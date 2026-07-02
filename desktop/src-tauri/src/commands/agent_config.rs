@@ -14,7 +14,8 @@ use crate::{
         },
         current_instance_id, effective_agent_command, known_acp_runtime, load_managed_agents,
         load_personas, resolve_effective_prompt_model_provider, save_managed_agents,
-        sync_managed_agent_processes, KnownAcpRuntime, ManagedAgentRecord, PersonaRecord,
+        sync_managed_agent_processes, GlobalAgentConfig, KnownAcpRuntime, ManagedAgentRecord,
+        PersonaRecord,
     },
 };
 
@@ -36,12 +37,16 @@ pub struct RuntimeFileConfigSubset {
     pub satisfied_env_keys: Vec<String>,
 }
 
-/// Resolve the config surface with persona values applied.
+/// Resolve the config surface with persona and global default values applied.
 ///
 /// The pipeline: resolve the linked persona's prompt/model/provider, inject
 /// each into the record only where the record lacks its own value, let
 /// `read_config_surface` tag those injected fields `BuzzExplicit`, then re-tag
 /// exactly the injected fields to `PersonaDefault`.
+///
+/// Global defaults fill in when neither the record nor the linked persona
+/// provides a value. They are re-tagged to `GlobalDefault` so the UI can
+/// display "inherited from global defaults".
 ///
 /// The re-tag is triple-gated — a field is re-tagged only when (a) the record
 /// did not already have it (`!had_*`), (b) the surface produced the field, and
@@ -52,6 +57,7 @@ fn resolve_config_surface(
     personas: &[PersonaRecord],
     runtime_meta: Option<&KnownAcpRuntime>,
     session_cache: Option<&SessionConfigCache>,
+    global: &GlobalAgentConfig,
 ) -> RuntimeConfigSurface {
     let had_prompt =
         record.system_prompt.is_some() || record.env_vars.contains_key("BUZZ_ACP_SYSTEM_PROMPT");
@@ -87,9 +93,21 @@ fn resolve_config_surface(
             None
         }
     } else {
+        // Prefer persona as baseline, fall back to global when persona has none
+        // and the model was overridden mid-session (global-default agent).
         persona_model
             .clone()
             .map(|m| (m, ConfigOrigin::PersonaDefault))
+            .or_else(|| {
+                if model_overridden {
+                    global
+                        .model
+                        .clone()
+                        .map(|m| (m, ConfigOrigin::GlobalDefault))
+                } else {
+                    None
+                }
+            })
     };
 
     // Inject resolved persona values into the record where absent.
@@ -109,6 +127,24 @@ fn resolve_config_surface(
         }
     }
 
+    // Inject global defaults where neither the record nor the persona had a value.
+    // Track injection so we can re-tag to GlobalDefault after the reader.
+    let inject_global_model = !had_model && record.model.is_none();
+    let inject_global_provider = !had_provider
+        && !provider_env_key.is_empty()
+        && !record.env_vars.contains_key(provider_env_key);
+
+    if inject_global_model {
+        record.model = global.model.clone();
+    }
+    if inject_global_provider {
+        if let Some(ref gprov) = global.provider {
+            record
+                .env_vars
+                .insert(provider_env_key.to_string(), gprov.clone());
+        }
+    }
+
     let mut surface = read_config_surface(
         &record,
         runtime_meta,
@@ -120,11 +156,19 @@ fn resolve_config_surface(
     if !had_prompt {
         retag_persona_default(&mut surface.normalized.system_prompt);
     }
-    if !had_model {
+    if !had_model && !inject_global_model {
         retag_persona_default(&mut surface.normalized.model);
     }
-    if !had_provider && !provider_env_key.is_empty() {
+    if !had_provider && !provider_env_key.is_empty() && !inject_global_provider {
         retag_persona_default(&mut surface.normalized.provider);
+    }
+
+    // Re-tag global-sourced fields from BuzzExplicit to GlobalDefault.
+    if inject_global_model {
+        retag_global_default(&mut surface.normalized.model);
+    }
+    if inject_global_provider {
+        retag_global_default(&mut surface.normalized.provider);
     }
 
     // Re-tag persona-snapshotted model from BuzzExplicit to PersonaDefault.
@@ -184,6 +228,15 @@ pub fn get_runtime_file_config(runtime_id: String) -> Option<RuntimeFileConfigSu
     }
 }
 
+/// Re-tag a field's origin from `BuzzExplicit` to `GlobalDefault`, leaving any
+/// other origin untouched. No-op when the field is absent.
+fn retag_global_default(field: &mut Option<NormalizedField>) {
+    if let Some(field) = field {
+        if field.origin == ConfigOrigin::BuzzExplicit {
+            field.origin = ConfigOrigin::GlobalDefault;
+        }
+    }
+}
 /// Get the full config surface for a managed agent.
 ///
 /// Returns normalized + advanced config from all available tiers.
@@ -227,12 +280,14 @@ pub async fn get_agent_config_surface(
     );
     let runtime_meta = known_acp_runtime(&effective_cmd);
     let session_cache = state.get_session_cache(&pubkey);
+    let global = crate::managed_agents::load_global_agent_config(&app).unwrap_or_default();
 
     Ok(resolve_config_surface(
         record,
         &personas,
         runtime_meta,
         session_cache.as_ref(),
+        &global,
     ))
 }
 
@@ -542,7 +597,13 @@ mod tests {
         record.model = Some("explicit-model".to_string());
         let personas = vec![persona_with_model("persona-model")];
 
-        let surface = resolve_config_surface(record, &personas, Some(goose_runtime()), None);
+        let surface = resolve_config_surface(
+            record,
+            &personas,
+            Some(goose_runtime()),
+            None,
+            &Default::default(),
+        );
 
         let model = surface.normalized.model.as_ref().expect("model resolved");
         assert_eq!(model.value.as_deref(), Some("explicit-model"));
@@ -563,8 +624,13 @@ mod tests {
         let personas: Vec<PersonaRecord> = vec![];
         let cache = session_cache("model-y", false);
 
-        let surface =
-            resolve_config_surface(record, &personas, Some(goose_runtime()), Some(&cache));
+        let surface = resolve_config_surface(
+            record,
+            &personas,
+            Some(goose_runtime()),
+            Some(&cache),
+            &Default::default(),
+        );
         let model = surface.normalized.model.expect("model resolved");
 
         assert_eq!(model.value.as_deref(), Some("model-x"));
@@ -586,8 +652,13 @@ mod tests {
         let personas: Vec<PersonaRecord> = vec![];
         let cache = session_cache("model-y", true);
 
-        let surface =
-            resolve_config_surface(record, &personas, Some(goose_runtime()), Some(&cache));
+        let surface = resolve_config_surface(
+            record,
+            &personas,
+            Some(goose_runtime()),
+            Some(&cache),
+            &Default::default(),
+        );
         let model = surface.normalized.model.expect("model resolved");
 
         assert_eq!(model.value.as_deref(), Some("model-y"));
@@ -608,8 +679,13 @@ mod tests {
         let personas: Vec<PersonaRecord> = vec![];
         let cache = session_cache("model-x", true);
 
-        let surface =
-            resolve_config_surface(record, &personas, Some(goose_runtime()), Some(&cache));
+        let surface = resolve_config_surface(
+            record,
+            &personas,
+            Some(goose_runtime()),
+            Some(&cache),
+            &Default::default(),
+        );
         let model = surface.normalized.model.expect("model resolved");
 
         assert_eq!(model.value.as_deref(), Some("model-x"));
@@ -627,13 +703,63 @@ mod tests {
         let personas = vec![persona_with_model("persona-model")];
         let cache = session_cache("model-y", true);
 
-        let surface =
-            resolve_config_surface(record, &personas, Some(goose_runtime()), Some(&cache));
+        let surface = resolve_config_surface(
+            record,
+            &personas,
+            Some(goose_runtime()),
+            Some(&cache),
+            &Default::default(),
+        );
         let model = surface.normalized.model.expect("model resolved");
 
         assert_eq!(model.value.as_deref(), Some("model-y"));
         assert_eq!(model.origin, ConfigOrigin::RuntimeOverride);
         assert_eq!(model.overridden_value.as_deref(), Some("persona-model"));
         assert_eq!(model.overridden_origin, Some(ConfigOrigin::PersonaDefault));
+    }
+
+    /// Fix 2 regression: a global-default-only agent (no record model, no
+    /// persona model, but global has a model) that live-switches mid-session
+    /// must render the global model as the secondary tagged `GlobalDefault`.
+    /// Before the fix, `baseline` was `None` in the `!had_model` arm when
+    /// persona has no model, so `read_config_surface` had no secondary to
+    /// surface. Fails against pre-fix code where the baseline arm returned
+    /// `None` when `!had_model && persona_model.is_none() && model_overridden`.
+    #[test]
+    fn global_default_live_switch_renders_global_model_as_secondary_global_default() {
+        // Record has no model, no persona, global provides the model.
+        let mut record = agent_record();
+        record.persona_id = None;
+        // record.model = None (set by agent_record())
+        let personas: Vec<PersonaRecord> = vec![];
+        let cache = session_cache("model-y", true);
+        let global = crate::managed_agents::GlobalAgentConfig {
+            model: Some("global-model".to_string()),
+            ..Default::default()
+        };
+
+        let surface = resolve_config_surface(
+            record,
+            &personas,
+            Some(goose_runtime()),
+            Some(&cache),
+            &global,
+        );
+        let model = surface.normalized.model.expect("model resolved");
+
+        // Live model wins as primary.
+        assert_eq!(model.value.as_deref(), Some("model-y"));
+        assert_eq!(model.origin, ConfigOrigin::RuntimeOverride);
+        // Global model surfaces as secondary, tagged GlobalDefault.
+        assert_eq!(
+            model.overridden_value.as_deref(),
+            Some("global-model"),
+            "global model must be the override baseline secondary"
+        );
+        assert_eq!(
+            model.overridden_origin,
+            Some(ConfigOrigin::GlobalDefault),
+            "override baseline origin must be GlobalDefault, not PersonaDefault or BuzzExplicit"
+        );
     }
 }

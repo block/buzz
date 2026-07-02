@@ -12,6 +12,7 @@ import type {
   RespondToMode,
   UpdateManagedAgentInput,
 } from "@/shared/api/types";
+import type { EditAgentFocusTarget } from "@/features/agents/openEditAgentEvent";
 import { Button } from "@/shared/ui/button";
 import {
   Dialog,
@@ -22,13 +23,13 @@ import {
 } from "@/shared/ui/dialog";
 import {
   AUTO_PROVIDER_DROPDOWN_VALUE,
+  computeLocalModeGate,
   CUSTOM_PROVIDER_DROPDOWN_VALUE,
   formatRuntimeOptionLabel,
   getProviderApiKeyEnvVar,
   isMissingRequiredDropdownField,
   NO_RUNTIME_DROPDOWN_VALUE,
   runtimeSupportsLlmProviderSelection,
-  requiredCredentialEnvKeys,
   shouldClearKnownModelForSelectionScope,
   sortPersonaRuntimes,
   type PersonaDropdownOption,
@@ -45,14 +46,18 @@ import {
 import { EnvVarsEditor, type EnvVarsValue } from "./EnvVarsEditor";
 import { CreateAgentRespondToField } from "./RespondToField";
 import { usePersonaModelDiscovery } from "./usePersonaModelDiscovery";
+import { useGlobalAgentConfig } from "@/features/agents/useGlobalAgentConfig";
 
 export function EditAgentDialog({
   agent,
+  initialFocus,
   open,
   onOpenChange,
   onUpdated,
 }: {
   agent: ManagedAgent;
+  /** Optional field to scroll/focus when the dialog opens from a card deep-link. */
+  initialFocus?: EditAgentFocusTarget;
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onUpdated?: (agent: ManagedAgent) => void;
@@ -225,6 +230,44 @@ export function EditAgentDialog({
     selectedRuntime?.id ?? selectedRuntimeId,
   );
 
+  // One-shot focus: when the dialog opens from a card deep-link, scroll and
+  // focus the relevant field. The effect re-runs when `llmProviderFieldVisible`
+  // changes so a provider-field focus request fires once the field materializes
+  // (the runtime catalog may still be loading at click time). A one-shot fired
+  // ref prevents re-focusing on unrelated re-renders after the target is ready.
+  const normalizedFieldFocusFiredRef = React.useRef(false);
+  // Reset the fired guard whenever the focus request changes (new open, new
+  // focus target, or dialog switched to a different agent).
+  // biome-ignore lint/correctness/useExhaustiveDependencies: intentional — reset guard on these three; llmProviderFieldVisible drives the focus attempt below
+  React.useEffect(() => {
+    normalizedFieldFocusFiredRef.current = false;
+  }, [open, initialFocus, agent.pubkey]);
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: intentional — llmProviderFieldVisible is the availability signal that re-triggers the focus attempt; agent.pubkey handles agent-switch
+  React.useEffect(() => {
+    if (!open || !initialFocus) return;
+    if (initialFocus.type !== "normalized_field") return;
+    if (normalizedFieldFocusFiredRef.current) return;
+
+    // For "provider" focus: the provider select is only rendered when
+    // llmProviderFieldVisible is true (runtime catalog resolved). Bail until
+    // it materializes — this effect re-runs when llmProviderFieldVisible flips.
+    const targetId =
+      initialFocus.field === "provider" ? "agent-provider" : "agent-model";
+    const el = document.getElementById(targetId);
+    if (!(el instanceof HTMLSelectElement)) return;
+
+    normalizedFieldFocusFiredRef.current = true;
+
+    const id = requestAnimationFrame(() => {
+      el.scrollIntoView({ block: "nearest" });
+      el.focus();
+    });
+
+    return () => cancelAnimationFrame(id);
+  }, [open, initialFocus, agent.pubkey, llmProviderFieldVisible]);
+  // env_key is handled by EnvVarsEditor via focusKey prop below.
+
   const providerForDiscovery = llmProviderFieldVisible ? provider : "";
   const normalizedConfig = configSurfaceQuery.data?.normalized;
   const modelRequired = isMissingRequiredDropdownField(
@@ -260,19 +303,6 @@ export function EditAgentDialog({
     selectedRuntimeId,
   ]);
 
-  // Provider used for required-key validation — keyed off the PROSPECTIVE
-  // runtime, not the current dropdown. When the user transitions from a
-  // CLI-login pin (claude) to inherit a buzz-agent/goose persona, the current
-  // dropdown would suppress provider to "" (llmProviderFieldVisible=false),
-  // making requiredCredentialEnvKeys return [] and falsely unblocking the save.
-  // Using prospectiveRuntimeId here ensures the gate checks the credential
-  // requirements of the runtime that will actually be saved.
-  const providerForRequiredKeys = runtimeSupportsLlmProviderSelection(
-    prospectiveRuntimeId,
-  )
-    ? provider
-    : "";
-
   // Required credential env keys for the PROSPECTIVE post-submit runtime.
   // Using the prospective id (not the current dropdown) ensures the gate
   // validates what will actually be saved — in particular, on the inherit
@@ -282,33 +312,36 @@ export function EditAgentDialog({
     prospectiveRuntimeId,
     { enabled: open },
   );
-  // Credential keys satisfied by the runtime file config — shown as
-  // "Set in goose config" rows rather than amber required rows.
-  const fileSatisfiedEnvKeys = React.useMemo(() => {
-    if (!runtimeFileConfig) return [] as string[];
-    const allKeys = requiredCredentialEnvKeys(
-      prospectiveRuntimeId,
-      providerForRequiredKeys,
-    );
-    return allKeys.filter(
-      (key) =>
-        (envVars[key] ?? "").length === 0 &&
-        runtimeFileConfig.satisfiedEnvKeys.includes(key),
-    );
-  }, [
-    runtimeFileConfig,
-    prospectiveRuntimeId,
-    providerForRequiredKeys,
-    envVars,
-  ]);
+  const { globalConfig } = useGlobalAgentConfig();
 
-  const requiredEnvKeys = React.useMemo(
+  // Derive required/file-satisfied env keys from the shared gate so the dialog
+  // and readiness.rs always agree on which keys are required. Passing global
+  // provider/model/env ensures an agent inheriting a global provider shows the
+  // correct credential rows even before the user sets a per-agent provider.
+  const { requiredEnvKeys, fileSatisfiedEnvKeys } = React.useMemo(
     () =>
-      requiredCredentialEnvKeys(
-        prospectiveRuntimeId,
-        providerForRequiredKeys,
-      ).filter((key) => !fileSatisfiedEnvKeys.includes(key)),
-    [prospectiveRuntimeId, providerForRequiredKeys, fileSatisfiedEnvKeys],
+      computeLocalModeGate({
+        envVars,
+        globalEnvVars: globalConfig.env_vars,
+        globalProvider: globalConfig.provider ?? "",
+        globalModel: globalConfig.model ?? "",
+        isProviderMode: false,
+        model,
+        provider,
+        runtimeId: prospectiveRuntimeId,
+        runtimeFileConfig,
+        useMesh: false,
+      }),
+    [
+      envVars,
+      globalConfig.env_vars,
+      globalConfig.provider,
+      globalConfig.model,
+      model,
+      provider,
+      prospectiveRuntimeId,
+      runtimeFileConfig,
+    ],
   );
 
   const {
@@ -323,6 +356,13 @@ export function EditAgentDialog({
     provider: providerForDiscovery,
     selectedRuntime,
   });
+
+  // Merge global + persona env for the inherited display hint in EnvVarsEditor.
+  // Persona wins over global on collision (higher precedence), so persona keys
+  // shadow global for display consistency.
+  const inheritedWithGlobal = React.useMemo(() => {
+    return { ...globalConfig.env_vars, ...inheritedEnvVars };
+  }, [globalConfig.env_vars, inheritedEnvVars]);
 
   // When the provider scope changes and the current model is no longer valid
   // for the new scope, clear it (mirrors Persona's useEffect for the same).
@@ -755,9 +795,12 @@ export function EditAgentDialog({
             <EnvVarsEditor
               disabled={updateMutation.isPending}
               fileSatisfiedKeys={fileSatisfiedEnvKeys}
+              focusKey={
+                initialFocus?.type === "env_key" ? initialFocus.key : undefined
+              }
               helperText="Per-agent env vars. Override the persona's vars on collision."
-              inheritedFrom={inheritedEnvVars}
-              inheritedLabel="persona"
+              inheritedFrom={inheritedWithGlobal}
+              inheritedLabel="persona / global defaults"
               onChange={setEnvVars}
               requiredKeys={requiredEnvKeys}
               value={envVars}

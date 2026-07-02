@@ -60,7 +60,11 @@ const overrides = new Map([
   // config-bridge: get_agent_config_surface/write_agent_config_field/put_agent_session_config
   // commands add ~40 lines. Queued to split.
   // branch cut; override bumped to cover the merged total. Queued to split.
-  ["src-tauri/src/commands/agents.rs", 1437],
+  // global-agent-config: build_deploy_payload threads global config fallback
+  // for provider/model/env_vars (+4 lines). cargo fmt reflowed 2 more lines.
+  // deploy-resolver: resolve_deploy_model_provider fn + doc comment (+6 lines).
+  // Queued to split.
+  ["src-tauri/src/commands/agents.rs", 1449],
   // #1418 read-path fix: get_thread_replies' blocker fix (shared TIMELINE_KINDS
   // const + build_thread_replies_filter helper, mirroring the channel sibling so
   // the two p-gate filters can't drift) plus two guard unit tests. The file was
@@ -84,7 +88,9 @@ const overrides = new Map([
   // activity-feed threads avatar_url into build_managed_agent_summary for the
   // assistant-bubble pinned snapshot.
   // +1 for agent_pubkey field in setup payload (config-nudge card wire).
-  ["src-tauri/src/managed_agents/runtime.rs", 2208],
+  // global-agent-config: spawn_agent_child loads global config and merges as
+  // lowest env layer (+8 lines). Queued to split.
+  ["src-tauri/src/managed_agents/runtime.rs", 2216],
   // config-bridge setup-payload env-boundary fix adds readiness wiring in
   // spawn_agent_child; load-bearing security fix, queued to split.
   ["src-tauri/src/managed_agents/config_bridge/reader.rs", 1016],
@@ -94,7 +100,8 @@ const overrides = new Map([
   // New file in this PR; queued to split.
   // +2 readiness integration tests for flat-DATABRICKS_HOST canonicalization fix.
   // +1 cargo fmt whitespace reformat (readiness.rs closures inline after rebase).
-  ["src-tauri/src/managed_agents/readiness.rs", 1150],
+  // +16: resolve_effective_agent_env + global-config readiness wiring (#1448 base).
+  ["src-tauri/src/managed_agents/readiness.rs", 1166],
   // applyWorkspace reposDir parameter plus the validateReposDir binding,
   // threaded through Tauri invokes for configurable repos_dir, plus the
   // harness-persona-sync `harnessOverride` create-input bit — load-bearing
@@ -143,7 +150,8 @@ const overrides = new Map([
   // props restored after 826d735fe removal (UserProfilePanel.tsx still needs them).
   ["src/features/profile/ui/UserProfilePanelSections.tsx", 1140],
   // +14 for openEditAgent event subscription (config-nudge card "Open Edit Agent" action).
-  ["src/features/profile/ui/UserProfilePanel.tsx", 1014],
+  // +11 for editAgentFocus state + initialFocus prop threading (deep-link granularity).
+  ["src/features/profile/ui/UserProfilePanel.tsx", 1025],
   // PersistBackend enum + marker-on-keyring-success plumbing and its three
   // fail-closed regression tests (silent identity rotation on keyring outage).
   // A small overage from load-bearing security plumbing on a file already at

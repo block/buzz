@@ -23,6 +23,7 @@ import { useManagedAgentActions } from "./useManagedAgentActions";
 import { usePersonaActions } from "./usePersonaActions";
 import { useTeamActions } from "./useTeamActions";
 import { useProfilePanel } from "@/shared/context/ProfilePanelContext";
+import { GlobalAgentConfigSettingsCard } from "@/features/settings/ui/GlobalAgentConfigSettingsCard";
 
 export function AgentsView() {
   const { openPersonaProfilePanel, openProfilePanel } = useProfilePanel();
@@ -62,6 +63,8 @@ export function AgentsView() {
       <div className="flex-1 overflow-y-auto overflow-x-hidden overscroll-contain px-4 py-7 sm:px-6 sm:py-8">
         <div className="mx-auto flex w-full max-w-6xl flex-col gap-8">
           <div className="flex flex-col gap-8">
+            <GlobalAgentConfigSettingsCard />
+
             <UnifiedAgentsSection
               actionErrorMessage={agents.actionErrorMessage}
               actionNoticeMessage={agents.actionNoticeMessage}

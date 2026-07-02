@@ -11,6 +11,23 @@ import {
 
 export type EnvVarsValue = Record<string, string>;
 
+/**
+ * Returns true when a required env key is unsatisfied — neither the agent-local
+ * value nor the inherited (global / persona) value provides it.
+ *
+ * Used by `EnvVarsEditor` to render the amber "Required" badge on unfilled rows.
+ * Exported for unit testing.
+ */
+export function isRequiredKeyMissing(
+  key: string,
+  localValue: EnvVarsValue,
+  inheritedFrom: EnvVarsValue | undefined,
+): boolean {
+  const local = localValue[key] ?? "";
+  const inherited = inheritedFrom?.[key] ?? "";
+  return local.length === 0 && inherited.length === 0;
+}
+
 type EnvVarsEditorProps = {
   /** The current key/value map. */
   value: EnvVarsValue;
@@ -43,6 +60,12 @@ type EnvVarsEditorProps = {
    * the user knows the key is covered without needing to add it here.
    */
   fileSatisfiedKeys?: readonly string[];
+  /**
+   * When set, scroll the matching required-key row into view and focus its
+   * value input on mount. One-shot: ignored after the first render in which
+   * it is set. Only acts on keys that appear in `requiredKeys`.
+   */
+  focusKey?: string;
 };
 
 type Row = { id: string; key: string; value: string };
@@ -65,6 +88,7 @@ export function EnvVarsEditor({
   disabled = false,
   requiredKeys = [],
   fileSatisfiedKeys = [],
+  focusKey,
 }: EnvVarsEditorProps) {
   // Local ordered row state. Synced from `value` on mount and when the
   // parent supplies a value we did NOT just emit (e.g., dialog reopened
@@ -80,6 +104,45 @@ export function EnvVarsEditor({
       setRows(toRows(value));
     }
   }, [value]);
+
+  // Ref map: key → required-value Input element. Populated via callback refs
+  // on each required-key row's value Input so focus can be dispatched directly
+  // without any DOM walking through presentation classes.
+  const requiredValueRefs = React.useRef<Map<string, HTMLInputElement>>(
+    new Map(),
+  );
+
+  // One-shot guard: prevents re-focusing after the target has already been
+  // focused (e.g., when requiredKeys later gains unrelated keys). Reset when
+  // focusKey changes so a new deep-link request always fires once.
+  const focusFiredRef = React.useRef(false);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: focusKey is the signal that triggers the reset; mutating a ref doesn't re-render but focusKey change is the intended trigger
+  React.useEffect(() => {
+    focusFiredRef.current = false;
+  }, [focusKey]);
+
+  // One-shot focus: scroll the matching required-key row into view and focus
+  // its value input. Re-runs whenever `requiredKeys` changes so the effect
+  // fires when the target key materializes asynchronously (e.g., the runtime
+  // file-config query completes after the card click). The one-shot guard
+  // ensures each requested target focuses exactly once.
+  React.useEffect(() => {
+    if (!focusKey) return;
+    if (focusFiredRef.current) return;
+    if (!requiredKeys.includes(focusKey)) return;
+
+    const inputEl = requiredValueRefs.current.get(focusKey);
+    if (!inputEl) return;
+
+    focusFiredRef.current = true;
+
+    const id = requestAnimationFrame(() => {
+      inputEl.scrollIntoView({ block: "nearest" });
+      inputEl.focus();
+    });
+
+    return () => cancelAnimationFrame(id);
+  }, [focusKey, requiredKeys]);
 
   function emit(next: Row[]) {
     setRows(next);
@@ -119,7 +182,9 @@ export function EnvVarsEditor({
         {/* Required credential rows — shown first, key is read-only */}
         {requiredKeys.map((key) => {
           const currentValue = value[key] ?? "";
-          const isMissing = currentValue.length === 0;
+          // A required key is only "missing" if neither the agent-local value
+          // nor the inherited (global / persona) value provides it.
+          const isMissing = isRequiredKeyMissing(key, value, inheritedFrom);
           return (
             <div key={key} className="space-y-1">
               <div className="flex items-center gap-2">
@@ -165,6 +230,13 @@ export function EnvVarsEditor({
                       updateRequiredValue(key, event.target.value)
                     }
                     placeholder="value"
+                    ref={(el) => {
+                      if (el) {
+                        requiredValueRefs.current.set(key, el);
+                      } else {
+                        requiredValueRefs.current.delete(key);
+                      }
+                    }}
                     type="password"
                     value={currentValue}
                   />
@@ -174,14 +246,16 @@ export function EnvVarsEditor({
               </div>
               {(() => {
                 const inheritedValue = inheritedFrom?.[key];
-                return inheritedValue !== undefined ? (
+                if (inheritedValue === undefined) return null;
+                const verb = currentValue ? "Overrides" : "Inherited from";
+                return (
                   <p className="ml-1 text-xs text-muted-foreground">
-                    Overrides {inheritedLabel} value{" "}
+                    {verb} {inheritedLabel} value{" "}
                     <span className="font-mono">
                       {maskInherited(inheritedValue)}
                     </span>
                   </p>
-                ) : null;
+                );
               })()}
             </div>
           );

@@ -41,7 +41,7 @@ import { meshPrepareRelayMeshClient } from "@/shared/api/tauriMesh";
 import type { MeshServeTarget } from "@/shared/api/tauriMesh";
 import { useLastRuntime } from "@/features/agents/lib/useLastRuntime";
 import {
-  requiredCredentialEnvKeys,
+  computeLocalModeGate,
   runtimeSupportsLlmProviderSelection,
   shouldClearKnownModelForSelectionScope,
   getProviderApiKeyEnvVar,
@@ -54,6 +54,7 @@ import {
   AgentProviderField,
 } from "./personaProviderModelFields";
 import { usePersonaModelDiscovery } from "./usePersonaModelDiscovery";
+import { useGlobalAgentConfig } from "@/features/agents/useGlobalAgentConfig";
 
 export function CreateAgentDialog({
   open,
@@ -69,6 +70,7 @@ export function CreateAgentDialog({
   const allProvidersQuery = useAcpRuntimesQuery({ enabled: open });
   const backendProvidersQuery = useBackendProvidersQuery({ enabled: open });
   const { lastRuntimeId, setLastRuntime } = useLastRuntime();
+  const { globalConfig } = useGlobalAgentConfig();
   const [acpCommand, setAcpCommand] = React.useState("buzz-acp");
   const [agentCommand, setAgentCommand] = React.useState("buzz-agent");
   const [agentArgs, setAgentArgs] = React.useState("acp");
@@ -177,33 +179,42 @@ export function CreateAgentDialog({
   });
 
   // Full required credential key list for EnvVarsEditor amber locked rows —
-  // includes already-satisfied keys, not just missing ones.
+  // `requiredEnvKeys` includes locally-filled keys (row stays stable while
+  // typing), excludes globally/file-satisfied keys shown differently.
   const { data: runtimeFileConfig } = useRuntimeFileConfigQuery(
     selectedRuntimeId,
     { enabled: open },
   );
-  // Credential keys satisfied by the runtime file config (e.g. goose config.yaml).
-  // These are shown as "Set in goose config" rows rather than amber required rows.
-  const fileSatisfiedEnvKeys = React.useMemo(() => {
-    if (!runtimeFileConfig) return [] as string[];
-    const allKeys = requiredCredentialEnvKeys(
-      selectedRuntimeId,
-      runtimeSupportsLlmProviderSelection(selectedRuntimeId) ? provider : "",
-    );
-    return allKeys.filter(
-      (key) =>
-        (envVars[key] ?? "").length === 0 &&
-        runtimeFileConfig.satisfiedEnvKeys.includes(key),
-    );
-  }, [runtimeFileConfig, selectedRuntimeId, provider, envVars]);
-
-  const requiredEnvKeys = React.useMemo(
+  // Derive required/file-satisfied env keys from the shared gate so the dialog
+  // and readiness.rs always agree on which keys are required. Passing global
+  // provider/model/env ensures an agent inheriting a global provider shows the
+  // correct credential rows even before the user sets a per-agent provider.
+  const { requiredEnvKeys, fileSatisfiedEnvKeys } = React.useMemo(
     () =>
-      requiredCredentialEnvKeys(
-        selectedRuntimeId,
-        runtimeSupportsLlmProviderSelection(selectedRuntimeId) ? provider : "",
-      ).filter((key) => !fileSatisfiedEnvKeys.includes(key)),
-    [selectedRuntimeId, provider, fileSatisfiedEnvKeys],
+      computeLocalModeGate({
+        envVars,
+        globalEnvVars: globalConfig.env_vars,
+        globalProvider: globalConfig.provider ?? "",
+        globalModel: globalConfig.model ?? "",
+        isProviderMode,
+        model,
+        provider,
+        runtimeId: selectedRuntimeId,
+        runtimeFileConfig,
+        useMesh,
+      }),
+    [
+      envVars,
+      globalConfig.env_vars,
+      globalConfig.provider,
+      globalConfig.model,
+      isProviderMode,
+      model,
+      provider,
+      runtimeFileConfig,
+      selectedRuntimeId,
+      useMesh,
+    ],
   );
 
   // Clear model when provider scope changes, mirroring EditAgentDialog.
@@ -836,6 +847,8 @@ export function CreateAgentDialog({
               disabled={createMutation.isPending}
               fileSatisfiedKeys={fileSatisfiedEnvKeys}
               helperText="Injected at spawn. Overrides the persona's env vars on collision."
+              inheritedFrom={globalConfig.env_vars}
+              inheritedLabel="global defaults"
               onChange={setEnvVars}
               requiredKeys={requiredEnvKeys}
               value={envVars}

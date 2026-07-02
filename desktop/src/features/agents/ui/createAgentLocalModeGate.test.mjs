@@ -410,3 +410,194 @@ test("localMode_goose_envPlusFileConfig_bothEmpty_stillRequired", () => {
   );
   assert.equal(result.satisfied, false, "gate must not be satisfied");
 });
+
+// ── Global env vars satisfy required credential keys ─────────────────────
+
+test("localMode_globalEnvVars_satisfies_missing_env_key", () => {
+  // A required key present in globalEnvVars must not appear in missingEnvKeys.
+  const result = computeLocalModeGate({
+    envVars: {},
+    globalEnvVars: { ANTHROPIC_API_KEY: "sk-global" },
+    isProviderMode: false,
+    model: "claude-3-5-sonnet-20241022",
+    provider: "anthropic",
+    runtimeId: "buzz-agent",
+    useMesh: false,
+  });
+
+  assert.equal(
+    result.satisfied,
+    true,
+    "global ANTHROPIC_API_KEY must satisfy the gate",
+  );
+  assert.equal(
+    result.missingEnvKeys.includes("ANTHROPIC_API_KEY"),
+    false,
+    "ANTHROPIC_API_KEY in globalEnvVars must not appear in missingEnvKeys",
+  );
+});
+
+test("localMode_perAgentEnvVar_wins_over_globalEnvVars_for_gate", () => {
+  // If the per-agent envVars has the key, globalEnvVars is redundant but
+  // the gate must remain satisfied (per-agent wins, both paths satisfy).
+  const result = computeLocalModeGate({
+    envVars: { ANTHROPIC_API_KEY: "sk-per-agent" },
+    globalEnvVars: { ANTHROPIC_API_KEY: "sk-global" },
+    isProviderMode: false,
+    model: "claude-3-5-sonnet-20241022",
+    provider: "anthropic",
+    runtimeId: "buzz-agent",
+    useMesh: false,
+  });
+
+  assert.equal(
+    result.satisfied,
+    true,
+    "per-agent key must satisfy the gate regardless of global",
+  );
+});
+
+test("localMode_globalEnvVars_empty_still_fails_gate", () => {
+  // No global and no per-agent env → gate must still surface the missing key.
+  const result = computeLocalModeGate({
+    envVars: {},
+    globalEnvVars: {},
+    isProviderMode: false,
+    model: "claude-3-5-sonnet-20241022",
+    provider: "anthropic",
+    runtimeId: "buzz-agent",
+    useMesh: false,
+  });
+
+  assert.equal(
+    result.satisfied,
+    false,
+    "empty global and per-agent env must leave gate unsatisfied",
+  );
+  assert.ok(
+    result.missingEnvKeys.includes("ANTHROPIC_API_KEY"),
+    "ANTHROPIC_API_KEY must be in missingEnvKeys when neither source provides it",
+  );
+});
+
+// ── Regression: global provider inherited, no credential key supplied ────────
+//
+// F3 regression from PR #1448 Batch-3 review: the old dialog code derived
+// required keys from the *agent-local* provider only and filtered by
+// globalConfig.env_vars. An agent with no per-agent provider but globalProvider
+// = "anthropic" would show no required-key row (dialog-local provider is ""),
+// even though readiness.rs would flag it as NotReady (credential missing).
+// computeLocalModeGate must surface the key when the effective provider is
+// inherited from globalProvider and neither agent nor global env supplies it.
+
+test("localMode_globalProvider_inherited_no_key_surfacesAsRequired", () => {
+  // Agent has no per-agent provider; global provider is "anthropic".
+  // Neither agent env nor global env has ANTHROPIC_API_KEY.
+  // Expected: the gate must surface ANTHROPIC_API_KEY as missing — the dialog
+  // must show the amber required row so the user knows what to configure.
+  const result = computeLocalModeGate({
+    envVars: {},
+    globalEnvVars: {},
+    globalProvider: "anthropic",
+    isProviderMode: false,
+    model: "claude-3-5-sonnet-20241022",
+    provider: "",
+    runtimeId: "buzz-agent",
+    useMesh: false,
+  });
+
+  assert.equal(
+    result.satisfied,
+    false,
+    "gate must not be satisfied when inherited global provider requires a key that is not supplied",
+  );
+  assert.ok(
+    result.missingEnvKeys.includes("ANTHROPIC_API_KEY"),
+    "ANTHROPIC_API_KEY must be in missingEnvKeys when global provider is anthropic and no key is in env",
+  );
+});
+
+test("localMode_globalProvider_inherited_globalEnv_satisfies_key", () => {
+  // Agent has no per-agent provider; global provider is "anthropic".
+  // Global env has ANTHROPIC_API_KEY — should be satisfied.
+  const result = computeLocalModeGate({
+    envVars: {},
+    globalEnvVars: { ANTHROPIC_API_KEY: "sk-global" },
+    globalProvider: "anthropic",
+    isProviderMode: false,
+    model: "claude-3-5-sonnet-20241022",
+    provider: "",
+    runtimeId: "buzz-agent",
+    useMesh: false,
+  });
+
+  assert.equal(
+    result.satisfied,
+    true,
+    "gate must be satisfied when inherited global provider's key is in globalEnvVars",
+  );
+  assert.equal(
+    result.missingEnvKeys.includes("ANTHROPIC_API_KEY"),
+    false,
+    "ANTHROPIC_API_KEY must not be missing when globalEnvVars provides it",
+  );
+});
+
+// ── Regression: required key stays in requiredEnvKeys when agent fills it ───
+//
+// EnvVarsEditor.requiredKeys is the full locked-row list — it must remain
+// stable while the user is typing in the row. If a key were removed from
+// requiredKeys the moment the local value becomes non-empty, the locked amber
+// row would unmount mid-entry (focus drop, row swap).
+// missingEnvKeys is the gate-state list — it correctly drops the key once
+// the value is present. These are now two separate properties.
+
+test("localMode_requiredKey_stays_in_requiredEnvKeys_when_locally_filled", () => {
+  // Key starts missing.
+  const before = computeLocalModeGate({
+    envVars: {},
+    globalEnvVars: {},
+    globalProvider: "anthropic",
+    isProviderMode: false,
+    model: "claude-3-5-sonnet-20241022",
+    provider: "",
+    runtimeId: "buzz-agent",
+    useMesh: false,
+  });
+
+  assert.ok(
+    before.missingEnvKeys.includes("ANTHROPIC_API_KEY"),
+    "key must start in missingEnvKeys when no value is set",
+  );
+  assert.ok(
+    before.requiredEnvKeys.includes("ANTHROPIC_API_KEY"),
+    "key must start in requiredEnvKeys when no value is set",
+  );
+
+  // User types a value — key is now locally filled.
+  const after = computeLocalModeGate({
+    envVars: { ANTHROPIC_API_KEY: "sk-test" },
+    globalEnvVars: {},
+    globalProvider: "anthropic",
+    isProviderMode: false,
+    model: "claude-3-5-sonnet-20241022",
+    provider: "",
+    runtimeId: "buzz-agent",
+    useMesh: false,
+  });
+
+  assert.equal(
+    after.missingEnvKeys.includes("ANTHROPIC_API_KEY"),
+    false,
+    "key must leave missingEnvKeys once a local value is set (gate satisfied)",
+  );
+  assert.ok(
+    after.requiredEnvKeys.includes("ANTHROPIC_API_KEY"),
+    "key must REMAIN in requiredEnvKeys even when locally filled (locked row stays stable)",
+  );
+  assert.equal(
+    after.satisfied,
+    true,
+    "gate must be satisfied when the key is locally filled",
+  );
+});
