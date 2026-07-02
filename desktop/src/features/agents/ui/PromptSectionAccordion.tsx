@@ -47,7 +47,7 @@ export function PromptSectionAccordion({
             <div
               className={cn(
                 "text-sm font-semibold text-foreground",
-                !open && "line-clamp-2",
+                !open && "line-clamp-2 wrap-break-word",
               )}
             >
               {section.title}
@@ -55,7 +55,9 @@ export function PromptSectionAccordion({
             <div
               className={cn(
                 "mt-1 text-xs leading-5 text-foreground/70",
-                open ? "whitespace-pre-wrap wrap-break-word" : "line-clamp-2",
+                open
+                  ? "whitespace-pre-wrap wrap-break-word"
+                  : "line-clamp-2 wrap-break-word",
               )}
             >
               {body.length > 0 ? (

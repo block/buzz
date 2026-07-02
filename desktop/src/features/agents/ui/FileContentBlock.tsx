@@ -1,3 +1,5 @@
+import type * as React from "react";
+
 import { cn } from "@/shared/lib/cn";
 
 export type FileContentLineKind = "add" | "remove" | "context" | "meta";
@@ -6,6 +8,41 @@ export type FileContentLine = {
   kind: FileContentLineKind;
   text: string;
 };
+
+/** Scrollable mono panel with top/bottom fade affordances for overflow. */
+export function ScrollFadeMonoPanel({
+  children,
+  className,
+  fadeFromClassName = "from-muted/40",
+  maxHeightClassName = "max-h-64",
+}: {
+  children: React.ReactNode;
+  className?: string;
+  fadeFromClassName?: string;
+  maxHeightClassName?: string;
+}) {
+  return (
+    <div className={cn("relative", maxHeightClassName, className)}>
+      <div className="h-full overflow-auto font-mono text-xs leading-5">
+        <div className="px-0 py-2">{children}</div>
+      </div>
+      <div
+        aria-hidden
+        className={cn(
+          "pointer-events-none absolute inset-x-0 top-0 h-4 bg-gradient-to-b to-transparent",
+          fadeFromClassName,
+        )}
+      />
+      <div
+        aria-hidden
+        className={cn(
+          "pointer-events-none absolute inset-x-0 bottom-0 h-4 bg-gradient-to-t to-transparent",
+          fadeFromClassName,
+        )}
+      />
+    </div>
+  );
+}
 
 export function FileContentBlock({
   footerText,
