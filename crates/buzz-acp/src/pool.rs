@@ -36,7 +36,7 @@ use crate::config::{DedupMode, PermissionMode};
 use crate::observer;
 use crate::queue::{
     CancelReason, ContextMessage, ConversationContext, FlushBatch, PromptChannelInfo,
-    PromptProfile, PromptProfileLookup,
+    PromptProfile, PromptProfileLookup, ThreadTags,
 };
 use crate::relay::{ChannelInfo, RestClient};
 
@@ -2612,6 +2612,50 @@ pub(crate) async fn reaction_add(rest: &crate::relay::RestClient, event_id: &str
         Ok(Ok(_)) => {}
         Ok(Err(e)) => tracing::debug!(event_id, emoji, "reaction add failed: {e}"),
         Err(_) => tracing::debug!(event_id, emoji, "reaction add timed out"),
+    }
+}
+
+/// Best-effort: post a visible failure notice (kind:9) to a channel after a
+/// batch is dead-lettered. Replies into the thread of `thread_tags` when the
+/// triggering event was threaded. Errors are logged and swallowed — the
+/// notice must never take down the main loop.
+pub(crate) async fn post_failure_notice(
+    rest: &crate::relay::RestClient,
+    channel_id: Uuid,
+    thread_tags: &ThreadTags,
+    content: &str,
+) {
+    let thread_ref = thread_tags.root_event_id.as_deref().and_then(|root| {
+        let root_id = nostr::EventId::from_hex(root).ok()?;
+        let parent_id = thread_tags
+            .parent_event_id
+            .as_deref()
+            .and_then(|p| nostr::EventId::from_hex(p).ok())
+            .unwrap_or(root_id);
+        Some(buzz_sdk::ThreadRef {
+            root_event_id: root_id,
+            parent_event_id: parent_id,
+        })
+    });
+    let builder =
+        match buzz_sdk::build_message(channel_id, content, thread_ref.as_ref(), &[], false, &[]) {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::warn!(channel = %channel_id, "failure notice: build failed: {e}");
+                return;
+            }
+        };
+    let event = match builder.sign_with_keys(&rest.keys) {
+        Ok(e) => e,
+        Err(e) => {
+            tracing::warn!(channel = %channel_id, "failure notice: sign failed: {e}");
+            return;
+        }
+    };
+    match tokio::time::timeout(Duration::from_secs(5), rest.submit_event(&event)).await {
+        Ok(Ok(_)) => {}
+        Ok(Err(e)) => tracing::warn!(channel = %channel_id, "failure notice failed: {e}"),
+        Err(_) => tracing::warn!(channel = %channel_id, "failure notice timed out"),
     }
 }
 

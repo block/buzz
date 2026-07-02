@@ -454,14 +454,17 @@ mod nip11_relay_info {
     /// input; this test proves the *observable wire behavior* — that the served
     /// document carries nothing that distinguishes one community from another.
     ///
-    /// Because `RelayInfo::build` is genuinely static-input today, host A's and
-    /// host B's NIP-11 bodies are byte-identical, and that identity *is* the
-    /// proof: no field varies by community, so an unauthenticated reader cannot
-    /// use the document to probe whether (or how) community B is configured.
-    /// The moment a per-community value leaks into the doc, the two bodies
-    /// diverge and this assertion fails — that is the mutate-bite this row
-    /// guards (seed a community-distinguishing field into the served doc → the
-    /// A≡B assertion goes red).
+    /// One field is deliberately host-scoped: `icon` (the NIP-WP workspace
+    /// icon, per-community state served in the standard NIP-11 field, fetched
+    /// through `bind_community` so it can only ever be the requesting host's
+    /// own community state — intentionally public presentation, exactly what
+    /// upstream NIP-11 `icon` is). So the
+    /// oracle proof is: the documents are identical *modulo each community's
+    /// own `icon`*, and an unmapped host's document carries no `icon` at all.
+    /// The moment any *other* per-community value leaks into the doc, the
+    /// icon-stripped bodies diverge and this assertion fails — that is the
+    /// mutate-bite this row guards (seed a community-distinguishing field into
+    /// the served doc → the A≡B assertion goes red).
     #[tokio::test]
     #[ignore]
     async fn nip11_is_not_a_cross_community_enumeration_oracle() {
@@ -481,9 +484,9 @@ mod nip11_relay_info {
 
         // Both bodies must be valid NIP-11 JSON — a relay-info object, not an
         // error page or a host echo.
-        let json_a: serde_json::Value =
+        let mut json_a: serde_json::Value =
             serde_json::from_str(&body_a).expect("host A NIP-11 is valid JSON");
-        let json_b: serde_json::Value =
+        let mut json_b: serde_json::Value =
             serde_json::from_str(&body_b).expect("host B NIP-11 is valid JSON");
         assert!(
             json_a.get("supported_nips").is_some(),
@@ -494,14 +497,23 @@ mod nip11_relay_info {
             "host B NIP-11 must be a relay-info document (has supported_nips)"
         );
 
-        // The enumeration-oracle obligation: no field of the served document
-        // varies by community. Identical bodies are the proof that the doc
-        // cannot be used to distinguish or probe another tenant.
+        // `icon` is the one deliberately host-scoped field (the NIP-WP
+        // workspace icon; each host sees only its own community's icon).
+        // Strip it before the equality proof — every OTHER field must still
+        // be community-agnostic.
+        json_a.as_object_mut().map(|o| o.remove("icon"));
+        json_b.as_object_mut().map(|o| o.remove("icon"));
+
+        // The enumeration-oracle obligation: no other field of the served
+        // document varies by community. Identical icon-stripped bodies are the
+        // proof that the doc cannot be used to distinguish or probe another
+        // tenant.
         assert_eq!(
             json_a, json_b,
-            "NIP-11 from host A and host B must be identical: any community-\
-             distinguishing field would make the unauthenticated relay-info \
-             document an enumeration oracle for other tenants"
+            "NIP-11 from host A and host B must be identical apart from each \
+             community's own `icon`: any other community-distinguishing field \
+             would make the unauthenticated relay-info document an enumeration \
+             oracle for other tenants"
         );
 
         // An *unmapped* host must get the SAME document too — not a 404. NIP-11
@@ -523,11 +535,18 @@ mod nip11_relay_info {
         );
         let json_unknown: serde_json::Value =
             serde_json::from_str(&body_unknown).expect("unmapped-host NIP-11 is valid JSON");
+        assert!(
+            json_unknown.get("icon").is_none(),
+            "an unmapped host binds to no community, so its NIP-11 document must \
+             carry no `icon` — leaking any community's icon to an unmapped host \
+             would cross the tenant boundary"
+        );
         assert_eq!(
             json_a, json_unknown,
-            "NIP-11 served to an unmapped host must be byte-identical to a mapped \
-             host's document: the relay-info doc carries no host-derived field, \
-             so it cannot reveal whether a given host is configured"
+            "NIP-11 served to an unmapped host must match a mapped host's \
+             icon-stripped document: apart from the host's own `icon`, the \
+             relay-info doc carries no host-derived field, so it cannot reveal \
+             whether a given host is configured"
         );
     }
 }

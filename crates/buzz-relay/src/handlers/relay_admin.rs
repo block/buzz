@@ -10,13 +10,17 @@
 //! | 9030 | Add member      | admin or owner       |
 //! | 9031 | Remove member   | admin or owner       |
 //! | 9032 | Change role     | owner only           |
+//! | 9033 | Set workspace profile (icon) | admin or owner |
 
 use std::sync::Arc;
 
 use nostr::Event;
 use tracing::{info, warn};
 
-use buzz_core::kind::{RELAY_ADMIN_ADD_MEMBER, RELAY_ADMIN_CHANGE_ROLE, RELAY_ADMIN_REMOVE_MEMBER};
+use buzz_core::kind::{
+    RELAY_ADMIN_ADD_MEMBER, RELAY_ADMIN_CHANGE_ROLE, RELAY_ADMIN_REMOVE_MEMBER,
+    RELAY_ADMIN_SET_WORKSPACE_PROFILE,
+};
 use buzz_core::tenant::TenantContext;
 use buzz_db::relay_members::RemoveResult;
 
@@ -52,7 +56,45 @@ fn extract_tag_value(event: &Event, name: &str) -> Option<String> {
     None
 }
 
-/// Validate and execute a relay admin command (kinds 9030–9032).
+/// Maximum accepted workspace icon https URL length.
+const MAX_WORKSPACE_ICON_URL_LEN: usize = 2048;
+
+/// Maximum accepted workspace icon data-URL length (~96 KB of base64 ≈ 72 KB
+/// image — generous for a 128px icon).
+const MAX_WORKSPACE_ICON_DATA_URL_LEN: usize = 98_304;
+
+/// Validate a workspace icon: empty (clear), an http(s) URL, or an inline
+/// `data:image/*` URL (what the desktop publishes — it renders across
+/// workspaces without cross-relay media fetches).
+fn validate_workspace_icon(icon: &str) -> Result<(), String> {
+    if icon.is_empty() {
+        return Ok(());
+    }
+    if icon.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        return Err("icon contains invalid characters".to_string());
+    }
+    if icon.starts_with("data:image/") {
+        if icon.len() > MAX_WORKSPACE_ICON_DATA_URL_LEN {
+            return Err(format!(
+                "icon data URL too long: {} bytes (max {MAX_WORKSPACE_ICON_DATA_URL_LEN})",
+                icon.len()
+            ));
+        }
+        return Ok(());
+    }
+    if !icon.starts_with("https://") && !icon.starts_with("http://") {
+        return Err("icon must be an http(s) URL or data:image/* URL".to_string());
+    }
+    if icon.len() > MAX_WORKSPACE_ICON_URL_LEN {
+        return Err(format!(
+            "icon URL too long: {} bytes (max {MAX_WORKSPACE_ICON_URL_LEN})",
+            icon.len()
+        ));
+    }
+    Ok(())
+}
+
+/// Validate and execute a relay admin command (kinds 9030–9033).
 ///
 /// The handler:
 /// 1. Extracts the target pubkey from the `["p", ...]` tag.
@@ -88,10 +130,6 @@ pub async fn handle_relay_admin_event(
         }
     }
 
-    let target_hex = extract_p_tag_hex(event)
-        .ok_or_else(|| "missing or invalid p tag".to_string())?
-        .to_ascii_lowercase();
-
     let sender_member = state
         .db
         .get_relay_member(tenant.community(), &sender_hex)
@@ -102,6 +140,34 @@ pub async fn handle_relay_admin_event(
         .as_ref()
         .map(|m| m.role.as_str())
         .unwrap_or("");
+
+    // kind:9033 — Set workspace profile (icon). Handled before p-tag
+    // extraction: it targets the relay itself, not a member pubkey.
+    if kind == RELAY_ADMIN_SET_WORKSPACE_PROFILE {
+        if sender_role != "admin" && sender_role != "owner" {
+            return Err("actor not authorized: must be admin or owner".to_string());
+        }
+
+        // Empty or missing icon tag clears the workspace icon.
+        let icon = extract_tag_value(event, "icon").unwrap_or_default();
+        validate_workspace_icon(&icon)?;
+
+        state
+            .db
+            .set_community_icon(
+                tenant.community(),
+                (!icon.is_empty()).then_some(icon.as_str()),
+            )
+            .await
+            .map_err(|e| format!("failed to store workspace icon: {e}"))?;
+
+        info!(sender = %sender_hex, icon_len = icon.len(), "workspace profile updated");
+        return Ok(());
+    }
+
+    let target_hex = extract_p_tag_hex(event)
+        .ok_or_else(|| "missing or invalid p tag".to_string())?
+        .to_ascii_lowercase();
 
     match kind {
         // kind:9030 — Add relay member
@@ -363,5 +429,40 @@ mod tests {
     fn extract_tag_value_wrong_name() {
         let event = make_test_event(9030, vec![vec!["role", "admin"]]);
         assert_eq!(extract_tag_value(&event, "p"), None);
+    }
+
+    #[test]
+    fn workspace_icon_empty_ok() {
+        assert!(validate_workspace_icon("").is_ok());
+    }
+
+    #[test]
+    fn workspace_icon_https_ok() {
+        assert!(validate_workspace_icon("https://example.com/icon.png").is_ok());
+    }
+
+    #[test]
+    fn workspace_icon_data_url_ok() {
+        assert!(validate_workspace_icon("data:image/webp;base64,UklGRg==").is_ok());
+    }
+
+    #[test]
+    fn workspace_icon_rejects_non_url() {
+        assert!(validate_workspace_icon("javascript:alert(1)").is_err());
+        assert!(validate_workspace_icon("data:text/html;base64,PGI+").is_err());
+    }
+
+    #[test]
+    fn workspace_icon_rejects_whitespace_and_control() {
+        assert!(validate_workspace_icon("https://example.com/a b.png").is_err());
+        assert!(validate_workspace_icon("https://example.com/a\nb.png").is_err());
+    }
+
+    #[test]
+    fn workspace_icon_rejects_oversized() {
+        let long_url = format!("https://example.com/{}.png", "a".repeat(2048));
+        assert!(validate_workspace_icon(&long_url).is_err());
+        let long_data = format!("data:image/png;base64,{}", "A".repeat(98_304));
+        assert!(validate_workspace_icon(&long_data).is_err());
     }
 }

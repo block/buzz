@@ -4,7 +4,8 @@ use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
-use axum::extract::ws::Message as WsMessage;
+use axum::body::Bytes;
+use axum::extract::ws::{Message as WsMessage, Utf8Bytes as WsUtf8Bytes};
 use dashmap::DashMap;
 use tokio::sync::mpsc;
 use tokio::sync::Semaphore;
@@ -155,9 +156,23 @@ impl ConnectionManager {
     /// On sustained backpressure (>grace_limit consecutive full buffers),
     /// cancels the connection. Transient stalls get a warning only.
     pub fn send_to(&self, conn_id: Uuid, msg: String) -> bool {
+        self.try_send_ws_message(conn_id, WsMessage::Text(msg.into()))
+    }
+
+    /// Sends an already-serialized UTF-8 text payload to the given connection.
+    ///
+    /// The shared `Bytes` payload is cloned into the outbound WS message without
+    /// copying the frame body. Callers must only pass valid UTF-8 bytes.
+    pub fn send_to_text_bytes(&self, conn_id: Uuid, msg: Arc<Bytes>) -> bool {
+        let text = WsUtf8Bytes::try_from(Bytes::clone(msg.as_ref()))
+            .expect("relay fan-out frames are serialized UTF-8 JSON");
+        self.try_send_ws_message(conn_id, WsMessage::Text(text))
+    }
+
+    fn try_send_ws_message(&self, conn_id: Uuid, msg: WsMessage) -> bool {
         if let Some(entry) = self.connections.get(&conn_id) {
             let conn = entry.value();
-            match conn.tx.try_send(WsMessage::Text(msg.into())) {
+            match conn.tx.try_send(msg) {
                 Ok(_) => {
                     conn.backpressure_count.store(0, Ordering::Relaxed);
                     true

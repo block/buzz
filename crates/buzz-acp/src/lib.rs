@@ -2111,6 +2111,7 @@ async fn tokio_main() -> Result<()> {
                     &respawn_tx,
                     &mut respawn_tasks,
                     observer.clone(),
+                    Some(&ctx.rest_client),
                 ) == LoopAction::Exit
                 {
                     break;
@@ -2662,6 +2663,7 @@ fn handle_prompt_result(
     respawn_tx: &mpsc::Sender<RespawnResult>,
     respawn_tasks: &mut tokio::task::JoinSet<()>,
     observer: Option<observer::ObserverHandle>,
+    rest_client: Option<&relay::RestClient>,
 ) -> LoopAction {
     let before = pool.task_map().len();
     let agent_index = result.agent.index;
@@ -2674,7 +2676,7 @@ fn handle_prompt_result(
     // retry_counts. If mark_complete runs first, retry_counts is cleared and
     // every retry starts at attempt 1 — defeating exponential backoff and
     // dead-letter protection.
-    if let Some(batch) = result.batch {
+    if let Some(batch) = result.batch.take() {
         // Don't requeue batches for channels the agent was removed from —
         // those events are stale and should be silently dropped.
         if !removed_channels.contains(&batch.channel_id) {
@@ -2689,8 +2691,31 @@ fn handle_prompt_result(
                 // system default — rather than telling the agent to supersede.
                 let reason = batch.cancel_reason.unwrap_or(CancelReason::Steer);
                 queue.requeue_as_cancelled(batch, reason);
-            } else {
-                queue.requeue(batch);
+            } else if let Some(dead) = queue.requeue(batch) {
+                // Dead-lettered: retries exhausted and the events are gone.
+                // Post a visible notice so the channel isn't left waiting on
+                // a turn that will never happen.
+                if let Some(rest) = rest_client {
+                    let thread_tags = dead
+                        .events
+                        .last()
+                        .map(|be| queue::parse_thread_tags(&be.event))
+                        .unwrap_or_default();
+                    let reason = match &result.outcome {
+                        PromptOutcome::Timeout => "the turn timed out".to_string(),
+                        PromptOutcome::AgentExited => "the agent process exited".to_string(),
+                        PromptOutcome::Error(e) => format!("{e}"),
+                        _ => "repeated failures".to_string(),
+                    };
+                    let content = format!(
+                        "⚠️ I couldn't process the last request after multiple retries ({reason}). Please re-send if it's still needed."
+                    );
+                    let rest = rest.clone();
+                    let channel_id = dead.channel_id;
+                    tokio::spawn(async move {
+                        pool::post_failure_notice(&rest, channel_id, &thread_tags, &content).await;
+                    });
+                }
             }
         } else {
             tracing::debug!(
@@ -2875,7 +2900,9 @@ fn recover_panicked_agent(
     if let Some(batch) = meta.recoverable_batch {
         if let Some(ch) = meta.channel_id {
             if !removed_channels.contains(&ch) {
-                queue.requeue(batch);
+                // Dead-letter on exhaustion is logged inside requeue(); a
+                // panic path has no outcome to report, so no notice here.
+                let _ = queue.requeue(batch);
                 tracing::warn!("requeued batch for panicked agent {i}");
             } else {
                 tracing::debug!(
@@ -4020,6 +4047,7 @@ mod error_outcome_emission_tests {
             &respawn_tx,
             &mut respawn_tasks,
             Some(observer.clone()),
+            None,
         );
 
         observer

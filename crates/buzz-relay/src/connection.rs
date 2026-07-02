@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::extract::ws::{Message as WsMessage, WebSocket};
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{Sink, SinkExt, StreamExt};
 use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument as _;
@@ -28,6 +28,9 @@ const AUTH_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Shared mutable subscription map for a single WebSocket connection.
 pub(crate) type ConnectionSubscriptions = Arc<Mutex<HashMap<String, Vec<Filter>>>>;
+
+/// Maximum outbound data frames buffered into the websocket sink before one flush.
+const MAX_WS_SEND_BATCH: usize = 64;
 
 /// NIP-42 authentication state for a single connection.
 #[derive(Debug, Clone)]
@@ -262,11 +265,22 @@ pub async fn handle_connection(
 /// is stalled, control frames queue in the small ctrl_rx buffer; callers
 /// treat a full control channel as terminal (Bug 7 fix).
 async fn send_loop(
-    mut ws_send: futures_util::stream::SplitSink<WebSocket, WsMessage>,
+    ws_send: futures_util::stream::SplitSink<WebSocket, WsMessage>,
+    data_rx: mpsc::Receiver<WsMessage>,
+    ctrl_rx: mpsc::Receiver<WsMessage>,
+    cancel: CancellationToken,
+) {
+    send_loop_inner(ws_send, data_rx, ctrl_rx, cancel).await;
+}
+
+async fn send_loop_inner<S>(
+    mut ws_send: S,
     mut data_rx: mpsc::Receiver<WsMessage>,
     mut ctrl_rx: mpsc::Receiver<WsMessage>,
     cancel: CancellationToken,
-) {
+) where
+    S: Sink<WsMessage> + Unpin,
+{
     loop {
         // Priority: drain all pending control frames before data.
         while let Ok(ctrl_msg) = ctrl_rx.try_recv() {
@@ -289,9 +303,28 @@ async fn send_loop(
                 }
             }
             Some(msg) = data_rx.recv() => {
-                if ws_send.send(msg).await.is_err() {
+                let mut batched = 1usize;
+                if ws_send.feed(msg).await.is_err() {
                     break;
                 }
+
+                while batched < MAX_WS_SEND_BATCH {
+                    match data_rx.try_recv() {
+                        Ok(next) => {
+                            if ws_send.feed(next).await.is_err() {
+                                return;
+                            }
+                            batched += 1;
+                        }
+                        Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                        Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => break,
+                    }
+                }
+
+                if ws_send.flush().await.is_err() {
+                    break;
+                }
+                metrics::histogram!("buzz_ws_send_batch_size").record(batched as f64);
             }
         }
     }
@@ -510,5 +543,160 @@ fn topic_for_subscription(channel_id: Option<Uuid>) -> EventTopic {
     match channel_id {
         Some(channel_id) => EventTopic::Channel(channel_id),
         None => EventTopic::Global,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Debug, Default)]
+    struct MockSinkState {
+        messages: Vec<WsMessage>,
+        flush_count: usize,
+        fail_after_flushes: Option<usize>,
+    }
+
+    #[derive(Debug, Clone)]
+    struct MockSink {
+        state: Arc<Mutex<MockSinkState>>,
+    }
+
+    impl MockSink {
+        fn new(fail_after_flushes: Option<usize>) -> (Self, Arc<Mutex<MockSinkState>>) {
+            let state = Arc::new(Mutex::new(MockSinkState {
+                fail_after_flushes,
+                ..MockSinkState::default()
+            }));
+            (
+                Self {
+                    state: Arc::clone(&state),
+                },
+                state,
+            )
+        }
+    }
+
+    impl Sink<WsMessage> for MockSink {
+        type Error = std::io::Error;
+
+        fn poll_ready(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), Self::Error>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+
+        fn start_send(self: std::pin::Pin<&mut Self>, item: WsMessage) -> Result<(), Self::Error> {
+            self.state
+                .lock()
+                .expect("mock sink poisoned")
+                .messages
+                .push(item);
+            Ok(())
+        }
+
+        fn poll_flush(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), Self::Error>> {
+            let mut state = self.state.lock().expect("mock sink poisoned");
+            state.flush_count += 1;
+            if state
+                .fail_after_flushes
+                .is_some_and(|limit| state.flush_count >= limit)
+            {
+                return std::task::Poll::Ready(Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "mock flush failure",
+                )));
+            }
+            std::task::Poll::Ready(Ok(()))
+        }
+
+        fn poll_close(
+            self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), Self::Error>> {
+            self.poll_flush(cx)
+        }
+    }
+
+    fn text_payloads(messages: &[WsMessage]) -> Vec<String> {
+        messages
+            .iter()
+            .map(|msg| match msg {
+                WsMessage::Text(text) => text.to_string(),
+                other => panic!("unexpected websocket message in test: {other:?}"),
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn send_loop_batches_queued_data_frames_into_one_flush() {
+        let (data_tx, data_rx) = mpsc::channel(MAX_WS_SEND_BATCH);
+        let (_ctrl_tx, ctrl_rx) = mpsc::channel(1);
+        for i in 0..5 {
+            data_tx
+                .send(WsMessage::Text(format!("data-{i}").into()))
+                .await
+                .expect("queue data frame");
+        }
+
+        let (sink, state) = MockSink::new(Some(1));
+        send_loop_inner(sink, data_rx, ctrl_rx, CancellationToken::new()).await;
+
+        let state = state.lock().expect("mock sink poisoned");
+        assert_eq!(state.flush_count, 1);
+        assert_eq!(
+            text_payloads(&state.messages),
+            vec!["data-0", "data-1", "data-2", "data-3", "data-4"]
+        );
+    }
+
+    #[tokio::test]
+    async fn send_loop_batch_one_preserves_single_frame_flush_behavior() {
+        let (data_tx, data_rx) = mpsc::channel(1);
+        let (_ctrl_tx, ctrl_rx) = mpsc::channel(1);
+        data_tx
+            .send(WsMessage::Text("single".into()))
+            .await
+            .expect("queue data frame");
+
+        let (sink, state) = MockSink::new(Some(1));
+        send_loop_inner(sink, data_rx, ctrl_rx, CancellationToken::new()).await;
+
+        let state = state.lock().expect("mock sink poisoned");
+        assert_eq!(state.flush_count, 1);
+        assert_eq!(text_payloads(&state.messages), vec!["single"]);
+    }
+
+    #[tokio::test]
+    async fn send_loop_drains_control_before_batched_data_without_reordering() {
+        let (data_tx, data_rx) = mpsc::channel(MAX_WS_SEND_BATCH);
+        let (ctrl_tx, ctrl_rx) = mpsc::channel(1);
+        data_tx
+            .send(WsMessage::Text("data-0".into()))
+            .await
+            .expect("queue data frame");
+        data_tx
+            .send(WsMessage::Text("data-1".into()))
+            .await
+            .expect("queue data frame");
+        ctrl_tx
+            .send(WsMessage::Text("control".into()))
+            .await
+            .expect("queue control frame");
+
+        let (sink, state) = MockSink::new(Some(2));
+        send_loop_inner(sink, data_rx, ctrl_rx, CancellationToken::new()).await;
+
+        let state = state.lock().expect("mock sink poisoned");
+        assert_eq!(state.flush_count, 2);
+        assert_eq!(
+            text_payloads(&state.messages),
+            vec!["control", "data-0", "data-1"]
+        );
     }
 }

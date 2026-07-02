@@ -128,7 +128,7 @@ pub struct FlushBatch {
 ///
 ///   requeue(batch):
 ///     increment retry_counts[channel]
-///     if retry_counts[channel] > MAX_RETRIES: dead-letter (log ERROR, discard)
+///     if retry_counts[channel] > MAX_RETRIES: dead-letter (log ERROR, return batch to caller)
 ///     else: push_front with original received_at, set exponential backoff retry_after with jitter
 /// ```
 pub struct EventQueue {
@@ -376,12 +376,13 @@ impl EventQueue {
     /// not from resetting received_at.
     ///
     /// After [`MAX_RETRIES`] attempts the batch is dead-lettered: logged at
-    /// ERROR and discarded rather than requeued. This prevents poison batches
-    /// from looping forever.
+    /// ERROR and returned to the caller (rather than requeued) so a visible
+    /// failure notice can be posted to the channel. Returns `None` when the
+    /// batch was requeued for another attempt.
     ///
     /// Note: does NOT remove from `in_flight_channels` — caller must call
     /// `mark_complete` separately.
-    pub fn requeue(&mut self, batch: FlushBatch) {
+    pub fn requeue(&mut self, batch: FlushBatch) -> Option<FlushBatch> {
         let channel_id = batch.channel_id;
         let attempt = {
             let count = self.retry_counts.entry(channel_id).or_insert(0);
@@ -402,7 +403,7 @@ impl EventQueue {
             // Also clear retry_after so fresh traffic on this channel isn't
             // throttled by stale backoff from the discarded poison batch.
             self.retry_after.remove(&channel_id);
-            return;
+            return Some(batch);
         }
 
         // Exponential backoff: BASE * 2^(attempt-1), capped at MAX, with ±20% jitter.
@@ -449,6 +450,7 @@ impl EventQueue {
             );
         }
         self.retry_after.insert(channel_id, Instant::now() + delay);
+        None
     }
 
     /// Re-queue a batch preserving original `received_at` timestamps.
@@ -2688,6 +2690,36 @@ mod tests {
             q.has_flushable_work(),
             "expired throttle should be flushable"
         );
+    }
+
+    #[test]
+    fn test_requeue_dead_letters_after_max_retries() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+
+        q.push(make_queued(ch, "poison"));
+        for attempt in 1..=MAX_RETRIES {
+            q.retry_after
+                .insert(ch, Instant::now() - Duration::from_secs(1));
+            let batch = q.flush_next().expect("flush");
+            assert!(
+                q.requeue(batch).is_none(),
+                "attempt {attempt} should requeue, not dead-letter"
+            );
+            q.mark_complete(ch);
+        }
+
+        // The MAX_RETRIES+1'th failure dead-letters: batch is returned.
+        q.retry_after
+            .insert(ch, Instant::now() - Duration::from_secs(1));
+        let batch = q.flush_next().expect("flush");
+        let dead = q.requeue(batch).expect("should dead-letter");
+        assert_eq!(dead.channel_id, ch);
+        assert_eq!(dead.events.len(), 1);
+        q.mark_complete(ch);
+        // Retry state is cleared so fresh traffic isn't throttled.
+        assert!(!q.retry_counts.contains_key(&ch));
+        assert!(!q.retry_after.contains_key(&ch));
     }
 
     #[test]
