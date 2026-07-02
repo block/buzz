@@ -12,11 +12,13 @@ import { cn } from "@/shared/lib/cn";
 import {
   Dialog,
   DialogContent,
+  DialogDescription,
   DialogHeader,
   DialogTitle,
 } from "@/shared/ui/dialog";
+import { Toggle } from "@/shared/ui/toggle";
 import { FuzzyLogo } from "@/shared/ui/buzz-logo/FuzzyLogo";
-import type { TranscriptItem } from "./agentSessionTypes";
+import type { PromptSection, TranscriptItem } from "./agentSessionTypes";
 import { TurnLivenessIndicator } from "./TurnLivenessIndicator";
 import { PromptSectionList as PromptContextSections } from "./PromptSectionAccordion";
 import {
@@ -598,89 +600,71 @@ function PromptUserMessage({
   setup?: Extract<TranscriptItem, { type: "lifecycle" }>[];
   systemPrompt?: Extract<TranscriptItem, { type: "metadata" }> | null;
 }) {
+  const [contextOpen, setContextOpen] = React.useState(false);
+  const contextSections = React.useMemo(
+    () => [...(systemPrompt?.sections ?? []), ...(context?.sections ?? [])],
+    [context, systemPrompt],
+  );
+
   return (
     <>
       <UserMessageBubble
         bubbleClassName="p-2.5"
         footer={
           <TurnSetupFooter
+            contextOpen={contextOpen}
+            hasContext={contextSections.length > 0}
             items={setup}
             messageLink={getTranscriptMessageLink(item)}
+            onContextOpenChange={setContextOpen}
             timestamp={item.timestamp}
           />
         }
         item={item}
         profiles={profiles}
       />
-      {systemPrompt && systemPrompt.sections.length > 0 ? (
-        <PromptContextInline context={systemPrompt} />
-      ) : null}
-      {context && context.sections.length > 0 ? (
-        <PromptContextInline context={context} />
-      ) : null}
-    </>
-  );
-}
-
-function PromptContextInline({
-  context,
-}: {
-  context: Extract<TranscriptItem, { type: "metadata" }>;
-}) {
-  const [dialogOpen, setDialogOpen] = React.useState(false);
-
-  return (
-    <>
-      <div
-        className="mt-1 space-y-2 pl-2"
-        data-testid="transcript-prompt-context-inline"
-      >
-        <div className="flex items-center justify-between gap-2">
-          <p className="text-xs font-medium text-muted-foreground/70">
-            {context.title}
-          </p>
-          <button
-            className="text-xs text-muted-foreground/50 hover:text-muted-foreground transition-colors"
-            data-testid="transcript-prompt-context-expand"
-            onClick={() => setDialogOpen(true)}
-            type="button"
-          >
-            View full
-          </button>
-        </div>
-        <PromptContextSections sections={context.sections} />
-      </div>
       <PromptContextDialog
-        context={context}
-        onOpenChange={setDialogOpen}
-        open={dialogOpen}
+        onOpenChange={setContextOpen}
+        open={contextOpen}
+        sections={contextSections}
+        setup={setup}
       />
     </>
   );
 }
 
 function PromptContextDialog({
-  context,
   onOpenChange,
   open,
+  sections,
+  setup,
 }: {
-  context: Extract<TranscriptItem, { type: "metadata" }>;
   onOpenChange: (open: boolean) => void;
   open: boolean;
+  sections: PromptSection[];
+  setup: Extract<TranscriptItem, { type: "lifecycle" }>[];
 }) {
-  if (!open || context.sections.length === 0) {
+  if (!open || sections.length === 0) {
     return null;
   }
+
+  const setupText = formatPromptSetupSummary(setup);
 
   return (
     <Dialog onOpenChange={onOpenChange} open={open}>
       <DialogContent className="max-w-xl overflow-hidden p-0">
         <div className="flex max-h-[85vh] flex-col">
           <DialogHeader className="px-6 pb-3 pt-5 pr-14">
-            <DialogTitle>{context.title}</DialogTitle>
+            <DialogTitle>Prompt context</DialogTitle>
+            {setupText ? (
+              <div className="flex items-center gap-1.5">
+                <CheckCheck className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                <DialogDescription>{setupText}</DialogDescription>
+              </div>
+            ) : null}
           </DialogHeader>
           <div className="min-h-0 flex-1 overflow-y-auto px-6 pb-6 pt-2">
-            <PromptContextSections sections={context.sections} />
+            <PromptContextSections sections={sections} />
           </div>
         </div>
       </DialogContent>
@@ -688,14 +672,28 @@ function PromptContextDialog({
   );
 }
 
+function formatPromptSetupSummary(
+  items: Extract<TranscriptItem, { type: "lifecycle" }>[],
+) {
+  const label = formatTurnSetupLabel(items);
+  const detail = turnSetupDetail(items);
+  return [label, detail].filter(Boolean).join(" · ");
+}
+
 function TurnSetupFooter({
+  contextOpen = false,
+  hasContext = false,
   items,
   messageLink = null,
+  onContextOpenChange,
   showTimestamp = true,
   timestamp,
 }: {
+  contextOpen?: boolean;
+  hasContext?: boolean;
   items: Extract<TranscriptItem, { type: "lifecycle" }>[];
   messageLink?: { channelId: string; messageId: string } | null;
+  onContextOpenChange?: (open: boolean) => void;
   showTimestamp?: boolean;
   timestamp: string;
 }) {
@@ -703,8 +701,9 @@ function TurnSetupFooter({
   const detail = turnSetupDetail(items);
   const tooltipText = [label, detail].filter(Boolean).join(" · ");
   const showSetup = items.length > 0;
+  const showContext = hasContext && onContextOpenChange != null;
 
-  if (!showSetup) {
+  if (!showSetup && !showContext) {
     return showTimestamp ? (
       <TranscriptTimestamp messageLink={messageLink} timestamp={timestamp} />
     ) : null;
@@ -715,10 +714,25 @@ function TurnSetupFooter({
       className="flex items-center gap-1.5 text-muted-foreground/80"
       data-testid="transcript-turn-setup"
     >
-      <span className="inline-flex shrink-0 items-center justify-center rounded-sm text-muted-foreground/70">
-        <CheckCheck className="h-3.5 w-3.5" />
-        <span className="sr-only">{tooltipText}</span>
-      </span>
+      {showContext ? (
+        <Toggle
+          aria-label={`${contextOpen ? "Hide" : "Show"} prompt context`}
+          className="data-[state=on]:bg-primary/10 data-[state=on]:text-primary dark:data-[state=on]:bg-primary/15"
+          data-testid="transcript-prompt-context-toggle"
+          onPressedChange={onContextOpenChange}
+          pressed={contextOpen}
+          size="xs"
+          title={tooltipText || "Show prompt context"}
+          variant="ghost"
+        >
+          <CheckCheck aria-hidden="true" />
+        </Toggle>
+      ) : (
+        <span className="inline-flex shrink-0 items-center justify-center rounded-sm text-muted-foreground/70">
+          <CheckCheck className="h-3.5 w-3.5" />
+          <span className="sr-only">{tooltipText}</span>
+        </span>
+      )}
       {showTimestamp ? (
         <TranscriptTimestamp messageLink={messageLink} timestamp={timestamp} />
       ) : null}
