@@ -170,21 +170,19 @@ pub async fn get_channels(state: State<'_, AppState>) -> Result<Vec<ChannelInfo>
     let t_member_counts = _profile_start.elapsed();
 
     // Populate last_message_at by fetching the most recent human message per
-    // channel. Uses per-channel filters (single #h value each) so the relay can
-    // push the query to its indexed channel_id column. Multi-value #h is NOT
-    // SQL-pushed and would silently drop quieter channels under the global limit.
+    // channel. `latest_per_channel` is the bridge's bulk top-1-per-channel
+    // extension: one indexed relay round trip for all channels, with the same
+    // per-channel winner as the previous one-`limit:1`-filter-per-channel
+    // shape (multi-value #h alone is NOT SQL-pushed and would silently drop
+    // quieter channels under the global limit; the extension exists so the
+    // relay can push it safely).
     let channel_ids: Vec<String> = channels.iter().map(|c| c.id.clone()).collect();
     if !channel_ids.is_empty() {
-        let filters: Vec<serde_json::Value> = channel_ids
-            .iter()
-            .map(|id| {
-                serde_json::json!({
-                    "kinds": [9, 40002],
-                    "#h": [id],
-                    "limit": 1
-                })
-            })
-            .collect();
+        let filters = [serde_json::json!({
+            "kinds": [9, 40002],
+            "#h": channel_ids,
+            "latest_per_channel": true,
+        })];
 
         let message_events = query_relay(&state, &filters).await.unwrap_or_default();
 

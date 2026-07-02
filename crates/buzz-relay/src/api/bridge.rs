@@ -253,6 +253,15 @@ fn extract_feed_types(raw: &Value) -> Option<Vec<String>> {
     }
 }
 
+/// `latest_per_channel: true` marks a filter as a bulk latest-message lookup:
+/// the top-1 event per `#h` channel in one DB round trip, instead of one
+/// `limit:1` filter per channel.
+fn extract_latest_per_channel(raw: &Value) -> bool {
+    raw.get("latest_per_channel")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
 fn extract_search_mode(raw: &Value) -> buzz_search::SearchMode {
     match raw
         .get("search_mode")
@@ -634,6 +643,64 @@ pub async fn query_events(
             }
         }
         handled.insert(idx);
+    }
+
+    // Bulk latest-message lookup: `latest_per_channel: true` + multi-`#h`
+    // resolves the top-1 event per channel in one LATERAL round trip, replacing
+    // one `limit:1` filter per channel. Inaccessible channels are dropped from
+    // the lookup set (same outcome as the catch-all's access-scope skip), and
+    // every returned event still passes the identical per-event gates below —
+    // top-1-per-channel is guaranteed by construction, so the multi-`#h`
+    // limit-budget hazard that rules out SQL pushdown elsewhere doesn't apply.
+    let h_tag_key = nostr::SingleLetterTag::lowercase(nostr::Alphabet::H);
+    for (idx, (raw, filter)) in raw_filters.iter().zip(filters.iter()).enumerate() {
+        if handled.contains(&idx) || !extract_latest_per_channel(raw) {
+            continue;
+        }
+        handled.insert(idx);
+
+        let requested: Vec<uuid::Uuid> = filter
+            .generic_tags
+            .get(&h_tag_key)
+            .map(|vs| {
+                vs.iter()
+                    .filter_map(|v| v.parse::<uuid::Uuid>().ok())
+                    .filter(|ch| accessible_channels.contains(ch))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if requested.is_empty() {
+            continue;
+        }
+
+        let kinds: Option<Vec<i32>> = filter
+            .kinds
+            .as_ref()
+            .map(|ks| ks.iter().map(|k| k.as_u16() as i32).collect());
+
+        let latest = state
+            .db
+            .get_latest_event_per_channel(tenant.community(), &requested, kinds.as_deref())
+            .await
+            .map_err(|e| internal_error(&format!("latest-per-channel query error: {e}")))?;
+
+        for se in latest {
+            if !event_in_accessible_channel(&se, &accessible_channels) {
+                continue;
+            }
+            if !buzz_core::filter::filters_match(std::slice::from_ref(filter), &se) {
+                continue;
+            }
+            if !buzz_core::filter::reader_authorized_for_event(&se.event, &authed_pubkey_hex) {
+                continue;
+            }
+            if crate::handlers::req::is_author_only_event(&se.event, &pubkey_bytes) {
+                continue;
+            }
+            if let Ok(v) = serde_json::to_value(&se.event) {
+                events.push(v);
+            }
+        }
     }
 
     // Phase 1 — pure construction + validation, in filter order. Access-scope
@@ -2105,6 +2172,23 @@ mod tests {
     fn extract_feed_types_non_array() {
         let raw = serde_json::json!({ "feed_types": "mentions" });
         assert!(extract_feed_types(&raw).is_none());
+    }
+
+    #[test]
+    fn extract_latest_per_channel_true() {
+        let raw = serde_json::json!({ "latest_per_channel": true });
+        assert!(extract_latest_per_channel(&raw));
+    }
+
+    #[test]
+    fn extract_latest_per_channel_false_absent_or_non_bool() {
+        assert!(!extract_latest_per_channel(&serde_json::json!({
+            "latest_per_channel": false
+        })));
+        assert!(!extract_latest_per_channel(&serde_json::json!({})));
+        assert!(!extract_latest_per_channel(&serde_json::json!({
+            "latest_per_channel": "true"
+        })));
     }
 
     #[test]

@@ -557,6 +557,18 @@ impl Db {
         event::get_last_message_at_bulk(&self.pool, community_id, channel_ids).await
     }
 
+    /// Bulk-fetch the latest non-deleted event per channel (single round trip).
+    ///
+    /// See [`event::get_latest_event_per_channel`] for ordering guarantees.
+    pub async fn get_latest_event_per_channel(
+        &self,
+        community_id: CommunityId,
+        channel_ids: &[Uuid],
+        kinds: Option<&[i32]>,
+    ) -> Result<Vec<StoredEvent>> {
+        event::get_latest_event_per_channel(&self.pool, community_id, channel_ids, kinds).await
+    }
+
     /// Batch-fetch non-deleted events by their raw IDs.
     pub async fn get_events_by_ids(
         &self,

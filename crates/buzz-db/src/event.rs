@@ -841,6 +841,61 @@ pub async fn get_last_message_at_bulk(
     Ok(map)
 }
 
+/// Bulk-fetch the latest non-deleted event per channel, one indexed top-1
+/// lookup per channel in a single round trip.
+///
+/// `unnest` + `LATERAL` guarantees an index-backed
+/// (`idx_events_community_channel_created`) `LIMIT 1` per channel — unlike
+/// `DISTINCT ON`, it cannot degrade to a full sort as channels grow. Per-channel
+/// ordering (`created_at DESC, id ASC LIMIT 1`) is byte-identical to
+/// [`query_events`] with `limit: 1`, so a caller migrating from N single-channel
+/// queries observes the same winning event per channel.
+///
+/// Channels with no matching events are omitted. `kinds` follows NIP-01
+/// semantics: `None` = any kind, `Some(&[])` = match nothing.
+pub async fn get_latest_event_per_channel(
+    pool: &PgPool,
+    community_id: CommunityId,
+    channel_ids: &[uuid::Uuid],
+    kinds: Option<&[i32]>,
+) -> Result<Vec<StoredEvent>> {
+    if channel_ids.is_empty() || kinds.is_some_and(|k| k.is_empty()) {
+        return Ok(vec![]);
+    }
+
+    let mut qb: QueryBuilder<sqlx::Postgres> = QueryBuilder::new(
+        "SELECT e.id, e.pubkey, e.created_at, e.kind, e.tags, e.content, \
+                e.sig, e.received_at, e.channel_id \
+         FROM unnest(",
+    );
+    qb.push_bind(channel_ids);
+    qb.push(
+        "::uuid[]) AS c(channel_id) \
+         CROSS JOIN LATERAL ( \
+             SELECT id, pubkey, created_at, kind, tags, content, sig, received_at, channel_id \
+             FROM events \
+             WHERE community_id = ",
+    );
+    qb.push_bind(community_id.as_uuid());
+    qb.push(" AND channel_id = c.channel_id AND deleted_at IS NULL");
+    if let Some(ks) = kinds {
+        qb.push(" AND kind = ANY(");
+        qb.push_bind(ks);
+        qb.push(")");
+    }
+    qb.push(" ORDER BY created_at DESC, id ASC LIMIT 1 ) e");
+
+    let rows = qb.build().fetch_all(pool).await?;
+
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        if let Some(ev) = row_to_stored_event(row)? {
+            out.push(ev);
+        }
+    }
+    Ok(out)
+}
+
 /// Fetches a single non-deleted event by its raw 32-byte ID.
 ///
 /// Returns `None` if the event does not exist or has been soft-deleted.
@@ -1400,6 +1455,110 @@ mod tests {
 
         assert_eq!(a.event.content, "community-a-copy");
         assert_eq!(b.event.content, "community-b-copy");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn latest_event_per_channel_matches_serial_per_channel_queries() {
+        let pool = setup_pool().await;
+        let community = CommunityId::from_uuid(make_test_community(&pool).await);
+        let keys = Keys::generate();
+        let chan_a = Uuid::new_v4();
+        let chan_b = Uuid::new_v4();
+        let chan_c = Uuid::new_v4();
+        let chan_empty = Uuid::new_v4();
+        let base = nostr::Timestamp::now().as_secs() - 100;
+
+        let sign = |kind: u16, content: &str, ts: u64| {
+            EventBuilder::new(Kind::Custom(kind), content)
+                .custom_created_at(nostr::Timestamp::from(ts))
+                .sign_with_keys(&keys)
+                .expect("sign")
+        };
+
+        // chan_a: two kind:9 messages; the newer must win.
+        let a_old = sign(9, "a-old", base);
+        let a_new = sign(9, "a-new", base + 10);
+        // chan_b: newest matching event is kind:40002; a newer kind:1 must be
+        // excluded by the kinds constraint. Also a soft-deleted even-newer 9.
+        let b_match = sign(40002, "b-match", base + 5);
+        let b_wrong_kind = sign(1, "b-wrong-kind", base + 20);
+        let b_deleted = sign(9, "b-deleted", base + 30);
+        // chan_c: same-second tie — `id ASC` must break it identically to
+        // query_events.
+        let c_tie_1 = sign(9, "c-tie-1", base + 7);
+        let c_tie_2 = sign(9, "c-tie-2", base + 7);
+
+        for (ev, ch) in [
+            (&a_old, chan_a),
+            (&a_new, chan_a),
+            (&b_match, chan_b),
+            (&b_wrong_kind, chan_b),
+            (&b_deleted, chan_b),
+            (&c_tie_1, chan_c),
+            (&c_tie_2, chan_c),
+        ] {
+            insert_event(&pool, community, ev, Some(ch))
+                .await
+                .expect("insert");
+        }
+        sqlx::query("UPDATE events SET deleted_at = now() WHERE community_id = $1 AND id = $2")
+            .bind(community.as_uuid())
+            .bind(b_deleted.id.as_bytes())
+            .execute(&pool)
+            .await
+            .expect("soft-delete");
+
+        let channels = [chan_a, chan_b, chan_c, chan_empty];
+        let kinds = [9i32, 40002];
+
+        // Reference: the serial shape being replaced — one limit:1 query per channel.
+        let mut expected: Vec<(Uuid, nostr::EventId)> = Vec::new();
+        for ch in channels {
+            let mut q = EventQuery::for_community(community);
+            q.channel_id = Some(ch);
+            q.kinds = Some(kinds.to_vec());
+            q.limit = Some(1);
+            if let Some(se) = query_events(&pool, &q).await.expect("serial query").pop() {
+                expected.push((ch, se.event.id));
+            }
+        }
+
+        let bulk = get_latest_event_per_channel(&pool, community, &channels, Some(&kinds))
+            .await
+            .expect("bulk query");
+        let mut got: Vec<(Uuid, nostr::EventId)> = bulk
+            .iter()
+            .map(|se| (se.channel_id.expect("channel scoped"), se.event.id))
+            .collect();
+        got.sort();
+        expected.sort();
+        assert_eq!(got, expected, "bulk winners must match serial winners");
+
+        // Spot-check the interesting winners directly.
+        let winner = |ch: Uuid| {
+            got.iter()
+                .find(|(c, _)| *c == ch)
+                .map(|(_, id)| *id)
+                .expect("winner present")
+        };
+        assert_eq!(winner(chan_a), a_new.id);
+        assert_eq!(winner(chan_b), b_match.id, "deleted + wrong-kind excluded");
+        let tie_winner = std::cmp::min(c_tie_1.id, c_tie_2.id);
+        assert_eq!(winner(chan_c), tie_winner, "same-second tie: id ASC");
+        assert!(!got.iter().any(|(c, _)| *c == chan_empty));
+
+        // kinds=None matches any kind (chan_b's non-deleted newest is kind:1);
+        // kinds=Some(&[]) matches nothing.
+        let any_kind = get_latest_event_per_channel(&pool, community, &[chan_b], None)
+            .await
+            .expect("any-kind query");
+        assert_eq!(any_kind.len(), 1);
+        assert_eq!(any_kind[0].event.id, b_wrong_kind.id);
+        let no_kind = get_latest_event_per_channel(&pool, community, &[chan_b], Some(&[]))
+            .await
+            .expect("empty-kinds query");
+        assert!(no_kind.is_empty());
     }
 
     fn make_event_with_kind_and_tags(kind: u16, tags: Vec<Tag>) -> nostr::Event {
