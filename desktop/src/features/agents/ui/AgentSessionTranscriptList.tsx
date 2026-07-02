@@ -107,25 +107,9 @@ export function AgentSessionTranscriptList({
     scrollContainerRef,
   });
 
-  const [showLoadingDelayMessage, setShowLoadingDelayMessage] =
-    React.useState(false);
   const isCompactPreview = variant === "compactPreview";
   const hasRenderableContent =
     items.length > 0 && hasRenderableDisplayContent(displayBlocks, variant);
-  const isLoadingEmptyState = emptyState === "loading" && !hasRenderableContent;
-
-  React.useEffect(() => {
-    if (!isLoadingEmptyState) {
-      setShowLoadingDelayMessage(false);
-      return;
-    }
-
-    const timeout = window.setTimeout(() => {
-      setShowLoadingDelayMessage(true);
-    }, 4000);
-
-    return () => window.clearTimeout(timeout);
-  }, [isLoadingEmptyState]);
 
   const scrollContainerClassNames = cn(
     "w-full",
@@ -139,17 +123,10 @@ export function AgentSessionTranscriptList({
       <div className={scrollContainerClassNames}>
         <div className="flex min-h-40 flex-col items-center justify-center px-6 py-10 text-center">
           {isLoading ? (
-            <>
-              <Spinner
-                aria-label="Waiting for ACP activity"
-                className="mx-auto h-4 w-4 border-2 text-muted-foreground"
-              />
-              {showLoadingDelayMessage ? (
-                <p className="mt-3 text-sm font-medium text-muted-foreground">
-                  This is taking longer than normal…
-                </p>
-              ) : null}
-            </>
+            <Spinner
+              aria-label="Waiting for ACP activity"
+              className="mx-auto h-4 w-4 border-2 text-muted-foreground"
+            />
           ) : (
             <>
               <Radio className="mx-auto h-4 w-4 text-muted-foreground" />
