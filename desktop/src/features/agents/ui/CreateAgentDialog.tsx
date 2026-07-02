@@ -291,6 +291,22 @@ export function CreateAgentDialog({
     }
   }, [prereqsQuery.error, providersQuery.error]);
 
+  // Auto-open the Advanced section the first time required env-key rows appear
+  // so the user sees a clear signal that action is needed (e.g. provider API
+  // key required). Fires once per dialog-open cycle; does not re-open if the
+  // user manually collapses the section afterward.
+  const hasAutoOpenedAdvancedRef = React.useRef(false);
+  React.useEffect(() => {
+    if (!open) {
+      hasAutoOpenedAdvancedRef.current = false;
+      return;
+    }
+    if (requiredEnvKeys.length > 0 && !hasAutoOpenedAdvancedRef.current) {
+      hasAutoOpenedAdvancedRef.current = true;
+      setShowAdvanced(true);
+    }
+  }, [open, requiredEnvKeys.length]);
+
   // Probe the backend provider when runOn changes to a non-local value
   React.useEffect(() => {
     if (!isProviderMode || !selectedBackendProvider) {
