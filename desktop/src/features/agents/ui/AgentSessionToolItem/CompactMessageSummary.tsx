@@ -7,6 +7,7 @@ import { useProfilePanel } from "@/shared/context/ProfilePanelContext";
 import { Markdown } from "@/shared/ui/markdown";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 import { useAgentSessionTranscriptVariant } from "../agentSessionTranscriptContext";
+import { MessageLinkHoverCue } from "../activityRenderClasses/MessageLinkHoverCue";
 import { TranscriptTimestamp } from "../activityRenderClasses/TranscriptTimestamp";
 import { useTranscriptBubbleOverflow } from "../activityRenderClasses/useTranscriptBubbleOverflow";
 import { compactSummaryTone } from "./CompactToolSummaryRow";
@@ -141,7 +142,7 @@ export function CompactMessageSummary({
                 : "text-sm leading-relaxed",
               shouldClampBubble && "relative max-h-36 overflow-hidden",
               canOpenMessage &&
-                "cursor-pointer transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                "group/bubble cursor-pointer transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
               isCompactPreview
                 ? isError
                   ? "border-destructive/25 bg-destructive/10 text-destructive"
@@ -172,6 +173,7 @@ export function CompactMessageSummary({
                 )}
               />
             ) : null}
+            {canOpenMessage ? <MessageLinkHoverCue /> : null}
           </div>
           <div className="inline-flex max-w-full items-center gap-1.5 px-1">
             <TranscriptTimestamp

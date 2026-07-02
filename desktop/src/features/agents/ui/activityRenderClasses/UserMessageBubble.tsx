@@ -11,6 +11,7 @@ import { Markdown } from "@/shared/ui/markdown";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 import { useAgentSessionTranscriptVariant } from "../agentSessionTranscriptContext";
 import type { TranscriptItem } from "../agentSessionTypes";
+import { MessageLinkHoverCue } from "./MessageLinkHoverCue";
 import { useTranscriptBubbleOverflow } from "./useTranscriptBubbleOverflow";
 
 export function UserMessageBubble({
@@ -137,7 +138,7 @@ export function UserMessageBubble({
             "w-full min-w-0 rounded-2xl border border-border/70 bg-transparent p-3 text-sm leading-relaxed text-foreground",
             shouldClampBubble && "relative max-h-36 overflow-hidden",
             messageLink &&
-              "cursor-pointer transition-colors hover:border-border focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+              "group/bubble cursor-pointer transition-colors hover:border-border hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
             isCompactPreview && "p-2 text-xs leading-4",
             bubbleClassName,
           )}
@@ -153,6 +154,7 @@ export function UserMessageBubble({
           {hasBubbleOverflow ? (
             <span className="pointer-events-none absolute inset-x-0 bottom-0 h-8 rounded-b-2xl bg-linear-to-b from-transparent to-background" />
           ) : null}
+          {messageLink ? <MessageLinkHoverCue /> : null}
         </div>
         {footer}
       </div>
