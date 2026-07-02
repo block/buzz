@@ -1,6 +1,7 @@
 import { Plus } from "lucide-react";
 
 import type { Workspace } from "@/features/workspaces/types";
+import { useWorkspaceIcons } from "@/features/workspaces/useWorkspaceIcons";
 import {
   useWorkspaceUnread,
   type WorkspaceUnreadState,
@@ -54,11 +55,13 @@ function WorkspaceButton({
   workspace,
   isActive,
   unread,
+  iconUrl,
   onSwitch,
 }: {
   workspace: Workspace;
   isActive: boolean;
   unread: WorkspaceUnreadState;
+  iconUrl: string | null;
   onSwitch: () => void;
 }) {
   const { mentionCount, showBadge, pending, badgeLabel } =
@@ -81,14 +84,24 @@ function WorkspaceButton({
         >
           <span
             className={cn(
-              "flex h-9 w-9 items-center justify-center rounded-2xl text-xs font-semibold transition-all",
+              "flex h-9 w-9 items-center justify-center overflow-hidden rounded-2xl text-xs font-semibold transition-all",
               isActive
                 ? "rounded-xl bg-primary text-primary-foreground"
                 : "bg-sidebar-accent/60 text-sidebar-foreground/80 hover:rounded-xl hover:bg-primary/80 hover:text-primary-foreground",
               pending && "opacity-60",
             )}
           >
-            {workspaceInitials(workspace.name) || "🐝"}
+            {iconUrl ? (
+              <img
+                alt=""
+                className="h-full w-full object-cover"
+                data-testid={`workspace-rail-icon-${workspace.id}`}
+                draggable={false}
+                src={iconUrl}
+              />
+            ) : (
+              workspaceInitials(workspace.name) || "🐝"
+            )}
           </span>
           {showBadge ? (
             <span
@@ -119,6 +132,7 @@ export function WorkspaceRail({
   onAddWorkspace,
 }: WorkspaceRailProps) {
   const unreadByWorkspace = useWorkspaceUnread(workspaces, activeWorkspaceId);
+  const iconsByWorkspace = useWorkspaceIcons(workspaces);
   const isFullscreen = useIsFullscreen();
   if (workspaces.length <= 1) {
     return null;
@@ -142,6 +156,7 @@ export function WorkspaceRail({
       {workspaces.map((workspace) => (
         <WorkspaceButton
           key={workspace.id}
+          iconUrl={iconsByWorkspace[workspace.id] ?? null}
           isActive={workspace.id === activeWorkspaceId}
           onSwitch={() => onSwitchWorkspace(workspace.id)}
           unread={

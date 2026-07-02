@@ -21,7 +21,7 @@ use crate::api;
 use crate::audio;
 use crate::connection::handle_connection;
 use crate::metrics::track_metrics;
-use crate::nip11::{nip11_facts, relay_info_handler, RelayInfo};
+use crate::nip11::{nip11_document, relay_info_handler};
 use crate::state::AppState;
 
 /// Build the axum [`Router`] with all relay routes, middleware, and CORS configuration.
@@ -149,27 +149,22 @@ async fn nip11_or_ws_handler(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
 
-    let (relay_self, advertise_nip43) = nip11_facts(&state);
+    let raw_host = headers
+        .get(axum::http::header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
 
     if accept.contains("application/nostr+json") {
-        let info = RelayInfo::build(
-            relay_self.as_deref(),
-            advertise_nip43,
-            state.config.max_frame_bytes,
-        );
-        return Json(info).into_response();
+        return Json(nip11_document(&state, raw_host).await).into_response();
     }
 
     // Row zero: bind the connection to its community from the request host
     // BEFORE the WebSocket upgrade, so no frame is ever read on an unbound
     // connection. The host is the authoritative selector; an unmapped host or a
     // lookup failure fails closed with a generic rejection — never a default
-    // tenant. NIP-11 above is intentionally host-agnostic (static facts only),
-    // so it is served before binding and cannot leak which hosts are mapped.
-    let raw_host = headers
-        .get(axum::http::header::HOST)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
+    // tenant. NIP-11 above is served before binding and stays fail-open: an
+    // unmapped host still gets the document (with host-scoped fields like
+    // `icon` simply absent), so the doc cannot leak which hosts are mapped.
     let tenant = match crate::tenant::bind_community(&state.db, raw_host).await {
         Ok(ctx) => ctx,
         Err(_) => {
@@ -199,12 +194,7 @@ async fn nip11_or_ws_handler(
                 }
             }
             // Not a WS request and not asking for nostr+json — serve NIP-11 as fallback.
-            let info = RelayInfo::build(
-                relay_self.as_deref(),
-                advertise_nip43,
-                state.config.max_frame_bytes,
-            );
-            Json(info).into_response()
+            Json(nip11_document(&state, raw_host).await).into_response()
         }
     }
 }

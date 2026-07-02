@@ -321,6 +321,49 @@ impl Db {
         .transpose()
     }
 
+    /// Returns the community's workspace icon (NIP-11 `icon`), if set.
+    ///
+    /// Set by relay admins/owners via the kind:9033 command; the value is
+    /// validated and size-capped at that write path.
+    pub async fn get_community_icon(&self, community_id: CommunityId) -> Result<Option<String>> {
+        let row = sqlx::query(
+            r#"
+            SELECT icon
+            FROM communities
+            WHERE id = $1
+            "#,
+        )
+        .bind(community_id.as_uuid())
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row
+            .map(|row| row.try_get::<Option<String>, _>("icon"))
+            .transpose()?
+            .flatten()
+            .filter(|icon| !icon.is_empty()))
+    }
+
+    /// Sets or clears (`None`) the community's workspace icon.
+    pub async fn set_community_icon(
+        &self,
+        community_id: CommunityId,
+        icon: Option<&str>,
+    ) -> Result<()> {
+        sqlx::query(
+            r#"
+            UPDATE communities
+            SET icon = $2
+            WHERE id = $1
+            "#,
+        )
+        .bind(community_id.as_uuid())
+        .bind(icon)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     /// Ensure a configured community host exists and return its row.
     ///
     /// This is the startup/config seeding path for N=1 deployments. Migrations

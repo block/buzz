@@ -23,11 +23,13 @@ import {
 } from "@/shared/ui/sidebar";
 import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
+import { cn } from "@/shared/lib/cn";
 import type { ConnectionState } from "@/shared/api/relayClientShared";
 import {
   isRelayConnectionDegraded,
   useRelayConnection,
 } from "@/shared/api/useRelayConnection";
+import { useActiveWorkspaceIcon } from "@/features/workspaces/useWorkspaceIcons";
 import { EditWorkspaceDialog } from "./EditWorkspaceDialog";
 
 const CONNECTION_STATE_LABEL: Record<ConnectionState, string> = {
@@ -52,7 +54,28 @@ type WorkspaceSwitcherProps = {
   onRemoveWorkspace: (id: string) => void;
 };
 
-function WorkspaceEmojiIcon({ className }: { className: string }) {
+function WorkspaceEmojiIcon({
+  className,
+  iconUrl,
+}: {
+  className: string;
+  iconUrl?: string | null;
+}) {
+  if (iconUrl) {
+    return (
+      <span
+        aria-hidden="true"
+        className={cn(className, "h-5 overflow-hidden rounded-md")}
+      >
+        <img
+          alt=""
+          className="h-full w-full object-cover"
+          draggable={false}
+          src={iconUrl}
+        />
+      </span>
+    );
+  }
   return (
     <span aria-hidden="true" className={className}>
       <span className="-translate-y-px leading-normal">🐝</span>
@@ -76,6 +99,8 @@ export function WorkspaceSwitcher({
   const connectionState = useRelayConnection();
   const degraded = isRelayConnectionDegraded(connectionState);
   const connectionLabel = CONNECTION_STATE_LABEL[connectionState];
+  const activeIconQuery = useActiveWorkspaceIcon(activeWorkspace?.relayUrl);
+  const activeIcon = activeIconQuery.data ?? null;
   const isProfileVariant = variant === "profile";
 
   function clearProfileMenuHoverTimer() {
@@ -143,6 +168,7 @@ export function WorkspaceSwitcher({
               ? "flex w-5 shrink-0 items-center justify-center rounded-md border border-sidebar-border/70 bg-sidebar-accent/40 text-2xs"
               : "flex w-5 shrink-0 items-center justify-center text-xs"
           }
+          iconUrl={activeIcon}
         />
       )}
       <span

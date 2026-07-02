@@ -32,7 +32,7 @@ use buzz_core::kind::{
     KIND_STREAM_MESSAGE_PINNED, KIND_STREAM_MESSAGE_SCHEDULED, KIND_STREAM_MESSAGE_V2,
     KIND_STREAM_REMINDER, KIND_TEAM, KIND_TEXT_NOTE, KIND_USER_STATUS, KIND_WORKFLOW_DEF,
     KIND_WORKFLOW_TRIGGER, RELAY_ADMIN_ADD_MEMBER, RELAY_ADMIN_CHANGE_ROLE,
-    RELAY_ADMIN_REMOVE_MEMBER,
+    RELAY_ADMIN_REMOVE_MEMBER, RELAY_ADMIN_SET_WORKSPACE_PROFILE,
 };
 use buzz_core::tenant::TenantContext;
 use buzz_core::verification::verify_event;
@@ -188,10 +188,12 @@ fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static s
         KIND_NIP29_PUT_USER | KIND_NIP29_REMOVE_USER | KIND_NIP29_DELETE_GROUP => {
             Ok(Scope::AdminChannels)
         }
-        // NIP-43: relay membership admin commands (9030–9032)
+        // NIP-43: relay membership admin commands (9030–9032) + Buzz
+        // workspace-profile command (9033)
         k if k == RELAY_ADMIN_ADD_MEMBER
             || k == RELAY_ADMIN_REMOVE_MEMBER
-            || k == RELAY_ADMIN_CHANGE_ROLE =>
+            || k == RELAY_ADMIN_CHANGE_ROLE
+            || k == RELAY_ADMIN_SET_WORKSPACE_PROFILE =>
         {
             Ok(Scope::AdminUsers)
         }
@@ -367,6 +369,7 @@ pub(crate) fn is_global_only_kind(kind: u32) -> bool {
             | RELAY_ADMIN_ADD_MEMBER
             | RELAY_ADMIN_REMOVE_MEMBER
             | RELAY_ADMIN_CHANGE_ROLE
+            | RELAY_ADMIN_SET_WORKSPACE_PROFILE
             | KIND_NIP43_LEAVE_REQUEST
             // NIP-IA: identity archive/unarchive requests drive relay-global
             // archive state (8002/8003/13535) and are audited as global request
