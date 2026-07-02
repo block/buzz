@@ -198,6 +198,48 @@ export function resolveEffectiveChannel(
   return channelsCache?.find((c) => c.id === capturedChannelId) ?? null;
 }
 
+/**
+ * Resolves the thread reply target from a submit-time captured context or,
+ * for callers that predate the capture pattern, from live refs.
+ *
+ * When `threadContext` is supplied (non-null), its values are used exclusively
+ * — no live-ref reads occur. This is the race-free path: the context was
+ * captured synchronously at submit time before any async awaits.
+ *
+ * When `threadContext` is null/undefined (legacy callers), falls back to
+ * `liveReplyTargetId ?? liveThreadHeadId`.
+ *
+ * Returns null when no parentEventId can be resolved (caller should bail).
+ */
+export function resolveThreadReplyTarget(
+  threadContext:
+    | { parentEventId: string | null; threadHeadId: string | null }
+    | null
+    | undefined,
+  liveReplyTargetId: string | null | undefined,
+  liveThreadHeadId: string | null | undefined,
+): { parentEventId: string; threadHeadId: string | null } | null {
+  if (threadContext != null) {
+    // Captured context: use exclusively — no ?? fallback to live refs.
+    if (!threadContext.parentEventId) {
+      return null;
+    }
+    return {
+      parentEventId: threadContext.parentEventId,
+      threadHeadId: threadContext.threadHeadId,
+    };
+  }
+  // Legacy path: read from live refs.
+  const parentEventId = liveReplyTargetId ?? liveThreadHeadId ?? null;
+  if (!parentEventId) {
+    return null;
+  }
+  return {
+    parentEventId,
+    threadHeadId: liveThreadHeadId ?? null,
+  };
+}
+
 export function useChannelMessagesQuery(channel: Channel | null) {
   const queryClient = useQueryClient();
   const queryKey = channelMessagesKey(channel?.id ?? "none");

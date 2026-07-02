@@ -6,6 +6,7 @@ import type {
   useSendMessageMutation,
   useToggleReactionMutation,
 } from "@/features/messages/hooks";
+import { resolveThreadReplyTarget } from "@/features/messages/hooks";
 
 /**
  * Stable callback references for ChannelPane so that keystroke-driven
@@ -253,19 +254,18 @@ export function useChannelPaneHandlers({
         threadHeadId: string | null;
       } | null,
     ) => {
-      // Use the submit-time-captured thread context when available so a channel
-      // or thread switch during the async mention-flow awaits does not send the
-      // reply to the wrong thread. Fall back to the live refs only when no
-      // context was captured (direct callers that bypass the mention flow).
-      const activeThreadHeadId =
-        threadContext?.threadHeadId ?? openThreadHeadIdRef.current;
-      const parentEventId =
-        threadContext?.parentEventId ??
-        threadReplyTargetIdRef.current ??
-        activeThreadHeadId;
-      if (!parentEventId) {
+      // Resolve target using captured submit-time context (race-free) or live
+      // refs (legacy path). When threadContext is supplied, no live-ref reads
+      // occur after the mention-flow awaits; the resolution is purely data.
+      const target = resolveThreadReplyTarget(
+        threadContext,
+        threadReplyTargetIdRef.current,
+        openThreadHeadIdRef.current,
+      );
+      if (!target) {
         return;
       }
+      const { parentEventId, threadHeadId: activeThreadHeadId } = target;
 
       if (
         activeThreadHeadId &&

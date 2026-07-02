@@ -20,7 +20,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { createOptimisticMessage, resolveEffectiveChannel } from "../hooks.ts";
+import {
+  createOptimisticMessage,
+  resolveEffectiveChannel,
+  resolveThreadReplyTarget,
+} from "../hooks.ts";
 
 // ---------------------------------------------------------------------------
 // Minimal stubs
@@ -200,113 +204,87 @@ test("resolveEffectiveChannel_emptyCache_capturedIdPresent_returnsNull", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Thread-reply context invariant (CRITICAL fix — Thufir Pass 1)
+// resolveThreadReplyTarget — flush-time resolution for handleSendThreadReply
 //
-// handleSendThreadReply now accepts a `threadContext` object captured at
-// submit time. These tests verify the structural invariants of the object
-// shape and the fall-through semantics, NOT the full async chain (which is
-// tested by the E2E spec). The key property to pin: once a capturedThreadContext
-// is in hand, the send must use its values — not re-read live refs.
+// These tests exercise the production resolveThreadReplyTarget function.
+// Key invariant (the race): when a captured context is provided, the live
+// ref values (liveReplyTargetId, liveThreadHeadId) must be IGNORED even if
+// they point at a different thread — they represent post-navigation state.
 // ---------------------------------------------------------------------------
 
-// Helpers that mirror the submit-time capture in MessageThreadPanel
-function makeCapturedThreadContext(parentEventId, threadHeadId) {
-  return { parentEventId, threadHeadId };
-}
-
-test("capturedThreadContext_withReplyTarget_preservesParentEventId", () => {
-  const replyTargetId = "event-abc-reply-target";
-  const threadHeadId = "event-abc-thread-head";
-
-  const ctx = makeCapturedThreadContext(replyTargetId, threadHeadId);
-
-  assert.equal(
-    ctx.parentEventId,
-    replyTargetId,
-    "captured context must preserve the reply-target id set at submit time",
+test("resolveThreadReplyTarget_capturedContext_ignoresLiveRefs", () => {
+  // The race scenario: compose-time context captured A, live refs now point
+  // at B (user switched threads mid-send).
+  const result = resolveThreadReplyTarget(
+    { parentEventId: "parent-A", threadHeadId: "head-A" },
+    /* liveReplyTargetId = */ "parent-B",
+    /* liveThreadHeadId = */ "head-B",
   );
-  assert.equal(
-    ctx.threadHeadId,
-    threadHeadId,
-    "captured context must preserve the thread-head id set at submit time",
-  );
+
+  assert.deepStrictEqual(result, {
+    parentEventId: "parent-A",
+    threadHeadId: "head-A",
+  });
 });
 
-test("capturedThreadContext_whenReplyTargetIsNull_fallsBackToThreadHead", () => {
-  // When the user has not selected a specific reply target (replying to the
-  // thread as a whole), parentEventId falls back to threadHeadId at capture time.
-  const threadHeadId = "event-abc-thread-head";
-  const parentEventId =
-    /* no reply target selected, captured as: */ threadHeadId;
-
-  const ctx = makeCapturedThreadContext(parentEventId, threadHeadId);
-
-  assert.equal(
-    ctx.parentEventId,
-    threadHeadId,
-    "when no specific reply target is selected, parentEventId equals threadHeadId",
+test("resolveThreadReplyTarget_capturedContextNullParent_returnsNull", () => {
+  // Captured context has no parentEventId — bail before any await fires.
+  const result = resolveThreadReplyTarget(
+    { parentEventId: null, threadHeadId: "head-A" },
+    "live-parent",
+    "live-head",
   );
+
+  assert.strictEqual(result, null);
 });
 
-test("capturedThreadContext_navigatedAwayDuringAwaits_submitTimeValuesUnchanged", () => {
-  // Simulates: submit in thread T1 of channel A → async awaits → user opens
-  // thread T2. The captured context must still hold T1's values.
-  const T1_parentEventId = "t1-reply";
-  const T1_threadHeadId = "t1-head";
-  const capturedAtSubmit = makeCapturedThreadContext(
-    T1_parentEventId,
-    T1_threadHeadId,
+test("resolveThreadReplyTarget_capturedContextNullThreadHead_usesItNotLiveRef", () => {
+  // F7 degenerate case: threadContext is non-null but threadHeadId is null.
+  // Must not fall through to the live ref — use null from the context itself.
+  const result = resolveThreadReplyTarget(
+    { parentEventId: "parent-A", threadHeadId: null },
+    "live-parent",
+    "live-head",
   );
 
-  // Simulate navigation: "live refs" would now point at T2 if read again
-  const T2_threadHeadId = "t2-head";
-  const T2_parentEventId = "t2-reply";
-
-  // The captured context is immutable — it holds submit-time values
-  assert.equal(
-    capturedAtSubmit.parentEventId,
-    T1_parentEventId,
-    "captured parentEventId must not change after navigation to a different thread",
-  );
-  assert.equal(
-    capturedAtSubmit.threadHeadId,
-    T1_threadHeadId,
-    "captured threadHeadId must not change after navigation to a different thread",
-  );
-
-  // Verify the live state is actually different (the race has occurred)
-  assert.notEqual(
-    capturedAtSubmit.parentEventId,
-    T2_parentEventId,
-    "live state after navigation differs from captured state",
-  );
-  assert.notEqual(
-    capturedAtSubmit.threadHeadId,
-    T2_threadHeadId,
-    "live thread head after navigation differs from captured thread head",
-  );
+  assert.deepStrictEqual(result, {
+    parentEventId: "parent-A",
+    threadHeadId: null,
+  });
 });
 
-test("capturedThreadContext_withChannelId_bothValuesAreIndependent", () => {
-  // When both channelId and thread context are captured together, they must
-  // remain independently stable after navigation.
-  const capturedChannelId = "channel-A";
-  const capturedCtx = makeCapturedThreadContext("reply-in-A", "head-in-A");
-
-  // Simulate post-navigation state
-  const liveChannelId = "channel-B";
-  const liveThreadHeadId = "head-in-B";
-
-  assert.equal(
-    capturedChannelId,
-    "channel-A",
-    "captured channel id must not be affected by navigation",
+test("resolveThreadReplyTarget_nullContext_fallsBackToLiveRefs", () => {
+  // Legacy path: no captured context — fall back to live refs.
+  const result = resolveThreadReplyTarget(
+    null,
+    /* liveReplyTargetId = */ "live-parent",
+    /* liveThreadHeadId = */ "live-head",
   );
-  assert.equal(
-    capturedCtx.threadHeadId,
-    "head-in-A",
-    "captured thread head must not be affected by navigation",
+
+  assert.deepStrictEqual(result, {
+    parentEventId: "live-parent",
+    threadHeadId: "live-head",
+  });
+});
+
+test("resolveThreadReplyTarget_nullContext_noLiveReplyTarget_fallsBackToThreadHead", () => {
+  // When there is no specific reply target (just the thread head), parentEventId
+  // equals the thread head.
+  const result = resolveThreadReplyTarget(
+    null,
+    /* liveReplyTargetId = */ null,
+    /* liveThreadHeadId = */ "head-only",
   );
-  assert.notEqual(capturedChannelId, liveChannelId);
-  assert.notEqual(capturedCtx.threadHeadId, liveThreadHeadId);
+
+  assert.deepStrictEqual(result, {
+    parentEventId: "head-only",
+    threadHeadId: "head-only",
+  });
+});
+
+test("resolveThreadReplyTarget_nullContext_noLiveRefs_returnsNull", () => {
+  // No context and no live refs — bail.
+  const result = resolveThreadReplyTarget(null, null, null);
+
+  assert.strictEqual(result, null);
 });

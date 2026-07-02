@@ -345,12 +345,10 @@ export function MessageThreadPanel({
     isSinglePanelView,
   );
 
-  // Live refs so onCaptureSendContext can read thread state at submit time
+  // Live ref so onCaptureSendContext can read reply state at submit time
   // (before any async mention-flow awaits change navigation state).
   const replyTargetMessageRef = React.useRef(replyTargetMessage);
   replyTargetMessageRef.current = replyTargetMessage;
-  const threadHeadRef = React.useRef(threadHead);
-  threadHeadRef.current = threadHead;
 
   const onCaptureSendContext = React.useCallback(
     () => ({
