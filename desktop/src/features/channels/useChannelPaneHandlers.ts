@@ -230,11 +230,13 @@ export function useChannelPaneHandlers({
       content: string,
       mentionPubkeys: string[],
       mediaTags?: string[][],
+      channelId?: string | null,
     ) => {
       await sendMutateRef.current({
         content,
         mentionPubkeys,
         mediaTags,
+        channelId: channelId ?? undefined,
       });
     },
     [],
@@ -245,6 +247,7 @@ export function useChannelPaneHandlers({
       content: string,
       mentionPubkeys: string[],
       mediaTags?: string[][],
+      channelId?: string | null,
     ) => {
       const activeThreadHeadId = openThreadHeadIdRef.current;
       const parentEventId =
@@ -270,6 +273,7 @@ export function useChannelPaneHandlers({
         mentionPubkeys,
         parentEventId,
         mediaTags,
+        channelId: channelId ?? undefined,
       });
       setThreadReplyTargetId(activeThreadHeadId);
       if (activeThreadHeadId && parentEventId !== activeThreadHeadId) {

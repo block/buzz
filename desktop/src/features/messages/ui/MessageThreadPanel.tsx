@@ -69,6 +69,7 @@ type MessageThreadPanelProps = {
     content: string,
     mentionPubkeys: string[],
     mediaTags?: string[][],
+    channelId?: string | null,
   ) => Promise<void>;
   onToggleReaction?: (
     message: TimelineMessage,

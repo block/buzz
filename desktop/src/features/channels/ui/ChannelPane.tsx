@@ -297,6 +297,7 @@ export const ChannelPane = React.memo(function ChannelPane({
       content: string,
       mentionPubkeys: string[],
       mediaTags?: string[][],
+      channelId?: string | null,
     ) => {
       const shouldCompleteWelcomeBanner =
         isActiveWelcomeChannel &&
@@ -304,7 +305,7 @@ export const ChannelPane = React.memo(function ChannelPane({
           mentionsKnownAgent(mentionPubkeys, knownAgentPubkeys));
 
       messageTimelineRef.current?.scrollToBottomOnNextUpdate();
-      await onSendMessage(content, mentionPubkeys, mediaTags);
+      await onSendMessage(content, mentionPubkeys, mediaTags, channelId);
 
       if (shouldCompleteWelcomeBanner) {
         completeWelcomeComposerBanner();

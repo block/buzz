@@ -90,6 +90,7 @@ type MessageComposerProps = {
     content: string,
     mentionPubkeys: string[],
     mediaTags?: string[][],
+    channelId?: string | null,
   ) => Promise<void>;
   placeholder?: string;
   profiles?: UserProfileLookup;
@@ -571,12 +572,14 @@ function MessageComposerImpl({
     }
 
     await mentionSendFlow.sendMessageWithMentionFlow({
+      capturedChannelId: channelId,
       pendingImeta: currentPendingImeta,
       sentDraftKey: effectiveDraftKeyRef.current,
       spoileredAttachmentUrls,
       trimmed,
     });
   }, [
+    channelId,
     channelLinks.clearChannels,
     customEmoji,
     emojiAutocomplete.clearEmojis,

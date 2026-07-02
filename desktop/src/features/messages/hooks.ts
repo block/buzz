@@ -18,6 +18,7 @@ import {
 import { splitOutgoingTags } from "@/features/messages/lib/imetaMediaMarkdown";
 import { relayClient } from "@/shared/api/relayClient";
 import { customEmojiQueryKey } from "@/features/custom-emoji/hooks";
+import { channelsQueryKey } from "@/features/channels/hooks";
 import { reactionEmojiUrl } from "@/shared/api/customEmoji";
 import type { CustomEmoji } from "@/shared/lib/remarkCustomEmoji";
 import {
@@ -385,6 +386,7 @@ export function useSendMessageMutation(
     RelayEvent,
     Error,
     {
+      channelId?: string;
       content: string;
       mentionPubkeys?: string[];
       parentEventId?: string | null;
@@ -393,12 +395,23 @@ export function useSendMessageMutation(
     MessageQueryContext | undefined
   >({
     mutationFn: async ({
+      channelId: capturedChannelId,
       content,
       mentionPubkeys,
       parentEventId,
       mediaTags,
     }) => {
-      if (!channel || channel.channelType === "forum") {
+      // Resolve the target channel from the compose-time id when provided, so
+      // a channel switch mid-send does not redirect the message. Fall back to
+      // the closed-over `channel` for callers that don't supply a capturedId.
+      const effectiveChannel =
+        capturedChannelId != null
+          ? (queryClient
+              .getQueryData<Channel[]>(channelsQueryKey)
+              ?.find((c) => c.id === capturedChannelId) ?? channel)
+          : channel;
+
+      if (!effectiveChannel || effectiveChannel.channelType === "forum") {
         throw new Error("This channel does not support message sending yet.");
       }
 
@@ -422,10 +435,10 @@ export function useSendMessageMutation(
       if (parentEventId || imetaTags.length > 0 || emojiTags.length > 0) {
         const cachedMessages =
           queryClient.getQueryData<RelayEvent[]>(
-            channelMessagesKey(channel.id),
+            channelMessagesKey(effectiveChannel.id),
           ) ?? [];
         const result = await sendChannelMessage(
-          channel.id,
+          effectiveChannel.id,
           content,
           parentEventId ?? null,
           imetaTags,
@@ -440,7 +453,7 @@ export function useSendMessageMutation(
         // For non-replies (media-only), we add them ourselves.
         const replyTags = parentEventId
           ? buildReplyTags(
-              channel.id,
+              effectiveChannel.id,
               identity.pubkey,
               parentEventId,
               resolveReplyRootId(parentEventId, cachedMessages),
@@ -450,7 +463,7 @@ export function useSendMessageMutation(
         const baseTags = parentEventId
           ? replyTags // buildReplyTags includes h + author p + mention ps
           : [
-              ["h", channel.id],
+              ["h", effectiveChannel.id],
               ["p", identity.pubkey],
             ]; // non-reply: add ourselves
 
@@ -478,24 +491,43 @@ export function useSendMessageMutation(
       }
 
       return relayClient.sendMessage(
-        channel.id,
+        effectiveChannel.id,
         content,
         mentionPubkeys ?? [],
         mentionTags,
       );
     },
-    onMutate: async ({ content, mentionPubkeys, parentEventId, mediaTags }) => {
-      if (!channel || !identity || channel.channelType === "forum") {
+    onMutate: async ({
+      channelId: capturedChannelId,
+      content,
+      mentionPubkeys,
+      parentEventId,
+      mediaTags,
+    }) => {
+      // Mirror the mutationFn channel resolution so the optimistic message
+      // lands in the same cache key the real send will eventually populate.
+      const effectiveChannel =
+        capturedChannelId != null
+          ? (queryClient
+              .getQueryData<Channel[]>(channelsQueryKey)
+              ?.find((c) => c.id === capturedChannelId) ?? channel)
+          : channel;
+
+      if (
+        !effectiveChannel ||
+        !identity ||
+        effectiveChannel.channelType === "forum"
+      ) {
         return undefined;
       }
 
-      const queryKey = channelMessagesKey(channel.id);
+      const queryKey = channelMessagesKey(effectiveChannel.id);
       await queryClient.cancelQueries({ queryKey });
 
       const previousMessages =
         queryClient.getQueryData<RelayEvent[]>(queryKey) ?? [];
       const optimisticMessage = createOptimisticMessage(
-        channel.id,
+        effectiveChannel.id,
         content.trim(),
         identity,
         previousMessages,

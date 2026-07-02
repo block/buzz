@@ -67,6 +67,7 @@ export type ChannelPaneProps = {
     content: string,
     mentionPubkeys: string[],
     mediaTags?: string[][],
+    channelId?: string | null,
   ) => Promise<void>;
   onSendVideoReviewComment?: (
     message: TimelineMessage,
@@ -79,6 +80,7 @@ export type ChannelPaneProps = {
     content: string,
     mentionPubkeys: string[],
     mediaTags?: string[][],
+    channelId?: string | null,
   ) => Promise<void>;
   onTargetReached?: (messageId: string) => void;
   onToggleReaction?: (

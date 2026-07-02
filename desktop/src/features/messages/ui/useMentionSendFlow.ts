@@ -27,6 +27,7 @@ import { MENTION_REFERENCE_TAG } from "@/shared/lib/resolveMentionNames";
 import { buildCustomEmojiTags } from "@/shared/lib/customEmojiTags";
 
 type PendingNonMemberMentionSend = {
+  capturedChannelId: string | null;
   finalContent: string;
   mentionPubkeys: string[];
   nonMemberPubkeys: string[];
@@ -39,6 +40,7 @@ type PendingNonMemberMentionSend = {
 };
 
 type SendMessageWithMentionFlowInput = {
+  capturedChannelId: string | null;
   pendingImeta: ImetaMedia[];
   sentDraftKey: string | null | undefined;
   spoileredAttachmentUrls?: ReadonlySet<string>;
@@ -59,6 +61,7 @@ type UseMentionSendFlowOptions = {
       content: string,
       mentionPubkeys: string[],
       mediaTags?: string[][],
+      channelId?: string | null,
     ) => Promise<void>
   >;
   richText: Pick<UseRichTextEditorResult, "clearContent" | "setContent">;
@@ -359,25 +362,35 @@ export function useMentionSendFlow({
           return;
         }
 
-        clearComposer();
+        // Only clear the composer if the user has not switched channels since
+        // submit. If they have, the composer they see belongs to the new channel
+        // and we must not wipe it.
+        if (draft.capturedChannelId === channelId) {
+          clearComposer();
+        }
 
         try {
           await onSendRef.current(
             draft.finalContent,
             mentionPubkeys,
             outgoingTags,
+            draft.capturedChannelId,
           );
           if (draft.sentDraftKey) {
             drafts.clearDraft(draft.sentDraftKey);
           }
         } catch {
-          setContent(draft.savedContent);
-          contentRef.current = draft.savedContent;
-          richText.setContent(draft.savedContent);
-          setPendingImeta(draft.savedImeta);
-          setSpoileredAttachmentUrls?.(
-            new Set(draft.savedSpoileredAttachmentUrls),
-          );
+          // Only restore the composer content if the user is still on the
+          // channel that originated the send.
+          if (draft.capturedChannelId === channelId) {
+            setContent(draft.savedContent);
+            contentRef.current = draft.savedContent;
+            richText.setContent(draft.savedContent);
+            setPendingImeta(draft.savedImeta);
+            setSpoileredAttachmentUrls?.(
+              new Set(draft.savedSpoileredAttachmentUrls),
+            );
+          }
         }
       } finally {
         isCompleteSendPendingRef.current = false;
@@ -385,6 +398,7 @@ export function useMentionSendFlow({
       }
     },
     [
+      channelId,
       clearComposer,
       contentRef,
       drafts,
@@ -416,6 +430,7 @@ export function useMentionSendFlow({
 
   const sendMessageWithMentionFlow = React.useCallback(
     async ({
+      capturedChannelId,
       pendingImeta,
       sentDraftKey,
       spoileredAttachmentUrls = new Set(),
@@ -479,6 +494,7 @@ export function useMentionSendFlow({
         }
 
         const pendingDraft: PendingNonMemberMentionSend = {
+          capturedChannelId,
           finalContent,
           mentionPubkeys: pubkeys,
           nonMemberPubkeys: promptNonMemberPubkeys,
