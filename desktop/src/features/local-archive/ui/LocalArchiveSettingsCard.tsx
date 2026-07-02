@@ -21,7 +21,7 @@ import {
 import { SettingsSectionHeader } from "@/features/settings/ui/SettingsSectionHeader";
 
 import {
-  buildFinalKinds,
+  buildSubscriptionRequest,
   isGroupFullyChecked,
   isGroupIndeterminate,
   KIND_GROUPS,
@@ -123,22 +123,12 @@ function KindChecklist({ checkedKinds, onChange }: KindChecklistProps) {
             {/* Group header */}
             <div className="mb-1.5 flex items-center gap-2">
               <Checkbox
-                checked={fullyChecked}
-                data-indeterminate={indeterminate}
+                checked={indeterminate ? "indeterminate" : fullyChecked}
                 data-testid={`local-archive-group-${group.label}`}
                 id={`local-archive-group-${group.label}`}
                 onCheckedChange={() =>
                   onChange(toggleGroup(group, checkedKinds))
                 }
-                ref={(el) => {
-                  if (el instanceof HTMLButtonElement) {
-                    el.dataset.state = indeterminate
-                      ? "indeterminate"
-                      : fullyChecked
-                        ? "checked"
-                        : "unchecked";
-                  }
-                }}
               />
               <label
                 className="cursor-pointer text-sm font-medium"
@@ -250,21 +240,29 @@ function AddSubscriptionForm({
   const [isAdding, setIsAdding] = React.useState(false);
 
   const { valid: customKinds } = parseCustomKinds(customKindsRaw);
-  const finalKinds = buildFinalKinds(checkedKinds, customKinds);
-
-  const canAdd =
-    source === "owner_p" ||
-    (source === "channel_h" && !!selectedChannelId && finalKinds.length > 0);
+  // `request` is non-null only when the subscription is valid to submit.
+  // `canAdd` mirrors the same check for the disabled prop without recomputing.
+  const request =
+    source !== null
+      ? buildSubscriptionRequest(
+          source,
+          source === "channel_h" ? selectedChannelId : pubkey,
+          checkedKinds,
+          customKinds,
+        )
+      : null;
+  const canAdd = request !== null;
 
   const handleAdd = React.useCallback(async () => {
-    if (source === null || !canAdd) return;
-    const scopeValue = source === "channel_h" ? selectedChannelId : pubkey;
-    const kinds =
-      source === "owner_p" ? [KIND_AGENT_OBSERVER_FRAME] : finalKinds;
+    if (request === null) return;
 
     setIsAdding(true);
     try {
-      await createSaveSubscription(source, scopeValue, kinds);
+      await createSaveSubscription(
+        request.scopeType,
+        request.scopeValue,
+        request.kinds,
+      );
       onSaved();
       toast.success("Archive subscription created.");
     } catch (err) {
@@ -274,7 +272,7 @@ function AddSubscriptionForm({
     } finally {
       setIsAdding(false);
     }
-  }, [source, canAdd, selectedChannelId, pubkey, finalKinds, onSaved]);
+  }, [request, onSaved]);
 
   const handleCancel = () => {
     setSource(null);
