@@ -7,9 +7,8 @@ use tauri::State;
 
 use crate::app_state::AppState;
 
-use super::project_git::{
-    build_git_auth_config, normalize_branch_option, run_git, validate_clone_url,
-};
+use super::project_git::normalize_branch_option;
+use super::project_git_exec::{build_git_auth_config, run_git, validate_clone_url};
 use super::project_repo_paths::{
     canonical_repos_roots, canonicalize_repos_root, default_repos_root_candidates,
     find_local_repo_dir, local_repo_candidates,

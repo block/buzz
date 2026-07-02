@@ -27,6 +27,7 @@ mod prevent_sleep;
 mod profile;
 mod project_git;
 mod project_git_diff;
+mod project_git_exec;
 mod project_repo_paths;
 mod project_terminal;
 mod relay_members;

@@ -1,4 +1,3 @@
-import { useQueryClient } from "@tanstack/react-query";
 import {
   CalendarDays,
   FolderGit2,
@@ -60,9 +59,12 @@ import {
   writeStoredSort,
   writeStoredViewMode,
 } from "@/features/projects/lib/projectsViewHelpers";
+import {
+  projectTerminalLabel,
+  useOpenProjectTerminal,
+} from "@/features/projects/ui/useOpenProjectTerminal";
 import { useWorkspaces } from "@/features/workspaces/useWorkspaces";
 import { useIdentityQuery } from "@/shared/api/hooks";
-import { openProjectTerminal } from "@/shared/api/projectGit";
 import { useMainInsetRef } from "@/shared/layout/MainInsetContext";
 import {
   channelChrome,
@@ -353,7 +355,7 @@ function ProjectActionsMenu({
             }}
           >
             <TerminalSquare className="h-4 w-4" />
-            {hasLocal ? "Open in Terminal" : "Clone & open in Terminal"}
+            {projectTerminalLabel(hasLocal)}
           </DropdownMenuItem>
           <DropdownMenuItem
             className="text-destructive focus:text-destructive"
@@ -754,37 +756,13 @@ export function ProjectsView() {
     [goProject],
   );
 
-  const queryClient = useQueryClient();
-  const reposDir = activeWorkspace?.reposDir;
+  const openTerminal = useOpenProjectTerminal(activeWorkspace?.reposDir);
   const handleOpenTerminal = React.useCallback(
-    async (project: Project) => {
-      const hasLocal = hasLocalCheckout(project, localRepoNames);
-      const toastId = hasLocal
-        ? undefined
-        : toast.loading(`Cloning ${project.name}…`);
-      try {
-        const result = await openProjectTerminal({
-          reposDir,
-          projectDtag: project.dtag,
-          cloneUrl: project.cloneUrls[0] ?? null,
-          defaultBranch: project.defaultBranch || null,
-        });
-        if (result.cloned) {
-          toast.success(`Cloned to ${result.path}`, { id: toastId });
-          void queryClient.invalidateQueries({
-            queryKey: ["projects", "local-repositories"],
-          });
-        } else if (toastId !== undefined) {
-          toast.dismiss(toastId);
-        }
-      } catch (error) {
-        toast.error(
-          error instanceof Error ? error.message : "Failed to open terminal",
-          { id: toastId },
-        );
-      }
-    },
-    [localRepoNames, queryClient, reposDir],
+    (project: Project) =>
+      openTerminal(project, {
+        hasLocalCheckout: hasLocalCheckout(project, localRepoNames),
+      }),
+    [localRepoNames, openTerminal],
   );
 
   const handleDeleteProject = React.useCallback(

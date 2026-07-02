@@ -21,10 +21,7 @@ fn local_repo_name_candidate(value: &str) -> Option<String> {
 
 fn clone_url_repo_name(clone_url: &str) -> Option<String> {
     let parsed = Url::parse(clone_url).ok()?;
-    let last_segment = parsed
-        .path_segments()?
-        .filter(|part| !part.is_empty())
-        .last()?;
+    let last_segment = parsed.path_segments()?.rfind(|part| !part.is_empty())?;
     local_repo_name_candidate(last_segment)
 }
 
