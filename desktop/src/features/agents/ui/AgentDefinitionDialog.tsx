@@ -965,7 +965,9 @@ export function AgentDefinitionDialog({
                       onBehaviorDraftChange={setBehaviorDraft}
                       onEnvVarsChange={handleAdvancedEnvVarsChange}
                       onNamePoolTextChange={setNamePoolText}
-                      requiredEnvKeys={requiredEnvKeys}
+                      requiredEnvKeys={requiredEnvKeys.filter(
+                        (k) => k !== (providerApiKeyConfig?.envVar ?? null),
+                      )}
                     />
                   </motion.div>
                 ) : null}
