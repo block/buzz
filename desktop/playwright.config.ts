@@ -47,8 +47,6 @@ export default defineConfig({
         "**/identity-archive.spec.ts",
         "**/identity-archive-hide.spec.ts",
         "**/relay-connectivity.spec.ts",
-        "**/history-icons-screenshots.spec.ts",
-        "**/projects-avatar-screenshot.spec.ts",
         "**/unread-pill.spec.ts",
         "**/sidebar-more-unread-overlap.spec.ts",
         "**/home-collapsed-top-chrome.spec.ts",
