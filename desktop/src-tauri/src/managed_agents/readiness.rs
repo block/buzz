@@ -396,11 +396,7 @@ fn goose_requirements(
     let file_key_present = |key: &str| -> bool {
         file_cfg
             .as_ref()
-            .map(|c| {
-                c.extra
-                    .get(key)
-                    .map_or(false, |v| !v.is_empty())
-            })
+            .map(|c| c.extra.get(key).map_or(false, |v| !v.is_empty()))
             .unwrap_or(false)
     };
     match effective_provider {
@@ -412,7 +408,9 @@ fn goose_requirements(
             }
         }
         Some("openai") => {
-            if env_key_missing("OPENAI_COMPAT_API_KEY") && !file_key_present("OPENAI_COMPAT_API_KEY") {
+            if env_key_missing("OPENAI_COMPAT_API_KEY")
+                && !file_key_present("OPENAI_COMPAT_API_KEY")
+            {
                 missing.push(Requirement::EnvKey {
                     key: "OPENAI_COMPAT_API_KEY".to_string(),
                 });
@@ -992,7 +990,10 @@ mod goose_file_config_tests {
 
     fn databricks_file_config() -> RuntimeFileConfig {
         let mut extra = BTreeMap::new();
-        extra.insert("DATABRICKS_HOST".to_string(), "https://dbc.example.com".to_string());
+        extra.insert(
+            "DATABRICKS_HOST".to_string(),
+            "https://dbc.example.com".to_string(),
+        );
         RuntimeFileConfig {
             provider: Some("databricks_v2".to_string()),
             model: Some("goose-claude-4-6-opus".to_string()),
@@ -1090,6 +1091,59 @@ mod goose_file_config_tests {
                 key: "DATABRICKS_HOST".to_string()
             }),
             "env provider=anthropic must NOT require DATABRICKS_HOST"
+        );
+    }
+
+    #[test]
+    fn goose_flat_databricks_host_in_file_config_silences_requirement() {
+        // Will's typical goose config: flat DATABRICKS_HOST at the top level,
+        // no active_provider — provider inferred as "databricks".
+        // The parser must store extra["DATABRICKS_HOST"] = value (canonical key),
+        // and goose_requirements must then silence the DATABRICKS_HOST requirement.
+        let mut extra = BTreeMap::new();
+        extra.insert(
+            "DATABRICKS_HOST".to_string(),
+            "https://block.cloud.databricks.com".to_string(),
+        );
+        let cfg = RuntimeFileConfig {
+            provider: Some("databricks".to_string()),
+            model: Some("goose-claude-4-5".to_string()),
+            extra,
+            ..Default::default()
+        };
+        let env = empty_env();
+        let result = goose_requirements(&env, Some(&cfg));
+        // All requirements silenced — provider (file), model (file), DATABRICKS_HOST (file).
+        assert!(
+            result.is_empty(),
+            "flat DATABRICKS_HOST in file config must silence all requirements; \
+             got: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn goose_goose_provider_databricks_flat_host_silences_databricks_host() {
+        // GOOSE_PROVIDER=databricks (not active_provider) + flat DATABRICKS_HOST.
+        // The parser canonicalizes to extra["DATABRICKS_HOST"]; readiness must silence it.
+        let mut extra = BTreeMap::new();
+        extra.insert(
+            "DATABRICKS_HOST".to_string(),
+            "https://dbc.example.com".to_string(),
+        );
+        let cfg = RuntimeFileConfig {
+            provider: Some("databricks".to_string()),
+            model: Some("some-model".to_string()),
+            extra,
+            ..Default::default()
+        };
+        let env = empty_env();
+        let result = goose_requirements(&env, Some(&cfg));
+        assert!(
+            !result.contains(&Requirement::EnvKey {
+                key: "DATABRICKS_HOST".to_string()
+            }),
+            "DATABRICKS_HOST must be silenced when canonical key is in file extra"
         );
     }
 }
