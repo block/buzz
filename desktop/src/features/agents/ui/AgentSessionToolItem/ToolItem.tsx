@@ -113,9 +113,7 @@ export function ToolItem({
       >
         <summary
           className={cn(
-            "max-w-full cursor-pointer list-none",
-            compactSummary.presentation === "inline" &&
-              "inline-flex items-center gap-1.5",
+            "flex min-h-6 max-w-full cursor-pointer list-none items-center gap-1.5",
             compactSummaryTone(),
           )}
         >
