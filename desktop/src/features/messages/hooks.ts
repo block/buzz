@@ -33,6 +33,7 @@ import type { Channel, Identity, RelayEvent } from "@/shared/api/types";
 import { applyEditTagOverlay } from "@/features/messages/lib/applyEditTagOverlay.mjs";
 import { backfillAuxForMessages } from "@/features/messages/lib/auxBackfill";
 import { countTopLevelTimelineRows } from "@/features/messages/lib/formatTimelineMessages";
+import { deferredTimelineTrim } from "@/features/messages/lib/deferredTimelineTrim";
 import {
   mergeHistoryOverSnapshot,
   readMessageSnapshot,
@@ -325,12 +326,7 @@ export function useChannelSubscription(channel: Channel | null) {
     }
   });
 
-  // Leaving the channel is the safe moment to enforce the timeline cap:
-  // nothing is rendered from this cache anymore, so trimming to the newest
-  // MAX_TIMELINE_MESSAGES window cannot evict rows out from under a
-  // scrolled-back reader. Merges while the channel is open are deliberately
-  // uncapped for the same reason.
-  const trimTimelineOnLeave = useEffectEvent((leftChannelId: string) => {
+  const trimTimelineCache = useEffectEvent((leftChannelId: string) => {
     queryClient.setQueryData<RelayEvent[]>(
       channelMessagesKey(leftChannelId),
       (current) =>
@@ -344,6 +340,10 @@ export function useChannelSubscription(channel: Channel | null) {
     if (!channelId || channelType === "forum") {
       return;
     }
+
+    // StrictMode immediately re-runs this setup after its synthetic cleanup.
+    // Cancel the deferred trim while this channel remains active.
+    deferredTimelineTrim.cancel(channelId);
 
     let isDisposed = false;
     let cleanup: (() => Promise<void>) | undefined;
@@ -392,7 +392,9 @@ export function useChannelSubscription(channel: Channel | null) {
       if (cleanup) {
         void cleanup();
       }
-      trimTimelineOnLeave(channelId);
+      deferredTimelineTrim.schedule(channelId, () => {
+        trimTimelineCache(channelId);
+      });
     };
   }, [channelId, channelType]);
 }
