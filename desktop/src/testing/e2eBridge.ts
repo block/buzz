@@ -667,6 +667,7 @@ declare global {
     __BUZZ_E2E_GET_RELAY_CONNECTION_STATE__?: () => ConnectionState;
     __BUZZ_E2E_SET_STALL_WEBSOCKET_SENDS__?: (stall: boolean) => void;
     __BUZZ_E2E_DISCONNECT_MOCK_WEBSOCKETS__?: () => number;
+    __BUZZ_E2E_FAIL_NEXT_MOCK_CONNECT__?: () => void;
     __BUZZ_E2E_SET_MESH__?: (mesh: {
       admitted?: boolean;
       models?: Array<{ id: string; name: string | null }>;
@@ -2084,6 +2085,8 @@ const mockReminderEvents: RelayEvent[] = [];
 let mockRelayMembers: RawRelayMember[] = [];
 const mockSockets = new Map<number, MockSocket>();
 let mockWebsocketSendMutexWedged = false;
+/** Number of upcoming `connectMockSocket` calls that should reject immediately. */
+let mockConnectFailCount = 0;
 const realSockets = new Map<number, WebSocket>();
 let mockManagedAgents: MockManagedAgent[] = [];
 
@@ -6844,6 +6847,11 @@ async function connectMockSocket(args: { onMessage: unknown }) {
     return new Promise<number>(() => {});
   }
 
+  if (mockConnectFailCount > 0) {
+    mockConnectFailCount--;
+    throw new Error("Mock connect failure (test-injected).");
+  }
+
   const wsId = nextSocketId++;
   const handler = resolveHandler(args.onMessage);
 
@@ -7151,6 +7159,7 @@ export function maybeInstallE2eTauriMocks() {
   resetMockMesh();
   resetMockUserStatuses();
   mockWebsocketSendMutexWedged = false;
+  mockConnectFailCount = 0;
   mockWindows("main");
   window.__BUZZ_E2E_COMMANDS__ = [];
   window.__BUZZ_E2E_COMMAND_PAYLOADS__ = [];
@@ -7268,6 +7277,13 @@ export function maybeInstallE2eTauriMocks() {
     const socketIds = [...mockSockets.keys()];
     for (const socketId of socketIds) disconnectMockSocket(socketId);
     return socketIds.length;
+  };
+  window.__BUZZ_E2E_FAIL_NEXT_MOCK_CONNECT__ = () => {
+    // Makes the next connectMockSocket call throw immediately (before the
+    // wsId is assigned), so relayClientSession.connect() rejects and the
+    // fast-path preconnect fails synchronously. Use in tests that need the
+    // controller to enter phase 3 without waiting for FAST_PATH_TIMEOUT_MS.
+    mockConnectFailCount++;
   };
   // Tests flip `admitted` to exercise the denial path: mesh_ensure_client_node
   // rejects when not admitted, which proves relay membership is the gate and

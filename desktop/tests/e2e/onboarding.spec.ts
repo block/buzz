@@ -1340,10 +1340,79 @@ test("membership denial can import a different invited key", async ({
   await expectHomeView(page);
 });
 
-test("onboarding relay reconnect — click shows Connected then auto-dismisses", async ({
+/**
+ * Force the next `connectMockSocket` call(s) to throw and close all live mock
+ * sockets so that when the reconnect button is clicked, the fast-path
+ * `preconnect()` call fails synchronously and the controller enters phase 3.
+ *
+ * Also drives the relay connection state to "disconnected" immediately so
+ * `useRelayConnection()` (which debounces transient states) commits a
+ * non-"connected" state before the click. This is required for the
+ * connection-state effect in `ProfileStep.tsx` to fire when we later drive
+ * the state back to "connected" — without it the hook may never transition
+ * away from "connected" (debounce absorbs "reconnecting") and the effect
+ * doesn't re-fire.
+ *
+ * @param failCount How many upcoming connect attempts should fail. Use 1 for
+ *   tests that need exactly one fail (positive path); use a higher value for
+ *   tests that need to hold disconnected across several poll retries.
+ */
+async function forcePhase3(page: Page, failCount = 1) {
+  // Arm the fail counter first, then close live sockets. The close triggers
+  // resetConnection() which sets wsId=null — so when the click fires
+  // ensureConnected(), it cannot short-circuit on the wsId check and must call
+  // connect(), which throws via the armed counter.
+  await page.evaluate((count) => {
+    const win = window as Window & {
+      __BUZZ_E2E_FAIL_NEXT_MOCK_CONNECT__?: () => void;
+      __BUZZ_E2E_DISCONNECT_MOCK_WEBSOCKETS__?: () => number;
+      __BUZZ_E2E_SET_RELAY_CONNECTION_STATE__?: (state: string) => void;
+    };
+    if (
+      typeof win.__BUZZ_E2E_FAIL_NEXT_MOCK_CONNECT__ !== "function" ||
+      typeof win.__BUZZ_E2E_DISCONNECT_MOCK_WEBSOCKETS__ !== "function" ||
+      typeof win.__BUZZ_E2E_SET_RELAY_CONNECTION_STATE__ !== "function"
+    ) {
+      throw new Error("Phase-3 test seams are not installed.");
+    }
+    for (let i = 0; i < count; i++) {
+      win.__BUZZ_E2E_FAIL_NEXT_MOCK_CONNECT__();
+    }
+    win.__BUZZ_E2E_DISCONNECT_MOCK_WEBSOCKETS__();
+    // Drive the emitter to "disconnected" immediately so useRelayConnection()
+    // (which debounces transient states like "reconnecting") commits a
+    // non-connected state before the click. This ensures the hook's state
+    // changes from "disconnected" → "connected" when we drive success later,
+    // causing the ProfileStep effect to re-fire and call markSuccess().
+    win.__BUZZ_E2E_SET_RELAY_CONNECTION_STATE__("disconnected");
+  }, failCount);
+
+  // Wait for the hook-visible state to settle to "disconnected" so that
+  // useRelayConnection() has committed the state change before we click.
+  await page.waitForFunction(() => {
+    const win = window as Window & {
+      __BUZZ_E2E_GET_RELAY_CONNECTION_STATE__?: () => string;
+    };
+    if (typeof win.__BUZZ_E2E_GET_RELAY_CONNECTION_STATE__ !== "function") {
+      return false;
+    }
+    return win.__BUZZ_E2E_GET_RELAY_CONNECTION_STATE__() === "disconnected";
+  });
+}
+
+test("onboarding relay reconnect — click forces phase 3, recovered relay shows Connected and auto-dismisses", async ({
   page,
 }) => {
-  // Produce the relay reconnect card via a relay-unreachable profile save error.
+  // Verifies that OnboardingRelayConnectionErrorCard's phase-3 success path
+  // works: when reconnect() returns false (controller entered phase 3 because
+  // the fast-path preconnect failed), the card must show "Connected" and
+  // auto-dismiss once the relay connection state becomes "connected".
+  //
+  // This test forces phase 3 by arming __BUZZ_E2E_FAIL_NEXT_MOCK_CONNECT__
+  // and closing the live socket before clicking. The "Connecting" pending UI
+  // that appears after the click proves phase 3 is active (not the fast path).
+  // Without that phase-3 proof assertion, a phase-1 win would silently pass
+  // the test while leaving the component's connection-state effect uncovered.
   await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
   await installMockBridge(
     page,
@@ -1361,17 +1430,23 @@ test("onboarding relay reconnect — click shows Connected then auto-dismisses",
   await expect(card).toBeVisible();
   await expect(card).toContainText("Can't reach the relay");
 
-  // Drive degraded before clicking so the card is in the expected error state.
-  await setRelayConnectionState(page, "disconnected");
+  // Arm the fail-connect seam and close live sockets so the click's fast-path
+  // preconnect() call throws and the controller enters phase 3 immediately.
+  await forcePhase3(page);
 
-  // Click the reconnect button. The controller attempts reconnect; the mock
-  // relay reconnects successfully (fast-path or via the state seam). Either
-  // path should result in the card transitioning to Connected and then
-  // auto-dismissing.
   await page.getByTestId("onboarding-reconnect-relay").click();
 
-  // Drive connected to ensure the controller's connection-state path fires
-  // and the component's hadActiveReconnectRef guard is satisfied.
+  // ── Phase-3 proof ────────────────────────────────────────────────────────
+  // The card must show the pending "Connecting" title while the controller is
+  // in phase 3. If this assertion fails, phase 1 won (fast path succeeded) and
+  // the seam did not fire — meaning the phase-3 success path was never tested.
+  await expect(card).toContainText("Connecting", { timeout: 3_000 });
+  await expect(card).not.toContainText("Connected");
+
+  // Drive the relay to "connected" via the state seam. This triggers the
+  // connection-state effect in OnboardingRelayConnectionErrorCard
+  // (relayConnectionState === "connected" && hadActiveReconnectRef.current)
+  // which calls markSuccess() — the phase-3 success path under test.
   await setRelayConnectionState(page, "connected");
 
   await expect(card).toContainText("Connected", { timeout: 5_000 });
@@ -1380,6 +1455,53 @@ test("onboarding relay reconnect — click shows Connected then auto-dismisses",
   // Auto-dismiss fires after ONBOARDING_CONNECTIVITY_SUCCESS_AUTO_DISMISS_MS
   // (2500ms). Allow generous headroom for CI.
   await expect(card).toBeHidden({ timeout: 10_000 });
+});
+
+test("onboarding relay reconnect — phase 3 active but relay stays disconnected does not show Connected", async ({
+  page,
+}) => {
+  // Verifies two guards together:
+  // 1. hadActiveReconnectRef: if the relay becomes "connected" without a prior
+  //    click, the card must NOT show Connected (no spurious markSuccess).
+  // 2. Phase-3 idle: if the user clicked but the relay never recovers, the card
+  //    stays in the pending/error state — markSuccess() is never called.
+  //
+  // A higher fail count (5) keeps the connection failing across all poll
+  // retries within the test window, so no background reconnect can sneak in
+  // and make the test pass via phase 1 while phase 3 was intended.
+  await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
+  await installMockBridge(
+    page,
+    {
+      profileUpdateError: "relay unreachable: could not connect to relay",
+    },
+    { skipOnboardingSeed: true },
+  );
+  await page.goto("/");
+
+  await page.getByTestId("onboarding-display-name").fill("Morty QA");
+  await page.getByTestId("onboarding-next").click();
+
+  const card = page.getByTestId("onboarding-relay-reconnect-card");
+  await expect(card).toBeVisible();
+
+  // Arm 5 fail slots: 1 for the click's fast path + 4 to block poll retries.
+  // Phase-3 POLL_INTERVAL_MS = 3s, so 4 extra slots guard a 12s window —
+  // well beyond the 500ms assertion wait below.
+  await forcePhase3(page, 5);
+
+  await page.getByTestId("onboarding-reconnect-relay").click();
+
+  // Confirm phase 3 is active before asserting the negative case.
+  // If this fails, phase 1 won and the negative assertion would be vacuous.
+  await expect(card).toContainText("Connecting", { timeout: 3_000 });
+
+  // Hold: do NOT drive "connected". The hadActiveReconnectRef guard and
+  // the phase-3 polling hold must collectively keep the card in the error
+  // or pending state — markSuccess() must not fire without a "connected" event.
+  await page.waitForTimeout(500);
+  await expect(card).toBeVisible();
+  await expect(card).not.toContainText("Connected");
 });
 
 test("onboarding relay reconnect — connected without a prior click does not show Connected", async ({
@@ -1405,10 +1527,7 @@ test("onboarding relay reconnect — connected without a prior click does not sh
   const card = page.getByTestId("onboarding-relay-reconnect-card");
   await expect(card).toBeVisible();
 
-  // Drive to disconnected state (no reconnect click has happened).
-  await setRelayConnectionState(page, "disconnected");
-
-  // Drive to connected WITHOUT clicking — this would happen on a spontaneous
+  // Drive to connected WITHOUT clicking — this simulates a spontaneous
   // background recovery. The hadActiveReconnectRef guard must block markSuccess().
   await setRelayConnectionState(page, "connected");
 
