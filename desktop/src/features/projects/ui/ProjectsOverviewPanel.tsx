@@ -14,8 +14,15 @@ import { normalizePubkey } from "@/shared/lib/pubkey";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 
+export type ProjectsOverviewSection =
+  | "repositories"
+  | "prs"
+  | "local"
+  | "issues";
+
 type ProjectsOverviewPanelProps = {
   localRepositoryCount: number;
+  onSelectSection: (section: ProjectsOverviewSection) => void;
   profiles?: UserProfileLookup;
   projects: Project[];
   relayName: string;
@@ -62,37 +69,49 @@ function overviewStats(
     (stats, project) => {
       const summary = summaries?.[project.repoAddress];
       return {
-        events: stats.events + (summary?.activityCount ?? 0),
         issues: stats.issues + (summary?.issueCount ?? 0),
         prs: stats.prs + (summary?.prCount ?? 0),
       };
     },
-    { events: 0, issues: 0, prs: 0 },
+    { issues: 0, prs: 0 },
   );
 }
 
 function StatPill({
   icon: Icon,
   label,
+  onClick,
   value,
 }: {
   icon: React.ComponentType<{ className?: string }>;
   label: string;
+  onClick: () => void;
   value: string;
 }) {
   return (
-    <div className="rounded-xl border border-border/50 bg-background/55 px-3 py-2">
-      <div className="flex items-center gap-2 text-xs text-muted-foreground">
-        <Icon className="h-3.5 w-3.5" />
-        {label}
+    <button
+      className="flex items-center gap-3 rounded-xl bg-card px-3 py-2.5 text-left shadow-xs transition-colors hover:bg-muted/40"
+      onClick={onClick}
+      type="button"
+    >
+      <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-muted/60">
+        <Icon className="h-4 w-4 text-muted-foreground" />
+      </span>
+      <div className="min-w-0">
+        <span className="block text-xs font-medium text-foreground">
+          {label}
+        </span>
+        <span className="mt-0.5 block truncate text-sm text-muted-foreground">
+          {value}
+        </span>
       </div>
-      <p className="mt-1 text-sm font-semibold text-foreground">{value}</p>
-    </div>
+    </button>
   );
 }
 
 export function ProjectsOverviewPanel({
   localRepositoryCount,
+  onSelectSection,
   profiles,
   projects,
   relayName,
@@ -103,9 +122,9 @@ export function ProjectsOverviewPanel({
 
   return (
     <section className="mb-4">
-      <div className="rounded-xl border border-border/60 bg-card/60 p-4">
+      <div className="overflow-hidden rounded-2xl border border-border/50 bg-muted/20 p-4">
         <div className="flex min-w-0 items-start gap-3">
-          <WorkspaceEmojiIcon className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-border/70 bg-muted/60 text-2xl shadow-inner" />
+          <WorkspaceEmojiIcon className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-muted/60 text-2xl" />
           <div className="-mt-1 min-w-0 flex-1 space-y-0.5">
             <h2 className="text-xl font-semibold leading-7 tracking-tight text-foreground">
               {relayName} Projects
@@ -120,21 +139,25 @@ export function ProjectsOverviewPanel({
           <StatPill
             icon={FolderGit2}
             label="Repositories"
+            onClick={() => onSelectSection("repositories")}
             value={pluralize(projects.length, "project")}
           />
           <StatPill
             icon={GitPullRequest}
             label="Pull requests"
+            onClick={() => onSelectSection("prs")}
             value={pluralize(stats.prs, "PR")}
           />
           <StatPill
             icon={Radio}
             label="Local"
+            onClick={() => onSelectSection("local")}
             value={pluralize(localRepositoryCount, "checkout")}
           />
           <StatPill
             icon={CircleDot}
             label="Issues"
+            onClick={() => onSelectSection("issues")}
             value={pluralize(stats.issues, "issue")}
           />
         </div>

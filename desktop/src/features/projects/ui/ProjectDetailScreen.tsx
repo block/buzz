@@ -11,11 +11,6 @@ import { toast } from "sonner";
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import { useOpenDmMutation } from "@/features/channels/hooks";
 import {
-  contributorKey,
-  profileForCommitAuthor,
-  profileForContributor,
-} from "@/features/projects/lib/projectContributorMatching";
-import {
   type Project,
   type ProjectLocalRepoSnapshot,
   type ProjectPullRequest,
@@ -23,6 +18,7 @@ import {
   type ProjectRepoDiff,
   type ProjectRepoSnapshot,
   useProjectQuery,
+  useProjectIssuesQuery,
   useProjectLocalRepoDiffQuery,
   useProjectLocalRepoSnapshotQuery,
   useProjectRepoDiffQuery,
@@ -65,8 +61,13 @@ import { Button } from "@/shared/ui/button";
 import { useWorkspaces } from "@/features/workspaces/useWorkspaces";
 import { Tabs, TabsContent } from "@/shared/ui/tabs";
 import { findReadmeFile, RepositoryFilesPanel } from "./ProjectRepositoryPanel";
+import { ActivityPanel, ContributorsPanel } from "./ProjectDetailFeedPanels";
+import { ProjectIssuesPanel } from "./ProjectIssuesPanel";
 import { ProjectOverviewPanel } from "./ProjectOverviewPanel";
-import { PullRequestsPanel } from "./ProjectPullRequestsPanel";
+import {
+  PullRequestDetailHeader,
+  PullRequestsPanel,
+} from "./ProjectPullRequestsPanel";
 import {
   ProjectTabsList,
   PullRequestTabsList,
@@ -74,36 +75,6 @@ import {
 import { ProjectPullRequestFilesChangedPanel } from "./ProjectPullRequestFilesChangedPanel";
 import { RepositorySourceCard } from "./ProjectRepositorySource";
 import { ProfileIdentityButton } from "./ProjectProfileIdentity";
-
-function compactDate(createdAt: number) {
-  return new Date(createdAt * 1_000).toLocaleDateString(undefined, {
-    month: "short",
-    day: "numeric",
-  });
-}
-
-function relativeCommitTime(createdAt: number) {
-  const elapsedSeconds = Math.max(
-    1,
-    Math.floor(Date.now() / 1_000 - createdAt),
-  );
-  const units = [
-    { label: "year", seconds: 365 * 24 * 60 * 60 },
-    { label: "month", seconds: 30 * 24 * 60 * 60 },
-    { label: "day", seconds: 24 * 60 * 60 },
-    { label: "hour", seconds: 60 * 60 },
-    { label: "min", seconds: 60 },
-  ];
-  const unit =
-    units.find((item) => elapsedSeconds >= item.seconds) ??
-    units[units.length - 1];
-  const value = Math.max(1, Math.floor(elapsedSeconds / unit.seconds));
-  return `${value} ${unit.label}${value === 1 ? "" : "s"} ago`;
-}
-
-function pluralize(count: number, singular: string, plural = `${singular}s`) {
-  return `${count} ${count === 1 ? singular : plural}`;
-}
 
 function projectPeople(project: Project) {
   return [
@@ -113,194 +84,6 @@ function projectPeople(project: Project) {
         .map(normalizePubkey),
     ),
   ];
-}
-
-function ContributorsPanel({
-  profiles,
-  repoContributors,
-}: {
-  profiles?: UserProfileLookup;
-  repoContributors: ProjectRepoContributor[];
-}) {
-  const rows = repoContributors.map((contributor) => {
-    const matchedProfile = profileForContributor(contributor, profiles);
-    const label = matchedProfile
-      ? resolveUserLabel({ pubkey: matchedProfile.pubkey, profiles })
-      : contributor.name || contributor.email || "Unknown contributor";
-
-    return {
-      avatarUrl: matchedProfile?.profile.avatarUrl ?? null,
-      commitCount: contributor.commitCount,
-      id: `git:${contributorKey(contributor)}`,
-      isAgent: matchedProfile?.profile.isAgent === true,
-      label,
-      lastCommitAt: contributor.lastCommitAt,
-      pubkey: matchedProfile?.pubkey ?? null,
-      role:
-        matchedProfile?.profile.nip05Handle ||
-        contributor.email ||
-        "Git contributor",
-    };
-  });
-
-  if (rows.length === 0) {
-    return (
-      <p className="rounded-xl border border-border/50 bg-card/60 p-4 text-sm text-muted-foreground">
-        No git contributors are available yet.
-      </p>
-    );
-  }
-
-  return (
-    <div className="overflow-hidden rounded-xl border border-border/50 bg-card/60">
-      {rows.map((row, index) => (
-        <div
-          className={cn(
-            "flex min-w-0 items-start gap-3 p-3 transition-colors hover:bg-muted/35",
-            index !== rows.length - 1 && "border-border/50 border-b",
-          )}
-          key={row.id}
-        >
-          <ProfileIdentityButton
-            avatarClassName="mt-0.5 shrink-0"
-            avatarSize="md"
-            avatarUrl={row.avatarUrl}
-            isAgent={row.isAgent}
-            label={row.label}
-            pubkey={row.pubkey}
-            showLabel={false}
-          />
-          <div className="min-w-0 flex-1 space-y-0.5">
-            <p className="truncate text-sm font-semibold leading-5 text-foreground">
-              {row.label}
-            </p>
-            <div className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5 text-xs leading-4 text-muted-foreground">
-              <span className="truncate">{row.role}</span>
-              <span className="rounded-full border border-border/50 px-1.5 py-0.5 text-2xs">
-                {row.commitCount === null
-                  ? "No git commits"
-                  : `${row.commitCount} commit${row.commitCount === 1 ? "" : "s"}`}
-              </span>
-              {row.lastCommitAt ? (
-                <>
-                  <span>·</span>
-                  <span>updated {compactDate(row.lastCommitAt)}</span>
-                </>
-              ) : null}
-            </div>
-          </div>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-function ActivityPanel({
-  snapshot,
-  isLoading,
-  error,
-  profiles,
-  repoContributors,
-}: {
-  snapshot: ProjectRepoSnapshot | null | undefined;
-  isLoading: boolean;
-  error: unknown;
-  profiles?: UserProfileLookup;
-  repoContributors: ProjectRepoContributor[];
-}) {
-  const commits = snapshot?.commits ?? [];
-
-  if (isLoading) {
-    return (
-      <p className="p-4 text-sm text-muted-foreground">Loading activity…</p>
-    );
-  }
-
-  if (commits.length === 0) {
-    return (
-      <p className="p-4 text-sm text-muted-foreground">
-        {error
-          ? "Could not load repository activity from git."
-          : "No commits are available yet."}
-      </p>
-    );
-  }
-
-  return (
-    <div className="relative">
-      {commits.length > 1 ? (
-        <div
-          aria-hidden="true"
-          className="absolute bottom-5 left-8 top-5 w-px bg-border/45"
-        />
-      ) : null}
-      {commits.map((commit) => {
-        const matchedProfile = profileForCommitAuthor(commit, profiles);
-        const authorLabel = matchedProfile
-          ? resolveUserLabel({ pubkey: matchedProfile.pubkey, profiles })
-          : commit.authorName || commit.authorEmail || "Unknown author";
-        const authorSubtitle =
-          matchedProfile?.profile.nip05Handle ||
-          commit.authorEmail ||
-          "Git contributor";
-        const matchingContributor = repoContributors.find(
-          (contributor) =>
-            contributor.name.trim().toLowerCase() ===
-              commit.authorName.trim().toLowerCase() ||
-            contributor.email.trim().toLowerCase() ===
-              commit.authorEmail.trim().toLowerCase(),
-        );
-
-        return (
-          <article
-            className="group/feed-item relative flex min-w-0 items-start gap-3 p-3 transition-colors hover:bg-muted/35"
-            data-testid="project-activity-feed-item"
-            key={commit.hash}
-          >
-            <ProfileIdentityButton
-              avatarClassName="relative z-10 mt-0.5 shrink-0 ring-2 ring-card"
-              avatarSize="md"
-              avatarUrl={matchedProfile?.profile.avatarUrl ?? null}
-              isAgent={matchedProfile?.profile.isAgent === true}
-              label={authorLabel}
-              pubkey={matchedProfile?.pubkey ?? null}
-              showLabel={false}
-            />
-            <div className="min-w-0 flex-1 space-y-1.5">
-              <div className="space-y-0.5">
-                <div className="flex min-w-0 items-center gap-1.5">
-                  <p className="truncate text-sm font-semibold leading-5 text-foreground">
-                    {authorLabel}
-                  </p>
-                  <span className="shrink-0 text-sm leading-5 text-muted-foreground">
-                    pushed a commit
-                  </span>
-                </div>
-                <div className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5 text-xs leading-4 text-muted-foreground">
-                  <span className="truncate">{authorSubtitle}</span>
-                  <span>{commit.shortHash}</span>
-                  {matchingContributor?.commitCount ? (
-                    <span className="rounded-full border border-border/50 px-1.5 py-0.5 text-2xs">
-                      {pluralize(matchingContributor.commitCount, "commit")}
-                    </span>
-                  ) : null}
-                  <span>·</span>
-                  <time className="transition-colors group-hover/feed-item:text-foreground">
-                    {relativeCommitTime(commit.timestamp)}
-                  </time>
-                </div>
-              </div>
-              <div className="rounded-lg border border-border/50 bg-background/45 px-3 py-1.5">
-                <p className="line-clamp-2 text-sm font-medium leading-5 text-foreground">
-                  {commit.subject}
-                </p>
-              </div>
-            </div>
-          </article>
-        );
-      })}
-    </div>
-  );
 }
 
 function snapshotHasContent(snapshot: ProjectRepoSnapshot | null | undefined) {
@@ -321,10 +104,12 @@ function WorkspaceTabs({
   repoDiff,
   repoDiffError,
   repoDiffLoading,
+  selectedIssueId,
   selectedPullRequestId,
   pullRequests,
   pullRequestsError,
   pullRequestsLoading,
+  onSelectedIssueIdChange,
   onSelectedPullRequestIdChange,
   onBranchChange,
   snapshot,
@@ -341,10 +126,12 @@ function WorkspaceTabs({
   repoDiff: ProjectRepoDiff | null | undefined;
   repoDiffError: unknown;
   repoDiffLoading: boolean;
+  selectedIssueId: string | null;
   selectedPullRequestId: string | null;
   pullRequests: ProjectPullRequest[];
   pullRequestsError: unknown;
   pullRequestsLoading: boolean;
+  onSelectedIssueIdChange: (id: string | null) => void;
   onSelectedPullRequestIdChange: (id: string | null) => void;
   onBranchChange: (branch: string | null) => void;
   snapshot: ProjectRepoSnapshot | null | undefined;
@@ -387,14 +174,23 @@ function WorkspaceTabs({
     }
   }, [isPullRequestSelected, onBranchChange, selectedPullRequest?.branchName]);
 
+  React.useEffect(() => {
+    if (selectedIssueId) {
+      setSelectedTab("issues");
+    }
+  }, [selectedIssueId]);
+
   const handleTabChange = React.useCallback(
     (nextTab: string) => {
       setSelectedTab(nextTab);
       if (!nextTab.startsWith("pr-") && nextTab !== "prs") {
         onSelectedPullRequestIdChange(null);
       }
+      if (nextTab !== "issues") {
+        onSelectedIssueIdChange(null);
+      }
     },
-    [onSelectedPullRequestIdChange],
+    [onSelectedIssueIdChange, onSelectedPullRequestIdChange],
   );
 
   return (
@@ -404,10 +200,17 @@ function WorkspaceTabs({
       value={selectedTab}
     >
       {selectedPullRequest ? (
-        <PullRequestTabsList
-          filesCount={repoDiff?.files.length ?? files.length}
-          pullRequest={selectedPullRequest}
-        />
+        <div className="space-y-4">
+          <PullRequestDetailHeader
+            profiles={profiles}
+            project={project}
+            pullRequest={selectedPullRequest}
+          />
+          <PullRequestTabsList
+            filesCount={repoDiff?.files.length ?? files.length}
+            pullRequest={selectedPullRequest}
+          />
+        </div>
       ) : (
         <ProjectTabsList />
       )}
@@ -451,6 +254,18 @@ function WorkspaceTabs({
           project={project}
           pullRequests={pullRequests}
           selectedPullRequestId={selectedPullRequestId}
+        />
+      </TabsContent>
+
+      <TabsContent
+        className="m-0 overflow-hidden rounded-xl border border-border/50 bg-card/60"
+        value="issues"
+      >
+        <ProjectIssuesPanel
+          onSelectedIssueIdChange={onSelectedIssueIdChange}
+          profiles={profiles}
+          project={project}
+          selectedIssueId={selectedIssueId}
         />
       </TabsContent>
 
@@ -510,7 +325,11 @@ function WorkspaceTabs({
   );
 }
 
-type ProjectDetailScreenProps = { projectId: string; pullRequestId?: string };
+type ProjectDetailScreenProps = {
+  projectId: string;
+  pullRequestId?: string;
+  issueId?: string;
+};
 
 const PROJECT_DETAIL_PANEL_SEARCH_KEYS = [
   "profile",
@@ -519,7 +338,7 @@ const PROJECT_DETAIL_PANEL_SEARCH_KEYS = [
 ] as const;
 
 export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
-  const { projectId, pullRequestId } = props;
+  const { projectId, pullRequestId, issueId } = props;
   const { goChannel, goProjects } = useAppNavigation();
   const { activeWorkspace } = useWorkspaces();
   const mainInsetRef = useMainInsetRef();
@@ -558,6 +377,11 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
     () => setSelectedPullRequestId(pullRequestId ?? null),
     [pullRequestId],
   );
+  const [selectedIssueId, setSelectedIssueId] = React.useState<string | null>(
+    issueId ?? null,
+  );
+  React.useEffect(() => setSelectedIssueId(issueId ?? null), [issueId]);
+  const issuesQuery = useProjectIssuesQuery(project);
   const selectedBranchPullRequest = React.useMemo(
     () =>
       pullRequestsQuery.data?.find(
@@ -616,11 +440,14 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
     repoSource === "local"
       ? localRepoDiffQuery.isLoading
       : repoDiffQuery.isLoading;
-  const isPullRequestDetailOpen = Boolean(selectedPullRequestId);
+  const isWorkItemDetailOpen = Boolean(
+    selectedPullRequestId || selectedIssueId,
+  );
   React.useEffect(() => {
     if (!project) {
       setSelectedBranch(null);
       setSelectedPullRequestId(null);
+      setSelectedIssueId(null);
       return;
     }
     setSelectedBranch((currentBranch) => {
@@ -776,6 +603,8 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
   const selectedPullRequest =
     pullRequestsQuery.data?.find((item) => item.id === selectedPullRequestId) ??
     null;
+  const selectedIssue =
+    issuesQuery.data?.find((item) => item.id === selectedIssueId) ?? null;
 
   return (
     <ProfilePanelProvider onOpenProfilePanel={handleOpenProfilePanel}>
@@ -829,6 +658,28 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
                       {selectedPullRequest.title}
                     </span>
                   </>
+                ) : selectedIssue ? (
+                  <>
+                    <button
+                      className="min-w-0 truncate rounded-md px-0.5 py-1 font-medium transition-colors hover:text-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+                      onClick={() => setSelectedIssueId(null)}
+                      type="button"
+                    >
+                      {project.name}
+                    </button>
+                    <ChevronRight className="h-3 w-3 shrink-0 text-muted-foreground/60" />
+                    <button
+                      className="shrink-0 rounded-md px-0.5 py-1 font-medium transition-colors hover:text-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+                      onClick={() => setSelectedIssueId(null)}
+                      type="button"
+                    >
+                      Issue
+                    </button>
+                    <ChevronRight className="h-3 w-3 shrink-0 text-muted-foreground/60" />
+                    <span className="min-w-0 truncate px-0.5 font-medium text-foreground">
+                      {selectedIssue.title}
+                    </span>
+                  </>
                 ) : (
                   <span className="min-w-0 truncate px-0.5 font-medium text-foreground">
                     {project.name}
@@ -855,40 +706,42 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
 
           <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto px-4 pb-4">
             <div className="w-full space-y-5 pt-[calc(var(--buzz-channel-content-top-padding,5.75rem)_+_1px)]">
-              <section className="space-y-3">
-                <div className="flex min-w-0 items-start justify-between gap-3">
-                  <div className="min-w-0 flex-1 space-y-0.5">
-                    <div className="flex min-w-0 items-center gap-1.5">
-                      <h2 className="truncate text-xl font-semibold tracking-tight">
-                        {project.name}
-                      </h2>
-                      {safeWebUrl ? (
-                        <Button
-                          asChild
-                          aria-label="Open project web page"
-                          className="h-6 w-6 shrink-0 text-muted-foreground hover:text-foreground"
-                          size="icon-xs"
-                          variant="ghost"
-                        >
-                          <a
-                            href={safeWebUrl}
-                            rel="noopener noreferrer"
-                            target="_blank"
+              {/* When a PR or issue is open, the breadcrumb already names the
+                  project — let the work item's own title lead the page and
+                  skip the project header section entirely. */}
+              {!isWorkItemDetailOpen ? (
+                <section className="space-y-3">
+                  <div className="flex min-w-0 items-start justify-between gap-3">
+                    <div className="min-w-0 flex-1 space-y-0.5">
+                      <div className="flex min-w-0 items-center gap-1.5">
+                        <h2 className="truncate text-xl font-semibold tracking-tight">
+                          {project.name}
+                        </h2>
+                        {safeWebUrl ? (
+                          <Button
+                            asChild
+                            aria-label="Open project web page"
+                            className="h-6 w-6 shrink-0 text-muted-foreground hover:text-foreground"
+                            size="icon-xs"
+                            variant="ghost"
                           >
-                            <ExternalLink className="h-3.5 w-3.5" />
-                          </a>
-                        </Button>
+                            <a
+                              href={safeWebUrl}
+                              rel="noopener noreferrer"
+                              target="_blank"
+                            >
+                              <ExternalLink className="h-3.5 w-3.5" />
+                            </a>
+                          </Button>
+                        ) : null}
+                      </div>
+                      {project.description ? (
+                        <p className="max-w-2xl text-sm font-normal text-muted-foreground">
+                          {project.description}
+                        </p>
                       ) : null}
                     </div>
-                    {project.description ? (
-                      <p className="max-w-2xl text-sm font-normal text-muted-foreground">
-                        {project.description}
-                      </p>
-                    ) : null}
                   </div>
-                </div>
-
-                {!isPullRequestDetailOpen ? (
                   <RepositorySourceCard
                     branch={activeBranch ?? ""}
                     branchOptions={branchOptions}
@@ -926,8 +779,8 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
                     source={repoSource}
                     status={repoSyncStatusQuery.data}
                   />
-                ) : null}
-              </section>
+                </section>
+              ) : null}
 
               <WorkspaceTabs
                 key={project.id}
@@ -935,6 +788,7 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
                 localSnapshotError={localRepoSnapshotQuery.error}
                 localSnapshotLoading={localRepoSnapshotQuery.isLoading}
                 onBranchChange={setSelectedBranch}
+                onSelectedIssueIdChange={setSelectedIssueId}
                 onSelectedPullRequestIdChange={setSelectedPullRequestId}
                 profiles={profiles}
                 project={project}
@@ -946,6 +800,7 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
                 pullRequestsLoading={pullRequestsQuery.isLoading}
                 repoContributors={repoContributors}
                 repoSource={repoSource}
+                selectedIssueId={selectedIssueId}
                 selectedPullRequestId={selectedPullRequestId}
                 snapshot={repoSnapshotQuery.data}
                 snapshotError={repoSnapshotQuery.error}

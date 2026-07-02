@@ -1,4 +1,10 @@
-import { Check, GitPullRequest, MessageSquare, X } from "lucide-react";
+import {
+  Check,
+  GitMerge,
+  GitPullRequest,
+  MessageSquare,
+  X,
+} from "lucide-react";
 import * as React from "react";
 import { toast } from "sonner";
 
@@ -62,6 +68,13 @@ function pullRequestStatusClassName(status: ProjectPullRequest["status"]) {
   if (status === "Draft") return "text-muted-foreground";
   if (status === "Merged") return "text-purple-400";
   return "text-green-500";
+}
+
+function pullRequestStatusBadgeClassName(status: ProjectPullRequest["status"]) {
+  if (status === "Closed") return "bg-destructive";
+  if (status === "Draft") return "bg-muted-foreground/80";
+  if (status === "Merged") return "bg-purple-600";
+  return "bg-green-600";
 }
 
 function pullRequestMembers(
@@ -167,6 +180,58 @@ function PullRequestRow({
 
 export type PullRequestPanelMode = "conversation" | "commits" | "checks";
 
+/** GitHub-style PR title + status line, rendered above the PR tab row. */
+export function PullRequestDetailHeader({
+  profiles,
+  project,
+  pullRequest,
+}: {
+  profiles?: UserProfileLookup;
+  project: Project;
+  pullRequest: ProjectPullRequest;
+}) {
+  const authorLabel = labelForPubkey(pullRequest.author, profiles);
+  const targetBranch = project.defaultBranch || "default branch";
+  const sourceBranch = pullRequest.branchName || "unknown branch";
+  const commitCount = Math.max(1, pullRequest.updateCount + 1);
+
+  return (
+    <div className="min-w-0 space-y-2.5">
+      <h3 className="min-w-0 text-xl font-semibold leading-snug text-foreground">
+        {pullRequest.title}{" "}
+        <span className="font-normal text-muted-foreground">
+          #{pullRequest.id.slice(0, 8)}
+        </span>
+      </h3>
+      <div className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-1.5 text-xs leading-4 text-muted-foreground">
+        <span
+          className={`mr-1 inline-flex shrink-0 items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium text-white ${pullRequestStatusBadgeClassName(pullRequest.status)}`}
+        >
+          {pullRequest.status === "Merged" ? (
+            <GitMerge className="h-3.5 w-3.5" />
+          ) : (
+            <GitPullRequest className="h-3.5 w-3.5" />
+          )}
+          {pullRequest.status}
+        </span>
+        <span className="font-medium text-foreground">{authorLabel}</span>
+        <span>wants to merge {pluralize(commitCount, "commit")} into</span>
+        <code className="rounded-md bg-muted px-1.5 py-0.5 text-2xs text-foreground">
+          {targetBranch}
+        </code>
+        <span>from</span>
+        <code className="rounded-md bg-muted px-1.5 py-0.5 text-2xs text-foreground">
+          {sourceBranch}
+        </code>
+        <span>·</span>
+        <span>opened {compactDate(pullRequest.createdAt)}</span>
+        <span>·</span>
+        <span>updated {compactDate(pullRequest.updatedAt)}</span>
+      </div>
+    </div>
+  );
+}
+
 function PullRequestDetail({
   mode,
   profiles,
@@ -179,10 +244,6 @@ function PullRequestDetail({
   pullRequest: ProjectPullRequest;
 }) {
   const commentMutation = useCreateProjectPullRequestCommentMutation(project);
-  const authorLabel = labelForPubkey(pullRequest.author, profiles);
-  const targetBranch = project.defaultBranch || "default branch";
-  const sourceBranch = pullRequest.branchName || "unknown branch";
-  const commitCount = Math.max(1, pullRequest.updateCount + 1);
   const members = React.useMemo(
     () => pullRequestMembers(project, pullRequest, profiles),
     [profiles, project, pullRequest],
@@ -271,58 +332,15 @@ function PullRequestDetail({
 
   return (
     <div className="divide-y divide-border/50">
-      <header className="space-y-3 p-4">
-        <div className="min-w-0 space-y-2">
-          <div className="flex min-w-0 items-start justify-between gap-3">
-            <div className="min-w-0">
-              <p className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
-                <GitPullRequest className="h-3.5 w-3.5" />
-                Pull request from {authorLabel}
-                <span
-                  className={`rounded-full border border-border/50 px-1.5 py-0.5 text-2xs ${pullRequestStatusClassName(pullRequest.status)}`}
-                >
-                  {pullRequest.status}
-                </span>
-              </p>
-              <h3 className="mt-1 line-clamp-2 text-base font-semibold text-foreground">
-                {pullRequest.title}
-              </h3>
-            </div>
-            {pullRequest.commit ? (
-              <code className="shrink-0 rounded-md bg-background/55 px-2 py-1 text-xs text-muted-foreground">
-                {pullRequest.commit.slice(0, 7)}
-              </code>
-            ) : null}
-          </div>
-          <div className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5 text-xs leading-4 text-muted-foreground">
-            <span>{authorLabel} wants to merge</span>
-            <span className="rounded-full border border-border/50 px-1.5 py-0.5 text-2xs">
-              {pluralize(commitCount, "commit")}
-            </span>
-            <span>into</span>
-            <code className="rounded-md bg-background/55 px-1.5 py-0.5 text-2xs text-foreground">
-              {targetBranch}
-            </code>
-            <span>from</span>
-            <code className="rounded-md bg-background/55 px-1.5 py-0.5 text-2xs text-foreground">
-              {sourceBranch}
-            </code>
-            <span>·</span>
-            <span>opened {compactDate(pullRequest.createdAt)}</span>
-            <span>·</span>
-            <span>updated {compactDate(pullRequest.updatedAt)}</span>
-          </div>
-        </div>
-        {pullRequest.content ? (
-          <div className="rounded-lg border border-border/50 bg-background/45 p-3">
-            <Markdown
-              className="text-sm"
-              content={pullRequest.content}
-              interactive={false}
-            />
-          </div>
-        ) : null}
-      </header>
+      {pullRequest.content ? (
+        <header className="p-4">
+          <Markdown
+            className="text-sm"
+            content={pullRequest.content}
+            interactive={false}
+          />
+        </header>
+      ) : null}
 
       {pullRequest.updates.length > 0 ? (
         <section className="space-y-3 p-4">

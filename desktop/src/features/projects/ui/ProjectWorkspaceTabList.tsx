@@ -1,3 +1,5 @@
+import { BookOpen } from "lucide-react";
+
 import type { ProjectPullRequest } from "@/features/projects/hooks";
 import { TabsList, TabsTrigger } from "@/shared/ui/tabs";
 
@@ -7,14 +9,22 @@ const PROJECT_TAB_TRIGGER_CLASS =
 export function ProjectTabsList() {
   return (
     <TabsList className="h-9 w-fit justify-start gap-0.5 bg-transparent p-0">
-      <TabsTrigger className={PROJECT_TAB_TRIGGER_CLASS} value="overview">
-        Overview
+      <TabsTrigger
+        aria-label="Overview"
+        className={PROJECT_TAB_TRIGGER_CLASS}
+        title="Overview"
+        value="overview"
+      >
+        <BookOpen className="h-3.5 w-3.5" />
       </TabsTrigger>
       <TabsTrigger className={PROJECT_TAB_TRIGGER_CLASS} value="activity">
         Activity
       </TabsTrigger>
       <TabsTrigger className={PROJECT_TAB_TRIGGER_CLASS} value="prs">
         PRs
+      </TabsTrigger>
+      <TabsTrigger className={PROJECT_TAB_TRIGGER_CLASS} value="issues">
+        Issues
       </TabsTrigger>
       <TabsTrigger className={PROJECT_TAB_TRIGGER_CLASS} value="files">
         Files

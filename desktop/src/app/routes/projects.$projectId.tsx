@@ -16,17 +16,19 @@ export const Route = createFileRoute("/projects/$projectId")({
       typeof search.pullRequestId === "string"
         ? search.pullRequestId
         : undefined,
+    issueId: typeof search.issueId === "string" ? search.issueId : undefined,
   }),
 });
 
 function ProjectDetailRouteComponent() {
   usePreviewFeatureWarning("projects");
   const { projectId } = Route.useParams();
-  const { pullRequestId } = Route.useSearch();
+  const { pullRequestId, issueId } = Route.useSearch();
 
   return (
     <React.Suspense fallback={<ViewLoadingFallback kind="projects" />}>
       <ProjectDetailScreen
+        issueId={issueId}
         projectId={projectId}
         pullRequestId={pullRequestId}
       />

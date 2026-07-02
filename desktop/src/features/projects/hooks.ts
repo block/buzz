@@ -43,7 +43,7 @@ import { projectIssueEventsToIssues } from "./projectIssues.mjs";
 import type { ProjectPullRequest } from "./projectPullRequests.mjs";
 import { projectPullRequestEventsToPullRequests } from "./projectPullRequests.mjs";
 
-export type { ProjectPullRequest };
+export type { ProjectIssue, ProjectPullRequest };
 
 const HIDDEN_PROJECT_CARDS_KEY = "buzz.projects.hidden-cards.v1";
 
@@ -74,9 +74,16 @@ export type ProjectActivitySummary = {
   repoAddress: string;
   issueCount: number;
   prCount: number;
+  commitCount: number;
   activityCount: number;
   updatedAt: number;
   participantPubkeys: string[];
+  latestCommit: {
+    author: string | null;
+    commit: string;
+    createdAt: number;
+    title: string;
+  } | null;
 };
 
 export type {
@@ -93,6 +100,11 @@ export type {
 export type ProjectPullRequestListItem = {
   project: Project;
   pullRequest: ProjectPullRequest;
+};
+
+export type ProjectIssueListItem = {
+  project: Project;
+  issue: ProjectIssue;
 };
 
 function getTag(event: RelayEvent, name: string): string | undefined {
@@ -265,7 +277,7 @@ async function fetchRepoState(project: Project): Promise<RepoState | null> {
 }
 
 async function fetchProjectIssues(project: Project): Promise<ProjectIssue[]> {
-  const [issueEvents, statusEvents] = await Promise.all([
+  const [issueEvents, statusEvents, commentEvents] = await Promise.all([
     relayClient.fetchEvents({
       kinds: [KIND_GIT_ISSUE],
       "#a": [project.repoAddress],
@@ -281,9 +293,14 @@ async function fetchProjectIssues(project: Project): Promise<ProjectIssue[]> {
       "#a": [project.repoAddress],
       limit: 500,
     }),
+    relayClient.fetchEvents({
+      kinds: [KIND_TEXT_NOTE],
+      "#a": [project.repoAddress],
+      limit: 500,
+    }),
   ]);
 
-  return projectIssueEventsToIssues(issueEvents, statusEvents);
+  return projectIssueEventsToIssues(issueEvents, statusEvents, commentEvents);
 }
 
 async function fetchProjectPullRequests(
@@ -367,6 +384,50 @@ async function createProjectPullRequestComment({
     event,
     "Timed out posting pull request comment.",
     "Failed to post pull request comment.",
+  );
+}
+
+async function createProjectIssueComment({
+  content,
+  mediaTags,
+  mentionPubkeys = [],
+  issue,
+  project,
+}: {
+  content: string;
+  mediaTags?: string[][];
+  mentionPubkeys?: string[];
+  issue: ProjectIssue;
+  project: Project;
+}): Promise<void> {
+  const body = content.trim();
+  if (!body) {
+    throw new Error("Comment cannot be empty.");
+  }
+
+  const recipients = new Set([
+    project.owner.toLowerCase(),
+    issue.author.toLowerCase(),
+    ...issue.recipients.map((recipient) => recipient.toLowerCase()),
+    ...mentionPubkeys.map((pubkey) => pubkey.toLowerCase()),
+  ]);
+  const tags = [
+    ["e", issue.id, "", "root"],
+    ["a", project.repoAddress],
+    ...[...recipients].map((recipient) => ["p", recipient]),
+    ...(mediaTags ?? []),
+  ];
+
+  const event = await signRelayEvent({
+    kind: KIND_TEXT_NOTE,
+    content: body,
+    tags,
+  });
+
+  await relayClient.publishEvent(
+    event,
+    "Timed out posting issue comment.",
+    "Failed to post issue comment.",
   );
 }
 
@@ -691,6 +752,25 @@ export function useProjectPullRequestsQuery(
   });
 }
 
+export function useProjectsIssuesQuery(projects: Project[]) {
+  return useQuery({
+    enabled: projects.length > 0,
+    queryKey: ["projects", "issues", projects.map((project) => project.id)],
+    queryFn: async (): Promise<ProjectIssueListItem[]> => {
+      const results = await Promise.all(
+        projects.map(async (project) => {
+          const issues = await fetchProjectIssues(project);
+          return issues.map((issue) => ({ project, issue }));
+        }),
+      );
+      return results
+        .flat()
+        .sort((left, right) => right.issue.updatedAt - left.issue.updatedAt);
+    },
+    staleTime: 30_000,
+  });
+}
+
 export function useProjectsPullRequestsQuery(projects: Project[]) {
   return useQuery({
     enabled: projects.length > 0,
@@ -714,6 +794,40 @@ export function useProjectsPullRequestsQuery(projects: Project[]) {
         );
     },
     staleTime: 30_000,
+  });
+}
+
+export function useCreateProjectIssueCommentMutation(
+  project: Project | null | undefined,
+) {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: ({
+      content,
+      mediaTags,
+      mentionPubkeys,
+      issue,
+    }: {
+      content: string;
+      mediaTags?: string[][];
+      mentionPubkeys?: string[];
+      issue: ProjectIssue;
+    }) => {
+      if (!project) throw new Error("No project selected.");
+      return createProjectIssueComment({
+        content,
+        mediaTags,
+        mentionPubkeys,
+        issue,
+        project,
+      });
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({
+        queryKey: ["project", project?.id ?? "none", "issues"],
+      });
+    },
   });
 }
 

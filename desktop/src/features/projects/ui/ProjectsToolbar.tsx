@@ -1,16 +1,10 @@
 import { LayoutGrid, List, Plus } from "lucide-react";
 
+import type {
+  ProjectsFilter,
+  ProjectsViewMode,
+} from "@/features/projects/lib/projectsViewHelpers";
 import { Button } from "@/shared/ui/button";
-
-type ProjectsViewMode = "grid" | "list";
-type ProjectsFilter =
-  | "all"
-  | "mine"
-  | "local"
-  | "repositories"
-  | "prs"
-  | "agents"
-  | "users";
 
 type ProjectsToolbarProps = {
   filter: ProjectsFilter;
@@ -65,33 +59,17 @@ export function ProjectsToolbar({
     { label: "Local", value: "local" },
     { label: "Repositories", value: "repositories" },
     { label: "PRs", value: "prs" },
+    { label: "Issues", value: "issues" },
     { label: "Agents", value: "agents" },
     { label: "Users", value: "users" },
   ];
 
   return (
     <div
-      className="pointer-events-auto flex flex-col gap-3 px-5 py-2"
+      className="pointer-events-auto flex min-h-[3.25rem] flex-wrap items-center justify-between gap-3 px-5 py-2"
       data-tauri-drag-region
     >
-      <div className="flex min-h-9 flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-        <h2 className="min-w-0 text-lg font-semibold text-foreground">
-          Projects
-        </h2>
-        <Button
-          className="h-8 gap-1.5 self-start rounded-full border-border/60 bg-background/70 px-3 text-muted-foreground shadow-none hover:bg-muted/60 hover:text-foreground lg:self-auto"
-          data-testid="create-project-button"
-          onClick={onCreateProject}
-          size="sm"
-          type="button"
-          variant="outline"
-        >
-          <Plus className="h-3.5 w-3.5" />
-          Create Project
-        </Button>
-      </div>
-
-      <fieldset className="flex flex-wrap items-center gap-0.5">
+      <fieldset className="flex min-w-0 flex-wrap items-center gap-0.5">
         <legend className="sr-only">Project owner filter</legend>
         {filterOptions.map((option) => (
           <Button
@@ -107,6 +85,17 @@ export function ProjectsToolbar({
           </Button>
         ))}
       </fieldset>
+      <Button
+        className="h-8 shrink-0 gap-1.5 rounded-full border-border/60 bg-background/70 px-3 text-muted-foreground shadow-none hover:bg-muted/60 hover:text-foreground"
+        data-testid="create-project-button"
+        onClick={onCreateProject}
+        size="sm"
+        type="button"
+        variant="outline"
+      >
+        <Plus className="h-3.5 w-3.5" />
+        Create Project
+      </Button>
     </div>
   );
 }

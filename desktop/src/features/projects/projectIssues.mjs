@@ -39,8 +39,29 @@ function statusFromEvent(issue, statusEvent) {
   return PROJECT_ISSUE_STATUS.BACKLOG;
 }
 
-export function eventToProjectIssue(issue, statusEvents = []) {
+function commentsForIssue(issueId, commentEvents) {
+  return commentEvents
+    .filter((event) =>
+      event.tags.some(
+        (tag) => (tag[0] === "e" || tag[0] === "E") && tag[1] === issueId,
+      ),
+    )
+    .sort((left, right) => left.created_at - right.created_at)
+    .map((event) => ({
+      id: event.id,
+      content: event.content,
+      author: event.pubkey,
+      createdAt: event.created_at,
+    }));
+}
+
+export function eventToProjectIssue(
+  issue,
+  statusEvents = [],
+  commentEvents = [],
+) {
   const latestStatus = latestStatusForIssue(issue.id, statusEvents);
+  const comments = commentsForIssue(issue.id, commentEvents);
   const title =
     getTag(issue, "subject") ||
     issue.content.split("\n")[0] ||
@@ -57,13 +78,23 @@ export function eventToProjectIssue(issue, statusEvents = []) {
     recipients: getAllTags(issue, "p"),
     status: statusFromEvent(issue, latestStatus),
     statusEventId: latestStatus?.id ?? null,
-    updatedAt: latestStatus?.created_at ?? issue.created_at,
+    updatedAt:
+      [
+        ...comments,
+        ...(latestStatus ? [{ createdAt: latestStatus.created_at }] : []),
+      ].sort((left, right) => right.createdAt - left.createdAt)[0]?.createdAt ??
+      issue.created_at,
+    comments,
   };
 }
 
-export function projectIssueEventsToIssues(issueEvents, statusEvents = []) {
+export function projectIssueEventsToIssues(
+  issueEvents,
+  statusEvents = [],
+  commentEvents = [],
+) {
   return [...issueEvents]
-    .map((issue) => eventToProjectIssue(issue, statusEvents))
+    .map((issue) => eventToProjectIssue(issue, statusEvents, commentEvents))
     .sort((left, right) => right.updatedAt - left.updatedAt);
 }
 

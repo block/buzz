@@ -1,6 +1,7 @@
 import {
   CalendarDays,
   FolderGit2,
+  GitCommit,
   GitFork,
   MessageSquare,
   MoreHorizontal,
@@ -19,13 +20,16 @@ import {
 import {
   type Project,
   type ProjectActivitySummary,
+  type ProjectIssue,
   type ProjectPullRequest,
   useDeleteProjectMutation,
   useProjectActivitySummariesQuery,
   useProjectLocalRepositoriesQuery,
+  useProjectsIssuesQuery,
   useProjectsPullRequestsQuery,
   useProjectsQuery,
 } from "@/features/projects/hooks";
+import { ProjectsIssuesList } from "@/features/projects/ui/ProjectsIssuesList";
 import { ProjectsOverviewPanel } from "@/features/projects/ui/ProjectsOverviewPanel";
 import { ProjectsPullRequestsList } from "@/features/projects/ui/ProjectsPullRequestsList";
 import {
@@ -34,6 +38,30 @@ import {
 } from "@/features/projects/ui/ProjectsToolbar";
 import { getDiscussionLabel } from "@/features/projects/lib/projectLabels";
 import { hasLocalCheckout } from "@/features/projects/lib/projectLocalRepos";
+import {
+  formatCreatedDate,
+  formatExactTimestamp,
+  getActivityLabel,
+  getClonePathLabel,
+  getProjectUpdatedAt,
+  isProjectMine,
+  isProjectOwnedByCurrentUser,
+  pluralize,
+  projectHasAgent,
+  projectOwnerIsUser,
+  projectPeople,
+  relativeTime,
+  type ProjectsFilter,
+  type ProjectsSort,
+  type ProjectsViewMode,
+  readStoredFilter,
+  readStoredSort,
+  readStoredViewMode,
+  uniqueRepositories,
+  writeStoredFilter,
+  writeStoredSort,
+  writeStoredViewMode,
+} from "@/features/projects/lib/projectsViewHelpers";
 import { useWorkspaces } from "@/features/workspaces/useWorkspaces";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import { useMainInsetRef } from "@/shared/layout/MainInsetContext";
@@ -66,129 +94,7 @@ import {
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 
-type ProjectsViewMode = "grid" | "list";
-type ProjectsFilter =
-  | "all"
-  | "mine"
-  | "local"
-  | "repositories"
-  | "prs"
-  | "agents"
-  | "users";
-type ProjectsSort = "updated" | "created" | "name";
-
-const PROJECTS_VIEW_MODE_STORAGE_KEY = "buzz.projects.viewMode";
-const PROJECTS_FILTER_STORAGE_KEY = "buzz.projects.filter";
-const PROJECTS_SORT_STORAGE_KEY = "buzz.projects.sort";
 const MANY_PROJECTS_THRESHOLD = 12;
-function readStoredViewMode(): ProjectsViewMode | null {
-  try {
-    const value = globalThis.localStorage?.getItem(
-      PROJECTS_VIEW_MODE_STORAGE_KEY,
-    );
-    return value === "grid" || value === "list" ? value : null;
-  } catch {
-    return null;
-  }
-}
-function writeStoredViewMode(viewMode: ProjectsViewMode) {
-  try {
-    globalThis.localStorage?.setItem(PROJECTS_VIEW_MODE_STORAGE_KEY, viewMode);
-  } catch {
-    // Persistence is best-effort; the in-memory toggle still works.
-  }
-}
-function readStoredFilter(): ProjectsFilter {
-  try {
-    const value = globalThis.localStorage?.getItem(PROJECTS_FILTER_STORAGE_KEY);
-    return value === "mine" ||
-      value === "local" ||
-      value === "repositories" ||
-      value === "prs" ||
-      value === "agents" ||
-      value === "users"
-      ? value
-      : "all";
-  } catch {
-    return "all";
-  }
-}
-function writeStoredFilter(filter: ProjectsFilter) {
-  try {
-    globalThis.localStorage?.setItem(PROJECTS_FILTER_STORAGE_KEY, filter);
-  } catch {
-    // Persistence is best-effort; the in-memory toggle still works.
-  }
-}
-function readStoredSort(): ProjectsSort {
-  try {
-    const value = globalThis.localStorage?.getItem(PROJECTS_SORT_STORAGE_KEY);
-    return value === "created" || value === "name" ? value : "updated";
-  } catch {
-    return "updated";
-  }
-}
-function writeStoredSort(sort: ProjectsSort) {
-  try {
-    globalThis.localStorage?.setItem(PROJECTS_SORT_STORAGE_KEY, sort);
-  } catch {
-    // Persistence is best-effort; the in-memory toggle still works.
-  }
-}
-function pluralize(count: number, singular: string, plural = `${singular}s`) {
-  return `${count} ${count === 1 ? singular : plural}`;
-}
-
-function formatCreatedDate(createdAt: number) {
-  return new Date(createdAt * 1_000).toLocaleDateString(undefined, {
-    month: "short",
-    day: "numeric",
-  });
-}
-
-function projectPeople(
-  project: Project,
-  summary?: ProjectActivitySummary,
-): string[] {
-  return [
-    ...new Set(
-      [
-        project.owner,
-        ...project.contributors,
-        ...(summary?.participantPubkeys ?? []),
-      ].map(normalizePubkey),
-    ),
-  ];
-}
-
-function normalizeRepositoryUrl(url: string) {
-  try {
-    const parsed = new URL(url);
-    const normalizedPath = parsed.pathname
-      .replace(/\/+$/, "")
-      .replace(/\.git$/i, "")
-      .toLowerCase();
-    return `${parsed.hostname.toLowerCase()}${normalizedPath}`;
-  } catch {
-    return url
-      .trim()
-      .replace(/\/+$/, "")
-      .replace(/\.git$/i, "")
-      .toLowerCase();
-  }
-}
-
-function getClonePathLabel(project: Project) {
-  const cloneUrl = project.cloneUrls[0];
-  if (!cloneUrl) return "Clone path pending";
-
-  try {
-    const parsed = new URL(cloneUrl);
-    return `${parsed.hostname}${parsed.pathname}`;
-  } catch {
-    return cloneUrl;
-  }
-}
 
 const CLONE_PATH_TAIL_CHARS = 14;
 
@@ -214,78 +120,6 @@ function ClonePathLabel({ project }: { project: Project }) {
   );
 }
 
-function repositoryIdentityKey(project: Project) {
-  const cloneUrl = project.cloneUrls[0];
-  if (cloneUrl) return normalizeRepositoryUrl(cloneUrl);
-  return (project.name || project.dtag).trim().toLowerCase();
-}
-
-function uniqueRepositories(projects: Project[]) {
-  const seen = new Set<string>();
-  return projects.filter((project) => {
-    const key = repositoryIdentityKey(project);
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
-}
-
-function getActivityLabel(summary: ProjectActivitySummary | undefined) {
-  if (!summary || summary.activityCount === 0) {
-    return "No activity yet";
-  }
-
-  const parts = [pluralize(summary.issueCount, "issue")];
-  if (summary.prCount > 0) {
-    parts.push(pluralize(summary.prCount, "PR"));
-  }
-  parts.push(pluralize(summary.activityCount, "event"));
-  return parts.join(" · ");
-}
-
-function getProjectUpdatedAt(
-  project: Project,
-  summary: ProjectActivitySummary | undefined,
-) {
-  return summary?.updatedAt ?? project.createdAt;
-}
-
-function isProjectMine(project: Project, currentPubkey: string | undefined) {
-  if (!currentPubkey) return false;
-  const normalizedCurrentPubkey = normalizePubkey(currentPubkey);
-  return (
-    normalizePubkey(project.owner) === normalizedCurrentPubkey ||
-    project.contributors.some(
-      (pubkey) => normalizePubkey(pubkey) === normalizedCurrentPubkey,
-    )
-  );
-}
-function isProjectOwnedByCurrentUser(
-  project: Project,
-  currentPubkey: string | undefined,
-) {
-  return currentPubkey
-    ? normalizePubkey(project.owner) === normalizePubkey(currentPubkey)
-    : false;
-}
-
-function projectHasAgent(
-  project: Project,
-  people: string[],
-  profiles: UserProfileLookup | undefined,
-) {
-  const projectPubkeys = [project.owner, ...people];
-  return projectPubkeys.some(
-    (pubkey) => profiles?.[normalizePubkey(pubkey)]?.isAgent === true,
-  );
-}
-function projectOwnerIsUser(
-  project: Project,
-  profiles: UserProfileLookup | undefined,
-) {
-  return profiles?.[normalizePubkey(project.owner)]?.isAgent !== true;
-}
-
 function ProjectPeopleStack({
   pubkeys,
   profiles,
@@ -295,7 +129,7 @@ function ProjectPeopleStack({
   profiles?: UserProfileLookup;
   workOwnerPubkey: string;
 }) {
-  const visible = pubkeys.slice(0, 4);
+  const visible = pubkeys.slice(0, 5);
   const remaining = pubkeys.length - visible.length;
 
   if (visible.length === 0) {
@@ -303,14 +137,18 @@ function ProjectPeopleStack({
   }
 
   return (
-    <div className="flex items-center -space-x-1.5">
-      {visible.map((pubkey) => {
+    <div className="flex items-center justify-end -space-x-1.5">
+      {visible.map((pubkey, index) => {
         const profile = profiles?.[normalizePubkey(pubkey)];
         const label = resolveUserLabel({ pubkey, profiles });
         return (
           <Tooltip key={pubkey}>
             <TooltipTrigger asChild>
-              <span className="inline-flex">
+              {/* First avatar sits on the top layer, cascading down rightward. */}
+              <span
+                className="relative inline-flex"
+                style={{ zIndex: visible.length - index }}
+              >
                 <UserAvatar
                   accent={
                     normalizePubkey(pubkey) === normalizePubkey(workOwnerPubkey)
@@ -327,11 +165,59 @@ function ProjectPeopleStack({
         );
       })}
       {remaining > 0 ? (
-        <span className="flex h-5 min-w-5 items-center justify-center rounded-full bg-muted px-1 text-3xs font-semibold text-muted-foreground ring-2 ring-card">
+        <span className="relative z-0 flex h-5 min-w-5 items-center justify-center rounded-full bg-muted px-1 text-3xs font-semibold text-muted-foreground ring-2 ring-card">
           +{remaining}
         </span>
       ) : null}
     </div>
+  );
+}
+
+function LatestCommitLabel({
+  profiles,
+  project,
+  summary,
+}: {
+  profiles?: UserProfileLookup;
+  project: Project;
+  summary: ProjectActivitySummary | undefined;
+}) {
+  const latestCommit = summary?.latestCommit;
+  if (!latestCommit) {
+    return (
+      <MetadataItem icon={CalendarDays}>
+        {formatCreatedDate(project.createdAt)}
+      </MetadataItem>
+    );
+  }
+
+  const authorLabel = latestCommit.author
+    ? resolveUserLabel({ profiles, pubkey: latestCommit.author })
+    : null;
+  const commitLabel = latestCommit.title || latestCommit.commit.slice(0, 7);
+  // Middle truncation: the commit title gives way while the trailing
+  // author + time stay pinned and always visible.
+  const tail = `${authorLabel ? ` · ${authorLabel}` : ""} · ${relativeTime(
+    latestCommit.createdAt,
+  )}`;
+
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <span className="flex min-w-0 items-center gap-1.5">
+          <GitCommit className="h-3.5 w-3.5 shrink-0 text-muted-foreground/70" />
+          <span className="flex min-w-0">
+            <span className="min-w-0 truncate">{commitLabel}</span>
+            <span className="shrink-0 whitespace-pre">{tail}</span>
+          </span>
+        </span>
+      </TooltipTrigger>
+      <TooltipContent className="max-w-96 break-words">
+        {commitLabel}
+        {authorLabel ? ` · ${authorLabel}` : ""} ·{" "}
+        {formatExactTimestamp(latestCommit.createdAt)}
+      </TooltipContent>
+    </Tooltip>
   );
 }
 
@@ -341,7 +227,7 @@ function StatusPill({ status }: { status: string }) {
   }
 
   return (
-    <span className="shrink-0 rounded-full border border-border/60 bg-background/80 px-2 py-0.5 text-2xs font-medium uppercase tracking-wide text-muted-foreground shadow-xs">
+    <span className="shrink-0 rounded-full bg-muted/60 px-2 pb-[3px] pt-[5px] text-2xs font-semibold uppercase leading-none tracking-[0.18em] text-muted-foreground">
       {status}
     </span>
   );
@@ -514,7 +400,7 @@ function ProjectGridCard({
 }) {
   return (
     <Card
-      className="group relative flex min-h-48 flex-col overflow-hidden border-border/60 bg-gradient-to-br from-card via-card to-muted/30 p-4 shadow-none transition-colors duration-150 hover:border-primary/30"
+      className="group relative flex min-h-48 flex-col overflow-hidden rounded-2xl border-border/50 bg-muted/20 p-4 shadow-none transition-colors duration-150 hover:bg-muted/30"
       data-testid={`project-card-${project.dtag}`}
     >
       <ProjectCardButton onOpen={onOpen} project={project} />
@@ -522,17 +408,19 @@ function ProjectGridCard({
         <div className="flex min-w-0 items-start justify-between gap-3">
           <div className="min-w-0 space-y-1.5">
             <div className="flex min-w-0 items-center gap-2">
-              <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary shadow-inner">
-                <FolderGit2 className="h-4 w-4" />
+              <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-muted/60">
+                <FolderGit2 className="h-4 w-4 text-muted-foreground" />
               </span>
               <div className="min-w-0 space-y-1">
                 <span className="block truncate text-sm font-semibold text-foreground">
                   {project.name}
                 </span>
-                <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
-                  <MetadataItem icon={CalendarDays}>
-                    {formatCreatedDate(project.createdAt)}
-                  </MetadataItem>
+                <div className="flex min-w-0 items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
+                  <LatestCommitLabel
+                    profiles={profiles}
+                    project={project}
+                    summary={summary}
+                  />
                 </div>
               </div>
             </div>
@@ -552,12 +440,12 @@ function ProjectGridCard({
           {project.description || "A shared space for internal git work."}
         </p>
 
-        <div className="flex min-w-0 items-center gap-1.5 rounded-lg bg-muted/45 px-2.5 py-1.5 text-xs text-muted-foreground/80">
+        <div className="flex min-w-0 items-center gap-1.5 rounded-xl bg-muted/50 px-2.5 py-1.5 text-xs text-muted-foreground/80">
           <GitFork className="h-3.5 w-3.5 shrink-0" />
           <ClonePathLabel project={project} />
         </div>
 
-        <div className="mt-auto space-y-2 rounded-lg bg-muted/70 px-2.5 py-2">
+        <div className="mt-auto space-y-2 rounded-xl bg-muted/60 px-2.5 py-2">
           <div className="flex min-w-0 items-center justify-between gap-2">
             <p className="truncate text-xs font-medium text-muted-foreground">
               {getActivityLabel(summary)}
@@ -597,7 +485,7 @@ function ProjectListRow({
 }) {
   return (
     <Card
-      className="group relative overflow-hidden border-border/60 bg-gradient-to-r from-card via-card to-muted/20 p-3 shadow-none transition-colors duration-150 hover:border-primary/30"
+      className="group relative overflow-hidden rounded-2xl border-border/50 bg-muted/20 p-3 shadow-none transition-colors duration-150 hover:bg-muted/30"
       data-testid={`project-row-${project.dtag}`}
     >
       <ProjectCardButton onOpen={onOpen} project={project} />
@@ -633,8 +521,8 @@ function ProjectListRow({
           </div>
         </div>
 
-        <div className="relative z-10 flex min-w-0 items-center justify-start gap-2 rounded-lg bg-muted/70 px-2.5 py-2 lg:w-full lg:justify-between">
-          <p className="truncate text-xs font-medium text-muted-foreground">
+        <div className="relative z-10 flex min-w-0 items-center gap-2 rounded-xl bg-muted/60 px-2.5 py-2 lg:w-full">
+          <p className="min-w-0 flex-1 truncate text-xs font-medium text-muted-foreground">
             {getActivityLabel(summary)}
           </p>
           <ProjectPeopleStack
@@ -670,11 +558,14 @@ export function ProjectsView() {
     activeWorkspace?.reposDir,
   );
   const projectPullRequestsQuery = useProjectsPullRequestsQuery(projects);
-  const [storedViewMode, setStoredViewMode] =
-    React.useState<ProjectsViewMode | null>(() => readStoredViewMode());
   const [filter, setFilter] = React.useState<ProjectsFilter>(() =>
     readStoredFilter(),
   );
+  const projectIssuesQuery = useProjectsIssuesQuery(
+    filter === "issues" ? projects : [],
+  );
+  const [storedViewMode, setStoredViewMode] =
+    React.useState<ProjectsViewMode | null>(() => readStoredViewMode());
   const [sort, setSort] = React.useState<ProjectsSort>(() => readStoredSort());
   const viewMode =
     storedViewMode ??
@@ -728,10 +619,26 @@ export function ProjectsView() {
     toast.info("Project creation is not available yet.");
   }, []);
 
+  const localRepoNames = React.useMemo(
+    () =>
+      new Set(
+        (localRepositoriesQuery.data ?? []).map(
+          (repository) => repository.name,
+        ),
+      ),
+    [localRepositoriesQuery.data],
+  );
+
+  // Count projects with a checkout on this machine — matches what the
+  // "Local" filter actually lists, not every directory in the repos folder.
+  const localProjectCount = React.useMemo(
+    () =>
+      projects.filter((project) => hasLocalCheckout(project, localRepoNames))
+        .length,
+    [localRepoNames, projects],
+  );
+
   const visibleProjects = React.useMemo(() => {
-    const localRepoNames = new Set(
-      (localRepositoriesQuery.data ?? []).map((repository) => repository.name),
-    );
     const sortedProjects = projects
       .filter((project) => {
         const summary = activitySummariesQuery.data?.[project.repoAddress];
@@ -768,7 +675,7 @@ export function ProjectsView() {
     activitySummariesQuery.data,
     currentPubkey,
     filter,
-    localRepositoriesQuery.data,
+    localRepoNames,
     profiles,
     projects,
     sort,
@@ -787,6 +694,19 @@ export function ProjectsView() {
     });
   }, [projectPullRequestsQuery.data, sort]);
 
+  const visibleIssues = React.useMemo(() => {
+    const issues = projectIssuesQuery.data ?? [];
+    return [...issues].sort((left, right) => {
+      if (sort === "name") {
+        return left.issue.title.localeCompare(right.issue.title);
+      }
+      if (sort === "created") {
+        return right.issue.createdAt - left.issue.createdAt;
+      }
+      return right.issue.updatedAt - left.issue.updatedAt;
+    });
+  }, [projectIssuesQuery.data, sort]);
+
   const handleOpenProject = React.useCallback(
     (project: Project) => {
       void goProject(project.dtag);
@@ -797,6 +717,13 @@ export function ProjectsView() {
   const handleOpenPullRequest = React.useCallback(
     (project: Project, pullRequest: ProjectPullRequest) => {
       void goProject(project.dtag, { pullRequestId: pullRequest.id });
+    },
+    [goProject],
+  );
+
+  const handleOpenIssue = React.useCallback(
+    (project: Project, issue: ProjectIssue) => {
+      void goProject(project.dtag, { issueId: issue.id });
     },
     [goProject],
   );
@@ -859,7 +786,8 @@ export function ProjectsView() {
         <div className="pt-[calc(var(--buzz-channel-content-top-padding,5.75rem)_+_1rem)]">
           {filter === "all" ? (
             <ProjectsOverviewPanel
-              localRepositoryCount={localRepositoriesQuery.data?.length ?? 0}
+              localRepositoryCount={localProjectCount}
+              onSelectSection={handleFilterChange}
               profiles={profiles}
               projects={projects}
               relayName={activeWorkspace?.name || "Relay"}
@@ -869,7 +797,11 @@ export function ProjectsView() {
           <section className="space-y-3">
             <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
               <h3 className="text-sm font-semibold text-foreground">
-                {filter === "prs" ? "Pull requests" : "Repositories"}
+                {filter === "prs"
+                  ? "Pull requests"
+                  : filter === "issues"
+                    ? "Issues"
+                    : "Repositories"}
               </h3>
               <div className="flex flex-wrap items-center gap-2 sm:justify-end">
                 <label className="flex items-center gap-2 text-xs text-muted-foreground">
@@ -898,6 +830,14 @@ export function ProjectsView() {
                 onOpen={handleOpenPullRequest}
                 profiles={profiles}
                 pullRequests={visiblePullRequests}
+                viewMode={viewMode}
+              />
+            ) : filter === "issues" ? (
+              <ProjectsIssuesList
+                isLoading={projectIssuesQuery.isLoading}
+                issues={visibleIssues}
+                onOpen={handleOpenIssue}
+                profiles={profiles}
                 viewMode={viewMode}
               />
             ) : visibleProjects.length === 0 ? (

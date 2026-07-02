@@ -78,7 +78,7 @@ function PullRequestGridCard({
       : Check;
 
   return (
-    <Card className="group relative flex min-h-40 flex-col overflow-hidden border-border bg-card p-4 shadow-sm transition-colors duration-150 hover:border-primary/50">
+    <Card className="group relative flex min-h-40 flex-col overflow-hidden rounded-2xl border-border/50 bg-muted/20 p-4 shadow-none transition-colors duration-150 hover:bg-muted/30">
       <button
         className="absolute inset-0 rounded-xl"
         onClick={() => onOpen(project, pullRequest)}
@@ -136,7 +136,7 @@ function PullRequestGridCard({
           </p>
         ) : null}
 
-        <div className="mt-auto rounded-lg border border-border/70 bg-muted px-2.5 py-2">
+        <div className="mt-auto rounded-xl bg-muted/60 px-2.5 py-2">
           <div className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5 text-xs text-foreground/80">
             <span className="font-mono text-foreground">
               #{pullRequest.id.slice(0, 8)}
@@ -181,7 +181,7 @@ function PullRequestListRow({
       : Check;
 
   return (
-    <Card className="group relative overflow-hidden border-border bg-card p-3 shadow-sm transition-colors duration-150 hover:border-primary/50">
+    <Card className="group relative overflow-hidden rounded-2xl border-border/50 bg-muted/20 p-3 shadow-none transition-colors duration-150 hover:bg-muted/30">
       <button
         className="absolute inset-0 rounded-xl"
         onClick={() => onOpen(project, pullRequest)}

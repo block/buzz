@@ -93,7 +93,10 @@ export function useAppNavigation() {
   const goProject = React.useCallback(
     (
       projectId: string,
-      behavior?: NavigationBehavior & { pullRequestId?: string },
+      behavior?: NavigationBehavior & {
+        pullRequestId?: string;
+        issueId?: string;
+      },
     ) =>
       commitNavigation(
         {
@@ -101,9 +104,12 @@ export function useAppNavigation() {
           params: {
             projectId,
           },
-          search: behavior?.pullRequestId
-            ? { pullRequestId: behavior.pullRequestId }
-            : {},
+          search: {
+            ...(behavior?.pullRequestId
+              ? { pullRequestId: behavior.pullRequestId }
+              : {}),
+            ...(behavior?.issueId ? { issueId: behavior.issueId } : {}),
+          },
         },
         behavior,
       ),

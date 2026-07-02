@@ -8,6 +8,13 @@ export type ProjectIssueStatus =
   | "Done"
   | "Closed";
 
+export type ProjectIssueComment = {
+  id: string;
+  content: string;
+  author: string;
+  createdAt: number;
+};
+
 export type ProjectIssue = {
   id: string;
   title: string;
@@ -20,6 +27,7 @@ export type ProjectIssue = {
   status: ProjectIssueStatus;
   statusEventId: string | null;
   updatedAt: number;
+  comments: ProjectIssueComment[];
 };
 
 export const PROJECT_ISSUE_STATUS: {
@@ -36,10 +44,12 @@ export function getAllTags(event: RelayEvent, name: string): string[];
 export function eventToProjectIssue(
   issue: RelayEvent,
   statusEvents?: RelayEvent[],
+  commentEvents?: RelayEvent[],
 ): ProjectIssue;
 export function projectIssueEventsToIssues(
   issueEvents: RelayEvent[],
   statusEvents?: RelayEvent[],
+  commentEvents?: RelayEvent[],
 ): ProjectIssue[];
 export function buildGitIssueTags(input: {
   repoAddress: string;
