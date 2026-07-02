@@ -173,6 +173,7 @@ pub fn delete_save_subscription(
 }
 
 /// Return true if a matching save subscription exists for the given scope.
+#[allow(dead_code)]
 pub fn has_save_subscription(
     conn: &Connection,
     identity_pubkey: &str,
