@@ -91,8 +91,18 @@ async function seedObserverEvents(
 }
 
 async function settleAnimations(panel: import("@playwright/test").Locator) {
+  // Only await finite animations — live surfaces (e.g. the turn liveness
+  // indicator) run infinite loops whose `finished` promise never resolves.
   await panel.evaluate((el) =>
-    Promise.all(el.getAnimations({ subtree: true }).map((a) => a.finished)),
+    Promise.all(
+      el
+        .getAnimations({ subtree: true })
+        .filter((a) => {
+          const timing = a.effect?.getTiming();
+          return timing?.iterations !== Number.POSITIVE_INFINITY;
+        })
+        .map((a) => a.finished),
+    ),
   );
 }
 
