@@ -345,14 +345,17 @@ export function AgentInstanceEditDialog({
   // Runtime/provider-required credential state, derived from the PROSPECTIVE
   // post-submit runtime — see the hook for the inherit-transition and
   // Advanced-auto-expand rationale.
-  const { requiredEnvKeys, fileSatisfiedEnvKeys, requiredEnvKeyMissing } =
-    useRequiredCredentialState({
-      open,
-      prospectiveRuntimeId,
-      provider: inheritedSubmission.provider ?? "",
-      envVars: inheritedSubmission.envVars,
-      setShowAdvancedFields,
-    });
+  const {
+    requiredEnvKeys: requiredEnvKeysRaw,
+    fileSatisfiedEnvKeys,
+    requiredEnvKeyMissing,
+  } = useRequiredCredentialState({
+    open,
+    prospectiveRuntimeId,
+    provider: inheritedSubmission.provider ?? "",
+    envVars: inheritedSubmission.envVars,
+    setShowAdvancedFields,
+  });
 
   const {
     discoveredModelOptions,
@@ -368,6 +371,16 @@ export function AgentInstanceEditDialog({
   });
 
   const { globalConfig } = useGlobalAgentConfig();
+
+  // Filter out keys already satisfied by global defaults — they should not
+  // render as amber required rows; they appear as inherited hints instead.
+  const requiredEnvKeys = React.useMemo(
+    () =>
+      requiredEnvKeysRaw.filter(
+        (key) => (globalConfig.env_vars[key] ?? "").length === 0,
+      ),
+    [requiredEnvKeysRaw, globalConfig.env_vars],
+  );
 
   // Merge global + persona env for the inherited display hint in EnvVarsEditor
   // (inside EditAgentAdvancedFields). Persona wins over global on collision
