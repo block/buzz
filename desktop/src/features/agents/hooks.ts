@@ -432,12 +432,16 @@ export function useAttachManagedAgentToChannelMutation(
   const queryClient = useQueryClient();
 
   return useMutation({
-    mutationFn: async (input: AttachManagedAgentToChannelInput) => {
-      if (!channelId) {
+    mutationFn: async (
+      input: AttachManagedAgentToChannelInput & { channelId?: string },
+    ) => {
+      const { channelId: capturedChannelId, ...rest } = input;
+      const effectiveChannelId = capturedChannelId ?? channelId;
+      if (!effectiveChannelId) {
         throw new Error("No channel selected.");
       }
 
-      return attachManagedAgentToChannel(channelId, input);
+      return attachManagedAgentToChannel(effectiveChannelId, rest);
     },
     onSettled: () => {
       invalidateAgentQueriesInBackground(queryClient, channelId);
@@ -469,13 +473,17 @@ export function useCreateChannelManagedAgentMutation(channelId: string | null) {
 
   return useMutation({
     mutationFn: async (
-      input: CreateChannelManagedAgentInput,
+      input: CreateChannelManagedAgentInput & { channelId?: string },
     ): Promise<CreateChannelManagedAgentResult> => {
-      if (!channelId) {
+      const { channelId: capturedChannelId, ...rest } = input;
+      const effectiveChannelId = capturedChannelId ?? channelId;
+      if (!effectiveChannelId) {
         throw new Error("No channel selected.");
       }
 
-      const result = await createChannelManagedAgents(channelId, [input]);
+      const result = await createChannelManagedAgents(effectiveChannelId, [
+        rest,
+      ]);
       const success = result.successes[0];
       if (success) {
         return success;

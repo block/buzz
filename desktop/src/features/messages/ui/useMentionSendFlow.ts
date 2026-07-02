@@ -131,6 +131,10 @@ export function useMentionSendFlow({
   const isMentionSendPendingRef = React.useRef(false);
   const isCompleteSendPendingRef = React.useRef(false);
   const previousChannelIdRef = React.useRef(channelId);
+  // Tracks the live channel so completeSend can ask "is the user still here?"
+  // without being frozen to the compose-time closure.
+  const channelIdRef = React.useRef(channelId);
+  channelIdRef.current = channelId;
 
   const addMembersMutation = useAddChannelMembersMutation(channelId);
   const attachAgentMutation = useAttachManagedAgentToChannelMutation(channelId);
@@ -173,8 +177,8 @@ export function useMentionSendFlow({
   ]);
 
   const ensureManagedAgentMentionsReady = React.useCallback(
-    async (mentionPubkeys: string[]) => {
-      if (!channelId || mentionPubkeys.length === 0) {
+    async (mentionPubkeys: string[], capturedChannelId: string) => {
+      if (!capturedChannelId || mentionPubkeys.length === 0) {
         return [];
       }
 
@@ -198,6 +202,7 @@ export function useMentionSendFlow({
             }
           } else {
             await attachAgentMutation.mutateAsync({
+              channelId: capturedChannelId,
               agent,
               role: "bot",
             });
@@ -216,7 +221,6 @@ export function useMentionSendFlow({
     },
     [
       attachAgentMutation,
-      channelId,
       getManagedAgentsByPubkey,
       mentions.memberPubkeys,
       startAgentMutation,
@@ -224,9 +228,9 @@ export function useMentionSendFlow({
   );
 
   const createMentionedPersonaAgents = React.useCallback(
-    async (trimmed: string) => {
+    async (trimmed: string, capturedChannelId: string) => {
       const personaMentions = mentions.extractMentionPersonas(trimmed);
-      if (!channelId || personaMentions.length === 0) {
+      if (!capturedChannelId || personaMentions.length === 0) {
         return {
           errors: [] as string[],
           pubkeys: [] as string[],
@@ -257,6 +261,7 @@ export function useMentionSendFlow({
 
         try {
           const result = await createPersonaAgentMutation.mutateAsync({
+            channelId: capturedChannelId,
             runtime,
             name: persona.displayName,
             personaId: persona.id,
@@ -287,7 +292,6 @@ export function useMentionSendFlow({
       };
     },
     [
-      channelId,
       createPersonaAgentMutation,
       getAvailableRuntimes,
       mentions.extractMentionPersonas,
@@ -349,6 +353,7 @@ export function useMentionSendFlow({
           mentionPubkeys.filter(
             (pubkey) => !readyAgentPubkeys.has(normalizePubkey(pubkey)),
           ),
+          draft.capturedChannelId ?? "",
         );
         if (agentReadinessErrors.length > 0) {
           const message =
@@ -365,7 +370,7 @@ export function useMentionSendFlow({
         // Only clear the composer if the user has not switched channels since
         // submit. If they have, the composer they see belongs to the new channel
         // and we must not wipe it.
-        if (draft.capturedChannelId === channelId) {
+        if (draft.capturedChannelId === channelIdRef.current) {
           clearComposer();
         }
 
@@ -382,7 +387,7 @@ export function useMentionSendFlow({
         } catch {
           // Only restore the composer content if the user is still on the
           // channel that originated the send.
-          if (draft.capturedChannelId === channelId) {
+          if (draft.capturedChannelId === channelIdRef.current) {
             setContent(draft.savedContent);
             contentRef.current = draft.savedContent;
             richText.setContent(draft.savedContent);
@@ -398,7 +403,6 @@ export function useMentionSendFlow({
       }
     },
     [
-      channelId,
       clearComposer,
       contentRef,
       drafts,
@@ -443,8 +447,10 @@ export function useMentionSendFlow({
       isMentionSendPendingRef.current = true;
       setIsMentionSendPending(true);
       try {
-        const personaMentionResult =
-          await createMentionedPersonaAgents(trimmed);
+        const personaMentionResult = await createMentionedPersonaAgents(
+          trimmed,
+          capturedChannelId ?? "",
+        );
         if (personaMentionResult.errors.length > 0) {
           const message =
             personaMentionResult.errors.length === 1
@@ -594,6 +600,7 @@ export function useMentionSendFlow({
       const errors: string[] = [];
       if (peoplePubkeys.length > 0) {
         const result = await addMembersMutation.mutateAsync({
+          channelId: pendingNonMemberSend.capturedChannelId ?? undefined,
           pubkeys: peoplePubkeys,
           role: "member",
         });
@@ -602,6 +609,7 @@ export function useMentionSendFlow({
 
       if (relayAgentPubkeys.length > 0) {
         const result = await addMembersMutation.mutateAsync({
+          channelId: pendingNonMemberSend.capturedChannelId ?? undefined,
           pubkeys: relayAgentPubkeys,
           role: "bot",
         });

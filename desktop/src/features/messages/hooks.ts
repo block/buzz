@@ -175,6 +175,29 @@ export function createOptimisticMessage(
   };
 }
 
+/**
+ * Resolves the effective target channel for a send operation.
+ *
+ * When `capturedChannelId` is supplied (non-null), the target is looked up from
+ * `channelsCache` — this pins the send to the compose-time channel regardless
+ * of any subsequent navigation. If the id is supplied but resolves to nothing,
+ * returns `null` (caller should throw — don't silently fall back to the live
+ * channel). When `capturedChannelId` is null, the caller didn't capture one and
+ * the closed-over `fallbackChannel` is the intended target.
+ *
+ * Exported for unit testing.
+ */
+export function resolveEffectiveChannel(
+  capturedChannelId: string | null | undefined,
+  channelsCache: Channel[] | undefined,
+  fallbackChannel: Channel | null,
+): Channel | null {
+  if (capturedChannelId == null) {
+    return fallbackChannel;
+  }
+  return channelsCache?.find((c) => c.id === capturedChannelId) ?? null;
+}
+
 export function useChannelMessagesQuery(channel: Channel | null) {
   const queryClient = useQueryClient();
   const queryKey = channelMessagesKey(channel?.id ?? "none");
@@ -404,12 +427,17 @@ export function useSendMessageMutation(
       // Resolve the target channel from the compose-time id when provided, so
       // a channel switch mid-send does not redirect the message. Fall back to
       // the closed-over `channel` for callers that don't supply a capturedId.
-      const effectiveChannel =
-        capturedChannelId != null
-          ? (queryClient
-              .getQueryData<Channel[]>(channelsQueryKey)
-              ?.find((c) => c.id === capturedChannelId) ?? channel)
-          : channel;
+      // A supplied-but-unresolvable id throws rather than silently falling back
+      // to the live channel (silent misdelivery is the failure mode we're fixing).
+      const effectiveChannel = resolveEffectiveChannel(
+        capturedChannelId,
+        queryClient.getQueryData<Channel[]>(channelsQueryKey),
+        channel,
+      );
+
+      if (capturedChannelId != null && effectiveChannel == null) {
+        throw new Error("Channel is no longer available.");
+      }
 
       if (!effectiveChannel || effectiveChannel.channelType === "forum") {
         throw new Error("This channel does not support message sending yet.");
@@ -506,12 +534,13 @@ export function useSendMessageMutation(
     }) => {
       // Mirror the mutationFn channel resolution so the optimistic message
       // lands in the same cache key the real send will eventually populate.
-      const effectiveChannel =
-        capturedChannelId != null
-          ? (queryClient
-              .getQueryData<Channel[]>(channelsQueryKey)
-              ?.find((c) => c.id === capturedChannelId) ?? channel)
-          : channel;
+      // A supplied-but-unresolvable id returns undefined (skips optimistic write)
+      // rather than silently writing to the live channel.
+      const effectiveChannel = resolveEffectiveChannel(
+        capturedChannelId,
+        queryClient.getQueryData<Channel[]>(channelsQueryKey),
+        channel,
+      );
 
       if (
         !effectiveChannel ||

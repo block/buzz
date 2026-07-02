@@ -7,25 +7,39 @@
  * data through the entire pipeline so the mutation always targets the
  * compose-time channel regardless of navigation.
  *
- * These tests cover the pure / pure-ish slice of the invariant:
- *   - createOptimisticMessage uses the supplied channelId, not any global state
- *   - The message event tags carry the correct channel h-tag
+ * Test coverage:
+ *   1. createOptimisticMessage uses the supplied channelId for the h-tag.
+ *   2. resolveEffectiveChannel pins the send to the captured channel even when
+ *      the closed-over channel is different (the core invariant).
+ *   3. resolveEffectiveChannel returns null for a supplied-but-unresolvable id
+ *      so the caller can throw rather than silently misdeliver.
+ *   4. resolveEffectiveChannel falls back to the closed-over channel when no
+ *      capturedChannelId was supplied (legacy-caller path).
  */
 
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { createOptimisticMessage } from "../hooks.ts";
+import { createOptimisticMessage, resolveEffectiveChannel } from "../hooks.ts";
 
 // ---------------------------------------------------------------------------
-// Minimal identity stub
+// Minimal stubs
 // ---------------------------------------------------------------------------
 const IDENTITY = {
   pubkey: "aaaa1111bbbb2222cccc3333dddd4444eeee5555ffff6666aaaa1111bbbb2222",
 };
 
+function makeChannel(id) {
+  return {
+    id,
+    name: id,
+    channelType: "channel",
+    // Only id and channelType are required by the resolution logic.
+  };
+}
+
 // ---------------------------------------------------------------------------
-// createOptimisticMessage uses the supplied channelId for the h-tag
+// createOptimisticMessage — h-tag carries the compose-time channelId
 // ---------------------------------------------------------------------------
 
 test("createOptimisticMessage_composedChannelId_hTagMatchesComposedChannel", () => {
@@ -34,10 +48,10 @@ test("createOptimisticMessage_composedChannelId_hTagMatchesComposedChannel", () 
     composeChannelId,
     "hello",
     IDENTITY,
-    [],   // currentMessages
-    [],   // mentionPubkeys
+    [], // currentMessages
+    [], // mentionPubkeys
     null, // parentEventId
-    [],   // mediaTags
+    [], // mediaTags
   );
 
   const hTag = msg.tags.find(([name]) => name === "h");
@@ -54,8 +68,24 @@ test("createOptimisticMessage_composedChannelId_hTagMatchesComposedChannel", () 
 test("createOptimisticMessage_differentChannelIds_hTagsAreIndependent", () => {
   // Simulate two messages composed in two different channels.
   // If a channel switch had corrupted channelId, both would carry the same tag.
-  const msgA = createOptimisticMessage("channel-A", "msg A", IDENTITY, [], [], null, []);
-  const msgB = createOptimisticMessage("channel-B", "msg B", IDENTITY, [], [], null, []);
+  const msgA = createOptimisticMessage(
+    "channel-A",
+    "msg A",
+    IDENTITY,
+    [],
+    [],
+    null,
+    [],
+  );
+  const msgB = createOptimisticMessage(
+    "channel-B",
+    "msg B",
+    IDENTITY,
+    [],
+    [],
+    null,
+    [],
+  );
 
   const hTagA = msgA.tags.find(([n]) => n === "h");
   const hTagB = msgB.tags.find(([n]) => n === "h");
@@ -73,7 +103,15 @@ test("createOptimisticMessage_withReply_hTagStillCarriesSuppliedChannelId", () =
   // Thread replies also carry the h-tag via buildReplyTags.
   // Verify the channel id flows through when a parentEventId is set.
   const composeChannelId = "channel-A";
-  const parentEvent = createOptimisticMessage("channel-A", "parent", IDENTITY, [], [], null, []);
+  const parentEvent = createOptimisticMessage(
+    "channel-A",
+    "parent",
+    IDENTITY,
+    [],
+    [],
+    null,
+    [],
+  );
   const replyMsg = createOptimisticMessage(
     composeChannelId,
     "reply",
@@ -91,4 +129,72 @@ test("createOptimisticMessage_withReply_hTagStillCarriesSuppliedChannelId", () =
     composeChannelId,
     "reply h-tag must match the compose-time channelId",
   );
+});
+
+// ---------------------------------------------------------------------------
+// resolveEffectiveChannel — the channel-binding invariant
+// ---------------------------------------------------------------------------
+
+test("resolveEffectiveChannel_capturedIdPresentInCache_returnsComposeTimeChannel", () => {
+  // Core invariant: closure channel is B, variables carry channel A.
+  // The mutation must target A regardless of what the closure says.
+  const channelA = makeChannel("channel-A");
+  const channelB = makeChannel("channel-B");
+  const cache = [channelA, channelB];
+
+  const result = resolveEffectiveChannel("channel-A", cache, channelB);
+
+  assert.strictEqual(
+    result?.id,
+    "channel-A",
+    "must return the compose-time channel even when the closed-over channel is B",
+  );
+});
+
+test("resolveEffectiveChannel_capturedIdNotInCache_returnsNull", () => {
+  // F3 invariant: a supplied-but-unresolvable id must not fall back to the
+  // live channel — the caller is expected to throw "channel no longer available".
+  const channelB = makeChannel("channel-B");
+  const cache = [channelB]; // channel-A is absent (e.g. new channel, cache miss)
+
+  const result = resolveEffectiveChannel("channel-A", cache, channelB);
+
+  assert.strictEqual(
+    result,
+    null,
+    "a supplied-but-unresolvable capturedChannelId must return null, not the live channel",
+  );
+});
+
+test("resolveEffectiveChannel_capturedIdNull_returnsFallbackChannel", () => {
+  // Legacy callers (thread reply, InboxDetailPane) don't supply a capturedId.
+  // They rely on the closed-over channel being correct for other reasons.
+  const channelB = makeChannel("channel-B");
+  const cache = [channelB];
+
+  const result = resolveEffectiveChannel(null, cache, channelB);
+
+  assert.strictEqual(
+    result?.id,
+    "channel-B",
+    "null capturedChannelId must fall through to the closed-over channel",
+  );
+});
+
+test("resolveEffectiveChannel_capturedIdUndefined_returnsFallbackChannel", () => {
+  // Same as null — undefined means the caller didn't capture an id.
+  const channelB = makeChannel("channel-B");
+
+  const result = resolveEffectiveChannel(undefined, [channelB], channelB);
+
+  assert.strictEqual(result?.id, "channel-B");
+});
+
+test("resolveEffectiveChannel_emptyCache_capturedIdPresent_returnsNull", () => {
+  // Cache was wiped (e.g. sign-out race). Must not fall back to live channel.
+  const channelB = makeChannel("channel-B");
+
+  const result = resolveEffectiveChannel("channel-A", [], channelB);
+
+  assert.strictEqual(result, null);
 });
