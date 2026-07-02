@@ -138,7 +138,13 @@ test("create agent supports parallelism and system prompt overrides", async ({
     .getByTestId("env-vars-required-value")
     .fill("sk-test-api-key-for-e2e");
 
-  await page.getByRole("button", { name: "Advanced setup" }).click();
+  // Fix 3 (auto-open Advanced when required keys appear) may have already
+  // opened the section; only click to open if it is currently collapsed.
+  const advancedToggle = page.getByRole("button", { name: "Advanced setup" });
+  if ((await advancedToggle.getAttribute("aria-expanded")) === "false") {
+    await advancedToggle.click();
+  }
+  await expect(page.getByTestId("agent-parallelism-input")).toBeVisible();
   await page.getByTestId("agent-parallelism-input").fill("3");
   await page
     .getByTestId("agent-system-prompt-input")
