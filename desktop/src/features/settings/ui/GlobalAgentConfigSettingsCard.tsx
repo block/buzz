@@ -54,7 +54,11 @@ export function GlobalAgentConfigSettingsCard() {
   );
   const queryClient = useQueryClient();
 
-  // Load on mount.
+  // Load on mount — seed the shared TanStack Query cache so any dialog that
+  // opens after this point reads the populated value on first render (no async
+  // race). The query is also backed by its own queryFn for first-consumer
+  // scenarios, but this eager seed eliminates the "settings card loaded, user
+  // opens Create Agent before the lazy query fires" window.
   React.useEffect(() => {
     let cancelled = false;
     getGlobalAgentConfig()
@@ -62,6 +66,7 @@ export function GlobalAgentConfigSettingsCard() {
         if (!cancelled) {
           setConfig(loaded);
           setIsLoading(false);
+          queryClient.setQueryData(globalAgentConfigQueryKey, loaded);
         }
       })
       .catch(() => {
@@ -73,7 +78,7 @@ export function GlobalAgentConfigSettingsCard() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [queryClient]);
 
   // Resolve the buzz-agent runtime catalog entry for model discovery.
   // The card is always visible (open=true), so the query is always enabled.
@@ -147,11 +152,10 @@ export function GlobalAgentConfigSettingsCard() {
       setConfig(saved);
       setDirty(false);
       setSaveState("saved");
-      // Invalidate the shared TanStack Query cache so all open dialogs that
-      // call useGlobalAgentConfig() pick up the new values immediately.
-      void queryClient.invalidateQueries({
-        queryKey: globalAgentConfigQueryKey,
-      });
+      // Seed the shared TanStack Query cache with the canonical saved value so
+      // all open dialogs (and any that open afterward) see the new config
+      // synchronously — no second IPC round-trip needed.
+      queryClient.setQueryData(globalAgentConfigQueryKey, saved);
       if (savedTimerRef.current) clearTimeout(savedTimerRef.current);
       savedTimerRef.current = setTimeout(() => setSaveState("idle"), 2500);
     } catch (err) {
