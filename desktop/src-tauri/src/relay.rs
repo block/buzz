@@ -382,12 +382,7 @@ pub async fn sync_managed_agent_profile(
     avatar_url: Option<&str>,
     auth_tag: Option<&str>, // NIP-OA auth tag JSON
 ) -> Result<(), String> {
-    // Guard against a blank/hostless relay URL. An empty `relay_url` collapses to
-    // an empty base, producing a schemeless `/events` POST that fails to connect
-    // and gets misclassified as "relay unreachable" — a false connectivity error
-    // even though the workspace relay is fine. Callers must resolve the effective
-    // relay (see `effective_agent_relay_url`) before syncing; fail loudly here so
-    // any future caller that forgets gets a clear, actionable error instead.
+    // Fail loudly on a blank relay URL — callers must resolve via `effective_agent_relay_url` first.
     let base = relay_http_base_url(relay_url);
     if base.is_empty() {
         return Err(
@@ -724,23 +719,15 @@ mod tests {
 
     #[test]
     fn blank_relay_http_base_is_empty() {
-        // A blank relay URL has no scheme to rewrite, so the HTTP base collapses
-        // to empty. This is the trap behind the false "relay unreachable" toast:
-        // an empty base makes the profile-sync POST target a hostless "/events".
-        // `sync_managed_agent_profile` now guards against this base explicitly.
+        // A blank relay URL has no scheme to rewrite, so the HTTP base is empty.
         assert_eq!(relay_http_base_url(""), "");
         assert_eq!(relay_http_base_url("   "), "");
     }
 
     #[test]
     fn ui_created_agent_blank_relay_resolves_to_reachable_host() {
-        // Regression: the New Agent dialog never pins a per-agent relay, so the
-        // create flow's `resolved_relay_url` is empty. `create_managed_agent`
-        // Phase 4 must resolve the sync target through `effective_agent_relay_url`
-        // (falling back to the active workspace relay) — exactly as reconcile and
-        // rename do — before calling `sync_managed_agent_profile`. Before the fix,
-        // create passed the raw empty string straight through, yielding a hostless
-        // base and a false "relay unreachable" profile-sync error.
+        // A blank per-agent relay (the UI create case) resolves through
+        // `effective_agent_relay_url` to a real workspace host, not a hostless base.
         let resolved_relay_url = ""; // UI create flow: no per-agent relay pinned
         let workspace_relay = "wss://staging.example.com";
 

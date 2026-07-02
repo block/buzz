@@ -886,14 +886,7 @@ pub async fn create_managed_agent(
     // ── Phase 4: sync agent profile on relay (async, outside lock) ───────────
     // Use the avatar persisted on the record so the published profile and any
     // later reconciliation agree on the same value.
-    //
-    // Resolve the sync target via `effective_agent_relay_url`: an explicit
-    // per-agent relay wins, and a blank one (the common case — the UI create
-    // flow never pins a relay) falls back to the active workspace relay. Without
-    // this, a blank `resolved_relay_url` would produce a hostless `/events` POST
-    // that fails to connect and surfaces as a false "relay unreachable" error,
-    // even though the workspace relay is reachable. This mirrors the reconcile
-    // (`reconcile_agent_profile`) and rename (`update_managed_agent`) paths.
+    // Blank per-agent relay falls back to the workspace relay (matches reconcile/rename).
     let sync_relay_url = crate::relay::effective_agent_relay_url(
         &resolved_relay_url,
         &relay_ws_url_with_override(&state),
