@@ -160,7 +160,6 @@ void main() {
       final nsec = keychain.nsec;
       final uploadService = MediaUploadService(
         baseUrl: 'https://relay.example',
-        apiToken: null,
         nsec: nsec,
         httpClient: http_testing.MockClient((request) async {
           return http.Response(
@@ -226,7 +225,6 @@ void main() {
       final nsec = keychain.nsec;
       final uploadService = MediaUploadService(
         baseUrl: 'https://relay.example',
-        apiToken: null,
         nsec: nsec,
         httpClient: http_testing.MockClient((request) async {
           return http.Response(
@@ -294,7 +292,6 @@ void main() {
       final nsec = keychain.nsec;
       final uploadService = MediaUploadService(
         baseUrl: 'https://relay.example',
-        apiToken: null,
         nsec: nsec,
         httpClient: http_testing.MockClient((request) async {
           return http.Response('bad upload', 401);
@@ -329,7 +326,6 @@ void main() {
       final nsec = keychain.nsec;
       final uploadService = MediaUploadService(
         baseUrl: 'https://relay.example',
-        apiToken: null,
         nsec: nsec,
         pickGalleryVideo: () async => null,
         pickGalleryImage: () async =>
@@ -366,7 +362,6 @@ void main() {
       final nsec = keychain.nsec;
       final uploadService = MediaUploadService(
         baseUrl: 'https://relay.example',
-        apiToken: null,
         nsec: nsec,
         pickGalleryVideo: () async => null,
         pickGalleryImage: () async =>
@@ -422,7 +417,6 @@ void main() {
       try {
         final uploadService = MediaUploadService(
           baseUrl: 'https://relay.example',
-          apiToken: null,
           nsec: nsec,
           httpClient: http_testing.MockClient((request) async {
             return http.Response(

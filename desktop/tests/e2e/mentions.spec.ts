@@ -319,6 +319,44 @@ test("autocomplete searches global non-member people from the first typed charac
   await expect(tessaRow.getByText("not in channel")).toBeVisible();
 });
 
+test("mention autocomplete pages global people search beyond the first 50 results", async ({
+  page,
+}) => {
+  const searchProfiles = Array.from({ length: 55 }, (_, index) => ({
+    pubkey: `${(index + 1).toString(16).padStart(64, "0")}`,
+    displayName: `Alex ${String(index + 1).padStart(2, "0")}`,
+  }));
+  await installMockBridge(page, { searchProfiles });
+
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  await page.getByTestId("message-input").fill("@Alex");
+
+  const dropdown = autocomplete(page);
+  await expect(dropdown.locator("button")).toHaveCount(50);
+  await dropdown.evaluate((node) => node.scrollTo(0, node.scrollHeight));
+
+  await expect(dropdown.locator("button")).toHaveCount(55);
+  await expect(dropdown.getByText("Alex 55")).toBeVisible();
+  await expect(dropdown.getByText("not in channel").last()).toBeVisible();
+
+  const searchCalls = (await readCommandPayloadLog(page)).filter(
+    (entry) => entry.command === "search_users",
+  );
+  expect(searchCalls).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        payload: expect.objectContaining({ cursor: null, limit: 50 }),
+      }),
+      expect.objectContaining({
+        payload: expect.objectContaining({ cursor: "2", limit: 50 }),
+      }),
+    ]),
+  );
+});
+
 test("selecting a person mention inserts @Name into input", async ({
   page,
 }) => {

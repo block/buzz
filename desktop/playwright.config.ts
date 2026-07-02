@@ -58,6 +58,7 @@ export default defineConfig({
         "**/reminders.spec.ts",
         "**/virtualization.spec.ts",
         "**/scroll-history.spec.ts",
+        "**/channel-dense-second-reach.spec.ts",
         "**/overscroll-boundary.spec.ts",
         "**/cold-switch-longtask.perf.ts",
         "**/timeline-no-shift.spec.ts",

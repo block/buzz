@@ -235,6 +235,7 @@ pub async fn publish_mesh_status(
             &stored,
             KIND_MESH_LLM_RELAY_STATUS,
             &relay_pubkey_hex,
+            None,
         )
         .await;
     }

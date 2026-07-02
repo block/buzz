@@ -1,6 +1,11 @@
+import type {
+  InfiniteData,
+  UseInfiniteQueryResult,
+} from "@tanstack/react-query";
 import * as React from "react";
 import {
   keepPreviousData,
+  useInfiniteQuery,
   useMutation,
   useQuery,
   useQueryClient,
@@ -19,6 +24,7 @@ import type {
   Profile,
   UpdateProfileInput,
   UserSearchResult,
+  UserSearchPage,
   UsersBatchResponse,
 } from "@/shared/api/types";
 import { useIdentityQuery } from "@/shared/api/hooks";
@@ -319,10 +325,77 @@ export function useUserSearchQuery(
   return useQuery<UserSearchResult[]>({
     enabled,
     queryKey: ["user-search", normalizedQuery, options?.limit ?? 8],
-    queryFn: () => searchUsers(normalizedQuery, options?.limit ?? 8),
+    queryFn: async () =>
+      (await searchUsers(normalizedQuery, options?.limit ?? 8)).users,
     staleTime: 30_000,
     gcTime: 5 * 60 * 1_000,
   });
+}
+
+export function useInfiniteUserSearchQuery(
+  query: string,
+  options?: {
+    allowEmpty?: boolean;
+    enabled?: boolean;
+    limit?: number;
+  },
+) {
+  const normalizedQuery = query.trim().toLowerCase();
+  const enabled =
+    (options?.enabled ?? true) &&
+    (options?.allowEmpty === true || normalizedQuery.length > 0);
+
+  return useInfiniteQuery<UserSearchPage>({
+    enabled,
+    queryKey: [
+      "user-search",
+      "infinite",
+      normalizedQuery,
+      options?.limit ?? 50,
+    ],
+    queryFn: ({ pageParam }) =>
+      searchUsers(
+        normalizedQuery,
+        options?.limit ?? 50,
+        typeof pageParam === "string" ? pageParam : null,
+      ),
+    getNextPageParam: (lastPage) => lastPage.nextCursor ?? undefined,
+    initialPageParam: null,
+    staleTime: 30_000,
+    gcTime: 5 * 60 * 1_000,
+  });
+}
+
+export function useFlattenedUserSearchResults(
+  data: InfiniteData<UserSearchPage> | undefined,
+) {
+  return React.useMemo(
+    () => data?.pages.flatMap((page) => page.users) ?? [],
+    [data],
+  );
+}
+
+export function useUserSearchFetchMoreOnScroll(
+  query: UseInfiniteQueryResult<InfiniteData<UserSearchPage>>,
+  enabled = true,
+) {
+  return React.useCallback(
+    (event: React.UIEvent<HTMLDivElement>) => {
+      if (!enabled) {
+        return;
+      }
+
+      const list = event.currentTarget;
+      if (list.scrollHeight - list.scrollTop - list.clientHeight >= 64) {
+        return;
+      }
+
+      if (query.hasNextPage && !query.isFetchingNextPage) {
+        void query.fetchNextPage();
+      }
+    },
+    [enabled, query],
+  );
 }
 
 export function useUpdateProfileMutation() {

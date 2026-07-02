@@ -318,7 +318,7 @@ test("closes sidebar search with Escape", async ({ page }) => {
   await expect(page.getByTestId("open-search")).toBeFocused();
 });
 
-test("reopens the collapsed sidebar when the search shortcut fires", async ({
+test("search shortcut opens search without disturbing the collapsed sidebar", async ({
   page,
 }) => {
   await page.goto("/");
@@ -334,11 +334,23 @@ test("reopens the collapsed sidebar when the search shortcut fires", async ({
     .click();
   await expect(sidebarRoot).toHaveAttribute("data-state", "collapsed");
 
-  await focusSidebarSearchWithShortcut(page);
+  await page.evaluate(() => {
+    const isMac = /mac|iphone|ipad|ipod/i.test(navigator.platform);
+    window.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        bubbles: true,
+        cancelable: true,
+        code: "KeyK",
+        ctrlKey: !isMac,
+        key: "k",
+        metaKey: isMac,
+      }),
+    );
+  });
 
-  // The shortcut reveals the sidebar and focuses the dialog search input.
-  await expect(sidebarRoot).toHaveAttribute("data-state", "expanded");
+  // Search opens in its portal dialog; the sidebar must not react.
   await expect(page.getByTestId("search-dialog-input")).toBeFocused();
+  await expect(sidebarRoot).toHaveAttribute("data-state", "collapsed");
 });
 
 test("search results use your resolved profile label instead of You", async ({

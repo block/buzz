@@ -62,7 +62,6 @@ import {
   SidebarMenu,
   SidebarMenuItem,
   SidebarRail,
-  useSidebar,
 } from "@/shared/ui/sidebar";
 
 type CollapsibleSidebarGroup =
@@ -239,24 +238,6 @@ export function AppSidebar({
   const setIsNewDmOpen = onNewDmOpenChange ?? setIsNewDmOpenInternal;
   const scrollRef = React.useRef<HTMLDivElement>(null);
   useSidebarScrollLock(scrollRef);
-
-  // Search lives in the sidebar's pinned header, so a ⌘K focus request must
-  // first reveal the sidebar. When collapsed (offcanvas) on desktop the input
-  // is mounted but translated off-screen; on mobile it is unmounted entirely.
-  // Open the sidebar on each focus-request bump so the input the shortcut
-  // focuses is actually visible. Skips the initial mount (request === 0).
-  const { isMobile, setOpen, setOpenMobile } = useSidebar();
-  React.useEffect(() => {
-    if (searchFocusRequest === 0) {
-      return;
-    }
-
-    if (isMobile) {
-      setOpenMobile(true);
-    } else {
-      setOpen(true);
-    }
-  }, [searchFocusRequest, isMobile, setOpen, setOpenMobile]);
 
   React.useEffect(() => {
     const scrollElement = scrollRef.current;

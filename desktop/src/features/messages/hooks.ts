@@ -34,9 +34,15 @@ import { applyEditTagOverlay } from "@/features/messages/lib/applyEditTagOverlay
 import { backfillAuxForMessages } from "@/features/messages/lib/auxBackfill";
 import { countTopLevelTimelineRows } from "@/features/messages/lib/formatTimelineMessages";
 import {
+  mergeHistoryOverSnapshot,
+  readMessageSnapshot,
+  writeMessageSnapshot,
+} from "@/features/messages/lib/messageSnapshot";
+import {
   MIN_TOP_LEVEL_ROWS_PER_FETCH,
   pageOlderMessagesUntilRowFloor,
 } from "@/features/messages/lib/pageOlderMessages";
+import { useWorkspaces } from "@/features/workspaces/useWorkspaces";
 import {
   KIND_STREAM_MESSAGE,
   KIND_SYSTEM_MESSAGE,
@@ -171,10 +177,24 @@ export function createOptimisticMessage(
 export function useChannelMessagesQuery(channel: Channel | null) {
   const queryClient = useQueryClient();
   const queryKey = channelMessagesKey(channel?.id ?? "none");
+  const { activeWorkspace } = useWorkspaces();
+  const relayUrl = activeWorkspace?.relayUrl ?? null;
 
-  return useQuery({
+  const query = useQuery({
     enabled: channel !== null && channel.channelType !== "forum",
-    placeholderData: () => queryClient.getQueryData<RelayEvent[]>(queryKey),
+    // Paint instantly from the in-memory cache, or — after a restart / gc —
+    // from the persisted per-channel snapshot, then revalidate behind it.
+    placeholderData: () => {
+      const cached = queryClient.getQueryData<RelayEvent[]>(queryKey);
+      if (cached && cached.length > 0) {
+        return cached;
+      }
+      if (!channel || !relayUrl) {
+        return undefined;
+      }
+      const snapshot = readMessageSnapshot(relayUrl, channel.id);
+      return snapshot ? normalizeTimelineMessages(snapshot) : undefined;
+    },
     queryKey,
     queryFn: async () => {
       if (!channel) {
@@ -185,36 +205,64 @@ export function useChannelMessagesQuery(channel: Channel | null) {
         channel.id,
         CHANNEL_HISTORY_LIMIT,
       );
-      const currentMessages =
-        queryClient.getQueryData<RelayEvent[]>(queryKey) ?? [];
-      const mergedHistory = mergeTimelineHistoryMessages(
-        currentMessages,
-        history,
-      );
+      // Merge over the cache, or over the persisted snapshot when cold; a
+      // cold snapshot load widens the aux backfill to the merged timeline so
+      // tombstones/edits for snapshot-only rows are fetched (see helper doc).
+      const cached = queryClient.getQueryData<RelayEvent[]>(queryKey);
+      const { merged: mergedHistory, auxBackfillWindow } =
+        mergeHistoryOverSnapshot({
+          cached,
+          snapshot:
+            !cached && relayUrl
+              ? readMessageSnapshot(relayUrl, channel.id)
+              : null,
+          history,
+        });
 
       // Paint messages immediately; backfill their reactions/edits/deletions
       // by `#e` in the background (it self-merges into the same cache key).
-      void backfillAuxForMessages(queryClient, channel.id, history);
+      void backfillAuxForMessages(queryClient, channel.id, auxBackfillWindow);
 
-      // Seed the cache, then — only if the cold window renders thinner than a
-      // normal scroll page — top it up to the same visible-row floor. A
-      // reply-heavy channel's 300-message cold load can be ~12 rows; a normal
-      // channel already clears the floor and skips the extra fetch entirely.
+      // Seed the cache and paint immediately; if the cold window renders
+      // thinner than a normal scroll page (reply-heavy channels), top it up
+      // in the background — it self-merges into the same cache key.
       queryClient.setQueryData<RelayEvent[]>(queryKey, mergedHistory);
       if (
         countTopLevelTimelineRows(mergedHistory) < MIN_TOP_LEVEL_ROWS_PER_FETCH
       ) {
-        await pageOlderMessagesUntilRowFloor(
+        void pageOlderMessagesUntilRowFloor(
           queryClient,
           channel.id,
           () => true,
-        );
+        ).catch((error) => {
+          console.error("Failed to top up channel history", channel.id, error);
+        });
       }
       return queryClient.getQueryData<RelayEvent[]>(queryKey) ?? mergedHistory;
     },
     staleTime: 5 * 60 * 1_000,
-    gcTime: 5 * 60 * 1_000,
+    // Long in-memory retention: a channel revisited within the hour paints
+    // from cache with zero relay round trips; the persisted snapshot covers
+    // restarts beyond it.
+    gcTime: 60 * 60 * 1_000,
   });
+
+  // Persist the newest slice after each settled update so the next cold open
+  // (restart, gc) paints from the snapshot. Placeholder frames are skipped —
+  // they are what the snapshot painted, not new information.
+  const persistSnapshot = useEffectEvent((events: RelayEvent[]) => {
+    if (relayUrl && channel) {
+      writeMessageSnapshot(relayUrl, channel.id, events);
+    }
+  });
+  const settledData = query.isPlaceholderData ? undefined : query.data;
+  useEffect(() => {
+    if (settledData && settledData.length > 0) {
+      persistSnapshot(settledData);
+    }
+  }, [settledData]);
+
+  return query;
 }
 
 export function useChannelSubscription(channel: Channel | null) {

@@ -1758,12 +1758,13 @@ impl Db {
     }
 
     /// Delete a workflow only when it belongs to the provided owner.
+    /// Returns the deleted workflow's `channel_id`.
     pub async fn delete_workflow_for_owner(
         &self,
         community_id: CommunityId,
         id: Uuid,
         owner_pubkey: &[u8],
-    ) -> Result<()> {
+    ) -> Result<Option<Uuid>> {
         workflow::delete_workflow_for_owner(&self.pool, community_id, id, owner_pubkey).await
     }
 

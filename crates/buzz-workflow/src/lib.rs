@@ -87,6 +87,21 @@ pub struct WorkflowEngine {
     /// Action sink for executing side-effects (SendMessage, etc.).
     /// Late-initialized via [`set_action_sink`] after `AppState` construction.
     pub(crate) action_sink: OnceLock<Arc<dyn ActionSink>>,
+    /// Short-TTL cache for the per-event enabled-workflow lookup, keyed
+    /// `(community_id, channel_id)`. Most channels have no workflows, so this
+    /// removes one SELECT from nearly every ingested event.
+    ///
+    /// Consistency: the relay invalidates this cache on its own pod at the two
+    /// workflow mutation sites (command upsert, NIP-09 deletion). There is
+    /// deliberately no cross-pod invalidation — workflow triggering is not an
+    /// access-control fence, so the worst case on another pod is a just-deleted
+    /// workflow firing (or a just-created one missing events) for up to the TTL.
+    /// The same TTL also bounds the same-pod look-aside race (a stale fill
+    /// landing just after an invalidation). Workflow mutations are rare; the
+    /// 10s window matches the relay's other moka caches (see `AppState` in
+    /// `buzz-relay`).
+    pub(crate) workflow_cache:
+        moka::sync::Cache<(CommunityId, Uuid), Arc<Vec<buzz_db::workflow::WorkflowRecord>>>,
 }
 
 impl WorkflowEngine {
@@ -100,7 +115,21 @@ impl WorkflowEngine {
             run_semaphore,
             last_fired: DashMap::new(),
             action_sink: OnceLock::new(),
+            workflow_cache: moka::sync::Cache::builder()
+                .max_capacity(10_000)
+                .time_to_live(std::time::Duration::from_secs(10))
+                .build(),
         }
+    }
+
+    /// Drop the cached enabled-workflow list for a channel.
+    ///
+    /// Must be called after any write to a workflow's trigger eligibility or
+    /// channel binding (currently the relay's command upsert and NIP-09
+    /// deletion paths) so same-pod trigger matching sees the change
+    /// immediately instead of after the cache TTL.
+    pub fn invalidate_channel_workflows(&self, community_id: CommunityId, channel_id: Uuid) {
+        self.workflow_cache.invalidate(&(community_id, channel_id));
     }
 
     /// Set the action sink. Called once after `AppState` construction.
@@ -265,11 +294,20 @@ impl WorkflowEngine {
             return Ok(());
         }
 
-        let workflows = self
-            .db
-            .list_enabled_channel_workflows(community_id, channel_id)
-            .await
-            .map_err(WorkflowError::from)?;
+        let cache_key = (community_id, channel_id);
+        let workflows = match self.workflow_cache.get(&cache_key) {
+            Some(cached) => cached,
+            None => {
+                let fresh = Arc::new(
+                    self.db
+                        .list_enabled_channel_workflows(community_id, channel_id)
+                        .await
+                        .map_err(WorkflowError::from)?,
+                );
+                self.workflow_cache.insert(cache_key, Arc::clone(&fresh));
+                fresh
+            }
+        };
 
         if workflows.is_empty() {
             return Ok(());
@@ -285,7 +323,7 @@ impl WorkflowEngine {
             }
         };
 
-        for workflow in &workflows {
+        for workflow in workflows.iter() {
             let def: WorkflowDef = match serde_json::from_value(workflow.definition.clone()) {
                 Ok(d) => d,
                 Err(e) => {

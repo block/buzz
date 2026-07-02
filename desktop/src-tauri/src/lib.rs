@@ -492,6 +492,8 @@ pub fn run() {
             send_managed_agent_channel_message,
             get_forum_posts,
             get_forum_thread,
+            get_thread_replies,
+            get_channel_messages_before,
             edit_message,
             delete_message,
             add_reaction,

@@ -457,6 +457,7 @@ export function ForumComposer({
                 mentions.isMentionOpen ? mentions.suggestions : []
               }
               onChannelSelect={applyChannelInsert}
+              onMentionFetchMore={mentions.fetchMoreSuggestions}
               onMentionSelect={applyMentionInsert}
               position={autocompletePosition}
             />

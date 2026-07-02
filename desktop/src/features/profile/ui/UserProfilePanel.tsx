@@ -768,28 +768,24 @@ export function UserProfilePanel({
       viewerIsOwner={viewerIsOwner}
     />
   );
-  const {
-    agentInfoFields,
-    agentSettingsFields,
-    diagnosticsFields,
-    modelLabel,
-  } = useProfileFieldBuckets({
-    isBot,
-    isOwner,
-    managedAgent,
-    onOpenProfile,
-    ownerAvatarUrl: ownerAvatarProfile?.avatarUrl ?? null,
-    ownerDisplayName,
-    ownerHandle,
-    ownerProfilePubkey,
-    ownerPubkey,
-    persona: resolvedPersona,
-    presenceLoaded: presenceQuery.isSuccess,
-    presenceStatus,
-    profile,
-    pubkey: effectivePubkey,
-    relayAgent,
-  });
+  const { agentInfoFields, agentSettingsFields, diagnosticsFields } =
+    useProfileFieldBuckets({
+      isBot,
+      isOwner: viewerIsOwner,
+      managedAgent,
+      onOpenProfile,
+      ownerAvatarUrl: ownerAvatarProfile?.avatarUrl ?? null,
+      ownerDisplayName,
+      ownerHandle,
+      ownerProfilePubkey,
+      ownerPubkey,
+      persona: resolvedPersona,
+      presenceLoaded: presenceQuery.isSuccess,
+      presenceStatus,
+      profile,
+      pubkey: effectivePubkey,
+      relayAgent,
+    });
   const isDiagnosticsLikeView = view === "diagnostics" || view === "logs";
   const managedAgentLogContent = managedAgentLogQuery.data?.content ?? null;
   const logHeaderSubtitle =
@@ -846,7 +842,6 @@ export function UserProfilePanel({
           managedAgent={managedAgent}
           memoriesLoading={memoryQuery.isLoading}
           memoryCount={memoryCount}
-          modelLabel={modelLabel}
           agentInfoFields={agentInfoFields}
           agentSettingsFields={agentSettingsFields}
           diagnosticsFields={diagnosticsFields}
@@ -876,11 +871,7 @@ export function UserProfilePanel({
         <AgentInfoFocusedView metadataFields={agentInfoFields} />
       ) : null}
       {view === "configuration" ? (
-        <AgentConfigurationFocusedView
-          fields={agentSettingsFields}
-          managedAgent={managedAgent}
-          modelLabel={modelLabel}
-        />
+        <AgentConfigurationFocusedView fields={agentSettingsFields} />
       ) : null}
       {view === "instructions" ? (
         <AgentInstructionsFocusedView instruction={agentInstruction} />

@@ -8,6 +8,8 @@ import type {
   Channel,
   ChannelDetail,
   ChannelMember,
+  ChannelMessagesPageResponse,
+  ChannelPageCursor,
   ChannelType,
   CreateChannelInput,
   GetHomeFeedInput,
@@ -29,9 +31,12 @@ import type {
   SetCanvasResult,
   SetChannelPurposeInput,
   SetChannelTopicInput,
+  ThreadCursor,
+  ThreadRepliesResponse,
   UpdateProfileInput,
   UpdateChannelInput,
   UserProfileSummary,
+  UserSearchPage,
   UserSearchResult,
   UsersBatchResponse,
   CreateManagedAgentInput,
@@ -69,6 +74,7 @@ type RawUserSearchResult = RawUserProfileSummary & { pubkey: string };
 
 type RawSearchUsersResponse = {
   users: RawUserSearchResult[];
+  next_cursor?: string | null;
 };
 
 type RawPresenceLookup = Record<string, PresenceStatus>;
@@ -503,12 +509,17 @@ export async function getUsersBatch(
 export async function searchUsers(
   query: string,
   limit = 8,
-): Promise<UserSearchResult[]> {
+  cursor?: string | null,
+): Promise<UserSearchPage> {
   const response = await invokeTauri<RawSearchUsersResponse>("search_users", {
     query,
     limit,
+    cursor: cursor ?? null,
   });
-  return response.users.map(fromRawUserSearchResult);
+  return {
+    users: response.users.map(fromRawUserSearchResult),
+    nextCursor: response.next_cursor ?? null,
+  };
 }
 
 export async function getPresence(pubkeys: string[]): Promise<PresenceLookup> {
@@ -704,6 +715,111 @@ export async function searchMessages(
 export async function getEventById(eventId: string): Promise<RelayEvent> {
   const eventJson = await invokeTauri<string>("get_event", { eventId });
   return JSON.parse(eventJson) as RelayEvent;
+}
+
+type RawThreadCursor = {
+  created_at: number;
+  event_id: string;
+};
+
+type RawThreadRepliesResponse = {
+  events: RelayEvent[];
+  next_cursor: RawThreadCursor | null;
+};
+
+/**
+ * Fetch the full reply subtree under a thread root, server-side.
+ *
+ * Unlike the channel timeline (which the desktop assembles from its local
+ * cache), this walks `thread_metadata` on the relay, so a thread renders
+ * complete even when its replies fell outside the channel cold-load window —
+ * the descendant gap that made deep/old threads silently incomplete.
+ *
+ * Paging is forward keyset on `(createdAt, eventId)`: pass the returned
+ * `nextCursor` back as `cursor` for the next page. `nextCursor` is non-null only
+ * when a full page was returned. The returned `events` are raw nostr events
+ * (`RelayEvent`), chronological (oldest first). These are the *replies* under
+ * the root (depth >= 1); the root event itself is NOT returned (the relay query
+ * keys on `root_event_id`, which a root row lacks). The caller already holds
+ * the root — it is the open thread head.
+ */
+export async function getThreadReplies(
+  rootEventId: string,
+  channelId?: string | null,
+  options?: {
+    limit?: number;
+    depthLimit?: number;
+    cursor?: ThreadCursor | null;
+  },
+): Promise<ThreadRepliesResponse> {
+  const response = await invokeTauri<RawThreadRepliesResponse>(
+    "get_thread_replies",
+    {
+      rootEventId,
+      channelId: channelId ?? null,
+      limit: options?.limit ?? null,
+      depthLimit: options?.depthLimit ?? null,
+      cursor: options?.cursor
+        ? {
+            created_at: options.cursor.createdAt,
+            event_id: options.cursor.eventId,
+          }
+        : null,
+    },
+  );
+
+  return {
+    events: response.events,
+    nextCursor: response.next_cursor
+      ? {
+          createdAt: response.next_cursor.created_at,
+          eventId: response.next_cursor.event_id,
+        }
+      : null,
+  };
+}
+
+type RawChannelMessagesPageResponse = {
+  events: RelayEvent[];
+  next_cursor: RawThreadCursor | null;
+};
+
+/**
+ * Fetch one keyset page of top-level channel history strictly older than a
+ * cursor, via the bridge composite `(createdAt, eventId)` cursor.
+ *
+ * The desktop timeline pages history over WS `REQ` with a bare `until`
+ * (`createdAt`) cursor, which cannot advance past a `createdAt` second denser
+ * than one page. This is the escape hatch: `beforeId` is the id of the oldest
+ * event already loaded at `before`, and the relay returns strictly-older rows
+ * (`created_at < before OR (created_at = before AND id > beforeId)`). Pass the
+ * returned `nextCursor` back to page further; `nextCursor` is null once a short
+ * page proves history is exhausted.
+ */
+export async function getChannelMessagesBefore(
+  channelId: string,
+  cursor: ChannelPageCursor,
+  limit?: number,
+): Promise<ChannelMessagesPageResponse> {
+  const response = await invokeTauri<RawChannelMessagesPageResponse>(
+    "get_channel_messages_before",
+    {
+      channelId,
+      before: cursor.createdAt,
+      beforeId: cursor.eventId,
+      limit: limit ?? null,
+    },
+  );
+
+  return {
+    events: response.events,
+    nextCursor: response.next_cursor
+      ? {
+          createdAt: response.next_cursor.created_at,
+          eventId: response.next_cursor.event_id,
+        }
+      : null,
+  };
 }
 
 export async function sendChannelMessage(
