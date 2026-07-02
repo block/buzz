@@ -21,7 +21,7 @@ use crate::{
 /// Read the workspace owner's pubkey hex from app state without holding the
 /// lock for longer than necessary. Used to populate `BUZZ_ACP_AGENT_OWNER`
 /// as a fallback for legacy agent records that have no NIP-OA `auth_tag`.
-fn workspace_owner_hex(state: &AppState) -> Result<String, String> {
+pub(super) fn workspace_owner_hex(state: &AppState) -> Result<String, String> {
     let keys = state.keys.lock().map_err(|e| e.to_string())?;
     Ok(keys.public_key().to_hex())
 }
@@ -215,7 +215,7 @@ async fn ensure_relay_mesh_for_record(
     Ok(())
 }
 
-async fn start_local_agent_with_preflight(
+pub(super) async fn start_local_agent_with_preflight(
     app: &AppHandle,
     state: &AppState,
     pubkey: &str,
