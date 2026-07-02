@@ -245,13 +245,12 @@ fn openai_efforts_for_model(model: &str) -> Option<&'static [ThinkingEffort]> {
         || lower.contains("gpt5.5")
         || lower.contains("gpt-5-5")
         || lower.contains("gpt5-5")
-    {
-        Some(GPT5_5_AND_5_4)
-    } else if lower.contains("gpt-5.4")
+        || lower.contains("gpt-5.4")
         || lower.contains("gpt5.4")
         || lower.contains("gpt-5-4")
         || lower.contains("gpt5-4")
     {
+        // gpt-5.5 and gpt-5.4 share the same effort availability table.
         Some(GPT5_5_AND_5_4)
     } else if lower.contains("gpt-5.1")
         || lower.contains("gpt5.1")
@@ -300,7 +299,7 @@ fn resolve_openai_effort(
             _ => None,
         };
         // All supported values sorted by distance (abs diff in ordinal), upward ties win.
-        let mut by_dist: Vec<ThinkingEffort> = supported.iter().copied().collect();
+        let mut by_dist: Vec<ThinkingEffort> = supported.to_vec();
         by_dist.sort_by_key(|&e| {
             let dist = (e as i32 - requested as i32).unsigned_abs();
             // Prefer upward (e > requested) to break ties between equidistant values.

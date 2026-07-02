@@ -769,7 +769,6 @@ fn session_token() -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::catalog::DATABRICKS_V2_KNOWN_MODELS;
 
     /// Regression: legacy `Provider::Databricks` must not advertise v2 AI Gateway model IDs
