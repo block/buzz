@@ -1,8 +1,10 @@
 import * as React from "react";
 import { useQueryClient } from "@tanstack/react-query";
 
-import { channelMessagesKey } from "@/features/messages/lib/messageQueryKeys";
-import { mergeMessages } from "@/features/messages/hooks";
+import {
+  channelMessagesKey,
+  mergeNonContiguousTimelineMessages,
+} from "@/features/messages/lib/messageQueryKeys";
 import {
   getChannelIdFromTags,
   getThreadReference,
@@ -91,7 +93,12 @@ export function useLoadMissingAncestors(
 
           queryClient.setQueryData<RelayEvent[]>(
             channelMessagesKey(activeChannel.id),
-            (current = []) => mergeMessages(current, event),
+            // Non-contiguous merge: an ancestor fetched by id is typically far
+            // older than the loaded window, and anchoring the older-history
+            // pager on it would skip everything in between (see
+            // mergeNonContiguousTimelineMessages).
+            (current = []) =>
+              mergeNonContiguousTimelineMessages(current, [event]),
           );
         } catch (error) {
           console.error("Failed to load ancestor event", eventId, error);

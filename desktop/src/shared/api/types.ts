@@ -167,6 +167,14 @@ export type RelayEvent = {
   id: string;
   /** Local-only render identity for optimistic events that are later acknowledged. */
   localKey?: string;
+  /**
+   * Local-only: merged out-of-band (fetched by id or thread reference, e.g. a
+   * missing thread ancestor), so the history between it and the contiguously
+   * loaded window may be unloaded. The older-history pager must not anchor its
+   * cursor on such an event; the flag clears when a contiguous history page
+   * re-fetches it (history merges keep the incoming copy on id collision).
+   */
+  nonContiguous?: boolean;
   pubkey: string;
   created_at: number;
   kind: number;

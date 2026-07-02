@@ -4,7 +4,9 @@ import { countTopLevelTimelineRows } from "@/features/messages/lib/formatTimelin
 import { backfillAuxForMessages } from "@/features/messages/lib/auxBackfill";
 import {
   channelMessagesKey,
+  isTimelineWindowContentEvent,
   mergeTimelineHistoryMessages,
+  oldestContiguousHistoryTimestamp,
 } from "@/features/messages/lib/messageQueryKeys";
 import { relayClient } from "@/shared/api/relayClient";
 import { getChannelMessagesBefore } from "@/shared/api/tauri";
@@ -45,14 +47,27 @@ const inFlightPasses = new Map<string, Promise<PageOlderResult>>();
  * **max** event id among all cached/fetched events at `created_at === second`.
  * Seeding from the min id (e.g. `baseline[0].id`) would re-request rows already
  * held; seeding from the max id asks the relay for the strictly-unreached tail.
+ * Non-contiguous events are excluded: an out-of-band island at the boundary
+ * second is a *point*, not proof that everything up to its id is held —
+ * seeding past it would skip the unfetched rows before it. The island itself
+ * just dedupes away when re-fetched. Auxiliary events are excluded for the
+ * same reason: the bridge keyset pages timeline-content kinds only, so an aux
+ * id at the boundary second says nothing about which *content* rows are held
+ * — seeding from a later aux id would skip unseen content in that second.
+ *
+ * Exported for tests only — the pager is the sole runtime caller.
  */
-function maxEventIdAtSecond(
+export function maxEventIdAtSecond(
   events: RelayEvent[],
   second: number,
 ): string | null {
   let maxId: string | null = null;
   for (const event of events) {
-    if (event.created_at !== second) {
+    if (
+      event.created_at !== second ||
+      event.nonContiguous ||
+      !isTimelineWindowContentEvent(event)
+    ) {
       continue;
     }
     if (maxId === null || event.id > maxId) {
@@ -201,7 +216,14 @@ async function runPageOlderPass(
   // visible rows, so the user sees the loader dribble messages in 1-5 at a
   // time. One commit = one bounded growth step.
   const fetched: RelayEvent[] = [];
-  let oldestTimestamp = baseline[0].created_at;
+  // Anchor the cursor on the oldest *contiguously loaded* event, not the
+  // oldest event in cache: out-of-band merges (thread ancestors, thread-panel
+  // subtrees) plant isolated older "islands", and anchoring on an island pages
+  // backward from it — permanently skipping the unloaded history between the
+  // island and the contiguous window. Islands dedupe away (and lose their
+  // mark) once contiguous paging reaches them.
+  let oldestTimestamp =
+    oldestContiguousHistoryTimestamp(baseline) ?? baseline[0].created_at;
 
   while (hasOlderMessages && shouldContinue()) {
     const olderMessages = await relayClient.fetchChannelHistoryBefore(

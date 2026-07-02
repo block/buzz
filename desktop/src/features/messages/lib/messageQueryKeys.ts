@@ -50,7 +50,7 @@ export function sortMessages(messages: RelayEvent[]) {
   });
 }
 
-function isTimelineWindowContentEvent(event: RelayEvent) {
+export function isTimelineWindowContentEvent(event: RelayEvent) {
   return (
     event.kind === KIND_STREAM_MESSAGE ||
     event.kind === KIND_STREAM_MESSAGE_V2 ||
@@ -64,6 +64,31 @@ function isTimelineWindowContentEvent(event: RelayEvent) {
     event.kind === KIND_JOB_ERROR ||
     event.kind === KIND_HUDDLE_STARTED
   );
+}
+
+/**
+ * The oldest timestamp the older-history pager may anchor its `until` cursor
+ * on: the oldest cached content event that arrived through contiguous history
+ * loading. Events merged out-of-band (`nonContiguous`: thread ancestors,
+ * thread-panel subtrees) are skipped — anchoring on such an "island" pages
+ * from the island backward and permanently skips the unloaded gap between the
+ * island and the contiguous window (the June-14 → June-9 scrollback hole).
+ * Auxiliary events are skipped too: they are always newer than the content
+ * they reference, so an aux event older than every contiguous content event
+ * can only reference an island — making it an island itself.
+ *
+ * Assumes `events` is sorted ascending (every cache write stores sorted).
+ * Returns null when no contiguously loaded content event is cached.
+ */
+export function oldestContiguousHistoryTimestamp(
+  events: RelayEvent[],
+): number | null {
+  for (const event of events) {
+    if (!event.nonContiguous && isTimelineWindowContentEvent(event)) {
+      return event.created_at;
+    }
+  }
+  return null;
 }
 
 function capNewestTimelineMessages(normalized: RelayEvent[]) {
@@ -113,4 +138,28 @@ export function mergeTimelineHistoryMessages(
   history: RelayEvent[],
 ) {
   return sortMessages([...current, ...history]);
+}
+
+/**
+ * Merge events fetched out-of-band — by id (missing thread ancestors) or by
+ * thread reference (thread-panel subtrees) — into the timeline cache, marked
+ * `nonContiguous` so {@link oldestContiguousHistoryTimestamp} never anchors
+ * the older-history pager on them. Events already in the cache are left
+ * untouched: a copy that arrived contiguously must not be downgraded to an
+ * island. The mark heals itself — when contiguous paging reaches an island,
+ * the history merge's last-copy-wins dedupe replaces the flagged copy with
+ * the unflagged one.
+ */
+export function mergeNonContiguousTimelineMessages(
+  current: RelayEvent[],
+  events: RelayEvent[],
+) {
+  const knownIds = new Set(current.map((event) => event.id));
+  const additions = events
+    .filter((event) => !knownIds.has(event.id))
+    .map((event) => ({ ...event, nonContiguous: true }));
+  if (additions.length === 0) {
+    return current;
+  }
+  return sortMessages([...current, ...additions]);
 }

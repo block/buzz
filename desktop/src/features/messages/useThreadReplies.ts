@@ -1,8 +1,10 @@
 import * as React from "react";
 import { useQueryClient } from "@tanstack/react-query";
 
-import { channelMessagesKey } from "@/features/messages/lib/messageQueryKeys";
-import { mergeMessages } from "@/features/messages/hooks";
+import {
+  channelMessagesKey,
+  mergeNonContiguousTimelineMessages,
+} from "@/features/messages/lib/messageQueryKeys";
 import { getThreadReplies } from "@/shared/api/tauri";
 import type { Channel, RelayEvent, ThreadCursor } from "@/shared/api/types";
 
@@ -82,7 +84,12 @@ export function useThreadReplies(
           if (response.events.length > 0) {
             queryClient.setQueryData<RelayEvent[]>(
               channelMessagesKey(channelId),
-              (current = []) => response.events.reduce(mergeMessages, current),
+              // Non-contiguous merge: a deep/old thread's replies can predate
+              // the loaded window; anchoring the older-history pager on them
+              // would skip everything in between (see
+              // mergeNonContiguousTimelineMessages).
+              (current = []) =>
+                mergeNonContiguousTimelineMessages(current, response.events),
             );
           }
 
