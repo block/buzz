@@ -63,7 +63,7 @@ export function TurnLivenessIndicator({
         >
           <FuzzyLogo
             ariaLabel=""
-            className="text-foreground"
+            className="w-5! text-foreground"
             fuzz={fuzz}
             pulse={false}
           />
