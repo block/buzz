@@ -391,7 +391,10 @@ async fn session_new(app: &Arc<App>, id: Value, params: Value, wire_tx: &WireSen
     let available_models: Vec<Value> = {
         use crate::config::Provider;
         match app.cfg.provider {
-            Provider::Databricks | Provider::DatabricksV2 => {
+            Provider::DatabricksV2 => {
+                // AI Gateway v2 supports model switching across the published catalog.
+                // On discovery failure, fall back to the statically-known v2 model IDs
+                // so the response is never empty even without a browser token.
                 let entries = app
                     .models_cache
                     .get_or_init(|| async {
@@ -399,8 +402,6 @@ async fn session_new(app: &Arc<App>, id: Value, params: Value, wire_tx: &WireSen
                             Ok(models) => models,
                             Err(e) => {
                                 tracing::warn!("model catalog discovery failed: {e}; using known-models fallback");
-                                // Fall back to the statically-known models list so the
-                                // response is never empty even without a browser token.
                                 DATABRICKS_V2_KNOWN_MODELS
                                     .iter()
                                     .map(|id| crate::catalog::ModelEntry {
@@ -408,6 +409,32 @@ async fn session_new(app: &Arc<App>, id: Value, params: Value, wire_tx: &WireSen
                                         name: id.to_string(),
                                     })
                                     .collect()
+                            }
+                        }
+                    })
+                    .await;
+                entries
+                    .iter()
+                    .map(|m| json!({ "modelId": m.id, "name": m.name }))
+                    .collect()
+            }
+            Provider::Databricks => {
+                // Legacy Databricks model serving routes to a single endpoint per model.
+                // The DATABRICKS_V2_KNOWN_MODELS list is AI Gateway v2 IDs that
+                // `/serving-endpoints/{model}/invocations` may not serve — do not advertise
+                // them for legacy Databricks. On discovery failure, advertise only the
+                // configured model.
+                let entries = app
+                    .models_cache
+                    .get_or_init(|| async {
+                        match discover_databricks_models(&app.cfg).await {
+                            Ok(models) => models,
+                            Err(e) => {
+                                tracing::warn!("model catalog discovery failed: {e}; advertising configured model only");
+                                vec![crate::catalog::ModelEntry {
+                                    id: app.cfg.model.clone(),
+                                    name: app.cfg.model.clone(),
+                                }]
                             }
                         }
                     })
@@ -738,4 +765,35 @@ fn session_token() -> Result<String, String> {
     let mut b = [0u8; 8];
     getrandom::fill(&mut b).map_err(|e| format!("rng: getrandom failed: {e}"))?;
     Ok(b.iter().map(|x| format!("{x:02x}")).collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::catalog::DATABRICKS_V2_KNOWN_MODELS;
+
+    /// Regression: legacy `Provider::Databricks` must not advertise v2 AI Gateway model IDs
+    /// as its discovery fallback. The `DATABRICKS_V2_KNOWN_MODELS` list contains AI Gateway
+    /// v2 endpoint IDs that `/serving-endpoints/{model}/invocations` may not serve.
+    ///
+    /// This test verifies that the v2 fallback list is non-empty (so there IS a distinction
+    /// between the two providers' fallback behavior to protect) and that each entry looks like
+    /// an AI Gateway v2 ID format (not a legacy serving endpoint name). The actual split is
+    /// in `session_new`; this documents the invariant that justifies it.
+    #[test]
+    fn databricks_v2_known_models_nonempty_and_not_legacy_format() {
+        assert!(
+            !DATABRICKS_V2_KNOWN_MODELS.is_empty(),
+            "DATABRICKS_V2_KNOWN_MODELS must be non-empty — it is the v2 discovery fallback"
+        );
+        // v2 model IDs include family name + version (e.g. "databricks-claude-opus-4-7",
+        // "databricks-meta-llama-4-maverick"). None should look like a bare serving endpoint
+        // name (which would not include a vendor/family prefix like "databricks-").
+        for id in DATABRICKS_V2_KNOWN_MODELS {
+            assert!(
+                id.contains('-'),
+                "v2 model ID {id:?} must contain a hyphen (AI Gateway v2 format)"
+            );
+        }
+    }
 }

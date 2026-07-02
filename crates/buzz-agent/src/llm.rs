@@ -91,28 +91,18 @@ impl Llm {
             }
             Provider::OpenAi | Provider::Databricks => {
                 self.openai_request(cfg, effective_model, |use_responses| {
+                    // Normalize effort for model-specific availability (per-model table; max is
+                    // already rejected at startup for pure OpenAI, but other per-model corrections
+                    // like none→minimal on gpt-5 base still apply).
+                    let e = effort.map(|ef| normalize_effort_for_openai_route(ef, effective_model));
                     if use_responses {
                         (
-                            responses_body(
-                                cfg,
-                                system_prompt,
-                                history,
-                                tools,
-                                effective_model,
-                                effort,
-                            ),
+                            responses_body(cfg, system_prompt, history, tools, effective_model, e),
                             parse_responses as OpenAiParse,
                         )
                     } else {
                         (
-                            openai_body(
-                                cfg,
-                                system_prompt,
-                                history,
-                                tools,
-                                effective_model,
-                                effort,
-                            ),
+                            openai_body(cfg, system_prompt, history, tools, effective_model, e),
                             parse_openai as OpenAiParse,
                         )
                     }
@@ -122,8 +112,9 @@ impl Llm {
             Provider::DatabricksV2 => {
                 self.databricks_v2_request(cfg, effective_model, |route| match route {
                     DatabricksV2Route::OpenAiResponses => {
-                        // OpenAI Responses path: normalize effort (max → xhigh).
-                        let e = effort.map(normalize_effort_for_openai_route);
+                        // OpenAI Responses path: normalize effort (max → xhigh, per-model table).
+                        let e =
+                            effort.map(|ef| normalize_effort_for_openai_route(ef, effective_model));
                         (
                             responses_body(cfg, system_prompt, history, tools, effective_model, e),
                             parse_responses as OpenAiParse,
@@ -138,8 +129,9 @@ impl Llm {
                         )
                     }
                     DatabricksV2Route::MlflowChatCompletions => {
-                        // MLflow Chat path (OpenAI-shaped): normalize effort (max → xhigh).
-                        let e = effort.map(normalize_effort_for_openai_route);
+                        // MLflow Chat path (OpenAI-shaped): normalize effort (max → xhigh, per-model table).
+                        let e =
+                            effort.map(|ef| normalize_effort_for_openai_route(ef, effective_model));
                         (
                             openai_body(cfg, system_prompt, history, tools, effective_model, e),
                             parse_openai as OpenAiParse,
@@ -1614,9 +1606,11 @@ mod tests {
     #[test]
     fn anthropic_body_emits_thinking_when_effort_high() {
         // claude-3.x model → manual budget_tokens shape.
-        // max_output_tokens in cfg() is 1024; High budget (32768) gets capped to 1023.
+        // Use max_output_tokens = 4096 so budget fits: headroom = 4096 - 1024 = 3072.
+        let mut c = cfg(Provider::Anthropic);
+        c.max_output_tokens = 4096;
         let body = anthropic_body(
-            &cfg(Provider::Anthropic),
+            &c,
             "system",
             &[HistoryItem::User("hi".into())],
             &[],
@@ -1624,9 +1618,47 @@ mod tests {
             Some(ThinkingEffort::High),
         );
         assert_eq!(body["thinking"]["type"], "enabled");
-        // budget_tokens capped at max_output_tokens - 1 = 1023
-        assert_eq!(body["thinking"]["budget_tokens"], 1023);
+        // budget_tokens = min(32768, 4096-1024) = 3072
+        assert_eq!(body["thinking"]["budget_tokens"], 3072);
         assert!(body.get("output_config").is_none());
+    }
+
+    #[test]
+    fn anthropic_body_omits_thinking_when_max_output_too_small() {
+        // max_output_tokens = 2047: headroom = 2047 - 1024 = 1023 < 1024 → omit thinking.
+        let mut c = cfg(Provider::Anthropic);
+        c.max_output_tokens = 2047;
+        let body = anthropic_body(
+            &c,
+            "system",
+            &[HistoryItem::User("hi".into())],
+            &[],
+            "claude-3-7-sonnet-20250219",
+            Some(ThinkingEffort::High),
+        );
+        assert!(
+            body.get("thinking").is_none(),
+            "thinking must be omitted when max_output_tokens leaves < 1024 for budget"
+        );
+    }
+
+    #[test]
+    fn anthropic_body_emits_thinking_at_boundary_2048() {
+        // max_output_tokens = 2048: headroom = 2048 - 1024 = 1024 ≥ 1024 → emit.
+        let mut c = cfg(Provider::Anthropic);
+        c.max_output_tokens = 2048;
+        let body = anthropic_body(
+            &c,
+            "system",
+            &[HistoryItem::User("hi".into())],
+            &[],
+            "claude-3-7-sonnet-20250219",
+            Some(ThinkingEffort::High),
+        );
+        let t = body
+            .get("thinking")
+            .expect("thinking must be present at boundary 2048");
+        assert_eq!(t["budget_tokens"], 1024); // min(32768, 2048-1024)
     }
 
     #[test]
@@ -1647,18 +1679,20 @@ mod tests {
 
     #[test]
     fn anthropic_body_emits_thinking_low_budget() {
-        // Low budget (1024) fits inside max_output_tokens (1024) only if strictly <.
-        // min(1024, 1024-1) = 1023 — Low is capped when max_output_tokens == 1024.
+        // Low budget (1024 tokens) exactly fits when max_output_tokens = 2048.
+        // headroom = 2048 - 1024 = 1024; min(1024, 1024) = 1024 ≥ 1024 → emit.
+        let mut c = cfg(Provider::Anthropic);
+        c.max_output_tokens = 2048;
         let body = anthropic_body(
-            &cfg(Provider::Anthropic),
+            &c,
             "system",
             &[HistoryItem::User("hi".into())],
             &[],
             "claude-3-7-sonnet-20250219",
             Some(ThinkingEffort::Low),
         );
-        // Low budget is exactly at the boundary — gets capped to max_output_tokens-1.
-        assert_eq!(body["thinking"]["budget_tokens"], 1023);
+        // Low budget (1024) fits exactly at the boundary — emitted without capping.
+        assert_eq!(body["thinking"]["budget_tokens"], 1024);
     }
 
     #[test]
@@ -1685,6 +1719,7 @@ mod tests {
     #[test]
     fn anthropic_body_emits_manual_budget_for_opus_4_5() {
         // Opus 4.5 uses manual budget (effort page: "uses manual thinking").
+        // max_output_tokens = 32768; headroom = 32768 - 1024 = 31744; min(32768, 31744) = 31744.
         let mut c = cfg(Provider::Anthropic);
         c.max_output_tokens = 32_768;
         let body = anthropic_body(
@@ -1696,7 +1731,7 @@ mod tests {
             Some(ThinkingEffort::High),
         );
         assert_eq!(body["thinking"]["type"], "enabled");
-        assert_eq!(body["thinking"]["budget_tokens"], 32_767); // capped: min(32768, 32768-1)
+        assert_eq!(body["thinking"]["budget_tokens"], 31_744); // min(32768, 32768-1024)
         assert!(
             body.get("output_config").is_none(),
             "output_config must be absent for claude-opus-4-5 (manual budget)"
@@ -1904,27 +1939,30 @@ mod tests {
 
     #[test]
     fn dbv2_openai_route_max_effort_clamped_to_xhigh_in_responses_body() {
-        // DBv2 GPT-5 route: max → clamped to xhigh by normalize_effort_for_openai_route
-        // before reaching responses_body. The body must carry "xhigh", never "max".
-        let clamped = crate::config::normalize_effort_for_openai_route(ThinkingEffort::Max);
+        // DBv2 GPT-5.5 route: max → clamped to xhigh by normalize_effort_for_openai_route
+        // before reaching responses_body. gpt-5.5 supports xhigh so the final value is xhigh.
+        let clamped =
+            crate::config::normalize_effort_for_openai_route(ThinkingEffort::Max, "gpt-5.5");
         let body = responses_body(
             &cfg_responses(),
             "system",
             &[HistoryItem::User("hi".into())],
             &[],
-            "gpt-5",
+            "gpt-5.5",
             Some(clamped),
         );
         assert_eq!(
             body["reasoning"]["effort"], "xhigh",
-            "DBv2 GPT-5 route: max must be clamped to xhigh before responses_body"
+            "DBv2 GPT-5.5 route: max must be clamped to xhigh before responses_body"
         );
     }
 
     #[test]
     fn dbv2_mlflow_route_max_effort_clamped_to_xhigh_in_openai_body() {
-        // DBv2 MLflow route: max → clamped to xhigh by normalize_effort_for_openai_route.
-        let clamped = crate::config::normalize_effort_for_openai_route(ThinkingEffort::Max);
+        // DBv2 MLflow route (unknown model): max → clamped to xhigh by normalize_effort_for_openai_route.
+        // Unknown models pass through after the max→xhigh clamp.
+        let clamped =
+            crate::config::normalize_effort_for_openai_route(ThinkingEffort::Max, "llama-4");
         let body = openai_body(
             &cfg(Provider::OpenAi),
             "system",
@@ -1941,28 +1979,34 @@ mod tests {
 
     #[test]
     fn dbv2_openai_route_none_minimal_pass_through_in_responses_body() {
-        // DBv2 GPT-5 route: none and minimal are valid OpenAI effort values.
-        // normalize_effort_for_openai_route passes them through unchanged.
-        for effort in [ThinkingEffort::None, ThinkingEffort::Minimal] {
-            let normalized = crate::config::normalize_effort_for_openai_route(effort);
-            assert_eq!(
-                normalized, effort,
-                "OpenAI normalizer must not touch none/minimal"
-            );
-            let body = responses_body(
-                &cfg_responses(),
-                "system",
-                &[HistoryItem::User("hi".into())],
-                &[],
-                "gpt-5",
-                Some(normalized),
-            );
-            assert_eq!(
-                body["reasoning"]["effort"],
-                effort.openai_effort_str(),
-                "DBv2 GPT-5 route: {effort:?} must be emitted as-is"
-            );
-        }
+        // Verify that supported values pass through for the respective model families.
+        // gpt-5.5 supports none (but not minimal); gpt-5 base supports minimal (but not none).
+        let none_normalized =
+            crate::config::normalize_effort_for_openai_route(ThinkingEffort::None, "gpt-5.5");
+        assert_eq!(
+            none_normalized,
+            ThinkingEffort::None,
+            "OpenAI normalizer must not touch none for gpt-5.5"
+        );
+        let minimal_normalized =
+            crate::config::normalize_effort_for_openai_route(ThinkingEffort::Minimal, "gpt-5");
+        assert_eq!(
+            minimal_normalized,
+            ThinkingEffort::Minimal,
+            "OpenAI normalizer must not touch minimal for gpt-5 base"
+        );
+        let body = responses_body(
+            &cfg_responses(),
+            "system",
+            &[HistoryItem::User("hi".into())],
+            &[],
+            "gpt-5.5",
+            Some(none_normalized),
+        );
+        assert_eq!(
+            body["reasoning"]["effort"], "none",
+            "DBv2 GPT-5.5 route: none must be emitted as-is"
+        );
     }
 
     #[test]
@@ -2013,20 +2057,22 @@ mod tests {
         assert_eq!(thinking_before.unwrap()["type"], "adaptive");
         assert_eq!(oc_before.unwrap()["effort"], "max");
 
-        // After switch to GPT-5 route: normalize max → xhigh for responses_body
-        let clamped = crate::config::normalize_effort_for_openai_route(ThinkingEffort::Max);
+        // After switch to GPT-5.5 route: normalize max → xhigh for responses_body
+        // (gpt-5.5 supports xhigh, so the clamp result is xhigh, not further reduced)
+        let clamped =
+            crate::config::normalize_effort_for_openai_route(ThinkingEffort::Max, "gpt-5.5");
         assert_eq!(clamped, ThinkingEffort::XHigh);
         let body_after = responses_body(
             &cfg_responses(),
             "system",
             &[HistoryItem::User("hi".into())],
             &[],
-            "gpt-5",
+            "gpt-5.5",
             Some(clamped),
         );
         assert_eq!(
             body_after["reasoning"]["effort"], "xhigh",
-            "After set_model to GPT-5: max must be clamped to xhigh"
+            "After set_model to GPT-5.5: max must be clamped to xhigh"
         );
     }
 
