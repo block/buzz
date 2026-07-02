@@ -7530,6 +7530,126 @@ export function maybeInstallE2eTauriMocks() {
           },
           activeConfig,
         );
+      case "get_project_repo_snapshot":
+        return {
+          latest_commit: {
+            hash: "0123456789abcdef0123456789abcdef01234567",
+            short_hash: "0123456",
+            author_name: "Brain",
+            author_email: "brain@example.com",
+            timestamp: Math.floor(Date.now() / 1000) - 600,
+            subject: "Add Trello board workflow details",
+          },
+          commits: [
+            {
+              hash: "0123456789abcdef0123456789abcdef01234567",
+              short_hash: "0123456",
+              author_name: "Brain",
+              author_email: "brain@example.com",
+              timestamp: Math.floor(Date.now() / 1000) - 600,
+              subject: "Add Trello board workflow details",
+            },
+            {
+              hash: "123456789abcdef0123456789abcdef012345678",
+              short_hash: "1234567",
+              author_name: "Thomas P",
+              author_email: "thomasp@example.com",
+              timestamp: Math.floor(Date.now() / 1000) - 1_800,
+              subject: "Point project repository details at active branch",
+            },
+            {
+              hash: "23456789abcdef0123456789abcdef0123456789",
+              short_hash: "2345678",
+              author_name: "Brain",
+              author_email: "brain@example.com",
+              timestamp: Math.floor(Date.now() / 1000) - 3_600,
+              subject: "Make project repository-first",
+            },
+            {
+              hash: "3456789abcdef0123456789abcdef0123456789a",
+              short_hash: "3456789",
+              author_name: "Git Importer",
+              author_email: "git-importer@example.com",
+              timestamp: Math.floor(Date.now() / 1000) - 7_200,
+              subject: "Merge remote project history into local workspace",
+            },
+          ],
+          contributors: [
+            {
+              name: "Brain",
+              email: "brain@example.com",
+              commit_count: 8,
+              last_commit_at: Math.floor(Date.now() / 1000) - 600,
+            },
+            {
+              name: "Thomas P",
+              email: "thomasp@example.com",
+              commit_count: 3,
+              last_commit_at: Math.floor(Date.now() / 1000) - 1_800,
+            },
+            {
+              name: "Git Importer",
+              email: "git-importer@example.com",
+              commit_count: 1,
+              last_commit_at: Math.floor(Date.now() / 1000) - 7_200,
+            },
+          ],
+          files: [
+            {
+              path: "desktop/src/features/projects/ui/ProjectDetailScreen.tsx",
+              kind: "blob",
+              size: 18420,
+              preview_content:
+                'export function ProjectDetailScreen() {\n  return <WorkspaceTabs defaultValue="files" />;\n}\n',
+            },
+            {
+              path: "desktop/src/features/projects/ui/ProjectsView.tsx",
+              kind: "blob",
+              size: 16412,
+              preview_content:
+                "export function ProjectsView() {\n  return <ProjectsToolbar />;\n}\n",
+            },
+            {
+              path: "desktop/src/features/projects/hooks.ts",
+              kind: "blob",
+              size: 9520,
+              preview_content:
+                "export function useProjectRepoSnapshotQuery(project) {\n  return useQuery({ queryKey: [project.id, 'repo-snapshot'] });\n}\n",
+            },
+            {
+              path: "crates/buzz-relay/src/api/git/transport.rs",
+              kind: "blob",
+              size: 33120,
+              preview_content:
+                "// Smart HTTP git transport\n// Handles upload-pack and receive-pack for Buzz git repos.\n",
+            },
+          ],
+        };
+      case "get_project_local_repo_snapshot":
+        return null;
+      case "get_project_repo_sync_status":
+        return {
+          local_path: null,
+          local_branch: null,
+          local_head: null,
+          local_short_head: null,
+          remote_branch: "main",
+          remote_head: "0123456789abcdef0123456789abcdef01234567",
+          remote_short_head: "0123456",
+          ahead_count: 0,
+          behind_count: 0,
+          has_uncommitted_changes: false,
+          has_untracked_files: false,
+          can_push: false,
+          push_block_reason: "No local checkout found.",
+        };
+      case "list_project_local_repositories":
+        return [];
+      case "push_project_local_repository":
+        return {
+          pushed: true,
+          message: "Pushed main to remote.",
+        };
       case "get_relay_ws_url":
         return getRelayWsUrl(activeConfig);
       case "get_default_relay_url":
