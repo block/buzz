@@ -8,6 +8,7 @@ mod handoff;
 mod hints;
 mod llm;
 mod mcp;
+mod metric;
 pub mod types;
 mod wire;
 
@@ -39,6 +40,7 @@ struct App {
     cfg: Config,
     llm: Arc<Llm>,
     sessions: Mutex<HashMap<String, Session>>,
+    metric_publisher: Arc<metric::MetricPublisher>,
 }
 
 struct Session {
@@ -71,6 +73,9 @@ struct Session {
     /// with it so the gate can account for history appended since.
     last_request_history_bytes: Option<usize>,
     effective_system_prompt: Arc<str>,
+    /// Monotonically increasing per-session turn counter for NIP-AM metric events.
+    /// Incremented on each `session/prompt` request.
+    turn_seq: u64,
 }
 
 fn die(msg: String) -> ! {
@@ -135,6 +140,7 @@ async fn async_main() {
         cfg,
         llm,
         sessions: Mutex::new(HashMap::new()),
+        metric_publisher: Arc::new(metric::MetricPublisher::from_env()),
     });
     let (wire_tx, wire_rx) = mpsc::channel::<WireMsg>(64);
     let writer = tokio::spawn(wire::writer_task(wire_rx));
@@ -365,6 +371,7 @@ async fn session_new(app: &Arc<App>, id: Value, params: Value, wire_tx: &WireSen
             last_request_input_tokens: None,
             last_request_history_bytes: None,
             effective_system_prompt,
+            turn_seq: 0,
         },
     );
     drop(sessions);
@@ -489,6 +496,7 @@ async fn run_prompt(app: Arc<App>, id: Value, params: Value, wire_tx: WireSender
         effective_system_prompt,
         run_id,
         mut steer_rx,
+        turn_seq,
     ) = match acquire_session(&app, &p.session_id).await {
         Ok(v) => v,
         Err(reason) => {
@@ -512,6 +520,8 @@ async fn run_prompt(app: Arc<App>, id: Value, params: Value, wire_tx: WireSender
         ),
     )
     .await;
+    let mut turn_input_tokens: Option<u64> = None;
+    let mut turn_output_tokens: Option<u64> = None;
     let mut ctx = RunCtx {
         cfg: &app.cfg,
         session_id: &sid,
@@ -528,6 +538,8 @@ async fn run_prompt(app: Arc<App>, id: Value, params: Value, wire_tx: WireSender
         stop_rejections: &mut stop_rejections,
         last_request_input_tokens: &mut last_request_input_tokens,
         last_request_history_bytes: &mut last_request_history_bytes,
+        turn_input_tokens: &mut turn_input_tokens,
+        turn_output_tokens: &mut turn_output_tokens,
     };
     let result = ctx.run(p.prompt).await;
     if let Some(s) = app.sessions.lock().await.get_mut(&sid) {
@@ -542,6 +554,22 @@ async fn run_prompt(app: Arc<App>, id: Value, params: Value, wire_tx: WireSender
         s.last_request_input_tokens = last_request_input_tokens;
         s.last_request_history_bytes = last_request_history_bytes;
     }
+    // Best-effort: publish NIP-AM kind 44200 agent turn metric. Never fails
+    // the turn — errors are logged at WARN inside MetricPublisher::publish.
+    let nip_am_stop = match &result {
+        Ok(stop) => agent_stop_to_nip_am(stop),
+        Err(_) => buzz_core::agent_turn_metric::StopReason::Error,
+    };
+    app.metric_publisher
+        .publish(
+            &sid,
+            turn_seq,
+            &run_id,
+            turn_input_tokens,
+            turn_output_tokens,
+            nip_am_stop,
+        )
+        .await;
     match result {
         Ok(stop) => {
             wire::send(
@@ -572,6 +600,7 @@ async fn acquire_session(
         Arc<str>,
         String,
         mpsc::UnboundedReceiver<Vec<ContentBlock>>,
+        u64,
     ),
     &'static str,
 > {
@@ -593,6 +622,10 @@ async fn acquire_session(
     s.active_run_id = Some(run_id.clone());
     let (steer_tx, steer_rx) = mpsc::unbounded_channel();
     s.steer_tx = Some(steer_tx);
+    // Increment turn sequence number before returning so the metric event
+    // gets a monotonically increasing counter starting at 1.
+    s.turn_seq = s.turn_seq.saturating_add(1);
+    let turn_seq = s.turn_seq;
     Ok((
         s.id.clone(),
         s.mcp.clone(),
@@ -607,6 +640,7 @@ async fn acquire_session(
         Arc::clone(&s.effective_system_prompt),
         run_id,
         steer_rx,
+        turn_seq,
     ))
 }
 
@@ -614,4 +648,17 @@ fn session_token() -> Result<String, String> {
     let mut b = [0u8; 8];
     getrandom::fill(&mut b).map_err(|e| format!("rng: getrandom failed: {e}"))?;
     Ok(b.iter().map(|x| format!("{x:02x}")).collect())
+}
+
+/// Map a buzz-agent `StopReason` to the NIP-AM `StopReason` used in kind 44200 payloads.
+fn agent_stop_to_nip_am(r: &crate::types::StopReason) -> buzz_core::agent_turn_metric::StopReason {
+    use crate::types::StopReason;
+    use buzz_core::agent_turn_metric::StopReason as CoreStop;
+    match r {
+        StopReason::EndTurn => CoreStop::EndTurn,
+        StopReason::Cancelled => CoreStop::Cancelled,
+        StopReason::MaxTokens => CoreStop::MaxTokens,
+        StopReason::MaxTurnRequests => CoreStop::Unknown,
+        StopReason::Refusal => CoreStop::Unknown,
+    }
 }

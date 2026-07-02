@@ -531,9 +531,8 @@ impl AcpClient {
     /// agent). Must be called at most once per turn; subsequent calls return
     /// `None` until the next `usage_update` notification is recorded.
     ///
-    /// Intended for consumption by `TurnCompletionGuard` in `pool.rs` to
+    /// Intended for consumption by `publish_agent_turn_metric` in `pool.rs` to
     /// publish a kind 44200 NIP-AM event.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn take_turn_usage(&mut self) -> Option<GooseTurnUsage> {
         self.goose_usage.take()
     }

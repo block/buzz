@@ -780,9 +780,12 @@ dependencies = [
  "async-trait",
  "axum",
  "base64",
+ "buzz-core",
+ "chrono",
  "getrandom 0.4.2",
  "hex",
  "nix 0.31.3",
+ "nostr",
  "reqwest 0.13.3",
  "rmcp",
  "serde",
@@ -794,6 +797,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "urlencoding",
+ "uuid",
  "webbrowser",
 ]
 
