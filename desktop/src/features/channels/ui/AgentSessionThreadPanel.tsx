@@ -1,5 +1,5 @@
 import * as React from "react";
-import { Octagon, Settings, TerminalSquare } from "lucide-react";
+import { Octagon, Settings, Sparkles, TerminalSquare } from "lucide-react";
 import { toast } from "sonner";
 
 import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlActions";
@@ -31,12 +31,16 @@ import { Button } from "@/shared/ui/button";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import {
   DropdownMenu,
-  DropdownMenuCheckboxItem,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/shared/ui/dropdown-menu";
+import { Switch } from "@/shared/ui/switch";
+import {
+  setTranscriptAnimationEnabled,
+  useTranscriptAnimationEnabled,
+} from "@/features/agents/ui/transcriptAnimationPreference";
 import type { ChannelAgentSessionAgent } from "./useChannelAgentSessions";
 
 type AgentSessionThreadPanelProps = {
@@ -112,6 +116,7 @@ export function AgentSessionThreadPanel({
     },
     [rawFeedScopeKey],
   );
+  const animateActivity = useTranscriptAnimationEnabled();
   async function handleInterruptTurn() {
     if (!channel) {
       return;
@@ -160,11 +165,13 @@ export function AgentSessionThreadPanel({
             className="min-w-56"
             onCloseAutoFocus={(event) => event.preventDefault()}
           >
-            <DropdownMenuCheckboxItem
-              checked={showRawFeed}
+            <DropdownMenuItem
               className="items-start gap-3"
               data-testid="agent-session-toggle-raw-feed"
-              onCheckedChange={handleRawFeedChange}
+              onSelect={(event) => {
+                event.preventDefault();
+                handleRawFeedChange(!showRawFeed);
+              }}
               title={
                 showRawFeed
                   ? "Hide raw JSON-RPC payloads."
@@ -182,7 +189,45 @@ export function AgentSessionThreadPanel({
                   Show raw JSON-RPC activity.
                 </span>
               </span>
-            </DropdownMenuCheckboxItem>
+              <Switch
+                aria-hidden="true"
+                checked={showRawFeed}
+                className="pointer-events-none mt-0.5"
+                tabIndex={-1}
+              />
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              className="items-start gap-3"
+              data-testid="agent-session-toggle-animate-activity"
+              disabled={showRawFeed}
+              onSelect={(event) => {
+                event.preventDefault();
+                setTranscriptAnimationEnabled(!animateActivity);
+              }}
+              title={
+                showRawFeed
+                  ? "Raw activity rows don't animate in."
+                  : animateActivity
+                    ? "Stop animating new activity rows."
+                    : "Animate new activity rows as they arrive."
+              }
+            >
+              <span className="min-w-0 flex-1">
+                <span className="flex items-center gap-2 text-sm font-medium">
+                  <Sparkles className="h-4 w-4 text-muted-foreground" />
+                  Show Animations
+                </span>
+                <span className="mt-0.5 block text-xs text-muted-foreground">
+                  Slide new activity rows in as they arrive.
+                </span>
+              </span>
+              <Switch
+                aria-hidden="true"
+                checked={animateActivity && !showRawFeed}
+                className="pointer-events-none mt-0.5"
+                tabIndex={-1}
+              />
+            </DropdownMenuItem>
             <DropdownMenuSeparator />
             <DropdownMenuItem
               className="items-start gap-3"
