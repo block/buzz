@@ -18,6 +18,7 @@ export const ACTIVITY_RENDER_CLASS_PRESENTERS = {
   "relay-op": ToolActivity,
   "file-edit": ToolActivity,
   "file-read": ToolActivity,
+  "skill-read": ToolActivity,
   image: ToolActivity,
   shell: ToolActivity,
   status: LifecycleActivity,

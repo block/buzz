@@ -168,6 +168,9 @@ function sameKindLabel(item: TranscriptItem, count: number): string {
     return `Edited ${count} file${count === 1 ? "" : "s"}`;
   }
   if (renderClass === "file-read") return `Read ${count} files`;
+  if (renderClass === "skill-read") {
+    return `Read ${count} skill${count === 1 ? "" : "s"}`;
+  }
   if (renderClass === "shell") return `Ran ${count} commands`;
   if (renderClass === "relay-op") return `Ran ${count} Buzz relay ops`;
   return `${label} ×${count}`;

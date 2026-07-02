@@ -22,6 +22,46 @@ export type FileReadContent = {
   path: string;
 };
 
+export function buildSkillReadContent(
+  item: ToolItem,
+  descriptor: AgentActivityDescriptor,
+): FileReadContent | null {
+  if (descriptor.renderClass !== "skill-read") {
+    return null;
+  }
+
+  const skillRef =
+    getToolString(item.args, ["name"]) ??
+    descriptor.preview ??
+    descriptor.object;
+  if (!skillRef) {
+    return null;
+  }
+
+  const resultText = getResultText(item.result);
+  if (!resultText.trim()) {
+    return null;
+  }
+
+  const rawLines = trimTrailingEmptyLines(resultText.split(/\r?\n/));
+  const lines =
+    rawLines.length > 0
+      ? rawLines.map((line) => ({
+          kind: "context" as const,
+          text: line,
+        }))
+      : [{ kind: "meta" as const, text: "No skill content returned." }];
+
+  const footerText = skillRef.includes("/") ? skillRef : `${skillRef}/SKILL.md`;
+
+  return {
+    footerText,
+    footerTitle: skillRef,
+    lines,
+    path: skillRef,
+  };
+}
+
 export function buildFileReadContent(
   item: ToolItem,
   descriptor: AgentActivityDescriptor,

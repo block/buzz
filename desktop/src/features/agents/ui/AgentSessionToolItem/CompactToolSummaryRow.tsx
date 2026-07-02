@@ -128,6 +128,7 @@ function getCompactToolActionLabel(
   if (
     kind === "shell" ||
     kind === "file-read" ||
+    kind === "skill-read" ||
     kind === "plan" ||
     kind === "image"
   ) {
