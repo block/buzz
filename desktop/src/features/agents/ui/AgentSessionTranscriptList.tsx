@@ -168,7 +168,7 @@ export function AgentSessionTranscriptList({
 
     return (
       <div className={scrollContainerClassNames}>
-        <div className="flex min-h-40 flex-col items-center justify-center px-6 py-10 text-center">
+        <div className="flex h-full min-h-40 flex-col items-center justify-center px-6 py-10 text-center">
           {isLoading ? (
             <FuzzyLogo
               ariaLabel="Waiting for ACP activity"
