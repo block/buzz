@@ -202,3 +202,96 @@ test("writeChannelSectionsStore: returns false when setItem throws", () => {
 test("storageKey: returns expected format with pubkey", () => {
   assert.equal(storageKey("abc123"), "buzz-channel-sections.v1:abc123");
 });
+
+// ─── Relay-scoped key tests ───────────────────────────────────────────────────
+
+test("storageKey: with relayUrl includes encoded relay in key", () => {
+  const key = storageKey("pk1", "wss://relay.example.com");
+  assert.equal(
+    key,
+    `buzz-channel-sections.v1:pk1:${encodeURIComponent("wss://relay.example.com")}`,
+  );
+});
+
+test("storageKey: without relayUrl returns legacy pubkey-only key", () => {
+  assert.equal(storageKey("pk1"), "buzz-channel-sections.v1:pk1");
+  assert.equal(storageKey("pk1", undefined), "buzz-channel-sections.v1:pk1");
+});
+
+test("storageKey: two different relays produce different keys for same pubkey", () => {
+  const k1 = storageKey("pk1", "wss://relay-a.example.com");
+  const k2 = storageKey("pk1", "wss://relay-b.example.com");
+  assert.notEqual(k1, k2);
+});
+
+test("readChannelSectionsStore + writeChannelSectionsStore: scoped write/read roundtrip", () => {
+  const pubkey = "pk-relay-roundtrip";
+  const relay = "wss://relay.example.com";
+  const store = makeStore({
+    sections: [makeSection({ id: "s1", name: "Work", order: 0 })],
+    assignments: { chan1: "s1" },
+  });
+  assert.equal(writeChannelSectionsStore(pubkey, store, relay), true);
+  const result = readChannelSectionsStore(pubkey, relay);
+  assert.deepEqual(result, store);
+});
+
+test("readChannelSectionsStore: scoped key is isolated from other relay's data", () => {
+  const pubkey = "pk-isolation";
+  const relayA = "wss://relay-a.example.com";
+  const relayB = "wss://relay-b.example.com";
+  const storeA = makeStore({
+    sections: [makeSection({ id: "sa", name: "Relay A section", order: 0 })],
+    assignments: {},
+  });
+  writeChannelSectionsStore(pubkey, storeA, relayA);
+  // Relay B should see empty store, not relay A's data.
+  const resultB = readChannelSectionsStore(pubkey, relayB);
+  assert.deepEqual(resultB, DEFAULT_STORE);
+});
+
+test("readChannelSectionsStore: migrates legacy unscoped data on first scoped read", () => {
+  const pubkey = "pk-migrate";
+  const relay = "wss://relay-migrate.example.com";
+  const legacyStore = makeStore({
+    sections: [makeSection({ id: "sl", name: "Legacy Section", order: 0 })],
+    assignments: {},
+  });
+  // Write under legacy (pubkey-only) key.
+  writeChannelSectionsStore(pubkey, legacyStore);
+  // First scoped read should migrate and return the legacy data.
+  const result = readChannelSectionsStore(pubkey, relay);
+  assert.deepEqual(result, legacyStore);
+  // Subsequent scoped reads should hit the scoped key directly.
+  const result2 = readChannelSectionsStore(pubkey, relay);
+  assert.deepEqual(result2, legacyStore);
+});
+
+test("readChannelSectionsStore: migration only copies non-empty legacy stores", () => {
+  const pubkey = "pk-migrate-empty";
+  const relay = "wss://relay-migrate-empty.example.com";
+  // Write an explicitly empty store under the legacy key.
+  writeChannelSectionsStore(pubkey, DEFAULT_STORE);
+  // Empty legacy store should NOT be migrated — we get DEFAULT_STORE.
+  const result = readChannelSectionsStore(pubkey, relay);
+  assert.deepEqual(result, DEFAULT_STORE);
+});
+
+test("readChannelSectionsStore: scoped key takes precedence over legacy key after migration", () => {
+  const pubkey = "pk-precedence";
+  const relay = "wss://relay-precedence.example.com";
+  const legacyStore = makeStore({
+    sections: [makeSection({ id: "sold", name: "Old Section", order: 0 })],
+    assignments: {},
+  });
+  const newStore = makeStore({
+    sections: [makeSection({ id: "snew", name: "New Section", order: 0 })],
+    assignments: {},
+  });
+  // Write legacy data then scoped data (simulates post-migration state).
+  writeChannelSectionsStore(pubkey, legacyStore);
+  writeChannelSectionsStore(pubkey, newStore, relay);
+  // Scoped read must return the scoped (newer) store, not the legacy one.
+  const result = readChannelSectionsStore(pubkey, relay);
+  assert.deepEqual(result, newStore);
+});

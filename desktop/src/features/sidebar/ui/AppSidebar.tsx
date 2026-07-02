@@ -344,7 +344,7 @@ export function AppSidebar({
     reorderSections,
     assignChannel,
     unassignChannel,
-  } = useChannelSections(currentPubkey);
+  } = useChannelSections(currentPubkey, activeWorkspace?.relayUrl);
 
   const [createSectionState, setCreateSectionState] = React.useState<{
     open: boolean;
