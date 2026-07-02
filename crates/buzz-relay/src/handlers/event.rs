@@ -756,9 +756,14 @@ async fn handle_ephemeral_event(
 
     // Check channel membership before publishing other ephemeral events.
     if let Some(ch_id) = super::ingest::extract_channel_id(&event) {
-        if let Err(msg) =
-            super::ingest::check_channel_membership(&conn.tenant, &state, ch_id, &pubkey_bytes)
-                .await
+        if let Err(msg) = super::ingest::check_channel_membership(
+            &conn.tenant,
+            &state,
+            ch_id,
+            &pubkey_bytes,
+            None,
+        )
+        .await
         {
             conn.send(RelayMessage::ok(event_id_hex, false, &msg));
             return;

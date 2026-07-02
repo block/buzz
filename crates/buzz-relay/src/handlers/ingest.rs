@@ -413,12 +413,17 @@ pub(crate) fn requires_h_channel_scope(kind: u32) -> bool {
 
 /// Check channel membership: member OR open-visibility channel.
 ///
+/// `channel` is the request's already-fetched channel row, when the caller has
+/// one (E1 within-request threading; correctness ruling §4.8). Callers without
+/// a row pass `None` and the open-visibility fallback reads the DB directly.
+///
 /// Returns `Ok(())` if allowed, `Err(reason)` if denied.
 pub(crate) async fn check_channel_membership(
     tenant: &TenantContext,
     state: &AppState,
     ch_id: Uuid,
     pubkey_bytes: &[u8],
+    channel: Option<&buzz_db::channel::ChannelRecord>,
 ) -> Result<(), String> {
     match state
         .is_member_cached(tenant.community(), ch_id, pubkey_bytes)
@@ -429,12 +434,15 @@ pub(crate) async fn check_channel_membership(
         Err(e) => return Err(format!("error: database error: {e}")),
     }
     // Not a member — check if channel is open.
-    let is_open = state
-        .db
-        .get_channel(tenant.community(), ch_id)
-        .await
-        .map(|ch| ch.visibility == "open")
-        .unwrap_or(false);
+    let is_open = match channel {
+        Some(ch) => ch.visibility == "open",
+        None => state
+            .db
+            .get_channel(tenant.community(), ch_id)
+            .await
+            .map(|ch| ch.visibility == "open")
+            .unwrap_or(false),
+    };
     if is_open {
         Ok(())
     } else {
@@ -1411,6 +1419,16 @@ async fn ingest_event_inner(
     }
 
     let pubkey_bytes = auth.pubkey().to_bytes().to_vec();
+    // E1 (§4.8): fetch the community-scoped channel row once per request and
+    // thread it through the gates below (membership open-fallback, archived
+    // check, join visibility) instead of re-SELECTing it at each. `None` when
+    // the event is global or the channel doesn't exist yet (kind:9007 creates
+    // it later in this request); each gate keeps its existing missing-row
+    // behavior.
+    let channel_row = match channel_id {
+        Some(ch_id) => state.db.get_channel(tenant.community(), ch_id).await.ok(),
+        None => None,
+    };
     if let Some(ch_id) = channel_id {
         // kind:9021 (join) doesn't require prior membership.
         // kind:9007 (create) — channel doesn't exist yet; creator becomes owner in step 16.
@@ -1434,7 +1452,9 @@ async fn ingest_event_inner(
             // at `check_channel_membership`'s `is_member_cached(tenant
             // .community(), …)` call (see crates/buzz-relay/src/handlers
             // /ingest.rs:424).
-            let auth_result = check_channel_membership(tenant, state, ch_id, &pubkey_bytes).await;
+            let auth_result =
+                check_channel_membership(tenant, state, ch_id, &pubkey_bytes, channel_row.as_ref())
+                    .await;
             let claimed = claimed_community_from_event(&event);
             let verdict = if auth_result.is_ok() {
                 Verdict::Allow
@@ -1574,7 +1594,7 @@ async fn ingest_event_inner(
             .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
     }
 
-    if let Some(ch_id) = channel_id {
+    if channel_id.is_some() {
         // Allow kind:9002 with archived=false (unarchive operation)
         let is_unarchive = kind_u32 == KIND_NIP29_EDIT_METADATA
             && event.tags.iter().any(|t| {
@@ -1583,7 +1603,7 @@ async fn ingest_event_inner(
             });
 
         if !is_unarchive {
-            if let Ok(channel) = state.db.get_channel(tenant.community(), ch_id).await {
+            if let Some(channel) = &channel_row {
                 if channel.archived_at.is_some() {
                     return Err(IngestError::Rejected("invalid: channel is archived".into()));
                 }
@@ -1740,14 +1760,14 @@ async fn ingest_event_inner(
                 "invalid: join request must include an h tag".into(),
             ));
         }
-        if let Some(ch_id) = channel_id {
-            match state.db.get_channel(tenant.community(), ch_id).await {
-                Ok(ch) if ch.visibility == "private" => {
+        if channel_id.is_some() {
+            match &channel_row {
+                Some(ch) if ch.visibility == "private" => {
                     return Err(IngestError::Rejected(
                         "restricted: channel is private".into(),
                     ));
                 }
-                Err(_) => {
+                None => {
                     return Err(IngestError::Rejected("invalid: channel not found".into()));
                 }
                 _ => {} // open — OK
