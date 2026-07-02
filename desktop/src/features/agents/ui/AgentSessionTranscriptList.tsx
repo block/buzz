@@ -1,6 +1,10 @@
 import * as React from "react";
 import { CheckCheck, Radio } from "lucide-react";
 
+import {
+  useActiveAgentTurns,
+  type ActiveTurnSummary,
+} from "@/features/agents/activeAgentTurnsStore";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { useAnchoredScroll } from "@/features/messages/ui/useAnchoredScroll";
 import { cn } from "@/shared/lib/cn";
@@ -10,8 +14,9 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/shared/ui/dialog";
-import { Spinner } from "@/shared/ui/spinner";
+import { FuzzyLogo } from "@/shared/ui/buzz-logo/FuzzyLogo";
 import type { TranscriptItem } from "./agentSessionTypes";
+import { TurnLivenessIndicator } from "./TurnLivenessIndicator";
 import { PromptSectionList as PromptContextSections } from "./PromptSectionAccordion";
 import {
   AgentSessionTranscriptVariantProvider,
@@ -76,6 +81,7 @@ export function AgentSessionTranscriptList({
   agentName,
   agentPubkey,
   autoTail = false,
+  channelId = null,
   emptyDescription,
   emptyState = "idle",
   items,
@@ -85,6 +91,7 @@ export function AgentSessionTranscriptList({
   variant = "default",
 }: AgentTranscriptIdentityProps & {
   autoTail?: boolean;
+  channelId?: string | null;
   emptyDescription: string;
   emptyState?: AgentSessionTranscriptEmptyState;
   items: TranscriptItem[];
@@ -93,6 +100,11 @@ export function AgentSessionTranscriptList({
   scrollScopeKey?: string | null;
   variant?: AgentSessionTranscriptVariant;
 }) {
+  const activeTurns = useActiveAgentTurns(agentPubkey);
+  const isTurnLive = React.useMemo(
+    () => isAgentTurnLive(activeTurns, channelId),
+    [activeTurns, channelId],
+  );
   const displayBlocks = React.useMemo(
     () => buildTranscriptDisplayBlocks(items),
     [items],
@@ -123,9 +135,11 @@ export function AgentSessionTranscriptList({
       <div className={scrollContainerClassNames}>
         <div className="flex min-h-40 flex-col items-center justify-center px-6 py-10 text-center">
           {isLoading ? (
-            <Spinner
-              aria-label="Waiting for ACP activity"
-              className="mx-auto h-4 w-4 border-2 text-muted-foreground"
+            <FuzzyLogo
+              ariaLabel="Waiting for ACP activity"
+              className="mx-auto text-muted-foreground"
+              fuzz={false}
+              loop
             />
           ) : (
             <>
@@ -175,10 +189,24 @@ export function AgentSessionTranscriptList({
               />
             </div>
           ))}
+          {isTurnLive ? <TurnLivenessIndicator /> : null}
         </AgentSessionTranscriptVariantProvider>
       </div>
     </div>
   );
+}
+
+function isAgentTurnLive(
+  activeTurns: ActiveTurnSummary[],
+  channelId: string | null,
+) {
+  if (activeTurns.length === 0) {
+    return false;
+  }
+  if (!channelId) {
+    return true;
+  }
+  return activeTurns.some((turn) => turn.channelId === channelId);
 }
 
 function hasRenderableDisplayContent(
