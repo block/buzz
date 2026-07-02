@@ -1647,8 +1647,8 @@ mod tests {
     }
 
     #[test]
-    fn anthropic_body_emits_output_config_effort_for_modern_claude() {
-        // Modern Claude (claude-4+, sonnet-5+) → `output_config.effort`; no budget_tokens.
+    fn anthropic_body_emits_adaptive_thinking_for_opus_4() {
+        // Adaptive Claude (claude-opus-4-*) → thinking:{type:"adaptive"} + output_config.effort.
         let mut c = cfg(Provider::Anthropic);
         c.max_output_tokens = 32_768;
         let body = anthropic_body(
@@ -1659,9 +1659,9 @@ mod tests {
             "claude-opus-4-5",
             Some(ThinkingEffort::High),
         );
-        assert!(
-            body.get("thinking").is_none(),
-            "thinking must be absent for modern claude"
+        assert_eq!(
+            body["thinking"]["type"], "adaptive",
+            "thinking must be {{type:adaptive}} for claude-opus-4-5"
         );
         assert_eq!(body["output_config"]["effort"], "high");
     }

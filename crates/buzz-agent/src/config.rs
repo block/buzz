@@ -42,13 +42,24 @@ impl ThinkingEffort {
 
 /// Build the Anthropic thinking/effort request fields for the given model and effort level.
 ///
-/// API shape selection (per Anthropic SDK and docs):
-/// - Claude 3.x models: `thinking: {type:"enabled", budget_tokens}` (manual budget).
-///   `budget_tokens` is capped at `max_output_tokens - 1` so it is always strictly less
-///   than `max_tokens` as required by the API.
-/// - Claude 4+ and Sonnet-5+ (modern Claude): `output_config: {effort: "low"|"medium"|"high"}`.
-///   These models use the high-level effort abstraction and may not support manual budgets.
-/// - Unrecognized model: neither field is emitted (safe omit; unknown API shape).
+/// API shape selection (per Anthropic docs — https://platform.claude.com/docs/en/build-with-claude/effort
+/// and https://platform.claude.com/docs/en/build-with-claude/extended-thinking):
+///
+/// **Adaptive families** — `thinking: {type:"adaptive"}` + `output_config: {effort}`.
+/// Doc-verified models (effort page, July 2025): Claude Opus 4.8/4.7/4.6, Sonnet 5/4.6, Opus 4.5.
+/// These models require `thinking:{type:"adaptive"}` to enable thinking; without it, requests
+/// run without thinking even when `output_config.effort` is set.
+/// Matched by prefix: `claude-opus-4-`, `claude-sonnet-5`, `claude-sonnet-4-6`.
+///
+/// **Manual-budget families** — `thinking: {type:"enabled", budget_tokens}`.
+/// `budget_tokens` is capped at `max_output_tokens - 1` (required by the API).
+/// Matched by prefix: `claude-3`.
+///
+/// **Everything else** — omit both fields. This includes unknown/future `claude-*` names
+/// that are not yet doc-verified. Safer to omit than to guess an unverified shape.
+///
+/// The Databricks `databricks-` prefix is stripped before matching so that
+/// `databricks-claude-opus-4-7` routes to the adaptive bucket.
 ///
 /// Returns `(thinking_field, output_config_field)` where each is `None` if not applicable.
 pub fn anthropic_thinking_config(
@@ -64,7 +75,7 @@ pub fn anthropic_thinking_config(
         .unwrap_or(effective_model);
 
     if model.starts_with("claude-3") {
-        // Legacy shape: manual budget, must be strictly < max_tokens.
+        // Legacy manual-budget shape: budget_tokens must be strictly < max_tokens.
         let budget = effort
             .anthropic_budget_tokens()
             .min(max_output_tokens.saturating_sub(1));
@@ -72,13 +83,34 @@ pub fn anthropic_thinking_config(
             Some(json!({ "type": "enabled", "budget_tokens": budget })),
             None,
         )
-    } else if model.starts_with("claude-") {
-        // Modern Claude (4+, sonnet-5, etc.): use output_config.effort.
-        (None, Some(json!({ "effort": effort.openai_effort_str() })))
+    } else if is_adaptive_thinking_model(model) {
+        // Adaptive families: thinking must be explicitly enabled via type:"adaptive".
+        // output_config.effort controls the depth. Both fields are required together.
+        (
+            Some(json!({ "type": "adaptive" })),
+            Some(json!({ "effort": effort.openai_effort_str() })),
+        )
     } else {
-        // Unrecognised model name — omit both fields rather than guess.
+        // Unrecognised or unverified model name — omit both fields rather than guess.
+        // This includes unknown future claude-* names not yet in the allowlist.
         (None, None)
     }
+}
+
+/// Returns true for Claude model families that use adaptive thinking (doc-verified, July 2025).
+///
+/// Verified against https://platform.claude.com/docs/en/build-with-claude/effort:
+/// Claude Opus 4.8, Opus 4.7, Opus 4.6, Sonnet 5, Sonnet 4.6, Opus 4.5.
+///
+/// `model` must already have the `databricks-` prefix stripped.
+fn is_adaptive_thinking_model(model: &str) -> bool {
+    // claude-opus-4-* covers Opus 4.5, 4.6, 4.7, 4.8 and any future Opus 4.x releases.
+    // claude-sonnet-5* covers Sonnet 5.x.
+    // claude-sonnet-4-6 covers Sonnet 4.6 exactly (not Sonnet 4.5 or earlier which
+    // are not in the effort-supported list).
+    model.starts_with("claude-opus-4-")
+        || model.starts_with("claude-sonnet-5")
+        || model.starts_with("claude-sonnet-4-6")
 }
 
 /// Parse `BUZZ_AGENT_THINKING_EFFORT`. Pure (env-free) for testability.
@@ -821,16 +853,85 @@ mod tests {
     }
 
     #[test]
-    fn anthropic_thinking_config_modern_claude_emits_output_config_effort() {
-        // Claude 4+ / sonnet-5+ → `output_config.effort`; no budget_tokens.
+    fn anthropic_thinking_config_opus_4_8_emits_adaptive_and_effort() {
+        // Opus 4.8 — adaptive family. Requires thinking:{type:"adaptive"} to enable thinking.
         let (thinking, output_config) =
-            anthropic_thinking_config("claude-opus-4-5", ThinkingEffort::Medium, 32_768);
+            anthropic_thinking_config("claude-opus-4-8", ThinkingEffort::High, 32_768);
+        let t = thinking.expect("thinking must be present for claude-opus-4-8");
+        assert_eq!(t["type"], "adaptive");
+        let oc = output_config.expect("output_config must be present for claude-opus-4-8");
+        assert_eq!(oc["effort"], "high");
+    }
+
+    #[test]
+    fn anthropic_thinking_config_opus_4_7_emits_adaptive_and_effort() {
+        // Opus 4.7 — adaptive family.
+        let (thinking, output_config) =
+            anthropic_thinking_config("claude-opus-4-7", ThinkingEffort::Medium, 32_768);
+        let t = thinking.expect("thinking must be present for claude-opus-4-7");
+        assert_eq!(t["type"], "adaptive");
+        let oc = output_config.expect("output_config must be present for claude-opus-4-7");
+        assert_eq!(oc["effort"], "medium");
+    }
+
+    #[test]
+    fn anthropic_thinking_config_sonnet_5_emits_adaptive_and_effort() {
+        // Sonnet 5 — adaptive family.
+        let (thinking, output_config) =
+            anthropic_thinking_config("claude-sonnet-5-20250901", ThinkingEffort::Low, 32_768);
+        let t = thinking.expect("thinking must be present for claude-sonnet-5");
+        assert_eq!(t["type"], "adaptive");
+        let oc = output_config.expect("output_config must be present for claude-sonnet-5");
+        assert_eq!(oc["effort"], "low");
+    }
+
+    #[test]
+    fn anthropic_thinking_config_sonnet_4_6_emits_adaptive_and_effort() {
+        // Sonnet 4.6 — adaptive family. Docs explicitly list "Combine effort with adaptive thinking."
+        let (thinking, output_config) =
+            anthropic_thinking_config("claude-sonnet-4-6", ThinkingEffort::High, 32_768);
+        let t = thinking.expect("thinking must be present for claude-sonnet-4-6");
+        assert_eq!(t["type"], "adaptive");
+        let oc = output_config.expect("output_config must be present for claude-sonnet-4-6");
+        assert_eq!(oc["effort"], "high");
+    }
+
+    #[test]
+    fn anthropic_thinking_config_unknown_claude_omits_both_fields() {
+        // An unknown/future "claude-*" name that is not in the allowlist → omit both fields.
+        // This prevents sending an unverified shape to an unrecognized model.
+        for model in &[
+            "claude-haiku-4-5",
+            "claude-sonnet-4-5",
+            "claude-unknown-9-1",
+            "claude-future-model",
+        ] {
+            let (thinking, output_config) =
+                anthropic_thinking_config(model, ThinkingEffort::High, 32_768);
+            assert!(
+                thinking.is_none(),
+                "thinking must be absent for unverified claude model: {model}"
+            );
+            assert!(
+                output_config.is_none(),
+                "output_config must be absent for unverified claude model: {model}"
+            );
+        }
+    }
+
+    #[test]
+    fn anthropic_thinking_config_non_claude_omits_both_fields() {
+        // Non-Anthropic model names (gpt-5, llama, etc.) → omit both fields.
+        let (thinking, output_config) =
+            anthropic_thinking_config("gpt-4o-mini", ThinkingEffort::High, 32_768);
         assert!(
             thinking.is_none(),
-            "thinking must be absent for modern claude"
+            "thinking must be absent for non-claude model"
         );
-        let oc = output_config.expect("output_config must be present for modern claude");
-        assert_eq!(oc["effort"], "medium");
+        assert!(
+            output_config.is_none(),
+            "output_config must be absent for non-claude model"
+        );
     }
 
     #[test]
@@ -844,27 +945,28 @@ mod tests {
     }
 
     #[test]
-    fn anthropic_thinking_config_databricks_prefix_stripped_for_modern_claude() {
-        // Databricks gateway prefix stripping applies to modern Claude too.
+    fn anthropic_thinking_config_databricks_prefix_stripped_for_opus_4_7() {
+        // Databricks gateway prefix stripping applies to adaptive Claude families too.
         let (thinking, output_config) =
             anthropic_thinking_config("databricks-claude-opus-4-7", ThinkingEffort::High, 32_768);
-        assert!(thinking.is_none());
-        let oc = output_config.expect("output_config must be present for databricks-claude-opus-4");
+        let t = thinking
+            .expect("thinking:{type:adaptive} must be present for databricks-claude-opus-4-7");
+        assert_eq!(t["type"], "adaptive");
+        let oc =
+            output_config.expect("output_config must be present for databricks-claude-opus-4-7");
         assert_eq!(oc["effort"], "high");
     }
 
     #[test]
-    fn anthropic_thinking_config_unrecognized_model_omits_both_fields() {
-        // Non-Anthropic model names (gpt-5, llama, etc.) → omit both fields.
+    fn anthropic_thinking_config_databricks_prefix_stripped_for_opus_4_8() {
+        // Databricks gateway prefix stripping applies to Opus 4.8 too.
         let (thinking, output_config) =
-            anthropic_thinking_config("gpt-4o-mini", ThinkingEffort::High, 32_768);
-        assert!(
-            thinking.is_none(),
-            "thinking must be absent for non-claude model"
-        );
-        assert!(
-            output_config.is_none(),
-            "output_config must be absent for non-claude model"
-        );
+            anthropic_thinking_config("databricks-claude-opus-4-8", ThinkingEffort::Medium, 32_768);
+        let t = thinking
+            .expect("thinking:{type:adaptive} must be present for databricks-claude-opus-4-8");
+        assert_eq!(t["type"], "adaptive");
+        let oc =
+            output_config.expect("output_config must be present for databricks-claude-opus-4-8");
+        assert_eq!(oc["effort"], "medium");
     }
 }
