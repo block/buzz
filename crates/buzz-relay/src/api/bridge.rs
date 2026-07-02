@@ -636,6 +636,11 @@ pub async fn query_events(
         handled.insert(idx);
     }
 
+    // Phase 1 — pure construction + validation, in filter order. Access-scope
+    // skips and the `before_id` BAD_REQUEST are decided here, before any DB
+    // work is issued (validation errors are deterministic client mistakes, so
+    // surfacing them ahead of transient DB errors is strictly more predictable).
+    let mut catchall_queries: Vec<(usize, buzz_db::EventQuery)> = Vec::new();
     for (idx, (raw, filter)) in raw_filters.iter().zip(filters.iter()).enumerate() {
         if handled.contains(&idx) {
             continue;
@@ -677,7 +682,24 @@ pub async fn query_events(
             query.offset = Some(offset);
         }
 
-        match state.db.query_events(&query).await {
+        catchall_queries.push((idx, query));
+    }
+
+    // Phase 2 — DB reads, bounded-concurrent, order-preserving (`buffered`).
+    // Phase 3 consumes results in original filter order, so response ordering
+    // and error semantics match the previous serial loop.
+    use futures_util::stream::{self, StreamExt};
+    let db = state.db.clone();
+    let mut catchall_results = stream::iter(catchall_queries.into_iter().map(|(idx, query)| {
+        let db = db.clone();
+        async move { (idx, db.query_events(&query).await) }
+    }))
+    .buffered(crate::handlers::req::FILTER_QUERY_CONCURRENCY);
+
+    // Phase 3 — post-processing, strictly in filter order.
+    while let Some((idx, filter_events)) = catchall_results.next().await {
+        let filter = &filters[idx];
+        match filter_events {
             Ok(stored_events) => {
                 for se in stored_events {
                     if !event_in_accessible_channel(&se, &accessible_channels) {
