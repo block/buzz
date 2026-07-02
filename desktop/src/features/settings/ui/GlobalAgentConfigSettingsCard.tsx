@@ -40,6 +40,7 @@ export function GlobalAgentConfigSettingsCard() {
   const [saveState, setSaveState] = React.useState<SaveState>("idle");
   const [saveError, setSaveError] = React.useState<string | null>(null);
   const [isLoading, setIsLoading] = React.useState(true);
+  const [loadError, setLoadError] = React.useState(false);
   const [isCustomProvider, setIsCustomProvider] = React.useState(false);
   const savedTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(
     null,
@@ -56,7 +57,10 @@ export function GlobalAgentConfigSettingsCard() {
         }
       })
       .catch(() => {
-        if (!cancelled) setIsLoading(false);
+        if (!cancelled) {
+          setIsLoading(false);
+          setLoadError(true);
+        }
       });
     return () => {
       cancelled = true;
@@ -135,6 +139,11 @@ export function GlobalAgentConfigSettingsCard() {
           <Loader className="size-4 animate-spin" />
           Loading…
         </div>
+      ) : loadError ? (
+        <div className="flex items-center gap-2 py-4 text-sm text-destructive">
+          <AlertCircle className="size-4" />
+          Failed to load agent defaults. Restart the app to try again.
+        </div>
       ) : (
         <SettingsOptionGroup>
           {/* Provider field */}
@@ -207,7 +216,7 @@ export function GlobalAgentConfigSettingsCard() {
       )}
 
       {/* Save bar */}
-      {!isLoading && (
+      {!isLoading && !loadError && (
         <div className="mt-4 flex items-center gap-3">
           <Button
             disabled={!dirty || saveState === "saving"}

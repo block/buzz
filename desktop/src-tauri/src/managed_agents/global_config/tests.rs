@@ -133,13 +133,25 @@ fn roundtrip_serialization() {
 }
 
 #[test]
-fn empty_env_vars_omitted_from_serialization() {
+fn default_global_config_serializes_all_fields() {
+    // IPC contract: the frontend TS type declares env_vars/provider/model as
+    // non-optional. A bare `{}` (old skip_serializing_if behaviour) caused an
+    // `Object.entries` crash on the undefined value. All three fields must
+    // always be present in the serialized form.
     let config = GlobalAgentConfig::default();
     let json = serde_json::to_string(&config).expect("serialize");
-    // With all-default/empty, the JSON should be compact.
-    assert!(!json.contains("env_vars"), "empty env_vars must be omitted");
-    assert!(!json.contains("provider"), "None provider must be omitted");
-    assert!(!json.contains("model"), "None model must be omitted");
+    assert!(
+        json.contains("\"env_vars\""),
+        "serialized JSON must always include env_vars; got: {json}"
+    );
+    assert!(
+        json.contains("\"provider\""),
+        "serialized JSON must always include provider; got: {json}"
+    );
+    assert!(
+        json.contains("\"model\""),
+        "serialized JSON must always include model; got: {json}"
+    );
 }
 
 // ── resolve_effective_model_provider ─────────────────────────────────────────
@@ -363,5 +375,27 @@ fn resolve_each_field_resolves_independently_through_tiers() {
         provider,
         Some("persona-provider"),
         "persona wins for provider when record has none"
+    );
+}
+
+// ── IPC serialization ─────────────────────────────────────────────────────────
+
+/// A fully-populated `GlobalAgentConfig` must round-trip through JSON without
+/// loss.
+#[test]
+fn populated_global_config_round_trips() {
+    let original = GlobalAgentConfig {
+        env_vars: [("ANTHROPIC_API_KEY".to_string(), "sk-test".to_string())]
+            .into_iter()
+            .collect(),
+        provider: Some("anthropic".to_string()),
+        model: Some("claude-opus-4-5".to_string()),
+    };
+    let json = serde_json::to_string(&original).expect("serialization must not fail");
+    let decoded: GlobalAgentConfig =
+        serde_json::from_str(&json).expect("deserialization must not fail");
+    assert_eq!(
+        decoded, original,
+        "populated config must round-trip losslessly"
     );
 }
