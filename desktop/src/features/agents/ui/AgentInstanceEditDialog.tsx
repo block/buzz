@@ -192,33 +192,6 @@ export function AgentInstanceEditDialog({
     }
   }, [open, runtimes, agent.agentCommand]);
 
-  // One-shot focus: when the dialog opens from a card deep-link, scroll and
-  // focus the relevant field. Runs once per open, keyed on `open` and the
-  // focus target so a second open with a different target re-fires correctly.
-  // Uses a short rAF delay to allow Radix Dialog to finish mounting the DOM
-  // before the imperative focus runs.
-  // biome-ignore lint/correctness/useExhaustiveDependencies: intentional one-shot — agent.pubkey included so focus re-fires when the dialog switches agents while staying open
-  React.useEffect(() => {
-    if (!open || !initialFocus) return;
-
-    const id = requestAnimationFrame(() => {
-      if (initialFocus.type === "normalized_field") {
-        // "provider" → focus the LLM provider dropdown; anything else
-        // (model / runtime) → focus the model dropdown.
-        const targetId =
-          initialFocus.field === "provider" ? "agent-provider" : "agent-model";
-        const el = document.getElementById(targetId);
-        if (el instanceof HTMLSelectElement) {
-          el.scrollIntoView({ block: "nearest" });
-          el.focus();
-        }
-      }
-      // env_key is handled by EnvVarsEditor via focusKey prop below.
-    });
-
-    return () => cancelAnimationFrame(id);
-  }, [open, initialFocus, agent.pubkey]);
-
   // Build the sorted runtime catalog for the dropdown.
   const sortedRuntimes = React.useMemo(
     () => sortPersonaRuntimes(runtimes),
@@ -256,6 +229,44 @@ export function AgentInstanceEditDialog({
   const llmProviderFieldVisible = runtimeSupportsLlmProviderSelection(
     selectedRuntime?.id ?? selectedRuntimeId,
   );
+
+  // One-shot focus: when the dialog opens from a card deep-link, scroll and
+  // focus the relevant field. The effect re-runs when `llmProviderFieldVisible`
+  // changes so a provider-field focus request fires once the field materializes
+  // (the runtime catalog may still be loading at click time). A one-shot fired
+  // ref prevents re-focusing on unrelated re-renders after the target is ready.
+  const normalizedFieldFocusFiredRef = React.useRef(false);
+  // Reset the fired guard whenever the focus request changes (new open, new
+  // focus target, or dialog switched to a different agent).
+  // biome-ignore lint/correctness/useExhaustiveDependencies: intentional — reset guard on these three; llmProviderFieldVisible drives the focus attempt below
+  React.useEffect(() => {
+    normalizedFieldFocusFiredRef.current = false;
+  }, [open, initialFocus, agent.pubkey]);
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: intentional — llmProviderFieldVisible is the availability signal that re-triggers the focus attempt; agent.pubkey handles agent-switch
+  React.useEffect(() => {
+    if (!open || !initialFocus) return;
+    if (initialFocus.type !== "normalized_field") return;
+    if (normalizedFieldFocusFiredRef.current) return;
+
+    // For "provider" focus: the provider select is only rendered when
+    // llmProviderFieldVisible is true (runtime catalog resolved). Bail until
+    // it materializes — this effect re-runs when llmProviderFieldVisible flips.
+    const targetId =
+      initialFocus.field === "provider" ? "agent-provider" : "agent-model";
+    const el = document.getElementById(targetId);
+    if (!(el instanceof HTMLSelectElement)) return;
+
+    normalizedFieldFocusFiredRef.current = true;
+
+    const id = requestAnimationFrame(() => {
+      el.scrollIntoView({ block: "nearest" });
+      el.focus();
+    });
+
+    return () => cancelAnimationFrame(id);
+  }, [open, initialFocus, agent.pubkey, llmProviderFieldVisible]);
+  // env_key is handled by EnvVarsEditor via focusKey prop below.
 
   const providerForDiscovery = llmProviderFieldVisible ? provider : "";
   const normalizedConfig = configSurfaceQuery.data?.normalized;

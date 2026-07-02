@@ -196,39 +196,44 @@ export function EnvVarsEditor({
     return { ...base, ...toRecord(nextRows) };
   }
 
+  // Ref map: key → required-value Input element. Populated via callback refs
+  // on each required-key row's value Input so focus can be dispatched directly
+  // without any DOM walking through presentation classes.
+  const requiredValueRefs = React.useRef<Map<string, HTMLInputElement>>(
+    new Map(),
+  );
+
+  // One-shot guard: prevents re-focusing after the target has already been
+  // focused (e.g., when requiredKeys later gains unrelated keys). Reset when
+  // focusKey changes so a new deep-link request always fires once.
+  const focusFiredRef = React.useRef(false);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: focusKey is the signal that triggers the reset; mutating a ref doesn't re-render but focusKey change is the intended trigger
+  React.useEffect(() => {
+    focusFiredRef.current = false;
+  }, [focusKey]);
+
   // One-shot focus: scroll the matching required-key row into view and focus
-  // its value input. Only fires when `focusKey` is set and the key is in
-  // `requiredKeys`. Uses a rAF to let the parent Dialog finish its animation
-  // before the imperative DOM operation.
-  // biome-ignore lint/correctness/useExhaustiveDependencies: intentional one-shot — requiredKeys omitted to avoid re-firing on every provider change; focusKey identity is the trigger
+  // its value input. Re-runs whenever `requiredKeys` changes so the effect
+  // fires when the target key materializes asynchronously (e.g., the runtime
+  // file-config query completes after the card click). The one-shot guard
+  // ensures each requested target focuses exactly once.
   React.useEffect(() => {
     if (!focusKey) return;
+    if (focusFiredRef.current) return;
     if (!requiredKeys.includes(focusKey)) return;
 
+    const inputEl = requiredValueRefs.current.get(focusKey);
+    if (!inputEl) return;
+
+    focusFiredRef.current = true;
+
     const id = requestAnimationFrame(() => {
-      // Each required-key row's value input has data-testid="env-vars-required-value".
-      // There may be multiple required rows; find the one whose adjacent key
-      // element shows the target key text.
-      const keyEls = document.querySelectorAll<HTMLElement>(
-        "[data-testid='env-vars-required-key']",
-      );
-      for (const keyEl of keyEls) {
-        if (keyEl.textContent?.trim() === focusKey) {
-          const row = keyEl.closest<HTMLElement>("[class]");
-          const valueInput = row?.parentElement?.querySelector<HTMLElement>(
-            "[data-testid='env-vars-required-value']",
-          );
-          if (valueInput) {
-            valueInput.scrollIntoView({ block: "nearest" });
-            valueInput.focus();
-          }
-          break;
-        }
-      }
+      inputEl.scrollIntoView({ block: "nearest" });
+      inputEl.focus();
     });
 
     return () => cancelAnimationFrame(id);
-  }, [focusKey]);
+  }, [focusKey, requiredKeys]);
 
   function emit(next: Row[]) {
     setRows(next);
@@ -322,6 +327,13 @@ export function EnvVarsEditor({
                       updateRequiredValue(key, event.target.value)
                     }
                     placeholder="value"
+                    ref={(el) => {
+                      if (el) {
+                        requiredValueRefs.current.set(key, el);
+                      } else {
+                        requiredValueRefs.current.delete(key);
+                      }
+                    }}
                     type="password"
                     value={currentValue}
                   />
