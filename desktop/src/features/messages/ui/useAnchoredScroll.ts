@@ -16,6 +16,16 @@ const AT_BOTTOM_THRESHOLD_PX = 32;
 // latest message; this strict threshold decides when a programmatic bottom pin
 // has actually finished settling.
 const TRUE_BOTTOM_THRESHOLD_PX = 1;
+// Bottom-settle loop tuning. The loop watches the scroll position once per
+// frame while a programmatic bottom jump settles: it must not fight a live
+// smooth-scroll animation (instant corrective writes mid-animation make the
+// motion jerky and, worse, the engine keeps animating toward its stale target
+// anyway), so it only issues a corrective pin after the position has held
+// still for `SETTLE_STABLE_FRAMES` frames while short of the true floor —
+// i.e. after the animation has died. The hard cap bounds the loop when the
+// floor never stabilizes (e.g. content that keeps reflowing indefinitely).
+const SETTLE_STABLE_FRAMES = 2;
+const SETTLE_MAX_MS = 2_000;
 
 type AnchorState =
   | { kind: "at-bottom" }
@@ -179,9 +189,21 @@ export function useAnchoredScroll({
   const forceBottomOnNextAppendRef = React.useRef(false);
   // True from a programmatic bottom pin until the list's row measurement settles
   // and the view reaches a true physical bottom. During this window `onScroll`
-  // ignores transient gaps and keeps chasing the floor. A `ref`, not state — the
-  // guard runs on a native scroll event, outside React's render cycle.
+  // ignores transient gaps (the settle loop below owns all corrective writes).
+  // A `ref`, not state — the guard runs on a native scroll event, outside
+  // React's render cycle.
   const settlingRef = React.useRef(false);
+  // rAF id for the settle loop, so a channel switch / re-arm can cancel it.
+  const settleRafIdRef = React.useRef<number | null>(null);
+  // Count of scroll events produced by our own anchor-holding writes (prepend
+  // restore, resize re-pin) that `onScroll` must swallow WITHOUT re-capturing
+  // the anchor. The write is re-pinning the saved anchor row; capturing the
+  // post-write position would bake in drift the next write is about to correct
+  // (rows prepended above the viewport realize their `content-visibility`
+  // estimates a few frames after the restore, shrinking the content above the
+  // reading row — the browser fires no scroll event for that shrink and native
+  // scroll anchoring does not compensate above the viewport).
+  const programmaticScrollEventsRef = React.useRef(0);
 
   // Reset everything when the channel changes — the layout effect that runs
   // immediately after this reset is responsible for either jumping to bottom
@@ -200,6 +222,11 @@ export function useAnchoredScroll({
     handledTargetIdRef.current = null;
     forceBottomOnNextAppendRef.current = false;
     settlingRef.current = false;
+    if (settleRafIdRef.current !== null) {
+      cancelAnimationFrame(settleRafIdRef.current);
+      settleRafIdRef.current = null;
+    }
+    programmaticScrollEventsRef.current = 0;
     if (highlightTimeoutRef.current !== null) {
       window.clearTimeout(highlightTimeoutRef.current);
       highlightTimeoutRef.current = null;
@@ -208,7 +235,98 @@ export function useAnchoredScroll({
       cancelAnimationFrame(mountPinRafIdRef.current);
       mountPinRafIdRef.current = null;
     }
+    // Unmount cleanup: stop the settle loop so a dead component's rAF chain
+    // doesn't keep scheduling against a detached container.
+    return () => {
+      settlingRef.current = false;
+      if (settleRafIdRef.current !== null) {
+        cancelAnimationFrame(settleRafIdRef.current);
+        settleRafIdRef.current = null;
+      }
+    };
   }, [channelId]);
+
+  // Arm the bottom-settle guard and start (or restart) the settle loop. A
+  // programmatic bottom jump is not atomic: a smooth jump (scroll-to-latest
+  // pill) computes its animation target from the scroll metrics at call time,
+  // and `content-visibility` rows realizing their true heights as the
+  // animation passes them make that target stale — the engine settles ABOVE
+  // the real floor and then emits no further scroll events, so an event-driven
+  // guard can never issue the final corrective write (the strand distance
+  // scales with the root font size; the 1.1 default text zoom pushed it past
+  // the e2e floor budget). The loop instead samples once per frame: while the
+  // position is still moving it stays hands-off (fighting a live animation is
+  // jerky and the engine re-targets anyway); once the position holds still
+  // short of the true floor, the animation is dead and it issues an instant
+  // corrective pin. Disarms at the true floor or at the hard time cap.
+  const armBottomSettle = React.useCallback(() => {
+    settlingRef.current = true;
+    if (settleRafIdRef.current !== null) {
+      cancelAnimationFrame(settleRafIdRef.current);
+      settleRafIdRef.current = null;
+    }
+    const container = scrollContainerRef.current;
+    const startedAt = performance.now();
+    let lastTop = Number.NaN;
+    let stableFrames = 0;
+    // Real user input during the settle window means the user has taken over —
+    // stop chasing the floor immediately instead of yanking them back down.
+    // Only trusted input events disarm; the stale animation's scroll events
+    // don't fire these.
+    const abortOnUserInput = () => {
+      settlingRef.current = false;
+    };
+    const inputEvents = ["wheel", "touchstart", "keydown"] as const;
+    for (const type of inputEvents) {
+      container?.addEventListener(type, abortOnUserInput, { passive: true });
+    }
+    const cleanup = () => {
+      for (const type of inputEvents) {
+        container?.removeEventListener(type, abortOnUserInput);
+      }
+    };
+    const tick = () => {
+      settleRafIdRef.current = null;
+      const container = scrollContainerRef.current;
+      if (!container || !settlingRef.current) {
+        settlingRef.current = false;
+        cleanup();
+        return;
+      }
+      if (performance.now() - startedAt >= SETTLE_MAX_MS) {
+        settlingRef.current = false;
+        cleanup();
+        return;
+      }
+      const top = container.scrollTop;
+      if (top === lastTop) {
+        stableFrames += 1;
+      } else {
+        stableFrames = 0;
+        lastTop = top;
+      }
+      if (stableFrames >= SETTLE_STABLE_FRAMES) {
+        // Stability alone isn't enough to disarm — the floor itself must be
+        // confirmed while the position is holding still. A smooth animation
+        // can touch the floor transiently and still walk backward on later
+        // ticks, so disarming on a mid-flight floor reading would hand those
+        // ticks back to `computeAnchor` as a phantom scroll-up.
+        if (isAtTrueBottom(container)) {
+          // Physically at the floor and no longer moving: settled. Later
+          // growth (image decode, late rows) is the at-bottom ResizeObserver's
+          // job, not the settle loop's.
+          settlingRef.current = false;
+          cleanup();
+          return;
+        }
+        settleProgrammaticBottomPin(container);
+        stableFrames = 0;
+        lastTop = container.scrollTop;
+      }
+      settleRafIdRef.current = requestAnimationFrame(tick);
+    };
+    settleRafIdRef.current = requestAnimationFrame(tick);
+  }, [scrollContainerRef]);
 
   const scrollToBottomImperative = React.useCallback(
     (behavior: ScrollBehavior = "auto") => {
@@ -221,13 +339,13 @@ export function useAnchoredScroll({
       // gap as a deliberate scroll-up and latch a mid-history message anchor,
       // which strands future appends above the floor. Arm the settle guard for
       // every imperative bottom jump so `onScroll` holds the at-bottom anchor
-      // until it can snap to the true floor.
-      settlingRef.current = true;
+      // until the settle loop confirms the true floor.
+      armBottomSettle();
       container.scrollTo({ top: container.scrollHeight, behavior });
       setIsAtBottom(true);
       setNewMessageCount(0);
     },
-    [scrollContainerRef],
+    [armBottomSettle, scrollContainerRef],
   );
 
   // Arm a one-shot: the next append snaps to bottom regardless of where the
@@ -307,13 +425,23 @@ export function useAnchoredScroll({
     // events while `scrollTop` holds at the old floor — opening a transient gap
     // above the true bottom. `computeAnchor` would read that as a deliberate
     // scroll-up and latch a message anchor, freezing the view short of bottom.
-    // While settling, keep the anchor at-bottom and chase the physical floor.
+    // While settling, hold the at-bottom anchor and swallow the event — the
+    // rAF settle loop armed by `armBottomSettle` owns all corrective writes
+    // (an event-driven guard can't finish the job: a stale smooth-scroll
+    // animation strands the view above the floor and then emits no further
+    // scroll events, so the final corrective pin must fire outside the event
+    // stream).
     if (settlingRef.current) {
-      if (settleProgrammaticBottomPin(container)) {
-        settlingRef.current = false;
-      } else {
-        return;
-      }
+      return;
+    }
+    // A scroll event echoing one of our own anchor-holding writes: swallow it
+    // without re-capturing, so the saved anchor offset keeps describing where
+    // the reading row BELONGS. Re-capturing here would adopt drift the next
+    // re-pin is about to correct. User scrolls are unaffected — only writes we
+    // issued ourselves increment this counter.
+    if (programmaticScrollEventsRef.current > 0) {
+      programmaticScrollEventsRef.current -= 1;
+      return;
     }
     anchorRef.current = computeAnchor(container);
     const atBottom = anchorRef.current.kind === "at-bottom";
@@ -396,7 +524,7 @@ export function useAnchoredScroll({
     if (newLatestArrived && forceBottomOnNextAppendRef.current) {
       forceBottomOnNextAppendRef.current = false;
       anchorRef.current = { kind: "at-bottom" };
-      settlingRef.current = true;
+      armBottomSettle();
       container.scrollTo({ top: container.scrollHeight, behavior: "auto" });
       setIsAtBottom(true);
       setNewMessageCount(0);
@@ -430,7 +558,13 @@ export function useAnchoredScroll({
           container.getBoundingClientRect().top;
         const drift = currentTopOffset - anchor.topOffset;
         if (Math.abs(drift) > 0.5) {
+          const scrollTopBefore = container.scrollTop;
           container.scrollBy(0, drift);
+          // Only count the write if it actually moved (a clamped write emits
+          // no scroll event, and a stale count would swallow a user scroll).
+          if (container.scrollTop !== scrollTopBefore) {
+            programmaticScrollEventsRef.current += 1;
+          }
         }
       }
       if (!isPrepend) {
@@ -443,6 +577,7 @@ export function useAnchoredScroll({
     prevMessageCountRef.current = messages.length;
     prevMessagesRef.current = messages;
   }, [
+    armBottomSettle,
     isLoading,
     messages,
     onTargetReached,
@@ -453,12 +588,18 @@ export function useAnchoredScroll({
   ]);
 
   // ---------------------------------------------------------------------------
-  // Content resize: while stuck to the bottom, an in-viewport reflow (image
-  // decode, embed expand, late font load) that React isn't driving grows
-  // `scrollHeight` without a `messages` change, so the layout effect doesn't
-  // fire — re-pin to the new floor here to stay glued. When anchored
-  // mid-history, native scroll anchoring (overflow-anchor) holds the reading
-  // row across the reflow, so there's nothing to do.
+  // Content resize: reflow that React isn't driving (image decode, embed
+  // expand, late font load, `content-visibility` realizing a row's true height)
+  // grows the content without a `messages` change, so the layout effect doesn't
+  // fire. While stuck to the bottom, re-pin to the new floor to stay glued.
+  // While anchored mid-history, native scroll anchoring (overflow-anchor) holds
+  // the reading row for in-viewport reflow — but it has no anchor node ABOVE
+  // the viewport near the top edge, so a just-prepended history page realizing
+  // its `contain-intrinsic-size` estimates over the next frames drifts the
+  // reading row (the drift scales with the root font size, so the 1.1 default
+  // text zoom pushed it past the e2e settle budget). Re-pin the anchored row to
+  // its saved offset here; when native anchoring already held it, the drift is
+  // ~0 and this is a no-op.
   // ---------------------------------------------------------------------------
   // biome-ignore lint/correctness/useExhaustiveDependencies: channelId is a deliberate re-subscription trigger — the effect body reads only the stable refs, but on a channel switch the keyed scroll container remounts and contentRef.current becomes a fresh node, so the observer must disconnect from the previous channel's detached node and re-observe the live one.
   React.useEffect(() => {
@@ -467,8 +608,27 @@ export function useAnchoredScroll({
     const observer = new ResizeObserver(() => {
       const container = scrollContainerRef.current;
       if (!container) return;
-      if (anchorRef.current.kind === "at-bottom") {
+      const anchor = anchorRef.current;
+      if (anchor.kind === "at-bottom") {
         container.scrollTo({ top: container.scrollHeight, behavior: "auto" });
+        return;
+      }
+      const row = container.querySelector<HTMLElement>(
+        `[data-message-id="${CSS.escape(anchor.messageId)}"]`,
+      );
+      if (!row) return;
+      const drift =
+        row.getBoundingClientRect().top -
+        container.getBoundingClientRect().top -
+        anchor.topOffset;
+      if (Math.abs(drift) > 0.5) {
+        const scrollTopBefore = container.scrollTop;
+        container.scrollBy(0, drift);
+        // Only count the write if it actually moved (a clamped write emits no
+        // scroll event, and a stale count would swallow a user scroll).
+        if (container.scrollTop !== scrollTopBefore) {
+          programmaticScrollEventsRef.current += 1;
+        }
       }
     });
     observer.observe(content);

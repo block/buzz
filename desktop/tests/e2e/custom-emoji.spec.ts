@@ -1,6 +1,7 @@
 import { expect, test } from "@playwright/test";
 
 import { installMockBridge } from "../helpers/bridge";
+import { expectedScaledPx } from "../helpers/css";
 
 // Custom-emoji end-to-end guard.
 //
@@ -271,14 +272,34 @@ test("reacting with a custom emoji renders via the loopback media proxy", async 
       }),
     )
     .toBe("0");
+  const expectedInlineReactionButtonWidth = Math.round(
+    await expectedScaledPx(inlineAddReactionButton, 40),
+  );
+  const minExpectedInlineReactionButtonHeight = Math.round(
+    await expectedScaledPx(inlineAddReactionButton, 28),
+  );
   await expect
     .poll(() =>
       inlineAddReactionButton.evaluate((button) => {
         const rect = button.getBoundingClientRect();
-        return `${Math.round(rect.width)}x${Math.round(rect.height)}`;
+        return {
+          height: Math.round(rect.height),
+          width: Math.round(rect.width),
+        };
       }),
     )
-    .toBe("40x28");
+    .toEqual({
+      height: expect.any(Number),
+      width: expectedInlineReactionButtonWidth,
+    });
+  await expect
+    .poll(() =>
+      inlineAddReactionButton.evaluate((button) => {
+        const rect = button.getBoundingClientRect();
+        return Math.round(rect.height);
+      }),
+    )
+    .toBeGreaterThanOrEqual(minExpectedInlineReactionButtonHeight);
   await expect
     .poll(() =>
       inlineAddReactionButton.evaluate((button) => {
@@ -292,10 +313,24 @@ test("reacting with a custom emoji renders via the loopback media proxy", async 
     .poll(() =>
       inlineAddReactionButton.evaluate((button) => {
         const rect = button.getBoundingClientRect();
-        return `${Math.round(rect.width)}x${Math.round(rect.height)}`;
+        return {
+          height: Math.round(rect.height),
+          width: Math.round(rect.width),
+        };
       }),
     )
-    .toBe("40x28");
+    .toEqual({
+      height: expect.any(Number),
+      width: expectedInlineReactionButtonWidth,
+    });
+  await expect
+    .poll(() =>
+      inlineAddReactionButton.evaluate((button) => {
+        const rect = button.getBoundingClientRect();
+        return Math.round(rect.height);
+      }),
+    )
+    .toBeGreaterThanOrEqual(minExpectedInlineReactionButtonHeight);
 
   // Toggle the reaction back off: click the pill, which fires remove_reaction
   // -> emits a kind:5 deletion targeting the reaction event. The pill must

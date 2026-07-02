@@ -30,7 +30,18 @@ async function seedChannelSections(page: Page) {
 // 6px distance constraint, so a single move never starts a drag. This walks the
 // pointer down, past the activation threshold, onto the target, then releases —
 // the sequence dnd-kit needs to fire onDragEnd and commit the reorder.
+//
+// Both handles are scrolled on-screen first: at the 1.1 default text scale the
+// sidebar overflows the 720px test viewport, and the click that navigates to
+// channel-general auto-scrolls the sidebar to center that row — leaving the
+// section headers above the scroller's clip. boundingBox() still reports those
+// off-screen positions, so raw mouse coords would land on the workspace rail
+// instead of the sortable rows and the drag would never activate. Scrolling the
+// handles into view keeps the coords honest; the reorder itself must still
+// activate, drop, and commit for the test to pass.
 async function dragOver(page: Page, source: Locator, target: Locator) {
+  await source.scrollIntoViewIfNeeded();
+  await target.scrollIntoViewIfNeeded();
   const from = await source.boundingBox();
   const to = await target.boundingBox();
   if (!from || !to) throw new Error("drag handles not laid out");

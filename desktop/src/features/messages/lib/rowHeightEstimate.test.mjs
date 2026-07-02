@@ -90,13 +90,13 @@ test("estimateRowHeight: bare URL line adds a preview card", () => {
   assert.ok(withUrl > withoutUrl + 50, `url ${withUrl} vs ${withoutUrl}`);
 });
 
-test("timelineRowReserveStyle: message item yields containIntrinsicSize", () => {
+test("timelineRowReserveStyle: message item yields rem containIntrinsicSize", () => {
   const style = timelineRowReserveStyle({
     kind: "message",
     key: "k",
     entry: { message: msg({ body: "hi" }), summary: null },
   });
-  assert.match(String(style.containIntrinsicSize), /^auto \d+px$/);
+  assert.match(String(style.containIntrinsicSize), /^auto \d+(?:\.\d+)?rem$/);
 });
 
 test("timelineRowReserveStyle: divider is short fixed height", () => {
@@ -105,5 +105,5 @@ test("timelineRowReserveStyle: divider is short fixed height", () => {
     key: "k",
     headingTimestamp: 0,
   });
-  assert.equal(style.containIntrinsicSize, "auto 32px");
+  assert.equal(style.containIntrinsicSize, "auto 2rem");
 });

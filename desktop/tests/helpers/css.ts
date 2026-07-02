@@ -1,8 +1,25 @@
 import { expect, type Locator } from "@playwright/test";
 
+export async function currentRootFontScale(locator: Locator) {
+  const rootFontSize = await locator.evaluate(() =>
+    Number.parseFloat(
+      window.getComputedStyle(document.documentElement).fontSize,
+    ),
+  );
+  return Number.isFinite(rootFontSize) ? rootFontSize / 16 : 1;
+}
+
+export async function expectedScaledPx(
+  locator: Locator,
+  pxAtDefaultScale: number,
+) {
+  return pxAtDefaultScale * (await currentRootFontScale(locator));
+}
+
 export async function expectCornerRadiusPx(
   locator: Locator,
   expectedRadiusPx: number,
+  options: { scaleWithRootFont?: boolean } = {},
 ) {
   const measurement = await locator.evaluate((element) => {
     const style = window.getComputedStyle(element);
@@ -65,13 +82,18 @@ export async function expectCornerRadiusPx(
       className: element.getAttribute("class") ?? "",
       radius,
       rawRadius,
+      rootFontSize,
     };
   });
 
+  const expected = options.scaleWithRootFont
+    ? expectedRadiusPx * (measurement.rootFontSize / 16)
+    : expectedRadiusPx;
+
   expect(
     measurement.radius,
-    `Expected ${expectedRadiusPx}px corner radius, got ${measurement.rawRadius} on class "${measurement.className}".`,
-  ).toBeCloseTo(expectedRadiusPx, 0);
+    `Expected ${expected}px corner radius, got ${measurement.rawRadius} on class "${measurement.className}".`,
+  ).toBeCloseTo(expected, 0);
 }
 
 export async function expectSmoothCorners(

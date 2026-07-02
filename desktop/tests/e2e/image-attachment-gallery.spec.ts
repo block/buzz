@@ -126,8 +126,10 @@ test("image bundle lightbox navigates as a gallery", async ({ page }) => {
 
   const triggers = row.getByTestId("message-image-lightbox-trigger");
   await expect(triggers).toHaveCount(3);
-  await expectCornerRadiusPx(triggers.first(), 16);
-  await expectCornerRadiusPx(triggers.first().locator("img"), 16);
+  await expectCornerRadiusPx(triggers.first(), 16, { scaleWithRootFont: true });
+  await expectCornerRadiusPx(triggers.first().locator("img"), 16, {
+    scaleWithRootFont: true,
+  });
   await expectSmoothCorners(triggers.first().locator("img"));
   await triggers.first().click();
 
@@ -137,7 +139,7 @@ test("image bundle lightbox navigates as a gallery", async ({ page }) => {
   const lightboxSurface = page
     .locator("[data-image-lightbox-frame] > div > div")
     .first();
-  await expectCornerRadiusPx(lightboxSurface, 16);
+  await expectCornerRadiusPx(lightboxSurface, 16, { scaleWithRootFont: true });
   await expectSmoothCorners(lightboxSurface);
   await expect(
     page.getByRole("button", { name: "Previous image" }),
@@ -174,6 +176,7 @@ test("image bundle lightbox navigates as a gallery", async ({ page }) => {
   await expectCornerRadiusPx(
     page.locator("[data-image-lightbox-frame] > div > div").first(),
     16,
+    { scaleWithRootFont: true },
   );
 
   expect(Math.abs(closingFrameBox.x - currentThumbnailBox.x)).toBeLessThan(2);
