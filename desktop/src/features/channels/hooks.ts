@@ -31,6 +31,11 @@ import type {
   SetChannelTopicInput,
   UpdateChannelInput,
 } from "@/shared/api/types";
+import { useWorkspaces } from "@/features/workspaces/useWorkspaces";
+import {
+  readChannelSnapshot,
+  writeChannelSnapshot,
+} from "@/features/channels/channelSnapshot";
 
 export const channelsQueryKey = ["channels"] as const;
 const channelDetailQueryKey = (channelId: string) =>
@@ -102,10 +107,29 @@ function setChannelArchivedState(
 }
 
 export function useChannelsQuery(options?: { enabled?: boolean }) {
+  const { activeWorkspace } = useWorkspaces();
+  const relayUrl = activeWorkspace?.relayUrl ?? null;
+
   return useQuery({
     enabled: options?.enabled ?? true,
     queryKey: channelsQueryKey,
-    queryFn: async () => sortChannels(await getChannels()),
+    queryFn: async () => {
+      const channels = sortChannels(await getChannels());
+      if (relayUrl) {
+        writeChannelSnapshot(relayUrl, channels);
+      }
+      return channels;
+    },
+    // Paint the sidebar instantly from the last-known list for this relay, then
+    // revalidate. initialDataUpdatedAt:0 marks the seed as already-stale so the
+    // background refetch still fires immediately.
+    initialData: relayUrl
+      ? () => {
+          const snapshot = readChannelSnapshot(relayUrl);
+          return snapshot ? sortChannels(snapshot) : undefined;
+        }
+      : undefined,
+    initialDataUpdatedAt: 0,
     staleTime: 60_000,
     refetchInterval: 60_000,
     refetchIntervalInBackground: false,

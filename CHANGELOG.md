@@ -1,5 +1,23 @@
 # Changelog
 
+## v0.3.41
+
+- Group consecutive desktop messages ([#1429](https://github.com/block/buzz/pull/1429)) ([`3d08c3b0`](https://github.com/block/buzz/commit/3d08c3b02b284d062e2932df8f96e2467bb40946))
+- Update Buzz app icon ([#1430](https://github.com/block/buzz/pull/1430)) ([`db2a9701`](https://github.com/block/buzz/commit/db2a97011536e810abdc3f813ec1867cbcef21f6))
+- feat(desktop): add workspace rail unread observer ([#1428](https://github.com/block/buzz/pull/1428)) ([`ce1f13e8`](https://github.com/block/buzz/commit/ce1f13e8f7a36621621d9249f7535a33439cfb87))
+- Prioritize channel members in mention autocomplete ([#1431](https://github.com/block/buzz/pull/1431)) ([`8fb33bdb`](https://github.com/block/buzz/commit/8fb33bdbca4285cac379ad18d42533859eacbd12))
+- Tighten message density ([#1426](https://github.com/block/buzz/pull/1426)) ([`6a08a3f4`](https://github.com/block/buzz/commit/6a08a3f4c8f79c2ed4e9ff7e425f3faa0b3627e5))
+- Tighten sidebar section actions ([#1424](https://github.com/block/buzz/pull/1424)) ([`c0e10d67`](https://github.com/block/buzz/commit/c0e10d67e06d405829ad8c4682b3cb621702d150))
+- Add memory copy actions ([#1427](https://github.com/block/buzz/pull/1427)) ([`6c0e6f0b`](https://github.com/block/buzz/commit/6c0e6f0bb74fe0b4777afbdb8151dddf7107c99f))
+- Limit agent profile quick actions ([#1425](https://github.com/block/buzz/pull/1425)) ([`177fe5a3`](https://github.com/block/buzz/commit/177fe5a3bfe7774205ca0a9de689924a5df988df))
+- Fade sidebar pinned chrome edges ([#1423](https://github.com/block/buzz/pull/1423)) ([`3e4e9dda`](https://github.com/block/buzz/commit/3e4e9dda94e04a67b6b73c372e853e961cca461d))
+- Apply smooth corners to inline media ([#1422](https://github.com/block/buzz/pull/1422)) ([`2fc8b9cf`](https://github.com/block/buzz/commit/2fc8b9cf5f14410750a97bbebc07241ce8628a1f))
+- Align thread summary rows ([#1421](https://github.com/block/buzz/pull/1421)) ([`4ae5a0d5`](https://github.com/block/buzz/commit/4ae5a0d5e372c5617aa32242c8e08c13a03d20b5))
+- Keep channel day dividers sticky ([#1420](https://github.com/block/buzz/pull/1420)) ([`8c388479`](https://github.com/block/buzz/commit/8c3884791361933f89e6771e1403e4799fc00c1d))
+- fix(deps): pin aws-creds to fork with EKS Pod Identity support ([#1419](https://github.com/block/buzz/pull/1419)) ([`86d6388e`](https://github.com/block/buzz/commit/86d6388e68d40aaa5449e3021e116a57cb2aefe0))
+- fix(relay): enable Redis TLS for rediss:// (ElastiCache) ([#1417](https://github.com/block/buzz/pull/1417)) ([`3292b502`](https://github.com/block/buzz/commit/3292b502aad44a5f849296d7bf28429bac272fb7))
+
+
 ## v0.3.40
 
 - fix(desktop): stabilize channel-timeline scrollback with per-row height reserves ([#1413](https://github.com/block/buzz/pull/1413)) ([`4fdc68f1`](https://github.com/block/buzz/commit/4fdc68f1568364b3e44d7003c83a9a4ad961e1ee))

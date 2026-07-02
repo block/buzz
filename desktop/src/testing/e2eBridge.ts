@@ -8,6 +8,7 @@ import { relayClient } from "@/shared/api/relayClient";
 import type { ConnectionState } from "@/shared/api/relayClientShared";
 import type { RelayEvent } from "@/shared/api/types";
 import { syncAgentTurnsFromEvents } from "@/features/agents/activeAgentTurnsStore";
+import { injectObserverEventsForE2E } from "@/features/agents/observerRelayStore";
 import {
   CUSTOM_EMOJI_SET_D_TAG,
   KIND_EMOJI_SET,
@@ -669,6 +670,19 @@ declare global {
       agentPubkey: string;
       channelId: string;
       turnId: string;
+    }) => void;
+    __BUZZ_E2E_SEED_OBSERVER_EVENTS__?: (input: {
+      agentPubkey: string;
+      events: Array<{
+        seq: number;
+        timestamp: string;
+        kind: string;
+        agentIndex: number | null;
+        channelId: string | null;
+        sessionId: string | null;
+        turnId: string | null;
+        payload: unknown;
+      }>;
     }) => void;
     __BUZZ_E2E_EMIT_MOCK_READ_STATE__?: (input: {
       clientId: string;
@@ -7273,6 +7287,9 @@ export function maybeInstallE2eTauriMocks() {
         payload: null,
       },
     ]);
+  };
+  window.__BUZZ_E2E_SEED_OBSERVER_EVENTS__ = ({ agentPubkey, events }) => {
+    injectObserverEventsForE2E(agentPubkey, events);
   };
   const meshNodeStatus = (
     state: "off" | "running",

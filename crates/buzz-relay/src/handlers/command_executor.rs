@@ -756,6 +756,12 @@ async fn handle_workflow_def(
             other => IngestError::Internal(format!("error: db upsert_workflow: {other}")),
         })?;
 
+    // Drop the trigger-path cache entry so the new/updated definition fires on
+    // the next matching event instead of after the cache TTL.
+    state
+        .workflow_engine
+        .invalidate_channel_workflows(community_id, channel_id);
+
     // Commit the event transaction after the idempotent workflow upsert succeeds.
     tx.commit()
         .await

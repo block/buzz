@@ -35,6 +35,7 @@ export default defineConfig({
         "**/active-turn-resilience.spec.ts",
         "**/profile-active-turn.spec.ts",
         "**/config-bridge-screenshots.spec.ts",
+        "**/observer-feed-screenshots.spec.ts",
         "**/file-attachment.spec.ts",
         "**/image-attachment-gallery.spec.ts",
         "**/video-attachment.spec.ts",
@@ -50,6 +51,7 @@ export default defineConfig({
         "**/sidebar-more-unread-overlap.spec.ts",
         "**/home-collapsed-top-chrome.spec.ts",
         "**/thread-unread.spec.ts",
+        "**/workspace-rail.spec.ts",
         "**/thread-reply-anchor-roleplay.spec.ts",
         "**/threadpane-ultrawide.spec.ts",
         "**/animated-avatar.spec.ts",
@@ -61,6 +63,7 @@ export default defineConfig({
         "**/cold-switch-longtask.perf.ts",
         "**/timeline-no-shift.spec.ts",
         "**/human-edit-agent-content.spec.ts",
+        "**/reaction-order.spec.ts",
       ],
       use: {
         ...devices["Desktop Chrome"],

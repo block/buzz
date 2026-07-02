@@ -17,23 +17,20 @@ use axum::{
 };
 use base64::Engine;
 use buzz_audit::{AuditAction, NewAuditEntry};
-use buzz_auth::Scope;
 use buzz_core::tenant::TenantContext;
 use buzz_media::{BlobDescriptor, MediaError};
-use sha2::{Digest, Sha256};
 
 use crate::state::AppState;
 
-/// Axum extractor that validates Blossom auth + API token scopes from headers
-/// BEFORE the request body is read. This prevents unauthenticated clients from
-/// forcing the server to buffer up to 50MB of body data.
+/// Axum extractor that validates Blossom auth, the BUD-11 hash binding, and
+/// relay membership (NIP-43, when enabled) from headers BEFORE the request
+/// body is read. This prevents unauthenticated clients from forcing the
+/// server to buffer up to 50MB of body data.
 ///
 /// Axum processes `FromRequestParts` extractors before `FromRequest` (body)
 /// extractors, so auth rejection happens before any body buffering.
 pub(crate) struct AuthenticatedUpload {
     auth_event: nostr::Event,
-    #[allow(dead_code)] // scopes validated in extractor; stored for future per-scope handler logic
-    scopes: Vec<Scope>,
     /// Community resolved from the request host at extraction time (row zero for
     /// this HTTP door), identical to the WS door in `router.rs` and the bridge
     /// door in `bridge.rs`. Server-resolved, never client-supplied.
@@ -125,12 +122,7 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedUpload {
         // host, so an unauthenticated caller cannot probe which communities
         // exist on this deployment.
         //
-        // This MUST run before scope resolution so the API-token lookup is
-        // keyed on (community_id, token_hash) — see Gap 2 / row-44 conformance
-        // obligation. Resolving scopes without a tenant in hand would query
-        // api_tokens by hash alone, defeating the cross-community fence.
-        //
-        // It also runs before Blossom auth verification (step 2) so the
+        // This MUST run before Blossom auth verification (step 2) so the
         // `server`-tag check validates against the *bound tenant host*, not a
         // process-global domain — a relay process serves many tenant hosts, and
         // the stock CLI tags its own configured relay host (conformance row 52).
@@ -176,12 +168,13 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedUpload {
             return Err(MediaError::HashMismatch);
         }
 
-        // 5. Resolve scopes (API token or dev mode), scoped to the bound tenant.
-        let scopes = resolve_upload_scopes(headers, state, &tenant, &auth_event.pubkey).await?;
-        buzz_auth::require_scope(&scopes, Scope::FilesWrite)
-            .map_err(|_| MediaError::InsufficientScope)?;
-
-        // 6. Relay membership gate (NIP-43).
+        // 5. Relay membership gate (NIP-43). Blossom auth proves the signer
+        // authorized this exact upload hash for this server; NIP-43 answers
+        // whether that Nostr key may use this community's media store. This is
+        // the only upload authority: independent of bearer-token / api_tokens
+        // storage and of `require_auth_token` (which governs the REST API, not
+        // media). On open relays (membership disabled) any valid Blossom signer
+        // may upload, matching the WS door's admission policy.
         let auth_tag = headers.get("x-auth-tag").and_then(|v| v.to_str().ok());
         crate::api::relay_members::enforce_relay_membership(
             state,
@@ -204,7 +197,6 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedUpload {
 
         Ok(AuthenticatedUpload {
             auth_event,
-            scopes,
             tenant,
             _upload_permit: upload_permit,
         })
@@ -223,7 +215,6 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedUpload {
 /// Expects:
 ///   - `Authorization: Nostr <base64(kind:24242 event)>` — Blossom auth
 ///   - `X-SHA-256: <hex>` — Required per BUD-11
-///   - `X-Auth-Token: buzz_*` — API token for scope resolution (optional in dev mode)
 ///   - `Content-Type: video/mp4` — routes to video validation path; all other types use image path
 ///   - Raw binary body (the file bytes)
 ///
@@ -747,86 +738,6 @@ fn extract_blossom_auth(headers: &HeaderMap) -> Result<nostr::Event, MediaError>
         serde_json::from_slice(&json_bytes).map_err(|_| MediaError::InvalidAuthEvent)?;
 
     Ok(event)
-}
-
-/// Resolve permission scopes for an upload caller, scoped to the request's tenant.
-///
-/// Resolution order:
-/// 1. `X-Auth-Token: buzz_*` header — API token path (validates owner matches Blossom signer)
-/// 2. If `require_auth_token` is false (dev mode) — check pubkey allowlist, then grant file scopes
-///
-/// The token lookup is keyed on `(tenant.community(), token_hash)` — see
-/// [`buzz_db::api_token::get_api_token_by_hash_including_revoked`] for the
-/// row-44 conformance rationale. A token minted in community A presented to a
-/// host that resolves to community B must not authorize.
-async fn resolve_upload_scopes(
-    headers: &HeaderMap,
-    state: &AppState,
-    tenant: &TenantContext,
-    blossom_pubkey: &nostr::PublicKey,
-) -> Result<Vec<Scope>, MediaError> {
-    // 1. API token path — desktop sends Blossom auth in Authorization + token in X-Auth-Token.
-    if let Some(token) = headers
-        .get("x-auth-token")
-        .and_then(|v| v.to_str().ok())
-        .filter(|t| t.starts_with("buzz_"))
-    {
-        let hash: [u8; 32] = Sha256::digest(token.as_bytes()).into();
-        let record = state
-            .db
-            .get_api_token_by_hash_including_revoked(tenant.community(), &hash)
-            .await
-            .map_err(|_| MediaError::Unauthorized)?
-            .ok_or(MediaError::Unauthorized)?;
-
-        if record.revoked_at.is_some() {
-            return Err(MediaError::TokenRevoked);
-        }
-        if let Some(expires_at) = record.expires_at {
-            if expires_at < chrono::Utc::now() {
-                return Err(MediaError::TokenExpired);
-            }
-        }
-
-        // Token owner must match the Blossom signer — prevents token theft attacks.
-        let blossom_bytes = blossom_pubkey.to_bytes().to_vec();
-        if record.owner_pubkey != blossom_bytes {
-            return Err(MediaError::PubkeyMismatch);
-        }
-
-        return Ok(record
-            .scopes
-            .iter()
-            .filter_map(|s| s.parse::<Scope>().ok())
-            .collect());
-    }
-
-    // 2. Dev mode: no API token required.
-    if state.config.require_auth_token {
-        return Err(MediaError::Unauthorized);
-    }
-
-    // Dev mode is active — any valid Blossom signer can upload.
-    // This must never be enabled in production.
-    tracing::warn!(
-        "dev mode upload: no API token required — ensure require_auth_token=true in production"
-    );
-
-    // 3. Pubkey allowlist check (dev mode only).
-    if state.config.pubkey_allowlist_enabled {
-        let pubkey_bytes = blossom_pubkey.to_bytes().to_vec();
-        if !state
-            .db
-            .is_pubkey_allowed(tenant.community(), &pubkey_bytes)
-            .await
-            .unwrap_or(false)
-        {
-            return Err(MediaError::Unauthorized);
-        }
-    }
-
-    // Dev mode: grant file scopes.
-    Ok(vec![Scope::FilesRead, Scope::FilesWrite])
 }
 
 #[cfg(test)]

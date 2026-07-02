@@ -103,6 +103,8 @@ export type TranscriptItem =
       renderClass: "status" | "permission" | "error";
       title: string;
       text: string;
+      /** Resolved outcome for permission items (e.g. "Approved (allow_once)", "Denied (reject_once)", "Cancelled"). */
+      outcome?: string;
       timestamp: string;
       descriptor?: AgentActivityDescriptor;
       acpSource?: TranscriptAcpSource;

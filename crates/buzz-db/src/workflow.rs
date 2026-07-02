@@ -270,6 +270,9 @@ pub struct ApprovalRecord {
 
 /// Insert a new workflow record. Returns the new workflow's UUID.
 /// New workflows start as `active` and `enabled = TRUE`.
+///
+/// NOTE: see the cache-invalidation note on [`update_workflow`]. The relay's
+/// creation path is [`upsert_workflow`] via event ingest. (No current callers.)
 pub async fn create_workflow(
     pool: &PgPool,
     community_id: CommunityId,
@@ -607,6 +610,11 @@ pub async fn prune_scheduled_workflow_fires_before(
 }
 
 /// Update a workflow's name, definition, and definition_hash.
+///
+/// NOTE: the relay's `WorkflowEngine` caches enabled workflows per
+/// `(community_id, channel_id)`; a caller mutating trigger behavior must
+/// invalidate via `WorkflowEngine::invalidate_channel_workflows` or trigger
+/// matching lags the change by up to the cache TTL. (No current callers.)
 pub async fn update_workflow(
     pool: &PgPool,
     community_id: CommunityId,
@@ -638,6 +646,9 @@ pub async fn update_workflow(
 }
 
 /// Update a workflow's status (active -> disabled -> archived).
+///
+/// NOTE: status gates trigger eligibility; see the cache-invalidation note on
+/// [`update_workflow`]. (No current callers.)
 pub async fn update_workflow_status(
     pool: &PgPool,
     community_id: CommunityId,
@@ -665,6 +676,9 @@ pub async fn update_workflow_status(
 }
 
 /// Enable or disable a workflow without changing its status.
+///
+/// NOTE: `enabled` gates trigger eligibility; see the cache-invalidation note
+/// on [`update_workflow`]. (No current callers.)
 pub async fn set_workflow_enabled(
     pool: &PgPool,
     community_id: CommunityId,
@@ -692,6 +706,10 @@ pub async fn set_workflow_enabled(
 }
 
 /// Delete a workflow and all its runs/approvals (CASCADE).
+///
+/// NOTE: see the cache-invalidation note on [`update_workflow`]. The relay's
+/// deletion path uses [`delete_workflow_for_owner`], which returns the
+/// `channel_id` needed for invalidation. (No current callers.)
 pub async fn delete_workflow(pool: &PgPool, community_id: CommunityId, id: Uuid) -> Result<()> {
     let affected = sqlx::query("DELETE FROM workflows WHERE community_id = $1 AND id = $2")
         .bind(community_id.as_uuid())
@@ -712,26 +730,29 @@ pub async fn delete_workflow(pool: &PgPool, community_id: CommunityId, id: Uuid)
 /// controlled. Keeping the owner predicate in the DELETE statement avoids a
 /// check-then-delete race and ensures a caller cannot delete another user's
 /// workflow just by learning its UUID.
+///
+/// Returns the deleted workflow's `channel_id` so the caller can invalidate
+/// the per-channel trigger cache without a separate lookup.
 pub async fn delete_workflow_for_owner(
     pool: &PgPool,
     community_id: CommunityId,
     id: Uuid,
     owner_pubkey: &[u8],
-) -> Result<()> {
-    let affected = sqlx::query(
-        "DELETE FROM workflows WHERE community_id = $1 AND id = $2 AND owner_pubkey = $3",
+) -> Result<Option<Uuid>> {
+    let row = sqlx::query(
+        "DELETE FROM workflows WHERE community_id = $1 AND id = $2 AND owner_pubkey = $3 \
+         RETURNING channel_id",
     )
     .bind(community_id.as_uuid())
     .bind(id)
     .bind(owner_pubkey)
-    .execute(pool)
-    .await?
-    .rows_affected();
+    .fetch_optional(pool)
+    .await?;
 
-    if affected == 0 {
-        return Err(DbError::NotFound(format!("workflow {id}")));
+    match row {
+        Some(row) => Ok(row.try_get("channel_id")?),
+        None => Err(DbError::NotFound(format!("workflow {id}"))),
     }
-    Ok(())
 }
 
 // -- Workflow Run CRUD --------------------------------------------------------

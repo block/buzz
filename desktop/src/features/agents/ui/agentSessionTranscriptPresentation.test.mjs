@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   getActivityHeadline,
   isMeaningfulItem,
+  isSpineItem,
 } from "./agentSessionTranscriptPresentation.ts";
 
 const baseTimestamp = "2026-06-14T19:00:00.000Z";
@@ -47,7 +48,7 @@ test("getActivityHeadline formats tool titles and assistant text", () => {
   assert.equal(getActivityHeadline(makeMessage({ text: "   " })), "Responding");
 });
 
-test("isMeaningfulItem ignores lifecycle noise and metadata", () => {
+test("isMeaningfulItem ignores lifecycle noise and raw JSON-RPC metadata", () => {
   assert.equal(
     isMeaningfulItem({
       id: "life:1",
@@ -57,16 +58,45 @@ test("isMeaningfulItem ignores lifecycle noise and metadata", () => {
       timestamp: baseTimestamp,
     }),
     false,
+    "turn started is lifecycle noise → not meaningful",
   );
   assert.equal(
     isMeaningfulItem({
-      id: "meta:1",
+      id: "meta:raw",
       type: "metadata",
+      renderClass: "raw-rail",
+      title: "Raw ACP payload",
+      sections: [],
+      timestamp: baseTimestamp,
+      acpSource: "raw_json_rpc",
+    }),
+    false,
+    "raw_json_rpc metadata is infrastructure noise → not meaningful",
+  );
+  assert.equal(
+    isMeaningfulItem({
+      id: "meta:ctx",
+      type: "metadata",
+      renderClass: "raw-rail",
       title: "Prompt context",
       sections: [],
       timestamp: baseTimestamp,
+      acpSource: "session/prompt:context",
     }),
-    false,
+    true,
+    "prompt context metadata is semantic → meaningful",
+  );
+  assert.equal(
+    isMeaningfulItem({
+      id: "meta:sys",
+      type: "metadata",
+      renderClass: "raw-rail",
+      title: "System prompt",
+      sections: [],
+      timestamp: baseTimestamp,
+    }),
+    true,
+    "system prompt metadata (no acpSource) is semantic → meaningful",
   );
   assert.equal(
     isMeaningfulItem({
@@ -118,3 +148,110 @@ test("isMeaningfulItem ignores suppressed tools", () => {
     false,
   );
 });
+
+const metadataSystemPrompt = {
+  id: "meta:sys",
+  type: "metadata",
+  renderClass: "raw-rail",
+  title: "System prompt",
+  sections: [],
+  timestamp: baseTimestamp,
+};
+
+const metadataPromptContext = {
+  id: "meta:ctx",
+  type: "metadata",
+  renderClass: "raw-rail",
+  title: "Prompt context",
+  sections: [],
+  timestamp: baseTimestamp,
+  acpSource: "session/prompt:context",
+};
+
+test("isSpineItem excludes metadata items (reads recede)", () => {
+  assert.equal(
+    isSpineItem(metadataSystemPrompt),
+    false,
+    "system prompt metadata is not spine work",
+  );
+  assert.equal(
+    isSpineItem(metadataPromptContext),
+    false,
+    "prompt context metadata is not spine work",
+  );
+  assert.equal(isSpineItem(makeTool()), true, "tool items are spine work");
+  assert.equal(
+    isSpineItem(makeMessage()),
+    true,
+    "message items are spine work",
+  );
+  assert.equal(
+    isSpineItem({
+      id: "meta:raw",
+      type: "metadata",
+      renderClass: "raw-rail",
+      title: "Raw ACP payload",
+      sections: [],
+      timestamp: baseTimestamp,
+      acpSource: "raw_json_rpc",
+    }),
+    false,
+    "raw_json_rpc is already filtered by isMeaningfulItem → not spine",
+  );
+});
+
+test("isSpineItem: metadata still meaningful via isMeaningfulItem (feed visibility unchanged)", () => {
+  // isMeaningfulItem must still return true for non-raw metadata — the feed
+  // renders metadata items independently of isSpineItem.
+  assert.equal(isMeaningfulItem(metadataSystemPrompt), true);
+  assert.equal(isMeaningfulItem(metadataPromptContext), true);
+});
+
+test("two-tier headline: metadata excluded when spine work is present", () => {
+  // Simulate what BotActivityBar does: when any spine item exists, only spine
+  // items are eligible for the headline rotation.
+  const transcript = [metadataSystemPrompt, makeTool()];
+  const hasSpine = transcript.some(isSpineItem);
+  const passFilter = hasSpine ? isSpineItem : isMeaningfulItem;
+
+  const headlines = transcript
+    .filter(passFilter)
+    .map((item) => getActivityHeadline(item))
+    .filter(Boolean);
+
+  assert.ok(
+    !headlines.includes("System prompt"),
+    "System prompt should not headline when spine work exists",
+  );
+  assert.ok(
+    headlines.some((h) => h?.includes("Send Message")),
+    "Tool headline should appear",
+  );
+});
+
+test("two-tier headline: metadata headlines when it is the only activity (session start / idle)", () => {
+  // When no spine items exist, fall back to isMeaningfulItem so the bar is not
+  // empty at session start.
+  const transcript = [metadataSystemPrompt, metadataPromptContext];
+  const hasSpine = transcript.some(isSpineItem);
+  const passFilter = hasSpine ? isSpineItem : isMeaningfulItem;
+
+  const headlines = transcript
+    .filter(passFilter)
+    .map((item) => getActivityHeadline(item))
+    .filter(Boolean);
+
+  assert.ok(
+    headlines.includes("System prompt"),
+    "System prompt should headline when no spine work exists",
+  );
+  assert.ok(
+    headlines.includes("Prompt context"),
+    "Prompt context should headline when no spine work exists",
+  );
+});
+
+// Render-tier tests (raw_json_rpc → <pre>, non-raw → polished accordion) live in
+// activityRenderClasses/RawRailActivity.render.test.mjs — they use
+// renderToStaticMarkup and would fail if the isRawPayload branch in
+// RawRailActivity were removed.

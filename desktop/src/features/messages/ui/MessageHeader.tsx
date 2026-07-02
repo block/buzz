@@ -43,6 +43,7 @@ export function MessageAuthorText({
         hoverUnderline && "hover:underline",
         className,
       )}
+      data-testid="message-author"
     >
       {children}
     </Component>

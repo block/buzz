@@ -65,8 +65,12 @@ serde_yaml  = "0.9"
 evalexpr    = "11"
 cron        = "0.16"
 # Observability
-tracing             = "0.1"
-tracing-subscriber  = { version = "0.3", features = ["env-filter", "json"] }
+tracing                     = "0.1"
+tracing-subscriber          = { version = "0.3", features = ["env-filter", "json"] }
+tracing-opentelemetry       = { version = "0.33" }
+opentelemetry               = { version = "0.32", features = ["trace"] }
+opentelemetry_sdk           = { version = "0.32", features = ["trace", "rt-tokio"] }
+opentelemetry-otlp          = { version = "0.32", default-features = false, features = ["trace", "grpc-tonic", "tls-ring"] }
 metrics             = "0.24"
 metrics-exporter-prometheus = "0.18"
 
@@ -148,3 +152,12 @@ lto = "fat"
 codegen-units = 1
 panic = "abort"
 strip = true
+
+# Temporary fork pin: aws-creds 0.39.1 (via rust-s3) cannot read EKS Pod Identity
+# credentials (AWS_CONTAINER_CREDENTIALS_FULL_URI + AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE),
+# which the relay pod on bb-block requires for S3 media + git storage. This pins
+# aws-creds to a fork that adopts the aws-creds portion of durch/rust-s3#449
+# (FULL_URI + token-file + Authorization header, refresh-safe, with a loopback
+# allowlist for the auth token). Revert to crates.io once #449 lands upstream.
+[patch.crates-io]
+aws-creds = { git = "https://github.com/tlongwell-block/rust-s3", rev = "c9fce3620dd434c1f810101d672cf384268dbb0f" }

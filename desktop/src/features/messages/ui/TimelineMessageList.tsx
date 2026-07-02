@@ -3,10 +3,12 @@ import * as React from "react";
 import { formatDayHeading } from "@/features/messages/lib/dateFormatters";
 import { timelineRowReserveStyle } from "@/features/messages/lib/rowHeightEstimate";
 import {
+  buildTimelineDayGroups,
   buildTimelineItems,
   getTimelineItemKey,
-  type TimelineItem,
+  type TimelineNonDayItem,
 } from "@/features/messages/lib/timelineItems";
+import { THREAD_REPLY_ROW_MARGIN_INLINE_REM } from "@/features/messages/lib/threadTreeLayout";
 import { buildMainTimelineEntries } from "@/features/messages/lib/threadPanel";
 import type { MainTimelineEntry } from "@/features/messages/lib/threadPanel";
 import {
@@ -163,14 +165,14 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
     () => buildTimelineItems(entries, firstUnreadMessageId),
     [entries, firstUnreadMessageId],
   );
+  const dayGroups = React.useMemo(
+    () => buildTimelineDayGroups(itemsResult.items),
+    [itemsResult.items],
+  );
 
   const renderItem = React.useCallback(
-    (item: TimelineItem) => {
+    (item: TimelineNonDayItem) => {
       switch (item.kind) {
-        case "day-divider":
-          // Heading is resolved at render time (not baked into the item) so
-          // "Today"/"Yesterday" track the wall clock, not build time.
-          return <DayDivider label={formatDayHeading(item.headingTimestamp)} />;
         case "unread-divider":
           return <UnreadDivider />;
         case "system":
@@ -195,6 +197,8 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
               highlightedMessageId={highlightedMessageId}
               huddleMemberPubkeys={huddleMemberPubkeys}
               huddleMemberPubkeysPending={huddleMemberPubkeysPending}
+              isContinuation={item.isContinuation}
+              isFollowedByContinuation={item.isFollowedByContinuation}
               isFollowingThreadById={isFollowingThreadById}
               isUnread={isMessageUnreadById?.(item.entry.message.id)}
               onDelete={onDelete}
@@ -245,14 +249,34 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
 
   return (
     <div className="flex flex-col">
-      {itemsResult.items.map((item) => (
-        <div
-          className="timeline-row-cv"
-          key={getTimelineItemKey(item)}
-          style={timelineRowReserveStyle(item)}
+      {dayGroups.map((group) => (
+        <section
+          className={cn(
+            "relative flex flex-col",
+            group.headingTimestamp !== null &&
+              "before:absolute before:inset-x-0 before:top-4 before:h-px before:bg-border/35 before:content-['']",
+          )}
+          data-day-label={
+            group.headingTimestamp === null
+              ? undefined
+              : formatDayHeading(group.headingTimestamp)
+          }
+          data-testid="message-timeline-day-group"
+          key={group.key}
         >
-          {renderItem(item)}
-        </div>
+          {group.headingTimestamp === null ? null : (
+            <DayDivider label={formatDayHeading(group.headingTimestamp)} />
+          )}
+          {group.items.map((item) => (
+            <div
+              className="timeline-row-cv"
+              key={getTimelineItemKey(item)}
+              style={timelineRowReserveStyle(item)}
+            >
+              {renderItem(item)}
+            </div>
+          ))}
+        </section>
       ))}
     </div>
   );
@@ -309,6 +333,8 @@ type MessageRowItemProps = Pick<
 > & {
   entry: MainTimelineEntry;
   footer: React.ReactNode;
+  isContinuation?: boolean;
+  isFollowedByContinuation?: boolean;
   isUnread?: boolean;
   videoReviewContext: ReturnType<typeof buildVideoReviewContextForMessage>;
 };
@@ -323,6 +349,8 @@ function MessageRowItem({
   highlightedMessageId,
   huddleMemberPubkeys,
   huddleMemberPubkeysPending,
+  isContinuation = false,
+  isFollowedByContinuation = false,
   isFollowingThreadById,
   isUnread,
   onDelete,
@@ -353,7 +381,7 @@ function MessageRowItem({
     return (
       <div
         className={cn(
-          "group/message relative mx-1 flex flex-col gap-0 rounded-2xl px-0 py-1 pb-2.5 transition-colors hover:bg-muted/50 focus-within:bg-muted/50",
+          "group/message relative mx-1 mb-1 flex flex-col gap-0 rounded-2xl px-0 py-1 transition-colors hover:bg-muted/50 focus-within:bg-muted/50",
           isHighlighted &&
             "-mx-4 px-4 before:absolute before:-inset-y-1.5 before:inset-x-0 before:animate-[route-target-highlight-fade_2s_ease-out_forwards] before:bg-primary/10 before:content-[''] motion-reduce:before:animate-none sm:-mx-6 sm:px-6",
         )}
@@ -371,6 +399,7 @@ function MessageRowItem({
               : undefined
           }
           isUnread={isUnread}
+          isContinuation={isContinuation}
           message={message}
           onDelete={canDelete}
           onEdit={canEdit}
@@ -396,6 +425,7 @@ function MessageRowItem({
           onOpenThread={onReply}
           showDepthGuides={false}
           summary={summary}
+          summaryIndentOffsetRem={-THREAD_REPLY_ROW_MARGIN_INLINE_REM}
           unreadCount={threadUnreadCounts?.get(message.id)}
         />
         {footer}
@@ -407,13 +437,19 @@ function MessageRowItem({
   const isSearchActive = message.id === searchActiveMessageId;
 
   return (
-    <div className="flex flex-col gap-1 pb-2.5">
+    <div
+      className={cn(
+        "flex flex-col gap-1",
+        isFollowedByContinuation ? "pb-0" : "pb-2.5",
+      )}
+    >
       <MessageRow
         agentPubkeys={agentPubkeys}
         channelId={channelId}
         highlighted={message.id === highlightedMessageId || isSearchActive}
         huddleMemberPubkeys={huddleMemberPubkeys}
         huddleMemberPubkeysPending={huddleMemberPubkeysPending}
+        isContinuation={isContinuation}
         isUnread={isUnread}
         message={message}
         onDelete={canDelete}

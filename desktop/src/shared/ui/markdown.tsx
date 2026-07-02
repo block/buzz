@@ -38,6 +38,7 @@ import remarkSpoilers from "@/shared/lib/remarkSpoilers";
 import remarkMessageLinks from "@/features/messages/lib/remarkMessageLinks";
 import { AttachmentGroup } from "@/shared/ui/attachment";
 import { LinkPreviewAttachment } from "@/shared/ui/link-preview-attachment";
+import { useSmoothCorners } from "@/shared/ui/smoothCorners";
 import {
   INLINE_CODE_CHIP_CLASS,
   MENTION_CHIP_BASE_CLASSES,
@@ -66,6 +67,7 @@ import {
 import { FileCard } from "./markdown/FileCard";
 import { InlineEmojiPopover } from "./markdown/InlineEmojiPopover";
 import { MarkdownInput } from "./markdown/MarkdownInput";
+import { MarkdownTable } from "./markdown/MarkdownTable";
 import { MessageLinkPill } from "./markdown/MessageLinkPill";
 import { resolveFileCard } from "./markdownFileCard";
 import type {
@@ -595,6 +597,7 @@ function ImageZoomOverlay({
   const galleryTransitionTimerRef = React.useRef<number | null>(null);
   const closeTimerRef = React.useRef<number | null>(null);
   const dialogRef = React.useRef<HTMLDivElement | null>(null);
+  const imageFrameSurfaceRef = React.useRef<HTMLDivElement | null>(null);
   const descriptionId = React.useId();
   const gestureScaleRef = React.useRef(1);
   const previouslyFocusedElementRef = React.useRef<HTMLElement | null>(null);
@@ -603,6 +606,8 @@ function ImageZoomOverlay({
   const hasPreviousImage = currentIndex > 0;
   const hasNextImage = currentIndex < items.length - 1;
   const canDownloadCurrentImage = Boolean(currentItem.src);
+  useSmoothCorners(imageFrameSurfaceRef);
+
   const galleryTransitionFilter =
     !prefersReducedMotion && isGalleryNavigating
       ? `blur(${IMAGE_LIGHTBOX_GALLERY_BLUR_PX}px)`
@@ -1145,31 +1150,36 @@ function ImageZoomOverlay({
             : IMAGE_LIGHTBOX_EASE_OUT,
         }}
       >
-        <div className="relative h-full w-full overflow-hidden rounded-lg shadow-2xl">
-          <AnimatePresence
-            custom={galleryDirection}
-            initial={false}
-            mode="popLayout"
+        <div className="relative h-full w-full rounded-2xl shadow-2xl">
+          <div
+            ref={imageFrameSurfaceRef}
+            className="relative h-full w-full overflow-hidden rounded-2xl"
           >
-            <motion.img
-              alt={currentItem.alt}
-              animate="center"
-              className="absolute inset-0 h-full w-full object-contain"
+            <AnimatePresence
               custom={galleryDirection}
-              exit="exit"
-              initial="enter"
-              key={currentItem.resolvedSrc}
-              src={currentItem.resolvedSrc}
-              transition={{
-                duration: prefersReducedMotion
-                  ? IMAGE_LIGHTBOX_REDUCED_MOTION_MS / 1000
-                  : IMAGE_LIGHTBOX_GALLERY_SLIDE_MS / 1000,
-                ease: IMAGE_LIGHTBOX_GALLERY_EASE,
-              }}
-              variants={galleryImageVariants}
-              onContextMenuCapture={handleImageContextMenu}
-            />
-          </AnimatePresence>
+              initial={false}
+              mode="popLayout"
+            >
+              <motion.img
+                alt={currentItem.alt}
+                animate="center"
+                className="absolute inset-0 h-full w-full object-contain"
+                custom={galleryDirection}
+                exit="exit"
+                initial="enter"
+                key={currentItem.resolvedSrc}
+                src={currentItem.resolvedSrc}
+                transition={{
+                  duration: prefersReducedMotion
+                    ? IMAGE_LIGHTBOX_REDUCED_MOTION_MS / 1000
+                    : IMAGE_LIGHTBOX_GALLERY_SLIDE_MS / 1000,
+                  ease: IMAGE_LIGHTBOX_GALLERY_EASE,
+                }}
+                variants={galleryImageVariants}
+                onContextMenuCapture={handleImageContextMenu}
+              />
+            </AnimatePresence>
+          </div>
         </div>
       </div>
       {hasPreviousImage ? (
@@ -1308,6 +1318,8 @@ function ImageBlock({ alt, dim, resolvedSrc, src }: ImageBlockProps) {
   const [menu, setMenu] = React.useState<ImageContextMenuPosition | null>(null);
   const inlineImageRef = React.useRef<HTMLImageElement | null>(null);
   const triggerRef = React.useRef<HTMLButtonElement | null>(null);
+  useSmoothCorners(inlineImageRef);
+
   const [spoilerMediaSize, setSpoilerMediaSize] = React.useState<{
     height: number;
     src: string;
@@ -1464,7 +1476,7 @@ function ImageBlock({ alt, dim, resolvedSrc, src }: ImageBlockProps) {
         aria-hidden={isHiddenInSpoiler ? true : undefined}
         aria-label={alt?.trim() ? `Zoom image: ${alt}` : "Zoom image"}
         className={cn(
-          "mt-1 inline-block min-w-0 max-w-full cursor-zoom-in rounded-xl border-0 bg-transparent p-0 text-left align-top focus:outline-hidden focus-visible:ring-2 focus-visible:ring-ring/50",
+          "mt-1 inline-block min-w-0 max-w-full cursor-zoom-in rounded-2xl border-0 bg-transparent p-0 text-left align-top focus:outline-hidden focus-visible:ring-2 focus-visible:ring-ring/50",
           lightboxState && "opacity-0",
         )}
         data-image-lightbox-resolved-src={resolvedSrc}
@@ -1481,7 +1493,7 @@ function ImageBlock({ alt, dim, resolvedSrc, src }: ImageBlockProps) {
       >
         <img
           alt={alt}
-          className="block h-auto max-h-64 max-w-[min(24rem,100%)] rounded-xl object-contain"
+          className="block h-auto max-h-64 max-w-[min(24rem,100%)] rounded-2xl object-contain"
           data-spoiler-media-size={hiddenSpoilerMediaSize ? "" : undefined}
           height={intrinsicDimensions.height}
           ref={imageRef}
@@ -1793,16 +1805,7 @@ function createMarkdownComponents(
     strong: ({ children }) => (
       <strong className="font-semibold">{children}</strong>
     ),
-    table: ({ children }) => (
-      <div
-        className="overflow-x-auto rounded-2xl border border-border/70"
-        data-table-block=""
-      >
-        <table className="w-full border-collapse text-left text-sm">
-          {children}
-        </table>
-      </div>
-    ),
+    table: ({ children }) => <MarkdownTable>{children}</MarkdownTable>,
     td: ({ children }) => (
       <td className="border-t border-border/70 px-3 py-2 align-top">
         {children}

@@ -47,7 +47,7 @@ function isLifecycleNoise(
   return LIFECYCLE_NOISE.has(item.title.toLowerCase());
 }
 
-/** Whether an item should contribute to the "Now" summary and headline scan. */
+/** Whether an item should contribute to the headline scan (noise gate). */
 export function isMeaningfulItem(item: TranscriptItem): boolean {
   if (item.type === "tool" && item.renderClass === "suppressed") {
     return false;
@@ -56,7 +56,26 @@ export function isMeaningfulItem(item: TranscriptItem): boolean {
     return !isLifecycleNoise(item);
   }
   if (item.type === "metadata") {
-    return false;
+    // Raw JSON-RPC frames ("Raw ACP payload") are infrastructure noise; all
+    // other metadata items (system prompt, prompt context) are semantically
+    // meaningful and visible in the feed.
+    return item.acpSource !== "raw_json_rpc";
   }
   return true;
+}
+
+/**
+ * Whether an item is "spine" work — eligible to headline over setup/context.
+ * Tools, messages, thoughts, plans, and meaningful lifecycle events qualify.
+ * Metadata items (system prompt, prompt context) are reads that should recede
+ * when real work is present; they are NOT spine items.
+ *
+ * Used by BotActivityBar for the two-tier headline scan:
+ * 1. Collect spine headlines first.
+ * 2. If none found, fall back to including metadata so the bar isn't empty at
+ *    session start / idle.
+ */
+export function isSpineItem(item: TranscriptItem): boolean {
+  if (!isMeaningfulItem(item)) return false;
+  return item.type !== "metadata";
 }

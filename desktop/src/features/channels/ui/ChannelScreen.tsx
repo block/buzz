@@ -390,9 +390,15 @@ export function ChannelScreen({
         messageProfilesQuery.data?.profiles,
         currentProfile,
       ) ?? {};
-    return mergeAgentNamesIntoProfiles(base, managedAgents, relayAgents);
+    return mergeAgentNamesIntoProfiles(
+      base,
+      managedAgents,
+      relayAgents,
+      currentPubkey,
+    );
   }, [
     currentProfile,
+    currentPubkey,
     managedAgents,
     messageProfilesQuery.data?.profiles,
     relayAgents,

@@ -5,6 +5,7 @@ import {
   formatDayHeading,
   formatShortMonthDayOrdinal,
   formatThreadSummaryLastReplyTime,
+  formatTimeWithoutDayPeriod,
   startOfLocalDaySeconds,
 } from "./dateFormatters.ts";
 
@@ -72,6 +73,12 @@ test("formatShortMonthDayOrdinal handles ordinal suffixes", () => {
     formatShortMonthDayOrdinal(localUnixSeconds(2026, 4, 31)),
     "May 31st",
   );
+});
+
+test("formatTimeWithoutDayPeriod removes AM/PM suffixes", () => {
+  assert.equal(formatTimeWithoutDayPeriod("8:00 AM"), "8:00");
+  assert.equal(formatTimeWithoutDayPeriod("12:34\u202fPM"), "12:34");
+  assert.equal(formatTimeWithoutDayPeriod("16:20"), "16:20");
 });
 
 test("formatThreadSummaryLastReplyTime expands relative units", () => {

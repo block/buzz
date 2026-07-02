@@ -39,18 +39,6 @@ tests:
       - failedTemplate:
           errorPattern: "replicaCount=3 requires Redis"
 
-  - it: fails when replicaCount>1 with RWO git PVC
-    set:
-      relayUrl: wss://buzz.example.com
-      ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
-      externalPostgresql.url: postgres://u:p@h:5432/d
-      externalRedis.url: redis://h:6379
-      replicaCount: 3
-      persistence.git.accessMode: ReadWriteOnce
-    asserts:
-      - failedTemplate:
-          errorPattern: "requires persistence.git.accessMode=ReadWriteMany"
-
   - it: fails when ingress and httproute both enabled
     set:
       relayUrl: wss://buzz.example.com

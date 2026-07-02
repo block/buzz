@@ -12,6 +12,9 @@ import { useIdentityQuery } from "@/shared/api/hooks";
 
 type HomeRouteSearch = {
   item?: string;
+  profile?: string;
+  profileTab?: string;
+  profileView?: string;
 };
 
 function validateHomeSearch(search: Record<string, unknown>): HomeRouteSearch {
@@ -19,6 +22,18 @@ function validateHomeSearch(search: Record<string, unknown>): HomeRouteSearch {
     item:
       typeof search.item === "string" && search.item.length > 0
         ? search.item
+        : undefined,
+    profile:
+      typeof search.profile === "string" && search.profile.length > 0
+        ? search.profile
+        : undefined,
+    profileTab:
+      typeof search.profileTab === "string" && search.profileTab.length > 0
+        ? search.profileTab
+        : undefined,
+    profileView:
+      typeof search.profileView === "string" && search.profileView.length > 0
+        ? search.profileView
         : undefined,
   };
 }

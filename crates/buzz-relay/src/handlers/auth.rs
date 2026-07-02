@@ -38,6 +38,7 @@ pub fn extract_auth_tag_json(event: &nostr::Event) -> Option<String> {
 /// the connection to authenticated state.
 ///
 /// Pure crypto verification — no API tokens, no JWT, no DB token lookups.
+#[tracing::instrument(skip_all, fields(event_id, conn_id))]
 pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state: Arc<AppState>) {
     let event_id_hex = event.id.to_hex();
     let (challenge, conn_id) = {
@@ -64,6 +65,11 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
             }
         }
     };
+
+    // Record the declared span fields now that we have the values.
+    tracing::Span::current()
+        .record("event_id", event_id_hex.as_str())
+        .record("conn_id", conn_id.to_string().as_str());
 
     // Extract the NIP-OA auth tag before verification consumes the event.
     // The tag is integrity-protected by the event's Schnorr signature — if

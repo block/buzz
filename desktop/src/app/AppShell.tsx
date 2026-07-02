@@ -60,11 +60,13 @@ import { useDueReminderBadgeCount } from "@/features/reminders/hooks";
 import { RemindMeLaterProvider } from "@/features/reminders/ui/RemindMeLaterProvider";
 import { useReminderNotifications } from "@/features/reminders/useReminderNotifications";
 import { AppSidebar } from "@/features/sidebar/ui/AppSidebar";
+import { WorkspaceRail } from "@/features/sidebar/ui/WorkspaceRail";
 import { useChannelMutes } from "@/features/sidebar/lib/useChannelMutes";
 import { useChannelStars } from "@/features/sidebar/lib/useChannelStars";
 import { useWorkspaces } from "@/features/workspaces/useWorkspaces";
 import { useApplyTemplate } from "@/features/channel-templates/useApplyTemplate";
 import { relayClient } from "@/shared/api/relayClient";
+import { useFeatureEnabled } from "@/shared/features";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import { useRelayAutoHeal } from "@/shared/api/useRelayAutoHeal";
 import { useDeferredStartup } from "@/shared/hooks/useDeferredStartup";
@@ -91,6 +93,7 @@ export function AppShell() {
   useWebviewScrollBoundaryLock();
 
   const workspacesHook = useWorkspaces();
+  const workspaceRailEnabled = useFeatureEnabled("workspaceRail");
   const [isAddWorkspaceOpen, setIsAddWorkspaceOpen] = React.useState(false);
   const [isChannelManagementOpen, setIsChannelManagementOpen] =
     React.useState(false);
@@ -606,15 +609,29 @@ export function AppShell() {
               >
                 <div
                   className={cn(
-                    "buzz-huddle-app-surface z-10 flex min-h-0 flex-col overflow-hidden bg-background",
+                    "buzz-huddle-app-surface z-10 flex min-h-0 flex-row overflow-hidden bg-background",
                     isHuddleDrawerOpen && "buzz-huddle-app-surface-open",
                   )}
                 >
+                  {workspaceRailEnabled ? (
+                    <WorkspaceRail
+                      activeWorkspaceId={
+                        workspacesHook.activeWorkspace?.id ?? null
+                      }
+                      onAddWorkspace={() => setIsAddWorkspaceOpen(true)}
+                      onSwitchWorkspace={workspacesHook.switchWorkspace}
+                      workspaces={workspacesHook.workspaces}
+                    />
+                  ) : null}
                   <SidebarProvider className="min-h-0 flex-1 flex-col overflow-hidden">
                     {!settingsOpen ? (
                       <AppTopChrome
                         canGoBack={canGoBack}
                         canGoForward={canGoForward}
+                        hasWorkspaceRail={
+                          workspaceRailEnabled &&
+                          workspacesHook.workspaces.length > 1
+                        }
                         onGoBack={goBack}
                         onGoForward={goForward}
                       />

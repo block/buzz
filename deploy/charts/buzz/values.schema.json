@@ -26,7 +26,7 @@
     "replicaCount": {
       "type": "integer",
       "minimum": 1,
-      "description": "Replica count for the relay Deployment. replicaCount > 1 requires Redis (for buzz-pubsub) and ReadWriteMany git storage — enforced by _validate.tpl."
+      "description": "Replica count for the relay Deployment. replicaCount > 1 requires Redis (for buzz-pubsub) — enforced by _validate.tpl. Git storage does NOT need ReadWriteMany: git state is object-store-backed and repo names live in Postgres, so ReadWriteOnce is fine per replica."
     },
     "relayUrl": {
       "type": "string",

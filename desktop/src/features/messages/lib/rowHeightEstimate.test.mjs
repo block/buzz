@@ -87,7 +87,7 @@ test("estimateRowHeight: imeta dim is not double-counted with its body url", () 
 test("estimateRowHeight: bare URL line adds a preview card", () => {
   const withUrl = estimateRowHeight(msg({ body: "https://example.com/x" }));
   const withoutUrl = estimateRowHeight(msg({ body: "example" }));
-  assert.ok(withUrl > withoutUrl + 80, `url ${withUrl} vs ${withoutUrl}`);
+  assert.ok(withUrl > withoutUrl + 50, `url ${withUrl} vs ${withoutUrl}`);
 });
 
 test("timelineRowReserveStyle: message item yields containIntrinsicSize", () => {

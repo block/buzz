@@ -1,17 +1,16 @@
 import * as React from "react";
-import { CheckCheck, ChevronDown, Radio } from "lucide-react";
+import { CheckCheck, Radio } from "lucide-react";
 
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { cn } from "@/shared/lib/cn";
 import {
   Dialog,
   DialogContent,
-  DialogDescription,
   DialogHeader,
   DialogTitle,
 } from "@/shared/ui/dialog";
-import { Toggle } from "@/shared/ui/toggle";
-import type { PromptSection, TranscriptItem } from "./agentSessionTypes";
+import type { TranscriptItem } from "./agentSessionTypes";
+import { PromptSectionList as PromptContextSections } from "./PromptSectionAccordion";
 import { TranscriptActivityItem } from "./activityRenderClasses/TranscriptActivityItem";
 import {
   ActivityRow,
@@ -207,6 +206,7 @@ function TranscriptTurnSegmentView({
         context={segment.context}
         profiles={profiles}
         setup={segment.setup}
+        systemPrompt={segment.systemPrompt}
         user={segment.user}
       />
     );
@@ -355,11 +355,13 @@ function TurnPromptBlock({
   context,
   profiles,
   setup,
+  systemPrompt,
   user,
 }: {
   context: Extract<TranscriptItem, { type: "metadata" }> | null;
   profiles?: UserProfileLookup;
   setup: Extract<TranscriptItem, { type: "lifecycle" }>[];
+  systemPrompt: Extract<TranscriptItem, { type: "metadata" }> | null;
   user: Extract<TranscriptItem, { type: "message" }>;
 }) {
   return (
@@ -377,6 +379,7 @@ function TurnPromptBlock({
         item={user}
         profiles={profiles}
         setup={setup}
+        systemPrompt={systemPrompt}
       />
     </div>
   );
@@ -387,111 +390,72 @@ function PromptUserMessage({
   item,
   profiles,
   setup = [],
+  systemPrompt = null,
 }: {
   context?: Extract<TranscriptItem, { type: "metadata" }> | null;
   item: Extract<TranscriptItem, { type: "message" }>;
   profiles?: UserProfileLookup;
   setup?: Extract<TranscriptItem, { type: "lifecycle" }>[];
+  systemPrompt?: Extract<TranscriptItem, { type: "metadata" }> | null;
 }) {
-  const [contextOpen, setContextOpen] = React.useState(false);
-
   return (
     <>
       <UserMessageBubble
         bubbleClassName="p-2.5"
         footer={
           <TurnSetupFooter
-            context={context}
-            contextOpen={contextOpen}
             items={setup}
             messageLink={getTranscriptMessageLink(item)}
-            onContextOpenChange={setContextOpen}
             timestamp={item.timestamp}
           />
         }
         item={item}
         profiles={profiles}
       />
-      <PromptContextDialog
-        context={context}
-        onOpenChange={setContextOpen}
-        open={contextOpen}
-        setup={setup}
-      />
+      {systemPrompt && systemPrompt.sections.length > 0 ? (
+        <PromptContextInline context={systemPrompt} />
+      ) : null}
+      {context && context.sections.length > 0 ? (
+        <PromptContextInline context={context} />
+      ) : null}
     </>
   );
 }
 
-function PromptContextSections({
-  className,
-  sections,
+function PromptContextInline({
+  context,
 }: {
-  className?: string;
-  sections: PromptSection[];
+  context: Extract<TranscriptItem, { type: "metadata" }>;
 }) {
-  return (
-    <div
-      className={cn("space-y-3", className)}
-      data-testid="transcript-prompt-context-sections"
-    >
-      {sections.map((section) => (
-        <PromptContextSectionAccordion
-          key={`${section.title}:${section.body.slice(0, 48)}`}
-          section={section}
-        />
-      ))}
-    </div>
-  );
-}
-
-function PromptContextSectionAccordion({
-  section,
-}: {
-  section: PromptSection;
-}) {
-  const [open, setOpen] = React.useState(false);
-  const body = section.body.trim();
+  const [dialogOpen, setDialogOpen] = React.useState(false);
 
   return (
-    <article className="overflow-hidden rounded-2xl bg-muted/40">
-      <button
-        aria-expanded={open}
-        className="w-full px-4 py-3 text-left transition-colors hover:bg-muted/50"
-        onClick={() => setOpen((value) => !value)}
-        type="button"
+    <>
+      <div
+        className="mt-1 space-y-2 pl-2"
+        data-testid="transcript-prompt-context-inline"
       >
-        <div className="flex items-start gap-3">
-          <div className="min-w-0 flex-1">
-            <div
-              className={cn(
-                "text-sm font-semibold text-foreground",
-                !open && "line-clamp-2",
-              )}
-            >
-              {section.title}
-            </div>
-            <div
-              className={cn(
-                "mt-1 text-xs leading-5 text-foreground/70",
-                open ? "whitespace-pre-wrap wrap-break-word" : "line-clamp-2",
-              )}
-            >
-              {body.length > 0 ? (
-                body
-              ) : (
-                <span className="italic text-foreground/50">No metadata.</span>
-              )}
-            </div>
-          </div>
-          <ChevronDown
-            className={cn(
-              "mt-0.5 h-4 w-4 shrink-0 text-muted-foreground transition-transform",
-              open && "rotate-180",
-            )}
-          />
+        <div className="flex items-center justify-between gap-2">
+          <p className="text-xs font-medium text-muted-foreground/70">
+            {context.title}
+          </p>
+          <button
+            className="text-xs text-muted-foreground/50 hover:text-muted-foreground transition-colors"
+            data-testid="transcript-prompt-context-expand"
+            onClick={() => setDialogOpen(true)}
+            type="button"
+          >
+            View full
+          </button>
         </div>
-      </button>
-    </article>
+        <PromptContextSections sections={context.sections} />
+      </div>
+      <PromptContextDialog
+        context={context}
+        onOpenChange={setDialogOpen}
+        open={dialogOpen}
+      />
+    </>
   );
 }
 
@@ -499,33 +463,22 @@ function PromptContextDialog({
   context,
   onOpenChange,
   open,
-  setup,
 }: {
-  context: Extract<TranscriptItem, { type: "metadata" }> | null;
+  context: Extract<TranscriptItem, { type: "metadata" }>;
   onOpenChange: (open: boolean) => void;
   open: boolean;
-  setup: Extract<TranscriptItem, { type: "lifecycle" }>[];
 }) {
-  if (!open || !context || context.sections.length === 0) {
+  if (!open || context.sections.length === 0) {
     return null;
   }
-
-  const setupText = formatPromptSetupSummary(setup);
 
   return (
     <Dialog onOpenChange={onOpenChange} open={open}>
       <DialogContent className="max-w-xl overflow-hidden p-0">
         <div className="flex max-h-[85vh] flex-col">
           <DialogHeader className="px-6 pb-3 pt-5 pr-14">
-            <DialogTitle>Prompt context</DialogTitle>
-            {setupText ? (
-              <div className="flex items-center gap-1.5">
-                <CheckCheck className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-                <DialogDescription>{setupText}</DialogDescription>
-              </div>
-            ) : null}
+            <DialogTitle>{context.title}</DialogTitle>
           </DialogHeader>
-
           <div className="min-h-0 flex-1 overflow-y-auto px-6 pb-6 pt-2">
             <PromptContextSections sections={context.sections} />
           </div>
@@ -535,28 +488,14 @@ function PromptContextDialog({
   );
 }
 
-function formatPromptSetupSummary(
-  items: Extract<TranscriptItem, { type: "lifecycle" }>[],
-) {
-  const label = formatTurnSetupLabel(items);
-  const detail = turnSetupDetail(items);
-  return [label, detail].filter(Boolean).join(" · ");
-}
-
 function TurnSetupFooter({
-  context = null,
-  contextOpen = false,
   items,
   messageLink = null,
-  onContextOpenChange,
   showTimestamp = true,
   timestamp,
 }: {
-  context?: Extract<TranscriptItem, { type: "metadata" }> | null;
-  contextOpen?: boolean;
   items: Extract<TranscriptItem, { type: "lifecycle" }>[];
   messageLink?: { channelId: string; messageId: string } | null;
-  onContextOpenChange?: (open: boolean) => void;
   showTimestamp?: boolean;
   timestamp: string;
 }) {
@@ -564,41 +503,22 @@ function TurnSetupFooter({
   const detail = turnSetupDetail(items);
   const tooltipText = [label, detail].filter(Boolean).join(" · ");
   const showSetup = items.length > 0;
-  const showContext = context != null && context.sections.length > 0;
 
-  if (!showSetup && !showContext) {
+  if (!showSetup) {
     return showTimestamp ? (
       <TranscriptTimestamp messageLink={messageLink} timestamp={timestamp} />
     ) : null;
   }
-
-  const contextToggle = showContext ? (
-    <Toggle
-      aria-label={`${contextOpen ? "Hide" : "Show"} prompt context`}
-      data-testid="transcript-prompt-context-toggle"
-      className="data-[state=on]:bg-primary/10 data-[state=on]:text-primary dark:data-[state=on]:bg-primary/15"
-      onPressedChange={onContextOpenChange}
-      pressed={contextOpen}
-      size="xs"
-      variant="ghost"
-    >
-      <CheckCheck aria-hidden="true" />
-    </Toggle>
-  ) : null;
 
   return (
     <div
       className="flex items-center gap-1.5 text-muted-foreground/80"
       data-testid="transcript-turn-setup"
     >
-      {showContext && showSetup ? contextToggle : null}
-      {!showContext && showSetup ? (
-        <span className="inline-flex shrink-0 items-center justify-center rounded-sm text-muted-foreground/70">
-          <CheckCheck className="h-3.5 w-3.5" />
-          <span className="sr-only">{tooltipText}</span>
-        </span>
-      ) : null}
-      {showContext && !showSetup ? contextToggle : null}
+      <span className="inline-flex shrink-0 items-center justify-center rounded-sm text-muted-foreground/70">
+        <CheckCheck className="h-3.5 w-3.5" />
+        <span className="sr-only">{tooltipText}</span>
+      </span>
       {showTimestamp ? (
         <TranscriptTimestamp messageLink={messageLink} timestamp={timestamp} />
       ) : null}

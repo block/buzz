@@ -350,7 +350,7 @@ mod tests {
         let pool = PgPool::connect(TEST_DB_URL)
             .await
             .expect("connect to test DB");
-        Db { pool }
+        Db::from_pool(pool)
     }
 
     async fn make_community(pool: &PgPool) -> Uuid {

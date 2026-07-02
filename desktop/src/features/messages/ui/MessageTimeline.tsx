@@ -373,7 +373,7 @@ const MessageTimelineBase = React.forwardRef<
         {showUnreadPill ? (
           <div
             className={cn(
-              "pointer-events-none absolute inset-x-0 z-20 flex translate-y-3 justify-center px-4",
+              "pointer-events-none absolute inset-x-0 z-30 flex translate-y-3 justify-center px-4",
               channelChrome.top,
             )}
           >
@@ -391,7 +391,7 @@ const MessageTimelineBase = React.forwardRef<
         isRenderedTimelineBehindHistoryPrepend(deferredMessages, messages) ? (
           <div
             className={cn(
-              "pointer-events-none absolute inset-x-0 z-20 flex translate-y-3 justify-center px-4",
+              "pointer-events-none absolute inset-x-0 z-30 flex translate-y-3 justify-center px-4",
               channelChrome.top,
             )}
             data-testid="message-timeline-fetching-older"
@@ -618,7 +618,7 @@ const MessageTimelineBase = React.forwardRef<
         {!isAtBottom ? (
           <div
             className={cn(
-              "pointer-events-none absolute inset-x-0 z-20 flex justify-center px-4",
+              "pointer-events-none absolute inset-x-0 z-50 flex justify-center px-4",
               hasComposerOverlay ? "bottom-36" : "bottom-4",
             )}
           >

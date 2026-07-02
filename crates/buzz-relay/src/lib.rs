@@ -33,6 +33,8 @@ pub mod router;
 pub mod state;
 /// Subscription registry with (channel, kind) fan-out index.
 pub mod subscription;
+/// OpenTelemetry tracing initialisation (tracer provider + OTLP exporter).
+pub mod telemetry;
 /// Row-zero host binding: resolve the request community from the connection host.
 pub mod tenant;
 /// Webhook secret generation and constant-time comparison.
