@@ -1946,6 +1946,30 @@ async fn test_channel_window_rejects_half_cursor_and_client_overlay_kinds() {
         "top_level with until but no before_id must be a 400"
     );
 
+    // Malformed before_id with no until → 400. Before the BeforeId enum, a
+    // malformed value decoded to None and silently demoted the request to a
+    // head fetch — the client would receive page zero instead of an error.
+    let filter = serde_json::json!([{
+        "kinds": [9],
+        "#h": [channel],
+        "limit": 2,
+        "top_level": true,
+        "before_id": "not-a-hex-event-id",
+    }]);
+    let resp = client
+        .post(format!("{}/query", relay_http_url()))
+        .header("X-Pubkey", &keys.public_key().to_hex())
+        .header("Content-Type", "application/json")
+        .body(serde_json::to_string(&filter).unwrap())
+        .send()
+        .await
+        .expect("submit malformed before_id query");
+    assert_eq!(
+        resp.status().as_u16(),
+        400,
+        "top_level with malformed before_id must be a 400, not a head request"
+    );
+
     // Client-submitted overlay kinds are rejected at ingest.
     let mut ws = BuzzTestClient::connect(&url, &keys).await.expect("connect");
     for kind in [39005u16, 39006u16] {

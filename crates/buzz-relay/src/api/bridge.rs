@@ -190,12 +190,26 @@ fn extract_channel_from_filter(filter: &nostr::Filter) -> Option<uuid::Uuid> {
 const BRIDGE_FEED_MAX_LIMIT: i64 = 100;
 const BRIDGE_THREAD_MAX_LIMIT: u32 = 500;
 
-fn extract_before_id(raw: &Value) -> Option<Vec<u8>> {
-    let hex_str = raw.get("before_id")?.as_str()?;
-    if hex_str.len() == 64 {
-        hex::decode(hex_str).ok()
-    } else {
-        None
+/// The `before_id` extension field, with "present but malformed" kept distinct
+/// from "absent": NIP-CW's cursor grammar says a malformed value MUST reject
+/// the request, never silently demote it to a half cursor or a head request.
+enum BeforeId {
+    Absent,
+    Valid(Vec<u8>),
+    Malformed,
+}
+
+fn extract_before_id(raw: &Value) -> BeforeId {
+    let Some(value) = raw.get("before_id") else {
+        return BeforeId::Absent;
+    };
+    match value
+        .as_str()
+        .filter(|hex_str| hex_str.len() == 64)
+        .and_then(|hex_str| hex::decode(hex_str).ok())
+    {
+        Some(id) => BeforeId::Valid(id),
+        None => BeforeId::Malformed,
     }
 }
 
@@ -348,8 +362,20 @@ async fn handle_channel_window_filter(
 
     // Composite request cursor: `until` + `before_id`, both or neither. The
     // window path has no timestamp-only fallback — that ambiguity is the
-    // dense-second dup/loss bug this surface exists to kill.
-    let cursor = match (filter.until, extract_before_id(raw)) {
+    // dense-second dup/loss bug this surface exists to kill. A malformed
+    // `before_id` is likewise rejected outright (NIP-CW cursor grammar),
+    // never demoted to a half cursor or a head request.
+    let before_id = match extract_before_id(raw) {
+        BeforeId::Malformed => {
+            return Err(api_error(
+                StatusCode::BAD_REQUEST,
+                "top_level: before_id must be a 64-hex event id",
+            ));
+        }
+        BeforeId::Valid(id) => Some(id),
+        BeforeId::Absent => None,
+    };
+    let cursor = match (filter.until, before_id) {
         (Some(ts), Some(id)) => {
             let ts = chrono::DateTime::from_timestamp(ts.as_secs() as i64, 0).ok_or_else(|| {
                 api_error(StatusCode::BAD_REQUEST, "top_level: until is out of range")
@@ -881,14 +907,23 @@ pub async fn query_events(
         )
         .await;
 
-        if let Some(bid) = extract_before_id(raw) {
-            if query.until.is_none() {
+        match extract_before_id(raw) {
+            BeforeId::Malformed => {
                 return Err(api_error(
                     StatusCode::BAD_REQUEST,
-                    "before_id requires until to be set",
+                    "before_id must be a 64-char hex event id",
                 ));
             }
-            query.before_id = Some(bid);
+            BeforeId::Valid(bid) => {
+                if query.until.is_none() {
+                    return Err(api_error(
+                        StatusCode::BAD_REQUEST,
+                        "before_id requires until to be set",
+                    ));
+                }
+                query.before_id = Some(bid);
+            }
+            BeforeId::Absent => {}
         }
 
         // Honor `page` on non-search general queries so offset paging works for
@@ -2124,39 +2159,40 @@ mod tests {
     fn extract_before_id_valid_hex() {
         let hex = "a".repeat(64);
         let raw = serde_json::json!({ "before_id": hex });
-        let result = extract_before_id(&raw);
-        assert!(result.is_some());
-        assert_eq!(result.unwrap().len(), 32);
+        match extract_before_id(&raw) {
+            BeforeId::Valid(id) => assert_eq!(id.len(), 32),
+            _ => panic!("64-char hex must parse as Valid"),
+        }
     }
 
     #[test]
     fn extract_before_id_short_hex() {
         let raw = serde_json::json!({ "before_id": "a".repeat(63) });
-        assert!(extract_before_id(&raw).is_none());
+        assert!(matches!(extract_before_id(&raw), BeforeId::Malformed));
     }
 
     #[test]
     fn extract_before_id_long_hex() {
         let raw = serde_json::json!({ "before_id": "a".repeat(65) });
-        assert!(extract_before_id(&raw).is_none());
+        assert!(matches!(extract_before_id(&raw), BeforeId::Malformed));
     }
 
     #[test]
     fn extract_before_id_invalid_hex_chars() {
         let raw = serde_json::json!({ "before_id": "z".repeat(64) });
-        assert!(extract_before_id(&raw).is_none());
+        assert!(matches!(extract_before_id(&raw), BeforeId::Malformed));
     }
 
     #[test]
     fn extract_before_id_absent() {
         let raw = serde_json::json!({});
-        assert!(extract_before_id(&raw).is_none());
+        assert!(matches!(extract_before_id(&raw), BeforeId::Absent));
     }
 
     #[test]
     fn extract_before_id_non_string() {
         let raw = serde_json::json!({ "before_id": 12345 });
-        assert!(extract_before_id(&raw).is_none());
+        assert!(matches!(extract_before_id(&raw), BeforeId::Malformed));
     }
 
     /// Extension flags opt in only on a literal JSON `true` — absent,
