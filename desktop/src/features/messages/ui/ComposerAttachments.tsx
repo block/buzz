@@ -223,6 +223,8 @@ const MediaAttachmentItem = React.forwardRef<
                 <ComposerImageEditor
                   alt={`Attachment ${hash}`}
                   src={rewriteRelayUrl(attachment.url)}
+                  sourceUrl={attachment.url}
+                  sourceType={attachment.type}
                   onCancel={handleEditorCancel}
                   onSave={handleEditorSave}
                 />

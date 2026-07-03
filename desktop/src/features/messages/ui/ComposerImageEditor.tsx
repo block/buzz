@@ -1,6 +1,7 @@
 import * as React from "react";
 import { Loader2, Redo2, Undo2 } from "lucide-react";
 
+import { fetchMediaBytes } from "@/shared/api/tauriMedia";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
@@ -69,42 +70,54 @@ function drawSegment(
 
 /**
  * Composite the source image and strokes into a PNG at natural resolution.
- * Requires the media proxy to grant CORS (`crossOrigin="anonymous"`), else
- * the canvas is tainted and `toBlob` throws.
+ *
+ * The source bytes are fetched over Tauri IPC and wrapped in a `blob:` URL.
+ * Blob URLs are same-origin, so the canvas stays un-tainted and `toBlob`
+ * works without any CORS involvement (the media proxy sends no CORS
+ * headers, and cross-origin `crossOrigin="anonymous"` loads would need
+ * them).
  */
 async function renderAnnotatedPng(
-  src: string,
+  sourceUrl: string,
+  sourceType: string,
   strokes: EditorStroke[],
 ): Promise<Uint8Array> {
-  const image = new Image();
-  image.crossOrigin = "anonymous";
-  // Distinct cache key from the display <img> loads: relay media is cached
-  // as `immutable` for a year, and WKWebView may hold pre-CORS-fix entries
-  // (no access-control-allow-origin header) that would fail the CORS check
-  // without ever refetching. The extra param guarantees this CORS-mode load
-  // gets a response that carries the header; the relay ignores the query.
-  image.src = `${src}${src.includes("?") ? "&" : "?"}cors=1`;
-  await image.decode();
+  const bytes = await fetchMediaBytes(sourceUrl);
+  // The explicit type matters: blob: image decoding is not content-sniffed
+  // for all formats, so an untyped blob may fail to decode.
+  const sourceBlob = new Blob([bytes], { type: sourceType });
+  const blobUrl = URL.createObjectURL(sourceBlob);
+  try {
+    const image = new Image();
+    image.src = blobUrl;
+    await image.decode();
 
-  const canvas = document.createElement("canvas");
-  canvas.width = image.naturalWidth;
-  canvas.height = image.naturalHeight;
-  const ctx = canvas.getContext("2d");
-  if (!ctx) throw new Error("Canvas 2D context unavailable");
-  ctx.drawImage(image, 0, 0);
-  for (const stroke of strokes) drawStroke(ctx, stroke);
+    const canvas = document.createElement("canvas");
+    canvas.width = image.naturalWidth;
+    canvas.height = image.naturalHeight;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) throw new Error("Canvas 2D context unavailable");
+    ctx.drawImage(image, 0, 0);
+    for (const stroke of strokes) drawStroke(ctx, stroke);
 
-  const blob = await new Promise<Blob | null>((resolve) => {
-    canvas.toBlob(resolve, "image/png");
-  });
-  if (!blob) throw new Error("PNG encoding failed");
-  return new Uint8Array(await blob.arrayBuffer());
+    const blob = await new Promise<Blob | null>((resolve) => {
+      canvas.toBlob(resolve, "image/png");
+    });
+    if (!blob) throw new Error("PNG encoding failed");
+    return new Uint8Array(await blob.arrayBuffer());
+  } finally {
+    URL.revokeObjectURL(blobUrl);
+  }
 }
 
 type ComposerImageEditorProps = {
   alt: string;
-  /** Resolved (proxy-rewritten) image URL. */
+  /** Resolved (proxy-rewritten) image URL, for display. */
   src: string;
+  /** Original relay media URL — export fetches its bytes over IPC. */
+  sourceUrl: string;
+  /** MIME type of the source image (from the blob descriptor). */
+  sourceType: string;
   onCancel: () => void;
   /** Upload the annotated PNG; rejection keeps the editor open. */
   onSave: (bytes: Uint8Array) => Promise<void>;
@@ -119,6 +132,8 @@ type ComposerImageEditorProps = {
 export function ComposerImageEditor({
   alt,
   src,
+  sourceUrl,
+  sourceType,
   onCancel,
   onSave,
 }: ComposerImageEditorProps) {
@@ -268,14 +283,14 @@ export function ComposerImageEditor({
     setSaving(true);
     setSaveError(null);
     try {
-      const bytes = await renderAnnotatedPng(src, strokes);
+      const bytes = await renderAnnotatedPng(sourceUrl, sourceType, strokes);
       await onSave(bytes);
       // On success the parent closes the lightbox and unmounts this component.
     } catch {
       setSaveError("Could not save the drawing. Please try again.");
       setSaving(false);
     }
-  }, [onSave, saving, src, strokes]);
+  }, [onSave, saving, sourceType, sourceUrl, strokes]);
 
   const hasStrokes = strokes.length > 0;
 

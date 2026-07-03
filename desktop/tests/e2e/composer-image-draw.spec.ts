@@ -28,10 +28,12 @@ const EDITED_DESCRIPTOR = {
 };
 
 /**
- * Serve deterministic same-size SVGs for both attachment URLs. The CORS
- * header matters: the editor re-loads the image with
- * `crossOrigin="anonymous"` to export an un-tainted canvas. The trailing
- * `*` also matches the editor's `?cors=1` cache-busting load.
+ * Serve deterministic same-size SVGs for both attachment URLs. These back
+ * the display <img> loads and the mock bridge's `fetch_media_bytes`
+ * handler (the editor exports via IPC bytes + blob: URL, so no CORS
+ * headers are needed). The CORS header is required only because the mock
+ * bridge's in-page `fetch()` of this cross-origin URL is CORS-mode —
+ * production fetches the bytes in Rust instead.
  */
 async function installImageRoutes(page: Page) {
   await page.route("https://example.com/e2e/draw-*.svg*", (route) => {

@@ -23,26 +23,6 @@ const MAX_PROXY_RESPONSE: u64 = 20 * 1024 * 1024;
 struct ProxyState {
     client: reqwest::Client,
     app_handle: tauri::AppHandle,
-    /// Exact `tauri dev` webview origin (from `build.devUrl`), accepted in
-    /// debug builds only. `None` in packaged builds.
-    dev_origin: Option<String>,
-}
-
-/// True when `origin` belongs to the Tauri webview itself: the custom-scheme
-/// origins of packaged builds, plus — in debug builds only — the exact
-/// `tauri dev` origin (`build.devUrl` from the merged Tauri config, e.g.
-/// `http://localhost:<per-worktree-port>`). Packaged builds accept only the
-/// custom-scheme origins: a blanket "any loopback origin" rule would let any
-/// local web page that discovers the proxy port make JS-readable requests to
-/// relay media.
-fn is_webview_origin(origin: &str, dev_origin: Option<&str>) -> bool {
-    if origin == "tauri://localhost" || origin == "http://tauri.localhost" {
-        return true;
-    }
-    if cfg!(debug_assertions) {
-        return dev_origin.is_some_and(|dev| origin == dev);
-    }
-    false
 }
 
 async fn proxy_handler(AxumState(state): AxumState<ProxyState>, req: Request) -> Response {
@@ -54,7 +34,7 @@ async fn proxy_handler(AxumState(state): AxumState<ProxyState>, req: Request) ->
         .get("origin")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    if !origin.is_empty() && !is_webview_origin(origin, state.dev_origin.as_deref()) {
+    if !origin.is_empty() && origin != "tauri://localhost" && origin != "http://tauri.localhost" {
         return (StatusCode::FORBIDDEN, "forbidden: invalid origin").into_response();
     }
 
@@ -115,19 +95,6 @@ async fn proxy_handler(AxumState(state): AxumState<ProxyState>, req: Request) ->
         }
     }
 
-    // CORS approval for `crossOrigin="anonymous"` media loads (the composer
-    // image editor needs them to keep the canvas un-tainted for `toBlob()`).
-    //
-    // This must be unconditional, not an echo of the request Origin: WKWebView
-    // omits the `Origin` header on CORS-mode image GETs (observed with the dev
-    // webview at `http://localhost:<port>`) while still enforcing this header
-    // on the response — so there is nothing to echo. `*` is valid because
-    // these loads are credential-less, and it grants nothing to foreign pages:
-    // any standards-following browser attaches `Origin` to cross-origin
-    // JS-readable requests, which the gate above rejects with 403 before this
-    // header matters.
-    headers.insert("access-control-allow-origin", HeaderValue::from_static("*"));
-
     // OOM guard for non-range full GETs (same 20 MB cap as the protocol handler).
     if !has_range {
         if let Some(cl) = headers.get("content-length") {
@@ -154,19 +121,9 @@ async fn proxy_handler(AxumState(state): AxumState<ProxyState>, req: Request) ->
 /// Tauri protocol handler's requirement to buffer the entire response into
 /// `Vec<u8>`. Returns the OS-assigned port.
 pub async fn spawn_media_proxy(http_client: reqwest::Client, app_handle: tauri::AppHandle) -> u16 {
-    // Origin form of `build.devUrl` (e.g. "http://localhost:1420"), only
-    // consulted by `is_webview_origin` in debug builds.
-    let dev_origin = app_handle
-        .config()
-        .build
-        .dev_url
-        .as_ref()
-        .map(|url| url.origin().ascii_serialization());
-
     let proxy_state = ProxyState {
         client: http_client,
         app_handle,
-        dev_origin,
     };
 
     let app = Router::new()
@@ -294,13 +251,9 @@ pub async fn handle_buzz_media(
 
             match resp.bytes().await {
                 Ok(bytes) => {
-                    // CORS approval for `crossOrigin="anonymous"` image loads
-                    // (composer canvas annotation). This custom scheme is only
-                    // reachable from our own webview, so "*" is safe.
                     let mut builder = http::Response::builder()
                         .status(status)
-                        .header("content-type", &content_type)
-                        .header("access-control-allow-origin", "*");
+                        .header("content-type", &content_type);
                     if let Some(ref cr) = content_range {
                         builder = builder.header("content-range", cr);
                     }
@@ -341,45 +294,4 @@ fn error_response(status: u16, msg: &str) -> http::Response<Vec<u8>> {
                 .body(Vec::new())
                 .unwrap()
         })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::is_webview_origin;
-
-    #[test]
-    fn allows_packaged_webview_origins() {
-        assert!(is_webview_origin("tauri://localhost", None));
-        assert!(is_webview_origin("http://tauri.localhost", None));
-    }
-
-    #[test]
-    #[cfg(debug_assertions)]
-    fn allows_only_the_exact_dev_origin_in_debug_builds() {
-        let dev = Some("http://localhost:1420");
-        assert!(is_webview_origin("http://localhost:1420", dev));
-        // Other loopback origins are not the webview.
-        assert!(!is_webview_origin("http://localhost:47177", dev));
-        assert!(!is_webview_origin("http://127.0.0.1:1420", dev));
-        assert!(!is_webview_origin("http://localhost", dev));
-        assert!(!is_webview_origin("http://localhost:1420", None));
-    }
-
-    #[test]
-    #[cfg(not(debug_assertions))]
-    fn rejects_dev_origin_in_release_builds() {
-        let dev = Some("http://localhost:1420");
-        assert!(!is_webview_origin("http://localhost:1420", dev));
-        assert!(!is_webview_origin("http://127.0.0.1:4173", dev));
-    }
-
-    #[test]
-    fn rejects_remote_and_lookalike_origins() {
-        let dev = Some("http://localhost:1420");
-        assert!(!is_webview_origin("https://evil.example.com", dev));
-        assert!(!is_webview_origin("http://localhost.evil.com", dev));
-        assert!(!is_webview_origin("http://127.0.0.1.evil.com", dev));
-        assert!(!is_webview_origin("file://localhost", dev));
-        assert!(!is_webview_origin("null", dev));
-    }
 }
