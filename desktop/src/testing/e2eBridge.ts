@@ -17,9 +17,18 @@ import {
   KIND_AGENT_OBSERVER_FRAME,
   KIND_DM_VISIBILITY,
   KIND_EVENT_REMINDER,
+  KIND_GIT_ISSUE,
+  KIND_GIT_PATCH,
+  KIND_GIT_PR_UPDATE,
+  KIND_GIT_PULL_REQUEST,
+  KIND_GIT_STATUS_CLOSED,
+  KIND_GIT_STATUS_DRAFT,
+  KIND_GIT_STATUS_MERGED,
+  KIND_GIT_STATUS_OPEN,
   KIND_HUDDLE_STARTED,
   KIND_MEMBER_ADDED_NOTIFICATION,
   KIND_MEMBER_REMOVED_NOTIFICATION,
+  KIND_REPO_ANNOUNCEMENT,
   KIND_STREAM_MESSAGE_EDIT,
   KIND_SYSTEM_MESSAGE,
   KIND_USER_STATUS,
@@ -517,6 +526,7 @@ type MockSubscription = {
 };
 
 type MockFilter = {
+  "#a"?: string[];
   "#d"?: string[];
   "#e"?: string[];
   "#h"?: string[];
@@ -3873,6 +3883,174 @@ function handleGetLikedNotes(): RawUserNotesResponse {
 // accepts 64-hex `e` tags (getDeletionTargets in formatTimelineMessages.ts), so
 // a kind:5 targeting a 32-hex reaction id would be silently ignored and the
 // reaction pill would never clear on toggle-off.
+// --- Mock projects (NIP-34 repo announcements + git activity) ---
+// Deterministic fixtures so the Projects view (cards, stat pills, and the
+// contribution heatmap) renders with data in screenshots and e2e specs.
+
+const MOCK_PROJECT_SEEDS = [
+  {
+    dtag: "buzz",
+    name: "buzz",
+    description:
+      "Relay, desktop, and mobile clients for the Buzz workspace platform.",
+    owner: MOCK_IDENTITY_PUBKEY,
+    contributors: [ALICE_PUBKEY, BOB_PUBKEY, CHARLIE_PUBKEY],
+    activityLevel: 4,
+  },
+  {
+    dtag: "relay-tools",
+    name: "relay-tools",
+    description: "Operator tooling and admin CLI for relay deployments.",
+    owner: ALICE_PUBKEY,
+    contributors: [MOCK_IDENTITY_PUBKEY, BOB_PUBKEY],
+    activityLevel: 2,
+  },
+  {
+    dtag: "design-system",
+    name: "design-system",
+    description: "Shared UI tokens, typography ramps, and component library.",
+    owner: BOB_PUBKEY,
+    contributors: [ALICE_PUBKEY],
+    activityLevel: 1,
+  },
+] as const;
+
+const MOCK_PROJECT_SUBJECTS = [
+  "Fix reconnect backoff jitter",
+  "Polish overview cards",
+  "Add contribution heatmap",
+  "Refactor filter matching",
+  "Speed up event dedup",
+  "Handle empty clone URLs",
+  "Update onboarding copy",
+  "Tighten p-gate checks",
+];
+
+const MOCK_PROJECT_KINDS = new Set<number>([
+  KIND_REPO_ANNOUNCEMENT,
+  KIND_GIT_PATCH,
+  KIND_GIT_PULL_REQUEST,
+  KIND_GIT_PR_UPDATE,
+  KIND_GIT_ISSUE,
+  KIND_GIT_STATUS_OPEN,
+  KIND_GIT_STATUS_MERGED,
+  KIND_GIT_STATUS_CLOSED,
+  KIND_GIT_STATUS_DRAFT,
+]);
+
+function mulberry32(seed: number) {
+  let state = seed;
+  return () => {
+    state |= 0;
+    state = (state + 0x6d2b79f5) | 0;
+    let t = Math.imul(state ^ (state >>> 15), 1 | state);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+let mockProjectEventStore: RelayEvent[] | null = null;
+
+function buildMockProjectEvents(): RelayEvent[] {
+  const events: RelayEvent[] = [];
+  const daySeconds = 86_400;
+  const now = Math.floor(Date.now() / 1000);
+  const historyDays = 26 * 7;
+
+  for (const [projectIndex, seed] of MOCK_PROJECT_SEEDS.entries()) {
+    const repoAddress = `${KIND_REPO_ANNOUNCEMENT}:${seed.owner}:${seed.dtag}`;
+    const authors = [seed.owner, ...seed.contributors];
+    const random = mulberry32(projectIndex + 1);
+
+    events.push(
+      createMockEvent(
+        KIND_REPO_ANNOUNCEMENT,
+        seed.description,
+        [
+          ["d", seed.dtag],
+          ["name", seed.name],
+          ["description", seed.description],
+          ["clone", `https://relay.example.com/git/${seed.dtag}.git`],
+          ...seed.contributors.map((pubkey) => ["p", pubkey]),
+        ],
+        seed.owner,
+        now - (historyDays + 30 + projectIndex) * daySeconds,
+        `mock-project-${seed.dtag}`.replace(/[^a-zA-Z0-9]/g, ""),
+      ),
+    );
+
+    for (let dayOffset = historyDays; dayOffset >= 0; dayOffset -= 1) {
+      // Roughly half the days are quiet; busy days scale with activityLevel.
+      if (random() < 0.5) continue;
+      const dayEventCount = 1 + Math.floor(random() * seed.activityLevel);
+
+      for (let index = 0; index < dayEventCount; index += 1) {
+        const createdAt =
+          now - dayOffset * daySeconds - Math.floor(random() * 10) * 3_600;
+        const author = authors[Math.floor(random() * authors.length)];
+        const subject =
+          MOCK_PROJECT_SUBJECTS[
+            Math.floor(random() * MOCK_PROJECT_SUBJECTS.length)
+          ];
+        const commitHash = `${seed.dtag}${dayOffset}x${index}`
+          .padEnd(40, "0")
+          .slice(0, 40);
+        const roll = random();
+        const kind =
+          roll < 0.7
+            ? KIND_GIT_PATCH
+            : roll < 0.85
+              ? KIND_GIT_PULL_REQUEST
+              : KIND_GIT_ISSUE;
+        const tags = [
+          ["a", repoAddress],
+          ["subject", subject],
+          ...(kind === KIND_GIT_ISSUE ? [] : [["c", commitHash]]),
+        ];
+
+        events.push(createMockEvent(kind, subject, tags, author, createdAt));
+      }
+    }
+  }
+
+  return events;
+}
+
+function getMockProjectEventStore(): RelayEvent[] {
+  mockProjectEventStore ??= buildMockProjectEvents();
+  return mockProjectEventStore;
+}
+
+function filterMockProjectEvents(filter: MockFilter): RelayEvent[] {
+  const authors = filter.authors?.map((author) => author.toLowerCase());
+  return getMockProjectEventStore()
+    .filter((event) => {
+      if (filter.kinds && !filter.kinds.includes(event.kind)) return false;
+      if (authors && !authors.includes(event.pubkey.toLowerCase())) {
+        return false;
+      }
+      if (
+        filter["#d"] &&
+        !event.tags.some(
+          (tag) => tag[0] === "d" && filter["#d"]?.includes(tag[1]),
+        )
+      ) {
+        return false;
+      }
+      if (
+        filter["#a"] &&
+        !event.tags.some(
+          (tag) => tag[0] === "a" && filter["#a"]?.includes(tag[1]),
+        )
+      ) {
+        return false;
+      }
+      return true;
+    })
+    .sort((left, right) => right.created_at - left.created_at)
+    .slice(0, filter.limit ?? 500);
+}
+
 function mockEventId(): string {
   const bytes = new Uint8Array(32);
   crypto.getRandomValues(bytes);
@@ -7096,6 +7274,14 @@ function sendToMockSocket(args: {
       const authors = filter.authors?.map((a) => a.toLowerCase());
       for (const event of mockReminderEvents) {
         if (authors && !authors.includes(event.pubkey.toLowerCase())) continue;
+        sendWsText(socket.handler, ["EVENT", subId, event]);
+      }
+      sendWsText(socket.handler, ["EOSE", subId]);
+      return;
+    }
+
+    if (filter.kinds?.some((kind) => MOCK_PROJECT_KINDS.has(kind))) {
+      for (const event of filterMockProjectEvents(filter)) {
         sendWsText(socket.handler, ["EVENT", subId, event]);
       }
       sendWsText(socket.handler, ["EOSE", subId]);

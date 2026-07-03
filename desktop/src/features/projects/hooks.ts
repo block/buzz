@@ -84,6 +84,8 @@ export type ProjectActivitySummary = {
     createdAt: number;
     title: string;
   } | null;
+  /** Activity event counts bucketed by local-time day key ("YYYY-MM-DD"). */
+  activityByDay: Record<string, number>;
 };
 
 export type {

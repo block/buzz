@@ -17,6 +17,15 @@ function normalizePubkey(pubkey) {
   return /^[a-fA-F0-9]{64}$/.test(pubkey) ? pubkey.toLowerCase() : null;
 }
 
+// Local-time day key ("YYYY-MM-DD") so contribution graphs align with the
+// viewer's calendar, matching how GitHub buckets contribution days.
+function activityDayKey(createdAtSeconds) {
+  const date = new Date(createdAtSeconds * 1000);
+  const month = `${date.getMonth() + 1}`.padStart(2, "0");
+  const day = `${date.getDate()}`.padStart(2, "0");
+  return `${date.getFullYear()}-${month}-${day}`;
+}
+
 function ensureSummary(summaryByRepoAddress, repoAddress) {
   const existing = summaryByRepoAddress.get(repoAddress);
   if (existing) return existing;
@@ -30,6 +39,7 @@ function ensureSummary(summaryByRepoAddress, repoAddress) {
     updatedAt: 0,
     participantPubkeys: [],
     latestCommit: null,
+    activityByDay: {},
   };
   summaryByRepoAddress.set(repoAddress, summary);
   return summary;
@@ -60,6 +70,9 @@ export function summarizeProjectActivityEvents(events, projects) {
 
     summary.activityCount += 1;
     summary.updatedAt = Math.max(summary.updatedAt, event.created_at);
+
+    const dayKey = activityDayKey(event.created_at);
+    summary.activityByDay[dayKey] = (summary.activityByDay[dayKey] ?? 0) + 1;
 
     if (event.kind === 1621) {
       summary.issueCount += 1;
