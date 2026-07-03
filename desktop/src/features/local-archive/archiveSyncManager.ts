@@ -173,32 +173,36 @@ export class ArchiveSyncManager {
       const scopeValue = sub.scopeValue;
       const filter = buildFilter(sub);
 
-      let unsub: (() => Promise<void>) | null = null;
-      let cancelled = false;
+      // Await the subscribe call so we only mark the key active after it
+      // succeeds. On failure the key is left absent so a future resubscribeAll
+      // (triggered by a config change or app restart) will retry it.
+      // JS is single-threaded, so no re-entrancy between the await and the
+      // active.set below — a concurrent resubscribeAll would have already
+      // returned or will run only after this microtask yields.
+      let dispose: (() => Promise<void>) | undefined;
+      try {
+        dispose = await this.deps.relayClient.subscribeLive(
+          filter,
+          (event: RelayEvent) => {
+            this.enqueue(event, scopeType, scopeValue);
+          },
+        );
+      } catch (err) {
+        console.warn(
+          `[archiveSyncManager] subscribeLive failed for ${scopeKey(scopeType, scopeValue)}:`,
+          err,
+        );
+        // Do NOT add key to active — next resubscribeAll will retry.
+        continue;
+      }
 
-      void this.deps.relayClient
-        .subscribeLive(filter, (event: RelayEvent) => {
-          this.enqueue(event, scopeType, scopeValue);
-        })
-        .then((dispose) => {
-          if (cancelled) {
-            void dispose();
-          } else {
-            unsub = dispose;
-          }
-        })
-        .catch((err: unknown) => {
-          console.warn(
-            `[archiveSyncManager] subscribeLive failed for ${scopeKey(scopeType, scopeValue)}:`,
-            err,
-          );
-        });
+      if (this.destroyed) {
+        // Manager was destroyed while we were awaiting — tear down immediately.
+        void dispose();
+        continue;
+      }
 
-      // Store a teardown handle that works whether the promise resolved yet.
-      this.active.set(key, async () => {
-        cancelled = true;
-        if (unsub) await unsub();
-      });
+      this.active.set(key, dispose);
     }
   }
 

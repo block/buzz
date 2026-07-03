@@ -541,6 +541,51 @@ test("manager_resubscribes_with_new_filter_when_kinds_upserted", async () => {
   mgr.destroy();
 });
 
+test("manager_retries_subscription_after_subscribeLive_failure", async () => {
+  // First subscribeLive call rejects; key must NOT be in active so a second
+  // resubscribeAll (triggered by any config change) retries it.
+  let callCount = 0;
+  const relay = {
+    subs: new Map(),
+    subscribeLive(filter, callback) {
+      callCount++;
+      if (callCount === 1) {
+        return Promise.reject(new Error("simulated relay failure"));
+      }
+      const key = JSON.stringify(filter);
+      relay.subs.set(key, { filter, callback, unsubbed: false });
+      return Promise.resolve(async () => {
+        const entry = relay.subs.get(key);
+        if (entry) entry.unsubbed = true;
+      });
+    },
+    activeCount() {
+      return [...relay.subs.values()].filter((e) => !e.unsubbed).length;
+    },
+  };
+  const archive = makeFakeArchive();
+  archive.setSubs([
+    {
+      scopeType: "channel_h",
+      scopeValue: "chan-retry",
+      kinds: [9],
+      identityPubkey: "pk",
+      relayUrl: "wss://r",
+      createdAt: 0,
+    },
+  ]);
+  const mgr = makeManager(relay, archive);
+  await mgr.start(); // first subscribeLive rejects — key must be absent
+  assert.equal(relay.activeCount(), 0, "no active sub after failure");
+
+  // Trigger resubscribeAll via a config change notification — second call succeeds.
+  await archive.createSaveSubscription("channel_h", "chan-retry", [9]);
+  await tick();
+  assert.equal(relay.activeCount(), 1, "sub created on retry after failure");
+  assert.equal(callCount, 2, "subscribeLive called exactly twice");
+  mgr.destroy();
+});
+
 test("manager_flushes_buffer_on_destroy", async () => {
   const relay = makeFakeRelayClient();
   const archive = makeFakeArchive();

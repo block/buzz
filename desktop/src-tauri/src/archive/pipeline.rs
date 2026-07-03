@@ -17,6 +17,23 @@ use crate::relay::query_relay;
 
 use super::{store, validate_ephemeral_frame, ArchiveBatchResult, ArchiveCandidate, MatchedScope};
 
+// ── Private helpers ───────────────────────────────────────────────────────────
+
+/// Extract the raw `kind` integer from an event JSON string and return it as
+/// `Some(u64)` only if it is in the valid NIP-01 range `0..=65535`.
+///
+/// Returns `None` for malformed JSON, a missing `kind` field, a non-integer
+/// `kind`, or any value outside `0..=65535`.  Used to detect the `nostr`
+/// crate's silent `v as u16` truncation before deserialization.
+fn raw_kind_value(raw: &str) -> Option<u64> {
+    let v: serde_json::Value = serde_json::from_str(raw).ok()?;
+    let kind = v.get("kind")?.as_u64()?;
+    if kind > 65535 {
+        return None;
+    }
+    Some(kind)
+}
+
 // ── Private types ────────────────────────────────────────────────────────────
 
 /// A parsed, sig-verified candidate ready for further processing.
@@ -75,6 +92,19 @@ pub(super) fn plan_archive(
     let mut pre_dropped: u32 = 0;
 
     for cand in candidates {
+        // Range-validate raw kind before nostr::Event normalizes it.
+        // `nostr 0.44.3` `Kind::deserialize` does `v as u16`, which silently
+        // truncates e.g. `89736` (= 24200 + 65536) to `24200`. We reject any
+        // raw `kind` outside 0..=65535 so the validator never reasons about a
+        // truncated kind while persisting the original out-of-range value.
+        let raw_kind = match raw_kind_value(&cand.raw_event_json) {
+            Some(k) => k,
+            None => {
+                pre_dropped += 1;
+                continue;
+            }
+        };
+
         let event = match Event::from_json(&cand.raw_event_json) {
             Ok(e) => e,
             Err(_) => {
@@ -82,6 +112,13 @@ pub(super) fn plan_archive(
                 continue;
             }
         };
+
+        // Assert the deserialized kind matches the raw value (paranoia check).
+        if event.kind.as_u16() as u64 != raw_kind {
+            pre_dropped += 1;
+            continue;
+        }
+
         if !event.verify_id() || !event.verify_signature() {
             pre_dropped += 1;
             continue;
@@ -201,6 +238,11 @@ pub(super) async fn query_buckets(buckets: Vec<Bucket>, state: &AppState) -> Vec
 // ── Phase 3 ──────────────────────────────────────────────────────────────────
 
 /// Phase 3 (sync): apply relay results and write accepted events to the store.
+///
+/// All event + scope upserts run inside a single SQLite transaction: either
+/// every write in the batch commits or none do. This preserves the invariant
+/// that every `archived_events` row has at least one matching `archived_event_scopes`
+/// row — a partial failure can never leave an orphaned event with no scope proof.
 pub(super) fn commit_archive(
     bucket_results: Vec<BucketWithResult>,
     ephemeral: Vec<Parsed>,
@@ -213,14 +255,27 @@ pub(super) fn commit_archive(
     let mut persisted: u32 = 0;
     let mut dropped: u32 = pre_dropped;
 
+    // Collect writes; count drops first, then execute inside a single
+    // transaction so event and scope rows are always committed atomically.
+    struct WriteRow<'a> {
+        eid: String,
+        kind: i64,
+        pubkey: String,
+        created_at: i64,
+        raw_json: &'a str,
+        scope_type: &'a str,
+        scope_value: &'a str,
+    }
+    let mut writes: Vec<WriteRow<'_>> = Vec::new();
+
     // ── Persistent path ──────────────────────────────────────────────────────
-    for result in bucket_results {
+    for result in &bucket_results {
         if result.relay_failed {
             dropped += result.group.len() as u32;
             continue;
         }
 
-        for p in result.group {
+        for p in &result.group {
             let eid = p.event.id.to_hex();
 
             // Relay proof: event was returned for the scoped filter.
@@ -242,33 +297,22 @@ pub(super) fn commit_archive(
             // proof of scope membership. Use scope_value directly; no local
             // tag re-derivation (which would incorrectly drop h-less events
             // matched via the relay's StoredEvent.channel_id fallback).
-            store::upsert_archived_event(
-                conn,
-                identity_pk,
-                relay_url,
-                &eid,
-                p.event.kind.as_u16() as i64,
-                &p.event.pubkey.to_hex(),
-                p.event.created_at.as_secs() as i64,
-                &p.raw_json,
-                now,
-            )?;
-            store::upsert_event_scope(
-                conn,
-                identity_pk,
-                relay_url,
-                &eid,
-                &result.scope_type_str,
-                &result.scope_value,
-                now,
-            )?;
-            persisted += 1;
+            writes.push(WriteRow {
+                eid,
+                kind: p.event.kind.as_u16() as i64,
+                pubkey: p.event.pubkey.to_hex(),
+                created_at: p.event.created_at.as_secs() as i64,
+                raw_json: &p.raw_json,
+                scope_type: &result.scope_type_str,
+                scope_value: &result.scope_value,
+            });
         }
     }
 
     // ── Ephemeral path (owner_p) ─────────────────────────────────────────────
     // Fully local validation — no relay query.
-    for p in ephemeral {
+    let mut validated_ephemeral: Vec<(String, &Parsed)> = Vec::new();
+    for p in &ephemeral {
         match validate_ephemeral_frame(
             &p.event,
             identity_pk,
@@ -277,35 +321,69 @@ pub(super) fn commit_archive(
             identity_pk,
             relay_url,
         ) {
-            Ok(()) => {}
+            Ok(()) => validated_ephemeral.push((p.event.id.to_hex(), p)),
             Err(_) => {
                 dropped += 1;
-                continue;
             }
         }
+    }
 
-        let eid = p.event.id.to_hex();
-        store::upsert_archived_event(
-            conn,
-            identity_pk,
-            relay_url,
-            &eid,
-            p.event.kind.as_u16() as i64,
-            &p.event.pubkey.to_hex(),
-            p.event.created_at.as_secs() as i64,
-            &p.raw_json,
-            now,
-        )?;
-        store::upsert_event_scope(
-            conn,
-            identity_pk,
-            relay_url,
-            &eid,
-            "owner_p",
-            &p.matched_scope.scope_value,
-            now,
-        )?;
-        persisted += 1;
+    // ── Commit all writes atomically ─────────────────────────────────────────
+    if !writes.is_empty() || !validated_ephemeral.is_empty() {
+        let tx = conn
+            .unchecked_transaction()
+            .map_err(|e| format!("failed to begin archive transaction: {e}"))?;
+
+        for w in &writes {
+            store::upsert_archived_event(
+                &tx,
+                identity_pk,
+                relay_url,
+                &w.eid,
+                w.kind,
+                &w.pubkey,
+                w.created_at,
+                w.raw_json,
+                now,
+            )?;
+            store::upsert_event_scope(
+                &tx,
+                identity_pk,
+                relay_url,
+                &w.eid,
+                w.scope_type,
+                w.scope_value,
+                now,
+            )?;
+            persisted += 1;
+        }
+
+        for (eid, p) in &validated_ephemeral {
+            store::upsert_archived_event(
+                &tx,
+                identity_pk,
+                relay_url,
+                eid,
+                p.event.kind.as_u16() as i64,
+                &p.event.pubkey.to_hex(),
+                p.event.created_at.as_secs() as i64,
+                &p.raw_json,
+                now,
+            )?;
+            store::upsert_event_scope(
+                &tx,
+                identity_pk,
+                relay_url,
+                eid,
+                "owner_p",
+                &p.matched_scope.scope_value,
+                now,
+            )?;
+            persisted += 1;
+        }
+
+        tx.commit()
+            .map_err(|e| format!("failed to commit archive transaction: {e}"))?;
     }
 
     Ok(ArchiveBatchResult { persisted, dropped })

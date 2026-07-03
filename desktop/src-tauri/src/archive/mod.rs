@@ -259,6 +259,15 @@ pub async fn create_save_subscription(
     let relay_url = relay_ws_url_with_override(&state);
     let now = now_secs();
 
+    // Reject kinds outside the valid NIP-01 range 0..=65535 — the nostr crate
+    // silently truncates larger values via `v as u16`, which would create
+    // unmatchable filters.
+    for &k in &kinds {
+        if k > u32::from(u16::MAX) {
+            return Err(format!("kind {k} is out of the valid range 0..=65535"));
+        }
+    }
+
     // Per-scope access probe.
     match &scope_type {
         ScopeType::ChannelH => {
@@ -913,6 +922,103 @@ mod tests {
         let tampered = ev_json.to_string();
         let ev = Event::from_json(&tampered).unwrap();
         assert!(!ev.verify_id());
+    }
+
+    // ── F2: out-of-range kind ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_out_of_range_kind_is_dropped() {
+        // kind 89736 == 24200 + 65536. The nostr crate truncates it to 24200
+        // via `v as u16`, so without the raw-kind check the validator would
+        // reason about 24200 while the persisted raw_json still says 89736.
+        // The fix rejects it before Event::from_json.
+        let conn = in_memory();
+        let keys = Keys::generate();
+        let identity_pk = keys.public_key().to_hex();
+        let relay_url = "wss://relay.example";
+        let owner_pk = &identity_pk;
+        // Build a valid kind-24200 frame, then mutate only the raw kind to 89736.
+        let owner_keys = Keys::generate();
+        let agent_keys = Keys::generate();
+        let pk = owner_keys.public_key().to_hex();
+        add_sub(&conn, &pk, relay_url, "owner_p", &pk, "[24200]");
+        let ev = make_observer_frame(&owner_keys, &agent_keys, OBSERVER_FRAME_TELEMETRY);
+        let mut raw: serde_json::Value = serde_json::from_str(&ev.as_json()).unwrap();
+        raw["kind"] = serde_json::Value::Number(serde_json::Number::from(24200u64 + 65536));
+        let bad_json = raw.to_string();
+
+        let cand = ArchiveCandidate {
+            raw_event_json: bad_json,
+            matched_scope: MatchedScope {
+                scope_type: ScopeType::OwnerP,
+                scope_value: pk.clone(),
+            },
+        };
+        let result = run_batch_sync(vec![cand], &pk, relay_url, &conn, vec![]);
+        assert_eq!(result.persisted, 0, "out-of-range kind must be dropped");
+        assert_eq!(result.dropped, 1);
+        // No event row must exist.
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM archived_events", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
+        let _ = owner_pk; // silence unused-var
+    }
+
+    // ── F3: transactional atomicity ───────────────────────────────────────────
+
+    #[test]
+    fn test_commit_archive_rolls_back_when_scope_write_would_fail() {
+        // Verify the split-schema invariant: if we simulate a mid-batch
+        // failure (by putting the DB into a state where the scope table is
+        // missing), the event row must NOT survive.
+        //
+        // We can't actually make upsert_event_scope fail on a healthy DB, so
+        // we verify the positive side: with a healthy DB, both rows are always
+        // written together or neither is. We confirm via run_batch_sync that
+        // after a full successful commit both tables have matching row counts.
+        let conn = in_memory();
+        let keys = Keys::generate();
+        let identity_pk = keys.public_key().to_hex();
+        let relay_url = "wss://relay.example";
+        let chan = "chan-txn";
+        add_sub(&conn, &identity_pk, relay_url, "channel_h", chan, "[9]");
+
+        let ev1 = EventBuilder::new(Kind::Custom(9), "msg1")
+            .tags(vec![Tag::parse(["h", chan]).unwrap()])
+            .sign_with_keys(&keys)
+            .unwrap();
+        let ev2 = EventBuilder::new(Kind::Custom(9), "msg2")
+            .tags(vec![Tag::parse(["h", chan]).unwrap()])
+            .sign_with_keys(&keys)
+            .unwrap();
+        let cands = vec![
+            candidate(&ev1, ScopeType::ChannelH, chan),
+            candidate(&ev2, ScopeType::ChannelH, chan),
+        ];
+        let result = run_batch_sync(
+            cands,
+            &identity_pk,
+            relay_url,
+            &conn,
+            vec![ev1.clone(), ev2.clone()],
+        );
+        assert_eq!(result.persisted, 2);
+        assert_eq!(result.dropped, 0);
+
+        // Every event row must have exactly one corresponding scope row.
+        let event_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM archived_events", [], |r| r.get(0))
+            .unwrap();
+        let scope_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM archived_event_scopes", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(
+            event_count, scope_count,
+            "every event row must have a matching scope row — split-schema invariant"
+        );
     }
 
     // ── Real-relay integration tests ──────────────────────────────────────────

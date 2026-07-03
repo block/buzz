@@ -104,7 +104,8 @@ export type ParsedCustomKinds = {
  *
  * Rules:
  * - Split on whitespace and/or commas.
- * - Accept non-negative integers only (no floats, no negatives, no hex).
+ * - Accept non-negative integers in the valid NIP-01 kind range 0..=65535 only
+ *   (no floats, no negatives, no hex, no values > 65535).
  * - Reject tokens that duplicate a kind already present in KIND_GROUPS.
  * - Deduplicate valid tokens (keep first occurrence).
  * - Return both valid numbers and invalid tokens for inline feedback.
@@ -122,7 +123,7 @@ export function parseCustomKinds(raw: string): ParsedCustomKinds {
       continue;
     }
     const n = parseInt(token, 10);
-    if (!Number.isFinite(n) || n < 0) {
+    if (!Number.isFinite(n) || n < 0 || n > 65535) {
       invalid.push(token);
       continue;
     }

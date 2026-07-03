@@ -33,8 +33,8 @@ test("parseCustomKinds_emptyString_returnsEmpty", () => {
 });
 
 test("parseCustomKinds_singleValidKind_returnsIt", () => {
-  const result = parseCustomKinds("99999");
-  assert.deepEqual(result.valid, [99999]);
+  const result = parseCustomKinds("60000");
+  assert.deepEqual(result.valid, [60000]);
   assert.deepEqual(result.invalid, []);
 });
 
@@ -63,6 +63,20 @@ test("parseCustomKinds_float_isInvalid", () => {
   assert.deepEqual(result.invalid, ["1.5"]);
 });
 
+test("parseCustomKinds_kindAbove65535_isInvalid", () => {
+  // NIP-01 kind range is 0..=65535; values above are rejected to prevent
+  // the nostr crate's silent u16 truncation from creating unmatchable filters.
+  const result = parseCustomKinds("65536 99999 89736");
+  assert.deepEqual(result.valid, []);
+  assert.deepEqual(result.invalid, ["65536", "99999", "89736"]);
+});
+
+test("parseCustomKinds_65535_isValid_boundary", () => {
+  const result = parseCustomKinds("65535");
+  assert.deepEqual(result.valid, [65535]);
+  assert.deepEqual(result.invalid, []);
+});
+
 test("parseCustomKinds_nonNumericToken_isInvalid", () => {
   const result = parseCustomKinds("abc");
   assert.deepEqual(result.valid, []);
@@ -70,21 +84,21 @@ test("parseCustomKinds_nonNumericToken_isInvalid", () => {
 });
 
 test("parseCustomKinds_mixedValidAndInvalid_separateCorrectly", () => {
-  const result = parseCustomKinds("99999 abc 88888 -1");
-  assert.deepEqual(result.valid, [99999, 88888]);
+  const result = parseCustomKinds("60000 abc 50000 -1");
+  assert.deepEqual(result.valid, [60000, 50000]);
   assert.deepEqual(result.invalid, ["abc", "-1"]);
 });
 
 test("parseCustomKinds_duplicateTokens_deduped", () => {
-  const result = parseCustomKinds("99999 99999 99999");
-  assert.deepEqual(result.valid, [99999]);
+  const result = parseCustomKinds("60000 60000 60000");
+  assert.deepEqual(result.valid, [60000]);
   assert.deepEqual(result.invalid, []);
 });
 
 test("parseCustomKinds_kindAlreadyInGroups_silentlyIgnored", () => {
   // Kind 9 is in the "Messages & posts" group — not invalid but not returned
-  const result = parseCustomKinds("9 99999");
-  assert.deepEqual(result.valid, [99999]);
+  const result = parseCustomKinds("9 60000");
+  assert.deepEqual(result.valid, [60000]);
   assert.deepEqual(result.invalid, []);
 });
 
@@ -259,8 +273,8 @@ test("buildFinalKinds_singleKind_returnsSingleElementArray", () => {
 // ── Malformed custom input: mixed valid/invalid ───────────────────────────────
 
 test("parseCustomKinds_malformedInput_onlyValidReturned", () => {
-  const { valid, invalid } = parseCustomKinds("hello 99999 1.5 88888 -2");
-  assert.deepEqual(valid, [99999, 88888]);
+  const { valid, invalid } = parseCustomKinds("hello 60000 1.5 50000 -2");
+  assert.deepEqual(valid, [60000, 50000]);
   assert.deepEqual(invalid, ["hello", "1.5", "-2"]);
 });
 
