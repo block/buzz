@@ -1,4 +1,4 @@
-import { AlertTriangle, ChevronDown } from "lucide-react";
+import { AlertTriangle, ChevronDown, Loader2 } from "lucide-react";
 import * as React from "react";
 
 import {
@@ -791,6 +791,9 @@ export function CreateAgentDialog({
               size="sm"
               type="button"
             >
+              {isDiscoveryPending ? (
+                <Loader2 aria-hidden className="h-4 w-4 animate-spin" />
+              ) : null}
               {meshPreparing
                 ? "Connecting to mesh..."
                 : createMutation.isPending

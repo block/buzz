@@ -1,14 +1,20 @@
 use crate::managed_agents::{discover_provider_candidates, invoke_provider, BackendProviderInfo};
 
 #[tauri::command]
-pub fn discover_backend_providers() -> Vec<BackendProviderInfo> {
-    discover_provider_candidates()
-        .into_iter()
-        .map(|(id, path)| BackendProviderInfo {
-            id,
-            binary_path: path.display().to_string(),
-        })
-        .collect()
+pub async fn discover_backend_providers() -> Result<Vec<BackendProviderInfo>, String> {
+    // PATH scanning hits the filesystem for every directory — run it off the
+    // main thread so the webview stays responsive.
+    tokio::task::spawn_blocking(|| {
+        discover_provider_candidates()
+            .into_iter()
+            .map(|(id, path)| BackendProviderInfo {
+                id,
+                binary_path: path.display().to_string(),
+            })
+            .collect()
+    })
+    .await
+    .map_err(|e| format!("provider discovery task panicked: {e}"))
 }
 
 #[tauri::command]
