@@ -66,7 +66,22 @@
     ],
     "macOS": {
       "infoPlist": "Info.plist",
-      "entitlements": "Entitlements.plist"
+      "entitlements": "Entitlements.plist",
+      "dmg": {
+        "background": "icons/dmg-background.png",
+        "windowSize": {
+          "width": 660,
+          "height": 500
+        },
+        "appPosition": {
+          "x": 199,
+          "y": 310
+        },
+        "applicationFolderPosition": {
+          "x": 461,
+          "y": 310
+        }
+      }
     }
   }
 }
