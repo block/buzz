@@ -15,7 +15,9 @@ import {
 } from "@/features/sidebar/lib/useChannelSections";
 import { useActiveWorkingChannelsById } from "@/features/sidebar/lib/useActiveWorkingChannelsById";
 import { useDmSidebarMetadata } from "@/features/sidebar/useDmSidebarMetadata";
-import { sortDmChannelsByLabel } from "@/features/sidebar/lib/dmSidebarSort";
+import { sortDmChannelsForSidebar } from "@/features/sidebar/lib/dmSidebarSort";
+import { sortChannelsForSidebar } from "@/features/sidebar/lib/channelSortPreference";
+import { useChannelSortPreference } from "@/features/sidebar/lib/useChannelSortPreference";
 import { useSidebarScrollLock } from "@/features/sidebar/lib/useSidebarScrollLock";
 import { useUnreadOverflow } from "@/features/sidebar/lib/useUnreadOverflow";
 import {
@@ -32,6 +34,7 @@ import {
   ChannelGroupSection,
   CustomChannelSection,
 } from "@/features/sidebar/ui/CustomChannelSection";
+import { ChannelSortDropdown } from "@/features/sidebar/ui/ChannelSortDropdown";
 import { CreateChannelDialog } from "@/features/sidebar/ui/CreateChannelDialog";
 import { NewDirectMessageDialog } from "@/features/sidebar/ui/NewDirectMessageDialog";
 import { SidebarProfileCard } from "@/features/sidebar/ui/SidebarProfileCard";
@@ -349,6 +352,11 @@ export function AppSidebar({
     unassignChannel,
   } = useChannelSections(currentPubkey, activeWorkspace?.relayUrl);
 
+  const { sortMode, setSortMode } = useChannelSortPreference(
+    currentPubkey,
+    activeWorkspace?.relayUrl,
+  );
+
   const [createSectionState, setCreateSectionState] = React.useState<{
     open: boolean;
     pendingChannelId: string | null;
@@ -387,15 +395,33 @@ export function AppSidebar({
         unassigned.push(channel);
       }
     }
-    return { bySection, unassigned };
-  }, [streamChannels, channelSections, channelAssignments, starredChannelIds]);
+    // Apply the sort preference inside each grouping; section membership
+    // itself is untouched.
+    for (const sectionId of Object.keys(bySection)) {
+      bySection[sectionId] = sortChannelsForSidebar(
+        bySection[sectionId],
+        sortMode,
+      );
+    }
+    return {
+      bySection,
+      unassigned: sortChannelsForSidebar(unassigned, sortMode),
+    };
+  }, [
+    streamChannels,
+    channelSections,
+    channelAssignments,
+    starredChannelIds,
+    sortMode,
+  ]);
 
   const starredChannels = React.useMemo(() => {
     if (!starredChannelIds || starredChannelIds.size === 0) return [];
-    return streamChannels.filter((channel) =>
-      starredChannelIds.has(channel.id),
+    return sortChannelsForSidebar(
+      streamChannels.filter((channel) => starredChannelIds.has(channel.id)),
+      sortMode,
     );
-  }, [streamChannels, starredChannelIds]);
+  }, [streamChannels, starredChannelIds, sortMode]);
 
   const handleCreateSectionForChannel = React.useCallback(
     (channelId: string) => {
@@ -419,8 +445,12 @@ export function AppSidebar({
   );
 
   const forumChannels = React.useMemo(
-    () => channels.filter((channel) => channel.channelType === "forum"),
-    [channels],
+    () =>
+      sortChannelsForSidebar(
+        channels.filter((channel) => channel.channelType === "forum"),
+        sortMode,
+      ),
+    [channels, sortMode],
   );
   const directMessages = React.useMemo(
     () => channels.filter((channel) => channel.channelType === "dm"),
@@ -442,8 +472,8 @@ export function AppSidebar({
       profileDisplayName: profile?.displayName,
     });
   const sortedDirectMessages = React.useMemo(
-    () => sortDmChannelsByLabel(directMessages, dmChannelLabels),
-    [directMessages, dmChannelLabels],
+    () => sortDmChannelsForSidebar(directMessages, dmChannelLabels, sortMode),
+    [directMessages, dmChannelLabels, sortMode],
   );
   const sidebarLoadingShape = useSidebarLoadingShape({
     activeWorkspaceId: activeWorkspace?.id,
@@ -650,6 +680,12 @@ export function AppSidebar({
                     isActiveChannel={selectedView === "channel"}
                     activeWorkingByChannelId={activeWorkingByChannelId}
                     items={sectionBuckets.unassigned}
+                    leadingHeaderAction={
+                      <ChannelSortDropdown
+                        onSortModeChange={setSortMode}
+                        sortMode={sortMode}
+                      />
+                    }
                     listTestId="stream-list"
                     onBrowseClick={onBrowseChannels}
                     onCreateClick={() => openCreateDialog("stream")}

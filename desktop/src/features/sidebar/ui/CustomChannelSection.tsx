@@ -19,6 +19,8 @@ import {
   Trash2,
 } from "lucide-react";
 
+import type * as React from "react";
+
 import { copyTextToClipboard } from "@/shared/lib/clipboard";
 import {
   ContextMenu,
@@ -254,6 +256,7 @@ function SectionHeaderActions({
   browseAriaLabel,
   createAriaLabel,
   hasUnread,
+  leadingAction,
   onBrowseClick,
   onCreateClick,
   onMarkAllRead,
@@ -261,12 +264,14 @@ function SectionHeaderActions({
   browseAriaLabel?: string;
   createAriaLabel: string;
   hasUnread?: boolean;
+  leadingAction?: React.ReactNode;
   onBrowseClick?: () => void;
   onCreateClick?: () => void;
   onMarkAllRead?: () => void;
 }) {
   return (
     <div className="absolute right-1 top-1/2 z-10 flex -translate-y-1/2 items-center gap-0.5">
+      {leadingAction}
       {hasUnread && onMarkAllRead ? (
         <button
           aria-label="Mark all as read"
@@ -322,6 +327,7 @@ export function ChannelGroupSection({
   isActiveChannel,
   activeWorkingByChannelId,
   items,
+  leadingHeaderAction,
   listTestId,
   onBrowseClick,
   onCreateClick,
@@ -355,6 +361,7 @@ export function ChannelGroupSection({
   isActiveChannel: boolean;
   activeWorkingByChannelId?: ReadonlyMap<string, ActiveChannelTurnSummary>;
   items: Channel[];
+  leadingHeaderAction?: React.ReactNode;
   listTestId: string;
   onBrowseClick?: () => void;
   onCreateClick?: () => void;
@@ -479,6 +486,7 @@ export function ChannelGroupSection({
           browseAriaLabel={browseAriaLabel}
           createAriaLabel={createAriaLabel}
           hasUnread={hasUnread}
+          leadingAction={leadingHeaderAction}
           onBrowseClick={onBrowseClick}
           onCreateClick={onCreateClick}
           onMarkAllRead={onMarkAllRead}
