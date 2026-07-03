@@ -59,6 +59,14 @@ pub struct TaskMeta {
     /// tasks only — all prompt tasks install a steer channel regardless
     /// of the agent's name.
     pub steer_tx: Option<tokio::sync::mpsc::Sender<SteerRequest>>,
+    /// Event IDs delivered into this turn via the goose-native steer path
+    /// (`SteerAck::Success`). These events are consumed from the queue
+    /// without ever entering a `FlushBatch`, so `run_prompt_task`'s
+    /// `ReactionGuard` never sees them — their 👀 (added at queue-push
+    /// time) must be cleared when this turn ends instead. Cleared by
+    /// `handle_prompt_result` / `recover_panicked_agent` when the meta
+    /// is removed.
+    pub steered_event_ids: Vec<String>,
 }
 
 /// Agent-level model capabilities. Populated on first session creation.
@@ -521,6 +529,26 @@ impl AgentPool {
             .ok_or_else(|| SteerError::Transport("steer_tx not installed".into()))?;
         tx.try_send(request)
             .map_err(|e| SteerError::Transport(e.to_string()))
+    }
+
+    /// Record an event id as steered into the in-flight turn for
+    /// `channel_id`, so its 👀 is cleared when that turn ends (the event
+    /// never enters a `FlushBatch`, so `run_prompt_task`'s `ReactionGuard`
+    /// cannot own it). Returns `false` if no task is in flight for the
+    /// channel — the turn already ended and the caller must clean up the
+    /// reaction immediately instead.
+    pub fn record_steered_event(&mut self, channel_id: Uuid, event_id: &str) -> bool {
+        match self
+            .task_map
+            .values_mut()
+            .find(|m| m.channel_id == Some(channel_id))
+        {
+            Some(meta) => {
+                meta.steered_event_ids.push(event_id.to_string());
+                true
+            }
+            None => false,
+        }
     }
 
     pub fn result_tx(&self) -> mpsc::UnboundedSender<PromptResult> {
@@ -3656,5 +3684,72 @@ mod tests {
         let (_steer_tx, steer_rx) = tokio::sync::mpsc::channel::<SteerRequest>(1);
         result.agent.acp.install_steer_rx(steer_rx);
         // Reaching here without a panic is the test.
+    }
+
+    // ── record_steered_event ──────────────────────────────────────────────
+    //
+    // Pins the stale-👀 fix: events delivered via SteerAck::Success never
+    // enter a FlushBatch, so their 👀 must be attached to the in-flight
+    // turn's TaskMeta (cleared on turn end) — or, if no turn is in flight,
+    // the caller must clean up immediately (record returns false).
+
+    /// Recording against an in-flight channel stores the id in that turn's
+    /// TaskMeta; ids accumulate across multiple steers into the same turn.
+    #[tokio::test]
+    async fn test_record_steered_event_attaches_to_in_flight_turn() {
+        let mut pool = AgentPool::from_slots(vec![]);
+        let channel_id = Uuid::new_v4();
+
+        let abort_handle = pool.join_set.spawn(async {});
+        pool.task_map_mut().insert(
+            abort_handle.id(),
+            TaskMeta {
+                agent_index: 0,
+                channel_id: Some(channel_id),
+                recoverable_batch: None,
+                control_tx: None,
+                steer_tx: None,
+                steered_event_ids: Vec::new(),
+            },
+        );
+
+        assert!(pool.record_steered_event(channel_id, "aaa"));
+        assert!(pool.record_steered_event(channel_id, "bbb"));
+
+        let ids: Vec<String> = pool
+            .task_map()
+            .values()
+            .find(|m| m.channel_id == Some(channel_id))
+            .expect("task meta must exist")
+            .steered_event_ids
+            .clone();
+        assert_eq!(ids, vec!["aaa".to_string(), "bbb".to_string()]);
+    }
+
+    /// Recording against a channel with no in-flight turn returns false so
+    /// the caller cleans up the 👀 immediately.
+    #[tokio::test]
+    async fn test_record_steered_event_returns_false_when_no_turn_in_flight() {
+        let mut pool = AgentPool::from_slots(vec![]);
+        let in_flight = Uuid::new_v4();
+        let other = Uuid::new_v4();
+
+        let abort_handle = pool.join_set.spawn(async {});
+        pool.task_map_mut().insert(
+            abort_handle.id(),
+            TaskMeta {
+                agent_index: 0,
+                channel_id: Some(in_flight),
+                recoverable_batch: None,
+                control_tx: None,
+                steer_tx: None,
+                steered_event_ids: Vec::new(),
+            },
+        );
+
+        assert!(!pool.record_steered_event(other, "ccc"));
+        // Empty pool: no task meta at all.
+        let mut empty = AgentPool::from_slots(vec![]);
+        assert!(!empty.record_steered_event(in_flight, "ddd"));
     }
 }

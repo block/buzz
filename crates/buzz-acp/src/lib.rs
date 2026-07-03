@@ -2127,6 +2127,7 @@ async fn tokio_main() -> Result<()> {
                     &respawn_tx,
                     &mut respawn_tasks,
                     observer.clone(),
+                    Some(&ctx.rest_client),
                 ) == LoopAction::Exit
                 {
                     break;
@@ -2149,6 +2150,7 @@ async fn tokio_main() -> Result<()> {
                     &respawn_tx,
                     &mut respawn_tasks,
                     observer.clone(),
+                    Some(&ctx.rest_client),
                 );
                 if pool.live_count() == 0 && !any_respawn_in_flight(&crash_history) {
                     tracing::error!("all agents dead — exiting");
@@ -2252,6 +2254,19 @@ async fn tokio_main() -> Result<()> {
                 );
                 if drop_withheld {
                     queue.remove_event(channel_id, &event_id);
+                    // The event was absorbed into the in-flight turn without
+                    // ever entering a FlushBatch, so no ReactionGuard owns
+                    // its 👀 (added at queue-push time). Attach it to the
+                    // turn's TaskMeta so the cleanup fires when that turn
+                    // ends. If the turn already ended (result raced ahead
+                    // of the ack), clean up immediately.
+                    if !pool.record_steered_event(channel_id, &event_id) {
+                        let rc = ctx.rest_client.clone();
+                        let eid = event_id.clone();
+                        tokio::spawn(async move {
+                            pool::reaction_remove(&rc, &eid, "👀").await;
+                        });
+                    }
                 }
                 if release_withheld {
                     queue.release_native_steer(channel_id, &event_id);
@@ -2639,6 +2654,7 @@ fn dispatch_pending(
                 recoverable_batch,
                 control_tx: Some(control_tx),
                 steer_tx,
+                steered_event_ids: Vec::new(),
             },
         );
         dispatched_channels.push((channel_id, typing_scope));
@@ -2667,9 +2683,31 @@ fn handle_prompt_result(
 ) -> LoopAction {
     let before = pool.task_map().len();
     let agent_index = result.agent.index;
-    pool.task_map_mut()
-        .retain(|_, meta| meta.agent_index != agent_index);
+    // Drain this agent's task meta, collecting any event ids that were
+    // steered into the completed turn (SteerAck::Success). Those events
+    // never entered a FlushBatch, so run_prompt_task's ReactionGuard never
+    // owned their 👀 — clean them up here, on turn end, matching the
+    // user-visible contract that the eyes go away when the turn stops.
+    let mut steered_ids: Vec<String> = Vec::new();
+    pool.task_map_mut().retain(|_, meta| {
+        if meta.agent_index == agent_index {
+            steered_ids.append(&mut meta.steered_event_ids);
+            false
+        } else {
+            true
+        }
+    });
     debug_assert_eq!(before, pool.task_map().len() + 1);
+    if !steered_ids.is_empty() {
+        if let Some(rest) = rest_client {
+            let rest = rest.clone();
+            tokio::spawn(async move {
+                for eid in &steered_ids {
+                    pool::reaction_remove(&rest, eid, "👀").await;
+                }
+            });
+        }
+    }
 
     // Requeue BEFORE mark_complete: requeue() sets retry_after with a future
     // deadline, and mark_complete() checks for it to decide whether to preserve
@@ -2888,6 +2926,7 @@ fn recover_panicked_agent(
     respawn_tx: &mpsc::Sender<RespawnResult>,
     respawn_tasks: &mut tokio::task::JoinSet<()>,
     observer: Option<observer::ObserverHandle>,
+    rest_client: Option<&relay::RestClient>,
 ) {
     let task_id = join_error.id();
     let Some(meta) = pool.task_map_mut().remove(&task_id) else {
@@ -2895,6 +2934,21 @@ fn recover_panicked_agent(
         return;
     };
     let i = meta.agent_index;
+
+    // Steered events never entered a FlushBatch, so the panicked task's
+    // ReactionGuard never owned their 👀 — clean them up here (same
+    // contract as handle_prompt_result: eyes clear when the turn ends).
+    if !meta.steered_event_ids.is_empty() {
+        if let Some(rest) = rest_client {
+            let rest = rest.clone();
+            let ids = meta.steered_event_ids.clone();
+            tokio::spawn(async move {
+                for eid in &ids {
+                    pool::reaction_remove(&rest, eid, "👀").await;
+                }
+            });
+        }
+    }
 
     // Requeue BEFORE mark_complete (same rationale as handle_prompt_result).
     if let Some(batch) = meta.recoverable_batch {
@@ -2985,6 +3039,7 @@ fn drain_ready_join_results(
     respawn_tx: &mpsc::Sender<RespawnResult>,
     respawn_tasks: &mut tokio::task::JoinSet<()>,
     observer: Option<observer::ObserverHandle>,
+    rest_client: Option<&relay::RestClient>,
 ) -> LoopAction {
     while let Some(Some(join_result)) = pool.join_set.join_next().now_or_never() {
         if let Err(join_error) = join_result {
@@ -3001,6 +3056,7 @@ fn drain_ready_join_results(
                 respawn_tx,
                 respawn_tasks,
                 observer.clone(),
+                rest_client,
             );
             if pool.live_count() == 0 && !any_respawn_in_flight(crash_history) {
                 return LoopAction::Exit;
@@ -3047,6 +3103,7 @@ fn dispatch_heartbeat(
             recoverable_batch: None,
             control_tx: None,
             steer_tx: None,
+            steered_event_ids: Vec::new(),
         },
     );
     *heartbeat_in_flight = true;
@@ -3490,6 +3547,7 @@ mod owner_control_command_tests {
                 recoverable_batch: None,
                 control_tx: Some(control_tx),
                 steer_tx: None,
+                steered_event_ids: Vec::new(),
             },
         );
 
@@ -4013,6 +4071,7 @@ mod error_outcome_emission_tests {
                 recoverable_batch: None,
                 control_tx: None,
                 steer_tx: None,
+                steered_event_ids: Vec::new(),
             },
         );
 
