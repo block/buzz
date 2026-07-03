@@ -24,6 +24,7 @@ import {
   usePersonasQuery,
   useRelayAgentsQuery,
 } from "@/features/agents/hooks";
+import { useActiveAgentTurnsBridge } from "@/features/agents/activeAgentTurnsStore";
 import { useManagedAgentObserverBridge } from "@/features/agents/observerRelayStore";
 import {
   mergeMessages,
@@ -196,8 +197,6 @@ export function ChannelScreen({
     }
     return null;
   }, [messagesQuery.data]);
-  // No `lastMessageAt` fallback: it is reply-inclusive and would clear unread
-  // thread/sidebar state before a real top-level position is known.
   const activeReadAt = latestActiveMessage
     ? new Date(latestActiveMessage.created_at * 1_000).toISOString()
     : null;
@@ -382,6 +381,7 @@ export function ChannelScreen({
     ];
   }, [managedAgents, openAgentSessionPubkey, profilePanelPubkey]);
   useManagedAgentObserverBridge(observerBridgeAgents);
+  useActiveAgentTurnsBridge(observerBridgeAgents);
   const messageProfiles = React.useMemo(() => {
     const base =
       mergeCurrentProfileIntoLookup(

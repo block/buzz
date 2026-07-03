@@ -528,6 +528,21 @@ export function useActiveAgentTurnsByChannel(): ActiveChannelTurnSummary[] {
 }
 
 /**
+ * Sync every running/deployed agent's observer events into the active-turns
+ * store. Extracted from the bridge hook so a regression can drive the exact
+ * observer→derived-liveness path without a React renderer.
+ */
+export function syncActiveAgentTurnsFromObserver(
+  agents: readonly { pubkey: string; status: string }[],
+) {
+  for (const agent of agents) {
+    if (agent.status !== "running" && agent.status !== "deployed") continue;
+    const snapshot = getAgentObserverSnapshot(agent.pubkey, true);
+    syncAgentTurnsFromEvents(agent.pubkey, snapshot.events);
+  }
+}
+
+/**
  * Bridge hook: processes observer events into the active-turns store.
  * Should be called by a parent component that has access to the observer events.
  */
@@ -536,11 +551,7 @@ export function useActiveAgentTurnsBridge(
 ) {
   React.useEffect(() => {
     function syncAll() {
-      for (const agent of agents) {
-        if (agent.status !== "running" && agent.status !== "deployed") continue;
-        const snapshot = getAgentObserverSnapshot(agent.pubkey, true);
-        syncAgentTurnsFromEvents(agent.pubkey, snapshot.events);
-      }
+      syncActiveAgentTurnsFromObserver(agents);
     }
 
     syncAll();
