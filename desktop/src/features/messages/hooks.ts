@@ -13,6 +13,7 @@ import {
   buildReplyTags,
   getChannelIdFromTags,
   getThreadReference,
+  isBroadcastReply,
   normalizeMentionPubkeys,
   resolveReplyRootId,
 } from "@/features/messages/lib/threading";
@@ -296,15 +297,18 @@ export function useChannelSubscription(channel: Channel | null) {
   const appendMessage = useEffectEvent((event: RelayEvent) => {
     if (!channelId) return;
     const isTimelineRow = CHANNEL_TIMELINE_KINDS.has(event.kind);
-    if (isTimelineRow && getThreadReference(event.tags).parentId !== null) {
-      const rootId = getThreadReference(event.tags).rootId;
+    const threadReference = isTimelineRow
+      ? getThreadReference(event.tags)
+      : null;
+    if (threadReference?.parentId != null) {
+      const rootId = threadReference?.rootId;
       if (rootId) {
         queryClient.setQueryData<RelayEvent[]>(
           threadRepliesKey(channelId, rootId),
           (current = []) => mergeMessages(current, event),
         );
       }
-      return;
+      if (!isBroadcastReply(event.tags)) return;
     }
     if (!isTimelineRow && !CHANNEL_AUX_KINDS.has(event.kind)) return;
     if (!isTimelineRow) {
@@ -381,6 +385,15 @@ export function useChannelSubscription(channel: Channel | null) {
         }
 
         cleanup = dispose;
+        void refreshNewestWindow().catch((error) => {
+          if (!isDisposed) {
+            console.error(
+              "Failed to refresh channel window after subscribing",
+              channelId,
+              error,
+            );
+          }
+        });
       })
       .catch((error) => {
         console.error("Failed to subscribe to channel", channelId, error);

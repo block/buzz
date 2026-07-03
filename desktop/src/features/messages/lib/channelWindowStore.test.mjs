@@ -193,6 +193,30 @@ test("authoritative refresh reconciles duplicate live rows", () => {
   );
 });
 
+test("older-page append reconciles a live row pushed below page zero", () => {
+  const initial = replaceNewestChannelWindow(
+    emptyChannelWindowStore(),
+    page(null, [event("a", 100)]),
+  );
+  const live = event("n", 110);
+  const withLive = mergeLiveChannelWindowEvent(initial, live);
+  const refreshed = replaceNewestChannelWindow(
+    withLive,
+    page(null, [event("newer", 120)]),
+  );
+  const reconciled = appendOlderChannelWindow(
+    refreshed,
+    page(refreshed.pages[0].nextCursor, [live], { hasMore: false }),
+  );
+
+  assert.deepEqual(reconciled.liveOverlay, []);
+  assert.equal(
+    flattenChannelWindowEvents(reconciled).filter((item) => item.id === live.id)
+      .length,
+    1,
+  );
+});
+
 test("flattening dedupes aux closure events returned on adjacent pages", () => {
   const deletion = event("d", 120, 5);
   const first = page(null, [event("a", 100)], { aux: [deletion] });

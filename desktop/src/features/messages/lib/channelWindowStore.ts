@@ -132,7 +132,12 @@ export function appendOlderChannelWindow(
       throw new Error(`Channel row ${row.event.id} overlaps a retained page.`);
     }
   }
-  return { ...current, pages: [...current.pages, page] };
+  const pageIds = new Set(page.rows.map((row) => row.event.id));
+  return {
+    ...current,
+    pages: [...current.pages, page],
+    liveOverlay: current.liveOverlay.filter((event) => !pageIds.has(event.id)),
+  };
 }
 
 /**
