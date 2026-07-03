@@ -1,9 +1,7 @@
 import * as React from "react";
 
-import {
-  type ActiveChannelTurnSummary,
-  useActiveAgentTurnsByChannel,
-} from "@/features/agents/activeAgentTurnsStore";
+import type { ActiveChannelTurnSummary } from "@/features/agents/activeAgentTurnsStore";
+import { useWorkingChannels } from "@/features/agents/agentWorkingSignal";
 import { useManagedAgentsQuery } from "@/features/agents/hooks";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 
@@ -34,9 +32,10 @@ export function useActiveWorkingChannelsById(): ReadonlyMap<
     [managedAgentsQuery.data],
   );
 
-  // Observer ingestion is owner-global (useAgentObserverIngestion in
-  // AppShell); this hook only reads derived state.
-  const activeWorkingChannels = useActiveAgentTurnsByChannel();
+  // Unified working signal: observer-derived turns primary, bot typing as
+  // fallback — so the sidebar badge appears even for agents whose observer
+  // stream is absent for this build/scope.
+  const activeWorkingChannels = useWorkingChannels();
   return React.useMemo(
     () =>
       new Map(

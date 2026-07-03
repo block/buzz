@@ -1,5 +1,6 @@
 import * as React from "react";
 
+import { reportChannelBotTyping } from "@/features/agents/agentWorkingSignal";
 import type { TypingIndicatorEntry } from "@/features/messages/useChannelTyping";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type {
@@ -83,6 +84,27 @@ export function useChannelActivityTyping({
     }
     return { botTypingEntries, humanTypingPubkeys };
   }, [channelAgentPubkeys, typingEntries]);
+
+  // Mirror bot typing into the unified working signal so surfaces that read
+  // agentWorkingSignal (sidebar badges, activity panel, composer bar) get the
+  // typing fallback. Entries follow the typing TTL because this effect
+  // re-reports whenever botTypingEntries changes.
+  const botTypingPubkeyKey = botTypingEntries
+    .map((entry) => entry.pubkey.toLowerCase())
+    .sort()
+    .join(",");
+  React.useEffect(() => {
+    if (!activeChannelId) {
+      return;
+    }
+    reportChannelBotTyping(
+      activeChannelId,
+      botTypingPubkeyKey ? botTypingPubkeyKey.split(",") : [],
+    );
+    return () => {
+      reportChannelBotTyping(activeChannelId, []);
+    };
+  }, [activeChannelId, botTypingPubkeyKey]);
 
   return {
     agentSessionCandidates: agentCandidates,

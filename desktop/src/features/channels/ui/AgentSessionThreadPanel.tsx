@@ -8,6 +8,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 
+import { useAgentWorking } from "@/features/agents/agentWorkingSignal";
 import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlActions";
 import { scopeByChannel } from "@/features/agents/ui/agentSessionPanelLayout";
 import type {
@@ -58,7 +59,6 @@ type AgentSessionThreadPanelProps = {
   channel: Channel | null;
   channelId?: string | null;
   canInterruptTurn: boolean;
-  isWorking: boolean;
   layout?: "standalone" | "split";
   isSinglePanelView?: boolean;
   profiles?: UserProfileLookup;
@@ -80,7 +80,6 @@ export function AgentSessionThreadPanel({
   canInterruptTurn,
   channel,
   channelId = null,
-  isWorking,
   layout = "standalone",
   isSinglePanelView = false,
   profiles,
@@ -91,11 +90,17 @@ export function AgentSessionThreadPanel({
 }: AgentSessionThreadPanelProps) {
   const isLive = isManagedAgentActive(agent);
   const isOverlay = useIsThreadPanelOverlay();
+  const sessionChannelId = channelId ?? channel?.id ?? null;
+  // Unified working signal, scoped to this panel's channel (or all channels
+  // when the panel is unscoped) — observer turns primary, typing fallback.
+  const { working: isWorking } = useAgentWorking(
+    agent.pubkey,
+    sessionChannelId,
+  );
   const canStopCurrentTurn = isWorking && canInterruptTurn;
   useEscapeKey(onClose, isOverlay || isSinglePanelView);
 
   const { ref: scrollRef, onScroll } = useStickToBottom<HTMLDivElement>();
-  const sessionChannelId = channelId ?? channel?.id ?? null;
   const now = useNow(1000);
   const { events } = useObserverEvents(isLive, agent.pubkey);
   const transcript = useAgentTranscript(isLive, agent.pubkey);

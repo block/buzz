@@ -22,7 +22,7 @@ import {
 } from "@/features/agents/hooks";
 import { useIsManagedAgent } from "@/features/agent-memory/hooks";
 import { useIdentityQuery } from "@/shared/api/hooks";
-import { useActiveAgentTurns } from "@/features/agents/activeAgentTurnsStore";
+import { useAgentWorking } from "@/features/agents/agentWorkingSignal";
 import {
   ownsAuthorAgent,
   truncatePubkey,
@@ -252,7 +252,7 @@ export function UserProfilePopover({
   const hasUserStatus = Boolean(userStatusText || userStatus?.emoji);
   const profileDescription = profile?.about?.trim() ?? "";
   const profileSubheader = profileDescription || profile?.nip05Handle?.trim();
-  const activeTurns = useActiveAgentTurns(isBotProfile ? pubkey : null);
+  const activeTurns = useAgentWorking(isBotProfile ? pubkey : null).channels;
   const channelsQuery = useChannelsQuery();
   const channelIdToName = React.useMemo(() => {
     const map: Record<string, string> = {};

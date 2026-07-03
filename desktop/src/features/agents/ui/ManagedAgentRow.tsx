@@ -6,7 +6,7 @@ import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import { PresenceDot } from "@/features/presence/ui/PresenceBadge";
 import { Badge } from "@/shared/ui/badge";
 import { AgentStatusBadge } from "@/features/agents/ui/AgentStatusBadge";
-import { useActiveAgentTurns } from "@/features/agents/activeAgentTurnsStore";
+import { useAgentWorking } from "@/features/agents/agentWorkingSignal";
 import { formatElapsed } from "@/features/agents/ui/agentSessionUtils";
 import { useNow } from "@/shared/lib/useNow";
 import type {
@@ -55,7 +55,7 @@ export function ManagedAgentRow({
     ? (personaLabelsById[agent.personaId] ?? null)
     : null;
   const presenceStatus = presenceLookup[agent.pubkey.trim().toLowerCase()];
-  const activeTurns = useActiveAgentTurns(agent.pubkey);
+  const activeTurns = useAgentWorking(agent.pubkey).channels;
   const activeWorkingChannels = React.useMemo(
     () =>
       activeTurns
