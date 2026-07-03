@@ -988,6 +988,13 @@ struct RespawnResult {
 struct SteerAckEvent {
     channel_id: Uuid,
     event_id: String,
+    /// The exact turn (`tokio::task::Id`) the steer was sent to, from
+    /// `pool.send_steer`. Ack-driven bookkeeping must bind to this id, not
+    /// to "whatever turn currently owns `channel_id`": if the turn ended
+    /// and a fresh one started on the same channel before a delayed ack
+    /// arrived, channel-matching would attach the steered event's 👀 to
+    /// the successor turn — keeping it alive until the wrong turn stopped.
+    task_id: tokio::task::Id,
     /// `Ok` if the read loop sent any of the locked `SteerAck` variants.
     /// `Err` if the oneshot was dropped without a send — should not happen
     /// under the current read-loop drains, but if it ever does the main
@@ -2127,6 +2134,7 @@ async fn tokio_main() -> Result<()> {
                     &respawn_tx,
                     &mut respawn_tasks,
                     observer.clone(),
+                    Some(&ctx.rest_client),
                 ) == LoopAction::Exit
                 {
                     break;
@@ -2149,6 +2157,7 @@ async fn tokio_main() -> Result<()> {
                     &respawn_tx,
                     &mut respawn_tasks,
                     observer.clone(),
+                    Some(&ctx.rest_client),
                 );
                 if pool.live_count() == 0 && !any_respawn_in_flight(&crash_history) {
                     tracing::error!("all agents dead — exiting");
@@ -2161,6 +2170,7 @@ async fn tokio_main() -> Result<()> {
             Some(PoolEvent::SteerAck(SteerAckEvent {
                 channel_id,
                 event_id,
+                task_id,
                 ack,
             })) => {
                 // Goose-native steer attempt resolved. Locked semantics
@@ -2252,6 +2262,17 @@ async fn tokio_main() -> Result<()> {
                 );
                 if drop_withheld {
                     queue.remove_event(channel_id, &event_id);
+                    // The event was absorbed into the in-flight turn without
+                    // ever entering a FlushBatch, so no ReactionGuard owns
+                    // its 👀 (added at queue-push time). Attach it to that
+                    // exact turn's TaskMeta (matched by task id, not channel
+                    // — a delayed ack must not bind to a successor turn on
+                    // the same channel) so the cleanup fires when the turn
+                    // ends. If the turn already ended (result raced ahead
+                    // of the ack), clean up immediately.
+                    if !pool.record_steered_event(task_id, &event_id) {
+                        spawn_steered_eyes_cleanup(Some(&ctx.rest_client), vec![event_id.clone()]);
+                    }
                 }
                 if release_withheld {
                     queue.release_native_steer(channel_id, &event_id);
@@ -2280,6 +2301,19 @@ async fn tokio_main() -> Result<()> {
     }
 
     tracing::info!("shutdown: waiting for in-flight prompts");
+    // Steered-👀 cleanup would otherwise be lost here: the drain below
+    // consumes PromptResults directly (never via handle_prompt_result), and
+    // tasks that outlive the grace period are aborted — either way every
+    // TaskMeta drops with the pool and its steered_event_ids with it. All
+    // in-flight turns are stopping now, so the user-visible contract (eyes
+    // clear when the turn stops) says remove them. This one-time drain only
+    // covers acks already processed by the SteerAck arm; acks still pending
+    // when the loop exited are handled by drain_crossing_steer_acks below,
+    // after the grace period resolves every watcher. Runs concurrently with
+    // the grace-period drain; awaited (bounded, each reaction_remove is
+    // internally timeout-capped) before exit.
+    let steered_cleanup =
+        spawn_steered_eyes_cleanup(Some(&ctx.rest_client), pool.drain_all_steered_event_ids());
     // 30 s is generous for in-flight prompts to be cancelled; using
     // max_turn_duration here would cause Ctrl+C to hang for up to an hour.
     let grace = Duration::from_secs(30);
@@ -2332,6 +2366,29 @@ async fn tokio_main() -> Result<()> {
         }
     }
     drop(pool);
+
+    // Resolve success acks that crossed the loop exit (watcher resolved
+    // during the grace period, after `select!` stopped polling). All prompt
+    // tasks have now settled, so every watcher is done or doomed — drop our
+    // sender and drain the channel, then remove the 👀 those events carry.
+    drop(steer_ack_tx);
+    let crossing_cleanup = spawn_steered_eyes_cleanup(
+        Some(&ctx.rest_client),
+        drain_crossing_steer_acks(&mut steer_ack_rx).await,
+    );
+
+    // Wait (bounded) for the steered-👀 cleanups spawned above — each
+    // reaction_remove is internally capped at ~2 s of HTTP, so this cannot
+    // hang shutdown meaningfully. Best-effort: on timeout the reactions
+    // stay stale, same class of loss as any other kill-during-cleanup.
+    for handle in [steered_cleanup, crossing_cleanup].into_iter().flatten() {
+        if tokio::time::timeout(Duration::from_secs(10), handle)
+            .await
+            .is_err()
+        {
+            tracing::warn!("steered 👀 cleanup did not finish before shutdown deadline");
+        }
+    }
 
     // Abort any in-flight respawn tasks. They may be sleeping in backoff or
     // running spawn_and_init — either way, we don't want them spawning new
@@ -2515,7 +2572,7 @@ fn try_native_steer(
     };
 
     match pool.send_steer(channel_id, request) {
-        Ok(()) => {
+        Ok(task_id) => {
             // Withhold the queued event synchronously BEFORE spawning
             // the watcher: this closes the race where `mark_complete`
             // clears `in_flight_channels` and a stray `flush_next` could
@@ -2544,6 +2601,7 @@ fn try_native_steer(
                 let _ = ack_tx_clone.send(SteerAckEvent {
                     channel_id,
                     event_id: event_id_for_watcher,
+                    task_id,
                     ack,
                 });
             });
@@ -2639,6 +2697,7 @@ fn dispatch_pending(
                 recoverable_batch,
                 control_tx: Some(control_tx),
                 steer_tx,
+                steered_event_ids: Vec::new(),
             },
         );
         dispatched_channels.push((channel_id, typing_scope));
@@ -2649,6 +2708,77 @@ fn dispatch_pending(
         "dispatch_pending"
     );
     dispatched_channels
+}
+
+/// Spawn a best-effort background removal of the 👀 reaction from events
+/// that were steered into a turn (`SteerAck::Success`). Steered events never
+/// enter a `FlushBatch`, so `run_prompt_task`'s `ReactionGuard` never owns
+/// their 👀 — every turn-stopping path (normal completion, panic recovery,
+/// graceful shutdown) and the late-ack path clean up through here instead.
+///
+/// Returns the `JoinHandle` when a task was spawned (non-empty ids and a
+/// rest client available) so shutdown can bound-await it; other callers
+/// discard the handle.
+fn spawn_steered_eyes_cleanup(
+    rest_client: Option<&relay::RestClient>,
+    ids: Vec<String>,
+) -> Option<tokio::task::JoinHandle<()>> {
+    if ids.is_empty() {
+        return None;
+    }
+    let rest = rest_client?.clone();
+    Some(tokio::spawn(async move {
+        for eid in &ids {
+            pool::reaction_remove(&rest, eid, "👀").await;
+        }
+    }))
+}
+
+/// Drain `steer_ack_rx` after the main loop has exited and every prompt
+/// task has settled, returning the event ids of `SteerAck::Success` acks
+/// that crossed the loop exit.
+///
+/// A watcher can resolve during the shutdown grace period — after the
+/// `select!` stopped polling `steer_ack_rx` but while its turn's read loop
+/// was still running. Such a Success ack was never seen by the SteerAck
+/// arm: its event id is on no `TaskMeta` (the one-time drain missed it) and
+/// no immediate cleanup fired — without this pass its 👀 would die stale at
+/// process exit.
+///
+/// Caller must drop its `steer_ack_tx` clone first and call this only after
+/// the grace-period drain: with all prompt tasks finished or aborted, every
+/// watcher's oneshot has resolved (or dropped → `RecvError`), so each
+/// watcher sends promptly and releases its sender clone — `recv()` then
+/// yields `None` once the channel empties. The per-recv timeout is a
+/// backstop against a wedged watcher; on timeout we keep what was drained.
+///
+/// Non-Success acks are dropped: their events were released back to the
+/// queue (which is being discarded) — the same stale-👀-at-exit fate as any
+/// queued-but-never-dispatched event, a pre-existing shutdown limitation
+/// owned by the relay-side cleanup.
+async fn drain_crossing_steer_acks(
+    steer_ack_rx: &mut mpsc::UnboundedReceiver<SteerAckEvent>,
+) -> Vec<String> {
+    let mut ids = Vec::new();
+    loop {
+        match tokio::time::timeout(Duration::from_secs(2), steer_ack_rx.recv()).await {
+            Ok(Some(ev)) => {
+                if matches!(ev.ack, Ok(pool::SteerAck::Success)) {
+                    ids.push(ev.event_id);
+                }
+            }
+            Ok(None) => break, // channel closed — every watcher finished
+            Err(_) => {
+                tracing::warn!(
+                    drained = ids.len(),
+                    "steer ack watcher still pending at shutdown deadline — \
+                     proceeding with acks drained so far"
+                );
+                break;
+            }
+        }
+    }
+    ids
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2667,9 +2797,22 @@ fn handle_prompt_result(
 ) -> LoopAction {
     let before = pool.task_map().len();
     let agent_index = result.agent.index;
-    pool.task_map_mut()
-        .retain(|_, meta| meta.agent_index != agent_index);
+    // Drain this agent's task meta, collecting any event ids that were
+    // steered into the completed turn (SteerAck::Success). Those events
+    // never entered a FlushBatch, so run_prompt_task's ReactionGuard never
+    // owned their 👀 — clean them up here, on turn end, matching the
+    // user-visible contract that the eyes go away when the turn stops.
+    let mut steered_ids: Vec<String> = Vec::new();
+    pool.task_map_mut().retain(|_, meta| {
+        if meta.agent_index == agent_index {
+            steered_ids.append(&mut meta.steered_event_ids);
+            false
+        } else {
+            true
+        }
+    });
     debug_assert_eq!(before, pool.task_map().len() + 1);
+    spawn_steered_eyes_cleanup(rest_client, steered_ids);
 
     // Requeue BEFORE mark_complete: requeue() sets retry_after with a future
     // deadline, and mark_complete() checks for it to decide whether to preserve
@@ -2888,6 +3031,7 @@ fn recover_panicked_agent(
     respawn_tx: &mpsc::Sender<RespawnResult>,
     respawn_tasks: &mut tokio::task::JoinSet<()>,
     observer: Option<observer::ObserverHandle>,
+    rest_client: Option<&relay::RestClient>,
 ) {
     let task_id = join_error.id();
     let Some(meta) = pool.task_map_mut().remove(&task_id) else {
@@ -2895,6 +3039,11 @@ fn recover_panicked_agent(
         return;
     };
     let i = meta.agent_index;
+
+    // Steered events never entered a FlushBatch, so the panicked task's
+    // ReactionGuard never owned their 👀 — clean them up here (same
+    // contract as handle_prompt_result: eyes clear when the turn ends).
+    spawn_steered_eyes_cleanup(rest_client, meta.steered_event_ids);
 
     // Requeue BEFORE mark_complete (same rationale as handle_prompt_result).
     if let Some(batch) = meta.recoverable_batch {
@@ -2985,6 +3134,7 @@ fn drain_ready_join_results(
     respawn_tx: &mpsc::Sender<RespawnResult>,
     respawn_tasks: &mut tokio::task::JoinSet<()>,
     observer: Option<observer::ObserverHandle>,
+    rest_client: Option<&relay::RestClient>,
 ) -> LoopAction {
     while let Some(Some(join_result)) = pool.join_set.join_next().now_or_never() {
         if let Err(join_error) = join_result {
@@ -3001,6 +3151,7 @@ fn drain_ready_join_results(
                 respawn_tx,
                 respawn_tasks,
                 observer.clone(),
+                rest_client,
             );
             if pool.live_count() == 0 && !any_respawn_in_flight(crash_history) {
                 return LoopAction::Exit;
@@ -3047,6 +3198,7 @@ fn dispatch_heartbeat(
             recoverable_batch: None,
             control_tx: None,
             steer_tx: None,
+            steered_event_ids: Vec::new(),
         },
     );
     *heartbeat_in_flight = true;
@@ -3490,6 +3642,7 @@ mod owner_control_command_tests {
                 recoverable_batch: None,
                 control_tx: Some(control_tx),
                 steer_tx: None,
+                steered_event_ids: Vec::new(),
             },
         );
 
@@ -4013,6 +4166,7 @@ mod error_outcome_emission_tests {
                 recoverable_batch: None,
                 control_tx: None,
                 steer_tx: None,
+                steered_event_ids: Vec::new(),
             },
         );
 
@@ -4077,6 +4231,474 @@ mod error_outcome_emission_tests {
     async fn application_error_emits_exactly_one_feed_event() {
         let app = AcpError::IdleTimeout(std::time::Duration::from_secs(1));
         assert_eq!(turn_errors_emitted_for(PromptOutcome::Error(app)).await, 1);
+    }
+}
+
+#[cfg(test)]
+mod steered_eyes_lifecycle_tests {
+    //! Lifecycle-level regression tests for steered-👀 cleanup.
+    //!
+    //! Events delivered mid-turn via the goose-native steer
+    //! (`SteerAck::Success`) never enter a `FlushBatch`, so
+    //! `run_prompt_task`'s `ReactionGuard` never owns their 👀. These tests
+    //! pin that every turn-stopping path actually removes the reaction *on
+    //! the wire* — a relay stub answers the `POST /query` reaction lookup
+    //! and captures the signed kind:5 (NIP-09) deletion submitted to
+    //! `POST /events` — not just that ids are bookkept in `TaskMeta`:
+    //!
+    //! - normal completion (`handle_prompt_result`)
+    //! - panic recovery (`recover_panicked_agent`)
+    //! - graceful shutdown (the `drain_all_steered_event_ids` +
+    //!   `spawn_steered_eyes_cleanup` composition `tokio_main` runs)
+    //! - late ack after turn end (immediate cleanup, no turn to attach to)
+    //!
+    //! The generation-reuse race (a late ack must not bind to a successor
+    //! turn on the same channel) is pinned at the binding level in
+    //! `pool::tests::test_late_ack_for_ended_turn_does_not_bind_to_successor_turn`.
+
+    use super::*;
+    use crate::acp::{AcpClient, StopReason};
+    use crate::pool::{AgentPool, OwnedAgent, PromptOutcome, PromptResult, PromptSource, TaskMeta};
+    use std::collections::HashSet;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+    use tokio::sync::Mutex;
+
+    /// Minimal relay stub. Answers `POST /query` (the reaction lookup inside
+    /// `pool::reaction_remove`) with a single 👀 reaction event of id
+    /// `reaction_id`, and captures every body submitted to `POST /events`
+    /// (the kind:5 deletions under test). One request per connection.
+    async fn spawn_mock_relay(
+        reaction_id: &str,
+    ) -> (relay::RestClient, Arc<Mutex<Vec<serde_json::Value>>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let captured: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
+        let captured_srv = captured.clone();
+        let reaction_id = reaction_id.to_string();
+        tokio::spawn(async move {
+            loop {
+                let (mut sock, _) = match listener.accept().await {
+                    Ok(p) => p,
+                    Err(_) => return,
+                };
+                let captured = captured_srv.clone();
+                let reaction_id = reaction_id.clone();
+                tokio::spawn(async move {
+                    let mut buf = Vec::new();
+                    let mut tmp = [0u8; 4096];
+                    while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                        match sock.read(&mut tmp).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => buf.extend_from_slice(&tmp[..n]),
+                        }
+                        if buf.len() > 1_000_000 {
+                            return;
+                        }
+                    }
+                    let head_end = buf.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
+                    let head = String::from_utf8_lossy(&buf[..head_end]).to_string();
+                    let content_length = head
+                        .lines()
+                        .find_map(|l| {
+                            let (k, v) = l.split_once(':')?;
+                            if k.eq_ignore_ascii_case("content-length") {
+                                v.trim().parse::<usize>().ok()
+                            } else {
+                                None
+                            }
+                        })
+                        .unwrap_or(0);
+                    while buf.len() < head_end + content_length {
+                        match sock.read(&mut tmp).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => buf.extend_from_slice(&tmp[..n]),
+                        }
+                    }
+                    let body = &buf[head_end..head_end + content_length];
+                    let path = head
+                        .lines()
+                        .next()
+                        .and_then(|l| l.split_whitespace().nth(1))
+                        .unwrap_or("")
+                        .to_string();
+                    let response_body = if path == "/query" {
+                        serde_json::json!([{ "id": reaction_id, "content": "👀" }]).to_string()
+                    } else {
+                        // `/events` — capture the submitted deletion event.
+                        if let Ok(v) = serde_json::from_slice::<serde_json::Value>(body) {
+                            captured.lock().await.push(v);
+                        }
+                        "{}".to_string()
+                    };
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        response_body.len(),
+                        response_body,
+                    );
+                    let _ = sock.write_all(resp.as_bytes()).await;
+                    let _ = sock.shutdown().await;
+                });
+            }
+        });
+        let rest = relay::RestClient {
+            http: reqwest::Client::new(),
+            base_url,
+            keys: nostr::Keys::generate(),
+            auth_tag_json: None,
+        };
+        (rest, captured)
+    }
+
+    /// Poll until `captured` holds at least `n` deletion events or ~3 s pass
+    /// (the cleanup runs on a fire-and-forget spawned task).
+    async fn wait_for_deletions(
+        captured: &Arc<Mutex<Vec<serde_json::Value>>>,
+        n: usize,
+    ) -> Vec<serde_json::Value> {
+        for _ in 0..300 {
+            let got = captured.lock().await.clone();
+            if got.len() >= n {
+                return got;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        captured.lock().await.clone()
+    }
+
+    /// The captured event must be a kind:5 (NIP-09) deletion e-tagging the
+    /// 👀 reaction event the stub advertised.
+    fn assert_is_deletion_of(event: &serde_json::Value, reaction_id: &str) {
+        assert_eq!(
+            event.get("kind").and_then(|k| k.as_u64()),
+            Some(5),
+            "must be a kind:5 deletion, got: {event}"
+        );
+        let tags = event
+            .get("tags")
+            .and_then(|t| t.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            tags.iter().any(|t| t.as_array().is_some_and(|t| {
+                t.first().and_then(|v| v.as_str()) == Some("e")
+                    && t.get(1).and_then(|v| v.as_str()) == Some(reaction_id)
+            })),
+            "deletion must e-tag reaction event {reaction_id}, got tags: {tags:?}"
+        );
+    }
+
+    fn test_config() -> Config {
+        Config {
+            keys: nostr::Keys::generate(),
+            relay_url: "ws://localhost:3000".into(),
+            // `true` exits cleanly, so the async respawn on the panic path
+            // fails fast and harmlessly off the JoinSet.
+            agent_command: "true".into(),
+            agent_args: vec![],
+            mcp_command: "test-mcp-server".into(),
+            idle_timeout_secs: config::DEFAULT_IDLE_TIMEOUT_SECS,
+            max_turn_duration_secs: 3600,
+            agents: 1,
+            heartbeat_interval_secs: 0,
+            turn_liveness_secs: 10,
+            heartbeat_prompt: None,
+            system_prompt: None,
+            initial_message: None,
+            subscribe_mode: config::SubscribeMode::All,
+            dedup_mode: config::DedupMode::Queue,
+            multiple_event_handling: config::MultipleEventHandling::Queue,
+            ignore_self: true,
+            kinds_override: None,
+            channels_override: None,
+            no_mention_filter: false,
+            config_path: std::path::PathBuf::from("./buzz-acp.toml"),
+            context_message_limit: 12,
+            max_turns_per_session: 0,
+            presence_enabled: true,
+            typing_enabled: true,
+            memory_enabled: false,
+            model: None,
+            permission_mode: config::PermissionMode::BypassPermissions,
+            respond_to: config::RespondTo::Anyone,
+            respond_to_allowlist: HashSet::new(),
+            allowed_respond_to: vec![],
+            persona_env_vars: vec![],
+            relay_observer: false,
+            agent_owner: None,
+            no_base_prompt: false,
+            base_prompt_content: None,
+        }
+    }
+
+    /// Real but inert agent subprocess (`cat`) — the paths under test never
+    /// talk to it. Same pattern as `error_outcome_emission_tests`.
+    async fn dummy_agent(index: usize) -> OwnedAgent {
+        OwnedAgent {
+            index,
+            acp: AcpClient::spawn("cat", &[], &[])
+                .await
+                .expect("spawn cat as inert agent"),
+            state: Default::default(),
+            model_capabilities: None,
+            desired_model: None,
+            model_overridden: false,
+            protocol_version: 1,
+        }
+    }
+
+    fn fresh_circuit() -> SlotCircuit {
+        SlotCircuit {
+            crash_times: Vec::new(),
+            open_until: None,
+            respawn_in_flight: false,
+        }
+    }
+
+    /// Normal completion: a turn that absorbed a steered event ends via
+    /// `handle_prompt_result` → the steered event's 👀 is removed on the
+    /// wire (kind:5 deletion submitted to the relay).
+    #[tokio::test]
+    async fn completion_removes_steered_eyes_on_the_wire() {
+        let reaction_id = "ab".repeat(32);
+        let (rest, captured) = spawn_mock_relay(&reaction_id).await;
+
+        let mut pool = AgentPool::from_slots(vec![None]);
+        let channel_id = Uuid::new_v4();
+        let task_id = pool.join_set.spawn(async {}).id();
+        pool.task_map_mut().insert(
+            task_id,
+            TaskMeta {
+                agent_index: 0,
+                channel_id: Some(channel_id),
+                recoverable_batch: None,
+                control_tx: None,
+                steer_tx: None,
+                steered_event_ids: Vec::new(),
+            },
+        );
+        assert!(pool.record_steered_event(task_id, &"ef".repeat(32)));
+
+        let mut queue = EventQueue::new(config::DedupMode::Queue);
+        let config = test_config();
+        let mut heartbeat_in_flight = false;
+        let removed_channels = HashSet::new();
+        let mut crash_history = vec![fresh_circuit()];
+        let (respawn_tx, _respawn_rx) = mpsc::channel(8);
+        let mut respawn_tasks = tokio::task::JoinSet::new();
+
+        handle_prompt_result(
+            &mut pool,
+            &mut queue,
+            &config,
+            PromptResult {
+                agent: dummy_agent(0).await,
+                source: PromptSource::Channel(channel_id),
+                outcome: PromptOutcome::Ok(StopReason::EndTurn),
+                batch: None,
+            },
+            &mut heartbeat_in_flight,
+            &removed_channels,
+            &mut crash_history,
+            &respawn_tx,
+            &mut respawn_tasks,
+            None,
+            Some(&rest),
+        );
+
+        let deletions = wait_for_deletions(&captured, 1).await;
+        assert_eq!(
+            deletions.len(),
+            1,
+            "exactly one deletion for one steered event"
+        );
+        assert_is_deletion_of(&deletions[0], &reaction_id);
+    }
+
+    /// Panic: a turn that absorbed a steered event panics; recovery removes
+    /// the 👀 on the wire — same contract as normal completion.
+    #[tokio::test]
+    async fn panic_recovery_removes_steered_eyes_on_the_wire() {
+        let reaction_id = "cd".repeat(32);
+        let (rest, captured) = spawn_mock_relay(&reaction_id).await;
+
+        let mut pool = AgentPool::from_slots(vec![None]);
+        let channel_id = Uuid::new_v4();
+        let task_id = pool
+            .join_set
+            .spawn(async { panic!("turn panicked mid-steer") })
+            .id();
+        pool.task_map_mut().insert(
+            task_id,
+            TaskMeta {
+                agent_index: 0,
+                channel_id: Some(channel_id),
+                recoverable_batch: None,
+                control_tx: None,
+                steer_tx: None,
+                steered_event_ids: vec!["12".repeat(32)],
+            },
+        );
+        let join_error = match pool.join_set.join_next().await {
+            Some(Err(e)) => e,
+            other => panic!("expected panicked task, got {other:?}"),
+        };
+        assert_eq!(join_error.id(), task_id);
+
+        let mut queue = EventQueue::new(config::DedupMode::Queue);
+        let config = test_config();
+        let mut heartbeat_in_flight = false;
+        let removed_channels = HashSet::new();
+        let mut typing_channels = HashMap::new();
+        let mut crash_history = vec![fresh_circuit()];
+        let (respawn_tx, _respawn_rx) = mpsc::channel(8);
+        let mut respawn_tasks = tokio::task::JoinSet::new();
+
+        recover_panicked_agent(
+            &mut pool,
+            &mut queue,
+            &config,
+            join_error,
+            &mut heartbeat_in_flight,
+            &removed_channels,
+            &mut typing_channels,
+            &mut crash_history,
+            &respawn_tx,
+            &mut respawn_tasks,
+            None,
+            Some(&rest),
+        );
+
+        let deletions = wait_for_deletions(&captured, 1).await;
+        assert_eq!(deletions.len(), 1);
+        assert_is_deletion_of(&deletions[0], &reaction_id);
+    }
+
+    /// Graceful shutdown: the exact composition `tokio_main` runs after the
+    /// main loop exits — drain every steered id from every in-flight turn,
+    /// then remove them on the wire — clears all steered 👀 even though no
+    /// `handle_prompt_result` ever ran for those turns.
+    #[tokio::test]
+    async fn shutdown_drain_removes_steered_eyes_on_the_wire() {
+        let reaction_id = "ee".repeat(32);
+        let (rest, captured) = spawn_mock_relay(&reaction_id).await;
+
+        let mut pool = AgentPool::from_slots(vec![]);
+        for i in 0..2 {
+            let task_id = pool.join_set.spawn(std::future::pending()).id();
+            pool.task_map_mut().insert(
+                task_id,
+                TaskMeta {
+                    agent_index: i,
+                    channel_id: Some(Uuid::new_v4()),
+                    recoverable_batch: None,
+                    control_tx: None,
+                    steer_tx: None,
+                    steered_event_ids: Vec::new(),
+                },
+            );
+            assert!(pool.record_steered_event(task_id, &format!("{i}{i}").repeat(32)));
+        }
+
+        let handle = spawn_steered_eyes_cleanup(Some(&rest), pool.drain_all_steered_event_ids())
+            .expect("two steered ids must spawn a cleanup task");
+        handle.await.expect("cleanup task must not panic");
+
+        let deletions = captured.lock().await.clone();
+        assert_eq!(deletions.len(), 2, "one deletion per steered event");
+        for d in &deletions {
+            assert_is_deletion_of(d, &reaction_id);
+        }
+        pool.join_set.shutdown().await;
+    }
+
+    /// Late ack after turn end: when `record_steered_event` refuses the
+    /// stale task id (see the pool generation-race test), the SteerAck arm
+    /// falls back to immediate cleanup — which must remove the 👀 on the
+    /// wire right away rather than waiting on any turn.
+    #[tokio::test]
+    async fn late_ack_immediate_cleanup_removes_eyes_on_the_wire() {
+        let reaction_id = "0f".repeat(32);
+        let (rest, captured) = spawn_mock_relay(&reaction_id).await;
+
+        let handle = spawn_steered_eyes_cleanup(Some(&rest), vec!["34".repeat(32)])
+            .expect("one id must spawn a cleanup task");
+        handle.await.expect("cleanup task must not panic");
+
+        let deletions = captured.lock().await.clone();
+        assert_eq!(deletions.len(), 1);
+        assert_is_deletion_of(&deletions[0], &reaction_id);
+    }
+
+    /// No ids → no task, no HTTP. Pins the no-op path shutdown relies on.
+    #[tokio::test]
+    async fn empty_cleanup_spawns_nothing() {
+        let (rest, captured) = spawn_mock_relay(&"aa".repeat(32)).await;
+        assert!(spawn_steered_eyes_cleanup(Some(&rest), Vec::new()).is_none());
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(captured.lock().await.is_empty());
+    }
+
+    /// Build a `SteerAckEvent` with a real (already-finished) task id.
+    async fn ack_event(event_id: &str, ack: pool::SteerAck) -> SteerAckEvent {
+        let handle = tokio::spawn(async {});
+        let task_id = handle.id();
+        let _ = handle.await;
+        SteerAckEvent {
+            channel_id: Uuid::new_v4(),
+            event_id: event_id.to_string(),
+            task_id,
+            ack: Ok(ack),
+        }
+    }
+
+    /// Crossing-ack shutdown race: a `SteerAck::Success` whose watcher
+    /// resolves after the main loop stopped polling `steer_ack_rx` was
+    /// never attached to any TaskMeta — the post-grace drain must still
+    /// recover its event id (and only Success ids) and remove the 👀 on
+    /// the wire before process exit.
+    #[tokio::test]
+    async fn crossing_success_ack_is_drained_and_cleaned_on_the_wire() {
+        let reaction_id = "5a".repeat(32);
+        let (rest, captured) = spawn_mock_relay(&reaction_id).await;
+
+        let (tx, mut rx) = mpsc::unbounded_channel::<SteerAckEvent>();
+        let steered_event = "77".repeat(32);
+        // Watcher resolved during the grace period: Success ack sitting in
+        // the channel, unseen by the (exited) main loop.
+        tx.send(ack_event(&steered_event, pool::SteerAck::Success).await)
+            .unwrap();
+        // Non-Success acks in the same window must be ignored.
+        tx.send(ack_event("ignored", pool::SteerAck::PromptCompletedNeutral).await)
+            .unwrap();
+        drop(tx); // shutdown drops its sender before draining
+
+        let ids = drain_crossing_steer_acks(&mut rx).await;
+        assert_eq!(ids, vec![steered_event]);
+
+        let handle = spawn_steered_eyes_cleanup(Some(&rest), ids)
+            .expect("crossing success ack must spawn cleanup");
+        handle.await.expect("cleanup task must not panic");
+
+        let deletions = captured.lock().await.clone();
+        assert_eq!(deletions.len(), 1);
+        assert_is_deletion_of(&deletions[0], &reaction_id);
+    }
+
+    /// Backstop: a wedged watcher (sender clone alive, never sends) must
+    /// not hang shutdown — the drain times out and keeps what it has.
+    /// Paused time makes the 2 s recv deadline resolve instantly.
+    #[tokio::test(start_paused = true)]
+    async fn crossing_ack_drain_times_out_on_wedged_watcher() {
+        let (tx, mut rx) = mpsc::unbounded_channel::<SteerAckEvent>();
+        let done = "99".repeat(32);
+        tx.send(ack_event(&done, pool::SteerAck::Success).await)
+            .unwrap();
+        // `tx` intentionally kept alive: simulates a watcher that never
+        // resolves, so the channel never closes.
+        let ids = drain_crossing_steer_acks(&mut rx).await;
+        assert_eq!(ids, vec![done], "must keep acks drained before timeout");
+        drop(tx);
     }
 }
 
