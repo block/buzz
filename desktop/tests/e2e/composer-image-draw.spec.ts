@@ -113,9 +113,10 @@ test("draw on an uploaded image, save replaces it, revert restores in place", as
 
   await saveButton.click();
 
-  // Dialog stays open, now showing the annotated image in view mode.
-  await expect(dialog.locator(`img[src="${EDITED_URL}"]`)).toBeVisible();
-  await expect(page.getByTestId("composer-image-editor-canvas")).toHaveCount(0);
+  // Saving closes the lightbox; the composer thumbnail now shows the
+  // annotated image.
+  await expect(dialog).toHaveCount(0);
+  await expect(composer.getByAltText("Attachment bbbb")).toBeVisible();
 
   // The annotated PNG went through the real upload command.
   const uploadCommandCount = await page.evaluate(
@@ -127,6 +128,11 @@ test("draw on an uploaded image, save replaces it, revert restores in place", as
       ).length ?? 0,
   );
   expect(uploadCommandCount).toBe(1);
+
+  // Reopen the lightbox on the annotated attachment to revert.
+  await composer.getByAltText("Attachment bbbb").click();
+  await expect(dialog).toBeVisible();
+  await expect(dialog.locator(`img[src="${EDITED_URL}"]`)).toBeVisible();
 
   // Revert swaps back to the original without closing the dialog.
   await page.getByTestId("composer-attachment-revert").click();
@@ -168,10 +174,8 @@ test("spoiler marking survives drawing on the attachment", async ({ page }) => {
   }, EDITED_DESCRIPTOR);
   await page.getByTestId("composer-image-editor-save").click();
 
-  const dialog = page.getByRole("dialog");
-  await expect(dialog.locator(`img[src="${EDITED_URL}"]`)).toBeVisible();
-  await page.keyboard.press("Escape");
-  await expect(dialog).toHaveCount(0);
+  // Saving closes the lightbox.
+  await expect(page.getByRole("dialog")).toHaveCount(0);
 
   // The annotated replacement is still marked as a spoiler.
   await expect(composer.getByAltText("Attachment bbbb")).toBeVisible();

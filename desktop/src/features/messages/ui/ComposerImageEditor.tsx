@@ -270,7 +270,7 @@ export function ComposerImageEditor({
     try {
       const bytes = await renderAnnotatedPng(src, strokes);
       await onSave(bytes);
-      // On success the parent leaves edit mode and unmounts this component.
+      // On success the parent closes the lightbox and unmounts this component.
     } catch {
       setSaveError("Could not save the drawing. Please try again.");
       setSaving(false);
