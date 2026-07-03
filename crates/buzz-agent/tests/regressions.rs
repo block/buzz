@@ -888,21 +888,25 @@ async fn hook_stop_budget_exhausted() {
     h.shutdown().await;
 }
 
-/// Consecutive-rejection rule: if the LLM responds to an objection with
-/// no tool calls and end_turn again, the agent accepts the end (avoids
-/// infinite loops with an unreasonable hook).
+/// A persistent `_Stop` objection must keep the turn alive through repeated
+/// consecutive end_turn responses. The configured rejection budget is the
+/// bounded escape hatch; accepting the second response would silently idle a
+/// session that still has open work.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn hook_stop_consecutive_end_turn() {
-    // LLM sequence:
-    //   1. text → _Stop objects (rejections: 0→1, last_was_end_turn=true)
-    //   2. text again, no tool calls → consecutive rule fires, return end_turn
-    let llm = spawn_capturing_llm(vec![openai_text("done-1"), openai_text("done-2")]).await;
+async fn hook_stop_consecutive_end_turn_uses_rejection_budget() {
+    // Three consecutive end_turn responses. With max=2, both objections must
+    // reroll the LLM and the third response is accepted by the budget cap.
+    let llm = spawn_capturing_llm(vec![
+        openai_text("done-1"),
+        openai_text("done-2"),
+        openai_text("done-3"),
+    ])
+    .await;
     let mut h = Harness::spawn_with_env(
         &llm.url,
         &[
             ("MCP_HOOK_SERVERS", "fake"),
-            // Set high so we don't trip the budget instead.
-            ("BUZZ_AGENT_STOP_MAX_REJECTIONS", "10"),
+            ("BUZZ_AGENT_STOP_MAX_REJECTIONS", "2"),
         ],
     )
     .await;
@@ -926,12 +930,12 @@ async fn hook_stop_consecutive_end_turn() {
     assert!(r.get("result").is_some(), "errored: {r}");
     assert_eq!(r["result"]["stopReason"], "end_turn");
 
-    // Exactly 2 LLM calls — consecutive rule prevented a 3rd round.
+    // Both objections force another round; the budget permits the third end.
     let captured = llm.captured.lock().await;
     assert_eq!(
         captured.len(),
-        2,
-        "expected 2 LLM calls (consecutive rule), got {}",
+        3,
+        "expected 3 LLM calls (two objections, then budget cap), got {}",
         captured.len()
     );
     h.shutdown().await;
