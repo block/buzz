@@ -10,6 +10,7 @@ import {
   publishNote,
 } from "@/shared/api/social";
 import { allPulseTimelinesQueryKey } from "@/features/profile/hooks";
+import { withoutProjectComments } from "@/features/pulse/lib/projectComments";
 import type { UserNote, UserNotesResponse } from "@/shared/api/socialTypes";
 
 // ── Query keys ──────────────────────────────────────────────────────────────
@@ -33,7 +34,8 @@ export function useLikedNotesQuery(pubkey?: string, enabled = true) {
   return useQuery<UserNotesResponse>({
     queryKey: pulseQueryKeys.likedNotes(pubkey ?? ""),
     // biome-ignore lint/style/noNonNullAssertion: guarded by enabled: !!pubkey
-    queryFn: () => getLikedNotes(pubkey!, 50),
+    queryFn: async () =>
+      withoutProjectComments(await getLikedNotes(pubkey!, 50)),
     enabled: enabled && !!pubkey,
     staleTime: 15_000,
     gcTime: 5 * 60_000,
@@ -45,7 +47,8 @@ export function useMyNotesQuery(pubkey?: string) {
   return useQuery<UserNotesResponse>({
     queryKey: pulseQueryKeys.myNotes(pubkey ?? ""),
     // biome-ignore lint/style/noNonNullAssertion: guarded by enabled: !!pubkey
-    queryFn: () => getUserNotes(pubkey!, { limit: 50 }),
+    queryFn: async () =>
+      withoutProjectComments(await getUserNotes(pubkey!, { limit: 50 })),
     enabled: !!pubkey,
     staleTime: 15_000,
     gcTime: 5 * 60_000,
@@ -58,7 +61,8 @@ export function useMyNotesQuery(pubkey?: string) {
 export function useTimelineQuery(contactPubkeys: string[], enabled: boolean) {
   return useQuery<UserNotesResponse>({
     queryKey: pulseQueryKeys.timeline(contactPubkeys),
-    queryFn: () => getNotesTimeline(contactPubkeys, 10),
+    queryFn: async () =>
+      withoutProjectComments(await getNotesTimeline(contactPubkeys, 10)),
     enabled: enabled && contactPubkeys.length > 0,
     staleTime: 15_000,
     gcTime: 5 * 60_000,
@@ -113,7 +117,8 @@ export function useNoteByIdQuery(noteId: string | null) {
 export function useGlobalNotesQuery(enabled: boolean) {
   return useQuery<UserNotesResponse>({
     queryKey: pulseQueryKeys.globalNotes,
-    queryFn: () => getGlobalNotes({ limit: 50 }),
+    queryFn: async () =>
+      withoutProjectComments(await getGlobalNotes({ limit: 50 })),
     enabled,
     staleTime: 15_000,
     gcTime: 5 * 60_000,

@@ -54,6 +54,8 @@ function latestStatusForIssue(issue, statusEvents) {
 function statusFromEvent(issue, statusEvent) {
   if (statusEvent?.kind === 1631) return PROJECT_ISSUE_STATUS.DONE;
   if (statusEvent?.kind === 1632) return PROJECT_ISSUE_STATUS.CLOSED;
+  // NIP-34 calls 1633 "Draft"; we surface it as Triage for issues. The
+  // label-based fallbacks below are client-side heuristics, not protocol.
   if (statusEvent?.kind === 1633) return PROJECT_ISSUE_STATUS.TRIAGE;
 
   const labels = getAllTags(issue, "t").map((label) => label.toLowerCase());

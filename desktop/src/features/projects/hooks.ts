@@ -167,6 +167,12 @@ function eventToProject(event: RelayEvent): Project {
   const webUrl = getTag(event, "web") ?? null;
   const setupUsers = getAllTags(event, "auth");
   const contributors = [...new Set([...getAllTags(event, "p"), ...setupUsers])];
+  // `h`/`project-channel`, `status`, and `default-branch` are NOT part of
+  // NIP-34 — they are read-side tolerance for extension tags no code writes
+  // today (the write path that emitted them was removed). If a write path is
+  // reintroduced it must go through the buzz-sdk repo-announcement builder;
+  // the canonical NIP-34 source for the default branch is the kind:30618
+  // state event's HEAD ref, not a 30617 tag.
   const projectChannelId =
     getTag(event, "h") ?? getTag(event, "project-channel") ?? null;
 
@@ -373,6 +379,11 @@ async function fetchProjectPullRequests(
   );
 }
 
+// Issue/PR comments are published as kind:1 text notes because the relay
+// does not register NIP-22 kind 1111 (current NIP-34 reply convention).
+// Pulse feeds filter these out via the repo-address `a` tag (see
+// features/pulse/lib/projectComments.ts). If the relay ever allowlists
+// 1111, migrate these to NIP-22 comments and drop that filter.
 async function createProjectPullRequestComment({
   content,
   mediaTags,
