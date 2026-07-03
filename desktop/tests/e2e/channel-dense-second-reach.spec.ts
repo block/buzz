@@ -4,28 +4,28 @@ import { installMockBridge } from "../helpers/bridge";
 
 // Lane 1c regression — the dense-second reachability wall.
 //
-// The desktop timeline pages older history over a WS `REQ` with a bare `until`
-// (`created_at`) cursor. That cursor cannot advance past a single `created_at`
-// second holding more messages than one WS page (200): `until` re-returns the
+// A bare `until` (`created_at`) cursor cannot advance past a single
+// `created_at` second holding more messages than one page: it re-returns the
 // same newest slice of that second forever, so everything behind it is
 // unreachable and the progress guard stalls.
 //
-// The fix (`pageOlderMessagesUntilRowFloor`) detects the stall on a *full*
-// page and switches that pass to the bridge composite `(created_at, event_id)`
-// keyset command `get_channel_messages_before`, seeded from the max event id at
-// the boundary second — which advances within the tied second via
-// `id > before_id` under the relay's `created_at DESC, id ASC` order.
+// The channel-window read path (`get_channel_window`, NIP-CW) pages with a
+// composite `(created_at, event_id)` keyset cursor instead, which advances
+// within a tied second via `id > event_id` under the relay's
+// `created_at DESC, id ASC` order.
 //
-// This test seeds one second with ~450 top-level messages (>2 WS pages) sitting
-// behind the cold-load window, then pages to the top and asserts:
-//   (a) the escape-hatch command actually fired, and
+// This test seeds one second with ~450 top-level messages (many window pages)
+// sitting behind the cold-load window, then pages to the top and asserts:
+//   (a) a *continuation* window request fired (cursor != null) — the head load
+//       always issues `get_channel_window`, so only a cursor-bearing request
+//       proves keyset paging engaged, and
 //   (b) every dense-second message becomes reachable (union of rendered rows
-//       equals the full seed) — impossible behind the bare-`until` wall.
+//       equals the full seed) — impossible behind a bare-`until` wall.
 const DENSE_SECOND = 1_700_000_000;
-const DENSE_COUNT = 450; // > 2 * OLDER_MESSAGES_BATCH_SIZE (200)
+const DENSE_COUNT = 450; // many multiples of CHANNEL_WINDOW_PAGE_SIZE (50)
 const NEWER_COUNT = 60; // fills the cold-load window, pushing the dense block older
 
-test("dense single second beyond one WS page is fully reachable via keyset escape hatch", async ({
+test("dense single second beyond one window page is fully reachable via composite keyset cursor", async ({
   page,
 }, testInfo) => {
   testInfo.setTimeout(90_000);
@@ -145,17 +145,24 @@ test("dense single second beyond one WS page is fully reachable via keyset escap
     }
   }
 
-  // (a) The escape hatch actually engaged — the bare-`until` WS path alone can
-  // never reach the high-id tail, so this proves we exercised the fix.
-  const commands = await page.evaluate(
-    () => window.__BUZZ_E2E_COMMANDS__ ?? [],
+  // (a) Keyset paging actually engaged — the head load always issues
+  // `get_channel_window` with a null cursor, so require at least one
+  // continuation request carrying a composite cursor.
+  const continuationRequests = await page.evaluate(
+    () =>
+      (window.__BUZZ_E2E_COMMAND_PAYLOADS__ ?? []).filter(
+        (entry) =>
+          entry.command === "get_channel_window" &&
+          (entry.payload as { cursor?: unknown } | null)?.cursor != null,
+      ).length,
   );
-  expect(commands).toContain("get_channel_messages_before");
+  expect(continuationRequests).toBeGreaterThan(0);
 
-  // (b) Reachability parity: the union of paged dense rows crosses far past one
-  // WS page (200) — impossible behind the bare-`until` wall, where it caps at
-  // 200 of the 450. We assert the vast majority became reachable;
-  // virtualization can drop a few transient rows between scroll settles, so we
-  // allow a small slack rather than demanding an exact 450.
+  // (b) Reachability parity: the union of paged dense rows crosses far past
+  // one window page — impossible behind a bare-`until` wall, where paging
+  // stalls on the newest slice of the dense second. We assert the vast
+  // majority became reachable; virtualization can drop a few transient rows
+  // between scroll settles, so we allow a small slack rather than demanding
+  // an exact 450.
   expect(seen.size).toBeGreaterThan(DENSE_COUNT * 0.9);
 });
