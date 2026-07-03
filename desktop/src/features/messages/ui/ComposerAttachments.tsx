@@ -1,7 +1,7 @@
 import * as React from "react";
 import { AnimatePresence, LayoutGroup, motion } from "motion/react";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
-import { FileText, HatGlasses, Pencil, Play, Undo2, X } from "lucide-react";
+import { FileText, HatGlasses, Pencil, Play, X } from "lucide-react";
 
 import type { BlobDescriptor } from "@/shared/api/tauri";
 import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
@@ -10,6 +10,7 @@ import {
   type UploadingAttachmentPreview,
 } from "@/features/messages/lib/useMediaUpload";
 import { cn } from "@/shared/lib/cn";
+import { Button } from "@/shared/ui/button";
 import { MODAL_BACKDROP_BLUR_CLASS } from "@/shared/ui/modalBackdrop";
 import { Progress } from "@/shared/ui/progress";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
@@ -238,15 +239,14 @@ const MediaAttachmentItem = React.forwardRef<
                   {canRevert ? (
                     <Tooltip>
                       <TooltipTrigger asChild>
-                        <button
-                          type="button"
-                          className={LIGHTBOX_BUTTON_CLASS}
+                        <Button
                           data-testid="composer-attachment-revert"
                           onClick={handleRevert}
+                          size="sm"
+                          type="button"
                         >
-                          <Undo2 className="h-4 w-4" />
-                          <span className="sr-only">Revert to original</span>
-                        </button>
+                          Revert
+                        </Button>
                       </TooltipTrigger>
                       <TooltipContent>Revert to original</TooltipContent>
                     </Tooltip>

@@ -420,6 +420,7 @@ export function ComposerImageEditor({
 
         <Button
           className="text-white hover:bg-white/10 hover:text-white"
+          disabled={saving}
           onClick={onCancel}
           size="sm"
           type="button"
