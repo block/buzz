@@ -15,6 +15,7 @@ import {
 } from "@/shared/api/customEmoji";
 import {
   KIND_AGENT_OBSERVER_FRAME,
+  KIND_CHANNEL_WINDOW_BOUNDS,
   KIND_DM_VISIBILITY,
   KIND_EVENT_REMINDER,
   KIND_HUDDLE_STARTED,
@@ -3710,7 +3711,36 @@ async function handleGetChannelMessagesBefore(
 }
 
 /**
- * Mirror of the desktop `get_channel_window` command (channel_window.rs): fetch
+ * Build the single kind-39006 bounds event a channel window response must carry.
+ * The `d` tag key must match `expectedBoundsKey` in channelWindowResponse.ts:
+ * `<channel>:head` at the frontier, else `<channel>:<created_at>:<event_id>` of
+ * the request cursor (lower-cased). `has_more`/`next_cursor` must agree — the
+ * parser rejects a bounds event where they disagree.
+ */
+function buildMockChannelWindowBounds(
+  args: {
+    channelId: string;
+    cursor?: { created_at: number; event_id: string } | null;
+  },
+  hasMore: boolean,
+  nextCursor: { created_at: number; id: string } | null,
+): RelayEvent {
+  const suffix = args.cursor
+    ? `${args.cursor.created_at}:${args.cursor.event_id.toLowerCase()}`
+    : "head";
+  const boundsKey = `${args.channelId.toLowerCase()}:${suffix}`;
+  return {
+    id: `mock-window-bounds-${boundsKey}`,
+    pubkey: DEFAULT_MOCK_IDENTITY.pubkey,
+    created_at: Math.floor(Date.now() / 1000),
+    kind: KIND_CHANNEL_WINDOW_BOUNDS,
+    tags: [["d", boundsKey]],
+    content: JSON.stringify({ has_more: hasMore, next_cursor: nextCursor }),
+    sig: "mocksig".repeat(20).slice(0, 128),
+  };
+}
+
+/**
  * one server-assembled channel window over the `/query` bridge. Emits the flat
  * event array the relay assembles — top-level rows (newest first), then the aux
  * closure, then relay-signed `39005` summaries and exactly one `39006` bounds
@@ -3733,10 +3763,11 @@ async function handleGetChannelWindow(
   const identity = getIdentity(config);
 
   if (!identity) {
-    // Mock store: top-level timeline rows in relay order. The mock store holds
-    // no relay-synthesized 39005/39006, so this is rows-only (parity suites run
-    // the relay path below, which returns the full assembled window).
-    return getMockMessageStore(args.channelId)
+    // Mock store: server-assembled channel window over the mock event store,
+    // mirroring the relay path's shape so callers (parseChannelWindowResponse)
+    // parse both modes identically. Top-level timeline rows in relay order,
+    // then exactly one kind-39006 bounds event.
+    const candidates = getMockMessageStore(args.channelId)
       .filter(
         (event) =>
           TIMELINE_KINDS.has(event.kind) &&
@@ -3745,8 +3776,31 @@ async function handleGetChannelWindow(
       .sort(
         (left, right) =>
           right.created_at - left.created_at || left.id.localeCompare(right.id),
-      )
-      .slice(0, cap);
+      );
+    // Honor the composite (until, before_id) cursor exactly like the relay's
+    // keyset: keep only rows strictly older than the cursor under the
+    // (created_at DESC, id ASC) order — older created_at, or the same second
+    // with a strictly greater id.
+    const cursor = args.cursor;
+    const afterCursor = cursor
+      ? candidates.filter(
+          (event) =>
+            event.created_at < cursor.created_at ||
+            (event.created_at === cursor.created_at &&
+              event.id > cursor.event_id),
+        )
+      : candidates;
+    const rows = afterCursor.slice(0, cap);
+    // Exhaustion probe mirrors the relay's limit+1: more rows past the cursor
+    // than the page cap means another page exists. next_cursor is the last
+    // retained row.
+    const hasMore = afterCursor.length > cap;
+    const lastRow = rows[rows.length - 1];
+    const nextCursor =
+      hasMore && lastRow
+        ? { created_at: lastRow.created_at, id: lastRow.id }
+        : null;
+    return [...rows, buildMockChannelWindowBounds(args, hasMore, nextCursor)];
   }
 
   // Relay mode: mirror build_channel_window_filter exactly — top-level dispatch
