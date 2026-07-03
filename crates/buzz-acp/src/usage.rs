@@ -194,6 +194,15 @@ impl UsageTracker {
     /// intermediate notification within the current turn. `turn_seq` stays
     /// constant across all notifications within one turn and only increments
     /// when a record is actually published (i.e. when `take()` is called).
+    ///
+    /// Three cases:
+    /// 1. **In-flight-match** (`in_flight_session == Some(session_id)`): updates
+    ///    `pending`. Baseline NOT advanced (that happens on `take()`).
+    /// 2. **Not in-flight at all** (`in_flight_session == None`): advances the
+    ///    committed baseline (setup notification path).
+    /// 3. **In-flight for another session** (`in_flight_session == Some(other)`):
+    ///    ignored entirely — touching this session's baseline while another is
+    ///    in-flight would undercount this session's next published delta.
     pub(crate) fn record(&mut self, session_id: &str, payload: &UsageUpdatePayload) {
         let current_input = payload.accumulated_input_tokens;
         let current_output = payload.accumulated_output_tokens;
@@ -243,7 +252,7 @@ impl UsageTracker {
             };
 
         if is_in_flight {
-            // Update the pending record with the latest cumulative values.
+            // In-flight-match: update pending with the latest cumulative values.
             // Baseline is NOT advanced here — it advances only on take().
             self.pending = Some(TurnUsage {
                 session_id: session_id.to_string(),
@@ -256,8 +265,8 @@ impl UsageTracker {
                 cumulative_output_tokens: current_output,
                 cumulative_cost_usd: current_cost,
             });
-        } else {
-            // Not in-flight: advance the committed baseline so the next
+        } else if self.in_flight_session.is_none() {
+            // Not in-flight at all: advance the committed baseline so the next
             // in-flight turn computes its delta from this notification.
             // This handles setup notifications that fire during `session/new`
             // before the first `begin_turn`.
@@ -274,6 +283,9 @@ impl UsageTracker {
                 },
             );
         }
+        // else: in-flight-for-another-session — ignore. A late notification
+        // for session X while session Y is in-flight must NOT advance X's
+        // committed baseline; doing so would undercount X's next published delta.
     }
 
     /// Consume and return the most recently computed turn usage record, then
@@ -378,6 +390,58 @@ mod tests {
 
         let usage = tracker.take().expect("sess-a pending must survive");
         assert_eq!(usage.session_id, "sess-a");
+    }
+
+    #[test]
+    fn cross_session_notification_does_not_corrupt_other_sessions_delta() {
+        // Regression: A publishes at 1000/100 (turn 1). A late A notification at
+        // 1500/150 arrives while session B is in-flight. Under the old `else`
+        // branch this would advance A's committed baseline to 1500/150 without
+        // publishing a metric, so A's next turn (2000/250) would see a delta of
+        // only 500/100 instead of the correct 1000/150.
+        //
+        // With the fixed three-way branch, the cross-session notification is
+        // ignored entirely and A's baseline stays at its last published state.
+        let mut tracker = UsageTracker::default();
+
+        // ── Turn A1 — establish A's committed baseline at 1000/100, seq=1 ──
+        tracker.begin_turn("sess-a");
+        tracker.record("sess-a", &payload(1000, 100, None));
+        let a1 = tracker.take().expect("A turn 1");
+        assert_eq!(a1.turn_seq, 1);
+        assert!(!a1.delta_reliable, "first turn is unreliable");
+        assert_eq!(a1.cumulative_input_tokens, 1000);
+
+        // ── B is now in-flight; A late notification arrives ──
+        tracker.begin_turn("sess-b");
+        // Late A notification while B is in-flight — must NOT advance A's baseline.
+        tracker.record("sess-a", &payload(1500, 150, None));
+        // B gets its own notification and completes.
+        tracker.record("sess-b", &payload(200, 50, None));
+        let b1 = tracker.take().expect("B turn 1");
+        assert_eq!(b1.session_id, "sess-b");
+
+        // ── Turn A2 — delta must be measured from A's last PUBLISHED baseline ──
+        // If the cross-session fix is correct: committed A baseline = 1000/100
+        // (from take() after A turn 1), so delta = 2000-1000 = 1000 / 250-100 = 150.
+        // If broken (old code): committed A baseline = 1500/150 (wrongly advanced),
+        // so delta = 500/100 — the undercount Eva+Wren and Thufir both flagged.
+        tracker.begin_turn("sess-a");
+        tracker.record("sess-a", &payload(2000, 250, None));
+        let a2 = tracker.take().expect("A turn 2");
+
+        assert_eq!(a2.session_id, "sess-a");
+        assert_eq!(a2.turn_seq, 2, "seq must increment per publish, not per notification");
+        assert!(a2.delta_reliable, "A turn 2 must have a reliable delta");
+        assert_eq!(
+            a2.turn_input_tokens,
+            Some(1000),
+            "A turn 2 delta must be from A's last published baseline (1000), not the \
+             late cross-session advance (500)"
+        );
+        assert_eq!(a2.turn_output_tokens, Some(150));
+        assert_eq!(a2.cumulative_input_tokens, 2000);
+        assert_eq!(a2.cumulative_output_tokens, 250);
     }
 
     // ── Delta computation: non-happy paths ─────────────────────────────────

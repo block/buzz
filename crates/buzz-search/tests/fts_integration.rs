@@ -8,8 +8,8 @@
 
 use buzz_core::{
     kind::{
-        AUTHOR_ONLY_KINDS, KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION,
-        P_GATED_KINDS,
+        AUTHOR_ONLY_KINDS, KIND_AGENT_TURN_METRIC, KIND_MEMBER_ADDED_NOTIFICATION,
+        KIND_MEMBER_REMOVED_NOTIFICATION, P_GATED_KINDS,
     },
     CommunityId,
 };
@@ -1058,8 +1058,9 @@ async fn very_long_query_is_bounded_before_pg_parse() {
 ///   - 30622 = `KIND_DM_VISIBILITY`  (per-viewer private hide state)
 ///   - 44100 = `KIND_MEMBER_ADDED_NOTIFICATION`  (p-gated membership notice)
 ///   - 44101 = `KIND_MEMBER_REMOVED_NOTIFICATION` (p-gated membership notice)
+///   - 44200 = `KIND_AGENT_TURN_METRIC` (NIP-AM: p-gated encrypted turn metrics)
 ///
-/// All six events are inserted with the same unique token in their content
+/// All seven events are inserted with the same unique token in their content
 /// so a single search query exercises every kind in one round-trip. Only
 /// the kind:9 control must surface — the excluded kinds must not.
 ///
@@ -1152,6 +1153,19 @@ async fn excluded_kinds_are_storage_level_unsearchable() {
     )
     .await;
 
+    // kind:44200 agent turn metric — p-gated NIP-44 ciphertext and MUST NOT be searchable.
+    insert_event(
+        &pool,
+        c,
+        rand_bytes32(),
+        rand_bytes32(),
+        KIND_AGENT_TURN_METRIC as i32,
+        &format!("agent turn metric — {token}"),
+        None,
+        1_700_000_006,
+    )
+    .await;
+
     let svc = SearchService::new(pool.clone());
     let result = svc
         .search(&SearchQuery {
@@ -1184,6 +1198,7 @@ async fn excluded_kinds_are_storage_level_unsearchable() {
         30622,
         KIND_MEMBER_ADDED_NOTIFICATION as i32,
         KIND_MEMBER_REMOVED_NOTIFICATION as i32,
+        KIND_AGENT_TURN_METRIC as i32,
     ] {
         assert!(
             !kinds.contains(&forbidden),
