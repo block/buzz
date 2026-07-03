@@ -36,4 +36,13 @@ export type TimelineMessage = {
   kind?: number;
   tags?: string[][];
   reactions?: TimelineReaction[];
+  /**
+   * Mirrors {@link RelayEvent.nonContiguous}: merged out-of-band (thread
+   * ancestor, thread-panel subtree), so the history around it may be unloaded.
+   * The main timeline hides such rows until contiguous paging heals them —
+   * otherwise the start of an old day pops in before its middle and end.
+   * Thread-panel derivations ignore the flag: a subtree fetched on thread-open
+   * is complete within the thread even though it is an island in the timeline.
+   */
+  nonContiguous?: boolean;
 };

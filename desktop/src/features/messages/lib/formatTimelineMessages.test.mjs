@@ -92,6 +92,25 @@ function huddleStarted(overrides = {}) {
 // late edit/delete for a visible old message would silently render stale.
 // ---------------------------------------------------------------------------
 
+test("formatTimelineMessages propagates the nonContiguous mark", () => {
+  const island = streamMessage({ nonContiguous: true });
+  const contiguous = streamMessage({ id: HEX64_B, created_at: 1_700_000_001 });
+  const out = formatTimelineMessages(
+    [island, contiguous],
+    null,
+    undefined,
+    null,
+  );
+  assert.deepEqual(
+    out.map((m) => ({ id: m.id, nonContiguous: m.nonContiguous })),
+    [
+      { id: HEX64_A, nonContiguous: true },
+      { id: HEX64_B, nonContiguous: undefined },
+    ],
+    "the local-only island mark must survive formatting so buildMainTimelineEntries can hide it",
+  );
+});
+
 test("a far-future edit still rewrites the body of an old message", () => {
   const old = streamMessage({ created_at: 1_700_000_000 });
   const lateEdit = streamEdit(HEX64_A, "edited body", {
@@ -427,6 +446,18 @@ function reply(id, parentId, overrides = {}) {
     ...overrides,
   });
 }
+
+test("countTopLevelTimelineRows excludes hidden non-contiguous islands", () => {
+  // Mirrors buildMainTimelineEntries: islands don't render, so they must not
+  // count toward the pager's row floor — otherwise a fetch pass could stop
+  // "satisfied" while the visible timeline gained fewer rows than the floor.
+  const events = [
+    message(hex64("1"), { nonContiguous: true }),
+    message(hex64("2")),
+    message(hex64("3")),
+  ];
+  assert.equal(countTopLevelTimelineRows(events), 2);
+});
 
 test("countTopLevelTimelineRows counts top-level messages", () => {
   const events = [

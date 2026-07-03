@@ -101,7 +101,13 @@ export function countTopLevelTimelineRows(events: RelayEvent[]): number {
 
   let count = 0;
   for (const event of events) {
-    if (!isTimelineContentEvent(event) || deletedEventIds.has(event.id)) {
+    if (
+      !isTimelineContentEvent(event) ||
+      deletedEventIds.has(event.id) ||
+      // Mirror `buildMainTimelineEntries`: out-of-band islands are hidden
+      // until contiguous paging heals them, so they are not visible rows.
+      event.nonContiguous
+    ) {
       continue;
     }
     const { parentId } = getThreadReference(event.tags);
@@ -442,6 +448,7 @@ export function formatTimelineMessages(
       pending: event.pending,
       edited: edit !== undefined,
       kind: event.kind,
+      nonContiguous: event.nonContiguous,
       // When edited, swap the original event's imeta tags for the edit's
       // imeta tags. All non-imeta tags on the original are preserved.
       // Logic lives in `applyEditTagOverlay.mjs` so prod and tests share

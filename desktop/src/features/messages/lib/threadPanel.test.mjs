@@ -67,6 +67,104 @@ test("buildMainTimelineEntries includes broadcast replies", () => {
   );
 });
 
+test("buildMainTimelineEntries hides non-contiguous islands until paging heals them", () => {
+  // An out-of-band ancestor (thread root fetched by id) lands in the cache
+  // days before the contiguous window. Rendering it would paint the start of
+  // an old day before its middle/end exist — so it stays hidden while marked.
+  const island = message({
+    id: "island-root",
+    createdAt: 1,
+    nonContiguous: true,
+  });
+  const contiguousRoot = message({ id: "contiguous-root", createdAt: 100 });
+  // A reply that references the island still collapses into it (not the main
+  // list) — the island's absence must not promote or duplicate anything.
+  const islandReply = message({
+    id: "island-reply",
+    createdAt: 101,
+    parentId: "island-root",
+    rootId: "island-root",
+    depth: 1,
+    tags: [["e", "island-root", "", "reply"]],
+    nonContiguous: true,
+  });
+
+  assert.deepEqual(
+    buildMainTimelineEntries([island, contiguousRoot, islandReply]).map(
+      (entry) => entry.message.id,
+    ),
+    ["contiguous-root"],
+  );
+
+  // Healed: contiguous paging re-fetched the events, the mark cleared, and
+  // the whole block appears at once, in order.
+  const healed = [message({ id: "island-root", createdAt: 1 }), contiguousRoot];
+  assert.deepEqual(
+    buildMainTimelineEntries(healed).map((entry) => entry.message.id),
+    ["island-root", "contiguous-root"],
+  );
+});
+
+test("buildThreadPanelData renders a marked island head and its marked replies while the main timeline hides both", () => {
+  // Thread-open on a head that is itself an island (spliced by
+  // useThreadReplies/useLoadMissingAncestors before contiguous paging reached
+  // it): the panel derives from the full message list and must show the head
+  // and its descendants, while buildMainTimelineEntries hides the duplicate
+  // main-timeline rows until paging heals them.
+  const islandHead = message({
+    id: "island-head",
+    createdAt: 1,
+    nonContiguous: true,
+  });
+  const islandReply = message({
+    id: "island-reply",
+    createdAt: 2,
+    parentId: "island-head",
+    rootId: "island-head",
+    depth: 1,
+    tags: [["e", "island-head", "", "reply"]],
+    nonContiguous: true,
+  });
+
+  const panelData = buildThreadPanelData(
+    [islandHead, islandReply],
+    "island-head",
+    null,
+    new Set(),
+  );
+  assert.equal(panelData.threadHead?.id, "island-head");
+  assert.deepEqual(
+    panelData.visibleReplies.map((entry) => entry.message.id),
+    ["island-reply"],
+  );
+
+  assert.deepEqual(buildMainTimelineEntries([islandHead, islandReply]), []);
+});
+
+test("buildMainTimelineEntries keeps island replies in the visible parent's summary", () => {
+  // The reply subtree fetched on thread-open is an island in the timeline,
+  // but the summary on its (contiguous, visible) root must still count it.
+  const root = message({ id: "root", createdAt: 1 });
+  const islandReply = message({
+    id: "island-reply",
+    createdAt: 2,
+    parentId: "root",
+    rootId: "root",
+    depth: 1,
+    tags: [["e", "root", "", "reply"]],
+    nonContiguous: true,
+  });
+
+  const entries = buildMainTimelineEntries([root, islandReply]);
+  assert.deepEqual(
+    entries.map((entry) => ({
+      id: entry.message.id,
+      replyCount: entry.summary?.replyCount ?? 0,
+    })),
+    [{ id: "root", replyCount: 1 }],
+  );
+});
+
 test("buildMainTimelineEntries keeps huddle thread replies out of the parent timeline summary", () => {
   const huddleRoot = message({
     id: "huddle-root",

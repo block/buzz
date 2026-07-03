@@ -188,8 +188,12 @@ export function useChannelUnreadState({
   const { firstUnreadMessageId, unreadCount } = React.useMemo(
     () =>
       computeChannelUnreadMarker(
-        timelineMessages.filter((message) =>
-          isConversationalUnreadKind(message.kind),
+        timelineMessages.filter(
+          (message) =>
+            isConversationalUnreadKind(message.kind) &&
+            // Hidden islands (see buildMainTimelineEntries) can't anchor the
+            // divider or inflate the pill — they aren't rendered rows yet.
+            !message.nonContiguous,
         ),
         openFrontierSeconds,
         isActiveChannelForcedUnread || isActiveWelcomeInitialUnreadSuppressed,

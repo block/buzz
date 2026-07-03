@@ -393,7 +393,13 @@ export function buildMainTimelineEntries(
   return messages
     .filter(
       (message) =>
-        message.parentId == null || isBroadcastReply(message.tags ?? []),
+        // Out-of-band islands (thread ancestors, thread-panel subtrees) stay
+        // hidden until contiguous paging heals them: rendering an island
+        // paints the start of an old day before its middle and end exist in
+        // cache, so the rest "pops in" above the reader. Thread summaries
+        // still count island replies — the index above sees every message.
+        !message.nonContiguous &&
+        (message.parentId == null || isBroadcastReply(message.tags ?? [])),
     )
     .map((message) => {
       return {
