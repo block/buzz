@@ -78,6 +78,7 @@ export const ChannelPane = React.memo(function ChannelPane({
   isSending,
   isTimelineLoading,
   messages,
+  threadSummaries,
   firstUnreadMessageId = null,
   unreadCount = 0,
   canResetThreadPanelWidth,
@@ -444,8 +445,14 @@ export const ChannelPane = React.memo(function ChannelPane({
     return messages.filter((message) => !isWelcomeSetupSystemMessage(message));
   }, [activeChannel, messages]);
   const mainTimelineEntries = React.useMemo(
-    () => buildMainTimelineEntries(visibleMessages),
-    [visibleMessages],
+    () =>
+      buildMainTimelineEntries(
+        visibleMessages,
+        new Set(),
+        threadSummaries,
+        profiles,
+      ),
+    [profiles, threadSummaries, visibleMessages],
   );
   useRenderScopedReactionHydration({
     activeChannel,

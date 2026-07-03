@@ -15,6 +15,7 @@ import {
 import {
   buildThreadPanelDataFromIndex,
   buildThreadPanelIndex,
+  type MainTimelineEntry,
 } from "@/features/messages/lib/threadPanel";
 import {
   computeChannelUnreadMarker,
@@ -32,6 +33,7 @@ type UseChannelUnreadStateOptions = {
   openThreadHeadId: string | null;
   threadReplyTargetId: string | null;
   expandedThreadReplyIds: ReadonlySet<string>;
+  openThreadMessages?: MainTimelineEntry[];
   getChannelReadAt: (channelId: string) => number | null;
   getMessageReadAt: (messageId: string) => number | null;
   markChannelUnread: (channelId: string) => void;
@@ -59,6 +61,7 @@ export function useChannelUnreadState({
   openThreadHeadId,
   threadReplyTargetId,
   expandedThreadReplyIds,
+  openThreadMessages,
   getChannelReadAt,
   getMessageReadAt,
   markChannelUnread,
@@ -178,7 +181,9 @@ export function useChannelUnreadState({
     ],
   );
   const openThreadHeadMessage = threadPanelData.threadHead;
-  const threadMessages = useStableArrayShallow(threadPanelData.visibleReplies);
+  const threadMessages = useStableArrayShallow(
+    openThreadMessages ?? threadPanelData.visibleReplies,
+  );
   const threadReplyTargetMessage = threadPanelData.replyTargetMessage;
 
   // Oldest unread top-level message + count from the open-time frontier.

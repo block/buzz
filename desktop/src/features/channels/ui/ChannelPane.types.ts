@@ -3,6 +3,7 @@ import type { BotActivityAgent } from "@/features/channels/ui/BotActivityBar";
 import type { ChannelAgentSessionAgent } from "@/features/channels/ui/useChannelAgentSessions";
 import type { ImetaMedia } from "@/features/messages/lib/imetaMediaMarkdown";
 import type { MainTimelineEntry } from "@/features/messages/lib/threadPanel";
+import type { ChannelWindowThreadSummary } from "@/features/messages/lib/channelWindowStore";
 import type { TimelineMessage } from "@/features/messages/types";
 import type { TypingIndicatorEntry } from "@/features/messages/useChannelTyping";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
@@ -37,6 +38,7 @@ export type ChannelPaneProps = {
   isSending: boolean;
   isTimelineLoading: boolean;
   messages: TimelineMessage[];
+  threadSummaries?: ReadonlyMap<string, ChannelWindowThreadSummary>;
   firstUnreadMessageId?: string | null;
   unreadCount?: number;
   canResetThreadPanelWidth: boolean;

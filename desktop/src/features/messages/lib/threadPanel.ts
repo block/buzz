@@ -1,4 +1,6 @@
 import type { TimelineMessage } from "@/features/messages/types";
+import type { ChannelWindowThreadSummary } from "@/features/messages/lib/channelWindowStore";
+import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { isBroadcastReply } from "@/features/messages/lib/threading";
 import { KIND_HUDDLE_STARTED } from "@/shared/constants/kinds";
 
@@ -381,9 +383,49 @@ function buildVisibleThreadReplies(params: {
   return entries;
 }
 
+function buildRelayThreadSummary(
+  messageId: string,
+  summary: ChannelWindowThreadSummary,
+  profiles: UserProfileLookup | undefined,
+): TimelineThreadSummary {
+  return {
+    threadHeadId: messageId,
+    replyCount: summary.descendantCount,
+    lastReplyAt: summary.lastReplyAt,
+    participants: summary.participantPubkeys.slice(0, 3).map((pubkey) => ({
+      id: pubkey,
+      author: profiles?.[pubkey.toLowerCase()]?.displayName ?? pubkey,
+      avatarUrl: profiles?.[pubkey.toLowerCase()]?.avatarUrl ?? null,
+    })),
+  };
+}
+
+function mergeThreadSummaries(
+  local: TimelineThreadSummary | null,
+  relay: TimelineThreadSummary | null,
+): TimelineThreadSummary | null {
+  if (!local) return relay;
+  if (!relay) return local;
+  const participants = new Map(
+    [...relay.participants, ...local.participants].map((participant) => [
+      participant.id,
+      participant,
+    ]),
+  );
+  return {
+    threadHeadId: local.threadHeadId,
+    replyCount: Math.max(local.replyCount, relay.replyCount),
+    lastReplyAt:
+      Math.max(local.lastReplyAt ?? 0, relay.lastReplyAt ?? 0) || null,
+    participants: [...participants.values()].slice(-3),
+  };
+}
+
 export function buildMainTimelineEntries(
   messages: TimelineMessage[],
   unreadReplyIds: ReadonlySet<string> = new Set(),
+  relaySummaries: ReadonlyMap<string, ChannelWindowThreadSummary> = new Map(),
+  profiles?: UserProfileLookup,
 ): MainTimelineEntry[] {
   const { descendantStatsByMessageId } = buildThreadPanelIndex(
     messages,
@@ -396,14 +438,20 @@ export function buildMainTimelineEntries(
         message.parentId == null || isBroadcastReply(message.tags ?? []),
     )
     .map((message) => {
+      const relaySummary = relaySummaries.get(message.id);
       return {
         message,
         summary:
           message.kind === KIND_HUDDLE_STARTED
             ? null
-            : buildSummaryForDirectReplies(
-                message.id,
-                descendantStatsByMessageId,
+            : mergeThreadSummaries(
+                buildSummaryForDirectReplies(
+                  message.id,
+                  descendantStatsByMessageId,
+                ),
+                relaySummary
+                  ? buildRelayThreadSummary(message.id, relaySummary, profiles)
+                  : null,
               ),
       };
     });

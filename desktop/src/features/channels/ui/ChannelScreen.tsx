@@ -29,6 +29,7 @@ import {
   mergeMessages,
   useChannelMessagesQuery,
   useChannelSubscription,
+  useChannelWindowQuery,
   useDeleteMessageMutation,
   useEditMessageMutation,
   useSendMessageMutation,
@@ -39,6 +40,10 @@ import {
   collectMessageMentionPubkeys,
   formatTimelineMessages,
 } from "@/features/messages/lib/formatTimelineMessages";
+import {
+  channelWindowThreadSummaries,
+  type ChannelWindowThreadSummary,
+} from "@/features/messages/lib/channelWindowStore";
 import { getThreadReference } from "@/features/messages/lib/threading";
 import { imetaMediaFromTags } from "@/features/messages/lib/imetaMediaMarkdown";
 import {
@@ -174,6 +179,7 @@ export function ChannelScreen({
     });
   }, [activeChannelId, openThreadHeadId]);
   const messagesQuery = useChannelMessagesQuery(activeChannel);
+  const windowQuery = useChannelWindowQuery(activeChannel);
   useChannelSubscription(activeChannel);
   const { fetchOlder, hasOlderMessages, isFetchingOlder } =
     useFetchOlderMessages(activeChannel);
@@ -441,6 +447,14 @@ export function ChannelScreen({
       resolvedMessages,
     ],
   );
+  const threadSummaries: ReadonlyMap<string, ChannelWindowThreadSummary> =
+    React.useMemo(
+      () =>
+        windowQuery.data
+          ? channelWindowThreadSummaries(windowQuery.data)
+          : new Map(),
+      [windowQuery.data],
+    );
   const handleFindSearchHit = React.useCallback((hit: SearchHit) => {
     const event = cacheSearchHitEvent(hit);
     setFindTargetEvents((currentEvents) =>
@@ -453,6 +467,19 @@ export function ChannelScreen({
     channelId: activeChannelId,
     messages: timelineMessages,
     onSearchHit: handleFindSearchHit,
+  });
+  const threadPanelData = useIndependentThreadPanel({
+    activeChannel,
+    channelEvents: resolvedMessages,
+    rootId: effectiveOpenThreadHeadId,
+    replyTargetId: threadReplyTargetId,
+    expandedReplyIds: expandedThreadReplyIds,
+    currentPubkey,
+    currentAvatarUrl: currentProfile?.avatarUrl ?? null,
+    profiles: messageProfiles,
+    members: channelMembers,
+    personaLookup,
+    respondToLookup,
   });
   const {
     firstUnreadMessageId,
@@ -472,9 +499,10 @@ export function ChannelScreen({
     activeChannelId,
     timelineMessages,
     currentPubkey,
-    openThreadHeadId,
+    openThreadHeadId: effectiveOpenThreadHeadId,
     threadReplyTargetId,
     expandedThreadReplyIds,
+    openThreadMessages: threadPanelData.visibleReplies,
     getChannelReadAt,
     getMessageReadAt,
     markChannelUnread,
@@ -709,19 +737,6 @@ export function ChannelScreen({
     threadReplyTargetMessage,
   ]);
 
-  const threadPanelData = useIndependentThreadPanel({
-    activeChannel,
-    channelEvents: resolvedMessages,
-    rootId: effectiveOpenThreadHeadId,
-    replyTargetId: threadReplyTargetId,
-    expandedReplyIds: expandedThreadReplyIds,
-    currentPubkey,
-    currentAvatarUrl: currentProfile?.avatarUrl ?? null,
-    profiles: messageProfiles,
-    members: channelMembers,
-    personaLookup,
-    respondToLookup,
-  });
   const hasAuxiliaryPanel = Boolean(
     effectiveOpenThreadHeadId ||
       openAgentSessionPubkey ||
@@ -893,6 +908,7 @@ export function ChannelScreen({
                   isSinglePanelView={isSinglePanelView}
                   isTimelineLoading={isTimelineLoading}
                   messages={timelineMessages}
+                  threadSummaries={threadSummaries}
                   onCancelEdit={handleCancelEdit}
                   onCancelThreadReply={handleCancelThreadReply}
                   onChannelManagementDeleted={handleChannelManagementDeleted}

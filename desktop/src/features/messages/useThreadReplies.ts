@@ -38,7 +38,7 @@ export function useThreadReplies(
         `Thread ${openThreadRootId} exceeded the page safety limit.`,
       );
     },
-    staleTime: 60_000,
+    staleTime: 0,
     gcTime: 60 * 60 * 1_000,
   });
 }

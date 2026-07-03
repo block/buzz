@@ -243,6 +243,19 @@ export function resolveThreadReplyTarget(
   };
 }
 
+export function useChannelWindowQuery(channel: Channel | null) {
+  const queryClient = useQueryClient();
+  const queryKey = channelWindowKey(channel?.id ?? "none");
+  return useQuery({
+    enabled: channel !== null && channel.channelType !== "forum",
+    queryKey,
+    queryFn: () =>
+      queryClient.getQueryData<ChannelWindowStore>(queryKey) ??
+      emptyChannelWindowStore(),
+    staleTime: Number.POSITIVE_INFINITY,
+  });
+}
+
 export function useChannelMessagesQuery(channel: Channel | null) {
   const queryClient = useQueryClient();
   const queryKey = channelMessagesKey(channel?.id ?? "none");
