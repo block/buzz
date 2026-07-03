@@ -55,25 +55,28 @@ pub struct ThreadSummary {
     pub participants: Vec<Vec<u8>>,
 }
 
-/// A top-level channel message with optional thread summary.
+/// One row of a channel window: the reconstructed signed event plus its
+/// thread summary (populated when the row has thread activity).
 #[derive(Debug, Clone)]
-pub struct TopLevelMessage {
-    /// The Nostr event ID of this message.
-    pub event_id: Vec<u8>,
-    /// Compressed public key of the message author.
-    pub pubkey: Vec<u8>,
-    /// Nostr event tags (JSON array), used to extract effective author.
-    pub tags: serde_json::Value,
-    /// Text content of the message.
-    pub content: String,
-    /// Nostr event kind number.
-    pub kind: i32,
-    /// When the message was created.
-    pub created_at: DateTime<Utc>,
-    /// The channel this message belongs to.
-    pub channel_id: Uuid,
-    /// Thread statistics for this message, if it has replies.
+pub struct ChannelWindowRow {
+    /// Fully reconstructed signed event for this row.
+    pub stored_event: StoredEvent,
+    /// Thread statistics for this row; `None` when it has no replies.
     pub thread_summary: Option<ThreadSummary>,
+}
+
+/// A page of top-level channel rows plus the server-side exhaustion fact.
+#[derive(Debug, Clone)]
+pub struct ChannelWindow {
+    /// Retained rows in `(created_at DESC, id ASC)` order — at most `limit`.
+    pub rows: Vec<ChannelWindowRow>,
+    /// Whether more rows exist past the last retained row. Computed from an
+    /// internal `limit + 1` probe; the sentinel row never leaves this module.
+    pub has_more: bool,
+    /// Composite keyset cursor `(created_at, id)` of the last retained row —
+    /// the scan position, captured before event reconstruction so a page whose
+    /// tail row fails to reconstruct still advances. `Some` iff `has_more`.
+    pub next_cursor: Option<(DateTime<Utc>, Vec<u8>)>,
 }
 
 /// Raw thread_metadata row -- used when processing deletes or computing ancestry.
@@ -547,40 +550,42 @@ pub async fn get_thread_summary(
     }))
 }
 
-/// Fetch top-level messages for a channel (depth = 0, or broadcast replies).
+/// Fetch one channel window: top-level rows (depth = 0, missing metadata, or
+/// broadcast depth-1 replies) in `(created_at DESC, id ASC)` keyset order,
+/// with thread summaries joined in, plus the server-side `has_more` fact.
 ///
-/// Returns events that are either:
-/// - Not in thread_metadata at all (no thread context set yet), OR
-/// - At depth 0 (root messages), OR
-/// - At depth 1 with `broadcast = true` (replies surfaced to the channel)
+/// `cursor` is the composite `(created_at, id)` of the last retained row from
+/// the previous page — there is no timestamp-only fallback on this path (the
+/// bridge rejects `until` without `before_id`). `None` = head of the channel.
 ///
-/// Default ordering is newest-first (DESC). When `since_cursor` is provided
-/// without `before_cursor`, ordering flips to oldest-first (ASC) for
-/// chronological polling.
-///
-/// `before_cursor` enables backward keyset pagination (pass the `created_at`
-/// of the last item from the previous page). `since_cursor` enables forward
-/// polling (returns only messages created after the given timestamp).
-pub async fn get_channel_messages_top_level(
+/// `has_more` comes from an internal `limit + 1` probe evaluated after all
+/// predicates (deletion, top-level, kinds). The sentinel row is dropped here
+/// and never reaches the wire; callers must not re-derive exhaustion from row
+/// counts (`rows < limit` proves nothing on an exact-multiple final page).
+pub async fn get_channel_window(
     pool: &PgPool,
     community_id: CommunityId,
     channel_id: Uuid,
     limit: u32,
-    before_cursor: Option<DateTime<Utc>>,
-    since_cursor: Option<DateTime<Utc>>,
+    cursor: Option<(DateTime<Utc>, Vec<u8>)>,
     kind_filter: Option<&[u32]>,
-) -> Result<Vec<TopLevelMessage>> {
+) -> Result<ChannelWindow> {
     let mut param_idx = 3u32; // $1 is community_id, $2 is channel_id
     let mut sql = String::from(
         r#"
         SELECT
-            e.id          AS event_id,
+            e.id,
             e.pubkey,
+            e.created_at,
+            e.kind,
             e.tags,
             e.content,
-            e.kind,
-            e.created_at,
-            e.channel_id
+            e.sig,
+            e.received_at,
+            e.channel_id,
+            tm.reply_count,
+            tm.descendant_count,
+            tm.last_reply_at
         FROM events e
         LEFT JOIN thread_metadata tm
             ON tm.community_id = e.community_id
@@ -597,14 +602,15 @@ pub async fn get_channel_messages_top_level(
         "#,
     );
 
-    if before_cursor.is_some() {
-        sql.push_str(&format!(" AND e.created_at < ${param_idx}"));
-        param_idx += 1;
-    }
-
-    if since_cursor.is_some() {
-        sql.push_str(&format!(" AND e.created_at > ${param_idx}"));
-        param_idx += 1;
+    if cursor.is_some() {
+        // Composite keyset: with ORDER BY created_at DESC, id ASC, the page
+        // after (ts, id) is created_at < ts OR (created_at = ts AND id > id).
+        let ts_idx = param_idx;
+        let id_idx = param_idx + 1;
+        sql.push_str(&format!(
+            " AND (e.created_at < ${ts_idx} OR (e.created_at = ${ts_idx} AND e.id > ${id_idx}))"
+        ));
+        param_idx += 2;
     }
 
     if let Some(kinds) = kind_filter {
@@ -618,52 +624,128 @@ pub async fn get_channel_messages_top_level(
         }
     }
 
-    let order = if since_cursor.is_some() && before_cursor.is_none() {
-        "ASC"
-    } else {
-        "DESC"
-    };
     sql.push_str(&format!(
-        " ORDER BY e.created_at {order} LIMIT ${param_idx}"
+        " ORDER BY e.created_at DESC, e.id ASC LIMIT ${param_idx}"
     ));
 
     let mut q = sqlx::query(sqlx::AssertSqlSafe(sql))
         .bind(community_id.as_uuid())
         .bind(channel_id);
-
-    if let Some(cursor) = before_cursor {
-        q = q.bind(cursor);
+    if let Some((ts, id)) = &cursor {
+        q = q.bind(*ts).bind(id.clone());
     }
-    if let Some(cursor) = since_cursor {
-        q = q.bind(cursor);
-    }
-    q = q.bind(limit as i32);
+    // The +1 probe row is the server-internal has_more evidence.
+    q = q.bind(limit as i64 + 1);
 
-    let rows = q.fetch_all(pool).await?;
+    let mut db_rows = q.fetch_all(pool).await?;
 
-    let mut messages = Vec::with_capacity(rows.len());
-    for row in rows {
-        let event_id: Vec<u8> = row.try_get("event_id")?;
-        let pubkey: Vec<u8> = row.try_get("pubkey")?;
-        let tags: serde_json::Value = row.try_get("tags")?;
-        let content: String = row.try_get("content")?;
-        let kind: i32 = row.try_get("kind")?;
-        let created_at: DateTime<Utc> = row.try_get("created_at")?;
-        let ch_id: Uuid = row.try_get("channel_id")?;
+    let has_more = db_rows.len() > limit as usize;
+    db_rows.truncate(limit as usize);
 
-        messages.push(TopLevelMessage {
-            event_id,
-            pubkey,
-            tags,
-            content,
-            kind,
-            created_at,
-            channel_id: ch_id,
-            thread_summary: None, // Populated by caller if needed
+    // Scan position of this page: the (created_at, id) of the last retained
+    // raw row, captured before reconstruction so skip-and-continue rows can't
+    // stall the cursor. Only meaningful when more rows exist past it.
+    let next_cursor = if has_more {
+        match db_rows.last() {
+            Some(row) => Some((
+                row.try_get::<DateTime<Utc>, _>("created_at")?,
+                row.try_get::<Vec<u8>, _>("id")?,
+            )),
+            None => None,
+        }
+    } else {
+        None
+    };
+
+    let mut rows = Vec::with_capacity(db_rows.len());
+    for row in db_rows {
+        let reply_count: Option<i32> = row.try_get("reply_count")?;
+        let descendant_count: Option<i32> = row.try_get("descendant_count")?;
+        let last_reply_at: Option<DateTime<Utc>> = row.try_get("last_reply_at")?;
+
+        // Skip rows that fail event reconstruction rather than failing the
+        // window, matching get_thread_replies' skip-and-continue semantics.
+        let stored_event = match row_to_stored_event(row)? {
+            Some(se) => se,
+            None => continue,
+        };
+
+        let thread_summary = match reply_count {
+            Some(rc) if rc > 0 => Some(ThreadSummary {
+                reply_count: rc,
+                descendant_count: descendant_count.unwrap_or(0),
+                last_reply_at,
+                participants: Vec::new(), // batch-filled below
+            }),
+            _ => None,
+        };
+
+        rows.push(ChannelWindowRow {
+            stored_event,
+            thread_summary,
         });
     }
 
-    Ok(messages)
+    // Batch participants for every row with thread activity — one query for
+    // the whole window instead of a per-root fan-out. Same shape and 10-cap
+    // as get_thread_summary.
+    let roots: Vec<Vec<u8>> = rows
+        .iter()
+        .filter(|r| r.thread_summary.is_some())
+        .map(|r| r.stored_event.event.id.as_bytes().to_vec())
+        .collect();
+    if !roots.is_empty() {
+        let participant_rows = sqlx::query(
+            r#"
+            SELECT root_event_id, pubkey FROM (
+                SELECT
+                    tm.root_event_id,
+                    e.pubkey,
+                    MAX(e.created_at) AS last_seen,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY tm.root_event_id
+                        ORDER BY MAX(e.created_at) DESC
+                    ) AS rn
+                FROM thread_metadata tm
+                JOIN events e
+                    ON e.community_id = tm.community_id
+                   AND e.created_at = tm.event_created_at
+                   AND e.id         = tm.event_id
+                WHERE tm.community_id = $1
+                  AND tm.root_event_id = ANY($2)
+                  AND e.deleted_at IS NULL
+                GROUP BY tm.root_event_id, e.pubkey
+            ) sub
+            WHERE rn <= 10
+            ORDER BY root_event_id, rn
+            "#,
+        )
+        .bind(community_id.as_uuid())
+        .bind(&roots)
+        .fetch_all(pool)
+        .await?;
+
+        let mut by_root: std::collections::HashMap<Vec<u8>, Vec<Vec<u8>>> =
+            std::collections::HashMap::new();
+        for row in participant_rows {
+            let root: Vec<u8> = row.try_get("root_event_id")?;
+            let pubkey: Vec<u8> = row.try_get("pubkey")?;
+            by_root.entry(root).or_default().push(pubkey);
+        }
+        for row in &mut rows {
+            if let Some(summary) = &mut row.thread_summary {
+                if let Some(p) = by_root.remove(row.stored_event.event.id.as_bytes().as_slice()) {
+                    summary.participants = p;
+                }
+            }
+        }
+    }
+
+    Ok(ChannelWindow {
+        rows,
+        has_more,
+        next_cursor,
+    })
 }
 
 /// Look up a single thread_metadata row by event_id.
@@ -1352,5 +1434,296 @@ mod tests {
         assert_eq!(replies.len(), 1);
         assert_eq!(replies[0].stored_event.event.id.to_hex(), good_id);
         assert_eq!(replies[0].stored_event.event.content, "good");
+    }
+
+    /// Insert one top-level event (root metadata, broadcast) into a channel.
+    async fn insert_root(
+        pool: &PgPool,
+        community: CommunityId,
+        channel_id: Uuid,
+        event: &nostr::Event,
+    ) {
+        insert_event_with_thread_metadata(
+            pool,
+            community,
+            event,
+            Some(channel_id),
+            Some(ThreadMetadataParams {
+                event_id: event.id.as_bytes(),
+                event_created_at: event_created_at(event),
+                channel_id,
+                parent_event_id: None,
+                parent_event_created_at: None,
+                root_event_id: None,
+                root_event_created_at: None,
+                depth: 0,
+                broadcast: true,
+            }),
+        )
+        .await
+        .expect("insert top-level event");
+    }
+
+    /// Insert a depth-1 reply under `root`, with the given broadcast flag.
+    async fn insert_reply(
+        pool: &PgPool,
+        community: CommunityId,
+        channel_id: Uuid,
+        root: &nostr::Event,
+        reply: &nostr::Event,
+        broadcast: bool,
+    ) {
+        insert_event_with_thread_metadata(
+            pool,
+            community,
+            reply,
+            Some(channel_id),
+            Some(ThreadMetadataParams {
+                event_id: reply.id.as_bytes(),
+                event_created_at: event_created_at(reply),
+                channel_id,
+                parent_event_id: Some(root.id.as_bytes()),
+                parent_event_created_at: Some(event_created_at(root)),
+                root_event_id: Some(root.id.as_bytes()),
+                root_event_created_at: Some(event_created_at(root)),
+                depth: 1,
+                broadcast,
+            }),
+        )
+        .await
+        .expect("insert reply event");
+    }
+
+    /// The window's top-level predicate: roots (depth 0), events with no
+    /// thread metadata at all (pre-metadata legacy rows), and broadcast
+    /// depth-1 replies are rows; ordinary replies never are. This is the
+    /// SQL-level guarantee that replaces the client-side "filter out replies,
+    /// splice back islands" machinery.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn channel_window_top_level_predicate() {
+        let pool = setup_pool().await;
+        let author = Keys::generate();
+        let (channel, community) = create_test_channel(
+            &pool,
+            &format!("window-predicate-{}", Uuid::new_v4()),
+            ChannelType::Stream,
+            ChannelVisibility::Open,
+            None,
+            author.public_key().to_bytes().as_slice(),
+            None,
+        )
+        .await
+        .expect("create channel");
+
+        let root = make_stream_event(&author, "root");
+        insert_root(&pool, community, channel.id, &root).await;
+
+        // No thread metadata at all — the legacy-ingest shape. Top-level.
+        let bare = make_stream_event(&author, "bare");
+        insert_event_with_thread_metadata(&pool, community, &bare, Some(channel.id), None)
+            .await
+            .expect("insert bare event");
+
+        let broadcast_reply = make_stream_event(&author, "broadcast reply");
+        insert_reply(&pool, community, channel.id, &root, &broadcast_reply, true).await;
+
+        let quiet_reply = make_stream_event(&author, "quiet reply");
+        insert_reply(&pool, community, channel.id, &root, &quiet_reply, false).await;
+
+        let window = get_channel_window(&pool, community, channel.id, 50, None, None)
+            .await
+            .expect("fetch window");
+
+        let ids: Vec<String> = window
+            .rows
+            .iter()
+            .map(|r| r.stored_event.event.id.to_hex())
+            .collect();
+        assert!(ids.contains(&root.id.to_hex()), "root is a row");
+        assert!(
+            ids.contains(&bare.id.to_hex()),
+            "metadata-less event is a row"
+        );
+        assert!(
+            ids.contains(&broadcast_reply.id.to_hex()),
+            "broadcast depth-1 reply is a row"
+        );
+        assert!(
+            !ids.contains(&quiet_reply.id.to_hex()),
+            "ordinary reply must never be a channel row"
+        );
+        assert!(!window.has_more);
+        assert!(window.next_cursor.is_none());
+    }
+
+    /// Same-second top-level rows must paginate by the composite
+    /// `(created_at, id)` keyset without loss or duplication, chaining each
+    /// page from the server-issued `next_cursor` — the exact loop the GUI
+    /// runs. A timestamp-only cursor loses every tied row past the first
+    /// page; this pins the tiebreak on the window path.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn channel_window_pages_same_second_ties_without_loss() {
+        use nostr::Timestamp;
+
+        let pool = setup_pool().await;
+        let author = Keys::generate();
+        let (channel, community) = create_test_channel(
+            &pool,
+            &format!("window-ties-{}", Uuid::new_v4()),
+            ChannelType::Stream,
+            ChannelVisibility::Open,
+            None,
+            author.public_key().to_bytes().as_slice(),
+            None,
+        )
+        .await
+        .expect("create channel");
+
+        let tie_secs = nostr::Timestamp::now().as_secs();
+        let row_count = 5usize;
+        let mut expected_ids = Vec::with_capacity(row_count);
+        for i in 0..row_count {
+            let event = EventBuilder::new(Kind::Custom(9), format!("tie-{i}"))
+                .custom_created_at(Timestamp::from(tie_secs))
+                .sign_with_keys(&author)
+                .expect("sign tied event");
+            expected_ids.push(event.id.as_bytes().to_vec());
+            insert_root(&pool, community, channel.id, &event).await;
+        }
+
+        let mut collected: Vec<Vec<u8>> = Vec::new();
+        let mut cursor: Option<(DateTime<Utc>, Vec<u8>)> = None;
+        loop {
+            let window = get_channel_window(&pool, community, channel.id, 2, cursor, None)
+                .await
+                .expect("fetch window page");
+            for row in &window.rows {
+                collected.push(row.stored_event.event.id.as_bytes().to_vec());
+            }
+            if !window.has_more {
+                break;
+            }
+            cursor = Some(window.next_cursor.expect("has_more implies next_cursor"));
+        }
+
+        assert_eq!(collected.len(), row_count, "paged set lost or grew rows");
+        let mut unique = collected.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(unique.len(), row_count, "paging produced duplicates");
+        let mut expected_sorted = expected_ids.clone();
+        expected_sorted.sort();
+        assert_eq!(unique, expected_sorted, "paged set != inserted tied set");
+    }
+
+    /// The exact-multiple final page: when the channel's row count is an
+    /// exact multiple of the page limit, the last full page must report
+    /// `has_more = false` (from the limit+1 probe) even though it contains
+    /// exactly `limit` rows — `rows < limit` proves nothing, and `rows ==
+    /// limit` must not imply more. Frozen ruling from the contract thread.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn channel_window_exact_multiple_final_page_reports_exhausted() {
+        let pool = setup_pool().await;
+        let author = Keys::generate();
+        let (channel, community) = create_test_channel(
+            &pool,
+            &format!("window-exact-{}", Uuid::new_v4()),
+            ChannelType::Stream,
+            ChannelVisibility::Open,
+            None,
+            author.public_key().to_bytes().as_slice(),
+            None,
+        )
+        .await
+        .expect("create channel");
+
+        // Exactly 4 rows, page limit 2 → two full pages.
+        for i in 0..4 {
+            let event = make_stream_event(&author, &format!("row-{i}"));
+            insert_root(&pool, community, channel.id, &event).await;
+        }
+
+        let page1 = get_channel_window(&pool, community, channel.id, 2, None, None)
+            .await
+            .expect("fetch page 1");
+        assert_eq!(page1.rows.len(), 2);
+        assert!(page1.has_more, "two more rows exist past page 1");
+        let cursor = page1.next_cursor.expect("has_more implies next_cursor");
+
+        let page2 = get_channel_window(&pool, community, channel.id, 2, Some(cursor), None)
+            .await
+            .expect("fetch page 2");
+        assert_eq!(page2.rows.len(), 2, "final page is exactly full");
+        assert!(
+            !page2.has_more,
+            "exact-multiple final page must report exhausted despite rows == limit"
+        );
+        assert!(page2.next_cursor.is_none(), "no cursor past the last row");
+    }
+
+    /// Rows with replies carry a thread summary (counts + batched
+    /// participants); rows without replies carry none. This is the join that
+    /// lets the GUI render thread affordances without a per-root fan-out.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn channel_window_joins_thread_summaries_with_participants() {
+        let pool = setup_pool().await;
+        let author = Keys::generate();
+        let replier = Keys::generate();
+        let (channel, community) = create_test_channel(
+            &pool,
+            &format!("window-summaries-{}", Uuid::new_v4()),
+            ChannelType::Stream,
+            ChannelVisibility::Open,
+            None,
+            author.public_key().to_bytes().as_slice(),
+            None,
+        )
+        .await
+        .expect("create channel");
+
+        let discussed = make_stream_event(&author, "discussed");
+        insert_root(&pool, community, channel.id, &discussed).await;
+        let quiet = make_stream_event(&author, "quiet");
+        insert_root(&pool, community, channel.id, &quiet).await;
+
+        for i in 0..2 {
+            let reply = make_stream_event(&replier, &format!("reply-{i}"));
+            insert_reply(&pool, community, channel.id, &discussed, &reply, false).await;
+        }
+
+        let window = get_channel_window(&pool, community, channel.id, 50, None, None)
+            .await
+            .expect("fetch window");
+
+        let discussed_row = window
+            .rows
+            .iter()
+            .find(|r| r.stored_event.event.id == discussed.id)
+            .expect("discussed row present");
+        let summary = discussed_row
+            .thread_summary
+            .as_ref()
+            .expect("replied row has a summary");
+        assert_eq!(summary.reply_count, 2);
+        assert!(
+            summary
+                .participants
+                .contains(&replier.public_key().to_bytes().to_vec()),
+            "batched participants include the replier"
+        );
+
+        let quiet_row = window
+            .rows
+            .iter()
+            .find(|r| r.stored_event.event.id == quiet.id)
+            .expect("quiet row present");
+        assert!(
+            quiet_row.thread_summary.is_none(),
+            "reply-less row carries no summary"
+        );
     }
 }

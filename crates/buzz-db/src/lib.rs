@@ -1243,23 +1243,21 @@ impl Db {
         thread::get_thread_summary(&self.pool, community_id, event_id).await
     }
 
-    /// Top-level messages for a channel.
-    pub async fn get_channel_messages_top_level(
+    /// One channel window: top-level rows + summaries + server `has_more`.
+    pub async fn get_channel_window(
         &self,
         community_id: CommunityId,
         channel_id: Uuid,
         limit: u32,
-        before_cursor: Option<DateTime<Utc>>,
-        since_cursor: Option<DateTime<Utc>>,
+        cursor: Option<(DateTime<Utc>, Vec<u8>)>,
         kind_filter: Option<&[u32]>,
-    ) -> Result<Vec<thread::TopLevelMessage>> {
-        thread::get_channel_messages_top_level(
+    ) -> Result<thread::ChannelWindow> {
+        thread::get_channel_window(
             &self.pool,
             community_id,
             channel_id,
             limit,
-            before_cursor,
-            since_cursor,
+            cursor,
             kind_filter,
         )
         .await

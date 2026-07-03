@@ -199,6 +199,12 @@ fn extract_before_id(raw: &Value) -> Option<Vec<u8>> {
     }
 }
 
+/// True when the raw filter opts into a bridge extension flag (`top_level`,
+/// `include_summaries`, `include_aux`). Absent or non-boolean = false.
+fn extension_flag(raw: &Value, key: &str) -> bool {
+    raw.get(key).and_then(Value::as_bool).unwrap_or(false)
+}
+
 fn extract_depth_limit(raw: &Value) -> Option<u32> {
     raw.get("depth_limit")?
         .as_u64()
@@ -291,6 +297,200 @@ fn extract_page_offset(raw: &Value, limit: Option<i64>) -> Option<i64> {
         .filter(|value| *value > 1)?;
     let per_page = limit.filter(|l| *l > 0)?;
     page.checked_sub(1)?.checked_mul(per_page)
+}
+
+/// Default and maximum row budget for a channel-window request. The budget
+/// counts row events only; summary/bounds overlays and the aux closure never
+/// consume it (docs/bridge-channel-window.md).
+const BRIDGE_WINDOW_DEFAULT_LIMIT: u32 = 50;
+const BRIDGE_WINDOW_MAX_LIMIT: u32 = 200;
+
+/// Aux closure kinds: reactions, deletions (NIP-09 + NIP-29), edits.
+const WINDOW_AUX_KINDS: [u32; 4] = [
+    buzz_core::kind::KIND_DELETION,
+    buzz_core::kind::KIND_REACTION,
+    buzz_core::kind::KIND_NIP29_DELETE_EVENT,
+    buzz_core::kind::KIND_STREAM_MESSAGE_EDIT,
+];
+/// Second-hop kinds: deletions targeting aux events (delete-of-a-reaction).
+const WINDOW_AUX_DELETE_KINDS: [u32; 2] = [
+    buzz_core::kind::KIND_DELETION,
+    buzz_core::kind::KIND_NIP29_DELETE_EVENT,
+];
+
+/// Serve one `top_level: true` channel-window filter on the bridge `/query`
+/// path (docs/bridge-channel-window.md). Appends, in order: row events, the
+/// aux closure (`include_aux`), `39005` thread-summary overlays
+/// (`include_summaries`), and exactly one `39006` window-bounds overlay.
+///
+/// Validation errors (missing `#h`, half a cursor) are deterministic client
+/// mistakes and return `400`; an inaccessible channel is an access-scope skip
+/// that still emits nothing, matching every other read path here.
+async fn handle_channel_window_filter(
+    state: &AppState,
+    tenant: &buzz_core::TenantContext,
+    raw: &Value,
+    filter: &nostr::Filter,
+    accessible_channels: &[uuid::Uuid],
+    events: &mut Vec<Value>,
+) -> Result<(), (StatusCode, Json<Value>)> {
+    use buzz_core::kind::{KIND_THREAD_SUMMARY, KIND_WINDOW_BOUNDS};
+
+    let Some(ch_id) = extract_channel_from_filter(filter) else {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "top_level requires exactly one #h channel",
+        ));
+    };
+    if !accessible_channels.contains(&ch_id) {
+        return Ok(());
+    }
+
+    // Composite request cursor: `until` + `before_id`, both or neither. The
+    // window path has no timestamp-only fallback — that ambiguity is the
+    // dense-second dup/loss bug this surface exists to kill.
+    let cursor = match (filter.until, extract_before_id(raw)) {
+        (Some(ts), Some(id)) => {
+            let ts = chrono::DateTime::from_timestamp(ts.as_secs() as i64, 0).ok_or_else(|| {
+                api_error(StatusCode::BAD_REQUEST, "top_level: until is out of range")
+            })?;
+            Some((ts, id))
+        }
+        (None, None) => None,
+        _ => {
+            return Err(api_error(
+                StatusCode::BAD_REQUEST,
+                "top_level cursor requires both until and before_id, or neither",
+            ));
+        }
+    };
+
+    let limit = filter
+        .limit
+        .map(|l| (l as u32).min(BRIDGE_WINDOW_MAX_LIMIT))
+        .unwrap_or(BRIDGE_WINDOW_DEFAULT_LIMIT)
+        .max(1);
+    let kind_filter: Option<Vec<u32>> = filter
+        .kinds
+        .as_ref()
+        .map(|ks| ks.iter().map(|k| k.as_u16() as u32).collect());
+
+    let window = state
+        .db
+        .get_channel_window(
+            tenant.community(),
+            ch_id,
+            limit,
+            cursor.clone(),
+            kind_filter.as_deref(),
+        )
+        .await
+        .map_err(|e| internal_error(&format!("channel window error: {e}")))?;
+
+    // 1. Rows, in keyset order.
+    let mut row_ids_hex = Vec::with_capacity(window.rows.len());
+    for row in &window.rows {
+        row_ids_hex.push(row.stored_event.event.id.to_hex());
+        let v = serde_json::to_value(&row.stored_event.event)
+            .map_err(|e| internal_error(&format!("window row serialize: {e}")))?;
+        events.push(v);
+    }
+
+    // 2. Aux closure: reactions/deletions/edits targeting retained rows, plus
+    //    deletions targeting those aux events (the transitive second hop).
+    //    One round trip for the client instead of an #e fan-out.
+    if extension_flag(raw, "include_aux") && !row_ids_hex.is_empty() {
+        let mut seen_aux: std::collections::HashSet<nostr::EventId> =
+            std::collections::HashSet::new();
+        let mut hop_ids = row_ids_hex.clone();
+        for hop_kinds in [&WINDOW_AUX_KINDS[..], &WINDOW_AUX_DELETE_KINDS[..]] {
+            let mut aux_query = buzz_db::EventQuery::for_community(tenant.community());
+            aux_query.kinds = Some(hop_kinds.iter().map(|k| *k as i32).collect());
+            aux_query.e_tags = Some(std::mem::take(&mut hop_ids));
+            aux_query.limit = Some(1000);
+            let aux_events = state
+                .db
+                .query_events(&aux_query)
+                .await
+                .map_err(|e| internal_error(&format!("window aux error: {e}")))?;
+            for se in aux_events {
+                if !seen_aux.insert(se.event.id) {
+                    continue;
+                }
+                // Deletions can be stored channel-less; access-check instead
+                // of channel-constraining so they aren't silently dropped.
+                if !event_in_accessible_channel(&se, accessible_channels) {
+                    continue;
+                }
+                hop_ids.push(se.event.id.to_hex());
+                let v = serde_json::to_value(&se.event)
+                    .map_err(|e| internal_error(&format!("window aux serialize: {e}")))?;
+                events.push(v);
+            }
+            if hop_ids.is_empty() {
+                break;
+            }
+        }
+    }
+
+    let sign_overlay = |kind: u32, tags: Vec<nostr::Tag>, content: String| {
+        nostr::EventBuilder::new(nostr::Kind::Custom(kind as u16), content)
+            .tags(tags)
+            .sign_with_keys(&state.relay_keypair)
+            .map_err(|e| internal_error(&format!("window overlay sign: {e}")))
+    };
+    let parse_tag = |parts: [&str; 2]| {
+        nostr::Tag::parse(parts).map_err(|e| internal_error(&format!("window overlay tag: {e}")))
+    };
+    let ch_hex = ch_id.to_string();
+
+    // 3. Thread-summary overlays: one relay-signed 39005 per row with replies.
+    if extension_flag(raw, "include_summaries") {
+        for row in &window.rows {
+            let Some(summary) = &row.thread_summary else {
+                continue;
+            };
+            let root_hex = row.stored_event.event.id.to_hex();
+            let content = serde_json::json!({
+                "reply_count": summary.reply_count,
+                "descendant_count": summary.descendant_count,
+                "last_reply_at": summary.last_reply_at.map(|t| t.timestamp()),
+                "participants": summary.participants.iter().map(hex::encode).collect::<Vec<_>>(),
+            });
+            let tags = vec![
+                parse_tag(["e", &root_hex])?,
+                parse_tag(["d", &root_hex])?,
+                parse_tag(["h", &ch_hex])?,
+            ];
+            let overlay = sign_overlay(KIND_THREAD_SUMMARY, tags, content.to_string())?;
+            let v = serde_json::to_value(&overlay)
+                .map_err(|e| internal_error(&format!("window overlay serialize: {e}")))?;
+            events.push(v);
+        }
+    }
+
+    // 4. Window bounds: exactly one 39006 per window response — the only
+    //    authority on exhaustion. `rows < limit` proves nothing on an
+    //    exact-multiple final page.
+    let cursor_suffix = match &cursor {
+        Some((ts, id)) => format!("{}:{}", ts.timestamp(), hex::encode(id)),
+        None => "head".to_owned(),
+    };
+    let d_val = format!("{ch_hex}:{cursor_suffix}");
+    let content = serde_json::json!({
+        "has_more": window.has_more,
+        "next_cursor": window.next_cursor.as_ref().map(|(ts, id)| serde_json::json!({
+            "created_at": ts.timestamp(),
+            "id": hex::encode(id),
+        })),
+    });
+    let tags = vec![parse_tag(["d", &d_val])?, parse_tag(["h", &ch_hex])?];
+    let overlay = sign_overlay(KIND_WINDOW_BOUNDS, tags, content.to_string())?;
+    let v = serde_json::to_value(&overlay)
+        .map_err(|e| internal_error(&format!("window overlay serialize: {e}")))?;
+    events.push(v);
+
+    Ok(())
 }
 
 fn event_in_accessible_channel(se: &buzz_core::StoredEvent, accessible: &[uuid::Uuid]) -> bool {
@@ -502,7 +702,28 @@ pub async fn query_events(
     let mut events: Vec<Value> = Vec::new();
     let mut handled: std::collections::HashSet<usize> = std::collections::HashSet::new();
 
+    // Channel-window filters (`top_level: true`) — the GUI read-model surface.
+    // Dispatched first: a window filter is never a feed/thread/catchall query.
     for (idx, (raw, filter)) in raw_filters.iter().zip(filters.iter()).enumerate() {
+        if !extension_flag(raw, "top_level") {
+            continue;
+        }
+        handle_channel_window_filter(
+            &state,
+            &tenant,
+            raw,
+            filter,
+            &accessible_channels,
+            &mut events,
+        )
+        .await?;
+        handled.insert(idx);
+    }
+
+    for (idx, (raw, filter)) in raw_filters.iter().zip(filters.iter()).enumerate() {
+        if handled.contains(&idx) {
+            continue;
+        }
         let feed_types = match extract_feed_types(raw) {
             Some(t) => t,
             None => continue,
@@ -1936,6 +2157,30 @@ mod tests {
     fn extract_before_id_non_string() {
         let raw = serde_json::json!({ "before_id": 12345 });
         assert!(extract_before_id(&raw).is_none());
+    }
+
+    /// Extension flags opt in only on a literal JSON `true` — absent,
+    /// non-boolean, and truthy-but-not-bool values all read as false, so a
+    /// malformed filter degrades to a normal query instead of a wrong window.
+    #[test]
+    fn extension_flag_only_true_on_literal_bool() {
+        assert!(extension_flag(
+            &serde_json::json!({ "top_level": true }),
+            "top_level"
+        ));
+        assert!(!extension_flag(
+            &serde_json::json!({ "top_level": false }),
+            "top_level"
+        ));
+        assert!(!extension_flag(&serde_json::json!({}), "top_level"));
+        assert!(!extension_flag(
+            &serde_json::json!({ "top_level": "true" }),
+            "top_level"
+        ));
+        assert!(!extension_flag(
+            &serde_json::json!({ "top_level": 1 }),
+            "top_level"
+        ));
     }
 
     #[test]

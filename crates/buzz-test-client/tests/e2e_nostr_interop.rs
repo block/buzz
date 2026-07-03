@@ -214,7 +214,7 @@ async fn query_thread_replies(
 /// True if a queried event JSON carries the `["broadcast", "1"]` tag.
 ///
 /// The relay sets `thread_metadata.broadcast` from exactly this tag
-/// (`ingest.rs`), and `get_channel_messages_top_level` surfaces a depth-1 reply
+/// (`ingest.rs`), and `get_channel_window` surfaces a depth-1 reply
 /// at top level only when `broadcast = true`. The bridge returns raw events, so
 /// this tag is the faithful, test-observable proxy for the `broadcast` column.
 fn has_broadcast_tag(event: &serde_json::Value) -> bool {
@@ -863,14 +863,14 @@ async fn test_dm_discovery_events_emitted() {
 /// Send a non-broadcast NIP-10 reply AND a broadcast (`["broadcast","1"]`)
 /// reply, then prove the relay's real top-level rule both directions.
 ///
-/// The relay's top-level view is `get_channel_messages_top_level`
+/// The relay's top-level view is `get_channel_window`
 /// (`thread.rs`): a message is surfaced at top level iff
 /// `depth IS NULL OR depth = 0 OR (depth = 1 AND broadcast = true)`. So a
 /// depth-1 reply is EXCLUDED only when `broadcast = false`, and a depth-1 reply
-/// with `broadcast = true` IS surfaced. That predicate is not exposed over any
-/// `POST /query` surface (`feed_types` routes to feed queries that never touch
-/// `thread_metadata.depth`/`broadcast`; `get_channel_messages_top_level` is
-/// wired to no relay HTTP route). We therefore pin the rule via its two
+/// with `broadcast = true` IS surfaced. That predicate is now exposed over
+/// `POST /query` via the `top_level: true` window extension
+/// (docs/bridge-channel-window.md), but this test predates it and pins the
+/// rule via its two
 /// test-observable inputs — recorded depth and the `broadcast` tag — instead of
 /// a one-sided "threads under root" correlate.
 #[tokio::test]
@@ -1696,4 +1696,268 @@ async fn test_nipdv_search_rejects_third_party() {
         "B must not receive A's snapshot via search, got {} event(s)",
         events.len()
     );
+}
+
+/// POST /query with `top_level: true` and its extension flags — the channel
+/// window surface (docs/bridge-channel-window.md).
+async fn query_channel_window(
+    keys: &Keys,
+    channel_id: &str,
+    limit: u32,
+    cursor: Option<(i64, &str)>,
+) -> Vec<serde_json::Value> {
+    let client = reqwest::Client::new();
+    let mut filter = serde_json::json!({
+        "kinds": [9],
+        "#h": [channel_id],
+        "limit": limit,
+        "top_level": true,
+        "include_summaries": true,
+        "include_aux": true,
+    });
+    if let Some((until, before_id)) = cursor {
+        filter["until"] = serde_json::json!(until);
+        filter["before_id"] = serde_json::json!(before_id);
+    }
+    let resp = client
+        .post(format!("{}/query", relay_http_url()))
+        .header("X-Pubkey", &keys.public_key().to_hex())
+        .header("Content-Type", "application/json")
+        .body(serde_json::to_string(&serde_json::json!([filter])).unwrap())
+        .send()
+        .await
+        .expect("submit window query");
+    assert!(
+        resp.status().is_success(),
+        "window query failed: {}",
+        resp.status()
+    );
+    let body: serde_json::Value = resp.json().await.expect("parse window query response");
+    body.as_array().cloned().unwrap_or_default()
+}
+
+/// Partition a window response by kind, the way the client contract requires:
+/// rows (9), summaries (39005), exactly-one bounds (39006), aux (the rest).
+fn partition_window(
+    events: &[serde_json::Value],
+) -> (
+    Vec<serde_json::Value>,
+    Vec<serde_json::Value>,
+    serde_json::Value,
+    Vec<serde_json::Value>,
+) {
+    let mut rows = Vec::new();
+    let mut summaries = Vec::new();
+    let mut bounds = Vec::new();
+    let mut aux = Vec::new();
+    for e in events {
+        match e["kind"].as_u64() {
+            Some(9) => rows.push(e.clone()),
+            Some(39005) => summaries.push(e.clone()),
+            Some(39006) => bounds.push(e.clone()),
+            _ => aux.push(e.clone()),
+        }
+    }
+    assert_eq!(
+        bounds.len(),
+        1,
+        "exactly one 39006 bounds overlay per window response, got {}",
+        bounds.len()
+    );
+    (rows, summaries, bounds.remove(0), aux)
+}
+
+/// End-to-end channel window: replies stay out of the rows, thread summaries
+/// and reactions ride along, and `39006.has_more`/`next_cursor` chain pages
+/// to exhaustion — including the exact-multiple final page, where row count
+/// alone would lie.
+#[tokio::test]
+#[ignore]
+async fn test_channel_window_rows_overlays_and_exact_multiple_exhaustion() {
+    let url = relay_url();
+    let keys = Keys::generate();
+    let channel = create_test_channel(&keys).await;
+
+    // 4 top-level messages: with page limit 2 the channel is an exact
+    // multiple — the shape where "rows < limit" heuristics fail.
+    let mut top_ids = Vec::new();
+    for i in 0..4 {
+        top_ids.push(send_rest_message(&keys, &channel, &format!("window top {i}")).await);
+    }
+
+    // All four roots share a created_at second, so ordering is decided by
+    // the composite key's id ASC tie-break — the dense-second case the old
+    // timestamp-only cursor got wrong. Probe the window to learn which root
+    // the relay puts first, then hang the reply and reaction off that row so
+    // its 39005/aux land on page 1.
+    let probe = query_channel_window(&keys, &channel, 2, None).await;
+    let (probe_rows, _, _, _) = partition_window(&probe);
+    let root_id = probe_rows[0]["id"]
+        .as_str()
+        .expect("probe row id")
+        .to_string();
+    let mut client = BuzzTestClient::connect(&url, &keys).await.expect("connect");
+    let reply = EventBuilder::new(Kind::Custom(9), "window reply")
+        .tags([
+            Tag::parse(["h", &channel]).unwrap(),
+            Tag::parse(["e", &root_id, "", "reply"]).unwrap(),
+        ])
+        .sign_with_keys(&keys)
+        .expect("sign reply");
+    let reply_id = reply.id.to_hex();
+    let ok = client.send_event(reply).await.expect("send reply");
+    assert!(ok.accepted, "relay rejected reply: {}", ok.message);
+    let reaction = EventBuilder::new(Kind::Reaction, "👍")
+        .tags([
+            Tag::parse(["h", &channel]).unwrap(),
+            Tag::parse(["e", &root_id]).unwrap(),
+        ])
+        .sign_with_keys(&keys)
+        .expect("sign reaction");
+    let ok = client.send_event(reaction).await.expect("send reaction");
+    assert!(ok.accepted, "relay rejected reaction: {}", ok.message);
+    client.disconnect().await.expect("disconnect");
+
+    // Page 1 (head request).
+    let page1 = query_channel_window(&keys, &channel, 2, None).await;
+    let (rows1, summaries1, bounds1, aux1) = partition_window(&page1);
+
+    assert_eq!(rows1.len(), 2, "page 1 rows: {rows1:?}");
+    assert!(
+        rows1
+            .iter()
+            .all(|r| r["id"].as_str() != Some(reply_id.as_str())),
+        "reply must never appear as a channel row"
+    );
+    // Newest-first: the replied/reacted root is the newest top-level row.
+    assert_eq!(rows1[0]["id"].as_str(), Some(root_id.as_str()));
+
+    // The replied root carries a 39005 with its reply count, signed by a key
+    // that is not the requester (the relay's).
+    let summary = summaries1
+        .iter()
+        .find(|s| {
+            s["tags"].as_array().is_some_and(|tags| {
+                tags.iter()
+                    .any(|t| t[0].as_str() == Some("e") && t[1].as_str() == Some(root_id.as_str()))
+            })
+        })
+        .unwrap_or_else(|| panic!("no 39005 for replied root. summaries: {summaries1:?}"));
+    let summary_content: serde_json::Value =
+        serde_json::from_str(summary["content"].as_str().unwrap()).expect("summary content JSON");
+    assert_eq!(summary_content["reply_count"].as_i64(), Some(1));
+    assert_ne!(
+        summary["pubkey"].as_str(),
+        Some(keys.public_key().to_hex().as_str()),
+        "39005 must be relay-signed, not requester-signed"
+    );
+
+    // The reaction rides in the aux closure.
+    assert!(
+        aux1.iter().any(|a| a["kind"].as_u64() == Some(7)),
+        "reaction missing from aux closure: {aux1:?}"
+    );
+
+    // Bounds: head request d-tag suffix, has_more true, cursor present.
+    let d1 = bounds1["tags"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find_map(|t| (t[0].as_str() == Some("d")).then(|| t[1].as_str().unwrap().to_string()));
+    assert_eq!(d1, Some(format!("{channel}:head")), "head d-tag suffix");
+    let bc1: serde_json::Value =
+        serde_json::from_str(bounds1["content"].as_str().unwrap()).expect("bounds content JSON");
+    assert_eq!(bc1["has_more"].as_bool(), Some(true));
+    let cursor = &bc1["next_cursor"];
+    let (c_ts, c_id) = (
+        cursor["created_at"].as_i64().expect("cursor created_at"),
+        cursor["id"].as_str().expect("cursor id").to_string(),
+    );
+
+    // Page 2 (cursor request): the exact-multiple final page. Two full rows,
+    // yet has_more must be false and next_cursor null — the server fact, not
+    // a row-count guess.
+    let page2 = query_channel_window(&keys, &channel, 2, Some((c_ts, &c_id))).await;
+    let (rows2, _summaries2, bounds2, _aux2) = partition_window(&page2);
+    assert_eq!(rows2.len(), 2, "final page is exactly full");
+    let d2 = bounds2["tags"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find_map(|t| (t[0].as_str() == Some("d")).then(|| t[1].as_str().unwrap().to_string()));
+    assert_eq!(
+        d2,
+        Some(format!("{channel}:{c_ts}:{c_id}")),
+        "cursor-request d-tag echoes the request cursor"
+    );
+    let bc2: serde_json::Value =
+        serde_json::from_str(bounds2["content"].as_str().unwrap()).expect("bounds content JSON");
+    assert_eq!(
+        bc2["has_more"].as_bool(),
+        Some(false),
+        "exact-multiple final page must report exhausted"
+    );
+    assert!(bc2["next_cursor"].is_null());
+
+    // No row is lost or duplicated across the two pages.
+    let mut paged: Vec<String> = rows1
+        .iter()
+        .chain(rows2.iter())
+        .map(|r| r["id"].as_str().unwrap().to_string())
+        .collect();
+    paged.sort();
+    let mut expected = top_ids.clone();
+    expected.sort();
+    assert_eq!(paged, expected, "paged union != inserted top-level set");
+}
+
+/// The window cursor is composite by contract: `until` without `before_id`
+/// (or vice versa) is a deterministic 400, never a silent timestamp-only
+/// fallback. And client-submitted 39005/39006 are rejected at ingest —
+/// overlay kinds are relay-only.
+#[tokio::test]
+#[ignore]
+async fn test_channel_window_rejects_half_cursor_and_client_overlay_kinds() {
+    let url = relay_url();
+    let keys = Keys::generate();
+    let channel = create_test_channel(&keys).await;
+    send_rest_message(&keys, &channel, "lone row").await;
+
+    // Half a cursor: until without before_id → 400.
+    let client = reqwest::Client::new();
+    let filter = serde_json::json!([{
+        "kinds": [9],
+        "#h": [channel],
+        "limit": 2,
+        "top_level": true,
+        "until": nostr::Timestamp::now().as_secs(),
+    }]);
+    let resp = client
+        .post(format!("{}/query", relay_http_url()))
+        .header("X-Pubkey", &keys.public_key().to_hex())
+        .header("Content-Type", "application/json")
+        .body(serde_json::to_string(&filter).unwrap())
+        .send()
+        .await
+        .expect("submit half-cursor query");
+    assert_eq!(
+        resp.status().as_u16(),
+        400,
+        "top_level with until but no before_id must be a 400"
+    );
+
+    // Client-submitted overlay kinds are rejected at ingest.
+    let mut ws = BuzzTestClient::connect(&url, &keys).await.expect("connect");
+    for kind in [39005u16, 39006u16] {
+        let forged = EventBuilder::new(Kind::Custom(kind), "{}")
+            .tags([Tag::parse(["h", &channel]).unwrap()])
+            .sign_with_keys(&keys)
+            .expect("sign forged overlay");
+        let ok = ws.send_event(forged).await.expect("send forged overlay");
+        assert!(
+            !ok.accepted,
+            "client-submitted kind:{kind} must be rejected at ingest"
+        );
+    }
+    ws.disconnect().await.expect("disconnect");
 }
