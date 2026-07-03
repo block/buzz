@@ -21,8 +21,12 @@ type AppTopChromeProps = {
   hasWorkspaceRail?: boolean;
 };
 
+// Fixed px on purpose (button box + glyph): these controls sit beside the
+// native macOS traffic lights, which ignore the app's Cmd +/- text zoom, so
+// the row must not grow or shrink with the rem scale. Deliberate exception
+// to the rem-first rule.
 const TOP_CHROME_ICON_BUTTON_CLASS =
-  "h-7 w-7 rounded-[4px] text-sidebar-foreground/65 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground [&_svg]:size-4";
+  "h-[28px] w-[28px] rounded-[4px] text-sidebar-foreground/65 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground [&_svg]:size-[16px]";
 
 function preventTopChromeWheel(event: WheelEvent) {
   event.preventDefault();

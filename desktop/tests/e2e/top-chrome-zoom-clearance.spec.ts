@@ -22,6 +22,44 @@ async function firstNavButtonX(page: import("@playwright/test").Page) {
   return box?.x ?? 0;
 }
 
+// The chrome buttons are styled to visually match the fixed-size native
+// controls, so their box must not follow the rem text scale either.
+const NAV_BUTTON_SIZE = 28;
+
+async function expectNavButtonsFixedSize(
+  page: import("@playwright/test").Page,
+) {
+  const buttons = page.locator('[data-testid="app-top-chrome"] button');
+  const count = await buttons.count();
+  expect(count).toBeGreaterThan(0);
+  for (let i = 0; i < count; i += 1) {
+    const box = await buttons.nth(i).boundingBox();
+    expect(box).not.toBeNull();
+    expect(box?.width ?? 0).toBe(NAV_BUTTON_SIZE);
+    expect(box?.height ?? 0).toBe(NAV_BUTTON_SIZE);
+  }
+}
+
+async function seedTextScale(
+  page: import("@playwright/test").Page,
+  scale: number,
+) {
+  await page.addInitScript((value) => {
+    window.localStorage.setItem("buzz:text-scale", String(value));
+  }, scale);
+}
+
+async function expectRootFontSize(
+  page: import("@playwright/test").Page,
+  fontSize: string,
+) {
+  await expect
+    .poll(() =>
+      page.evaluate(() => getComputedStyle(document.documentElement).fontSize),
+    )
+    .toBe(fontSize);
+}
+
 test.describe("top chrome macOS traffic-light clearance under text zoom", () => {
   test("nav buttons clear the traffic lights at default zoom", async ({
     page,
@@ -33,6 +71,7 @@ test.describe("top chrome macOS traffic-light clearance under text zoom", () => 
     expect(await firstNavButtonX(page)).toBeGreaterThanOrEqual(
       TRAFFIC_LIGHT_RIGHT_EDGE,
     );
+    await expectNavButtonsFixedSize(page);
   });
 
   test("nav buttons still clear the traffic lights when zoomed out", async ({
@@ -42,23 +81,32 @@ test.describe("top chrome macOS traffic-light clearance under text zoom", () => 
     // Seed the minimum Cmd- text scale (0.75). The old rem-based clearance
     // (pl-20 = 5rem) shrank to 60px here, sliding the buttons under the
     // fixed-position native controls.
-    await page.addInitScript(() => {
-      window.localStorage.setItem("buzz:text-scale", "0.75");
-    });
+    await seedTextScale(page, 0.75);
     await installMockBridge(page);
     await page.goto("/");
 
     // Confirm the zoomed-out scale actually applied to the root font size.
-    await expect
-      .poll(() =>
-        page.evaluate(
-          () => getComputedStyle(document.documentElement).fontSize,
-        ),
-      )
-      .toBe("12px");
+    await expectRootFontSize(page, "12px");
 
     expect(await firstNavButtonX(page)).toBeGreaterThanOrEqual(
       TRAFFIC_LIGHT_RIGHT_EDGE,
     );
+    await expectNavButtonsFixedSize(page);
+  });
+
+  test("nav buttons keep their fixed size when zoomed in", async ({ page }) => {
+    await spoofMacPlatform(page);
+    // Seed the maximum Cmd+ text scale (1.5). Rem-sized buttons (h-7 = 42px
+    // here) grew visibly taller than the fixed-size traffic lights.
+    await seedTextScale(page, 1.5);
+    await installMockBridge(page);
+    await page.goto("/");
+
+    await expectRootFontSize(page, "24px");
+
+    expect(await firstNavButtonX(page)).toBeGreaterThanOrEqual(
+      TRAFFIC_LIGHT_RIGHT_EDGE,
+    );
+    await expectNavButtonsFixedSize(page);
   });
 });
