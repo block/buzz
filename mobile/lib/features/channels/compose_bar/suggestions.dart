@@ -1,43 +1,17 @@
 part of '../compose_bar.dart';
 
-List<ChannelMember> _filterMembers(
-  List<ChannelMember> members,
-  String? query,
-  String? currentPubkey,
-  Map<String, UserProfile> userCache,
-) {
-  if (query == null) return const [];
-  final q = query.toLowerCase();
-  return members
-      .where(
-        (m) =>
-            currentPubkey == null ||
-            m.pubkey.toLowerCase() != currentPubkey.toLowerCase(),
-      )
-      .where((m) {
-        if (q.isEmpty) return true;
-        final profile = userCache[m.pubkey.toLowerCase()];
-        final name = (profile?.displayName ?? m.displayName ?? '')
-            .toLowerCase();
-        final firstName = name.split(RegExp(r'\s+')).first;
-        return name.startsWith(q) ||
-            firstName.startsWith(q) ||
-            name.contains(q);
-      })
-      .take(6)
-      .toList();
-}
-
 class _MentionSuggestions extends StatelessWidget {
-  final List<ChannelMember> suggestions;
+  final List<MentionCandidate> suggestions;
   final Map<String, UserProfile> userCache;
   final String? currentPubkey;
-  final void Function(ChannelMember) onSelect;
+  final bool isDmChannel;
+  final void Function(MentionCandidate) onSelect;
 
   const _MentionSuggestions({
     required this.suggestions,
     required this.userCache,
     required this.currentPubkey,
+    required this.isDmChannel,
     required this.onSelect,
   });
 
@@ -65,17 +39,10 @@ class _MentionSuggestions extends StatelessWidget {
         itemCount: suggestions.length,
         separatorBuilder: (_, _) => const SizedBox.shrink(),
         itemBuilder: (context, index) {
-          final member = suggestions[index];
-          final profile = userCache[member.pubkey.toLowerCase()];
-          final name = profile?.displayName?.trim().isNotEmpty == true
-              ? profile!.displayName!.trim()
-              : member.labelFor(currentPubkey);
-          final avatarUrl = profile?.avatarUrl;
-          final initial =
-              (profile?.displayName?.trim().isNotEmpty == true
-                      ? profile!.displayName!.trim()
-                      : member.pubkey)[0]
-                  .toUpperCase();
+          final candidate = suggestions[index];
+          final name = candidate.label;
+          final avatarUrl =
+              candidate.avatarUrl ?? userCache[candidate.pubkey]?.avatarUrl;
 
           return ListTile(
             dense: true,
@@ -88,7 +55,7 @@ class _MentionSuggestions extends StatelessWidget {
                   : null,
               child: avatarUrl == null
                   ? Text(
-                      initial,
+                      name[0].toUpperCase(),
                       style: context.textTheme.labelSmall?.copyWith(
                         color: context.colors.onPrimaryContainer,
                       ),
@@ -96,17 +63,89 @@ class _MentionSuggestions extends StatelessWidget {
                   : null,
             ),
             title: Text(name, style: context.textTheme.bodyMedium),
-            trailing: member.isBot
-                ? Icon(
-                    LucideIcons.bot,
-                    size: 14,
-                    color: context.colors.onSurfaceVariant,
-                  )
-                : null,
-            onTap: () => onSelect(member),
+            subtitle: _MentionSuggestionInfo.build(
+              context,
+              candidate: candidate,
+              currentPubkey: currentPubkey,
+              isDmChannel: isDmChannel,
+              userCache: userCache,
+            ),
+            onTap: () => onSelect(candidate),
           );
         },
       ),
+    );
+  }
+}
+
+/// The secondary info line under a mention suggestion — mirrors desktop's
+/// `MentionAutocomplete` subtitle: bot icon + "agent" (or an "admin" badge
+/// for human admins), then "owned by …" / "not in channel".
+abstract final class _MentionSuggestionInfo {
+  static Widget? build(
+    BuildContext context, {
+    required MentionCandidate candidate,
+    required String? currentPubkey,
+    required bool isDmChannel,
+    required Map<String, UserProfile> userCache,
+  }) {
+    final ownerLabel = candidate.isAgent
+        ? formatOwnerLabel(candidate.ownerPubkey, currentPubkey, userCache)
+        : null;
+    final notInChannel = !isDmChannel && !candidate.isMember;
+    final isAdmin = !candidate.isAgent && candidate.role == 'admin';
+
+    final String? detail;
+    if (ownerLabel != null && notInChannel) {
+      detail = 'owned by $ownerLabel \u00b7 not in channel';
+    } else if (ownerLabel != null) {
+      detail = 'owned by $ownerLabel';
+    } else if (notInChannel) {
+      detail = 'not in channel';
+    } else {
+      detail = null;
+    }
+
+    if (!candidate.isAgent && !isAdmin && detail == null) return null;
+
+    final style = context.textTheme.labelSmall?.copyWith(
+      color: context.colors.onSurfaceVariant,
+    );
+
+    return Row(
+      children: [
+        if (candidate.isAgent) ...[
+          Icon(
+            LucideIcons.bot,
+            size: 12,
+            color: context.colors.onSurfaceVariant,
+          ),
+          const SizedBox(width: Grid.half),
+          Text('agent', style: style),
+        ] else if (isAdmin)
+          Container(
+            padding: const EdgeInsets.symmetric(
+              horizontal: Grid.xxs,
+              vertical: 1,
+            ),
+            decoration: BoxDecoration(
+              color: context.colors.secondaryContainer,
+              borderRadius: BorderRadius.circular(Radii.sm),
+            ),
+            child: Text(
+              'admin',
+              style: style?.copyWith(
+                color: context.colors.onSecondaryContainer,
+              ),
+            ),
+          ),
+        if (detail != null) ...[
+          if (candidate.isAgent || isAdmin) const SizedBox(width: Grid.xxs),
+          Flexible(
+            child: Text(detail, style: style, overflow: TextOverflow.ellipsis),
+          ),
+        ],
+      ],
     );
   }
 }

@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
+import '../../shared/crypto/nip_oa.dart';
 import '../../shared/relay/relay.dart';
 import 'user_profile.dart';
 
@@ -72,6 +73,7 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
           avatarUrl: data.avatarUrl,
           about: data.about,
           nip05Handle: data.nip05,
+          ownerPubkey: verifiedOaOwnerPubkey(event.tags, event.pubkey),
         );
       }
 
