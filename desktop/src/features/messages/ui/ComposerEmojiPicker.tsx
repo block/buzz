@@ -39,7 +39,7 @@ export const ComposerEmojiPicker = React.memo(function ComposerEmojiPicker({
             </Button>
           </PopoverTrigger>
         </TooltipTrigger>
-        <TooltipContent data-composer-tooltip>Insert emoji</TooltipContent>
+        <TooltipContent>Insert emoji</TooltipContent>
       </Tooltip>
       <PopoverContent
         align="start"

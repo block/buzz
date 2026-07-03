@@ -130,9 +130,7 @@ export const ComposerAttachments = React.memo(function ComposerAttachments({
                         <X className="h-2.5 w-2.5" />
                       </button>
                     </TooltipTrigger>
-                    <TooltipContent data-composer-tooltip>
-                      Remove attachment
-                    </TooltipContent>
+                    <TooltipContent>Remove attachment</TooltipContent>
                   </Tooltip>
                 </motion.div>
               );
@@ -242,9 +240,7 @@ export const ComposerAttachments = React.memo(function ComposerAttachments({
                         <X className="h-2.5 w-2.5" />
                       </button>
                     </TooltipTrigger>
-                    <TooltipContent data-composer-tooltip>
-                      Remove attachment
-                    </TooltipContent>
+                    <TooltipContent>Remove attachment</TooltipContent>
                   </Tooltip>
                 </div>
               </motion.div>
@@ -301,9 +297,7 @@ export const ComposerAttachments = React.memo(function ComposerAttachments({
                           <X className="h-2.5 w-2.5" />
                         </button>
                       </TooltipTrigger>
-                      <TooltipContent data-composer-tooltip>
-                        Cancel upload
-                      </TooltipContent>
+                      <TooltipContent>Cancel upload</TooltipContent>
                     </Tooltip>
                   ) : null}
                 </div>

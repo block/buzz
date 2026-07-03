@@ -148,9 +148,7 @@ export const MessageComposerToolbar = React.memo(
                         <ALargeSmall />
                       </Button>
                     </TooltipTrigger>
-                    <TooltipContent data-composer-tooltip>
-                      Formatting
-                    </TooltipContent>
+                    <TooltipContent>Formatting</TooltipContent>
                   </Tooltip>
                 </motion.div>
                 <motion.div
@@ -175,9 +173,7 @@ export const MessageComposerToolbar = React.memo(
                         <X />
                       </Button>
                     </TooltipTrigger>
-                    <TooltipContent data-composer-tooltip>
-                      Close formatting
-                    </TooltipContent>
+                    <TooltipContent>Close formatting</TooltipContent>
                   </Tooltip>
                   <div className="mx-1 h-5 w-px shrink-0 bg-border/60" />
                 </motion.div>
@@ -209,11 +205,11 @@ export const MessageComposerToolbar = React.memo(
               >
                 {/*
                  * Composer tooltips float over the message textarea, so they
-                 * opt in to the click-through/anti-camp treatment:
-                 * disableHoverableContent on the Root (no hover-to-persist
-                 * safe bridge) + data-composer-tooltip on the Content (a
-                 * scoped globals.css rule makes the floating popup inert).
-                 * See the rule in globals.css for the full rationale.
+                 * set disableHoverableContent: without it, Radix keeps the
+                 * tooltip open when the cursor slides off the trigger onto
+                 * the popup, leaving it camped over the editor. With it, the
+                 * tooltip dismisses the instant the pointer leaves the
+                 * trigger.
                  */}
                 <Tooltip disableHoverableContent>
                   <TooltipTrigger asChild>
@@ -230,9 +226,7 @@ export const MessageComposerToolbar = React.memo(
                       <AtSign />
                     </Button>
                   </TooltipTrigger>
-                  <TooltipContent data-composer-tooltip>
-                    Mention someone
-                  </TooltipContent>
+                  <TooltipContent>Mention someone</TooltipContent>
                 </Tooltip>
                 <Tooltip disableHoverableContent>
                   <TooltipTrigger asChild>
@@ -248,9 +242,7 @@ export const MessageComposerToolbar = React.memo(
                       <Paperclip />
                     </Button>
                   </TooltipTrigger>
-                  <TooltipContent data-composer-tooltip>
-                    Attach image
-                  </TooltipContent>
+                  <TooltipContent>Attach image</TooltipContent>
                 </Tooltip>
                 <ComposerEmojiPicker
                   disabled={composerDisabled}
@@ -278,7 +270,7 @@ export const MessageComposerToolbar = React.memo(
                       <HatGlasses />
                     </Button>
                   </TooltipTrigger>
-                  <TooltipContent data-composer-tooltip>Spoiler</TooltipContent>
+                  <TooltipContent>Spoiler</TooltipContent>
                 </Tooltip>
                 <motion.div
                   initial={{ x: -8, opacity: 0 }}
@@ -301,9 +293,7 @@ export const MessageComposerToolbar = React.memo(
                         <ALargeSmall />
                       </Button>
                     </TooltipTrigger>
-                    <TooltipContent data-composer-tooltip>
-                      Formatting
-                    </TooltipContent>
+                    <TooltipContent>Formatting</TooltipContent>
                   </Tooltip>
                 </motion.div>
               </motion.div>

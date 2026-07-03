@@ -291,7 +291,7 @@ export const FormattingToolbar = React.memo(function FormattingToolbar({
               <item.icon className="h-4 w-4" />
             </button>
           </TooltipTrigger>
-          <TooltipContent data-composer-tooltip>
+          <TooltipContent>
             {"shortcut" in item
               ? `${item.label} (${item.shortcut})`
               : item.label}

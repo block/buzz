@@ -2229,27 +2229,3 @@
     transform: translateX(400%);
   }
 }
-
-/*
- * Composer tooltip click-through + non-camp.
- *
- * Radix renders TooltipContent inside a positioned
- * [data-radix-popper-content-wrapper] DIV that it styles directly with
- * pointer-events: auto and never exposes to React props. That wrapper is the
- * outermost popup surface and it overlaps the trigger, so a real cursor sliding
- * off the trigger lands on the wrapper, keeps the tooltip alive (camps on it),
- * and can select its text — pointer-events-none on the inner content alone is
- * one level too shallow to stop it.
- *
- * Composer callers opt in by putting data-composer-tooltip on TooltipContent
- * (this rule reaches the wrapper via :has(), killing pointer-events/select on
- * the actual camp surface — inherited by the content) and
- * disableHoverableContent on the Tooltip Root (no hover-to-persist safe
- * bridge). Opt-in only — no app-wide tooltip change. The trigger keeps its
- * hover/focus-to-show lifecycle (WCAG content-on-hover-or-focus); we only
- * make the floating popup inert.
- */
-[data-radix-popper-content-wrapper]:has(> [data-composer-tooltip]) {
-  pointer-events: none;
-  user-select: none;
-}
