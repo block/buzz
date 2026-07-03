@@ -420,9 +420,11 @@ const DEFAULT_READ_LIMIT: i64 = 50;
 /// Read a paginated page of archived events for a scope.
 ///
 /// Returns at most `limit` events (default `DEFAULT_READ_LIMIT`) in
-/// newest-first order. Pass `before` (Unix seconds) as a keyset cursor to
-/// request events strictly older than that timestamp — advance it to the
-/// `created_at` of the oldest event in the previous page to walk backwards.
+/// newest-first order. Pass the compound cursor `(before_created_at,
+/// before_id)` — both `Some` — from the last row of the previous page to
+/// walk backwards. The predicate mirrors `ORDER BY created_at DESC, id DESC`
+/// so same-second siblings are never skipped at a page boundary. Pass
+/// `None`/`None` to start at the newest end.
 /// A returned page shorter than `limit` signals that the archive is exhausted.
 ///
 /// `kinds` is an optional filter; an empty array means "no kinds matched"
@@ -433,7 +435,8 @@ pub fn read_archived_events(
     scope_type: ScopeType,
     scope_value: String,
     kinds: Option<Vec<i64>>,
-    before: Option<i64>,
+    before_created_at: Option<i64>,
+    before_id: Option<String>,
     limit: Option<i64>,
 ) -> Result<Vec<String>, String> {
     let identity_pk = identity_pubkey(&state)?;
@@ -446,7 +449,8 @@ pub fn read_archived_events(
         scope_type.as_str(),
         &scope_value,
         kinds.as_deref(),
-        before,
+        before_created_at,
+        before_id.as_deref(),
         limit.unwrap_or(DEFAULT_READ_LIMIT),
     )
 }

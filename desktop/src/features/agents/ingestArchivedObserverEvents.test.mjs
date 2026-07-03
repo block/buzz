@@ -234,23 +234,24 @@ describe("ingestArchivedObserverEvents", () => {
 // ── Cursor advance test (pure logic, no store needed) ─────────────────────────
 
 describe("load-older cursor advance logic", () => {
-  it("test_cursor_advances_to_oldest_created_at_in_page", () => {
+  it("test_cursor_advances_to_last_row_compound_key", () => {
     // Mirrors the cursor-update logic in useLoadArchivedObserverEvents.
-    // Page of events with various created_at values.
+    // Events arrive newest-first (as the store returns them).
+    // The cursor should be the LAST element — the oldest on this page —
+    // capturing both created_at and id to mirror the compound sort key
+    // so same-second siblings are never skipped at a page boundary.
     const events = [
-      { created_at: 1000 },
-      { created_at: 800 },
-      { created_at: 500 },
-      { created_at: 900 },
+      { id: "e1", created_at: 1000 },
+      { id: "e2", created_at: 900 },
+      { id: "e3", created_at: 800 },
+      { id: "e4", created_at: 500 },
     ];
-    const oldest = events.reduce(
-      (min, e) => (e.created_at < min ? e.created_at : min),
-      events[0].created_at,
-    );
-    assert.equal(
-      oldest,
-      500,
-      "cursor should advance to the oldest created_at in the page",
+    const oldestEvent = events[events.length - 1];
+    const cursor = { createdAt: oldestEvent.created_at, id: oldestEvent.id };
+    assert.deepEqual(
+      cursor,
+      { createdAt: 500, id: "e4" },
+      "cursor must capture the last (oldest) row's created_at + id",
     );
   });
 

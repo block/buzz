@@ -289,10 +289,18 @@ pub fn upsert_event_scope(
 /// Read a paginated page of archived events for a given scope.
 ///
 /// Returns the `raw_json` of matching events in newest-first order
-/// (`ORDER BY created_at DESC, id DESC`). The optional `before` cursor
-/// implements keyset pagination: only rows with `created_at < before` are
-/// included, which is stable under concurrent archive writes. Pass `None`
-/// for `before` to start at the newest end.
+/// (`ORDER BY created_at DESC, id DESC`). The optional compound cursor
+/// `(before_created_at, before_id)` implements keyset pagination: both fields
+/// must be `Some` together to activate the cursor (passing one `Some` and one
+/// `None` is a logic error at the call site — the store treats mixed `Some`/
+/// `None` as no cursor). The predicate mirrors the sort order exactly:
+/// `(created_at < before_created_at) OR (created_at = before_created_at AND
+/// id < before_id)`. Pass `None`/`None` to start at the newest end.
+///
+/// A scalar `created_at`-only cursor would skip same-second siblings at a page
+/// boundary because rows are ordered by `(created_at DESC, id DESC)` — two
+/// rows with equal `created_at` on different pages would both be excluded by
+/// `created_at < before`. The compound cursor avoids this.
 ///
 /// An optional `kinds` slice filters by event kind; `None` admits all kinds.
 ///
@@ -304,7 +312,8 @@ pub fn read_archived_events(
     scope_type: &str,
     scope_value: &str,
     kinds: Option<&[i64]>,
-    before: Option<i64>,
+    before_created_at: Option<i64>,
+    before_id: Option<&str>,
     limit: i64,
 ) -> Result<Vec<String>, String> {
     // Build clauses and positional params together so slot numbers are always
@@ -316,7 +325,8 @@ pub fn read_archived_events(
     let mut next_slot: usize = 5;
     let mut extra_clauses = String::new();
     let mut kinds_json: Option<String> = None;
-    let mut before_val: Option<i64> = None;
+    let mut before_at_val: Option<i64> = None;
+    let mut before_id_val: Option<String> = None;
 
     if let Some(ks) = kinds {
         kinds_json = Some(serde_json::to_string(ks).unwrap_or_else(|_| "[]".to_string()));
@@ -325,10 +335,18 @@ pub fn read_archived_events(
         ));
         next_slot += 1;
     }
-    if let Some(b) = before {
-        before_val = Some(b);
-        extra_clauses.push_str(&format!(" AND ae.created_at < ?{next_slot}"));
-        next_slot += 1;
+    // Compound cursor: both fields must be Some to activate.  The predicate
+    // mirrors ORDER BY (created_at DESC, id DESC) exactly so no same-second
+    // sibling is skipped at a page boundary.
+    if let (Some(bat), Some(bid)) = (before_created_at, before_id) {
+        before_at_val = Some(bat);
+        before_id_val = Some(bid.to_owned());
+        extra_clauses.push_str(&format!(
+            " AND (ae.created_at < ?{next_slot} \
+              OR (ae.created_at = ?{next_slot} AND ae.id < ?{}))",
+            next_slot + 1,
+        ));
+        next_slot += 2;
     }
     let limit_slot = next_slot;
 
@@ -358,8 +376,11 @@ pub fn read_archived_events(
     if let Some(kj) = kinds_json {
         params.push(Box::new(kj));
     }
-    if let Some(b) = before_val {
-        params.push(Box::new(b));
+    if let (Some(bat), Some(bid)) = (before_at_val, before_id_val) {
+        // Both slots use the same created_at value (the OR predicate references
+        // it twice); the id slot follows.
+        params.push(Box::new(bat));
+        params.push(Box::new(bid));
     }
     params.push(Box::new(limit));
 
@@ -616,9 +637,18 @@ mod tests {
     fn test_read_archived_events_returns_newest_first() {
         let conn = in_memory();
         seed_events(&conn);
-        let rows =
-            read_archived_events(&conn, "pk", "wss://r", "channel_h", "chan1", None, None, 10)
-                .unwrap();
+        let rows = read_archived_events(
+            &conn,
+            "pk",
+            "wss://r",
+            "channel_h",
+            "chan1",
+            None,
+            None,
+            None,
+            10,
+        )
+        .unwrap();
         assert_eq!(rows.len(), 3);
         // Newest first: e1 (300), e2 (200), e3 (100).
         let ids: Vec<&str> = rows
@@ -640,7 +670,8 @@ mod tests {
     fn test_read_archived_events_keyset_cursor_excludes_at_boundary() {
         let conn = in_memory();
         seed_events(&conn);
-        // before=300: should exclude e1 (created_at==300), include e2 and e3.
+        // Compound cursor at e1 (created_at=300, id="e1"): excludes e1 itself,
+        // returns e2 and e3.
         let rows = read_archived_events(
             &conn,
             "pk",
@@ -649,6 +680,7 @@ mod tests {
             "chan1",
             None,
             Some(300),
+            Some("e1"),
             10,
         )
         .unwrap();
@@ -660,12 +692,21 @@ mod tests {
     fn test_read_archived_events_keyset_cursor_advances_correctly() {
         let conn = in_memory();
         seed_events(&conn);
-        // Page 1: before=None, limit=2 → e1, e2.
-        let page1 =
-            read_archived_events(&conn, "pk", "wss://r", "channel_h", "chan1", None, None, 2)
-                .unwrap();
+        // Page 1: before=None/None, limit=2 → e1, e2.
+        let page1 = read_archived_events(
+            &conn,
+            "pk",
+            "wss://r",
+            "channel_h",
+            "chan1",
+            None,
+            None,
+            None,
+            2,
+        )
+        .unwrap();
         assert_eq!(page1.len(), 2);
-        // Page 2: before=200 (oldest of page1), limit=2 → e3 only.
+        // Page 2: compound cursor at e2 (created_at=200, id="e2") → e3 only.
         let page2 = read_archived_events(
             &conn,
             "pk",
@@ -674,6 +715,7 @@ mod tests {
             "chan1",
             None,
             Some(200),
+            Some("e2"),
             2,
         )
         .unwrap();
@@ -696,6 +738,7 @@ mod tests {
             "chan1",
             Some(&[9]),
             None,
+            None,
             10,
         )
         .unwrap();
@@ -708,14 +751,32 @@ mod tests {
         let conn = in_memory();
         seed_events(&conn);
         // chan2 has only e4; chan1 results must not include e4.
-        let chan1 =
-            read_archived_events(&conn, "pk", "wss://r", "channel_h", "chan1", None, None, 10)
-                .unwrap();
+        let chan1 = read_archived_events(
+            &conn,
+            "pk",
+            "wss://r",
+            "channel_h",
+            "chan1",
+            None,
+            None,
+            None,
+            10,
+        )
+        .unwrap();
         assert!(chan1.iter().all(|r| !r.contains("\"e4\"")));
 
-        let chan2 =
-            read_archived_events(&conn, "pk", "wss://r", "channel_h", "chan2", None, None, 10)
-                .unwrap();
+        let chan2 = read_archived_events(
+            &conn,
+            "pk",
+            "wss://r",
+            "channel_h",
+            "chan2",
+            None,
+            None,
+            None,
+            10,
+        )
+        .unwrap();
         assert_eq!(chan2.len(), 1);
         assert!(chan2[0].contains("\"e4\""));
     }
@@ -731,6 +792,7 @@ mod tests {
             "wss://r",
             "channel_h",
             "chan1",
+            None,
             None,
             None,
             10,
@@ -752,6 +814,7 @@ mod tests {
             "chan1",
             None,
             None,
+            None,
             10,
         )
         .unwrap();
@@ -761,9 +824,18 @@ mod tests {
     #[test]
     fn test_read_archived_events_empty_result() {
         let conn = in_memory();
-        let rows =
-            read_archived_events(&conn, "pk", "wss://r", "channel_h", "nope", None, None, 10)
-                .unwrap();
+        let rows = read_archived_events(
+            &conn,
+            "pk",
+            "wss://r",
+            "channel_h",
+            "nope",
+            None,
+            None,
+            None,
+            10,
+        )
+        .unwrap();
         assert!(rows.is_empty());
     }
 
@@ -771,9 +843,18 @@ mod tests {
     fn test_read_archived_events_limit_respected() {
         let conn = in_memory();
         seed_events(&conn);
-        let rows =
-            read_archived_events(&conn, "pk", "wss://r", "channel_h", "chan1", None, None, 1)
-                .unwrap();
+        let rows = read_archived_events(
+            &conn,
+            "pk",
+            "wss://r",
+            "channel_h",
+            "chan1",
+            None,
+            None,
+            None,
+            1,
+        )
+        .unwrap();
         assert_eq!(rows.len(), 1);
         // Must be the newest (e1, created_at=300).
         assert!(rows[0].contains("\"e1\""));
@@ -783,9 +864,19 @@ mod tests {
     fn test_read_archived_events_no_duplicates_across_pages() {
         let conn = in_memory();
         seed_events(&conn);
-        let page1 =
-            read_archived_events(&conn, "pk", "wss://r", "channel_h", "chan1", None, None, 2)
-                .unwrap();
+        let page1 = read_archived_events(
+            &conn,
+            "pk",
+            "wss://r",
+            "channel_h",
+            "chan1",
+            None,
+            None,
+            None,
+            2,
+        )
+        .unwrap();
+        // Compound cursor at e2 (the oldest in page1: created_at=200, id="e2").
         let page2 = read_archived_events(
             &conn,
             "pk",
@@ -794,11 +885,91 @@ mod tests {
             "chan1",
             None,
             Some(200),
+            Some("e2"),
             2,
         )
         .unwrap();
         // All event ids across both pages are unique.
         let all: Vec<_> = page1.iter().chain(page2.iter()).collect();
         assert_eq!(all.len(), 3); // 2 + 1 = 3 total, no duplication.
+    }
+
+    /// Regression for the scalar-cursor same-second skip defect (Thufir IMPORTANT).
+    ///
+    /// The writer stores `created_at` in whole seconds, so two events can share
+    /// the same timestamp.  The sort order is `(created_at DESC, id DESC)`, so
+    /// a page split exactly at a same-second boundary leaves one sibling on each
+    /// side.  With only `created_at < before` the second-page sibling would be
+    /// permanently excluded.  The compound `(created_at < ?) OR (created_at = ?
+    /// AND id < ?)` predicate mirrors the sort key exactly and avoids the skip.
+    #[test]
+    fn test_read_archived_events_same_second_cursor_no_skip() {
+        let conn = in_memory();
+        // Two events share created_at=1000. Sort order: "z" (id "z") > "a" (id "a"),
+        // so ORDER BY created_at DESC, id DESC yields: ("z", 1000) first, ("a", 1000) second.
+        // A third event has created_at=500.
+        for (id, kind, created_at, raw) in &[
+            ("z", 9i64, 1000i64, r#"{"id":"z","created_at":1000}"#),
+            ("a", 9i64, 1000i64, r#"{"id":"a","created_at":1000}"#),
+            ("old", 9i64, 500i64, r#"{"id":"old","created_at":500}"#),
+        ] {
+            upsert_archived_event(
+                &conn,
+                "pk",
+                "wss://r",
+                id,
+                *kind,
+                "author",
+                *created_at,
+                raw,
+                999,
+            )
+            .unwrap();
+            upsert_event_scope(&conn, "pk", "wss://r", id, "channel_h", "same_sec", 999).unwrap();
+        }
+
+        // Page 1: limit=1 → should return ("z", 1000) only (newest by compound sort).
+        let page1 = read_archived_events(
+            &conn,
+            "pk",
+            "wss://r",
+            "channel_h",
+            "same_sec",
+            None,
+            None,
+            None,
+            1,
+        )
+        .unwrap();
+        assert_eq!(page1.len(), 1);
+        assert!(page1[0].contains("\"z\""), "page1 must be the 'z' row");
+
+        // Page 2: compound cursor at ("z", 1000).
+        // With a scalar cursor (created_at < 1000), row "a" would be SKIPPED.
+        // With the compound cursor, "a" must appear on page 2.
+        let page2 = read_archived_events(
+            &conn,
+            "pk",
+            "wss://r",
+            "channel_h",
+            "same_sec",
+            None,
+            Some(1000),
+            Some("z"),
+            2,
+        )
+        .unwrap();
+        // Must contain "a" (same-second sibling) and "old" (strictly older).
+        assert_eq!(page2.len(), 2, "page2 must return both remaining rows");
+        assert!(
+            page2.iter().any(|r| r.contains("\"a\"")),
+            "same-second sibling 'a' must not be skipped"
+        );
+        assert!(
+            page2.iter().any(|r| r.contains("\"old\"")),
+            "'old' row must appear on page2"
+        );
+        // No overlap with page1.
+        assert!(page2.iter().all(|r| !r.contains("\"z\"")));
     }
 }

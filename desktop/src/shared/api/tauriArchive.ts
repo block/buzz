@@ -167,9 +167,11 @@ export async function archiveEvents(
  * Read a paginated page of archived raw events for a scope.
  *
  * Returns at most `limit` raw Nostr events (default 50) in newest-first order.
- * Use `before` (Unix seconds) as a keyset cursor: pass the `created_at` of the
- * oldest event from the previous page to load the next older page. A page
- * shorter than `limit` signals the archive is exhausted.
+ * Use `before` — a compound cursor `{ createdAt, id }` taken from the **last**
+ * (oldest) row of the previous page — to load the next older page. The
+ * predicate on the Rust side mirrors `ORDER BY created_at DESC, id DESC`
+ * exactly, so same-second siblings are never skipped at a page boundary.
+ * A page shorter than `limit` signals the archive is exhausted.
  *
  * Pass `kinds: null` (or omit) to admit all archived kinds. An empty array
  * `[]` matches nothing — callers that want all events must omit/null `kinds`.
@@ -177,13 +179,18 @@ export async function archiveEvents(
 export async function readArchivedEvents(
   scopeType: ScopeType,
   scopeValue: string,
-  opts?: { kinds?: number[] | null; before?: number | null; limit?: number },
+  opts?: {
+    kinds?: number[] | null;
+    before?: { createdAt: number; id: string } | null;
+    limit?: number;
+  },
 ): Promise<import("@/shared/api/types").RelayEvent[]> {
   const rawRows = await invokeTauri<string[]>("read_archived_events", {
     scopeType,
     scopeValue,
     kinds: opts?.kinds ?? null,
-    before: opts?.before ?? null,
+    beforeCreatedAt: opts?.before?.createdAt ?? null,
+    beforeId: opts?.before?.id ?? null,
     limit: opts?.limit ?? null,
   });
   return rawRows

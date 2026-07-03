@@ -74,8 +74,12 @@ export function useLoadArchivedObserverEvents(enabled: boolean) {
   );
   const [hasOlderArchived, setHasOlderArchived] = React.useState(true);
   const isFetchingRef = React.useRef(false);
-  // Keyset cursor: the oldest `created_at` seen so far across all pages.
-  const oldestCreatedAtRef = React.useRef<number | null>(null);
+  // Compound keyset cursor: tracks both `created_at` and `id` of the oldest
+  // event seen so far.  Mirrors the SQL `ORDER BY created_at DESC, id DESC` so
+  // same-second siblings are never skipped at a page boundary.
+  const cursorRef = React.useRef<{ createdAt: number; id: string } | null>(
+    null,
+  );
 
   // Check for an owner_p subscription once per identity.
   React.useEffect(() => {
@@ -120,7 +124,7 @@ export function useLoadArchivedObserverEvents(enabled: boolean) {
 
     isFetchingRef.current = true;
     try {
-      const before = oldestCreatedAtRef.current ?? undefined;
+      const before = cursorRef.current ?? undefined;
       const events = await readArchivedEvents("owner_p", identityPubkey, {
         kinds: [24200],
         before: before ?? null,
@@ -128,12 +132,14 @@ export function useLoadArchivedObserverEvents(enabled: boolean) {
       });
 
       if (events.length > 0) {
-        // Update the cursor to the oldest created_at in this page.
-        const oldest = events.reduce(
-          (min, e) => (e.created_at < min ? e.created_at : min),
-          events[0].created_at,
-        );
-        oldestCreatedAtRef.current = oldest;
+        // Cursor = the last row in newest-first order = the oldest event on
+        // this page.  Capture both created_at and id to mirror the compound
+        // sort key so same-second siblings are not skipped on the next page.
+        const oldestEvent = events[events.length - 1];
+        cursorRef.current = {
+          createdAt: oldestEvent.created_at,
+          id: oldestEvent.id,
+        };
         await ingestArchivedObserverEvents(events);
       }
 
