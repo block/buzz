@@ -620,7 +620,7 @@ pub struct Config {
     pub max_handoffs: usize,
     pub max_parallel_tools: usize,
     pub hook_timeout: Duration,
-    /// Maximum `_Stop` rejections per session. Default 3. Set to 0 to
+    /// Maximum `_Stop` rejections per prompt. Default 3. Set to 0 to
     /// disable `_Stop` hooks entirely (agent always honors end_turn).
     pub stop_max_rejections: u32,
     /// Hook server allowlist. See [`HookServers`] for variant semantics.

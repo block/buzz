@@ -50,8 +50,7 @@ Hooks are advisory, not authoritative. The agent enforces:
 | Constraint | Behavior |
 |---|---|
 | Timeout (2.5s default) | Treated as no objection. Server killed only on second consecutive timeout (tolerates one-off slowness) |
-| Rejection budget (3/session) | After exhaustion, agent stops regardless |
-| Consecutive end_turn | If LLM ends again without tool calls after an objection, agent stops — the LLM heard and declined |
+| Rejection budget (3/prompt) | After exhaustion, agent stops regardless; the budget resets on the next prompt |
 
 These constraints ensure a buggy or malicious hook cannot trap the agent.
 
@@ -61,7 +60,7 @@ These constraints ensure a buggy or malicious hook cannot trap the agent.
 |---|---|---|
 | `MCP_HOOK_SERVERS` | (unset = no hooks) | Allowlist: `*` for all servers, or comma-separated names |
 | `BUZZ_AGENT_HOOK_TIMEOUT_MS` | 2500 | Per-hook call timeout in milliseconds |
-| `BUZZ_AGENT_STOP_MAX_REJECTIONS` | 3 | Session-wide `_Stop` budget (0 = disable) |
+| `BUZZ_AGENT_STOP_MAX_REJECTIONS` | 3 | Per-prompt `_Stop` budget (0 = disable) |
 
 Hooks are **off by default**. The operator must explicitly opt in via
 `MCP_HOOK_SERVERS`.
