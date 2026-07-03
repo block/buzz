@@ -11,10 +11,18 @@ function matchesMagic(
   return magic.every((b, i) => bytes[i] === b);
 }
 
-/** Return true when `bytes` looks like a single-item file (PNG or JSON). */
-export function isSingleItemFile(bytes: number[] | readonly number[]): boolean {
+function isMarkdownFileName(fileName: string | undefined): boolean {
+  return fileName?.toLowerCase().endsWith(".md") ?? false;
+}
+
+/** Return true when the file format carries one persona instead of a bundle. */
+export function isSingleItemFile(
+  bytes: number[] | readonly number[],
+  fileName?: string,
+): boolean {
   return (
     matchesMagic(bytes, PNG_MAGIC) ||
-    (bytes.length > 0 && bytes[0] === JSON_FIRST_BYTE)
+    (bytes.length > 0 && bytes[0] === JSON_FIRST_BYTE) ||
+    isMarkdownFileName(fileName)
   );
 }

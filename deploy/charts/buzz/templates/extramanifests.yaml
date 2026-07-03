@@ -1,0 +1,10 @@
+{{- /*
+Free-form extra manifests. Each entry in .Values.extraManifests is rendered
+through `tpl` (so entries may reference release values / helpers) and emitted
+as its own document. Lets operators ship companion objects (e.g. Istio mesh
+glue, NetworkPolicies) alongside the relay without forking the chart.
+*/ -}}
+{{- range .Values.extraManifests }}
+---
+{{ tpl (toYaml .) $ }}
+{{- end }}

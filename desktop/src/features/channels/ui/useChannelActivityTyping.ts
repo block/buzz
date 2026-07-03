@@ -85,6 +85,7 @@ export function useChannelActivityTyping({
   }, [channelAgentPubkeys, typingEntries]);
 
   return {
+    agentSessionCandidates: agentCandidates,
     botTypingEntries,
     channelAgentSessionAgents,
     humanTypingPubkeys,
@@ -96,15 +97,27 @@ export function mergeAgentNamesIntoProfiles(
   profiles: UserProfileLookup,
   managedAgents: ManagedAgent[],
   relayAgents: RelayAgent[],
+  currentPubkey?: string | null,
 ): UserProfileLookup {
   const merged = { ...profiles };
-  for (const agent of [...relayAgents, ...managedAgents]) {
+  for (const agent of relayAgents) {
     const key = normalizePubkey(agent.pubkey);
     merged[key] = {
       ...merged[key],
       displayName: merged[key]?.displayName || agent.name,
       avatarUrl: merged[key]?.avatarUrl ?? null,
       nip05Handle: merged[key]?.nip05Handle ?? null,
+      isAgent: true,
+    };
+  }
+  for (const agent of managedAgents) {
+    const key = normalizePubkey(agent.pubkey);
+    merged[key] = {
+      ...merged[key],
+      displayName: merged[key]?.displayName || agent.name,
+      avatarUrl: merged[key]?.avatarUrl ?? agent.avatarUrl,
+      nip05Handle: merged[key]?.nip05Handle ?? null,
+      ownerPubkey: merged[key]?.ownerPubkey ?? currentPubkey ?? null,
       isAgent: true,
     };
   }

@@ -31,10 +31,6 @@ pub struct Config {
     pub database_url: String,
     /// Redis connection URL used by the pub/sub manager.
     pub redis_url: String,
-    /// Typesense search server URL.
-    pub typesense_url: String,
-    /// Typesense API key.
-    pub typesense_key: String,
     /// Public WebSocket URL of this relay, advertised in NIP-11.
     pub relay_url: String,
     /// Maximum number of concurrent WebSocket connections.
@@ -80,6 +76,23 @@ pub struct Config {
     /// are permitted regardless of auth method (API token, NIP-42).
     pub require_relay_membership: bool,
 
+    /// Whether this deployment can serve huddle (voice) audio.
+    ///
+    /// Huddle audio frames are relayed peer-to-peer *within a single pod*
+    /// (`AudioRoomManager` is an in-process map; only huddle lifecycle events
+    /// cross pods via Redis). Under horizontal scaling (any-pod-any-connection,
+    /// plan §4 fork B) two peers in the same huddle can land on different pods
+    /// and never hear each other. Rather than sticky-route huddles or ship a
+    /// silent split-room (plan §5b, decided by Tyler), a horizontally-scaled
+    /// deployment sets this `false` and the relay surfaces a clear, client-
+    /// handleable "huddle audio unavailable" signal on join.
+    ///
+    /// Defaults to `true` so single-pod deployments (the N=1 case) keep today's
+    /// behavior unchanged. Operators running multiple relay pods MUST set
+    /// `BUZZ_HUDDLE_AUDIO_AVAILABLE=false` until the out-of-relay media/SFU
+    /// service lands.
+    pub huddle_audio_available: bool,
+
     /// Optional hex-encoded pubkey of the relay owner.
     /// When set, this pubkey is automatically bootstrapped into `relay_members`
     /// with the `owner` role on first startup.
@@ -101,6 +114,12 @@ pub struct Config {
 
     /// Media storage configuration (S3/MinIO).
     pub media: buzz_media::MediaConfig,
+    /// Maximum concurrent media uploads handled by one relay process.
+    pub media_max_concurrent_uploads: usize,
+    /// Maximum concurrent media uploads accepted from one pubkey.
+    pub media_max_concurrent_uploads_per_pubkey: u32,
+    /// Maximum media upload starts accepted from one pubkey per minute.
+    pub media_uploads_per_minute: u32,
 
     /// Optional override for ephemeral channel TTL (in seconds).
     /// When set, any channel created with a TTL tag will use this value instead
@@ -109,12 +128,22 @@ pub struct Config {
     /// 60 seconds after the last message.
     pub ephemeral_ttl_override: Option<i32>,
 
-    /// Root directory for the relay's local git state. No per-repo bare repos
-    /// live here — runtime reads/writes hydrate ephemeral repos from object
-    /// storage. Holds only the name-reservation index at `{git_repo_path}/.names/`.
+    /// Root directory for the relay's local git scratch. No per-repo bare repos
+    /// or persistent git state live here — runtime reads/writes hydrate
+    /// ephemeral repos from object storage per request, and repo-name
+    /// uniqueness now lives in Postgres (`git_repo_names`), not on disk. Retained
+    /// for ephemeral working space and env compatibility; the relay no longer
+    /// depends on this path being persistent or shared across replicas, so it
+    /// needs no ReadWriteMany volume. (Removing the field entirely is a
+    /// follow-up cleanup once the deploy chart drops the git PVC mount.)
     pub git_repo_path: std::path::PathBuf,
     /// Maximum pack file size for git push (bytes). Default: 500 MB.
     pub git_max_pack_bytes: u64,
+    /// Maximum total bytes materialized for one git repo request. Default: 1 GB.
+    ///
+    /// This bounds clone/fetch hydration work across a repo's historical pack
+    /// set rather than only bounding one incoming push body.
+    pub git_max_repo_bytes: u64,
     /// Maximum number of repos per pubkey. Default: 100.
     pub git_max_repos_per_pubkey: u32,
     /// Maximum concurrent git subprocess operations. Default: 20.
@@ -129,25 +158,36 @@ pub struct Config {
     pub web_dir: Option<std::path::PathBuf>,
 }
 
+fn parse_bind_addr(raw: &str) -> Result<SocketAddr, ConfigError> {
+    raw.parse::<SocketAddr>()
+        .map_err(|e| ConfigError::InvalidBindAddr(e.to_string()))
+}
+
+fn ensure_git_repo_path(
+    raw: impl Into<std::path::PathBuf>,
+) -> Result<std::path::PathBuf, ConfigError> {
+    let git_repo_path = raw.into();
+    if let Err(e) = std::fs::create_dir_all(&git_repo_path) {
+        return Err(ConfigError::InvalidValue(format!(
+            "BUZZ_GIT_REPO_PATH={} could not be created: {e}",
+            git_repo_path.display()
+        )));
+    }
+    Ok(git_repo_path)
+}
+
 impl Config {
     /// Loads configuration from environment variables, falling back to development defaults.
     pub fn from_env() -> Result<Self, ConfigError> {
-        let bind_addr = std::env::var("BUZZ_BIND_ADDR")
-            .unwrap_or_else(|_| "0.0.0.0:3000".to_string())
-            .parse::<SocketAddr>()
-            .map_err(|e| ConfigError::InvalidBindAddr(e.to_string()))?;
+        let bind_addr_raw =
+            std::env::var("BUZZ_BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:3000".to_string());
+        let bind_addr = parse_bind_addr(&bind_addr_raw)?;
 
         let database_url = std::env::var("DATABASE_URL")
             .unwrap_or_else(|_| "postgres://buzz:buzz_dev@localhost:5432/buzz".to_string());
 
         let redis_url =
             std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://localhost:6379".to_string());
-
-        let typesense_url =
-            std::env::var("TYPESENSE_URL").unwrap_or_else(|_| "http://localhost:8108".to_string());
-
-        let typesense_key =
-            std::env::var("TYPESENSE_API_KEY").unwrap_or_else(|_| "buzz_dev_key".to_string());
 
         let relay_url =
             std::env::var("RELAY_URL").unwrap_or_else(|_| "ws://localhost:3000".to_string());
@@ -189,6 +229,12 @@ impl Config {
         let require_relay_membership = std::env::var("BUZZ_REQUIRE_RELAY_MEMBERSHIP")
             .map(|v| v == "true" || v == "1")
             .unwrap_or(false);
+
+        // Defaults true → single-pod (N=1) keeps today's huddle behavior. A
+        // horizontally-scaled deployment sets this false; see the field doc.
+        let huddle_audio_available = std::env::var("BUZZ_HUDDLE_AUDIO_AVAILABLE")
+            .map(|v| !(v == "false" || v == "0"))
+            .unwrap_or(true);
 
         let allow_nip_oa_auth = std::env::var("BUZZ_ALLOW_NIP_OA_AUTH")
             .map(|v| v == "true" || v == "1")
@@ -255,6 +301,9 @@ impl Config {
             s3_secret_key: std::env::var("BUZZ_S3_SECRET_KEY")
                 .unwrap_or_else(|_| "buzz_dev_secret".to_string()),
             s3_bucket: std::env::var("BUZZ_S3_BUCKET").unwrap_or_else(|_| "buzz-media".to_string()),
+            s3_region: std::env::var("BUZZ_S3_REGION")
+                .or_else(|_| std::env::var("AWS_REGION"))
+                .unwrap_or_else(|_| "us-east-1".to_string()),
             max_image_bytes: std::env::var("BUZZ_MAX_IMAGE_BYTES")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -273,27 +322,25 @@ impl Config {
                 .unwrap_or(100 * 1024 * 1024),
             public_base_url: std::env::var("BUZZ_MEDIA_BASE_URL")
                 .unwrap_or_else(|_| "http://localhost:3000/media".to_string()),
-            server_domain: std::env::var("BUZZ_MEDIA_SERVER_DOMAIN")
-                .ok()
-                .filter(|s| !s.is_empty())
-                .or_else(|| {
-                    // Auto-derive from RELAY_URL so desktop uploads work out-of-the-box
-                    // without requiring an extra env var in dev mode.
-                    url::Url::parse(
-                        &relay_url
-                            .replace("ws://", "http://")
-                            .replace("wss://", "https://"),
-                    )
-                    .ok()
-                    .and_then(|u| {
-                        let host = u.host_str()?.to_string();
-                        match u.port() {
-                            Some(p) => Some(format!("{host}:{p}")),
-                            None => Some(host),
-                        }
-                    })
-                }),
         };
+        let media_max_concurrent_uploads: usize =
+            std::env::var("BUZZ_MEDIA_MAX_CONCURRENT_UPLOADS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .filter(|&v| v > 0)
+                .unwrap_or(8);
+        let media_max_concurrent_uploads_per_pubkey: u32 =
+            std::env::var("BUZZ_MEDIA_MAX_CONCURRENT_UPLOADS_PER_PUBKEY")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .filter(|&v| v > 0)
+                .unwrap_or(2)
+                .min(u32::try_from(media_max_concurrent_uploads).unwrap_or(u32::MAX));
+        let media_uploads_per_minute: u32 = std::env::var("BUZZ_MEDIA_UPLOADS_PER_MINUTE")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .filter(|&v| v > 0)
+            .unwrap_or(30);
 
         let ephemeral_ttl_override = std::env::var("BUZZ_EPHEMERAL_TTL_OVERRIDE")
             .ok()
@@ -308,26 +355,17 @@ impl Config {
         }
 
         // Git server config
-        let git_repo_path: std::path::PathBuf = std::env::var("BUZZ_GIT_REPO_PATH")
-            .unwrap_or_else(|_| "./repos".to_string())
-            .into();
-        // Ensure the git repo root exists. The smart-HTTP transport and the
-        // kind:30617 side-effect handler both canonicalize this path; if it's
-        // missing, all git operations 500 with "git service misconfigured" and
-        // repo announcements silently fail to create their bare repo on disk.
-        // Bootstrapping here makes the relay self-provision its own data dir
-        // (matches how we treat other relay-owned paths) rather than requiring
-        // ops to mkdir it out of band.
-        if let Err(e) = std::fs::create_dir_all(&git_repo_path) {
-            return Err(ConfigError::InvalidValue(format!(
-                "BUZZ_GIT_REPO_PATH={} could not be created: {e}",
-                git_repo_path.display()
-            )));
-        }
+        let git_repo_path = ensure_git_repo_path(
+            std::env::var("BUZZ_GIT_REPO_PATH").unwrap_or_else(|_| "./repos".to_string()),
+        )?;
         let git_max_pack_bytes: u64 = std::env::var("BUZZ_GIT_MAX_PACK_BYTES")
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(500 * 1024 * 1024); // 500 MB
+        let git_max_repo_bytes: u64 = std::env::var("BUZZ_GIT_MAX_REPO_BYTES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or_else(|| git_max_pack_bytes.saturating_mul(2)); // 1 GB at defaults
         let git_max_repos_per_pubkey: u32 = std::env::var("BUZZ_GIT_MAX_REPOS_PER_PUBKEY")
             .ok()
             .and_then(|v| v.parse().ok())
@@ -373,8 +411,6 @@ impl Config {
             bind_addr,
             database_url,
             redis_url,
-            typesense_url,
-            typesense_key,
             relay_url,
             max_connections,
             max_concurrent_handlers,
@@ -390,12 +426,17 @@ impl Config {
             metrics_port,
             pubkey_allowlist_enabled,
             require_relay_membership,
+            huddle_audio_available,
             relay_owner_pubkey,
             allow_nip_oa_auth,
             media,
+            media_max_concurrent_uploads,
+            media_max_concurrent_uploads_per_pubkey,
+            media_uploads_per_minute,
             ephemeral_ttl_override,
             git_repo_path,
             git_max_pack_bytes,
+            git_max_repo_bytes,
             git_max_repos_per_pubkey,
             git_max_concurrent_ops,
             git_hook_hmac_secret,
@@ -440,15 +481,30 @@ mod tests {
             !config.allow_nip_oa_auth,
             "allow_nip_oa_auth should default to false"
         );
+        assert!(
+            config.huddle_audio_available,
+            "huddle_audio_available should default to true so single-pod (N=1) keeps today's huddle behavior"
+        );
+    }
+
+    #[test]
+    fn huddle_audio_available_can_be_disabled_for_horizontal_scaling() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        std::env::set_var("BUZZ_HUDDLE_AUDIO_AVAILABLE", "false");
+        let config = Config::from_env().expect("config");
+        std::env::remove_var("BUZZ_HUDDLE_AUDIO_AVAILABLE");
+        assert!(
+            !config.huddle_audio_available,
+            "BUZZ_HUDDLE_AUDIO_AVAILABLE=false must disable huddle audio (multi-pod deployments)"
+        );
     }
 
     #[test]
     fn invalid_bind_addr_returns_error() {
-        let _guard = ENV_MUTEX.lock().unwrap();
-        std::env::set_var("BUZZ_BIND_ADDR", "not-an-addr");
-        let result = Config::from_env();
-        std::env::remove_var("BUZZ_BIND_ADDR");
-        assert!(matches!(result, Err(ConfigError::InvalidBindAddr(_))));
+        assert!(matches!(
+            parse_bind_addr("not-an-addr"),
+            Err(ConfigError::InvalidBindAddr(_))
+        ));
     }
 
     #[test]
@@ -458,33 +514,6 @@ mod tests {
         let config = Config::from_env().expect("config");
         std::env::remove_var("BUZZ_MAX_FRAME_BYTES");
         assert_eq!(config.max_frame_bytes, 262_144);
-    }
-
-    #[test]
-    fn server_domain_auto_derived_from_relay_url() {
-        let _guard = ENV_MUTEX.lock().unwrap();
-        // Clear explicit override so auto-derive kicks in
-        std::env::remove_var("BUZZ_MEDIA_SERVER_DOMAIN");
-        std::env::set_var("RELAY_URL", "ws://localhost:3000");
-        let config = Config::from_env().expect("config");
-        std::env::remove_var("RELAY_URL");
-        assert_eq!(
-            config.media.server_domain.as_deref(),
-            Some("localhost:3000")
-        );
-    }
-
-    #[test]
-    fn server_domain_auto_derived_default_port() {
-        let _guard = ENV_MUTEX.lock().unwrap();
-        std::env::remove_var("BUZZ_MEDIA_SERVER_DOMAIN");
-        std::env::set_var("RELAY_URL", "wss://relay.example.com");
-        let config = Config::from_env().expect("config");
-        std::env::remove_var("RELAY_URL");
-        assert_eq!(
-            config.media.server_domain.as_deref(),
-            Some("relay.example.com")
-        );
     }
 
     #[test]
@@ -520,30 +549,13 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn git_repo_path_unwritable_returns_error() {
-        let _guard = ENV_MUTEX.lock().unwrap();
         // Try to create a path under a regular file — must fail.
         // Using /dev/null as the parent guarantees create_dir_all fails on unix.
         let bogus = std::path::PathBuf::from("/dev/null/cannot-create-here");
-        std::env::set_var("BUZZ_GIT_REPO_PATH", &bogus);
-        let result = Config::from_env();
-        std::env::remove_var("BUZZ_GIT_REPO_PATH");
+        let result = ensure_git_repo_path(&bogus);
         assert!(
             matches!(result, Err(ConfigError::InvalidValue(ref msg)) if msg.contains("BUZZ_GIT_REPO_PATH")),
             "expected InvalidValue mentioning BUZZ_GIT_REPO_PATH, got {result:?}"
-        );
-    }
-
-    #[test]
-    fn server_domain_explicit_override_wins() {
-        let _guard = ENV_MUTEX.lock().unwrap();
-        std::env::set_var("BUZZ_MEDIA_SERVER_DOMAIN", "custom.example.com");
-        std::env::set_var("RELAY_URL", "ws://localhost:3000");
-        let config = Config::from_env().expect("config");
-        std::env::remove_var("BUZZ_MEDIA_SERVER_DOMAIN");
-        std::env::remove_var("RELAY_URL");
-        assert_eq!(
-            config.media.server_domain.as_deref(),
-            Some("custom.example.com")
         );
     }
 }

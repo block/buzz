@@ -334,7 +334,9 @@ test.describe("reminders phase 2 — author, source, navigation", () => {
 
     // Lands in the #general chat view with the target message in context.
     await expect(page.getByTestId("chat-title")).toHaveText("general");
-    await expect(page.getByText("Hey team — checking in.")).toBeVisible();
+    await expect(
+      page.getByTestId("message-timeline").getByText("Hey team — checking in."),
+    ).toBeVisible();
     await waitForAnimations(page);
   });
 });

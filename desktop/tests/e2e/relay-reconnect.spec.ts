@@ -175,11 +175,32 @@ test("reconnect backfills more missed channel messages than the live subscriptio
   }));
   await emitMockMessages(page, missedMessages);
 
-  await expect(page.getByTestId("message-timeline")).toContainText(
-    "reconnect e2e missed 001",
-    { timeout: 15_000 },
-  );
-  await expect(page.getByTestId("message-timeline")).toContainText(
-    "reconnect e2e missed 260",
-  );
+  // The newest backfilled message renders at the bottom once the reconnect
+  // catch-up settles.
+  const timeline = page.getByTestId("message-timeline");
+  await expect(timeline).toContainText("reconnect e2e missed 260", {
+    timeout: 15_000,
+  });
+
+  // The virtualized timeline windows the oldest backfilled rows out of the DOM
+  // while the user sits at the bottom, so the backfill depth can't be asserted
+  // by expecting all 260 rows to be mounted at once. Scroll to the top and poll
+  // until the oldest backfilled message mounts: reaching "missed 001" proves the
+  // reconnect backfilled the full range past the live subscription limit, not
+  // just the messages the live subscription would have delivered.
+  await expect
+    .poll(
+      async () => {
+        await timeline.evaluate((element) => {
+          const scrollable = element as HTMLDivElement;
+          scrollable.scrollTop = 0;
+          scrollable.dispatchEvent(new Event("scroll", { bubbles: true }));
+        });
+        return timeline.evaluate((element) =>
+          (element.textContent ?? "").includes("reconnect e2e missed 001"),
+        );
+      },
+      { timeout: 15_000 },
+    )
+    .toBe(true);
 });

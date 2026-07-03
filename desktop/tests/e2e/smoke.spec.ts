@@ -2,6 +2,9 @@ import { expect, test } from "@playwright/test";
 
 import { installMockBridge } from "../helpers/bridge";
 
+const DEFAULT_AGENT_ACTIVITY_PUBKEY =
+  "db0b028cd36f4d3e36c8300cce87252c1f7fc9495ffecc53f393fcac341ffd36";
+
 async function getTimelineMetrics(page: import("@playwright/test").Page) {
   return page.getByTestId("message-timeline").evaluate((element) => {
     const timeline = element as HTMLDivElement;
@@ -115,11 +118,8 @@ test("create agent supports parallelism and system prompt overrides", async ({
 
   await page.goto("/");
   await page.getByTestId("open-agents-view").click();
-  await page
-    .getByTestId("agents-library-personas")
-    .getByRole("button", { name: "New", exact: true })
-    .click();
-  await page.getByText("Custom Agent").click();
+  await page.getByTestId("new-agent-card").click();
+  await page.getByText("Custom agent").click();
 
   await page.getByTestId("agent-name-input").fill(agentName);
   await page.getByRole("button", { name: "Advanced setup" }).click();
@@ -137,12 +137,21 @@ test("create agent supports parallelism and system prompt overrides", async ({
   await expect(page.getByTestId("agents-library-personas")).toContainText(
     agentName,
   );
-  const inlineLog = page
-    .getByTestId("agents-library-personas")
-    .getByTestId("managed-agent-log-content");
 
-  await expect(inlineLog).toContainText("parallelism=3");
-  await expect(inlineLog).toContainText("system prompt override configured");
+  // Logs now live in the profile sidebar (PR #1274), not an inline panel.
+  // Open the new agent's card to reveal the profile panel, then read the
+  // harness log from the diagnostics view.
+  await page
+    .getByRole("button", { name: `${agentName} agent profile` })
+    .click();
+  await expect(page.getByTestId("user-profile-panel")).toBeVisible();
+
+  await page.getByTestId("user-profile-tab-runtime").click();
+  await page.getByTestId("user-profile-diagnostics-ingress").click();
+
+  const log = page.getByTestId("managed-agent-log-content");
+  await expect(log).toContainText("parallelism=3");
+  await expect(log).toContainText("system prompt override configured");
 });
 
 test("opens a mocked channel from the inbox feed", async ({ page }) => {
@@ -183,6 +192,37 @@ test("inbox feed shows channel and agent activity sections", async ({
   await expect(page.getByTestId("home-inbox-detail")).toContainText(
     "Agent progress: channel index complete.",
   );
+});
+
+test("inbox agent hover only exposes message action", async ({ page }) => {
+  await page.goto("/");
+
+  await selectHomeInboxFilter(page, "Agents");
+  const agentRow = page.getByTestId("home-inbox-item-mock-feed-agent");
+  await expect(agentRow).toContainText(
+    "Agent progress: channel index complete.",
+  );
+
+  await agentRow.getByTestId("home-inbox-avatar-mock-feed-agent").hover();
+  const profilePopover = page.locator(
+    '[data-testid="user-profile-popover"][data-state="open"]',
+  );
+  await expect(profilePopover).toBeVisible();
+  await expect(
+    profilePopover.getByTestId(
+      `user-profile-popover-message-${DEFAULT_AGENT_ACTIVITY_PUBKEY}`,
+    ),
+  ).toBeVisible();
+  await expect(
+    profilePopover.getByTestId(
+      `user-profile-popover-wave-${DEFAULT_AGENT_ACTIVITY_PUBKEY}`,
+    ),
+  ).toHaveCount(0);
+  await expect(
+    profilePopover.getByTestId(
+      `user-profile-popover-huddle-${DEFAULT_AGENT_ACTIVITY_PUBKEY}`,
+    ),
+  ).toHaveCount(0);
 });
 
 test("opens a mocked forum activity item from the inbox feed", async ({
@@ -278,7 +318,7 @@ test("closes sidebar search with Escape", async ({ page }) => {
   await expect(page.getByTestId("open-search")).toBeFocused();
 });
 
-test("reopens the collapsed sidebar when the search shortcut fires", async ({
+test("search shortcut opens search without disturbing the collapsed sidebar", async ({
   page,
 }) => {
   await page.goto("/");
@@ -294,11 +334,23 @@ test("reopens the collapsed sidebar when the search shortcut fires", async ({
     .click();
   await expect(sidebarRoot).toHaveAttribute("data-state", "collapsed");
 
-  await focusSidebarSearchWithShortcut(page);
+  await page.evaluate(() => {
+    const isMac = /mac|iphone|ipad|ipod/i.test(navigator.platform);
+    window.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        bubbles: true,
+        cancelable: true,
+        code: "KeyK",
+        ctrlKey: !isMac,
+        key: "k",
+        metaKey: isMac,
+      }),
+    );
+  });
 
-  // The shortcut reveals the sidebar and focuses the dialog search input.
-  await expect(sidebarRoot).toHaveAttribute("data-state", "expanded");
+  // Search opens in its portal dialog; the sidebar must not react.
   await expect(page.getByTestId("search-dialog-input")).toBeFocused();
+  await expect(sidebarRoot).toHaveAttribute("data-state", "collapsed");
 });
 
 test("search results use your resolved profile label instead of You", async ({

@@ -48,16 +48,34 @@ async function waitForReactEffects(page: Page) {
     () =>
       new Promise<void>((resolve) => {
         requestAnimationFrame(() => {
-          requestAnimationFrame(resolve);
+          requestAnimationFrame(() => resolve());
         });
       }),
   );
+}
+
+function getHashSearchParam(page: Page, name: string) {
+  const hash = new URL(page.url()).hash.replace(/^#/, "");
+  const queryStart = hash.indexOf("?");
+  if (queryStart === -1) {
+    return null;
+  }
+  return new URLSearchParams(hash.slice(queryStart + 1)).get(name);
+}
+
+async function expectHashSearchParam(
+  page: Page,
+  name: string,
+  value: string | null,
+) {
+  await expect.poll(() => getHashSearchParam(page, name)).toBe(value);
 }
 
 async function addGenericAgent(
   page: Page,
   channelName: string,
   agentName: string,
+  systemPrompt = "Watch the channel and help when asked.",
 ): Promise<string> {
   await page.getByTestId(`channel-${channelName}`).click();
   await expect(page.getByTestId("chat-title")).toHaveText(channelName);
@@ -78,7 +96,7 @@ async function addGenericAgent(
     );
   });
   return page.evaluate(
-    async ({ agentName, channelId }) => {
+    async ({ agentName, channelId, systemPrompt }) => {
       const invoke = (
         window as Window & {
           __BUZZ_E2E_INVOKE_MOCK_COMMAND__?: (
@@ -95,7 +113,7 @@ async function addGenericAgent(
         input: {
           name: agentName,
           spawnAfterCreate: true,
-          systemPrompt: "Watch the channel and help when asked.",
+          systemPrompt,
         },
       });
       const pubkey = created.agent?.pubkey;
@@ -119,7 +137,7 @@ async function addGenericAgent(
 
       return pubkey;
     },
-    { agentName, channelId },
+    { agentName, channelId, systemPrompt },
   );
 }
 
@@ -283,7 +301,7 @@ test("nests the avatar edit button in a clipped notch", async ({ page }) => {
 
   await expect(page.getByTestId("profile-avatar-preview-clip")).toHaveCSS(
     "clip-path",
-    /url/,
+    /polygon/,
   );
   const editShell = page.getByTestId("profile-avatar-edit-shell");
   await expect(editShell).toHaveCSS("height", "54px");
@@ -627,7 +645,7 @@ test("updates presence from the profile menu", async ({ page }) => {
   ).toContainText("Offline");
 });
 
-test("renders agent memories seeded through the Playwright mock bridge", async ({
+test("renders agent profile ingress subviews from the Playwright mock bridge", async ({
   page,
 }) => {
   await installMockBridge(page, {
@@ -635,7 +653,19 @@ test("renders agent memories seeded through the Playwright mock bridge", async (
   });
   await page.goto("/");
 
-  const agentPubkey = await addGenericAgent(page, "general", "Memory Bot");
+  const longAgentInstruction = [
+    "Watch the channel and help when asked.",
+    "Summarize active decisions, call out risks plainly, and keep the tone concise.",
+    "Prefer concrete next steps over broad commentary, and cite the relevant thread context when responding.",
+    "Avoid catchphrases, theatrical roleplay, and unsupported guesses.",
+    "When uncertainty remains, say exactly what evidence would resolve it.",
+  ].join("\n\n");
+  const agentPubkey = await addGenericAgent(
+    page,
+    "general",
+    "Memory Bot",
+    longAgentInstruction,
+  );
 
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
@@ -671,20 +701,244 @@ test("renders agent memories seeded through the Playwright mock bridge", async (
   await messageRow.locator("button").first().click();
 
   await expect(page.getByTestId("user-profile-panel")).toBeVisible();
-  const memoriesIngress = page.getByTestId("user-profile-memories-ingress");
-  await expect(memoriesIngress).toContainText("Memories");
-  await expect(memoriesIngress).toContainText("9");
-  await memoriesIngress.click();
+  await expectHashSearchParam(page, "profileTab", null);
 
+  await expect(page.getByTestId("user-profile-tab-info")).toBeVisible();
+  await expect(page.getByTestId("user-profile-runtime-status")).toHaveAttribute(
+    "data-status",
+    "running",
+  );
+  await page.getByTestId("user-profile-tab-runtime").click();
+  await expectHashSearchParam(page, "profileTab", "runtime");
+  const instructionPane = page.getByTestId("user-profile-agent-instruction");
+  await expect(instructionPane).toContainText(
+    "Watch the channel and help when asked.",
+  );
+  await expect(instructionPane).toHaveClass(/line-clamp-2/);
+  await page.getByTestId("user-profile-agent-instruction-row").click();
+  await expectHashSearchParam(page, "profileView", "instructions");
+  await expect(
+    page.getByRole("heading", { level: 2, name: "Instructions" }),
+  ).toBeVisible();
+  await expect(
+    page.getByTestId("user-profile-agent-instructions-view"),
+  ).toContainText("When uncertainty remains");
+  await page.getByTestId("user-profile-panel-back").click();
+  await expectHashSearchParam(page, "profileView", null);
+  await expectHashSearchParam(page, "profileTab", "runtime");
+  await expect(
+    page.getByRole("heading", { level: 2, name: "Profile" }),
+  ).toBeVisible();
+
+  await page.getByTestId("user-profile-tab-runtime").click();
+  await expectHashSearchParam(page, "profileTab", "runtime");
+  // The dedicated Model row was consolidated into the runtime config panel;
+  // Model now renders as a normalized config row with real provenance.
+  await expect(
+    page
+      .getByTestId("user-profile-panel")
+      .getByText("Model", { exact: true })
+      .first(),
+  ).toBeVisible();
+  await expect(page.getByTestId("user-profile-respond-to")).toBeVisible();
+
+  await page.getByTestId("user-profile-settings-menu-trigger").click();
+  await expect(
+    page.getByTestId(`user-profile-agent-auto-start-${agentPubkey}`),
+  ).toBeVisible();
+  await page.keyboard.press("Escape");
+
+  await page.getByTestId("user-profile-diagnostics-ingress").click();
+  await expectHashSearchParam(page, "profileView", "diagnostics");
+  await expect(
+    page.getByRole("heading", { level: 2, name: "Harness Log" }),
+  ).toBeVisible();
+  await expect(page.getByTestId("user-profile-agent-status")).toHaveCount(0);
+  await expect(page.getByTestId("managed-agent-log-content")).toBeVisible();
+  await page.getByTestId("user-profile-panel-back").click();
+  await expectHashSearchParam(page, "profileView", null);
+  await expectHashSearchParam(page, "profileTab", "runtime");
+  await expect(
+    page.getByRole("heading", { level: 2, name: "Profile" }),
+  ).toBeVisible();
+
+  await page.getByTestId("user-profile-tab-info").click();
+  await expectHashSearchParam(page, "profileTab", null);
+  await page.getByTestId(`user-profile-view-activity-${agentPubkey}`).click();
+  await expect(page.getByTestId("agent-session-thread-panel")).toBeVisible();
+  await page.getByTestId("agent-session-back").click();
+  await expect(page.getByTestId("user-profile-panel")).toBeVisible();
+  await expect(
+    page.getByRole("heading", { level: 2, name: "Profile" }),
+  ).toBeVisible();
+
+  await page.getByTestId("user-profile-tab-channels").click();
+  await expectHashSearchParam(page, "profileTab", "channels");
+  await expect(page.getByTestId("user-profile-channels-list")).toContainText(
+    "#general",
+  );
+
+  await page.getByTestId("user-profile-tab-memories").click();
+  await expectHashSearchParam(page, "profileTab", "memories");
   await expect(page.getByTestId("agent-memory-section")).toBeVisible();
   await expect(page.getByTestId("agent-memory-list")).toContainText(
     "ui-density",
   );
+  await page.goBack();
+  await expectHashSearchParam(page, "profileTab", "channels");
+  await expect(page.getByTestId("user-profile-channels-list")).toContainText(
+    "#general",
+  );
+  await page.goForward();
+  await expectHashSearchParam(page, "profileTab", "memories");
+  await expect(page.getByTestId("agent-memory-section")).toBeVisible();
   await expect(page.getByTestId("agent-memory-truncated")).toContainText(
     "View all (9)",
   );
   await page.getByTestId("agent-memory-truncated").click();
   await expect(page.getByTestId("agent-memory-list")).toContainText("orphan");
+});
+
+test("declared owner sees runtime tab for a remote relay agent", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    relayAgents: [
+      {
+        pubkey:
+          "a1b2c3d4e5f60718293a4b5c6d7e8f90112233445566778899aabbccddeeff00",
+        name: "nadia",
+        agentType: "goose",
+        capabilities: ["search", "summaries"],
+        channelNames: ["agents"],
+        respondTo: "anyone",
+      },
+    ],
+  });
+  await page.goto("/");
+
+  await page.getByTestId("channel-agents").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("agents");
+
+  const messageRow = page.getByTestId("message-row").filter({
+    has: page.getByText("Indexing remotely for my owner."),
+  });
+  await expect(messageRow.first()).toBeVisible({ timeout: 5_000 });
+  await messageRow.first().getByRole("button").first().click();
+
+  const panel = page.getByTestId("user-profile-panel");
+  await expect(panel).toBeVisible({ timeout: 10_000 });
+  await expect(panel.getByRole("tab", { name: "Runtime" })).toBeVisible();
+  await panel.getByRole("tab", { name: "Runtime" }).click();
+
+  await expect(panel.getByTestId("user-profile-runtime")).toContainText(
+    "Runtime",
+  );
+  await expect(panel.getByTestId("user-profile-runtime")).toContainText(
+    "Goose",
+  );
+  await expect(panel.getByTestId("user-profile-respond-to")).toContainText(
+    "anyone",
+  );
+
+  // Declared ownership grants read visibility only; local-management write UI
+  // stays hidden because this relay agent is not in the managed-agents list.
+  await expect(panel.getByText("Model")).toHaveCount(0);
+  await expect(
+    panel.getByRole("button", { name: /Start|Stop|Deploy/ }),
+  ).toHaveCount(0);
+});
+
+test("declared owner sees runtime tab without a relay-agent record", async ({
+  page,
+}) => {
+  await page.goto("/");
+
+  await page.getByTestId("channel-agents").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("agents");
+
+  const messageRow = page.getByTestId("message-row").filter({
+    has: page.getByText("Indexing remotely for my owner."),
+  });
+  await expect(messageRow.first()).toBeVisible({ timeout: 5_000 });
+  await messageRow.first().getByRole("button").first().click();
+
+  const panel = page.getByTestId("user-profile-panel");
+  await expect(panel).toBeVisible({ timeout: 10_000 });
+  await expect(panel.getByTestId("user-profile-agent-type")).toHaveCount(0);
+  await expect(panel.getByTestId("user-profile-capabilities")).toHaveCount(0);
+  await expect(panel.getByRole("tab", { name: "Runtime" })).toBeVisible();
+  await panel.getByRole("tab", { name: "Runtime" }).click();
+
+  await expect(panel.getByTestId("user-profile-agent-profile")).toContainText(
+    "Agent profile",
+  );
+  await expect(panel.getByTestId("user-profile-agent-profile")).toContainText(
+    "Declared owner verified",
+  );
+  await expect(panel.getByTestId("user-profile-runtime")).toHaveCount(0);
+  await expect(panel.getByTestId("user-profile-respond-to")).toHaveCount(0);
+
+  // No relay/managed runtime record means no write or management affordance —
+  // only the truthful NIP-OA profile signal is rendered in Runtime.
+  await expect(panel.getByText("Model")).toHaveCount(0);
+  await expect(
+    panel.getByRole("button", { name: /Start|Stop|Deploy/ }),
+  ).toHaveCount(0);
+});
+
+test("owned agent absent from relay/managed lists still renders agent framing", async ({
+  page,
+}) => {
+  // Regression: bot-detection used to rely solely on the relay-agents registry
+  // + the local managed-agents list. An owned agent deployed elsewhere can miss
+  // BOTH lists, so the panel rendered it as a human (wrong archive framing).
+  // The fix ORs in the kind:0 NIP-OA agent flag (same signal the archive gate
+  // trusts), surfaced via the users-batch summary's `isAgent`.
+  const ednaPubkey =
+    "16aaadcf39011edbd887e4abefe5837170621db277e234f3f6c220d38ba75ecf";
+  await installMockBridge(page, {
+    // Seeded as an agent (kind:0 NIP-OA owner) but NOT as a managed agent and
+    // NOT in the relay-agents registry — exactly the bug scenario.
+    searchProfiles: [
+      { pubkey: ednaPubkey, displayName: "Edna", isAgent: true },
+    ],
+  });
+  await page.goto("/");
+
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await waitForMockLiveSubscription(page, "general");
+
+  await page.evaluate(
+    ({ pubkey }) => {
+      const emit = (
+        window as Window & {
+          __BUZZ_E2E_EMIT_MOCK_MESSAGE__?: (input: {
+            channelName: string;
+            content: string;
+            pubkey: string;
+          }) => unknown;
+        }
+      ).__BUZZ_E2E_EMIT_MOCK_MESSAGE__;
+      if (!emit) {
+        throw new Error("Mock message emitter is unavailable.");
+      }
+      emit({ channelName: "general", content: "Edna check-in", pubkey });
+    },
+    { pubkey: ednaPubkey },
+  );
+
+  const messageRow = page
+    .getByTestId("message-row")
+    .filter({ hasText: "Edna check-in" });
+  await expect(messageRow).toBeVisible();
+  await messageRow.locator("button").first().click();
+
+  await expect(page.getByTestId("user-profile-panel")).toBeVisible();
+  // The bot indicator only renders when isBot resolves true — the assertion
+  // that the OA-owner signal now drives agent framing.
+  await expect(page.getByTestId("profile-bot-indicator")).toBeVisible();
 });
 
 test("renders settings in the app shell with a back button", async ({
@@ -1031,7 +1285,8 @@ test("supports webview zoom keyboard shortcuts", async ({ page }) => {
     page.evaluate(() => ({
       fontSize: getComputedStyle(document.documentElement).fontSize,
       storedScale: localStorage.getItem("buzz:text-scale"),
-      webviewZoom: window.__BUZZ_E2E_WEBVIEW_ZOOM__,
+      webviewZoom: (window as Window & { __BUZZ_E2E_WEBVIEW_ZOOM__?: number })
+        .__BUZZ_E2E_WEBVIEW_ZOOM__,
     }));
   const dispatchPrimaryShortcut = (
     key: string,

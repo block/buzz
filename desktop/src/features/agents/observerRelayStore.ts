@@ -2,9 +2,12 @@ import * as React from "react";
 
 import { subscribeToAgentObserverFrames } from "@/shared/api/observerRelay";
 import type { RelayEvent, ManagedAgent } from "@/shared/api/types";
-import { getIdentity } from "@/shared/api/tauri";
+import type { ControlResultFrame } from "@/shared/api/types";
+import { getIdentity, putAgentSessionConfig } from "@/shared/api/tauri";
 import { decryptObserverEvent } from "@/shared/api/tauriObserver";
 import { normalizePubkey } from "@/shared/lib/pubkey";
+import { useQueryClient } from "@tanstack/react-query";
+import { agentConfigSurfaceQueryKey } from "@/features/agents/hooks";
 import type {
   ConnectionState,
   ObserverEvent,
@@ -38,6 +41,14 @@ const eventsByAgent = new Map<string, ObserverEvent[]>();
 const transcriptByAgent = new Map<string, TranscriptState>();
 const snapshotByAgent = new Map<string, ObserverSnapshot>();
 
+// Per-agent listeners for `control_result` frames. The ModelPicker subscribes
+// here to learn the async outcome of a `switch_model` frame (the send is
+// fire-and-forget; the harness replies out-of-band over the observer relay).
+const controlResultListeners = new Map<
+  string,
+  Set<(frame: ControlResultFrame) => void>
+>();
+
 // Normalized pubkeys of agents we are actively managing. Only events whose
 // "agent" tag matches an entry here will be decrypted (defense-in-depth).
 //
@@ -48,6 +59,17 @@ const snapshotByAgent = new Map<string, ObserverSnapshot>();
 // recompute the union, so co-mounted callers no longer clobber each other.
 const knownAgentPubkeys = new Set<string>();
 const knownAgentsBySubscription = new Map<string, Set<string>>();
+
+// Callback invoked when session_config_captured is received, so React Query
+// can invalidate the config-surface query for the affected agent. Wired up
+// by useManagedAgentObserverBridge via setSessionConfigCapturedCallback.
+let onSessionConfigCaptured: ((pubkey: string) => void) | null = null;
+
+export function setSessionConfigCapturedCallback(
+  cb: ((pubkey: string) => void) | null,
+) {
+  onSessionConfigCaptured = cb;
+}
 
 function recomputeKnownAgentPubkeys() {
   knownAgentPubkeys.clear();
@@ -190,6 +212,12 @@ async function handleRelayObserverEvent(
       return;
     }
     appendAgentEvent(agentPubkey, parsed);
+    if (parsed.kind === "session_config_captured") {
+      void putAgentSessionConfig(agentPubkey, parsed.payload);
+      onSessionConfigCaptured?.(agentPubkey);
+    } else if (parsed.kind === "control_result") {
+      dispatchControlResult(agentPubkey, parsed.payload);
+    }
   } catch (error) {
     if (activeGeneration !== generation) {
       return;
@@ -266,6 +294,53 @@ export function subscribeAgentObserverStore(listener: () => void) {
   };
 }
 
+function isControlResultFrame(payload: unknown): payload is ControlResultFrame {
+  return (
+    typeof payload === "object" &&
+    payload !== null &&
+    typeof (payload as { type?: unknown }).type === "string" &&
+    typeof (payload as { status?: unknown }).status === "string"
+  );
+}
+
+function dispatchControlResult(agentPubkey: string, payload: unknown) {
+  if (!isControlResultFrame(payload)) {
+    return;
+  }
+  const subscribers = controlResultListeners.get(normalizePubkey(agentPubkey));
+  if (!subscribers) {
+    return;
+  }
+  for (const subscriber of subscribers) {
+    subscriber(payload);
+  }
+}
+
+/**
+ * Subscribe to `control_result` frames for a single agent. Returns an
+ * unsubscribe function. Used by the ModelPicker to learn the async outcome of
+ * a `switch_model` frame.
+ */
+export function subscribeControlResults(
+  agentPubkey: string,
+  listener: (frame: ControlResultFrame) => void,
+) {
+  const key = normalizePubkey(agentPubkey);
+  const subscribers = controlResultListeners.get(key) ?? new Set();
+  subscribers.add(listener);
+  controlResultListeners.set(key, subscribers);
+  return () => {
+    const current = controlResultListeners.get(key);
+    if (!current) {
+      return;
+    }
+    current.delete(listener);
+    if (current.size === 0) {
+      controlResultListeners.delete(key);
+    }
+  };
+}
+
 export function getAgentObserverSnapshot(
   agentPubkey?: string | null,
   enabled?: boolean,
@@ -336,6 +411,49 @@ export function useManagedAgentObserverBridge(
     }
     void ensureRelayObserverSubscription();
   }, [hasActiveAgent]);
+
+  // Wire up config-surface query invalidation when session_config_captured fires.
+  const queryClient = useQueryClient();
+  React.useEffect(() => {
+    setSessionConfigCapturedCallback((pubkey) => {
+      void queryClient.invalidateQueries({
+        queryKey: agentConfigSurfaceQueryKey(pubkey),
+      });
+    });
+    return () => setSessionConfigCapturedCallback(null);
+  }, [queryClient]);
+}
+
+/**
+ * E2E-only: inject synthetic observer events directly into the store, bypassing
+ * the relay-security knownAgentPubkeys filter. Exercises the real
+ * appendAgentEvent → processTranscriptEvent ingestion path so screenshot specs
+ * prove the production render, not a stub.
+ *
+ * Never call this from production code — it is intentionally not re-exported
+ * from the public agent feature barrel.
+ */
+export function injectObserverEventsForE2E(
+  agentPubkey: string,
+  events: ObserverEvent[],
+) {
+  for (const event of events) {
+    appendAgentEvent(agentPubkey, event);
+  }
+  notifyListeners();
+}
+
+/**
+ * Synchronize the observer store with a sorted buffer of events for one agent.
+ * Used by test harnesses and replay bridges that already hold decoded frames.
+ */
+export function syncAgentObserverEvents(
+  agentPubkey: string,
+  events: ObserverEvent[],
+) {
+  for (const event of events) {
+    appendAgentEvent(agentPubkey, event);
+  }
 }
 
 export function resetAgentObserverStore() {
@@ -349,6 +467,7 @@ export function resetAgentObserverStore() {
   snapshotByAgent.clear();
   knownAgentPubkeys.clear();
   knownAgentsBySubscription.clear();
+  onSessionConfigCaptured = null;
   connectionState = "idle";
   errorMessage = null;
   notifyListeners();

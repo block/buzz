@@ -11,6 +11,7 @@ type ForumComposerAutocompletesProps = {
   mentionSelectedIndex: number;
   mentionSuggestions: MentionSuggestion[];
   onChannelSelect: (suggestion: ChannelSuggestion) => void;
+  onMentionFetchMore?: () => void;
   onMentionSelect: (suggestion: MentionSuggestion) => void;
   position: "above" | "below";
 };
@@ -21,6 +22,7 @@ export function ForumComposerAutocompletes({
   mentionSelectedIndex,
   mentionSuggestions,
   onChannelSelect,
+  onMentionFetchMore,
   onMentionSelect,
   position,
 }: ForumComposerAutocompletesProps) {
@@ -33,6 +35,7 @@ export function ForumComposerAutocompletes({
         suggestions={channelSuggestions}
       />
       <MentionAutocomplete
+        onFetchMore={onMentionFetchMore}
         onSelect={onMentionSelect}
         position={position}
         selectedIndex={mentionSelectedIndex}

@@ -37,6 +37,7 @@ import {
 import { setDesktopAppBadge } from "@/features/notifications/lib/desktop";
 import { PreventSleepProvider } from "@/features/agents/usePreventSleep";
 import { requestOpenCreateAgent } from "@/features/agents/openCreateAgentEvent";
+import { useAgentsDataRefresh } from "@/features/agents/lib/useAgentsDataRefresh";
 import { usePersonaSync } from "@/features/agents/lib/usePersonaSync";
 import {
   usePresenceSession,
@@ -59,14 +60,17 @@ import { useDueReminderBadgeCount } from "@/features/reminders/hooks";
 import { RemindMeLaterProvider } from "@/features/reminders/ui/RemindMeLaterProvider";
 import { useReminderNotifications } from "@/features/reminders/useReminderNotifications";
 import { AppSidebar } from "@/features/sidebar/ui/AppSidebar";
+import { WorkspaceRail } from "@/features/sidebar/ui/WorkspaceRail";
 import { useChannelMutes } from "@/features/sidebar/lib/useChannelMutes";
 import { useChannelStars } from "@/features/sidebar/lib/useChannelStars";
 import { useWorkspaces } from "@/features/workspaces/useWorkspaces";
 import { useApplyTemplate } from "@/features/channel-templates/useApplyTemplate";
 import { relayClient } from "@/shared/api/relayClient";
+import { useFeatureEnabled } from "@/shared/features";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import { useRelayAutoHeal } from "@/shared/api/useRelayAutoHeal";
 import { useDeferredStartup } from "@/shared/hooks/useDeferredStartup";
+import { useWebviewScrollBoundaryLock } from "@/shared/hooks/useWebviewScrollBoundaryLock";
 import { joinChannel } from "@/shared/api/tauri";
 import type { SearchHit } from "@/shared/api/types";
 import { ChannelNavigationProvider } from "@/shared/context/ChannelNavigationContext";
@@ -86,8 +90,10 @@ const LazySettingsScreen = React.lazy(async () => {
 export function AppShell() {
   useWebviewZoomShortcuts();
   useTauriWindowDrag();
+  useWebviewScrollBoundaryLock();
 
   const workspacesHook = useWorkspaces();
+  const workspaceRailEnabled = useFeatureEnabled("workspaceRail");
   const [isAddWorkspaceOpen, setIsAddWorkspaceOpen] = React.useState(false);
   const [isChannelManagementOpen, setIsChannelManagementOpen] =
     React.useState(false);
@@ -139,6 +145,7 @@ export function AppShell() {
     identityQuery.data?.pubkey,
   );
   usePersonaSync(identityQuery.data?.pubkey);
+  useAgentsDataRefresh();
   const profileQuery = useProfileQuery();
   const deferredPubkey = startupReady ? identityQuery.data?.pubkey : undefined;
   useRelayAutoHeal();
@@ -154,9 +161,12 @@ export function AppShell() {
   const { feedProfilesQuery, homeFeedQuery, notificationSettings } =
     useHomeFeedNotifications(identityQuery.data?.pubkey);
   const feedItemState = useFeedItemState(identityQuery.data?.pubkey);
+  const channelsQuery = useChannelsQuery();
+  const channels = channelsQuery.data ?? [];
   useReminderNotifications(
     identityQuery.data?.pubkey,
     notificationSettings.settings,
+    channels,
   );
   const refetchHomeFeedFromLiveSignal = React.useEffectEvent(() => {
     void homeFeedQuery.refetch();
@@ -165,9 +175,7 @@ export function AppShell() {
     identityQuery.data?.pubkey,
     refetchHomeFeedFromLiveSignal,
   );
-  const channelsQuery = useChannelsQuery();
   const { refetch: refetchChannels } = channelsQuery;
-  const channels = channelsQuery.data ?? [];
   const channelsErrorMessage =
     channelsQuery.error instanceof Error
       ? channelsQuery.error.message
@@ -601,15 +609,29 @@ export function AppShell() {
               >
                 <div
                   className={cn(
-                    "buzz-huddle-app-surface z-10 flex min-h-0 flex-col overflow-hidden bg-background",
+                    "buzz-huddle-app-surface z-10 flex min-h-0 flex-row overflow-hidden bg-background",
                     isHuddleDrawerOpen && "buzz-huddle-app-surface-open",
                   )}
                 >
+                  {workspaceRailEnabled ? (
+                    <WorkspaceRail
+                      activeWorkspaceId={
+                        workspacesHook.activeWorkspace?.id ?? null
+                      }
+                      onAddWorkspace={() => setIsAddWorkspaceOpen(true)}
+                      onSwitchWorkspace={workspacesHook.switchWorkspace}
+                      workspaces={workspacesHook.workspaces}
+                    />
+                  ) : null}
                   <SidebarProvider className="min-h-0 flex-1 flex-col overflow-hidden">
                     {!settingsOpen ? (
                       <AppTopChrome
                         canGoBack={canGoBack}
                         canGoForward={canGoForward}
+                        hasWorkspaceRail={
+                          workspaceRailEnabled &&
+                          workspacesHook.workspaces.length > 1
+                        }
                         onGoBack={goBack}
                         onGoForward={goForward}
                       />
@@ -798,7 +820,7 @@ export function AppShell() {
                             className="isolate min-h-0 min-w-0 overflow-hidden bg-sidebar"
                             style={chromeCssVarDefaults}
                           >
-                            <div className="relative z-10 ml-px mt-px flex min-h-0 flex-1 flex-col overflow-hidden rounded-tl-xl bg-background shadow-[-1px_-1px_0_0_hsl(var(--sidebar-border)/0.45)]">
+                            <div className="relative z-10 mb-2 ml-px mr-2 mt-px flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl bg-background shadow-[-1px_-1px_0_0_hsl(var(--sidebar-border)/0.45)]">
                               <ConnectionBanner
                                 errorMessage={channelsErrorMessage}
                               />
@@ -837,6 +859,12 @@ export function AppShell() {
                 <div className="absolute inset-x-0 bottom-0 z-0 h-(--buzz-huddle-drawer-height)">
                   <HuddleBar
                     className="h-full"
+                    onOpenThread={(channelId, messageId) => {
+                      void goChannel(channelId, {
+                        messageId,
+                        threadRootId: messageId,
+                      });
+                    }}
                     onVisibilityChange={setIsHuddleDrawerOpen}
                   />
                 </div>

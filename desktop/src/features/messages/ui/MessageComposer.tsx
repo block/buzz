@@ -1,7 +1,6 @@
 import * as React from "react";
 
 import { EditorContent } from "@tiptap/react";
-import { CornerUpLeft, Pencil, X } from "lucide-react";
 import { useChannelLinks } from "@/features/messages/lib/useChannelLinks";
 import { useComposerAutofocus } from "@/features/messages/lib/useComposerAutofocus";
 import type { ChannelSuggestion } from "@/features/messages/lib/useChannelLinks";
@@ -40,8 +39,8 @@ import { useTypingBroadcast } from "@/features/messages/useTypingBroadcast";
 import { getBuzzCodeBlockClipboardText } from "@/shared/lib/codeBlockClipboard";
 import { cn } from "@/shared/lib/cn";
 import type { ChannelType } from "@/shared/api/types";
-import { Button } from "@/shared/ui/button";
 import { ChannelAutocomplete } from "./ChannelAutocomplete";
+import { ComposerReplyEditBanner } from "./ComposerReplyEditBanner";
 import { ComposerAttachments, DropZoneOverlay } from "./ComposerAttachments";
 import { EmojiAutocomplete } from "./EmojiAutocomplete";
 import {
@@ -51,6 +50,7 @@ import {
 import { MessageComposerToolbar } from "./MessageComposerToolbar";
 import { NonMemberMentionDialog } from "./NonMemberMentionDialog";
 import { useMentionSendFlow } from "./useMentionSendFlow";
+import { useComposerContentState } from "./useComposerContentState";
 
 type MessageComposerProps = {
   channelId?: string | null;
@@ -86,10 +86,25 @@ type MessageComposerProps = {
    */
   onEditLastOwnMessage?: () => boolean;
   onEditSave?: (content: string, mediaTags?: string[][]) => Promise<void>;
+  /**
+   * Called synchronously at the start of `submitMessage`, before any awaits,
+   * to capture context that must be stable throughout the async send pipeline.
+   * Used by the thread-reply composer to capture the current reply target before
+   * the mention-flow awaits can change navigation state.
+   */
+  onCaptureSendContext?: () => {
+    parentEventId: string | null;
+    threadHeadId: string | null;
+  } | null;
   onSend: (
     content: string,
     mentionPubkeys: string[],
     mediaTags?: string[][],
+    channelId?: string | null,
+    threadContext?: {
+      parentEventId: string | null;
+      threadHeadId: string | null;
+    } | null,
   ) => Promise<void>;
   placeholder?: string;
   profiles?: UserProfileLookup;
@@ -104,7 +119,7 @@ type MessageComposerProps = {
   typingRootEventId?: string | null;
 };
 
-export function MessageComposer({
+function MessageComposerImpl({
   channelId = null,
   channelName,
   channelType = null,
@@ -115,6 +130,7 @@ export function MessageComposer({
   isSending = false,
   onCancelEdit,
   onCancelReply,
+  onCaptureSendContext,
   onEditLastOwnMessage,
   onEditSave,
   onSend,
@@ -127,10 +143,14 @@ export function MessageComposer({
   typingParentEventId = null,
   typingRootEventId = null,
 }: MessageComposerProps) {
-  const [content, setContent] = React.useState("");
-  const contentRef = React.useRef(content);
-  contentRef.current = content;
-
+  const {
+    contentRef,
+    isContentEmpty,
+    setComposerContent,
+    setComposerContentFromText,
+    syncComposerContentFromEditor,
+    syncContentRefFromEditorRef,
+  } = useComposerContentState();
   const [isEmojiPickerOpen, setIsEmojiPickerOpen] = React.useState(false);
   const [isFormattingOpen, setIsFormattingOpen] = React.useState(false);
   const [spoileredAttachmentUrls, setSpoileredAttachmentUrls] = React.useState<
@@ -238,14 +258,9 @@ export function MessageComposer({
     isAutocompleteOpen: isAutocompleteOpenRef,
     onEditLink: (info) => onEditLinkRef.current?.(info),
     onLinkSelectionChange: (info) => onLinkSelectionChangeRef.current?.(info),
-    onUpdate: ({ markdown, text }) => {
-      setContent(markdown);
-      contentRef.current = markdown;
+    onUpdate: ({ cursor, text }) => {
+      setComposerContentFromText(text);
 
-      // Bridge to mention/channel/emoji detection hooks. `text` and the
-      // cursor are both in plain-text-offset space (treating hardBreak
-      // and inter-block boundaries as `\n`).
-      const { cursor } = richText.getPlainTextAndCursor();
       mentions.updateMentionQuery(text, cursor);
       channelLinks.updateChannelQuery(text, cursor);
       emojiAutocomplete.updateEmojiQuery(text, cursor);
@@ -257,6 +272,11 @@ export function MessageComposer({
   });
 
   const linkEditor = useLinkEditor(richText);
+  syncContentRefFromEditorRef.current = () => {
+    const markdown = richText.getMarkdown();
+    contentRef.current = markdown;
+    return markdown;
+  };
   onEditLinkRef.current = linkEditor.openFromClick;
   onLinkSelectionChangeRef.current = linkEditor.showFromCursor;
   useComposerSpoilerParticles(richText.editor, composerScrollRef);
@@ -272,7 +292,7 @@ export function MessageComposer({
     mentions,
     onSendRef,
     richText,
-    setContent,
+    setContent: setComposerContent,
     setIsEmojiPickerOpen,
     setPendingImeta: media.setPendingImeta,
     setSpoileredAttachmentUrls,
@@ -282,7 +302,7 @@ export function MessageComposer({
   React.useEffect(() => {
     const prevKey = previousDraftKeyRef.current;
     if (prevKey) {
-      drafts.persistDraft(prevKey, contentRef.current);
+      drafts.persistDraft(prevKey, syncComposerContentFromEditor());
     }
     previousDraftKeyRef.current = effectiveDraftKey;
 
@@ -290,12 +310,10 @@ export function MessageComposer({
       ? drafts.loadDraft(effectiveDraftKey)
       : undefined;
     if (saved) {
-      setContent(saved.content);
-      contentRef.current = saved.content;
+      setComposerContent(saved.content);
       richText.setContent(saved.content);
     } else {
-      setContent("");
-      contentRef.current = "";
+      setComposerContent("");
       richText.clearContent();
     }
 
@@ -309,7 +327,7 @@ export function MessageComposer({
 
     return () => {
       if (effectiveDraftKey) {
-        drafts.persistDraft(effectiveDraftKey, contentRef.current);
+        drafts.persistDraft(effectiveDraftKey, syncComposerContentFromEditor());
       }
     };
   }, [effectiveDraftKey]);
@@ -321,7 +339,7 @@ export function MessageComposer({
       // in-flight work survives the edit-mode hijack and is restored on
       // edit-cancel/exit.
       preEditSnapshotRef.current = {
-        content: contentRef.current,
+        content: syncComposerContentFromEditor(),
         pendingImeta: [...media.pendingImetaRef.current],
         spoileredAttachmentUrls: new Set(spoileredAttachmentUrls),
       };
@@ -332,8 +350,7 @@ export function MessageComposer({
         editTarget.body,
         editTarget.imetaMedia ?? [],
       );
-      setContent(editableBody);
-      contentRef.current = editableBody;
+      setComposerContent(editableBody);
       richText.setContent(editableBody);
       // Seed the composer's pending-imeta state with the original event's
       // attachments so they show up in `ComposerAttachments` and the user
@@ -360,8 +377,7 @@ export function MessageComposer({
         spoileredAttachmentUrls: restoredSpoileredAttachmentUrls,
       } = preEditSnapshotRef.current;
       preEditSnapshotRef.current = null;
-      setContent(restoredContent);
-      contentRef.current = restoredContent;
+      setComposerContent(restoredContent);
       restoredContent
         ? richText.setContent(restoredContent)
         : richText.clearContent();
@@ -502,7 +518,7 @@ export function MessageComposer({
 
   // ── Submit message ──────────────────────────────────────────────────
   const submitMessage = React.useCallback(async () => {
-    const trimmed = contentRef.current.trim();
+    const trimmed = syncComposerContentFromEditor().trim();
 
     // Edit mode
     if (editTargetRef.current && onEditSaveRef.current) {
@@ -537,8 +553,7 @@ export function MessageComposer({
       const savedContent = trimmed;
       const savedImeta = [...currentPendingImeta];
       const savedSpoileredAttachmentUrls = new Set(spoileredAttachmentUrls);
-      setContent("");
-      contentRef.current = "";
+      setComposerContent("");
       richText.clearContent();
       media.setPendingImeta([]);
       setSpoileredAttachmentUrls(new Set());
@@ -550,8 +565,7 @@ export function MessageComposer({
       try {
         await onEditSaveRef.current(finalContent, outgoingTags);
       } catch {
-        setContent(savedContent);
-        contentRef.current = savedContent;
+        setComposerContent(savedContent);
         richText.setContent(savedContent);
         media.setPendingImeta(savedImeta);
         setSpoileredAttachmentUrls(savedSpoileredAttachmentUrls);
@@ -572,13 +586,26 @@ export function MessageComposer({
       return;
     }
 
+    const capturedThreadContext = onCaptureSendContext?.() ?? null;
+    // If a thread-reply composer reported no reply target at submit time,
+    // bail here rather than discovering the null later after async awaits.
+    if (
+      capturedThreadContext !== null &&
+      !capturedThreadContext.parentEventId
+    ) {
+      return;
+    }
+
     await mentionSendFlow.sendMessageWithMentionFlow({
+      capturedChannelId: channelId,
+      capturedThreadContext,
       pendingImeta: currentPendingImeta,
       sentDraftKey: effectiveDraftKeyRef.current,
       spoileredAttachmentUrls,
       trimmed,
     });
   }, [
+    channelId,
     channelLinks.clearChannels,
     customEmoji,
     emojiAutocomplete.clearEmojis,
@@ -589,7 +616,10 @@ export function MessageComposer({
     mentions.clearMentions,
     richText.clearContent,
     richText.setContent,
+    setComposerContent,
     spoileredAttachmentUrls,
+    syncComposerContentFromEditor,
+    onCaptureSendContext,
   ]);
   submitMessageRef.current = submitMessage;
 
@@ -744,12 +774,12 @@ export function MessageComposer({
       disabled ||
       media.isUploading ||
       mentionSendFlow.isPreparingMentionSend ||
-      (content.trim().length === 0 && media.pendingImeta.length === 0),
+      (isContentEmpty && media.pendingImeta.length === 0),
     [
       disabled,
       media.isUploading,
       mentionSendFlow.isPreparingMentionSend,
-      content,
+      isContentEmpty,
       media.pendingImeta.length,
     ],
   );
@@ -825,60 +855,12 @@ export function MessageComposer({
           className="absolute inset-x-0 bottom-0 h-5 bg-background"
         />
         <div className="relative flex w-full flex-col gap-0">
-          {editTarget ? (
-            <div
-              className="relative z-0 -mb-4 flex transform-gpu items-center gap-2 rounded-t-2xl border border-b-0 border-border/60 bg-muted/55 px-4 pb-6 pt-2.5 text-sm leading-5 text-muted-foreground backdrop-blur-sm transition-colors"
-              data-testid="edit-target"
-            >
-              <Pencil aria-hidden className="h-4 w-4 shrink-0" />
-              <div className="min-w-0 flex-1">
-                <p className="truncate font-medium text-foreground">
-                  Editing message
-                </p>
-              </div>
-              {onCancelEdit ? (
-                <Button
-                  aria-label="Cancel edit"
-                  className="-mr-1 h-7 w-7 shrink-0 px-0 text-muted-foreground hover:text-foreground"
-                  onClick={onCancelEdit}
-                  size="icon"
-                  type="button"
-                  variant="ghost"
-                >
-                  <X className="h-4 w-4" />
-                </Button>
-              ) : null}
-            </div>
-          ) : replyTarget ? (
-            <div
-              className="relative z-0 -mb-4 flex transform-gpu items-start gap-2 rounded-t-2xl border border-b-0 border-border/60 bg-muted/55 px-4 pb-6 pt-2.5 text-sm leading-5 text-muted-foreground backdrop-blur-sm transition-colors"
-              data-testid="reply-target"
-            >
-              <CornerUpLeft aria-hidden className="mt-0.5 h-4 w-4 shrink-0" />
-              <div className="min-w-0 flex-1">
-                <p className="truncate font-medium text-foreground">
-                  Replying to {replyTarget.author}
-                </p>
-                {replyTarget.body ? (
-                  <p className="truncate text-muted-foreground/80">
-                    {replyTarget.body}
-                  </p>
-                ) : null}
-              </div>
-              {onCancelReply ? (
-                <Button
-                  aria-label="Cancel reply"
-                  className="-mr-1 h-7 w-7 shrink-0 px-0 text-muted-foreground hover:text-foreground"
-                  onClick={onCancelReply}
-                  size="icon"
-                  type="button"
-                  variant="ghost"
-                >
-                  <X className="h-4 w-4" />
-                </Button>
-              ) : null}
-            </div>
-          ) : null}
+          <ComposerReplyEditBanner
+            isEditing={editTarget != null}
+            replyTarget={replyTarget}
+            onCancelEdit={onCancelEdit}
+            onCancelReply={onCancelReply}
+          />
           <form
             className="relative z-10 isolate rounded-2xl border border-border/50 bg-background/80 px-3 pb-2 pt-3 shadow-none backdrop-blur-md supports-[backdrop-filter]:bg-background/70 dark:bg-background/70 dark:backdrop-blur-xl dark:supports-[backdrop-filter]:bg-background/55 sm:px-4"
             data-testid="message-composer"
@@ -916,6 +898,7 @@ export function MessageComposer({
               }
             />
             <MentionAutocomplete
+              onFetchMore={mentions.fetchMoreSuggestions}
               onSelect={applyMentionInsert}
               selectedIndex={mentions.mentionSelectedIndex}
               suggestions={mentions.isMentionOpen ? mentions.suggestions : []}
@@ -996,3 +979,5 @@ export function MessageComposer({
     </>
   );
 }
+
+export const MessageComposer = React.memo(MessageComposerImpl);

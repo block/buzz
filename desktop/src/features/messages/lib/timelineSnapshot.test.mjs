@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  classifyTimelineMessageDelta,
   BOTTOM_THRESHOLD_PX,
   buildDayGroupBoundaries,
   isDeferredTimelineSnapshotStale,
@@ -337,6 +338,29 @@ test("no-tearing: stale snapshot keeps all three decisions internally consistent
   assert.equal(link.resolved, false);
   assert.equal(coveredCount, stale.length);
   assert.equal(latestKey, "b");
+});
+
+test("classifyTimelineMessageDelta: detects older-history prepends", () => {
+  const previous = [message({ id: "a" }), message({ id: "b" })];
+  const current = [message({ id: "older" }), ...previous];
+
+  assert.equal(classifyTimelineMessageDelta({ current, previous }), "prepend");
+});
+
+test("classifyTimelineMessageDelta: detects latest-message appends", () => {
+  const previous = [message({ id: "a" }), message({ id: "b" })];
+  const current = [...previous, message({ id: "c" })];
+
+  assert.equal(classifyTimelineMessageDelta({ current, previous }), "append");
+});
+
+test("classifyTimelineMessageDelta: unchanged snapshots do not count as arrivals", () => {
+  const previous = [message({ id: "a" }), message({ id: "b" })];
+
+  assert.equal(
+    classifyTimelineMessageDelta({ current: previous, previous }),
+    "none",
+  );
 });
 
 // --- deferred reply-list render state (thread side pane) --------------------

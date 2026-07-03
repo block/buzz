@@ -9,12 +9,29 @@ import type { ConnectionState } from "@/shared/api/relayClientShared";
 import type { RelayEvent } from "@/shared/api/types";
 import { syncAgentTurnsFromEvents } from "@/features/agents/activeAgentTurnsStore";
 import {
+  injectObserverEventsForE2E,
+  syncAgentObserverEvents,
+} from "@/features/agents/observerRelayStore";
+import {
   CUSTOM_EMOJI_SET_D_TAG,
   KIND_EMOJI_SET,
 } from "@/shared/api/customEmoji";
 import {
+  KIND_AGENT_OBSERVER_FRAME,
   KIND_DM_VISIBILITY,
   KIND_EVENT_REMINDER,
+  KIND_GIT_ISSUE,
+  KIND_GIT_PATCH,
+  KIND_GIT_PR_UPDATE,
+  KIND_GIT_PULL_REQUEST,
+  KIND_GIT_STATUS_CLOSED,
+  KIND_GIT_STATUS_DRAFT,
+  KIND_GIT_STATUS_MERGED,
+  KIND_GIT_STATUS_OPEN,
+  KIND_HUDDLE_STARTED,
+  KIND_MEMBER_ADDED_NOTIFICATION,
+  KIND_MEMBER_REMOVED_NOTIFICATION,
+  KIND_REPO_ANNOUNCEMENT,
   KIND_STREAM_MESSAGE_EDIT,
   KIND_SYSTEM_MESSAGE,
   KIND_USER_STATUS,
@@ -39,11 +56,13 @@ type MockCommandAvailability = {
 type MockManagedAgentSeed = {
   pubkey: string;
   name: string;
+  avatarUrl?: string | null;
   personaId?: string | null;
   status?: RawManagedAgent["status"];
   channelNames?: string[];
   channelIds?: string[];
   backend?: RawManagedAgent["backend"];
+  lastError?: string | null;
   respondTo?: RawManagedAgent["respond_to"];
   respondToAllowlist?: string[];
 };
@@ -51,11 +70,23 @@ type MockManagedAgentSeed = {
 type MockRelayAgentSeed = {
   pubkey: string;
   name: string;
+  agentType?: string;
+  capabilities?: string[];
   respondTo?: RawRelayAgent["respond_to"];
   respondToAllowlist?: string[];
   channelNames?: string[];
   channelIds?: string[];
   status?: PresenceStatus;
+};
+
+type MockPersonaSeed = {
+  id?: string;
+  displayName: string;
+  avatarUrl?: string | null;
+  systemPrompt: string;
+  isActive?: boolean;
+  sourceTeam?: string | null;
+  envVars?: Record<string, string>;
 };
 
 type MockSearchProfileSeed = {
@@ -79,13 +110,21 @@ type E2eConfig = {
       mcp?: MockCommandAvailability;
     };
     managedAgents?: MockManagedAgentSeed[];
+    personas?: MockPersonaSeed[];
     relayAgents?: MockRelayAgentSeed[];
+    agentListDelayMs?: number;
     agentMemory?: RawAgentMemoryListing | Record<string, RawAgentMemoryListing>;
+    addChannelMembersDelayMs?: number;
     createManagedAgentDelayMs?: number;
     channelsReadError?: string;
     feedReadError?: string;
     canvasReadError?: string;
+    /** Delay (ms) for `apply_workspace` so e2e tests can observe the
+     *  workspace-switch gate. 0/undefined = instant. */
+    applyWorkspaceDelayMs?: number;
     openDmDelayMs?: number;
+    sendMessageDelayMs?: number;
+    usersBatchDelayMs?: number;
     /** Delay (ms) applied to older-history (`history-` subId) fetches so e2e
      *  tests can observe the in-flight prepend window. 0/undefined = instant. */
     historyDelayMs?: number;
@@ -178,6 +217,7 @@ type RawUserSearchResult = {
 
 type RawSearchUsersResponse = {
   users: RawUserSearchResult[];
+  next_cursor?: string | null;
 };
 
 type PresenceStatus = "online" | "away" | "offline";
@@ -385,6 +425,7 @@ type RawManagedAgent = {
   max_turn_duration_seconds: number | null;
   parallelism: number;
   system_prompt: string | null;
+  avatar_url: string | null;
   model: string | null;
   env_vars?: Record<string, string>;
   status: "running" | "stopped" | "deployed" | "not_deployed";
@@ -448,8 +489,13 @@ type RawPersona = {
   display_name: string;
   avatar_url: string | null;
   system_prompt: string;
+  runtime?: string | null;
+  model?: string | null;
+  provider?: string | null;
+  name_pool?: string[];
   is_builtin: boolean;
   is_active: boolean;
+  source_team?: string | null;
   env_vars?: Record<string, string>;
   created_at: string;
   updated_at: string;
@@ -483,10 +529,13 @@ type MockSubscription = {
 };
 
 type MockFilter = {
+  "#a"?: string[];
   "#d"?: string[];
   "#e"?: string[];
   "#h"?: string[];
+  "#p"?: string[];
   authors?: string[];
+  ids?: string[];
   kinds?: number[];
   limit?: number;
   since?: number;
@@ -641,6 +690,7 @@ declare global {
       tags: string[][];
     }>;
     __BUZZ_E2E_SET_RELAY_CONNECTION_STATE__?: (state: ConnectionState) => void;
+    __BUZZ_E2E_GET_RELAY_CONNECTION_STATE__?: () => ConnectionState;
     __BUZZ_E2E_SET_STALL_WEBSOCKET_SENDS__?: (stall: boolean) => void;
     __BUZZ_E2E_DISCONNECT_MOCK_WEBSOCKETS__?: () => number;
     __BUZZ_E2E_SET_MESH__?: (mesh: {
@@ -652,6 +702,20 @@ declare global {
       agentPubkey: string;
       channelId: string;
       turnId: string;
+      kind?: "turn_started" | "turn_completed";
+    }) => void;
+    __BUZZ_E2E_SEED_OBSERVER_EVENTS__?: (input: {
+      agentPubkey: string;
+      events: Array<{
+        seq: number;
+        timestamp: string;
+        kind: string;
+        agentIndex: number | null;
+        channelId: string | null;
+        sessionId: string | null;
+        turnId: string | null;
+        payload: unknown;
+      }>;
     }) => void;
     __BUZZ_E2E_EMIT_MOCK_READ_STATE__?: (input: {
       clientId: string;
@@ -929,6 +993,7 @@ function cloneManagedAgent(agent: MockManagedAgent): RawManagedAgent {
     max_turn_duration_seconds: agent.max_turn_duration_seconds ?? null,
     parallelism: agent.parallelism,
     system_prompt: agent.system_prompt,
+    avatar_url: agent.avatar_url ?? null,
     model: agent.model,
     env_vars: { ...(agent.env_vars ?? {}) },
     status: agent.status,
@@ -1000,6 +1065,430 @@ function resetMockRelayMembers(config: E2eConfig | undefined) {
   ];
 }
 
+function buildMockConfigSurface(pubkey: string): {
+  runtimeId: string | null;
+  runtimeLabel: string | null;
+  isPreSpawn: boolean;
+  normalized: Record<string, unknown>;
+  advanced: unknown[];
+  sources: Record<string, unknown>;
+} {
+  // Goose running — mixed origins, override on model
+  const gooseSurface = {
+    runtimeId: "goose",
+    runtimeLabel: "Goose",
+    isPreSpawn: false,
+    normalized: {
+      model: {
+        value: "gpt-4o",
+        origin: "buzzExplicit",
+        overriddenValue: "gpt-4o-mini",
+        overriddenOrigin: "configFile",
+        isRequired: false,
+        writeVia: { type: "readOnly" },
+      },
+      provider: {
+        value: "openai",
+        origin: "configFile",
+        overriddenValue: null,
+        overriddenOrigin: null,
+        isRequired: false,
+        writeVia: {
+          type: "gooseNativeConfigWrite",
+          configKey: "goose.provider",
+        },
+      },
+      mode: {
+        value: "auto",
+        origin: "envVar",
+        overriddenValue: null,
+        overriddenOrigin: null,
+        isRequired: false,
+        writeVia: { type: "respawnWithEnvVar", envKey: "GOOSE_MODE" },
+      },
+      thinkingEffort: {
+        value: "medium",
+        origin: "configFile",
+        overriddenValue: null,
+        overriddenOrigin: null,
+        isRequired: false,
+        writeVia: {
+          type: "gooseNativeConfigWrite",
+          configKey: "goose.thinkingEffort",
+        },
+      },
+      maxOutputTokens: null,
+      contextLimit: null,
+      systemPrompt: null,
+    },
+    advanced: [
+      {
+        key: "extensions.developer",
+        label: "Extension: developer",
+        value: "enabled",
+        origin: "configFile",
+        schemaType: { type: "enum", options: ["enabled", "disabled"] },
+        writeVia: {
+          type: "gooseNativeConfigWrite",
+          configKey: "goose.extensions.developer",
+        },
+      },
+      {
+        key: "extensions.web_search",
+        label: "Extension: web_search",
+        value: "enabled",
+        origin: "configFile",
+        schemaType: { type: "enum", options: ["enabled", "disabled"] },
+        writeVia: {
+          type: "gooseNativeConfigWrite",
+          configKey: "goose.extensions.web_search",
+        },
+      },
+      {
+        key: "extensions.memory",
+        label: "Extension: memory",
+        value: "disabled",
+        origin: "configFile",
+        schemaType: { type: "enum", options: ["enabled", "disabled"] },
+        writeVia: {
+          type: "gooseNativeConfigWrite",
+          configKey: "goose.extensions.memory",
+        },
+      },
+    ],
+    sources: {
+      acpNative: "available",
+      acpConfigOptions: "available",
+      envVars: "available",
+      configFile: "available",
+      configFilePath: "~/.config/goose/config.yaml",
+    },
+  };
+
+  // Claude Code — mostly ACP-sourced
+  const claudeSurface = {
+    runtimeId: "claude-code",
+    runtimeLabel: "Claude Code",
+    isPreSpawn: false,
+    normalized: {
+      model: {
+        value: "claude-sonnet-4-20250514",
+        origin: "acpConfigOption",
+        overriddenValue: null,
+        overriddenOrigin: null,
+        isRequired: false,
+        writeVia: { type: "acpSetConfigOption", configId: "model" },
+      },
+      provider: {
+        value: "anthropic",
+        origin: "acpConfigOption",
+        overriddenValue: null,
+        overriddenOrigin: null,
+        isRequired: false,
+        writeVia: { type: "acpSetConfigOption", configId: "provider" },
+      },
+      mode: {
+        value: "code",
+        origin: "acpConfigOption",
+        overriddenValue: null,
+        overriddenOrigin: null,
+        isRequired: false,
+        writeVia: { type: "acpSetConfigOption", configId: "mode" },
+      },
+      thinkingEffort: {
+        value: "high",
+        origin: "acpConfigOption",
+        overriddenValue: null,
+        overriddenOrigin: null,
+        isRequired: false,
+        writeVia: { type: "acpSetConfigOption", configId: "thinkingEffort" },
+      },
+      maxOutputTokens: {
+        value: "16384",
+        origin: "acpConfigOption",
+        overriddenValue: null,
+        overriddenOrigin: null,
+        isRequired: false,
+        writeVia: { type: "acpSetConfigOption", configId: "maxOutputTokens" },
+      },
+      contextLimit: null,
+      systemPrompt: null,
+    },
+    advanced: [],
+    sources: {
+      acpNative: "available",
+      acpConfigOptions: "available",
+      envVars: "notApplicable",
+      configFile: "available",
+      configFilePath: "~/.claude/settings.json",
+    },
+  };
+
+  // Pre-spawn — model from config file, ACP fields pending
+  const preSpawnSurface = {
+    runtimeId: "goose",
+    runtimeLabel: "Goose",
+    isPreSpawn: true,
+    normalized: {
+      model: {
+        value: "gpt-4o-mini",
+        origin: "configFile",
+        overriddenValue: null,
+        overriddenOrigin: null,
+        isRequired: false,
+        writeVia: { type: "gooseNativeConfigWrite", configKey: "goose.model" },
+      },
+      provider: {
+        value: "openai",
+        origin: "configFile",
+        overriddenValue: null,
+        overriddenOrigin: null,
+        isRequired: false,
+        writeVia: {
+          type: "gooseNativeConfigWrite",
+          configKey: "goose.provider",
+        },
+      },
+      mode: {
+        value: null,
+        origin: "acpNativeRead",
+        overriddenValue: null,
+        overriddenOrigin: null,
+        isRequired: false,
+        writeVia: { type: "readOnly" },
+      },
+      thinkingEffort: {
+        value: null,
+        origin: "acpNativeRead",
+        overriddenValue: null,
+        overriddenOrigin: null,
+        isRequired: false,
+        writeVia: { type: "readOnly" },
+      },
+      maxOutputTokens: null,
+      contextLimit: null,
+      systemPrompt: null,
+    },
+    advanced: [],
+    sources: {
+      acpNative: "pending",
+      acpConfigOptions: "pending",
+      envVars: "available",
+      configFile: "available",
+      configFilePath: "~/.config/goose/config.yaml",
+    },
+  };
+
+  // Codex — dual-axis mode
+  const codexSurface = {
+    runtimeId: "codex",
+    runtimeLabel: "Codex",
+    isPreSpawn: false,
+    normalized: {
+      model: {
+        value: "codex-mini",
+        origin: "configFile",
+        overriddenValue: null,
+        overriddenOrigin: null,
+        isRequired: false,
+        writeVia: { type: "gooseNativeConfigWrite", configKey: "goose.model" },
+      },
+      provider: {
+        value: "openai",
+        origin: "configFile",
+        overriddenValue: null,
+        overriddenOrigin: null,
+        isRequired: false,
+        writeVia: {
+          type: "gooseNativeConfigWrite",
+          configKey: "goose.provider",
+        },
+      },
+      mode: {
+        value: "suggest / auto-edit",
+        origin: "configFile",
+        overriddenValue: null,
+        overriddenOrigin: null,
+        isRequired: false,
+        writeVia: { type: "gooseNativeConfigWrite", configKey: "goose.mode" },
+      },
+      thinkingEffort: null,
+      maxOutputTokens: null,
+      contextLimit: null,
+      systemPrompt: null,
+    },
+    advanced: [
+      {
+        key: "approval_policy",
+        label: "Approval Policy",
+        value: "unless-allow-listed",
+        origin: "configFile",
+        schemaType: {
+          type: "enum",
+          options: ["suggest", "auto-edit", "full-auto", "unless-allow-listed"],
+        },
+        writeVia: {
+          type: "gooseNativeConfigWrite",
+          configKey: "goose.approval_policy",
+        },
+      },
+      {
+        key: "sandbox_mode",
+        label: "Sandbox Mode",
+        value: "container",
+        origin: "envVar",
+        schemaType: {
+          type: "enum",
+          options: ["container", "host", "none"],
+        },
+        writeVia: { type: "respawnWithEnvVar", envKey: "GOOSE_SANDBOX_MODE" },
+      },
+    ],
+    sources: {
+      acpNative: "notApplicable",
+      acpConfigOptions: "notApplicable",
+      envVars: "available",
+      configFile: "available",
+      configFilePath: "~/.codex/config.toml",
+    },
+  };
+
+  // Live runtime override — a persona-linked agent whose session model was
+  // switched at runtime. The live model rides over the persona baseline as a
+  // secondary value WITHOUT strikethrough (the headline runtimeOverride render).
+  const runtimeOverrideSurface = {
+    runtimeId: "goose",
+    runtimeLabel: "Goose",
+    isPreSpawn: false,
+    normalized: {
+      model: {
+        value: "claude-opus-4-20250514",
+        origin: "runtimeOverride",
+        overriddenValue: "gpt-4o",
+        overriddenOrigin: "personaDefault",
+        isRequired: false,
+        writeVia: { type: "acpSetSessionModel" },
+      },
+      provider: {
+        value: "anthropic",
+        origin: "acpConfigOption",
+        overriddenValue: null,
+        overriddenOrigin: null,
+        isRequired: false,
+        writeVia: { type: "acpSetConfigOption", configId: "provider" },
+      },
+      mode: {
+        value: "auto",
+        origin: "envVar",
+        overriddenValue: null,
+        overriddenOrigin: null,
+        isRequired: false,
+        writeVia: { type: "respawnWithEnvVar", envKey: "GOOSE_MODE" },
+      },
+      thinkingEffort: {
+        value: "high",
+        origin: "configFile",
+        overriddenValue: null,
+        overriddenOrigin: null,
+        isRequired: false,
+        writeVia: {
+          type: "gooseNativeConfigWrite",
+          configKey: "goose.thinkingEffort",
+        },
+      },
+      maxOutputTokens: null,
+      contextLimit: null,
+      systemPrompt: null,
+    },
+    advanced: [],
+    sources: {
+      acpNative: "available",
+      acpConfigOptions: "available",
+      envVars: "available",
+      configFile: "available",
+      configFilePath: "~/.config/goose/config.yaml",
+    },
+  };
+
+  // Mixed-provenance showcase — top-level rows carry different origins so the
+  // panel witnesses distinct provenance labels in one frame: "Set in Buzz",
+  // "Inherited from persona", "From config file (...)" and
+  // "From environment variable (...)".
+  const multiOriginSurface = {
+    runtimeId: "goose",
+    runtimeLabel: "Goose",
+    isPreSpawn: false,
+    normalized: {
+      model: {
+        value: "gpt-4o",
+        origin: "buzzExplicit",
+        overriddenValue: null,
+        overriddenOrigin: null,
+        isRequired: false,
+        writeVia: { type: "readOnly" },
+      },
+      provider: {
+        value: "openai",
+        origin: "personaDefault",
+        overriddenValue: null,
+        overriddenOrigin: null,
+        isRequired: false,
+        writeVia: { type: "readOnly" },
+      },
+      mode: {
+        value: "auto",
+        origin: "envVar",
+        overriddenValue: null,
+        overriddenOrigin: null,
+        isRequired: false,
+        writeVia: { type: "respawnWithEnvVar", envKey: "GOOSE_MODE" },
+      },
+      thinkingEffort: {
+        value: "medium",
+        origin: "configFile",
+        overriddenValue: null,
+        overriddenOrigin: null,
+        isRequired: false,
+        writeVia: {
+          type: "gooseNativeConfigWrite",
+          configKey: "goose.thinkingEffort",
+        },
+      },
+      maxOutputTokens: null,
+      contextLimit: null,
+      systemPrompt: null,
+    },
+    advanced: [],
+    sources: {
+      acpNative: "available",
+      acpConfigOptions: "available",
+      envVars: "available",
+      configFile: "available",
+      configFilePath: "~/.config/goose/config.yaml",
+    },
+  };
+
+  // Map well-known test pubkeys to specific fixtures
+  // Synthetic agent for the multi-origin provenance showcase (not a TEST_IDENTITY).
+  const PUBKEY_MULTI_ORIGIN =
+    "abc1230000000000000000000000000000000000000000000000000000000def";
+
+  switch (pubkey) {
+    case ALICE_PUBKEY:
+      return claudeSurface;
+    case BOB_PUBKEY:
+      return preSpawnSurface;
+    case CHARLIE_PUBKEY:
+      return codexSurface;
+    case OUTSIDER_PUBKEY:
+      return runtimeOverrideSurface;
+    case PUBKEY_MULTI_ORIGIN:
+      return multiOriginSurface;
+    default:
+      return gooseSurface;
+  }
+}
+
 function buildSeededManagedAgent(seed: MockManagedAgentSeed): MockManagedAgent {
   const now = new Date().toISOString();
   const status = seed.status ?? "stopped";
@@ -1018,6 +1507,7 @@ function buildSeededManagedAgent(seed: MockManagedAgentSeed): MockManagedAgent {
     max_turn_duration_seconds: null,
     parallelism: 1,
     system_prompt: null,
+    avatar_url: seed.avatarUrl ?? null,
     model: null,
     env_vars: {},
     status,
@@ -1027,7 +1517,7 @@ function buildSeededManagedAgent(seed: MockManagedAgentSeed): MockManagedAgent {
     last_started_at: status === "running" ? now : null,
     last_stopped_at: status === "stopped" ? now : null,
     last_exit_code: null,
-    last_error: null,
+    last_error: seed.lastError ?? null,
     log_path: `/tmp/mock-agent-${seed.pubkey}.log`,
     start_on_app_launch: true,
     backend: seed.backend ?? { type: "local" },
@@ -1061,10 +1551,10 @@ function resetMockRelayAgents(config?: E2eConfig) {
     mockRelayAgents.push({
       pubkey: seed.pubkey,
       name: seed.name,
-      agent_type: "goose",
+      agent_type: seed.agentType ?? "goose",
       channels: channels.map((channel) => channel.name),
       channel_ids: channels.map((channel) => channel.id),
-      capabilities: ["messages", "channels", "mcp"],
+      capabilities: seed.capabilities ?? ["messages", "channels", "mcp"],
       status: seed.status ?? "online",
       respond_to: seed.respondTo ?? "owner-only",
       respond_to_allowlist: seed.respondToAllowlist ?? [],
@@ -1077,6 +1567,17 @@ function resetMockManagedAgents(config?: E2eConfig) {
 
   for (const seed of config?.mock?.managedAgents ?? []) {
     mockManagedAgents.push(buildSeededManagedAgent(seed));
+    applyMockDisplayName(seed.pubkey, seed.name);
+    mockAgentPubkeys.add(seed.pubkey);
+    mockProfiles.set(seed.pubkey, {
+      pubkey: seed.pubkey,
+      display_name: seed.name,
+      avatar_url: null,
+      about: null,
+      nip05_handle: null,
+      owner_pubkey: MOCK_IDENTITY_PUBKEY,
+      is_agent: true,
+    });
     for (const channel of mockChannels) {
       const isSeedChannel =
         seed.channelIds?.includes(channel.id) ||
@@ -1103,21 +1604,104 @@ function resetMockManagedAgents(config?: E2eConfig) {
   syncMockRelayAgentsFromManagedAgents();
 }
 
+const BUILT_IN_PERSONA_AVATAR_URLS = {
+  productStrategist:
+    "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxMjggMTI4Ij48cmVjdCB3aWR0aD0iMTI4IiBoZWlnaHQ9IjEyOCIgcng9IjMyIiBmaWxsPSIjMmY2ZjczIi8+PGNpcmNsZSBjeD0iOTYiIGN5PSIzMiIgcj0iMTYiIGZpbGw9IiNkZmY3ZjQiIGZpbGwtb3BhY2l0eT0iLjI4Ii8+PHBhdGggZD0iTTI0IDk0YzE0LTI1IDI3LTM3IDQwLTM3czI2IDEyIDQwIDM3IiBmaWxsPSJub25lIiBzdHJva2U9IiNkZmY3ZjQiIHN0cm9rZS13aWR0aD0iOCIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIi8+PHRleHQgeD0iNjQiIHk9IjcyIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LWZhbWlseT0iSW50ZXIsQXJpYWwsc2Fucy1zZXJpZiIgZm9udC1zaXplPSIzNCIgZm9udC13ZWlnaHQ9IjcwMCIgZmlsbD0iI2RmZjdmNCI+UFM8L3RleHQ+PC9zdmc+",
+  implementationPartner:
+    "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxMjggMTI4Ij48cmVjdCB3aWR0aD0iMTI4IiBoZWlnaHQ9IjEyOCIgcng9IjMyIiBmaWxsPSIjNmY0ZTlhIi8+PGNpcmNsZSBjeD0iOTYiIGN5PSIzMiIgcj0iMTYiIGZpbGw9IiNmMGU4ZmYiIGZpbGwtb3BhY2l0eT0iLjI4Ii8+PHBhdGggZD0iTTI0IDk0YzE0LTI1IDI3LTM3IDQwLTM3czI2IDEyIDQwIDM3IiBmaWxsPSJub25lIiBzdHJva2U9IiNmMGU4ZmYiIHN0cm9rZS13aWR0aD0iOCIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIi8+PHRleHQgeD0iNjQiIHk9IjcyIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LWZhbWlseT0iSW50ZXIsQXJpYWwsc2Fucy1zZXJpZiIgZm9udC1zaXplPSIzNCIgZm9udC13ZWlnaHQ9IjcwMCIgZmlsbD0iI2YwZThmZiI+SVA8L3RleHQ+PC9zdmc+",
+  qaReviewer:
+    "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxMjggMTI4Ij48cmVjdCB3aWR0aD0iMTI4IiBoZWlnaHQ9IjEyOCIgcng9IjMyIiBmaWxsPSIjOWE1YTFmIi8+PGNpcmNsZSBjeD0iOTYiIGN5PSIzMiIgcj0iMTYiIGZpbGw9IiNmZmYwZGMiIGZpbGwtb3BhY2l0eT0iLjI4Ii8+PHBhdGggZD0iTTI0IDk0YzE0LTI1IDI3LTM3IDQwLTM3czI2IDEyIDQwIDM3IiBmaWxsPSJub25lIiBzdHJva2U9IiNmZmYwZGMiIHN0cm9rZS13aWR0aD0iOCIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIi8+PHRleHQgeD0iNjQiIHk9IjcyIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LWZhbWlseT0iSW50ZXIsQXJpYWwsc2Fucy1zZXJpZiIgZm9udC1zaXplPSIzNCIgZm9udC13ZWlnaHQ9IjcwMCIgZmlsbD0iI2ZmZjBkYyI+UUE8L3RleHQ+PC9zdmc+",
+  workCoordinator:
+    "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxMjggMTI4Ij48cmVjdCB3aWR0aD0iMTI4IiBoZWlnaHQ9IjEyOCIgcng9IjMyIiBmaWxsPSIjMzQ1ZjhjIi8+PGNpcmNsZSBjeD0iOTYiIGN5PSIzMiIgcj0iMTYiIGZpbGw9IiNlM2YwZmYiIGZpbGwtb3BhY2l0eT0iLjI4Ii8+PHBhdGggZD0iTTI0IDk0YzE0LTI1IDI3LTM3IDQwLTM3czI2IDEyIDQwIDM3IiBmaWxsPSJub25lIiBzdHJva2U9IiNlM2YwZmYiIHN0cm9rZS13aWR0aD0iOCIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIi8+PHRleHQgeD0iNjQiIHk9IjcyIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LWZhbWlseT0iSW50ZXIsQXJpYWwsc2Fucy1zZXJpZiIgZm9udC1zaXplPSIzNCIgZm9udC13ZWlnaHQ9IjcwMCIgZmlsbD0iI2UzZjBmZiI+V0M8L3RleHQ+PC9zdmc+",
+  supportGuide:
+    "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxMjggMTI4Ij48cmVjdCB3aWR0aD0iMTI4IiBoZWlnaHQ9IjEyOCIgcng9IjMyIiBmaWxsPSIjNmE3MDMxIi8+PGNpcmNsZSBjeD0iOTYiIGN5PSIzMiIgcj0iMTYiIGZpbGw9IiNmMmY2ZDciIGZpbGwtb3BhY2l0eT0iLjI4Ii8+PHBhdGggZD0iTTI0IDk0YzE0LTI1IDI3LTM3IDQwLTM3czI2IDEyIDQwIDM3IiBmaWxsPSJub25lIiBzdHJva2U9IiNmMmY2ZDciIHN0cm9rZS13aWR0aD0iOCIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIi8+PHRleHQgeD0iNjQiIHk9IjcyIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LWZhbWlseT0iSW50ZXIsQXJpYWwsc2Fucy1zZXJpZiIgZm9udC1zaXplPSIzNCIgZm9udC13ZWlnaHQ9IjcwMCIgZmlsbD0iI2YyZjZkNyI+U0c8L3RleHQ+PC9zdmc+",
+  experimentDesigner:
+    "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxMjggMTI4Ij48cmVjdCB3aWR0aD0iMTI4IiBoZWlnaHQ9IjEyOCIgcng9IjMyIiBmaWxsPSIjOGIzZjVlIi8+PGNpcmNsZSBjeD0iOTYiIGN5PSIzMiIgcj0iMTYiIGZpbGw9IiNmZmU3ZjAiIGZpbGwtb3BhY2l0eT0iLjI4Ii8+PHBhdGggZD0iTTI0IDk0YzE0LTI1IDI3LTM3IDQwLTM3czI2IDEyIDQwIDM3IiBmaWxsPSJub25lIiBzdHJva2U9IiNmZmU3ZjAiIHN0cm9rZS13aWR0aD0iOCIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIi8+PHRleHQgeD0iNjQiIHk9IjcyIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LWZhbWlseT0iSW50ZXIsQXJpYWwsc2Fucy1zZXJpZiIgZm9udC1zaXplPSIzNCIgZm9udC13ZWlnaHQ9IjcwMCIgZmlsbD0iI2ZmZTdmMCI+RUQ8L3RleHQ+PC9zdmc+",
+} as const;
+
 function resetMockPersonas(config?: E2eConfig) {
   const now = new Date().toISOString();
   const activePersonaIds = new Set(config?.mock?.activePersonaIds ?? []);
-  mockPersonas = [
+  const builtInPersonas = [
+    {
+      id: "builtin:product-strategist",
+      display_name: "Product Strategist",
+      avatar_url: BUILT_IN_PERSONA_AVATAR_URLS.productStrategist,
+      system_prompt:
+        "You are a product strategy agent. You help turn broad ideas into clear product and design direction.\n\n# Focus\n\nClarify the goal, identify the audience, and call out the tradeoffs that matter.",
+    },
+    {
+      id: "builtin:implementation-partner",
+      display_name: "Implementation Partner",
+      avatar_url: BUILT_IN_PERSONA_AVATAR_URLS.implementationPartner,
+      system_prompt:
+        "You are an implementation partner agent. You help turn scoped plans into working changes.\n\n# Focus\n\nPrefer small, direct edits that follow the existing codebase.",
+    },
+    {
+      id: "builtin:qa-reviewer",
+      display_name: "QA Reviewer",
+      avatar_url: BUILT_IN_PERSONA_AVATAR_URLS.qaReviewer,
+      system_prompt:
+        "You are a QA reviewer agent. You look for the ways a change might break.\n\n# Focus\n\nInspect state transitions, empty states, permissions, accessibility, and failure paths.",
+    },
     {
       id: "builtin:fizz",
       display_name: "Fizz",
       avatar_url: null,
       system_prompt: "You are Fizz.",
-      is_builtin: true,
-      is_active: activePersonaIds.has("builtin:fizz"),
-      created_at: now,
-      updated_at: now,
+    },
+    {
+      id: "builtin:work-coordinator",
+      display_name: "Work Coordinator",
+      avatar_url: BUILT_IN_PERSONA_AVATAR_URLS.workCoordinator,
+      system_prompt:
+        "You are a work coordination agent. You keep multi-step work organized and grounded.\n\n# Focus\n\nTrack goals, dependencies, and follow-ups.",
+    },
+    {
+      id: "builtin:support-guide",
+      display_name: "Support Guide",
+      avatar_url: BUILT_IN_PERSONA_AVATAR_URLS.supportGuide,
+      system_prompt:
+        "You are a support and onboarding agent. You help people feel oriented quickly.\n\n# Focus\n\nExplain unfamiliar flows plainly, surface the next useful step, and keep guidance reassuring without becoming verbose.",
+    },
+    {
+      id: "builtin:experiment-designer",
+      display_name: "Experiment Designer",
+      avatar_url: BUILT_IN_PERSONA_AVATAR_URLS.experimentDesigner,
+      system_prompt:
+        "You are an experiment design agent. You help turn uncertainty into experiments.\n\n# Focus\n\nBreak big questions into small trials, name what would prove or disprove an idea, and keep momentum through ambiguity.",
     },
   ];
+  mockPersonas = builtInPersonas.map((persona) => ({
+    id: persona.id,
+    display_name: persona.display_name,
+    avatar_url: persona.avatar_url,
+    system_prompt: persona.system_prompt,
+    runtime: persona.id === "builtin:fizz" ? "goose" : null,
+    model: null,
+    provider: null,
+    name_pool: [],
+    is_builtin: true,
+    is_active: activePersonaIds.has(persona.id),
+    source_team: null,
+    created_at: now,
+    updated_at: now,
+  }));
+
+  for (const persona of config?.mock?.personas ?? []) {
+    mockPersonas.push({
+      id: persona.id ?? crypto.randomUUID(),
+      display_name: persona.displayName,
+      avatar_url: persona.avatarUrl ?? null,
+      system_prompt: persona.systemPrompt,
+      is_builtin: false,
+      is_active: persona.isActive ?? true,
+      source_team: persona.sourceTeam ?? null,
+      env_vars: { ...(persona.envVars ?? {}) },
+      created_at: now,
+      updated_at: now,
+    });
+  }
 }
 
 function resetMockTeams() {
@@ -1569,6 +2153,37 @@ const mockChannels: MockChannel[] = [
       createMockMember(MOCK_IDENTITY_PUBKEY, "member", 700),
     ],
   }),
+  // Deep history channel for the load-older-under-virtualization E2E. Seeded
+  // with more messages than CHANNEL_HISTORY_LIMIT (300) so the initial load
+  // windows to the newest page and a `fetchOlder` (until-cursor) prepend has
+  // genuinely older rows to add — exercising the scroll-restore anchor under
+  // virtualization. Its own channel so existing channels' row-index and unread
+  // assertions stay undisturbed.
+  createMockChannel({
+    id: "feedf00d-0000-4000-8000-000000000007",
+    name: "deep-history",
+    channel_type: "stream",
+    visibility: "open",
+    description: "Channel with paginated history for load-older tests",
+    topic: null,
+    purpose: null,
+    last_message_at: isoMinutesAgo(1),
+    archived_at: null,
+    created_by: ALICE_PUBKEY,
+    topic_set_by: null,
+    topic_set_at: null,
+    purpose_set_by: null,
+    purpose_set_at: null,
+    topic_required: false,
+    max_members: null,
+    nip29_group_id: null,
+    created_minutes_ago: 2000,
+    updated_minutes_ago: 1,
+    members: [
+      createMockMember(ALICE_PUBKEY, "owner", 2000),
+      createMockMember(MOCK_IDENTITY_PUBKEY, "member", 1900),
+    ],
+  }),
 ];
 
 const mockMessages = new Map<string, RelayEvent[]>();
@@ -1616,6 +2231,8 @@ function resetMockMesh() {
 }
 let mockPersonas: RawPersona[] = [];
 let mockTeams: RawTeam[] = [];
+// Listeners registered via the mock __TAURI_INTERNALS__.listen — keyed by event name.
+const tauriEventListeners = new Map<string, Set<() => void>>();
 const defaultMockRelayAgents: RawRelayAgent[] = [
   {
     pubkey: ALICE_PUBKEY,
@@ -1641,16 +2258,6 @@ const defaultMockRelayAgents: RawRelayAgent[] = [
     status: "away",
     respond_to: "anyone",
     respond_to_allowlist: [],
-  },
-  {
-    pubkey: OWNED_RELAY_AGENT_PUBKEY,
-    name: "nadia",
-    agent_type: "goose",
-    channels: ["agents"],
-    channel_ids: ["94a444a4-c0a3-5966-ab05-530c6ddc2301"],
-    capabilities: ["search", "summaries"],
-    status: "online",
-    respond_to: "anyone",
   },
 ];
 let mockRelayAgents: RawRelayAgent[] = defaultMockRelayAgents.map((agent) => ({
@@ -2371,8 +2978,55 @@ function getMockMessageStore(channelId: string): RelayEvent[] {
                 content: "Indexing the channel catalog now.",
                 sig: "mocksig".repeat(20).slice(0, 128),
               },
+              // Owned remote relay agent: declared-owned by the mock viewer,
+              // present in the relay registry, but NOT locally managed. This
+              // keeps the profile Runtime-tab owner gate honest.
+              {
+                id: "mock-agents-owned-relay-nadia",
+                pubkey: OWNED_RELAY_AGENT_PUBKEY,
+                created_at: Math.floor(Date.now() / 1000) - 85,
+                kind: 9,
+                tags: [["h", channelId]],
+                content: "Indexing remotely for my owner.",
+                sig: "mocksig".repeat(20).slice(0, 128),
+              },
+              // Seed one message per managed agent that is a member of #agents.
+              // This lets e2e specs open the profile panel by clicking the
+              // agent's avatar in a message-row (the same pattern as charlie).
+              ...mockManagedAgents
+                .filter((agent) =>
+                  mockChannels
+                    .find((ch) => ch.id === channelId)
+                    ?.members.some((m) => m.pubkey === agent.pubkey),
+                )
+                .map((agent, index) => ({
+                  id: `mock-agents-managed-${agent.pubkey.slice(0, 8)}`,
+                  pubkey: agent.pubkey,
+                  created_at: Math.floor(Date.now() / 1000) - 80 + index,
+                  kind: 9 as const,
+                  tags: [["h", channelId]],
+                  content: `${agent.name} reporting in.`,
+                  sig: "mocksig".repeat(20).slice(0, 128),
+                })),
             ]
-          : [];
+          : channelId === "feedf00d-0000-4000-8000-000000000007"
+            ? // 600 messages > CHANNEL_HISTORY_LIMIT (300): the initial load
+              // windows to the newest 300, leaving 300 older behind the until
+              // cursor — enough for several full fetchOlder pages (batch 100),
+              // so the load-older anchor restore is exercised across REPEATED
+              // prepend cycles, not a single lucky pass. created_at increases
+              // with index (oldest first) so message N+1 is newer than N — the
+              // anchor restores the first-visible row across each prepend.
+              Array.from({ length: 600 }, (_, index) => ({
+                id: `mock-deep-history-${index}`,
+                pubkey: index % 2 === 0 ? ALICE_PUBKEY : MOCK_IDENTITY_PUBKEY,
+                created_at: Math.floor(Date.now() / 1000) - (600 - index) * 60,
+                kind: 9,
+                tags: [["h", channelId]],
+                content: `Deep history message #${index}`,
+                sig: "mocksig".repeat(20).slice(0, 128),
+              }))
+            : [];
 
   mockMessages.set(channelId, seeded);
   return seeded;
@@ -2451,9 +3105,22 @@ function emitMockHistory(
       }
       return true;
     })
-    .sort((left, right) => right.created_at - left.created_at)
+    // Relay order is `created_at DESC, id ASC` — match it (both the WS history
+    // page and the `get_channel_messages_before` keyset are backed by that one
+    // order in production, so the mock must be self-consistent too, else a
+    // same-second slice returned here won't line up with the keyset's tiebreak
+    // and the dense-second escape hatch can't prove completeness). Bare `until`
+    // still can't advance past a second denser than one page; the composite
+    // keyset is the escape hatch.
+    .sort(
+      (left, right) =>
+        right.created_at - left.created_at || left.id.localeCompare(right.id),
+    )
     .slice(0, filter.limit ?? 50)
-    .sort((left, right) => left.created_at - right.created_at);
+    .sort(
+      (left, right) =>
+        left.created_at - right.created_at || left.id.localeCompare(right.id),
+    );
 
   const emit = () => {
     for (const event of events) {
@@ -2469,6 +3136,11 @@ function emitMockHistory(
   const delayMs = getConfig()?.mock?.historyDelayMs ?? 0;
   const isVisibleOlderHistoryPage =
     subId.startsWith("history-") && filter.until !== undefined && !filter["#e"];
+  if (isVisibleOlderHistoryPage) {
+    const counter = window as unknown as { __HISTORY_FETCH_COUNT__?: number };
+    counter.__HISTORY_FETCH_COUNT__ =
+      (counter.__HISTORY_FETCH_COUNT__ ?? 0) + 1;
+  }
   if (delayMs > 0 && isVisibleOlderHistoryPage) {
     const probe = window as unknown as {
       __HISTORY_INFLIGHT__?: number;
@@ -2764,6 +3436,293 @@ async function handleGetForumThread(args: {
   };
 }
 
+type RawThreadCursor = {
+  created_at: number;
+  event_id: string;
+};
+
+type RawThreadRepliesResponse = {
+  events: RelayEvent[];
+  next_cursor: RawThreadCursor | null;
+};
+
+/**
+ * Mirror of the desktop `get_thread_replies` command: return the full reply
+ * subtree under a root, chronological (oldest first), excluding the root itself,
+ * with gap-free `(created_at, event_id)` keyset paging.
+ *
+ * The event-id tiebreak is load-bearing — same-second replies must all page
+ * through even when they cross a page boundary. This lets a Playwright spec
+ * assert the paged union equals the whole subtree, matching the relay contract.
+ */
+async function handleGetThreadReplies(
+  args: {
+    rootEventId: string;
+    channelId?: string | null;
+    limit?: number | null;
+    depthLimit?: number | null;
+    cursor?: RawThreadCursor | null;
+  },
+  config: E2eConfig | undefined,
+): Promise<RawThreadRepliesResponse> {
+  const cap = Math.min(args.limit ?? 200, 500);
+  const filter: MockFilter & Record<string, unknown> = {
+    "#e": [args.rootEventId],
+    depth_limit: args.depthLimit ?? 64,
+    kinds: [...TIMELINE_KINDS],
+    limit: cap,
+  };
+  if (args.channelId) {
+    filter["#h"] = [args.channelId];
+  }
+  if (args.cursor) {
+    filter.thread_cursor = args.cursor.created_at;
+    filter.thread_cursor_id = args.cursor.event_id;
+  }
+  const identity = getIdentity(config);
+  if (
+    !isPGatedFilterAuthorized(
+      filter,
+      identity?.pubkey ?? getMockMemberPubkey(config),
+    )
+  ) {
+    throw new Error(P_GATED_REJECTION_MESSAGE);
+  }
+
+  let subtree: RelayEvent[];
+  if (!identity) {
+    // Mock store: walk the reply forest transitively from the root so nested
+    // replies (reply-to-a-reply) are included, matching thread_metadata depth.
+    const events = args.channelId
+      ? getMockMessageStore(args.channelId)
+      : Array.from(mockMessages.values()).flat();
+    const byId = new Map(events.map((event) => [event.id, event]));
+    const root = byId.get(args.rootEventId);
+    const collected: RelayEvent[] = [];
+    const included = new Set<string>();
+    if (!root) {
+      subtree = collected;
+    } else {
+      const frontier = new Set<string>([root.id]);
+      for (;;) {
+        let added = false;
+        for (const event of events) {
+          if (included.has(event.id)) {
+            continue;
+          }
+          const ref = getThreadReferenceFromTags(event.tags);
+          if (!ref.parentEventId || !frontier.has(ref.parentEventId)) {
+            continue;
+          }
+          included.add(event.id);
+          collected.push(event);
+          frontier.add(event.id);
+          added = true;
+        }
+        if (!added) {
+          break;
+        }
+      }
+      subtree = collected;
+    }
+  } else {
+    // Config mode: exercise the real bridge thread path over /query.
+    const events = await relayQuery(config, [filter]);
+    const nextCursor =
+      events.length >= cap
+        ? {
+            created_at: events[events.length - 1].created_at,
+            event_id: events[events.length - 1].id,
+          }
+        : null;
+    return { events, next_cursor: nextCursor };
+  }
+
+  // Mock mode paging: sort by the composite key, then slice strictly after the
+  // cursor so same-second ties can never be skipped across a page boundary.
+  subtree.sort(
+    (left, right) =>
+      left.created_at - right.created_at || left.id.localeCompare(right.id),
+  );
+  let start = 0;
+  if (args.cursor) {
+    const cursor = args.cursor;
+    start = subtree.findIndex(
+      (event) =>
+        event.created_at > cursor.created_at ||
+        (event.created_at === cursor.created_at &&
+          event.id.localeCompare(cursor.event_id) > 0),
+    );
+    if (start < 0) {
+      start = subtree.length;
+    }
+  }
+  const page = subtree.slice(start, start + cap);
+  const nextCursor =
+    page.length >= cap && start + cap < subtree.length
+      ? {
+          created_at: page[page.length - 1].created_at,
+          event_id: page[page.length - 1].id,
+        }
+      : null;
+
+  return { events: page, next_cursor: nextCursor };
+}
+
+const TIMELINE_KINDS = new Set([
+  9,
+  40002,
+  40008,
+  40099,
+  43001,
+  43002,
+  43003,
+  43004,
+  43005,
+  43006,
+  KIND_HUDDLE_STARTED,
+]);
+
+const KIND_GIFT_WRAP = 1059;
+const P_GATED_KINDS = new Set([
+  KIND_AGENT_OBSERVER_FRAME,
+  KIND_MEMBER_ADDED_NOTIFICATION,
+  KIND_MEMBER_REMOVED_NOTIFICATION,
+  KIND_GIFT_WRAP,
+  KIND_DM_VISIBILITY,
+]);
+const P_GATED_REJECTION_MESSAGE =
+  "restricted: p-gated kinds require #p tag matching your pubkey";
+
+function filterKinds(filter: { kinds?: unknown }): number[] | undefined {
+  return Array.isArray(filter.kinds)
+    ? filter.kinds.filter((kind): kind is number => typeof kind === "number")
+    : undefined;
+}
+
+function filterCanMatchPGated(filter: { kinds?: unknown }) {
+  const kinds = filterKinds(filter);
+  return !kinds || kinds.some((kind) => P_GATED_KINDS.has(kind));
+}
+
+function filterHasOwnPTag(filter: { "#p"?: unknown }, pubkey: string) {
+  const values = filter["#p"];
+  return (
+    Array.isArray(values) &&
+    values.length > 0 &&
+    values.every((value) => value === pubkey)
+  );
+}
+
+function isPGatedFilterAuthorized(
+  filter: { "#p"?: unknown; ids?: unknown; kinds?: unknown },
+  pubkey: string,
+) {
+  if (!filterCanMatchPGated(filter)) {
+    return true;
+  }
+
+  const kinds = filterKinds(filter);
+  const ids = filter.ids;
+  const explicitlyDmVisibility = kinds?.includes(KIND_DM_VISIBILITY);
+  if (!explicitlyDmVisibility && Array.isArray(ids) && ids.length > 0) {
+    return true;
+  }
+
+  return filterHasOwnPTag(filter, pubkey);
+}
+
+type RawChannelMessagesPageResponse = {
+  events: RelayEvent[];
+  next_cursor: RawThreadCursor | null;
+};
+
+/**
+ * Mirror of the desktop `get_channel_messages_before` command: return one
+ * keyset page of *top-level* channel history strictly older than a composite
+ * `(before, before_id)` cursor, newest first (relay order `created_at DESC,
+ * id ASC`).
+ *
+ * This is the dense-second escape hatch — the id tiebreak is load-bearing so a
+ * single `created_at` second denser than one WS page can still be paged
+ * through: within a tied second the relay advances via `id > before_id`. Lets a
+ * Playwright spec assert the keyset union reaches every top-level message even
+ * when a second holds more than one page.
+ */
+async function handleGetChannelMessagesBefore(
+  args: {
+    channelId: string;
+    before: number;
+    beforeId?: string | null;
+    limit?: number | null;
+  },
+  config: E2eConfig | undefined,
+): Promise<RawChannelMessagesPageResponse> {
+  const cap = Math.min(args.limit ?? 200, 500);
+  const identity = getIdentity(config);
+
+  let events: RelayEvent[];
+  if (!identity) {
+    // Mock store: top-level timeline events for this channel.
+    events = getMockMessageStore(args.channelId).filter((event) => {
+      if (!TIMELINE_KINDS.has(event.kind)) {
+        return false;
+      }
+      return getThreadReferenceFromTags(event.tags).rootEventId === null;
+    });
+  } else {
+    // Config mode: exercise the real bridge keyset over /query.
+    const filter: Record<string, unknown> = {
+      "#h": [args.channelId],
+      kinds: [...TIMELINE_KINDS],
+      until: args.before,
+      limit: cap,
+    };
+    if (args.beforeId) {
+      filter.before_id = args.beforeId;
+    }
+    const page = await relayQuery(config, [filter]);
+    const nextCursor =
+      page.length >= cap
+        ? {
+            created_at: page[page.length - 1].created_at,
+            event_id: page[page.length - 1].id,
+          }
+        : null;
+    return { events: page, next_cursor: nextCursor };
+  }
+
+  // Mock mode paging: relay order (created_at DESC, id ASC), then take the
+  // slice strictly older than the composite cursor. Strictly-older means
+  // `created_at < before OR (created_at === before AND id > before_id)` — the
+  // id tiebreak walks *forward* through a tied second under ASC id order.
+  events.sort(
+    (left, right) =>
+      right.created_at - left.created_at || left.id.localeCompare(right.id),
+  );
+  const before = args.before;
+  const beforeId = args.beforeId ?? null;
+  const older = events.filter((event) => {
+    if (event.created_at < before) {
+      return true;
+    }
+    if (event.created_at === before && beforeId !== null) {
+      return event.id.localeCompare(beforeId) > 0;
+    }
+    return false;
+  });
+  const page = older.slice(0, cap);
+  const nextCursor =
+    page.length >= cap
+      ? {
+          created_at: page[page.length - 1].created_at,
+          event_id: page[page.length - 1].id,
+        }
+      : null;
+
+  return { events: page, next_cursor: nextCursor };
+}
+
 function getMockUserNotes(pubkey: string): RawUserNote[] {
   const now = Math.floor(Date.now() / 1000);
 
@@ -2928,6 +3887,174 @@ function handleGetLikedNotes(): RawUserNotesResponse {
 // accepts 64-hex `e` tags (getDeletionTargets in formatTimelineMessages.ts), so
 // a kind:5 targeting a 32-hex reaction id would be silently ignored and the
 // reaction pill would never clear on toggle-off.
+// --- Mock projects (NIP-34 repo announcements + git activity) ---
+// Deterministic fixtures so the Projects view (cards, stat pills, and the
+// contribution heatmap) renders with data in screenshots and e2e specs.
+
+const MOCK_PROJECT_SEEDS = [
+  {
+    dtag: "buzz",
+    name: "buzz",
+    description:
+      "Relay, desktop, and mobile clients for the Buzz workspace platform.",
+    owner: MOCK_IDENTITY_PUBKEY,
+    contributors: [ALICE_PUBKEY, BOB_PUBKEY, CHARLIE_PUBKEY],
+    activityLevel: 4,
+  },
+  {
+    dtag: "relay-tools",
+    name: "relay-tools",
+    description: "Operator tooling and admin CLI for relay deployments.",
+    owner: ALICE_PUBKEY,
+    contributors: [MOCK_IDENTITY_PUBKEY, BOB_PUBKEY],
+    activityLevel: 2,
+  },
+  {
+    dtag: "design-system",
+    name: "design-system",
+    description: "Shared UI tokens, typography ramps, and component library.",
+    owner: BOB_PUBKEY,
+    contributors: [ALICE_PUBKEY],
+    activityLevel: 1,
+  },
+] as const;
+
+const MOCK_PROJECT_SUBJECTS = [
+  "Fix reconnect backoff jitter",
+  "Polish overview cards",
+  "Add contribution heatmap",
+  "Refactor filter matching",
+  "Speed up event dedup",
+  "Handle empty clone URLs",
+  "Update onboarding copy",
+  "Tighten p-gate checks",
+];
+
+const MOCK_PROJECT_KINDS = new Set<number>([
+  KIND_REPO_ANNOUNCEMENT,
+  KIND_GIT_PATCH,
+  KIND_GIT_PULL_REQUEST,
+  KIND_GIT_PR_UPDATE,
+  KIND_GIT_ISSUE,
+  KIND_GIT_STATUS_OPEN,
+  KIND_GIT_STATUS_MERGED,
+  KIND_GIT_STATUS_CLOSED,
+  KIND_GIT_STATUS_DRAFT,
+]);
+
+function mulberry32(seed: number) {
+  let state = seed;
+  return () => {
+    state |= 0;
+    state = (state + 0x6d2b79f5) | 0;
+    let t = Math.imul(state ^ (state >>> 15), 1 | state);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+let mockProjectEventStore: RelayEvent[] | null = null;
+
+function buildMockProjectEvents(): RelayEvent[] {
+  const events: RelayEvent[] = [];
+  const daySeconds = 86_400;
+  const now = Math.floor(Date.now() / 1000);
+  const historyDays = 26 * 7;
+
+  for (const [projectIndex, seed] of MOCK_PROJECT_SEEDS.entries()) {
+    const repoAddress = `${KIND_REPO_ANNOUNCEMENT}:${seed.owner}:${seed.dtag}`;
+    const authors = [seed.owner, ...seed.contributors];
+    const random = mulberry32(projectIndex + 1);
+
+    events.push(
+      createMockEvent(
+        KIND_REPO_ANNOUNCEMENT,
+        seed.description,
+        [
+          ["d", seed.dtag],
+          ["name", seed.name],
+          ["description", seed.description],
+          ["clone", `https://relay.example.com/git/${seed.dtag}.git`],
+          ...seed.contributors.map((pubkey) => ["p", pubkey]),
+        ],
+        seed.owner,
+        now - (historyDays + 30 + projectIndex) * daySeconds,
+        `mock-project-${seed.dtag}`.replace(/[^a-zA-Z0-9]/g, ""),
+      ),
+    );
+
+    for (let dayOffset = historyDays; dayOffset >= 0; dayOffset -= 1) {
+      // Roughly half the days are quiet; busy days scale with activityLevel.
+      if (random() < 0.5) continue;
+      const dayEventCount = 1 + Math.floor(random() * seed.activityLevel);
+
+      for (let index = 0; index < dayEventCount; index += 1) {
+        const createdAt =
+          now - dayOffset * daySeconds - Math.floor(random() * 10) * 3_600;
+        const author = authors[Math.floor(random() * authors.length)];
+        const subject =
+          MOCK_PROJECT_SUBJECTS[
+            Math.floor(random() * MOCK_PROJECT_SUBJECTS.length)
+          ];
+        const commitHash = `${seed.dtag}${dayOffset}x${index}`
+          .padEnd(40, "0")
+          .slice(0, 40);
+        const roll = random();
+        const kind =
+          roll < 0.7
+            ? KIND_GIT_PATCH
+            : roll < 0.85
+              ? KIND_GIT_PULL_REQUEST
+              : KIND_GIT_ISSUE;
+        const tags = [
+          ["a", repoAddress],
+          ["subject", subject],
+          ...(kind === KIND_GIT_ISSUE ? [] : [["c", commitHash]]),
+        ];
+
+        events.push(createMockEvent(kind, subject, tags, author, createdAt));
+      }
+    }
+  }
+
+  return events;
+}
+
+function getMockProjectEventStore(): RelayEvent[] {
+  mockProjectEventStore ??= buildMockProjectEvents();
+  return mockProjectEventStore;
+}
+
+function filterMockProjectEvents(filter: MockFilter): RelayEvent[] {
+  const authors = filter.authors?.map((author) => author.toLowerCase());
+  return getMockProjectEventStore()
+    .filter((event) => {
+      if (filter.kinds && !filter.kinds.includes(event.kind)) return false;
+      if (authors && !authors.includes(event.pubkey.toLowerCase())) {
+        return false;
+      }
+      if (
+        filter["#d"] &&
+        !event.tags.some(
+          (tag) => tag[0] === "d" && filter["#d"]?.includes(tag[1]),
+        )
+      ) {
+        return false;
+      }
+      if (
+        filter["#a"] &&
+        !event.tags.some(
+          (tag) => tag[0] === "a" && filter["#a"]?.includes(tag[1]),
+        )
+      ) {
+        return false;
+      }
+      return true;
+    })
+    .sort((left, right) => right.created_at - left.created_at)
+    .slice(0, filter.limit ?? 500);
+}
+
 function mockEventId(): string {
   const bytes = new Uint8Array(32);
   crypto.getRandomValues(bytes);
@@ -3023,6 +4150,14 @@ async function relayQuery(
   filters: Array<Record<string, unknown>>,
 ): Promise<RelayEvent[]> {
   const identity = getRelayIdentity(config);
+  if (
+    !filters.every((filter) =>
+      isPGatedFilterAuthorized(filter, identity.pubkey),
+    )
+  ) {
+    throw new Error(P_GATED_REJECTION_MESSAGE);
+  }
+
   const response = await fetch(`${getRelayHttpUrl(config)}/query`, {
     method: "POST",
     headers: {
@@ -3321,6 +4456,13 @@ async function handleGetUsersBatch(
   },
   config: E2eConfig | undefined,
 ) {
+  const usersBatchDelayMs = config?.mock?.usersBatchDelayMs ?? 0;
+  if (usersBatchDelayMs > 0) {
+    await new Promise<void>((resolve) => {
+      window.setTimeout(resolve, usersBatchDelayMs);
+    });
+  }
+
   const identity = getIdentity(config);
   if (!identity) {
     const profiles: RawUsersBatchResponse["profiles"] = {};
@@ -3403,6 +4545,7 @@ async function handleSearchUsers(
   args: {
     query: string;
     limit?: number;
+    cursor?: string | null;
   },
   config: E2eConfig | undefined,
 ) {
@@ -3417,7 +4560,9 @@ async function handleSearchUsers(
   if (!identity) {
     const normalizedQuery = args.query.trim().toLowerCase();
 
-    const results = listMockProfiles()
+    const limit = args.limit ?? 8;
+    const page = Math.max(Number(args.cursor ?? 1) || 1, 1);
+    const allResults = listMockProfiles()
       .filter((profile) => {
         if (normalizedQuery.length === 0) {
           return true;
@@ -3437,8 +4582,9 @@ async function handleSearchUsers(
         const rightName =
           right.display_name ?? right.nip05_handle ?? right.pubkey;
         return leftName.localeCompare(rightName);
-      })
-      .slice(0, args.limit ?? 8)
+      });
+    const results = allResults
+      .slice((page - 1) * limit, page * limit)
       .map((profile) => ({
         pubkey: profile.pubkey,
         display_name: profile.display_name,
@@ -3450,16 +4596,18 @@ async function handleSearchUsers(
 
     return {
       users: results,
+      next_cursor: page * limit < allResults.length ? String(page + 1) : null,
     } satisfies RawSearchUsersResponse;
   }
 
   // NIP-50 search on kind:0 profiles
   const limit = args.limit ?? 8;
   const normalizedQuery = args.query.trim();
+  const page = Math.max(Number(args.cursor ?? 1) || 1, 1);
   const filter =
     normalizedQuery.length === 0
-      ? { kinds: [0], limit }
-      : { kinds: [0], search: args.query, limit };
+      ? { kinds: [0], limit, page }
+      : { kinds: [0], search: args.query, limit, page };
   const events = await relayQuery(config, [filter]);
   const users = events.map((ev) => {
     const content = JSON.parse(ev.content ?? "{}");
@@ -3480,7 +4628,10 @@ async function handleSearchUsers(
         : false,
     };
   });
-  return { users };
+  return {
+    users,
+    next_cursor: users.length >= limit ? String(page + 1) : null,
+  };
 }
 
 async function handleGetPresence(
@@ -4087,6 +5238,12 @@ async function handleAddChannelMembers(
   },
   config: E2eConfig | undefined,
 ): Promise<RawAddChannelMembersResponse> {
+  const addChannelMembersDelayMs = config?.mock?.addChannelMembersDelayMs ?? 0;
+  if (addChannelMembersDelayMs > 0) {
+    await new Promise((resolve) =>
+      window.setTimeout(resolve, addChannelMembersDelayMs),
+    );
+  }
   const identity = getIdentity(config);
   if (!identity) {
     const channel = getMockChannel(args.channelId);
@@ -4564,7 +5721,19 @@ async function handleGetFeed(
   };
 }
 
-async function handleListRelayAgents(): Promise<RawRelayAgent[]> {
+async function delayAgentList(config: E2eConfig | undefined) {
+  const agentListDelayMs = config?.mock?.agentListDelayMs ?? 0;
+  if (agentListDelayMs > 0) {
+    await new Promise<void>((resolve) => {
+      window.setTimeout(resolve, agentListDelayMs);
+    });
+  }
+}
+
+async function handleListRelayAgents(
+  config: E2eConfig | undefined,
+): Promise<RawRelayAgent[]> {
+  await delayAgentList(config);
   syncMockRelayAgentsFromManagedAgents();
   return mockRelayAgents.map(cloneRelayAgent);
 }
@@ -4691,7 +5860,10 @@ async function handleDiscoverManagedAgentPrereqs(
   };
 }
 
-async function handleListManagedAgents(): Promise<RawManagedAgent[]> {
+async function handleListManagedAgents(
+  config: E2eConfig | undefined,
+): Promise<RawManagedAgent[]> {
+  await delayAgentList(config);
   return mockManagedAgents.map(cloneManagedAgent);
 }
 
@@ -4768,6 +5940,7 @@ async function handleCreatePersona(args: {
     system_prompt: args.input.systemPrompt.trim(),
     is_builtin: false,
     is_active: true,
+    source_team: null,
     env_vars: { ...(args.input.envVars ?? {}) },
     created_at: now,
     updated_at: now,
@@ -4873,7 +6046,7 @@ function ensureMockPersonaIsActive(personaId: string) {
   }
   if (!persona.is_active) {
     throw new Error(
-      `${persona.display_name} is not in My Agents. Choose it from Persona Catalog first.`,
+      `${persona.display_name} is not in My Agents. Choose it from Agent Catalog first.`,
     );
   }
 }
@@ -5034,6 +6207,7 @@ async function handleParsePersonaFiles(args: {
     display_name: string;
     system_prompt: string;
     avatar_data_url: string | null;
+    avatar_ref: string | null;
     source_file: string;
   }[];
   skipped: { source_file: string; reason: string }[];
@@ -5045,6 +6219,7 @@ async function handleParsePersonaFiles(args: {
         display_name: "Imported Persona",
         system_prompt: "You are an imported test persona.",
         avatar_data_url: null,
+        avatar_ref: null,
         source_file: args.fileName,
       },
     ],
@@ -5128,6 +6303,7 @@ async function handleCreateManagedAgent(
     max_turn_duration_seconds: args.input.maxTurnDurationSeconds ?? null,
     parallelism: args.input.parallelism ?? 1,
     system_prompt: args.input.systemPrompt?.trim() || null,
+    avatar_url: avatarUrl,
     model: args.input.model?.trim() || null,
     env_vars: { ...(args.input.envVars ?? {}) },
     status: args.input.spawnAfterCreate ? "running" : "stopped",
@@ -5504,6 +6680,13 @@ async function handleSendChannelMessage(
   config: E2eConfig | undefined,
 ): Promise<RawSendChannelMessageResponse> {
   const kind = args.kind ?? 9;
+  const sendMessageDelayMs = config?.mock?.sendMessageDelayMs ?? 0;
+  if (sendMessageDelayMs > 0) {
+    await new Promise((resolve) =>
+      window.setTimeout(resolve, sendMessageDelayMs),
+    );
+  }
+
   // NIP-92 imeta attachments. The real relay echoes these back on the stored
   // event; mirror that here so attachment renderers (FileCard, images, video)
   // have the imeta tags they key on. `null`/empty → no extra tags.
@@ -5679,6 +6862,23 @@ async function handleSendManagedAgentChannelMessage(
     depth: 0,
     created_at: createdAt,
   };
+}
+
+/**
+ * Mock the `delete_message` Tauri command. Removes the event from the
+ * in-memory mock store so the query-cache invalidation in
+ * `useDeleteMessageMutation.onSuccess` (which filters by eventId) finds
+ * nothing to keep, and the row disappears from the timeline.
+ */
+function handleDeleteMessage(args: {
+  channelId: string;
+  eventId: string;
+}): void {
+  const history = mockMessages.get(args.channelId);
+  if (history) {
+    const index = history.findIndex((ev) => ev.id === args.eventId);
+    if (index !== -1) history.splice(index, 1);
+  }
 }
 
 /**
@@ -6007,13 +7207,21 @@ function sendToMockSocket(args: {
 
   if (type === "REQ") {
     const subId = rest[0] as string;
+    const filters = rest.slice(1) as MockFilter[];
+    if (
+      !filters.every((filter) =>
+        isPGatedFilterAuthorized(filter, MOCK_IDENTITY_PUBKEY),
+      )
+    ) {
+      sendWsText(socket.handler, ["CLOSED", subId, P_GATED_REJECTION_MESSAGE]);
+      return;
+    }
 
     if (subId.startsWith("live-")) {
       // Collect channel IDs from all filters in the REQ
       const channelIds = new Set<string>();
       const kinds = new Set<number>();
-      for (let i = 1; i < rest.length; i++) {
-        const f = rest[i] as { "#h"?: string[]; kinds?: number[] };
+      for (const f of filters) {
         const cid = f["#h"]?.[0];
         if (cid) channelIds.add(cid);
         for (const kind of f.kinds ?? []) {
@@ -6070,6 +7278,14 @@ function sendToMockSocket(args: {
       const authors = filter.authors?.map((a) => a.toLowerCase());
       for (const event of mockReminderEvents) {
         if (authors && !authors.includes(event.pubkey.toLowerCase())) continue;
+        sendWsText(socket.handler, ["EVENT", subId, event]);
+      }
+      sendWsText(socket.handler, ["EOSE", subId]);
+      return;
+    }
+
+    if (filter.kinds?.some((kind) => MOCK_PROJECT_KINDS.has(kind))) {
+      for (const event of filterMockProjectEvents(filter)) {
         sendWsText(socket.handler, ["EVENT", subId, event]);
       }
       sendWsText(socket.handler, ["EOSE", subId]);
@@ -6323,6 +7539,8 @@ export function maybeInstallE2eTauriMocks() {
       }
     ).connectionStateEmitter.set(state);
   };
+  window.__BUZZ_E2E_GET_RELAY_CONNECTION_STATE__ = () =>
+    relayClient.getConnectionState();
 
   window.__BUZZ_E2E_SEED_MOCK_REMINDERS__ = (reminders) => {
     mockReminderEvents.length = 0;
@@ -6356,20 +7574,24 @@ export function maybeInstallE2eTauriMocks() {
     agentPubkey,
     channelId,
     turnId,
+    kind = "turn_started",
   }) => {
     seedTurnSeq += 1;
-    syncAgentTurnsFromEvents(agentPubkey, [
-      {
-        seq: seedTurnSeq,
-        timestamp: new Date().toISOString(),
-        kind: "turn_started",
-        agentIndex: 0,
-        channelId,
-        sessionId: null,
-        turnId,
-        payload: null,
-      },
-    ]);
+    const event = {
+      seq: seedTurnSeq,
+      timestamp: new Date().toISOString(),
+      kind,
+      agentIndex: 0,
+      channelId,
+      sessionId: null,
+      turnId,
+      payload: null,
+    };
+    syncAgentTurnsFromEvents(agentPubkey, [event]);
+    syncAgentObserverEvents(agentPubkey, [event]);
+  };
+  window.__BUZZ_E2E_SEED_OBSERVER_EVENTS__ = ({ agentPubkey, events }) => {
+    injectObserverEventsForE2E(agentPubkey, events);
   };
   const meshNodeStatus = (
     state: "off" | "running",
@@ -6542,8 +7764,15 @@ export function maybeInstallE2eTauriMocks() {
         return importMockIdentity(
           (payload as { nsec?: string } | null)?.nsec ?? "",
         );
-      case "apply_workspace":
+      case "apply_workspace": {
+        const applyDelayMs = activeConfig?.mock?.applyWorkspaceDelayMs ?? 0;
+        if (applyDelayMs > 0) {
+          return new Promise((resolve) =>
+            window.setTimeout(resolve, applyDelayMs),
+          );
+        }
         return;
+      }
       case "get_profile":
         return handleGetProfile(activeConfig);
       case "update_profile":
@@ -6593,6 +7822,126 @@ export function maybeInstallE2eTauriMocks() {
           },
           activeConfig,
         );
+      case "get_project_repo_snapshot":
+        return {
+          latest_commit: {
+            hash: "0123456789abcdef0123456789abcdef01234567",
+            short_hash: "0123456",
+            author_name: "Brain",
+            author_email: "brain@example.com",
+            timestamp: Math.floor(Date.now() / 1000) - 600,
+            subject: "Add Trello board workflow details",
+          },
+          commits: [
+            {
+              hash: "0123456789abcdef0123456789abcdef01234567",
+              short_hash: "0123456",
+              author_name: "Brain",
+              author_email: "brain@example.com",
+              timestamp: Math.floor(Date.now() / 1000) - 600,
+              subject: "Add Trello board workflow details",
+            },
+            {
+              hash: "123456789abcdef0123456789abcdef012345678",
+              short_hash: "1234567",
+              author_name: "Thomas P",
+              author_email: "thomasp@example.com",
+              timestamp: Math.floor(Date.now() / 1000) - 1_800,
+              subject: "Point project repository details at active branch",
+            },
+            {
+              hash: "23456789abcdef0123456789abcdef0123456789",
+              short_hash: "2345678",
+              author_name: "Brain",
+              author_email: "brain@example.com",
+              timestamp: Math.floor(Date.now() / 1000) - 3_600,
+              subject: "Make project repository-first",
+            },
+            {
+              hash: "3456789abcdef0123456789abcdef0123456789a",
+              short_hash: "3456789",
+              author_name: "Git Importer",
+              author_email: "git-importer@example.com",
+              timestamp: Math.floor(Date.now() / 1000) - 7_200,
+              subject: "Merge remote project history into local workspace",
+            },
+          ],
+          contributors: [
+            {
+              name: "Brain",
+              email: "brain@example.com",
+              commit_count: 8,
+              last_commit_at: Math.floor(Date.now() / 1000) - 600,
+            },
+            {
+              name: "Thomas P",
+              email: "thomasp@example.com",
+              commit_count: 3,
+              last_commit_at: Math.floor(Date.now() / 1000) - 1_800,
+            },
+            {
+              name: "Git Importer",
+              email: "git-importer@example.com",
+              commit_count: 1,
+              last_commit_at: Math.floor(Date.now() / 1000) - 7_200,
+            },
+          ],
+          files: [
+            {
+              path: "desktop/src/features/projects/ui/ProjectDetailScreen.tsx",
+              kind: "blob",
+              size: 18420,
+              preview_content:
+                'export function ProjectDetailScreen() {\n  return <WorkspaceTabs defaultValue="files" />;\n}\n',
+            },
+            {
+              path: "desktop/src/features/projects/ui/ProjectsView.tsx",
+              kind: "blob",
+              size: 16412,
+              preview_content:
+                "export function ProjectsView() {\n  return <ProjectsToolbar />;\n}\n",
+            },
+            {
+              path: "desktop/src/features/projects/hooks.ts",
+              kind: "blob",
+              size: 9520,
+              preview_content:
+                "export function useProjectRepoSnapshotQuery(project) {\n  return useQuery({ queryKey: [project.id, 'repo-snapshot'] });\n}\n",
+            },
+            {
+              path: "crates/buzz-relay/src/api/git/transport.rs",
+              kind: "blob",
+              size: 33120,
+              preview_content:
+                "// Smart HTTP git transport\n// Handles upload-pack and receive-pack for Buzz git repos.\n",
+            },
+          ],
+        };
+      case "get_project_local_repo_snapshot":
+        return null;
+      case "get_project_repo_sync_status":
+        return {
+          local_path: null,
+          local_branch: null,
+          local_head: null,
+          local_short_head: null,
+          remote_branch: "main",
+          remote_head: "0123456789abcdef0123456789abcdef01234567",
+          remote_short_head: "0123456",
+          ahead_count: 0,
+          behind_count: 0,
+          has_uncommitted_changes: false,
+          has_untracked_files: false,
+          can_push: false,
+          push_block_reason: "No local checkout found.",
+        };
+      case "list_project_local_repositories":
+        return [];
+      case "push_project_local_repository":
+        return {
+          pushed: true,
+          message: "Pushed main to remote.",
+        };
       case "get_relay_ws_url":
         return getRelayWsUrl(activeConfig);
       case "get_default_relay_url":
@@ -6629,7 +7978,7 @@ export function maybeInstallE2eTauriMocks() {
           activeConfig,
         );
       case "list_relay_agents":
-        return handleListRelayAgents();
+        return handleListRelayAgents(activeConfig);
       case "list_personas":
         return handleListPersonas();
       case "create_persona":
@@ -6644,6 +7993,61 @@ export function maybeInstallE2eTauriMocks() {
         return handleDeletePersona(
           payload as Parameters<typeof handleDeletePersona>[0],
         );
+      case "reconcile_inbound_persona_event": {
+        const nostrEvent = JSON.parse(
+          (payload as { eventJson: string }).eventJson,
+        ) as {
+          kind: number;
+          tags: string[][];
+          content: string;
+          created_at: number;
+        };
+        if (nostrEvent.kind === 30175) {
+          // Persona upsert — parse content and upsert into mockPersonas by d-tag
+          const dTag = nostrEvent.tags.find((t) => t[0] === "d")?.[1];
+          if (dTag) {
+            const content = JSON.parse(nostrEvent.content) as {
+              display_name?: string;
+              system_prompt?: string;
+            };
+            const now = new Date().toISOString();
+            const existing = mockPersonas.find((p) => p.id === dTag);
+            if (existing) {
+              existing.display_name =
+                content.display_name ?? existing.display_name;
+              existing.system_prompt =
+                content.system_prompt ?? existing.system_prompt;
+              existing.updated_at = now;
+            } else {
+              mockPersonas.push({
+                id: dTag,
+                display_name: content.display_name ?? dTag,
+                avatar_url: null,
+                system_prompt: content.system_prompt ?? "",
+                is_builtin: false,
+                is_active: true,
+                env_vars: {},
+                created_at: now,
+                updated_at: now,
+              });
+            }
+          }
+        } else if (nostrEvent.kind === 5) {
+          // Tombstone — extract d-tag from a-tag "30175:<pubkey>:<d_tag>" and remove
+          const aTagValue = nostrEvent.tags.find((t) => t[0] === "a")?.[1];
+          if (aTagValue) {
+            const dTag = aTagValue.split(":")[2];
+            if (dTag) {
+              mockPersonas = mockPersonas.filter((p) => p.id !== dTag);
+            }
+          }
+        }
+        // Mirror the real Rust backend: emit "agents-data-changed" after reconcile.
+        for (const cb of tauriEventListeners.get("agents-data-changed") ?? []) {
+          cb();
+        }
+        return undefined;
+      }
       case "set_persona_active":
         return handleSetPersonaActive(
           payload as Parameters<typeof handleSetPersonaActive>[0],
@@ -6683,7 +8087,7 @@ export function maybeInstallE2eTauriMocks() {
       case "export_persona_to_json":
         return handleExportPersonaToJson(payload as { id: string });
       case "list_managed_agents":
-        return handleListManagedAgents();
+        return handleListManagedAgents(activeConfig);
       case "get_agent_memory":
         return handleGetAgentMemory(
           (payload as Parameters<typeof handleGetAgentMemory>[0]) ?? {},
@@ -6725,6 +8129,47 @@ export function maybeInstallE2eTauriMocks() {
           selectedModel: null,
           supportsSwitching: false,
         };
+      case "discover_agent_models": {
+        const input = (payload as { input?: { provider?: string } } | null)
+          ?.input;
+        const provider = input?.provider?.trim() ?? "";
+        const openAiModels = [
+          { id: "gpt-5.5", name: "GPT-5.5", description: null },
+          { id: "gpt-5.4", name: "GPT-5.4", description: null },
+          { id: "gpt-5.4-mini", name: "GPT-5.4 mini", description: null },
+          { id: "gpt-5.4-nano", name: "GPT-5.4 nano", description: null },
+        ];
+        const anthropicModels = [
+          {
+            id: "goose-claude-4-6-opus",
+            name: "Claude Opus 4.6",
+            description: null,
+          },
+          {
+            id: "goose-claude-4-6-sonnet",
+            name: "Claude Sonnet 4.6",
+            description: null,
+          },
+        ];
+        const models =
+          provider === "openai"
+            ? openAiModels
+            : provider === "anthropic"
+              ? anthropicModels
+              : [...anthropicModels, ...openAiModels];
+        return {
+          agentName: "mock-agent",
+          agentVersion: "0.0.0",
+          models,
+          agentDefaultModel: null,
+          selectedModel: null,
+          supportsSwitching: true,
+        };
+      }
+      case "get_agent_config_surface": {
+        const configArgs = payload as { pubkey: string };
+        return buildMockConfigSurface(configArgs.pubkey);
+      }
       case "update_managed_agent":
         return handleUpdateManagedAgent(
           payload as Parameters<typeof handleUpdateManagedAgent>[0],
@@ -6818,6 +8263,16 @@ export function maybeInstallE2eTauriMocks() {
         return handleGetForumThread(
           payload as Parameters<typeof handleGetForumThread>[0],
         );
+      case "get_thread_replies":
+        return handleGetThreadReplies(
+          payload as Parameters<typeof handleGetThreadReplies>[0],
+          activeConfig,
+        );
+      case "get_channel_messages_before":
+        return handleGetChannelMessagesBefore(
+          payload as Parameters<typeof handleGetChannelMessagesBefore>[0],
+          activeConfig,
+        );
       case "send_channel_message":
         return handleSendChannelMessage(
           payload as Parameters<typeof handleSendChannelMessage>[0],
@@ -6828,6 +8283,11 @@ export function maybeInstallE2eTauriMocks() {
           payload as Parameters<typeof handleSendManagedAgentChannelMessage>[0],
           activeConfig,
         );
+      case "delete_message":
+        handleDeleteMessage(
+          payload as Parameters<typeof handleDeleteMessage>[0],
+        );
+        return null;
       case "edit_message":
         return handleEditMessage(
           payload as Parameters<typeof handleEditMessage>[0],
@@ -6930,14 +8390,6 @@ export function maybeInstallE2eTauriMocks() {
         return sendToMockSocket(
           payload as Parameters<typeof sendToMockSocket>[0],
         );
-      case "plugin:websocket|disconnect":
-        if (isRelayMode(activeConfig)) {
-          realSockets.get((payload as { id: number }).id)?.close();
-          realSockets.delete((payload as { id: number }).id);
-          return;
-        }
-
-        return disconnectMockSocket((payload as { id: number }).id);
       case "plugin:window|show":
       case "plugin:window|unminimize":
       case "plugin:window|set_focus":
@@ -6950,6 +8402,8 @@ export function maybeInstallE2eTauriMocks() {
         return handleUpdaterDownloadAndInstall(payload, activeConfig);
       case "relay_reconnect_hook":
         return null;
+      case "relay_reconnect_hook_configured":
+        return false;
       case "plugin:resources|close":
         return null;
       case "plugin:process|restart":
@@ -7027,6 +8481,27 @@ export function maybeInstallE2eTauriMocks() {
   window.__BUZZ_E2E_INVOKE_MOCK_COMMAND__ = (command, payload) =>
     handleMockCommand(command, payload ?? null);
   mockIPC(handleMockCommand);
+
+  // Wire up __TAURI_INTERNALS__.listen so tests can subscribe to backend-emitted
+  // events (e.g. "agents-data-changed"). mockIPC already ensures __TAURI_INTERNALS__
+  // exists; we just add the listen property without clobbering invoke.
+  (
+    window as unknown as {
+      __TAURI_INTERNALS__: {
+        listen?: (event: string, cb: () => void) => Promise<() => void>;
+      };
+    }
+  ).__TAURI_INTERNALS__.listen = async (event: string, cb: () => void) => {
+    let listeners = tauriEventListeners.get(event);
+    if (!listeners) {
+      listeners = new Set();
+      tauriEventListeners.set(event, listeners);
+    }
+    listeners.add(cb);
+    return () => {
+      tauriEventListeners.get(event)?.delete(cb);
+    };
+  };
 
   installed = true;
 }

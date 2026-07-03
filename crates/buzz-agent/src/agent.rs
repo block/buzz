@@ -1,11 +1,13 @@
 use std::sync::Arc;
 
 use serde_json::json;
-use tokio::sync::{watch, Semaphore};
+use tokio::sync::{mpsc, watch, Semaphore};
 use tokio::task::JoinSet;
 
+use crate::builtin;
 use crate::config::{Config, MAX_PROMPT_BYTES, MAX_TOOL_CALLS_PER_TURN, MAX_TOOL_RESULT_BYTES};
 use crate::handoff::HandoffOutcome;
+use crate::hints::SkillEntry;
 use crate::llm::Llm;
 use crate::mcp::McpRegistry;
 use crate::mcp::ResultBudget;
@@ -21,20 +23,25 @@ const ERROR_REFLECTION_SUFFIX: &str =
 
 pub struct RunCtx<'a> {
     pub cfg: &'a Config,
+    /// Effective model for this session. Usually equals `cfg.model`; overridden
+    /// per-session by `session/set_model`. All LLM calls use this value.
+    pub effective_model: &'a str,
     pub session_id: &'a str,
     pub system_prompt: &'a str,
     pub llm: &'a Llm,
     pub mcp: &'a Arc<McpRegistry>,
+    /// Skills discovered at session creation; used by the built-in `load_skill` tool.
+    pub skills: &'a [SkillEntry],
     pub wire: &'a WireSender,
     pub cancel: &'a mut watch::Receiver<bool>,
+    /// Mid-turn steer queue. Drained at each round boundary (before the next
+    /// LLM call): queued messages are appended to history as user turns so the
+    /// model sees them on its next request, without restarting the turn. Fed by
+    /// the `_goose/unstable/session/steer` handler.
+    pub steer: &'a mut mpsc::UnboundedReceiver<Vec<ContentBlock>>,
     pub history: &'a mut Vec<HistoryItem>,
     pub original_task: &'a mut Option<String>,
     pub handoff_count: &'a mut usize,
-    /// Cumulative `_Stop` objection count for this session (persists
-    /// across `session/prompt` calls). Once it hits
-    /// `cfg.stop_max_rejections` we stop calling `_Stop` for that
-    /// session — a runaway hook can't burn rejections on every prompt.
-    pub stop_rejections: &'a mut u32,
     /// Cache-summed input tokens reported by the provider on this session's
     /// most recent request (persists across `session/prompt` calls), or `None`
     /// before the first response and immediately after a handoff resets the
@@ -63,10 +70,10 @@ impl RunCtx<'_> {
         self.history.push(HistoryItem::User(user_text));
 
         let mut round = 0u32;
-        // Per-prompt latch: only used to detect "LLM said end_turn twice
-        // in a row with no tool calls between" within this single prompt.
-        // The cumulative rejection budget lives on the session.
-        let mut last_was_end_turn = false;
+        // Per-prompt `_Stop` objection count. Bounded per prompt (not per
+        // session) so a stubborn exchange can't permanently disable the stop
+        // guard for a long-lived session; `max_rounds` still caps the loop.
+        let mut stop_rejections = 0u32;
         loop {
             if self.cfg.max_rounds > 0 && round >= self.cfg.max_rounds {
                 return Ok(StopReason::MaxTurnRequests);
@@ -74,6 +81,11 @@ impl RunCtx<'_> {
             if *self.cancel.borrow() {
                 return Ok(StopReason::Cancelled);
             }
+            // Round boundary: fold in any steer messages queued since the last
+            // round. They land as user turns so the model incorporates them on
+            // its next request — the turn continues, it is not restarted. Drain
+            // non-blocking; an empty queue is the common case.
+            self.drain_steers();
             match self.maybe_handoff().await {
                 HandoffOutcome::Cancelled => return Ok(StopReason::Cancelled),
                 // Context was just reset — the prior request's token count no
@@ -90,12 +102,16 @@ impl RunCtx<'_> {
                 }
             }
 
-            let tools = self.mcp.tools();
+            let mut tools = self.mcp.tools();
+            // Inject the built-in load_skill tool when skills are available.
+            if !self.skills.is_empty() {
+                tools.push(builtin::load_skill_def());
+            }
             round = round.saturating_add(1);
             let response = tokio::select! {
                 biased;
                 _ = self.cancel.changed() => return Ok(StopReason::Cancelled),
-                r = self.llm.complete(self.cfg, self.system_prompt, self.history, &tools) => r?,
+                r = self.llm.complete(self.cfg, self.system_prompt, self.history, &tools, self.effective_model) => r?,
                 _ = async {
                     // Keepalive ticker: emit a lightweight session update every 30s
                     // while waiting on the LLM provider. This resets the ACP harness
@@ -125,13 +141,35 @@ impl RunCtx<'_> {
             // exactly the history that was just sent to `complete()` (the
             // assistant response is appended below, after this point). Pairing
             // them lets the gate add a conservative estimate for any history
-            // appended before the next request. Preserve both when a response
-            // omits usage (`None`) rather than clobbering — a one-off missing
-            // field shouldn't blind the gate or zero the growth baseline.
+            // appended before the next request. Uses `context_pressure_bytes`
+            // (the same measure the gate's `current_bytes` uses) so the
+            // `grown` delta is coherent — an image contributes its visual-
+            // token equivalent here, not its base64 length. Preserve both when
+            // a response omits usage (`None`) rather than clobbering — a
+            // one-off missing field shouldn't blind the gate or zero the
+            // growth baseline.
             if let Some(tokens) = response.input_tokens {
                 *self.last_request_input_tokens = Some(tokens);
-                *self.last_request_history_bytes =
-                    Some(self.history.iter().map(HistoryItem::estimated_bytes).sum());
+                *self.last_request_history_bytes = Some(
+                    self.history
+                        .iter()
+                        .map(HistoryItem::context_pressure_bytes)
+                        .sum(),
+                );
+            }
+
+            if !response.reasoning.is_empty() {
+                wire::send(
+                    self.wire,
+                    wire::session_update(
+                        self.session_id,
+                        json!({
+                            "sessionUpdate": "agent_thought_chunk",
+                            "content": { "type": "text", "text": &response.reasoning }
+                        }),
+                    ),
+                )
+                .await;
             }
 
             if !response.text.is_empty() {
@@ -161,13 +199,7 @@ impl RunCtx<'_> {
                 let stop = map_stop(response.stop);
                 // Only gate genuine end_turn — don't override max_tokens/refusal.
                 if stop == StopReason::EndTurn {
-                    // Consecutive-rejection rule: LLM responded to our last
-                    // objection with no tool calls — accept the end and
-                    // move on rather than loop forever.
-                    if last_was_end_turn {
-                        return Ok(stop);
-                    }
-                    if *self.stop_rejections >= self.cfg.stop_max_rejections {
+                    if stop_rejections >= self.cfg.stop_max_rejections {
                         return Ok(stop);
                     }
                     let objections = self
@@ -180,8 +212,7 @@ impl RunCtx<'_> {
                         )
                         .await;
                     if !objections.is_empty() {
-                        *self.stop_rejections = self.stop_rejections.saturating_add(1);
-                        last_was_end_turn = true;
+                        stop_rejections = stop_rejections.saturating_add(1);
                         push_hook_outputs_as_tool_results(self.history, "_Stop", &objections);
                         continue;
                     }
@@ -202,11 +233,29 @@ impl RunCtx<'_> {
                 tool_calls: calls.clone(),
             });
 
-            // Tool calls executed → reset the consecutive-rejection latch.
-            last_was_end_turn = false;
-
             if let Some(stop) = self.execute_calls(&calls).await {
                 return Ok(stop);
+            }
+        }
+    }
+
+    /// Non-blocking drain of the steer queue. Each queued steer is appended to
+    /// history as a user turn so the model picks it up on its next request. A
+    /// steer whose blocks all fail to render (e.g. unsupported content) is
+    /// skipped rather than aborting the turn — steering is best-effort
+    /// augmentation, not a hard input contract like the initial prompt.
+    fn drain_steers(&mut self) {
+        while let Ok(blocks) = self.steer.try_recv() {
+            match prompt_to_text(blocks) {
+                Ok(text) if !text.trim().is_empty() => {
+                    self.history.push(HistoryItem::User(text));
+                }
+                Ok(_) => {
+                    tracing::debug!("dropping empty steer message");
+                }
+                Err(e) => {
+                    tracing::warn!("dropping unrenderable steer message: {e}");
+                }
             }
         }
     }
@@ -246,6 +295,17 @@ impl RunCtx<'_> {
                 return Some(StopReason::Cancelled);
             }
             emit_pending(self.wire, self.session_id, call).await;
+
+            // Built-in load_skill: execute inline, no MCP round-trip.
+            if call.name == builtin::LOAD_SKILL_TOOL {
+                emit_in_progress(self.wire, self.session_id, call).await;
+                let mut result = builtin::call_load_skill(&call.arguments, self.skills).await;
+                result.provider_id = call.provider_id.clone();
+                emit_completed(self.wire, self.session_id, call, &result).await;
+                results[idx] = Some(result);
+                continue;
+            }
+
             // Hook tools (bare name starts with `_`) are invisible to the
             // LLM and only callable via `call_hooks`. Treat any direct
             // invocation as if the tool didn't exist.

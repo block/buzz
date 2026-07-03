@@ -5,16 +5,13 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Typesense-backed full-text search for Buzz"
+description = "Postgres full-text search for Buzz, scoped by community"
 
 [dependencies]
-buzz-core = { workspace = true }
-reqwest     = { workspace = true }
-tokio       = { workspace = true }
-serde       = { workspace = true }
-serde_json  = { workspace = true }
+buzz-core   = { workspace = true }
+sqlx        = { workspace = true }
 uuid        = { workspace = true }
-chrono      = { workspace = true }
-tracing     = { workspace = true }
 thiserror   = { workspace = true }
-nostr       = { workspace = true }
+
+[dev-dependencies]
+tokio       = { workspace = true }

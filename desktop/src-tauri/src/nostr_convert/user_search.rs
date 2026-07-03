@@ -28,13 +28,19 @@ pub fn user_search_result_from_event(ev: &Event) -> UserSearchResultInfo {
 /// Convert kind:0 events (e.g. from a NIP-50 search) to [`SearchUsersResponse`].
 pub fn search_users_from_events(events: &[Event]) -> SearchUsersResponse {
     let users = events.iter().map(user_search_result_from_event).collect();
-    SearchUsersResponse { users }
+    SearchUsersResponse {
+        users,
+        next_cursor: None,
+    }
 }
 
 /// Convert a default kind:0 page to user-search results for empty-query pickers.
 pub fn list_user_search_results(events: &[Event], limit: usize) -> SearchUsersResponse {
     if limit == 0 {
-        return SearchUsersResponse { users: Vec::new() };
+        return SearchUsersResponse {
+            users: Vec::new(),
+            next_cursor: None,
+        };
     }
 
     let mut latest_by_pubkey: HashMap<String, (nostr::Timestamp, UserSearchResultInfo)> =
@@ -71,13 +77,16 @@ pub fn list_user_search_results(events: &[Event], limit: usize) -> SearchUsersRe
     });
     users.truncate(limit);
 
-    SearchUsersResponse { users }
+    SearchUsersResponse {
+        users,
+        next_cursor: None,
+    }
 }
 
 /// Rank and truncate kind:0 events from a NIP-50 search response for the
 /// member-picker / DM-recipient autocomplete.
 ///
-/// The relay returns results scored by Typesense BM25 against the whole kind:0
+/// The relay returns results scored by Postgres FTS rank against the whole kind:0
 /// JSON content blob. That ranking is fine as a recall mechanism but not as
 /// final ordering — a user whose `display_name` *is* the query should always
 /// rank above someone whose `about` happens to mention it. We re-rank with a
@@ -87,7 +96,7 @@ pub fn list_user_search_results(events: &[Event], limit: usize) -> SearchUsersRe
 /// - field priority: display_name (or name) > nip05 > pubkey hex
 ///
 /// `limit` clamps the output. Pubkey de-duplication keeps only the
-/// highest-scoring result per pubkey (Typesense should already return one doc
+/// highest-scoring result per pubkey (the relay should already return one doc
 /// per event id, and kind:0 is a NIP-16 replaceable event so stale rows are
 /// soft-deleted in the DB and filtered out before reaching us — this is
 /// defense in depth in case both somehow slip through).
@@ -98,7 +107,10 @@ pub fn rank_user_search_results(
 ) -> SearchUsersResponse {
     let q = query.trim().to_lowercase();
     if q.is_empty() || limit == 0 {
-        return SearchUsersResponse { users: Vec::new() };
+        return SearchUsersResponse {
+            users: Vec::new(),
+            next_cursor: None,
+        };
     }
 
     // (score, input_index) — input index is a stable tiebreaker preserving
@@ -138,7 +150,10 @@ pub fn rank_user_search_results(
         }
     }
 
-    SearchUsersResponse { users }
+    SearchUsersResponse {
+        users,
+        next_cursor: None,
+    }
 }
 
 fn match_score(q: &str, display_name: &str, nip05: &str, pubkey_hex: &str) -> u32 {

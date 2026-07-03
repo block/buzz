@@ -1,5 +1,6 @@
 mod app_state;
 mod commands;
+mod deep_link;
 mod events;
 mod huddle;
 mod managed_agents;
@@ -7,350 +8,45 @@ mod media_proxy;
 #[cfg(feature = "mesh-llm")]
 mod mesh_llm;
 mod migration;
+#[cfg(test)]
+mod model_tests;
 mod models;
 pub mod nostr_convert;
 mod prevent_sleep;
+mod ptt_shortcut;
 mod relay;
 mod secret_store;
+mod shutdown;
 mod templates;
 mod util;
 
 #[cfg(not(feature = "mesh-llm"))]
-mod mesh_llm_stubs {
-    use tauri::State;
-
-    use crate::app_state::AppState;
-
-    type CmdResult<T> = Result<T, String>;
-
-    #[tauri::command]
-    pub async fn mesh_availability(_state: State<'_, AppState>) -> CmdResult<serde_json::Value> {
-        Err("mesh-llm feature not enabled".to_string())
-    }
-
-    #[tauri::command]
-    pub async fn mesh_start_node(
-        _app: tauri::AppHandle,
-        _state: State<'_, AppState>,
-        _request: serde_json::Value,
-    ) -> CmdResult<serde_json::Value> {
-        Err("mesh-llm feature not enabled".to_string())
-    }
-
-    #[tauri::command]
-    pub async fn mesh_ensure_client_node(
-        _state: State<'_, AppState>,
-        _request: serde_json::Value,
-    ) -> CmdResult<serde_json::Value> {
-        Err("mesh-llm feature not enabled".to_string())
-    }
-
-    #[tauri::command]
-    pub async fn mesh_prepare_relay_mesh_client(
-        _app: tauri::AppHandle,
-        _state: State<'_, AppState>,
-        _request: serde_json::Value,
-    ) -> CmdResult<serde_json::Value> {
-        Err("mesh-llm feature not enabled".to_string())
-    }
-
-    #[tauri::command]
-    pub async fn mesh_stop_node(
-        _app: tauri::AppHandle,
-        _state: State<'_, AppState>,
-    ) -> CmdResult<serde_json::Value> {
-        Err("mesh-llm feature not enabled".to_string())
-    }
-
-    #[tauri::command]
-    pub async fn mesh_node_status(_state: State<'_, AppState>) -> CmdResult<serde_json::Value> {
-        Err("mesh-llm feature not enabled".to_string())
-    }
-
-    #[tauri::command]
-    pub async fn mesh_installed_models(
-        _state: State<'_, AppState>,
-    ) -> CmdResult<Vec<serde_json::Value>> {
-        Err("mesh-llm feature not enabled".to_string())
-    }
-
-    #[tauri::command]
-    pub fn mesh_agent_preset(_request: serde_json::Value) -> CmdResult<serde_json::Value> {
-        Err("mesh-llm feature not enabled".to_string())
-    }
-
-    #[tauri::command]
-    pub async fn mesh_dial_endpoint_addr(
-        _state: State<'_, AppState>,
-        _request: serde_json::Value,
-    ) -> CmdResult<serde_json::Value> {
-        Err("mesh-llm feature not enabled".to_string())
-    }
-
-    #[tauri::command]
-    pub async fn mesh_status_report_payload(
-        _state: State<'_, AppState>,
-    ) -> CmdResult<Option<serde_json::Value>> {
-        Err("mesh-llm feature not enabled".to_string())
-    }
-}
-
+mod mesh_llm_stubs;
 #[cfg(not(feature = "mesh-llm"))]
 use mesh_llm_stubs::*;
 
 use app_state::{build_app_state, resolve_persisted_identity, AppState};
 use commands::*;
+use deep_link::handle_deep_link_url;
 use huddle::audio_output::{
     get_audio_output_device, list_audio_output_devices, set_audio_output_device,
 };
 use huddle::{
     add_agent_to_huddle, check_pipeline_hotstart, confirm_huddle_active, download_voice_models,
     end_huddle, get_huddle_agent_pubkeys, get_huddle_state, get_model_status, get_voice_input_mode,
-    join_huddle, leave_huddle, push_audio_pcm, set_tts_enabled, set_voice_input_mode,
-    speak_agent_message, start_huddle, start_stt_pipeline,
+    join_huddle, leave_huddle, push_audio_pcm, set_huddle_transcription_enabled, set_tts_enabled,
+    set_voice_input_mode, speak_agent_message, start_huddle, start_stt_pipeline,
 };
 use managed_agents::{
-    backfill_persona_snapshots, ensure_nest, kill_stale_tracked_processes, load_managed_agents,
-    restore_managed_agents_on_launch, save_managed_agents, sync_managed_agent_processes,
-    try_regenerate_nest, BackendKind, ManagedAgentProcess,
+    backfill_persona_snapshots, ensure_nest, restore_managed_agents_on_launch, try_regenerate_nest,
 };
+use shutdown::shutdown_managed_agents;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
 use tauri::{Emitter, Manager, RunEvent};
 use tauri_plugin_window_state::StateFlags;
-use url::Url;
-
-fn shutdown_managed_agents(app: &tauri::AppHandle) -> Result<(), String> {
-    let state = app.state::<AppState>();
-    let _store_guard = state
-        .managed_agents_store_lock
-        .lock()
-        .map_err(|error| error.to_string())?;
-    let mut records = load_managed_agents(app)?;
-    let mut runtimes = state
-        .managed_agent_processes
-        .lock()
-        .map_err(|error| error.to_string())?;
-    let mut changed = sync_managed_agent_processes(&mut records, &mut runtimes);
-    changed |= kill_stale_tracked_processes(&mut records, &runtimes);
-
-    // Stop all tracked agents. Send SIGTERM to all process
-    // groups first, then wait for exits in parallel to avoid serial 1s waits.
-    struct AgentToStop {
-        idx: usize,
-        pid: u32,
-        runtime: Option<ManagedAgentProcess>,
-    }
-
-    let mut to_stop: Vec<AgentToStop> = Vec::new();
-    for (idx, record) in records.iter_mut().enumerate() {
-        if record.backend != BackendKind::Local {
-            continue;
-        }
-        if record.runtime_pid.is_none() && !runtimes.contains_key(&record.pubkey) {
-            continue;
-        }
-        let runtime = runtimes.remove(&record.pubkey);
-        let Some(pid) = runtime
-            .as_ref()
-            .map(|rt| rt.child.id())
-            .or(record.runtime_pid)
-        else {
-            continue;
-        };
-        to_stop.push(AgentToStop { idx, pid, runtime });
-    }
-
-    if !to_stop.is_empty() {
-        changed = true;
-
-        // Fan-out: send SIGTERM to all process groups at once.
-        #[cfg(unix)]
-        for agent in &to_stop {
-            let pgid = -(agent.pid as i32);
-            unsafe {
-                libc::kill(pgid, libc::SIGTERM);
-            }
-        }
-
-        // Wait up to 2s for all to exit, checking in a polling loop.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-        loop {
-            if to_stop
-                .iter()
-                .all(|a| !managed_agents::process_is_running(a.pid))
-            {
-                break;
-            }
-            if std::time::Instant::now() >= deadline {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(50));
-        }
-
-        // Fan-out: SIGKILL any survivors.
-        #[cfg(unix)]
-        for agent in &to_stop {
-            if managed_agents::process_is_running(agent.pid) {
-                let pgid = -(agent.pid as i32);
-                unsafe {
-                    libc::kill(pgid, libc::SIGKILL);
-                }
-            }
-        }
-
-        // Reap children and update records.
-        for mut agent in to_stop {
-            if let Some(ref mut rt) = agent.runtime {
-                // Best-effort reap — don’t block shutdown if the child is stuck
-                // in uninterruptible sleep. The zombie will be cleaned up when
-                // our process exits and launchd reaps it.
-                let _ = rt.child.try_wait();
-                // Write log marker (best-effort).
-                let record = &records[agent.idx];
-                let _ = managed_agents::append_log_marker(
-                    &rt.log_path,
-                    &format!(
-                        "=== stopped {} ({}) at {} ===",
-                        record.name,
-                        record.pubkey,
-                        util::now_iso()
-                    ),
-                );
-            }
-            let record = &mut records[agent.idx];
-            record.runtime_pid = None;
-            record.last_stopped_at = Some(util::now_iso());
-            record.updated_at = util::now_iso();
-            record.last_exit_code = None;
-            record.last_error = None;
-        }
-    }
-
-    // Final sweep: kill any orphaned agent processes we have PID file receipts
-    // for that escaped process-group kills or weren't tracked in records.
-    // All tracked PIDs have already been killed above, so pass an empty skip list.
-    managed_agents::sweep_orphaned_agent_processes(app, &[]);
-
-    // System-wide sweep: agent workers (goose, buzz-agent, etc.) are spawned
-    // in their own process groups by buzz-acp, so group-kills above only
-    // reach the harness, not the workers. Scan all user processes and kill any
-    // known agent binaries that are still running.
-    managed_agents::sweep_system_agent_processes(&managed_agents::current_instance_id(app), &[]);
-
-    // Dead-instance reaping: find agents belonging to Buzz instances
-    // whose desktop process is no longer running and reap them.
-    managed_agents::reap_dead_instance_agents(&managed_agents::current_instance_id(app), &[]);
-
-    if changed {
-        save_managed_agents(app, &records)?;
-    }
-
-    Ok(())
-}
-
-/// Parse the query string of a `buzz://message?…` URL into the JSON
-/// payload emitted on `deep-link-message`. Returns `None` when a required
-/// param (`channel`, `id`) is missing or empty — mirroring the validation
-/// policy of the `connect` arm so the frontend never sees a half-formed
-/// payload (e.g. `channelId: ""` from `channel=&id=foo`).
-///
-/// Pulled out of `handle_deep_link_url` so it can be unit-tested without
-/// a live `tauri::AppHandle`.
-fn parse_message_deep_link(url: &Url) -> Option<serde_json::Value> {
-    let mut channel: Option<String> = None;
-    let mut message_id: Option<String> = None;
-    let mut thread: Option<String> = None;
-    for (k, v) in url.query_pairs() {
-        let v = v.into_owned();
-        if v.is_empty() {
-            continue;
-        }
-        match k.as_ref() {
-            "channel" => channel = Some(v),
-            "id" => message_id = Some(v),
-            "thread" => thread = Some(v),
-            _ => {}
-        }
-    }
-    let (channel_id, message_id) = (channel?, message_id?);
-    Some(serde_json::json!({
-        "channelId": channel_id,
-        "messageId": message_id,
-        "threadRootId": thread,
-    }))
-}
-
-/// Handle an incoming `buzz://` deep link URL.
-///
-/// Currently supports:
-/// - `buzz://connect?relay=<ws(s)://...>` — emits `deep-link-connect` to the frontend
-fn handle_deep_link_url(app: &tauri::AppHandle, url_str: &str) {
-    let url = match Url::parse(url_str) {
-        Ok(u) => u,
-        Err(e) => {
-            eprintln!("buzz-desktop: invalid deep link URL {url_str:?}: {e}");
-            return;
-        }
-    };
-
-    if url.scheme() != "buzz" {
-        eprintln!("buzz-desktop: ignoring unsupported deep link scheme: {url_str}");
-        return;
-    }
-
-    match url.host_str() {
-        Some("connect") => {
-            let relay = url
-                .query_pairs()
-                .find(|(k, _)| k == "relay")
-                .map(|(_, v)| v.into_owned());
-            let Some(relay_url) = relay else {
-                eprintln!("buzz-desktop: connect deep link missing relay param: {url_str}");
-                return;
-            };
-            // Validate the relay URL is ws:// or wss://
-            match Url::parse(&relay_url) {
-                Ok(parsed) if parsed.scheme() == "ws" || parsed.scheme() == "wss" => {}
-                Ok(parsed) => {
-                    eprintln!(
-                        "buzz-desktop: rejecting non-websocket relay URL scheme {:?}: {relay_url}",
-                        parsed.scheme()
-                    );
-                    return;
-                }
-                Err(e) => {
-                    eprintln!("buzz-desktop: invalid relay URL {relay_url:?}: {e}");
-                    return;
-                }
-            }
-            let _ = app.emit("deep-link-connect", relay_url);
-        }
-        Some("message") => {
-            // `buzz://message?channel=<uuid>&id=<eventId>[&thread=<rootId>]`
-            //
-            // Validation policy mirrors the `connect` arm: parse what we
-            // need, refuse to emit anything if a required param is missing
-            // so the frontend never sees a half-formed payload. The
-            // frontend listener mirrors `parseMessageLink` in TS — we keep
-            // structure on this side (serde JSON) and let the TS code own
-            // any further normalisation.
-            let Some(payload) = parse_message_deep_link(&url) else {
-                eprintln!("buzz-desktop: message deep link missing channel or id: {url_str}");
-                return;
-            };
-            let _ = app.emit("deep-link-message", payload);
-        }
-        Some(action) => {
-            eprintln!("buzz-desktop: unknown deep link action: {action}");
-        }
-        None => {
-            eprintln!("buzz-desktop: deep link missing action: {url_str}");
-        }
-    }
-}
 
 #[tauri::command]
 fn perform_sidebar_default_haptic() {
@@ -403,94 +99,98 @@ pub fn run() {
         )
         .plugin(tauri_plugin_websocket::init())
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_process::init())
-        .plugin({
-            use tauri_plugin_global_shortcut::ShortcutState;
+        .plugin(tauri_plugin_process::init());
 
-            // Generation counter for the release delay task. Incremented on
-            // every press — a delayed release only fires if the generation
-            // hasn't changed (i.e. no new press happened during the delay).
-            // This prevents press→release→press within 200 ms from having
-            // the first release clobber the second press.
-            let ptt_press_gen = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    // The global-shortcut plugin is omitted from test builds: linking it into
+    // the lib-test binary makes it fail to load on Windows
+    // (STATUS_ENTRYPOINT_NOT_FOUND) before any test runs.
+    #[cfg(not(test))]
+    let builder = builder.plugin({
+        use tauri_plugin_global_shortcut::ShortcutState;
 
-            tauri_plugin_global_shortcut::Builder::new()
-                .with_handler(move |app, _shortcut, event| {
-                    let state = match app.try_state::<AppState>() {
-                        Some(s) => s,
-                        None => return,
-                    };
+        // Generation counter for the release delay task. Incremented on
+        // every press — a delayed release only fires if the generation
+        // hasn't changed (i.e. no new press happened during the delay).
+        // This prevents press→release→press within 200 ms from having
+        // the first release clobber the second press.
+        let ptt_press_gen = Arc::new(std::sync::atomic::AtomicU64::new(0));
 
-                    // Only act if a huddle is active and mode is PTT.
-                    let (is_ptt_mode, is_active) = match state.huddle_state.lock() {
-                        Ok(hs) => (
-                            hs.voice_input_mode == huddle::VoiceInputMode::PushToTalk,
-                            matches!(
-                                hs.phase,
-                                huddle::HuddlePhase::Connected | huddle::HuddlePhase::Active
-                            ),
+        tauri_plugin_global_shortcut::Builder::new()
+            .with_handler(move |app, _shortcut, event| {
+                let state = match app.try_state::<AppState>() {
+                    Some(s) => s,
+                    None => return,
+                };
+
+                // Only act if a huddle is active and mode is PTT.
+                let (is_ptt_mode, is_active) = match state.huddle_state.lock() {
+                    Ok(hs) => (
+                        hs.voice_input_mode == huddle::VoiceInputMode::PushToTalk,
+                        matches!(
+                            hs.phase,
+                            huddle::HuddlePhase::Connected | huddle::HuddlePhase::Active
                         ),
-                        Err(_) => return,
-                    };
+                    ),
+                    Err(_) => return,
+                };
 
-                    if !is_ptt_mode || !is_active {
-                        return;
-                    }
+                if !is_ptt_mode || !is_active {
+                    return;
+                }
 
-                    match event.state {
-                        ShortcutState::Pressed => {
-                            // Bump generation — invalidates any pending release delay.
-                            ptt_press_gen.fetch_add(1, std::sync::atomic::Ordering::Release);
+                match event.state {
+                    ShortcutState::Pressed => {
+                        // Bump generation — invalidates any pending release delay.
+                        ptt_press_gen.fetch_add(1, std::sync::atomic::Ordering::Release);
 
-                            if let Ok(hs) = state.huddle_state.lock() {
-                                hs.ptt_active
+                        if let Ok(hs) = state.huddle_state.lock() {
+                            hs.ptt_active
+                                .store(true, std::sync::atomic::Ordering::Release);
+                            // Only cancel TTS if it's actually playing — avoids
+                            // a stale cancel flag that drops the next queued message.
+                            if hs.tts_active.load(std::sync::atomic::Ordering::Acquire) {
+                                hs.tts_cancel
                                     .store(true, std::sync::atomic::Ordering::Release);
-                                // Only cancel TTS if it's actually playing — avoids
-                                // a stale cancel flag that drops the next queued message.
-                                if hs.tts_active.load(std::sync::atomic::Ordering::Acquire) {
-                                    hs.tts_cancel
-                                        .store(true, std::sync::atomic::Ordering::Release);
+                            }
+                        }
+                        // Emit ptt-state=true to the frontend.
+                        // The React side plays the press audio cue on this event
+                        // (Web Audio API via HuddleContext). Rust-side rodio audio
+                        // was considered but rejected: the rodio OutputStream must
+                        // outlive the handler and sharing it across the shortcut
+                        // closure adds lifecycle complexity for marginal gain.
+                        // The React implementation is sufficient and simpler.
+                        let _ = app.emit("ptt-state", true);
+                    }
+                    ShortcutState::Released => {
+                        // Capture generation at release time.
+                        let gen_at_release =
+                            ptt_press_gen.load(std::sync::atomic::Ordering::Acquire);
+                        let gen_arc = Arc::clone(&ptt_press_gen);
+                        let app_handle = app.clone();
+                        // 200 ms release delay — captures the tail of the utterance.
+                        // Only applies if no new press happened during the delay.
+                        tauri::async_runtime::spawn(async move {
+                            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                            // Check generation — if it changed, a new press arrived.
+                            if gen_arc.load(std::sync::atomic::Ordering::Acquire) != gen_at_release
+                            {
+                                return; // Superseded by a new press.
+                            }
+                            if let Some(state) = app_handle.try_state::<AppState>() {
+                                if let Ok(hs) = state.huddle_state.lock() {
+                                    hs.ptt_active
+                                        .store(false, std::sync::atomic::Ordering::Release);
                                 }
                             }
-                            // Emit ptt-state=true to the frontend.
-                            // The React side plays the press audio cue on this event
-                            // (Web Audio API via HuddleContext). Rust-side rodio audio
-                            // was considered but rejected: the rodio OutputStream must
-                            // outlive the handler and sharing it across the shortcut
-                            // closure adds lifecycle complexity for marginal gain.
-                            // The React implementation is sufficient and simpler.
-                            let _ = app.emit("ptt-state", true);
-                        }
-                        ShortcutState::Released => {
-                            // Capture generation at release time.
-                            let gen_at_release =
-                                ptt_press_gen.load(std::sync::atomic::Ordering::Acquire);
-                            let gen_arc = Arc::clone(&ptt_press_gen);
-                            let app_handle = app.clone();
-                            // 200 ms release delay — captures the tail of the utterance.
-                            // Only applies if no new press happened during the delay.
-                            tauri::async_runtime::spawn(async move {
-                                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-                                // Check generation — if it changed, a new press arrived.
-                                if gen_arc.load(std::sync::atomic::Ordering::Acquire)
-                                    != gen_at_release
-                                {
-                                    return; // Superseded by a new press.
-                                }
-                                if let Some(state) = app_handle.try_state::<AppState>() {
-                                    if let Ok(hs) = state.huddle_state.lock() {
-                                        hs.ptt_active
-                                            .store(false, std::sync::atomic::Ordering::Release);
-                                    }
-                                }
-                                // Emit ptt-state=false — React plays the release audio cue.
-                                let _ = app_handle.emit("ptt-state", false);
-                            });
-                        }
+                            // Emit ptt-state=false — React plays the release audio cue.
+                            let _ = app_handle.emit("ptt-state", false);
+                        });
                     }
-                })
-                .build()
-        });
+                }
+            })
+            .build()
+    });
 
     // Only register the updater in release builds that were compiled with a
     // real updater configuration. Local unsigned builds omit that config and
@@ -583,9 +283,10 @@ pub fn run() {
                     .store(port, std::sync::atomic::Ordering::Relaxed);
             });
 
-            // Create the Buzz nest (~/.buzz) before agents are restored,
-            // so default_agent_workdir() resolves to the nest directory.
-            // Non-fatal: agents fall back to $HOME if nest creation fails.
+            // Create the Buzz nest (~/.buzz or ~/.buzz-dev for dev builds) before
+            // agents are restored, so default_agent_workdir() resolves to the
+            // nest directory. Non-fatal: agents fall back to $HOME if nest
+            // creation fails.
             if let Err(error) = ensure_nest() {
                 eprintln!("buzz-desktop: failed to create nest: {error}");
             }
@@ -606,12 +307,23 @@ pub fn run() {
             };
 
             // Carry the agent's knowledge from the legacy nest (~/.sprout) into
-            // the live nest (~/.buzz) after it exists. Must run after
-            // ensure_nest() so the destination is present. Non-fatal.
+            // the live nest after it exists. Must run after ensure_nest() so the
+            // destination is present. Non-fatal.
             // On a real migration, emit a one-time hint so the user can delete
             // the now-inert ~/.sprout; the frontend dedupes the toast.
             if migration::migrate_legacy_nest() {
                 let _ = app_handle.emit("legacy-nest-migrated", ());
+            }
+
+            // One-time migration for dev builds: copy accumulated knowledge
+            // from the shared ~/.buzz nest into the new dedicated ~/.buzz-dev
+            // nest so no work is lost when the nest is first namespaced.
+            // Runs only when nest_dir() resolved to ~/.buzz-dev (dev instance).
+            let is_dev_nest = managed_agents::nest_dir()
+                .and_then(|p| p.file_name().map(|n| n.to_os_string()))
+                .is_some_and(|n| n == ".buzz-dev");
+            if is_dev_nest {
+                migration::migrate_dev_nest();
             }
 
             // Create/update the local CLI symlink pointing to the
@@ -629,16 +341,6 @@ pub fn run() {
             if let Some(mgr) = huddle::models::global_model_manager() {
                 mgr.start_stt_download(state.http_client.clone());
                 mgr.start_tts_download(state.http_client.clone());
-            }
-
-            // Non-fatal: huddle works without the shortcut (user can switch to VAD mode).
-            #[cfg(desktop)]
-            {
-                use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut};
-                let shortcut = Shortcut::new(Some(Modifiers::CONTROL), Code::Space);
-                if let Err(e) = app.handle().global_shortcut().register(shortcut) {
-                    eprintln!("buzz-desktop: failed to register PTT shortcut: {e}");
-                }
             }
 
             // Handle deep link URLs received while the app is running (macOS)
@@ -747,6 +449,14 @@ pub fn run() {
             get_user_profile,
             get_users_batch,
             get_user_notes,
+            get_project_repo_snapshot,
+            get_project_repo_diff,
+            get_project_local_repo_diff,
+            get_project_local_repo_snapshot,
+            get_project_repo_sync_status,
+            list_project_local_repositories,
+            push_project_local_repository,
+            open_project_terminal,
             search_users,
             get_presence,
             get_default_relay_url,
@@ -755,6 +465,7 @@ pub fn run() {
             get_relay_ws_url,
             get_relay_http_url,
             get_media_proxy_port,
+            fetch_link_preview_title,
             discover_acp_providers,
             install_acp_runtime,
             discover_managed_agent_prereqs,
@@ -789,11 +500,14 @@ pub fn run() {
             send_managed_agent_channel_message,
             get_forum_posts,
             get_forum_thread,
+            get_thread_replies,
+            get_channel_messages_before,
             edit_message,
             delete_message,
             add_reaction,
             remove_reaction,
             get_event,
+            show_native_notification,
             upload_media,
             pick_and_upload_media,
             upload_media_bytes,
@@ -804,7 +518,6 @@ pub fn run() {
             add_relay_member,
             remove_relay_member,
             change_relay_member_role,
-            // NIP-IA identity archival
             archive_identity,
             unarchive_identity,
             list_archived_identities,
@@ -818,6 +531,9 @@ pub fn run() {
             delete_managed_agent,
             get_managed_agent_log,
             get_agent_models,
+            discover_agent_models,
+            get_agent_config_surface,
+            put_agent_session_config,
             mesh_availability,
             mesh_start_node,
             mesh_ensure_client_node,
@@ -878,6 +594,7 @@ pub fn run() {
             get_huddle_state,
             push_audio_pcm,
             start_stt_pipeline,
+            set_huddle_transcription_enabled,
             download_voice_models,
             get_model_status,
             set_tts_enabled,
@@ -898,9 +615,11 @@ pub fn run() {
             apply_workspace,
             validate_repos_dir,
             get_active_workspace,
+            fetch_workspace_icon,
             set_prevent_sleep_active,
             get_agent_memory,
             relay_reconnect_hook,
+            relay_reconnect_hook_configured,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
@@ -942,84 +661,4 @@ pub fn run() {
         }
         _ => {}
     });
-}
-
-#[cfg(test)]
-mod tests {
-    use serde_json::json;
-    use url::Url;
-
-    use crate::models::ChannelInfo;
-    use crate::parse_message_deep_link;
-
-    #[test]
-    fn channel_info_defaults_is_member_for_legacy_payloads() {
-        let channel: ChannelInfo = serde_json::from_value(json!({
-            "id": "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50",
-            "name": "general",
-            "channel_type": "stream",
-            "visibility": "open",
-            "description": "General discussion",
-            "topic": null,
-            "purpose": null,
-            "member_count": 3,
-            "last_message_at": null,
-            "archived_at": null,
-            "participants": [],
-            "participant_pubkeys": []
-        }))
-        .expect("legacy payload should deserialize");
-
-        assert!(channel.is_member);
-    }
-
-    #[test]
-    fn parse_message_deep_link_extracts_required_params() {
-        let url = Url::parse("buzz://message?channel=abc&id=xyz").unwrap();
-        let payload = parse_message_deep_link(&url).expect("required params present");
-        assert_eq!(payload["channelId"], "abc");
-        assert_eq!(payload["messageId"], "xyz");
-        assert!(payload["threadRootId"].is_null());
-    }
-
-    #[test]
-    fn parse_message_deep_link_accepts_buzz_scheme() {
-        let url = Url::parse("buzz://message?channel=abc&id=xyz").unwrap();
-        let payload = parse_message_deep_link(&url).expect("required params present");
-        assert_eq!(payload["channelId"], "abc");
-        assert_eq!(payload["messageId"], "xyz");
-    }
-
-    #[test]
-    fn parse_message_deep_link_includes_thread_root() {
-        let url = Url::parse("buzz://message?channel=abc&id=xyz&thread=root1").unwrap();
-        let payload = parse_message_deep_link(&url).expect("required params present");
-        assert_eq!(payload["threadRootId"], "root1");
-    }
-
-    #[test]
-    fn parse_message_deep_link_rejects_missing_id() {
-        let url = Url::parse("buzz://message?channel=abc").unwrap();
-        assert!(parse_message_deep_link(&url).is_none());
-    }
-
-    #[test]
-    fn parse_message_deep_link_rejects_empty_channel() {
-        // Regression: `channel=&id=foo` previously produced channelId: "".
-        let url = Url::parse("buzz://message?channel=&id=foo").unwrap();
-        assert!(parse_message_deep_link(&url).is_none());
-    }
-
-    #[test]
-    fn parse_message_deep_link_rejects_empty_id() {
-        let url = Url::parse("buzz://message?channel=abc&id=").unwrap();
-        assert!(parse_message_deep_link(&url).is_none());
-    }
-
-    #[test]
-    fn parse_message_deep_link_treats_empty_thread_as_absent() {
-        let url = Url::parse("buzz://message?channel=abc&id=xyz&thread=").unwrap();
-        let payload = parse_message_deep_link(&url).expect("required params present");
-        assert!(payload["threadRootId"].is_null());
-    }
 }

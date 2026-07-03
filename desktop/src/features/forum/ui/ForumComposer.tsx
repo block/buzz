@@ -99,11 +99,11 @@ export function ForumComposer({
     isAutocompleteOpen: isAutocompleteOpenRef,
     onEditLink: (info) => onEditLinkRef.current?.(info),
     onLinkSelectionChange: (info) => onLinkSelectionChangeRef.current?.(info),
-    onUpdate: ({ markdown, text }) => {
+    onUpdate: ({ cursor, text }) => {
+      const markdown = richText.getMarkdown();
       setContent(markdown);
       contentRef.current = markdown;
 
-      const { cursor } = richText.getPlainTextAndCursor();
       mentions.updateMentionQuery(text, cursor);
       channelLinks.updateChannelQuery(text, cursor);
     },
@@ -457,6 +457,7 @@ export function ForumComposer({
                 mentions.isMentionOpen ? mentions.suggestions : []
               }
               onChannelSelect={applyChannelInsert}
+              onMentionFetchMore={mentions.fetchMoreSuggestions}
               onMentionSelect={applyMentionInsert}
               position={autocompletePosition}
             />

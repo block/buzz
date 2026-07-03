@@ -38,9 +38,9 @@ pub(crate) async fn post_connect_setup(
         }
     }
 
-    // Ensure voice models are downloading (idempotent).
+    // Prepare TTS for agent voice. STT is transcript-specific and starts only
+    // when transcription is explicitly enabled.
     if let Some(mgr) = models::global_model_manager() {
-        mgr.start_stt_download(state.http_client.clone());
         mgr.start_tts_download(state.http_client.clone());
     }
 
@@ -58,12 +58,10 @@ pub(crate) async fn post_connect_setup(
         hs.audio_relay_pcm_tx = Some(pcm_tx);
     }
 
-    // Start pipelines: TTS first (so STT can capture tts_cancel for barge-in).
+    // Start TTS immediately. STT/transcript posting is opt-in and starts only
+    // after the user explicitly enables transcription.
     if let Err(e) = maybe_start_tts_pipeline(state).await {
         eprintln!("buzz-desktop: TTS pipeline failed to start: {e}");
-    }
-    if let Err(e) = maybe_start_stt_pipeline(state, ephemeral_channel_id).await {
-        eprintln!("buzz-desktop: STT pipeline failed to start: {e}");
     }
 
     Ok(())
@@ -81,6 +79,13 @@ pub(crate) async fn maybe_start_stt_pipeline(
     state: &AppState,
     ephemeral_channel_id: &str,
 ) -> Result<bool, String> {
+    {
+        let hs = state.huddle()?;
+        if !hs.transcription_enabled {
+            return Ok(false);
+        }
+    }
+
     if !models::is_stt_ready() {
         return Ok(false); // Models not downloaded yet — voice-only mode.
     }
@@ -143,7 +148,9 @@ pub(crate) async fn maybe_start_stt_pipeline(
         let mut hs = state.huddle()?;
         hs.stt_starting.store(false, Ordering::Release);
         // Phase check: huddle may have been torn down during construction.
-        if !matches!(hs.phase, HuddlePhase::Connected | HuddlePhase::Active) {
+        if !hs.transcription_enabled
+            || !matches!(hs.phase, HuddlePhase::Connected | HuddlePhase::Active)
+        {
             return Ok(false);
         }
         hs.stt_pipeline = Some(Arc::clone(&pipeline));

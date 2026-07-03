@@ -8,6 +8,7 @@ import {
 } from "../helpers/bridge";
 
 const GENERAL_CHANNEL_ID = "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50";
+const AGENTS_CHANNEL_ID = "94a444a4-c0a3-5966-ab05-530c6ddc2301";
 const MOCK_IDENTITY_PUBKEY = "deadbeef".repeat(8);
 // Relay-only agent owned by the mock viewer (see e2eBridge.ts
 // OWNED_RELAY_AGENT_PUBKEY). Classified as a bot via mockRelayAgents and
@@ -17,6 +18,12 @@ const OWNED_RELAY_AGENT_PUBKEY =
   "a1b2c3d4e5f60718293a4b5c6d7e8f90112233445566778899aabbccddeeff00";
 
 type MockFeedWindow = Window & {
+  __BUZZ_E2E_SEED_ACTIVE_TURNS__?: (input: {
+    agentPubkey: string;
+    channelId: string;
+    turnId: string;
+    kind?: "turn_started" | "turn_completed";
+  }) => void;
   __BUZZ_E2E_PUSH_MOCK_FEED_ITEM__?: (item: {
     category: "mention" | "needs_action" | "activity" | "agent_activity";
     channel_id: string | null;
@@ -41,7 +48,7 @@ async function openChannelManagement(
 }
 
 async function closeChannelManagement(page: import("@playwright/test").Page) {
-  await page.getByTestId("channel-management-close").click();
+  await page.getByTestId("auxiliary-panel-close").click();
   await expect(page.getByTestId("channel-management-sheet")).not.toBeVisible();
 }
 
@@ -279,7 +286,7 @@ async function expectSameLeftInset(
   expect(Math.abs(firstBox.x - secondBox.x)).toBeLessThanOrEqual(4);
 }
 
-async function expectIntroBalancedAroundDayDivider(
+async function expectIntroSpacedAboveDayDivider(
   page: import("@playwright/test").Page,
   introTestId: string,
 ) {
@@ -300,7 +307,17 @@ async function expectIntroBalancedAroundDayDivider(
   const gapAboveDivider = dividerBox.y - (introBox.y + introBox.height);
   const gapBelowDivider = messageBox.y - (dividerBox.y + dividerBox.height);
 
-  expect(Math.abs(gapAboveDivider - gapBelowDivider)).toBeLessThanOrEqual(1);
+  // The intro is a flex sibling above the timeline; the day divider and first
+  // message-row are virtualized items positioned by translateY inside the
+  // scroll container. The intro -> divider gap is the wrapper flex spacing the
+  // layout controls (8px, stable), so guard THAT with a tight band — a layout
+  // regression that collapses or balloons it fails here. The divider -> message
+  // gap is NOT a layout-spacing contract: virtualized rows are positioned
+  // back-to-back (no inter-item gap), so it is ~0 by construction plus
+  // MessageRow avatar/font render jitter, genuinely variable run-to-run. Assert
+  // only non-overlap on it (reading order: intro, divider, then message).
+  expect(Math.abs(gapAboveDivider - 8)).toBeLessThanOrEqual(2);
+  expect(gapBelowDivider).toBeGreaterThanOrEqual(0);
 }
 
 async function expectIntroActionCardLayout(
@@ -921,6 +938,117 @@ test("channel with messages shows content", async ({ page }) => {
   );
 });
 
+test("channel date divider keeps the date sticky while the separator rule scrolls", async ({
+  page,
+}) => {
+  await page.goto("/");
+
+  await page.getByTestId("channel-engineering").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("engineering");
+  await waitForMockLiveSubscription(page, "engineering");
+
+  await page.evaluate(() => {
+    const firstDay = 1_700_000_000;
+    for (let day = 0; day < 2; day += 1) {
+      for (let index = 0; index < 14; index += 1) {
+        window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+          channelName: "engineering",
+          content: `date handoff day ${day + 1} row ${index + 1}\nsecond line for scroll height`,
+          createdAt: firstDay + day * 86_400 + index,
+          pubkey:
+            "953d3363262e86b770419834c53d2446409db6d918a57f8f339d495d54ab001f",
+        });
+      }
+    }
+  });
+
+  await expect(page.getByTestId("message-timeline-day-group")).toHaveCount(2);
+  await expect(page.getByTestId("message-timeline-day-divider")).toHaveCount(2);
+
+  const timeline = page.getByTestId("message-timeline");
+  await timeline.evaluate((element) => {
+    const firstGroup = element.querySelector<HTMLElement>(
+      '[data-testid="message-timeline-day-group"]',
+    );
+    if (!firstGroup) {
+      throw new Error("missing first day group");
+    }
+    element.scrollTop = firstGroup.offsetTop + 180;
+    element.dispatchEvent(new Event("scroll", { bubbles: true }));
+  });
+  await page.waitForTimeout(50);
+
+  const metrics = await timeline.evaluate((element) => {
+    const firstGroup = element.querySelector<HTMLElement>(
+      '[data-testid="message-timeline-day-group"]',
+    );
+    const firstDivider = firstGroup?.querySelector<HTMLElement>(
+      '[data-testid="message-timeline-day-divider"]',
+    );
+    const firstDividerPill = firstDivider?.querySelector<HTMLElement>("p");
+    if (!firstGroup || !firstDivider || !firstDividerPill) {
+      throw new Error("missing day group or divider");
+    }
+
+    const groupRect = firstGroup.getBoundingClientRect();
+    const dividerRect = firstDivider.getBoundingClientRect();
+    const groupBefore = getComputedStyle(firstGroup, "::before");
+    const dividerBefore = getComputedStyle(firstDivider, "::before");
+
+    return {
+      dividerBeforeContent: dividerBefore.content,
+      dividerPillBackground: getComputedStyle(firstDividerPill).backgroundColor,
+      dividerPillShadow: getComputedStyle(firstDividerPill).boxShadow,
+      dividerPosition: getComputedStyle(firstDivider).position,
+      dividerTop: dividerRect.top,
+      dividerZIndex: getComputedStyle(firstDivider).zIndex,
+      groupBeforeContent: groupBefore.content,
+      groupBeforePosition: groupBefore.position,
+      groupTop: groupRect.top,
+      ruleTop: groupRect.top + Number.parseFloat(groupBefore.top),
+    };
+  });
+
+  expect(metrics.dividerPosition).toBe("sticky");
+  expect(Number.parseInt(metrics.dividerZIndex, 10)).toBeGreaterThan(10);
+  await expect
+    .poll(async () => {
+      const headerZIndex = await page
+        .getByTestId("chat-header")
+        .evaluate(
+          (element) =>
+            getComputedStyle(element.parentElement ?? element).zIndex,
+        );
+      return Number.parseInt(headerZIndex, 10);
+    })
+    .toBeGreaterThan(Number.parseInt(metrics.dividerZIndex, 10));
+  await expect
+    .poll(async () => {
+      const sharedBackdropZIndex = await page
+        .getByTestId("channel-shared-header-backdrop")
+        .evaluate((element) => getComputedStyle(element).zIndex);
+      return Number.parseInt(sharedBackdropZIndex, 10);
+    })
+    .toBeGreaterThan(Number.parseInt(metrics.dividerZIndex, 10));
+  await expect(page.getByTestId("channel-composer-overlay")).toBeVisible();
+  await expect
+    .poll(async () => {
+      const composerOverlayZIndex = await page
+        .getByTestId("channel-composer-overlay")
+        .evaluate((element) => getComputedStyle(element).zIndex);
+      return Number.parseInt(composerOverlayZIndex, 10);
+    })
+    .toBeGreaterThan(Number.parseInt(metrics.dividerZIndex, 10));
+  expect(metrics.dividerPillBackground).not.toBe("rgba(0, 0, 0, 0)");
+  expect(metrics.dividerPillBackground).not.toBe("transparent");
+  expect(metrics.dividerPillShadow).toBe("none");
+  expect(metrics.dividerBeforeContent).toBe("none");
+  expect(metrics.groupBeforePosition).toBe("absolute");
+  expect(metrics.groupBeforeContent).not.toBe("none");
+  expect(metrics.groupTop).toBeLessThan(metrics.dividerTop - 8);
+  expect(metrics.ruleTop).toBeLessThan(metrics.dividerTop - 8);
+});
+
 test("shows and clears activity indicators for active channel agents", async ({
   page,
 }) => {
@@ -950,6 +1078,14 @@ test("shows and clears activity indicators for active channel agents", async ({
   await expect(page.getByTestId("agent-session-thread-panel")).toBeVisible();
   await expect(page.getByTestId("agent-session-thread-panel")).toContainText(
     "alice",
+  );
+  await expect(page.getByTestId("agent-transcript-now-summary")).toHaveCount(0);
+  await page.getByTestId("agent-session-settings-menu-trigger").click();
+  await expect(page.getByTestId("agent-session-stop-turn")).toBeVisible();
+  await expect(page.getByTestId("agent-session-stop-turn")).toBeDisabled();
+  await page.keyboard.press("Escape");
+  await expect(page.getByTestId("agent-session-thread-panel")).toContainText(
+    "No ACP activity yet",
   );
   await expect(page.getByTestId("message-typing-indicator")).toHaveCount(0);
 
@@ -982,6 +1118,21 @@ test("shows and clears activity indicators for active channel agents", async ({
 test("members sidebar exposes view-activity for a viewer-owned relay agent", async ({
   page,
 }) => {
+  // nadia is no longer in the default relay-agent seeds (the no-relay-record
+  // owner path claims that fixture), so seed her relay registry entry here to
+  // exercise the relay-bot classification.
+  await installMockBridge(page, {
+    relayAgents: [
+      {
+        pubkey: OWNED_RELAY_AGENT_PUBKEY,
+        name: "nadia",
+        agentType: "goose",
+        capabilities: ["search", "summaries"],
+        channelNames: ["agents"],
+        respondTo: "anyone",
+      },
+    ],
+  });
   await page.goto("/");
 
   await openMembersSidebar(page, "agents");
@@ -996,6 +1147,156 @@ test("members sidebar exposes view-activity for a viewer-owned relay agent", asy
   await expect(
     page.getByTestId(`sidebar-view-activity-${OWNED_RELAY_AGENT_PUBKEY}`),
   ).toBeVisible();
+});
+
+test("profile renders live activity for a viewer-owned relay agent", async ({
+  page,
+}) => {
+  await page.goto("/");
+
+  await openMembersSidebar(page, "agents");
+  await page
+    .getByTestId(`sidebar-member-open-profile-${OWNED_RELAY_AGENT_PUBKEY}`)
+    .click();
+  await expect(page.getByTestId("members-sidebar")).not.toBeVisible();
+  await expect(
+    page.getByTestId(`user-profile-view-activity-${OWNED_RELAY_AGENT_PUBKEY}`),
+  ).toBeVisible();
+
+  await page.waitForFunction(
+    () =>
+      typeof (window as MockFeedWindow).__BUZZ_E2E_SEED_ACTIVE_TURNS__ ===
+      "function",
+  );
+  await page.evaluate(
+    ({ agentPubkey, channelId }) => {
+      const seedActiveTurns = (window as MockFeedWindow)
+        .__BUZZ_E2E_SEED_ACTIVE_TURNS__;
+      if (!seedActiveTurns) {
+        throw new Error("Mock active-turn helper is not installed.");
+      }
+      seedActiveTurns({
+        agentPubkey,
+        channelId,
+        turnId: "owned-relay-profile-turn",
+      });
+    },
+    {
+      agentPubkey: OWNED_RELAY_AGENT_PUBKEY,
+      channelId: AGENTS_CHANNEL_ID,
+    },
+  );
+
+  const liveActivity = page.getByTestId(
+    `user-profile-live-activity-${OWNED_RELAY_AGENT_PUBKEY}`,
+  );
+  await expect(liveActivity).toBeVisible();
+  await expect(liveActivity).toContainText("Latest Activity");
+  await expect(liveActivity).toContainText("#agents");
+  await expect(
+    page.getByTestId(`user-profile-activity-dot-${AGENTS_CHANNEL_ID}`),
+  ).toHaveCount(0);
+
+  await page.evaluate(
+    ({ agentPubkey, channelId, turnId }) => {
+      const seedActiveTurns = (window as MockFeedWindow)
+        .__BUZZ_E2E_SEED_ACTIVE_TURNS__;
+      if (!seedActiveTurns) {
+        throw new Error("Mock active-turn helper is not installed.");
+      }
+      seedActiveTurns({
+        agentPubkey,
+        channelId,
+        turnId,
+        kind: "turn_completed",
+      });
+    },
+    {
+      agentPubkey: OWNED_RELAY_AGENT_PUBKEY,
+      channelId: AGENTS_CHANNEL_ID,
+      turnId: "owned-relay-profile-turn",
+    },
+  );
+
+  await expect(liveActivity).toBeVisible();
+  await expect(liveActivity).toContainText("Latest Activity");
+  await expect(
+    page.getByTestId(`user-profile-view-activity-${OWNED_RELAY_AGENT_PUBKEY}`),
+  ).not.toBeVisible();
+});
+
+test("profile activity carousel switches channels via progress dots", async ({
+  page,
+}) => {
+  await page.goto("/");
+
+  await openMembersSidebar(page, "agents");
+  await page
+    .getByTestId(`sidebar-member-open-profile-${OWNED_RELAY_AGENT_PUBKEY}`)
+    .click();
+  await expect(page.getByTestId("members-sidebar")).not.toBeVisible();
+  await expect(
+    page.getByTestId(`user-profile-view-activity-${OWNED_RELAY_AGENT_PUBKEY}`),
+  ).toBeVisible();
+
+  await page.waitForFunction(
+    () =>
+      typeof (window as MockFeedWindow).__BUZZ_E2E_SEED_ACTIVE_TURNS__ ===
+      "function",
+  );
+
+  await page.evaluate(
+    ({ agentPubkey, channels }) => {
+      const seedActiveTurns = (window as MockFeedWindow)
+        .__BUZZ_E2E_SEED_ACTIVE_TURNS__;
+      if (!seedActiveTurns) {
+        throw new Error("Mock active-turn helper is not installed.");
+      }
+
+      for (const [index, channelId] of channels.entries()) {
+        seedActiveTurns({
+          agentPubkey,
+          channelId,
+          turnId: `owned-relay-profile-turn-${index}`,
+        });
+      }
+    },
+    {
+      agentPubkey: OWNED_RELAY_AGENT_PUBKEY,
+      channels: [AGENTS_CHANNEL_ID, GENERAL_CHANNEL_ID],
+    },
+  );
+
+  const liveActivity = page.getByTestId(
+    `user-profile-live-activity-${OWNED_RELAY_AGENT_PUBKEY}`,
+  );
+  await expect(liveActivity).toBeVisible();
+  await expect(liveActivity).toContainText("#agents");
+
+  await expect(
+    page.getByTestId(`user-profile-activity-dot-${AGENTS_CHANNEL_ID}`),
+  ).toBeVisible();
+  await expect(
+    page.getByTestId(`user-profile-activity-dot-${GENERAL_CHANNEL_ID}`),
+  ).toBeVisible();
+
+  await expect(
+    page.getByTestId(`user-profile-activity-slide-${GENERAL_CHANNEL_ID}`),
+  ).toHaveAttribute("data-mounted", "false");
+
+  await page
+    .getByTestId(`user-profile-activity-dot-${GENERAL_CHANNEL_ID}`)
+    .click();
+
+  await expect(
+    page.getByTestId("user-profile-activity-channel-label"),
+  ).toContainText("#general");
+  await expect(
+    page.getByTestId(`user-profile-activity-slide-${GENERAL_CHANNEL_ID}`),
+  ).toHaveAttribute("data-mounted", "true");
+  await expect(
+    page.getByTestId(`user-profile-activity-slide-${AGENTS_CHANNEL_ID}`),
+  ).toHaveAttribute("data-mounted", "true");
 });
 
 test("typing indicator shows avatars and maintains stable name order", async ({
@@ -1157,7 +1458,7 @@ test("sidebar clears unread indicator after opening a DM", async ({ page }) => {
     "Unread update for the DM",
   );
   await expectSameLeftInset(page, "message-dm-intro", "message-row");
-  await expectIntroBalancedAroundDayDivider(page, "message-dm-intro");
+  await expectIntroSpacedAboveDayDivider(page, "message-dm-intro");
   await expect(page.getByTestId("channel-unread-alice-tyler")).toHaveCount(0);
 });
 
@@ -1520,6 +1821,83 @@ test("members sidebar can invite and remove members", async ({ page }) => {
     page.getByTestId(`sidebar-member-${TEST_IDENTITIES.charlie.pubkey}`),
   ).toHaveCount(0);
   await expectMembersTriggerCount(page, initialMemberCount);
+});
+
+test("members sidebar pages add-member search beyond the first 50 people", async ({
+  page,
+}) => {
+  const searchProfiles = Array.from({ length: 55 }, (_, index) => ({
+    pubkey: `${(index + 1).toString(16).padStart(64, "0")}`,
+    displayName: `Alex ${String(index + 1).padStart(2, "0")}`,
+  }));
+  await installMockBridge(page, { searchProfiles });
+
+  await page.goto("/");
+  await openMembersSidebar(page, "general");
+  await page.getByTestId("channel-management-search-users").fill("Alex");
+
+  const results = page.locator("[data-testid^='channel-user-search-result-']");
+  await expect(results).toHaveCount(50);
+
+  await page
+    .getByTestId("members-sidebar-people")
+    .evaluate((node) => node.scrollTo(0, node.scrollHeight));
+
+  await expect(results).toHaveCount(55);
+  await expect(page.getByText("Alex 55")).toBeVisible();
+
+  const searchCalls = (await readCommandPayloadLog(page)).filter(
+    (entry) => entry.command === "search_users",
+  );
+  expect(searchCalls).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        payload: expect.objectContaining({ cursor: null, limit: 50 }),
+      }),
+      expect.objectContaining({
+        payload: expect.objectContaining({ cursor: "2", limit: 50 }),
+      }),
+    ]),
+  );
+});
+
+test("new DM picker pages people search beyond the first 50 results", async ({
+  page,
+}) => {
+  const searchProfiles = Array.from({ length: 55 }, (_, index) => ({
+    pubkey: `${(index + 1).toString(16).padStart(64, "0")}`,
+    displayName: `Alex ${String(index + 1).padStart(2, "0")}`,
+  }));
+  await installMockBridge(page, { searchProfiles });
+
+  await page.goto("/");
+  await page.getByTestId("new-dm-trigger").click();
+  await expect(page.getByTestId("new-dm-dialog")).toBeVisible();
+  await page.getByTestId("new-dm-search").fill("Alex");
+
+  const results = page.locator("[data-testid^='new-dm-result-']");
+  await expect(results).toHaveCount(50);
+
+  await page
+    .getByTestId("new-dm-results")
+    .evaluate((node) => node.scrollTo(0, node.scrollHeight));
+
+  await expect(results).toHaveCount(55);
+  await expect(page.getByText("Alex 55")).toBeVisible();
+
+  const searchCalls = (await readCommandPayloadLog(page)).filter(
+    (entry) => entry.command === "search_users",
+  );
+  expect(searchCalls).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        payload: expect.objectContaining({ cursor: null, limit: 50 }),
+      }),
+      expect.objectContaining({
+        payload: expect.objectContaining({ cursor: "2", limit: 50 }),
+      }),
+    ]),
+  );
 });
 
 test("members modal does not show direct pubkey entry", async ({ page }) => {

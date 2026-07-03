@@ -10,6 +10,23 @@ export const READ_STATE_HORIZON_SECONDS = 7 * 24 * 60 * 60;
 
 export const MAX_CONTEXTS = 10_000;
 
+// Local-storage cap on within-horizon msg:/thread: markers. Generous multiple
+// of what the 32 KB publish budget can round-trip (~290 entries), so anything
+// beyond it is local-only dead weight that other devices never see anyway.
+export const LOCAL_MAX_PRUNABLE_CONTEXTS = 1_000;
+
+// Maximum plaintext byte length for the JSON blob passed to nip44EncryptToSelf.
+// NIP-44 v2 hard-caps plaintext at 65,535 bytes; the relay enforces a 256 KB
+// content limit. 32 KB gives ample headroom for NIP-44 overhead (~1.4×
+// expansion to ~45 KB ciphertext) while keeping the blob well under both caps.
+export const READ_STATE_MAX_PLAINTEXT_BYTES = 32_768;
+
+// Maximum number of slots a client may publish. Each slot is a separate
+// kind:30078 event. Splitting across slots is the fallback when channel keys
+// alone exceed READ_STATE_MAX_PLAINTEXT_BYTES. 8 slots × ~650 channel keys per
+// slot = ~5,200 channels — well beyond any realistic user.
+export const READ_STATE_MAX_SLOTS = 8;
+
 // Context-key prefix for a per-MESSAGE read marker (LP4 v3). One grow-only
 // marker per reply id; the badge predicate reads effective("msg:<id>") live so
 // reading an ancestor never covers a descendant (Issue 2 by construction).
@@ -96,6 +113,10 @@ export function isValidReadStateDTag(
   if (!value?.startsWith(READ_STATE_D_TAG_PREFIX)) return false;
   const slotId = value.slice(READ_STATE_D_TAG_PREFIX.length);
   return slotId.length > 0 && slotId.length <= 64 && isAscii(slotId);
+}
+
+export function localExtraSlotIdsKey(pubkey: string): string {
+  return `buzz.nip-rs.extra-slot-ids:${pubkey}`;
 }
 
 export function localIsoToUnixSeconds(value: unknown): number | null {

@@ -18,6 +18,7 @@ import {
 import { splitOutgoingTags } from "@/features/messages/lib/imetaMediaMarkdown";
 import { relayClient } from "@/shared/api/relayClient";
 import { customEmojiQueryKey } from "@/features/custom-emoji/hooks";
+import { channelsQueryKey } from "@/features/channels/hooks";
 import { reactionEmojiUrl } from "@/shared/api/customEmoji";
 import type { CustomEmoji } from "@/shared/lib/remarkCustomEmoji";
 import {
@@ -34,9 +35,15 @@ import { applyEditTagOverlay } from "@/features/messages/lib/applyEditTagOverlay
 import { backfillAuxForMessages } from "@/features/messages/lib/auxBackfill";
 import { countTopLevelTimelineRows } from "@/features/messages/lib/formatTimelineMessages";
 import {
+  mergeHistoryOverSnapshot,
+  readMessageSnapshot,
+  writeMessageSnapshot,
+} from "@/features/messages/lib/messageSnapshot";
+import {
   MIN_TOP_LEVEL_ROWS_PER_FETCH,
   pageOlderMessagesUntilRowFloor,
 } from "@/features/messages/lib/pageOlderMessages";
+import { useWorkspaces } from "@/features/workspaces/useWorkspaces";
 import {
   KIND_STREAM_MESSAGE,
   KIND_SYSTEM_MESSAGE,
@@ -48,7 +55,7 @@ type MessageQueryContext = {
   queryKey: ReturnType<typeof channelMessagesKey>;
 };
 
-const CHANNEL_HISTORY_LIMIT = 300;
+const CHANNEL_HISTORY_LIMIT = 60;
 
 function getLocalRenderKey(message: RelayEvent) {
   return message.localKey ?? message.id;
@@ -118,7 +125,7 @@ export function mergeTimelineCacheMessages(
   );
 }
 
-function createOptimisticMessage(
+export function createOptimisticMessage(
   channelId: string,
   content: string,
   identity: Identity,
@@ -168,13 +175,92 @@ function createOptimisticMessage(
   };
 }
 
+/**
+ * Resolves the effective target channel for a send operation.
+ *
+ * When `capturedChannelId` is supplied (non-null), the target is looked up from
+ * `channelsCache` — this pins the send to the compose-time channel regardless
+ * of any subsequent navigation. If the id is supplied but resolves to nothing,
+ * returns `null` (caller should throw — don't silently fall back to the live
+ * channel). When `capturedChannelId` is null, the caller didn't capture one and
+ * the closed-over `fallbackChannel` is the intended target.
+ *
+ * Exported for unit testing.
+ */
+export function resolveEffectiveChannel(
+  capturedChannelId: string | null | undefined,
+  channelsCache: Channel[] | undefined,
+  fallbackChannel: Channel | null,
+): Channel | null {
+  if (capturedChannelId == null) {
+    return fallbackChannel;
+  }
+  return channelsCache?.find((c) => c.id === capturedChannelId) ?? null;
+}
+
+/**
+ * Resolves the thread reply target from a submit-time captured context or,
+ * for callers that predate the capture pattern, from live refs.
+ *
+ * When `threadContext` is supplied (non-null), its values are used exclusively
+ * — no live-ref reads occur. This is the race-free path: the context was
+ * captured synchronously at submit time before any async awaits.
+ *
+ * When `threadContext` is null/undefined (legacy callers), falls back to
+ * `liveReplyTargetId ?? liveThreadHeadId`.
+ *
+ * Returns null when no parentEventId can be resolved (caller should bail).
+ */
+export function resolveThreadReplyTarget(
+  threadContext:
+    | { parentEventId: string | null; threadHeadId: string | null }
+    | null
+    | undefined,
+  liveReplyTargetId: string | null | undefined,
+  liveThreadHeadId: string | null | undefined,
+): { parentEventId: string; threadHeadId: string | null } | null {
+  if (threadContext != null) {
+    // Captured context: use exclusively — no ?? fallback to live refs.
+    if (!threadContext.parentEventId) {
+      return null;
+    }
+    return {
+      parentEventId: threadContext.parentEventId,
+      threadHeadId: threadContext.threadHeadId,
+    };
+  }
+  // Legacy path: read from live refs.
+  const parentEventId = liveReplyTargetId ?? liveThreadHeadId ?? null;
+  if (!parentEventId) {
+    return null;
+  }
+  return {
+    parentEventId,
+    threadHeadId: liveThreadHeadId ?? null,
+  };
+}
+
 export function useChannelMessagesQuery(channel: Channel | null) {
   const queryClient = useQueryClient();
   const queryKey = channelMessagesKey(channel?.id ?? "none");
+  const { activeWorkspace } = useWorkspaces();
+  const relayUrl = activeWorkspace?.relayUrl ?? null;
 
-  return useQuery({
+  const query = useQuery({
     enabled: channel !== null && channel.channelType !== "forum",
-    placeholderData: () => queryClient.getQueryData<RelayEvent[]>(queryKey),
+    // Paint instantly from the in-memory cache, or — after a restart / gc —
+    // from the persisted per-channel snapshot, then revalidate behind it.
+    placeholderData: () => {
+      const cached = queryClient.getQueryData<RelayEvent[]>(queryKey);
+      if (cached && cached.length > 0) {
+        return cached;
+      }
+      if (!channel || !relayUrl) {
+        return undefined;
+      }
+      const snapshot = readMessageSnapshot(relayUrl, channel.id);
+      return snapshot ? normalizeTimelineMessages(snapshot) : undefined;
+    },
     queryKey,
     queryFn: async () => {
       if (!channel) {
@@ -185,36 +271,64 @@ export function useChannelMessagesQuery(channel: Channel | null) {
         channel.id,
         CHANNEL_HISTORY_LIMIT,
       );
-      const currentMessages =
-        queryClient.getQueryData<RelayEvent[]>(queryKey) ?? [];
-      const mergedHistory = mergeTimelineHistoryMessages(
-        currentMessages,
-        history,
-      );
+      // Merge over the cache, or over the persisted snapshot when cold; a
+      // cold snapshot load widens the aux backfill to the merged timeline so
+      // tombstones/edits for snapshot-only rows are fetched (see helper doc).
+      const cached = queryClient.getQueryData<RelayEvent[]>(queryKey);
+      const { merged: mergedHistory, auxBackfillWindow } =
+        mergeHistoryOverSnapshot({
+          cached,
+          snapshot:
+            !cached && relayUrl
+              ? readMessageSnapshot(relayUrl, channel.id)
+              : null,
+          history,
+        });
 
       // Paint messages immediately; backfill their reactions/edits/deletions
       // by `#e` in the background (it self-merges into the same cache key).
-      void backfillAuxForMessages(queryClient, channel.id, history);
+      void backfillAuxForMessages(queryClient, channel.id, auxBackfillWindow);
 
-      // Seed the cache, then — only if the cold window renders thinner than a
-      // normal scroll page — top it up to the same visible-row floor. A
-      // reply-heavy channel's 300-message cold load can be ~12 rows; a normal
-      // channel already clears the floor and skips the extra fetch entirely.
+      // Seed the cache and paint immediately; if the cold window renders
+      // thinner than a normal scroll page (reply-heavy channels), top it up
+      // in the background — it self-merges into the same cache key.
       queryClient.setQueryData<RelayEvent[]>(queryKey, mergedHistory);
       if (
         countTopLevelTimelineRows(mergedHistory) < MIN_TOP_LEVEL_ROWS_PER_FETCH
       ) {
-        await pageOlderMessagesUntilRowFloor(
+        void pageOlderMessagesUntilRowFloor(
           queryClient,
           channel.id,
           () => true,
-        );
+        ).catch((error) => {
+          console.error("Failed to top up channel history", channel.id, error);
+        });
       }
       return queryClient.getQueryData<RelayEvent[]>(queryKey) ?? mergedHistory;
     },
     staleTime: 5 * 60 * 1_000,
-    gcTime: 5 * 60 * 1_000,
+    // Long in-memory retention: a channel revisited within the hour paints
+    // from cache with zero relay round trips; the persisted snapshot covers
+    // restarts beyond it.
+    gcTime: 60 * 60 * 1_000,
   });
+
+  // Persist the newest slice after each settled update so the next cold open
+  // (restart, gc) paints from the snapshot. Placeholder frames are skipped —
+  // they are what the snapshot painted, not new information.
+  const persistSnapshot = useEffectEvent((events: RelayEvent[]) => {
+    if (relayUrl && channel) {
+      writeMessageSnapshot(relayUrl, channel.id, events);
+    }
+  });
+  const settledData = query.isPlaceholderData ? undefined : query.data;
+  useEffect(() => {
+    if (settledData && settledData.length > 0) {
+      persistSnapshot(settledData);
+    }
+  }, [settledData]);
+
+  return query;
 }
 
 export function useChannelSubscription(channel: Channel | null) {
@@ -304,7 +418,7 @@ export function useChannelSubscription(channel: Channel | null) {
 
         cleanup = dispose;
         // No post-subscribe history refetch: useChannelMessagesQuery already
-        // loaded the latest CHANNEL_HISTORY_LIMIT (300) events, and the live
+        // loaded the latest CHANNEL_HISTORY_LIMIT events, and the live
         // subscription itself backfills up to 50 most-recent events via its
         // initial REQ (buildChannelFilter(id, 50)). Both write into the same
         // channelMessagesKey cache, so any window between the two REQs is
@@ -337,6 +451,7 @@ export function useSendMessageMutation(
     RelayEvent,
     Error,
     {
+      channelId?: string;
       content: string;
       mentionPubkeys?: string[];
       parentEventId?: string | null;
@@ -345,12 +460,28 @@ export function useSendMessageMutation(
     MessageQueryContext | undefined
   >({
     mutationFn: async ({
+      channelId: capturedChannelId,
       content,
       mentionPubkeys,
       parentEventId,
       mediaTags,
     }) => {
-      if (!channel || channel.channelType === "forum") {
+      // Resolve the target channel from the compose-time id when provided, so
+      // a channel switch mid-send does not redirect the message. Fall back to
+      // the closed-over `channel` for callers that don't supply a capturedId.
+      // A supplied-but-unresolvable id throws rather than silently falling back
+      // to the live channel (silent misdelivery is the failure mode we're fixing).
+      const effectiveChannel = resolveEffectiveChannel(
+        capturedChannelId,
+        queryClient.getQueryData<Channel[]>(channelsQueryKey),
+        channel,
+      );
+
+      if (capturedChannelId != null && effectiveChannel == null) {
+        throw new Error("Channel is no longer available.");
+      }
+
+      if (!effectiveChannel || effectiveChannel.channelType === "forum") {
         throw new Error("This channel does not support message sending yet.");
       }
 
@@ -374,10 +505,10 @@ export function useSendMessageMutation(
       if (parentEventId || imetaTags.length > 0 || emojiTags.length > 0) {
         const cachedMessages =
           queryClient.getQueryData<RelayEvent[]>(
-            channelMessagesKey(channel.id),
+            channelMessagesKey(effectiveChannel.id),
           ) ?? [];
         const result = await sendChannelMessage(
-          channel.id,
+          effectiveChannel.id,
           content,
           parentEventId ?? null,
           imetaTags,
@@ -392,7 +523,7 @@ export function useSendMessageMutation(
         // For non-replies (media-only), we add them ourselves.
         const replyTags = parentEventId
           ? buildReplyTags(
-              channel.id,
+              effectiveChannel.id,
               identity.pubkey,
               parentEventId,
               resolveReplyRootId(parentEventId, cachedMessages),
@@ -402,7 +533,7 @@ export function useSendMessageMutation(
         const baseTags = parentEventId
           ? replyTags // buildReplyTags includes h + author p + mention ps
           : [
-              ["h", channel.id],
+              ["h", effectiveChannel.id],
               ["p", identity.pubkey],
             ]; // non-reply: add ourselves
 
@@ -430,24 +561,44 @@ export function useSendMessageMutation(
       }
 
       return relayClient.sendMessage(
-        channel.id,
+        effectiveChannel.id,
         content,
         mentionPubkeys ?? [],
         mentionTags,
       );
     },
-    onMutate: async ({ content, mentionPubkeys, parentEventId, mediaTags }) => {
-      if (!channel || !identity || channel.channelType === "forum") {
+    onMutate: async ({
+      channelId: capturedChannelId,
+      content,
+      mentionPubkeys,
+      parentEventId,
+      mediaTags,
+    }) => {
+      // Mirror the mutationFn channel resolution so the optimistic message
+      // lands in the same cache key the real send will eventually populate.
+      // A supplied-but-unresolvable id returns undefined (skips optimistic write)
+      // rather than silently writing to the live channel.
+      const effectiveChannel = resolveEffectiveChannel(
+        capturedChannelId,
+        queryClient.getQueryData<Channel[]>(channelsQueryKey),
+        channel,
+      );
+
+      if (
+        !effectiveChannel ||
+        !identity ||
+        effectiveChannel.channelType === "forum"
+      ) {
         return undefined;
       }
 
-      const queryKey = channelMessagesKey(channel.id);
+      const queryKey = channelMessagesKey(effectiveChannel.id);
       await queryClient.cancelQueries({ queryKey });
 
       const previousMessages =
         queryClient.getQueryData<RelayEvent[]>(queryKey) ?? [];
       const optimisticMessage = createOptimisticMessage(
-        channel.id,
+        effectiveChannel.id,
         content.trim(),
         identity,
         previousMessages,

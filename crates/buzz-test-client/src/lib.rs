@@ -106,6 +106,18 @@ impl BuzzTestClient {
         Ok(())
     }
 
+    /// Performs NIP-42 authentication with a NIP-OA `auth` tag, establishing
+    /// the agent→owner relationship in the relay's DB.  Call this as the
+    /// *agent* connection; the tag must be signed by `owner_keys`.
+    pub async fn authenticate_with_nip_oa(
+        &mut self,
+        agent_keys: &Keys,
+        auth_tag: &Tag,
+    ) -> Result<(), TestClientError> {
+        self.inner.authenticate(agent_keys, Some(auth_tag)).await?;
+        Ok(())
+    }
+
     /// Sends a signed event to the relay and waits for the OK response.
     pub async fn send_event(&mut self, event: Event) -> Result<OkResponse, TestClientError> {
         Ok(self.inner.send_event(event).await?)

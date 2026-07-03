@@ -2,6 +2,7 @@ import * as React from "react";
 import { toast } from "sonner";
 
 import { SidebarRelayConnectionCompactCard } from "@/features/sidebar/ui/SidebarRelayConnectionCard";
+import { useRelayConnection } from "@/shared/api/useRelayConnection";
 import { useReconnectRelay } from "@/shared/api/useReconnectRelay";
 import { cn } from "@/shared/lib/cn";
 import { isRelayUnreachableError } from "@/shared/lib/relayError";
@@ -30,7 +31,15 @@ function OnboardingRelayConnectionErrorCard({
   isSaving: boolean;
   message: string;
 }) {
-  const { isPending: isReconnectPending, reconnect } = useReconnectRelay();
+  const {
+    isPending: isReconnectPending,
+    isWaitingOnReconnectHook,
+    reconnect,
+  } = useReconnectRelay();
+  // Track whether a reconnect attempt was ever initiated from this card so we
+  // don't call markSuccess() on a "connected" state that pre-dates any click.
+  const hadActiveReconnectRef = React.useRef(false);
+  const relayConnectionState = useRelayConnection();
   const [dismissedErrorMessage, setDismissedErrorMessage] = React.useState<
     string | null
   >(null);
@@ -73,12 +82,24 @@ function OnboardingRelayConnectionErrorCard({
     }, ONBOARDING_CONNECTIVITY_SUCCESS_AUTO_DISMISS_MS);
   }, [message]);
 
+  // Observe real relay connection state. When this card initiated a reconnect
+  // attempt (phase-3 path: reconnect() returns false) and the relay later
+  // becomes connected, mark success. Guard: only fire when we actually
+  // started a reconnect so a pre-existing connected state doesn't trigger it.
+  React.useEffect(() => {
+    if (relayConnectionState === "connected" && hadActiveReconnectRef.current) {
+      hadActiveReconnectRef.current = false;
+      markSuccess();
+    }
+  }, [relayConnectionState, markSuccess]);
+
   const runConnectivityAction = React.useCallback(
     (runAction: () => Promise<boolean | undefined>) => {
       if (reconnectActionPendingRef.current) {
         return;
       }
 
+      hadActiveReconnectRef.current = true;
       reconnectActionPendingRef.current = true;
       setIsReconnectActionPending(true);
       setHasSuccess(false);
@@ -86,10 +107,18 @@ function OnboardingRelayConnectionErrorCard({
         .then(runAction)
         .then((didReconnect) => {
           if (didReconnect !== false) {
+            // Synchronous success (phase 1) — clear the ref and mark success
+            // immediately. The connection-state effect won't fire because the
+            // ref was just cleared.
+            hadActiveReconnectRef.current = false;
             markSuccess();
           }
+          // didReconnect === false means phase 3 is active; the
+          // connection-state effect will call markSuccess() when the relay
+          // becomes connected.
         })
         .catch((error) => {
+          hadActiveReconnectRef.current = false;
           const detail = error instanceof Error ? error.message : String(error);
           toast.error(`Could not reconnect to the relay. ${detail}`);
         })
@@ -116,6 +145,7 @@ function OnboardingRelayConnectionErrorCard({
         isActionDisabled={isActionPending}
         isConnected={hasSuccess}
         isReconnectPending={isActionPending}
+        isWaitingOnReconnectHook={isWaitingOnReconnectHook}
         onDismiss={() => setDismissedErrorMessage(message)}
         onReconnect={handleReconnectRelay}
         surface="secondary"

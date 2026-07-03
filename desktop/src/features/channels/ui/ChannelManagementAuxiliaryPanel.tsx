@@ -17,6 +17,7 @@ type ChannelManagementAuxiliaryPanelProps = {
   ) => void;
   threadPanelWidthPx: number;
   useSplitAuxiliaryPane: boolean;
+  transparentChrome?: boolean;
 };
 
 export function ChannelManagementAuxiliaryPanel({
@@ -30,9 +31,11 @@ export function ChannelManagementAuxiliaryPanel({
   onThreadPanelResizeStart,
   threadPanelWidthPx,
   useSplitAuxiliaryPane,
+  transparentChrome = false,
 }: ChannelManagementAuxiliaryPanelProps) {
   const panel = (
     <ChannelManagementSheet
+      animateSplitEnter={isSinglePanelView && !useSplitAuxiliaryPane}
       channel={activeChannel}
       currentPubkey={currentPubkey}
       layout={useSplitAuxiliaryPane || isSinglePanelView ? "split" : "overlay"}
@@ -43,6 +46,7 @@ export function ChannelManagementAuxiliaryPanel({
         }
       }}
       open={true}
+      transparentChrome={transparentChrome}
     />
   );
 

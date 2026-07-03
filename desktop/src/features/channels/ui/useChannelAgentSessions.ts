@@ -28,8 +28,10 @@ type UseChannelAgentSessionsOptions = {
   handleOpenThread: (message: TimelineMessage) => void;
   managedAgents: ChannelAgentSessionAgent[];
   openAgentSessionPubkey: string | null;
+  profilePanelPubkey?: string | null;
   setChannelManagementOpen: (open: boolean) => void;
   setExpandedThreadReplyIds: (value: Set<string>) => void;
+  setOpenAgentSessionChannelId: PanelValueSetter;
   setOpenAgentSessionPubkey: PanelValueSetter;
   setOpenThreadHeadId: (value: string | null) => void;
   setProfilePanelPubkey: (value: string | null) => void;
@@ -160,8 +162,10 @@ export function useChannelAgentSessions({
   handleOpenThread,
   managedAgents,
   openAgentSessionPubkey,
+  profilePanelPubkey = null,
   setChannelManagementOpen,
   setExpandedThreadReplyIds,
+  setOpenAgentSessionChannelId,
   setOpenAgentSessionPubkey,
   setOpenThreadHeadId,
   setProfilePanelPubkey,
@@ -178,37 +182,39 @@ export function useChannelAgentSessions({
       }),
     [activeChannel, activeChannelId, channelMembers, managedAgents],
   );
+  const agentSessionAgents = managedAgents;
 
   const closeAgentSession = React.useCallback(() => {
     setOpenAgentSessionPubkey(null);
   }, [setOpenAgentSessionPubkey]);
 
   const openAgentSession = React.useCallback(
-    (pubkey: string) => {
+    (pubkey: string, channelId?: string | null) => {
       setOpenThreadHeadId(null);
       setExpandedThreadReplyIds(new Set());
       setThreadScrollTargetId(null);
       setThreadReplyTargetId(null);
-      setProfilePanelPubkey(null);
       setChannelManagementOpen(false);
       setOpenAgentSessionPubkey(pubkey);
+      setOpenAgentSessionChannelId(channelId ?? null);
     },
     [
       setChannelManagementOpen,
       setExpandedThreadReplyIds,
+      setOpenAgentSessionChannelId,
       setOpenAgentSessionPubkey,
       setOpenThreadHeadId,
-      setProfilePanelPubkey,
       setThreadReplyTargetId,
       setThreadScrollTargetId,
     ],
   );
 
   const selectAgentSession = React.useCallback(
-    (pubkey: string) => {
+    (pubkey: string, channelId?: string | null) => {
       setOpenAgentSessionPubkey(pubkey);
+      setOpenAgentSessionChannelId(channelId ?? null);
     },
-    [setOpenAgentSessionPubkey],
+    [setOpenAgentSessionChannelId, setOpenAgentSessionPubkey],
   );
 
   const openThreadAndCloseAgentSession = React.useCallback(
@@ -234,7 +240,9 @@ export function useChannelAgentSessions({
     if (
       openAgentSessionPubkey &&
       agentsLoaded &&
-      !channelAgentSessionAgents.some(
+      normalizePubkey(profilePanelPubkey ?? "") !==
+        normalizePubkey(openAgentSessionPubkey) &&
+      !agentSessionAgents.some(
         (agent) =>
           normalizePubkey(agent.pubkey) ===
           normalizePubkey(openAgentSessionPubkey),
@@ -243,13 +251,15 @@ export function useChannelAgentSessions({
       setOpenAgentSessionPubkey(null, { replace: true });
     }
   }, [
+    agentSessionAgents,
     agentsLoaded,
-    channelAgentSessionAgents,
     openAgentSessionPubkey,
+    profilePanelPubkey,
     setOpenAgentSessionPubkey,
   ]);
 
   return {
+    agentSessionAgents,
     channelAgentSessionAgents,
     closeAgentSession,
     openAgentSession,

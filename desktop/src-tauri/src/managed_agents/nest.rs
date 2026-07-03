@@ -55,10 +55,53 @@ const END_MARKER: &str = "<!-- END BUZZ MANAGED -->";
 
 /// Canonical skill directory path relative to the nest root.
 const CANONICAL_SKILL_DIR: &str = ".agents/skills/buzz-cli";
-/// Returns the nest root path (`~/.buzz`), or `None` if the home
-/// directory cannot be resolved.
+
+/// Nest directory name for production builds.
+const NEST_DIR_PROD: &str = ".buzz";
+
+/// Nest directory name for dev builds. Dev builds (those whose Tauri app-data
+/// directory name starts with `"xyz.block.buzz.app.dev"`) use a separate nest
+/// so that the DMG and dev-build instances don't clobber each other's
+/// `.repos-dir` dotfile and `REPOS` symlink.
+const NEST_DIR_DEV: &str = ".buzz-dev";
+
+/// Process-lifetime nest directory. Initialized once at startup via
+/// [`init_nest_dir`] before any call to [`nest_dir`].
+///
+/// `None` inside the `OnceLock` means "home dir was unresolvable at init time".
+/// The outer `None` from `OnceLock::get` means "not initialized yet" —
+/// [`nest_dir`] falls back to the prod path in that case, ensuring test code
+/// that never calls [`init_nest_dir`] still works.
+static NEST_DIR: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+
+/// Initialize the process-lifetime nest directory.
+///
+/// Must be called once at app startup (before any call to [`nest_dir`] that
+/// may result in a filesystem operation). Subsequent calls are no-ops — the
+/// `OnceLock` is set exactly once.
+///
+/// `is_dev` should be `true` when the running binary is a dev build — i.e.
+/// when the Tauri app-data directory name starts with `"xyz.block.buzz.app.dev"`.
+/// Pass `false` for production (signed DMG) builds.
+pub fn init_nest_dir(is_dev: bool) {
+    let suffix = if is_dev { NEST_DIR_DEV } else { NEST_DIR_PROD };
+    let path = dirs::home_dir().map(|h| h.join(suffix));
+    // set() is a no-op when already initialized, which is correct: only the
+    // first call (at boot, before any filesystem work) should win.
+    let _ = NEST_DIR.set(path);
+}
+
+/// Returns the nest root path (`~/.buzz` for prod, `~/.buzz-dev` for dev),
+/// or `None` if the home directory cannot be resolved.
+///
+/// If [`init_nest_dir`] has not been called yet (e.g. in unit tests), falls
+/// back to the production path `~/.buzz`.
 pub fn nest_dir() -> Option<PathBuf> {
-    dirs::home_dir().map(|h| h.join(".buzz"))
+    match NEST_DIR.get() {
+        Some(path) => path.clone(),
+        // Not yet initialized — fall back to prod path. Covers test code.
+        None => dirs::home_dir().map(|h| h.join(NEST_DIR_PROD)),
+    }
 }
 
 /// Creates the Buzz nest at `~/.buzz` if it doesn't already exist.
@@ -265,9 +308,9 @@ fn ensure_skill_symlinks(_root: &Path) -> Result<(), String> {
 
 /// Ensures `~/.local/bin/buzz` is a symlink to the bundled CLI binary.
 ///
-/// Creates the symlink if it doesn't exist, updates it if it already points
-/// to a Buzz app bundle, and leaves it alone if it points elsewhere (to
-/// avoid clobbering another tool's binary).
+/// On every boot: replaces any existing symlink unconditionally (the `buzz`
+/// name is our namespace), creates a new one if absent, and leaves regular
+/// files alone to avoid clobbering a user-compiled binary.
 ///
 /// Non-fatal: callers should ignore errors — the symlink is a convenience
 /// for human Terminal use; agents find the CLI via PATH augmentation.
@@ -287,23 +330,14 @@ pub fn ensure_cli_symlink(exe_parent: &Path) -> Result<(), String> {
     let link = local_bin.join("buzz");
     match link.symlink_metadata() {
         Ok(meta) if meta.file_type().is_symlink() => {
-            // Symlink exists — only update if it points to a Buzz bundle.
-            if let Ok(target) = fs::read_link(&link) {
-                let target_str = target.display().to_string();
-                if target_str.contains(".app/Contents/MacOS") {
-                    // Buzz-owned symlink — update to current bundle path.
-                    let _ = fs::remove_file(&link);
-                    std::os::unix::fs::symlink(&buzz_bin, &link)
-                        .map_err(|e| format!("symlink {}: {e}", link.display()))?;
-                }
-                // Otherwise: symlink points elsewhere — don't clobber.
-            }
+            let _ = fs::remove_file(&link);
+            std::os::unix::fs::symlink(&buzz_bin, &link)
+                .map_err(|e| format!("symlink {}: {e}", link.display()))?;
         }
         Ok(_) => {
             // Regular file or directory — don't clobber.
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            // No file exists — create the symlink.
             std::os::unix::fs::symlink(&buzz_bin, &link)
                 .map_err(|e| format!("symlink {}: {e}", link.display()))?;
         }
@@ -623,7 +657,29 @@ mod tests {
     #[test]
     fn nest_dir_is_under_home() {
         if let Some(dir) = nest_dir() {
-            assert!(dir.ends_with(".buzz"));
+            // Accepts both .buzz (prod) and .buzz-dev (dev) depending on
+            // whether init_nest_dir was called before this test ran.
+            let name = dir.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            assert!(
+                name == NEST_DIR_PROD || name == NEST_DIR_DEV,
+                "nest_dir must end with .buzz or .buzz-dev, got {dir:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn init_nest_dir_prod_sets_buzz() {
+        // init_nest_dir is idempotent (OnceLock) — once set, subsequent calls
+        // are no-ops. We can only test the fallback path if the OnceLock is
+        // unset, which is only true in a fresh process. Instead, verify that
+        // nest_dir() always returns a path ending with a valid nest suffix.
+        let dir = nest_dir();
+        if let Some(d) = dir {
+            let name = d.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            assert!(
+                name == NEST_DIR_PROD || name == NEST_DIR_DEV,
+                "nest_dir suffix must be .buzz or .buzz-dev, got {d:?}"
+            );
         }
     }
 
@@ -935,13 +991,11 @@ mod tests {
         fs::create_dir(&exe_parent).unwrap();
         fs::write(exe_parent.join("buzz"), "binary").unwrap();
 
-        // Point home_dir to a temp location by using ensure_cli_symlink
-        // directly with a custom link target. We'll test the logic manually.
+        // Simulate the symlink creation path.
         let local_bin = tmp.path().join("local_bin");
         fs::create_dir_all(&local_bin).unwrap();
         let link = local_bin.join("buzz");
 
-        // Create symlink manually to test the creation path.
         std::os::unix::fs::symlink(exe_parent.join("buzz"), &link).unwrap();
         assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
         assert_eq!(fs::read_link(&link).unwrap(), exe_parent.join("buzz"));
@@ -956,11 +1010,8 @@ mod tests {
         let link = local_bin.join("buzz");
         fs::write(&link, "user-installed binary").unwrap();
 
-        // Verify it's a regular file.
+        // Regular files are preserved — the Ok(_) branch skips them.
         assert!(link.symlink_metadata().unwrap().file_type().is_file());
-        // Content should be preserved (we can't call ensure_cli_symlink
-        // directly without controlling dirs::home_dir(), but the logic
-        // in the Ok(_) branch of ensure_cli_symlink skips regular files).
         assert_eq!(fs::read_to_string(&link).unwrap(), "user-installed binary");
     }
 

@@ -52,6 +52,7 @@ type MockManagedAgentSeed = {
   backend?:
     | { type: "local" }
     | { type: "provider"; id: string; config: Record<string, unknown> };
+  lastError?: string | null;
   respondTo?: "owner-only" | "allowlist" | "anyone";
   respondToAllowlist?: string[];
 };
@@ -69,11 +70,23 @@ type MockSearchProfileSeed = {
 type MockRelayAgentSeed = {
   pubkey: string;
   name: string;
+  agentType?: string;
+  capabilities?: string[];
   respondTo?: "owner-only" | "allowlist" | "anyone";
   respondToAllowlist?: string[];
   channelNames?: string[];
   channelIds?: string[];
   status?: "online" | "away" | "offline";
+};
+
+type MockPersonaSeed = {
+  id?: string;
+  displayName: string;
+  avatarUrl?: string | null;
+  systemPrompt: string;
+  isActive?: boolean;
+  sourceTeam?: string | null;
+  envVars?: Record<string, string>;
 };
 
 export type MockEngramEntry = {
@@ -104,12 +117,19 @@ type MockBridgeOptions = {
     mcp?: MockCommandAvailability;
   };
   managedAgents?: MockManagedAgentSeed[];
+  personas?: MockPersonaSeed[];
   relayAgents?: MockRelayAgentSeed[];
+  agentListDelayMs?: number;
   createManagedAgentDelayMs?: number;
+  addChannelMembersDelayMs?: number;
   channelsReadError?: string;
   feedReadError?: string;
   canvasReadError?: string;
+  /** Delay (ms) for `apply_workspace`; see e2eBridge mock config. */
+  applyWorkspaceDelayMs?: number;
   openDmDelayMs?: number;
+  sendMessageDelayMs?: number;
+  usersBatchDelayMs?: number;
   /** Delay (ms) for older-history fetches; see e2eBridge mock config. */
   historyDelayMs?: number;
   profileReadDelayMs?: number;

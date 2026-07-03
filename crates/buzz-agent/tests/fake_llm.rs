@@ -574,3 +574,214 @@ async fn system_prompt_absent_no_canary() {
 
     h.shutdown().await;
 }
+
+// ─── Steering (_goose/unstable/session/steer) ───────────────────────────────
+
+/// Wait for the `activeRunId` advert buzz-agent emits at prompt start and
+/// return the run id, so a steer can target the live turn.
+async fn recv_active_run_id(h: &mut Harness) -> String {
+    let v = h
+        .recv_until(|v| {
+            v.get("method") == Some(&json!("session/update"))
+                && v["params"]["update"]["_meta"]["goose"]["activeRunId"].is_string()
+        })
+        .await;
+    v["params"]["update"]["_meta"]["goose"]["activeRunId"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn steer_folds_into_active_turn_without_cancelling() {
+    // A two-round turn (tool call → text). A steer sent once the run is live
+    // must (a) be accepted with the matching runId, (b) NOT cancel the turn —
+    // it still ends with end_turn — and (c) reach the provider as a user turn.
+    let (url, captures) = spawn_capturing_fake_llm(vec![
+        openai_tool_call("call_steer", "fake__noop", json!({})),
+        openai_text("acknowledged the steer"),
+    ])
+    .await;
+    let mut h = Harness::spawn(&url).await;
+    let sid = init_session(&mut h).await;
+
+    let p_id = h
+        .send(
+            "session/prompt",
+            json!({
+                "sessionId": sid,
+                "prompt": [{"type":"text","text":"work on the original task"}],
+            }),
+        )
+        .await;
+
+    // Learn the run id, then steer into it before the turn finishes.
+    let run_id = recv_active_run_id(&mut h).await;
+    let steer_text = "STEER-CANARY: also consider the edge case";
+    let s_id = h
+        .send(
+            "_goose/unstable/session/steer",
+            json!({
+                "sessionId": sid,
+                "expectedRunId": run_id,
+                "prompt": [{"type":"text","text": steer_text}],
+            }),
+        )
+        .await;
+
+    // Steer is accepted and echoes the run id it landed in.
+    let mut steer_ok = false;
+    let mut end_turn = false;
+    for _ in 0..40 {
+        let v = h.recv().await;
+        if v["id"] == json!(s_id) {
+            assert_eq!(
+                v["result"]["runId"],
+                json!(run_id),
+                "steer ran into the live turn"
+            );
+            assert!(
+                v["result"]["messageId"]
+                    .as_str()
+                    .is_some_and(|m| m.starts_with("steer_")),
+                "steer reply carries a messageId"
+            );
+            steer_ok = true;
+        } else if v["id"] == json!(p_id) {
+            // The turn was NOT cancelled — it completed normally.
+            assert_eq!(v["result"]["stopReason"], "end_turn");
+            end_turn = true;
+        }
+        if steer_ok && end_turn {
+            break;
+        }
+    }
+    assert!(steer_ok, "steer request was not accepted");
+    assert!(end_turn, "turn did not complete with end_turn after steer");
+
+    // The steered text reached the provider as a user message in some round.
+    let reqs = captures.lock().await;
+    let saw_steer = reqs.iter().any(|req| {
+        req["messages"].as_array().is_some_and(|msgs| {
+            msgs.iter().any(|m| {
+                m["role"] == "user"
+                    && m["content"]
+                        .as_str()
+                        .is_some_and(|c| c.contains(steer_text))
+            })
+        })
+    });
+    assert!(
+        saw_steer,
+        "steered text never reached the provider; captured requests: {reqs:#?}"
+    );
+    drop(reqs);
+    h.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn steer_rejected_when_no_active_run() {
+    // No prompt in flight → no active run → invalid_params.
+    let url = spawn_fake_llm(vec![]).await;
+    let mut h = Harness::spawn(&url).await;
+    let sid = init_session(&mut h).await;
+
+    let s_id = h
+        .send(
+            "_goose/unstable/session/steer",
+            json!({
+                "sessionId": sid,
+                "expectedRunId": "run_does_not_exist",
+                "prompt": [{"type":"text","text":"hello?"}],
+            }),
+        )
+        .await;
+    let v = h.recv_until(|v| v["id"] == json!(s_id)).await;
+    assert_eq!(v["error"]["code"], -32602, "expected invalid_params");
+    h.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn steer_rejected_on_run_id_mismatch() {
+    // A live run, but the caller targets a stale/wrong run id → invalid_params,
+    // so the client falls back to cancel+merge instead of injecting blind.
+    let (url, _captures) = spawn_capturing_fake_llm(vec![
+        openai_tool_call("call_x", "fake__noop", json!({})),
+        openai_text("done"),
+    ])
+    .await;
+    let mut h = Harness::spawn(&url).await;
+    let sid = init_session(&mut h).await;
+
+    let p_id = h
+        .send(
+            "session/prompt",
+            json!({"sessionId": sid, "prompt": [{"type":"text","text":"go"}]}),
+        )
+        .await;
+    let _live_run = recv_active_run_id(&mut h).await;
+
+    let s_id = h
+        .send(
+            "_goose/unstable/session/steer",
+            json!({
+                "sessionId": sid,
+                "expectedRunId": "run_stale_mismatch",
+                "prompt": [{"type":"text","text":"too late"}],
+            }),
+        )
+        .await;
+
+    let mut saw_reject = false;
+    for _ in 0..40 {
+        let v = h.recv().await;
+        if v["id"] == json!(s_id) {
+            assert_eq!(
+                v["error"]["code"], -32602,
+                "mismatched runId must be rejected"
+            );
+            saw_reject = true;
+        } else if v["id"] == json!(p_id) {
+            // Turn finishes normally regardless of the rejected steer.
+            break;
+        }
+    }
+    assert!(saw_reject, "run-id mismatch was not rejected");
+    h.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn steer_rejected_on_empty_prompt() {
+    let (url, _captures) = spawn_capturing_fake_llm(vec![
+        openai_tool_call("call_x", "fake__noop", json!({})),
+        openai_text("done"),
+    ])
+    .await;
+    let mut h = Harness::spawn(&url).await;
+    let sid = init_session(&mut h).await;
+    let p_id = h
+        .send(
+            "session/prompt",
+            json!({"sessionId": sid, "prompt": [{"type":"text","text":"go"}]}),
+        )
+        .await;
+    let run_id = recv_active_run_id(&mut h).await;
+    let s_id = h
+        .send(
+            "_goose/unstable/session/steer",
+            json!({"sessionId": sid, "expectedRunId": run_id, "prompt": []}),
+        )
+        .await;
+    let mut saw_reject = false;
+    for _ in 0..40 {
+        let v = h.recv().await;
+        if v["id"] == json!(s_id) {
+            assert_eq!(v["error"]["code"], -32602, "empty prompt must be rejected");
+            saw_reject = true;
+        } else if v["id"] == json!(p_id) {
+            break;
+        }
+    }
+    assert!(saw_reject, "empty steer prompt was not rejected");
+    h.shutdown().await;
+}

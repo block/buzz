@@ -29,14 +29,14 @@ use tokio::time::timeout;
 use uuid::Uuid;
 
 use crate::acp::{
-    extract_model_config_options, extract_model_state, resolve_model_switch_method, AcpClient,
-    AcpError, McpServer, ModelSwitchMethod, StopReason,
+    extract_model_config_options, extract_model_state, model_in_catalog,
+    resolve_model_switch_method, AcpClient, AcpError, McpServer, ModelSwitchMethod, StopReason,
 };
 use crate::config::{DedupMode, PermissionMode};
 use crate::observer;
 use crate::queue::{
-    ContextMessage, ConversationContext, FlushBatch, PromptChannelInfo, PromptProfile,
-    PromptProfileLookup,
+    CancelReason, ContextMessage, ConversationContext, FlushBatch, PromptChannelInfo,
+    PromptProfile, PromptProfileLookup, ThreadTags,
 };
 use crate::relay::{ChannelInfo, RestClient};
 
@@ -52,6 +52,13 @@ pub struct TaskMeta {
     /// Control signal for the in-flight prompt task.
     /// `None` for heartbeat tasks (not controllable) and after signal is consumed.
     pub control_tx: Option<tokio::sync::oneshot::Sender<ControlSignal>>,
+    /// Steer request channel for non-cancelling mid-turn delivery.
+    /// Capacity-1; `try_send` from the main loop fails on `Full`/`Closed`,
+    /// in which case the caller must fall back to the universal
+    /// `ControlSignal::Steer` cancel+merge path. `None` for heartbeat
+    /// tasks only — all prompt tasks install a steer channel regardless
+    /// of the agent's name.
+    pub steer_tx: Option<tokio::sync::mpsc::Sender<SteerRequest>>,
 }
 
 /// Agent-level model capabilities. Populated on first session creation.
@@ -132,6 +139,11 @@ pub struct OwnedAgent {
     pub model_capabilities: Option<AgentModelCapabilities>,
     /// Desired model ID (from `Config.model`). Applied after every `session_new_full()`.
     pub desired_model: Option<String>,
+    /// Whether `desired_model` was set by a live `SwitchModel` control signal
+    /// (as opposed to being derived from config/persona at spawn). Used by the
+    /// desktop reader to distinguish a genuine runtime override from a stale
+    /// session whose persona model was edited. Reset on spawn/restart.
+    pub model_overridden: bool,
     /// Protocol version reported by the agent in its initialize response.
     /// Agents declaring >= 2 support `systemPrompt` in session/new.
     pub protocol_version: u32,
@@ -173,23 +185,152 @@ pub enum PromptSource {
 fn apply_completed_before_control_signal(
     state: &mut SessionState,
     source: &PromptSource,
-    control_signal: ControlSignal,
+    control_signal: &ControlSignal,
 ) {
-    if control_signal == ControlSignal::Rotate {
+    // Rotate and SwitchModel both invalidate so the next turn creates a fresh
+    // session. For SwitchModel the caller has already set `desired_model`, so
+    // the fresh session applies the new model on its next creation.
+    if matches!(
+        control_signal,
+        ControlSignal::Rotate | ControlSignal::SwitchModel(_)
+    ) {
         state.invalidate(source);
     }
 }
 
 /// Control signal for an in-flight channel turn.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+///
+/// Not `Copy`: `SwitchModel` carries an owned `String`. Callers must clone when
+/// a value is needed after a move, or match by reference.
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ControlSignal {
     /// Stop the current turn and drop its triggering batch.
     Cancel,
-    /// Stop the current turn and requeue its triggering batch for a merged re-prompt.
+    /// Stop the current turn and requeue its triggering batch for a merged
+    /// re-prompt framed as a **supersede**: the new request replaces the old.
     Interrupt,
+    /// Stop the current turn and requeue its triggering batch for a merged
+    /// re-prompt framed as a **steer**: a message arrived while the agent was
+    /// working; it should continue its work and incorporate the message if
+    /// relevant, not treat it as a replacement task. This is the default
+    /// mid-turn delivery path (see [`MultipleEventHandling::Steer`]).
+    Steer,
     /// Stop the current turn and drop its triggering batch. The session is
     /// invalidated just like cancel; the next turn creates a fresh session.
     Rotate,
+    /// Switch the agent's model, then requeue the triggering batch so it
+    /// re-runs on a fresh session under the new model. The model lands by
+    /// setting `OwnedAgent::desired_model` before invalidation; the requeued
+    /// turn re-creates the session and re-applies `desired_model`. Runtime-only
+    /// — never persisted, gone on restart/respawn.
+    SwitchModel(String),
+}
+
+/// Goose-native non-cancelling steer request, sent from the main loop to an
+/// in-flight prompt task's read loop via a capacity-1 mpsc channel.
+///
+/// The read loop owns the `AcpClient`'s reader/writer for the duration of the
+/// turn, so we cannot drive a steer write from the main thread directly. The
+/// main loop carries the steer prompt body (already framed by
+/// `queue::native_steer_framing()` + `queue::format_event_block`); the read
+/// loop completes `sessionId` (lexical) and `expectedRunId`
+/// (`AcpClient::active_run_id` at write time) when it actually emits the
+/// JSON-RPC request. The main loop awaits a `SteerAck` on the `ack_tx`
+/// oneshot.
+///
+/// ## Why the read loop fills params, not the main loop
+///
+/// `expectedRunId` is a *moving target*: the read loop updates
+/// `self.active_run_id` as goose emits `session/update` notifications, and
+/// the steer is rejected if the supplied id doesn't match the *current* run.
+/// A snapshot taken at dispatch (or at mode-gate time) can be stale by the
+/// time the read loop actually writes the steer line. Filling params at
+/// write time uses the freshest possible run id and is correct-by-
+/// construction on the one field whose freshness the protocol checks.
+/// `sessionId` is in lexical scope inside the read loop's caller
+/// (`session_prompt_blocks_with_idle_timeout`), so no plumbing is required
+/// for that — only a function parameter pass-through.
+///
+/// If `active_run_id` is `None` at write time (no `session/update` seen yet
+/// — e.g. agents that never emit run-id metadata), the steer cannot form a
+/// valid `expectedRunId` and the read loop acks
+/// [`SteerError::ExpectedRunIdMissing`]. The main loop maps this to the
+/// "Err-before-pending" bucket: no withhold/mark was established at
+/// `pool::send_steer` time because the request was rejected before any
+/// write, so the watcher only needs to release nothing and fall back to the
+/// universal `ControlSignal::Steer` cancel+merge path.
+pub struct SteerRequest {
+    /// Prompt body text blocks. Each entry becomes one `text` content
+    /// block in `params.prompt`. Built by the main loop via
+    /// `queue::native_steer_framing()` + `queue::format_event_block` so
+    /// the wording cannot drift from the cancel+merge fallback path.
+    pub prompt_blocks: Vec<String>,
+    /// Oneshot for the read loop to report the outcome.
+    pub ack_tx: tokio::sync::oneshot::Sender<SteerAck>,
+}
+
+/// Why a goose-native steer failed.
+///
+/// String and integer fields are intentionally `Debug`-only — read by
+/// `tracing` macros in the main loop's `PoolEvent::SteerAck` arm via
+/// `?ack`. The dead-code lint can't see that path because it doesn't
+/// trace through `Debug` derives, hence the `#[allow]`.
+#[allow(dead_code)]
+#[derive(Debug)]
+pub enum SteerError {
+    /// The agent returned a JSON-RPC error response to the steer request.
+    ///
+    /// `code` is the JSON-RPC error code:
+    /// - `-32601` (`method_not_found`): the agent does not implement the
+    ///   steer extension. The main loop should fire the cancel+merge
+    ///   fallback so the message still reaches the agent.
+    /// - Any other code: the write landed and the agent rejected it at the
+    ///   application level (e.g. wrong run id). Release the withheld event
+    ///   for normal dispatch; do NOT fire the fallback — the turn is still
+    ///   running or just ended.
+    AgentError { code: i64, message: String },
+    /// Transport-level failure: write error, read EOF, JSON-RPC framing
+    /// violation, etc. The string carries the underlying `AcpError`'s display.
+    Transport(String),
+    /// At steer-write time `AcpClient::active_run_id` was `None`, so the
+    /// read loop couldn't form a valid `expectedRunId`. The read loop drops
+    /// the request without writing anything; the main loop should release
+    /// any withheld event and fall back to the universal cancel+merge
+    /// `ControlSignal::Steer` path. This is in the same "Err-before-pending"
+    /// bucket as `Transport` write failures: no in-process state was
+    /// established, so no in-process cleanup is needed.
+    ExpectedRunIdMissing,
+    /// The read loop never got to dispatch the steer because the prompt
+    /// completed first. Delivery state for the underlying message is
+    /// unknown after prompt completion — the main loop must treat this as
+    /// "release the withheld event so normal dispatch handles it" with no
+    /// claims that the agent did or did not incorporate it.
+    ///
+    /// Returned synchronously by `send_steer` when no task is in flight
+    /// for the channel. Never sent through the ack channel — the ack
+    /// watcher is only spawned on `send_steer` success.
+    PromptCompleted,
+}
+
+/// Outcome of a goose-native steer, sent from the read loop back to the
+/// main loop's ack watcher.
+#[derive(Debug)]
+pub enum SteerAck {
+    /// The agent returned a successful response to the steer request.
+    /// The main loop must drop the withheld event (`remove_event`) — it
+    /// has been delivered via the non-cancelling path.
+    Success,
+    /// The steer was attempted but failed. Delivery state for the
+    /// underlying message is unknown after prompt completion; the main
+    /// loop must release the withheld event and fall back to the
+    /// universal `Steer` cancel+merge path so the message still reaches
+    /// the agent.
+    Err(SteerError),
+    /// The prompt completed before the read loop selected the steer arm.
+    /// Treated as a benign no-op: release the withheld event for normal
+    /// dispatch. Do not fire the fallback `Steer` signal — there is no
+    /// in-flight turn to signal, and normal dispatch handles delivery.
+    PromptCompletedNeutral,
 }
 
 /// Outcome of a prompt task.
@@ -342,6 +483,46 @@ impl AgentPool {
         &mut self.task_map
     }
 
+    /// Try to send a goose-native steer request to the in-flight task for
+    /// `channel_id`.
+    ///
+    /// Returns `Ok(())` if the request was accepted by the read loop's
+    /// receiver (capacity-1 mpsc; one slot is the single in-flight steer
+    /// write). Returns `Err(SteerError::Transport(_))` on `Full`/`Closed`
+    /// (already-in-flight write, or read loop torn down). Callers must
+    /// fall back to the universal `ControlSignal::Steer` cancel+merge path
+    /// on `Err`.
+    ///
+    /// This does **not** spawn the ack watcher — the caller owns the
+    /// oneshot `ack_tx` inside `SteerRequest` and is responsible for
+    /// awaiting it and applying the locked Success / Err / PromptCompletedNeutral
+    /// semantics. Caller is also responsible for the synchronous
+    /// `queue.mark_native_steer_pending(...)` *before* spawning the
+    /// watcher, to close the result-vs-ack race.
+    ///
+    /// Returns `Err(SteerError::PromptCompleted)` if no task is in flight
+    /// for `channel_id` (the prompt completed between the mode-gate check
+    /// and this call, or the channel was never in flight). This is
+    /// semantically a soft no-op — the caller should release any withheld
+    /// event and let normal dispatch handle delivery.
+    pub fn send_steer(
+        &mut self,
+        channel_id: Uuid,
+        request: SteerRequest,
+    ) -> Result<(), SteerError> {
+        let meta = self
+            .task_map
+            .values_mut()
+            .find(|m| m.channel_id == Some(channel_id))
+            .ok_or(SteerError::PromptCompleted)?;
+        let tx = meta
+            .steer_tx
+            .as_ref()
+            .ok_or_else(|| SteerError::Transport("steer_tx not installed".into()))?;
+        tx.try_send(request)
+            .map_err(|e| SteerError::Transport(e.to_string()))
+    }
+
     pub fn result_tx(&self) -> mpsc::UnboundedSender<PromptResult> {
         self.result_tx.clone()
     }
@@ -396,6 +577,63 @@ impl AgentPool {
         }
         count
     }
+
+    /// Idle-path model switch: set `desired_model` on the idle agent for
+    /// `channel_id` and invalidate its session so the next turn re-creates the
+    /// session under the new model.
+    ///
+    /// Pre-cancel guard: the desired model is validated against the agent's
+    /// cached catalog *before* the session is invalidated, so an unsupported
+    /// pick is rejected without disturbing the existing session.
+    ///
+    /// Returns [`IdleSwitchResult`] describing what happened. The model does not
+    /// take effect — and the panel does not reflect it — until the agent next
+    /// runs a turn (no live session exists to re-emit `session_config_captured`
+    /// from an idle agent). This lag is intentional: faking the emit would
+    /// surface an override the session has not actually applied.
+    pub fn switch_idle_agent_model(
+        &mut self,
+        channel_id: Uuid,
+        model_id: &str,
+    ) -> IdleSwitchResult {
+        let Some(agent) = self
+            .agents
+            .iter_mut()
+            .flatten()
+            .find(|a| a.state.sessions.contains_key(&channel_id))
+        else {
+            return IdleSwitchResult::NoIdleAgent;
+        };
+
+        // Pre-cancel guard against the cached catalog. None = catalog not yet
+        // populated (no session ever created); defer validation to apply time.
+        if let Some(caps) = agent.model_capabilities.as_ref() {
+            if !model_in_catalog(
+                &caps.config_options_raw,
+                caps.available_models_raw.as_ref(),
+                model_id,
+            ) {
+                return IdleSwitchResult::UnsupportedModel;
+            }
+        }
+
+        agent.desired_model = Some(model_id.to_string());
+        agent.model_overridden = true;
+        agent.state.invalidate_channel(&channel_id);
+        IdleSwitchResult::Switched
+    }
+}
+
+/// Outcome of [`AgentPool::switch_idle_agent_model`].
+#[derive(Debug, PartialEq, Eq)]
+pub enum IdleSwitchResult {
+    /// `desired_model` set and the channel session invalidated.
+    Switched,
+    /// Desired model is not in the agent's cached catalog — pick rejected,
+    /// session untouched.
+    UnsupportedModel,
+    /// No idle agent available (all checked out / none spawned).
+    NoIdleAgent,
 }
 
 /// Timeout for a single pre-prompt context fetch attempt (thread/DM history).
@@ -456,19 +694,52 @@ async fn create_session_and_apply_model(
     }
 
     // Apply desired_model if set, matching against the fresh session/new response.
-    if let Some(ref desired) = agent.desired_model {
+    // Track whether the switch succeeded so session_config_captured reflects
+    // the post-switch state (not the pre-switch desired state).
+    let switch_succeeded = if let Some(ref desired) = agent.desired_model {
         match resolve_model_switch_method(&resp.raw, desired) {
             Some(method) => {
                 apply_model_switch(&mut agent.acp, &resp.session_id, desired, &method).await?;
+                true
             }
             None => {
                 tracing::warn!(
                     target: "pool::model",
                     "desired model {desired} not found in agent's available models — proceeding with agent default"
                 );
+                // Surface the miss so the desktop ModelPicker can reject a live
+                // pick rather than silently no-op. On the busy path the turn has
+                // already been cancelled+requeued by the time we get here, so the
+                // turn restarts on the unchanged model and the user is told no.
+                agent.acp.observe(
+                    "control_result",
+                    serde_json::json!({
+                        "type": "switch_model",
+                        "status": "unsupported_model",
+                        "modelId": desired,
+                    }),
+                );
+                false
             }
         }
-    }
+    } else {
+        false
+    };
+
+    // Emit session config for desktop consumption (config bridge tier 1b).
+    // Emitted AFTER desired_model resolution so the desktop caches the
+    // post-switch state. modelOverridden reflects whether the switch actually
+    // applied — false on the unsupported arm so the panel doesn't show a
+    // stale override badge.
+    agent.acp.observe(
+        "session_config_captured",
+        serde_json::json!({
+            "configOptions": resp.raw.get("configOptions").cloned().unwrap_or(serde_json::Value::Null),
+            "modes": resp.raw.get("modes").cloned().unwrap_or(serde_json::Value::Null),
+            "models": resp.raw.get("models").cloned().unwrap_or(serde_json::Value::Null),
+            "modelOverridden": agent.model_overridden && switch_succeeded,
+        }),
+    );
 
     // Apply permission mode if not the agent's built-in default AND the agent
     // advertises the requested mode in session/new. Agents that don't support
@@ -725,6 +996,35 @@ fn with_core(framed: Option<String>, core: Option<&str>) -> Option<String> {
     }
 }
 
+/// Return `agent` to the pool via `result_tx`, clearing any steer receiver first.
+///
+/// Every path that returns an `OwnedAgent` to the pool via `PromptResult` goes
+/// through this function. Panic/abort paths do not — and don't need to, since a
+/// panicked task's agent is never sent back via `PromptResult`.
+///
+/// Clearing `steer_rx` here — rather than per-arm — makes the `install_steer_rx`
+/// invariant (`steer_rx.is_none()` at dispatch) structurally unviolatable: a receiver
+/// installed for a turn that ends before the read loop's `take()` (e.g. session-create
+/// error) is always dropped before the agent re-enters the pool, so the next dispatch
+/// can never trigger the assert.
+///
+/// On the happy path the read loop has already called `take()`, so this is a no-op.
+fn send_prompt_result(
+    result_tx: &mpsc::UnboundedSender<PromptResult>,
+    mut agent: OwnedAgent,
+    source: PromptSource,
+    outcome: PromptOutcome,
+    batch: Option<FlushBatch>,
+) {
+    agent.acp.clear_steer_rx();
+    let _ = result_tx.send(PromptResult {
+        agent,
+        source,
+        outcome,
+        batch,
+    });
+}
+
 /// Core async function spawned for each prompt.
 ///
 /// Lifecycle:
@@ -882,21 +1182,23 @@ pub async fn run_prompt_task(
                     }
                     Err(AcpError::AgentExited) => {
                         agent.state.invalidate_all();
-                        let _ = result_tx.send(PromptResult {
+                        send_prompt_result(
+                            &result_tx,
                             agent,
                             source,
-                            outcome: PromptOutcome::AgentExited,
-                            batch: requeue_batch_if_queue(&ctx, batch),
-                        });
+                            PromptOutcome::AgentExited,
+                            requeue_batch_if_queue(&ctx, batch),
+                        );
                         return;
                     }
                     Err(e) => {
-                        let _ = result_tx.send(PromptResult {
+                        send_prompt_result(
+                            &result_tx,
                             agent,
                             source,
-                            outcome: PromptOutcome::Error(e),
-                            batch: requeue_batch_if_queue(&ctx, batch),
-                        });
+                            PromptOutcome::Error(e),
+                            requeue_batch_if_queue(&ctx, batch),
+                        );
                         return;
                     }
                 }
@@ -918,21 +1220,23 @@ pub async fn run_prompt_task(
                     }
                     Err(AcpError::AgentExited) => {
                         agent.state.invalidate_all();
-                        let _ = result_tx.send(PromptResult {
+                        send_prompt_result(
+                            &result_tx,
                             agent,
                             source,
-                            outcome: PromptOutcome::AgentExited,
-                            batch: None,
-                        });
+                            PromptOutcome::AgentExited,
+                            None,
+                        );
                         return;
                     }
                     Err(e) => {
-                        let _ = result_tx.send(PromptResult {
+                        send_prompt_result(
+                            &result_tx,
                             agent,
                             source,
-                            outcome: PromptOutcome::Error(e),
-                            batch: None,
-                        });
+                            PromptOutcome::Error(e),
+                            None,
+                        );
                         return;
                     }
                 }
@@ -983,12 +1287,13 @@ pub async fn run_prompt_task(
                 }
                 Err(AcpError::AgentExited) => {
                     agent.state.invalidate_all();
-                    let _ = result_tx.send(PromptResult {
+                    send_prompt_result(
+                        &result_tx,
                         agent,
                         source,
-                        outcome: PromptOutcome::AgentExited,
-                        batch: requeue_batch_if_queue(&ctx, batch),
-                    });
+                        PromptOutcome::AgentExited,
+                        requeue_batch_if_queue(&ctx, batch),
+                    );
                     return;
                 }
                 Err(AcpError::IdleTimeout(_)) => {
@@ -1007,12 +1312,13 @@ pub async fn run_prompt_task(
                         }
                         Err(AcpError::AgentExited) => {
                             agent.state.invalidate_all();
-                            let _ = result_tx.send(PromptResult {
+                            send_prompt_result(
+                                &result_tx,
                                 agent,
                                 source,
-                                outcome: PromptOutcome::AgentExited,
-                                batch: requeue_batch_if_queue(&ctx, batch),
-                            });
+                                PromptOutcome::AgentExited,
+                                requeue_batch_if_queue(&ctx, batch),
+                            );
                             return;
                         }
                         Err(e) => {
@@ -1023,12 +1329,13 @@ pub async fn run_prompt_task(
                             agent.state.invalidate(&source);
                         }
                     }
-                    let _ = result_tx.send(PromptResult {
+                    send_prompt_result(
+                        &result_tx,
                         agent,
                         source,
-                        outcome: PromptOutcome::Timeout,
-                        batch: requeue_batch_if_queue(&ctx, batch),
-                    });
+                        PromptOutcome::Timeout,
+                        requeue_batch_if_queue(&ctx, batch),
+                    );
                     return;
                 }
                 Err(AcpError::HardTimeout) => {
@@ -1038,12 +1345,13 @@ pub async fn run_prompt_task(
                         ctx.max_turn_duration.as_secs()
                     );
                     agent.state.invalidate_all();
-                    let _ = result_tx.send(PromptResult {
+                    send_prompt_result(
+                        &result_tx,
                         agent,
                         source,
-                        outcome: PromptOutcome::Timeout,
-                        batch: requeue_batch_if_queue(&ctx, batch),
-                    });
+                        PromptOutcome::Timeout,
+                        requeue_batch_if_queue(&ctx, batch),
+                    );
                     return;
                 }
                 Err(e) => {
@@ -1052,12 +1360,13 @@ pub async fn run_prompt_task(
                         "initial_message failed for channel {cid}: {e} — invalidating session"
                     );
                     agent.state.invalidate(&source);
-                    let _ = result_tx.send(PromptResult {
+                    send_prompt_result(
+                        &result_tx,
                         agent,
                         source,
-                        outcome: PromptOutcome::Error(e),
-                        batch: requeue_batch_if_queue(&ctx, batch),
-                    });
+                        PromptOutcome::Error(e),
+                        requeue_batch_if_queue(&ctx, batch),
+                    );
                     return;
                 }
             }
@@ -1125,12 +1434,13 @@ pub async fn run_prompt_task(
         // Should not happen — batch is None only for heartbeats which have prompt_text.
         // Return the agent to the pool to prevent a permanent slot leak.
         tracing::error!("run_prompt_task: no batch and no prompt_text — returning agent");
-        let _ = result_tx.send(PromptResult {
+        send_prompt_result(
+            &result_tx,
             agent,
             source,
-            outcome: PromptOutcome::Error(AcpError::Protocol("no batch and no prompt_text".into())),
-            batch: None,
-        });
+            PromptOutcome::Error(AcpError::Protocol("no batch and no prompt_text".into())),
+            None,
+        );
         return;
     };
 
@@ -1203,6 +1513,14 @@ pub async fn run_prompt_task(
                 _ = &mut liveness => unreachable!("liveness future never resolves"),
                 mode = rx => {
                     let control_signal = mode.unwrap_or(ControlSignal::Cancel);
+                    // Land the model switch before any cancel/requeue work: setting
+                    // `desired_model` here means the fresh session created by the
+                    // requeued turn (busy) or the next turn (already-completed)
+                    // applies the new model. Runtime-only — never persisted.
+                    if let ControlSignal::SwitchModel(ref model_id) = control_signal {
+                        agent.desired_model = Some(model_id.clone());
+                        agent.model_overridden = true;
+                    }
                     // Control signal received. Guard against Race 1: the turn may
                     // have completed naturally just as cancel fired.
                     if agent.acp.has_in_flight_prompt() {
@@ -1218,59 +1536,59 @@ pub async fn run_prompt_task(
                             Ok(stop_reason) => {
                                 log_stop_reason(&source, &stop_reason);
                                 agent.state.invalidate(&source);
-                                let retry_batch = match control_signal {
-                                    ControlSignal::Interrupt => requeue_batch_if_queue(&ctx, batch),
-                                    ControlSignal::Cancel | ControlSignal::Rotate => None,
-                                };
-                                let _ = result_tx.send(PromptResult {
+                                let retry_batch =
+                                    requeue_cancelled_batch(&ctx, control_signal, batch);
+
+                                send_prompt_result(
+                                    &result_tx,
                                     agent,
                                     source,
-                                    outcome: PromptOutcome::Cancelled,
-                                    batch: retry_batch,
-                                });
+                                    PromptOutcome::Cancelled,
+                                    retry_batch,
+                                );
                                 return;
                             }
                             Err(AcpError::AgentExited) => {
                                 agent.state.invalidate_all();
-                                let retry_batch = match control_signal {
-                                    ControlSignal::Interrupt => requeue_batch_if_queue(&ctx, batch),
-                                    ControlSignal::Cancel | ControlSignal::Rotate => None,
-                                };
-                                let _ = result_tx.send(PromptResult {
+                                let retry_batch =
+                                    requeue_cancelled_batch(&ctx, control_signal, batch);
+
+                                send_prompt_result(
+                                    &result_tx,
                                     agent,
                                     source,
-                                    outcome: PromptOutcome::AgentExited,
-                                    batch: retry_batch,
-                                });
+                                    PromptOutcome::AgentExited,
+                                    retry_batch,
+                                );
                                 return;
                             }
                             Err(AcpError::IdleTimeout(_) | AcpError::HardTimeout) => {
                                 // Cancel drain timed out — agent state uncertain.
                                 agent.state.invalidate(&source);
-                                let retry_batch = match control_signal {
-                                    ControlSignal::Interrupt => requeue_batch_if_queue(&ctx, batch),
-                                    ControlSignal::Cancel | ControlSignal::Rotate => None,
-                                };
-                                let _ = result_tx.send(PromptResult {
+                                let retry_batch =
+                                    requeue_cancelled_batch(&ctx, control_signal, batch);
+
+                                send_prompt_result(
+                                    &result_tx,
                                     agent,
                                     source,
-                                    outcome: PromptOutcome::Timeout,
-                                    batch: retry_batch,
-                                });
+                                    PromptOutcome::Timeout,
+                                    retry_batch,
+                                );
                                 return;
                             }
                             Err(e) => {
                                 agent.state.invalidate(&source);
-                                let retry_batch = match control_signal {
-                                    ControlSignal::Interrupt => requeue_batch_if_queue(&ctx, batch),
-                                    ControlSignal::Cancel | ControlSignal::Rotate => None,
-                                };
-                                let _ = result_tx.send(PromptResult {
+                                let retry_batch =
+                                    requeue_cancelled_batch(&ctx, control_signal, batch);
+
+                                send_prompt_result(
+                                    &result_tx,
                                     agent,
                                     source,
-                                    outcome: PromptOutcome::Error(e),
-                                    batch: retry_batch,
-                                });
+                                    PromptOutcome::Error(e),
+                                    retry_batch,
+                                );
                                 return;
                             }
                         }
@@ -1289,10 +1607,13 @@ pub async fn run_prompt_task(
                         // and last_prompt_id was cleared by the success path.
                         //
                         // MUST send a PromptResult or the main loop deadlocks.
-                        if control_signal == ControlSignal::Rotate {
+                        if matches!(
+                            control_signal,
+                            ControlSignal::Rotate | ControlSignal::SwitchModel(_)
+                        ) {
                             tracing::debug!(
                                 target: "pool::prompt",
-                                "rotate signal arrived but turn already completed — invalidating session"
+                                "rotate/switch signal arrived but turn already completed — invalidating session"
                             );
                         } else {
                             tracing::debug!(
@@ -1303,14 +1624,15 @@ pub async fn run_prompt_task(
                         apply_completed_before_control_signal(
                             &mut agent.state,
                             &source,
-                            control_signal,
+                            &control_signal,
                         );
-                        let _ = result_tx.send(PromptResult {
+                        send_prompt_result(
+                            &result_tx,
                             agent,
                             source,
-                            outcome: PromptOutcome::Ok(StopReason::EndTurn),
-                            batch: None, // turn succeeded — batch was processed, no requeue
-                        });
+                            PromptOutcome::Ok(StopReason::EndTurn),
+                            None, // turn succeeded — batch was processed, no requeue
+                        );
                         return;
                     }
                 }
@@ -1354,22 +1676,24 @@ pub async fn run_prompt_task(
                 agent.state.invalidate(&source);
             }
 
-            let _ = result_tx.send(PromptResult {
+            send_prompt_result(
+                &result_tx,
                 agent,
                 source,
-                outcome: PromptOutcome::Ok(stop_reason),
-                batch: None,
-            });
+                PromptOutcome::Ok(stop_reason),
+                None,
+            );
         }
         Err(AcpError::AgentExited) => {
             tracing::error!(target: "pool::prompt", "agent {} exited during prompt", agent.index);
             agent.state.invalidate_all();
-            let _ = result_tx.send(PromptResult {
+            send_prompt_result(
+                &result_tx,
                 agent,
                 source,
-                outcome: PromptOutcome::AgentExited,
-                batch: requeue_batch_if_queue(&ctx, batch),
-            });
+                PromptOutcome::AgentExited,
+                requeue_batch_if_queue(&ctx, batch),
+            );
         }
         Err(AcpError::IdleTimeout(_)) => {
             tracing::warn!(
@@ -1386,12 +1710,13 @@ pub async fn run_prompt_task(
                     log_stop_reason(&source, &stop_reason);
                     // Timeout triggers respawn in handle_prompt_result —
                     // session state will be discarded with the old agent.
-                    let _ = result_tx.send(PromptResult {
+                    send_prompt_result(
+                        &result_tx,
                         agent,
                         source,
-                        outcome: PromptOutcome::Timeout,
-                        batch: requeue_batch_if_queue(&ctx, batch),
-                    });
+                        PromptOutcome::Timeout,
+                        requeue_batch_if_queue(&ctx, batch),
+                    );
                 }
                 Err(AcpError::AgentExited) => {
                     tracing::error!(
@@ -1400,12 +1725,13 @@ pub async fn run_prompt_task(
                         agent.index
                     );
                     agent.state.invalidate_all();
-                    let _ = result_tx.send(PromptResult {
+                    send_prompt_result(
+                        &result_tx,
                         agent,
                         source,
-                        outcome: PromptOutcome::AgentExited,
-                        batch: requeue_batch_if_queue(&ctx, batch),
-                    });
+                        PromptOutcome::AgentExited,
+                        requeue_batch_if_queue(&ctx, batch),
+                    );
                 }
                 Err(e) => {
                     tracing::error!(
@@ -1413,12 +1739,13 @@ pub async fn run_prompt_task(
                         "cancel_with_cleanup error: {e} — invalidating session"
                     );
                     agent.state.invalidate(&source);
-                    let _ = result_tx.send(PromptResult {
+                    send_prompt_result(
+                        &result_tx,
                         agent,
                         source,
-                        outcome: PromptOutcome::Timeout,
-                        batch: requeue_batch_if_queue(&ctx, batch),
-                    });
+                        PromptOutcome::Timeout,
+                        requeue_batch_if_queue(&ctx, batch),
+                    );
                 }
             }
         }
@@ -1429,12 +1756,13 @@ pub async fn run_prompt_task(
                 ctx.max_turn_duration.as_secs()
             );
             agent.state.invalidate_all();
-            let _ = result_tx.send(PromptResult {
+            send_prompt_result(
+                &result_tx,
                 agent,
                 source,
-                outcome: PromptOutcome::Timeout,
-                batch: requeue_batch_if_queue(&ctx, batch),
-            });
+                PromptOutcome::Timeout,
+                requeue_batch_if_queue(&ctx, batch),
+            );
         }
         Err(e) => {
             tracing::error!(target: "pool::prompt", "session_prompt error: {e}");
@@ -1444,12 +1772,13 @@ pub async fn run_prompt_task(
             if !matches!(e, AcpError::AgentError(_)) {
                 agent.state.invalidate(&source);
             }
-            let _ = result_tx.send(PromptResult {
+            send_prompt_result(
+                &result_tx,
                 agent,
                 source,
-                outcome: PromptOutcome::Error(e),
-                batch: requeue_batch_if_queue(&ctx, batch),
-            });
+                PromptOutcome::Error(e),
+                requeue_batch_if_queue(&ctx, batch),
+            );
         }
     }
     // _reaction_guard drops here → spawns clear_reactions for all exit paths.
@@ -1627,6 +1956,24 @@ fn collect_prompt_pubkeys(
     pubkeys
 }
 
+/// Detect whether a kind:0 profile event belongs to an owned agent.
+///
+/// Agents carry a NIP-OA `["auth", owner_pk, conditions, sig]` tag in their
+/// profile; humans do not. This checks for the tag's presence/shape only — a
+/// cheap routing heuristic for reply anchoring, not a verified security gate
+/// (the signing path in `lib.rs::check_sibling_via_profile` does full
+/// verification where it matters).
+fn profile_event_is_agent(ev: &serde_json::Value) -> bool {
+    ev.get("tags")
+        .and_then(|t| t.as_array())
+        .is_some_and(|tags| {
+            tags.iter().any(|tag| {
+                tag.as_array()
+                    .is_some_and(|parts| parts.len() == 4 && parts[0].as_str() == Some("auth"))
+            })
+        })
+}
+
 /// Parse kind:0 profile events into a `PromptProfileLookup`.
 ///
 /// Each kind:0 event has `pubkey` and JSON `content` with optional fields:
@@ -1649,11 +1996,13 @@ fn parse_kind0_profile_lookup(json: serde_json::Value) -> Option<PromptProfileLo
                     .get("nip05")
                     .and_then(|v| v.as_str())
                     .map(str::to_string);
+                let is_agent = profile_event_is_agent(ev);
                 lookup.insert(
                     pk.to_ascii_lowercase(),
                     PromptProfile {
                         display_name,
                         nip05_handle,
+                        is_agent,
                     },
                 );
             }
@@ -2015,6 +2364,29 @@ fn requeue_batch_if_queue(ctx: &PromptContext, batch: Option<FlushBatch>) -> Opt
     }
 }
 
+/// Map a cancelling [`ControlSignal`] to the [`CancelReason`] that should frame
+/// the merged re-prompt, then requeue the batch (in `Queue` dedup mode) with
+/// that reason stamped onto [`FlushBatch::cancel_reason`]. `Cancel`/`Rotate`
+/// drop the batch entirely. The reason is consumed by the main loop at requeue
+/// time (`requeue_as_cancelled`) and ultimately by `format_prompt`.
+#[inline]
+fn requeue_cancelled_batch(
+    ctx: &PromptContext,
+    signal: ControlSignal,
+    batch: Option<FlushBatch>,
+) -> Option<FlushBatch> {
+    let reason = match signal {
+        ControlSignal::Steer => CancelReason::Steer,
+        ControlSignal::Interrupt | ControlSignal::SwitchModel(_) => CancelReason::Interrupt,
+        // Cancel/Rotate discard the batch — no merged re-prompt.
+        ControlSignal::Cancel | ControlSignal::Rotate => return None,
+    };
+    requeue_batch_if_queue(ctx, batch).map(|mut b| {
+        b.cancel_reason = Some(reason);
+        b
+    })
+}
+
 /// Log a stop reason at the appropriate tracing level.
 fn log_stop_reason(source: &PromptSource, stop_reason: &StopReason) {
     let label = match source {
@@ -2240,6 +2612,50 @@ pub(crate) async fn reaction_add(rest: &crate::relay::RestClient, event_id: &str
         Ok(Ok(_)) => {}
         Ok(Err(e)) => tracing::debug!(event_id, emoji, "reaction add failed: {e}"),
         Err(_) => tracing::debug!(event_id, emoji, "reaction add timed out"),
+    }
+}
+
+/// Best-effort: post a visible failure notice (kind:9) to a channel after a
+/// batch is dead-lettered. Replies into the thread of `thread_tags` when the
+/// triggering event was threaded. Errors are logged and swallowed — the
+/// notice must never take down the main loop.
+pub(crate) async fn post_failure_notice(
+    rest: &crate::relay::RestClient,
+    channel_id: Uuid,
+    thread_tags: &ThreadTags,
+    content: &str,
+) {
+    let thread_ref = thread_tags.root_event_id.as_deref().and_then(|root| {
+        let root_id = nostr::EventId::from_hex(root).ok()?;
+        let parent_id = thread_tags
+            .parent_event_id
+            .as_deref()
+            .and_then(|p| nostr::EventId::from_hex(p).ok())
+            .unwrap_or(root_id);
+        Some(buzz_sdk::ThreadRef {
+            root_event_id: root_id,
+            parent_event_id: parent_id,
+        })
+    });
+    let builder =
+        match buzz_sdk::build_message(channel_id, content, thread_ref.as_ref(), &[], false, &[]) {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::warn!(channel = %channel_id, "failure notice: build failed: {e}");
+                return;
+            }
+        };
+    let event = match builder.sign_with_keys(&rest.keys) {
+        Ok(e) => e,
+        Err(e) => {
+            tracing::warn!(channel = %channel_id, "failure notice: sign failed: {e}");
+            return;
+        }
+    };
+    match tokio::time::timeout(Duration::from_secs(5), rest.submit_event(&event)).await {
+        Ok(Ok(_)) => {}
+        Ok(Err(e)) => tracing::warn!(channel = %channel_id, "failure notice failed: {e}"),
+        Err(_) => tracing::warn!(channel = %channel_id, "failure notice timed out"),
     }
 }
 
@@ -2741,6 +3157,7 @@ mod tests {
                 received_at: std::time::Instant::now(),
             }],
             cancelled_events: vec![],
+            cancel_reason: None,
         };
         let context = ConversationContext::Thread {
             messages: vec![ContextMessage {
@@ -2784,8 +3201,31 @@ mod tests {
             Some(&PromptProfile {
                 display_name: Some("Wes".into()),
                 nip05_handle: Some("wes@example.com".into()),
+                is_agent: false,
             })
         );
+    }
+
+    #[test]
+    fn test_profile_event_is_agent_detects_nip_oa_auth_tag() {
+        // Agent profile carries a 4-element NIP-OA ["auth", owner, cond, sig] tag.
+        let agent_ev = json!({
+            "pubkey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "tags": [["auth", "owner_pk", "conditions", "sig"]],
+        });
+        assert!(profile_event_is_agent(&agent_ev));
+
+        // Human profile: no auth tag.
+        let human_ev = json!({ "pubkey": "bbbb", "tags": [["t", "topic"]] });
+        assert!(!profile_event_is_agent(&human_ev));
+
+        // Empty / missing tags → not an agent.
+        assert!(!profile_event_is_agent(&json!({ "tags": [] })));
+        assert!(!profile_event_is_agent(&json!({})));
+
+        // Malformed auth tag (wrong arity) → not treated as an agent.
+        let malformed = json!({ "tags": [["auth", "owner_pk"]] });
+        assert!(!profile_event_is_agent(&malformed));
     }
 
     #[test]
@@ -2858,7 +3298,7 @@ mod tests {
         apply_completed_before_control_signal(
             &mut s,
             &PromptSource::Channel(ch_a),
-            ControlSignal::Rotate,
+            &ControlSignal::Rotate,
         );
 
         assert!(!s.sessions.contains_key(&ch_a));
@@ -2879,7 +3319,7 @@ mod tests {
         apply_completed_before_control_signal(
             &mut s,
             &PromptSource::Channel(ch_a),
-            ControlSignal::Cancel,
+            &ControlSignal::Cancel,
         );
 
         assert_eq!(s.sessions.get(&ch_a).unwrap(), "sess-a");
@@ -3002,6 +3442,27 @@ mod tests {
         assert_eq!(s.core_sections.get(&ch_b).unwrap(), "core-b");
     }
 
+    // ── ControlSignal::SwitchModel (Phase 3a, Option ii) ─────────────────────
+
+    #[test]
+    fn test_switch_model_after_natural_completion_invalidates_channel_state() {
+        let (mut s, ch_a, ch_b) = make_state();
+
+        // SwitchModel must invalidate just like Rotate so the requeued turn
+        // re-creates a fresh session that re-applies the new desired_model.
+        apply_completed_before_control_signal(
+            &mut s,
+            &PromptSource::Channel(ch_a),
+            &ControlSignal::SwitchModel("gpt-5".into()),
+        );
+
+        assert!(!s.has_channel_state(&ch_a));
+        // ch_b untouched — the switch is channel-scoped.
+        assert_eq!(s.sessions.get(&ch_b).unwrap(), "sess-b");
+        assert_eq!(*s.turn_counts.get(&ch_b).unwrap(), 3);
+    }
+
+    // ── turn liveness emission ───────────────────────────────────────────────
     // `run_turn_liveness` is raced against a "prompt" future the same way
     // `run_prompt_task` does it: the prompt wins the select and the liveness
     // future is dropped. We assert what the observer saw.
@@ -3080,5 +3541,120 @@ mod tests {
             _ = &mut liveness => unreachable!("handle-less liveness future never resolves"),
         }
         // No observer to assert against — reaching here without panic is the test.
+    }
+
+    // ── steer_rx invariant tests ──────────────────────────────────────────
+    //
+    // These pin the `send_prompt_result` invariant: `steer_rx` is always
+    // `None` on any agent returned to the pool, regardless of which exit
+    // path fired.
+    //
+    // Test 1 (session-create-error path): installs a receiver, then calls
+    // `send_prompt_result` without the read loop running `take()` — simulating
+    // any early-return arm (e.g. session-create failure). The receiver must be
+    // cleared and the next `install_steer_rx` must not panic.
+    //
+    // Test 2 (post-read-loop path): receiver is already `None` (the read loop
+    // already consumed it via `take()`). `send_prompt_result` is idempotent —
+    // `steer_rx` stays `None` and the next `install_steer_rx` still does not
+    // panic.
+
+    /// After an early-return path (receiver installed but read loop never ran),
+    /// the returned agent's `steer_rx` is `None` and a subsequent
+    /// `install_steer_rx` does not panic.
+    #[tokio::test]
+    async fn test_send_prompt_result_clears_steer_rx_on_early_return() {
+        let acp = AcpClient::spawn("bash", &["-c".to_string(), "sleep 10".to_string()], &[])
+            .await
+            .expect("failed to spawn test agent");
+        let mut agent = OwnedAgent {
+            index: 0,
+            acp,
+            state: SessionState::default(),
+            model_capabilities: None,
+            desired_model: None,
+            model_overridden: false,
+            protocol_version: 2,
+        };
+
+        // Simulate dispatch: install a steer receiver (normally done by
+        // `dispatch_pending` before `run_prompt_task` is spawned).
+        let (_steer_tx, steer_rx) = tokio::sync::mpsc::channel::<SteerRequest>(1);
+        agent.acp.install_steer_rx(steer_rx);
+
+        // Simulate session-create error: early-return path calls
+        // `send_prompt_result` without the read loop ever running `take()`.
+        let (result_tx, mut result_rx) = tokio::sync::mpsc::unbounded_channel::<PromptResult>();
+        let source = PromptSource::Heartbeat;
+        send_prompt_result(
+            &result_tx,
+            agent,
+            source,
+            PromptOutcome::Error(AcpError::Protocol("simulated session-create error".into())),
+            None,
+        );
+
+        // Receive the PromptResult back from the channel.
+        let mut result = result_rx.recv().await.expect("PromptResult must be sent");
+
+        // steer_rx must be cleared even though the read loop never ran take().
+        assert!(
+            result.agent.acp.steer_rx_is_none(),
+            "steer_rx must be None after send_prompt_result on error path"
+        );
+
+        // The next dispatch can now install a fresh receiver without panicking.
+        let (_steer_tx2, steer_rx2) = tokio::sync::mpsc::channel::<SteerRequest>(1);
+        result.agent.acp.install_steer_rx(steer_rx2);
+        // Reaching here without a panic is the test.
+    }
+
+    /// After a successful prompt (read loop already consumed `steer_rx` via
+    /// `take()`), `send_prompt_result` is a no-op — `steer_rx` stays `None`
+    /// and the next `install_steer_rx` does not panic.
+    #[tokio::test]
+    async fn test_send_prompt_result_is_noop_when_steer_rx_already_consumed() {
+        let acp = AcpClient::spawn("bash", &["-c".to_string(), "sleep 10".to_string()], &[])
+            .await
+            .expect("failed to spawn test agent");
+        let agent = OwnedAgent {
+            index: 0,
+            acp,
+            state: SessionState::default(),
+            model_capabilities: None,
+            desired_model: None,
+            model_overridden: false,
+            protocol_version: 2,
+        };
+
+        // Simulate a completed turn: `steer_rx` was consumed by the read loop
+        // (`take()` was called), so it is already `None` when the turn ends.
+        assert!(
+            agent.acp.steer_rx_is_none(),
+            "precondition: steer_rx starts as None"
+        );
+
+        let (result_tx, mut result_rx) = tokio::sync::mpsc::unbounded_channel::<PromptResult>();
+        let source = PromptSource::Heartbeat;
+        send_prompt_result(
+            &result_tx,
+            agent,
+            source,
+            PromptOutcome::Ok(StopReason::EndTurn),
+            None,
+        );
+
+        let mut result = result_rx.recv().await.expect("PromptResult must be sent");
+
+        // Still None — clear_steer_rx on an already-None field is idempotent.
+        assert!(
+            result.agent.acp.steer_rx_is_none(),
+            "steer_rx must remain None after send_prompt_result on happy path"
+        );
+
+        // The next dispatch can install a fresh receiver without panicking.
+        let (_steer_tx, steer_rx) = tokio::sync::mpsc::channel::<SteerRequest>(1);
+        result.agent.acp.install_steer_rx(steer_rx);
+        // Reaching here without a panic is the test.
     }
 }

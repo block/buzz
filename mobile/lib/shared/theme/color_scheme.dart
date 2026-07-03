@@ -21,7 +21,7 @@ const lightColorScheme = ColorScheme(
   onError: Color(0xFFFFFFFF),
   errorContainer: Color(0xFFFDD8E0),
   onErrorContainer: Color(0xFFD20F39),
-  surface: Color(0xFFEFF1F5), // Latte Base
+  surface: Color(0xFFFFFFFF),
   onSurface: Color(0xFF4C4F69), // Latte Text
   onSurfaceVariant: Color(0xFF6C6F85), // Latte Subtext0
   outline: Color(0xFFBCC0CC), // Latte Surface2
@@ -83,17 +83,11 @@ Color contrastForeground(Color bg) {
 }
 
 /// Returns a [ColorScheme] with the given accent applied as primary.
-/// If [accentIndex] is [defaultAccentIndex], returns the base scheme unchanged.
 ColorScheme applyAccent(ColorScheme base, int accentIndex) {
-  if (accentIndex == defaultAccentIndex ||
-      accentIndex < 0 ||
-      accentIndex >= accentColors.length) {
+  if (accentIndex < 0 || accentIndex >= accentColors.length) {
     return base;
   }
-  final accent = accentColors[accentIndex];
-  final color = base.brightness == Brightness.light
-      ? accent.light
-      : accent.dark;
+  final color = accentColorForScheme(base, accentIndex);
   final onColor = contrastForeground(color);
 
   return base.copyWith(primary: color, onPrimary: onColor, surfaceTint: color);

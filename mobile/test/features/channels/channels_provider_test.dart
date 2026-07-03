@@ -113,6 +113,33 @@ void main() {
     expect(ephemeral.ttlSeconds, 86400);
   });
 
+  test('hidden DMs are filtered from the channel list', () async {
+    final session = _FakeRelaySession(
+      memberships: [_membership(_channelA, myPk), _membership(_channelB, myPk)],
+      metadata: [
+        _meta(id: _channelA, name: 'Alice', channelType: 'dm'),
+        _meta(id: _channelB, name: 'Bob', channelType: 'dm'),
+      ],
+      hiddenDmEvents: [
+        _hiddenDms([_channelA], pubkey: myPk),
+      ],
+    );
+    final container = _buildContainer(session: session);
+    addTearDown(container.dispose);
+
+    final channels = await container.read(channelsProvider.future);
+
+    expect(channels.map((c) => c.id), [_channelB]);
+    expect(
+      session.historyFilters.any(
+        (filter) =>
+            filter.kinds.contains(EventKind.dmVisibility) &&
+            filter.tags['#p']?.single == myPk,
+      ),
+      isTrue,
+    );
+  });
+
   test(
     'archived kind:39000 metadata sets Channel.isArchived (covers TTL auto-archive)',
     () async {
@@ -256,6 +283,21 @@ NostrEvent _membership(String channelId, String pubkey) => NostrEvent(
   sig: 'sig',
 );
 
+NostrEvent _hiddenDms(List<String> channelIds, {required String pubkey}) =>
+    NostrEvent(
+      id: 'hidden-${channelIds.join('-')}',
+      pubkey: 'relay',
+      createdAt: 2,
+      kind: EventKind.dmVisibility,
+      tags: [
+        ['d', pubkey],
+        ['p', pubkey],
+        for (final channelId in channelIds) ['h', channelId],
+      ],
+      content: '',
+      sig: 'sig',
+    );
+
 /// Build a kind:39000 channel metadata event.
 NostrEvent _meta({
   required String id,
@@ -294,10 +336,15 @@ ProviderContainer _buildContainer({required _FakeRelaySession session}) {
 /// Fake [RelaySessionNotifier] that returns canned events from [fetchHistory]
 /// and records subscribe calls.
 class _FakeRelaySession extends RelaySessionNotifier {
-  _FakeRelaySession({required this.memberships, required this.metadata});
+  _FakeRelaySession({
+    required this.memberships,
+    required this.metadata,
+    this.hiddenDmEvents = const [],
+  });
 
   final List<NostrEvent> memberships;
   final List<NostrEvent> metadata;
+  final List<NostrEvent> hiddenDmEvents;
 
   final List<NostrFilter> historyFilters = [];
   final List<NostrFilter> subscribeFilters = [];
@@ -321,6 +368,9 @@ class _FakeRelaySession extends RelaySessionNotifier {
                 e.tags.any((t) => t.length >= 2 && t[0] == 'p' && t[1] == myPk),
           )
           .toList();
+    }
+    if (filter.kinds.contains(EventKind.dmVisibility)) {
+      return hiddenDmEvents;
     }
     if (filter.kinds.contains(39000)) {
       // Metadata query — return all metadata events whose `d` tag matches.

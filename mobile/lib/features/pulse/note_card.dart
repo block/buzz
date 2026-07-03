@@ -268,7 +268,7 @@ class _ActionButton extends StatelessWidget {
       borderRadius: BorderRadius.circular(Radii.md),
       child: Padding(
         padding: const EdgeInsets.symmetric(
-          horizontal: Grid.xs,
+          horizontal: Grid.gutter,
           vertical: Grid.half,
         ),
         child: Row(

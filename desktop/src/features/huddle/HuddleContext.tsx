@@ -76,10 +76,13 @@ interface HuddleContextValue {
   selectedOutputDevice: string;
   /** Select a different speaker — takes effect on next huddle start/join */
   setSelectedOutputDevice: (name: string) => void;
+  /** Active ephemeral huddle channel ID, if this client is connected to one. */
+  activeEphemeralChannelId: string | null;
   /** Start a new huddle — calls Rust start_huddle, then connects mic + AudioWorklet */
   startHuddle: (
     parentChannelId: string,
     memberPubkeys: string[],
+    channelName?: string,
   ) => Promise<void>;
   /** Join an existing huddle — calls Rust join_huddle, then connects mic + AudioWorklet */
   joinHuddle: (
@@ -414,7 +417,11 @@ export function HuddleProvider({ children }: { children: React.ReactNode }) {
   );
 
   const startHuddle = React.useCallback(
-    async (parentChannelId: string, memberPubkeys: string[]) => {
+    async (
+      parentChannelId: string,
+      memberPubkeys: string[],
+      channelName?: string,
+    ) => {
       if (busyRef.current) return;
       busyRef.current = true;
 
@@ -427,6 +434,7 @@ export function HuddleProvider({ children }: { children: React.ReactNode }) {
         const joinInfo = await invoke<HuddleJoinInfo>("start_huddle", {
           parentChannelId,
           memberPubkeys,
+          channelName,
         });
         rustActiveRef.current = true;
         try {
@@ -640,6 +648,7 @@ export function HuddleProvider({ children }: { children: React.ReactNode }) {
         outputDevices,
         selectedOutputDevice,
         setSelectedOutputDevice,
+        activeEphemeralChannelId: ephemeralChannelId,
         startHuddle,
         joinHuddle,
         leaveHuddle,

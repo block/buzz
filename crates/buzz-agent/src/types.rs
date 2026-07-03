@@ -1,6 +1,18 @@
 use serde::Deserialize;
 use serde_json::Value;
 
+/// Byte-equivalent charged to the handoff/context-pressure gate for a single
+/// image tool result. The gate maps bytes to tokens at 1 byte/token (see
+/// `handoff::CONSERVATIVE_BYTES_PER_TOKEN`), so this is also the per-image
+/// token budget. Providers bill an image as visual *tiles*, not its base64
+/// length: Anthropic caps at ~1600 tokens/image and OpenAI high-detail lands
+/// ~1.1K–1.5K. We charge 16 KiB — a generous ceiling that still over-counts
+/// the real ~2K cost, while being ~190× smaller than the base64 length of a
+/// typical multi-MiB screenshot. Charging `data.len()` to the gate instead
+/// made a single `view_image` (~3.1M base64 bytes) trip the handoff gate on a
+/// fresh context.
+const IMAGE_CONTEXT_TOKEN_EQUIV: usize = 16 * 1024;
+
 #[derive(Debug, Clone)]
 pub enum ToolResultContent {
     Text(String),
@@ -8,13 +20,29 @@ pub enum ToolResultContent {
 }
 
 impl ToolResultContent {
+    /// Real serialized size in bytes. Used by `truncate_history` to keep the
+    /// outgoing request body under `max_history_bytes` — an image rides the
+    /// wire as its full base64 string, so that string's length is what counts
+    /// here. For context-window/handoff pressure use
+    /// [`Self::context_pressure_bytes`] instead, which charges an image its
+    /// (far smaller) visual-token equivalent.
     pub fn estimated_bytes(&self) -> usize {
         match self {
             Self::Text(s) => s.len(),
-            // This is request-size pressure accounting, not a visual-token
-            // estimate. Count the base64 bytes we will actually serialize so
-            // image-heavy sessions cannot silently exceed provider/body caps.
             Self::Image { data, mime_type } => data.len() + mime_type.len(),
+        }
+    }
+
+    /// Token-equivalent context-window pressure, in bytes (the handoff gate
+    /// maps bytes→tokens at 1:1). Identical to [`Self::estimated_bytes`] for
+    /// text, but an image is charged a flat [`IMAGE_CONTEXT_TOKEN_EQUIV`]
+    /// budget rather than its base64 length — providers bill it as visual
+    /// tiles (~2K tokens), so counting `data.len()` over-counts by ~1500× and
+    /// forces a handoff on a single image.
+    pub fn context_pressure_bytes(&self) -> usize {
+        match self {
+            Self::Text(s) => s.len(),
+            Self::Image { data: _, mime_type } => IMAGE_CONTEXT_TOKEN_EQUIV + mime_type.len(),
         }
     }
 
@@ -40,6 +68,19 @@ pub enum HistoryItem {
 
 impl HistoryItem {
     pub fn estimated_bytes(&self) -> usize {
+        self.size_with(ToolResultContent::estimated_bytes)
+    }
+
+    /// Token-equivalent context-window pressure, in bytes. Mirrors
+    /// [`Self::estimated_bytes`] but charges image tool results their visual-
+    /// token equivalent rather than their base64 length — see
+    /// [`ToolResultContent::context_pressure_bytes`]. The handoff gate uses
+    /// this; `truncate_history` (request-body sizing) uses `estimated_bytes`.
+    pub fn context_pressure_bytes(&self) -> usize {
+        self.size_with(ToolResultContent::context_pressure_bytes)
+    }
+
+    fn size_with(&self, content_size: fn(&ToolResultContent) -> usize) -> usize {
         match self {
             Self::User(s) => s.len(),
             Self::Assistant { text, tool_calls } => {
@@ -56,11 +97,7 @@ impl HistoryItem {
                         .sum::<usize>()
             }
             Self::ToolResult(r) => {
-                r.provider_id.len()
-                    + r.content
-                        .iter()
-                        .map(ToolResultContent::estimated_bytes)
-                        .sum::<usize>()
+                r.provider_id.len() + r.content.iter().map(content_size).sum::<usize>()
             }
         }
     }
@@ -102,6 +139,15 @@ pub struct LlmResponse {
     /// tokens, so reading it alone would undercount). Used to gate handoff on
     /// the real token budget rather than a byte estimate.
     pub input_tokens: Option<u64>,
+    /// Reasoning/thinking content emitted by the model before its answer, if
+    /// any. Non-empty when the provider returns extended-thinking tokens:
+    ///
+    /// - Responses API: concatenated `summary[].text` from `type == "reasoning"` output items.
+    /// - Anthropic: concatenated `thinking` from `type == "thinking"` content blocks.
+    /// - OpenAI chat/completions: not exposed; always empty.
+    ///
+    /// Empty string when the provider returned no reasoning content.
+    pub reasoning: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -218,4 +264,83 @@ pub fn clamp(mut s: String, max: usize) -> String {
         s.push_str(MARKER);
     }
     s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn image_item(base64_len: usize) -> HistoryItem {
+        HistoryItem::ToolResult(ToolResult {
+            provider_id: "call_1".into(),
+            content: vec![ToolResultContent::Image {
+                data: "A".repeat(base64_len),
+                mime_type: "image/png".into(),
+            }],
+            is_error: false,
+        })
+    }
+
+    #[test]
+    fn image_estimated_bytes_is_real_wire_size() {
+        // `truncate_history` relies on this to keep the request body under
+        // `max_history_bytes`, so an image must report its full base64 length.
+        let img = ToolResultContent::Image {
+            data: "A".repeat(3_000_000),
+            mime_type: "image/png".into(),
+        };
+        assert_eq!(img.estimated_bytes(), 3_000_000 + "image/png".len());
+    }
+
+    #[test]
+    fn image_context_pressure_is_token_equivalent_not_base64_len() {
+        // The handoff gate must charge an image its visual-token equivalent,
+        // not its base64 length — otherwise one screenshot trips the gate.
+        let img = ToolResultContent::Image {
+            data: "A".repeat(3_000_000),
+            mime_type: "image/png".into(),
+        };
+        assert_eq!(
+            img.context_pressure_bytes(),
+            IMAGE_CONTEXT_TOKEN_EQUIV + "image/png".len()
+        );
+        // And it must be independent of the (huge) base64 payload length.
+        let bigger = ToolResultContent::Image {
+            data: "A".repeat(10_000_000),
+            mime_type: "image/png".into(),
+        };
+        assert_eq!(
+            img.context_pressure_bytes(),
+            bigger.context_pressure_bytes()
+        );
+    }
+
+    #[test]
+    fn single_image_does_not_trip_default_handoff_threshold() {
+        // Regression: a single ~3.1M-base64-byte `view_image` result on an
+        // otherwise-empty history must NOT exceed the default pre-usage
+        // handoff cap. The gate's byte-fallback threshold with the shipped
+        // defaults (max_context_tokens=200_000, max_output_tokens=32_768) is
+        // min(200_000*9/10, 200_000-32_768) = 167_232 "bytes". Before the fix
+        // this item counted ~3.1M and tripped instantly.
+        let item = image_item(3_118_884);
+        const DEFAULT_PRE_USAGE_THRESHOLD: usize = 167_232;
+        assert!(
+            item.context_pressure_bytes() <= DEFAULT_PRE_USAGE_THRESHOLD,
+            "one image charged {} bytes of context pressure, over the {} threshold",
+            item.context_pressure_bytes(),
+            DEFAULT_PRE_USAGE_THRESHOLD
+        );
+        // The real wire size, by contrast, is still the full base64 payload.
+        assert!(item.estimated_bytes() >= 3_118_884);
+    }
+
+    #[test]
+    fn text_content_size_is_identical_for_both_measures() {
+        // Only images diverge; text must size the same under both paths.
+        let text = ToolResultContent::Text("hello world".into());
+        assert_eq!(text.estimated_bytes(), text.context_pressure_bytes());
+        let item = HistoryItem::User("a user message".into());
+        assert_eq!(item.estimated_bytes(), item.context_pressure_bytes());
+    }
 }

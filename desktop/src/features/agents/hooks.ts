@@ -13,6 +13,7 @@ import {
   discoverAcpRuntimes,
   discoverBackendProviders,
   discoverManagedAgentPrereqs,
+  getAgentConfigSurface,
   getManagedAgentLog,
   installAcpRuntime,
   listManagedAgents,
@@ -361,6 +362,17 @@ export function useStartManagedAgentMutation() {
 
   return useMutation({
     mutationFn: (pubkey: string) => startManagedAgent(pubkey),
+    onSuccess: (updated) => {
+      queryClient.setQueryData<ManagedAgent[]>(
+        managedAgentsQueryKey,
+        (current) => {
+          if (!current) return current;
+          return current.map((agent) =>
+            agent.pubkey === updated.pubkey ? updated : agent,
+          );
+        },
+      );
+    },
     onSettled: () => {
       invalidateManagedAgentQueriesInBackground(queryClient);
     },
@@ -420,15 +432,24 @@ export function useAttachManagedAgentToChannelMutation(
   const queryClient = useQueryClient();
 
   return useMutation({
-    mutationFn: async (input: AttachManagedAgentToChannelInput) => {
-      if (!channelId) {
+    mutationFn: async (
+      input: AttachManagedAgentToChannelInput & { channelId?: string },
+    ) => {
+      const { channelId: capturedChannelId, ...rest } = input;
+      const effectiveChannelId = capturedChannelId ?? channelId;
+      if (!effectiveChannelId) {
         throw new Error("No channel selected.");
       }
 
-      return attachManagedAgentToChannel(channelId, input);
+      return attachManagedAgentToChannel(effectiveChannelId, rest);
     },
-    onSettled: () => {
-      invalidateAgentQueriesInBackground(queryClient, channelId);
+    onSettled: (_data, _err, variables) => {
+      // Invalidate the effective channel (the one the server actually mutated)
+      // so its membership/agent state stays fresh. Invalidating the live
+      // hook-closure channelId when the user has already switched away would
+      // leave the compose-time channel stale.
+      const effectiveChannelId = variables?.channelId ?? channelId;
+      invalidateAgentQueriesInBackground(queryClient, effectiveChannelId);
     },
   });
 }
@@ -457,13 +478,17 @@ export function useCreateChannelManagedAgentMutation(channelId: string | null) {
 
   return useMutation({
     mutationFn: async (
-      input: CreateChannelManagedAgentInput,
+      input: CreateChannelManagedAgentInput & { channelId?: string },
     ): Promise<CreateChannelManagedAgentResult> => {
-      if (!channelId) {
+      const { channelId: capturedChannelId, ...rest } = input;
+      const effectiveChannelId = capturedChannelId ?? channelId;
+      if (!effectiveChannelId) {
         throw new Error("No channel selected.");
       }
 
-      const result = await createChannelManagedAgents(channelId, [input]);
+      const result = await createChannelManagedAgents(effectiveChannelId, [
+        rest,
+      ]);
       const success = result.successes[0];
       if (success) {
         return success;
@@ -472,8 +497,9 @@ export function useCreateChannelManagedAgentMutation(channelId: string | null) {
       const failure = result.failures[0];
       throw new Error(failure?.error ?? "Could not create agent.");
     },
-    onSettled: () => {
-      invalidateAgentQueriesInBackground(queryClient, channelId);
+    onSettled: (_data, _err, variables) => {
+      const effectiveChannelId = variables?.channelId ?? channelId;
+      invalidateAgentQueriesInBackground(queryClient, effectiveChannelId);
     },
   });
 }
@@ -522,7 +548,6 @@ export function useEnsureGooseInChannelMutation(channelId: string | null) {
       return {
         agent: attached.agent,
         membershipAdded: attached.membershipAdded,
-        restarted: attached.restarted,
         started: attached.started,
         created: attached.created,
       };
@@ -550,6 +575,19 @@ export function useManagedAgentLogQuery(
     retry: false,
     staleTime: 3_000,
     refetchInterval: pubkey ? 30_000 : false,
+  });
+}
+
+export const agentConfigSurfaceQueryKey = (pubkey: string) =>
+  ["agent-config-surface", pubkey] as const;
+
+export function useAgentConfigSurface(pubkey: string | null) {
+  return useQuery({
+    queryKey: agentConfigSurfaceQueryKey(pubkey ?? ""),
+    queryFn: () => getAgentConfigSurface(pubkey ?? ""),
+    enabled: !!pubkey,
+    staleTime: 10_000,
+    refetchInterval: 30_000,
   });
 }
 

@@ -9,6 +9,8 @@ use chrono::{DateTime, Utc};
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
+use buzz_core::CommunityId;
+
 use crate::{error::Result, event::row_to_stored_event};
 
 // -- Structs ------------------------------------------------------------------
@@ -110,6 +112,7 @@ pub struct ThreadMetadataRecord {
 #[allow(clippy::too_many_arguments)]
 pub async fn insert_thread_metadata(
     pool: &PgPool,
+    community_id: CommunityId,
     event_id: &[u8],
     event_created_at: DateTime<Utc>,
     channel_id: Uuid,
@@ -125,14 +128,15 @@ pub async fn insert_thread_metadata(
     let result = sqlx::query(
         r#"
         INSERT INTO thread_metadata
-            (event_created_at, event_id, channel_id,
+            (community_id, event_created_at, event_id, channel_id,
              parent_event_id, parent_event_created_at,
              root_event_id, root_event_created_at,
              depth, broadcast)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
         ON CONFLICT DO NOTHING
         "#,
     )
+    .bind(community_id.as_uuid())
     .bind(event_created_at)
     .bind(event_id)
     .bind(channel_id)
@@ -156,14 +160,15 @@ pub async fn insert_thread_metadata(
             sqlx::query(
                 r#"
                 INSERT INTO thread_metadata
-                    (event_created_at, event_id, channel_id,
+                    (community_id, event_created_at, event_id, channel_id,
                      parent_event_id, parent_event_created_at,
                      root_event_id, root_event_created_at,
                      depth, broadcast)
-                VALUES ($1, $2, $3, NULL, NULL, NULL, NULL, 0, false)
+                VALUES ($1, $2, $3, $4, NULL, NULL, NULL, NULL, 0, false)
                 ON CONFLICT DO NOTHING
                 "#,
             )
+            .bind(community_id.as_uuid())
             .bind(parent_ts)
             .bind(pid)
             .bind(channel_id)
@@ -177,14 +182,15 @@ pub async fn insert_thread_metadata(
                     sqlx::query(
                         r#"
                         INSERT INTO thread_metadata
-                            (event_created_at, event_id, channel_id,
+                            (community_id, event_created_at, event_id, channel_id,
                              parent_event_id, parent_event_created_at,
                              root_event_id, root_event_created_at,
                              depth, broadcast)
-                        VALUES ($1, $2, $3, NULL, NULL, NULL, NULL, 0, false)
+                        VALUES ($1, $2, $3, $4, NULL, NULL, NULL, NULL, 0, false)
                         ON CONFLICT DO NOTHING
                         "#,
                     )
+                    .bind(community_id.as_uuid())
                     .bind(root_ts)
                     .bind(root_id)
                     .bind(channel_id)
@@ -199,9 +205,10 @@ pub async fn insert_thread_metadata(
                 UPDATE thread_metadata
                 SET reply_count   = reply_count + 1,
                     last_reply_at = NOW()
-                WHERE event_id = $1
+                WHERE community_id = $1 AND event_id = $2
                 "#,
             )
+            .bind(community_id.as_uuid())
             .bind(pid)
             .execute(&mut *tx)
             .await?;
@@ -212,9 +219,10 @@ pub async fn insert_thread_metadata(
                     r#"
                     UPDATE thread_metadata
                     SET descendant_count = descendant_count + 1
-                    WHERE event_id = $1
+                    WHERE community_id = $1 AND event_id = $2
                     "#,
                 )
+                .bind(community_id.as_uuid())
                 .bind(root_id)
                 .execute(&mut *tx)
                 .await?;
@@ -239,6 +247,7 @@ pub async fn insert_thread_metadata(
 #[allow(dead_code)]
 pub async fn increment_reply_count(
     pool: &PgPool,
+    community_id: CommunityId,
     parent_event_id: &[u8],
     root_event_id: Option<&[u8]>,
 ) -> Result<()> {
@@ -248,9 +257,10 @@ pub async fn increment_reply_count(
         UPDATE thread_metadata
         SET reply_count  = reply_count + 1,
             last_reply_at = NOW()
-        WHERE event_id = $1
+        WHERE community_id = $1 AND event_id = $2
         "#,
     )
+    .bind(community_id.as_uuid())
     .bind(parent_event_id)
     .execute(pool)
     .await?;
@@ -261,9 +271,10 @@ pub async fn increment_reply_count(
             r#"
             UPDATE thread_metadata
             SET descendant_count = descendant_count + 1
-            WHERE event_id = $1
+            WHERE community_id = $1 AND event_id = $2
             "#,
         )
+        .bind(community_id.as_uuid())
         .bind(root_id)
         .execute(pool)
         .await?;
@@ -277,6 +288,7 @@ pub async fn increment_reply_count(
 /// root -- even when root == parent. Mirrors the increment logic exactly.
 pub async fn decrement_reply_count(
     pool: &PgPool,
+    community_id: CommunityId,
     parent_event_id: &[u8],
     root_event_id: Option<&[u8]>,
 ) -> Result<()> {
@@ -285,9 +297,10 @@ pub async fn decrement_reply_count(
         r#"
         UPDATE thread_metadata
         SET reply_count = GREATEST(reply_count - 1, 0)
-        WHERE event_id = $1
+        WHERE community_id = $1 AND event_id = $2
         "#,
     )
+    .bind(community_id.as_uuid())
     .bind(parent_event_id)
     .execute(pool)
     .await?;
@@ -298,9 +311,10 @@ pub async fn decrement_reply_count(
             r#"
             UPDATE thread_metadata
             SET descendant_count = GREATEST(descendant_count - 1, 0)
-            WHERE event_id = $1
+            WHERE community_id = $1 AND event_id = $2
             "#,
         )
+        .bind(community_id.as_uuid())
         .bind(root_id)
         .execute(pool)
         .await?;
@@ -314,29 +328,46 @@ pub async fn decrement_reply_count(
 /// Fetch all replies under a root event, ordered chronologically.
 ///
 /// - `depth_limit` -- if `Some(n)`, only returns replies at depth <= n.
-/// - `cursor` -- if `Some(ts_bytes)`, returns replies with `event_created_at`
-///   strictly after the timestamp encoded in `ts_bytes`. The bytes must be an
-///   8-byte big-endian i64 Unix timestamp in seconds.
+/// - `cursor` -- keyset pagination cursor. The result order is
+///   `(event_created_at ASC, event_id ASC)`; the cursor is the composite key of
+///   the last row already seen and the query returns rows strictly after it. A
+///   composite `(timestamp, event_id)` tiebreak is required because thread
+///   replies routinely share a `created_at` second (bursty threads); a
+///   timestamp-only cursor silently drops every tied reply past the page limit.
+///   Wire encoding: `8-byte big-endian i64 seconds` followed by the raw
+///   `event_id` bytes (32 for a standard Nostr id). A bare 8-byte cursor is
+///   still accepted for back-compat and paginates on timestamp alone (unsafe
+///   across same-second ties) -- prefer the composite form.
 /// - `limit` -- maximum rows returned (caller should cap this).
 pub async fn get_thread_replies(
     pool: &PgPool,
+    community_id: CommunityId,
     root_event_id: &[u8],
     depth_limit: Option<u32>,
     limit: u32,
     cursor: Option<&[u8]>,
 ) -> Result<Vec<ThreadReply>> {
-    // Decode cursor bytes -> DateTime<Utc> for the keyset condition.
-    let cursor_ts: Option<DateTime<Utc>> = match cursor {
-        Some(bytes) if bytes.len() == 8 => {
-            let secs = i64::from_be_bytes(bytes.try_into().expect("length checked"));
-            DateTime::from_timestamp(secs, 0)
+    // Decode cursor bytes -> keyset (timestamp, optional event_id) for the
+    // WHERE condition. Layout: 8-byte BE i64 seconds, then the raw event_id.
+    // An 8-byte-only cursor is legacy timestamp-only paging (no tiebreak).
+    let cursor_key: Option<(DateTime<Utc>, Option<Vec<u8>>)> = match cursor {
+        Some(bytes) if bytes.len() >= 8 => {
+            let secs = i64::from_be_bytes(bytes[..8].try_into().expect("length checked"));
+            DateTime::from_timestamp(secs, 0).map(|ts| {
+                let id = if bytes.len() > 8 {
+                    Some(bytes[8..].to_vec())
+                } else {
+                    None
+                };
+                (ts, id)
+            })
         }
         _ => None,
     };
 
     // Build the query dynamically based on optional filters.
     // Track the next positional parameter index.
-    let mut param_idx = 2u32; // $1 is root_event_id
+    let mut param_idx = 3u32; // $1 is community_id, $2 is root_event_id
     let mut sql = String::from(
         r#"
         SELECT
@@ -357,9 +388,11 @@ pub async fn get_thread_replies(
             tm.broadcast
         FROM thread_metadata tm
         JOIN events e
-            ON e.created_at = tm.event_created_at
+            ON e.community_id = tm.community_id
+           AND e.created_at = tm.event_created_at
            AND e.id         = tm.event_id
-        WHERE tm.root_event_id = $1
+        WHERE tm.community_id = $1
+          AND tm.root_event_id = $2
           AND e.deleted_at IS NULL
         "#,
     );
@@ -368,22 +401,44 @@ pub async fn get_thread_replies(
         sql.push_str(&format!(" AND tm.depth <= ${param_idx}"));
         param_idx += 1;
     }
-    if cursor_ts.is_some() {
-        sql.push_str(&format!(" AND tm.event_created_at > ${param_idx}"));
-        param_idx += 1;
+    match &cursor_key {
+        Some((_, Some(_))) => {
+            // Composite keyset: strict row comparison with an event_id tiebreak
+            // so same-second replies paginate without gaps or duplicates.
+            let ts_idx = param_idx;
+            let id_idx = param_idx + 1;
+            sql.push_str(&format!(
+                " AND (tm.event_created_at, tm.event_id) > (${ts_idx}, ${id_idx})"
+            ));
+            param_idx += 2;
+        }
+        Some((_, None)) => {
+            // Legacy timestamp-only cursor (no tiebreak).
+            sql.push_str(&format!(" AND tm.event_created_at > ${param_idx}"));
+            param_idx += 1;
+        }
+        None => {}
     }
 
     sql.push_str(&format!(
-        " ORDER BY tm.event_created_at ASC LIMIT ${param_idx}"
+        " ORDER BY tm.event_created_at ASC, tm.event_id ASC LIMIT ${param_idx}"
     ));
 
-    let mut q = sqlx::query(sqlx::AssertSqlSafe(sql)).bind(root_event_id);
+    let mut q = sqlx::query(sqlx::AssertSqlSafe(sql))
+        .bind(community_id.as_uuid())
+        .bind(root_event_id);
 
     if let Some(dl) = depth_limit {
         q = q.bind(dl as i32);
     }
-    if let Some(ts) = cursor_ts {
-        q = q.bind(ts);
+    match &cursor_key {
+        Some((ts, Some(id))) => {
+            q = q.bind(*ts).bind(id.clone());
+        }
+        Some((ts, None)) => {
+            q = q.bind(*ts);
+        }
+        None => {}
     }
     q = q.bind(limit as i32);
 
@@ -428,15 +483,20 @@ pub async fn get_thread_replies(
 }
 
 /// Fetch aggregated thread stats for a single event, plus up to 10 participant pubkeys.
-pub async fn get_thread_summary(pool: &PgPool, event_id: &[u8]) -> Result<Option<ThreadSummary>> {
+pub async fn get_thread_summary(
+    pool: &PgPool,
+    community_id: CommunityId,
+    event_id: &[u8],
+) -> Result<Option<ThreadSummary>> {
     let row = sqlx::query(
         r#"
         SELECT reply_count, descendant_count, last_reply_at
         FROM thread_metadata
-        WHERE event_id = $1
+        WHERE community_id = $1 AND event_id = $2
         LIMIT 1
         "#,
     )
+    .bind(community_id.as_uuid())
     .bind(event_id)
     .fetch_optional(pool)
     .await?;
@@ -457,9 +517,11 @@ pub async fn get_thread_summary(pool: &PgPool, event_id: &[u8]) -> Result<Option
             SELECT DISTINCT e.pubkey, MAX(e.created_at) AS last_seen
             FROM thread_metadata tm
             JOIN events e
-                ON e.created_at = tm.event_created_at
+                ON e.community_id = tm.community_id
+               AND e.created_at = tm.event_created_at
                AND e.id         = tm.event_id
-            WHERE tm.root_event_id = $1
+            WHERE tm.community_id = $1
+              AND tm.root_event_id = $2
               AND e.deleted_at IS NULL
             GROUP BY e.pubkey
         ) sub
@@ -467,6 +529,7 @@ pub async fn get_thread_summary(pool: &PgPool, event_id: &[u8]) -> Result<Option
         LIMIT 10
         "#,
     )
+    .bind(community_id.as_uuid())
     .bind(event_id)
     .fetch_all(pool)
     .await?;
@@ -500,13 +563,14 @@ pub async fn get_thread_summary(pool: &PgPool, event_id: &[u8]) -> Result<Option
 /// polling (returns only messages created after the given timestamp).
 pub async fn get_channel_messages_top_level(
     pool: &PgPool,
+    community_id: CommunityId,
     channel_id: Uuid,
     limit: u32,
     before_cursor: Option<DateTime<Utc>>,
     since_cursor: Option<DateTime<Utc>>,
     kind_filter: Option<&[u32]>,
 ) -> Result<Vec<TopLevelMessage>> {
-    let mut param_idx = 2u32; // $1 is channel_id
+    let mut param_idx = 3u32; // $1 is community_id, $2 is channel_id
     let mut sql = String::from(
         r#"
         SELECT
@@ -519,9 +583,11 @@ pub async fn get_channel_messages_top_level(
             e.channel_id
         FROM events e
         LEFT JOIN thread_metadata tm
-            ON tm.event_created_at = e.created_at
+            ON tm.community_id = e.community_id
+           AND tm.event_created_at = e.created_at
            AND tm.event_id         = e.id
-        WHERE e.channel_id = $1
+        WHERE e.community_id = $1
+          AND e.channel_id = $2
           AND e.deleted_at IS NULL
           AND (
                 tm.depth IS NULL
@@ -561,7 +627,9 @@ pub async fn get_channel_messages_top_level(
         " ORDER BY e.created_at {order} LIMIT ${param_idx}"
     ));
 
-    let mut q = sqlx::query(sqlx::AssertSqlSafe(sql)).bind(channel_id);
+    let mut q = sqlx::query(sqlx::AssertSqlSafe(sql))
+        .bind(community_id.as_uuid())
+        .bind(channel_id);
 
     if let Some(cursor) = before_cursor {
         q = q.bind(cursor);
@@ -604,6 +672,7 @@ pub async fn get_channel_messages_top_level(
 /// can be decremented.
 pub async fn get_thread_metadata_by_event(
     pool: &PgPool,
+    community_id: CommunityId,
     event_id: &[u8],
 ) -> Result<Option<ThreadMetadataRecord>> {
     let row = sqlx::query(
@@ -619,10 +688,11 @@ pub async fn get_thread_metadata_by_event(
             descendant_count,
             broadcast
         FROM thread_metadata
-        WHERE event_id = $1
+        WHERE community_id = $1 AND event_id = $2
         LIMIT 1
         "#,
     )
+    .bind(community_id.as_uuid())
     .bind(event_id)
     .fetch_optional(pool)
     .await?;
@@ -659,7 +729,7 @@ pub async fn get_thread_metadata_by_event(
 mod tests {
     use super::*;
     use crate::{
-        channel::{create_channel, ChannelType, ChannelVisibility},
+        channel::{ChannelType, ChannelVisibility},
         event::{insert_event_with_thread_metadata, ThreadMetadataParams},
     };
     use nostr::{EventBuilder, Keys, Kind};
@@ -687,12 +757,170 @@ mod tests {
             .expect("event timestamp is valid")
     }
 
+    async fn make_test_community(pool: &PgPool) -> Uuid {
+        let id = Uuid::new_v4();
+        let host = format!("thread-test-{}.example", id.simple());
+        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+            .bind(id)
+            .bind(host)
+            .execute(pool)
+            .await
+            .expect("insert test community");
+        id
+    }
+
+    async fn create_test_channel(
+        pool: &PgPool,
+        name: &str,
+        channel_type: ChannelType,
+        visibility: ChannelVisibility,
+        description: Option<&str>,
+        created_by: &[u8],
+        ttl_seconds: Option<i32>,
+    ) -> crate::error::Result<(crate::channel::ChannelRecord, buzz_core::CommunityId)> {
+        let id = Uuid::new_v4();
+        let community_id = make_test_community(pool).await;
+
+        sqlx::query(
+            r#"
+            INSERT INTO channels
+                (id, community_id, name, channel_type, visibility, description, created_by, ttl_seconds, ttl_deadline)
+            VALUES
+                ($1, $2, $3, $4::channel_type, $5::channel_visibility, $6, $7, $8,
+                 CASE WHEN $8 IS NOT NULL THEN NOW() + ($8 || ' seconds')::interval ELSE NULL END)
+            "#,
+        )
+        .bind(id)
+        .bind(community_id)
+        .bind(name)
+        .bind(channel_type.as_str())
+        .bind(visibility.as_str())
+        .bind(description)
+        .bind(created_by)
+        .bind(ttl_seconds)
+        .execute(pool)
+        .await
+        .expect("insert test channel");
+
+        sqlx::query(
+            r#"
+            INSERT INTO channel_members (community_id, channel_id, pubkey, role, invited_by)
+            VALUES ($1, $2, $3, 'owner', $4)
+            "#,
+        )
+        .bind(community_id)
+        .bind(id)
+        .bind(created_by)
+        .bind(created_by)
+        .execute(pool)
+        .await
+        .expect("insert owner membership");
+
+        crate::channel::get_channel(pool, buzz_core::CommunityId::from_uuid(community_id), id)
+            .await
+            .map(|channel| (channel, buzz_core::CommunityId::from_uuid(community_id)))
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn get_thread_metadata_by_event_is_scoped_when_event_id_collides_across_communities() {
+        let pool = setup_pool().await;
+        let author = Keys::generate();
+        let channel_id = Uuid::new_v4();
+        let community_a = make_test_community(&pool).await;
+        let community_b = make_test_community(&pool).await;
+        let community_a = buzz_core::CommunityId::from_uuid(community_a);
+        let community_b = buzz_core::CommunityId::from_uuid(community_b);
+
+        crate::channel::create_channel_with_id(
+            &pool,
+            community_a,
+            channel_id,
+            &format!("thread-collision-a-{channel_id}"),
+            ChannelType::Stream,
+            ChannelVisibility::Open,
+            None,
+            author.public_key().to_bytes().as_slice(),
+            None,
+        )
+        .await
+        .expect("create community A channel");
+        crate::channel::create_channel_with_id(
+            &pool,
+            community_b,
+            channel_id,
+            &format!("thread-collision-b-{channel_id}"),
+            ChannelType::Stream,
+            ChannelVisibility::Open,
+            None,
+            author.public_key().to_bytes().as_slice(),
+            None,
+        )
+        .await
+        .expect("create community B channel");
+
+        let event = make_stream_event(&author, "same id in both communities");
+        let created_at = event_created_at(&event);
+        insert_event_with_thread_metadata(
+            &pool,
+            community_a,
+            &event,
+            Some(channel_id),
+            Some(ThreadMetadataParams {
+                event_id: event.id.as_bytes(),
+                event_created_at: created_at,
+                channel_id,
+                parent_event_id: None,
+                parent_event_created_at: None,
+                root_event_id: None,
+                root_event_created_at: None,
+                depth: 0,
+                broadcast: true,
+            }),
+        )
+        .await
+        .expect("insert community A metadata");
+        insert_event_with_thread_metadata(
+            &pool,
+            community_b,
+            &event,
+            Some(channel_id),
+            Some(ThreadMetadataParams {
+                event_id: event.id.as_bytes(),
+                event_created_at: created_at,
+                channel_id,
+                parent_event_id: None,
+                parent_event_created_at: None,
+                root_event_id: None,
+                root_event_created_at: None,
+                depth: 3,
+                broadcast: false,
+            }),
+        )
+        .await
+        .expect("insert community B metadata");
+
+        let a = get_thread_metadata_by_event(&pool, community_a, event.id.as_bytes())
+            .await
+            .expect("lookup community A metadata")
+            .expect("community A metadata exists");
+        let b = get_thread_metadata_by_event(&pool, community_b, event.id.as_bytes())
+            .await
+            .expect("lookup community B metadata")
+            .expect("community B metadata exists");
+
+        assert_eq!(a.depth, 0);
+        assert!(a.broadcast);
+        assert_eq!(b.depth, 3);
+        assert!(!b.broadcast);
+    }
+
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn get_thread_replies_reconstructs_stored_events() {
         let pool = setup_pool().await;
         let author = Keys::generate();
-        let channel = create_channel(
+        let (channel, community) = create_test_channel(
             &pool,
             &format!("thread-replies-{}", Uuid::new_v4()),
             ChannelType::Stream,
@@ -706,7 +934,7 @@ mod tests {
 
         let root = make_stream_event(&author, "root");
         let root_created_at = event_created_at(&root);
-        insert_event_with_thread_metadata(&pool, &root, Some(channel.id), None)
+        insert_event_with_thread_metadata(&pool, community, &root, Some(channel.id), None)
             .await
             .expect("insert root event");
 
@@ -715,6 +943,7 @@ mod tests {
         let reply_id = reply.id.to_hex();
         insert_event_with_thread_metadata(
             &pool,
+            community,
             &reply,
             Some(channel.id),
             Some(ThreadMetadataParams {
@@ -732,7 +961,7 @@ mod tests {
         .await
         .expect("insert reply event and metadata");
 
-        let replies = get_thread_replies(&pool, root.id.as_bytes(), Some(10), 10, None)
+        let replies = get_thread_replies(&pool, community, root.id.as_bytes(), Some(10), 10, None)
             .await
             .expect("fetch thread replies");
 
@@ -741,6 +970,292 @@ mod tests {
         assert_eq!(replies[0].stored_event.event.content, "reply");
         assert_eq!(replies[0].stored_event.channel_id, Some(channel.id));
         assert_eq!(replies[0].depth, 1);
+    }
+
+    /// Replies that share the same `created_at` second (bursty threads are the
+    /// common case) must paginate without gaps or duplicates. Before the
+    /// composite `(event_created_at, event_id)` keyset, a timestamp-only cursor
+    /// advanced past the whole tied second after one page, silently dropping
+    /// every tied reply beyond the first page's limit — the "missed messages"
+    /// bug this read-path work exists to fix. This pins the tiebreak.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn get_thread_replies_pages_same_second_ties_without_loss() {
+        use nostr::Timestamp;
+
+        let pool = setup_pool().await;
+        let author = Keys::generate();
+        let (channel, community) = create_test_channel(
+            &pool,
+            &format!("thread-ties-{}", Uuid::new_v4()),
+            ChannelType::Stream,
+            ChannelVisibility::Open,
+            None,
+            author.public_key().to_bytes().as_slice(),
+            None,
+        )
+        .await
+        .expect("create channel");
+
+        let root = make_stream_event(&author, "root");
+        let root_created_at = event_created_at(&root);
+        insert_event_with_thread_metadata(&pool, community, &root, Some(channel.id), None)
+            .await
+            .expect("insert root event");
+
+        // Pin every reply to the SAME second so pagination must lean entirely on
+        // the event_id tiebreak. Distinct content keeps the ids distinct.
+        let tie_secs: u64 = root.created_at.as_secs() + 1;
+        let tie_ts = DateTime::from_timestamp(tie_secs as i64, 0).expect("valid timestamp");
+        let reply_count = 5usize;
+        let mut expected_ids = Vec::with_capacity(reply_count);
+        for i in 0..reply_count {
+            let reply = EventBuilder::new(Kind::Custom(9), format!("tie-{i}"))
+                .custom_created_at(Timestamp::from(tie_secs))
+                .sign_with_keys(&author)
+                .expect("sign tied reply");
+            expected_ids.push(reply.id.as_bytes().to_vec());
+            insert_event_with_thread_metadata(
+                &pool,
+                community,
+                &reply,
+                Some(channel.id),
+                Some(ThreadMetadataParams {
+                    event_id: reply.id.as_bytes(),
+                    event_created_at: tie_ts,
+                    channel_id: channel.id,
+                    parent_event_id: Some(root.id.as_bytes()),
+                    parent_event_created_at: Some(root_created_at),
+                    root_event_id: Some(root.id.as_bytes()),
+                    root_event_created_at: Some(root_created_at),
+                    depth: 1,
+                    broadcast: false,
+                }),
+            )
+            .await
+            .expect("insert tied reply");
+        }
+
+        // Page with limit=2 across 5 same-second replies. Build the next cursor
+        // from the last row's (created_at seconds, event_id) — the exact keyset
+        // the bridge derives transparently for the client.
+        let page_limit = 2u32;
+        let mut collected: Vec<Vec<u8>> = Vec::new();
+        let mut cursor: Option<Vec<u8>> = None;
+        loop {
+            let page = get_thread_replies(
+                &pool,
+                community,
+                root.id.as_bytes(),
+                Some(10),
+                page_limit,
+                cursor.as_deref(),
+            )
+            .await
+            .expect("fetch page");
+            if page.is_empty() {
+                break;
+            }
+            let last = page.last().expect("non-empty page");
+            let mut next = last.created_at.timestamp().to_be_bytes().to_vec();
+            next.extend_from_slice(&last.event_id);
+            cursor = Some(next);
+            let full = page.len() as u32 == page_limit;
+            for reply in page {
+                collected.push(reply.event_id);
+            }
+            if !full {
+                break;
+            }
+        }
+
+        // No gaps, no duplicates: the paged union equals the full tied set.
+        assert_eq!(
+            collected.len(),
+            reply_count,
+            "paged {} replies, expected all {}",
+            collected.len(),
+            reply_count
+        );
+        let mut unique = collected.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(unique.len(), reply_count, "paging produced duplicates");
+        let mut expected_sorted = expected_ids.clone();
+        expected_sorted.sort();
+        assert_eq!(unique, expected_sorted, "paged set != inserted tied set");
+    }
+
+    /// Nested replies (depth >= 2) must be reachable in a subtree read. Every
+    /// existing thread test uses `parent == root` (depth-1 direct replies), so
+    /// the depth>1 path — where `root_event_id != parent_event_id` and the root
+    /// stub is created by a nested reply arriving before the root has a
+    /// metadata row — was never exercised. `get_thread_replies` advertises
+    /// depth-64 subtree reads, so pin that a grandchild reply is returned and
+    /// its depth is recorded. This also exercises the root-stub INSERT branch
+    /// (`root_id != pid`) end-to-end through the production insert path.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn get_thread_replies_reaches_nested_depth_two_replies() {
+        let pool = setup_pool().await;
+        let author = Keys::generate();
+        let (channel, community) = create_test_channel(
+            &pool,
+            &format!("thread-nested-{}", Uuid::new_v4()),
+            ChannelType::Stream,
+            ChannelVisibility::Open,
+            None,
+            author.public_key().to_bytes().as_slice(),
+            None,
+        )
+        .await
+        .expect("create channel");
+
+        // Root (no metadata row on first insert — a depth-0 message).
+        let root = make_stream_event(&author, "root");
+        let root_created_at = event_created_at(&root);
+        insert_event_with_thread_metadata(&pool, community, &root, Some(channel.id), None)
+            .await
+            .expect("insert root event");
+
+        // Depth-1 direct reply to the root (parent == root).
+        let child = make_stream_event(&author, "child");
+        let child_created_at = event_created_at(&child);
+        insert_event_with_thread_metadata(
+            &pool,
+            community,
+            &child,
+            Some(channel.id),
+            Some(ThreadMetadataParams {
+                event_id: child.id.as_bytes(),
+                event_created_at: child_created_at,
+                channel_id: channel.id,
+                parent_event_id: Some(root.id.as_bytes()),
+                parent_event_created_at: Some(root_created_at),
+                root_event_id: Some(root.id.as_bytes()),
+                root_event_created_at: Some(root_created_at),
+                depth: 1,
+                broadcast: false,
+            }),
+        )
+        .await
+        .expect("insert depth-1 child");
+
+        // Depth-2 grandchild: parent is the child, root is the root. This is the
+        // `root_id != parent_id` case that fires the nested root-stub branch.
+        let grandchild = make_stream_event(&author, "grandchild");
+        let grandchild_created_at = event_created_at(&grandchild);
+        insert_event_with_thread_metadata(
+            &pool,
+            community,
+            &grandchild,
+            Some(channel.id),
+            Some(ThreadMetadataParams {
+                event_id: grandchild.id.as_bytes(),
+                event_created_at: grandchild_created_at,
+                channel_id: channel.id,
+                parent_event_id: Some(child.id.as_bytes()),
+                parent_event_created_at: Some(child_created_at),
+                root_event_id: Some(root.id.as_bytes()),
+                root_event_created_at: Some(root_created_at),
+                depth: 2,
+                broadcast: false,
+            }),
+        )
+        .await
+        .expect("insert depth-2 grandchild");
+
+        // Read the whole subtree under the root.
+        let replies = get_thread_replies(&pool, community, root.id.as_bytes(), Some(64), 100, None)
+            .await
+            .expect("fetch subtree");
+
+        let by_id: std::collections::HashMap<Vec<u8>, i32> = replies
+            .iter()
+            .map(|r| (r.event_id.clone(), r.depth))
+            .collect();
+        assert_eq!(
+            replies.len(),
+            2,
+            "both the child and grandchild must be reached"
+        );
+        assert_eq!(
+            by_id.get(child.id.as_bytes().as_slice()),
+            Some(&1),
+            "depth-1 child must be present at depth 1"
+        );
+        assert_eq!(
+            by_id.get(grandchild.id.as_bytes().as_slice()),
+            Some(&2),
+            "depth-2 grandchild must be reached (subtree read must not stop at depth 1)"
+        );
+    }
+
+    /// Direct guard on [`insert_thread_metadata`]'s nested root-stub INSERT. The
+    /// column list once omitted `community_id` while still binding it, scrambling
+    /// every placeholder (the bind for `community_id` landed on `event_created_at`
+    /// etc.), so any nested reply (`root_id != parent_id`) whose root lacked a
+    /// metadata row failed the whole insert. The production ingest path uses
+    /// `insert_event_with_thread_metadata` (event.rs), whose copy was already
+    /// correct, which is why no test caught this. Pin the standalone function so
+    /// the scrambled SQL can't return.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn insert_thread_metadata_nested_reply_creates_root_stub() {
+        let pool = setup_pool().await;
+        let author = Keys::generate();
+        let (channel, community) = create_test_channel(
+            &pool,
+            &format!("thread-stub-{}", Uuid::new_v4()),
+            ChannelType::Stream,
+            ChannelVisibility::Open,
+            None,
+            author.public_key().to_bytes().as_slice(),
+            None,
+        )
+        .await
+        .expect("create channel");
+
+        // Insert the events themselves (no thread metadata yet) so the FK/row
+        // exists; then drive `insert_thread_metadata` directly for a depth-2
+        // reply whose root has no metadata row — the root-stub branch.
+        let root = make_stream_event(&author, "root");
+        let child = make_stream_event(&author, "child");
+        let grandchild = make_stream_event(&author, "grandchild");
+        for ev in [&root, &child, &grandchild] {
+            insert_event_with_thread_metadata(&pool, community, ev, Some(channel.id), None)
+                .await
+                .expect("insert event");
+        }
+
+        // Depth-2 reply where root_id != parent_id. Before the fix this errored
+        // inside the transaction (UUID bound to a TIMESTAMPTZ placeholder).
+        insert_thread_metadata(
+            &pool,
+            community,
+            grandchild.id.as_bytes(),
+            event_created_at(&grandchild),
+            channel.id,
+            Some(child.id.as_bytes()),
+            Some(event_created_at(&child)),
+            Some(root.id.as_bytes()),
+            Some(event_created_at(&root)),
+            2,
+            false,
+        )
+        .await
+        .expect("nested insert must succeed and create the root stub");
+
+        // The root stub must now exist and be readable.
+        let replies = get_thread_replies(&pool, community, root.id.as_bytes(), Some(64), 100, None)
+            .await
+            .expect("fetch subtree");
+        assert!(
+            replies
+                .iter()
+                .any(|r| r.event_id == grandchild.id.as_bytes()),
+            "grandchild must be reachable under the root after the nested insert"
+        );
     }
 
     /// A reply whose stored row can no longer be reconstructed into a
@@ -752,7 +1267,7 @@ mod tests {
     async fn get_thread_replies_skips_unreconstructable_row() {
         let pool = setup_pool().await;
         let author = Keys::generate();
-        let channel = create_channel(
+        let (channel, community) = create_test_channel(
             &pool,
             &format!("thread-replies-corrupt-{}", Uuid::new_v4()),
             ChannelType::Stream,
@@ -766,7 +1281,7 @@ mod tests {
 
         let root = make_stream_event(&author, "root");
         let root_created_at = event_created_at(&root);
-        insert_event_with_thread_metadata(&pool, &root, Some(channel.id), None)
+        insert_event_with_thread_metadata(&pool, community, &root, Some(channel.id), None)
             .await
             .expect("insert root event");
 
@@ -776,6 +1291,7 @@ mod tests {
         let good_created_at = event_created_at(&good);
         insert_event_with_thread_metadata(
             &pool,
+            community,
             &good,
             Some(channel.id),
             Some(ThreadMetadataParams {
@@ -797,6 +1313,7 @@ mod tests {
         let bad_created_at = event_created_at(&bad);
         insert_event_with_thread_metadata(
             &pool,
+            community,
             &bad,
             Some(channel.id),
             Some(ThreadMetadataParams {
@@ -826,7 +1343,7 @@ mod tests {
             .rows_affected();
         assert_eq!(rows_changed, 1, "expected to corrupt exactly one row");
 
-        let replies = get_thread_replies(&pool, root.id.as_bytes(), Some(10), 10, None)
+        let replies = get_thread_replies(&pool, community, root.id.as_bytes(), Some(10), 10, None)
             .await
             .expect("fetch thread replies must succeed despite a corrupt row");
 

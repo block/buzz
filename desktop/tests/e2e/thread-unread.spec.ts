@@ -141,7 +141,7 @@ test.describe("thread unread indicator", () => {
         .getByTestId("message-thread-panel")
         .getByTestId("thread-collapse-guide"),
     ).toHaveCount(0);
-    await page.getByTestId("message-thread-close").click();
+    await page.getByTestId("auxiliary-panel-close").click();
     await expect(page.getByTestId("message-thread-panel")).not.toBeVisible();
 
     // Switch away so general becomes inactive
@@ -187,7 +187,7 @@ test.describe("thread unread indicator", () => {
     await expect(threadSummary).toBeVisible();
     await threadSummary.click();
     await expect(page.getByTestId("message-thread-panel")).toBeVisible();
-    await page.getByTestId("message-thread-close").click();
+    await page.getByTestId("auxiliary-panel-close").click();
     await expect(page.getByTestId("message-thread-panel")).not.toBeVisible();
 
     // Switch away
@@ -263,7 +263,7 @@ test.describe("thread unread indicator", () => {
     // badge render gate and read-on-open gate must stay aligned.
     await page.locator(`[data-thread-head-id="${rootEvent.id}"]`).click();
     await expect(page.getByTestId("message-thread-panel")).toBeVisible();
-    await page.getByTestId("message-thread-close").click();
+    await page.getByTestId("auxiliary-panel-close").click();
     await expect(page.getByTestId("message-thread-panel")).not.toBeVisible();
     await expect(badges).toHaveCount(0);
   });
@@ -322,7 +322,7 @@ test.describe("thread unread indicator", () => {
     await expect(page.getByTestId("message-thread-panel")).toBeVisible();
     await expandReply(page, r1.id);
     await expandReply(page, r2.id);
-    await page.getByTestId("message-thread-close").click();
+    await page.getByTestId("auxiliary-panel-close").click();
     await expect(page.getByTestId("message-thread-panel")).not.toBeVisible();
 
     // Switch away, then emit the deeper replies past the frontier — these are
@@ -365,23 +365,18 @@ test.describe("thread unread indicator", () => {
     await divider.scrollIntoViewIfNeeded();
     await page.waitForTimeout(300);
 
+    const panel = page.getByTestId("message-thread-panel");
     await page.getByTestId("message-thread-head").scrollIntoViewIfNeeded();
-    await page
-      .locator(
+    await expect(
+      panel.locator(
         `[data-testid="thread-collapse-rail"][data-thread-head-id="mock-general-welcome"]`,
-      )
-      .click();
-    await expect(page.getByTestId("message-thread-panel")).toBeVisible();
-    await expect(replies).toHaveCount(0);
-    const rootStack = page
-      .getByTestId("message-thread-replies")
-      .locator(
-        `[data-testid="message-thread-summary"][data-thread-head-id="mock-general-welcome"]`,
-      );
-    await expect(rootStack).toBeVisible();
-    await expect(rootStack).toContainText("6 replies");
-    await rootStack.click();
-    await expect(replies).toHaveCount(6);
+      ),
+    ).toHaveCount(0);
+    await expect(
+      panel.locator(
+        `[data-testid="thread-collapse-guide"][data-thread-head-id="mock-general-welcome"]`,
+      ),
+    ).toHaveCount(0);
 
     await page
       .locator(
@@ -442,7 +437,7 @@ test.describe("thread unread indicator", () => {
     await expect(summary).toBeVisible();
     await summary.click();
     await expect(page.getByTestId("message-thread-panel")).toBeVisible();
-    await page.getByTestId("message-thread-close").click();
+    await page.getByTestId("auxiliary-panel-close").click();
     await expect(page.getByTestId("message-thread-panel")).not.toBeVisible();
 
     // Switch away, then emit two unread replies deep under p (children of c) —
@@ -533,7 +528,7 @@ test.describe("thread unread indicator", () => {
     await expect(summary).toBeVisible();
     await summary.click();
     await expect(page.getByTestId("message-thread-panel")).toBeVisible();
-    await page.getByTestId("message-thread-close").click();
+    await page.getByTestId("auxiliary-panel-close").click();
     await expect(page.getByTestId("message-thread-panel")).not.toBeVisible();
 
     await page.getByTestId("channel-random").click();
@@ -608,7 +603,7 @@ test.describe("thread unread indicator", () => {
     await expect(summary).toBeVisible();
     await summary.click();
     await expect(page.getByTestId("message-thread-panel")).toBeVisible();
-    await page.getByTestId("message-thread-close").click();
+    await page.getByTestId("auxiliary-panel-close").click();
     await expect(page.getByTestId("message-thread-panel")).not.toBeVisible();
 
     await page.getByTestId("channel-random").click();
@@ -685,7 +680,7 @@ test.describe("thread unread indicator", () => {
     await expect(threadSummary).toBeVisible();
     await threadSummary.click();
     await expect(page.getByTestId("message-thread-panel")).toBeVisible();
-    await page.getByTestId("message-thread-close").click();
+    await page.getByTestId("auxiliary-panel-close").click();
     await expect(page.getByTestId("message-thread-panel")).not.toBeVisible();
 
     // Leave, emit unread replies, return — badge appears (same as test 01).
@@ -738,7 +733,7 @@ test.describe("thread unread indicator", () => {
     await expect(threadSummary).toBeVisible();
     await threadSummary.click();
     await expect(page.getByTestId("message-thread-panel")).toBeVisible();
-    await page.getByTestId("message-thread-close").click();
+    await page.getByTestId("auxiliary-panel-close").click();
 
     // Leave, emit an unread reply (thread-reply-only unread), then RE-ENTER
     // general so the channel-open marker fires while the reply is unread.
@@ -827,7 +822,7 @@ test.describe("thread unread indicator", () => {
     await expect(threadSummary).toBeVisible();
     await threadSummary.click();
     await expect(page.getByTestId("message-thread-panel")).toBeVisible();
-    await page.getByTestId("message-thread-close").click();
+    await page.getByTestId("auxiliary-panel-close").click();
     await expect(page.getByTestId("message-thread-panel")).not.toBeVisible();
 
     // Leave, emit unread replies, return — badge appears (same as test 01).
@@ -853,7 +848,7 @@ test.describe("thread unread indicator", () => {
     // recompute alone. Before the BUG-2 fix it would persist at 3 here.
     await page.getByTestId("message-thread-summary").first().click();
     await expect(page.getByTestId("message-thread-panel")).toBeVisible();
-    await page.getByTestId("message-thread-close").click();
+    await page.getByTestId("auxiliary-panel-close").click();
     await expect(page.getByTestId("message-thread-panel")).not.toBeVisible();
 
     await expect(page.getByTestId("chat-title")).toHaveText("general");
@@ -929,7 +924,7 @@ test.describe("thread unread indicator", () => {
     await expandReply(page, replyA?.id ?? "");
     await expect(badge).toHaveCount(0);
 
-    await page.getByTestId("message-thread-close").click();
+    await page.getByTestId("auxiliary-panel-close").click();
     await expect(page.getByTestId("message-thread-panel")).not.toBeVisible();
 
     await expect(page.getByTestId("chat-title")).toHaveText("general");

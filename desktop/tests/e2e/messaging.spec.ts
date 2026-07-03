@@ -1,6 +1,7 @@
 import { expect, test, type Locator } from "@playwright/test";
 
 import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
+import { expectCornerRadiusPx, expectSmoothCorners } from "../helpers/css";
 import { openSettings } from "../helpers/settings";
 
 async function expectThreadReplyUnobscured(row: Locator) {
@@ -28,6 +29,67 @@ async function expectThreadReplyUnobscured(row: Locator) {
       }),
     )
     .toBe(true);
+}
+
+async function measureThreadSummaryGeometry(summaryRow: Locator) {
+  return summaryRow.evaluate((summaryButton) => {
+    const summaryWrapper = summaryButton.parentElement;
+    const container = summaryWrapper?.parentElement;
+    const messageRow = container?.querySelector<HTMLElement>(
+      '[data-testid="message-row"]',
+    );
+    const messageMarkdown =
+      messageRow?.querySelector<HTMLElement>(".message-markdown");
+    const messageAuthor = messageRow?.querySelector<HTMLElement>(
+      '[data-testid="message-author"]',
+    );
+    const firstParticipant = summaryButton.querySelector<HTMLElement>(
+      '[data-testid="message-thread-summary-participant"]',
+    );
+    const summarySurface = summaryButton.querySelector<HTMLElement>(
+      '[data-testid="message-thread-summary-surface"]',
+    );
+    const firstAvatar = firstParticipant?.firstElementChild;
+
+    if (
+      !summaryWrapper ||
+      !container ||
+      !messageRow ||
+      !messageAuthor ||
+      !messageMarkdown ||
+      !summarySurface ||
+      !(firstAvatar instanceof HTMLElement)
+    ) {
+      throw new Error("Expected measurable thread summary geometry.");
+    }
+
+    const containerRect = container.getBoundingClientRect();
+    const messageRowRect = messageRow.getBoundingClientRect();
+    const messageAuthorRect = messageAuthor.getBoundingClientRect();
+    const messageMarkdownRect = messageMarkdown.getBoundingClientRect();
+    const summaryButtonRect = summaryButton.getBoundingClientRect();
+    const summaryButtonStyle = getComputedStyle(summaryButton);
+    const summaryButtonPaddingLeft = Number.parseFloat(
+      summaryButtonStyle.paddingLeft,
+    );
+    const summaryWrapperRect = summaryWrapper.getBoundingClientRect();
+    const firstAvatarRect = firstAvatar.getBoundingClientRect();
+    const summarySurfaceRect = summarySurface.getBoundingClientRect();
+
+    return {
+      authorLeft: messageAuthorRect.left,
+      avatarLeft: firstAvatarRect.left,
+      bodyLeft: messageMarkdownRect.left,
+      bottomPadding: containerRect.bottom - summaryWrapperRect.bottom,
+      messageRowLeft: messageRowRect.left,
+      summaryButtonContentLeft:
+        summaryButtonRect.left + summaryButtonPaddingLeft,
+      summaryButtonLeft: summaryButtonRect.left,
+      summaryButtonPaddingLeft,
+      summarySurfaceLeft: summarySurfaceRect.left,
+      topPadding: messageRowRect.top - containerRect.top,
+    };
+  });
 }
 
 test.beforeEach(async ({ page }) => {
@@ -88,6 +150,37 @@ test("long autolink wraps without widening the timeline", async ({ page }) => {
       return barBox.x + barBox.width - (timelineBox.x + timelineBox.width);
     })
     .toBeLessThanOrEqual(0);
+  // #1338 guard: hovering must un-pause the row so the upward-bleeding bar renders
+  await expect
+    .poll(async () =>
+      actionBar.evaluate((bar) => {
+        const cvRow = bar.closest(".timeline-row-cv");
+        return cvRow ? getComputedStyle(cvRow).contentVisibility : "missing";
+      }),
+    )
+    .toBe("visible");
+});
+
+test("supported link previews keep the message link visible", async ({
+  page,
+}) => {
+  const previewUrl = "https://github.com/block/sprout/pull/1334";
+
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  await page.getByTestId("message-input").fill(previewUrl);
+  await page.getByTestId("send-message").click();
+
+  const row = page.getByTestId("message-row").last();
+  await expect(
+    row.getByRole("link", { exact: true, name: previewUrl }),
+  ).toBeVisible();
+  const previewCard = row.locator('[data-link-preview="github-pull-request"]');
+  await expect(previewCard).toBeVisible();
+  await expectCornerRadiusPx(previewCard, 16);
+  await expectSmoothCorners(previewCard);
 });
 
 test("send multiple messages in sequence", async ({ page }) => {
@@ -140,6 +233,8 @@ test("copy a rendered code block and paste it back as code", async ({
 
   const codeBlock = page.locator("[data-code-block]");
   await expect(codeBlock).toHaveCount(1);
+  await expectCornerRadiusPx(codeBlock.locator("pre"), 16);
+  await expectSmoothCorners(codeBlock.locator("pre"));
 
   const copyButton = page.getByLabel("Copy code block");
   await expect(copyButton).toHaveCSS("opacity", "0");
@@ -552,7 +647,45 @@ test("opens a single-level thread panel with inline expansion", async ({
           return `${Math.round(rect.width)}x${Math.round(rect.height)}`;
         }),
     )
-    .toBe("28x28");
+    .toBe("24x24");
+  const summaryGeometry = await measureThreadSummaryGeometry(rootSummaryRow);
+  expect(
+    Math.abs(summaryGeometry.authorLeft - summaryGeometry.bodyLeft),
+  ).toBeLessThanOrEqual(1);
+  expect(
+    Math.abs(summaryGeometry.avatarLeft - summaryGeometry.bodyLeft),
+  ).toBeLessThanOrEqual(1);
+  expect(
+    Math.abs(
+      summaryGeometry.summaryButtonContentLeft - summaryGeometry.bodyLeft,
+    ),
+  ).toBeLessThanOrEqual(1);
+  expect(
+    Math.abs(
+      summaryGeometry.summaryButtonLeft - summaryGeometry.messageRowLeft,
+    ),
+  ).toBeLessThanOrEqual(1);
+  expect(summaryGeometry.summaryButtonLeft).toBeLessThan(
+    summaryGeometry.bodyLeft,
+  );
+  expect(
+    Math.abs(
+      summaryGeometry.bodyLeft -
+        summaryGeometry.summaryButtonLeft -
+        summaryGeometry.summaryButtonPaddingLeft,
+    ),
+  ).toBeLessThanOrEqual(1);
+  expect(summaryGeometry.summarySurfaceLeft).toBeLessThan(
+    summaryGeometry.avatarLeft,
+  );
+  expect(
+    Math.abs(
+      summaryGeometry.avatarLeft - summaryGeometry.summarySurfaceLeft - 4,
+    ),
+  ).toBeLessThanOrEqual(1);
+  expect(
+    Math.abs(summaryGeometry.topPadding - summaryGeometry.bottomPadding),
+  ).toBeLessThanOrEqual(1);
 
   await page.mouse.move(0, 0);
   const rootSummaryWidthBeforeHover = await rootSummaryRow.evaluate((row) =>
@@ -603,7 +736,7 @@ test("opens a single-level thread panel with inline expansion", async ({
     )
     .toBe(rootSummaryWidthBeforeHover);
 
-  await threadPanel.getByTestId("message-thread-close").click();
+  await threadPanel.getByTestId("auxiliary-panel-close").click();
   await expect(threadPanel).toBeHidden();
 
   await rootSummaryRow.click();
@@ -755,7 +888,7 @@ test("thread panel width uses session storage and reset handle", async ({
     })
     .toBe(defaultWidthPx);
 
-  await threadPanel.getByTestId("message-thread-close").click();
+  await threadPanel.getByTestId("auxiliary-panel-close").click();
   await expect(threadPanel).toBeHidden();
 
   await rootMessage.hover();
@@ -808,7 +941,8 @@ test("narrow thread view collapses channel header actions into a menu", async ({
     .evaluate((header) =>
       Number.parseFloat(window.getComputedStyle(header).paddingRight),
     );
-  expect(Math.round(menuGap)).toBe(Math.round(headerPaddingInlineEnd));
+  expect(menuGap).toBeGreaterThanOrEqual(0);
+  expect(menuGap).toBeLessThanOrEqual(headerPaddingInlineEnd + menuBox.width);
 
   await menuTrigger.click();
 

@@ -59,6 +59,16 @@ async function seedTurns(
   }, turns);
 }
 
+async function openAgentProfile(
+  page: import("@playwright/test").Page,
+  pubkey: string,
+) {
+  await page.getByTestId(`managed-agent-${pubkey}`).click();
+  const panel = page.getByTestId("user-profile-panel");
+  await expect(panel).toBeVisible({ timeout: 5_000 });
+  return panel;
+}
+
 test.describe("active turn badge resilience", () => {
   test.use({ viewport: { width: 1280, height: 720 } });
 
@@ -107,19 +117,26 @@ test.describe("active turn badge resilience", () => {
       },
     ]);
 
-    const paulRow = page.getByTestId(`managed-agent-${AGENT_PAUL}`);
-    const duncanRow = page.getByTestId(`managed-agent-${AGENT_DUNCAN}`);
-    await expect(paulRow).toContainText("Working", { timeout: 5_000 });
-    await expect(duncanRow).toContainText("Working", { timeout: 5_000 });
+    const paulPanel = await openAgentProfile(page, AGENT_PAUL);
+    await expect(paulPanel).toBeVisible();
+
+    // The profile panel surfaces active turns via the live-activity embed only
+    // where an agent session can open (channel surfaces). In the Agents view
+    // the store-driven working state shows as sidebar channel badges — the
+    // same activeAgentTurnsStore this test exercises.
+    const generalBadge = page.getByTestId("channel-working-general");
+    const engineeringBadge = page.getByTestId("channel-working-engineering");
+    await expect(generalBadge).toBeVisible({ timeout: 5_000 });
+    await expect(engineeringBadge).toBeVisible();
 
     // Simulate the all-at-once relay drop: no further frames, advance the clock
     // past both thresholds. This fires several real prune ticks; shouldPausePrune
     // sees every turn's lastActivityAt stuck at T0 (gap > 20s) and pauses the
-    // prune, so the badges survive. Under the pre-fix code every badge would be
-    // gone after the first tick past 25s.
+    // prune, so the active-turn-driven working badges survive. Under the
+    // pre-fix code every badge would be gone after the first tick past 25s.
     await page.clock.fastForward(FRAME_GAP_MS);
 
-    await expect(paulRow).toContainText("Working");
-    await expect(duncanRow).toContainText("Working");
+    await expect(generalBadge).toBeVisible();
+    await expect(engineeringBadge).toBeVisible();
   });
 });

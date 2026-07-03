@@ -139,6 +139,11 @@ export type UserSearchResult = {
   isAgent: boolean;
 };
 
+export type UserSearchPage = {
+  users: UserSearchResult[];
+  nextCursor: string | null;
+};
+
 export type UpdateProfileInput = {
   displayName?: string;
   avatarUrl?: string;
@@ -157,6 +162,84 @@ export type UserStatus = {
 };
 
 export type UserStatusLookup = Record<string, UserStatus | null>;
+
+export type ProjectRepoCommit = {
+  hash: string;
+  shortHash: string;
+  authorName: string;
+  authorEmail: string;
+  timestamp: number;
+  subject: string;
+};
+
+export type ProjectRepoFile = {
+  path: string;
+  kind: string;
+  size: number | null;
+  previewContent: string | null;
+  lastChangedAt: number | null;
+  latestCommit: ProjectRepoCommit | null;
+};
+
+export type ProjectRepoContributor = {
+  name: string;
+  email: string;
+  commitCount: number;
+  lastCommitAt: number;
+};
+
+export type ProjectRepoSnapshot = {
+  latestCommit: ProjectRepoCommit | null;
+  commits: ProjectRepoCommit[];
+  files: ProjectRepoFile[];
+  contributors: ProjectRepoContributor[];
+};
+
+export type ProjectRepoDiffFile = {
+  path: string;
+  additions: number;
+  deletions: number;
+  patch: string;
+  /** True when the patch was cut off at the backend's per-file line cap. */
+  truncated: boolean;
+};
+
+export type ProjectRepoDiff = {
+  files: ProjectRepoDiffFile[];
+  additions: number;
+  deletions: number;
+};
+
+export type ProjectLocalRepoSnapshot = {
+  path: string;
+  snapshot: ProjectRepoSnapshot;
+};
+
+export type ProjectLocalRepository = {
+  name: string;
+  path: string;
+};
+
+export type ProjectRepoSyncStatus = {
+  localPath: string | null;
+  localBranch: string | null;
+  localHead: string | null;
+  localShortHead: string | null;
+  remoteBranch: string | null;
+  remoteHead: string | null;
+  remoteShortHead: string | null;
+  aheadCount: number;
+  behindCount: number;
+  hasUncommittedChanges: boolean;
+  hasUntrackedFiles: boolean;
+  canPush: boolean;
+  pushBlockReason: string | null;
+};
+
+export type ProjectRepoPushResult = {
+  pushed: boolean;
+  message: string;
+};
 
 export type RelayEvent = {
   id: string;
@@ -293,6 +376,7 @@ export type ManagedAgent = {
   maxTurnDurationSeconds: number | null;
   parallelism: number;
   systemPrompt: string | null;
+  avatarUrl: string | null;
   model: string | null;
   /** LLM inference provider, from the agent's pinned record snapshot. */
   provider: string | null;
@@ -364,10 +448,10 @@ export type CreateManagedAgentInput = {
   acpCommand?: string;
   agentCommand?: string;
   /**
-   * True when `agentCommand` is a runtime the user deliberately picked to
-   * override the linked persona (a deploy-dialog runtime selector). Lets the
-   * backend distinguish a real pin from a missing-runtime fallback. Omit/false
-   * for persona-less creates and fallback divergence — both inherit.
+   * True when `agentCommand` is a runtime command the caller deliberately wants
+   * to preserve instead of inheriting the linked persona command. This covers
+   * deploy-dialog runtime selections and discovered or installed aliases for the
+   * same persona runtime id, while still ignoring missing-runtime fallbacks.
    */
   harnessOverride?: boolean;
   agentArgs?: string[];
@@ -408,6 +492,25 @@ export type ManagedAgentLog = {
 
 export type CancelManagedAgentTurnResult = {
   status: "sent" | "no_active_turn";
+};
+
+/**
+ * Outcome of a live `switch_model` control frame, surfaced asynchronously via
+ * the agent's `control_result` observer frame. Busy path: `sent` (cancel +
+ * requeue on the new model) or `turn_ending` (oneshot already consumed this
+ * turn). Idle path: `switched`, `unsupported_model`, or `no_active_turn`.
+ */
+export type SwitchManagedAgentModelStatus =
+  | "sent"
+  | "turn_ending"
+  | "switched"
+  | "unsupported_model"
+  | "no_active_turn";
+
+export type ControlResultFrame = {
+  type: "cancel_turn" | "switch_model";
+  status: string;
+  modelId?: string;
 };
 
 export type AcpAvailabilityStatus =
@@ -476,10 +579,85 @@ export type AgentModelInfo = {
   name: string | null;
   description: string | null;
 };
+
+// ── Config bridge types ──────────────────────────────────────────────────────
+
+export type ConfigOrigin =
+  | "buzzExplicit"
+  | "acpNativeRead"
+  | "acpConfigOption"
+  | "envVar"
+  | "configFile"
+  | "personaDefault"
+  | "runtimeOverride"
+  | "harnessConstraint";
+
+export type ConfigWriteMechanism =
+  | { type: "respawnWithEnvVar"; envKey: string }
+  | { type: "acpSetConfigOption"; configId: string }
+  | { type: "acpSetSessionModel" }
+  | { type: "gooseNativeConfigWrite"; configKey: string }
+  | { type: "readOnly" };
+
+export type NormalizedField = {
+  value: string | null;
+  origin: ConfigOrigin;
+  writeVia: ConfigWriteMechanism;
+  overriddenValue: string | null;
+  overriddenOrigin: ConfigOrigin | null;
+  /** True if this field must be set for the harness to function. */
+  isRequired: boolean;
+};
+
+export type ConfigFieldType =
+  | { type: "string" }
+  | { type: "number" }
+  | { type: "boolean" }
+  | { type: "enum"; options: string[] };
+
+export type ConfigField = {
+  key: string;
+  label: string;
+  value: string | null;
+  origin: ConfigOrigin;
+  schemaType: ConfigFieldType;
+  writeVia: ConfigWriteMechanism;
+};
+
+export type ConfigTierStatus = "available" | "pending" | "notApplicable";
+
+export type ConfigSourceReport = {
+  acpNative: ConfigTierStatus;
+  acpConfigOptions: ConfigTierStatus;
+  envVars: ConfigTierStatus;
+  configFile: ConfigTierStatus;
+  configFilePath: string | null;
+};
+
+export type NormalizedConfig = {
+  model: NormalizedField | null;
+  provider: NormalizedField | null;
+  mode: NormalizedField | null;
+  thinkingEffort: NormalizedField | null;
+  maxOutputTokens: NormalizedField | null;
+  contextLimit: NormalizedField | null;
+  systemPrompt: NormalizedField | null;
+};
+
+export type RuntimeConfigSurface = {
+  runtimeId: string | null;
+  runtimeLabel: string | null;
+  isPreSpawn: boolean;
+  normalized: NormalizedConfig;
+  advanced: ConfigField[];
+  sources: ConfigSourceReport;
+};
+
 export type UpdateManagedAgentInput = {
   pubkey: string;
   name?: string;
   model?: string | null;
+  provider?: string | null;
   systemPrompt?: string | null;
   mcpToolsets?: string | null;
   /** Absent = don't touch. Present = replace the env_vars map entirely. */
@@ -700,4 +878,46 @@ export type ForumThreadResponse = {
   replies: ThreadReply[];
   totalReplies: number;
   nextCursor: string | null;
+};
+
+/**
+ * Forward keyset cursor for the server-side thread read (`get_thread_replies`).
+ *
+ * The event-id tiebreak is load-bearing: thread replies routinely share a
+ * `createdAt` second (bursty threads), so a timestamp-only cursor would skip
+ * every tied reply past the page limit. The pair `(createdAt, eventId)` orders
+ * replies unambiguously and lets paging resume strictly after the last event.
+ */
+export type ThreadCursor = {
+  createdAt: number;
+  eventId: string;
+};
+
+export type ThreadRepliesResponse = {
+  /** The reply subtree (chronological, oldest first), depth >= 1. Excludes the root event (relay keys on `root_event_id`, which a root row lacks); the caller already holds the root. */
+  events: RelayEvent[];
+  /** Present only when a full page was returned — pass back to fetch the next page. */
+  nextCursor: ThreadCursor | null;
+};
+
+/**
+ * Composite backward keyset cursor for channel-timeline paging via the bridge
+ * (`getChannelMessagesBefore`).
+ *
+ * The event-id tiebreak is load-bearing for the dense-second case: the relay
+ * orders `created_at DESC, id ASC` and advances past a second denser than one
+ * page with `id > eventId`. A bare `createdAt` (`until`) cursor cannot escape
+ * such a second — it re-returns the same slice forever, leaving older history
+ * unreachable. `(createdAt, eventId)` moves strictly older every page.
+ */
+export type ChannelPageCursor = {
+  createdAt: number;
+  eventId: string;
+};
+
+export type ChannelMessagesPageResponse = {
+  /** One keyset page of top-level history, relay order (newest first). */
+  events: RelayEvent[];
+  /** Present only when a full page was returned — pass back to fetch the next (older) page. */
+  nextCursor: ChannelPageCursor | null;
 };

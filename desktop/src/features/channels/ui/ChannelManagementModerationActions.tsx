@@ -29,7 +29,7 @@ type ChannelManagementModerationActionsProps = {
   isArchived: boolean;
   isDark: boolean;
   isDeleteDialogOpen: boolean;
-  isOwner: boolean;
+  canDeleteChannel: boolean;
   resolvedChannelName: string;
   unarchiveChannelMutation: ChannelMutation;
 };
@@ -43,7 +43,7 @@ export function ChannelManagementModerationActions({
   isArchived,
   isDark,
   isDeleteDialogOpen,
-  isOwner,
+  canDeleteChannel,
   resolvedChannelName,
   unarchiveChannelMutation,
 }: ChannelManagementModerationActionsProps) {
@@ -104,7 +104,7 @@ export function ChannelManagementModerationActions({
           <Archive className="h-4 w-4" />
         </Button>
       )}
-      {isOwner ? (
+      {canDeleteChannel ? (
         <AlertDialog
           onOpenChange={handleDeleteDialogOpenChange}
           open={isDeleteDialogOpen}

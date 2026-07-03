@@ -27,8 +27,8 @@ class App extends HookConsumerWidget {
     final resolved = resolveSchemes(schemeName);
     final lightScheme = applyAccent(resolved.light, accentIndex);
     final darkScheme = applyAccent(resolved.dark, accentIndex);
-    // When a named scheme is selected it forces light or dark mode;
-    // otherwise respect the user's ThemeMode preference.
+    // Default and named schemes can force light or dark mode; otherwise
+    // respect the user's ThemeMode preference.
     final effectiveMode = resolved.forcedMode ?? themeMode;
 
     // Eagerly initialize websocket session and lifecycle observer when

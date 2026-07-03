@@ -13,6 +13,8 @@ import 'package:nostr/nostr.dart' as nostr;
 import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/compose_bar.dart';
+import 'package:buzz/features/channels/mentions/mention_candidates.dart';
+import 'package:buzz/features/channels/mentions/mention_candidates_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
 
@@ -116,6 +118,10 @@ Widget _buildComposeBar({
       channelMembersProvider(
         'channel-1',
       ).overrideWith((ref) async => const <ChannelMember>[]),
+      agentDirectoryProvider.overrideWith(
+        (ref) async => const <AgentDirectoryEntry>[],
+      ),
+      agentOwnersProvider.overrideWith((ref) async => const <String, String>{}),
       relayClientProvider.overrideWithValue(
         RelayClient(baseUrl: 'http://localhost:3000'),
       ),
@@ -160,7 +166,6 @@ void main() {
       final nsec = keychain.nsec;
       final uploadService = MediaUploadService(
         baseUrl: 'https://relay.example',
-        apiToken: null,
         nsec: nsec,
         httpClient: http_testing.MockClient((request) async {
           return http.Response(
@@ -226,7 +231,6 @@ void main() {
       final nsec = keychain.nsec;
       final uploadService = MediaUploadService(
         baseUrl: 'https://relay.example',
-        apiToken: null,
         nsec: nsec,
         httpClient: http_testing.MockClient((request) async {
           return http.Response(
@@ -294,7 +298,6 @@ void main() {
       final nsec = keychain.nsec;
       final uploadService = MediaUploadService(
         baseUrl: 'https://relay.example',
-        apiToken: null,
         nsec: nsec,
         httpClient: http_testing.MockClient((request) async {
           return http.Response('bad upload', 401);
@@ -329,7 +332,6 @@ void main() {
       final nsec = keychain.nsec;
       final uploadService = MediaUploadService(
         baseUrl: 'https://relay.example',
-        apiToken: null,
         nsec: nsec,
         pickGalleryVideo: () async => null,
         pickGalleryImage: () async =>
@@ -366,7 +368,6 @@ void main() {
       final nsec = keychain.nsec;
       final uploadService = MediaUploadService(
         baseUrl: 'https://relay.example',
-        apiToken: null,
         nsec: nsec,
         pickGalleryVideo: () async => null,
         pickGalleryImage: () async =>
@@ -422,7 +423,6 @@ void main() {
       try {
         final uploadService = MediaUploadService(
           baseUrl: 'https://relay.example',
-          apiToken: null,
           nsec: nsec,
           httpClient: http_testing.MockClient((request) async {
             return http.Response(

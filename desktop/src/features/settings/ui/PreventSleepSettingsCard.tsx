@@ -25,8 +25,8 @@ export function PreventSleepSettingsCard() {
             </label>
             <p className="text-sm font-normal text-muted-foreground">
               Prevents your computer from sleeping while local agents are
-              running. Automatically releases when all agents stop or after 4
-              hours.
+              running. Automatically releases when all agents stop or after 1
+              hour without agent activity.
             </p>
           </div>
           <Switch
@@ -51,8 +51,9 @@ export function PreventSleepSettingsCard() {
 
       {expired && (
         <p className="mt-3 rounded-xl border border-yellow-500/30 bg-yellow-500/10 px-3 py-2 text-sm text-yellow-700 dark:text-yellow-400">
-          Sleep prevention expired after 4 hours. Toggle off and on to
-          re-enable.
+          Sleep prevention expired after 1 hour without agent activity. It will
+          resume on the next agent activity, or toggle off and on to re-enable
+          now.
         </p>
       )}
     </section>

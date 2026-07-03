@@ -56,6 +56,19 @@ pub struct BatchEvent {
     pub received_at: Instant,
 }
 
+/// Why a batch's prior turn was cancelled — controls how `format_prompt`
+/// frames the merged re-prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CancelReason {
+    /// A new request should **supersede** the interrupted work
+    /// (`MultipleEventHandling::Interrupt`).
+    Interrupt,
+    /// A message arrived while the agent was working; it should **continue**
+    /// and incorporate the message if relevant
+    /// (`MultipleEventHandling::Steer`, the default mid-turn path).
+    Steer,
+}
+
 /// A batch of events to prompt the agent with.
 #[derive(Debug, Clone)]
 pub struct FlushBatch {
@@ -63,8 +76,14 @@ pub struct FlushBatch {
     pub events: Vec<BatchEvent>,
     /// Events from a cancelled batch that triggered this re-prompt.
     /// Empty for normal (non-cancel) batches. When non-empty, `format_prompt()`
-    /// produces a merged prompt with annotated sections.
+    /// produces a merged prompt with annotated sections, framed per
+    /// [`cancel_reason`](Self::cancel_reason).
     pub cancelled_events: Vec<BatchEvent>,
+    /// How the prior turn was cancelled, when [`cancelled_events`] is non-empty.
+    /// `None` for normal (non-merge) batches; falls back to the gentler
+    /// [`Steer`](CancelReason::Steer) framing if a merge somehow lacks a reason
+    /// (see [`MergeFraming::for_reason`]).
+    pub cancel_reason: Option<CancelReason>,
 }
 
 /// Per-channel event queue with per-channel in-flight enforcement.
@@ -109,7 +128,7 @@ pub struct FlushBatch {
 ///
 ///   requeue(batch):
 ///     increment retry_counts[channel]
-///     if retry_counts[channel] > MAX_RETRIES: dead-letter (log ERROR, discard)
+///     if retry_counts[channel] > MAX_RETRIES: dead-letter (log ERROR, return batch to caller)
 ///     else: push_front with original received_at, set exponential backoff retry_after with jitter
 /// ```
 pub struct EventQueue {
@@ -127,6 +146,21 @@ pub struct EventQueue {
     /// `FlushBatch` for that channel as `cancelled_events` so `format_prompt()`
     /// can produce annotated "[Previous request — interrupted]" sections.
     cancelled_batches: HashMap<Uuid, Vec<BatchEvent>>,
+    /// Why each channel's cancelled batch was cancelled (steer vs interrupt).
+    /// Set by `requeue_as_cancelled`, consumed by `flush_next` to set
+    /// `FlushBatch::cancel_reason`. Keyed by channel, cleared on flush.
+    cancel_reasons: HashMap<Uuid, CancelReason>,
+    /// Events withheld from `queues` while a goose-native steer is in flight
+    /// for that event. Invisible to `flush_next` / `has_flushable_work` /
+    /// `drain` (the events have been moved out of `queues`), so the queue's
+    /// no-double-deliver invariant holds without any change to the hot drain
+    /// path. Populated by [`mark_native_steer_pending`]; drained back to the
+    /// queue front by [`release_native_steer`] (preserving original
+    /// `received_at` fairness, same discipline as `requeue_preserve_timestamps`
+    /// at line 453). Bulk recovery on `IN_FLIGHT_DEADLINE_SECS` expiry is
+    /// performed by `flush_next` / `has_flushable_work` (recover, not
+    /// log-and-drop — the events were never delivered to the agent).
+    withheld_native_steer: HashMap<Uuid, Vec<QueuedEvent>>,
 }
 
 impl EventQueue {
@@ -141,6 +175,8 @@ impl EventQueue {
             retry_counts: HashMap::new(),
             dedup_mode,
             cancelled_batches: HashMap::new(),
+            cancel_reasons: HashMap::new(),
+            withheld_native_steer: HashMap::new(),
         }
     }
 
@@ -201,6 +237,12 @@ impl EventQueue {
             );
             self.in_flight_channels.remove(&id);
             self.in_flight_deadlines.remove(&id);
+            // Recover any withheld goose-native steer events for the expired
+            // channel back to the queue front so normal dispatch delivers
+            // them. Unlike the in-flight batch above (already delivered to a
+            // now-hung prompt — nothing to recover), these events were never
+            // delivered to the agent.
+            self.recover_withheld_for_expired_channel(id);
         }
 
         // Find the channel whose head event has the oldest received_at,
@@ -232,6 +274,7 @@ impl EventQueue {
                         // Move cancelled events into the regular events slot.
                         // No new events to merge — re-dispatch the original batch.
                         let cancelled = self.cancelled_batches.remove(&id).unwrap_or_default();
+                        let cancel_reason = self.cancel_reasons.remove(&id);
                         self.in_flight_channels.insert(id);
                         self.in_flight_deadlines
                             .insert(id, now + Duration::from_secs(IN_FLIGHT_DEADLINE_SECS));
@@ -240,6 +283,7 @@ impl EventQueue {
                             channel_id: id,
                             events: cancelled,
                             cancelled_events: vec![],
+                            cancel_reason,
                         });
                     }
                     None => return None,
@@ -276,11 +320,18 @@ impl EventQueue {
             .cancelled_batches
             .remove(&channel_id)
             .unwrap_or_default();
+        let cancel_reason = if cancelled_events.is_empty() {
+            self.cancel_reasons.remove(&channel_id);
+            None
+        } else {
+            self.cancel_reasons.remove(&channel_id)
+        };
 
         Some(FlushBatch {
             channel_id,
             events,
             cancelled_events,
+            cancel_reason,
         })
     }
 
@@ -325,12 +376,13 @@ impl EventQueue {
     /// not from resetting received_at.
     ///
     /// After [`MAX_RETRIES`] attempts the batch is dead-lettered: logged at
-    /// ERROR and discarded rather than requeued. This prevents poison batches
-    /// from looping forever.
+    /// ERROR and returned to the caller (rather than requeued) so a visible
+    /// failure notice can be posted to the channel. Returns `None` when the
+    /// batch was requeued for another attempt.
     ///
     /// Note: does NOT remove from `in_flight_channels` — caller must call
     /// `mark_complete` separately.
-    pub fn requeue(&mut self, batch: FlushBatch) {
+    pub fn requeue(&mut self, batch: FlushBatch) -> Option<FlushBatch> {
         let channel_id = batch.channel_id;
         let attempt = {
             let count = self.retry_counts.entry(channel_id).or_insert(0);
@@ -351,7 +403,7 @@ impl EventQueue {
             // Also clear retry_after so fresh traffic on this channel isn't
             // throttled by stale backoff from the discarded poison batch.
             self.retry_after.remove(&channel_id);
-            return;
+            return Some(batch);
         }
 
         // Exponential backoff: BASE * 2^(attempt-1), capped at MAX, with ±20% jitter.
@@ -398,6 +450,7 @@ impl EventQueue {
             );
         }
         self.retry_after.insert(channel_id, Instant::now() + delay);
+        None
     }
 
     /// Re-queue a batch preserving original `received_at` timestamps.
@@ -435,14 +488,19 @@ impl EventQueue {
     /// in the next `FlushBatch` for this channel (enabling the annotated
     /// merged-prompt format in `format_prompt()`).
     ///
+    /// `reason` records why the turn was cancelled (steer vs interrupt) so the
+    /// merged prompt is framed correctly. On a double-cancel, the most recent
+    /// reason wins.
+    ///
     /// Unlike `requeue_preserve_timestamps`, events are NOT pushed back into
     /// the generic queue — they are stored separately and merged by
     /// `flush_next()`. No retry throttle, no backoff.
-    pub fn requeue_as_cancelled(&mut self, batch: FlushBatch) {
+    pub fn requeue_as_cancelled(&mut self, batch: FlushBatch, reason: CancelReason) {
         let entry = self.cancelled_batches.entry(batch.channel_id).or_default();
         // Preserve any already-cancelled events from a prior cancel (double-cancel).
         entry.extend(batch.cancelled_events);
         entry.extend(batch.events);
+        self.cancel_reasons.insert(batch.channel_id, reason);
     }
 
     /// Returns `true` if any channel has pending events that are not in-flight
@@ -472,6 +530,10 @@ impl EventQueue {
             );
             self.in_flight_channels.remove(&id);
             self.in_flight_deadlines.remove(&id);
+            // Symmetric with the flush_next expiry block: recover withheld
+            // goose-native steer events for the expired channel so they are
+            // not permanently orphaned in the side table.
+            self.recover_withheld_for_expired_channel(id);
         }
 
         self.queues.iter().any(|(id, q)| {
@@ -509,6 +571,8 @@ impl EventQueue {
         self.retry_after.remove(&channel_id);
         self.retry_counts.remove(&channel_id);
         self.cancelled_batches.remove(&channel_id);
+        self.cancel_reasons.remove(&channel_id);
+        self.withheld_native_steer.remove(&channel_id);
         // Preserve in_flight_channels AND in_flight_deadlines: the in-flight
         // task will eventually complete (calling mark_complete) or the deadline
         // will expire (auto-cleaning the channel). Removing deadlines without
@@ -520,6 +584,148 @@ impl EventQueue {
     /// Whether a prompt is currently in-flight for the given channel.
     pub fn is_channel_in_flight(&self, channel_id: Uuid) -> bool {
         self.in_flight_channels.contains(&channel_id)
+    }
+
+    // ── Goose-native steer withhold (side table) ──────────────────────────
+    //
+    // While a goose-native `_goose/unstable/session/steer` write is in flight
+    // for a specific queued event, that event is moved out of `queues` into
+    // `withheld_native_steer` so `flush_next` / `has_flushable_work` / the
+    // contiguous drain at line 285 cannot see it — closing the race window
+    // between `mark_complete` (which clears `in_flight_channels`) and the
+    // ack arriving on the main loop. On `Success` the event is consumed
+    // (`remove_event`); on `Err` / `PromptCompletedNeutral` it is released
+    // back to the queue front (`release_native_steer`), preserving its
+    // original `received_at` for FIFO fairness.
+
+    /// Move a queued event out of `queues[channel_id]` into the side table
+    /// to withhold it from `flush_next` while a goose-native steer is in
+    /// flight.
+    ///
+    /// Returns `true` if the event was found and withheld, `false` if the
+    /// event id was not present in `queues[channel_id]` (race-safe no-op:
+    /// the event may have already been drained, removed, or never queued).
+    ///
+    /// Must be called synchronously from the mode-gate fork immediately
+    /// after `pool.send_steer` returns `Ok(())` and before any watcher task
+    /// is spawned, so the withhold is established before `mark_complete` /
+    /// any subsequent `flush_next` tick can run.
+    pub fn mark_native_steer_pending(&mut self, channel_id: Uuid, event_id: &str) -> bool {
+        let Some(q) = self.queues.get_mut(&channel_id) else {
+            return false;
+        };
+        let Some(pos) = q.iter().position(|qe| qe.event.id.to_hex() == event_id) else {
+            return false;
+        };
+        let qe = q
+            .remove(pos)
+            .expect("position came from iter so remove must succeed");
+        if q.is_empty() {
+            self.queues.remove(&channel_id);
+        }
+        self.withheld_native_steer
+            .entry(channel_id)
+            .or_default()
+            .push(qe);
+        true
+    }
+
+    /// Release a single withheld event back to the front of
+    /// `queues[channel_id]`, preserving its original `received_at`.
+    ///
+    /// Called on `SteerAck::Err(_)` and `SteerAck::PromptCompletedNeutral`
+    /// (delivery unknown after prompt completion; restoring queued event
+    /// for normal dispatch). Idempotent: a no-op if the event was already
+    /// removed or never withheld.
+    ///
+    /// Push-to-front matches the discipline of `requeue_preserve_timestamps`
+    /// at line 453, preserving fairness across channels.
+    pub fn release_native_steer(&mut self, channel_id: Uuid, event_id: &str) {
+        let Some(entries) = self.withheld_native_steer.get_mut(&channel_id) else {
+            return;
+        };
+        let Some(pos) = entries
+            .iter()
+            .position(|qe| qe.event.id.to_hex() == event_id)
+        else {
+            return;
+        };
+        let qe = entries.remove(pos);
+        if entries.is_empty() {
+            self.withheld_native_steer.remove(&channel_id);
+        }
+        // Push to FRONT so original `received_at` keeps the event at the head
+        // of the channel's queue. Per-channel cap is enforced below in case
+        // a flood of events arrived during the ack window.
+        let queue = self.queues.entry(channel_id).or_default();
+        queue.push_front(qe);
+        while queue.len() > MAX_PENDING_PER_CHANNEL {
+            queue.pop_back();
+            tracing::warn!(
+                channel_id = %channel_id,
+                limit = MAX_PENDING_PER_CHANNEL,
+                "release_native_steer overflow — dropped newest event to enforce cap"
+            );
+        }
+    }
+
+    /// Drop a specific event by id from both the side table and the main
+    /// queue.
+    ///
+    /// Called on `SteerAck::Success` — the agent received the steer, so the
+    /// event has been "delivered" via the non-cancelling path and must not
+    /// be redelivered via normal dispatch. Idempotent across both stores.
+    pub fn remove_event(&mut self, channel_id: Uuid, event_id: &str) {
+        if let Some(entries) = self.withheld_native_steer.get_mut(&channel_id) {
+            entries.retain(|qe| qe.event.id.to_hex() != event_id);
+            if entries.is_empty() {
+                self.withheld_native_steer.remove(&channel_id);
+            }
+        }
+        if let Some(q) = self.queues.get_mut(&channel_id) {
+            q.retain(|qe| qe.event.id.to_hex() != event_id);
+            if q.is_empty() {
+                self.queues.remove(&channel_id);
+            }
+        }
+    }
+
+    /// Bulk-release every withheld event for `channel_id` back to the queue
+    /// front, preserving relative FIFO order.
+    ///
+    /// Called from the `IN_FLIGHT_DEADLINE_SECS` expiry blocks in
+    /// `flush_next` and `has_flushable_work` — if a steer ack never arrives
+    /// (read loop hung, watcher never posted), the withheld events would
+    /// otherwise be permanently orphaned. Recover, do not log-and-drop: the
+    /// events were never delivered to the agent, so normal dispatch must
+    /// have a chance to deliver them.
+    ///
+    /// Iterates the stored entries in reverse so per-entry `push_front`
+    /// composes to original-FIFO order at the queue front (same discipline
+    /// as `requeue_preserve_timestamps` at line 453).
+    fn recover_withheld_for_expired_channel(&mut self, channel_id: Uuid) {
+        let Some(entries) = self.withheld_native_steer.remove(&channel_id) else {
+            return;
+        };
+        let n = entries.len();
+        let queue = self.queues.entry(channel_id).or_default();
+        for qe in entries.into_iter().rev() {
+            queue.push_front(qe);
+        }
+        while queue.len() > MAX_PENDING_PER_CHANNEL {
+            queue.pop_back();
+            tracing::warn!(
+                channel_id = %channel_id,
+                limit = MAX_PENDING_PER_CHANNEL,
+                "withheld-steer recovery overflow — dropped newest event to enforce cap"
+            );
+        }
+        tracing::warn!(
+            channel_id = %channel_id,
+            recovered = n,
+            "in-flight expiry recovered withheld steer event(s) — \
+             steer ack never arrived; normal dispatch will deliver"
+        );
     }
 
     /// Compact expired metadata entries to prevent unbounded map growth.
@@ -736,6 +942,10 @@ pub struct PromptChannelInfo {
 pub struct PromptProfile {
     pub display_name: Option<String>,
     pub nip05_handle: Option<String>,
+    /// True when this pubkey's kind:0 profile carries a NIP-OA `auth` tag,
+    /// i.e. it is an owned agent rather than a human. Used to gate reply-anchor
+    /// flattening (UX routing heuristic, not a security boundary).
+    pub is_agent: bool,
 }
 
 /// Pubkey-keyed profile lookup used while formatting ACP prompts.
@@ -798,7 +1008,12 @@ fn format_prompt_actor(pubkey: &str, profile_lookup: Option<&PromptProfileLookup
 ///
 /// Includes: event_id, channel (name + UUID), kind, sender (hex + npub),
 /// time, content, all tags (never stripped), and parsed structural fields.
-fn format_event_block(
+///
+/// Reused by the goose-native steer path (lib.rs mode-gate) to render the
+/// single withheld event for delivery via `_goose/unstable/session/steer`,
+/// without paying for the batch-level context blocks the in-flight turn
+/// already has.
+pub(crate) fn format_event_block(
     channel_id: Uuid,
     channel_info: Option<&PromptChannelInfo>,
     be: &BatchEvent,
@@ -881,14 +1096,87 @@ fn append_reply_instruction(s: &mut String, event_id: &str) {
     ));
 }
 
+/// Append a new-thread reply instruction for a human-facing top-level mention.
+///
+/// The triggering mention has no thread tags, so the agent's reply becomes the
+/// thread root. Anchoring to the triggering event (rather than leaving the
+/// choice open) prevents replying into a stale/unrelated prior thread.
+fn append_new_thread_reply_instruction(s: &mut String, event_id: &str) {
+    s.push_str(&format!(
+        "\nIMPORTANT: This is a new top-level message. For ordinary replies in \
+         this turn, use `--reply-to {event_id}` on `buzz messages send` — the \
+         triggering message is the thread root. Do NOT reply into any other \
+         (older) thread. If the human explicitly asks for a channel-root, \
+         top-level, or broadcast post, send that message without `--reply-to`."
+    ));
+}
+
+/// Decide whether a turn is human-facing for reply-anchor purposes.
+///
+/// A turn is human-facing when the triggering sender is a human, OR a human
+/// (other than this agent) is tagged in the triggering event. Identity comes
+/// from `PromptProfile::is_agent` (NIP-OA auth tag), not raw `p`-tag presence:
+/// agent-only mentions must not force flattening. When a participant cannot be
+/// classified (no profile fetched), it is treated as human — humans must not
+/// lose thread visibility to a misclassification.
+fn turn_is_human_facing(
+    sender_pubkey: &str,
+    thread_tags: &ThreadTags,
+    profile_lookup: Option<&PromptProfileLookup>,
+) -> bool {
+    let is_agent = |pubkey: &str| -> bool {
+        profile_lookup
+            .and_then(|m| m.get(&normalize_lookup_key(pubkey)))
+            .map(|p| p.is_agent)
+            // Unknown identity → treat as human (fail open for visibility).
+            .unwrap_or(false)
+    };
+
+    if !is_agent(sender_pubkey) {
+        return true;
+    }
+    thread_tags.mentioned_pubkeys.iter().any(|pk| !is_agent(pk))
+}
+
+/// Resolve the `--reply-to` anchor for a non-DM turn.
+///
+/// Returns `Some(id)` only for human-facing turns (see [`turn_is_human_facing`]):
+///   - in a thread → the thread ROOT, keeping the reply flat at layer 1
+///   - top-level   → the triggering event id, which becomes the new thread root
+///
+/// Returns `None` for agent↔agent turns, leaving the agent free to nest deeply
+/// (intentional for agent coordination).
+fn resolve_reply_anchor(
+    sender_pubkey: &str,
+    thread_tags: &ThreadTags,
+    triggering_event_id: &str,
+    profile_lookup: Option<&PromptProfileLookup>,
+) -> Option<String> {
+    if !turn_is_human_facing(sender_pubkey, thread_tags, profile_lookup) {
+        return None;
+    }
+    Some(
+        thread_tags
+            .root_event_id
+            .clone()
+            .unwrap_or_else(|| triggering_event_id.to_string()),
+    )
+}
+
 /// Format a `[Context]` hints section based on event scope.
+///
+/// `reply_anchor` is the pre-resolved `--reply-to` target for this turn (see
+/// [`resolve_reply_anchor`]). In the thread/DM branches it threads ordinary
+/// replies; in the channel branch a `Some` anchor means a human-facing
+/// top-level mention whose reply should open a new thread rooted at the
+/// triggering event.
 fn format_context_hints(
     channel_id: Uuid,
     channel_info: Option<&PromptChannelInfo>,
     thread_tags: &ThreadTags,
     is_dm: bool,
     has_conversation_context: bool,
-    triggering_event_id: Option<&str>,
+    reply_anchor: Option<&str>,
 ) -> String {
     let channel_display = match channel_info {
         Some(ci) => format!("{} (#{channel_id})", ci.name),
@@ -924,7 +1212,7 @@ fn format_context_hints(
                     s.push_str(&format!("\nParent: {parent}"));
                 }
             }
-            if let Some(event_id) = triggering_event_id {
+            if let Some(event_id) = reply_anchor {
                 append_reply_instruction(&mut s, event_id);
             }
         }
@@ -947,17 +1235,21 @@ fn format_context_hints(
             }
         }
         s.push_str(&format!("\n{ctx_hint}"));
-        if let Some(event_id) = triggering_event_id {
+        if let Some(event_id) = reply_anchor {
             append_reply_instruction(&mut s, event_id);
         }
         s
     } else {
-        format!(
+        let mut s = format!(
             "[Context]\n\
              Scope: channel\n\
              Channel: {channel_display}\n\
              Hint: Use `buzz messages get --channel <UUID>` for recent messages if needed."
-        )
+        );
+        if let Some(event_id) = reply_anchor {
+            append_new_thread_reply_instruction(&mut s, event_id);
+        }
+        s
     }
 }
 
@@ -1085,11 +1377,26 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
         }
     }
 
-    // 2. Context hints (with reply instruction for thread replies).
-    let triggering_event_id = if thread_tags.root_event_id.is_some() {
-        Some(last_event.event.id.to_hex())
+    // 2. Context hints (with a human-aware reply anchor).
+    //
+    // Human-facing turns are anchored so replies stay readable at layer 1:
+    //   - in a thread  → anchor to the thread ROOT (no depth-2 nesting)
+    //   - top-level     → anchor to the triggering event (it becomes the root)
+    // Agent↔agent turns get no forced anchor — deep nesting is intentional
+    // there. DMs are always 1:1 with a human, so they always anchor.
+    let sender_pubkey = last_event.event.pubkey.to_hex();
+    let reply_anchor = if is_dm {
+        thread_tags
+            .root_event_id
+            .is_some()
+            .then(|| last_event.event.id.to_hex())
     } else {
-        None
+        resolve_reply_anchor(
+            &sender_pubkey,
+            &thread_tags,
+            &last_event.event.id.to_hex(),
+            args.profile_lookup,
+        )
     };
     sections.push(format_context_hints(
         batch.channel_id,
@@ -1097,7 +1404,7 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
         &thread_tags,
         is_dm,
         args.conversation_context.is_some(),
-        triggering_event_id.as_deref(),
+        reply_anchor.as_deref(),
     ));
 
     // 3. Conversation context (thread or DM).
@@ -1105,9 +1412,18 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
         sections.push(format_conversation_context(ctx, args.profile_lookup));
     }
 
-    // 4a. Cancelled events section (cancel + re-prompt).
-    if !batch.cancelled_events.is_empty() {
-        let mut s = "[Previous request — interrupted before completion]".to_string();
+    // 4. Cancelled + re-prompt framing. When a turn was cancelled to deliver
+    //    new events mid-flight, the merged prompt is framed two ways depending
+    //    on why it was cancelled (see [`CancelReason`]):
+    //    - `Interrupt`: the new request *supersedes* the interrupted work.
+    //    - `Steer` (default): a message arrived while the agent was working; it
+    //      should *continue* its work and weave the message in if relevant.
+    let has_cancelled = !batch.cancelled_events.is_empty();
+    let framing = MergeFraming::for_reason(batch.cancel_reason);
+
+    // 4a. Cancelled events section.
+    if has_cancelled {
+        let mut s = framing.prior_header.to_string();
         for (i, be) in batch.cancelled_events.iter().enumerate() {
             s.push_str(&format!(
                 "\n\n--- Event {} ({}) ---\n{}",
@@ -1120,12 +1436,12 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
     }
 
     // 4b. Event block(s).
-    let has_cancelled = !batch.cancelled_events.is_empty();
     let event_section = if batch.events.len() == 1 {
         let be = &batch.events[0];
         if has_cancelled {
             format!(
-                "[New request — supersedes previous]\n\n--- Event 1 ({}) ---\n{}",
+                "{}\n\n--- Event 1 ({}) ---\n{}",
+                framing.new_header_single,
                 be.prompt_tag,
                 format_event_block(batch.channel_id, args.channel_info, be, args.profile_lookup)
             )
@@ -1139,7 +1455,8 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
     } else {
         let header = if has_cancelled {
             format!(
-                "[New request — supersedes previous — {} events]",
+                "{} — {} events]",
+                framing.new_header_multi_prefix,
                 batch.events.len()
             )
         } else {
@@ -1158,17 +1475,74 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
     };
     sections.push(event_section);
 
-    // Closing note for cancel + re-prompt.
+    // 4c. Closing note for cancel + re-prompt.
     if has_cancelled {
-        sections.push(
-            "Note: The previous request was interrupted. Please address the new request.\n\
-             If the new request is unrelated to the previous one, you may briefly acknowledge\n\
-             the interruption."
-                .to_string(),
-        );
+        sections.push(framing.closing_note.to_string());
     }
 
     sections
+}
+
+/// Prompt-framing strings for a merged (cancel + re-prompt) turn, selected by
+/// [`CancelReason`]. `Interrupt` frames the new events as superseding the prior
+/// work; `Steer` (the default mid-turn path) frames them as messages that
+/// arrived while the agent was working, to be woven in without abandoning the
+/// in-progress task.
+struct MergeFraming {
+    /// Header for the prior (cancelled) events section.
+    prior_header: &'static str,
+    /// Header for a single newly-arrived event.
+    new_header_single: &'static str,
+    /// Header prefix for multiple newly-arrived events; ` — N events]` is
+    /// appended (note the unclosed `[`).
+    new_header_multi_prefix: &'static str,
+    /// Closing instruction appended after the event block(s).
+    closing_note: &'static str,
+}
+
+impl MergeFraming {
+    fn for_reason(reason: Option<CancelReason>) -> Self {
+        match reason {
+            // Default to steer framing if a merge somehow lacks a reason: the
+            // gentler "continue your work" wording is the safer fallback.
+            None | Some(CancelReason::Steer) => MergeFraming {
+                // We never capture the agent's partial work — session/cancel is
+                // terminal and returns nothing — so this section holds the
+                // *original request*, not a transcript. The header must not
+                // overclaim preserved state (per Dawn's framing review).
+                prior_header: "[What you were working on]",
+                new_header_single: "[New message — arrived while you were working]",
+                new_header_multi_prefix: "[New messages — arrived while you were working",
+                closing_note: "Note: A new message arrived while you were working. Continue your \
+                     in-progress work and incorporate the new message if it's relevant; if it's \
+                     unrelated, you may briefly acknowledge it and carry on.",
+            },
+            Some(CancelReason::Interrupt) => MergeFraming {
+                prior_header: "[Previous request — interrupted before completion]",
+                new_header_single: "[New request — supersedes previous]",
+                new_header_multi_prefix: "[New request — supersedes previous",
+                closing_note: "Note: The previous request was interrupted. Please address the new \
+                     request.\nIf the new request is unrelated to the previous one, you may \
+                     briefly acknowledge the interruption.",
+            },
+        }
+    }
+}
+
+/// Framing strings for the goose-native steer path (lib.rs mode-gate),
+/// pulled from the same source-of-truth as the cancel+merge fallback
+/// (`MergeFraming::for_reason(Some(CancelReason::Steer))`).
+///
+/// Returns `(new_header_single, closing_note)`. Native-steer renders only
+/// the new-message header + the single event block + the closing note —
+/// no `prior_header`, no original-request section, because the in-flight
+/// goose turn already has all of that in context. The two paths share
+/// these strings so an agent receiving either transport gets the same
+/// "weave it in, don't abandon your work" orientation (Eva's drift-proof
+/// requirement: native and fallback must not diverge in UX).
+pub(crate) fn native_steer_framing() -> (&'static str, &'static str) {
+    let framing = MergeFraming::for_reason(Some(CancelReason::Steer));
+    (framing.new_header_single, framing.closing_note)
 }
 
 #[cfg(test)]
@@ -1372,6 +1746,7 @@ mod tests {
                 received_at: Instant::now(),
             }],
             cancelled_events: vec![],
+            cancel_reason: None,
         };
 
         let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
@@ -1388,6 +1763,235 @@ mod tests {
         // Should NOT contain "--- Event 1 ---" (that's the multi-event format).
         assert!(!prompt.contains("--- Event 1 ---"));
     }
+
+    /// Helper: build a merged (cancel + re-prompt) batch with one cancelled
+    /// event and one new event, framed by `reason`.
+    fn make_merged_batch(reason: Option<CancelReason>) -> FlushBatch {
+        let ch = Uuid::new_v4();
+        FlushBatch {
+            channel_id: ch,
+            events: vec![BatchEvent {
+                event: make_event("the new message"),
+                prompt_tag: "@mention".into(),
+                received_at: Instant::now(),
+            }],
+            cancelled_events: vec![BatchEvent {
+                event: make_event("the original task"),
+                prompt_tag: "@mention".into(),
+                received_at: Instant::now(),
+            }],
+            cancel_reason: reason,
+        }
+    }
+
+    #[test]
+    fn test_format_prompt_steer_framing() {
+        let batch = make_merged_batch(Some(CancelReason::Steer));
+        let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
+
+        // Steer framing: the new message "arrived while you were working" and
+        // the agent should "continue" — NOT supersede framing.
+        assert!(
+            prompt.contains("arrived while you were working"),
+            "steer prompt should frame the new message as arriving mid-task: {prompt}"
+        );
+        assert!(
+            prompt.contains("Continue your"),
+            "steer prompt should instruct the agent to continue its work: {prompt}"
+        );
+        assert!(
+            !prompt.contains("supersedes"),
+            "steer prompt must NOT use supersede framing: {prompt}"
+        );
+        // Both the original and new content must survive the merge.
+        assert!(prompt.contains("the original task"));
+        assert!(prompt.contains("the new message"));
+    }
+
+    #[test]
+    fn test_format_prompt_interrupt_framing() {
+        let batch = make_merged_batch(Some(CancelReason::Interrupt));
+        let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
+
+        // Interrupt framing: the new request supersedes the previous one.
+        assert!(
+            prompt.contains("supersedes previous"),
+            "interrupt prompt should use supersede framing: {prompt}"
+        );
+        assert!(
+            prompt.contains("interrupted before completion"),
+            "interrupt prompt should label the prior work as interrupted: {prompt}"
+        );
+        assert!(
+            !prompt.contains("arrived while you were working"),
+            "interrupt prompt must NOT use steer framing: {prompt}"
+        );
+    }
+
+    #[test]
+    fn test_format_prompt_no_reason_defaults_to_steer_framing() {
+        // A merged batch with no recorded reason falls back to the gentler
+        // steer framing (the safer default — see MergeFraming::for_reason).
+        let batch = make_merged_batch(None);
+        let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
+        assert!(
+            prompt.contains("arrived while you were working"),
+            "unset reason should default to steer framing: {prompt}"
+        );
+        assert!(!prompt.contains("supersedes"));
+    }
+
+    /// Full steering path, queue mechanics through to rendered prompt.
+    ///
+    /// The framing tests above hand-build a `FlushBatch`; this one drives the
+    /// *real* queue output through the *real* renderer so a regression in how
+    /// `flush_next` assembles the merged batch (which events land where, whether
+    /// the reason rides through) is caught against the actual prompt string —
+    /// the seam the split unit tests don't cover on their own.
+    #[test]
+    fn test_steer_end_to_end_queue_to_rendered_prompt() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+
+        // Original turn is in flight: push the work, flush it into a batch.
+        q.push(make_queued(ch, "draft the migration plan"));
+        let batch = q.flush_next().unwrap();
+        assert!(any_in_flight(&q));
+
+        // A steering-eligible mention arrives mid-turn.
+        q.push(make_queued(ch, "actually scope it to v2 only"));
+
+        // The mode gate fires Steer → cancel → requeue as cancelled, carrying
+        // the steer reason (exactly the lib.rs requeue path).
+        q.requeue_as_cancelled(batch, CancelReason::Steer);
+        q.mark_complete(ch);
+
+        // The re-prompt the agent actually receives.
+        let merged = q.flush_next().unwrap();
+        assert_eq!(merged.cancel_reason, Some(CancelReason::Steer));
+        let prompt = format_prompt(&merged, &FormatPromptArgs::default()).join("\n\n");
+
+        // Steer framing — "arrived while you were working" / "Continue", never
+        // supersede — survives the full queue→render path.
+        assert!(
+            prompt.contains("arrived while you were working"),
+            "end-to-end steer prompt must carry steer framing: {prompt}"
+        );
+        assert!(
+            prompt.contains("Continue your"),
+            "end-to-end steer prompt must instruct continue: {prompt}"
+        );
+        assert!(
+            !prompt.contains("supersedes"),
+            "end-to-end steer prompt must NOT supersede: {prompt}"
+        );
+        // The honest prior header (no overclaimed partial-work capture).
+        assert!(
+            prompt.contains("[What you were working on]"),
+            "steer prior header must be the honest variant: {prompt}"
+        );
+        // Both the original work and the steering message survive the merge.
+        assert!(prompt.contains("draft the migration plan"));
+        assert!(prompt.contains("actually scope it to v2 only"));
+    }
+
+    #[test]
+    fn test_format_prompt_steer_framing_multi_event() {
+        // Multi-event header path must also branch on reason.
+        let ch = Uuid::new_v4();
+        let batch = FlushBatch {
+            channel_id: ch,
+            events: vec![
+                BatchEvent {
+                    event: make_event("new one"),
+                    prompt_tag: "@mention".into(),
+                    received_at: Instant::now(),
+                },
+                BatchEvent {
+                    event: make_event("new two"),
+                    prompt_tag: "@mention".into(),
+                    received_at: Instant::now(),
+                },
+            ],
+            cancelled_events: vec![BatchEvent {
+                event: make_event("original"),
+                prompt_tag: "@mention".into(),
+                received_at: Instant::now(),
+            }],
+            cancel_reason: Some(CancelReason::Steer),
+        };
+        let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
+        assert!(prompt.contains("New messages — arrived while you were working — 2 events]"));
+        assert!(!prompt.contains("supersedes"));
+    }
+
+    /// Cross-thread steering: original work in thread A (cancelled), steering
+    /// message in thread B (new). Pins Perci's edge — the reply instruction
+    /// targets the *steering* message (the one the agent is responding to, where
+    /// the mentioner is waiting), while the steer framing still says "continue
+    /// your in-progress work." This is intended behavior, not a mismatch.
+    #[test]
+    fn test_steer_cross_thread_reply_targets_steering_message() {
+        let ch = Uuid::new_v4();
+        let thread_a = "a".repeat(64);
+        let thread_b = "b".repeat(64);
+
+        let original = make_event_with_tags(
+            "@bot keep working on thread A",
+            vec![vec![
+                "e".into(),
+                thread_a.clone(),
+                "".into(),
+                "reply".into(),
+            ]],
+        );
+        let steering = make_event_with_tags(
+            "@bot note from thread B",
+            vec![vec![
+                "e".into(),
+                thread_b.clone(),
+                "".into(),
+                "reply".into(),
+            ]],
+        );
+        let _steering_id = steering.id.to_hex();
+
+        let batch = FlushBatch {
+            channel_id: ch,
+            events: vec![BatchEvent {
+                event: steering,
+                prompt_tag: "@mention".into(),
+                received_at: Instant::now(),
+            }],
+            cancelled_events: vec![BatchEvent {
+                event: original,
+                prompt_tag: "@mention".into(),
+                received_at: Instant::now(),
+            }],
+            cancel_reason: Some(CancelReason::Steer),
+        };
+
+        let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
+
+        // Reply instruction points at the thread root of the steering message
+        // (thread_b), not the steering event's own id — this matches the
+        // human-aware reply anchoring from PR #1281: for human-facing turns in
+        // a thread, the anchor is always the thread root.
+        assert!(
+            prompt.contains(&format!("--reply-to {thread_b}")),
+            "reply instruction should target the steering thread root: {prompt}"
+        );
+        assert!(
+            !prompt.contains(&format!("--reply-to {thread_a}")),
+            "reply instruction must NOT target the original thread: {prompt}"
+        );
+        // Steer framing still frames the original as in-progress work to continue.
+        assert!(prompt.contains("[What you were working on]"));
+        assert!(prompt.contains("arrived while you were working"));
+        assert!(!prompt.contains("supersedes"));
+    }
+
+    // ── Test 9b: requeue preserves events ────────────────────────────────────
 
     #[test]
     fn test_requeue_preserves_events() {
@@ -1464,6 +2068,7 @@ mod tests {
                 },
             ],
             cancelled_events: vec![],
+            cancel_reason: None,
         };
 
         let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
@@ -1491,6 +2096,7 @@ mod tests {
                 received_at: Instant::now(),
             }],
             cancelled_events: vec![],
+            cancel_reason: None,
         };
 
         let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
@@ -1513,6 +2119,7 @@ mod tests {
                 received_at: Instant::now(),
             }],
             cancelled_events: vec![],
+            cancel_reason: None,
         };
         let core = "[Agent Memory — core]\nbe helpful";
         let prompt = format_prompt(
@@ -1544,6 +2151,7 @@ mod tests {
                 received_at: Instant::now(),
             }],
             cancelled_events: vec![],
+            cancel_reason: None,
         };
         let prompt = format_prompt(
             &batch,
@@ -1573,6 +2181,7 @@ mod tests {
                 received_at: Instant::now(),
             }],
             cancelled_events: vec![],
+            cancel_reason: None,
         };
         let core = "[Agent Memory — core]\nbe helpful";
         let prompt = format_prompt(
@@ -1599,6 +2208,7 @@ mod tests {
                 received_at: Instant::now(),
             }],
             cancelled_events: vec![],
+            cancel_reason: None,
         };
 
         // format_prompt no longer accepts or emits base_prompt/system_prompt.
@@ -1622,6 +2232,7 @@ mod tests {
                 received_at: Instant::now(),
             }],
             cancelled_events: vec![],
+            cancel_reason: None,
         };
 
         let core = "[Agent Memory — core]\nremember this";
@@ -1677,6 +2288,7 @@ mod tests {
                 received_at: Instant::now(),
             }],
             cancelled_events: vec![],
+            cancel_reason: None,
         };
 
         let prompt = format_prompt(
@@ -1714,6 +2326,7 @@ mod tests {
                 received_at: Instant::now(),
             }],
             cancelled_events: vec![],
+            cancel_reason: None,
         };
 
         let ctx = ConversationContext::Thread {
@@ -2080,6 +2693,36 @@ mod tests {
     }
 
     #[test]
+    fn test_requeue_dead_letters_after_max_retries() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+
+        q.push(make_queued(ch, "poison"));
+        for attempt in 1..=MAX_RETRIES {
+            q.retry_after
+                .insert(ch, Instant::now() - Duration::from_secs(1));
+            let batch = q.flush_next().expect("flush");
+            assert!(
+                q.requeue(batch).is_none(),
+                "attempt {attempt} should requeue, not dead-letter"
+            );
+            q.mark_complete(ch);
+        }
+
+        // The MAX_RETRIES+1'th failure dead-letters: batch is returned.
+        q.retry_after
+            .insert(ch, Instant::now() - Duration::from_secs(1));
+        let batch = q.flush_next().expect("flush");
+        let dead = q.requeue(batch).expect("should dead-letter");
+        assert_eq!(dead.channel_id, ch);
+        assert_eq!(dead.events.len(), 1);
+        q.mark_complete(ch);
+        // Retry state is cleared so fresh traffic isn't throttled.
+        assert!(!q.retry_counts.contains_key(&ch));
+        assert!(!q.retry_after.contains_key(&ch));
+    }
+
+    #[test]
     fn test_retry_throttle_blocks_requeue_channel() {
         let mut q = EventQueue::new(DedupMode::Queue);
         let ch = Uuid::new_v4();
@@ -2200,6 +2843,7 @@ mod tests {
                 received_at: Instant::now(),
             }],
             cancelled_events: vec![],
+            cancel_reason: None,
         };
         let ci = PromptChannelInfo {
             name: "engineering".into(),
@@ -2230,6 +2874,7 @@ mod tests {
                 received_at: Instant::now(),
             }],
             cancelled_events: vec![],
+            cancel_reason: None,
         };
         let ci = PromptChannelInfo {
             name: "DM".into(),
@@ -2267,6 +2912,7 @@ mod tests {
                 received_at: Instant::now(),
             }],
             cancelled_events: vec![],
+            cancel_reason: None,
         };
 
         let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
@@ -2294,6 +2940,7 @@ mod tests {
                 received_at: Instant::now(),
             }],
             cancelled_events: vec![],
+            cancel_reason: None,
         };
         let ctx = ConversationContext::Thread {
             messages: vec![
@@ -2337,6 +2984,7 @@ mod tests {
                 received_at: Instant::now(),
             }],
             cancelled_events: vec![],
+            cancel_reason: None,
         };
         let ci = PromptChannelInfo {
             name: "DM".into(),
@@ -2385,6 +3033,7 @@ mod tests {
                 received_at: Instant::now(),
             }],
             cancelled_events: vec![],
+            cancel_reason: None,
         };
         let ctx = ConversationContext::Thread {
             messages: vec![ContextMessage {
@@ -2401,6 +3050,7 @@ mod tests {
                 PromptProfile {
                     display_name: Some("Wes".into()),
                     nip05_handle: None,
+                    ..Default::default()
                 },
             ),
             (
@@ -2408,6 +3058,7 @@ mod tests {
                 PromptProfile {
                     display_name: Some("Rick".into()),
                     nip05_handle: None,
+                    ..Default::default()
                 },
             ),
         ]);
@@ -2437,6 +3088,7 @@ mod tests {
             PromptProfile {
                 display_name: None,
                 nip05_handle: Some("wes@example.com".into()),
+                ..Default::default()
             },
         )]);
         assert_eq!(
@@ -2453,12 +3105,101 @@ mod tests {
             PromptProfile {
                 display_name: Some("   ".into()),
                 nip05_handle: Some("wes@example.com".into()),
+                ..Default::default()
             },
         )]);
         assert_eq!(
             resolve_prompt_label(pubkey, Some(&profiles)),
             Some("wes@example.com".into()),
         );
+    }
+
+    // ── Human-aware reply anchoring ──────────────────────────────────────────
+
+    const HUMAN_PK: &str = "1111111111111111111111111111111111111111111111111111111111111111";
+    const AGENT_A_PK: &str = "2222222222222222222222222222222222222222222222222222222222222222";
+    const AGENT_B_PK: &str = "3333333333333333333333333333333333333333333333333333333333333333";
+    const ROOT_ID: &str = "abc0000000000000000000000000000000000000000000000000000000000000";
+    const TRIGGER_ID: &str = "def0000000000000000000000000000000000000000000000000000000000000";
+
+    fn profile(is_agent: bool) -> PromptProfile {
+        PromptProfile {
+            is_agent,
+            ..Default::default()
+        }
+    }
+
+    /// Lookup with HUMAN as a human and AGENT_A / AGENT_B as agents.
+    fn id_lookup() -> PromptProfileLookup {
+        HashMap::from([
+            (HUMAN_PK.to_string(), profile(false)),
+            (AGENT_A_PK.to_string(), profile(true)),
+            (AGENT_B_PK.to_string(), profile(true)),
+        ])
+    }
+
+    fn thread_tags(root: Option<&str>, mentions: &[&str]) -> ThreadTags {
+        ThreadTags {
+            root_event_id: root.map(str::to_string),
+            parent_event_id: root.map(str::to_string),
+            mentioned_pubkeys: mentions.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn test_anchor_human_in_thread_uses_root() {
+        // Human asks inside a thread → anchor to the thread ROOT (flat at L1).
+        let tags = thread_tags(Some(ROOT_ID), &[AGENT_A_PK]);
+        let anchor = resolve_reply_anchor(HUMAN_PK, &tags, TRIGGER_ID, Some(&id_lookup()));
+        assert_eq!(anchor.as_deref(), Some(ROOT_ID));
+    }
+
+    #[test]
+    fn test_anchor_human_top_level_uses_triggering_event() {
+        // Human top-level mention (no thread tags) → triggering event is root.
+        let tags = thread_tags(None, &[AGENT_A_PK]);
+        let anchor = resolve_reply_anchor(HUMAN_PK, &tags, TRIGGER_ID, Some(&id_lookup()));
+        assert_eq!(anchor.as_deref(), Some(TRIGGER_ID));
+    }
+
+    #[test]
+    fn test_anchor_agent_to_agent_in_thread_is_none() {
+        // Agent pings agent inside a thread → no forced anchor (deep nesting ok).
+        let tags = thread_tags(Some(ROOT_ID), &[AGENT_B_PK]);
+        let anchor = resolve_reply_anchor(AGENT_A_PK, &tags, TRIGGER_ID, Some(&id_lookup()));
+        assert_eq!(anchor, None);
+    }
+
+    #[test]
+    fn test_anchor_agent_to_agent_top_level_is_none() {
+        let tags = thread_tags(None, &[AGENT_B_PK]);
+        let anchor = resolve_reply_anchor(AGENT_A_PK, &tags, TRIGGER_ID, Some(&id_lookup()));
+        assert_eq!(anchor, None);
+    }
+
+    #[test]
+    fn test_anchor_agent_sender_but_human_tagged_flattens() {
+        // Agent-authored, but a human is tagged → human-facing → anchor to root.
+        let tags = thread_tags(Some(ROOT_ID), &[AGENT_B_PK, HUMAN_PK]);
+        let anchor = resolve_reply_anchor(AGENT_A_PK, &tags, TRIGGER_ID, Some(&id_lookup()));
+        assert_eq!(anchor.as_deref(), Some(ROOT_ID));
+    }
+
+    #[test]
+    fn test_anchor_unknown_identity_treated_as_human() {
+        // No profile lookup → fail open (treat as human so visibility is kept).
+        let tags = thread_tags(Some(ROOT_ID), &[]);
+        let anchor = resolve_reply_anchor(AGENT_A_PK, &tags, TRIGGER_ID, None);
+        assert_eq!(anchor.as_deref(), Some(ROOT_ID));
+    }
+
+    #[test]
+    fn test_anchor_agent_only_p_tags_do_not_flatten() {
+        // Raw p-tag presence must NOT flatten when every tagged pubkey is an
+        // agent — this is the regression Pinky flagged.
+        let tags = thread_tags(Some(ROOT_ID), &[AGENT_A_PK, AGENT_B_PK]);
+        let anchor = resolve_reply_anchor(AGENT_A_PK, &tags, TRIGGER_ID, Some(&id_lookup()));
+        assert_eq!(anchor, None);
     }
 
     #[test]
@@ -2499,6 +3240,7 @@ mod tests {
                 received_at: Instant::now(),
             }],
             cancelled_events: vec![],
+            cancel_reason: None,
         };
         let ci = PromptChannelInfo {
             name: "DM".into(),
@@ -2555,6 +3297,7 @@ mod tests {
                 received_at: Instant::now(),
             }],
             cancelled_events: vec![],
+            cancel_reason: None,
         };
         let ci = PromptChannelInfo {
             name: "DM".into(),
@@ -2594,6 +3337,7 @@ mod tests {
                 received_at: Instant::now(),
             }],
             cancelled_events: vec![],
+            cancel_reason: None,
         };
 
         let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
@@ -2617,6 +3361,7 @@ mod tests {
                 received_at: Instant::now(),
             }],
             cancelled_events: vec![],
+            cancel_reason: None,
         };
 
         let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
@@ -2639,6 +3384,7 @@ mod tests {
                 received_at: Instant::now(),
             }],
             cancelled_events: vec![],
+            cancel_reason: None,
         };
 
         let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
@@ -2811,7 +3557,7 @@ mod tests {
         q.push(make_queued(ch, "new-1"));
 
         // Cancel the original batch and release the channel.
-        q.requeue_as_cancelled(batch);
+        q.requeue_as_cancelled(batch, CancelReason::Interrupt);
         q.mark_complete(ch);
 
         // flush_next should merge: events=[new-1], cancelled_events=[old-1, old-2].
@@ -2825,6 +3571,64 @@ mod tests {
     }
 
     #[test]
+    fn test_requeue_as_cancelled_propagates_reason() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+
+        // Merge path (new event present): reason rides on FlushBatch.
+        q.push(make_queued(ch, "old"));
+        let batch = q.flush_next().unwrap();
+        q.push(make_queued(ch, "new"));
+        q.requeue_as_cancelled(batch, CancelReason::Steer);
+        q.mark_complete(ch);
+        let merged = q.flush_next().unwrap();
+        assert_eq!(
+            merged.cancel_reason,
+            Some(CancelReason::Steer),
+            "steer reason should reach the merged batch"
+        );
+        q.mark_complete(ch);
+
+        // Fallback path (no new event): reason still rides through.
+        q.push(make_queued(ch, "only"));
+        let batch = q.flush_next().unwrap();
+        q.requeue_as_cancelled(batch, CancelReason::Interrupt);
+        q.mark_complete(ch);
+        let fallback = q.flush_next().unwrap();
+        assert_eq!(
+            fallback.cancel_reason,
+            Some(CancelReason::Interrupt),
+            "interrupt reason should reach the re-dispatched batch"
+        );
+        q.mark_complete(ch);
+
+        // A normal (non-cancel) flush carries no reason.
+        q.push(make_queued(ch, "plain"));
+        let plain = q.flush_next().unwrap();
+        assert_eq!(plain.cancel_reason, None);
+    }
+
+    #[test]
+    fn test_double_cancel_latest_reason_wins() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+        q.push(make_queued(ch, "orig"));
+        let batch1 = q.flush_next().unwrap();
+        q.push(make_queued(ch, "new-1"));
+        q.requeue_as_cancelled(batch1, CancelReason::Interrupt);
+        q.mark_complete(ch);
+        let batch2 = q.flush_next().unwrap();
+        // Second cancel with a different reason — the latest reason wins.
+        q.requeue_as_cancelled(batch2, CancelReason::Steer);
+        q.push(make_queued(ch, "new-2"));
+        q.mark_complete(ch);
+        let batch3 = q.flush_next().unwrap();
+        assert_eq!(batch3.cancel_reason, Some(CancelReason::Steer));
+    }
+
+    // ── Test: requeue_as_cancelled fallback (no new events) ──────────────────
+
+    #[test]
     fn test_requeue_as_cancelled_no_new_events_fallback() {
         let mut q = EventQueue::new(DedupMode::Queue);
         let ch = Uuid::new_v4();
@@ -2834,7 +3638,7 @@ mod tests {
         let batch = q.flush_next().unwrap();
 
         // Cancel the batch (no new events pushed) and release the channel.
-        q.requeue_as_cancelled(batch);
+        q.requeue_as_cancelled(batch, CancelReason::Interrupt);
         q.mark_complete(ch);
 
         // Fallback path: cancelled events become regular events, cancelled_events is empty.
@@ -2858,7 +3662,7 @@ mod tests {
         // Push, flush, cancel — no new events queued.
         q.push(make_queued(ch, "msg"));
         let batch = q.flush_next().unwrap();
-        q.requeue_as_cancelled(batch);
+        q.requeue_as_cancelled(batch, CancelReason::Interrupt);
         q.mark_complete(ch);
 
         // Channel has only cancelled events — should still be considered flushable.
@@ -2876,7 +3680,7 @@ mod tests {
         // Push, flush, cancel.
         q.push(make_queued(ch, "msg"));
         let batch = q.flush_next().unwrap();
-        q.requeue_as_cancelled(batch);
+        q.requeue_as_cancelled(batch, CancelReason::Interrupt);
         q.mark_complete(ch);
 
         // drain_channel should clear cancelled_batches for the channel.
@@ -2904,7 +3708,7 @@ mod tests {
         q.push(make_queued(ch, "new-1"));
 
         // First cancel: store 2 cancelled events.
-        q.requeue_as_cancelled(batch1);
+        q.requeue_as_cancelled(batch1, CancelReason::Interrupt);
         q.mark_complete(ch);
 
         // Second flush: events=[new-1], cancelled_events=[orig-1, orig-2].
@@ -2914,7 +3718,7 @@ mod tests {
 
         // Second cancel: requeue_as_cancelled should accumulate all 3 events
         // (2 from cancelled_events + 1 from events).
-        q.requeue_as_cancelled(batch2);
+        q.requeue_as_cancelled(batch2, CancelReason::Interrupt);
 
         // Push 1 more new event and release channel.
         q.push(make_queued(ch, "new-2"));
@@ -2936,9 +3740,8 @@ mod tests {
         let root_id = "a".repeat(64);
         let event = make_event_with_tags(
             "@bot help",
-            vec![vec!["e".into(), root_id, "".into(), "reply".into()]],
+            vec![vec!["e".into(), root_id.clone(), "".into(), "reply".into()]],
         );
-        let event_id = event.id.to_hex();
         let batch = FlushBatch {
             channel_id: ch,
             events: vec![BatchEvent {
@@ -2947,12 +3750,16 @@ mod tests {
                 received_at: Instant::now(),
             }],
             cancelled_events: vec![],
+            cancel_reason: None,
         };
 
+        // No profile lookup → sender treated as human → human-facing thread
+        // reply anchors to the thread ROOT (flat at layer 1), not the
+        // triggering event id.
         let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
         assert!(
-            prompt.contains(&format!("--reply-to {event_id}")),
-            "channel thread reply should include reply instruction with triggering event ID"
+            prompt.contains(&format!("--reply-to {root_id}")),
+            "human-facing thread reply should anchor to the thread root"
         );
         assert!(
             prompt.contains("For ordinary replies in this turn"),
@@ -2985,6 +3792,7 @@ mod tests {
                 received_at: Instant::now(),
             }],
             cancelled_events: vec![],
+            cancel_reason: None,
         };
         let ci = PromptChannelInfo {
             name: "DM".into(),
@@ -3006,9 +3814,10 @@ mod tests {
     }
 
     #[test]
-    fn test_reply_instruction_absent_for_top_level_channel_message() {
+    fn test_reply_instruction_present_for_top_level_human_message() {
         let ch = Uuid::new_v4();
         let event = make_event("hello world");
+        let event_id = event.id.to_hex();
         let batch = FlushBatch {
             channel_id: ch,
             events: vec![BatchEvent {
@@ -3017,12 +3826,20 @@ mod tests {
                 received_at: Instant::now(),
             }],
             cancelled_events: vec![],
+            cancel_reason: None,
         };
 
+        // Top-level human message (no lookup → human): the reply opens a new
+        // thread anchored to the triggering event, preventing replies into a
+        // stale older thread.
         let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
         assert!(
-            !prompt.contains("--reply-to"),
-            "top-level message should NOT include reply instruction"
+            prompt.contains(&format!("--reply-to {event_id}")),
+            "top-level human message should anchor a new thread at the triggering event"
+        );
+        assert!(
+            prompt.contains("new top-level message"),
+            "top-level human message should use the new-thread instruction"
         );
     }
 
@@ -3038,6 +3855,7 @@ mod tests {
                 received_at: Instant::now(),
             }],
             cancelled_events: vec![],
+            cancel_reason: None,
         };
         let ci = PromptChannelInfo {
             name: "DM".into(),
@@ -3059,7 +3877,7 @@ mod tests {
     }
 
     #[test]
-    fn test_reply_instruction_uses_triggering_event_id_not_root_or_parent() {
+    fn test_human_thread_reply_anchors_to_root_not_triggering_or_parent() {
         let ch = Uuid::new_v4();
         let root_id = "a".repeat(64);
         let parent_id = "b".repeat(64);
@@ -3079,21 +3897,23 @@ mod tests {
                 received_at: Instant::now(),
             }],
             cancelled_events: vec![],
+            cancel_reason: None,
         };
 
+        // Human-facing (no lookup) deep reply: anchor to the thread ROOT to
+        // keep the conversation flat — NOT the triggering event or parent.
         let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
-        // The instruction should use the triggering event's own ID — not root or parent.
         assert!(
-            prompt.contains(&format!("--reply-to {event_id}")),
-            "nested reply instruction should use the triggering event ID"
+            prompt.contains(&format!("--reply-to {root_id}")),
+            "human-facing nested reply should anchor to the thread root"
         );
         assert!(
-            !prompt.contains(&format!("--reply-to {root_id}")),
-            "instruction should NOT use root_event_id"
+            !prompt.contains(&format!("--reply-to {event_id}")),
+            "instruction should NOT anchor to the triggering event id"
         );
         assert!(
             !prompt.contains(&format!("--reply-to {parent_id}")),
-            "instruction should NOT use parent_event_id from tags"
+            "instruction should NOT anchor to the parent event id"
         );
     }
 
@@ -3103,9 +3923,8 @@ mod tests {
         let root_id = "e".repeat(64);
         let event = make_event_with_tags(
             "@bot post your summary in the channel root",
-            vec![vec!["e".into(), root_id, "".into(), "reply".into()]],
+            vec![vec!["e".into(), root_id.clone(), "".into(), "reply".into()]],
         );
-        let event_id = event.id.to_hex();
         let batch = FlushBatch {
             channel_id: ch,
             events: vec![BatchEvent {
@@ -3114,12 +3933,13 @@ mod tests {
                 received_at: Instant::now(),
             }],
             cancelled_events: vec![],
+            cancel_reason: None,
         };
 
         let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
         assert!(
-            prompt.contains(&format!("--reply-to {event_id}")),
-            "thread reply should still provide the default reply target"
+            prompt.contains(&format!("--reply-to {root_id}")),
+            "human-facing thread reply should anchor to the thread root"
         );
         assert!(
             prompt.contains("channel-root, top-level"),
@@ -3138,9 +3958,8 @@ mod tests {
         let root_id = "c".repeat(64);
         let threaded = make_event_with_tags(
             "@bot help",
-            vec![vec!["e".into(), root_id, "".into(), "reply".into()]],
+            vec![vec!["e".into(), root_id.clone(), "".into(), "reply".into()]],
         );
-        let threaded_id = threaded.id.to_hex();
         let batch = FlushBatch {
             channel_id: ch,
             events: vec![
@@ -3156,12 +3975,15 @@ mod tests {
                 },
             ],
             cancelled_events: vec![],
+            cancel_reason: None,
         };
 
+        // Scope derives from the last (threaded) event; human-facing → anchor
+        // to that thread's root.
         let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
         assert!(
-            prompt.contains(&format!("--reply-to {threaded_id}")),
-            "batched prompt should use last (threaded) event's ID"
+            prompt.contains(&format!("--reply-to {root_id}")),
+            "batched prompt should anchor to the last (threaded) event's root"
         );
     }
 
@@ -3174,6 +3996,7 @@ mod tests {
             vec![vec!["e".into(), root_id, "".into(), "reply".into()]],
         );
         let plain = make_event("latest top-level");
+        let plain_id = plain.id.to_hex();
         let batch = FlushBatch {
             channel_id: ch,
             events: vec![
@@ -3189,12 +4012,19 @@ mod tests {
                 },
             ],
             cancelled_events: vec![],
+            cancel_reason: None,
         };
 
+        // Last event is top-level and human-facing → opens a new thread
+        // anchored to that top-level event (NOT the earlier thread's root).
         let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
         assert!(
-            !prompt.contains("--reply-to"),
-            "batched prompt where last event is top-level should NOT include reply instruction"
+            prompt.contains(&format!("--reply-to {plain_id}")),
+            "batched top-level-last prompt should anchor to the last (top-level) event"
+        );
+        assert!(
+            prompt.contains("new top-level message"),
+            "batched top-level-last prompt should use the new-thread instruction"
         );
     }
 
@@ -3208,6 +4038,7 @@ mod tests {
                 received_at: Instant::now(),
             }],
             cancelled_events: vec![],
+            cancel_reason: None,
         }
     }
 
@@ -3299,5 +4130,191 @@ mod tests {
             slash_command_for_batch(&make_single_batch("@Eva hello"), &[]),
             None
         );
+    }
+
+    // ── Goose-native steer withhold tests ───────────────────────────────────
+    //
+    // Side-table semantics: `mark_native_steer_pending` moves an event out of
+    // `queues` into `withheld_native_steer`, making it invisible to
+    // `flush_next` / `has_flushable_work` / contiguous drain. `Success` ack
+    // drops it via `remove_event`; `Err` / `PromptCompletedNeutral` ack
+    // restores it to the queue front via `release_native_steer`. The
+    // `IN_FLIGHT_DEADLINE_SECS` expiry bulk-recovers withheld events so they
+    // are never permanently orphaned.
+
+    /// A channel whose only queued event has been withheld for a goose-native
+    /// steer must be invisible to both `flush_next` and `has_flushable_work`.
+    /// The withhold is the whole point of the side table — it must close the
+    /// `mark_complete` → ack race window.
+    #[test]
+    fn test_native_steer_withhold_only_channel_not_flushable() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+
+        let qe = make_queued(ch, "hello");
+        let event_id = qe.event.id.to_hex();
+        q.push(qe);
+
+        assert!(q.mark_native_steer_pending(ch, &event_id));
+
+        assert!(
+            q.flush_next().is_none(),
+            "withheld-only channel must not be flushable"
+        );
+        assert!(
+            !q.has_flushable_work(),
+            "withheld-only channel must not register as flushable work"
+        );
+        assert_eq!(pending_count(&q), 0);
+        assert_eq!(q.withheld_native_steer.get(&ch).map(|v| v.len()), Some(1));
+    }
+
+    /// Earlier events on the same channel must flush normally during the
+    /// steer ack window. Only the specific withheld event is invisible.
+    /// After `release_native_steer`, the released event sits at the queue
+    /// front (push-to-front preserves original `received_at` FIFO) and is
+    /// delivered by the next `flush_next`.
+    #[test]
+    fn test_native_steer_earlier_events_flush_during_ack_window() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+
+        // Three events arrive in order: e1, e2 (already queued), then e3
+        // (the latest mid-turn mention being steered).
+        let e1 = make_queued_at(ch, "e1", Duration::from_millis(30));
+        let e2 = make_queued_at(ch, "e2", Duration::from_millis(20));
+        let e3 = make_queued_at(ch, "e3", Duration::from_millis(10));
+        let e1_id = e1.event.id.to_hex();
+        let e2_id = e2.event.id.to_hex();
+        let e3_id = e3.event.id.to_hex();
+        q.push(e1);
+        q.push(e2);
+        q.push(e3);
+
+        // Steer in flight for e3 — withhold it from normal dispatch.
+        assert!(q.mark_native_steer_pending(ch, &e3_id));
+
+        // Earlier events flush as a normal batch; e3 is invisible.
+        let batch = q
+            .flush_next()
+            .expect("e1+e2 should flush during ack window");
+        assert_eq!(batch.channel_id, ch);
+        assert_eq!(batch.events.len(), 2);
+        assert_eq!(batch.events[0].event.id.to_hex(), e1_id);
+        assert_eq!(batch.events[1].event.id.to_hex(), e2_id);
+
+        // Earlier batch completes; channel is no longer in flight.
+        q.mark_complete(ch);
+
+        // Ack arrives as Err or PromptCompletedNeutral → release e3.
+        q.release_native_steer(ch, &e3_id);
+
+        let next = q.flush_next().expect("released e3 should now flush");
+        assert_eq!(next.channel_id, ch);
+        assert_eq!(next.events.len(), 1);
+        assert_eq!(next.events[0].event.id.to_hex(), e3_id);
+
+        assert_eq!(pending_count(&q), 0);
+        assert!(q.withheld_native_steer.is_empty());
+    }
+
+    /// If the steer ack never arrives — read loop hung, watcher never posted —
+    /// the `IN_FLIGHT_DEADLINE_SECS` auto-expiry block must bulk-recover the
+    /// withheld events back to the queue front so normal dispatch can deliver
+    /// them. Recover, not log-and-drop: the events were never seen by the
+    /// agent.
+    #[test]
+    fn test_native_steer_expiry_recovers_withheld() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+
+        let qe = make_queued(ch, "withheld event");
+        let event_id = qe.event.id.to_hex();
+        q.push(qe);
+
+        // Simulate a prompt in flight for `ch`, then withhold the queued
+        // event for an in-flight goose-native steer.
+        q.in_flight_channels.insert(ch);
+        q.in_flight_deadlines.insert(ch, Instant::now());
+        q.in_flight_batch_sizes.insert(ch, 1);
+        assert!(q.mark_native_steer_pending(ch, &event_id));
+
+        // Force the in-flight deadline to be in the past, simulating the
+        // steer ack never arriving and the read loop hanging long enough
+        // for `IN_FLIGHT_DEADLINE_SECS` to elapse. Same expiry-simulation
+        // trick used by `test_retry_throttle_blocks_requeue_channel`.
+        q.in_flight_deadlines
+            .insert(ch, Instant::now() - Duration::from_secs(1));
+
+        // `has_flushable_work` runs the expiry block first; it must recover
+        // the withheld event so the channel registers as flushable.
+        assert!(
+            q.has_flushable_work(),
+            "expired channel with withheld event must register as flushable after recovery"
+        );
+
+        // The withheld event has been moved back to `queues[ch]`.
+        assert!(q.withheld_native_steer.is_empty());
+        assert_eq!(pending_count(&q), 1);
+
+        // Normal dispatch delivers it.
+        let batch = q
+            .flush_next()
+            .expect("recovered event should flush via normal dispatch");
+        assert_eq!(batch.channel_id, ch);
+        assert_eq!(batch.events.len(), 1);
+        assert_eq!(batch.events[0].event.id.to_hex(), event_id);
+    }
+
+    /// Bulk-release on expiry must preserve original FIFO. The
+    /// implementation iterates the side-table entries in reverse and
+    /// `push_front`s each — composing to original-FIFO at the queue front.
+    /// Test ≥2 withheld entries (3 here) with staggered `received_at`.
+    #[test]
+    fn test_native_steer_bulk_release_preserves_fifo() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+
+        // Three events with staggered ages — e1 oldest, e3 newest.
+        let e1 = make_queued_at(ch, "e1", Duration::from_millis(30));
+        let e2 = make_queued_at(ch, "e2", Duration::from_millis(20));
+        let e3 = make_queued_at(ch, "e3", Duration::from_millis(10));
+        let e1_id = e1.event.id.to_hex();
+        let e2_id = e2.event.id.to_hex();
+        let e3_id = e3.event.id.to_hex();
+        q.push(e1);
+        q.push(e2);
+        q.push(e3);
+
+        // Withhold all three in FIFO arrival order (e1, e2, e3 → side table).
+        // This simulates a pathological repeated-steer flow; the more
+        // realistic case (one withhold at a time) is covered by the other
+        // tests. What matters here is that the bulk-recovery path
+        // (reverse iter + push_front) composes to original FIFO at the
+        // queue front.
+        assert!(q.mark_native_steer_pending(ch, &e1_id));
+        assert!(q.mark_native_steer_pending(ch, &e2_id));
+        assert!(q.mark_native_steer_pending(ch, &e3_id));
+        assert_eq!(pending_count(&q), 0);
+        assert_eq!(q.withheld_native_steer.get(&ch).map(|v| v.len()), Some(3));
+
+        // Trigger expiry → bulk-release path.
+        q.in_flight_channels.insert(ch);
+        q.in_flight_deadlines
+            .insert(ch, Instant::now() - Duration::from_secs(1));
+        q.in_flight_batch_sizes.insert(ch, 3);
+        assert!(q.has_flushable_work());
+
+        // After recovery, the queue front-to-back order must match the
+        // original FIFO: e1, e2, e3.
+        let recovered: Vec<String> = q
+            .queues
+            .get(&ch)
+            .expect("queue restored")
+            .iter()
+            .map(|qe| qe.event.id.to_hex())
+            .collect();
+        assert_eq!(recovered, vec![e1_id, e2_id, e3_id]);
+        assert!(q.withheld_native_steer.is_empty());
     }
 }

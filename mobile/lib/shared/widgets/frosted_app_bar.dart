@@ -84,7 +84,9 @@ class FrostedAppBar extends StatelessWidget {
                       Expanded(
                         child: Padding(
                           padding: EdgeInsets.only(
-                            left: effectiveLeading != null ? 0 : Grid.xs,
+                            left: effectiveLeading != null
+                                ? 0
+                                : Grid.gutter - Grid.quarter,
                           ),
                           child: DefaultTextStyle.merge(
                             style: context.textTheme.titleMedium?.copyWith(

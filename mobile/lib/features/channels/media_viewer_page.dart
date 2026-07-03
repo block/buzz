@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:video_player/video_player.dart';
 
@@ -100,6 +101,8 @@ class _MediaViewerRouteTransition extends StatelessWidget {
   }
 }
 
+// StatefulWidget retained: imperative gesture/animation controllers with
+// listener lifecycle don't map cleanly to hooks (allowed exception).
 class MediaImageViewerPage extends StatefulWidget {
   final String imageUrl;
   final Object heroTag;
@@ -321,6 +324,8 @@ bool _hasImageTransform(Matrix4 transform) {
   return false;
 }
 
+// StatefulWidget retained: owns a VideoPlayerController with async init and
+// disposal — kept imperative deliberately (allowed exception).
 class MediaVideoViewerPage extends StatefulWidget {
   final String videoUrl;
   final String? posterUrl;
@@ -470,45 +475,15 @@ class _VideoLoadingPoster extends StatelessWidget {
   }
 }
 
-class _VideoTransportBar extends StatefulWidget {
+class _VideoTransportBar extends HookWidget {
   final VideoPlayerController controller;
 
   const _VideoTransportBar({required this.controller});
 
   @override
-  State<_VideoTransportBar> createState() => _VideoTransportBarState();
-}
-
-class _VideoTransportBarState extends State<_VideoTransportBar> {
-  @override
-  void initState() {
-    super.initState();
-    widget.controller.addListener(_handleTick);
-  }
-
-  @override
-  void didUpdateWidget(covariant _VideoTransportBar oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    if (oldWidget.controller == widget.controller) return;
-    oldWidget.controller.removeListener(_handleTick);
-    widget.controller.addListener(_handleTick);
-  }
-
-  @override
-  void dispose() {
-    widget.controller.removeListener(_handleTick);
-    super.dispose();
-  }
-
-  void _handleTick() {
-    if (mounted) {
-      setState(() {});
-    }
-  }
-
-  @override
   Widget build(BuildContext context) {
-    final value = widget.controller.value;
+    useListenable(controller);
+    final value = controller.value;
     final durationMs = value.duration.inMilliseconds;
     final positionMs = value.position.inMilliseconds.clamp(0, durationMs);
 
@@ -518,9 +493,9 @@ class _VideoTransportBarState extends State<_VideoTransportBar> {
         IconButton(
           onPressed: () {
             if (value.isPlaying) {
-              widget.controller.pause();
+              controller.pause();
             } else {
-              widget.controller.play();
+              controller.play();
             }
           },
           tooltip: value.isPlaying ? 'Pause video' : 'Play video',
@@ -537,9 +512,8 @@ class _VideoTransportBarState extends State<_VideoTransportBar> {
             max: durationMs == 0 ? 1 : durationMs.toDouble(),
             onChanged: durationMs == 0
                 ? null
-                : (next) => widget.controller.seekTo(
-                    Duration(milliseconds: next.round()),
-                  ),
+                : (next) =>
+                      controller.seekTo(Duration(milliseconds: next.round())),
           ),
         ),
       ],

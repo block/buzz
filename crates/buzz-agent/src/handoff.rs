@@ -36,6 +36,7 @@ impl RunCtx<'_> {
                 HANDOFF_SYSTEM_PROMPT,
                 &prompt,
                 HANDOFF_MAX_OUTPUT_TOKENS,
+                self.effective_model,
             ) => match r {
                 Ok(s) if !s.trim().is_empty() => s,
                 Ok(_) => {
@@ -100,8 +101,11 @@ impl RunCtx<'_> {
             // token estimate of the bytes added since the measurement.
             Some(measured_tokens) => {
                 let measured_bytes = self.last_request_history_bytes.unwrap_or(0);
-                let current_bytes: usize =
-                    self.history.iter().map(HistoryItem::estimated_bytes).sum();
+                let current_bytes: usize = self
+                    .history
+                    .iter()
+                    .map(HistoryItem::context_pressure_bytes)
+                    .sum();
                 let grown = current_bytes.saturating_sub(measured_bytes);
                 let projected = measured_tokens.saturating_add(estimate_tokens_from_bytes(grown));
                 projected
@@ -119,7 +123,11 @@ impl RunCtx<'_> {
             // since a handoff re-adds the current prompt verbatim — that is a
             // prompt-cap concern (MAX_PROMPT_BYTES), not this gate.
             None => {
-                let bytes: usize = self.history.iter().map(HistoryItem::estimated_bytes).sum();
+                let bytes: usize = self
+                    .history
+                    .iter()
+                    .map(HistoryItem::context_pressure_bytes)
+                    .sum();
                 bytes
                     > byte_fallback_threshold(
                         self.cfg.max_context_tokens,

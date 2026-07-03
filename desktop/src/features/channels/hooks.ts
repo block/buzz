@@ -31,6 +31,11 @@ import type {
   SetChannelTopicInput,
   UpdateChannelInput,
 } from "@/shared/api/types";
+import { useWorkspaces } from "@/features/workspaces/useWorkspaces";
+import {
+  readChannelSnapshot,
+  writeChannelSnapshot,
+} from "@/features/channels/channelSnapshot";
 
 export const channelsQueryKey = ["channels"] as const;
 const channelDetailQueryKey = (channelId: string) =>
@@ -102,10 +107,29 @@ function setChannelArchivedState(
 }
 
 export function useChannelsQuery(options?: { enabled?: boolean }) {
+  const { activeWorkspace } = useWorkspaces();
+  const relayUrl = activeWorkspace?.relayUrl ?? null;
+
   return useQuery({
     enabled: options?.enabled ?? true,
     queryKey: channelsQueryKey,
-    queryFn: async () => sortChannels(await getChannels()),
+    queryFn: async () => {
+      const channels = sortChannels(await getChannels());
+      if (relayUrl) {
+        writeChannelSnapshot(relayUrl, channels);
+      }
+      return channels;
+    },
+    // Paint the sidebar instantly from the last-known list for this relay, then
+    // revalidate. initialDataUpdatedAt:0 marks the seed as already-stale so the
+    // background refetch still fires immediately.
+    initialData: relayUrl
+      ? () => {
+          const snapshot = readChannelSnapshot(relayUrl);
+          return snapshot ? sortChannels(snapshot) : undefined;
+        }
+      : undefined,
+    initialDataUpdatedAt: 0,
     staleTime: 60_000,
     refetchInterval: 60_000,
     refetchIntervalInBackground: false,
@@ -125,8 +149,14 @@ export function useCreateChannelMutation() {
         ]),
       );
     },
-    onSettled: async () => {
-      await queryClient.invalidateQueries({ queryKey: channelsQueryKey });
+    onSettled: () => {
+      // refetchType "none": onSuccess already cached the relay-returned channel;
+      // an immediate getChannels() refetch blocked the dialog and could clobber
+      // it with a read-after-write-lagged snapshot. Live updates reconcile later.
+      void queryClient.invalidateQueries({
+        queryKey: channelsQueryKey,
+        refetchType: "none",
+      });
     },
   });
 }
@@ -144,8 +174,8 @@ export function useOpenDmMutation() {
         ]),
       );
     },
-    onSettled: async () => {
-      await queryClient.invalidateQueries({ queryKey: channelsQueryKey });
+    onSettled: () => {
+      void queryClient.invalidateQueries({ queryKey: channelsQueryKey });
     },
   });
 }
@@ -366,15 +396,24 @@ export function useAddChannelMembersMutation(channelId: string | null) {
   const queryClient = useQueryClient();
 
   return useMutation({
-    mutationFn: (input: Omit<AddChannelMembersInput, "channelId">) => {
-      if (!channelId) {
+    mutationFn: (
+      input: Omit<AddChannelMembersInput, "channelId"> & {
+        channelId?: string;
+      },
+    ) => {
+      const { channelId: capturedChannelId, ...rest } = input;
+      const effectiveChannelId = capturedChannelId ?? channelId;
+      if (!effectiveChannelId) {
         throw new Error("No channel selected.");
       }
 
-      return addChannelMembers({ ...input, channelId });
+      return addChannelMembers({ ...rest, channelId: effectiveChannelId });
     },
-    onSettled: async () => {
-      await invalidateChannelState(queryClient, channelId);
+    onSettled: async (_data, _err, variables) => {
+      // Invalidate the effective channel (the one actually mutated) not the
+      // live hook-closure channel, which may have changed mid-send.
+      const effectiveChannelId = variables?.channelId ?? channelId;
+      await invalidateChannelState(queryClient, effectiveChannelId);
     },
   });
 }

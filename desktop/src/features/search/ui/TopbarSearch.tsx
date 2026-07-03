@@ -538,13 +538,15 @@ export function TopbarSearch({
     ],
   );
 
+  // Edge-trigger: the counter never resets, so `!== 0` would replay on remount.
+  const lastFocusRequestRef = React.useRef(focusRequest);
   React.useEffect(() => {
-    if (focusRequest === 0) {
+    if (focusRequest === lastFocusRequestRef.current) {
       return;
     }
+    lastFocusRequestRef.current = focusRequest;
 
     openSearchDialog();
-    triggerRef.current?.focus();
   }, [focusRequest, openSearchDialog]);
 
   React.useEffect(() => {

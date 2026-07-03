@@ -16,6 +16,12 @@ unreliable and may expose content.
 
 **ALWAYS use `scripts/post-screenshots.sh`** — it hosts PNGs on a per-developer
 git branch with immutable commit-SHA URLs that render correctly on GitHub.
+If you manually compose or edit PR markdown, run
+`scripts/check-pr-image-urls.sh <markdown-file>` before posting. The checker
+fails on Buzz/relay media URLs so broken images are caught locally.
+
+This hosting rule applies to any PNG you want in a PR, including mobile
+simulator screenshots captured outside the desktop Playwright helper.
 
 ## Step 1 — Capture Screenshots
 

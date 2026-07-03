@@ -6,6 +6,14 @@ Buzz is a self-hosted team communication platform built on the Nostr protocol (N
 
 The relay is the single source of truth. All reads and writes flow through it. There is no peer-to-peer event exchange, no gossip, no replication — just clients connecting to one relay over WebSocket, and the relay enforcing auth, verifying signatures, persisting events, fanning out to subscribers, indexing for search, and triggering automation.
 
+A Buzz **community** is the tenant-visible workspace selected by the request host.
+The self-hosted default remains one host, one relay process, one implicit
+community. Multi-community deployments move that semantic boundary one level up:
+`req.community = resolve_host(connection.host)` is established before AUTH,
+EVENT, REQ, REST, media, git, search, workflow, or pub/sub handling. Unknown
+hosts fail closed, and NIP-98/API-token stamps must agree with the host-derived
+community rather than overriding it.
+
 Buzz is a Rust monorepo, licensed Apache 2.0 under Block, Inc.
 
 ---
@@ -26,14 +34,14 @@ Buzz is a Rust monorepo, licensed Apache 2.0 under Block, Inc.
 │                         buzz-relay (Axum)                          │
 │                                                                      │
 │  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌─────────────────────┐ │
-│  │ NIP-42   │  │  EVENT   │  │   REQ    │  │   REST API          │ │
-│  │  auth    │  │ pipeline │  │ handler  │  │ /api/channels       │ │
-│  └──────────┘  └──────────┘  └──────────┘  │ /api/search         │ │
-│                                             │ /api/feed           │ │
-│  ┌──────────────────────────────────────┐   │ /api/workflows      │ │
-│  │       SubscriptionRegistry           │   │ /api/presence       │ │
-│  │  DashMap: (channel_id, kind) → conns │   │ /api/agents         │ │
-│  └──────────────────────────────────────┘   │ /api/approvals      │ │
+│  │ NIP-42   │  │  EVENT   │  │   REQ    │  │  HTTP bridge       │ │
+│  │  auth    │  │ pipeline │  │ handler  │  │ /events            │ │
+│  └──────────┘  └──────────┘  └──────────┘  │ /query             │ │
+│                                             │ /count             │ │
+│  ┌──────────────────────────────────────┐   │ /hooks/{id}        │ │
+│  │       SubscriptionRegistry           │   │ /media/*           │ │
+│  │  DashMap: (channel_id, kind) → conns │   │ /git/*             │ │
+│  └──────────────────────────────────────┘   │ /info, NIP-05      │ │
 │                                             └─────────────────────┘ │
 └──────────┬──────────────┬──────────────────────────────────────────┘
            │              │
@@ -56,8 +64,8 @@ Buzz is a Rust monorepo, licensed Apache 2.0 under Block, Inc.
      (multi-node fan-out wired; local-echo dedup via AppState.local_event_ids).
 
      ┌──────────────┐
-     │  Typesense   │  ← buzz-search (bounded worker queue)
-     │ (full-text   │
+     │  Postgres    │  ← buzz-search (FTS over the search_tsv
+     │ (full-text   │     generated column + GIN index)
      │   search)    │
      └──────────────┘
 ```
@@ -72,14 +80,13 @@ buzz-core    (zero I/O — types, verification, filter matching, kind registry)
     ├── buzz-db          (Postgres: events, channels, tokens, workflows, audit)
     ├── buzz-auth        (NIP-42, NIP-98, API tokens, scopes, rate limiting)
     ├── buzz-pubsub      (Redis pub/sub, presence, typing indicators)
-    ├── buzz-search      (Typesense: index, query, delete)
+    ├── buzz-search      (Postgres FTS: query, delete)
     ├── buzz-audit       (hash-chain tamper-evident log)
     └── buzz-workflow    (YAML-as-code automation engine)
          │
          └── buzz-relay       (ties everything together — the server)
 
 buzz-acp            (agent harness — bridges relay @mentions → AI agents via ACP/JSON-RPC)
-buzz-proxy          (NIP-28 compatibility proxy — translates standard Nostr clients ↔ Buzz relay)
 buzz-sdk            (typed Nostr event builders — used by buzz-acp and buzz-cli)
 buzz-media          (Blossom/S3 media storage)
 buzz-cli            (agent-first CLI)
@@ -87,7 +94,7 @@ buzz-admin          (operator CLI: relay membership + key generation)
 buzz-test-client    (integration test harness + manual CLI)
 ```
 
-**Key architectural principle:** The relay is the single source of truth. `buzz-relay` orchestrates all subsystems by calling them directly — it imports `buzz-db`, `buzz-auth`, `buzz-pubsub`, `buzz-search`, `buzz-audit`, and `buzz-workflow`. However, those subsystems are isolated from each other: `buzz-workflow` never calls `buzz-pubsub`, `buzz-search` never calls `buzz-db`, etc. Cross-subsystem coordination happens only through the relay. `buzz-proxy` connects to the relay as a WebSocket client and translates NIP-28 events between standard Nostr clients and the Buzz relay.
+**Key architectural principle:** The relay is the single source of truth. `buzz-relay` orchestrates all subsystems by calling them directly — it imports `buzz-db`, `buzz-auth`, `buzz-pubsub`, `buzz-search`, `buzz-audit`, and `buzz-workflow`. However, those subsystems are isolated from each other: `buzz-workflow` never calls `buzz-pubsub`, `buzz-search` never calls `buzz-db`, etc. Cross-subsystem coordination happens only through the relay. In multi-community mode, the relay also owns propagation of `TenantContext`; service crates should receive community-scoped inputs rather than independently deriving tenancy from client-controlled event tags.
 
 ---
 
@@ -159,6 +166,16 @@ Max frame size: 65,536 bytes. Max subscriptions per connection: 1024. Max histor
 
 Every WebSocket connection follows this exact sequence:
 
+### Step 0: Community Binding
+
+The server resolves `TenantContext` from the request host before any handler can
+observe tenant data. The URL/domain is authoritative for the community, matching
+today's "the relay URL is the workspace" behavior. In single-community mode the
+configured host maps to the default community. In multi-community mode, an
+unknown or unmapped host rejects generically and never falls through to a default
+tenant. Client-supplied `#h` tags are still channel identifiers; they must resolve
+to a channel inside the host-derived community.
+
 ### Step 1: Semaphore Acquire
 
 `state.conn_semaphore.try_acquire_owned()` — if the relay is at connection capacity, the connection is rejected immediately before any data is read. The permit is held for the entire connection lifetime and dropped on cleanup.
@@ -174,7 +191,7 @@ The client must respond with `["AUTH", <signed-event>]` before submitting events
 | Path | Mechanism | Use Case |
 |------|-----------|---------|
 | NIP-42 | Signed challenge, pubkey verified | WebSocket connections |
-| NIP-98 HTTP Auth | Schnorr-signed `kind:27235` event on REST endpoints | REST API clients |
+| NIP-98 HTTP Auth | Schnorr-signed `kind:27235` event on HTTP bridge endpoints | HTTP clients |
 
 On success, `ConnectionState.auth_state` transitions from `Pending` → `Authenticated(AuthContext)`. On failure → `Failed`. Unauthenticated EVENT/REQ messages are rejected with `["CLOSED", ...]` or `["OK", ..., false, "auth-required: ..."]`.
 
@@ -350,7 +367,7 @@ Handles authentication paths, scope enforcement, and token operations.
 | Path | Entry Point | Notes |
 |------|-------------|-------|
 | NIP-42 | `verify_auth_event()` | Schnorr-signed challenge/response; grants `Scope::all_known()` (all 14 scopes) |
-| NIP-98 HTTP Auth | `validate_nip98_auth()` | REST endpoints; Schnorr-signed `kind:27235` event |
+| NIP-98 HTTP Auth | `validate_nip98_auth()` | HTTP bridge endpoints; Schnorr-signed `kind:27235` event |
 
 **Key types:**
 
@@ -414,7 +431,7 @@ All database access. Uses `sqlx::query()` (runtime, not compile-time macros) —
 
 ### buzz-pubsub — Redis Pub/Sub, Presence, Typing
 
-Manages Redis pub/sub fan-out, presence tracking, and typing indicators.
+Manages Redis pub/sub fan-out, presence tracking, and typing indicators. In multi-community mode all tenant-visible keys are prefixed or otherwise partitioned by community (`buzz:{community}:...`) so channel fan-out, presence, typing, and cache invalidation cannot cross hosts.
 
 **Architecture:**
 
@@ -444,21 +461,32 @@ EXPIRE buzz:typing:{channel_id} 60
 
 ---
 
-### buzz-search — Typesense Integration
+### buzz-search — Postgres FTS Integration
 
-Full-text search via Typesense. All HTTP calls use `reqwest` with `X-TYPESENSE-API-KEY`.
-
-**Collection schema (7 fields):** `id`, `content`, `kind` (int32), `pubkey` (facet), `channel_id` (facet, optional), `created_at` (int64, default sort), `tags_flat` (string[]).
+Full-text search via Postgres FTS. Events are searchable through the
+`events.search_tsv` generated `tsvector` column (populated on insert, indexed
+by a GIN index) — there is no separate search service or out-of-band indexer.
+Privacy-sensitive kinds are excluded at the storage level (the `search_tsv`
+`CASE WHEN kind IN (...)` yields `NULL`, which never matches `@@`). In
+multi-community mode every query filter includes `community_id`, so the shared
+`events` table is infrastructure, not a cross-community result space; the relay
+re-authorizes every candidate hit before returning it.
 
 **Key behaviors:**
-- `ensure_collection()` is idempotent: handles 409 race condition (another process created it between check and create).
-- Tag flattening uses `\x1f` (ASCII unit separator) to avoid ambiguity with tag values containing colons (e.g., URLs in `r` tags).
-- Upsert indexing: `POST /documents?action=upsert` (single), `POST /documents/import?action=upsert` (batch JSONL).
-- `delete_event()` validates event ID (64-char hex) before constructing the URL — prevents path injection.
-- `delete_event()` is idempotent: 404 treated as success.
-- Permission filtering is **caller's responsibility** — `buzz-search` provides the `filter_by` mechanism but does not enforce access policy.
+- `SearchService::new(pool)` wraps a `PgPool`; `search(&SearchQuery)` runs a
+  parameterized FTS query against the `events.search_tsv` GIN index and returns
+  `SearchResult` (candidate `SearchHit`s).
+- `ChannelScope` makes the channel constraint explicit (`Any` /
+  `ChannelLessOnly` / `Channels` / `ChannelsOrChannelLess`), closing the
+  ambiguity the old `Option<Vec<Uuid>> + bool` matrix could not express.
+- Every query carries `community_id`; the FTS predicate is BitmapAnd-ed with
+  the community-leading btree filters so a query never crosses tenants.
+- Permission filtering is **caller's responsibility** — `buzz-search` returns
+  candidate hits; the relay re-authorizes each one (channel membership, `#p`,
+  owner gates) before delivering it.
 
-**Does NOT:** enforce channel membership or access control. Does NOT store events in Postgres.
+**Does NOT:** enforce channel membership or access control. Does NOT write
+events (indexing is the `search_tsv` generated column on the `events` insert).
 
 ---
 
@@ -466,7 +494,7 @@ Full-text search via Typesense. All HTTP calls use `reqwest` with `X-TYPESENSE-A
 
 Tamper-evident append-only log with SHA-256 hash chaining.
 
-**Hash chain:** each entry stores `prev_hash` (hash of the previous entry). `verify_chain()` walks entries and recomputes hashes to detect tampering. Genesis entry uses `GENESIS_HASH` (64 zeros).
+**Hash chain:** each entry stores `prev_hash` (hash of the previous entry). In multi-community mode audit heads/chains are per-community; operator metrics may aggregate, but tenant-readable audit verification walks one community chain. `verify_chain()` walks entries and recomputes hashes to detect tampering. Genesis entry uses `GENESIS_HASH` (64 zeros).
 
 **Hash covers:** seq (big-endian bytes), timestamp (RFC3339), event_id, event_kind (big-endian), actor_pubkey, action string, channel_id (16 bytes or 16 zero bytes if None), canonical metadata JSON (BTreeMap for deterministic key ordering), prev_hash.
 
@@ -480,7 +508,7 @@ Tamper-evident append-only log with SHA-256 hash chaining.
 
 ### buzz-workflow — YAML-as-Code Automation Engine
 
-Parses, validates, and executes channel-scoped workflow definitions.
+Parses, validates, and executes channel-scoped workflow definitions. In multi-community mode workflow definitions, runs, approvals, webhook routes, and schedules inherit the host-derived community and evaluate triggers only against events in that community.
 
 **Workflow definition structure:**
 ```yaml
@@ -526,50 +554,6 @@ Note: Both `TriggerDef` and `ActionDef` use serde internally-tagged enums. Trigg
 **Cron scheduler:** loop ticks every 60 seconds, evaluates cron expressions with window-based matching, and creates workflow runs for matched triggers. Fully implemented.
 
 **Does NOT:** recursively resolve templates (single-pass only). Does NOT queue workflow runs when at capacity — returns `CapacityExceeded` immediately.
-
----
-
-### buzz-proxy — NIP-28 Compatibility Proxy
-
-Lets standard Nostr clients (Coracle, nak, Amethyst, nostr-tools, nostr-sdk) read and write Buzz channels using the NIP-28 Public Chat Channels protocol. Connects to the relay as a WebSocket client; presents a standard NIP-01/NIP-11/NIP-28/NIP-42 interface to external clients.
-
-**Key modules:** `server.rs` (Axum WebSocket server, NIP-11, NIP-42 auth, filter splitting), `translate.rs` (bidirectional kind/tag translation), `upstream.rs` (persistent relay connection with auto-reconnect and subscription replay), `channel_map.rs` (bidirectional UUID ↔ kind:40 event ID mapping), `shadow_keys.rs` (deterministic keypair derivation), `guest_store.rs` (pubkey-based guest registry), `invite_store.rs` (token-based invite system).
-
-**Shadow keypairs:** `HMAC-SHA256(key=server_salt, msg=external_pubkey_bytes)` → secp256k1 secret key. Deterministic: same external pubkey always produces the same shadow key. Empty salt rejected. Cache: `DashMap` with `MAX_CACHE_SIZE = 10,000`. Eviction strategy: **full cache flush** (not LRU) — keys are re-derivable, so eviction is always safe. Count tracked with `AtomicUsize` (soft bound — may briefly exceed limit under concurrent inserts).
-
-**Kind translation (lossy):**
-
-`KindTranslator` defines the full mapping between standard Nostr kinds and Buzz kinds. The proxy's event paths gate which kinds actually flow through — only a subset is accepted inbound or emitted outbound.
-
-*Inbound (client → relay) — accepted kinds:*
-
-| Standard Kind | Buzz Kind | Note |
-|--------------|-------------|------|
-| 1, 42 | KIND_STREAM_MESSAGE | Multiple → one (lossy) |
-| 41 | KIND_STREAM_MESSAGE_EDIT | Channel message edit |
-| 7 | KIND_REACTION | Reaction (pass-through kind) |
-
-Kind 5 (deletion) is intentionally blocked inbound — the relay's deletion handler lacks author-match authorization for proxy clients. Kinds 4, 40, 43, 44 are defined in `KindTranslator` but not accepted by the proxy's inbound path.
-
-*Outbound (relay → client) — emitted kinds:*
-
-| Buzz Kind | Standard Kind | Note |
-|-------------|--------------|------|
-| KIND_STREAM_MESSAGE | 42 | NIP-28 channel message |
-| KIND_STREAM_MESSAGE_V2 | 42 | Rich format collapses to plain kind:42 |
-| KIND_STREAM_MESSAGE_EDIT | 41 | NIP-28 channel message edit |
-| KIND_REACTION | 7 | Reaction |
-| KIND_DELETION | 5 | Standard NIP-09 deletion |
-
-`to_buzz(to_standard(k))` is NOT lossless for secondary mappings (e.g., kind:1 → KIND_STREAM_MESSAGE → kind:42). Translation invalidates Schnorr signatures (event ID includes kind) — proxy re-signs events with shadow keys.
-
-**Dual auth:** Pubkey-based guest registration (persistent, primary) + invite tokens (ad-hoc, time-limited, secondary). Both use NIP-42 for the authentication handshake. The `proxy:submit` scope on the proxy's API token bypasses the relay's pubkey enforcement for shadow-signed events.
-
-**Channel map:** Loaded at startup from the relay's REST API. kind:40 events are synthesized locally only. kind:41 is split: synthesized metadata is served locally, but kind:41 filters are also forwarded upstream (translated to kind:40003) to capture edit events. Channels created after proxy start require a restart to appear.
-
-**State is in-memory.** Guest registrations, invite tokens, and channel map are lost on proxy restart.
-
-**Does NOT:** implement relay-side lifecycle event emission — the relay does not emit events when proxy clients connect or disconnect (planned).
 
 ---
 
@@ -623,47 +607,26 @@ pub struct ConnectionState {
 pub enum AuthState { Pending { challenge: String }, Authenticated(AuthContext), Failed }
 ```
 
-**REST API endpoints:**
+**HTTP endpoints:**
 
 | Method | Path | Handler |
 |--------|------|---------|
-| GET | `/api/channels` | List accessible channels |
-| GET | `/api/channels/{channel_id}` | Get channel detail + metadata |
-| GET | `/api/channels/{channel_id}/members` | List channel members |
-| GET | `/api/channels/{channel_id}/canvas` | Get channel canvas |
-| GET | `/api/channels/{channel_id}/messages` | List channel messages |
-| GET | `/api/channels/{channel_id}/threads/{event_id}` | Get message thread |
-| GET/POST | `/api/channels/{channel_id}/workflows` | List/create channel workflows |
-| GET | `/api/search` | Full-text search via Typesense |
-| GET | `/api/agents` | List agent accounts |
-| GET/PUT | `/api/presence` | Presence status (bulk) / set presence |
-| GET | `/api/feed` | Personalized feed (mentions/needs-action/activity) |
-| POST | `/api/events` | Submit event via REST (no WebSocket) |
-| GET | `/api/events/{id}` | Get event by ID |
-| GET/PUT/DELETE | `/api/workflows/{id}` | Workflow CRUD |
-| GET | `/api/workflows/{id}/runs` | Execution history |
-| GET | `/api/workflows/{id}/runs/{run_id}/approvals` | List run approvals |
-| POST | `/api/workflows/{id}/trigger` | Manual trigger |
-| POST | `/api/workflows/{id}/webhook` | Webhook trigger (HMAC-verified) |
-| POST | `/api/approvals/{token}/grant` | Approve a workflow step (🚧 unreachable — see WF-08) |
-| POST | `/api/approvals/{token}/deny` | Deny a workflow step (🚧 unreachable — see WF-08) |
-| POST | `/api/approvals/by-hash/{hash}/grant` | Approve by hash (🚧 unreachable — see WF-08) |
-| POST | `/api/approvals/by-hash/{hash}/deny` | Deny by hash (🚧 unreachable — see WF-08) |
-| GET | `/api/dms` | List DM channels |
-| POST | `/api/dms` | Open a DM channel |
-| POST | `/api/dms/{channel_id}/members` | Add DM member |
-| POST | `/api/dms/{channel_id}/hide` | Hide a DM channel |
-| GET | `/api/messages/{event_id}/reactions` | List reactions on a message |
-| GET | `/api/users/me/profile` | Get own profile |
-| PUT | `/api/users/me/channel-add-policy` | Set channel add policy |
-| GET | `/api/users/search` | Search users |
-| GET | `/api/users/{pubkey}/profile` | Get user profile by pubkey |
-| POST | `/api/users/batch` | Batch-fetch user profiles |
-| PUT | `/media/upload` | Upload media blob (Blossom, 50 MB limit) |
-| GET/HEAD | `/media/{sha256_ext}` | Retrieve/probe media blob |
+| GET | `/` | WebSocket upgrade or NIP-11 relay info |
 | GET | `/info` | NIP-11 relay info |
 | GET | `/.well-known/nostr.json` | NIP-05 identity |
 | GET | `/health` | Health check |
+| GET | `/_liveness` | Liveness probe |
+| GET | `/_readiness` | Readiness probe |
+| POST | `/events` | Submit a signed Nostr event over HTTP (same ingest path as WebSocket `EVENT`) |
+| POST | `/query` | Query Nostr events over HTTP with NIP-01 filters |
+| POST | `/count` | Count Nostr events over HTTP with NIP-45 filters |
+| POST | `/hooks/{id}` | Workflow webhook trigger (secret-authenticated) |
+| PUT | `/media/upload` | Upload media blob (Blossom, 50 MB limit) |
+| GET/HEAD | `/media/{sha256_ext}` | Retrieve/probe media blob |
+| GET | `/git/{owner}/{repo}/info/refs` | Git smart HTTP advertisement |
+| POST | `/git/{owner}/{repo}/git-upload-pack` | Git smart HTTP fetch |
+| POST | `/git/{owner}/{repo}/git-receive-pack` | Git smart HTTP push |
+| POST | `/internal/git/policy` | Internal git hook policy check |
 
 **Constants:**
 
@@ -739,10 +702,7 @@ The `buzz-admin` binary is shipped in the relay Docker image (`/usr/local/bin/bu
 | `tests/e2e_relay.rs` | 27 | WebSocket protocol (auth, subscriptions, filters, limits, NIP-11) |
 | `tests/e2e_media.rs` | 7 | Media upload/download (Blossom) |
 | `tests/e2e_media_extended.rs` | 18 | Extended media scenarios |
-| `tests/e2e_nostr_interop.rs` | 15 | NIP-28 proxy interoperability |
-| `tests/e2e_rest_api.rs` | 40 | REST API (channels, search, presence, agents, feed) |
-| `tests/e2e_tokens.rs` | 20 | Token auth and scope enforcement |
-| `tests/e2e_workflows.rs` | 7 | Workflow CRUD, trigger, and execution |
+| `tests/e2e_nostr_interop.rs` | 15 | Nostr interoperability: NIP-50 search, NIP-10 threads, NIP-17 gift wraps, DM discovery |
 
 All e2e tests are `#[ignore]` — require a running relay. Total: **134 e2e tests**.
 
@@ -813,9 +773,8 @@ Docker Compose provides the full local development stack. All services include h
 
 | Service | Image | Port | Purpose |
 |---------|-------|------|---------|
-| Postgres | `postgres:17-alpine` | 5432 | Primary event store — events, channels, tokens, workflows, audit |
+| Postgres | `postgres:17-alpine` | 5432 | Primary event store — events, channels, tokens, workflows, audit; full-text search (`search_tsv` GIN) |
 | Redis | `redis:7-alpine` | 6379 | Pub/sub fan-out, presence (SET EX), typing (sorted sets) |
-| Typesense | `typesense/typesense:27.1` | 8108 | Full-text search index |
 | Adminer | `adminer` | 8082 | DB web UI (dev only) |
 | MinIO | `minio/minio` | 9000 (API), 9001 (console) | S3-compatible object storage (media) |
 | Prometheus | `prom/prometheus` | 9090 | Metrics collection |
@@ -824,26 +783,33 @@ Docker Compose provides the full local development stack. All services include h
 
 | Table | Purpose |
 |-------|---------|
-| `events` | All stored Nostr events; monthly range-partitioned by `PARTITION BY RANGE` on `created_at` |
-| `channels` | Channel records (type, visibility, canvas, topic) |
+| `events` | All stored Nostr events; monthly range-partitioned by `PARTITION BY RANGE` on `created_at`; multi-community mode keys every tenant-visible event by `community_id` |
+| `channels` | Channel records (type, visibility, canvas, topic); `community_id` is immutable after creation in multi-community mode |
 | `channel_members` | Membership with roles; soft-delete via `removed_at` |
-| `workflows` | Workflow definitions (YAML stored as canonical JSON) |
+| `workflows` | Workflow definitions (YAML stored as canonical JSON); scoped by community in multi-community mode |
 | `workflow_runs` | Execution records with trigger context and trace |
 | `workflow_approvals` | Approval gates (token stored as SHA-256 hash) |
-| `audit_log` | Hash-chain audit entries |
+| `audit_log` | Hash-chain audit entries; per-community chain/head in multi-community mode |
 | `delivery_log` | Delivery tracking (partitioned; Rust module pending) |
 
 ### Redis Key Patterns
 
 | Pattern | Type | TTL | Purpose |
 |---------|------|-----|---------|
-| `buzz:channel:{uuid}` | Pub/Sub channel | — | Event fan-out |
-| `buzz:presence:{pubkey_hex}` | String | 90s | Online/away status |
-| `buzz:typing:{channel_uuid}` | Sorted Set | 60s | Active typers (5s window) |
+| `buzz:channel:{uuid}` | Pub/Sub channel | — | Event fan-out (single-community form; shared multi-community Redis must use `buzz:{community}:channel:{uuid}` or equivalent) |
+| `buzz:presence:{pubkey_hex}` | String | 90s | Online/away status (single-community form; shared multi-community Redis must scope by community) |
+| `buzz:typing:{channel_uuid}` | Sorted Set | 60s | Active typers (5s window; shared multi-community Redis must scope by community) |
 
-### Typesense Collection
+### Full-Text Search (Postgres FTS)
 
-Single collection (`events` by default, configurable via `TYPESENSE_COLLECTION`). Schema: `id`, `content`, `kind` (int32), `pubkey` (facet), `channel_id` (facet, optional), `created_at` (int64, default sort), `tags_flat` (string[]).
+Search runs over the `events.search_tsv` generated `tsvector` column on the
+`events` table (no separate collection or service). The column is populated on
+insert — `to_tsvector('simple', content)` — and excludes privacy-sensitive
+kinds via `CASE WHEN kind IN (1059, 30300, 30622) THEN NULL`, so those rows are
+storage-level unsearchable (a `NULL` tsvector never matches `@@`). A GIN index
+(`idx_events_search_tsv`) backs the `@@` probe; in multi-community mode the
+community-leading btree filters BitmapAnd with the GIN probe so every query is
+fenced to its `community_id`.
 
 ---
 

@@ -8,14 +8,12 @@ templates:
   - templates/service.yaml
   - templates/pvc-git.yaml
 tests:
-  - it: renders cleanly in production profile (external pg/redis/typesense)
+  - it: renders cleanly in production profile (external pg/redis)
     set:
       relayUrl: wss://buzz.example.com
       ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
       externalPostgresql.url: postgres://u:p@h:5432/d
       externalRedis.url: redis://h:6379
-      typesense.url: http://ts:8108
-      typesense.apiKey: k
       s3.endpoint: http://minio:9000
       s3.accessKey: a
       s3.secretKey: s
@@ -32,20 +30,62 @@ tests:
           path: kind
           value: Service
         template: templates/service.yaml
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: BUZZ_HUDDLE_AUDIO_AVAILABLE
+            value: "true"
+        template: templates/deployment.yaml
 
-  - it: renders HA cleanly with replicaCount=3 + RWX + Redis
+  - it: lets an explicit value disable huddle audio in a single-replica render
     set:
       relayUrl: wss://buzz.example.com
       ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
       externalPostgresql.url: postgres://u:p@h:5432/d
       externalRedis.url: redis://h:6379
-      typesense.url: http://ts:8108
-      typesense.apiKey: k
+      s3.endpoint: http://minio:9000
+      s3.accessKey: a
+      s3.secretKey: s
+      relay.huddleAudioAvailable: false
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: BUZZ_HUDDLE_AUDIO_AVAILABLE
+            value: "false"
+        template: templates/deployment.yaml
+
+  - it: lets an explicit value enable huddle audio in HA when the operator owns external audio behavior
+    set:
+      relayUrl: wss://buzz.example.com
+      ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
+      externalPostgresql.url: postgres://u:p@h:5432/d
+      externalRedis.url: redis://h:6379
       s3.endpoint: http://minio:9000
       s3.accessKey: a
       s3.secretKey: s
       replicaCount: 3
-      persistence.git.accessMode: ReadWriteMany
+      persistence.git.accessMode: ReadWriteOnce
+      relay.huddleAudioAvailable: true
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: BUZZ_HUDDLE_AUDIO_AVAILABLE
+            value: "true"
+        template: templates/deployment.yaml
+
+  - it: renders HA cleanly with replicaCount=3 + RWO git + Redis (no RWM needed)
+    set:
+      relayUrl: wss://buzz.example.com
+      ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
+      externalPostgresql.url: postgres://u:p@h:5432/d
+      externalRedis.url: redis://h:6379
+      s3.endpoint: http://minio:9000
+      s3.accessKey: a
+      s3.secretKey: s
+      replicaCount: 3
+      persistence.git.accessMode: ReadWriteOnce
     asserts:
       - equal:
           path: spec.replicas
@@ -53,5 +93,46 @@ tests:
         template: templates/deployment.yaml
       - equal:
           path: spec.accessModes[0]
-          value: ReadWriteMany
+          value: ReadWriteOnce
+        template: templates/pvc-git.yaml
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: BUZZ_HUDDLE_AUDIO_AVAILABLE
+            value: "false"
+        template: templates/deployment.yaml
+
+  - it: mounts a per-pod emptyDir git scratch volume when persistence is disabled
+    set:
+      relayUrl: wss://buzz.example.com
+      ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
+      externalPostgresql.url: postgres://u:p@h:5432/d
+      externalRedis.url: redis://h:6379
+      s3.endpoint: http://minio:9000
+      s3.accessKey: a
+      s3.secretKey: s
+      replicaCount: 5
+      persistence.git.enabled: false
+    asserts:
+      - equal:
+          path: spec.replicas
+          value: 5
+        template: templates/deployment.yaml
+      # git-repos is still mounted (BUZZ_GIT_REPO_PATH must be a real dir)…
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: git-repos
+            mountPath: /var/lib/buzz/git
+        template: templates/deployment.yaml
+      # …but as a per-pod emptyDir, not a shared PVC (no multi-attach).
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: git-repos
+            emptyDir: {}
+        template: templates/deployment.yaml
+      # No PVC is rendered at all when persistence is disabled.
+      - hasDocuments:
+          count: 0
         template: templates/pvc-git.yaml

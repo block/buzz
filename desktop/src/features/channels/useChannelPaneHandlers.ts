@@ -1,13 +1,12 @@
 import * as React from "react";
 
-import { flushSync } from "react-dom";
-
 import type {
   useDeleteMessageMutation,
   useEditMessageMutation,
   useSendMessageMutation,
   useToggleReactionMutation,
 } from "@/features/messages/hooks";
+import { resolveThreadReplyTarget } from "@/features/messages/hooks";
 
 /**
  * Stable callback references for ChannelPane so that keystroke-driven
@@ -81,19 +80,26 @@ export function useChannelPaneHandlers({
   const toggleMutateRef = React.useRef(toggleReactionMutation.mutateAsync);
   toggleMutateRef.current = toggleReactionMutation.mutateAsync;
 
+  const deferPanelState = React.useCallback((update: () => void) => {
+    window.setTimeout(() => {
+      React.startTransition(update);
+    }, 0);
+  }, []);
+
   const handleCancelThreadReply = React.useCallback(() => {
     setThreadReplyTargetId(openThreadHeadIdRef.current);
   }, [setThreadReplyTargetId]);
 
   const handleCloseThread = React.useCallback(() => {
-    flushSync(() => {
+    deferPanelState(() => {
       onOptimisticOpenThreadHeadIdChange(null);
+      setOpenThreadHeadId(null);
+      setThreadReplyTargetId(null);
+      setThreadScrollTargetId(null);
+      setExpandedThreadReplyIds(new Set());
     });
-    setOpenThreadHeadId(null);
-    setThreadReplyTargetId(null);
-    setThreadScrollTargetId(null);
-    setExpandedThreadReplyIds(new Set());
   }, [
+    deferPanelState,
     onOptimisticOpenThreadHeadIdChange,
     setExpandedThreadReplyIds,
     setOpenThreadHeadId,
@@ -135,27 +141,28 @@ export function useChannelPaneHandlers({
   const handleOpenThread = React.useCallback(
     (message: { id: string }) => {
       if (openThreadHeadIdRef.current === message.id) {
-        flushSync(() => {
+        deferPanelState(() => {
           onOptimisticOpenThreadHeadIdChange(null);
+          setOpenThreadHeadId(null);
+          setThreadReplyTargetId(null);
+          setThreadScrollTargetId(null);
+          setExpandedThreadReplyIds(new Set());
         });
-        setOpenThreadHeadId(null);
-        setThreadReplyTargetId(null);
-        setThreadScrollTargetId(null);
-        setExpandedThreadReplyIds(new Set());
         setEditTargetId(null);
         return;
       }
 
-      flushSync(() => {
+      deferPanelState(() => {
         onOptimisticOpenThreadHeadIdChange(message.id);
+        setOpenThreadHeadId(message.id);
+        setThreadReplyTargetId(message.id);
+        setThreadScrollTargetId(null);
+        setExpandedThreadReplyIds(new Set());
       });
-      setOpenThreadHeadId(message.id);
-      setThreadReplyTargetId(message.id);
-      setThreadScrollTargetId(null);
-      setExpandedThreadReplyIds(new Set());
       setEditTargetId(null);
     },
     [
+      deferPanelState,
       onOptimisticOpenThreadHeadIdChange,
       setEditTargetId,
       setExpandedThreadReplyIds,
@@ -224,11 +231,13 @@ export function useChannelPaneHandlers({
       content: string,
       mentionPubkeys: string[],
       mediaTags?: string[][],
+      channelId?: string | null,
     ) => {
       await sendMutateRef.current({
         content,
         mentionPubkeys,
         mediaTags,
+        channelId: channelId ?? undefined,
       });
     },
     [],
@@ -239,13 +248,24 @@ export function useChannelPaneHandlers({
       content: string,
       mentionPubkeys: string[],
       mediaTags?: string[][],
+      channelId?: string | null,
+      threadContext?: {
+        parentEventId: string | null;
+        threadHeadId: string | null;
+      } | null,
     ) => {
-      const activeThreadHeadId = openThreadHeadIdRef.current;
-      const parentEventId =
-        threadReplyTargetIdRef.current ?? activeThreadHeadId;
-      if (!parentEventId) {
+      // Resolve target using captured submit-time context (race-free) or live
+      // refs (legacy path). When threadContext is supplied, no live-ref reads
+      // occur after the mention-flow awaits; the resolution is purely data.
+      const target = resolveThreadReplyTarget(
+        threadContext,
+        threadReplyTargetIdRef.current,
+        openThreadHeadIdRef.current,
+      );
+      if (!target) {
         return;
       }
+      const { parentEventId, threadHeadId: activeThreadHeadId } = target;
 
       if (
         activeThreadHeadId &&
@@ -264,10 +284,17 @@ export function useChannelPaneHandlers({
         mentionPubkeys,
         parentEventId,
         mediaTags,
+        channelId: channelId ?? undefined,
       });
-      setThreadReplyTargetId(activeThreadHeadId);
-      if (activeThreadHeadId && parentEventId !== activeThreadHeadId) {
-        setThreadScrollTargetId(sentMessage.id);
+
+      // Only update thread UI state if the user is still viewing the same
+      // thread. If they navigated away during the async send, don't disrupt
+      // the thread they are currently viewing.
+      if (openThreadHeadIdRef.current === activeThreadHeadId) {
+        setThreadReplyTargetId(activeThreadHeadId);
+        if (activeThreadHeadId && parentEventId !== activeThreadHeadId) {
+          setThreadScrollTargetId(sentMessage.id);
+        }
       }
     },
     [

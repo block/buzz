@@ -29,10 +29,10 @@ use filter::SubscriptionRule;
 use futures_util::FutureExt;
 use nostr::{PublicKey, ToBech32};
 use pool::{
-    AgentPool, ControlSignal, OwnedAgent, PromptContext, PromptOutcome, PromptResult, PromptSource,
-    SessionState,
+    AgentPool, ControlSignal, IdleSwitchResult, OwnedAgent, PromptContext, PromptOutcome,
+    PromptResult, PromptSource, SessionState,
 };
-use queue::{EventQueue, QueuedEvent, ThreadTags};
+use queue::{CancelReason, EventQueue, QueuedEvent, ThreadTags};
 use relay::{HarnessRelay, RelayEventPublisher};
 use tokio::sync::{mpsc, watch};
 use tracing_subscriber::EnvFilter;
@@ -710,11 +710,25 @@ fn handle_relay_observer_control_event(
     };
 
     let command_type = payload.get("type").and_then(|value| value.as_str());
-    if command_type != Some("cancel_turn") {
-        tracing::debug!(payload = %payload, "ignoring unknown observer control frame");
-        return;
+    match command_type {
+        Some("cancel_turn") => {
+            handle_cancel_turn_control(&payload, pool, observer);
+        }
+        Some("switch_model") => {
+            handle_switch_model_control(&payload, pool, observer);
+        }
+        _ => {
+            tracing::debug!(payload = %payload, "ignoring unknown observer control frame");
+        }
     }
+}
 
+/// Handle a `cancel_turn` control frame: signal the in-flight task to cancel.
+fn handle_cancel_turn_control(
+    payload: &serde_json::Value,
+    pool: &mut AgentPool,
+    observer: Option<&observer::ObserverHandle>,
+) {
     let Some(channel_id) = payload
         .get("channelId")
         .and_then(|value| value.as_str())
@@ -738,6 +752,83 @@ fn handle_relay_observer_control_event(
             serde_json::json!({
                 "type": "cancel_turn",
                 "status": status,
+            }),
+        );
+    }
+}
+
+/// Handle a `switch_model` control frame (Phase 3a, Option ii).
+///
+/// Busy path: deliver `SwitchModel` over the in-flight task's oneshot — the
+/// task cancels the turn, sets `desired_model`, and requeues the batch so it
+/// re-runs on a fresh session under the new model. A catalog miss surfaces
+/// post-cancel via `create_session_and_apply_model` (the turn restarts on the
+/// unchanged model + an `unsupported_model` result).
+///
+/// Idle path: validate against the cached catalog *before* invalidating
+/// (pre-cancel guard), then set `desired_model` + invalidate. The override
+/// takes visible effect on the agent's next turn.
+fn handle_switch_model_control(
+    payload: &serde_json::Value,
+    pool: &mut AgentPool,
+    observer: Option<&observer::ObserverHandle>,
+) {
+    let Some(channel_id) = payload
+        .get("channelId")
+        .and_then(|value| value.as_str())
+        .and_then(|value| value.parse::<Uuid>().ok())
+    else {
+        tracing::warn!("observer switch_model control frame missing valid channelId");
+        return;
+    };
+    let Some(model_id) = payload.get("modelId").and_then(|value| value.as_str()) else {
+        tracing::warn!("observer switch_model control frame missing modelId");
+        return;
+    };
+
+    // A turn is in flight for this channel iff a task_map entry exists. The
+    // agent is moved out of the pool during a turn, so the control oneshot is
+    // the only reachable lever; an idle channel has no such entry.
+    let turn_in_flight = pool
+        .task_map()
+        .values()
+        .any(|m| m.channel_id == Some(channel_id));
+
+    let status = if turn_in_flight {
+        // Busy path: deliver over the oneshot. `false` means the oneshot was
+        // already consumed this turn (a prior cancel/interrupt) — the turn is
+        // already ending, so the switch cannot land on it.
+        if signal_in_flight_task(
+            pool,
+            channel_id,
+            ControlSignal::SwitchModel(model_id.to_string()),
+        ) {
+            "sent"
+        } else {
+            "turn_ending"
+        }
+    } else {
+        // Idle path: validate against the cached catalog before invalidating.
+        match pool.switch_idle_agent_model(channel_id, model_id) {
+            IdleSwitchResult::Switched => "switched",
+            IdleSwitchResult::UnsupportedModel => "unsupported_model",
+            IdleSwitchResult::NoIdleAgent => "no_active_turn",
+        }
+    };
+
+    if let Some(observer) = observer {
+        observer.emit(
+            "control_result",
+            None,
+            &observer::ObserverContext {
+                channel_id: Some(channel_id.to_string()),
+                session_id: None,
+                turn_id: None,
+            },
+            serde_json::json!({
+                "type": "switch_model",
+                "status": status,
+                "modelId": model_id,
             }),
         );
     }
@@ -879,7 +970,30 @@ fn any_respawn_in_flight(crash_history: &[SlotCircuit]) -> bool {
 /// Result of a background respawn task.
 struct RespawnResult {
     index: usize,
-    result: Result<(AcpClient, u32)>,
+    /// Tuple: (initialized client, protocol version, supports_goose_steer).
+    /// The third element is always `true` — the supervisor uses
+    /// try-and-tolerate for the steer extension.
+    result: Result<(AcpClient, u32, bool)>,
+}
+
+/// Outcome of a non-cancelling steer attempt, forwarded from a per-attempt
+/// watcher task (which awaits the `SteerRequest.ack_tx` oneshot) back to
+/// the main loop's `select!`. The main loop drives queue side-effects from
+/// this — it cannot await the oneshot itself without blocking the relay
+/// stream.
+///
+/// Carries enough identity to operate on the right withheld event in
+/// `EventQueue::withheld_native_steer`: `channel_id` is the routing key,
+/// `event_id` is the hex id of the single event the steer carried.
+struct SteerAckEvent {
+    channel_id: Uuid,
+    event_id: String,
+    /// `Ok` if the read loop sent any of the locked `SteerAck` variants.
+    /// `Err` if the oneshot was dropped without a send — should not happen
+    /// under the current read-loop drains, but if it ever does the main
+    /// loop treats it as `PromptCompletedNeutral` (release withheld, no
+    /// fallback signal) to avoid leaking the withheld event.
+    ack: std::result::Result<pool::SteerAck, tokio::sync::oneshot::error::RecvError>,
 }
 
 /// RAII guard that ensures a `RespawnResult` is sent even if the task panics.
@@ -903,7 +1017,7 @@ impl RespawnGuard {
     /// Send the result and disarm the guard. Uses `try_send` (sync) so there
     /// is no await boundary between marking `sent` and actually enqueueing —
     /// cancellation cannot slip between the two.
-    fn send(mut self, result: Result<(AcpClient, u32)>) {
+    fn send(mut self, result: Result<(AcpClient, u32, bool)>) {
         // Invariant: try_send succeeds because the channel capacity equals the
         // slot count, and respawn_in_flight guarantees at most one outstanding
         // result per slot. If this ever fails, the channel sizing or the
@@ -1022,6 +1136,16 @@ async fn tokio_main() -> Result<()> {
                         tracing::info!(agent = i, "agent initialized: {init_result}");
                         let protocol_version =
                             init_result["protocolVersion"].as_u64().unwrap_or(1) as u32;
+                        tracing::info!(
+                            agent = i,
+                            name = init_result
+                                .get("agentInfo")
+                                .or_else(|| init_result.get("serverInfo"))
+                                .and_then(|info| info.get("name"))
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("unknown"),
+                            "agent initialized — non-cancelling steer enabled (try-and-tolerate)"
+                        );
                         acp.observe(
                             "agent_initialized",
                             serde_json::json!({
@@ -1035,6 +1159,7 @@ async fn tokio_main() -> Result<()> {
                             state: SessionState::default(),
                             model_capabilities: None,
                             desired_model: config.model.clone(),
+                            model_overridden: false,
                             protocol_version,
                         }));
                     }
@@ -1331,6 +1456,19 @@ async fn tokio_main() -> Result<()> {
     // JoinSet for respawn tasks so shutdown can abort them.
     let mut respawn_tasks: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
 
+    // Channel for non-cancelling steer ack watchers to forward outcomes back
+    // to the main loop. Each `pool.send_steer(...) == Ok(())` spawns a
+    // short-lived task that awaits the `SteerRequest.ack_tx` oneshot and
+    // forwards a `SteerAckEvent`. Unbounded because:
+    //   1. The producer count is bounded by in-flight goose turns
+    //      (`agents` slots, capacity-1 `steer_tx` each), so the channel
+    //      cannot legitimately back up under steady state.
+    //   2. We must never drop a steer outcome — losing an ack would leak a
+    //      withheld event in `EventQueue::withheld_native_steer` until
+    //      `IN_FLIGHT_DEADLINE_SECS` expires.
+    let (steer_ack_tx, mut steer_ack_rx) = mpsc::unbounded_channel::<SteerAckEvent>();
+
+    // ── Step 7: Shutdown signal ───────────────────────────────────────────────
     let (shutdown_tx, mut shutdown_rx) = watch::channel(());
 
     let tx = shutdown_tx.clone();
@@ -1402,6 +1540,7 @@ async fn tokio_main() -> Result<()> {
     enum PoolEvent {
         Result(Box<PromptResult>),
         Panic(tokio::task::JoinError),
+        SteerAck(SteerAckEvent),
     }
 
     loop {
@@ -1448,13 +1587,14 @@ async fn tokio_main() -> Result<()> {
         while let Ok(rr) = respawn_rx.try_recv() {
             crash_history[rr.index].respawn_in_flight = false;
             match rr.result {
-                Ok((acp, protocol_version)) => {
+                Ok((acp, protocol_version, _)) => {
                     let agent = OwnedAgent {
                         index: rr.index,
                         acp,
                         state: SessionState::default(),
                         model_capabilities: None,
                         desired_model: config.model.clone(),
+                        model_overridden: false,
                         protocol_version,
                     };
                     pool.return_agent(agent);
@@ -1495,6 +1635,14 @@ async fn tokio_main() -> Result<()> {
                 // are in-flight tasks.
                 Some(Err(e)) = join_set.join_next(), if !join_set.is_empty() => {
                     Some(PoolEvent::Panic(e))
+                }
+                // Goose-native steer ack from a watcher task. Outcomes drive
+                // queue side-effects (drop / release withheld event) and
+                // optionally the cancel+merge fallback signal. See the
+                // `Some(PoolEvent::SteerAck(...))` match arm below for the
+                // locked semantics (Eva + Max + Perci).
+                Some(ack_event) = steer_ack_rx.recv() => {
+                    Some(PoolEvent::SteerAck(ack_event))
                 }
                 control_event = async {
                     match relay_observer_control_rx.as_mut() {
@@ -1784,6 +1932,18 @@ async fn tokio_main() -> Result<()> {
                             // buzz_event.event (needed for mode gate below).
                             let author_hex = buzz_event.event.pubkey.to_hex();
                             let event_id_hex = buzz_event.event.id.to_hex();
+                            // Clone for the non-cancelling steer fork, which
+                            // needs the event to render the steer body. The
+                            // clone is unconditional because we don't know
+                            // yet whether the mode gate will demand a steer
+                            // — checking `multiple_event_handling` here
+                            // would couple the queueing path to the mode
+                            // and break the existing invariant that every
+                            // accepted event goes through `queue.push`
+                            // first. `nostr::Event::clone` is cheap (Arc-
+                            // backed payload) so the cost is negligible.
+                            let event_for_steer = buzz_event.event.clone();
+                            let prompt_tag_for_steer = prompt_tag.clone();
                             let accepted = queue.push(QueuedEvent {
                                 channel_id: buzz_event.channel_id,
                                 event: buzz_event.event,
@@ -1797,29 +1957,53 @@ async fn tokio_main() -> Result<()> {
                             // cosmetic stale 👀. Acceptable — see ReactionGuard docs.
                             if accepted {
                                 let rc = ctx.rest_client.clone();
+                                let eid = event_id_hex.clone();
                                 tokio::spawn(async move {
-                                    pool::reaction_add(&rc, &event_id_hex, "👀").await;
+                                    pool::reaction_add(&rc, &eid, "👀").await;
                                 });
                             }
                             // Event is already queued. If mode requires it AND
-                            // the channel has an in-flight task, fire cancel.
+                            // the channel has an in-flight task, fire cancel —
+                            // OR take the non-cancelling (ACP steer) fork for Steer signals.
                             if accepted && queue.is_channel_in_flight(buzz_event.channel_id) {
-                                let should_cancel = match config.multiple_event_handling {
-                                    MultipleEventHandling::Queue => false,
-                                    MultipleEventHandling::Interrupt => true,
-                                    MultipleEventHandling::OwnerInterrupt => {
-                                        match owner_cache.get() {
-                                            Some(o) => author_hex == *o,
-                                            None => false,
-                                        }
+                                // Author eligibility (owner ∪ allowlist ∪ siblings)
+                                // is already enforced by the inbound author gate
+                                // above, so the mid-turn signal fires for every
+                                // event that reaches here.
+                                let signal = mode_gate_signal(
+                                    config.multiple_event_handling,
+                                    &author_hex,
+                                    owner_cache.get(),
+                                );
+                                if let Some(signal) = signal {
+                                    // Try-and-tolerate fork: when the mode
+                                    // wants a Steer, attempt the non-cancelling
+                                    // path first for any agent. On accept,
+                                    // withhold the queued event and spawn an
+                                    // ack watcher; the main loop's
+                                    // `PoolEvent::SteerAck` arm decides
+                                    // success/release/fallback. On reject
+                                    // (including `-32601 method_not_found`
+                                    // from agents that don't implement the
+                                    // extension), fall through to the universal
+                                    // cancel+merge `Steer` signal so the event
+                                    // still reaches the agent.
+                                    let native_attempted = matches!(signal, ControlSignal::Steer)
+                                        && try_native_steer(
+                                            &mut pool,
+                                            &mut queue,
+                                            buzz_event.channel_id,
+                                            event_for_steer,
+                                            prompt_tag_for_steer,
+                                            &steer_ack_tx,
+                                        );
+                                    if !native_attempted {
+                                        signal_in_flight_task(
+                                            &mut pool,
+                                            buzz_event.channel_id,
+                                            signal,
+                                        );
                                     }
-                                };
-                                if should_cancel {
-                                    signal_in_flight_task(
-                                        &mut pool,
-                                        buzz_event.channel_id,
-                                        ControlSignal::Interrupt,
-                                    );
                                 }
                             }
                             for (channel_id, thread_tags) in
@@ -1927,6 +2111,7 @@ async fn tokio_main() -> Result<()> {
                     &respawn_tx,
                     &mut respawn_tasks,
                     observer.clone(),
+                    Some(&ctx.rest_client),
                 ) == LoopAction::Exit
                 {
                     break;
@@ -1969,6 +2154,123 @@ async fn tokio_main() -> Result<()> {
                     tracing::error!("all agents dead — exiting");
                     break;
                 }
+                for (channel_id, thread_tags) in dispatch_pending(&mut pool, &mut queue, &ctx) {
+                    typing_channels.insert(channel_id, thread_tags);
+                }
+            }
+            Some(PoolEvent::SteerAck(SteerAckEvent {
+                channel_id,
+                event_id,
+                ack,
+            })) => {
+                // Goose-native steer attempt resolved. Locked semantics
+                // (Eva + Max + Perci, unanimous on Option X):
+                //
+                //   Success
+                //     The agent received the steer via the non-cancelling
+                //     path. Drop the withheld event so normal dispatch
+                //     never redelivers it.
+                //
+                //   Err(_) where the write never landed (Transport /
+                //   ExpectedRunIdMissing):
+                //     Delivery state of the underlying message is "never
+                //     attempted on the wire". Release withheld back to the
+                //     queue front AND issue the cancel+merge fallback so
+                //     the message still reaches the agent.
+                //
+                //   Err(AgentError { code: -32601, .. })
+                //     The agent returned method_not_found — it does not
+                //     implement the steer extension. Release withheld AND
+                //     fire the cancel+merge fallback so the message still
+                //     reaches the agent via the universal path.
+                //
+                //   Err(AgentError { code: other, .. })
+                //     The write landed and the agent returned a JSON-RPC
+                //     error at the application level (e.g. wrong run id).
+                //     The agent's turn is still running (or just completed).
+                //     Release withheld for normal dispatch; do NOT fire the
+                //     fallback signal — the agent already saw the steer
+                //     attempt. If the turn is still running, normal dispatch
+                //     re-delivers when it completes. If the turn already
+                //     ended, there is nothing to cancel.
+                //
+                //   PromptCompletedNeutral
+                //     The read loop wrote the steer (or was preparing to)
+                //     but the prompt completed before the response landed.
+                //     Delivery state is unknown — but the prompt completing
+                //     means there is no in-flight turn to signal anymore.
+                //     Release withheld for normal dispatch; do NOT fire
+                //     the fallback signal (it would target a turn that
+                //     just ended; normal dispatch already handles
+                //     redelivery via the released queue entry).
+                //
+                //   Err(PromptCompleted)
+                //     `SteerError::PromptCompleted` is returned synchronously
+                //     by `pool::send_steer` when no task is in flight (handled
+                //     in `try_native_steer`'s Err branch, which falls through
+                //     to cancel+merge). It is never routed through the ack
+                //     channel, so this variant never appears in `SteerAckEvent`.
+                //
+                //   Watcher Err (oneshot dropped)
+                //     Should not happen — the read loop drains
+                //     pending_steer on every return path. If it does,
+                //     treat as PromptCompletedNeutral to avoid leaking
+                //     the withheld event in `withheld_native_steer`.
+                let (release_withheld, drop_withheld, signal_fallback) = match &ack {
+                    Ok(pool::SteerAck::Success) => (false, true, false),
+                    // -32601 = method_not_found: agent does not implement the
+                    // steer extension. Fire cancel+merge so the message still
+                    // reaches the agent.
+                    Ok(pool::SteerAck::Err(pool::SteerError::AgentError { code, .. }))
+                        if *code == -32601 =>
+                    {
+                        (true, false, true)
+                    }
+                    // AgentError: write landed, agent rejected it at the
+                    // application level (e.g. wrong run id). Release for
+                    // normal dispatch; no fallback signal (the turn is still
+                    // running or just ended — either way there is nothing to
+                    // cancel).
+                    Ok(pool::SteerAck::Err(pool::SteerError::AgentError { .. })) => {
+                        (true, false, false)
+                    }
+                    // Transport / ExpectedRunIdMissing: write never landed.
+                    // Release and fire the cancel+merge fallback so the
+                    // message still reaches the agent.
+                    Ok(pool::SteerAck::Err(_)) => (true, false, true),
+                    Ok(pool::SteerAck::PromptCompletedNeutral) => (true, false, false),
+                    Err(_recv_err) => (true, false, false),
+                };
+                tracing::info!(
+                    channel = %channel_id,
+                    event_id = %event_id,
+                    ?ack,
+                    release_withheld,
+                    drop_withheld,
+                    signal_fallback,
+                    "non-cancelling steer ack received"
+                );
+                if drop_withheld {
+                    queue.remove_event(channel_id, &event_id);
+                }
+                if release_withheld {
+                    queue.release_native_steer(channel_id, &event_id);
+                }
+                if signal_fallback {
+                    // Universal cancel+merge fallback. Note: the
+                    // queued event has already been released to the
+                    // front of `queues[channel_id]`, so the cancel
+                    // will pick it up as part of the merged batch and
+                    // re-prompt the agent.
+                    signal_in_flight_task(&mut pool, channel_id, ControlSignal::Steer);
+                }
+                // After releasing a withheld event, give dispatch a chance
+                // to re-flush. If the prompt is still in flight, the
+                // channel stays `in_flight_channels` and `flush_next`
+                // skips it — but a Steer fallback signal sent above will
+                // tear down the in-flight task; on its completion the
+                // queue drains. We still try here in case the in-flight
+                // task has already returned.
                 for (channel_id, thread_tags) in dispatch_pending(&mut pool, &mut queue, &ctx) {
                     typing_channels.insert(channel_id, thread_tags);
                 }
@@ -2040,7 +2342,7 @@ async fn tokio_main() -> Result<()> {
     // Drain any respawn results that completed before the abort. Explicitly
     // shut down returned agents instead of relying on AcpClient::Drop.
     while let Ok(rr) = respawn_rx.try_recv() {
-        if let Ok((mut acp, _)) = rr.result {
+        if let Ok((mut acp, _, _)) = rr.result {
             acp.shutdown().await;
             tracing::debug!(agent = rr.index, "reaped respawned agent on shutdown");
         }
@@ -2101,6 +2403,34 @@ fn is_owner_control_command(
         && event_mentions_agent(event, agent_pubkey_hex)
 }
 
+// ── signal_in_flight_task ─────────────────────────────────────────────────────
+
+/// Decide which [`ControlSignal`] (if any) to send to an in-flight turn when a
+/// new, already-author-gated event arrives for that channel.
+///
+/// Returns `None` to leave the in-flight turn untouched (the event waits in the
+/// queue and is delivered when the turn completes). Author eligibility — owner
+/// ∪ allowlist ∪ siblings — is enforced upstream by the inbound author gate, so
+/// `Steer`/`Interrupt` apply to every event that reaches this point; only
+/// `OwnerInterrupt` re-checks authorship (owner-only) here.
+///
+/// `owner` is the resolved owner pubkey hex, if known.
+fn mode_gate_signal(
+    handling: MultipleEventHandling,
+    author_hex: &str,
+    owner: Option<&str>,
+) -> Option<ControlSignal> {
+    match handling {
+        MultipleEventHandling::Queue => None,
+        MultipleEventHandling::Steer => Some(ControlSignal::Steer),
+        MultipleEventHandling::Interrupt => Some(ControlSignal::Interrupt),
+        MultipleEventHandling::OwnerInterrupt => match owner {
+            Some(o) if author_hex == o => Some(ControlSignal::Interrupt),
+            _ => None,
+        },
+    }
+}
+
 /// Send a control signal to the in-flight task for `channel_id`.
 /// Returns `true` if a signal was sent, `false` if no in-flight task was found.
 fn signal_in_flight_task(
@@ -2115,13 +2445,122 @@ fn signal_in_flight_task(
 
     if let Some(meta) = entry {
         if let Some(tx) = meta.control_tx.take() {
-            let _ = tx.send(mode);
             tracing::info!(channel = %channel_id, ?mode, "control signal sent to in-flight task");
+            let _ = tx.send(mode);
             return true;
         }
     }
     false
 }
+
+/// Attempt the non-cancelling (ACP) steer for a freshly-queued event.
+///
+/// Caller invariants:
+/// - `event` has already been pushed into `EventQueue::queues[channel_id]`
+///   via [`EventQueue::push`] — its `event.id` must still be locatable
+///   there so [`EventQueue::mark_native_steer_pending`] can move it to the
+///   side table.
+/// - `multiple_event_handling` resolved to `ControlSignal::Steer`; this
+///   function is the non-cancelling fork of that signal.
+///
+/// Returns `true` if the native attempt was accepted by the read loop
+/// (capacity-1 mpsc `try_send` succeeded, event withheld synchronously,
+/// ack watcher spawned). On `true` the caller MUST NOT issue the
+/// universal cancel+merge `ControlSignal::Steer` fallback — the watcher
+/// will issue it from the ack arm if the native attempt fails.
+///
+/// Returns `false` if `pool.send_steer` failed (no in-flight task,
+/// `steer_tx` already full from a prior in-flight steer, or read loop
+/// torn down). The caller MUST fall through to
+/// `signal_in_flight_task(channel_id, ControlSignal::Steer)` so the
+/// event still reaches the agent via the universal path.
+///
+/// The withheld event is NOT released here on `false` because no withhold
+/// was established: `mark_native_steer_pending` only runs on `Ok(())`.
+fn try_native_steer(
+    pool: &mut AgentPool,
+    queue: &mut EventQueue,
+    channel_id: uuid::Uuid,
+    event: nostr::Event,
+    prompt_tag: String,
+    steer_ack_tx: &mpsc::UnboundedSender<SteerAckEvent>,
+) -> bool {
+    // Build the steer body: framing strings come from
+    // `queue::native_steer_framing()` (Eva's drift-proof requirement —
+    // native and cancel+merge fallback share these so the agent gets the
+    // same orientation regardless of transport). The single event block
+    // is rendered by `queue::format_event_block`, the same function
+    // `queue::format_prompt` uses internally for `[Buzz event: …]`
+    // sections, so the rendering also cannot drift.
+    //
+    // Passing `None` for `channel_info` / `profile_lookup` is intentional:
+    // native steer is a *delta* into a live turn — the agent already saw
+    // channel context and the actor's profile in the original prompt,
+    // duplicating it here would defeat the point of non-cancelling
+    // steering (which is to inject only what's new).
+    let (header, closing) = queue::native_steer_framing();
+    let event_id_hex = event.id.to_hex();
+    let be = queue::BatchEvent {
+        event,
+        prompt_tag: prompt_tag.clone(),
+        received_at: std::time::Instant::now(),
+    };
+    let event_block = queue::format_event_block(channel_id, None, &be, None);
+    let body = format!("{header}\n\n[Buzz event: {prompt_tag}]\n{event_block}\n\n{closing}");
+
+    let (ack_tx, ack_rx) = tokio::sync::oneshot::channel::<pool::SteerAck>();
+    let request = pool::SteerRequest {
+        prompt_blocks: vec![body],
+        ack_tx,
+    };
+
+    match pool.send_steer(channel_id, request) {
+        Ok(()) => {
+            // Withhold the queued event synchronously BEFORE spawning
+            // the watcher: this closes the race where `mark_complete`
+            // clears `in_flight_channels` and a stray `flush_next` could
+            // re-deliver the event via normal dispatch. See
+            // `EventQueue::mark_native_steer_pending` docs at queue.rs:606.
+            let withheld = queue.mark_native_steer_pending(channel_id, &event_id_hex);
+            if !withheld {
+                // Race: the event was already drained out of the queue
+                // before we got here (e.g. a concurrent flush picked it
+                // up). The steer is on the wire; if it succeeds the
+                // agent gets it via the native path AND normal
+                // dispatch — duplicate delivery is benign (agent gets
+                // the same message twice). Log so this is visible if it
+                // ever happens in production.
+                tracing::warn!(
+                    channel = %channel_id,
+                    event_id = %event_id_hex,
+                    "native steer accepted by read loop but event was not in queue to withhold \
+                     — possible duplicate delivery if steer succeeds"
+                );
+            }
+            let ack_tx_clone = steer_ack_tx.clone();
+            let event_id_for_watcher = event_id_hex.clone();
+            tokio::spawn(async move {
+                let ack = ack_rx.await;
+                let _ = ack_tx_clone.send(SteerAckEvent {
+                    channel_id,
+                    event_id: event_id_for_watcher,
+                    ack,
+                });
+            });
+            true
+        }
+        Err(e) => {
+            tracing::info!(
+                channel = %channel_id,
+                error = ?e,
+                "non-cancelling steer not accepted — falling back to cancel+merge"
+            );
+            false
+        }
+    }
+}
+
+// ── dispatch_pending ──────────────────────────────────────────────────────────
 
 /// Flush queued work to available agents.
 fn dispatch_pending(
@@ -2142,7 +2581,7 @@ fn dispatch_pending(
             .map(|event| queue::parse_thread_tags(&event.event))
             .unwrap_or_default();
         let affinity_hit = pool.has_session_for(channel_id);
-        let agent = match pool.try_claim(Some(channel_id)) {
+        let mut agent = match pool.try_claim(Some(channel_id)) {
             Some(a) => a,
             None => {
                 let pending = queue.pending_channels();
@@ -2162,6 +2601,19 @@ fn dispatch_pending(
         let result_tx = pool.result_tx();
         let ctx_clone = Arc::clone(ctx);
         let agent_index = agent.index;
+
+        // Goose-native non-cancelling steer seam: snapshot capability before
+        // the agent moves into `run_prompt_task`, and install the per-turn
+        // steer receiver on the read loop so the main loop's mode-gate fork
+        // (see the `if accepted && queue.is_channel_in_flight(...)` block
+        // in the relay event branch of the main `select!` loop) can drive
+        // it via the matching sender stored in `TaskMeta.steer_tx`.
+        // Install the steer channel for every prompt task — the supervisor
+        // uses try-and-tolerate: it attempts the steer for any agent and
+        // treats `-32601 method_not_found` as "fall back to cancel+merge".
+        let (tx, rx) = tokio::sync::mpsc::channel::<pool::SteerRequest>(1);
+        agent.acp.install_steer_rx(rx);
+        let steer_tx = Some(tx);
 
         // Prompt text is now built inside run_prompt_task (needs async for
         // context fetching). Pass None for prompt_text; batch carries the data.
@@ -2186,6 +2638,7 @@ fn dispatch_pending(
                 channel_id: Some(channel_id),
                 recoverable_batch,
                 control_tx: Some(control_tx),
+                steer_tx,
             },
         );
         dispatched_channels.push((channel_id, typing_scope));
@@ -2210,6 +2663,7 @@ fn handle_prompt_result(
     respawn_tx: &mpsc::Sender<RespawnResult>,
     respawn_tasks: &mut tokio::task::JoinSet<()>,
     observer: Option<observer::ObserverHandle>,
+    rest_client: Option<&relay::RestClient>,
 ) -> LoopAction {
     let before = pool.task_map().len();
     let agent_index = result.agent.index;
@@ -2222,17 +2676,46 @@ fn handle_prompt_result(
     // retry_counts. If mark_complete runs first, retry_counts is cleared and
     // every retry starts at attempt 1 — defeating exponential backoff and
     // dead-letter protection.
-    if let Some(batch) = result.batch {
+    if let Some(batch) = result.batch.take() {
         // Don't requeue batches for channels the agent was removed from —
         // those events are stale and should be silently dropped.
         if !removed_channels.contains(&batch.channel_id) {
             if matches!(result.outcome, PromptOutcome::Cancelled) {
                 // Cancel re-prompt: store as cancelled events so flush_next()
                 // merges them into the next FlushBatch.cancelled_events,
-                // enabling the annotated merged-prompt format.
-                queue.requeue_as_cancelled(batch);
-            } else {
-                queue.requeue(batch);
+                // enabling the annotated merged-prompt format. The batch's
+                // cancel_reason (set by the pool task per the control signal)
+                // selects steer vs interrupt framing. It is always set on this
+                // path; if somehow unset, fall back to the gentler Steer framing
+                // — consistent with MergeFraming::for_reason(None) and the
+                // system default — rather than telling the agent to supersede.
+                let reason = batch.cancel_reason.unwrap_or(CancelReason::Steer);
+                queue.requeue_as_cancelled(batch, reason);
+            } else if let Some(dead) = queue.requeue(batch) {
+                // Dead-lettered: retries exhausted and the events are gone.
+                // Post a visible notice so the channel isn't left waiting on
+                // a turn that will never happen.
+                if let Some(rest) = rest_client {
+                    let thread_tags = dead
+                        .events
+                        .last()
+                        .map(|be| queue::parse_thread_tags(&be.event))
+                        .unwrap_or_default();
+                    let reason = match &result.outcome {
+                        PromptOutcome::Timeout => "the turn timed out".to_string(),
+                        PromptOutcome::AgentExited => "the agent process exited".to_string(),
+                        PromptOutcome::Error(e) => format!("{e}"),
+                        _ => "repeated failures".to_string(),
+                    };
+                    let content = format!(
+                        "⚠️ I couldn't process the last request after multiple retries ({reason}). Please re-send if it's still needed."
+                    );
+                    let rest = rest.clone();
+                    let channel_id = dead.channel_id;
+                    tokio::spawn(async move {
+                        pool::post_failure_notice(&rest, channel_id, &thread_tags, &content).await;
+                    });
+                }
             }
         } else {
             tracing::debug!(
@@ -2417,7 +2900,9 @@ fn recover_panicked_agent(
     if let Some(batch) = meta.recoverable_batch {
         if let Some(ch) = meta.channel_id {
             if !removed_channels.contains(&ch) {
-                queue.requeue(batch);
+                // Dead-letter on exhaustion is logged inside requeue(); a
+                // panic path has no outcome to report, so no notice here.
+                let _ = queue.requeue(batch);
                 tracing::warn!("requeued batch for panicked agent {i}");
             } else {
                 tracing::debug!(
@@ -2561,6 +3046,7 @@ fn dispatch_heartbeat(
             channel_id: None,
             recoverable_batch: None,
             control_tx: None,
+            steer_tx: None,
         },
     );
     *heartbeat_in_flight = true;
@@ -2643,6 +3129,7 @@ fn spawn_respawn_task(
     true
 }
 
+// ── spawn_and_init ────────────────────────────────────────────────────────────
 /// Spawn an agent subprocess and run the MCP `initialize` handshake.
 ///
 /// Takes owned args so it can run in a background `tokio::spawn` task without
@@ -2653,7 +3140,7 @@ async fn spawn_and_init(
     extra_env: &[(String, String)],
     agent_index: usize,
     observer: Option<observer::ObserverHandle>,
-) -> Result<(AcpClient, u32)> {
+) -> Result<(AcpClient, u32, bool)> {
     let mut acp = AcpClient::spawn(command, args, extra_env)
         .await
         .map_err(|e| anyhow::anyhow!("failed to spawn agent: {e}"))?;
@@ -2670,7 +3157,7 @@ async fn spawn_and_init(
                     "initializeResult": init_result,
                 }),
             );
-            Ok((acp, protocol_version))
+            Ok((acp, protocol_version, true))
         }
         Err(e) => {
             // Explicitly shut down the spawned child to prevent zombie/leak.
@@ -2947,6 +3434,46 @@ mod owner_control_command_tests {
         ));
     }
 
+    #[test]
+    fn mode_gate_signal_maps_handling_to_control_signal() {
+        let owner = "a".repeat(64);
+        let other = "b".repeat(64);
+
+        // Queue: never signals — events wait for the turn to finish.
+        assert!(mode_gate_signal(MultipleEventHandling::Queue, &owner, Some(&owner)).is_none());
+
+        // Steer: always steers (eligibility already enforced upstream).
+        assert!(matches!(
+            mode_gate_signal(MultipleEventHandling::Steer, &other, Some(&owner)),
+            Some(ControlSignal::Steer)
+        ));
+        // Steer even when owner is unknown — gate doesn't re-check authorship.
+        assert!(matches!(
+            mode_gate_signal(MultipleEventHandling::Steer, &other, None),
+            Some(ControlSignal::Steer)
+        ));
+
+        // Interrupt: always interrupts for any eligible author.
+        assert!(matches!(
+            mode_gate_signal(MultipleEventHandling::Interrupt, &other, Some(&owner)),
+            Some(ControlSignal::Interrupt)
+        ));
+
+        // OwnerInterrupt: interrupts only for the owner.
+        assert!(matches!(
+            mode_gate_signal(MultipleEventHandling::OwnerInterrupt, &owner, Some(&owner)),
+            Some(ControlSignal::Interrupt)
+        ));
+        assert!(
+            mode_gate_signal(MultipleEventHandling::OwnerInterrupt, &other, Some(&owner)).is_none(),
+            "owner-interrupt must not fire for a non-owner author"
+        );
+        assert!(
+            mode_gate_signal(MultipleEventHandling::OwnerInterrupt, &owner, None).is_none(),
+            "owner-interrupt must not fire when the owner is unknown"
+        );
+    }
+
     #[tokio::test]
     async fn signal_in_flight_task_sends_rotate_once() {
         let mut pool = AgentPool::from_slots(vec![]);
@@ -2962,6 +3489,7 @@ mod owner_control_command_tests {
                 channel_id: Some(channel_id),
                 recoverable_batch: None,
                 control_tx: Some(control_tx),
+                steer_tx: None,
             },
         );
 
@@ -3103,6 +3631,44 @@ mod author_gate_tests {
             "the owner must always be accepted under Allowlist"
         );
     }
+
+    // The default `respond-to` is OwnerOnly. Under steering, "an ineligible
+    // author must NOT steer" is enforced *here* — author_allowed drops the
+    // event before it reaches the mode gate — not in the gate itself. These
+    // pin that invariant against the default mode.
+    #[tokio::test]
+    async fn test_owner_only_rejects_stranger_so_no_steer() {
+        let cache = cache_with_sibling();
+        assert!(
+            !author_allowed(
+                &RespondTo::OwnerOnly,
+                &HashSet::new(),
+                STRANGER,
+                &cache,
+                &dummy_rest_client()
+            )
+            .await,
+            "under the default OwnerOnly, a stranger must be dropped — so it can never reach the mode gate to steer"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_owner_only_admits_owner_and_sibling_to_steer() {
+        let cache = cache_with_sibling();
+        for (who, label) in [(OWNER, "owner"), (SIBLING, "sibling")] {
+            assert!(
+                author_allowed(
+                    &RespondTo::OwnerOnly,
+                    &HashSet::new(),
+                    who,
+                    &cache,
+                    &dummy_rest_client()
+                )
+                .await,
+                "under default OwnerOnly, the {label} must be admitted so steering can fire"
+            );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -3241,6 +3807,7 @@ mod build_mcp_servers_tests {
             permission_mode: config::PermissionMode::BypassPermissions,
             respond_to: config::RespondTo::Anyone,
             respond_to_allowlist: std::collections::HashSet::new(),
+            allowed_respond_to: vec![],
             persona_env_vars: vec![],
             relay_observer: false,
             agent_owner: None,
@@ -3399,6 +3966,7 @@ mod error_outcome_emission_tests {
             permission_mode: config::PermissionMode::BypassPermissions,
             respond_to: config::RespondTo::Anyone,
             respond_to_allowlist: HashSet::new(),
+            allowed_respond_to: vec![],
             persona_env_vars: vec![],
             relay_observer: false,
             agent_owner: None,
@@ -3419,6 +3987,7 @@ mod error_outcome_emission_tests {
             state: Default::default(),
             model_capabilities: None,
             desired_model: None,
+            model_overridden: false,
             // Error branches under test never read this; 1 is the legacy
             // non-systemPrompt path, the simplest valid value.
             protocol_version: 1,
@@ -3443,6 +4012,7 @@ mod error_outcome_emission_tests {
                 channel_id: None,
                 recoverable_batch: None,
                 control_tx: None,
+                steer_tx: None,
             },
         );
 
@@ -3477,6 +4047,7 @@ mod error_outcome_emission_tests {
             &respawn_tx,
             &mut respawn_tasks,
             Some(observer.clone()),
+            None,
         );
 
         observer

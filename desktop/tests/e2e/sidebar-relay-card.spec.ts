@@ -39,14 +39,34 @@ async function setRelayConnectionState(
   page: Page,
   state: RelayConnectionState,
 ) {
-  await page.waitForFunction(
-    () =>
-      typeof (
-        window as Window & {
-          __BUZZ_E2E_SET_RELAY_CONNECTION_STATE__?: unknown;
-        }
-      ).__BUZZ_E2E_SET_RELAY_CONNECTION_STATE__ === "function",
-  );
+  if (state !== "connected") {
+    // When driving to a degraded state, wait for the relay to reach "connected"
+    // first. Without this guard, the mock relay's async auth handshake (started
+    // on page load) can race the override and set state back to "connected"
+    // after we've driven it to a degraded value.
+    await page.waitForFunction(() => {
+      const win = window as Window & {
+        __BUZZ_E2E_GET_RELAY_CONNECTION_STATE__?: () => string;
+        __BUZZ_E2E_SET_RELAY_CONNECTION_STATE__?: unknown;
+      };
+      return (
+        typeof win.__BUZZ_E2E_SET_RELAY_CONNECTION_STATE__ === "function" &&
+        typeof win.__BUZZ_E2E_GET_RELAY_CONNECTION_STATE__ === "function" &&
+        win.__BUZZ_E2E_GET_RELAY_CONNECTION_STATE__() === "connected"
+      );
+    });
+  } else {
+    // When driving to "connected", just wait for the seam to be installed —
+    // no need to gate on the current state since we're overriding it directly.
+    await page.waitForFunction(
+      () =>
+        typeof (
+          window as Window & {
+            __BUZZ_E2E_SET_RELAY_CONNECTION_STATE__?: unknown;
+          }
+        ).__BUZZ_E2E_SET_RELAY_CONNECTION_STATE__ === "function",
+    );
+  }
   await page.evaluate((nextState) => {
     const testWindow = window as Window & {
       __BUZZ_E2E_SET_RELAY_CONNECTION_STATE__?: (
@@ -80,6 +100,12 @@ test("sidebar generic relay failures use the reconnect card", async ({
 
   await page.goto("/");
 
+  // The card is gated on !isRelayConnectionConnected — a stale channelsReadError
+  // alone (with state still "connected") no longer pins the card. Drive the relay
+  // into a disconnected state so the card appears immediately (disconnected is
+  // reported without debounce, unlike the 2-second delay for reconnecting/stalled).
+  await setRelayConnectionState(page, "disconnected");
+
   await expectGenericReconnectCard(page);
 });
 
@@ -90,6 +116,9 @@ test("sidebar proxy sign-in failures use the reconnect card", async ({
 
   await page.goto("/");
 
+  // Drive disconnected so the card appears immediately (connected is now authoritative).
+  await setRelayConnectionState(page, "disconnected");
+
   await expectGenericReconnectCard(page);
 });
 
@@ -97,6 +126,9 @@ test("sidebar access failures use the reconnect card", async ({ page }) => {
   await installMockBridge(page, { channelsReadError: ACCESS_ERROR });
 
   await page.goto("/");
+
+  // Drive disconnected so the card appears immediately (connected is now authoritative).
+  await setRelayConnectionState(page, "disconnected");
 
   await expectGenericReconnectCard(page);
 });
@@ -107,6 +139,9 @@ test("collapsed sidebar relay failures use the connection banner", async ({
   await installMockBridge(page, { channelsReadError: CONNECT_ERROR });
 
   await page.goto("/");
+
+  // Drive degraded state so the card (and subsequently banner) appears.
+  await setRelayConnectionState(page, "disconnected");
 
   await expectGenericReconnectCard(page);
 
@@ -123,6 +158,8 @@ test("collapsed sidebar relay failures use the connection banner", async ({
 
   await setChannelsReadError(page, null);
   await page.getByTestId("connection-banner-reconnect").click();
+  // Drive connected so the banner shows "Connected" and auto-dismisses.
+  await setRelayConnectionState(page, "connected");
   await expect(banner).toBeHidden({ timeout: 10_000 });
 });
 
@@ -157,10 +194,15 @@ test("sidebar reconnect action shows connected before hiding", async ({
 
   await page.goto("/");
 
+  // Drive disconnected state so the card appears immediately.
+  await setRelayConnectionState(page, "disconnected");
+
   const card = await expectGenericReconnectCard(page);
 
   await setChannelsReadError(page, null);
   await page.getByTestId("sidebar-reconnect").click();
+  // Drive connected to simulate the relay recovering after the reconnect action.
+  await setRelayConnectionState(page, "connected");
 
   await expect(card).toContainText("Connected");
   await expect(card).not.toContainText("Click to connect");
@@ -177,9 +219,14 @@ test("sidebar reconnect action suppresses stale refresh errors after success", a
 
   await page.goto("/");
 
+  // Drive disconnected state so the card appears immediately.
+  await setRelayConnectionState(page, "disconnected");
+
   const card = await expectGenericReconnectCard(page);
 
   await page.getByTestId("sidebar-reconnect").click();
+  // Drive connected to simulate the relay recovering after the reconnect action.
+  await setRelayConnectionState(page, "connected");
 
   await page.waitForTimeout(500);
   await expect(card).toBeVisible();
@@ -197,10 +244,15 @@ test("sidebar connected success clears when relay degrades again", async ({
 
   await page.goto("/");
 
+  // Drive disconnected state so the card appears immediately.
+  await setRelayConnectionState(page, "disconnected");
+
   const card = await expectGenericReconnectCard(page);
 
   await setChannelsReadError(page, null);
   await page.getByTestId("sidebar-reconnect").click();
+  // Drive connected to simulate the relay recovering after the reconnect action.
+  await setRelayConnectionState(page, "connected");
 
   await expect(card).toContainText("Connected");
 

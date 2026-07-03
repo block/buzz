@@ -17,7 +17,10 @@ use tauri::State;
 use crate::{
     app_state::AppState,
     events,
-    relay::{query_relay, submit_event, SubmitEventResponse},
+    relay::{
+        classify_request_error, query_relay, relay_http_base_url, relay_ws_url_with_override,
+        submit_event, SubmitEventResponse,
+    },
 };
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -218,38 +221,45 @@ pub struct ArchivedIdentitiesSnapshot {
     pub archived: Vec<String>,
 }
 
-/// Read the relay's latest `kind:13535` archive snapshot. The frontend caches
-/// this and tests membership client-side to drive the "Archived" flair.
-///
-/// Per spec §Snapshot and Delta Consistency: the latest valid `kind:13535`
-/// signed by the relay identity is authoritative.
-///
-/// NIP-IA §Client Behavior says clients MUST verify the snapshot is signed by
-/// the relay's NIP-11 `self` key. We do not yet filter by that key here: the
-/// desktop only ever talks to its own configured relay, where server-side
-/// enforcement makes archive state trustworthy, and we have no NIP-11 `self`
-/// fetch wired up (the sibling relay-signed kind:13534 membership list is
-/// consumed the same way). Author-filtering against NIP-11 `self` is the
-/// correct hardening for an untrusted/multi-relay client and is tracked as a
-/// follow-up — not a runtime gap on Buzz's relay.
-#[tauri::command]
-pub async fn list_archived_identities(
-    state: State<'_, AppState>,
-) -> Result<ArchivedIdentitiesSnapshot, String> {
-    let events = query_relay(
-        &state,
-        &[serde_json::json!({
-            "kinds": [13535],
-            "limit": 1,
-        })],
-    )
-    .await?;
+#[derive(Debug, Deserialize)]
+struct RelayInformationDocument {
+    #[serde(default, rename = "self")]
+    self_: Option<String>,
+}
 
-    let Some(snapshot) = events.into_iter().next() else {
-        return Ok(ArchivedIdentitiesSnapshot { archived: vec![] });
+async fn fetch_relay_self(state: &AppState) -> Result<Option<String>, String> {
+    let relay_url = relay_ws_url_with_override(state);
+    let http_url = relay_http_base_url(&relay_url);
+    let response = state
+        .http_client
+        .get(&http_url)
+        .header("Accept", "application/nostr+json")
+        .send()
+        .await
+        .map_err(|e| classify_request_error(&e))?;
+
+    if !response.status().is_success() {
+        return Ok(None);
+    }
+
+    let doc = response
+        .json::<RelayInformationDocument>()
+        .await
+        .map_err(|_| "relay returned malformed NIP-11 document".to_string())?;
+
+    let Some(relay_self) = doc.self_.map(|value| value.to_ascii_lowercase()) else {
+        return Ok(None);
     };
 
-    let archived = snapshot
+    if relay_self.len() == 64 && relay_self.chars().all(|c| c.is_ascii_hexdigit()) {
+        Ok(Some(relay_self))
+    } else {
+        Ok(None)
+    }
+}
+
+fn archived_pubkeys_from_snapshot(snapshot: &nostr::Event) -> Vec<String> {
+    snapshot
         .tags
         .iter()
         .filter_map(|t| {
@@ -262,9 +272,50 @@ pub async fn list_archived_identities(
             }
             None
         })
-        .collect();
+        .collect()
+}
 
-    Ok(ArchivedIdentitiesSnapshot { archived })
+/// Read the relay's latest valid `kind:13535` archive snapshot. The frontend
+/// caches this and tests membership client-side to drive the "Archived" flair.
+///
+/// Per NIP-IA §Client Behavior and §Snapshot and Delta Consistency, only a
+/// snapshot signed by the relay identity advertised in NIP-11 `self` can affect
+/// archive state. If the relay has no stable `self`, fail open with an empty
+/// snapshot rather than trusting unauthenticated relay-authoritative state.
+#[tauri::command]
+pub async fn list_archived_identities(
+    state: State<'_, AppState>,
+) -> Result<ArchivedIdentitiesSnapshot, String> {
+    let Some(relay_self) = fetch_relay_self(&state).await? else {
+        return Ok(ArchivedIdentitiesSnapshot { archived: vec![] });
+    };
+
+    let events = query_relay(
+        &state,
+        &[serde_json::json!({
+            "authors": [relay_self.clone()],
+            "kinds": [13535],
+            "limit": 1,
+        })],
+    )
+    .await?;
+
+    let Some(snapshot) = events.into_iter().next() else {
+        return Ok(ArchivedIdentitiesSnapshot { archived: vec![] });
+    };
+
+    // Defense-in-depth: the filter should already restrict author, but the
+    // client must still reject malformed or wrongly signed relay state.
+    if !snapshot.verify_id() || !snapshot.verify_signature() {
+        return Ok(ArchivedIdentitiesSnapshot { archived: vec![] });
+    }
+    if !snapshot.pubkey.to_hex().eq_ignore_ascii_case(&relay_self) {
+        return Ok(ArchivedIdentitiesSnapshot { archived: vec![] });
+    }
+
+    Ok(ArchivedIdentitiesSnapshot {
+        archived: archived_pubkeys_from_snapshot(&snapshot),
+    })
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────────
@@ -315,6 +366,38 @@ mod tests {
             .sign_with_keys(&agent)
             .unwrap();
         assert!(extract_oa_owner(&kind0).is_none());
+    }
+
+    #[test]
+    fn archived_pubkeys_from_snapshot_accepts_only_valid_p_tags() {
+        let relay = Keys::generate();
+        let valid = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let uppercase = "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB";
+        let snapshot = EventBuilder::new(Kind::Custom(13535), "")
+            .tags([
+                Tag::parse(["-"]).unwrap(),
+                Tag::parse(["p", valid]).unwrap(),
+                Tag::parse(["p", uppercase]).unwrap(),
+                Tag::parse(["p", "not-hex"]).unwrap(),
+            ])
+            .sign_with_keys(&relay)
+            .unwrap();
+
+        let expected = vec![valid.to_string(), uppercase.to_ascii_lowercase()];
+        assert_eq!(archived_pubkeys_from_snapshot(&snapshot), expected);
+    }
+
+    #[test]
+    fn relay_information_document_reads_nip11_self_field() {
+        let doc: RelayInformationDocument = serde_json::from_str(
+            r#"{"name":"test relay","self":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#,
+        )
+        .expect("NIP-11 document");
+
+        assert_eq!(
+            doc.self_.as_deref(),
+            Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+        );
     }
 
     /// Spec test-vector regression for gotcha #3: the NIP-OA preimage subject

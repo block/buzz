@@ -1,5 +1,6 @@
 import { type Virtualizer, useVirtualizer } from "@tanstack/react-virtual";
 import * as React from "react";
+import { createPortal } from "react-dom";
 
 import { cn } from "@/shared/lib/cn";
 
@@ -16,8 +17,15 @@ export type ListVirtualizer = Virtualizer<HTMLElement, Element>;
  *   dynamic sizing automatically.
  *
  * Supports:
- * (a) Optional non-virtualized sticky-header slot rendered above the virtual
- *     rows inside the scroll container (for PulseView's sticky composer, etc).
+ * (a) Optional floating header fed the topmost visible row index. It is
+ *     portaled into a caller-owned container OUTSIDE the scroll element
+ *     (`headerOverlayRef`) so it pins to a fixed viewport offset regardless of
+ *     scroll position — a `position: sticky` header inside the scroll element
+ *     drifts at scrollTop 0, where it reveals its natural flow offset instead
+ *     of the pinned offset. The render fn still re-runs with the virtualizer on
+ *     every scroll (the absolutely-positioned rows cannot stay `position:
+ *     sticky` once they leave the virtual window), but the re-render stays
+ *     localized here rather than forcing the caller to re-render per scroll.
  * (b) Optional externally-owned scroll container — pass `scrollRef` when the
  *     caller already owns the scrolling element (a surface that shares its
  *     scroll region with non-row siblings). When omitted, VirtualizedList
@@ -32,8 +40,20 @@ type VirtualizedListProps<T> = {
   renderItem: (item: T, index: number) => React.ReactNode;
   /** Estimated row height in px — used before measurement. */
   estimateSize?: number;
-  /** Optional non-virtualized content rendered above the virtual rows (sticky headers, etc). */
-  stickyHeader?: React.ReactNode;
+  /**
+   * Optional floating header rendered with the index of the topmost visible
+   * row (so it can label what's on screen). When `headerOverlayRef` points at a
+   * mounted element, the result is portaled there — a non-scrolling container
+   * outside the scroll element — so it pins to a fixed offset and cannot drift
+   * with scroll position. `null` before the first row is in view.
+   */
+  stickyHeader?: (topVisibleIndex: number | null) => React.ReactNode;
+  /**
+   * Portal target for `stickyHeader`. Must sit OUTSIDE the scroll element (a
+   * `position: sticky` header inside it drifts at scrollTop 0). The header is
+   * portaled here only once the ref attaches.
+   */
+  headerOverlayRef?: React.RefObject<HTMLElement | null>;
   /**
    * Externally-owned scroll container. When provided, no internal scroll
    * container is rendered — the caller's element scrolls and is measured.
@@ -55,6 +75,7 @@ export function VirtualizedList<T>({
   renderItem,
   estimateSize = 80,
   stickyHeader,
+  headerOverlayRef,
   scrollRef,
   className,
   innerClassName,
@@ -100,19 +121,37 @@ export function VirtualizedList<T>({
     scrollMargin,
   });
 
-  React.useEffect(() => {
+  // Register in a layout effect, not a passive one: when this list remounts on
+  // channel switch the parent's mount-pin runs in a layout effect on the same
+  // commit, and child layout effects fire before parent layout effects. A
+  // passive effect would publish the fresh virtualizer too late and the parent
+  // would pin against the previous channel's stale instance.
+  React.useLayoutEffect(() => {
     onVirtualizer?.(virtualizer);
   }, [onVirtualizer, virtualizer]);
 
+  const virtualItems = virtualizer.getVirtualItems();
+
+  // The header portals into `headerOverlayRef`, which the parent mounts before
+  // this child — so it is populated on first commit. The dependency-free state
+  // flip re-renders once after mount to cover the rare case where the parent
+  // attaches the ref in the same commit as our first paint.
+  const [headerHost, setHeaderHost] = React.useState<HTMLElement | null>(null);
+  React.useEffect(() => {
+    setHeaderHost(headerOverlayRef?.current ?? null);
+  }, [headerOverlayRef]);
+
+  const header = stickyHeader?.(virtualItems[0]?.index ?? null);
+
   const content = (
     <>
-      {stickyHeader}
+      {headerHost && header ? createPortal(header, headerHost) : null}
       <div
         className={cn("relative w-full", innerClassName)}
         ref={spacerRef}
         style={{ height: `${virtualizer.getTotalSize()}px` }}
       >
-        {virtualizer.getVirtualItems().map((virtualRow) => (
+        {virtualItems.map((virtualRow) => (
           <div
             data-index={virtualRow.index}
             key={virtualRow.key}

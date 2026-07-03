@@ -3,7 +3,14 @@ import { request } from "@playwright/test";
 const tylerPubkey =
   "e5ebc6cdb579be112e336cc319b5989b4bb6af11786ea90dbe52b5f08d741b34";
 const isCi = Boolean(process.env.CI);
-const relayBaseUrl = process.env.BUZZ_E2E_RELAY_URL ?? "http://127.0.0.1:3000";
+// Multi-tenant: the relay resolves each request's tenant from its Host header
+// against the communities host map and fails closed (404) on an unmapped host.
+// The seed maps host 'localhost:3000' (matching the relay's RELAY_URL) — and
+// `localhost` != `127.0.0.1` to normalize_host — so this readiness check must
+// hit `localhost:3000`, not `127.0.0.1:3000`, or every /query 404s. This also
+// matches the rest of the desktop e2e suite (e2eBridge.ts / bridge.ts), which
+// already default to localhost.
+const relayBaseUrl = process.env.BUZZ_E2E_RELAY_URL ?? "http://localhost:3000";
 const seedTimeoutMs = Number.parseInt(
   process.env.BUZZ_E2E_SEED_TIMEOUT_MS ?? (isCi ? "60000" : "25000"),
   10,

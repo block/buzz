@@ -16,8 +16,12 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 
 const REACTION_PILL_BASE_CLASSES =
-  "inline-flex h-8 items-center rounded-full border text-xs font-medium leading-none transition-colors";
-const REACTION_GLYPH_CLASSES = "h-3.5 w-3.5 translate-y-px text-sm";
+  "inline-flex h-7 items-center rounded-full border text-xs font-medium leading-none transition-colors";
+const REACTION_CUSTOM_GLYPH_CLASSES = "h-3.5 w-3.5 -translate-y-[0.5px]";
+const REACTION_NATIVE_GLYPH_CLASSES = "h-3 w-3 text-xs";
+const REACTION_COUNT_CLASSES = "text-muted-foreground";
+const REACTION_NATIVE_COUNT_CLASSES =
+  "text-muted-foreground translate-y-[0.5px]";
 const REACTION_PILL_HOVER_CLASSES =
   "hover:bg-primary/10 hover:text-foreground focus-visible:bg-primary/10 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring";
 const BADGE_BURST_STABLE_FRAMES = 2;
@@ -436,9 +440,20 @@ function ReactionPill({
         ref={setPillRef}
         type="button"
       >
-        <EmojiGlyph reaction={reaction} className={REACTION_GLYPH_CLASSES} />
+        <EmojiGlyph
+          reaction={reaction}
+          className={
+            reaction.emojiUrl
+              ? REACTION_CUSTOM_GLYPH_CLASSES
+              : REACTION_NATIVE_GLYPH_CLASSES
+          }
+        />
         <AnimatedCount
-          className="text-muted-foreground"
+          className={
+            reaction.emojiUrl
+              ? REACTION_COUNT_CLASSES
+              : REACTION_NATIVE_COUNT_CLASSES
+          }
           value={reaction.count}
         />
       </button>
@@ -468,10 +483,18 @@ function ReactionPill({
           >
             <EmojiGlyph
               reaction={reaction}
-              className={REACTION_GLYPH_CLASSES}
+              className={
+                reaction.emojiUrl
+                  ? REACTION_CUSTOM_GLYPH_CLASSES
+                  : REACTION_NATIVE_GLYPH_CLASSES
+              }
             />
             <AnimatedCount
-              className="text-muted-foreground"
+              className={
+                reaction.emojiUrl
+                  ? REACTION_COUNT_CLASSES
+                  : REACTION_NATIVE_COUNT_CLASSES
+              }
               value={reaction.count}
             />
           </button>

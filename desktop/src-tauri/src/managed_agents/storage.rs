@@ -254,6 +254,11 @@ fn persist_agent_keys(records: &mut [ManagedAgentRecord]) {
         // No keyring backend: keys stay inline.
         return;
     };
+    persist_agent_keys_with(store, records);
+}
+
+/// Testable core of [`persist_agent_keys`], generic over the [`KeyStore`] seam.
+fn persist_agent_keys_with(store: &impl KeyStore, records: &mut [ManagedAgentRecord]) {
     for record in records.iter_mut() {
         // Only a verified keyring entry lets us drop the inline copy. Both
         // other outcomes keep the key inline: `KeptInline` (keyring
@@ -464,8 +469,8 @@ mod tests {
     use tempfile::NamedTempFile;
 
     use super::{
-        agent_keyring_name, hydrate_keys_with, migrate_inline_key, KeyMigration, KeyStore,
-        KeyringProbe, ManagedAgentRecord,
+        agent_keyring_name, hydrate_keys_with, migrate_inline_key, persist_agent_keys_with,
+        KeyMigration, KeyStore, KeyringProbe, ManagedAgentRecord,
     };
 
     /// In-memory [`KeyStore`] for testing the migrate decision without the OS
@@ -475,6 +480,7 @@ mod tests {
         reachable: bool,
         fail_verify: bool,
         stored: RefCell<HashMap<String, String>>,
+        write_count: RefCell<usize>,
     }
 
     impl FakeKeyStore {
@@ -483,6 +489,7 @@ mod tests {
                 reachable: true,
                 fail_verify: false,
                 stored: RefCell::new(HashMap::new()),
+                write_count: RefCell::new(0),
             }
         }
         fn unreachable() -> Self {
@@ -490,6 +497,7 @@ mod tests {
                 reachable: false,
                 fail_verify: false,
                 stored: RefCell::new(HashMap::new()),
+                write_count: RefCell::new(0),
             }
         }
         fn verify_fails() -> Self {
@@ -497,6 +505,7 @@ mod tests {
                 reachable: true,
                 fail_verify: true,
                 stored: RefCell::new(HashMap::new()),
+                write_count: RefCell::new(0),
             }
         }
         /// Seed a key as already present in the keyring.
@@ -528,6 +537,7 @@ mod tests {
             if self.fail_verify {
                 return Err("read-back verify failed".to_string());
             }
+            *self.write_count.borrow_mut() += 1;
             self.stored
                 .borrow_mut()
                 .insert(name.to_string(), value.to_string());
@@ -536,9 +546,13 @@ mod tests {
     }
 
     fn record_with_key(nsec: &str) -> ManagedAgentRecord {
+        record_with_pubkey_and_key("agent-pubkey", nsec)
+    }
+
+    fn record_with_pubkey_and_key(pubkey: &str, nsec: &str) -> ManagedAgentRecord {
         serde_json::from_str(&format!(
             r#"{{
-                "pubkey": "agent-pubkey",
+                "pubkey": "{pubkey}",
                 "name": "test-agent",
                 "private_key_nsec": "{nsec}",
                 "relay_url": "wss://localhost:3000",
@@ -660,6 +674,68 @@ mod tests {
         // A record carrying a key must not be blocked by the refusal guard.
         let record = record_with_key("nsec1realkey");
         assert!(super::spawn_key_refusal(&record).is_none());
+    }
+
+    #[test]
+    fn persist_agent_keys_issues_zero_writes_when_inline_keys_already_cleared() {
+        // This is the dominant prompt-storm scenario: after the first successful
+        // persist all inline copies are cleared, so subsequent saves (e.g. a
+        // model change) must issue zero keychain writes. `migrate_inline_key`
+        // returns `Nothing` for empty-key records, and `persist_agent_keys_with`
+        // must propagate that guarantee — write_count stays at 0.
+        let store = FakeKeyStore::reachable();
+        // Records whose inline key is already blank (key lives in the keyring).
+        let mut records = vec![record_with_key(""), record_with_key("")];
+
+        persist_agent_keys_with(&store, &mut records);
+
+        assert_eq!(
+            *store.write_count.borrow(),
+            0,
+            "a save with no inline keys must issue zero keychain writes"
+        );
+    }
+
+    #[test]
+    fn persist_agent_keys_writes_once_per_record_with_inline_key() {
+        // A record carrying an inline key (e.g. first save, or keyring-outage
+        // residue) must trigger exactly one write_and_verify per record — and
+        // once persisted the inline copy is cleared so the next save is free.
+        // Records use distinct pubkeys so each maps to a distinct keyring name,
+        // verifying the "per record" behaviour rather than a single-key overwrite.
+        let store = FakeKeyStore::reachable();
+        let mut records = vec![
+            record_with_pubkey_and_key("pubkey-agent-alpha", "nsec1key_a"),
+            record_with_pubkey_and_key("pubkey-agent-beta", "nsec1key_b"),
+        ];
+
+        persist_agent_keys_with(&store, &mut records);
+
+        assert_eq!(
+            *store.write_count.borrow(),
+            2,
+            "each record with an inline key must trigger exactly one write"
+        );
+        // Verify the correct keyring name was used for each agent.
+        assert_eq!(
+            store
+                .stored
+                .borrow()
+                .get(&agent_keyring_name("pubkey-agent-alpha"))
+                .map(String::as_str),
+            Some("nsec1key_a"),
+        );
+        assert_eq!(
+            store
+                .stored
+                .borrow()
+                .get(&agent_keyring_name("pubkey-agent-beta"))
+                .map(String::as_str),
+            Some("nsec1key_b"),
+        );
+        // After persist the inline copies are cleared — next save is zero-write.
+        assert!(records[0].private_key_nsec.is_empty());
+        assert!(records[1].private_key_nsec.is_empty());
     }
 
     fn write_log(content: &str) -> NamedTempFile {

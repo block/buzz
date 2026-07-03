@@ -1,5 +1,6 @@
 import type { ParsedPersonaPreview } from "@/shared/api/tauriPersonas";
 import type { AgentPersona } from "@/shared/api/types";
+import { importedAvatarUrl } from "./personaDialogState";
 
 type LineChangeCounts = {
   addedLines: number;
@@ -124,8 +125,12 @@ export function buildPersonaImportPlan({
   }
 
   const existingAvatar = normalizeOptionalText(persona.avatarUrl);
-  const importedAvatar = normalizeOptionalText(preview.avatarDataUrl);
-  if (existingAvatar !== importedAvatar) {
+  const importedAvatar = normalizeOptionalText(importedAvatarUrl(preview));
+  const hasUnusableAvatarRef =
+    !preview.avatarDataUrl &&
+    Boolean(preview.avatarRef?.trim()) &&
+    !importedAvatar;
+  if (!hasUnusableAvatarRef && existingAvatar !== importedAvatar) {
     fields.push({
       field: "avatarUrl",
       label: "Avatar",
@@ -171,6 +176,18 @@ export function buildPersonaImportPlan({
       existingValue: existingModel,
       importedValue: importedModel,
       ...singleLineChanges(existingModel, importedModel),
+    });
+  }
+
+  const existingProvider = normalizeOptionalText(persona.provider);
+  const importedProvider = normalizeOptionalText(preview.provider);
+  if (existingProvider !== importedProvider) {
+    fields.push({
+      field: "provider",
+      label: "LLM provider",
+      existingValue: existingProvider,
+      importedValue: importedProvider,
+      ...singleLineChanges(existingProvider, importedProvider),
     });
   }
 

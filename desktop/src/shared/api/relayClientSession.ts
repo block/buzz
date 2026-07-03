@@ -34,6 +34,7 @@ import {
   shouldScheduleReconnect,
 } from "@/shared/api/relayReconnectPolicy";
 import { RelayStallWatchdog } from "@/shared/api/relayStallWatchdog";
+import { closeWebSocket } from "@/shared/api/relayWebSocketClose";
 import { buildThreadReferenceTags } from "@/features/messages/lib/threading";
 
 const RECONNECT_BASE_DELAY_MS = 1_000,
@@ -114,9 +115,7 @@ export class RelayClient {
     this.connectionStateEmitter.set("idle");
 
     if (this.wsId !== null) {
-      void invoke("plugin:websocket|disconnect", { id: this.wsId }).catch(
-        () => {},
-      );
+      void closeWebSocket(this.wsId, "workspace switch");
       this.wsId = null;
     }
 
@@ -981,11 +980,7 @@ export class RelayClient {
     }
 
     if (this.wsId !== null) {
-      void invoke("plugin:websocket|disconnect", { id: this.wsId }).catch(
-        (err) => {
-          console.warn("[RelayClientSession] disconnect failed:", err);
-        },
-      );
+      void closeWebSocket(this.wsId, "connection reset");
     }
 
     this.wsId = null;

@@ -110,6 +110,29 @@ pub const KIND_EVENT_REMINDER: u32 = 30300;
 /// a compile-time bitset or sorted array with binary search for hot-path use.
 pub const AUTHOR_ONLY_KINDS: &[u32] = &[KIND_EVENT_REMINDER];
 
+/// Kinds whose stored events have `#p`-bound read access — readable only by
+/// subscribers whose pubkey appears in the event's `#p` tag.
+///
+/// The relay enforces this at the filter layer (`p_gated_filters_authorized`):
+/// a REQ that can match any kind in this set is closed unless the filter's
+/// `#p` values exactly equal the authenticated reader's pubkey. For stored
+/// (non-ephemeral) kinds in this set, the storage layer additionally writes a
+/// NULL `search_tsv` so the event is unsearchable through NIP-50 FTS
+/// (`schema/schema.sql` and `migrations/0001_initial_schema.sql` — drift
+/// caught by `p_gated_persistent_kinds_have_storage_null_tsvector` in
+/// `crates/buzz-search/tests/fts_integration.rs`).
+///
+/// Ephemeral kinds (20000–29999, e.g. [`KIND_AGENT_OBSERVER_FRAME`]) are
+/// included for filter-layer enforcement but are never stored, so the
+/// storage-layer search defense does not apply to them.
+pub const P_GATED_KINDS: &[u32] = &[
+    KIND_AGENT_OBSERVER_FRAME,
+    KIND_MEMBER_ADDED_NOTIFICATION,
+    KIND_MEMBER_REMOVED_NOTIFICATION,
+    KIND_GIFT_WRAP,
+    KIND_DM_VISIBILITY,
+];
+
 /// NIP-AP: Agent Persona (parameterized replaceable, owner-authored).
 ///
 /// Persona definition event published by the workspace owner. Addressed by
@@ -164,6 +187,8 @@ pub const RELAY_ADMIN_ADD_MEMBER: u32 = 9030;
 pub const RELAY_ADMIN_REMOVE_MEMBER: u32 = 9031;
 /// NIP-43: Change the role of an existing relay member.
 pub const RELAY_ADMIN_CHANGE_ROLE: u32 = 9032;
+/// Buzz: Set the workspace profile (icon). Admin/owner-signed command.
+pub const RELAY_ADMIN_SET_WORKSPACE_PROFILE: u32 = 9033;
 // NIP-43 relay membership announcement events (relay-signed)
 /// NIP-43: Relay membership list snapshot (relay-signed, replaceable by convention).
 pub const KIND_NIP43_MEMBERSHIP_LIST: u32 = 13534;
@@ -432,6 +457,7 @@ pub const ALL_KINDS: &[u32] = &[
     RELAY_ADMIN_ADD_MEMBER,
     RELAY_ADMIN_REMOVE_MEMBER,
     RELAY_ADMIN_CHANGE_ROLE,
+    RELAY_ADMIN_SET_WORKSPACE_PROFILE,
     KIND_NIP43_MEMBERSHIP_LIST,
     KIND_NIP43_MEMBER_ADDED,
     KIND_NIP43_MEMBER_REMOVED,
@@ -545,11 +571,15 @@ pub const fn is_workflow_execution_kind(kind: u32) -> bool {
     kind >= KIND_WORKFLOW_TRIGGERED && kind <= KIND_WORKFLOW_APPROVAL_DENIED
 }
 
-/// Returns `true` if `kind` is a NIP-43 relay membership admin command (9030–9032).
+/// Returns `true` if `kind` is a NIP-43 relay membership admin command (9030–9032)
+/// or the Buzz workspace-profile admin command (9033).
 pub const fn is_relay_admin_kind(kind: u32) -> bool {
     matches!(
         kind,
-        RELAY_ADMIN_ADD_MEMBER | RELAY_ADMIN_REMOVE_MEMBER | RELAY_ADMIN_CHANGE_ROLE
+        RELAY_ADMIN_ADD_MEMBER
+            | RELAY_ADMIN_REMOVE_MEMBER
+            | RELAY_ADMIN_CHANGE_ROLE
+            | RELAY_ADMIN_SET_WORKSPACE_PROFILE
     )
 }
 

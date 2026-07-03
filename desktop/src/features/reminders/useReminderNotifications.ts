@@ -13,6 +13,11 @@ import {
 } from "@/features/notifications/lib/desktop";
 import type { NotificationSettings } from "@/features/notifications/hooks";
 import {
+  formatNotificationTitle,
+  resolveNotificationChannelLabel,
+  truncateNotificationBody,
+} from "@/features/notifications/lib/notificationFormat";
+import {
   playNotificationSound,
   resolveSlotSound,
 } from "@/features/notifications/lib/sound";
@@ -53,6 +58,7 @@ function readWatermark(pubkey: string): number {
 export function useReminderNotifications(
   pubkey: string | undefined,
   settings: NotificationSettings,
+  channels: ReadonlyArray<{ id: string; name?: string | null }>,
 ): void {
   const reminders = useRemindersQuery(pubkey).data;
   const queryClient = useQueryClient();
@@ -60,6 +66,8 @@ export function useReminderNotifications(
   remindersRef.current = reminders ?? [];
   const settingsRef = React.useRef(settings);
   settingsRef.current = settings;
+  const channelsRef = React.useRef(channels);
+  channelsRef.current = channels;
 
   // Track whether the query has resolved at least once. On mount,
   // useRemindersQuery is still loading (data === undefined), so
@@ -78,15 +86,27 @@ export function useReminderNotifications(
       return;
     }
 
+    // For a single reminder, try to resolve the channel name from its target.
+    // Multiple reminders may span different channels, so we omit channel context
+    // in that case and let the body count speak for itself.
+    const channelLabel =
+      due.length === 1
+        ? resolveNotificationChannelLabel(
+            due[0].content.target?.channelId ?? null,
+            channelsRef.current,
+          )
+        : null;
+
     const body =
       due.length === 1
-        ? (due[0].content.target?.preview ??
-          due[0].content.note ??
-          "A reminder is waiting")
+        ? truncateNotificationBody(
+            due[0].content.target?.preview ?? due[0].content.note ?? "",
+            "A reminder is waiting",
+          )
         : `${due.length} reminders are due`;
 
     void sendDesktopNotification({
-      title: "Reminder due",
+      title: formatNotificationTitle({ prefix: "Reminder due", channelLabel }),
       body,
     }).then((didSend) => {
       if (!didSend) return;

@@ -12,6 +12,17 @@ export function isMacPlatform(): boolean {
   return /mac|iphone|ipad|ipod/i.test(navigator.platform);
 }
 
+/** Returns true on Linux desktops (excludes Android). */
+export function isLinuxPlatform(): boolean {
+  if (typeof navigator === "undefined") {
+    return false;
+  }
+
+  return (
+    /linux/i.test(navigator.platform) && !/android/i.test(navigator.userAgent)
+  );
+}
+
 /**
  * The platform's normal application-shortcut modifier:
  * - macOS: Command (Meta)

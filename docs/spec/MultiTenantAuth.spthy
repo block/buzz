@@ -1,0 +1,748 @@
+theory MultiTenantAuth
+begin
+
+builtins: signing, hashing
+
+// ============================================================================
+// Multi-tenant relay auth/key/audit model (draft skeleton)
+// ============================================================================
+//
+// This model covers the symbolic security surface for the multi-tenant relay:
+// NIP-98 minting, stamped bearer-token use, per-community signing keys, and
+// independent per-community audit chains. It intentionally follows the house
+// style of crates/buzz-core/src/pairing/NIP-AB.spthy: explicit adversary/leak
+// rules, action facts for theorem statements, and reachability / anti-vacuity
+// lemmas near the bottom.
+//
+// Final theorem wording is expected to be tightened by the prose contract in
+// docs/multi-tenant-relay.md. Until then these lemmas are the intended shape,
+// not the final public statement.
+
+// Tamarin has no primitive != in lemma conclusions; model inequality through an
+// action fact guarded by a global restriction. Rules emit Neq(x,y) only at the
+// comparison point relevant to the counterexample.
+restriction Inequality:
+  "All x #i. Neq(x, x) @ i ==> F"
+
+restriction Equality:
+  "All x y #i. Eq(x, y) @ i ==> x = y"
+
+// ============================================================================
+// Setup: communities, channels, clients
+// ============================================================================
+
+rule Create_Community:
+  [ Fr(~comm), Fr(~sk_comm) ]
+  --[
+      CommunityCreated(~comm, pk(~sk_comm))
+    ]->
+  [
+      !Community(~comm),
+      !CommunitySigningKey(~comm, ~sk_comm),
+      AuditHead(~comm, 'genesis')
+  ]
+
+rule Register_Channel:
+  [ !Community(comm), Fr(~chan) ]
+  --[
+      ChannelRegistered(~chan, comm)
+    ]->
+  [
+      !ChannelCommunity(~chan, comm),
+      Out(~chan)
+  ]
+
+rule Register_Client:
+  [ Fr(~sk_client) ]
+  --[
+      ClientRegistered(pk(~sk_client))
+    ]->
+  [
+      !ClientPublic(pk(~sk_client)),
+      !ClientSecret(pk(~sk_client), ~sk_client),
+      Out(pk(~sk_client))
+  ]
+
+rule Compromise_Client_Key:
+  [ !ClientSecret(client, sk) ]
+  --[
+      ClientKeyCompromised(client)
+    ]->
+  [ Out(sk) ]
+
+// ============================================================================
+// NIP-98 minting
+// ============================================================================
+
+// A single wire constructor models all mint requests. The requested channel set
+// is bounded to two slots for model finiteness; a one-channel mint is represented
+// as (chanA = chanB). This avoids proving S2 only for a special "multi" shape:
+// acceptance vs rejection is forced solely by server-side resolution of the
+// requested channels, not by which constructor the client chose.
+//
+// The client signs a kind:27235 event binding URL, method, payload hash,
+// freshness bucket, and the full requested channel set. Freshness is abstracted
+// as a relay-accepted time bucket; exact ±60s wall-clock arithmetic is a prose
+// / implementation axiom under P3.
+rule Client_Sends_NIP98_Mint:
+  [ !ClientSecret(client, sk),
+    !ChannelCommunity(chanA, commA),
+    !ChannelCommunity(chanB, commB),
+    Fr(~url), Fr(~body), Fr(~time) ]
+  --[
+      NIP98MintRequested(h(< client, ~url, h(~body), ~time, chanA, chanB >),
+                         client, chanA, commA, chanB, commB)
+    ]->
+  [
+      Out(
+        < 'nip98_mint',
+          client,
+          ~url,
+          'POST',
+          h(~body),
+          ~time,
+          chanA,
+          chanB,
+          sign(< 'kind27235', client, ~url, 'POST', h(~body), ~time, chanA, chanB >, sk)
+        >
+      )
+  ]
+
+// Successful mint: both requested channels resolve to the same community. The
+// stamped community is a fact on the token term (`!Token(tok, client, comm)`) and
+// each requested channel is recorded as resolving to that stamp.
+rule Relay_Mints_Token_All_Channels_Same_Community:
+  [ In(
+      < 'nip98_mint',
+        client,
+        url,
+        'POST',
+        payload_hash,
+        time,
+        chanA,
+        chanB,
+        sig
+      >
+    ),
+    !ClientPublic(client),
+    !ChannelCommunity(chanA, comm),
+    !ChannelCommunity(chanB, comm),
+    Fr(~tok)
+  ]
+  --[
+      Eq(verify(sig, < 'kind27235', client, url, 'POST', payload_hash, time, chanA, chanB >, client), true),
+      AllResolveSame(h(< client, url, payload_hash, time, chanA, chanB >), comm, chanA, chanB),
+      NIP98Accepted(h(< client, url, payload_hash, time, chanA, chanB >), client, comm, chanA),
+      NIP98Accepted(h(< client, url, payload_hash, time, chanA, chanB >), client, comm, chanB),
+      TokenMinted(~tok, client, comm),
+      TokenMintedForRequest(~tok, h(< client, url, payload_hash, time, chanA, chanB >), client, comm),
+      TokenStamped(~tok, comm),
+      MintChannel(~tok, chanA, comm),
+      MintChannel(~tok, chanB, comm),
+      RequestChannel(h(< client, url, payload_hash, time, chanA, chanB >), chanA, comm),
+      RequestChannel(h(< client, url, payload_hash, time, chanA, chanB >), chanB, comm)
+    ]->
+  [
+      !Token(~tok, client, comm),
+      Out(~tok)
+  ]
+
+// Failed mint: the same wire constructor, same signed shape, but the server-side
+// resolver finds two different communities. This emits a rejection witness and
+// produces no token. S2 is therefore about resolution, not about the client
+// selecting a special "cross-community" event type.
+rule Relay_Rejects_Mint_Channels_Resolve_Differently:
+  [ In(
+      < 'nip98_mint',
+        client,
+        url,
+        'POST',
+        payload_hash,
+        time,
+        chanA,
+        chanB,
+        sig
+      >
+    ),
+    !ClientPublic(client),
+    !ChannelCommunity(chanA, commA),
+    !ChannelCommunity(chanB, commB)
+  ]
+  --[
+      Eq(verify(sig, < 'kind27235', client, url, 'POST', payload_hash, time, chanA, chanB >, client), true),
+      Neq(commA, commB),
+      ChannelsResolveDifferently(h(< client, url, payload_hash, time, chanA, chanB >), commA, commB, chanA, chanB),
+      CrossCommunityMintRejected(h(< client, url, payload_hash, time, chanA, chanB >), client, commA, commB, chanA, chanB)
+    ]->
+  [ ]
+
+rule Leak_Token:
+  [ !Token(tok, client, comm) ]
+  --[
+      TokenLeaked(tok, client, comm)
+    ]->
+  [ Out(tok) ]
+
+// ============================================================================
+// Token use
+// ============================================================================
+
+// Token use resolves the target community server-side from the requested channel.
+// There is intentionally no client-supplied community or h-tag in this rule.
+// The connection's HOST is *also* authoritative: the rule only fires when the
+// host's bound community equals the channel's resolved community, so an A-host
+// presenting a B-channel-bearing request cannot authorize (the confused-deputy
+// fence on the host axis, mirroring the channel-less case). The combined witness
+// ChannelBearingResolved(tok, used_comm, host, host_comm) is emitted by this SAME
+// rule firing so the agreement lemma is a single-fact assertion -- no second-fact
+// lookup, so the M8 mutation falsifies in one rule instance.
+rule Use_Token:
+  [ In(tok), !Token(tok, client, comm), !ChannelCommunity(chan, comm),
+    !HostCommunity(host, comm) ]
+  --[
+      ActionAuthorized(tok, client, comm, chan),
+      HostBoundFor(host, comm),
+      ChannelBearingResolved(tok, comm, host, comm),
+      TokenUsedForCommunity(tok, comm)
+    ]->
+  [ ]
+
+// Non-vacuity mutation M8 (DO NOT ENABLE in the real model): the relay authorizes
+// a channel-bearing op from the channel mapping while ignoring the host binding,
+// so an A-host can drive a B-channel op (host/channel disagreement accepted).
+//
+// rule MUTATION_Use_Token_Ignore_Host:
+//   [ In(tok), !Token(tok, client, comm), !ChannelCommunity(chan, comm),
+//     !HostCommunity(host, host_comm) ]
+//   --[
+//       Neq(comm, host_comm),
+//       ActionAuthorized(tok, client, comm, chan),
+//       HostBoundFor(host, host_comm),
+//       ChannelBearingResolved(tok, comm, host, host_comm),
+//       TokenUsedForCommunity(tok, comm)
+//     ]->
+//   [ ]
+//
+// Expected mutation result: `channelbearing_use_agrees_with_host` goes red. The
+// lemma reads a SINGLE ChannelBearingResolved(tok, used, host, host_comm) fact and
+// asserts used = host_comm; the mutation emits used = comm, host_comm under
+// Neq(comm, host_comm), so the counterexample is one rule instance. Confirmed:
+// falsified with a 14-step trace on Tamarin 1.12.0 / Maude 3.5.1.
+
+// Non-vacuity mutation for S1 (DO NOT ENABLE in the real model): this is the
+// tempting confused-deputy bug where the relay authorizes from a client-supplied
+// claimed community / h-tag rather than from `!ChannelCommunity(chan, comm)`.
+//
+// rule MUTATION_Use_Token_Claimed_Community:
+//   [ In(< tok, claimed_comm >), !Token(tok, client, minted_comm) ]
+//   --[
+//       Neq(minted_comm, claimed_comm),
+//       ActionAuthorized(tok, client, claimed_comm, 'attacker-chosen-channel'),
+//       TokenUsedForCommunity(tok, claimed_comm)
+//     ]->
+//   [ ]
+//
+// Expected mutation result: `token_confinement` goes red with a trace containing
+// TokenMinted(tok, client, minted_comm) and ActionAuthorized(..., claimed_comm,
+// ...) under Neq(minted_comm, claimed_comm). Confirmed by uncommenting this
+// rule and running `tamarin-prover --prove=token_confinement`: falsified with a
+// 15-step trace on Tamarin 1.12.0 / Maude 3.5.1.
+
+// Probe rule: the adversary can try to use a token against a channel in another
+// community; the real model records the attempt but does not authorize it.
+rule Probe_Cross_Community_Token_Use:
+  [ In(tok), !Token(tok, client, minted_comm), !ChannelCommunity(chan, resolved_comm) ]
+  --[
+      Neq(minted_comm, resolved_comm),
+      CrossCommunityUseAttempt(tok, client, minted_comm, resolved_comm, chan)
+    ]->
+  [ ]
+
+// ============================================================================
+// Host -> community binding (P-RESOLVE-HOST) and channel-less token use
+// ============================================================================
+//
+// Channel-less operations (kind:0 profiles, 1059 DMs, 30023/30174/30315/30078,
+// lists) carry no h tag, so the community cannot be resolved from a channel.
+// Per Tyler's ruling, the connection's HOST is authoritative for the community,
+// exactly as a relay URL is authoritative for a relay today, lifted one level up.
+// A host binds to exactly one community; an unmapped host has no binding and so
+// no channel-less op can resolve (fail-closed -- modeled by the absence of a
+// !HostCommunity fact, so Use_Token_ChannelLess simply cannot fire).
+
+rule Bind_Host:
+  [ !Community(comm), Fr(~host) ]
+  --[
+      HostBound(~host, comm)
+    ]->
+  [
+      !HostCommunity(~host, comm),
+      Out(~host)
+  ]
+
+// Channel-less token use. The target community is resolved server-side from the
+// connection's host, NOT from a client-supplied community/h tag and NOT from the
+// token's stamp. The token must AGREE with the host-derived community: the rule
+// only fires when !Token(tok, client, comm) and !HostCommunity(host, comm) share
+// the same comm. Host wins; a token stamped for a different community cannot
+// authorize here (see Probe_Host_Token_Mismatch). This is the confused-deputy
+// fence (I2) lifted from channel to host. The HostBoundFor action witnesses the
+// host's binding at the authorization point so the confinement lemma can join on
+// the (single-source) host binding rather than reconstructing adversary state.
+rule Use_Token_ChannelLess:
+  [ In(tok), !Token(tok, client, comm), !HostCommunity(host, comm) ]
+  --[
+      ChannelLessAuthorized(tok, client, comm, host),
+      HostBoundFor(host, comm),
+      // Single combined witness: the community actually used (1st arg) alongside
+      // the host's resolved community (3rd arg), emitted by the SAME rule firing.
+      // In the real rule both are `comm` (host wins), so the confinement lemma is
+      // a single-fact assertion -- no second-fact lookup, no source ambiguity, so
+      // the mutation that breaks the equality falsifies in one rule instance.
+      ChannelLessResolved(tok, comm, host, comm),
+      TokenUsedForCommunity(tok, comm)
+    ]->
+  [ ]
+
+// Non-vacuity mutation for S1-host (DO NOT ENABLE in the real model): the relay
+// authorizes a channel-less op from the token's stamp while ignoring the host
+// binding, so a B-stamped token authorizes on an A-host.
+//
+// rule MUTATION_Use_Token_ChannelLess_Ignore_Host:
+//   [ In(tok), !Token(tok, client, minted_comm), !HostCommunity(host, host_comm) ]
+//   --[
+//       Neq(minted_comm, host_comm),
+//       ChannelLessAuthorized(tok, client, minted_comm, host),
+//       HostBoundFor(host, host_comm),
+//       ChannelLessResolved(tok, minted_comm, host, host_comm),
+//       TokenUsedForCommunity(tok, minted_comm)
+//     ]->
+//   [ ]
+//
+// Expected mutation result: `channelless_use_confined_to_host_community` goes red.
+// The confinement lemma reads a SINGLE ChannelLessResolved(tok, used, host,
+// host_comm) fact and asserts used = host_comm; the mutation emits that fact with
+// used = minted_comm, host_comm = host_comm under Neq(minted_comm, host_comm), so
+// the counterexample is one rule instance with no second-fact lookup or adversary
+// reconstruction. Confirmed: falsified fast on Tamarin 1.12.0.
+
+// Probe rule: the adversary presents a token stamped for one community over a
+// connection whose host is bound to a different community. The real model records
+// the attempt but does not authorize it (host wins / token must agree with host).
+rule Probe_Host_Token_Mismatch:
+  [ In(tok), !Token(tok, client, minted_comm), !HostCommunity(host, host_comm) ]
+  --[
+      Neq(minted_comm, host_comm),
+      HostTokenMismatchAttempt(tok, client, minted_comm, host_comm, host)
+    ]->
+  [ ]
+
+
+// Open-community AUTH auto-registration. A community with no NIP-43 member
+// pubkey allowlist admits any authenticated npub, but still only into the
+// community resolved from the connection host. This is a separate admission
+// source from NIP-43 member-list signing: NIP-43 admissions emit
+// `MemberAdmitted`; open AUTH emits `OpenCommunityAutoRegistered`. Both mint the
+// same downstream `!Admitted(pk, comm)` fact, so later read/write checks stay
+// literal admission checks rather than read-path carve-outs.
+rule Mark_Open_Community:
+  [ !Community(comm) ]
+  --[
+      OpenCommunityEnabled(comm)
+    ]->
+  [ !OpenCommunity(comm) ]
+
+rule Authenticate_To_Open_Community:
+  [ !ClientPublic(pk), !HostCommunity(host, comm), !OpenCommunity(comm) ]
+  --[
+      OpenCommunityAutoRegistered(pk, comm, host),
+      HostBoundFor(host, comm),
+      OpenRegistrationResolved(pk, comm, host, comm)
+    ]->
+  [ !Admitted(pk, comm) ]
+
+// ============================================================================
+// Per-community signing keys
+// ============================================================================
+//
+// NIP-29 grounding: relay-signed `39000`/`39001`/`39002` discovery/system events
+// are community-scoped even when group ids collide. The signed preimage commits
+// to (event kind, community id, group id, payload), so a B-key-signed metadata,
+// admin-list, or member-list event cannot be replayed as an A event.
+
+rule Community_Signs_NIP29_System_Event:
+  [ !CommunitySigningKey(comm, sk), Fr(~group), Fr(~payload) ]
+  --[
+      SystemEventSigned(comm, '39000', ~group, h(~payload)),
+      SystemEventSigned(comm, '39001', ~group, h(~payload)),
+      SystemEventSigned(comm, '39002', ~group, h(~payload))
+    ]->
+  [
+      Out(< 'system_event', '39000', comm, ~group, h(~payload),
+            sign(< 'system_event', '39000', comm, ~group, h(~payload) >, sk) >),
+      Out(< 'system_event', '39001', comm, ~group, h(~payload),
+            sign(< 'system_event', '39001', comm, ~group, h(~payload) >, sk) >),
+      Out(< 'system_event', '39002', comm, ~group, h(~payload),
+            sign(< 'system_event', '39002', comm, ~group, h(~payload) >, sk) >)
+  ]
+
+rule Relay_Accepts_System_Event:
+  [ In(< 'system_event', kind, comm, group, msg,
+         sign(< 'system_event', kind, comm, group, msg >, sk) >),
+    !CommunitySigningKey(comm, sk)
+  ]
+  --[
+      SystemEventAccepted(comm, kind, group, msg)
+    ]->
+  [ ]
+
+rule Compromise_Community_Signing_Key:
+  [ !CommunitySigningKey(comm, sk) ]
+  --[
+      CommunityKeyCompromised(comm)
+    ]->
+  [ Out(sk) ]
+
+// ============================================================================
+// NIP-43 community member-npub allowlist admission
+// ============================================================================
+//
+// NIP-43 grounding: a relay-signed member-list event names pubkeys that are
+// admitted to a community. The signed preimage commits to (community id,
+// group id, pubkey), so a B-key-signed member-list event cannot mint an
+// admission into community A even under group-id collision. Acceptance is
+// gated by the same key-binding discipline as Relay_Accepts_System_Event:
+// the signature is verified against `!CommunitySigningKey(comm, sk)`, which
+// binds `comm` to the resolved community at acceptance time, never the
+// claimed one (same confused-deputy discipline as Use_Token's host fence).
+//
+// `!Admitted(pk, comm)` is the persistent fact a downstream layer would
+// consult to decide whether a pubkey is admitted to a community; the TLA+
+// counterpart is `admittedMembers ⊆ (Communities × Actors)` populated by an
+// `AdmitMember(w)` action. The cross-lane claim is one property witnessed in
+// two model worlds: TLA+ proves the in-relay scoping (a B-admitted actor
+// cannot act in A); Tamarin proves the admission event itself is
+// per-community unforgeable (B's key cannot mint an admission into A).
+
+rule Community_Signs_NIP43_MemberList:
+  [ !CommunitySigningKey(comm, sk), Fr(~group), !ClientPublic(pk) ]
+  --[
+      MemberListSigned(comm, ~group, pk)
+    ]->
+  [
+      Out(< 'member_list', comm, ~group, pk,
+            sign(< 'member_list', comm, ~group, pk >, sk) >)
+  ]
+
+rule Relay_Accepts_NIP43_MemberList:
+  [ In(< 'member_list', comm, group, pk,
+         sign(< 'member_list', comm, group, pk >, sk) >),
+    !CommunitySigningKey(comm, sk)
+  ]
+  --[
+      MemberAdmitted(pk, comm)
+    ]->
+  [ !Admitted(pk, comm) ]
+
+// MUTATION_Admit_Ignore_Community (commented red witness):
+// Re-bind the admission community to a fresh variable so a B-signed
+// member-list event mints `!Admitted(pk, ~other_comm)` for a community
+// whose key did not sign it. This is the exact dual of
+// `MUTATION_Use_Token_Ignore_Host` (213-225): the rule fires with
+// `Neq(comm, ~other_comm)` and emits an admission into a community whose
+// signing key never authorized the event. Toggling this rule on (and
+// commenting out `Relay_Accepts_NIP43_MemberList` above) falsifies
+// `nip43_admission_confined_to_signing_community` below: a fresh
+// `~other_comm` cannot have either signed the list (different community)
+// or had its key compromised in a way that authorized this admission, so
+// the lemma's right-hand disjunction is unsatisfiable.
+//
+// rule MUTATION_Admit_Ignore_Community:
+//   [ In(< 'member_list', comm, group, pk,
+//          sign(< 'member_list', comm, group, pk >, sk) >),
+//     !CommunitySigningKey(comm, sk),
+//     Fr(~other_comm)
+//   ]
+//   --[
+//       Neq(comm, ~other_comm),
+//       MemberAdmitted(pk, ~other_comm)
+//     ]->
+//   [ !Admitted(pk, ~other_comm) ]
+//
+// Expected mutation result: `nip43_admission_confined_to_signing_community`
+// goes red.
+
+// ============================================================================
+// Independent per-community audit chains
+// ============================================================================
+//
+// Target shape, not today's implementation: current `buzz-audit` has one global
+// chain (`buzz-audit/src/service.rs` reads the latest global hash). Multi-tenant
+// safety requires N independent community-labeled heads so the spec's
+// Implementation Correspondence section can track replacing the global chain.
+
+rule Append_Audit:
+  [ AuditHead(comm, prev), Fr(~seq), Fr(~entry) ]
+  --[
+      AuditEntryCreated(comm, ~seq, prev, h(< 'audit', comm, ~seq, prev, ~entry >)),
+      AuditAppended(comm, prev, h(< 'audit', comm, ~seq, prev, ~entry >)),
+      AuditHeadAdvanced(comm, prev, h(< 'audit', comm, ~seq, prev, ~entry >))
+    ]->
+  [
+      AuditHead(comm, h(< 'audit', comm, ~seq, prev, ~entry >)),
+      Out(h(< 'audit', comm, ~seq, prev, ~entry >))
+  ]
+
+rule Probe_Audit_Cross_Community_Splice:
+  [ AuditHead(commA, prevA), AuditHead(commB, prevB), Fr(~seq), Fr(~entry) ]
+  --[
+      Neq(commA, commB),
+      CrossCommunityAuditSpliceAttempt(commA, commB, prevA, prevB, h(< 'audit', commA, ~seq, prevB, ~entry >))
+    ]->
+  [
+      // Restore both heads unchanged: the probe models an *attempt* that does
+      // not advance either chain. Without restoring, a successful probe firing
+      // would erase both heads from the trace, preventing any further audit
+      // appends in the same execution. Soundness of
+      // `cross_community_audit_splice_attempt_is_not_append` does not depend
+      // on this (no rule emits `AuditAppended` from this attempt), but
+      // tightening the model so the attempt does not consume the chains makes
+      // the trace shape match reality.
+      AuditHead(commA, prevA),
+      AuditHead(commB, prevB)
+  ]
+
+// ============================================================================
+// Draft security lemmas
+// ============================================================================
+
+lemma executable_core_flow:
+  exists-trace
+  "Ex tok client comm chan #i #j.
+      TokenMinted(tok, client, comm) @ i
+    & ActionAuthorized(tok, client, comm, chan) @ j
+    & #i < #j"
+
+lemma executable_cross_community_mint_rejection:
+  exists-trace
+  "Ex req client commA commB chanA chanB #i.
+      CrossCommunityMintRejected(req, client, commA, commB, chanA, chanB) @ i"
+
+// S1: token use is confined to the token's stamped community. This remains true
+// even when `Leak_Token` makes the bearer token known to the adversary.
+lemma token_confinement:
+  "All tok client minted_comm used_comm chan #i #j.
+      TokenMinted(tok, client, minted_comm) @ i
+    & ActionAuthorized(tok, client, used_comm, chan) @ j
+    ==> minted_comm = used_comm"
+
+lemma leaked_token_blast_radius_contained:
+  "All tok client minted_comm used_comm chan #i #j.
+      TokenLeaked(tok, client, minted_comm) @ i
+    & ActionAuthorized(tok, client, used_comm, chan) @ j
+    ==> minted_comm = used_comm"
+
+lemma cross_community_use_attempts_are_not_authorized:
+  "All tok client minted_comm resolved_comm chan #i.
+      CrossCommunityUseAttempt(tok, client, minted_comm, resolved_comm, chan) @ i
+    ==> not (Ex #j. ActionAuthorized(tok, client, resolved_comm, chan) @ j)"
+
+// S1-host: a channel-less authorization is confined to the community bound to the
+// connection's HOST. The lemma reads a single ChannelLessResolved(tok, used_comm,
+// host, host_comm) fact -- emitted by the authorizing rule and carrying both the
+// community actually used and the host's resolved community -- and asserts they
+// are equal. A single-fact assertion means a counterexample is one rule instance,
+// not a multi-fact join or adversary reconstruction. Host wins over the token's
+// stamp: enabling MUTATION_Use_Token_ChannelLess_Ignore_Host falsifies this fast.
+lemma channelless_use_confined_to_host_community:
+  "All tok used_comm host host_comm #i.
+      ChannelLessResolved(tok, used_comm, host, host_comm) @ i
+    ==> used_comm = host_comm"
+
+// S1-host (channel-bearing): a channel-BEARING authorization is confined to the
+// community bound to the connection's HOST -- the host axis of the confused-deputy
+// fence. Today the relay resolves a channel-bearing op's community from the h tag
+// (the channel mapping) alone; this lemma proves that the host must ALSO agree, so
+// an A-host presenting a B-channel-bearing request cannot authorize as B. Like the
+// channel-less case it reads a single ChannelBearingResolved(tok, used_comm, host,
+// host_comm) fact, so a counterexample is one rule instance. Enabling
+// MUTATION_Use_Token_Ignore_Host (which accepts host/channel disagreement)
+// falsifies this fast.
+lemma channelbearing_use_agrees_with_host:
+  "All tok used_comm host host_comm #i.
+      ChannelBearingResolved(tok, used_comm, host, host_comm) @ i
+    ==> used_comm = host_comm"
+
+// The token presented for a channel-less op must agree with the host-derived
+// community: the real rule only fires when the token's stamp equals the host's
+// community, so any recorded channel-less authorization carries a token whose
+// mint stamp matches the used community.
+lemma channelless_token_agrees_with_host:
+  "All tok client used_comm host minted_comm #i #j.
+      ChannelLessAuthorized(tok, client, used_comm, host) @ i
+    & TokenMinted(tok, client, minted_comm) @ j
+    ==> used_comm = minted_comm"
+
+// A token stamped for one community presented over a host bound to a different
+// community (the host/token mismatch) is never channel-less authorized for the
+// token's stamped community over that host.
+lemma host_token_mismatch_not_authorized:
+  "All tok client minted_comm host_comm host #i.
+      HostTokenMismatchAttempt(tok, client, minted_comm, host_comm, host) @ i
+    ==> not (Ex #j. ChannelLessAuthorized(tok, client, minted_comm, host) @ j)"
+
+// Open-community auto-registration is host-confined: the registered community is
+// exactly the community bound to the connection host. There is no client-supplied
+// community selector in the rule.
+lemma open_auth_registration_confined_to_host_community:
+  "All pk registered_comm host host_comm #i.
+      OpenRegistrationResolved(pk, registered_comm, host, host_comm) @ i
+    ==> registered_comm = host_comm"
+
+// S2: every minted token has exactly one stamped community, and every requested
+// channel recorded for that mint resolved to that stamp.
+lemma minted_token_channels_match_stamp:
+  "All tok client comm chan chan_comm #i #j.
+      TokenMinted(tok, client, comm) @ i
+    & MintChannel(tok, chan, chan_comm) @ j
+    ==> comm = chan_comm"
+
+lemma minted_request_channels_match_stamp:
+  "All tok req client comm chan chan_comm #i #j #k.
+      TokenMintedForRequest(tok, req, client, comm) @ i
+    & RequestChannel(req, chan, chan_comm) @ j
+    & TokenStamped(tok, comm) @ k
+    ==> comm = chan_comm"
+
+lemma token_stamp_matches_mint:
+  "All tok client comm stamp #i #j.
+      TokenMinted(tok, client, comm) @ i
+    & TokenStamped(tok, stamp) @ j
+    ==> comm = stamp"
+
+lemma cross_community_mint_yields_no_token_for_that_request:
+  "All req client commA commB chanA chanB #i.
+      CrossCommunityMintRejected(req, client, commA, commB, chanA, chanB) @ i
+    ==> not (Ex tok comm #j. TokenMintedForRequest(tok, req, client, comm) @ j)"
+
+// S3 shape: accepting an event for community A requires A's signing key, unless
+// A's signing key has been compromised. Compromise of another community's key is
+// not sufficient because the signed preimage includes the community id.
+lemma system_event_acceptance_requires_same_community_key_or_compromise:
+  "All comm kind group msg #i.
+      SystemEventAccepted(comm, kind, group, msg) @ i
+    ==> (Ex #j. SystemEventSigned(comm, kind, group, msg) @ j & #j < #i)
+      | (Ex #k. CommunityKeyCompromised(comm) @ k & #k < #i)"
+
+lemma other_community_key_compromise_does_not_authorize:
+  "All commA commB kind group msg #i #j #k.
+      CommunityKeyCompromised(commB) @ i
+    & SystemEventAccepted(commA, kind, group, msg) @ j
+    & Neq(commA, commB) @ k
+    ==> (Ex #l. SystemEventSigned(commA, kind, group, msg) @ l & #l < #j)
+      | (Ex #m. CommunityKeyCompromised(commA) @ m & #m < #j)"
+
+// S5 shape: every NIP-43 admission of `pk` into community A requires either
+// (a) a `MemberListSigned(A, _, pk)` event preceding the admission, or
+// (b) A's signing key was compromised before the admission. Since acceptance
+// in `Relay_Accepts_NIP43_MemberList` re-verifies the signature against
+// `!CommunitySigningKey(comm, sk)` (binding `comm` at acceptance, not at
+// claim), the admission community is forced to be the same community whose
+// key signed the list event. This is the load-bearing cross-community claim
+// for community-scoped member-npub allowlists: B's key cannot mint an
+// admission into A.
+lemma nip43_admission_confined_to_signing_community:
+  "All pk comm #i.
+      MemberAdmitted(pk, comm) @ i
+    ==> (Ex group #j. MemberListSigned(comm, group, pk) @ j & #j < #i)
+      | (Ex #k. CommunityKeyCompromised(comm) @ k & #k < #i)"
+
+// Sibling to `other_community_key_compromise_does_not_authorize`: compromise
+// of community B's signing key never suffices to admit a pubkey into a
+// different community A. The signed preimage of a member-list event binds
+// the community id, so B's compromise yields no admission for A — A must
+// either have signed the list for `pk` itself or had its own key
+// compromised.
+lemma other_community_key_compromise_does_not_admit:
+  "All commA commB pk #i #j #k.
+      CommunityKeyCompromised(commB) @ i
+    & MemberAdmitted(pk, commA) @ j
+    & Neq(commA, commB) @ k
+    ==> (Ex group #l. MemberListSigned(commA, group, pk) @ l & #l < #j)
+      | (Ex #m. CommunityKeyCompromised(commA) @ m & #m < #j)"
+
+// S4 shape: every audit append advances a head for the same community and the
+// next hash binds that community id, so another community's head cannot be used
+// as a splice without changing the hash/preimage.
+lemma audit_append_advances_same_community_head:
+  "All comm prev next #i.
+      AuditAppended(comm, prev, next) @ i
+    ==> AuditHeadAdvanced(comm, prev, next) @ i"
+
+lemma cross_community_audit_splice_attempt_is_not_append:
+  "All commA commB prevA prevB forged #i.
+      CrossCommunityAuditSpliceAttempt(commA, commB, prevA, prevB, forged) @ i
+    ==> not (Ex #j. AuditAppended(commA, prevB, forged) @ j)"
+
+// Reachability / anti-vacuity probes.
+lemma executable_token_leak:
+  exists-trace
+  "Ex tok client comm #i. TokenLeaked(tok, client, comm) @ i"
+
+lemma leaked_token_can_authorize_within_its_community:
+  exists-trace
+  "Ex tok client comm chan #i #j.
+      TokenLeaked(tok, client, comm) @ i
+    & ActionAuthorized(tok, client, comm, chan) @ j"
+
+lemma executable_system_event_acceptance:
+  exists-trace
+  "Ex comm kind group msg #i. SystemEventAccepted(comm, kind, group, msg) @ i"
+
+lemma executable_other_key_compromise_plus_system_accept:
+  exists-trace
+  "Ex commA commB kind group msg #i #j #k.
+      CommunityKeyCompromised(commB) @ i
+    & SystemEventAccepted(commA, kind, group, msg) @ j
+    & Neq(commA, commB) @ k"
+
+lemma executable_cross_community_audit_splice_attempt:
+  exists-trace
+  "Ex commA commB prevA prevB forged #i.
+      CrossCommunityAuditSpliceAttempt(commA, commB, prevA, prevB, forged) @ i"
+
+lemma executable_signing_key_compromise:
+  exists-trace
+  "Ex comm #i. CommunityKeyCompromised(comm) @ i"
+
+lemma executable_audit_append:
+  exists-trace
+  "Ex comm prev next #i. AuditAppended(comm, prev, next) @ i"
+
+// Host-binding reachability probes (anti-vacuity for the S1-host lemmas).
+lemma executable_host_bound:
+  exists-trace
+  "Ex host comm #i. HostBound(host, comm) @ i"
+
+lemma executable_channelless_use:
+  exists-trace
+  "Ex tok client comm host #i.
+      ChannelLessAuthorized(tok, client, comm, host) @ i"
+
+lemma executable_host_token_mismatch_attempt:
+  exists-trace
+  "Ex tok client minted_comm host_comm host #i.
+      HostTokenMismatchAttempt(tok, client, minted_comm, host_comm, host) @ i"
+
+// Anti-vacuity probe for nip43_admission_confined_to_signing_community: there
+// must be a trace in which a member-list event is signed and accepted into
+// the admitting community, so the lemma's left-hand side is reachable.
+lemma executable_member_admitted:
+  exists-trace
+  "Ex pk comm #i. MemberAdmitted(pk, comm) @ i"
+
+lemma executable_open_auth_registration:
+  exists-trace
+  "Ex pk comm host #i. OpenCommunityAutoRegistered(pk, comm, host) @ i"
+
+end

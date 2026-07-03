@@ -6,6 +6,15 @@ ignore = [
     # paste 1.0.15 — unmaintained. Transitive dep: mesh-llm → iroh → netlink-* → paste.
     # No safe upgrade available; tracked for upstream (iroh/netlink) replacement.
     { id = "RUSTSEC-2024-0436", reason = "transitive dep via mesh-llm → iroh → netlink; no upstream fix available" },
+    # quick-xml < 0.41: quadratic runtime on duplicate-attribute check (0194) and
+    # unbounded namespace-declaration allocation in NsReader (0195). Both DoS-class,
+    # requiring attacker-controlled XML. Our two locked versions only parse trusted
+    # input: 0.38.4 (rust-s3/aws-creds — responses from our own S3/MinIO endpoint)
+    # and 0.39.4 (mesh-llm → iroh → netdev → plist — local macOS system plists).
+    # Patched release (>= 0.41.0) is unreachable until rust-s3 and plist/netdev bump;
+    # remove these when upstream catches up.
+    { id = "RUSTSEC-2026-0194", reason = "transitive via rust-s3 and mesh-llm→plist; trusted-input XML only; no upstream fix available yet" },
+    { id = "RUSTSEC-2026-0195", reason = "transitive via rust-s3 and mesh-llm→plist; trusted-input XML only; no upstream fix available yet" },
 ]
 
 [licenses]

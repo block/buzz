@@ -73,7 +73,9 @@ pub async fn handle_count(
     }
 
     // Get channels this user can access — same enforcement as WS REQ handler.
-    let mut accessible_channels = match state.get_accessible_channel_ids_cached(&pubkey_bytes).await
+    let mut accessible_channels = match state
+        .get_accessible_channel_ids_cached(conn.tenant.community(), &pubkey_bytes)
+        .await
     {
         Ok(ids) => ids,
         Err(e) => {
@@ -108,7 +110,11 @@ pub async fn handle_count(
             let db_is_member = if accessible_channels.contains(&ch_id) {
                 None
             } else {
-                match state.db.is_member(ch_id, &pubkey_bytes).await {
+                match state
+                    .db
+                    .is_member(conn.tenant.community(), ch_id, &pubkey_bytes)
+                    .await
+                {
                     Ok(member) => Some(member),
                     Err(e) => {
                         warn!(sub_id = %sub_id, "Channel membership confirmation failed: {e}");
@@ -128,8 +134,13 @@ pub async fn handle_count(
                 continue; // Skip filters targeting inaccessible channels.
             }
             // Channel is accessible — count with pushability check.
-            let query =
-                super::req::build_event_query_from_filter(filter, &pubkey_bytes, &state).await;
+            let query = super::req::build_event_query_from_filter(
+                filter,
+                &pubkey_bytes,
+                &state,
+                conn.tenant.community(),
+            )
+            .await;
             let author_is_self = filter.authors.as_ref().is_some_and(|authors| {
                 !authors.is_empty()
                     && authors
@@ -149,10 +160,17 @@ pub async fn handle_count(
             } else {
                 // Fallback: query + post-filter for non-pushable constraints.
                 let mut q = query;
-                q.limit = Some(100_000);
-                q.max_limit = Some(100_000);
+                super::req::apply_count_fallback_limit(&mut q);
                 match state.db.query_events(&q).await {
                     Ok(stored_events) => {
+                        if super::req::count_fallback_exceeded(stored_events.len()) {
+                            metrics::counter!("buzz_count_fallback_rejections_total").increment(1);
+                            conn.send(RelayMessage::closed(
+                                &sub_id,
+                                "restricted: count filter requires narrower constraints",
+                            ));
+                            return;
+                        }
                         for se in stored_events {
                             if !buzz_core::filter::filters_match(std::slice::from_ref(filter), &se)
                             {
@@ -177,8 +195,13 @@ pub async fn handle_count(
             // If the filter has generic tags beyond what SQL can push down
             // (#h, #p single, #d single, #e), we must fall back to
             // query + post-filter to avoid overcounting.
-            let mut query =
-                super::req::build_event_query_from_filter(filter, &pubkey_bytes, &state).await;
+            let mut query = super::req::build_event_query_from_filter(
+                filter,
+                &pubkey_bytes,
+                &state,
+                conn.tenant.community(),
+            )
+            .await;
             query.channel_ids = Some(accessible_channels.to_vec());
 
             let author_is_self = filter.authors.as_ref().is_some_and(|authors| {
@@ -199,11 +222,18 @@ pub async fn handle_count(
                     }
                 }
             } else {
-                // Fallback: query with high limit + post-filter for correctness.
-                query.limit = Some(100_000);
-                query.max_limit = Some(100_000);
+                // Fallback: query a bounded candidate set + post-filter.
+                super::req::apply_count_fallback_limit(&mut query);
                 match state.db.query_events(&query).await {
                     Ok(stored_events) => {
+                        if super::req::count_fallback_exceeded(stored_events.len()) {
+                            metrics::counter!("buzz_count_fallback_rejections_total").increment(1);
+                            conn.send(RelayMessage::closed(
+                                &sub_id,
+                                "restricted: count filter requires narrower constraints",
+                            ));
+                            return;
+                        }
                         for se in stored_events {
                             if !buzz_core::filter::filters_match(std::slice::from_ref(filter), &se)
                             {

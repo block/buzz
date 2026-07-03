@@ -89,24 +89,54 @@ pub fn verify_blossom_auth_event(
         return Err(MediaError::TimestampOutOfWindow);
     }
 
-    // 6. Server tag enforcement (BUD-11 §5): if server tags present, our domain must appear.
-    // Fail closed: if server_domain is unconfigured, reject tokens that carry server tags
-    // rather than silently accepting them.
+    // 6. Server tag enforcement (BUD-11 §5): if server tags present, our host must appear.
+    //
+    // `server_domain` is the host this request was bound to — the per-request
+    // tenant host (`TenantContext::host()`), NOT a single process-global domain.
+    // A relay process serves many tenant hosts; validating against one global
+    // host would 401 every non-primary tenant's server-tagged client (the stock
+    // CLI always tags its configured relay host). Comparison is done under the
+    // shared [`normalize_host`] rule so a tag and the bound host agree by
+    // construction across case, trailing dot, default ports, and an optional
+    // URL scheme/path — exactly as every other host seam resolves tenants.
+    //
+    // Fail closed: if the bound host is unknown, reject tokens that carry server
+    // tags rather than silently accepting them.
     if !server_tags.is_empty() {
         match server_domain {
             Some(domain) => {
-                if !server_tags.contains(&domain) {
+                let want = normalize_server_host(domain);
+                let matches = server_tags
+                    .iter()
+                    .any(|tag| normalize_server_host(tag) == want);
+                if !matches {
                     return Err(MediaError::ServerMismatch);
                 }
             }
             None => {
-                // Server tags present but we don't know our own domain — reject.
+                // Server tags present but we don't know our own host — reject.
                 return Err(MediaError::ServerMismatch);
             }
         }
     }
 
     Ok(())
+}
+
+/// Normalize a Blossom `server` tag value (or a bound tenant host) into the
+/// canonical host form used as the community lookup key.
+///
+/// A `server` tag may be a bare authority (`relay.example:3100`, what the stock
+/// CLI emits) or a full URL (`https://relay.example/`). We strip an optional
+/// scheme and path down to the authority, then apply the one shared
+/// [`buzz_core::tenant::normalize_host`] rule so the comparison agrees with how
+/// the WS/HTTP/git doors resolve tenants.
+fn normalize_server_host(value: &str) -> String {
+    let authority = match value.split_once("://") {
+        Some((_scheme, rest)) => rest.split('/').next().unwrap_or(rest),
+        None => value.split('/').next().unwrap_or(value),
+    };
+    buzz_core::tenant::normalize_host(authority)
 }
 
 /// Verify a kind:24242 Blossom upload auth event, including the x tag hash check.
@@ -262,6 +292,68 @@ mod tests {
         let event = build_valid_auth(&keys, &sha256);
         // No server tags → passes regardless of our domain
         assert!(verify_blossom_upload_auth(&event, &sha256, Some("any.domain.com"), 600).is_ok());
+    }
+
+    /// A `server` tag is matched against the *bound tenant host* under the
+    /// shared `normalize_host` rule, so equivalent host spellings agree — the
+    /// stock CLI's bare `host:port`, an explicit default port, a trailing dot,
+    /// mixed case, and a full URL all match the same bound host. This is the
+    /// regression guard for the multi-tenant media blocker: a non-primary
+    /// tenant must accept its own server-tagged client.
+    #[test]
+    fn test_server_tag_normalized_against_bound_host() {
+        let keys = Keys::generate();
+        let sha256 = "a".repeat(64);
+        let now = Timestamp::now().as_secs();
+        let exp_str = (now + 300).to_string();
+        let build = |server: &str| {
+            let tags = vec![
+                Tag::parse(["t", "upload"]).unwrap(),
+                Tag::parse(["x", &sha256]).unwrap(),
+                Tag::parse(["expiration", &exp_str]).unwrap(),
+                Tag::parse(["server", server]).unwrap(),
+            ];
+            EventBuilder::new(Kind::from(24242), "Upload scoped")
+                .tags(tags)
+                .sign_with_keys(&keys)
+                .unwrap()
+        };
+
+        // Non-primary tenant host with explicit non-default port (the live
+        // repro: tenant B on 127.0.0.1:3100). Stock CLI tags `host:port`.
+        assert!(verify_blossom_upload_auth(
+            &build("127.0.0.1:3100"),
+            &sha256,
+            Some("127.0.0.1:3100"),
+            600
+        )
+        .is_ok());
+
+        // Equivalence under normalize_host: explicit default port, trailing
+        // dot, mixed case, and a full URL all collapse to the bound host.
+        for tag in [
+            "Relay.Example:443",
+            "relay.example.",
+            "RELAY.EXAMPLE",
+            "https://relay.example/",
+        ] {
+            assert!(
+                verify_blossom_upload_auth(&build(tag), &sha256, Some("relay.example"), 600)
+                    .is_ok(),
+                "server tag {tag:?} should match bound host relay.example"
+            );
+        }
+
+        // A different tenant host still fails closed.
+        assert!(matches!(
+            verify_blossom_upload_auth(
+                &build("127.0.0.1:3100"),
+                &sha256,
+                Some("127.0.0.1:3200"),
+                600
+            ),
+            Err(MediaError::ServerMismatch)
+        ));
     }
 
     #[test]

@@ -37,6 +37,7 @@ import {
 } from "@/shared/ui/dropdown-menu";
 import { Input } from "@/shared/ui/input";
 import { SettingsSectionHeader } from "@/features/settings/ui/SettingsSectionHeader";
+import { WorkspaceIconSettingsCard } from "@/features/workspaces/ui/WorkspaceIconSettingsCard";
 import { VirtualizedList } from "@/shared/ui/VirtualizedList";
 
 type AssignableRelayRole = Exclude<RelayMemberRole, "owner">;
@@ -365,6 +366,7 @@ export function RelayMembersSettingsCard({
       />
 
       <div className="space-y-6">
+        <WorkspaceIconSettingsCard />
         <form className="space-y-1.5" onSubmit={handleAddMember}>
           <label className="text-sm font-medium" htmlFor="relay-member-pubkey">
             Invite a person
