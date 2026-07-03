@@ -2038,7 +2038,7 @@ function MarkdownInner({
       className={cn(
         MESSAGE_MARKDOWN_CLASS,
         [
-          "max-w-none wrap-anywhere",
+          "max-w-none wrap-anywhere text-sm leading-5 text-foreground",
           "[&>*:first-child]:mt-0 [&>*:last-child]:mb-0",
           "[&>*+*]:mt-3",
           "[&>p+p]:mt-1.5",

@@ -9,6 +9,7 @@ import {
   AgentInstructionRow,
 } from "@/features/profile/ui/UserProfilePanelAgentDetails";
 import type { ProfileActivityAgent } from "@/features/profile/lib/profileActivityAgent";
+import { resolveActivityChannelId } from "@/features/profile/lib/profileActivityCarousel";
 import {
   type ProfileActivityFeedScope,
   useProfileActivityFeedScope,
@@ -348,7 +349,9 @@ function ProfileLiveActivityEmbed({
   onOpenActivity: (channelId?: string | null) => void;
 }) {
   const [carouselApi, setCarouselApi] = React.useState<CarouselApi>();
-  const [selectedIndex, setSelectedIndex] = React.useState(0);
+  const [selectedChannelId, setSelectedChannelId] = React.useState<
+    string | null
+  >(null);
   const [mountedChannelIds, setMountedChannelIds] = React.useState<Set<string>>(
     () => new Set(),
   );
@@ -360,62 +363,42 @@ function ProfileLiveActivityEmbed({
     return [...new Set(channelIds)];
   }, [activeTurns, feedScope.channelIds, feedScope.isLive]);
 
-  const preferredIndex = React.useMemo(() => {
-    const preferredChannelId = feedScope.preferredChannelId;
-    if (!preferredChannelId) {
-      return 0;
-    }
-    const index = slides.indexOf(preferredChannelId);
-    return index >= 0 ? index : 0;
-  }, [feedScope.preferredChannelId, slides]);
+  const activeChannelId = resolveActivityChannelId(
+    slides,
+    selectedChannelId,
+    feedScope.preferredChannelId,
+  );
+  const selectedIndex = activeChannelId ? slides.indexOf(activeChannelId) : 0;
 
   React.useEffect(() => {
-    if (slides.length === 0) {
-      setSelectedIndex(0);
+    if (!carouselApi || !activeChannelId) {
       return;
     }
 
-    setSelectedIndex((current) => {
-      if (current < slides.length) {
-        return current;
-      }
-      return Math.max(0, slides.length - 1);
-    });
-  }, [slides.length]);
-
-  React.useEffect(() => {
-    if (!carouselApi || slides.length === 0) {
-      return;
-    }
-
-    const syncSelectedIndex = () => {
-      setSelectedIndex(carouselApi.selectedScrollSnap());
+    const syncSelectedChannel = () => {
+      setSelectedChannelId(slides[carouselApi.selectedScrollSnap()] ?? null);
     };
 
-    syncSelectedIndex();
-    carouselApi.on("select", syncSelectedIndex);
-    carouselApi.on("reInit", syncSelectedIndex);
+    carouselApi.on("select", syncSelectedChannel);
+    carouselApi.on("reInit", syncSelectedChannel);
 
     return () => {
-      carouselApi.off("select", syncSelectedIndex);
-      carouselApi.off("reInit", syncSelectedIndex);
+      carouselApi.off("select", syncSelectedChannel);
+      carouselApi.off("reInit", syncSelectedChannel);
     };
-  }, [carouselApi, slides.length]);
+  }, [activeChannelId, carouselApi, slides]);
 
   React.useEffect(() => {
-    if (!carouselApi || slides.length === 0) {
+    if (!carouselApi || !activeChannelId) {
       return;
     }
 
-    const currentChannelId = slides[carouselApi.selectedScrollSnap()];
-    if (currentChannelId && slides.includes(currentChannelId)) {
-      return;
+    const targetIndex = slides.indexOf(activeChannelId);
+    if (targetIndex >= 0 && carouselApi.selectedScrollSnap() !== targetIndex) {
+      carouselApi.scrollTo(targetIndex, true);
     }
-
-    carouselApi.scrollTo(preferredIndex, true);
-  }, [carouselApi, preferredIndex, slides]);
-
-  const activeChannelId = slides[selectedIndex] ?? slides[0] ?? null;
+    setSelectedChannelId(activeChannelId);
+  }, [activeChannelId, carouselApi, slides]);
 
   React.useEffect(() => {
     if (!activeChannelId) {
