@@ -17,6 +17,7 @@ import {
   stripImetaMediaLines,
 } from "@/features/messages/lib/imetaMediaMarkdown";
 
+import { useAttachmentEditing } from "@/features/messages/lib/useAttachmentEditing";
 import {
   type MediaUploadController,
   useMediaUpload,
@@ -805,6 +806,13 @@ function MessageComposerImpl({
     [media.removeAttachment],
   );
 
+  const { handleAttachmentEditSave, handleAttachmentRevert } =
+    useAttachmentEditing({
+      revertAttachment: media.revertAttachment,
+      setSpoileredAttachmentUrls,
+      uploadEditedAttachment: media.uploadEditedAttachment,
+    });
+
   const handleComposerSpoilerToggle = React.useCallback(
     ({
       emptySelection,
@@ -924,7 +932,10 @@ function MessageComposerImpl({
                   onCancelUpload={media.cancelUpload}
                   uploadingCount={media.uploadingCount}
                   uploadingPreviews={media.uploadingPreviews}
+                  onEditSave={handleAttachmentEditSave}
                   onRemove={handleRemoveAttachment}
+                  onRevert={handleAttachmentRevert}
+                  originalUrlByUrl={media.originalUrlByUrl}
                   spoileredUrls={spoileredAttachmentUrls}
                 />
               </div>
