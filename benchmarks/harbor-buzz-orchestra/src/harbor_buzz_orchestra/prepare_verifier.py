@@ -77,17 +77,22 @@ def _write_shims(destination: Path) -> None:
     )
 
 
-def _set_no_network_and_env(task_toml: Path) -> None:
+def _set_verifier_env(task_toml: Path, network_enforcement: str) -> None:
     text = task_toml.read_text()
     marker = "[verifier]\n"
     if text.count(marker) != 1:
         raise ValueError(f"expected exactly one [verifier] table: {task_toml}")
-    if (
-        "network_mode"
-        in text[text.index(marker) : text.index("\n[", text.index(marker) + 1)]
-    ):
+    verifier_table = text[
+        text.index(marker) : text.index("\n[", text.index(marker) + 1)
+    ]
+    if "network_mode" in verifier_table:
         raise ValueError("verifier network_mode already declared")
-    text = text.replace(marker, marker + 'network_mode = "no-network"\n', 1)
+    if network_enforcement == "enforced":
+        text = text.replace(marker, marker + 'network_mode = "no-network"\n', 1)
+    elif network_enforcement != "advisory":
+        raise ValueError(
+            "verifier network enforcement must be 'enforced' or 'advisory'"
+        )
     env_marker = "[verifier.env]\n"
     if text.count(env_marker) != 1:
         raise ValueError(f"expected exactly one [verifier.env] table: {task_toml}")
@@ -101,8 +106,18 @@ def _set_no_network_and_env(task_toml: Path) -> None:
     task_toml.write_text(text)
 
 
-def prepare_task(source: Path, destination: Path, lock_dir: Path) -> dict[str, object]:
+def prepare_task(
+    source: Path,
+    destination: Path,
+    lock_dir: Path,
+    *,
+    network_enforcement: str = "enforced",
+) -> dict[str, object]:
     source = source.resolve()
+    if network_enforcement not in {"enforced", "advisory"}:
+        raise ValueError(
+            "verifier network enforcement must be 'enforced' or 'advisory'"
+        )
     if destination.exists():
         raise FileExistsError(f"destination already exists: {destination}")
     lock = json.loads((lock_dir / "lock.json").read_text())
@@ -128,7 +143,7 @@ def prepare_task(source: Path, destination: Path, lock_dir: Path) -> dict[str, o
     shutil.copytree(lock_dir / "wheels", prepared / "wheels")
     _write_shims(destination)
     _append_verifier_layer(destination / "environment/Dockerfile", lock["base_image"])
-    _set_no_network_and_env(destination / "task.toml")
+    _set_verifier_env(destination / "task.toml", network_enforcement)
 
     output_test_hashes = {
         path.relative_to(destination).as_posix(): sha256(path)
@@ -148,7 +163,11 @@ def prepare_task(source: Path, destination: Path, lock_dir: Path) -> dict[str, o
         "dependency_manifest_sha256": sha256(lock_dir / "lock.json"),
         "prepared_layer_content_sha256": tree_hash(prepared),
         "base_image": lock["base_image"],
-        "verifier_network_mode": "no-network",
+        "verifier_network_mode": (
+            "no-network" if network_enforcement == "enforced" else None
+        ),
+        "verifier_network_enforcement": network_enforcement,
+        "offline_attestation_required": network_enforcement == "advisory",
     }
     (destination / "prepared-image.json").write_text(
         json.dumps(metadata, indent=2, sort_keys=True) + "\n"
@@ -161,9 +180,23 @@ def main() -> None:
     parser.add_argument("source", type=Path)
     parser.add_argument("destination", type=Path)
     parser.add_argument("--lock-dir", type=Path, default=LOCK_ROOT / "hello-world")
+    parser.add_argument(
+        "--network-enforcement",
+        choices=("enforced", "advisory"),
+        default="enforced",
+        help="advisory is a laptop-only divergence and requires direct offline attestation",
+    )
     args = parser.parse_args()
     print(
-        json.dumps(prepare_task(args.source, args.destination, args.lock_dir), indent=2)
+        json.dumps(
+            prepare_task(
+                args.source,
+                args.destination,
+                args.lock_dir,
+                network_enforcement=args.network_enforcement,
+            ),
+            indent=2,
+        )
     )
 
 

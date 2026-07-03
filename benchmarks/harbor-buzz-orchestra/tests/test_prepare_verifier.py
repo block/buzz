@@ -41,6 +41,31 @@ def test_prepare_is_deterministic_and_preserves_tests(tmp_path: Path) -> None:
     assert (tmp_path / "one/tests/test.sh").read_bytes() == before
     assert 'network_mode = "no-network"' in (tmp_path / "one/task.toml").read_text()
     assert first["prepared_image"] is True
+    assert first["verifier_network_enforcement"] == "enforced"
+    assert first["offline_attestation_required"] is False
+
+
+def test_prepare_advisory_mode_is_explicit_and_omits_provider_policy(
+    tmp_path: Path,
+) -> None:
+    source, lock = tmp_path / "source", tmp_path / "lock"
+    _write_fixture(source, lock)
+    metadata = prepare_task(
+        source, tmp_path / "out", lock, network_enforcement="advisory"
+    )
+    task = (tmp_path / "out/task.toml").read_text()
+    assert "network_mode" not in task
+    assert 'UV_OFFLINE = "1"' in task
+    assert metadata["verifier_network_mode"] is None
+    assert metadata["verifier_network_enforcement"] == "advisory"
+    assert metadata["offline_attestation_required"] is True
+
+
+def test_prepare_rejects_unknown_network_enforcement(tmp_path: Path) -> None:
+    source, lock = tmp_path / "source", tmp_path / "lock"
+    _write_fixture(source, lock)
+    with pytest.raises(ValueError, match="must be 'enforced' or 'advisory'"):
+        prepare_task(source, tmp_path / "out", lock, network_enforcement="silent")
 
 
 def test_prepare_rejects_tampered_wheel(tmp_path: Path) -> None:
