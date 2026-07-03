@@ -5,7 +5,6 @@ import {
   mergeTimelineHistoryMessages,
   normalizeTimelineMessages,
 } from "./messageQueryKeys.ts";
-import { KIND_HUDDLE_STARTED } from "@/shared/constants/kinds";
 
 const CHANNEL_ID = "timeline-window-test";
 const PUBKEY = "a".repeat(64);
@@ -26,149 +25,35 @@ function id(prefix, index) {
   return `${prefix}${String(index).padStart(64 - prefix.length, "0")}`;
 }
 
-test("normalizeTimelineMessages caps visible content, not unrelated auxiliary events", () => {
-  const june12Roots = [
-    "1f86d0450b3c2c376691e7a8232fbd8a5b8408ecad2f5eb0209e7bfcfdf9af80",
-    "3b745de3d9ff91c464b0cbf26e3e628a5a8c05dccf3f9781b1fbd99a0f6f5e7b",
-    "cb404eeae1517bb2ed2e9975dfd2efd12d0a7ef17b87c3a6573b251b9865f7a4",
-    "337de49c712fcf84f5689a6c11ce36018817197d578468b8132c6dc3d1a13131",
-    "ac683f35cda2e8c1e9ae609e0b9f5dc23a7d434637b4f0505495c3a2b6f52aae",
-  ];
+test("normalizeTimelineMessages preserves the complete loaded window", () => {
   const messages = [];
-
-  for (let index = 0; index < 500; index += 1) {
-    messages.push(event({ id: id("old", index), createdAt: 1_000 + index }));
+  for (let index = 0; index < 2_100; index += 1) {
+    messages.push(event({ id: id("row", index), createdAt: 1_000 + index }));
   }
-  for (const [index, rootId] of june12Roots.entries()) {
-    messages.push(
-      event({ id: rootId, createdAt: 2_000 + index, content: "June 12 root" }),
-    );
-  }
-  for (let index = 0; index < 1_303; index += 1) {
-    messages.push(
-      event({
-        id: id("del", index),
-        kind: 5,
-        createdAt: 3_000 + index,
-        tags: [
-          ["h", CHANNEL_ID],
-          ["e", id("zzz", index)],
-        ],
-      }),
-    );
-  }
-  for (let index = 0; index < 231; index += 1) {
-    messages.push(
-      event({
-        id: id("rea", index),
-        kind: 7,
-        createdAt: 5_000 + index,
-        tags: [
-          ["h", CHANNEL_ID],
-          ["e", id("yyy", index)],
-        ],
-        content: "+",
-      }),
-    );
-  }
-  for (let index = 0; index < 1_495; index += 1) {
-    messages.push(event({ id: id("new", index), createdAt: 6_000 + index }));
-  }
-
-  const normalized = normalizeTimelineMessages(messages);
-
-  assert.equal(normalized.filter((item) => item.kind === 9).length, 2_000);
-  assert.deepEqual(
-    june12Roots.map((rootId) => normalized.some((item) => item.id === rootId)),
-    [true, true, true, true, true],
-  );
-  assert.equal(normalized.filter((item) => item.kind === 5).length, 1_303);
-  assert.equal(normalized.filter((item) => item.kind === 7).length, 231);
-});
-
-test("normalizeTimelineMessages still caps old visible content", () => {
-  const retainedRoot = `${"a".repeat(63)}1`;
-  const reaction = `${"b".repeat(63)}1`;
-  const reactionDeletion = `${"c".repeat(63)}1`;
-  const messages = [];
-
-  for (let index = 0; index < 2_000; index += 1) {
-    messages.push(event({ id: id("old", index), createdAt: 1_000 + index }));
-  }
-  messages.push(event({ id: retainedRoot, createdAt: 4_000 }));
   messages.push(
     event({
-      id: reaction,
+      id: id("aux", 0),
       kind: 7,
-      createdAt: 4_001,
+      createdAt: 4_000,
       tags: [
         ["h", CHANNEL_ID],
-        ["e", retainedRoot],
+        ["e", id("row", 0)],
       ],
       content: "+",
     }),
   );
-  messages.push(
-    event({
-      id: reactionDeletion,
-      kind: 5,
-      createdAt: 4_002,
-      tags: [
-        ["h", CHANNEL_ID],
-        ["e", reaction],
-      ],
-    }),
-  );
 
   const normalized = normalizeTimelineMessages(messages);
 
+  assert.equal(normalized.filter((item) => item.kind === 9).length, 2_100);
   assert.equal(
-    normalized.some((item) => item.id === id("old", 0)),
-    false,
-  );
-  assert.equal(
-    normalized.some((item) => item.id === retainedRoot),
+    normalized.some((item) => item.id === id("row", 0)),
     true,
   );
   assert.equal(
-    normalized.some((item) => item.id === reaction),
+    normalized.some((item) => item.id === id("aux", 0)),
     true,
   );
-  assert.equal(
-    normalized.some((item) => item.id === reactionDeletion),
-    true,
-  );
-});
-
-test("normalizeTimelineMessages counts huddle starts as visible content", () => {
-  const huddleId = `${"d".repeat(63)}1`;
-  const messages = [];
-
-  for (let index = 0; index < 2_000; index += 1) {
-    messages.push(event({ id: id("old", index), createdAt: 1_000 + index }));
-  }
-  messages.push(
-    event({
-      id: huddleId,
-      kind: KIND_HUDDLE_STARTED,
-      createdAt: 4_000,
-      content: JSON.stringify({
-        ephemeral_channel_id: "8d764100-fd8f-44cf-9c98-6d8fbd739b8c",
-      }),
-    }),
-  );
-
-  const normalized = normalizeTimelineMessages(messages);
-
-  assert.equal(
-    normalized.some((item) => item.id === id("old", 0)),
-    false,
-  );
-  assert.equal(
-    normalized.some((item) => item.id === huddleId),
-    true,
-  );
-  assert.equal(normalized.filter((item) => item.kind === 9).length, 1_999);
 });
 
 test("timeline history merge preserves freshly fetched older content roots", () => {

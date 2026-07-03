@@ -3,10 +3,11 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import {
   channelMessagesKey,
+  channelWindowKey,
   dedupeMessagesById,
-  mergeTimelineHistoryMessages,
   normalizeTimelineMessages,
   sortMessages,
+  threadRepliesKey,
 } from "@/features/messages/lib/messageQueryKeys";
 import {
   buildReplyTags,
@@ -28,23 +29,22 @@ import {
   removeReaction,
   sendChannelMessage,
 } from "@/shared/api/tauri";
+import { getChannelWindowEvents } from "@/shared/api/channelWindow";
 import type { Channel, Identity, RelayEvent } from "@/shared/api/types";
 // Same .mjs the renderer uses, so the cache-update projection can't drift
 // from the on-render overlay.
 import { applyEditTagOverlay } from "@/features/messages/lib/applyEditTagOverlay.mjs";
-import { backfillAuxForMessages } from "@/features/messages/lib/auxBackfill";
-import { countTopLevelTimelineRows } from "@/features/messages/lib/formatTimelineMessages";
 import {
-  mergeHistoryOverSnapshot,
-  readMessageSnapshot,
-  writeMessageSnapshot,
-} from "@/features/messages/lib/messageSnapshot";
+  emptyChannelWindowStore,
+  flattenChannelWindowEvents,
+  mergeLiveChannelWindowEvent,
+  replaceNewestChannelWindow,
+  type ChannelWindowStore,
+} from "@/features/messages/lib/channelWindowStore";
+import { parseChannelWindowResponse } from "@/features/messages/lib/channelWindowResponse";
 import {
-  MIN_TOP_LEVEL_ROWS_PER_FETCH,
-  pageOlderMessagesUntilRowFloor,
-} from "@/features/messages/lib/pageOlderMessages";
-import { useWorkspaces } from "@/features/workspaces/useWorkspaces";
-import {
+  CHANNEL_AUX_EVENT_KINDS,
+  CHANNEL_TIMELINE_CONTENT_KINDS,
   KIND_STREAM_MESSAGE,
   KIND_SYSTEM_MESSAGE,
 } from "@/shared/constants/kinds";
@@ -52,10 +52,13 @@ import {
 type MessageQueryContext = {
   optimisticId: string;
   previousMessages: RelayEvent[];
+  previousWindow: ChannelWindowStore | undefined;
+  channelId: string;
   queryKey: ReturnType<typeof channelMessagesKey>;
 };
 
-const CHANNEL_HISTORY_LIMIT = 60;
+const CHANNEL_TIMELINE_KINDS = new Set<number>(CHANNEL_TIMELINE_CONTENT_KINDS);
+const CHANNEL_AUX_KINDS = new Set<number>(CHANNEL_AUX_EVENT_KINDS);
 
 function getLocalRenderKey(message: RelayEvent) {
   return message.localKey ?? message.id;
@@ -243,125 +246,73 @@ export function resolveThreadReplyTarget(
 export function useChannelMessagesQuery(channel: Channel | null) {
   const queryClient = useQueryClient();
   const queryKey = channelMessagesKey(channel?.id ?? "none");
-  const { activeWorkspace } = useWorkspaces();
-  const relayUrl = activeWorkspace?.relayUrl ?? null;
+  const windowKey = channelWindowKey(channel?.id ?? "none");
 
-  const query = useQuery({
+  return useQuery({
     enabled: channel !== null && channel.channelType !== "forum",
-    // Paint instantly from the in-memory cache, or — after a restart / gc —
-    // from the persisted per-channel snapshot, then revalidate behind it.
-    placeholderData: () => {
-      const cached = queryClient.getQueryData<RelayEvent[]>(queryKey);
-      if (cached && cached.length > 0) {
-        return cached;
-      }
-      if (!channel || !relayUrl) {
-        return undefined;
-      }
-      const snapshot = readMessageSnapshot(relayUrl, channel.id);
-      return snapshot ? normalizeTimelineMessages(snapshot) : undefined;
-    },
     queryKey,
     queryFn: async () => {
-      if (!channel) {
-        throw new Error("No channel selected.");
-      }
-
-      const history = await relayClient.fetchChannelHistory(
-        channel.id,
-        CHANNEL_HISTORY_LIMIT,
-      );
-      // Merge over the cache, or over the persisted snapshot when cold; a
-      // cold snapshot load widens the aux backfill to the merged timeline so
-      // tombstones/edits for snapshot-only rows are fetched (see helper doc).
-      const cached = queryClient.getQueryData<RelayEvent[]>(queryKey);
-      const { merged: mergedHistory, auxBackfillWindow } =
-        mergeHistoryOverSnapshot({
-          cached,
-          snapshot:
-            !cached && relayUrl
-              ? readMessageSnapshot(relayUrl, channel.id)
-              : null,
-          history,
-        });
-
-      // Paint messages immediately; backfill their reactions/edits/deletions
-      // by `#e` in the background (it self-merges into the same cache key).
-      void backfillAuxForMessages(queryClient, channel.id, auxBackfillWindow);
-
-      // Seed the cache and paint immediately; if the cold window renders
-      // thinner than a normal scroll page (reply-heavy channels), top it up
-      // in the background — it self-merges into the same cache key.
-      queryClient.setQueryData<RelayEvent[]>(queryKey, mergedHistory);
-      if (
-        countTopLevelTimelineRows(mergedHistory) < MIN_TOP_LEVEL_ROWS_PER_FETCH
-      ) {
-        void pageOlderMessagesUntilRowFloor(
-          queryClient,
-          channel.id,
-          () => true,
-        ).catch((error) => {
-          console.error("Failed to top up channel history", channel.id, error);
-        });
-      }
-      return queryClient.getQueryData<RelayEvent[]>(queryKey) ?? mergedHistory;
+      if (!channel) throw new Error("No channel selected.");
+      const events = await getChannelWindowEvents(channel.id);
+      const page = parseChannelWindowResponse(events, channel.id, null);
+      const current =
+        queryClient.getQueryData<ChannelWindowStore>(windowKey) ??
+        emptyChannelWindowStore();
+      const next = replaceNewestChannelWindow(current, page);
+      queryClient.setQueryData(windowKey, next);
+      return flattenChannelWindowEvents(next);
     },
     staleTime: 5 * 60 * 1_000,
-    // Long in-memory retention: a channel revisited within the hour paints
-    // from cache with zero relay round trips; the persisted snapshot covers
-    // restarts beyond it.
     gcTime: 60 * 60 * 1_000,
   });
-
-  // Persist the newest slice after each settled update so the next cold open
-  // (restart, gc) paints from the snapshot. Placeholder frames are skipped —
-  // they are what the snapshot painted, not new information.
-  const persistSnapshot = useEffectEvent((events: RelayEvent[]) => {
-    if (relayUrl && channel) {
-      writeMessageSnapshot(relayUrl, channel.id, events);
-    }
-  });
-  const settledData = query.isPlaceholderData ? undefined : query.data;
-  useEffect(() => {
-    if (settledData && settledData.length > 0) {
-      persistSnapshot(settledData);
-    }
-  }, [settledData]);
-
-  return query;
 }
 
 export function useChannelSubscription(channel: Channel | null) {
   const queryClient = useQueryClient();
   const channelId = channel?.id ?? null;
   const channelType = channel?.channelType ?? null;
-  const syncLatestHistory = useEffectEvent(async () => {
-    if (!channelId) {
-      return;
-    }
-
-    const history = await relayClient.fetchChannelHistory(
-      channelId,
-      CHANNEL_HISTORY_LIMIT,
-    );
-
-    queryClient.setQueryData<RelayEvent[]>(
-      channelMessagesKey(channelId),
-      (current = []) => mergeTimelineHistoryMessages(current, history),
-    );
-
-    void backfillAuxForMessages(queryClient, channelId, history);
+  const refreshNewestWindow = useEffectEvent(async () => {
+    if (!channelId) return;
+    await queryClient.invalidateQueries({
+      queryKey: channelMessagesKey(channelId),
+      exact: true,
+      refetchType: "active",
+    });
   });
 
   const appendMessage = useEffectEvent((event: RelayEvent) => {
-    if (!channelId) {
+    if (!channelId) return;
+    const isTimelineRow = CHANNEL_TIMELINE_KINDS.has(event.kind);
+    if (isTimelineRow && getThreadReference(event.tags).parentId !== null) {
+      const rootId = getThreadReference(event.tags).rootId;
+      if (rootId) {
+        queryClient.setQueryData<RelayEvent[]>(
+          threadRepliesKey(channelId, rootId),
+          (current = []) => mergeMessages(current, event),
+        );
+      }
       return;
     }
+    if (!isTimelineRow && !CHANNEL_AUX_KINDS.has(event.kind)) return;
+    if (!isTimelineRow) {
+      queryClient.setQueriesData<RelayEvent[]>(
+        { queryKey: ["thread-replies", channelId] },
+        (current = []) => mergeMessages(current, event),
+      );
+    }
 
-    queryClient.setQueryData<RelayEvent[]>(
-      channelMessagesKey(channelId),
-      (current = []) => mergeTimelineCacheMessages(current, event),
-    );
+    const windowKey = channelWindowKey(channelId);
+    const current =
+      queryClient.getQueryData<ChannelWindowStore>(windowKey) ??
+      emptyChannelWindowStore();
+    const next = mergeLiveChannelWindowEvent(current, event, isTimelineRow);
+    if (next !== current) {
+      queryClient.setQueryData(windowKey, next);
+      queryClient.setQueryData<RelayEvent[]>(
+        channelMessagesKey(channelId),
+        flattenChannelWindowEvents(next),
+      );
+    }
 
     if (event.kind === KIND_SYSTEM_MESSAGE) {
       try {
@@ -393,10 +344,10 @@ export function useChannelSubscription(channel: Channel | null) {
     let isDisposed = false;
     let cleanup: (() => Promise<void>) | undefined;
     const disposeReconnectListener = relayClient.subscribeToReconnects(() => {
-      void syncLatestHistory().catch((error) => {
+      void refreshNewestWindow().catch((error) => {
         if (!isDisposed) {
           console.error(
-            "Failed to refresh channel history after reconnecting",
+            "Failed to refresh channel window after reconnecting",
             channelId,
             error,
           );
@@ -405,7 +356,7 @@ export function useChannelSubscription(channel: Channel | null) {
     });
 
     relayClient
-      .subscribeToChannel(channelId, (event) => {
+      .subscribeToChannelLive(channelId, (event) => {
         if (!isDisposed) {
           appendMessage(event);
         }
@@ -417,15 +368,6 @@ export function useChannelSubscription(channel: Channel | null) {
         }
 
         cleanup = dispose;
-        // No post-subscribe history refetch: useChannelMessagesQuery already
-        // loaded the latest CHANNEL_HISTORY_LIMIT events, and the live
-        // subscription itself backfills up to 50 most-recent events via its
-        // initial REQ (buildChannelFilter(id, 50)). Both write into the same
-        // channelMessagesKey cache, so any window between the two REQs is
-        // covered by the live sub's overlap unless >50 messages land in
-        // <1s — vanishingly rare in practice. The reconnect listener above
-        // still bridges gaps from connection drops, where the gap *is*
-        // unbounded.
       })
       .catch((error) => {
         console.error("Failed to subscribe to channel", channelId, error);
@@ -597,6 +539,9 @@ export function useSendMessageMutation(
 
       const previousMessages =
         queryClient.getQueryData<RelayEvent[]>(queryKey) ?? [];
+      const windowKey = channelWindowKey(effectiveChannel.id);
+      const previousWindow =
+        queryClient.getQueryData<ChannelWindowStore>(windowKey);
       const optimisticMessage = createOptimisticMessage(
         effectiveChannel.id,
         content.trim(),
@@ -607,14 +552,21 @@ export function useSendMessageMutation(
         mediaTags ?? [],
       );
 
+      const nextWindow = mergeLiveChannelWindowEvent(
+        previousWindow ?? emptyChannelWindowStore(),
+        optimisticMessage,
+      );
+      queryClient.setQueryData(windowKey, nextWindow);
       queryClient.setQueryData<RelayEvent[]>(
         queryKey,
-        mergeTimelineCacheMessages(previousMessages, optimisticMessage),
+        flattenChannelWindowEvents(nextWindow),
       );
 
       return {
         optimisticId: optimisticMessage.id,
         previousMessages,
+        previousWindow,
+        channelId: effectiveChannel.id,
         queryKey,
       };
     },
@@ -624,17 +576,34 @@ export function useSendMessageMutation(
       }
 
       queryClient.setQueryData(context.queryKey, context.previousMessages);
+      queryClient.setQueryData(
+        channelWindowKey(context.channelId),
+        context.previousWindow,
+      );
     },
     onSuccess: (message, _variables, context) => {
       if (!context) {
         return;
       }
 
-      queryClient.setQueryData<RelayEvent[]>(context.queryKey, (current = []) =>
-        mergeTimelineCacheMessages(current, {
-          ...message,
-          localKey: context.optimisticId,
-        }),
+      const windowKey = channelWindowKey(context.channelId);
+      const current =
+        queryClient.getQueryData<ChannelWindowStore>(windowKey) ??
+        emptyChannelWindowStore();
+      const withoutPending: ChannelWindowStore = {
+        ...current,
+        liveOverlay: current.liveOverlay.filter(
+          (event) => event.id !== context.optimisticId,
+        ),
+      };
+      const next = mergeLiveChannelWindowEvent(withoutPending, {
+        ...message,
+        localKey: context.optimisticId,
+      });
+      queryClient.setQueryData(windowKey, next);
+      queryClient.setQueryData<RelayEvent[]>(
+        context.queryKey,
+        flattenChannelWindowEvents(next),
       );
     },
   });

@@ -493,6 +493,7 @@ pub fn run() {
             get_forum_posts,
             get_forum_thread,
             get_thread_replies,
+            get_channel_window,
             get_channel_messages_before,
             edit_message,
             delete_message,

@@ -46,8 +46,7 @@ import {
   selectTimelineLoadingState,
 } from "@/features/messages/lib/timelineLoadingState";
 import { useFetchOlderMessages } from "@/features/messages/useFetchOlderMessages";
-import { useLoadMissingAncestors } from "@/features/messages/useLoadMissingAncestors";
-import { useThreadReplies } from "@/features/messages/useThreadReplies";
+import { useIndependentThreadPanel } from "@/features/messages/useIndependentThreadPanel";
 import { useChannelTyping } from "@/features/messages/useChannelTyping";
 import type { TimelineMessage } from "@/features/messages/types";
 import { useUsersBatchQuery } from "@/features/profile/hooks";
@@ -465,7 +464,6 @@ export function ChannelScreen({
     markRevealedRepliesRead,
     openThreadHeadMessage,
     threadFirstUnreadReplyId,
-    threadMessages,
     threadReplyTargetMessage,
     threadReplyUnreadCounts,
     threadUnreadCounts,
@@ -711,27 +709,28 @@ export function ChannelScreen({
     threadReplyTargetMessage,
   ]);
 
-  useLoadMissingAncestors(activeChannel, resolvedMessages);
-  // Fetch the full reply subtree server-side when a thread is open, closing the
-  // descendant gap that useLoadMissingAncestors (ancestors-only) leaves. The
-  // open thread head is the top-level message, i.e. the thread root.
-  useThreadReplies(activeChannel, effectiveOpenThreadHeadId);
+  const threadPanelData = useIndependentThreadPanel({
+    activeChannel,
+    channelEvents: resolvedMessages,
+    rootId: effectiveOpenThreadHeadId,
+    replyTargetId: threadReplyTargetId,
+    expandedReplyIds: expandedThreadReplyIds,
+    currentPubkey,
+    currentAvatarUrl: currentProfile?.avatarUrl ?? null,
+    profiles: messageProfiles,
+    members: channelMembers,
+    personaLookup,
+    respondToLookup,
+  });
   const hasAuxiliaryPanel = Boolean(
     effectiveOpenThreadHeadId ||
       openAgentSessionPubkey ||
       profilePanelPubkey ||
       channelManagementOpen,
   );
-  const displayedThreadHeadMessage =
-    openThreadHeadMessage?.id === effectiveOpenThreadHeadId
-      ? openThreadHeadMessage
-      : null;
-  const displayedThreadMessages = displayedThreadHeadMessage
-    ? threadMessages
-    : [];
-  const displayedThreadReplyTargetMessage = displayedThreadHeadMessage
-    ? threadReplyTargetMessage
-    : null;
+  const displayedThreadHeadMessage = threadPanelData.threadHead;
+  const displayedThreadMessages = threadPanelData.visibleReplies;
+  const displayedThreadReplyTargetMessage = threadPanelData.replyTargetMessage;
   const displayedThreadFirstUnreadReplyId = displayedThreadHeadMessage
     ? threadFirstUnreadReplyId
     : null;
