@@ -626,6 +626,7 @@ pub fn run() {
             archive::create_save_subscription,
             archive::list_save_subscriptions,
             archive::delete_save_subscription,
+            archive::read_archived_events,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

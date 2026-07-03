@@ -162,3 +162,38 @@ export async function archiveEvents(
     })),
   });
 }
+
+/**
+ * Read a paginated page of archived raw events for a scope.
+ *
+ * Returns at most `limit` raw Nostr events (default 50) in newest-first order.
+ * Use `before` (Unix seconds) as a keyset cursor: pass the `created_at` of the
+ * oldest event from the previous page to load the next older page. A page
+ * shorter than `limit` signals the archive is exhausted.
+ *
+ * Pass `kinds: null` (or omit) to admit all archived kinds. An empty array
+ * `[]` matches nothing — callers that want all events must omit/null `kinds`.
+ */
+export async function readArchivedEvents(
+  scopeType: ScopeType,
+  scopeValue: string,
+  opts?: { kinds?: number[] | null; before?: number | null; limit?: number },
+): Promise<import("@/shared/api/types").RelayEvent[]> {
+  const rawRows = await invokeTauri<string[]>("read_archived_events", {
+    scopeType,
+    scopeValue,
+    kinds: opts?.kinds ?? null,
+    before: opts?.before ?? null,
+    limit: opts?.limit ?? null,
+  });
+  return rawRows
+    .map((raw) => {
+      try {
+        return JSON.parse(raw) as import("@/shared/api/types").RelayEvent;
+      } catch {
+        console.warn("[tauriArchive] failed to parse archived raw_json:", raw);
+        return null;
+      }
+    })
+    .filter((e): e is import("@/shared/api/types").RelayEvent => e !== null);
+}

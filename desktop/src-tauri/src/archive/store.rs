@@ -286,6 +286,97 @@ pub fn upsert_event_scope(
     Ok(())
 }
 
+/// Read a paginated page of archived events for a given scope.
+///
+/// Returns the `raw_json` of matching events in newest-first order
+/// (`ORDER BY created_at DESC, id DESC`). The optional `before` cursor
+/// implements keyset pagination: only rows with `created_at < before` are
+/// included, which is stable under concurrent archive writes. Pass `None`
+/// for `before` to start at the newest end.
+///
+/// An optional `kinds` slice filters by event kind; `None` admits all kinds.
+///
+/// Returns at most `limit` rows (caller is responsible for a sane default).
+pub fn read_archived_events(
+    conn: &Connection,
+    identity_pubkey: &str,
+    relay_url: &str,
+    scope_type: &str,
+    scope_value: &str,
+    kinds: Option<&[i64]>,
+    before: Option<i64>,
+    limit: i64,
+) -> Result<Vec<String>, String> {
+    // Build clauses and positional params together so slot numbers are always
+    // contiguous (rusqlite rejects gaps like ?4 then ?6 with no ?5 in between).
+    //
+    // Fixed params: identity_pubkey, relay_url, scope_type, scope_value = ?1–?4.
+    // Optional params appended in declaration order, limit always last.
+
+    let mut next_slot: usize = 5;
+    let mut extra_clauses = String::new();
+    let mut kinds_json: Option<String> = None;
+    let mut before_val: Option<i64> = None;
+
+    if let Some(ks) = kinds {
+        kinds_json = Some(serde_json::to_string(ks).unwrap_or_else(|_| "[]".to_string()));
+        extra_clauses.push_str(&format!(
+            " AND ae.kind IN (SELECT value FROM json_each(?{next_slot}))"
+        ));
+        next_slot += 1;
+    }
+    if let Some(b) = before {
+        before_val = Some(b);
+        extra_clauses.push_str(&format!(" AND ae.created_at < ?{next_slot}"));
+        next_slot += 1;
+    }
+    let limit_slot = next_slot;
+
+    let sql = format!(
+        "SELECT ae.raw_json \
+         FROM archived_events ae \
+         INNER JOIN archived_event_scopes aes \
+             ON aes.identity_pubkey = ae.identity_pubkey \
+            AND aes.relay_url       = ae.relay_url \
+            AND aes.id              = ae.id \
+         WHERE ae.identity_pubkey = ?1 \
+           AND ae.relay_url       = ?2 \
+           AND aes.scope_type     = ?3 \
+           AND aes.scope_value    = ?4\
+         {extra_clauses}\
+         ORDER BY ae.created_at DESC, ae.id DESC \
+         LIMIT ?{limit_slot}",
+    );
+
+    // Build the param list dynamically to match the generated SQL.
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![
+        Box::new(identity_pubkey.to_owned()),
+        Box::new(relay_url.to_owned()),
+        Box::new(scope_type.to_owned()),
+        Box::new(scope_value.to_owned()),
+    ];
+    if let Some(kj) = kinds_json {
+        params.push(Box::new(kj));
+    }
+    if let Some(b) = before_val {
+        params.push(Box::new(b));
+    }
+    params.push(Box::new(limit));
+
+    let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|e| format!("prepare read_archived_events: {e}"))?;
+
+    let rows = stmt
+        .query_map(param_refs.as_slice(), |row| row.get::<_, String>(0))
+        .map_err(|e| format!("query read_archived_events: {e}"))?;
+
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("read read_archived_events row: {e}"))
+}
+
 /// GC: delete orphaned event rows whose last scope row was just removed.
 ///
 /// Called after any batch deletion of scope rows. Uses a LEFT JOIN so only
@@ -479,5 +570,235 @@ mod tests {
         .unwrap();
         let removed = gc_orphaned_events(&conn, "pk", "wss://r").unwrap();
         assert_eq!(removed, 0);
+    }
+
+    // ── read_archived_events ─────────────────────────────────────────────────
+
+    fn seed_events(conn: &Connection) {
+        // Three events in scope "channel_h/chan1" for identity "pk"/"wss://r".
+        // created_at: 300 (newest), 200, 100 (oldest).
+        for (id, kind, created_at, raw) in &[
+            ("e1", 9i64, 300i64, r#"{"id":"e1","created_at":300}"#),
+            ("e2", 9i64, 200i64, r#"{"id":"e2","created_at":200}"#),
+            ("e3", 42i64, 100i64, r#"{"id":"e3","created_at":100}"#),
+        ] {
+            upsert_archived_event(
+                conn,
+                "pk",
+                "wss://r",
+                id,
+                *kind,
+                "author",
+                *created_at,
+                raw,
+                999,
+            )
+            .unwrap();
+            upsert_event_scope(conn, "pk", "wss://r", id, "channel_h", "chan1", 999).unwrap();
+        }
+        // One event in a different scope — must never appear in chan1 results.
+        upsert_archived_event(
+            conn,
+            "pk",
+            "wss://r",
+            "e4",
+            9,
+            "author",
+            250,
+            r#"{"id":"e4"}"#,
+            999,
+        )
+        .unwrap();
+        upsert_event_scope(conn, "pk", "wss://r", "e4", "channel_h", "chan2", 999).unwrap();
+    }
+
+    #[test]
+    fn test_read_archived_events_returns_newest_first() {
+        let conn = in_memory();
+        seed_events(&conn);
+        let rows =
+            read_archived_events(&conn, "pk", "wss://r", "channel_h", "chan1", None, None, 10)
+                .unwrap();
+        assert_eq!(rows.len(), 3);
+        // Newest first: e1 (300), e2 (200), e3 (100).
+        let ids: Vec<&str> = rows
+            .iter()
+            .map(|r| {
+                if r.contains("\"e1\"") {
+                    "e1"
+                } else if r.contains("\"e2\"") {
+                    "e2"
+                } else {
+                    "e3"
+                }
+            })
+            .collect();
+        assert_eq!(ids, ["e1", "e2", "e3"]);
+    }
+
+    #[test]
+    fn test_read_archived_events_keyset_cursor_excludes_at_boundary() {
+        let conn = in_memory();
+        seed_events(&conn);
+        // before=300: should exclude e1 (created_at==300), include e2 and e3.
+        let rows = read_archived_events(
+            &conn,
+            "pk",
+            "wss://r",
+            "channel_h",
+            "chan1",
+            None,
+            Some(300),
+            10,
+        )
+        .unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|r| !r.contains("\"e1\"")));
+    }
+
+    #[test]
+    fn test_read_archived_events_keyset_cursor_advances_correctly() {
+        let conn = in_memory();
+        seed_events(&conn);
+        // Page 1: before=None, limit=2 → e1, e2.
+        let page1 =
+            read_archived_events(&conn, "pk", "wss://r", "channel_h", "chan1", None, None, 2)
+                .unwrap();
+        assert_eq!(page1.len(), 2);
+        // Page 2: before=200 (oldest of page1), limit=2 → e3 only.
+        let page2 = read_archived_events(
+            &conn,
+            "pk",
+            "wss://r",
+            "channel_h",
+            "chan1",
+            None,
+            Some(200),
+            2,
+        )
+        .unwrap();
+        assert_eq!(page2.len(), 1);
+        assert!(page2[0].contains("\"e3\""));
+        // No overlap between pages.
+        assert!(page1.iter().all(|r| !r.contains("\"e3\"")));
+    }
+
+    #[test]
+    fn test_read_archived_events_kind_filter() {
+        let conn = in_memory();
+        seed_events(&conn);
+        // Only kind 9 (e1 and e2); e3 is kind 42.
+        let rows = read_archived_events(
+            &conn,
+            "pk",
+            "wss://r",
+            "channel_h",
+            "chan1",
+            Some(&[9]),
+            None,
+            10,
+        )
+        .unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|r| !r.contains("\"e3\"")));
+    }
+
+    #[test]
+    fn test_read_archived_events_scope_isolation() {
+        let conn = in_memory();
+        seed_events(&conn);
+        // chan2 has only e4; chan1 results must not include e4.
+        let chan1 =
+            read_archived_events(&conn, "pk", "wss://r", "channel_h", "chan1", None, None, 10)
+                .unwrap();
+        assert!(chan1.iter().all(|r| !r.contains("\"e4\"")));
+
+        let chan2 =
+            read_archived_events(&conn, "pk", "wss://r", "channel_h", "chan2", None, None, 10)
+                .unwrap();
+        assert_eq!(chan2.len(), 1);
+        assert!(chan2[0].contains("\"e4\""));
+    }
+
+    #[test]
+    fn test_read_archived_events_identity_isolation() {
+        let conn = in_memory();
+        seed_events(&conn);
+        // Different identity — must see no rows.
+        let rows = read_archived_events(
+            &conn,
+            "pk2",
+            "wss://r",
+            "channel_h",
+            "chan1",
+            None,
+            None,
+            10,
+        )
+        .unwrap();
+        assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn test_read_archived_events_relay_isolation() {
+        let conn = in_memory();
+        seed_events(&conn);
+        // Different relay — must see no rows.
+        let rows = read_archived_events(
+            &conn,
+            "pk",
+            "wss://other",
+            "channel_h",
+            "chan1",
+            None,
+            None,
+            10,
+        )
+        .unwrap();
+        assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn test_read_archived_events_empty_result() {
+        let conn = in_memory();
+        let rows =
+            read_archived_events(&conn, "pk", "wss://r", "channel_h", "nope", None, None, 10)
+                .unwrap();
+        assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn test_read_archived_events_limit_respected() {
+        let conn = in_memory();
+        seed_events(&conn);
+        let rows =
+            read_archived_events(&conn, "pk", "wss://r", "channel_h", "chan1", None, None, 1)
+                .unwrap();
+        assert_eq!(rows.len(), 1);
+        // Must be the newest (e1, created_at=300).
+        assert!(rows[0].contains("\"e1\""));
+    }
+
+    #[test]
+    fn test_read_archived_events_no_duplicates_across_pages() {
+        let conn = in_memory();
+        seed_events(&conn);
+        let page1 =
+            read_archived_events(&conn, "pk", "wss://r", "channel_h", "chan1", None, None, 2)
+                .unwrap();
+        let page2 = read_archived_events(
+            &conn,
+            "pk",
+            "wss://r",
+            "channel_h",
+            "chan1",
+            None,
+            Some(200),
+            2,
+        )
+        .unwrap();
+        // All event ids across both pages are unique.
+        let all: Vec<_> = page1.iter().chain(page2.iter()).collect();
+        assert_eq!(all.len(), 3); // 2 + 1 = 3 total, no duplication.
     }
 }

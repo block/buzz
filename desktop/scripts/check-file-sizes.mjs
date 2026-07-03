@@ -65,8 +65,9 @@ const overrides = new Map([
   // #[cfg(not(target_os = "windows"))] mod real_relay). The test module is the
   // source of the overage — production logic is ~408 lines. The fix-round added
   // 2 regression tests (F2: out-of-range kind + F3: atomicity invariant).
+  // read_archived_events Tauri command added ~39 lines (Phase 1 read-back).
   // Queued to split the test module into archive/mod_tests.rs in a follow-up.
-  ["src-tauri/src/archive/mod.rs", 1395],
+  ["src-tauri/src/archive/mod.rs", 1434],
   ["src-tauri/src/commands/agents.rs", 1437],
   // #1418 read-path fix: get_thread_replies' blocker fix (shared TIMELINE_KINDS
   // const + build_thread_replies_filter helper, mirroring the channel sibling so

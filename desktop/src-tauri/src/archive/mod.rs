@@ -412,6 +412,45 @@ pub fn delete_save_subscription(
     )
 }
 
+// ── read_archived_events ─────────────────────────────────────────────────────
+
+/// Default page size for `read_archived_events`.
+const DEFAULT_READ_LIMIT: i64 = 50;
+
+/// Read a paginated page of archived events for a scope.
+///
+/// Returns at most `limit` events (default `DEFAULT_READ_LIMIT`) in
+/// newest-first order. Pass `before` (Unix seconds) as a keyset cursor to
+/// request events strictly older than that timestamp — advance it to the
+/// `created_at` of the oldest event in the previous page to walk backwards.
+/// A returned page shorter than `limit` signals that the archive is exhausted.
+///
+/// `kinds` is an optional filter; an empty array means "no kinds matched"
+/// (not "all kinds") — callers should pass `null`/`None` when they want all.
+#[tauri::command]
+pub fn read_archived_events(
+    state: State<'_, AppState>,
+    scope_type: ScopeType,
+    scope_value: String,
+    kinds: Option<Vec<i64>>,
+    before: Option<i64>,
+    limit: Option<i64>,
+) -> Result<Vec<String>, String> {
+    let identity_pk = identity_pubkey(&state)?;
+    let relay_url = relay_ws_url_with_override(&state);
+    let conn = open_db()?;
+    store::read_archived_events(
+        &conn,
+        &identity_pk,
+        &relay_url,
+        scope_type.as_str(),
+        &scope_value,
+        kinds.as_deref(),
+        before,
+        limit.unwrap_or(DEFAULT_READ_LIMIT),
+    )
+}
+
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
