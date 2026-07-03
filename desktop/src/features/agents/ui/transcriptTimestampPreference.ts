@@ -1,11 +1,12 @@
 import * as React from "react";
 
 /**
- * User preference for showing a timestamp under each polished activity row.
- * Persisted in localStorage and shared across every transcript surface, same
- * as the animation preference. This is a device-level UI preference, not
- * workspace-scoped data, so it is intentionally not reset on workspace
- * switch. Defaults off to keep the feed compact.
+ * User preference for showing a timestamp under each activity row — polished
+ * transcript rows and raw JSON-RPC cards alike. Persisted in localStorage and
+ * shared across every transcript surface, same as the animation preference.
+ * This is a device-level UI preference, not workspace-scoped data, so it is
+ * intentionally not reset on workspace switch. Defaults off to keep the feed
+ * compact.
  */
 const STORAGE_KEY = "buzz:show-transcript-timestamps";
 

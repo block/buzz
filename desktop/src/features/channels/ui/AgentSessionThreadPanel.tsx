@@ -239,17 +239,14 @@ export function AgentSessionThreadPanel({
             <DropdownMenuItem
               className="items-start gap-3"
               data-testid="agent-session-toggle-show-timestamps"
-              disabled={showRawFeed}
               onSelect={(event) => {
                 event.preventDefault();
                 setTranscriptTimestampsEnabled(!showTimestamps);
               }}
               title={
-                showRawFeed
-                  ? "Raw activity rows don't show timestamps."
-                  : showTimestamps
-                    ? "Hide per-row activity timestamps."
-                    : "Show a timestamp under each activity row."
+                showTimestamps
+                  ? "Hide per-row activity timestamps."
+                  : "Show a timestamp under each activity row."
               }
             >
               <span className="min-w-0 flex-1">
@@ -260,7 +257,7 @@ export function AgentSessionThreadPanel({
               </span>
               <Switch
                 aria-hidden="true"
-                checked={showTimestamps && !showRawFeed}
+                checked={showTimestamps}
                 className="pointer-events-none mt-0.5"
                 tabIndex={-1}
               />

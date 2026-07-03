@@ -1,7 +1,11 @@
 import type { ObserverEvent } from "./agentSessionTypes";
 import { describeRawEvent } from "./agentSessionTranscript";
+import { TranscriptTimestamp } from "./activityRenderClasses/TranscriptTimestamp";
+import { useTranscriptTimestampsEnabled } from "./transcriptTimestampPreference";
 
 export function RawEventRail({ events }: { events: ObserverEvent[] }) {
+  const showTimestamps = useTranscriptTimestampsEnabled();
+
   return (
     <section className="flex min-h-0 w-full flex-col text-foreground">
       <div className="min-h-0 flex-1">
@@ -21,6 +25,14 @@ export function RawEventRail({ events }: { events: ObserverEvent[] }) {
                     #{event.seq}
                   </span>{" "}
                   {describeRawEvent(event)}
+                  {showTimestamps ? (
+                    <span
+                      className="mt-1 flex justify-start"
+                      data-testid="raw-event-timestamp"
+                    >
+                      <TranscriptTimestamp timestamp={event.timestamp} />
+                    </span>
+                  ) : null}
                 </summary>
                 <pre className="mt-2 max-h-72 overflow-auto whitespace-pre-wrap wrap-break-word rounded-md border border-border/40 bg-background/45 p-2 font-mono text-xs leading-5 text-muted-foreground">
                   {JSON.stringify(event.payload, null, 2)}
