@@ -23,26 +23,26 @@ const MAX_PROXY_RESPONSE: u64 = 20 * 1024 * 1024;
 struct ProxyState {
     client: reqwest::Client,
     app_handle: tauri::AppHandle,
+    /// Exact `tauri dev` webview origin (from `build.devUrl`), accepted in
+    /// debug builds only. `None` in packaged builds.
+    dev_origin: Option<String>,
 }
 
 /// True when `origin` belongs to the Tauri webview itself: the custom-scheme
-/// origins of packaged builds, or a loopback origin used by `tauri dev`
-/// (`devUrl` is `http://localhost:<per-worktree-port>`). Loopback origins
-/// imply code already running on this machine, which could reach the proxy
-/// directly anyway — allowing them adds no new exposure, while remote
-/// websites keep getting 403.
-fn is_webview_origin(origin: &str) -> bool {
+/// origins of packaged builds, plus — in debug builds only — the exact
+/// `tauri dev` origin (`build.devUrl` from the merged Tauri config, e.g.
+/// `http://localhost:<per-worktree-port>`). Packaged builds accept only the
+/// custom-scheme origins: a blanket "any loopback origin" rule would let any
+/// local web page that discovers the proxy port make JS-readable requests to
+/// relay media.
+fn is_webview_origin(origin: &str, dev_origin: Option<&str>) -> bool {
     if origin == "tauri://localhost" || origin == "http://tauri.localhost" {
         return true;
     }
-    let Some(rest) = origin
-        .strip_prefix("http://")
-        .or_else(|| origin.strip_prefix("https://"))
-    else {
-        return false;
-    };
-    let host = rest.split(':').next().unwrap_or(rest);
-    host == "localhost" || host == "127.0.0.1"
+    if cfg!(debug_assertions) {
+        return dev_origin.is_some_and(|dev| origin == dev);
+    }
+    false
 }
 
 async fn proxy_handler(AxumState(state): AxumState<ProxyState>, req: Request) -> Response {
@@ -54,7 +54,7 @@ async fn proxy_handler(AxumState(state): AxumState<ProxyState>, req: Request) ->
         .get("origin")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    if !origin.is_empty() && !is_webview_origin(origin) {
+    if !origin.is_empty() && !is_webview_origin(origin, state.dev_origin.as_deref()) {
         return (StatusCode::FORBIDDEN, "forbidden: invalid origin").into_response();
     }
 
@@ -154,9 +154,19 @@ async fn proxy_handler(AxumState(state): AxumState<ProxyState>, req: Request) ->
 /// Tauri protocol handler's requirement to buffer the entire response into
 /// `Vec<u8>`. Returns the OS-assigned port.
 pub async fn spawn_media_proxy(http_client: reqwest::Client, app_handle: tauri::AppHandle) -> u16 {
+    // Origin form of `build.devUrl` (e.g. "http://localhost:1420"), only
+    // consulted by `is_webview_origin` in debug builds.
+    let dev_origin = app_handle
+        .config()
+        .build
+        .dev_url
+        .as_ref()
+        .map(|url| url.origin().ascii_serialization());
+
     let proxy_state = ProxyState {
         client: http_client,
         app_handle,
+        dev_origin,
     };
 
     let app = Router::new()
@@ -339,24 +349,37 @@ mod tests {
 
     #[test]
     fn allows_packaged_webview_origins() {
-        assert!(is_webview_origin("tauri://localhost"));
-        assert!(is_webview_origin("http://tauri.localhost"));
+        assert!(is_webview_origin("tauri://localhost", None));
+        assert!(is_webview_origin("http://tauri.localhost", None));
     }
 
     #[test]
-    fn allows_loopback_dev_origins_on_any_port() {
-        assert!(is_webview_origin("http://localhost:1420"));
-        assert!(is_webview_origin("http://localhost:47177"));
-        assert!(is_webview_origin("http://127.0.0.1:4173"));
-        assert!(is_webview_origin("http://localhost"));
+    #[cfg(debug_assertions)]
+    fn allows_only_the_exact_dev_origin_in_debug_builds() {
+        let dev = Some("http://localhost:1420");
+        assert!(is_webview_origin("http://localhost:1420", dev));
+        // Other loopback origins are not the webview.
+        assert!(!is_webview_origin("http://localhost:47177", dev));
+        assert!(!is_webview_origin("http://127.0.0.1:1420", dev));
+        assert!(!is_webview_origin("http://localhost", dev));
+        assert!(!is_webview_origin("http://localhost:1420", None));
+    }
+
+    #[test]
+    #[cfg(not(debug_assertions))]
+    fn rejects_dev_origin_in_release_builds() {
+        let dev = Some("http://localhost:1420");
+        assert!(!is_webview_origin("http://localhost:1420", dev));
+        assert!(!is_webview_origin("http://127.0.0.1:4173", dev));
     }
 
     #[test]
     fn rejects_remote_and_lookalike_origins() {
-        assert!(!is_webview_origin("https://evil.example.com"));
-        assert!(!is_webview_origin("http://localhost.evil.com"));
-        assert!(!is_webview_origin("http://127.0.0.1.evil.com"));
-        assert!(!is_webview_origin("file://localhost"));
-        assert!(!is_webview_origin("null"));
+        let dev = Some("http://localhost:1420");
+        assert!(!is_webview_origin("https://evil.example.com", dev));
+        assert!(!is_webview_origin("http://localhost.evil.com", dev));
+        assert!(!is_webview_origin("http://127.0.0.1.evil.com", dev));
+        assert!(!is_webview_origin("file://localhost", dev));
+        assert!(!is_webview_origin("null", dev));
     }
 }
