@@ -305,7 +305,6 @@ function parseHunkHeader(line: string) {
 }
 
 function diffRows(file: ProjectRepoDiffFile): DiffRow[] {
-  const seen = new Map<string, number>();
   let oldLine = 0;
   let newLine = 0;
   return file.patch
@@ -318,7 +317,7 @@ function diffRows(file: ProjectRepoDiffFile): DiffRow[] {
         !line.startsWith("--- ") &&
         !line.startsWith("+++ "),
     )
-    .map((line) => {
+    .map((line, index) => {
       const hunk = parseHunkHeader(line);
       let row: Omit<DiffRow, "key">;
       if (hunk) {
@@ -347,10 +346,9 @@ function diffRows(file: ProjectRepoDiffFile): DiffRow[] {
           type: "context",
         };
       }
-      const rawKey = `${row.type}:${row.oldLine ?? ""}:${row.newLine ?? ""}:${row.content}`;
-      const count = seen.get(rawKey) ?? 0;
-      seen.set(rawKey, count + 1);
-      return { ...row, key: `${file.path}:${count}:${rawKey}` };
+      // Rows are computed once per patch in source order, so a positional
+      // index is a stable, cheap key.
+      return { ...row, key: `${file.path}:${index}` };
     });
 }
 
@@ -380,9 +378,16 @@ function changedFileStats(diff: ProjectRepoDiff | null | undefined) {
 }
 
 function errorMessage(error: unknown) {
-  if (error instanceof Error) return error.message;
-  if (typeof error === "string") return error;
-  return null;
+  const message =
+    error instanceof Error
+      ? error.message
+      : typeof error === "string"
+        ? error
+        : null;
+  if (!message) return null;
+  // Backend errors can carry raw git stderr with temp-dir paths; strip
+  // absolute paths so the UI doesn't leak local filesystem details.
+  return message.replace(/(^|[\s'"`])(?:[A-Za-z]:)?[\\/][^\s'"`]+/g, "$1…");
 }
 
 function DiffPreview({ file }: { file: ProjectRepoDiffFile }) {
@@ -397,6 +402,12 @@ function DiffPreview({ file }: { file: ProjectRepoDiffFile }) {
 
   return (
     <div className="overflow-x-auto bg-background/70 font-mono text-xs leading-5">
+      {file.truncated ? (
+        <div className="border-border/40 border-b bg-amber-500/10 px-4 py-2 text-amber-600 dark:text-amber-400">
+          Large diff truncated — showing the first {rows.length} lines. Use a
+          local checkout to review the full change.
+        </div>
+      ) : null}
       {rows.map((row) => (
         <div
           className={cn(

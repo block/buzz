@@ -200,6 +200,8 @@ export type ProjectRepoDiffFile = {
   additions: number;
   deletions: number;
   patch: string;
+  /** True when the patch was cut off at the backend's per-file line cap. */
+  truncated: boolean;
 };
 
 export type ProjectRepoDiff = {

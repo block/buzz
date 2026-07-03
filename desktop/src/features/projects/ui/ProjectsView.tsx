@@ -395,7 +395,7 @@ function ProjectActionsMenu({
               disabled={disabled}
               onClick={(event) => {
                 event.preventDefault();
-                void Promise.resolve(onDelete(project)).then(() =>
+                void Promise.resolve(onDelete(project)).finally(() =>
                   setConfirmOpen(false),
                 );
               }}
@@ -643,9 +643,6 @@ export function ProjectsView() {
     setSort(nextSort);
     writeStoredSort(nextSort);
   }, []);
-  const handleCreateProject = React.useCallback(() => {
-    toast.info("Project creation is not available yet.");
-  }, []);
 
   const localRepoNames = React.useMemo(
     () =>
@@ -667,6 +664,12 @@ export function ProjectsView() {
   );
 
   const visibleProjects = React.useMemo(() => {
+    // The PRs and Issues filters render dedicated lists
+    // (visiblePullRequests / visibleIssues), not project cards.
+    if (filter === "prs" || filter === "issues") {
+      return [];
+    }
+
     const sortedProjects = projects
       .filter((project) => {
         const summary = activitySummariesQuery.data?.[project.repoAddress];
@@ -674,7 +677,6 @@ export function ProjectsView() {
         if (filter === "mine") return isProjectMine(project, currentPubkey);
         if (filter === "local")
           return hasLocalCheckout(project, localRepoNames);
-        if (filter === "prs") return (summary?.prCount ?? 0) > 0;
         if (filter === "agents") {
           return projectHasAgent(project, people, profiles);
         }
@@ -735,23 +737,25 @@ export function ProjectsView() {
     });
   }, [projectIssuesQuery.data, sort]);
 
+  // Route by the canonical `owner:dtag` project ID — a bare dtag is
+  // ambiguous across owners (forks can share the same dtag).
   const handleOpenProject = React.useCallback(
     (project: Project) => {
-      void goProject(project.dtag);
+      void goProject(project.id);
     },
     [goProject],
   );
 
   const handleOpenPullRequest = React.useCallback(
     (project: Project, pullRequest: ProjectPullRequest) => {
-      void goProject(project.dtag, { pullRequestId: pullRequest.id });
+      void goProject(project.id, { pullRequestId: pullRequest.id });
     },
     [goProject],
   );
 
   const handleOpenIssue = React.useCallback(
     (project: Project, issue: ProjectIssue) => {
-      void goProject(project.dtag, { issueId: issue.id });
+      void goProject(project.id, { issueId: issue.id });
     },
     [goProject],
   );
@@ -812,11 +816,7 @@ export function ProjectsView() {
         )}
         ref={projectsHeaderChromeRef}
       >
-        <ProjectsToolbar
-          filter={filter}
-          onCreateProject={handleCreateProject}
-          onFilterChange={handleFilterChange}
-        />
+        <ProjectsToolbar filter={filter} onFilterChange={handleFilterChange} />
       </div>
 
       <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto px-4 pb-4">

@@ -1,17 +1,34 @@
-import { getAllTags, getTag } from "./projectIssues.mjs";
+import { allowedActorsForRoot, getAllTags, getTag } from "./projectIssues.mjs";
 
-function latestUpdateForPullRequest(pullRequestId, updateEvents) {
-  return updateEvents
-    .filter((event) => getTag(event, "E") === pullRequestId)
-    .sort((left, right) => right.created_at - left.created_at)[0];
+// Updates and status changes rewrite the PR's tip commit, clone URLs, and
+// lifecycle state, so they are only honored when signed by the PR author or
+// the repo owner — an arbitrary relay user must not be able to re-point an
+// open PR at their own commit/clone URL or flip its status.
+function trustedUpdatesForPullRequest(pullRequest, updateEvents) {
+  const allowedActors = allowedActorsForRoot(pullRequest);
+  return updateEvents.filter(
+    (event) =>
+      allowedActors.has(event.pubkey.toLowerCase()) &&
+      getTag(event, "E") === pullRequest.id,
+  );
 }
 
-function latestStatusForPullRequest(pullRequestId, statusEvents) {
+function latestUpdateForPullRequest(pullRequest, updateEvents) {
+  return trustedUpdatesForPullRequest(pullRequest, updateEvents).sort(
+    (left, right) => right.created_at - left.created_at,
+  )[0];
+}
+
+function latestStatusForPullRequest(pullRequest, statusEvents) {
+  const allowedActors = allowedActorsForRoot(pullRequest);
   return statusEvents
-    .filter((event) =>
-      event.tags.some(
-        (tag) => (tag[0] === "e" || tag[0] === "E") && tag[1] === pullRequestId,
-      ),
+    .filter(
+      (event) =>
+        allowedActors.has(event.pubkey.toLowerCase()) &&
+        event.tags.some(
+          (tag) =>
+            (tag[0] === "e" || tag[0] === "E") && tag[1] === pullRequest.id,
+        ),
     )
     .sort((left, right) => right.created_at - left.created_at)[0];
 }
@@ -70,11 +87,12 @@ export function eventToProjectPullRequest(
   commentEvents = [],
   statusEvents = [],
 ) {
-  const latestUpdate = latestUpdateForPullRequest(pullRequest.id, updateEvents);
-  const latestStatus = latestStatusForPullRequest(pullRequest.id, statusEvents);
-  const updates = eventsForPullRequest(pullRequest.id, updateEvents).map(
-    eventToPullRequestUpdate,
-  );
+  const latestUpdate = latestUpdateForPullRequest(pullRequest, updateEvents);
+  const latestStatus = latestStatusForPullRequest(pullRequest, statusEvents);
+  const updates = eventsForPullRequest(
+    pullRequest.id,
+    trustedUpdatesForPullRequest(pullRequest, updateEvents),
+  ).map(eventToPullRequestUpdate);
   const comments = eventsForPullRequest(pullRequest.id, commentEvents).map(
     eventToPullRequestComment,
   );

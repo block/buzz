@@ -7,18 +7,46 @@ export const PROJECT_ISSUE_STATUS = {
   CLOSED: "Closed",
 };
 
+function isNonEmptyString(value) {
+  return typeof value === "string" && value.length > 0;
+}
+
 export function getTag(event, name) {
-  return event.tags.find((tag) => tag[0] === name)?.[1];
+  const value = event.tags.find((tag) => tag[0] === name)?.[1];
+  return isNonEmptyString(value) ? value : undefined;
 }
 
 export function getAllTags(event, name) {
-  return event.tags.filter((tag) => tag[0] === name).map((tag) => tag[1]);
+  return event.tags
+    .filter((tag) => tag[0] === name && isNonEmptyString(tag[1]))
+    .map((tag) => tag[1]);
 }
 
-function latestStatusForIssue(issueId, statusEvents) {
+function repoOwnerFromAddress(repoAddress) {
+  const owner = (repoAddress ?? "").split(":")[1] ?? "";
+  return /^[a-fA-F0-9]{64}$/.test(owner) ? owner.toLowerCase() : null;
+}
+
+/**
+ * Pubkeys allowed to change a root event's lifecycle (status, updates):
+ * the root author and the owner of the repo the root event targets.
+ * Anyone else's status/update events are ignored (NIP-34 scopes these
+ * to the root author or a maintainer).
+ */
+export function allowedActorsForRoot(rootEvent) {
+  const allowed = new Set([rootEvent.pubkey.toLowerCase()]);
+  const owner = repoOwnerFromAddress(getTag(rootEvent, "a"));
+  if (owner) allowed.add(owner);
+  return allowed;
+}
+
+function latestStatusForIssue(issue, statusEvents) {
+  const allowedActors = allowedActorsForRoot(issue);
   return statusEvents
-    .filter((event) =>
-      event.tags.some((tag) => tag[0] === "e" && tag[1] === issueId),
+    .filter(
+      (event) =>
+        allowedActors.has(event.pubkey.toLowerCase()) &&
+        event.tags.some((tag) => tag[0] === "e" && tag[1] === issue.id),
     )
     .sort((left, right) => right.created_at - left.created_at)[0];
 }
@@ -60,7 +88,7 @@ export function eventToProjectIssue(
   statusEvents = [],
   commentEvents = [],
 ) {
-  const latestStatus = latestStatusForIssue(issue.id, statusEvents);
+  const latestStatus = latestStatusForIssue(issue, statusEvents);
   const comments = commentsForIssue(issue.id, commentEvents);
   const title =
     getTag(issue, "subject") ||

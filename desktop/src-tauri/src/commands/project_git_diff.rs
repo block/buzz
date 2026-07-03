@@ -1,8 +1,15 @@
-use super::project_git_exec::{build_git_auth_config, run_git, validate_clone_url, GitAuthConfig};
+use super::project_git_exec::{
+    build_git_auth_config, clean_branch, run_git, validate_clone_url, GitAuthConfig,
+};
 use super::project_repo_paths::find_local_repo_dir;
 use crate::app_state::AppState;
 use serde::Serialize;
 use tauri::State;
+
+/// Per-file cap on rendered patch lines. One regenerated lockfile or
+/// minified bundle would otherwise produce tens of thousands of DOM nodes
+/// in the diff view and freeze the webview.
+const MAX_PATCH_LINES: usize = 2_000;
 
 #[derive(Serialize)]
 pub struct ProjectRepoDiffFileInfo {
@@ -10,6 +17,7 @@ pub struct ProjectRepoDiffFileInfo {
     pub additions: usize,
     pub deletions: usize,
     pub patch: String,
+    pub truncated: bool,
 }
 
 #[derive(Serialize)]
@@ -17,23 +25,6 @@ pub struct ProjectRepoDiffInfo {
     pub files: Vec<ProjectRepoDiffFileInfo>,
     pub additions: usize,
     pub deletions: usize,
-}
-
-fn clean_branch(value: Option<String>) -> Option<String> {
-    value
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(|value| value.trim_start_matches("refs/heads/"))
-        .filter(|value| {
-            !value.contains("..")
-                && !value.starts_with('/')
-                && !value.ends_with('/')
-                && value
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '_' | '.' | '-'))
-        })
-        .map(ToString::to_string)
 }
 
 fn clean_target_ref(value: Option<String>) -> Option<String> {
@@ -288,6 +279,18 @@ fn local_diff_range(
         .unwrap_or_else(|_| format!("{target_ref}^..{target_ref}"))
 }
 
+/// Caps a patch at [`MAX_PATCH_LINES`], reporting whether it was cut.
+fn truncate_patch(patch: String) -> (String, bool) {
+    let mut line_starts = patch
+        .char_indices()
+        .filter(|(_, c)| *c == '\n')
+        .map(|(index, _)| index);
+    match line_starts.nth(MAX_PATCH_LINES - 1) {
+        Some(cut_at) => (patch[..cut_at].to_string(), true),
+        None => (patch, false),
+    }
+}
+
 fn diff_from_repo(
     repo_dir: &std::path::Path,
     auth: &GitAuthConfig,
@@ -314,11 +317,13 @@ fn diff_from_repo(
                 auth,
             )
             .unwrap_or_default();
+            let (patch, truncated) = truncate_patch(patch);
             ProjectRepoDiffFileInfo {
                 path,
                 additions,
                 deletions,
                 patch,
+                truncated,
             }
         })
         .collect::<Vec<_>>();

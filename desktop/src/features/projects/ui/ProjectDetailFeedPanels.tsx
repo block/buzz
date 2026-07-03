@@ -65,10 +65,15 @@ export function ContributorsPanel({
       label,
       lastCommitAt: contributor.lastCommitAt,
       pubkey: matchedProfile?.pubkey ?? null,
-      role:
-        matchedProfile?.profile.nip05Handle ||
-        contributor.email ||
-        "Git contributor",
+      // Profile matches come from unauthenticated git author strings, so
+      // they are surfaced as unverified rather than as a confirmed identity.
+      role: matchedProfile
+        ? `${
+            matchedProfile.profile.nip05Handle ||
+            contributor.email ||
+            "Git contributor"
+          } · unverified match`
+        : contributor.email || "Git contributor",
     };
   });
 
@@ -168,10 +173,13 @@ export function ActivityPanel({
         const authorLabel = matchedProfile
           ? resolveUserLabel({ pubkey: matchedProfile.pubkey, profiles })
           : commit.authorName || commit.authorEmail || "Unknown author";
-        const authorSubtitle =
-          matchedProfile?.profile.nip05Handle ||
-          commit.authorEmail ||
-          "Git contributor";
+        const authorSubtitle = matchedProfile
+          ? `${
+              matchedProfile.profile.nip05Handle ||
+              commit.authorEmail ||
+              "Git contributor"
+            } · unverified match`
+          : commit.authorEmail || "Git contributor";
         const matchingContributor = repoContributors.find(
           (contributor) =>
             contributor.name.trim().toLowerCase() ===

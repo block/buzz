@@ -87,6 +87,7 @@ type RawProjectRepoDiffFile = {
   additions: number;
   deletions: number;
   patch: string;
+  truncated: boolean;
 };
 
 type RawProjectRepoDiff = {
@@ -164,6 +165,7 @@ export async function getProjectRepoDiff(input: {
       additions: file.additions,
       deletions: file.deletions,
       patch: file.patch,
+      truncated: file.truncated,
     })),
   };
 }
@@ -198,6 +200,7 @@ export async function getProjectLocalRepoDiff(input: {
       additions: file.additions,
       deletions: file.deletions,
       patch: file.patch,
+      truncated: file.truncated,
     })),
   };
 }

@@ -1,4 +1,6 @@
-use super::project_git_exec::{build_git_auth_config, run_git, validate_clone_url, GitAuthConfig};
+use super::project_git_exec::{
+    build_git_auth_config, clean_branch, run_git, validate_clone_url, GitAuthConfig,
+};
 use super::project_repo_paths::{canonical_repos_roots, find_local_repo_dir};
 use crate::app_state::AppState;
 use serde::Serialize;
@@ -467,13 +469,11 @@ fn snapshot_from_worktree(
     }
 }
 
+/// Normalizes a relay-supplied branch option through the shared
+/// [`clean_branch`] validation, so every command applies the same character
+/// allowlist and flag-injection rejection before the value reaches git.
 pub(crate) fn normalize_branch_option(branch: Option<&str>) -> Option<String> {
-    branch
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(normalize_branch_name)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
+    clean_branch(branch.map(str::to_string))
 }
 
 fn compare_local_remote_status(
@@ -489,11 +489,19 @@ fn compare_local_remote_status(
         .or_else(|| local_branch.clone())
         .unwrap_or_else(|| "main".to_string());
 
-    let _ = run_git(
-        &["remote", "set-url", "origin", clone_url],
-        Some(repo_dir),
-        auth,
-    );
+    // Only rewrite the checkout's origin when it actually differs from the
+    // project's clone URL — a read-only status poll must not silently
+    // re-point the user's remote on every run.
+    let current_origin = run_git(&["remote", "get-url", "origin"], Some(repo_dir), auth)
+        .ok()
+        .and_then(|output| first_output_line(&output));
+    if current_origin.as_deref() != Some(clone_url) {
+        let _ = run_git(
+            &["remote", "set-url", "origin", clone_url],
+            Some(repo_dir),
+            auth,
+        );
+    }
     let _ = run_git(
         &["fetch", "--quiet", "origin", branch.as_str(), "--depth=100"],
         Some(repo_dir),
@@ -583,16 +591,8 @@ pub async fn get_project_repo_snapshot(
 ) -> Result<ProjectRepoSnapshotInfo, String> {
     validate_clone_url(&clone_url)?;
     let auth = build_git_auth_config(&state)?;
-    let branch = default_branch
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string);
-    let base_branch = base_branch
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string);
+    let branch = clean_branch(default_branch);
+    let base_branch = clean_branch(base_branch);
     let target_ref = target_ref.filter(|value| value.starts_with("refs/") && !value.contains(".."));
     let target_commit = target_commit
         .filter(|value| matches!(value.len(), 40 | 64))
@@ -660,16 +660,8 @@ pub async fn get_project_local_repo_snapshot(
     state: State<'_, AppState>,
 ) -> Result<Option<ProjectLocalRepoSnapshotInfo>, String> {
     let auth = build_git_auth_config(&state)?;
-    let branch = default_branch
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string);
-    let base_branch = base_branch
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string);
+    let branch = clean_branch(default_branch);
+    let base_branch = clean_branch(base_branch);
 
     tauri::async_runtime::spawn_blocking(move || {
         let Some(repo_dir) =

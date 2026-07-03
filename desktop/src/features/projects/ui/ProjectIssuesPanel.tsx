@@ -13,6 +13,7 @@ import {
   resolveUserLabel,
   type UserProfileLookup,
 } from "@/features/profile/lib/identity";
+import { relativeTime } from "@/features/projects/lib/projectsViewHelpers";
 import type { ChannelMember } from "@/shared/api/types";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { Markdown } from "@/shared/ui/markdown";
@@ -23,25 +24,6 @@ function compactDate(createdAt: number) {
     month: "short",
     day: "numeric",
   });
-}
-
-function relativeOpenedAt(createdAt: number) {
-  const elapsedSeconds = Math.max(
-    1,
-    Math.floor(Date.now() / 1_000 - createdAt),
-  );
-  const units = [
-    { label: "year", seconds: 365 * 24 * 60 * 60 },
-    { label: "month", seconds: 30 * 24 * 60 * 60 },
-    { label: "day", seconds: 24 * 60 * 60 },
-    { label: "hour", seconds: 60 * 60 },
-    { label: "minute", seconds: 60 },
-  ];
-  const unit =
-    units.find((item) => elapsedSeconds >= item.seconds) ??
-    units[units.length - 1];
-  const value = Math.max(1, Math.floor(elapsedSeconds / unit.seconds));
-  return `${value} ${unit.label}${value === 1 ? "" : "s"} ago`;
 }
 
 export function issueStatusClassName(status: ProjectIssue["status"]) {
@@ -138,7 +120,7 @@ function IssueRow({
         </div>
         <div className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5 text-xs leading-4 text-muted-foreground">
           <span>#{issue.id.slice(0, 8)}</span>
-          <span>opened {relativeOpenedAt(issue.createdAt)}</span>
+          <span>opened {relativeTime(issue.createdAt)}</span>
           <span>by {authorLabel}</span>
           <span>·</span>
           <span>{issue.status}</span>

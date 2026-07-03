@@ -1,9 +1,16 @@
+function isNonEmptyString(value) {
+  return typeof value === "string" && value.length > 0;
+}
+
 function getAllTags(event, name) {
-  return event.tags.filter((tag) => tag[0] === name).map((tag) => tag[1]);
+  return event.tags
+    .filter((tag) => tag[0] === name && isNonEmptyString(tag[1]))
+    .map((tag) => tag[1]);
 }
 
 function getTag(event, name) {
-  return event.tags.find((tag) => tag[0] === name)?.[1];
+  const value = event.tags.find((tag) => tag[0] === name)?.[1];
+  return isNonEmptyString(value) ? value : undefined;
 }
 
 function normalizePubkey(pubkey) {

@@ -108,11 +108,14 @@ export type ProjectIssueListItem = {
 };
 
 function getTag(event: RelayEvent, name: string): string | undefined {
-  return event.tags.find((t) => t[0] === name)?.[1];
+  const value = event.tags.find((t) => t[0] === name)?.[1];
+  return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
 function getAllTags(event: RelayEvent, name: string): string[] {
-  return event.tags.filter((t) => t[0] === name).map((t) => t[1]);
+  return event.tags
+    .filter((t) => t[0] === name && typeof t[1] === "string" && t[1].length > 0)
+    .map((t) => t[1]);
 }
 
 function getCloneUrls(event: RelayEvent): string[] {
@@ -147,8 +150,12 @@ function isHiddenLocally(project: Project): boolean {
 
 function isDeletedByA(project: Project, deletionEvents: RelayEvent[]): boolean {
   const coordinate = projectCoordinate(project);
-  return deletionEvents.some((event) =>
-    event.tags.some((tag) => tag[0] === "a" && tag[1] === coordinate),
+  // NIP-09: a deletion is only valid when signed by the author of the
+  // referenced event — otherwise anyone could hide someone else's project.
+  return deletionEvents.some(
+    (event) =>
+      event.pubkey.toLowerCase() === project.owner.toLowerCase() &&
+      event.tags.some((tag) => tag[0] === "a" && tag[1] === coordinate),
   );
 }
 
@@ -217,14 +224,36 @@ async function fetchProjects(): Promise<Project[]> {
     .sort((a, b) => b.createdAt - a.createdAt);
 }
 
+/**
+ * Splits a project route ID into its owner pubkey and dtag. The canonical
+ * form is `<owner-pubkey>:<dtag>` (matching `Project.id`) — NIP-34 repo
+ * identity is the full `30617:<owner>:<dtag>` coordinate, and two owners can
+ * both publish the same dtag (forks). Bare-dtag IDs from legacy links are
+ * still resolved, ambiguously, to whichever owner the relay returns first.
+ */
+function parseProjectRouteId(projectId: string): {
+  owner: string | null;
+  dtag: string;
+} {
+  const owner = projectId.slice(0, 64);
+  if (projectId[64] === ":" && /^[0-9a-fA-F]{64}$/.test(owner)) {
+    return { owner: owner.toLowerCase(), dtag: projectId.slice(65) };
+  }
+  return { owner: null, dtag: projectId };
+}
+
 async function fetchProject(projectId: string): Promise<Project | null> {
+  const { owner, dtag } = parseProjectRouteId(projectId);
   const events = await relayClient.fetchEvents({
     kinds: [KIND_REPO_ANNOUNCEMENT],
-    "#d": [projectId],
+    ...(owner ? { authors: [owner] } : {}),
+    "#d": [dtag],
     limit: 10,
   });
 
-  const deduped = dedup(events);
+  const deduped = dedup(events).filter(
+    (event) => !owner || event.pubkey.toLowerCase() === owner,
+  );
   const project = deduped.length > 0 ? eventToProject(deduped[0]) : null;
   if (!project) {
     return null;
@@ -232,6 +261,7 @@ async function fetchProject(projectId: string): Promise<Project | null> {
 
   const deletionEvents = await relayClient.fetchEvents({
     kinds: [KIND_DELETION],
+    authors: [project.owner],
     "#a": [project.repoAddress],
     limit: 10,
   });
@@ -827,6 +857,10 @@ export function useCreateProjectIssueCommentMutation(
       void queryClient.invalidateQueries({
         queryKey: ["project", project?.id ?? "none", "issues"],
       });
+      void queryClient.invalidateQueries({ queryKey: ["projects", "issues"] });
+      void queryClient.invalidateQueries({
+        queryKey: ["projects", "activity-summaries"],
+      });
     },
   });
 }
@@ -861,6 +895,12 @@ export function useCreateProjectPullRequestCommentMutation(
       void queryClient.invalidateQueries({
         queryKey: ["project", project?.id ?? "none", "pull-requests"],
       });
+      void queryClient.invalidateQueries({
+        queryKey: ["projects", "pull-requests"],
+      });
+      void queryClient.invalidateQueries({
+        queryKey: ["projects", "activity-summaries"],
+      });
     },
   });
 }
@@ -888,10 +928,10 @@ export function useDeleteProjectMutation() {
       queryClient.setQueryData<Project[]>(projectsQueryKey, (current = []) =>
         current.filter((item) => item.id !== project.id),
       );
-      queryClient.setQueryData(["project", project.dtag], null);
+      queryClient.setQueryData(["project", project.id], null);
       void queryClient.invalidateQueries({ queryKey: projectsQueryKey });
       void queryClient.invalidateQueries({
-        queryKey: ["project", project.dtag],
+        queryKey: ["project", project.id],
       });
     },
   });

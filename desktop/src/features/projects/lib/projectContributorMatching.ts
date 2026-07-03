@@ -8,6 +8,12 @@ export function contributorKey(contributor: ProjectRepoContributor) {
   return (contributor.email || contributor.name).trim().toLowerCase();
 }
 
+// Git author strings are unauthenticated — anyone can commit under any
+// name/email — so a profile match here is a display heuristic, never an
+// identity claim. Matching is limited to exact equality against profile
+// fields; fuzzy matching (name prefixes, email local-parts) let arbitrary
+// commit authors borrow a real user's avatar. Callers must present matches
+// as unverified.
 function profileMatchesContributor(
   contributor: ProjectRepoContributor,
   profile: UserProfileLookup[string] | undefined,
@@ -16,7 +22,6 @@ function profileMatchesContributor(
   if (!profile) return false;
   const name = contributor.name.trim().toLowerCase();
   const email = contributor.email.trim().toLowerCase();
-  const emailLocalPart = email.split("@")[0] ?? "";
   const candidates = [
     pubkey,
     profile.displayName,
@@ -25,17 +30,10 @@ function profileMatchesContributor(
   ]
     .map((value) => value?.trim().toLowerCase() ?? "")
     .filter(Boolean);
-  const candidateLocalParts = candidates.map(
-    (candidate) => candidate.split("@")[0] ?? "",
-  );
 
   return (
-    candidates.includes(name) ||
-    candidates.includes(email) ||
-    candidateLocalParts.includes(emailLocalPart) ||
-    candidates.some(
-      (candidate) => candidate.length >= 4 && name.startsWith(candidate),
-    )
+    (name.length > 0 && candidates.includes(name)) ||
+    (email.length > 0 && candidates.includes(email))
   );
 }
 

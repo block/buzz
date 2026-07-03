@@ -1,4 +1,4 @@
-import { LayoutGrid, List, Plus } from "lucide-react";
+import { LayoutGrid, List } from "lucide-react";
 
 import type {
   ProjectsFilter,
@@ -8,7 +8,6 @@ import { Button } from "@/shared/ui/button";
 
 type ProjectsToolbarProps = {
   filter: ProjectsFilter;
-  onCreateProject: () => void;
   onFilterChange: (filter: ProjectsFilter) => void;
 };
 
@@ -50,7 +49,6 @@ export function ProjectsViewModeToggle({
 
 export function ProjectsToolbar({
   filter,
-  onCreateProject,
   onFilterChange,
 }: ProjectsToolbarProps) {
   const filterOptions: Array<{ label: string; value: ProjectsFilter }> = [
@@ -85,17 +83,6 @@ export function ProjectsToolbar({
           </Button>
         ))}
       </fieldset>
-      <Button
-        className="h-8 shrink-0 gap-1.5 rounded-full border-border/60 bg-background/70 px-3 text-muted-foreground shadow-none hover:bg-muted/60 hover:text-foreground"
-        data-testid="create-project-button"
-        onClick={onCreateProject}
-        size="sm"
-        type="button"
-        variant="outline"
-      >
-        <Plus className="h-3.5 w-3.5" />
-        Create Project
-      </Button>
     </div>
   );
 }
