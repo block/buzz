@@ -2726,6 +2726,10 @@ async fn publish_agent_turn_metric(
             cache_write_tokens: None,
         })
     } else {
+        // Defense-in-depth: UsageTracker already sets all turn_* fields to None
+        // when delta_reliable is false, so the None arm here is technically
+        // redundant. The explicit guard prevents a future refactor from
+        // accidentally publishing unreliable per-turn counts.
         None
     };
     let cumulative_counts = Some(TokenCounts {

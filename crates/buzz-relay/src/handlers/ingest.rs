@@ -1103,7 +1103,7 @@ fn validate_agent_turn_metric_envelope(event: &nostr::Event) -> Result<(), Strin
 
     if has_h_tag {
         return Err(
-            "agent-turn-metric event must not have an `h` tag              (channel identity belongs inside the encrypted payload)".to_string(),
+            "agent-turn-metric event must not have an `h` tag (channel identity belongs inside the encrypted payload)".to_string(),
         );
     }
 

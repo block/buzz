@@ -699,7 +699,7 @@ async fn run_prompt(app: Arc<App>, id: Value, params: Value, wire_tx: WireSender
     // provider response (validation failure, pre-response cancellation) carries
     // no information and must not produce a kind 44200 record per NIP-AM.
     if turn_input_tokens.is_some() || turn_output_tokens.is_some() {
-        let (accumulated_in, accumulated_out) = {
+        let accumulated = {
             let mut sessions = app.sessions.lock().await;
             if let Some(s) = sessions.get_mut(&sid) {
                 s.accumulated_input_tokens = s
@@ -708,30 +708,31 @@ async fn run_prompt(app: Arc<App>, id: Value, params: Value, wire_tx: WireSender
                 s.accumulated_output_tokens = s
                     .accumulated_output_tokens
                     .saturating_add(turn_output_tokens.unwrap_or(0));
-                (s.accumulated_input_tokens, s.accumulated_output_tokens)
+                Some((s.accumulated_input_tokens, s.accumulated_output_tokens))
             } else {
-                (
-                    turn_input_tokens.unwrap_or(0),
-                    turn_output_tokens.unwrap_or(0),
-                )
+                // Session is gone — the accumulated baseline no longer exists, so
+                // there is nothing correct to emit. Skip the usage notification.
+                None
             }
         };
-        wire::send(
-            &wire_tx,
-            goose_session_update(
-                &sid,
-                json!({
-                    "sessionUpdate": "usage_update",
-                    // used: total tokens as a context-usage proxy;
-                    // contextLimit: 0 (buzz-agent has no context limit tracking).
-                    "used": accumulated_in.saturating_add(accumulated_out),
-                    "contextLimit": 0u64,
-                    "accumulatedInputTokens": accumulated_in,
-                    "accumulatedOutputTokens": accumulated_out,
-                }),
-            ),
-        )
-        .await;
+        if let Some((accumulated_in, accumulated_out)) = accumulated {
+            wire::send(
+                &wire_tx,
+                goose_session_update(
+                    &sid,
+                    json!({
+                        "sessionUpdate": "usage_update",
+                        // used: total tokens as a context-usage proxy;
+                        // contextLimit: 0 (buzz-agent has no context limit tracking).
+                        "used": accumulated_in.saturating_add(accumulated_out),
+                        "contextLimit": 0u64,
+                        "accumulatedInputTokens": accumulated_in,
+                        "accumulatedOutputTokens": accumulated_out,
+                    }),
+                ),
+            )
+            .await;
+        }
     }
     match result {
         Ok(stop) => {

@@ -816,6 +816,12 @@ pub async fn query_events(
                 if !event_in_accessible_channel(&se, &accessible_channels) {
                     continue;
                 }
+                // Defense-in-depth: never deliver a result-gated event (e.g. kind:44200
+                // or kind:30622) to a non-owner via the feed path, even though feed SQL
+                // kind allowlists already exclude these kinds.
+                if !buzz_core::filter::reader_authorized_for_event(&se.event, &authed_pubkey_hex) {
+                    continue;
+                }
                 if let Ok(v) = serde_json::to_value(&se.event) {
                     events.push(v);
                     feed_count += 1;
@@ -874,6 +880,12 @@ pub async fn query_events(
         for reply in thread_replies {
             let se = reply.stored_event;
             if !event_in_accessible_channel(&se, &accessible_channels) {
+                continue;
+            }
+            // Defense-in-depth: never deliver a result-gated event (e.g. kind:44200
+            // or kind:30622) to a non-owner via the thread path, even though
+            // requires_h_channel_scope already excludes these kinds from thread metadata.
+            if !buzz_core::filter::reader_authorized_for_event(&se.event, &authed_pubkey_hex) {
                 continue;
             }
             if let Ok(v) = serde_json::to_value(&se.event) {

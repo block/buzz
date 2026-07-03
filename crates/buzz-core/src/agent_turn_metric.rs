@@ -178,11 +178,17 @@ pub fn encrypt_agent_turn_metric(
 /// Decrypt and deserialize an [`AgentTurnMetricPayload`] from a `kind:44200` event.
 ///
 /// `recipient_keys` is the owner's key pair.
+///
+/// Returns `Err(ObserverPayloadError::InvalidPayload)` if the decrypted payload
+/// fails numeric validation (e.g. negative or non-finite `costUsd`), mirroring
+/// the fail-closed contract of [`encrypt_agent_turn_metric`].
 pub fn decrypt_agent_turn_metric(
     recipient_keys: &Keys,
     event: &Event,
 ) -> Result<AgentTurnMetricPayload, ObserverPayloadError> {
-    decrypt_observer_payload(recipient_keys, event)
+    let payload: AgentTurnMetricPayload = decrypt_observer_payload(recipient_keys, event)?;
+    payload.validate()?;
+    Ok(payload)
 }
 
 #[cfg(test)]
@@ -463,6 +469,40 @@ mod tests {
         assert!(
             matches!(result, Err(ObserverPayloadError::InvalidPayload(_))),
             "encrypt must reject payload with negative costUsd"
+        );
+    }
+
+    #[test]
+    fn decrypt_agent_turn_metric_rejects_negative_cost_bypassing_encrypt() {
+        // Regression: a raw/misbehaving agent can persist a syntactically valid
+        // NIP-44 payload with costUsd: -1 by calling encrypt_observer_payload
+        // directly (bypassing the validating encrypt_agent_turn_metric helper).
+        // decrypt_agent_turn_metric must reject it symmetrically.
+        use crate::observer::encrypt_observer_payload;
+
+        let agent_keys = Keys::generate();
+        let owner_keys = Keys::generate();
+
+        // Build a payload with negative costUsd and encrypt via the lower-level
+        // path, bypassing encrypt_agent_turn_metric's validate() call.
+        let bad_payload = make_payload_with_turn_cost(Some(-1.0));
+        let ciphertext =
+            encrypt_observer_payload(&agent_keys, &owner_keys.public_key(), &bad_payload)
+                .expect("lower-level encrypt should succeed without validation");
+
+        let event = EventBuilder::new(Kind::Custom(44200), ciphertext)
+            .tags([
+                Tag::parse(["p", &owner_keys.public_key().to_hex()]).unwrap(),
+                Tag::parse(["agent", &agent_keys.public_key().to_hex()]).unwrap(),
+            ])
+            .sign_with_keys(&agent_keys)
+            .expect("sign");
+
+        let result = decrypt_agent_turn_metric(&owner_keys, &event);
+        assert!(
+            matches!(result, Err(ObserverPayloadError::InvalidPayload(_))),
+            "decrypt must reject a payload with negative costUsd even when \
+             encrypted via the lower-level path"
         );
     }
 }

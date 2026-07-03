@@ -799,4 +799,17 @@ mod tests {
         assert_eq!(usage.turn_input_tokens, Some(500));
         assert_eq!(usage.turn_output_tokens, Some(100));
     }
+
+    #[test]
+    fn begin_turn_then_take_without_record_returns_none() {
+        // A turn cancelled before the provider emits any tokens: begin_turn is
+        // called but no record() arrives before take(). take() must return None.
+        let mut tracker = UsageTracker::default();
+        tracker.begin_turn("sess-precancel");
+        let result = tracker.take();
+        assert!(
+            result.is_none(),
+            "take() without any record() must return None (pre-response cancel path)"
+        );
+    }
 }

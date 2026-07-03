@@ -917,21 +917,84 @@ async fn no_usage_turn_emits_no_usage_notification() {
 /// (so token counts are observed), buzz-agent must still emit the usage
 /// notification before the cancelled `session/prompt` response.
 ///
-/// Setup: round 1 is a tool call WITH usage (tokens are captured). The agent
-/// sends the cancel before round 2's LLM call, so the turn exits with
-/// `stopReason: "cancelled"`. The usage notification must precede that response.
+/// Setup: round 1 is a tool call WITH usage (tokens are captured). After the
+/// tool_call_update notification (proving round 1 is fully processed), we gate
+/// the round-2 LLM response behind a `oneshot` barrier that only releases after
+/// cancel is sent. This guarantees the turn exits with `stopReason: "cancelled"`
+/// deterministically, even on a slow CI worker.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cancelled_turn_with_usage_emits_notification_before_response() {
+    use tokio::sync::oneshot;
+
+    // Gate: the second LLM request (round 2) is held until we explicitly release it.
+    let (gate_tx, gate_rx) = oneshot::channel::<()>();
+    let gate_rx = Arc::new(tokio::sync::Mutex::new(Some(gate_rx)));
+
     // Round 1: tool call with usage — sets turn_input/output_tokens.
-    // Round 2 never starts because cancel fires at the round boundary.
-    let url = spawn_fake_llm(vec![openai_tool_call_with_usage(
+    // Round 2: gated — blocked until cancel fires, then released so the
+    // in-flight TCP request can resolve. The queue is empty for round 2, so the
+    // agent receives the fallback "no canned response" body which it treats as
+    // an LLM error; the cancel check at the round boundary fires first because
+    // the gate is only released after cancel is enqueued.
+    let responses = vec![openai_tool_call_with_usage(
         "call_cancel_test",
         "fake__noop",
         json!({}),
         15,
         6,
-    )])
-    .await;
+    )];
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let queue = Arc::new(Mutex::new(VecDeque::from(responses)));
+    let gate_rx_clone = gate_rx.clone();
+    tokio::spawn(async move {
+        let mut request_num = 0usize;
+        loop {
+            let (mut sock, _) = match listener.accept().await {
+                Ok(p) => p,
+                Err(_) => return,
+            };
+            let queue = queue.clone();
+            let gate = gate_rx_clone.clone();
+            request_num += 1;
+            let req_num = request_num;
+            tokio::spawn(async move {
+                let mut buf = Vec::new();
+                let mut tmp = [0u8; 4096];
+                while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match sock.read(&mut tmp).await {
+                        Ok(0) | Err(_) => return,
+                        Ok(n) => buf.extend_from_slice(&tmp[..n]),
+                    }
+                    if buf.len() > 1_000_000 {
+                        return;
+                    }
+                }
+                // For request 2+ (round 2), wait for the gate to open before
+                // responding. This ensures cancel is sent before round 2 resolves,
+                // making stopReason: cancelled deterministic.
+                if req_num >= 2 {
+                    let rx = gate.lock().await.take();
+                    if let Some(rx) = rx {
+                        let _ = rx.await;
+                    }
+                }
+                let body = queue
+                    .lock()
+                    .await
+                    .pop_front()
+                    .unwrap_or_else(|| json!({ "error": "no canned response" }));
+                let body_s = serde_json::to_string(&body).unwrap();
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body_s.len(), body_s,
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+                let _ = sock.shutdown().await;
+            });
+        }
+    });
+
     let mut h = Harness::spawn(&url).await;
     let sid = init_session(&mut h).await;
 
@@ -942,17 +1005,21 @@ async fn cancelled_turn_with_usage_emits_notification_before_response() {
         )
         .await;
 
-    // Wait for the activeRunId advert (agent is live) then send cancel.
+    // Wait for the activeRunId advert (agent is live).
     let _run_id = recv_active_run_id(&mut h).await;
-    // Wait for the tool_call_update (failed — unknown tool) so we know round 1
-    // LLM response has been processed and tokens are captured, THEN cancel.
+    // Wait for tool_call_update — proves round 1 LLM response is fully processed
+    // and tokens are captured before we send cancel.
     h.recv_until(|v| {
         v.get("method") == Some(&json!("session/update"))
             && v["params"]["update"]["sessionUpdate"] == "tool_call_update"
     })
     .await;
+
+    // Now send cancel and release the round-2 gate. Cancel is enqueued before
+    // round 2 can respond, so the turn exits with stopReason: cancelled.
     let c_id = h.send("session/cancel", json!({"sessionId": sid})).await;
-    // Drain remaining frames; the cancel OK and the prompt response both arrive.
+    let _ = gate_tx.send(()); // unblock round 2
+
     let mut saw_usage_before_prompt_response = false;
     let mut saw_usage = false;
     let mut saw_cancel_ok = false;
@@ -960,26 +1027,18 @@ async fn cancelled_turn_with_usage_emits_notification_before_response() {
     for _ in 0..40 {
         let v = h.recv().await;
         if v["id"] == json!(c_id) {
-            // cancel acknowledged
             saw_cancel_ok = true;
         } else if is_usage_update(&v) {
             saw_usage = true;
-            // Record that usage arrived before the prompt response (if it hasn't yet).
             if !saw_prompt_response {
                 saw_usage_before_prompt_response = true;
             }
         } else if v["id"] == json!(p_id) {
             saw_prompt_response = true;
-            // The prompt response is either a result (stopReason: cancelled or
-            // end_turn) or an error (if cancel races with round 2's LLM call
-            // returning no-more-responses). Both are acceptable — we only care
-            // that the usage notification precedes whichever frame terminates
-            // the turn.
-            let has_result = v.get("result").is_some();
-            let has_error = v.get("error").is_some();
-            assert!(
-                has_result || has_error,
-                "expected result or error on prompt response, got: {v}"
+            // The gate guarantees stopReason: cancelled — not a race-driven error.
+            assert_eq!(
+                v["result"]["stopReason"], "cancelled",
+                "turn must end with stopReason: cancelled"
             );
         }
         if saw_usage && saw_prompt_response && saw_cancel_ok {
