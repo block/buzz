@@ -16,6 +16,7 @@ class AgentCredential:
     role: str
     nostr_secret_key: str
     nostr_pubkey: str
+    nostr_auth_tag: str
     llm_endpoint: str
     llm_api_key: str
 
