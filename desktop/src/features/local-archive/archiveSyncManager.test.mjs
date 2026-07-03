@@ -587,9 +587,12 @@ test("manager_retries_subscription_after_subscribeLive_failure", async () => {
 });
 
 test("manager_no_duplicate_sub_when_two_reloads_overlap", async () => {
-  // Two resubscribeAll invocations fire concurrently while the first
-  // subscribeLive is still pending. Only one relay subscription must survive —
-  // no duplicate live sub, no leaked dispose.
+  // Under single-flight serialization: when a second resubscribeAll request
+  // arrives while the first subscribeLive is still pending, it sets
+  // reloadPending and returns immediately (no concurrent body runs). The
+  // first subscribe resolves and activates normally, then the coalescing loop
+  // runs the second pass — but by then the key is already active, so no
+  // duplicate subscription is opened.
   let resolveFirst;
   let callCount = 0;
   const disposedCount = { value: 0 };
@@ -613,7 +616,7 @@ test("manager_no_duplicate_sub_when_two_reloads_overlap", async () => {
           };
         });
       }
-      // Instant second call — this should not be reached due to inflight guard.
+      // A second call should not be reached under single-flight.
       relay.subs.set(key, { filter, unsubbed: false });
       return Promise.resolve(disposeHandle);
     },
@@ -640,17 +643,17 @@ test("manager_no_duplicate_sub_when_two_reloads_overlap", async () => {
   await tick(); // let it reach the subscribeLive await
 
   // Fire second resubscribeAll before the first subscribe resolves.
+  // Under single-flight this sets reloadPending and returns synchronously.
   // biome-ignore lint/complexity/useLiteralKeys: intentional private access in test
-  const second = mgr["resubscribeAll"]();
+  mgr["resubscribeAll"]();
   await tick();
 
   // First subscribe still pending — resolve it now.
   resolveFirst();
   await first;
-  await second;
   await tick();
 
-  // subscribeLive was called exactly once (inflight guard blocked the second).
+  // subscribeLive was called exactly once (single-flight blocked the second).
   assert.equal(callCount, 1, "subscribeLive called only once");
   // Exactly one active subscription.
   assert.equal(relay.activeCount(), 1, "exactly one active sub");
@@ -662,7 +665,10 @@ test("manager_no_duplicate_sub_when_two_reloads_overlap", async () => {
 
 test("manager_disposes_stale_sub_when_deleted_before_resolve", async () => {
   // A subscription is deleted while its subscribeLive call is in flight.
-  // On resolve, the stale dispose MUST be called and the key must NOT enter active.
+  // Under single-flight: the delete sets reloadPending; the first pass
+  // finishes (activates K), then the coalescing loop runs a second pass which
+  // lists [] and tears K down via the normal teardown loop. Net result: dispose
+  // is called and K is absent from active.
   let resolveSubscribe;
   let disposeCalled = false;
 
@@ -690,35 +696,111 @@ test("manager_disposes_stale_sub_when_deleted_before_resolve", async () => {
   ]);
   const mgr = makeManager(relay, archive);
 
-  // Start: subscribeLive is pending.
+  // Start: subscribeLive is pending (first doResubscribe pass).
   const started = mgr.start();
   await tick(); // reaches the subscribeLive await
 
-  // Delete the subscription before the subscribe resolves; this fires a second
-  // resubscribeAll that updates wantedKeys to the empty set.
+  // Delete the subscription before the subscribe resolves; sets reloadPending
+  // so the coalescing loop runs a second pass after the first finishes.
   await archive.deleteSaveSubscription("channel_h", "chan-stale");
   await tick();
 
-  // Now resolve the first subscribe.
+  // Now resolve the first subscribe — first pass activates K, then the second
+  // pass (reloadPending) runs, lists [], and tears K down.
   resolveSubscribe();
-  await started;
+  await started; // waits for both passes to complete
   await tick();
 
-  // The stale resolve must have called dispose.
+  // Dispose must have been called (by the teardown loop in the second pass).
   assert.equal(
     disposeCalled,
     true,
-    "dispose must be called for superseded subscription",
+    "dispose must be called when subscription is removed",
   );
   // Key must NOT be in active.
   assert.equal(
     // biome-ignore lint/complexity/useLiteralKeys: intentional private access in test
     mgr["active"].size,
     0,
-    "active must be empty — deleted key must not be stored",
+    "active must be empty — deleted key must not remain",
   );
 
   mgr.destroy();
+});
+
+test("manager_handles_out_of_order_list_resolution", async () => {
+  // Regression test for the defect Thufir found at pass-3: a stale
+  // listSaveSubscriptions result from an older reload can overwrite the
+  // wantedKeys published by a newer reload that already knows K was deleted.
+  //
+  // Setup: reload A starts and its list resolves LATE (K present); meanwhile
+  // K is deleted and reload B completes with an empty list. Then A's stale
+  // list (with K) resolves last.
+  //
+  // Under single-flight serialization, A and B cannot interleave — B is
+  // queued as reloadPending and only runs after A's full pass completes. So
+  // when A's late list resolves it sees [K] and subscribes K; then B runs,
+  // lists [], and tears K down. The stale-overwrite defect is structurally
+  // impossible.
+  let resolveAList;
+
+  const archive = makeFakeArchive();
+  archive.setSubs([
+    {
+      scopeType: "channel_h",
+      scopeValue: "chan-ooo",
+      kinds: [9],
+      identityPubkey: "pk",
+      relayUrl: "wss://r",
+      createdAt: 0,
+    },
+  ]);
+
+  // Intercept listSaveSubscriptions: first call is slow (returns a manually
+  // resolvable promise with a snapshot captured at call time); subsequent
+  // calls return the current state immediately.
+  let listCallCount = 0;
+  const fakeList = () => {
+    listCallCount++;
+    if (listCallCount === 1) {
+      // Capture the snapshot NOW (K is still present at this point).
+      const snapshot = archive.listSaveSubscriptions();
+      // Return a promise we control — the caller decides when to resolve it.
+      return new Promise((resolve) => {
+        resolveAList = () => resolve(snapshot);
+      });
+    }
+    return archive.listSaveSubscriptions();
+  };
+
+  const relay = makeFakeRelayClient();
+  const mgr = new ArchiveSyncManager({
+    relayClient: relay,
+    listSaveSubscriptions: fakeList,
+    archiveEvents: (c) => archive.archiveEvents(c),
+    onSubscriptionChange: (l) => archive.onSubscriptionChange(l),
+  });
+
+  // Start: first list call is pending (reload A in flight).
+  const started = mgr.start();
+  await tick(); // A is suspended at listSaveSubscriptions
+
+  // Delete K — this notifies the listener, which sets reloadPending (B queued).
+  await archive.deleteSaveSubscription("channel_h", "chan-ooo");
+  await tick();
+
+  // Now resolve A's stale list result (K is present in the snapshot A captured).
+  resolveAList();
+  await started; // waits for A's full pass + B's coalescing pass
+  await tick();
+
+  // K must NOT be active after both passes complete. A's pass subscribed it,
+  // B's pass tore it down.
+  assert.equal(
+    relay.activeCount(),
+    0,
+    "K must not be active after delete-then-list-resolve",
+  );
 });
 
 test("manager_flushes_buffer_on_destroy", async () => {

@@ -86,16 +86,13 @@ export class ArchiveSyncManager {
 
   // full subKey (scope+kinds) → unsub
   private active = new Map<string, () => Promise<void>>();
-  // Keys with a subscribeLive call in flight — prevents a concurrent
-  // resubscribeAll from opening a second relay subscription for the same key
-  // while the first is still pending.
-  private inflight = new Set<string>();
-  // Last-known desired key set, updated synchronously (before any await) at
-  // the start of each resubscribeAll's open pass. An in-flight subscribeLive
-  // checks this after it resolves: if the key was deleted by a later invocation
-  // (which updated wantedKeys before any await), the stale subscription is
-  // disposed immediately rather than being activated.
-  private wantedKeys = new Set<string>();
+  // Single-flight reload state — exactly one doResubscribe body runs at a time.
+  // Any reload request arriving while one is running sets reloadPending so that
+  // the loop runs one additional full pass after the current one finishes.
+  // This structural guarantee makes concurrent list/subscribe awaits impossible,
+  // eliminating all interleaving defects without per-boundary guards.
+  private reloading = false;
+  private reloadPending = false;
   private buffer: Array<{
     rawEventJson: string;
     matchedScope: { scopeType: ScopeType; scopeValue: string };
@@ -118,13 +115,13 @@ export class ArchiveSyncManager {
   }
 
   async start(): Promise<void> {
-    // Register the change listener before the initial resubscribeAll so that
-    // any subscription change arriving while the first subscribeLive is in
-    // flight is captured and triggers a fresh reload via wantedKeys update.
+    // Register the change listener before the initial load so that any
+    // subscription change arriving while the first pass is running sets
+    // reloadPending and gets picked up by the coalescing loop.
     this.offSubscriptionChange = this.deps.onSubscriptionChange(() => {
-      void this.resubscribeAll();
+      this.resubscribeAll();
     });
-    await this.resubscribeAll();
+    await this.runReloadLoop();
   }
 
   destroy(): void {
@@ -148,7 +145,51 @@ export class ArchiveSyncManager {
     this.active.clear();
   }
 
-  private async resubscribeAll(): Promise<void> {
+  /**
+   * Request a reload of all save subscriptions.
+   *
+   * If no reload is currently running, starts one immediately via
+   * `runReloadLoop`. If one is already running, sets `reloadPending` so
+   * the loop runs exactly one additional full pass after the current pass
+   * completes — no matter how many changes arrive mid-run, they coalesce
+   * into a single follow-up pass.
+   */
+  private resubscribeAll(): void {
+    if (this.reloading) {
+      this.reloadPending = true;
+      return;
+    }
+    void this.runReloadLoop();
+  }
+
+  /**
+   * Runs `doResubscribe` in a loop, draining any reload requests that
+   * arrive while a pass is in flight. The loop terminates once no reload
+   * is pending and the manager has not been destroyed.
+   *
+   * Awaited directly by `start()` for the initial load.
+   */
+  private async runReloadLoop(): Promise<void> {
+    this.reloading = true;
+    try {
+      do {
+        this.reloadPending = false;
+        await this.doResubscribe();
+      } while (this.reloadPending && !this.destroyed);
+    } finally {
+      this.reloading = false;
+    }
+  }
+
+  /**
+   * One full reload pass: fetch the current subscription list, tear down
+   * removed or kind-changed subscriptions, and open new ones.
+   *
+   * Only one instance of this method ever runs at a time (enforced by
+   * `runReloadLoop`). That single-flight guarantee makes concurrent
+   * list/subscribe awaits structurally impossible.
+   */
+  private async doResubscribe(): Promise<void> {
     if (this.destroyed) return;
 
     let subs: SaveSubscription[];
@@ -161,16 +202,10 @@ export class ArchiveSyncManager {
 
     if (this.destroyed) return;
 
-    // Full keys (scope+kinds) we want after reload.
+    // Full keys (scope+kinds) for the current subscription list.
     const wanted = new Set(
       subs.map((s) => subKey(s.scopeType, s.scopeValue, s.kinds)),
     );
-
-    // Publish wanted synchronously before any further await so that any
-    // concurrently in-flight subscribeLive resolves can check whether their
-    // key is still desired. A later resubscribeAll invocation overwrites this,
-    // so an in-flight subscribe always checks against the most-recent wanted set.
-    this.wantedKeys = wanted;
 
     // Tear down subscriptions that are no longer needed or whose kinds changed.
     // A stale entry whose scope is still present but with different kinds will
@@ -183,20 +218,20 @@ export class ArchiveSyncManager {
       }
     }
 
-    // Open new subscriptions for any full key not already active or in-flight.
+    // Open new subscriptions for any full key not already active.
+    // No concurrency guards are needed here: single-flight serialization
+    // ensures this loop body is the only async path running, so nothing
+    // can add a duplicate entry to `active` between iterations.
     for (const sub of subs) {
+      if (this.destroyed) return;
+
       const key = subKey(sub.scopeType, sub.scopeValue, sub.kinds);
-      // Skip keys that already have an active subscription or a pending
-      // subscribeLive call from a concurrent resubscribeAll invocation.
-      if (this.active.has(key) || this.inflight.has(key)) continue;
+      if (this.active.has(key)) continue;
 
       const scopeType = sub.scopeType;
       const scopeValue = sub.scopeValue;
       const filter = buildFilter(sub);
 
-      // Mark as in-flight so a concurrent resubscribeAll doesn't open a
-      // duplicate subscription for this key while we await.
-      this.inflight.add(key);
       let dispose: (() => Promise<void>) | undefined;
       try {
         dispose = await this.deps.relayClient.subscribeLive(
@@ -212,18 +247,13 @@ export class ArchiveSyncManager {
         );
         // Do NOT add key to active — next resubscribeAll will retry.
         continue;
-      } finally {
-        this.inflight.delete(key);
       }
 
-      // Re-check after the await. A later resubscribeAll may have updated
-      // wantedKeys to exclude this key (e.g. the subscription was deleted
-      // while subscribeLive was pending). Dispose the subscription rather
-      // than activating it so we don't keep a live relay sub for a deleted
-      // config. The manager may also have been destroyed while we awaited.
-      if (this.destroyed || !this.wantedKeys.has(key)) {
+      // A destroy() call may have arrived while subscribeLive was pending.
+      // Tear down the just-opened subscription and bail out.
+      if (this.destroyed) {
         void dispose();
-        continue;
+        return;
       }
 
       this.active.set(key, dispose);
