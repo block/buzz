@@ -28,7 +28,7 @@ import { ancestorIsland, seedScenario } from "../helpers/seedRelay";
 // entirely — `gap` rows reached === 0); GREEN on the windowed read model, whose
 // relay-owned cursor cannot be moved by an out-of-band ancestor merge.
 
-const RELAY_HTTP = process.env.BUZZ_E2E_RELAY_URL ?? "http://localhost:3030";
+const RELAY_HTTP = process.env.BUZZ_E2E_RELAY_URL ?? "http://localhost:3000";
 
 // uuid5(NAMESPACE_DNS, "buzz.channel.general") — the seeded `general` channel.
 const GENERAL_CHANNEL_ID = "9f28288a-d724-587a-9709-92dc7f967110";
