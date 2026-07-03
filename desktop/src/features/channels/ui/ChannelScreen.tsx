@@ -579,6 +579,7 @@ export function ChannelScreen({
     backFromAgentSession: handleBackFromAgentSession,
     channelAgentSessionAgents,
     closeAgentSession: handleCloseAgentSession,
+    hasAgentSessionReturnTarget,
     openAgentSession: handleOpenAgentSession,
     openThreadAndCloseAgentSession: handleOpenThreadAndCloseAgentSession,
   } = useChannelAgentSessions({
@@ -912,7 +913,11 @@ export function ChannelScreen({
                       : undefined
                   }
                   onCloseAgentSession={handleCloseAgentSession}
-                  onBackFromAgentSession={handleBackFromAgentSession}
+                  onBackFromAgentSession={
+                    hasAgentSessionReturnTarget
+                      ? handleBackFromAgentSession
+                      : undefined
+                  }
                   onCloseChannelManagement={handleCloseChannelManagement}
                   onCloseThread={handleCloseThread}
                   onDelete={

@@ -1072,6 +1072,10 @@ test("shows and clears activity indicators for active channel agents", async ({
   await expect(page.getByTestId("agent-session-thread-panel")).toContainText(
     "alice",
   );
+  // Opened from the composer with no prior pane: there is nowhere to go
+  // "back" to, so the header shows only the close affordance.
+  await expect(page.getByTestId("agent-session-back")).toHaveCount(0);
+  await expect(page.getByTestId("auxiliary-panel-close")).toBeVisible();
   await expect(page.getByTestId("agent-transcript-now-summary")).toHaveCount(0);
   await page.getByTestId("agent-session-settings-menu-trigger").click();
   await expect(page.getByTestId("agent-session-stop-turn")).toBeVisible();

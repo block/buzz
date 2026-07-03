@@ -193,7 +193,7 @@ export function useChannelAgentSessions({
   // closed→open transition, consumed exactly once on back, cleared on any
   // other close so a stale target can't resurface later. Channel switches
   // drop it via the reset key.
-  const returnTarget =
+  const { hasTarget: hasAgentSessionReturnTarget, store: returnTarget } =
     usePanelReturnTarget<AgentSessionReturnTarget>(activeChannelId);
   const isAgentSessionOpen = openAgentSessionPubkey != null;
 
@@ -310,6 +310,7 @@ export function useChannelAgentSessions({
     backFromAgentSession,
     channelAgentSessionAgents,
     closeAgentSession,
+    hasAgentSessionReturnTarget,
     openAgentSession,
     openAgentSessionPubkey,
     openThreadAndCloseAgentSession,

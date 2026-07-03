@@ -39,10 +39,12 @@ type AgentSessionThreadPanelProps = {
   profiles?: UserProfileLookup;
   /**
    * Fired by the header back arrow. Restores the pane this panel replaced
-   * (thread or profile) via the captured return target, or just closes when
-   * there is none — see useChannelAgentSessions.backFromAgentSession.
+   * (thread or profile) via the captured return target — see
+   * useChannelAgentSessions.backFromAgentSession. Omit when there is no
+   * target (composer/no-pane open, direct/restored URL): the arrow hides
+   * and the close affordance is the fallback.
    */
-  onBack: () => void;
+  onBack?: () => void;
   onClose: () => void;
   widthPx: number;
   transparentChrome?: boolean;

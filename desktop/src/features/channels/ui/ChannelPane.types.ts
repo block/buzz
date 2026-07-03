@@ -42,7 +42,12 @@ export type ChannelPaneProps = {
   canResetThreadPanelWidth: boolean;
   onCancelEdit?: () => void;
   onCancelThreadReply: () => void;
-  onBackFromAgentSession: () => void;
+  /**
+   * Fired by the header back arrow when Activity has a captured pane to
+   * return to. Absent (arrow hidden) for composer/no-pane opens and
+   * direct/restored Activity URLs — the close affordance is the fallback.
+   */
+  onBackFromAgentSession?: () => void;
   onCloseAgentSession: () => void;
   onCloseChannelManagement?: () => void;
   onChannelManagementDeleted?: () => void;

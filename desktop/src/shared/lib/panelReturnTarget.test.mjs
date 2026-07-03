@@ -48,3 +48,39 @@ test("peek reads without consuming", () => {
   assert.deepEqual(store.peek(), { kind: "thread", threadHeadId: "head-1" });
   assert.deepEqual(store.consume(), { kind: "thread", threadHeadId: "head-1" });
 });
+
+test("subscribe notifies on capture, clear, and consume", () => {
+  const store = createPanelReturnTargetStore();
+  let notifications = 0;
+  const unsubscribe = store.subscribe(() => {
+    notifications += 1;
+  });
+
+  store.capture({ kind: "profile", pubkey: "abc" });
+  assert.equal(notifications, 1);
+
+  store.consume();
+  assert.equal(notifications, 2);
+
+  store.clear();
+  assert.equal(notifications, 3);
+
+  unsubscribe();
+  store.capture({ kind: "profile", pubkey: "abc" });
+  assert.equal(notifications, 3);
+});
+
+test("reset drops the target silently", () => {
+  const store = createPanelReturnTargetStore();
+  let notifications = 0;
+  store.subscribe(() => {
+    notifications += 1;
+  });
+
+  store.capture({ kind: "thread", threadHeadId: "head-1" });
+  assert.equal(notifications, 1);
+
+  store.reset();
+  assert.equal(notifications, 1);
+  assert.equal(store.peek(), null);
+});
