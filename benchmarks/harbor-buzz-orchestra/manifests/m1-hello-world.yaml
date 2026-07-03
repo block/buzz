@@ -42,3 +42,9 @@ prices:
     output_per_million_usd: 0
 trial_budget:
   timeout_seconds: 1800
+metadata:
+  worker_publish_recovery:
+    enabled: true
+    max_attempts_per_worker: 1
+    timeout_seconds: 120
+    detection: successful-worker-messages-send-receipt-after-terminal-exec

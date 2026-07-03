@@ -1,5 +1,6 @@
 import hashlib
 import json
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -209,6 +210,8 @@ def test_runtime_rejects_unbounded_agent_rounds(tmp_path):
         runtime(tmp_path, max_agent_rounds=0)
     with pytest.raises(ValueError, match="positive"):
         runtime(tmp_path, readiness_timeout_seconds=0)
+    with pytest.raises(ValueError, match="positive"):
+        runtime(tmp_path, worker_report_timeout_seconds=0)
 
 
 @pytest.mark.asyncio
@@ -253,7 +256,7 @@ async def test_wait_for_agents_ready_requires_every_channel_subscription(
         ("other", 1, False),
     ],
 )
-async def test_m1_output_probe_is_exact_and_condition_scoped(
+async def test_m1_output_probe_matches_grader_and_is_condition_scoped(
     tmp_path, condition, return_code, raises
 ):
     manifest = write_manifest(tmp_path).model_copy(update={"condition": condition})
@@ -274,8 +277,7 @@ async def test_m1_output_probe_is_exact_and_condition_scoped(
 
     assert bool(environment.commands) == (condition == "M1-hello-world")
     if environment.commands:
-        assert "wc -c < /app/hello.txt" in environment.commands[0]
-        assert "-eq 14" in environment.commands[0]
+        assert "p.read_text().strip() == 'Hello, world!'" in environment.commands[0]
 
 
 @pytest.mark.asyncio
@@ -307,5 +309,128 @@ async def test_wait_for_done_requires_orchestrator_authorship(tmp_path, monkeypa
     monkeypatch.setattr(
         "harbor_buzz_orchestra.subprocess_runtime.asyncio.sleep", no_sleep
     )
-    result = await rt._wait_for_done(orch, trial, [])
+    result, recoveries = await rt._wait_for_done(orch, [], trial, [])
     assert json.dumps(result).find("real") > 0
+    assert recoveries == []
+
+
+@pytest.mark.asyncio
+async def test_wait_for_done_reprompts_worker_once_after_unreported_terminal_work(
+    tmp_path, monkeypatch
+):
+    rt = runtime(tmp_path, worker_report_timeout_seconds=1, poll_seconds=0)
+    orch = credential("orch-1", "orchestrator", "orch-model")
+    worker = credential("worker-1", "worker", "worker-model")
+    trial = TrialHandle(
+        run_id="run",
+        trial_id="trial",
+        manifest_hash="hash",
+        relay_ws_url="ws://relay",
+        channel_id="channel",
+        credentials=(orch, worker),
+    )
+    (tmp_path / "logs").mkdir()
+    (tmp_path / "logs" / "orchestration.jsonl").write_text(
+        json.dumps(
+            {
+                "event": "terminal_exec",
+                "agent_id": worker.agent_id,
+                "ended_at": "2020-01-01T00:00:00+00:00",
+            }
+        )
+        + "\n"
+    )
+    rounds = iter(
+        [
+            [],
+            [{"id": "done", "pubkey": orch.nostr_pubkey, "content": "DONE: real"}],
+        ]
+    )
+    sent = []
+
+    async def buzz_json(*args, **kwargs):
+        return next(rounds)
+
+    async def send(*args):
+        sent.append(args)
+
+    async def no_sleep(_):
+        return None
+
+    monkeypatch.setattr(rt, "_buzz_json", buzz_json)
+    monkeypatch.setattr(rt, "_send", send)
+    monkeypatch.setattr(
+        "harbor_buzz_orchestra.subprocess_runtime.asyncio.sleep", no_sleep
+    )
+
+    result, recoveries = await rt._wait_for_done(orch, [worker], trial, [])
+    assert result["id"] == "done"
+    assert recoveries == [worker.agent_id]
+    assert len(sent) == 1
+    assert sent[0][0] == orch
+    assert "Publish your result now" in sent[0][2]
+    records = [
+        json.loads(line)
+        for line in (tmp_path / "logs" / "orchestration.jsonl")
+        .read_text()
+        .splitlines()
+    ]
+    recovery = records[-1]
+    assert recovery["event"] == "worker_publish_recovery"
+    assert recovery["worker_agent_id"] == worker.agent_id
+    assert recovery["orchestrator_agent_id"] == orch.agent_id
+
+
+def test_latest_worker_event_requires_successful_message_send_receipt(tmp_path):
+    rt = runtime(tmp_path)
+    records = [
+        {
+            "event": "buzz_exec",
+            "agent_id": "worker-1",
+            "args": ["messages", "get"],
+            "ended_at": "2026-01-01T00:00:01+00:00",
+            "return_code": 0,
+            "error": None,
+        },
+        {
+            "event": "buzz_exec",
+            "agent_id": "worker-1",
+            "args": ["messages", "send"],
+            "ended_at": "2026-01-01T00:00:02+00:00",
+            "return_code": 1,
+            "error": "buzz exited 1",
+        },
+        {
+            "event": "buzz_exec",
+            "agent_id": "worker-1",
+            "args": ["messages", "send"],
+            "ended_at": "2026-01-01T00:00:03+00:00",
+            "return_code": 0,
+            "error": None,
+        },
+    ]
+    assert rt._latest_worker_event(
+        records, "worker-1", event="buzz_exec", require_message_send=True
+    ) == datetime.fromisoformat("2026-01-01T00:00:03+00:00")
+
+
+def test_recovery_policy_is_manifested_and_matches_runtime_bound(tmp_path):
+    manifest = write_manifest(tmp_path).model_copy(
+        update={
+            "metadata": {
+                "worker_publish_recovery": {
+                    "enabled": True,
+                    "max_attempts_per_worker": 1,
+                    "timeout_seconds": 120,
+                    "detection": (
+                        "successful-worker-messages-send-receipt-after-terminal-exec"
+                    ),
+                }
+            }
+        }
+    )
+    runtime(tmp_path)._verify_recovery_policy(manifest)
+    with pytest.raises(RuntimeLaunchError, match="worker_publish_recovery"):
+        runtime(tmp_path, worker_report_timeout_seconds=60)._verify_recovery_policy(
+            manifest
+        )
