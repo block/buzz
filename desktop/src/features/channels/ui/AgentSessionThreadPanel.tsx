@@ -228,9 +228,6 @@ export function AgentSessionThreadPanel({
                   <Sparkles className="h-4 w-4 text-muted-foreground" />
                   Show Animations
                 </span>
-                <span className="mt-0.5 block text-xs text-muted-foreground">
-                  Slide new activity rows in as they arrive.
-                </span>
               </span>
               <Switch
                 aria-hidden="true"
@@ -259,9 +256,6 @@ export function AgentSessionThreadPanel({
                 <span className="flex items-center gap-2 text-sm font-medium">
                   <Clock3 className="h-4 w-4 text-muted-foreground" />
                   Show Timestamps
-                </span>
-                <span className="mt-0.5 block text-xs text-muted-foreground">
-                  Show when each activity row happened.
                 </span>
               </span>
               <Switch
