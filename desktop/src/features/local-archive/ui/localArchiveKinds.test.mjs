@@ -317,7 +317,7 @@ test("buildSubscriptionRequest_groupHeaderToggle_allKindsInGroup", () => {
 
 test("buildSubscriptionRequest_groupPlusCustomKind_unionDedupedSorted", () => {
   const messagesKinds = kindsOfGroupBySR("Messages & posts");
-  const customKinds = [99999, 88888];
+  const customKinds = [50000, 50001];
   const req = buildSubscriptionRequest(
     "channel_h",
     "channel-abc",
@@ -332,8 +332,8 @@ test("buildSubscriptionRequest_groupPlusCustomKind_unionDedupedSorted", () => {
   for (const k of messagesKinds) {
     assert.ok(req.kinds.includes(k), `missing messages kind ${k}`);
   }
-  assert.ok(req.kinds.includes(99999));
-  assert.ok(req.kinds.includes(88888));
+  assert.ok(req.kinds.includes(50000));
+  assert.ok(req.kinds.includes(50001));
   // No duplicates
   assert.equal(req.kinds.length, new Set(req.kinds).size);
 });

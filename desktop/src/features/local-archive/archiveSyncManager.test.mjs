@@ -586,6 +586,141 @@ test("manager_retries_subscription_after_subscribeLive_failure", async () => {
   mgr.destroy();
 });
 
+test("manager_no_duplicate_sub_when_two_reloads_overlap", async () => {
+  // Two resubscribeAll invocations fire concurrently while the first
+  // subscribeLive is still pending. Only one relay subscription must survive —
+  // no duplicate live sub, no leaked dispose.
+  let resolveFirst;
+  let callCount = 0;
+  const disposedCount = { value: 0 };
+
+  const relay = {
+    subs: new Map(),
+    subscribeLive(filter, _callback) {
+      callCount++;
+      const key = JSON.stringify(filter);
+      const disposeHandle = async () => {
+        disposedCount.value++;
+        const entry = relay.subs.get(key);
+        if (entry) entry.unsubbed = true;
+      };
+      if (callCount === 1) {
+        // Slow first call — resolver exposed so the test can unblock it later.
+        return new Promise((resolve) => {
+          resolveFirst = () => {
+            relay.subs.set(key, { filter, unsubbed: false });
+            resolve(disposeHandle);
+          };
+        });
+      }
+      // Instant second call — this should not be reached due to inflight guard.
+      relay.subs.set(key, { filter, unsubbed: false });
+      return Promise.resolve(disposeHandle);
+    },
+    activeCount() {
+      return [...relay.subs.values()].filter((e) => !e.unsubbed).length;
+    },
+  };
+
+  const archive = makeFakeArchive();
+  archive.setSubs([
+    {
+      scopeType: "channel_h",
+      scopeValue: "chan-dup",
+      kinds: [9],
+      identityPubkey: "pk",
+      relayUrl: "wss://r",
+      createdAt: 0,
+    },
+  ]);
+  const mgr = makeManager(relay, archive);
+
+  // Fire first resubscribeAll (goes async, subscribeLive pending).
+  const first = mgr.start();
+  await tick(); // let it reach the subscribeLive await
+
+  // Fire second resubscribeAll before the first subscribe resolves.
+  // biome-ignore lint/complexity/useLiteralKeys: intentional private access in test
+  const second = mgr["resubscribeAll"]();
+  await tick();
+
+  // First subscribe still pending — resolve it now.
+  resolveFirst();
+  await first;
+  await second;
+  await tick();
+
+  // subscribeLive was called exactly once (inflight guard blocked the second).
+  assert.equal(callCount, 1, "subscribeLive called only once");
+  // Exactly one active subscription.
+  assert.equal(relay.activeCount(), 1, "exactly one active sub");
+  // No extra dispose leaked.
+  assert.equal(disposedCount.value, 0, "no dispose called for a healthy sub");
+
+  mgr.destroy();
+});
+
+test("manager_disposes_stale_sub_when_deleted_before_resolve", async () => {
+  // A subscription is deleted while its subscribeLive call is in flight.
+  // On resolve, the stale dispose MUST be called and the key must NOT enter active.
+  let resolveSubscribe;
+  let disposeCalled = false;
+
+  const relay = {
+    subscribeLive(_filter, _callback) {
+      return new Promise((resolve) => {
+        resolveSubscribe = () =>
+          resolve(async () => {
+            disposeCalled = true;
+          });
+      });
+    },
+  };
+
+  const archive = makeFakeArchive();
+  archive.setSubs([
+    {
+      scopeType: "channel_h",
+      scopeValue: "chan-stale",
+      kinds: [9],
+      identityPubkey: "pk",
+      relayUrl: "wss://r",
+      createdAt: 0,
+    },
+  ]);
+  const mgr = makeManager(relay, archive);
+
+  // Start: subscribeLive is pending.
+  const started = mgr.start();
+  await tick(); // reaches the subscribeLive await
+
+  // Delete the subscription before the subscribe resolves; this fires a second
+  // resubscribeAll that updates wantedKeys to the empty set.
+  await archive.deleteSaveSubscription("channel_h", "chan-stale");
+  await tick();
+
+  // Now resolve the first subscribe.
+  resolveSubscribe();
+  await started;
+  await tick();
+
+  // The stale resolve must have called dispose.
+  assert.equal(
+    disposeCalled,
+    true,
+    "dispose must be called for superseded subscription",
+  );
+  // Key must NOT be in active.
+  assert.equal(
+    // biome-ignore lint/complexity/useLiteralKeys: intentional private access in test
+    mgr["active"].size,
+    0,
+    "active must be empty — deleted key must not be stored",
+  );
+
+  mgr.destroy();
+});
+
 test("manager_flushes_buffer_on_destroy", async () => {
   const relay = makeFakeRelayClient();
   const archive = makeFakeArchive();
