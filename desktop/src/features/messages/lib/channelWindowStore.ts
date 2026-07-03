@@ -67,9 +67,6 @@ function assertValidPage(page: ChannelWindowPage) {
   if (page.hasMore !== (page.nextCursor !== null)) {
     throw new Error("Channel window hasMore and nextCursor disagree.");
   }
-  if (page.rows.length === 0 && page.hasMore) {
-    throw new Error("An empty channel window cannot advance the cursor.");
-  }
   const seen = new Set<string>();
   for (let index = 0; index < page.rows.length; index += 1) {
     const event = page.rows[index].event;
@@ -85,15 +82,6 @@ function assertValidPage(page: ChannelWindowPage) {
     if (previous && compareRelayOrder(previous, event) > 0) {
       throw new Error("Channel window rows are not in relay order.");
     }
-  }
-  const last = page.rows[page.rows.length - 1]?.event;
-  if (
-    page.nextCursor &&
-    (!last ||
-      page.nextCursor.createdAt !== last.created_at ||
-      page.nextCursor.eventId !== last.id)
-  ) {
-    throw new Error("Channel window nextCursor is not its last row.");
   }
 }
 

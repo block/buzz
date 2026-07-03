@@ -45,6 +45,41 @@ test("dense-second pages form a lossless cursor chain", () => {
   );
 });
 
+test("accepts a relay cursor beyond the last reconstructed row", () => {
+  const visible = event("a", 100);
+  const skippedRawTail = event("z", 99);
+  const first = {
+    ...page(null, [visible]),
+    nextCursor: cursor(skippedRawTail),
+  };
+  const store = replaceNewestChannelWindow(emptyChannelWindowStore(), first);
+  const complete = appendOlderChannelWindow(
+    store,
+    page(first.nextCursor, [event("older", 98)], { hasMore: false }),
+  );
+
+  assert.deepEqual(store.pages[0].nextCursor, cursor(skippedRawTail));
+  assert.deepEqual(
+    flattenChannelWindowEvents(complete).map((item) => item.content),
+    ["older", "a"],
+  );
+});
+
+test("accepts a relay cursor when all retained rows were skipped", () => {
+  const first = page(null, [event("head", 110)]);
+  const initial = replaceNewestChannelWindow(emptyChannelWindowStore(), first);
+  const skippedRawTail = event("z", 99);
+  const next = appendOlderChannelWindow(initial, {
+    startCursor: first.nextCursor,
+    rows: [],
+    aux: [],
+    nextCursor: cursor(skippedRawTail),
+    hasMore: true,
+  });
+
+  assert.deepEqual(next.pages[1].nextCursor, cursor(skippedRawTail));
+});
+
 test("rejects a response that does not continue the echoed cursor", () => {
   const first = page(null, [event("a", 100)]);
   const store = replaceNewestChannelWindow(emptyChannelWindowStore(), first);
