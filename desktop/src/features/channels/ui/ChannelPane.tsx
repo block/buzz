@@ -119,6 +119,7 @@ export const ChannelPane = React.memo(function ChannelPane({
   profiles,
   openThreadHeadId,
   shouldShowThreadSkeleton,
+  openAgentSessionChannelId,
   openAgentSessionPubkey,
   onProfilePanelViewChange,
   onProfilePanelTabChange,
@@ -825,13 +826,18 @@ export const ChannelPane = React.memo(function ChannelPane({
               agent={selectedAgent}
               canInterruptTurn={selectedAgent.canInterruptTurn}
               channel={
-                agentSessionSelection.isAgentInActivityList({
-                  activityAgents,
-                  selectedAgent,
-                })
-                  ? activeChannel
-                  : null
+                openAgentSessionChannelId
+                  ? activeChannel?.id === openAgentSessionChannelId
+                    ? activeChannel
+                    : null
+                  : agentSessionSelection.isAgentInActivityList({
+                        activityAgents,
+                        selectedAgent,
+                      })
+                    ? activeChannel
+                    : null
               }
+              channelId={openAgentSessionChannelId}
               isWorking={botTypingEntries.some(
                 (entry) =>
                   entry.pubkey.toLowerCase() ===

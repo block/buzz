@@ -87,6 +87,9 @@ const TOOL_CLASS_LABELS: Record<AgentActivityRenderClass, string> = {
   message: "Message",
   "relay-op": "Buzz relay op",
   "file-edit": "File edit",
+  "file-read": "File read",
+  "skill-read": "Skill read",
+  image: "Image",
   shell: "Shell command",
   status: "Status",
   thought: "Thought",
@@ -99,6 +102,7 @@ const TOOL_CLASS_LABELS: Record<AgentActivityRenderClass, string> = {
 };
 
 const providers: ToolClassifierProvider[] = [
+  classifyLoadSkillTool,
   classifyDeveloperHarnessTool,
   classifyBuzzTool,
 ];
@@ -139,6 +143,28 @@ export function renderClassLabel(renderClass: AgentActivityRenderClass) {
   return TOOL_CLASS_LABELS[renderClass];
 }
 
+function classifyLoadSkillTool(
+  input: ToolClassificationInput,
+): AgentActivityDescriptor | null {
+  const isLoadSkill = [input.toolName, input.title, input.buzzToolName].some(
+    (value) => value && normalizeToolNameText(value) === "load_skill",
+  );
+  if (!isLoadSkill) return null;
+
+  const skillRef = getToolString(input.args, ["name"]);
+  const object = skillRef ?? "skill";
+  const isSupportingFile = skillRef?.includes("/") ?? false;
+
+  return {
+    renderClass: "skill-read",
+    label: isSupportingFile ? "Read skill file" : "Read skill",
+    preview: skillRef,
+    action: { verb: "Read", object },
+    source: "harness",
+    groupKey: isSupportingFile ? "skill:load-file" : "skill:load",
+  };
+}
+
 function classifyDeveloperHarnessTool(
   input: ToolClassificationInput,
 ): AgentActivityDescriptor | null {
@@ -164,7 +190,7 @@ function classifyDeveloperHarnessTool(
   if (kind === "read_file") {
     const path = getToolString(input.args, ["path"]);
     return {
-      renderClass: "generic",
+      renderClass: "file-read",
       label: "Read file",
       preview: path,
       action: { verb: "Read", object: path ?? "file" },
@@ -176,7 +202,7 @@ function classifyDeveloperHarnessTool(
   if (kind === "view_image") {
     const source = getToolString(input.args, ["source"]);
     return {
-      renderClass: "generic",
+      renderClass: "image",
       label: "Viewed image",
       preview: source ? basenameOrUrl(source) : null,
       action: {

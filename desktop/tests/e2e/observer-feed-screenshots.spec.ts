@@ -91,8 +91,18 @@ async function seedObserverEvents(
 }
 
 async function settleAnimations(panel: import("@playwright/test").Locator) {
+  // Only await finite animations — live surfaces (e.g. the turn liveness
+  // indicator) run infinite loops whose `finished` promise never resolves.
   await panel.evaluate((el) =>
-    Promise.all(el.getAnimations({ subtree: true }).map((a) => a.finished)),
+    Promise.all(
+      el
+        .getAnimations({ subtree: true })
+        .filter((a) => {
+          const timing = a.effect?.getTiming();
+          return timing?.iterations !== Number.POSITIVE_INFINITY;
+        })
+        .map((a) => a.finished),
+    ),
   );
 }
 
@@ -114,15 +124,14 @@ test.describe("observer feed screenshots", () => {
     });
   });
 
-  test("01 — prompt context inline (collapsed-but-labeled)", async ({
-    page,
-  }) => {
+  test("01 — prompt context dialog (via Checks ingress)", async ({ page }) => {
     await installMockBridge(page, { managedAgents: MANAGED_AGENTS });
     const feedPanel = await openObserverFeedPanel(page, OBSERVER_AGENT_PUBKEY);
 
-    // session/prompt event: the per-turn prompt context that #1381 stopped
-    // rendering inline. The payload contains sections that parsePromptText
-    // extracts and the transcript renders as a collapsed PromptContextInline.
+    // session/prompt event: per-turn prompt context. The payload contains
+    // sections that parsePromptText extracts; the transcript keeps them out
+    // of the feed until the CheckCheck footer toggle opens the
+    // PromptContextDialog modal.
     await seedObserverEvents(page, OBSERVER_AGENT_PUBKEY, [
       {
         seq: 1,
@@ -156,13 +165,22 @@ test.describe("observer feed screenshots", () => {
       },
     ]);
 
-    // The inline context element should be visible with collapsed sections.
+    // The context stays out of the feed until the CheckCheck ingress opens
+    // the dialog.
+    await expect(feedPanel.getByText("Prompt context")).toHaveCount(0);
+    const contextToggle = feedPanel.getByTestId(
+      "transcript-prompt-context-toggle",
+    );
+    await expect(contextToggle).toBeVisible({ timeout: 5_000 });
+    await contextToggle.click();
+    const dialog = page.getByRole("dialog");
+    await expect(dialog).toBeVisible({ timeout: 5_000 });
     await expect(
-      feedPanel.getByTestId("transcript-prompt-context-inline"),
+      dialog.getByTestId("transcript-prompt-context-sections"),
     ).toBeVisible({ timeout: 5_000 });
-    await settleAnimations(feedPanel);
-    await feedPanel.screenshot({
-      path: `${SHOTS}/01-prompt-context-inline.png`,
+    await settleAnimations(dialog);
+    await dialog.screenshot({
+      path: `${SHOTS}/01-prompt-context-dialog.png`,
     });
   });
 
@@ -323,7 +341,7 @@ test.describe("observer feed screenshots", () => {
     });
   });
 
-  test("05 — prompt context inline (sections expanded)", async ({ page }) => {
+  test("05 — prompt context dialog (sections expanded)", async ({ page }) => {
     await installMockBridge(page, { managedAgents: MANAGED_AGENTS });
     const feedPanel = await openObserverFeedPanel(page, OBSERVER_AGENT_PUBKEY);
 
@@ -360,19 +378,23 @@ test.describe("observer feed screenshots", () => {
       },
     ]);
 
-    await expect(
-      feedPanel.getByTestId("transcript-prompt-context-inline"),
-    ).toBeVisible({ timeout: 5_000 });
+    // Open the dialog via the CheckCheck ingress, then expand every section.
+    const contextToggle = feedPanel.getByTestId(
+      "transcript-prompt-context-toggle",
+    );
+    await expect(contextToggle).toBeVisible({ timeout: 5_000 });
+    await contextToggle.click();
+    const dialog = page.getByRole("dialog");
+    await expect(dialog).toBeVisible({ timeout: 5_000 });
 
-    // Click each section accordion button to expand it.
-    const sectionButtons = feedPanel
+    const sectionButtons = dialog
       .getByTestId("transcript-prompt-context-sections")
       .getByRole("button");
     for (const btn of await sectionButtons.all()) {
       await btn.click();
     }
-    await settleAnimations(feedPanel);
-    await feedPanel.screenshot({
+    await settleAnimations(dialog);
+    await dialog.screenshot({
       path: `${SHOTS}/05-prompt-context-expanded.png`,
     });
   });
@@ -618,7 +640,7 @@ test.describe("observer feed screenshots", () => {
     });
   });
 
-  test("11 — first-turn ordering: user bubble → System prompt → Prompt context", async ({
+  test("11 — first-turn bundle: user bubble + Checks ingress dialog", async ({
     page,
   }) => {
     await installMockBridge(page, { managedAgents: MANAGED_AGENTS });
@@ -626,8 +648,9 @@ test.describe("observer feed screenshots", () => {
 
     // Full realistic pool.rs first-turn wire sequence:
     // turn_started → session/new → session_resolved → session/prompt
-    // Verifies the ordering fix: System prompt renders between the user message
-    // bubble and the Prompt context inline block (not after it).
+    // Verifies the prompt bundle keeps context out of the feed: the system
+    // prompt and prompt context both live in the dialog opened via the
+    // CheckCheck footer ingress, with system-prompt sections listed first.
     await seedObserverEvents(page, OBSERVER_AGENT_PUBKEY, [
       {
         seq: 1,
@@ -699,15 +722,24 @@ test.describe("observer feed screenshots", () => {
     await expect(feedPanel.getByTestId("transcript-prompt-bundle")).toBeVisible(
       { timeout: 5_000 },
     );
-    // System prompt should appear inside the bundle, above prompt context.
-    await expect(feedPanel.getByText("System prompt")).toBeVisible({
-      timeout: 5_000,
-    });
-    await expect(feedPanel.getByText("Prompt context")).toBeVisible({
-      timeout: 5_000,
-    });
-    await settleAnimations(feedPanel);
-    await feedPanel.screenshot({
+    // Neither the system prompt nor the prompt context renders in the feed.
+    await expect(feedPanel.getByText("System prompt")).toHaveCount(0);
+    await expect(feedPanel.getByText("Prompt context")).toHaveCount(0);
+
+    // Open the dialog: system-prompt sections (Base/System) come before the
+    // prompt-context sections (Buzz event/Thread context).
+    await feedPanel.getByTestId("transcript-prompt-context-toggle").click();
+    const dialog = page.getByRole("dialog");
+    await expect(dialog).toBeVisible({ timeout: 5_000 });
+    const sectionTitles = await dialog
+      .getByTestId("transcript-prompt-context-sections")
+      .locator("article")
+      .allInnerTexts();
+    expect(sectionTitles.length).toBe(4);
+    expect(sectionTitles[0]).toContain("Base");
+    expect(sectionTitles[1]).toContain("System");
+    await settleAnimations(dialog);
+    await dialog.screenshot({
       path: `${SHOTS}/11-first-turn-ordering.png`,
     });
   });

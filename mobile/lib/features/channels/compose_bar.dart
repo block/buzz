@@ -15,6 +15,9 @@ import 'channel.dart';
 import 'channel_management_provider.dart';
 import 'channels_provider.dart';
 import 'emoji_picker.dart';
+import 'mentions/mention_candidates.dart';
+import 'mentions/mention_candidates_provider.dart';
+import 'mentions/mention_ranking.dart';
 
 part 'compose_bar/helpers.dart';
 part 'compose_bar/suggestions.dart';
@@ -84,17 +87,33 @@ class ComposeBar extends HookConsumerWidget {
     final membersAsync = ref.watch(channelMembersProvider(channelId));
     final currentPubkey = ref.watch(currentPubkeyProvider);
     final userCache = ref.watch(userCacheProvider);
+    final isDmChannel =
+        channelsAsync.asData?.value.any((c) => c.id == channelId && c.isDm) ??
+        false;
 
-    // Preload profiles for channel members so @mention suggestions show names.
-    useEffect(() {
-      final memberList = membersAsync.asData?.value ?? <ChannelMember>[];
-      if (memberList.isNotEmpty) {
-        ref
-            .read(userCacheProvider.notifier)
-            .preload(memberList.map((m) => m.pubkey).toList());
-      }
-      return null;
-    }, [membersAsync.asData?.value.length]);
+    // Preload profiles for channel members, mentionable agents, and their
+    // owners so @mention suggestions show names ("owned by …" included).
+    final relayAgents = ref.watch(agentDirectoryProvider).asData?.value;
+    final agentOwners = ref.watch(agentOwnersProvider).asData?.value;
+    useEffect(
+      () {
+        final memberList = membersAsync.asData?.value ?? <ChannelMember>[];
+        final pubkeys = [
+          ...memberList.map((m) => m.pubkey),
+          ...?relayAgents?.map((a) => a.pubkey),
+          ...?agentOwners?.values,
+        ];
+        if (pubkeys.isNotEmpty) {
+          ref.read(userCacheProvider.notifier).preload(pubkeys);
+        }
+        return null;
+      },
+      [
+        membersAsync.asData?.value.length,
+        relayAgents?.length,
+        agentOwners?.length,
+      ],
+    );
 
     // Typing indicator broadcast — throttled to one event per 3 seconds.
     final lastTypingSentMs = useRef(0);
@@ -165,27 +184,37 @@ class ComposeBar extends HookConsumerWidget {
       return () => controller.removeListener(listener);
     }, [controller]);
 
-    // Filter channel members against the query.
-    final members = membersAsync.asData?.value ?? <ChannelMember>[];
-    final suggestions = _filterMembers(
-      members,
-      mentionQuery.value,
-      currentPubkey,
-      userCache,
-    );
+    // Ranked mention candidates (desktop-parity ordering + eligibility).
+    final suggestions = mentionQuery.value == null
+        ? const <MentionCandidate>[]
+        : ref
+              .watch(
+                mentionCandidatesProvider((
+                  channelId: channelId,
+                  query: mentionQuery.value!,
+                )),
+              )
+              .take(_mentionSuggestionLimit)
+              .toList();
+
+    // Resolve owner names for the visible "owned by …" subtitles.
+    useEffect(() {
+      final ownerPubkeys = [for (final s in suggestions) ?s.ownerPubkey];
+      if (ownerPubkeys.isNotEmpty) {
+        ref.read(userCacheProvider.notifier).preload(ownerPubkeys);
+      }
+      return null;
+    }, [suggestions.length, mentionQuery.value]);
 
     // Filter channels against the query.
     final channels = channelsAsync.asData?.value ?? <Channel>[];
     final channelSuggestions = filterChannels(channels, channelQuery.value);
 
     // Insert a selected mention into the text field.
-    void insertMention(ChannelMember member) {
-      final cached = ref.read(userCacheProvider)[member.pubkey.toLowerCase()];
-      final name = cached?.displayName?.trim().isNotEmpty == true
-          ? cached!.displayName!.trim()
-          : '${member.pubkey.substring(0, 8)}\u2026';
+    void insertMention(MentionCandidate candidate) {
+      final name = candidate.label;
       // Track the resolved pubkey so we can pass it at send time.
-      mentionMap.value[name] = member.pubkey;
+      mentionMap.value[name] = candidate.pubkey;
 
       final start = mentionStartIdx.value.clamp(0, controller.text.length);
       spliceAndMoveCursor(
@@ -349,6 +378,7 @@ class ComposeBar extends HookConsumerWidget {
             suggestions: suggestions,
             userCache: userCache,
             currentPubkey: currentPubkey,
+            isDmChannel: isDmChannel,
             onSelect: insertMention,
           ),
 

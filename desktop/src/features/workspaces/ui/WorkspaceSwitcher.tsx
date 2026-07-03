@@ -54,7 +54,7 @@ type WorkspaceSwitcherProps = {
   onRemoveWorkspace: (id: string) => void;
 };
 
-function WorkspaceEmojiIcon({
+export function WorkspaceEmojiIcon({
   className,
   iconUrl,
 }: {

@@ -2,6 +2,10 @@ part of '../compose_bar.dart';
 
 const _typingThrottleMs = 3000;
 
+/// Cap on ranked mention suggestions shown — matches desktop's
+/// `MENTION_SUGGESTION_LIMIT`.
+const _mentionSuggestionLimit = 50;
+
 /// Walk backward from [cursor] looking for [trigger] (e.g. `@` or `#`) at a
 /// word boundary. Returns the index of the trigger character, or `null` if none
 /// is found.

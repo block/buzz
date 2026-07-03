@@ -2,6 +2,7 @@ import * as React from "react";
 import { ChevronDown } from "lucide-react";
 
 import { cn } from "@/shared/lib/cn";
+import { useAgentSessionTranscriptVariant } from "../agentSessionTranscriptContext";
 
 export type ActivityRowLabelParts = {
   verb: string;
@@ -71,7 +72,7 @@ export function ActivityRow({
     >
       <summary
         className={cn(
-          "inline-flex min-h-6 max-w-full cursor-pointer list-none items-center gap-1.5 text-muted-foreground",
+          "group/row flex min-h-6 w-full max-w-full cursor-pointer list-none items-center gap-1.5 text-muted-foreground",
           openToneScope === "summary"
             ? "group-open/summary:text-foreground"
             : "group-open:text-foreground",
@@ -80,7 +81,7 @@ export function ActivityRow({
         {summaryChildren}
         <ChevronDown
           className={cn(
-            "h-3.5 w-3.5 shrink-0 text-muted-foreground/60 transition-transform",
+            "h-3.5 w-3.5 shrink-0 text-muted-foreground/60 transition-transform group-hover/row:text-foreground",
             openToneScope === "summary"
               ? "group-open/summary:rotate-180 group-open/summary:text-foreground"
               : "group-open:rotate-180 group-open:text-foreground",
@@ -113,6 +114,9 @@ export function ActivityRowLabel({
   stats?: ActivityRowStats | null;
   title?: string;
 }) {
+  const variant = useAgentSessionTranscriptVariant();
+  const isCompactPreview = variant === "compactPreview";
+
   return (
     <span
       className={cn("inline-flex min-w-0 items-center gap-1.5", className)}
@@ -120,12 +124,13 @@ export function ActivityRowLabel({
     >
       <span
         className={cn(
-          "shrink-0 text-sm font-semibold text-muted-foreground/50",
+          "shrink-0 font-semibold text-muted-foreground/50",
+          isCompactPreview ? "text-xs" : "text-sm",
           openToneScope === "none"
             ? null
             : openToneScope === "summary"
-              ? "group-open/summary:text-foreground"
-              : "group-open:text-foreground",
+              ? "transition-colors group-hover/row:text-foreground group-open/summary:text-foreground"
+              : "transition-colors group-hover/row:text-foreground group-open:text-foreground",
         )}
       >
         {verb}
@@ -133,12 +138,13 @@ export function ActivityRowLabel({
       {object ? (
         <span
           className={cn(
-            "min-w-0 truncate text-sm font-normal text-muted-foreground/60",
+            "min-w-0 truncate font-normal text-muted-foreground/60",
+            isCompactPreview ? "text-xs" : "text-sm",
             openToneScope === "none"
               ? null
               : openToneScope === "summary"
-                ? "group-open/summary:text-foreground"
-                : "group-open:text-foreground",
+                ? "transition-colors group-hover/row:text-foreground group-open/summary:text-foreground"
+                : "transition-colors group-hover/row:text-foreground group-open:text-foreground",
           )}
         >
           {object}

@@ -108,12 +108,14 @@ export function ChannelScreen({
   const {
     channelManagementOpen,
     clearMessageRouteTarget,
+    openAgentSessionChannelId,
     openAgentSessionPubkey,
     openThreadHeadId,
     profilePanelPubkey,
     profilePanelTab,
     profilePanelView,
     setChannelManagementOpen,
+    setOpenAgentSessionChannelId,
     setOpenAgentSessionPubkey,
     setOpenThreadHeadId,
     setProfilePanelTab,
@@ -601,6 +603,7 @@ export function ChannelScreen({
     profilePanelPubkey,
     setChannelManagementOpen,
     setExpandedThreadReplyIds,
+    setOpenAgentSessionChannelId,
     setOpenAgentSessionPubkey,
     setOpenThreadHeadId,
     setProfilePanelPubkey,
@@ -946,6 +949,7 @@ export function ChannelScreen({
                   onThreadPanelResizeStart={handleThreadPanelResizeStart}
                   onTargetReached={handleTargetReached}
                   onToggleReaction={effectiveToggleReaction}
+                  openAgentSessionChannelId={openAgentSessionChannelId}
                   openAgentSessionPubkey={openAgentSessionPubkey}
                   openThreadHeadId={effectiveOpenThreadHeadId}
                   shouldShowThreadSkeleton={shouldShowThreadSkeleton}

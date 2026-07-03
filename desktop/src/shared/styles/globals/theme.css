@@ -111,6 +111,20 @@
     width: 100%;
   }
 
+  /*
+   * The app is a fixed-height shell — the document itself must never scroll
+   * or rubber-band. `overscroll-behavior: none` stops scroll chaining from
+   * inner containers reaching the viewport on both axes (the Magic Mouse
+   * horizontal pan escaped through here), and `overflow: hidden` removes any
+   * document-level scrollability. useWebviewScrollBoundaryLock handles the
+   * wheel-event side; this is the CSS backstop.
+   */
+  html,
+  body {
+    overflow: hidden;
+    overscroll-behavior: none;
+  }
+
   mark {
     background-color: transparent;
     color: inherit;

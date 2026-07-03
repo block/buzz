@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Buzz",
-  "version": "0.3.41",
+  "version": "0.3.42",
   "identifier": "xyz.block.buzz.app",
   "build": {
     "beforeDevCommand": {
@@ -66,7 +66,22 @@
     ],
     "macOS": {
       "infoPlist": "Info.plist",
-      "entitlements": "Entitlements.plist"
+      "entitlements": "Entitlements.plist",
+      "dmg": {
+        "background": "icons/dmg-background.png",
+        "windowSize": {
+          "width": 660,
+          "height": 532
+        },
+        "appPosition": {
+          "x": 191,
+          "y": 330
+        },
+        "applicationFolderPosition": {
+          "x": 469,
+          "y": 330
+        }
+      }
     }
   }
 }

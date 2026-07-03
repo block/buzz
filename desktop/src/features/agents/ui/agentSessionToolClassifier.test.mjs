@@ -53,6 +53,41 @@ test("parseBuzzCliCommand promotes buzz message sends to message descriptors", (
   assert.equal(descriptor?.operation, "messages.send");
 });
 
+test("classifyTool promotes load_skill to skill-read descriptors", () => {
+  const descriptor = classifyTool({
+    title: "load_skill",
+    toolName: "load_skill",
+    buzzToolName: null,
+    args: { name: "block-safe-github" },
+    result: "# Safe GitHub usage at Block\n",
+    isError: false,
+  });
+
+  assert.equal(descriptor.renderClass, "skill-read");
+  assert.equal(descriptor.label, "Read skill");
+  assert.equal(descriptor.preview, "block-safe-github");
+  assert.deepEqual(descriptor.action, {
+    verb: "Read",
+    object: "block-safe-github",
+  });
+  assert.equal(descriptor.groupKey, "skill:load");
+});
+
+test("classifyTool promotes supporting-file load_skill to skill-read file descriptors", () => {
+  const descriptor = classifyTool({
+    title: "load_skill",
+    toolName: "load_skill",
+    buzzToolName: null,
+    args: { name: "block-safe-github/references/foo.md" },
+    result: "# Reference\n",
+    isError: false,
+  });
+
+  assert.equal(descriptor.renderClass, "skill-read");
+  assert.equal(descriptor.label, "Read skill file");
+  assert.equal(descriptor.groupKey, "skill:load-file");
+});
+
 test("classifyTool promotes buzz CLI shell commands to relay operations", () => {
   const descriptor = classifyTool({
     title: "Shell",

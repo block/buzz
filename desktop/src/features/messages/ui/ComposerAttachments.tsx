@@ -1,6 +1,5 @@
 import * as React from "react";
 import { AnimatePresence, LayoutGroup, motion } from "motion/react";
-import * as DialogPrimitive from "@radix-ui/react-dialog";
 import { FileText, HatGlasses, Play, X } from "lucide-react";
 
 import type { BlobDescriptor } from "@/shared/api/tauri";
@@ -10,7 +9,7 @@ import {
   type UploadingAttachmentPreview,
 } from "@/features/messages/lib/useMediaUpload";
 import { cn } from "@/shared/lib/cn";
-import { MODAL_BACKDROP_BLUR_CLASS } from "@/shared/ui/modalBackdrop";
+import { SimpleImageLightbox } from "@/shared/ui/SimpleImageLightbox";
 import { Progress } from "@/shared/ui/progress";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 
@@ -146,103 +145,28 @@ export const ComposerAttachments = React.memo(function ComposerAttachments({
                 transition={{ type: "spring", stiffness: 500, damping: 30 }}
                 className="group relative"
               >
-                <div
-                  className="relative h-[55px] max-w-[55px]"
-                  style={mediaStyle}
-                >
-                  <DialogPrimitive.Root>
-                    <DialogPrimitive.Trigger asChild>
-                      <div className="h-full w-full cursor-pointer overflow-hidden rounded-2xl border border-border/70">
-                        {isVideo ? (
-                          <div className="relative flex h-full w-full items-center justify-center bg-muted text-white">
-                            {videoPosterUrl ? (
-                              <img
-                                src={videoPosterUrl}
-                                alt={`Video attachment ${hash}`}
-                                className="h-full w-full object-cover"
-                              />
-                            ) : (
-                              <div className="h-full w-full bg-muted/80" />
-                            )}
-                            <div className="absolute inset-0 bg-black/15" />
-                            <div className="absolute flex h-5 w-5 items-center justify-center rounded-full bg-black/55 backdrop-blur-sm">
-                              <Play className="h-4 w-4 fill-white text-white" />
-                            </div>
-                          </div>
-                        ) : (
-                          <img
-                            src={thumbUrl}
-                            alt={`Attachment ${hash}`}
-                            className="h-full w-full object-cover"
-                          />
-                        )}
-                        {isSpoilered ? (
-                          <div
-                            className="pointer-events-none absolute inset-0 flex items-center justify-center rounded-2xl bg-background/55 text-foreground/70 backdrop-blur-[1px]"
-                            data-composer-media-spoiler=""
-                          >
-                            <HatGlasses className="h-4 w-4" />
-                          </div>
-                        ) : null}
-                      </div>
-                    </DialogPrimitive.Trigger>
-                    <DialogPrimitive.Portal>
-                      <DialogPrimitive.Overlay
-                        className={cn(
-                          "fixed inset-0 z-50 bg-black/80 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0",
-                          MODAL_BACKDROP_BLUR_CLASS,
-                        )}
-                      />
-                      <DialogPrimitive.Content
-                        className="fixed inset-0 z-50 flex items-center justify-center p-8"
-                        onPointerDownOutside={(e) => e.preventDefault()}
-                        onInteractOutside={(e) => e.preventDefault()}
-                      >
-                        <DialogPrimitive.Title className="sr-only">
-                          Attachment {hash} preview
-                        </DialogPrimitive.Title>
-                        <DialogPrimitive.Description className="sr-only">
-                          Full-size attachment preview. Press Escape or click
-                          outside to close.
-                        </DialogPrimitive.Description>
-                        <DialogPrimitive.Close
-                          className="absolute inset-0 cursor-default"
-                          aria-label="Close lightbox"
-                        />
-                        {isVideo ? (
-                          // biome-ignore lint/a11y/useMediaCaption: user-uploaded video, no captions available
-                          <video
-                            src={rewriteRelayUrl(attachment.url)}
-                            controls
-                            className="relative max-h-[90vh] max-w-[90vw] rounded-lg"
-                          />
-                        ) : (
-                          <img
-                            alt={`Attachment ${hash}`}
-                            className="relative max-h-[90vh] max-w-[90vw] rounded-lg object-contain"
-                            src={rewriteRelayUrl(attachment.url)}
-                          />
-                        )}
-                        <DialogPrimitive.Close className="absolute right-4 top-4 rounded-full bg-black/50 p-2 text-white/80 transition-colors hover:bg-black/70 hover:text-white focus:outline-hidden focus:ring-2 focus:ring-white/30">
-                          <X className="h-4 w-4" />
-                          <span className="sr-only">Close</span>
-                        </DialogPrimitive.Close>
-                      </DialogPrimitive.Content>
-                    </DialogPrimitive.Portal>
-                  </DialogPrimitive.Root>
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <button
-                        type="button"
-                        onClick={() => onRemove(attachment.url)}
-                        className="absolute -right-1 -top-1 hidden h-4 w-4 items-center justify-center rounded-full bg-foreground text-background group-hover:flex"
-                      >
-                        <X className="h-2.5 w-2.5" />
-                      </button>
-                    </TooltipTrigger>
-                    <TooltipContent>Remove attachment</TooltipContent>
-                  </Tooltip>
-                </div>
+                <AttachmentMediaLightbox
+                  alt={`Attachment ${hash} preview`}
+                  hash={hash}
+                  isSpoilered={isSpoilered}
+                  isVideo={isVideo}
+                  mediaStyle={mediaStyle}
+                  thumbUrl={thumbUrl}
+                  url={attachment.url}
+                  videoPosterUrl={videoPosterUrl ?? null}
+                />
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <button
+                      type="button"
+                      onClick={() => onRemove(attachment.url)}
+                      className="absolute -right-1 -top-1 hidden h-4 w-4 items-center justify-center rounded-full bg-foreground text-background group-hover:flex"
+                    >
+                      <X className="h-2.5 w-2.5" />
+                    </button>
+                  </TooltipTrigger>
+                  <TooltipContent>Remove attachment</TooltipContent>
+                </Tooltip>
               </motion.div>
             );
           })}
@@ -308,3 +232,83 @@ export const ComposerAttachments = React.memo(function ComposerAttachments({
     </LayoutGroup>
   );
 });
+
+function AttachmentMediaLightbox({
+  alt,
+  hash,
+  isSpoilered,
+  isVideo,
+  mediaStyle,
+  thumbUrl,
+  url,
+  videoPosterUrl,
+}: {
+  alt: string;
+  hash: string;
+  isSpoilered: boolean;
+  isVideo: boolean;
+  mediaStyle: React.CSSProperties;
+  thumbUrl: string;
+  url: string;
+  videoPosterUrl: string | null;
+}) {
+  const [lightboxOpen, setLightboxOpen] = React.useState(false);
+  const previewSrc = rewriteRelayUrl(url);
+
+  return (
+    <div className="relative h-[55px] max-w-[55px]" style={mediaStyle}>
+      <button
+        className="h-full w-full cursor-pointer overflow-hidden rounded-2xl border border-border/70"
+        onClick={() => setLightboxOpen(true)}
+        type="button"
+      >
+        {isVideo ? (
+          <div className="relative flex h-full w-full items-center justify-center bg-muted text-white">
+            {videoPosterUrl ? (
+              <img
+                alt={`Video attachment ${hash}`}
+                className="h-full w-full object-cover"
+                src={videoPosterUrl}
+              />
+            ) : (
+              <div className="h-full w-full bg-muted/80" />
+            )}
+            <div className="absolute inset-0 bg-black/15" />
+            <div className="absolute flex h-5 w-5 items-center justify-center rounded-full bg-black/55 backdrop-blur-sm">
+              <Play className="h-4 w-4 fill-white text-white" />
+            </div>
+          </div>
+        ) : (
+          <img
+            alt={`Attachment ${hash}`}
+            className="h-full w-full object-cover"
+            src={thumbUrl}
+          />
+        )}
+        {isSpoilered ? (
+          <div
+            className="pointer-events-none absolute inset-0 flex items-center justify-center rounded-2xl bg-background/55 text-foreground/70 backdrop-blur-[1px]"
+            data-composer-media-spoiler=""
+          >
+            <HatGlasses className="h-4 w-4" />
+          </div>
+        ) : null}
+      </button>
+      <SimpleImageLightbox
+        alt={alt}
+        onOpenChange={setLightboxOpen}
+        open={lightboxOpen}
+        src={previewSrc}
+      >
+        {isVideo ? (
+          // biome-ignore lint/a11y/useMediaCaption: user-uploaded video, no captions available
+          <video
+            className="relative max-h-[90vh] max-w-[90vw] rounded-lg"
+            controls
+            src={previewSrc}
+          />
+        ) : undefined}
+      </SimpleImageLightbox>
+    </div>
+  );
+}
