@@ -2241,11 +2241,13 @@
  * and can select its text — pointer-events-none on the inner content alone is
  * one level too shallow to stop it.
  *
- * We tag the composer tooltips' content with data-composer-tooltip and reach
- * the wrapper via :has(), so pointer-events/select are killed on the actual
- * camp surface. Scoped to composer tooltips only — no app-wide tooltip change.
- * The trigger keeps its hover/focus-to-show lifecycle (WCAG
- * content-on-hover-or-focus); we only make the floating popup inert.
+ * Composer callers opt in by putting data-composer-tooltip on TooltipContent
+ * (this rule reaches the wrapper via :has(), killing pointer-events/select on
+ * the actual camp surface — inherited by the content) and
+ * disableHoverableContent on the Tooltip Root (no hover-to-persist safe
+ * bridge). Opt-in only — no app-wide tooltip change. The trigger keeps its
+ * hover/focus-to-show lifecycle (WCAG content-on-hover-or-focus); we only
+ * make the floating popup inert.
  */
 [data-radix-popper-content-wrapper]:has(> [data-composer-tooltip]) {
   pointer-events: none;

@@ -10,9 +10,9 @@ import {
   X,
 } from "lucide-react";
 
-import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
-import { ComposerIconButton } from "./ComposerIconButton";
+import { cn } from "@/shared/lib/cn";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { ComposerEmojiPicker } from "./ComposerEmojiPicker";
 import {
   FormattingToolbar,
@@ -133,17 +133,25 @@ export const MessageComposerToolbar = React.memo(
                   exit={{ x: 8, opacity: 0 }}
                   transition={presenceSpring}
                 >
-                  <ComposerIconButton
-                    aria-label="Toggle formatting"
-                    aria-pressed={isFormattingOpen}
-                    disabled={composerDisabled}
-                    onClick={() => onFormattingToggle(!isFormattingOpen)}
-                    onMouseDown={onCaptureSelection}
-                    tooltip="Formatting"
-                    variant={isFormattingOpen ? "default" : "ghost"}
-                  >
-                    <ALargeSmall />
-                  </ComposerIconButton>
+                  <Tooltip disableHoverableContent>
+                    <TooltipTrigger asChild>
+                      <Button
+                        aria-label="Toggle formatting"
+                        aria-pressed={isFormattingOpen}
+                        disabled={composerDisabled}
+                        onClick={() => onFormattingToggle(!isFormattingOpen)}
+                        onMouseDown={onCaptureSelection}
+                        size="icon"
+                        type="button"
+                        variant={isFormattingOpen ? "default" : "ghost"}
+                      >
+                        <ALargeSmall />
+                      </Button>
+                    </TooltipTrigger>
+                    <TooltipContent data-composer-tooltip>
+                      Formatting
+                    </TooltipContent>
+                  </Tooltip>
                 </motion.div>
                 <motion.div
                   className="flex items-center gap-1"
@@ -152,17 +160,25 @@ export const MessageComposerToolbar = React.memo(
                   exit={{ opacity: 0, scale: 0.95 }}
                   transition={{ ...presenceSpring, delay: 0.15 }}
                 >
-                  <ComposerIconButton
-                    aria-label="Close formatting"
-                    disabled={composerDisabled}
-                    onClick={() => onFormattingToggle(false)}
-                    onMouseDown={onCaptureSelection}
-                    variant="ghost"
-                    className="shrink-0"
-                    tooltip="Close formatting"
-                  >
-                    <X />
-                  </ComposerIconButton>
+                  <Tooltip disableHoverableContent>
+                    <TooltipTrigger asChild>
+                      <Button
+                        aria-label="Close formatting"
+                        disabled={composerDisabled}
+                        onClick={() => onFormattingToggle(false)}
+                        onMouseDown={onCaptureSelection}
+                        size="icon"
+                        type="button"
+                        variant="ghost"
+                        className="shrink-0"
+                      >
+                        <X />
+                      </Button>
+                    </TooltipTrigger>
+                    <TooltipContent data-composer-tooltip>
+                      Close formatting
+                    </TooltipContent>
+                  </Tooltip>
                   <div className="mx-1 h-5 w-px shrink-0 bg-border/60" />
                 </motion.div>
                 <motion.div
@@ -191,27 +207,51 @@ export const MessageComposerToolbar = React.memo(
                 exit={{ opacity: 0, x: -12 }}
                 transition={presenceSpring}
               >
-                <ComposerIconButton
-                  aria-label="Mention someone"
-                  data-testid="message-insert-mention"
-                  disabled={composerDisabled}
-                  onClick={onOpenMentionPicker}
-                  onMouseDown={onCaptureSelection}
-                  variant="ghost"
-                  tooltip="Mention someone"
-                >
-                  <AtSign />
-                </ComposerIconButton>
-                <ComposerIconButton
-                  aria-label="Attach image"
-                  disabled={composerDisabled || isUploading}
-                  onClick={onPaperclip}
-                  onMouseDown={onCaptureSelection}
-                  variant="ghost"
-                  tooltip="Attach image"
-                >
-                  <Paperclip />
-                </ComposerIconButton>
+                {/*
+                 * Composer tooltips float over the message textarea, so they
+                 * opt in to the click-through/anti-camp treatment:
+                 * disableHoverableContent on the Root (no hover-to-persist
+                 * safe bridge) + data-composer-tooltip on the Content (a
+                 * scoped globals.css rule makes the floating popup inert).
+                 * See the rule in globals.css for the full rationale.
+                 */}
+                <Tooltip disableHoverableContent>
+                  <TooltipTrigger asChild>
+                    <Button
+                      aria-label="Mention someone"
+                      data-testid="message-insert-mention"
+                      disabled={composerDisabled}
+                      onClick={onOpenMentionPicker}
+                      onMouseDown={onCaptureSelection}
+                      size="icon"
+                      type="button"
+                      variant="ghost"
+                    >
+                      <AtSign />
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent data-composer-tooltip>
+                    Mention someone
+                  </TooltipContent>
+                </Tooltip>
+                <Tooltip disableHoverableContent>
+                  <TooltipTrigger asChild>
+                    <Button
+                      aria-label="Attach image"
+                      disabled={composerDisabled || isUploading}
+                      onClick={onPaperclip}
+                      onMouseDown={onCaptureSelection}
+                      size="icon"
+                      type="button"
+                      variant="ghost"
+                    >
+                      <Paperclip />
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent data-composer-tooltip>
+                    Attach image
+                  </TooltipContent>
+                </Tooltip>
                 <ComposerEmojiPicker
                   disabled={composerDisabled}
                   onEmojiSelect={onEmojiSelect}
@@ -219,38 +259,52 @@ export const MessageComposerToolbar = React.memo(
                   onTriggerMouseDown={onCaptureSelection}
                   open={isEmojiPickerOpen}
                 />
-                <ComposerIconButton
-                  aria-label="Spoiler"
-                  aria-pressed={isSpoilerActive}
-                  className={cn(
-                    isSpoilerActive &&
-                      "bg-primary text-primary-foreground hover:bg-primary/90 hover:text-primary-foreground",
-                  )}
-                  disabled={composerDisabled || !editor || isUploading}
-                  onClick={handleSpoilerClick}
-                  onMouseDown={onCaptureSelection}
-                  variant={isSpoilerActive ? "default" : "ghost"}
-                  tooltip="Spoiler"
-                >
-                  <HatGlasses />
-                </ComposerIconButton>
+                <Tooltip disableHoverableContent>
+                  <TooltipTrigger asChild>
+                    <Button
+                      aria-label="Spoiler"
+                      aria-pressed={isSpoilerActive}
+                      className={cn(
+                        isSpoilerActive &&
+                          "bg-primary text-primary-foreground hover:bg-primary/90 hover:text-primary-foreground",
+                      )}
+                      disabled={composerDisabled || !editor || isUploading}
+                      onClick={handleSpoilerClick}
+                      onMouseDown={onCaptureSelection}
+                      size="icon"
+                      type="button"
+                      variant={isSpoilerActive ? "default" : "ghost"}
+                    >
+                      <HatGlasses />
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent data-composer-tooltip>Spoiler</TooltipContent>
+                </Tooltip>
                 <motion.div
                   initial={{ x: -8, opacity: 0 }}
                   animate={{ x: 0, opacity: 1 }}
                   exit={{ x: -8, opacity: 0 }}
                   transition={presenceSpring}
                 >
-                  <ComposerIconButton
-                    aria-label="Toggle formatting"
-                    aria-pressed={isFormattingOpen}
-                    disabled={composerDisabled}
-                    onClick={() => onFormattingToggle(!isFormattingOpen)}
-                    onMouseDown={onCaptureSelection}
-                    tooltip="Formatting"
-                    variant={isFormattingOpen ? "default" : "ghost"}
-                  >
-                    <ALargeSmall />
-                  </ComposerIconButton>
+                  <Tooltip disableHoverableContent>
+                    <TooltipTrigger asChild>
+                      <Button
+                        aria-label="Toggle formatting"
+                        aria-pressed={isFormattingOpen}
+                        disabled={composerDisabled}
+                        onClick={() => onFormattingToggle(!isFormattingOpen)}
+                        onMouseDown={onCaptureSelection}
+                        size="icon"
+                        type="button"
+                        variant={isFormattingOpen ? "default" : "ghost"}
+                      >
+                        <ALargeSmall />
+                      </Button>
+                    </TooltipTrigger>
+                    <TooltipContent data-composer-tooltip>
+                      Formatting
+                    </TooltipContent>
+                  </Tooltip>
                 </motion.div>
               </motion.div>
             )}

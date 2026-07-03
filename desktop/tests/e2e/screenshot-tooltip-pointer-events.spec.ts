@@ -67,3 +67,32 @@ test("formatting sub-toolbar tooltip is visible but click-through (pointer-event
   const pe = await tip.evaluate((el) => getComputedStyle(el).pointerEvents);
   expect(pe).toBe("none");
 });
+
+test("emoji picker tooltip is visible but click-through (pointer-events:none)", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  // The emoji button wraps its tooltip around a nested PopoverTrigger, so
+  // assert it opted in to the same treatment as the plain toolbar buttons.
+  const trigger = page.getByTestId("composer-emoji-button");
+  await trigger.hover();
+
+  const tip = page.getByRole("tooltip", { name: "Insert emoji" });
+  await expect(tip).toBeVisible();
+
+  // Money check: the emoji tooltip popup must be click-through too.
+  const pe = await tip.evaluate((el) => getComputedStyle(el).pointerEvents);
+  expect(pe).toBe("none");
+
+  // And the Radix popper wrapper (the real camp surface) must be inert.
+  const wrapperPe = await tip.evaluate((el) => {
+    const wrapper = el.closest<HTMLElement>(
+      "[data-radix-popper-content-wrapper]",
+    );
+    return wrapper ? getComputedStyle(wrapper).pointerEvents : null;
+  });
+  expect(wrapperPe).toBe("none");
+});

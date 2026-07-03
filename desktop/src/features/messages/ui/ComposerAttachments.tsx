@@ -120,7 +120,7 @@ export const ComposerAttachments = React.memo(function ComposerAttachments({
                       {label}
                     </span>
                   </div>
-                  <Tooltip>
+                  <Tooltip disableHoverableContent>
                     <TooltipTrigger asChild>
                       <button
                         type="button"
@@ -130,7 +130,9 @@ export const ComposerAttachments = React.memo(function ComposerAttachments({
                         <X className="h-2.5 w-2.5" />
                       </button>
                     </TooltipTrigger>
-                    <TooltipContent>Remove attachment</TooltipContent>
+                    <TooltipContent data-composer-tooltip>
+                      Remove attachment
+                    </TooltipContent>
                   </Tooltip>
                 </motion.div>
               );
@@ -230,7 +232,7 @@ export const ComposerAttachments = React.memo(function ComposerAttachments({
                       </DialogPrimitive.Content>
                     </DialogPrimitive.Portal>
                   </DialogPrimitive.Root>
-                  <Tooltip>
+                  <Tooltip disableHoverableContent>
                     <TooltipTrigger asChild>
                       <button
                         type="button"
@@ -240,7 +242,9 @@ export const ComposerAttachments = React.memo(function ComposerAttachments({
                         <X className="h-2.5 w-2.5" />
                       </button>
                     </TooltipTrigger>
-                    <TooltipContent>Remove attachment</TooltipContent>
+                    <TooltipContent data-composer-tooltip>
+                      Remove attachment
+                    </TooltipContent>
                   </Tooltip>
                 </div>
               </motion.div>
@@ -286,7 +290,7 @@ export const ComposerAttachments = React.memo(function ComposerAttachments({
                     </div>
                   </div>
                   {onCancelUpload && preview.id >= 0 ? (
-                    <Tooltip>
+                    <Tooltip disableHoverableContent>
                       <TooltipTrigger asChild>
                         <button
                           type="button"
@@ -297,7 +301,9 @@ export const ComposerAttachments = React.memo(function ComposerAttachments({
                           <X className="h-2.5 w-2.5" />
                         </button>
                       </TooltipTrigger>
-                      <TooltipContent>Cancel upload</TooltipContent>
+                      <TooltipContent data-composer-tooltip>
+                        Cancel upload
+                      </TooltipContent>
                     </Tooltip>
                   ) : null}
                 </div>
