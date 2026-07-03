@@ -179,14 +179,12 @@ impl UsageTracker {
 
     /// Process a `usage_update` notification payload.
     ///
-    /// **Always** updates the cumulative baseline for `session_id` so that the
-    /// next in-flight turn can compute a correct delta even if this notification
-    /// arrived outside a turn (e.g. during `session/new` setup).
-    ///
-    /// Only produces a publishable `pending` record when a turn is currently
-    /// in-flight for the matching `session_id`. If `in_flight_session` is
-    /// `None` or refers to a different session, the baseline is updated but
-    /// `pending` is left unchanged.
+    /// Behavior depends on which session (if any) is currently in-flight; see
+    /// the three explicit cases below. Only a notification for the in-flight
+    /// session produces a publishable `pending` record. A notification that
+    /// arrives outside any turn (e.g. during `session/new` setup) advances the
+    /// committed baseline so the next in-flight turn computes a correct delta.
+    /// A notification for a *different* in-flight session is ignored entirely.
     ///
     /// When multiple notifications arrive during the same turn, the **last one
     /// wins** on the cumulative totals, and the delta is always measured from
