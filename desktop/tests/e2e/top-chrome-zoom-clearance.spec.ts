@@ -26,6 +26,21 @@ async function firstNavButtonX(page: import("@playwright/test").Page) {
 // controls, so their box must not follow the rem text scale either.
 const NAV_BUTTON_SIZE = 28;
 
+// The grabber/drag strip hosting the buttons must hold its height too —
+// otherwise Cmd+ balloons the bar around the fixed-size buttons and Cmd-
+// collapses it.
+const TOP_CHROME_BAR_HEIGHT = 40;
+
+async function expectTopChromeFixedHeight(
+  page: import("@playwright/test").Page,
+) {
+  const bar = page.getByTestId("app-top-chrome");
+  await expect(bar).toBeVisible();
+  const box = await bar.boundingBox();
+  expect(box).not.toBeNull();
+  expect(box?.height ?? 0).toBe(TOP_CHROME_BAR_HEIGHT);
+}
+
 async function expectNavButtonsFixedSize(
   page: import("@playwright/test").Page,
 ) {
@@ -72,6 +87,7 @@ test.describe("top chrome macOS traffic-light clearance under text zoom", () => 
       TRAFFIC_LIGHT_RIGHT_EDGE,
     );
     await expectNavButtonsFixedSize(page);
+    await expectTopChromeFixedHeight(page);
   });
 
   test("nav buttons still clear the traffic lights when zoomed out", async ({
@@ -92,6 +108,7 @@ test.describe("top chrome macOS traffic-light clearance under text zoom", () => 
       TRAFFIC_LIGHT_RIGHT_EDGE,
     );
     await expectNavButtonsFixedSize(page);
+    await expectTopChromeFixedHeight(page);
   });
 
   test("nav buttons keep their fixed size when zoomed in", async ({ page }) => {
@@ -108,5 +125,6 @@ test.describe("top chrome macOS traffic-light clearance under text zoom", () => 
       TRAFFIC_LIGHT_RIGHT_EDGE,
     );
     await expectNavButtonsFixedSize(page);
+    await expectTopChromeFixedHeight(page);
   });
 });
