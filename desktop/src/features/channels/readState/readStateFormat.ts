@@ -10,6 +10,11 @@ export const READ_STATE_HORIZON_SECONDS = 7 * 24 * 60 * 60;
 
 export const MAX_CONTEXTS = 10_000;
 
+// Local-storage cap on within-horizon msg:/thread: markers. Generous multiple
+// of what the 32 KB publish budget can round-trip (~290 entries), so anything
+// beyond it is local-only dead weight that other devices never see anyway.
+export const LOCAL_MAX_PRUNABLE_CONTEXTS = 1_000;
+
 // Maximum plaintext byte length for the JSON blob passed to nip44EncryptToSelf.
 // NIP-44 v2 hard-caps plaintext at 65,535 bytes; the relay enforces a 256 KB
 // content limit. 32 KB gives ample headroom for NIP-44 overhead (~1.4×

@@ -1,5 +1,7 @@
 import { cn } from "@/shared/lib/cn";
 import type { FileEditDiff } from "../agentSessionFileEditDiff";
+import type { FileReadContent } from "../agentSessionFileRead";
+import { FileContentBlock } from "../FileContentBlock";
 import { FileEditDiffBlock, hasFileEditLineDiff } from "../FileEditDiffView";
 import { formatCodeValue } from "../agentSessionUtils";
 import { ShellCommandBlock } from "./ShellCommandBlock";
@@ -9,6 +11,7 @@ export function ToolDetailBlocks({
   args,
   description,
   fileEditDiff,
+  fileReadContent,
   hasArgs,
   hasResult,
   imagePreview,
@@ -19,6 +22,7 @@ export function ToolDetailBlocks({
   args: Record<string, unknown>;
   description?: string;
   fileEditDiff: FileEditDiff | null;
+  fileReadContent: FileReadContent | null;
   hasArgs: boolean;
   hasResult: boolean;
   imagePreview: { src: string | null; title: string | null } | null;
@@ -28,8 +32,10 @@ export function ToolDetailBlocks({
 }) {
   const showFileEditDiff =
     fileEditDiff && hasFileEditLineDiff(fileEditDiff) && !isError;
-  const showShellCommand = shellCommand != null && !showFileEditDiff;
-  const showParameters = hasArgs && !showFileEditDiff;
+  const showFileReadContent = fileReadContent != null && !isError;
+  const showFileContent = showFileEditDiff || showFileReadContent;
+  const showShellCommand = shellCommand != null && !showFileContent;
+  const showParameters = hasArgs && !showFileContent;
 
   return (
     <div className="space-y-4 py-2 text-popover-foreground outline-hidden">
@@ -56,6 +62,13 @@ export function ToolDetailBlocks({
       {!showShellCommand && hasResult ? (
         showFileEditDiff ? (
           <FileEditDiffBlock diff={fileEditDiff} />
+        ) : showFileReadContent ? (
+          <FileContentBlock
+            footerText={fileReadContent.footerText}
+            footerTitle={fileReadContent.footerTitle}
+            lines={fileReadContent.lines}
+            path={fileReadContent.path}
+          />
         ) : (
           <ToolCodeBlock
             label={isError ? "Error" : "Result"}

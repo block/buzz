@@ -67,7 +67,6 @@ struct Session {
     steer_tx: Option<mpsc::UnboundedSender<Vec<ContentBlock>>>,
     original_task: Option<String>,
     handoff_count: usize,
-    stop_rejections: u32,
     /// Cache-summed input tokens the provider reported for this session's most
     /// recent request, or `None` before the first response (or after a handoff
     /// resets the context). Drives the token-based handoff gate; see
@@ -401,7 +400,6 @@ async fn session_new(app: &Arc<App>, id: Value, params: Value, wire_tx: &WireSen
             steer_tx: None,
             original_task: None,
             handoff_count: 0,
-            stop_rejections: 0,
             last_request_input_tokens: None,
             last_request_history_bytes: None,
             effective_system_prompt,
@@ -616,7 +614,6 @@ async fn run_prompt(app: Arc<App>, id: Value, params: Value, wire_tx: WireSender
         mut history,
         mut original_task,
         mut handoff_count,
-        mut stop_rejections,
         mut last_request_input_tokens,
         mut last_request_history_bytes,
         mut cancel_rx,
@@ -665,7 +662,6 @@ async fn run_prompt(app: Arc<App>, id: Value, params: Value, wire_tx: WireSender
         history: &mut history,
         original_task: &mut original_task,
         handoff_count: &mut handoff_count,
-        stop_rejections: &mut stop_rejections,
         last_request_input_tokens: &mut last_request_input_tokens,
         last_request_history_bytes: &mut last_request_history_bytes,
     };
@@ -678,7 +674,6 @@ async fn run_prompt(app: Arc<App>, id: Value, params: Value, wire_tx: WireSender
         s.history = history;
         s.original_task = original_task;
         s.handoff_count = handoff_count;
-        s.stop_rejections = stop_rejections;
         s.last_request_input_tokens = last_request_input_tokens;
         s.last_request_history_bytes = last_request_history_bytes;
     }
@@ -705,7 +700,6 @@ async fn acquire_session(
         Vec<HistoryItem>,
         Option<String>,
         usize,
-        u32,
         Option<u64>,
         Option<usize>,
         watch::Receiver<bool>,
@@ -742,7 +736,6 @@ async fn acquire_session(
         std::mem::take(&mut s.history),
         s.original_task.take(),
         s.handoff_count,
-        s.stop_rejections,
         s.last_request_input_tokens,
         s.last_request_history_bytes,
         rx,

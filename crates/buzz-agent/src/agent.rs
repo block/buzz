@@ -42,11 +42,6 @@ pub struct RunCtx<'a> {
     pub history: &'a mut Vec<HistoryItem>,
     pub original_task: &'a mut Option<String>,
     pub handoff_count: &'a mut usize,
-    /// Cumulative `_Stop` objection count for this session (persists
-    /// across `session/prompt` calls). Once it hits
-    /// `cfg.stop_max_rejections` we stop calling `_Stop` for that
-    /// session — a runaway hook can't burn rejections on every prompt.
-    pub stop_rejections: &'a mut u32,
     /// Cache-summed input tokens reported by the provider on this session's
     /// most recent request (persists across `session/prompt` calls), or `None`
     /// before the first response and immediately after a handoff resets the
@@ -75,10 +70,10 @@ impl RunCtx<'_> {
         self.history.push(HistoryItem::User(user_text));
 
         let mut round = 0u32;
-        // Per-prompt latch: only used to detect "LLM said end_turn twice
-        // in a row with no tool calls between" within this single prompt.
-        // The cumulative rejection budget lives on the session.
-        let mut last_was_end_turn = false;
+        // Per-prompt `_Stop` objection count. Bounded per prompt (not per
+        // session) so a stubborn exchange can't permanently disable the stop
+        // guard for a long-lived session; `max_rounds` still caps the loop.
+        let mut stop_rejections = 0u32;
         loop {
             if self.cfg.max_rounds > 0 && round >= self.cfg.max_rounds {
                 return Ok(StopReason::MaxTurnRequests);
@@ -204,13 +199,7 @@ impl RunCtx<'_> {
                 let stop = map_stop(response.stop);
                 // Only gate genuine end_turn — don't override max_tokens/refusal.
                 if stop == StopReason::EndTurn {
-                    // Consecutive-rejection rule: LLM responded to our last
-                    // objection with no tool calls — accept the end and
-                    // move on rather than loop forever.
-                    if last_was_end_turn {
-                        return Ok(stop);
-                    }
-                    if *self.stop_rejections >= self.cfg.stop_max_rejections {
+                    if stop_rejections >= self.cfg.stop_max_rejections {
                         return Ok(stop);
                     }
                     let objections = self
@@ -223,8 +212,7 @@ impl RunCtx<'_> {
                         )
                         .await;
                     if !objections.is_empty() {
-                        *self.stop_rejections = self.stop_rejections.saturating_add(1);
-                        last_was_end_turn = true;
+                        stop_rejections = stop_rejections.saturating_add(1);
                         push_hook_outputs_as_tool_results(self.history, "_Stop", &objections);
                         continue;
                     }
@@ -244,9 +232,6 @@ impl RunCtx<'_> {
                 text: response.text,
                 tool_calls: calls.clone(),
             });
-
-            // Tool calls executed → reset the consecutive-rejection latch.
-            last_was_end_turn = false;
 
             if let Some(stop) = self.execute_calls(&calls).await {
                 return Ok(stop);

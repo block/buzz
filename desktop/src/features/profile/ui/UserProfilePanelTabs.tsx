@@ -2,10 +2,18 @@ import * as React from "react";
 import type { LucideIcon } from "lucide-react";
 import { Activity, Archive, ChevronRight, Info, Wrench } from "lucide-react";
 
+import type { ActiveTurnSummary } from "@/features/agents/activeAgentTurnsStore";
+import { ManagedAgentSessionPanel } from "@/features/agents/ui/ManagedAgentSessionPanel";
 import {
   AgentDetailsRows,
   AgentInstructionRow,
 } from "@/features/profile/ui/UserProfilePanelAgentDetails";
+import type { ProfileActivityAgent } from "@/features/profile/lib/profileActivityAgent";
+import { resolveActivityChannelId } from "@/features/profile/lib/profileActivityCarousel";
+import {
+  type ProfileActivityFeedScope,
+  useProfileActivityFeedScope,
+} from "@/features/profile/lib/profileActivityFeedScope";
 import {
   type ProfileField,
   ProfileFieldGroup,
@@ -13,7 +21,14 @@ import {
 } from "@/features/profile/ui/UserProfilePanelFields";
 import type { ProfilePanelTab } from "@/features/profile/ui/UserProfilePanelUtils";
 import { cn } from "@/shared/lib/cn";
+import { useNow } from "@/shared/lib/useNow";
 import { Button } from "@/shared/ui/button";
+import {
+  Carousel,
+  type CarouselApi,
+  CarouselContent,
+  CarouselItem,
+} from "@/shared/ui/carousel";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 
 export function ProfileIngressRow({
@@ -255,15 +270,21 @@ export function ProfileTabBar({
 }
 
 export function ProfileInfoTabContent({
+  activeTurns,
+  activityAgent,
   agentInfoFields,
+  channelIdToName,
   isArchived,
   onOpenActivity,
   pubkey,
   showActivityIngress,
 }: {
+  activeTurns: ActiveTurnSummary[];
+  activityAgent: ProfileActivityAgent | null;
   agentInfoFields: ProfileField[];
+  channelIdToName: Record<string, string>;
   isArchived: boolean;
-  onOpenActivity: () => void;
+  onOpenActivity: (channelId?: string | null) => void;
   pubkey: string | null;
   showActivityIngress: boolean;
 }) {
@@ -280,6 +301,9 @@ export function ProfileInfoTabContent({
       ]
     : agentInfoFields;
   const hasInfoFields = infoFields.length > 0;
+  const feedScope = useProfileActivityFeedScope(activityAgent, activeTurns);
+  const showLiveActivityEmbed =
+    showActivityIngress && (feedScope.isLive || feedScope.hasFeedContent);
 
   if (!hasInfoFields && !showActivityIngress) {
     return null;
@@ -288,17 +312,388 @@ export function ProfileInfoTabContent({
   return (
     <div className="space-y-2">
       {showActivityIngress ? (
-        <ProfileIngressRow
-          icon={Wrench}
-          label="Activity log"
-          onClick={onOpenActivity}
-          testId={`user-profile-view-activity-${pubkey}`}
-          trailing="View"
-        />
+        showLiveActivityEmbed && activityAgent ? (
+          <ProfileLiveActivityEmbed
+            activeTurns={activeTurns}
+            activityAgent={activityAgent}
+            channelIdToName={channelIdToName}
+            feedScope={feedScope}
+            onOpenActivity={onOpenActivity}
+          />
+        ) : (
+          <ProfileIngressRow
+            icon={Wrench}
+            label="Activity log"
+            onClick={() => onOpenActivity(null)}
+            testId={`user-profile-view-activity-${pubkey}`}
+            trailing="View"
+          />
+        )
       ) : null}
       {hasInfoFields ? <ProfileFieldGroup fields={infoFields} /> : null}
     </div>
   );
+}
+
+function ProfileLiveActivityEmbed({
+  activeTurns,
+  activityAgent,
+  channelIdToName,
+  feedScope,
+  onOpenActivity,
+}: {
+  activeTurns: ActiveTurnSummary[];
+  activityAgent: ProfileActivityAgent;
+  channelIdToName: Record<string, string>;
+  feedScope: ProfileActivityFeedScope;
+  onOpenActivity: (channelId?: string | null) => void;
+}) {
+  const [carouselApi, setCarouselApi] = React.useState<CarouselApi>();
+  const [selectedChannelId, setSelectedChannelId] = React.useState<
+    string | null
+  >(null);
+  const [mountedChannelIds, setMountedChannelIds] = React.useState<Set<string>>(
+    () => new Set(),
+  );
+
+  const slides = React.useMemo(() => {
+    const channelIds = feedScope.isLive
+      ? activeTurns.map((turn) => turn.channelId)
+      : feedScope.channelIds;
+    return [...new Set(channelIds)];
+  }, [activeTurns, feedScope.channelIds, feedScope.isLive]);
+
+  const activeChannelId = resolveActivityChannelId(
+    slides,
+    selectedChannelId,
+    feedScope.preferredChannelId,
+  );
+  const selectedIndex = activeChannelId ? slides.indexOf(activeChannelId) : 0;
+
+  React.useEffect(() => {
+    if (!carouselApi || !activeChannelId) {
+      return;
+    }
+
+    const syncSelectedChannel = () => {
+      setSelectedChannelId(slides[carouselApi.selectedScrollSnap()] ?? null);
+    };
+
+    carouselApi.on("select", syncSelectedChannel);
+    carouselApi.on("reInit", syncSelectedChannel);
+
+    return () => {
+      carouselApi.off("select", syncSelectedChannel);
+      carouselApi.off("reInit", syncSelectedChannel);
+    };
+  }, [activeChannelId, carouselApi, slides]);
+
+  React.useEffect(() => {
+    if (!carouselApi || !activeChannelId) {
+      return;
+    }
+
+    const targetIndex = slides.indexOf(activeChannelId);
+    if (targetIndex >= 0 && carouselApi.selectedScrollSnap() !== targetIndex) {
+      carouselApi.scrollTo(targetIndex, true);
+    }
+    setSelectedChannelId(activeChannelId);
+  }, [activeChannelId, carouselApi, slides]);
+
+  React.useEffect(() => {
+    if (!activeChannelId) {
+      return;
+    }
+
+    setMountedChannelIds((current) => {
+      if (current.has(activeChannelId)) {
+        return current;
+      }
+      const next = new Set(current);
+      next.add(activeChannelId);
+      return next;
+    });
+  }, [activeChannelId]);
+
+  const selectedTurn = feedScope.isLive
+    ? (activeTurns.find((turn) => turn.channelId === activeChannelId) ??
+      activeTurns[0] ??
+      null)
+    : null;
+  const activeChannelName = activeChannelId
+    ? (channelIdToName[activeChannelId] ?? activeChannelId)
+    : null;
+  const lastLiveAt =
+    (activeChannelId
+      ? feedScope.latestActivityAtByChannel[activeChannelId]
+      : undefined) ??
+    selectedTurn?.anchorAt ??
+    null;
+  const emptyState = feedScope.isLive ? "loading" : "idle";
+  const emptyDescription = "Live activity will appear here.";
+  const openSelectedActivity = React.useCallback(() => {
+    onOpenActivity(activeChannelId);
+  }, [activeChannelId, onOpenActivity]);
+
+  const handleDotSelect = React.useCallback(
+    (index: number) => {
+      const targetIndex =
+        slides.length === 2 && index === selectedIndex
+          ? (selectedIndex + 1) % slides.length
+          : index;
+      carouselApi?.scrollTo(targetIndex);
+    },
+    [carouselApi, selectedIndex, slides.length],
+  );
+
+  if (slides.length === 0) {
+    return (
+      <section
+        aria-label={`Open activity feed. Last live ${formatLastLiveLabel(lastLiveAt, Date.now())}.`}
+        className="relative flex h-56 cursor-pointer flex-col overflow-hidden rounded-2xl border bg-background text-left shadow-none transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        data-testid={`user-profile-live-activity-${activityAgent.pubkey}`}
+      >
+        <button
+          aria-label={`Open activity feed. Last live ${formatLastLiveLabel(lastLiveAt, Date.now())}.`}
+          className="absolute inset-0 z-10 rounded-2xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          onClick={openSelectedActivity}
+          type="button"
+        />
+        <LiveActivityOpenButton
+          activeChannelId={activeChannelId}
+          lastLiveAt={lastLiveAt}
+          onOpenActivity={onOpenActivity}
+        />
+        <ManagedAgentSessionPanel
+          agent={activityAgent}
+          autoTail={true}
+          channelId={null}
+          className="relative z-0 min-h-0 flex-1 border-0 bg-transparent px-4 text-xs shadow-none **:data-message-id:pointer-events-none"
+          emptyDescription={emptyDescription}
+          emptyState={emptyState}
+          panelPadding={false}
+          rawLayout="responsive"
+          showHeader={false}
+          showRaw={false}
+          transcriptContentClassName="py-4"
+          transcriptVariant="compactPreview"
+        />
+        <div className="pointer-events-none absolute inset-0 z-20">
+          <div className="absolute inset-x-0 bottom-0 flex flex-col items-start bg-linear-to-t from-background via-background/90 to-transparent px-3 pb-3 pt-24">
+            <div className="min-w-0">
+              <span className="block text-sm font-semibold text-muted-foreground">
+                Latest Activity
+              </span>
+            </div>
+          </div>
+        </div>
+      </section>
+    );
+  }
+
+  return (
+    <div>
+      <section
+        aria-label={`Open activity feed. Last live ${formatLastLiveLabel(lastLiveAt, Date.now())}.`}
+        className="relative flex h-56 cursor-pointer flex-col overflow-hidden rounded-2xl border bg-background text-left shadow-none transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        data-testid={`user-profile-live-activity-${activityAgent.pubkey}`}
+      >
+        <button
+          aria-label={`Open activity feed. Last live ${formatLastLiveLabel(lastLiveAt, Date.now())}.`}
+          className="absolute inset-0 z-10 rounded-2xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          onClick={openSelectedActivity}
+          type="button"
+        />
+        <LiveActivityOpenButton
+          activeChannelId={activeChannelId}
+          lastLiveAt={lastLiveAt}
+          onOpenActivity={onOpenActivity}
+        />
+        <Carousel
+          className="relative z-0 flex min-h-0 flex-1 flex-col"
+          opts={{
+            align: "start",
+            containScroll: "trimSnaps",
+            dragFree: false,
+            watchDrag: false,
+          }}
+          setApi={setCarouselApi}
+        >
+          <CarouselContent className="ml-0 h-full flex-1">
+            {slides.map((channelId) => {
+              const isMounted = mountedChannelIds.has(channelId);
+
+              return (
+                <CarouselItem
+                  className="h-full basis-full pl-0"
+                  data-mounted={isMounted ? "true" : "false"}
+                  data-testid={`user-profile-activity-slide-${channelId}`}
+                  key={channelId}
+                >
+                  {isMounted ? (
+                    <ManagedAgentSessionPanel
+                      agent={activityAgent}
+                      autoTail={true}
+                      channelId={channelId}
+                      className="h-full min-h-0 border-0 bg-transparent px-4 text-xs shadow-none **:data-message-id:pointer-events-none"
+                      emptyDescription={emptyDescription}
+                      emptyState={emptyState}
+                      panelPadding={false}
+                      rawLayout="responsive"
+                      showHeader={false}
+                      showRaw={false}
+                      transcriptContentClassName="py-4"
+                      transcriptVariant="compactPreview"
+                    />
+                  ) : (
+                    <div aria-hidden="true" className="h-full" />
+                  )}
+                </CarouselItem>
+              );
+            })}
+          </CarouselContent>
+        </Carousel>
+        <div className="pointer-events-none absolute inset-0 z-20">
+          <div className="absolute inset-x-0 bottom-0 flex flex-col items-start bg-linear-to-t from-background via-background/80 to-transparent px-3 pb-3 pt-16">
+            <div className="min-w-0">
+              <span className="block text-xs font-semibold text-muted-foreground">
+                Latest Activity
+              </span>
+              {activeChannelName ? (
+                <span
+                  className="block truncate text-xs font-medium text-muted-foreground/75"
+                  data-testid="user-profile-activity-channel-label"
+                  title={`#${activeChannelName}`}
+                >
+                  #{activeChannelName}
+                </span>
+              ) : null}
+            </div>
+          </div>
+        </div>
+      </section>
+      <ActivityCarouselDots
+        channelIdToName={channelIdToName}
+        onSelect={handleDotSelect}
+        selectedIndex={selectedIndex}
+        slides={slides}
+      />
+    </div>
+  );
+}
+
+function ActivityCarouselDots({
+  channelIdToName,
+  onSelect,
+  selectedIndex,
+  slides,
+}: {
+  channelIdToName: Record<string, string>;
+  onSelect: (index: number) => void;
+  selectedIndex: number;
+  slides: string[];
+}) {
+  if (slides.length <= 1) {
+    return null;
+  }
+
+  return (
+    <div
+      aria-label="Choose active channel feed"
+      className="mt-2 flex items-center justify-center gap-1.5"
+      role="tablist"
+    >
+      {slides.map((channelId, index) => {
+        const isSelected = index === selectedIndex;
+        const channelName = channelIdToName[channelId] ?? channelId;
+
+        return (
+          <button
+            aria-label={`Show #${channelName} activity`}
+            aria-selected={isSelected}
+            className="group relative flex items-center justify-center before:absolute before:-inset-2 before:content-['']"
+            data-testid={`user-profile-activity-dot-${channelId}`}
+            key={channelId}
+            onClick={(event) => {
+              event.stopPropagation();
+              onSelect(index);
+            }}
+            role="tab"
+            type="button"
+          >
+            <span
+              aria-hidden="true"
+              className={cn(
+                "relative z-10 block rounded-full bg-foreground transition-all",
+                isSelected
+                  ? "h-1 w-4"
+                  : "h-1 w-1 opacity-30 group-hover:opacity-60",
+              )}
+            />
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+function LiveActivityOpenButton({
+  activeChannelId,
+  lastLiveAt,
+  onOpenActivity,
+}: {
+  activeChannelId: string | null;
+  lastLiveAt: number | null;
+  onOpenActivity: (channelId?: string | null) => void;
+}) {
+  const now = useNow(15_000);
+  const label = formatLastLiveLabel(lastLiveAt, now);
+
+  return (
+    <Button
+      aria-label={`Open full activity. Last live ${label}.`}
+      className="absolute right-3 top-3 z-40 rounded-full bg-primary px-2.5 text-xs font-semibold text-primary-foreground hover:bg-primary/90"
+      onClick={(event) => {
+        event.stopPropagation();
+        onOpenActivity(activeChannelId);
+      }}
+      size="xs"
+      title={`Last live ${label}`}
+      type="button"
+    >
+      {label}
+    </Button>
+  );
+}
+
+function formatLastLiveLabel(timestamp: number | null, now: number): string {
+  if (timestamp === null) {
+    return "No activity yet";
+  }
+
+  const elapsedMs = Math.max(0, now - timestamp);
+  const totalSeconds = Math.floor(elapsedMs / 1000);
+  if (totalSeconds < 60) {
+    return "Just now";
+  }
+
+  const totalMinutes = Math.floor(totalSeconds / 60);
+  if (totalMinutes < 60) {
+    return `${totalMinutes}m ago`;
+  }
+
+  const totalHours = Math.floor(totalMinutes / 60);
+  if (totalHours < 24) {
+    return `${totalHours}h ago`;
+  }
+
+  const totalDays = Math.floor(totalHours / 24);
+  if (totalDays < 7) {
+    return `${totalDays}d ago`;
+  }
+
+  const totalWeeks = Math.floor(totalDays / 7);
+  return `${totalWeeks}w ago`;
 }
 
 function ArchiveStatusTooltip() {

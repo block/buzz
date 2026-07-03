@@ -23,8 +23,11 @@ async function firstNavButtonX(page: import("@playwright/test").Page) {
 }
 
 // The chrome buttons are styled to visually match the fixed-size native
-// controls, so their box must not follow the rem text scale either.
+// controls, so their box must not follow the rem text scale either. The
+// sidebar toggle is 28px square; the back/forward history buttons share the
+// height but are deliberately narrower (24px).
 const NAV_BUTTON_SIZE = 28;
+const HISTORY_BUTTON_WIDTH = 24;
 
 // The grabber/drag strip hosting the buttons must hold its height too —
 // otherwise Cmd+ balloons the bar around the fixed-size buttons and Cmd-
@@ -48,9 +51,14 @@ async function expectNavButtonsFixedSize(
   const count = await buttons.count();
   expect(count).toBeGreaterThan(0);
   for (let i = 0; i < count; i += 1) {
-    const box = await buttons.nth(i).boundingBox();
+    const button = buttons.nth(i);
+    const label = await button.getAttribute("aria-label");
+    const isHistoryButton = label === "Go back" || label === "Go forward";
+    const box = await button.boundingBox();
     expect(box).not.toBeNull();
-    expect(box?.width ?? 0).toBe(NAV_BUTTON_SIZE);
+    expect(box?.width ?? 0).toBe(
+      isHistoryButton ? HISTORY_BUTTON_WIDTH : NAV_BUTTON_SIZE,
+    );
     expect(box?.height ?? 0).toBe(NAV_BUTTON_SIZE);
   }
 }

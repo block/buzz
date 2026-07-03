@@ -1,5 +1,6 @@
 import type { Workspace } from "./types";
 import { homeDir } from "@tauri-apps/api/path";
+import { setLocalStorageItemWithRecovery } from "@/shared/lib/localStorageQuota";
 
 const WORKSPACES_KEY = "buzz-workspaces";
 const ACTIVE_WORKSPACE_KEY = "buzz-active-workspace-id";
@@ -52,7 +53,7 @@ export function loadWorkspaces(): Workspace[] {
       return entry;
     }) as Workspace[];
     if (didStrip) {
-      localStorage.setItem(WORKSPACES_KEY, JSON.stringify(cleaned));
+      setLocalStorageItemWithRecovery(WORKSPACES_KEY, JSON.stringify(cleaned));
     }
     return cleaned;
   } catch {
@@ -61,7 +62,7 @@ export function loadWorkspaces(): Workspace[] {
 }
 
 export function saveWorkspaces(workspaces: Workspace[]): void {
-  localStorage.setItem(WORKSPACES_KEY, JSON.stringify(workspaces));
+  setLocalStorageItemWithRecovery(WORKSPACES_KEY, JSON.stringify(workspaces));
 }
 
 export function clearWorkspaceStorage(): void {
@@ -74,7 +75,7 @@ export function loadActiveWorkspaceId(): string | null {
 }
 
 export function saveActiveWorkspaceId(id: string): void {
-  localStorage.setItem(ACTIVE_WORKSPACE_KEY, id);
+  setLocalStorageItemWithRecovery(ACTIVE_WORKSPACE_KEY, id);
 }
 
 export function normalizeRelayUrl(url: string): string {

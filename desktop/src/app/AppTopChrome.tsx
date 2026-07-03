@@ -27,6 +27,8 @@ type AppTopChromeProps = {
 // to the rem-first rule.
 const TOP_CHROME_ICON_BUTTON_CLASS =
   "h-[28px] w-[28px] rounded-[4px] text-sidebar-foreground/65 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground [&_svg]:size-[16px]";
+const HISTORY_ICON_BUTTON_CLASS =
+  "h-[28px] w-[24px] rounded-[4px] text-sidebar-foreground/65 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground [&_svg]:size-[16px]";
 
 function preventTopChromeWheel(event: WheelEvent) {
   event.preventDefault();
@@ -108,7 +110,7 @@ export function AppTopChrome({
         <TopChromeSidebarTrigger />
         <Button
           aria-label="Go back"
-          className={TOP_CHROME_ICON_BUTTON_CLASS}
+          className={HISTORY_ICON_BUTTON_CLASS}
           data-testid="global-back"
           disabled={!canGoBack}
           onClick={onGoBack}
@@ -119,7 +121,7 @@ export function AppTopChrome({
         </Button>
         <Button
           aria-label="Go forward"
-          className={TOP_CHROME_ICON_BUTTON_CLASS}
+          className={HISTORY_ICON_BUTTON_CLASS}
           data-testid="global-forward"
           disabled={!canGoForward}
           onClick={onGoForward}

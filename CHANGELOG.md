@@ -1,5 +1,48 @@
 # Changelog
 
+## v0.3.42
+
+- fix(desktop): bound read-state localStorage growth and recover from quota errors ([#1502](https://github.com/block/buzz/pull/1502)) ([`a3cf7eec1`](https://github.com/block/buzz/commit/a3cf7eec1d5c876c65aabc827620ca2b7b79127b))
+- Customize macOS DMG installer ([#1496](https://github.com/block/buzz/pull/1496)) ([`bbf8d8912`](https://github.com/block/buzz/commit/bbf8d8912a19d9f8f249b3b7897999e343f803dd))
+- mobile: thread scroll-to-bottom and desktop-parity mention autocomplete ([#1499](https://github.com/block/buzz/pull/1499)) ([`e9318f66d`](https://github.com/block/buzz/commit/e9318f66d8fe5bff1df8afb7a2dcc36baf0876ac))
+- fix(agent): honor stop hook retry budget ([#1501](https://github.com/block/buzz/pull/1501)) ([`1c297d2f2`](https://github.com/block/buzz/commit/1c297d2f26688c35718e90a875e0bece41392253))
+- feat(profile): embed live activity feed in profile aux panel ([#1380](https://github.com/block/buzz/pull/1380)) ([`654b6c374`](https://github.com/block/buzz/commit/654b6c374b3f8a2f2a59c72f604bc5de4546f53f))
+- feat(desktop): contribution heatmap and graphical cards on projects overview ([#1497](https://github.com/block/buzz/pull/1497)) ([`204a0fd2e`](https://github.com/block/buzz/commit/204a0fd2ec2332cdbad7279be537aee27f20a70d))
+- feat(desktop): repository-first projects with git workflows ([#1471](https://github.com/block/buzz/pull/1471)) ([`8e3c0ee95`](https://github.com/block/buzz/commit/8e3c0ee958af8777ba54fd835de03b0e8eada531))
+- fix(desktop): lock horizontal webview pan (Magic Mouse side-scroll) ([#1480](https://github.com/block/buzz/pull/1480)) ([`5d4edf153`](https://github.com/block/buzz/commit/5d4edf1535c4b19543e1f57722f4dc94b5af675c))
+- Add agent catalog modal ([#1302](https://github.com/block/buzz/pull/1302)) ([`228122fdd`](https://github.com/block/buzz/commit/228122fddcc35cef0cb69c89892276c9b5986c25))
+- fix(desktop): actually close relay sockets — plugin:websocket|disconnect does not exist ([#1481](https://github.com/block/buzz/pull/1481)) ([`e70dd1a1e`](https://github.com/block/buzz/commit/e70dd1a1e70cc0f56aa6094e4da22cd91e3203b0))
+- feat(buzz-agent): config parity — thinking effort, model switching, normalized token limits ([#1470](https://github.com/block/buzz/pull/1470)) ([`3e282a241`](https://github.com/block/buzz/commit/3e282a24181aeef1c2cf06d4e4bc3b1c87f60067))
+- fix(sidebar): scope channel sections storage to relay URL ([#1477](https://github.com/block/buzz/pull/1477)) ([`f9d06ae21`](https://github.com/block/buzz/commit/f9d06ae21aaa20c3de299a6f7065863e9e8d76b3))
+- chore(mobile): declare non-exempt encryption usage in Info.plist ([#1474](https://github.com/block/buzz/pull/1474)) ([`453b8b1e4`](https://github.com/block/buzz/commit/453b8b1e47d0a13fb568b2f9b797113c4d663c0f))
+- fix(desktop): bind channel and thread context at compose time to prevent wrong-channel send ([#1472](https://github.com/block/buzz/pull/1472)) ([`d369ca9df`](https://github.com/block/buzz/commit/d369ca9df1248e2ee16a40b2a193bf08dd8126c4))
+- fix(relay-reconnect): resilient reconnect with fast-path, escalation, and polling ([#1456](https://github.com/block/buzz/pull/1456)) ([`02ff06cac`](https://github.com/block/buzz/commit/02ff06cac230ae708e1dffaa10bf3f71351ae582))
+- feat: per-community workspace icon set by admins, served via NIP-11 ([#1463](https://github.com/block/buzz/pull/1463)) ([`5bfd5ca27`](https://github.com/block/buzz/commit/5bfd5ca2700483498e83224a40a5628a29cf2e9e))
+- perf(relay): batch outbound websocket data frames ([#1464](https://github.com/block/buzz/pull/1464)) ([`01b92faa1`](https://github.com/block/buzz/commit/01b92faa156648835f143e84583b8ec3bd7490ab))
+- Make reaction ingest atomic ([#1458](https://github.com/block/buzz/pull/1458)) ([`835302cc8`](https://github.com/block/buzz/commit/835302cc829c8a63bf254d3e40156fc446e040f6))
+- Serialize fan-out EVENT frames once ([#1459](https://github.com/block/buzz/pull/1459)) ([`3c661fb48`](https://github.com/block/buzz/commit/3c661fb48f81c294b529592d2b2ff874bf96ee96))
+- fix: agent reliability — no restart on channel-add, visible dead-letter notice ([#1468](https://github.com/block/buzz/pull/1468)) ([`d9c4e4aa7`](https://github.com/block/buzz/commit/d9c4e4aa7fb5634f19d96f31da9f602951f503d0))
+- fix(profile): consolidate agent profile runtime metadata ([#1451](https://github.com/block/buzz/pull/1451)) ([`c48006fc3`](https://github.com/block/buzz/commit/c48006fc3e2e3a2a7984be1f02f6e6ba9d11b8eb))
+- fix(desktop): simplify workspace rail badges ([#1462](https://github.com/block/buzz/pull/1462)) ([`e42dae3f9`](https://github.com/block/buzz/commit/e42dae3f9ce767e832e1b954875e3bf3e662d35c))
+- perf(desktop): instant channel switching — non-blocking first paint, persisted snapshots ([#1452](https://github.com/block/buzz/pull/1452)) ([`deb3e6adc`](https://github.com/block/buzz/commit/deb3e6adcaeb744439e794a71090d2d1dcfc004c))
+- perf(relay): bounded-concurrency multi-filter query execution (S2) ([#1457](https://github.com/block/buzz/pull/1457)) ([`a9e752e25`](https://github.com/block/buzz/commit/a9e752e2540a94d304a51ddeecbf68464ca9ec69))
+- fix(desktop): classify timeline prepends so history loads don't bump unread ([#1416](https://github.com/block/buzz/pull/1416)) ([`9967b97f5`](https://github.com/block/buzz/commit/9967b97f59179a0261ef5e2046df9632652be619))
+- fix(desktop): quiet gate for workspace switches instead of boot splash ([#1449](https://github.com/block/buzz/pull/1449)) ([`b779a3ee2`](https://github.com/block/buzz/commit/b779a3ee2f4fea3599d61511ae82fed439c919ce))
+- fix(read-path): reach complete threads, dense-second timelines, and all people in the GUI ([#1418](https://github.com/block/buzz/pull/1418)) ([`7da936fff`](https://github.com/block/buzz/commit/7da936fff82a9a956f338c690e9605888725ea3b))
+- E1+E3: reduce relay ingest/fan-out DB round trips; ack p99 −7–16%, fd p99 −6–28%, p999 tails −29–53% vs PR #1453 tip ([#1454](https://github.com/block/buzz/pull/1454)) ([`a504ad619`](https://github.com/block/buzz/commit/a504ad6197558575c0db7b9f53806d7337e0c64f))
+- perf(relay): defer post-commit dispatch and avoid verify clone ([#1453](https://github.com/block/buzz/pull/1453)) ([`7bd3760c8`](https://github.com/block/buzz/commit/7bd3760c82a6d640af199ed2301525877e629ced))
+- fix(relay): include git hook tools in runtime image ([#1326](https://github.com/block/buzz/pull/1326)) ([`88c089d3b`](https://github.com/block/buzz/commit/88c089d3b652bc952adbe8b32a6fc585121c982f))
+- feat(chart): per-pod emptyDir git scratch when persistence disabled (multi-replica HA) ([#1450](https://github.com/block/buzz/pull/1450)) ([`c88799ac6`](https://github.com/block/buzz/commit/c88799ac6c3b5b149196223abe7a6134c8823359))
+- fix(relay): remove media bearer-token auth ([#1444](https://github.com/block/buzz/pull/1444)) ([`0701f47f4`](https://github.com/block/buzz/commit/0701f47f4a31a904ebcd9f360cbd6aadaff9d784))
+- fix(desktop): stop search shortcut from hijacking the sidebar ([#1447](https://github.com/block/buzz/pull/1447)) ([`15ad7ae87`](https://github.com/block/buzz/commit/15ad7ae87e655a7873fa0b0a51f53b5f800afd9b))
+- fix(ci): set PGSCHEMA_PLAN_* in start-relay-for-tests.sh to avoid embedded-PG fetch ([#1443](https://github.com/block/buzz/pull/1443)) ([`89c4f7657`](https://github.com/block/buzz/commit/89c4f76579944ae1c7f86e37d76cecf2b378e60e))
+- feat(desktop): restore observer-feed regressions from #1381 and classify 4 new session/update types ([#1412](https://github.com/block/buzz/pull/1412)) ([`fec768436`](https://github.com/block/buzz/commit/fec76843665aeb4aff06688f83b93fc6ed2b603d))
+- fix(desktop): disable spellcheck/autocorrect/autocapitalize on emoji picker search ([#1438](https://github.com/block/buzz/pull/1438)) ([`bdeab23b5`](https://github.com/block/buzz/commit/bdeab23b59ca8e622e5c23b3368ecaccf21c5652))
+- feat(relay): add OpenTelemetry tracing, keep Prometheus metrics ([#1398](https://github.com/block/buzz/pull/1398)) ([`b1d9d955d`](https://github.com/block/buzz/commit/b1d9d955de83538c231a3034bf190af6df03070d))
+- feat(buzz-agent): emit agent_thought_chunk for reasoning content ([#1436](https://github.com/block/buzz/pull/1436)) ([`9f2a11b33`](https://github.com/block/buzz/commit/9f2a11b33827036d7b7415ede72c1dacd0fcd6f9))
+- feat(git): move repo-name registry to Postgres + relax RWM chart gate (HA relay) ([#1432](https://github.com/block/buzz/pull/1432)) ([`e5aa4a213`](https://github.com/block/buzz/commit/e5aa4a21327438c02fb25baea4d0849a498c9059))
+
+
 ## v0.3.41
 
 - Group consecutive desktop messages ([#1429](https://github.com/block/buzz/pull/1429)) ([`3d08c3b0`](https://github.com/block/buzz/commit/3d08c3b02b284d062e2932df8f96e2467bb40946))
