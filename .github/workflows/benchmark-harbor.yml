@@ -25,11 +25,15 @@ jobs:
         run: python -m pip install --disable-pip-version-check uv==0.8.13
       - name: Test adapter
         working-directory: benchmarks/harbor-buzz-orchestra
+        env:
+          UV_OFFLINE: "1"
         run: |
           uv run --frozen --extra dev pytest -q
           uv run --frozen --extra dev ruff check .
       - name: Test provisioner
         working-directory: benchmarks/harbor-buzz-orchestra/testbed
+        env:
+          UV_OFFLINE: "1"
         run: |
           uv run --frozen --extra dev pytest -q
           uv run --frozen --extra dev ruff check .
