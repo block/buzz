@@ -33,11 +33,14 @@ def tree_hash(root: Path) -> str:
 def _append_verifier_layer(dockerfile: Path, base_image: str) -> None:
     original = dockerfile.read_text()
     lines = original.splitlines()
-    if not lines or not lines[0].startswith("FROM "):
+    from_indices = [
+        i for i, line in enumerate(lines) if line.startswith("FROM ")
+    ]
+    if len(from_indices) != 1:
         raise ValueError(
-            f"unsupported Dockerfile (first line must be FROM): {dockerfile}"
+            f"unsupported Dockerfile (expected exactly one FROM): {dockerfile}"
         )
-    lines[0] = f"FROM {base_image}"
+    lines[from_indices[0]] = f"FROM {base_image}"
     addition = r"""
 
 # Generated additive layer: verifier dependencies are present before grading.
@@ -67,7 +70,7 @@ def _write_shims(destination: Path) -> None:
         '*) exec /usr/bin/apt-get "$@";; esac\n'
     )
     (bin_dir / "curl").write_text(
-        '#!/bin/sh\ncase "$*" in *https://astral.sh/uv/0.9.7/install.sh*) '
+        '#!/bin/sh\ncase "$*" in *https://astral.sh/uv/*/install.sh*) '
         "printf '#!/bin/sh\\nexit 0\\n';; *) exec /usr/bin/curl \"$@\";; esac\n"
     )
     (bin_dir / "uvx").write_text(
@@ -87,6 +90,14 @@ def _set_verifier_env(task_toml: Path, network_enforcement: str) -> None:
     ]
     if "network_mode" in verifier_table:
         raise ValueError("verifier network_mode already declared")
+    # A prebuilt-image pin would make Harbor skip the Dockerfile entirely,
+    # silently dropping the prepared verifier layer. Remove it so the
+    # modified Dockerfile is authoritative.
+    text = "".join(
+        line
+        for line in text.splitlines(keepends=True)
+        if not line.startswith("docker_image = ")
+    )
     if network_enforcement == "enforced":
         text = text.replace(marker, marker + 'network_mode = "no-network"\n', 1)
     elif network_enforcement != "advisory":
@@ -94,8 +105,13 @@ def _set_verifier_env(task_toml: Path, network_enforcement: str) -> None:
             "verifier network enforcement must be 'enforced' or 'advisory'"
         )
     env_marker = "[verifier.env]\n"
-    if text.count(env_marker) != 1:
-        raise ValueError(f"expected exactly one [verifier.env] table: {task_toml}")
+    env_count = text.count(env_marker)
+    if env_count > 1:
+        raise ValueError(f"expected at most one [verifier.env] table: {task_toml}")
+    if env_count == 0:
+        if not text.endswith("\n"):
+            text += "\n"
+        text += "\n" + env_marker
     text = text.replace(
         env_marker,
         env_marker
