@@ -83,6 +83,7 @@ export const ChannelPane = React.memo(function ChannelPane({
   canResetThreadPanelWidth,
   onCancelEdit,
   onCancelThreadReply,
+  onBackFromAgentSession,
   onCloseAgentSession,
   onCloseChannelManagement,
   onChannelManagementDeleted,
@@ -842,7 +843,7 @@ export const ChannelPane = React.memo(function ChannelPane({
               layout={useSplitAuxiliaryPane ? "split" : "standalone"}
               transparentChrome={useSplitAuxiliaryPane}
               profiles={profiles}
-              onBackToProfile={() => onOpenProfilePanel(selectedAgent.pubkey)}
+              onBack={onBackFromAgentSession}
               onClose={onCloseAgentSession}
               widthPx={threadPanelWidthPx}
             />

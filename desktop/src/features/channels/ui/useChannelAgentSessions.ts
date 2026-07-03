@@ -7,7 +7,12 @@ import type {
   ManagedAgent,
   RelayAgent,
 } from "@/shared/api/types";
+import { usePanelReturnTarget } from "@/shared/hooks/usePanelReturnTarget";
 import { normalizePubkey } from "@/shared/lib/pubkey";
+import {
+  type AgentSessionReturnTarget,
+  resolveAgentSessionReturnTarget,
+} from "./agentSessionSelection";
 import type { PanelValueSetter } from "./useChannelPanelHistoryState";
 
 export type ChannelAgentSessionAgent = Pick<
@@ -28,6 +33,7 @@ type UseChannelAgentSessionsOptions = {
   handleOpenThread: (message: TimelineMessage) => void;
   managedAgents: ChannelAgentSessionAgent[];
   openAgentSessionPubkey: string | null;
+  openThreadHeadId: string | null;
   profilePanelPubkey?: string | null;
   setChannelManagementOpen: (open: boolean) => void;
   setExpandedThreadReplyIds: (value: Set<string>) => void;
@@ -161,6 +167,7 @@ export function useChannelAgentSessions({
   handleOpenThread,
   managedAgents,
   openAgentSessionPubkey,
+  openThreadHeadId,
   profilePanelPubkey = null,
   setChannelManagementOpen,
   setExpandedThreadReplyIds,
@@ -182,12 +189,29 @@ export function useChannelAgentSessions({
   );
   const agentSessionAgents = managedAgents;
 
+  // Breadcrumb for the Activity panel back arrow: captured on the
+  // closed→open transition, consumed exactly once on back, cleared on any
+  // other close so a stale target can't resurface later. Channel switches
+  // drop it via the reset key.
+  const returnTarget =
+    usePanelReturnTarget<AgentSessionReturnTarget>(activeChannelId);
+  const isAgentSessionOpen = openAgentSessionPubkey != null;
+
   const closeAgentSession = React.useCallback(() => {
+    returnTarget.clear();
     setOpenAgentSessionPubkey(null);
-  }, [setOpenAgentSessionPubkey]);
+  }, [returnTarget, setOpenAgentSessionPubkey]);
 
   const openAgentSession = React.useCallback(
     (pubkey: string) => {
+      if (!isAgentSessionOpen) {
+        returnTarget.capture(
+          resolveAgentSessionReturnTarget({
+            openThreadHeadId,
+            profilePanelPubkey,
+          }),
+        );
+      }
       setOpenThreadHeadId(null);
       setExpandedThreadReplyIds(new Set());
       setThreadScrollTargetId(null);
@@ -196,6 +220,10 @@ export function useChannelAgentSessions({
       setOpenAgentSessionPubkey(pubkey);
     },
     [
+      isAgentSessionOpen,
+      openThreadHeadId,
+      profilePanelPubkey,
+      returnTarget,
       setChannelManagementOpen,
       setExpandedThreadReplyIds,
       setOpenAgentSessionPubkey,
@@ -204,6 +232,26 @@ export function useChannelAgentSessions({
       setThreadScrollTargetId,
     ],
   );
+
+  // Back restores the pane the Activity panel replaced; with no recorded
+  // target (opened from the composer with no pane, or a direct/restored
+  // `agentSession` URL) it simply closes — never a blind history pop.
+  const backFromAgentSession = React.useCallback(() => {
+    const target = returnTarget.consume();
+    setOpenAgentSessionPubkey(null);
+    if (target?.kind === "thread") {
+      setOpenThreadHeadId(target.threadHeadId);
+      return;
+    }
+    if (target?.kind === "profile") {
+      setProfilePanelPubkey(target.pubkey);
+    }
+  }, [
+    returnTarget,
+    setOpenAgentSessionPubkey,
+    setOpenThreadHeadId,
+    setProfilePanelPubkey,
+  ]);
 
   const selectAgentSession = React.useCallback(
     (pubkey: string) => {
@@ -214,6 +262,7 @@ export function useChannelAgentSessions({
 
   const openThreadAndCloseAgentSession = React.useCallback(
     (message: TimelineMessage) => {
+      returnTarget.clear();
       setOpenAgentSessionPubkey(null);
       setProfilePanelPubkey(null);
       setChannelManagementOpen(false);
@@ -221,6 +270,7 @@ export function useChannelAgentSessions({
     },
     [
       handleOpenThread,
+      returnTarget,
       setChannelManagementOpen,
       setOpenAgentSessionPubkey,
       setProfilePanelPubkey,
@@ -243,6 +293,7 @@ export function useChannelAgentSessions({
           normalizePubkey(openAgentSessionPubkey),
       )
     ) {
+      returnTarget.clear();
       setOpenAgentSessionPubkey(null, { replace: true });
     }
   }, [
@@ -250,11 +301,13 @@ export function useChannelAgentSessions({
     agentsLoaded,
     openAgentSessionPubkey,
     profilePanelPubkey,
+    returnTarget,
     setOpenAgentSessionPubkey,
   ]);
 
   return {
     agentSessionAgents,
+    backFromAgentSession,
     channelAgentSessionAgents,
     closeAgentSession,
     openAgentSession,
