@@ -1,5 +1,5 @@
 import * as React from "react";
-import { Loader2, Undo2 } from "lucide-react";
+import { Loader2, Redo2, Undo2 } from "lucide-react";
 
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
@@ -124,7 +124,13 @@ export function ComposerImageEditor({
 }: ComposerImageEditorProps) {
   const canvasRef = React.useRef<HTMLCanvasElement>(null);
   const activeStrokeRef = React.useRef<EditorStroke | null>(null);
-  const [strokes, setStrokes] = React.useState<EditorStroke[]>([]);
+  // Committed strokes plus the undone strokes available for redo. Kept in
+  // one state object so undo/redo move strokes between stacks atomically.
+  const [history, setHistory] = React.useState<{
+    strokes: EditorStroke[];
+    undone: EditorStroke[];
+  }>({ strokes: [], undone: [] });
+  const strokes = history.strokes;
   const [activeColor, setActiveColor] = React.useState<string>(
     PEN_COLORS[0].value,
   );
@@ -159,23 +165,44 @@ export function ComposerImageEditor({
   }, [strokes]);
 
   const undo = React.useCallback(() => {
-    setStrokes((prev) => (prev.length > 0 ? prev.slice(0, -1) : prev));
+    setHistory((prev) => {
+      const last = prev.strokes[prev.strokes.length - 1];
+      if (!last) return prev;
+      return {
+        strokes: prev.strokes.slice(0, -1),
+        undone: [...prev.undone, last],
+      };
+    });
+  }, []);
+
+  const redo = React.useCallback(() => {
+    setHistory((prev) => {
+      const last = prev.undone[prev.undone.length - 1];
+      if (!last) return prev;
+      return {
+        strokes: [...prev.strokes, last],
+        undone: prev.undone.slice(0, -1),
+      };
+    });
   }, []);
 
   React.useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
-      const isUndo =
+      const isModZ =
         (event.metaKey || event.ctrlKey) &&
-        !event.shiftKey &&
         !event.altKey &&
         event.key.toLowerCase() === "z";
-      if (!isUndo) return;
+      if (!isModZ) return;
       event.preventDefault();
-      undo();
+      if (event.shiftKey) {
+        redo();
+      } else {
+        undo();
+      }
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [undo]);
+  }, [redo, undo]);
 
   const toNaturalPoint = React.useCallback(
     (event: React.PointerEvent<HTMLCanvasElement>): EditorPoint | null => {
@@ -232,7 +259,8 @@ export function ComposerImageEditor({
     const stroke = activeStrokeRef.current;
     if (!stroke) return;
     activeStrokeRef.current = null;
-    setStrokes((prev) => [...prev, stroke]);
+    // A new stroke invalidates the redo stack, matching editor conventions.
+    setHistory((prev) => ({ strokes: [...prev.strokes, stroke], undone: [] }));
   }, []);
 
   const handleSave = React.useCallback(async () => {
@@ -251,29 +279,68 @@ export function ComposerImageEditor({
 
   const hasStrokes = strokes.length > 0;
 
+  // The native cursor is hidden over the canvas; this DOM dot follows the
+  // pointer instead. Unlike a `cursor: url(...)` image, an element sized in
+  // CSS pixels is guaranteed to match the on-screen stroke width exactly.
+  // Positioned imperatively during pointermove to avoid re-rendering.
+  const brushPreviewRef = React.useRef<HTMLDivElement>(null);
+
+  const moveBrushPreview = React.useCallback(
+    (event: React.PointerEvent<HTMLCanvasElement>) => {
+      const preview = brushPreviewRef.current;
+      const rect = canvasRef.current?.getBoundingClientRect();
+      if (!preview || !rect) return;
+      preview.style.opacity = "1";
+      preview.style.transform = `translate(${event.clientX - rect.left}px, ${event.clientY - rect.top}px) translate(-50%, -50%)`;
+    },
+    [],
+  );
+
+  const hideBrushPreview = React.useCallback(() => {
+    const preview = brushPreviewRef.current;
+    if (preview) preview.style.opacity = "0";
+  }, []);
+
   return (
     <div className="relative z-10 flex max-h-full max-w-full flex-col items-center gap-3">
       <div className="relative">
         <img
           alt={alt}
-          className="max-h-[75vh] max-w-[85vw] select-none rounded-lg object-contain"
+          className="pointer-events-none max-h-[75vh] max-w-[85vw] select-none rounded-lg object-contain"
           draggable={false}
           onLoad={handleImageLoad}
           src={src}
         />
         {naturalSize ? (
-          <canvas
-            aria-label="Drawing canvas"
-            className="absolute inset-0 h-full w-full cursor-crosshair touch-none rounded-lg"
-            data-testid="composer-image-editor-canvas"
-            height={naturalSize.height}
-            onPointerCancel={commitActiveStroke}
-            onPointerDown={handlePointerDown}
-            onPointerMove={handlePointerMove}
-            onPointerUp={commitActiveStroke}
-            ref={canvasRef}
-            width={naturalSize.width}
-          />
+          <>
+            <canvas
+              aria-label="Drawing canvas"
+              className="absolute inset-0 h-full w-full cursor-none touch-none rounded-lg"
+              data-testid="composer-image-editor-canvas"
+              height={naturalSize.height}
+              onPointerCancel={commitActiveStroke}
+              onPointerDown={handlePointerDown}
+              onPointerEnter={moveBrushPreview}
+              onPointerLeave={hideBrushPreview}
+              onPointerMove={(event) => {
+                handlePointerMove(event);
+                moveBrushPreview(event);
+              }}
+              onPointerUp={commitActiveStroke}
+              ref={canvasRef}
+              width={naturalSize.width}
+            />
+            <div
+              aria-hidden
+              className="pointer-events-none absolute left-0 top-0 rounded-full opacity-0 ring-1 ring-white/60"
+              ref={brushPreviewRef}
+              style={{
+                backgroundColor: activeColor,
+                height: `${activeWidthCss}px`,
+                width: `${activeWidthCss}px`,
+              }}
+            />
+          </>
         ) : null}
       </div>
 
@@ -334,6 +401,20 @@ export function ComposerImageEditor({
               </button>
             </TooltipTrigger>
             <TooltipContent>Undo (⌘Z)</TooltipContent>
+          </Tooltip>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                aria-label="Redo stroke"
+                className="flex h-7 w-7 items-center justify-center rounded-full text-white transition-colors hover:bg-white/10 disabled:opacity-40 disabled:hover:bg-transparent"
+                disabled={history.undone.length === 0}
+                onClick={redo}
+                type="button"
+              >
+                <Redo2 className="h-4 w-4" />
+              </button>
+            </TooltipTrigger>
+            <TooltipContent>Redo (⇧⌘Z)</TooltipContent>
           </Tooltip>
         </div>
 
