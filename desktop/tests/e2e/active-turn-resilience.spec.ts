@@ -118,10 +118,16 @@ test.describe("active turn badge resilience", () => {
     ]);
 
     const paulPanel = await openAgentProfile(page, AGENT_PAUL);
-    await expect(paulPanel).toContainText("Working in #general", {
-      timeout: 5_000,
-    });
-    await expect(paulPanel).toContainText("Working in #engineering");
+    await expect(paulPanel).toBeVisible();
+
+    // The profile panel surfaces active turns via the live-activity embed only
+    // where an agent session can open (channel surfaces). In the Agents view
+    // the store-driven working state shows as sidebar channel badges — the
+    // same activeAgentTurnsStore this test exercises.
+    const generalBadge = page.getByTestId("channel-working-general");
+    const engineeringBadge = page.getByTestId("channel-working-engineering");
+    await expect(generalBadge).toBeVisible({ timeout: 5_000 });
+    await expect(engineeringBadge).toBeVisible();
 
     // Simulate the all-at-once relay drop: no further frames, advance the clock
     // past both thresholds. This fires several real prune ticks; shouldPausePrune
@@ -130,7 +136,7 @@ test.describe("active turn badge resilience", () => {
     // pre-fix code every badge would be gone after the first tick past 25s.
     await page.clock.fastForward(FRAME_GAP_MS);
 
-    await expect(paulPanel).toContainText("Working in #general");
-    await expect(paulPanel).toContainText("Working in #engineering");
+    await expect(generalBadge).toBeVisible();
+    await expect(engineeringBadge).toBeVisible();
   });
 });

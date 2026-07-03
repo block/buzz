@@ -31,6 +31,7 @@ type UseChannelAgentSessionsOptions = {
   profilePanelPubkey?: string | null;
   setChannelManagementOpen: (open: boolean) => void;
   setExpandedThreadReplyIds: (value: Set<string>) => void;
+  setOpenAgentSessionChannelId: PanelValueSetter;
   setOpenAgentSessionPubkey: PanelValueSetter;
   setOpenThreadHeadId: (value: string | null) => void;
   setProfilePanelPubkey: (value: string | null) => void;
@@ -164,6 +165,7 @@ export function useChannelAgentSessions({
   profilePanelPubkey = null,
   setChannelManagementOpen,
   setExpandedThreadReplyIds,
+  setOpenAgentSessionChannelId,
   setOpenAgentSessionPubkey,
   setOpenThreadHeadId,
   setProfilePanelPubkey,
@@ -187,17 +189,19 @@ export function useChannelAgentSessions({
   }, [setOpenAgentSessionPubkey]);
 
   const openAgentSession = React.useCallback(
-    (pubkey: string) => {
+    (pubkey: string, channelId?: string | null) => {
       setOpenThreadHeadId(null);
       setExpandedThreadReplyIds(new Set());
       setThreadScrollTargetId(null);
       setThreadReplyTargetId(null);
       setChannelManagementOpen(false);
       setOpenAgentSessionPubkey(pubkey);
+      setOpenAgentSessionChannelId(channelId ?? null);
     },
     [
       setChannelManagementOpen,
       setExpandedThreadReplyIds,
+      setOpenAgentSessionChannelId,
       setOpenAgentSessionPubkey,
       setOpenThreadHeadId,
       setThreadReplyTargetId,
@@ -206,10 +210,11 @@ export function useChannelAgentSessions({
   );
 
   const selectAgentSession = React.useCallback(
-    (pubkey: string) => {
+    (pubkey: string, channelId?: string | null) => {
       setOpenAgentSessionPubkey(pubkey);
+      setOpenAgentSessionChannelId(channelId ?? null);
     },
-    [setOpenAgentSessionPubkey],
+    [setOpenAgentSessionChannelId, setOpenAgentSessionPubkey],
   );
 
   const openThreadAndCloseAgentSession = React.useCallback(

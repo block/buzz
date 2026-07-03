@@ -8,7 +8,10 @@ import { relayClient } from "@/shared/api/relayClient";
 import type { ConnectionState } from "@/shared/api/relayClientShared";
 import type { RelayEvent } from "@/shared/api/types";
 import { syncAgentTurnsFromEvents } from "@/features/agents/activeAgentTurnsStore";
-import { injectObserverEventsForE2E } from "@/features/agents/observerRelayStore";
+import {
+  injectObserverEventsForE2E,
+  syncAgentObserverEvents,
+} from "@/features/agents/observerRelayStore";
 import {
   CUSTOM_EMOJI_SET_D_TAG,
   KIND_EMOJI_SET,
@@ -17,9 +20,18 @@ import {
   KIND_AGENT_OBSERVER_FRAME,
   KIND_DM_VISIBILITY,
   KIND_EVENT_REMINDER,
+  KIND_GIT_ISSUE,
+  KIND_GIT_PATCH,
+  KIND_GIT_PR_UPDATE,
+  KIND_GIT_PULL_REQUEST,
+  KIND_GIT_STATUS_CLOSED,
+  KIND_GIT_STATUS_DRAFT,
+  KIND_GIT_STATUS_MERGED,
+  KIND_GIT_STATUS_OPEN,
   KIND_HUDDLE_STARTED,
   KIND_MEMBER_ADDED_NOTIFICATION,
   KIND_MEMBER_REMOVED_NOTIFICATION,
+  KIND_REPO_ANNOUNCEMENT,
   KIND_STREAM_MESSAGE_EDIT,
   KIND_SYSTEM_MESSAGE,
   KIND_USER_STATUS,
@@ -517,6 +529,7 @@ type MockSubscription = {
 };
 
 type MockFilter = {
+  "#a"?: string[];
   "#d"?: string[];
   "#e"?: string[];
   "#h"?: string[];
@@ -689,6 +702,7 @@ declare global {
       agentPubkey: string;
       channelId: string;
       turnId: string;
+      kind?: "turn_started" | "turn_completed";
     }) => void;
     __BUZZ_E2E_SEED_OBSERVER_EVENTS__?: (input: {
       agentPubkey: string;
@@ -3873,6 +3887,174 @@ function handleGetLikedNotes(): RawUserNotesResponse {
 // accepts 64-hex `e` tags (getDeletionTargets in formatTimelineMessages.ts), so
 // a kind:5 targeting a 32-hex reaction id would be silently ignored and the
 // reaction pill would never clear on toggle-off.
+// --- Mock projects (NIP-34 repo announcements + git activity) ---
+// Deterministic fixtures so the Projects view (cards, stat pills, and the
+// contribution heatmap) renders with data in screenshots and e2e specs.
+
+const MOCK_PROJECT_SEEDS = [
+  {
+    dtag: "buzz",
+    name: "buzz",
+    description:
+      "Relay, desktop, and mobile clients for the Buzz workspace platform.",
+    owner: MOCK_IDENTITY_PUBKEY,
+    contributors: [ALICE_PUBKEY, BOB_PUBKEY, CHARLIE_PUBKEY],
+    activityLevel: 4,
+  },
+  {
+    dtag: "relay-tools",
+    name: "relay-tools",
+    description: "Operator tooling and admin CLI for relay deployments.",
+    owner: ALICE_PUBKEY,
+    contributors: [MOCK_IDENTITY_PUBKEY, BOB_PUBKEY],
+    activityLevel: 2,
+  },
+  {
+    dtag: "design-system",
+    name: "design-system",
+    description: "Shared UI tokens, typography ramps, and component library.",
+    owner: BOB_PUBKEY,
+    contributors: [ALICE_PUBKEY],
+    activityLevel: 1,
+  },
+] as const;
+
+const MOCK_PROJECT_SUBJECTS = [
+  "Fix reconnect backoff jitter",
+  "Polish overview cards",
+  "Add contribution heatmap",
+  "Refactor filter matching",
+  "Speed up event dedup",
+  "Handle empty clone URLs",
+  "Update onboarding copy",
+  "Tighten p-gate checks",
+];
+
+const MOCK_PROJECT_KINDS = new Set<number>([
+  KIND_REPO_ANNOUNCEMENT,
+  KIND_GIT_PATCH,
+  KIND_GIT_PULL_REQUEST,
+  KIND_GIT_PR_UPDATE,
+  KIND_GIT_ISSUE,
+  KIND_GIT_STATUS_OPEN,
+  KIND_GIT_STATUS_MERGED,
+  KIND_GIT_STATUS_CLOSED,
+  KIND_GIT_STATUS_DRAFT,
+]);
+
+function mulberry32(seed: number) {
+  let state = seed;
+  return () => {
+    state |= 0;
+    state = (state + 0x6d2b79f5) | 0;
+    let t = Math.imul(state ^ (state >>> 15), 1 | state);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+let mockProjectEventStore: RelayEvent[] | null = null;
+
+function buildMockProjectEvents(): RelayEvent[] {
+  const events: RelayEvent[] = [];
+  const daySeconds = 86_400;
+  const now = Math.floor(Date.now() / 1000);
+  const historyDays = 26 * 7;
+
+  for (const [projectIndex, seed] of MOCK_PROJECT_SEEDS.entries()) {
+    const repoAddress = `${KIND_REPO_ANNOUNCEMENT}:${seed.owner}:${seed.dtag}`;
+    const authors = [seed.owner, ...seed.contributors];
+    const random = mulberry32(projectIndex + 1);
+
+    events.push(
+      createMockEvent(
+        KIND_REPO_ANNOUNCEMENT,
+        seed.description,
+        [
+          ["d", seed.dtag],
+          ["name", seed.name],
+          ["description", seed.description],
+          ["clone", `https://relay.example.com/git/${seed.dtag}.git`],
+          ...seed.contributors.map((pubkey) => ["p", pubkey]),
+        ],
+        seed.owner,
+        now - (historyDays + 30 + projectIndex) * daySeconds,
+        `mock-project-${seed.dtag}`.replace(/[^a-zA-Z0-9]/g, ""),
+      ),
+    );
+
+    for (let dayOffset = historyDays; dayOffset >= 0; dayOffset -= 1) {
+      // Roughly half the days are quiet; busy days scale with activityLevel.
+      if (random() < 0.5) continue;
+      const dayEventCount = 1 + Math.floor(random() * seed.activityLevel);
+
+      for (let index = 0; index < dayEventCount; index += 1) {
+        const createdAt =
+          now - dayOffset * daySeconds - Math.floor(random() * 10) * 3_600;
+        const author = authors[Math.floor(random() * authors.length)];
+        const subject =
+          MOCK_PROJECT_SUBJECTS[
+            Math.floor(random() * MOCK_PROJECT_SUBJECTS.length)
+          ];
+        const commitHash = `${seed.dtag}${dayOffset}x${index}`
+          .padEnd(40, "0")
+          .slice(0, 40);
+        const roll = random();
+        const kind =
+          roll < 0.7
+            ? KIND_GIT_PATCH
+            : roll < 0.85
+              ? KIND_GIT_PULL_REQUEST
+              : KIND_GIT_ISSUE;
+        const tags = [
+          ["a", repoAddress],
+          ["subject", subject],
+          ...(kind === KIND_GIT_ISSUE ? [] : [["c", commitHash]]),
+        ];
+
+        events.push(createMockEvent(kind, subject, tags, author, createdAt));
+      }
+    }
+  }
+
+  return events;
+}
+
+function getMockProjectEventStore(): RelayEvent[] {
+  mockProjectEventStore ??= buildMockProjectEvents();
+  return mockProjectEventStore;
+}
+
+function filterMockProjectEvents(filter: MockFilter): RelayEvent[] {
+  const authors = filter.authors?.map((author) => author.toLowerCase());
+  return getMockProjectEventStore()
+    .filter((event) => {
+      if (filter.kinds && !filter.kinds.includes(event.kind)) return false;
+      if (authors && !authors.includes(event.pubkey.toLowerCase())) {
+        return false;
+      }
+      if (
+        filter["#d"] &&
+        !event.tags.some(
+          (tag) => tag[0] === "d" && filter["#d"]?.includes(tag[1]),
+        )
+      ) {
+        return false;
+      }
+      if (
+        filter["#a"] &&
+        !event.tags.some(
+          (tag) => tag[0] === "a" && filter["#a"]?.includes(tag[1]),
+        )
+      ) {
+        return false;
+      }
+      return true;
+    })
+    .sort((left, right) => right.created_at - left.created_at)
+    .slice(0, filter.limit ?? 500);
+}
+
 function mockEventId(): string {
   const bytes = new Uint8Array(32);
   crypto.getRandomValues(bytes);
@@ -7102,6 +7284,14 @@ function sendToMockSocket(args: {
       return;
     }
 
+    if (filter.kinds?.some((kind) => MOCK_PROJECT_KINDS.has(kind))) {
+      for (const event of filterMockProjectEvents(filter)) {
+        sendWsText(socket.handler, ["EVENT", subId, event]);
+      }
+      sendWsText(socket.handler, ["EOSE", subId]);
+      return;
+    }
+
     const channelId = filter["#h"]?.[0];
     if (!channelId) {
       sendWsText(socket.handler, ["EOSE", subId]);
@@ -7384,20 +7574,21 @@ export function maybeInstallE2eTauriMocks() {
     agentPubkey,
     channelId,
     turnId,
+    kind = "turn_started",
   }) => {
     seedTurnSeq += 1;
-    syncAgentTurnsFromEvents(agentPubkey, [
-      {
-        seq: seedTurnSeq,
-        timestamp: new Date().toISOString(),
-        kind: "turn_started",
-        agentIndex: 0,
-        channelId,
-        sessionId: null,
-        turnId,
-        payload: null,
-      },
-    ]);
+    const event = {
+      seq: seedTurnSeq,
+      timestamp: new Date().toISOString(),
+      kind,
+      agentIndex: 0,
+      channelId,
+      sessionId: null,
+      turnId,
+      payload: null,
+    };
+    syncAgentTurnsFromEvents(agentPubkey, [event]);
+    syncAgentObserverEvents(agentPubkey, [event]);
   };
   window.__BUZZ_E2E_SEED_OBSERVER_EVENTS__ = ({ agentPubkey, events }) => {
     injectObserverEventsForE2E(agentPubkey, events);
@@ -7631,6 +7822,126 @@ export function maybeInstallE2eTauriMocks() {
           },
           activeConfig,
         );
+      case "get_project_repo_snapshot":
+        return {
+          latest_commit: {
+            hash: "0123456789abcdef0123456789abcdef01234567",
+            short_hash: "0123456",
+            author_name: "Brain",
+            author_email: "brain@example.com",
+            timestamp: Math.floor(Date.now() / 1000) - 600,
+            subject: "Add Trello board workflow details",
+          },
+          commits: [
+            {
+              hash: "0123456789abcdef0123456789abcdef01234567",
+              short_hash: "0123456",
+              author_name: "Brain",
+              author_email: "brain@example.com",
+              timestamp: Math.floor(Date.now() / 1000) - 600,
+              subject: "Add Trello board workflow details",
+            },
+            {
+              hash: "123456789abcdef0123456789abcdef012345678",
+              short_hash: "1234567",
+              author_name: "Thomas P",
+              author_email: "thomasp@example.com",
+              timestamp: Math.floor(Date.now() / 1000) - 1_800,
+              subject: "Point project repository details at active branch",
+            },
+            {
+              hash: "23456789abcdef0123456789abcdef0123456789",
+              short_hash: "2345678",
+              author_name: "Brain",
+              author_email: "brain@example.com",
+              timestamp: Math.floor(Date.now() / 1000) - 3_600,
+              subject: "Make project repository-first",
+            },
+            {
+              hash: "3456789abcdef0123456789abcdef0123456789a",
+              short_hash: "3456789",
+              author_name: "Git Importer",
+              author_email: "git-importer@example.com",
+              timestamp: Math.floor(Date.now() / 1000) - 7_200,
+              subject: "Merge remote project history into local workspace",
+            },
+          ],
+          contributors: [
+            {
+              name: "Brain",
+              email: "brain@example.com",
+              commit_count: 8,
+              last_commit_at: Math.floor(Date.now() / 1000) - 600,
+            },
+            {
+              name: "Thomas P",
+              email: "thomasp@example.com",
+              commit_count: 3,
+              last_commit_at: Math.floor(Date.now() / 1000) - 1_800,
+            },
+            {
+              name: "Git Importer",
+              email: "git-importer@example.com",
+              commit_count: 1,
+              last_commit_at: Math.floor(Date.now() / 1000) - 7_200,
+            },
+          ],
+          files: [
+            {
+              path: "desktop/src/features/projects/ui/ProjectDetailScreen.tsx",
+              kind: "blob",
+              size: 18420,
+              preview_content:
+                'export function ProjectDetailScreen() {\n  return <WorkspaceTabs defaultValue="files" />;\n}\n',
+            },
+            {
+              path: "desktop/src/features/projects/ui/ProjectsView.tsx",
+              kind: "blob",
+              size: 16412,
+              preview_content:
+                "export function ProjectsView() {\n  return <ProjectsToolbar />;\n}\n",
+            },
+            {
+              path: "desktop/src/features/projects/hooks.ts",
+              kind: "blob",
+              size: 9520,
+              preview_content:
+                "export function useProjectRepoSnapshotQuery(project) {\n  return useQuery({ queryKey: [project.id, 'repo-snapshot'] });\n}\n",
+            },
+            {
+              path: "crates/buzz-relay/src/api/git/transport.rs",
+              kind: "blob",
+              size: 33120,
+              preview_content:
+                "// Smart HTTP git transport\n// Handles upload-pack and receive-pack for Buzz git repos.\n",
+            },
+          ],
+        };
+      case "get_project_local_repo_snapshot":
+        return null;
+      case "get_project_repo_sync_status":
+        return {
+          local_path: null,
+          local_branch: null,
+          local_head: null,
+          local_short_head: null,
+          remote_branch: "main",
+          remote_head: "0123456789abcdef0123456789abcdef01234567",
+          remote_short_head: "0123456",
+          ahead_count: 0,
+          behind_count: 0,
+          has_uncommitted_changes: false,
+          has_untracked_files: false,
+          can_push: false,
+          push_block_reason: "No local checkout found.",
+        };
+      case "list_project_local_repositories":
+        return [];
+      case "push_project_local_repository":
+        return {
+          pushed: true,
+          message: "Pushed main to remote.",
+        };
       case "get_relay_ws_url":
         return getRelayWsUrl(activeConfig);
       case "get_default_relay_url":

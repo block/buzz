@@ -1,5 +1,6 @@
 import { Terminal } from "lucide-react";
 
+import { ScrollFadeMonoPanel } from "../FileContentBlock";
 import { parseShellToolOutput } from "../agentSessionUtils";
 
 export function ShellCommandBlock({
@@ -14,17 +15,28 @@ export function ShellCommandBlock({
 
   return (
     <div
-      className="rounded-lg bg-muted/40 px-3 py-2 font-mono text-xs leading-5"
+      className="overflow-hidden rounded-lg bg-muted font-mono text-xs leading-5"
       data-testid="transcript-shell-command"
     >
-      <p className="whitespace-pre-wrap wrap-break-word text-muted-foreground/70">
-        <Terminal className="mr-2 inline h-3.5 w-3.5 align-[-0.1875rem] text-accent-foreground" />
-        {command}
-      </p>
+      <ScrollFadeMonoPanel
+        fadeFromClassName="from-muted"
+        maxHeightClassName="max-h-36"
+      >
+        <p className="whitespace-pre-wrap wrap-break-word text-muted-foreground/70">
+          <Terminal className="mr-2 inline h-3.5 w-3.5 align-[-0.1875rem] text-primary" />
+          {command}
+        </p>
+      </ScrollFadeMonoPanel>
       {stdout ? (
-        <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap wrap-break-word text-foreground">
-          {stdout}
-        </pre>
+        <ScrollFadeMonoPanel
+          className="mt-2"
+          fadeFromClassName="from-muted"
+          maxHeightClassName="max-h-36"
+        >
+          <pre className="whitespace-pre-wrap wrap-break-word text-foreground">
+            {stdout}
+          </pre>
+        </ScrollFadeMonoPanel>
       ) : null}
     </div>
   );

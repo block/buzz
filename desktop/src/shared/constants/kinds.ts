@@ -1,5 +1,6 @@
 export const KIND_DELETION = 5;
 export const KIND_REACTION = 7;
+export const KIND_TEXT_NOTE = 1;
 export const KIND_STREAM_MESSAGE = 9;
 // Buzz-native deletion. The relay soft-deletes the target and emits a
 // kind:40099 system message. Treated as a deletion marker alongside kind:5.
@@ -45,6 +46,15 @@ export const KIND_MESH_CONNECT_REQUEST = 24621;
 export const KIND_MESH_CALL_ME_NOW = 24622;
 export const KIND_EVENT_REMINDER = 30300;
 export const KIND_REPO_ANNOUNCEMENT = 30617;
+export const KIND_REPO_STATE = 30618;
+export const KIND_GIT_PATCH = 1617;
+export const KIND_GIT_PULL_REQUEST = 1618;
+export const KIND_GIT_PR_UPDATE = 1619;
+export const KIND_GIT_ISSUE = 1621;
+export const KIND_GIT_STATUS_OPEN = 1630;
+export const KIND_GIT_STATUS_MERGED = 1631;
+export const KIND_GIT_STATUS_CLOSED = 1632;
+export const KIND_GIT_STATUS_DRAFT = 1633;
 // NIP-DV: relay-signed per-viewer DM visibility snapshot (d=viewer pubkey,
 // h-tags = currently-hidden DM channel ids).
 export const KIND_DM_VISIBILITY = 30622;

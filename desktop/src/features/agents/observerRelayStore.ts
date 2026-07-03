@@ -443,6 +443,19 @@ export function injectObserverEventsForE2E(
   notifyListeners();
 }
 
+/**
+ * Synchronize the observer store with a sorted buffer of events for one agent.
+ * Used by test harnesses and replay bridges that already hold decoded frames.
+ */
+export function syncAgentObserverEvents(
+  agentPubkey: string,
+  events: ObserverEvent[],
+) {
+  for (const event of events) {
+    appendAgentEvent(agentPubkey, event);
+  }
+}
+
 export function resetAgentObserverStore() {
   generation += 1;
   const unsubscribe = unsubscribeRelay;

@@ -8,6 +8,7 @@ import {
 } from "../helpers/bridge";
 
 const GENERAL_CHANNEL_ID = "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50";
+const AGENTS_CHANNEL_ID = "94a444a4-c0a3-5966-ab05-530c6ddc2301";
 const MOCK_IDENTITY_PUBKEY = "deadbeef".repeat(8);
 // Relay-only agent owned by the mock viewer (see e2eBridge.ts
 // OWNED_RELAY_AGENT_PUBKEY). Classified as a bot via mockRelayAgents and
@@ -17,6 +18,12 @@ const OWNED_RELAY_AGENT_PUBKEY =
   "a1b2c3d4e5f60718293a4b5c6d7e8f90112233445566778899aabbccddeeff00";
 
 type MockFeedWindow = Window & {
+  __BUZZ_E2E_SEED_ACTIVE_TURNS__?: (input: {
+    agentPubkey: string;
+    channelId: string;
+    turnId: string;
+    kind?: "turn_started" | "turn_completed";
+  }) => void;
   __BUZZ_E2E_PUSH_MOCK_FEED_ITEM__?: (item: {
     category: "mention" | "needs_action" | "activity" | "agent_activity";
     channel_id: string | null;
@@ -1140,6 +1147,156 @@ test("members sidebar exposes view-activity for a viewer-owned relay agent", asy
   await expect(
     page.getByTestId(`sidebar-view-activity-${OWNED_RELAY_AGENT_PUBKEY}`),
   ).toBeVisible();
+});
+
+test("profile renders live activity for a viewer-owned relay agent", async ({
+  page,
+}) => {
+  await page.goto("/");
+
+  await openMembersSidebar(page, "agents");
+  await page
+    .getByTestId(`sidebar-member-open-profile-${OWNED_RELAY_AGENT_PUBKEY}`)
+    .click();
+  await expect(page.getByTestId("members-sidebar")).not.toBeVisible();
+  await expect(
+    page.getByTestId(`user-profile-view-activity-${OWNED_RELAY_AGENT_PUBKEY}`),
+  ).toBeVisible();
+
+  await page.waitForFunction(
+    () =>
+      typeof (window as MockFeedWindow).__BUZZ_E2E_SEED_ACTIVE_TURNS__ ===
+      "function",
+  );
+  await page.evaluate(
+    ({ agentPubkey, channelId }) => {
+      const seedActiveTurns = (window as MockFeedWindow)
+        .__BUZZ_E2E_SEED_ACTIVE_TURNS__;
+      if (!seedActiveTurns) {
+        throw new Error("Mock active-turn helper is not installed.");
+      }
+      seedActiveTurns({
+        agentPubkey,
+        channelId,
+        turnId: "owned-relay-profile-turn",
+      });
+    },
+    {
+      agentPubkey: OWNED_RELAY_AGENT_PUBKEY,
+      channelId: AGENTS_CHANNEL_ID,
+    },
+  );
+
+  const liveActivity = page.getByTestId(
+    `user-profile-live-activity-${OWNED_RELAY_AGENT_PUBKEY}`,
+  );
+  await expect(liveActivity).toBeVisible();
+  await expect(liveActivity).toContainText("Latest Activity");
+  await expect(liveActivity).toContainText("#agents");
+  await expect(
+    page.getByTestId(`user-profile-activity-dot-${AGENTS_CHANNEL_ID}`),
+  ).toHaveCount(0);
+
+  await page.evaluate(
+    ({ agentPubkey, channelId, turnId }) => {
+      const seedActiveTurns = (window as MockFeedWindow)
+        .__BUZZ_E2E_SEED_ACTIVE_TURNS__;
+      if (!seedActiveTurns) {
+        throw new Error("Mock active-turn helper is not installed.");
+      }
+      seedActiveTurns({
+        agentPubkey,
+        channelId,
+        turnId,
+        kind: "turn_completed",
+      });
+    },
+    {
+      agentPubkey: OWNED_RELAY_AGENT_PUBKEY,
+      channelId: AGENTS_CHANNEL_ID,
+      turnId: "owned-relay-profile-turn",
+    },
+  );
+
+  await expect(liveActivity).toBeVisible();
+  await expect(liveActivity).toContainText("Latest Activity");
+  await expect(
+    page.getByTestId(`user-profile-view-activity-${OWNED_RELAY_AGENT_PUBKEY}`),
+  ).not.toBeVisible();
+});
+
+test("profile activity carousel switches channels via progress dots", async ({
+  page,
+}) => {
+  await page.goto("/");
+
+  await openMembersSidebar(page, "agents");
+  await page
+    .getByTestId(`sidebar-member-open-profile-${OWNED_RELAY_AGENT_PUBKEY}`)
+    .click();
+  await expect(page.getByTestId("members-sidebar")).not.toBeVisible();
+  await expect(
+    page.getByTestId(`user-profile-view-activity-${OWNED_RELAY_AGENT_PUBKEY}`),
+  ).toBeVisible();
+
+  await page.waitForFunction(
+    () =>
+      typeof (window as MockFeedWindow).__BUZZ_E2E_SEED_ACTIVE_TURNS__ ===
+      "function",
+  );
+
+  await page.evaluate(
+    ({ agentPubkey, channels }) => {
+      const seedActiveTurns = (window as MockFeedWindow)
+        .__BUZZ_E2E_SEED_ACTIVE_TURNS__;
+      if (!seedActiveTurns) {
+        throw new Error("Mock active-turn helper is not installed.");
+      }
+
+      for (const [index, channelId] of channels.entries()) {
+        seedActiveTurns({
+          agentPubkey,
+          channelId,
+          turnId: `owned-relay-profile-turn-${index}`,
+        });
+      }
+    },
+    {
+      agentPubkey: OWNED_RELAY_AGENT_PUBKEY,
+      channels: [AGENTS_CHANNEL_ID, GENERAL_CHANNEL_ID],
+    },
+  );
+
+  const liveActivity = page.getByTestId(
+    `user-profile-live-activity-${OWNED_RELAY_AGENT_PUBKEY}`,
+  );
+  await expect(liveActivity).toBeVisible();
+  await expect(liveActivity).toContainText("#agents");
+
+  await expect(
+    page.getByTestId(`user-profile-activity-dot-${AGENTS_CHANNEL_ID}`),
+  ).toBeVisible();
+  await expect(
+    page.getByTestId(`user-profile-activity-dot-${GENERAL_CHANNEL_ID}`),
+  ).toBeVisible();
+
+  await expect(
+    page.getByTestId(`user-profile-activity-slide-${GENERAL_CHANNEL_ID}`),
+  ).toHaveAttribute("data-mounted", "false");
+
+  await page
+    .getByTestId(`user-profile-activity-dot-${GENERAL_CHANNEL_ID}`)
+    .click();
+
+  await expect(
+    page.getByTestId("user-profile-activity-channel-label"),
+  ).toContainText("#general");
+  await expect(
+    page.getByTestId(`user-profile-activity-slide-${GENERAL_CHANNEL_ID}`),
+  ).toHaveAttribute("data-mounted", "true");
+  await expect(
+    page.getByTestId(`user-profile-activity-slide-${AGENTS_CHANNEL_ID}`),
+  ).toHaveAttribute("data-mounted", "true");
 });
 
 test("typing indicator shows avatars and maintains stable name order", async ({

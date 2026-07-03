@@ -96,8 +96,10 @@ test("buildCompactToolSummary formats view_image thumbnail source", () => {
     }),
   );
 
+  assert.equal(summary.kind, "image");
   assert.equal(summary.label, "Viewed image");
   assert.equal(summary.thumbnailSrc, source);
+  assert.equal(summary.imageContent?.src, source);
   assert.equal(summary.preview, source);
 });
 
@@ -109,24 +111,53 @@ test("buildCompactToolSummary uses basename for local view_image paths", () => {
     }),
   );
 
+  assert.equal(summary.kind, "image");
   assert.equal(summary.thumbnailSrc, null);
+  assert.equal(summary.imageContent, null);
   assert.equal(summary.preview, "screenshot.png");
 });
 
 test("buildCompactToolSummary formats read_file path preview", () => {
+  const path = "desktop/src/app/App.tsx";
   const summary = buildCompactToolSummary(
     makeTool({
       toolName: "read_file",
-      args: { path: "desktop/src/app/App.tsx" },
+      args: { path },
+      result: `${path} (lines 1-2 of 2)\n1:export {}\n2: `,
     }),
   );
 
+  assert.equal(summary.kind, "file-read");
   assert.equal(summary.label, "Read file");
-  assert.equal(summary.preview, "desktop/src/app/App.tsx");
+  assert.equal(summary.preview, path);
   assert.deepEqual(summary.action, {
     verb: "Read",
-    object: "desktop/src/app/App.tsx",
+    object: path,
   });
+  assert.ok(summary.fileReadContent);
+});
+
+test("buildCompactToolSummary formats load_skill into skill-read file panel", () => {
+  const summary = buildCompactToolSummary(
+    makeTool({
+      toolName: "load_skill",
+      args: { name: "block-safe-github" },
+      result: "# Safe GitHub usage at Block\n",
+    }),
+  );
+
+  assert.equal(summary.kind, "skill-read");
+  assert.equal(summary.label, "Read skill");
+  assert.equal(summary.preview, "block-safe-github");
+  assert.deepEqual(summary.action, {
+    verb: "Read",
+    object: "block-safe-github",
+  });
+  assert.ok(summary.fileReadContent);
+  assert.equal(
+    summary.fileReadContent?.footerText,
+    "block-safe-github/SKILL.md",
+  );
 });
 
 test("buildCompactToolSummary formats todo list preview", () => {
@@ -176,6 +207,29 @@ test("buildCompactToolSummary promotes non-send buzz CLI commands to relay ops",
   assert.equal(summary.preview, "channel-1");
   assert.deepEqual(summary.action, { verb: "Read", object: "channel-1" });
   assert.equal(summary.presentation, "inline");
+  assert.equal(summary.shellContent, "buzz channels get --channel channel-1");
+});
+
+test("buildCompactToolSummary exposes shellContent for shell-sourced buzz CLI reads", () => {
+  const command =
+    "sleep 45; buzz messages thread --channel channel-uuid --event abc | tail -n 20";
+  const summary = buildCompactToolSummary(
+    makeTool({
+      toolName: "shell",
+      args: { command },
+      result: JSON.stringify({
+        stdout: "[1782969453] user: hello",
+        exit_code: 0,
+      }),
+    }),
+  );
+
+  assert.equal(summary.kind, "relay-op");
+  assert.equal(summary.shellContent, command);
+  assert.deepEqual(summary.action, {
+    verb: "Read",
+    object: "channel-uuid",
+  });
 });
 
 test("buildCompactToolSummary derives structured actions for native Buzz MCP tools", () => {

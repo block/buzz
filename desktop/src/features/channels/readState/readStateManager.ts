@@ -18,6 +18,7 @@ import {
   readStoredReadState,
   writeStoredReadState,
 } from "@/features/channels/readState/readStateStorage";
+import { setLocalStorageItemWithRecovery } from "@/shared/lib/localStorageQuota";
 
 const CLIENT_ID_KEY_PREFIX = "buzz.nip-rs.client-id";
 const SLOT_ID_KEY_PREFIX = "buzz.nip-rs.slot-id";
@@ -33,7 +34,7 @@ function getOrCreatePersisted(key: string, generator: () => string): string {
   let value = localStorage.getItem(key);
   if (!value) {
     value = generator();
-    localStorage.setItem(key, value);
+    setLocalStorageItemWithRecovery(key, value);
   }
   return value;
 }
@@ -61,7 +62,10 @@ function loadExtraSlotIds(pubkey: string): string[] {
 }
 
 function saveExtraSlotIds(pubkey: string, ids: string[]): void {
-  localStorage.setItem(localExtraSlotIdsKey(pubkey), JSON.stringify(ids));
+  setLocalStorageItemWithRecovery(
+    localExtraSlotIdsKey(pubkey),
+    JSON.stringify(ids),
+  );
 }
 
 export type ApplyRemoteContextResult = "unchanged" | "advanced";
@@ -518,7 +522,7 @@ export class ReadStateManager {
       if (!parsed || parsed.dTag !== `read-state:${this.slotId}`) continue;
       if (parsed.blob.client_id !== this.clientId) {
         this.slotId = generateHex(16);
-        localStorage.setItem(slotIdKey(this.pubkey), this.slotId);
+        setLocalStorageItemWithRecovery(slotIdKey(this.pubkey), this.slotId);
         break;
       }
     }

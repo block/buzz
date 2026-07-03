@@ -8,12 +8,17 @@ class UserProfile {
   final String? about;
   final String? nip05Handle;
 
+  /// NIP-OA verified owner pubkey from the profile's `auth` tag; non-null
+  /// means this identity is an agent (mirrors desktop's `ownerPubkey`).
+  final String? ownerPubkey;
+
   const UserProfile({
     required this.pubkey,
     this.displayName,
     this.avatarUrl,
     this.about,
     this.nip05Handle,
+    this.ownerPubkey,
   });
 
   factory UserProfile.fromJson(Map<String, dynamic> json) => UserProfile(

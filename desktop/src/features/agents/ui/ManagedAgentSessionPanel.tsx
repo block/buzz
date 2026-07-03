@@ -14,13 +14,17 @@ import { cn } from "@/shared/lib/cn";
 import { Badge } from "@/shared/ui/badge";
 import { Skeleton } from "@/shared/ui/skeleton";
 import { Spinner } from "@/shared/ui/spinner";
-import { AgentSessionTranscriptList } from "./AgentSessionTranscriptList";
+import {
+  AgentSessionTranscriptList,
+  type AgentSessionTranscriptEmptyState,
+} from "./AgentSessionTranscriptList";
 import { RawEventRail } from "./RawEventRail";
 import type {
   ConnectionState,
   ObserverEvent,
   TranscriptItem,
 } from "./agentSessionTypes";
+import type { AgentSessionTranscriptVariant } from "./agentSessionTranscriptContext";
 import {
   deriveLatestSessionId,
   resolveDisplayEvents,
@@ -34,12 +38,17 @@ type ManagedAgentSessionPanelProps = {
   agent: Pick<ManagedAgent, "pubkey" | "name" | "status"> & {
     avatarUrl?: string | null;
   };
+  autoTail?: boolean;
   channelId?: string | null;
   className?: string;
   emptyDescription?: string;
+  emptyState?: AgentSessionTranscriptEmptyState;
+  panelPadding?: boolean;
   rawLayout?: "responsive" | "exclusive";
   showHeader?: boolean;
   showRaw?: boolean;
+  transcriptContentClassName?: string;
+  transcriptVariant?: AgentSessionTranscriptVariant;
   profiles?: UserProfileLookup;
   rawEventsOverride?: ObserverEvent[];
   transcriptOverride?: TranscriptItem[];
@@ -47,12 +56,17 @@ type ManagedAgentSessionPanelProps = {
 
 export function ManagedAgentSessionPanel({
   agent,
+  autoTail = false,
   channelId = null,
   className,
   emptyDescription = "Mention this agent in a channel to watch the next turn.",
+  emptyState = "idle",
+  panelPadding = true,
   rawLayout = "responsive",
   showHeader = true,
   showRaw = true,
+  transcriptContentClassName,
+  transcriptVariant = "default",
   profiles,
   rawEventsOverride,
   transcriptOverride,
@@ -88,7 +102,9 @@ export function ManagedAgentSessionPanel({
   return (
     <section
       className={cn(
-        "rounded-lg border border-border/70 bg-background/80 p-4 shadow-xs",
+        "rounded-lg border border-border/70 bg-background/80 shadow-xs",
+        panelPadding && "p-4",
+        autoTail && "flex flex-col overflow-hidden",
         className,
       )}
     >
@@ -106,7 +122,10 @@ export function ManagedAgentSessionPanel({
         agentName={agent.name}
         agentPubkey={agent.pubkey}
         connectionState={connectionState}
+        autoTail={autoTail}
+        channelId={channelId}
         emptyDescription={emptyDescription}
+        emptyState={emptyState}
         errorMessage={errorMessage}
         events={displayEvents}
         hasObserver={hasObserver}
@@ -115,6 +134,8 @@ export function ManagedAgentSessionPanel({
         rawLayout={rawLayout}
         showRaw={showRaw}
         transcript={displayTranscript}
+        transcriptContentClassName={transcriptContentClassName}
+        transcriptVariant={transcriptVariant}
       />
     </section>
   );
@@ -159,8 +180,11 @@ function SessionBody({
   agentAvatarUrl,
   agentName,
   agentPubkey,
+  autoTail,
   connectionState,
+  channelId,
   emptyDescription,
+  emptyState,
   errorMessage,
   events,
   hasObserver,
@@ -169,12 +193,17 @@ function SessionBody({
   rawLayout,
   showRaw,
   transcript,
+  transcriptContentClassName,
+  transcriptVariant,
 }: {
   agentAvatarUrl: string | null;
   agentName: string;
   agentPubkey: string;
+  autoTail: boolean;
+  channelId: string | null;
   connectionState: ConnectionState;
   emptyDescription: string;
+  emptyState: AgentSessionTranscriptEmptyState;
   errorMessage: string | null;
   events: ObserverEvent[];
   hasObserver: boolean;
@@ -183,6 +212,8 @@ function SessionBody({
   rawLayout: "responsive" | "exclusive";
   showRaw: boolean;
   transcript: TranscriptItem[];
+  transcriptContentClassName?: string;
+  transcriptVariant: AgentSessionTranscriptVariant;
 }) {
   const rawRail = resolveRawRailLayout(showRaw, rawLayout);
 
@@ -215,15 +246,22 @@ function SessionBody({
             rawRail.mode === "side"
               ? "mt-4 grid gap-4 xl:grid-cols-[minmax(0,1fr)_20rem]"
               : "mt-0",
+            autoTail && "min-h-0 flex-1 overflow-hidden",
           )}
         >
           <AgentSessionTranscriptList
             agentAvatarUrl={agentAvatarUrl}
             agentName={agentName}
             agentPubkey={agentPubkey}
+            channelId={channelId}
             emptyDescription={emptyDescription}
+            emptyState={emptyState}
             items={transcript}
             profiles={profiles}
+            contentContainerClassName={transcriptContentClassName}
+            scrollScopeKey={`${agentPubkey}:${channelId ?? "all"}`}
+            autoTail={autoTail}
+            variant={transcriptVariant}
           />
           {rawRail.mode === "side" ? <RawEventRail events={events} /> : null}
         </div>

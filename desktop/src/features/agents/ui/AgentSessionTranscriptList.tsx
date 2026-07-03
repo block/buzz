@@ -1,16 +1,32 @@
 import * as React from "react";
+import { motion, useReducedMotion } from "motion/react";
 import { CheckCheck, Radio } from "lucide-react";
 
+import {
+  useActiveAgentTurns,
+  type ActiveTurnSummary,
+} from "@/features/agents/activeAgentTurnsStore";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
+import { useAnchoredScroll } from "@/features/messages/ui/useAnchoredScroll";
 import { cn } from "@/shared/lib/cn";
 import {
   Dialog,
   DialogContent,
+  DialogDescription,
   DialogHeader,
   DialogTitle,
 } from "@/shared/ui/dialog";
-import type { TranscriptItem } from "./agentSessionTypes";
+import { Toggle } from "@/shared/ui/toggle";
+import { FuzzyLogo } from "@/shared/ui/buzz-logo/FuzzyLogo";
+import type { PromptSection, TranscriptItem } from "./agentSessionTypes";
+import { TurnLivenessIndicator } from "./TurnLivenessIndicator";
 import { PromptSectionList as PromptContextSections } from "./PromptSectionAccordion";
+import {
+  AgentSessionTranscriptVariantProvider,
+  type AgentSessionTranscriptVariant,
+  useAgentSessionTranscriptVariant,
+} from "./agentSessionTranscriptContext";
+import { useTranscriptAnimationEnabled } from "./transcriptAnimationPreference";
 import { TranscriptActivityItem } from "./activityRenderClasses/TranscriptActivityItem";
 import {
   ActivityRow,
@@ -37,11 +53,34 @@ import { UserMessageBubble } from "./activityRenderClasses/UserMessageBubble";
 
 const TRANSCRIPT_ACP_SOURCE_STORAGE_KEY = "buzz:show-transcript-acp-source";
 
+const ROW_ENTER_SPRING = {
+  damping: 38,
+  stiffness: 480,
+  type: "spring",
+} as const;
+const ROW_ENTER_FROM = { opacity: 0, y: 12 } as const;
+const ROW_ENTER_TO = { opacity: 1, y: 0 } as const;
+
+/**
+ * False during the mount commit, true afterwards. Children mounted with the
+ * initial batch (history load) read false and skip their enter animation;
+ * children appended later read true and animate in.
+ */
+function useHasCompletedInitialRender() {
+  const ref = React.useRef(false);
+  React.useEffect(() => {
+    ref.current = true;
+  }, []);
+  return ref;
+}
+
 /**
  * Opt-in only: source pills are useful while iterating on observer parsing, but
  * they should not appear for every local dev session.
  */
 const SHOW_TRANSCRIPT_ACP_SOURCE = shouldShowTranscriptAcpSource();
+
+export type AgentSessionTranscriptEmptyState = "idle" | "loading";
 
 function shouldShowTranscriptAcpSource() {
   const envValue = import.meta.env.VITE_SHOW_TRANSCRIPT_ACP_SOURCE;
@@ -66,54 +105,195 @@ export function AgentSessionTranscriptList({
   agentAvatarUrl,
   agentName,
   agentPubkey,
+  autoTail = false,
+  channelId = null,
   emptyDescription,
+  emptyState = "idle",
   items,
   profiles,
+  contentContainerClassName,
+  scrollScopeKey,
+  variant = "default",
 }: AgentTranscriptIdentityProps & {
+  autoTail?: boolean;
+  channelId?: string | null;
   emptyDescription: string;
+  emptyState?: AgentSessionTranscriptEmptyState;
   items: TranscriptItem[];
   profiles?: UserProfileLookup;
+  contentContainerClassName?: string;
+  scrollScopeKey?: string | null;
+  variant?: AgentSessionTranscriptVariant;
 }) {
+  const activeTurns = useActiveAgentTurns(agentPubkey);
+  const isTurnLive = React.useMemo(
+    () => isAgentTurnLive(activeTurns, channelId),
+    [activeTurns, channelId],
+  );
   const displayBlocks = React.useMemo(
     () => buildTranscriptDisplayBlocks(items),
     [items],
   );
+  const scrollContainerRef = React.useRef<HTMLDivElement>(null);
+  const contentRef = React.useRef<HTMLDivElement>(null);
+  const anchoredScroll = useAnchoredScroll({
+    channelId: autoTail ? (scrollScopeKey ?? agentPubkey) : null,
+    contentRef,
+    isLoading: false,
+    messages: items,
+    scrollContainerRef,
+  });
 
-  if (items.length === 0) {
+  const isCompactPreview = variant === "compactPreview";
+  const animationPreferenceEnabled = useTranscriptAnimationEnabled();
+  const shouldReduceMotion = useReducedMotion();
+  const animationsDisabled =
+    Boolean(shouldReduceMotion) || !animationPreferenceEnabled;
+  // Position (layout) animations are only safe when this component owns the
+  // scroll container: `layoutScroll` below tells motion to subtract our scroll
+  // offset when measuring rows. When an ancestor scrolls instead (autoTail
+  // off), scrolling would register as false position deltas and rows would
+  // visibly spring back toward their pre-scroll position, so only the enter
+  // animation runs there.
+  const layoutAnimationsEnabled = !animationsDisabled && autoTail;
+  const hasCompletedInitialRenderRef = useHasCompletedInitialRender();
+  const hasRenderableContent =
+    items.length > 0 && hasRenderableDisplayContent(displayBlocks, variant);
+
+  const scrollContainerClassNames = cn(
+    "w-full",
+    autoTail ? "h-full overflow-y-auto" : null,
+  );
+
+  if (!hasRenderableContent) {
+    const isLoading = emptyState === "loading" || isTurnLive;
+
     return (
-      <div className="flex min-h-40 flex-col items-center justify-center px-6 py-10 text-center">
-        <Radio className="mx-auto h-4 w-4 text-muted-foreground" />
-        <p className="mt-3 text-sm font-medium">No ACP activity yet</p>
-        <p className="mt-1 text-sm text-muted-foreground">{emptyDescription}</p>
+      <div className={scrollContainerClassNames}>
+        <div className="flex h-full min-h-40 flex-col items-center justify-center px-6 py-10 text-center">
+          {isLoading ? (
+            <FuzzyLogo
+              ariaLabel="Waiting for ACP activity"
+              className="mx-auto text-muted-foreground"
+              fuzz={false}
+              loop
+            />
+          ) : (
+            <>
+              <Radio className="mx-auto h-4 w-4 text-muted-foreground" />
+              <p className="mt-3 text-sm font-medium">No ACP activity yet</p>
+              <p className="mt-1 text-sm text-muted-foreground">
+                {emptyDescription}
+              </p>
+            </>
+          )}
+        </div>
       </div>
     );
   }
 
   return (
-    <div className="w-full">
+    <motion.div
+      className={scrollContainerClassNames}
+      layoutScroll
+      onScroll={autoTail ? anchoredScroll.onScroll : undefined}
+      ref={autoTail ? scrollContainerRef : undefined}
+    >
       <div
         aria-label="Live ACP transcript"
         aria-live="polite"
-        className="flex w-full flex-col gap-2.5"
+        className={cn(
+          "flex w-full flex-col",
+          isCompactPreview ? "gap-1" : "gap-4",
+          autoTail && "pb-4",
+          contentContainerClassName,
+        )}
+        ref={autoTail ? contentRef : undefined}
         role="log"
       >
-        {displayBlocks.map((block) => (
-          <div
-            className="content-visibility-auto"
-            key={getDisplayBlockKey(block)}
-          >
-            <TranscriptDisplayBlockView
-              agentAvatarUrl={agentAvatarUrl}
-              agentName={agentName}
-              agentPubkey={agentPubkey}
-              block={block}
-              profiles={profiles}
-            />
-          </div>
-        ))}
+        <AgentSessionTranscriptVariantProvider value={variant}>
+          {displayBlocks.map((block) => {
+            const blockKey = getDisplayBlockKey(block);
+            return (
+              <motion.div
+                animate={ROW_ENTER_TO}
+                data-message-id={blockKey}
+                initial={
+                  animationsDisabled || !hasCompletedInitialRenderRef.current
+                    ? false
+                    : ROW_ENTER_FROM
+                }
+                key={blockKey}
+                layout={layoutAnimationsEnabled ? "position" : false}
+                transition={ROW_ENTER_SPRING}
+              >
+                {/* content-visibility stays on a non-animated child: motion
+                    measures the outer wrapper for layout animations, which
+                    would otherwise force skipped offscreen rows to render. */}
+                <div className="content-visibility-auto">
+                  <TranscriptDisplayBlockView
+                    agentAvatarUrl={agentAvatarUrl}
+                    agentName={agentName}
+                    agentPubkey={agentPubkey}
+                    block={block}
+                    profiles={profiles}
+                  />
+                </div>
+              </motion.div>
+            );
+          })}
+          {isTurnLive && !isCompactPreview ? <TurnLivenessIndicator /> : null}
+        </AgentSessionTranscriptVariantProvider>
       </div>
-    </div>
+    </motion.div>
   );
+}
+
+function isAgentTurnLive(
+  activeTurns: ActiveTurnSummary[],
+  channelId: string | null,
+) {
+  if (activeTurns.length === 0) {
+    return false;
+  }
+  if (!channelId) {
+    return true;
+  }
+  return activeTurns.some((turn) => turn.channelId === channelId);
+}
+
+function hasRenderableDisplayContent(
+  displayBlocks: TranscriptDisplayBlock[],
+  variant: AgentSessionTranscriptVariant,
+) {
+  if (variant !== "compactPreview") {
+    return displayBlocks.length > 0;
+  }
+
+  return displayBlocks.some(hasRenderableCompactBlock);
+}
+
+function hasRenderableCompactBlock(block: TranscriptDisplayBlock) {
+  if (block.kind === "single") {
+    return isRenderableCompactItem(block.item);
+  }
+
+  return block.segments.some((segment) => {
+    if (segment.kind === "item") {
+      return isRenderableCompactItem(segment.item);
+    }
+    if (segment.kind === "prompt") {
+      return true;
+    }
+    if (segment.kind === "summary") {
+      return segment.summary.items.some(isRenderableCompactItem);
+    }
+    return false;
+  });
+}
+
+function isRenderableCompactItem(item: TranscriptItem) {
+  return item.renderClass !== "raw-rail" && item.renderClass !== "suppressed";
 }
 
 function TranscriptAcpSourceBadge({ source }: { source: string }) {
@@ -145,6 +325,18 @@ function TranscriptDisplayBlockView({
   block: TranscriptDisplayBlock;
   profiles?: UserProfileLookup;
 }) {
+  const variant = useAgentSessionTranscriptVariant();
+  const isCompactPreview = variant === "compactPreview";
+  const animationPreferenceEnabled = useTranscriptAnimationEnabled();
+  const shouldReduceMotion = useReducedMotion();
+  // Streaming tool calls land as new segments inside the current turn block
+  // (the block key stays `turn:<id>`), so the list-level enter animation
+  // never fires for them — each segment animates in here instead. Segments
+  // present when the block mounts (history load, or the first paint of a new
+  // turn — the block wrapper already animates that) skip the transition.
+  const hasCompletedInitialRenderRef = useHasCompletedInitialRender();
+  const animateSegmentEnter = animationPreferenceEnabled && !shouldReduceMotion;
+
   if (block.kind === "single") {
     return (
       <TranscriptItemRow
@@ -159,19 +351,29 @@ function TranscriptDisplayBlockView({
 
   return (
     <div
-      className="flex flex-col gap-2.5"
+      className={cn("flex flex-col", isCompactPreview ? "gap-2.5" : "gap-4")}
       data-testid="transcript-turn-group"
       data-turn-id={block.turnId}
     >
       {block.segments.map((segment) => (
-        <TranscriptTurnSegmentView
-          agentAvatarUrl={agentAvatarUrl}
-          agentName={agentName}
-          agentPubkey={agentPubkey}
+        <motion.div
+          animate={ROW_ENTER_TO}
+          initial={
+            animateSegmentEnter && hasCompletedInitialRenderRef.current
+              ? ROW_ENTER_FROM
+              : false
+          }
           key={getTurnSegmentKey(block.turnId, segment)}
-          profiles={profiles}
-          segment={segment}
-        />
+          transition={ROW_ENTER_SPRING}
+        >
+          <TranscriptTurnSegmentView
+            agentAvatarUrl={agentAvatarUrl}
+            agentName={agentName}
+            agentPubkey={agentPubkey}
+            profiles={profiles}
+            segment={segment}
+          />
+        </motion.div>
       ))}
     </div>
   );
@@ -398,89 +600,71 @@ function PromptUserMessage({
   setup?: Extract<TranscriptItem, { type: "lifecycle" }>[];
   systemPrompt?: Extract<TranscriptItem, { type: "metadata" }> | null;
 }) {
+  const [contextOpen, setContextOpen] = React.useState(false);
+  const contextSections = React.useMemo(
+    () => [...(systemPrompt?.sections ?? []), ...(context?.sections ?? [])],
+    [context, systemPrompt],
+  );
+
   return (
     <>
       <UserMessageBubble
         bubbleClassName="p-2.5"
         footer={
           <TurnSetupFooter
+            contextOpen={contextOpen}
+            hasContext={contextSections.length > 0}
             items={setup}
             messageLink={getTranscriptMessageLink(item)}
+            onContextOpenChange={setContextOpen}
             timestamp={item.timestamp}
           />
         }
         item={item}
         profiles={profiles}
       />
-      {systemPrompt && systemPrompt.sections.length > 0 ? (
-        <PromptContextInline context={systemPrompt} />
-      ) : null}
-      {context && context.sections.length > 0 ? (
-        <PromptContextInline context={context} />
-      ) : null}
-    </>
-  );
-}
-
-function PromptContextInline({
-  context,
-}: {
-  context: Extract<TranscriptItem, { type: "metadata" }>;
-}) {
-  const [dialogOpen, setDialogOpen] = React.useState(false);
-
-  return (
-    <>
-      <div
-        className="mt-1 space-y-2 pl-2"
-        data-testid="transcript-prompt-context-inline"
-      >
-        <div className="flex items-center justify-between gap-2">
-          <p className="text-xs font-medium text-muted-foreground/70">
-            {context.title}
-          </p>
-          <button
-            className="text-xs text-muted-foreground/50 hover:text-muted-foreground transition-colors"
-            data-testid="transcript-prompt-context-expand"
-            onClick={() => setDialogOpen(true)}
-            type="button"
-          >
-            View full
-          </button>
-        </div>
-        <PromptContextSections sections={context.sections} />
-      </div>
       <PromptContextDialog
-        context={context}
-        onOpenChange={setDialogOpen}
-        open={dialogOpen}
+        onOpenChange={setContextOpen}
+        open={contextOpen}
+        sections={contextSections}
+        setup={setup}
       />
     </>
   );
 }
 
 function PromptContextDialog({
-  context,
   onOpenChange,
   open,
+  sections,
+  setup,
 }: {
-  context: Extract<TranscriptItem, { type: "metadata" }>;
   onOpenChange: (open: boolean) => void;
   open: boolean;
+  sections: PromptSection[];
+  setup: Extract<TranscriptItem, { type: "lifecycle" }>[];
 }) {
-  if (!open || context.sections.length === 0) {
+  if (!open || sections.length === 0) {
     return null;
   }
+
+  const setupText = formatPromptSetupSummary(setup);
 
   return (
     <Dialog onOpenChange={onOpenChange} open={open}>
       <DialogContent className="max-w-xl overflow-hidden p-0">
         <div className="flex max-h-[85vh] flex-col">
           <DialogHeader className="px-6 pb-3 pt-5 pr-14">
-            <DialogTitle>{context.title}</DialogTitle>
+            <DialogTitle>Prompt context</DialogTitle>
+            {setupText ? (
+              <div className="flex items-center gap-1.5">
+                <CheckCheck className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                <DialogDescription>{setupText}</DialogDescription>
+              </div>
+            ) : null}
           </DialogHeader>
           <div className="min-h-0 flex-1 overflow-y-auto px-6 pb-6 pt-2">
-            <PromptContextSections sections={context.sections} />
+            <PromptContextSections sections={sections} />
           </div>
         </div>
       </DialogContent>
@@ -488,14 +672,28 @@ function PromptContextDialog({
   );
 }
 
+function formatPromptSetupSummary(
+  items: Extract<TranscriptItem, { type: "lifecycle" }>[],
+) {
+  const label = formatTurnSetupLabel(items);
+  const detail = turnSetupDetail(items);
+  return [label, detail].filter(Boolean).join(" · ");
+}
+
 function TurnSetupFooter({
+  contextOpen = false,
+  hasContext = false,
   items,
   messageLink = null,
+  onContextOpenChange,
   showTimestamp = true,
   timestamp,
 }: {
+  contextOpen?: boolean;
+  hasContext?: boolean;
   items: Extract<TranscriptItem, { type: "lifecycle" }>[];
   messageLink?: { channelId: string; messageId: string } | null;
+  onContextOpenChange?: (open: boolean) => void;
   showTimestamp?: boolean;
   timestamp: string;
 }) {
@@ -503,8 +701,9 @@ function TurnSetupFooter({
   const detail = turnSetupDetail(items);
   const tooltipText = [label, detail].filter(Boolean).join(" · ");
   const showSetup = items.length > 0;
+  const showContext = hasContext && onContextOpenChange != null;
 
-  if (!showSetup) {
+  if (!showSetup && !showContext) {
     return showTimestamp ? (
       <TranscriptTimestamp messageLink={messageLink} timestamp={timestamp} />
     ) : null;
@@ -515,10 +714,25 @@ function TurnSetupFooter({
       className="flex items-center gap-1.5 text-muted-foreground/80"
       data-testid="transcript-turn-setup"
     >
-      <span className="inline-flex shrink-0 items-center justify-center rounded-sm text-muted-foreground/70">
-        <CheckCheck className="h-3.5 w-3.5" />
-        <span className="sr-only">{tooltipText}</span>
-      </span>
+      {showContext ? (
+        <Toggle
+          aria-label={`${contextOpen ? "Hide" : "Show"} prompt context`}
+          className="data-[state=on]:bg-primary/10 data-[state=on]:text-primary dark:data-[state=on]:bg-primary/15"
+          data-testid="transcript-prompt-context-toggle"
+          onPressedChange={onContextOpenChange}
+          pressed={contextOpen}
+          size="xs"
+          title={tooltipText || "Show prompt context"}
+          variant="ghost"
+        >
+          <CheckCheck aria-hidden="true" />
+        </Toggle>
+      ) : (
+        <span className="inline-flex shrink-0 items-center justify-center rounded-sm text-muted-foreground/70">
+          <CheckCheck className="h-3.5 w-3.5" />
+          <span className="sr-only">{tooltipText}</span>
+        </span>
+      )}
       {showTimestamp ? (
         <TranscriptTimestamp messageLink={messageLink} timestamp={timestamp} />
       ) : null}

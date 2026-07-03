@@ -2,10 +2,13 @@ import * as React from "react";
 import { ChevronDown } from "lucide-react";
 
 import { cn } from "@/shared/lib/cn";
-import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
+import { useAgentSessionTranscriptVariant } from "../agentSessionTranscriptContext";
 import type { AgentActivityAction } from "../agentSessionTypes";
-import type { CompactFileEditSummary } from "../agentSessionToolSummary";
-import { isInlineImageData } from "../agentSessionUtils";
+import type {
+  CompactFileEditSummary,
+  CompactToolKind,
+} from "../agentSessionToolSummary";
+import { resolveToolImageSrc } from "../agentSessionUtils";
 import {
   ActivityRowLabel,
   splitActivityRowLabel,
@@ -13,13 +16,14 @@ import {
 } from "../activityRenderClasses/ActivityRow";
 
 export function compactSummaryTone() {
-  return "text-muted-foreground/60 group-open:text-foreground";
+  return "text-muted-foreground/60 transition-colors group-hover/row:text-foreground group-open:text-foreground";
 }
 
 export function CompactToolSummaryRow({
   action,
   duration,
   fileEditSummary,
+  kind,
   label,
   preview,
   thumbnailSrc,
@@ -27,19 +31,22 @@ export function CompactToolSummaryRow({
   action: AgentActivityAction | null;
   duration: string | null;
   fileEditSummary: CompactFileEditSummary | null;
+  kind: CompactToolKind;
   label: string;
   preview: string | null;
   thumbnailSrc: string | null;
 }) {
   const [thumbnailFailed, setThumbnailFailed] = React.useState(false);
+  const variant = useAgentSessionTranscriptVariant();
+  const isCompactPreview = variant === "compactPreview";
   const mutedTone = compactSummaryTone();
   const resolvedThumbnail = React.useMemo(() => {
     if (!thumbnailSrc || thumbnailFailed) return null;
-    return resolveImageSrc(thumbnailSrc);
+    return resolveToolImageSrc(thumbnailSrc);
   }, [thumbnailFailed, thumbnailSrc]);
   const actionLabel = fileEditSummary
     ? null
-    : getCompactToolActionLabel(action, label, preview);
+    : getCompactToolActionLabel(action, kind, label, preview);
 
   return (
     <>
@@ -53,7 +60,13 @@ export function CompactToolSummaryRow({
           verb={actionLabel.verb}
         />
       ) : (
-        <span className={cn("shrink-0 text-sm font-semibold", mutedTone)}>
+        <span
+          className={cn(
+            "shrink-0 font-semibold",
+            isCompactPreview ? "text-xs" : "text-sm",
+            mutedTone,
+          )}
+        >
           {label}
         </span>
       )}
@@ -69,7 +82,11 @@ export function CompactToolSummaryRow({
         />
       ) : !fileEditSummary && !actionLabel && preview ? (
         <span
-          className={cn("min-w-0 max-w-48 truncate text-sm", mutedTone)}
+          className={cn(
+            "min-w-0 max-w-48 truncate",
+            isCompactPreview ? "text-xs" : "text-sm",
+            mutedTone,
+          )}
           title={preview}
         >
           {preview}
@@ -90,6 +107,7 @@ export function CompactToolSummaryRow({
 
 function getCompactToolActionLabel(
   action: AgentActivityAction | null,
+  kind: CompactToolKind,
   label: string,
   preview: string | null,
 ): (ActivityRowLabelParts & { title?: string }) | null {
@@ -108,10 +126,11 @@ function getCompactToolActionLabel(
   if (!preview) return parts;
 
   if (
-    label === "Ran command" ||
-    label === "Read file" ||
-    label === "Updated todos" ||
-    label === "Viewed image"
+    kind === "shell" ||
+    kind === "file-read" ||
+    kind === "skill-read" ||
+    kind === "plan" ||
+    kind === "image"
   ) {
     return { verb: parts.verb, object: preview, title: preview };
   }
@@ -137,8 +156,4 @@ function CompactFileEditSummaryView({
       verb="Edited"
     />
   );
-}
-
-function resolveImageSrc(source: string): string {
-  return isInlineImageData(source) ? source : rewriteRelayUrl(source);
 }
