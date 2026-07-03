@@ -44,6 +44,9 @@ pub enum ObserverPayloadError {
         /// Actual plaintext byte count.
         got: usize,
     },
+    /// A payload field violated a NIP-AM numeric constraint.
+    #[error("invalid payload field: {0}")]
+    InvalidPayload(String),
 }
 
 /// Returns true when `content` fits the NIP-44 v2 ciphertext length envelope.

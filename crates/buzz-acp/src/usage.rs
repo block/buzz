@@ -19,6 +19,15 @@
 //! 3. **Session restart** (caller supplies a new `session_id` not seen
 //!    before): treated as case 1 — fresh baseline, no delta for this turn.
 //!
+//! Goose may emit **multiple** `usage_update` notifications per turn. The
+//! tracker handles this correctly: the committed baseline (and `turn_seq`)
+//! advance only when `take()` is called (i.e. at publish time), never on
+//! individual notifications. Within a turn all notifications measure their
+//! delta from the same frozen baseline — the end of the previous published
+//! turn — so the final `pending` record always reflects the full
+//! previous-published→current-final delta regardless of how many
+//! intermediate notifications arrived.
+//!
 //! The `TurnUsage` produced after each turn is consumed by the
 //! `TurnCompletionGuard` in `pool.rs` to publish a kind 44200 relay event.
 
@@ -82,14 +91,17 @@ pub(crate) struct UsageUpdatePayload {
 /// Per-session normalization state: the last cumulative snapshot we saw.
 #[derive(Debug, Clone)]
 struct SessionState {
-    /// Monotonically increasing per-session turn counter (1-based, incremented
-    /// on every recorded update).
-    turn_seq: u64,
-    /// Cumulative input tokens at the end of the previous turn.
+    /// Per-session turn counter for the LAST PUBLISHED metric (1-based).
+    /// Advanced only when `take()` drains a pending record — not on every
+    /// `record()` call. This ensures `turnSeq` counts published metrics, not
+    /// usage-update notifications.
+    published_seq: u64,
+    /// Cumulative input tokens at the end of the LAST PUBLISHED turn.
+    /// Advanced only on publish (i.e. in `take()`), not on every notification.
     last_input: u64,
-    /// Cumulative output tokens at the end of the previous turn.
+    /// Cumulative output tokens at the end of the LAST PUBLISHED turn.
     last_output: u64,
-    /// Cumulative cost at the end of the previous turn.
+    /// Cumulative cost at the end of the LAST PUBLISHED turn.
     last_cost: Option<f64>,
 }
 
@@ -131,12 +143,16 @@ pub struct TurnUsage {
 ///    `session/new` setup) will still update the cumulative baseline but will
 ///    NOT produce a publishable record.
 /// 2. **`record(session_id, payload)`** — called for each
-///    `_goose/unstable/session/update` notification. Always updates the
-///    cumulative baseline; only produces a publishable record when a turn is
-///    currently in-flight for the matching session.
+///    `_goose/unstable/session/update` notification. When in-flight, updates
+///    `pending` with the latest cumulative values and a delta measured from
+///    the committed baseline (end of the previous published turn). Multiple
+///    notifications per turn are fine — the last one wins and `turn_seq` stays
+///    constant within the turn. When not in-flight, advances the committed
+///    baseline so the next turn can compute a correct delta.
 /// 3. **`take()`** — called at turn completion by `TurnCompletionGuard`.
 ///    Drains and returns the pending record (or `None` if no usage was emitted
-///    for this turn) and clears the in-flight marker.
+///    for this turn), clears the in-flight marker, and advances the committed
+///    baseline so the next `record()` call measures from here.
 #[derive(Debug, Default)]
 pub(crate) struct UsageTracker {
     /// One entry per goose `sessionId` ever seen in this process.
@@ -172,12 +188,21 @@ impl UsageTracker {
     /// `None` or refers to a different session, the baseline is updated but
     /// `pending` is left unchanged.
     ///
-    /// When multiple notifications arrive during the same turn, the last one
-    /// wins (goose may emit several per turn; each increments `turn_seq`).
+    /// When multiple notifications arrive during the same turn, the **last one
+    /// wins** on the cumulative totals, and the delta is always measured from
+    /// the baseline at the end of the **previous published turn** — not from an
+    /// intermediate notification within the current turn. `turn_seq` stays
+    /// constant across all notifications within one turn and only increments
+    /// when a record is actually published (i.e. when `take()` is called).
     pub(crate) fn record(&mut self, session_id: &str, payload: &UsageUpdatePayload) {
         let current_input = payload.accumulated_input_tokens;
         let current_output = payload.accumulated_output_tokens;
         let current_cost = payload.accumulated_cost;
+
+        // Determine whether this session is currently in-flight so we know
+        // whether to set `pending`. We compute the delta regardless so that
+        // setup notifications (no in-flight turn) still advance the baseline.
+        let is_in_flight = self.in_flight_session.as_deref() == Some(session_id);
 
         let (delta_reliable, turn_input, turn_output, turn_cost, turn_seq) =
             match self.sessions.get(session_id) {
@@ -186,7 +211,10 @@ impl UsageTracker {
                     (false, None, None, None, 1u64)
                 }
                 Some(prev) => {
-                    let seq = prev.turn_seq + 1;
+                    // turn_seq for this pending record is one above the last
+                    // *published* seq — constant for all notifications in this
+                    // turn, advanced only on publish.
+                    let seq = prev.published_seq + 1;
                     // Token counter decrease → unreliable delta.
                     if current_input < prev.last_input || current_output < prev.last_output {
                         (false, None, None, None, seq)
@@ -214,20 +242,9 @@ impl UsageTracker {
                 }
             };
 
-        // Always advance the session baseline so the next in-flight turn can
-        // compute a correct delta even if this notification is from setup.
-        self.sessions.insert(
-            session_id.to_string(),
-            SessionState {
-                turn_seq,
-                last_input: current_input,
-                last_output: current_output,
-                last_cost: current_cost,
-            },
-        );
-
-        // Only publish a pending record if this session is currently in-flight.
-        if self.in_flight_session.as_deref() == Some(session_id) {
+        if is_in_flight {
+            // Update the pending record with the latest cumulative values.
+            // Baseline is NOT advanced here — it advances only on take().
             self.pending = Some(TurnUsage {
                 session_id: session_id.to_string(),
                 turn_seq,
@@ -239,11 +256,28 @@ impl UsageTracker {
                 cumulative_output_tokens: current_output,
                 cumulative_cost_usd: current_cost,
             });
+        } else {
+            // Not in-flight: advance the committed baseline so the next
+            // in-flight turn computes its delta from this notification.
+            // This handles setup notifications that fire during `session/new`
+            // before the first `begin_turn`.
+            self.sessions.insert(
+                session_id.to_string(),
+                SessionState {
+                    published_seq: match self.sessions.get(session_id) {
+                        Some(s) => s.published_seq,
+                        None => 0,
+                    },
+                    last_input: current_input,
+                    last_output: current_output,
+                    last_cost: current_cost,
+                },
+            );
         }
     }
 
     /// Consume and return the most recently computed turn usage record, then
-    /// clear the in-flight marker.
+    /// clear the in-flight marker and advance the committed baseline.
     ///
     /// Returns `None` if no `usage_update` arrived during the current in-flight
     /// turn (the agent did not emit usage, or no `begin_turn` was called). The
@@ -251,7 +285,19 @@ impl UsageTracker {
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn take(&mut self) -> Option<TurnUsage> {
         self.in_flight_session = None;
-        self.pending.take()
+        let record = self.pending.take()?;
+        // Advance the committed baseline to this published record so the
+        // *next* turn measures its delta from here.
+        self.sessions.insert(
+            record.session_id.clone(),
+            SessionState {
+                published_seq: record.turn_seq,
+                last_input: record.cumulative_input_tokens,
+                last_output: record.cumulative_output_tokens,
+                last_cost: record.cumulative_cost_usd,
+            },
+        );
+        Some(record)
     }
 }
 
@@ -497,25 +543,45 @@ mod tests {
 
     #[test]
     fn last_update_wins_multiple_updates_same_turn() {
+        // Goose emits multiple usage_update notifications per turn. The tracker
+        // must:
+        // (a) use the LAST notification's cumulative values,
+        // (b) measure the delta from the baseline at the END OF THE PREVIOUS
+        //     PUBLISHED TURN (not from intermediate notifications), and
+        // (c) keep turn_seq constant across all notifications within the turn
+        //     (incrementing only on publish, not on each notification).
         let mut tracker = UsageTracker::default();
-        // Turn 1 — baseline.
+        // Turn 1 — establish baseline. After take(), committed baseline = 1000/100.
         tracker.begin_turn("sess-5");
         tracker.record("sess-5", &payload(1000, 100, None));
-        let _ = tracker.take();
+        let t1 = tracker.take().expect("turn 1");
+        assert_eq!(t1.turn_seq, 1);
 
-        // Two updates arrive before take() — each advances state independently;
-        // the second delta is computed from the first update's snapshot.
+        // Turn 2 — two notifications arrive before take(). The second overwrites
+        // the first in pending; delta is measured from the committed baseline
+        // (1000/100), not from the intermediate snapshot (1500/150).
         tracker.begin_turn("sess-5");
         tracker.record("sess-5", &payload(1500, 150, None));
         tracker.record("sess-5", &payload(2000, 250, None));
-        let usage = tracker.take().expect("pending");
+        let usage = tracker.take().expect("turn 2");
 
-        // Cumulative from the last update.
+        // Cumulative from the last notification.
         assert_eq!(usage.cumulative_input_tokens, 2000);
         assert_eq!(usage.cumulative_output_tokens, 250);
-        // Delta is from the previous intermediate snapshot (1500, 150) → (2000, 250).
-        assert_eq!(usage.turn_input_tokens, Some(500));
-        assert_eq!(usage.turn_output_tokens, Some(100));
+        // Delta is from committed baseline (1000, 100) → (2000, 250) = 1000/150.
+        assert_eq!(usage.turn_input_tokens, Some(1000));
+        assert_eq!(usage.turn_output_tokens, Some(150));
+        // seq increments once per publish, not once per notification.
+        assert_eq!(usage.turn_seq, 2);
+
+        // Turn 3 — prove seq continues to increment per publish, not per notification.
+        tracker.begin_turn("sess-5");
+        tracker.record("sess-5", &payload(2300, 290, None));
+        let t3 = tracker.take().expect("turn 3");
+        assert_eq!(t3.turn_seq, 3);
+        // Delta from turn-2 committed baseline (2000, 250).
+        assert_eq!(t3.turn_input_tokens, Some(300));
+        assert_eq!(t3.turn_output_tokens, Some(40));
     }
 
     // ── Wire deserialization ────────────────────────────────────────────────

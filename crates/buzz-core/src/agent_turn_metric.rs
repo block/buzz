@@ -131,8 +131,39 @@ fn default_delta_reliable() -> bool {
     true
 }
 
+impl AgentTurnMetricPayload {
+    /// Validate numeric constraints from NIP-AM §Numeric validity.
+    ///
+    /// Returns `Err` when any `cost_usd` field (in `turn` or `cumulative`) is
+    /// present but negative or non-finite (NaN or infinity). Token counts are
+    /// typed as `Option<u64>` and therefore cannot be negative by construction.
+    pub fn validate(&self) -> Result<(), ObserverPayloadError> {
+        fn check_cost(cost: Option<f64>, field: &str) -> Result<(), ObserverPayloadError> {
+            if let Some(c) = cost {
+                if !c.is_finite() || c < 0.0 {
+                    return Err(ObserverPayloadError::InvalidPayload(format!(
+                        "{field} must be finite and non-negative (got {c})"
+                    )));
+                }
+            }
+            Ok(())
+        }
+        if let Some(t) = &self.turn {
+            check_cost(t.cost_usd, "turn.costUsd")?;
+        }
+        if let Some(c) = &self.cumulative {
+            check_cost(c.cost_usd, "cumulative.costUsd")?;
+        }
+        Ok(())
+    }
+}
+
 /// Encrypt an [`AgentTurnMetricPayload`] into a NIP-44 v2 ciphertext string
 /// using the agent's key pair and the owner's public key.
+///
+/// Returns `Err(ObserverPayloadError::InvalidPayload)` if any `cost_usd` field
+/// is negative or non-finite (NaN/inf), in accordance with NIP-AM §Numeric
+/// validity.
 ///
 /// This is the content field of a `kind:44200` event.
 pub fn encrypt_agent_turn_metric(
@@ -140,6 +171,7 @@ pub fn encrypt_agent_turn_metric(
     owner_pubkey: &PublicKey,
     payload: &AgentTurnMetricPayload,
 ) -> Result<String, ObserverPayloadError> {
+    payload.validate()?;
     encrypt_observer_payload(agent_keys, owner_pubkey, payload)
 }
 
@@ -306,5 +338,134 @@ mod tests {
         assert_eq!(turn.input_tokens, Some(1234));
         assert_eq!(turn.output_tokens, Some(567));
         assert_eq!(turn.total_tokens, Some(1801));
+    }
+
+    // ── validate() — negative / non-finite costUsd ─────────────────────────
+
+    fn make_payload_with_turn_cost(cost: Option<f64>) -> AgentTurnMetricPayload {
+        AgentTurnMetricPayload {
+            harness: "test".to_string(),
+            model: None,
+            channel_id: None,
+            session_id: None,
+            turn_id: None,
+            turn_seq: None,
+            timestamp: "2026-07-01T00:00:00Z".to_string(),
+            turn: Some(TokenCounts {
+                input_tokens: Some(100),
+                output_tokens: Some(50),
+                total_tokens: None,
+                cost_usd: cost,
+                cache_read_tokens: None,
+                cache_write_tokens: None,
+            }),
+            cumulative: None,
+            delta_reliable: true,
+            stop_reason: None,
+        }
+    }
+
+    fn make_payload_with_cumulative_cost(cost: Option<f64>) -> AgentTurnMetricPayload {
+        AgentTurnMetricPayload {
+            harness: "test".to_string(),
+            model: None,
+            channel_id: None,
+            session_id: None,
+            turn_id: None,
+            turn_seq: None,
+            timestamp: "2026-07-01T00:00:00Z".to_string(),
+            turn: None,
+            cumulative: Some(TokenCounts {
+                input_tokens: Some(500),
+                output_tokens: Some(200),
+                total_tokens: None,
+                cost_usd: cost,
+                cache_read_tokens: None,
+                cache_write_tokens: None,
+            }),
+            delta_reliable: true,
+            stop_reason: None,
+        }
+    }
+
+    #[test]
+    fn validate_rejects_negative_turn_cost() {
+        let payload = make_payload_with_turn_cost(Some(-0.001));
+        assert!(
+            matches!(
+                payload.validate(),
+                Err(ObserverPayloadError::InvalidPayload(_))
+            ),
+            "negative turn.costUsd must be rejected"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_nan_turn_cost() {
+        let payload = make_payload_with_turn_cost(Some(f64::NAN));
+        assert!(
+            matches!(
+                payload.validate(),
+                Err(ObserverPayloadError::InvalidPayload(_))
+            ),
+            "NaN turn.costUsd must be rejected"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_infinite_turn_cost() {
+        let payload = make_payload_with_turn_cost(Some(f64::INFINITY));
+        assert!(
+            matches!(
+                payload.validate(),
+                Err(ObserverPayloadError::InvalidPayload(_))
+            ),
+            "infinite turn.costUsd must be rejected"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_negative_cumulative_cost() {
+        let payload = make_payload_with_cumulative_cost(Some(-1.0));
+        assert!(
+            matches!(
+                payload.validate(),
+                Err(ObserverPayloadError::InvalidPayload(_))
+            ),
+            "negative cumulative.costUsd must be rejected"
+        );
+    }
+
+    #[test]
+    fn validate_accepts_finite_non_negative_cost() {
+        // Zero, small, and larger values are all valid.
+        for cost in [0.0_f64, 0.001, 1.0, 999.99] {
+            let payload = make_payload_with_turn_cost(Some(cost));
+            assert!(
+                payload.validate().is_ok(),
+                "cost {cost} should be accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_accepts_absent_cost() {
+        let payload = make_payload_with_turn_cost(None);
+        assert!(
+            payload.validate().is_ok(),
+            "absent costUsd must be accepted"
+        );
+    }
+
+    #[test]
+    fn encrypt_agent_turn_metric_rejects_negative_cost() {
+        let agent_keys = Keys::generate();
+        let owner_keys = Keys::generate();
+        let payload = make_payload_with_turn_cost(Some(-0.5));
+        let result = encrypt_agent_turn_metric(&agent_keys, &owner_keys.public_key(), &payload);
+        assert!(
+            matches!(result, Err(ObserverPayloadError::InvalidPayload(_))),
+            "encrypt must reject payload with negative costUsd"
+        );
     }
 }

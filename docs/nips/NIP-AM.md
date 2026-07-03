@@ -38,7 +38,8 @@ encrypted to the owner.
 
 ## Event
 
-`kind:44200` is a regular event as defined in [NIP-01](01.md): stored,
+`kind:44200` is a regular event by Buzz convention (alongside 44100/44101):
+stored,
 append-only, never replaced. Each completed turn produces exactly one event.
 
 ```json
@@ -189,8 +190,9 @@ pubkey equals the `#p` tag value may receive the event. This gate applies to
 MUST NOT grant access. (Some p-gated kinds exempt id-addressed lookups on the
 theory that knowing the id implies authorization; kind 44200 events are
 long-lived and their cleartext envelope leaks turn activity, so no such
-exemption is permitted.) Unauthorized publish or subscribe attempts MUST be
-rejected with `AUTH required`.
+exemption is permitted.) Unauthenticated publish or subscribe attempts MUST be
+rejected with `AUTH required`; authenticated attempts from a pubkey that is not
+the event owner MUST be rejected with `restricted:`.
 
 Relays SHOULD rate-limit kind 44200 to a rate consistent with real turn
 frequency (RECOMMENDED: 60 events/minute per agent pubkey).
