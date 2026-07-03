@@ -24,7 +24,7 @@ async function expectTooltipDismissesOnLeave(
   const tip = page.getByRole("tooltip", { name: tooltipName });
   await expect(tip).toBeVisible();
 
-  // Slide off the trigger onto the tooltip popup — the old camp path.
+  // Slide off the trigger onto the tooltip popup.
   const box = await tip.boundingBox();
   if (!box) throw new Error("no tooltip box");
   await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2, {
@@ -72,8 +72,8 @@ test("emoji picker tooltip dismisses when cursor leaves the trigger", async ({
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
-  // The emoji button wraps its tooltip around a nested PopoverTrigger — it
-  // was the composer tooltip that persisted before opting in.
+  // The emoji button wraps its tooltip around a nested PopoverTrigger, so
+  // cover it separately from the plain toolbar buttons.
   await expectTooltipDismissesOnLeave(
     page,
     page.getByTestId("composer-emoji-button"),
