@@ -11,6 +11,7 @@ import {
 import { cn } from "@/shared/lib/cn";
 import { SimpleImageLightbox } from "@/shared/ui/SimpleImageLightbox";
 import { Progress } from "@/shared/ui/progress";
+import { Toggle } from "@/shared/ui/toggle";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 
 /** Dashed-border overlay shown when a file is dragged over the composer form. */
@@ -36,8 +37,12 @@ type ComposerAttachmentsProps = {
   uploadingCount?: number;
   uploadingPreviews?: UploadingAttachmentPreview[];
   onRemove: (url: string) => void;
+  onToggleSpoiler?: (url: string) => void;
   spoileredUrls?: ReadonlySet<string>;
 };
+
+const LIGHTBOX_BUTTON_CLASS =
+  "rounded-full bg-black/50 p-2 text-white/80 transition-colors hover:bg-black/70 hover:text-white focus:outline-hidden focus:ring-2 focus:ring-white/30";
 
 const COMPOSER_MEDIA_HEIGHT_PX = 55;
 const COMPOSER_MEDIA_WIDTH_PX = 55;
@@ -61,6 +66,7 @@ export const ComposerAttachments = React.memo(function ComposerAttachments({
   uploadingPreviews = [],
   onCancelUpload,
   onRemove,
+  onToggleSpoiler,
   spoileredUrls,
 }: ComposerAttachmentsProps) {
   if (attachments.length === 0 && !isUploading) return null;
@@ -151,6 +157,7 @@ export const ComposerAttachments = React.memo(function ComposerAttachments({
                   isSpoilered={isSpoilered}
                   isVideo={isVideo}
                   mediaStyle={mediaStyle}
+                  onToggleSpoiler={onToggleSpoiler}
                   thumbUrl={thumbUrl}
                   url={attachment.url}
                   videoPosterUrl={videoPosterUrl ?? null}
@@ -239,6 +246,7 @@ function AttachmentMediaLightbox({
   isSpoilered,
   isVideo,
   mediaStyle,
+  onToggleSpoiler,
   thumbUrl,
   url,
   videoPosterUrl,
@@ -248,6 +256,7 @@ function AttachmentMediaLightbox({
   isSpoilered: boolean;
   isVideo: boolean;
   mediaStyle: React.CSSProperties;
+  onToggleSpoiler?: (url: string) => void;
   thumbUrl: string;
   url: string;
   videoPosterUrl: string | null;
@@ -299,15 +308,63 @@ function AttachmentMediaLightbox({
         onOpenChange={setLightboxOpen}
         open={lightboxOpen}
         src={previewSrc}
+        actions={
+          // Hide this alongside image-edit mode once the annotation flow lands.
+          onToggleSpoiler ? (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Toggle
+                  aria-label={
+                    isSpoilered ? "Remove spoiler" : "Mark as spoiler"
+                  }
+                  className={cn(LIGHTBOX_BUTTON_CLASS, "h-auto min-w-0")}
+                  data-testid="composer-attachment-spoiler"
+                  onPressedChange={() => onToggleSpoiler(url)}
+                  pressed={isSpoilered}
+                >
+                  <HatGlasses className="h-4 w-4" />
+                </Toggle>
+              </TooltipTrigger>
+              <TooltipContent>
+                {isSpoilered ? "Remove spoiler" : "Mark as spoiler"}
+              </TooltipContent>
+            </Tooltip>
+          ) : null
+        }
       >
         {isVideo ? (
           // biome-ignore lint/a11y/useMediaCaption: user-uploaded video, no captions available
           <video
-            className="relative max-h-[90vh] max-w-[90vw] rounded-lg"
+            className={cn(
+              "relative max-h-[90vh] max-w-[90vw] rounded-lg",
+              isSpoilered && "blur-2xl brightness-75",
+            )}
             controls
             src={previewSrc}
           />
-        ) : undefined}
+        ) : (
+          <img
+            alt={alt}
+            className={cn(
+              "relative max-h-[90vh] max-w-[90vw] rounded-lg object-contain",
+              isSpoilered && "blur-2xl brightness-75",
+            )}
+            src={previewSrc}
+          />
+        )}
+        {isSpoilered ? (
+          /*
+           * Expanded-media counterpart of the thumbnail spoiler treatment: the
+           * media itself is blurred above, and this layer centers the spoiler
+           * glyph. pointer-events-none keeps controls and backdrop-close clickable.
+           */
+          <div
+            className="pointer-events-none absolute inset-0 flex items-center justify-center text-foreground/70"
+            data-lightbox-media-spoiler=""
+          >
+            <HatGlasses className="h-10 w-10" />
+          </div>
+        ) : null}
       </SimpleImageLightbox>
     </div>
   );
