@@ -217,6 +217,42 @@ test("older-page append reconciles a live row pushed below page zero", () => {
   );
 });
 
+// Sharper than the count-only reconcile checks above: when the live-overlay copy
+// and the authoritative relay copy share an id but DIFFER in content (an
+// optimistic/pending row later re-served by the relay in an older page), the
+// rendered row must be the relay copy. `flattenChannelWindowEvents` sets page
+// rows before liveOverlay, so an un-reconciled overlay entry shadows the
+// authoritative row — user sees the stale/pending version after paginating.
+test("older-page append: authoritative relay row wins over a stale overlay copy", () => {
+  const withContent = (id, createdAt, content) => ({
+    ...event(id, createdAt),
+    content,
+    pending: content.startsWith("PENDING"),
+  });
+  const initial = replaceNewestChannelWindow(
+    emptyChannelWindowStore(),
+    page(null, [event("a", 100)]),
+  );
+  const staleOverlay = withContent("n", 110, "PENDING n");
+  const withLive = mergeLiveChannelWindowEvent(initial, staleOverlay);
+  const refreshed = replaceNewestChannelWindow(
+    withLive,
+    page(null, [event("newer", 120)]),
+  );
+  const authoritative = withContent("n", 110, "CONFIRMED n");
+  const reconciled = appendOlderChannelWindow(
+    refreshed,
+    page(refreshed.pages[0].nextCursor, [authoritative], { hasMore: false }),
+  );
+
+  const rows = flattenChannelWindowEvents(reconciled).filter(
+    (item) => item.id === staleOverlay.id,
+  );
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].content, "CONFIRMED n");
+  assert.deepEqual(reconciled.liveOverlay, []);
+});
+
 test("flattening dedupes aux closure events returned on adjacent pages", () => {
   const deletion = event("d", 120, 5);
   const first = page(null, [event("a", 100)], { aux: [deletion] });

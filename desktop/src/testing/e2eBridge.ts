@@ -2788,6 +2788,31 @@ function getThreadReferenceFromTags(tags: string[][]) {
   };
 }
 
+/**
+ * A reply broadcast to the channel timeline carries the exact tag
+ * `["broadcast", "1"]` (NIP-CW §Top-level Classification).
+ */
+function isMockBroadcastReply(tags: string[][]): boolean {
+  return tags.some((tag) => tag[0] === "broadcast" && tag[1] === "1");
+}
+
+/**
+ * Mirror the relay's channel-window row set (buzz-db `thread.rs`, NIP-CW
+ * §Top-level Classification): an event is a timeline row iff its depth is 0
+ * (no reply marker → `rootEventId === null`) OR its depth is 1 (its parent is
+ * the thread root) AND it is broadcast. Depth ≥ 2 replies never surface on the
+ * timeline. A bare-`rootEventId === null` predicate silently dropped broadcast
+ * depth-1 replies the real relay serves.
+ */
+function isMockTopLevelRow(event: RelayEvent): boolean {
+  const { parentEventId, rootEventId } = getThreadReferenceFromTags(event.tags);
+  if (rootEventId === null) {
+    return true;
+  }
+  const isDepthOne = parentEventId !== null && parentEventId === rootEventId;
+  return isDepthOne && isMockBroadcastReply(event.tags);
+}
+
 function appendMentionTags(
   tags: string[][],
   mentionPubkeys: string[] | undefined,
@@ -3638,7 +3663,7 @@ async function handleGetChannelMessagesBefore(
       if (!TIMELINE_KINDS.has(event.kind)) {
         return false;
       }
-      return getThreadReferenceFromTags(event.tags).rootEventId === null;
+      return isMockTopLevelRow(event);
     });
   } else {
     // Config mode: exercise the real bridge keyset over /query.
@@ -3830,9 +3855,7 @@ async function handleGetChannelWindow(
       const events = getMockMessageStore(args.channelId);
       const candidates = events
         .filter(
-          (event) =>
-            TIMELINE_KINDS.has(event.kind) &&
-            getThreadReferenceFromTags(event.tags).rootEventId === null,
+          (event) => TIMELINE_KINDS.has(event.kind) && isMockTopLevelRow(event),
         )
         .sort(
           (left, right) =>
