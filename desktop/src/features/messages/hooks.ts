@@ -1,5 +1,6 @@
 import { useEffect, useEffectEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { toast } from "sonner";
 
 import {
   channelMessagesKey,
@@ -685,6 +686,9 @@ export function useDeleteMessageMutation(channel: Channel | null) {
         channelMessagesKey(channel.id),
         (current = []) => current.filter((message) => message.id !== eventId),
       );
+    },
+    onError: (error) => {
+      toast.error(error.message || "Failed to delete message.");
     },
   });
 }

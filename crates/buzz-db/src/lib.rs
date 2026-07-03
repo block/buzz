@@ -564,6 +564,21 @@ impl Db {
         event::soft_delete_by_coordinate(&self.pool, community_id, kind, pubkey, d_tag).await
     }
 
+    /// Fetch the `channel_id` of the live addressable row for a coordinate `(kind, pubkey, d_tag)`.
+    ///
+    /// Returns `Some(Some(ch))` if a live row exists in a channel, `Some(None)` if global,
+    /// `None` if no live row matched. Used by NIP-09 a-tag deletion to derive trusted channel
+    /// context from the stored row (not the deletion event's h-tag).
+    pub async fn get_coordinate_channel_id(
+        &self,
+        community_id: CommunityId,
+        kind: i32,
+        pubkey: &[u8],
+        d_tag: &str,
+    ) -> Result<Option<Option<Uuid>>> {
+        event::get_coordinate_channel_id(&self.pool, community_id, kind, pubkey, d_tag).await
+    }
+
     /// Atomically soft-delete an event and decrement thread reply counters.
     pub async fn soft_delete_event_and_update_thread(
         &self,

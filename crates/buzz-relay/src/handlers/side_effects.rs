@@ -169,8 +169,15 @@ pub async fn handle_side_effects(
 
 /// Validate a standard NIP-09 deletion event before it is stored.
 ///
-/// Buzz accepts standard deletions for self-authored events only. Channel
-/// admin deletions continue to use kind 9005.
+/// Buzz accepts standard deletions for:
+/// - **Self-authored events**: actor is the original event author (no membership re-gate —
+///   channel removal revokes future send access, not retroactive delete rights).
+/// - **Owner-of-agent**: actor is the NIP-OA owner of the agent that authored the target.
+///   Channel context is derived from the **stored target row** (not the deletion event's own
+///   h-tag, which the actor controls) and a membership re-gate applies: a removed private-channel
+///   owner cannot delete their agent's channel-scoped events after access is revoked.
+///
+/// Channel admin deletions continue to use kind 9005.
 pub async fn validate_standard_deletion_event(
     tenant: &TenantContext,
     event: &Event,
@@ -180,7 +187,7 @@ pub async fn validate_standard_deletion_event(
     let target_ids = extract_target_event_ids(event);
 
     if !has_e_tag(event) {
-        // a-tag deletion: verify author owns the addressable event
+        // a-tag deletion: verify author owns the addressable event.
         let a_tag = event
             .tags
             .iter()
@@ -194,7 +201,60 @@ pub async fn validate_standard_deletion_event(
         let target_pubkey_bytes =
             hex::decode(parts[1]).map_err(|_| anyhow::anyhow!("invalid pubkey in a-tag"))?;
         if target_pubkey_bytes != actor_bytes {
-            return Err(anyhow::anyhow!("must be event author"));
+            // Not self-author: check whether actor owns the target-pubkey agent.
+            let is_owner = state
+                .db
+                .is_agent_owner(tenant.community(), &target_pubkey_bytes, &actor_bytes)
+                .await
+                .map_err(|e| anyhow::anyhow!("db error checking agent ownership: {e}"))?;
+            if !is_owner {
+                return Err(anyhow::anyhow!("must be event author"));
+            }
+            // Owner confirmed. Re-gate on channel membership using the channel_id stored in the
+            // target row — NOT from the deletion event's h-tag (which the actor controls and
+            // could omit to bypass the re-gate). Parse the coordinate from the a-tag and look
+            // up the trusted stored value.
+            let stored_channel_id = if parts.len() >= 3 {
+                let kind_i32 = parts[0]
+                    .parse::<i32>()
+                    .map_err(|_| anyhow::anyhow!("invalid kind in a-tag"))?;
+                let d_tag = parts[2];
+                state
+                    .db
+                    .get_coordinate_channel_id(
+                        tenant.community(),
+                        kind_i32,
+                        &target_pubkey_bytes,
+                        d_tag,
+                    )
+                    .await
+                    .map_err(|e| anyhow::anyhow!("db error fetching coordinate channel: {e}"))?
+            } else {
+                // a-tag without d_tag: non-parameterized replaceable — no coordinate row to
+                // look up; treat as global (owner-check alone is sufficient).
+                None
+            };
+            // `stored_channel_id` is:
+            //   None          — no live row (deleted/not found); treat as global, allow owner.
+            //   Some(None)    — live row is global; no channel re-gate needed.
+            //   Some(Some(id))— live row is channel-scoped; apply membership re-gate.
+            if let Some(Some(ch_id)) = stored_channel_id {
+                let is_member = state
+                    .is_member_cached(tenant.community(), ch_id, &actor_bytes)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("db error checking membership: {e}"))?;
+                if !is_member {
+                    let is_open = state
+                        .db
+                        .get_channel(tenant.community(), ch_id)
+                        .await
+                        .map(|ch| ch.visibility == "open")
+                        .unwrap_or(false);
+                    if !is_open {
+                        return Err(anyhow::anyhow!("restricted: not a channel member"));
+                    }
+                }
+            }
         }
         return Ok(());
     }
@@ -208,8 +268,39 @@ pub async fn validate_standard_deletion_event(
 
         let target_author =
             effective_message_author(&target_event.event, &state.relay_keypair.public_key());
-        if target_author != actor_bytes {
-            return Err(anyhow::anyhow!("must be event author"));
+        if target_author == actor_bytes {
+            // Self-author fast-path: accepted without membership re-gate, matching current
+            // behavior (a removal from a private channel revokes future send access; it does
+            // not retroactively block deleting their own historic messages).
+        } else {
+            // Not self-author: check whether actor owns the agent that authored the target.
+            let is_owner = state
+                .db
+                .is_agent_owner(tenant.community(), &target_author, &actor_bytes)
+                .await
+                .map_err(|e| anyhow::anyhow!("db error checking agent ownership: {e}"))?;
+            if !is_owner {
+                return Err(anyhow::anyhow!("must be event author"));
+            }
+            // Owner confirmed. Re-gate on channel membership so that a removed private-channel
+            // member cannot delete their agent's messages after access is revoked.
+            if let Some(ch_id) = target_event.channel_id {
+                let is_member = state
+                    .is_member_cached(tenant.community(), ch_id, &actor_bytes)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("db error checking membership: {e}"))?;
+                if !is_member {
+                    let is_open = state
+                        .db
+                        .get_channel(tenant.community(), ch_id)
+                        .await
+                        .map(|ch| ch.visibility == "open")
+                        .unwrap_or(false);
+                    if !is_open {
+                        return Err(anyhow::anyhow!("restricted: not a channel member"));
+                    }
+                }
+            }
         }
     }
 
@@ -2960,5 +3051,572 @@ fn topic_for_subscription(channel_id: Option<Uuid>) -> EventTopic {
     match channel_id {
         Some(channel_id) => EventTopic::Channel(channel_id),
         None => EventTopic::Global,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use nostr::{EventBuilder, Keys, Kind, Tag};
+    use uuid::Uuid;
+
+    use super::validate_standard_deletion_event;
+    use crate::config::Config;
+    use buzz_core::tenant::TenantContext;
+
+    // ── helpers ──────────────────────────────────────────────────────────────
+
+    async fn test_pool() -> Option<sqlx::PgPool> {
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://buzz:buzz_dev@localhost:5432/buzz".into());
+        sqlx::PgPool::connect(&url).await.ok()
+    }
+
+    async fn test_state(pool: sqlx::PgPool) -> Option<Arc<crate::state::AppState>> {
+        let db = buzz_db::Db::from_pool(pool.clone());
+        let config = Config::from_env().ok()?;
+        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .ok()?;
+        let pubsub = Arc::new(
+            buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
+                .await
+                .ok()?,
+        );
+        let audit = buzz_audit::AuditService::new(pool.clone());
+        let auth = buzz_auth::AuthService::new(config.auth.clone());
+        let search = buzz_search::SearchService::new(pool.clone());
+        let workflow_engine = Arc::new(buzz_workflow::WorkflowEngine::new(
+            db.clone(),
+            buzz_workflow::WorkflowConfig::default(),
+        ));
+        let media_storage = buzz_media::MediaStorage::new(&config.media).ok()?;
+        let (state, _) = crate::state::AppState::new(
+            config,
+            db,
+            redis_pool,
+            audit,
+            pubsub,
+            auth,
+            search,
+            workflow_engine,
+            Keys::generate(),
+            media_storage,
+        );
+        Some(Arc::new(state))
+    }
+
+    async fn seed_community(pool: &sqlx::PgPool) -> TenantContext {
+        let id = Uuid::new_v4();
+        let host = format!("del-test-{}.example", id.simple());
+        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+            .bind(id)
+            .bind(&host)
+            .execute(pool)
+            .await
+            .expect("insert community");
+        TenantContext::resolved(buzz_core::tenant::CommunityId::from_uuid(id), host)
+    }
+
+    /// Insert a user row (no agent_owner_pubkey).
+    async fn insert_user(pool: &sqlx::PgPool, community_id: Uuid, pubkey: &[u8]) {
+        sqlx::query(
+            "INSERT INTO users (community_id, pubkey) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+        )
+        .bind(community_id)
+        .bind(pubkey)
+        .execute(pool)
+        .await
+        .expect("insert user");
+    }
+
+    /// Insert a user row with agent_owner_pubkey set (marks `pubkey` as an agent owned by `owner`).
+    async fn insert_agent_with_owner(
+        pool: &sqlx::PgPool,
+        community_id: Uuid,
+        pubkey: &[u8],
+        owner_pubkey: &[u8],
+    ) {
+        sqlx::query(
+            "INSERT INTO users (community_id, pubkey, agent_owner_pubkey) \
+             VALUES ($1, $2, $3) ON CONFLICT (community_id, pubkey) DO \
+             UPDATE SET agent_owner_pubkey = EXCLUDED.agent_owner_pubkey",
+        )
+        .bind(community_id)
+        .bind(pubkey)
+        .bind(owner_pubkey)
+        .execute(pool)
+        .await
+        .expect("insert agent with owner");
+    }
+
+    /// Insert a private channel; returns its UUID.
+    async fn insert_private_channel(pool: &sqlx::PgPool, community_id: Uuid) -> Uuid {
+        let ch_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO channels (id, community_id, name, visibility, created_by) \
+             VALUES ($1, $2, $3, 'private', $4)",
+        )
+        .bind(ch_id)
+        .bind(community_id)
+        .bind(format!("test-{}", ch_id.simple()))
+        .bind(vec![0u8; 32])
+        .execute(pool)
+        .await
+        .expect("insert channel");
+        ch_id
+    }
+
+    /// Insert an open channel; returns its UUID.
+    async fn insert_open_channel(pool: &sqlx::PgPool, community_id: Uuid) -> Uuid {
+        let ch_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO channels (id, community_id, name, visibility, created_by) \
+             VALUES ($1, $2, $3, 'open', $4)",
+        )
+        .bind(ch_id)
+        .bind(community_id)
+        .bind(format!("test-{}", ch_id.simple()))
+        .bind(vec![0u8; 32])
+        .execute(pool)
+        .await
+        .expect("insert open channel");
+        ch_id
+    }
+
+    /// Add a member to a channel.
+    async fn add_member(pool: &sqlx::PgPool, community_id: Uuid, channel_id: Uuid, pubkey: &[u8]) {
+        sqlx::query(
+            "INSERT INTO channel_members (community_id, channel_id, pubkey, role, invited_by) \
+             VALUES ($1, $2, $3, 'member', $4) ON CONFLICT DO NOTHING",
+        )
+        .bind(community_id)
+        .bind(channel_id)
+        .bind(pubkey)
+        .bind(pubkey)
+        .execute(pool)
+        .await
+        .expect("add member");
+    }
+
+    /// Build a signed kind:5 delete event with one e-tag targeting `target_id_hex`.
+    fn delete_event_e_tag(actor_keys: &Keys, target_id_hex: &str) -> nostr::Event {
+        let tags = vec![Tag::parse(["e", target_id_hex]).unwrap()];
+        EventBuilder::new(Kind::Custom(5), "")
+            .tags(tags)
+            .sign_with_keys(actor_keys)
+            .unwrap()
+    }
+
+    // ── tests ─────────────────────────────────────────────────────────────────
+
+    /// Self-author can always delete their own message (no membership re-gate on delete).
+    #[tokio::test]
+    async fn delete_own_message_succeeds() {
+        let Some(pool) = test_pool().await else {
+            return;
+        };
+        let Some(state) = test_state(pool.clone()).await else {
+            return;
+        };
+        let tenant = seed_community(&pool).await;
+        let community_uuid = *tenant.community().as_uuid();
+
+        let actor_keys = Keys::generate();
+        let actor_bytes = actor_keys.public_key().to_bytes().to_vec();
+        insert_user(&pool, community_uuid, &actor_bytes).await;
+
+        let ch_id = insert_private_channel(&pool, community_uuid).await;
+        add_member(&pool, community_uuid, ch_id, &actor_bytes).await;
+
+        // Insert the target event authored by actor.
+        let target_event = EventBuilder::new(Kind::Custom(9), "hello")
+            .tags([Tag::parse(["h", &ch_id.to_string()]).unwrap()])
+            .sign_with_keys(&actor_keys)
+            .unwrap();
+        let target_id_hex = target_event.id.to_hex();
+        state
+            .db
+            .insert_event(tenant.community(), &target_event, Some(ch_id))
+            .await
+            .expect("insert target");
+
+        let delete = delete_event_e_tag(&actor_keys, &target_id_hex);
+        validate_standard_deletion_event(&tenant, &delete, &state)
+            .await
+            .expect("self-author delete must succeed");
+    }
+
+    /// Owning human can delete their agent's message when they are a channel member.
+    #[tokio::test]
+    async fn delete_owner_agent_message_as_member_succeeds() {
+        let Some(pool) = test_pool().await else {
+            return;
+        };
+        let Some(state) = test_state(pool.clone()).await else {
+            return;
+        };
+        let tenant = seed_community(&pool).await;
+        let community_uuid = *tenant.community().as_uuid();
+
+        let owner_keys = Keys::generate();
+        let agent_keys = Keys::generate();
+        let owner_bytes = owner_keys.public_key().to_bytes().to_vec();
+        let agent_bytes = agent_keys.public_key().to_bytes().to_vec();
+
+        insert_user(&pool, community_uuid, &owner_bytes).await;
+        insert_agent_with_owner(&pool, community_uuid, &agent_bytes, &owner_bytes).await;
+
+        let ch_id = insert_private_channel(&pool, community_uuid).await;
+        add_member(&pool, community_uuid, ch_id, &owner_bytes).await;
+
+        // Target event is authored by the agent.
+        let target_event = EventBuilder::new(Kind::Custom(9), "agent says hi")
+            .tags([Tag::parse(["h", &ch_id.to_string()]).unwrap()])
+            .sign_with_keys(&agent_keys)
+            .unwrap();
+        let target_id_hex = target_event.id.to_hex();
+        state
+            .db
+            .insert_event(tenant.community(), &target_event, Some(ch_id))
+            .await
+            .expect("insert agent target");
+
+        // Delete is signed by the owner, not the agent.
+        let delete = delete_event_e_tag(&owner_keys, &target_id_hex);
+        validate_standard_deletion_event(&tenant, &delete, &state)
+            .await
+            .expect("owner delete of agent message must succeed");
+    }
+
+    /// Non-owner, non-author cannot delete another agent's message.
+    #[tokio::test]
+    async fn delete_non_owner_agent_message_is_rejected() {
+        let Some(pool) = test_pool().await else {
+            return;
+        };
+        let Some(state) = test_state(pool.clone()).await else {
+            return;
+        };
+        let tenant = seed_community(&pool).await;
+        let community_uuid = *tenant.community().as_uuid();
+
+        let owner_keys = Keys::generate();
+        let agent_keys = Keys::generate();
+        let attacker_keys = Keys::generate();
+        let owner_bytes = owner_keys.public_key().to_bytes().to_vec();
+        let agent_bytes = agent_keys.public_key().to_bytes().to_vec();
+        let attacker_bytes = attacker_keys.public_key().to_bytes().to_vec();
+
+        insert_user(&pool, community_uuid, &owner_bytes).await;
+        insert_agent_with_owner(&pool, community_uuid, &agent_bytes, &owner_bytes).await;
+        insert_user(&pool, community_uuid, &attacker_bytes).await;
+
+        let ch_id = insert_private_channel(&pool, community_uuid).await;
+        add_member(&pool, community_uuid, ch_id, &attacker_bytes).await;
+
+        let target_event = EventBuilder::new(Kind::Custom(9), "agent says hi")
+            .tags([Tag::parse(["h", &ch_id.to_string()]).unwrap()])
+            .sign_with_keys(&agent_keys)
+            .unwrap();
+        let target_id_hex = target_event.id.to_hex();
+        state
+            .db
+            .insert_event(tenant.community(), &target_event, Some(ch_id))
+            .await
+            .expect("insert agent target");
+
+        // Attacker (not the owner) tries to delete the agent's message.
+        let delete = delete_event_e_tag(&attacker_keys, &target_id_hex);
+        let err = validate_standard_deletion_event(&tenant, &delete, &state)
+            .await
+            .expect_err("non-owner must be rejected");
+        assert!(
+            err.to_string().contains("must be event author"),
+            "expected 'must be event author', got: {err}"
+        );
+    }
+
+    /// Owner who has been removed from a private channel cannot delete their agent's messages.
+    #[tokio::test]
+    async fn delete_owner_agent_message_removed_from_private_channel_is_rejected() {
+        let Some(pool) = test_pool().await else {
+            return;
+        };
+        let Some(state) = test_state(pool.clone()).await else {
+            return;
+        };
+        let tenant = seed_community(&pool).await;
+        let community_uuid = *tenant.community().as_uuid();
+
+        let owner_keys = Keys::generate();
+        let agent_keys = Keys::generate();
+        let owner_bytes = owner_keys.public_key().to_bytes().to_vec();
+        let agent_bytes = agent_keys.public_key().to_bytes().to_vec();
+
+        insert_user(&pool, community_uuid, &owner_bytes).await;
+        insert_agent_with_owner(&pool, community_uuid, &agent_bytes, &owner_bytes).await;
+        // Owner is intentionally NOT added as a channel member.
+
+        let ch_id = insert_private_channel(&pool, community_uuid).await;
+
+        let target_event = EventBuilder::new(Kind::Custom(9), "agent says hi")
+            .tags([Tag::parse(["h", &ch_id.to_string()]).unwrap()])
+            .sign_with_keys(&agent_keys)
+            .unwrap();
+        let target_id_hex = target_event.id.to_hex();
+        state
+            .db
+            .insert_event(tenant.community(), &target_event, Some(ch_id))
+            .await
+            .expect("insert agent target");
+
+        let delete = delete_event_e_tag(&owner_keys, &target_id_hex);
+        let err = validate_standard_deletion_event(&tenant, &delete, &state)
+            .await
+            .expect_err("removed owner must be rejected");
+        assert!(
+            err.to_string().contains("restricted: not a channel member"),
+            "expected 'restricted: not a channel member', got: {err}"
+        );
+    }
+
+    /// Owner CAN delete their agent's message in an open channel even without being a member.
+    #[tokio::test]
+    async fn delete_owner_agent_message_in_open_channel_without_membership_succeeds() {
+        let Some(pool) = test_pool().await else {
+            return;
+        };
+        let Some(state) = test_state(pool.clone()).await else {
+            return;
+        };
+        let tenant = seed_community(&pool).await;
+        let community_uuid = *tenant.community().as_uuid();
+        let owner_keys = Keys::generate();
+        let agent_keys = Keys::generate();
+        let owner_bytes = owner_keys.public_key().to_bytes().to_vec();
+        let agent_bytes = agent_keys.public_key().to_bytes().to_vec();
+
+        insert_user(&pool, community_uuid, &owner_bytes).await;
+        insert_agent_with_owner(&pool, community_uuid, &agent_bytes, &owner_bytes).await;
+        // Owner has no membership in the open channel.
+
+        let ch_id = insert_open_channel(&pool, community_uuid).await;
+
+        let target_event = EventBuilder::new(Kind::Custom(9), "agent says hi")
+            .tags([Tag::parse(["h", &ch_id.to_string()]).unwrap()])
+            .sign_with_keys(&agent_keys)
+            .unwrap();
+        let target_id_hex = target_event.id.to_hex();
+        state
+            .db
+            .insert_event(tenant.community(), &target_event, Some(ch_id))
+            .await
+            .expect("insert agent target");
+
+        let delete = delete_event_e_tag(&owner_keys, &target_id_hex);
+        validate_standard_deletion_event(&tenant, &delete, &state)
+            .await
+            .expect("owner delete in open channel without membership must succeed");
+    }
+
+    // ── a-tag deletion tests ──────────────────────────────────────────────────
+
+    /// Build a signed kind:5 delete event with one a-tag targeting `a_value` (format:
+    /// `kind:pubkey_hex:d_tag`). When `h_tag_channel` is `Some`, an h-tag is added;
+    /// when `None`, no h-tag is present — this is the bypass case the production fix
+    /// must reject.
+    fn delete_event_a_tag(
+        actor_keys: &Keys,
+        a_value: &str,
+        h_tag_channel: Option<Uuid>,
+    ) -> nostr::Event {
+        let mut tags = vec![Tag::parse(["a", a_value]).unwrap()];
+        if let Some(ch_id) = h_tag_channel {
+            tags.push(Tag::parse(["h", &ch_id.to_string()]).unwrap());
+        }
+        EventBuilder::new(Kind::Custom(5), "")
+            .tags(tags)
+            .sign_with_keys(actor_keys)
+            .unwrap()
+    }
+
+    /// Insert a parameterized-replaceable (NIP-33) event authored by `agent_keys` with
+    /// the given `d_tag`, stored in `channel_id`. Returns the a-tag value string for use
+    /// in a kind-5 deletion event.
+    async fn insert_addressable_event(
+        state: &Arc<crate::state::AppState>,
+        tenant: &TenantContext,
+        agent_keys: &Keys,
+        d_tag_val: &str,
+        channel_id: Option<Uuid>,
+    ) -> String {
+        // kind 30023 = NIP-33 parameterized replaceable (long-form article)
+        let kind = 30023u16;
+        let event = EventBuilder::new(Kind::Custom(kind), "addressable content")
+            .tags([Tag::parse(["d", d_tag_val]).unwrap()])
+            .sign_with_keys(agent_keys)
+            .unwrap();
+        state
+            .db
+            .insert_event(tenant.community(), &event, channel_id)
+            .await
+            .expect("insert addressable event");
+        format!(
+            "{}:{}:{}",
+            kind,
+            agent_keys.public_key().to_hex(),
+            d_tag_val
+        )
+    }
+
+    /// Owning human can delete their agent's addressable event (a-tag path) when they are a
+    /// member of the channel the event is stored in.
+    #[tokio::test]
+    async fn delete_owner_agent_addressable_as_member_succeeds() {
+        let Some(pool) = test_pool().await else {
+            return;
+        };
+        let Some(state) = test_state(pool.clone()).await else {
+            return;
+        };
+        let tenant = seed_community(&pool).await;
+        let community_uuid = *tenant.community().as_uuid();
+
+        let owner_keys = Keys::generate();
+        let agent_keys = Keys::generate();
+        let owner_bytes = owner_keys.public_key().to_bytes().to_vec();
+        let agent_bytes = agent_keys.public_key().to_bytes().to_vec();
+
+        insert_user(&pool, community_uuid, &owner_bytes).await;
+        insert_agent_with_owner(&pool, community_uuid, &agent_bytes, &owner_bytes).await;
+
+        let ch_id = insert_private_channel(&pool, community_uuid).await;
+        add_member(&pool, community_uuid, ch_id, &owner_bytes).await;
+
+        let a_value =
+            insert_addressable_event(&state, &tenant, &agent_keys, "doc-1", Some(ch_id)).await;
+
+        // No h-tag on the deletion event — channel context comes from the stored row.
+        let delete = delete_event_a_tag(&owner_keys, &a_value, None);
+        validate_standard_deletion_event(&tenant, &delete, &state)
+            .await
+            .expect("owner+member a-tag delete must succeed");
+    }
+
+    /// Owning human who was removed from a private channel CANNOT delete their agent's
+    /// addressable event via a-tag — even without an h-tag on the deletion event.
+    ///
+    /// This is the regression test that proves the bypass is closed: the re-gate reads
+    /// channel context from the stored row (trusted), not the deletion event's h-tag
+    /// (actor-controlled). If the fix regressed to reading the event h-tag, this test
+    /// would pass (no h-tag → no re-gate → allowed) when it should reject.
+    #[tokio::test]
+    async fn delete_owner_agent_addressable_removed_from_private_channel_is_rejected() {
+        let Some(pool) = test_pool().await else {
+            return;
+        };
+        let Some(state) = test_state(pool.clone()).await else {
+            return;
+        };
+        let tenant = seed_community(&pool).await;
+        let community_uuid = *tenant.community().as_uuid();
+
+        let owner_keys = Keys::generate();
+        let agent_keys = Keys::generate();
+        let owner_bytes = owner_keys.public_key().to_bytes().to_vec();
+        let agent_bytes = agent_keys.public_key().to_bytes().to_vec();
+
+        insert_user(&pool, community_uuid, &owner_bytes).await;
+        insert_agent_with_owner(&pool, community_uuid, &agent_bytes, &owner_bytes).await;
+        // Owner is intentionally NOT added as a channel member.
+
+        let ch_id = insert_private_channel(&pool, community_uuid).await;
+
+        let a_value =
+            insert_addressable_event(&state, &tenant, &agent_keys, "doc-removed", Some(ch_id))
+                .await;
+
+        // Deletion event carries NO h-tag — this is exactly the bypass attempt.
+        // The fix must derive channel context from the stored row and still reject.
+        let delete = delete_event_a_tag(&owner_keys, &a_value, None);
+        let err = validate_standard_deletion_event(&tenant, &delete, &state)
+            .await
+            .expect_err("removed owner a-tag delete without h-tag must be rejected");
+        assert!(
+            err.to_string().contains("restricted: not a channel member"),
+            "expected 'restricted: not a channel member', got: {err}"
+        );
+    }
+
+    /// Owning human CAN delete their agent's addressable event in an open channel even
+    /// without being a member (open channel relaxes the membership gate).
+    #[tokio::test]
+    async fn delete_owner_agent_addressable_open_channel_without_membership_succeeds() {
+        let Some(pool) = test_pool().await else {
+            return;
+        };
+        let Some(state) = test_state(pool.clone()).await else {
+            return;
+        };
+        let tenant = seed_community(&pool).await;
+        let community_uuid = *tenant.community().as_uuid();
+
+        let owner_keys = Keys::generate();
+        let agent_keys = Keys::generate();
+        let owner_bytes = owner_keys.public_key().to_bytes().to_vec();
+        let agent_bytes = agent_keys.public_key().to_bytes().to_vec();
+
+        insert_user(&pool, community_uuid, &owner_bytes).await;
+        insert_agent_with_owner(&pool, community_uuid, &agent_bytes, &owner_bytes).await;
+
+        let ch_id = insert_open_channel(&pool, community_uuid).await;
+
+        let a_value =
+            insert_addressable_event(&state, &tenant, &agent_keys, "doc-open", Some(ch_id)).await;
+
+        let delete = delete_event_a_tag(&owner_keys, &a_value, None);
+        validate_standard_deletion_event(&tenant, &delete, &state)
+            .await
+            .expect("owner a-tag delete in open channel without membership must succeed");
+    }
+
+    /// Non-owner cannot delete an agent's addressable event via a-tag.
+    #[tokio::test]
+    async fn delete_non_owner_agent_addressable_is_rejected() {
+        let Some(pool) = test_pool().await else {
+            return;
+        };
+        let Some(state) = test_state(pool.clone()).await else {
+            return;
+        };
+        let tenant = seed_community(&pool).await;
+        let community_uuid = *tenant.community().as_uuid();
+
+        let non_owner_keys = Keys::generate();
+        let agent_keys = Keys::generate();
+        let non_owner_bytes = non_owner_keys.public_key().to_bytes().to_vec();
+        let agent_bytes = agent_keys.public_key().to_bytes().to_vec();
+
+        insert_user(&pool, community_uuid, &non_owner_bytes).await;
+        insert_user(&pool, community_uuid, &agent_bytes).await;
+        // Agent has NO owner_pubkey set — non_owner is not the owner.
+
+        let ch_id = insert_private_channel(&pool, community_uuid).await;
+        add_member(&pool, community_uuid, ch_id, &non_owner_bytes).await;
+
+        let a_value =
+            insert_addressable_event(&state, &tenant, &agent_keys, "doc-nonowner", Some(ch_id))
+                .await;
+
+        let delete = delete_event_a_tag(&non_owner_keys, &a_value, None);
+        let err = validate_standard_deletion_event(&tenant, &delete, &state)
+            .await
+            .expect_err("non-owner a-tag delete must be rejected");
+        assert!(
+            err.to_string().contains("must be event author"),
+            "expected 'must be event author', got: {err}"
+        );
     }
 }

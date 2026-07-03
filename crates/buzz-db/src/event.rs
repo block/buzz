@@ -745,6 +745,37 @@ pub async fn soft_delete_by_coordinate(
     Ok(result.rows_affected() > 0)
 }
 
+/// Fetch the `channel_id` of the live addressable row for a coordinate `(kind, pubkey, d_tag)`.
+///
+/// Returns:
+/// - `Ok(Some(Some(channel_id)))` — live row found and it is scoped to a channel.
+/// - `Ok(Some(None))` — live row found but it is a global event (no channel).
+/// - `Ok(None)` — no live row matched the coordinate (deleted or never existed).
+///
+/// Used by NIP-09 a-tag deletion to derive trusted channel context from the stored row
+/// rather than from the deletion event's own h-tag (which the actor controls).
+pub async fn get_coordinate_channel_id(
+    pool: &PgPool,
+    community_id: CommunityId,
+    kind: i32,
+    pubkey: &[u8],
+    d_tag: &str,
+) -> Result<Option<Option<Uuid>>> {
+    let row = sqlx::query(
+        "SELECT channel_id FROM events \
+         WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND d_tag = $4 AND deleted_at IS NULL \
+         LIMIT 1",
+    )
+    .bind(community_id.as_uuid())
+    .bind(kind)
+    .bind(pubkey)
+    .bind(d_tag)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(row.map(|r| r.get::<Option<Uuid>, _>("channel_id")))
+}
+
 /// Atomically soft-delete an event and decrement thread reply counters.
 ///
 /// Wraps the delete + counter update in a single transaction so a crash between
