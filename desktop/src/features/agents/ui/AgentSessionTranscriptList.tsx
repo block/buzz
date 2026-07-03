@@ -27,6 +27,7 @@ import {
   useAgentSessionTranscriptVariant,
 } from "./agentSessionTranscriptContext";
 import { useTranscriptAnimationEnabled } from "./transcriptAnimationPreference";
+import { useTranscriptTimestampsEnabled } from "./transcriptTimestampPreference";
 import { TranscriptActivityItem } from "./activityRenderClasses/TranscriptActivityItem";
 import {
   ActivityRow,
@@ -47,6 +48,7 @@ import {
   type TranscriptTurnSegment,
 } from "./agentSessionTranscriptGrouping";
 import { buildCompactToolSummary } from "./agentSessionToolSummary";
+import { shouldShowTranscriptRowTimestamp } from "./agentSessionTranscriptPresentation";
 import { formatTranscriptTimestampTitle } from "./agentSessionUtils";
 import { hasFileEditLineDiff } from "./FileEditDiffView";
 import { UserMessageBubble } from "./activityRenderClasses/UserMessageBubble";
@@ -462,44 +464,55 @@ function SameKindSummaryItem({
   const expandsToToolItems = summary.items.every(
     (item) => item.type === "tool",
   );
+  const variant = useAgentSessionTranscriptVariant();
+  const timestampsEnabled = useTranscriptTimestampsEnabled();
+  const showTimestamp = timestampsEnabled && variant !== "compactPreview";
 
   return (
-    <ActivityRow
-      className="flex flex-col gap-0.5"
-      openToneScope="summary"
-      testId="transcript-same-kind-summary"
-      title={formatTranscriptTimestampTitle(summary.timestamp)}
-    >
-      <ToolRunSummaryLabel label={summary.label} stats={groupedFileEditStats} />
-      <ActivityRowContent
-        className={cn(
-          "flex flex-col",
-          expandsToToolItems ? "gap-0.5" : "gap-1 pl-5",
-        )}
+    <>
+      <ActivityRow
+        className="flex flex-col gap-0.5"
+        openToneScope="summary"
+        testId="transcript-same-kind-summary"
+        title={formatTranscriptTimestampTitle(summary.timestamp)}
       >
-        {expandsToToolItems
-          ? summary.items.map((item) => (
-              <TranscriptItemView
-                agentAvatarUrl={agentAvatarUrl}
-                agentName={agentName}
-                agentPubkey={agentPubkey}
-                item={item}
-                key={item.id}
-                profiles={profiles}
-              />
-            ))
-          : summary.items.map((item) => (
-              <p
-                className="truncate text-xs text-muted-foreground"
-                key={item.id}
-              >
-                {item.type === "tool"
-                  ? item.descriptor.preview || item.descriptor.label
-                  : item.title}
-              </p>
-            ))}
-      </ActivityRowContent>
-    </ActivityRow>
+        <ToolRunSummaryLabel
+          label={summary.label}
+          stats={groupedFileEditStats}
+        />
+        <ActivityRowContent
+          className={cn(
+            "flex flex-col",
+            expandsToToolItems ? "gap-0.5" : "gap-1 pl-5",
+          )}
+        >
+          {expandsToToolItems
+            ? summary.items.map((item) => (
+                <TranscriptItemView
+                  agentAvatarUrl={agentAvatarUrl}
+                  agentName={agentName}
+                  agentPubkey={agentPubkey}
+                  item={item}
+                  key={item.id}
+                  profiles={profiles}
+                />
+              ))
+            : summary.items.map((item) => (
+                <p
+                  className="truncate text-xs text-muted-foreground"
+                  key={item.id}
+                >
+                  {item.type === "tool"
+                    ? item.descriptor.preview || item.descriptor.label
+                    : item.title}
+                </p>
+              ))}
+        </ActivityRowContent>
+      </ActivityRow>
+      {showTimestamp ? (
+        <TranscriptRowTimestamp timestamp={summary.timestamp} />
+      ) : null}
+    </>
   );
 }
 
@@ -760,6 +773,13 @@ function TranscriptItemRow({
   item: TranscriptItem;
   profiles?: UserProfileLookup;
 }) {
+  const variant = useAgentSessionTranscriptVariant();
+  const timestampsEnabled = useTranscriptTimestampsEnabled();
+  const showTimestamp = shouldShowTranscriptRowTimestamp(item, {
+    enabled: timestampsEnabled,
+    variant,
+  });
+
   return (
     <div key={item.id}>
       {SHOW_TRANSCRIPT_ACP_SOURCE && item.acpSource ? (
@@ -772,6 +792,35 @@ function TranscriptItemRow({
         item={item}
         profiles={profiles}
       />
+      {showTimestamp ? (
+        <TranscriptRowTimestamp
+          messageLink={
+            item.type === "message" ? getTranscriptMessageLink(item) : null
+          }
+          timestamp={item.timestamp}
+        />
+      ) : null}
+    </div>
+  );
+}
+
+/**
+ * Opt-in per-row timestamp, anchored bottom-left under the row content and
+ * styled to match the chat/transcript timestamps.
+ */
+function TranscriptRowTimestamp({
+  messageLink = null,
+  timestamp,
+}: {
+  messageLink?: { channelId: string; messageId: string } | null;
+  timestamp: string;
+}) {
+  return (
+    <div
+      className="mt-0.5 flex justify-start"
+      data-testid="transcript-row-timestamp"
+    >
+      <TranscriptTimestamp messageLink={messageLink} timestamp={timestamp} />
     </div>
   );
 }

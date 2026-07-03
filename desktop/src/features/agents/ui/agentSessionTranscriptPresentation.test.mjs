@@ -5,6 +5,7 @@ import {
   getActivityHeadline,
   isMeaningfulItem,
   isSpineItem,
+  shouldShowTranscriptRowTimestamp,
 } from "./agentSessionTranscriptPresentation.ts";
 
 const baseTimestamp = "2026-06-14T19:00:00.000Z";
@@ -255,3 +256,59 @@ test("two-tier headline: metadata headlines when it is the only activity (sessio
 // activityRenderClasses/RawRailActivity.render.test.mjs — they use
 // renderToStaticMarkup and would fail if the isRawPayload branch in
 // RawRailActivity were removed.
+
+test("shouldShowTranscriptRowTimestamp: off by default (enabled=false)", () => {
+  assert.equal(
+    shouldShowTranscriptRowTimestamp(makeTool(), {
+      enabled: false,
+      variant: "default",
+    }),
+    false,
+  );
+});
+
+test("shouldShowTranscriptRowTimestamp: enabled shows for tools, thoughts, assistant messages", () => {
+  const options = { enabled: true, variant: "default" };
+  assert.equal(shouldShowTranscriptRowTimestamp(makeTool(), options), true);
+  assert.equal(
+    shouldShowTranscriptRowTimestamp(
+      makeMessage({ role: "assistant" }),
+      options,
+    ),
+    true,
+  );
+  assert.equal(
+    shouldShowTranscriptRowTimestamp(
+      {
+        id: "thought:1",
+        type: "thought",
+        title: "Thinking",
+        text: "hmm",
+        timestamp: baseTimestamp,
+      },
+      options,
+    ),
+    true,
+  );
+});
+
+test("shouldShowTranscriptRowTimestamp: user message bubbles keep their own footer (excluded)", () => {
+  assert.equal(
+    shouldShowTranscriptRowTimestamp(
+      makeMessage({ role: "user", title: "tho" }),
+      { enabled: true, variant: "default" },
+    ),
+    false,
+    "user bubbles already render a timestamp footer",
+  );
+});
+
+test("shouldShowTranscriptRowTimestamp: compact preview stays dense", () => {
+  assert.equal(
+    shouldShowTranscriptRowTimestamp(makeTool(), {
+      enabled: true,
+      variant: "compactPreview",
+    }),
+    false,
+  );
+});

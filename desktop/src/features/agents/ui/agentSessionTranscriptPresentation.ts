@@ -1,6 +1,25 @@
 import type { TranscriptItem } from "./agentSessionTypes";
 import { buildCompactToolSummary } from "./agentSessionToolSummary";
 
+/**
+ * Whether a polished activity row should render the opt-in timestamp footer.
+ * User message bubbles already render their own timestamp footer, so they are
+ * excluded to avoid doubling up. Compact previews stay dense regardless of
+ * the preference.
+ */
+export function shouldShowTranscriptRowTimestamp(
+  item: TranscriptItem,
+  options: { enabled: boolean; variant: string },
+): boolean {
+  if (!options.enabled || options.variant === "compactPreview") {
+    return false;
+  }
+  if (item.type === "message" && item.role !== "assistant") {
+    return false;
+  }
+  return true;
+}
+
 const LIFECYCLE_NOISE = new Set([
   "turn started",
   "session ready",
