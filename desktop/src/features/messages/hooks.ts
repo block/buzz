@@ -244,6 +244,25 @@ export function resolveThreadReplyTarget(
   };
 }
 
+function retainRefetchReconciliationEvents(events: RelayEvent[]) {
+  return events.filter((event) => {
+    if (!CHANNEL_TIMELINE_KINDS.has(event.kind)) return false;
+    if (event.pending) return true;
+    const thread = getThreadReference(event.tags);
+    return thread.parentId !== null && !isBroadcastReply(event.tags);
+  });
+}
+
+function mergeRefetchReconciliationEvents(
+  windowEvents: RelayEvent[],
+  previousMessages: RelayEvent[],
+) {
+  const authoritativeIds = new Set(windowEvents.map((event) => event.id));
+  return retainRefetchReconciliationEvents(previousMessages)
+    .filter((event) => !authoritativeIds.has(event.id))
+    .reduce((current, reply) => mergeMessages(current, reply), windowEvents);
+}
+
 export function useChannelWindowQuery(channel: Channel | null) {
   const queryClient = useQueryClient();
   const queryKey = channelWindowKey(channel?.id ?? "none");
@@ -267,14 +286,17 @@ export function useChannelMessagesQuery(channel: Channel | null) {
     queryKey,
     queryFn: async () => {
       if (!channel) throw new Error("No channel selected.");
+      const previousMessages =
+        queryClient.getQueryData<RelayEvent[]>(queryKey) ?? [];
       const events = await getChannelWindowEvents(channel.id);
       const page = parseChannelWindowResponse(events, channel.id, null);
       const current =
         queryClient.getQueryData<ChannelWindowStore>(windowKey) ??
         emptyChannelWindowStore();
       const next = replaceNewestChannelWindow(current, page);
+      const windowEvents = flattenChannelWindowEvents(next);
       queryClient.setQueryData(windowKey, next);
-      return flattenChannelWindowEvents(next);
+      return mergeRefetchReconciliationEvents(windowEvents, previousMessages);
     },
     staleTime: 5 * 60 * 1_000,
     gcTime: 60 * 60 * 1_000,
