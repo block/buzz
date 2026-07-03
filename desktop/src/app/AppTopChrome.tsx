@@ -64,11 +64,15 @@ export function AppTopChrome({
   // x-position. When the workspace rail is present it already occupies the far
   // left, so the nav row only needs to clear the lights past the rail edge
   // rather than the full offset. In fullscreen those buttons hide.
+  //
+  // Fixed px on purpose: the native traffic lights do not scale with the app's
+  // Cmd +/- text zoom (rem), so rem-based clearance shrinks under them when
+  // zoomed out. This is a deliberate exception to the rem-first rule.
   const macChrome = isMacPlatform() && !isFullscreen;
   const navRowPaddingClass = macChrome
     ? hasWorkspaceRail
-      ? "pl-8"
-      : "pl-20"
+      ? "pl-[32px]"
+      : "pl-[80px]"
     : "pl-3";
   const navRowAlignmentClass = macChrome ? "translate-y-[3px]" : null;
 

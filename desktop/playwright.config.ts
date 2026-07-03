@@ -50,6 +50,7 @@ export default defineConfig({
         "**/unread-pill.spec.ts",
         "**/sidebar-more-unread-overlap.spec.ts",
         "**/home-collapsed-top-chrome.spec.ts",
+        "**/top-chrome-zoom-clearance.spec.ts",
         "**/thread-unread.spec.ts",
         "**/workspace-rail.spec.ts",
         "**/thread-reply-anchor-roleplay.spec.ts",
