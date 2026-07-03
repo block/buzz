@@ -53,6 +53,7 @@ import {
   useTranscriptTimestampsEnabled,
 } from "@/features/agents/ui/transcriptTimestampPreference";
 import type { ChannelAgentSessionAgent } from "./useChannelAgentSessions";
+import { useChannelsQuery } from "@/features/channels/hooks";
 
 type AgentSessionThreadPanelProps = {
   agent: ChannelAgentSessionAgent;
@@ -126,6 +127,29 @@ export function AgentSessionThreadPanel({
       ? undefined
       : `Last updated ${new Date(latestActivityAt).toLocaleString()}`;
   const rawFeedScopeKey = `${agent.pubkey}:${sessionChannelId ?? "all"}`;
+  // Scope label input: prefer the passed channel's name; when the pane is
+  // channel-scoped without a full Channel object (#1380's channelId prop),
+  // resolve the name from the channels cache.
+  const channelsQuery = useChannelsQuery({
+    enabled: Boolean(sessionChannelId),
+  });
+  const scopeChannelName = React.useMemo(() => {
+    if (!sessionChannelId) {
+      return null;
+    }
+    if (channel && channel.id === sessionChannelId) {
+      return channel.name;
+    }
+    return (
+      channelsQuery.data?.find((entry) => entry.id === sessionChannelId)
+        ?.name ?? null
+    );
+  }, [channel, channelsQuery.data, sessionChannelId]);
+  const scopeLabel = sessionChannelId
+    ? scopeChannelName
+      ? `#${scopeChannelName}`
+      : "1 channel"
+    : "All channels";
   const [rawFeedState, setRawFeedState] = React.useState(() => ({
     scopeKey: rawFeedScopeKey,
     show: false,
@@ -323,6 +347,14 @@ export function AgentSessionThreadPanel({
           subtitleTitle={lastUpdatedTitle}
           title={showRawFeed ? "Raw ACP Activity" : "Activity"}
         />
+        {/* Scope label: makes channel-targeted vs all-channels state obvious
+            (an all-channels pane can look "wrong" without it). */}
+        <span
+          className="min-w-0 shrink truncate text-xs text-muted-foreground"
+          data-testid="agent-session-scope-label"
+        >
+          {scopeLabel}
+        </span>
       </AuxiliaryPanelHeaderGroup>
       {agentHeaderActions}
     </>
