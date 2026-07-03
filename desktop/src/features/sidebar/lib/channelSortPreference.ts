@@ -5,22 +5,39 @@ const STORAGE_KEY_PREFIX = "buzz-channel-sort.v1";
 
 export type ChannelSortMode = "alpha" | "recent";
 
+/**
+ * Key identifying a sidebar grouping that carries its own sort preference.
+ * Fixed groups use their name; custom sections use `section:<sectionId>`.
+ */
+export type ChannelSortGroupKey =
+  | "starred"
+  | "channels"
+  | "forums"
+  | "dms"
+  | `section:${string}`;
+
 export type ChannelSortStore = {
   version: 1;
-  mode: ChannelSortMode;
+  groups: Record<string, ChannelSortMode>;
 };
+
+export const DEFAULT_SORT_MODE: ChannelSortMode = "alpha";
 
 export const DEFAULT_STORE: ChannelSortStore = Object.freeze({
   version: 1,
-  mode: "alpha",
+  groups: {},
 });
 
+export function sectionSortGroupKey(sectionId: string): ChannelSortGroupKey {
+  return `section:${sectionId}`;
+}
+
 /**
- * Returns the localStorage key for the sidebar channel sort preference.
+ * Returns the localStorage key for the sidebar channel sort preferences.
  *
  * When `relayUrl` is provided the key is scoped to that relay (normalized via
- * the same `normalizeRelayUrl` used by all relay-scoped local stores) so the
- * preference doesn't bleed across workspaces/relays.
+ * the same `normalizeRelayUrl` used by all relay-scoped local stores) so
+ * preferences don't bleed across workspaces/relays.
  */
 export function storageKey(pubkey: string, relayUrl?: string): string {
   if (!relayUrl) return `${STORAGE_KEY_PREFIX}:${pubkey}`;
@@ -35,8 +52,18 @@ export function parseChannelSortPayload(
   if (typeof json !== "object" || json === null) return null;
   const obj = json as Record<string, unknown>;
   if (obj.version !== 1) return null;
-  if (obj.mode !== "alpha" && obj.mode !== "recent") return null;
-  return { version: 1, mode: obj.mode };
+  const groups: Record<string, ChannelSortMode> =
+    typeof obj.groups === "object" &&
+    obj.groups !== null &&
+    !Array.isArray(obj.groups)
+      ? Object.fromEntries(
+          Object.entries(obj.groups as Record<string, unknown>).filter(
+            (entry): entry is [string, ChannelSortMode] =>
+              entry[1] === "alpha" || entry[1] === "recent",
+          ),
+        )
+      : {};
+  return { version: 1, groups };
 }
 
 export function readChannelSortStore(
@@ -66,6 +93,13 @@ export function writeChannelSortStore(
   } catch {
     return false;
   }
+}
+
+export function sortModeForGroup(
+  store: ChannelSortStore,
+  group: ChannelSortGroupKey,
+): ChannelSortMode {
+  return store.groups[group] ?? DEFAULT_SORT_MODE;
 }
 
 function channelRecencyMs(channel: Channel): number | null {

@@ -3,23 +3,27 @@ import * as React from "react";
 import {
   DEFAULT_STORE,
   readChannelSortStore,
+  sortModeForGroup,
   storageKey,
   writeChannelSortStore,
+  type ChannelSortGroupKey,
   type ChannelSortMode,
   type ChannelSortStore,
 } from "./channelSortPreference";
 
 /**
- * Persistent sidebar channel sort preference, scoped by pubkey + relay so it
- * doesn't bleed across identities or workspaces (same scoping as channel
- * sections). Mirrors changes made in other windows via the storage event.
+ * Persistent per-group sidebar sort preferences, scoped by pubkey + relay so
+ * they don't bleed across identities or workspaces (same scoping as channel
+ * sections). Each sidebar grouping (starred, channels, forums, dms, and each
+ * custom section) carries its own saved Recent/A–Z mode; unset groups default
+ * to A–Z. Mirrors changes made in other windows via the storage event.
  */
 export function useChannelSortPreference(
   pubkey: string | undefined,
   relayUrl?: string,
 ): {
-  sortMode: ChannelSortMode;
-  setSortMode: (mode: ChannelSortMode) => void;
+  sortModeFor: (group: ChannelSortGroupKey) => ChannelSortMode;
+  setSortModeFor: (group: ChannelSortGroupKey, mode: ChannelSortMode) => void;
 } {
   const [store, setStore] = React.useState<ChannelSortStore>(() => {
     if (!pubkey) return DEFAULT_STORE;
@@ -47,11 +51,19 @@ export function useChannelSortPreference(
     };
   }, [pubkey, relayUrl]);
 
-  const setSortMode = React.useCallback(
-    (mode: ChannelSortMode) => {
+  const sortModeFor = React.useCallback(
+    (group: ChannelSortGroupKey) => sortModeForGroup(store, group),
+    [store],
+  );
+
+  const setSortModeFor = React.useCallback(
+    (group: ChannelSortGroupKey, mode: ChannelSortMode) => {
       if (!pubkey) return;
       setStore((prev) => {
-        const next: ChannelSortStore = { ...prev, mode };
+        const next: ChannelSortStore = {
+          ...prev,
+          groups: { ...prev.groups, [group]: mode },
+        };
         if (!writeChannelSortStore(pubkey, next, relayUrl)) return prev;
         return next;
       });
@@ -59,5 +71,5 @@ export function useChannelSortPreference(
     [pubkey, relayUrl],
   );
 
-  return { sortMode: store.mode, setSortMode };
+  return { sortModeFor, setSortModeFor };
 }

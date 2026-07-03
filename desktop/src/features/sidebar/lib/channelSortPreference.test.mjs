@@ -2,9 +2,12 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  DEFAULT_SORT_MODE,
   DEFAULT_STORE,
   parseChannelSortPayload,
+  sectionSortGroupKey,
   sortChannelsForSidebar,
+  sortModeForGroup,
 } from "./channelSortPreference.ts";
 
 function makeChannel(id, name, lastMessageAt = null) {
@@ -30,26 +33,49 @@ function makeChannel(id, name, lastMessageAt = null) {
 
 // ── parseChannelSortPayload ──────────────────────────────────────────────────
 
-test("parseChannelSortPayload: valid alpha payload", () => {
-  assert.deepEqual(parseChannelSortPayload({ version: 1, mode: "alpha" }), {
+test("parseChannelSortPayload: valid per-group payload", () => {
+  assert.deepEqual(
+    parseChannelSortPayload({
+      version: 1,
+      groups: { channels: "recent", dms: "alpha" },
+    }),
+    { version: 1, groups: { channels: "recent", dms: "alpha" } },
+  );
+});
+
+test("parseChannelSortPayload: empty groups is valid", () => {
+  assert.deepEqual(parseChannelSortPayload({ version: 1, groups: {} }), {
     version: 1,
-    mode: "alpha",
+    groups: {},
   });
 });
 
-test("parseChannelSortPayload: valid recent payload", () => {
-  assert.deepEqual(parseChannelSortPayload({ version: 1, mode: "recent" }), {
-    version: 1,
-    mode: "recent",
-  });
+test("parseChannelSortPayload: unknown modes are filtered out", () => {
+  assert.deepEqual(
+    parseChannelSortPayload({
+      version: 1,
+      groups: { channels: "zorp", forums: "recent", dms: 42 },
+    }),
+    { version: 1, groups: { forums: "recent" } },
+  );
 });
 
-test("parseChannelSortPayload: unknown mode returns null", () => {
-  assert.equal(parseChannelSortPayload({ version: 1, mode: "zorp" }), null);
+test("parseChannelSortPayload: missing/invalid groups falls back to empty", () => {
+  assert.deepEqual(parseChannelSortPayload({ version: 1 }), {
+    version: 1,
+    groups: {},
+  });
+  assert.deepEqual(parseChannelSortPayload({ version: 1, groups: ["x"] }), {
+    version: 1,
+    groups: {},
+  });
 });
 
 test("parseChannelSortPayload: wrong version returns null", () => {
-  assert.equal(parseChannelSortPayload({ version: 2, mode: "alpha" }), null);
+  assert.equal(
+    parseChannelSortPayload({ version: 2, groups: { channels: "alpha" } }),
+    null,
+  );
 });
 
 test("parseChannelSortPayload: non-object input returns null", () => {
@@ -58,8 +84,31 @@ test("parseChannelSortPayload: non-object input returns null", () => {
   assert.equal(parseChannelSortPayload(42), null);
 });
 
-test("default store mode is alpha", () => {
-  assert.equal(DEFAULT_STORE.mode, "alpha");
+// ── sortModeForGroup / defaults ──────────────────────────────────────────────
+
+test("default sort mode is alpha and default store has no overrides", () => {
+  assert.equal(DEFAULT_SORT_MODE, "alpha");
+  assert.deepEqual(DEFAULT_STORE.groups, {});
+});
+
+test("sortModeForGroup: unset group falls back to alpha", () => {
+  assert.equal(sortModeForGroup(DEFAULT_STORE, "channels"), "alpha");
+  assert.equal(sortModeForGroup(DEFAULT_STORE, "dms"), "alpha");
+});
+
+test("sortModeForGroup: set groups are independent", () => {
+  const store = {
+    version: 1,
+    groups: { channels: "recent", [sectionSortGroupKey("abc")]: "recent" },
+  };
+  assert.equal(sortModeForGroup(store, "channels"), "recent");
+  assert.equal(sortModeForGroup(store, sectionSortGroupKey("abc")), "recent");
+  assert.equal(sortModeForGroup(store, "forums"), "alpha");
+  assert.equal(sortModeForGroup(store, sectionSortGroupKey("xyz")), "alpha");
+});
+
+test("sectionSortGroupKey: namespaced by section id", () => {
+  assert.equal(sectionSortGroupKey("abc"), "section:abc");
 });
 
 // ── sortChannelsForSidebar ───────────────────────────────────────────────────

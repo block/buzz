@@ -20,31 +20,36 @@ const SORT_OPTIONS: { value: ChannelSortMode; label: string }[] = [
 ];
 
 /**
- * Section-header dropdown for the sidebar-wide channel sort preference.
- * One preference, applied inside every grouping (Starred, custom sections,
- * Channels, Forums, DMs) without changing grouping boundaries.
+ * Section-header dropdown for a single sidebar grouping's sort preference.
+ * Every grouping (Starred, each custom section, Channels, Forums, DMs)
+ * carries its own control and saved mode; grouping boundaries are untouched.
  */
 export function ChannelSortDropdown({
+  groupLabel,
   sortMode,
   onSortModeChange,
+  testId,
+  visibilityClassName = SECTION_ACTION_VISIBILITY_CLASS,
 }: {
+  groupLabel: string;
   sortMode: ChannelSortMode;
   onSortModeChange: (mode: ChannelSortMode) => void;
+  testId?: string;
+  visibilityClassName?: string;
 }) {
   const activeLabel =
     SORT_OPTIONS.find((option) => option.value === sortMode)?.label ?? "A–Z";
+  const ariaLabel = `Sort ${groupLabel}: ${activeLabel}`;
 
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
         <button
-          aria-label={`Sort channels: ${activeLabel}`}
-          className={cn(
-            SECTION_ICON_BUTTON_CLASS,
-            SECTION_ACTION_VISIBILITY_CLASS,
-          )}
-          data-testid="channel-sort-trigger"
-          title={`Sort channels: ${activeLabel}`}
+          aria-label={ariaLabel}
+          className={cn(SECTION_ICON_BUTTON_CLASS, visibilityClassName)}
+          data-testid={testId ?? "channel-sort-trigger"}
+          onClick={(e) => e.stopPropagation()}
+          title={ariaLabel}
           type="button"
         >
           <ArrowUpDown className="h-4 w-4" />

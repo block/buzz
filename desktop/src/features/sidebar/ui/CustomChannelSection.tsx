@@ -519,6 +519,7 @@ export function CustomChannelSection({
   assignments,
   isFirst,
   isLast,
+  leadingHeaderAction,
   onToggleCollapsed,
   onSelectChannel,
   onMarkChannelRead,
@@ -552,6 +553,7 @@ export function CustomChannelSection({
   assignments: Record<string, string>;
   isFirst: boolean;
   isLast: boolean;
+  leadingHeaderAction?: React.ReactNode;
   onToggleCollapsed: () => void;
   onSelectChannel: (channelId: string) => void;
   onMarkChannelRead: (
@@ -641,6 +643,7 @@ export function CustomChannelSection({
                       SECTION_ACTION_VISIBILITY_CLASS,
                     )}
                   >
+                    {leadingHeaderAction}
                     {hasUnread ? (
                       <button
                         aria-label="Mark all as read"
