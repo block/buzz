@@ -1,7 +1,8 @@
 import * as React from "react";
-import { Loader2, Trash2, Undo2 } from "lucide-react";
+import { Loader2, Undo2 } from "lucide-react";
 
 import { cn } from "@/shared/lib/cn";
+import { Button } from "@/shared/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 
 type EditorPoint = { x: number; y: number };
@@ -23,11 +24,11 @@ const PEN_COLORS = [
   { label: "Black", value: "#111111" },
 ] as const;
 
-const PEN_WIDTHS = [
-  { cssPx: 3, dotClass: "h-1 w-1", label: "Thin" },
-  { cssPx: 6, dotClass: "h-2 w-2", label: "Medium" },
-  { cssPx: 12, dotClass: "h-3 w-3", label: "Thick" },
-] as const;
+/** Pen stroke width range, in CSS pixels: five whole-pixel slider stops. */
+const PEN_WIDTH_MIN_CSS = 4;
+const PEN_WIDTH_MAX_CSS = 12;
+const PEN_WIDTH_STEP_CSS = 2;
+const PEN_WIDTH_DEFAULT_CSS = 6;
 
 function drawStroke(ctx: CanvasRenderingContext2D, stroke: EditorStroke) {
   const [first, ...rest] = stroke.points;
@@ -128,7 +129,7 @@ export function ComposerImageEditor({
     PEN_COLORS[0].value,
   );
   const [activeWidthCss, setActiveWidthCss] = React.useState<number>(
-    PEN_WIDTHS[1].cssPx,
+    PEN_WIDTH_DEFAULT_CSS,
   );
   const [naturalSize, setNaturalSize] = React.useState<{
     height: number;
@@ -276,101 +277,85 @@ export function ComposerImageEditor({
         ) : null}
       </div>
 
-      <div
-        className="flex flex-wrap items-center justify-center gap-3 rounded-full bg-black/60 px-4 py-2 backdrop-blur-sm"
-        data-testid="composer-image-editor-toolbar"
-      >
-        <div className="flex items-center gap-1.5">
-          {PEN_COLORS.map((color) => (
-            <button
-              aria-label={`${color.label} pen`}
-              aria-pressed={activeColor === color.value}
-              className={cn(
-                "h-5 w-5 rounded-full border border-white/30 transition-transform",
-                activeColor === color.value
-                  ? "scale-110 ring-2 ring-white"
-                  : "hover:scale-105",
-              )}
-              key={color.value}
-              onClick={() => setActiveColor(color.value)}
-              style={{ backgroundColor: color.value }}
-              type="button"
-            />
-          ))}
+      <div className="fixed right-4 top-4 z-20 flex items-center gap-3">
+        <div
+          className="flex items-center gap-3 animate-in fade-in slide-in-from-right-12 duration-300"
+          data-testid="composer-image-editor-toolbar"
+        >
+          <input
+            aria-label="Stroke width"
+            className="h-1 w-12 cursor-pointer appearance-none rounded-full bg-white/25 [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-white"
+            max={PEN_WIDTH_MAX_CSS}
+            min={PEN_WIDTH_MIN_CSS}
+            onChange={(event) => setActiveWidthCss(Number(event.target.value))}
+            step={PEN_WIDTH_STEP_CSS}
+            type="range"
+            value={activeWidthCss}
+          />
+
+          <div className="flex items-center gap-1.5">
+            {PEN_COLORS.map((color) => (
+              <button
+                aria-label={`${color.label} pen`}
+                aria-pressed={activeColor === color.value}
+                className={cn(
+                  "flex h-5 w-5 items-center justify-center rounded-full transition-transform",
+                  activeColor === color.value && "scale-110 ring-2 ring-white",
+                )}
+                key={color.value}
+                onClick={() => setActiveColor(color.value)}
+                type="button"
+              >
+                <span
+                  className={cn(
+                    "rounded-full transition-[height,width]",
+                    color.label === "Black" && "ring-1 ring-white/30",
+                  )}
+                  style={{
+                    backgroundColor: color.value,
+                    height: `${activeWidthCss}px`,
+                    width: `${activeWidthCss}px`,
+                  }}
+                />
+              </button>
+            ))}
+          </div>
+
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                aria-label="Undo last stroke"
+                className="flex h-7 w-7 items-center justify-center rounded-full text-white transition-colors hover:bg-white/10 disabled:opacity-40 disabled:hover:bg-transparent"
+                disabled={!hasStrokes}
+                onClick={undo}
+                type="button"
+              >
+                <Undo2 className="h-4 w-4" />
+              </button>
+            </TooltipTrigger>
+            <TooltipContent>Undo (⌘Z)</TooltipContent>
+          </Tooltip>
         </div>
 
-        <div className="h-5 w-px bg-white/20" />
-
-        <div className="flex items-center gap-1">
-          {PEN_WIDTHS.map((width) => (
-            <button
-              aria-label={`${width.label} stroke`}
-              aria-pressed={activeWidthCss === width.cssPx}
-              className={cn(
-                "flex h-7 w-7 items-center justify-center rounded-full text-white transition-colors",
-                activeWidthCss === width.cssPx
-                  ? "bg-white/25"
-                  : "hover:bg-white/10",
-              )}
-              key={width.label}
-              onClick={() => setActiveWidthCss(width.cssPx)}
-              type="button"
-            >
-              <span className={cn("rounded-full bg-current", width.dotClass)} />
-            </button>
-          ))}
-        </div>
-
-        <div className="h-5 w-px bg-white/20" />
-
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <button
-              aria-label="Undo last stroke"
-              className="flex h-7 w-7 items-center justify-center rounded-full text-white transition-colors hover:bg-white/10 disabled:opacity-40 disabled:hover:bg-transparent"
-              disabled={!hasStrokes}
-              onClick={undo}
-              type="button"
-            >
-              <Undo2 className="h-4 w-4" />
-            </button>
-          </TooltipTrigger>
-          <TooltipContent>Undo (⌘Z)</TooltipContent>
-        </Tooltip>
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <button
-              aria-label="Clear all strokes"
-              className="flex h-7 w-7 items-center justify-center rounded-full text-white transition-colors hover:bg-white/10 disabled:opacity-40 disabled:hover:bg-transparent"
-              disabled={!hasStrokes}
-              onClick={() => setStrokes([])}
-              type="button"
-            >
-              <Trash2 className="h-4 w-4" />
-            </button>
-          </TooltipTrigger>
-          <TooltipContent>Clear drawing</TooltipContent>
-        </Tooltip>
-
-        <div className="h-5 w-px bg-white/20" />
-
-        <button
-          className="rounded-full px-3 py-1 text-sm text-white/80 transition-colors hover:bg-white/10 hover:text-white"
+        <Button
+          className="text-white hover:bg-white/10 hover:text-white"
           onClick={onCancel}
+          size="sm"
           type="button"
+          variant="ghost"
         >
           Cancel
-        </button>
-        <button
-          className="flex items-center gap-1.5 rounded-full bg-white px-3 py-1 text-sm font-medium text-black transition-opacity hover:opacity-90 disabled:opacity-50"
+        </Button>
+        <Button
           data-testid="composer-image-editor-save"
           disabled={saving || !hasStrokes}
           onClick={() => void handleSave()}
+          size="sm"
           type="button"
         >
-          {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+          {saving ? <Loader2 className="animate-spin" /> : null}
           Save
-        </button>
+        </Button>
       </div>
 
       {saveError ? (
