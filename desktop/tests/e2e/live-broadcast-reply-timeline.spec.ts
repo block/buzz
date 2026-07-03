@@ -145,5 +145,7 @@ test("a live broadcast depth-1 reply enters the authoritative channel window sto
     .toContain("broadcast to the channel");
 
   // The ordinary reply is a thread reply, never a window row.
-  expect(await liveOverlayContents(page)).not.toContain("ordinary thread reply");
+  expect(await liveOverlayContents(page)).not.toContain(
+    "ordinary thread reply",
+  );
 });
