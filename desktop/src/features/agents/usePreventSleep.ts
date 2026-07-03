@@ -3,7 +3,6 @@ import { useManagedAgentsQuery } from "@/features/agents/hooks";
 import {
   getAgentObserverSnapshot,
   subscribeAgentObserverStore,
-  useManagedAgentObserverBridge,
 } from "@/features/agents/observerRelayStore";
 import { createPreventSleepActivityTracker } from "@/features/agents/preventSleepActivity";
 import { setPreventSleepActive } from "@/shared/api/tauri";
@@ -68,18 +67,8 @@ function usePreventSleepInternal() {
   );
 
   const runningAgentPubkeyKey = runningAgentPubkeys.join(",");
-  const runningObserverAgents = React.useMemo(
-    () =>
-      enabled && runningAgentPubkeyKey
-        ? runningAgentPubkeyKey.split(",").map((pubkey) => ({
-            pubkey,
-            status: "running" as const,
-          }))
-        : [],
-    [enabled, runningAgentPubkeyKey],
-  );
-
-  useManagedAgentObserverBridge(runningObserverAgents);
+  // Observer ingestion is owner-global (useAgentObserverIngestion in
+  // AppShell); this hook only reads observer snapshots for activity tracking.
 
   const hasRunningAgents = runningAgentPubkeys.length > 0;
 

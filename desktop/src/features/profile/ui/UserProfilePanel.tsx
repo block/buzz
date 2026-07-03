@@ -27,14 +27,12 @@ import {
   useUpdatePersonaMutation,
 } from "@/features/agents/hooks";
 import { AddAgentToChannelDialog } from "@/features/agents/ui/AddAgentToChannelDialog";
-import { useActiveAgentTurnsBridge } from "@/features/agents/activeAgentTurnsStore";
 import { resolvePersonaRuntime } from "@/features/agents/lib/resolvePersonaRuntime";
 import {
   isManagedAgentActive,
   startManagedAgentWithRules,
   stopManagedAgentWithRules,
 } from "@/features/agents/lib/managedAgentControlActions";
-import { useManagedAgentObserverBridge } from "@/features/agents/observerRelayStore";
 import { describeLogFile } from "@/features/agents/ui/agentUi";
 import { EditAgentDialog } from "@/features/agents/ui/EditAgentDialog";
 import {
@@ -288,14 +286,9 @@ export function UserProfilePanel({
       }),
     [effectivePubkey, isBot, managedAgent, profile, relayAgent, viewerIsOwner],
   );
-  const activityBridgeAgents = React.useMemo(
-    () => (activityAgent ? [activityAgent] : []),
-    [activityAgent],
-  );
-  // Populate the active-turns store for this agent so useActiveAgentTurns works
-  // even if the Agents page hasn't been visited yet.
-  useActiveAgentTurnsBridge(activityBridgeAgents);
-  useManagedAgentObserverBridge(activityBridgeAgents);
+  // Observer ingestion (frame decryption + derived active-turn liveness) is
+  // owner-global — mounted once in AppShell via useAgentObserverIngestion —
+  // covering both locally managed agents and declared-owned relay agents.
   const canEditAgent =
     isOwner === true &&
     (managedAgent !== undefined ||
