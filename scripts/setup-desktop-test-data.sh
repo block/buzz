@@ -53,7 +53,10 @@ run_sql "SELECT 1" >/dev/null
 # so the channel reconciler (BUZZ_RECONCILE_CHANNELS, which binds localhost:3000
 # fail-closed and retries every 5s for 2min) can resolve the tenant.
 COMMUNITY_ID="00000000-0000-4000-8000-00000000c0de"
-COMMUNITY_HOST="localhost:3000"
+# Host must match the relay's normalized bind host verbatim (non-default ports
+# are kept by normalize_host). Overridable so an isolated relay on an alternate
+# port can seed the same channels/members against its own tenant.
+COMMUNITY_HOST="${BUZZ_COMMUNITY_HOST:-localhost:3000}"
 
 run_sql "
 INSERT INTO communities (id, host)

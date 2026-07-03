@@ -210,7 +210,12 @@ const WELCOME_CHANNEL_ENSURED_STORAGE_KEY_PREFIX =
   "buzz-welcome-channel-ensured.v2:";
 const ONBOARDING_COMPLETION_STORAGE_KEY_PREFIX = "buzz-onboarding-complete.v1:";
 const DEFAULT_MOCK_PUBKEY = "deadbeef".repeat(8);
-const DEFAULT_RELAY_WS_URL = "ws://localhost:3000";
+// The relay WS URL follows BUZZ_E2E_RELAY_URL (same env var seed.ts reads), so a
+// suite pointed at an isolated relay (e.g. the read-model harness on :3030) uses
+// it without per-spec wiring. Falls back to the shared dev relay when unset.
+const DEFAULT_RELAY_WS_URL = (
+  process.env.BUZZ_E2E_RELAY_URL ?? "http://localhost:3000"
+).replace(/^http/, "ws");
 
 function cloneEngramEntry(entry: MockEngramEntry): MockEngramEntry {
   return {
