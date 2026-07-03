@@ -429,7 +429,10 @@ mod tests {
         let a2 = tracker.take().expect("A turn 2");
 
         assert_eq!(a2.session_id, "sess-a");
-        assert_eq!(a2.turn_seq, 2, "seq must increment per publish, not per notification");
+        assert_eq!(
+            a2.turn_seq, 2,
+            "seq must increment per publish, not per notification"
+        );
         assert!(a2.delta_reliable, "A turn 2 must have a reliable delta");
         assert_eq!(
             a2.turn_input_tokens,

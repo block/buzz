@@ -529,14 +529,8 @@ mod tests {
         // startup. Migration 5 drops and re-adds the generated `search_tsv`
         // column with the extended kind-44200 exclusion. 0001 must NOT carry 44200.
         assert_eq!(migrations[4].version, 5);
-        assert!(migrations[4]
-            .sql
-            .as_str()
-            .contains("search_tsv"));
-        assert!(migrations[4]
-            .sql
-            .as_str()
-            .contains("44200"));
+        assert!(migrations[4].sql.as_str().contains("search_tsv"));
+        assert!(migrations[4].sql.as_str().contains("44200"));
         assert!(!migrations[0].sql.as_str().contains("44200"));
     }
 

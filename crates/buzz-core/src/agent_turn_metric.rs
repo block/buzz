@@ -441,10 +441,7 @@ mod tests {
         // Zero, small, and larger values are all valid.
         for cost in [0.0_f64, 0.001, 1.0, 999.99] {
             let payload = make_payload_with_turn_cost(Some(cost));
-            assert!(
-                payload.validate().is_ok(),
-                "cost {cost} should be accepted"
-            );
+            assert!(payload.validate().is_ok(), "cost {cost} should be accepted");
         }
     }
 
