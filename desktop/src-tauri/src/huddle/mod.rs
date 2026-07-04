@@ -32,6 +32,7 @@ pub mod playout;
 pub mod pocket;
 pub mod preprocessing;
 pub mod relay_api;
+pub mod screen_share;
 pub mod state;
 pub mod stt;
 pub mod transcription;
@@ -60,6 +61,7 @@ pub(super) fn drain_until_shutdown<T>(
 
 // ── Re-exports ────────────────────────────────────────────────────────────────
 
+pub use screen_share::{push_huddle_screen_control, push_huddle_screen_frame};
 pub use state::{HuddleJoinInfo, HuddlePhase, HuddleState, VoiceInputMode};
 pub use transcription::{set_huddle_transcription_enabled, start_stt_pipeline};
 
@@ -417,6 +419,7 @@ fn teardown_huddle(state: &AppState) -> Result<(), String> {
             c.cancel();
         }
         hs.audio_relay_pcm_tx.take(); // Drop sender — signals the relay task.
+        hs.screen_relay_tx.take();
         hs.reset_preserving_generation();
         (stt, tts, cancel)
     };

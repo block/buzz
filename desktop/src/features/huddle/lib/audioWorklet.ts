@@ -1,20 +1,6 @@
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
-/**
- * Raw binary invoke — uses Tauri's internal IPC for zero-copy ArrayBuffer transfer.
- *
- * The typed @tauri-apps/api doesn't support raw binary payloads (InvokeBody::Raw).
- * This wrapper isolates the internal API dependency to a single call site.
- * Tested against Tauri v2. If this breaks on upgrade, only this function needs updating.
- */
-function invokeRawBinary(cmd: string, payload: Uint8Array): Promise<unknown> {
-  // biome-ignore lint/suspicious/noExplicitAny: Tauri internals have no public type definition
-  const internals = (window as any).__TAURI_INTERNALS__;
-  if (!internals?.invoke) {
-    return Promise.reject(new Error("Tauri internals not available"));
-  }
-  return internals.invoke(cmd, payload);
-}
+import { invokeRawBinary } from "./tauriRawBinary";
 
 /** Return type for setupAudioWorklet — stop + mode control. */
 export type AudioWorkletHandle = {

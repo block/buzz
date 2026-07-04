@@ -18,7 +18,7 @@ use uuid::Uuid;
 pub struct AudioPeer {
     /// Nostr pubkey hex.
     pub pubkey: String,
-    /// Audio frames (binary Opus with peer_index prefix). Drops on full — real-time.
+    /// Realtime media frames (binary payload with peer_index prefix). Drops on full.
     pub audio_tx: mpsc::Sender<Bytes>,
     /// Control messages (joined/left/close JSON). Separate queue so control
     /// is never starved by audio backpressure.
@@ -27,7 +27,7 @@ pub struct AudioPeer {
     pub peer_index: u8,
 }
 
-/// Control message for a single peer (separate from audio frames).
+/// Control message for a single peer (separate from realtime media frames).
 pub enum PeerCtrl {
     /// JSON control message (joined/left/speakers).
     Json(String),
@@ -261,7 +261,7 @@ impl Room {
         Some((peer_index, should_end))
     }
 
-    /// Fan-out a binary frame to all peers except the sender.
+    /// Fan-out a binary realtime media frame to all peers except the sender.
     /// Prepends the sender's `peer_index` as a 1-byte prefix.
     /// Drops on full buffer — real-time audio never queues.
     pub fn broadcast_frame(&self, sender_id: Uuid, frame: Bytes) {

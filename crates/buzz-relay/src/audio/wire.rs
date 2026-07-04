@@ -32,6 +32,13 @@ pub const V2_HEADER_LEN: usize = 8;
 /// `flags & FLAG_DTX` indicates a DTX/comfort-noise frame.
 pub const FLAG_DTX: u8 = 0x01;
 
+/// v3 media kind: payload is a v2 audio frame (`FrameHeader` + Opus bytes).
+pub const MEDIA_KIND_AUDIO: u8 = 0x01;
+/// v3 media kind: payload is a compressed screen-share frame.
+pub const MEDIA_KIND_SCREEN_FRAME: u8 = 0x02;
+/// v3 media kind: payload is UTF-8 JSON screen-share control data.
+pub const MEDIA_KIND_SCREEN_CONTROL: u8 = 0x03;
+
 /// Parsed v2 header view. Cheap (Copy).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FrameHeader {

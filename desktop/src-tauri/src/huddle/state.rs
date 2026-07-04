@@ -50,6 +50,12 @@ pub struct HuddleState {
     /// Sends PCM batches from push_audio_pcm to the audio relay encode thread.
     #[serde(skip)]
     pub audio_relay_pcm_tx: Option<tokio::sync::mpsc::Sender<Vec<u8>>>,
+    /// Sends screen-share frames/control messages to the huddle relay task.
+    #[serde(skip)]
+    pub screen_relay_tx: Option<tokio::sync::mpsc::Sender<super::relay_api::ScreenRelayFrame>>,
+    /// Whether the negotiated huddle relay protocol supports screen sharing.
+    #[serde(default)]
+    pub screen_share_available: bool,
     /// Participant pubkey hex strings (all members, including humans).
     pub participants: Vec<String>,
     /// Agent pubkeys only — used as p-tags on transcribed messages.
@@ -150,6 +156,8 @@ impl Clone for HuddleState {
             ephemeral_channel_id: self.ephemeral_channel_id.clone(),
             audio_ws_cancel: None,    // Never clone handles.
             audio_relay_pcm_tx: None, // Never clone handles.
+            screen_relay_tx: None,    // Never clone handles.
+            screen_share_available: self.screen_share_available,
             participants: self.participants.clone(),
             agent_pubkeys: Arc::new(Mutex::new(agent_pubkeys_snapshot)),
             stt_pipeline: None, // Never clone the pipeline handle.
@@ -177,6 +185,8 @@ impl Default for HuddleState {
             ephemeral_channel_id: None,
             audio_ws_cancel: None,
             audio_relay_pcm_tx: None,
+            screen_relay_tx: None,
+            screen_share_available: false,
             participants: Vec::new(),
             agent_pubkeys: Arc::new(Mutex::new(Vec::new())),
             stt_pipeline: None,

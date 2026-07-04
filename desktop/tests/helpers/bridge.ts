@@ -67,6 +67,25 @@ type MockSearchProfileSeed = {
   isAgent?: boolean;
 };
 
+type MockHuddleState = {
+  phase:
+    | "idle"
+    | "creating"
+    | "connecting"
+    | "connected"
+    | "active"
+    | "leaving";
+  parent_channel_id: string | null;
+  ephemeral_channel_id: string | null;
+  participants: string[];
+  agent_pubkeys: string[];
+  tts_enabled: boolean;
+  transcription_enabled: boolean;
+  screen_share_available: boolean;
+  is_creator: boolean;
+  voice_input_mode: "push_to_talk" | "voice_activity";
+};
+
 type MockRelayAgentSeed = {
   pubkey: string;
   name: string;
@@ -141,6 +160,7 @@ type MockBridgeOptions = {
   updateChannelDelayMs?: number;
   updateDownloadDelayMs?: number;
   updateVersion?: string;
+  huddleState?: MockHuddleState | null;
   stallWebsocketSends?: boolean;
   userSearchDelayMs?: number;
   // NIP-IA gate inputs — drive the archive-button gate matrix in
