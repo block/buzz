@@ -35,6 +35,7 @@ export function DictationButton({
           aria-label={tooltipText}
           aria-pressed={dictation.isRecording}
           className={cn(
+            "rounded-full",
             dictation.isRecording &&
               "bg-destructive text-destructive-foreground hover:bg-destructive/90 hover:text-destructive-foreground active:bg-destructive active:text-destructive-foreground",
             dictation.isTranscribing && "animate-pulse",
