@@ -13,6 +13,7 @@ import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 import { MODAL_BACKDROP_BLUR_CLASS } from "@/shared/ui/modalBackdrop";
 import { Progress } from "@/shared/ui/progress";
+import { Toggle } from "@/shared/ui/toggle";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { ComposerImageEditor } from "./ComposerImageEditor";
 
@@ -45,8 +46,12 @@ type ComposerAttachmentsProps = {
   onRevert?: (url: string) => void;
   /** Annotated attachment URL → original (pre-edit) URL. */
   originalUrlByUrl?: ReadonlyMap<string, string>;
+  onToggleSpoiler?: (url: string) => void;
   spoileredUrls?: ReadonlySet<string>;
 };
+
+const LIGHTBOX_BUTTON_CLASS =
+  "rounded-full bg-black/50 p-2 text-white/80 transition-colors hover:bg-black/70 hover:text-white focus:outline-hidden focus:ring-2 focus:ring-white/30";
 
 const COMPOSER_MEDIA_HEIGHT_PX = 55;
 const COMPOSER_MEDIA_WIDTH_PX = 55;
@@ -58,15 +63,13 @@ function composerMediaStyle(): React.CSSProperties {
   };
 }
 
-const LIGHTBOX_BUTTON_CLASS =
-  "rounded-full bg-black/50 p-2 text-white/80 transition-colors hover:bg-black/70 hover:text-white focus:outline-hidden focus:ring-2 focus:ring-white/30";
-
 type MediaAttachmentItemProps = {
   attachment: BlobDescriptor;
   isSpoilered: boolean;
   onEditSave?: (url: string, bytes: Uint8Array) => Promise<void>;
   onRemove: (url: string) => void;
   onRevert?: (url: string) => void;
+  onToggleSpoiler?: (url: string) => void;
   /** Set when this attachment is an annotated replacement of an original. */
   originalUrl?: string;
 };
@@ -87,7 +90,15 @@ const MediaAttachmentItem = React.forwardRef<
   HTMLDivElement,
   MediaAttachmentItemProps
 >(function MediaAttachmentItem(
-  { attachment, isSpoilered, onEditSave, onRemove, onRevert, originalUrl },
+  {
+    attachment,
+    isSpoilered,
+    onEditSave,
+    onRemove,
+    onRevert,
+    onToggleSpoiler,
+    originalUrl,
+  },
   ref,
 ) {
   const [open, setOpen] = React.useState(false);
@@ -233,15 +244,35 @@ const MediaAttachmentItem = React.forwardRef<
                 <video
                   src={rewriteRelayUrl(attachment.url)}
                   controls
-                  className="relative max-h-[90vh] max-w-[90vw] rounded-lg"
+                  className={cn(
+                    "relative max-h-[90vh] max-w-[90vw] rounded-lg",
+                    isSpoilered && "blur-2xl brightness-75",
+                  )}
                 />
               ) : (
                 <img
                   alt={`Attachment ${hash}`}
-                  className="relative max-h-[90vh] max-w-[90vw] rounded-lg object-contain"
+                  className={cn(
+                    "relative max-h-[90vh] max-w-[90vw] rounded-lg object-contain",
+                    isSpoilered && "blur-2xl brightness-75",
+                  )}
                   src={rewriteRelayUrl(attachment.url)}
                 />
               )}
+              {mode === "view" && isSpoilered ? (
+                /*
+                 * Expanded-media counterpart of the thumbnail spoiler treatment:
+                 * the media itself is blurred above, and this layer centers the
+                 * spoiler glyph. pointer-events-none keeps controls and
+                 * backdrop-close clickable.
+                 */
+                <div
+                  className="pointer-events-none absolute inset-0 flex items-center justify-center text-foreground/70"
+                  data-lightbox-media-spoiler=""
+                >
+                  <HatGlasses className="h-10 w-10" />
+                </div>
+              ) : null}
               {mode === "view" ? (
                 <div className="absolute right-4 top-4 flex items-center gap-2">
                   {canRevert ? (
@@ -257,6 +288,31 @@ const MediaAttachmentItem = React.forwardRef<
                         </Button>
                       </TooltipTrigger>
                       <TooltipContent>Revert to original</TooltipContent>
+                    </Tooltip>
+                  ) : null}
+                  {onToggleSpoiler ? (
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <Toggle
+                          aria-label={
+                            isSpoilered ? "Remove spoiler" : "Mark as spoiler"
+                          }
+                          className={cn(
+                            LIGHTBOX_BUTTON_CLASS,
+                            "h-auto min-w-0",
+                          )}
+                          data-testid="composer-attachment-spoiler"
+                          onPressedChange={() =>
+                            onToggleSpoiler(attachment.url)
+                          }
+                          pressed={isSpoilered}
+                        >
+                          <HatGlasses className="h-4 w-4" />
+                        </Toggle>
+                      </TooltipTrigger>
+                      <TooltipContent>
+                        {isSpoilered ? "Remove spoiler" : "Mark as spoiler"}
+                      </TooltipContent>
                     </Tooltip>
                   ) : null}
                   {canEdit ? (
@@ -316,6 +372,7 @@ export const ComposerAttachments = React.memo(function ComposerAttachments({
   onRemove,
   onRevert,
   originalUrlByUrl,
+  onToggleSpoiler,
   spoileredUrls,
 }: ComposerAttachmentsProps) {
   if (attachments.length === 0 && !isUploading) return null;
@@ -392,6 +449,7 @@ export const ComposerAttachments = React.memo(function ComposerAttachments({
                 onEditSave={onEditSave}
                 onRemove={onRemove}
                 onRevert={onRevert}
+                onToggleSpoiler={onToggleSpoiler}
                 originalUrl={originalUrl}
               />
             );
