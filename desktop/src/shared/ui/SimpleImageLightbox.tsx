@@ -5,12 +5,14 @@ import { cn } from "@/shared/lib/cn";
 import { MODAL_BACKDROP_BLUR_CLASS } from "@/shared/ui/modalBackdrop";
 
 export function SimpleImageLightbox({
+  actions,
   alt,
   children,
   onOpenChange,
   open,
   src,
 }: {
+  actions?: React.ReactNode;
   alt: string;
   children?: React.ReactNode;
   onOpenChange: (open: boolean) => void;
@@ -49,24 +51,27 @@ export function SimpleImageLightbox({
               src={src}
             />
           )}
-          <DialogPrimitive.Close className="absolute right-4 top-4 rounded-full bg-black/50 p-2 text-white/80 transition-colors hover:bg-black/70 hover:text-white focus:outline-hidden focus:ring-2 focus:ring-white/30">
-            <svg
-              aria-hidden="true"
-              fill="none"
-              height="20"
-              viewBox="0 0 24 24"
-              width="20"
-              xmlns="http://www.w3.org/2000/svg"
-            >
-              <path
-                d="M18 6L6 18M6 6l12 12"
-                stroke="currentColor"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth="2"
-              />
-            </svg>
-          </DialogPrimitive.Close>
+          <div className="absolute right-4 top-4 flex items-center gap-2">
+            {actions}
+            <DialogPrimitive.Close className="rounded-full bg-black/50 p-2 text-white/80 transition-colors hover:bg-black/70 hover:text-white focus:outline-hidden focus:ring-2 focus:ring-white/30">
+              <svg
+                aria-hidden="true"
+                fill="none"
+                height="20"
+                viewBox="0 0 24 24"
+                width="20"
+                xmlns="http://www.w3.org/2000/svg"
+              >
+                <path
+                  d="M18 6L6 18M6 6l12 12"
+                  stroke="currentColor"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth="2"
+                />
+              </svg>
+            </DialogPrimitive.Close>
+          </div>
         </DialogPrimitive.Content>
       </DialogPrimitive.Portal>
     </DialogPrimitive.Root>

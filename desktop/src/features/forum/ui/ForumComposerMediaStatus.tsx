@@ -1,3 +1,5 @@
+import * as React from "react";
+
 import type { useMediaUpload } from "@/features/messages/lib/useMediaUpload";
 import { ComposerAttachments } from "@/features/messages/ui/ComposerAttachments";
 
@@ -5,9 +7,12 @@ type ComposerMedia = Pick<
   ReturnType<typeof useMediaUpload>,
   | "isUploading"
   | "cancelUpload"
+  | "originalUrlByUrl"
   | "pendingImeta"
   | "removeAttachment"
+  | "revertAttachment"
   | "setUploadState"
+  | "uploadEditedAttachment"
   | "uploadState"
   | "uploadingCount"
   | "uploadingPreviews"
@@ -20,6 +25,13 @@ type ForumComposerMediaStatusProps = {
 export function ForumComposerMediaStatus({
   media,
 }: ForumComposerMediaStatusProps) {
+  const handleEditSave = React.useCallback(
+    async (url: string, bytes: Uint8Array) => {
+      await media.uploadEditedAttachment(url, bytes);
+    },
+    [media.uploadEditedAttachment],
+  );
+
   return (
     <>
       {media.uploadState.status === "error" ? (
@@ -41,7 +53,10 @@ export function ForumComposerMediaStatus({
             attachments={media.pendingImeta}
             isUploading={media.isUploading}
             onCancelUpload={media.cancelUpload}
+            onEditSave={handleEditSave}
             onRemove={media.removeAttachment}
+            onRevert={media.revertAttachment}
+            originalUrlByUrl={media.originalUrlByUrl}
             uploadingCount={media.uploadingCount}
             uploadingPreviews={media.uploadingPreviews}
           />

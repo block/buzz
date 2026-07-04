@@ -17,6 +17,7 @@ import {
   stripImetaMediaLines,
 } from "@/features/messages/lib/imetaMediaMarkdown";
 
+import { useAttachmentEditing } from "@/features/messages/lib/useAttachmentEditing";
 import {
   type MediaUploadController,
   useMediaUpload,
@@ -805,41 +806,24 @@ function MessageComposerImpl({
     [media.removeAttachment],
   );
 
-  const handleComposerSpoilerToggle = React.useCallback(
-    ({
-      emptySelection,
-      nextSpoilered,
-    }: {
-      emptySelection: boolean;
-      nextSpoilered?: boolean;
-    }) => {
-      if (!emptySelection) return;
+  const { handleAttachmentEditSave, handleAttachmentRevert } =
+    useAttachmentEditing({
+      revertAttachment: media.revertAttachment,
+      setSpoileredAttachmentUrls,
+      uploadEditedAttachment: media.uploadEditedAttachment,
+    });
 
-      const mediaUrls = media.pendingImetaRef.current
-        .filter(
-          (attachment) =>
-            attachment.type.startsWith("image/") ||
-            attachment.type.startsWith("video/"),
-        )
-        .map((attachment) => attachment.url);
-      if (mediaUrls.length === 0) return;
-
-      setSpoileredAttachmentUrls((current) => {
-        const shouldSpoiler =
-          nextSpoilered ?? mediaUrls.some((url) => !current.has(url));
-        const next = new Set(current);
-        for (const url of mediaUrls) {
-          if (shouldSpoiler) {
-            next.add(url);
-          } else {
-            next.delete(url);
-          }
-        }
-        return next;
-      });
-    },
-    [media.pendingImetaRef],
-  );
+  const handleToggleAttachmentSpoiler = React.useCallback((url: string) => {
+    setSpoileredAttachmentUrls((current) => {
+      const next = new Set(current);
+      if (next.has(url)) {
+        next.delete(url);
+      } else {
+        next.add(url);
+      }
+      return next;
+    });
+  }, []);
 
   return (
     <>
@@ -924,7 +908,11 @@ function MessageComposerImpl({
                   onCancelUpload={media.cancelUpload}
                   uploadingCount={media.uploadingCount}
                   uploadingPreviews={media.uploadingPreviews}
+                  onEditSave={handleAttachmentEditSave}
                   onRemove={handleRemoveAttachment}
+                  onRevert={handleAttachmentRevert}
+                  originalUrlByUrl={media.originalUrlByUrl}
+                  onToggleSpoiler={handleToggleAttachmentSpoiler}
                   spoileredUrls={spoileredAttachmentUrls}
                 />
               </div>
@@ -956,9 +944,7 @@ function MessageComposerImpl({
               onLinkButton={linkEditor.openFromToolbar}
               onOpenMentionPicker={openMentionPicker}
               onPaperclip={handlePaperclipClick}
-              onSpoilerToggle={handleComposerSpoilerToggle}
               sendDisabled={sendDisabled}
-              spoilerActive={spoileredAttachmentUrls.size > 0}
             />
           </form>
         </div>

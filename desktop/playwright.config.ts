@@ -38,6 +38,7 @@ export default defineConfig({
         "**/observer-feed-screenshots.spec.ts",
         "**/file-attachment.spec.ts",
         "**/image-attachment-gallery.spec.ts",
+        "**/composer-image-draw.spec.ts",
         "**/video-attachment.spec.ts",
         "**/spoiler.spec.ts",
         "**/composer-tooltip-dismiss.spec.ts",

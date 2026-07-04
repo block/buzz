@@ -205,6 +205,44 @@ export function useMediaUpload() {
   const pendingImetaRef = React.useRef(pendingImeta);
   pendingImetaRef.current = pendingImeta;
 
+  /**
+   * Pre-edit originals of annotated attachments, keyed by the annotated
+   * attachment's URL. Powers "revert to original" in the composer lightbox.
+   * In-memory only — cleared implicitly when the attachment leaves the
+   * composer (send, remove, draft switch).
+   */
+  const [originalsByUrl, setOriginalsByUrl] = React.useState<
+    Map<string, BlobDescriptor>
+  >(() => new Map());
+  const originalsByUrlRef = React.useRef(originalsByUrl);
+  originalsByUrlRef.current = originalsByUrl;
+
+  /** Annotated URL → original URL (derived; handy for stable list keys). */
+  const originalUrlByUrl = React.useMemo(() => {
+    const map = new Map<string, string>();
+    for (const [url, original] of originalsByUrl) map.set(url, original.url);
+    return map;
+  }, [originalsByUrl]);
+
+  // Prune originals whose annotated attachment is no longer pending —
+  // covers remove, cancel, send-clear, and draft restore in one place.
+  React.useEffect(() => {
+    setOriginalsByUrl((prev) => {
+      if (prev.size === 0) return prev;
+      const liveUrls = new Set(pendingImeta.map((d) => d.url));
+      let changed = false;
+      const next = new Map<string, BlobDescriptor>();
+      for (const [url, original] of prev) {
+        if (liveUrls.has(url)) {
+          next.set(url, original);
+        } else {
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [pendingImeta]);
+
   /** Monotonic slot counter — ensures each batch gets unique indices even
    *  before React flushes the state update. */
   const nextSlotRef = React.useRef(0);
@@ -511,6 +549,80 @@ export function useMediaUpload() {
     [isUploadCanceled, onUploaded, onUploadError, reserveUploadingPreview],
   );
 
+  /**
+   * Upload an annotated replacement for an existing image attachment and
+   * swap it into the same slot (attachment order is preserved). The pre-edit
+   * descriptor is remembered in `originalsByUrl` so the edit can be reverted;
+   * chained edits keep the earliest original as the single revert point.
+   *
+   * Returns the new descriptor, or null if `oldUrl` is no longer pending.
+   * Rejects on upload failure (after surfacing the standard error banner) so
+   * callers can keep their editing UI open.
+   */
+  const uploadEditedAttachment = React.useCallback(
+    async (
+      oldUrl: string,
+      bytes: Uint8Array,
+    ): Promise<BlobDescriptor | null> => {
+      const oldDescriptor = pendingImetaRef.current.find(
+        (d) => d.url === oldUrl,
+      );
+      if (!oldDescriptor) return null;
+
+      // The annotated output is always PNG — swap the extension accordingly.
+      const stem = (oldDescriptor.filename ?? "image").replace(/\.[^.]+$/, "");
+      const filename = `${stem}.png`;
+
+      const previewId = reserveUploadingPreview();
+      setUploadingCount((c) => c + 1);
+      try {
+        const descriptor = await uploadMediaBytes(
+          [...bytes],
+          filename,
+          uploadProgressId(previewId),
+        );
+        if (isUploadCanceled(previewId)) return null;
+        finishUpload(previewId);
+        setImetaSlots((prev) =>
+          prev.map((d) => (d?.url === oldUrl ? descriptor : d)),
+        );
+        setOriginalsByUrl((prev) => {
+          const next = new Map(prev);
+          // Re-editing an annotated image keeps the earliest original.
+          const original = prev.get(oldUrl) ?? oldDescriptor;
+          next.delete(oldUrl);
+          next.set(descriptor.url, original);
+          return next;
+        });
+        return descriptor;
+      } catch (err) {
+        onUploadError(err, previewId);
+        throw err;
+      }
+    },
+    [finishUpload, isUploadCanceled, onUploadError, reserveUploadingPreview],
+  );
+
+  /**
+   * Swap an annotated attachment back to its pre-edit original (same slot)
+   * and forget the stored original. Returns the restored descriptor, or null
+   * if the URL has no recorded original.
+   */
+  const revertAttachment = React.useCallback(
+    (url: string): BlobDescriptor | null => {
+      const original = originalsByUrlRef.current.get(url);
+      if (!original) return null;
+      setImetaSlots((prev) => prev.map((d) => (d?.url === url ? original : d)));
+      setOriginalsByUrl((prev) => {
+        const next = new Map(prev);
+        next.delete(url);
+        return next;
+      });
+      return original;
+    },
+    [],
+  );
+
   const removeAttachment = React.useCallback((url: string) => {
     setImetaSlots((prev) => prev.map((d) => (d?.url === url ? null : d)));
   }, []);
@@ -541,11 +653,14 @@ export function useMediaUpload() {
       handlePaste,
       isDragOver,
       isUploading,
+      originalUrlByUrl,
       pendingImeta,
       pendingImetaRef,
       removeAttachment,
+      revertAttachment,
       setPendingImeta,
       setUploadState,
+      uploadEditedAttachment,
       uploadFile,
       uploadingCount,
       uploadingPreviews,
@@ -561,9 +676,12 @@ export function useMediaUpload() {
       handlePaste,
       isDragOver,
       isUploading,
+      originalUrlByUrl,
       pendingImeta,
       removeAttachment,
+      revertAttachment,
       setPendingImeta,
+      uploadEditedAttachment,
       uploadFile,
       uploadingCount,
       uploadingPreviews,
