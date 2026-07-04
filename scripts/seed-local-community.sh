@@ -67,7 +67,7 @@ for h in hosts:
 if not seen:
     raise SystemExit("could not derive a host from RELAY_URL")
 
-print(",\n".join(f"    ('{h.replace("'", "''")}')" for h in seen))
+print(",\n".join("    ('{}')".format(h.replace("'", "''")) for h in seen))
 PY
 )
 
