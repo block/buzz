@@ -3,6 +3,7 @@ import { AnimatePresence, motion } from "motion/react";
 import { SidebarRelayConnectionCard } from "@/features/sidebar/ui/SidebarRelayConnectionCard";
 import { useSidebarRelayConnectionCard } from "@/features/sidebar/ui/useSidebarRelayConnectionCard";
 import { cn } from "@/shared/lib/cn";
+import { useIsMobile } from "@/shared/hooks/use-mobile";
 import { useSidebar } from "@/shared/ui/sidebar";
 
 type RelayConnectionOverlayProps = {
@@ -25,9 +26,15 @@ export function RelayConnectionOverlay({
   relayUrl,
 }: RelayConnectionOverlayProps) {
   const card = useSidebarRelayConnectionCard(errorMessage, relayUrl);
-  const { open: sidebarOpen } = useSidebar();
+  const { open: sidebarOpen, openMobile } = useSidebar();
+  const isMobile = useIsMobile();
 
-  const shouldShow = card.showSidebarRelayConnectionCard && !sidebarOpen;
+  // Show the overlay when the sidebar surface isn't visible:
+  // - Desktop: sidebar is collapsed (open === false)
+  // - Mobile: the sheet is closed (openMobile === false)
+  const isSidebarSurfaceHidden = isMobile ? !openMobile : !sidebarOpen;
+  const shouldShow =
+    card.showSidebarRelayConnectionCard && isSidebarSurfaceHidden;
 
   return (
     <AnimatePresence>
