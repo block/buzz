@@ -66,6 +66,30 @@ pub struct SessionCancelParams {
     pub session_id: String,
 }
 
+/// Params for goose's non-standard `_goose/unstable/session/steer` request:
+/// inject user input into the *currently active* prompt without starting a new
+/// one. `expected_run_id` must match the run id buzz-agent advertised via
+/// `params.update._meta.goose.activeRunId` on a `session/update`, so a steer
+/// can't race a turn that already ended or hasn't started.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionSteerParams {
+    pub session_id: String,
+    #[serde(default)]
+    pub prompt: Vec<ContentBlock>,
+    pub expected_run_id: String,
+}
+
+/// Params for `session/set_model`: override the active model for an existing
+/// session without respawning. Applied immediately; subsequent prompts on this
+/// session use `model_id` instead of the configured `BUZZ_AGENT_MODEL`.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionSetModelParams {
+    pub session_id: String,
+    pub model_id: String,
+}
+
 pub fn classify(msg: &Value) -> Inbound {
     if !msg.is_object() || msg.get("jsonrpc").and_then(Value::as_str) != Some("2.0") {
         return Inbound::Invalid {
@@ -109,6 +133,25 @@ pub fn session_update(sid: &str, update: Value) -> Value {
         "jsonrpc": "2.0",
         "method": "session/update",
         "params": { "sessionId": sid, "update": update },
+    })
+}
+
+/// A `session/update` notification carrying a `update._meta.goose.<key>` field.
+/// Used to advertise `activeRunId` (so steer-capable clients can target the
+/// in-flight run) and `queuedSteer` (so they can correlate an accepted steer
+/// with the chunk that later picks it up) — matching goose's wire layout where
+/// `_meta` is nested inside the `update` object (per the ACP `SessionInfoUpdate`
+/// schema), not alongside it at the params level.
+pub fn session_update_with_goose_meta(sid: &str, update: Value, goose_meta: Value) -> Value {
+    let mut update = update;
+    update["_meta"] = json!({ "goose": goose_meta });
+    json!({
+        "jsonrpc": "2.0",
+        "method": "session/update",
+        "params": {
+            "sessionId": sid,
+            "update": update,
+        },
     })
 }
 

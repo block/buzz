@@ -1,25 +1,13 @@
 # Using Third-Party Nostr Clients with Buzz
 
-Buzz is a Nostr relay that speaks NIP-29 (relay-based groups) natively. There are two ways for
-third-party Nostr clients to connect:
-
-| Path | Protocol | Connects to | Expected clients (not all verified in-repo) |
-|------|----------|-------------|----------------------------------------------|
-| **Direct** | NIP-29 | `buzz-relay :3000` | NIP-29 clients (e.g. Chachi, 0xchat), nak |
-| **Via proxy** | NIP-28 | `buzz-proxy :4869` | NIP-28 clients (e.g. Coracle, Amethyst), nostr-tools apps |
-
-**Direct** is simpler — no extra process, no translation layer. Use it when your client speaks
-NIP-29. **Proxy** is for external guests (investors, press, partners, etc.) who use standard NIP-28
-clients and don't have company credentials.
-
-Both paths require NIP-42 authentication.
+Buzz is a Nostr relay that speaks NIP-29 (relay-based groups) natively. Third-party Nostr clients connect directly to `buzz-relay` using NIP-29 and NIP-42 authentication. The old NIP-28 compatibility proxy has been removed.
 
 ## Community scope
 
 Buzz treats the relay URL/domain as authoritative for the community. Today's
 single-relay deployment has exactly one community behind that URL, so existing
-NIP-29/NIP-28 clients keep using the same WebSocket URL, event kinds, tags, and
-REST/media/git paths. In a multi-community deployment, each community is reached
+NIP-29 clients keep using the same WebSocket URL, event kinds, tags, and
+HTTP/media/git paths. In a multi-community deployment, each community is reached
 by its own domain or subdomain; the backend resolves the community from the host
 before handling AUTH, EVENT, REQ, REST, media, git, search, or workflow traffic.
 
@@ -33,7 +21,7 @@ across community domains.
 
 ---
 
-## Path 1: NIP-29 Direct
+## NIP-29 Direct
 
 Connect any NIP-29 client straight to the relay.
 
@@ -211,283 +199,6 @@ nak req -k 1059 --tag "p=<your-hex-pubkey>" \
 
 ---
 
-## Path 2: NIP-28 via buzz-proxy
-
-For clients that speak NIP-28 (kind:40/41/42) but not NIP-29, **buzz-proxy** translates between
-the two protocols in real time. Events are re-signed with deterministic shadow keys so each
-external user maps to a consistent identity on the relay.
-
-### Quick Start
-
-```bash
-# 1. Start infrastructure + relay (see Path 1)
-
-# 2. Generate proxy server key and derive its pubkey
-export BUZZ_PROXY_SERVER_KEY=$(openssl rand -hex 32)
-PROXY_PUBKEY=$(echo $BUZZ_PROXY_SERVER_KEY | nak key public)
-
-# 3. Mint a proxy API token (required until proxy is migrated to NIP-98 auth)
-export BUZZ_PROXY_API_TOKEN=$(curl -s -X POST http://localhost:3000/api/tokens \
-  -H "Authorization: Nostr <base64-nip98-event>" \
-  -H "Content-Type: application/json" \
-  -d '{"name":"proxy"}' | jq -r .token)
-
-# 4. Get the relay's public key (needed for attribution trust)
-#    This is the pubkey of the relay's signing keypair. If BUZZ_RELAY_PRIVATE_KEY
-#    is set, derive it: echo $BUZZ_RELAY_PRIVATE_KEY | nak key public
-#    If not set, the relay generates a random keypair at startup — check relay logs.
-export BUZZ_RELAY_PUBKEY=<relay-hex-pubkey>
-
-# 5. Start the proxy
-export BUZZ_UPSTREAM_URL=ws://localhost:3000
-export BUZZ_PROXY_SALT=$(openssl rand -hex 32)
-export BUZZ_PROXY_ADMIN_SECRET=$(openssl rand -hex 16)
-cargo run -p buzz-proxy             # proxy on :4869
-
-# 6. Register a guest
-curl -X POST http://localhost:4869/admin/guests \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer $BUZZ_PROXY_ADMIN_SECRET" \
-  -d '{"pubkey": "<guest-hex-pubkey>", "channels": "<channel-uuid>"}'
-
-# 7. Connect any NIP-28 + NIP-42 client to ws://localhost:4869
-```
-
-### What Works
-
-| Feature | Status | Notes |
-|---------|:------:|-------|
-| **NIP-11 relay info** | ✅ | Standard relay info document at `GET /` |
-| **NIP-42 authentication** | ✅ | Proactive challenge + reactive-auth compatible |
-| **Channel discovery (kind:40)** | ✅ | Synthesized from Buzz REST API at startup; served locally. Content uses channel UUID as `name` for ID stability; human-readable name is in kind:41. **Snapshot — new channels created after proxy start require restart. Renames do NOT affect kind:40 (UUID-anchored).** |
-| **Channel metadata (kind:41)** | ✅ | Name, description (picture always empty — no channel-picture source in proxy path); synthesized at startup, served locally. **Snapshot — new channels AND renames require restart to update local kind:41.** |
-| **Channel messages (kind:42)** | ✅ | Translated to/from Buzz kind:9 |
-| **Inbound kind:1** | ✅ | Text notes (kind:1) accepted and translated to kind:9, same as kind:42 |
-| **Message editing (kind:41)** | ✅ | Bidirectional: inbound kind:41 → kind:40003; outbound kind:40003 → kind:41. **Note:** inbound kind:41 is always treated as a message edit, never as a channel metadata update. Standard NIP-28 channel-metadata writes are not supported. |
-| **Reactions (kind:7)** | ✅ | Bidirectional; inbound channel scope verified against allowed channels. **Constraint:** target must already be known to the proxy's ID mapping cache (populated by prior fetch, outbound delivery, or inbound publish). Error if unknown: `reaction target is unknown to the proxy; fetch the message first`. |
-| **Deletions (kind:5)** | ⚠️ | **Outbound only** — standard kind:5 events stored on the relay are translated for clients. Admin deletions (kind:9005) and REST-API deletes soft-delete without emitting kind:5, so proxy clients won't see those. Inbound kind:5 blocked by proxy policy (not yet implemented). |
-| **Real-time streaming** | ✅ | Live event delivery via open subscriptions |
-| **Multi-channel access** | ✅ | Guests can be granted access to multiple channels |
-| **Shadow identity** | ✅ | Each guest gets a deterministic shadow keypair |
-
-> **kind:41 dual semantics:** A `REQ` for kind:41 returns both locally-synthesized channel metadata
-> (startup snapshot) AND upstream edit events (kind:40003 translated to kind:41). Clients may see
-> two different event types under the same kind number. Inbound kind:41 is always treated as a
-> message edit (→ kind:40003), never as a channel metadata update.
-
-### What Doesn't Work
-
-| Feature | Status | Why |
-|---------|:------:|-----|
-| **Channel creation (kind:40 write)** | ❌ | Channels created via REST API or NIP-29 kind:9007 (direct path) |
-| **Inbound deletions (kind:5)** | ❌ | Blocked by proxy policy; not yet implemented |
-| **DMs (NIP-04/NIP-44)** | ❌ | Proxy only handles NIP-28 channel events |
-| **User profiles (kind:0)** | ❌ | Profiles managed via REST API or kind:0 (direct path) |
-| **NIP-10 reply threading** | ⚠️ | Threading works on direct path; proxy preserves `#e` tags but does not translate thread metadata |
-| **NIP-50 search** | ❌ | Available on direct path only (ws://relay:3000); not proxied |
-| **File uploads (NIP-94/96)** | ❌ | Use Blossom on the relay directly (Path 1) |
-| **Relay lists / Outbox (NIP-65)** | ❌ | Single-relay architecture |
-
-### Channel UUIDs vs Event IDs
-
-Buzz identifies channels by UUID. NIP-28 clients identify channels by the event ID of the
-kind:40 creation event. The proxy translates automatically, but you need the event ID to subscribe.
-
-The synthesized kind:40 uses the channel UUID as the `name` field in content (for deterministic
-event ID stability across restarts). The human-readable channel name is in kind:41 metadata:
-
-```bash
-# Get kind:40 (UUID in content.name) and kind:41 (human-readable name)
-nak req -k 40 -k 41 --auth --sec <privkey> ws://localhost:4869
-```
-
-### Proxy Authentication
-
-Two methods, both using NIP-42:
-
-**Pubkey-based (primary)** — register a guest's hex pubkey with channel access:
-
-```bash
-# Register
-curl -X POST http://localhost:4869/admin/guests \
-  -H "Authorization: Bearer $BUZZ_PROXY_ADMIN_SECRET" \
-  -H "Content-Type: application/json" \
-  -d '{"pubkey": "<hex>", "channels": "<uuid1>,<uuid2>"}'
-
-# List
-curl http://localhost:4869/admin/guests \
-  -H "Authorization: Bearer $BUZZ_PROXY_ADMIN_SECRET"
-
-# Revoke
-curl -X DELETE http://localhost:4869/admin/guests \
-  -H "Authorization: Bearer $BUZZ_PROXY_ADMIN_SECRET" \
-  -H "Content-Type: application/json" \
-  -d '{"pubkey": "<hex>"}'
-```
-
-> **Private channels:** The proxy authenticates upstream using its own server key via NIP-42.
-> `GET /api/channels` and relay REQ filters only return channels accessible to that identity.
-> For the proxy to expose a private channel, the proxy's server pubkey must itself be a member
-> of that channel. Guest registration alone is not sufficient for private channels.
-
-**Invite tokens (secondary)** — for ad-hoc sharing with expiry and use limits:
-
-```bash
-# Create
-curl -X POST http://localhost:4869/admin/invite \
-  -H "Authorization: Bearer $BUZZ_PROXY_ADMIN_SECRET" \
-  -H "Content-Type: application/json" \
-  -d '{"channels": "<uuid1>,<uuid2>", "max_uses": 5, "hours": 48}'
-
-# Connect: ws://localhost:4869?token=<invite_token>
-```
-
-### Connecting with Coracle (expected, not verified in-repo)
-
-1. Open **https://coracle.social**.
-2. Note your hex pubkey from **Settings → Account**.
-3. Register it: `POST /admin/guests` with your pubkey and channel UUIDs.
-4. **Settings → Relays → Add Relay** → `ws://localhost:4869`
-5. Coracle should handle NIP-42 auth automatically. Channels should appear under **Public Channels**.
-
-For remote access, tunnel with ngrok: `ngrok http 4869` → use `wss://<subdomain>.ngrok.io`.
-
-### Connecting with nak (Proxy)
-
-```bash
-# Discover channels
-nak req -k 40 -l 10 --auth --sec <privkey> ws://localhost:4869
-
-# Read messages from a specific channel
-nak req -k 42 --tag "e=<kind40-event-id>" -l 10 --auth --sec <privkey> ws://localhost:4869
-
-# Send a message
-nak event -k 42 -c "Hello!" --tag e=<kind40-event-id> \
-  --auth --sec <privkey> ws://localhost:4869
-
-# Stream live from a specific channel
-nak req -k 42 --tag "e=<kind40-event-id>" --stream --auth --sec <privkey> ws://localhost:4869
-```
-
-### Connecting with nostr-tools v2.23
-
-```javascript
-import { Relay } from 'nostr-tools/relay'
-import { finalizeEvent } from 'nostr-tools/pure'
-import { channelMessageEvent } from 'nostr-tools/nip28'
-
-const relay = new Relay('ws://localhost:4869', { websocketImplementation: WebSocket })
-relay.onauth = async (template) => finalizeEvent(template, secretKey)
-await relay.connect()
-
-const event = channelMessageEvent({
-  channel_create_event_id: '<kind:40 event ID>',
-  relay_url: 'ws://localhost:4869',
-  content: 'Hello from nostr-tools!',
-  created_at: Math.floor(Date.now() / 1000),
-}, secretKey)
-await relay.publish(event)
-```
-
-Test script: `scripts/test-proxy-nostr-tools.mjs`.
-
-### Connecting with nostr-sdk v0.44 (Python)
-
-```python
-import nostr_sdk
-
-keys = nostr_sdk.Keys.parse("<hex-privkey>")
-signer = nostr_sdk.NostrSigner.keys(keys)
-client = nostr_sdk.ClientBuilder().signer(signer).build()
-client.automatic_authentication(True)
-
-await client.add_relay(nostr_sdk.RelayUrl.parse("ws://localhost:4869"))
-await client.connect()
-
-builder = nostr_sdk.EventBuilder.channel_msg(channel_eid, relay_url, "Hello from Python!")
-await client.send_event_builder(builder)
-```
-
-Test script: `scripts/test-proxy-nostr-sdk-python.py`.
-
-### Tested Clients (Proxy)
-
-| Client | Platform | Evidence | Notes |
-|--------|----------|:--------:|-------|
-| **nak** | CLI | Manual (anecdotal) | Auth, discovery, metadata, send, receive, streaming |
-| **nostr-tools v2.23** | JS | Standalone script | `scripts/test-proxy-nostr-tools.mjs` |
-| **nostr-sdk v0.44** | Python | Standalone script | `scripts/test-proxy-nostr-sdk-python.py` |
-
-**Not verified in-repo** (anecdotal / expected based on NIP-28 + NIP-42 support):
-- **Coracle** (Web) — expected best GUI; renders kind:42 in chat UI
-- **Amethyst** (Android) — NIP-28 public chat view
-- **Nostrudel** (Web) — good NIP-28 support
-
-### Clients That Won't Work (anecdotal)
-
-| Client | Why |
-|--------|-----|
-| **Damus** | NIP-42 works but no NIP-28 channel UI (anecdotal) |
-| **Primal** | Caching relay infrastructure — doesn't connect directly (anecdotal) |
-| **Clients without NIP-42** | Both relay and proxy require authentication |
-
----
-
-## Architecture
-
-```
-                          NIP-29 (direct)
-┌──────────────────┐ ◄──────────────────────────► ┌──────────────────┐
-│  NIP-29 Client   │   kind:9, kind:7, kind:5     │  Buzz Relay    │
-│  (Chachi, 0xchat,│   kind:9000/01/02/05/07/08   │  :3000           │
-│   nak)           │   #h(uuid), NIP-42            │                  │
-└──────────────────┘                               │  kind:39000/1/2  │
-                                                   │  kind:44100/44101│
-                                                   │  Blossom media   │
-┌──────────────────┐        ┌────────────────┐     │  /media/upload   │
-│  NIP-28 Client   │◄──────►│  buzz-proxy    │◄───►│                  │
-│  (Coracle, nak,  │ NIP-28 │  :4869         │ WS  └──────────────────┘
-│   nostr-tools)   │        │                │ +REST
-└──────────────────┘        │ kind:42↔kind:9 │ (/api/channels,
-                            │ kind:41↔40003  │  /api/events)
-                            │ kind:1→kind:9  │
-                            │ kind:7 (bidir) │
-                            │ kind:5 (out)   │
-                            │ #e(id)↔#h(uuid)│
-                            │ shadow keys    │
-                            └────────────────┘
-```
-
-**Direct path:** Clients speak kind:9 natively. No translation, no shadow keys, no proxy. The relay
-handles NIP-42 auth, channel scoping via `#h` tags, group discovery (kind:39000–39002), membership
-notifications (kind:44100/44101), NIP-29 admin commands (kind:9000, 9001, 9002, 9005, 9007, 9008,
-9021, 9022; plus deferred 9009), and standard deletions/reactions (kind:5/7).
-
-**Proxy path:** Translates kind:42 ↔ kind:9 (also accepts kind:1 inbound), kind:41 ↔ kind:40003
-(edits), kind:7 (reactions, bidirectional), and kind:5 (deletions, outbound only — standard kind:5
-events only; admin/REST deletions do not surface as NIP-28 delete events). Re-signs events with
-deterministic shadow keys (HMAC-SHA256 of salt + pubkey). Channel discovery (kind:40) is synthesized
-locally from Buzz's REST API at startup and never forwarded upstream. Channel metadata (kind:41)
-is dual-sourced: local snapshot metadata plus upstream edit events (kind:40003 → kind:41).
-
----
-
-## Proxy Environment Variables
-
-| Variable | Required | Default | Description |
-|----------|:--------:|---------|-------------|
-| `BUZZ_UPSTREAM_URL` | ✅ | — | WebSocket URL of the relay |
-| `BUZZ_PROXY_API_TOKEN` | ✅ | — | Relay API token for REST calls (required until proxy is migrated to NIP-98 auth) |
-| `BUZZ_PROXY_SERVER_KEY` | ✅ | — | Hex-encoded 32-byte secret key (raw hex, not bech32 `nsec`) |
-| `BUZZ_PROXY_SALT` | ✅ | — | Hex 32-byte salt for shadow keys (keep stable and secret) |
-| `BUZZ_RELAY_PUBKEY` | ✅ | — | Hex-encoded 64-char relay public key (for attribution trust) |
-| `BUZZ_PROXY_BIND_ADDR` | ❌ | `0.0.0.0:4869` | Listen address |
-| `BUZZ_PROXY_RELAY_URL` | ❌ | derived from bind addr | Public WebSocket URL for NIP-42 relay-tag validation. Set if behind a reverse proxy. |
-| `BUZZ_PROXY_ADMIN_SECRET` | ❌ | — | Bearer secret for `/admin/*` (unset = no auth, dev mode) |
-| `RUST_LOG` | ❌ | `buzz_proxy=info,tower_http=info` | Log level |
-
----
-
 ## Relay Membership (NIP-43)
 
 When `BUZZ_REQUIRE_RELAY_MEMBERSHIP=true`, every authenticated connection is checked against the
@@ -551,6 +262,7 @@ the sender to be authenticated (NIP-42) as the relay owner or an admin.
 | 9030 | Add member | `["p", "<hex-pubkey>"]`, optional `["role", "member\|admin"]` |
 | 9031 | Remove member | `["p", "<hex-pubkey>"]`, optional `["role", "member\|admin"]` |
 | 9032 | Change role | `["p", "<hex-pubkey>"]`, `["role", "member\|admin"]` |
+| 9033 | Set workspace profile (icon) | `["icon", "<https-url or data:image/* URL>"]` (empty clears) |
 
 Example using `nak`:
 
@@ -583,6 +295,13 @@ After each add/remove/role-change, the relay publishes a kind:13534 membership l
 # Subscribe to the live membership roster
 nak req -k 13534 --auth --sec <privkey> ws://localhost:3000
 ```
+
+A kind:9033 command similarly makes the relay store the workspace icon (per
+community) and serve it in the standard NIP-11 `icon` field of its relay
+information document. Clients render it in the workspace rail/switcher; anyone
+can read it (`curl -H 'Accept: application/nostr+json' http://localhost:3000`),
+but only admins/owners can set it. Full spec:
+[docs/nips/NIP-WP.md](docs/nips/NIP-WP.md).
 
 ### Known Limitations
 
@@ -619,15 +338,6 @@ nak req -k 13534 --auth --sec <privkey> ws://localhost:3000
 - **kind:5 uses `#h` if present, but doesn't require it.** Deletions validate author-match against target events via `#e` tags. Only self-authored events can be deleted (admin deletions use kind:9005).
 - **Client-submitted kind:44100/44101 rejected.** Membership notifications can only be signed by the relay keypair.
 
-### Proxy Path
-- **Event pubkey verification.** Inbound events must have a `pubkey` matching the authenticated NIP-42 identity. Spoofed pubkeys are rejected.
-- **Inbound kind:5 blocked by proxy policy.** Not yet implemented. The relay's deletion handler does perform author-match validation, but the proxy-side translation path for inbound deletions has not been built.
-- **Shadow keys use HMAC-SHA256.** Proper domain separation; salt must be kept secret.
-- **Guest registry is in-memory.** Lost on proxy restart. Re-register guests after restarts.
-- **Invite tokens are in-memory.** Lost on proxy restart. Default `max_uses` is 10.
-- **Revocation is not session-aware.** Removing a guest doesn't disconnect active sessions.
-- **Admin secret uses hash-then-compare.** No timing oracle on the bearer token check.
-
 ---
 
 ## Troubleshooting
@@ -639,23 +349,8 @@ nak req -k 13534 --auth --sec <privkey> ws://localhost:3000
 | `auth-required: verification failed` | Pubkey not in allowlist (when enabled), or NIP-42 auth failed | Add pubkey to `pubkey_allowlist` table; verify NIP-42 challenge/response |
 | `invalid: channel-scoped events must include an h tag` | kind:9 sent without `#h` tag | Include `--tag "h=<channel-uuid>"` |
 | `invalid: reaction target event not found` | Reaction references unknown event | Ensure the target event exists in the relay |
-| No discovery events | Channel is private + you're not a member | Join the channel first via REST API |
-
-### Proxy Path
-
-| Symptom | Cause | Fix |
-|---------|-------|-----|
-| `restricted: pubkey not registered and no invite token provided` | Pubkey not registered, no token | Register guest or create invite token |
-| `error: token invalid: invite token not found` | Token doesn't exist (proxy restarted or mistyped) | Create new invite token |
-| `error: token invalid: invite token expired` | Token past expiry time | Create new invite token |
-| `error: token invalid: invite token exhausted` | Token reached `max_uses` limit | Create new invite token with higher limit |
-| `auth-required: authentication timeout` | Client didn't respond to NIP-42 within 30s | Use a NIP-42-capable client |
-| No messages after auth | Unresolved `#e` filter silently returns zero events | Re-query `nak req -k 40` for correct kind:40 event ID |
-| Guest still has access after revoke | Active sessions not terminated | Restart proxy to cut all sessions |
-| Proxy startup fails | Can't reach relay REST API or missing env vars | Check relay is running; verify all required env vars (especially `BUZZ_RELAY_PUBKEY`) |
+| No discovery events | Channel is private + you're not a member | Join the channel first |
 
 ---
 
 ## Further Reading
-
-- [`crates/buzz-proxy/README.md`](crates/buzz-proxy/README.md) — proxy crate internals, shadow key derivation, subscription namespacing. **Note:** some auth/buffering details in that README may be stale; this document is the authoritative reference for proxy behavior.

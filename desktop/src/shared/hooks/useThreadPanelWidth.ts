@@ -1,38 +1,47 @@
 import * as React from "react";
 
-const THREAD_PANEL_DEFAULT_WIDTH_PX = 380;
-export const THREAD_PANEL_MIN_WIDTH_PX = 300;
-export const THREAD_PANEL_SINGLE_COLUMN_BREAKPOINT_PX =
-  THREAD_PANEL_MIN_WIDTH_PX * 2;
-const THREAD_PANEL_MAX_WIDTH_PX = 720;
+import {
+  AUXILIARY_PANEL_DEFAULT_WIDTH_PX,
+  clampAuxiliaryPanelWidth,
+} from "@/shared/layout/AuxiliaryPanel";
+
 const THREAD_PANEL_WIDTH_SESSION_KEY = "buzz.desktop.thread-panel-width";
 
+function getViewportWidth(): number {
+  return typeof window === "undefined" ? 0 : window.innerWidth;
+}
+
+/**
+ * Clamp the stored panel width for the current viewport.
+ *
+ * The upper bound grows with the viewport (see {@link clampAuxiliaryPanelWidth}) so
+ * the pane can expand on ultrawide displays. `AuxiliaryPanelShell` additionally
+ * clamps the rendered width to `calc(100% - MIN)` at paint time, so a stored width
+ * larger than the current viewport never collapses the main pane.
+ */
 function clampThreadPanelWidth(width: number): number {
-  return Math.max(
-    THREAD_PANEL_MIN_WIDTH_PX,
-    Math.min(THREAD_PANEL_MAX_WIDTH_PX, width),
-  );
+  return clampAuxiliaryPanelWidth(width, getViewportWidth());
 }
 
 function getInitialThreadPanelWidth(): number {
   if (typeof window === "undefined") {
-    return THREAD_PANEL_DEFAULT_WIDTH_PX;
+    return AUXILIARY_PANEL_DEFAULT_WIDTH_PX;
   }
 
   try {
     const raw = window.sessionStorage.getItem(THREAD_PANEL_WIDTH_SESSION_KEY);
     if (!raw) {
-      return THREAD_PANEL_DEFAULT_WIDTH_PX;
+      return AUXILIARY_PANEL_DEFAULT_WIDTH_PX;
     }
 
     const parsed = Number.parseInt(raw, 10);
     if (!Number.isFinite(parsed)) {
-      return THREAD_PANEL_DEFAULT_WIDTH_PX;
+      return AUXILIARY_PANEL_DEFAULT_WIDTH_PX;
     }
 
     return clampThreadPanelWidth(parsed);
   } catch {
-    return THREAD_PANEL_DEFAULT_WIDTH_PX;
+    return AUXILIARY_PANEL_DEFAULT_WIDTH_PX;
   }
 }
 
@@ -87,11 +96,11 @@ export function useThreadPanelWidth() {
   );
 
   const onResetWidth = React.useCallback(() => {
-    setWidthPx(THREAD_PANEL_DEFAULT_WIDTH_PX);
+    setWidthPx(AUXILIARY_PANEL_DEFAULT_WIDTH_PX);
   }, []);
 
   return {
-    canReset: widthPx !== THREAD_PANEL_DEFAULT_WIDTH_PX,
+    canReset: widthPx !== AUXILIARY_PANEL_DEFAULT_WIDTH_PX,
     onResetWidth,
     onResizeStart,
     widthPx,

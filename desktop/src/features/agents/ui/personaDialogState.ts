@@ -1,4 +1,4 @@
-import type { ParsePersonaFilesResult } from "@/shared/api/tauriPersonas";
+import type { ParsedPersonaPreview } from "@/shared/api/tauriPersonas";
 import type {
   AgentPersona,
   CreatePersonaInput,
@@ -12,7 +12,10 @@ export type PersonaDialogState = {
   title: string;
 };
 
-type ParsedPersonaDraft = ParsePersonaFilesResult["personas"][number];
+type ImportedPersonaAvatarPreview = Pick<
+  ParsedPersonaPreview,
+  "avatarDataUrl" | "avatarRef"
+>;
 
 /**
  * Whether the persona dialog's save action should be enabled.
@@ -28,12 +31,46 @@ export function canSubmitPersonaDialog(args: {
   return args.displayName.trim().length > 0 && !args.isPending;
 }
 
+function isSafeImportedAvatarRef(
+  ref: string | null | undefined,
+): ref is string {
+  const trimmed = ref?.trim();
+  if (!trimmed) return false;
+
+  try {
+    const parsed = new URL(trimmed);
+    return (
+      parsed.protocol === "http:" ||
+      parsed.protocol === "https:" ||
+      (parsed.protocol === "data:" && trimmed.startsWith("data:image/"))
+    );
+  } catch {
+    return false;
+  }
+}
+
+export function importedAvatarUrl(persona: ImportedPersonaAvatarPreview) {
+  if (persona.avatarDataUrl) return persona.avatarDataUrl;
+  return isSafeImportedAvatarRef(persona.avatarRef) ? persona.avatarRef : "";
+}
+
+export function formatPersonaNamePoolText(namePool: string[] | undefined) {
+  return namePool?.join(", ") ?? "";
+}
+
+export function parsePersonaNamePoolText(text: string): string[] {
+  return text
+    .split(",")
+    .map((value) => value.trim())
+    .filter((value) => value.length > 0);
+}
+
 export function createPersonaDialogState(): PersonaDialogState {
   return {
-    title: "Create persona",
+    title: "Create agent",
     description:
-      "Save a reusable role, prompt, and optional avatar for future agent deployments.",
-    submitLabel: "Create persona",
+      "Create an agent profile and start its managed agent instance.",
+    submitLabel: "Create agent",
     initialValues: {
       displayName: "",
       avatarUrl: "",
@@ -50,8 +87,8 @@ export function duplicatePersonaDialogState(
   return {
     title: `Duplicate ${persona.displayName}`,
     description:
-      "Create a new persona by copying this template and adjusting it as needed.",
-    submitLabel: "Create persona",
+      "Create a new agent by copying this profile and adjusting it as needed.",
+    submitLabel: "Create agent",
     initialValues: {
       displayName: `${persona.displayName} copy`,
       avatarUrl: persona.avatarUrl ?? "",
@@ -74,7 +111,7 @@ export function editPersonaDialogState(
   persona: AgentPersona,
 ): PersonaDialogState {
   return {
-    title: "Edit persona",
+    title: "Edit agent",
     description: "",
     submitLabel: "Save changes",
     initialValues: {
@@ -96,19 +133,20 @@ export function editPersonaDialogState(
 }
 
 export function importPersonaDialogState(
-  persona: ParsedPersonaDraft,
+  persona: ParsedPersonaPreview,
 ): PersonaDialogState {
   return {
     title: `Import ${persona.displayName}`,
-    description: "Review and save this imported persona.",
-    submitLabel: "Create persona",
+    description: "Review and create this imported agent.",
+    submitLabel: "Create agent",
     initialValues: {
       displayName: persona.displayName,
-      avatarUrl: persona.avatarDataUrl ?? "",
+      avatarUrl: importedAvatarUrl(persona),
       systemPrompt: persona.systemPrompt,
       runtime: persona.runtime ?? undefined,
       model: persona.model ?? undefined,
       provider: persona.provider ?? undefined,
+      ...(persona.namePool.length > 0 ? { namePool: persona.namePool } : {}),
     },
   };
 }

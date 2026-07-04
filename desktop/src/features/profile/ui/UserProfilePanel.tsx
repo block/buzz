@@ -53,6 +53,8 @@ import {
   useUserProfileQuery,
   useUsersBatchQuery,
 } from "@/features/profile/hooks";
+import { ownsAuthorAgent } from "@/features/profile/lib/identity";
+import { resolveProfileActivityAgent } from "@/features/profile/lib/profileActivityAgent";
 import {
   AgentInfoFocusedView,
   AgentInstructionsFocusedView,
@@ -83,19 +85,17 @@ import { useUserStatusQuery } from "@/features/user-status/hooks";
 import { useAgentSession } from "@/shared/context/AgentSessionContext";
 import { useEscapeKey } from "@/shared/hooks/useEscapeKey";
 import { useIsThreadPanelOverlay } from "@/shared/hooks/use-mobile";
-import { auxiliaryPanelContentPaddingClass } from "@/shared/layout/AuxiliaryPanelHeader";
+import { AuxiliaryPanelBody } from "@/shared/layout/AuxiliaryPanel";
 import { cn } from "@/shared/lib/cn";
 import type {
   AgentPersona,
   Channel,
   CreateManagedAgentInput,
   CreatePersonaInput,
-  ManagedAgent,
   UpdatePersonaInput,
 } from "@/shared/api/types";
 import { UserProfilePanelFrame } from "@/features/profile/ui/UserProfilePanelFrame";
 import { getUserProfilePanelHeaderContent } from "@/features/profile/ui/UserProfilePanelHeaderContent";
-
 export type { ProfilePanelTab, ProfilePanelView };
 
 export function UserProfilePanel({
@@ -116,9 +116,9 @@ export function UserProfilePanel({
   tab: controlledTab,
   view: controlledView,
   widthPx,
+  transparentChrome = false,
 }: UserProfilePanelProps) {
   const isOverlay = useIsThreadPanelOverlay();
-  const isFloatingOverlay = isOverlay && !isSinglePanelView;
   const isSplitLayout = layout === "split";
   useEscapeKey(onClose, isOverlay || isSinglePanelView);
 
@@ -270,47 +270,32 @@ export function UserProfilePanel({
   // the relay routes and the client decrypts those frames with the owner's OWN
   // key, so the agent's seckey is never needed. Computed here (before the gates
   // that consume it) so visibility keys off declared ownership, not key custody.
-  const isCurrentUserOwner =
-    currentPubkey !== undefined &&
-    ownerPubkey !== null &&
-    ownerPubkey.toLowerCase() === currentPubkey.toLowerCase();
+  const isCurrentUserOwner = ownsAuthorAgent(profile, currentPubkey);
   // The viewer may see owner-scoped data if they declared-own the agent OR they
   // manage it locally (older agents may not advertise an owner pubkey). Every
   // real boundary is server-side, so this only controls what UI we paint.
   const viewerIsOwner = isCurrentUserOwner || isOwner === true;
 
+  const activityAgent = React.useMemo(
+    () =>
+      resolveProfileActivityAgent({
+        effectivePubkey,
+        isBot,
+        managedAgent,
+        profile: profile ?? null,
+        relayAgent,
+        viewerIsOwner,
+      }),
+    [effectivePubkey, isBot, managedAgent, profile, relayAgent, viewerIsOwner],
+  );
+  const activityBridgeAgents = React.useMemo(
+    () => (activityAgent ? [activityAgent] : []),
+    [activityAgent],
+  );
   // Populate the active-turns store for this agent so useActiveAgentTurns works
   // even if the Agents page hasn't been visited yet.
-  const bridgeAgents = React.useMemo(
-    () =>
-      managedAgent
-        ? [{ pubkey: managedAgent.pubkey, status: managedAgent.status }]
-        : [],
-    [managedAgent],
-  );
-  // The observer bridge subscribes on the OWNER's own pubkey and decrypts the
-  // agent's telemetry with the owner's key — no agent seckey needed. It only
-  // decrypts frames whose agent pubkey is "known", and only subscribes when an
-  // agent is running/deployed. For a remote agent we own but don't manage
-  // locally, `managedAgent` is undefined, so we seed the bridge from the relay
-  // agent (treated as "deployed") when the viewer is the declared owner. This
-  // mirrors what the composer-area ingress already does in ChannelScreen.
-  const observerBridgeAgents = React.useMemo(() => {
-    if (managedAgent) {
-      return [{ pubkey: managedAgent.pubkey, status: managedAgent.status }];
-    }
-    if (viewerIsOwner && relayAgent) {
-      return [
-        {
-          pubkey: relayAgent.pubkey,
-          status: "deployed" as ManagedAgent["status"],
-        },
-      ];
-    }
-    return [];
-  }, [managedAgent, relayAgent, viewerIsOwner]);
-  useActiveAgentTurnsBridge(bridgeAgents);
-  useManagedAgentObserverBridge(observerBridgeAgents);
+  useActiveAgentTurnsBridge(activityBridgeAgents);
+  useManagedAgentObserverBridge(activityBridgeAgents);
   const canEditAgent =
     isOwner === true &&
     (managedAgent !== undefined ||
@@ -663,11 +648,7 @@ export function UserProfilePanel({
 
   const handleAddedToChannel = React.useCallback(
     (channel: Channel, result: AttachManagedAgentToChannelResult) => {
-      if (result.restarted) {
-        toast.success(
-          `Added ${result.agent.name} to ${channel.name} and restarted it.`,
-        );
-      } else if (result.started) {
+      if (result.started) {
         toast.success(`Added ${result.agent.name} to ${channel.name}.`);
       } else if (result.membershipAdded) {
         toast.success(`Added ${result.agent.name} to ${channel.name}.`);
@@ -685,10 +666,13 @@ export function UserProfilePanel({
     ],
   );
 
-  const handleOpenActivity = React.useCallback(() => {
-    if (!effectivePubkey) return;
-    onOpenAgentSession?.(effectivePubkey);
-  }, [effectivePubkey, onOpenAgentSession]);
+  const handleOpenActivity = React.useCallback(
+    (channelId?: string | null) => {
+      if (!effectivePubkey) return;
+      onOpenAgentSession?.(effectivePubkey, channelId ?? null);
+    },
+    [effectivePubkey, onOpenAgentSession],
+  );
 
   const handleOpenChannel = React.useCallback(
     (channelId: string) => {
@@ -769,28 +753,24 @@ export function UserProfilePanel({
       viewerIsOwner={viewerIsOwner}
     />
   );
-  const {
-    agentInfoFields,
-    agentSettingsFields,
-    diagnosticsFields,
-    modelLabel,
-  } = useProfileFieldBuckets({
-    isBot,
-    isOwner,
-    managedAgent,
-    onOpenProfile,
-    ownerAvatarUrl: ownerAvatarProfile?.avatarUrl ?? null,
-    ownerDisplayName,
-    ownerHandle,
-    ownerProfilePubkey,
-    ownerPubkey,
-    persona: resolvedPersona,
-    presenceLoaded: presenceQuery.isSuccess,
-    presenceStatus,
-    profile,
-    pubkey: effectivePubkey,
-    relayAgent,
-  });
+  const { agentInfoFields, agentSettingsFields, diagnosticsFields } =
+    useProfileFieldBuckets({
+      isBot,
+      isOwner: viewerIsOwner,
+      managedAgent,
+      onOpenProfile,
+      ownerAvatarUrl: ownerAvatarProfile?.avatarUrl ?? null,
+      ownerDisplayName,
+      ownerHandle,
+      ownerProfilePubkey,
+      ownerPubkey,
+      persona: resolvedPersona,
+      presenceLoaded: presenceQuery.isSuccess,
+      presenceStatus,
+      profile,
+      pubkey: effectivePubkey,
+      relayAgent,
+    });
   const isDiagnosticsLikeView = view === "diagnostics" || view === "logs";
   const managedAgentLogContent = managedAgentLogQuery.data?.content ?? null;
   const logHeaderSubtitle =
@@ -804,21 +784,18 @@ export function UserProfilePanel({
       logCopyValue: isDiagnosticsLikeView ? managedAgentLogContent : null,
       logSubtitle: logHeaderSubtitle,
       onBack: () => setView("summary"),
-      onClose,
       view,
       viewerIsOwner,
     },
   );
 
   const profileBody = (
-    <div
+    <AuxiliaryPanelBody
       className={cn(
-        "min-h-0 flex-1 px-4 pb-6",
+        "px-4 pb-6",
         isDiagnosticsLikeView
           ? "flex flex-col overflow-hidden"
           : "overflow-y-auto",
-        isSplitLayout && auxiliaryPanelContentPaddingClass,
-        !isSplitLayout && !isFloatingOverlay && "pt-13",
       )}
     >
       {view === "summary" ? (
@@ -847,10 +824,10 @@ export function UserProfilePanel({
           isFollowing={isFollowing}
           isOwner={viewerIsOwner}
           isSelf={isSelf}
+          activityAgent={activityAgent}
           managedAgent={managedAgent}
           memoriesLoading={memoryQuery.isLoading}
           memoryCount={memoryCount}
-          modelLabel={modelLabel}
           agentInfoFields={agentInfoFields}
           agentSettingsFields={agentSettingsFields}
           diagnosticsFields={diagnosticsFields}
@@ -880,11 +857,7 @@ export function UserProfilePanel({
         <AgentInfoFocusedView metadataFields={agentInfoFields} />
       ) : null}
       {view === "configuration" ? (
-        <AgentConfigurationFocusedView
-          fields={agentSettingsFields}
-          managedAgent={managedAgent}
-          modelLabel={modelLabel}
-        />
+        <AgentConfigurationFocusedView fields={agentSettingsFields} />
       ) : null}
       {view === "instructions" ? (
         <AgentInstructionsFocusedView instruction={agentInstruction} />
@@ -927,7 +900,7 @@ export function UserProfilePanel({
           managedAgent={managedAgent}
         />
       ) : null}
-    </div>
+    </AuxiliaryPanelBody>
   );
   const editAgentDialog =
     canEditAgent && managedAgent ? (
@@ -982,7 +955,6 @@ export function UserProfilePanel({
       editAgentDialog={editAgentDialog}
       headerActions={headerActions}
       headerLeftContent={headerLeftContent}
-      isFloatingOverlay={isFloatingOverlay}
       isOverlay={isOverlay}
       isSinglePanelView={isSinglePanelView}
       isSplitLayout={isSplitLayout}
@@ -993,6 +965,7 @@ export function UserProfilePanel({
       profileBody={profileBody}
       splitPaneClamp={splitPaneClamp}
       widthPx={widthPx}
+      transparentChrome={transparentChrome}
     />
   );
 }

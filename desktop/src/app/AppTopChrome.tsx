@@ -18,10 +18,13 @@ type AppTopChromeProps = {
   canGoForward: boolean;
   onGoBack: () => void;
   onGoForward: () => void;
+  hasWorkspaceRail?: boolean;
 };
 
 const TOP_CHROME_ICON_BUTTON_CLASS =
   "h-7 w-7 rounded-[4px] text-sidebar-foreground/65 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground [&_svg]:size-4";
+const HISTORY_ICON_BUTTON_CLASS =
+  "h-7 w-6 rounded-[4px] text-sidebar-foreground/65 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground [&_svg]:size-4";
 
 function preventTopChromeWheel(event: WheelEvent) {
   event.preventDefault();
@@ -54,17 +57,22 @@ export function AppTopChrome({
   canGoForward,
   onGoBack,
   onGoForward,
+  hasWorkspaceRail = false,
 }: AppTopChromeProps) {
   const topChromeRef = React.useRef<HTMLDivElement>(null);
   const isFullscreen = useIsFullscreen();
   // On macOS the traffic-light buttons overlay the chrome (see
   // `trafficLightPosition` in `tauri.conf.json`), so the nav row clears their
-  // x-position and shifts to align the nav icon centers with the native dot
-  // centers. In fullscreen those buttons hide, so use the standard alignment.
-  const navRowPaddingClass =
-    isMacPlatform() && !isFullscreen ? "pl-20" : "pl-3";
-  const navRowAlignmentClass =
-    isMacPlatform() && !isFullscreen ? "translate-y-[3px]" : null;
+  // x-position. When the workspace rail is present it already occupies the far
+  // left, so the nav row only needs to clear the lights past the rail edge
+  // rather than the full offset. In fullscreen those buttons hide.
+  const macChrome = isMacPlatform() && !isFullscreen;
+  const navRowPaddingClass = macChrome
+    ? hasWorkspaceRail
+      ? "pl-8"
+      : "pl-20"
+    : "pl-3";
+  const navRowAlignmentClass = macChrome ? "translate-y-[3px]" : null;
 
   React.useEffect(() => {
     const topChrome = topChromeRef.current;
@@ -94,7 +102,7 @@ export function AppTopChrome({
         <TopChromeSidebarTrigger />
         <Button
           aria-label="Go back"
-          className={TOP_CHROME_ICON_BUTTON_CLASS}
+          className={HISTORY_ICON_BUTTON_CLASS}
           data-testid="global-back"
           disabled={!canGoBack}
           onClick={onGoBack}
@@ -105,7 +113,7 @@ export function AppTopChrome({
         </Button>
         <Button
           aria-label="Go forward"
-          className={TOP_CHROME_ICON_BUTTON_CLASS}
+          className={HISTORY_ICON_BUTTON_CLASS}
           data-testid="global-forward"
           disabled={!canGoForward}
           onClick={onGoForward}

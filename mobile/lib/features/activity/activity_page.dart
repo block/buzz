@@ -162,7 +162,7 @@ class _FeedItemTile extends ConsumerWidget {
       onTap: item.channelId != null ? onTap : null,
       child: Padding(
         padding: const EdgeInsets.symmetric(
-          horizontal: Grid.xs,
+          horizontal: Grid.gutter,
           vertical: Grid.twelve,
         ),
         child: Column(

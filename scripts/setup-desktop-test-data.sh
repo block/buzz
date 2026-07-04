@@ -43,6 +43,28 @@ PYEOF
 echo "Checking database connection..."
 run_sql "SELECT 1" >/dev/null
 
+# Multi-tenant: every scoped row carries community_id. The relay resolves the
+# tenant per-connection from the durable communities host map (WHERE host = $1
+# against the *normalized* host). normalize_host() keeps non-default ports, so
+# the host must be 'localhost:3000' verbatim to match RELAY_URL=ws://localhost:3000.
+# The relay does not auto-seed communities (ensure_configured_community has no
+# callers); this seed is the only writer of the dev community row. Insert it
+# first so the channel/member INSERTs below satisfy their community_id FKs, and
+# so the channel reconciler (BUZZ_RECONCILE_CHANNELS, which binds localhost:3000
+# fail-closed and retries every 5s for 2min) can resolve the tenant.
+COMMUNITY_ID="00000000-0000-4000-8000-00000000c0de"
+# Host must match the relay's normalized bind host verbatim (non-default ports
+# are kept by normalize_host). Overridable so an isolated relay on an alternate
+# port can seed the same channels/members against its own tenant.
+COMMUNITY_HOST="${BUZZ_COMMUNITY_HOST:-localhost:3000}"
+
+run_sql "
+INSERT INTO communities (id, host)
+VALUES ('${COMMUNITY_ID}', '${COMMUNITY_HOST}')
+ON CONFLICT (lower(host)) DO NOTHING
+;
+"
+
 UUID_GENERAL=$(uuid5_hex "buzz.channel.general")
 UUID_RANDOM=$(uuid5_hex "buzz.channel.random")
 UUID_ENGINEERING=$(uuid5_hex "buzz.channel.engineering")
@@ -55,44 +77,44 @@ UUID_DM_BOB_CHARLIE_TYLER=$(uuid5_hex "buzz.channel.dm.bob-charlie-tyler")
 
 run_sql "
 INSERT INTO channels
-  (id, name, channel_type, visibility, description, created_by, topic_required)
+  (community_id, id, name, channel_type, visibility, description, created_by, topic_required)
 VALUES
-  ('${UUID_GENERAL}', 'general', 'stream', 'open', 'General discussion for everyone', decode('${SYSTEM_PUBKEY}','hex'), false),
-  ('${UUID_RANDOM}', 'random', 'stream', 'open', 'Off-topic, fun stuff', decode('${SYSTEM_PUBKEY}','hex'), false),
-  ('${UUID_ENGINEERING}', 'engineering', 'stream', 'open', 'Engineering discussions', decode('${SYSTEM_PUBKEY}','hex'), false),
-  ('${UUID_AGENTS}', 'agents', 'stream', 'open', 'AI agent testing and collaboration', decode('${SYSTEM_PUBKEY}','hex'), false),
-  ('${UUID_WATERCOOLER}', 'watercooler', 'forum', 'open', 'Casual forum for async discussions', decode('${SYSTEM_PUBKEY}','hex'), true),
-  ('${UUID_ANNOUNCEMENTS}', 'announcements', 'forum', 'open', 'Company announcements', decode('${SYSTEM_PUBKEY}','hex'), true),
-  ('${UUID_DM_ALICE_TYLER}', 'alice-tyler', 'dm', 'private', 'DM between alice and tyler', decode('${SYSTEM_PUBKEY}','hex'), false),
-  ('${UUID_DM_BOB_TYLER}', 'bob-tyler', 'dm', 'private', 'DM between bob and tyler', decode('${SYSTEM_PUBKEY}','hex'), false),
-  ('${UUID_DM_BOB_CHARLIE_TYLER}', 'bob-charlie-tyler', 'dm', 'private', 'Group DM: bob, charlie, tyler', decode('${SYSTEM_PUBKEY}','hex'), false)
+  ('${COMMUNITY_ID}', '${UUID_GENERAL}', 'general', 'stream', 'open', 'General discussion for everyone', decode('${SYSTEM_PUBKEY}','hex'), false),
+  ('${COMMUNITY_ID}', '${UUID_RANDOM}', 'random', 'stream', 'open', 'Off-topic, fun stuff', decode('${SYSTEM_PUBKEY}','hex'), false),
+  ('${COMMUNITY_ID}', '${UUID_ENGINEERING}', 'engineering', 'stream', 'open', 'Engineering discussions', decode('${SYSTEM_PUBKEY}','hex'), false),
+  ('${COMMUNITY_ID}', '${UUID_AGENTS}', 'agents', 'stream', 'open', 'AI agent testing and collaboration', decode('${SYSTEM_PUBKEY}','hex'), false),
+  ('${COMMUNITY_ID}', '${UUID_WATERCOOLER}', 'watercooler', 'forum', 'open', 'Casual forum for async discussions', decode('${SYSTEM_PUBKEY}','hex'), true),
+  ('${COMMUNITY_ID}', '${UUID_ANNOUNCEMENTS}', 'announcements', 'forum', 'open', 'Company announcements', decode('${SYSTEM_PUBKEY}','hex'), true),
+  ('${COMMUNITY_ID}', '${UUID_DM_ALICE_TYLER}', 'alice-tyler', 'dm', 'private', 'DM between alice and tyler', decode('${SYSTEM_PUBKEY}','hex'), false),
+  ('${COMMUNITY_ID}', '${UUID_DM_BOB_TYLER}', 'bob-tyler', 'dm', 'private', 'DM between bob and tyler', decode('${SYSTEM_PUBKEY}','hex'), false),
+  ('${COMMUNITY_ID}', '${UUID_DM_BOB_CHARLIE_TYLER}', 'bob-charlie-tyler', 'dm', 'private', 'Group DM: bob, charlie, tyler', decode('${SYSTEM_PUBKEY}','hex'), false)
 ON CONFLICT DO NOTHING
 ;
 "
 
 run_sql "
 INSERT INTO channel_members
-  (channel_id, pubkey, role, invited_by)
+  (community_id, channel_id, pubkey, role, invited_by)
 VALUES
-  ('${UUID_GENERAL}', decode('${TYLER_PUBKEY}','hex'), 'member', decode('${SYSTEM_PUBKEY}','hex')),
-  ('${UUID_GENERAL}', decode('${ALICE_PUBKEY}','hex'), 'member', decode('${SYSTEM_PUBKEY}','hex')),
-  ('${UUID_GENERAL}', decode('${BOB_PUBKEY}','hex'), 'member', decode('${SYSTEM_PUBKEY}','hex')),
-  ('${UUID_RANDOM}', decode('${TYLER_PUBKEY}','hex'), 'member', decode('${SYSTEM_PUBKEY}','hex')),
-  ('${UUID_ENGINEERING}', decode('${TYLER_PUBKEY}','hex'), 'member', decode('${SYSTEM_PUBKEY}','hex')),
-  ('${UUID_AGENTS}', decode('${TYLER_PUBKEY}','hex'), 'member', decode('${SYSTEM_PUBKEY}','hex')),
-  ('${UUID_WATERCOOLER}', decode('${TYLER_PUBKEY}','hex'), 'member', decode('${SYSTEM_PUBKEY}','hex')),
-  ('${UUID_ANNOUNCEMENTS}', decode('${TYLER_PUBKEY}','hex'), 'guest', decode('${SYSTEM_PUBKEY}','hex')),
-  ('${UUID_DM_ALICE_TYLER}', decode('${ALICE_PUBKEY}','hex'), 'member', decode('${SYSTEM_PUBKEY}','hex')),
-  ('${UUID_DM_ALICE_TYLER}', decode('${TYLER_PUBKEY}','hex'), 'member', decode('${SYSTEM_PUBKEY}','hex')),
-  ('${UUID_DM_BOB_TYLER}', decode('${BOB_PUBKEY}','hex'), 'member', decode('${SYSTEM_PUBKEY}','hex')),
-  ('${UUID_DM_BOB_TYLER}', decode('${TYLER_PUBKEY}','hex'), 'member', decode('${SYSTEM_PUBKEY}','hex')),
-  ('${UUID_DM_BOB_CHARLIE_TYLER}', decode('${BOB_PUBKEY}','hex'), 'member', decode('${SYSTEM_PUBKEY}','hex')),
-  ('${UUID_DM_BOB_CHARLIE_TYLER}', decode('${CHARLIE_PUBKEY}','hex'), 'member', decode('${SYSTEM_PUBKEY}','hex')),
-  ('${UUID_DM_BOB_CHARLIE_TYLER}', decode('${TYLER_PUBKEY}','hex'), 'member', decode('${SYSTEM_PUBKEY}','hex')),
-  ('${UUID_GENERAL}', decode('${AGENT_PUBKEY}','hex'), 'bot', decode('${SYSTEM_PUBKEY}','hex')),
-  ('${UUID_RANDOM}', decode('${AGENT_PUBKEY}','hex'), 'bot', decode('${SYSTEM_PUBKEY}','hex')),
-  ('${UUID_ENGINEERING}', decode('${AGENT_PUBKEY}','hex'), 'bot', decode('${SYSTEM_PUBKEY}','hex')),
-  ('${UUID_AGENTS}', decode('${AGENT_PUBKEY}','hex'), 'bot', decode('${SYSTEM_PUBKEY}','hex'))
+  ('${COMMUNITY_ID}', '${UUID_GENERAL}', decode('${TYLER_PUBKEY}','hex'), 'member', decode('${SYSTEM_PUBKEY}','hex')),
+  ('${COMMUNITY_ID}', '${UUID_GENERAL}', decode('${ALICE_PUBKEY}','hex'), 'member', decode('${SYSTEM_PUBKEY}','hex')),
+  ('${COMMUNITY_ID}', '${UUID_GENERAL}', decode('${BOB_PUBKEY}','hex'), 'member', decode('${SYSTEM_PUBKEY}','hex')),
+  ('${COMMUNITY_ID}', '${UUID_RANDOM}', decode('${TYLER_PUBKEY}','hex'), 'member', decode('${SYSTEM_PUBKEY}','hex')),
+  ('${COMMUNITY_ID}', '${UUID_ENGINEERING}', decode('${TYLER_PUBKEY}','hex'), 'member', decode('${SYSTEM_PUBKEY}','hex')),
+  ('${COMMUNITY_ID}', '${UUID_AGENTS}', decode('${TYLER_PUBKEY}','hex'), 'member', decode('${SYSTEM_PUBKEY}','hex')),
+  ('${COMMUNITY_ID}', '${UUID_WATERCOOLER}', decode('${TYLER_PUBKEY}','hex'), 'member', decode('${SYSTEM_PUBKEY}','hex')),
+  ('${COMMUNITY_ID}', '${UUID_ANNOUNCEMENTS}', decode('${TYLER_PUBKEY}','hex'), 'guest', decode('${SYSTEM_PUBKEY}','hex')),
+  ('${COMMUNITY_ID}', '${UUID_DM_ALICE_TYLER}', decode('${ALICE_PUBKEY}','hex'), 'member', decode('${SYSTEM_PUBKEY}','hex')),
+  ('${COMMUNITY_ID}', '${UUID_DM_ALICE_TYLER}', decode('${TYLER_PUBKEY}','hex'), 'member', decode('${SYSTEM_PUBKEY}','hex')),
+  ('${COMMUNITY_ID}', '${UUID_DM_BOB_TYLER}', decode('${BOB_PUBKEY}','hex'), 'member', decode('${SYSTEM_PUBKEY}','hex')),
+  ('${COMMUNITY_ID}', '${UUID_DM_BOB_TYLER}', decode('${TYLER_PUBKEY}','hex'), 'member', decode('${SYSTEM_PUBKEY}','hex')),
+  ('${COMMUNITY_ID}', '${UUID_DM_BOB_CHARLIE_TYLER}', decode('${BOB_PUBKEY}','hex'), 'member', decode('${SYSTEM_PUBKEY}','hex')),
+  ('${COMMUNITY_ID}', '${UUID_DM_BOB_CHARLIE_TYLER}', decode('${CHARLIE_PUBKEY}','hex'), 'member', decode('${SYSTEM_PUBKEY}','hex')),
+  ('${COMMUNITY_ID}', '${UUID_DM_BOB_CHARLIE_TYLER}', decode('${TYLER_PUBKEY}','hex'), 'member', decode('${SYSTEM_PUBKEY}','hex')),
+  ('${COMMUNITY_ID}', '${UUID_GENERAL}', decode('${AGENT_PUBKEY}','hex'), 'bot', decode('${SYSTEM_PUBKEY}','hex')),
+  ('${COMMUNITY_ID}', '${UUID_RANDOM}', decode('${AGENT_PUBKEY}','hex'), 'bot', decode('${SYSTEM_PUBKEY}','hex')),
+  ('${COMMUNITY_ID}', '${UUID_ENGINEERING}', decode('${AGENT_PUBKEY}','hex'), 'bot', decode('${SYSTEM_PUBKEY}','hex')),
+  ('${COMMUNITY_ID}', '${UUID_AGENTS}', decode('${AGENT_PUBKEY}','hex'), 'bot', decode('${SYSTEM_PUBKEY}','hex'))
 ON CONFLICT DO NOTHING
 ;
 "

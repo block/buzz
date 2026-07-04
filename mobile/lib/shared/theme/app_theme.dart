@@ -63,8 +63,9 @@ class AppTheme {
     return ThemeData(
       useMaterial3: true,
       colorScheme: scheme,
+      scaffoldBackgroundColor: scheme.surface,
       extensions: [appColors],
-      fontFamily: 'Geist',
+      fontFamily: 'Inter',
       textTheme: textTheme,
       appBarTheme: AppBarTheme(
         backgroundColor: Colors.transparent,

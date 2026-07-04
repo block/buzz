@@ -3,6 +3,7 @@ import * as React from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useHuddle } from "@/features/huddle";
 import { HuddleIndicator } from "@/features/huddle/components/HuddleIndicator";
+import { buildHuddleChannelName } from "@/features/huddle/lib/huddleChannelName";
 import {
   useAvailableAcpRuntimes,
   useBackendProvidersQuery,
@@ -10,6 +11,7 @@ import {
   useRelayAgentsQuery,
 } from "@/features/agents/hooks";
 import { useChannelMembersQuery } from "@/features/channels/hooks";
+import { canStartHuddleInChannel } from "@/features/channels/lib/huddleAvailability";
 import type { Channel } from "@/shared/api/types";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { Button } from "@/shared/ui/button";
@@ -81,10 +83,11 @@ export function ChannelMembersBar({
     members.find(
       (member) => normalizePubkey(member.pubkey) === normalizedCurrentPubkey,
     ) ?? null;
-  const canStartHuddle =
-    channel.channelType !== "dm" &&
-    channel.archivedAt === null &&
-    (channel.visibility === "open" || selfMember !== null);
+  const canStartHuddle = canStartHuddleInChannel({
+    channel,
+    currentPubkey,
+    selfMember,
+  });
   const previousChannelIdRef = React.useRef(channel.id);
 
   React.useEffect(() => {
@@ -110,7 +113,15 @@ export function ChannelMembersBar({
       channelId={channel.id}
       onStart={async () => {
         try {
-          await startHuddle(channel.id, []);
+          await startHuddle(
+            channel.id,
+            [],
+            buildHuddleChannelName({
+              channel,
+              currentPubkey,
+              members,
+            }),
+          );
           // Refetch channels so the new ephemeral channel appears in the sidebar immediately
           // (default poll interval is 60s — too slow for huddle UX).
           void queryClient.invalidateQueries({ queryKey: ["channels"] });

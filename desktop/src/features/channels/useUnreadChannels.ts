@@ -29,6 +29,7 @@ import {
 import type { RelayClient } from "@/shared/api/relayClientSession";
 import type { Channel, RelayEvent } from "@/shared/api/types";
 import { CHANNEL_MESSAGE_EVENT_KINDS } from "@/shared/constants/kinds";
+import { DM_NOTIFIABLE_EVENT_KINDS } from "./isDmNotifiableKind";
 
 type UseUnreadChannelsOptions = UseLiveChannelUpdatesOptions & {
   pubkey?: string;
@@ -42,6 +43,14 @@ type UseUnreadChannelsOptions = UseLiveChannelUpdatesOptions & {
 // filter to find one external trigger message. 1000 matches the live sub's
 // per-channel limit elsewhere in the app.
 const CATCH_UP_LIMIT = 1000;
+
+export function channelCatchUpEventKinds(
+  channelType: Channel["channelType"] | undefined,
+) {
+  return channelType === "dm"
+    ? DM_NOTIFIABLE_EVENT_KINDS
+    : CHANNEL_MESSAGE_EVENT_KINDS;
+}
 
 const participationStore = makeRootIdStore("buzz-thread-participation.v1");
 const authoredStore = makeRootIdStore("buzz-thread-authored.v1");
@@ -598,13 +607,14 @@ export function useUnreadChannels(
       toFetch.map(async (channelId): Promise<CatchUpResult> => {
         try {
           const readAt = getEffectiveTimestamp(channelId);
+          const channel = channels.find((c) => c.id === channelId);
           // NIP-01 `since` is inclusive of `created_at >= since`. The +1
           // makes the relay-side filter strict-newer; the client-side
           // `> readAt` check below is the belt to the suspenders.
           const sinceParam = readAt === null ? 0 : readAt + 1;
 
           const events = await relayClient.fetchEvents({
-            kinds: [...CHANNEL_MESSAGE_EVENT_KINDS],
+            kinds: [...channelCatchUpEventKinds(channel?.channelType)],
             "#h": [channelId],
             since: sinceParam,
             limit: CATCH_UP_LIMIT,
@@ -642,9 +652,8 @@ export function useUnreadChannels(
           let maxExternal = 0;
           const unreadEvents: ObservedUnreadEvent[] = [];
           const threadReplies: ThreadActivityItem[] = [];
-          const ch = channels.find((c) => c.id === channelId);
-          const chType = ch?.channelType;
-          const chName = ch?.name ?? "";
+          const chType = channel?.channelType;
+          const chName = channel?.name ?? "";
           for (const event of events) {
             if (
               normalizedPubkey !== null &&

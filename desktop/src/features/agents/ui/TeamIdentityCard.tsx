@@ -42,7 +42,7 @@ export function TeamIdentityCard({
 
   return (
     <Card
-      className="min-w-0 overflow-hidden p-0 transition-colors hover:border-border hover:bg-muted/65"
+      className="min-w-0 overflow-hidden rounded-2xl p-0 transition-colors hover:border-border hover:bg-muted/65"
       data-testid={dataTestId}
     >
       <div className="relative aspect-[4/5] min-w-0 overflow-hidden bg-muted/50">

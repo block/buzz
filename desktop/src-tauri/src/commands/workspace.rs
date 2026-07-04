@@ -1,5 +1,5 @@
 use nostr::Keys;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, State};
 
 use crate::app_state::AppState;
@@ -8,6 +8,43 @@ use crate::managed_agents::{
     write_persisted_repos_dir,
 };
 use crate::relay;
+
+#[derive(Deserialize)]
+struct RelayInfoIcon {
+    #[serde(default)]
+    icon: Option<String>,
+}
+
+/// Fetch a relay's workspace icon from its NIP-11 relay information document.
+///
+/// Works for any workspace (active or not) with a plain unauthenticated HTTP
+/// GET — no WebSocket session needed. Returns `None` when the relay has no
+/// icon set, is unreachable, or serves a malformed document: the rail falls
+/// back to initials in all three cases.
+#[tauri::command]
+pub async fn fetch_workspace_icon(
+    relay_url: String,
+    state: State<'_, AppState>,
+) -> Result<Option<String>, String> {
+    let http_url = relay::relay_http_base_url(&relay_url);
+    let Ok(response) = state
+        .http_client
+        .get(&http_url)
+        .header("Accept", "application/nostr+json")
+        .send()
+        .await
+    else {
+        return Ok(None);
+    };
+    if !response.status().is_success() {
+        return Ok(None);
+    }
+    let doc = response
+        .json::<RelayInfoIcon>()
+        .await
+        .unwrap_or(RelayInfoIcon { icon: None });
+    Ok(doc.icon.filter(|icon| !icon.is_empty()))
+}
 
 #[derive(Serialize)]
 pub struct ActiveWorkspaceInfo {

@@ -85,6 +85,29 @@ test("initial load holds the skeleton while the cold-load top-up fetches", () =>
   );
 });
 
+test("pre-settle placeholder rows paint immediately (snapshot revisit)", () => {
+  // A revisit painting from the React-Query cache or a persisted snapshot:
+  // placeholder rows are a previously-settled timeline, not a partial cold
+  // load — show them stale-then-revalidate instead of a skeleton.
+  assert.equal(
+    selectTimelineLoadingState(
+      { ...settled, isFetching: true, isPlaceholderData: true, dataLength: 8 },
+      false,
+    ),
+    false,
+  );
+});
+
+test("pre-settle EMPTY placeholder still holds the skeleton", () => {
+  assert.equal(
+    selectTimelineLoadingState(
+      { ...settled, isFetching: true, isPlaceholderData: true, dataLength: 0 },
+      false,
+    ),
+    true,
+  );
+});
+
 test("settled channel with rows mid-refetch is not loading", () => {
   // Same query shape, but after first settle: the latch owns refetch blips, so
   // present rows mean loaded.

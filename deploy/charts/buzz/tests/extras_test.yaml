@@ -1,0 +1,70 @@
+suite: extraManifests + serviceMonitor renderers
+templates:
+  - templates/extramanifests.yaml
+  - templates/servicemonitor.yaml
+set:
+  relayUrl: wss://buzz.example.com
+  ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
+  externalPostgresql.url: postgres://u:p@h:5432/d
+  externalRedis.url: redis://h:6379
+  s3.endpoint: http://minio:9000
+  s3.accessKey: a
+  s3.secretKey: s
+tests:
+  - it: emits nothing by default (extraManifests empty)
+    template: templates/extramanifests.yaml
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: renders each extraManifests entry, tpl-resolving release values
+    template: templates/extramanifests.yaml
+    set:
+      extraManifests:
+        - apiVersion: v1
+          kind: ConfigMap
+          metadata:
+            name: '{{ include "buzz.fullname" . }}-extra'
+          data:
+            host: '{{ .Values.relayUrl }}'
+    asserts:
+      - hasDocuments:
+          count: 1
+      - equal:
+          path: kind
+          value: ConfigMap
+      - equal:
+          path: metadata.name
+          value: RELEASE-NAME-buzz-extra
+      - equal:
+          path: data.host
+          value: wss://buzz.example.com
+
+  - it: omits the ServiceMonitor unless enabled
+    template: templates/servicemonitor.yaml
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: renders a ServiceMonitor scraping the metrics port when enabled
+    template: templates/servicemonitor.yaml
+    set:
+      serviceMonitor.enabled: true
+      serviceMonitor.labels.release: kube-prometheus-stack
+    asserts:
+      - hasDocuments:
+          count: 1
+      - equal:
+          path: kind
+          value: ServiceMonitor
+      - equal:
+          path: spec.endpoints[0].port
+          value: metrics
+      - equal:
+          path: spec.selector.matchLabels["app.kubernetes.io/name"]
+          value: buzz
+      - notExists:
+          path: spec.selector.matchLabels["app.kubernetes.io/component"]
+      - equal:
+          path: metadata.labels.release
+          value: kube-prometheus-stack

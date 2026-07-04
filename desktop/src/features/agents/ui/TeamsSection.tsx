@@ -94,7 +94,7 @@ export function TeamsSection({
         className={`${TEAM_CARD_COLUMN_CLASS} flex items-center justify-between gap-3`}
       >
         <div>
-          <h3 className="text-sm font-semibold tracking-tight">My teams</h3>
+          <h3 className="text-sm font-semibold tracking-tight">Teams</h3>
           <p className="text-sm text-secondary-foreground/75">
             Saved groups from My Agents that you can add to a channel together.
           </p>

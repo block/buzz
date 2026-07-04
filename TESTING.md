@@ -34,8 +34,8 @@ just setup                       # start Docker services, run migrations
 ```
 
 > **Already running Buzz Desktop?** Desktop uses the same Docker container
-> names (`buzz-postgres`, `buzz-redis`, `buzz-typesense`) and the same
-> default ports (`:5432`, `:6379`, `:8108`). `just setup` will reuse those
+> names (`buzz-postgres`, `buzz-redis`) and the same
+> default ports (`:5432`, `:6379`). `just setup` will reuse those
 > services, so **your test relay writes into Desktop's database**. That's
 > fine for read/write smoke tests, but: `just reset` wipes Desktop's data
 > along with yours. If you need isolation, stop Desktop first or run the
@@ -267,7 +267,6 @@ out of the box with `just setup` or `just relay`. Common overrides:
 | `RELAY_URL`                       | `ws://localhost:3000`       | Advertised in NIP-11 / NIP-42 challenges. **Note: no `BUZZ_` prefix.** |
 | `DATABASE_URL`                    | `postgres://buzz:buzz_dev@localhost:5432/buzz` | |
 | `REDIS_URL`                       | `redis://localhost:6379`    | |
-| `TYPESENSE_URL`                   | `http://localhost:8108`     | |
 | `BUZZ_REQUIRE_AUTH_TOKEN`       | `false`                     | When true, REST requires NIP-98 (no `X-Pubkey` fallback) |
 | `BUZZ_REQUIRE_RELAY_MEMBERSHIP` | `false`                     | When true, only pubkeys in `relay_members` can connect |
 | `BUZZ_AUTO_MIGRATE`             | `false`                     | Opt in with `true`/`1`/`yes`/`on` to run embedded SQLx migrations on relay startup |

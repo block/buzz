@@ -1,5 +1,6 @@
 import * as React from "react";
-import { RefreshCw, Upload } from "lucide-react";
+import { ChevronDown, RefreshCw, Upload } from "lucide-react";
+import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 
 import type {
   AcpRuntimeCatalogEntry,
@@ -9,23 +10,62 @@ import type {
 import { useFileImportZone } from "@/shared/hooks/useFileImportZone";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogHeader,
-  DialogTitle,
-} from "@/shared/ui/dialog";
+import { ChooserDialogContent } from "@/shared/ui/chooser-dialog-content";
+import { Dialog } from "@/shared/ui/dialog";
 import { Input } from "@/shared/ui/input";
 import { Textarea } from "@/shared/ui/textarea";
-import { EnvVarsEditor, type EnvVarsValue } from "./EnvVarsEditor";
+import { AgentCreationPreview } from "./AgentCreationPreview";
+import { PersonaDropdownField } from "./PersonaDropdownField";
+import type { EnvVarsValue } from "./EnvVarsEditor";
+import { PersonaAdvancedFields } from "./PersonaAdvancedFields";
+import { PersonaModelField } from "./PersonaModelField";
+import { PersonaProviderApiKeyField } from "./PersonaProviderApiKeyField";
 import {
   getImportButtonLabel,
   getImportButtonTone,
   getImportErrorLabel,
   IMPORT_ERROR_VISIBILITY_MS,
 } from "./personaDialogImportState";
-import { canSubmitPersonaDialog } from "./personaDialogState";
+import {
+  canSubmitPersonaDialog,
+  formatPersonaNamePoolText,
+  parsePersonaNamePoolText,
+} from "./personaDialogState";
+import {
+  getAdvancedEnvVars,
+  hasAdvancedEnvVars,
+  hasText,
+} from "./personaDialogEnvVars";
+import {
+  AUTO_MODEL_DROPDOWN_VALUE,
+  AUTO_PROVIDER_DROPDOWN_VALUE,
+  CUSTOM_MODEL_DROPDOWN_VALUE,
+  CUSTOM_PROVIDER_DROPDOWN_VALUE,
+  formatRuntimeOptionLabel,
+  getDefaultLlmProviderLabel,
+  getDefaultPersonaRuntime,
+  getModelSelectValue,
+  getPersonaModelOptions,
+  getPersonaProviderOptions,
+  getProviderApiKeyConfig,
+  getProviderApiKeyEnvVar,
+  getRuntimePersonaModelOptions,
+  hasPersonaModelOption,
+  NO_RUNTIME_DROPDOWN_VALUE,
+  providerRequiresExplicitModel,
+  runtimeSupportsLlmProviderSelection,
+  type PersonaDropdownOption,
+  PERSONA_FIELD_CONTROL_CLASS,
+  PERSONA_FIELD_SHELL_CLASS,
+  PERSONA_LABEL_OPTIONAL_CLASS,
+  shouldClearKnownModelForSelectionScope,
+  sortPersonaRuntimes,
+} from "./personaDialogPickers";
+import { shouldClearModelForRuntimeChange } from "./personaRuntimeModel";
+import {
+  MODEL_DISCOVERY_LOADING_VALUE,
+  usePersonaModelDiscovery,
+} from "./usePersonaModelDiscovery";
 
 type PersonaDialogProps = {
   open: boolean;
@@ -47,6 +87,11 @@ type PersonaDialogProps = {
   ) => Promise<void>;
 };
 
+const ADVANCED_FIELDS_MOTION_TRANSITION = {
+  duration: 0.18,
+  ease: [0.23, 1, 0.32, 1],
+} as const;
+
 export function PersonaDialog({
   open,
   title,
@@ -67,9 +112,15 @@ export function PersonaDialog({
   const [systemPrompt, setSystemPrompt] = React.useState("");
   const [runtime, setRuntime] = React.useState("");
   const [model, setModel] = React.useState("");
+  const [isCustomModelEditing, setIsCustomModelEditing] = React.useState(false);
   const [provider, setProvider] = React.useState("");
+  const [isCustomProviderEditing, setIsCustomProviderEditing] =
+    React.useState(false);
   const [namePoolText, setNamePoolText] = React.useState("");
   const [envVars, setEnvVars] = React.useState<EnvVarsValue>({});
+  const [showAdvancedFields, setShowAdvancedFields] = React.useState(false);
+  const [isAvatarUploadPending, setIsAvatarUploadPending] =
+    React.useState(false);
   const [isImportingUpdate, setIsImportingUpdate] = React.useState(false);
   const [importErrorMessage, setImportErrorMessage] = React.useState<
     string | null
@@ -81,6 +132,17 @@ export function PersonaDialog({
       ? initialValues.id
       : null;
   const canImportPersonaUpdate = isEditMode && Boolean(onImportUpdateFile);
+  const defaultRuntime = React.useMemo(
+    () => getDefaultPersonaRuntime(runtimes),
+    [runtimes],
+  );
+  const shouldReduceMotion = useReducedMotion();
+  const initialModelProviderEditableWithoutRuntime = Boolean(
+    initialValues &&
+      "id" in initialValues &&
+      !hasText(initialValues.runtime) &&
+      (hasText(initialValues.model) || hasText(initialValues.provider)),
+  );
 
   React.useEffect(() => {
     if (!open || !initialValues) {
@@ -92,17 +154,44 @@ export function PersonaDialog({
     setSystemPrompt(initialValues.systemPrompt);
     setRuntime(initialValues.runtime ?? "");
     setModel(initialValues.model ?? "");
+    setIsCustomModelEditing(false);
     setProvider(initialValues.provider ?? "");
-    setNamePoolText(
-      ("namePool" in initialValues
-        ? (initialValues as { namePool?: string[] }).namePool
-        : undefined
-      )?.join(", ") ?? "",
+    setIsCustomProviderEditing(false);
+    const nextNamePoolText =
+      "namePool" in initialValues
+        ? formatPersonaNamePoolText(initialValues.namePool)
+        : "";
+    const nextEnvVars =
+      "envVars" in initialValues ? (initialValues.envVars ?? {}) : {};
+    const managedApiKeyEnvVar = getProviderApiKeyEnvVar(
+      initialValues.provider ?? "",
     );
-    setEnvVars(initialValues.envVars ?? {});
+    setNamePoolText(nextNamePoolText);
+    setEnvVars(nextEnvVars);
+    setShowAdvancedFields(
+      nextNamePoolText.trim().length > 0 ||
+        hasAdvancedEnvVars(nextEnvVars, managedApiKeyEnvVar),
+    );
+    setIsAvatarUploadPending(false);
     setImportErrorMessage(null);
     setIsImportingUpdate(false);
   }, [initialValues, open]);
+
+  React.useEffect(() => {
+    if (
+      !open ||
+      !initialValues ||
+      "id" in initialValues ||
+      initialValues.runtime?.trim() ||
+      runtimesLoading ||
+      runtime.trim().length > 0 ||
+      defaultRuntime === null
+    ) {
+      return;
+    }
+
+    setRuntime(defaultRuntime.id);
+  }, [defaultRuntime, initialValues, open, runtime, runtimesLoading]);
 
   React.useEffect(() => {
     if (!open || !canImportPersonaUpdate) {
@@ -219,8 +308,13 @@ export function PersonaDialog({
       setSystemPrompt("");
       setRuntime("");
       setModel("");
+      setIsCustomModelEditing(false);
       setProvider("");
+      setIsCustomProviderEditing(false);
       setNamePoolText("");
+      setEnvVars({});
+      setShowAdvancedFields(false);
+      setIsAvatarUploadPending(false);
       setImportErrorMessage(null);
       setIsImportingUpdate(false);
       setIsWindowFileDragOver(false);
@@ -230,22 +324,51 @@ export function PersonaDialog({
   }
 
   async function handleSubmit() {
-    if (!initialValues) {
+    if (
+      !initialValues ||
+      !canSubmitPersonaDialog({ displayName, isPending }) ||
+      isAvatarUploadPending
+    ) {
       return;
     }
 
-    const namePool = namePoolText
-      .split(",")
-      .map((s) => s.trim())
-      .filter(Boolean);
+    const trimmedRuntime = runtime.trim();
+    const previousRuntime = initialValues.runtime?.trim() ?? "";
+    const modelProviderEditableWithoutRuntime =
+      initialModelProviderEditableWithoutRuntime && trimmedRuntime.length === 0;
+    const llmProviderVisibleForSubmit =
+      (trimmedRuntime.length > 0 &&
+        runtimeSupportsLlmProviderSelection(trimmedRuntime)) ||
+      modelProviderEditableWithoutRuntime;
+    const shouldPreserveHiddenModelProvider =
+      "id" in initialValues &&
+      previousRuntime.length === 0 &&
+      trimmedRuntime.length === 0 &&
+      !modelProviderEditableWithoutRuntime;
+    const namePool = parsePersonaNamePoolText(namePoolText);
+    const namePoolInput =
+      namePool.length > 0
+        ? namePool
+        : "namePool" in initialValues
+          ? []
+          : undefined;
     const baseInput = {
-      displayName,
+      displayName: displayName.trim(),
       avatarUrl: avatarUrl.trim() || undefined,
-      systemPrompt,
-      runtime: runtime.trim() || undefined,
-      model: model.trim() || undefined,
-      provider: provider.trim() || undefined,
-      namePool: namePool.length > 0 ? namePool : undefined,
+      systemPrompt: systemPrompt,
+      runtime: trimmedRuntime || undefined,
+      model:
+        trimmedRuntime || modelProviderEditableWithoutRuntime
+          ? model.trim() || undefined
+          : shouldPreserveHiddenModelProvider
+            ? initialValues.model
+            : undefined,
+      provider: llmProviderVisibleForSubmit
+        ? provider.trim() || undefined
+        : shouldPreserveHiddenModelProvider
+          ? initialValues.provider
+          : undefined,
+      namePool: namePoolInput,
       envVars,
     };
 
@@ -260,6 +383,11 @@ export function PersonaDialog({
     await onSubmit(baseInput);
   }
 
+  function handleSubmitForm(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    void handleSubmit();
+  }
+
   const importButtonTone = getImportButtonTone({
     isWindowFileDragOver,
     isImportDragOver,
@@ -272,6 +400,143 @@ export function PersonaDialog({
   });
 
   const selectedRuntime = runtimes.find((p) => p.id === runtime);
+  const blankRuntimeModelProviderEditable =
+    initialModelProviderEditableWithoutRuntime && runtime.trim().length === 0;
+  const runtimeCanChooseLlmProvider =
+    runtimeSupportsLlmProviderSelection(runtime) ||
+    blankRuntimeModelProviderEditable;
+  const llmProviderFieldVisible =
+    (runtime.trim().length > 0 && runtimeCanChooseLlmProvider) ||
+    blankRuntimeModelProviderEditable;
+  const providerForModelScope = llmProviderFieldVisible ? provider : "";
+  const trimmedProvider = provider.trim();
+  const providerApiKeyConfig =
+    llmProviderFieldVisible && !isCustomProviderEditing
+      ? getProviderApiKeyConfig(trimmedProvider)
+      : null;
+  const providerApiKeyValue = providerApiKeyConfig
+    ? (envVars[providerApiKeyConfig.envVar] ?? "")
+    : "";
+  const providerApiKeyFieldVisible =
+    llmProviderFieldVisible && providerApiKeyConfig !== null;
+  const modelFieldVisible =
+    runtime.trim().length > 0 || blankRuntimeModelProviderEditable;
+  const isExplicitModelRequired =
+    modelFieldVisible && providerRequiresExplicitModel(providerForModelScope);
+  const isCreateMode = Boolean(initialValues && !("id" in initialValues));
+  const selectedRuntimeIsAvailable =
+    runtime.trim().length === 0 ||
+    selectedRuntime?.availability === "available";
+  const canSubmit =
+    canSubmitPersonaDialog({ displayName, isPending }) &&
+    (!isCreateMode || runtime.trim().length > 0) &&
+    (!isCreateMode || selectedRuntimeIsAvailable) &&
+    (!isExplicitModelRequired || model.trim().length > 0) &&
+    !isAvatarUploadPending;
+  const {
+    discoveredModelOptions,
+    modelDiscoveryLoading,
+    modelDiscoveryStatus,
+  } = usePersonaModelDiscovery({
+    envVars,
+    isCustomProviderEditing,
+    modelFieldVisible,
+    open,
+    provider: providerForModelScope,
+    selectedRuntime,
+  });
+  const staticModelOptions = getPersonaModelOptions(
+    runtime,
+    providerForModelScope,
+  );
+  const runtimeModelOptions = getRuntimePersonaModelOptions(runtime);
+  const modelOptions = discoveredModelOptions ?? staticModelOptions;
+  const isModelCustom = !hasPersonaModelOption(
+    discoveredModelOptions ?? runtimeModelOptions,
+    model,
+  );
+  const modelSelectValue = getModelSelectValue({
+    isCustomModelEditing,
+    isModelCustom,
+    model,
+  });
+  const showCustomModelInput =
+    modelFieldVisible && (isCustomModelEditing || isModelCustom);
+  const providerOptions = getPersonaProviderOptions(
+    providerForModelScope,
+    runtime,
+  );
+  const defaultLlmProviderLabel = getDefaultLlmProviderLabel(runtime);
+  const providerSelectValue = isCustomProviderEditing
+    ? CUSTOM_PROVIDER_DROPDOWN_VALUE
+    : trimmedProvider || AUTO_PROVIDER_DROPDOWN_VALUE;
+  const showCustomProviderInput =
+    llmProviderFieldVisible && isCustomProviderEditing;
+  const advancedEnvVars = getAdvancedEnvVars(
+    envVars,
+    providerApiKeyConfig?.envVar ?? null,
+  );
+  const runtimeDropdownValue = runtime.trim() || NO_RUNTIME_DROPDOWN_VALUE;
+  const sortedRuntimes = React.useMemo(
+    () => sortPersonaRuntimes(runtimes),
+    [runtimes],
+  );
+  const blankRuntimeOptionLabel = runtimesLoading
+    ? "Loading providers..."
+    : isCreateMode
+      ? "Choose a provider"
+      : "No preference (use app default)";
+  const runtimeDropdownOptions: PersonaDropdownOption[] = [
+    ...(!isCreateMode
+      ? [
+          {
+            label: blankRuntimeOptionLabel,
+            value: NO_RUNTIME_DROPDOWN_VALUE,
+          },
+        ]
+      : []),
+    ...sortedRuntimes.map((candidate) => ({
+      disabled: isCreateMode && candidate.availability !== "available",
+      label: `${formatRuntimeOptionLabel(candidate)}${
+        isCreateMode && candidate.id === defaultRuntime?.id ? " (default)" : ""
+      }`,
+      value: candidate.id,
+    })),
+  ];
+  if (
+    runtime.trim().length > 0 &&
+    !runtimeDropdownOptions.some((option) => option.value === runtime)
+  ) {
+    runtimeDropdownOptions.push({
+      label: `${runtime.trim()} (current)`,
+      value: runtime.trim(),
+    });
+  }
+  const providerDropdownOptions: PersonaDropdownOption[] = [
+    ...providerOptions.map((option) => ({
+      label: option.label,
+      value: option.id || AUTO_PROVIDER_DROPDOWN_VALUE,
+    })),
+    { label: "Custom provider...", value: CUSTOM_PROVIDER_DROPDOWN_VALUE },
+  ];
+  const modelDropdownOptions: PersonaDropdownOption[] = [
+    ...modelOptions.map((option) => ({
+      label: option.label,
+      value: option.id || AUTO_MODEL_DROPDOWN_VALUE,
+    })),
+    ...(modelDiscoveryLoading && discoveredModelOptions === null
+      ? [
+          {
+            disabled: true,
+            label: "Loading models...",
+            value: MODEL_DISCOVERY_LOADING_VALUE,
+          },
+        ]
+      : []),
+    { label: "Custom model...", value: CUSTOM_MODEL_DROPDOWN_VALUE },
+  ];
+  const previewLabel = displayName.trim() || "Agent name";
+  const previewAvatarUrl = avatarUrl.trim() || null;
   const runtimeWarning =
     selectedRuntime && selectedRuntime.availability !== "available" ? (
       <p className="text-xs text-warning">
@@ -283,193 +548,186 @@ export function PersonaDialog({
         Visit Settings &gt; Doctor to set it up.
       </p>
     ) : null;
+  const advancedFieldsTransition = shouldReduceMotion
+    ? { duration: 0 }
+    : ADVANCED_FIELDS_MOTION_TRANSITION;
+
+  React.useEffect(() => {
+    if (
+      !open ||
+      !modelFieldVisible ||
+      isCustomModelEditing ||
+      !shouldClearKnownModelForSelectionScope({
+        model,
+        provider: providerForModelScope,
+        runtime,
+      })
+    ) {
+      return;
+    }
+
+    setModel("");
+    setIsCustomModelEditing(false);
+  }, [
+    isCustomModelEditing,
+    model,
+    modelFieldVisible,
+    open,
+    providerForModelScope,
+    runtime,
+  ]);
+
+  function updateProviderApiKey(envKey: string, value: string) {
+    setEnvVars((current) => {
+      if ((current[envKey] ?? "") === value) {
+        return current;
+      }
+
+      const next = { ...current };
+      if (value.length > 0) {
+        next[envKey] = value;
+      } else {
+        delete next[envKey];
+      }
+      return next;
+    });
+  }
+
+  function removeEnvVar(envKey: string) {
+    setEnvVars((current) => {
+      if (!(envKey in current)) {
+        return current;
+      }
+
+      const next = { ...current };
+      delete next[envKey];
+      return next;
+    });
+  }
+
+  function clearManagedProviderApiKeyWhenLeaving(
+    previousProvider: string,
+    nextProvider: string,
+  ) {
+    const previousEnvVar = getProviderApiKeyEnvVar(previousProvider);
+    const nextEnvVar = getProviderApiKeyEnvVar(nextProvider);
+    if (previousEnvVar && previousEnvVar !== nextEnvVar) {
+      removeEnvVar(previousEnvVar);
+    }
+  }
+
+  function handleProviderApiKeyChange(value: string) {
+    if (!providerApiKeyConfig) {
+      return;
+    }
+
+    updateProviderApiKey(providerApiKeyConfig.envVar, value);
+  }
+
+  function handleAdvancedEnvVarsChange(nextAdvancedEnvVars: EnvVarsValue) {
+    setEnvVars((current) => {
+      const managedEnvVar = providerApiKeyConfig?.envVar ?? null;
+      if (!managedEnvVar || !(managedEnvVar in current)) {
+        return nextAdvancedEnvVars;
+      }
+
+      return {
+        ...nextAdvancedEnvVars,
+        [managedEnvVar]: current[managedEnvVar],
+      };
+    });
+  }
+
+  function handleRuntimeDropdownChange(nextValue: string) {
+    const nextRuntime =
+      nextValue === NO_RUNTIME_DROPDOWN_VALUE ? "" : nextValue;
+    const previousRuntime = runtime;
+    const nextRuntimeCanChooseLlmProvider =
+      nextRuntime.trim().length > 0 &&
+      runtimeSupportsLlmProviderSelection(nextRuntime);
+    setRuntime(nextRuntime);
+    if (
+      shouldClearModelForRuntimeChange(previousRuntime, nextRuntime) ||
+      shouldClearKnownModelForSelectionScope({
+        model,
+        provider,
+        runtime: nextRuntime,
+      })
+    ) {
+      setModel("");
+      setIsCustomModelEditing(false);
+    }
+    if (!nextRuntimeCanChooseLlmProvider) {
+      clearManagedProviderApiKeyWhenLeaving(provider, "");
+      setIsCustomModelEditing(false);
+      setIsCustomProviderEditing(false);
+      setProvider("");
+    }
+  }
+
+  function handleProviderDropdownChange(nextValue: string) {
+    if (nextValue === CUSTOM_PROVIDER_DROPDOWN_VALUE) {
+      clearManagedProviderApiKeyWhenLeaving(provider, "");
+      setIsCustomProviderEditing(true);
+      setProvider("");
+      return;
+    }
+
+    const nextProvider =
+      nextValue === AUTO_PROVIDER_DROPDOWN_VALUE ? "" : nextValue;
+    clearManagedProviderApiKeyWhenLeaving(provider, nextProvider);
+    setIsCustomProviderEditing(false);
+    setProvider(nextProvider);
+    const requiredEnvVar = getProviderApiKeyEnvVar(nextProvider);
+    if (requiredEnvVar && !envVars[requiredEnvVar]?.trim()) {
+      setModel("");
+      setIsCustomModelEditing(false);
+    }
+    if (
+      !isCustomModelEditing &&
+      shouldClearKnownModelForSelectionScope({
+        model,
+        provider: nextProvider,
+        runtime,
+      })
+    ) {
+      setModel("");
+      setIsCustomModelEditing(false);
+    }
+  }
+
+  function handleModelDropdownChange(nextValue: string) {
+    if (nextValue === CUSTOM_MODEL_DROPDOWN_VALUE) {
+      setIsCustomModelEditing(true);
+      if (!isModelCustom) {
+        setModel("");
+      }
+      return;
+    }
+
+    setIsCustomModelEditing(false);
+    setModel(nextValue === AUTO_MODEL_DROPDOWN_VALUE ? "" : nextValue);
+  }
 
   return (
-    <Dialog onOpenChange={handleOpenChange} open={open}>
-      <DialogContent className="max-w-2xl overflow-hidden p-0">
-        <div className="flex max-h-[85vh] flex-col">
-          <DialogHeader className="shrink-0 border-b border-border/60 px-6 py-5 pr-14">
-            <DialogTitle>{title}</DialogTitle>
-            {description.trim().length > 0 ? (
-              <DialogDescription>{description}</DialogDescription>
-            ) : null}
-          </DialogHeader>
-
-          <div className="min-h-0 flex-1 space-y-5 overflow-y-auto px-6 py-5">
-            <div className="space-y-1.5">
-              <label
-                className="text-sm font-medium"
-                htmlFor="persona-display-name"
-              >
-                Display name
-              </label>
-              <Input
-                autoCorrect="off"
-                disabled={isPending}
-                id="persona-display-name"
-                onChange={(event) => setDisplayName(event.target.value)}
-                placeholder="Researcher"
-                value={displayName}
-              />
-            </div>
-
-            <div className="space-y-1.5">
-              <label
-                className="text-sm font-medium"
-                htmlFor="persona-avatar-url"
-              >
-                Avatar URL
-              </label>
-              <Input
-                autoCapitalize="none"
-                autoCorrect="off"
-                disabled={isPending}
-                id="persona-avatar-url"
-                onChange={(event) => setAvatarUrl(event.target.value)}
-                placeholder="https://example.com/avatar.png"
-                spellCheck={false}
-                value={avatarUrl}
-              />
-              <p className="text-xs text-muted-foreground">
-                Optional. Deployed agents fall back to the runtime avatar if
-                this is blank.
-              </p>
-            </div>
-
-            <div className="space-y-1.5">
-              <label
-                className="text-sm font-medium"
-                htmlFor="persona-system-prompt"
-              >
-                System prompt
-              </label>
-              <Textarea
-                className="min-h-40"
-                disabled={isPending}
-                id="persona-system-prompt"
-                onChange={(event) => setSystemPrompt(event.target.value)}
-                placeholder="Describe what this persona should do."
-                value={systemPrompt}
-              />
-            </div>
-
-            <div className="space-y-1.5">
-              <label className="text-sm font-medium" htmlFor="persona-runtime">
-                Preferred runtime
-              </label>
-              <select
-                className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-2 text-sm shadow-xs"
-                disabled={isPending || runtimesLoading}
-                id="persona-runtime"
-                onChange={(event) => setRuntime(event.target.value)}
-                value={runtime}
-              >
-                <option value="">
-                  {runtimesLoading
-                    ? "Loading runtimes..."
-                    : "No preference (use default)"}
-                </option>
-                {runtimes.map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.label}
-                    {p.availability === "adapter_missing"
-                      ? " (adapter missing)"
-                      : p.availability === "cli_missing"
-                        ? " (CLI missing)"
-                        : p.availability === "not_installed"
-                          ? " (not installed)"
-                          : ""}
-                  </option>
-                ))}
-              </select>
-              <p className="text-xs text-muted-foreground">
-                Optional. When deploying this persona, the selected runtime will
-                be pre-selected. Unavailable runtimes can be installed from
-                Settings &gt; Doctor.
-              </p>
-              {runtimeWarning}
-            </div>
-
-            <div className="space-y-1.5">
-              <label className="text-sm font-medium" htmlFor="persona-model">
-                Preferred model
-              </label>
-              <Input
-                autoCapitalize="none"
-                autoCorrect="off"
-                disabled={isPending}
-                id="persona-model"
-                onChange={(event) => setModel(event.target.value)}
-                placeholder="e.g. gpt-4o, claude-sonnet-4-20250514"
-                spellCheck={false}
-                value={model}
-              />
-              <p className="text-xs text-muted-foreground">
-                Optional. Passed to the agent at creation time. Leave blank to
-                use the runtime default.
-              </p>
-            </div>
-
-            <div className="space-y-1.5">
-              <label className="text-sm font-medium" htmlFor="persona-provider">
-                LLM Provider
-              </label>
-              <Input
-                autoCapitalize="none"
-                autoCorrect="off"
-                disabled={isPending}
-                id="persona-provider"
-                onChange={(event) => setProvider(event.target.value)}
-                placeholder="e.g. databricks, anthropic, openai"
-                spellCheck={false}
-                value={provider}
-              />
-              <p className="text-xs text-muted-foreground">
-                Optional. Injected as the runtime's provider env var at agent
-                creation time. Leave blank for auto-detection or provider-locked
-                runtimes.
-              </p>
-            </div>
-
-            <div className="space-y-1.5">
-              <label
-                className="text-sm font-medium"
-                htmlFor="persona-name-pool"
-              >
-                Instance name pool
-              </label>
-              <Input
-                autoCapitalize="none"
-                autoCorrect="off"
-                disabled={isPending}
-                id="persona-name-pool"
-                onChange={(event) => setNamePoolText(event.target.value)}
-                placeholder="Birch, Compass, Ridge, Thistle, ..."
-                spellCheck={false}
-                value={namePoolText}
-              />
-              <p className="text-xs text-muted-foreground">
-                Comma-separated names for bot copies. Each instance gets a
-                random name from this pool. Leave empty to use generic defaults.
-              </p>
-            </div>
-
-            <EnvVarsEditor
-              disabled={isPending}
-              helperText="Injected when agents created from this persona spawn. Per-agent overrides can replace these."
-              onChange={setEnvVars}
-              value={envVars}
-            />
-
-            {error ? (
-              <p className="rounded-2xl border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
-                {error.message}
-              </p>
-            ) : null}
-          </div>
-
-          <div className="flex shrink-0 items-center justify-between gap-3 border-t border-border/60 px-6 py-4">
-            <div className="flex min-h-8 items-center">
+    <Dialog
+      onOpenChange={(nextOpen) => {
+        if (!nextOpen && (isPending || isAvatarUploadPending)) return;
+        handleOpenChange(nextOpen);
+      }}
+      open={open}
+    >
+      <ChooserDialogContent
+        className="max-w-3xl border-0"
+        contentClassName="pt-3"
+        data-testid="persona-dialog"
+        description={description}
+        footerClassName="border-t-0 pt-0"
+        headerClassName="pb-2"
+        title={title}
+        footer={
+          <div className="flex w-full items-center justify-between gap-3">
+            <div className="flex min-h-9 items-center">
               {canImportPersonaUpdate ? (
                 <>
                   <input
@@ -481,7 +739,7 @@ export function PersonaDialog({
                   />
                   <button
                     className={cn(
-                      "inline-flex h-8 items-center gap-2 rounded-md border px-3 text-xs font-medium transition-colors",
+                      "inline-flex h-9 items-center gap-2 rounded-md border px-3 text-xs font-medium transition-colors",
                       importButtonTone === "drag"
                         ? "border-dashed border-primary/70 bg-primary/10 text-primary"
                         : importButtonTone === "error"
@@ -512,25 +770,223 @@ export function PersonaDialog({
 
             <div className="flex items-center gap-2">
               <Button
+                disabled={isPending || isAvatarUploadPending}
                 onClick={() => handleOpenChange(false)}
-                size="sm"
                 type="button"
                 variant="outline"
               >
                 Cancel
               </Button>
               <Button
-                disabled={!canSubmitPersonaDialog({ displayName, isPending })}
-                onClick={() => void handleSubmit()}
-                size="sm"
-                type="button"
+                data-testid="persona-dialog-submit"
+                disabled={!canSubmit}
+                form="persona-dialog-form"
+                type="submit"
               >
-                {isPending ? "Saving..." : submitLabel}
+                {isPending
+                  ? "Saving..."
+                  : isAvatarUploadPending
+                    ? "Uploading..."
+                    : submitLabel}
               </Button>
             </div>
           </div>
-        </div>
-      </DialogContent>
+        }
+      >
+        <form
+          className="grid gap-5 lg:grid-cols-[220px_minmax(0,1fr)]"
+          id="persona-dialog-form"
+          onSubmit={handleSubmitForm}
+        >
+          <AgentCreationPreview
+            avatarUrl={previewAvatarUrl}
+            disabled={isPending || isAvatarUploadPending}
+            label={previewLabel}
+            onClearAvatar={() => setAvatarUrl("")}
+            onUploadPendingChange={setIsAvatarUploadPending}
+            onSelectAvatar={setAvatarUrl}
+          />
+
+          <div className="space-y-5">
+            <div className="space-y-1.5">
+              <label
+                className="text-sm font-medium text-foreground"
+                htmlFor="persona-display-name"
+              >
+                Agent name
+              </label>
+              <div
+                className={cn(
+                  "flex min-h-11 items-center px-3",
+                  PERSONA_FIELD_SHELL_CLASS,
+                )}
+              >
+                <Input
+                  autoCorrect="off"
+                  className={cn(
+                    "h-8 px-0 py-0 leading-6",
+                    PERSONA_FIELD_CONTROL_CLASS,
+                  )}
+                  disabled={isPending}
+                  id="persona-display-name"
+                  onChange={(event) => setDisplayName(event.target.value)}
+                  placeholder="Fizz"
+                  value={displayName}
+                />
+              </div>
+            </div>
+
+            <div className="space-y-1.5">
+              <label
+                className="text-sm font-medium text-foreground"
+                htmlFor="persona-system-prompt"
+              >
+                Agent instruction
+              </label>
+              <div className={PERSONA_FIELD_SHELL_CLASS}>
+                <Textarea
+                  className={cn(
+                    "min-h-40 resize-y px-3 py-3 leading-5",
+                    PERSONA_FIELD_CONTROL_CLASS,
+                  )}
+                  disabled={isPending}
+                  id="persona-system-prompt"
+                  onChange={(event) => setSystemPrompt(event.target.value)}
+                  placeholder="Describe what this agent should do."
+                  value={systemPrompt}
+                />
+              </div>
+            </div>
+
+            <div className="space-y-1.5">
+              <label
+                className="text-sm font-medium text-foreground"
+                htmlFor="persona-runtime"
+              >
+                Provider
+              </label>
+              <PersonaDropdownField
+                disabled={isPending || runtimesLoading}
+                id="persona-runtime"
+                onValueChange={handleRuntimeDropdownChange}
+                options={runtimeDropdownOptions}
+                placeholder={blankRuntimeOptionLabel}
+                value={runtimeDropdownValue}
+              />
+              {runtimeWarning}
+            </div>
+
+            {llmProviderFieldVisible ? (
+              <div className="space-y-1.5">
+                <label
+                  className="text-sm font-medium text-foreground"
+                  htmlFor="persona-llm-provider"
+                >
+                  LLM provider
+                  <span className={PERSONA_LABEL_OPTIONAL_CLASS}>Optional</span>
+                </label>
+                <PersonaDropdownField
+                  disabled={isPending}
+                  id="persona-llm-provider"
+                  onValueChange={handleProviderDropdownChange}
+                  options={providerDropdownOptions}
+                  placeholder={defaultLlmProviderLabel}
+                  value={providerSelectValue}
+                />
+                {showCustomProviderInput ? (
+                  <div
+                    className={cn(
+                      "mt-2 flex min-h-11 items-center px-3",
+                      PERSONA_FIELD_SHELL_CLASS,
+                    )}
+                  >
+                    <Input
+                      aria-label="Custom provider ID"
+                      autoCorrect="off"
+                      className={cn(
+                        "h-8 px-0 py-0 leading-6",
+                        PERSONA_FIELD_CONTROL_CLASS,
+                      )}
+                      disabled={isPending}
+                      id="persona-custom-provider"
+                      onChange={(event) => setProvider(event.target.value)}
+                      placeholder="Custom provider ID"
+                      value={provider}
+                    />
+                  </div>
+                ) : null}
+                {providerApiKeyFieldVisible && providerApiKeyConfig ? (
+                  <PersonaProviderApiKeyField
+                    config={providerApiKeyConfig}
+                    disabled={isPending}
+                    onChange={handleProviderApiKeyChange}
+                    value={providerApiKeyValue}
+                  />
+                ) : null}
+              </div>
+            ) : null}
+
+            <AnimatePresence initial={false}>
+              {modelFieldVisible ? (
+                <PersonaModelField
+                  disabled={isPending}
+                  isExplicitModelRequired={isExplicitModelRequired}
+                  model={model}
+                  modelDiscoveryStatus={modelDiscoveryStatus}
+                  modelDropdownOptions={modelDropdownOptions}
+                  modelSelectValue={modelSelectValue}
+                  onCustomModelChange={setModel}
+                  onModelValueChange={handleModelDropdownChange}
+                  showCustomModelInput={showCustomModelInput}
+                  transition={advancedFieldsTransition}
+                />
+              ) : null}
+            </AnimatePresence>
+
+            <div className="space-y-3">
+              <button
+                aria-expanded={showAdvancedFields}
+                className="inline-flex h-9 items-center gap-1.5 text-sm font-medium text-foreground transition-colors hover:text-foreground/80 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+                onClick={() => setShowAdvancedFields((current) => !current)}
+                type="button"
+              >
+                <span>Advanced</span>
+                <ChevronDown
+                  className={cn(
+                    "h-4 w-4 text-muted-foreground transition-transform duration-150 ease-out",
+                    showAdvancedFields && "rotate-180",
+                  )}
+                />
+              </button>
+
+              <AnimatePresence initial={false}>
+                {showAdvancedFields ? (
+                  <motion.div
+                    animate={{ height: "auto", opacity: 1, scale: 1 }}
+                    className="origin-top overflow-hidden"
+                    exit={{ height: 0, opacity: 0, scale: 0.98 }}
+                    initial={{ height: 0, opacity: 0, scale: 0.98 }}
+                    key="persona-advanced-fields"
+                    transition={advancedFieldsTransition}
+                  >
+                    <PersonaAdvancedFields
+                      disabled={isPending}
+                      envVars={advancedEnvVars}
+                      namePoolText={namePoolText}
+                      onEnvVarsChange={handleAdvancedEnvVarsChange}
+                      onNamePoolTextChange={setNamePoolText}
+                    />
+                  </motion.div>
+                ) : null}
+              </AnimatePresence>
+            </div>
+
+            {error ? (
+              <p className="text-sm text-destructive">{error.message}</p>
+            ) : null}
+          </div>
+        </form>
+      </ChooserDialogContent>
     </Dialog>
   );
 }

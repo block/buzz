@@ -116,7 +116,6 @@ class BlobDescriptor {
 
 class MediaUploadService {
   final String _baseUrl;
-  final String? _apiToken;
   final String? _nsec;
   final PickGalleryImage _pickGalleryImage;
   final PickGalleryVideo _pickGalleryVideo;
@@ -129,7 +128,6 @@ class MediaUploadService {
 
   MediaUploadService({
     required String baseUrl,
-    required String? apiToken,
     required String? nsec,
     required PickGalleryImage pickGalleryImage,
     required PickGalleryVideo pickGalleryVideo,
@@ -139,7 +137,6 @@ class MediaUploadService {
     DateTime Function()? now,
     http.Client? httpClient,
   }) : _baseUrl = baseUrl,
-       _apiToken = apiToken,
        _nsec = nsec,
        _pickGalleryImage = pickGalleryImage,
        _pickGalleryVideo = pickGalleryVideo,
@@ -262,9 +259,6 @@ class MediaUploadService {
       'Content-Type': mimeType,
       'X-SHA-256': sha256,
     };
-    if (_apiToken case final token? when token.isNotEmpty) {
-      headers['X-Auth-Token'] = token;
-    }
     return headers;
   }
 
@@ -641,7 +635,6 @@ final mediaUploadServiceProvider = Provider<MediaUploadService>((ref) {
   final picker = ImagePicker();
   final service = MediaUploadService(
     baseUrl: config.baseUrl,
-    apiToken: null,
     nsec: config.nsec,
     pickGalleryImage: () => picker.pickImage(
       source: ImageSource.gallery,

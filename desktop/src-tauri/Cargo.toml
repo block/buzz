@@ -2,7 +2,7 @@
 
 [package]
 name = "buzz-desktop"
-version = "0.3.35"
+version = "0.3.42"
 description = "Buzz desktop app"
 authors = ["you"]
 edition = "2021"
@@ -24,6 +24,7 @@ mesh-llm = ["dep:mesh-llm-sdk", "dep:mesh-llm-host-runtime"]
 system-keyring = ["dep:keyring"]
 
 [build-dependencies]
+base64 = "0.22"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tauri-build = { version = "2", features = [] }
@@ -46,7 +47,7 @@ keyring = { version = "3.6.3", default-features = false, features = ["apple-nati
 security-framework = { version = "3.7.0", features = ["OSX_10_15"] }
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_Foundation"] }
+windows-sys = { version = "0.61", features = ["Win32_Security", "Win32_Storage_FileSystem", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_Foundation"] }
 keyring = { version = "3.6.3", default-features = false, features = ["windows-native", "vendored"], optional = true }
 
 [dependencies]
@@ -74,6 +75,7 @@ neteq = { version = "0.8", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
+toml = "0.8"
 nostr = { version = "0.44", features = ["nip44"] }
 zeroize = "1"
 reqwest = { version = "0.13", features = ["json", "query", "stream"] }
@@ -81,6 +83,7 @@ url = "2"
 buzz_core_pkg = { package = "buzz-core", path = "../../crates/buzz-core" }
 buzz_persona_pkg = { package = "buzz-persona", path = "../../crates/buzz-persona" }
 buzz_sdk_pkg = { package = "buzz-sdk", path = "../../crates/buzz-sdk" }
+buzz_agent_pkg = { package = "buzz-agent", path = "../../crates/buzz-agent" }
 mesh-llm-sdk = { git = "https://github.com/Mesh-LLM/mesh-llm.git", rev = "ebc3ab4c4b5f4a45d5bc942c66c18583800c3f82", package = "mesh-llm-sdk", default-features = false, features = ["client", "serving"], optional = true }
 mesh-llm-host-runtime = { git = "https://github.com/Mesh-LLM/mesh-llm.git", rev = "ebc3ab4c4b5f4a45d5bc942c66c18583800c3f82", package = "mesh-llm-host-runtime", default-features = false, features = ["dynamic-native-runtime"], optional = true }
 base64 = "0.22"

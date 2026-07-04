@@ -1,0 +1,268 @@
+import { CircleCheck, CircleDot, CircleX, MessageSquare } from "lucide-react";
+
+import type {
+  Project,
+  ProjectIssue,
+  ProjectIssueListItem,
+} from "@/features/projects/hooks";
+import {
+  resolveUserLabel,
+  type UserProfileLookup,
+} from "@/features/profile/lib/identity";
+import { normalizePubkey } from "@/shared/lib/pubkey";
+import { Button } from "@/shared/ui/button";
+import { Card } from "@/shared/ui/card";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
+import { UserAvatar } from "@/shared/ui/UserAvatar";
+
+type ProjectsIssuesListProps = {
+  isLoading: boolean;
+  onOpen: (project: Project, issue: ProjectIssue) => void;
+  profiles?: UserProfileLookup;
+  issues: ProjectIssueListItem[];
+  viewMode: "grid" | "list";
+};
+
+function formatRelativeTime(createdAt: number) {
+  const elapsedSeconds = Math.max(
+    1,
+    Math.floor(Date.now() / 1_000 - createdAt),
+  );
+  const units = [
+    { label: "year", seconds: 365 * 24 * 60 * 60 },
+    { label: "month", seconds: 30 * 24 * 60 * 60 },
+    { label: "day", seconds: 24 * 60 * 60 },
+    { label: "hour", seconds: 60 * 60 },
+    { label: "minute", seconds: 60 },
+  ];
+  const unit =
+    units.find((item) => elapsedSeconds >= item.seconds) ??
+    units[units.length - 1];
+  const value = Math.max(1, Math.floor(elapsedSeconds / unit.seconds));
+  return `${value} ${unit.label}${value === 1 ? "" : "s"} ago`;
+}
+
+function issueStatusVisual(status: ProjectIssue["status"]) {
+  if (status === "Done") {
+    return { className: "text-purple-400", icon: CircleCheck };
+  }
+  if (status === "Closed") {
+    return { className: "text-destructive", icon: CircleX };
+  }
+  return { className: "text-green-500", icon: CircleDot };
+}
+
+function nextStepLabel(status: ProjectIssue["status"]) {
+  if (status === "Done" || status === "Closed") return "View issue";
+  if (status === "In Review") return "Review issue";
+  if (status === "Triage") return "Triage issue";
+  return "Open issue";
+}
+
+function IssueHeader({
+  issue,
+  profiles,
+  project,
+}: {
+  issue: ProjectIssue;
+  profiles?: UserProfileLookup;
+  project: Project;
+}) {
+  const authorLabel = resolveUserLabel({ profiles, pubkey: issue.author });
+  const authorProfile = profiles?.[normalizePubkey(issue.author)];
+  const status = issueStatusVisual(issue.status);
+
+  return (
+    <>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <span className="relative z-10 inline-flex shrink-0">
+            <UserAvatar
+              accent={authorProfile?.isAgent === true}
+              avatarUrl={authorProfile?.avatarUrl ?? null}
+              displayName={authorLabel}
+              size="md"
+            />
+          </span>
+        </TooltipTrigger>
+        <TooltipContent>{authorLabel}</TooltipContent>
+      </Tooltip>
+      <div className="min-w-0 flex-1 space-y-1">
+        <div className="flex min-w-0 items-center gap-1.5">
+          <p className="truncate text-sm font-semibold text-foreground">
+            {issue.title}
+          </p>
+          <status.icon className={`h-3.5 w-3.5 shrink-0 ${status.className}`} />
+        </div>
+        <p className="truncate text-xs text-muted-foreground">{project.name}</p>
+      </div>
+    </>
+  );
+}
+
+function IssueGridCard({
+  issue,
+  onOpen,
+  profiles,
+  project,
+}: {
+  issue: ProjectIssue;
+  onOpen: (project: Project, issue: ProjectIssue) => void;
+  profiles?: UserProfileLookup;
+  project: Project;
+}) {
+  const authorLabel = resolveUserLabel({ profiles, pubkey: issue.author });
+
+  return (
+    <Card className="group relative flex min-h-40 flex-col overflow-hidden rounded-2xl border-border/50 bg-muted/20 p-4 shadow-none transition-colors duration-150 hover:bg-muted/30">
+      <button
+        className="absolute inset-0 rounded-xl"
+        onClick={() => onOpen(project, issue)}
+        type="button"
+      >
+        <span className="sr-only">View {issue.title}</span>
+      </button>
+      <div className="flex min-h-0 flex-1 flex-col gap-3">
+        <div className="flex min-w-0 items-start gap-3">
+          <IssueHeader issue={issue} profiles={profiles} project={project} />
+          <Button
+            className="relative z-10 h-7 shrink-0 rounded-full px-2.5"
+            onClick={(event) => {
+              event.stopPropagation();
+              onOpen(project, issue);
+            }}
+            size="xs"
+            type="button"
+            variant="default"
+          >
+            {nextStepLabel(issue.status)}
+          </Button>
+        </div>
+
+        {issue.content ? (
+          <p className="line-clamp-2 text-sm text-foreground/90">
+            {issue.content}
+          </p>
+        ) : null}
+
+        <div className="mt-auto rounded-xl bg-muted/60 px-2.5 py-2">
+          <div className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5 text-xs text-foreground/80">
+            <span className="font-mono text-foreground">
+              #{issue.id.slice(0, 8)}
+            </span>
+            <span className="font-medium text-foreground">{issue.status}</span>
+            <span>opened {formatRelativeTime(issue.createdAt)}</span>
+            <span>by {authorLabel}</span>
+            {issue.comments.length > 0 ? (
+              <span className="flex items-center gap-1">
+                <MessageSquare className="h-3.5 w-3.5" />
+                {issue.comments.length}
+              </span>
+            ) : null}
+          </div>
+        </div>
+      </div>
+    </Card>
+  );
+}
+
+function IssueListRow({
+  issue,
+  onOpen,
+  profiles,
+  project,
+}: {
+  issue: ProjectIssue;
+  onOpen: (project: Project, issue: ProjectIssue) => void;
+  profiles?: UserProfileLookup;
+  project: Project;
+}) {
+  const authorLabel = resolveUserLabel({ profiles, pubkey: issue.author });
+
+  return (
+    <Card className="group relative overflow-hidden rounded-2xl border-border/50 bg-muted/20 p-3 shadow-none transition-colors duration-150 hover:bg-muted/30">
+      <button
+        className="absolute inset-0 rounded-xl"
+        onClick={() => onOpen(project, issue)}
+        type="button"
+      >
+        <span className="sr-only">View {issue.title}</span>
+      </button>
+      <div className="flex min-w-0 items-start gap-3">
+        <IssueHeader issue={issue} profiles={profiles} project={project} />
+        <div className="relative z-10 flex shrink-0 items-center gap-2">
+          <span className="text-xs text-muted-foreground">
+            {issue.status} · opened {formatRelativeTime(issue.createdAt)} by{" "}
+            {authorLabel}
+          </span>
+          <Button
+            className="h-7 rounded-full px-2.5"
+            onClick={(event) => {
+              event.stopPropagation();
+              onOpen(project, issue);
+            }}
+            size="xs"
+            type="button"
+            variant="default"
+          >
+            {nextStepLabel(issue.status)}
+          </Button>
+        </div>
+      </div>
+    </Card>
+  );
+}
+
+export function ProjectsIssuesList({
+  isLoading,
+  issues,
+  onOpen,
+  profiles,
+  viewMode,
+}: ProjectsIssuesListProps) {
+  if (isLoading) {
+    return (
+      <div className="rounded-xl border border-border/60 px-4 py-12 text-center text-sm text-muted-foreground">
+        Loading issues...
+      </div>
+    );
+  }
+
+  if (issues.length === 0) {
+    return (
+      <div className="rounded-xl border border-dashed border-border/60 px-4 py-12 text-center text-sm text-muted-foreground">
+        No issues yet.
+      </div>
+    );
+  }
+
+  if (viewMode === "grid") {
+    return (
+      <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+        {issues.map(({ project, issue }) => (
+          <IssueGridCard
+            issue={issue}
+            key={issue.id}
+            onOpen={onOpen}
+            profiles={profiles}
+            project={project}
+          />
+        ))}
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-2">
+      {issues.map(({ project, issue }) => (
+        <IssueListRow
+          issue={issue}
+          key={issue.id}
+          onOpen={onOpen}
+          profiles={profiles}
+          project={project}
+        />
+      ))}
+    </div>
+  );
+}

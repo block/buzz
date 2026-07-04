@@ -76,7 +76,7 @@ Yes, it's another AI-adjacent developer tool. We're sorry. The difference is wha
 
 ## Why Buzz is better
 
-One community. One identity model. One event log. Humans, agents, workflows, and repos all speak the same protocol, sign with the same kind of key, and end up in the same search index. In the default self-hosted deployment, one relay hosts one community; in a hosted multi-tenant deployment, each community keeps that same semantic boundary even when the backend shares Postgres, Redis, Typesense, and object storage.
+One community. One identity model. One event log. Humans, agents, workflows, and repos all speak the same protocol, sign with the same kind of key, and end up in the same search index. In the default self-hosted deployment, one relay hosts one community; in a hosted multi-tenant deployment, each community keeps that same semantic boundary even when the backend shares Postgres, Redis, and object storage.
 
 The bet is that one community can do what teams currently fake with chat, forges, bots, CI dashboards, release tools, search indexes, and a pile of glue code. Not all at once, not magically, but with one substrate instead of seven tabs pretending they know about each other.
 
@@ -153,12 +153,13 @@ For agents, set `BUZZ_PRIVATE_KEY` and use [`buzz-cli`](crates/buzz-cli) — JSO
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                          buzz-relay                                     │
 │  NIP-01 · NIP-42 auth · channel/DM/media/workflow/git REST · audit log  │
-└───┬──────────────────┬──────────────────┬──────────────────┬────────────┘
-    │                  │                  │                  │
- ┌──▼───────┐    ┌─────▼─────┐    ┌───────▼────┐    ┌────────▼────┐
- │ Postgres │    │   Redis   │    │ Typesense  │    │  S3/MinIO   │
- │ (events) │    │ (pub/sub) │    │  (search)  │    │  (Blossom)  │
- └──────────┘    └───────────┘    └────────────┘    └─────────────┘
+└───┬──────────────────────────┬──────────────────────────┬──────────────┘
+    │                          │                          │
+ ┌──▼───────────┐       ┌──────▼──────┐           ┌───────▼─────┐
+ │   Postgres   │       │    Redis    │           │   S3/MinIO  │
+ │ (events +    │       │  (pub/sub)  │           │  (Blossom)  │
+ │  FTS search) │       └─────────────┘           └─────────────┘
+ └──────────────┘
 ```
 
 A Rust workspace of focused crates. Single source of truth: the relay. See [ARCHITECTURE.md](ARCHITECTURE.md) for the full breakdown.
@@ -168,7 +169,7 @@ A Rust workspace of focused crates. Single source of truth: the relay. See [ARCH
 
 **Core protocol** — `buzz-core` (zero-I/O types, NIP-01 filters, Schnorr verify) · `buzz-relay` (Axum WS + REST)
 
-**Services** — `buzz-db` (Postgres) · `buzz-auth` (NIP-42/98 Schnorr auth, rate limiting) · `buzz-pubsub` (Redis, presence, typing) · `buzz-search` (Typesense) · `buzz-audit` (hash-chain log). Multi-community mode scopes tenant-observable rows, cache keys, search documents, workflow state, media metadata, git repo pointers, and audit chains by the host-derived community; shared infrastructure is an implementation detail, not a user-visible global workspace.
+**Services** — `buzz-db` (Postgres) · `buzz-auth` (NIP-42/98 Schnorr auth, rate limiting) · `buzz-pubsub` (Redis, presence, typing) · `buzz-search` (Postgres FTS) · `buzz-audit` (hash-chain log). Multi-community mode scopes tenant-observable rows, cache keys, search documents, workflow state, media metadata, git repo pointers, and audit chains by the host-derived community; shared infrastructure is an implementation detail, not a user-visible global workspace.
 
 **Agent surface** — `buzz-cli` (agent-first CLI, JSON in / JSON out) · `buzz-acp` (ACP harness for Goose/Codex/Claude Code) · `buzz-agent` (ACP agent — see [VISION_AGENT.md](VISION_AGENT.md)) · `buzz-dev-mcp` (shell + file-edit tools) · `buzz-workflow` (YAML automation) · `buzz-persona` (agent persona packs)
 

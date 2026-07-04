@@ -1,32 +1,28 @@
 import * as React from "react";
-import { ArrowDown, ArrowLeft, X } from "lucide-react";
+import { ArrowDown } from "lucide-react";
 
 import {
   buildThreadSummaryFromVisibleEntries,
   hasNestedThreadBranches,
   type MainTimelineEntry,
 } from "@/features/messages/lib/threadPanel";
+import { hasSameMessageAuthor } from "@/features/messages/lib/messageGrouping";
 import type { ImetaMedia } from "@/features/messages/lib/imetaMediaMarkdown";
+import { canManageMessageForCurrentUser } from "@/features/messages/lib/canManageMessage";
 import type { TimelineMessage } from "@/features/messages/types";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type { Channel } from "@/shared/api/types";
 import { useEscapeKey } from "@/shared/hooks/useEscapeKey";
 import { useIsThreadPanelOverlay } from "@/shared/hooks/use-mobile";
-import { THREAD_PANEL_MIN_WIDTH_PX } from "@/shared/hooks/useThreadPanelWidth";
 import { cn } from "@/shared/lib/cn";
+import { AuxiliaryPanel } from "@/shared/layout/AuxiliaryPanel";
+import { AuxiliaryPanelBody } from "@/shared/layout/AuxiliaryPanel";
 import {
   AuxiliaryPanelHeader,
   AuxiliaryPanelHeaderGroup,
   AuxiliaryPanelTitle,
-  auxiliaryPanelContentPaddingClass,
-} from "@/shared/layout/AuxiliaryPanelHeader";
+} from "@/shared/layout/AuxiliaryPanel";
 import { Button } from "@/shared/ui/button";
-import {
-  OverlayPanelBackdrop,
-  PANEL_ENTER_BASE_CLASS,
-  PANEL_OVERLAY_CLASS,
-  PANEL_SINGLE_COLUMN_HEADER_LAYER_CLASS,
-} from "@/shared/ui/OverlayPanelBackdrop";
 import { Skeleton } from "@/shared/ui/skeleton";
 import type { VideoReviewContext } from "@/shared/ui/VideoPlayer";
 import { MessageComposer } from "./MessageComposer";
@@ -46,6 +42,8 @@ type MessageThreadPanelProps = {
   currentPubkey?: string;
   disabled?: boolean;
   firstUnreadReplyId?: string | null;
+  huddleMemberPubkeys?: readonly string[];
+  huddleMemberPubkeysPending?: boolean;
   layout?: "standalone" | "split";
   editTarget?: {
     author: string;
@@ -71,6 +69,11 @@ type MessageThreadPanelProps = {
     content: string,
     mentionPubkeys: string[],
     mediaTags?: string[][],
+    channelId?: string | null,
+    threadContext?: {
+      parentEventId: string | null;
+      threadHeadId: string | null;
+    } | null,
   ) => Promise<void>;
   onToggleReaction?: (
     message: TimelineMessage,
@@ -88,6 +91,7 @@ type MessageThreadPanelProps = {
   threadHeadVideoReviewContext?: VideoReviewContext;
   toolbarExtraActions?: React.ReactNode;
   widthPx: number;
+  transparentChrome?: boolean;
   isFollowingThread?: boolean;
   isMessageUnreadById?: (messageId: string) => boolean;
   onFollowThread?: () => void;
@@ -97,24 +101,14 @@ type MessageThreadPanelProps = {
 const EMPTY_THREAD_REPLIES: MainTimelineEntry[] = [];
 const THREAD_PANEL_MESSAGE_GUTTER_CLASS = "px-2";
 const THREAD_PANEL_COMPOSER_GUTTER_CLASS = "px-5";
-const THREAD_PANEL_SUMMARY_INDENT_OFFSET_REM = -0.125;
+const THREAD_PANEL_SUMMARY_INDENT_OFFSET_REM = 0;
 type MessageThreadPanelSkeletonProps = {
   isSinglePanelView?: boolean;
   layout?: "standalone" | "split";
   onClose: () => void;
   widthPx: number;
+  transparentChrome?: boolean;
 };
-
-function canManageMessage(
-  message: TimelineMessage,
-  currentPubkey: string | undefined,
-): boolean {
-  return Boolean(
-    currentPubkey &&
-      message.pubkey &&
-      currentPubkey.toLowerCase() === message.pubkey.toLowerCase(),
-  );
-}
 
 function hasLaterVisibleSibling(
   entries: readonly MainTimelineEntry[],
@@ -225,49 +219,25 @@ export function MessageThreadPanelSkeleton({
   layout = "standalone",
   onClose,
   widthPx,
+  transparentChrome = false,
 }: MessageThreadPanelSkeletonProps) {
   const isOverlay = useIsThreadPanelOverlay();
-  const isFloatingOverlay = isOverlay && !isSinglePanelView;
-  const isSplitLayout = layout === "split";
   useEscapeKey(onClose, isOverlay || isSinglePanelView);
 
   const threadHeaderContent = (
     <>
-      <AuxiliaryPanelHeaderGroup>
-        {isSinglePanelView ? (
-          <Button
-            aria-label="Back to conversation"
-            className="shrink-0"
-            onClick={onClose}
-            size="icon"
-            type="button"
-            variant="outline"
-          >
-            <ArrowLeft />
-          </Button>
-        ) : null}
+      <AuxiliaryPanelHeaderGroup
+        backButtonAriaLabel="Back to conversation"
+        onBack={isSinglePanelView ? onClose : undefined}
+      >
         <AuxiliaryPanelTitle>Thread</AuxiliaryPanelTitle>
       </AuxiliaryPanelHeaderGroup>
-      <Button
-        aria-label="Close thread"
-        className="ml-auto"
-        onClick={onClose}
-        size="icon"
-        type="button"
-        variant="ghost"
-      >
-        <X />
-      </Button>
     </>
   );
 
   const threadBody = (
-    <div
-      className={cn(
-        "min-h-0 flex-1 overflow-y-auto overflow-x-hidden overscroll-contain pb-24 [overflow-anchor:none]",
-        isSplitLayout && auxiliaryPanelContentPaddingClass,
-        !isSplitLayout && !isFloatingOverlay && "pt-[3.25rem]",
-      )}
+    <AuxiliaryPanelBody
+      className="overflow-y-auto overflow-x-hidden overscroll-contain pb-24"
       data-testid="message-thread-loading"
     >
       <div
@@ -290,51 +260,25 @@ export function MessageThreadPanelSkeleton({
           <Skeleton className="h-4 w-28 rounded-full" />
         </div>
       </div>
-    </div>
+    </AuxiliaryPanelBody>
   );
 
-  if (isSplitLayout) {
-    return (
-      <div className="relative flex min-h-0 flex-1 flex-col">
-        <AuxiliaryPanelHeader>{threadHeaderContent}</AuxiliaryPanelHeader>
-        {threadBody}
-        <ThreadComposerSkeleton />
-      </div>
-    );
-  }
-
   return (
-    <>
-      {isFloatingOverlay && <OverlayPanelBackdrop onClose={onClose} />}
-      <aside
-        className={cn(
-          PANEL_ENTER_BASE_CLASS,
-          isSinglePanelView && "border-l-0",
-          isFloatingOverlay && PANEL_OVERLAY_CLASS,
-        )}
-        data-testid="message-thread-panel"
-        style={{
-          width: isSinglePanelView
-            ? "100%"
-            : `min(${widthPx}px, calc(100% - ${THREAD_PANEL_MIN_WIDTH_PX}px))`,
-        }}
-      >
-        <div
-          className={cn(
-            "flex cursor-default select-none items-center",
-            isSinglePanelView
-              ? `relative ${PANEL_SINGLE_COLUMN_HEADER_LAYER_CLASS} -mb-[3.25rem] min-h-[3.25rem] shrink-0 gap-2.5 bg-background/80 px-4 py-2 backdrop-blur-md supports-[backdrop-filter]:bg-background/70 sm:pr-3 dark:bg-background/70 dark:backdrop-blur-xl dark:supports-[backdrop-filter]:bg-background/55`
-              : "relative z-50 min-h-[3.25rem] shrink-0 gap-3 bg-background/80 px-5 py-2 backdrop-blur-md supports-[backdrop-filter]:bg-background/70 dark:bg-background/70 dark:backdrop-blur-xl dark:supports-[backdrop-filter]:bg-background/55",
-          )}
-          data-tauri-drag-region
-        >
-          {threadHeaderContent}
-        </div>
-
-        {threadBody}
-        <ThreadComposerSkeleton />
-      </aside>
-    </>
+    <AuxiliaryPanel
+      className="relative"
+      footer={<ThreadComposerSkeleton />}
+      header={
+        <AuxiliaryPanelHeader>{threadHeaderContent}</AuxiliaryPanelHeader>
+      }
+      isSinglePanelView={isSinglePanelView}
+      layout={layout}
+      onClose={onClose}
+      testId="message-thread-panel"
+      transparentChrome={transparentChrome}
+      widthPx={widthPx}
+    >
+      {threadBody}
+    </AuxiliaryPanel>
   );
 }
 
@@ -346,6 +290,8 @@ export function MessageThreadPanel({
   currentPubkey,
   disabled = false,
   firstUnreadReplyId,
+  huddleMemberPubkeys,
+  huddleMemberPubkeysPending = false,
   layout = "standalone",
   editTarget,
   isSending,
@@ -379,6 +325,7 @@ export function MessageThreadPanel({
   threadTypingPubkeys,
   toolbarExtraActions,
   widthPx,
+  transparentChrome = false,
 }: MessageThreadPanelProps) {
   const threadBodyRef = React.useRef<HTMLDivElement>(null);
   const threadContentRef = React.useRef<HTMLDivElement>(null);
@@ -390,14 +337,25 @@ export function MessageThreadPanel({
     string | null
   >(null);
   const isOverlay = useIsThreadPanelOverlay();
-  const isFloatingOverlay = isOverlay && !isSinglePanelView;
-  const isSplitLayout = layout === "split";
   const threadHeadId = threadHead?.id ?? null;
   useEscapeKey(onClose, isOverlay || isSinglePanelView);
   useComposerHeightPadding(
     threadBodyRef,
     threadComposerWrapperRef,
     isSinglePanelView,
+  );
+
+  // Live ref so onCaptureSendContext can read reply state at submit time
+  // (before any async mention-flow awaits change navigation state).
+  const replyTargetMessageRef = React.useRef(replyTargetMessage);
+  replyTargetMessageRef.current = replyTargetMessage;
+
+  const onCaptureSendContext = React.useCallback(
+    () => ({
+      parentEventId: replyTargetMessageRef.current?.id ?? threadHeadId,
+      threadHeadId,
+    }),
+    [threadHeadId],
   );
 
   const collapseThreadHeadReplies = React.useCallback(() => {
@@ -542,6 +500,7 @@ export function MessageThreadPanel({
     const ancestorStack: { index: number; message: TimelineMessage }[] = [
       { index: -1, message: threadHead },
     ];
+    let previousGroupMessage: TimelineMessage | null = threadHead;
 
     return deferredThreadReplies.map((entry, index) => {
       while (
@@ -579,10 +538,18 @@ export function MessageThreadPanel({
       const nextEntry = deferredThreadReplies[index + 1];
       const connectsToVisibleChild =
         nextEntry != null && nextEntry.message.depth > entry.message.depth;
+      const startsUnreadSection =
+        index > 0 && entry.message.id === firstUnreadReplyId;
+      const isContinuation =
+        !startsUnreadSection &&
+        entry.summary === null &&
+        hasSameMessageAuthor(previousGroupMessage, entry.message);
 
       if (connectsToVisibleChild && !entry.summary) {
         ancestorStack.push({ index, message: entry.message });
       }
+
+      previousGroupMessage = entry.summary !== null ? null : entry.message;
 
       return {
         collapseDepthGuideActions,
@@ -590,9 +557,15 @@ export function MessageThreadPanel({
         continuationDepths,
         entry,
         index,
+        isContinuation,
       };
     });
-  }, [deferredThreadReplies, hoveredCollapseBranchId, threadHead]);
+  }, [
+    deferredThreadReplies,
+    firstUnreadReplyId,
+    hoveredCollapseBranchId,
+    threadHead,
+  ]);
 
   const { isAtBottom, newMessageCount, onScroll, scrollToBottom } =
     useAnchoredScroll({
@@ -610,12 +583,9 @@ export function MessageThreadPanel({
   }
 
   const threadScrollRegion = (
-    <div
-      className={cn(
-        "min-h-0 flex-1 overflow-y-auto overflow-x-hidden overscroll-contain pb-24 [overflow-anchor:none]",
-        isSplitLayout && auxiliaryPanelContentPaddingClass,
-        !isSplitLayout && !isFloatingOverlay && "pt-[3.25rem]",
-      )}
+    <AuxiliaryPanelBody
+      className="overflow-y-auto overflow-x-hidden overscroll-contain pb-24"
+      data-buzz-conversation-scroll
       data-testid="message-thread-body"
       onScroll={onScroll}
       ref={threadBodyRef}
@@ -630,17 +600,29 @@ export function MessageThreadPanel({
               actionBarPlacement="inside"
               agentPubkeys={agentPubkeys}
               channelId={channelId}
+              huddleMemberPubkeys={huddleMemberPubkeys}
+              huddleMemberPubkeysPending={huddleMemberPubkeysPending}
               isFollowingThread={isFollowingThread}
               isUnread={isMessageUnreadById?.(threadHead.id)}
               layoutVariant="thread-reply"
               message={threadHead}
               onDelete={
-                onDelete && canManageMessage(threadHead, currentPubkey)
+                onDelete &&
+                canManageMessageForCurrentUser(
+                  threadHead,
+                  currentPubkey,
+                  profiles,
+                )
                   ? onDelete
                   : undefined
               }
               onEdit={
-                onEdit && canManageMessage(threadHead, currentPubkey)
+                onEdit &&
+                canManageMessageForCurrentUser(
+                  threadHead,
+                  currentPubkey,
+                  profiles,
+                )
                   ? onEdit
                   : undefined
               }
@@ -693,6 +675,7 @@ export function MessageThreadPanel({
                     continuationDepths,
                     entry,
                     index,
+                    isContinuation,
                   } = item;
                   const showUnreadDivider =
                     index > 0 && entry.message.id === firstUnreadReplyId;
@@ -717,7 +700,7 @@ export function MessageThreadPanel({
                   return (
                     <div
                       className={cn(
-                        "content-visibility-auto-interactive flex flex-col gap-0",
+                        "flex flex-col gap-0",
                         entry.summary &&
                           "group/message rounded-2xl px-0 py-0.5 transition-colors hover:bg-muted/50 focus-within:bg-muted/50",
                       )}
@@ -748,6 +731,9 @@ export function MessageThreadPanel({
                         }
                         highlightThreadLineDepths={highlightedLineDepths}
                         hoverBackground={!entry.summary}
+                        huddleMemberPubkeys={huddleMemberPubkeys}
+                        huddleMemberPubkeysPending={huddleMemberPubkeysPending}
+                        isContinuation={isContinuation}
                         isUnread={isMessageUnreadById?.(entry.message.id)}
                         layoutVariant="thread-reply"
                         message={entry.message}
@@ -767,13 +753,21 @@ export function MessageThreadPanel({
                         }
                         onDelete={
                           onDelete &&
-                          canManageMessage(entry.message, currentPubkey)
+                          canManageMessageForCurrentUser(
+                            entry.message,
+                            currentPubkey,
+                            profiles,
+                          )
                             ? onDelete
                             : undefined
                         }
                         onEdit={
                           onEdit &&
-                          canManageMessage(entry.message, currentPubkey)
+                          canManageMessageForCurrentUser(
+                            entry.message,
+                            currentPubkey,
+                            profiles,
+                          )
                             ? onEdit
                             : undefined
                         }
@@ -833,13 +827,13 @@ export function MessageThreadPanel({
           null}
         </div>
       </div>
-    </div>
+    </AuxiliaryPanelBody>
   );
 
   const threadFooter = (
     <>
       {!isAtBottom ? (
-        <div className="pointer-events-none absolute inset-x-0 bottom-36 z-20 flex justify-center px-4">
+        <div className="pointer-events-none absolute inset-x-0 bottom-36 z-50 flex justify-center px-4">
           <Button
             className="pointer-events-auto h-7 min-h-7 gap-1.5 rounded-full border-border/50 bg-background/85 px-2.5 text-2xs font-medium text-muted-foreground shadow-xs backdrop-blur-sm hover:bg-muted/70 hover:text-foreground [&_svg]:size-4"
             data-testid="thread-scroll-to-latest"
@@ -857,7 +851,8 @@ export function MessageThreadPanel({
       ) : null}
 
       <div
-        className="pointer-events-none absolute inset-x-0 bottom-0 z-10"
+        className="pointer-events-none absolute inset-x-0 bottom-0 z-40"
+        data-testid="thread-composer-overlay"
         ref={threadComposerWrapperRef}
       >
         <div className="pointer-events-auto">
@@ -872,6 +867,7 @@ export function MessageThreadPanel({
             isSending={isSending}
             onCancelEdit={onCancelEdit}
             onCancelReply={composerReplyTarget ? onCancelReply : undefined}
+            onCaptureSendContext={onCaptureSendContext}
             onEditLastOwnMessage={onEditLastOwnMessage}
             onEditSave={onEditSave}
             onSend={onSend}
@@ -883,13 +879,15 @@ export function MessageThreadPanel({
           />
           <div
             className={cn(
-              "h-7 bg-background pb-1 pt-0",
+              "min-h-8 bg-background pb-1.5 pt-0",
               THREAD_PANEL_COMPOSER_GUTTER_CLASS,
             )}
           >
-            <div className="mx-auto flex h-full w-full max-w-4xl items-center gap-2">
+            <div className="mx-auto flex h-full w-full max-w-4xl items-center gap-2 overflow-visible">
               {toolbarExtraActions ? (
-                <div className="shrink-0">{toolbarExtraActions}</div>
+                <div className="flex min-w-0 flex-1 overflow-visible">
+                  {toolbarExtraActions}
+                </div>
               ) : null}
               {threadTypingPubkeys.length > 0 ? (
                 <TypingIndicatorRow
@@ -910,77 +908,31 @@ export function MessageThreadPanel({
 
   const threadHeaderContent = (
     <>
-      <AuxiliaryPanelHeaderGroup>
-        {isSinglePanelView ? (
-          <Button
-            aria-label="Back to conversation"
-            className="shrink-0"
-            data-testid="message-thread-back"
-            onClick={onClose}
-            size="icon"
-            type="button"
-            variant="outline"
-          >
-            <ArrowLeft />
-          </Button>
-        ) : null}
+      <AuxiliaryPanelHeaderGroup
+        backButtonAriaLabel="Back to conversation"
+        backButtonTestId="message-thread-back"
+        onBack={isSinglePanelView ? onClose : undefined}
+      >
         <AuxiliaryPanelTitle>Thread</AuxiliaryPanelTitle>
       </AuxiliaryPanelHeaderGroup>
-      <Button
-        aria-label="Close thread"
-        className="ml-auto"
-        data-testid="message-thread-close"
-        onClick={onClose}
-        size="icon"
-        type="button"
-        variant="ghost"
-      >
-        <X />
-      </Button>
     </>
   );
 
-  if (isSplitLayout) {
-    return (
-      <div className="relative flex min-h-0 flex-1 flex-col">
-        <AuxiliaryPanelHeader>{threadHeaderContent}</AuxiliaryPanelHeader>
-        {threadScrollRegion}
-        {threadFooter}
-      </div>
-    );
-  }
-
   return (
-    <>
-      {isFloatingOverlay && <OverlayPanelBackdrop onClose={onClose} />}
-      <aside
-        className={cn(
-          PANEL_ENTER_BASE_CLASS,
-          isSinglePanelView && "border-l-0",
-          isFloatingOverlay && PANEL_OVERLAY_CLASS,
-        )}
-        data-testid="message-thread-panel"
-        style={{
-          width: isSinglePanelView
-            ? "100%"
-            : `min(${widthPx}px, calc(100% - ${THREAD_PANEL_MIN_WIDTH_PX}px))`,
-        }}
-      >
-        <div
-          className={cn(
-            "flex cursor-default select-none items-center",
-            isSinglePanelView
-              ? `relative ${PANEL_SINGLE_COLUMN_HEADER_LAYER_CLASS} -mb-[3.25rem] min-h-[3.25rem] shrink-0 gap-2.5 bg-background/80 px-4 py-2 backdrop-blur-md supports-[backdrop-filter]:bg-background/70 sm:pr-3 dark:bg-background/70 dark:backdrop-blur-xl dark:supports-[backdrop-filter]:bg-background/55`
-              : "relative z-50 min-h-[3.25rem] shrink-0 gap-3 bg-background/80 px-5 py-2 backdrop-blur-md supports-[backdrop-filter]:bg-background/70 dark:bg-background/70 dark:backdrop-blur-xl dark:supports-[backdrop-filter]:bg-background/55",
-          )}
-          data-tauri-drag-region
-        >
-          {threadHeaderContent}
-        </div>
-
-        {threadScrollRegion}
-        {threadFooter}
-      </aside>
-    </>
+    <AuxiliaryPanel
+      className="relative"
+      footer={threadFooter}
+      header={
+        <AuxiliaryPanelHeader>{threadHeaderContent}</AuxiliaryPanelHeader>
+      }
+      isSinglePanelView={isSinglePanelView}
+      layout={layout}
+      onClose={onClose}
+      testId="message-thread-panel"
+      transparentChrome={transparentChrome}
+      widthPx={widthPx}
+    >
+      {threadScrollRegion}
+    </AuxiliaryPanel>
   );
 }

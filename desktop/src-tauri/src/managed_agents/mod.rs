@@ -1,5 +1,8 @@
+mod agent_env;
 pub(crate) mod agent_events;
+pub(crate) use agent_env::{build_buzz_agent_provider_defaults, discovery_env_with_baked_floor};
 mod backend;
+pub(crate) mod config_bridge;
 mod discovery;
 mod env_vars;
 mod nest;
@@ -38,7 +41,7 @@ pub use repos::{
 pub use restore::*;
 pub use runtime::*;
 pub use storage::*;
-pub use team_repair::sync_team_personas;
+pub use team_repair::{sync_team_personas, team_persona_key};
 pub use teams::*;
 pub use types::*;
 

@@ -40,6 +40,7 @@ export class ChannelSectionSyncManager {
   private lastRemoteCreatedAt = 0;
   private pendingStore: ChannelSectionStore | null = null;
   private lastPublishedStore: ChannelSectionStore | null = null;
+  private destroyed = false;
 
   constructor(pubkey: string) {
     this.pubkey = pubkey;
@@ -143,6 +144,10 @@ export class ChannelSectionSyncManager {
   private async doPublish(store: ChannelSectionStore): Promise<void> {
     try {
       const merged = await this.fetchOwnBlobBeforePublish(store);
+      // Guard: manager may have been destroyed while fetchOwnBlobBeforePublish
+      // was awaited (workspace switch during in-flight fetch). If so, abort
+      // before touching the relay.
+      if (this.destroyed) return;
       if (this.isIdenticalToLastPublished(merged)) {
         this.pendingStore = null;
         return;
@@ -166,6 +171,10 @@ export class ChannelSectionSyncManager {
           ["t", D_TAG], // relay discoverability; not used in our filters
         ],
       });
+      // Final guard immediately before the network call — sign/encrypt are
+      // synchronous-ish but cheap; the relay socket may have moved to a
+      // different workspace by the time we reach this point.
+      if (this.destroyed) return;
       await relayClient.publishEvent(
         event,
         "Timed out publishing channel sections.",
@@ -208,13 +217,15 @@ export class ChannelSectionSyncManager {
   }
 
   destroy(): void {
-    if (this.debounceTimer !== null && this.pendingStore !== null) {
-      window.clearTimeout(this.debounceTimer);
-      this.debounceTimer = null;
-      void this.doPublish(this.pendingStore);
-    } else if (this.debounceTimer !== null) {
-      window.clearTimeout(this.debounceTimer);
-      this.debounceTimer = null;
-    }
+    // Cancel any pending publish and mark this manager as destroyed so any
+    // in-flight doPublish() calls abort before reaching relayClient. The
+    // scoped localStorage write is already durable; when the user returns to
+    // this relay the existing seed-publish guard will re-publish from local
+    // state. Flushing here would race against workspace switching and could
+    // publish relay A's sections to relay B via the shared relayClient
+    // singleton.
+    this.destroyed = true;
+    this.cancelPendingPublish();
+    this.pendingStore = null;
   }
 }

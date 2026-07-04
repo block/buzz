@@ -268,6 +268,7 @@ pub struct ManagedAgentSummary {
     pub max_turn_duration_seconds: Option<u64>,
     pub parallelism: u32,
     pub system_prompt: Option<String>,
+    pub avatar_url: Option<String>,
     pub model: Option<String>,
     /// LLM inference provider, from the agent's pinned record snapshot.
     pub provider: Option<String>,
@@ -310,11 +311,10 @@ pub struct CreateManagedAgentRequest {
     pub relay_url: Option<String>,
     pub acp_command: Option<String>,
     pub agent_command: Option<String>,
-    /// True when `agent_command` is a runtime the user deliberately picked to
-    /// override the linked persona (a deploy-dialog runtime selector). Distinguishes
-    /// a real pin from a missing-runtime fallback so a persona-backed create only
-    /// stores an `agent_command_override` for the former. Defaults `false`: callers
-    /// that don't set it (persona-less creates, fallback divergence) inherit.
+    /// True when `agent_command` is a runtime command the user deliberately
+    /// picked for a linked persona. Distinguishes a real selection, including an
+    /// installed alias, from a missing-runtime fallback so a persona-backed
+    /// create only stores an `agent_command_override` for the former.
     #[serde(default)]
     pub harness_override: bool,
     #[serde(default)]
@@ -506,6 +506,9 @@ pub struct UpdateManagedAgentRequest {
     pub agent_args: Option<Vec<String>>,
     #[serde(default)]
     pub mcp_command: Option<String>,
+    /// Absent = don't touch. null = clear to runtime default. "id" = set.
+    #[serde(default, deserialize_with = "crate::util::double_option")]
+    pub provider: Option<Option<String>>,
     /// Absent = don't touch. Present = set mode.
     #[serde(default)]
     pub respond_to: Option<RespondTo>,

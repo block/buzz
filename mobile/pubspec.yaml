@@ -41,10 +41,10 @@ dev_dependencies:
 flutter:
   uses-material-design: true
   fonts:
-    - family: Geist
+    - family: Inter
       fonts:
-        - asset: assets/fonts/Geist-Variable.ttf
-        - asset: assets/fonts/Geist-Italic-Variable.ttf
+        - asset: assets/fonts/InterVariable.ttf
+        - asset: assets/fonts/InterVariable-Italic.ttf
           style: italic
     - family: GeistMono
       fonts:

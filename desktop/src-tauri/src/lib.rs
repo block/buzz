@@ -34,8 +34,8 @@ use huddle::audio_output::{
 use huddle::{
     add_agent_to_huddle, check_pipeline_hotstart, confirm_huddle_active, download_voice_models,
     end_huddle, get_huddle_agent_pubkeys, get_huddle_state, get_model_status, get_voice_input_mode,
-    join_huddle, leave_huddle, push_audio_pcm, set_tts_enabled, set_voice_input_mode,
-    speak_agent_message, start_huddle, start_stt_pipeline,
+    join_huddle, leave_huddle, push_audio_pcm, set_huddle_transcription_enabled, set_tts_enabled,
+    set_voice_input_mode, speak_agent_message, start_huddle, start_stt_pipeline,
 };
 use managed_agents::{
     backfill_persona_snapshots, ensure_nest, restore_managed_agents_on_launch, try_regenerate_nest,
@@ -283,9 +283,10 @@ pub fn run() {
                     .store(port, std::sync::atomic::Ordering::Relaxed);
             });
 
-            // Create the Buzz nest (~/.buzz) before agents are restored,
-            // so default_agent_workdir() resolves to the nest directory.
-            // Non-fatal: agents fall back to $HOME if nest creation fails.
+            // Create the Buzz nest (~/.buzz or ~/.buzz-dev for dev builds) before
+            // agents are restored, so default_agent_workdir() resolves to the
+            // nest directory. Non-fatal: agents fall back to $HOME if nest
+            // creation fails.
             if let Err(error) = ensure_nest() {
                 eprintln!("buzz-desktop: failed to create nest: {error}");
             }
@@ -306,12 +307,23 @@ pub fn run() {
             };
 
             // Carry the agent's knowledge from the legacy nest (~/.sprout) into
-            // the live nest (~/.buzz) after it exists. Must run after
-            // ensure_nest() so the destination is present. Non-fatal.
+            // the live nest after it exists. Must run after ensure_nest() so the
+            // destination is present. Non-fatal.
             // On a real migration, emit a one-time hint so the user can delete
             // the now-inert ~/.sprout; the frontend dedupes the toast.
             if migration::migrate_legacy_nest() {
                 let _ = app_handle.emit("legacy-nest-migrated", ());
+            }
+
+            // One-time migration for dev builds: copy accumulated knowledge
+            // from the shared ~/.buzz nest into the new dedicated ~/.buzz-dev
+            // nest so no work is lost when the nest is first namespaced.
+            // Runs only when nest_dir() resolved to ~/.buzz-dev (dev instance).
+            let is_dev_nest = managed_agents::nest_dir()
+                .and_then(|p| p.file_name().map(|n| n.to_os_string()))
+                .is_some_and(|n| n == ".buzz-dev");
+            if is_dev_nest {
+                migration::migrate_dev_nest();
             }
 
             // Create/update the local CLI symlink pointing to the
@@ -437,6 +449,14 @@ pub fn run() {
             get_user_profile,
             get_users_batch,
             get_user_notes,
+            get_project_repo_snapshot,
+            get_project_repo_diff,
+            get_project_local_repo_diff,
+            get_project_local_repo_snapshot,
+            get_project_repo_sync_status,
+            list_project_local_repositories,
+            push_project_local_repository,
+            open_project_terminal,
             search_users,
             get_presence,
             get_default_relay_url,
@@ -445,6 +465,7 @@ pub fn run() {
             get_relay_ws_url,
             get_relay_http_url,
             get_media_proxy_port,
+            fetch_link_preview_title,
             discover_acp_providers,
             install_acp_runtime,
             discover_managed_agent_prereqs,
@@ -479,6 +500,9 @@ pub fn run() {
             send_managed_agent_channel_message,
             get_forum_posts,
             get_forum_thread,
+            get_thread_replies,
+            get_channel_window,
+            get_channel_messages_before,
             edit_message,
             delete_message,
             add_reaction,
@@ -508,6 +532,9 @@ pub fn run() {
             delete_managed_agent,
             get_managed_agent_log,
             get_agent_models,
+            discover_agent_models,
+            get_agent_config_surface,
+            put_agent_session_config,
             mesh_availability,
             mesh_start_node,
             mesh_ensure_client_node,
@@ -568,6 +595,7 @@ pub fn run() {
             get_huddle_state,
             push_audio_pcm,
             start_stt_pipeline,
+            set_huddle_transcription_enabled,
             download_voice_models,
             get_model_status,
             set_tts_enabled,
@@ -588,9 +616,11 @@ pub fn run() {
             apply_workspace,
             validate_repos_dir,
             get_active_workspace,
+            fetch_workspace_icon,
             set_prevent_sleep_active,
             get_agent_memory,
             relay_reconnect_hook,
+            relay_reconnect_hook_configured,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

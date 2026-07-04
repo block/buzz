@@ -1,12 +1,13 @@
 /**
- * Light reconnect hook — clears the relay client's terminal flag and refetches
- * all queries without tearing down the workspace.
+ * React binding for the relay reconnect controller.
  *
- * Deliberately uses `relayClient.preconnect()` + `queryClient.invalidateQueries()`
- * rather than the full `reconnectWorkspace()` path, which unmounts the entire
- * React tree and clears drafts. The goal here is a transparent re-handshake
- * when the transport comes back online; the user should not lose their in-progress
- * compose state.
+ * Delegates all reconnect logic to the module-level `relayReconnectController`
+ * singleton so that all mounted hook instances (banner + sidebar card) share
+ * a single in-flight state. Deliberately uses `preconnect()` rather than the
+ * full `reconnectWorkspace()` path to avoid unmounting the React tree and
+ * clearing draft state.
+ *
+ * See `relayReconnectController.ts` for the three-phase strategy details.
  */
 
 import * as React from "react";
@@ -15,84 +16,73 @@ import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
 
 import { relayClient } from "@/shared/api/relayClient";
+import { relayReconnectController } from "@/shared/api/relayReconnectController";
 
-const RECONNECT_HOOK_TIMEOUT_MS = 20_000;
-const RELAY_PRECONNECT_TIMEOUT_MS = 15_000;
-
-function withTimeout<T>(
-  promise: Promise<T>,
-  timeoutMs: number,
-  label: string,
-): Promise<T> {
-  let timeoutId: number | null = null;
-  const timeout = new Promise<never>((_, reject) => {
-    timeoutId = window.setTimeout(() => {
-      reject(new Error(`${label} timed out after ${timeoutMs}ms`));
-    }, timeoutMs);
-  });
-
-  return Promise.race([promise, timeout]).finally(() => {
-    if (timeoutId !== null) {
-      window.clearTimeout(timeoutId);
-    }
-  });
+function buildDeps(onSuccess: () => void, onBackstop: () => void) {
+  return {
+    preconnect: () => relayClient.preconnect(),
+    hookConfigured: () => invoke<boolean>("relay_reconnect_hook_configured"),
+    runHook: () => invoke<void>("relay_reconnect_hook"),
+    subscribeToConnectionState: (listener: (state: string) => void) =>
+      relayClient.subscribeToConnectionState(listener),
+    onSuccess,
+    onBackstop,
+    setTimeout: window.setTimeout.bind(window),
+    clearTimeout: window.clearTimeout.bind(window),
+    setInterval: window.setInterval.bind(window),
+    clearInterval: window.clearInterval.bind(window),
+  };
 }
 
 export function useReconnectRelay(): {
   reconnect: () => Promise<boolean>;
   isPending: boolean;
+  isWaitingOnReconnectHook: boolean;
 } {
   const queryClient = useQueryClient();
-  const [isPending, setIsPending] = React.useState(false);
-  // Ref-based guard prevents a second fire if the user clicks while the first
-  // preconnect is still in flight — stale closure over `isPending` state would
-  // allow a double-trigger between the click and the next render.
-  const inFlightRef = React.useRef(false);
 
-  const reconnect = React.useCallback(async () => {
-    if (inFlightRef.current) return false;
-    inFlightRef.current = true;
-    setIsPending(true);
-    try {
-      // Run the transport-layer reconnect hook configured by internal builds.
-      // No-op in OSS builds. Non-fatal — transport failure shouldn't block relay reconnect.
-      try {
-        await withTimeout(
-          invoke("relay_reconnect_hook"),
-          RECONNECT_HOOK_TIMEOUT_MS,
-          "reconnect hook",
+  const [controllerState, setControllerState] = React.useState(() =>
+    relayReconnectController.getState(),
+  );
+
+  // Subscribe to controller state changes for the lifetime of this component.
+  // Multiple hook instances receive the same state from the shared singleton.
+  React.useEffect(() => {
+    return relayReconnectController.subscribe(setControllerState);
+  }, []);
+
+  // Stable mutable refs for callbacks — updated every render so stale closures
+  // are never captured, but the reconnect callback itself never changes identity.
+  const onSuccessRef = React.useRef<(() => void) | null>(null);
+  const onBackstopRef = React.useRef<(() => void) | null>(null);
+
+  onSuccessRef.current = React.useCallback(() => {
+    // Defer query invalidation so callers render the recovered state first.
+    window.setTimeout(() => {
+      void queryClient.invalidateQueries().catch((err) => {
+        console.error(
+          "[useReconnectRelay] failed to refresh queries after reconnect:",
+          err,
         );
-      } catch (err) {
-        console.warn("[useReconnectRelay] reconnect hook failed:", err);
-      }
-
-      await withTimeout(
-        relayClient.preconnect(),
-        RELAY_PRECONNECT_TIMEOUT_MS,
-        "relay preconnect",
-      );
-      // Let callers render the recovered/connected state before refetching the
-      // sidebar data. The refetch can briefly swap the sidebar into loading UI.
-      window.setTimeout(() => {
-        void queryClient.invalidateQueries().catch((error) => {
-          console.error(
-            "[useReconnectRelay] failed to refresh queries after reconnect:",
-            error,
-          );
-        });
-      }, 0);
-      // No success toast — the banner auto-hides once the connection state
-      // transitions back to "connected", which is the user-visible confirmation.
-      return true;
-    } catch (err) {
-      toast.error("Reconnect failed — check your network.");
-      console.error("[useReconnectRelay] reconnect failed:", err);
-      return false;
-    } finally {
-      inFlightRef.current = false;
-      setIsPending(false);
-    }
+      });
+    }, 0);
   }, [queryClient]);
 
-  return { reconnect, isPending };
+  onBackstopRef.current = React.useCallback(() => {
+    toast("Still trying to reconnect — check your network.");
+  }, []);
+
+  const reconnect = React.useCallback(async () => {
+    const deps = buildDeps(
+      () => onSuccessRef.current?.(),
+      () => onBackstopRef.current?.(),
+    );
+    return relayReconnectController.start(deps);
+  }, []);
+
+  return {
+    reconnect,
+    isPending: controllerState.isPending,
+    isWaitingOnReconnectHook: controllerState.isWaitingOnReconnectHook,
+  };
 }

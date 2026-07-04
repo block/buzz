@@ -5,11 +5,13 @@ class AccentColor {
   final String name;
   final Color light;
   final Color dark;
+  final bool useThemeForegroundInDark;
 
   const AccentColor({
     required this.name,
     required this.light,
     required this.dark,
+    this.useThemeForegroundInDark = false,
   });
 }
 
@@ -34,7 +36,30 @@ const accentColors = [
     light: Color(0xFF6366F1),
     dark: Color(0xFF818CF8),
   ),
+  AccentColor(
+    name: 'Black',
+    light: Color(0xFF000000),
+    dark: Color(0xFFFFFFFF),
+    useThemeForegroundInDark: true,
+  ),
 ];
 
-/// Default: Catppuccin Mauve (the current primary).
-const defaultAccentIndex = -1; // -1 means "use theme default (Mauve)"
+Color accentColorForScheme(ColorScheme scheme, int accentIndex) {
+  if (accentIndex < 0 || accentIndex >= accentColors.length) {
+    return scheme.primary;
+  }
+  final accent = accentColors[accentIndex];
+  if (scheme.brightness == Brightness.dark && accent.useThemeForegroundInDark) {
+    return scheme.onSurface;
+  }
+  return scheme.brightness == Brightness.light ? accent.light : accent.dark;
+}
+
+/// New default: Black.
+///
+/// Keep this at the end of [accentColors] so existing saved accent indexes keep
+/// pointing at the same colors.
+const defaultAccentIndex = 8;
+
+/// Legacy default: Catppuccin Mauve/the base theme primary.
+const legacyDefaultAccentIndex = -1;

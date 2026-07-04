@@ -8,13 +8,34 @@ use crate::{
     models::{
         FeedItemInfo, FeedMeta, FeedResponse, FeedSections, ForumMessageInfo, ForumPostsResponse,
         ForumThreadReplyInfo, ForumThreadResponse, SearchResponse, SendChannelMessageResponse,
-        ThreadSummary,
+        ThreadRepliesResponse, ThreadSummary,
     },
     nostr_convert,
     relay::{query_relay, submit_event, submit_event_with_keys},
 };
 
 // ── Reads (pure-nostr) ──────────────────────────────────────────────────────
+
+/// Timeline content kinds — the message/channel-event kinds that make up a
+/// channel timeline and a thread's replies. Used to build relay `/query`
+/// filters for the keyset readers below. None of these are in
+/// `P_GATED_KINDS`, so a filter carrying them clears the bridge p-gate
+/// (`p_gated_filters_authorized`) without a `#p` tag — load-bearing for the
+/// thread-subtree read, whose relay routing keys off `#e`+`depth_limit` (not
+/// kind) but still passes through the p-gate before it runs.
+const TIMELINE_KINDS: [u32; 11] = [
+    9,
+    40002,
+    40008,
+    40099,
+    43001,
+    43002,
+    43003,
+    43004,
+    43005,
+    43006,
+    buzz_core_pkg::kind::KIND_HUDDLE_STARTED,
+];
 
 #[tauri::command]
 pub async fn get_feed(
@@ -100,6 +121,24 @@ pub async fn get_feed(
     })
 }
 
+fn build_search_messages_filter(q: &str, cap: u32, channel_id: Option<&str>) -> serde_json::Value {
+    let mut filter = serde_json::Map::new();
+    filter.insert(
+        "kinds".to_string(),
+        serde_json::json!([9, 40002, 45001, 45003]),
+    );
+    filter.insert("search".to_string(), serde_json::json!(q.trim()));
+    // The desktop topbar is a typeahead surface. This bridge-only extension is
+    // consumed before nostr::Filter parsing on the relay, so general WS/NIP-50
+    // search remains word/lexeme-based.
+    filter.insert("search_mode".to_string(), serde_json::json!("prefix"));
+    filter.insert("limit".to_string(), serde_json::json!(cap));
+    if let Some(cid) = channel_id {
+        filter.insert("#h".to_string(), serde_json::json!([cid]));
+    }
+    serde_json::Value::Object(filter)
+}
+
 #[tauri::command]
 pub async fn search_messages(
     q: String,
@@ -108,18 +147,9 @@ pub async fn search_messages(
     state: State<'_, AppState>,
 ) -> Result<SearchResponse, String> {
     let cap = limit.unwrap_or(20).min(100);
-    let mut filter = serde_json::Map::new();
-    filter.insert(
-        "kinds".to_string(),
-        serde_json::json!([9, 40002, 45001, 45003]),
-    );
-    filter.insert("search".to_string(), serde_json::json!(q.trim()));
-    filter.insert("limit".to_string(), serde_json::json!(cap));
-    if let Some(cid) = channel_id {
-        filter.insert("#h".to_string(), serde_json::json!([cid]));
-    }
+    let filter = build_search_messages_filter(&q, cap, channel_id.as_deref());
 
-    let events = query_relay(&state, &[serde_json::Value::Object(filter)]).await?;
+    let events = query_relay(&state, &[filter]).await?;
     Ok(nostr_convert::search_response_from_events(&events))
 }
 
@@ -196,13 +226,191 @@ pub async fn get_forum_thread(
     })
 }
 
+/// Fetch the full reply subtree under a thread root, server-side.
+///
+/// Unlike the channel timeline (which the desktop assembles from its local
+/// cache by grouping on `e`-root tags), this walks `thread_metadata` on the
+/// relay via `get_thread_replies`, so a thread renders complete even when its
+/// replies fell outside the channel cold-load window. Results are chronological
+/// (oldest first) and are the *replies* under the root (depth >= 1); the root
+/// event itself is NOT returned (the relay query keys on `root_event_id`, and a
+/// root row has no `root_event_id`). Callers already hold the root — it is the
+/// open thread head — so this closes the descendant gap without re-fetching it.
+///
+/// Paging is forward keyset on `(created_at, event_id)`: pass the `next_cursor`
+/// from a previous page back as `cursor` to fetch the next batch. The event-id
+/// tiebreak is required because replies routinely share a `created_at` second;
+/// a timestamp-only cursor would skip every tied reply past the page limit.
+/// `next_cursor` is `Some` only when a full page was returned.
+#[tauri::command]
+pub async fn get_thread_replies(
+    root_event_id: String,
+    channel_id: Option<String>,
+    limit: Option<u32>,
+    depth_limit: Option<u32>,
+    cursor: Option<crate::models::ThreadCursor>,
+    state: State<'_, AppState>,
+) -> Result<ThreadRepliesResponse, String> {
+    let cap = limit.unwrap_or(200).min(500);
+    let filter = build_thread_replies_filter(
+        &root_event_id,
+        channel_id.as_deref(),
+        depth_limit.unwrap_or(64),
+        cap,
+        cursor.as_ref(),
+    );
+
+    let events = query_relay(&state, &[serde_json::Value::Object(filter)]).await?;
+
+    // A full page implies there may be more; hand back the last event's
+    // composite key as the next cursor (the DB returns replies strictly after
+    // it, tiebroken by event_id so same-second replies are not skipped).
+    let next_cursor = if events.len() as u32 >= cap {
+        events.last().map(|ev| crate::models::ThreadCursor {
+            created_at: ev.created_at.as_secs() as i64,
+            event_id: ev.id.to_hex(),
+        })
+    } else {
+        None
+    };
+
+    let event_values: Vec<serde_json::Value> = events
+        .iter()
+        .filter_map(|ev| serde_json::to_value(ev).ok())
+        .collect();
+
+    Ok(ThreadRepliesResponse {
+        events: event_values,
+        next_cursor,
+    })
+}
+
+/// Build the relay `/query` filter for the server-side thread-subtree read.
+///
+/// The relay routes a filter to `get_thread_replies` purely off a single `#e`
+/// (root) tag plus `depth_limit` — kind is NOT part of that routing or the
+/// underlying DB query (it keys on `root_event_id`). Yet `kinds` is still
+/// required here: the bridge runs the p-gate (`p_gated_filters_authorized`) on
+/// every filter *before* routing, and a kindless filter "could match" a p-gated
+/// kind, so the gate demands a `#p` tag we don't send -> HTTP 403
+/// `restricted: p-gated kinds require #p tag`, before the thread query ever
+/// runs. Carrying non-p-gated [`TIMELINE_KINDS`] makes the filter provably
+/// un-p-gated so it clears the gate. `build_channel_messages_before_filter` is
+/// the sibling that already does this, which is why the dense-second channel
+/// pager was never gated and this reader was. Extracted so a unit test can pin
+/// that `kinds` is present (the e2e mock does not model p-gating, so only a
+/// unit test guards this contract).
+fn build_thread_replies_filter(
+    root_event_id: &str,
+    channel_id: Option<&str>,
+    depth_limit: u32,
+    cap: u32,
+    cursor: Option<&crate::models::ThreadCursor>,
+) -> serde_json::Map<String, serde_json::Value> {
+    let mut filter = serde_json::Map::new();
+    filter.insert("#e".to_string(), serde_json::json!([root_event_id]));
+    filter.insert("kinds".to_string(), serde_json::json!(TIMELINE_KINDS));
+    // depth_limit is what activates the thread-subtree bridge path; the caller
+    // defaults it to a deep-but-bounded value so nested replies aren't dropped.
+    filter.insert("depth_limit".to_string(), serde_json::json!(depth_limit));
+    filter.insert("limit".to_string(), serde_json::json!(cap));
+    if let Some(cid) = channel_id {
+        filter.insert("#h".to_string(), serde_json::json!([cid]));
+    }
+    if let Some(c) = cursor {
+        filter.insert("thread_cursor".to_string(), serde_json::json!(c.created_at));
+        filter.insert(
+            "thread_cursor_id".to_string(),
+            serde_json::json!(c.event_id),
+        );
+    }
+    filter
+}
+
+/// Build the relay `/query` filter for one keyset page of top-level channel
+/// history strictly older than `(before, before_id)`. Extracted so a unit test
+/// can pin the tiebreak field: it MUST be `before_id` (what the relay's
+/// `extract_before_id` reads), else the keyset degrades to a bare `until`.
+fn build_channel_messages_before_filter(
+    channel_id: &str,
+    before: i64,
+    before_id: Option<&str>,
+    cap: u32,
+) -> serde_json::Map<String, serde_json::Value> {
+    // Timeline content kinds — mirror the WS history filter so the keyset page
+    // and the WS page select the same rows. Top-level filtering is enforced by
+    // the relay's thread_metadata join for this channel scope.
+    let mut filter = serde_json::Map::new();
+    filter.insert("#h".to_string(), serde_json::json!([channel_id]));
+    filter.insert("kinds".to_string(), serde_json::json!(TIMELINE_KINDS));
+    filter.insert("until".to_string(), serde_json::json!(before));
+    filter.insert("limit".to_string(), serde_json::json!(cap));
+    // `before_id` is the bridge extension field for the composite tiebreak
+    // (relay `extract_before_id`); it requires `until` to be set alongside it.
+    if let Some(id) = before_id {
+        filter.insert("before_id".to_string(), serde_json::json!(id));
+    }
+    filter
+}
+
+/// Fetch one keyset page of top-level channel history strictly *older* than a
+/// cursor, server-side via the bridge composite cursor.
+///
+/// The desktop timeline normally pages history over WS `REQ` with a bare `until`
+/// (`created_at`) cursor. That cursor cannot advance past a single `created_at`
+/// second that holds more messages than one page: `until` keeps returning the
+/// same newest slice of that second and history behind it is unreachable. This
+/// command uses the relay's `(created_at, event_id)` keyset (`until` +
+/// `before_id`), which advances within a tied second via `id > before_id` under
+/// the relay's `created_at DESC, id ASC` order — the escape hatch for that wall.
+///
+/// `before` is the cursor's `created_at` (Unix seconds); `before_id` is the hex
+/// id of the last (oldest) event already loaded at that second, so the page
+/// returned is strictly older. `next_cursor` is the last (oldest) returned
+/// event's composite key when a full page came back, else `None`.
+#[tauri::command]
+pub async fn get_channel_messages_before(
+    channel_id: String,
+    before: i64,
+    before_id: Option<String>,
+    limit: Option<u32>,
+    state: State<'_, AppState>,
+) -> Result<crate::models::ChannelMessagesPageResponse, String> {
+    let cap = limit.unwrap_or(200).min(500);
+    let filter =
+        build_channel_messages_before_filter(&channel_id, before, before_id.as_deref(), cap);
+
+    let events = query_relay(&state, &[serde_json::Value::Object(filter)]).await?;
+
+    // Relay order is created_at DESC, id ASC — the last event is the oldest, so
+    // it is the cursor for the next (older) page when a full page returned.
+    let next_cursor = if events.len() as u32 >= cap {
+        events.last().map(|ev| crate::models::ChannelPageCursor {
+            created_at: ev.created_at.as_secs() as i64,
+            event_id: ev.id.to_hex(),
+        })
+    } else {
+        None
+    };
+
+    let event_values: Vec<serde_json::Value> = events
+        .iter()
+        .filter_map(|ev| serde_json::to_value(ev).ok())
+        .collect();
+
+    Ok(crate::models::ChannelMessagesPageResponse {
+        events: event_values,
+        next_cursor,
+    })
+}
+
 #[tauri::command]
 pub async fn get_event(event_id: String, state: State<'_, AppState>) -> Result<String, String> {
     let events = query_relay(
         &state,
         &[serde_json::json!({
             "ids": [event_id],
-            "kinds": [0, 1, 3, 5, 7, 9, 30078, 40002, 40003, 40008, 40099, 40100, 45001, 45003],
+            "kinds": [0, 1, 3, 5, 7, 9, 30078, 40002, 40003, 40008, 40099, 40100, 45001, 45003, buzz_core_pkg::kind::KIND_HUDDLE_STARTED],
             "limit": 1
         })],
     )
@@ -228,7 +436,7 @@ async fn resolve_thread_ref(
         state,
         &[serde_json::json!({
             "ids": [parent_event_id],
-            "kinds": [9, 40002, 45001, 45003],
+            "kinds": [9, 40002, 45001, 45003, buzz_core_pkg::kind::KIND_HUDDLE_STARTED],
             "limit": 1
         })],
     )
@@ -565,6 +773,87 @@ mod tests {
         assert_eq!(
             marker_author_for_scope(Some("channel"), "agent-pubkey"),
             None
+        );
+    }
+
+    #[test]
+    fn search_messages_filter_requests_prefix_mode_for_topbar_typeahead() {
+        let filter = build_search_messages_filter("  pro  ", 12, Some("channel-1"));
+
+        assert_eq!(filter["search"], serde_json::json!("pro"));
+        assert_eq!(filter["search_mode"], serde_json::json!("prefix"));
+        assert_eq!(filter["limit"], serde_json::json!(12));
+        assert_eq!(filter["#h"], serde_json::json!(["channel-1"]));
+    }
+
+    #[test]
+    fn channel_messages_before_filter_sends_before_id_the_relay_reads() {
+        // The relay bridge's `extract_before_id` reads the composite tiebreak
+        // from `before_id`. If this filter sent the id under any other key (an
+        // earlier cut used `n`), the relay would silently drop the tiebreak and
+        // the dense-second keyset would degrade to a bare inclusive `until` —
+        // re-returning the same page forever. Pin the field name here so the
+        // client/relay contract can't drift without a red test (the Playwright
+        // mock reimplements the keyset in JS and cannot catch this).
+        let filter =
+            build_channel_messages_before_filter("channel-1", 1_700_000_000, Some("ab"), 200);
+
+        assert_eq!(filter["until"], serde_json::json!(1_700_000_000));
+        assert_eq!(filter["before_id"], serde_json::json!("ab"));
+        assert_eq!(filter["limit"], serde_json::json!(200));
+        assert_eq!(filter["#h"], serde_json::json!(["channel-1"]));
+        assert!(
+            !filter.contains_key("n"),
+            "tiebreak must be `before_id`, not the `n` alias the relay ignores"
+        );
+    }
+
+    #[test]
+    fn thread_replies_filter_carries_non_p_gated_kinds_to_clear_the_gate() {
+        // The relay bridge p-gates EVERY filter before routing
+        // (`p_gated_filters_authorized`): a kindless filter "could match" a
+        // p-gated kind, so it demands a `#p` tag we don't send -> HTTP 403,
+        // before the thread-subtree query runs. The headline Lane-1 fix
+        // (`useThreadReplies` closing the descendant gap) then fails on every
+        // call against a real relay. So the thread filter MUST carry `kinds`,
+        // and every kind MUST be non-p-gated (else the gate still fires). The
+        // Playwright mock does not model p-gating, so this unit test is the
+        // only guard against the client/relay auth contract drifting.
+        let filter = build_thread_replies_filter("root-hex", Some("channel-1"), 64, 200, None);
+
+        let kinds = filter
+            .get("kinds")
+            .and_then(|v| v.as_array())
+            .expect("thread filter must carry `kinds` so the p-gate passes");
+        assert!(!kinds.is_empty(), "kinds must be non-empty");
+        for kind in kinds {
+            let k = kind.as_u64().expect("kind is a number") as u32;
+            assert!(
+                !buzz_core_pkg::kind::P_GATED_KINDS.contains(&k),
+                "kind {k} is p-gated; a p-gated kind in the filter re-triggers the \
+                 403 that this fix exists to prevent"
+            );
+        }
+        assert_eq!(filter["#e"], serde_json::json!(["root-hex"]));
+        assert_eq!(filter["depth_limit"], serde_json::json!(64));
+        assert_eq!(filter["#h"], serde_json::json!(["channel-1"]));
+    }
+
+    #[test]
+    fn thread_replies_filter_pages_with_composite_cursor() {
+        // When a cursor is supplied, both the timestamp and the event-id
+        // tiebreak must be emitted (`thread_cursor` + `thread_cursor_id`), else
+        // paging degrades to timestamp-only and drops same-second replies.
+        let cursor = crate::models::ThreadCursor {
+            created_at: 1_700_000_000,
+            event_id: "abcd".to_string(),
+        };
+        let filter = build_thread_replies_filter("root-hex", None, 64, 200, Some(&cursor));
+        assert_eq!(filter["thread_cursor"], serde_json::json!(1_700_000_000));
+        assert_eq!(filter["thread_cursor_id"], serde_json::json!("abcd"));
+        assert!(
+            !filter.contains_key("#h"),
+            "no channel_id -> no #h scope in the filter"
         );
     }
 

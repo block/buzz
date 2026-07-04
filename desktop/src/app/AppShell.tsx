@@ -60,14 +60,17 @@ import { useDueReminderBadgeCount } from "@/features/reminders/hooks";
 import { RemindMeLaterProvider } from "@/features/reminders/ui/RemindMeLaterProvider";
 import { useReminderNotifications } from "@/features/reminders/useReminderNotifications";
 import { AppSidebar } from "@/features/sidebar/ui/AppSidebar";
+import { WorkspaceRail } from "@/features/sidebar/ui/WorkspaceRail";
 import { useChannelMutes } from "@/features/sidebar/lib/useChannelMutes";
 import { useChannelStars } from "@/features/sidebar/lib/useChannelStars";
 import { useWorkspaces } from "@/features/workspaces/useWorkspaces";
 import { useApplyTemplate } from "@/features/channel-templates/useApplyTemplate";
 import { relayClient } from "@/shared/api/relayClient";
+import { useFeatureEnabled } from "@/shared/features";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import { useRelayAutoHeal } from "@/shared/api/useRelayAutoHeal";
 import { useDeferredStartup } from "@/shared/hooks/useDeferredStartup";
+import { useWebviewScrollBoundaryLock } from "@/shared/hooks/useWebviewScrollBoundaryLock";
 import { joinChannel } from "@/shared/api/tauri";
 import type { SearchHit } from "@/shared/api/types";
 import { ChannelNavigationProvider } from "@/shared/context/ChannelNavigationContext";
@@ -76,8 +79,9 @@ import { chromeCssVarDefaults } from "@/shared/layout/chromeLayout";
 import { cn } from "@/shared/lib/cn";
 import { hasPrimaryShortcutModifier } from "@/shared/lib/platform";
 import { useMessageDeepLinks } from "@/shared/useMessageDeepLinks";
-import { ConnectionBanner } from "@/shared/ui/ConnectionBanner";
 import { SidebarInset, SidebarProvider } from "@/shared/ui/sidebar";
+import { RelayConnectionOverlay } from "@/app/RelayConnectionOverlay";
+import { useSidebarRelayConnectionCard } from "@/features/sidebar/ui/useSidebarRelayConnectionCard";
 
 const LazySettingsScreen = React.lazy(async () => {
   const module = await import("@/features/settings/ui/SettingsScreen");
@@ -87,8 +91,10 @@ const LazySettingsScreen = React.lazy(async () => {
 export function AppShell() {
   useWebviewZoomShortcuts();
   useTauriWindowDrag();
+  useWebviewScrollBoundaryLock();
 
   const workspacesHook = useWorkspaces();
+  const workspaceRailEnabled = useFeatureEnabled("workspaceRail");
   const [isAddWorkspaceOpen, setIsAddWorkspaceOpen] = React.useState(false);
   const [isChannelManagementOpen, setIsChannelManagementOpen] =
     React.useState(false);
@@ -175,6 +181,10 @@ export function AppShell() {
     channelsQuery.error instanceof Error
       ? channelsQuery.error.message
       : undefined;
+  const relayConnectionCard = useSidebarRelayConnectionCard(
+    channelsErrorMessage,
+    workspacesHook.activeWorkspace?.relayUrl,
+  );
   const memberChannels = React.useMemo(
     () => channels.filter((channel) => channel.isMember),
     [channels],
@@ -604,15 +614,29 @@ export function AppShell() {
               >
                 <div
                   className={cn(
-                    "buzz-huddle-app-surface z-10 flex min-h-0 flex-col overflow-hidden bg-background",
+                    "buzz-huddle-app-surface z-10 flex min-h-0 flex-row overflow-hidden bg-background",
                     isHuddleDrawerOpen && "buzz-huddle-app-surface-open",
                   )}
                 >
+                  {workspaceRailEnabled ? (
+                    <WorkspaceRail
+                      activeWorkspaceId={
+                        workspacesHook.activeWorkspace?.id ?? null
+                      }
+                      onAddWorkspace={() => setIsAddWorkspaceOpen(true)}
+                      onSwitchWorkspace={workspacesHook.switchWorkspace}
+                      workspaces={workspacesHook.workspaces}
+                    />
+                  ) : null}
                   <SidebarProvider className="min-h-0 flex-1 flex-col overflow-hidden">
                     {!settingsOpen ? (
                       <AppTopChrome
                         canGoBack={canGoBack}
                         canGoForward={canGoForward}
+                        hasWorkspaceRail={
+                          workspaceRailEnabled &&
+                          workspacesHook.workspaces.length > 1
+                        }
                         onGoBack={goBack}
                         onGoForward={goForward}
                       />
@@ -669,6 +693,7 @@ export function AppShell() {
                           fallbackDisplayName={identityQuery.data?.displayName}
                           homeBadgeCount={homeBadgeCount + dueReminderBadge}
                           isAddWorkspaceOpen={isAddWorkspaceOpen}
+                          relayConnectionCard={relayConnectionCard}
                           isCreatingChannel={createChannelMutation.isPending}
                           isCreatingForum={createForumMutation.isPending}
                           isLoading={channelsQuery.isLoading}
@@ -801,14 +826,20 @@ export function AppShell() {
                             className="isolate min-h-0 min-w-0 overflow-hidden bg-sidebar"
                             style={chromeCssVarDefaults}
                           >
-                            <div className="relative z-10 mb-2 ml-px mr-2 mt-px flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl bg-background shadow-[-1px_-1px_0_0_hsl(var(--sidebar-border)/0.45)]">
-                              <ConnectionBanner
-                                errorMessage={channelsErrorMessage}
-                              />
+                            <div className="relative z-10 mb-2 ml-px mr-2 mt-px flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl bg-background shadow-[-1px_-1px_0_0_hsl(var(--sidebar-border)/0.45)]">
                               <Outlet />
                             </div>
                           </SidebarInset>
                         </MainInsetProvider>
+                        <RelayConnectionOverlay
+                          card={relayConnectionCard}
+                          errorMessage={channelsErrorMessage}
+                          hasWorkspaceRail={
+                            workspaceRailEnabled &&
+                            workspacesHook.workspaces.length > 1
+                          }
+                          isHuddleDrawerOpen={isHuddleDrawerOpen}
+                        />
                       </div>
                     )}
                     <AppShellOverlays
@@ -840,6 +871,12 @@ export function AppShell() {
                 <div className="absolute inset-x-0 bottom-0 z-0 h-(--buzz-huddle-drawer-height)">
                   <HuddleBar
                     className="h-full"
+                    onOpenThread={(channelId, messageId) => {
+                      void goChannel(channelId, {
+                        messageId,
+                        threadRootId: messageId,
+                      });
+                    }}
                     onVisibilityChange={setIsHuddleDrawerOpen}
                   />
                 </div>

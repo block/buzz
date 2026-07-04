@@ -17,11 +17,11 @@ import { toast } from "sonner";
 import { MemorySection } from "@/features/agent-memory/ui/MemorySection";
 import { useActiveAgentTurns } from "@/features/agents/activeAgentTurnsStore";
 import { getManagedAgentPrimaryActionLabel } from "@/features/agents/lib/managedAgentControlActions";
-import { formatElapsed } from "@/features/agents/ui/agentSessionUtils";
 import { ManagedAgentLogPanel } from "@/features/agents/ui/ManagedAgentLogPanel";
-import { useAppNavigation } from "@/app/navigation/useAppNavigation";
+import { AgentConfigPanel } from "@/features/agents/ui/AgentConfigPanel";
 import { getPresenceLabel } from "@/features/presence/lib/presence";
 import { PresenceDot } from "@/features/presence/ui/PresenceBadge";
+import type { ProfileActivityAgent } from "@/features/profile/lib/profileActivityAgent";
 import type {
   useFollowMutation,
   useUnfollowMutation,
@@ -38,6 +38,10 @@ import {
   ProfileRuntimeTabContent,
   ProfileTabBar,
 } from "@/features/profile/ui/UserProfilePanelTabs";
+import {
+  MaskedAvatarBadgeFrame,
+  STATUS_DOT_MASK_CURVE,
+} from "@/features/profile/ui/MaskedAvatarBadgeFrame";
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
 import { StatusEmoji } from "@/features/user-status/ui/StatusEmoji";
 import { BotIdenticon } from "@/features/messages/ui/BotIdenticon";
@@ -49,7 +53,6 @@ import type {
 } from "@/features/profile/ui/UserProfilePanelUtils";
 import { useFeatureEnabled } from "@/shared/features";
 import { cn } from "@/shared/lib/cn";
-import { useNow } from "@/shared/lib/useNow";
 import { Alert, AlertDescription, AlertTitle } from "@/shared/ui/alert";
 import { Badge } from "@/shared/ui/badge";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
@@ -59,6 +62,7 @@ export { AgentInstructionsFocusedView } from "@/features/profile/ui/UserProfileP
 // ── Summary view ─────────────────────────────────────────────────────────────
 
 export type ProfileSummaryViewProps = {
+  activityAgent: ProfileActivityAgent | null;
   canAddToChannel: boolean;
   canEditAgent: boolean;
   canOpenAgentLogs: boolean;
@@ -86,12 +90,11 @@ export type ProfileSummaryViewProps = {
   managedAgent: ManagedAgent | undefined;
   memoriesLoading: boolean;
   memoryCount: number | undefined;
-  modelLabel: string;
   agentInfoFields: ProfileField[];
   agentSettingsFields: ProfileField[];
   diagnosticsFields: ProfileField[];
   onAddToChannel: () => void;
-  onOpenActivity: () => void;
+  onOpenActivity: (channelId?: string | null) => void;
   onOpenChannel: (channelId: string) => void;
   onOpenDiagnostics: () => void;
   onOpenInstructions: () => void;
@@ -107,6 +110,21 @@ export type ProfileSummaryViewProps = {
 };
 
 type RuntimeTabStatus = "running" | "stopped" | "error";
+
+const PROFILE_HERO_SPACING = {
+  "0": 0,
+  "6": 24,
+} as const;
+
+const PROFILE_HERO_PRESENCE_BADGE = {
+  cutout: { cx: 68, cy: 68, r: 15 },
+  shell: {
+    bottom: PROFILE_HERO_SPACING["0"],
+    height: PROFILE_HERO_SPACING["6"],
+    right: PROFILE_HERO_SPACING["0"],
+    width: PROFILE_HERO_SPACING["6"],
+  },
+} as const;
 
 function resolveRuntimeTabStatus({
   diagnosticsError,
@@ -153,6 +171,7 @@ function RuntimeTabStatusDot({ status }: { status: RuntimeTabStatus }) {
 }
 
 export function ProfileSummaryView({
+  activityAgent,
   canAddToChannel,
   canEditAgent,
   canOpenAgentLogs,
@@ -180,7 +199,6 @@ export function ProfileSummaryView({
   managedAgent,
   memoriesLoading,
   memoryCount,
-  modelLabel,
   agentInfoFields,
   agentSettingsFields,
   diagnosticsFields,
@@ -199,7 +217,6 @@ export function ProfileSummaryView({
   unfollowMutation,
   userStatus,
 }: ProfileSummaryViewProps) {
-  const { goChannel } = useAppNavigation();
   const activeTurns = useActiveAgentTurns(isBot ? pubkey : null);
 
   const showMemoriesTab = isOwner === true && Boolean(pubkey);
@@ -220,7 +237,6 @@ export function ProfileSummaryView({
     (runtimeConfigurationFields.length > 0 ||
       runtimeSettingsFields.length > 0 ||
       managedAgent !== undefined ||
-      modelLabel.trim().length > 0 ||
       diagnosticsFields.length > 0 ||
       canOpenAgentLogs ||
       showInstructionBlock);
@@ -354,20 +370,6 @@ export function ProfileSummaryView({
         />
       ) : null}
 
-      {activeTurns.length > 0 ? (
-        <div className="flex flex-wrap justify-center gap-1.5">
-          {activeTurns.map(({ channelId, anchorAt }) => (
-            <ProfileWorkingBadge
-              key={channelId}
-              channelId={channelId}
-              name={channelIdToName[channelId] ?? channelId}
-              anchorAt={anchorAt}
-              onNavigate={goChannel}
-            />
-          ))}
-        </div>
-      ) : null}
-
       {showTabSection ? (
         <section className="space-y-3">
           {showTabBar ? (
@@ -379,7 +381,10 @@ export function ProfileSummaryView({
           ) : null}
           {activeTab === "info" ? (
             <ProfileInfoTabContent
+              activeTurns={activeTurns}
+              activityAgent={activityAgent}
               agentInfoFields={agentInfoFields}
+              channelIdToName={channelIdToName}
               isArchived={isArchived}
               onOpenActivity={onOpenActivity}
               pubkey={pubkey}
@@ -387,19 +392,27 @@ export function ProfileSummaryView({
             />
           ) : null}
           {activeTab === "runtime" ? (
-            <ProfileRuntimeTabContent
-              agentInstruction={agentInstruction}
-              diagnosticsFields={diagnosticsFields}
-              diagnosticsSummary={diagnosticsTrailing}
-              managedAgent={managedAgent}
-              modelLabel={modelLabel}
-              onOpenDiagnostics={onOpenDiagnostics}
-              onOpenInstructions={onOpenInstructions}
-              runtimeConfigurationFields={runtimeConfigurationFields}
-              runtimeSettingsFields={runtimeSettingsFields}
-              showDiagnosticsIngress={showDiagnosticsIngress}
-              showInstructionBlock={showInstructionBlock}
-            />
+            <>
+              <ProfileRuntimeTabContent
+                agentInstruction={agentInstruction}
+                diagnosticsFields={diagnosticsFields}
+                diagnosticsSummary={diagnosticsTrailing}
+                onOpenDiagnostics={onOpenDiagnostics}
+                onOpenInstructions={onOpenInstructions}
+                runtimeConfigurationFields={runtimeConfigurationFields}
+                runtimeSettingsFields={runtimeSettingsFields}
+                showDiagnosticsIngress={showDiagnosticsIngress}
+                showInstructionBlock={showInstructionBlock}
+              />
+              {isOwner === true && managedAgent !== undefined ? (
+                <div className="overflow-hidden rounded-2xl bg-muted/20">
+                  <AgentConfigPanel
+                    advancedMode="flat"
+                    pubkey={managedAgent.pubkey}
+                  />
+                </div>
+              ) : null}
+            </>
           ) : null}
           {activeTab === "channels" ? (
             <ChannelsFocusedView
@@ -425,30 +438,6 @@ export function ProfileSummaryView({
   );
 }
 
-function ProfileWorkingBadge({
-  channelId,
-  name,
-  anchorAt,
-  onNavigate,
-}: {
-  channelId: string;
-  name: string;
-  anchorAt: number;
-  onNavigate: (channelId: string) => void;
-}) {
-  const now = useNow(1000);
-
-  return (
-    <Badge
-      className="cursor-pointer motion-safe:animate-pulse normal-case tracking-normal hover:opacity-80"
-      variant="default"
-      onClick={() => onNavigate(channelId)}
-    >
-      Working in #{name} · {formatElapsed(now - anchorAt)}
-    </Badge>
-  );
-}
-
 // ── Hero & metadata ──────────────────────────────────────────────────────────
 
 function ProfileHero({
@@ -464,28 +453,41 @@ function ProfileHero({
   profile: ProfileSummaryViewProps["profile"];
   userStatus: ProfileSummaryViewProps["userStatus"];
 }) {
+  const presenceDotClassName = isBot ? "h-4.5 w-4.5" : "h-3.5 w-3.5";
+
   return (
     <div className="flex flex-col items-center gap-3 text-center">
-      <div className="relative">
+      <MaskedAvatarBadgeFrame
+        badge={
+          presenceStatus ? (
+            <span
+              aria-label={getPresenceLabel(presenceStatus)}
+              className="flex h-6 w-6 items-center justify-center rounded-full"
+              data-testid="user-profile-presence-badge"
+              role="img"
+            >
+              <PresenceDot
+                className={presenceDotClassName}
+                status={presenceStatus}
+              />
+            </span>
+          ) : null
+        }
+        badgeBox={PROFILE_HERO_PRESENCE_BADGE.shell}
+        className="h-20 w-20"
+        curve={STATUS_DOT_MASK_CURVE}
+        cutout={PROFILE_HERO_PRESENCE_BADGE.cutout}
+        size={80}
+      >
         <ProfileAvatar
           avatarUrl={profile?.avatarUrl ?? null}
-          className="h-20 w-20 text-xl"
+          className="h-full w-full text-xl"
           iconClassName="h-8 w-8"
           label={displayName}
           plain
           testId="user-profile-avatar"
         />
-        {presenceStatus ? (
-          <span
-            aria-label={getPresenceLabel(presenceStatus)}
-            className="absolute bottom-0 right-0 flex h-6 w-6 items-center justify-center rounded-full bg-background"
-            data-testid="user-profile-presence-badge"
-            role="img"
-          >
-            <PresenceDot className="h-3.5 w-3.5" status={presenceStatus} />
-          </span>
-        ) : null}
-      </div>
+      </MaskedAvatarBadgeFrame>
 
       <div className="flex flex-col items-center gap-1">
         <div className="flex items-center justify-center gap-2">

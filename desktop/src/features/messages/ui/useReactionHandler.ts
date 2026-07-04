@@ -10,7 +10,7 @@ import { reactionEmojiUrl } from "@/shared/api/customEmoji";
 import type { CustomEmoji } from "@/shared/lib/remarkCustomEmoji";
 
 type ReactionHandler = {
-  /** Reactions sorted by count (desc) then emoji (asc). */
+  /** Reactions in chronological order (earliest first) as emitted by the formatter. */
   reactions: TimelineReaction[];
   /** Whether the user can currently toggle reactions. */
   canToggle: boolean;
@@ -22,16 +22,8 @@ type ReactionHandler = {
   select: (emoji: string) => Promise<void>;
 };
 
-function sortReactions(reactions: TimelineReaction[]): TimelineReaction[] {
-  return [...reactions].sort((left, right) => {
-    if (left.count !== right.count) {
-      return right.count - left.count;
-    }
-    return left.emoji.localeCompare(right.emoji);
-  });
-}
-
-function applyOptimisticReaction(
+/** @visibleForTesting */
+export function applyOptimisticReaction(
   reactions: TimelineReaction[],
   emoji: string,
   remove: boolean,
@@ -86,8 +78,23 @@ function applyOptimisticReaction(
 }
 
 /**
+ * Selects the reactions to display: optimistic state when it is still valid
+ * (source has not changed under us), otherwise the formatter-emitted source
+ * order. Chronological ordering is the formatter's responsibility; this helper
+ * must not re-sort.
+ *
+ * @visibleForTesting
+ */
+export function selectDisplayReactions(
+  optimisticReactions: TimelineReaction[] | null,
+  sourceReactions: TimelineReaction[] | undefined,
+): TimelineReaction[] {
+  return optimisticReactions ?? sourceReactions ?? [];
+}
+
+/**
  * Shared reaction state + toggle logic used by both MessageRow and
- * SystemMessageRow. Keeps the pending/error/sorting concerns in one place.
+ * SystemMessageRow. Keeps the pending/error/optimistic-update concerns in one place.
  */
 export function useReactionHandler(
   message: TimelineMessage,
@@ -111,7 +118,7 @@ export function useReactionHandler(
       : null;
 
   const reactions = React.useMemo(() => {
-    return sortReactions(optimisticReactions ?? sourceReactions ?? []);
+    return selectDisplayReactions(optimisticReactions, sourceReactions);
   }, [sourceReactions, optimisticReactions]);
 
   const canToggle = Boolean(onToggleReaction && !message.pending);

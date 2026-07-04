@@ -23,7 +23,7 @@ export function getChannelIntroDescription(channel: Channel): string | null {
   return (
     channel.topic?.trim() ||
     channel.purpose?.trim() ||
-    channel.description.trim() ||
+    channel.description?.trim() ||
     null
   );
 }

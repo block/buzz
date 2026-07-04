@@ -301,7 +301,7 @@ test("nests the avatar edit button in a clipped notch", async ({ page }) => {
 
   await expect(page.getByTestId("profile-avatar-preview-clip")).toHaveCSS(
     "clip-path",
-    /url/,
+    /polygon/,
   );
   const editShell = page.getByTestId("profile-avatar-edit-shell");
   await expect(editShell).toHaveCSS("height", "54px");
@@ -732,7 +732,14 @@ test("renders agent profile ingress subviews from the Playwright mock bridge", a
 
   await page.getByTestId("user-profile-tab-runtime").click();
   await expectHashSearchParam(page, "profileTab", "runtime");
-  await expect(page.getByTestId("user-profile-model")).toBeVisible();
+  // The dedicated Model row was consolidated into the runtime config panel;
+  // Model now renders as a normalized config row with real provenance.
+  await expect(
+    page
+      .getByTestId("user-profile-panel")
+      .getByText("Model", { exact: true })
+      .first(),
+  ).toBeVisible();
   await expect(page.getByTestId("user-profile-respond-to")).toBeVisible();
 
   await page.getByTestId("user-profile-settings-menu-trigger").click();
@@ -790,6 +797,94 @@ test("renders agent profile ingress subviews from the Playwright mock bridge", a
   );
   await page.getByTestId("agent-memory-truncated").click();
   await expect(page.getByTestId("agent-memory-list")).toContainText("orphan");
+});
+
+test("declared owner sees runtime tab for a remote relay agent", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    relayAgents: [
+      {
+        pubkey:
+          "a1b2c3d4e5f60718293a4b5c6d7e8f90112233445566778899aabbccddeeff00",
+        name: "nadia",
+        agentType: "goose",
+        capabilities: ["search", "summaries"],
+        channelNames: ["agents"],
+        respondTo: "anyone",
+      },
+    ],
+  });
+  await page.goto("/");
+
+  await page.getByTestId("channel-agents").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("agents");
+
+  const messageRow = page.getByTestId("message-row").filter({
+    has: page.getByText("Indexing remotely for my owner."),
+  });
+  await expect(messageRow.first()).toBeVisible({ timeout: 5_000 });
+  await messageRow.first().getByRole("button").first().click();
+
+  const panel = page.getByTestId("user-profile-panel");
+  await expect(panel).toBeVisible({ timeout: 10_000 });
+  await expect(panel.getByRole("tab", { name: "Runtime" })).toBeVisible();
+  await panel.getByRole("tab", { name: "Runtime" }).click();
+
+  await expect(panel.getByTestId("user-profile-runtime")).toContainText(
+    "Runtime",
+  );
+  await expect(panel.getByTestId("user-profile-runtime")).toContainText(
+    "Goose",
+  );
+  await expect(panel.getByTestId("user-profile-respond-to")).toContainText(
+    "anyone",
+  );
+
+  // Declared ownership grants read visibility only; local-management write UI
+  // stays hidden because this relay agent is not in the managed-agents list.
+  await expect(panel.getByText("Model")).toHaveCount(0);
+  await expect(
+    panel.getByRole("button", { name: /Start|Stop|Deploy/ }),
+  ).toHaveCount(0);
+});
+
+test("declared owner sees runtime tab without a relay-agent record", async ({
+  page,
+}) => {
+  await page.goto("/");
+
+  await page.getByTestId("channel-agents").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("agents");
+
+  const messageRow = page.getByTestId("message-row").filter({
+    has: page.getByText("Indexing remotely for my owner."),
+  });
+  await expect(messageRow.first()).toBeVisible({ timeout: 5_000 });
+  await messageRow.first().getByRole("button").first().click();
+
+  const panel = page.getByTestId("user-profile-panel");
+  await expect(panel).toBeVisible({ timeout: 10_000 });
+  await expect(panel.getByTestId("user-profile-agent-type")).toHaveCount(0);
+  await expect(panel.getByTestId("user-profile-capabilities")).toHaveCount(0);
+  await expect(panel.getByRole("tab", { name: "Runtime" })).toBeVisible();
+  await panel.getByRole("tab", { name: "Runtime" }).click();
+
+  await expect(panel.getByTestId("user-profile-agent-profile")).toContainText(
+    "Agent profile",
+  );
+  await expect(panel.getByTestId("user-profile-agent-profile")).toContainText(
+    "Declared owner verified",
+  );
+  await expect(panel.getByTestId("user-profile-runtime")).toHaveCount(0);
+  await expect(panel.getByTestId("user-profile-respond-to")).toHaveCount(0);
+
+  // No relay/managed runtime record means no write or management affordance —
+  // only the truthful NIP-OA profile signal is rendered in Runtime.
+  await expect(panel.getByText("Model")).toHaveCount(0);
+  await expect(
+    panel.getByRole("button", { name: /Start|Stop|Deploy/ }),
+  ).toHaveCount(0);
 });
 
 test("owned agent absent from relay/managed lists still renders agent framing", async ({

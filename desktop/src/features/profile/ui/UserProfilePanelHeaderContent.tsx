@@ -1,5 +1,4 @@
 import type { ReactNode } from "react";
-import { ArrowLeft, X } from "lucide-react";
 
 import { CopyButton } from "@/features/agents/ui/CopyButton";
 import { MemoryRefreshButton } from "@/features/agent-memory/ui/MemorySection";
@@ -8,10 +7,10 @@ import {
   type ProfilePanelView,
 } from "@/features/profile/ui/UserProfilePanelUtils";
 import {
+  AuxiliaryPanelHeaderActions,
   AuxiliaryPanelHeaderGroup,
-  AuxiliaryPanelTitle,
-} from "@/shared/layout/AuxiliaryPanelHeader";
-import { Button } from "@/shared/ui/button";
+  AuxiliaryPanelHeaderTitleBlock,
+} from "@/shared/layout/AuxiliaryPanel";
 
 export function getUserProfilePanelHeaderContent({
   agentSettingsMenu,
@@ -19,7 +18,6 @@ export function getUserProfilePanelHeaderContent({
   logCopyValue,
   logSubtitle,
   onBack,
-  onClose,
   view,
   viewerIsOwner,
 }: {
@@ -28,7 +26,6 @@ export function getUserProfilePanelHeaderContent({
   logCopyValue?: string | null;
   logSubtitle?: string | null;
   onBack: () => void;
-  onClose: () => void;
   view: ProfilePanelView;
   viewerIsOwner: boolean;
 }) {
@@ -37,40 +34,20 @@ export function getUserProfilePanelHeaderContent({
     (view === "diagnostics" || view === "logs") && Boolean(logSubtitle);
   const headerLeftContent = (
     <AuxiliaryPanelHeaderGroup
-      className={shouldShowLogDetails ? "items-start" : undefined}
+      align={shouldShowLogDetails ? "start" : "center"}
+      backButtonAriaLabel="Back to profile"
+      backButtonTestId="user-profile-panel-back"
+      onBack={view !== "summary" ? onBack : undefined}
     >
-      {view !== "summary" ? (
-        <Button
-          aria-label="Back to profile"
-          className={shouldShowLogDetails ? "mt-0.5 shrink-0" : "shrink-0"}
-          data-testid="user-profile-panel-back"
-          onClick={onBack}
-          size="icon"
-          type="button"
-          variant="outline"
-        >
-          <ArrowLeft />
-        </Button>
-      ) : null}
-      {shouldShowLogDetails ? (
-        <div className="min-w-0 flex-1">
-          <AuxiliaryPanelTitle className="translate-y-0 leading-5">
-            {title}
-          </AuxiliaryPanelTitle>
-          <p
-            className="min-w-0 truncate font-mono text-2xs text-muted-foreground"
-            title={logSubtitle ?? undefined}
-          >
-            {logSubtitle}
-          </p>
-        </div>
-      ) : (
-        <AuxiliaryPanelTitle>{title}</AuxiliaryPanelTitle>
-      )}
+      <AuxiliaryPanelHeaderTitleBlock
+        subtitle={shouldShowLogDetails ? logSubtitle : null}
+        subtitleTitle={logSubtitle ?? undefined}
+        title={title}
+      />
     </AuxiliaryPanelHeaderGroup>
   );
   const headerActions = (
-    <div className="ml-auto flex shrink-0 items-center gap-2">
+    <AuxiliaryPanelHeaderActions>
       {view === "memories" && viewerIsOwner && effectivePubkey ? (
         <MemoryRefreshButton
           agentPubkey={effectivePubkey}
@@ -89,17 +66,7 @@ export function getUserProfilePanelHeaderContent({
           variant="ghost"
         />
       ) : null}
-      <Button
-        aria-label="Close profile"
-        data-testid="user-profile-panel-close"
-        onClick={onClose}
-        size="icon"
-        type="button"
-        variant="ghost"
-      >
-        <X />
-      </Button>
-    </div>
+    </AuxiliaryPanelHeaderActions>
   );
 
   return { headerActions, headerLeftContent };

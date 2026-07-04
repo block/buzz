@@ -14,6 +14,9 @@ class Grid {
   /// Extra small spacing - 16 pixels
   static const double xs = 16.0;
 
+  /// Standard app content gutter - 20 pixels
+  static const double gutter = 20.0;
+
   /// Small spacing - 24 pixels
   static const double sm = 24.0;
 

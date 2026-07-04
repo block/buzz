@@ -3,9 +3,10 @@
 //! One reaction per user per emoji per event. Soft-delete via removed_at.
 
 use chrono::{DateTime, Utc};
-use sqlx::{PgPool, Row};
+use sqlx::{PgPool, Postgres, Row, Transaction};
 
 use crate::error::Result;
+use crate::CommunityId;
 
 // -- Public structs -----------------------------------------------------------
 
@@ -61,6 +62,16 @@ pub struct ActiveReactionRecord {
 
 // -- Write operations ---------------------------------------------------------
 
+const ADD_REACTION_SQL: &str = r#"
+        INSERT INTO reactions (community_id, event_created_at, event_id, pubkey, emoji, reaction_event_id)
+        VALUES ($1, $2, $3, $4, $5, $6)
+        ON CONFLICT (community_id, event_created_at, event_id, pubkey, emoji) DO UPDATE SET
+            created_at = NOW(),
+            removed_at = NULL,
+            reaction_event_id = COALESCE(EXCLUDED.reaction_event_id, reactions.reaction_event_id)
+        WHERE reactions.removed_at IS NOT NULL
+        "#;
+
 /// Add (or re-activate) a reaction.
 ///
 /// Returns `Ok(true)` if the reaction was added or re-activated, `Ok(false)` if
@@ -70,30 +81,22 @@ pub struct ActiveReactionRecord {
 /// two concurrent adds both see no existing row and then race to INSERT.
 pub async fn add_reaction(
     pool: &PgPool,
+    community: CommunityId,
     event_id: &[u8],
     event_created_at: DateTime<Utc>,
     pubkey: &[u8],
     emoji: &str,
     reaction_event_id: Option<&[u8]>,
 ) -> Result<bool> {
-    let result = sqlx::query(
-        r#"
-        INSERT INTO reactions (event_created_at, event_id, pubkey, emoji, reaction_event_id)
-        VALUES ($1, $2, $3, $4, $5)
-        ON CONFLICT (event_created_at, event_id, pubkey, emoji) DO UPDATE SET
-            created_at = NOW(),
-            removed_at = NULL,
-            reaction_event_id = COALESCE(EXCLUDED.reaction_event_id, reactions.reaction_event_id)
-        WHERE reactions.removed_at IS NOT NULL
-        "#,
-    )
-    .bind(event_created_at)
-    .bind(event_id)
-    .bind(pubkey)
-    .bind(emoji)
-    .bind(reaction_event_id)
-    .execute(pool)
-    .await?;
+    let result = sqlx::query(ADD_REACTION_SQL)
+        .bind(community.as_uuid())
+        .bind(event_created_at)
+        .bind(event_id)
+        .bind(pubkey)
+        .bind(emoji)
+        .bind(reaction_event_id)
+        .execute(pool)
+        .await?;
 
     // Three cases:
     // (a) New reaction (no existing row): INSERT succeeds → rows_affected = 1 → true.
@@ -104,11 +107,39 @@ pub async fn add_reaction(
     Ok(result.rows_affected() != 0)
 }
 
+/// Add (or re-activate) a reaction inside an existing transaction.
+///
+/// Uses the same `INSERT ... ON CONFLICT DO UPDATE ... WHERE removed_at IS NOT NULL`
+/// statement as [`add_reaction`], preserving the new / re-activate / active-duplicate
+/// semantics while letting callers atomically couple the reaction row to other writes.
+pub(crate) async fn add_reaction_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    community: CommunityId,
+    event_id: &[u8],
+    event_created_at: DateTime<Utc>,
+    pubkey: &[u8],
+    emoji: &str,
+    reaction_event_id: Option<&[u8]>,
+) -> Result<bool> {
+    let result = sqlx::query(ADD_REACTION_SQL)
+        .bind(community.as_uuid())
+        .bind(event_created_at)
+        .bind(event_id)
+        .bind(pubkey)
+        .bind(emoji)
+        .bind(reaction_event_id)
+        .execute(&mut **tx)
+        .await?;
+
+    Ok(result.rows_affected() != 0)
+}
+
 /// Soft-delete a reaction by setting `removed_at`.
 ///
 /// Returns `true` if a row was updated, `false` if not found or already removed.
 pub async fn remove_reaction(
     pool: &PgPool,
+    community: CommunityId,
     event_id: &[u8],
     event_created_at: DateTime<Utc>,
     pubkey: &[u8],
@@ -118,13 +149,15 @@ pub async fn remove_reaction(
         r#"
         UPDATE reactions
         SET removed_at = NOW()
-        WHERE event_created_at = $1
-          AND event_id = $2
-          AND pubkey = $3
-          AND emoji = $4
+        WHERE community_id = $1
+          AND event_created_at = $2
+          AND event_id = $3
+          AND pubkey = $4
+          AND emoji = $5
           AND removed_at IS NULL
         "#,
     )
+    .bind(community.as_uuid())
     .bind(event_created_at)
     .bind(event_id)
     .bind(pubkey)
@@ -140,16 +173,19 @@ pub async fn remove_reaction(
 /// Returns `true` if a row was updated, `false` if not found or already removed.
 pub async fn remove_reaction_by_source_event_id(
     pool: &PgPool,
+    community: CommunityId,
     reaction_event_id: &[u8],
 ) -> Result<bool> {
     let result = sqlx::query(
         r#"
         UPDATE reactions
         SET removed_at = NOW()
-        WHERE reaction_event_id = $1
+        WHERE community_id = $1
+          AND reaction_event_id = $2
           AND removed_at IS NULL
         "#,
     )
+    .bind(community.as_uuid())
     .bind(reaction_event_id)
     .execute(pool)
     .await?;
@@ -160,6 +196,7 @@ pub async fn remove_reaction_by_source_event_id(
 /// Look up the active reaction row for one actor + emoji + target tuple.
 pub async fn get_active_reaction_record(
     pool: &PgPool,
+    community: CommunityId,
     event_id: &[u8],
     event_created_at: DateTime<Utc>,
     pubkey: &[u8],
@@ -169,14 +206,16 @@ pub async fn get_active_reaction_record(
         r#"
         SELECT reaction_event_id
         FROM reactions
-        WHERE event_id = $1
-          AND event_created_at = $2
-          AND pubkey = $3
-          AND emoji = $4
+        WHERE community_id = $1
+          AND event_id = $2
+          AND event_created_at = $3
+          AND pubkey = $4
+          AND emoji = $5
           AND removed_at IS NULL
         LIMIT 1
         "#,
     )
+    .bind(community.as_uuid())
     .bind(event_id)
     .bind(event_created_at)
     .bind(pubkey)
@@ -198,6 +237,7 @@ pub async fn get_active_reaction_record(
 /// reaction row to its source event. Returns `true` if the row was updated.
 pub async fn set_reaction_event_id(
     pool: &PgPool,
+    community: CommunityId,
     event_id: &[u8],
     event_created_at: DateTime<Utc>,
     pubkey: &[u8],
@@ -208,14 +248,16 @@ pub async fn set_reaction_event_id(
         r#"
         UPDATE reactions
         SET reaction_event_id = $1
-        WHERE event_created_at = $2
-          AND event_id = $3
-          AND pubkey = $4
-          AND emoji = $5
+        WHERE community_id = $2
+          AND event_created_at = $3
+          AND event_id = $4
+          AND pubkey = $5
+          AND emoji = $6
           AND removed_at IS NULL
         "#,
     )
     .bind(reaction_event_id)
+    .bind(community.as_uuid())
     .bind(event_created_at)
     .bind(event_id)
     .bind(pubkey)
@@ -232,11 +274,12 @@ pub async fn set_reaction_event_id(
 ///
 /// Returns one [`ReactionGroup`] per emoji, each containing the list of reacting
 /// user pubkeys. Display names are NOT resolved here -- callers should enrich via
-/// `get_users_bulk` if needed.
+/// scoped user lookups if needed.
 ///
 /// `cursor` is reserved for future keyset pagination (currently unused).
 pub async fn get_reactions(
     pool: &PgPool,
+    community: CommunityId,
     event_id: &[u8],
     event_created_at: DateTime<Utc>,
     limit: u32,
@@ -253,18 +296,21 @@ pub async fn get_reactions(
         INNER JOIN (
             SELECT DISTINCT emoji
             FROM reactions
-            WHERE event_id = $1
-              AND event_created_at = $2
+            WHERE community_id = $1
+              AND event_id = $2
+              AND event_created_at = $3
               AND removed_at IS NULL
             ORDER BY emoji
-            LIMIT $3
+            LIMIT $4
         ) g ON g.emoji = r.emoji
-        WHERE r.event_id = $1
-          AND r.event_created_at = $2
+        WHERE r.community_id = $1
+          AND r.event_id = $2
+          AND r.event_created_at = $3
           AND r.removed_at IS NULL
         ORDER BY r.emoji, r.created_at
         "#,
     )
+    .bind(community.as_uuid())
     .bind(event_id)
     .bind(event_created_at)
     .bind(limit as i64)
@@ -319,6 +365,7 @@ pub async fn get_reactions(
 /// active reaction. Pairs with no reactions are omitted.
 pub async fn get_reactions_bulk(
     pool: &PgPool,
+    community: CommunityId,
     event_ids: &[(&[u8], DateTime<Utc>)],
 ) -> Result<Vec<BulkReactionEntry>> {
     if event_ids.is_empty() {
@@ -335,13 +382,15 @@ pub async fn get_reactions_bulk(
             r#"
             SELECT emoji, COUNT(*) AS count
             FROM reactions
-            WHERE event_id = $1
-              AND event_created_at = $2
+            WHERE community_id = $1
+              AND event_id = $2
+              AND event_created_at = $3
               AND removed_at IS NULL
             GROUP BY emoji
             ORDER BY emoji
             "#,
         )
+        .bind(community.as_uuid())
         .bind(*event_id)
         .bind(event_created_at)
         .fetch_all(pool)

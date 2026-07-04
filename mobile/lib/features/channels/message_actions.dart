@@ -36,7 +36,12 @@ void showMessageActions({
     showDragHandle: true,
     builder: (sheetContext) => SafeArea(
       child: Padding(
-        padding: const EdgeInsets.fromLTRB(Grid.xs, 0, Grid.xs, Grid.xs),
+        padding: const EdgeInsets.fromLTRB(
+          Grid.gutter,
+          0,
+          Grid.gutter,
+          Grid.xs,
+        ),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
@@ -57,9 +62,7 @@ void showMessageActions({
                       height: 44,
                       alignment: Alignment.center,
                       decoration: BoxDecoration(
-                        color: Theme.of(
-                          sheetContext,
-                        ).colorScheme.surfaceContainerHighest,
+                        color: sheetContext.colors.surfaceContainerHighest,
                         shape: BoxShape.circle,
                       ),
                       child: Text(emoji, style: const TextStyle(fontSize: 20)),
@@ -82,17 +85,13 @@ void showMessageActions({
                     height: 44,
                     alignment: Alignment.center,
                     decoration: BoxDecoration(
-                      color: Theme.of(
-                        sheetContext,
-                      ).colorScheme.surfaceContainerHighest,
+                      color: sheetContext.colors.surfaceContainerHighest,
                       shape: BoxShape.circle,
                     ),
                     child: Icon(
                       LucideIcons.plus,
                       size: 20,
-                      color: Theme.of(
-                        sheetContext,
-                      ).colorScheme.onSurfaceVariant,
+                      color: sheetContext.colors.onSurfaceVariant,
                     ),
                   ),
                 ),
@@ -147,13 +146,11 @@ void showMessageActions({
               ListTile(
                 leading: Icon(
                   LucideIcons.trash2,
-                  color: Theme.of(sheetContext).colorScheme.error,
+                  color: sheetContext.colors.error,
                 ),
                 title: Text(
                   'Delete message',
-                  style: TextStyle(
-                    color: Theme.of(sheetContext).colorScheme.error,
-                  ),
+                  style: TextStyle(color: sheetContext.colors.error),
                 ),
                 onTap: () {
                   Navigator.of(sheetContext).pop();
@@ -186,9 +183,9 @@ void _showEditSheet({
     showDragHandle: true,
     builder: (sheetContext) => Padding(
       padding: EdgeInsets.fromLTRB(
-        Grid.xs,
+        Grid.gutter,
         0,
-        Grid.xs,
+        Grid.gutter,
         MediaQuery.viewInsetsOf(sheetContext).bottom,
       ),
       child: Column(
@@ -264,7 +261,7 @@ void _confirmDelete({
                 .deleteMessage(channelId: channelId, eventId: messageId);
           },
           style: FilledButton.styleFrom(
-            backgroundColor: Theme.of(dialogContext).colorScheme.error,
+            backgroundColor: dialogContext.colors.error,
           ),
           child: const Text('Delete'),
         ),

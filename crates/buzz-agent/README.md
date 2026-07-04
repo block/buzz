@@ -129,17 +129,17 @@ Everything is environment variables. No flags, no config files. (We are a subpro
 
 | Variable | Default | Notes |
 |---|---|---|
-| `BUZZ_AGENT_PROVIDER` | — | `anthropic`, `openai`, or `databricks`. If unset, or if `anthropic`/`openai` is selected but its API key is missing, Databricks is auto-selected when `DATABRICKS_HOST` + `DATABRICKS_MODEL` are set. |
-| `ANTHROPIC_API_KEY` | — | Required when provider=anthropic unless Databricks fallback is configured. |
+| `BUZZ_AGENT_PROVIDER` | — | Required. `anthropic`, `openai`, `databricks`, or `databricks_v2`. No implicit fallback — the agent errors at startup when this is unset. |
+| `ANTHROPIC_API_KEY` | — | Required when provider=anthropic. |
 | `ANTHROPIC_MODEL` | — | Required when provider=anthropic. |
 | `ANTHROPIC_BASE_URL` | `https://api.anthropic.com` | |
 | `ANTHROPIC_API_VERSION` | `2023-06-01` | |
-| `OPENAI_COMPAT_API_KEY` | — | Required when provider=openai unless Databricks fallback is configured. |
+| `OPENAI_COMPAT_API_KEY` | — | Required when provider=openai. |
 | `OPENAI_COMPAT_MODEL` | — | Required when provider=openai. |
 | `OPENAI_COMPAT_BASE_URL` | `https://api.openai.com/v1` | Point at vLLM, llama.cpp, OpenRouter, Ollama, etc. |
 | `OPENAI_COMPAT_API` | `auto` | `auto` \| `chat` \| `responses`. `auto` picks Responses for `*.openai.com`, Chat Completions everywhere else. |
-| `DATABRICKS_HOST` | — | Required when provider=databricks or when using Databricks fallback. |
-| `DATABRICKS_MODEL` | — | Required when provider=databricks or when using Databricks fallback. |
+| `DATABRICKS_HOST` | — | Required when provider=databricks or provider=databricks_v2. |
+| `DATABRICKS_MODEL` | — | Required when provider=databricks or provider=databricks_v2. |
 | `DATABRICKS_TOKEN` | — | Optional static bearer escape hatch. If unset, Databricks uses browser OAuth + refresh cache. |
 | `BUZZ_AGENT_SYSTEM_PROMPT` | built-in | Inline system prompt. |
 | `BUZZ_AGENT_SYSTEM_PROMPT_FILE` | — | File path. Mutually exclusive with the above. |
@@ -147,7 +147,7 @@ Everything is environment variables. No flags, no config files. (We are a subpro
 | `BUZZ_AGENT_MAX_OUTPUT_TOKENS` | `32768` | Per LLM call. Headroom for large tool-call inputs (e.g. file writes via heredoc); Sonnet 4 / Opus 4 cap at 64K. |
 | `BUZZ_AGENT_MAX_CONTEXT_TOKENS` | `200000` | Provider context window used by the handoff gate. |
 | `BUZZ_AGENT_MAX_HANDOFFS` | `10` | Max context handoffs per session before falling back to truncation. |
-| `BUZZ_AGENT_LLM_TIMEOUT_SECS` | `120` | |
+| `BUZZ_AGENT_LLM_TIMEOUT_SECS` | `240` | |
 | `BUZZ_AGENT_TOOL_TIMEOUT_SECS` | `660` | Per-tool call timeout in seconds |
 | `BUZZ_AGENT_MAX_PARALLEL_TOOLS` | `8` | Max concurrent tool calls per turn (1 = sequential) |
 | `BUZZ_AGENT_MAX_SESSIONS` | unlimited | Max concurrent ACP sessions. Sessions are cheap; default has no cap. |
@@ -158,7 +158,7 @@ Everything is environment variables. No flags, no config files. (We are a subpro
 
 ## Providers
 
-`buzz-agent` speaks two HTTP dialects. Pick with `BUZZ_AGENT_PROVIDER`.
+`buzz-agent` speaks a few HTTP dialects. Pick with `BUZZ_AGENT_PROVIDER`.
 
 | Provider | `BUZZ_AGENT_PROVIDER` | Endpoint (auto) | Tested with |
 |---|---|---|---|
@@ -170,14 +170,15 @@ Everything is environment variables. No flags, no config files. (We are a subpro
 | OpenRouter | `openai` | `POST {base}/chat/completions` | anything they route |
 | Block Gateway | `openai` | `POST {base}/chat/completions` | gpt-5, claude |
 | Databricks | `databricks` | `POST {host}/serving-endpoints/{model}/invocations` | goose-claude-4-6-sonnet |
+| Databricks AI Gateway v2 | `databricks_v2` | `POST {host}/ai-gateway/{provider}/v1/...` | databricks-gpt-5-5, databricks-claude-opus-4-7 |
 
-If `BUZZ_AGENT_PROVIDER=anthropic` is selected without `ANTHROPIC_API_KEY`, or `BUZZ_AGENT_PROVIDER=openai` is selected without `OPENAI_COMPAT_API_KEY`, the agent automatically falls back to Databricks OAuth when `DATABRICKS_HOST` and `DATABRICKS_MODEL` are set. The same Databricks fallback applies when `BUZZ_AGENT_PROVIDER` is unset. Explicit Anthropic/OpenAI API keys always win.
+If `BUZZ_AGENT_PROVIDER=anthropic` is selected without `ANTHROPIC_API_KEY`, or `BUZZ_AGENT_PROVIDER=openai` is selected without `OPENAI_COMPAT_API_KEY`, the agent returns an error — there is no implicit fallback to another provider.
 
 `provider=openai` speaks two HTTP dialects: the [Responses API](https://platform.openai.com/docs/api-reference/responses) (`/v1/responses`, required for GPT-5 / o-series tool-calling on OpenAI's own service) and the [Chat Completions API](https://platform.openai.com/docs/api-reference/chat) (`/chat/completions`, the broadly-supported OpenAI-compatible wire format).
 
 By default (`OPENAI_COMPAT_API=auto`) the agent picks **Responses** when `OPENAI_COMPAT_BASE_URL` points at an `*.openai.com` host and **Chat Completions** everywhere else. Pin the choice explicitly with `OPENAI_COMPAT_API=chat` or `OPENAI_COMPAT_API=responses` for providers that diverge from the default (e.g. a Responses-compatible self-hosted gateway).
 
-`Provider` is a Rust `enum` with one `match` in `Llm::complete`. There is no trait, no `Box<dyn>`, no async-trait. Adding a third provider is a `match` arm and one `body`/`parse` pair in `llm.rs`.
+`Provider` is a Rust `enum` with one `match` in `Llm::complete`. There is no trait, no `Box<dyn>`, no async-trait. Adding a provider is a `match` arm and one `body`/`parse` pair in `llm.rs`.
 
 ## MCP Servers
 
@@ -243,7 +244,7 @@ The trust boundary is **the operator who launched the agent**. The harness, MCP 
 | Tool schema bytes | 4 KiB | `MAX_SCHEMA_BYTES` (oversize → replaced with `{}`) |
 | Tool calls per turn | 64 | `MAX_TOOL_CALLS_PER_TURN` |
 | Loop rounds | 0 (unlimited) | `BUZZ_AGENT_MAX_ROUNDS` |
-| LLM call timeout | 120 s | `BUZZ_AGENT_LLM_TIMEOUT_SECS` |
+| LLM call timeout | 240 s | `BUZZ_AGENT_LLM_TIMEOUT_SECS` |
 | Tool call timeout | 660 s | `BUZZ_AGENT_TOOL_TIMEOUT_SECS` |
 
 ## What This Is NOT

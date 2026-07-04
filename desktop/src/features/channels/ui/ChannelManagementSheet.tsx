@@ -1,7 +1,6 @@
 import {
   Archive,
   BookOpenText,
-  ChevronLeft,
   Copy,
   DoorClosed,
   DoorOpen,
@@ -14,7 +13,6 @@ import {
   Radio,
   Type,
   Users,
-  X,
   Zap,
 } from "lucide-react";
 import * as React from "react";
@@ -39,8 +37,11 @@ import {
   formatTtlDuration,
   parseTtlDuration,
 } from "@/features/channels/lib/ephemeralChannel";
+import { ownsAuthorAgent } from "@/features/profile/lib/identity";
+import { useUsersBatchQuery } from "@/features/profile/hooks";
 import type { Channel } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
+import { normalizePubkey } from "@/shared/lib/pubkey";
 import { useTheme } from "@/shared/theme/ThemeProvider";
 import { Button } from "@/shared/ui/button";
 import {
@@ -53,11 +54,14 @@ import {
 import { Input } from "@/shared/ui/input";
 import { Textarea } from "@/shared/ui/textarea";
 import {
+  AuxiliaryPanelBody,
+  AuxiliaryPanelContext,
   AuxiliaryPanelHeader,
   AuxiliaryPanelHeaderGroup,
   AuxiliaryPanelTitle,
-  auxiliaryPanelContentPaddingClass,
-} from "@/shared/layout/AuxiliaryPanelHeader";
+  type AuxiliaryPanelMode,
+  getAuxiliaryPanelMode,
+} from "@/shared/layout/AuxiliaryPanel";
 import { useScrollBoundaryLock } from "@/shared/hooks/useScrollBoundaryLock";
 import {
   OverlayPanelBackdrop,
@@ -88,6 +92,7 @@ type ChannelManagementSheetProps = {
   onDeleted?: () => void;
   onOpenChange: (open: boolean) => void;
   open: boolean;
+  transparentChrome?: boolean;
 };
 
 const DEFAULT_EPHEMERAL_TTL_SECONDS = 7 * 24 * 60 * 60;
@@ -100,9 +105,14 @@ export function ChannelManagementSheet({
   onDeleted,
   onOpenChange,
   open,
+  transparentChrome = false,
 }: ChannelManagementSheetProps) {
   const { isDark } = useTheme();
   const isSplitLayout = layout === "split";
+  const auxiliaryPanelMode = getAuxiliaryPanelMode(
+    isSplitLayout,
+    !isSplitLayout,
+  );
   const channelId = channel?.id ?? null;
   const detailsQuery = useChannelDetailsQuery(channelId, open);
   const membersQuery = useChannelMembersQuery(channelId, open);
@@ -126,9 +136,38 @@ export function ChannelManagementSheet({
   const selfMember =
     members.find((member) => member.pubkey === currentPubkey) ?? null;
   const hasResolvedMembership = membersQuery.data !== undefined;
-  const isOwner = selfMember?.role === "owner";
+
+  // Collect owner-role member pubkeys to look up their NIP-OA ownerPubkey.
+  // This is what surfaces the "you own the agent that owns this channel" path.
+  const ownerMemberPubkeys = React.useMemo(
+    () =>
+      members
+        .filter((m) => m.role === "owner" && m.pubkey !== currentPubkey)
+        .map((m) => m.pubkey),
+    [members, currentPubkey],
+  );
+  const ownerProfilesQuery = useUsersBatchQuery(ownerMemberPubkeys, {
+    enabled: open && ownerMemberPubkeys.length > 0,
+  });
+  // True when an owner-role member of this channel is an agent owned by the
+  // current user — mirrors the relay's is_agent_owner gate.
+  const canManageOwnedAgentChannel = React.useMemo(() => {
+    if (!currentPubkey || !ownerProfilesQuery.data) return false;
+    return ownerMemberPubkeys.some((pubkey) =>
+      ownsAuthorAgent(
+        ownerProfilesQuery.data?.profiles[normalizePubkey(pubkey)],
+        currentPubkey,
+      ),
+    );
+  }, [currentPubkey, ownerMemberPubkeys, ownerProfilesQuery.data]);
+
+  const isSelfOwner = selfMember?.role === "owner";
+  // Capability: may delete this channel (self-owner OR owns the agent-owner).
+  const canDeleteChannel = isSelfOwner || canManageOwnedAgentChannel;
   const canManageChannel =
-    selfMember?.role === "owner" || selfMember?.role === "admin";
+    selfMember?.role === "owner" ||
+    selfMember?.role === "admin" ||
+    canManageOwnedAgentChannel;
   const canEditNarrative =
     canManageChannel && selfMember !== null && detail?.channelType !== "dm";
   const isArchived =
@@ -320,7 +359,7 @@ export function ChannelManagementSheet({
             "h-full w-full cursor-default overflow-hidden border-l-0 p-0",
             animateSplitEnter && PANEL_ENTER_MOTION_CLASS,
             isDark
-              ? "bg-background/85 backdrop-blur-xl supports-[backdrop-filter]:bg-background/75"
+              ? "bg-background/85 backdrop-blur-xl supports-backdrop-filter:bg-background/75"
               : "bg-background",
           )}
           data-testid="channel-management-sheet"
@@ -346,8 +385,9 @@ export function ChannelManagementSheet({
             isArchived={isArchived}
             isDark={isDark}
             isDeleteDialogOpen={isDeleteDialogOpen}
-            isOwner={isOwner}
-            isSplitLayout={isSplitLayout}
+            canDeleteChannel={canDeleteChannel}
+            mode={auxiliaryPanelMode}
+            transparentChrome={transparentChrome}
             joinChannelMutation={joinChannelMutation}
             leaveChannelMutation={leaveChannelMutation}
             memberCount={memberCount}
@@ -368,7 +408,7 @@ export function ChannelManagementSheet({
               PANEL_ENTER_MOTION_CLASS,
               "w-[380px] cursor-default overflow-hidden p-0 data-[state=closed]:animate-out data-[state=closed]:slide-out-to-right data-[state=closed]:duration-200",
               isDark
-                ? "bg-background/85 backdrop-blur-xl supports-[backdrop-filter]:bg-background/75"
+                ? "bg-background/85 backdrop-blur-xl supports-backdrop-filter:bg-background/75"
                 : "bg-background",
             )}
             data-testid="channel-management-sheet"
@@ -391,8 +431,9 @@ export function ChannelManagementSheet({
               isArchived={isArchived}
               isDark={isDark}
               isDeleteDialogOpen={isDeleteDialogOpen}
-              isOwner={isOwner}
-              isSplitLayout={isSplitLayout}
+              canDeleteChannel={canDeleteChannel}
+              mode={auxiliaryPanelMode}
+              transparentChrome={transparentChrome}
               joinChannelMutation={joinChannelMutation}
               leaveChannelMutation={leaveChannelMutation}
               memberCount={memberCount}
@@ -626,8 +667,9 @@ type ChannelManagementPanelContentProps = {
   isArchived: boolean;
   isDark: boolean;
   isDeleteDialogOpen: boolean;
-  isOwner: boolean;
-  isSplitLayout: boolean;
+  canDeleteChannel: boolean; // true when caller may delete the channel
+  mode: AuxiliaryPanelMode;
+  transparentChrome?: boolean;
   joinChannelMutation: ChannelMutation;
   leaveChannelMutation: ChannelMutation;
   memberCount: number;
@@ -657,8 +699,9 @@ function ChannelManagementPanelContent({
   isArchived,
   isDark,
   isDeleteDialogOpen,
-  isOwner,
-  isSplitLayout,
+  canDeleteChannel,
+  mode,
+  transparentChrome = false,
   joinChannelMutation,
   leaveChannelMutation,
   memberCount,
@@ -676,107 +719,52 @@ function ChannelManagementPanelContent({
     activeView === "summary" &&
     canManageChannel &&
     resolvedChannel.channelType !== "dm";
-
   return (
-    <>
-      {isSplitLayout ? (
-        <AuxiliaryPanelHeader>
-          <AuxiliaryPanelHeaderGroup>
-            {activeView === "canvas" ? (
-              <Button
-                aria-label="Back to channel"
-                className="shrink-0"
-                data-testid="channel-management-back"
-                onClick={() => setActiveView("summary")}
-                size="icon"
-                type="button"
-                variant="outline"
-              >
-                <ChevronLeft />
-              </Button>
-            ) : null}
-            <DialogPrimitive.Title asChild>
-              <AuxiliaryPanelTitle>
-                {activeView === "canvas" ? "Canvas" : "Channel"}
-              </AuxiliaryPanelTitle>
-            </DialogPrimitive.Title>
-          </AuxiliaryPanelHeaderGroup>
-          <div className="ml-auto flex shrink-0 items-center gap-2">
-            <Button
-              aria-label="Close channel management"
-              className="relative z-[60]"
-              data-testid="channel-management-close"
-              onClick={() => onOpenChange(false)}
-              onPointerDown={(event) => {
-                event.preventDefault();
-                event.stopPropagation();
-                onOpenChange(false);
-              }}
-              size="icon"
-              type="button"
-              variant="ghost"
-            >
-              <X />
-            </Button>
-          </div>
-          <DialogPrimitive.Description className="sr-only">
-            Channel settings
-          </DialogPrimitive.Description>
-        </AuxiliaryPanelHeader>
-      ) : (
-        <div
-          className={cn(
-            "relative z-10 flex min-h-11 flex-row items-center gap-3 space-y-0 border-b border-border/35 px-3 py-1.5 text-left shadow-none",
-            isDark
-              ? "bg-background/70 backdrop-blur-xl supports-[backdrop-filter]:bg-background/55"
-              : "bg-background/80 backdrop-blur-md supports-[backdrop-filter]:bg-background/70",
-          )}
+    <AuxiliaryPanelContext.Provider
+      value={{
+        isFloatingOverlay: mode === "panel",
+        isOverlay: mode !== "docked",
+        isSinglePanelView: mode === "single-panel",
+        isSplitLayout: mode === "docked",
+        layout: mode === "docked" ? "split" : "standalone",
+        mode,
+        onClose: () => onOpenChange(false),
+        transparentChrome,
+        widthPx: 380,
+      }}
+    >
+      <AuxiliaryPanelHeader
+        bordered={mode === "panel"}
+        density={mode === "panel" ? "compact" : "comfortable"}
+        mode={mode}
+        transparent={transparentChrome}
+      >
+        <AuxiliaryPanelHeaderGroup
+          backButtonAriaLabel="Back to channel"
+          backButtonTestId="channel-management-back"
+          mode={mode}
+          onBack={
+            activeView === "canvas" ? () => setActiveView("summary") : undefined
+          }
         >
-          <div className="flex min-w-0 flex-1 items-center gap-1.5">
-            {activeView === "canvas" ? (
-              <Button
-                aria-label="Back to channel"
-                data-testid="channel-management-back"
-                onClick={() => setActiveView("summary")}
-                size="icon"
-                type="button"
-                variant="ghost"
-              >
-                <ChevronLeft />
-              </Button>
-            ) : null}
-            <DialogPrimitive.Title className="min-w-0 flex-1 translate-y-px truncate text-base font-semibold leading-6 tracking-tight">
+          <DialogPrimitive.Title asChild>
+            <AuxiliaryPanelTitle>
               {activeView === "canvas" ? "Canvas" : "Channel"}
-            </DialogPrimitive.Title>
-          </div>
-          <Button
-            aria-label="Close channel management"
-            className="relative z-[60]"
-            data-testid="channel-management-close"
-            onClick={() => onOpenChange(false)}
-            onPointerDown={(event) => {
-              event.preventDefault();
-              event.stopPropagation();
-              onOpenChange(false);
-            }}
-            size="icon"
-            type="button"
-            variant="ghost"
-          >
-            <X />
-          </Button>
-          <DialogPrimitive.Description className="sr-only">
-            Channel settings
-          </DialogPrimitive.Description>
-        </div>
-      )}
+            </AuxiliaryPanelTitle>
+          </DialogPrimitive.Title>
+        </AuxiliaryPanelHeaderGroup>
+        <DialogPrimitive.Description className="sr-only">
+          Channel settings
+        </DialogPrimitive.Description>
+      </AuxiliaryPanelHeader>
 
-      <div
+      <AuxiliaryPanelBody
         className={cn(
-          "flex-1 overflow-y-auto overflow-x-hidden overscroll-contain bg-background px-4 [overflow-anchor:none]",
+          "overflow-y-auto overflow-x-hidden overscroll-contain bg-background px-4 [overflow-anchor:none]",
           showModerationActions ? "pb-20" : "pb-8",
-          isSplitLayout ? auxiliaryPanelContentPaddingClass : "pt-4",
         )}
+        mode={mode}
+        panelPadding
         ref={scrollRef}
       >
         {activeView === "summary" ? (
@@ -965,7 +953,7 @@ function ChannelManagementPanelContent({
             />
           </div>
         )}
-      </div>
+      </AuxiliaryPanelBody>
 
       {showModerationActions ? (
         <ChannelManagementModerationActions
@@ -977,11 +965,11 @@ function ChannelManagementPanelContent({
           isArchived={isArchived}
           isDark={isDark}
           isDeleteDialogOpen={isDeleteDialogOpen}
-          isOwner={isOwner}
+          canDeleteChannel={canDeleteChannel}
           resolvedChannelName={resolvedChannel.name}
           unarchiveChannelMutation={unarchiveChannelMutation}
         />
       ) : null}
-    </>
+    </AuxiliaryPanelContext.Provider>
   );
 }

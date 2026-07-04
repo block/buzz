@@ -950,13 +950,14 @@ The model's obligations map to concrete code seams:
   shared atomic seen-set keyed by community and NIP-98 event id, or an explicitly
   admitted sticky/single-replica deployment; otherwise S2's freshness premise is
   not carried in production.
-- **Search / C2.1** — Typesense is shared infrastructure, not a shared result
-  space. Indexed documents carry `community_id`; document ids are collision-safe
-  across communities (for example `community_id:event_id`) or every upsert/delete
-  path includes a community filter. All query `filter_by` strings include
-  `community_id`, and Postgres refetch by hit id is `(community_id, event_id)`.
-  The existing `__global__` channel sentinel means channel-less within one
-  community, never operator-global.
+- **Search / C2.1** — the Postgres FTS index (the `events.search_tsv` generated
+  column, backed by a GIN index) is shared infrastructure, not a shared result
+  space. Searchable rows carry `community_id`, and every search query filters by
+  `community_id` so the FTS predicate is BitmapAnd-ed with the community-leading
+  btree filters; a hit never crosses tenants and refetch by hit id is
+  `(community_id, event_id)`. The channel-less scope (`ChannelScope::ChannelLessOnly`,
+  formerly the `__global__` sentinel) means channel-less within one community,
+  never operator-global.
 - **Redis / subscription refinement** — Redis pub/sub keys, presence keys, typing
   keys, cache invalidation channels, and local-echo dedup labels include
   community context in any shared multi-tenant deployment. The safe shape is

@@ -10,6 +10,7 @@ import {
   KIND_STREAM_MESSAGE,
   KIND_TYPING_INDICATOR,
   KIND_USER_STATUS,
+  CHANNEL_EVENT_KINDS,
 } from "@/shared/constants/kinds";
 import {
   getTextPayload,
@@ -34,6 +35,7 @@ import {
   shouldScheduleReconnect,
 } from "@/shared/api/relayReconnectPolicy";
 import { RelayStallWatchdog } from "@/shared/api/relayStallWatchdog";
+import { closeWebSocket } from "@/shared/api/relayWebSocketClose";
 import { buildThreadReferenceTags } from "@/features/messages/lib/threading";
 
 const RECONNECT_BASE_DELAY_MS = 1_000,
@@ -114,9 +116,7 @@ export class RelayClient {
     this.connectionStateEmitter.set("idle");
 
     if (this.wsId !== null) {
-      void invoke("plugin:websocket|disconnect", { id: this.wsId }).catch(
-        () => {},
-      );
+      void closeWebSocket(this.wsId, "workspace switch");
       this.wsId = null;
     }
 
@@ -333,19 +333,14 @@ export class RelayClient {
     return this.subscribe(buildChannelFilter(channelId, 50), onEvent);
   }
 
-  /**
-   * Subscribe to a channel starting from NOW — no history backfill.
-   * Used by huddle TTS where only live kind:9 messages should be spoken.
-   * The `since` filter ensures the relay never sends historical backlog.
-   * The high `limit` ensures reconnect replay can recover all missed events.
-   */
+  /** Subscribe to channel rows and aux starting now, with no history replay. */
   async subscribeToChannelLive(
     channelId: string,
     onEvent: (event: RelayEvent) => void,
   ) {
     return this.subscribe(
       {
-        kinds: [KIND_STREAM_MESSAGE],
+        kinds: [...CHANNEL_EVENT_KINDS],
         "#h": [channelId],
         limit: 1000,
         since: Math.floor(Date.now() / 1_000),
@@ -981,11 +976,7 @@ export class RelayClient {
     }
 
     if (this.wsId !== null) {
-      void invoke("plugin:websocket|disconnect", { id: this.wsId }).catch(
-        (err) => {
-          console.warn("[RelayClientSession] disconnect failed:", err);
-        },
-      );
+      void closeWebSocket(this.wsId, "connection reset");
     }
 
     this.wsId = null;

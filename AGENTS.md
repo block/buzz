@@ -42,7 +42,7 @@ crates/
   buzz-db             # Postgres event store and data access layer
   buzz-auth           # Authentication and authorization
   buzz-pubsub         # Redis pub/sub fan-out, presence, typing indicators
-  buzz-search         # Typesense-backed full-text search
+  buzz-search         # Postgres FTS full-text search
   buzz-audit          # Hash-chain audit log
   buzz-media          # Blossom/S3 media storage
   # Agent surface
@@ -52,7 +52,6 @@ crates/
   buzz-persona        # Agent persona packs
   buzz-workflow       # YAML-as-code workflow engine (evalexpr conditions)
   # Clients + interop
-  buzz-proxy          # Nostr client compatibility proxy (NIP-28)
   buzz-pair-relay     # Ephemeral sidecar relay for NIP-AB device pairing
   buzz-pairing-cli    # CLI for NIP-AB device pairing interop testing
   git-sign-nostr      # Sign git objects with a Nostr key
@@ -116,24 +115,21 @@ Additional rules:
 
 ## Key Patterns
 
-**Dual API surface**: Buzz exposes both a REST API and a NIP-29 WebSocket
-relay. Both paths converge on shared DB functions in `buzz-db`. When adding
-a feature, implement the shared DB logic first, then wire up both surfaces.
+**Nostr-first HTTP surface**: Buzz's primary API is NIP-29 over WebSocket. The relay also exposes a narrow HTTP surface: NIP-11/NIP-05 metadata, `POST /events`, `POST /query`, `POST /count`, workflow webhooks at `/hooks/{id}`, Blossom media, git smart HTTP, git policy hooks, and health probes. These HTTP paths all preserve the same host-derived community boundary.
 
-**Prefer Nostr events over new REST endpoints**: For new feature work, model
+**Prefer Nostr events over new HTTP endpoints**: For new feature work, model
 the operation as a Nostr event (new kind in `buzz-core/src/kind.rs`, handler
-in `buzz-relay`) rather than adding a new REST endpoint. REST is reserved
-for things that genuinely need an HTTP-only surface: media upload/download
-(Blossom), OAuth callbacks, health checks, and the existing read endpoints
-that proxy DB queries. Two helpful endpoints already exist and rarely need
-to be duplicated:
+in `buzz-relay`) rather than adding endpoint-specific JSON APIs. HTTP is
+reserved for things that genuinely need an HTTP-only surface: media upload/download
+(Blossom), webhooks, git smart HTTP, NIP-11/NIP-05 metadata, health checks,
+and the generic Nostr bridge endpoints:
 
 - `POST /events` — submit any signed event (same path the WebSocket uses).
 - `POST /query` — Nostr REQ filters over HTTP. NIP-50 `search` filters
-  are routed to `buzz-search` (Typesense-backed) automatically.
+  are routed to `buzz-search` (Postgres FTS) automatically.
 - `POST /count` — Nostr COUNT filters over HTTP.
 
-If you find yourself reaching for a new REST endpoint, first check whether
+If you find yourself reaching for a new HTTP endpoint, first check whether
 an event kind would do the job — it usually will, and you get realtime
 fan-out, NIP-29 scoping, and the existing auth pipeline for free.
 
@@ -207,9 +203,6 @@ just test         # full integration suite (requires Postgres + Redis)
 
 E2E tests live in `crates/buzz-test-client/tests/`:
 - `e2e_relay.rs` — WebSocket relay protocol
-- `e2e_rest_api.rs` — REST endpoint coverage
-- `e2e_tokens.rs` — auth token flows
-- `e2e_workflows.rs` — workflow engine
 - `e2e_media.rs` — media upload/download (Blossom)
 - `e2e_media_extended.rs` — extended media scenarios
 - `e2e_nostr_interop.rs` — Nostr interop (NIP-50 search, NIP-10 threads, NIP-17 gift wraps)
@@ -419,6 +412,7 @@ description. See [PR #803](https://github.com/block/buzz/pull/803).
 4. **Worktrees: `cd` in the same command** — shell CWD doesn't persist between tool calls. Use `cd /path && cargo build` as one command.
 5. **Desktop crate excluded from root workspace** — `cargo test` at repo root does NOT run desktop tests. Use `cargo test --manifest-path desktop/src-tauri/Cargo.toml` explicitly.
 6. **Desktop Tauri fmt fails in worktrees and blocks commits** — the pre-commit hook runs `just desktop-tauri-fmt`, which fails in git worktrees because `cargo fmt` resolves workspace paths relative to the worktree root. Run `just desktop-tauri-fmt` from the main checkout to apply the fix, then re-stage and commit. CI is unaffected.
+7. **React render perf: `React.memo` is all-or-nothing** — it only skips a re-render when *every* prop is reference-stable; one unstable prop (inline arrow/JSX, or a hook returning a fresh `{}`/`[]`/`Map` each render) defeats it. Two repeat offenders: (a) React Query results (`useMutation`/`useQuery`) are a **new object each render** — depend on the stable method (`mutation.mutateAsync`), not the object; (b) derived `Map`/array state that recomputes on a version bump — wrap in a content-equality ref cache (`shared/hooks/useStableReference.ts`). When chasing interaction lag, **measure with DevTools closed and no perf probes** (an open Web Inspector + per-keystroke `console.log` inflate the numbers), and isolate by removing one suspect at a time rather than guessing.
 
 ---
 
@@ -511,15 +505,21 @@ The mobile app lives in `mobile/` — a Flutter app using Riverpod + Hooks.
 
 ### Rules
 
-- **NEVER use `StatefulWidget`** — always use `HookConsumerWidget` or
-  `ConsumerWidget` with `flutter_hooks` for local state.
+- **NEVER use `StatefulWidget`** — favor Riverpod for state and always use
+  `HookConsumerWidget` or `ConsumerWidget` with `flutter_hooks` for local state.
 - **NEVER run `flutter run`, `flutter build`, `flutter clean`, or
   `flutter upgrade`** — only `flutter test`, `flutter analyze`, and
   `dart format` are safe for agents to run.
 - **Do NOT use `print()`** — use `debugPrint()` or structured logging.
 - Prefer `context.colors` and `context.textTheme` (via theme extensions)
   over raw `Theme.of(context)` calls.
-- Keep widgets small and composable.
+- **Keep widgets small and composable.** One public widget per file; push
+  private sub-widgets (`_Foo`) into sibling `part` files under a
+  `<page>/` folder rather than growing the page file. Hard ceiling:
+  **1000 lines/file**, enforced by `mobile/scripts/check-file-sizes.mjs` via
+  `just mobile-check` (runs in `just check` + pre-push, mirroring desktop/web).
+  If the guard trips, **split the file — never bump the limit or add an
+  override to slip under it.**
 - Feature modules must not import from other feature modules — only from
   `shared/`.
 - Use `Grid` tokens for spacing, `Radii` for border radius.
@@ -554,7 +554,7 @@ just mobile-dev
 
 ## See Also
 
-- [CONTRIBUTING.md](CONTRIBUTING.md) — setup, code style, PR process, how to add event kinds / CLI subcommands / API endpoints
+- [CONTRIBUTING.md](CONTRIBUTING.md) — setup, code style, PR process, how to add event kinds / CLI subcommands / HTTP endpoints
 - [TESTING.md](TESTING.md) — multi-agent E2E test guide
 - [ARCHITECTURE.md](ARCHITECTURE.md) — system design and component relationships
 - [RELEASING.md](RELEASING.md) — release process: `release-desktop`, `release-relay`, `release-mobile`, auto-tag, internal builds

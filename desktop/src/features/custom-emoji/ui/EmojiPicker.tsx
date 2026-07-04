@@ -29,6 +29,58 @@ function warmEmojiIndex() {
 warmEmojiIndex();
 
 /**
+ * Reach into the `em-emoji-picker` shadow root and disable spellcheck,
+ * autocorrect, and autocapitalize on its search input. When `autoFocus` is
+ * true, also focus the input so the cursor lands there immediately — this
+ * makes focus deterministic and owned by us, preventing Radix's focus-scope
+ * from racing emoji-mart's own async focus call and winning.
+ *
+ * emoji-mart mounts the custom element and its shadow content asynchronously,
+ * so the input is not present on first render. A MutationObserver on the
+ * shadow root watches for the input to appear, applies the attributes once,
+ * then disconnects. Returns a cleanup function for `useEffect`.
+ */
+function disableSearchInputCorrections(
+  host: HTMLElement,
+  autoFocus: boolean,
+): () => void {
+  const picker = host.querySelector("em-emoji-picker");
+  const shadowRoot = picker?.shadowRoot ?? null;
+  if (!shadowRoot) {
+    return () => undefined;
+  }
+  // shadowRoot is ShadowRoot here; capture as a typed const so the nested
+  // closure doesn't re-widen to ShadowRoot | null.
+  const root: ShadowRoot = shadowRoot;
+
+  function applyAttributes() {
+    const input = root.querySelector<HTMLInputElement>('input[type="search"]');
+    if (!input) return false;
+    input.spellcheck = false;
+    input.setAttribute("autocorrect", "off");
+    input.setAttribute("autocapitalize", "off");
+    if (autoFocus) {
+      input.focus();
+    }
+    return true;
+  }
+
+  // Fast path: input already present (e.g. picker re-mount from hot cache).
+  if (applyAttributes()) {
+    return () => undefined;
+  }
+
+  // Slow path: wait for the shadow subtree to include the input.
+  const observer = new MutationObserver(() => {
+    if (applyAttributes()) {
+      observer.disconnect();
+    }
+  });
+  observer.observe(root, { childList: true, subtree: true });
+  return () => observer.disconnect();
+}
+
+/**
  * The one emoji picker for the whole app. Every place that lets a user choose
  * an emoji — composing a message, reacting to a regular or system message,
  * setting a status — renders this, so the config and custom-emoji wiring can't
@@ -64,27 +116,35 @@ export const EmojiPicker = React.memo(function EmojiPicker({
     () => buildCustomEmojiCategory(customEmoji),
     [customEmoji],
   );
+  const hostRef = React.useRef<HTMLDivElement>(null);
+
+  React.useEffect(() => {
+    if (!hostRef.current) return;
+    return disableSearchInputCorrections(hostRef.current, autoFocus);
+  }, [autoFocus]);
 
   return (
-    <Picker
-      autoFocus={autoFocus}
-      custom={custom}
-      data={data}
-      maxFrequentRows={2}
-      onEmojiSelect={(emoji: { native?: string; id?: string }) => {
-        // Standard emoji carry a `native` glyph. Custom emoji don't — emit
-        // their `:shortcode:` (emoji-mart `id` == shortcode) instead. Ignore a
-        // malformed selection that has neither.
-        const value = emoji.native ?? (emoji.id ? `:${emoji.id}:` : "");
-        if (value) {
-          onSelect(value);
-        }
-      }}
-      perLine={8}
-      previewPosition="bottom"
-      set="native"
-      skinTonePosition="search"
-      theme="auto"
-    />
+    <div ref={hostRef}>
+      <Picker
+        autoFocus={autoFocus}
+        custom={custom}
+        data={data}
+        maxFrequentRows={2}
+        onEmojiSelect={(emoji: { native?: string; id?: string }) => {
+          // Standard emoji carry a `native` glyph. Custom emoji don't — emit
+          // their `:shortcode:` (emoji-mart `id` == shortcode) instead. Ignore a
+          // malformed selection that has neither.
+          const value = emoji.native ?? (emoji.id ? `:${emoji.id}:` : "");
+          if (value) {
+            onSelect(value);
+          }
+        }}
+        perLine={8}
+        previewPosition="bottom"
+        set="native"
+        skinTonePosition="search"
+        theme="auto"
+      />
+    </div>
   );
 });

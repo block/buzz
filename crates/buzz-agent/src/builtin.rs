@@ -198,14 +198,22 @@ async fn load_supporting_file(
                 .await
                 .unwrap_or_else(|e| Err(std::io::Error::other(e)))
             {
-                Ok(content) => ToolResult {
-                    provider_id: String::new(),
-                    content: vec![ToolResultContent::Text(format!(
+                Ok(content) => {
+                    let output = format!(
                         "# Loaded: {}/{}\n\n{}\n\n---\nFile loaded into context.",
                         skill_name, rel_path_owned, content
-                    ))],
-                    is_error: false,
-                },
+                    );
+                    let output = if output.len() > MAX_SKILL_BODY_BYTES {
+                        truncate_at_boundary(&output, MAX_SKILL_BODY_BYTES).to_owned()
+                    } else {
+                        output
+                    };
+                    ToolResult {
+                        provider_id: String::new(),
+                        content: vec![ToolResultContent::Text(output)],
+                        is_error: false,
+                    }
+                }
                 Err(e) => error_result(&format!(
                     "load_skill: could not read {skill_name:?}/{rel_path_owned}: {e}"
                 )),
@@ -525,6 +533,43 @@ mod tests {
             "output length {} exceeds MAX_SKILL_BODY_BYTES {}",
             text.len(),
             MAX_SKILL_BODY_BYTES
+        );
+    }
+
+    #[tokio::test]
+    async fn call_load_skill_truncates_large_supporting_file() {
+        let tmp = TempDir::new().unwrap();
+        let skill_dir = tmp.path();
+        let skill_md = skill_dir.join("SKILL.md");
+        std::fs::write(&skill_md, "---\nname: big\ndescription: desc\n---\nBody.\n").unwrap();
+
+        let refs_dir = skill_dir.join("references");
+        std::fs::create_dir_all(&refs_dir).unwrap();
+        let ref_file = refs_dir.join("huge.md");
+        std::fs::write(&ref_file, "x".repeat(MAX_SKILL_BODY_BYTES * 2)).unwrap();
+
+        let skills = vec![make_skill_with_files(
+            "big",
+            "desc",
+            skill_md,
+            vec![ref_file],
+        )];
+        let result = call_load_skill(
+            &serde_json::json!({"name": "big/references/huge.md"}),
+            &skills,
+        )
+        .await;
+        assert!(!result.is_error);
+        let text = text_content(&result);
+        assert!(
+            text.len() <= MAX_SKILL_BODY_BYTES,
+            "output length {} exceeds MAX_SKILL_BODY_BYTES {}",
+            text.len(),
+            MAX_SKILL_BODY_BYTES
+        );
+        assert!(
+            text.starts_with("# Loaded: big/references/huge.md"),
+            "missing supporting-file header: {text}"
         );
     }
 }

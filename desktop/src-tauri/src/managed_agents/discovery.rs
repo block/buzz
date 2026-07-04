@@ -42,6 +42,20 @@ pub(crate) struct KnownAcpRuntime {
     pub provider_env_var: Option<&'static str>,
     pub provider_locked: bool,
     pub default_env: &'static [(&'static str, &'static str)],
+    pub config_file_path: Option<&'static str>,
+    #[allow(dead_code)] // reserved for format-based dispatch when readers are unified
+    pub config_file_format: Option<&'static str>,
+    pub supports_acp_native_config: bool, // tier 1a: config/read+write
+    pub thinking_env_var: Option<&'static str>,
+    /// Env var for normalizing `max_output_tokens`. `None` when the harness
+    /// does not have a first-class env var for this field (config-file only).
+    pub max_tokens_env_var: Option<&'static str>,
+    /// Env var for normalizing `context_limit`. `None` when not applicable.
+    pub context_limit_env_var: Option<&'static str>,
+    /// Normalized field keys that must be set for this harness to function.
+    /// Used by the config bridge to mark fields as required in the UI.
+    /// Keys match the camelCase names used in `NormalizedConfig` (e.g. "model", "provider").
+    pub required_normalized_fields: &'static [&'static str],
 }
 
 const GOOSE_AVATAR_URL: &str = "https://goose-docs.ai/img/logo_dark.png";
@@ -93,6 +107,13 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         provider_env_var: Some("GOOSE_PROVIDER"),
         provider_locked: false,
         default_env: &[("GOOSE_MODE", "auto")],
+        config_file_path: Some("~/.config/goose/config.yaml"),
+        config_file_format: Some("yaml"),
+        supports_acp_native_config: true,
+        thinking_env_var: Some("GOOSE_THINKING_EFFORT"),
+        max_tokens_env_var: Some("GOOSE_MAX_TOKENS"),
+        context_limit_env_var: Some("GOOSE_CONTEXT_LIMIT"),
+        required_normalized_fields: &["model", "provider"],
     },
     KnownAcpRuntime {
         id: "claude",
@@ -114,6 +135,13 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         provider_env_var: None,
         provider_locked: true,
         default_env: &[],
+        config_file_path: Some("~/.claude/settings.json"),
+        config_file_format: Some("json"),
+        supports_acp_native_config: false,
+        thinking_env_var: None,
+        max_tokens_env_var: None,
+        context_limit_env_var: None,
+        required_normalized_fields: &[],
     },
     KnownAcpRuntime {
         id: "codex",
@@ -121,7 +149,7 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         commands: &["codex-acp"],
         aliases: &[],
         avatar_url: CODEX_AVATAR_URL,
-        mcp_command: None,
+        mcp_command: Some("buzz-dev-mcp"),
         mcp_hooks: false,
         underlying_cli: Some("codex"),
         cli_install_commands: &["curl -fsSL https://chatgpt.com/codex/install.sh | sh"],
@@ -133,8 +161,15 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         supports_acp_model_switching: false,
         model_env_var: None,
         provider_env_var: None,
-        provider_locked: true,
+        provider_locked: false,
         default_env: &[],
+        config_file_path: Some("~/.codex/config.toml"),
+        config_file_format: Some("toml"),
+        supports_acp_native_config: false,
+        thinking_env_var: None,
+        max_tokens_env_var: None,
+        context_limit_env_var: None,
+        required_normalized_fields: &[],
     },
     KnownAcpRuntime {
         id: "buzz-agent",
@@ -156,6 +191,13 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         provider_env_var: Some("BUZZ_AGENT_PROVIDER"),
         provider_locked: false,
         default_env: &[],
+        config_file_path: None,
+        config_file_format: None,
+        supports_acp_native_config: false,
+        thinking_env_var: Some("BUZZ_AGENT_THINKING_EFFORT"),
+        max_tokens_env_var: Some("BUZZ_AGENT_MAX_OUTPUT_TOKENS"),
+        context_limit_env_var: Some("BUZZ_AGENT_MAX_CONTEXT_TOKENS"),
+        required_normalized_fields: &["model", "provider"],
     },
 ];
 
@@ -243,11 +285,9 @@ pub fn default_agent_command() -> String {
         .to_string()
 }
 
-/// Resolve the agent command (harness) for a spawn/deploy/summary. Mirrors the
-/// model resolution in `resolve_effective_prompt_model_provider`: the linked
+/// Resolve the agent command (harness) for a spawn/deploy/summary. The linked
 /// persona wins so persona harness edits propagate on the next spawn. An
-/// explicit per-instance override (`agent_command_override`) takes precedence,
-/// matching the opt-in `record.model` override pattern.
+/// explicit per-instance override (`agent_command_override`) takes precedence.
 ///
 /// Resolution order:
 ///   1. explicit override (non-empty) — a deliberate per-instance pin;
@@ -315,9 +355,9 @@ pub fn divergent_agent_command_override(
 /// distinct cases that the backend MUST tell apart:
 ///
 /// - DELIBERATE OVERRIDE (`harness_override` true): the user explicitly picked a
-///   non-persona runtime in a deploy dialog that exposes a runtime selector (e.g.
-///   `AddChannelBotDialog`, "overriding persona preferences"). This is a real pin
-///   and is preserved via `divergent_agent_command_override`.
+///   runtime command in UI that exposes a runtime selector. This is a real pin
+///   and is preserved when it differs from the command inheritance would spawn,
+///   including installed aliases such as `claude-code-acp`.
 /// - MISSING-RUNTIME FALLBACK (`harness_override` false): the persona's runtime
 ///   isn't installed locally, so `resolvePersonaRuntime` substitutes a fallback
 ///   default. This is NOT a pin — baking it would freeze the agent on the fallback
@@ -341,6 +381,15 @@ pub fn create_time_agent_command_override(
     if persona_id.is_some() && !harness_override {
         return None;
     }
+
+    if persona_id.is_some() && harness_override {
+        let picked = picked_command
+            .map(str::trim)
+            .filter(|value| !value.is_empty())?;
+        let inherited_command = effective_agent_command(persona_id, personas, None);
+        return (picked != inherited_command).then(|| picked.to_string());
+    }
+
     divergent_agent_command_override(persona_id, personas, picked_command)
 }
 
@@ -1023,6 +1072,38 @@ mod tests {
         let personas = vec![persona_with_runtime("p1", Some("goose"))];
         assert_eq!(
             create_time_agent_command_override(Some("p1"), &personas, Some("goose"), false),
+            None
+        );
+    }
+
+    #[test]
+    fn create_time_override_preserves_selected_runtime_alias() {
+        // A `claude` persona inherits the primary command `claude-agent-acp`,
+        // but discovery may select an installed alias such as `claude-code-acp`.
+        // When UI marks that create-time selection as explicit, preserve the
+        // alias so the first spawn uses a command known to be installed.
+        let personas = vec![persona_with_runtime("p1", Some("claude"))];
+        assert_eq!(
+            create_time_agent_command_override(
+                Some("p1"),
+                &personas,
+                Some("claude-code-acp"),
+                true
+            ),
+            Some("claude-code-acp".to_string())
+        );
+    }
+
+    #[test]
+    fn create_time_override_inherits_exact_persona_command() {
+        let personas = vec![persona_with_runtime("p1", Some("claude"))];
+        assert_eq!(
+            create_time_agent_command_override(
+                Some("p1"),
+                &personas,
+                Some("claude-agent-acp"),
+                true
+            ),
             None
         );
     }

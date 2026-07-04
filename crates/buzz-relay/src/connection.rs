@@ -7,21 +7,30 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::extract::ws::{Message as WsMessage, WebSocket};
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{Sink, SinkExt, StreamExt};
 use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument as _;
 use tracing::{debug, info, trace, warn};
 use uuid::Uuid;
 
 use buzz_auth::{generate_challenge, AuthContext};
+use buzz_core::tenant::TenantContext;
 use nostr::Filter;
 
 use crate::handlers;
 use crate::protocol::{ClientMessage, RelayMessage};
 use crate::state::AppState;
+use buzz_pubsub::EventTopic;
+
+/// Maximum time a new socket may hold a connection slot without completing NIP-42 auth.
+const AUTH_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Shared mutable subscription map for a single WebSocket connection.
 pub(crate) type ConnectionSubscriptions = Arc<Mutex<HashMap<String, Vec<Filter>>>>;
+
+/// Maximum outbound data frames buffered into the websocket sink before one flush.
+const MAX_WS_SEND_BATCH: usize = 64;
 
 /// NIP-42 authentication state for a single connection.
 #[derive(Debug, Clone)]
@@ -44,6 +53,10 @@ pub enum AuthState {
 pub struct ConnectionState {
     /// Unique identifier for this connection.
     pub conn_id: Uuid,
+    /// The community this connection is bound to, resolved from the connection
+    /// host at row zero (before any frame is read) and never overridable by
+    /// client-supplied input. Every handler reads tenant scope from here.
+    pub tenant: TenantContext,
     /// Remote socket address of the client.
     pub remote_addr: SocketAddr,
     /// Current NIP-42 authentication state.
@@ -102,7 +115,12 @@ impl ConnectionState {
 ///
 /// Acquires a connection semaphore permit, sends the NIP-42 AUTH challenge,
 /// then drives the send, heartbeat, and receive loops until the connection closes.
-pub async fn handle_connection(socket: WebSocket, state: Arc<AppState>, addr: SocketAddr) {
+pub async fn handle_connection(
+    socket: WebSocket,
+    state: Arc<AppState>,
+    addr: SocketAddr,
+    tenant: TenantContext,
+) {
     let permit = match state.conn_semaphore.clone().try_acquire_owned() {
         Ok(p) => p,
         Err(_) => {
@@ -125,6 +143,7 @@ pub async fn handle_connection(socket: WebSocket, state: Arc<AppState>, addr: So
 
     let conn = Arc::new(ConnectionState {
         conn_id,
+        tenant,
         remote_addr: addr,
         auth_state: RwLock::new(AuthState::Pending {
             challenge: challenge.clone(),
@@ -159,6 +178,7 @@ pub async fn handle_connection(socket: WebSocket, state: Arc<AppState>, addr: So
         conn_id,
         tx.clone(),
         cancel.clone(),
+        conn.tenant.community(),
         Arc::clone(&backpressure_count),
         subscriptions,
         state.config.slow_client_grace_limit,
@@ -177,6 +197,29 @@ pub async fn handle_connection(socket: WebSocket, state: Arc<AppState>, addr: So
         heartbeat_cancel,
     ));
 
+    let auth_timeout_conn = Arc::clone(&conn);
+    let auth_timeout_cancel = cancel.clone();
+    let auth_timeout_task = tokio::spawn(async move {
+        tokio::select! {
+            _ = tokio::time::sleep(AUTH_TIMEOUT) => {
+                let authenticated = matches!(
+                    *auth_timeout_conn.auth_state.read().await,
+                    AuthState::Authenticated(_)
+                );
+                if !authenticated {
+                    warn!(
+                        conn_id = %auth_timeout_conn.conn_id,
+                        timeout_secs = AUTH_TIMEOUT.as_secs(),
+                        "NIP-42 auth timeout — closing connection"
+                    );
+                    metrics::counter!("buzz_ws_auth_timeouts_total").increment(1);
+                    auth_timeout_cancel.cancel();
+                }
+            }
+            _ = auth_timeout_cancel.cancelled() => {}
+        }
+    });
+
     recv_loop(
         ws_recv,
         Arc::clone(&conn),
@@ -189,15 +232,24 @@ pub async fn handle_connection(socket: WebSocket, state: Arc<AppState>, addr: So
     cancel.cancel();
     let _ = send_task.await;
     let _ = heartbeat_task.await;
+    let _ = auth_timeout_task.await;
 
-    state.sub_registry.remove_connection(conn.conn_id);
+    for removed in state.sub_registry.remove_connection(conn.conn_id) {
+        state
+            .pubsub
+            .release_topic(&conn.tenant, topic_for_subscription(removed.channel_id))
+            .await;
+    }
     state.conn_manager.deregister(conn.conn_id);
     if let AuthState::Authenticated(ref auth_ctx) = *conn.auth_state.read().await {
         let remaining = state
             .conn_manager
             .connection_ids_for_pubkey(auth_ctx.pubkey.to_bytes().as_slice());
         if remaining.is_empty() {
-            let _ = state.pubsub.clear_presence(&auth_ctx.pubkey).await;
+            let _ = state
+                .pubsub
+                .clear_presence(&conn.tenant, &auth_ctx.pubkey)
+                .await;
         }
     }
     metrics::gauge!("buzz_ws_connections_active").decrement(1.0);
@@ -213,11 +265,22 @@ pub async fn handle_connection(socket: WebSocket, state: Arc<AppState>, addr: So
 /// is stalled, control frames queue in the small ctrl_rx buffer; callers
 /// treat a full control channel as terminal (Bug 7 fix).
 async fn send_loop(
-    mut ws_send: futures_util::stream::SplitSink<WebSocket, WsMessage>,
+    ws_send: futures_util::stream::SplitSink<WebSocket, WsMessage>,
+    data_rx: mpsc::Receiver<WsMessage>,
+    ctrl_rx: mpsc::Receiver<WsMessage>,
+    cancel: CancellationToken,
+) {
+    send_loop_inner(ws_send, data_rx, ctrl_rx, cancel).await;
+}
+
+async fn send_loop_inner<S>(
+    mut ws_send: S,
     mut data_rx: mpsc::Receiver<WsMessage>,
     mut ctrl_rx: mpsc::Receiver<WsMessage>,
     cancel: CancellationToken,
-) {
+) where
+    S: Sink<WsMessage> + Unpin,
+{
     loop {
         // Priority: drain all pending control frames before data.
         while let Ok(ctrl_msg) = ctrl_rx.try_recv() {
@@ -240,9 +303,28 @@ async fn send_loop(
                 }
             }
             Some(msg) = data_rx.recv() => {
-                if ws_send.send(msg).await.is_err() {
+                let mut batched = 1usize;
+                if ws_send.feed(msg).await.is_err() {
                     break;
                 }
+
+                while batched < MAX_WS_SEND_BATCH {
+                    match data_rx.try_recv() {
+                        Ok(next) => {
+                            if ws_send.feed(next).await.is_err() {
+                                return;
+                            }
+                            batched += 1;
+                        }
+                        Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                        Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => break,
+                    }
+                }
+
+                if ws_send.flush().await.is_err() {
+                    break;
+                }
+                metrics::histogram!("buzz_ws_send_batch_size").record(batched as f64);
             }
         }
     }
@@ -375,7 +457,11 @@ async fn handle_text_message(text: String, conn: Arc<ConnectionState>, state: Ar
 
     match msg {
         ClientMessage::Auth(event) => {
-            handlers::auth::handle_auth(event, Arc::clone(&conn), Arc::clone(&state)).await;
+            // Auth is synchronous in the WS loop — no span context is lost.
+            let span = tracing::info_span!("ws.auth", conn_id = %conn.conn_id);
+            handlers::auth::handle_auth(event, Arc::clone(&conn), Arc::clone(&state))
+                .instrument(span)
+                .await;
         }
         ClientMessage::Event(event) => {
             let conn = Arc::clone(&conn);
@@ -389,10 +475,21 @@ async fn handle_text_message(text: String, conn: Arc<ConnectionState>, state: Ar
                     return;
                 }
             };
-            tokio::spawn(async move {
-                handlers::event::handle_event(event, conn, state).await;
-                drop(permit);
-            });
+            // Capture the parent span BEFORE the spawn so it is propagated into
+            // the spawned future.  A bare `tokio::spawn` drops tracing context.
+            let span = tracing::info_span!(
+                "ws.event",
+                conn_id = %conn.conn_id,
+                event_id = tracing::field::Empty,
+                kind = tracing::field::Empty,
+            );
+            tokio::spawn(
+                async move {
+                    handlers::event::handle_event(event, conn, state).await;
+                    drop(permit);
+                }
+                .instrument(span),
+            );
         }
         ClientMessage::Req { sub_id, filters } => {
             let conn = Arc::clone(&conn);
@@ -406,10 +503,14 @@ async fn handle_text_message(text: String, conn: Arc<ConnectionState>, state: Ar
                     return;
                 }
             };
-            tokio::spawn(async move {
-                handlers::req::handle_req(sub_id, filters, conn, state).await;
-                drop(permit);
-            });
+            let span = tracing::info_span!("ws.req", conn_id = %conn.conn_id, sub_id = %sub_id);
+            tokio::spawn(
+                async move {
+                    handlers::req::handle_req(sub_id, filters, conn, state).await;
+                    drop(permit);
+                }
+                .instrument(span),
+            );
         }
         ClientMessage::Count { sub_id, filters } => {
             let conn = Arc::clone(&conn);
@@ -423,13 +524,179 @@ async fn handle_text_message(text: String, conn: Arc<ConnectionState>, state: Ar
                     return;
                 }
             };
-            tokio::spawn(async move {
-                handlers::count::handle_count(sub_id, filters, conn, state).await;
-                drop(permit);
-            });
+            let span = tracing::info_span!("ws.count", conn_id = %conn.conn_id, sub_id = %sub_id);
+            tokio::spawn(
+                async move {
+                    handlers::count::handle_count(sub_id, filters, conn, state).await;
+                    drop(permit);
+                }
+                .instrument(span),
+            );
         }
         ClientMessage::Close(sub_id) => {
             handlers::close::handle_close(sub_id, Arc::clone(&conn), Arc::clone(&state)).await;
         }
+    }
+}
+
+fn topic_for_subscription(channel_id: Option<Uuid>) -> EventTopic {
+    match channel_id {
+        Some(channel_id) => EventTopic::Channel(channel_id),
+        None => EventTopic::Global,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Debug, Default)]
+    struct MockSinkState {
+        messages: Vec<WsMessage>,
+        flush_count: usize,
+        fail_after_flushes: Option<usize>,
+    }
+
+    #[derive(Debug, Clone)]
+    struct MockSink {
+        state: Arc<Mutex<MockSinkState>>,
+    }
+
+    impl MockSink {
+        fn new(fail_after_flushes: Option<usize>) -> (Self, Arc<Mutex<MockSinkState>>) {
+            let state = Arc::new(Mutex::new(MockSinkState {
+                fail_after_flushes,
+                ..MockSinkState::default()
+            }));
+            (
+                Self {
+                    state: Arc::clone(&state),
+                },
+                state,
+            )
+        }
+    }
+
+    impl Sink<WsMessage> for MockSink {
+        type Error = std::io::Error;
+
+        fn poll_ready(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), Self::Error>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+
+        fn start_send(self: std::pin::Pin<&mut Self>, item: WsMessage) -> Result<(), Self::Error> {
+            self.state
+                .lock()
+                .expect("mock sink poisoned")
+                .messages
+                .push(item);
+            Ok(())
+        }
+
+        fn poll_flush(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), Self::Error>> {
+            let mut state = self.state.lock().expect("mock sink poisoned");
+            state.flush_count += 1;
+            if state
+                .fail_after_flushes
+                .is_some_and(|limit| state.flush_count >= limit)
+            {
+                return std::task::Poll::Ready(Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "mock flush failure",
+                )));
+            }
+            std::task::Poll::Ready(Ok(()))
+        }
+
+        fn poll_close(
+            self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), Self::Error>> {
+            self.poll_flush(cx)
+        }
+    }
+
+    fn text_payloads(messages: &[WsMessage]) -> Vec<String> {
+        messages
+            .iter()
+            .map(|msg| match msg {
+                WsMessage::Text(text) => text.to_string(),
+                other => panic!("unexpected websocket message in test: {other:?}"),
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn send_loop_batches_queued_data_frames_into_one_flush() {
+        let (data_tx, data_rx) = mpsc::channel(MAX_WS_SEND_BATCH);
+        let (_ctrl_tx, ctrl_rx) = mpsc::channel(1);
+        for i in 0..5 {
+            data_tx
+                .send(WsMessage::Text(format!("data-{i}").into()))
+                .await
+                .expect("queue data frame");
+        }
+
+        let (sink, state) = MockSink::new(Some(1));
+        send_loop_inner(sink, data_rx, ctrl_rx, CancellationToken::new()).await;
+
+        let state = state.lock().expect("mock sink poisoned");
+        assert_eq!(state.flush_count, 1);
+        assert_eq!(
+            text_payloads(&state.messages),
+            vec!["data-0", "data-1", "data-2", "data-3", "data-4"]
+        );
+    }
+
+    #[tokio::test]
+    async fn send_loop_batch_one_preserves_single_frame_flush_behavior() {
+        let (data_tx, data_rx) = mpsc::channel(1);
+        let (_ctrl_tx, ctrl_rx) = mpsc::channel(1);
+        data_tx
+            .send(WsMessage::Text("single".into()))
+            .await
+            .expect("queue data frame");
+
+        let (sink, state) = MockSink::new(Some(1));
+        send_loop_inner(sink, data_rx, ctrl_rx, CancellationToken::new()).await;
+
+        let state = state.lock().expect("mock sink poisoned");
+        assert_eq!(state.flush_count, 1);
+        assert_eq!(text_payloads(&state.messages), vec!["single"]);
+    }
+
+    #[tokio::test]
+    async fn send_loop_drains_control_before_batched_data_without_reordering() {
+        let (data_tx, data_rx) = mpsc::channel(MAX_WS_SEND_BATCH);
+        let (ctrl_tx, ctrl_rx) = mpsc::channel(1);
+        data_tx
+            .send(WsMessage::Text("data-0".into()))
+            .await
+            .expect("queue data frame");
+        data_tx
+            .send(WsMessage::Text("data-1".into()))
+            .await
+            .expect("queue data frame");
+        ctrl_tx
+            .send(WsMessage::Text("control".into()))
+            .await
+            .expect("queue control frame");
+
+        let (sink, state) = MockSink::new(Some(2));
+        send_loop_inner(sink, data_rx, ctrl_rx, CancellationToken::new()).await;
+
+        let state = state.lock().expect("mock sink poisoned");
+        assert_eq!(state.flush_count, 2);
+        assert_eq!(
+            text_payloads(&state.messages),
+            vec!["control", "data-0", "data-1"]
+        );
     }
 }

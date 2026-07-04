@@ -38,6 +38,7 @@ pub fn extract_auth_tag_json(event: &nostr::Event) -> Option<String> {
 /// the connection to authenticated state.
 ///
 /// Pure crypto verification — no API tokens, no JWT, no DB token lookups.
+#[tracing::instrument(skip_all, fields(event_id, conn_id))]
 pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state: Arc<AppState>) {
     let event_id_hex = event.id.to_hex();
     let (challenge, conn_id) = {
@@ -65,12 +66,18 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
         }
     };
 
+    // Record the declared span fields now that we have the values.
+    tracing::Span::current()
+        .record("event_id", event_id_hex.as_str())
+        .record("conn_id", conn_id.to_string().as_str());
+
     // Extract the NIP-OA auth tag before verification consumes the event.
     // The tag is integrity-protected by the event's Schnorr signature — if
     // tampered, NIP-42 verification will fail before we ever inspect it.
     let auth_tag_json = extract_auth_tag_json(&event);
 
-    let relay_url = state.config.relay_url.clone();
+    let relay_url =
+        crate::api::bridge::nip42_expected_relay_url(&state.config.relay_url, &conn.tenant);
     let auth_svc = Arc::clone(&state.auth);
 
     metrics::counter!("buzz_auth_attempts_total", "method" => "nip42").increment(1);
@@ -87,7 +94,11 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
             if state.config.pubkey_allowlist_enabled
                 && auth_ctx.auth_method == buzz_auth::AuthMethod::Nip42
             {
-                let allowed = match state.db.is_pubkey_allowed(pubkey.as_bytes()).await {
+                let allowed = match state
+                    .db
+                    .is_pubkey_allowed(conn.tenant.community(), pubkey.as_bytes())
+                    .await
+                {
                     Ok(v) => v,
                     Err(e) => {
                         warn!(conn_id = %conn_id, pubkey = %pubkey.to_hex(), error = %e,
@@ -112,6 +123,7 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
             // Relay membership gate — uses the shared helper with NIP-OA fallback.
             let nip_oa_owner = match crate::api::relay_members::enforce_relay_membership(
                 &state,
+                conn.tenant.community(),
                 pubkey.as_bytes(),
                 auth_tag_json.as_deref(),
             )
@@ -152,10 +164,18 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
             if let Some(owner) = nip_oa_owner {
                 // Ensure both agent and owner have users rows (BYO agents may not,
                 // and agent_owner_pubkey has a FK constraint to users.pubkey).
-                if let Err(e) = state.db.ensure_user(pubkey.as_bytes()).await {
+                if let Err(e) = state
+                    .db
+                    .ensure_user(conn.tenant.community(), pubkey.as_bytes())
+                    .await
+                {
                     warn!(conn_id = %conn_id, error = %e, "ensure_user(agent) failed during NIP-OA backfill");
                 }
-                if let Err(e) = state.db.ensure_user(owner.as_bytes()).await {
+                if let Err(e) = state
+                    .db
+                    .ensure_user(conn.tenant.community(), owner.as_bytes())
+                    .await
+                {
                     warn!(conn_id = %conn_id, error = %e, "ensure_user(owner) failed during NIP-OA backfill");
                 }
 
@@ -164,7 +184,7 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
                 // Returns Ok(true) if written, Ok(false) if already owned by someone else.
                 match state
                     .db
-                    .set_agent_owner(pubkey.as_bytes(), owner.as_bytes())
+                    .set_agent_owner(conn.tenant.community(), pubkey.as_bytes(), owner.as_bytes())
                     .await
                 {
                     Ok(true) => {
@@ -179,7 +199,11 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
                         // owner matches the existing DB record before trusting it.
                         match state
                             .db
-                            .is_agent_owner(pubkey.as_bytes(), owner.as_bytes())
+                            .is_agent_owner(
+                                conn.tenant.community(),
+                                pubkey.as_bytes(),
+                                owner.as_bytes(),
+                            )
                             .await
                         {
                             Ok(true) => {

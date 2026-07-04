@@ -68,9 +68,16 @@ export function useSidebarRelayConnectionCard(
   const hasRelayUnreachableError = errorMessage
     ? isRelayUnreachableError(errorMessage)
     : false;
+  // True when the error is an application-level issue (e.g. auth rejection)
+  // rather than a network-level relay-unreachable error. In this case, the
+  // disconnected state should NOT trigger the reconnect card — the app shows
+  // a dedicated error path instead.
+  const hasNonUnreachableError =
+    Boolean(errorMessage) && !hasRelayUnreachableError;
   const isRelayConnectionStateDegraded =
     relayConnectionState === "reconnecting" ||
-    relayConnectionState === "stalled";
+    relayConnectionState === "stalled" ||
+    (relayConnectionState === "disconnected" && !hasNonUnreachableError);
   const isRelayConnectionConnected = relayConnectionState === "connected";
   const isRelayConnectionDisconnected = relayConnectionState === "disconnected";
   const [isDismissed, setIsDismissed] = React.useState(false);
@@ -82,14 +89,18 @@ export function useSidebarRelayConnectionCard(
   const [isWindowVisible, setIsWindowVisible] =
     React.useState(isDocumentVisible);
   const hasActiveRelayUnreachableError =
-    hasRelayUnreachableError && !hasSuccess;
+    hasRelayUnreachableError && !hasSuccess && !isRelayConnectionConnected;
   const isRelayConnectionActuallyDegraded =
     hasActiveRelayUnreachableError || isRelayConnectionStateDegraded;
   const isRelayConnectionSuccess = hasSuccess && isRelayConnectionConnected;
   const canShow = isRelayConnectionActuallyDegraded || isRelayConnectionSuccess;
   const show = canShow && !isDismissed;
   const wasProblemCardVisibleRef = React.useRef(false);
-  const { isPending: isReconnectPending, reconnect } = useReconnectRelay();
+  const {
+    isPending: isReconnectPending,
+    isWaitingOnReconnectHook,
+    reconnect,
+  } = useReconnectRelay();
   const [connectivityAction, setConnectivityAction] = React.useState<
     "relay-connection" | null
   >(null);
@@ -212,6 +223,7 @@ export function useSidebarRelayConnectionCard(
     hasRelayUnreachableError,
     isRelayConnectionSuccess,
     isRelayReconnectPending,
+    isWaitingOnReconnectHook,
     onDismissRelayConnectionCard: () => {
       setRelayConnectivitySuccess(relayUrl, false);
       setIsDismissed(true);

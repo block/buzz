@@ -70,7 +70,6 @@ spec:
             - { name: BUZZ_METRICS_PORT,  value: {{ .Values.service.metricsPort | quote }} }
             - { name: RELAY_URL,          value: {{ .Values.relayUrl | quote }} }
             - { name: BUZZ_MEDIA_BASE_URL, value: {{ include "buzz.mediaBaseUrl" . | quote }} }
-            - { name: BUZZ_MEDIA_SERVER_DOMAIN, value: {{ include "buzz.relayHost" . | quote }} }
 
             # ── Behavior ─────────────────────────────────────────────
             - { name: BUZZ_MAX_CONNECTIONS,        value: {{ .Values.relay.maxConnections | quote }} }
@@ -130,16 +129,6 @@ spec:
                   name: {{ include "buzz.envSecretName" . }}
                   key: REDIS_URL
                   optional: {{ and (eq (.Values.replicaCount | int) 1) (not .Values.redis.enabled) (not .Values.externalRedis.url) }}
-            - name: TYPESENSE_URL
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "buzz.envSecretName" . }}
-                  key: TYPESENSE_URL
-            - name: TYPESENSE_API_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "buzz.envSecretName" . }}
-                  key: TYPESENSE_API_KEY
             - name: BUZZ_S3_ACCESS_KEY
               valueFrom:
                 secretKeyRef:
@@ -152,6 +141,9 @@ spec:
                   name: {{ include "buzz.envSecretName" . }}
                   key: BUZZ_S3_SECRET_KEY
                   optional: true
+
+            - name: BUZZ_HUDDLE_AUDIO_AVAILABLE
+              value: {{ include "buzz.huddleAudioAvailable" . | quote }}
 
             {{- with .Values.relay.extraEnv }}
             {{- toYaml . | nindent 12 }}
@@ -172,13 +164,13 @@ spec:
             {{- toYaml .Values.relay.resources | nindent 12 }}
 
           volumeMounts:
-            {{- if .Values.persistence.git.enabled }}
             - { name: git-repos, mountPath: {{ .Values.persistence.git.mountPath | quote }} }
-            {{- end }}
 
       volumes:
-        {{- if .Values.persistence.git.enabled }}
         - name: git-repos
+        {{- if .Values.persistence.git.enabled }}
           persistentVolumeClaim:
             claimName: {{ default (printf "%s-git" (include "buzz.fullname" .)) .Values.persistence.git.existingClaim }}
+        {{- else }}
+          emptyDir: {}
         {{- end }}

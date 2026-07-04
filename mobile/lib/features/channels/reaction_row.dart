@@ -118,7 +118,7 @@ void showReactionDetailSheet({
     context: context,
     isScrollControlled: true,
     showDragHandle: true,
-    backgroundColor: Theme.of(context).colorScheme.surfaceContainerHighest,
+    backgroundColor: context.colors.surfaceContainerHighest,
     builder: (sheetContext) =>
         _ReactionDetailSheet(reactions: reactions, initialEmoji: initialEmoji),
   );
@@ -163,7 +163,7 @@ class _ReactionDetailSheet extends HookConsumerWidget {
           // Emoji filter chips (if multiple reaction types).
           if (reactions.length > 1)
             Padding(
-              padding: const EdgeInsets.symmetric(horizontal: Grid.xs),
+              padding: const EdgeInsets.symmetric(horizontal: Grid.gutter),
               child: SingleChildScrollView(
                 scrollDirection: Axis.horizontal,
                 child: Row(
@@ -194,7 +194,7 @@ class _ReactionDetailSheet extends HookConsumerWidget {
           // Header: emoji + shortcode.
           Padding(
             padding: const EdgeInsets.symmetric(
-              horizontal: Grid.xs,
+              horizontal: Grid.gutter,
               vertical: Grid.half,
             ),
             child: Row(

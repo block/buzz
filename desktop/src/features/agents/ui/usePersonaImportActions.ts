@@ -8,6 +8,7 @@ import {
   type ParsedPersonaPreview,
 } from "@/shared/api/tauriPersonas";
 import type { AgentPersona } from "@/shared/api/types";
+import { resolveManagedAgentAvatarUrl } from "./managedAgentAvatar";
 import { buildPersonaImportPlan } from "./personaImportPlan";
 import { buildPersonaImportUpdateInput } from "./personaImportUpdateInput";
 import {
@@ -115,6 +116,13 @@ export function usePersonaImportActions(
         preview,
         selectedFields,
       });
+      if (selectedFields.includes("avatarUrl")) {
+        updateInput.avatarUrl = await resolveManagedAgentAvatarUrl(
+          updateInput.avatarUrl,
+          undefined,
+          existing.avatarUrl,
+        );
+      }
 
       await updatePersonaApi(updateInput);
 

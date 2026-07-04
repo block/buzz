@@ -182,7 +182,12 @@ class ForumPostCard extends ConsumerWidget {
       showDragHandle: true,
       builder: (sheetContext) => SafeArea(
         child: Padding(
-          padding: const EdgeInsets.fromLTRB(Grid.xs, 0, Grid.xs, Grid.xs),
+          padding: const EdgeInsets.fromLTRB(
+            Grid.gutter,
+            0,
+            Grid.gutter,
+            Grid.xs,
+          ),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
@@ -198,13 +203,11 @@ class ForumPostCard extends ConsumerWidget {
                 ListTile(
                   leading: Icon(
                     LucideIcons.trash2,
-                    color: Theme.of(sheetContext).colorScheme.error,
+                    color: sheetContext.colors.error,
                   ),
                   title: Text(
                     'Delete post',
-                    style: TextStyle(
-                      color: Theme.of(sheetContext).colorScheme.error,
-                    ),
+                    style: TextStyle(color: sheetContext.colors.error),
                   ),
                   onTap: () {
                     Navigator.of(sheetContext).pop();
@@ -235,7 +238,7 @@ class ForumPostCard extends ConsumerWidget {
               onDelete?.call(post.eventId);
             },
             style: FilledButton.styleFrom(
-              backgroundColor: Theme.of(dialogContext).colorScheme.error,
+              backgroundColor: dialogContext.colors.error,
             ),
             child: const Text('Delete'),
           ),

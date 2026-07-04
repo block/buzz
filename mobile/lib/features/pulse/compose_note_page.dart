@@ -70,7 +70,7 @@ class ComposeNotePage extends HookConsumerWidget {
             child: FilledButton(
               onPressed: hasText && !isSending.value ? submit : null,
               style: FilledButton.styleFrom(
-                padding: const EdgeInsets.symmetric(horizontal: Grid.xs),
+                padding: const EdgeInsets.symmetric(horizontal: Grid.gutter),
                 minimumSize: const Size(0, 36),
                 shape: const StadiumBorder(),
               ),
@@ -166,7 +166,7 @@ class _ReplyContext extends ConsumerWidget {
     final displayName = profile?.label ?? _shortPubkey(pubkey);
 
     return Padding(
-      padding: const EdgeInsets.fromLTRB(Grid.xs, Grid.xs, Grid.xs, 0),
+      padding: const EdgeInsets.fromLTRB(Grid.gutter, Grid.xs, Grid.gutter, 0),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [

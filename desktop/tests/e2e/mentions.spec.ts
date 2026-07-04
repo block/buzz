@@ -20,6 +20,8 @@ const REUSABLE_PERSONA_AGENT_PUBKEY =
   "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
 const ALLOWLIST_RELAY_AGENT_PUBKEY =
   "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+const DELAYED_RELAY_AGENT_PUBKEY =
+  "9999999999999999999999999999999999999999999999999999999999999999";
 const CASEY_PROFILE_PUBKEY =
   "1111111111111111111111111111111111111111111111111111111111111111";
 const PROFILE_ONLY_AGENT_PUBKEY =
@@ -42,6 +44,21 @@ async function readCommandLog(page: import("@playwright/test").Page) {
   });
 }
 
+async function readCommandPayloadLog(page: import("@playwright/test").Page) {
+  return page.evaluate(() => {
+    return (
+      (
+        window as Window & {
+          __BUZZ_E2E_COMMAND_LOG__?: Array<{
+            command: string;
+            payload: unknown;
+          }>;
+        }
+      ).__BUZZ_E2E_COMMAND_LOG__ ?? []
+    );
+  });
+}
+
 function commandCount(commands: string[], command: string) {
   return commands.filter((entry) => entry === command).length;
 }
@@ -51,17 +68,19 @@ async function emitMockMessage(
   channelName: string,
   content: string,
   options?: {
+    mentionPubkeys?: string[];
     parentEventId?: string;
     pubkey?: string;
   },
 ) {
   const event = await page.evaluate(
-    ({ ch, msg, parentEventId, pubkey }) => {
+    ({ ch, mentionPubkeys, msg, parentEventId, pubkey }) => {
       return (
         window as Window & {
           __BUZZ_E2E_EMIT_MOCK_MESSAGE__?: (input: {
             channelName: string;
             content: string;
+            mentionPubkeys?: string[];
             parentEventId?: string | null;
             pubkey?: string;
           }) => { id: string; created_at: number; pubkey: string };
@@ -69,12 +88,14 @@ async function emitMockMessage(
       ).__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
         channelName: ch,
         content: msg,
+        mentionPubkeys,
         parentEventId: parentEventId ?? undefined,
         pubkey: pubkey ?? undefined,
       });
     },
     {
       ch: channelName,
+      mentionPubkeys: options?.mentionPubkeys,
       msg: content,
       parentEventId: options?.parentEventId ?? null,
       pubkey: options?.pubkey ?? TEST_IDENTITIES.alice.pubkey,
@@ -124,7 +145,22 @@ async function waitForTimelineSettled(page: import("@playwright/test").Page) {
   await expect(page.locator("[data-render-pending]")).toHaveCount(0);
 }
 
-test("@ trigger shows unified autocomplete with agents first", async ({
+async function expectAgentProfileMessageOnly(
+  profilePopover: import("@playwright/test").Locator,
+  pubkey: string,
+) {
+  await expect(
+    profilePopover.getByTestId(`user-profile-popover-message-${pubkey}`),
+  ).toBeVisible();
+  await expect(
+    profilePopover.getByTestId(`user-profile-popover-wave-${pubkey}`),
+  ).toHaveCount(0);
+  await expect(
+    profilePopover.getByTestId(`user-profile-popover-huddle-${pubkey}`),
+  ).toHaveCount(0);
+}
+
+test("@ trigger prioritizes channel members before runnable personas and other agents", async ({
   page,
 }) => {
   await installMockBridge(page, {
@@ -169,10 +205,9 @@ test("@ trigger shows unified autocomplete with agents first", async ({
   expect(bobIndex).toBeGreaterThanOrEqual(0);
   expect(charlieIndex).toBeGreaterThanOrEqual(0);
   expect(outsiderIndex).toEqual(-1);
-  expect(fizzIndex).toBeLessThan(aliceIndex);
-  expect(fizzIndex).toBeLessThan(bobIndex);
-  expect(aliceIndex).toBeLessThan(charlieIndex);
-  expect(bobIndex).toBeLessThan(charlieIndex);
+  expect(aliceIndex).toBeLessThan(fizzIndex);
+  expect(bobIndex).toBeLessThan(fizzIndex);
+  expect(fizzIndex).toBeLessThan(charlieIndex);
 });
 
 test("thread autocomplete keeps multiple long names readable in a narrow panel", async ({
@@ -238,7 +273,7 @@ test("thread autocomplete keeps multiple long names readable in a narrow panel",
       row.getByTestId("mention-suggestion-avatar-fallback"),
     ).toBeVisible();
     await expect(row.getByText("agent")).toBeVisible();
-    await expect(row.getByText(/owned by npub1mock/)).toBeVisible();
+    await expect(row.getByText("owned by you")).toBeVisible();
 
     await expect(row.getByText(name)).not.toHaveCSS(
       "text-overflow",
@@ -282,6 +317,44 @@ test("autocomplete searches global non-member people from the first typed charac
   const tessaRow = dropdown.locator("button", { hasText: "tessa" });
   await expect(tessaRow).toBeVisible();
   await expect(tessaRow.getByText("not in channel")).toBeVisible();
+});
+
+test("mention autocomplete pages global people search beyond the first 50 results", async ({
+  page,
+}) => {
+  const searchProfiles = Array.from({ length: 55 }, (_, index) => ({
+    pubkey: `${(index + 1).toString(16).padStart(64, "0")}`,
+    displayName: `Alex ${String(index + 1).padStart(2, "0")}`,
+  }));
+  await installMockBridge(page, { searchProfiles });
+
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  await page.getByTestId("message-input").fill("@Alex");
+
+  const dropdown = autocomplete(page);
+  await expect(dropdown.locator("button")).toHaveCount(50);
+  await dropdown.evaluate((node) => node.scrollTo(0, node.scrollHeight));
+
+  await expect(dropdown.locator("button")).toHaveCount(55);
+  await expect(dropdown.getByText("Alex 55")).toBeVisible();
+  await expect(dropdown.getByText("not in channel").last()).toBeVisible();
+
+  const searchCalls = (await readCommandPayloadLog(page)).filter(
+    (entry) => entry.command === "search_users",
+  );
+  expect(searchCalls).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        payload: expect.objectContaining({ cursor: null, limit: 50 }),
+      }),
+      expect.objectContaining({
+        payload: expect.objectContaining({ cursor: "2", limit: 50 }),
+      }),
+    ]),
+  );
 });
 
 test("selecting a person mention inserts @Name into input", async ({
@@ -872,6 +945,133 @@ test("system add and remove rows use agent mention styling for managed agents", 
   ).toHaveText("portal");
 });
 
+test("system agent profile only exposes message action", async ({ page }) => {
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await waitForMockLiveSubscription(page, "general", SYSTEM_MESSAGE_KIND);
+
+  await page.evaluate(
+    ({ actorPubkey, kind, targetPubkey }) => {
+      window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+        channelName: "general",
+        content: JSON.stringify({
+          type: "member_joined",
+          actor: actorPubkey,
+          target: targetPubkey,
+        }),
+        kind,
+      });
+    },
+    {
+      actorPubkey: TEST_IDENTITIES.tyler.pubkey,
+      kind: SYSTEM_MESSAGE_KIND,
+      targetPubkey: PROFILE_ONLY_AGENT_PUBKEY,
+    },
+  );
+  await waitForTimelineSettled(page);
+
+  const joinedRow = page
+    .getByTestId("system-message-row")
+    .filter({ hasText: "added mira to the channel" });
+  const agentChip = joinedRow.locator(
+    "[data-mention].agent-mention-highlight",
+    {
+      hasText: "mira",
+    },
+  );
+  await expect(agentChip).toHaveText("mira");
+  await agentChip.hover();
+
+  const profilePopover = page.locator(
+    '[data-testid="user-profile-popover"][data-state="open"]',
+  );
+  await expect(profilePopover).toBeVisible();
+  await expectAgentProfileMessageOnly(
+    profilePopover,
+    PROFILE_ONLY_AGENT_PUBKEY,
+  );
+});
+
+test("system agent avatar only exposes message action", async ({ page }) => {
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await waitForMockLiveSubscription(page, "general", SYSTEM_MESSAGE_KIND);
+
+  await page.evaluate(
+    ({ kind, targetPubkey }) => {
+      window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+        channelName: "general",
+        content: JSON.stringify({
+          type: "member_joined",
+          actor: targetPubkey,
+          target: targetPubkey,
+        }),
+        kind,
+      });
+    },
+    {
+      kind: SYSTEM_MESSAGE_KIND,
+      targetPubkey: PROFILE_ONLY_AGENT_PUBKEY,
+    },
+  );
+  await waitForTimelineSettled(page);
+
+  const joinedRow = page
+    .getByTestId("system-message-row")
+    .filter({ hasText: "mira" })
+    .filter({ hasText: "joined the channel" });
+  await joinedRow.getByTestId("system-message-avatar").hover();
+
+  const profilePopover = page.locator(
+    '[data-testid="user-profile-popover"][data-state="open"]',
+  );
+  await expect(profilePopover).toBeVisible();
+  await expectAgentProfileMessageOnly(
+    profilePopover,
+    PROFILE_ONLY_AGENT_PUBKEY,
+  );
+});
+
+test("profile-only agent author popover only exposes message action", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    searchProfiles: [
+      {
+        pubkey: PROFILE_ONLY_AGENT_PUBKEY,
+        displayName: "mira",
+        isAgent: true,
+      },
+    ],
+  });
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await waitForMockLiveSubscription(page, "general");
+
+  await emitMockMessage(page, "general", "Mira status update.", {
+    pubkey: PROFILE_ONLY_AGENT_PUBKEY,
+  });
+  await waitForTimelineSettled(page);
+
+  const messageRow = page
+    .getByTestId("message-row")
+    .filter({ hasText: "Mira status update." })
+    .first();
+  await messageRow.locator("button").first().hover();
+
+  const profilePopover = page.locator(
+    '[data-testid="user-profile-popover"][data-state="open"]',
+  );
+  await expect(profilePopover).toBeVisible();
+  await expectAgentProfileMessageOnly(
+    profilePopover,
+    PROFILE_ONLY_AGENT_PUBKEY,
+  );
+});
+
 test("system member-joined rows render the joined person as a mention chip", async ({
   page,
 }) => {
@@ -1170,4 +1370,179 @@ test("hovering avatar opens popover, clicking opens profile panel", async ({
   await avatarButton.click();
   await expect(profilePopover).toHaveCount(0);
   await expect(page.getByTestId("user-profile-panel")).toBeVisible();
+});
+
+test("bot profile only exposes message action", async ({ page }) => {
+  await page.goto("/");
+  await page.getByTestId("channel-agents").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("agents");
+
+  const charlieMessage = page
+    .getByTestId("message-row")
+    .filter({ hasText: "Indexing the channel catalog now." })
+    .first();
+  await charlieMessage.locator("button").first().hover();
+
+  const profilePopover = page.locator(
+    '[data-testid="user-profile-popover"][data-state="open"]',
+  );
+  await expect(profilePopover).toBeVisible();
+  await expect(profilePopover.getByText("Codex")).toBeVisible();
+  await expectAgentProfileMessageOnly(
+    profilePopover,
+    TEST_IDENTITIES.charlie.pubkey,
+  );
+});
+
+test("agent mention profile only exposes message action", async ({ page }) => {
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await waitForMockLiveSubscription(page, "general");
+
+  await emitMockMessage(page, "general", "Can @charlie take this?", {
+    mentionPubkeys: [TEST_IDENTITIES.charlie.pubkey],
+  });
+  await waitForTimelineSettled(page);
+
+  const mentionChip = page
+    .getByTestId("message-row")
+    .filter({ hasText: "Can charlie take this?" })
+    .locator("[data-mention].agent-mention-highlight", { hasText: "charlie" });
+  await expect(mentionChip).toBeVisible();
+  await mentionChip.hover();
+
+  const profilePopover = page.locator(
+    '[data-testid="user-profile-popover"][data-state="open"]',
+  );
+  await expect(profilePopover).toBeVisible();
+  await expectAgentProfileMessageOnly(
+    profilePopover,
+    TEST_IDENTITIES.charlie.pubkey,
+  );
+});
+
+test("profile popover wave sends a direct message for a human profile", async ({
+  page,
+}) => {
+  await installMockBridge(page, { sendMessageDelayMs: 2_500 });
+
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await waitForMockLiveSubscription(page, "general");
+
+  await emitMockMessage(page, "general", "Bob says hello.", {
+    pubkey: TEST_IDENTITIES.bob.pubkey,
+  });
+  await waitForTimelineSettled(page);
+
+  const bobMessage = page
+    .getByTestId("message-row")
+    .filter({ hasText: "Bob says hello." })
+    .first();
+  await bobMessage.locator("button").first().hover();
+
+  const profilePopover = page.locator(
+    '[data-testid="user-profile-popover"][data-state="open"]',
+  );
+  await expect(profilePopover).toBeVisible();
+  await expect(
+    profilePopover.getByTestId(
+      `user-profile-popover-message-${TEST_IDENTITIES.bob.pubkey}`,
+    ),
+  ).toBeVisible();
+  await expect(
+    profilePopover.getByTestId(
+      `user-profile-popover-huddle-${TEST_IDENTITIES.bob.pubkey}`,
+    ),
+  ).toBeVisible();
+  await expect(
+    profilePopover.getByTestId(
+      `user-profile-popover-wave-${TEST_IDENTITIES.bob.pubkey}`,
+    ),
+  ).toBeVisible();
+  await profilePopover
+    .getByTestId(`user-profile-popover-wave-${TEST_IDENTITIES.bob.pubkey}`)
+    .click();
+
+  await expect(page.getByTestId("chat-title")).toHaveText("bob-tyler");
+  const waveAttachment = page.getByTestId("message-wave-attachment");
+  await expect(waveAttachment).toBeVisible({ timeout: 1_500 });
+  await expect(page.getByText("Sending")).toHaveCount(0, { timeout: 4_000 });
+  await waitForTimelineSettled(page);
+  await expect(waveAttachment).toContainText("👋");
+  await expect(waveAttachment).toContainText("npub1mock... waved at you.");
+  await expect(waveAttachment).toContainText("Start a huddle to talk to them.");
+  await expect(
+    waveAttachment.getByRole("button", { name: "Start huddle" }),
+  ).toBeVisible();
+
+  const commandLog = await readCommandPayloadLog(page);
+  expect(commandLog).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        command: "send_channel_message",
+        payload: expect.objectContaining({
+          content: expect.stringContaining("npub1mock... waved at you."),
+        }),
+      }),
+    ]),
+  );
+  expect(commandLog).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        command: "send_channel_message",
+        payload: expect.objectContaining({
+          content: expect.stringContaining("<!-- buzz:wave:v1 -->"),
+        }),
+      }),
+    ]),
+  );
+});
+
+test("delayed agent profile keeps wave and huddle hidden while classifying", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    agentListDelayMs: 5_000,
+    relayAgents: [
+      {
+        pubkey: DELAYED_RELAY_AGENT_PUBKEY,
+        name: "orbit",
+        channelNames: ["general"],
+      },
+    ],
+    searchProfiles: [
+      {
+        pubkey: DELAYED_RELAY_AGENT_PUBKEY,
+        displayName: "orbit",
+      },
+    ],
+  });
+
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await waitForMockLiveSubscription(page, "general");
+
+  await emitMockMessage(page, "general", "Orbit checking in.", {
+    pubkey: DELAYED_RELAY_AGENT_PUBKEY,
+  });
+  await waitForTimelineSettled(page);
+
+  const orbitMessage = page
+    .getByTestId("message-row")
+    .filter({ hasText: "Orbit checking in." })
+    .first();
+  await orbitMessage.locator("button").first().hover();
+
+  const profilePopover = page.locator(
+    '[data-testid="user-profile-popover"][data-state="open"]',
+  );
+  await expect(profilePopover).toBeVisible();
+  await expectAgentProfileMessageOnly(
+    profilePopover,
+    DELAYED_RELAY_AGENT_PUBKEY,
+  );
 });

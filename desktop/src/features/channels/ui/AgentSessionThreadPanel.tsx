@@ -1,36 +1,62 @@
-import { ArrowLeft, CircleDot, Octagon, X } from "lucide-react";
+import * as React from "react";
+import {
+  Clock3,
+  Octagon,
+  Settings,
+  Sparkles,
+  TerminalSquare,
+} from "lucide-react";
 import { toast } from "sonner";
 
-import { ManagedAgentSessionPanel } from "@/features/agents/ui/ManagedAgentSessionPanel";
 import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlActions";
+import { scopeByChannel } from "@/features/agents/ui/agentSessionPanelLayout";
+import type {
+  ObserverEvent,
+  TranscriptItem,
+} from "@/features/agents/ui/agentSessionTypes";
+import { ManagedAgentSessionPanel } from "@/features/agents/ui/ManagedAgentSessionPanel";
+import {
+  useAgentTranscript,
+  useObserverEvents,
+} from "@/features/agents/ui/useObserverEvents";
 import { cancelManagedAgentTurn } from "@/shared/api/agentControl";
 import type { Channel } from "@/shared/api/types";
 import { useEscapeKey } from "@/shared/hooks/useEscapeKey";
 import { useIsThreadPanelOverlay } from "@/shared/hooks/use-mobile";
 import { useStickToBottom } from "@/shared/hooks/useStickToBottom";
-import { cn } from "@/shared/lib/cn";
+import { useNow } from "@/shared/lib/useNow";
+import { AuxiliaryPanel } from "@/shared/layout/AuxiliaryPanel";
+import { AuxiliaryPanelBody } from "@/shared/layout/AuxiliaryPanel";
 import {
   AuxiliaryPanelHeader,
+  AuxiliaryPanelHeaderActions,
   AuxiliaryPanelHeaderGroup,
-  AuxiliaryPanelTitle,
-  auxiliaryPanelContentPaddingClass,
-} from "@/shared/layout/AuxiliaryPanelHeader";
-import { Badge } from "@/shared/ui/badge";
+  AuxiliaryPanelHeaderTitleBlock,
+} from "@/shared/layout/AuxiliaryPanel";
 import { Button } from "@/shared/ui/button";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import {
-  OverlayPanelBackdrop,
-  PANEL_ENTER_BASE_CLASS,
-  PANEL_OVERLAY_CLASS,
-  PANEL_SINGLE_COLUMN_HEADER_LAYER_CLASS,
-} from "@/shared/ui/OverlayPanelBackdrop";
-import { THREAD_PANEL_MIN_WIDTH_PX } from "@/shared/hooks/useThreadPanelWidth";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/shared/ui/dropdown-menu";
+import { Switch } from "@/shared/ui/switch";
+import {
+  setTranscriptAnimationEnabled,
+  useTranscriptAnimationEnabled,
+} from "@/features/agents/ui/transcriptAnimationPreference";
+import {
+  setTranscriptTimestampsEnabled,
+  useTranscriptTimestampsEnabled,
+} from "@/features/agents/ui/transcriptTimestampPreference";
 import type { ChannelAgentSessionAgent } from "./useChannelAgentSessions";
 
 type AgentSessionThreadPanelProps = {
   agent: ChannelAgentSessionAgent;
   channel: Channel | null;
+  channelId?: string | null;
   canInterruptTurn: boolean;
   isWorking: boolean;
   layout?: "standalone" | "split";
@@ -39,12 +65,14 @@ type AgentSessionThreadPanelProps = {
   onBackToProfile: () => void;
   onClose: () => void;
   widthPx: number;
+  transparentChrome?: boolean;
 };
 
 export function AgentSessionThreadPanel({
   agent,
   canInterruptTurn,
   channel,
+  channelId = null,
   isWorking,
   layout = "standalone",
   isSinglePanelView = false,
@@ -52,15 +80,54 @@ export function AgentSessionThreadPanel({
   onBackToProfile,
   onClose,
   widthPx,
+  transparentChrome = false,
 }: AgentSessionThreadPanelProps) {
   const isLive = isManagedAgentActive(agent);
   const isOverlay = useIsThreadPanelOverlay();
-  const isFloatingOverlay = isOverlay && !isSinglePanelView;
-  const isSplitLayout = layout === "split";
+  const canStopCurrentTurn = isWorking && canInterruptTurn;
   useEscapeKey(onClose, isOverlay || isSinglePanelView);
 
   const { ref: scrollRef, onScroll } = useStickToBottom<HTMLDivElement>();
-
+  const sessionChannelId = channelId ?? channel?.id ?? null;
+  const now = useNow(1000);
+  const { events } = useObserverEvents(isLive, agent.pubkey);
+  const transcript = useAgentTranscript(isLive, agent.pubkey);
+  const scopedEvents = React.useMemo(
+    () => scopeByChannel(events, sessionChannelId),
+    [events, sessionChannelId],
+  );
+  const scopedTranscript = React.useMemo(
+    () => scopeByChannel(transcript, sessionChannelId),
+    [sessionChannelId, transcript],
+  );
+  const latestActivityAt = React.useMemo(
+    () =>
+      getLatestActivityTimestamp({
+        events: scopedEvents,
+        transcript: scopedTranscript,
+      }),
+    [scopedEvents, scopedTranscript],
+  );
+  const lastUpdatedLabel = formatLastUpdatedLabel(latestActivityAt, now);
+  const lastUpdatedTitle =
+    latestActivityAt === null
+      ? undefined
+      : `Last updated ${new Date(latestActivityAt).toLocaleString()}`;
+  const rawFeedScopeKey = `${agent.pubkey}:${sessionChannelId ?? "all"}`;
+  const [rawFeedState, setRawFeedState] = React.useState(() => ({
+    scopeKey: rawFeedScopeKey,
+    show: false,
+  }));
+  const showRawFeed =
+    rawFeedState.scopeKey === rawFeedScopeKey && rawFeedState.show;
+  const handleRawFeedChange = React.useCallback(
+    (checked: boolean) => {
+      setRawFeedState({ scopeKey: rawFeedScopeKey, show: checked });
+    },
+    [rawFeedScopeKey],
+  );
+  const animateActivity = useTranscriptAnimationEnabled();
+  const showTimestamps = useTranscriptTimestampsEnabled();
   async function handleInterruptTurn() {
     if (!channel) {
       return;
@@ -81,144 +148,279 @@ export function AgentSessionThreadPanel({
   }
 
   const agentHeaderActions = (
-    <div className="ml-auto flex shrink-0 items-center gap-2">
-      {isLive && isWorking ? (
-        <Badge className="shrink-0 gap-1 px-2 py-0 text-2xs" variant="default">
-          <CircleDot className="h-2.5 w-2.5" />
-          Live
-        </Badge>
-      ) : null}
-      {isLive && isWorking ? (
-        <Tooltip>
-          <TooltipTrigger asChild>
+    <AuxiliaryPanelHeaderActions>
+      {isLive ? (
+        <DropdownMenu modal={false}>
+          <DropdownMenuTrigger asChild>
             <Button
-              aria-label="Stop current agent turn"
-              className="h-6 px-2 text-2xs"
+              aria-label="Open activity settings"
+              className="relative"
+              data-testid="agent-session-settings-menu-trigger"
+              size="icon"
+              title="Activity settings"
+              type="button"
+              variant="ghost"
+            >
+              <Settings />
+              {canStopCurrentTurn ? (
+                <span
+                  aria-hidden="true"
+                  className="absolute right-1 bottom-1 h-2 w-2 rounded-full bg-primary ring-2 ring-background"
+                  data-testid="agent-session-settings-live-badge"
+                />
+              ) : null}
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent
+            align="end"
+            className="min-w-56"
+            onCloseAutoFocus={(event) => event.preventDefault()}
+          >
+            <DropdownMenuItem
+              className="items-start gap-3"
+              data-testid="agent-session-toggle-raw-feed"
+              onSelect={(event) => {
+                event.preventDefault();
+                handleRawFeedChange(!showRawFeed);
+              }}
+              title={
+                showRawFeed
+                  ? "Hide raw JSON-RPC payloads."
+                  : channel
+                    ? "Show raw JSON-RPC payloads for this channel."
+                    : "Show raw JSON-RPC payloads for this agent."
+              }
+            >
+              <span className="min-w-0 flex-1">
+                <span className="flex items-center gap-2 text-sm font-medium">
+                  <TerminalSquare className="h-4 w-4 text-muted-foreground" />
+                  Raw
+                </span>
+                <span className="mt-0.5 block text-xs text-muted-foreground">
+                  Show raw JSON-RPC activity.
+                </span>
+              </span>
+              <Switch
+                aria-hidden="true"
+                checked={showRawFeed}
+                className="pointer-events-none mt-0.5"
+                tabIndex={-1}
+              />
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              className="items-start gap-3"
+              data-testid="agent-session-toggle-animate-activity"
+              disabled={showRawFeed}
+              onSelect={(event) => {
+                event.preventDefault();
+                setTranscriptAnimationEnabled(!animateActivity);
+              }}
+              title={
+                showRawFeed
+                  ? "Raw activity rows don't animate in."
+                  : animateActivity
+                    ? "Stop animating new activity rows."
+                    : "Animate new activity rows as they arrive."
+              }
+            >
+              <span className="min-w-0 flex-1">
+                <span className="flex items-center gap-2 text-sm font-medium">
+                  <Sparkles className="h-4 w-4 text-muted-foreground" />
+                  Show Animations
+                </span>
+              </span>
+              <Switch
+                aria-hidden="true"
+                checked={animateActivity && !showRawFeed}
+                className="pointer-events-none mt-0.5"
+                tabIndex={-1}
+              />
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              className="items-start gap-3"
+              data-testid="agent-session-toggle-show-timestamps"
+              onSelect={(event) => {
+                event.preventDefault();
+                setTranscriptTimestampsEnabled(!showTimestamps);
+              }}
+              title={
+                showTimestamps
+                  ? "Hide per-row activity timestamps."
+                  : "Show a timestamp under each activity row."
+              }
+            >
+              <span className="min-w-0 flex-1">
+                <span className="flex items-center gap-2 text-sm font-medium">
+                  <Clock3 className="h-4 w-4 text-muted-foreground" />
+                  Show Timestamps
+                </span>
+              </span>
+              <Switch
+                aria-hidden="true"
+                checked={showTimestamps}
+                className="pointer-events-none mt-0.5"
+                tabIndex={-1}
+              />
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem
+              className="items-start gap-3"
               data-testid="agent-session-stop-turn"
-              disabled={!canInterruptTurn}
-              onClick={() => {
+              disabled={!canStopCurrentTurn}
+              onSelect={() => {
                 void handleInterruptTurn();
               }}
-              size="sm"
-              type="button"
-              variant="outline"
+              title={
+                canStopCurrentTurn
+                  ? "Interrupt the current ACP turn without stopping the agent process."
+                  : isWorking
+                    ? "Only locally managed agents can be interrupted from this workspace."
+                    : "Available while the agent is working."
+              }
             >
-              <Octagon className="h-4 w-4" />
-              Stop
-            </Button>
-          </TooltipTrigger>
-          <TooltipContent side="bottom" className="text-xs">
-            {canInterruptTurn
-              ? "Interrupt the current ACP turn without stopping the agent process."
-              : "This agent cannot be interrupted from this workspace."}
-          </TooltipContent>
-        </Tooltip>
+              <Octagon className="mt-0.5 h-4 w-4 text-muted-foreground" />
+              <span className="min-w-0 flex-1">
+                <span className="block text-sm font-medium">
+                  Stop current turn
+                </span>
+                {!canStopCurrentTurn ? (
+                  <span className="mt-0.5 block text-xs text-muted-foreground">
+                    {isWorking
+                      ? "Only available for locally managed agents."
+                      : "Available while the agent is working."}
+                  </span>
+                ) : null}
+              </span>
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
       ) : null}
-      <Button
-        aria-label="Close activity panel"
-        data-testid="agent-session-close"
-        onClick={onClose}
-        size="icon"
-        type="button"
-        variant="ghost"
-      >
-        <X />
-      </Button>
-    </div>
+    </AuxiliaryPanelHeaderActions>
   );
 
   const agentHeaderContent = (
     <>
-      <AuxiliaryPanelHeaderGroup>
-        <Button
-          aria-label="Back from activity"
-          className="shrink-0"
-          data-testid="agent-session-back"
-          onClick={onBackToProfile}
-          size="icon"
-          type="button"
-          variant="outline"
-        >
-          <ArrowLeft />
-        </Button>
-        <AuxiliaryPanelTitle>Activity</AuxiliaryPanelTitle>
+      <AuxiliaryPanelHeaderGroup
+        align="start"
+        backButtonAriaLabel="Back from activity"
+        backButtonTestId="agent-session-back"
+        onBack={onBackToProfile}
+      >
+        <AuxiliaryPanelHeaderTitleBlock
+          subtitle={lastUpdatedLabel}
+          subtitleTitle={lastUpdatedTitle}
+          title={showRawFeed ? "Raw ACP Activity" : "Activity"}
+        />
       </AuxiliaryPanelHeaderGroup>
       {agentHeaderActions}
     </>
   );
 
-  const agentBody = (
-    <div
-      ref={scrollRef}
-      onScroll={onScroll}
-      className={cn(
-        "min-h-0 flex-1 overflow-y-auto px-3 pb-4",
-        isSplitLayout && auxiliaryPanelContentPaddingClass,
-        !isSplitLayout && (isFloatingOverlay ? "pt-4" : "pt-[3.25rem]"),
-      )}
-    >
-      <ManagedAgentSessionPanel
-        agent={agent}
-        channelId={channel?.id ?? null}
-        className="border-0 bg-transparent p-0 shadow-none"
-        emptyDescription={
-          channel
-            ? `Mention ${agent.name} in the channel to see its work here.`
-            : `Mention ${agent.name} in any channel to see its work here.`
-        }
-        profiles={profiles}
-        showHeader={false}
-        showRaw={false}
-      />
-    </div>
-  );
-
-  if (isSplitLayout) {
-    return (
-      <div className="flex min-h-0 flex-1 flex-col">
-        <AuxiliaryPanelHeader>{agentHeaderContent}</AuxiliaryPanelHeader>
-        {agentBody}
-      </div>
-    );
-  }
-
   return (
-    <>
-      {isFloatingOverlay && <OverlayPanelBackdrop onClose={onClose} />}
-      <aside
-        className={cn(
-          PANEL_ENTER_BASE_CLASS,
-          isSinglePanelView && "border-l-0",
-          isFloatingOverlay && PANEL_OVERLAY_CLASS,
-        )}
-        data-testid="agent-session-thread-panel"
-        style={{
-          width: isSinglePanelView
-            ? "100%"
-            : `min(${widthPx}px, calc(100% - ${THREAD_PANEL_MIN_WIDTH_PX}px))`,
-        }}
-      >
-        {!isOverlay ? (
-          <div
-            aria-hidden="true"
-            className="pointer-events-none absolute inset-x-0 top-0 z-40 h-[3.25rem] bg-background/75 backdrop-blur-md supports-[backdrop-filter]:bg-background/65 dark:bg-background/45 dark:backdrop-blur-xl dark:supports-[backdrop-filter]:bg-background/35"
-          />
-        ) : null}
-
-        <div
-          className={cn(
-            "flex cursor-default select-none items-center",
-            isSinglePanelView
-              ? `relative ${PANEL_SINGLE_COLUMN_HEADER_LAYER_CLASS} -mb-[3.25rem] min-h-[3.25rem] shrink-0 gap-2.5 bg-background/80 px-4 py-2 backdrop-blur-md supports-[backdrop-filter]:bg-background/70 sm:pl-6 sm:pr-3 dark:bg-background/70 dark:backdrop-blur-xl dark:supports-[backdrop-filter]:bg-background/55`
-              : "relative z-50 min-h-[3.25rem] shrink-0 gap-3 bg-background/80 px-5 py-2 backdrop-blur-md supports-[backdrop-filter]:bg-background/70 dark:bg-background/70 dark:backdrop-blur-xl dark:supports-[backdrop-filter]:bg-background/55",
-          )}
-          data-tauri-drag-region
+    <AuxiliaryPanel
+      isSinglePanelView={isSinglePanelView}
+      layout={layout}
+      onClose={onClose}
+      testId="agent-session-thread-panel"
+      transparentChrome={transparentChrome}
+      widthPx={widthPx}
+      header={
+        <AuxiliaryPanelHeader
+          backdrop={layout !== "split" && !isOverlay}
+          backdropSurface="soft"
+          inset={layout !== "split" ? "wide" : "default"}
         >
           {agentHeaderContent}
-        </div>
-
-        {agentBody}
-      </aside>
-    </>
+        </AuxiliaryPanelHeader>
+      }
+    >
+      <AuxiliaryPanelBody
+        ref={scrollRef}
+        onScroll={onScroll}
+        className="overflow-y-auto px-3 pb-4"
+        panelPadding
+      >
+        <ManagedAgentSessionPanel
+          agent={agent}
+          channelId={sessionChannelId}
+          className="border-0 bg-transparent p-0 shadow-none"
+          emptyDescription={
+            sessionChannelId
+              ? `Mention ${agent.name} in the channel to see its work here.`
+              : `Mention ${agent.name} in any channel to see its work here.`
+          }
+          profiles={profiles}
+          rawLayout="exclusive"
+          showHeader={false}
+          showRaw={showRawFeed}
+        />
+      </AuxiliaryPanelBody>
+    </AuxiliaryPanel>
   );
+}
+
+function getLatestActivityTimestamp({
+  events,
+  transcript,
+}: {
+  events: readonly ObserverEvent[];
+  transcript: readonly TranscriptItem[];
+}): number | null {
+  let latest: number | null = null;
+
+  const record = (timestamp: string) => {
+    const parsed = Date.parse(timestamp);
+    if (!Number.isFinite(parsed)) {
+      return;
+    }
+
+    if (latest === null || parsed > latest) {
+      latest = parsed;
+    }
+  };
+
+  for (const event of events) {
+    record(event.timestamp);
+  }
+
+  for (const item of transcript) {
+    record(item.timestamp);
+  }
+
+  return latest;
+}
+
+function formatLastUpdatedLabel(timestamp: number | null, now: number): string {
+  if (timestamp === null) {
+    return "No updates yet";
+  }
+
+  return `Last updated ${formatRelativeActivityTime(timestamp, now)}`;
+}
+
+function formatRelativeActivityTime(timestamp: number, now: number): string {
+  const elapsedMs = Math.max(0, now - timestamp);
+  const totalSeconds = Math.floor(elapsedMs / 1_000);
+
+  if (totalSeconds < 60) {
+    return "just now";
+  }
+
+  const totalMinutes = Math.floor(totalSeconds / 60);
+  if (totalMinutes < 60) {
+    return `${totalMinutes}m ago`;
+  }
+
+  const totalHours = Math.floor(totalMinutes / 60);
+  if (totalHours < 24) {
+    return `${totalHours}h ago`;
+  }
+
+  const totalDays = Math.floor(totalHours / 24);
+  if (totalDays < 7) {
+    return `${totalDays}d ago`;
+  }
+
+  const totalWeeks = Math.floor(totalDays / 7);
+  return `${totalWeeks}w ago`;
 }

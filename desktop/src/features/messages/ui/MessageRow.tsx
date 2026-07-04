@@ -1,6 +1,7 @@
 import * as React from "react";
 
 import type { TimelineMessage } from "@/features/messages/types";
+import { HuddleAttachment } from "@/features/huddle/components/HuddleAttachment";
 import { MessageReactions } from "@/features/messages/ui/MessageReactions";
 import { useReactionHandler } from "@/features/messages/ui/useReactionHandler";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
@@ -15,13 +16,17 @@ import {
   threadReplyLength,
   THREAD_REPLY_LINE_WIDTH_REM,
 } from "@/features/messages/lib/threadTreeLayout";
-import { KIND_STREAM_MESSAGE_DIFF } from "@/shared/constants/kinds";
+import {
+  KIND_HUDDLE_STARTED,
+  KIND_STREAM_MESSAGE_DIFF,
+} from "@/shared/constants/kinds";
 import { cn } from "@/shared/lib/cn";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 import { useChannelNavigation } from "@/shared/context/ChannelNavigationContext";
 import { parseImetaTags } from "@/features/messages/lib/parseImeta";
 import { useMessageEmoji } from "@/features/messages/lib/useMessageEmoji";
+import { parseWaveMessageContent } from "@/features/messages/lib/waveMessage";
 import {
   resolveMentionNames,
   resolveMentionPubkeysByName,
@@ -31,6 +36,7 @@ import type { VideoReviewContext } from "@/shared/ui/VideoPlayer";
 import { MessageActionBar } from "./MessageActionBar";
 import { MessageAuthorText, MessageHeaderRow } from "./MessageHeader";
 import { MessageTimestamp } from "./MessageTimestamp";
+import { WaveMessageAttachment } from "./WaveMessageAttachment";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 
 const DiffMessage = React.lazy(() => import("./DiffMessage"));
@@ -54,9 +60,12 @@ export const MessageRow = React.memo(
     highlightReplyConnector = false,
     highlightThreadLineDepths,
     hoverBackground = true,
+    huddleMemberPubkeys,
+    huddleMemberPubkeysPending = false,
     actionBarPlacement = "floating",
     collapseDescendantsLabel,
     isFollowingThread,
+    isContinuation = false,
     isUnread,
     layoutVariant = "default",
     message,
@@ -88,9 +97,12 @@ export const MessageRow = React.memo(
     highlightReplyConnector?: boolean;
     highlightThreadLineDepths?: ReadonlyArray<number>;
     hoverBackground?: boolean;
+    huddleMemberPubkeys?: readonly string[];
+    huddleMemberPubkeysPending?: boolean;
     actionBarPlacement?: "floating" | "inside";
     collapseDescendantsLabel?: string;
     isFollowingThread?: boolean;
+    isContinuation?: boolean;
     isUnread?: boolean;
     layoutVariant?: "default" | "thread-reply";
     message: TimelineMessage;
@@ -155,6 +167,12 @@ export const MessageRow = React.memo(
 
       return pubkeys;
     }, [agentPubkeys, profiles]);
+    const profilePopoverRole =
+      message.role === "bot" ||
+      (message.pubkey &&
+        resolvedAgentPubkeys.has(normalizePubkey(message.pubkey)))
+        ? "bot"
+        : message.role;
     const agentMentionPubkeysByName = React.useMemo(() => {
       if (!mentionPubkeysByName) {
         return undefined;
@@ -274,7 +292,29 @@ export const MessageRow = React.memo(
               />
             </React.Suspense>
           );
+        case KIND_HUDDLE_STARTED:
+          return (
+            <HuddleAttachment
+              channelId={channelId}
+              message={message}
+              onOpenThread={onReply}
+            />
+          );
         default:
+          {
+            const waveMessage = parseWaveMessageContent(message.body);
+            if (waveMessage) {
+              return (
+                <WaveMessageAttachment
+                  channelId={channelId}
+                  fallbackText={waveMessage.fallbackText}
+                  huddleMemberPubkeys={huddleMemberPubkeys}
+                  huddleMemberPubkeysPending={huddleMemberPubkeysPending}
+                />
+              );
+            }
+          }
+
           return (
             <Markdown
               channelNames={channelNames}
@@ -333,6 +373,45 @@ export const MessageRow = React.memo(
       </div>
     );
 
+    const continuationTimestampGutter = (
+      <div
+        aria-hidden="true"
+        className={cn(
+          "flex w-9 shrink-0 items-start justify-end pt-0.5",
+          isThreadReplyLayout ? "min-h-9 self-start" : "self-stretch",
+        )}
+      >
+        <MessageTimestamp
+          className="opacity-0 transition-opacity group-hover/message:opacity-100 group-focus-within/message:opacity-100"
+          createdAt={message.createdAt}
+          hideDayPeriod
+          time={message.time}
+        />
+      </div>
+    );
+
+    const avatarGutterNode = isContinuation ? (
+      continuationTimestampGutter
+    ) : message.pubkey ? (
+      <UserProfilePopover
+        pubkey={message.pubkey}
+        role={profilePopoverRole}
+        botIdenticonValue={message.author}
+      >
+        <button
+          className={cn(
+            "flex shrink-0 items-start focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring",
+            avatarButtonRadiusClass,
+          )}
+          type="button"
+        >
+          {avatarNode}
+        </button>
+      </UserProfilePopover>
+    ) : (
+      <div className="flex shrink-0 items-start">{avatarNode}</div>
+    );
+
     const authorNode = message.pubkey ? (
       <MessageAuthorText hoverUnderline>{message.author}</MessageAuthorText>
     ) : (
@@ -342,7 +421,7 @@ export const MessageRow = React.memo(
     const actionBarNode = (
       <div
         className={cn(
-          "absolute right-2 top-1 z-10",
+          "absolute right-2 top-1 z-10 sm:pointer-events-none",
           actionBarPlacement === "floating"
             ? "sm:top-0 sm:-translate-y-1/2"
             : "sm:top-1 sm:translate-y-0",
@@ -380,28 +459,72 @@ export const MessageRow = React.memo(
       </div>
     );
 
+    const statusMetadataNode =
+      message.pending || message.edited ? (
+        <>
+          {message.pending ? (
+            <p className="font-medium uppercase tracking-[0.14em] text-primary/80">
+              Sending
+            </p>
+          ) : null}
+          {message.edited ? (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <p className="text-muted-foreground/70">(edited)</p>
+              </TooltipTrigger>
+              <TooltipContent>This message has been edited</TooltipContent>
+            </Tooltip>
+          ) : null}
+        </>
+      ) : null;
+
     const inlineMetadataNode = (
       <div className="flex shrink-0 items-baseline gap-2 text-xs">
         <MessageTimestamp createdAt={message.createdAt} time={message.time} />
-        {message.pending ? (
-          <p className="font-medium uppercase tracking-[0.14em] text-primary/80">
-            Sending
-          </p>
-        ) : null}
-        {message.edited ? (
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <p className="text-muted-foreground/70">(edited)</p>
-            </TooltipTrigger>
-            <TooltipContent>This message has been edited</TooltipContent>
-          </Tooltip>
-        ) : null}
+        {statusMetadataNode}
       </div>
     );
+
+    const continuationMetadataNode =
+      isContinuation && statusMetadataNode ? (
+        <div className="mt-0.5 flex items-baseline gap-2 text-xs">
+          {statusMetadataNode}
+        </div>
+      ) : null;
+
+    const headerNode = isContinuation ? null : (
+      <MessageHeaderRow>
+        {message.pubkey ? (
+          <UserProfilePopover
+            pubkey={message.pubkey}
+            role={profilePopoverRole}
+            botIdenticonValue={message.author}
+          >
+            <button
+              className="truncate rounded leading-4 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+              type="button"
+            >
+              {authorNode}
+            </button>
+          </UserProfilePopover>
+        ) : (
+          authorNode
+        )}
+        {inlineMetadataNode}
+        {message.personaDisplayName &&
+        message.personaDisplayName !== message.author ? (
+          <span className="text-xs text-muted-foreground">
+            {message.personaDisplayName}
+          </span>
+        ) : null}
+      </MessageHeaderRow>
+    );
+    const bodyContainerClass = isContinuation ? "mt-0" : bodyOffsetClass;
 
     const messageBodyNode = (
       <>
         {renderBody()}
+        {continuationMetadataNode}
         <MessageReactions
           messageId={message.id}
           reactions={reactions}
@@ -606,13 +729,14 @@ export const MessageRow = React.memo(
         <article
           className={cn(
             "group/message relative z-10 rounded-2xl transition-colors",
-            isThreadReplyLayout ? "py-1.5" : "py-2",
+            "py-1",
             hoverBackground
               ? "mx-1 px-2 hover:bg-muted/50 focus-within:bg-muted/50"
               : isThreadReplyLayout
                 ? "mx-1 px-2"
                 : "px-2",
-            "flex items-start gap-2.5",
+            "flex gap-2.5",
+            isContinuation ? "items-center" : "items-start",
             hasActiveReminder ? "bg-blue-500/10" : "",
             highlighted
               ? "-mx-4 rounded-none px-6 before:absolute before:-inset-y-1.5 before:inset-x-0 before:animate-[route-target-highlight-fade_2s_ease-out_forwards] before:bg-primary/10 before:content-[''] motion-reduce:before:animate-none sm:-mx-6 sm:px-8"
@@ -623,102 +747,18 @@ export const MessageRow = React.memo(
         >
           {isThreadReplyLayout ? (
             <>
-              {message.pubkey ? (
-                <UserProfilePopover
-                  pubkey={message.pubkey}
-                  role={message.role}
-                  botIdenticonValue={message.author}
-                >
-                  <button
-                    className={cn(
-                      "flex shrink-0 items-start focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring",
-                      avatarButtonRadiusClass,
-                    )}
-                    type="button"
-                  >
-                    {avatarNode}
-                  </button>
-                </UserProfilePopover>
-              ) : (
-                <div className="flex shrink-0 items-start">{avatarNode}</div>
-              )}
+              {avatarGutterNode}
               <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-                <MessageHeaderRow>
-                  {message.pubkey ? (
-                    <UserProfilePopover
-                      pubkey={message.pubkey}
-                      role={message.role}
-                      botIdenticonValue={message.author}
-                    >
-                      <button
-                        className="truncate rounded leading-4 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
-                        type="button"
-                      >
-                        {authorNode}
-                      </button>
-                    </UserProfilePopover>
-                  ) : (
-                    authorNode
-                  )}
-                  {inlineMetadataNode}
-                  {message.personaDisplayName &&
-                  message.personaDisplayName !== message.author ? (
-                    <span className="text-xs text-muted-foreground">
-                      {message.personaDisplayName}
-                    </span>
-                  ) : null}
-                </MessageHeaderRow>
-                <div className={bodyOffsetClass}>{messageBodyNode}</div>
+                {headerNode}
+                <div className={bodyContainerClass}>{messageBodyNode}</div>
               </div>
             </>
           ) : (
             <>
-              {message.pubkey ? (
-                <UserProfilePopover
-                  pubkey={message.pubkey}
-                  role={message.role}
-                  botIdenticonValue={message.author}
-                >
-                  <button
-                    className={cn(
-                      "flex shrink-0 items-start focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring",
-                      avatarButtonRadiusClass,
-                    )}
-                    type="button"
-                  >
-                    {avatarNode}
-                  </button>
-                </UserProfilePopover>
-              ) : (
-                <div className="flex shrink-0 items-start">{avatarNode}</div>
-              )}
+              {avatarGutterNode}
               <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-                <MessageHeaderRow>
-                  {message.pubkey ? (
-                    <UserProfilePopover
-                      pubkey={message.pubkey}
-                      role={message.role}
-                      botIdenticonValue={message.author}
-                    >
-                      <button
-                        className="truncate rounded leading-4 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
-                        type="button"
-                      >
-                        {authorNode}
-                      </button>
-                    </UserProfilePopover>
-                  ) : (
-                    authorNode
-                  )}
-                  {inlineMetadataNode}
-                  {message.personaDisplayName &&
-                  message.personaDisplayName !== message.author ? (
-                    <span className="text-xs text-muted-foreground">
-                      {message.personaDisplayName}
-                    </span>
-                  ) : null}
-                </MessageHeaderRow>
-                <div className={bodyOffsetClass}>{messageBodyNode}</div>
+                {headerNode}
+                <div className={bodyContainerClass}>{messageBodyNode}</div>
               </div>
             </>
           )}
@@ -745,6 +785,7 @@ export const MessageRow = React.memo(
     prev.message.tags === next.message.tags &&
     prev.message.role === next.message.role &&
     prev.message.personaDisplayName === next.message.personaDisplayName &&
+    prev.agentPubkeys === next.agentPubkeys &&
     prev.collapseDepthGuideActions === next.collapseDepthGuideActions &&
     prev.collapseDescendantsLabel === next.collapseDescendantsLabel &&
     prev.connectDescendants === next.connectDescendants &&
@@ -754,6 +795,9 @@ export const MessageRow = React.memo(
     prev.highlightReplyConnector === next.highlightReplyConnector &&
     prev.highlightThreadLineDepths === next.highlightThreadLineDepths &&
     prev.hoverBackground === next.hoverBackground &&
+    prev.huddleMemberPubkeys === next.huddleMemberPubkeys &&
+    prev.huddleMemberPubkeysPending === next.huddleMemberPubkeysPending &&
+    prev.isContinuation === next.isContinuation &&
     prev.isFollowingThread === next.isFollowingThread &&
     prev.isUnread === next.isUnread &&
     prev.layoutVariant === next.layoutVariant &&

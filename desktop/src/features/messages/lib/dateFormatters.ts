@@ -14,6 +14,8 @@ const TIME_FORMATTER = new Intl.DateTimeFormat("en-US", {
   minute: "2-digit",
 });
 
+const DAY_PERIOD_SUFFIX_RE = /[\s\u00a0\u202f]*(?:AM|PM)$/i;
+
 const FULL_DATE_TIME_FORMATTER = new Intl.DateTimeFormat("en-US", {
   weekday: "long",
   year: "numeric",
@@ -38,6 +40,11 @@ const SHORT_MONTH_FORMATTER = new Intl.DateTimeFormat("en-US", {
 /** Short clock time, e.g. "2:34 PM". */
 export function formatTime(unixSeconds: number): string {
   return TIME_FORMATTER.format(new Date(unixSeconds * 1_000));
+}
+
+/** Short clock time with the AM/PM marker removed, e.g. "2:34". */
+export function formatTimeWithoutDayPeriod(time: string): string {
+  return time.replace(DAY_PERIOD_SUFFIX_RE, "").trim();
 }
 
 /** Full date + time for tooltips, e.g. "Wednesday, April 2, 2026 at 2:34 PM". */

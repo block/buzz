@@ -3,9 +3,9 @@ import test from "node:test";
 
 import { KIND_SYSTEM_MESSAGE } from "@/shared/constants/kinds";
 import {
+  buildTimelineDayGroups,
   buildTimelineItems,
   getTimelineItemKey,
-  resolveActiveDayTimestamp,
 } from "./timelineItems.ts";
 
 function dayAt(year, month, day, hour = 12) {
@@ -90,71 +90,65 @@ test("buildTimelineItems: system messages flatten to a 'system' item", () => {
   assert.deepEqual(kinds(items), ["day-divider", "message", "system"]);
 });
 
-test("buildTimelineItems: empty entries produce no items and an empty map", () => {
-  const { items, indexByMessageId } = buildTimelineItems([], null);
+test("buildTimelineItems: consecutive messages from the same author are grouped", () => {
+  const entries = [
+    entry({ id: "a", pubkey: "author-a", createdAt: dayAt(2026, 6, 14) }),
+    entry({ id: "b", pubkey: "AUTHOR-A", createdAt: dayAt(2026, 6, 14, 13) }),
+    entry({ id: "c", pubkey: "author-b", createdAt: dayAt(2026, 6, 14, 14) }),
+  ];
+
+  const messageItems = buildTimelineItems(entries, null).items.filter(
+    (item) => item.kind === "message",
+  );
+
+  assert.deepEqual(
+    messageItems.map((item) => item.isContinuation),
+    [false, true, false],
+  );
+  assert.deepEqual(
+    messageItems.map((item) => item.isFollowedByContinuation),
+    [true, false, false],
+  );
+});
+
+test("buildTimelineItems: dividers break grouping while thread summaries do not", () => {
+  const sameAuthor = "author-a";
+  const entries = [
+    entry({ id: "a", pubkey: sameAuthor, createdAt: dayAt(2026, 6, 14) }),
+    {
+      ...entry({
+        id: "b",
+        pubkey: sameAuthor,
+        createdAt: dayAt(2026, 6, 14, 13),
+      }),
+      summary: {
+        threadHeadId: "b",
+        replyCount: 1,
+        lastReplyAt: dayAt(2026, 6, 14, 13),
+        participants: [],
+      },
+    },
+    entry({ id: "c", pubkey: sameAuthor, createdAt: dayAt(2026, 6, 14, 14) }),
+    entry({ id: "d", pubkey: sameAuthor, createdAt: dayAt(2026, 6, 15) }),
+  ];
+
+  const messageItems = buildTimelineItems(entries, "c").items.filter(
+    (item) => item.kind === "message",
+  );
+
+  assert.deepEqual(
+    messageItems.map((item) => item.isContinuation),
+    [false, true, false, false],
+  );
+  assert.deepEqual(
+    messageItems.map((item) => item.isFollowedByContinuation),
+    [true, false, false, false],
+  );
+});
+
+test("buildTimelineItems: empty entries produce no items", () => {
+  const { items } = buildTimelineItems([], null);
   assert.equal(items.length, 0);
-  assert.equal(indexByMessageId.size, 0);
-});
-
-// --- index map correctness ---------------------------------------------------
-
-test("buildTimelineItems: map points each message id at its flattened item index", () => {
-  const entries = [
-    entry({ id: "d1", createdAt: dayAt(2026, 6, 12) }),
-    entry({ id: "d2", createdAt: dayAt(2026, 6, 13) }),
-  ];
-  const { items, indexByMessageId } = buildTimelineItems(entries, null);
-
-  // dividers occupy indices 0 and 2; messages land at 1 and 3.
-  assert.equal(indexByMessageId.get("d1"), 1);
-  assert.equal(indexByMessageId.get("d2"), 3);
-  assert.equal(items[1].entry.message.id, "d1");
-  assert.equal(items[3].entry.message.id, "d2");
-});
-
-test("buildTimelineItems: appending a new message keeps prior indices stable", () => {
-  const base = [entry({ id: "a", createdAt: dayAt(2026, 6, 14) })];
-  const before = buildTimelineItems(base, null).indexByMessageId;
-
-  const appended = [
-    ...base,
-    entry({ id: "b", createdAt: dayAt(2026, 6, 14, 13) }),
-  ];
-  const after = buildTimelineItems(appended, null).indexByMessageId;
-
-  assert.equal(after.get("a"), before.get("a"));
-  assert.equal(after.get("b"), 2);
-});
-
-test("buildTimelineItems: prepending an older-day message shifts later indices", () => {
-  const original = [entry({ id: "b", createdAt: dayAt(2026, 6, 14) })];
-  const beforeIdx = buildTimelineItems(original, null).indexByMessageId.get(
-    "b",
-  );
-
-  // Prepend a message on an earlier day → adds its own day-divider + message,
-  // pushing "b" (now on a new day boundary too) further down.
-  const prepended = [
-    entry({ id: "a", createdAt: dayAt(2026, 6, 13) }),
-    entry({ id: "b", createdAt: dayAt(2026, 6, 14) }),
-  ];
-  const afterIdx = buildTimelineItems(prepended, null).indexByMessageId.get(
-    "b",
-  );
-  assert.ok(afterIdx > beforeIdx);
-});
-
-test("buildTimelineItems: deleting a message drops it from the map", () => {
-  const entries = [
-    entry({ id: "a", createdAt: dayAt(2026, 6, 14) }),
-    entry({ id: "b", createdAt: dayAt(2026, 6, 14, 13) }),
-  ];
-  const afterDelete = buildTimelineItems(
-    entries.filter((e) => e.message.id !== "a"),
-    null,
-  ).indexByMessageId;
-  assert.equal(afterDelete.has("a"), false);
-  assert.equal(afterDelete.get("b"), 1);
 });
 
 test("getTimelineItemKey: keys are unique across the stream", () => {
@@ -167,65 +161,41 @@ test("getTimelineItemKey: keys are unique across the stream", () => {
   assert.equal(new Set(keys).size, keys.length);
 });
 
-test("resolveActiveDayTimestamp: null index returns null (nothing in view yet)", () => {
-  const { items } = buildTimelineItems(
-    [entry({ id: "a", createdAt: dayAt(2026, 6, 14) })],
-    null,
+test("buildTimelineDayGroups: moves non-day rows under their day section", () => {
+  const entries = [
+    entry({ id: "d1a", createdAt: dayAt(2026, 6, 12) }),
+    entry({ id: "d1b", createdAt: dayAt(2026, 6, 12, 13) }),
+    entry({ id: "d2a", createdAt: dayAt(2026, 6, 13) }),
+    entry({ id: "d2b", createdAt: dayAt(2026, 6, 13, 13) }),
+  ];
+  const { items } = buildTimelineItems(entries, "d2b");
+
+  const groups = buildTimelineDayGroups(items);
+
+  assert.equal(groups.length, 2);
+  assert.deepEqual(
+    groups.map((group) => group.items.map((item) => item.kind)),
+    [
+      ["message", "message"],
+      ["message", "unread-divider", "message"],
+    ],
   );
-  assert.equal(resolveActiveDayTimestamp(items, null), null);
+  assert.ok(groups.every((group) => group.headingTimestamp !== null));
 });
 
-test("resolveActiveDayTimestamp: empty stream returns null", () => {
-  assert.equal(resolveActiveDayTimestamp([], 0), null);
-});
+test("buildTimelineDayGroups: preserves leading rows without a day divider", () => {
+  const leadingRows = [
+    { kind: "unread-divider", key: "unread-a" },
+    { kind: "message", key: "a", entry: entry({ id: "a" }) },
+  ];
 
-test("resolveActiveDayTimestamp: a top row resolves to its own day's heading", () => {
-  const ts = dayAt(2026, 6, 14, 9);
-  const { items } = buildTimelineItems(
-    [entry({ id: "a", createdAt: ts })],
-    null,
-  );
-  // items[0] is the day-divider, items[1] is the message. The message at index
-  // 1 resolves back to the divider above it.
-  assert.equal(resolveActiveDayTimestamp(items, 1), items[0].headingTimestamp);
-});
+  const groups = buildTimelineDayGroups(leadingRows);
 
-test("resolveActiveDayTimestamp: a later-day row whose divider scrolled out still resolves to that later day", () => {
-  const day1 = dayAt(2026, 6, 13, 9);
-  const day2 = dayAt(2026, 6, 14, 9);
-  const { items } = buildTimelineItems(
-    [entry({ id: "a", createdAt: day1 }), entry({ id: "b", createdAt: day2 })],
-    null,
-  );
-  // Stream: [div(day1), a, div(day2), b]. Topmost visible = b (index 3); the
-  // day2 divider at index 2 is the nearest divider at or above it.
-  const dividerDay2 = items[2];
-  assert.equal(dividerDay2.kind, "day-divider");
-  assert.equal(
-    resolveActiveDayTimestamp(items, 3),
-    dividerDay2.headingTimestamp,
-  );
-});
-
-test("resolveActiveDayTimestamp: index past the end clamps to the last item", () => {
-  const ts = dayAt(2026, 6, 14, 9);
-  const { items } = buildTimelineItems(
-    [entry({ id: "a", createdAt: ts })],
-    null,
-  );
-  assert.equal(
-    resolveActiveDayTimestamp(items, 999),
-    items[0].headingTimestamp,
-  );
-});
-
-test("resolveActiveDayTimestamp: a divider row at the top resolves to its own heading", () => {
-  const ts = dayAt(2026, 6, 14, 9);
-  const { items } = buildTimelineItems(
-    [entry({ id: "a", createdAt: ts })],
-    null,
-  );
-  // Topmost visible is the divider itself (index 0) — it resolves to itself.
-  assert.equal(items[0].kind, "day-divider");
-  assert.equal(resolveActiveDayTimestamp(items, 0), items[0].headingTimestamp);
+  assert.deepEqual(groups, [
+    {
+      key: "day-undated",
+      headingTimestamp: null,
+      items: leadingRows,
+    },
+  ]);
 });

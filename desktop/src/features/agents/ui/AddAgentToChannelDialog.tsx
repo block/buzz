@@ -116,9 +116,8 @@ export function AddAgentToChannelDialog({
             <DialogTitle>Add agent to channel</DialogTitle>
             <DialogDescription>
               Add {agent?.name ?? "this agent"} to a channel so desktop chat can
-              `@mention` it. Running local agents are restarted automatically
-              when they join a new channel. Remote agents pick up new channels
-              automatically via membership notifications.
+              `@mention` it. Running agents pick up new channels automatically
+              via membership notifications.
             </DialogDescription>
           </DialogHeader>
 

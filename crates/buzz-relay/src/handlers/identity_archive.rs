@@ -10,6 +10,8 @@ use nostr::{Event, PublicKey};
 use tracing::{info, warn};
 
 use buzz_core::kind::{KIND_IA_ARCHIVE_REQUEST, KIND_IA_UNARCHIVE_REQUEST, KIND_PROFILE};
+use buzz_core::tenant::TenantContext;
+use buzz_core::CommunityId;
 use buzz_db::EventQuery;
 
 use crate::handlers::side_effects::{
@@ -36,6 +38,7 @@ impl ConsentPath {
 
 /// Validate and execute a NIP-IA archive/unarchive request.
 pub async fn handle_identity_archive_event(
+    tenant: &TenantContext,
     state: &Arc<AppState>,
     event: &Event,
 ) -> Result<(), String> {
@@ -59,13 +62,15 @@ pub async fn handle_identity_archive_event(
     }
 
     let reason = extract_tag_value(event, "reason");
-    let consent_path = determine_consent_path(state, event, &target_hex, &actor_hex).await?;
+    let consent_path =
+        determine_consent_path(tenant.community(), state, event, &target_hex, &actor_hex).await?;
     let request_event_id = event.id.to_hex();
 
     let changed = if kind == KIND_IA_ARCHIVE_REQUEST {
         state
             .db
             .archive(
+                tenant.community(),
                 &target_hex,
                 consent_path.as_str(),
                 &actor_hex,
@@ -78,7 +83,7 @@ pub async fn handle_identity_archive_event(
     } else {
         state
             .db
-            .unarchive(&target_hex)
+            .unarchive(tenant.community(), &target_hex)
             .await
             .map_err(|e| format!("database error: {e}"))?
     };
@@ -98,6 +103,7 @@ pub async fn handle_identity_archive_event(
 
     let publish_delta = if kind == KIND_IA_ARCHIVE_REQUEST {
         publish_nipia_archived(
+            tenant,
             state,
             &target_hex,
             consent_path.as_str(),
@@ -110,6 +116,7 @@ pub async fn handle_identity_archive_event(
         .await
     } else {
         publish_nipia_unarchived(
+            tenant,
             state,
             &target_hex,
             consent_path.as_str(),
@@ -124,7 +131,7 @@ pub async fn handle_identity_archive_event(
     if let Err(e) = publish_delta {
         warn!(error = %e, "failed to publish NIP-IA delta");
     }
-    if let Err(e) = publish_nipia_archival_list(state).await {
+    if let Err(e) = publish_nipia_archival_list(tenant, state).await {
         warn!(error = %e, "failed to publish NIP-IA archival list");
     }
 
@@ -219,6 +226,7 @@ fn extract_optional_replaced_by(event: &Event, target_hex: &str) -> Result<Optio
 }
 
 async fn determine_consent_path(
+    community_id: CommunityId,
     state: &Arc<AppState>,
     event: &Event,
     target_hex: &str,
@@ -230,7 +238,7 @@ async fn determine_consent_path(
 
     let actor_member = state
         .db
-        .get_relay_member(actor_hex)
+        .get_relay_member(community_id, actor_hex)
         .await
         .map_err(|e| format!("database error: {e}"))?;
     let actor_role = actor_member.as_ref().map(|m| m.role.as_str()).unwrap_or("");
@@ -238,11 +246,12 @@ async fn determine_consent_path(
         return Ok(ConsentPath::Admin);
     }
 
-    verify_owner_consent(state, event, target_hex, actor_hex).await?;
+    verify_owner_consent(community_id, state, event, target_hex, actor_hex).await?;
     Ok(ConsentPath::Owner)
 }
 
 async fn verify_owner_consent(
+    community_id: CommunityId,
     state: &Arc<AppState>,
     event: &Event,
     target_hex: &str,
@@ -266,7 +275,7 @@ async fn verify_owner_consent(
             authors: Some(vec![target_author]),
             limit: Some(1),
             global_only: true,
-            ..Default::default()
+            ..EventQuery::for_community(community_id)
         })
         .await
         .map_err(|e| format!("database error: {e}"))?
@@ -443,13 +452,9 @@ mod tests {
                 .await
                 .ok()?,
         );
-        let audit = buzz_audit::AuditService::new(pool);
+        let audit = buzz_audit::AuditService::new(pool.clone());
         let auth = buzz_auth::AuthService::new(config.auth.clone());
-        let search = buzz_search::SearchService::new(buzz_search::SearchConfig {
-            url: config.typesense_url.clone(),
-            api_key: config.typesense_key.clone(),
-            collection: "events".to_string(),
-        });
+        let search = buzz_search::SearchService::new(pool.clone());
         let workflow_engine = Arc::new(buzz_workflow::WorkflowEngine::new(
             db.clone(),
             buzz_workflow::WorkflowConfig::default(),
@@ -495,6 +500,18 @@ mod tests {
             .expect("sign archive request")
     }
 
+    async fn seed_test_community(pool: &sqlx::PgPool) -> buzz_core::tenant::TenantContext {
+        let id = uuid::Uuid::new_v4();
+        let host = format!("ident-test-{}.example", id.simple());
+        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+            .bind(id)
+            .bind(&host)
+            .execute(pool)
+            .await
+            .expect("insert test community");
+        TenantContext::resolved(CommunityId::from_uuid(id), host)
+    }
+
     #[tokio::test]
     async fn owner_archive_rejects_stale_request_after_live_kind0_owner_flip() {
         let Some(pool) = test_pool().await else {
@@ -507,9 +524,10 @@ mod tests {
         {
             return;
         }
-        let Some(state) = test_state(pool).await else {
+        let Some(state) = test_state(pool.clone()).await else {
             return;
         };
+        let tenant = seed_test_community(&pool).await;
 
         let owner_keys = Keys::generate();
         let other_owner_keys = Keys::generate();
@@ -521,19 +539,19 @@ mod tests {
         let live_profile = profile_event(&target_keys, auth_tag(&owner_keys, &target_pubkey), now);
         state
             .db
-            .replace_addressable_event(&live_profile, None)
+            .replace_addressable_event(tenant.community(), &live_profile, None)
             .await
             .expect("insert initial target kind:0");
 
         let request_auth = auth_tag(&owner_keys, &target_pubkey);
         let archive_request = owner_archive_request(&owner_keys, &target_hex, request_auth.clone());
-        handle_identity_archive_event(&state, &archive_request)
+        handle_identity_archive_event(&tenant, &state, &archive_request)
             .await
             .expect("owner archive accepted while live kind:0 attests owner");
         assert!(
             state
                 .db
-                .is_archived(&target_hex)
+                .is_archived(tenant.community(), &target_hex)
                 .await
                 .expect("is_archived"),
             "first owner archive should mutate archive state"
@@ -546,12 +564,12 @@ mod tests {
         );
         state
             .db
-            .replace_addressable_event(&revoked_profile, None)
+            .replace_addressable_event(tenant.community(), &revoked_profile, None)
             .await
             .expect("replace target kind:0");
 
         let stale_request = owner_archive_request(&owner_keys, &target_hex, request_auth);
-        let err = handle_identity_archive_event(&state, &stale_request)
+        let err = handle_identity_archive_event(&tenant, &state, &stale_request)
             .await
             .expect_err("stale owner request must be rejected after live kind:0 owner flip");
         assert!(

@@ -90,8 +90,8 @@ class ForumPostsView extends HookConsumerWidget {
                   child: ListView.separated(
                     padding: EdgeInsets.only(
                       top: frostedAppBarHeight(context),
-                      left: Grid.xs,
-                      right: Grid.xs,
+                      left: Grid.gutter,
+                      right: Grid.gutter,
                       bottom: Grid.xs,
                     ),
                     itemCount: posts.length,

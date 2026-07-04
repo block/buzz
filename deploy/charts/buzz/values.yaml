@@ -2,22 +2,23 @@
 #
 # Two supported tiers:
 #
-#   PRODUCTION (default) — external Postgres/Redis/Typesense/S3, existingSecret
+#   PRODUCTION (default) — external Postgres/Redis/S3, existingSecret
 #   refs everywhere, no chart-side autogeneration, GitOps-safe (ArgoCD/Flux).
-#   HA-ready: replicaCount >= 2 (requires Redis and RWX storage for git).
+#   HA-ready: replicaCount >= 2 (requires Redis; git state is object-store-
+#   backed, so no ReadWriteMany volume is needed — RWO per replica is fine).
 #
-#   QUICKSTART — bundles in-cluster Postgres + Redis + MinIO + Typesense and
+#   QUICKSTART — bundles in-cluster Postgres + Redis + MinIO and
 #   auto-generates relay secrets via the `lookup` pattern (NOT GitOps-safe —
 #   see README), single replica, evaluation only. Opt in by enabling each
-#   bundled service: postgresql.enabled, redis.enabled, minio.enabled,
-#   typesense.enabled. See ci/quickstart-values.yaml and the README.
+#   bundled service: postgresql.enabled, redis.enabled, minio.enabled.
+#   See ci/quickstart-values.yaml and the README.
 #
 # See examples/argocd-app.yaml and examples/flux-helmrelease.yaml for the
 # canonical GitOps configurations.
 
 # Intent marker for the evaluation profile, surfaced in NOTES.txt. It does NOT
 # by itself enable any bundled service — set the per-service .enabled flags
-# (postgresql / redis / minio / typesense) to bring them up in-cluster.
+# (postgresql / redis / minio) to bring them up in-cluster.
 quickstart: false
 
 # ── Image ────────────────────────────────────────────────────────────────────
@@ -28,9 +29,11 @@ image:
   pullSecrets: []
 
 # ── Topology ────────────────────────────────────────────────────────────────
-# replicaCount > 1 hard-requires:
-#   - Redis for buzz-pubsub (in-cluster or external)
-#   - ReadWriteMany storage for the git PVC (or shared FS via existingClaim)
+# replicaCount > 1 hard-requires Redis for buzz-pubsub (in-cluster or external).
+# It does NOT require ReadWriteMany git storage: git ref/object state is
+# object-store-backed (each request hydrates an ephemeral repo from S3; writer
+# serialization is the object-store pointer CAS), and repo-name uniqueness lives
+# in Postgres. Each replica can use its own ReadWriteOnce volume (or none).
 replicaCount: 1
 
 # ── Public URL ───────────────────────────────────────────────────────────────
@@ -56,8 +59,6 @@ ownerPubkey: ""
 #   BUZZ_GIT_HOOK_HMAC_SECRET     — 32+ chars; required when replicaCount > 1
 #   DATABASE_URL                  — full Postgres URL (preferred over externalPostgresql.url)
 #   REDIS_URL                     — full Redis URL with auth
-#   TYPESENSE_URL                 — Typesense base URL
-#   TYPESENSE_API_KEY             — Typesense API key
 #   BUZZ_S3_ACCESS_KEY            — S3 access key
 #   BUZZ_S3_SECRET_KEY            — S3 secret key
 secrets:
@@ -77,6 +78,11 @@ relay:
   allowNipOaAuth: true
   pubkeyAllowlist: false
   corsOrigins: []
+  # Huddle audio is safe only for single-pod relay deployments until an SFU
+  # exists. null lets the chart render false automatically when
+  # replicaCount > 1. Explicit true with replicaCount > 1 means the operator
+  # accepts/owns the external multi-pod audio/SFU behavior.
+  huddleAudioAvailable: null
   ephemeralTtlOverride: 0
 
   livenessProbe:
@@ -167,13 +173,24 @@ httproute:
   hostnames: []
   rules: []                      # empty → default match-all → service
 
-# ── Git on-disk state ────────────────────────────────────────────────────────
+# ── Git scratch volume ───────────────────────────────────────────────────────
+# Ephemeral working space only. No persistent git state lives here — reads/writes
+# hydrate ephemeral repos from object storage per request, and repo-name
+# uniqueness lives in Postgres.
+#
+# enabled: true  → mount a PVC at mountPath (durable across pod restarts, but a
+#   single ReadWriteOnce PVC binds to one node, so it does NOT support multi-pod
+#   scheduling across nodes on a Deployment).
+# enabled: false → mount a per-pod emptyDir at mountPath (pure scratch). This is
+#   the correct choice for multi-replica HA: each pod gets its own local working
+#   space, nothing is shared, and there is no volume to multi-attach. Safe
+#   because the object store + Postgres are the sources of truth, not this disk.
 persistence:
   git:
     enabled: true
     mountPath: /var/lib/buzz/git
     storageClass: ""
-    accessMode: ReadWriteOnce    # MUST be ReadWriteMany if replicaCount > 1
+    accessMode: ReadWriteOnce
     size: 10Gi
     annotations: {}
     existingClaim: ""
@@ -210,20 +227,6 @@ redis:
     size: 4Gi
 externalRedis:
   url: ""                        # redis://:pass@host:6379
-
-# ── Typesense ────────────────────────────────────────────────────────────────
-# Production: point url/apiKey at an external Typesense service (or supply
-# TYPESENSE_URL/TYPESENSE_API_KEY via secrets.existingSecret).
-# Quickstart (`enabled: true`): the chart runs an in-cluster, eval-only
-# Typesense Deployment and composes TYPESENSE_URL with an autogenerated key.
-typesense:
-  enabled: false                 # quickstart: set true for bundled in-cluster Typesense
-  url: ""
-  apiKey: ""
-  image: typesense/typesense:30.2
-  persistence:
-    enabled: true
-    size: 4Gi
 
 # ── S3 / object storage (media) ──────────────────────────────────────────────
 # Production: point endpoint/bucket at an external S3-compatible service and

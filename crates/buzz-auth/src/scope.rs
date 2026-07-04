@@ -54,8 +54,6 @@ pub enum Scope {
     /// enforced by git HTTP push routes (which use NIP-98 + owner check).
     /// Full enforcement deferred to v2 collaborator model.
     ReposWrite,
-    /// Submit events on behalf of other pubkeys (proxy service accounts only).
-    ProxySubmit,
     /// A scope string not recognised by this version of the relay.
     ///
     /// Preserved as-is to allow forward-compatibility with future scope additions.
@@ -131,7 +129,6 @@ impl Scope {
             Self::FilesWrite => "files:write",
             Self::ReposRead => "repos:read",
             Self::ReposWrite => "repos:write",
-            Self::ProxySubmit => "proxy:submit",
             Self::Unknown(s) => s.as_str(),
         }
     }
@@ -164,7 +161,6 @@ impl FromStr for Scope {
             "files:write" => Self::FilesWrite,
             "repos:read" => Self::ReposRead,
             "repos:write" => Self::ReposWrite,
-            "proxy:submit" => Self::ProxySubmit,
             other => Self::Unknown(other.to_string()),
         })
     }
@@ -236,7 +232,7 @@ mod tests {
     }
 
     #[test]
-    fn all_known_returns_all_14_variants() {
+    fn all_known_returns_all_known_variants() {
         let all = Scope::all_known();
         assert_eq!(all.len(), 16, "expected 16 known scope variants");
         // Verify no duplicates

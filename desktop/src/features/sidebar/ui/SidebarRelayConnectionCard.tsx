@@ -12,6 +12,7 @@ type SidebarRelayConnectionCardProps = {
   className?: string;
   isConnected?: boolean;
   isReconnectPending: boolean;
+  isWaitingOnReconnectHook?: boolean;
   onDismiss?: () => void;
   onReconnect: () => void;
   surface?: SidebarActionCardSurface;
@@ -24,6 +25,7 @@ export function SidebarRelayConnectionCard({
   isActionDisabled = false,
   isConnected = false,
   isReconnectPending,
+  isWaitingOnReconnectHook = false,
   onDismiss,
   onReconnect,
   surface,
@@ -35,6 +37,7 @@ export function SidebarRelayConnectionCard({
       isActionDisabled={isActionDisabled}
       isConnected={isConnected}
       isReconnectPending={isReconnectPending}
+      isWaitingOnReconnectHook={isWaitingOnReconnectHook}
       onDismiss={onDismiss}
       onReconnect={onReconnect}
       surface={surface}
@@ -49,11 +52,19 @@ export function SidebarRelayConnectionCompactCard({
   isActionDisabled = false,
   isConnected = false,
   isReconnectPending,
+  isWaitingOnReconnectHook = false,
   onDismiss,
   onReconnect,
   surface,
   testId = "sidebar-relay-unreachable-compact",
 }: SidebarRelayConnectionCardProps) {
+  const reconnectTitle = isWaitingOnReconnectHook
+    ? "Waiting to reconnect"
+    : "Connecting";
+  const reconnectDescription = isWaitingOnReconnectHook
+    ? "Complete any prompts opened by the reconnect helper to continue."
+    : "Reconnecting";
+
   return (
     <SidebarCompactActionCard
       actionAriaLabel={isConnected ? "Connected" : "Connect to relay"}
@@ -63,7 +74,7 @@ export function SidebarRelayConnectionCompactCard({
         isConnected
           ? undefined
           : isReconnectPending
-            ? "Reconnecting"
+            ? reconnectDescription
             : "Click to connect"
       }
       dismissLabel="Dismiss relay notification"
@@ -89,7 +100,7 @@ export function SidebarRelayConnectionCompactCard({
         isConnected
           ? "Connected"
           : isReconnectPending
-            ? "Connecting"
+            ? reconnectTitle
             : "Can't reach the relay"
       }
       tone={isConnected ? "success" : "neutral"}

@@ -169,9 +169,10 @@ _ensure-services:
     echo " timed out"
     exit 1
 
-# Apply database migrations if the dev database is running
+# Apply database migrations and seed the local dev community if the dev database is running
 _ensure-migrations: _ensure-services
     cargo run -p buzz-admin -- migrate
+    ./scripts/seed-local-community.sh
 
 # Run clippy on the desktop Tauri Rust crate
 desktop-tauri-clippy: _ensure-sidecar-stubs
@@ -230,6 +231,18 @@ test-unit:
     #!/usr/bin/env bash
     if command -v cargo-nextest &>/dev/null; then
         cargo nextest run -p buzz-core -p buzz-auth --lib
+        # buzz-db migrator/lint tests: pure SQL-parsing unit tests (no infra).
+        # They guard the embedded-migrator invariant (exactly the consolidated
+        # 0001; cutover/backfill stays an operator script, not startup state)
+        # and the tenant-scoping lints. The Postgres-backed buzz-db tests are
+        # #[ignore]d, so --lib runs only the infra-free set. Without this gate a
+        # stray file in migrations/ or a broken lint ships green.
+        cargo nextest run -p buzz-db --lib
+        # Multi-tenant conformance gate (buzz-conformance): the independent
+        # replay checker + golden fixtures. No infra — pure in-process trace
+        # replay — so it belongs in the unit job. Run all targets (lib + the
+        # tests/replay_fixtures.rs integration test), not just --lib.
+        cargo nextest run -p buzz-conformance
     else
         ./scripts/run-tests.sh unit
     fi
@@ -285,22 +298,36 @@ relay-web: bootstrap _ensure-migrations
 relay-release: _ensure-migrations
     cargo run -p buzz-relay --release
 
-# Start buzz-proxy (dev mode)
-proxy:
-    cargo run -p buzz-proxy
-
-# Start buzz-proxy (release mode)
-proxy-release:
-    cargo run -p buzz-proxy --release
 
 # Run the desktop Tauri app in dev mode with a local relay (ports and identity derived from worktree)
 dev *ARGS: bootstrap _ensure-sidecar-stubs _ensure-migrations
     #!/usr/bin/env bash
     set -euo pipefail
     export PATH="{{justfile_directory()}}/bin:$PATH"
+    bind_addr="${BUZZ_BIND_ADDR:-0.0.0.0:3000}"
+    relay_port="${bind_addr##*:}"; [[ -n "$relay_port" ]] || relay_port=3000
+    health_port="${BUZZ_HEALTH_PORT:-8080}"
+    metrics_port="${BUZZ_METRICS_PORT:-9102}"
+    if command -v lsof >/dev/null 2>&1; then
+        for spec in "relay:$relay_port" "health:$health_port" "metrics:$metrics_port"; do
+            name="${spec%%:*}"; port="${spec##*:}"
+            if lsof -nP -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1; then
+                echo "Error: $name port $port is already in use; refusing to launch desktop against a stale relay." >&2
+                lsof -nP -iTCP:"$port" -sTCP:LISTEN >&2 || true
+                echo "Stop the process above (often a stale buzz-relay) and rerun: just dev" >&2
+                exit 1
+            fi
+        done
+    fi
     cargo build -p buzz-acp -p buzz-agent -p buzz-dev-mcp -p buzz-cli -p git-credential-nostr -p buzz-relay
     ./target/debug/buzz-relay &
     RELAY_PID=$!
+    sleep 1
+    if ! kill -0 "$RELAY_PID" 2>/dev/null; then
+        echo "Error: buzz-relay exited during startup; refusing to launch desktop against a stale relay." >&2
+        wait "$RELAY_PID" || true
+        exit 1
+    fi
     cleanup() {
         [[ -n "${INSTANCE_ID:-}" ]] && ../scripts/cleanup-instance-agents.sh "$INSTANCE_ID" || true
         kill "$RELAY_PID" 2>/dev/null || true
@@ -402,7 +429,7 @@ mobile-fix:
 
 # Run mobile lint and format checks
 mobile-check:
-    unset GIT_DIR GIT_WORK_TREE; cd {{mobile_dir}} && dart format --output=none --set-exit-if-changed . && flutter analyze
+    unset GIT_DIR GIT_WORK_TREE; cd {{mobile_dir}} && dart format --output=none --set-exit-if-changed . && flutter analyze && node ./scripts/check-file-sizes.mjs
 
 # Run mobile tests
 mobile-test:
@@ -426,13 +453,6 @@ mobile-dev:
 migrate: _ensure-migrations
 
 # ─── Utilities ────────────────────────────────────────────────────────────────
-
-# Rebuild Typesense docs for all kind:0 (user profile) events.
-# Required once after deploying the indexer change that flattens kind:0 content
-# for searchability; new/updated profiles are indexed correctly automatically.
-# Safe to run repeatedly — Typesense upserts.
-reindex-kind0:
-    cargo run --release -p buzz-relay --bin buzz-reindex-kind0
 
 # Remove build artifacts
 clean:

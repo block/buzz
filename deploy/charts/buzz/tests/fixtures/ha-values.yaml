@@ -1,4 +1,4 @@
-# HA shape: replicas=3 + Redis + RWX. Render-only check.
+# HA shape: replicas=3 + Redis + RWO git (object-store-backed; no RWM). Render-only check.
 relayUrl: wss://buzz.example.com
 ownerPubkey: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
 replicaCount: 3
@@ -8,14 +8,12 @@ externalPostgresql:
   url: "postgres://buzz:pw@postgres.example.com:5432/buzz"
 externalRedis:
   url: "redis://:pw@redis.example.com:6379"
-typesense:
-  url: "https://typesense.example.com"
 s3:
   bucket: "buzz-media"
 persistence:
   git:
     enabled: true
-    accessMode: ReadWriteMany
+    accessMode: ReadWriteOnce
     size: 50Gi
 podDisruptionBudget:
   enabled: true

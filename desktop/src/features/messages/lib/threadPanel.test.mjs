@@ -11,6 +11,7 @@ import {
   hasNestedThreadBranches,
   shouldRenderUnreadDivider,
 } from "./threadPanel.ts";
+import { KIND_HUDDLE_STARTED } from "@/shared/constants/kinds";
 
 function message(overrides) {
   return {
@@ -63,6 +64,46 @@ test("buildMainTimelineEntries includes broadcast replies", () => {
       (entry) => entry.message.id,
     ),
     ["root", "broadcast-reply"],
+  );
+});
+
+test("buildMainTimelineEntries keeps huddle thread replies out of the parent timeline summary", () => {
+  const huddleRoot = message({
+    id: "huddle-root",
+    kind: KIND_HUDDLE_STARTED,
+    createdAt: 1,
+    body: JSON.stringify({
+      ephemeral_channel_id: "8d764100-fd8f-44cf-9c98-6d8fbd739b8c",
+    }),
+  });
+  const reply = message({
+    id: "huddle-thread-reply",
+    createdAt: 2,
+    parentId: "huddle-root",
+    rootId: "huddle-root",
+    depth: 1,
+    tags: [["e", "huddle-root", "", "reply"]],
+  });
+
+  const entries = buildMainTimelineEntries([huddleRoot, reply]);
+
+  assert.deepEqual(
+    entries.map((entry) => ({
+      id: entry.message.id,
+      replyCount: entry.summary?.replyCount ?? 0,
+    })),
+    [{ id: "huddle-root", replyCount: 0 }],
+  );
+
+  const panelData = buildThreadPanelData(
+    [huddleRoot, reply],
+    "huddle-root",
+    "huddle-root",
+    new Set(),
+  );
+  assert.deepEqual(
+    panelData.visibleReplies.map((entry) => entry.message.id),
+    ["huddle-thread-reply"],
   );
 });
 
@@ -562,4 +603,74 @@ test("buildThreadPanelDataFromIndex matches direct panel data", () => {
   );
 
   assert.deepEqual(indexed, direct);
+});
+
+test("buildMainTimelineEntries renders a relay-only thread summary", () => {
+  const root = message({ id: "root", createdAt: 1 });
+  const summaries = new Map([
+    [
+      "root",
+      {
+        replyCount: 2,
+        descendantCount: 4,
+        lastReplyAt: 9,
+        participantPubkeys: ["alice", "bob"],
+      },
+    ],
+  ]);
+  const profiles = { alice: { displayName: "Alice", avatarUrl: "alice.png" } };
+
+  const [entry] = buildMainTimelineEntries(
+    [root],
+    new Set(),
+    summaries,
+    profiles,
+  );
+
+  assert.deepEqual(entry.summary, {
+    threadHeadId: "root",
+    replyCount: 4,
+    lastReplyAt: 9,
+    participants: [
+      { id: "alice", author: "Alice", avatarUrl: "alice.png" },
+      { id: "bob", author: "bob", avatarUrl: null },
+    ],
+  });
+});
+
+test("buildMainTimelineEntries merges local knowledge over the relay floor", () => {
+  const root = message({ id: "root", createdAt: 1 });
+  const localReply = message({
+    id: "reply",
+    createdAt: 12,
+    parentId: "root",
+    rootId: "root",
+    depth: 1,
+    pubkey: "local",
+    author: "Local",
+  });
+  const summaries = new Map([
+    [
+      "root",
+      {
+        replyCount: 2,
+        descendantCount: 5,
+        lastReplyAt: 10,
+        participantPubkeys: ["relay"],
+      },
+    ],
+  ]);
+
+  const [entry] = buildMainTimelineEntries(
+    [root, localReply],
+    new Set(),
+    summaries,
+  );
+
+  assert.equal(entry.summary?.replyCount, 5);
+  assert.equal(entry.summary?.lastReplyAt, 12);
+  assert.deepEqual(
+    entry.summary?.participants.map((participant) => participant.id),
+    ["relay", "local"],
+  );
 });

@@ -1,12 +1,14 @@
 import * as React from "react";
 
 import { formatDayHeading } from "@/features/messages/lib/dateFormatters";
+import { timelineRowReserveStyle } from "@/features/messages/lib/rowHeightEstimate";
 import {
+  buildTimelineDayGroups,
   buildTimelineItems,
   getTimelineItemKey,
-  resolveActiveDayTimestamp,
-  type TimelineItem,
+  type TimelineNonDayItem,
 } from "@/features/messages/lib/timelineItems";
+import { THREAD_REPLY_ROW_MARGIN_INLINE_REM } from "@/features/messages/lib/threadTreeLayout";
 import { buildMainTimelineEntries } from "@/features/messages/lib/threadPanel";
 import type { MainTimelineEntry } from "@/features/messages/lib/threadPanel";
 import {
@@ -15,15 +17,11 @@ import {
   hasVideoAttachment,
 } from "@/features/messages/lib/videoReviewContext";
 import type { TimelineMessage } from "@/features/messages/types";
+import { canManageMessageForCurrentUser } from "@/features/messages/lib/canManageMessage";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type { ChannelType } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
-import {
-  type ListVirtualizer,
-  VirtualizedList,
-} from "@/shared/ui/VirtualizedList";
 import { DayDivider } from "./DayDivider";
-import { ActiveDayHeader } from "./ActiveDayHeader";
 import { MessageRow } from "./MessageRow";
 import { MessageThreadSummaryRow } from "./MessageThreadSummaryRow";
 import { SystemMessageRow } from "./SystemMessageRow";
@@ -35,6 +33,8 @@ type TimelineMessageListProps = {
   channelName?: string;
   channelType?: ChannelType | null;
   currentPubkey?: string;
+  huddleMemberPubkeys?: readonly string[];
+  huddleMemberPubkeysPending?: boolean;
   /** Event id of the oldest unread top-level message; renders a "New" divider above it. */
   firstUnreadMessageId?: string | null;
   followThreadById?: (rootId: string) => void;
@@ -76,13 +76,6 @@ type TimelineMessageListProps = {
   searchQuery?: string;
   /** Per-thread unread counts keyed by thread root id. */
   threadUnreadCounts?: ReadonlyMap<string, number>;
-  /** Caller-owned scroll container the virtualizer measures and scrolls. */
-  scrollContainerRef: React.RefObject<HTMLElement | null>;
-  /** Non-scrolling overlay container the floating active-day header portals
-   *  into — sits OUTSIDE the scroll container so the header cannot drift. */
-  headerOverlayRef: React.RefObject<HTMLElement | null>;
-  /** Receives the virtualizer instance for index-model scroll paths. */
-  onVirtualizer?: (virtualizer: ListVirtualizer) => void;
 };
 
 export const TimelineMessageList = React.memo(function TimelineMessageList({
@@ -94,6 +87,8 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
   firstUnreadMessageId = null,
   followThreadById,
   highlightedMessageId = null,
+  huddleMemberPubkeys,
+  huddleMemberPubkeysPending = false,
   isFollowingThreadById,
   isMessageUnreadById,
   messageFooters,
@@ -113,9 +108,6 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
   searchQuery,
   threadUnreadCounts,
   unfollowThreadById,
-  scrollContainerRef,
-  headerOverlayRef,
-  onVirtualizer,
 }: TimelineMessageListProps) {
   const entries = React.useMemo(
     () => mainEntries ?? buildMainTimelineEntries(messages),
@@ -167,23 +159,20 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
     reviewCommentsByRootId,
   ]);
 
-  // The flattened item stream and its messageId -> itemIndex map are produced
-  // together from ONE memo, keyed on the entries and the unread boundary (the
-  // unread divider is its own item, so it shifts indices). A separate memo with
-  // diverging deps would let the map go stale and scroll deep-links to the wrong
-  // row — the exact failure virtualization risks.
+  // The flattened item stream, memoized on the entries and the unread boundary
+  // (the unread divider is its own item, so it shifts subsequent rows).
   const itemsResult = React.useMemo(
     () => buildTimelineItems(entries, firstUnreadMessageId),
     [entries, firstUnreadMessageId],
   );
+  const dayGroups = React.useMemo(
+    () => buildTimelineDayGroups(itemsResult.items),
+    [itemsResult.items],
+  );
 
   const renderItem = React.useCallback(
-    (item: TimelineItem) => {
+    (item: TimelineNonDayItem) => {
       switch (item.kind) {
-        case "day-divider":
-          // Heading is resolved at render time (not baked into the item) so
-          // "Today"/"Yesterday" track the wall clock, not build time.
-          return <DayDivider label={formatDayHeading(item.headingTimestamp)} />;
         case "unread-divider":
           return <UnreadDivider />;
         case "system":
@@ -206,6 +195,10 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
               followThreadById={followThreadById}
               footer={messageFooters?.[item.entry.message.id] ?? null}
               highlightedMessageId={highlightedMessageId}
+              huddleMemberPubkeys={huddleMemberPubkeys}
+              huddleMemberPubkeysPending={huddleMemberPubkeysPending}
+              isContinuation={item.isContinuation}
+              isFollowedByContinuation={item.isFollowedByContinuation}
               isFollowingThreadById={isFollowingThreadById}
               isUnread={isMessageUnreadById?.(item.entry.message.id)}
               onDelete={onDelete}
@@ -233,6 +226,8 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
       currentPubkey,
       followThreadById,
       highlightedMessageId,
+      huddleMemberPubkeys,
+      huddleMemberPubkeysPending,
       isFollowingThreadById,
       isMessageUnreadById,
       messageFooters,
@@ -252,36 +247,38 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
     ],
   );
 
-  // The floating active-day header is portaled by VirtualizedList into the
-  // non-scrolling overlay container (outside the scroll element) and is
-  // re-invoked with the topmost visible row index on every scroll. We resolve
-  // that index back to the day it belongs to so the label tracks the viewport
-  // even after that day's in-stream divider has been windowed out.
-  const renderStickyHeader = React.useCallback(
-    (topVisibleIndex: number | null) => {
-      const headingTimestamp = resolveActiveDayTimestamp(
-        itemsResult.items,
-        topVisibleIndex,
-      );
-      if (headingTimestamp === null) {
-        return null;
-      }
-      return <ActiveDayHeader label={formatDayHeading(headingTimestamp)} />;
-    },
-    [itemsResult.items],
-  );
-
   return (
-    <VirtualizedList
-      getItemKey={getTimelineItemKey}
-      headerOverlayRef={headerOverlayRef}
-      innerClassName="flex flex-col"
-      items={itemsResult.items}
-      onVirtualizer={onVirtualizer}
-      renderItem={renderItem}
-      scrollRef={scrollContainerRef}
-      stickyHeader={renderStickyHeader}
-    />
+    <div className="flex flex-col">
+      {dayGroups.map((group) => (
+        <section
+          className={cn(
+            "relative flex flex-col",
+            group.headingTimestamp !== null &&
+              "before:absolute before:inset-x-0 before:top-4 before:h-px before:bg-border/35 before:content-['']",
+          )}
+          data-day-label={
+            group.headingTimestamp === null
+              ? undefined
+              : formatDayHeading(group.headingTimestamp)
+          }
+          data-testid="message-timeline-day-group"
+          key={group.key}
+        >
+          {group.headingTimestamp === null ? null : (
+            <DayDivider label={formatDayHeading(group.headingTimestamp)} />
+          )}
+          {group.items.map((item) => (
+            <div
+              className="timeline-row-cv"
+              key={getTimelineItemKey(item)}
+              style={timelineRowReserveStyle(item)}
+            >
+              {renderItem(item)}
+            </div>
+          ))}
+        </section>
+      ))}
+    </div>
   );
 });
 
@@ -318,6 +315,8 @@ type MessageRowItemProps = Pick<
   | "currentPubkey"
   | "followThreadById"
   | "highlightedMessageId"
+  | "huddleMemberPubkeys"
+  | "huddleMemberPubkeysPending"
   | "isFollowingThreadById"
   | "onDelete"
   | "onEdit"
@@ -334,6 +333,8 @@ type MessageRowItemProps = Pick<
 > & {
   entry: MainTimelineEntry;
   footer: React.ReactNode;
+  isContinuation?: boolean;
+  isFollowedByContinuation?: boolean;
   isUnread?: boolean;
   videoReviewContext: ReturnType<typeof buildVideoReviewContextForMessage>;
 };
@@ -346,6 +347,10 @@ function MessageRowItem({
   followThreadById,
   footer,
   highlightedMessageId,
+  huddleMemberPubkeys,
+  huddleMemberPubkeysPending,
+  isContinuation = false,
+  isFollowedByContinuation = false,
   isFollowingThreadById,
   isUnread,
   onDelete,
@@ -363,21 +368,20 @@ function MessageRowItem({
   videoReviewContext,
 }: MessageRowItemProps) {
   const { message, summary } = entry;
-  const canDelete =
-    onDelete && currentPubkey && message.pubkey === currentPubkey
-      ? onDelete
-      : undefined;
-  const canEdit =
-    onEdit && currentPubkey && message.pubkey === currentPubkey
-      ? onEdit
-      : undefined;
+  const canManage = canManageMessageForCurrentUser(
+    message,
+    currentPubkey,
+    profiles,
+  );
+  const canDelete = canManage && onDelete ? onDelete : undefined;
+  const canEdit = canManage && onEdit ? onEdit : undefined;
 
   if (summary && onReply) {
     const isHighlighted = message.id === highlightedMessageId;
     return (
       <div
         className={cn(
-          "group/message relative mx-1 flex flex-col gap-0 rounded-2xl px-0 py-1 pb-2.5 transition-colors hover:bg-muted/50 focus-within:bg-muted/50",
+          "group/message relative mx-1 mb-1 flex flex-col gap-0 rounded-2xl px-0 py-1 transition-colors hover:bg-muted/50 focus-within:bg-muted/50",
           isHighlighted &&
             "-mx-4 px-4 before:absolute before:-inset-y-1.5 before:inset-x-0 before:animate-[route-target-highlight-fade_2s_ease-out_forwards] before:bg-primary/10 before:content-[''] motion-reduce:before:animate-none sm:-mx-6 sm:px-6",
         )}
@@ -387,12 +391,15 @@ function MessageRowItem({
           channelId={channelId}
           highlighted={false}
           hoverBackground={false}
+          huddleMemberPubkeys={huddleMemberPubkeys}
+          huddleMemberPubkeysPending={huddleMemberPubkeysPending}
           isFollowingThread={
             isFollowingThreadById
               ? isFollowingThreadById(message.id)
               : undefined
           }
           isUnread={isUnread}
+          isContinuation={isContinuation}
           message={message}
           onDelete={canDelete}
           onEdit={canEdit}
@@ -418,6 +425,7 @@ function MessageRowItem({
           onOpenThread={onReply}
           showDepthGuides={false}
           summary={summary}
+          summaryIndentOffsetRem={-THREAD_REPLY_ROW_MARGIN_INLINE_REM}
           unreadCount={threadUnreadCounts?.get(message.id)}
         />
         {footer}
@@ -429,11 +437,19 @@ function MessageRowItem({
   const isSearchActive = message.id === searchActiveMessageId;
 
   return (
-    <div className="flex flex-col gap-1 pb-2.5">
+    <div
+      className={cn(
+        "flex flex-col gap-1",
+        isFollowedByContinuation ? "pb-0" : "pb-2.5",
+      )}
+    >
       <MessageRow
         agentPubkeys={agentPubkeys}
         channelId={channelId}
         highlighted={message.id === highlightedMessageId || isSearchActive}
+        huddleMemberPubkeys={huddleMemberPubkeys}
+        huddleMemberPubkeysPending={huddleMemberPubkeysPending}
+        isContinuation={isContinuation}
         isUnread={isUnread}
         message={message}
         onDelete={canDelete}

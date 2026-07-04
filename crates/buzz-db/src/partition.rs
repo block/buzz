@@ -100,7 +100,7 @@ async fn ensure_partition(
         )));
     }
 
-    let partition_name = format!("{table_name}_{suffix}");
+    let partition_name = format!("{table_name}_p{suffix}");
 
     let row = sqlx::query(
         r#"
@@ -127,10 +127,26 @@ async fn ensure_partition(
          FOR VALUES FROM ('{start_date_str}') TO ('{end_date_str}')"
     );
 
-    sqlx::query(sqlx::AssertSqlSafe(sql)).execute(pool).await?;
-    info!("added partition {partition_name}");
-
-    Ok(())
+    match sqlx::query(sqlx::AssertSqlSafe(sql)).execute(pool).await {
+        Ok(_) => {
+            info!("added partition {partition_name}");
+            Ok(())
+        }
+        Err(sqlx::Error::Database(db_err))
+            if db_err.code().as_deref() == Some("42P17")
+                && db_err.message().contains("would overlap partition") =>
+        {
+            // Fresh schemas include a right-edge catch-all partition (`*_p_future`).
+            // If it already covers this month, the table is still safe for writes;
+            // treat the overlap as "ensured" rather than failing startup.
+            info!(
+                partition_name,
+                "partition range already covered by an existing partition"
+            );
+            Ok(())
+        }
+        Err(e) => Err(e.into()),
+    }
 }
 
 #[cfg(test)]

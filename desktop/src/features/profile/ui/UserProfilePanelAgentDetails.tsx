@@ -1,6 +1,5 @@
-import { ChevronRight, Cpu, MessageSquare } from "lucide-react";
+import { ChevronRight, MessageSquare } from "lucide-react";
 
-import type { ManagedAgent } from "@/shared/api/types";
 import { Markdown } from "@/shared/ui/markdown";
 import {
   type ProfileField,
@@ -15,12 +14,8 @@ export const AGENT_DETAILS_FIELD_LABELS = new Set([
 
 export function AgentConfigurationFocusedView({
   fields,
-  managedAgent,
-  modelLabel,
 }: {
   fields: ProfileField[];
-  managedAgent: ManagedAgent | undefined;
-  modelLabel: string;
 }) {
   const runtimeConfigurationFields = fields.filter((field) =>
     AGENT_DETAILS_FIELD_LABELS.has(field.label),
@@ -28,12 +23,7 @@ export function AgentConfigurationFocusedView({
 
   return (
     <div className="pt-4">
-      <AgentConfigurationRows
-        fields={runtimeConfigurationFields}
-        managedAgent={managedAgent}
-        modelLabel={modelLabel}
-        showModel={true}
-      />
+      <AgentConfigurationRows fields={runtimeConfigurationFields} />
     </div>
   );
 }
@@ -41,25 +31,16 @@ export function AgentConfigurationFocusedView({
 function AgentConfigurationRows({
   fields,
   instruction,
-  managedAgent,
-  modelLabel,
   showInstructionPlaceholder,
-  showModel,
 }: {
   fields: ProfileField[];
   instruction?: string | null;
-  managedAgent: ManagedAgent | undefined;
-  modelLabel: string;
   showInstructionPlaceholder?: boolean;
-  showModel: boolean;
 }) {
   const hasRows = hasAgentConfigurationRows({
     fields,
     instruction,
-    managedAgent,
-    modelLabel,
     showInstructionPlaceholder,
-    showModel,
   });
 
   if (!hasRows) {
@@ -71,10 +52,7 @@ function AgentConfigurationRows({
       <AgentDetailsRows
         fields={fields}
         instruction={instruction}
-        managedAgent={managedAgent}
-        modelLabel={modelLabel}
         showInstructionPlaceholder={showInstructionPlaceholder}
-        showModel={showModel}
       />
     </div>
   );
@@ -83,26 +61,17 @@ function AgentConfigurationRows({
 export function AgentDetailsRows({
   fields,
   instruction,
-  managedAgent,
-  modelLabel,
   showInstructionPlaceholder,
-  showModel = false,
 }: {
   fields: ProfileField[];
   instruction?: string | null;
-  managedAgent?: ManagedAgent | undefined;
-  modelLabel?: string;
   showInstructionPlaceholder?: boolean;
-  showModel?: boolean;
 }) {
   const trimmedInstruction = instruction?.trim() ?? "";
   const showInstructions =
     trimmedInstruction.length > 0 || showInstructionPlaceholder === true;
-  const showModelRow =
-    showModel === true &&
-    (managedAgent !== undefined || (modelLabel?.trim().length ?? 0) > 0);
 
-  if (!showInstructions && !showModelRow && fields.length === 0) {
+  if (!showInstructions && fields.length === 0) {
     return null;
   }
 
@@ -110,10 +79,6 @@ export function AgentDetailsRows({
     <>
       {showInstructions ? (
         <AgentInstructionRow instruction={instruction ?? null} />
-      ) : null}
-
-      {showModelRow ? (
-        <AgentModelRow modelLabel={modelLabel ?? "Auto"} />
       ) : null}
 
       {fields.length > 0 ? <ProfileFieldRows fields={fields} /> : null}
@@ -124,25 +89,17 @@ export function AgentDetailsRows({
 function hasAgentConfigurationRows({
   fields,
   instruction,
-  managedAgent,
-  modelLabel,
   showInstructionPlaceholder,
-  showModel,
 }: {
   fields: ProfileField[];
   instruction?: string | null;
-  managedAgent: ManagedAgent | undefined;
-  modelLabel: string;
   showInstructionPlaceholder?: boolean;
-  showModel: boolean;
 }) {
   const trimmedInstruction = instruction?.trim() ?? "";
 
   return (
     trimmedInstruction.length > 0 ||
     showInstructionPlaceholder === true ||
-    (showModel === true &&
-      (managedAgent !== undefined || modelLabel.trim().length > 0)) ||
     fields.length > 0
   );
 }
@@ -240,25 +197,6 @@ export function AgentInstructionsFocusedView({
           </p>
         )}
       </div>
-    </div>
-  );
-}
-
-function AgentModelRow({ modelLabel }: { modelLabel: string }) {
-  return (
-    <div
-      className="flex items-center gap-3 px-4 py-3"
-      data-testid="user-profile-model"
-    >
-      <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-muted/60">
-        <Cpu className="h-4 w-4 text-muted-foreground" />
-      </span>
-      <span className="min-w-0 flex-1">
-        <span className="block text-xs font-medium text-foreground">Model</span>
-        <span className="mt-0.5 block truncate text-sm text-muted-foreground">
-          {modelLabel}
-        </span>
-      </span>
     </div>
   );
 }

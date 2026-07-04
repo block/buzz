@@ -26,6 +26,7 @@ class SettingsPage extends HookConsumerWidget {
     final config = ref.watch(relayConfigProvider);
     final selectedAccent = ref.watch(accentProvider);
     final selectedScheme = ref.watch(schemeProvider);
+    final colorScheme = context.colors;
     final packageInfoFuture = useMemoized(() => PackageInfo.fromPlatform());
     final packageInfo = useFuture(packageInfoFuture);
 
@@ -53,7 +54,7 @@ class SettingsPage extends HookConsumerWidget {
                       icon: LucideIcons.palette,
                       title: 'Color Scheme',
                       subtitle: selectedScheme == null
-                          ? 'Default (Catppuccin)'
+                          ? 'Default ($defaultSchemeDisplayName)'
                           : findTheme(selectedScheme)?.displayName ??
                                 selectedScheme,
                       trailing: Icon(
@@ -69,9 +70,9 @@ class SettingsPage extends HookConsumerWidget {
                     ),
                     Padding(
                       padding: const EdgeInsets.fromLTRB(
-                        Grid.xs,
+                        Grid.gutter,
                         Grid.xxs,
-                        Grid.xs,
+                        Grid.gutter,
                         Grid.twelve,
                       ),
                       child: Column(
@@ -88,26 +89,9 @@ class SettingsPage extends HookConsumerWidget {
                             spacing: Grid.xxs,
                             runSpacing: Grid.xxs,
                             children: [
-                              // Default (Mauve) swatch
-                              _AccentSwatch(
-                                color:
-                                    context.colors.brightness ==
-                                        Brightness.light
-                                    ? const Color(0xFF8839EF)
-                                    : const Color(0xFFA875F5),
-                                label: 'Mauve',
-                                selected: selectedAccent == defaultAccentIndex,
-                                onTap: () => ref
-                                    .read(accentProvider.notifier)
-                                    .setAccent(defaultAccentIndex),
-                              ),
                               for (var i = 0; i < accentColors.length; i++)
                                 _AccentSwatch(
-                                  color:
-                                      context.colors.brightness ==
-                                          Brightness.light
-                                      ? accentColors[i].light
-                                      : accentColors[i].dark,
+                                  color: accentColorForScheme(colorScheme, i),
                                   label: accentColors[i].name,
                                   selected: selectedAccent == i,
                                   onTap: () => ref
@@ -226,9 +210,7 @@ class SettingsPage extends HookConsumerWidget {
               Navigator.of(context).popUntil((route) => route.isFirst);
               ref.read(authProvider.notifier).signOut();
             },
-            style: FilledButton.styleFrom(
-              backgroundColor: Theme.of(ctx).colorScheme.error,
-            ),
+            style: FilledButton.styleFrom(backgroundColor: ctx.colors.error),
             child: const Text('Remove'),
           ),
         ],
