@@ -159,6 +159,19 @@ def load_state() -> dict[str, str]:
     return state
 
 
+def print_user_identity(state: dict[str, str]) -> None:
+    """Show the pinned benchmark user's key so a human can import it during
+    the desktop GUI's onboarding (this stack is local-only; the key guards
+    nothing beyond it)."""
+    from harbor_buzz_testbed.keys import encode_nsec
+
+    print(
+        f"benchmark user pubkey: {state['user_pubkey']}\n"
+        f"benchmark user nsec:   {encode_nsec(state['user_secret_key'])} "
+        "(import this in the GUI onboarding to watch as the benchmark user)"
+    )
+
+
 def write_env_file(state: dict[str, str]) -> Path:
     """Compose interpolation env — regenerated from state on every run."""
     env_path = STATE_DIR / ".env"
@@ -468,6 +481,7 @@ def leaderboard_argv(
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     state = load_state()
+    print_user_identity(state)
     write_env_file(state)
     provisioner_config = write_provisioner_config(state, args.endpoint_config)
 
