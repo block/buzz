@@ -225,67 +225,148 @@ pub async fn update_persona(
     app: AppHandle,
 ) -> Result<PersonaRecord, String> {
     use tauri::Manager;
-    tokio::task::spawn_blocking(move || {
-        let state = app.state::<AppState>();
-        let display_name = trim_required(&input.display_name, "Display name")?;
-        // Do not trim system_prompt: `compose_prompt` appends pack_instructions
-        // verbatim (including any trailing newline), and write_back_persona_md
-        // decomposes by suffix-stripping. Trimming would break that exact-suffix
-        // match for the common case where instructions.md has a trailing newline.
-        let system_prompt = input.system_prompt.clone();
-        let avatar_url = trim_optional(input.avatar_url);
-        let runtime = trim_optional(input.runtime);
-        let model = trim_optional(input.model);
-        let provider = trim_optional(input.provider);
 
-        let _store_guard = state
-            .managed_agents_store_lock
-            .lock()
-            .map_err(|error| error.to_string())?;
-        let mut personas = load_personas(&app)?;
-        let persona = personas
-            .iter_mut()
-            .find(|record| record.id == input.id)
-            .ok_or_else(|| format!("persona {} not found", input.id))?;
+    /// Profile sync params collected under the store lock for async relay publish.
+    type ProfileSyncParams = Vec<(nostr::Keys, String, String, Option<String>, Option<String>)>;
 
-        if persona.is_builtin {
-            return Err("Built-in personas cannot be edited.".to_string());
+    // Phase 1: synchronous save (persona record + linked agent avatar updates)
+    let (result, profile_sync_params) = tokio::task::spawn_blocking({
+        let app = app.clone();
+        move || -> Result<(PersonaRecord, ProfileSyncParams), String> {
+            let state = app.state::<AppState>();
+            let display_name = trim_required(&input.display_name, "Display name")?;
+            // Do not trim system_prompt: `compose_prompt` appends pack_instructions
+            // verbatim (including any trailing newline), and write_back_persona_md
+            // decomposes by suffix-stripping. Trimming would break that exact-suffix
+            // match for the common case where instructions.md has a trailing newline.
+            let system_prompt = input.system_prompt.clone();
+            let avatar_url = trim_optional(input.avatar_url);
+            let runtime = trim_optional(input.runtime);
+            let model = trim_optional(input.model);
+            let provider = trim_optional(input.provider);
+
+            let _store_guard = state
+                .managed_agents_store_lock
+                .lock()
+                .map_err(|error| error.to_string())?;
+            let mut personas = load_personas(&app)?;
+            let persona = personas
+                .iter_mut()
+                .find(|record| record.id == input.id)
+                .ok_or_else(|| format!("persona {} not found", input.id))?;
+
+            if persona.is_builtin {
+                return Err("Built-in personas cannot be edited.".to_string());
+            }
+
+            // Track whether avatar changed so we can sync linked agents.
+            let avatar_changed = persona.avatar_url != avatar_url;
+
+            persona.display_name = display_name;
+            persona.avatar_url = avatar_url;
+            persona.system_prompt = system_prompt;
+            persona.runtime = runtime;
+            persona.model = model;
+            persona.provider = provider;
+            persona.name_pool = input
+                .name_pool
+                .into_iter()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            if let Some(env_vars) = input.env_vars {
+                crate::managed_agents::validate_user_env_keys(&env_vars)?;
+                persona.env_vars = env_vars;
+            }
+            persona.updated_at = now_iso();
+
+            save_personas(&app, &personas)?;
+            let result = personas
+                .into_iter()
+                .find(|record| record.id == input.id)
+                .ok_or_else(|| format!("persona {} disappeared unexpectedly", input.id))?;
+
+            // For pack-backed personas, also write the edit back to the source
+            // `.persona.md` so that launch sync (which reads the file) becomes a
+            // no-op rather than overwriting the record we just saved.
+            write_back_persona_md(&app, &result);
+
+            retain_persona_pending(&app, &state, &result);
+            try_regenerate_nest(&app);
+
+            // If the avatar changed, propagate to linked agent records and
+            // collect relay profile sync params for the async phase.
+            let sync_params: ProfileSyncParams = if avatar_changed {
+                let mut records = load_managed_agents(&app)?;
+                let mut params: ProfileSyncParams = Vec::new();
+                let mut agents_modified = false;
+                let workspace_relay = crate::relay::relay_ws_url_with_override(&state);
+
+                for record in records.iter_mut() {
+                    if record.persona_id.as_deref() != Some(&result.id) {
+                        continue;
+                    }
+                    // Update the persisted avatar so reconciliation on next
+                    // start agrees with what we're about to publish.
+                    record.avatar_url = result.avatar_url.clone();
+                    agents_modified = true;
+
+                    if let Ok(agent_keys) = nostr::Keys::parse(&record.private_key_nsec) {
+                        let relay_url = crate::relay::effective_agent_relay_url(
+                            &record.relay_url,
+                            &workspace_relay,
+                        );
+                        params.push((
+                            agent_keys,
+                            relay_url,
+                            record.name.clone(),
+                            record.avatar_url.clone(),
+                            record.auth_tag.clone(),
+                        ));
+                    }
+                }
+
+                if agents_modified {
+                    save_managed_agents(&app, &records)?;
+                }
+
+                params
+            } else {
+                Vec::new()
+            };
+
+            Ok((result, sync_params))
         }
-        persona.display_name = display_name;
-        persona.avatar_url = avatar_url;
-        persona.system_prompt = system_prompt;
-        persona.runtime = runtime;
-        persona.model = model;
-        persona.provider = provider;
-        persona.name_pool = input
-            .name_pool
-            .into_iter()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect();
-        if let Some(env_vars) = input.env_vars {
-            crate::managed_agents::validate_user_env_keys(&env_vars)?;
-            persona.env_vars = env_vars;
-        }
-        persona.updated_at = now_iso();
-
-        save_personas(&app, &personas)?;
-        let result = personas
-            .into_iter()
-            .find(|record| record.id == input.id)
-            .ok_or_else(|| format!("persona {} disappeared unexpectedly", input.id))?;
-
-        // For pack-backed personas, also write the edit back to the source
-        // `.persona.md` so that launch sync (which reads the file) becomes a
-        // no-op rather than overwriting the record we just saved.
-        write_back_persona_md(&app, &result);
-
-        retain_persona_pending(&app, &state, &result);
-        try_regenerate_nest(&app);
-        Ok(result)
     })
     .await
-    .map_err(|e| format!("spawn_blocking failed: {e}"))?
+    .map_err(|e| format!("spawn_blocking failed: {e}"))??;
+
+    // Phase 2: fire-and-forget relay profile sync for linked agents whose
+    // avatar was just updated. Best-effort — failures are logged, not surfaced.
+    if !profile_sync_params.is_empty() {
+        let sync_app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            let state = sync_app.state::<AppState>();
+            for (agent_keys, relay_url, display_name, avatar_url, auth_tag) in profile_sync_params {
+                if let Err(e) = crate::relay::sync_managed_agent_profile(
+                    &state,
+                    &relay_url,
+                    &agent_keys,
+                    &display_name,
+                    avatar_url.as_deref(),
+                    auth_tag.as_deref(),
+                )
+                .await
+                {
+                    eprintln!(
+                        "buzz-desktop: relay profile sync failed after persona avatar update: {e}"
+                    );
+                }
+            }
+        });
+    }
+
+    Ok(result)
 }
 
 mod writeback;

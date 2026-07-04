@@ -330,6 +330,12 @@ export function useUpdatePersonaMutation() {
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: personasQueryKey }),
         queryClient.invalidateQueries({ queryKey: managedAgentsQueryKey }),
+        // Persona avatar changes re-sync linked agents' relay profiles;
+        // invalidate cached user-profile queries so the UI picks up the
+        // updated kind:0 picture without waiting for staleTime expiry.
+        queryClient.invalidateQueries({
+          predicate: (query) => query.queryKey[0] === "user-profile",
+        }),
       ]);
     },
   });
