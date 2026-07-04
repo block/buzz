@@ -81,6 +81,7 @@ import { hasPrimaryShortcutModifier } from "@/shared/lib/platform";
 import { useMessageDeepLinks } from "@/shared/useMessageDeepLinks";
 import { SidebarInset, SidebarProvider } from "@/shared/ui/sidebar";
 import { RelayConnectionOverlay } from "@/app/RelayConnectionOverlay";
+import { useSidebarRelayConnectionCard } from "@/features/sidebar/ui/useSidebarRelayConnectionCard";
 
 const LazySettingsScreen = React.lazy(async () => {
   const module = await import("@/features/settings/ui/SettingsScreen");
@@ -180,6 +181,10 @@ export function AppShell() {
     channelsQuery.error instanceof Error
       ? channelsQuery.error.message
       : undefined;
+  const relayConnectionCard = useSidebarRelayConnectionCard(
+    channelsErrorMessage,
+    workspacesHook.activeWorkspace?.relayUrl,
+  );
   const memberChannels = React.useMemo(
     () => channels.filter((channel) => channel.isMember),
     [channels],
@@ -688,6 +693,7 @@ export function AppShell() {
                           fallbackDisplayName={identityQuery.data?.displayName}
                           homeBadgeCount={homeBadgeCount + dueReminderBadge}
                           isAddWorkspaceOpen={isAddWorkspaceOpen}
+                          relayConnectionCard={relayConnectionCard}
                           isCreatingChannel={createChannelMutation.isPending}
                           isCreatingForum={createForumMutation.isPending}
                           isLoading={channelsQuery.isLoading}
@@ -826,13 +832,12 @@ export function AppShell() {
                           </SidebarInset>
                         </MainInsetProvider>
                         <RelayConnectionOverlay
-                          errorMessage={channelsErrorMessage}
+                          card={relayConnectionCard}
                           hasWorkspaceRail={
                             workspaceRailEnabled &&
                             workspacesHook.workspaces.length > 1
                           }
                           isHuddleDrawerOpen={isHuddleDrawerOpen}
-                          relayUrl={workspacesHook.activeWorkspace?.relayUrl}
                         />
                       </div>
                     )}

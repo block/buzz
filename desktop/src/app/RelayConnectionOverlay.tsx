@@ -1,16 +1,15 @@
 import { AnimatePresence, motion } from "motion/react";
 
 import { SidebarRelayConnectionCard } from "@/features/sidebar/ui/SidebarRelayConnectionCard";
-import { useSidebarRelayConnectionCard } from "@/features/sidebar/ui/useSidebarRelayConnectionCard";
+import type { useSidebarRelayConnectionCard } from "@/features/sidebar/ui/useSidebarRelayConnectionCard";
 import { cn } from "@/shared/lib/cn";
 import { useIsMobile } from "@/shared/hooks/use-mobile";
 import { useSidebar } from "@/shared/ui/sidebar";
 
 type RelayConnectionOverlayProps = {
-  errorMessage?: string;
+  card: ReturnType<typeof useSidebarRelayConnectionCard>;
   hasWorkspaceRail?: boolean;
   isHuddleDrawerOpen?: boolean;
-  relayUrl?: string | null;
 };
 
 /**
@@ -20,12 +19,10 @@ type RelayConnectionOverlayProps = {
  * the workspace rail (48px) and huddle drawer when present.
  */
 export function RelayConnectionOverlay({
-  errorMessage,
+  card,
   hasWorkspaceRail,
   isHuddleDrawerOpen,
-  relayUrl,
 }: RelayConnectionOverlayProps) {
-  const card = useSidebarRelayConnectionCard(errorMessage, relayUrl);
   const { open: sidebarOpen, openMobile } = useSidebar();
   const isMobile = useIsMobile();
 
