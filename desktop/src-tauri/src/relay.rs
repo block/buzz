@@ -382,12 +382,21 @@ pub async fn sync_managed_agent_profile(
     avatar_url: Option<&str>,
     auth_tag: Option<&str>, // NIP-OA auth tag JSON
 ) -> Result<(), String> {
+    // Fail loudly on a blank relay URL — callers must resolve via `effective_agent_relay_url` first.
+    let base = relay_http_base_url(relay_url);
+    if base.is_empty() {
+        return Err(
+            "no relay configured for profile sync (resolve the agent's relay URL first)"
+                .to_string(),
+        );
+    }
+
     // Build a signed kind:0 profile event (with optional NIP-OA auth tag).
     let event = build_profile_event(agent_keys, display_name, avatar_url, auth_tag)?;
     let event_json = event.as_json();
     let body_bytes = event_json.into_bytes();
 
-    let url = format!("{}/events", relay_http_base_url(relay_url));
+    let url = format!("{}/events", base);
     let auth = build_nip98_auth_header_for_keys(agent_keys, &Method::POST, &url, &body_bytes)?;
 
     let mut request = state
@@ -706,6 +715,30 @@ mod tests {
             relay_http_base_url("wss://localhost:3000"),
             "https://localhost:3000"
         );
+    }
+
+    #[test]
+    fn blank_relay_http_base_is_empty() {
+        // A blank relay URL has no scheme to rewrite, so the HTTP base is empty.
+        assert_eq!(relay_http_base_url(""), "");
+        assert_eq!(relay_http_base_url("   "), "");
+    }
+
+    #[test]
+    fn ui_created_agent_blank_relay_resolves_to_reachable_host() {
+        // A blank per-agent relay (the UI create case) resolves through
+        // `effective_agent_relay_url` to a real workspace host, not a hostless base.
+        let resolved_relay_url = ""; // UI create flow: no per-agent relay pinned
+        let workspace_relay = "wss://staging.example.com";
+
+        let sync_relay_url = effective_agent_relay_url(resolved_relay_url, workspace_relay);
+        let base = relay_http_base_url(&sync_relay_url);
+
+        assert!(
+            !base.is_empty(),
+            "blank per-agent relay must resolve to a real workspace host, not a hostless base"
+        );
+        assert_eq!(base, "https://staging.example.com");
     }
 
     // ── classify_intercepted_response ────────────────────────────────────────

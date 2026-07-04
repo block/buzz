@@ -886,9 +886,14 @@ pub async fn create_managed_agent(
     // ── Phase 4: sync agent profile on relay (async, outside lock) ───────────
     // Use the avatar persisted on the record so the published profile and any
     // later reconciliation agree on the same value.
+    // Blank per-agent relay falls back to the workspace relay (matches reconcile/rename).
+    let sync_relay_url = crate::relay::effective_agent_relay_url(
+        &resolved_relay_url,
+        &relay_ws_url_with_override(&state),
+    );
     let profile_sync_error = (sync_managed_agent_profile(
         &state,
-        &resolved_relay_url,
+        &sync_relay_url,
         &agent_keys,
         &name,
         resolved_avatar_url.as_deref(),
