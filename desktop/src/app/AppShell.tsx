@@ -79,8 +79,8 @@ import { chromeCssVarDefaults } from "@/shared/layout/chromeLayout";
 import { cn } from "@/shared/lib/cn";
 import { hasPrimaryShortcutModifier } from "@/shared/lib/platform";
 import { useMessageDeepLinks } from "@/shared/useMessageDeepLinks";
-import { ConnectionBanner } from "@/shared/ui/ConnectionBanner";
 import { SidebarInset, SidebarProvider } from "@/shared/ui/sidebar";
+import { RelayConnectionOverlay } from "@/app/RelayConnectionOverlay";
 
 const LazySettingsScreen = React.lazy(async () => {
   const module = await import("@/features/settings/ui/SettingsScreen");
@@ -821,13 +821,14 @@ export function AppShell() {
                             style={chromeCssVarDefaults}
                           >
                             <div className="relative z-10 mb-2 ml-px mr-2 mt-px flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl bg-background shadow-[-1px_-1px_0_0_hsl(var(--sidebar-border)/0.45)]">
-                              <ConnectionBanner
-                                errorMessage={channelsErrorMessage}
-                              />
                               <Outlet />
                             </div>
                           </SidebarInset>
                         </MainInsetProvider>
+                        <RelayConnectionOverlay
+                          errorMessage={channelsErrorMessage}
+                          relayUrl={workspacesHook.activeWorkspace?.relayUrl}
+                        />
                       </div>
                     )}
                     <AppShellOverlays

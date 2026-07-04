@@ -1,7 +1,7 @@
 // biome-ignore format: keep compact to stay within file size limit
 import { MessageCirclePlus } from "lucide-react";
-import * as React from "react";
 import { AnimatePresence } from "motion/react";
+import * as React from "react";
 import { FeatureGate } from "@/shared/features";
 import { SidebarDndContext } from "@/features/sidebar/ui/SidebarDnd";
 
@@ -765,7 +765,7 @@ export function AppSidebar({
             <AnimatePresence>
               {sidebarRelayConnectionCard.showSidebarRelayConnectionCard ? (
                 <SidebarRelayConnectionCard
-                  className="mb-2 group-data-[collapsible=icon]:hidden"
+                  className="mb-2"
                   isConnected={
                     sidebarRelayConnectionCard.isRelayConnectionSuccess
                   }

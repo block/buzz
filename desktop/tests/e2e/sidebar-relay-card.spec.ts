@@ -133,14 +133,12 @@ test("sidebar access failures use the reconnect card", async ({ page }) => {
   await expectGenericReconnectCard(page);
 });
 
-test("collapsed sidebar relay failures use the connection banner", async ({
-  page,
-}) => {
+test("collapsed sidebar still shows the reconnect card", async ({ page }) => {
   await installMockBridge(page, { channelsReadError: CONNECT_ERROR });
 
   await page.goto("/");
 
-  // Drive degraded state so the card (and subsequently banner) appears.
+  // Drive degraded state so the card appears.
   await setRelayConnectionState(page, "disconnected");
 
   await expectGenericReconnectCard(page);
@@ -152,15 +150,17 @@ test("collapsed sidebar relay failures use the connection banner", async ({
     page.locator('[data-state="collapsed"][data-collapsible="offcanvas"]'),
   ).toHaveCount(1);
 
-  const banner = page.getByTestId("connection-banner");
-  await expect(banner).toBeVisible();
-  await expect(banner).toContainText("Can't reach the relay.");
+  // The card remains visible via the fixed overlay even with sidebar collapsed.
+  const card = page.getByTestId("sidebar-relay-unreachable");
+  await expect(card).toBeVisible();
+  await expect(card).toContainText("Can't reach the relay");
 
   await setChannelsReadError(page, null);
-  await page.getByTestId("connection-banner-reconnect").click();
-  // Drive connected so the banner shows "Connected" and auto-dismisses.
+  await page.getByTestId("sidebar-reconnect").click();
+  // Drive connected so the card shows success and auto-dismisses.
   await setRelayConnectionState(page, "connected");
-  await expect(banner).toBeHidden({ timeout: 10_000 });
+  await expect(card).toContainText("Connected");
+  await expect(card).toBeHidden({ timeout: 10_000 });
 });
 
 test("sidebar stalled relay state uses the reconnect card", async ({
