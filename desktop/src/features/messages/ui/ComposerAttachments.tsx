@@ -276,7 +276,7 @@ const MediaAttachmentItem = React.forwardRef<
               {mode === "view" ? (
                 <div className="absolute right-4 top-4 flex items-center gap-2">
                   {canRevert ? (
-                    <Tooltip>
+                    <Tooltip disableHoverableContent>
                       <TooltipTrigger asChild>
                         <Button
                           data-testid="composer-attachment-revert"
@@ -291,7 +291,7 @@ const MediaAttachmentItem = React.forwardRef<
                     </Tooltip>
                   ) : null}
                   {onToggleSpoiler ? (
-                    <Tooltip>
+                    <Tooltip disableHoverableContent>
                       <TooltipTrigger asChild>
                         <Toggle
                           aria-label={
@@ -316,7 +316,7 @@ const MediaAttachmentItem = React.forwardRef<
                     </Tooltip>
                   ) : null}
                   {canEdit ? (
-                    <Tooltip>
+                    <Tooltip disableHoverableContent>
                       <TooltipTrigger asChild>
                         <button
                           type="button"
@@ -340,7 +340,7 @@ const MediaAttachmentItem = React.forwardRef<
             </DialogPrimitive.Content>
           </DialogPrimitive.Portal>
         </DialogPrimitive.Root>
-        <Tooltip>
+        <Tooltip disableHoverableContent>
           <TooltipTrigger asChild>
             <button
               type="button"
@@ -421,7 +421,7 @@ export const ComposerAttachments = React.memo(function ComposerAttachments({
                       {label}
                     </span>
                   </div>
-                  <Tooltip>
+                  <Tooltip disableHoverableContent>
                     <TooltipTrigger asChild>
                       <button
                         type="button"
@@ -494,7 +494,7 @@ export const ComposerAttachments = React.memo(function ComposerAttachments({
                     </div>
                   </div>
                   {onCancelUpload && preview.id >= 0 ? (
-                    <Tooltip>
+                    <Tooltip disableHoverableContent>
                       <TooltipTrigger asChild>
                         <button
                           type="button"

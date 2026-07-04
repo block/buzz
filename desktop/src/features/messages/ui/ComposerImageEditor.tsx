@@ -403,7 +403,7 @@ export function ComposerImageEditor({
             ))}
           </div>
 
-          <Tooltip>
+          <Tooltip disableHoverableContent>
             <TooltipTrigger asChild>
               <button
                 aria-label="Undo last stroke"
@@ -417,7 +417,7 @@ export function ComposerImageEditor({
             </TooltipTrigger>
             <TooltipContent>Undo (⌘Z)</TooltipContent>
           </Tooltip>
-          <Tooltip>
+          <Tooltip disableHoverableContent>
             <TooltipTrigger asChild>
               <button
                 aria-label="Redo stroke"

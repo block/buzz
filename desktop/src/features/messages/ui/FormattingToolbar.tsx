@@ -281,7 +281,7 @@ export const FormattingToolbar = React.memo(function FormattingToolbar({
   return (
     <div className="flex items-center gap-0.5">
       {items.map((item) => (
-        <Tooltip key={item.label}>
+        <Tooltip key={item.label} disableHoverableContent>
           <TooltipTrigger asChild>
             <button
               type="button"

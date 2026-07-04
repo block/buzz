@@ -88,7 +88,7 @@ export const MessageComposerToolbar = React.memo(
                   exit={{ x: 8, opacity: 0 }}
                   transition={presenceSpring}
                 >
-                  <Tooltip>
+                  <Tooltip disableHoverableContent>
                     <TooltipTrigger asChild>
                       <Button
                         aria-label="Toggle formatting"
@@ -113,7 +113,7 @@ export const MessageComposerToolbar = React.memo(
                   exit={{ opacity: 0, scale: 0.95 }}
                   transition={{ ...presenceSpring, delay: 0.15 }}
                 >
-                  <Tooltip>
+                  <Tooltip disableHoverableContent>
                     <TooltipTrigger asChild>
                       <Button
                         aria-label="Close formatting"
@@ -158,7 +158,15 @@ export const MessageComposerToolbar = React.memo(
                 exit={{ opacity: 0, x: -12 }}
                 transition={presenceSpring}
               >
-                <Tooltip>
+                {/*
+                 * Composer tooltips float over the message textarea, so they
+                 * set disableHoverableContent: without it, Radix keeps the
+                 * tooltip open when the cursor slides off the trigger onto
+                 * the popup, leaving it camped over the editor. With it, the
+                 * tooltip dismisses the instant the pointer leaves the
+                 * trigger.
+                 */}
+                <Tooltip disableHoverableContent>
                   <TooltipTrigger asChild>
                     <Button
                       aria-label="Mention someone"
@@ -175,7 +183,7 @@ export const MessageComposerToolbar = React.memo(
                   </TooltipTrigger>
                   <TooltipContent>Mention someone</TooltipContent>
                 </Tooltip>
-                <Tooltip>
+                <Tooltip disableHoverableContent>
                   <TooltipTrigger asChild>
                     <Button
                       aria-label="Attach image"
@@ -205,7 +213,7 @@ export const MessageComposerToolbar = React.memo(
                   exit={{ x: -8, opacity: 0 }}
                   transition={presenceSpring}
                 >
-                  <Tooltip>
+                  <Tooltip disableHoverableContent>
                     <TooltipTrigger asChild>
                       <Button
                         aria-label="Toggle formatting"
