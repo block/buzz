@@ -264,7 +264,10 @@ export function SidebarCompactActionCard({
         type="button"
       >
         <motion.span
-          className="relative top-[0.1875rem] flex min-h-10 min-w-0 flex-1 flex-col justify-center"
+          className={cn(
+            "relative flex min-h-10 min-w-0 flex-1 flex-col justify-center",
+            description && "top-[0.1875rem]",
+          )}
           layout="position"
           transition={contentTransition}
         >
