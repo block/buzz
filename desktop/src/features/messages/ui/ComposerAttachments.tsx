@@ -1,6 +1,7 @@
 import * as React from "react";
 import { AnimatePresence, LayoutGroup, motion } from "motion/react";
-import { FileText, HatGlasses, Play, X } from "lucide-react";
+import * as DialogPrimitive from "@radix-ui/react-dialog";
+import { FileText, HatGlasses, Pencil, Play, X } from "lucide-react";
 
 import type { BlobDescriptor } from "@/shared/api/tauri";
 import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
@@ -9,10 +10,12 @@ import {
   type UploadingAttachmentPreview,
 } from "@/features/messages/lib/useMediaUpload";
 import { cn } from "@/shared/lib/cn";
-import { SimpleImageLightbox } from "@/shared/ui/SimpleImageLightbox";
+import { Button } from "@/shared/ui/button";
+import { MODAL_BACKDROP_BLUR_CLASS } from "@/shared/ui/modalBackdrop";
 import { Progress } from "@/shared/ui/progress";
 import { Toggle } from "@/shared/ui/toggle";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
+import { ComposerImageEditor } from "./ComposerImageEditor";
 
 /** Dashed-border overlay shown when a file is dragged over the composer form. */
 export function DropZoneOverlay({ className }: { className?: string }) {
@@ -36,7 +39,13 @@ type ComposerAttachmentsProps = {
   onCancelUpload?: (previewId: number) => void;
   uploadingCount?: number;
   uploadingPreviews?: UploadingAttachmentPreview[];
+  /** Upload annotated bytes as a replacement for the attachment at `url`. */
+  onEditSave?: (url: string, bytes: Uint8Array) => Promise<void>;
   onRemove: (url: string) => void;
+  /** Restore the pre-edit original for an annotated attachment. */
+  onRevert?: (url: string) => void;
+  /** Annotated attachment URL → original (pre-edit) URL. */
+  originalUrlByUrl?: ReadonlyMap<string, string>;
   onToggleSpoiler?: (url: string) => void;
   spoileredUrls?: ReadonlySet<string>;
 };
@@ -54,6 +63,300 @@ function composerMediaStyle(): React.CSSProperties {
   };
 }
 
+type MediaAttachmentItemProps = {
+  attachment: BlobDescriptor;
+  isSpoilered: boolean;
+  onEditSave?: (url: string, bytes: Uint8Array) => Promise<void>;
+  onRemove: (url: string) => void;
+  onRevert?: (url: string) => void;
+  onToggleSpoiler?: (url: string) => void;
+  /** Set when this attachment is an annotated replacement of an original. */
+  originalUrl?: string;
+};
+
+/**
+ * A single image/video attachment thumbnail with its lightbox dialog.
+ * Images support an in-lightbox canvas edit mode (freehand drawing) and,
+ * once annotated, an in-place revert to the original. Saving a drawing
+ * closes the dialog (each save uploads a new blob, so the close adds
+ * friction against rapid re-edit cycles); revert keeps it open (the
+ * parent keys this item by its original URL so the swap doesn't remount
+ * it).
+ *
+ * Forwards its ref to the root motion.div — required by the parent
+ * `AnimatePresence mode="popLayout"`, which measures exiting children.
+ */
+const MediaAttachmentItem = React.forwardRef<
+  HTMLDivElement,
+  MediaAttachmentItemProps
+>(function MediaAttachmentItem(
+  {
+    attachment,
+    isSpoilered,
+    onEditSave,
+    onRemove,
+    onRevert,
+    onToggleSpoiler,
+    originalUrl,
+  },
+  ref,
+) {
+  const [open, setOpen] = React.useState(false);
+  const [mode, setMode] = React.useState<"view" | "edit">("view");
+
+  const hash = shortHash(attachment.sha256);
+  const isVideo = attachment.type.startsWith("video/");
+  const thumbUrl = attachment.thumb
+    ? rewriteRelayUrl(attachment.thumb)
+    : rewriteRelayUrl(attachment.url);
+  const videoPosterUrl = attachment.image
+    ? rewriteRelayUrl(attachment.image)
+    : attachment.thumb
+      ? rewriteRelayUrl(attachment.thumb)
+      : undefined;
+
+  const canEdit = !isVideo && onEditSave !== undefined;
+  const canRevert =
+    !isVideo && onRevert !== undefined && originalUrl !== undefined;
+
+  const handleOpenChange = React.useCallback((next: boolean) => {
+    setOpen(next);
+    if (!next) setMode("view");
+  }, []);
+
+  const handleEscapeKeyDown = React.useCallback(
+    (event: KeyboardEvent) => {
+      if (mode === "edit") {
+        // Escape leaves canvas mode but keeps the lightbox open.
+        event.preventDefault();
+        setMode("view");
+      }
+    },
+    [mode],
+  );
+
+  const handleEditorSave = React.useCallback(
+    async (bytes: Uint8Array) => {
+      if (!onEditSave) return;
+      await onEditSave(attachment.url, bytes);
+      // Close the lightbox on save. Each save uploads a fresh blob, so the
+      // added friction of reopening discourages rapid save/redraw cycles
+      // that would otherwise orphan a blob per iteration.
+      setMode("view");
+      setOpen(false);
+    },
+    [attachment.url, onEditSave],
+  );
+
+  const handleEditorCancel = React.useCallback(() => setMode("view"), []);
+
+  const handleRevert = React.useCallback(() => {
+    onRevert?.(attachment.url);
+  }, [attachment.url, onRevert]);
+
+  return (
+    <motion.div
+      ref={ref}
+      layout
+      initial={false}
+      animate={{ opacity: 1, scale: 1 }}
+      exit={{ opacity: 0, scale: 0.8 }}
+      transition={{ type: "spring", stiffness: 500, damping: 30 }}
+      className="group relative"
+    >
+      <div
+        className="relative h-[55px] max-w-[55px]"
+        style={composerMediaStyle()}
+      >
+        <DialogPrimitive.Root open={open} onOpenChange={handleOpenChange}>
+          <DialogPrimitive.Trigger asChild>
+            <div className="h-full w-full cursor-pointer overflow-hidden rounded-2xl border border-border/70">
+              {isVideo ? (
+                <div className="relative flex h-full w-full items-center justify-center bg-muted text-white">
+                  {videoPosterUrl ? (
+                    <img
+                      src={videoPosterUrl}
+                      alt={`Video attachment ${hash}`}
+                      className="h-full w-full object-cover"
+                    />
+                  ) : (
+                    <div className="h-full w-full bg-muted/80" />
+                  )}
+                  <div className="absolute inset-0 bg-black/15" />
+                  <div className="absolute flex h-5 w-5 items-center justify-center rounded-full bg-black/55 backdrop-blur-sm">
+                    <Play className="h-4 w-4 fill-white text-white" />
+                  </div>
+                </div>
+              ) : (
+                <img
+                  src={thumbUrl}
+                  alt={`Attachment ${hash}`}
+                  className="h-full w-full object-cover"
+                />
+              )}
+              {isSpoilered ? (
+                <div
+                  className="pointer-events-none absolute inset-0 flex items-center justify-center rounded-2xl bg-background/55 text-foreground/70 backdrop-blur-[1px]"
+                  data-composer-media-spoiler=""
+                >
+                  <HatGlasses className="h-4 w-4" />
+                </div>
+              ) : null}
+            </div>
+          </DialogPrimitive.Trigger>
+          <DialogPrimitive.Portal>
+            <DialogPrimitive.Overlay
+              className={cn(
+                "fixed inset-0 z-50 bg-black/80 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0",
+                MODAL_BACKDROP_BLUR_CLASS,
+              )}
+            />
+            <DialogPrimitive.Content
+              className="fixed inset-0 z-50 flex items-center justify-center p-8"
+              onPointerDownOutside={(e) => e.preventDefault()}
+              onInteractOutside={(e) => e.preventDefault()}
+              onEscapeKeyDown={handleEscapeKeyDown}
+            >
+              <DialogPrimitive.Title className="sr-only">
+                Attachment {hash} preview
+              </DialogPrimitive.Title>
+              <DialogPrimitive.Description className="sr-only">
+                Full-size attachment preview. Press Escape or click outside to
+                close.
+              </DialogPrimitive.Description>
+              {mode === "view" ? (
+                <DialogPrimitive.Close
+                  className="absolute inset-0 cursor-default"
+                  aria-label="Close lightbox"
+                />
+              ) : null}
+              {mode === "edit" && !isVideo ? (
+                <ComposerImageEditor
+                  alt={`Attachment ${hash}`}
+                  src={rewriteRelayUrl(attachment.url)}
+                  sourceUrl={attachment.url}
+                  sourceType={attachment.type}
+                  onCancel={handleEditorCancel}
+                  onSave={handleEditorSave}
+                />
+              ) : isVideo ? (
+                // biome-ignore lint/a11y/useMediaCaption: user-uploaded video, no captions available
+                <video
+                  src={rewriteRelayUrl(attachment.url)}
+                  controls
+                  className={cn(
+                    "relative max-h-[90vh] max-w-[90vw] rounded-lg",
+                    isSpoilered && "blur-2xl brightness-75",
+                  )}
+                />
+              ) : (
+                <img
+                  alt={`Attachment ${hash}`}
+                  className={cn(
+                    "relative max-h-[90vh] max-w-[90vw] rounded-lg object-contain",
+                    isSpoilered && "blur-2xl brightness-75",
+                  )}
+                  src={rewriteRelayUrl(attachment.url)}
+                />
+              )}
+              {mode === "view" && isSpoilered ? (
+                /*
+                 * Expanded-media counterpart of the thumbnail spoiler treatment:
+                 * the media itself is blurred above, and this layer centers the
+                 * spoiler glyph. pointer-events-none keeps controls and
+                 * backdrop-close clickable.
+                 */
+                <div
+                  className="pointer-events-none absolute inset-0 flex items-center justify-center text-foreground/70"
+                  data-lightbox-media-spoiler=""
+                >
+                  <HatGlasses className="h-10 w-10" />
+                </div>
+              ) : null}
+              {mode === "view" ? (
+                <div className="absolute right-4 top-4 flex items-center gap-2">
+                  {canRevert ? (
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <Button
+                          data-testid="composer-attachment-revert"
+                          onClick={handleRevert}
+                          size="sm"
+                          type="button"
+                        >
+                          Revert
+                        </Button>
+                      </TooltipTrigger>
+                      <TooltipContent>Revert to original</TooltipContent>
+                    </Tooltip>
+                  ) : null}
+                  {onToggleSpoiler ? (
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <Toggle
+                          aria-label={
+                            isSpoilered ? "Remove spoiler" : "Mark as spoiler"
+                          }
+                          className={cn(
+                            LIGHTBOX_BUTTON_CLASS,
+                            "h-auto min-w-0",
+                          )}
+                          data-testid="composer-attachment-spoiler"
+                          onPressedChange={() =>
+                            onToggleSpoiler(attachment.url)
+                          }
+                          pressed={isSpoilered}
+                        >
+                          <HatGlasses className="h-4 w-4" />
+                        </Toggle>
+                      </TooltipTrigger>
+                      <TooltipContent>
+                        {isSpoilered ? "Remove spoiler" : "Mark as spoiler"}
+                      </TooltipContent>
+                    </Tooltip>
+                  ) : null}
+                  {canEdit ? (
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <button
+                          type="button"
+                          className={LIGHTBOX_BUTTON_CLASS}
+                          data-testid="composer-attachment-edit"
+                          onClick={() => setMode("edit")}
+                        >
+                          <Pencil className="h-4 w-4" />
+                          <span className="sr-only">Draw on image</span>
+                        </button>
+                      </TooltipTrigger>
+                      <TooltipContent>Draw on image</TooltipContent>
+                    </Tooltip>
+                  ) : null}
+                  <DialogPrimitive.Close className={LIGHTBOX_BUTTON_CLASS}>
+                    <X className="h-4 w-4" />
+                    <span className="sr-only">Close</span>
+                  </DialogPrimitive.Close>
+                </div>
+              ) : null}
+            </DialogPrimitive.Content>
+          </DialogPrimitive.Portal>
+        </DialogPrimitive.Root>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <button
+              type="button"
+              onClick={() => onRemove(attachment.url)}
+              className="absolute -right-1 -top-1 hidden h-4 w-4 items-center justify-center rounded-full bg-foreground text-background group-hover:flex"
+            >
+              <X className="h-2.5 w-2.5" />
+            </button>
+          </TooltipTrigger>
+          <TooltipContent>Remove attachment</TooltipContent>
+        </Tooltip>
+      </div>
+    </motion.div>
+  );
+});
+
 /**
  * Thumbnail previews for uploaded attachments in the composer.
  * Each attachment shows as a small image with a remove button and
@@ -65,7 +368,10 @@ export const ComposerAttachments = React.memo(function ComposerAttachments({
   uploadingCount = 0,
   uploadingPreviews = [],
   onCancelUpload,
+  onEditSave,
   onRemove,
+  onRevert,
+  originalUrlByUrl,
   onToggleSpoiler,
   spoileredUrls,
 }: ComposerAttachmentsProps) {
@@ -91,16 +397,6 @@ export const ComposerAttachments = React.memo(function ComposerAttachments({
             const isVideo = attachment.type.startsWith("video/");
             const isImage = attachment.type.startsWith("image/");
             const isFile = !isVideo && !isImage;
-            const isSpoilered = spoileredUrls?.has(attachment.url) ?? false;
-            const thumbUrl = attachment.thumb
-              ? rewriteRelayUrl(attachment.thumb)
-              : rewriteRelayUrl(attachment.url);
-            const videoPosterUrl = attachment.image
-              ? rewriteRelayUrl(attachment.image)
-              : attachment.thumb
-                ? rewriteRelayUrl(attachment.thumb)
-                : undefined;
-            const mediaStyle = composerMediaStyle();
 
             // Generic file: compact chip with a file icon + filename, plus the
             // same remove button. No lightbox (nothing to preview).
@@ -119,7 +415,7 @@ export const ComposerAttachments = React.memo(function ComposerAttachments({
                   transition={{ type: "spring", stiffness: 500, damping: 30 }}
                   className="group relative"
                 >
-                  <div className="flex h-5 max-w-[10rem] items-center gap-1 rounded border border-border/70 bg-muted px-1.5">
+                  <div className="flex h-5 max-w-40 items-center gap-1 rounded border border-border/70 bg-muted px-1.5">
                     <FileText className="h-4 w-4 shrink-0 text-muted-foreground" />
                     <span className="truncate text-2xs text-muted-foreground">
                       {label}
@@ -141,40 +437,21 @@ export const ComposerAttachments = React.memo(function ComposerAttachments({
               );
             }
 
+            const originalUrl = originalUrlByUrl?.get(attachment.url);
             return (
-              <motion.div
-                key={attachment.url}
-                layout
-                initial={false}
-                animate={{ opacity: 1, scale: 1 }}
-                exit={{ opacity: 0, scale: 0.8 }}
-                transition={{ type: "spring", stiffness: 500, damping: 30 }}
-                className="group relative"
-              >
-                <AttachmentMediaLightbox
-                  alt={`Attachment ${hash} preview`}
-                  hash={hash}
-                  isSpoilered={isSpoilered}
-                  isVideo={isVideo}
-                  mediaStyle={mediaStyle}
-                  onToggleSpoiler={onToggleSpoiler}
-                  thumbUrl={thumbUrl}
-                  url={attachment.url}
-                  videoPosterUrl={videoPosterUrl ?? null}
-                />
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <button
-                      type="button"
-                      onClick={() => onRemove(attachment.url)}
-                      className="absolute -right-1 -top-1 hidden h-4 w-4 items-center justify-center rounded-full bg-foreground text-background group-hover:flex"
-                    >
-                      <X className="h-2.5 w-2.5" />
-                    </button>
-                  </TooltipTrigger>
-                  <TooltipContent>Remove attachment</TooltipContent>
-                </Tooltip>
-              </motion.div>
+              <MediaAttachmentItem
+                attachment={attachment}
+                isSpoilered={spoileredUrls?.has(attachment.url) ?? false}
+                // Annotated attachments keep their original URL as the key so
+                // the in-place edit/revert URL swap doesn't remount the item
+                // (which would close its open lightbox dialog).
+                key={originalUrl ?? attachment.url}
+                onEditSave={onEditSave}
+                onRemove={onRemove}
+                onRevert={onRevert}
+                onToggleSpoiler={onToggleSpoiler}
+                originalUrl={originalUrl}
+              />
             );
           })}
           {isUploading &&
@@ -239,133 +516,3 @@ export const ComposerAttachments = React.memo(function ComposerAttachments({
     </LayoutGroup>
   );
 });
-
-function AttachmentMediaLightbox({
-  alt,
-  hash,
-  isSpoilered,
-  isVideo,
-  mediaStyle,
-  onToggleSpoiler,
-  thumbUrl,
-  url,
-  videoPosterUrl,
-}: {
-  alt: string;
-  hash: string;
-  isSpoilered: boolean;
-  isVideo: boolean;
-  mediaStyle: React.CSSProperties;
-  onToggleSpoiler?: (url: string) => void;
-  thumbUrl: string;
-  url: string;
-  videoPosterUrl: string | null;
-}) {
-  const [lightboxOpen, setLightboxOpen] = React.useState(false);
-  const previewSrc = rewriteRelayUrl(url);
-
-  return (
-    <div className="relative h-[55px] max-w-[55px]" style={mediaStyle}>
-      <button
-        className="h-full w-full cursor-pointer overflow-hidden rounded-2xl border border-border/70"
-        onClick={() => setLightboxOpen(true)}
-        type="button"
-      >
-        {isVideo ? (
-          <div className="relative flex h-full w-full items-center justify-center bg-muted text-white">
-            {videoPosterUrl ? (
-              <img
-                alt={`Video attachment ${hash}`}
-                className="h-full w-full object-cover"
-                src={videoPosterUrl}
-              />
-            ) : (
-              <div className="h-full w-full bg-muted/80" />
-            )}
-            <div className="absolute inset-0 bg-black/15" />
-            <div className="absolute flex h-5 w-5 items-center justify-center rounded-full bg-black/55 backdrop-blur-sm">
-              <Play className="h-4 w-4 fill-white text-white" />
-            </div>
-          </div>
-        ) : (
-          <img
-            alt={`Attachment ${hash}`}
-            className="h-full w-full object-cover"
-            src={thumbUrl}
-          />
-        )}
-        {isSpoilered ? (
-          <div
-            className="pointer-events-none absolute inset-0 flex items-center justify-center rounded-2xl bg-background/55 text-foreground/70 backdrop-blur-[1px]"
-            data-composer-media-spoiler=""
-          >
-            <HatGlasses className="h-4 w-4" />
-          </div>
-        ) : null}
-      </button>
-      <SimpleImageLightbox
-        alt={alt}
-        onOpenChange={setLightboxOpen}
-        open={lightboxOpen}
-        src={previewSrc}
-        actions={
-          // Hide this alongside image-edit mode once the annotation flow lands.
-          onToggleSpoiler ? (
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <Toggle
-                  aria-label={
-                    isSpoilered ? "Remove spoiler" : "Mark as spoiler"
-                  }
-                  className={cn(LIGHTBOX_BUTTON_CLASS, "h-auto min-w-0")}
-                  data-testid="composer-attachment-spoiler"
-                  onPressedChange={() => onToggleSpoiler(url)}
-                  pressed={isSpoilered}
-                >
-                  <HatGlasses className="h-4 w-4" />
-                </Toggle>
-              </TooltipTrigger>
-              <TooltipContent>
-                {isSpoilered ? "Remove spoiler" : "Mark as spoiler"}
-              </TooltipContent>
-            </Tooltip>
-          ) : null
-        }
-      >
-        {isVideo ? (
-          // biome-ignore lint/a11y/useMediaCaption: user-uploaded video, no captions available
-          <video
-            className={cn(
-              "relative max-h-[90vh] max-w-[90vw] rounded-lg",
-              isSpoilered && "blur-2xl brightness-75",
-            )}
-            controls
-            src={previewSrc}
-          />
-        ) : (
-          <img
-            alt={alt}
-            className={cn(
-              "relative max-h-[90vh] max-w-[90vw] rounded-lg object-contain",
-              isSpoilered && "blur-2xl brightness-75",
-            )}
-            src={previewSrc}
-          />
-        )}
-        {isSpoilered ? (
-          /*
-           * Expanded-media counterpart of the thumbnail spoiler treatment: the
-           * media itself is blurred above, and this layer centers the spoiler
-           * glyph. pointer-events-none keeps controls and backdrop-close clickable.
-           */
-          <div
-            className="pointer-events-none absolute inset-0 flex items-center justify-center text-foreground/70"
-            data-lightbox-media-spoiler=""
-          >
-            <HatGlasses className="h-10 w-10" />
-          </div>
-        ) : null}
-      </SimpleImageLightbox>
-    </div>
-  );
-}

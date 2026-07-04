@@ -129,6 +129,25 @@ pub async fn download_file(
     save_bytes_with_dialog(&app, &filename, "All Files", &extensions, &bytes).await
 }
 
+/// Fetch relay media bytes for the composer image editor.
+///
+/// The editor composites the image onto a canvas and needs pixel access.
+/// Handing the webview raw bytes over IPC (which it wraps in a same-origin
+/// `blob:` URL) keeps the canvas un-tainted without involving CORS — and
+/// therefore without any media-proxy header or origin-gate changes.
+///
+/// Same SSRF validation, size cap, and content policy as the download
+/// commands above.
+#[tauri::command]
+pub async fn fetch_media_bytes(url: String, state: State<'_, AppState>) -> Result<Vec<u8>, String> {
+    let relay_base = relay_api_base_url_with_override(&state);
+    validate_download_url(&url, &relay_base)?;
+
+    let bytes = fetch_blob_bytes(&url, &state).await?;
+    detect_and_validate_mime(&bytes)?;
+    Ok(bytes)
+}
+
 /// Fetch blob bytes from a (pre-validated) relay media URL through the app's
 /// HTTP client, enforcing the download size cap. The caller is responsible for
 /// validating the URL origin and for any content-type checks on the result.

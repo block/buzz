@@ -513,6 +513,7 @@ pub fn run() {
             upload_media_bytes,
             download_image,
             download_file,
+            fetch_media_bytes,
             list_relay_members,
             get_my_relay_membership,
             add_relay_member,
