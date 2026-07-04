@@ -833,6 +833,7 @@ export function AppShell() {
                         </MainInsetProvider>
                         <RelayConnectionOverlay
                           card={relayConnectionCard}
+                          errorMessage={channelsErrorMessage}
                           hasWorkspaceRail={
                             workspaceRailEnabled &&
                             workspacesHook.workspaces.length > 1
