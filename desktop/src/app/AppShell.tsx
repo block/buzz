@@ -827,6 +827,11 @@ export function AppShell() {
                         </MainInsetProvider>
                         <RelayConnectionOverlay
                           errorMessage={channelsErrorMessage}
+                          hasWorkspaceRail={
+                            workspaceRailEnabled &&
+                            workspacesHook.workspaces.length > 1
+                          }
+                          isHuddleDrawerOpen={isHuddleDrawerOpen}
                           relayUrl={workspacesHook.activeWorkspace?.relayUrl}
                         />
                       </div>

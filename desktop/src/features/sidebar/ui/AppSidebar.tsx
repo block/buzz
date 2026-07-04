@@ -62,6 +62,7 @@ import {
   SidebarMenu,
   SidebarMenuItem,
   SidebarRail,
+  useSidebar,
 } from "@/shared/ui/sidebar";
 
 type CollapsibleSidebarGroup =
@@ -225,6 +226,7 @@ export function AppSidebar({
   const activeWorkingByChannelId = useActiveWorkingChannelsById();
   const { status: updateStatus } = useUpdaterContext();
   const canShowSidebarUpdateCard = shouldShowSidebarUpdateCard(updateStatus);
+  const { open: sidebarOpen } = useSidebar();
   const sidebarRelayConnectionCard = useSidebarRelayConnectionCard(
     errorMessage,
     activeWorkspace?.relayUrl,
@@ -763,7 +765,8 @@ export function AppSidebar({
 
           <SidebarFooter>
             <AnimatePresence>
-              {sidebarRelayConnectionCard.showSidebarRelayConnectionCard ? (
+              {sidebarRelayConnectionCard.showSidebarRelayConnectionCard &&
+              sidebarOpen ? (
                 <SidebarRelayConnectionCard
                   className="mb-2"
                   isConnected={
