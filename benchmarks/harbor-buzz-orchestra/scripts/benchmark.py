@@ -254,8 +254,26 @@ def compose_command(*args: str) -> list[str]:
 
 def ensure_stack(state: dict[str, str]) -> None:
     """Bring the compose stack up (idempotent) and apply the benchmark schema."""
-    subprocess.run(compose_command("up", "-d", "--wait"), check=True)
     import psycopg
+
+    try:
+        subprocess.run(compose_command("up", "-d", "--wait"), check=True)
+    except subprocess.CalledProcessError:
+        # The classic failure: a Postgres volume initialized by ANOTHER
+        # clone's .benchmark/state.json (compose project name is global,
+        # state dir is per-clone), so the relay can never authenticate.
+        try:
+            psycopg.connect(postgres_dsn(state), connect_timeout=5).close()
+        except psycopg.OperationalError as error:
+            if "password authentication failed" in str(error):
+                raise SystemExit(
+                    "the benchmark Postgres volume holds credentials from a "
+                    "different checkout's .benchmark/ state (the compose "
+                    f"project {COMPOSE_PROJECT!r} is machine-global, state is "
+                    "per-clone). Reset the stack, then rerun:\n"
+                    f"  docker compose --project-name {COMPOSE_PROJECT} down -v"
+                ) from error
+        raise
 
     deadline = time.monotonic() + 60
     last_error: Exception | None = None
