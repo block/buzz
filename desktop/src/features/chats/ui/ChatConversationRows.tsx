@@ -117,7 +117,10 @@ export function ChatMessageRow({
             mentionPubkeysByName={mentionPubkeysByName}
           />
         ) : (
-          <Bubble side={isOwn ? "right" : "left"}>
+          <Bubble
+            className={cn(isOwn && "buzz-own-bubble-links")}
+            side={isOwn ? "right" : "left"}
+          >
             <Markdown
               agentMentionPubkeysByName={agentMentionPubkeysByName}
               className={cn(
