@@ -157,8 +157,12 @@ test("spoiler marking survives drawing on the attachment", async ({ page }) => {
   const composer = page.getByTestId("message-composer");
   await expect(composer.getByAltText("Attachment aaaa")).toBeVisible();
 
-  // Spoiler the attachment, then draw on it.
-  await page.getByRole("button", { name: "Spoiler", exact: true }).click();
+  // Spoiler the attachment from its lightbox (media spoilers are
+  // per-attachment; the text spoiler control no longer affects media),
+  // then draw on it.
+  await composer.getByAltText("Attachment aaaa").click();
+  await page.getByTestId("composer-attachment-spoiler").click();
+  await page.keyboard.press("Escape");
   await expect(composer.locator("[data-composer-media-spoiler]")).toBeVisible();
 
   await composer.getByAltText("Attachment aaaa").click();
