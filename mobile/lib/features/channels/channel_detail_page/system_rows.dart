@@ -41,7 +41,7 @@ class _SystemMessageRow extends ConsumerWidget {
         ref: ref,
         message: message,
         channelId: channelId,
-        isOwnMessage: false,
+        canManageMessage: false,
         allMessages: null,
         currentPubkey: currentPubkey,
         isMember: isMember,
