@@ -3029,9 +3029,12 @@ async fn generate_chat_title(
     request_text: &str,
 ) -> Option<String> {
     let prompt = format!(
-        "You are titling a chat conversation. Reply with ONLY a short title \
-         (3-6 words, no quotes, no trailing punctuation) that names what the \
-         conversation is trying to accomplish.\n\nOpening message:\n{request_text}"
+        "You are naming a chat conversation. Name it exactly the way you \
+         would name a git branch for this work — a few terse, concrete words \
+         that identify the task — but written as plain words separated by \
+         spaces instead of dashes. Reply with ONLY that name (2-5 words, no \
+         quotes, no dashes, no trailing punctuation), capitalized like a \
+         sentence.\n\nOpening message:\n{request_text}"
     );
 
     let session_id = match agent.acp.session_new(&ctx.cwd, Vec::new(), None).await {
@@ -3109,10 +3112,24 @@ fn sanitize_chat_title(raw: &str) -> Option<String> {
             .unwrap_or(cleaned.len());
         cleaned.truncate(last_space.unwrap_or(hard_cut));
     }
-    let cleaned = cleaned
+    let mut cleaned = cleaned
         .trim_end_matches(['.', ',', ';', ':', '!', '?', '-'])
         .trim()
         .to_string();
+    // Despite the prompt, models sometimes answer with the literal branch
+    // slug ("fix-panel-width", "kenny/dictation-support"). A single dashed/
+    // slashed token becomes spaced words with a leading capital.
+    if !cleaned.contains(char::is_whitespace) && cleaned.contains(['-', '_', '/']) {
+        let mut words = cleaned
+            .split(['-', '_', '/'])
+            .filter(|word| !word.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
+        if let Some(first) = words.get_mut(0..1) {
+            first.make_ascii_uppercase();
+        }
+        cleaned = words;
+    }
     if cleaned.chars().count() < 3 {
         return None;
     }
@@ -3537,6 +3554,27 @@ mod tests {
         assert!(title.chars().count() <= CHAT_TITLE_MAX_CHARS, "{title}");
         assert!(!title.ends_with(' '));
         assert!(long.starts_with(&title));
+    }
+
+    #[test]
+    fn test_sanitize_chat_title_despaces_branch_slugs() {
+        assert_eq!(
+            sanitize_chat_title("fix-panel-width"),
+            Some("Fix panel width".to_string())
+        );
+        assert_eq!(
+            sanitize_chat_title("kenny/dictation-support"),
+            Some("Kenny dictation support".to_string())
+        );
+        assert_eq!(
+            sanitize_chat_title("relay_reconnect_backoff"),
+            Some("Relay reconnect backoff".to_string())
+        );
+        // Titles that already have spaces keep interior dashes untouched.
+        assert_eq!(
+            sanitize_chat_title("Fix e2e re-run flake"),
+            Some("Fix e2e re-run flake".to_string())
+        );
     }
 
     #[test]
