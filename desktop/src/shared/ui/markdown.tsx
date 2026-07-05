@@ -1494,7 +1494,9 @@ function ImageBlock({ alt, dim, resolvedSrc, src }: ImageBlockProps) {
           alt={alt}
           className="block h-auto max-h-64 max-w-[min(24rem,100%)] rounded-2xl object-contain"
           data-spoiler-media-size={hiddenSpoilerMediaSize ? "" : undefined}
+          decoding="async"
           height={intrinsicDimensions.height}
+          loading="lazy"
           ref={imageRef}
           src={resolvedSrc}
           style={spoilerMediaStyle}
