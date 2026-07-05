@@ -341,29 +341,28 @@ pub async fn update_persona(
     .await
     .map_err(|e| format!("spawn_blocking failed: {e}"))??;
 
-    // Phase 2: fire-and-forget relay profile sync for linked agents whose
-    // avatar was just updated. Best-effort — failures are logged, not surfaced.
+    // Phase 2: await relay profile sync for linked agents whose avatar was
+    // just updated. We await (rather than fire-and-forget) so the frontend
+    // cache invalidation that follows the mutation settlement sees the fresh
+    // relay profile. Best-effort — failures are logged, not surfaced.
     if !profile_sync_params.is_empty() {
-        let sync_app = app.clone();
-        tauri::async_runtime::spawn(async move {
-            let state = sync_app.state::<AppState>();
-            for (agent_keys, relay_url, display_name, avatar_url, auth_tag) in profile_sync_params {
-                if let Err(e) = crate::relay::sync_managed_agent_profile(
-                    &state,
-                    &relay_url,
-                    &agent_keys,
-                    &display_name,
-                    avatar_url.as_deref(),
-                    auth_tag.as_deref(),
-                )
-                .await
-                {
-                    eprintln!(
-                        "buzz-desktop: relay profile sync failed after persona avatar update: {e}"
-                    );
-                }
+        let state = app.state::<AppState>();
+        for (agent_keys, relay_url, display_name, avatar_url, auth_tag) in profile_sync_params {
+            if let Err(e) = crate::relay::sync_managed_agent_profile(
+                &state,
+                &relay_url,
+                &agent_keys,
+                &display_name,
+                avatar_url.as_deref(),
+                auth_tag.as_deref(),
+            )
+            .await
+            {
+                eprintln!(
+                    "buzz-desktop: relay profile sync failed after persona avatar update: {e}"
+                );
             }
-        });
+        }
     }
 
     Ok(result)
