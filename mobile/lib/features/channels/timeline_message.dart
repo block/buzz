@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 
 import '../../shared/relay/relay.dart';
 import '../custom_emoji/custom_emoji.dart';
+import 'channel_window.dart';
 
 enum SystemEventType {
   memberJoined,
@@ -374,8 +375,9 @@ List<TimelineMessage> formatTimeline(
 ///
 /// Mirrors the desktop's `buildMainTimelineEntries`.
 List<MainTimelineEntry> buildMainTimelineEntries(
-  List<TimelineMessage> messages,
-) {
+  List<TimelineMessage> messages, {
+  Map<String, ChannelWindowThreadSummary>? relaySummaries,
+}) {
   // Index direct children by parentId.
   final childrenByParent = <String, List<TimelineMessage>>{};
   for (final msg in messages) {
@@ -389,7 +391,11 @@ List<MainTimelineEntry> buildMainTimelineEntries(
       if (msg.parentId == null || _isBroadcastReply(msg))
         MainTimelineEntry(
           message: msg,
-          summary: _buildSummary(msg.id, childrenByParent),
+          summary: _buildSummary(
+            msg.id,
+            childrenByParent,
+            relaySummaries?[msg.id],
+          ),
         ),
   ];
 }
@@ -403,7 +409,16 @@ bool _isBroadcastReply(TimelineMessage message) {
 ThreadSummary? _buildSummary(
   String messageId,
   Map<String, List<TimelineMessage>> childrenByParent,
+  ChannelWindowThreadSummary? relaySummary,
 ) {
+  if (relaySummary != null && relaySummary.replyCount > 0) {
+    return ThreadSummary(
+      threadHeadId: messageId,
+      replyCount: relaySummary.replyCount,
+      participantPubkeys: relaySummary.participantPubkeys.take(3).toList(),
+    );
+  }
+
   final replies = childrenByParent[messageId];
   if (replies == null || replies.isEmpty) return null;
 

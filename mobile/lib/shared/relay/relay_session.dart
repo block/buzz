@@ -1,11 +1,18 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:math';
+
+import 'package:http/http.dart' as http;
+import 'package:nostr/nostr.dart' as nostr;
+import 'package:pointycastle/digests/sha256.dart';
+import 'package:uuid/uuid.dart';
 
 import 'package:flutter/foundation.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../auth/auth.dart';
 import 'nostr_models.dart';
+import 'relay_client.dart';
 import 'relay_provider.dart';
 import 'relay_socket.dart';
 
@@ -59,6 +66,10 @@ class _BufferedEvent {
 /// Manages websocket subscriptions, event batching, reconnection with replay,
 /// and pending event tracking. Equivalent to the desktop's RelayClientSession.
 class RelaySessionNotifier extends Notifier<SessionState> {
+  RelaySessionNotifier({http.Client? httpClient}) : _httpClient = httpClient;
+
+  final http.Client? _httpClient;
+
   static const _baseReconnectDelayMs = 1000;
   static const _maxReconnectDelayMs = 30000;
   static const _eventBatchMs = 16;
@@ -97,6 +108,57 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     }
 
     return const SessionState(status: SessionStatus.disconnected);
+  }
+
+  /// Execute a one-shot query via the relay's HTTP bridge (`POST /query`).
+  Future<List<NostrEvent>> queryRelay(
+    List<NostrFilter> filters, {
+    Duration timeout = const Duration(seconds: 8),
+  }) async {
+    final config = ref.read(relayConfigProvider);
+    final url = Uri.parse(config.baseUrl).resolve('/query').toString();
+    final bodyBytes = utf8.encode(
+      jsonEncode(filters.map((filter) => filter.toJson()).toList()),
+    );
+    final client = _httpClient ?? http.Client();
+    final shouldCloseClient = _httpClient == null;
+    final response = await client
+        .post(
+          Uri.parse(url),
+          headers: {
+            'Authorization': _buildNip98AuthHeader(
+              method: 'POST',
+              url: url,
+              bodyBytes: bodyBytes,
+              nsec: config.nsec,
+            ),
+            'Content-Type': 'application/json',
+          },
+          body: bodyBytes,
+        )
+        .timeout(timeout)
+        .whenComplete(() {
+          if (shouldCloseClient) client.close();
+        });
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw RelayException(response.statusCode, response.body);
+    }
+    final decoded = jsonDecode(response.body);
+    if (decoded is! List) {
+      throw const FormatException('relay returned malformed query response');
+    }
+    try {
+      return [
+        for (final eventJson in decoded)
+          if (eventJson is Map<String, dynamic>)
+            NostrEvent.fromJson(eventJson)
+          else
+            throw const FormatException('relay returned malformed query event'),
+      ];
+    } catch (error) {
+      if (error is FormatException) rethrow;
+      throw FormatException('relay returned malformed query event: $error');
+    }
   }
 
   /// Fetch historical events matching [filter]. Sends REQ, collects events
@@ -532,6 +594,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     _recentDeliveryKeys.clear();
     _socket?.dispose();
     _socket = null;
+    _httpClient?.close();
   }
 }
 
@@ -539,3 +602,35 @@ final relaySessionProvider =
     NotifierProvider<RelaySessionNotifier, SessionState>(
       RelaySessionNotifier.new,
     );
+
+String _buildNip98AuthHeader({
+  required String method,
+  required String url,
+  required List<int> bodyBytes,
+  required String? nsec,
+}) {
+  if (nsec == null || nsec.isEmpty) {
+    throw Exception('Cannot query relay: no signing key available');
+  }
+  final privkeyHex = nostr.Nip19.decode(payload: nsec).data;
+  if (privkeyHex.isEmpty) {
+    throw Exception('Invalid nsec');
+  }
+  final payloadHash = SHA256Digest()
+      .process(Uint8List.fromList(bodyBytes))
+      .map((byte) => byte.toRadixString(16).padLeft(2, '0'))
+      .join();
+  final event = nostr.Event.from(
+    kind: 27235,
+    content: '',
+    tags: [
+      ['u', url],
+      ['method', method.toUpperCase()],
+      ['payload', payloadHash],
+      ['nonce', const Uuid().v4()],
+    ],
+    secretKey: privkeyHex,
+    verify: false,
+  );
+  return 'Nostr ${base64.encode(utf8.encode(event.toJson()))}';
+}

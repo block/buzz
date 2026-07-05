@@ -21,9 +21,17 @@ abstract final class EventKind {
   static const userStatus = 30315;
   static const dmVisibility = 30622;
   static const streamMessageV2 = 40002;
+  static const channelThreadSummary = 39005;
+  static const channelWindowBounds = 39006;
   static const streamMessageEdit = 40003;
   static const streamMessageDiff = 40008;
   static const systemMessage = 40099;
+  static const jobRequest = 43001;
+  static const jobAccepted = 43002;
+  static const jobProgress = 43003;
+  static const jobResult = 43004;
+  static const jobCancel = 43005;
+  static const jobError = 43006;
   static const forumPost = 45001;
   static const forumComment = 45003;
   static const huddleStarted = 48100;
@@ -54,6 +62,29 @@ abstract final class EventKind {
     huddleParticipantJoined, // 48101 — huddle lifecycle metadata
     huddleParticipantLeft, // 48102 — huddle lifecycle metadata
     huddleEnded, // 48103 — visible huddle ended row
+  ];
+
+  /// Auxiliary timeline kinds that overlay or hide existing rows.
+  static const channelAuxEventKinds = [
+    deletion,
+    reaction,
+    nip29DeleteEvent,
+    streamMessageEdit,
+  ];
+
+  /// Visible content kinds requested by the NIP-CW channel-window path.
+  static const channelTimelineContentKinds = [
+    streamMessage,
+    streamMessageV2,
+    streamMessageDiff,
+    systemMessage,
+    jobRequest,
+    jobAccepted,
+    jobProgress,
+    jobResult,
+    jobCancel,
+    jobError,
+    huddleStarted,
   ];
 }
 
@@ -175,6 +206,9 @@ class NostrFilter {
   /// Tag filters, e.g. `{'#h': ['channel-id']}`.
   final Map<String, List<String>> tags;
 
+  /// Buzz relay bridge filter extensions (for example NIP-CW `top_level`).
+  final Map<String, Object?> extensions;
+
   const NostrFilter({
     required this.kinds,
     this.authors,
@@ -184,6 +218,7 @@ class NostrFilter {
     this.until,
     this.search,
     this.tags = const {},
+    this.extensions = const {},
   });
 
   /// Return a copy with an updated `since` value.
@@ -196,6 +231,7 @@ class NostrFilter {
     until: until,
     search: search,
     tags: tags,
+    extensions: extensions,
   );
 
   Map<String, dynamic> toJson() {
@@ -206,6 +242,9 @@ class NostrFilter {
     if (until != null) json['until'] = until;
     if (search != null) json['search'] = search;
     for (final entry in tags.entries) {
+      json[entry.key] = entry.value;
+    }
+    for (final entry in extensions.entries) {
       json[entry.key] = entry.value;
     }
     return json;
