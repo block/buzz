@@ -55,23 +55,32 @@ export function ChatWorkPanel({
   projectPath?: string | null;
 }) {
   // No PR link in the chat yet? Discover it from the branch via the
-  // project's git remote (agents don't always paste the URL).
+  // project's git remote (agents don't always paste the URL). All GitHub
+  // polling pauses while the drawer is closed — a hidden panel burning the
+  // API rate limit is how the monitor went stale-empty.
+  const automation = useChatWorkAutomation(chatId);
+  // Armed automation keeps watching with the drawer closed; otherwise a
+  // hidden panel stops polling entirely.
+  const monitorActive =
+    open || automation.autoFixCi || automation.addressComments;
   const discoveredPrQuery = useGithubPrForBranchQuery(
-    prHref ? null : projectPath,
+    monitorActive && !prHref ? projectPath : null,
     branch,
   );
   const effectiveHref = prHref ?? discoveredPrQuery.data ?? null;
   const preview = effectiveHref
     ? parseSupportedLinkPreview(effectiveHref)
     : null;
-  const ref = effectiveHref ? parseGithubPullRequestRef(effectiveHref) : null;
+  const parsedRef = effectiveHref
+    ? parseGithubPullRequestRef(effectiveHref)
+    : null;
+  const ref = monitorActive ? parsedRef : null;
   const prQuery = useGithubPullRequestQuery(ref);
   const pr = prQuery.data ?? null;
   const checksQuery = useGithubCheckSummaryQuery(ref, pr?.headSha);
   const checks = checksQuery.data ?? null;
   const commentStateQuery = useGithubCommentStateQuery(ref);
   const openThreads = commentStateQuery.data?.openThreads ?? 0;
-  const automation = useChatWorkAutomation(chatId);
   // Live activity wins over the PR's head ref: the agent may have moved to a
   // new worktree since opening the PR, and activity updates immediately.
   const currentBranch = branch?.trim() || pr?.headRef?.trim() || null;

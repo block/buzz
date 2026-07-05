@@ -103,8 +103,13 @@ pub async fn fetch_github_pull_request(
         .send()
         .await
         .map_err(|error| format!("github request failed: {error}"))?;
-    if !response.status().is_success() {
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
         return Ok(None);
+    }
+    if !response.status().is_success() {
+        // Rate limits and transient failures must NOT read as "no data" —
+        // the UI keeps its last good snapshot on error.
+        return Err(format!("github request failed: {}", response.status()));
     }
 
     let body: serde_json::Value = response
@@ -167,8 +172,13 @@ pub async fn fetch_github_check_summary(
         .send()
         .await
         .map_err(|error| format!("github request failed: {error}"))?;
-    if !response.status().is_success() {
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
         return Ok(None);
+    }
+    if !response.status().is_success() {
+        // Rate limits and transient failures must NOT read as "no data" —
+        // the UI keeps its last good snapshot on error.
+        return Err(format!("github request failed: {}", response.status()));
     }
 
     let body: serde_json::Value = response
@@ -249,8 +259,11 @@ pub async fn fetch_github_pr_comment_state(
         .send()
         .await
         .map_err(|error| format!("github request failed: {error}"))?;
-    if !pr_response.status().is_success() {
+    if pr_response.status() == reqwest::StatusCode::NOT_FOUND {
         return Ok(None);
+    }
+    if !pr_response.status().is_success() {
+        return Err(format!("github request failed: {}", pr_response.status()));
     }
     let pr: serde_json::Value = pr_response
         .json()
@@ -264,8 +277,14 @@ pub async fn fetch_github_pr_comment_state(
     .send()
     .await
     .map_err(|error| format!("github request failed: {error}"))?;
-    if !comments_response.status().is_success() {
+    if comments_response.status() == reqwest::StatusCode::NOT_FOUND {
         return Ok(None);
+    }
+    if !comments_response.status().is_success() {
+        return Err(format!(
+            "github request failed: {}",
+            comments_response.status()
+        ));
     }
     let comments: serde_json::Value = comments_response
         .json()
@@ -417,12 +436,34 @@ fn parse_github_remote(remote: &str) -> Option<(String, String)> {
 }
 
 fn ambient_github_token() -> Option<String> {
-    ["GITHUB_TOKEN", "GH_TOKEN"].iter().find_map(|name| {
-        std::env::var(name)
-            .ok()
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty())
-    })
+    static TOKEN: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    TOKEN
+        .get_or_init(|| {
+            let env_token = ["GITHUB_TOKEN", "GH_TOKEN"].iter().find_map(|name| {
+                std::env::var(name)
+                    .ok()
+                    .map(|value| value.trim().to_string())
+                    .filter(|value| !value.is_empty())
+            });
+            if env_token.is_some() {
+                return env_token;
+            }
+            // Desktop apps rarely inherit a token env (launched from Finder or
+            // a clean shell), but the gh CLI credential is usually present —
+            // without it the anonymous 60 req/h limit starves the PR monitor
+            // within minutes. Resolved once per process.
+            let output = std::process::Command::new("gh")
+                .args(["auth", "token"])
+                .stdin(std::process::Stdio::null())
+                .output()
+                .ok()?;
+            if !output.status.success() {
+                return None;
+            }
+            let token = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            (!token.is_empty()).then_some(token)
+        })
+        .clone()
 }
 
 fn is_valid_github_name(value: &str) -> bool {
