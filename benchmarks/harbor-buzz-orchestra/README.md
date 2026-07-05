@@ -53,9 +53,9 @@ any Linux base image works). `buzz_cli_binary` is the **host** CLI the harness
 uses to act as the trial user.
 
 `--n-concurrent 1` is the safe laptop setting for a serialized local model; it
-is not an orchestration requirement. Tasks whose graders install dependencies
-at verification time must first be prepared for offline execution; see
-[VERIFIER_PREPARATION.md](VERIFIER_PREPARATION.md).
+is not an orchestration requirement. Some TB graders install dependencies from
+public package registries at verification time — run benchmarks off networks
+that block those installs (e.g. corporate VPNs).
 
 Each trial gets fresh keys and a private Buzz channel. The provisioner archives
 rather than deletes that channel, leaving the relay/Postgres event timeline
