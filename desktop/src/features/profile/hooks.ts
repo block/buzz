@@ -1,5 +1,6 @@
 import type {
   InfiniteData,
+  QueryClient,
   UseInfiniteQueryResult,
 } from "@tanstack/react-query";
 import * as React from "react";
@@ -279,6 +280,26 @@ type UsersBatchEntry = {
 
 const usersBatchEntryKey = (pubkey: string) => ["users-batch-entry", pubkey];
 
+/**
+ * Drop the per-pubkey delta-fetch entries so the next `useUsersBatchQuery`
+ * run re-fetches these profiles from the relay. Must be called anywhere a
+ * specific profile (or a containing `users-batch` query) is invalidated —
+ * otherwise the re-run resolves from the still-fresh-looking entry and
+ * renders the stale name/avatar for up to the entry's 60s freshness window.
+ * Synchronous, so callers can evict before awaiting aggregate invalidations.
+ */
+export function evictUsersBatchEntries(
+  queryClient: QueryClient,
+  pubkeys: string[],
+) {
+  for (const pubkey of pubkeys) {
+    queryClient.removeQueries({
+      queryKey: usersBatchEntryKey(pubkey.toLowerCase()),
+      exact: true,
+    });
+  }
+}
+
 export function useUsersBatchQuery(
   pubkeys: string[],
   options?: {
@@ -459,6 +480,20 @@ export function useUpdateProfileMutation() {
       const pubkey = identityQuery.data?.pubkey ?? profile.pubkey;
       if (relayUrl && pubkey) {
         void persistSelfProfile(relayUrl, pubkey, profile);
+      }
+      if (pubkey) {
+        // Own author labels/avatars render through the users-batch delta
+        // cache too — evict so the next batch run picks up the new profile
+        // instead of the fresh-looking stale entry, then poke the aggregates.
+        evictUsersBatchEntries(queryClient, [pubkey]);
+        void queryClient.invalidateQueries({
+          queryKey: ["user-profile", pubkey.toLowerCase()],
+        });
+        void queryClient.invalidateQueries({
+          predicate: (query) =>
+            query.queryKey[0] === "users-batch" &&
+            query.queryKey.includes(pubkey.toLowerCase()),
+        });
       }
     },
     onSettled: async () => {

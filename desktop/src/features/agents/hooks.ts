@@ -7,6 +7,7 @@ import {
   ensureChannelAgentPresetInChannel,
 } from "@/features/agents/channelAgents";
 import { channelsQueryKey } from "@/features/channels/hooks";
+import { evictUsersBatchEntries } from "@/features/profile/hooks";
 import {
   createManagedAgent,
   deleteManagedAgent,
@@ -277,6 +278,12 @@ export function useUpdateManagedAgentMutation() {
       // ["users-batch", ...] entries that include this pubkey so sidebar member
       // rows, channel header chips, and message author labels refresh too.
       const lowerPubkey = variables.pubkey.toLowerCase();
+
+      // The users-batch delta fetch resolves from per-pubkey
+      // ["users-batch-entry", pubkey] entries with their own 60s freshness —
+      // invalidating the aggregate queries alone would just re-read the stale
+      // entry. Evict it first so the re-run refetches this profile.
+      evictUsersBatchEntries(queryClient, [lowerPubkey]);
 
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: managedAgentsQueryKey }),
