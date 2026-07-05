@@ -169,8 +169,9 @@ pub async fn handle_side_effects(
 
 /// Validate a standard NIP-09 deletion event before it is stored.
 ///
-/// Buzz accepts standard deletions for self-authored events only. Channel
-/// admin deletions continue to use kind 9005.
+/// Buzz accepts standard deletions for self-authored events, plus the owning
+/// human deleting their agent's events (mirrors `validate_edit_ownership`).
+/// Channel admin deletions continue to use kind 9005.
 pub async fn validate_standard_deletion_event(
     tenant: &TenantContext,
     event: &Event,
@@ -193,7 +194,12 @@ pub async fn validate_standard_deletion_event(
         }
         let target_pubkey_bytes =
             hex::decode(parts[1]).map_err(|_| anyhow::anyhow!("invalid pubkey in a-tag"))?;
-        if target_pubkey_bytes != actor_bytes {
+        if target_pubkey_bytes != actor_bytes
+            && !state
+                .db
+                .is_agent_owner(tenant.community(), &target_pubkey_bytes, &actor_bytes)
+                .await?
+        {
             return Err(anyhow::anyhow!("must be event author"));
         }
         return Ok(());
@@ -208,7 +214,12 @@ pub async fn validate_standard_deletion_event(
 
         let target_author =
             effective_message_author(&target_event.event, &state.relay_keypair.public_key());
-        if target_author != actor_bytes {
+        if target_author != actor_bytes
+            && !state
+                .db
+                .is_agent_owner(tenant.community(), &target_author, &actor_bytes)
+                .await?
+        {
             return Err(anyhow::anyhow!("must be event author"));
         }
     }

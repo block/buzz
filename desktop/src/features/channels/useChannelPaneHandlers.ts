@@ -112,7 +112,8 @@ export function useChannelPaneHandlers({
   }, [setEditTargetId]);
 
   const handleDelete = React.useCallback(async (message: { id: string }) => {
-    await deleteMutateRef.current({ eventId: message.id });
+    // Failure is surfaced via the mutation's onError toast.
+    await deleteMutateRef.current({ eventId: message.id }).catch(() => {});
   }, []);
 
   const handleEdit = React.useCallback(
