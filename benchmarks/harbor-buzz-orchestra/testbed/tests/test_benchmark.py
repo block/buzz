@@ -107,3 +107,50 @@ def test_compose_command_isolates_the_project(state_dir):
     files = [command[i + 1] for i, part in enumerate(command) if part == "-f"]
     assert any(f.endswith("deploy/compose/compose.yml") for f in files)
     assert any(f.endswith("compose.benchmark.yml") for f in files)
+
+
+def test_bring_up_self_heals_a_stale_credential_volume(monkeypatch):
+    calls = []
+
+    def fake_run(command, check=True):
+        calls.append(command)
+        if len(calls) == 1:  # first up fails against the stale volume
+            raise benchmark.subprocess.CalledProcessError(1, command)
+
+    monkeypatch.setattr(benchmark.subprocess, "run", fake_run)
+    monkeypatch.setattr(benchmark, "stale_credential_volume", lambda state: True)
+    benchmark.bring_up_stack({})
+    assert [c[-3:] for c in calls] == [
+        ["up", "-d", "--wait"],
+        [str(benchmark.COMPOSE_FILES[-1]), "down", "-v"],
+        ["up", "-d", "--wait"],
+    ]
+
+
+def test_bring_up_reraises_unrelated_failures(monkeypatch):
+    def fake_run(command, check=True):
+        raise benchmark.subprocess.CalledProcessError(1, command)
+
+    monkeypatch.setattr(benchmark.subprocess, "run", fake_run)
+    monkeypatch.setattr(benchmark, "stale_credential_volume", lambda state: False)
+    with pytest.raises(benchmark.subprocess.CalledProcessError):
+        benchmark.bring_up_stack({})
+
+
+def test_fresh_resets_volumes_and_gui_state(tmp_path, monkeypatch):
+    commands = []
+    monkeypatch.setattr(
+        benchmark.subprocess, "run", lambda cmd, check=True: commands.append(cmd)
+    )
+    monkeypatch.setattr(benchmark.sys, "platform", "darwin")
+    monkeypatch.setattr(benchmark.Path, "home", classmethod(lambda cls: tmp_path))
+    gui_state = tmp_path / "Library" / "WebKit" / benchmark.GUI_BUNDLE_IDENTIFIER
+    gui_state.mkdir(parents=True)
+    (gui_state / "localstorage.sqlite3").touch()
+
+    benchmark.reset_environment()
+
+    assert ["down", "-v"] == commands[0][-2:]
+    assert not gui_state.exists()
+    assert benchmark.parse_args(["--fresh"]).fresh
+    assert not benchmark.parse_args([]).fresh

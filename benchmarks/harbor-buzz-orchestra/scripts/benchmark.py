@@ -30,6 +30,7 @@ import importlib.util
 import json
 import os
 import secrets
+import shutil
 import subprocess
 import sys
 import time
@@ -47,6 +48,7 @@ COMPOSE_FILES = (
 RELAY_HTTP_PORT = 3600
 PG_HOST_PORT = 5633
 METRICS_HOST_PORT = 9602
+GUI_BUNDLE_IDENTIFIER = "xyz.block.buzz.app.benchmark"
 
 DEFAULT_DATASET = "terminal-bench/terminal-bench-2-1"
 DEFAULT_ATTEMPTS = 5
@@ -119,6 +121,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--gui", action="store_true",
         help="Open the Buzz desktop app as the benchmark user to watch the run live",
+    )
+    parser.add_argument(
+        "--fresh", action="store_true",
+        help="Reset first: drop the stack's Docker volumes and the benchmark "
+             "GUI's app state (keys in state.json are kept)",
     )
     parser.add_argument(
         "--dry-run", action="store_true",
@@ -265,28 +272,57 @@ def compose_command(*args: str) -> list[str]:
     return command + list(args)
 
 
+def stale_credential_volume(state: dict[str, str]) -> bool:
+    """True when Postgres is up but rejects THIS clone's password — the
+    volume was initialized by another checkout's ``.benchmark/`` state
+    (compose project name is machine-global, state dir is per-clone)."""
+    import psycopg
+
+    try:
+        psycopg.connect(postgres_dsn(state), connect_timeout=5).close()
+    except psycopg.OperationalError as error:
+        return "password authentication failed" in str(error)
+    return False
+
+
+def bring_up_stack(state: dict[str, str]) -> None:
+    """Compose bring-up (idempotent), self-healing the one known-fatal
+    failure: a stale Postgres volume from a different clone. Nothing in
+    that volume is usable (we can't even authenticate to it), so drop the
+    volumes and retry once rather than aborting with instructions."""
+    try:
+        subprocess.run(compose_command("up", "-d", "--wait"), check=True)
+    except subprocess.CalledProcessError:
+        if not stale_credential_volume(state):
+            raise
+        print(
+            "benchmark Postgres volume was initialized by a different "
+            "checkout's .benchmark/ state — dropping the stale volumes and "
+            "retrying..."
+        )
+        subprocess.run(compose_command("down", "-v"), check=True)
+        subprocess.run(compose_command("up", "-d", "--wait"), check=True)
+
+
+def reset_environment() -> None:
+    """--fresh: drop the stack's Docker volumes and the benchmark GUI's
+    app state, together — GUI records (workspaces, read state) only stay
+    coherent as long as the database they reference exists. Keys in
+    ``state.json`` are kept, so the same nsec works after the reset."""
+    subprocess.run(compose_command("down", "-v"), check=True)
+    if sys.platform == "darwin":
+        for domain in ("WebKit", "Caches", "Application Support"):
+            shutil.rmtree(
+                Path.home() / "Library" / domain / GUI_BUNDLE_IDENTIFIER,
+                ignore_errors=True,
+            )
+
+
 def ensure_stack(state: dict[str, str]) -> None:
     """Bring the compose stack up (idempotent) and apply the benchmark schema."""
     import psycopg
 
-    try:
-        subprocess.run(compose_command("up", "-d", "--wait"), check=True)
-    except subprocess.CalledProcessError:
-        # The classic failure: a Postgres volume initialized by ANOTHER
-        # clone's .benchmark/state.json (compose project name is global,
-        # state dir is per-clone), so the relay can never authenticate.
-        try:
-            psycopg.connect(postgres_dsn(state), connect_timeout=5).close()
-        except psycopg.OperationalError as error:
-            if "password authentication failed" in str(error):
-                raise SystemExit(
-                    "the benchmark Postgres volume holds credentials from a "
-                    "different checkout's .benchmark/ state (the compose "
-                    f"project {COMPOSE_PROJECT!r} is machine-global, state is "
-                    "per-clone). Reset the stack, then rerun:\n"
-                    f"  docker compose --project-name {COMPOSE_PROJECT} down -v"
-                ) from error
-        raise
+    bring_up_stack(state)
 
     deadline = time.monotonic() + 60
     last_error: Exception | None = None
@@ -433,7 +469,7 @@ def launch_gui(state: dict[str, str]) -> subprocess.Popen:
     # workspace silently shadows the benchmark relay. An identifier of our own
     # keeps that state isolated both ways.
     tauri_config = json.dumps(
-        {"identifier": "xyz.block.buzz.app.benchmark", "productName": "Buzz Benchmark"}
+        {"identifier": GUI_BUNDLE_IDENTIFIER, "productName": "Buzz Benchmark"}
     )
     return subprocess.Popen(
         ["pnpm", "exec", "tauri", "dev", "--config", tauri_config],
@@ -499,6 +535,8 @@ def main(argv: list[str] | None = None) -> int:
     else:
         ensure_binaries()
         agent_bin_dir = ensure_agent_binaries()
+        if args.fresh:
+            reset_environment()
         ensure_stack(state)
         if args.gui:
             launch_gui(state)
