@@ -11,6 +11,7 @@ import {
   KIND_TYPING_INDICATOR,
   KIND_USER_STATUS,
   CHANNEL_EVENT_KINDS,
+  KIND_CHANNEL_THREAD_SUMMARY,
 } from "@/shared/constants/kinds";
 import {
   getTextPayload,
@@ -340,7 +341,10 @@ export class RelayClient {
   ) {
     return this.subscribe(
       {
-        kinds: [...CHANNEL_EVENT_KINDS],
+        // 39005 rides only this window-store subscription — not
+        // CHANNEL_EVENT_KINDS, whose other consumers (unread tracking,
+        // timeline-cache merges) must never see summary overlays.
+        kinds: [...CHANNEL_EVENT_KINDS, KIND_CHANNEL_THREAD_SUMMARY],
         "#h": [channelId],
         limit: 1000,
         since: Math.floor(Date.now() / 1_000),

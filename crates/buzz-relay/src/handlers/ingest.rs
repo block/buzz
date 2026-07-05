@@ -2047,6 +2047,20 @@ async fn ingest_event_inner(
         }
     }
 
+    // A freshly inserted reply changed its thread's counters (updated in the
+    // same transaction as the insert) — push a fresh relay-signed 39005 so
+    // subscribed clients can update badge counts without refetching the head
+    // window. Page responses recompute summaries independently, so this is
+    // fan-out-only and best-effort.
+    if let Some(meta) = &thread_meta {
+        crate::handlers::side_effects::emit_live_thread_summary(
+            tenant,
+            state,
+            meta.channel_id,
+            meta.root_event_id.clone(),
+        );
+    }
+
     let pubkey_hex = auth.pubkey().to_hex();
     // Spec WriteInsert (line 514) / WriteInsertGlobal (line 559) /
     // WriteDuplicate (line 606): emit the abstract write at the trailing
