@@ -302,16 +302,11 @@ function MessageComposerImpl({
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: effectiveDraftKey is the sole trigger
   React.useEffect(() => {
-    const prevKey = previousDraftKeyRef.current;
-    if (prevKey) {
-      drafts.persistDraft(
-        prevKey,
-        syncComposerContentFromEditor(),
-        channelId ?? prevKey,
-        [...media.pendingImetaRef.current],
-        [...spoileredAttachmentUrls],
-      );
-    }
+    // The outgoing draft is persisted by the cleanup below, which runs before
+    // this body on key changes and has the correct outgoing channelId in its
+    // closure. Do NOT re-persist prevKey here: channelId in this render
+    // already reflects the incoming channel, which would corrupt the outgoing
+    // draft's channelId metadata.
     previousDraftKeyRef.current = effectiveDraftKey;
 
     const saved = effectiveDraftKey

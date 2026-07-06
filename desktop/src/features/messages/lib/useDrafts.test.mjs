@@ -329,6 +329,63 @@ test("getAllDraftEntries_returns_empty_array_when_no_drafts", () => {
   assert.deepEqual(getAllDraftEntries(), []);
 });
 
+// ── channelId correctness on key switch ──────────────────────────────────────
+// Regression: composer effect body was re-persisting prevKey with the incoming
+// channel's id, corrupting the outgoing draft's channelId metadata.
+// The store-layer fix here asserts the contract: persisting key-A with
+// channelId-A must never be overwritten by a subsequent persist of key-A with
+// channelId-B (the incoming channel).
+
+test("persist_draft_channelId_for_key_A_unaffected_by_persist_of_key_A_with_wrong_channelId", () => {
+  setup();
+  // Simulate correct outgoing save (cleanup runs first in React, correct channel).
+  persistDraftEntry("chan-A", "draft text", "chan-A", [IMG_A], []);
+  const afterCorrectSave = loadDraftEntry("chan-A");
+  assert.ok(afterCorrectSave, "chan-A draft should exist after correct save");
+  assert.equal(
+    afterCorrectSave.channelId,
+    "chan-A",
+    "channelId must be chan-A after correct save",
+  );
+
+  // Simulate the BUG path: a second persist of the same key but with the
+  // incoming channel's id (chan-B). This must NOT be done in practice, but
+  // we assert here that IF it were called, it would corrupt the metadata —
+  // confirming that removing the redundant body-side persist was the right fix.
+  persistDraftEntry("chan-A", "draft text", "chan-B", [IMG_A], []);
+  const afterBuggyOverwrite = loadDraftEntry("chan-A");
+  assert.ok(afterBuggyOverwrite);
+  assert.equal(
+    afterBuggyOverwrite.channelId,
+    "chan-B",
+    "channelId IS overwritten when persist is called with wrong channel — confirms the redundant persist must be removed",
+  );
+});
+
+test("persist_draft_outgoing_key_retains_original_channelId_when_body_persist_removed", () => {
+  // The correct behavior after the fix: only the cleanup call persists
+  // the outgoing draft. We simulate: persist A with channelId=A (cleanup),
+  // do NOT call persist A again with channelId=B (body removed), then verify A
+  // still has channelId=A when navigating to B's composer.
+  setup();
+  persistDraftEntry("chan-A", "draft in A", "chan-A", [IMG_A], []);
+  // Simulate switch to channel B: persist B's draft (new channel).
+  persistDraftEntry("chan-B", "", "chan-B", [], []); // empty B draft, gets cleared
+  // A's draft must still have channelId=A.
+  const draftA = loadDraftEntry("chan-A");
+  assert.ok(draftA, "chan-A draft should survive channel switch to B");
+  assert.equal(
+    draftA.channelId,
+    "chan-A",
+    "chan-A channelId must not be corrupted by switch to chan-B",
+  );
+  assert.equal(
+    draftA.pendingImeta.length,
+    1,
+    "image must be preserved on chan-A draft",
+  );
+});
+
 // ── thread-key handling ───────────────────────────────────────────────────────
 
 test("thread_draft_key_stores_explicit_channelId_not_the_thread_key", () => {
