@@ -997,6 +997,7 @@ export function AgentInstanceEditDialog({
                       inheritHarness={inheritHarness}
                       linkedPersona={linkedPersona}
                       mcpToolsets={mcpToolsets}
+                      modelTuningRuntimeId={prospectiveRuntimeId}
                       parallelism={parallelism}
                       relayUrl={relayUrl}
                       requiredEnvKeys={requiredEnvKeys}
