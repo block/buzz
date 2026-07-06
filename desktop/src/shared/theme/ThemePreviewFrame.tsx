@@ -195,6 +195,269 @@ function ThemePreviewSvg({ vars }: { vars: ThemePreviewVars | null }) {
   );
 }
 
+/**
+ * Split preview SVG: dark theme on top, light theme on bottom.
+ * Matches the "System Preference" visual — one image showing both modes.
+ */
+function SystemPreferencePreviewSvg({
+  darkVars,
+  lightVars,
+}: {
+  darkVars: ThemePreviewVars | null;
+  lightVars: ThemePreviewVars | null;
+}) {
+  const clipBase = React.useId().replace(/:/g, "");
+  const clipDark = `${clipBase}-dark`;
+  const clipLight = `${clipBase}-light`;
+  const clipOuter = `${clipBase}-outer`;
+
+  // Dark half colors
+  const darkBg = hsl(darkVars, "--background");
+  const darkSidebar = hsl(darkVars, "--sidebar-background");
+  const darkSidebarFg = hslAlpha(darkVars, "--sidebar-foreground", 0.58);
+  const darkMutedFg = hsl(darkVars, "--muted-foreground");
+
+  // Light half colors
+  const lightBg = hsl(lightVars, "--background");
+  const lightSidebar = hsl(lightVars, "--sidebar-background");
+  const lightSidebarFg = hslAlpha(lightVars, "--sidebar-foreground", 0.58);
+  const lightMutedFg = hsl(lightVars, "--muted-foreground");
+
+  return (
+    <svg
+      aria-hidden="true"
+      className="h-full w-full"
+      fill="none"
+      viewBox="0 0 118 80"
+      xmlns="http://www.w3.org/2000/svg"
+    >
+      {/* Dark half (top) */}
+      <g clipPath={`url(#${clipDark})`}>
+        <rect fill={darkBg} height="180" rx="3.6" width="288" />
+        <rect fill={darkSidebar} height="180" width="57.375" />
+        <rect
+          fill={darkSidebarFg}
+          height="3.6"
+          rx="0.9"
+          width="3.6"
+          x="3.60156"
+          y="15.9751"
+        />
+        <rect
+          fill={darkSidebarFg}
+          height="3.6"
+          rx="0.9"
+          width="3.6"
+          x="3.60156"
+          y="21.375"
+        />
+        <rect
+          fill={darkSidebarFg}
+          height="3.6"
+          rx="0.9"
+          width="3.6"
+          x="3.60156"
+          y="26.7749"
+        />
+        <rect
+          fill={darkSidebarFg}
+          height="3.6"
+          rx="0.9"
+          width="3.6"
+          x="3.60156"
+          y="32.175"
+        />
+        <rect
+          fill="#FF5F57"
+          height="2.7"
+          rx="1.35"
+          width="2.7"
+          x="4.5"
+          y="4.72485"
+        />
+        <rect
+          height="2.5875"
+          rx="1.29375"
+          stroke="black"
+          strokeOpacity="0.2"
+          strokeWidth="0.1125"
+          width="2.5875"
+          x="4.55625"
+          y="4.7811"
+        />
+        <rect
+          fill="#FEBC2E"
+          height="2.7"
+          rx="1.35"
+          width="2.7"
+          x="9"
+          y="4.72485"
+        />
+        <rect
+          height="2.5875"
+          rx="1.29375"
+          stroke="black"
+          strokeOpacity="0.2"
+          strokeWidth="0.1125"
+          width="2.5875"
+          x="9.05625"
+          y="4.7811"
+        />
+        <rect
+          fill="#28C840"
+          height="2.7"
+          rx="1.35"
+          width="2.7"
+          x="13.5"
+          y="4.72485"
+        />
+        <rect
+          height="2.5875"
+          rx="1.29375"
+          stroke="black"
+          strokeOpacity="0.2"
+          strokeWidth="0.1125"
+          width="2.5875"
+          x="13.5563"
+          y="4.7811"
+        />
+        <rect
+          fill={darkSidebarFg}
+          height="1.8"
+          rx="0.225"
+          width="45.225"
+          x="9"
+          y="16.875"
+        />
+        <rect
+          fill={darkSidebarFg}
+          height="1.8"
+          rx="0.225"
+          width="45.225"
+          x="9"
+          y="22.2749"
+        />
+        <rect
+          fill={darkSidebarFg}
+          height="1.8"
+          rx="0.225"
+          width="45.225"
+          x="9"
+          y="27.675"
+        />
+        <rect
+          fill={darkSidebarFg}
+          height="1.8"
+          rx="0.225"
+          width="45.225"
+          x="9"
+          y="33.075"
+        />
+        <rect
+          fill={darkMutedFg}
+          height="1.8"
+          rx="0.225"
+          width="26.775"
+          x="3.60156"
+          y="43.875"
+        />
+      </g>
+
+      {/* Light half (bottom) — clipped to bottom portion */}
+      <g clipPath={`url(#${clipLight})`}>
+        <g clipPath={`url(#${clipOuter})`}>
+          <rect fill={lightBg} height="180" rx="3.6" width="288" y="22" />
+          <rect fill={lightSidebar} height="180" width="57.375" y="22" />
+          <rect
+            fill={lightSidebarFg}
+            height="3.6"
+            rx="0.9"
+            width="3.6"
+            x="3.60156"
+            y="37.9751"
+          />
+          <rect
+            fill={lightSidebarFg}
+            height="3.6"
+            rx="0.9"
+            width="3.6"
+            x="3.60156"
+            y="43.375"
+          />
+          <rect
+            fill={lightSidebarFg}
+            height="3.6"
+            rx="0.9"
+            width="3.6"
+            x="3.60156"
+            y="48.7749"
+          />
+          <rect
+            fill={lightSidebarFg}
+            height="3.6"
+            rx="0.9"
+            width="3.6"
+            x="3.60156"
+            y="54.175"
+          />
+          <rect
+            fill={lightSidebarFg}
+            height="1.8"
+            rx="0.225"
+            width="45.225"
+            x="9"
+            y="38.875"
+          />
+          <rect
+            fill={lightSidebarFg}
+            height="1.8"
+            rx="0.225"
+            width="45.225"
+            x="9"
+            y="44.2749"
+          />
+          <rect
+            fill={lightSidebarFg}
+            height="1.8"
+            rx="0.225"
+            width="45.225"
+            x="9"
+            y="49.675"
+          />
+          <rect
+            fill={lightSidebarFg}
+            height="1.8"
+            rx="0.225"
+            width="45.225"
+            x="9"
+            y="55.075"
+          />
+          <rect
+            fill={lightMutedFg}
+            height="1.8"
+            rx="0.225"
+            width="26.775"
+            x="3.60156"
+            y="65.875"
+          />
+        </g>
+      </g>
+
+      <defs>
+        <clipPath id={clipDark}>
+          <rect fill="white" height="180" rx="3.6" width="288" />
+        </clipPath>
+        <clipPath id={clipLight}>
+          <path d="M0 37H118V80H0V37Z" fill="white" />
+        </clipPath>
+        <clipPath id={clipOuter}>
+          <rect fill="white" height="180" rx="3.6" width="288" y="22" />
+        </clipPath>
+      </defs>
+    </svg>
+  );
+}
+
 export function ThemePreviewFrame({
   className,
   vars,
@@ -216,6 +479,31 @@ export function ThemePreviewFrame({
       <div className="absolute bottom-0 right-0">
         <ThemePreviewSvg vars={vars} />
       </div>
+    </div>
+  );
+}
+
+/**
+ * System preference preview frame: shows dark on top, light on bottom
+ * in a single image to represent auto-switching themes.
+ */
+export function SystemPreferencePreviewFrame({
+  className,
+  darkVars,
+  lightVars,
+}: {
+  className?: string;
+  darkVars: ThemePreviewVars | null;
+  lightVars: ThemePreviewVars | null;
+}) {
+  return (
+    <div
+      className={cn(
+        "relative overflow-hidden rounded-md border border-border/70",
+        className,
+      )}
+    >
+      <SystemPreferencePreviewSvg darkVars={darkVars} lightVars={lightVars} />
     </div>
   );
 }
