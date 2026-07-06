@@ -13,6 +13,7 @@ import {
   type InboxItem,
   type InboxTypeLabel,
 } from "@/features/home/lib/inbox";
+import { DraftsPanel } from "@/features/messages/ui/DraftsPanel";
 import { UserProfilePopover } from "@/features/profile/ui/UserProfilePopover";
 import { RemindersPanel } from "@/features/reminders/ui/RemindersPanel";
 import { TopChromeInsetHeader } from "@/shared/layout/TopChromeInsetHeader";
@@ -52,6 +53,7 @@ const FILTER_OPTIONS: Array<{ label: string; value: InboxFilter }> = [
   { value: "activity", label: "Activity" },
   { value: "agent_activity", label: "Agents" },
   { value: "reminders", label: "Reminders" },
+  { value: "drafts", label: "Drafts" },
 ];
 
 const INBOX_HEADER_ICON_BUTTON_CLASS =
@@ -137,6 +139,7 @@ export function InboxListPane({
 }: InboxListPaneProps) {
   const activeFilter = FILTER_OPTIONS.find((option) => option.value === filter);
   const isReminders = filter === "reminders";
+  const isDrafts = filter === "drafts";
   const scrollRef = React.useRef<HTMLDivElement>(null);
   const unreadVisibleItemCount = React.useMemo(
     () =>
@@ -399,7 +402,7 @@ export function InboxListPane({
                 <div
                   className={cn(
                     "flex min-h-9 items-center justify-between gap-3 rounded-lg px-2 py-1.5",
-                    isReminders && "opacity-50",
+                    (isReminders || isDrafts) && "opacity-50",
                   )}
                 >
                   <label
@@ -412,7 +415,7 @@ export function InboxListPane({
                     checked={unreadOnly}
                     className="shadow-none [&>span]:shadow-none"
                     data-testid="inbox-unread-only-toggle"
-                    disabled={isReminders}
+                    disabled={isReminders || isDrafts}
                     id="inbox-unread-only-switch"
                     onCheckedChange={onUnreadOnlyChange}
                   />
@@ -498,6 +501,13 @@ export function InboxListPane({
           {reminderPubkey ? (
             <RemindersPanel includeDone pubkey={reminderPubkey} />
           ) : null}
+        </div>
+      ) : isDrafts ? (
+        <div
+          className="flex min-h-0 flex-1 flex-col overflow-hidden"
+          data-testid="home-inbox-drafts"
+        >
+          <DraftsPanel />
         </div>
       ) : (
         <div

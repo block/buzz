@@ -112,7 +112,8 @@ export function HomeView({
   const { applyPatch: applyInboxSearchPatch, values: inboxSearchValues } =
     useHistorySearchState(INBOX_SEARCH_KEYS);
   const isReminders = filter === "reminders";
-  const isMessagesMode = !isReminders;
+  const isDrafts = filter === "drafts";
+  const isMessagesMode = !isReminders && !isDrafts;
   const remindersQuery = useRemindersQuery(currentPubkey);
   const dueReminderCount = countDueReminders(remindersQuery.data ?? []);
   // `?item=` is Messages-mode-only machinery: a reminder never enters the
