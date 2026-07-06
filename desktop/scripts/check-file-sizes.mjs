@@ -103,7 +103,8 @@ const overrides = new Map([
   // for the 3 existing goose tests that previously read real disk config.
   // New file in this PR; queued to split.
   // +2 readiness integration tests for flat-DATABRICKS_HOST canonicalization fix.
-  ["src-tauri/src/managed_agents/readiness.rs", 1149],
+  // +1 cargo fmt whitespace reformat (readiness.rs closures inline after rebase).
+  ["src-tauri/src/managed_agents/readiness.rs", 1150],
   // applyWorkspace reposDir parameter plus the validateReposDir binding,
   // threaded through Tauri invokes for configurable repos_dir, plus the
   // harness-persona-sync `harnessOverride` create-input bit — load-bearing
@@ -116,7 +117,8 @@ const overrides = new Map([
   // which root rows lack). Documentation accuracy, not code growth.
   // linux-updater isAutoUpdateSupported() binding + onboarding has_profile_event field.
   // config-bridge-aware requirements: getRuntimeFileConfig command adds ~15 lines.
-  ["src/shared/api/tauri.ts", 1349],
+  // +26 lines from PRs landing on main between prior rebase and this rebase.
+  ["src/shared/api/tauri.ts", 1375],
   // readiness-gate: PersonaDialog.tsx threads computeLocalModeGate +
   // requiredCredentialEnvKeys + RequiredFieldLabel so the "New agent" dialog
   // shows required markers and credential amber rows (parity with
