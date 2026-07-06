@@ -399,82 +399,44 @@ function ThemeSettingsCard() {
 
   return (
     <section
-      className="flex min-h-0 flex-1 flex-col"
+      className="flex min-h-0 flex-1 flex-col overflow-y-auto"
       data-testid="settings-theme"
     >
-      {/* Fixed header area — does not scroll */}
-      <div className="shrink-0">
-        <SettingsSectionHeader
-          title="Appearance"
-          description="Choose a theme for Buzz."
-        />
+      <SettingsSectionHeader
+        title="Appearance"
+        description="Choose a theme for Buzz."
+      />
 
-        {/* Accent color picker */}
-        <div className="mb-6 px-1">
-          <h3 className="mb-2 text-sm font-medium">Accent color</h3>
-          <div className="flex flex-wrap gap-2 p-1">
-            {ACCENT_COLORS.map((color) => {
-              const isNeutral = color.value === NEUTRAL_ACCENT;
-              const swatchColor = isNeutral
-                ? "hsl(var(--foreground))"
-                : color.value;
-              const checkClassName =
-                isNeutral && isDark ? "text-black" : "text-white";
-
-              return (
-                <button
-                  className={cn(
-                    "flex h-7 w-7 items-center justify-center rounded-full border border-border/50 transition-transform hover:scale-110",
-                    accentColor === color.value &&
-                      "ring-2 ring-ring ring-offset-2 ring-offset-background",
-                  )}
-                  data-testid={`accent-color-${color.name.toLowerCase()}`}
-                  key={color.value}
-                  onClick={() => setAccentColor(color.value)}
-                  style={{ backgroundColor: swatchColor }}
-                  title={color.name}
-                  type="button"
-                >
-                  {accentColor === color.value && (
-                    <Check className={cn("h-4 w-4", checkClassName)} />
-                  )}
-                </button>
-              );
-            })}
-          </div>
-        </div>
-
-        {/* Mode selector: System / Light / Dark */}
-        <div className="mb-4 flex gap-2">
-          {(
-            [
-              { mode: "system" as const, label: "System", Icon: SunMoon },
-              { mode: "light" as const, label: "Light", Icon: Sun },
-              { mode: "dark" as const, label: "Dark", Icon: Moon },
-            ] as const
-          ).map(({ mode, label, Icon }) => (
-            <button
-              aria-pressed={selectedMode === mode}
-              className={cn(
-                "flex items-center gap-2 rounded-lg border px-4 py-2 text-sm font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring",
-                selectedMode === mode
-                  ? "border-primary bg-primary/10 text-foreground"
-                  : "border-border/70 text-muted-foreground hover:border-border hover:text-foreground",
-              )}
-              data-testid={`appearance-mode-${mode}`}
-              key={mode}
-              onClick={() => handleModeSelect(mode)}
-              type="button"
-            >
-              <Icon className="h-4 w-4" />
-              {label}
-            </button>
-          ))}
-        </div>
+      {/* Mode selector: System / Light / Dark */}
+      <div className="mb-4 flex gap-2">
+        {(
+          [
+            { mode: "system" as const, label: "System", Icon: SunMoon },
+            { mode: "light" as const, label: "Light", Icon: Sun },
+            { mode: "dark" as const, label: "Dark", Icon: Moon },
+          ] as const
+        ).map(({ mode, label, Icon }) => (
+          <button
+            aria-pressed={selectedMode === mode}
+            className={cn(
+              "flex items-center gap-2 rounded-lg border px-4 py-2 text-sm font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring",
+              selectedMode === mode
+                ? "border-primary bg-primary/10 text-foreground"
+                : "border-border/70 text-muted-foreground hover:border-border hover:text-foreground",
+            )}
+            data-testid={`appearance-mode-${mode}`}
+            key={mode}
+            onClick={() => handleModeSelect(mode)}
+            type="button"
+          >
+            <Icon className="h-4 w-4" />
+            {label}
+          </button>
+        ))}
       </div>
 
-      {/* Theme grid — only this area scrolls */}
-      <div className="min-h-0 flex-1 overflow-y-auto">
+      {/* Theme grid — constrained to ~3 rows, scrolls internally */}
+      <div className="mb-6 max-h-[430px] overflow-y-auto rounded-lg">
         <div className="flex flex-wrap gap-4 p-1">
           {selectedMode === "system" &&
             pairedLight.map((lightName) => {
@@ -511,6 +473,41 @@ function ThemeSettingsCard() {
                 vars={getVars(name)}
               />
             ))}
+        </div>
+      </div>
+
+      {/* Accent color picker */}
+      <div className="shrink-0 px-1 pb-2">
+        <h3 className="mb-2 text-sm font-medium">Accent color</h3>
+        <div className="flex flex-wrap gap-2 p-1">
+          {ACCENT_COLORS.map((color) => {
+            const isNeutral = color.value === NEUTRAL_ACCENT;
+            const swatchColor = isNeutral
+              ? "hsl(var(--foreground))"
+              : color.value;
+            const checkClassName =
+              isNeutral && isDark ? "text-black" : "text-white";
+
+            return (
+              <button
+                className={cn(
+                  "flex h-7 w-7 items-center justify-center rounded-full border border-border/50 transition-transform hover:scale-110",
+                  accentColor === color.value &&
+                    "ring-2 ring-ring ring-offset-2 ring-offset-background",
+                )}
+                data-testid={`accent-color-${color.name.toLowerCase()}`}
+                key={color.value}
+                onClick={() => setAccentColor(color.value)}
+                style={{ backgroundColor: swatchColor }}
+                title={color.name}
+                type="button"
+              >
+                {accentColor === color.value && (
+                  <Check className={cn("h-4 w-4", checkClassName)} />
+                )}
+              </button>
+            );
+          })}
         </div>
       </div>
     </section>
