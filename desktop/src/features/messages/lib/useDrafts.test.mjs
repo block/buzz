@@ -52,9 +52,12 @@ installFreshLocalStorage();
 import {
   clearAllDrafts,
   clearDraftEntry,
+  getActiveDraftEntries,
   getAllDraftEntries,
+  getSentDraftEntries,
   initDraftStore,
   loadDraftEntry,
+  markDraftSentEntry,
   persistDraftEntry,
   saveDraftEntry,
 } from "./useDrafts.ts";
@@ -428,4 +431,122 @@ test("initDraftStore_resets_cache_on_pubkey_change_without_clearAllDrafts", () =
     undefined,
     "bob must not see alice's cached draft after direct initDraftStore switch",
   );
+});
+
+// ── status field: markDraftSent, getActiveDraftEntries, getSentDraftEntries ───
+
+test("markDraftSent_flips_status_to_sent_and_preserves_content_and_images", () => {
+  setup();
+  persistDraftEntry("chan-1", "sent message content", "chan-1", [IMG_A], []);
+  markDraftSentEntry("chan-1");
+  const loaded = loadDraftEntry("chan-1");
+  assert.ok(loaded, "entry must still exist after markDraftSent");
+  assert.equal(loaded.status, "sent", "status must be 'sent'");
+  assert.equal(loaded.content, "sent message content", "content preserved");
+  assert.equal(loaded.pendingImeta.length, 1, "image preserved");
+  assert.equal(loaded.pendingImeta[0].url, IMG_A.url);
+});
+
+test("markDraftSent_is_a_noop_for_nonexistent_key", () => {
+  setup();
+  // Must not throw.
+  markDraftSentEntry("no-such-key");
+  assert.equal(loadDraftEntry("no-such-key"), undefined);
+});
+
+test("getActiveDraftEntries_returns_only_active_drafts", () => {
+  setup("pubkey-active");
+  persistDraftEntry("chan-active", "active draft", "chan-active", [], []);
+  persistDraftEntry("chan-sent", "sent draft", "chan-sent", [], []);
+  markDraftSentEntry("chan-sent");
+  const active = getActiveDraftEntries();
+  assert.equal(active.length, 1, "only one active draft");
+  assert.equal(active[0].key, "chan-active");
+  assert.equal(active[0].draft.status, "active");
+});
+
+test("getSentDraftEntries_returns_only_sent_drafts", () => {
+  setup("pubkey-sent");
+  persistDraftEntry("chan-active2", "still drafting", "chan-active2", [], []);
+  persistDraftEntry("chan-sent2", "already sent", "chan-sent2", [], []);
+  markDraftSentEntry("chan-sent2");
+  const sent = getSentDraftEntries();
+  assert.equal(sent.length, 1, "only one sent draft");
+  assert.equal(sent[0].key, "chan-sent2");
+  assert.equal(sent[0].draft.status, "sent");
+});
+
+test("getActiveDraftEntries_and_getSentDraftEntries_partition_all_entries", () => {
+  setup("pubkey-partition");
+  persistDraftEntry("ch-a", "draft a", "ch-a", [], []);
+  persistDraftEntry("ch-b", "draft b", "ch-b", [], []);
+  persistDraftEntry("ch-c", "draft c", "ch-c", [], []);
+  markDraftSentEntry("ch-b");
+  const all = getAllDraftEntries();
+  const active = getActiveDraftEntries();
+  const sent = getSentDraftEntries();
+  assert.equal(all.length, 3);
+  assert.equal(active.length + sent.length, all.length, "active + sent = all");
+  assert.ok(
+    active.every((e) => e.draft.status === "active"),
+    "all active entries have status active",
+  );
+  assert.ok(
+    sent.every((e) => e.draft.status === "sent"),
+    "all sent entries have status sent",
+  );
+});
+
+// ── status migration: pre-status entries read as "active" ────────────────────
+
+test("pre_status_entry_without_status_field_is_read_as_active", () => {
+  setup("pubkey-migrate");
+  // Write a raw entry without the status field, simulating data persisted
+  // before the status field was introduced.
+  const legacyEntry = {
+    content: "legacy draft",
+    selectionStart: 0,
+    selectionEnd: 12,
+    channelId: "chan-legacy",
+    createdAt: "2025-01-01T00:00:00.000Z",
+    updatedAt: "2025-01-01T00:00:00.000Z",
+    pendingImeta: [],
+    spoileredAttachmentUrls: [],
+    // NOTE: no 'status' field
+  };
+  localStorage.setItem(
+    "buzz-drafts.v1:pubkey-migrate",
+    JSON.stringify({ "chan-legacy": legacyEntry }),
+  );
+  // Force re-read from localStorage.
+  clearAllDrafts();
+  initDraftStore("pubkey-migrate");
+  const loaded = loadDraftEntry("chan-legacy");
+  assert.ok(loaded, "legacy entry must load without rejection");
+  assert.equal(loaded.status, "active", "missing status defaults to 'active'");
+  assert.equal(loaded.content, "legacy draft");
+});
+
+test("pre_status_entry_appears_in_getActiveDraftEntries_after_migration", () => {
+  setup("pubkey-migrate2");
+  const legacyEntry = {
+    content: "old draft",
+    selectionStart: 0,
+    selectionEnd: 9,
+    channelId: "chan-old",
+    createdAt: "2025-06-01T00:00:00.000Z",
+    updatedAt: "2025-06-01T00:00:00.000Z",
+    pendingImeta: [],
+    spoileredAttachmentUrls: [],
+  };
+  localStorage.setItem(
+    "buzz-drafts.v1:pubkey-migrate2",
+    JSON.stringify({ "chan-old": legacyEntry }),
+  );
+  clearAllDrafts();
+  initDraftStore("pubkey-migrate2");
+  const active = getActiveDraftEntries();
+  assert.equal(active.length, 1, "legacy entry appears in active list");
+  assert.equal(active[0].key, "chan-old");
+  assert.equal(active[0].draft.status, "active");
 });

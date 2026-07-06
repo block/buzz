@@ -22,6 +22,14 @@ export type DraftState = {
   pendingImeta: ImetaMedia[];
   /** URLs of imeta attachments marked as spoilered. */
   spoileredAttachmentUrls: string[];
+  /**
+   * Lifecycle status of this draft.
+   * - "active": draft is in progress (not yet sent).
+   * - "sent": draft was sent; kept for the Drafts inbox "Sent" subsection.
+   * Entries persisted before this field was added have no status field —
+   * the read path treats absent status as "active" (see `isValidDraftState`).
+   */
+  status: "active" | "sent";
 };
 
 /** Serialised shape stored in localStorage (same as DraftState for round-trips). */
@@ -108,16 +116,27 @@ function readStore(): Map<string, DraftState> {
 function isValidDraftState(v: unknown): v is DraftState {
   if (typeof v !== "object" || v === null) return false;
   const d = v as Partial<DraftState>;
-  return (
-    typeof d.content === "string" &&
-    typeof d.selectionStart === "number" &&
-    typeof d.selectionEnd === "number" &&
-    typeof d.channelId === "string" &&
-    typeof d.createdAt === "string" &&
-    typeof d.updatedAt === "string" &&
-    Array.isArray(d.pendingImeta) &&
-    Array.isArray(d.spoileredAttachmentUrls)
-  );
+  if (
+    typeof d.content !== "string" ||
+    typeof d.selectionStart !== "number" ||
+    typeof d.selectionEnd !== "number" ||
+    typeof d.channelId !== "string" ||
+    typeof d.createdAt !== "string" ||
+    typeof d.updatedAt !== "string" ||
+    !Array.isArray(d.pendingImeta) ||
+    !Array.isArray(d.spoileredAttachmentUrls)
+  ) {
+    return false;
+  }
+  // Migration: entries written before the status field was introduced have no
+  // status. Treat absent/invalid status as "active" rather than rejecting the
+  // entry — this avoids data loss on first run after the upgrade.
+  if (d.status === undefined || d.status === null) {
+    (d as DraftState).status = "active";
+  } else if (d.status !== "active" && d.status !== "sent") {
+    return false;
+  }
+  return true;
 }
 
 function flushStore(map: Map<string, DraftState>): void {
@@ -197,6 +216,10 @@ export function persistDraftEntry(
       updatedAt: now,
       pendingImeta,
       spoileredAttachmentUrls,
+      // Preserve existing status on update (e.g. do not flip a "sent" entry
+      // back to "active" if the composer somehow persists again). New entries
+      // default to "active".
+      status: existing?.status ?? "active",
     });
   } else {
     clearDraftEntry(draftKey);
@@ -214,6 +237,46 @@ export function getAllDraftEntries(): Array<{
   return [...readStore().entries()]
     .sort((a, b) => b[1].updatedAt.localeCompare(a[1].updatedAt))
     .map(([key, draft]) => ({ key, draft }));
+}
+
+/**
+ * Returns only active (unsent) drafts, sorted most-recently-updated first.
+ * Used by the "Drafts" subsection of the Drafts inbox panel.
+ */
+export function getActiveDraftEntries(): Array<{
+  key: string;
+  draft: DraftState;
+}> {
+  return getAllDraftEntries().filter((e) => e.draft.status === "active");
+}
+
+/**
+ * Returns only sent drafts, sorted most-recently-updated first.
+ * Used by the "Sent" subsection of the Drafts inbox panel.
+ */
+export function getSentDraftEntries(): Array<{
+  key: string;
+  draft: DraftState;
+}> {
+  return getAllDraftEntries().filter((e) => e.draft.status === "sent");
+}
+
+/**
+ * Mark a draft as sent.
+ * Flips `status` to `"sent"` and bumps `updatedAt`. Keeps all content and
+ * attachment data intact so the Drafts inbox "Sent" subsection can display it.
+ * Does NOT delete the entry — call `clearDraftEntry` to remove it entirely.
+ */
+export function markDraftSentEntry(draftKey: string): void {
+  const map = readStore();
+  const existing = map.get(draftKey);
+  if (!existing) return;
+  map.set(draftKey, {
+    ...existing,
+    status: "sent",
+    updatedAt: new Date().toISOString(),
+  });
+  flushStore(map);
 }
 
 export function useDrafts() {
@@ -252,7 +315,25 @@ export function useDrafts() {
 
   const getAllDrafts = React.useCallback(() => getAllDraftEntries(), []);
 
-  return { saveDraft, loadDraft, clearDraft, persistDraft, getAllDrafts };
+  const getActiveDrafts = React.useCallback(() => getActiveDraftEntries(), []);
+
+  const getSentDrafts = React.useCallback(() => getSentDraftEntries(), []);
+
+  const markDraftSent = React.useCallback(
+    (draftKey: string) => markDraftSentEntry(draftKey),
+    [],
+  );
+
+  return {
+    saveDraft,
+    loadDraft,
+    clearDraft,
+    persistDraft,
+    getAllDrafts,
+    getActiveDrafts,
+    getSentDrafts,
+    markDraftSent,
+  };
 }
 
 export type UseDraftsResult = ReturnType<typeof useDrafts>;
