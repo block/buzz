@@ -564,8 +564,6 @@ export type CommandAvailability = {
 export type ManagedAgentPrereqs = {
   acp: CommandAvailability;
   mcp: CommandAvailability;
-  /** Windows only: whether a bash-compatible shell (Git for Windows) is available. Null on non-Windows. */
-  bash: CommandAvailability | null;
 };
 
 export type AgentModelsResponse = {

@@ -284,7 +284,6 @@ type RawCommandAvailability = {
 type RawManagedAgentPrereqs = {
   acp: RawCommandAvailability;
   mcp: RawCommandAvailability;
-  bash: RawCommandAvailability | null;
 };
 
 type RawRelayMember = {
@@ -1232,7 +1231,6 @@ export async function discoverManagedAgentPrereqs(input: {
   return {
     acp: fromRawCommandAvailability(response.acp),
     mcp: fromRawCommandAvailability(response.mcp),
-    bash: response.bash ? fromRawCommandAvailability(response.bash) : null,
   };
 }
 
