@@ -135,6 +135,16 @@ For agents, set `BUZZ_PRIVATE_KEY` and use [`buzz-cli`](crates/buzz-cli) — JSO
 
 ---
 
+## Windows prerequisites
+
+The agent shell tool runs commands under bash. On macOS and Linux that's already there; on Windows you need to bring it.
+
+Install [Git for Windows](https://git-scm.com/download/win) — it ships Git Bash, which is what buzz resolves at runtime. Once it's installed, everything works the same as on other platforms.
+
+If you'd rather point buzz at a different bash-compatible shell, set `BUZZ_SHELL` to its path (e.g. `BUZZ_SHELL=C:\path\to\bash.exe`). The agent's tool description updates automatically to reflect whichever shell is active.
+
+---
+
 ## Architecture
 
 ```
