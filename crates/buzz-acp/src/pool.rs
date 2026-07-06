@@ -2743,7 +2743,7 @@ async fn publish_agent_turn_metric(
     let timestamp = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
     let payload = AgentTurnMetricPayload {
         harness: ctx.harness_name.clone(),
-        model: None,
+        model: usage.model.clone(),
         channel_id: channel_id.map(|id| id.to_string()),
         session_id: Some(usage.session_id.clone()),
         turn_id: Some(turn_id.to_string()),
@@ -3965,6 +3965,7 @@ mod tests {
             cumulative_input_tokens: 100,
             cumulative_output_tokens: 50,
             cumulative_cost_usd: None,
+            model: None,
         };
         // owner_pubkey = None → early return, no panic.
         publish_agent_turn_metric(
@@ -3996,6 +3997,7 @@ mod tests {
             cumulative_input_tokens: 200,
             cumulative_output_tokens: 80,
             cumulative_cost_usd: Some(0.001),
+            model: None,
         };
         // Will try to publish and fail (no real relay) but must not panic.
         publish_agent_turn_metric(
@@ -4028,6 +4030,7 @@ mod tests {
             cumulative_input_tokens: 150,
             cumulative_output_tokens: 70,
             cumulative_cost_usd: None,
+            model: None,
         };
         // Must not panic; HTTP submit will fail (no real relay) — that's fine.
         publish_agent_turn_metric(
@@ -4060,6 +4063,7 @@ mod tests {
             cumulative_input_tokens: 400,
             cumulative_output_tokens: 100,
             cumulative_cost_usd: None,
+            model: None,
         };
         // Will try to publish (encrypt succeeds) and fail HTTP (no relay) — must not panic.
         publish_agent_turn_metric(

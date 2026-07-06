@@ -86,6 +86,10 @@ pub(crate) struct UsageUpdatePayload {
     pub accumulated_input_tokens: u64,
     pub accumulated_output_tokens: u64,
     pub accumulated_cost: Option<f64>,
+    /// Effective model id for this turn. Optional — goose payloads that
+    /// predate this field deserialize cleanly as `None`.
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 /// Per-session normalization state: the last cumulative snapshot we saw.
@@ -130,6 +134,9 @@ pub struct TurnUsage {
     pub cumulative_output_tokens: u64,
     /// Session-cumulative estimated cost in USD; `None` if goose did not report it.
     pub cumulative_cost_usd: Option<f64>,
+    /// Effective model id for this turn (maps to NIP-AM `model`). `None` if the
+    /// harness did not include the model in its usage notification.
+    pub model: Option<String>,
 }
 
 /// Tracks per-session cumulative usage state across turns.
@@ -262,6 +269,7 @@ impl UsageTracker {
                 cumulative_input_tokens: current_input,
                 cumulative_output_tokens: current_output,
                 cumulative_cost_usd: current_cost,
+                model: payload.model.clone(),
             });
         } else if self.in_flight_session.is_none() {
             // Not in-flight at all: advance the committed baseline so the next
@@ -322,6 +330,7 @@ mod tests {
             accumulated_input_tokens: input,
             accumulated_output_tokens: output,
             accumulated_cost: cost,
+            model: None,
         }
     }
 
@@ -332,6 +341,7 @@ mod tests {
             accumulated_input_tokens: input,
             accumulated_output_tokens: output,
             accumulated_cost: cost,
+            model: None,
         }
     }
 
@@ -810,6 +820,73 @@ mod tests {
         assert!(
             result.is_none(),
             "take() without any record() must return None (pre-response cancel path)"
+        );
+    }
+
+    // ── model field threading ────────────────────────────────────────────────
+
+    fn payload_with_model(
+        input: u64,
+        output: u64,
+        cost: Option<f64>,
+        model: Option<&str>,
+    ) -> UsageUpdatePayload {
+        UsageUpdatePayload {
+            used: input + output,
+            context_limit: 200_000,
+            accumulated_input_tokens: input,
+            accumulated_output_tokens: output,
+            accumulated_cost: cost,
+            model: model.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn model_threads_from_payload_to_turn_usage() {
+        // When a `usage_update` payload includes a `model` field, TurnUsage
+        // must carry it through so pool.rs can populate the 44200 payload.
+        let mut tracker = UsageTracker::default();
+        let p = payload_with_model(1000, 200, None, Some("claude-sonnet-4-5"));
+        tracker.begin_turn("sess-model");
+        tracker.record("sess-model", &p);
+        let usage = tracker.take().expect("pending");
+        assert_eq!(
+            usage.model.as_deref(),
+            Some("claude-sonnet-4-5"),
+            "model must pass through record() → pending → take()"
+        );
+    }
+
+    #[test]
+    fn model_none_when_payload_omits_model_field() {
+        // Goose payloads that predate the `model` field must deserialize cleanly
+        // and produce TurnUsage with model = None (no deserialization error,
+        // no panic — goose-parity / fail-soft contract).
+        let json = r#"{
+            "sessionUpdate": "usage_update",
+            "accumulatedInputTokens": 500,
+            "accumulatedOutputTokens": 100,
+            "accumulatedCost": 0.005
+        }"#;
+        let variant: GooseSessionUpdateVariant =
+            serde_json::from_str(json).expect("must deserialize without model field");
+        let payload = match variant {
+            GooseSessionUpdateVariant::UsageUpdate(p) => p,
+            _ => panic!("expected UsageUpdate variant"),
+        };
+        assert!(
+            payload.model.is_none(),
+            "model must be None when absent from wire payload"
+        );
+
+        // And it should produce a TurnUsage with model = None.
+        let mut tracker = UsageTracker::default();
+        tracker.begin_turn("sess-goose-compat");
+        tracker.record("sess-goose-compat", &payload);
+        let usage = tracker.take().expect("pending");
+        assert!(
+            usage.model.is_none(),
+            "TurnUsage.model must be None when payload omits the field"
         );
     }
 }
