@@ -197,7 +197,7 @@ function ThemePreviewSvg({ vars }: { vars: ThemePreviewVars | null }) {
 }
 
 /**
- * Split preview SVG: dark theme on top, light theme on bottom.
+ * Split preview SVG: light theme on top, dark theme on bottom.
  * Matches the "System Preference" visual — one image showing both modes.
  */
 function SystemPreferencePreviewSvg({
