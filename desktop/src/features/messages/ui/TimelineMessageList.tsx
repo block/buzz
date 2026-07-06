@@ -11,6 +11,7 @@ import {
 import { THREAD_REPLY_ROW_MARGIN_INLINE_REM } from "@/features/messages/lib/threadTreeLayout";
 import { buildMainTimelineEntries } from "@/features/messages/lib/threadPanel";
 import type { MainTimelineEntry } from "@/features/messages/lib/threadPanel";
+import type { ChannelWindowThreadSummary } from "@/features/messages/lib/channelWindowStore";
 import {
   buildVideoReviewCommentsByRootId,
   buildVideoReviewContextForMessage,
@@ -45,6 +46,10 @@ type TimelineMessageListProps = {
   /** Hoisted main-timeline entries (computed once in ChannelPane). Falls back
    *  to deriving them here when omitted (e.g. the deferred-render pass). */
   mainEntries?: MainTimelineEntry[];
+  /** Relay thread summaries keyed by thread root id. Keeps badge rows alive on
+   *  the deferred-render fallback — replies usually are not local timeline
+   *  rows, so without the relay map every summary row unmounts mid-scrollback. */
+  threadSummaries?: ReadonlyMap<string, ChannelWindowThreadSummary>;
   messages: TimelineMessage[];
   onDelete?: (message: TimelineMessage) => void;
   onEdit?: (message: TimelineMessage) => void;
@@ -93,6 +98,7 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
   isMessageUnreadById,
   messageFooters,
   mainEntries,
+  threadSummaries,
   messages,
   onDelete,
   onEdit,
@@ -110,8 +116,10 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
   unfollowThreadById,
 }: TimelineMessageListProps) {
   const entries = React.useMemo(
-    () => mainEntries ?? buildMainTimelineEntries(messages),
-    [mainEntries, messages],
+    () =>
+      mainEntries ??
+      buildMainTimelineEntries(messages, undefined, threadSummaries, profiles),
+    [mainEntries, messages, profiles, threadSummaries],
   );
   const reviewCommentsByRootId = React.useMemo(
     () =>
