@@ -77,11 +77,9 @@ type MediaAttachmentItemProps = {
 /**
  * A single image/video attachment thumbnail with its lightbox dialog.
  * Images support an in-lightbox canvas edit mode (freehand drawing) and,
- * once annotated, an in-place revert to the original. Saving a drawing
- * closes the dialog (each save uploads a new blob, so the close adds
- * friction against rapid re-edit cycles); revert keeps it open (the
- * parent keys this item by its original URL so the swap doesn't remount
- * it).
+ * once annotated, an in-place revert to the original. Save closes the
+ * dialog; revert keeps it open (the parent keys this item by its original
+ * URL so the swap doesn't remount it).
  *
  * Forwards its ref to the root motion.div — required by the parent
  * `AnimatePresence mode="popLayout"`, which measures exiting children.
@@ -139,9 +137,7 @@ const MediaAttachmentItem = React.forwardRef<
     async (bytes: Uint8Array) => {
       if (!onEditSave) return;
       await onEditSave(attachment.url, bytes);
-      // Close the lightbox on save. Each save uploads a fresh blob, so the
-      // added friction of reopening discourages rapid save/redraw cycles
-      // that would otherwise orphan a blob per iteration.
+      // Close on save so rapid save/redraw cycles don't orphan a blob per iteration.
       setMode("view");
       setOpen(false);
     },

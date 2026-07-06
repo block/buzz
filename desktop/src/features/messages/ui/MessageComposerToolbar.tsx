@@ -158,14 +158,7 @@ export const MessageComposerToolbar = React.memo(
                 exit={{ opacity: 0, x: -12 }}
                 transition={presenceSpring}
               >
-                {/*
-                 * Composer tooltips float over the message textarea, so they
-                 * set disableHoverableContent: without it, Radix keeps the
-                 * tooltip open when the cursor slides off the trigger onto
-                 * the popup, leaving it camped over the editor. With it, the
-                 * tooltip dismisses the instant the pointer leaves the
-                 * trigger.
-                 */}
+                {/* disableHoverableContent keeps tooltips from lingering over the editor. */}
                 <Tooltip disableHoverableContent>
                   <TooltipTrigger asChild>
                     <Button
