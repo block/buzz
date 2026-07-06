@@ -1119,8 +1119,21 @@ test("existing relay profile with display name auto-skips onboarding without loc
 }) => {
   // A user whose relay profile already has a display name should skip
   // onboarding even without the localStorage completion flag.
+  // Seed alice's pubkey into searchProfiles so seedMockSearchProfiles writes
+  // has_profile_event: true into mockProfiles — the harness-intended mechanism
+  // for simulating a returning user with a real kind:0 event. Do NOT use the
+  // static mockProfiles seed (removed in PR #1508); that path collides with
+  // FIRST_RUN_ALICE (same pubkey) and breaks the first-run onboarding specs.
   await seedActiveIdentity(page, TEST_IDENTITIES.alice);
-  await installMockBridge(page, undefined, { skipOnboardingSeed: true });
+  await installMockBridge(
+    page,
+    {
+      searchProfiles: [
+        { pubkey: TEST_IDENTITIES.alice.pubkey, displayName: "alice" },
+      ],
+    },
+    { skipOnboardingSeed: true },
+  );
   await page.goto("/");
 
   await expect(page.getByTestId("onboarding-gate")).toHaveCount(0);
@@ -1362,8 +1375,21 @@ test("existing relay profile with display name auto-completes onboarding", async
   // A user whose relay profile already has a display name should skip
   // onboarding entirely — they've already set up their identity previously
   // (possibly on another machine or app data directory).
+  // Seed alice's pubkey into searchProfiles so seedMockSearchProfiles writes
+  // has_profile_event: true into mockProfiles — the harness-intended mechanism
+  // for simulating a returning user with a real kind:0 event. Do NOT use the
+  // static mockProfiles seed (removed in PR #1508); that path collides with
+  // FIRST_RUN_ALICE (same pubkey) and breaks the first-run onboarding specs.
   await seedActiveIdentity(page, TEST_IDENTITIES.alice);
-  await installMockBridge(page, undefined, { skipOnboardingSeed: true });
+  await installMockBridge(
+    page,
+    {
+      searchProfiles: [
+        { pubkey: TEST_IDENTITIES.alice.pubkey, displayName: "alice" },
+      ],
+    },
+    { skipOnboardingSeed: true },
+  );
   await page.goto("/");
 
   await expect(page.getByTestId("onboarding-gate")).toHaveCount(0);
