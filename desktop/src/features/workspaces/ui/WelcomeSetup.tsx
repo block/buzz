@@ -1,5 +1,4 @@
 import * as React from "react";
-import { Hexagon } from "lucide-react";
 import { flushSync } from "react-dom";
 
 import {
@@ -222,9 +221,12 @@ export function WelcomeSetup({
             effect={welcomeEffect}
             transitionKey={`welcome-${welcomeEffect}-${transitionDirection}`}
           >
-            <div className="flex h-14 w-14 items-center justify-center rounded-lg border border-border bg-background text-foreground shadow-xs">
-              <Hexagon className="h-7 w-7" aria-hidden="true" />
-            </div>
+            <img
+              alt="Buzz"
+              className="h-14 w-14 rounded-xl shadow-xs"
+              src="/app-icon@2x.png"
+              srcSet="/app-icon@2x.png 1x, /app-icon@3x.png 2x"
+            />
 
             <h1 className="mt-6 text-3xl font-semibold tracking-tight">
               Welcome to Buzz
