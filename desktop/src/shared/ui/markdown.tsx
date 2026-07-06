@@ -40,7 +40,6 @@ import { AttachmentGroup } from "@/shared/ui/attachment";
 import { ConfigNudgeCard } from "@/shared/ui/config-nudge-attachment";
 import { LinkPreviewAttachment } from "@/shared/ui/link-preview-attachment";
 import { useSmoothCorners } from "@/shared/ui/smoothCorners";
-import { stripConfigNudgeSentinel } from "@/shared/lib/configNudge";
 import {
   computeConfigNudge,
   selectProseOrNudge,
@@ -2025,9 +2024,10 @@ function MarkdownInner({
 
   let processedContent = content;
 
-  if (configNudge !== null) {
-    processedContent = stripConfigNudgeSentinel(processedContent);
-  }
+  // Note: stripping the sentinel here is intentionally omitted. When
+  // configNudge !== null, selectProseOrNudge() returns null — suppressing
+  // the prose node entirely — so processedContent is never rendered and
+  // stripConfigNudgeSentinel would be dead work on that path.
 
   if (/^(?:\s{2}\n)+/.test(processedContent)) {
     processedContent = `\u200B${processedContent}`;

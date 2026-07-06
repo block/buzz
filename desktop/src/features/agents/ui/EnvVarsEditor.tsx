@@ -103,8 +103,17 @@ export function EnvVarsEditor({
   // Required rows are rendered before the user-editable rows. They are not
   // part of `rows` state — they read from / write to `value` directly via
   // `onChange`, using their key as the stable identity.
+  //
+  // We must update `lastEmitted.current` BEFORE calling `onChange` so the
+  // resync effect (`recordsEqual(lastEmitted.current, value) === false`)
+  // does NOT re-run `setRows(toRows(value))` after the parent re-renders.
+  // Without this, each keystroke in an amber required row causes `toRows`
+  // to include the required key as a second normal editable row (duplicate
+  // row bug reported by Wes).
   function updateRequiredValue(key: string, newValue: string) {
-    onChange({ ...value, [key]: newValue });
+    const next = { ...value, [key]: newValue };
+    lastEmitted.current = next;
+    onChange(next);
   }
 
   return (
