@@ -47,8 +47,9 @@ function ThemePreviewSvg({ vars }: { vars: ThemePreviewVars | null }) {
   return (
     <svg
       aria-hidden="true"
-      className="h-full w-full shrink-0 drop-shadow-sm"
+      className="h-full w-full shrink-0"
       fill="none"
+      preserveAspectRatio="xMinYMin slice"
       viewBox="0 0 118 80"
       xmlns="http://www.w3.org/2000/svg"
     >
@@ -228,6 +229,7 @@ function SystemPreferencePreviewSvg({
       aria-hidden="true"
       className="h-full w-full"
       fill="none"
+      preserveAspectRatio="xMinYMin slice"
       viewBox="0 0 118 80"
       xmlns="http://www.w3.org/2000/svg"
     >
@@ -473,7 +475,7 @@ export function ThemePreviewFrame({
         borderColor: hsl(vars, "--border"),
       }}
     >
-      <div className="absolute bottom-0 right-0">
+      <div className="absolute inset-0">
         <ThemePreviewSvg vars={vars} />
       </div>
     </div>
