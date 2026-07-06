@@ -2675,9 +2675,10 @@ function importMockIdentity(nsec: string) {
       about: null,
       nip05_handle: null,
       owner_pubkey: null,
-      // Synthesised fallback for the identity-switch path: the new identity
-      // has not yet published a kind:0 event, so treat as no event.
-      has_profile_event: false,
+      // A non-empty username means this identity is registered in
+      // mockDisplayNames — it has a real mock relay profile (kind:0).
+      // A truly new identity (no username) has no event yet.
+      has_profile_event: username.length > 0,
     });
   }
 
