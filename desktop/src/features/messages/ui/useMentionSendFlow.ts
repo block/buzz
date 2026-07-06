@@ -397,7 +397,13 @@ export function useMentionSendFlow({
             draft.capturedThreadContext,
           );
           if (draft.sentDraftKey) {
-            drafts.markDraftSent(draft.sentDraftKey);
+            drafts.markDraftSent(
+              draft.sentDraftKey,
+              draft.savedContent,
+              draft.capturedChannelId ?? draft.sentDraftKey,
+              draft.savedImeta,
+              [...draft.savedSpoileredAttachmentUrls],
+            );
           }
         } catch {
           // Only restore the composer content if the user is still on the

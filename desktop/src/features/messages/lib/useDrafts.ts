@@ -41,6 +41,10 @@ const MAX_DRAFTS = 100;
 /** Module-level pubkey set by `initDraftStore`. Empty string = no identity. */
 let currentPubkey = "";
 
+/** Monotonically-incrementing counter used to guarantee unique sent-record keys
+ *  even when two sends happen within the same millisecond (e.g. in tests). */
+let _sentSeq = 0;
+
 function storageKey(): string {
   return `${DRAFT_STORE_KEY_PREFIX}:${currentPubkey}`;
 }
@@ -216,10 +220,7 @@ export function persistDraftEntry(
       updatedAt: now,
       pendingImeta,
       spoileredAttachmentUrls,
-      // Preserve existing status on update (e.g. do not flip a "sent" entry
-      // back to "active" if the composer somehow persists again). New entries
-      // default to "active".
-      status: existing?.status ?? "active",
+      status: "active",
     });
   } else {
     clearDraftEntry(draftKey);
@@ -262,20 +263,49 @@ export function getSentDraftEntries(): Array<{
 }
 
 /**
- * Mark a draft as sent.
- * Flips `status` to `"sent"` and bumps `updatedAt`. Keeps all content and
- * attachment data intact so the Drafts inbox "Sent" subsection can display it.
- * Does NOT delete the entry — call `clearDraftEntry` to remove it entirely.
+ * Mark a draft as sent by writing its content to a durable sent-record key.
+ *
+ * The active draft key is simultaneously cleared so the composer can create
+ * a fresh draft in the same channel without inheriting the sent status, and so
+ * the composer's empty-content cleanup can never delete the sent record.
+ *
+ * The sent record is stored under `sent:<draftKey>:<timestamp>` — a key the
+ * composer never writes to — so active and sent records for the same channel
+ * can coexist in the store independently.
  */
-export function markDraftSentEntry(draftKey: string): void {
+export function markDraftSentEntry(
+  draftKey: string,
+  content: string,
+  channelId: string,
+  pendingImeta: ImetaMedia[],
+  spoileredAttachmentUrls: string[],
+): void {
   const map = readStore();
   const existing = map.get(draftKey);
   if (!existing) return;
-  map.set(draftKey, {
-    ...existing,
+
+  const now = new Date().toISOString();
+  // Write the sent record under a stable, distinct key so it can never be
+  // overwritten by the composer's active-draft persist path.
+  // The `Date.now()-seq` suffix guarantees uniqueness even if two sends in the
+  // same channel happen within the same millisecond.
+  const sentKey = `sent:${draftKey}:${Date.now()}-${++_sentSeq}`;
+  map.set(sentKey, {
+    content,
+    selectionStart: content.length,
+    selectionEnd: content.length,
+    channelId,
+    createdAt: existing.createdAt,
+    updatedAt: now,
+    pendingImeta,
+    spoileredAttachmentUrls,
     status: "sent",
-    updatedAt: new Date().toISOString(),
   });
+
+  // Clear the active draft key so the composer starts fresh and any subsequent
+  // empty-content persist doesn't encounter (and delete) the sent record.
+  map.delete(draftKey);
+  evictOldest(map);
   flushStore(map);
 }
 
@@ -320,7 +350,20 @@ export function useDrafts() {
   const getSentDrafts = React.useCallback(() => getSentDraftEntries(), []);
 
   const markDraftSent = React.useCallback(
-    (draftKey: string) => markDraftSentEntry(draftKey),
+    (
+      draftKey: string,
+      content: string,
+      channelId: string,
+      pendingImeta: ImetaMedia[],
+      spoileredAttachmentUrls: string[],
+    ) =>
+      markDraftSentEntry(
+        draftKey,
+        content,
+        channelId,
+        pendingImeta,
+        spoileredAttachmentUrls,
+      ),
     [],
   );
 

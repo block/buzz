@@ -434,31 +434,102 @@ test("initDraftStore_resets_cache_on_pubkey_change_without_clearAllDrafts", () =
 });
 
 // ── status field: markDraftSent, getActiveDraftEntries, getSentDraftEntries ───
+// markDraftSentEntry snapshots the draft into a distinct `sent:<key>:<ts>` key
+// and removes the original active key so composer cleanup and new drafts are
+// never affected by the sent record's lifecycle.
 
-test("markDraftSent_flips_status_to_sent_and_preserves_content_and_images", () => {
+test("markDraftSent_writes_sent_record_under_distinct_key_and_removes_active_key", () => {
   setup();
   persistDraftEntry("chan-1", "sent message content", "chan-1", [IMG_A], []);
-  markDraftSentEntry("chan-1");
-  const loaded = loadDraftEntry("chan-1");
-  assert.ok(loaded, "entry must still exist after markDraftSent");
-  assert.equal(loaded.status, "sent", "status must be 'sent'");
-  assert.equal(loaded.content, "sent message content", "content preserved");
-  assert.equal(loaded.pendingImeta.length, 1, "image preserved");
-  assert.equal(loaded.pendingImeta[0].url, IMG_A.url);
+  markDraftSentEntry("chan-1", "sent message content", "chan-1", [IMG_A], []);
+  // Active key must be gone.
+  assert.equal(
+    loadDraftEntry("chan-1"),
+    undefined,
+    "active key must be cleared after markDraftSent",
+  );
+  // Sent record must exist under a sent: key.
+  const sent = getSentDraftEntries();
+  assert.equal(sent.length, 1, "one sent entry must exist");
+  assert.equal(sent[0].draft.status, "sent", "status must be 'sent'");
+  assert.equal(
+    sent[0].draft.content,
+    "sent message content",
+    "content preserved",
+  );
+  assert.equal(sent[0].draft.pendingImeta.length, 1, "image preserved");
+  assert.equal(sent[0].draft.pendingImeta[0].url, IMG_A.url);
+  assert.ok(
+    sent[0].key.startsWith("sent:chan-1:"),
+    "sent key must have sent: prefix",
+  );
 });
 
 test("markDraftSent_is_a_noop_for_nonexistent_key", () => {
   setup();
-  // Must not throw.
-  markDraftSentEntry("no-such-key");
+  // Must not throw and must not create a sent record.
+  markDraftSentEntry("no-such-key", "content", "chan-x", [], []);
   assert.equal(loadDraftEntry("no-such-key"), undefined);
+  assert.equal(getSentDraftEntries().length, 0);
+});
+
+test("markDraftSent_send_then_cleanup_preserves_sent_record", () => {
+  // Simulate the full composer lifecycle:
+  // 1. Draft exists on key A.
+  // 2. User sends -> markDraftSent(A) snapshots under sent:A:ts and clears A.
+  // 3. Composer cleanup calls persistDraft(A, "", ...) -> clearDraftEntry(A).
+  // The sent record under sent:A:ts must still exist after step 3.
+  setup();
+  persistDraftEntry("chan-A", "my draft", "chan-A", [IMG_A], []);
+  markDraftSentEntry("chan-A", "my draft", "chan-A", [IMG_A], []);
+  // Simulate composer cleanup: empty persist on the now-absent active key.
+  persistDraftEntry("chan-A", "", "chan-A", [], []);
+  const sent = getSentDraftEntries();
+  assert.equal(sent.length, 1, "sent record must survive composer cleanup");
+  assert.equal(sent[0].draft.content, "my draft");
+});
+
+test("markDraftSent_new_active_draft_after_send_is_independent", () => {
+  // After sending, a new draft typed in the same channel must appear in
+  // getActiveDraftEntries() as active, and the sent record must remain in
+  // getSentDraftEntries() -- they coexist under distinct keys.
+  setup("pubkey-coexist");
+  persistDraftEntry("chan-X", "original draft", "chan-X", [], []);
+  markDraftSentEntry("chan-X", "original draft", "chan-X", [], []);
+  // New draft in the same channel.
+  persistDraftEntry("chan-X", "new draft after send", "chan-X", [IMG_B], []);
+  const active = getActiveDraftEntries();
+  const sent = getSentDraftEntries();
+  assert.equal(active.length, 1, "one active draft");
+  assert.equal(active[0].draft.content, "new draft after send");
+  assert.equal(active[0].draft.status, "active");
+  assert.equal(sent.length, 1, "one sent record");
+  assert.equal(sent[0].draft.content, "original draft");
+  assert.equal(sent[0].draft.status, "sent");
+});
+
+test("markDraftSent_double_send_in_same_channel_creates_two_distinct_sent_records", () => {
+  // Sending twice from the same channel must produce two independent sent
+  // records -- the timestamp suffix prevents key collision.
+  setup("pubkey-double-send");
+  persistDraftEntry("chan-Y", "first draft", "chan-Y", [], []);
+  markDraftSentEntry("chan-Y", "first draft", "chan-Y", [], []);
+  // Second draft in the same channel.
+  persistDraftEntry("chan-Y", "second draft", "chan-Y", [], []);
+  markDraftSentEntry("chan-Y", "second draft", "chan-Y", [], []);
+  const sent = getSentDraftEntries();
+  assert.equal(sent.length, 2, "two distinct sent records");
+  const contents = sent.map((e) => e.draft.content).sort();
+  assert.deepEqual(contents, ["first draft", "second draft"]);
+  const keys = sent.map((e) => e.key);
+  assert.notEqual(keys[0], keys[1], "sent keys must be distinct");
 });
 
 test("getActiveDraftEntries_returns_only_active_drafts", () => {
   setup("pubkey-active");
   persistDraftEntry("chan-active", "active draft", "chan-active", [], []);
   persistDraftEntry("chan-sent", "sent draft", "chan-sent", [], []);
-  markDraftSentEntry("chan-sent");
+  markDraftSentEntry("chan-sent", "sent draft", "chan-sent", [], []);
   const active = getActiveDraftEntries();
   assert.equal(active.length, 1, "only one active draft");
   assert.equal(active[0].key, "chan-active");
@@ -469,10 +540,10 @@ test("getSentDraftEntries_returns_only_sent_drafts", () => {
   setup("pubkey-sent");
   persistDraftEntry("chan-active2", "still drafting", "chan-active2", [], []);
   persistDraftEntry("chan-sent2", "already sent", "chan-sent2", [], []);
-  markDraftSentEntry("chan-sent2");
+  markDraftSentEntry("chan-sent2", "already sent", "chan-sent2", [], []);
   const sent = getSentDraftEntries();
   assert.equal(sent.length, 1, "only one sent draft");
-  assert.equal(sent[0].key, "chan-sent2");
+  assert.ok(sent[0].key.startsWith("sent:chan-sent2:"), "sent key has prefix");
   assert.equal(sent[0].draft.status, "sent");
 });
 
@@ -481,10 +552,11 @@ test("getActiveDraftEntries_and_getSentDraftEntries_partition_all_entries", () =
   persistDraftEntry("ch-a", "draft a", "ch-a", [], []);
   persistDraftEntry("ch-b", "draft b", "ch-b", [], []);
   persistDraftEntry("ch-c", "draft c", "ch-c", [], []);
-  markDraftSentEntry("ch-b");
+  markDraftSentEntry("ch-b", "draft b", "ch-b", [], []);
   const all = getAllDraftEntries();
   const active = getActiveDraftEntries();
   const sent = getSentDraftEntries();
+  // ch-a, ch-c still active; sent:ch-b:ts is the sent record.
   assert.equal(all.length, 3);
   assert.equal(active.length + sent.length, all.length, "active + sent = all");
   assert.ok(
