@@ -3,7 +3,7 @@ import { motion } from "motion/react";
 
 import { cn } from "@/shared/lib/cn";
 import { Input } from "@/shared/ui/input";
-import { PersonaDropdownField } from "./PersonaDropdownField";
+import { PersonaModelCombobox } from "./PersonaModelCombobox";
 import type { PersonaModelDiscoveryStatus } from "./personaModelDiscoveryStatus";
 import {
   type PersonaDropdownOption,
@@ -56,7 +56,7 @@ export function PersonaModelField({
             <span className={PERSONA_LABEL_OPTIONAL_CLASS}>Optional</span>
           ) : null}
         </label>
-        <PersonaDropdownField
+        <PersonaModelCombobox
           disabled={disabled}
           id="persona-model"
           onValueChange={onModelValueChange}
