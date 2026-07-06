@@ -33,8 +33,8 @@ export const pulseQueryKeys = {
 export function useLikedNotesQuery(pubkey?: string, enabled = true) {
   return useQuery<UserNotesResponse>({
     queryKey: pulseQueryKeys.likedNotes(pubkey ?? ""),
-    // biome-ignore lint/style/noNonNullAssertion: guarded by enabled: !!pubkey
     queryFn: async () =>
+      // biome-ignore lint/style/noNonNullAssertion: guarded by enabled: !!pubkey
       withoutProjectComments(await getLikedNotes(pubkey!, 50)),
     enabled: enabled && !!pubkey,
     staleTime: 15_000,
@@ -46,8 +46,8 @@ export function useLikedNotesQuery(pubkey?: string, enabled = true) {
 export function useMyNotesQuery(pubkey?: string) {
   return useQuery<UserNotesResponse>({
     queryKey: pulseQueryKeys.myNotes(pubkey ?? ""),
-    // biome-ignore lint/style/noNonNullAssertion: guarded by enabled: !!pubkey
     queryFn: async () =>
+      // biome-ignore lint/style/noNonNullAssertion: guarded by enabled: !!pubkey
       withoutProjectComments(await getUserNotes(pubkey!, { limit: 50 })),
     enabled: !!pubkey,
     staleTime: 15_000,
