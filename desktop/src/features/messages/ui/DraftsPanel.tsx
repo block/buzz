@@ -1,4 +1,4 @@
-import { FileText, Lock, Send, Trash2 } from "lucide-react";
+import { FileText, Lock, Pencil, Trash2 } from "lucide-react";
 import * as React from "react";
 
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
@@ -250,10 +250,10 @@ function DraftRow({
         {isSent ? null : (
           <DraftRowActionButton
             disabled={!canOpen}
-            label={canOpen ? "Send message" : "No channel link"}
+            label={canOpen ? "Open draft" : "No channel link"}
             onClick={() => onOpen(entry)}
           >
-            <Send className="h-4 w-4" />
+            <Pencil className="h-4 w-4" />
           </DraftRowActionButton>
         )}
         <DraftRowActionButton
