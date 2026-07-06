@@ -2525,6 +2525,45 @@ const mockProfiles = new Map<string, RawProfile>([
     },
   ],
   [
+    ALICE_PUBKEY,
+    {
+      pubkey: ALICE_PUBKEY,
+      display_name: "alice",
+      avatar_url: null,
+      about: null,
+      nip05_handle: null,
+      owner_pubkey: null,
+      is_agent: true,
+      has_profile_event: true,
+    },
+  ],
+  [
+    BOB_PUBKEY,
+    {
+      pubkey: BOB_PUBKEY,
+      display_name: "bob",
+      avatar_url: null,
+      about: null,
+      nip05_handle: null,
+      owner_pubkey: null,
+      is_agent: false,
+      has_profile_event: true,
+    },
+  ],
+  [
+    CHARLIE_PUBKEY,
+    {
+      pubkey: CHARLIE_PUBKEY,
+      display_name: "charlie",
+      avatar_url: null,
+      about: null,
+      nip05_handle: null,
+      owner_pubkey: null,
+      is_agent: true,
+      has_profile_event: true,
+    },
+  ],
+  [
     PROFILE_ONLY_AGENT_PUBKEY,
     {
       pubkey: PROFILE_ONLY_AGENT_PUBKEY,
