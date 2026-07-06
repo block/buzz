@@ -858,30 +858,25 @@ mod tests {
 
     #[test]
     fn cli_login_requirements_resolvable_binary_runs_probe_at_resolved_path() {
-        // `true` is a system binary available on every POSIX system and always
-        // exits 0. Use it as a stand-in: probe_args = ["true", "…extra_arg…"]
-        // so the probe runs `true …extra_arg…` → exit 0 → logged_in = true
-        // → requirements is empty (Ready). This exercises the resolve_command
-        // fast path (binary found) + the probe-at-resolved-path branch.
+        // `true` is a POSIX built-in available on every CI runner and always
+        // exits 0. Use it as a probe: probe_args = ["true", "--probe-arg"]
+        // → resolved path probed → exit 0 → logged_in = true → requirements
+        // is empty (Ready). This exercises the resolve_command fast path
+        // (binary found on PATH) + the probe-at-resolved-path branch.
         //
-        // If `true` isn't resolvable (should never happen in CI), the test is
-        // inconclusive but doesn't false-positive: we'd get NotReady, which
-        // is the same safe fallback as the missing-binary case.
+        // `true` is universally resolvable on POSIX/macOS/Linux CI, so we
+        // assert the ready (empty) outcome directly rather than hedging.
         let reqs = cli_login_requirements(
             &["true", "--probe-arg"],
             "this should not show (true always succeeds)",
         );
-        // Either true was found and exited 0 → ready (empty), or true wasn't
-        // resolved and we get NotReady. Either is safe; assert the contract:
-        // if resolved, must be empty (ready). We cannot force the env, so just
-        // verify no panic and the return type is correct.
-        for req in &reqs {
-            assert!(
-                matches!(req, Requirement::CliLogin { .. }),
-                "any requirement from cli_login_requirements must be CliLogin; got {:?}",
-                req
-            );
-        }
+        assert!(
+            reqs.is_empty(),
+            "expected Ready (no requirements) when probe binary resolves and exits 0; \
+             got {:?} — `true` is always on PATH on POSIX/macOS/Linux CI so this \
+             must be empty",
+            reqs
+        );
     }
 
     // ── custom/unknown command ─────────────────────────────────────────────

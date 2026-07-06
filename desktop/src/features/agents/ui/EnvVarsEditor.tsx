@@ -11,6 +11,42 @@ import {
 
 export type EnvVarsValue = Record<string, string>;
 
+/**
+ * Build a rows array from a value record, optionally skipping a set of keys.
+ * Exported for unit tests.
+ */
+export function toRows(
+  value: EnvVarsValue,
+  skipKeys: ReadonlySet<string> = EMPTY_SET,
+): Row[] {
+  return Object.entries(value)
+    .filter(([key]) => !skipKeys.has(key))
+    .map(([key, val]) => ({
+      id: crypto.randomUUID(),
+      key,
+      value: val,
+    }));
+}
+
+/**
+ * Collapse an ordered row list back to a record, skipping rows with empty
+ * keys. Exported for unit tests.
+ */
+export function toRecord(rows: Row[]): EnvVarsValue {
+  const out: EnvVarsValue = {};
+  for (const row of rows) {
+    // Empty key = user is mid-edit; skip it so we don't poison the record.
+    // Duplicate keys: last write wins (matches Command::env semantics).
+    if (row.key.length > 0) {
+      out[row.key] = row.value;
+    }
+  }
+  return out;
+}
+
+// Module-private empty set constant so skipKeys defaults are allocation-free.
+const EMPTY_SET: ReadonlySet<string> = new Set<string>();
+
 type EnvVarsEditorProps = {
   /** The current key/value map. */
   value: EnvVarsValue;
@@ -66,24 +102,51 @@ export function EnvVarsEditor({
   requiredKeys = [],
   fileSatisfiedKeys = [],
 }: EnvVarsEditorProps) {
-  // Local ordered row state. Synced from `value` on mount and when the
-  // parent supplies a value we did NOT just emit (e.g., dialog reopened
-  // with a different persona/agent). We track what we last emitted so a
-  // row with an empty key doesn't get wiped: emit returns {} for it, the
-  // parent's useState produces a new object reference, but `value` content
-  // matches our `lastEmitted`, so we skip the resync.
-  const [rows, setRows] = React.useState<Row[]>(() => toRows(value));
-  const lastEmitted = React.useRef<EnvVarsValue>(toRecord(toRows(value)));
+  // Keys that render as their own special rows (required amber rows or
+  // file-satisfied read-only rows). These must NEVER enter `rows` state —
+  // they read/write `value` directly via `onChange`/`updateRequiredValue`.
+  // Keeping them out of rows is the invariant that prevents a pre-saved
+  // required key from appearing as a duplicate normal editable row.
+  const skipKeys = React.useMemo(
+    () => new Set([...requiredKeys, ...fileSatisfiedKeys]),
+    [requiredKeys, fileSatisfiedKeys],
+  );
+
+  // Local ordered row state — normal (non-special) keys only. Synced from
+  // `value` on mount and when the parent supplies a value we did NOT just
+  // emit (e.g., dialog reopened with a different persona/agent). We track
+  // what we last emitted so a row with an empty key doesn't get wiped:
+  // emit returns {} for it, the parent's useState produces a new object
+  // reference, but `value` content matches our `lastEmitted`, so we skip
+  // the resync.
+  //
+  // `lastEmitted` holds the FULL emitted record (normal rows + required-key
+  // values merged in), matching the shape of `value`, so `recordsEqual` can
+  // compare them on the same projection without special-casing.
+  const [rows, setRows] = React.useState<Row[]>(() => toRows(value, skipKeys));
+  const lastEmitted = React.useRef<EnvVarsValue>(value);
   React.useEffect(() => {
     if (!recordsEqual(lastEmitted.current, value)) {
       lastEmitted.current = value;
-      setRows(toRows(value));
+      setRows(toRows(value, skipKeys));
     }
-  }, [value]);
+  }, [value, skipKeys]);
+
+  // Build the emitted record: normal rows + required-key values preserved
+  // from `value`. Required keys are never in `rows`, so `toRecord(rows)`
+  // would silently drop any required secret the user just typed unless we
+  // merge them back explicitly.
+  function buildRecord(nextRows: Row[]): EnvVarsValue {
+    const base: EnvVarsValue = {};
+    for (const key of requiredKeys) {
+      if (key in value) base[key] = value[key];
+    }
+    return { ...base, ...toRecord(nextRows) };
+  }
 
   function emit(next: Row[]) {
     setRows(next);
-    const record = toRecord(next);
+    const record = buildRecord(next);
     lastEmitted.current = record;
     onChange(record);
   }
@@ -100,16 +163,13 @@ export function EnvVarsEditor({
     emit([...rows, { id: crypto.randomUUID(), key: "", value: "" }]);
   }
 
-  // Required rows are rendered before the user-editable rows. They are not
-  // part of `rows` state — they read from / write to `value` directly via
-  // `onChange`, using their key as the stable identity.
+  // Required rows render before the user-editable rows. They are NOT part of
+  // `rows` state (see skipKeys above). They read from / write to `value`
+  // directly via `onChange`, using their key as the stable identity.
   //
-  // We must update `lastEmitted.current` BEFORE calling `onChange` so the
-  // resync effect (`recordsEqual(lastEmitted.current, value) === false`)
-  // does NOT re-run `setRows(toRows(value))` after the parent re-renders.
-  // Without this, each keystroke in an amber required row causes `toRows`
-  // to include the required key as a second normal editable row (duplicate
-  // row bug reported by Wes).
+  // `lastEmitted.current` is updated BEFORE `onChange` so the resync effect
+  // (`recordsEqual(lastEmitted.current, value) === false`) does not trigger a
+  // `setRows(toRows(value, skipKeys))` after the parent re-renders.
   function updateRequiredValue(key: string, newValue: string) {
     const next = { ...value, [key]: newValue };
     lastEmitted.current = next;
@@ -347,14 +407,6 @@ function maskInherited(value: string): string {
   return `••••${value.slice(-4)}`;
 }
 
-function toRows(value: EnvVarsValue): Row[] {
-  return Object.entries(value).map(([key, val]) => ({
-    id: crypto.randomUUID(),
-    key,
-    value: val,
-  }));
-}
-
 function recordsEqual(a: EnvVarsValue, b: EnvVarsValue): boolean {
   const aKeys = Object.keys(a);
   const bKeys = Object.keys(b);
@@ -366,16 +418,4 @@ function recordsEqual(a: EnvVarsValue, b: EnvVarsValue): boolean {
     if (a[key] !== b[key]) return false;
   }
   return true;
-}
-
-function toRecord(rows: Row[]): EnvVarsValue {
-  const out: EnvVarsValue = {};
-  for (const row of rows) {
-    // Empty key = user is mid-edit; skip it so we don't poison the record.
-    // Duplicate keys: last write wins (matches Command::env semantics).
-    if (row.key.length > 0) {
-      out[row.key] = row.value;
-    }
-  }
-  return out;
 }
