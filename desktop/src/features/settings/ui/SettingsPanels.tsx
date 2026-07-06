@@ -436,43 +436,63 @@ function ThemeSettingsCard() {
       </div>
 
       {/* Theme grid — constrained to ~3 rows, scrolls internally */}
-      <div className="mb-6 max-h-[430px] overflow-y-auto rounded-lg">
-        <div className="flex flex-wrap gap-4 p-1">
-          {selectedMode === "system" &&
-            pairedLight.map((lightName) => {
-              const darkName = getThemePair(lightName);
-              if (!darkName) return null;
-              return (
-                <PairedThemeTile
-                  darkVars={getVars(darkName)}
-                  isActive={isPairActive(lightName)}
-                  key={lightName}
-                  lightName={lightName}
-                  lightVars={getVars(lightName)}
-                  onSelect={() => handleSelectTheme(lightName)}
+      <div className="relative mb-6">
+        {/* Top fade */}
+        <div
+          aria-hidden="true"
+          className="pointer-events-none absolute inset-x-0 top-0 z-10 h-3"
+          style={{
+            background:
+              "linear-gradient(to bottom, hsl(var(--background)), hsl(var(--background) / 0))",
+          }}
+        />
+        {/* Bottom fade */}
+        <div
+          aria-hidden="true"
+          className="pointer-events-none absolute inset-x-0 bottom-0 z-10 h-3"
+          style={{
+            background:
+              "linear-gradient(to top, hsl(var(--background)), hsl(var(--background) / 0))",
+          }}
+        />
+        <div className="max-h-[430px] overflow-y-auto rounded-lg">
+          <div className="flex flex-wrap gap-4 p-1">
+            {selectedMode === "system" &&
+              pairedLight.map((lightName) => {
+                const darkName = getThemePair(lightName);
+                if (!darkName) return null;
+                return (
+                  <PairedThemeTile
+                    darkVars={getVars(darkName)}
+                    isActive={isPairActive(lightName)}
+                    key={lightName}
+                    lightName={lightName}
+                    lightVars={getVars(lightName)}
+                    onSelect={() => handleSelectTheme(lightName)}
+                  />
+                );
+              })}
+            {selectedMode === "light" &&
+              allLightThemes.map((name) => (
+                <SingleThemeTile
+                  isActive={selectedThemeName === name}
+                  key={name}
+                  name={name}
+                  onSelect={() => handleSelectTheme(name)}
+                  vars={getVars(name)}
                 />
-              );
-            })}
-          {selectedMode === "light" &&
-            allLightThemes.map((name) => (
-              <SingleThemeTile
-                isActive={selectedThemeName === name}
-                key={name}
-                name={name}
-                onSelect={() => handleSelectTheme(name)}
-                vars={getVars(name)}
-              />
-            ))}
-          {selectedMode === "dark" &&
-            allDarkThemes.map((name) => (
-              <SingleThemeTile
-                isActive={selectedThemeName === name}
-                key={name}
-                name={name}
-                onSelect={() => handleSelectTheme(name)}
-                vars={getVars(name)}
-              />
-            ))}
+              ))}
+            {selectedMode === "dark" &&
+              allDarkThemes.map((name) => (
+                <SingleThemeTile
+                  isActive={selectedThemeName === name}
+                  key={name}
+                  name={name}
+                  onSelect={() => handleSelectTheme(name)}
+                  vars={getVars(name)}
+                />
+              ))}
+          </div>
         </div>
       </div>
 
