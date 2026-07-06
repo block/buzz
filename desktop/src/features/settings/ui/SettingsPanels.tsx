@@ -36,6 +36,7 @@ import {
   getThemePair,
 } from "@/shared/theme/theme-loader";
 import {
+  SystemPreferencePreviewFrame,
   ThemePreviewFrame,
   type ThemePreviewVars,
 } from "@/shared/theme/ThemePreviewFrame";
@@ -261,7 +262,7 @@ function PairedThemeTile({
     <button
       aria-pressed={isActive}
       className={cn(
-        "group flex min-w-0 flex-col rounded-lg border bg-background/70 p-2 text-left transition-colors focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring",
+        "group flex w-[174px] min-w-0 flex-col rounded-lg border bg-background/70 p-2 text-left transition-colors focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring",
         isActive
           ? "border-primary text-foreground shadow-sm"
           : "border-border/70 text-muted-foreground hover:border-border hover:bg-accent/70 hover:text-accent-foreground",
@@ -270,10 +271,11 @@ function PairedThemeTile({
       onClick={onSelect}
       type="button"
     >
-      <div className="flex gap-2">
-        <ThemePreviewFrame className="h-20 w-[120px]" vars={lightVars} />
-        <ThemePreviewFrame className="h-20 w-[120px]" vars={darkVars} />
-      </div>
+      <SystemPreferencePreviewFrame
+        className="h-28 w-full"
+        darkVars={darkVars}
+        lightVars={lightVars}
+      />
 
       <div className="mt-2 flex min-h-6 items-center gap-2 px-1">
         <span className="min-w-0 flex-1 truncate text-sm font-medium">
@@ -379,7 +381,7 @@ function ThemeSettingsCard() {
           Automatically switches between light and dark with your system
           preferences.
         </p>
-        <div className="grid grid-cols-[repeat(auto-fill,minmax(260px,1fr))] gap-3">
+        <div className="grid grid-cols-[repeat(auto-fill,174px)] gap-3">
           {pairedLight.map((lightName) => {
             const darkName = getThemePair(lightName);
             if (!darkName) return null;
