@@ -384,6 +384,21 @@ function ThemeSettingsCard() {
       setFollowSystem(true);
     } else {
       setFollowSystem(false);
+      // Switch to the counterpart theme when the current theme doesn't match
+      // the selected mode. E.g. if the stored theme is light and the user
+      // clicks Dark, apply the dark pair so the app immediately reflects the
+      // chosen mode.
+      const currentIsLight = LIGHT_THEMES.has(
+        selectedThemeName as SyntaxThemeName,
+      );
+      const needsDark = mode === "dark" && currentIsLight;
+      const needsLight = mode === "light" && !currentIsLight;
+      if (needsDark || needsLight) {
+        const pair = getThemePair(selectedThemeName as SyntaxThemeName);
+        if (pair) {
+          setTheme(pair);
+        }
+      }
     }
   };
 
