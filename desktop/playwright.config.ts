@@ -39,6 +39,7 @@ export default defineConfig({
         "**/activity-scope-label-screenshots.spec.ts",
         "**/local-archive-screenshots.spec.ts",
         "**/agent-readiness-screenshots.spec.ts",
+        "**/pubkey-display-screenshots.spec.ts",
         "**/file-attachment.spec.ts",
         "**/image-attachment-gallery.spec.ts",
         "**/composer-image-draw.spec.ts",
