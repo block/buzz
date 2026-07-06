@@ -53,21 +53,31 @@ export function PersonaModelCombobox({
     handleOpenChange(false);
   }
 
+  // Walk the filtered list from `from` in `direction` (+1 or -1), wrapping
+  // around once, and return the first non-disabled index. Returns `from` if
+  // every option is disabled so the highlight doesn't vanish unexpectedly.
+  function nextEnabledIndex(from: number, direction: 1 | -1): number {
+    const len = filteredOptions.length;
+    for (let step = 1; step <= len; step++) {
+      const candidate = (from + direction * step + len * step) % len;
+      if (!filteredOptions[candidate]?.disabled) return candidate;
+    }
+    return from;
+  }
+
   function handleKeyDown(event: React.KeyboardEvent) {
     switch (event.key) {
       case "ArrowDown": {
         event.preventDefault();
         if (filteredOptions.length > 0) {
-          setHighlightedIndex((i) => (i + 1) % filteredOptions.length);
+          setHighlightedIndex((i) => nextEnabledIndex(i, 1));
         }
         break;
       }
       case "ArrowUp": {
         event.preventDefault();
         if (filteredOptions.length > 0) {
-          setHighlightedIndex(
-            (i) => (i - 1 + filteredOptions.length) % filteredOptions.length,
-          );
+          setHighlightedIndex((i) => nextEnabledIndex(i, -1));
         }
         break;
       }
@@ -85,9 +95,21 @@ export function PersonaModelCombobox({
     }
   }
 
-  // Reset highlight to 0 whenever the filtered list changes so the
-  // highlighted row stays within bounds.
+  // Reset highlight whenever the filtered list changes so the highlighted
+  // row stays within bounds and lands on the first enabled option.
   React.useEffect(() => {
+    if (filteredOptions.length === 0) {
+      setHighlightedIndex(0);
+      return;
+    }
+    // Walk forward from -1 to land on the first enabled index.
+    const len = filteredOptions.length;
+    for (let i = 0; i < len; i++) {
+      if (!filteredOptions[i]?.disabled) {
+        setHighlightedIndex(i);
+        return;
+      }
+    }
     setHighlightedIndex(0);
   }, [filteredOptions]);
 
@@ -155,6 +177,7 @@ export function PersonaModelCombobox({
             {filteredOptions.length > 0 ? (
               filteredOptions.map((option, index) => (
                 <button
+                  aria-disabled={option.disabled}
                   className={cn(
                     "relative flex min-h-9 w-full select-none items-center rounded-lg py-2 pl-8 pr-4 text-left text-sm outline-none transition-colors",
                     option.disabled
@@ -167,7 +190,9 @@ export function PersonaModelCombobox({
                   disabled={option.disabled}
                   key={option.value}
                   onClick={() => selectOption(option.value)}
-                  onMouseEnter={() => setHighlightedIndex(index)}
+                  onMouseEnter={() => {
+                    if (!option.disabled) setHighlightedIndex(index);
+                  }}
                   type="button"
                 >
                   <span className="absolute left-2 flex h-3.5 w-3.5 items-center justify-center">
