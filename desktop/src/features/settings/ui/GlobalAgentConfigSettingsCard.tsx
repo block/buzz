@@ -233,6 +233,7 @@ export function GlobalAgentConfigSettingsCard() {
             <AgentModelField
               disabled={false}
               discoveredModelOptions={discoveredModelOptions}
+              id="global-agent-model"
               isCustomModelEditing={isCustomModelEditing}
               isRequired={false}
               model={config.model ?? ""}

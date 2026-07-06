@@ -45,6 +45,7 @@ export function RequiredFieldLabel({
 export function AgentModelField({
   disabled,
   discoveredModelOptions,
+  id = "agent-model",
   isCustomModelEditing,
   isRequired,
   model,
@@ -55,6 +56,10 @@ export function AgentModelField({
 }: {
   disabled: boolean;
   discoveredModelOptions: readonly PersonaModelOption[] | null;
+  /** DOM id for the model select. Defaults to `"agent-model"`. Override in
+   *  contexts where multiple instances coexist on the same page (e.g. the
+   *  global-config settings card) to avoid duplicate DOM ids. */
+  id?: string;
   isCustomModelEditing: boolean;
   isRequired: boolean;
   model: string;
@@ -97,14 +102,14 @@ export function AgentModelField({
 
   return (
     <div className="space-y-1.5">
-      <RequiredFieldLabel htmlFor="agent-model" isRequired={isRequired}>
+      <RequiredFieldLabel htmlFor={id} isRequired={isRequired}>
         Model
       </RequiredFieldLabel>
       <select
         aria-required={isRequired}
         className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-2 text-sm shadow-xs disabled:cursor-not-allowed disabled:opacity-60"
         disabled={selectDisabled}
-        id="agent-model"
+        id={id}
         onChange={(event) => {
           const nextValue = event.target.value;
           if (nextValue === AUTO_MODEL_DROPDOWN_VALUE) {
