@@ -183,7 +183,8 @@ export function PersonaModelCombobox({
                     option.disabled
                       ? "pointer-events-none opacity-50"
                       : "cursor-default hover:bg-muted/50 hover:text-foreground",
-                    index === highlightedIndex && !option.disabled &&
+                    index === highlightedIndex &&
+                      !option.disabled &&
                       "bg-muted/50 text-foreground",
                     option.value === value && "font-medium",
                   )}
