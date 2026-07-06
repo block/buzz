@@ -220,6 +220,10 @@ function SystemPreferencePreviewSvg({
 
   // Light half colors
   const lightBg = hsl(lightVars, "--background");
+  const lightBorder = hsl(lightVars, "--border");
+  const lightForeground = hsl(lightVars, "--foreground");
+  const lightPrimary = hsl(lightVars, "--primary");
+  const lightPrimarySoft = hslAlpha(lightVars, "--primary", 0.68);
   const lightSidebar = hsl(lightVars, "--sidebar-background");
   const lightSidebarFg = hslAlpha(lightVars, "--sidebar-foreground", 0.58);
   const lightMutedFg = hsl(lightVars, "--muted-foreground");
@@ -363,6 +367,24 @@ function SystemPreferencePreviewSvg({
           x="3.60156"
           y="43.875"
         />
+        <line stroke={lightBorder} x1="57" x2="118" y1="10.5" y2="10.5" />
+        <rect
+          fill={lightForeground}
+          height="2"
+          rx="0.5"
+          width="21"
+          x="60"
+          y="4"
+        />
+        <rect fill={lightPrimary} height="4" rx="1" width="4" x="105" y="3" />
+        <rect
+          fill={lightPrimarySoft}
+          height="4"
+          rx="1"
+          width="4"
+          x="111"
+          y="3"
+        />
       </g>
 
       {/* Dark half (bottom) — clipped to bottom portion */}
@@ -475,7 +497,7 @@ export function ThemePreviewFrame({
         borderColor: hsl(vars, "--border"),
       }}
     >
-      <div className="absolute inset-0">
+      <div className="absolute -bottom-1 -right-1 h-[90%] w-[90%]">
         <ThemePreviewSvg vars={vars} />
       </div>
     </div>
@@ -501,8 +523,13 @@ export function SystemPreferencePreviewFrame({
         "relative overflow-hidden rounded-2xl border border-border/70",
         className,
       )}
+      style={{
+        backgroundColor: hsl(lightVars, "--muted"),
+      }}
     >
-      <SystemPreferencePreviewSvg darkVars={darkVars} lightVars={lightVars} />
+      <div className="absolute -bottom-1 -right-1 h-[90%] w-[90%]">
+        <SystemPreferencePreviewSvg darkVars={darkVars} lightVars={lightVars} />
+      </div>
     </div>
   );
 }

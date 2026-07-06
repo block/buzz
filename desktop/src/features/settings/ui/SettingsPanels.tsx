@@ -437,7 +437,7 @@ function ThemeSettingsCard() {
 
       {/* Theme grid based on selected mode */}
       <div className="mb-6">
-        <div className="flex flex-wrap gap-3 p-1">
+        <div className="flex flex-wrap gap-4 p-1">
           {selectedMode === "system" &&
             pairedLight.map((lightName) => {
               const darkName = getThemePair(lightName);
@@ -477,9 +477,9 @@ function ThemeSettingsCard() {
       </div>
 
       {/* Accent color picker */}
-      <div className="mt-2 shrink-0 pb-2">
+      <div className="mt-2 shrink-0 px-1 pb-2">
         <h3 className="mb-2 text-sm font-medium">Accent color</h3>
-        <div className="flex flex-wrap gap-2">
+        <div className="flex flex-wrap gap-2 p-1">
           {ACCENT_COLORS.map((color) => {
             const isNeutral = color.value === NEUTRAL_ACCENT;
             const swatchColor = isNeutral
