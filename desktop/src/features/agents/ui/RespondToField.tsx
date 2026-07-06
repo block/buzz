@@ -12,6 +12,8 @@ import { cn } from "@/shared/lib/cn";
 import { Input } from "@/shared/ui/input";
 import { Textarea } from "@/shared/ui/textarea";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
+import { PersonaDropdownField } from "./PersonaDropdownField";
+import type { PersonaDropdownOption } from "./personaDialogPickers";
 
 /**
  * Inbound author gate UI for create/edit agent dialogs.
@@ -47,6 +49,12 @@ function formatSearchUserSecondary(user: UserSearchResult) {
   return formatPubkey(user.pubkey);
 }
 
+const RESPOND_TO_OPTIONS: PersonaDropdownOption[] = [
+  { label: "Owner only (default)", value: "owner-only" },
+  { label: "Anyone", value: "anyone" },
+  { label: "Allowlist", value: "allowlist" },
+];
+
 export function CreateAgentRespondToField({
   mode,
   allowlist,
@@ -54,6 +62,7 @@ export function CreateAgentRespondToField({
   onAllowlistChange,
   ownerPubkey,
   disabled,
+  variant,
 }: {
   mode: RespondToMode;
   allowlist: string[];
@@ -66,6 +75,8 @@ export function CreateAgentRespondToField({
    */
   ownerPubkey?: string | null;
   disabled?: boolean;
+  /** When "persona", uses PersonaDropdownField styling to match the persona dialog. */
+  variant?: "default" | "persona";
 }) {
   const [query, setQuery] = React.useState("");
   const [isDirectEntryOpen, setIsDirectEntryOpen] = React.useState(false);
@@ -113,23 +124,43 @@ export function CreateAgentRespondToField({
     setPasteText("");
   }
 
+  const isPersonaVariant = variant === "persona";
+
   return (
     <div className="space-y-2" data-testid="agent-respond-to">
-      <label className="text-sm font-medium" htmlFor="agent-respond-to">
+      <label
+        className={
+          isPersonaVariant
+            ? "text-sm font-medium text-foreground"
+            : "text-sm font-medium"
+        }
+        htmlFor="agent-respond-to"
+      >
         Who can talk to this agent
       </label>
-      <select
-        className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-2 text-sm shadow-xs"
-        data-testid="agent-respond-to-select"
-        disabled={disabled}
-        id="agent-respond-to"
-        onChange={(e) => onModeChange(e.target.value as RespondToMode)}
-        value={mode}
-      >
-        <option value="owner-only">Owner only (default)</option>
-        <option value="anyone">Anyone</option>
-        <option value="allowlist">Allowlist</option>
-      </select>
+      {isPersonaVariant ? (
+        <PersonaDropdownField
+          disabled={disabled}
+          id="agent-respond-to"
+          onValueChange={(value) => onModeChange(value as RespondToMode)}
+          options={RESPOND_TO_OPTIONS}
+          placeholder="Owner only (default)"
+          value={mode}
+        />
+      ) : (
+        <select
+          className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-2 text-sm shadow-xs"
+          data-testid="agent-respond-to-select"
+          disabled={disabled}
+          id="agent-respond-to"
+          onChange={(e) => onModeChange(e.target.value as RespondToMode)}
+          value={mode}
+        >
+          <option value="owner-only">Owner only (default)</option>
+          <option value="anyone">Anyone</option>
+          <option value="allowlist">Allowlist</option>
+        </select>
+      )}
       <p className="text-xs text-muted-foreground">
         Controls which Nostr authors the agent listens to (@mentions, DMs,
         thread replies). The agent&apos;s owner can always shut it down with

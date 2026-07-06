@@ -706,6 +706,7 @@ export function EditAgentDialog({
               mode={respondTo}
               onAllowlistChange={setRespondToAllowlist}
               onModeChange={setRespondTo}
+              variant="persona"
             />
 
             {/* Provider (runtime) */}
