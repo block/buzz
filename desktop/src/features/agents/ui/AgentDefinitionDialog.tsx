@@ -50,7 +50,6 @@ import {
   CUSTOM_PROVIDER_DROPDOWN_VALUE,
   computeLocalModeGate,
   formatRuntimeOptionLabel,
-  getBakedSatisfiedEnvKeys,
   getDefaultLlmProviderLabel,
   getDefaultPersonaRuntime,
   getModelSelectValue,
@@ -62,7 +61,6 @@ import {
   hasPersonaModelOption,
   NO_RUNTIME_DROPDOWN_VALUE,
   providerRequiresExplicitModel,
-  requiredCredentialEnvKeys,
   runtimeSupportsLlmProviderSelection,
   type PersonaDropdownOption,
   PERSONA_FIELD_CONTROL_CLASS,
@@ -87,6 +85,7 @@ import {
   usePersonaModelDiscovery,
 } from "./usePersonaModelDiscovery";
 import { useBakedBuildEnvKeysQuery, useRuntimeFileConfigQuery } from "../hooks";
+import { useGlobalAgentConfig } from "../useGlobalAgentConfig";
 
 type AgentDefinitionDialogProps = {
   open: boolean;
@@ -166,6 +165,7 @@ export function AgentDefinitionDialog({
   const [importErrorMessage, setImportErrorMessage] = React.useState<
     string | null
   >(null);
+  const { globalConfig } = useGlobalAgentConfig();
   const isEditMode = Boolean(initialValues && "id" in initialValues);
   const editPersonaId =
     isEditMode && initialValues && "id" in initialValues
@@ -421,33 +421,36 @@ export function AgentDefinitionDialog({
     enabled: open,
   });
   const { data: bakedEnvKeys } = useBakedBuildEnvKeysQuery({ enabled: open });
-  const localModeGate = computeLocalModeGate({
-    bakedEnvKeys,
-    envVars,
-    isProviderMode: false,
-    model,
-    provider: trimmedProvider,
-    runtimeId: runtime,
-    runtimeFileConfig,
-    useMesh: false,
-  });
-  // Required keys for EnvVarsEditor amber locked rows: all required keys except
-  // those silenced by baked env or file config. Filled keys stay in the amber
-  // row (exclusion semantics, not missing-only), matching the other consumers.
-  const allRequiredEnvKeys = requiredCredentialEnvKeys(
-    runtime,
-    trimmedProvider,
+  const localModeGate = React.useMemo(
+    () =>
+      computeLocalModeGate({
+        bakedEnvKeys,
+        envVars,
+        globalEnvVars: globalConfig.env_vars,
+        globalProvider: globalConfig.provider ?? "",
+        globalModel: globalConfig.model ?? "",
+        isProviderMode: false,
+        model,
+        provider: trimmedProvider,
+        runtimeId: runtime,
+        runtimeFileConfig,
+        useMesh: false,
+      }),
+    [
+      bakedEnvKeys,
+      envVars,
+      globalConfig.env_vars,
+      globalConfig.provider,
+      globalConfig.model,
+      model,
+      trimmedProvider,
+      runtime,
+      runtimeFileConfig,
+    ],
   );
-  const bakedSatisfiedPersonaKeys = getBakedSatisfiedEnvKeys(
-    allRequiredEnvKeys,
-    envVars,
-    bakedEnvKeys,
-  );
-  const requiredEnvKeys = allRequiredEnvKeys.filter(
-    (key) =>
-      !bakedSatisfiedPersonaKeys.includes(key) &&
-      !localModeGate.fileSatisfiedEnvKeys.includes(key),
-  );
+  // requiredEnvKeys: the gate already handles baked-, global-, and file-
+  // satisfied keys so no further filtering is needed.
+  const { requiredEnvKeys } = localModeGate;
   // Provider required-ness is a static property of the runtime — it does not
   // change based on whether the field is currently filled. Using the dynamic
   // missingNormalizedFields check would flip the asterisk off once a value is
@@ -471,7 +474,32 @@ export function AgentDefinitionDialog({
     // every instance minted from this definition at startup.
     personaBehaviorDraftValid(behaviorDraft) &&
     (!isExplicitModelRequired || model.trim().length > 0) &&
+    // Block save when the LLM provider field is visible but no effective
+    // provider exists — neither a per-agent value nor a global fallback.
+    // When a global provider is set, an empty per-agent provider is valid
+    // (inherits the global). Only block when there is genuinely nothing.
+    !(
+      llmProviderFieldVisible &&
+      !provider.trim() &&
+      !(globalConfig.provider ?? "").trim()
+    ) &&
     !isAvatarUploadPending;
+
+  // Auto-expand the Advanced section once per dialog-open cycle when required
+  // env keys are present, so the user sees a clear signal that action is
+  // needed (e.g. provider API key required). Does not re-open if the user
+  // manually collapses the section afterward.
+  const hasAutoOpenedAdvancedRef = React.useRef(false);
+  React.useEffect(() => {
+    if (!open) {
+      hasAutoOpenedAdvancedRef.current = false;
+      return;
+    }
+    if (requiredEnvKeys.length > 0 && !hasAutoOpenedAdvancedRef.current) {
+      hasAutoOpenedAdvancedRef.current = true;
+      setShowAdvancedFields(true);
+    }
+  }, [open, requiredEnvKeys.length]);
   const {
     discoveredModelOptions,
     modelDiscoveryLoading,
@@ -504,8 +532,12 @@ export function AgentDefinitionDialog({
   const providerOptions = getPersonaProviderOptions(
     providerForModelScope,
     runtime,
+    globalConfig.provider ?? "",
   );
-  const defaultLlmProviderLabel = getDefaultLlmProviderLabel(runtime);
+  const defaultLlmProviderLabel = getDefaultLlmProviderLabel(
+    runtime,
+    globalConfig.provider ?? "",
+  );
   const providerSelectValue = isCustomProviderEditing
     ? CUSTOM_PROVIDER_DROPDOWN_VALUE
     : trimmedProvider || AUTO_PROVIDER_DROPDOWN_VALUE;

@@ -171,7 +171,11 @@ const overrides = new Map([
   // baked-env-required-badge: useBakedBuildEnvKeysQuery + bakedEnvKeys wiring
   // + correct exclusion-semantics for requiredEnvKeys adds ~14 lines.
   // +2 lines: filter managed provider key from requiredEnvKeys (suppress dead-input locked row).
-  ["src/features/agents/ui/PersonaDialog.tsx", 1050],
+  // global-agent-config parity: wire useGlobalAgentConfig into PersonaDialog
+  // (Gap A: global-aware computeLocalModeGate + drop bare requiredCredentialEnvKeys;
+  // Gap B: hasAutoOpenedAdvancedRef auto-expand effect) + effective-provider
+  // save gate + Inherit/Select-a-provider label. Queued to split.
+  ["src/features/agents/ui/PersonaDialog.tsx", 1080],
   // harness-persona-sync feature growth, queued to split in the resolver-unify
   // refactor followup. discovery.rs is dominated by the new test module
   // (the effective_agent_command / divergent / create-time override matrix);

@@ -514,6 +514,15 @@ export function AgentInstanceEditDialog({
     onOpenChange(next);
   }
 
+  // Block save when the LLM provider field is visible but no effective
+  // provider exists — neither a per-agent value nor a global fallback.
+  // When a global provider is set, an empty per-agent provider is valid
+  // (inherits the global). Only block when there is genuinely nothing.
+  const effectiveProvider =
+    provider.trim() || (globalConfig.provider ?? "").trim();
+  const providerValid =
+    !llmProviderFieldVisible || effectiveProvider.length > 0;
+
   const canSubmit =
     computeEditAgentFormValidity({
       name,
@@ -527,6 +536,7 @@ export function AgentInstanceEditDialog({
       agentCommand,
       requiredEnvKeyMissing,
     }) &&
+    providerValid &&
     !updateMutation.isPending &&
     !isAvatarUploadPending;
 
@@ -719,6 +729,7 @@ export function AgentInstanceEditDialog({
   const providerOptions = getPersonaProviderOptions(
     trimmedProvider,
     selectedRuntime?.id ?? "",
+    globalConfig.provider ?? "",
   );
   const providerSelectValue = isCustomProviderEditing
     ? CUSTOM_PROVIDER_DROPDOWN_VALUE

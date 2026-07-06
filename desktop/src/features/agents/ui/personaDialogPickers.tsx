@@ -207,17 +207,24 @@ export function providerRequiresExplicitModel(
   );
 }
 
-export function getDefaultLlmProviderLabel(_runtimeId: string) {
-  return "Default";
+export function getDefaultLlmProviderLabel(
+  _runtimeId: string,
+  globalProvider?: string,
+) {
+  const trimmedGlobal = (globalProvider ?? "").trim();
+  return trimmedGlobal
+    ? `Inherit (${trimmedGlobal})`
+    : "Select a provider\u2026";
 }
 
 export function getPersonaProviderOptions(
   currentProvider: string,
   runtimeId: string,
+  globalProvider?: string,
 ): readonly PersonaModelOption[] {
   const trimmedProvider = currentProvider.trim();
   const defaultProviderOptions = [
-    { id: "", label: getDefaultLlmProviderLabel(runtimeId) },
+    { id: "", label: getDefaultLlmProviderLabel(runtimeId, globalProvider) },
   ];
   const options = [...defaultProviderOptions, ...PERSONA_LLM_PROVIDER_OPTIONS];
   if (
