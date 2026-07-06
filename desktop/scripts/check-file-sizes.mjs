@@ -94,9 +94,10 @@ const overrides = new Map([
   // #1418 read-path fix: +3 doc-only lines correcting the getThreadReplies
   // contract (replies-only, root excluded — the query keys on root_event_id,
   // which root rows lack). Documentation accuracy, not code growth.
-  ["src/shared/api/tauri.ts", 1342],
+  // linux-updater-manual: isAutoUpdateSupported() binding adds 7 lines.
   // +2 lines: bash prereq field (RawManagedAgentPrereqs.bash) + mapping in
   // discoverManagedAgentPrereqs — added by the drop-windows-git-bundle refactor.
+  ["src/shared/api/tauri.ts", 1349],
   // harness-persona-sync feature growth, queued to split in the resolver-unify
   // refactor followup. discovery.rs is dominated by the new test module
   // (the effective_agent_command / divergent / create-time override matrix);

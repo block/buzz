@@ -1,6 +1,7 @@
 import { useState, useRef, useCallback, useEffect } from "react";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
+import { isAutoUpdateSupported } from "@/shared/api/tauri";
 
 export type UpdateStatus =
   | { state: "idle" }
@@ -11,7 +12,13 @@ export type UpdateStatus =
   | { state: "downloading" }
   | { state: "installing" }
   | { state: "ready" }
-  | { state: "error"; message: string };
+  | { state: "error"; message: string }
+  | {
+      state: "manual-required";
+      version: string;
+      /** GitHub releases page for the update. */
+      releaseUrl: string;
+    };
 
 const BACKGROUND_UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
 const BACKGROUND_BLOCKED_STATES = new Set<UpdateStatus["state"]>([
@@ -20,7 +27,10 @@ const BACKGROUND_BLOCKED_STATES = new Set<UpdateStatus["state"]>([
   "downloading",
   "installing",
   "ready",
+  "manual-required",
 ]);
+
+const GITHUB_RELEASES_URL = "https://github.com/block/buzz/releases/latest";
 
 function toErrorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
@@ -125,10 +135,26 @@ export function useUpdater() {
           !background || manualResultRequestedRef.current;
 
         if (update) {
+          // Check support BEFORE exposing any actionable state — on a Linux
+          // .deb, the window between "available" and "manual-required" would
+          // let a click reach downloadAndInstall on an un-updatable install.
+          const autoUpdateOk = await isAutoUpdateSupported();
           updateRef.current = update;
-          setStatus({ state: "available", version: update.version });
-          // Start download automatically — user sees "restart" when done
-          void downloadAndInstall();
+          if (autoUpdateOk) {
+            setStatus({ state: "available", version: update.version });
+            // Start download automatically — user sees "restart" when done
+            void downloadAndInstall();
+          } else {
+            // .deb / non-AppImage: surface manual-download card instead.
+            // updateRef is intentionally NOT retained — no install handle
+            // should be kept when we will never call downloadAndInstall.
+            updateRef.current = null;
+            setStatus({
+              state: "manual-required",
+              version: update.version,
+              releaseUrl: GITHUB_RELEASES_URL,
+            });
+          }
         } else if (shouldShowQuietResult) {
           setStatus({ state: "up-to-date" });
         }

@@ -1339,3 +1339,10 @@ export async function validateReposDir(dir: string): Promise<void> {
 
 export const setPreventSleepActive = (active: boolean) =>
   invokeTauri("set_prevent_sleep_active", { active });
+
+/** Returns true on macOS, Windows, and Linux AppImage installs.
+ *  Returns false on Linux non-AppImage packages (e.g. .deb) where
+ *  Tauri's updater cannot swap the binary. */
+export function isAutoUpdateSupported(): Promise<boolean> {
+  return invokeTauri<boolean>("is_auto_update_supported");
+}

@@ -621,6 +621,7 @@ pub fn run() {
             get_agent_memory,
             relay_reconnect_hook,
             relay_reconnect_hook_configured,
+            is_auto_update_supported,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

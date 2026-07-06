@@ -293,3 +293,64 @@ test("shows a sidebar update card when an update is ready", async ({
     .toBeLessThan(0.05);
   await expect(updateCard).toBeHidden();
 });
+
+// Regression test for the Linux .deb auto-update guard (PR #1535).
+// When auto-update is not supported (e.g. Linux .deb install), the update
+// check must surface a "manual-required" card with a GitHub link and
+// AppImage hint, and must NEVER invoke plugin:updater|download_and_install.
+test("shows manual-required update card and never auto-downloads on non-AppImage installs", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await expect(page.getByTestId("app-sidebar")).toBeVisible();
+
+  // Override the bridge to report an update available AND auto-update not
+  // supported. The mock is mutated after page load so the window object is
+  // live (mirrors the ready-card test pattern).
+  await page.evaluate(() => {
+    const testWindow = window as Window & {
+      __BUZZ_E2E__?: {
+        mock?: { updateAvailable?: boolean; autoUpdateSupported?: boolean };
+      };
+    };
+    testWindow.__BUZZ_E2E__ = {
+      ...(testWindow.__BUZZ_E2E__ ?? {}),
+      mock: {
+        ...(testWindow.__BUZZ_E2E__?.mock ?? {}),
+        updateAvailable: true,
+        autoUpdateSupported: false,
+      },
+    };
+  });
+
+  await page.getByTestId("sidebar-profile-card").click();
+  await page.getByTestId("profile-popover-settings").click();
+  await page.getByTestId("settings-nav-updates").click();
+  await page.getByRole("button", { name: "Check for Updates" }).click();
+
+  // Settings panel shows the manual-required state, not "ready".
+  await expect(page.getByTestId("settings-panel-updates")).toContainText(
+    "In-app updates aren't supported on this Linux package",
+  );
+  await expect(page.getByTestId("settings-panel-updates")).toContainText(
+    "AppImage",
+  );
+
+  await page.getByTestId("settings-back-to-app").click();
+
+  // Sidebar card shows the manual update card.
+  const updateCard = page.getByTestId("sidebar-update-card-manual");
+  await expect(updateCard).toBeVisible();
+  await expect(updateCard).toContainText("AppImage");
+
+  // download_and_install must NEVER have been called.
+  const commands = await page.evaluate(
+    () =>
+      (
+        window as Window & {
+          __BUZZ_E2E_COMMANDS__?: string[];
+        }
+      ).__BUZZ_E2E_COMMANDS__ ?? [],
+  );
+  expect(commands).not.toContain("plugin:updater|download_and_install");
+});
