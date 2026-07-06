@@ -13,6 +13,7 @@ use std::collections::HashMap;
 
 use buzz_core::tenant::CommunityId;
 use evalexpr::HashMapContext;
+use nostr::ToBech32;
 use serde_json::Value as JsonValue;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
@@ -62,7 +63,8 @@ impl TriggerContext {
 ///
 /// Supports filters:
 /// - `| truncate(N)` — truncate to N characters
-/// - `| truncate_pubkey` — shorten pubkey to `abc...xyz` (first 6 + last 6 chars)
+/// - `| npub` — encode a hex pubkey as its full bech32 `npub` (non-pubkey
+///   values pass through unchanged); `truncate_pubkey` is a legacy alias
 ///
 /// Unknown `{{keys}}` are left as literal text (no error, no substitution).
 pub fn resolve_template(
@@ -185,28 +187,12 @@ fn apply_filter(value: String, filter: &str) -> Result<String, WorkflowError> {
         return Ok(truncated);
     }
 
-    // `truncate_pubkey` — shorten to `abc...xyz` (first 6 + last 6 chars).
-    // Only skip truncation if the string is shorter than the truncated form would be.
-    if filter == "truncate_pubkey" {
-        let char_count = value.chars().count();
-        if char_count <= 12 {
-            // Already short enough that truncating would be longer than the original.
-            // But we still apply the format for consistency if exactly 12.
-            // For strings < 12 chars, return as-is.
-            if char_count < 12 {
-                return Ok(value);
-            }
+    // `npub` (alias `truncate_pubkey`): full bech32 npub — truncated prefixes are grindable.
+    if filter == "npub" || filter == "truncate_pubkey" {
+        if let Ok(pk) = nostr::PublicKey::from_hex(&value) {
+            return Ok(pk.to_bech32().unwrap_or(value));
         }
-        let head: String = value.chars().take(6).collect();
-        let tail: String = value
-            .chars()
-            .rev()
-            .take(6)
-            .collect::<String>()
-            .chars()
-            .rev()
-            .collect();
-        return Ok(format!("{head}...{tail}"));
+        return Ok(value);
     }
 
     Err(WorkflowError::TemplateError(format!(
@@ -1284,15 +1270,30 @@ mod tests {
     }
 
     #[test]
-    fn resolve_truncate_pubkey_filter() {
-        let ctx = make_trigger();
+    fn resolve_npub_filter_encodes_hex_pubkey() {
+        let mut ctx = make_trigger();
+        ctx.author = "e17e5abf7b1dbd363f0ed6fbda2455609727b2555428dea251388c542cd2f03f".to_owned();
+        let out = resolve_template("{{trigger.author | npub}}", &ctx, &HashMap::new()).unwrap();
+        assert_eq!(
+            out,
+            "npub1u9l940mmrk7nv0cw6maa5fz4vztj0vj42s5dagj38zx9gtxj7qls94fpux"
+        );
+    }
+
+    #[test]
+    fn resolve_truncate_pubkey_is_alias_for_npub() {
+        let mut ctx = make_trigger();
+        ctx.author = "e17e5abf7b1dbd363f0ed6fbda2455609727b2555428dea251388c542cd2f03f".to_owned();
         let out = resolve_template(
             "{{trigger.author | truncate_pubkey}}",
             &ctx,
             &HashMap::new(),
         )
         .unwrap();
-        assert_eq!(out, "abc123...def456");
+        assert_eq!(
+            out,
+            "npub1u9l940mmrk7nv0cw6maa5fz4vztj0vj42s5dagj38zx9gtxj7qls94fpux"
+        );
     }
 
     #[test]
@@ -1543,10 +1544,10 @@ mod tests {
     }
 
     #[test]
-    fn resolve_truncate_pubkey_short_string_returned_as_is() {
-        // Strings shorter than 12 chars are returned as-is (no truncation).
+    fn resolve_pubkey_filter_non_pubkey_passes_through() {
+        // Values that are not valid hex pubkeys are returned unchanged.
         let mut ctx = make_trigger();
-        ctx.author = "short".to_owned(); // 5 chars < 12
+        ctx.author = "short".to_owned();
         let out = resolve_template(
             "{{trigger.author | truncate_pubkey}}",
             &ctx,
@@ -1557,17 +1558,12 @@ mod tests {
     }
 
     #[test]
-    fn resolve_truncate_pubkey_exactly_12_chars() {
-        // Exactly 12 chars → format as head...tail (6+6).
+    fn resolve_npub_filter_passes_npub_through() {
+        // Already-encoded npubs are not valid hex, so they pass through intact.
         let mut ctx = make_trigger();
-        ctx.author = "abcdef123456".to_owned(); // exactly 12 chars
-        let out = resolve_template(
-            "{{trigger.author | truncate_pubkey}}",
-            &ctx,
-            &HashMap::new(),
-        )
-        .unwrap();
-        assert_eq!(out, "abcdef...123456");
+        ctx.author = "npub1u9l940mmrk7nv0cw6maa5fz4vztj0vj42s5dagj38zx9gtxj7qls94fpux".to_owned();
+        let out = resolve_template("{{trigger.author | npub}}", &ctx, &HashMap::new()).unwrap();
+        assert_eq!(out, ctx.author);
     }
 
     #[test]
