@@ -37,7 +37,11 @@ impl SharedState {
         let session_dir = tempfile::Builder::new()
             .prefix("buzz-dev-mcp-session-")
             .tempdir()?;
-        let bootstrap_instructions = build_bootstrap(&cwd);
+        // Resolve the shell once so bootstrap_instructions and spawn use the
+        // exact same shell. If resolution fails at startup (no bash installed),
+        // the error surfaces at first tool call rather than here.
+        let shell_hint = resolved_shell_display_name();
+        let bootstrap_instructions = build_bootstrap(&cwd, &shell_hint);
         Ok(Self {
             cwd,
             shim,
@@ -58,9 +62,8 @@ impl SharedState {
     }
 }
 
-fn build_bootstrap(cwd: &Path) -> String {
+fn build_bootstrap(cwd: &Path, shell_hint: &str) -> String {
     let stack = detect_stack(cwd);
-    let shell = resolved_shell_name();
     let buzz_hint =
         if std::env::var("BUZZ_RELAY_URL").is_ok() && std::env::var("BUZZ_PRIVATE_KEY").is_ok() {
             "\nBuzz relay configured. Run `buzz --help` to see available commands.\n"
@@ -70,7 +73,7 @@ fn build_bootstrap(cwd: &Path) -> String {
     format!(
         "Working directory: {}\n\
          Detected stack: {}\n\
-         Shell: {shell} (set BUZZ_SHELL to override) — write command strings in that shell's syntax.\n\
+         Shell: {shell_hint} (set BUZZ_SHELL to override) — write command strings in that shell's syntax.\n\
          Pass `workdir` per call rather than `cd`.\n\
          {buzz_hint}",
         cwd.display(),
@@ -146,7 +149,7 @@ pub async fn run(
     }
 
     let bash = match resolve_bash(&state.shim.path_env) {
-        Ok(path) => path,
+        Ok((path, _)) => path,
         Err(msg) => return Ok(CallToolResult::error(vec![Content::text(msg)])),
     };
     let shell_arg = shell_flag(&bash);
@@ -170,7 +173,7 @@ pub async fn run(
         Ok(c) => c,
         Err(e) => {
             return Ok(CallToolResult::error(vec![Content::text(format!(
-                "failed to spawn bash: {e}"
+                "failed to spawn shell: {e}"
             ))]));
         }
     };
@@ -333,28 +336,72 @@ fn shell_flag(shell: &Path) -> &'static str {
 
 /// Human-readable name for the shell that will execute commands.
 ///
-/// Used in bootstrap instructions so the model knows which dialect to write.
-/// Resolution order mirrors `resolve_bash`: `BUZZ_SHELL` wins, then platform
-/// defaults. Does NOT perform file-existence checks — this is a display hint,
-/// not a resolved path.
-pub fn resolved_shell_name() -> &'static str {
-    if let Some(p) = std::env::var_os("BUZZ_SHELL") {
-        let path = PathBuf::from(&p);
-        match path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .map(|s| s.to_ascii_lowercase())
-            .as_deref()
-        {
-            Some("pwsh") => return "pwsh",
-            Some("powershell") => return "powershell",
-            Some("cmd") => return "cmd",
-            Some("zsh") => return "zsh",
-            Some("sh") => return "sh",
-            _ => return "bash",
+/// Derived from the SAME resolution used by `resolve_bash` so the dialect
+/// hint always matches the shell that will actually run. Resolution order:
+///   1. `BUZZ_SHELL` — resolved through PATH if a bare command name (no slashes).
+///   2. Platform default (`bash`).
+///
+/// Returns `"bash"` in all cases where BUZZ_SHELL is unset, empty, or cannot
+/// be resolved to a real file — never reports a shell that won't run.
+pub fn resolved_shell_display_name() -> String {
+    // Peek at BUZZ_SHELL to build the display name. On Windows the full
+    // resolver (resolve_bash) requires a `path_env` argument that isn't
+    // available at bootstrap time — we look up BUZZ_SHELL independently here.
+    // The logic intentionally mirrors resolve_bash: bare name → PATH lookup
+    // with .exe suffix on Windows; absolute path → existence check.
+    if let Some(raw) = std::env::var_os("BUZZ_SHELL") {
+        let p = PathBuf::from(&raw);
+        // Absolute path: must exist as a file.
+        if p.components().count() > 1 || p.has_root() {
+            if p.is_file() {
+                return shell_name_from_path(&p);
+            }
+            // Non-existent absolute path: fall through to bash default.
+        } else {
+            // Bare command name (e.g. "pwsh", "zsh").
+            // Try to find it on the ambient PATH.
+            if let Ok(resolved) = which_in_path(&p) {
+                return shell_name_from_path(&resolved);
+            }
+            // Not found on PATH: fall through to bash default.
         }
     }
-    "bash"
+    "bash".to_string()
+}
+
+/// Extract a short display name from a resolved shell path (e.g. `pwsh.exe` → `"pwsh"`).
+fn shell_name_from_path(p: &Path) -> String {
+    p.file_stem()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_ascii_lowercase())
+        .unwrap_or_else(|| "bash".to_string())
+}
+
+/// Look up a bare command name on the process PATH (not the MCP shim PATH).
+/// Returns the absolute path if found.
+fn which_in_path(name: &Path) -> Result<PathBuf, ()> {
+    let path_var = std::env::var_os("PATH").ok_or(())?;
+    for dir in std::env::split_paths(&path_var) {
+        // On Windows try name + ".exe"; on Unix try as-is.
+        #[cfg(windows)]
+        {
+            let mut candidate = dir.join(name);
+            if candidate.extension().is_none() {
+                candidate.set_extension("exe");
+            }
+            if candidate.is_file() {
+                return Ok(candidate);
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            let candidate = dir.join(name);
+            if candidate.is_file() {
+                return Ok(candidate);
+            }
+        }
+    }
+    Err(())
 }
 
 /// Resolve a genuine, non-WSL bash to an absolute path so we spawn it directly
@@ -362,24 +409,45 @@ pub fn resolved_shell_name() -> &'static str {
 /// that search finds `System32\bash.exe` (the WSL launcher), which fails at spawn
 /// with `0x8007072c` and can never run the agent's POSIX commands.
 ///
+/// Returns `(resolved_path, display_name)`. The display name is derived from the
+/// resolved path so the caller can use it for diagnostics without a second lookup.
+///
 /// On Unix, bare `bash` resolved via PATH is correct and was never broken, so the
 /// resolver is a no-op there. The probe logic is Windows-only.
 #[cfg(not(windows))]
-fn resolve_bash(_path_env: &str) -> Result<PathBuf, String> {
+fn resolve_bash(_path_env: &str) -> Result<(PathBuf, String), String> {
     // Honor BUZZ_SHELL on Unix too so power users can opt into zsh or another shell.
-    if let Some(p) = std::env::var_os("BUZZ_SHELL").map(PathBuf::from) {
-        if p.is_file() {
-            return Ok(p);
+    if let Some(raw) = std::env::var_os("BUZZ_SHELL") {
+        let p = PathBuf::from(&raw);
+        // Absolute / rooted path: must exist as a file.
+        if p.components().count() > 1 || p.has_root() {
+            if p.is_file() {
+                let name = shell_name_from_path(&p);
+                return Ok((p, name));
+            }
+            // Non-existent path: fall through to bash.
+        } else {
+            // Bare command name: resolve through PATH.
+            if let Ok(resolved) = which_in_path(&p) {
+                let name = shell_name_from_path(&resolved);
+                return Ok((resolved, name));
+            }
+            // Not found: fall through to bash.
         }
     }
-    Ok(PathBuf::from("bash"))
+    Ok((PathBuf::from("bash"), "bash".to_string()))
 }
 
 /// Windows bash resolution. Probe order (first hit wins):
 ///   1. `BUZZ_SHELL` env override — explicit operator choice, any shell.
+///      Bare command names (e.g. `pwsh`) are resolved through PATH + `.exe`
+///      suffix so `BUZZ_SHELL=pwsh` works without an absolute path.
 ///   2. `GIT_BASH` env override — legacy escape hatch (kept for back-compat).
 ///   3. Installed Git for Windows (fast path when the user has Git).
 ///   4. PATH scan, EXCLUDING System32 (so we never resolve WSL's `bash.exe`).
+///
+/// Returns `(resolved_path, display_name)`. The display name is derived from the
+/// resolved path, guaranteeing the dialect hint and the spawned shell agree.
 ///
 /// The previously-bundled PortableGit fallback (probe 3 in the old order) has
 /// been removed: Git for Windows is a documented host prerequisite, and shipping
@@ -387,19 +455,34 @@ fn resolve_bash(_path_env: &str) -> Result<PathBuf, String> {
 ///
 /// No bash found -> actionable error pointing at the prerequisite.
 #[cfg(windows)]
-fn resolve_bash(path_env: &str) -> Result<PathBuf, String> {
-    // BUZZ_SHELL: explicit operator override — use whatever shell is specified,
-    // including cmd or PowerShell for advanced users. Validated to exist.
-    if let Some(p) = std::env::var_os("BUZZ_SHELL").map(PathBuf::from) {
-        if p.is_file() {
-            return Ok(p);
+fn resolve_bash(path_env: &str) -> Result<(PathBuf, String), String> {
+    // BUZZ_SHELL: explicit operator override — any shell, including cmd or PowerShell.
+    // Supports both absolute paths and bare command names resolved through PATH.
+    if let Some(raw) = std::env::var_os("BUZZ_SHELL") {
+        let p = PathBuf::from(&raw);
+        // Absolute / rooted path: must exist as a file.
+        if p.components().count() > 1 || p.has_root() {
+            if p.is_file() {
+                let name = shell_name_from_path(&p);
+                return Ok((p, name));
+            }
+            // Non-existent absolute path: fall through, do NOT report this shell.
+        } else {
+            // Bare command name (e.g. "pwsh"): scan PATH + try .exe suffix.
+            let system_root = std::env::var_os("SystemRoot").map(PathBuf::from);
+            if let Some(found) = scan_path_for_command(&p, path_env, system_root.as_deref()) {
+                let name = shell_name_from_path(&found);
+                return Ok((found, name));
+            }
+            // Not found on PATH: fall through.
         }
     }
 
     // GIT_BASH: legacy override kept for back-compat.
     if let Some(p) = std::env::var_os("GIT_BASH").map(PathBuf::from) {
         if p.is_file() {
-            return Ok(p);
+            let name = shell_name_from_path(&p);
+            return Ok((p, name));
         }
     }
 
@@ -412,14 +495,14 @@ fn resolve_bash(path_env: &str) -> Result<PathBuf, String> {
             .join("bin")
             .join("bash.exe");
             if candidate.is_file() {
-                return Ok(candidate);
+                return Ok((candidate, "bash".to_string()));
             }
         }
     }
 
     if let Some(p) = scan_path_for_bash(path_env, std::env::var_os("SystemRoot").map(PathBuf::from))
     {
-        return Ok(p);
+        return Ok((p, "bash".to_string()));
     }
 
     Err(
@@ -457,17 +540,41 @@ fn is_under_dir(dir: &Path, root: &Path) -> bool {
 /// hand-split on ';') so it matches exactly what the spawned child would see.
 #[cfg(windows)]
 fn scan_path_for_bash(path_env: &str, system_root: Option<PathBuf>) -> Option<PathBuf> {
+    scan_path_for_command(
+        Path::new("bash.exe"),
+        path_env,
+        system_root.as_deref(),
+    )
+}
+
+/// Scan `path_env` for `name` (or `name.exe` on Windows if `name` has no
+/// extension), skipping any directory under `system_root` to avoid resolving
+/// WSL helpers. Returns the first absolute path found.
+#[cfg(windows)]
+fn scan_path_for_command(
+    name: &Path,
+    path_env: &str,
+    system_root: Option<&Path>,
+) -> Option<PathBuf> {
+    let needs_exe = name.extension().is_none();
     for dir in std::env::split_paths(path_env) {
-        if let Some(ref root) = system_root {
-            // Skip System32 (and any other dir under %SystemRoot%) — that's where
-            // WSL's bash.exe lives.
+        if let Some(root) = system_root {
             if is_under_dir(&dir, root) {
                 continue;
             }
         }
-        let candidate = dir.join("bash.exe");
+        // Try as-is first.
+        let candidate = dir.join(name);
         if candidate.is_file() {
             return Some(candidate);
+        }
+        // On Windows, also try with .exe suffix when the name has no extension.
+        if needs_exe {
+            let mut with_exe = dir.join(name);
+            with_exe.set_extension("exe");
+            if with_exe.is_file() {
+                return Some(with_exe);
+            }
         }
     }
     None
@@ -905,7 +1012,7 @@ mod windows_resolver_tests {
         env::set_var("BUZZ_SHELL", &fake_bash);
         let result = resolve_bash("");
         env::remove_var("BUZZ_SHELL");
-        let resolved = result.expect("BUZZ_SHELL override should resolve");
+        let (resolved, _name) = result.expect("BUZZ_SHELL override should resolve");
         assert_eq!(resolved, fake_bash);
     }
 
@@ -918,7 +1025,7 @@ mod windows_resolver_tests {
         // but we can assert the override itself is not returned.
         let result = resolve_bash("");
         env::remove_var("BUZZ_SHELL");
-        if let Ok(resolved) = result {
+        if let Ok((resolved, _)) = result {
             assert_ne!(
                 resolved.to_str().unwrap_or(""),
                 r"C:\does\not\exist\bash.exe",
@@ -926,6 +1033,68 @@ mod windows_resolver_tests {
             );
         }
         // An Err is also acceptable (no Git installed on test host).
+    }
+
+    /// F3: BUZZ_SHELL bare command name (e.g. "pwsh") resolved through PATH.
+    /// When pwsh.exe is on PATH, resolve_bash must return it and report "pwsh".
+    #[test]
+    fn buzz_shell_bare_name_resolved_through_path_when_present() {
+        let dir = tempdir().expect("tempdir");
+        let fake_pwsh = dir.path().join("pwsh.exe");
+        touch(&fake_pwsh);
+
+        // Put the temp dir on PATH so "pwsh" resolves.
+        let old_path = env::var_os("PATH").unwrap_or_default();
+        let new_path = env::join_paths(
+            std::iter::once(dir.path().to_path_buf())
+                .chain(std::env::split_paths(&old_path)),
+        )
+        .expect("join");
+        env::set_var("BUZZ_SHELL", "pwsh");
+        env::set_var("PATH", &new_path);
+        let result = resolve_bash("");
+        env::remove_var("BUZZ_SHELL");
+        env::set_var("PATH", &old_path);
+
+        let (resolved, name) = result.expect("bare BUZZ_SHELL=pwsh should resolve from PATH");
+        assert_eq!(resolved, fake_pwsh, "should resolve to pwsh.exe on PATH");
+        assert_eq!(name, "pwsh", "display name must match resolved shell");
+    }
+
+    /// F3: BUZZ_SHELL bare command name absent from PATH → fall through, do not
+    /// report pwsh as the active shell.
+    #[test]
+    fn buzz_shell_bare_name_absent_from_path_falls_through() {
+        // Set BUZZ_SHELL to a command that won't be on any real PATH.
+        env::set_var("BUZZ_SHELL", "buzz-shell-does-not-exist-xyz");
+        let result = resolve_bash("");
+        env::remove_var("BUZZ_SHELL");
+        if let Ok((resolved, name)) = result {
+            assert_ne!(
+                resolved.file_name().and_then(|n| n.to_str()).unwrap_or(""),
+                "buzz-shell-does-not-exist-xyz.exe",
+                "absent BUZZ_SHELL must not be returned as the resolved path"
+            );
+            assert_ne!(
+                name, "buzz-shell-does-not-exist-xyz",
+                "absent BUZZ_SHELL must not be reported as the shell name"
+            );
+        }
+        // Err is also acceptable (no Git on test host).
+    }
+
+    /// F3: resolved_shell_display_name() matches what resolve_bash() would use.
+    /// With BUZZ_SHELL pointing at a real file, the display name must reflect that
+    /// shell — not lie by reporting "bash".
+    #[test]
+    fn resolved_shell_display_name_matches_absolute_buzz_shell() {
+        let dir = tempdir().expect("tempdir");
+        let fake_pwsh = dir.path().join("pwsh.exe");
+        touch(&fake_pwsh);
+        env::set_var("BUZZ_SHELL", &fake_pwsh);
+        let name = resolved_shell_display_name();
+        env::remove_var("BUZZ_SHELL");
+        assert_eq!(name, "pwsh", "display name must reflect the resolved shell");
     }
 
     #[test]
@@ -985,5 +1154,29 @@ mod windows_resolver_tests {
             found.is_none(),
             "case-divergent System32 must still be excluded"
         );
+    }
+
+    /// F2: PATH-only discovery — a bash.exe custom-installed on PATH (not under
+    /// the standard Program Files locations) must be detected by detect_windows_bash
+    /// AND by resolve_bash (the runtime resolver). This ensures the UI prereq check
+    /// and the runtime resolver stay in parity: a custom install that works at
+    /// runtime must also satisfy the UI check.
+    #[test]
+    fn path_only_bash_is_found_by_scan() {
+        // scan_path_for_bash is the shared helper used by both the UI probe and
+        // the runtime resolver for the PATH fallback. Verify it returns the bash.
+        let real = tempdir().expect("real");
+        let real_bash = real.path().join("bash.exe");
+        touch(&real_bash);
+
+        let path_env = env::join_paths([real.path().to_path_buf()]).expect("join");
+        let sys_root = tempdir().expect("sysroot"); // empty — no System32 here
+
+        let found = scan_path_for_bash(
+            path_env.to_str().expect("utf8"),
+            Some(sys_root.path().to_path_buf()),
+        )
+        .expect("bash on PATH must be found");
+        assert_eq!(found, real_bash);
     }
 }

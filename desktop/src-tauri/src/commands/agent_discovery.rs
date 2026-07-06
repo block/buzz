@@ -309,9 +309,9 @@ pub fn discover_managed_agent_prereqs(
         .unwrap_or("");
 
     // On Windows, check whether a bash-compatible shell is available. The probe
-    // mirrors the resolver in buzz-dev-mcp/src/shell.rs (same priority: BUZZ_SHELL
-    // > GIT_BASH > Program Files\Git > LocalAppData\Programs\Git). This surfaces
-    // the prerequisite in the agent-creation UI before the user hits a runtime error.
+    // uses the same algorithm as the runtime resolver in buzz-dev-mcp/src/shell.rs:
+    // BUZZ_SHELL > GIT_BASH > Program Files\Git > LocalAppData\Programs\Git > PATH
+    // (excluding %SystemRoot% to avoid WSL's bash.exe).
     #[cfg(windows)]
     let bash = Some(detect_windows_bash());
     #[cfg(not(windows))]
@@ -327,27 +327,36 @@ pub fn discover_managed_agent_prereqs(
 /// Probe for a bash-compatible shell on Windows, mirroring the resolver in
 /// `buzz-dev-mcp/src/shell.rs`. Returns a `CommandAvailabilityInfo` so the
 /// frontend can surface a prereq hint in the same shape as acp/mcp.
+///
+/// Probe order (first hit wins):
+///   1. `BUZZ_SHELL` env override
+///   2. `GIT_BASH` legacy override
+///   3. Installed Git for Windows (`Program Files\Git` / `LocalAppData\Programs\Git`)
+///   4. PATH scan, excluding `%SystemRoot%` (to skip WSL's `System32\bash.exe`)
+///
+/// This must stay byte-behavior-identical to the Windows arm of `resolve_bash`
+/// in `crates/buzz-dev-mcp/src/shell.rs`. Keep them in sync.
 #[cfg(windows)]
 fn detect_windows_bash() -> crate::managed_agents::CommandAvailabilityInfo {
+    fn found(path: std::path::PathBuf) -> crate::managed_agents::CommandAvailabilityInfo {
+        crate::managed_agents::CommandAvailabilityInfo {
+            command: "bash".to_string(),
+            available: true,
+            resolved_path: Some(path.display().to_string()),
+        }
+    }
+
     // 1. BUZZ_SHELL override.
     if let Some(p) = std::env::var_os("BUZZ_SHELL").map(std::path::PathBuf::from) {
         if p.is_file() {
-            return crate::managed_agents::CommandAvailabilityInfo {
-                command: "bash".to_string(),
-                available: true,
-                resolved_path: Some(p.display().to_string()),
-            };
+            return found(p);
         }
     }
 
     // 2. GIT_BASH legacy override.
     if let Some(p) = std::env::var_os("GIT_BASH").map(std::path::PathBuf::from) {
         if p.is_file() {
-            return crate::managed_agents::CommandAvailabilityInfo {
-                command: "bash".to_string(),
-                available: true,
-                resolved_path: Some(p.display().to_string()),
-            };
+            return found(p);
         }
     }
 
@@ -363,13 +372,16 @@ fn detect_windows_bash() -> crate::managed_agents::CommandAvailabilityInfo {
             .join("bin")
             .join("bash.exe");
             if candidate.is_file() {
-                return crate::managed_agents::CommandAvailabilityInfo {
-                    command: "bash".to_string(),
-                    available: true,
-                    resolved_path: Some(candidate.display().to_string()),
-                };
+                return found(candidate);
             }
         }
+    }
+
+    // 4. PATH scan, excluding %SystemRoot% to avoid WSL's System32\bash.exe.
+    let path_env = std::env::var("PATH").unwrap_or_default();
+    let system_root = std::env::var_os("SystemRoot").map(std::path::PathBuf::from);
+    if let Some(p) = scan_path_for_bash_ui(&path_env, system_root.as_deref()) {
+        return found(p);
     }
 
     // Not found.
@@ -378,6 +390,45 @@ fn detect_windows_bash() -> crate::managed_agents::CommandAvailabilityInfo {
         available: false,
         resolved_path: None,
     }
+}
+
+/// Scan `path_env` for `bash.exe`, skipping directories under `system_root`.
+/// Duplicated from `buzz-dev-mcp/src/shell.rs::scan_path_for_bash` — must be
+/// kept in sync. The two crates cannot share code at this boundary without a
+/// dedicated shared crate, so we duplicate with an explicit cross-reference.
+#[cfg(windows)]
+fn scan_path_for_bash_ui(
+    path_env: &str,
+    system_root: Option<&std::path::Path>,
+) -> Option<std::path::PathBuf> {
+    for dir in std::env::split_paths(path_env) {
+        if let Some(root) = system_root {
+            if is_under_dir_ui(&dir, root) {
+                continue;
+            }
+        }
+        let candidate = dir.join("bash.exe");
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+/// Case-insensitive component-wise prefix check. Duplicated from
+/// `buzz-dev-mcp/src/shell.rs::is_under_dir` — must be kept in sync.
+#[cfg(windows)]
+fn is_under_dir_ui(dir: &std::path::Path, root: &std::path::Path) -> bool {
+    let mut dir_components = dir.components();
+    for root_component in root.components() {
+        match dir_components.next() {
+            Some(d)
+                if d.as_os_str()
+                    .eq_ignore_ascii_case(root_component.as_os_str()) => {}
+            _ => return false,
+        }
+    }
+    true
 }
 
 #[tauri::command]

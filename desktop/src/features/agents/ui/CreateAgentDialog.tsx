@@ -647,9 +647,8 @@ export function CreateAgentDialog({
                         >
                           git-scm.com/download/win
                         </a>{" "}
-                        and re-launch Buzz, or set the{" "}
-                        <code>BUZZ_SHELL</code> environment variable to a
-                        bash-compatible executable.
+                        and re-launch Buzz, or set the <code>BUZZ_SHELL</code>{" "}
+                        environment variable to a bash-compatible executable.
                       </p>
                     ) : null}
                   </div>
