@@ -678,7 +678,6 @@ export function EditAgentDialog({
         className="max-w-3xl border-0"
         contentClassName="pt-3"
         data-testid="edit-agent-dialog"
-        description="Update configuration. Changes take effect on the next start."
         footerClassName="border-t-0 pt-0"
         headerClassName="pb-2"
         title={`Edit ${agent.name}`}
