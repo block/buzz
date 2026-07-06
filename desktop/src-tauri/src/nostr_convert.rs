@@ -304,6 +304,7 @@ pub fn profile_info_from_event(event: &Event) -> Result<ProfileInfo, String> {
         about,
         nip05_handle,
         owner_pubkey: profile_valid_oa_owner_pubkey(event),
+        has_profile_event: true,
     })
 }
 

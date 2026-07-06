@@ -694,6 +694,51 @@ test("identity fallback text does not count as a real onboarding name", async ({
   await expect(page.getByTestId("onboarding-next")).toBeDisabled();
 });
 
+// Regression test for the H2 predicate fix (PR #1508).
+// A blank first-run identity (no kind:0 event on the relay) must see
+// onboarding even when the mock bridge returns display_name: "" — the gate
+// must depend on `hasProfileEvent`, not on `typeof displayName === "string"`.
+test("first-run blank identity with no profile event sees onboarding", async ({
+  page,
+}) => {
+  await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
+  // Do NOT seed searchProfiles for tyler's pubkey, so ensureMockProfile
+  // constructs a synthesised profile with has_profile_event: false.
+  await installMockBridge(page, undefined, { skipOnboardingSeed: true });
+  await page.goto("/");
+
+  await expectIncompleteOnboarding(page);
+});
+
+// Regression test for the H2 predicate fix (PR #1508).
+// A returning user who has a real kind:0 profile event with an empty
+// display_name must skip onboarding — they are already onboarded.
+test("returning user with blank display name and real profile event skips onboarding", async ({
+  page,
+}) => {
+  await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
+  // Seed tyler's pubkey into searchProfiles with an empty displayName.
+  // seedMockSearchProfiles stores this into mockProfiles with
+  // has_profile_event: true, simulating a real kind:0 event with no name.
+  await installMockBridge(
+    page,
+    {
+      searchProfiles: [
+        {
+          pubkey: TEST_IDENTITIES.tyler.pubkey,
+          displayName: "",
+        },
+      ],
+    },
+    { skipOnboardingSeed: true },
+  );
+  await page.goto("/");
+
+  // Profile event exists → onboarding is skipped, app renders.
+  await expect(page.getByTestId("onboarding-gate")).toHaveCount(0);
+  await expectHomeView(page);
+});
+
 test("avatar step uses an add-image placeholder before an avatar is chosen", async ({
   page,
 }) => {

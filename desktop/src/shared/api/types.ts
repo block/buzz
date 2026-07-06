@@ -115,6 +115,11 @@ export type Profile = {
   about: string | null;
   nip05Handle: string | null;
   ownerPubkey: string | null;
+  /** True when a real kind:0 metadata event exists on the relay for this pubkey.
+   * False for the synthesized fallback returned when no event is present.
+   * Used by the onboarding gate to distinguish new users from returning users
+   * whose display name happens to be empty. */
+  hasProfileEvent: boolean;
 };
 
 export type UserProfileSummary = {
