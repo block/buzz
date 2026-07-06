@@ -2524,45 +2524,11 @@ const mockProfiles = new Map<string, RawProfile>([
       has_profile_event: true,
     },
   ],
-  [
-    ALICE_PUBKEY,
-    {
-      pubkey: ALICE_PUBKEY,
-      display_name: "alice",
-      avatar_url: null,
-      about: null,
-      nip05_handle: null,
-      owner_pubkey: null,
-      is_agent: true,
-      has_profile_event: true,
-    },
-  ],
-  [
-    BOB_PUBKEY,
-    {
-      pubkey: BOB_PUBKEY,
-      display_name: "bob",
-      avatar_url: null,
-      about: null,
-      nip05_handle: null,
-      owner_pubkey: null,
-      is_agent: false,
-      has_profile_event: true,
-    },
-  ],
-  [
-    CHARLIE_PUBKEY,
-    {
-      pubkey: CHARLIE_PUBKEY,
-      display_name: "charlie",
-      avatar_url: null,
-      about: null,
-      nip05_handle: null,
-      owner_pubkey: null,
-      is_agent: true,
-      has_profile_event: true,
-    },
-  ],
+  // alice, bob, and charlie are intentionally NOT seeded here — they are
+  // covered by mockDisplayNames + mockAgentPubkeys and synthesised on demand
+  // by getMockProfileByPubkey. Static seeds would cause ensureMockProfile to
+  // return has_profile_event:true when alice/bob/charlie are used as the
+  // active first-run identity, incorrectly skipping onboarding page 1.
   [
     PROFILE_ONLY_AGENT_PUBKEY,
     {
