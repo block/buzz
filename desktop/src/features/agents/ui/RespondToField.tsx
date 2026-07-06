@@ -144,7 +144,7 @@ export function CreateAgentRespondToField({
           id="agent-respond-to"
           onValueChange={(value) => onModeChange(value as RespondToMode)}
           options={RESPOND_TO_OPTIONS}
-          placeholder="Owner only (default)"
+          placeholder="Only me (default)"
           value={mode}
         />
       ) : (

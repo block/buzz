@@ -345,17 +345,26 @@ export function EditAgentDialog({
       nextRuntime?.id ?? nextRuntimeId,
     );
 
+    // Mark that the user has made an explicit runtime choice. The catalog-arrival
+    // effect will no longer overwrite selectedRuntimeId after this point.
     runtimeTouched.current = true;
 
     setSelectedRuntimeId(nextRuntimeId || "custom");
 
+    // When switching to a catalog-known runtime, update the agent command to
+    // its resolved command so the command field stays consistent.
     if (nextRuntime?.command) {
       setAgentCommand(nextRuntime.command);
       const newArgs = nextRuntime.defaultArgs.join(",");
       setAgentArgs(newArgs);
+      // Selecting a concrete catalog runtime pins the harness — this is the
+      // authoritative override. Disabling inheritance ensures the runtime is
+      // actually persisted and prevents a mismatched provider from being saved
+      // against an inherited runtime that will actually run something else.
       setInheritHarness(false);
     }
 
+    // Clear model when switching away from a runtime with a different model scope.
     if (
       shouldClearModelForRuntimeChange(previousRuntimeId, nextRuntimeId) ||
       shouldClearKnownModelForSelectionScope({
@@ -368,6 +377,8 @@ export function EditAgentDialog({
       setIsCustomModelEditing(false);
     }
 
+    // When switching to a provider-locked runtime, clear provider state so no
+    // conflicting provider is persisted on a runtime that doesn't support it.
     if (!nextCanChooseProvider) {
       const previousProviderApiKeyEnvVar = getProviderApiKeyEnvVar(provider);
       if (previousProviderApiKeyEnvVar) {
@@ -401,6 +412,7 @@ export function EditAgentDialog({
     const nextProvider =
       nextValue === AUTO_PROVIDER_DROPDOWN_VALUE ? "" : nextValue;
 
+    // Clear the old provider API key when switching providers.
     const previousProviderApiKeyEnvVar = getProviderApiKeyEnvVar(provider);
     const nextProviderApiKeyEnvVar = getProviderApiKeyEnvVar(nextProvider);
     if (
@@ -417,6 +429,8 @@ export function EditAgentDialog({
     setIsCustomProviderEditing(false);
     setProvider(nextProvider);
 
+    // Clear the model when switching to a provider that requires a different
+    // explicit model selection.
     if (
       !isCustomModelEditing &&
       shouldClearKnownModelForSelectionScope({
@@ -454,7 +468,12 @@ export function EditAgentDialog({
   const timeoutValid =
     turnTimeoutSeconds.trim() === "" ||
     !Number.isNaN(Number.parseInt(turnTimeoutSeconds, 10));
+  // Block clearing a previously-set command to empty — sending an empty string
+  // for a required command field would cause a runtime failure at spawn.
   const acpCommandValid = !(agent.acpCommand && acpCommand.trim() === "");
+  // Allowlist mode requires at least one entry — mirrors the harness's own
+  // validation. The backend would reject the request anyway; we block early
+  // so the user sees the disabled button instead of a round-tripped error.
   const respondToValid =
     respondTo !== "allowlist" || respondToAllowlist.length > 0;
 
@@ -478,6 +497,12 @@ export function EditAgentDialog({
       const normalizedModel = model.trim() || null;
       const normalizedProvider = provider.trim() || null;
 
+      // Harness pin resolution. The backend treats an empty string as the
+      // "inherit from persona" sentinel (clears the override) and any concrete
+      // command as an explicit pin. When inheriting, only send the sentinel if
+      // there's a pin to clear — a name-only edit must leave the record alone.
+      // When pinning, send the command only if it diverges from the resolved
+      // value the dialog opened with, so an unchanged save stays a no-op.
       const agentCommandUpdate = inheritHarness
         ? agent.agentCommandOverride != null
           ? ""
@@ -492,6 +517,13 @@ export function EditAgentDialog({
       // always agree on which runtime is being saved.
       const effectiveRuntimeIdForSubmit = prospectiveRuntimeId;
 
+      // Classify the effective runtime's provider capability as a tri-state so
+      // the provider submit branch can distinguish "known-locked" (clear) from
+      // "unknown" (omit). Clearing must ONLY happen when we KNOW the runtime is
+      // provider-locked (e.g. Claude). When capability is unknown — because the
+      // catalog is still loading, the query errored, or the inherited command
+      // matched nothing — we OMIT the field rather than sending null, so a
+      // transient discovery/loading state never becomes a destructive write.
       type ProviderRuntimeCapability = "capable" | "locked" | "unknown";
       const matchedCatalogEntry =
         effectiveRuntimeIdForSubmit.length > 0
@@ -534,6 +566,7 @@ export function EditAgentDialog({
           parsedParallelism > 0 && parsedParallelism !== agent.parallelism
             ? parsedParallelism
             : undefined,
+        // Use tri-state: send null to clear, value to set, omit if unchanged.
         systemPrompt:
           (systemPrompt.trim() || null) !== agent.systemPrompt
             ? systemPrompt.trim() || null
@@ -542,6 +575,11 @@ export function EditAgentDialog({
           normalizedModel !== (agent.model ?? null)
             ? normalizedModel
             : undefined,
+        // Tri-state provider persistence keyed on providerRuntimeCapability:
+        //   "capable"  → persist: value if changed, omit if unchanged.
+        //   "locked"   → clear: send null if provider was set, else omit.
+        //   "unknown"  → omit always (never send null for a transient state).
+        // llmProviderFieldVisible is for UX visibility only; not used here.
         provider:
           providerRuntimeCapability === "capable"
             ? normalizedProvider !== (agent.provider ?? null)
@@ -551,9 +589,15 @@ export function EditAgentDialog({
               ? (agent.provider ?? null) !== null
                 ? null
                 : undefined
-              : undefined,
+              : undefined, // "unknown" → omit always
         envVars: envVarsChanged(envVars, agent.envVars) ? envVars : undefined,
         respondTo: respondTo !== agent.respondTo ? respondTo : undefined,
+        // The allowlist is preserved across mode toggles in local UI state
+        // (so a user can flip away from allowlist and back without losing
+        // their entries), but we only send it on the wire when (a) it
+        // actually changed, AND (b) the saved mode will need it. Sending
+        // an allowlist while switching to a non-allowlist mode would be
+        // harmless server-side, but it's noise in the persisted record.
         respondToAllowlist:
           respondTo === "allowlist" &&
           respondToAllowlist.join(",") !== agent.respondToAllowlist.join(",")
