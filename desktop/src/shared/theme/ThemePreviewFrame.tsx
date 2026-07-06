@@ -278,7 +278,7 @@ function SystemPreferencePreviewSvg({
           height="2.7"
           rx="1.35"
           width="2.7"
-          x="4.5"
+          x="3.5"
           y="4.72485"
         />
         <rect
@@ -288,7 +288,7 @@ function SystemPreferencePreviewSvg({
           strokeOpacity="0.2"
           strokeWidth="0.1125"
           width="2.5875"
-          x="4.55625"
+          x="3.55625"
           y="4.7811"
         />
         <rect
@@ -296,7 +296,7 @@ function SystemPreferencePreviewSvg({
           height="2.7"
           rx="1.35"
           width="2.7"
-          x="9"
+          x="8"
           y="4.72485"
         />
         <rect
@@ -306,7 +306,7 @@ function SystemPreferencePreviewSvg({
           strokeOpacity="0.2"
           strokeWidth="0.1125"
           width="2.5875"
-          x="9.05625"
+          x="8.05625"
           y="4.7811"
         />
         <rect
@@ -314,7 +314,7 @@ function SystemPreferencePreviewSvg({
           height="2.7"
           rx="1.35"
           width="2.7"
-          x="13.5"
+          x="12.5"
           y="4.72485"
         />
         <rect
@@ -324,7 +324,7 @@ function SystemPreferencePreviewSvg({
           strokeOpacity="0.2"
           strokeWidth="0.1125"
           width="2.5875"
-          x="13.5563"
+          x="12.5563"
           y="4.7811"
         />
         <rect
@@ -524,7 +524,7 @@ export function SystemPreferencePreviewFrame({
         className,
       )}
       style={{
-        backgroundColor: hsl(lightVars, "--muted"),
+        backgroundColor: "hsl(var(--muted))",
       }}
     >
       <div className="absolute -bottom-1 -right-1 h-[90%] w-[90%]">
