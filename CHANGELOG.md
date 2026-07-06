@@ -1,5 +1,23 @@
 # Changelog
 
+## v0.3.45
+
+- chore(deps): bump crossbeam-epoch to 0.9.20 for RUSTSEC-2026-0204 ([#1563](https://github.com/block/buzz/pull/1563)) ([`75b52ad7e`](https://github.com/block/buzz/commit/75b52ad7e54ca7f930656e756910a08d0f146b82))
+- fix(archive): atomic remove-kind path + split test modules ([#1562](https://github.com/block/buzz/pull/1562)) ([`484bede75`](https://github.com/block/buzz/commit/484bede7597814dd7dc322d1f72f69c08545ef42))
+- feat(archive): add agent turn-metric (kind 44200) local archive ([#1555](https://github.com/block/buzz/pull/1555)) ([`429f54b4f`](https://github.com/block/buzz/commit/429f54b4f45df0d5f4a52aafb8913e903ebdc6b3))
+- feat(desktop,buzz-acp): add harness-agnostic config bridge and setup-listener mode ([#1411](https://github.com/block/buzz/pull/1411)) ([`d8355d318`](https://github.com/block/buzz/commit/d8355d318853f85ffaf53dc7b5215bc998b460c4))
+- fix(desktop): stop edit-channel dialog hanging on "Saving..." ([#1557](https://github.com/block/buzz/pull/1557)) ([`76806cb1f`](https://github.com/block/buzz/commit/76806cb1f654650a412b7f0368f495062a9ee224))
+- feat(archive): add local-save archive with observer-feed default-on option ([#1442](https://github.com/block/buzz/pull/1442)) ([`711078807`](https://github.com/block/buzz/commit/711078807777db77960404e51ffd862c08a33ded))
+- feat(desktop): add Slack-like Drafts inbox with persistence and image fix ([#1539](https://github.com/block/buzz/pull/1539)) ([`4c598dcef`](https://github.com/block/buzz/commit/4c598dcef577bb204f9666eaac5b95743a0f8736))
+- fix(setup): fix syntax error in seed-local-community.sh ([#1547](https://github.com/block/buzz/pull/1547)) ([`3729a6515`](https://github.com/block/buzz/commit/3729a6515617abdae03117d9713dfeb7e1ff74c2))
+- feat(desktop): add right-click context menu to workspace rail ([#1552](https://github.com/block/buzz/pull/1552)) ([`0e87998f8`](https://github.com/block/buzz/commit/0e87998f8fcac0ff1612d661cbd505a63b51c550))
+- fix(desktop): restore saved window geometry on launch ([#1554](https://github.com/block/buzz/pull/1554)) ([`e790c9828`](https://github.com/block/buzz/commit/e790c9828f1ae85ce7618d06e67e78732be4221b))
+- feat(desktop): add typeahead search to persona model dropdown ([#1542](https://github.com/block/buzz/pull/1542)) ([`3b43743e1`](https://github.com/block/buzz/commit/3b43743e1f2acd192705a80629ceadfa7a737831))
+- fix(desktop): publish new agent profiles to active relay ([#1546](https://github.com/block/buzz/pull/1546)) ([`346efe08b`](https://github.com/block/buzz/commit/346efe08b3ca6e847b6c9c2f843cdb8834db123c))
+- chore(desktop): use dot access for host header assignment ([#1548](https://github.com/block/buzz/pull/1548)) ([`ccfdf45bc`](https://github.com/block/buzz/commit/ccfdf45bc5dd61ef7d59644293d84deed24e1789))
+- fix(onboarding): guard against webkit2gtk WAL race with explicit profile-event signal ([#1508](https://github.com/block/buzz/pull/1508)) ([`c2ee4d162`](https://github.com/block/buzz/commit/c2ee4d162753a3338dc434f85c80a82eb284b3d2))
+
+
 ## v0.3.44
 
 - fix(desktop): keep thread-summary badges mounted through scrollback prepends ([#1533](https://github.com/block/buzz/pull/1533)) ([`6abf614fd`](https://github.com/block/buzz/commit/6abf614fd4eb512cf2e4175f17dc09892a8b472d))
