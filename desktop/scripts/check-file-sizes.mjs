@@ -94,7 +94,8 @@ const overrides = new Map([
   // #1418 read-path fix: +3 doc-only lines correcting the getThreadReplies
   // contract (replies-only, root excluded — the query keys on root_event_id,
   // which root rows lack). Documentation accuracy, not code growth.
-  ["src/shared/api/tauri.ts", 1340],
+  // linux-updater-manual: isAutoUpdateSupported() binding adds 7 lines.
+  ["src/shared/api/tauri.ts", 1347],
   // harness-persona-sync feature growth, queued to split in the resolver-unify
   // refactor followup. discovery.rs is dominated by the new test module
   // (the effective_agent_command / divergent / create-time override matrix);
