@@ -5,6 +5,7 @@ import { useChannelLinks } from "@/features/messages/lib/useChannelLinks";
 import { useComposerAutofocus } from "@/features/messages/lib/useComposerAutofocus";
 import type { ChannelSuggestion } from "@/features/messages/lib/useChannelLinks";
 import { useDrafts } from "@/features/messages/lib/useDrafts";
+import { resolveSentDraftKey } from "@/features/messages/ui/draftSubmitKey";
 import { useEmojiAutocomplete } from "@/features/messages/lib/useEmojiAutocomplete";
 import type { EmojiSuggestion } from "@/features/messages/lib/useEmojiAutocomplete";
 import { useCustomEmoji } from "@/features/custom-emoji/hooks";
@@ -609,16 +610,15 @@ function MessageComposerImpl({
       capturedChannelId: channelId,
       capturedThreadContext,
       pendingImeta: currentPendingImeta,
-      // Capture whether a draft was actually persisted at submit time.
-      // `loadDraft` is a synchronous O(1) cache read; the draft is still
-      // in the store at this point (before any async send or composer
-      // cleanup runs). If no draft exists the key resolves to null so no
-      // sent record is written for fast/never-persisted sends.
-      sentDraftKey:
-        effectiveDraftKeyRef.current &&
-        drafts.loadDraft(effectiveDraftKeyRef.current)
-          ? effectiveDraftKeyRef.current
-          : null,
+      // resolveSentDraftKey checks at submit time (synchronously, before any
+      // await) whether a draft was actually persisted. If not — fast/
+      // never-persisted send — it returns null so no sent record is written.
+      // The function is exported and tested directly in
+      // MessageComposerDraftPredicate.test.mjs.
+      sentDraftKey: resolveSentDraftKey(
+        effectiveDraftKeyRef.current,
+        drafts.loadDraft,
+      ),
       spoileredAttachmentUrls,
       trimmed,
     });
