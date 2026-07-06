@@ -122,16 +122,17 @@ const MediaAttachmentItem = React.forwardRef<
     if (!next) setMode("view");
   }, []);
 
-  const handleEscapeKeyDown = React.useCallback(
-    (event: KeyboardEvent) => {
-      if (mode === "edit") {
-        // Escape leaves canvas mode but keeps the lightbox open.
-        event.preventDefault();
-        setMode("view");
-      }
-    },
-    [mode],
-  );
+  // Read `mode` via a ref: Radix's dismissable layer (>=1.1.14) registers a
+  // stable Escape listener, so the handler would otherwise see a stale mode.
+  const modeRef = React.useRef(mode);
+  modeRef.current = mode;
+  const handleEscapeKeyDown = React.useCallback((event: KeyboardEvent) => {
+    if (modeRef.current === "edit") {
+      // Escape leaves canvas mode but keeps the lightbox open.
+      event.preventDefault();
+      setMode("view");
+    }
+  }, []);
 
   const handleEditorSave = React.useCallback(
     async (bytes: Uint8Array) => {
