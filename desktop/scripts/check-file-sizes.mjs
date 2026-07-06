@@ -60,34 +60,13 @@ const overrides = new Map([
   // config-bridge: get_agent_config_surface/write_agent_config_field/put_agent_session_config
   // commands add ~40 lines. Queued to split.
   // branch cut; override bumped to cover the merged total. Queued to split.
-  // archive/mod.rs carries the full test module: 899 unit tests + 4 real-relay
-  // integration tests (ignored, live-relay only, wrapped in
-  // #[cfg(not(target_os = "windows"))] mod real_relay). The test module is the
-  // source of the overage — production logic is ~408 lines. The fix-round added
-  // 2 regression tests (F2: out-of-range kind + F3: atomicity invariant).
-  // read_archived_events Tauri command added ~39 lines (Phase 1 read-back).
-  // E2E test-depth hardening added the owner_p content round-trip assert and
-  // two empty-table drop asserts (~24 lines). Queued to split the test module
-  // into archive/mod_tests.rs in a follow-up.
-  // agent-metric-archive PR added 4 new unit tests (owner_p+44200 routing,
-  // decrypt-success plaintext storage, decrypt-fail-closed, 24200 still
-  // ephemeral) + run_batch_sync_with_keys helper (~175 lines). Same test-growth
-  // category as above. Still queued to split.
-  // merge_save_subscription_kinds command + owner_p-kinds TOCTOU fix adds ~30
-  // lines. Atomic merge to close the concurrent-seed race. Still queued to split.
-  // IMMEDIATE-tx fix: BEGIN IMMEDIATE replaces DEFERRED unchecked_transaction
-  // in merge_owner_p_kinds comment block (~5 lines). Still queued to split.
-  // doc-comment: mixed row-shape invariant on read_archived_events (~5 lines).
-  ["src-tauri/src/archive/mod.rs", 1705],
-  // archive/store.rs: merge_owner_p_kinds fn (read+union+upsert under a single
-  // SQLite tx) + 4 unit tests (create-when-none, adds-kind, idempotent,
-  // concurrent-interleave). Load-bearing TOCTOU fix for the owner_p shared row.
-  // Queued to split test module into store_tests.rs in a follow-up.
-  // IMMEDIATE-tx fix: replaces mislabeled sequential test with a real
-  // two-connection WAL regression test (tempfile + std::thread + Barrier,
-  // ~85 lines). The new test exercises the actual concurrent write path and
-  // fails fast if IMMEDIATE guard is removed. Still queued to split.
-  ["src-tauri/src/archive/store.rs", 1179],
+  // archive/mod_tests.rs carries the full test module for archive/mod.rs:
+  // unit tests + 4 real-relay integration tests (ignored, live-relay only).
+  // Production logic in mod.rs is now ~527 lines (under 1000). mod_tests.rs
+  // is test-only content; the override covers the test growth accumulated
+  // across the local-archive + agent-metric-archive PR series. store_tests.rs
+  // (~731 lines) is under 1000 so needs no override.
+  ["src-tauri/src/archive/mod_tests.rs", 1208],
   ["src-tauri/src/commands/agents.rs", 1437],
   // #1418 read-path fix: get_thread_replies' blocker fix (shared TIMELINE_KINDS
   // const + build_thread_replies_filter helper, mirroring the channel sibling so

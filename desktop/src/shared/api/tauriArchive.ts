@@ -127,6 +127,24 @@ export async function mergeSaveSubscriptionKinds(kind: number): Promise<void> {
 }
 
 /**
+ * Atomically remove `kind` from the `owner_p` save subscription for the
+ * current identity + relay.
+ *
+ * Mirrors `mergeSaveSubscriptionKinds`: reads existing kinds, removes `kind`,
+ * then deletes the row if the list becomes empty or updates it otherwise.
+ * Uses `BEGIN IMMEDIATE` on the Rust side for the same reason as the merge
+ * path — concurrent toggle-OFF callers serialize rather than racing.
+ *
+ * Called by toggle-OFF handlers in `LocalArchiveSettingsCard` for both
+ * kind 24200 and kind 44200, replacing the former TS-side read-modify-overwrite
+ * that would drop the *other* kind if `subs` state was stale.
+ */
+export async function removeSaveSubscriptionKind(kind: number): Promise<void> {
+  await invokeTauri("remove_save_subscription_kind", { kind });
+  notifySubscriptionChange();
+}
+
+/**
  * Create a save subscription.
  * Runs an access probe on the backend (channel membership, event readability).
  * `kinds` is sent as a plain number array — Tauri serializes it correctly.
