@@ -26,57 +26,25 @@ import type { AutocompleteEdit } from "./useRichTextEditor";
 import type {
   AgentPersona,
   ChannelMember,
-  ChannelRole,
   ChannelType,
-  UserSearchResult,
 } from "@/shared/api/types";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { detectPrefixQuery } from "@/shared/lib/detectPrefixQuery";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { trimMapToSize } from "@/shared/lib/trimMapToSize";
 import { hasMention } from "./hasMention";
+import {
+  formatOwnerLabel,
+  formatSearchUserDisplayName,
+  formatSearchUserSecondaryLabel,
+  globalSearchIdentityKey,
+  type MentionCandidate,
+  mentionCandidateLabel,
+} from "./mentionCandidates";
 import { rankMentionCandidates } from "./mentionRanking";
 
 const MENTION_DEBOUNCE_MS = 120;
 const MENTION_SUGGESTION_LIMIT = 50;
-
-type MentionCandidate = {
-  kind: "identity" | "persona";
-  pubkey?: string;
-  personaId?: string;
-  displayName: string | null;
-  avatarUrl?: string | null;
-  isMember: boolean;
-  role?: ChannelRole | null;
-  personaName?: string | null;
-  secondaryLabel?: string | null;
-  ownerPubkey?: string | null;
-  isAgent: boolean;
-  isManagedAgent?: boolean;
-  isGlobalSearchResult?: boolean;
-};
-
-function mentionCandidateLabel(candidate: MentionCandidate) {
-  return candidate.displayName ?? candidate.pubkey?.slice(0, 8) ?? "persona";
-}
-
-function globalSearchIdentityKey(candidate: MentionCandidate) {
-  if (
-    !candidate.isGlobalSearchResult ||
-    candidate.isMember ||
-    candidate.isAgent
-  ) {
-    return null;
-  }
-
-  const label = candidate.displayName?.trim().toLowerCase();
-  if (!label) {
-    return null;
-  }
-
-  const secondaryLabel = candidate.secondaryLabel?.trim().toLowerCase() ?? "";
-  return `global-person:${label}:${secondaryLabel}`;
-}
 
 export type PersonaMentionTarget = {
   displayName: string;
@@ -87,46 +55,6 @@ type UseMentionsOptions = {
   channelType?: ChannelType | null;
 };
 
-function formatSearchUserDisplayName(user: UserSearchResult) {
-  return user.displayName?.trim() || user.nip05Handle?.trim() || null;
-}
-
-function formatSearchUserSecondaryLabel(user: UserSearchResult) {
-  const displayName = user.displayName?.trim();
-  const nip05Handle = user.nip05Handle?.trim();
-
-  if (displayName && nip05Handle) {
-    return nip05Handle;
-  }
-
-  return null;
-}
-
-function formatOwnerLabel(
-  ownerPubkey: string | null | undefined,
-  currentPubkey: string | null | undefined,
-  ownerProfiles?: UserProfileLookup,
-) {
-  if (!ownerPubkey) {
-    return null;
-  }
-
-  const normalizedOwnerPubkey = normalizePubkey(ownerPubkey);
-  if (
-    currentPubkey &&
-    normalizedOwnerPubkey === normalizePubkey(currentPubkey)
-  ) {
-    return "you";
-  }
-
-  const owner = ownerProfiles?.[normalizedOwnerPubkey];
-  return (
-    owner?.displayName?.trim() ||
-    owner?.nip05Handle?.trim() ||
-    `${ownerPubkey.slice(0, 8)}…`
-  );
-}
-
 export function useMentions(
   channelId: string | null,
   externalMembers?: ChannelMember[],
@@ -134,7 +62,7 @@ export function useMentions(
   options?: UseMentionsOptions,
 ) {
   const [mentionQuery, setMentionQuery] = React.useState<string | null>(null);
-  const [mentionStartIndex, setMentionStartIndex] = React.useState(0);
+  const mentionStartIndexRef = React.useRef(0);
   const [mentionSelectedIndex, setMentionSelectedIndex] = React.useState(0);
   const [selectedMentionNames, setSelectedMentionNames] = React.useState<
     string[]
@@ -702,12 +630,12 @@ export function useMentions(
       setMentionSelectedIndex(0);
 
       return {
-        replaceFromOffset: mentionStartIndex,
+        replaceFromOffset: mentionStartIndexRef.current,
         replaceToOffset: selectionEnd,
         insertText,
       };
     },
-    [knownAgentPubkeys, mentionStartIndex],
+    [knownAgentPubkeys],
   );
 
   const registerMentionPubkey = React.useCallback(
@@ -802,7 +730,7 @@ export function useMentions(
         );
         if (mention) {
           setMentionQuery(mention.query);
-          setMentionStartIndex(mention.startIndex);
+          mentionStartIndexRef.current = mention.startIndex;
           setMentionSelectedIndex(0);
         } else {
           setMentionQuery(null);
@@ -923,6 +851,47 @@ export function useMentions(
           !event.shiftKey)
       ) {
         event.preventDefault();
+
+        // Flush pending debounced detection so a fast Tab/Enter commits the
+        // match for the text actually typed, not a stale suggestion list.
+        if (debounceTimerRef.current !== null) {
+          clearTimeout(debounceTimerRef.current);
+          debounceTimerRef.current = null;
+          const mention = detectPrefixQuery(
+            "@",
+            latestValueRef.current,
+            latestCursorRef.current,
+            searchableNamesLowerRef.current,
+          );
+          if (!mention) {
+            setMentionQuery(null);
+            return { handled: true };
+          }
+          mentionStartIndexRef.current = mention.startIndex;
+          if (mention.query !== mentionQuery) {
+            const top = rankMentionCandidates(
+              mentionCandidates,
+              mention.query,
+              activePersonaIds,
+            )[0];
+            if (!top) {
+              setMentionQuery(mention.query);
+              setMentionSelectedIndex(0);
+              return { handled: true };
+            }
+            return {
+              handled: true,
+              suggestion: {
+                displayName: top.label,
+                isAgent: top.candidate.isAgent,
+                kind: top.candidate.kind,
+                personaId: top.candidate.personaId,
+                pubkey: top.candidate.pubkey,
+              },
+            };
+          }
+        }
+
         return { handled: true, suggestion: suggestions[mentionSelectedIndex] };
       }
 
@@ -934,7 +903,14 @@ export function useMentions(
 
       return { handled: false };
     },
-    [isMentionOpen, mentionSelectedIndex, suggestions],
+    [
+      activePersonaIds,
+      isMentionOpen,
+      mentionCandidates,
+      mentionQuery,
+      mentionSelectedIndex,
+      suggestions,
+    ],
   );
 
   return {

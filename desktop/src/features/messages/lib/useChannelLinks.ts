@@ -16,7 +16,7 @@ export function useChannelLinks() {
   const { channels } = useChannelNavigation();
 
   const [channelQuery, setChannelQuery] = React.useState<string | null>(null);
-  const [channelStartIndex, setChannelStartIndex] = React.useState(0);
+  const channelStartIndexRef = React.useRef(0);
   const [channelSelectedIndex, setChannelSelectedIndex] = React.useState(0);
 
   const debounceTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(
@@ -52,24 +52,33 @@ export function useChannelLinks() {
     };
   }, []);
 
+  /** Match channels for a query, mirroring the `channelSuggestions` memo. */
+  const matchChannels = React.useCallback(
+    (query: string): ChannelSuggestion[] => {
+      const lowerQuery = query.toLowerCase();
+      return channels
+        .filter(
+          (ch) =>
+            ch.channelType !== "dm" &&
+            ch.name.toLowerCase().includes(lowerQuery),
+        )
+        .slice(0, 8)
+        .map((ch) => ({
+          id: ch.id,
+          name: ch.name,
+          channelType: ch.channelType as "stream" | "forum",
+        }));
+    },
+    [channels],
+  );
+
   const channelSuggestions = React.useMemo<ChannelSuggestion[]>(() => {
     if (channelQuery === null) {
       return [];
     }
 
-    const lowerQuery = channelQuery.toLowerCase();
-    return channels
-      .filter(
-        (ch) =>
-          ch.channelType !== "dm" && ch.name.toLowerCase().includes(lowerQuery),
-      )
-      .slice(0, 8)
-      .map((ch) => ({
-        id: ch.id,
-        name: ch.name,
-        channelType: ch.channelType as "stream" | "forum",
-      }));
-  }, [channels, channelQuery]);
+    return matchChannels(channelQuery);
+  }, [matchChannels, channelQuery]);
 
   const isChannelOpen = channelQuery !== null && channelSuggestions.length > 0;
 
@@ -86,12 +95,12 @@ export function useChannelLinks() {
       setChannelSelectedIndex(0);
 
       return {
-        replaceFromOffset: channelStartIndex,
+        replaceFromOffset: channelStartIndexRef.current,
         replaceToOffset: selectionEnd,
         insertText,
       };
     },
-    [channelStartIndex],
+    [],
   );
 
   const updateChannelQuery = React.useCallback(
@@ -114,7 +123,7 @@ export function useChannelLinks() {
         );
         if (channel) {
           setChannelQuery(channel.query);
-          setChannelStartIndex(channel.startIndex);
+          channelStartIndexRef.current = channel.startIndex;
           setChannelSelectedIndex(0);
         } else {
           setChannelQuery(null);
@@ -166,6 +175,34 @@ export function useChannelLinks() {
           !event.shiftKey)
       ) {
         event.preventDefault();
+
+        // Flush pending debounced detection so a fast Tab/Enter commits the
+        // match for the text actually typed, not a stale suggestion list.
+        if (debounceTimerRef.current !== null) {
+          clearTimeout(debounceTimerRef.current);
+          debounceTimerRef.current = null;
+          const channel = detectPrefixQuery(
+            "#",
+            latestValueRef.current,
+            latestCursorRef.current,
+            knownNamesLowerRef.current,
+          );
+          if (!channel) {
+            setChannelQuery(null);
+            return { handled: true };
+          }
+          channelStartIndexRef.current = channel.startIndex;
+          if (channel.query !== channelQuery) {
+            const fresh = matchChannels(channel.query);
+            if (fresh.length === 0) {
+              setChannelQuery(channel.query);
+              setChannelSelectedIndex(0);
+              return { handled: true };
+            }
+            return { handled: true, suggestion: fresh[0] };
+          }
+        }
+
         return {
           handled: true,
           suggestion: channelSuggestions[channelSelectedIndex],
@@ -180,7 +217,13 @@ export function useChannelLinks() {
 
       return { handled: false };
     },
-    [isChannelOpen, channelSelectedIndex, channelSuggestions],
+    [
+      channelQuery,
+      channelSelectedIndex,
+      channelSuggestions,
+      isChannelOpen,
+      matchChannels,
+    ],
   );
 
   return {

@@ -378,6 +378,26 @@ test("selecting a person mention inserts @Name into input", async ({
   await expect(mentionChip).not.toHaveClass(/agent-mention-highlight/);
 });
 
+test("fast Tab right after typing commits the typed match, not a stale list", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  const input = page.getByTestId("message-input");
+  // Open the dropdown with a bare "@" (unfiltered list, bob is not first).
+  await input.fill("Hey @");
+  await expect(autocomplete(page)).toBeVisible();
+
+  // Type the filter and Tab inside the 120ms detection debounce window —
+  // this must commit the match for "bo", not the stale unfiltered top entry.
+  await page.keyboard.type("bo");
+  await page.keyboard.press("Tab");
+
+  await expect(input).toHaveText("Hey @bob ");
+});
+
 test("selecting an agent mention inserts @Name into input", async ({
   page,
 }) => {

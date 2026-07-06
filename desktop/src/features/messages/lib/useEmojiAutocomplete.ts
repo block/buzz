@@ -44,7 +44,7 @@ function detectEmojiQuery(
 
 export function useEmojiAutocomplete(customEmoji: CustomEmoji[] = []) {
   const [emojiQuery, setEmojiQuery] = React.useState<string | null>(null);
-  const [emojiStartIndex, setEmojiStartIndex] = React.useState(0);
+  const emojiStartIndexRef = React.useRef(0);
   const [emojiSelectedIndex, setEmojiSelectedIndex] = React.useState(0);
   const [suggestions, setSuggestions] = React.useState<EmojiSuggestion[]>([]);
 
@@ -141,13 +141,13 @@ export function useEmojiAutocomplete(customEmoji: CustomEmoji[] = []) {
       setEmojiSelectedIndex(0);
 
       return {
-        replaceFromOffset: emojiStartIndex,
+        replaceFromOffset: emojiStartIndexRef.current,
         replaceToOffset: selectionEnd,
         insertText,
         ...(isCustom ? { customEmojiShortcode: suggestion.id } : {}),
       };
     },
-    [emojiStartIndex],
+    [],
   );
 
   const updateEmojiQuery = React.useCallback(
@@ -167,7 +167,7 @@ export function useEmojiAutocomplete(customEmoji: CustomEmoji[] = []) {
         );
         if (result) {
           setEmojiQuery(result.query);
-          setEmojiStartIndex(result.startIndex);
+          emojiStartIndexRef.current = result.startIndex;
         } else {
           setEmojiQuery(null);
         }
@@ -219,6 +219,28 @@ export function useEmojiAutocomplete(customEmoji: CustomEmoji[] = []) {
           !event.shiftKey)
       ) {
         event.preventDefault();
+
+        // Flush pending debounced detection so a fast Tab/Enter never commits
+        // a suggestion from a stale query. Emoji search is async, so when the
+        // query changed we refresh the dropdown instead of committing.
+        if (debounceTimerRef.current !== null) {
+          clearTimeout(debounceTimerRef.current);
+          debounceTimerRef.current = null;
+          const result = detectEmojiQuery(
+            latestValueRef.current,
+            latestCursorRef.current,
+          );
+          if (!result) {
+            setEmojiQuery(null);
+            return { handled: true };
+          }
+          emojiStartIndexRef.current = result.startIndex;
+          if (result.query !== emojiQuery) {
+            setEmojiQuery(result.query);
+            return { handled: true };
+          }
+        }
+
         return {
           handled: true,
           suggestion: suggestions[emojiSelectedIndex],
@@ -233,7 +255,7 @@ export function useEmojiAutocomplete(customEmoji: CustomEmoji[] = []) {
 
       return { handled: false };
     },
-    [isEmojiAutocompleteOpen, emojiSelectedIndex, suggestions],
+    [isEmojiAutocompleteOpen, emojiQuery, emojiSelectedIndex, suggestions],
   );
 
   return {
