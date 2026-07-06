@@ -8,7 +8,10 @@ import {
 } from "@/shared/api/tauri";
 import { resetMediaCaches } from "@/shared/lib/mediaUrl";
 import { clearSearchHitEventCache } from "@/app/navigation/searchHitEventCache";
-import { clearAllDrafts } from "@/features/messages/lib/useDrafts";
+import {
+  clearAllDrafts,
+  initDraftStore,
+} from "@/features/messages/lib/useDrafts";
 import { resetRenderScopedReactionHydration } from "@/features/messages/lib/renderScopedReactions";
 import { resetAgentObserverStore } from "@/features/agents/observerRelayStore";
 import { resetSidebarRelayConnectionCardState } from "@/features/sidebar/ui/useSidebarRelayConnectionCard";
@@ -156,6 +159,11 @@ export function useWorkspaceInit(
       }
 
       if (!cancelled) {
+        // Initialise the draft store for this identity so localStorage drafts
+        // are scoped to the correct pubkey before the app renders.
+        if (activeWorkspace.pubkey) {
+          initDraftStore(activeWorkspace.pubkey);
+        }
         setResult({
           isReady: true,
           needsSetup: false,

@@ -156,6 +156,8 @@ function MessageComposerImpl({
   const [spoileredAttachmentUrls, setSpoileredAttachmentUrls] = React.useState<
     Set<string>
   >(() => new Set());
+  const spoileredAttachmentUrlsRef = React.useRef(spoileredAttachmentUrls);
+  spoileredAttachmentUrlsRef.current = spoileredAttachmentUrls;
 
   const handleFormattingToggle = React.useCallback((pressed: boolean) => {
     if (pressed) setIsEmojiPickerOpen(false);
@@ -302,7 +304,13 @@ function MessageComposerImpl({
   React.useEffect(() => {
     const prevKey = previousDraftKeyRef.current;
     if (prevKey) {
-      drafts.persistDraft(prevKey, syncComposerContentFromEditor());
+      drafts.persistDraft(
+        prevKey,
+        syncComposerContentFromEditor(),
+        channelId ?? prevKey,
+        [...media.pendingImetaRef.current],
+        [...spoileredAttachmentUrls],
+      );
     }
     previousDraftKeyRef.current = effectiveDraftKey;
 
@@ -312,13 +320,15 @@ function MessageComposerImpl({
     if (saved) {
       setComposerContent(saved.content);
       richText.setContent(saved.content);
+      media.setPendingImeta(saved.pendingImeta);
+      setSpoileredAttachmentUrls(new Set(saved.spoileredAttachmentUrls));
     } else {
       setComposerContent("");
       richText.clearContent();
+      media.setPendingImeta([]);
+      setSpoileredAttachmentUrls(new Set());
     }
 
-    media.setPendingImeta([]);
-    setSpoileredAttachmentUrls(new Set());
     media.setUploadState({ status: "idle" });
     setIsEmojiPickerOpen(false);
     mentions.clearMentions();
@@ -327,7 +337,13 @@ function MessageComposerImpl({
 
     return () => {
       if (effectiveDraftKey) {
-        drafts.persistDraft(effectiveDraftKey, syncComposerContentFromEditor());
+        drafts.persistDraft(
+          effectiveDraftKey,
+          syncComposerContentFromEditor(),
+          channelId ?? effectiveDraftKey,
+          [...media.pendingImetaRef.current],
+          [...spoileredAttachmentUrlsRef.current],
+        );
       }
     };
   }, [effectiveDraftKey]);
