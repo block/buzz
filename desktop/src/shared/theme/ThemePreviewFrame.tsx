@@ -508,7 +508,7 @@ export function ThemePreviewFrame({
 }
 
 /**
- * System preference preview frame: shows dark on top, light on bottom
+ * System preference preview frame: shows light on top, dark on bottom
  * in a single image to represent auto-switching themes.
  */
 export function SystemPreferencePreviewFrame({
