@@ -50,7 +50,7 @@ function formatSearchUserSecondary(user: UserSearchResult) {
 }
 
 const RESPOND_TO_OPTIONS: PersonaDropdownOption[] = [
-  { label: "Owner only (default)", value: "owner-only" },
+  { label: "Only me (default)", value: "owner-only" },
   { label: "Anyone", value: "anyone" },
   { label: "Allowlist", value: "allowlist" },
 ];
@@ -190,6 +190,7 @@ export function CreateAgentRespondToField({
           }
           searchIsLoading={userSearchQuery.isLoading}
           searchResults={searchResults}
+          variant={isPersonaVariant ? "persona" : "default"}
         />
       ) : null}
     </div>
@@ -215,6 +216,7 @@ function AllowlistPicker({
   searchError,
   searchIsLoading,
   searchResults,
+  variant = "default",
 }: {
   allowlist: string[];
   deferredQuery: string;
@@ -234,28 +236,37 @@ function AllowlistPicker({
   searchError: string | null;
   searchIsLoading: boolean;
   searchResults: UserSearchResult[];
+  variant?: "default" | "persona";
 }) {
+  const isPersona = variant === "persona";
+
   return (
     <div
-      className="space-y-2.5 rounded-xl border border-border/80 bg-muted/15 p-3"
+      className={
+        isPersona
+          ? "space-y-2.5"
+          : "space-y-2.5 rounded-xl border border-border/80 bg-muted/15 p-3"
+      }
       data-testid="agent-respond-to-allowlist"
     >
-      <div className="flex items-center justify-between gap-2">
-        <span className="text-sm font-medium">Allowed pubkeys</span>
-        <span className="rounded-full bg-background px-2 py-1 text-2xs font-medium leading-none text-muted-foreground">
-          {allowlist.length} selected
-        </span>
-      </div>
-      {ownerPubkey ? (
+      {!isPersona ? (
+        <div className="flex items-center justify-between gap-2">
+          <span className="text-sm font-medium">Allowed pubkeys</span>
+          <span className="rounded-full bg-background px-2 py-1 text-2xs font-medium leading-none text-muted-foreground">
+            {allowlist.length} selected
+          </span>
+        </div>
+      ) : null}
+      {!isPersona && ownerPubkey ? (
         <p className="text-xs text-muted-foreground">
           Owner (<span className="font-mono">{formatPubkey(ownerPubkey)}</span>)
           is always implicitly allowed by the harness — no need to add it here.
         </p>
-      ) : (
+      ) : !isPersona ? (
         <p className="text-xs text-muted-foreground">
           The agent&apos;s owner is always implicitly allowed.
         </p>
-      )}
+      ) : null}
       <div className="rounded-lg border border-border/80 bg-background">
         <div className="flex items-center gap-2 px-2.5 py-2">
           <Search className="h-4 w-4 text-muted-foreground" />
@@ -264,7 +275,9 @@ function AllowlistPicker({
             data-testid="agent-respond-to-search"
             disabled={disabled}
             onChange={(event) => onQueryChange(event.target.value)}
-            placeholder="Search by name or NIP-05."
+            placeholder={
+              isPersona ? "Search people" : "Search by name or NIP-05."
+            }
             value={query}
           />
         </div>
