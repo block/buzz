@@ -465,12 +465,33 @@ test("markDraftSent_writes_sent_record_under_distinct_key_and_removes_active_key
   );
 });
 
-test("markDraftSent_is_a_noop_for_nonexistent_key", () => {
+test("markDraftSent_writes_sent_record_even_when_active_key_already_cleared", () => {
+  // The never-persisted boundary is enforced at the call site (sentDraftKey
+  // is only set when a draft was actually persisted). This function writes
+  // unconditionally so a navigation-during-send race cannot cause data loss:
+  // if the active key was already cleared before send success, the snapshot
+  // content still produces a sent record (createdAt falls back to now).
   setup();
-  // Must not throw and must not create a sent record.
+  // Call without any prior persistDraftEntry — simulates the race where the
+  // active key was deleted by a composer cleanup before markDraftSent ran.
   markDraftSentEntry("no-such-key", "content", "chan-x", [], []);
-  assert.equal(loadDraftEntry("no-such-key"), undefined);
-  assert.equal(getSentDraftEntries().length, 0);
+  assert.equal(
+    loadDraftEntry("no-such-key"),
+    undefined,
+    "active key still absent",
+  );
+  const sent = getSentDraftEntries();
+  assert.equal(
+    sent.length,
+    1,
+    "sent record is written even without a live active key",
+  );
+  assert.equal(sent[0].draft.content, "content");
+  assert.equal(sent[0].draft.status, "sent");
+  assert.ok(
+    sent[0].key.startsWith("sent:no-such-key:"),
+    "sent key has correct prefix",
+  );
 });
 
 test("markDraftSent_send_then_cleanup_preserves_sent_record", () => {
@@ -487,6 +508,45 @@ test("markDraftSent_send_then_cleanup_preserves_sent_record", () => {
   const sent = getSentDraftEntries();
   assert.equal(sent.length, 1, "sent record must survive composer cleanup");
   assert.equal(sent[0].draft.content, "my draft");
+});
+
+test("markDraftSent_navigation_during_async_send_still_creates_sent_record", () => {
+  // Regression test for the async-send/navigation race (Thufir Pass-2 finding):
+  // 1. Persisted draft A exists at submit time.
+  // 2. Composer clears the editor (clearContent) then awaits onSend.
+  // 3. While onSend is in flight, user switches channel. MessageComposer
+  //    cleanup runs persistDraftEntry(A, empty) -> clearDraftEntry(A) — active
+  //    key is gone before send success.
+  // 4. Send succeeds; markDraftSentEntry(A, savedContent, ...) runs.
+  // The sent record MUST still be written from the passed-in snapshot.
+  setup();
+  persistDraftEntry("chan-race", "race draft", "chan-race", [IMG_A], []);
+  // Simulate step 3: active key cleared by navigation-during-send cleanup.
+  persistDraftEntry("chan-race", "", "chan-race", [], []);
+  assert.equal(
+    loadDraftEntry("chan-race"),
+    undefined,
+    "active key should be cleared (simulating race)",
+  );
+  // Simulate step 4: send succeeds, mark sent with full snapshot.
+  markDraftSentEntry("chan-race", "race draft", "chan-race", [IMG_A], []);
+  const sent = getSentDraftEntries();
+  assert.equal(
+    sent.length,
+    1,
+    "sent record must be written despite active key being gone",
+  );
+  assert.equal(
+    sent[0].draft.content,
+    "race draft",
+    "snapshot content preserved",
+  );
+  assert.equal(
+    sent[0].draft.pendingImeta.length,
+    1,
+    "snapshot image preserved",
+  );
+  assert.equal(sent[0].draft.status, "sent");
 });
 
 test("markDraftSent_new_active_draft_after_send_is_independent", () => {

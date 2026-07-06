@@ -272,6 +272,13 @@ export function getSentDraftEntries(): Array<{
  * The sent record is stored under `sent:<draftKey>:<timestamp>` — a key the
  * composer never writes to — so active and sent records for the same channel
  * can coexist in the store independently.
+ *
+ * The "never-persisted draft writes no sent record" boundary is enforced at
+ * the call site: callers only invoke this function when `sentDraftKey` is
+ * non-null, which only holds for drafts that were persisted before submit.
+ * This function writes unconditionally so the sent record is created even
+ * when the active key was already cleared by a composer cleanup that raced
+ * the async send (e.g. the user switched channels while send was in flight).
  */
 export function markDraftSentEntry(
   draftKey: string,
@@ -282,9 +289,11 @@ export function markDraftSentEntry(
 ): void {
   const map = readStore();
   const existing = map.get(draftKey);
-  if (!existing) return;
-
   const now = new Date().toISOString();
+  // Use the live entry's createdAt when available; fall back to now when the
+  // active key was already cleared by a navigation-during-send race. Either
+  // way the sent record is written — the race cannot cause data loss.
+  const createdAt = existing?.createdAt ?? now;
   // Write the sent record under a stable, distinct key so it can never be
   // overwritten by the composer's active-draft persist path.
   // The `Date.now()-seq` suffix guarantees uniqueness even if two sends in the
@@ -295,15 +304,15 @@ export function markDraftSentEntry(
     selectionStart: content.length,
     selectionEnd: content.length,
     channelId,
-    createdAt: existing.createdAt,
+    createdAt,
     updatedAt: now,
     pendingImeta,
     spoileredAttachmentUrls,
     status: "sent",
   });
 
-  // Clear the active draft key so the composer starts fresh and any subsequent
-  // empty-content persist doesn't encounter (and delete) the sent record.
+  // Clear the active draft key (if still present) so the composer starts fresh
+  // and any subsequent empty-content persist doesn't encounter the sent record.
   map.delete(draftKey);
   evictOldest(map);
   flushStore(map);
