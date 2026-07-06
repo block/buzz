@@ -765,11 +765,14 @@ export function EditAgentDialog({
               acpCommand={acpCommand}
               agentArgs={agentArgs}
               agentCommand={agentCommand}
+              envVars={envVars}
+              inheritedEnvVars={inheritedWithGlobal}
               mcpCommand={mcpCommand}
               mcpToolsets={mcpToolsets}
               onAcpCommandChange={setAcpCommand}
               onAgentArgsChange={setAgentArgs}
               onAgentCommandChange={setAgentCommand}
+              onEnvVarsChange={setEnvVars}
               onMcpCommandChange={setMcpCommand}
               onMcpToolsetsChange={setMcpToolsets}
               onParallelismChange={setParallelism}

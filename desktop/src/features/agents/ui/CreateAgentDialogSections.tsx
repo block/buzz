@@ -3,6 +3,15 @@ import { cn } from "@/shared/lib/cn";
 import { Input } from "@/shared/ui/input";
 import { Textarea } from "@/shared/ui/textarea";
 import { describeResolvedCommand } from "./agentUi";
+import {
+  BUZZ_AGENT_MAX_CONTEXT_TOKENS,
+  BUZZ_AGENT_MAX_OUTPUT_TOKENS,
+  BUZZ_AGENT_MAX_ROUNDS,
+  BUZZ_AGENT_THINKING_EFFORT,
+  BUZZ_AGENT_THINKING_EFFORT_VALUES,
+  isBuzzAgentRuntime,
+} from "./buzzAgentConfig";
+import type { EnvVarsValue } from "./EnvVarsEditor";
 
 export function CreateAgentBasicsFields({
   name,
@@ -105,6 +114,8 @@ export function CreateAgentRuntimeFields({
   acpCommand,
   agentArgs,
   agentCommand,
+  envVars,
+  inheritedEnvVars,
   mcpCommand,
   mcpToolsets,
   parallelism,
@@ -115,6 +126,7 @@ export function CreateAgentRuntimeFields({
   onAcpCommandChange,
   onAgentArgsChange,
   onAgentCommandChange,
+  onEnvVarsChange,
   onMcpCommandChange,
   onMcpToolsetsChange,
   onParallelismChange,
@@ -125,6 +137,10 @@ export function CreateAgentRuntimeFields({
   acpCommand: string;
   agentArgs: string;
   agentCommand: string;
+  /** Current agent env vars map — used to read/write tier-1 knob overrides. */
+  envVars: EnvVarsValue;
+  /** Inherited baseline for tier-1 knobs (global → persona chain). Empty = no baseline. */
+  inheritedEnvVars: EnvVarsValue;
   mcpCommand: string;
   mcpToolsets: string;
   parallelism: string;
@@ -135,6 +151,8 @@ export function CreateAgentRuntimeFields({
   onAcpCommandChange: (value: string) => void;
   onAgentArgsChange: (value: string) => void;
   onAgentCommandChange: (value: string) => void;
+  /** Called when a tier-1 field change writes/deletes a key in envVars. */
+  onEnvVarsChange: (updated: EnvVarsValue) => void;
   onMcpCommandChange: (value: string) => void;
   onMcpToolsetsChange: (value: string) => void;
   onParallelismChange: (value: string) => void;
@@ -142,6 +160,19 @@ export function CreateAgentRuntimeFields({
   onSystemPromptChange: (value: string) => void;
   onTurnTimeoutChange: (value: string) => void;
 }) {
+  const isBuzzAgent = isBuzzAgentRuntime(selectedRuntimeId);
+
+  /** Write or delete a single env var key. Empty string = inherit (delete). */
+  function handleEnvVarChange(key: string, value: string) {
+    const next = { ...envVars };
+    if (value === "") {
+      delete next[key];
+    } else {
+      next[key] = value;
+    }
+    onEnvVarsChange(next);
+  }
+
   return (
     <>
       <div className="grid gap-4 md:grid-cols-2">
@@ -337,7 +368,175 @@ export function CreateAgentRuntimeFields({
           Blank means no override. buzz-acp will not add a [System] prompt.
         </p>
       </div>
+
+      {/* Tier-1 buzz-agent model-tuning knobs — only shown for buzz-agent. */}
+      {isBuzzAgent ? (
+        <BuzzAgentModelTuningFields
+          envVars={envVars}
+          inheritedEnvVars={inheritedEnvVars}
+          onEnvVarChange={handleEnvVarChange}
+        />
+      ) : null}
     </>
+  );
+}
+
+/**
+ * Dedicated editable fields for the four buzz-agent model-tuning knobs.
+ * Renders only when the selected runtime is buzz-agent.
+ *
+ * Empty field = inherit (key absent from envVars; placeholder shows baseline).
+ * Non-empty = explicit override written into envVars.
+ */
+function BuzzAgentModelTuningFields({
+  envVars,
+  inheritedEnvVars,
+  onEnvVarChange,
+}: {
+  envVars: EnvVarsValue;
+  inheritedEnvVars: EnvVarsValue;
+  onEnvVarChange: (key: string, value: string) => void;
+}) {
+  return (
+    <div className="space-y-4">
+      <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+        buzz-agent model tuning
+      </p>
+
+      <div className="grid gap-4 md:grid-cols-2">
+        {/* Thinking / Effort */}
+        <div className="space-y-1.5">
+          <label className="text-sm font-medium" htmlFor="ba-thinking-effort">
+            Thinking / Effort
+          </label>
+          <select
+            className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-2 text-sm shadow-xs"
+            data-testid="ba-thinking-effort-select"
+            id="ba-thinking-effort"
+            onChange={(event) =>
+              onEnvVarChange(BUZZ_AGENT_THINKING_EFFORT, event.target.value)
+            }
+            value={envVars[BUZZ_AGENT_THINKING_EFFORT] ?? ""}
+          >
+            <option value="">
+              {inheritedEnvVars[BUZZ_AGENT_THINKING_EFFORT]
+                ? `Inherit (${inheritedEnvVars[BUZZ_AGENT_THINKING_EFFORT]})`
+                : "Inherit (agent default)"}
+            </option>
+            {BUZZ_AGENT_THINKING_EFFORT_VALUES.map((v) => (
+              <option key={v} value={v}>
+                {v}
+              </option>
+            ))}
+          </select>
+          <p
+            className="text-xs text-muted-foreground"
+            id="help-ba-thinking-effort"
+          >
+            Controls how much reasoning effort the LLM applies per turn. Leave
+            blank to inherit from the global or persona default.
+          </p>
+        </div>
+
+        {/* Max Rounds */}
+        <div className="space-y-1.5">
+          <label className="text-sm font-medium" htmlFor="ba-max-rounds">
+            Max rounds
+          </label>
+          <Input
+            aria-describedby="help-ba-max-rounds"
+            autoComplete="off"
+            data-testid="ba-max-rounds-input"
+            id="ba-max-rounds"
+            inputMode="numeric"
+            min="1"
+            onChange={(event) =>
+              onEnvVarChange(BUZZ_AGENT_MAX_ROUNDS, event.target.value)
+            }
+            placeholder={
+              inheritedEnvVars[BUZZ_AGENT_MAX_ROUNDS]
+                ? `Inherit (${inheritedEnvVars[BUZZ_AGENT_MAX_ROUNDS]})`
+                : "Inherit (agent default)"
+            }
+            step="1"
+            type="number"
+            value={envVars[BUZZ_AGENT_MAX_ROUNDS] ?? ""}
+          />
+          <p className="text-xs text-muted-foreground" id="help-ba-max-rounds">
+            Maximum LLM + tool-call rounds per turn. Leave blank to inherit.
+          </p>
+        </div>
+
+        {/* Max Output Tokens */}
+        <div className="space-y-1.5">
+          <label className="text-sm font-medium" htmlFor="ba-max-output-tokens">
+            Max output tokens
+          </label>
+          <Input
+            aria-describedby="help-ba-max-output-tokens"
+            autoComplete="off"
+            data-testid="ba-max-output-tokens-input"
+            id="ba-max-output-tokens"
+            inputMode="numeric"
+            min="1"
+            onChange={(event) =>
+              onEnvVarChange(BUZZ_AGENT_MAX_OUTPUT_TOKENS, event.target.value)
+            }
+            placeholder={
+              inheritedEnvVars[BUZZ_AGENT_MAX_OUTPUT_TOKENS]
+                ? `Inherit (${inheritedEnvVars[BUZZ_AGENT_MAX_OUTPUT_TOKENS]})`
+                : "Inherit (agent default)"
+            }
+            step="1"
+            type="number"
+            value={envVars[BUZZ_AGENT_MAX_OUTPUT_TOKENS] ?? ""}
+          />
+          <p
+            className="text-xs text-muted-foreground"
+            id="help-ba-max-output-tokens"
+          >
+            Maximum tokens the LLM may generate per response. Leave blank to
+            inherit.
+          </p>
+        </div>
+
+        {/* Context Limit */}
+        <div className="space-y-1.5">
+          <label
+            className="text-sm font-medium"
+            htmlFor="ba-max-context-tokens"
+          >
+            Context limit
+          </label>
+          <Input
+            aria-describedby="help-ba-max-context-tokens"
+            autoComplete="off"
+            data-testid="ba-max-context-tokens-input"
+            id="ba-max-context-tokens"
+            inputMode="numeric"
+            min="1"
+            onChange={(event) =>
+              onEnvVarChange(BUZZ_AGENT_MAX_CONTEXT_TOKENS, event.target.value)
+            }
+            placeholder={
+              inheritedEnvVars[BUZZ_AGENT_MAX_CONTEXT_TOKENS]
+                ? `Inherit (${inheritedEnvVars[BUZZ_AGENT_MAX_CONTEXT_TOKENS]})`
+                : "Inherit (agent default)"
+            }
+            step="1"
+            type="number"
+            value={envVars[BUZZ_AGENT_MAX_CONTEXT_TOKENS] ?? ""}
+          />
+          <p
+            className="text-xs text-muted-foreground"
+            id="help-ba-max-context-tokens"
+          >
+            Maximum context window tokens buzz-agent tracks before a handoff.
+            Leave blank to inherit.
+          </p>
+        </div>
+      </div>
+    </div>
   );
 }
 
