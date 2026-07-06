@@ -209,7 +209,10 @@ fn build_session_payload(model: &str) -> Value {
                 "input": audio_input
             }
         },
-        "expires_after": 60
+        "expires_after": {
+            "anchor": "created_at",
+            "seconds": 60
+        }
     })
 }
 
@@ -433,9 +436,11 @@ mod tests {
     fn build_session_payload_sets_short_expires_after() {
         use super::build_session_payload;
         let payload = build_session_payload("whisper-1");
-        assert_eq!(payload["expires_after"], 60);
+        assert_eq!(payload["expires_after"]["anchor"], "created_at");
+        assert_eq!(payload["expires_after"]["seconds"], 60);
         let payload2 = build_session_payload("gpt-realtime-whisper");
-        assert_eq!(payload2["expires_after"], 60);
+        assert_eq!(payload2["expires_after"]["anchor"], "created_at");
+        assert_eq!(payload2["expires_after"]["seconds"], 60);
     }
 
     #[test]

@@ -108,31 +108,33 @@ export function useRealtimeDictation({
       manualCommitRef.current && dc && dc.readyState === "open";
     manualCommitRef.current = false;
 
+    // Send final commit for manual-commit models.
     if (needsCommit && dc) {
       commitAudioBuffer(dc);
-      // Stop the mic immediately so no new audio is sent after commit.
+    }
+
+    // Determine whether we need a grace window before full teardown.
+    // User-initiated stop (!invalidateRun) needs a grace period for BOTH:
+    // - Manual-commit models: final commit's transcript response
+    // - Server-VAD models: in-flight VAD completion events
+    const needsGrace = !invalidateRun && dc && dc.readyState === "open";
+
+    if (needsGrace && dc) {
+      // Stop the mic immediately so no new audio is sent.
       for (const track of streamRef.current?.getTracks() ?? []) {
         track.stop();
       }
       streamRef.current = null;
       audioCaptureRef.current?.close();
       audioCaptureRef.current = null;
-      // Delay WebRTC teardown briefly so the commit reaches OpenAI and
-      // the transcript response can arrive.
+      // Delay WebRTC teardown briefly so final transcript events arrive.
       const pc = peerConnectionRef.current;
       peerConnectionRef.current = null;
       dataChannelRef.current = null;
       const runId = activeRunIdRef.current;
 
-      if (invalidateRun) {
-        // Send/navigation: reject all late events immediately.
-        activeRunIdRef.current += 1;
-      }
-      // else: user stop — keep the run valid so the final transcript arrives.
-
       setTimeout(() => {
-        // After the grace window, invalidate if we haven't already (user stop)
-        // or if no new run started (send/navigation case already bumped).
+        // After the grace window, invalidate the run and tear down.
         if (activeRunIdRef.current === runId) {
           activeRunIdRef.current += 1;
         }
@@ -142,6 +144,7 @@ export function useRealtimeDictation({
       return;
     }
 
+    // Immediate teardown: send/navigation cancellation, or no open channel.
     activeRunIdRef.current += 1;
     closeResources({
       audioCapture: audioCaptureRef.current,
