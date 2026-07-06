@@ -25,7 +25,7 @@ const rules = [
 const overrides = new Set([
   "src/features/settings/ui/ProfileSettingsCard.tsx:584",
   "src/features/onboarding/ui/AvatarStep.tsx:89",
-  "src/features/agents/ui/AgentCreationPreview.tsx:685",
+  "src/features/agents/ui/AgentCreationPreview.tsx:688",
 ]);
 
 await runPxTextCheck({

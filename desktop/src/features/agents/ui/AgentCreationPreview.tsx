@@ -102,7 +102,7 @@ export function AgentCreationPreview({
     },
   });
 
-  useEmojiMartStyles(emojiPickerContainerRef, activeTab === "emoji");
+  useEmojiMartStyles(emojiPickerContainerRef, isAvatarMenuOpen);
 
   const customColorDraft = React.useMemo(
     () => hsvToHex(customHue, customSaturation, customValue),
@@ -392,224 +392,227 @@ export function AgentCreationPreview({
           </TabsList>
         </Tabs>
 
-        {activeTab === "image" ? (
-          <div className="grid gap-2.5">
-            {/* Click to browse zone */}
+        <div className={activeTab === "image" ? "grid gap-2.5" : "hidden"}>
+          {/* Click to browse zone */}
+          <button
+            className="relative flex h-[80px] flex-col items-center justify-center gap-1.5 overflow-hidden rounded-lg border border-transparent bg-muted text-foreground transition-[background-color,border-color,box-shadow,color] duration-200 ease-out hover:bg-muted/80 disabled:opacity-60"
+            disabled={disabled || isUploading}
+            onClick={() => {
+              clearUploadError();
+              openUploadPicker();
+            }}
+            type="button"
+          >
+            {isUploading ? (
+              <Spinner
+                aria-hidden
+                className="h-5 w-5 border-2 text-muted-foreground"
+              />
+            ) : (
+              <UploadCloud className="h-5 w-5 text-muted-foreground" />
+            )}
+            <span className="text-xs font-medium text-muted-foreground">
+              {isUploading ? "Uploading..." : "Drop or browse"}
+            </span>
+          </button>
+
+          {/* URL input */}
+          <div className="flex h-10 items-center gap-2.5 rounded-lg bg-muted px-3">
+            <Link2 className="h-3.5 w-3.5 shrink-0 text-muted-foreground/60" />
+            <input
+              autoCapitalize="none"
+              autoCorrect="off"
+              className="min-w-0 flex-1 bg-transparent text-xs font-medium text-foreground outline-none placeholder:text-muted-foreground/50"
+              disabled={disabled || isUploading}
+              onBlur={() => applyAvatarUrl()}
+              onChange={(event) => setAvatarUrlDraft(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  event.preventDefault();
+                  applyAvatarUrl();
+                }
+              }}
+              placeholder="Paste a URL"
+              spellCheck={false}
+              type="url"
+              value={avatarUrlDraft}
+            />
+            <AnimatePresence initial={false}>
+              {avatarUrlDraft.trim().length > 0 ? (
+                <motion.div
+                  animate={{ opacity: 1, scale: 1, width: "auto" }}
+                  className="overflow-hidden"
+                  exit={{ opacity: 0, scale: 0.96, width: 0 }}
+                  initial={{ opacity: 0, scale: 0.96, width: 0 }}
+                  key="apply-url"
+                  transition={applyButtonTransition}
+                >
+                  <Button
+                    className="h-6 px-2 text-2xs"
+                    disabled={disabled || isUploading}
+                    onClick={() => applyAvatarUrl()}
+                    size="xs"
+                    type="button"
+                  >
+                    Apply
+                  </Button>
+                </motion.div>
+              ) : null}
+            </AnimatePresence>
+          </div>
+
+          {uploadErrorMessage ? (
+            <p className="rounded-lg bg-destructive/10 px-3 py-2 text-xs font-medium text-destructive">
+              {uploadErrorMessage}
+            </p>
+          ) : null}
+
+          {hasAvatar && onClearAvatar ? (
             <button
-              className="relative flex h-[80px] flex-col items-center justify-center gap-1.5 overflow-hidden rounded-lg border border-transparent bg-muted text-foreground transition-[background-color,border-color,box-shadow,color] duration-200 ease-out hover:bg-muted/80 disabled:opacity-60"
+              className="flex min-h-8 w-full items-center justify-center rounded-lg text-xs text-destructive outline-hidden transition-colors duration-150 ease-out hover:bg-destructive/10 focus-visible:bg-destructive/10 focus-visible:outline-none disabled:pointer-events-none disabled:opacity-50"
               disabled={disabled || isUploading}
               onClick={() => {
-                clearUploadError();
-                openUploadPicker();
+                onClearAvatar();
+                setIsAvatarMenuOpen(false);
               }}
               type="button"
             >
-              {isUploading ? (
-                <Spinner
-                  aria-hidden
-                  className="h-5 w-5 border-2 text-muted-foreground"
-                />
-              ) : (
-                <UploadCloud className="h-5 w-5 text-muted-foreground" />
-              )}
-              <span className="text-xs font-medium text-muted-foreground">
-                {isUploading ? "Uploading..." : "Drop or browse"}
-              </span>
+              Remove avatar
             </button>
+          ) : null}
+        </div>
 
-            {/* URL input */}
-            <div className="flex h-10 items-center gap-2.5 rounded-lg bg-muted px-3">
-              <Link2 className="h-3.5 w-3.5 shrink-0 text-muted-foreground/60" />
-              <input
-                autoCapitalize="none"
-                autoCorrect="off"
-                className="min-w-0 flex-1 bg-transparent text-xs font-medium text-foreground outline-none placeholder:text-muted-foreground/50"
-                disabled={disabled || isUploading}
-                onBlur={() => applyAvatarUrl()}
-                onChange={(event) => setAvatarUrlDraft(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter") {
-                    event.preventDefault();
-                    applyAvatarUrl();
-                  }
-                }}
-                placeholder="Paste a URL"
-                spellCheck={false}
-                type="url"
-                value={avatarUrlDraft}
-              />
-              <AnimatePresence initial={false}>
-                {avatarUrlDraft.trim().length > 0 ? (
-                  <motion.div
-                    animate={{ opacity: 1, scale: 1, width: "auto" }}
-                    className="overflow-hidden"
-                    exit={{ opacity: 0, scale: 0.96, width: 0 }}
-                    initial={{ opacity: 0, scale: 0.96, width: 0 }}
-                    key="apply-url"
-                    transition={applyButtonTransition}
-                  >
-                    <Button
-                      className="h-6 px-2 text-2xs"
-                      disabled={disabled || isUploading}
-                      onClick={() => applyAvatarUrl()}
-                      size="xs"
-                      type="button"
-                    >
-                      Apply
-                    </Button>
-                  </motion.div>
-                ) : null}
-              </AnimatePresence>
-            </div>
-
-            {uploadErrorMessage ? (
-              <p className="rounded-lg bg-destructive/10 px-3 py-2 text-xs font-medium text-destructive">
-                {uploadErrorMessage}
-              </p>
-            ) : null}
-
-            {hasAvatar && onClearAvatar ? (
-              <button
-                className="flex min-h-8 w-full items-center justify-center rounded-lg text-xs text-destructive outline-hidden transition-colors duration-150 ease-out hover:bg-destructive/10 focus-visible:bg-destructive/10 focus-visible:outline-none disabled:pointer-events-none disabled:opacity-50"
-                disabled={disabled || isUploading}
-                onClick={() => {
-                  onClearAvatar();
-                  setIsAvatarMenuOpen(false);
-                }}
-                type="button"
-              >
-                Remove avatar
-              </button>
-            ) : null}
-          </div>
-        ) : (
-          <div className="relative grid content-start gap-3">
-            {/* Emoji picker — no overflow-hidden so internal scroll works */}
-            <div
-              className="buzz-emoji-mart relative z-0 h-[280px] rounded-lg bg-muted"
-              ref={emojiPickerContainerRef}
-              style={emojiMartThemeVars}
-            >
-              <Picker
-                categories={EMOJI_MART_CATEGORIES}
-                data={emojiData}
-                dynamicWidth
-                emojiButtonRadius="999px"
-                emojiButtonSize={44}
-                emojiSize={32}
-                icons="outline"
-                navPosition="bottom"
-                onEmojiSelect={(emoji: EmojiMartEmoji, event?: MouseEvent) => {
-                  if (disabled) {
-                    return;
-                  }
-                  if (!emoji.native) {
-                    return;
-                  }
-                  const nextColor =
-                    selectedEmoji === null
-                      ? (AVATAR_COLORS[
-                          Math.floor(Math.random() * AVATAR_COLORS.length)
-                        ] ?? DEFAULT_EMOJI_AVATAR_COLOR)
-                      : selectedColor;
-                  burstEmoji(emoji.native, event);
-                  setSelectedEmoji(emoji.native);
-                  setSelectedColor(nextColor);
-                  applyEmojiAvatar(emoji.native, nextColor);
-                }}
-                previewPosition="none"
-                searchPosition="none"
-                set="native"
-                skinTonePosition="none"
-                theme="auto"
-              />
-            </div>
-
-            {/* Color swatches — always visible */}
-            <div className="grid grid-cols-12 justify-items-center gap-1.5 rounded-lg bg-muted p-3">
-              {AVATAR_COLOR_SWATCHES.map((swatch) => {
-                const isCustomSwatch = swatch === CUSTOM_AVATAR_COLOR_SWATCH;
-                const isSelected = isCustomSwatch
-                  ? !AVATAR_COLORS.some(
-                      (color) =>
-                        color.toUpperCase() === selectedColor.toUpperCase(),
-                    )
-                  : swatch.toUpperCase() === selectedColor.toUpperCase();
-
-                return (
-                  <button
-                    aria-label={
-                      isCustomSwatch
-                        ? selectedEmoji
-                          ? "Choose custom color"
-                          : "Choose an emoji first"
-                        : `Use ${swatch} background`
-                    }
-                    aria-pressed={isSelected}
-                    className={cn(
-                      "relative h-6 w-6 rounded-full border border-border transition-transform duration-150 ease-out hover:scale-[1.15] focus-visible:scale-[1.15] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-                      isCustomSwatch &&
-                        !selectedEmoji &&
-                        "cursor-not-allowed opacity-45 hover:scale-100 focus-visible:scale-100",
-                    )}
-                    disabled={isCustomSwatch && !selectedEmoji}
-                    key={swatch}
-                    onClick={() => handleColorSelect(swatch)}
-                    style={{
-                      background: isCustomSwatch
-                        ? isSelected
-                          ? selectedColor
-                          : "conic-gradient(from 0deg, #ff4d4d, #ffe75c, #73ef75, #63c6f2, #b141ff, #ff4d4d)"
-                        : swatch,
-                    }}
-                    type="button"
-                  >
-                    {isSelected ? (
-                      <span
-                        className="absolute inset-0.5 rounded-full border-2"
-                        style={{
-                          borderColor: contrastColorForBackground(
-                            isCustomSwatch ? selectedColor : swatch,
-                          ),
-                        }}
-                      />
-                    ) : null}
-                  </button>
-                );
-              })}
-            </div>
-
-            <AvatarCustomColorPanel
-              colorDraft={customColorDraft}
-              hue={customHue}
-              onCommit={commitCustomColor}
-              onHueChange={setCustomHue}
-              onSaturationValueChange={(nextSaturation, nextValue) => {
-                setCustomSaturation(nextSaturation);
-                setCustomValue(nextValue);
+        <div
+          className={
+            activeTab === "emoji"
+              ? "relative grid content-start gap-3"
+              : "hidden"
+          }
+        >
+          <div
+            className="buzz-emoji-mart relative z-0 h-[280px] overflow-hidden rounded-lg bg-muted"
+            ref={emojiPickerContainerRef}
+            style={emojiMartThemeVars}
+          >
+            <Picker
+              categories={EMOJI_MART_CATEGORIES}
+              data={emojiData}
+              dynamicWidth
+              emojiButtonRadius="999px"
+              emojiButtonSize={44}
+              emojiSize={32}
+              icons="outline"
+              navPosition="bottom"
+              onEmojiSelect={(emoji: EmojiMartEmoji, event?: MouseEvent) => {
+                if (disabled) {
+                  return;
+                }
+                if (!emoji.native) {
+                  return;
+                }
+                const nextColor =
+                  selectedEmoji === null
+                    ? (AVATAR_COLORS[
+                        Math.floor(Math.random() * AVATAR_COLORS.length)
+                      ] ?? DEFAULT_EMOJI_AVATAR_COLOR)
+                    : selectedColor;
+                burstEmoji(emoji.native, event);
+                setSelectedEmoji(emoji.native);
+                setSelectedColor(nextColor);
+                applyEmojiAvatar(emoji.native, nextColor);
               }}
-              saturation={customSaturation}
-              testIdPrefix="agent-avatar"
-              value={customValue}
-              visible={isCustomColorPickerVisible}
+              previewPosition="none"
+              searchPosition="none"
+              set="native"
+              skinTonePosition="none"
+              theme="auto"
             />
-
-            {hasAvatar && onClearAvatar ? (
-              <button
-                className="flex min-h-8 w-full items-center justify-center rounded-lg text-xs text-destructive outline-hidden transition-colors duration-150 ease-out hover:bg-destructive/10 focus-visible:bg-destructive/10 focus-visible:outline-none disabled:pointer-events-none disabled:opacity-50"
-                disabled={disabled}
-                onClick={() => {
-                  onClearAvatar();
-                  setSelectedEmoji(null);
-                  setIsAvatarMenuOpen(false);
-                }}
-                type="button"
-              >
-                Remove avatar
-              </button>
-            ) : null}
           </div>
-        )}
+
+          {/* Color swatches — always visible */}
+          <div className="grid grid-cols-12 justify-items-center gap-1.5 rounded-lg bg-muted p-3">
+            {AVATAR_COLOR_SWATCHES.map((swatch) => {
+              const isCustomSwatch = swatch === CUSTOM_AVATAR_COLOR_SWATCH;
+              const isSelected = isCustomSwatch
+                ? !AVATAR_COLORS.some(
+                    (color) =>
+                      color.toUpperCase() === selectedColor.toUpperCase(),
+                  )
+                : swatch.toUpperCase() === selectedColor.toUpperCase();
+
+              return (
+                <button
+                  aria-label={
+                    isCustomSwatch
+                      ? selectedEmoji
+                        ? "Choose custom color"
+                        : "Choose an emoji first"
+                      : `Use ${swatch} background`
+                  }
+                  aria-pressed={isSelected}
+                  className={cn(
+                    "relative h-6 w-6 rounded-full border border-border transition-transform duration-150 ease-out hover:scale-[1.15] focus-visible:scale-[1.15] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                    isCustomSwatch &&
+                      !selectedEmoji &&
+                      "cursor-not-allowed opacity-45 hover:scale-100 focus-visible:scale-100",
+                  )}
+                  disabled={isCustomSwatch && !selectedEmoji}
+                  key={swatch}
+                  onClick={() => handleColorSelect(swatch)}
+                  style={{
+                    background: isCustomSwatch
+                      ? isSelected
+                        ? selectedColor
+                        : "conic-gradient(from 0deg, #ff4d4d, #ffe75c, #73ef75, #63c6f2, #b141ff, #ff4d4d)"
+                      : swatch,
+                  }}
+                  type="button"
+                >
+                  {isSelected ? (
+                    <span
+                      className="absolute inset-0.5 rounded-full border-2"
+                      style={{
+                        borderColor: contrastColorForBackground(
+                          isCustomSwatch ? selectedColor : swatch,
+                        ),
+                      }}
+                    />
+                  ) : null}
+                </button>
+              );
+            })}
+          </div>
+
+          <AvatarCustomColorPanel
+            colorDraft={customColorDraft}
+            hue={customHue}
+            onCommit={commitCustomColor}
+            onHueChange={setCustomHue}
+            onSaturationValueChange={(nextSaturation, nextValue) => {
+              setCustomSaturation(nextSaturation);
+              setCustomValue(nextValue);
+            }}
+            saturation={customSaturation}
+            testIdPrefix="agent-avatar"
+            value={customValue}
+            visible={isCustomColorPickerVisible}
+          />
+
+          {hasAvatar && onClearAvatar ? (
+            <button
+              className="flex min-h-8 w-full items-center justify-center rounded-lg text-xs text-destructive outline-hidden transition-colors duration-150 ease-out hover:bg-destructive/10 focus-visible:bg-destructive/10 focus-visible:outline-none disabled:pointer-events-none disabled:opacity-50"
+              disabled={disabled}
+              onClick={() => {
+                onClearAvatar();
+                setSelectedEmoji(null);
+                setIsAvatarMenuOpen(false);
+              }}
+              type="button"
+            >
+              Remove avatar
+            </button>
+          ) : null}
+        </div>
       </fieldset>
     </PopoverContent>
   );
@@ -689,7 +692,7 @@ export function AgentCreationPreview({
                     style={
                       {
                         "--buzz-avatar-emoji-offset-x": "0px",
-                        "--buzz-avatar-emoji-offset-y": "4px",
+                        "--buzz-avatar-emoji-offset-y": "0px",
                       } as React.CSSProperties
                     }
                   >
