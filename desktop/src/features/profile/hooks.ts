@@ -105,6 +105,9 @@ export function useProfileQuery(enabled = true) {
             about: null,
             nip05Handle: null,
             ownerPubkey: null,
+            // Cached profile was persisted from a real getProfile() call, which
+            // only stores a non-zero updatedAt when a kind:0 event was fetched.
+            hasProfileEvent: true,
           } satisfies Profile)
         : undefined,
     [cached, pubkey],
@@ -370,7 +373,15 @@ export function useUsersBatchQuery(
     for (const [pubkey, summary] of Object.entries(profiles)) {
       queryClient.setQueryData<Profile>(
         ["user-profile", pubkey],
-        (existing) => existing ?? { pubkey, about: null, ...summary },
+        (existing) =>
+          existing ?? {
+            pubkey,
+            about: null,
+            // Batch endpoint gives UserProfileSummary (no event-presence flag).
+            // These cached summaries are never used for the onboarding gate.
+            hasProfileEvent: false,
+            ...summary,
+          },
       );
     }
   }, [query.data, queryClient]);
