@@ -5,9 +5,10 @@ use super::export_util::save_json_with_dialog;
 use crate::{
     app_state::AppState,
     managed_agents::{
-        agent_events::ManagedAgentEventContent, encode_persona_json, load_managed_agents,
-        load_personas, load_teams, parse_json_persona, parse_md_persona, parse_png_persona,
-        parse_zip_personas, persona_events::persona_d_tag, save_managed_agents, save_personas,
+        agent_events::ManagedAgentEventContent, effective_agent_command, encode_persona_json,
+        load_managed_agents, load_personas, load_teams, managed_agent_avatar_url,
+        parse_json_persona, parse_md_persona, parse_png_persona, parse_zip_personas,
+        persona_events::persona_d_tag, save_managed_agents, save_personas,
         team_events::TeamEventContent, team_persona_key, try_regenerate_nest,
         validate_persona_activation_change, validate_persona_deletion, CreatePersonaRequest,
         ManagedAgentRecord, ParsePersonaFilesResult, PersonaRecord, TeamRecord,
@@ -308,7 +309,18 @@ pub async fn update_persona(
                     }
                     // Update the persisted avatar so reconciliation on next
                     // start agrees with what we're about to publish.
-                    record.avatar_url = result.avatar_url.clone();
+                    // When the persona avatar is cleared, fall back to the
+                    // command-default icon so the record never stores `None`
+                    // (which reconcile_agent_profile treats as "un-migrated").
+                    let effective_cmd = effective_agent_command(
+                        record.persona_id.as_deref(),
+                        std::slice::from_ref(&result),
+                        record.agent_command_override.as_deref(),
+                    );
+                    record.avatar_url = result
+                        .avatar_url
+                        .clone()
+                        .or_else(|| managed_agent_avatar_url(&effective_cmd));
                     agents_modified = true;
 
                     if let Ok(agent_keys) = nostr::Keys::parse(&record.private_key_nsec) {
