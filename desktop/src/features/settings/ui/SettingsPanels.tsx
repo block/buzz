@@ -1,4 +1,4 @@
-import { type ReactNode, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import {
   BellRing,
   Bot,
@@ -10,9 +10,12 @@ import {
   LayoutTemplate,
   LockKeyhole,
   MonitorCog,
+  Moon,
   Smartphone,
   Smile,
   Stethoscope,
+  Sun,
+  SunMoon,
   UserRound,
   type LucideIcon,
 } from "lucide-react";
@@ -330,35 +333,6 @@ function SingleThemeTile({
   );
 }
 
-function HorizontalScrollWithFade({
-  children,
-  expanded,
-}: {
-  children: ReactNode;
-  expanded: boolean;
-}) {
-  if (expanded) {
-    return <div className="flex flex-wrap gap-3 p-1">{children}</div>;
-  }
-
-  return (
-    <div className="relative">
-      <div className="flex gap-3 overflow-x-auto p-1 pb-2 [scrollbar-width:thin]">
-        {children}
-      </div>
-      {/* Right fade */}
-      <div
-        aria-hidden="true"
-        className="pointer-events-none absolute inset-y-0 right-0 w-8"
-        style={{
-          background:
-            "linear-gradient(to left, hsl(var(--background)), hsl(var(--background) / 0))",
-        }}
-      />
-    </div>
-  );
-}
-
 type AppearanceMode = "system" | "light" | "dark";
 
 function ThemeSettingsCard() {
@@ -383,7 +357,6 @@ function ThemeSettingsCard() {
       : "light";
 
   const [selectedMode, setSelectedMode] = useState<AppearanceMode>(activeMode);
-  const [expanded, setExpanded] = useState(false);
 
   const getVars = (name: SyntaxThemeName) =>
     withAccentPreviewVars(
@@ -407,7 +380,6 @@ function ThemeSettingsCard() {
 
   const handleModeSelect = (mode: AppearanceMode) => {
     setSelectedMode(mode);
-    setExpanded(false);
   };
 
   const handleSelectTheme = (name: SyntaxThemeName) => {
@@ -436,18 +408,18 @@ function ThemeSettingsCard() {
       />
 
       {/* Mode selector: System / Light / Dark */}
-      <div className="mb-6 flex gap-3">
+      <div className="mb-8 flex gap-2">
         {(
           [
-            { mode: "system" as const, label: "System" },
-            { mode: "light" as const, label: "Light" },
-            { mode: "dark" as const, label: "Dark" },
+            { mode: "system" as const, label: "System", Icon: SunMoon },
+            { mode: "light" as const, label: "Light", Icon: Sun },
+            { mode: "dark" as const, label: "Dark", Icon: Moon },
           ] as const
-        ).map(({ mode, label }) => (
+        ).map(({ mode, label, Icon }) => (
           <button
             aria-pressed={selectedMode === mode}
             className={cn(
-              "flex flex-col items-center gap-1.5 rounded-2xl border px-5 py-3 text-sm font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring",
+              "flex items-center gap-2 rounded-lg border px-4 py-2 text-sm font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring",
               selectedMode === mode
                 ? "border-primary bg-primary/10 text-foreground"
                 : "border-border/70 text-muted-foreground hover:border-border hover:text-foreground",
@@ -457,52 +429,15 @@ function ThemeSettingsCard() {
             onClick={() => handleModeSelect(mode)}
             type="button"
           >
-            {mode === "system" && (
-              <SystemPreferencePreviewFrame
-                className="h-12 w-16"
-                darkVars={getVars(
-                  pairedLight[0]
-                    ? (getThemePair(pairedLight[0]) ?? pairedLight[0])
-                    : pairedLight[0],
-                )}
-                lightVars={getVars(pairedLight[0])}
-              />
-            )}
-            {mode === "light" && (
-              <ThemePreviewFrame
-                className="h-12 w-16"
-                vars={getVars(allLightThemes[0])}
-              />
-            )}
-            {mode === "dark" && (
-              <ThemePreviewFrame
-                className="h-12 w-16"
-                vars={getVars(allDarkThemes[0])}
-              />
-            )}
+            <Icon className="h-4 w-4" />
             {label}
           </button>
         ))}
       </div>
 
-      {/* Theme list based on selected mode */}
+      {/* Theme grid based on selected mode */}
       <div className="mb-6">
-        <div className="mb-3 flex items-center justify-between">
-          <h3 className="text-sm font-medium text-foreground">Themes</h3>
-          {((selectedMode === "system" && pairedLight.length > 4) ||
-            (selectedMode === "light" && allLightThemes.length > 4) ||
-            (selectedMode === "dark" && allDarkThemes.length > 4)) && (
-            <button
-              className="text-2xs text-muted-foreground hover:text-foreground"
-              onClick={() => setExpanded((v) => !v)}
-              type="button"
-            >
-              {expanded ? "Collapse" : "Show all"}
-            </button>
-          )}
-        </div>
-
-        <HorizontalScrollWithFade expanded={expanded}>
+        <div className="flex flex-wrap gap-3 p-1">
           {selectedMode === "system" &&
             pairedLight.map((lightName) => {
               const darkName = getThemePair(lightName);
@@ -538,7 +473,7 @@ function ThemeSettingsCard() {
                 vars={getVars(name)}
               />
             ))}
-        </HorizontalScrollWithFade>
+        </div>
       </div>
 
       {/* Accent color picker */}

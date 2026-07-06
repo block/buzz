@@ -233,12 +233,12 @@ function SystemPreferencePreviewSvg({
       viewBox="0 0 118 80"
       xmlns="http://www.w3.org/2000/svg"
     >
-      {/* Dark half (top) */}
-      <g clipPath={`url(#${clipDark})`}>
-        <rect fill={darkBg} height="180" rx="3.6" width="288" />
-        <rect fill={darkSidebar} height="180" width="57.375" />
+      {/* Light half (top) */}
+      <g clipPath={`url(#${clipLight})`}>
+        <rect fill={lightBg} height="180" rx="3.6" width="288" />
+        <rect fill={lightSidebar} height="180" width="57.375" />
         <rect
-          fill={darkSidebarFg}
+          fill={lightSidebarFg}
           height="3.6"
           rx="0.9"
           width="3.6"
@@ -246,7 +246,7 @@ function SystemPreferencePreviewSvg({
           y="15.9751"
         />
         <rect
-          fill={darkSidebarFg}
+          fill={lightSidebarFg}
           height="3.6"
           rx="0.9"
           width="3.6"
@@ -254,7 +254,7 @@ function SystemPreferencePreviewSvg({
           y="21.375"
         />
         <rect
-          fill={darkSidebarFg}
+          fill={lightSidebarFg}
           height="3.6"
           rx="0.9"
           width="3.6"
@@ -262,7 +262,7 @@ function SystemPreferencePreviewSvg({
           y="26.7749"
         />
         <rect
-          fill={darkSidebarFg}
+          fill={lightSidebarFg}
           height="3.6"
           rx="0.9"
           width="3.6"
@@ -324,7 +324,7 @@ function SystemPreferencePreviewSvg({
           y="4.7811"
         />
         <rect
-          fill={darkSidebarFg}
+          fill={lightSidebarFg}
           height="1.8"
           rx="0.225"
           width="45.225"
@@ -332,7 +332,7 @@ function SystemPreferencePreviewSvg({
           y="16.875"
         />
         <rect
-          fill={darkSidebarFg}
+          fill={lightSidebarFg}
           height="1.8"
           rx="0.225"
           width="45.225"
@@ -340,7 +340,7 @@ function SystemPreferencePreviewSvg({
           y="22.2749"
         />
         <rect
-          fill={darkSidebarFg}
+          fill={lightSidebarFg}
           height="1.8"
           rx="0.225"
           width="45.225"
@@ -348,7 +348,7 @@ function SystemPreferencePreviewSvg({
           y="27.675"
         />
         <rect
-          fill={darkSidebarFg}
+          fill={lightSidebarFg}
           height="1.8"
           rx="0.225"
           width="45.225"
@@ -356,7 +356,7 @@ function SystemPreferencePreviewSvg({
           y="33.075"
         />
         <rect
-          fill={darkMutedFg}
+          fill={lightMutedFg}
           height="1.8"
           rx="0.225"
           width="26.775"
@@ -365,13 +365,13 @@ function SystemPreferencePreviewSvg({
         />
       </g>
 
-      {/* Light half (bottom) — clipped to bottom portion */}
-      <g clipPath={`url(#${clipLight})`}>
+      {/* Dark half (bottom) — clipped to bottom portion */}
+      <g clipPath={`url(#${clipDark})`}>
         <g clipPath={`url(#${clipOuter})`}>
-          <rect fill={lightBg} height="180" rx="3.6" width="288" y="22" />
-          <rect fill={lightSidebar} height="180" width="57.375" y="22" />
+          <rect fill={darkBg} height="180" rx="3.6" width="288" y="22" />
+          <rect fill={darkSidebar} height="180" width="57.375" y="22" />
           <rect
-            fill={lightSidebarFg}
+            fill={darkSidebarFg}
             height="3.6"
             rx="0.9"
             width="3.6"
@@ -379,7 +379,7 @@ function SystemPreferencePreviewSvg({
             y="37.9751"
           />
           <rect
-            fill={lightSidebarFg}
+            fill={darkSidebarFg}
             height="3.6"
             rx="0.9"
             width="3.6"
@@ -387,7 +387,7 @@ function SystemPreferencePreviewSvg({
             y="43.375"
           />
           <rect
-            fill={lightSidebarFg}
+            fill={darkSidebarFg}
             height="3.6"
             rx="0.9"
             width="3.6"
@@ -395,7 +395,7 @@ function SystemPreferencePreviewSvg({
             y="48.7749"
           />
           <rect
-            fill={lightSidebarFg}
+            fill={darkSidebarFg}
             height="3.6"
             rx="0.9"
             width="3.6"
@@ -403,7 +403,7 @@ function SystemPreferencePreviewSvg({
             y="54.175"
           />
           <rect
-            fill={lightSidebarFg}
+            fill={darkSidebarFg}
             height="1.8"
             rx="0.225"
             width="45.225"
@@ -411,7 +411,7 @@ function SystemPreferencePreviewSvg({
             y="38.875"
           />
           <rect
-            fill={lightSidebarFg}
+            fill={darkSidebarFg}
             height="1.8"
             rx="0.225"
             width="45.225"
@@ -419,7 +419,7 @@ function SystemPreferencePreviewSvg({
             y="44.2749"
           />
           <rect
-            fill={lightSidebarFg}
+            fill={darkSidebarFg}
             height="1.8"
             rx="0.225"
             width="45.225"
@@ -427,7 +427,7 @@ function SystemPreferencePreviewSvg({
             y="49.675"
           />
           <rect
-            fill={lightSidebarFg}
+            fill={darkSidebarFg}
             height="1.8"
             rx="0.225"
             width="45.225"
@@ -435,7 +435,7 @@ function SystemPreferencePreviewSvg({
             y="55.075"
           />
           <rect
-            fill={lightMutedFg}
+            fill={darkMutedFg}
             height="1.8"
             rx="0.225"
             width="26.775"
@@ -446,10 +446,10 @@ function SystemPreferencePreviewSvg({
       </g>
 
       <defs>
-        <clipPath id={clipDark}>
+        <clipPath id={clipLight}>
           <rect fill="white" height="180" rx="3.6" width="288" />
         </clipPath>
-        <clipPath id={clipLight}>
+        <clipPath id={clipDark}>
           <path d="M0 37H118V80H0V37Z" fill="white" />
         </clipPath>
         <clipPath id={clipOuter}>
