@@ -161,11 +161,13 @@ export function CreateAgentRespondToField({
           <option value="allowlist">Allowlist</option>
         </select>
       )}
-      <p className="text-xs text-muted-foreground">
-        Controls which Nostr authors the agent listens to (@mentions, DMs,
-        thread replies). The agent&apos;s owner can always shut it down with
-        <span className="font-mono"> !shutdown</span>.
-      </p>
+      {!isPersonaVariant ? (
+        <p className="text-xs text-muted-foreground">
+          Controls which Nostr authors the agent listens to (@mentions, DMs,
+          thread replies). The agent&apos;s owner can always shut it down with
+          <span className="font-mono"> !shutdown</span>.
+        </p>
+      ) : null}
       {mode === "allowlist" ? (
         <AllowlistPicker
           allowlist={allowlist}
@@ -354,66 +356,68 @@ function AllowlistPicker({
       {searchError ? (
         <p className="text-sm text-destructive">{searchError}</p>
       ) : null}
-      <div className="space-y-2">
-        <button
-          aria-controls="agent-respond-to-direct-panel"
-          aria-expanded={isDirectEntryOpen}
-          className="inline-flex items-center gap-1.5 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground"
-          data-testid="agent-respond-to-toggle-direct"
-          onClick={onToggleDirectEntry}
-          type="button"
-        >
-          <ChevronDown
-            className={cn(
-              "h-4 w-4 transition-transform",
-              isDirectEntryOpen && "rotate-180",
-            )}
-          />
-          <span>Paste pubkeys</span>
-        </button>
-        {isDirectEntryOpen ? (
-          <div
-            className="space-y-2 rounded-lg border border-dashed border-border/80 bg-background/70 p-2.5"
-            id="agent-respond-to-direct-panel"
+      {!isPersona ? (
+        <div className="space-y-2">
+          <button
+            aria-controls="agent-respond-to-direct-panel"
+            aria-expanded={isDirectEntryOpen}
+            className="inline-flex items-center gap-1.5 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground"
+            data-testid="agent-respond-to-toggle-direct"
+            onClick={onToggleDirectEntry}
+            type="button"
           >
-            <p className="text-xs text-muted-foreground">
-              One per line, or comma/space-separated. 64-char lowercase hex only
-              — npub decoding is not yet supported here.
-            </p>
-            <Textarea
-              className="min-h-20 font-mono text-xs"
-              data-testid="agent-respond-to-paste"
-              disabled={disabled}
-              onChange={(event) => onPasteTextChange(event.target.value)}
-              placeholder="abcdef0123…"
-              value={pasteText}
+            <ChevronDown
+              className={cn(
+                "h-4 w-4 transition-transform",
+                isDirectEntryOpen && "rotate-180",
+              )}
             />
-            {pasteInvalid.length > 0 ? (
-              <p className="text-xs text-destructive">
-                {pasteInvalid.length} entr
-                {pasteInvalid.length === 1 ? "y is" : "ies are"} not 64-char hex
-                and will be ignored.
+            <span>Paste pubkeys</span>
+          </button>
+          {isDirectEntryOpen ? (
+            <div
+              className="space-y-2 rounded-lg border border-dashed border-border/80 bg-background/70 p-2.5"
+              id="agent-respond-to-direct-panel"
+            >
+              <p className="text-xs text-muted-foreground">
+                One per line, or comma/space-separated. 64-char lowercase hex
+                only — npub decoding is not yet supported here.
               </p>
-            ) : null}
-            <div className="flex items-center justify-between gap-2">
-              <span className="text-xs text-muted-foreground">
-                {pasteValidCount > 0
-                  ? `${pasteValidCount} valid pubkey${pasteValidCount === 1 ? "" : "s"} ready.`
-                  : "No valid pubkeys yet."}
-              </span>
-              <button
-                className="rounded-md border border-border/80 bg-background px-2.5 py-1 text-xs font-medium transition-colors hover:bg-accent hover:text-accent-foreground disabled:cursor-not-allowed disabled:opacity-50"
-                data-testid="agent-respond-to-paste-add"
-                disabled={disabled || pasteValidCount === 0}
-                onClick={onAddFromPaste}
-                type="button"
-              >
-                Add to allowlist
-              </button>
+              <Textarea
+                className="min-h-20 font-mono text-xs"
+                data-testid="agent-respond-to-paste"
+                disabled={disabled}
+                onChange={(event) => onPasteTextChange(event.target.value)}
+                placeholder="abcdef0123…"
+                value={pasteText}
+              />
+              {pasteInvalid.length > 0 ? (
+                <p className="text-xs text-destructive">
+                  {pasteInvalid.length} entr
+                  {pasteInvalid.length === 1 ? "y is" : "ies are"} not 64-char
+                  hex and will be ignored.
+                </p>
+              ) : null}
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-xs text-muted-foreground">
+                  {pasteValidCount > 0
+                    ? `${pasteValidCount} valid pubkey${pasteValidCount === 1 ? "" : "s"} ready.`
+                    : "No valid pubkeys yet."}
+                </span>
+                <button
+                  className="rounded-md border border-border/80 bg-background px-2.5 py-1 text-xs font-medium transition-colors hover:bg-accent hover:text-accent-foreground disabled:cursor-not-allowed disabled:opacity-50"
+                  data-testid="agent-respond-to-paste-add"
+                  disabled={disabled || pasteValidCount === 0}
+                  onClick={onAddFromPaste}
+                  type="button"
+                >
+                  Add to allowlist
+                </button>
+              </div>
             </div>
-          </div>
-        ) : null}
-      </div>
+          ) : null}
+        </div>
+      ) : null}
     </div>
   );
 }
