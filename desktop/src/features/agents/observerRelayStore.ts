@@ -20,7 +20,7 @@ import {
   processTranscriptEvent,
 } from "./ui/agentSessionTranscript";
 
-const MAX_OBSERVER_EVENTS = 800;
+const MAX_OBSERVER_EVENTS = 3000;
 
 export type ObserverSnapshot = {
   connectionState: ConnectionState;
