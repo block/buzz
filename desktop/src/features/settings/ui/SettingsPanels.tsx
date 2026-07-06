@@ -359,6 +359,8 @@ function HorizontalScrollWithFade({
   );
 }
 
+type AppearanceMode = "system" | "light" | "dark";
+
 function ThemeSettingsCard() {
   const {
     setTheme,
@@ -366,11 +368,22 @@ function ThemeSettingsCard() {
     isDark,
     accentColor,
     setAccentColor,
+    followSystem,
     setFollowSystem,
   } = useTheme();
 
   const previewVarsByTheme = useThemePreviewVars();
   const { pairedLight, lightOnly, darkOnly } = useThemeCategories();
+
+  // Determine the active mode from current state
+  const activeMode: AppearanceMode = followSystem
+    ? "system"
+    : isDark
+      ? "dark"
+      : "light";
+
+  const [selectedMode, setSelectedMode] = useState<AppearanceMode>(activeMode);
+  const [expanded, setExpanded] = useState(false);
 
   const getVars = (name: SyntaxThemeName) =>
     withAccentPreviewVars(
@@ -378,30 +391,38 @@ function ThemeSettingsCard() {
       accentColor,
     );
 
+  // All light themes (paired light + light-only)
+  const allLightThemes = useMemo(
+    () => [...pairedLight, ...lightOnly],
+    [pairedLight, lightOnly],
+  );
+
+  // All dark themes (paired dark + dark-only)
+  const allDarkThemes = useMemo(() => {
+    const pairedDark = pairedLight
+      .map((l) => getThemePair(l))
+      .filter(Boolean) as SyntaxThemeName[];
+    return [...pairedDark, ...darkOnly];
+  }, [pairedLight, darkOnly]);
+
+  const handleModeSelect = (mode: AppearanceMode) => {
+    setSelectedMode(mode);
+    setExpanded(false);
+  };
+
+  const handleSelectTheme = (name: SyntaxThemeName) => {
+    setTheme(name);
+    if (selectedMode === "system") {
+      setFollowSystem(true);
+    } else {
+      setFollowSystem(false);
+    }
+  };
+
   /** Check if a paired theme (by its light member) is the active selection */
   const isPairActive = (lightName: SyntaxThemeName) => {
     const darkName = getThemePair(lightName);
     return selectedThemeName === lightName || selectedThemeName === darkName;
-  };
-
-  const handleSelectPair = (lightName: SyntaxThemeName) => {
-    // Selecting a paired theme auto-enables follow-system
-    setTheme(lightName);
-    setFollowSystem(true);
-  };
-
-  const handleSelectSingle = (name: SyntaxThemeName) => {
-    setTheme(name);
-    // Single themes don't follow system — they're always one mode
-    setFollowSystem(false);
-  };
-
-  const [expandedSections, setExpandedSections] = useState<
-    Record<string, boolean>
-  >({});
-
-  const toggleSection = (key: string) => {
-    setExpandedSections((prev) => ({ ...prev, [key]: !prev[key] }));
   };
 
   return (
@@ -414,97 +435,111 @@ function ThemeSettingsCard() {
         description="Choose a theme for Buzz."
       />
 
-      {/* Section 1: Paired themes (follow system) */}
+      {/* Mode selector: System / Light / Dark */}
+      <div className="mb-6 flex gap-3">
+        {(
+          [
+            { mode: "system" as const, label: "System" },
+            { mode: "light" as const, label: "Light" },
+            { mode: "dark" as const, label: "Dark" },
+          ] as const
+        ).map(({ mode, label }) => (
+          <button
+            aria-pressed={selectedMode === mode}
+            className={cn(
+              "flex flex-col items-center gap-1.5 rounded-2xl border px-5 py-3 text-sm font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring",
+              selectedMode === mode
+                ? "border-primary bg-primary/10 text-foreground"
+                : "border-border/70 text-muted-foreground hover:border-border hover:text-foreground",
+            )}
+            data-testid={`appearance-mode-${mode}`}
+            key={mode}
+            onClick={() => handleModeSelect(mode)}
+            type="button"
+          >
+            {mode === "system" && (
+              <SystemPreferencePreviewFrame
+                className="h-12 w-16"
+                darkVars={getVars(
+                  pairedLight[0]
+                    ? (getThemePair(pairedLight[0]) ?? pairedLight[0])
+                    : pairedLight[0],
+                )}
+                lightVars={getVars(pairedLight[0])}
+              />
+            )}
+            {mode === "light" && (
+              <ThemePreviewFrame
+                className="h-12 w-16"
+                vars={getVars(allLightThemes[0])}
+              />
+            )}
+            {mode === "dark" && (
+              <ThemePreviewFrame
+                className="h-12 w-16"
+                vars={getVars(allDarkThemes[0])}
+              />
+            )}
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {/* Theme list based on selected mode */}
       <div className="mb-6">
         <div className="mb-3 flex items-center justify-between">
-          <h3 className="text-sm font-medium text-foreground">
-            Adapts to system
-          </h3>
-          {pairedLight.length > 4 && (
+          <h3 className="text-sm font-medium text-foreground">Themes</h3>
+          {((selectedMode === "system" && pairedLight.length > 4) ||
+            (selectedMode === "light" && allLightThemes.length > 4) ||
+            (selectedMode === "dark" && allDarkThemes.length > 4)) && (
             <button
               className="text-2xs text-muted-foreground hover:text-foreground"
-              onClick={() => toggleSection("paired")}
+              onClick={() => setExpanded((v) => !v)}
               type="button"
             >
-              {expandedSections.paired ? "Collapse" : "Show all"}
+              {expanded ? "Collapse" : "Show all"}
             </button>
           )}
         </div>
-        <HorizontalScrollWithFade expanded={!!expandedSections.paired}>
-          {pairedLight.map((lightName) => {
-            const darkName = getThemePair(lightName);
-            if (!darkName) return null;
-            return (
-              <PairedThemeTile
-                darkVars={getVars(darkName)}
-                isActive={isPairActive(lightName)}
-                key={lightName}
-                lightName={lightName}
-                lightVars={getVars(lightName)}
-                onSelect={() => handleSelectPair(lightName)}
+
+        <HorizontalScrollWithFade expanded={expanded}>
+          {selectedMode === "system" &&
+            pairedLight.map((lightName) => {
+              const darkName = getThemePair(lightName);
+              if (!darkName) return null;
+              return (
+                <PairedThemeTile
+                  darkVars={getVars(darkName)}
+                  isActive={isPairActive(lightName)}
+                  key={lightName}
+                  lightName={lightName}
+                  lightVars={getVars(lightName)}
+                  onSelect={() => handleSelectTheme(lightName)}
+                />
+              );
+            })}
+          {selectedMode === "light" &&
+            allLightThemes.map((name) => (
+              <SingleThemeTile
+                isActive={selectedThemeName === name}
+                key={name}
+                name={name}
+                onSelect={() => handleSelectTheme(name)}
+                vars={getVars(name)}
               />
-            );
-          })}
+            ))}
+          {selectedMode === "dark" &&
+            allDarkThemes.map((name) => (
+              <SingleThemeTile
+                isActive={selectedThemeName === name}
+                key={name}
+                name={name}
+                onSelect={() => handleSelectTheme(name)}
+                vars={getVars(name)}
+              />
+            ))}
         </HorizontalScrollWithFade>
       </div>
-
-      {/* Section 2: Light-only themes */}
-      {lightOnly.length > 0 && (
-        <div className="mb-6">
-          <div className="mb-3 flex items-center justify-between">
-            <h3 className="text-sm font-medium text-foreground">Light</h3>
-            {lightOnly.length > 4 && (
-              <button
-                className="text-2xs text-muted-foreground hover:text-foreground"
-                onClick={() => toggleSection("light")}
-                type="button"
-              >
-                {expandedSections.light ? "Collapse" : "Show all"}
-              </button>
-            )}
-          </div>
-          <HorizontalScrollWithFade expanded={!!expandedSections.light}>
-            {lightOnly.map((name) => (
-              <SingleThemeTile
-                isActive={selectedThemeName === name}
-                key={name}
-                name={name}
-                onSelect={() => handleSelectSingle(name)}
-                vars={getVars(name)}
-              />
-            ))}
-          </HorizontalScrollWithFade>
-        </div>
-      )}
-
-      {/* Section 3: Dark-only themes */}
-      {darkOnly.length > 0 && (
-        <div className="mb-6">
-          <div className="mb-3 flex items-center justify-between">
-            <h3 className="text-sm font-medium text-foreground">Dark</h3>
-            {darkOnly.length > 4 && (
-              <button
-                className="text-2xs text-muted-foreground hover:text-foreground"
-                onClick={() => toggleSection("dark")}
-                type="button"
-              >
-                {expandedSections.dark ? "Collapse" : "Show all"}
-              </button>
-            )}
-          </div>
-          <HorizontalScrollWithFade expanded={!!expandedSections.dark}>
-            {darkOnly.map((name) => (
-              <SingleThemeTile
-                isActive={selectedThemeName === name}
-                key={name}
-                name={name}
-                onSelect={() => handleSelectSingle(name)}
-                vars={getVars(name)}
-              />
-            ))}
-          </HorizontalScrollWithFade>
-        </div>
-      )}
 
       {/* Accent color picker */}
       <div className="mt-2 shrink-0 pb-2">
