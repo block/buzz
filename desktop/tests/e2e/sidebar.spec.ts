@@ -301,9 +301,12 @@ test("shows a sidebar update card when an update is ready", async ({
 test("shows manual-required update card and never auto-downloads on non-AppImage installs", async ({
   page,
 }) => {
+  await page.goto("/");
+  await expect(page.getByTestId("app-sidebar")).toBeVisible();
+
   // Override the bridge to report an update available AND auto-update not
-  // supported. The beforeEach installMockBridge is overridden here by
-  // setting the mock on the window object after page load.
+  // supported. The mock is mutated after page load so the window object is
+  // live (mirrors the ready-card test pattern).
   await page.evaluate(() => {
     const testWindow = window as Window & {
       __BUZZ_E2E__?: {
