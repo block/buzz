@@ -52,7 +52,7 @@ import { MessageComposerToolbar } from "./MessageComposerToolbar";
 import { NonMemberMentionDialog } from "./NonMemberMentionDialog";
 import { useMentionSendFlow } from "./useMentionSendFlow";
 import { useComposerContentState } from "./useComposerContentState";
-import { useDraftPersistSnapshot } from "./useDraftPersistSnapshot";
+import { useDraftPersistLifecycle } from "./useDraftPersistSnapshot";
 
 type MessageComposerProps = {
   channelId?: string | null;
@@ -194,13 +194,37 @@ function MessageComposerImpl({
   const media = mediaController ?? internalMedia;
   const ownsDropZone = mediaController === undefined;
 
-  // Snapshot of pendingImeta for the effect cleanup.  Updated both on every
-  // render (from the live state, same cadence as pendingImetaRef) AND
-  // synchronously inside the effect body when a draft is restored.  The
-  // See useDraftPersistSnapshot for the two-update-path design that makes the
-  // StrictMode simulate-unmount cleanup read the correct value.
-  const { pendingImetaForPersistRef, snapshotPendingImeta } =
-    useDraftPersistSnapshot(media.pendingImeta);
+  // Draft-persist lifecycle: restore/clear content + imeta + spoilered urls on
+  // key change, and persist the outgoing draft in the cleanup. The StrictMode
+  // fix lives inside this hook — see useDraftPersistSnapshot.ts.
+  useDraftPersistLifecycle({
+    effectiveDraftKey,
+    channelId,
+    loadDraft: drafts.loadDraft,
+    persistDraft: drafts.persistDraft,
+    livePendingImeta: media.pendingImeta,
+    setPendingImeta: media.setPendingImeta,
+    setContent: (content) => {
+      setComposerContent(content);
+      richText.setContent(content);
+    },
+    clearContent: () => {
+      setComposerContent("");
+      richText.clearContent();
+    },
+    setSpoileredAttachmentUrls,
+    spoileredAttachmentUrlsRef,
+    syncComposerContentFromEditor,
+  });
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: effectiveDraftKey is the sole trigger
+  React.useEffect(() => {
+    media.setUploadState({ status: "idle" });
+    setIsEmojiPickerOpen(false);
+    mentions.clearMentions();
+    channelLinks.clearChannels();
+    emojiAutocomplete.clearEmojis();
+  }, [effectiveDraftKey]);
 
   const disabledRef = React.useRef(disabled);
   const isSendingRef = React.useRef(isSending);
@@ -308,54 +332,6 @@ function MessageComposerImpl({
     setPendingImeta: media.setPendingImeta,
     setSpoileredAttachmentUrls,
   });
-
-  // biome-ignore lint/correctness/useExhaustiveDependencies: effectiveDraftKey is the sole trigger
-  React.useEffect(() => {
-    // The outgoing draft is persisted by the cleanup below, which runs before
-    // this body on key changes and has the correct outgoing channelId in its
-    // closure. Do NOT re-persist prevKey here: channelId in this render
-    // already reflects the incoming channel, which would corrupt the outgoing
-    // draft's channelId metadata.
-
-    const saved = effectiveDraftKey
-      ? drafts.loadDraft(effectiveDraftKey)
-      : undefined;
-    if (saved) {
-      setComposerContent(saved.content);
-      richText.setContent(saved.content);
-      // Set the persist-snapshot ref SYNCHRONOUSLY before calling the async
-      // state setter, so the cleanup closure (which may fire before the state
-      // update commits in React StrictMode's simulate-unmount pass) reads the
-      // correct value instead of the stale [].
-      snapshotPendingImeta(saved.pendingImeta);
-      media.setPendingImeta(saved.pendingImeta);
-      setSpoileredAttachmentUrls(new Set(saved.spoileredAttachmentUrls));
-    } else {
-      setComposerContent("");
-      richText.clearContent();
-      snapshotPendingImeta([]);
-      media.setPendingImeta([]);
-      setSpoileredAttachmentUrls(new Set());
-    }
-
-    media.setUploadState({ status: "idle" });
-    setIsEmojiPickerOpen(false);
-    mentions.clearMentions();
-    channelLinks.clearChannels();
-    emojiAutocomplete.clearEmojis();
-
-    return () => {
-      if (effectiveDraftKey) {
-        drafts.persistDraft(
-          effectiveDraftKey,
-          syncComposerContentFromEditor(),
-          channelId ?? effectiveDraftKey,
-          [...pendingImetaForPersistRef.current],
-          [...spoileredAttachmentUrlsRef.current],
-        );
-      }
-    };
-  }, [effectiveDraftKey]);
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: editTarget?.id is the trigger
   React.useEffect(() => {
