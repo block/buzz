@@ -1,19 +1,23 @@
 /**
  * Unit tests for the EnvVarsEditor state helpers.
  *
- * Tests the two invariants added to fix Thufir's IMPORTANT findings:
+ * Tests three invariants:
  *
  *   1. Pre-saved required key renders exactly once (toRows excludes skipKeys).
  *   2. Type required value → add a normal var → required value survives in
  *      the emitted record (buildRecord merges required keys from value).
+ *   3. Provider/runtime switch (skipKeys change) triggers a row reprojection
+ *      — the guard fires when skipKeys changes, even if value is unchanged.
  *
- * These are pure-logic tests — no React renderer needed.
+ * These are pure-logic tests — no React renderer needed. The transition tests
+ * (Invariant 3) exercise the real exported `skipKeysEqual` guard that controls
+ * whether the effect calls `setRows(toRows(value, skipKeys))`.
  */
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { toRows, toRecord } from "./EnvVarsEditor.tsx";
+import { toRows, toRecord, skipKeysEqual } from "./EnvVarsEditor.tsx";
 
 // ── Invariant 1: toRows excludes skip keys ─────────────────────────────────
 
@@ -155,4 +159,107 @@ test("toRecord_last_write_wins_on_duplicate_keys", () => {
   const record = toRecord(rows);
   assert.equal(record.FOO, "second", "last duplicate wins");
   assert.equal(Object.keys(record).length, 1);
+});
+
+// ── Invariant 3: skipKeysEqual guard — transition detection ────────────────
+//
+// The row-resync effect fires when `[value, skipKeys]` changes. The guard
+// previously checked only `recordsEqual(lastEmitted, value)`. If `skipKeys`
+// changed while `value` stayed equal to `lastEmitted`, the guard returned
+// false and rows were NOT rebuilt — leaving a stale projection (duplicate
+// or dropped key). The fix adds `skipKeysChanged = !skipKeysEqual(prev, next)`
+// as a second trigger.
+//
+// These tests exercise the REAL exported `skipKeysEqual` function, which is
+// exactly what the effect calls. They prove the guard fires on both transition
+// directions, and that `toRows(value, newSkipKeys)` produces the correct rows
+// after the rebuild.
+
+test("skipKeysEqual_detects_normal_to_required_transition", () => {
+  // Scenario: value = {ANTHROPIC_API_KEY:"sk"}, key starts as normal row.
+  // Provider switches → requiredKeys gains ANTHROPIC_API_KEY.
+  const prev = new Set(); // before switch: key is normal (not in skipKeys)
+  const next = new Set(["ANTHROPIC_API_KEY"]); // after switch: key is required
+
+  // Guard must fire (skipKeys changed → !skipKeysEqual returns true).
+  assert.equal(
+    skipKeysEqual(prev, next),
+    false,
+    "normal→required transition must be detected",
+  );
+
+  // After rebuild: toRows with new skipKeys must EXCLUDE the now-required key.
+  const value = { ANTHROPIC_API_KEY: "sk", MY_VAR: "foo" };
+  const rows = toRows(value, next);
+  const keyNames = rows.map((r) => r.key);
+  assert.equal(
+    keyNames.includes("ANTHROPIC_API_KEY"),
+    false,
+    "ANTHROPIC_API_KEY must not be in rows after normal→required transition",
+  );
+  assert.equal(
+    keyNames.includes("MY_VAR"),
+    true,
+    "non-required key must still be in rows after transition",
+  );
+});
+
+test("skipKeysEqual_detects_required_to_normal_transition", () => {
+  // Scenario: value = {ANTHROPIC_API_KEY:"sk"}, key starts as required row.
+  // Provider switches → requiredKeys loses ANTHROPIC_API_KEY.
+  const prev = new Set(["ANTHROPIC_API_KEY"]); // before switch: key is required
+  const next = new Set(); // after switch: key is now a normal row
+
+  // Guard must fire (skipKeys changed).
+  assert.equal(
+    skipKeysEqual(prev, next),
+    false,
+    "required→normal transition must be detected",
+  );
+
+  // After rebuild: toRows with empty skipKeys must INCLUDE the key.
+  const value = { ANTHROPIC_API_KEY: "sk" };
+  const rows = toRows(value, next);
+  assert.equal(
+    rows.length,
+    1,
+    "key must appear as a normal row after required→normal",
+  );
+  assert.equal(rows[0].key, "ANTHROPIC_API_KEY");
+  assert.equal(
+    rows[0].value,
+    "sk",
+    "the key value must be preserved in the rebuilt row",
+  );
+});
+
+test("skipKeysEqual_no_rebuild_when_keys_unchanged", () => {
+  // When skipKeys membership is identical (but different Set reference), the
+  // guard must NOT fire — avoids wasted re-render on every parent render.
+  const prev = new Set(["ANTHROPIC_API_KEY"]);
+  const next = new Set(["ANTHROPIC_API_KEY"]); // same membership, different ref
+
+  assert.equal(
+    skipKeysEqual(prev, next),
+    true,
+    "identical membership must be equal (no spurious rebuild)",
+  );
+});
+
+test("skipKeysEqual_empty_sets_are_equal", () => {
+  assert.equal(
+    skipKeysEqual(new Set(), new Set()),
+    true,
+    "two empty sets are equal",
+  );
+});
+
+test("skipKeysEqual_different_sizes_are_not_equal", () => {
+  const a = new Set(["FOO", "BAR"]);
+  const b = new Set(["FOO"]);
+  assert.equal(
+    skipKeysEqual(a, b),
+    false,
+    "sets of different sizes are not equal",
+  );
 });
