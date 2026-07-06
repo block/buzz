@@ -3,6 +3,7 @@
   "extends": ["config:recommended", "helpers:pinGitHubActionDigests"],
   "prCreation": "immediate",
   "automerge": true,
+  "rebaseWhen": "conflicted",
   "recreateWhen": "always",
   "separateMinorPatch": true,
   "postUpdateOptions": ["cargo:updateLockfile"],
