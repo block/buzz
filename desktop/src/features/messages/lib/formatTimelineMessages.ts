@@ -484,6 +484,40 @@ function extractSystemMessagePubkeys(event: RelayEvent): string[] {
   }
 }
 
+export function collectReactionActorPubkeys(events: RelayEvent[]) {
+  const deletedEventIds = new Set<string>();
+  for (const event of events) {
+    if (
+      event.kind !== KIND_DELETION &&
+      event.kind !== KIND_NIP29_DELETE_EVENT
+    ) {
+      continue;
+    }
+    for (const targetId of getDeletionTargets(event.tags)) {
+      deletedEventIds.add(targetId.toLowerCase());
+    }
+  }
+
+  const pubkeys = new Set<string>();
+  for (const event of events) {
+    if (
+      event.kind !== KIND_REACTION ||
+      deletedEventIds.has(event.id.toLowerCase())
+    ) {
+      continue;
+    }
+    pubkeys.add(
+      resolveEventAuthorPubkey({
+        pubkey: event.pubkey,
+        tags: event.tags,
+        preferActorTag: true,
+        requireChannelTagForPTags: true,
+      }).toLowerCase(),
+    );
+  }
+  return [...pubkeys];
+}
+
 export function collectMessageAuthorPubkeys(events: RelayEvent[]) {
   const pubkeys = new Set<string>();
 

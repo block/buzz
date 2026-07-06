@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  collectReactionActorPubkeys,
   countTopLevelTimelineRows,
   formatTimelineMessages,
   isTimelineContentEvent,
@@ -166,6 +167,57 @@ test("non-deletion event kinds do NOT hide the target message", () => {
   const events = [streamMessage(), reaction];
   const out = formatTimelineMessages(events, null, undefined, null);
   assert.equal(out.length, 1, "the kind:9 message should still be visible");
+});
+
+test("collectReactionActorPubkeys returns active kind:7 actors only", () => {
+  const reactionId = `${"c".repeat(64)}`;
+  const deletedReactionId = `${"d".repeat(64)}`;
+  const actor = PUBKEY_B.toUpperCase();
+  const events = [
+    streamMessage(),
+    {
+      id: reactionId,
+      pubkey: actor,
+      kind: 7,
+      created_at: 1_700_000_001,
+      content: "+",
+      tags: [
+        ["h", CHANNEL_ID],
+        ["e", HEX64_A],
+      ],
+      sig: "sig",
+    },
+    {
+      id: `${"e".repeat(64)}`,
+      pubkey: PUBKEY_A,
+      kind: 7,
+      created_at: 1_700_000_002,
+      content: "🎉",
+      tags: [
+        ["h", CHANNEL_ID],
+        ["e", HEX64_A],
+        ["actor", actor],
+      ],
+      sig: "sig",
+    },
+    {
+      id: deletedReactionId,
+      pubkey: PUBKEY_A,
+      kind: 7,
+      created_at: 1_700_000_003,
+      content: "👀",
+      tags: [
+        ["h", CHANNEL_ID],
+        ["e", HEX64_A],
+      ],
+      sig: "sig",
+    },
+    deletionEvent(5, deletedReactionId, {
+      id: `${"f".repeat(64)}`,
+    }),
+  ];
+
+  assert.deepEqual(collectReactionActorPubkeys(events), [PUBKEY_B]);
 });
 
 test("huddle start renders as a timeline row", () => {

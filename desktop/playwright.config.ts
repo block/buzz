@@ -67,6 +67,7 @@ export default defineConfig({
         "**/timeline-no-shift.spec.ts",
         "**/human-edit-agent-content.spec.ts",
         "**/reaction-order.spec.ts",
+        "**/reaction-names.spec.ts",
         "**/send-channel-binding.spec.ts",
       ],
       use: {
