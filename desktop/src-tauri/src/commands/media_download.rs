@@ -138,14 +138,21 @@ pub async fn download_file(
 ///
 /// Same SSRF validation, size cap, and content policy as the download
 /// commands above.
+///
+/// Returns `tauri::ipc::Response` so the bytes cross IPC as a raw buffer
+/// instead of a JSON number array (which would be ~3x the size to
+/// serialize and deserialize at the 50 MiB cap).
 #[tauri::command]
-pub async fn fetch_media_bytes(url: String, state: State<'_, AppState>) -> Result<Vec<u8>, String> {
+pub async fn fetch_media_bytes(
+    url: String,
+    state: State<'_, AppState>,
+) -> Result<tauri::ipc::Response, String> {
     let relay_base = relay_api_base_url_with_override(&state);
     validate_download_url(&url, &relay_base)?;
 
     let bytes = fetch_blob_bytes(&url, &state).await?;
     detect_and_validate_mime(&bytes)?;
-    Ok(bytes)
+    Ok(tauri::ipc::Response::new(bytes))
 }
 
 /// Fetch blob bytes from a (pre-validated) relay media URL through the app's

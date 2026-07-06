@@ -121,6 +121,8 @@ type ComposerImageEditorProps = {
   onCancel: () => void;
   /** Upload the annotated PNG; rejection keeps the editor open. */
   onSave: (bytes: Uint8Array) => Promise<void>;
+  /** Notifies the parent while a save is in flight (used to gate Escape). */
+  onSavingChange?: (saving: boolean) => void;
 };
 
 /**
@@ -136,6 +138,7 @@ export function ComposerImageEditor({
   sourceType,
   onCancel,
   onSave,
+  onSavingChange,
 }: ComposerImageEditorProps) {
   const canvasRef = React.useRef<HTMLCanvasElement>(null);
   const activeStrokeRef = React.useRef<EditorStroke | null>(null);
@@ -158,6 +161,18 @@ export function ComposerImageEditor({
   } | null>(null);
   const [saving, setSaving] = React.useState(false);
   const [saveError, setSaveError] = React.useState<string | null>(null);
+
+  const setSavingState = React.useCallback(
+    (next: boolean) => {
+      setSaving(next);
+      onSavingChange?.(next);
+    },
+    [onSavingChange],
+  );
+
+  // Reset the parent's gate if we unmount mid-save (success closes the
+  // lightbox and unmounts this component before the flag is cleared here).
+  React.useEffect(() => () => onSavingChange?.(false), [onSavingChange]);
 
   const handleImageLoad = React.useCallback(
     (event: React.SyntheticEvent<HTMLImageElement>) => {
@@ -280,7 +295,7 @@ export function ComposerImageEditor({
 
   const handleSave = React.useCallback(async () => {
     if (saving || strokes.length === 0) return;
-    setSaving(true);
+    setSavingState(true);
     setSaveError(null);
     try {
       const bytes = await renderAnnotatedPng(sourceUrl, sourceType, strokes);
@@ -288,9 +303,9 @@ export function ComposerImageEditor({
       // On success the parent closes the lightbox and unmounts this component.
     } catch {
       setSaveError("Could not save the drawing. Please try again.");
-      setSaving(false);
+      setSavingState(false);
     }
-  }, [onSave, saving, sourceType, sourceUrl, strokes]);
+  }, [onSave, saving, setSavingState, sourceType, sourceUrl, strokes]);
 
   const hasStrokes = strokes.length > 0;
 

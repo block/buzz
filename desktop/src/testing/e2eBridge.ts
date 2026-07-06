@@ -8603,11 +8603,12 @@ export function maybeInstallE2eTauriMocks() {
       case "upload_media_bytes":
         return (await resolveMockUploadDescriptors(activeConfig))[0];
       case "fetch_media_bytes": {
-        // The real command fetches relay media through Rust reqwest. In E2E
-        // the browser fetch suffices — specs serve the URL via page.route.
+        // The real command fetches relay media through Rust reqwest and
+        // replies with raw bytes (`tauri::ipc::Response` → ArrayBuffer). In
+        // E2E the browser fetch suffices — specs serve the URL via page.route.
         const response = await fetch((payload as { url: string }).url);
         if (!response.ok) throw new Error(`fetch failed: ${response.status}`);
-        return Array.from(new Uint8Array(await response.arrayBuffer()));
+        return await response.arrayBuffer();
       }
       case "download_image":
       case "download_file":

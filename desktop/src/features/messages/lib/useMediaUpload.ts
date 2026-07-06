@@ -208,8 +208,9 @@ export function useMediaUpload() {
   /**
    * Pre-edit originals of annotated attachments, keyed by the annotated
    * attachment's URL. Powers "revert to original" in the composer lightbox.
-   * In-memory only — cleared implicitly when the attachment leaves the
-   * composer (send, remove, draft switch).
+   * In-memory only, by design — cleared implicitly when the attachment
+   * leaves the composer (send, remove, draft switch). Persisting revert
+   * across a draft round-trip is an explicit non-goal (#1491 review).
    */
   const [originalsByUrl, setOriginalsByUrl] = React.useState<
     Map<string, BlobDescriptor>

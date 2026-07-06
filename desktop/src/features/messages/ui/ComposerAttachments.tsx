@@ -126,11 +126,17 @@ const MediaAttachmentItem = React.forwardRef<
   // stable Escape listener, so the handler would otherwise see a stale mode.
   const modeRef = React.useRef(mode);
   modeRef.current = mode;
+  // Gates Escape while the editor's save upload is in flight: dismissing
+  // edit mode mid-save would look like a cancel while the swap still lands.
+  const editorSavingRef = React.useRef(false);
+  const handleEditorSavingChange = React.useCallback((saving: boolean) => {
+    editorSavingRef.current = saving;
+  }, []);
   const handleEscapeKeyDown = React.useCallback((event: KeyboardEvent) => {
     if (modeRef.current === "edit") {
       // Escape leaves canvas mode but keeps the lightbox open.
       event.preventDefault();
-      setMode("view");
+      if (!editorSavingRef.current) setMode("view");
     }
   }, []);
 
@@ -235,6 +241,7 @@ const MediaAttachmentItem = React.forwardRef<
                   sourceType={attachment.type}
                   onCancel={handleEditorCancel}
                   onSave={handleEditorSave}
+                  onSavingChange={handleEditorSavingChange}
                 />
               ) : isVideo ? (
                 // biome-ignore lint/a11y/useMediaCaption: user-uploaded video, no captions available
