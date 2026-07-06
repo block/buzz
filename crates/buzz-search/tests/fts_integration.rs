@@ -21,7 +21,7 @@ const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz";
 const MIGRATION_0001_SQL: &str = include_str!("../../../migrations/0001_initial_schema.sql");
 const MIGRATION_0002_SQL: &str = include_str!("../../../migrations/0002_git_repo_names.sql");
 const MIGRATION_0003_SQL: &str = include_str!("../../../migrations/0003_community_icon.sql");
-const MIGRATION_0004_SQL: &str = include_str!("../../../migrations/0004_agent_turn_metric_fts.sql");
+const MIGRATION_0004_SQL: &str = include_str!("../../../migrations/0005_agent_turn_metric_fts.sql");
 
 async fn setup() -> (PgPool, String) {
     let url = std::env::var("BUZZ_TEST_DATABASE_URL").unwrap_or_else(|_| TEST_DB_URL.to_string());
