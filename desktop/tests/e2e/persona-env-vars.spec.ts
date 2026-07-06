@@ -272,39 +272,43 @@ test("env vars editor renders in PersonaDialog new-persona form", async ({
   await page.getByTestId("new-agent-card").click();
   await page.getByRole("menuitem", { name: /^New agent$/ }).click();
 
-  await expect(page.getByTestId("env-vars-editor")).toHaveCount(0);
+  // Scope all env-vars queries to the dialog: GlobalAgentConfigSettingsCard
+  // also renders an EnvVarsEditor in the background settings pane (introduced
+  // by this branch), so page-wide testid queries would match both.
+  const dialog = page.getByRole("dialog");
+
+  // Advanced section is collapsed — no env-vars-editor inside the dialog yet.
+  await expect(dialog.getByTestId("env-vars-editor")).toHaveCount(0);
   await page.getByRole("button", { name: "Advanced", exact: true }).click();
 
   // The env vars editor should be present after opening Advanced.
-  await expect(page.getByTestId("env-vars-editor")).toBeVisible();
+  await expect(dialog.getByTestId("env-vars-editor")).toBeVisible();
   // Initially empty (no rows).
-  await expect(page.getByTestId("env-vars-key")).toHaveCount(0);
+  await expect(dialog.getByTestId("env-vars-key")).toHaveCount(0);
 
   // Add a row.
-  await page.getByTestId("env-vars-add").click();
-  await expect(page.getByTestId("env-vars-key")).toHaveCount(1);
+  await dialog.getByTestId("env-vars-add").click();
+  await expect(dialog.getByTestId("env-vars-key")).toHaveCount(1);
 
   // Fill it in with realistic-looking keys/values to cover masked secrets and row controls.
-  const keys = page.getByTestId("env-vars-key");
-  const values = page.getByTestId("env-vars-value");
+  const keys = dialog.getByTestId("env-vars-key");
+  const values = dialog.getByTestId("env-vars-value");
   await keys.nth(0).fill("ANTHROPIC_API_KEY");
   await values.nth(0).fill("sk-ant-abc");
-  await page.getByTestId("env-vars-add").click();
+  await dialog.getByTestId("env-vars-add").click();
   await keys.nth(1).fill("GOOSE_PROVIDER");
   await values.nth(1).fill("anthropic");
-  await page.getByTestId("env-vars-add").click();
+  await dialog.getByTestId("env-vars-add").click();
   await keys.nth(2).fill("OPENAI_BASE_URL");
   await values.nth(2).fill("https://api.openai.com/v1");
 
   // Capture a screenshot of the dialog with three env vars filled. Helps
   // reviewers see the UI at a glance.
   await waitForAnimations(page);
-  await page
-    .getByRole("dialog")
-    .screenshot({ path: "test-results/persona-env-dialog.png" });
+  await dialog.screenshot({ path: "test-results/persona-env-dialog.png" });
 
   // Remove the first row to verify per-row removal still works.
-  await page.getByTestId("env-vars-remove").first().click();
+  await dialog.getByTestId("env-vars-remove").first().click();
   await expect(keys).toHaveCount(2);
 });
 
@@ -331,7 +335,13 @@ test("persona model options follow the selected LLM provider", async ({
   const providerApiKey = page.getByTestId("persona-provider-api-key");
   await expect(page.getByText("OpenAI API key")).toBeVisible();
   await expect(providerApiKey).toBeVisible();
-  await expect(page.getByTestId("env-vars-editor")).toHaveCount(0);
+  // Since the branch added auto-expand of Advanced when required env keys are
+  // present, switching to OpenAI surfaces OPENAI_COMPAT_API_KEY as required
+  // and auto-opens the Advanced section. The editor is now visible (count=1)
+  // inside the dialog — this is the correct new behavior.
+  const dialog = page.getByRole("dialog");
+  await expect(dialog.getByTestId("env-vars-editor")).toHaveCount(1);
+  await expect(dialog.getByTestId("env-vars-editor")).toBeVisible();
   await expect(model).toBeVisible();
   // OpenAI requires an explicit model, so "Default model" is filtered out.
   // The combobox offers only "Custom model..." — verify it is present and selectable.
@@ -351,7 +361,9 @@ test("persona model options follow the selected LLM provider", async ({
   await expect(model).toBeVisible();
 
   // Switch to Default (no explicit provider) — model resets to "Default model".
-  await selectDropdownOption(page, llmProvider, "Default");
+  // Provider blank option was renamed from "Default" to "Select a provider\u2026"
+  // by the global-provider label change in this branch (getDefaultLlmProviderLabel).
+  await selectDropdownOption(page, llmProvider, "Select a provider\u2026");
   await expect(model).toBeVisible();
   await expect(model).toContainText("Default model");
 });
