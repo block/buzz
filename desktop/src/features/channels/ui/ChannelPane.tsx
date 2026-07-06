@@ -611,6 +611,7 @@ export const ChannelPane = React.memo(function ChannelPane({
             }
             isLoading={isTimelineLoading}
             mainEntries={mainTimelineEntries}
+            threadSummaries={threadSummaries}
             messages={visibleMessages}
             firstUnreadMessageId={firstUnreadMessageId}
             unreadCount={unreadCount}

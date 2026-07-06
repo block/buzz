@@ -58,22 +58,17 @@ async function invokeTauri<T>(
   );
 }
 
-async function openModelMenu(
+async function openModelCombobox(
   page: import("@playwright/test").Page,
   model: import("@playwright/test").Locator,
 ) {
+  // PersonaModelCombobox renders a role="combobox" trigger + a Radix Popover
+  // with a search <input> and plain <button> options — not a role="menu".
   await model.click();
-  const menu = page
-    .getByRole("menu")
-    .filter({
-      has: page.getByRole("menuitemradio", {
-        name: "Custom model...",
-        exact: true,
-      }),
-    })
-    .last();
-  await expect(menu).toBeVisible();
-  return menu;
+  const searchInput = page.getByPlaceholder("Search models…");
+  await expect(searchInput).toBeVisible({ timeout: 5_000 });
+  // Return the popover content container so callers can scope option clicks.
+  return page.locator("[data-radix-popper-content-wrapper]").last();
 }
 
 async function selectDropdownOption(
@@ -339,10 +334,10 @@ test("persona model options follow the selected LLM provider", async ({
   await expect(page.getByTestId("env-vars-editor")).toHaveCount(0);
   await expect(model).toBeVisible();
   // OpenAI requires an explicit model, so "Default model" is filtered out.
-  // The menu offers only "Custom model..." — verify it is present and selectable.
-  const openAiModelMenu = await openModelMenu(page, model);
-  await openAiModelMenu
-    .getByRole("menuitemradio", { name: "Custom model...", exact: true })
+  // The combobox offers only "Custom model..." — verify it is present and selectable.
+  const openAiModelPopover = await openModelCombobox(page, model);
+  await openAiModelPopover
+    .getByRole("button", { name: "Custom model...", exact: true })
     .click();
 
   // Switch to Anthropic — API-key field label changes and value clears.

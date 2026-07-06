@@ -54,6 +54,12 @@ pub struct RunCtx<'a> {
     /// which the exact-but-stale token count would otherwise miss. Cleared and
     /// preserved in lockstep with `last_request_input_tokens`.
     pub last_request_history_bytes: &'a mut Option<usize>,
+    /// Accumulated input tokens across all LLM rounds in this turn, for
+    /// NIP-AM metric publishing. Reset to `None` at turn start in `run()`.
+    pub turn_input_tokens: &'a mut Option<u64>,
+    /// Accumulated output tokens across all LLM rounds in this turn, for
+    /// NIP-AM metric publishing. Reset to `None` at turn start in `run()`.
+    pub turn_output_tokens: &'a mut Option<u64>,
 }
 
 impl RunCtx<'_> {
@@ -68,6 +74,10 @@ impl RunCtx<'_> {
             *self.original_task = Some(user_text.clone());
         }
         self.history.push(HistoryItem::User(user_text));
+
+        // Reset per-turn token accumulators for this prompt.
+        *self.turn_input_tokens = None;
+        *self.turn_output_tokens = None;
 
         let mut round = 0u32;
         // Per-prompt `_Stop` objection count. Bounded per prompt (not per
@@ -156,6 +166,14 @@ impl RunCtx<'_> {
                         .map(HistoryItem::context_pressure_bytes)
                         .sum(),
                 );
+                // Accumulate per-turn input tokens for NIP-AM metric publishing.
+                *self.turn_input_tokens =
+                    Some(self.turn_input_tokens.unwrap_or(0).saturating_add(tokens));
+            }
+            // Accumulate per-turn output tokens for NIP-AM metric publishing.
+            if let Some(out) = response.output_tokens {
+                *self.turn_output_tokens =
+                    Some(self.turn_output_tokens.unwrap_or(0).saturating_add(out));
             }
 
             if !response.reasoning.is_empty() {

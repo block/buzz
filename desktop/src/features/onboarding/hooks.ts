@@ -124,7 +124,7 @@ type UseFirstRunOnboardingGateOptions = {
   identityIsFetching: boolean;
   identityStatus: QueryStatus;
   isSharedIdentity: boolean;
-  profileDisplayName: string | null | undefined;
+  profileHasEvent: boolean | undefined;
   profileIsFetching: boolean;
   profileStatus: QueryStatus;
 };
@@ -219,7 +219,7 @@ export function useFirstRunOnboardingGate({
   identityIsFetching,
   identityStatus,
   isSharedIdentity,
-  profileDisplayName,
+  profileHasEvent,
   profileIsFetching,
   profileStatus,
 }: UseFirstRunOnboardingGateOptions) {
@@ -288,19 +288,32 @@ export function useFirstRunOnboardingGate({
       return;
     }
 
-    // If the relay already has a profile with a display name for this pubkey,
-    // the user has previously completed onboarding (possibly on another
-    // machine or app data directory). Skip the onboarding flow and mark as
-    // complete so they go straight to the app.
+    // If the relay has a real kind:0 metadata event for this pubkey, the user
+    // has previously completed onboarding (possibly on another machine or app
+    // data directory). Skip the onboarding flow and mark as complete so they
+    // go straight to the app.
+    //
+    // We gate on `hasProfileEvent` — a flag set by the Tauri backend when a
+    // real kind:0 event was found — rather than any field value. This correctly
+    // handles the case where a returning user's display_name is empty: the event
+    // still exists, so onboarding is skipped. A missing event (new user, or no
+    // kind:0 on the relay) always shows onboarding regardless of display_name.
     const hasExistingProfile =
-      profileStatus === "success" &&
-      typeof profileDisplayName === "string" &&
-      profileDisplayName.trim().length > 0;
+      profileStatus === "success" && profileHasEvent === true;
 
     setGateState((current) =>
       updateActiveGateState(current, currentPubkey, (activeGateState) => {
+        // Re-read localStorage here to handle the webkit2gtk WAL race: the
+        // synchronous useState initializer may have run before the WAL was
+        // merged into the main SQLite file, returning null for a flag that is
+        // actually present. By the time this effect fires (identity + profile
+        // settled), the WAL has had time to merge and the read is reliable.
+        const hasCompletedAfterRecheck =
+          readOnboardingCompletion(currentPubkey);
         const alreadyOnboarded =
-          activeGateState.hasCompletedCurrentPubkey || hasExistingProfile;
+          activeGateState.hasCompletedCurrentPubkey ||
+          hasCompletedAfterRecheck ||
+          hasExistingProfile;
         if (alreadyOnboarded && typeof window !== "undefined") {
           window.localStorage.setItem(
             onboardingCompletionStorageKey(currentPubkey),
@@ -321,7 +334,7 @@ export function useFirstRunOnboardingGate({
     hasSettledCurrentPubkey,
     identityStatus,
     isSharedIdentity,
-    profileDisplayName,
+    profileHasEvent,
     profileIsFetching,
     profileStatus,
   ]);
@@ -382,7 +395,7 @@ export function useAppOnboardingState(isSharedIdentity: boolean) {
     identityIsFetching: identityQuery.fetchStatus === "fetching",
     identityStatus: identityQuery.status,
     isSharedIdentity,
-    profileDisplayName: profileQuery.data?.displayName,
+    profileHasEvent: profileQuery.data?.hasProfileEvent,
     profileIsFetching: profileQuery.fetchStatus === "fetching",
     profileStatus: profileQuery.status,
   });

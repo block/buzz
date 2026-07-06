@@ -145,7 +145,7 @@ test("MEASURE: scroll-back pagination latency in target channel", async ({
       delete fwd["sec-ch-ua"];
       delete fwd["sec-ch-ua-mobile"];
       delete fwd["sec-ch-ua-platform"];
-      if (COMMUNITY_HOST) fwd["host"] = COMMUNITY_HOST;
+      if (COMMUNITY_HOST) fwd.host = COMMUNITY_HOST;
       const resp = await route.fetch({ headers: fwd });
       const ms = Date.now() - t0;
       const buf = await resp.body();

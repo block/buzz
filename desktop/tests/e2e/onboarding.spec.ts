@@ -694,6 +694,88 @@ test("identity fallback text does not count as a real onboarding name", async ({
   await expect(page.getByTestId("onboarding-next")).toBeDisabled();
 });
 
+// Regression test for the H2 predicate fix (PR #1508).
+// A blank first-run identity (no kind:0 event on the relay) must see
+// onboarding even when the mock bridge returns display_name: "" — the gate
+// must depend on `hasProfileEvent`, not on `typeof displayName === "string"`.
+test("first-run blank identity with no profile event sees onboarding", async ({
+  page,
+}) => {
+  await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
+  // Do NOT seed searchProfiles for tyler's pubkey, so ensureMockProfile
+  // constructs a synthesised profile with has_profile_event: false.
+  await installMockBridge(page, undefined, { skipOnboardingSeed: true });
+  await page.goto("/");
+
+  await expectIncompleteOnboarding(page);
+});
+
+// Regression test for the H2 predicate fix (PR #1508).
+// A returning user who has a real kind:0 profile event with an empty
+// display_name must skip onboarding — they are already onboarded.
+test("returning user with blank display name and real profile event skips onboarding", async ({
+  page,
+}) => {
+  await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
+  // Seed tyler's pubkey into searchProfiles with an empty displayName.
+  // seedMockSearchProfiles stores this into mockProfiles with
+  // has_profile_event: true, simulating a real kind:0 event with no name.
+  await installMockBridge(
+    page,
+    {
+      searchProfiles: [
+        {
+          pubkey: TEST_IDENTITIES.tyler.pubkey,
+          displayName: "",
+        },
+      ],
+    },
+    { skipOnboardingSeed: true },
+  );
+  await page.goto("/");
+
+  // Profile event exists → onboarding is skipped, app renders.
+  await expect(page.getByTestId("onboarding-gate")).toHaveCount(0);
+  await expectHomeView(page);
+});
+
+// Regression test for the cache-seed defect (PR #1508 CRITICAL fix).
+// Sequence: no-event profile fetched and cached with hasProfileEvent absent →
+// reload with cache present → onboarding must still show. Previously the
+// initialData seed hardcoded hasProfileEvent: true for any updatedAt > 0
+// entry, reopening the original bug on the second app load.
+test("no-event profile cached then reloaded still sees onboarding", async ({
+  page,
+}) => {
+  await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
+  // Seed a stale v1 cache entry WITHOUT hasProfileEvent (simulating a cache
+  // written by the old code path or a no-event fallback). updatedAt > 0 so
+  // the seed is eligible, but hasProfileEvent is absent → conservative false.
+  const SELF_PROFILE_CACHE_KEY = `buzz-self-profile.v1:ws://localhost:3000:${TEST_IDENTITIES.tyler.pubkey}`;
+  await page.addInitScript(
+    ({ key, cache }) => {
+      window.localStorage.setItem(key, JSON.stringify(cache));
+    },
+    {
+      key: SELF_PROFILE_CACHE_KEY,
+      cache: {
+        version: 1,
+        displayName: null,
+        avatarUrl: null,
+        avatarDataUrl: null,
+        updatedAt: 1_700_000_000_000,
+        // hasProfileEvent deliberately absent — legacy/no-event entry.
+      },
+    },
+  );
+  // No profile event on the relay either — ensureMockProfile uses false.
+  await installMockBridge(page, undefined, { skipOnboardingSeed: true });
+  await page.goto("/");
+
+  // Cache seed must NOT promote hasProfileEvent to true. Onboarding shows.
+  await expectIncompleteOnboarding(page);
+});
+
 test("avatar step uses an add-image placeholder before an avatar is chosen", async ({
   page,
 }) => {
@@ -1037,8 +1119,21 @@ test("existing relay profile with display name auto-skips onboarding without loc
 }) => {
   // A user whose relay profile already has a display name should skip
   // onboarding even without the localStorage completion flag.
+  // Seed alice's pubkey into searchProfiles so seedMockSearchProfiles writes
+  // has_profile_event: true into mockProfiles — the harness-intended mechanism
+  // for simulating a returning user with a real kind:0 event. Do NOT use the
+  // static mockProfiles seed (removed in PR #1508); that path collides with
+  // FIRST_RUN_ALICE (same pubkey) and breaks the first-run onboarding specs.
   await seedActiveIdentity(page, TEST_IDENTITIES.alice);
-  await installMockBridge(page, undefined, { skipOnboardingSeed: true });
+  await installMockBridge(
+    page,
+    {
+      searchProfiles: [
+        { pubkey: TEST_IDENTITIES.alice.pubkey, displayName: "alice" },
+      ],
+    },
+    { skipOnboardingSeed: true },
+  );
   await page.goto("/");
 
   await expect(page.getByTestId("onboarding-gate")).toHaveCount(0);
@@ -1280,8 +1375,21 @@ test("existing relay profile with display name auto-completes onboarding", async
   // A user whose relay profile already has a display name should skip
   // onboarding entirely — they've already set up their identity previously
   // (possibly on another machine or app data directory).
+  // Seed alice's pubkey into searchProfiles so seedMockSearchProfiles writes
+  // has_profile_event: true into mockProfiles — the harness-intended mechanism
+  // for simulating a returning user with a real kind:0 event. Do NOT use the
+  // static mockProfiles seed (removed in PR #1508); that path collides with
+  // FIRST_RUN_ALICE (same pubkey) and breaks the first-run onboarding specs.
   await seedActiveIdentity(page, TEST_IDENTITIES.alice);
-  await installMockBridge(page, undefined, { skipOnboardingSeed: true });
+  await installMockBridge(
+    page,
+    {
+      searchProfiles: [
+        { pubkey: TEST_IDENTITIES.alice.pubkey, displayName: "alice" },
+      ],
+    },
+    { skipOnboardingSeed: true },
+  );
   await page.goto("/");
 
   await expect(page.getByTestId("onboarding-gate")).toHaveCount(0);

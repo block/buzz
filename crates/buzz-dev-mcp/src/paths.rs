@@ -52,12 +52,12 @@ pub(crate) fn resolve_path(root: &Path, path: &str) -> Result<PathBuf, String> {
 ///   - UNC:      `//server/share/x` -> `\\server\share\x`.
 ///
 /// A third form — root-anchored `/tmp`, `/usr/...`, `/bin` — maps under the
-/// MSYS install root (the bundled `git-bash` dir), which this process does not
-/// reliably know. We deliberately do NOT guess it: such a path falls through
-/// untranslated and fails with the clear `path not accessible` error rather than
-/// being silently mis-mapped to the wrong location. Resolving it correctly would
-/// require shelling out to the bundled `cygpath`; that is out of scope here and
-/// these paths are not a normal target for agent file I/O.
+/// MSYS install root (from the host's Git for Windows install), which this
+/// process does not reliably know. We deliberately do NOT guess it: such a path
+/// falls through untranslated and fails with the clear `path not accessible`
+/// error rather than being silently mis-mapped to the wrong location. Resolving
+/// it correctly would require shelling out to `cygpath`; that is out of scope
+/// here and these paths are not a normal target for agent file I/O.
 #[cfg(windows)]
 fn msys_to_windows(path: &str) -> String {
     // UNC: exactly two leading slashes then a non-empty host segment.

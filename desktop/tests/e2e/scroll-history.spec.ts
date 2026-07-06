@@ -1834,3 +1834,99 @@ test("older-history prepend keeps the reading row fixed (no jump to oldest)", as
     "Jump to latest",
   );
 });
+
+// Regression: thread-summary badges must not flash during a scrollback prepend.
+// When an older page lands, the urgent render pass still paints the OLD
+// deferred message snapshot, so MessageTimeline passes `mainEntries=undefined`
+// and TimelineMessageList rebuilds entries itself. That fallback used to drop
+// the relay summary map — and since thread replies are usually not local
+// timeline rows, every relay-driven badge unmounted for the whole deferred
+// window and remounted when the heavy render committed (the visible flash).
+// A MutationObserver is commit-granular, so it catches even a single-frame
+// unmount that a polling assertion would race past.
+test("thread summary badge survives an older-history prepend without unmounting", async ({
+  page,
+}, testInfo) => {
+  testInfo.setTimeout(60_000);
+  await installMockBridge(page);
+  await page.goto("/");
+  await page.waitForFunction(
+    () => typeof window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__ === "function",
+  );
+
+  // Seed a reply to the NEWEST deep-history row before the channel is opened:
+  // no live subscription exists yet, so the reply lands only in the mock store.
+  // It is not a top-level timeline row, so the badge rendered for #599 is
+  // driven purely by the relay-shaped 39005 page summary — exactly the state
+  // the deferred-pass entry fallback used to drop.
+  await page.evaluate(() => {
+    window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+      channelName: "deep-history",
+      content: "summary-only reply",
+      parentEventId: "mock-deep-history-599",
+    });
+  });
+
+  await page.getByTestId("channel-deep-history").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("deep-history");
+  const timeline = page.getByTestId("message-timeline");
+  const badgeSelector =
+    '[data-testid="message-thread-summary"][data-thread-head-id="mock-deep-history-599"]';
+  await expect(timeline.locator(badgeSelector)).toBeVisible();
+
+  const oldestRenderedIndex = () =>
+    timeline.evaluate((element) => {
+      let min = Number.POSITIVE_INFINITY;
+      for (const row of (
+        element as HTMLDivElement
+      ).querySelectorAll<HTMLElement>("[data-message-id]")) {
+        const match = row.textContent?.match(/#(\d+)/);
+        if (match) min = Math.min(min, Number(match[1]));
+      }
+      return Number.isFinite(min) ? min : null;
+    });
+  const oldestBefore = await oldestRenderedIndex();
+  expect(oldestBefore).not.toBeNull();
+
+  // Arm the observer AFTER the initial window has settled, so the only
+  // mutations it sees are the prepend landing and any (buggy) badge unmount.
+  await timeline.evaluate((element, selector) => {
+    const scroller = element as HTMLDivElement;
+    const win = window as typeof window & {
+      __SUMMARY_FLASH_PROBE__?: { missingCommits: number };
+    };
+    const probe = { missingCommits: 0 };
+    win.__SUMMARY_FLASH_PROBE__ = probe;
+    new MutationObserver(() => {
+      if (!scroller.querySelector(selector)) {
+        probe.missingCommits += 1;
+      }
+    }).observe(scroller, { childList: true, subtree: true });
+  }, badgeSelector);
+
+  // Scroll back until a genuinely older page has landed.
+  await timeline.hover();
+  await expect
+    .poll(
+      async () => {
+        await page.mouse.wheel(0, -4000);
+        await page.waitForTimeout(50);
+        return oldestRenderedIndex();
+      },
+      { timeout: 20_000 },
+    )
+    .toBeLessThan(oldestBefore ?? Number.POSITIVE_INFINITY);
+
+  // The badge row must have stayed mounted through every DOM commit of the
+  // prepend — zero commits observed it missing — and still be attached now.
+  const missingCommits = await page.evaluate(
+    () =>
+      (
+        window as typeof window & {
+          __SUMMARY_FLASH_PROBE__?: { missingCommits: number };
+        }
+      ).__SUMMARY_FLASH_PROBE__?.missingCommits,
+  );
+  expect(missingCommits).toBe(0);
+  await expect(timeline.locator(badgeSelector)).toHaveCount(1);
+});

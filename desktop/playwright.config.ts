@@ -69,6 +69,7 @@ export default defineConfig({
         "**/human-edit-agent-content.spec.ts",
         "**/reaction-order.spec.ts",
         "**/send-channel-binding.spec.ts",
+        "**/persona-model-combobox-screenshots.spec.ts",
       ],
       use: {
         ...devices["Desktop Chrome"],

@@ -16,6 +16,11 @@ pub struct ProfileInfo {
     pub about: Option<String>,
     pub nip05_handle: Option<String>,
     pub owner_pubkey: Option<String>,
+    /// `true` when a real kind:0 event was found on the relay; `false` for the
+    /// synthesized fallback returned when no metadata event exists.  The
+    /// onboarding gate uses this to distinguish "new user with no profile" from
+    /// "returning user whose display_name happens to be empty".
+    pub has_profile_event: bool,
 }
 
 #[derive(Serialize, Deserialize)]

@@ -59,6 +59,7 @@ type RawProfile = {
   about: string | null;
   nip05_handle: string | null;
   owner_pubkey: string | null;
+  has_profile_event?: boolean;
 };
 
 type RawUserProfileSummary = Omit<RawProfile, "pubkey" | "about"> & {
@@ -427,6 +428,7 @@ function fromRawProfile(profile: RawProfile): Profile {
     about: profile.about,
     nip05Handle: profile.nip05_handle,
     ownerPubkey: profile.owner_pubkey,
+    hasProfileEvent: profile.has_profile_event ?? false,
   };
 }
 

@@ -10,6 +10,7 @@ import {
 import { getDmParticipantPreview } from "@/features/channels/lib/dmParticipantDisplay";
 import type { TimelineMessage } from "@/features/messages/types";
 import type { MainTimelineEntry } from "@/features/messages/lib/threadPanel";
+import type { ChannelWindowThreadSummary } from "@/features/messages/lib/channelWindowStore";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type { ChannelType } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
@@ -37,6 +38,9 @@ type MessageTimelineProps = {
   huddleMemberPubkeysPending?: boolean;
   messages: TimelineMessage[];
   mainEntries?: MainTimelineEntry[];
+  /** Relay thread summaries (root id → summary) for the deferred-pass entry
+   *  fallback, so badge rows survive while a scrollback page commits. */
+  threadSummaries?: ReadonlyMap<string, ChannelWindowThreadSummary>;
   directMessageIntro?: {
     displayName: string;
     participants: DirectMessageIntroParticipant[];
@@ -143,6 +147,7 @@ const MessageTimelineBase = React.forwardRef<
     directMessageIntro = null,
     messages,
     mainEntries,
+    threadSummaries,
     isLoading = false,
     emptyTitle = "No messages yet",
     emptyDescription = "Send the first message to start the thread.",
@@ -592,6 +597,7 @@ const MessageTimelineBase = React.forwardRef<
                     mainEntries={
                       deferredMessages === messages ? mainEntries : undefined
                     }
+                    threadSummaries={threadSummaries}
                     messages={deferredMessages}
                     onDelete={onDelete}
                     onEdit={onEdit}

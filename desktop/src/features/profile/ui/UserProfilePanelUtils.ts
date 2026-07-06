@@ -165,6 +165,8 @@ export function buildPersonaDraftProfile(persona: AgentPersona): Profile {
     about: null,
     nip05Handle: null,
     ownerPubkey: null,
+    // Draft profile synthesised from persona config — not backed by a kind:0 event.
+    hasProfileEvent: false,
   };
 }
 
