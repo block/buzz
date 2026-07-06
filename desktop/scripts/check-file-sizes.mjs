@@ -175,7 +175,10 @@ const overrides = new Map([
   // + deps-array entry in submitMessage closes the never-persisted-boundary
   // defect (Thufir Pass-3 finding). Load-bearing correctness fix; queued to
   // split MessageComposer into submit/edit/media sub-modules.
-  ["src/features/messages/ui/MessageComposer.tsx", 1003],
+  // +18: pendingImetaForPersistRef (local snapshot ref) + synchronous restore
+  // path writes in the draft-key effect body, fixing the image-drop bug on
+  // top-level nav switch (StrictMode simulate-unmount race on remount).
+  ["src/features/messages/ui/MessageComposer.tsx", 1021],
 ]);
 
 await runFileSizeCheck({
