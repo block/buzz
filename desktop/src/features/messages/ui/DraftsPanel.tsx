@@ -188,10 +188,7 @@ function DraftRowActionButton({
   );
 }
 
-export function canOpenDraft(
-  draft: DraftState,
-  source: DraftSource,
-): boolean {
+export function canOpenDraft(draft: DraftState, source: DraftSource): boolean {
   return (
     draft.status !== "sent" &&
     source.channel !== null &&

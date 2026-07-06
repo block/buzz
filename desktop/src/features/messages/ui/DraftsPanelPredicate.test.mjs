@@ -19,7 +19,11 @@ import test from "node:test";
 import { canOpenDraft } from "./DraftsPanel.tsx";
 
 // Minimal Channel stub — only the fields canOpenDraft reads (none; it checks null/non-null).
-const RESOLVED_CHANNEL = { id: "chan-1", visibility: "public", channelType: "channel" };
+const RESOLVED_CHANNEL = {
+  id: "chan-1",
+  visibility: "public",
+  channelType: "channel",
+};
 
 function activeDraft(channelId = "chan-1") {
   return {
