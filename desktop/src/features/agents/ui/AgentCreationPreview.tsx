@@ -297,7 +297,6 @@ export function AgentCreationPreview({
       popoverDragDepthRef.current += 1;
       event.dataTransfer.dropEffect = "copy";
       setIsPopoverDragOver(true);
-      // Switch to image tab when dragging a file
       setActiveTab("image");
     },
     [disabled],
@@ -367,22 +366,15 @@ export function AgentCreationPreview({
       {/* Single drop zone covering the entire popover */}
       <fieldset
         aria-label="Avatar picker"
-        className="relative m-0 border-0 p-0"
+        className={cn(
+          "relative m-0 rounded-lg border-2 border-transparent p-0 transition-[border-color,background-color] duration-150",
+          isPopoverDragOver && "border-dashed border-primary bg-primary/5",
+        )}
         onDragEnter={handlePopoverDragEnter}
         onDragLeave={handlePopoverDragLeave}
         onDragOver={handlePopoverDragOver}
         onDrop={handlePopoverDrop}
       >
-        {/* Full-popover drop overlay */}
-        {isPopoverDragOver ? (
-          <div className="absolute inset-0 z-50 flex flex-col items-center justify-center gap-2 rounded-lg border-2 border-dashed border-primary bg-primary/10">
-            <UploadCloud className="h-8 w-8 text-primary" />
-            <span className="text-sm font-medium text-primary">
-              Drop image here
-            </span>
-          </div>
-        ) : null}
-
         <Tabs
           className="w-full"
           onValueChange={(tab) => {
@@ -411,9 +403,7 @@ export function AgentCreationPreview({
           <div className="grid gap-2.5">
             {/* Click to browse zone */}
             <button
-              className={cn(
-                "relative flex h-[80px] flex-col items-center justify-center gap-1.5 overflow-hidden rounded-lg border border-transparent bg-muted text-foreground transition-[background-color,border-color,box-shadow,color] duration-200 ease-out hover:bg-muted/80 disabled:opacity-60",
-              )}
+              className="relative flex h-[80px] flex-col items-center justify-center gap-1.5 overflow-hidden rounded-lg border border-transparent bg-muted text-foreground transition-[background-color,border-color,box-shadow,color] duration-200 ease-out hover:bg-muted/80 disabled:opacity-60"
               disabled={disabled || isUploading}
               onClick={() => {
                 clearUploadError();
@@ -434,13 +424,13 @@ export function AgentCreationPreview({
               </span>
             </button>
 
-            {/* URL input — same style as profile editor */}
+            {/* URL input */}
             <div className="flex h-10 items-center gap-2.5 rounded-lg bg-muted px-3">
-              <Link2 className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+              <Link2 className="h-3.5 w-3.5 shrink-0 text-muted-foreground/60" />
               <input
                 autoCapitalize="none"
                 autoCorrect="off"
-                className="min-w-0 flex-1 bg-transparent text-xs font-medium text-foreground outline-none placeholder:text-muted-foreground"
+                className="min-w-0 flex-1 bg-transparent text-xs font-medium text-foreground outline-none placeholder:text-muted-foreground/50"
                 disabled={disabled || isUploading}
                 onBlur={() => applyAvatarUrl()}
                 onChange={(event) => setAvatarUrlDraft(event.target.value)}
@@ -500,10 +490,10 @@ export function AgentCreationPreview({
             ) : null}
           </div>
         ) : (
-          <div className="grid gap-3">
-            {/* Emoji picker */}
+          <div className="relative grid content-start gap-3">
+            {/* Emoji picker — no overflow-hidden so internal scroll works */}
             <div
-              className="buzz-emoji-mart relative z-0 h-[280px] overflow-hidden rounded-lg bg-muted"
+              className="buzz-emoji-mart relative z-0 h-[280px] rounded-lg bg-muted"
               ref={emojiPickerContainerRef}
               style={emojiMartThemeVars}
             >
@@ -743,7 +733,7 @@ export function AgentCreationPreview({
                 <button
                   aria-label="Add avatar"
                   className={cn(
-                    "flex h-full w-full items-center justify-center rounded-full border-2 border-dashed border-border bg-background text-primary shadow-xs transition-[background-color,border-color,color,box-shadow] duration-150 ease-out hover:border-primary/50 hover:bg-primary/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-default disabled:opacity-70",
+                    "group/add-avatar relative flex h-full w-full items-center justify-center rounded-full border-2 border-dashed border-border bg-background text-primary shadow-xs transition-[background-color,border-color,color,box-shadow] duration-150 ease-out hover:border-primary/50 hover:bg-primary/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-default disabled:opacity-70",
                     isDragOverAvatar &&
                       !isAvatarMenuOpen &&
                       "border-primary/70 bg-primary/5 ring-2 ring-primary/15",
@@ -758,7 +748,13 @@ export function AgentCreationPreview({
                       className="h-4 w-4 border-2"
                     />
                   ) : (
-                    <Plus aria-hidden="true" className="h-14 w-14" />
+                    <>
+                      <Plus aria-hidden="true" className="h-14 w-14" />
+                      {/* Pencil badge on empty state */}
+                      <span className="absolute bottom-0 right-0 flex h-9 w-9 items-center justify-center rounded-full bg-sidebar-active text-sidebar-active-foreground shadow-lg">
+                        <Pencil className="h-4 w-4" />
+                      </span>
+                    </>
                   )}
                 </button>
               </PopoverTrigger>
