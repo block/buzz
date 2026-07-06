@@ -837,7 +837,9 @@ jobs:
       - name: Test (buzz-dev-mcp)
         # The Windows-only bash resolver lives in buzz-dev-mcp; its unit tests
         # only gate if this crate is tested ON Windows.
-        run: cargo test -p buzz-dev-mcp --target $env:TARGET
+        # Serial: windows_resolver_tests mutate process-global env
+        # (BUZZ_SHELL/GIT_BASH/SystemRoot) that SharedState::new reads.
+        run: cargo test -p buzz-dev-mcp --target $env:TARGET -- --test-threads=1
       # Smoke-test the new host-prereq contract: Git for Windows (which provides
       # bash) is available on the runner, a shell command round-trips, and bash
       # does NOT resolve from System32 (so WSL's launcher is never picked up).

@@ -1189,15 +1189,14 @@ mod windows_resolver_tests {
         );
     }
 
-    /// F2: PATH-only discovery — a bash.exe custom-installed on PATH (not under
-    /// the standard Program Files locations) must be detected by detect_windows_bash
-    /// AND by resolve_bash (the runtime resolver). This ensures the UI prereq check
-    /// and the runtime resolver stay in parity: a custom install that works at
-    /// runtime must also satisfy the UI check.
+    /// PATH-only discovery — a bash.exe custom-installed on PATH (not under
+    /// the standard Program Files locations) must be found by the runtime
+    /// resolver. This verifies the PATH fallback in resolve_bash: a custom
+    /// install that lives outside Program Files is still usable as a shell.
     #[test]
     fn path_only_bash_is_found_by_scan() {
-        // scan_path_for_bash is the shared helper used by both the UI probe and
-        // the runtime resolver for the PATH fallback. Verify it returns the bash.
+        // scan_path_for_bash is the runtime resolver's PATH fallback helper.
+        // Verify it returns the bash.
         let real = tempdir().expect("real");
         let real_bash = real.path().join("bash.exe");
         touch(&real_bash);
