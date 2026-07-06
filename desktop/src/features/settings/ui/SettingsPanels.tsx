@@ -402,6 +402,12 @@ function ThemeSettingsCard() {
     setSelectedMode(mode);
     if (mode === "system") {
       setFollowSystem(true);
+      // If the current theme is unpaired, resolveSystemTheme can't switch it
+      // with the OS. Fall back to the first paired theme so System mode works.
+      const pair = getThemePair(selectedThemeName as SyntaxThemeName);
+      if (!pair && pairedLight.length > 0) {
+        setTheme(pairedLight[0]);
+      }
     } else {
       setFollowSystem(false);
       // Switch to the counterpart theme when the current theme doesn't match
