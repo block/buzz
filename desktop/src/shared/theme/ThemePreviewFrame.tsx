@@ -47,7 +47,7 @@ function ThemePreviewSvg({ vars }: { vars: ThemePreviewVars | null }) {
   return (
     <svg
       aria-hidden="true"
-      className="h-24 w-[142px] shrink-0 drop-shadow-sm"
+      className="h-full w-full shrink-0 drop-shadow-sm"
       fill="none"
       viewBox="0 0 118 80"
       xmlns="http://www.w3.org/2000/svg"
@@ -467,10 +467,7 @@ export function ThemePreviewFrame({
 }) {
   return (
     <div
-      className={cn(
-        "relative h-28 w-[158px] overflow-hidden rounded-md border",
-        className,
-      )}
+      className={cn("relative overflow-hidden rounded-2xl border", className)}
       style={{
         backgroundColor: hsl(vars, "--muted"),
         borderColor: hsl(vars, "--border"),
@@ -499,7 +496,7 @@ export function SystemPreferencePreviewFrame({
   return (
     <div
       className={cn(
-        "relative overflow-hidden rounded-md border border-border/70",
+        "relative overflow-hidden rounded-2xl border border-border/70",
         className,
       )}
     >

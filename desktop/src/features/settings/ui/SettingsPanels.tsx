@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { type ReactNode, useMemo, useState } from "react";
 import {
   BellRing,
   Bot,
@@ -261,14 +261,14 @@ function PairedThemeTile({
   return (
     <button
       aria-pressed={isActive}
-      className="group flex w-[140px] shrink-0 flex-col items-center text-center focus-visible:outline-hidden"
+      className="group flex w-[168px] shrink-0 flex-col items-center text-center focus-visible:outline-hidden"
       data-testid={`theme-pair-${lightName}`}
       onClick={onSelect}
       type="button"
     >
       <SystemPreferencePreviewFrame
         className={cn(
-          "h-[94px] w-[140px] transition-shadow",
+          "h-[112px] w-[168px] transition-shadow",
           isActive
             ? "ring-2 ring-primary ring-offset-2 ring-offset-background"
             : "group-hover:ring-2 group-hover:ring-border",
@@ -304,14 +304,14 @@ function SingleThemeTile({
   return (
     <button
       aria-pressed={isActive}
-      className="group flex w-[140px] shrink-0 flex-col items-center text-center focus-visible:outline-hidden"
+      className="group flex w-[168px] shrink-0 flex-col items-center text-center focus-visible:outline-hidden"
       data-testid={`theme-option-${name}`}
       onClick={onSelect}
       type="button"
     >
       <ThemePreviewFrame
         className={cn(
-          "h-[94px] w-[140px] transition-shadow",
+          "h-[112px] w-[168px] transition-shadow",
           isActive
             ? "ring-2 ring-primary ring-offset-2 ring-offset-background"
             : "group-hover:ring-2 group-hover:ring-border",
@@ -327,6 +327,35 @@ function SingleThemeTile({
         {formatThemeLabel(name)}
       </span>
     </button>
+  );
+}
+
+function HorizontalScrollWithFade({
+  children,
+  expanded,
+}: {
+  children: ReactNode;
+  expanded: boolean;
+}) {
+  if (expanded) {
+    return <div className="flex flex-wrap gap-3 p-1">{children}</div>;
+  }
+
+  return (
+    <div className="relative">
+      <div className="flex gap-3 overflow-x-auto p-1 pb-2 [scrollbar-width:thin]">
+        {children}
+      </div>
+      {/* Right fade */}
+      <div
+        aria-hidden="true"
+        className="pointer-events-none absolute inset-y-0 right-0 w-8"
+        style={{
+          background:
+            "linear-gradient(to left, hsl(var(--background)), hsl(var(--background) / 0))",
+        }}
+      />
+    </div>
   );
 }
 
@@ -387,7 +416,7 @@ function ThemeSettingsCard() {
 
       {/* Section 1: Paired themes (follow system) */}
       <div className="mb-6">
-        <div className="mb-1 flex items-center justify-between">
+        <div className="mb-3 flex items-center justify-between">
           <h3 className="text-sm font-medium text-foreground">
             Adapts to system
           </h3>
@@ -401,17 +430,7 @@ function ThemeSettingsCard() {
             </button>
           )}
         </div>
-        <p className="mb-3 text-2xs text-muted-foreground">
-          Automatically switches between light and dark with your system
-          preferences.
-        </p>
-        <div
-          className={
-            expandedSections.paired
-              ? "flex flex-wrap gap-3"
-              : "flex gap-3 overflow-x-auto pb-2 [scrollbar-width:thin]"
-          }
-        >
+        <HorizontalScrollWithFade expanded={!!expandedSections.paired}>
           {pairedLight.map((lightName) => {
             const darkName = getThemePair(lightName);
             if (!darkName) return null;
@@ -426,13 +445,13 @@ function ThemeSettingsCard() {
               />
             );
           })}
-        </div>
+        </HorizontalScrollWithFade>
       </div>
 
       {/* Section 2: Light-only themes */}
       {lightOnly.length > 0 && (
         <div className="mb-6">
-          <div className="mb-1 flex items-center justify-between">
+          <div className="mb-3 flex items-center justify-between">
             <h3 className="text-sm font-medium text-foreground">Light</h3>
             {lightOnly.length > 4 && (
               <button
@@ -444,16 +463,7 @@ function ThemeSettingsCard() {
               </button>
             )}
           </div>
-          <p className="mb-3 text-2xs text-muted-foreground">
-            Always uses a light appearance.
-          </p>
-          <div
-            className={
-              expandedSections.light
-                ? "flex flex-wrap gap-3"
-                : "flex gap-3 overflow-x-auto pb-2 [scrollbar-width:thin]"
-            }
-          >
+          <HorizontalScrollWithFade expanded={!!expandedSections.light}>
             {lightOnly.map((name) => (
               <SingleThemeTile
                 isActive={selectedThemeName === name}
@@ -463,14 +473,14 @@ function ThemeSettingsCard() {
                 vars={getVars(name)}
               />
             ))}
-          </div>
+          </HorizontalScrollWithFade>
         </div>
       )}
 
       {/* Section 3: Dark-only themes */}
       {darkOnly.length > 0 && (
         <div className="mb-6">
-          <div className="mb-1 flex items-center justify-between">
+          <div className="mb-3 flex items-center justify-between">
             <h3 className="text-sm font-medium text-foreground">Dark</h3>
             {darkOnly.length > 4 && (
               <button
@@ -482,16 +492,7 @@ function ThemeSettingsCard() {
               </button>
             )}
           </div>
-          <p className="mb-3 text-2xs text-muted-foreground">
-            Always uses a dark appearance.
-          </p>
-          <div
-            className={
-              expandedSections.dark
-                ? "flex flex-wrap gap-3"
-                : "flex gap-3 overflow-x-auto pb-2 [scrollbar-width:thin]"
-            }
-          >
+          <HorizontalScrollWithFade expanded={!!expandedSections.dark}>
             {darkOnly.map((name) => (
               <SingleThemeTile
                 isActive={selectedThemeName === name}
@@ -501,7 +502,7 @@ function ThemeSettingsCard() {
                 vars={getVars(name)}
               />
             ))}
-          </div>
+          </HorizontalScrollWithFade>
         </div>
       )}
 
