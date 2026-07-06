@@ -1,7 +1,7 @@
 import emojiData from "@emoji-mart/data";
 import Picker from "@emoji-mart/react";
 import * as React from "react";
-import { Pencil, Plus } from "lucide-react";
+import { Link2, Pencil, Plus, UploadCloud } from "lucide-react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
@@ -15,12 +15,12 @@ import {
   DEFAULT_EMOJI_AVATAR_COLOR,
   EMOJI_MART_CATEGORIES,
   type AvatarColorSwatch,
+  contrastColorForBackground,
   emojiAvatarDataUrl,
   hexToHsv,
   hsvToHex,
   normalizeHue,
   parseEmojiAvatarDataUrl,
-  contrastColorForBackground,
   useEmojiMartStyles,
   useEmojiMartThemeVars,
 } from "@/features/profile/ui/ProfileAvatarEditor.utils";
@@ -29,7 +29,6 @@ import { useAvatarUpload } from "@/features/profile/useAvatarUpload";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 import { useEmojiBurst } from "@/shared/ui/EmojiBurstProvider";
-import { Input } from "@/shared/ui/input";
 import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
 import { Spinner } from "@/shared/ui/spinner";
 import { Tabs, TabsList, TabsTrigger } from "@/shared/ui/tabs";
@@ -43,7 +42,7 @@ const AVATAR_APPLY_MOTION_TRANSITION = {
   ease: [0.23, 1, 0.32, 1],
 } as const;
 
-type AvatarTab = "upload" | "emoji";
+type AvatarTab = "image" | "emoji";
 
 type EmojiMartEmoji = {
   native?: string;
@@ -68,9 +67,7 @@ export function AgentCreationPreview({
   const [isDragOverAvatar, setIsDragOverAvatar] = React.useState(false);
   const [isAvatarMenuOpen, setIsAvatarMenuOpen] = React.useState(false);
   const [avatarUrlDraft, setAvatarUrlDraft] = React.useState("");
-  const [isAvatarUrlInputFocused, setIsAvatarUrlInputFocused] =
-    React.useState(false);
-  const [activeTab, setActiveTab] = React.useState<AvatarTab>("upload");
+  const [activeTab, setActiveTab] = React.useState<AvatarTab>("image");
   const [selectedEmoji, setSelectedEmoji] = React.useState<string | null>(null);
   const [selectedColor, setSelectedColor] = React.useState(
     DEFAULT_EMOJI_AVATAR_COLOR,
@@ -82,7 +79,9 @@ export function AgentCreationPreview({
   const [customValue, setCustomValue] = React.useState(DEFAULT_CUSTOM_VALUE);
   const [isCustomColorPickerOpen, setIsCustomColorPickerOpen] =
     React.useState(false);
+  const [isImageDropActive, setIsImageDropActive] = React.useState(false);
   const avatarDragDepthRef = React.useRef(0);
+  const imageDragDepthRef = React.useRef(0);
   const shouldReduceMotion = useReducedMotion();
   const emojiPickerContainerRef = React.useRef<HTMLDivElement | null>(null);
   const emojiMartThemeVars = useEmojiMartThemeVars();
@@ -96,7 +95,10 @@ export function AgentCreationPreview({
     uploadFile: uploadAvatarFile,
     handleFileChange: handleAvatarUploadFileChange,
   } = useAvatarUpload({
-    onUploadSuccess: onSelectAvatar,
+    onUploadSuccess: (url) => {
+      onSelectAvatar(url);
+      setIsAvatarMenuOpen(false);
+    },
   });
 
   useEmojiMartStyles(emojiPickerContainerRef, activeTab === "emoji");
@@ -117,7 +119,6 @@ export function AgentCreationPreview({
   React.useEffect(() => {
     if (isAvatarMenuOpen) {
       setAvatarUrlDraft("");
-      setIsAvatarUrlInputFocused(false);
 
       const parsed = parseEmojiAvatarDataUrl(avatarUrl ?? "");
       if (parsed) {
@@ -125,7 +126,7 @@ export function AgentCreationPreview({
         setSelectedColor(parsed.color);
         setActiveTab("emoji");
       } else {
-        setActiveTab("upload");
+        setActiveTab("image");
       }
     }
   }, [isAvatarMenuOpen, avatarUrl]);
@@ -202,7 +203,6 @@ export function AgentCreationPreview({
     }),
     [avatarEditClipId],
   );
-  const hasAvatarUrlDraft = avatarUrlDraft.trim().length > 0;
   const hasAvatar = (avatarUrl?.trim().length ?? 0) > 0;
   const applyButtonTransition = shouldReduceMotion
     ? { duration: 0 }
@@ -271,10 +271,8 @@ export function AgentCreationPreview({
     [clearUploadError, disabled, isUploading, uploadAvatarFile],
   );
 
-  const shouldShowColorControls =
-    activeTab === "emoji" && selectedEmoji !== null;
   const isCustomColorPickerVisible =
-    isCustomColorPickerOpen && shouldShowColorControls;
+    isCustomColorPickerOpen && selectedEmoji !== null;
 
   const avatarMenuContent = (
     <PopoverContent
@@ -294,7 +292,7 @@ export function AgentCreationPreview({
         <TabsList className="mb-3 grid h-9 w-full grid-cols-2 rounded-lg bg-muted p-0.5">
           <TabsTrigger
             className="h-full rounded-md text-xs font-medium data-[state=active]:bg-background data-[state=active]:shadow-sm"
-            value="upload"
+            value="image"
           >
             Image
           </TabsTrigger>
@@ -307,77 +305,151 @@ export function AgentCreationPreview({
         </TabsList>
       </Tabs>
 
-      {activeTab === "upload" ? (
-        <div className="space-y-1">
+      {activeTab === "image" ? (
+        <div className="grid gap-2.5">
+          {/* Drop / browse zone — mini version of profile editor */}
           <button
-            className="flex min-h-9 w-full items-center rounded-lg px-2.5 text-left text-sm outline-hidden transition-colors duration-150 ease-out hover:bg-muted/50 focus-visible:bg-muted/50 focus-visible:outline-none disabled:pointer-events-none disabled:opacity-50"
+            className={cn(
+              "relative flex h-[80px] flex-col items-center justify-center gap-1.5 overflow-hidden rounded-lg border border-transparent bg-muted text-foreground transition-[background-color,border-color,box-shadow,color] duration-200 ease-out hover:bg-muted/80 disabled:opacity-60",
+              isImageDropActive &&
+                "border-primary bg-primary/10 text-primary ring-1 ring-primary/35 hover:bg-primary/10",
+            )}
             disabled={disabled || isUploading}
             onClick={() => {
               clearUploadError();
               openUploadPicker();
-              setIsAvatarMenuOpen(false);
+            }}
+            onDragEnter={(event) => {
+              if (disabled || !isAvatarFileDrag(event)) {
+                return;
+              }
+              event.preventDefault();
+              event.stopPropagation();
+              imageDragDepthRef.current += 1;
+              event.dataTransfer.dropEffect = "copy";
+              setIsImageDropActive(true);
+            }}
+            onDragLeave={(event) => {
+              if (!isAvatarFileDrag(event)) {
+                return;
+              }
+              event.preventDefault();
+              event.stopPropagation();
+              imageDragDepthRef.current = Math.max(
+                0,
+                imageDragDepthRef.current - 1,
+              );
+              if (imageDragDepthRef.current === 0) {
+                setIsImageDropActive(false);
+              }
+            }}
+            onDragOver={(event) => {
+              if (disabled || !isAvatarFileDrag(event)) {
+                return;
+              }
+              event.preventDefault();
+              event.stopPropagation();
+              event.dataTransfer.dropEffect = "copy";
+              setIsImageDropActive(true);
+            }}
+            onDrop={(event) => {
+              if (!isAvatarFileDrag(event)) {
+                return;
+              }
+              event.preventDefault();
+              event.stopPropagation();
+              imageDragDepthRef.current = 0;
+              setIsImageDropActive(false);
+              const file = event.dataTransfer.files[0];
+              if (!file || disabled || isUploading) {
+                return;
+              }
+              clearUploadError();
+              void uploadAvatarFile(file);
             }}
             type="button"
           >
-            Upload an image
-          </button>
-          <form
-            className="flex min-h-9 items-center gap-2 rounded-lg px-2.5 py-1.5 transition-colors duration-150 ease-out focus-within:bg-muted/50"
-            onSubmit={(event) => {
-              event.preventDefault();
-              event.stopPropagation();
-              applyAvatarUrl();
-            }}
-          >
-            <label className="sr-only" htmlFor="agent-avatar-url">
-              Use a URL
-            </label>
-            <Input
-              autoCapitalize="none"
-              autoComplete="off"
-              autoCorrect="off"
+            {isUploading ? (
+              <Spinner
+                aria-hidden
+                className="h-5 w-5 border-2 text-muted-foreground"
+              />
+            ) : (
+              <UploadCloud
+                className={cn(
+                  "h-5 w-5 text-muted-foreground transition-colors duration-200 ease-out",
+                  isImageDropActive && "text-primary",
+                )}
+              />
+            )}
+            <span
               className={cn(
-                "h-7 min-w-0 flex-1 border-0 bg-transparent px-0 py-0 text-sm shadow-none outline-none focus-visible:ring-0",
-                isAvatarUrlInputFocused
-                  ? "placeholder:text-muted-foreground/55"
-                  : "placeholder:text-popover-foreground",
+                "text-xs font-medium text-muted-foreground transition-colors duration-200 ease-out",
+                isImageDropActive && "text-primary",
               )}
+            >
+              {isUploading
+                ? "Uploading..."
+                : isImageDropActive
+                  ? "Drop image here"
+                  : "Drop or browse"}
+            </span>
+          </button>
+
+          {/* URL input — same style as profile editor */}
+          <div className="flex h-10 items-center gap-2.5 rounded-lg bg-muted px-3">
+            <Link2 className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+            <input
+              autoCapitalize="none"
+              autoCorrect="off"
+              className="min-w-0 flex-1 bg-transparent text-xs font-medium text-foreground outline-none placeholder:text-muted-foreground"
               disabled={disabled || isUploading}
-              id="agent-avatar-url"
-              onBlur={() => setIsAvatarUrlInputFocused(false)}
+              onBlur={() => applyAvatarUrl()}
               onChange={(event) => setAvatarUrlDraft(event.target.value)}
-              onFocus={() => setIsAvatarUrlInputFocused(true)}
-              placeholder={
-                isAvatarUrlInputFocused ? "https://..." : "Use a URL"
-              }
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  event.preventDefault();
+                  applyAvatarUrl();
+                }
+              }}
+              placeholder="Paste a URL"
               spellCheck={false}
+              type="url"
               value={avatarUrlDraft}
             />
             <AnimatePresence initial={false}>
-              {hasAvatarUrlDraft ? (
+              {avatarUrlDraft.trim().length > 0 ? (
                 <motion.div
                   animate={{ opacity: 1, scale: 1, width: "auto" }}
                   className="overflow-hidden"
                   exit={{ opacity: 0, scale: 0.96, width: 0 }}
                   initial={{ opacity: 0, scale: 0.96, width: 0 }}
-                  key="apply-avatar-url"
+                  key="apply-url"
                   transition={applyButtonTransition}
                 >
                   <Button
-                    className="h-7 px-2 text-xs"
+                    className="h-6 px-2 text-2xs"
                     disabled={disabled || isUploading}
+                    onClick={() => applyAvatarUrl()}
                     size="xs"
-                    type="submit"
+                    type="button"
                   >
                     Apply
                   </Button>
                 </motion.div>
               ) : null}
             </AnimatePresence>
-          </form>
+          </div>
+
+          {uploadErrorMessage ? (
+            <p className="rounded-lg bg-destructive/10 px-3 py-2 text-xs font-medium text-destructive">
+              {uploadErrorMessage}
+            </p>
+          ) : null}
+
           {hasAvatar && onClearAvatar ? (
             <button
-              className="flex min-h-9 w-full items-center rounded-lg px-2.5 text-left text-sm text-destructive outline-hidden transition-colors duration-150 ease-out hover:bg-destructive/10 focus-visible:bg-destructive/10 focus-visible:outline-none disabled:pointer-events-none disabled:opacity-50"
+              className="flex min-h-8 w-full items-center justify-center rounded-lg text-xs text-destructive outline-hidden transition-colors duration-150 ease-out hover:bg-destructive/10 focus-visible:bg-destructive/10 focus-visible:outline-none disabled:pointer-events-none disabled:opacity-50"
               disabled={disabled || isUploading}
               onClick={() => {
                 onClearAvatar();
@@ -390,9 +462,10 @@ export function AgentCreationPreview({
           ) : null}
         </div>
       ) : (
-        <div className="space-y-3">
+        <div className="grid gap-3">
+          {/* Emoji picker */}
           <div
-            className="buzz-emoji-mart relative z-0 h-[280px] overflow-hidden rounded-lg bg-muted"
+            className="buzz-emoji-mart relative z-0 h-[240px] overflow-hidden rounded-lg bg-muted"
             ref={emojiPickerContainerRef}
             style={emojiMartThemeVars}
           >
@@ -431,68 +504,58 @@ export function AgentCreationPreview({
             />
           </div>
 
-          <div
-            aria-hidden={!shouldShowColorControls}
-            className={cn(
-              "origin-top overflow-hidden transition-[max-height,margin,opacity,transform] duration-200 ease-out",
-              shouldShowColorControls
-                ? "max-h-64 scale-100 opacity-100"
-                : "max-h-0 scale-[0.96] opacity-0",
-            )}
-            inert={shouldShowColorControls ? undefined : true}
-          >
-            <div className="grid grid-cols-8 justify-items-center gap-2 rounded-lg bg-muted p-3">
-              {AVATAR_COLOR_SWATCHES.map((swatch) => {
-                const isCustomSwatch = swatch === CUSTOM_AVATAR_COLOR_SWATCH;
-                const isSelected = isCustomSwatch
-                  ? !AVATAR_COLORS.some(
-                      (color) =>
-                        color.toUpperCase() === selectedColor.toUpperCase(),
-                    )
-                  : swatch.toUpperCase() === selectedColor.toUpperCase();
+          {/* Color swatches — always visible */}
+          <div className="grid grid-cols-8 justify-items-center gap-2 rounded-lg bg-muted p-3">
+            {AVATAR_COLOR_SWATCHES.map((swatch) => {
+              const isCustomSwatch = swatch === CUSTOM_AVATAR_COLOR_SWATCH;
+              const isSelected = isCustomSwatch
+                ? !AVATAR_COLORS.some(
+                    (color) =>
+                      color.toUpperCase() === selectedColor.toUpperCase(),
+                  )
+                : swatch.toUpperCase() === selectedColor.toUpperCase();
 
-                return (
-                  <button
-                    aria-label={
-                      isCustomSwatch
-                        ? selectedEmoji
-                          ? "Choose custom color"
-                          : "Choose an emoji first"
-                        : `Use ${swatch} background`
-                    }
-                    aria-pressed={isSelected}
-                    className={cn(
-                      "relative h-7 w-7 rounded-full border border-border transition-transform duration-150 ease-out hover:scale-[1.15] focus-visible:scale-[1.15] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-                      isCustomSwatch &&
-                        !selectedEmoji &&
-                        "cursor-not-allowed opacity-45 hover:scale-100 focus-visible:scale-100",
-                    )}
-                    disabled={isCustomSwatch && !selectedEmoji}
-                    key={swatch}
-                    onClick={() => handleColorSelect(swatch)}
-                    style={{
-                      background: isCustomSwatch
-                        ? isSelected
-                          ? selectedColor
-                          : "conic-gradient(from 0deg, #ff4d4d, #ffe75c, #73ef75, #63c6f2, #b141ff, #ff4d4d)"
-                        : swatch,
-                    }}
-                    type="button"
-                  >
-                    {isSelected ? (
-                      <span
-                        className="absolute inset-0.5 rounded-full border-2"
-                        style={{
-                          borderColor: contrastColorForBackground(
-                            isCustomSwatch ? selectedColor : swatch,
-                          ),
-                        }}
-                      />
-                    ) : null}
-                  </button>
-                );
-              })}
-            </div>
+              return (
+                <button
+                  aria-label={
+                    isCustomSwatch
+                      ? selectedEmoji
+                        ? "Choose custom color"
+                        : "Choose an emoji first"
+                      : `Use ${swatch} background`
+                  }
+                  aria-pressed={isSelected}
+                  className={cn(
+                    "relative h-7 w-7 rounded-full border border-border transition-transform duration-150 ease-out hover:scale-[1.15] focus-visible:scale-[1.15] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                    isCustomSwatch &&
+                      !selectedEmoji &&
+                      "cursor-not-allowed opacity-45 hover:scale-100 focus-visible:scale-100",
+                  )}
+                  disabled={isCustomSwatch && !selectedEmoji}
+                  key={swatch}
+                  onClick={() => handleColorSelect(swatch)}
+                  style={{
+                    background: isCustomSwatch
+                      ? isSelected
+                        ? selectedColor
+                        : "conic-gradient(from 0deg, #ff4d4d, #ffe75c, #73ef75, #63c6f2, #b141ff, #ff4d4d)"
+                      : swatch,
+                  }}
+                  type="button"
+                >
+                  {isSelected ? (
+                    <span
+                      className="absolute inset-0.5 rounded-full border-2"
+                      style={{
+                        borderColor: contrastColorForBackground(
+                          isCustomSwatch ? selectedColor : swatch,
+                        ),
+                      }}
+                    />
+                  ) : null}
+                </button>
+              );
+            })}
           </div>
 
           <AvatarCustomColorPanel
