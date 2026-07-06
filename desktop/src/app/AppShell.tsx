@@ -824,7 +824,7 @@ export function AppShell() {
                           <SidebarInset
                             ref={mainInsetRef}
                             className="isolate min-h-0 min-w-0 overflow-hidden bg-sidebar"
-                            style={chromeCssVarDefaults}
+                            style={chromeCssVarDefaults as React.CSSProperties}
                           >
                             <div className="relative z-10 mb-2 ml-px mr-2 mt-px flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl bg-background shadow-[-1px_-1px_0_0_hsl(var(--sidebar-border)/0.45)]">
                               <Outlet />
