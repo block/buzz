@@ -22,6 +22,20 @@ async function storedSidebarWidth(page: Page) {
   );
 }
 
+// Regression guard for the "Leave channel" lockup: opening a modal AlertDialog
+// from a modal Radix ContextMenu leaves `pointer-events: none` stuck on <body>
+// after the dialog closes, freezing the whole app. The fix makes the sidebar
+// context menus non-modal. This asserts the app is still interactive.
+async function expectAppClickable(page: Page) {
+  await expect
+    .poll(() =>
+      page.evaluate(() => getComputedStyle(document.body).pointerEvents),
+    )
+    .not.toBe("none");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+}
+
 async function dragSidebarRail(page: Page, deltaX: number) {
   const sidebarRail = page.locator('[data-sidebar="rail"]');
   await expect(sidebarRail).toBeVisible();
@@ -40,6 +54,29 @@ async function dragSidebarRail(page: Page, deltaX: number) {
   await page.mouse.move(startX + deltaX, startY, { steps: 8 });
   await page.mouse.up();
 }
+
+test("leaving a channel from the context menu never freezes the app", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await expect(page.getByTestId("app-sidebar")).toBeVisible();
+
+  // Cancel path: dialog opens from the context menu, then is dismissed.
+  await page.getByTestId("channel-random").click({ button: "right" });
+  await page.getByRole("menuitem", { name: "Leave channel" }).click();
+  await expect(page.getByRole("alertdialog")).toBeVisible();
+  await page.getByRole("button", { name: "Cancel" }).click();
+  await expect(page.getByRole("alertdialog")).toHaveCount(0);
+  await expectAppClickable(page);
+
+  // Confirm path: same overlay lifecycle, plus the leave mutation.
+  await page.getByTestId("channel-random").click({ button: "right" });
+  await page.getByRole("menuitem", { name: "Leave channel" }).click();
+  await expect(page.getByRole("alertdialog")).toBeVisible();
+  await page.getByRole("button", { name: "Leave" }).click();
+  await expect(page.getByRole("alertdialog")).toHaveCount(0);
+  await expectAppClickable(page);
+});
 
 test("fades the pinned sidebar chrome edges", async ({ page }) => {
   await page.goto("/");
