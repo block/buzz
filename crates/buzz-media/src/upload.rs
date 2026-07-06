@@ -11,6 +11,7 @@ use crate::error::MediaError;
 use crate::storage::{BlobMeta, MediaStorage};
 use crate::thumbnail::generate_image_metadata_sync;
 use crate::types::BlobDescriptor;
+use crate::upload_record::{record_upload_event, UploadAttribution, UploadEventFacts};
 use crate::validation::{
     mime_to_ext, validate_content, validate_file_content, validate_video_file,
 };
@@ -31,12 +32,19 @@ use crate::validation::{
 /// key, the both-exist idempotency short-circuit, blob store, orphan-blob
 /// handling, and descriptor build — is common. The streaming video path stays
 /// separate (see [`process_video_upload`]) because it never buffers in RAM.
+///
+/// `attribution` is `Some` when per-event upload records are enabled
+/// (`BUZZ_MEDIA_UPLOAD_RECORDS`): a record is then written for **every**
+/// accepted upload — including the idempotent short-circuit, which does no
+/// blob PUT and would otherwise be invisible to the moderation pipeline. The
+/// record is written last, after all other objects are durably stored.
 async fn process_buffered_upload<V, M, Fut>(
     storage: &MediaStorage,
     config: &MediaConfig,
     ctx: &TenantContext,
     auth_event: &nostr::Event,
     body: Bytes,
+    attribution: Option<UploadAttribution>,
     validate: V,
     store_metadata: M,
 ) -> Result<BlobDescriptor, MediaError>
@@ -72,6 +80,26 @@ where
     let blob_exists = storage.head(&key).await?;
     if sidecar_exists && blob_exists {
         let meta = storage.get_sidecar(ctx, &sha256).await?;
+        // A re-upload of known bytes is still a distinct upload *event*: no
+        // blob PUT happens, so without this record the uploader would be
+        // invisible to the moderation pipeline (and takedown re-uploads
+        // would go unscanned).
+        if let Some(attribution) = &attribution {
+            record_upload_event(
+                storage,
+                ctx,
+                &auth_event.pubkey,
+                attribution,
+                UploadEventFacts {
+                    sha256: &sha256,
+                    ext: &ext,
+                    mime: &mime,
+                    size: body.len() as u64,
+                    uploaded_at: chrono::Utc::now().timestamp(),
+                },
+            )
+            .await?;
+        }
         return Ok(build_descriptor(
             config,
             &sha256,
@@ -105,15 +133,37 @@ where
     .await;
 
     match meta_result {
-        Ok(meta) => Ok(build_descriptor(
-            config,
-            &sha256,
-            &ext,
-            &mime,
-            body.len() as u64,
-            Some(&meta),
-            uploaded_at,
-        )),
+        Ok(meta) => {
+            // Per-event record LAST — blob, thumbnail, and sidecar are all
+            // durably stored, so the record's ObjectCreated event (the
+            // moderation scan trigger) implies everything it references is
+            // readable.
+            if let Some(attribution) = &attribution {
+                record_upload_event(
+                    storage,
+                    ctx,
+                    &auth_event.pubkey,
+                    attribution,
+                    UploadEventFacts {
+                        sha256: &sha256,
+                        ext: &ext,
+                        mime: &mime,
+                        size: body.len() as u64,
+                        uploaded_at,
+                    },
+                )
+                .await?;
+            }
+            Ok(build_descriptor(
+                config,
+                &sha256,
+                &ext,
+                &mime,
+                body.len() as u64,
+                Some(&meta),
+                uploaded_at,
+            ))
+        }
         Err(e) => {
             tracing::warn!(sha256 = %sha256, error = %e, "metadata generation failed; orphan blob left for GC");
             Err(e)
@@ -143,6 +193,7 @@ pub async fn process_upload(
     ctx: &TenantContext,
     auth_event: &nostr::Event,
     body: Bytes,
+    attribution: Option<UploadAttribution>,
 ) -> Result<BlobDescriptor, MediaError> {
     process_buffered_upload(
         storage,
@@ -150,6 +201,7 @@ pub async fn process_upload(
         ctx,
         auth_event,
         body,
+        attribution,
         |bytes, cfg| {
             let mime = validate_content(bytes, cfg)?;
             let ext = mime_to_ext(&mime).to_string();
@@ -176,6 +228,7 @@ pub async fn process_file_upload(
     ctx: &TenantContext,
     auth_event: &nostr::Event,
     body: Bytes,
+    attribution: Option<UploadAttribution>,
 ) -> Result<BlobDescriptor, MediaError> {
     process_buffered_upload(
         storage,
@@ -183,6 +236,7 @@ pub async fn process_file_upload(
         ctx,
         auth_event,
         body,
+        attribution,
         |bytes, cfg| validate_file_content(bytes, cfg),
         |input| async move {
             // Minimal sidecar — no thumbnail/dim/blurhash/duration for generic files.
@@ -221,6 +275,7 @@ pub async fn process_video_upload(
     auth_event: &nostr::Event,
     body_stream: impl futures_core::Stream<Item = Result<Bytes, axum::Error>> + Send + 'static,
     content_length: Option<u64>,
+    attribution: Option<UploadAttribution>,
 ) -> Result<BlobDescriptor, MediaError> {
     // --- 1. Stream body to temp file, compute SHA-256 incrementally ---
     let tmp = tempfile::NamedTempFile::new().map_err(|e| MediaError::Io(e.to_string()))?;
@@ -357,6 +412,24 @@ pub async fn process_video_upload(
     let blob_exists = storage.head(&key).await?;
     if sidecar_exists && blob_exists {
         let meta = storage.get_sidecar(ctx, &sha256_hex).await?;
+        // Re-upload of known bytes: still a distinct upload event — see the
+        // buffered path's short-circuit for the rationale.
+        if let Some(attribution) = &attribution {
+            record_upload_event(
+                storage,
+                ctx,
+                &auth_event.pubkey,
+                attribution,
+                UploadEventFacts {
+                    sha256: &sha256_hex,
+                    ext,
+                    mime: &mime,
+                    size: file_size,
+                    uploaded_at: chrono::Utc::now().timestamp(),
+                },
+            )
+            .await?;
+        }
         return Ok(build_descriptor(
             config,
             &sha256_hex,
@@ -386,6 +459,24 @@ pub async fn process_video_upload(
         duration_secs: Some(video_meta.duration_secs),
     };
     storage.put_sidecar(ctx, &sha256_hex, &meta).await?;
+
+    // Per-event record LAST — see the buffered path for ordering rationale.
+    if let Some(attribution) = &attribution {
+        record_upload_event(
+            storage,
+            ctx,
+            &auth_event.pubkey,
+            attribution,
+            UploadEventFacts {
+                sha256: &sha256_hex,
+                ext,
+                mime: &mime,
+                size: file_size,
+                uploaded_at,
+            },
+        )
+        .await?;
+    }
 
     Ok(build_descriptor(
         config,
@@ -467,6 +558,9 @@ mod tests {
             max_video_bytes: 524_288_000,
             max_file_bytes: 104_857_600,
             public_base_url: "https://media.example.com".to_string(),
+            upload_records_enabled: false,
+            upload_ip_header: None,
+            upload_port_header: None,
         }
     }
 

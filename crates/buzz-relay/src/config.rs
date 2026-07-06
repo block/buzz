@@ -363,6 +363,20 @@ impl Config {
                 .unwrap_or(100 * 1024 * 1024),
             public_base_url: std::env::var("BUZZ_MEDIA_BASE_URL")
                 .unwrap_or_else(|_| "http://localhost:3000/media".to_string()),
+            // Per-upload-event records (`_uploads/` moderation side channel).
+            // Off by default; coherence between the three knobs is enforced in
+            // MediaConfig::validate at startup.
+            upload_records_enabled: std::env::var("BUZZ_MEDIA_UPLOAD_RECORDS")
+                .map(|v| v == "true" || v == "1")
+                .unwrap_or(false),
+            upload_ip_header: std::env::var("BUZZ_MEDIA_UPLOAD_IP_HEADER")
+                .ok()
+                .map(|s| s.trim().to_lowercase())
+                .filter(|s| !s.is_empty()),
+            upload_port_header: std::env::var("BUZZ_MEDIA_UPLOAD_PORT_HEADER")
+                .ok()
+                .map(|s| s.trim().to_lowercase())
+                .filter(|s| !s.is_empty()),
         };
         let media_max_concurrent_uploads: usize =
             std::env::var("BUZZ_MEDIA_MAX_CONCURRENT_UPLOADS")
