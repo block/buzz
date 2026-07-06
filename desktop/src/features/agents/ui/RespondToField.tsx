@@ -112,6 +112,11 @@ export function CreateAgentRespondToField({
     setQuery("");
   }
 
+  function handleAddRawPubkey(pubkey: string) {
+    onAllowlistChange(mergeAllowlist(allowlist, [pubkey]));
+    setQuery("");
+  }
+
   function handleRemove(pubkey: string) {
     onAllowlistChange(
       allowlist.filter((p) => p.toLowerCase() !== pubkey.toLowerCase()),
@@ -175,6 +180,7 @@ export function CreateAgentRespondToField({
           disabled={disabled}
           isDirectEntryOpen={isDirectEntryOpen}
           onAddFromPaste={handleAddFromPaste}
+          onAddRawPubkey={handleAddRawPubkey}
           onAddSearchResult={handleAddSearchResult}
           onPasteTextChange={setPasteText}
           onQueryChange={setQuery}
@@ -199,12 +205,15 @@ export function CreateAgentRespondToField({
   );
 }
 
+const HEX_64_RE = /^[0-9a-f]{64}$/i;
+
 function AllowlistPicker({
   allowlist,
   deferredQuery,
   disabled,
   isDirectEntryOpen,
   onAddFromPaste,
+  onAddRawPubkey,
   onAddSearchResult,
   onPasteTextChange,
   onQueryChange,
@@ -225,6 +234,7 @@ function AllowlistPicker({
   disabled?: boolean;
   isDirectEntryOpen: boolean;
   onAddFromPaste: () => void;
+  onAddRawPubkey: (pubkey: string) => void;
   onAddSearchResult: (user: UserSearchResult) => void;
   onPasteTextChange: (value: string) => void;
   onQueryChange: (value: string) => void;
@@ -241,6 +251,11 @@ function AllowlistPicker({
   variant?: "default" | "persona";
 }) {
   const isPersona = variant === "persona";
+
+  // Detect if the query is a valid hex pubkey that's not already in the list.
+  const queryIsHexPubkey =
+    HEX_64_RE.test(deferredQuery) &&
+    !allowlist.some((p) => p.toLowerCase() === deferredQuery.toLowerCase());
 
   return (
     <div
@@ -345,6 +360,30 @@ function AllowlistPicker({
                   </button>
                 ))}
               </div>
+            ) : queryIsHexPubkey ? (
+              <button
+                className="flex w-full items-center justify-between rounded-md px-2.5 py-1.5 text-left transition-colors hover:bg-accent hover:text-accent-foreground"
+                data-testid="agent-respond-to-add-raw-pubkey"
+                onClick={() => onAddRawPubkey(deferredQuery.toLowerCase())}
+                type="button"
+              >
+                <div className="flex items-center gap-2 min-w-0">
+                  <UserAvatar
+                    avatarUrl={null}
+                    displayName={formatPubkey(deferredQuery)}
+                    size="xs"
+                  />
+                  <div className="min-w-0">
+                    <p className="truncate text-sm font-medium leading-5">
+                      {formatPubkey(deferredQuery)}
+                    </p>
+                    <p className="truncate text-xs text-muted-foreground">
+                      Add pubkey directly
+                    </p>
+                  </div>
+                </div>
+                <span className="text-xs text-muted-foreground">Add</span>
+              </button>
             ) : (
               <p className="px-2 py-1 text-sm text-muted-foreground">
                 No matching users.
