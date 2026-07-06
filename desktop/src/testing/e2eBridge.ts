@@ -2675,7 +2675,9 @@ function importMockIdentity(nsec: string) {
       about: null,
       nip05_handle: null,
       owner_pubkey: null,
-      has_profile_event: username.length > 0,
+      // Synthesised fallback for the identity-switch path: the new identity
+      // has not yet published a kind:0 event, so treat as no event.
+      has_profile_event: false,
     });
   }
 
@@ -2724,9 +2726,10 @@ function ensureMockProfile(config: E2eConfig | undefined): RawProfile {
     about: null,
     nip05_handle: null,
     owner_pubkey: null,
-    // A non-empty username means this identity has a real relay profile.
-    // An empty username (blank first-run identity) has no kind:0 event yet.
-    has_profile_event: displayName.length > 0,
+    // Synthesised fallback: no kind:0 event exists on the relay for this
+    // identity. Always false regardless of display name so the onboarding
+    // gate cannot mistake a blank first-run identity for a returning user.
+    has_profile_event: false,
   };
   mockProfiles.set(pubkey, profile);
   return profile;
