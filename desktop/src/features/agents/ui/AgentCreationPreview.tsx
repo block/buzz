@@ -79,9 +79,10 @@ export function AgentCreationPreview({
   const [customValue, setCustomValue] = React.useState(DEFAULT_CUSTOM_VALUE);
   const [isCustomColorPickerOpen, setIsCustomColorPickerOpen] =
     React.useState(false);
-  const [isImageDropActive, setIsImageDropActive] = React.useState(false);
+  const [isPopoverDragOver, setIsPopoverDragOver] = React.useState(false);
+  const [squishKey, setSquishKey] = React.useState(0);
   const avatarDragDepthRef = React.useRef(0);
-  const imageDragDepthRef = React.useRef(0);
+  const popoverDragDepthRef = React.useRef(0);
   const shouldReduceMotion = useReducedMotion();
   const emojiPickerContainerRef = React.useRef<HTMLDivElement | null>(null);
   const emojiMartThemeVars = useEmojiMartThemeVars();
@@ -119,6 +120,8 @@ export function AgentCreationPreview({
   React.useEffect(() => {
     if (isAvatarMenuOpen) {
       setAvatarUrlDraft("");
+      setIsPopoverDragOver(false);
+      popoverDragDepthRef.current = 0;
 
       const parsed = parseEmojiAvatarDataUrl(avatarUrl ?? "");
       if (parsed) {
@@ -161,6 +164,7 @@ export function AgentCreationPreview({
 
   function applyEmojiAvatar(emoji: string, color = selectedColor) {
     onSelectAvatar(emojiAvatarDataUrl(emoji, color));
+    setSquishKey((key) => key + 1);
   }
 
   function handleColorSelect(swatch: AvatarColorSwatch) {
@@ -204,13 +208,18 @@ export function AgentCreationPreview({
     [avatarEditClipId],
   );
   const hasAvatar = (avatarUrl?.trim().length ?? 0) > 0;
+  const emojiAvatarPreview = React.useMemo(
+    () => parseEmojiAvatarDataUrl(avatarUrl ?? ""),
+    [avatarUrl],
+  );
   const applyButtonTransition = shouldReduceMotion
     ? { duration: 0 }
     : AVATAR_APPLY_MOTION_TRANSITION;
 
+  // Outer avatar drag — only active when popover is closed
   const handleAvatarDragEnter = React.useCallback(
     (event: React.DragEvent<HTMLFieldSetElement>) => {
-      if (disabled || !isAvatarFileDrag(event)) {
+      if (disabled || isAvatarMenuOpen || !isAvatarFileDrag(event)) {
         return;
       }
       event.preventDefault();
@@ -219,12 +228,12 @@ export function AgentCreationPreview({
       event.dataTransfer.dropEffect = "copy";
       setIsDragOverAvatar(true);
     },
-    [disabled],
+    [disabled, isAvatarMenuOpen],
   );
 
   const handleAvatarDragOver = React.useCallback(
     (event: React.DragEvent<HTMLFieldSetElement>) => {
-      if (disabled || !isAvatarFileDrag(event)) {
+      if (disabled || isAvatarMenuOpen || !isAvatarFileDrag(event)) {
         return;
       }
       event.preventDefault();
@@ -232,12 +241,12 @@ export function AgentCreationPreview({
       event.dataTransfer.dropEffect = "copy";
       setIsDragOverAvatar(true);
     },
-    [disabled],
+    [disabled, isAvatarMenuOpen],
   );
 
   const handleAvatarDragLeave = React.useCallback(
     (event: React.DragEvent<HTMLFieldSetElement>) => {
-      if (!isAvatarFileDrag(event)) {
+      if (isAvatarMenuOpen || !isAvatarFileDrag(event)) {
         return;
       }
       event.preventDefault();
@@ -247,18 +256,92 @@ export function AgentCreationPreview({
         setIsDragOverAvatar(false);
       }
     },
-    [],
+    [isAvatarMenuOpen],
   );
 
   const handleAvatarDrop = React.useCallback(
     (event: React.DragEvent<HTMLFieldSetElement>) => {
-      if (!isAvatarFileDrag(event)) {
+      if (isAvatarMenuOpen || !isAvatarFileDrag(event)) {
         return;
       }
       event.preventDefault();
       event.stopPropagation();
       avatarDragDepthRef.current = 0;
       setIsDragOverAvatar(false);
+
+      const file = event.dataTransfer.files[0];
+      if (!file || disabled || isUploading) {
+        return;
+      }
+
+      clearUploadError();
+      void uploadAvatarFile(file);
+    },
+    [
+      clearUploadError,
+      disabled,
+      isAvatarMenuOpen,
+      isUploading,
+      uploadAvatarFile,
+    ],
+  );
+
+  // Popover-level drag — one big drop zone for the entire popover
+  const handlePopoverDragEnter = React.useCallback(
+    (event: React.DragEvent<HTMLElement>) => {
+      if (disabled || !isAvatarFileDrag(event)) {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      popoverDragDepthRef.current += 1;
+      event.dataTransfer.dropEffect = "copy";
+      setIsPopoverDragOver(true);
+      // Switch to image tab when dragging a file
+      setActiveTab("image");
+    },
+    [disabled],
+  );
+
+  const handlePopoverDragOver = React.useCallback(
+    (event: React.DragEvent<HTMLElement>) => {
+      if (disabled || !isAvatarFileDrag(event)) {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      event.dataTransfer.dropEffect = "copy";
+    },
+    [disabled],
+  );
+
+  const handlePopoverDragLeave = React.useCallback(
+    (event: React.DragEvent<HTMLElement>) => {
+      if (!isAvatarFileDrag(event)) {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      popoverDragDepthRef.current = Math.max(
+        0,
+        popoverDragDepthRef.current - 1,
+      );
+      if (popoverDragDepthRef.current === 0) {
+        setIsPopoverDragOver(false);
+      }
+    },
+    [],
+  );
+
+  const handlePopoverDrop = React.useCallback(
+    (event: React.DragEvent<HTMLElement>) => {
+      if (!isAvatarFileDrag(event)) {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      popoverDragDepthRef.current = 0;
+      setIsPopoverDragOver(false);
 
       const file = event.dataTransfer.files[0];
       if (!file || disabled || isUploading) {
@@ -277,318 +360,274 @@ export function AgentCreationPreview({
   const avatarMenuContent = (
     <PopoverContent
       align="center"
-      className="w-[340px] p-3"
+      className="w-[400px] p-3"
       side="bottom"
       sideOffset={8}
     >
-      <Tabs
-        className="w-full"
-        onValueChange={(tab) => {
-          setActiveTab(tab as AvatarTab);
-          setIsCustomColorPickerOpen(false);
-        }}
-        value={activeTab}
+      {/* Single drop zone covering the entire popover */}
+      <fieldset
+        aria-label="Avatar picker"
+        className="relative m-0 border-0 p-0"
+        onDragEnter={handlePopoverDragEnter}
+        onDragLeave={handlePopoverDragLeave}
+        onDragOver={handlePopoverDragOver}
+        onDrop={handlePopoverDrop}
       >
-        <TabsList className="mb-3 grid h-9 w-full grid-cols-2 rounded-lg bg-muted p-0.5">
-          <TabsTrigger
-            className="h-full rounded-md text-xs font-medium data-[state=active]:bg-background data-[state=active]:shadow-sm"
-            value="image"
-          >
-            Image
-          </TabsTrigger>
-          <TabsTrigger
-            className="h-full rounded-md text-xs font-medium data-[state=active]:bg-background data-[state=active]:shadow-sm"
-            value="emoji"
-          >
-            Emoji
-          </TabsTrigger>
-        </TabsList>
-      </Tabs>
-
-      {activeTab === "image" ? (
-        <div className="grid gap-2.5">
-          {/* Drop / browse zone — mini version of profile editor */}
-          <button
-            className={cn(
-              "relative flex h-[80px] flex-col items-center justify-center gap-1.5 overflow-hidden rounded-lg border border-transparent bg-muted text-foreground transition-[background-color,border-color,box-shadow,color] duration-200 ease-out hover:bg-muted/80 disabled:opacity-60",
-              isImageDropActive &&
-                "border-primary bg-primary/10 text-primary ring-1 ring-primary/35 hover:bg-primary/10",
-            )}
-            disabled={disabled || isUploading}
-            onClick={() => {
-              clearUploadError();
-              openUploadPicker();
-            }}
-            onDragEnter={(event) => {
-              if (disabled || !isAvatarFileDrag(event)) {
-                return;
-              }
-              event.preventDefault();
-              event.stopPropagation();
-              imageDragDepthRef.current += 1;
-              event.dataTransfer.dropEffect = "copy";
-              setIsImageDropActive(true);
-            }}
-            onDragLeave={(event) => {
-              if (!isAvatarFileDrag(event)) {
-                return;
-              }
-              event.preventDefault();
-              event.stopPropagation();
-              imageDragDepthRef.current = Math.max(
-                0,
-                imageDragDepthRef.current - 1,
-              );
-              if (imageDragDepthRef.current === 0) {
-                setIsImageDropActive(false);
-              }
-            }}
-            onDragOver={(event) => {
-              if (disabled || !isAvatarFileDrag(event)) {
-                return;
-              }
-              event.preventDefault();
-              event.stopPropagation();
-              event.dataTransfer.dropEffect = "copy";
-              setIsImageDropActive(true);
-            }}
-            onDrop={(event) => {
-              if (!isAvatarFileDrag(event)) {
-                return;
-              }
-              event.preventDefault();
-              event.stopPropagation();
-              imageDragDepthRef.current = 0;
-              setIsImageDropActive(false);
-              const file = event.dataTransfer.files[0];
-              if (!file || disabled || isUploading) {
-                return;
-              }
-              clearUploadError();
-              void uploadAvatarFile(file);
-            }}
-            type="button"
-          >
-            {isUploading ? (
-              <Spinner
-                aria-hidden
-                className="h-5 w-5 border-2 text-muted-foreground"
-              />
-            ) : (
-              <UploadCloud
-                className={cn(
-                  "h-5 w-5 text-muted-foreground transition-colors duration-200 ease-out",
-                  isImageDropActive && "text-primary",
-                )}
-              />
-            )}
-            <span
-              className={cn(
-                "text-xs font-medium text-muted-foreground transition-colors duration-200 ease-out",
-                isImageDropActive && "text-primary",
-              )}
-            >
-              {isUploading
-                ? "Uploading..."
-                : isImageDropActive
-                  ? "Drop image here"
-                  : "Drop or browse"}
+        {/* Full-popover drop overlay */}
+        {isPopoverDragOver ? (
+          <div className="absolute inset-0 z-50 flex flex-col items-center justify-center gap-2 rounded-lg border-2 border-dashed border-primary bg-primary/10">
+            <UploadCloud className="h-8 w-8 text-primary" />
+            <span className="text-sm font-medium text-primary">
+              Drop image here
             </span>
-          </button>
+          </div>
+        ) : null}
 
-          {/* URL input — same style as profile editor */}
-          <div className="flex h-10 items-center gap-2.5 rounded-lg bg-muted px-3">
-            <Link2 className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-            <input
-              autoCapitalize="none"
-              autoCorrect="off"
-              className="min-w-0 flex-1 bg-transparent text-xs font-medium text-foreground outline-none placeholder:text-muted-foreground"
+        <Tabs
+          className="w-full"
+          onValueChange={(tab) => {
+            setActiveTab(tab as AvatarTab);
+            setIsCustomColorPickerOpen(false);
+          }}
+          value={activeTab}
+        >
+          <TabsList className="mb-3 grid h-9 w-full grid-cols-2 rounded-lg bg-muted p-0.5">
+            <TabsTrigger
+              className="h-full rounded-md text-xs font-medium data-[state=active]:bg-background data-[state=active]:shadow-sm"
+              value="image"
+            >
+              Image
+            </TabsTrigger>
+            <TabsTrigger
+              className="h-full rounded-md text-xs font-medium data-[state=active]:bg-background data-[state=active]:shadow-sm"
+              value="emoji"
+            >
+              Emoji
+            </TabsTrigger>
+          </TabsList>
+        </Tabs>
+
+        {activeTab === "image" ? (
+          <div className="grid gap-2.5">
+            {/* Click to browse zone */}
+            <button
+              className={cn(
+                "relative flex h-[80px] flex-col items-center justify-center gap-1.5 overflow-hidden rounded-lg border border-transparent bg-muted text-foreground transition-[background-color,border-color,box-shadow,color] duration-200 ease-out hover:bg-muted/80 disabled:opacity-60",
+              )}
               disabled={disabled || isUploading}
-              onBlur={() => applyAvatarUrl()}
-              onChange={(event) => setAvatarUrlDraft(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === "Enter") {
-                  event.preventDefault();
-                  applyAvatarUrl();
-                }
+              onClick={() => {
+                clearUploadError();
+                openUploadPicker();
               }}
-              placeholder="Paste a URL"
-              spellCheck={false}
-              type="url"
-              value={avatarUrlDraft}
-            />
-            <AnimatePresence initial={false}>
-              {avatarUrlDraft.trim().length > 0 ? (
-                <motion.div
-                  animate={{ opacity: 1, scale: 1, width: "auto" }}
-                  className="overflow-hidden"
-                  exit={{ opacity: 0, scale: 0.96, width: 0 }}
-                  initial={{ opacity: 0, scale: 0.96, width: 0 }}
-                  key="apply-url"
-                  transition={applyButtonTransition}
-                >
-                  <Button
-                    className="h-6 px-2 text-2xs"
-                    disabled={disabled || isUploading}
-                    onClick={() => applyAvatarUrl()}
-                    size="xs"
+              type="button"
+            >
+              {isUploading ? (
+                <Spinner
+                  aria-hidden
+                  className="h-5 w-5 border-2 text-muted-foreground"
+                />
+              ) : (
+                <UploadCloud className="h-5 w-5 text-muted-foreground" />
+              )}
+              <span className="text-xs font-medium text-muted-foreground">
+                {isUploading ? "Uploading..." : "Drop or browse"}
+              </span>
+            </button>
+
+            {/* URL input — same style as profile editor */}
+            <div className="flex h-10 items-center gap-2.5 rounded-lg bg-muted px-3">
+              <Link2 className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+              <input
+                autoCapitalize="none"
+                autoCorrect="off"
+                className="min-w-0 flex-1 bg-transparent text-xs font-medium text-foreground outline-none placeholder:text-muted-foreground"
+                disabled={disabled || isUploading}
+                onBlur={() => applyAvatarUrl()}
+                onChange={(event) => setAvatarUrlDraft(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    event.preventDefault();
+                    applyAvatarUrl();
+                  }
+                }}
+                placeholder="Paste a URL"
+                spellCheck={false}
+                type="url"
+                value={avatarUrlDraft}
+              />
+              <AnimatePresence initial={false}>
+                {avatarUrlDraft.trim().length > 0 ? (
+                  <motion.div
+                    animate={{ opacity: 1, scale: 1, width: "auto" }}
+                    className="overflow-hidden"
+                    exit={{ opacity: 0, scale: 0.96, width: 0 }}
+                    initial={{ opacity: 0, scale: 0.96, width: 0 }}
+                    key="apply-url"
+                    transition={applyButtonTransition}
+                  >
+                    <Button
+                      className="h-6 px-2 text-2xs"
+                      disabled={disabled || isUploading}
+                      onClick={() => applyAvatarUrl()}
+                      size="xs"
+                      type="button"
+                    >
+                      Apply
+                    </Button>
+                  </motion.div>
+                ) : null}
+              </AnimatePresence>
+            </div>
+
+            {uploadErrorMessage ? (
+              <p className="rounded-lg bg-destructive/10 px-3 py-2 text-xs font-medium text-destructive">
+                {uploadErrorMessage}
+              </p>
+            ) : null}
+
+            {hasAvatar && onClearAvatar ? (
+              <button
+                className="flex min-h-8 w-full items-center justify-center rounded-lg text-xs text-destructive outline-hidden transition-colors duration-150 ease-out hover:bg-destructive/10 focus-visible:bg-destructive/10 focus-visible:outline-none disabled:pointer-events-none disabled:opacity-50"
+                disabled={disabled || isUploading}
+                onClick={() => {
+                  onClearAvatar();
+                  setIsAvatarMenuOpen(false);
+                }}
+                type="button"
+              >
+                Remove avatar
+              </button>
+            ) : null}
+          </div>
+        ) : (
+          <div className="grid gap-3">
+            {/* Emoji picker */}
+            <div
+              className="buzz-emoji-mart relative z-0 h-[280px] overflow-hidden rounded-lg bg-muted"
+              ref={emojiPickerContainerRef}
+              style={emojiMartThemeVars}
+            >
+              <Picker
+                categories={EMOJI_MART_CATEGORIES}
+                data={emojiData}
+                dynamicWidth
+                emojiButtonRadius="999px"
+                emojiButtonSize={44}
+                emojiSize={32}
+                icons="outline"
+                navPosition="bottom"
+                onEmojiSelect={(emoji: EmojiMartEmoji, event?: MouseEvent) => {
+                  if (disabled) {
+                    return;
+                  }
+                  if (!emoji.native) {
+                    return;
+                  }
+                  const nextColor =
+                    selectedEmoji === null
+                      ? (AVATAR_COLORS[
+                          Math.floor(Math.random() * AVATAR_COLORS.length)
+                        ] ?? DEFAULT_EMOJI_AVATAR_COLOR)
+                      : selectedColor;
+                  burstEmoji(emoji.native, event);
+                  setSelectedEmoji(emoji.native);
+                  setSelectedColor(nextColor);
+                  applyEmojiAvatar(emoji.native, nextColor);
+                }}
+                previewPosition="none"
+                searchPosition="none"
+                set="native"
+                skinTonePosition="none"
+                theme="auto"
+              />
+            </div>
+
+            {/* Color swatches — always visible */}
+            <div className="grid grid-cols-12 justify-items-center gap-1.5 rounded-lg bg-muted p-3">
+              {AVATAR_COLOR_SWATCHES.map((swatch) => {
+                const isCustomSwatch = swatch === CUSTOM_AVATAR_COLOR_SWATCH;
+                const isSelected = isCustomSwatch
+                  ? !AVATAR_COLORS.some(
+                      (color) =>
+                        color.toUpperCase() === selectedColor.toUpperCase(),
+                    )
+                  : swatch.toUpperCase() === selectedColor.toUpperCase();
+
+                return (
+                  <button
+                    aria-label={
+                      isCustomSwatch
+                        ? selectedEmoji
+                          ? "Choose custom color"
+                          : "Choose an emoji first"
+                        : `Use ${swatch} background`
+                    }
+                    aria-pressed={isSelected}
+                    className={cn(
+                      "relative h-6 w-6 rounded-full border border-border transition-transform duration-150 ease-out hover:scale-[1.15] focus-visible:scale-[1.15] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                      isCustomSwatch &&
+                        !selectedEmoji &&
+                        "cursor-not-allowed opacity-45 hover:scale-100 focus-visible:scale-100",
+                    )}
+                    disabled={isCustomSwatch && !selectedEmoji}
+                    key={swatch}
+                    onClick={() => handleColorSelect(swatch)}
+                    style={{
+                      background: isCustomSwatch
+                        ? isSelected
+                          ? selectedColor
+                          : "conic-gradient(from 0deg, #ff4d4d, #ffe75c, #73ef75, #63c6f2, #b141ff, #ff4d4d)"
+                        : swatch,
+                    }}
                     type="button"
                   >
-                    Apply
-                  </Button>
-                </motion.div>
-              ) : null}
-            </AnimatePresence>
-          </div>
+                    {isSelected ? (
+                      <span
+                        className="absolute inset-0.5 rounded-full border-2"
+                        style={{
+                          borderColor: contrastColorForBackground(
+                            isCustomSwatch ? selectedColor : swatch,
+                          ),
+                        }}
+                      />
+                    ) : null}
+                  </button>
+                );
+              })}
+            </div>
 
-          {uploadErrorMessage ? (
-            <p className="rounded-lg bg-destructive/10 px-3 py-2 text-xs font-medium text-destructive">
-              {uploadErrorMessage}
-            </p>
-          ) : null}
-
-          {hasAvatar && onClearAvatar ? (
-            <button
-              className="flex min-h-8 w-full items-center justify-center rounded-lg text-xs text-destructive outline-hidden transition-colors duration-150 ease-out hover:bg-destructive/10 focus-visible:bg-destructive/10 focus-visible:outline-none disabled:pointer-events-none disabled:opacity-50"
-              disabled={disabled || isUploading}
-              onClick={() => {
-                onClearAvatar();
-                setIsAvatarMenuOpen(false);
+            <AvatarCustomColorPanel
+              colorDraft={customColorDraft}
+              hue={customHue}
+              onCommit={commitCustomColor}
+              onHueChange={setCustomHue}
+              onSaturationValueChange={(nextSaturation, nextValue) => {
+                setCustomSaturation(nextSaturation);
+                setCustomValue(nextValue);
               }}
-              type="button"
-            >
-              Remove avatar
-            </button>
-          ) : null}
-        </div>
-      ) : (
-        <div className="grid gap-3">
-          {/* Emoji picker */}
-          <div
-            className="buzz-emoji-mart relative z-0 h-[240px] overflow-hidden rounded-lg bg-muted"
-            ref={emojiPickerContainerRef}
-            style={emojiMartThemeVars}
-          >
-            <Picker
-              categories={EMOJI_MART_CATEGORIES}
-              data={emojiData}
-              dynamicWidth
-              emojiButtonRadius="999px"
-              emojiButtonSize={44}
-              emojiSize={32}
-              icons="outline"
-              navPosition="bottom"
-              onEmojiSelect={(emoji: EmojiMartEmoji, event?: MouseEvent) => {
-                if (disabled) {
-                  return;
-                }
-                if (!emoji.native) {
-                  return;
-                }
-                const nextColor =
-                  selectedEmoji === null
-                    ? (AVATAR_COLORS[
-                        Math.floor(Math.random() * AVATAR_COLORS.length)
-                      ] ?? DEFAULT_EMOJI_AVATAR_COLOR)
-                    : selectedColor;
-                burstEmoji(emoji.native, event);
-                setSelectedEmoji(emoji.native);
-                setSelectedColor(nextColor);
-                applyEmojiAvatar(emoji.native, nextColor);
-              }}
-              previewPosition="none"
-              searchPosition="none"
-              set="native"
-              skinTonePosition="none"
-              theme="auto"
+              saturation={customSaturation}
+              testIdPrefix="agent-avatar"
+              value={customValue}
+              visible={isCustomColorPickerVisible}
             />
+
+            {hasAvatar && onClearAvatar ? (
+              <button
+                className="flex min-h-8 w-full items-center justify-center rounded-lg text-xs text-destructive outline-hidden transition-colors duration-150 ease-out hover:bg-destructive/10 focus-visible:bg-destructive/10 focus-visible:outline-none disabled:pointer-events-none disabled:opacity-50"
+                disabled={disabled}
+                onClick={() => {
+                  onClearAvatar();
+                  setSelectedEmoji(null);
+                  setIsAvatarMenuOpen(false);
+                }}
+                type="button"
+              >
+                Remove avatar
+              </button>
+            ) : null}
           </div>
-
-          {/* Color swatches — always visible */}
-          <div className="grid grid-cols-8 justify-items-center gap-2 rounded-lg bg-muted p-3">
-            {AVATAR_COLOR_SWATCHES.map((swatch) => {
-              const isCustomSwatch = swatch === CUSTOM_AVATAR_COLOR_SWATCH;
-              const isSelected = isCustomSwatch
-                ? !AVATAR_COLORS.some(
-                    (color) =>
-                      color.toUpperCase() === selectedColor.toUpperCase(),
-                  )
-                : swatch.toUpperCase() === selectedColor.toUpperCase();
-
-              return (
-                <button
-                  aria-label={
-                    isCustomSwatch
-                      ? selectedEmoji
-                        ? "Choose custom color"
-                        : "Choose an emoji first"
-                      : `Use ${swatch} background`
-                  }
-                  aria-pressed={isSelected}
-                  className={cn(
-                    "relative h-7 w-7 rounded-full border border-border transition-transform duration-150 ease-out hover:scale-[1.15] focus-visible:scale-[1.15] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-                    isCustomSwatch &&
-                      !selectedEmoji &&
-                      "cursor-not-allowed opacity-45 hover:scale-100 focus-visible:scale-100",
-                  )}
-                  disabled={isCustomSwatch && !selectedEmoji}
-                  key={swatch}
-                  onClick={() => handleColorSelect(swatch)}
-                  style={{
-                    background: isCustomSwatch
-                      ? isSelected
-                        ? selectedColor
-                        : "conic-gradient(from 0deg, #ff4d4d, #ffe75c, #73ef75, #63c6f2, #b141ff, #ff4d4d)"
-                      : swatch,
-                  }}
-                  type="button"
-                >
-                  {isSelected ? (
-                    <span
-                      className="absolute inset-0.5 rounded-full border-2"
-                      style={{
-                        borderColor: contrastColorForBackground(
-                          isCustomSwatch ? selectedColor : swatch,
-                        ),
-                      }}
-                    />
-                  ) : null}
-                </button>
-              );
-            })}
-          </div>
-
-          <AvatarCustomColorPanel
-            colorDraft={customColorDraft}
-            hue={customHue}
-            onCommit={commitCustomColor}
-            onHueChange={setCustomHue}
-            onSaturationValueChange={(nextSaturation, nextValue) => {
-              setCustomSaturation(nextSaturation);
-              setCustomValue(nextValue);
-            }}
-            saturation={customSaturation}
-            testIdPrefix="agent-avatar"
-            value={customValue}
-            visible={isCustomColorPickerVisible}
-          />
-
-          {hasAvatar && onClearAvatar ? (
-            <button
-              className="flex min-h-8 w-full items-center justify-center rounded-lg text-xs text-destructive outline-hidden transition-colors duration-150 ease-out hover:bg-destructive/10 focus-visible:bg-destructive/10 focus-visible:outline-none disabled:pointer-events-none disabled:opacity-50"
-              disabled={disabled}
-              onClick={() => {
-                onClearAvatar();
-                setSelectedEmoji(null);
-                setIsAvatarMenuOpen(false);
-              }}
-              type="button"
-            >
-              Remove avatar
-            </button>
-          ) : null}
-        </div>
-      )}
+        )}
+      </fieldset>
     </PopoverContent>
   );
 
@@ -599,6 +638,7 @@ export function AgentCreationPreview({
         className={cn(
           "group/avatar-preview relative m-0 flex min-h-[190px] min-w-0 flex-col items-center justify-center gap-3 rounded-xl border border-transparent p-0 transition-[background-color,border-color,box-shadow] duration-150",
           isDragOverAvatar &&
+            !isAvatarMenuOpen &&
             "border-dashed border-primary/70 bg-primary/5 ring-2 ring-primary/15",
         )}
         onDragEnter={handleAvatarDragEnter}
@@ -637,14 +677,37 @@ export function AgentCreationPreview({
               </svg>
 
               <div className="relative h-full w-full" style={avatarClipStyle}>
-                <ProfileAvatar
-                  avatarUrl={avatarUrl}
-                  className={cn(
-                    "h-full w-full text-4xl transition-shadow duration-150",
-                    isDragOverAvatar && "ring-2 ring-primary/30",
-                  )}
-                  label={label}
-                />
+                {emojiAvatarPreview ? (
+                  <div
+                    aria-label={`${label} avatar`}
+                    className="relative flex h-full w-full shrink-0 items-center justify-center overflow-hidden rounded-full shadow-xs transition-[background-color] duration-200 ease-out"
+                    role="img"
+                    style={{
+                      backgroundColor: emojiAvatarPreview.color,
+                    }}
+                  >
+                    <span
+                      className={cn(
+                        "buzz-avatar-emoji-glyph flex h-full w-full items-center justify-center text-[4rem] leading-none",
+                        squishKey > 0 && "buzz-avatar-squish",
+                      )}
+                      key={squishKey}
+                    >
+                      {emojiAvatarPreview.emoji}
+                    </span>
+                  </div>
+                ) : (
+                  <ProfileAvatar
+                    avatarUrl={avatarUrl}
+                    className={cn(
+                      "h-full w-full text-4xl transition-shadow duration-150",
+                      isDragOverAvatar &&
+                        !isAvatarMenuOpen &&
+                        "ring-2 ring-primary/30",
+                    )}
+                    label={label}
+                  />
+                )}
               </div>
 
               <div className="absolute bottom-0 right-0 z-10 flex h-[42px] w-[42px] items-center justify-center rounded-full bg-background">
@@ -682,6 +745,7 @@ export function AgentCreationPreview({
                   className={cn(
                     "flex h-full w-full items-center justify-center rounded-full border-2 border-dashed border-border bg-background text-primary shadow-xs transition-[background-color,border-color,color,box-shadow] duration-150 ease-out hover:border-primary/50 hover:bg-primary/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-default disabled:opacity-70",
                     isDragOverAvatar &&
+                      !isAvatarMenuOpen &&
                       "border-primary/70 bg-primary/5 ring-2 ring-primary/15",
                   )}
                   disabled={disabled || isUploading}
