@@ -4,4 +4,4 @@ packages:
 allowBuilds:
   esbuild: true
 patchedDependencies:
-  isomorphic-git@1.38.3: patches/isomorphic-git@1.38.3.patch
+  isomorphic-git: patches/isomorphic-git.patch

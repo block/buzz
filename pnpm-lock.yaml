@@ -5,7 +5,7 @@ settings:
   excludeLinksFromLockfile: false
 
 patchedDependencies:
-  isomorphic-git@1.38.3: e9b414a60d4cf1d8aa18f7a779483984e821989967c235662566e94ef0238d3f
+  isomorphic-git: e9b414a60d4cf1d8aa18f7a779483984e821989967c235662566e94ef0238d3f
 
 importers:
 
