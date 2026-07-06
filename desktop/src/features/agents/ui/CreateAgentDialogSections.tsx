@@ -118,6 +118,7 @@ export function CreateAgentRuntimeFields({
   inheritedEnvVars,
   mcpCommand,
   mcpToolsets,
+  modelTuningRuntimeId,
   parallelism,
   relayUrl,
   selectedRuntimeId,
@@ -143,8 +144,20 @@ export function CreateAgentRuntimeFields({
   inheritedEnvVars: EnvVarsValue;
   mcpCommand: string;
   mcpToolsets: string;
+  /**
+   * The actual/prospective runtime id used to decide whether to show the
+   * buzz-agent model-tuning fields. Kept separate from `selectedRuntimeId`
+   * because Edit collapses `selectedRuntimeId` to the "inherit"/"custom"
+   * sentinel that drives the custom-command input — that sentinel must NOT
+   * be used to gate the model-tuning section.
+   */
+  modelTuningRuntimeId: string;
   parallelism: string;
   relayUrl: string;
+  /**
+   * Drives the custom-command input only: "custom" shows it, anything else
+   * hides it. In Edit this carries the "inherit"/"custom" sentinel.
+   */
   selectedRuntimeId: string;
   systemPrompt: string;
   turnTimeoutSeconds: string;
@@ -160,7 +173,7 @@ export function CreateAgentRuntimeFields({
   onSystemPromptChange: (value: string) => void;
   onTurnTimeoutChange: (value: string) => void;
 }) {
-  const isBuzzAgent = isBuzzAgentRuntime(selectedRuntimeId);
+  const isBuzzAgent = isBuzzAgentRuntime(modelTuningRuntimeId);
 
   /** Write or delete a single env var key. Empty string = inherit (delete). */
   function handleEnvVarChange(key: string, value: string) {
@@ -449,7 +462,7 @@ function BuzzAgentModelTuningFields({
             data-testid="ba-max-rounds-input"
             id="ba-max-rounds"
             inputMode="numeric"
-            min="1"
+            min="0"
             onChange={(event) =>
               onEnvVarChange(BUZZ_AGENT_MAX_ROUNDS, event.target.value)
             }
@@ -463,7 +476,8 @@ function BuzzAgentModelTuningFields({
             value={envVars[BUZZ_AGENT_MAX_ROUNDS] ?? ""}
           />
           <p className="text-xs text-muted-foreground" id="help-ba-max-rounds">
-            Maximum LLM + tool-call rounds per turn. Leave blank to inherit.
+            Maximum LLM + tool-call rounds per turn. 0 = unlimited. Leave blank
+            to inherit.
           </p>
         </div>
 

@@ -172,3 +172,53 @@ test("non-numeric string is stored as-is (validation is at the backend)", () => 
   );
   assert.equal(result[BUZZ_AGENT_MAX_OUTPUT_TOKENS], "not-a-number");
 });
+
+// ---------------------------------------------------------------------------
+// modelTuningRuntimeId → visibility mapping (regression for Edit dialog path)
+// ---------------------------------------------------------------------------
+
+// Mirrors the `isBuzzAgent` derivation in CreateAgentRuntimeFields.
+// The point of modelTuningRuntimeId is that the Edit dialog can pass
+// prospectiveRuntimeId (the real resolved runtime) while selectedRuntimeId
+// carries the "inherit"/"custom" sentinel — the two must not be conflated.
+
+test("isBuzzAgentRuntime(prospectiveRuntimeId) shows fields when Edit resolves buzz-agent even though selectedRuntimeId sentinel is 'inherit'", () => {
+  // Simulates Edit dialog state: inheritHarness=true, persona is buzz-agent.
+  // selectedRuntimeId would be "inherit" (sentinel for custom-command hiding),
+  // but prospectiveRuntimeId correctly resolves to "buzz-agent".
+  const selectedRuntimeIdSentinel = "inherit"; // what Edit passes to selectedRuntimeId
+  const prospectiveRuntimeId = "buzz-agent"; // what Edit passes to modelTuningRuntimeId
+
+  assert.equal(
+    isBuzzAgentRuntime(selectedRuntimeIdSentinel),
+    false,
+    "sentinel 'inherit' must NOT trigger model-tuning fields",
+  );
+  assert.equal(
+    isBuzzAgentRuntime(prospectiveRuntimeId),
+    true,
+    "prospectiveRuntimeId 'buzz-agent' MUST trigger model-tuning fields",
+  );
+});
+
+test("isBuzzAgentRuntime(prospectiveRuntimeId) shows fields when Edit has a pinned buzz-agent (selectedRuntimeId sentinel is also 'inherit')", () => {
+  // Simulates Edit dialog with a pinned non-custom runtime:
+  // selectedRuntimeId sentinel = "inherit" (non-custom known runtime),
+  // prospectiveRuntimeId = "buzz-agent" (selectedRuntime?.id).
+  const selectedRuntimeIdSentinel = "inherit";
+  const prospectiveRuntimeId = "buzz-agent";
+
+  assert.equal(isBuzzAgentRuntime(prospectiveRuntimeId), true);
+  assert.equal(isBuzzAgentRuntime(selectedRuntimeIdSentinel), false);
+});
+
+test("isBuzzAgentRuntime(prospectiveRuntimeId) hides fields when Edit resolves to non-buzz-agent", () => {
+  // E.g. user switches from buzz-agent to goose in Edit — prospectiveRuntimeId = "goose"
+  const prospectiveRuntimeId = "goose";
+  assert.equal(isBuzzAgentRuntime(prospectiveRuntimeId), false);
+});
+
+test("isBuzzAgentRuntime(prospectiveRuntimeId) hides fields when Edit has no resolved runtime (empty string)", () => {
+  // prospectiveRuntimeId falls back to "" when catalog hasn't loaded yet
+  assert.equal(isBuzzAgentRuntime(""), false);
+});

@@ -824,6 +824,7 @@ export function CreateAgentDialog({
                       inheritedEnvVars={globalConfig.env_vars}
                       mcpCommand={mcpCommand}
                       mcpToolsets={mcpToolsets}
+                      modelTuningRuntimeId={selectedRuntimeId}
                       onAcpCommandChange={setAcpCommand}
                       onAgentArgsChange={setAgentArgs}
                       onAgentCommandChange={setAgentCommand}

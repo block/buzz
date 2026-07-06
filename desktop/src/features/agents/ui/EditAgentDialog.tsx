@@ -769,6 +769,7 @@ export function EditAgentDialog({
               inheritedEnvVars={inheritedWithGlobal}
               mcpCommand={mcpCommand}
               mcpToolsets={mcpToolsets}
+              modelTuningRuntimeId={prospectiveRuntimeId}
               onAcpCommandChange={setAcpCommand}
               onAgentArgsChange={setAgentArgs}
               onAgentCommandChange={setAgentCommand}
