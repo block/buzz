@@ -44,6 +44,46 @@ type ObservedChannel = {
   archived: boolean;
 };
 
+/**
+ * List the channels this pubkey is a member of on the observed relay,
+ * excluding archived channels and hidden DMs — the same visibility set the
+ * unread poll and "mark all as read" must agree on.
+ */
+export async function fetchObservedChannels(
+  client: WorkspaceUnreadRelay,
+  pubkey: string,
+): Promise<ObservedChannel[]> {
+  const memberEvents = await client.fetchEvents({
+    kinds: [KIND_NIP29_GROUP_MEMBERS],
+    "#p": [pubkey],
+    limit: MEMBER_CHANNEL_LIMIT,
+  });
+  const channelIds = extractMemberChannelIds(memberEvents);
+  if (channelIds.length === 0) {
+    return [];
+  }
+
+  const [metadataEvents, visibilityEvents] = await Promise.all([
+    client.fetchEvents({
+      kinds: [KIND_NIP29_GROUP_METADATA],
+      "#d": channelIds,
+      limit: METADATA_LIMIT,
+    }),
+    client.fetchEvents({
+      kinds: [KIND_DM_VISIBILITY],
+      "#p": [pubkey],
+      limit: 1,
+    }),
+  ]);
+
+  const hiddenDmIds = extractHiddenDmIds(visibilityEvents);
+  return resolveObservedChannels(channelIds, metadataEvents).filter(
+    (channel) =>
+      !channel.archived &&
+      (channel.channelType !== "dm" || !hiddenDmIds.has(channel.id)),
+  );
+}
+
 export async function pollWorkspaceUnread(
   workspace: Workspace,
   pubkey: string,
@@ -63,44 +103,17 @@ export async function fetchWorkspaceUnread(args: {
   const normalizedPubkey = pubkey.toLowerCase();
   const nowSeconds = args.nowSeconds ?? Math.floor(Date.now() / 1_000);
 
-  const memberEvents = await client.fetchEvents({
-    kinds: [KIND_NIP29_GROUP_MEMBERS],
-    "#p": [pubkey],
-    limit: MEMBER_CHANNEL_LIMIT,
-  });
-  const channelIds = extractMemberChannelIds(memberEvents);
-  if (channelIds.length === 0) {
+  const channels = await fetchObservedChannels(client, pubkey);
+  if (channels.length === 0) {
     return { hasUnread: false, mentionCount: 0 };
   }
-
-  const [metadataEvents, visibilityEvents, readStateEvents] = await Promise.all(
-    [
-      client.fetchEvents({
-        kinds: [KIND_NIP29_GROUP_METADATA],
-        "#d": channelIds,
-        limit: METADATA_LIMIT,
-      }),
-      client.fetchEvents({
-        kinds: [KIND_DM_VISIBILITY],
-        "#p": [pubkey],
-        limit: 1,
-      }),
-      client.fetchEvents({
-        kinds: [KIND_READ_STATE],
-        authors: [pubkey],
-        "#t": ["read-state"],
-        since: nowSeconds - READ_STATE_HORIZON_SECONDS,
-        limit: READ_STATE_FETCH_LIMIT,
-      }),
-    ],
-  );
-
-  const hiddenDmIds = extractHiddenDmIds(visibilityEvents);
-  const channels = resolveObservedChannels(channelIds, metadataEvents).filter(
-    (channel) =>
-      !channel.archived &&
-      (channel.channelType !== "dm" || !hiddenDmIds.has(channel.id)),
-  );
+  const readStateEvents = await client.fetchEvents({
+    kinds: [KIND_READ_STATE],
+    authors: [pubkey],
+    "#t": ["read-state"],
+    since: nowSeconds - READ_STATE_HORIZON_SECONDS,
+    limit: READ_STATE_FETCH_LIMIT,
+  });
   const readState = await mergeReadStateEvents(
     readStateEvents,
     pubkey,

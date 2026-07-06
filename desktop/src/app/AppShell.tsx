@@ -624,7 +624,9 @@ export function AppShell() {
                         workspacesHook.activeWorkspace?.id ?? null
                       }
                       onAddWorkspace={() => setIsAddWorkspaceOpen(true)}
+                      onRemoveWorkspace={workspacesHook.removeWorkspace}
                       onSwitchWorkspace={workspacesHook.switchWorkspace}
+                      onUpdateWorkspace={workspacesHook.updateWorkspace}
                       workspaces={workspacesHook.workspaces}
                     />
                   ) : null}
