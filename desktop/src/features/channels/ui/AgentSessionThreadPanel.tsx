@@ -62,7 +62,14 @@ type AgentSessionThreadPanelProps = {
   layout?: "standalone" | "split";
   isSinglePanelView?: boolean;
   profiles?: UserProfileLookup;
-  onBackToProfile: () => void;
+  /**
+   * Fired by the header back arrow. Restores the pane this panel replaced
+   * (thread or profile) via the captured return target — see
+   * useChannelAgentSessions.backFromAgentSession. Omit when there is no
+   * target (composer/no-pane open, direct/restored URL): the arrow hides
+   * and the close affordance is the fallback.
+   */
+  onBack?: () => void;
   onClose: () => void;
   widthPx: number;
   transparentChrome?: boolean;
@@ -77,7 +84,7 @@ export function AgentSessionThreadPanel({
   layout = "standalone",
   isSinglePanelView = false,
   profiles,
-  onBackToProfile,
+  onBack,
   onClose,
   widthPx,
   transparentChrome = false,
@@ -304,7 +311,7 @@ export function AgentSessionThreadPanel({
         align="start"
         backButtonAriaLabel="Back from activity"
         backButtonTestId="agent-session-back"
-        onBack={onBackToProfile}
+        onBack={onBack}
       >
         <AuxiliaryPanelHeaderTitleBlock
           subtitle={lastUpdatedLabel}

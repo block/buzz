@@ -258,7 +258,13 @@ class ChannelDetailPage extends HookConsumerWidget {
                         events,
                         currentPubkey: currentPubkey,
                       );
-                      final entries = buildMainTimelineEntries(messages);
+                      final summaries = ref
+                          .read(channelMessagesProvider(channel.id).notifier)
+                          .threadSummaries;
+                      final entries = buildMainTimelineEntries(
+                        messages,
+                        relaySummaries: summaries,
+                      );
                       return _MessageList(
                         entries: entries,
                         allMessages: messages,

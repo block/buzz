@@ -141,7 +141,7 @@ export function WorkspaceRail({
   // macOS traffic lights overlay the top-left, so start buttons below them (they hide in fullscreen).
   const topPaddingClass =
     isMacPlatform() && !isFullscreen
-      ? "pt-(--buzz-top-chrome-height,2.5rem)"
+      ? "pt-(--buzz-top-chrome-height,40px)"
       : "pt-3";
 
   return (

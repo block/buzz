@@ -1,4 +1,6 @@
 import 'dart:async';
+import 'dart:collection';
+import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -34,15 +36,19 @@ void main() {
           .read(channelMessagesProvider(_channelId))
           .value!;
       expect(messages.map((event) => event.id), ['history', 'live']);
-      // The auto-prefetch fires an extra fetchOlder because fewer than 15
-      // displayable events were loaded. The deduped result sets _reachedOldest.
-      expect(relaySession.operations, ['subscribe', 'fetch', 'fetch']);
+      expect(relaySession.operations, ['subscribe', 'query', 'fetch']);
       expect(
         relaySession.liveFilters.single.kinds,
         EventKind.channelEventKinds,
       );
       expect(relaySession.liveFilters.single.tags['#h'], [_channelId]);
       expect(relaySession.liveFilters.single.limit, 200);
+      expect(
+        relaySession.queryFilters.first.kinds,
+        EventKind.channelTimelineContentKinds,
+      );
+      expect(relaySession.queryFilters.first.tags['#h'], [_channelId]);
+      expect(relaySession.queryFilters.first.extensions['top_level'], isTrue);
       expect(
         relaySession.historyFilters.first.kinds,
         EventKind.channelEventKinds,
@@ -64,7 +70,7 @@ void main() {
 
     final messages = container.read(channelMessagesProvider(_channelId)).value!;
     expect(messages.map((event) => event.id), ['history']);
-    expect(relaySession.operations, ['subscribe', 'fetch', 'fetch']);
+    expect(relaySession.operations, ['subscribe', 'query', 'fetch']);
   });
 
   test(
@@ -88,6 +94,45 @@ void main() {
       expect(state.value?.map((event) => event.id), ['live']);
     },
   );
+
+  test('window pagination failures return false without exhausting', () async {
+    final relaySession = _RecordingRelaySessionNotifier(
+      queryResults: [
+        [
+          _event(id: 'head', createdAt: 20),
+          _bounds(hasMore: true, cursorCreatedAt: 20, cursorId: 'head'),
+        ],
+        Exception('page failed'),
+        [
+          _event(id: 'older', createdAt: 10),
+          _bounds(dTag: '${_channelId.toLowerCase()}:20:head'),
+        ],
+      ],
+    );
+    final container = _buildContainer(relaySession);
+    addTearDown(container.dispose);
+
+    container.read(channelMessagesProvider(_channelId));
+    await relaySession.subscribed;
+    await _pumpEventQueue();
+
+    final notifier = container.read(
+      channelMessagesProvider(_channelId).notifier,
+    );
+    expect(notifier.reachedOldest, isFalse);
+    await expectLater(notifier.fetchOlder(), completion(isFalse));
+    expect(notifier.reachedOldest, isFalse);
+
+    await expectLater(notifier.fetchOlder(), completion(isTrue));
+    expect(notifier.reachedOldest, isTrue);
+    expect(
+      container
+          .read(channelMessagesProvider(_channelId))
+          .value
+          ?.map((e) => e.id),
+      ['older', 'head'],
+    );
+  });
 }
 
 const _channelId = '11111111-1111-4111-8111-111111111111';
@@ -112,6 +157,30 @@ NostrEvent _event({required String id, required int createdAt}) {
   );
 }
 
+NostrEvent _bounds({
+  bool hasMore = false,
+  int? cursorCreatedAt,
+  String? cursorId,
+  String? dTag,
+}) {
+  return NostrEvent(
+    id: 'bounds-$hasMore-${cursorId ?? dTag ?? 'none'}',
+    pubkey: 'relay',
+    createdAt: 0,
+    kind: EventKind.channelWindowBounds,
+    tags: [
+      ['d', dTag ?? '${_channelId.toLowerCase()}:head'],
+    ],
+    content: jsonEncode({
+      'has_more': hasMore,
+      'next_cursor': hasMore
+          ? {'created_at': cursorCreatedAt, 'id': cursorId}
+          : null,
+    }),
+    sig: 'sig',
+  );
+}
+
 Future<void> _pumpEventQueue() async {
   await Future<void>.delayed(Duration.zero);
   await Future<void>.delayed(Duration.zero);
@@ -119,19 +188,37 @@ Future<void> _pumpEventQueue() async {
 
 class _RecordingRelaySessionNotifier extends RelaySessionNotifier {
   final bool failSubscribe;
+  final Queue<Object> _queryResults;
   final List<String> operations = [];
   final List<NostrFilter> liveFilters = [];
   final List<NostrFilter> historyFilters = [];
+  final List<NostrFilter> queryFilters = [];
   final List<void Function(NostrEvent)> _listeners = [];
   final Completer<void> _subscribed = Completer<void>();
   final Completer<List<NostrEvent>> _history = Completer<List<NostrEvent>>();
 
-  _RecordingRelaySessionNotifier({this.failSubscribe = false});
+  _RecordingRelaySessionNotifier({
+    this.failSubscribe = false,
+    List<Object> queryResults = const [],
+  }) : _queryResults = Queue<Object>.of(queryResults);
 
   Future<void> get subscribed => _subscribed.future;
 
   @override
   SessionState build() => const SessionState(status: SessionStatus.connected);
+
+  @override
+  Future<List<NostrEvent>> queryRelay(
+    List<NostrFilter> filters, {
+    Duration timeout = const Duration(seconds: 8),
+  }) async {
+    operations.add('query');
+    queryFilters.addAll(filters);
+    if (_queryResults.isEmpty) throw Exception('unsupported');
+    final result = _queryResults.removeFirst();
+    if (result is Exception) throw result;
+    return (result as List<NostrEvent>).toList();
+  }
 
   @override
   Future<List<NostrEvent>> fetchHistory(

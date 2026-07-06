@@ -3,6 +3,7 @@ import { expect, test, type Page } from "@playwright/test";
 import {
   createMockAgentMemoryListing,
   installMockBridge,
+  TEST_IDENTITIES,
 } from "../helpers/bridge";
 import { openProfileMenu, openSettings } from "../helpers/settings";
 
@@ -797,6 +798,52 @@ test("renders agent profile ingress subviews from the Playwright mock bridge", a
   );
   await page.getByTestId("agent-memory-truncated").click();
   await expect(page.getByTestId("agent-memory-list")).toContainText("orphan");
+});
+
+test("restored activity deep link hides the back arrow", async ({ page }) => {
+  // Charlie is a `bot` member of #agents and authors a seeded message there;
+  // seeding a managed agent with the same pubkey makes that message's avatar
+  // open a managed-agent profile panel with the Activity ingress. Unlike an
+  // agent created at runtime through the bridge, this seed survives
+  // `page.reload()` because init scripts re-run on navigation.
+  const agentPubkey = TEST_IDENTITIES.charlie.pubkey;
+  await installMockBridge(page, {
+    managedAgents: [
+      {
+        channelNames: ["agents"],
+        name: "Charlie",
+        pubkey: agentPubkey,
+        status: "running",
+      },
+    ],
+  });
+  await page.goto("/");
+
+  await page.getByTestId("channel-agents").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("agents");
+
+  const messageRow = page
+    .getByTestId("message-row")
+    .filter({ hasText: "Indexing the channel catalog now." });
+  await expect(messageRow).toBeVisible();
+  await messageRow.locator("button").first().click();
+  await expect(page.getByTestId("user-profile-panel")).toBeVisible();
+
+  // Opened from the profile panel: a return target was captured, so the
+  // header shows the back arrow.
+  await page.getByTestId(`user-profile-view-activity-${agentPubkey}`).click();
+  await expect(page.getByTestId("agent-session-thread-panel")).toBeVisible();
+  await expect(page.getByTestId("agent-session-back")).toBeVisible();
+
+  // A reload keeps the `agentSession` URL param but drops the in-memory
+  // return target, so the restored panel hides the back arrow and close is
+  // the only affordance — never a blind history pop.
+  await page.reload();
+  await expect(page.getByTestId("agent-session-thread-panel")).toBeVisible();
+  await expect(page.getByTestId("agent-session-back")).toHaveCount(0);
+  await expect(page.getByTestId("auxiliary-panel-close")).toBeVisible();
+  await page.getByTestId("auxiliary-panel-close").click();
+  await expect(page.getByTestId("agent-session-thread-panel")).toHaveCount(0);
 });
 
 test("declared owner sees runtime tab for a remote relay agent", async ({

@@ -146,10 +146,9 @@ export function ChannelScreen({
     string | null
   >(null);
   const [editTargetId, setEditTargetId] = React.useState<string | null>(null);
-  // Thread panel state is URL-backed, but router navigation is intentionally
-  // deferred out of the click handler. Keep a tiny optimistic override so the
-  // auxiliary pane can open/close in the urgent render, then let the URL-backed
-  // state hydrate the real thread contents when it catches up.
+  // Thread panel state is URL-backed, but router navigation is deferred out
+  // of the click handler; a tiny optimistic override lets the auxiliary pane
+  // open/close in the urgent render before the URL-backed state catches up.
   const [optimisticOpenThreadHeadId, setOptimisticOpenThreadHeadId] =
     React.useState<string | null | undefined>(undefined);
   const clearOptimisticThreadOverride = React.useCallback(() => {
@@ -206,16 +205,14 @@ export function ChannelScreen({
     if (!activeChannelId || activeChannel?.isMember === false) {
       return;
     }
-    // Passive channel-open: advance the marker to the newest top-level message
-    // only (NIP-RS Option 1). Opening a channel clears the main timeline while
-    // leaving thread badges and Home inbox thread activity intact until each
-    // thread itself is read.
+    // Passive channel-open (NIP-RS Option 1): advance the marker to the newest
+    // top-level message only, clearing the main timeline while thread badges
+    // and Home inbox thread activity stay intact until each thread is read.
     markChannelRead(activeChannelId, activeReadAt, { topLevelOnly: true });
   }, [activeChannel?.isMember, activeChannelId, activeReadAt, markChannelRead]);
-  // Install the NIP-RS parent resolver. Active `thread:` and `msg:` contexts
-  // belong to this channel; folding messages to the channel (never another
-  // message) preserves ancestor/descendant isolation while channel reads still
-  // cover top-level history. Clear on leave so the parent cannot go stale.
+  // Install the NIP-RS parent resolver. Active `thread:`/`msg:` contexts fold
+  // to this channel (never another message), preserving ancestor/descendant
+  // isolation while channel reads cover top-level history. Clear on leave.
   React.useEffect(() => {
     if (!activeChannelId) {
       setContextParentResolver(null);
@@ -550,9 +547,8 @@ export function ChannelScreen({
         : undefined,
     [activeChannel, handleToggleReaction],
   );
-  // The menu actions are typed (message) => void; the per-message read-state
-  // handlers key off the message id (message + subtree). Adapt at the seam so
-  // the handlers stay id-based and the menu stays message-based.
+  // The menu actions are typed (message) => void; the read-state handlers
+  // key off the message id (message + subtree). Adapt at the seam.
   const handleMessageMarkUnread = React.useCallback(
     (message: TimelineMessage) => handleMarkMessageUnread(message.id),
     [handleMarkMessageUnread],
@@ -598,17 +594,18 @@ export function ChannelScreen({
   }, [setChannelManagementOpen, goHome]);
   const {
     agentSessionAgents,
+    backFromAgentSession: handleBackFromAgentSession,
     channelAgentSessionAgents,
     closeAgentSession: handleCloseAgentSession,
+    hasAgentSessionReturnTarget,
     openAgentSession: handleOpenAgentSession,
     openThreadAndCloseAgentSession: handleOpenThreadAndCloseAgentSession,
   } = useChannelAgentSessions({
     activeChannel,
     activeChannelId,
-    // The agent list comes from three queries; treat it as loaded only once
-    // none of them are in their initial fetch, so a channel with genuinely
-    // zero agents can still auto-close a stale agentSession param. A disabled
-    // query (e.g. no active channel) reports isLoading=false, which is fine.
+    // Loaded only once none of the three agent queries are in their initial
+    // fetch, so a channel with genuinely zero agents still auto-closes a stale
+    // agentSession param (a disabled query reports isLoading=false — fine).
     agentsLoaded:
       !channelMembersQuery.isLoading &&
       !managedAgentsQuery.isLoading &&
@@ -617,6 +614,7 @@ export function ChannelScreen({
     handleOpenThread,
     managedAgents: agentSessionCandidates,
     openAgentSessionPubkey,
+    openThreadHeadId: effectiveOpenThreadHeadId,
     profilePanelPubkey,
     setChannelManagementOpen,
     setExpandedThreadReplyIds,
@@ -637,10 +635,10 @@ export function ChannelScreen({
       setThreadReplyTargetId,
       setThreadScrollTargetId,
     });
-  // `data !== undefined` is not "loaded": the cache is seeded early by stale
-  // placeholders and the live subscription. Wait for the history fetch to settle.
-  // Latch loaded per channel so a later background refetch can't flip back to
-  // the skeleton — that re-flip is the "skeleton bouncing up and down" on entry.
+  // `data !== undefined` is not "loaded" (the cache is seeded early by stale
+  // placeholders and the live subscription); wait for the history fetch to
+  // settle, latched per channel so a background refetch can't re-flip to the
+  // skeleton (the "skeleton bouncing up and down" on entry).
   const settledChannelIdRef = React.useRef<string | null>(null);
   const hasSettledThisChannel =
     activeChannelId !== null && settledChannelIdRef.current === activeChannelId;
@@ -664,8 +662,7 @@ export function ChannelScreen({
     );
   settledChannelIdRef.current = settledChannelId;
   // Panel identity (thread/profile/agent session) lives in the URL search
-  // params, so channel changes and back/forward traversals carry it per
-  // history entry — only the local ephemeral targets need resetting here.
+  // params and carries per history entry — only ephemeral targets reset here.
   const resetComposerTargets = React.useCallback(
     (_channelId: string | null) => {
       setExpandedThreadReplyIds(new Set());
@@ -922,6 +919,11 @@ export function ChannelScreen({
                       : undefined
                   }
                   onCloseAgentSession={handleCloseAgentSession}
+                  onBackFromAgentSession={
+                    hasAgentSessionReturnTarget
+                      ? handleBackFromAgentSession
+                      : undefined
+                  }
                   onCloseChannelManagement={handleCloseChannelManagement}
                   onCloseThread={handleCloseThread}
                   onDelete={
