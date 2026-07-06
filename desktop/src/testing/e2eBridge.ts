@@ -185,6 +185,16 @@ type E2eConfig = {
     // When true, `get_identity` returns `locked: true` until `import_identity` is
     // called. Drives the keyring-locked screen in tests.
     identityLocked?: boolean;
+    /**
+     * Global agent config returned by `get_global_agent_config`. Defaults to
+     * an empty config (no provider, model, or env vars) if not specified.
+     * Pass a config with a provider to test Inherit-from-global behavior.
+     */
+    globalAgentConfig?: {
+      env_vars: Record<string, string>;
+      provider: string | null;
+      model: string | null;
+    };
   };
   relayHttpUrl?: string;
   relayWsUrl?: string;
@@ -8715,6 +8725,17 @@ export function maybeInstallE2eTauriMocks() {
         // No harness config file in the E2E environment — return null so
         // dialogs fall back to normal required-field evaluation.
         return null;
+      }
+      case "get_global_agent_config": {
+        // Return the mock global agent config if provided; otherwise return
+        // an empty config (no global provider, model, or env vars).
+        return (
+          config?.mock?.globalAgentConfig ?? {
+            env_vars: {},
+            provider: null,
+            model: null,
+          }
+        );
       }
       case "update_managed_agent":
         return handleUpdateManagedAgent(

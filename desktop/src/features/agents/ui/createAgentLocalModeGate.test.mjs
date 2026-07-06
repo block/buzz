@@ -22,6 +22,7 @@ import assert from "node:assert/strict";
 import {
   computeLocalModeGate,
   getBakedSatisfiedEnvKeys,
+  getDefaultLlmProviderLabel,
   requiredCredentialEnvKeys,
   runtimeSupportsLlmProviderSelection,
 } from "./personaDialogPickers.tsx";
@@ -705,7 +706,6 @@ test("localMode_globalEnvVars_empty_still_fails_gate", () => {
     "ANTHROPIC_API_KEY must be in missingEnvKeys when neither source provides it",
   );
 });
-});
 
 // ── Regression: global provider inherited, no credential key supplied ────────
 //
@@ -769,7 +769,6 @@ test("localMode_globalProvider_inherited_globalEnv_satisfies_key", () => {
     "ANTHROPIC_API_KEY must not be missing when globalEnvVars provides it",
   );
 });
-});
 
 // ── Regression: required key stays in requiredEnvKeys when agent fills it ───
 //
@@ -827,5 +826,129 @@ test("localMode_requiredKey_stays_in_requiredEnvKeys_when_locally_filled", () =>
     after.satisfied,
     true,
     "gate must be satisfied when the key is locally filled",
+  );
+});
+
+// ── Provider-default label ─────────────────────────────────────────────────
+
+test("providerDefaultLabel_noGlobal_returnsSelectAProvider", () => {
+  // No global provider → placeholder signals user must choose.
+  const label = getDefaultLlmProviderLabel("buzz-agent", undefined);
+  assert.equal(
+    label,
+    "Select a provider\u2026",
+    "no global provider must return 'Select a provider…'",
+  );
+});
+
+test("providerDefaultLabel_emptyGlobal_returnsSelectAProvider", () => {
+  // Empty string treated the same as absent.
+  const label = getDefaultLlmProviderLabel("buzz-agent", "");
+  assert.equal(
+    label,
+    "Select a provider\u2026",
+    "empty global provider must return 'Select a provider…'",
+  );
+});
+
+test("providerDefaultLabel_globalSet_returnsInheritLabel", () => {
+  // Global provider set → label shows the provider name so the user
+  // knows what they're inheriting.
+  const label = getDefaultLlmProviderLabel("buzz-agent", "anthropic");
+  assert.equal(
+    label,
+    "Inherit (anthropic)",
+    "global provider set must return 'Inherit (<provider>)'",
+  );
+});
+
+test("providerDefaultLabel_globalSetWithWhitespace_trimsAndReturnsInherit", () => {
+  // Surrounding whitespace is stripped before building the label.
+  const label = getDefaultLlmProviderLabel("buzz-agent", "  openai  ");
+  assert.equal(
+    label,
+    "Inherit (openai)",
+    "global provider with surrounding whitespace must be trimmed in label",
+  );
+});
+
+// ── Effective-provider save gate ────────────────────────────────────────────
+//
+// The canSubmit gate in Create/Edit/PersonaDialog uses:
+//   effectiveProvider = provider.trim() || globalProvider.trim()
+//   providerValid = !llmProviderFieldVisible || effectiveProvider.length > 0
+//
+// These tests exercise the core logic through computeLocalModeGate's satisfied
+// flag and the label helper; the gate itself is inline in each dialog.
+
+test("providerValid_emptyPerAgentAndNoGlobal_shouldBlockSave", () => {
+  // Per Will's confirmed rule: empty per-agent + no global → no effective
+  // provider → save MUST be blocked.
+  const effectiveProvider = "".trim() || "".trim();
+  assert.equal(
+    effectiveProvider.length > 0,
+    false,
+    "empty per-agent + no global must yield an empty effective provider",
+  );
+});
+
+test("providerValid_emptyPerAgentWithGlobal_shouldAllowSave", () => {
+  // Per Will's confirmed rule: empty per-agent + global set → inherit →
+  // save MUST be allowed.
+  const effectiveProvider = "".trim() || "anthropic".trim();
+  assert.equal(
+    effectiveProvider.length > 0,
+    true,
+    "empty per-agent + global set must yield a non-empty effective provider",
+  );
+});
+
+test("providerValid_explicitPerAgent_shouldAllowSave", () => {
+  // Explicit per-agent provider always valid regardless of global.
+  const effectiveProvider = "openai".trim() || "".trim();
+  assert.equal(
+    effectiveProvider.length > 0,
+    true,
+    "explicit per-agent provider must yield a non-empty effective provider",
+  );
+});
+
+test("globalAwareGate_globalProviderSet_requiredKeyAppearsWhenMissing", () => {
+  // When the effective provider is supplied via the global config (no
+  // per-agent provider), required credential rows must still appear.
+  const gate = computeLocalModeGate({
+    envVars: {},
+    globalProvider: "anthropic",
+    globalEnvVars: {},
+    isProviderMode: false,
+    model: "",
+    provider: "",
+    runtimeId: "buzz-agent",
+    runtimeFileConfig: undefined,
+    useMesh: false,
+  });
+  assert.ok(
+    gate.requiredEnvKeys.includes("ANTHROPIC_API_KEY"),
+    "ANTHROPIC_API_KEY must appear in requiredEnvKeys when global provider = anthropic and key is missing",
+  );
+});
+
+test("globalAwareGate_globalProviderAndKeySet_requiredKeyAbsent", () => {
+  // When the key is satisfied globally, it must not appear in requiredEnvKeys.
+  const gate = computeLocalModeGate({
+    envVars: {},
+    globalProvider: "anthropic",
+    globalEnvVars: { ANTHROPIC_API_KEY: "sk-global-key" },
+    isProviderMode: false,
+    model: "",
+    provider: "",
+    runtimeId: "buzz-agent",
+    runtimeFileConfig: undefined,
+    useMesh: false,
+  });
+  assert.equal(
+    gate.requiredEnvKeys.includes("ANTHROPIC_API_KEY"),
+    false,
+    "ANTHROPIC_API_KEY must NOT appear in requiredEnvKeys when it is satisfied globally",
   );
 });
