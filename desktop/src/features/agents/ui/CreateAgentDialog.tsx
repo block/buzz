@@ -634,6 +634,24 @@ export function CreateAgentDialog({
                         {prereqsQuery.error.message}
                       </p>
                     ) : null}
+
+                    {prereqs?.bash?.available === false ? (
+                      <p className="rounded-2xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-warning">
+                        <strong>Git for Windows not found.</strong> The shell
+                        tool requires Git Bash. Install Git for Windows from{" "}
+                        <a
+                          className="underline"
+                          href="https://git-scm.com/download/win"
+                          rel="noreferrer"
+                          target="_blank"
+                        >
+                          git-scm.com/download/win
+                        </a>{" "}
+                        and re-launch Buzz, or set the{" "}
+                        <code>BUZZ_SHELL</code> environment variable to a
+                        bash-compatible executable.
+                      </p>
+                    ) : null}
                   </div>
                 </div>
               ) : null}

@@ -467,6 +467,9 @@ pub struct DiscoverManagedAgentPrereqsRequest {
 pub struct ManagedAgentPrereqsInfo {
     pub acp: CommandAvailabilityInfo,
     pub mcp: CommandAvailabilityInfo,
+    /// Windows only: whether a bash-compatible shell is available on the host.
+    /// Always `None` on non-Windows platforms.
+    pub bash: Option<CommandAvailabilityInfo>,
 }
 
 /// Patch request for updating a managed agent's mutable fields.

@@ -484,6 +484,7 @@ type RawCommandAvailability = {
 type RawManagedAgentPrereqs = {
   acp: RawCommandAvailability;
   mcp: RawCommandAvailability;
+  bash: RawCommandAvailability | null;
 };
 
 type RawPersona = {
@@ -6099,6 +6100,7 @@ async function handleDiscoverManagedAgentPrereqs(
       resolved_path: configuredPrereqs?.mcp?.resolvedPath ?? "",
       available: configuredPrereqs?.mcp?.available ?? true,
     },
+    bash: null,
   };
 }
 

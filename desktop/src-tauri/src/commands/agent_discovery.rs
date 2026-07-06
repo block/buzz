@@ -308,9 +308,75 @@ pub fn discover_managed_agent_prereqs(
         .filter(|value| !value.is_empty())
         .unwrap_or("");
 
+    // On Windows, check whether a bash-compatible shell is available. The probe
+    // mirrors the resolver in buzz-dev-mcp/src/shell.rs (same priority: BUZZ_SHELL
+    // > GIT_BASH > Program Files\Git > LocalAppData\Programs\Git). This surfaces
+    // the prerequisite in the agent-creation UI before the user hits a runtime error.
+    #[cfg(windows)]
+    let bash = Some(detect_windows_bash());
+    #[cfg(not(windows))]
+    let bash = None;
+
     ManagedAgentPrereqsInfo {
         acp: command_availability(acp_command),
         mcp: command_availability(mcp_command),
+        bash,
+    }
+}
+
+/// Probe for a bash-compatible shell on Windows, mirroring the resolver in
+/// `buzz-dev-mcp/src/shell.rs`. Returns a `CommandAvailabilityInfo` so the
+/// frontend can surface a prereq hint in the same shape as acp/mcp.
+#[cfg(windows)]
+fn detect_windows_bash() -> crate::managed_agents::CommandAvailabilityInfo {
+    // 1. BUZZ_SHELL override.
+    if let Some(p) = std::env::var_os("BUZZ_SHELL").map(std::path::PathBuf::from) {
+        if p.is_file() {
+            return crate::managed_agents::CommandAvailabilityInfo {
+                command: "bash".to_string(),
+                available: true,
+                resolved_path: Some(p.display().to_string()),
+            };
+        }
+    }
+
+    // 2. GIT_BASH legacy override.
+    if let Some(p) = std::env::var_os("GIT_BASH").map(std::path::PathBuf::from) {
+        if p.is_file() {
+            return crate::managed_agents::CommandAvailabilityInfo {
+                command: "bash".to_string(),
+                available: true,
+                resolved_path: Some(p.display().to_string()),
+            };
+        }
+    }
+
+    // 3. Installed Git for Windows.
+    for root in ["ProgramFiles", "LocalAppData"] {
+        if let Some(base) = std::env::var_os(root) {
+            let candidate = match root {
+                "LocalAppData" => {
+                    std::path::PathBuf::from(&base).join("Programs").join("Git")
+                }
+                _ => std::path::PathBuf::from(&base).join("Git"),
+            }
+            .join("bin")
+            .join("bash.exe");
+            if candidate.is_file() {
+                return crate::managed_agents::CommandAvailabilityInfo {
+                    command: "bash".to_string(),
+                    available: true,
+                    resolved_path: Some(candidate.display().to_string()),
+                };
+            }
+        }
+    }
+
+    // Not found.
+    crate::managed_agents::CommandAvailabilityInfo {
+        command: "bash".to_string(),
+        available: false,
+        resolved_path: None,
     }
 }
 
