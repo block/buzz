@@ -21,8 +21,8 @@
 //! The whole feature is **off by default** and gated behind
 //! `BUZZ_MEDIA_UPLOAD_RECORDS`. IP collection is a second, independent opt-in
 //! (`BUZZ_MEDIA_UPLOAD_IP_HEADER`) and is *fail-empty*: a missing, malformed,
-//! or non-public address records nothing — a wrong IP misattributes a
-//! criminal act; absent is always preferable. The IP goes only into this
+//! or non-public address records nothing — a wrong IP is worse than no IP,
+//! so absent is always preferable. The IP goes only into this
 //! record — never blob metadata, never the upload response, never the
 //! hash-chained audit log.
 //!
