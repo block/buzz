@@ -52,6 +52,7 @@ import { MessageComposerToolbar } from "./MessageComposerToolbar";
 import { NonMemberMentionDialog } from "./NonMemberMentionDialog";
 import { useMentionSendFlow } from "./useMentionSendFlow";
 import { useComposerContentState } from "./useComposerContentState";
+import { useDraftPersistSnapshot } from "./useDraftPersistSnapshot";
 
 type MessageComposerProps = {
   channelId?: string | null;
@@ -196,14 +197,10 @@ function MessageComposerImpl({
   // Snapshot of pendingImeta for the effect cleanup.  Updated both on every
   // render (from the live state, same cadence as pendingImetaRef) AND
   // synchronously inside the effect body when a draft is restored.  The
-  // synchronous write is what makes the unmount path correct in React StrictMode:
-  // StrictMode simulates unmount immediately after the effect body runs, before
-  // the queued setPendingImeta state update is committed — so
-  // media.pendingImetaRef.current would still be [] at that point.  By writing
-  // here in the effect body (synchronous), the cleanup closure sees [image] even
-  // during the StrictMode simulate-unmount pass.
-  const pendingImetaForPersistRef = React.useRef<ImetaMedia[]>([]);
-  pendingImetaForPersistRef.current = media.pendingImeta;
+  // See useDraftPersistSnapshot for the two-update-path design that makes the
+  // StrictMode simulate-unmount cleanup read the correct value.
+  const { pendingImetaForPersistRef, snapshotPendingImeta } =
+    useDraftPersistSnapshot(media.pendingImeta);
 
   const disabledRef = React.useRef(disabled);
   const isSendingRef = React.useRef(isSending);
@@ -330,13 +327,13 @@ function MessageComposerImpl({
       // state setter, so the cleanup closure (which may fire before the state
       // update commits in React StrictMode's simulate-unmount pass) reads the
       // correct value instead of the stale [].
-      pendingImetaForPersistRef.current = saved.pendingImeta;
+      snapshotPendingImeta(saved.pendingImeta);
       media.setPendingImeta(saved.pendingImeta);
       setSpoileredAttachmentUrls(new Set(saved.spoileredAttachmentUrls));
     } else {
       setComposerContent("");
       richText.clearContent();
-      pendingImetaForPersistRef.current = [];
+      snapshotPendingImeta([]);
       media.setPendingImeta([]);
       setSpoileredAttachmentUrls(new Set());
     }

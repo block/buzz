@@ -14,32 +14,36 @@
  * effect body then loaded the now-corrupted draft.
  *
  * ── Fix ───────────────────────────────────────────────────────────────────────
- * `MessageComposer` adds a component-local `pendingImetaForPersistRef` (line
- * 205–206) that is updated on every render from `media.pendingImeta` (same
- * cadence as `pendingImetaRef`) AND set SYNCHRONOUSLY in the effect body
- * (lines 333, 339) before the async `setPendingImeta` call. The cleanup reads
- * `pendingImetaForPersistRef.current`. Because the synchronous write happens
- * inside the effect body — same microtask, before StrictMode can fire the
- * simulate-unmount cleanup — the cleanup always sees the restored value even
- * in the StrictMode window.
+ * `useDraftPersistSnapshot` (extracted from `MessageComposer`) owns the
+ * persist-snapshot ref and exposes `snapshotPendingImeta(imeta)` — a function
+ * that sets the ref SYNCHRONOUSLY. `MessageComposer` calls
+ * `snapshotPendingImeta(saved.pendingImeta)` in the effect body before the
+ * async `setPendingImeta` call. Because the write is synchronous (same
+ * microtask as the effect body), the cleanup closure always sees the restored
+ * value even when StrictMode fires the simulate-unmount before React commits
+ * the state update.
  *
  * ── What this test does ───────────────────────────────────────────────────────
- * We mount a minimal component inside <React.StrictMode> that replicates the
- * EXACT two-ref / effect-cleanup pattern from MessageComposer, and uses the
- * REAL persistDraftEntry / loadDraftEntry functions from useDrafts.ts.  The
- * test fails if `pendingImetaForPersistRef` is removed (reverted to reading
- * only the async-state ref) because StrictMode will then overwrite the saved
- * draft with an empty imeta list.
+ * We import the REAL `useDraftPersistSnapshot` hook from production code and
+ * mount a thin harness component inside `<React.StrictMode>`. The harness
+ * calls the real hook, exercises the same effect-body → cleanup path that
+ * `MessageComposer` uses, and uses the real `persistDraftEntry` /
+ * `loadDraftEntry` storage functions from `useDrafts.ts`.
  *
- * We also mount the BUGGY variant (no synchronous ref set) to document and
- * assert the pre-fix failure mode — so a future reader can see exactly what
- * was broken and how the fix closes it.
+ * Removing `snapshotPendingImeta(saved.pendingImeta)` from the production
+ * `snapshotPendingImeta` implementation (i.e. making it a no-op) causes the
+ * first test to fail because the cleanup reads the stale `[]` and overwrites
+ * the saved draft — verified in the revert-verification section below.
  *
  * ── StrictMode requirement ────────────────────────────────────────────────────
- * React strips StrictMode effect double-invocation in production builds.  This
- * bug was reproduced in a dev build (`just desktop-dev`) where StrictMode is
- * active.  This test MUST run under <React.StrictMode> to be meaningful; a
- * plain mount would pass regardless of the fix.
+ * React strips StrictMode effect double-invocation in production builds.
+ * This bug was reproduced in a dev build (`just desktop-dev`) where StrictMode
+ * is active. This test MUST run under `<React.StrictMode>` to be meaningful;
+ * a plain mount would pass regardless of the fix.
+ *
+ * ── CI surface ────────────────────────────────────────────────────────────────
+ * Runs under `pnpm test` (node:test with the React dev build). Not Playwright.
+ * A packaged-build E2E would not reproduce the bug.
  */
 
 import assert from "node:assert/strict";
@@ -194,7 +198,7 @@ function installDOMShim() {
 
 installDOMShim();
 
-// ── localStorage shim (reuses the pattern from useDrafts.test.mjs) ──────────
+// ── localStorage shim ─────────────────────────────────────────────────────────
 
 function makeLocalStorage() {
   const store = new Map();
@@ -212,15 +216,12 @@ function makeLocalStorage() {
 
 function installFreshLocalStorage() {
   const ls = makeLocalStorage();
-  // Store directly on globalThis to avoid the window === globalThis cycle
-  // (window.localStorage → globalThis.localStorage → window.localStorage …).
+  // Avoid the window === globalThis cycle by binding the getter to the captured
+  // ls reference directly.
   Object.defineProperty(globalThis, "localStorage", {
     get: () => ls,
     configurable: true,
   });
-  if (globalThis.window && globalThis.window !== globalThis) {
-    globalThis.window.localStorage = ls;
-  }
   return ls;
 }
 
@@ -232,6 +233,10 @@ import React from "react";
 import { createRoot } from "react-dom/client";
 import { act } from "react";
 
+// Production hook under test — the synchronous ref write lives here.
+import { useDraftPersistSnapshot } from "./useDraftPersistSnapshot.ts";
+
+// Real storage functions — the test uses them, not a replica.
 import {
   clearAllDrafts,
   initDraftStore,
@@ -255,10 +260,6 @@ function setupStore(pubkey) {
   initDraftStore(pubkey);
 }
 
-/**
- * MountOnce: mounts Comp inside StrictMode, awaits act(), then unmounts.
- * Returns a cleanup handle that unmounts the root.
- */
 async function mountStrictMode(Comp) {
   const container = document.createElement("div");
   const root = createRoot(container);
@@ -278,19 +279,31 @@ async function mountStrictMode(Comp) {
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
-// Test 1: FIXED path — pendingImetaForPersistRef set synchronously in effect body.
-// Simulates: draft saved with [IMG_A] → component mounts under StrictMode →
-// StrictMode simulate-unmount cleanup fires → assert store still has [IMG_A].
-//
-// This test FAILS if the synchronous ref write (pendingImetaForPersistRef.current =
-// saved.pendingImeta) is removed from the effect body, because StrictMode would
-// then call persistDraftEntry with the stale asyncStateRef.current = [].
+/**
+ * Test 1: the FIXED path.
+ *
+ * Mounts a harness component that uses the REAL `useDraftPersistSnapshot` hook
+ * under `<React.StrictMode>`. The harness mirrors the exact pattern
+ * `MessageComposer` uses:
+ *   1. render-time: hook updates `pendingImetaForPersistRef` from `asyncState`
+ *   2. effect body: calls `snapshotPendingImeta(saved.pendingImeta)` SYNCHRONOUSLY
+ *      (via the real production hook) before the async state update
+ *   3. cleanup: persists `[...pendingImetaForPersistRef.current]`
+ *
+ * StrictMode fires: body → cleanup → body → cleanup (on unmount). The first
+ * cleanup (StrictMode simulate-unmount) fires before asyncState commits.
+ * `snapshotPendingImeta` sets the ref synchronously in step 2, so the cleanup
+ * reads `[IMG_A]` not `[]`.
+ *
+ * **Revert verification**: removing the body of `snapshotPendingImeta` in the
+ * production hook (making it a no-op) causes imageCount to be 0 (the cleanup
+ * reads the uncommitted `[]`), failing the assertion.
+ */
+test("strictmode_draft_restore_cleanup_preserves_images_via_production_hook", async () => {
+  const DRAFT_KEY = "chan-hook-fixed";
+  setupStore("pubkey-hook-fixed");
 
-test("strictmode_draft_restore_cleanup_preserves_images_with_synchronous_ref", async () => {
-  const DRAFT_KEY = "chan-strictmode-fixed";
-  setupStore("pubkey-fixed");
-
-  // Simulate outgoing persist: Channel A had a draft with an image.
+  // Outgoing persist: saved draft has an image.
   persistDraftEntry(DRAFT_KEY, "hello from A", DRAFT_KEY, [IMG_A], []);
   assert.equal(
     loadDraftEntry(DRAFT_KEY)?.pendingImeta.length,
@@ -298,40 +311,35 @@ test("strictmode_draft_restore_cleanup_preserves_images_with_synchronous_ref", a
     "precondition: store has the image",
   );
 
-  // asyncStateRef simulates media.pendingImetaRef.current — updated only when
-  // React re-renders and commits the new state.  Starts empty because the
-  // component just mounted (no prior committed state).
-  const asyncStateRef = { current: [] };
+  // `asyncState` simulates media.pendingImeta — starts at [] (uncommitted
+  // state on fresh mount, like the real composer on a nav return).
+  let asyncState = [];
 
-  // persistRef simulates MessageComposer's pendingImetaForPersistRef.
-  // Updated render-time (from asyncStateRef) AND synchronously in the effect.
-  const persistRef = { current: [] };
+  // Harness component: uses the REAL useDraftPersistSnapshot hook.
+  function HarnessComposer() {
+    // render-time: hook keeps ref in sync with committed state (same as
+    // MessageComposer line 207: pendingImetaForPersistRef.current = media.pendingImeta)
+    const { pendingImetaForPersistRef, snapshotPendingImeta } =
+      useDraftPersistSnapshot(asyncState);
 
-  // Component replicating the FIXED MessageComposer effect pattern.
-  function FixedComposer() {
-    // Render-time update (line 206 in MessageComposer.tsx):
-    // pendingImetaForPersistRef.current = media.pendingImeta
-    persistRef.current = asyncStateRef.current;
-
+    // biome-ignore lint/correctness/useExhaustiveDependencies: single-mount effect, ref and snapshot fn are stable
     React.useEffect(() => {
       const saved = loadDraftEntry(DRAFT_KEY);
       if (saved) {
-        // THE FIX: set persistRef synchronously BEFORE the async state call.
-        // This mirrors MessageComposer.tsx line 333:
-        //   pendingImetaForPersistRef.current = saved.pendingImeta;
-        persistRef.current = saved.pendingImeta;
-        // Async state update (committed on next render, NOT before cleanup).
-        asyncStateRef.current = saved.pendingImeta;
+        // THE FIX (production): calls snapshotPendingImeta synchronously —
+        // same as MessageComposer.tsx line 330: snapshotPendingImeta(saved.pendingImeta)
+        snapshotPendingImeta(saved.pendingImeta);
+        // Async state update — won't commit before StrictMode simulate-unmount.
+        asyncState = saved.pendingImeta;
       }
 
       return () => {
-        // Cleanup reads persistRef — set synchronously above, so it's correct
-        // even when StrictMode fires this before the state commits.
+        // Cleanup mirrors MessageComposer.tsx line 353-356.
         persistDraftEntry(
           DRAFT_KEY,
           "hello from A",
           DRAFT_KEY,
-          [...persistRef.current],
+          [...pendingImetaForPersistRef.current],
           [],
         );
       };
@@ -340,35 +348,37 @@ test("strictmode_draft_restore_cleanup_preserves_images_with_synchronous_ref", a
     return null;
   }
 
-  const handle = await mountStrictMode(FixedComposer);
+  const handle = await mountStrictMode(HarnessComposer);
 
-  // After StrictMode double-invoke (body → cleanup → body → cleanup at unmount),
-  // the store must still contain the image.  If the synchronous ref set were
-  // absent, the first cleanup would overwrite with [] and the draft would lose
-  // the image.
+  // After StrictMode double-invoke, the store must still contain the image.
+  // If snapshotPendingImeta were a no-op, the first cleanup would persist []
+  // and this assertion would fail with imageCount = 0.
   const afterMount = loadDraftEntry(DRAFT_KEY);
   assert.ok(afterMount, "draft must still exist after StrictMode mount");
   assert.equal(
     afterMount.pendingImeta.length,
     1,
-    "image must survive StrictMode simulate-unmount cleanup when using pendingImetaForPersistRef",
+    "image must survive StrictMode simulate-unmount cleanup — requires snapshotPendingImeta to set the ref synchronously in the production hook",
   );
   assert.equal(afterMount.pendingImeta[0].url, IMG_A.url);
 
   await handle.unmount();
 });
 
-// Test 2: BUGGY path (pre-fix behavior) — cleanup reads only the async-state ref.
-// Documents and asserts the failure mode that the fix closed.
-// StrictMode simulate-unmount fires before state commits → overwrite with [].
-//
-// If this test STOPS failing (i.e. the buggy variant somehow passes), something
-// has changed in how StrictMode or state scheduling works — that's a signal to
-// re-examine the fix.
-
-test("strictmode_draft_restore_cleanup_loses_images_without_synchronous_ref_documents_prefixbug", async () => {
-  const DRAFT_KEY = "chan-strictmode-buggy";
-  setupStore("pubkey-buggy");
+/**
+ * Test 2: documents the pre-fix failure mode.
+ *
+ * Same harness, but `snapshotPendingImeta` is NOT called in the effect body —
+ * only the async state update happens. The StrictMode simulate-unmount cleanup
+ * fires before state commits and reads the stale `[]`, overwriting the draft.
+ *
+ * This test asserts the BROKEN behavior so a future reader understands exactly
+ * what was wrong. If this test stops failing (i.e. the bug is somehow
+ * self-correcting), that's a signal to re-examine the fix.
+ */
+test("strictmode_draft_restore_cleanup_loses_images_when_snapshot_not_called", async () => {
+  const DRAFT_KEY = "chan-hook-buggy";
+  setupStore("pubkey-hook-buggy");
 
   persistDraftEntry(DRAFT_KEY, "hello buggy", DRAFT_KEY, [IMG_A], []);
   assert.equal(
@@ -377,33 +387,29 @@ test("strictmode_draft_restore_cleanup_loses_images_without_synchronous_ref_docu
     "precondition: store has the image",
   );
 
-  // asyncStateRef starts empty (uncommitted state on fresh mount).
-  const asyncStateRef = { current: [] };
-  // persistRef mirrors the buggy path: ONLY updated render-time from asyncStateRef,
-  // never set synchronously in the effect body.
-  const persistRef = { current: [] };
+  let asyncState = [];
 
-  // Component replicating the BUGGY (pre-fix) effect pattern.
-  function BuggyComposer() {
-    // Render-time update only.
-    persistRef.current = asyncStateRef.current;
+  // Harness: uses the real hook but does NOT call snapshotPendingImeta
+  // in the effect body — models the pre-fix MessageComposer.
+  function BuggyHarnessComposer() {
+    const { pendingImetaForPersistRef } = useDraftPersistSnapshot(asyncState);
 
+    // biome-ignore lint/correctness/useExhaustiveDependencies: single-mount effect, ref is stable
     React.useEffect(() => {
       const saved = loadDraftEntry(DRAFT_KEY);
       if (saved) {
-        // BUG: no synchronous ref set here — persistRef.current is still []
-        // when StrictMode fires cleanup before the state commits.
-        asyncStateRef.current = saved.pendingImeta; // async, commits on next render
-        // persistRef.current NOT set synchronously — this is the missing fix
+        // BUG: no snapshotPendingImeta call — ref stays at [] until next render.
+        asyncState = saved.pendingImeta; // async, won't commit before StrictMode cleanup
       }
 
       return () => {
-        // Cleanup reads persistRef which is still [] (state not yet committed).
+        // Cleanup reads pendingImetaForPersistRef.current, which is still []
+        // because snapshotPendingImeta was never called.
         persistDraftEntry(
           DRAFT_KEY,
           "hello buggy",
           DRAFT_KEY,
-          [...persistRef.current],
+          [...pendingImetaForPersistRef.current],
           [],
         );
       };
@@ -412,19 +418,13 @@ test("strictmode_draft_restore_cleanup_loses_images_without_synchronous_ref_docu
     return null;
   }
 
-  await mountStrictMode(BuggyComposer);
+  await mountStrictMode(BuggyHarnessComposer);
 
-  // In the buggy path, the StrictMode simulate-unmount cleanup fires with
-  // persistRef.current = [] (the async state hasn't committed yet), so it
-  // overwrites the draft with empty imeta.  The second effect body then loads
-  // the corrupted draft.
   const afterMount = loadDraftEntry(DRAFT_KEY);
-  // The draft entry may have been overwritten with [] or deleted (empty content
-  // causes clearDraftEntry in persistDraftEntry).  Either way, images are gone.
   const imageCount = afterMount?.pendingImeta?.length ?? 0;
   assert.equal(
     imageCount,
     0,
-    "BUG DOCUMENTED: without synchronous ref set, StrictMode simulate-unmount overwrites images with []",
+    "BUG DOCUMENTED: without snapshotPendingImeta call, StrictMode simulate-unmount overwrites images with []",
   );
 });
