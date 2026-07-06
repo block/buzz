@@ -301,7 +301,7 @@ function AgentPersonaCard({
   const isActive = agent ? isManagedAgentActive(agent) : false;
   const profileQuery = useUserProfileQuery(agent?.pubkey);
   const avatarUrl = agent
-    ? firstAvatarUrl(profileQuery.data?.avatarUrl, persona.avatarUrl)
+    ? firstAvatarUrl(persona.avatarUrl, profileQuery.data?.avatarUrl)
     : persona.avatarUrl;
   const friendlyError = agent
     ? friendlyAgentLastError(agent.lastError)?.copy

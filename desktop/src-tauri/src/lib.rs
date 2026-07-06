@@ -627,6 +627,7 @@ pub fn run() {
             archive::list_save_subscriptions,
             archive::delete_save_subscription,
             archive::read_archived_events,
+            is_auto_update_supported,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
