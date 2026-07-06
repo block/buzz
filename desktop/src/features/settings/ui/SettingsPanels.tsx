@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import {
   BellRing,
   Bot,
@@ -261,30 +261,31 @@ function PairedThemeTile({
   return (
     <button
       aria-pressed={isActive}
-      className={cn(
-        "group flex w-[174px] min-w-0 flex-col rounded-lg border bg-background/70 p-2 text-left transition-colors focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring",
-        isActive
-          ? "border-primary text-foreground shadow-sm"
-          : "border-border/70 text-muted-foreground hover:border-border hover:bg-accent/70 hover:text-accent-foreground",
-      )}
+      className="group flex w-[140px] shrink-0 flex-col items-center text-center focus-visible:outline-hidden"
       data-testid={`theme-pair-${lightName}`}
       onClick={onSelect}
       type="button"
     >
       <SystemPreferencePreviewFrame
-        className="h-28 w-full"
+        className={cn(
+          "h-[94px] w-[140px] transition-shadow",
+          isActive
+            ? "ring-2 ring-primary ring-offset-2 ring-offset-background"
+            : "group-hover:ring-2 group-hover:ring-border",
+        )}
         darkVars={darkVars}
         lightVars={lightVars}
       />
-
-      <div className="mt-2 flex min-h-6 items-center gap-2 px-1">
-        <span className="min-w-0 flex-1 truncate text-sm font-medium">
-          {formatThemeLabel(
-            lightName.replace(/-(?:light|latte|dawn|lotus|ochin)$/, ""),
-          )}
-        </span>
-        {isActive ? <Check className="h-4 w-4 shrink-0 text-primary" /> : null}
-      </div>
+      <span
+        className={cn(
+          "mt-1.5 w-full truncate text-2xs",
+          isActive ? "font-medium text-foreground" : "text-muted-foreground",
+        )}
+      >
+        {formatThemeLabel(
+          lightName.replace(/-(?:light|latte|dawn|lotus|ochin)$/, ""),
+        )}
+      </span>
     </button>
   );
 }
@@ -303,24 +304,28 @@ function SingleThemeTile({
   return (
     <button
       aria-pressed={isActive}
-      className={cn(
-        "group flex w-[174px] min-w-0 flex-col rounded-lg border bg-background/70 p-2 text-left transition-colors focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring",
-        isActive
-          ? "border-primary text-foreground shadow-sm"
-          : "border-border/70 text-muted-foreground hover:border-border hover:bg-accent/70 hover:text-accent-foreground",
-      )}
+      className="group flex w-[140px] shrink-0 flex-col items-center text-center focus-visible:outline-hidden"
       data-testid={`theme-option-${name}`}
       onClick={onSelect}
       type="button"
     >
-      <ThemePreviewFrame vars={vars} />
-
-      <div className="mt-2 flex min-h-6 items-center gap-2 px-1">
-        <span className="min-w-0 flex-1 truncate text-sm font-medium">
-          {formatThemeLabel(name)}
-        </span>
-        {isActive ? <Check className="h-4 w-4 shrink-0 text-primary" /> : null}
-      </div>
+      <ThemePreviewFrame
+        className={cn(
+          "h-[94px] w-[140px] transition-shadow",
+          isActive
+            ? "ring-2 ring-primary ring-offset-2 ring-offset-background"
+            : "group-hover:ring-2 group-hover:ring-border",
+        )}
+        vars={vars}
+      />
+      <span
+        className={cn(
+          "mt-1.5 w-full truncate text-2xs",
+          isActive ? "font-medium text-foreground" : "text-muted-foreground",
+        )}
+      >
+        {formatThemeLabel(name)}
+      </span>
     </button>
   );
 }
@@ -362,6 +367,14 @@ function ThemeSettingsCard() {
     setFollowSystem(false);
   };
 
+  const [expandedSections, setExpandedSections] = useState<
+    Record<string, boolean>
+  >({});
+
+  const toggleSection = (key: string) => {
+    setExpandedSections((prev) => ({ ...prev, [key]: !prev[key] }));
+  };
+
   return (
     <section
       className="flex min-h-0 flex-1 flex-col overflow-y-auto"
@@ -374,14 +387,31 @@ function ThemeSettingsCard() {
 
       {/* Section 1: Paired themes (follow system) */}
       <div className="mb-6">
-        <h3 className="mb-1 text-sm font-medium text-foreground">
-          Adapts to system
-        </h3>
+        <div className="mb-1 flex items-center justify-between">
+          <h3 className="text-sm font-medium text-foreground">
+            Adapts to system
+          </h3>
+          {pairedLight.length > 4 && (
+            <button
+              className="text-2xs text-muted-foreground hover:text-foreground"
+              onClick={() => toggleSection("paired")}
+              type="button"
+            >
+              {expandedSections.paired ? "Collapse" : "Show all"}
+            </button>
+          )}
+        </div>
         <p className="mb-3 text-2xs text-muted-foreground">
           Automatically switches between light and dark with your system
           preferences.
         </p>
-        <div className="grid grid-cols-[repeat(auto-fill,174px)] gap-3">
+        <div
+          className={
+            expandedSections.paired
+              ? "flex flex-wrap gap-3"
+              : "flex gap-3 overflow-x-auto pb-2 [scrollbar-width:thin]"
+          }
+        >
           {pairedLight.map((lightName) => {
             const darkName = getThemePair(lightName);
             if (!darkName) return null;
@@ -402,11 +432,28 @@ function ThemeSettingsCard() {
       {/* Section 2: Light-only themes */}
       {lightOnly.length > 0 && (
         <div className="mb-6">
-          <h3 className="mb-1 text-sm font-medium text-foreground">Light</h3>
+          <div className="mb-1 flex items-center justify-between">
+            <h3 className="text-sm font-medium text-foreground">Light</h3>
+            {lightOnly.length > 4 && (
+              <button
+                className="text-2xs text-muted-foreground hover:text-foreground"
+                onClick={() => toggleSection("light")}
+                type="button"
+              >
+                {expandedSections.light ? "Collapse" : "Show all"}
+              </button>
+            )}
+          </div>
           <p className="mb-3 text-2xs text-muted-foreground">
             Always uses a light appearance.
           </p>
-          <div className="grid grid-cols-[repeat(auto-fill,174px)] gap-3">
+          <div
+            className={
+              expandedSections.light
+                ? "flex flex-wrap gap-3"
+                : "flex gap-3 overflow-x-auto pb-2 [scrollbar-width:thin]"
+            }
+          >
             {lightOnly.map((name) => (
               <SingleThemeTile
                 isActive={selectedThemeName === name}
@@ -423,11 +470,28 @@ function ThemeSettingsCard() {
       {/* Section 3: Dark-only themes */}
       {darkOnly.length > 0 && (
         <div className="mb-6">
-          <h3 className="mb-1 text-sm font-medium text-foreground">Dark</h3>
+          <div className="mb-1 flex items-center justify-between">
+            <h3 className="text-sm font-medium text-foreground">Dark</h3>
+            {darkOnly.length > 4 && (
+              <button
+                className="text-2xs text-muted-foreground hover:text-foreground"
+                onClick={() => toggleSection("dark")}
+                type="button"
+              >
+                {expandedSections.dark ? "Collapse" : "Show all"}
+              </button>
+            )}
+          </div>
           <p className="mb-3 text-2xs text-muted-foreground">
             Always uses a dark appearance.
           </p>
-          <div className="grid grid-cols-[repeat(auto-fill,174px)] gap-3">
+          <div
+            className={
+              expandedSections.dark
+                ? "flex flex-wrap gap-3"
+                : "flex gap-3 overflow-x-auto pb-2 [scrollbar-width:thin]"
+            }
+          >
             {darkOnly.map((name) => (
               <SingleThemeTile
                 isActive={selectedThemeName === name}
