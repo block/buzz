@@ -838,12 +838,12 @@ jobs:
         # The Windows-only bash resolver lives in buzz-dev-mcp; its unit tests
         # only gate if this crate is tested ON Windows.
         run: cargo test -p buzz-dev-mcp --target $env:TARGET
-      # Verify the new contract: Git for Windows (which provides bash) is
-      # available on the host, the resolver in buzz-dev-mcp can find it,
-      # and a shell command round-trips through the resolved bash.
-      # windows-latest runners have Git for Windows pre-installed; this step
-      # proves the PATH-based resolver finds it without any bundled tree.
-      - name: Smoke-test host Git Bash resolver (new prereq contract)
+      # Smoke-test the new host-prereq contract: Git for Windows (which provides
+      # bash) is available on the runner, a shell command round-trips, and bash
+      # does NOT resolve from System32 (so WSL's launcher is never picked up).
+      # windows-latest runners have Git for Windows pre-installed; the unit tests
+      # above exercise the MCP resolver itself. This step verifies the host env.
+      - name: Smoke-test host Git Bash prereq (host env check)
         shell: bash
         run: |
           set -euo pipefail

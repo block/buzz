@@ -329,12 +329,15 @@ pub fn discover_managed_agent_prereqs(
 /// frontend can surface a prereq hint in the same shape as acp/mcp.
 ///
 /// Probe order (first hit wins):
-///   1. `BUZZ_SHELL` env override
+///   1. `BUZZ_SHELL` env override — absolute path or bare command name.
+///      Bare names are resolved through PATH WITHOUT System32 exclusion
+///      (same policy as the runtime resolver: explicit overrides can choose
+///      cmd/pwsh which legitimately live in System32).
 ///   2. `GIT_BASH` legacy override
 ///   3. Installed Git for Windows (`Program Files\Git` / `LocalAppData\Programs\Git`)
-///   4. PATH scan, excluding `%SystemRoot%` (to skip WSL's `System32\bash.exe`)
+///   4. PATH scan for `bash.exe`, excluding `%SystemRoot%` (WSL guard)
 ///
-/// This must stay byte-behavior-identical to the Windows arm of `resolve_bash`
+/// This must stay behavior-identical to the Windows arm of `resolve_bash`
 /// in `crates/buzz-dev-mcp/src/shell.rs`. Keep them in sync.
 #[cfg(windows)]
 fn detect_windows_bash() -> crate::managed_agents::CommandAvailabilityInfo {
@@ -346,10 +349,22 @@ fn detect_windows_bash() -> crate::managed_agents::CommandAvailabilityInfo {
         }
     }
 
-    // 1. BUZZ_SHELL override.
-    if let Some(p) = std::env::var_os("BUZZ_SHELL").map(std::path::PathBuf::from) {
-        if p.is_file() {
-            return found(p);
+    let path_env = std::env::var("PATH").unwrap_or_default();
+
+    // 1. BUZZ_SHELL override — absolute path or bare command name.
+    if let Some(raw) = std::env::var_os("BUZZ_SHELL") {
+        let p = std::path::PathBuf::from(&raw);
+        if p.components().count() > 1 || p.has_root() {
+            // Absolute path: must exist as a file.
+            if p.is_file() {
+                return found(p);
+            }
+        } else {
+            // Bare command name: scan PATH without System32 exclusion —
+            // the operator explicitly chose this shell.
+            if let Some(resolved) = scan_path_for_command_ui(&p, &path_env, None) {
+                return found(resolved);
+            }
         }
     }
 
@@ -364,9 +379,7 @@ fn detect_windows_bash() -> crate::managed_agents::CommandAvailabilityInfo {
     for root in ["ProgramFiles", "LocalAppData"] {
         if let Some(base) = std::env::var_os(root) {
             let candidate = match root {
-                "LocalAppData" => {
-                    std::path::PathBuf::from(&base).join("Programs").join("Git")
-                }
+                "LocalAppData" => std::path::PathBuf::from(&base).join("Programs").join("Git"),
                 _ => std::path::PathBuf::from(&base).join("Git"),
             }
             .join("bin")
@@ -377,8 +390,7 @@ fn detect_windows_bash() -> crate::managed_agents::CommandAvailabilityInfo {
         }
     }
 
-    // 4. PATH scan, excluding %SystemRoot% to avoid WSL's System32\bash.exe.
-    let path_env = std::env::var("PATH").unwrap_or_default();
+    // 4. PATH scan for bash.exe, excluding %SystemRoot% to avoid WSL's bash.exe.
     let system_root = std::env::var_os("SystemRoot").map(std::path::PathBuf::from);
     if let Some(p) = scan_path_for_bash_ui(&path_env, system_root.as_deref()) {
         return found(p);
@@ -394,22 +406,42 @@ fn detect_windows_bash() -> crate::managed_agents::CommandAvailabilityInfo {
 
 /// Scan `path_env` for `bash.exe`, skipping directories under `system_root`.
 /// Duplicated from `buzz-dev-mcp/src/shell.rs::scan_path_for_bash` — must be
-/// kept in sync. The two crates cannot share code at this boundary without a
-/// dedicated shared crate, so we duplicate with an explicit cross-reference.
+/// kept in sync. Delegates to `scan_path_for_command_ui`.
 #[cfg(windows)]
 fn scan_path_for_bash_ui(
     path_env: &str,
     system_root: Option<&std::path::Path>,
 ) -> Option<std::path::PathBuf> {
+    scan_path_for_command_ui(std::path::Path::new("bash.exe"), path_env, system_root)
+}
+
+/// Scan `path_env` for `name` (or `name.exe` if no extension), optionally
+/// skipping directories under `system_root`. Duplicated from
+/// `buzz-dev-mcp/src/shell.rs::scan_path_for_command` — must be kept in sync.
+/// Pass `system_root = None` for explicit BUZZ_SHELL overrides (no exclusion).
+#[cfg(windows)]
+fn scan_path_for_command_ui(
+    name: &std::path::Path,
+    path_env: &str,
+    system_root: Option<&std::path::Path>,
+) -> Option<std::path::PathBuf> {
+    let needs_exe = name.extension().is_none();
     for dir in std::env::split_paths(path_env) {
         if let Some(root) = system_root {
             if is_under_dir_ui(&dir, root) {
                 continue;
             }
         }
-        let candidate = dir.join("bash.exe");
+        let candidate = dir.join(name);
         if candidate.is_file() {
             return Some(candidate);
+        }
+        if needs_exe {
+            let mut with_exe = dir.join(name);
+            with_exe.set_extension("exe");
+            if with_exe.is_file() {
+                return Some(with_exe);
+            }
         }
     }
     None
@@ -429,6 +461,172 @@ fn is_under_dir_ui(dir: &std::path::Path, root: &std::path::Path) -> bool {
         }
     }
     true
+}
+
+#[cfg(all(test, windows))]
+mod windows_bash_detect_tests {
+    use super::*;
+    use std::env;
+    use tempfile::tempdir;
+
+    fn touch(path: &std::path::Path) {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("mkdir");
+        }
+        std::fs::write(path, b"").expect("touch");
+    }
+
+    fn available(info: &crate::managed_agents::CommandAvailabilityInfo) -> bool {
+        info.available
+    }
+
+    /// BUZZ_SHELL bare name (pwsh) resolves through PATH with no System32 exclusion.
+    /// Tests the scan_path_for_command_ui helper used by detect_windows_bash().
+    #[test]
+    fn detect_buzz_shell_bare_name_resolves_from_path() {
+        let dir = tempdir().expect("tempdir");
+        let fake_pwsh = dir.path().join("pwsh.exe");
+        touch(&fake_pwsh);
+
+        let path_env = env::join_paths([dir.path().to_path_buf()]).expect("join");
+        env::set_var("BUZZ_SHELL", "pwsh");
+
+        let result = scan_path_for_command_ui(
+            std::path::Path::new("pwsh"),
+            path_env.to_str().expect("utf8"),
+            None, // no System32 exclusion for explicit overrides
+        );
+
+        env::remove_var("BUZZ_SHELL");
+
+        let resolved = result.expect("pwsh must be found via PATH");
+        assert_eq!(resolved, fake_pwsh);
+    }
+
+    /// detect_windows_bash() end-to-end: BUZZ_SHELL=pwsh (bare name) resolves
+    /// to a real executable on PATH and is reported as available.
+    #[test]
+    fn detect_windows_bash_buzz_shell_bare_name_end_to_end() {
+        let dir = tempdir().expect("tempdir");
+        let fake_pwsh = dir.path().join("pwsh.exe");
+        touch(&fake_pwsh);
+
+        let old_path = env::var_os("PATH");
+        let old_buzz_shell = env::var_os("BUZZ_SHELL");
+
+        // Put fake pwsh.exe at the front of PATH and set BUZZ_SHELL to the bare name.
+        let new_path = env::join_paths(
+            std::iter::once(dir.path().to_path_buf()).chain(
+                old_path
+                    .as_ref()
+                    .map(|p| env::split_paths(p).collect::<Vec<_>>().into_iter())
+                    .into_iter()
+                    .flatten(),
+            ),
+        )
+        .expect("join");
+        env::set_var("PATH", &new_path);
+        env::set_var("BUZZ_SHELL", "pwsh");
+
+        let info = detect_windows_bash();
+
+        // Restore env.
+        match old_path {
+            Some(p) => env::set_var("PATH", p),
+            None => env::remove_var("PATH"),
+        }
+        match old_buzz_shell {
+            Some(v) => env::set_var("BUZZ_SHELL", v),
+            None => env::remove_var("BUZZ_SHELL"),
+        }
+
+        assert!(info.available, "detect_windows_bash must report available");
+        assert_eq!(
+            info.resolved_path.as_deref(),
+            Some(fake_pwsh.display().to_string()).as_deref(),
+            "resolved path must point to the fake pwsh.exe"
+        );
+    }
+
+    /// detect_windows_bash() end-to-end: PATH-only bash.exe (no Git for Windows)
+    /// is found and reported as available.
+    #[test]
+    fn detect_windows_bash_path_only_bash_end_to_end() {
+        let dir = tempdir().expect("tempdir");
+        let fake_bash = dir.path().join("bash.exe");
+        touch(&fake_bash);
+
+        // Use a separate dir as the "SystemRoot" so the scan-exclusion logic
+        // doesn't interfere. detect_windows_bash() reads SystemRoot from env.
+        let fake_sysroot = tempdir().expect("sysroot");
+
+        let old_path = env::var_os("PATH");
+        let old_system_root = env::var_os("SystemRoot");
+        let old_buzz_shell = env::var_os("BUZZ_SHELL");
+
+        let new_path = env::join_paths([dir.path().to_path_buf()]).expect("join");
+        env::set_var("PATH", &new_path);
+        env::set_var("SystemRoot", fake_sysroot.path());
+        env::remove_var("BUZZ_SHELL");
+
+        let info = detect_windows_bash();
+
+        match old_path {
+            Some(p) => env::set_var("PATH", p),
+            None => env::remove_var("PATH"),
+        }
+        match old_system_root {
+            Some(v) => env::set_var("SystemRoot", v),
+            None => env::remove_var("SystemRoot"),
+        }
+        match old_buzz_shell {
+            Some(v) => env::set_var("BUZZ_SHELL", v),
+            None => env::remove_var("BUZZ_SHELL"),
+        }
+
+        assert!(info.available, "PATH-only bash.exe must be found");
+        assert_eq!(
+            info.resolved_path.as_deref(),
+            Some(fake_bash.display().to_string()).as_deref(),
+            "resolved path must point to the fake bash.exe"
+        );
+    }
+
+    /// PATH-only bash.exe is found by the scan_path_for_bash_ui helper.
+    #[test]
+    fn detect_path_only_bash_found() {
+        let real = tempdir().expect("real");
+        let real_bash = real.path().join("bash.exe");
+        touch(&real_bash);
+        let sys_root = tempdir().expect("sysroot"); // empty
+
+        let found = scan_path_for_bash_ui(
+            env::join_paths([real.path().to_path_buf()])
+                .expect("join")
+                .to_str()
+                .expect("utf8"),
+            Some(sys_root.path()),
+        )
+        .expect("bash found");
+        assert_eq!(found, real_bash);
+    }
+
+    /// System32 bash.exe is skipped by the implicit scan.
+    #[test]
+    fn detect_system32_bash_skipped() {
+        let sys32 = tempdir().expect("sys32");
+        touch(&sys32.path().join("bash.exe"));
+        let parent = sys32.path().parent().unwrap().to_path_buf();
+
+        let found = scan_path_for_bash_ui(
+            env::join_paths([sys32.path().to_path_buf()])
+                .expect("join")
+                .to_str()
+                .expect("utf8"),
+            Some(&parent),
+        );
+        assert!(found.is_none(), "System32 bash must be skipped");
+    }
 }
 
 #[tauri::command]
