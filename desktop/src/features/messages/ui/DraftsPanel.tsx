@@ -188,6 +188,17 @@ function DraftRowActionButton({
   );
 }
 
+export function canOpenDraft(
+  draft: DraftState,
+  source: DraftSource,
+): boolean {
+  return (
+    draft.status !== "sent" &&
+    source.channel !== null &&
+    draft.channelId.length > 0
+  );
+}
+
 function DraftRow({
   entry,
   onDelete,
@@ -199,8 +210,8 @@ function DraftRow({
   onOpen: (entry: DraftListEntry) => void;
   source: DraftSource;
 }) {
-  const canOpen = entry.draft.channelId.length > 0;
   const isSent = entry.draft.status === "sent";
+  const canOpen = canOpenDraft(entry.draft, source);
   const isPrivate = source.channel?.visibility === "private";
   const isDm = source.channel?.channelType === "dm";
   const channelLabel = source.channel
