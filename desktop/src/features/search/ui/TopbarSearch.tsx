@@ -15,7 +15,7 @@ import {
 import { SearchPromptPlaceholder } from "@/features/search/ui/SearchPromptPlaceholder";
 import type { Channel, SearchHit, UserSearchResult } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
-import { normalizePubkey } from "@/shared/lib/pubkey";
+import { normalizePubkey, truncatePubkey } from "@/shared/lib/pubkey";
 import { Dialog, DialogContent, DialogTitle } from "@/shared/ui/dialog";
 import { useDeferredModalOpen } from "@/shared/ui/deferredModalOpen";
 import {
@@ -145,7 +145,7 @@ function getUserDisplayName(user: UserSearchResult) {
   return (
     user.displayName?.trim() ||
     user.nip05Handle?.trim() ||
-    `${normalizePubkey(user.pubkey).slice(0, 8)}...`
+    truncatePubkey(user.pubkey)
   );
 }
 

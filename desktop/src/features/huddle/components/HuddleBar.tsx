@@ -31,6 +31,7 @@ import { useHuddle } from "../HuddleContext";
 import { AddAgentDialog, type AgentAddResult } from "./AddAgentDialog";
 import { MicControls, SpeakerControls } from "./MicControls";
 import { HuddleParticipantsControl } from "./ParticipantList";
+import { truncatePubkey } from "@/shared/lib/pubkey";
 
 // Mirrors HuddleState in src-tauri/src/huddle/mod.rs.
 type HuddleState = {
@@ -93,7 +94,7 @@ function clampReactionName(name: string): string {
 }
 
 function fallbackNameForPubkey(pubkey?: string | null): string {
-  return pubkey ? `Participant ${pubkey.slice(0, 8)}` : "Someone";
+  return pubkey ? `Participant ${truncatePubkey(pubkey)}` : "Someone";
 }
 
 function parseHuddleReactionEvent(event: RelayEvent) {

@@ -5,7 +5,7 @@ import type { RelayAgent } from "@/shared/api/types";
 import { PresenceBadge } from "@/features/presence/ui/PresenceBadge";
 import { Card } from "@/shared/ui/card";
 import { Input } from "@/shared/ui/input";
-import { truncatePubkey } from "./agentUi";
+import { truncatePubkey } from "@/shared/lib/pubkey";
 
 export function RelayDirectorySection({
   error,

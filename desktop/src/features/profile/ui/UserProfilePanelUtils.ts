@@ -8,8 +8,7 @@ import type {
   RelayAgent,
   UpdateManagedAgentInput,
 } from "@/shared/api/types";
-import { normalizePubkey } from "@/shared/lib/pubkey";
-import { truncatePubkey } from "@/features/profile/lib/identity";
+import { normalizePubkey, truncatePubkey } from "@/shared/lib/pubkey";
 
 export { truncatePubkey };
 

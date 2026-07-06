@@ -4,7 +4,8 @@ import {
   mergeAllowlist,
   parsePubkeyInput,
 } from "@/features/agents/lib/respondToAllowlist";
-import { formatPubkey } from "@/features/channels/lib/memberUtils";
+import { truncatePubkey } from "@/shared/lib/pubkey";
+import { PubKey } from "@/shared/ui/PubKey";
 import { useIsArchivedPredicate } from "@/features/identity-archive/hooks";
 import { useUserSearchQuery } from "@/features/profile/hooks";
 import type { RespondToMode, UserSearchResult } from "@/shared/api/types";
@@ -36,7 +37,7 @@ function formatSearchUserName(user: UserSearchResult) {
   return (
     user.displayName?.trim() ||
     user.nip05Handle?.trim() ||
-    formatPubkey(user.pubkey)
+    truncatePubkey(user.pubkey)
   );
 }
 
@@ -46,7 +47,7 @@ function formatSearchUserSecondary(user: UserSearchResult) {
   if (displayName && nip05Handle) {
     return nip05Handle;
   }
-  return formatPubkey(user.pubkey);
+  return truncatePubkey(user.pubkey);
 }
 
 const RESPOND_TO_OPTIONS: PersonaDropdownOption[] = [
@@ -276,8 +277,9 @@ function AllowlistPicker({
       ) : null}
       {!isPersona && ownerPubkey ? (
         <p className="text-xs text-muted-foreground">
-          Owner (<span className="font-mono">{formatPubkey(ownerPubkey)}</span>)
-          is always implicitly allowed by the harness — no need to add it here.
+          Owner (
+          <PubKey pubkey={ownerPubkey} />) is always implicitly allowed by the
+          harness — no need to add it here.
         </p>
       ) : !isPersona ? (
         <p className="text-xs text-muted-foreground">
@@ -308,12 +310,12 @@ function AllowlistPicker({
               >
                 <UserAvatar
                   avatarUrl={null}
-                  displayName={formatPubkey(pubkey)}
+                  displayName={truncatePubkey(pubkey)}
                   size="xs"
                 />
-                <span className="font-mono">{formatPubkey(pubkey)}</span>
+                <PubKey pubkey={pubkey} />
                 <button
-                  aria-label={`Remove ${formatPubkey(pubkey)}`}
+                  aria-label={`Remove ${truncatePubkey(pubkey)}`}
                   className="text-muted-foreground transition-colors hover:text-foreground"
                   disabled={disabled}
                   onClick={() => onRemove(pubkey)}
@@ -370,12 +372,12 @@ function AllowlistPicker({
                 <div className="flex items-center gap-2 min-w-0">
                   <UserAvatar
                     avatarUrl={null}
-                    displayName={formatPubkey(deferredQuery)}
+                    displayName={truncatePubkey(deferredQuery)}
                     size="xs"
                   />
                   <div className="min-w-0">
                     <p className="truncate text-sm font-medium leading-5">
-                      {formatPubkey(deferredQuery)}
+                      {truncatePubkey(deferredQuery)}
                     </p>
                     <p className="truncate text-xs text-muted-foreground">
                       Add pubkey directly

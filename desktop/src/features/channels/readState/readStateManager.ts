@@ -19,6 +19,7 @@ import {
   writeStoredReadState,
 } from "@/features/channels/readState/readStateStorage";
 import { setLocalStorageItemWithRecovery } from "@/shared/lib/localStorageQuota";
+import { truncatePubkey } from "@/shared/lib/pubkey";
 
 const CLIENT_ID_KEY_PREFIX = "buzz.nip-rs.client-id";
 const SLOT_ID_KEY_PREFIX = "buzz.nip-rs.slot-id";
@@ -335,7 +336,7 @@ export class ReadStateManager {
   async initialize(): Promise<void> {
     if (this.initialized || this.destroyed) return;
     console.debug(
-      `[ReadStateManager] initialize pubkey=${this.pubkey.substring(0, 8)}… clientId=${this.clientId.substring(0, 8)}… slotId=${this.slotId}`,
+      `[ReadStateManager] initialize pubkey=${truncatePubkey(this.pubkey)} clientId=${this.clientId.substring(0, 8)}… slotId=${this.slotId}`,
     );
 
     this.hydrateFromLocalStorage();

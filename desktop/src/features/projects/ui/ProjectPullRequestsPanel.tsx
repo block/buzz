@@ -16,7 +16,7 @@ import {
 } from "@/features/projects/hooks";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type { ChannelMember } from "@/shared/api/types";
-import { normalizePubkey } from "@/shared/lib/pubkey";
+import { normalizePubkey, truncatePubkey } from "@/shared/lib/pubkey";
 import { Markdown } from "@/shared/ui/markdown";
 import { ProfileIdentityButton } from "./ProjectProfileIdentity";
 
@@ -36,7 +36,7 @@ function labelForPubkey(pubkey: string, profiles?: UserProfileLookup) {
   return (
     profile?.displayName?.trim() ||
     profile?.nip05Handle?.trim() ||
-    `${pubkey.slice(0, 8)}…${pubkey.slice(-4)}`
+    truncatePubkey(pubkey)
   );
 }
 

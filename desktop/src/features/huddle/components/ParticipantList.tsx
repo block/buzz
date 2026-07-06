@@ -6,6 +6,7 @@ import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
+import { truncatePubkey } from "@/shared/lib/pubkey";
 
 type ParticipantListProps = {
   /** Pubkey hex strings from the Rust huddle state */
@@ -76,7 +77,7 @@ export function HuddleParticipantsControl({
           {participants.map((pubkey) => {
             const profile = profiles[pubkey.toLowerCase()];
             const displayName =
-              profile?.displayName || `Participant ${pubkey.slice(0, 8)}`;
+              profile?.displayName || `Participant ${truncatePubkey(pubkey)}`;
             const isActive = activeSpeakers?.includes(pubkey);
             const isAgent = agentSet.has(pubkey);
 
@@ -146,7 +147,7 @@ function HexAvatar({
 
   return (
     <div
-      aria-label={`Participant ${pubkey.slice(0, 8)}`}
+      aria-label={`Participant ${truncatePubkey(pubkey)}`}
       role="img"
       className={cn(
         "flex items-center justify-center rounded-full font-semibold shadow-xs",

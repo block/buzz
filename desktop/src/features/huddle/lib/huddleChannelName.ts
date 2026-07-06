@@ -1,15 +1,11 @@
 import type { Channel, ChannelMember } from "@/shared/api/types";
-import { normalizePubkey } from "@/shared/lib/pubkey";
+import { normalizePubkey, truncatePubkey } from "@/shared/lib/pubkey";
 
 type BuildHuddleChannelNameInput = {
   channel: Channel;
   currentPubkey?: string;
   members?: readonly ChannelMember[];
 };
-
-function fallbackPubkeyLabel(pubkey: string): string {
-  return `${pubkey.slice(0, 8)}...${pubkey.slice(-4)}`;
-}
 
 function firstName(label: string): string {
   return label.trim().split(/\s+/)[0] ?? "";
@@ -37,7 +33,7 @@ function channelParticipantLabel(
     return firstName(fallbackName);
   }
 
-  return fallbackPubkeyLabel(pubkey);
+  return truncatePubkey(pubkey);
 }
 
 export function buildHuddleChannelName({

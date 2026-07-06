@@ -30,6 +30,7 @@ import { Input } from "@/shared/ui/input";
 import { Skeleton } from "@/shared/ui/skeleton";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 import { VirtualizedList } from "@/shared/ui/VirtualizedList";
+import { truncatePubkey } from "@/shared/lib/pubkey";
 
 export type PulseTab =
   | "search"
@@ -223,7 +224,7 @@ export function PulseView({ currentPubkey }: PulseViewProps) {
     : null;
   const currentDisplayName =
     currentProfile?.displayName ??
-    (currentPubkey ? `${currentPubkey.slice(0, 8)}...` : "You");
+    (currentPubkey ? truncatePubkey(currentPubkey) : "You");
 
   const pulseMentionMembers = React.useMemo<ChannelMember[]>(() => {
     const members: ChannelMember[] = [];

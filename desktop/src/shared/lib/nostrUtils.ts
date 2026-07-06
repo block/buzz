@@ -35,14 +35,3 @@ export function nsecToNpub(nsec: string): string | null {
     return null;
   }
 }
-
-/**
- * Format an npub for compact display: `npub1abcd…wxyz`. Falls back to the
- * original string if it's shorter than the truncation thresholds.
- */
-export function shortenNpub(npub: string): string {
-  if (npub.length <= 16) {
-    return npub;
-  }
-  return `${npub.slice(0, 12)}…${npub.slice(-6)}`;
-}

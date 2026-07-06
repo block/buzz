@@ -16,7 +16,7 @@ import {
 } from "@/features/agents/lib/managedAgentControlActions";
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
 import { PresenceDot } from "@/features/presence/ui/PresenceBadge";
-import { truncatePubkey } from "@/features/profile/lib/identity";
+import { truncatePubkey } from "@/shared/lib/pubkey";
 import type {
   ChannelMember,
   ManagedAgent,

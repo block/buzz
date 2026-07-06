@@ -17,7 +17,6 @@ import {
   useUserSearchFetchMoreOnScroll,
   useUsersBatchQuery,
 } from "@/features/profile/hooks";
-import { truncatePubkey } from "@/features/profile/lib/identity";
 import {
   getKeyboardSearchSelection,
   rankUserCandidatesBySearch,
@@ -31,7 +30,8 @@ import type {
   UserProfileSummary,
 } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
-import { normalizePubkey } from "@/shared/lib/pubkey";
+import { normalizePubkey, truncatePubkey } from "@/shared/lib/pubkey";
+import { PubKey } from "@/shared/ui/PubKey";
 import { Button } from "@/shared/ui/button";
 import {
   Dialog,
@@ -696,6 +696,22 @@ export function NewDirectMessageDialog({
                         />
                       ) : null}
                     </button>
+                  ))}
+                </div>
+              ) : null}
+              {selectedUsers.length > 0 ? (
+                <div className="mt-2 space-y-1">
+                  {selectedUsers.map((user) => (
+                    <div
+                      className="flex min-w-0 flex-wrap items-baseline gap-x-2 text-2xs text-muted-foreground"
+                      data-testid={`new-dm-pubkey-${user.pubkey}`}
+                      key={user.pubkey}
+                    >
+                      <span className="font-medium">
+                        {formatUserName(user)}
+                      </span>
+                      <PubKey pubkey={user.pubkey} variant="full" />
+                    </div>
                   ))}
                 </div>
               ) : null}

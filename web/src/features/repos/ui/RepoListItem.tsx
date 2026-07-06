@@ -4,12 +4,8 @@ import { Link } from "@tanstack/react-router";
 import { Badge } from "@/shared/ui/badge";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { relativeTime } from "@/shared/lib/relative-time";
+import { truncatePubkey } from "@/shared/lib/pubkey";
 import type { Repo } from "../use-repos";
-
-function truncateHex(hex: string): string {
-  if (hex.length <= 12) return hex;
-  return `${hex.slice(0, 8)}...${hex.slice(-4)}`;
-}
 
 export function RepoListItem({ repo }: { repo: Repo }) {
   return (
@@ -41,7 +37,7 @@ export function RepoListItem({ repo }: { repo: Repo }) {
         <Tooltip>
           <TooltipTrigger asChild>
             <span className="cursor-default font-mono">
-              {truncateHex(repo.owner)}
+              {truncatePubkey(repo.owner)}
             </span>
           </TooltipTrigger>
           <TooltipContent>{repo.owner}</TooltipContent>
