@@ -20,9 +20,7 @@ import {
   SettingsOptionRow,
 } from "@/features/settings/ui/SettingsOptionGroup";
 import { SettingsSectionHeader } from "@/features/settings/ui/SettingsSectionHeader";
-import {
-  setExplicitObserverArchiveChoice,
-} from "../observerArchivePreference";
+import { setExplicitObserverArchiveChoice } from "../observerArchivePreference";
 
 import {
   buildSubscriptionRequest,
@@ -82,8 +80,8 @@ function ObserverArchiveSection({
             </label>
             <p className="text-sm font-normal text-muted-foreground">
               Saves kind {KIND_AGENT_OBSERVER_FRAME} observer frames addressed
-              to your pubkey. These are ephemeral — not stored by the relay —
-              so local archiving is the only way to retain them.
+              to your pubkey. These are ephemeral — not stored by the relay — so
+              local archiving is the only way to retain them.
             </p>
           </div>
           <Switch
@@ -216,11 +214,7 @@ type AddFormProps = {
   onCancel: () => void;
 };
 
-function AddSubscriptionForm({
-  channels,
-  onSaved,
-  onCancel,
-}: AddFormProps) {
+function AddSubscriptionForm({ channels, onSaved, onCancel }: AddFormProps) {
   const [selectedChannelId, setSelectedChannelId] = React.useState("");
   const [checkedKinds, setCheckedKinds] = React.useState<Set<number>>(
     new Set(),
@@ -302,10 +296,7 @@ function AddSubscriptionForm({
         </div>
 
         {/* Advanced: custom kinds */}
-        <CustomKindsInput
-          onChange={setCustomKindsRaw}
-          value={customKindsRaw}
-        />
+        <CustomKindsInput onChange={setCustomKindsRaw} value={customKindsRaw} />
 
         <div className="flex justify-end gap-2">
           <Button
@@ -411,7 +402,9 @@ export function LocalArchiveSettingsCard() {
         await reload();
       } catch (err) {
         toast.error(
-          err instanceof Error ? err.message : "Failed to update observer archive.",
+          err instanceof Error
+            ? err.message
+            : "Failed to update observer archive.",
         );
       } finally {
         setObserverToggling(false);
@@ -509,9 +502,7 @@ export function LocalArchiveSettingsCard() {
             <SettingsOptionGroup>
               <SettingsOptionRow>
                 <div className="min-w-0 flex-1">
-                  <p className="text-sm font-medium">
-                    Subscribe to a channel
-                  </p>
+                  <p className="text-sm font-medium">Subscribe to a channel</p>
                   <p className="text-xs text-muted-foreground">
                     Choose a channel and select which event types to archive.
                   </p>

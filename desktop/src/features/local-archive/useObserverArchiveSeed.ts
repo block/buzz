@@ -19,7 +19,7 @@ import {
   observerArchiveDefaultEnabled,
 } from "@/shared/api/tauriArchive";
 import {
-  hasExplicitObserverArchiceChoice,
+  hasExplicitObserverArchiveChoice,
   setExplicitObserverArchiveChoice,
 } from "./observerArchivePreference";
 
@@ -40,7 +40,7 @@ export interface ObserverArchiveSeedDeps {
 const defaultDeps: ObserverArchiveSeedDeps = {
   observerArchiveDefaultEnabled,
   createSaveSubscription,
-  hasExplicitChoice: hasExplicitObserverArchiceChoice,
+  hasExplicitChoice: hasExplicitObserverArchiveChoice,
   setExplicitChoice: setExplicitObserverArchiveChoice,
 };
 
@@ -80,12 +80,8 @@ export function useObserverArchiveSeed(
       if (cancelled) return;
 
       if (!defaultOn) {
-        // OSS build — record the explicit choice as "off" so we never query
-        // again, then return.  This way an OSS user who later receives an
-        // internal build via some side channel won't get auto-seeded without
-        // warning.  Actually — don't persist on OSS: keep null so if the user
-        // somehow ends up on an internal build later the seeding can still
-        // fire.  Just return without setting.
+        // OSS build (flag off): don't persist a choice — leave null so seeding
+        // can still fire if this identity later runs an internal build.
         return;
       }
 
@@ -95,7 +91,10 @@ export function useObserverArchiveSeed(
           KIND_AGENT_OBSERVER_FRAME,
         ]);
       } catch (err) {
-        console.warn("[useObserverArchiveSeed] createSaveSubscription failed:", err);
+        console.warn(
+          "[useObserverArchiveSeed] createSaveSubscription failed:",
+          err,
+        );
         // Do NOT set the localStorage flag — a transient failure (relay
         // unreachable, archive DB not yet initialized) should retry on next
         // startup rather than permanently suppress seeding.

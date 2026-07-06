@@ -24,7 +24,7 @@ function storageKey(identityPubkey: string): string {
  * identity (either opted in or opted out).  When `false`, the seeding path
  * may fire.
  */
-export function hasExplicitObserverArchiceChoice(
+export function hasExplicitObserverArchiveChoice(
   identityPubkey: string,
 ): boolean {
   if (typeof window === "undefined") return true; // SSR/test: treat as set
