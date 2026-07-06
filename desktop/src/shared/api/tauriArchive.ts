@@ -88,6 +88,17 @@ function decodeRawSubscription(raw: RawSaveSubscription): SaveSubscription {
 // ── API wrappers ─────────────────────────────────────────────────────────────
 
 /**
+ * Returns `true` when the build has observer-feed archive default-on.
+ *
+ * Internal builds set `BUZZ_BUILD_OBSERVER_ARCHIVE_DEFAULT` at build time;
+ * OSS builds never set it, so this returns `false`.  The frontend calls this
+ * once at startup to decide whether to auto-seed an `owner_p` subscription.
+ */
+export async function observerArchiveDefaultEnabled(): Promise<boolean> {
+  return invokeTauri<boolean>("observer_archive_default_enabled");
+}
+
+/**
  * Create a save subscription.
  * Runs an access probe on the backend (channel membership, event readability).
  * `kinds` is sent as a plain number array — Tauri serializes it correctly.
