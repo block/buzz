@@ -609,7 +609,16 @@ function MessageComposerImpl({
       capturedChannelId: channelId,
       capturedThreadContext,
       pendingImeta: currentPendingImeta,
-      sentDraftKey: effectiveDraftKeyRef.current,
+      // Capture whether a draft was actually persisted at submit time.
+      // `loadDraft` is a synchronous O(1) cache read; the draft is still
+      // in the store at this point (before any async send or composer
+      // cleanup runs). If no draft exists the key resolves to null so no
+      // sent record is written for fast/never-persisted sends.
+      sentDraftKey:
+        effectiveDraftKeyRef.current &&
+        drafts.loadDraft(effectiveDraftKeyRef.current)
+          ? effectiveDraftKeyRef.current
+          : null,
       spoileredAttachmentUrls,
       trimmed,
     });
@@ -617,6 +626,7 @@ function MessageComposerImpl({
     channelId,
     channelLinks.clearChannels,
     customEmoji,
+    drafts.loadDraft,
     emojiAutocomplete.clearEmojis,
     media.pendingImetaRef,
     media.setPendingImeta,
