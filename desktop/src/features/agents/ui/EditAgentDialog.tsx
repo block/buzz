@@ -704,9 +704,12 @@ export function EditAgentDialog({
         }
       >
         <div className="grid gap-5 lg:grid-cols-[220px_minmax(0,1fr)]">
+          {/* Avatar is display-only — UpdateManagedAgentInput has no
+              avatarUrl field, so edits can't be persisted yet. Keep the
+              preview disabled until the backend supports avatar updates. */}
           <AgentCreationPreview
             avatarUrl={previewAvatarUrl}
-            disabled={updateMutation.isPending || isAvatarUploadPending}
+            disabled
             label={previewLabel}
             onClearAvatar={() => setAvatarUrl("")}
             onUploadPendingChange={setIsAvatarUploadPending}
