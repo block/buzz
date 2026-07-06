@@ -739,6 +739,43 @@ test("returning user with blank display name and real profile event skips onboar
   await expectHomeView(page);
 });
 
+// Regression test for the cache-seed defect (PR #1508 CRITICAL fix).
+// Sequence: no-event profile fetched and cached with hasProfileEvent absent →
+// reload with cache present → onboarding must still show. Previously the
+// initialData seed hardcoded hasProfileEvent: true for any updatedAt > 0
+// entry, reopening the original bug on the second app load.
+test("no-event profile cached then reloaded still sees onboarding", async ({
+  page,
+}) => {
+  await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
+  // Seed a stale v1 cache entry WITHOUT hasProfileEvent (simulating a cache
+  // written by the old code path or a no-event fallback). updatedAt > 0 so
+  // the seed is eligible, but hasProfileEvent is absent → conservative false.
+  const SELF_PROFILE_CACHE_KEY = `buzz-self-profile.v1:ws://localhost:3000:${TEST_IDENTITIES.tyler.pubkey}`;
+  await page.addInitScript(
+    ({ key, cache }) => {
+      window.localStorage.setItem(key, JSON.stringify(cache));
+    },
+    {
+      key: SELF_PROFILE_CACHE_KEY,
+      cache: {
+        version: 1,
+        displayName: null,
+        avatarUrl: null,
+        avatarDataUrl: null,
+        updatedAt: 1_700_000_000_000,
+        // hasProfileEvent deliberately absent — legacy/no-event entry.
+      },
+    },
+  );
+  // No profile event on the relay either — ensureMockProfile uses false.
+  await installMockBridge(page, undefined, { skipOnboardingSeed: true });
+  await page.goto("/");
+
+  // Cache seed must NOT promote hasProfileEvent to true. Onboarding shows.
+  await expectIncompleteOnboarding(page);
+});
+
 test("avatar step uses an add-image placeholder before an avatar is chosen", async ({
   page,
 }) => {

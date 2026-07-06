@@ -75,6 +75,10 @@ async function persistSelfProfile(
     avatarUrl: profile.avatarUrl,
     avatarDataUrl,
     updatedAt: Date.now(),
+    // Only persist the presence bit when true — no-event fallbacks
+    // (hasProfileEvent: false) must not be cached as real profiles,
+    // which would cause the onboarding gate to skip on next restart.
+    ...(profile.hasProfileEvent && { hasProfileEvent: true }),
   });
 }
 
@@ -105,9 +109,10 @@ export function useProfileQuery(enabled = true) {
             about: null,
             nip05Handle: null,
             ownerPubkey: null,
-            // Cached profile was persisted from a real getProfile() call, which
-            // only stores a non-zero updatedAt when a kind:0 event was fetched.
-            hasProfileEvent: true,
+            // Only true when the cache entry was explicitly written with a
+            // real kind:0-backed profile. Older entries (absent field) and
+            // no-event fallbacks default to false — conservative is correct.
+            hasProfileEvent: cached.hasProfileEvent === true,
           } satisfies Profile)
         : undefined,
     [cached, pubkey],

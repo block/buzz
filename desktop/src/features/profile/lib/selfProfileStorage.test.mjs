@@ -212,6 +212,53 @@ function makeCache(overrides = {}) {
   };
 }
 
+test("parseSelfProfileCache: hasProfileEvent true is preserved", () => {
+  const result = parseSelfProfileCache({
+    version: 1,
+    displayName: null,
+    avatarUrl: null,
+    avatarDataUrl: null,
+    updatedAt: 1700000000000,
+    hasProfileEvent: true,
+  });
+  assert.equal(result?.hasProfileEvent, true);
+});
+
+test("parseSelfProfileCache: hasProfileEvent false is omitted (conservative default)", () => {
+  const result = parseSelfProfileCache({
+    version: 1,
+    displayName: null,
+    avatarUrl: null,
+    avatarDataUrl: null,
+    updatedAt: 1700000000000,
+    hasProfileEvent: false,
+  });
+  assert.equal(result?.hasProfileEvent, undefined);
+});
+
+test("parseSelfProfileCache: absent hasProfileEvent field is omitted (legacy v1 migration)", () => {
+  const result = parseSelfProfileCache({
+    version: 1,
+    displayName: "Alice",
+    avatarUrl: null,
+    avatarDataUrl: null,
+    updatedAt: 1700000000000,
+  });
+  assert.equal(result?.hasProfileEvent, undefined);
+});
+
+test("parseSelfProfileCache: non-boolean hasProfileEvent is coerced to absent", () => {
+  const result = parseSelfProfileCache({
+    version: 1,
+    displayName: null,
+    avatarUrl: null,
+    avatarDataUrl: null,
+    updatedAt: 1700000000000,
+    hasProfileEvent: "yes",
+  });
+  assert.equal(result?.hasProfileEvent, undefined);
+});
+
 test("shouldFetchAvatar: URL changed → fetch", () => {
   const existing = makeCache({
     avatarUrl: "https://relay.example.com/old.jpg",
