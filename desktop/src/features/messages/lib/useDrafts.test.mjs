@@ -332,11 +332,13 @@ test("getAllDraftEntries_returns_empty_array_when_no_drafts", () => {
 // ── channelId correctness on key switch ──────────────────────────────────────
 // Regression: composer effect body was re-persisting prevKey with the incoming
 // channel's id, corrupting the outgoing draft's channelId metadata.
-// The store-layer fix here asserts the contract: persisting key-A with
-// channelId-A must never be overwritten by a subsequent persist of key-A with
-// channelId-B (the incoming channel).
+// The first test below demonstrates the bug path — calling persistDraftEntry
+// for key-A with channelId-B DOES overwrite the metadata, proving that the
+// redundant body-side persist was the corruption source and had to be removed.
+// The second test asserts the correct post-fix behavior: a normal A→B switch
+// leaves draft A's channelId untouched.
 
-test("persist_draft_channelId_for_key_A_unaffected_by_persist_of_key_A_with_wrong_channelId", () => {
+test("persist_draft_bug_path_overwrites_channelId_confirming_removal_was_right", () => {
   setup();
   // Simulate correct outgoing save (cleanup runs first in React, correct channel).
   persistDraftEntry("chan-A", "draft text", "chan-A", [IMG_A], []);

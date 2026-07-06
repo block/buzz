@@ -166,7 +166,6 @@ function MessageComposerImpl({
 
   const drafts = useDrafts();
   const effectiveDraftKey = draftKey ?? channelId;
-  const previousDraftKeyRef = React.useRef<string | null>(null);
   const effectiveDraftKeyRef = React.useRef(effectiveDraftKey);
   effectiveDraftKeyRef.current = effectiveDraftKey;
   // Snapshot composer state before edit mode so cancel can restore it.
@@ -307,7 +306,6 @@ function MessageComposerImpl({
     // closure. Do NOT re-persist prevKey here: channelId in this render
     // already reflects the incoming channel, which would corrupt the outgoing
     // draft's channelId metadata.
-    previousDraftKeyRef.current = effectiveDraftKey;
 
     const saved = effectiveDraftKey
       ? drafts.loadDraft(effectiveDraftKey)
