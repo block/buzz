@@ -43,7 +43,9 @@ test.describe("local archive screenshots", () => {
     });
   });
 
-  test("01 — subscriptions list with two active entries", async ({ page }) => {
+  test("01 — subscriptions list with channel entry and observer toggle on", async ({
+    page,
+  }) => {
     await installMockBridge(page, {
       saveSubscriptions: [
         {
@@ -61,31 +63,32 @@ test.describe("local archive screenshots", () => {
 
     const card = await openLocalArchiveSettings(page);
 
-    // Wait for both subscription rows to appear.
+    // Channel subscription row appears in the channel list.
     await expect(
       card.getByTestId(`local-archive-sub-channel_h:${GENERAL_CHANNEL_ID}`),
     ).toBeVisible({ timeout: 5_000 });
-    await expect(
-      card.getByTestId(`local-archive-sub-owner_p:${"deadbeef".repeat(8)}`),
-    ).toBeVisible({ timeout: 5_000 });
+    // owner_p rows are filtered out of the channel list and surfaced via the
+    // dedicated observer section instead — toggle should be visible and checked.
+    const observerToggle = card.getByTestId("local-archive-observer-toggle");
+    await expect(observerToggle).toBeVisible({ timeout: 5_000 });
+    await expect(observerToggle).toBeChecked();
     await settleAnimations(card);
     await card.screenshot({ path: `${SHOTS}/01-subscriptions-list.png` });
   });
 
-  test("02 — Step 1 source picker (Channel vs My agents observer feed)", async ({
-    page,
-  }) => {
+  test("02 — Add form opens directly to channel picker", async ({ page }) => {
     await installMockBridge(page, { saveSubscriptions: [] });
 
     const card = await openLocalArchiveSettings(page);
 
-    // Open the Add form — the source picker is Step 1.
+    // The source-picker step no longer exists — clicking Add opens the channel
+    // subscription form directly (channel select is the first visible field).
     await card.getByTestId("local-archive-open-add").click();
-    await expect(card.getByTestId("local-archive-add-channel")).toBeVisible({
+    await expect(card.getByTestId("local-archive-channel-select")).toBeVisible({
       timeout: 5_000,
     });
     await settleAnimations(card);
-    await card.screenshot({ path: `${SHOTS}/02-step1-source-picker.png` });
+    await card.screenshot({ path: `${SHOTS}/02-add-form-channel-picker.png` });
   });
 
   test("03 — Step 2 kind checklist with indeterminate group header", async ({
@@ -95,9 +98,8 @@ test.describe("local archive screenshots", () => {
 
     const card = await openLocalArchiveSettings(page);
 
-    // Navigate to Step 2 via the Channel source path.
+    // Navigate to the kind checklist — clicking Add opens the form directly.
     await card.getByTestId("local-archive-open-add").click();
-    await card.getByTestId("local-archive-add-channel").click();
 
     // Step 2 should be visible now. Select a channel so the form becomes valid.
     await card
@@ -123,7 +125,6 @@ test.describe("local archive screenshots", () => {
     const card = await openLocalArchiveSettings(page);
 
     await card.getByTestId("local-archive-open-add").click();
-    await card.getByTestId("local-archive-add-channel").click();
 
     // Type invalid tokens into the custom kinds field.
     await card
@@ -140,24 +141,23 @@ test.describe("local archive screenshots", () => {
     });
   });
 
-  test("05 — observer feed fixed-[24200] step (owner_p source)", async ({
-    page,
-  }) => {
+  test("05 — observer archive section with toggle", async ({ page }) => {
     await installMockBridge(page, { saveSubscriptions: [] });
 
     const card = await openLocalArchiveSettings(page);
 
-    await card.getByTestId("local-archive-open-add").click();
-    // Click "Add" for the observer feed source.
-    await card.getByTestId("local-archive-add-owner").click();
-
-    // Step 2 for owner_p: shows the informational fixed-[24200] message.
-    await expect(card.getByText(/observer frames/)).toBeVisible({
-      timeout: 5_000,
-    });
+    // Observer archive is now a dedicated first-class section, not an add-flow
+    // source. Assert the section, descriptive copy, and toggle are all visible.
+    const observerSection = card.getByTestId("local-archive-observer-section");
+    await expect(observerSection).toBeVisible({ timeout: 5_000 });
+    // The section description mentions observer frames and their ephemeral nature.
+    await expect(
+      observerSection.getByText(/not stored by the relay/i),
+    ).toBeVisible();
+    await expect(
+      card.getByTestId("local-archive-observer-toggle"),
+    ).toBeVisible();
     await settleAnimations(card);
-    await card.screenshot({
-      path: `${SHOTS}/05-observer-fixed-24200.png`,
-    });
+    await card.screenshot({ path: `${SHOTS}/05-observer-section.png` });
   });
 });
