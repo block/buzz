@@ -1335,6 +1335,16 @@ mod tests {
             assert_eq!(result.persisted, 0, "kind-mismatch: should be dropped");
             assert_eq!(result.dropped, 1, "kind-mismatch: drop count should be 1");
 
+            // Belt-and-suspenders: confirm the on-disk archive is genuinely empty.
+            let read_conn = store::open_archive_db(&db_path).expect("reopen archive db");
+            let event_count: i64 = read_conn
+                .query_row("SELECT COUNT(*) FROM archived_events", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(
+                event_count, 0,
+                "nothing should be archived on kind-mismatch"
+            );
+
             println!(
                 "✓ real relay: kind-mismatch correctly dropped kind:9 event (subscription is kinds=[1059])"
             );
@@ -1368,6 +1378,16 @@ mod tests {
 
             assert_eq!(result.persisted, 0, "no-sub: should be dropped");
             assert_eq!(result.dropped, 1, "no-sub: drop count should be 1");
+
+            // Belt-and-suspenders: confirm the on-disk archive is genuinely empty.
+            let read_conn = store::open_archive_db(&db_path).expect("reopen archive db");
+            let event_count: i64 = read_conn
+                .query_row("SELECT COUNT(*) FROM archived_events", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(
+                event_count, 0,
+                "nothing should be archived on no-subscription"
+            );
 
             println!("✓ real relay: no-subscription correctly dropped event");
         }
@@ -1425,6 +1445,13 @@ mod tests {
                 )
                 .unwrap();
             assert_eq!(scope_count, 1);
+
+            // Confirm the stored raw_json round-trips to the original frame.
+            let raw_json: String = read_conn
+                .query_row("SELECT raw_json FROM archived_events", [], |r| r.get(0))
+                .unwrap();
+            let stored_ev = Event::from_json(&raw_json).unwrap();
+            assert_eq!(stored_ev.id.to_hex(), ev.id.to_hex());
 
             println!(
                 "✓ real relay: owner_p ephemeral frame {} archived",
