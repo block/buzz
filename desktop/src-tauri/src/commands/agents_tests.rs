@@ -83,6 +83,11 @@ fn profile_needs_sync_when_missing() {
 }
 
 #[test]
+fn profile_needs_sync_when_missing_even_without_expected_avatar() {
+    assert!(profile_needs_sync(None, "Duncan", None));
+}
+
+#[test]
 fn profile_needs_sync_when_name_diverges() {
     let existing = profile(Some("Stilgar"), Some("https://x/a.png"));
     assert!(profile_needs_sync(
