@@ -620,6 +620,7 @@ pub fn run() {
             archive::archive_events,
             archive::create_save_subscription,
             archive::merge_save_subscription_kinds,
+            archive::remove_save_subscription_kind,
             archive::list_save_subscriptions,
             archive::delete_save_subscription,
             archive::read_archived_events,

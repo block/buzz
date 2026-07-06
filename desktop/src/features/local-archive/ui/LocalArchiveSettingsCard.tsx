@@ -6,6 +6,8 @@ import {
   createSaveSubscription,
   deleteSaveSubscription,
   listSaveSubscriptions,
+  mergeSaveSubscriptionKinds,
+  removeSaveSubscriptionKind,
   type SaveSubscription,
   type ScopeType,
 } from "@/shared/api/tauriArchive";
@@ -447,21 +449,10 @@ export function LocalArchiveSettingsCard() {
       if (!pubkey) return;
       setObserverToggling(true);
       try {
-        // The owner_p row is keyed by (scope_type, scope_value) — both observer
-        // (24200) and metric (44200) share the same row. Merge kinds atomically:
-        // read current kinds, add or remove 24200, upsert the result.
-        const currentKinds =
-          subs
-            .find((s) => s.scopeType === "owner_p" && s.scopeValue === pubkey)
-            ?.kinds.filter((k) => k !== KIND_AGENT_OBSERVER_FRAME) ?? [];
-        const nextKinds = checked
-          ? [...currentKinds, KIND_AGENT_OBSERVER_FRAME]
-          : currentKinds;
-
-        if (nextKinds.length > 0) {
-          await createSaveSubscription("owner_p", pubkey, nextKinds);
+        if (checked) {
+          await mergeSaveSubscriptionKinds(KIND_AGENT_OBSERVER_FRAME);
         } else {
-          await deleteSaveSubscription("owner_p", pubkey);
+          await removeSaveSubscriptionKind(KIND_AGENT_OBSERVER_FRAME);
         }
         setExplicitObserverArchiveChoice(pubkey, checked);
         toast.success(
@@ -480,7 +471,7 @@ export function LocalArchiveSettingsCard() {
         setObserverToggling(false);
       }
     },
-    [pubkey, subs, reload],
+    [pubkey, reload],
   );
 
   const handleMetricToggle = React.useCallback(
@@ -488,19 +479,10 @@ export function LocalArchiveSettingsCard() {
       if (!pubkey) return;
       setMetricToggling(true);
       try {
-        // Same row as observer — merge 44200 in or out.
-        const currentKinds =
-          subs
-            .find((s) => s.scopeType === "owner_p" && s.scopeValue === pubkey)
-            ?.kinds.filter((k) => k !== KIND_AGENT_TURN_METRIC) ?? [];
-        const nextKinds = checked
-          ? [...currentKinds, KIND_AGENT_TURN_METRIC]
-          : currentKinds;
-
-        if (nextKinds.length > 0) {
-          await createSaveSubscription("owner_p", pubkey, nextKinds);
+        if (checked) {
+          await mergeSaveSubscriptionKinds(KIND_AGENT_TURN_METRIC);
         } else {
-          await deleteSaveSubscription("owner_p", pubkey);
+          await removeSaveSubscriptionKind(KIND_AGENT_TURN_METRIC);
         }
         setExplicitAgentMetricArchiveChoice(pubkey, checked);
         toast.success(
@@ -519,7 +501,7 @@ export function LocalArchiveSettingsCard() {
         setMetricToggling(false);
       }
     },
-    [pubkey, subs, reload],
+    [pubkey, reload],
   );
 
   // Non-owner_p subscriptions shown in the active-subscriptions list.
