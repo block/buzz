@@ -84,17 +84,9 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(
             tauri_plugin_window_state::Builder::default()
-                // The main window should always launch edge-to-edge in the
-                // available desktop area. Do not let stale saved geometry or
-                // fullscreen state override the maximized launch config.
-                .with_state_flags(
-                    StateFlags::all()
-                        & !(StateFlags::VISIBLE
-                            | StateFlags::POSITION
-                            | StateFlags::SIZE
-                            | StateFlags::MAXIMIZED
-                            | StateFlags::FULLSCREEN),
-                )
+                // Visibility is excluded: the window starts hidden and the
+                // frontend shows it once ready.
+                .with_state_flags(StateFlags::all() & !StateFlags::VISIBLE)
                 .build(),
         )
         .plugin(tauri_plugin_websocket::init())
