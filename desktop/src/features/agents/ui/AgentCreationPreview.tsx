@@ -4,6 +4,7 @@ import * as React from "react";
 import { Link2, Pencil, Plus, UploadCloud } from "lucide-react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 
+import { MaskedAvatarBadgeFrame } from "@/features/profile/ui/MaskedAvatarBadgeFrame";
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
 import {
   AVATAR_COLORS,
@@ -63,7 +64,6 @@ export function AgentCreationPreview({
   onUploadPendingChange?: (isPending: boolean) => void;
   onSelectAvatar: (avatarUrl: string) => void;
 }) {
-  const avatarEditClipId = React.useId().replace(/:/g, "");
   const [isDragOverAvatar, setIsDragOverAvatar] = React.useState(false);
   const [isAvatarMenuOpen, setIsAvatarMenuOpen] = React.useState(false);
   const [avatarUrlDraft, setAvatarUrlDraft] = React.useState("");
@@ -200,13 +200,6 @@ export function AgentCreationPreview({
     setIsCustomColorPickerOpen(false);
   }
 
-  const avatarClipStyle = React.useMemo<React.CSSProperties>(
-    () => ({
-      clipPath: `url(#${avatarEditClipId})`,
-      transform: "translateZ(0)",
-    }),
-    [avatarEditClipId],
-  );
   const hasAvatar = (avatarUrl?.trim().length ?? 0) > 0;
   const emojiAvatarPreview = React.useMemo(
     () => parseEmojiAvatarDataUrl(avatarUrl ?? ""),
@@ -646,61 +639,8 @@ export function AgentCreationPreview({
 
         <div className="relative h-36 w-36">
           {hasAvatar ? (
-            <>
-              <svg
-                aria-hidden="true"
-                className="pointer-events-none absolute inset-0 h-full w-full"
-                fill="none"
-                height="144"
-                viewBox="0 0 144 144"
-                width="144"
-                xmlns="http://www.w3.org/2000/svg"
-              >
-                <clipPath clipPathUnits="userSpaceOnUse" id={avatarEditClipId}>
-                  <path
-                    clipRule="evenodd"
-                    d="M100.734 83.3298C102.415 84.1574 104.616 83.8757 105.495 82.2207C109.647 74.3981 112 65.4738 112 56C112 25.0721 86.9279 0 56 0C25.0721 0 0 25.0721 0 56C0 86.9279 25.0721 112 56 112C65.4738 112 74.3981 109.647 82.2207 105.495C83.8757 104.616 84.1574 102.415 83.3298 100.734C82.4783 99.0047 82 97.0582 82 95C82 87.8203 87.8203 82 95 82C97.0582 82 99.0047 82.4783 100.734 83.3298Z"
-                    fillRule="evenodd"
-                    transform="translate(-25.875 -25.875) scale(1.575)"
-                  />
-                </clipPath>
-              </svg>
-
-              <div className="relative h-full w-full" style={avatarClipStyle}>
-                {emojiAvatarPreview ? (
-                  <div
-                    aria-label={`${label} avatar`}
-                    className="relative flex h-full w-full shrink-0 items-center justify-center overflow-hidden rounded-full shadow-xs transition-[background-color] duration-200 ease-out"
-                    role="img"
-                    style={{
-                      backgroundColor: emojiAvatarPreview.color,
-                    }}
-                  >
-                    <span
-                      className={cn(
-                        "buzz-avatar-emoji-glyph flex h-full w-full items-center justify-center text-[4rem] leading-none",
-                        squishKey > 0 && "buzz-avatar-squish",
-                      )}
-                      key={squishKey}
-                    >
-                      {emojiAvatarPreview.emoji}
-                    </span>
-                  </div>
-                ) : (
-                  <ProfileAvatar
-                    avatarUrl={avatarUrl}
-                    className={cn(
-                      "h-full w-full text-4xl transition-shadow duration-150",
-                      isDragOverAvatar &&
-                        !isAvatarMenuOpen &&
-                        "ring-2 ring-primary/30",
-                    )}
-                    label={label}
-                  />
-                )}
-              </div>
-
-              <div className="absolute bottom-0 right-0 z-10 flex h-[42px] w-[42px] items-center justify-center rounded-full bg-background">
+            <MaskedAvatarBadgeFrame
+              badge={
                 <Popover
                   open={isAvatarMenuOpen}
                   onOpenChange={setIsAvatarMenuOpen}
@@ -725,41 +665,101 @@ export function AgentCreationPreview({
                   </PopoverTrigger>
                   {avatarMenuContent}
                 </Popover>
-              </div>
-            </>
-          ) : (
-            <Popover open={isAvatarMenuOpen} onOpenChange={setIsAvatarMenuOpen}>
-              <PopoverTrigger asChild>
-                <button
-                  aria-label="Add avatar"
+              }
+              badgeBox={{ bottom: 0, height: 42, right: 0, width: 42 }}
+              className="h-36 w-36"
+              cutout={{ cx: 123, cy: 123, r: 24 }}
+              size={144}
+            >
+              {emojiAvatarPreview ? (
+                <div
+                  aria-label={`${label} avatar`}
+                  className="relative flex h-full w-full shrink-0 items-center justify-center overflow-hidden rounded-full shadow-xs transition-[background-color] duration-200 ease-out"
+                  role="img"
+                  style={{
+                    backgroundColor: emojiAvatarPreview.color,
+                  }}
+                >
+                  <span
+                    className={cn(
+                      "flex h-full w-full items-center justify-center text-[4rem] leading-none",
+                      squishKey > 0 && "buzz-avatar-squish",
+                    )}
+                    key={squishKey}
+                    style={
+                      {
+                        "--buzz-avatar-emoji-offset-x": "0px",
+                        "--buzz-avatar-emoji-offset-y": "4px",
+                      } as React.CSSProperties
+                    }
+                  >
+                    {emojiAvatarPreview.emoji}
+                  </span>
+                </div>
+              ) : (
+                <ProfileAvatar
+                  avatarUrl={avatarUrl}
                   className={cn(
-                    "group/add-avatar relative flex h-full w-full items-center justify-center rounded-full border-2 border-dashed border-border bg-background text-primary shadow-xs transition-[background-color,border-color,color,box-shadow] duration-150 ease-out hover:border-primary/50 hover:bg-primary/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-default disabled:opacity-70",
+                    "h-full w-full text-4xl transition-shadow duration-150",
                     isDragOverAvatar &&
                       !isAvatarMenuOpen &&
-                      "border-primary/70 bg-primary/5 ring-2 ring-primary/15",
+                      "ring-2 ring-primary/30",
                   )}
-                  disabled={disabled || isUploading}
-                  title="Add avatar"
-                  type="button"
+                  label={label}
+                />
+              )}
+            </MaskedAvatarBadgeFrame>
+          ) : (
+            <MaskedAvatarBadgeFrame
+              badge={
+                <Popover
+                  open={isAvatarMenuOpen}
+                  onOpenChange={setIsAvatarMenuOpen}
                 >
-                  {isUploading ? (
-                    <Spinner
-                      aria-label="Uploading avatar"
-                      className="h-4 w-4 border-2"
-                    />
-                  ) : (
-                    <>
-                      <Plus aria-hidden="true" className="h-14 w-14" />
-                      {/* Pencil badge on empty state */}
-                      <span className="absolute bottom-0 right-0 flex h-9 w-9 items-center justify-center rounded-full bg-sidebar-active text-sidebar-active-foreground shadow-lg">
+                  <PopoverTrigger asChild>
+                    <button
+                      aria-label="Add avatar"
+                      className="flex h-9 w-9 items-center justify-center rounded-full bg-sidebar-active text-sidebar-active-foreground shadow-lg transition-[background-color,scale] duration-150 ease-out hover:scale-[1.04] hover:bg-sidebar-active focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-default disabled:opacity-90 disabled:hover:scale-100"
+                      disabled={disabled || isUploading}
+                      title="Add avatar"
+                      type="button"
+                    >
+                      {isUploading ? (
+                        <Spinner
+                          aria-label="Uploading avatar"
+                          className="h-4 w-4 border-2"
+                        />
+                      ) : (
                         <Pencil className="h-4 w-4" />
-                      </span>
-                    </>
-                  )}
-                </button>
-              </PopoverTrigger>
-              {avatarMenuContent}
-            </Popover>
+                      )}
+                    </button>
+                  </PopoverTrigger>
+                  {avatarMenuContent}
+                </Popover>
+              }
+              badgeBox={{ bottom: 0, height: 42, right: 0, width: 42 }}
+              className="h-36 w-36"
+              cutout={{ cx: 123, cy: 123, r: 24 }}
+              size={144}
+            >
+              <div
+                className={cn(
+                  "flex h-full w-full items-center justify-center rounded-full border-2 border-dashed border-border bg-background text-primary shadow-xs transition-[background-color,border-color,color,box-shadow] duration-150 ease-out",
+                  isDragOverAvatar &&
+                    !isAvatarMenuOpen &&
+                    "border-primary/70 bg-primary/5 ring-2 ring-primary/15",
+                )}
+              >
+                {isUploading ? (
+                  <Spinner
+                    aria-label="Uploading avatar"
+                    className="h-4 w-4 border-2"
+                  />
+                ) : (
+                  <Plus aria-hidden="true" className="h-14 w-14" />
+                )}
+              </div>
+            </MaskedAvatarBadgeFrame>
           )}
         </div>
 
