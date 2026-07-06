@@ -8,6 +8,7 @@ import {
   sectionSortGroupKey,
   sortChannelsForSidebar,
   sortModeForGroup,
+  stripOrphanedSectionModes,
 } from "./channelSortPreference.ts";
 
 function makeChannel(id, name, lastMessageAt = null) {
@@ -109,6 +110,62 @@ test("sortModeForGroup: set groups are independent", () => {
 
 test("sectionSortGroupKey: namespaced by section id", () => {
   assert.equal(sectionSortGroupKey("abc"), "section:abc");
+});
+
+// ── stripOrphanedSectionModes ────────────────────────────────────────────────
+
+test("stripOrphanedSectionModes: drops modes for deleted sections", () => {
+  const store = {
+    version: 1,
+    groups: {
+      channels: "recent",
+      [sectionSortGroupKey("live")]: "recent",
+      [sectionSortGroupKey("deleted")]: "alpha",
+    },
+  };
+  assert.deepEqual(stripOrphanedSectionModes(store, ["live"]), {
+    version: 1,
+    groups: { channels: "recent", [sectionSortGroupKey("live")]: "recent" },
+  });
+});
+
+test("stripOrphanedSectionModes: fixed groups survive with no live sections", () => {
+  const store = {
+    version: 1,
+    groups: {
+      starred: "recent",
+      channels: "alpha",
+      forums: "recent",
+      dms: "recent",
+      [sectionSortGroupKey("gone")]: "recent",
+    },
+  };
+  assert.deepEqual(stripOrphanedSectionModes(store, []), {
+    version: 1,
+    groups: {
+      starred: "recent",
+      channels: "alpha",
+      forums: "recent",
+      dms: "recent",
+    },
+  });
+});
+
+test("stripOrphanedSectionModes: returns same reference when nothing is stale", () => {
+  const store = {
+    version: 1,
+    groups: { channels: "recent", [sectionSortGroupKey("live")]: "recent" },
+  };
+  assert.equal(stripOrphanedSectionModes(store, ["live", "other"]), store);
+});
+
+test("stripOrphanedSectionModes: does not mutate the input store", () => {
+  const store = {
+    version: 1,
+    groups: { [sectionSortGroupKey("gone")]: "recent" },
+  };
+  stripOrphanedSectionModes(store, []);
+  assert.deepEqual(store.groups, { [sectionSortGroupKey("gone")]: "recent" });
 });
 
 // ── sortChannelsForSidebar ───────────────────────────────────────────────────

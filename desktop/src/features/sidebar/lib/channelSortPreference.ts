@@ -46,6 +46,26 @@ export function storageKey(pubkey: string, relayUrl?: string): string {
   return `${STORAGE_KEY_PREFIX}:${pubkey}:${encodeURIComponent(normalized)}`;
 }
 
+/**
+ * Drops per-section sort modes whose custom section no longer exists so
+ * deleted sections don't leave stale `section:<id>` keys in localStorage
+ * forever. Fixed group keys (starred/channels/forums/dms) are always kept.
+ * Returns the same store reference when nothing needs stripping.
+ */
+export function stripOrphanedSectionModes(
+  store: ChannelSortStore,
+  liveSectionIds: Iterable<string>,
+): ChannelSortStore {
+  const liveKeys = new Set<string>(
+    [...liveSectionIds].map((id) => sectionSortGroupKey(id)),
+  );
+  const kept = Object.entries(store.groups).filter(
+    ([key]) => !key.startsWith("section:") || liveKeys.has(key),
+  );
+  if (kept.length === Object.keys(store.groups).length) return store;
+  return { ...store, groups: Object.fromEntries(kept) };
+}
+
 export function parseChannelSortPayload(
   json: unknown,
 ): ChannelSortStore | null {

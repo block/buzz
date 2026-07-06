@@ -355,9 +355,15 @@ export function AppSidebar({
     unassignChannel,
   } = useChannelSections(currentPubkey, activeWorkspace?.relayUrl);
 
+  const sectionIds = React.useMemo(
+    () => channelSections.map((s) => s.id),
+    [channelSections],
+  );
+
   const { sortModeFor, setSortModeFor } = useChannelSortPreference(
     currentPubkey,
     activeWorkspace?.relayUrl,
+    sectionIds,
   );
 
   const [createSectionState, setCreateSectionState] = React.useState<{
@@ -370,11 +376,6 @@ export function AppSidebar({
     React.useState<ChannelSection | null>(null);
   const { requestLeaveChannel, dialog: leaveChannelDialog } =
     useLeaveChannelDialog();
-
-  const sectionIds = React.useMemo(
-    () => channelSections.map((s) => s.id),
-    [channelSections],
-  );
 
   const streamChannels = React.useMemo(
     () => channels.filter((channel) => channel.channelType === "stream"),

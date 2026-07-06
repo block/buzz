@@ -5,6 +5,7 @@ import {
   readChannelSortStore,
   sortModeForGroup,
   storageKey,
+  stripOrphanedSectionModes,
   writeChannelSortStore,
   type ChannelSortGroupKey,
   type ChannelSortMode,
@@ -17,10 +18,15 @@ import {
  * sections). Each sidebar grouping (starred, channels, forums, dms, and each
  * custom section) carries its own saved Recent/A–Z mode; unset groups default
  * to A–Z. Mirrors changes made in other windows via the storage event.
+ *
+ * When `liveSectionIds` is provided, writes also prune `section:<id>` entries
+ * whose custom section no longer exists, so deleted sections don't leave
+ * stale keys in localStorage.
  */
 export function useChannelSortPreference(
   pubkey: string | undefined,
   relayUrl?: string,
+  liveSectionIds?: string[],
 ): {
   sortModeFor: (group: ChannelSortGroupKey) => ChannelSortMode;
   setSortModeFor: (group: ChannelSortGroupKey, mode: ChannelSortMode) => void;
@@ -60,15 +66,20 @@ export function useChannelSortPreference(
     (group: ChannelSortGroupKey, mode: ChannelSortMode) => {
       if (!pubkey) return;
       setStore((prev) => {
-        const next: ChannelSortStore = {
+        const withUpdate: ChannelSortStore = {
           ...prev,
           groups: { ...prev.groups, [group]: mode },
         };
+        // Prune sort modes left behind by deleted custom sections on write so
+        // the stored map can't grow unboundedly with stale `section:` keys.
+        const next = liveSectionIds
+          ? stripOrphanedSectionModes(withUpdate, liveSectionIds)
+          : withUpdate;
         if (!writeChannelSortStore(pubkey, next, relayUrl)) return prev;
         return next;
       });
     },
-    [pubkey, relayUrl],
+    [pubkey, relayUrl, liveSectionIds],
   );
 
   return { sortModeFor, setSortModeFor };
