@@ -1,3 +1,4 @@
+import { openUrl } from "@tauri-apps/plugin-opener";
 import type { ComponentType } from "react";
 import { ExternalLink, RefreshCcw, RotateCw } from "lucide-react";
 
@@ -44,7 +45,8 @@ const variants: Record<
   },
   "manual-required": {
     Icon: ExternalLink,
-    label: "Update available — download from GitHub",
+    label:
+      "Update available — download from GitHub (use AppImage for auto-updates)",
     badgeColor: "bg-primary",
   },
   ready: {
@@ -85,7 +87,7 @@ export function UpdateIndicator({ className }: { className?: string }) {
       ? relaunch
       : status.state === "manual-required"
         ? () => {
-            window.open(status.releaseUrl, "_blank");
+            void openUrl(status.releaseUrl);
           }
         : status.state === "available"
           ? downloadAndInstall

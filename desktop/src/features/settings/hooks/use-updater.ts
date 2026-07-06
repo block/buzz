@@ -135,16 +135,20 @@ export function useUpdater() {
           !background || manualResultRequestedRef.current;
 
         if (update) {
-          updateRef.current = update;
-          setStatus({ state: "available", version: update.version });
-          // On non-updatable installs (Linux .deb), skip auto-download and
-          // surface a manual-download state instead. The user gets a GitHub
-          // link so they can grab the AppImage or new .deb themselves.
+          // Check support BEFORE exposing any actionable state — on a Linux
+          // .deb, the window between "available" and "manual-required" would
+          // let a click reach downloadAndInstall on an un-updatable install.
           const autoUpdateOk = await isAutoUpdateSupported();
+          updateRef.current = update;
           if (autoUpdateOk) {
+            setStatus({ state: "available", version: update.version });
             // Start download automatically — user sees "restart" when done
             void downloadAndInstall();
           } else {
+            // .deb / non-AppImage: surface manual-download card instead.
+            // updateRef is intentionally NOT retained — no install handle
+            // should be kept when we will never call downloadAndInstall.
+            updateRef.current = null;
             setStatus({
               state: "manual-required",
               version: update.version,

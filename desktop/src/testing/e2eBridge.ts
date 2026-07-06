@@ -140,6 +140,10 @@ type E2eConfig = {
     updateDownloadDelayMs?: number;
     restartDelayMs?: number;
     updateVersion?: string;
+    /** When false, `is_auto_update_supported` returns false (simulates a
+     *  Linux .deb install where Tauri's updater cannot swap the binary).
+     *  Defaults to true for all existing tests. */
+    autoUpdateSupported?: boolean;
     stallWebsocketSends?: boolean;
     userSearchDelayMs?: number;
     // NIP-IA gate inputs — see tests/helpers/bridge.ts:MockBridgeOptions for
@@ -8647,6 +8651,10 @@ export function maybeInstallE2eTauriMocks() {
         return handleUpdaterCheck(activeConfig);
       case "plugin:updater|download_and_install":
         return handleUpdaterDownloadAndInstall(payload, activeConfig);
+      case "is_auto_update_supported":
+        // Default true so all existing tests continue to use the auto-update
+        // path. Set mock.autoUpdateSupported: false to simulate a .deb install.
+        return activeConfig?.mock?.autoUpdateSupported !== false;
       case "relay_reconnect_hook":
         return null;
       case "relay_reconnect_hook_configured":

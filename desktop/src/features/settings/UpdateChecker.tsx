@@ -1,3 +1,4 @@
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { useUpdaterContext } from "./hooks/UpdaterProvider";
 import { Button } from "@/shared/ui/button";
 import {
@@ -84,10 +85,7 @@ export function UpdateChecker() {
                 </span>
               </p>
             </div>
-            <Button
-              size="sm"
-              onClick={() => window.open(status.releaseUrl, "_blank")}
-            >
+            <Button size="sm" onClick={() => void openUrl(status.releaseUrl)}>
               Download Update
             </Button>
           </SettingsOptionRow>
