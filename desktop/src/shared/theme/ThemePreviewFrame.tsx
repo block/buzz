@@ -491,7 +491,10 @@ export function ThemePreviewFrame({
 }) {
   return (
     <div
-      className={cn("relative overflow-hidden rounded-2xl border", className)}
+      className={cn(
+        "relative aspect-[3/2] overflow-hidden rounded-2xl border",
+        className,
+      )}
       style={{
         backgroundColor: hsl(vars, "--muted"),
         borderColor: hsl(vars, "--border"),

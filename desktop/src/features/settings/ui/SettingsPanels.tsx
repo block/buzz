@@ -380,6 +380,11 @@ function ThemeSettingsCard() {
 
   const handleModeSelect = (mode: AppearanceMode) => {
     setSelectedMode(mode);
+    if (mode === "system") {
+      setFollowSystem(true);
+    } else {
+      setFollowSystem(false);
+    }
   };
 
   const handleSelectTheme = (name: SyntaxThemeName) => {
