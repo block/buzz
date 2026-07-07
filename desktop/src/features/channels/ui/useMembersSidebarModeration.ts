@@ -9,24 +9,11 @@ import {
   useUntimeoutMemberMutation,
 } from "@/features/moderation/hooks";
 import { useMyRelayMembershipQuery } from "@/features/relay-members/hooks";
+import { isTimedOut } from "@/features/moderation/lib/restrictionState";
 import type { ChannelMember } from "@/shared/api/types";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 
 import type { MemberModerationState } from "./MembersSidebarMemberCard";
-
-/**
- * Coerce a restriction timestamp to epoch milliseconds. The wire emits
- * DateTime<Utc> as an RFC3339 string, but the shared type still tolerates the
- * legacy `number` (unix seconds) shape, so handle both: strings parse as ISO,
- * numbers are treated as unix seconds. Returns null for absent/unparseable
- * values (fails closed — no phantom "timed out" state).
- */
-function parseTimestampMs(value: string | number | null): number | null {
-  if (value == null) return null;
-  if (typeof value === "number") return value * 1000;
-  const parsed = Date.parse(value);
-  return Number.isNaN(parsed) ? null : parsed;
-}
 
 /**
  * Owns community ban/timeout wiring for the members sidebar. Gated by relay
@@ -53,11 +40,9 @@ export function useMembersSidebarModeration(open: boolean) {
     const nowMs = Date.now();
     const map = new Map<string, MemberModerationState>();
     for (const restriction of restrictionsQuery.data ?? []) {
-      const mutedUntilMs = parseTimestampMs(restriction.mutedUntil);
-      const timedOut = mutedUntilMs != null && mutedUntilMs > nowMs;
       map.set(normalizePubkey(restriction.pubkey), {
         banned: restriction.banned,
-        timedOut,
+        timedOut: isTimedOut(restriction.mutedUntil, nowMs),
       });
     }
     return map;

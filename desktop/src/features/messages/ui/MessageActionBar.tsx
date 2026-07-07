@@ -20,6 +20,7 @@ import { EmojiPicker } from "@/features/custom-emoji/ui/EmojiPicker";
 import { useCustomEmoji } from "@/features/custom-emoji/hooks";
 import { getThreadReference } from "@/features/messages/lib/threading";
 import { ReportMessageDialog } from "@/features/moderation/ui/ReportMessageDialog";
+import { MessageModerationMenuItems } from "@/features/moderation/ui/MessageModerationMenuItems";
 import type {
   TimelineMessage,
   TimelineReaction,
@@ -264,6 +265,13 @@ function MoreActionsMenu({
               <Trash2 className="h-4 w-4" />
               Delete message
             </DropdownMenuItem>
+          ) : null}
+
+          {canReport ? (
+            <MessageModerationMenuItems
+              channelId={channelId}
+              message={message}
+            />
           ) : null}
         </DropdownMenuContent>
       </DropdownMenu>
