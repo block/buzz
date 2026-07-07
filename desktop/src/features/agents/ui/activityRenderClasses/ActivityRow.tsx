@@ -191,3 +191,24 @@ export function splitActivityRowLabel(
   );
   return match ? { verb: match[1], object: match[2] } : null;
 }
+
+export type ActivityRowCountedObject = {
+  count: number;
+  rest: string;
+};
+
+/**
+ * Split a summary label object like "16 tool calls" into its leading count
+ * and the trailing text (" tool calls"), so the number can animate through
+ * AnimatedCount while streaming bursts grow. Returns null when the object
+ * does not lead with a count.
+ */
+export function splitActivityRowCountedObject(
+  object: string,
+): ActivityRowCountedObject | null {
+  const match = object.match(/^(\d+)(\s.+)$/);
+  if (!match) return null;
+  const count = Number(match[1]);
+  if (!Number.isFinite(count)) return null;
+  return { count, rest: match[2] };
+}

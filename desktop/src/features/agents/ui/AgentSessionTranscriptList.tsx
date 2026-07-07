@@ -17,6 +17,7 @@ import {
   DialogTitle,
 } from "@/shared/ui/dialog";
 import { Toggle } from "@/shared/ui/toggle";
+import { AnimatedCount } from "@/shared/ui/AnimatedCount";
 import { FuzzyLogo } from "@/shared/ui/buzz-logo/FuzzyLogo";
 import type { PromptSection, TranscriptItem } from "./agentSessionTypes";
 import { TurnLivenessIndicator } from "./TurnLivenessIndicator";
@@ -34,6 +35,7 @@ import {
   ActivityRowContent,
   ActivityRowLabel,
   type ActivityRowStats,
+  splitActivityRowCountedObject,
   splitActivityRowLabel,
 } from "./activityRenderClasses/ActivityRow";
 import { TranscriptTimestamp } from "./activityRenderClasses/TranscriptTimestamp";
@@ -578,15 +580,33 @@ function ToolRunSummaryLabel({
   label: string;
   stats?: ActivityRowStats | null;
 }) {
+  const animationPreferenceEnabled = useTranscriptAnimationEnabled();
   const parts = splitActivityRowLabel(label);
 
   if (!parts) {
     return <span className="truncate text-sm font-medium">{label}</span>;
   }
 
+  // Streaming bursts grow their count in place ("Ran 16 tool calls" →
+  // "Ran 17 tool calls"); rolling the digits odometer-style makes the
+  // increment legible. AnimatedCount keeps an sr-only static value and
+  // falls back to static text under prefers-reduced-motion.
+  const countedObject =
+    animationPreferenceEnabled && typeof parts.object === "string"
+      ? splitActivityRowCountedObject(parts.object)
+      : null;
+  const object = countedObject ? (
+    <>
+      <AnimatedCount value={countedObject.count} />
+      {countedObject.rest}
+    </>
+  ) : (
+    parts.object
+  );
+
   return (
     <ActivityRowLabel
-      object={parts.object}
+      object={object}
       openToneScope="summary"
       stats={stats}
       verb={parts.verb}
