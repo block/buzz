@@ -1706,7 +1706,7 @@ function resetMockPersonas(config?: E2eConfig) {
     display_name: persona.display_name,
     avatar_url: persona.avatar_url,
     system_prompt: persona.system_prompt,
-    runtime: persona.id === "builtin:fizz" ? "goose" : null,
+    runtime: null,
     model: null,
     provider: null,
     name_pool: [],
@@ -6574,7 +6574,7 @@ async function handleCreateManagedAgent(
     persona_id: args.input.personaId ?? null,
     relay_url: args.input.relayUrl ?? DEFAULT_RELAY_WS_URL,
     acp_command: args.input.acpCommand ?? "buzz-acp",
-    agent_command: args.input.agentCommand ?? "goose",
+    agent_command: args.input.agentCommand ?? "buzz-agent",
     agent_args:
       args.input.agentArgs && args.input.agentArgs.length > 0
         ? [...args.input.agentArgs]
