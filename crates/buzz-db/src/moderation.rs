@@ -99,13 +99,30 @@ pub struct BanRecord {
     pub updated_at: DateTime<Utc>,
 }
 
+/// Audit action values accepted by the `moderation_actions.action` CHECK in
+/// migration 0006. Keep this in lockstep with `migrations/0006_moderation.sql`.
+pub const MODERATION_ACTION_CHECK_VOCAB: &[&str] = &[
+    "delete_message",
+    "kick",
+    "ban",
+    "unban",
+    "timeout",
+    "untimeout",
+    "dismiss_report",
+    "escalate",
+    "resolve:delete",
+    "resolve:kick",
+    "resolve:ban",
+    "resolve:timeout",
+];
+
 /// Insert parameters for a moderation audit row.
 #[derive(Debug, Clone)]
 pub struct NewAction<'a> {
     /// Acting moderator pubkey bytes.
     pub actor_pubkey: &'a [u8],
     /// `delete_message` | `kick` | `ban` | `unban` | `timeout` | `untimeout`
-    /// | `dismiss_report` | `escalate` (DB CHECK-enforced).
+    /// | `dismiss_report` | `escalate` | `resolve:*` decision rows (DB CHECK-enforced).
     pub action: &'a str,
     /// Actioned member, when the action targets a pubkey.
     pub target_pubkey: Option<&'a [u8]>,
