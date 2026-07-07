@@ -7,6 +7,7 @@ import { PresenceDot } from "@/features/presence/ui/PresenceBadge";
 import { Badge } from "@/shared/ui/badge";
 import { AgentStatusBadge } from "@/features/agents/ui/AgentStatusBadge";
 import { useAgentWorking } from "@/features/agents/agentWorkingSignal";
+import { useOpenAgentActivity } from "@/features/agents/useOpenAgentActivity";
 import { formatElapsed } from "@/features/agents/ui/agentSessionUtils";
 import { useNow } from "@/shared/lib/useNow";
 import type {
@@ -202,6 +203,7 @@ function AgentSummary({
   presenceStatus: PresenceStatus | undefined;
 }) {
   const { goChannel } = useAppNavigation();
+  const { openAgentActivity } = useOpenAgentActivity();
 
   return (
     <div className="min-w-0">
@@ -275,7 +277,11 @@ function AgentSummary({
                   channelId={channel.id}
                   name={channel.name}
                   anchorAt={channel.anchorAt}
-                  onNavigate={goChannel}
+                  // Deep-link straight into the agent's activity pane in the
+                  // working channel, not just the channel timeline.
+                  onNavigate={(channelId) =>
+                    openAgentActivity(agent.pubkey, { channelId })
+                  }
                 />
               ))}
             </div>
