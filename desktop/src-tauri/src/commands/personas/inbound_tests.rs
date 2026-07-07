@@ -161,6 +161,9 @@ fn local_agent() -> ManagedAgentRecord {
         last_error: None,
         respond_to: crate::managed_agents::RespondTo::OwnerOnly,
         respond_to_allowlist: vec![],
+        display_name: None,
+        name_pool: Vec::new(),
+        is_builtin: false,
         relay_mesh: None,
     }
 }

@@ -204,6 +204,17 @@ pub struct ManagedAgentRecord {
     /// Preserved across mode toggles so users don't lose state.
     #[serde(default)]
     pub respond_to_allowlist: Vec<String>,
+    /// Optional display name distinct from the unique `name` handle. Absorbed
+    /// from `PersonaRecord.display_name` (unified agent model, Phase 1A).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    /// Pool of short thematic names for clones of this agent. Absorbed from
+    /// `PersonaRecord.name_pool`; feeds clone naming.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub name_pool: Vec<String>,
+    /// Absorbed from `PersonaRecord.is_builtin`.
+    #[serde(default)]
+    pub is_builtin: bool,
     /// Typed marker for relay-mesh agents. `Some(_)` means this agent runs its
     /// inference through Buzz's relay-mesh local endpoint; the `model_ref` is
     /// the served model id to route to. `None` is a normal agent.

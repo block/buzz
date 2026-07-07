@@ -160,6 +160,9 @@ fn fixture(
         last_error: None,
         respond_to,
         respond_to_allowlist: allowlist,
+        display_name: None,
+        name_pool: Vec::new(),
+        is_builtin: false,
         relay_mesh: None,
     }
 }

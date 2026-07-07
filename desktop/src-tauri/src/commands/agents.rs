@@ -843,6 +843,9 @@ pub async fn create_managed_agent(
             last_error: None,
             respond_to: input.respond_to,
             respond_to_allowlist: respond_to_allowlist.clone(),
+            display_name: None,
+            name_pool: Vec::new(),
+            is_builtin: false,
             relay_mesh: relay_mesh.clone(),
         };
 

@@ -176,6 +176,9 @@ mod tests {
             last_error: Some("some runtime error".to_string()),
             respond_to: RespondTo::Allowlist,
             respond_to_allowlist: vec!["79be667e".to_string()],
+            display_name: None,
+            name_pool: Vec::new(),
+            is_builtin: false,
             relay_mesh: None,
         }
     }

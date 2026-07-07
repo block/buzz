@@ -40,6 +40,9 @@ fn record() -> ManagedAgentRecord {
         last_error: None,
         respond_to: Default::default(),
         respond_to_allowlist: vec![],
+        display_name: None,
+        name_pool: Vec::new(),
+        is_builtin: false,
         relay_mesh: None,
     }
 }

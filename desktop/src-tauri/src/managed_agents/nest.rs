@@ -1147,6 +1147,9 @@ mod tests {
             respond_to: RespondTo::default(),
             respond_to_allowlist: vec![],
             env_vars: std::collections::BTreeMap::new(),
+            display_name: None,
+            name_pool: Vec::new(),
+            is_builtin: false,
             relay_mesh: None,
         }
     }
