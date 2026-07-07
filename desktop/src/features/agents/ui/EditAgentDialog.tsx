@@ -352,13 +352,21 @@ export function EditAgentDialog({
     const resolvedRuntimeId = nextRuntimeId || "custom";
     setSelectedRuntimeId(resolvedRuntimeId);
 
-    // Any explicit runtime selection pins the harness — this is the
-    // authoritative override. Disabling inheritance ensures the choice is
-    // actually persisted (Save follows the pin path, not the inherit path) and
-    // that the Advanced command input becomes editable for the custom case.
-    // "Custom command" has no catalog entry, so it must clear inheritance here
-    // rather than relying on the concrete-runtime branch below.
-    setInheritHarness(false);
+    const isCustomCommand = resolvedRuntimeId === "custom";
+
+    // Only pin the harness when the selection can actually supply a command:
+    //   - "Custom command": the Advanced command input becomes editable, so the
+    //     user provides the command.
+    //   - a catalog entry with a concrete command: we set it below.
+    // A catalog entry with command:null (availability adapter_missing /
+    // not_installed) can't produce a runnable command — clearing inheritance
+    // there would omit agentCommand on Save (command unchanged) while the
+    // provider/model logic treats the new runtime as effective, so an inherited
+    // Claude agent could persist a Databricks provider while still running
+    // Claude. Keep inheriting in that case.
+    if (isCustomCommand || nextRuntime?.command) {
+      setInheritHarness(false);
+    }
 
     // When switching to a catalog-known runtime, update the agent command to
     // its resolved command so the command field stays consistent.

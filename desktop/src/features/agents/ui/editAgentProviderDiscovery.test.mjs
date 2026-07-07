@@ -393,6 +393,34 @@ test("editAgent_runtimeDropdown_pinsHarnessWhenCustomCommandSelected", () => {
   );
 });
 
+test("editAgent_runtimeDropdown_keepsInheritWhenCatalogEntryHasNoCommand", () => {
+  // A catalog entry whose adapter is missing/not installed has command:null.
+  // Selecting it must NOT clear inheritance: the concrete-runtime branch can't
+  // set a command, so pinning would leave agentCommand unchanged on Save while
+  // the provider/model logic treats the new runtime as effective — an inherited
+  // Claude agent could persist a Databricks provider while still running Claude.
+  let inheritHarness = true; // inherited Claude agent
+
+  const NO_RUNTIME_DROPDOWN_VALUE = "__none__";
+  const nextValue = "buzz-agent"; // catalog entry, but adapter missing
+  const nextRuntimeId =
+    nextValue === NO_RUNTIME_DROPDOWN_VALUE ? "" : nextValue;
+  const resolvedRuntimeId = nextRuntimeId || "custom";
+  const nextRuntime = { id: "buzz-agent", command: null, defaultArgs: [] };
+
+  // Mirror the guarded handler: only pin when a command can be supplied.
+  const isCustomCommand = resolvedRuntimeId === "custom";
+  if (isCustomCommand || nextRuntime?.command) {
+    inheritHarness = false;
+  }
+
+  assert.equal(
+    inheritHarness,
+    true,
+    "selecting a command:null catalog entry must keep inheritHarness=true to avoid a mismatched command/provider pair",
+  );
+});
+
 test("editAgent_customCommandSelected_savePinsCustomCommandNotInherit", () => {
   // After the custom-command selection clears inheritance, the submit path must
   // pin the (edited) custom command rather than following the inherit sentinel.
