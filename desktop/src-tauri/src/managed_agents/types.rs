@@ -503,6 +503,14 @@ pub struct UpdateManagedAgentRequest {
     pub acp_command: Option<String>,
     #[serde(default)]
     pub agent_command: Option<String>,
+    /// True when the accompanying `agent_command` is a runtime/Custom command
+    /// the user deliberately picked for a linked persona (i.e. the dialog is
+    /// not inheriting). Distinguishes a real pin — including one that maps to
+    /// the persona's own runtime — from a persona-authoritative restatement,
+    /// so a same-runtime pick is preserved instead of being dropped back to
+    /// inherit. Ignored when `agent_command` is absent or the inherit sentinel.
+    #[serde(default)]
+    pub harness_override: bool,
     #[serde(default)]
     pub agent_args: Option<Vec<String>>,
     #[serde(default)]

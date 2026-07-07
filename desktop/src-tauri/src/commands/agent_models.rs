@@ -860,13 +860,21 @@ pub async fn update_managed_agent(
         // that diverges from the persona. An empty/whitespace value (the
         // "Inherit from persona" sentinel) clears the pin back to `None`. A
         // name-only edit (`agent_command == None`) leaves the pin intact.
+        //
+        // `harness_override` threads the user's explicit intent: when they pick
+        // a runtime/Custom command in the dialog it is a real pin even if it
+        // maps to the persona's own runtime, so a same-runtime pick is kept
+        // rather than dropped back to inherit (see
+        // `update_time_agent_command_override`).
         if let Some(agent_command) = input.agent_command {
             let personas = load_personas(&app).unwrap_or_default();
-            record.agent_command_override = crate::managed_agents::divergent_agent_command_override(
-                record.persona_id.as_deref(),
-                &personas,
-                Some(&agent_command),
-            );
+            record.agent_command_override =
+                crate::managed_agents::update_time_agent_command_override(
+                    record.persona_id.as_deref(),
+                    &personas,
+                    Some(&agent_command),
+                    input.harness_override,
+                );
         }
         if let Some(agent_args) = input.agent_args {
             record.agent_args = agent_args;

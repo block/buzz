@@ -134,7 +134,11 @@ const overrides = new Map([
   // config-parity: max_tokens_env_var + context_limit_env_var fields added to
   // KnownAcpRuntime (2 fields × 4 runtimes + discovery tests = ~13 lines).
   // Load-bearing — required for buzz-agent normalized config parity.
-  ["src-tauri/src/managed_agents/discovery.rs", 1124],
+  // same-runtime-pin: update_time_agent_command_override + its override /
+  // same-runtime / alias / sentinel / non-override / persona-less test matrix
+  // (~135 lines, mostly tests) so a deliberate Custom pin survives the update
+  // path instead of being dropped back to inherit. Load-bearing, not debt.
+  ["src-tauri/src/managed_agents/discovery.rs", 1259],
   // migration_tests.rs carries the harness-sync migration coverage plus the
   // patch_json_records owner-only writeback regression test (SECURITY.md:90
   // crash-safe 0o600 fallback). Load-bearing security + feature coverage, not
@@ -207,7 +211,9 @@ const overrides = new Map([
   // a GUI-launched DMG (the discovery_env_with_baked_floor fold).
   // +3: provider tri-state applied in update_managed_agent handler
   // (if let Some(provider_update) = input.provider { record.provider = provider_update; }).
-  ["src-tauri/src/commands/agent_models.rs", 1071],
+  // +8: harness_override thread-through in update_managed_agent so a deliberate
+  // Custom pin routes to update_time_agent_command_override (comment + call).
+  ["src-tauri/src/commands/agent_models.rs", 1079],
   // draft-persistence predicate: submit-time `loadDraft` check + inline comment
   // + deps-array entry in submitMessage closes the never-persisted-boundary
   // defect (Thufir Pass-3 finding). Load-bearing correctness fix; queued to

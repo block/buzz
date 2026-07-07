@@ -547,6 +547,12 @@ export function EditAgentDialog({
             ? acpCommand.trim()
             : undefined,
         agentCommand: agentCommandUpdate,
+        // A non-inheriting selection is a deliberate pin — signal it so the
+        // backend preserves a Custom/runtime command even when it maps to the
+        // linked persona's own runtime (otherwise it would be dropped back to
+        // inherit). Omitted (falsy) when inheriting or on a name-only edit.
+        harnessOverride:
+          agentCommandUpdate != null ? !inheritHarness : undefined,
         agentArgs:
           parsedArgs.join(",") !== agent.agentArgs.join(",")
             ? parsedArgs
