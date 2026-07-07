@@ -253,6 +253,15 @@ function groupMixedToolRuns(
       const items = run.flatMap((child) =>
         child.kind === "item" ? [child.item] : child.summary.items,
       );
+      // Mixed bursts are already the visual summary. Expanding nested
+      // same-kind summaries here creates redundant rows like
+      // "Ran 16 tool calls" → "Ran 12 commands". Keep same-kind summaries as
+      // grouping inputs, but flatten the mixed summary's visible children back
+      // to leaf tool rows.
+      const childSegments = items.map((item) => ({
+        kind: "item" as const,
+        item,
+      }));
       grouped.push({
         kind: "summary",
         summary: {
@@ -262,7 +271,7 @@ function groupMixedToolRuns(
           items,
           renderClass: null,
           variant: "mixed",
-          segments: run,
+          segments: childSegments,
           timestamp: items[0].timestamp,
         },
       });

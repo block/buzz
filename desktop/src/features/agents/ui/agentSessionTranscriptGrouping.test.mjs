@@ -343,14 +343,14 @@ test("buildTranscriptDisplayBlocks nests same-kind summaries inside tool bursts"
   assert.equal(block.segments[0].kind, "summary");
   assert.equal(block.segments[0].summary.variant, "mixed");
   assert.equal(block.segments[0].summary.label, "Ran 5 tool calls");
-  // Child segments preserve the same-kind summary as an intact nested node.
+  // Mixed summaries are the only visible burst summary; nested same-kind
+  // summaries flatten back to leaf rows to avoid redundant rows such as
+  // "Ran 16 tool calls" → "Ran 12 commands".
   assert.deepEqual(
-    block.segments[0].summary.segments.map((child) => child.kind),
-    ["summary", "item", "item"],
-  );
-  assert.equal(
-    block.segments[0].summary.segments[0].summary.label,
-    "Read 3 files",
+    block.segments[0].summary.segments.map((child) =>
+      child.kind === "item" ? child.item.id : child.summary.label,
+    ),
+    ["read-1", "read-2", "read-3", "shell-1", "skill-1"],
   );
   // Flat leaf items preserve original order.
   assert.deepEqual(
@@ -380,7 +380,16 @@ test("buildTranscriptDisplayBlocks collapses alternating search/read bursts into
     block.segments[0].summary.segments.map((child) =>
       child.kind === "summary" ? child.summary.label : child.item.id,
     ),
-    ["shell-1", "Read 3 files", "shell-2", "Read 3 files"],
+    [
+      "shell-1",
+      "read-1",
+      "read-2",
+      "read-3",
+      "shell-2",
+      "read-4",
+      "read-5",
+      "read-6",
+    ],
   );
 });
 
