@@ -2175,6 +2175,151 @@ impl Db {
         relay_members::backfill_from_allowlist(&self.pool, community).await
     }
 
+    /// Insert a tenant-scoped NIP-56 report row, idempotent by report event id.
+    pub async fn insert_moderation_report(
+        &self,
+        community: CommunityId,
+        report: moderation::NewReport<'_>,
+    ) -> Result<Uuid> {
+        moderation::insert_report(&self.pool, community, report).await
+    }
+
+    /// List moderation reports for a community, newest first.
+    pub async fn list_moderation_reports(
+        &self,
+        community: CommunityId,
+        status: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<moderation::ReportRecord>> {
+        moderation::list_reports(&self.pool, community, status, limit).await
+    }
+
+    /// Fetch one moderation report by row id.
+    pub async fn get_moderation_report(
+        &self,
+        community: CommunityId,
+        report_id: Uuid,
+    ) -> Result<Option<moderation::ReportRecord>> {
+        moderation::get_report(&self.pool, community, report_id).await
+    }
+
+    /// Fetch one moderation report by signed NIP-56 report event id.
+    pub async fn get_moderation_report_by_event(
+        &self,
+        community: CommunityId,
+        report_event_id: &[u8],
+    ) -> Result<Option<moderation::ReportRecord>> {
+        moderation::get_report_by_event(&self.pool, community, report_event_id).await
+    }
+
+    /// Resolve, dismiss, or escalate an open moderation report.
+    pub async fn resolve_moderation_report(
+        &self,
+        community: CommunityId,
+        report_id: Uuid,
+        status: &str,
+        resolved_by: &[u8],
+        action_id: Option<Uuid>,
+    ) -> Result<bool> {
+        moderation::resolve_report(
+            &self.pool,
+            community,
+            report_id,
+            status,
+            resolved_by,
+            action_id,
+        )
+        .await
+    }
+
+    /// Upsert a community ban for a member pubkey.
+    pub async fn ban_community_member(
+        &self,
+        community: CommunityId,
+        pubkey: &[u8],
+        actor: &[u8],
+        reason: Option<&str>,
+        expires_at: Option<DateTime<Utc>>,
+    ) -> Result<()> {
+        moderation::ban_member(&self.pool, community, pubkey, actor, reason, expires_at).await
+    }
+
+    /// Lift a community ban for a member pubkey.
+    pub async fn unban_community_member(
+        &self,
+        community: CommunityId,
+        pubkey: &[u8],
+        actor: &[u8],
+    ) -> Result<bool> {
+        moderation::unban_member(&self.pool, community, pubkey, actor).await
+    }
+
+    /// Upsert a community timeout/write-block for a member pubkey.
+    pub async fn timeout_community_member(
+        &self,
+        community: CommunityId,
+        pubkey: &[u8],
+        actor: &[u8],
+        muted_until: DateTime<Utc>,
+        reason: Option<&str>,
+    ) -> Result<()> {
+        moderation::timeout_member(&self.pool, community, pubkey, actor, muted_until, reason).await
+    }
+
+    /// Clear a community timeout/write-block for a member pubkey.
+    pub async fn untimeout_community_member(
+        &self,
+        community: CommunityId,
+        pubkey: &[u8],
+        actor: &[u8],
+    ) -> Result<bool> {
+        moderation::untimeout_member(&self.pool, community, pubkey, actor).await
+    }
+
+    /// Fetch the active ban/timeout restriction state for enforcement hot paths.
+    pub async fn moderation_restriction_state(
+        &self,
+        community: CommunityId,
+        pubkey: &[u8],
+    ) -> Result<moderation::RestrictionState> {
+        moderation::restriction_state(&self.pool, community, pubkey).await
+    }
+
+    /// Fetch the full ban/timeout row for a member pubkey.
+    pub async fn get_community_ban(
+        &self,
+        community: CommunityId,
+        pubkey: &[u8],
+    ) -> Result<Option<moderation::BanRecord>> {
+        moderation::get_ban(&self.pool, community, pubkey).await
+    }
+
+    /// List currently restricted members in a community.
+    pub async fn list_community_restrictions(
+        &self,
+        community: CommunityId,
+    ) -> Result<Vec<moderation::BanRecord>> {
+        moderation::list_restricted(&self.pool, community).await
+    }
+
+    /// Insert a moderation audit action row.
+    pub async fn insert_moderation_action(
+        &self,
+        community: CommunityId,
+        action: moderation::NewAction<'_>,
+    ) -> Result<Uuid> {
+        moderation::insert_action(&self.pool, community, action).await
+    }
+
+    /// List moderation audit action rows, newest first.
+    pub async fn list_moderation_actions(
+        &self,
+        community: CommunityId,
+        limit: i64,
+    ) -> Result<Vec<moderation::ActionRecord>> {
+        moderation::list_actions(&self.pool, community, limit).await
+    }
+
     /// Return the current owner of git repo name `repo_id` in `community`, or
     /// `None` if unreserved. See [`git_repo::repo_name_owner`].
     pub async fn repo_name_owner(
