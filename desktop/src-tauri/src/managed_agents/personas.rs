@@ -119,7 +119,7 @@ const BUILT_IN_PERSONAS: &[BuiltInPersona] = &[
             "Orchard", "Buzz",
         ],
         model: None,
-        runtime: Some("goose"),
+        runtime: None,
         default_active: true,
     },
     BuiltInPersona {

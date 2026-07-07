@@ -2,11 +2,12 @@ import * as React from "react";
 
 import {
   useAcpRuntimesQuery,
+  useAgentConfigSurface,
   usePersonasQuery,
+  useRuntimeFileConfigQuery,
   useUpdateManagedAgentMutation,
 } from "@/features/agents/hooks";
 import type {
-  AcpRuntimeCatalogEntry,
   ManagedAgent,
   RespondToMode,
   UpdateManagedAgentInput,
@@ -19,36 +20,31 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/shared/ui/dialog";
-import { Input } from "@/shared/ui/input";
 import {
-  AUTO_MODEL_DROPDOWN_VALUE,
   AUTO_PROVIDER_DROPDOWN_VALUE,
-  CUSTOM_MODEL_DROPDOWN_VALUE,
   CUSTOM_PROVIDER_DROPDOWN_VALUE,
   formatRuntimeOptionLabel,
-  getModelSelectValue,
-  getPersonaProviderOptions,
   getProviderApiKeyEnvVar,
-  hasPersonaModelOption,
+  isMissingRequiredDropdownField,
   NO_RUNTIME_DROPDOWN_VALUE,
   runtimeSupportsLlmProviderSelection,
+  requiredCredentialEnvKeys,
   shouldClearKnownModelForSelectionScope,
   sortPersonaRuntimes,
   type PersonaDropdownOption,
-  type PersonaModelOption,
 } from "./personaDialogPickers";
 import { shouldClearModelForRuntimeChange } from "./personaRuntimeModel";
-import type { PersonaModelDiscoveryStatus } from "./personaModelDiscoveryStatus";
+import {
+  AgentModelField,
+  AgentProviderField,
+} from "./personaProviderModelFields";
 import {
   CreateAgentBasicsFields,
   CreateAgentRuntimeFields,
 } from "./CreateAgentDialogSections";
 import { EnvVarsEditor, type EnvVarsValue } from "./EnvVarsEditor";
 import { CreateAgentRespondToField } from "./RespondToField";
-import {
-  MODEL_DISCOVERY_LOADING_VALUE,
-  usePersonaModelDiscovery,
-} from "./usePersonaModelDiscovery";
+import { usePersonaModelDiscovery } from "./usePersonaModelDiscovery";
 
 export function EditAgentDialog({
   agent,
@@ -63,6 +59,7 @@ export function EditAgentDialog({
 }) {
   const updateMutation = useUpdateManagedAgentMutation();
   const runtimesQuery = useAcpRuntimesQuery({ enabled: open });
+  const configSurfaceQuery = useAgentConfigSurface(open ? agent.pubkey : null);
   const runtimes = runtimesQuery.data ?? [];
 
   const [name, setName] = React.useState(agent.name);
@@ -229,6 +226,90 @@ export function EditAgentDialog({
   );
 
   const providerForDiscovery = llmProviderFieldVisible ? provider : "";
+  const normalizedConfig = configSurfaceQuery.data?.normalized;
+  const modelRequired = isMissingRequiredDropdownField(
+    normalizedConfig?.model,
+    model,
+  );
+  const providerRequired = isMissingRequiredDropdownField(
+    normalizedConfig?.provider,
+    provider,
+  );
+
+  // The runtime id that will actually be active after submit. When inheriting,
+  // resolve from agent.agentCommand (the persona's runtime) using the same
+  // dual-match used at submit time — command path first, then id fallback for
+  // catalog entries where the adapter binary is missing (command:null). This
+  // single prospective id feeds BOTH the block-save gate (requiredEnvKeys) and
+  // the submit path so they never disagree on which runtime is being saved.
+  const prospectiveRuntimeId = React.useMemo(() => {
+    if (!inheritHarness) {
+      return selectedRuntime?.id ?? selectedRuntimeId;
+    }
+    return (
+      runtimes.find((r) => r.command?.trim() === agent.agentCommand.trim())
+        ?.id ??
+      runtimes.find((r) => r.id === agent.agentCommand.trim())?.id ??
+      ""
+    );
+  }, [
+    inheritHarness,
+    runtimes,
+    agent.agentCommand,
+    selectedRuntime?.id,
+    selectedRuntimeId,
+  ]);
+
+  // Provider used for required-key validation — keyed off the PROSPECTIVE
+  // runtime, not the current dropdown. When the user transitions from a
+  // CLI-login pin (claude) to inherit a buzz-agent/goose persona, the current
+  // dropdown would suppress provider to "" (llmProviderFieldVisible=false),
+  // making requiredCredentialEnvKeys return [] and falsely unblocking the save.
+  // Using prospectiveRuntimeId here ensures the gate checks the credential
+  // requirements of the runtime that will actually be saved.
+  const providerForRequiredKeys = runtimeSupportsLlmProviderSelection(
+    prospectiveRuntimeId,
+  )
+    ? provider
+    : "";
+
+  // Required credential env keys for the PROSPECTIVE post-submit runtime.
+  // Using the prospective id (not the current dropdown) ensures the gate
+  // validates what will actually be saved — in particular, on the inherit
+  // transition (claude→buzz-agent or buzz-agent→claude) the gate reflects
+  // the inherited runtime's requirements, not the old pin's.
+  const { data: runtimeFileConfig } = useRuntimeFileConfigQuery(
+    prospectiveRuntimeId,
+    { enabled: open },
+  );
+  // Credential keys satisfied by the runtime file config — shown as
+  // "Set in goose config" rows rather than amber required rows.
+  const fileSatisfiedEnvKeys = React.useMemo(() => {
+    if (!runtimeFileConfig) return [] as string[];
+    const allKeys = requiredCredentialEnvKeys(
+      prospectiveRuntimeId,
+      providerForRequiredKeys,
+    );
+    return allKeys.filter(
+      (key) =>
+        (envVars[key] ?? "").length === 0 &&
+        runtimeFileConfig.satisfiedEnvKeys.includes(key),
+    );
+  }, [
+    runtimeFileConfig,
+    prospectiveRuntimeId,
+    providerForRequiredKeys,
+    envVars,
+  ]);
+
+  const requiredEnvKeys = React.useMemo(
+    () =>
+      requiredCredentialEnvKeys(
+        prospectiveRuntimeId,
+        providerForRequiredKeys,
+      ).filter((key) => !fileSatisfiedEnvKeys.includes(key)),
+    [prospectiveRuntimeId, providerForRequiredKeys, fileSatisfiedEnvKeys],
+  );
 
   const {
     discoveredModelOptions,
@@ -431,21 +512,10 @@ export function EditAgentDialog({
           : undefined;
 
       // Derive the effective runtime at submit time — the one that will
-      // actually run AFTER submit. When pinned (inheritHarness=false), it's
-      // the live dropdown selection. When inheriting, match agent.agentCommand
-      // first by command (the normal path), then fall back to id-match for
-      // runtimes where the adapter is missing (command:null in the catalog).
-      // The id of a known runtime is stable even when its adapter binary is
-      // absent, so id-fallback lets us classify capability correctly without
-      // treating a "known adapter missing" as "completely unknown runtime."
-      const effectiveRuntimeIdForSubmit = inheritHarness
-        ? (runtimes.find((r) => r.command?.trim() === agent.agentCommand.trim())
-            ?.id ??
-          // Fallback: id-based match for command:null catalog entries (adapter
-          // missing but runtime is known and its capability is still static).
-          runtimes.find((r) => r.id === agent.agentCommand.trim())?.id ??
-          "")
-        : (selectedRuntime?.id ?? selectedRuntimeId);
+      // actually run AFTER submit. This is the component-scope prospectiveRuntimeId,
+      // which is shared with the block-save gate (requiredEnvKeys) so both
+      // always agree on which runtime is being saved.
+      const effectiveRuntimeIdForSubmit = prospectiveRuntimeId;
 
       // Classify the effective runtime's provider capability as a tri-state so
       // the provider submit branch can distinguish "known-locked" (clear) from
@@ -569,10 +639,11 @@ export function EditAgentDialog({
               onModeChange={setRespondTo}
             />
 
-            <EditAgentModelField
+            <AgentModelField
               disabled={updateMutation.isPending}
               discoveredModelOptions={discoveredModelOptions}
               isCustomModelEditing={isCustomModelEditing}
+              isRequired={modelRequired}
               model={model}
               modelDiscoveryLoading={modelDiscoveryLoading}
               modelDiscoveryStatus={modelDiscoveryStatus}
@@ -581,9 +652,10 @@ export function EditAgentDialog({
             />
 
             {llmProviderFieldVisible ? (
-              <EditAgentProviderField
+              <AgentProviderField
                 disabled={updateMutation.isPending}
                 isCustomProviderEditing={isCustomProviderEditing}
+                isRequired={providerRequired}
                 onProviderChange={handleProviderDropdownChange}
                 provider={provider}
                 selectedRuntime={selectedRuntime}
@@ -682,10 +754,12 @@ export function EditAgentDialog({
 
             <EnvVarsEditor
               disabled={updateMutation.isPending}
+              fileSatisfiedKeys={fileSatisfiedEnvKeys}
               helperText="Per-agent env vars. Override the persona's vars on collision."
               inheritedFrom={inheritedEnvVars}
               inheritedLabel="persona"
               onChange={setEnvVars}
+              requiredKeys={requiredEnvKeys}
               value={envVars}
             />
 
@@ -717,183 +791,6 @@ export function EditAgentDialog({
         </div>
       </DialogContent>
     </Dialog>
-  );
-}
-
-function EditAgentModelField({
-  disabled,
-  discoveredModelOptions,
-  isCustomModelEditing,
-  model,
-  modelDiscoveryLoading,
-  modelDiscoveryStatus,
-  onIsCustomModelEditingChange,
-  onModelChange,
-}: {
-  disabled: boolean;
-  discoveredModelOptions: readonly PersonaModelOption[] | null;
-  isCustomModelEditing: boolean;
-  model: string;
-  modelDiscoveryLoading: boolean;
-  modelDiscoveryStatus: PersonaModelDiscoveryStatus | null;
-  onIsCustomModelEditingChange: (value: boolean) => void;
-  onModelChange: (value: string) => void;
-}) {
-  const trimmedModel = model.trim();
-
-  // Mirror Persona: static options serve as the fallback when discovery hasn't
-  // returned yet. Discovered options are ADDITIVE — we never disable the picker
-  // or hide the custom input just because discovery returned null.
-  const staticModelOptions: readonly PersonaModelOption[] = [
-    { id: "", label: "Default model" },
-  ];
-  const effectiveModelOptions = discoveredModelOptions ?? staticModelOptions;
-
-  // isModelCustom: true when the current model isn't in any known option set.
-  // We check discovered options (when available) or runtime-static options so
-  // a previously-saved custom model stays in custom mode even before discovery.
-  const isModelCustom = !hasPersonaModelOption(
-    effectiveModelOptions,
-    trimmedModel,
-  );
-
-  const modelSelectValue = getModelSelectValue({
-    isCustomModelEditing,
-    isModelCustom,
-    model,
-  });
-
-  // The select is only disabled for mutation pending — never for missing discovery.
-  // Default/custom options remain usable regardless of discovery state.
-  const selectDisabled = disabled || modelDiscoveryLoading;
-
-  // Show the custom model input whenever custom mode is active or the current
-  // model is already custom — not gated on discovery having returned.
-  const showCustomModelInput = isCustomModelEditing || isModelCustom;
-
-  return (
-    <div className="space-y-1.5">
-      <label className="text-sm font-medium" htmlFor="agent-model">
-        Model
-      </label>
-      <select
-        className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-2 text-sm shadow-xs disabled:cursor-not-allowed disabled:opacity-60"
-        disabled={selectDisabled}
-        id="agent-model"
-        onChange={(event) => {
-          const nextValue = event.target.value;
-          if (nextValue === AUTO_MODEL_DROPDOWN_VALUE) {
-            onIsCustomModelEditingChange(false);
-            onModelChange("");
-            return;
-          }
-          if (nextValue === CUSTOM_MODEL_DROPDOWN_VALUE) {
-            onIsCustomModelEditingChange(true);
-            return;
-          }
-          onIsCustomModelEditingChange(false);
-          onModelChange(nextValue);
-        }}
-        value={modelSelectValue}
-      >
-        {effectiveModelOptions.map((option) => (
-          <option
-            key={option.id}
-            value={option.id || AUTO_MODEL_DROPDOWN_VALUE}
-          >
-            {option.label}
-          </option>
-        ))}
-        {modelDiscoveryLoading && discoveredModelOptions === null ? (
-          <option disabled value={MODEL_DISCOVERY_LOADING_VALUE}>
-            Loading models...
-          </option>
-        ) : null}
-        <option value={CUSTOM_MODEL_DROPDOWN_VALUE}>Custom model...</option>
-      </select>
-      {showCustomModelInput ? (
-        <Input
-          aria-label="Custom model ID"
-          autoCorrect="off"
-          disabled={disabled}
-          onChange={(event) => onModelChange(event.target.value)}
-          placeholder="Custom model ID"
-          value={model}
-        />
-      ) : null}
-      <p className="text-xs text-muted-foreground">
-        {modelDiscoveryLoading
-          ? "Loading models..."
-          : modelDiscoveryStatus !== null
-            ? modelDiscoveryStatus.message
-            : discoveredModelOptions !== null
-              ? "Saved changes take effect on the next start."
-              : "Select a provider above to see available models."}
-      </p>
-    </div>
-  );
-}
-
-function EditAgentProviderField({
-  disabled,
-  isCustomProviderEditing,
-  onProviderChange,
-  provider,
-  selectedRuntime,
-}: {
-  disabled: boolean;
-  isCustomProviderEditing: boolean;
-  onProviderChange: (value: string) => void;
-  provider: string;
-  selectedRuntime: AcpRuntimeCatalogEntry | undefined;
-}) {
-  const trimmedProvider = provider.trim();
-  const providerOptions = getPersonaProviderOptions(
-    trimmedProvider,
-    selectedRuntime?.id ?? "",
-  );
-  const providerSelectValue = isCustomProviderEditing
-    ? CUSTOM_PROVIDER_DROPDOWN_VALUE
-    : trimmedProvider || AUTO_PROVIDER_DROPDOWN_VALUE;
-
-  return (
-    <div className="space-y-1.5">
-      <label className="text-sm font-medium" htmlFor="agent-provider">
-        LLM provider
-      </label>
-      <select
-        className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-2 text-sm shadow-xs disabled:cursor-not-allowed disabled:opacity-60"
-        disabled={disabled}
-        id="agent-provider"
-        onChange={(event) => onProviderChange(event.target.value)}
-        value={providerSelectValue}
-      >
-        {providerOptions.map((option) => (
-          <option
-            key={option.id}
-            value={option.id || AUTO_PROVIDER_DROPDOWN_VALUE}
-          >
-            {option.label}
-          </option>
-        ))}
-        <option value={CUSTOM_PROVIDER_DROPDOWN_VALUE}>
-          Custom provider...
-        </option>
-      </select>
-      {isCustomProviderEditing ? (
-        <Input
-          aria-label="Custom provider ID"
-          autoCorrect="off"
-          disabled={disabled}
-          onChange={(event) => onProviderChange(event.target.value)}
-          placeholder="Custom provider ID"
-          value={provider}
-        />
-      ) : null}
-      <p className="text-xs text-muted-foreground">
-        Changing the provider updates the available model list immediately.
-      </p>
-    </div>
   );
 }
 

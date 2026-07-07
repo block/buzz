@@ -52,6 +52,8 @@ import {
   setTranscriptTimestampsEnabled,
   useTranscriptTimestampsEnabled,
 } from "@/features/agents/ui/transcriptTimestampPreference";
+import { useLoadArchivedObserverEvents } from "@/features/agents/ui/useObserverEvents";
+import { useLoadOlderOnScroll } from "@/features/messages/ui/useLoadOlderOnScroll";
 import type { ChannelAgentSessionAgent } from "./useChannelAgentSessions";
 import { useChannelsQuery } from "@/features/channels/hooks";
 
@@ -102,6 +104,7 @@ export function AgentSessionThreadPanel({
   useEscapeKey(onClose, isOverlay || isSinglePanelView);
 
   const { ref: scrollRef, onScroll } = useStickToBottom<HTMLDivElement>();
+  const topSentinelRef = React.useRef<HTMLDivElement>(null);
   const now = useNow(1000);
   const { events } = useObserverEvents(isLive, agent.pubkey);
   const transcript = useAgentTranscript(isLive, agent.pubkey);
@@ -126,6 +129,17 @@ export function AgentSessionThreadPanel({
     latestActivityAt === null
       ? undefined
       : `Last updated ${new Date(latestActivityAt).toLocaleString()}`;
+
+  const { fetchOlderArchived, hasOlderArchived } =
+    useLoadArchivedObserverEvents(isLive);
+
+  useLoadOlderOnScroll({
+    fetchOlder: fetchOlderArchived,
+    hasOlderMessages: hasOlderArchived,
+    isLoading: false,
+    scrollContainerRef: scrollRef,
+    sentinelRef: topSentinelRef,
+  });
   const rawFeedScopeKey = `${agent.pubkey}:${sessionChannelId ?? "all"}`;
   // Scope label input: prefer the passed channel's name; when the pane is
   // channel-scoped without a full Channel object (#1380's channelId prop),
@@ -384,6 +398,7 @@ export function AgentSessionThreadPanel({
         className="overflow-y-auto px-3 pb-4"
         panelPadding
       >
+        <div ref={topSentinelRef} aria-hidden className="h-px" />
         <ManagedAgentSessionPanel
           agent={agent}
           channelId={sessionChannelId}

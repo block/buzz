@@ -122,6 +122,22 @@ test("create agent supports parallelism and system prompt overrides", async ({
   await page.getByText("Custom agent").click();
 
   await page.getByTestId("agent-name-input").fill(agentName);
+
+  // The buzz-agent runtime requires provider + model selection. Wait for the
+  // provider field to appear (it renders once the ACP runtime catalog loads
+  // and the auto-select effect resolves to buzz-agent).
+  await expect(page.locator("#agent-provider")).toBeVisible({
+    timeout: 10_000,
+  });
+  await page.locator("#agent-provider").selectOption("anthropic");
+  await page.locator("#agent-model").selectOption("__custom_model__");
+  await page.getByLabel("Custom model ID").fill("claude-opus-4-5");
+  // Supply a credential so the agent can actually run (create is no longer
+  // blocked by a missing key, but we include it for a realistic test).
+  await page
+    .getByTestId("env-vars-required-value")
+    .fill("sk-test-api-key-for-e2e");
+
   await page.getByRole("button", { name: "Advanced setup" }).click();
   await page.getByTestId("agent-parallelism-input").fill("3");
   await page

@@ -1,4 +1,5 @@
 import type { AcpRuntimeCatalogEntry } from "@/shared/api/types";
+import type { RuntimeFileConfigSubset } from "@/shared/api/tauri";
 
 export const PERSONA_FIELD_SHELL_CLASS =
   "rounded-xl border border-input bg-muted/40 transition-colors duration-150 ease-out hover:border-muted-foreground/40 focus-within:border-muted-foreground/50";
@@ -73,6 +74,49 @@ function isKnownLlmProvider(
   providerId: string,
 ): providerId is PersonaLlmProviderId {
   return (KNOWN_LLM_PROVIDER_IDS as readonly string[]).includes(providerId);
+}
+
+/**
+ * Returns the credential env-var keys that are required for a given
+ * runtime + provider combination. These are the keys that must be present
+ * in the agent's effective env for it to start successfully.
+ *
+ * Used by EnvVarsEditor to render first-class "required" rows that make the
+ * gap visible before the user tries to save or start the agent.
+ *
+ * Mirrors the Rust `readiness::buzz_agent_requirements` /
+ * `readiness::goose_requirements` logic — keep in sync.
+ */
+export function requiredCredentialEnvKeys(
+  runtimeId: string,
+  provider: string,
+): readonly string[] {
+  const normalizedRuntime = runtimeId.trim();
+  const normalizedProvider = provider.trim().toLowerCase();
+
+  // buzz-agent and goose both use provider-specific credentials.
+  if (normalizedRuntime === "buzz-agent" || normalizedRuntime === "goose") {
+    if (normalizedProvider === "anthropic") return ["ANTHROPIC_API_KEY"];
+    if (normalizedProvider === "openai") return ["OPENAI_COMPAT_API_KEY"];
+    if (
+      normalizedProvider === "databricks" ||
+      normalizedProvider === "databricks_v2"
+    ) {
+      // DATABRICKS_TOKEN is NOT required — OAuth PKCE is the normal path.
+      return ["DATABRICKS_HOST"];
+    }
+  }
+
+  // claude and codex handle auth via CLI login (not env keys) — those
+  // requirements are surfaced separately via the CliLogin surface.
+  return [];
+}
+
+export function isMissingRequiredDropdownField(
+  field: { isRequired: boolean } | null | undefined,
+  value: string,
+) {
+  return field?.isRequired === true && value.trim().length === 0;
 }
 
 export function runtimeSupportsLlmProviderSelection(runtimeId: string) {
@@ -307,4 +351,109 @@ export function getDefaultPersonaRuntime(runtimes: AcpRuntimeCatalogEntry[]) {
     available[0] ??
     null
   );
+}
+
+/**
+ * Pure local-mode readiness gate for Create (no existing agent, no config
+ * surface query). Returns the missing normalized fields (provider, model) and
+ * the missing credential env keys so the caller can derive `canSubmit`,
+ * field `isRequired`, and `EnvVarsEditor.requiredKeys` from the same source.
+ *
+ * Two classes of required field for provider-selection runtimes (buzz-agent,
+ * goose) — both required unconditionally per readiness.rs:
+ *   1. Normalized fields: provider + model (empty string = NotReady)
+ *   2. Credential env keys: provider-specific (e.g. ANTHROPIC_API_KEY)
+ *
+ * isProviderMode / useMesh modes are NOT subject to this gate — they have
+ * their own gates. Pass isProviderMode=true or useMesh=true to bypass.
+ */
+export function computeLocalModeGate({
+  envVars,
+  isProviderMode,
+  model,
+  provider,
+  runtimeId,
+  runtimeFileConfig,
+  useMesh,
+}: {
+  envVars: Record<string, string>;
+  isProviderMode: boolean;
+  model: string;
+  provider: string;
+  runtimeId: string;
+  /** Optional file-layer config for the runtime (e.g. goose config.yaml).
+   *  When provided, requirements already satisfied there are silenced. */
+  runtimeFileConfig?: RuntimeFileConfigSubset | null;
+  useMesh: boolean;
+}): {
+  /** Normalized field names that are required but empty ("provider", "model"). */
+  missingNormalizedFields: string[];
+  /** Credential env key names that are required but missing or empty. */
+  missingEnvKeys: string[];
+  /** Env keys that are not set in Buzz but are satisfied in the runtime's
+   *  config file (e.g. "Set in goose config"). */
+  fileSatisfiedEnvKeys: string[];
+  /** True when the create button may be enabled (from this gate's perspective). */
+  satisfied: boolean;
+} {
+  if (isProviderMode || useMesh) {
+    return {
+      missingNormalizedFields: [],
+      missingEnvKeys: [],
+      fileSatisfiedEnvKeys: [],
+      satisfied: true,
+    };
+  }
+
+  const needsProviderSelection = runtimeSupportsLlmProviderSelection(runtimeId);
+
+  // A normalized field is satisfied by the runtime file config when the file
+  // provides the value (provider or model). The file layer silences the
+  // requirement; the value is not injected into the Buzz env.
+  const fileProvider = runtimeFileConfig?.provider?.trim() ?? "";
+  const fileModel = runtimeFileConfig?.model?.trim() ?? "";
+  const fileSatisfiedKeys = new Set(runtimeFileConfig?.satisfiedEnvKeys ?? []);
+
+  const missingNormalizedFields: string[] = [];
+  if (needsProviderSelection) {
+    if (provider.trim().length === 0 && fileProvider.length === 0) {
+      missingNormalizedFields.push("provider");
+    }
+    if (model.trim().length === 0 && fileModel.length === 0) {
+      missingNormalizedFields.push("model");
+    }
+  }
+
+  // Credential keys depend on the selected provider (empty provider → no keys
+  // required beyond the normalized field gate above).
+  // Use the file provider as fallback when the env provider is empty, so
+  // credential requirements are computed correctly for file-config runtimes.
+  const effectiveProviderForKeys = needsProviderSelection
+    ? provider.trim() || fileProvider
+    : "";
+  const providerForKeys = needsProviderSelection
+    ? effectiveProviderForKeys
+    : "";
+  const requiredKeys = requiredCredentialEnvKeys(runtimeId, providerForKeys);
+
+  const missingEnvKeys: string[] = [];
+  const fileSatisfiedEnvKeys: string[] = [];
+  for (const key of requiredKeys) {
+    if ((envVars[key] ?? "").length > 0) {
+      // Set in Buzz env — satisfied, no action.
+    } else if (fileSatisfiedKeys.has(key)) {
+      // Not in Buzz env but present in the runtime config file — silenced.
+      fileSatisfiedEnvKeys.push(key);
+    } else {
+      missingEnvKeys.push(key);
+    }
+  }
+
+  return {
+    missingNormalizedFields,
+    missingEnvKeys,
+    fileSatisfiedEnvKeys,
+    satisfied:
+      missingNormalizedFields.length === 0 && missingEnvKeys.length === 0,
+  };
 }

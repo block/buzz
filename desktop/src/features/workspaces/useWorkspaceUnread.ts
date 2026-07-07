@@ -1,6 +1,7 @@
 import * as React from "react";
 
 import { getIdentity } from "@/shared/api/tauri";
+import { markWorkspaceRead } from "@/features/workspaces/workspaceMarkRead";
 import { pollWorkspaceUnread } from "@/features/workspaces/workspaceUnreadObserver";
 
 import type { Workspace } from "./types";
@@ -49,7 +50,10 @@ function seedWorkspaceStates(
 export function useWorkspaceUnread(
   workspaces: Workspace[],
   activeWorkspaceId: string | null,
-): Record<string, WorkspaceUnreadState> {
+): {
+  unreadByWorkspace: Record<string, WorkspaceUnreadState>;
+  markWorkspaceRead: (workspaceId: string) => Promise<void>;
+} {
   const [unreadByWorkspace, setUnreadByWorkspace] = React.useState<
     Record<string, WorkspaceUnreadState>
   >(() => seedWorkspaceStates(workspaces, {}));
@@ -153,5 +157,26 @@ export function useWorkspaceUnread(
     };
   }, [activeWorkspaceId, workspaces]);
 
-  return unreadByWorkspace;
+  const workspacesRef = React.useRef(workspaces);
+  workspacesRef.current = workspaces;
+
+  const markRead = React.useCallback(
+    async (workspaceId: string) => {
+      const workspace = workspacesRef.current.find(
+        (candidate) => candidate.id === workspaceId,
+      );
+      if (!workspace || workspaceId === activeWorkspaceId) return;
+
+      const { pubkey } = await getIdentity();
+      await markWorkspaceRead(workspace, pubkey);
+      // Optimistic clear — the next poll re-verifies against the relay.
+      setUnreadByWorkspace((previous) => ({
+        ...previous,
+        [workspaceId]: { hasUnread: false, state: "ready" },
+      }));
+    },
+    [activeWorkspaceId],
+  );
+
+  return { unreadByWorkspace, markWorkspaceRead: markRead };
 }

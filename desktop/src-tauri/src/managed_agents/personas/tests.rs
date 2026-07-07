@@ -1,8 +1,9 @@
 use super::{
-    ensure_persona_ids_are_active, ensure_persona_is_active, merge_personas,
-    migrate_retired_personas, validate_persona_activation_change, validate_persona_deletion,
-    BUILT_IN_PERSONAS, RETIRED_PERSONAS,
+    built_in_persona_records, ensure_persona_ids_are_active, ensure_persona_is_active,
+    merge_personas, migrate_retired_personas, validate_persona_activation_change,
+    validate_persona_deletion, BUILT_IN_PERSONAS, RETIRED_PERSONAS,
 };
+use crate::managed_agents::discovery::{default_agent_command, effective_agent_command};
 use crate::managed_agents::validate_team_id;
 use crate::managed_agents::PersonaRecord;
 
@@ -35,7 +36,7 @@ fn merge_personas_adds_missing_built_ins() {
     assert!(records.iter().all(|record| record.is_builtin));
     assert!(records
         .iter()
-        .any(|record| record.id == "builtin:fizz" && record.runtime.as_deref() == Some("goose")));
+        .any(|record| record.id == "builtin:fizz" && record.runtime.is_none()));
     assert!(records
         .iter()
         .any(|record| record.id == "builtin:product-strategist" && !record.is_active));
@@ -478,4 +479,38 @@ fn migrate_is_idempotent() {
 
     // 4. Run again on result of (3) — should be no-op.
     assert!(!migrate_retired_personas(&mut stored_pre_demotion, now));
+}
+
+// ── Fizz default harness ──────────────────────────────────────────────────────
+
+#[test]
+fn fizz_builtin_has_no_pinned_runtime() {
+    // The Fizz built-in must not hard-pin a runtime so it inherits the
+    // bundled default (buzz-agent) rather than requiring goose on PATH.
+    let records = built_in_persona_records("2026-01-01T00:00:00Z");
+    let fizz = records
+        .iter()
+        .find(|r| r.id == "builtin:fizz")
+        .expect("builtin:fizz must exist");
+    assert_eq!(
+        fizz.runtime, None,
+        "Fizz built-in must not pin a runtime — it should inherit the default"
+    );
+}
+
+#[test]
+fn fizz_builtin_resolves_to_buzz_agent() {
+    // With no runtime pin, effective_agent_command must fall through to
+    // default_agent_command(), which resolves the bundled buzz-agent.
+    let records = built_in_persona_records("2026-01-01T00:00:00Z");
+    assert_eq!(
+        effective_agent_command(Some("builtin:fizz"), &records, None),
+        default_agent_command(),
+        "Fizz must resolve to the bundled default harness, not goose"
+    );
+    assert_eq!(
+        effective_agent_command(Some("builtin:fizz"), &records, None),
+        "buzz-agent",
+        "Fizz must resolve to buzz-agent specifically"
+    );
 }

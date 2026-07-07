@@ -11,6 +11,7 @@ import { closeWebSocket } from "@/shared/api/relayWebSocketClose";
 
 const AUTH_TIMEOUT_MS = 8_000;
 const HISTORY_TIMEOUT_MS = 8_000;
+const PUBLISH_TIMEOUT_MS = 8_000;
 
 type PendingHistory = {
   events: RelayEvent[];
@@ -19,10 +20,17 @@ type PendingHistory = {
   timeout: number;
 };
 
+type PendingPublish = {
+  resolve: () => void;
+  reject: (error: Error) => void;
+  timeout: number;
+};
+
 /**
- * Minimal read-only relay session for inactive-workspace observation.
- * It never reads or mutates the active workspace backend relay URL; callers pass
- * an explicit URL and should disconnect as soon as their polling batch finishes.
+ * Minimal relay session for inactive-workspace observation (and the rail's
+ * cross-relay "mark all as read" publish). It never reads or mutates the
+ * active workspace backend relay URL; callers pass an explicit URL and should
+ * disconnect as soon as their polling batch finishes.
  */
 export class ReadOnlyRelayClient {
   private wsId: number | null = null;
@@ -35,6 +43,7 @@ export class ReadOnlyRelayClient {
     timeout: number;
   } | null = null;
   private histories = new Map<string, PendingHistory>();
+  private publishes = new Map<string, PendingPublish>();
   private generation = 0;
 
   private readonly relayUrl: string;
@@ -79,6 +88,12 @@ export class ReadOnlyRelayClient {
       this.histories.delete(subId);
     }
 
+    for (const [eventId, pending] of this.publishes) {
+      window.clearTimeout(pending.timeout);
+      pending.reject(error);
+      this.publishes.delete(eventId);
+    }
+
     this.onMessageChannel = null;
     this.connectPromise = null;
   }
@@ -86,6 +101,32 @@ export class ReadOnlyRelayClient {
   async fetchEvents(filter: RelaySubscriptionFilter): Promise<RelayEvent[]> {
     await this.connect();
     return this.requestHistory(filter);
+  }
+
+  async publishEvent(event: RelayEvent): Promise<void> {
+    await this.connect();
+    if (this.wsId === null) {
+      throw new Error("Read-only relay socket is not connected.");
+    }
+
+    return new Promise<void>((resolve, reject) => {
+      const timeout = window.setTimeout(() => {
+        this.publishes.delete(event.id);
+        reject(new Error("Timed out publishing to observer relay."));
+      }, PUBLISH_TIMEOUT_MS);
+
+      this.publishes.set(event.id, { resolve, reject, timeout });
+
+      void this.sendRaw(["EVENT", event]).catch((error) => {
+        window.clearTimeout(timeout);
+        this.publishes.delete(event.id);
+        reject(
+          error instanceof Error
+            ? error
+            : new Error("Failed to publish to observer relay."),
+        );
+      });
+    });
   }
 
   private async openConnection(): Promise<void> {
@@ -229,6 +270,20 @@ export class ReadOnlyRelayClient {
   }
 
   private handleOk(eventId: string, success: boolean, message: string): void {
+    const publish = this.publishes.get(eventId);
+    if (publish) {
+      window.clearTimeout(publish.timeout);
+      this.publishes.delete(eventId);
+      if (success) {
+        publish.resolve();
+      } else {
+        publish.reject(
+          new Error(message || "Observer relay rejected the event."),
+        );
+      }
+      return;
+    }
+
     if (!this.authRequest || this.authRequest.pendingEventId !== eventId) {
       return;
     }

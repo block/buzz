@@ -1257,6 +1257,32 @@ export async function putAgentSessionConfig(
   return invokeTauri<void>("put_agent_session_config", { pubkey, payload });
 }
 
+/** File-layer config for a runtime (e.g. `~/.config/goose/config.yaml`). */
+export type RuntimeFileConfigSubset = {
+  /** Provider set in the harness config file. */
+  provider: string | null;
+  /** Model set in the harness config file. */
+  model: string | null;
+  /** Credential env key names whose values are present in the file config. */
+  satisfiedEnvKeys: string[];
+};
+
+/**
+ * Get the file-layer config for a runtime so dialogs can show
+ * "Set in goose config" instead of surfacing a false required-field marker.
+ * Returns `null` when the runtime has no config file or it cannot be parsed.
+ */
+export async function getRuntimeFileConfig(
+  runtimeId: string,
+): Promise<RuntimeFileConfigSubset | null> {
+  return invokeTauri<RuntimeFileConfigSubset | null>(
+    "get_runtime_file_config",
+    {
+      runtimeId,
+    },
+  );
+}
+
 type RawUpdateManagedAgentResponse = {
   agent: RawManagedAgent;
   profile_sync_error: string | null;

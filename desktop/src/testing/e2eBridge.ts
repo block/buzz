@@ -162,6 +162,14 @@ type E2eConfig = {
     meshReporterPubkey?: string;
     uploadDelayMs?: number;
     uploadDescriptors?: RawBlobDescriptor[];
+    // Seed rows returned by `list_save_subscriptions`. Each entry uses the same
+    // snake_case wire shape the Rust backend returns so tests can drive the
+    // LocalArchiveSettingsCard without a real SQLite database.
+    saveSubscriptions?: Array<{
+      scope_type: string;
+      scope_value: string;
+      kinds: string; // JSON-encoded integer array, e.g. "[9,40002]"
+    }>;
   };
   relayHttpUrl?: string;
   relayWsUrl?: string;
@@ -1698,7 +1706,7 @@ function resetMockPersonas(config?: E2eConfig) {
     display_name: persona.display_name,
     avatar_url: persona.avatar_url,
     system_prompt: persona.system_prompt,
-    runtime: persona.id === "builtin:fizz" ? "goose" : null,
+    runtime: null,
     model: null,
     provider: null,
     name_pool: [],
@@ -6560,17 +6568,21 @@ async function handleCreateManagedAgent(
     .replace(/-/g, "")
     .padEnd(64, "0")
     .slice(0, 64);
+  const agentCommand = args.input.agentCommand ?? "buzz-agent";
+  const agentArgs =
+    args.input.agentArgs && args.input.agentArgs.length > 0
+      ? [...args.input.agentArgs]
+      : agentCommand === "goose"
+        ? ["acp"]
+        : [];
   const managedAgent: MockManagedAgent = {
     pubkey,
     name,
     persona_id: args.input.personaId ?? null,
     relay_url: args.input.relayUrl ?? DEFAULT_RELAY_WS_URL,
     acp_command: args.input.acpCommand ?? "buzz-acp",
-    agent_command: args.input.agentCommand ?? "goose",
-    agent_args:
-      args.input.agentArgs && args.input.agentArgs.length > 0
-        ? [...args.input.agentArgs]
-        : ["acp"],
+    agent_command: agentCommand,
+    agent_args: agentArgs,
     mcp_command: args.input.mcpCommand ?? "",
     turn_timeout_seconds: args.input.turnTimeoutSeconds ?? 320,
     idle_timeout_seconds: args.input.idleTimeoutSeconds ?? null,
@@ -8445,6 +8457,11 @@ export function maybeInstallE2eTauriMocks() {
         const configArgs = payload as { pubkey: string };
         return buildMockConfigSurface(configArgs.pubkey);
       }
+      case "get_runtime_file_config": {
+        // No harness config file in the E2E environment — return null so
+        // dialogs fall back to normal required-field evaluation.
+        return null;
+      }
       case "update_managed_agent":
         return handleUpdateManagedAgent(
           payload as Parameters<typeof handleUpdateManagedAgent>[0],
@@ -8589,6 +8606,13 @@ export function maybeInstallE2eTauriMocks() {
         return await resolveMockUploadDescriptors(activeConfig);
       case "upload_media_bytes":
         return (await resolveMockUploadDescriptors(activeConfig))[0];
+      case "fetch_media_bytes": {
+        // The real command fetches relay media through Rust reqwest. In E2E
+        // the browser fetch suffices — specs serve the URL via page.route.
+        const response = await fetch((payload as { url: string }).url);
+        if (!response.ok) throw new Error(`fetch failed: ${response.status}`);
+        return Array.from(new Uint8Array(await response.arrayBuffer()));
+      }
       case "download_image":
       case "download_file":
         // The save dialog can't run headlessly; report a successful save so the
@@ -8758,6 +8782,32 @@ export function maybeInstallE2eTauriMocks() {
         // Return the no-canvas success shape — content null means no canvas set.
         return { content: null, updated_at: null, author: null };
       }
+      // ── Local-save archive ──────────────────────────────────────────────
+      // These stubs drive the LocalArchiveSettingsCard in screenshot / UI tests
+      // without requiring a real SQLite backend. `activeConfig.mock.saveSubscriptions`
+      // seeds the initial list; create/delete return success shapes so the
+      // component's reload path behaves correctly.
+      case "list_save_subscriptions": {
+        const ident = activeConfig?.identity ?? DEFAULT_MOCK_IDENTITY;
+        return (activeConfig?.mock?.saveSubscriptions ?? []).map((s) => ({
+          identity_pubkey: ident.pubkey,
+          relay_url: DEFAULT_RELAY_WS_URL,
+          scope_type: s.scope_type,
+          scope_value: s.scope_value,
+          kinds: s.kinds,
+          created_at: Math.floor(Date.now() / 1000),
+        }));
+      }
+      case "create_save_subscription":
+        // UI calls this then re-fetches via list_save_subscriptions; returning
+        // null (Rust Ok(())) is sufficient to let the component proceed.
+        return null;
+      case "delete_save_subscription":
+        // Returns true == row removed; mirrors Rust success path.
+        return true;
+      case "archive_events":
+        // Returns the ArchiveBatchResult shape the UI expects.
+        return { persisted: 0, dropped: 0 };
       default:
         throw new Error(`Unsupported mocked Tauri command: ${command}`);
     }

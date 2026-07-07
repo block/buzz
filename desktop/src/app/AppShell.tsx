@@ -50,6 +50,9 @@ import {
   useUserStatusSubscription,
 } from "@/features/user-status/hooks";
 import { useWorkspaceEmojiLiveUpdates } from "@/features/custom-emoji/hooks";
+import { useArchiveSync } from "@/features/local-archive/archiveSyncManager";
+import { useObserverArchiveSeed } from "@/features/local-archive/useObserverArchiveSeed";
+import { useAgentMetricArchiveSeed } from "@/features/local-archive/useAgentMetricArchiveSeed";
 import { useProfileQuery } from "@/features/profile/hooks";
 import {
   DEFAULT_SETTINGS_SECTION,
@@ -156,6 +159,9 @@ export function AppShell() {
   // relay-owned agents join automatically once identity arrives. Adding a
   // guard here would drop managed-agent coverage during startup.
   useAgentObserverIngestion();
+  useArchiveSync();
+  useObserverArchiveSeed(identityQuery.data?.pubkey);
+  useAgentMetricArchiveSeed(identityQuery.data?.pubkey);
   const profileQuery = useProfileQuery();
   const deferredPubkey = startupReady ? identityQuery.data?.pubkey : undefined;
   useRelayAutoHeal();
@@ -633,7 +639,9 @@ export function AppShell() {
                         workspacesHook.activeWorkspace?.id ?? null
                       }
                       onAddWorkspace={() => setIsAddWorkspaceOpen(true)}
+                      onRemoveWorkspace={workspacesHook.removeWorkspace}
                       onSwitchWorkspace={workspacesHook.switchWorkspace}
+                      onUpdateWorkspace={workspacesHook.updateWorkspace}
                       workspaces={workspacesHook.workspaces}
                     />
                   ) : null}

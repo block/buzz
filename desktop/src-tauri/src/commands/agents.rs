@@ -795,7 +795,14 @@ pub async fn create_managed_agent(
                     .filter(|value| !value.is_empty())
                     .map(str::to_string)
             }),
-            provider: snapshot_provider,
+            provider: snapshot_provider.or_else(|| {
+                input
+                    .provider
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string)
+            }),
             persona_source_version: snapshot_source_version,
             mcp_toolsets: input
                 .mcp_toolsets
@@ -886,9 +893,13 @@ pub async fn create_managed_agent(
     // ── Phase 4: sync agent profile on relay (async, outside lock) ───────────
     // Use the avatar persisted on the record so the published profile and any
     // later reconciliation agree on the same value.
+    let profile_relay_url = crate::relay::effective_agent_relay_url(
+        &resolved_relay_url,
+        &relay_ws_url_with_override(&state),
+    );
     let profile_sync_error = (sync_managed_agent_profile(
         &state,
-        &resolved_relay_url,
+        &profile_relay_url,
         &agent_keys,
         &name,
         resolved_avatar_url.as_deref(),
@@ -1212,11 +1223,13 @@ pub(crate) async fn reconcile_agent_profile(
         }
     };
 
-    if expected_avatar.is_empty() {
-        return Ok(());
-    }
+    let expected_avatar = if expected_avatar.is_empty() {
+        None
+    } else {
+        Some(expected_avatar)
+    };
 
-    if !profile_needs_sync(existing.as_ref(), &data.name, Some(&expected_avatar)) {
+    if !profile_needs_sync(existing.as_ref(), &data.name, expected_avatar.as_deref()) {
         return Ok(());
     }
 
@@ -1228,7 +1241,7 @@ pub(crate) async fn reconcile_agent_profile(
         &relay_url,
         &agent_keys,
         &data.name,
-        Some(&expected_avatar),
+        expected_avatar.as_deref(),
         data.auth_tag.as_deref(),
     )
     .await

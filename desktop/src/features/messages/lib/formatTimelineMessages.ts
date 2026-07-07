@@ -36,6 +36,7 @@ import {
   KIND_SYSTEM_MESSAGE,
 } from "@/shared/constants/kinds";
 import { resolveEventAuthorPubkey } from "@/shared/lib/authors";
+import { normalizePubkey } from "@/shared/lib/pubkey";
 import { formatTime } from "@/features/messages/lib/dateFormatters";
 // Pure overlay helper lives in a sibling .mjs so node:test (no TS loader)
 // can exercise the exact same source the renderer uses.
@@ -417,6 +418,7 @@ export function formatTimelineMessages(
       renderKey: event.localKey ?? event.id,
       createdAt: event.created_at,
       pubkey: authorPubkey,
+      signerPubkey: normalizePubkey(event.pubkey),
       author,
       avatarUrl: getAuthorAvatarUrl({
         authorPubkey,

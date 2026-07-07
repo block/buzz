@@ -37,8 +37,13 @@ import remarkMentions from "@/shared/lib/remarkMentions";
 import remarkSpoilers from "@/shared/lib/remarkSpoilers";
 import remarkMessageLinks from "@/features/messages/lib/remarkMessageLinks";
 import { AttachmentGroup } from "@/shared/ui/attachment";
+import { ConfigNudgeCard } from "@/shared/ui/config-nudge-attachment";
 import { LinkPreviewAttachment } from "@/shared/ui/link-preview-attachment";
 import { useSmoothCorners } from "@/shared/ui/smoothCorners";
+import {
+  computeConfigNudge,
+  selectProseOrNudge,
+} from "@/shared/lib/computeConfigNudge";
 import {
   INLINE_CODE_CHIP_CLASS,
   MENTION_CHIP_BASE_CLASSES,
@@ -1934,6 +1939,7 @@ function createMarkdownComponents(
 function MarkdownInner({
   channelNames,
   className,
+  configNudgeAuthorPubkey,
   content,
   customEmoji,
   imetaByUrl,
@@ -1973,6 +1979,10 @@ function MarkdownInner({
   const linkPreviews = React.useMemo(
     () => (interactive ? extractSupportedLinkPreviews(content) : []),
     [content, interactive],
+  );
+  const configNudge = React.useMemo(
+    () => computeConfigNudge(content, interactive, configNudgeAuthorPubkey),
+    [content, interactive, configNudgeAuthorPubkey],
   );
   const runtimeRef = useLatestRef<MarkdownRuntime>({
     agentMentionPubkeysByName,
@@ -2014,11 +2024,16 @@ function MarkdownInner({
 
   let processedContent = content;
 
-  if (/^(?:\s{2}\n)+/.test(content)) {
+  // Note: stripping the sentinel here is intentionally omitted. When
+  // configNudge !== null, selectProseOrNudge() returns null — suppressing
+  // the prose node entirely — so processedContent is never rendered and
+  // stripConfigNudgeSentinel would be dead work on that path.
+
+  if (/^(?:\s{2}\n)+/.test(processedContent)) {
     processedContent = `\u200B${processedContent}`;
   }
 
-  if (/(?:\s{2}\n)+$/.test(content)) {
+  if (/(?:\s{2}\n)+$/.test(processedContent)) {
     processedContent = `${processedContent}\u200B`;
   }
 
@@ -2057,7 +2072,15 @@ function MarkdownInner({
       )}
     >
       <VideoReviewMarkdownContext.Provider value={videoReviewContext}>
-        {markdownNode}
+        {selectProseOrNudge(configNudge, markdownNode)}
+        {configNudge !== null ? (
+          <AttachmentGroup
+            className="max-w-full flex-wrap overflow-visible pb-0"
+            data-config-nudge=""
+          >
+            <ConfigNudgeCard nudge={configNudge} />
+          </AttachmentGroup>
+        ) : null}
         {resolvedLinkPreviews.length > 0 ? (
           <AttachmentGroup
             className="max-w-full flex-wrap overflow-visible pb-0"
@@ -2086,6 +2109,7 @@ export const Markdown = React.memo(
     shallowArrayEqual(prev.mentionNames, next.mentionNames) &&
     shallowArrayEqual(prev.channelNames, next.channelNames) &&
     prev.imetaByUrl === next.imetaByUrl &&
+    prev.configNudgeAuthorPubkey === next.configNudgeAuthorPubkey &&
     prev.searchQuery === next.searchQuery &&
     prev.videoReviewContext === next.videoReviewContext,
 );

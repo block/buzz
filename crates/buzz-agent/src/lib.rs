@@ -728,6 +728,7 @@ async fn run_prompt(app: Arc<App>, id: Value, params: Value, wire_tx: WireSender
                         "contextLimit": 0u64,
                         "accumulatedInputTokens": accumulated_in,
                         "accumulatedOutputTokens": accumulated_out,
+                        "model": effective_model_str,
                     }),
                 ),
             )

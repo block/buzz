@@ -60,6 +60,13 @@ const overrides = new Map([
   // config-bridge: get_agent_config_surface/write_agent_config_field/put_agent_session_config
   // commands add ~40 lines. Queued to split.
   // branch cut; override bumped to cover the merged total. Queued to split.
+  // archive/mod_tests.rs carries the full test module for archive/mod.rs:
+  // unit tests + 4 real-relay integration tests (ignored, live-relay only).
+  // Production logic in mod.rs is now ~527 lines (under 1000). mod_tests.rs
+  // is test-only content; the override covers the test growth accumulated
+  // across the local-archive + agent-metric-archive PR series. store_tests.rs
+  // (~731 lines) is under 1000 so needs no override.
+  ["src-tauri/src/archive/mod_tests.rs", 1208],
   ["src-tauri/src/commands/agents.rs", 1437],
   // #1418 read-path fix: get_thread_replies' blocker fix (shared TIMELINE_KINDS
   // const + build_thread_replies_filter helper, mirroring the channel sibling so
@@ -83,7 +90,19 @@ const overrides = new Map([
   // PGID resolution helper + PID-recycling safety guard added for orphan sweep.
   // activity-feed threads avatar_url into build_managed_agent_summary for the
   // assistant-bubble pinned snapshot.
-  ["src-tauri/src/managed_agents/runtime.rs", 2150],
+  // +1 for agent_pubkey field in setup payload (config-nudge card wire).
+  ["src-tauri/src/managed_agents/runtime.rs", 2208],
+  // config-bridge setup-payload env-boundary fix adds readiness wiring in
+  // spawn_agent_child; load-bearing security fix, queued to split.
+  ["src-tauri/src/managed_agents/config_bridge/reader.rs", 1016],
+  // config-bridge-aware requirements: goose_requirements + injection tests
+  // (4 new tests in goose_file_config_tests module) + test-determinism fixes
+  // for the 3 existing goose tests that previously read real disk config.
+  // New file in this PR; queued to split.
+  // +2 readiness integration tests for flat-DATABRICKS_HOST canonicalization fix.
+  // +1 cargo fmt whitespace reformat (readiness.rs closures inline after rebase).
+  // +2 unit tests for cli_login_requirements resolve_command integration (DMG PATH fix).
+  ["src-tauri/src/managed_agents/readiness.rs", 1215],
   // applyWorkspace reposDir parameter plus the validateReposDir binding,
   // threaded through Tauri invokes for configurable repos_dir, plus the
   // harness-persona-sync `harnessOverride` create-input bit — load-bearing
@@ -95,7 +114,16 @@ const overrides = new Map([
   // contract (replies-only, root excluded — the query keys on root_event_id,
   // which root rows lack). Documentation accuracy, not code growth.
   // linux-updater isAutoUpdateSupported() binding + onboarding has_profile_event field.
-  ["src/shared/api/tauri.ts", 1349],
+  // config-bridge-aware requirements: getRuntimeFileConfig command adds ~15 lines.
+  // +26 lines from PRs landing on main between prior rebase and this rebase.
+  ["src/shared/api/tauri.ts", 1375],
+  // readiness-gate: PersonaDialog.tsx threads computeLocalModeGate +
+  // requiredCredentialEnvKeys + RequiredFieldLabel so the "New agent" dialog
+  // shows required markers and credential amber rows (parity with
+  // CreateAgentDialog). +23 lines of gate wiring. Queued to split.
+  // config-bridge-aware requirements: useRuntimeFileConfigQuery wiring adds
+  // ~16 lines. Queued to split.
+  ["src/features/agents/ui/PersonaDialog.tsx", 1032],
   // harness-persona-sync feature growth, queued to split in the resolver-unify
   // refactor followup. discovery.rs is dominated by the new test module
   // (the effective_agent_command / divergent / create-time override matrix);
@@ -126,6 +154,8 @@ const overrides = new Map([
   // +135 for AgentInfoFocusedView/DiagnosticsFocusedView/ChannelsFocusedView
   // props restored after 826d735fe removal (UserProfilePanel.tsx still needs them).
   ["src/features/profile/ui/UserProfilePanelSections.tsx", 1140],
+  // +14 for openEditAgent event subscription (config-nudge card "Open Edit Agent" action).
+  ["src/features/profile/ui/UserProfilePanel.tsx", 1014],
   // PersistBackend enum + marker-on-keyring-success plumbing and its three
   // fail-closed regression tests (silent identity rotation on keyring outage).
   // A small overage from load-bearing security plumbing on a file already at
@@ -150,7 +180,8 @@ const overrides = new Map([
   ["src/features/channels/ui/ChannelScreen.tsx", 1002],
   // Shared UI was added to this guard after splitting globals/markdown so
   // large shared renderers cannot grow further while follow-up splits land.
-  ["src/shared/ui/markdown.tsx", 2119],
+  // +33 for config-nudge detect-and-render + author-auth gate (normalizePubkey guard).
+  ["src/shared/ui/markdown.tsx", 2152],
   ["src/shared/ui/VideoPlayer.tsx", 2199],
   ["src/shared/ui/sidebar.tsx", 1042],
   // permission-outcome (fix #1381 regression): pendingPermissions state map,
@@ -177,6 +208,14 @@ const overrides = new Map([
   // +3: provider tri-state applied in update_managed_agent handler
   // (if let Some(provider_update) = input.provider { record.provider = provider_update; }).
   ["src-tauri/src/commands/agent_models.rs", 1071],
+  // draft-persistence predicate: submit-time `loadDraft` check + inline comment
+  // + deps-array entry in submitMessage closes the never-persisted-boundary
+  // defect (Thufir Pass-3 finding). Load-bearing correctness fix; queued to
+  // split MessageComposer into submit/edit/media sub-modules.
+  // +18: pendingImetaForPersistRef (local snapshot ref) + synchronous restore
+  // path writes in the draft-key effect body, fixing the image-drop bug on
+  // top-level nav switch (StrictMode simulate-unmount race on remount).
+  ["src/features/messages/ui/MessageComposer.tsx", 1021],
 ]);
 
 await runFileSizeCheck({

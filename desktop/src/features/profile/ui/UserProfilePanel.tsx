@@ -36,6 +36,10 @@ import {
 import { describeLogFile } from "@/features/agents/ui/agentUi";
 import { EditAgentDialog } from "@/features/agents/ui/EditAgentDialog";
 import {
+  consumePendingOpenEditAgent,
+  subscribeOpenEditAgent,
+} from "@/features/agents/openEditAgentEvent";
+import {
   duplicatePersonaDialogState,
   editPersonaDialogState,
   type PersonaDialogState,
@@ -146,6 +150,21 @@ export function UserProfilePanel({
     [onTabChange],
   );
   const [editAgentOpen, setEditAgentOpen] = React.useState(false);
+
+  // Open the Edit Agent dialog when `requestOpenEditAgent(pubkey)` fires from
+  // a card or other non-panel surface (e.g. `ConfigNudgeCard`). Mirrors the
+  // `subscribeOpenCreateAgent` pattern in AgentsView.
+  React.useEffect(() => {
+    if (!pubkey) return;
+    // Consume any pending request that arrived before this panel mounted.
+    if (consumePendingOpenEditAgent(pubkey)) {
+      setEditAgentOpen(true);
+    }
+    // Subscribe for events that arrive while the panel is mounted.
+    return subscribeOpenEditAgent(pubkey, () => {
+      setEditAgentOpen(true);
+    });
+  }, [pubkey]);
   const [addToChannelOpen, setAddToChannelOpen] = React.useState(false);
   const [personaDialogState, setPersonaDialogState] =
     React.useState<PersonaDialogState | null>(null);

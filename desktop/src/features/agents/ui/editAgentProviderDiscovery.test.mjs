@@ -4,6 +4,8 @@ import test from "node:test";
 import {
   runtimeSupportsLlmProviderSelection,
   getPersonaProviderOptions,
+  requiredCredentialEnvKeys,
+  isMissingRequiredDropdownField,
 } from "./personaDialogPickers.tsx";
 import { shouldClearModelForRuntimeChange } from "./personaRuntimeModel.ts";
 
@@ -90,6 +92,28 @@ test("editAgent_providerOptions_includesCurrentIfCustom", () => {
 // We can't render React in pure node tests, but we CAN verify that the logic
 // for deciding whether to show options is sound: when discovery is null, we
 // fall back to staticModelOptions (length > 0), so we always have options.
+
+test("editAgent_requiredDropdownField_onlyMarksMissingKnownField", async () => {
+  const { isMissingRequiredDropdownField } = await import(
+    "./personaDialogPickers.tsx"
+  );
+
+  assert.equal(
+    isMissingRequiredDropdownField({ isRequired: true }, ""),
+    true,
+    "missing required dropdown value must be marked required",
+  );
+  assert.equal(
+    isMissingRequiredDropdownField({ isRequired: true }, "configured"),
+    false,
+    "configured required dropdown value must not show the missing-required mark",
+  );
+  assert.equal(
+    isMissingRequiredDropdownField(null, ""),
+    false,
+    "unknown normalized field names are ignored because they do not map to a dropdown",
+  );
+});
 
 test("editAgent_modelFallback_staticOptionsWhenDiscoveryNull", () => {
   const staticModelOptions = [{ id: "", label: "Default model" }];
@@ -991,5 +1015,283 @@ test("editAgent_bugA_unknownCommandStillFallsBackToCustom", () => {
     selectedRuntimeId,
     "custom",
     "unknown command/id must still fall back to 'custom'",
+  );
+});
+
+// ── requiredCredentialEnvKeys ──────────────────────────────────────────────
+//
+// Guards the provider-aware credential requirements surface so Phase 2
+// required env rows stay correct as providers and runtimes change.
+
+test("requiredCredentialEnvKeys: buzz-agent + anthropic → ANTHROPIC_API_KEY", () => {
+  const keys = requiredCredentialEnvKeys("buzz-agent", "anthropic");
+  assert.deepEqual(keys, ["ANTHROPIC_API_KEY"]);
+});
+
+test("requiredCredentialEnvKeys: buzz-agent + openai → OPENAI_COMPAT_API_KEY", () => {
+  const keys = requiredCredentialEnvKeys("buzz-agent", "openai");
+  assert.deepEqual(keys, ["OPENAI_COMPAT_API_KEY"]);
+});
+
+test("requiredCredentialEnvKeys: buzz-agent + databricks → DATABRICKS_HOST only (no token)", () => {
+  const keys = requiredCredentialEnvKeys("buzz-agent", "databricks");
+  // DATABRICKS_TOKEN is NOT required — OAuth PKCE is the normal path.
+  assert.deepEqual(keys, ["DATABRICKS_HOST"]);
+  assert.ok(
+    !keys.includes("DATABRICKS_TOKEN"),
+    "DATABRICKS_TOKEN must not be required (OAuth PKCE is the normal auth path)",
+  );
+});
+
+test("requiredCredentialEnvKeys: buzz-agent + databricks_v2 → DATABRICKS_HOST only", () => {
+  const keys = requiredCredentialEnvKeys("buzz-agent", "databricks_v2");
+  assert.deepEqual(keys, ["DATABRICKS_HOST"]);
+});
+
+test("requiredCredentialEnvKeys: goose + anthropic → ANTHROPIC_API_KEY", () => {
+  const keys = requiredCredentialEnvKeys("goose", "anthropic");
+  assert.deepEqual(keys, ["ANTHROPIC_API_KEY"]);
+});
+
+test("requiredCredentialEnvKeys: goose + openai → OPENAI_COMPAT_API_KEY", () => {
+  const keys = requiredCredentialEnvKeys("goose", "openai");
+  assert.deepEqual(keys, ["OPENAI_COMPAT_API_KEY"]);
+});
+
+test("requiredCredentialEnvKeys: buzz-agent + no provider → empty (provider not yet selected)", () => {
+  const keys = requiredCredentialEnvKeys("buzz-agent", "");
+  assert.deepEqual(keys, []);
+});
+
+test("requiredCredentialEnvKeys: claude → empty (uses CLI login, not env keys)", () => {
+  const keys = requiredCredentialEnvKeys("claude", "");
+  assert.deepEqual(keys, []);
+});
+
+test("requiredCredentialEnvKeys: codex → empty (uses CLI login, not env keys)", () => {
+  const keys = requiredCredentialEnvKeys("codex", "");
+  assert.deepEqual(keys, []);
+});
+
+test("requiredCredentialEnvKeys: custom/unknown runtime → empty", () => {
+  const keys = requiredCredentialEnvKeys("my-custom-harness", "anthropic");
+  assert.deepEqual(keys, []);
+});
+
+// ── Block-save gate: hasRequiredEnvKeyMissing logic ────────────────────────
+//
+// The EditAgentDialog computes:
+//   hasRequiredEnvKeyMissing = requiredEnvKeys.some(k => (envVars[k] ?? "").length === 0)
+// and folds it into canSubmit. These tests exercise that predicate directly.
+
+function hasRequiredEnvKeyMissing(requiredKeys, envVars) {
+  return requiredKeys.some((key) => (envVars[key] ?? "").length === 0);
+}
+
+test("blockSave_buzzAgentAnthropicMissingKey_blocked", () => {
+  // Will's exact case: buzz-agent / anthropic / opus / no ANTHROPIC_API_KEY
+  const requiredKeys = requiredCredentialEnvKeys("buzz-agent", "anthropic");
+  const envVars = {}; // key absent
+  assert.equal(
+    hasRequiredEnvKeyMissing(requiredKeys, envVars),
+    true,
+    "save must be blocked when ANTHROPIC_API_KEY is missing",
+  );
+});
+
+test("blockSave_buzzAgentAnthropicKeyProvided_allowed", () => {
+  const requiredKeys = requiredCredentialEnvKeys("buzz-agent", "anthropic");
+  const envVars = { ANTHROPIC_API_KEY: "sk-ant-test" };
+  assert.equal(
+    hasRequiredEnvKeyMissing(requiredKeys, envVars),
+    false,
+    "save must be allowed when ANTHROPIC_API_KEY is present",
+  );
+});
+
+test("blockSave_buzzAgentAnthropicEmptyStringKey_blocked", () => {
+  // Empty string is treated the same as absent — matches EnvVarsEditor isMissing
+  const requiredKeys = requiredCredentialEnvKeys("buzz-agent", "anthropic");
+  const envVars = { ANTHROPIC_API_KEY: "" };
+  assert.equal(
+    hasRequiredEnvKeyMissing(requiredKeys, envVars),
+    true,
+    "save must be blocked when ANTHROPIC_API_KEY is empty string",
+  );
+});
+
+test("blockSave_claudeNoCliLogin_notBlocked", () => {
+  // CLI-login runtimes have no dialog-fixable requirement — must never block
+  const requiredKeys = requiredCredentialEnvKeys("claude", "");
+  const envVars = {}; // no keys set
+  assert.equal(
+    hasRequiredEnvKeyMissing(requiredKeys, envVars),
+    false,
+    "claude save must NOT be blocked — CLI login is out-of-band",
+  );
+});
+
+test("blockSave_codexNoCliLogin_notBlocked", () => {
+  const requiredKeys = requiredCredentialEnvKeys("codex", "");
+  const envVars = {};
+  assert.equal(
+    hasRequiredEnvKeyMissing(requiredKeys, envVars),
+    false,
+    "codex save must NOT be blocked — CLI login is out-of-band",
+  );
+});
+
+test("blockSave_buzzAgentDatabricksMissingHost_blocked", () => {
+  const requiredKeys = requiredCredentialEnvKeys("buzz-agent", "databricks");
+  const envVars = {};
+  assert.equal(
+    hasRequiredEnvKeyMissing(requiredKeys, envVars),
+    true,
+    "save must be blocked when DATABRICKS_HOST is missing",
+  );
+});
+
+test("blockSave_buzzAgentDatabricksHostProvided_allowed", () => {
+  const requiredKeys = requiredCredentialEnvKeys("buzz-agent", "databricks");
+  const envVars = { DATABRICKS_HOST: "https://my.databricks.instance" };
+  assert.equal(
+    hasRequiredEnvKeyMissing(requiredKeys, envVars),
+    false,
+    "save must be allowed when DATABRICKS_HOST is present",
+  );
+});
+
+// ── Block-save gate: isMissingRequiredDropdownField ────────────────────────
+//
+// The EditAgentDialog also gates on modelRequired / providerRequired.
+// These tests guard the isMissingRequiredDropdownField predicate used for both.
+
+test("blockSave_missingRequiredModel_blocked", () => {
+  // isRequired=true and value is empty → should block
+  assert.equal(
+    isMissingRequiredDropdownField({ isRequired: true }, ""),
+    true,
+    "canSubmit must be blocked when required model is unset",
+  );
+});
+
+test("blockSave_requiredModelProvided_allowed", () => {
+  assert.equal(
+    isMissingRequiredDropdownField({ isRequired: true }, "claude-opus-4-5"),
+    false,
+    "canSubmit must be allowed when required model is set",
+  );
+});
+
+test("blockSave_optionalModelEmpty_allowed", () => {
+  // isRequired=false → not a block-save condition
+  assert.equal(
+    isMissingRequiredDropdownField({ isRequired: false }, ""),
+    false,
+    "optional empty model must not block save",
+  );
+});
+
+test("blockSave_nullField_allowed", () => {
+  // null/undefined field descriptor → not required, not blocked
+  assert.equal(
+    isMissingRequiredDropdownField(null, ""),
+    false,
+    "null field must not block save",
+  );
+  assert.equal(
+    isMissingRequiredDropdownField(undefined, ""),
+    false,
+    "undefined field must not block save",
+  );
+});
+
+// ── Block-save gate: inherit-runtime transition cases ──────────────────────
+//
+// When inheritHarness=true, prospectiveRuntimeId resolves from agent.agentCommand
+// (the persona's runtime), not the current dropdown. These tests guard the two
+// failure modes Thufir flagged:
+//   FALSE-ALLOW: claude pin → inherit buzz-agent persona → missing ANTHROPIC_API_KEY
+//     → must be BLOCKED (prospective runtime is buzz-agent/anthropic, key absent)
+//   FALSE-BLOCK: buzz-agent pin → inherit claude persona
+//     → must NOT be blocked (claude has no dialog-fixable credential requirement)
+
+test("blockSave_inheritTransition_claudePin_toBuzzAgentPersona_missingKey_blocked", () => {
+  // Scenario: agent is currently pinned to claude (CLI-login, llmProviderFieldVisible=false
+  // so providerForDiscovery="" in the component). The user checks "Inherit runtime
+  // from persona" where the persona uses buzz-agent/anthropic.
+  // prospectiveRuntimeId resolves to "buzz-agent"; providerForRequiredKeys must
+  // use the PROSPECTIVE runtime's provider-field visibility (buzz-agent supports
+  // provider selection) rather than the current locked runtime's suppression.
+  const prospectiveRuntimeId = "buzz-agent"; // resolved from persona's agentCommand
+  const provider = "anthropic"; // agent's configured provider (in envVars / state)
+
+  // Mirror the component's providerForRequiredKeys computation:
+  //   providerForRequiredKeys = runtimeSupportsLlmProviderSelection(prospectiveRuntimeId)
+  //                              ? provider : ""
+  const providerForRequiredKeys = runtimeSupportsLlmProviderSelection(
+    prospectiveRuntimeId,
+  )
+    ? provider
+    : "";
+
+  const requiredKeys = requiredCredentialEnvKeys(
+    prospectiveRuntimeId,
+    providerForRequiredKeys,
+  );
+  const envVars = {}; // ANTHROPIC_API_KEY absent
+
+  // providerForRequiredKeys must be "anthropic" (buzz-agent supports selection)
+  // so requiredCredentialEnvKeys returns [ANTHROPIC_API_KEY] and save is blocked.
+  assert.equal(
+    providerForRequiredKeys,
+    "anthropic",
+    "providerForRequiredKeys must use the prospective runtime's visibility, not the locked current runtime",
+  );
+  const missing = requiredKeys.some((key) => (envVars[key] ?? "").length === 0);
+  assert.equal(
+    missing,
+    true,
+    "inheriting buzz-agent/anthropic persona with no key must BLOCK save (false-allow prevented)",
+  );
+});
+
+test("blockSave_inheritTransition_buzzAgentPin_toClaudePersona_notBlocked", () => {
+  // Scenario: agent is pinned to buzz-agent/anthropic. The user checks
+  // "Inherit runtime from persona" where the persona uses claude.
+  // prospectiveRuntimeId resolves to "claude"; claude doesn't support provider
+  // selection, so providerForRequiredKeys="" and requiredCredentialEnvKeys returns [].
+  const prospectiveRuntimeId = "claude"; // resolved from persona's agentCommand
+  const provider = "anthropic"; // agent's old provider (no longer relevant for claude)
+
+  // Mirror the component's providerForRequiredKeys computation:
+  const providerForRequiredKeys = runtimeSupportsLlmProviderSelection(
+    prospectiveRuntimeId,
+  )
+    ? provider
+    : "";
+
+  const requiredKeys = requiredCredentialEnvKeys(
+    prospectiveRuntimeId,
+    providerForRequiredKeys,
+  );
+  const envVars = {}; // nothing set — claude doesn't require dialog credentials
+
+  // providerForRequiredKeys must be "" (claude doesn't support provider selection)
+  assert.equal(
+    providerForRequiredKeys,
+    "",
+    "providerForRequiredKeys must be empty for CLI-login runtimes",
+  );
+  const missing = requiredKeys.some((key) => (envVars[key] ?? "").length === 0);
+  assert.equal(
+    missing,
+    false,
+    "inheriting claude persona must NOT block save (false-block prevented — CLI login is out-of-band)",
+  );
+  assert.equal(
+    requiredKeys.length,
+    0,
+    "claude must return empty required keys — no dialog-fixable credential",
   );
 });

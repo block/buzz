@@ -190,6 +190,16 @@ type MockBridgeOptions = {
     image?: string;
     filename?: string;
   }[];
+  /**
+   * Seed rows returned by the mocked `list_save_subscriptions` command.
+   * Drives the LocalArchiveSettingsCard subscription list view in screenshot
+   * and UI tests without a real SQLite backend.
+   */
+  saveSubscriptions?: Array<{
+    scope_type: string;
+    scope_value: string;
+    kinds: string; // JSON-encoded integer array, e.g. "[9,40002]"
+  }>;
 };
 
 type BridgeOptions = {

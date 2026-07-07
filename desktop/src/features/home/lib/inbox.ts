@@ -23,7 +23,8 @@ export type InboxFilter =
   | "needs_action"
   | "activity"
   | "agent_activity"
-  | "reminders";
+  | "reminders"
+  | "drafts";
 
 export type InboxItem = {
   avatarUrl: string | null;

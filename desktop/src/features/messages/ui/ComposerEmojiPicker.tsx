@@ -27,7 +27,7 @@ export const ComposerEmojiPicker = React.memo(function ComposerEmojiPicker({
 }: ComposerEmojiPickerProps) {
   return (
     <Popover onOpenChange={onOpenChange} open={open}>
-      <Tooltip>
+      <Tooltip disableHoverableContent>
         <TooltipTrigger asChild>
           <PopoverTrigger asChild>
             <Button

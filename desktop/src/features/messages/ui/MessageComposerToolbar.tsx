@@ -1,25 +1,12 @@
 import * as React from "react";
 import type { Editor } from "@tiptap/react";
 import { AnimatePresence, motion } from "motion/react";
-import {
-  ALargeSmall,
-  ArrowUp,
-  AtSign,
-  HatGlasses,
-  Paperclip,
-  X,
-} from "lucide-react";
+import { ALargeSmall, ArrowUp, AtSign, Paperclip, X } from "lucide-react";
 
 import { Button } from "@/shared/ui/button";
-import { cn } from "@/shared/lib/cn";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { ComposerEmojiPicker } from "./ComposerEmojiPicker";
-import {
-  FormattingToolbar,
-  isSpoilerFormattingActive,
-  type SpoilerToggleState,
-  toggleSpoilerFormatting,
-} from "./FormattingToolbar";
+import { FormattingToolbar } from "./FormattingToolbar";
 import { SelectionFormattingTray } from "./SelectionFormattingTray";
 
 /** Spring for enter/exit of button groups — all fire simultaneously. */
@@ -46,9 +33,7 @@ export const MessageComposerToolbar = React.memo(
     onLinkButton,
     onOpenMentionPicker,
     onPaperclip,
-    onSpoilerToggle,
     sendDisabled,
-    spoilerActive,
   }: {
     composerDisabled: boolean;
     editor: Editor | null;
@@ -65,38 +50,8 @@ export const MessageComposerToolbar = React.memo(
     onLinkButton: () => void;
     onOpenMentionPicker: () => void;
     onPaperclip: () => void;
-    onSpoilerToggle?: (state: SpoilerToggleState) => void;
     sendDisabled: boolean;
-    spoilerActive?: boolean;
   }) {
-    const [spoilerFormattingActive, setSpoilerFormattingActive] =
-      React.useState(() =>
-        editor ? isSpoilerFormattingActive(editor) : false,
-      );
-
-    React.useEffect(() => {
-      if (!editor) {
-        setSpoilerFormattingActive(false);
-        return;
-      }
-
-      const update = () => {
-        setSpoilerFormattingActive(isSpoilerFormattingActive(editor));
-      };
-      update();
-      editor.on("transaction", update);
-      return () => {
-        editor.off("transaction", update);
-      };
-    }, [editor]);
-
-    const isSpoilerActive = spoilerFormattingActive || Boolean(spoilerActive);
-
-    const handleSpoilerClick = React.useCallback(() => {
-      if (!editor) return;
-      onSpoilerToggle?.(toggleSpoilerFormatting(editor));
-    }, [editor, onSpoilerToggle]);
-
     return (
       <div className="mt-2 flex flex-wrap items-center justify-between gap-3">
         <SelectionFormattingTray
@@ -133,7 +88,7 @@ export const MessageComposerToolbar = React.memo(
                   exit={{ x: 8, opacity: 0 }}
                   transition={presenceSpring}
                 >
-                  <Tooltip>
+                  <Tooltip disableHoverableContent>
                     <TooltipTrigger asChild>
                       <Button
                         aria-label="Toggle formatting"
@@ -158,7 +113,7 @@ export const MessageComposerToolbar = React.memo(
                   exit={{ opacity: 0, scale: 0.95 }}
                   transition={{ ...presenceSpring, delay: 0.15 }}
                 >
-                  <Tooltip>
+                  <Tooltip disableHoverableContent>
                     <TooltipTrigger asChild>
                       <Button
                         aria-label="Close formatting"
@@ -203,7 +158,8 @@ export const MessageComposerToolbar = React.memo(
                 exit={{ opacity: 0, x: -12 }}
                 transition={presenceSpring}
               >
-                <Tooltip>
+                {/* disableHoverableContent keeps tooltips from lingering over the editor. */}
+                <Tooltip disableHoverableContent>
                   <TooltipTrigger asChild>
                     <Button
                       aria-label="Mention someone"
@@ -220,7 +176,7 @@ export const MessageComposerToolbar = React.memo(
                   </TooltipTrigger>
                   <TooltipContent>Mention someone</TooltipContent>
                 </Tooltip>
-                <Tooltip>
+                <Tooltip disableHoverableContent>
                   <TooltipTrigger asChild>
                     <Button
                       aria-label="Attach image"
@@ -244,34 +200,13 @@ export const MessageComposerToolbar = React.memo(
                   onTriggerMouseDown={onCaptureSelection}
                   open={isEmojiPickerOpen}
                 />
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <Button
-                      aria-label="Spoiler"
-                      aria-pressed={isSpoilerActive}
-                      className={cn(
-                        isSpoilerActive &&
-                          "bg-primary text-primary-foreground hover:bg-primary/90 hover:text-primary-foreground",
-                      )}
-                      disabled={composerDisabled || !editor || isUploading}
-                      onClick={handleSpoilerClick}
-                      onMouseDown={onCaptureSelection}
-                      size="icon"
-                      type="button"
-                      variant={isSpoilerActive ? "default" : "ghost"}
-                    >
-                      <HatGlasses />
-                    </Button>
-                  </TooltipTrigger>
-                  <TooltipContent>Spoiler</TooltipContent>
-                </Tooltip>
                 <motion.div
                   initial={{ x: -8, opacity: 0 }}
                   animate={{ x: 0, opacity: 1 }}
                   exit={{ x: -8, opacity: 0 }}
                   transition={presenceSpring}
                 >
-                  <Tooltip>
+                  <Tooltip disableHoverableContent>
                     <TooltipTrigger asChild>
                       <Button
                         aria-label="Toggle formatting"

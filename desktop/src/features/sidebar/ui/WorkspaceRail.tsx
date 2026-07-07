@@ -1,11 +1,21 @@
-import { Plus } from "lucide-react";
+import { CheckCheck, Link2, Plus, Settings2 } from "lucide-react";
+import * as React from "react";
 
 import type { Workspace } from "@/features/workspaces/types";
+import { EditWorkspaceDialog } from "@/features/workspaces/ui/EditWorkspaceDialog";
 import { useWorkspaceIcons } from "@/features/workspaces/useWorkspaceIcons";
 import {
   useWorkspaceUnread,
   type WorkspaceUnreadState,
 } from "@/features/workspaces/useWorkspaceUnread";
+import { useAppShell } from "@/app/AppShellContext";
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuSeparator,
+  ContextMenuTrigger,
+} from "@/shared/ui/context-menu";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { cn } from "@/shared/lib/cn";
 import { getInitials } from "@/shared/lib/initials";
@@ -17,6 +27,11 @@ type WorkspaceRailProps = {
   activeWorkspaceId: string | null;
   onSwitchWorkspace: (id: string) => void;
   onAddWorkspace: () => void;
+  onUpdateWorkspace: (
+    id: string,
+    updates: Partial<Pick<Workspace, "name" | "relayUrl" | "token">>,
+  ) => void;
+  onRemoveWorkspace: (id: string) => void;
 };
 
 const MAX_BADGE = 99;
@@ -57,12 +72,14 @@ function WorkspaceButton({
   unread,
   iconUrl,
   onSwitch,
+  menu,
 }: {
   workspace: Workspace;
   isActive: boolean;
   unread: WorkspaceUnreadState;
   iconUrl: string | null;
   onSwitch: () => void;
+  menu: React.ReactNode;
 }) {
   const { mentionCount, showBadge, pending, badgeLabel } =
     workspaceRailIndicators(unread);
@@ -72,56 +89,64 @@ function WorkspaceButton({
     : workspace.name;
 
   return (
-    <Tooltip>
-      <TooltipTrigger asChild>
-        <button
-          aria-current={isActive ? "true" : undefined}
-          aria-label={tooltipLabel}
-          className="relative flex h-9 w-9 items-center justify-center outline-hidden focus:outline-none focus-visible:outline-none"
-          data-testid={`workspace-rail-button-${workspace.id}`}
-          onClick={onSwitch}
-          type="button"
-        >
-          <span
-            className={cn(
-              "flex h-9 w-9 items-center justify-center overflow-hidden rounded-2xl text-xs font-semibold transition-all",
-              isActive
-                ? "rounded-xl bg-primary text-primary-foreground"
-                : "bg-sidebar-accent/60 text-sidebar-foreground/80 hover:rounded-xl hover:bg-primary/80 hover:text-primary-foreground",
-              pending && "opacity-60",
-            )}
-          >
-            {iconUrl ? (
-              <img
-                alt=""
-                className="h-full w-full object-cover"
-                data-testid={`workspace-rail-icon-${workspace.id}`}
-                draggable={false}
-                src={iconUrl}
-              />
-            ) : (
-              workspaceInitials(workspace.name) || "🐝"
-            )}
-          </span>
-          {showBadge ? (
-            <span
-              className="absolute -bottom-0.5 -right-0.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-primary px-1 text-2xs font-semibold text-primary-foreground ring-2 ring-sidebar"
-              data-testid={`workspace-rail-mentions-${workspace.id}`}
+    <ContextMenu>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <ContextMenuTrigger asChild>
+            <button
+              aria-current={isActive ? "true" : undefined}
+              aria-label={tooltipLabel}
+              className="relative flex h-9 w-9 items-center justify-center outline-hidden focus:outline-none focus-visible:outline-none"
+              data-testid={`workspace-rail-button-${workspace.id}`}
+              onClick={onSwitch}
+              type="button"
             >
-              {badgeLabel}
-            </span>
-          ) : null}
-        </button>
-      </TooltipTrigger>
-      <TooltipContent side="right">{tooltipLabel}</TooltipContent>
-    </Tooltip>
+              <span
+                className={cn(
+                  "flex h-9 w-9 items-center justify-center overflow-hidden rounded-2xl text-xs font-semibold transition-all",
+                  isActive
+                    ? "rounded-xl bg-primary text-primary-foreground"
+                    : "bg-sidebar-accent/60 text-sidebar-foreground/80 hover:rounded-xl hover:bg-primary/80 hover:text-primary-foreground",
+                  pending && "opacity-60",
+                )}
+              >
+                {iconUrl ? (
+                  <img
+                    alt=""
+                    className="h-full w-full object-cover"
+                    data-testid={`workspace-rail-icon-${workspace.id}`}
+                    draggable={false}
+                    src={iconUrl}
+                  />
+                ) : (
+                  workspaceInitials(workspace.name) || "🐝"
+                )}
+              </span>
+              {showBadge ? (
+                <span
+                  className="absolute -bottom-0.5 -right-0.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-primary px-1 text-2xs font-semibold text-primary-foreground ring-2 ring-sidebar"
+                  data-testid={`workspace-rail-mentions-${workspace.id}`}
+                >
+                  {badgeLabel}
+                </span>
+              ) : null}
+            </button>
+          </ContextMenuTrigger>
+        </TooltipTrigger>
+        <TooltipContent side="right">{tooltipLabel}</TooltipContent>
+      </Tooltip>
+      <ContextMenuContent data-testid={`workspace-rail-menu-${workspace.id}`}>
+        {menu}
+      </ContextMenuContent>
+    </ContextMenu>
   );
 }
 
 /**
  * Discord/Slack-style vertical rail of workspaces on the far left of the app.
  * Shows a mention-count badge for inactive workspaces (observed via
- * `useWorkspaceUnread`) and switches relays on click.
+ * `useWorkspaceUnread`) and switches relays on click. Right-click opens a
+ * per-workspace menu: mark all as read, copy relay URL, workspace settings.
  *
  * Hidden entirely with a single workspace — a rail of one adds no value.
  */
@@ -130,13 +155,34 @@ export function WorkspaceRail({
   activeWorkspaceId,
   onSwitchWorkspace,
   onAddWorkspace,
+  onUpdateWorkspace,
+  onRemoveWorkspace,
 }: WorkspaceRailProps) {
-  const unreadByWorkspace = useWorkspaceUnread(workspaces, activeWorkspaceId);
+  const { unreadByWorkspace, markWorkspaceRead } = useWorkspaceUnread(
+    workspaces,
+    activeWorkspaceId,
+  );
   const iconsByWorkspace = useWorkspaceIcons(workspaces);
   const isFullscreen = useIsFullscreen();
+  const { markAllChannelsRead } = useAppShell();
+  const [editingWorkspace, setEditingWorkspace] =
+    React.useState<Workspace | null>(null);
   if (workspaces.length <= 1) {
     return null;
   }
+
+  const handleMarkAllRead = (workspace: Workspace) => {
+    if (workspace.id === activeWorkspaceId) {
+      markAllChannelsRead();
+      return;
+    }
+    markWorkspaceRead(workspace.id).catch((error) => {
+      console.warn(
+        `[WorkspaceRail] mark all read failed workspace=${workspace.id}:`,
+        error,
+      );
+    });
+  };
 
   // macOS traffic lights overlay the top-left, so start buttons below them (they hide in fullscreen).
   const topPaddingClass =
@@ -158,6 +204,27 @@ export function WorkspaceRail({
           key={workspace.id}
           iconUrl={iconsByWorkspace[workspace.id] ?? null}
           isActive={workspace.id === activeWorkspaceId}
+          menu={
+            <>
+              <ContextMenuItem onClick={() => handleMarkAllRead(workspace)}>
+                <CheckCheck className="h-4 w-4" />
+                Mark all as read
+              </ContextMenuItem>
+              <ContextMenuItem
+                onClick={() => {
+                  void navigator.clipboard.writeText(workspace.relayUrl);
+                }}
+              >
+                <Link2 className="h-4 w-4" />
+                Copy relay URL
+              </ContextMenuItem>
+              <ContextMenuSeparator />
+              <ContextMenuItem onClick={() => setEditingWorkspace(workspace)}>
+                <Settings2 className="h-4 w-4" />
+                Workspace settings
+              </ContextMenuItem>
+            </>
+          }
           onSwitch={() => onSwitchWorkspace(workspace.id)}
           unread={
             unreadByWorkspace[workspace.id] ?? {
@@ -182,6 +249,16 @@ export function WorkspaceRail({
         </TooltipTrigger>
         <TooltipContent side="right">Add workspace</TooltipContent>
       </Tooltip>
+      <EditWorkspaceDialog
+        canRemove={workspaces.length > 1}
+        onOpenChange={(open) => {
+          if (!open) setEditingWorkspace(null);
+        }}
+        onRemove={onRemoveWorkspace}
+        onSave={onUpdateWorkspace}
+        open={editingWorkspace !== null}
+        workspace={editingWorkspace}
+      />
     </nav>
   );
 }
