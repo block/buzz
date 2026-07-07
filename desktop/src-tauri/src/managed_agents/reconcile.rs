@@ -30,7 +30,7 @@ use buzz_core_pkg::kind::KIND_MANAGED_AGENT;
 use nostr::JsonUtil;
 
 /// Reconcile `managed-agents.json` into kind:30177 events in the retention
-/// store. Boot-time entry point, called from `migration::run_event_sync`
+/// store. Boot-time entry point, called from `event_sync::run_event_sync`
 /// after the persona and team legs.
 pub fn reconcile_agents_to_events(app: &tauri::AppHandle, keys: &nostr::Keys) {
     let Ok(base_dir) = super::managed_agents_base_dir(app) else {

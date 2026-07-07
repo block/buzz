@@ -153,11 +153,16 @@ const overrides = new Map([
   // migration_tests.rs carries the harness-sync migration coverage plus the
   // patch_json_records owner-only writeback regression test (SECURITY.md:90
   // crash-safe 0o600 fallback). Load-bearing security + feature coverage, not
-  // generic debt growth. Approved override; still queued to split.
-  ["src-tauri/src/migration_tests.rs", 1410],
+  // generic debt growth. Approved override; still queued to split. Event-sync
+  // (persona/team event reconcile) tests were split out to event_sync_tests.rs
+  // and the limit ratcheted 1410 → 1110.
+  ["src-tauri/src/migration_tests.rs", 1110],
   ["src-tauri/src/nostr_convert.rs", 1126],
   ["src/shared/api/relayClientSession.ts", 1022],
-  ["src-tauri/src/migration.rs", 1575],
+  // Boot-time event sync (persona/team/agent event reconcile) was split out
+  // to event_sync.rs, ratcheting this limit 1575 → 1310. Remaining content is
+  // the pre-identity data migrations; still queued to split further.
+  ["src-tauri/src/migration.rs", 1310],
   // onMarkRead + isUnread prop threading (mirrors the onMarkUnread prop
   // already here) for the single-toggle mark-read/unread menu item — a small
   // overage from load-bearing per-message plumbing, not generic debt growth.

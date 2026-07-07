@@ -2,6 +2,7 @@ mod app_state;
 mod archive;
 mod commands;
 mod deep_link;
+mod event_sync;
 mod events;
 mod huddle;
 mod managed_agents;
@@ -232,7 +233,7 @@ pub fn run() {
                 .lock()
                 .map(|k| k.clone())
                 .map_err(|e| -> Box<dyn std::error::Error> { e.to_string().into() })?;
-            migration::run_event_sync(&app_handle, &owner_keys);
+            event_sync::run_event_sync(&app_handle, &owner_keys);
 
             // Backfill the pinned persona snapshot for any pre-existing agent
             // that predates the record-authoritative-spawn cutover (persona_id
