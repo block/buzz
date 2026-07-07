@@ -218,6 +218,21 @@ pub const KIND_MODERATION_UNTIMEOUT: u32 = 9043;
 /// `status` tag = resolved|dismissed|escalated).
 pub const KIND_MODERATION_RESOLVE_REPORT: u32 = 9044;
 
+/// Returns `true` for community moderation command kinds (9040–9044).
+///
+/// The canonical route check — use this instead of scattering
+/// `9040..=9044` matches across ingest/dispatch.
+pub const fn is_moderation_command_kind(kind: u32) -> bool {
+    matches!(
+        kind,
+        KIND_MODERATION_BAN
+            | KIND_MODERATION_UNBAN
+            | KIND_MODERATION_TIMEOUT
+            | KIND_MODERATION_UNTIMEOUT
+            | KIND_MODERATION_RESOLVE_REPORT
+    )
+}
+
 // NIP-43 relay membership admin commands
 /// NIP-43: Add a pubkey to the relay member list.
 pub const RELAY_ADMIN_ADD_MEMBER: u32 = 9030;
@@ -503,6 +518,7 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_PERSONA,
     KIND_TEAM,
     KIND_MANAGED_AGENT,
+    KIND_REPORT,
     KIND_NIP29_PUT_USER,
     KIND_NIP29_REMOVE_USER,
     KIND_NIP29_EDIT_METADATA,
@@ -512,6 +528,11 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_NIP29_CREATE_INVITE,
     KIND_NIP29_JOIN_REQUEST,
     KIND_NIP29_LEAVE_REQUEST,
+    KIND_MODERATION_BAN,
+    KIND_MODERATION_UNBAN,
+    KIND_MODERATION_TIMEOUT,
+    KIND_MODERATION_UNTIMEOUT,
+    KIND_MODERATION_RESOLVE_REPORT,
     RELAY_ADMIN_ADD_MEMBER,
     RELAY_ADMIN_REMOVE_MEMBER,
     RELAY_ADMIN_CHANGE_ROLE,
@@ -725,6 +746,15 @@ const _: () = assert!(!is_ephemeral(KIND_AGENT_TURN_METRIC));
 const _: () = assert!(!is_replaceable(KIND_AGENT_TURN_METRIC));
 const _: () = assert!(!is_parameterized_replaceable(KIND_AGENT_TURN_METRIC));
 const _: () = assert!(KIND_AGENT_TURN_METRIC <= u16::MAX as u32);
+// Moderation kinds fit u16 and are neither replaceable nor ephemeral:
+// 1984 is a regular event (persisted to the queue, never fanned out);
+// 9040–9044 are direct commands (executed, never stored).
+const _: () = assert!(KIND_REPORT <= u16::MAX as u32);
+const _: () = assert!(KIND_MODERATION_RESOLVE_REPORT <= u16::MAX as u32);
+const _: () = assert!(!is_ephemeral(KIND_REPORT));
+const _: () = assert!(is_moderation_command_kind(KIND_MODERATION_BAN));
+const _: () = assert!(is_moderation_command_kind(KIND_MODERATION_RESOLVE_REPORT));
+const _: () = assert!(!is_moderation_command_kind(KIND_REPORT));
 
 #[cfg(test)]
 mod tests {
