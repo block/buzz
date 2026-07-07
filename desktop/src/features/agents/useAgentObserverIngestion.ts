@@ -66,6 +66,12 @@ export function combineObserverIngestionAgents(
  * This is the product invariant: if the current identity owns an agent (local
  * managed agent or declared-owned relay agent), its turn activity is ingested
  * app-wide — not only while a panel that happens to mount a bridge is open.
+ *
+ * Mounts before identity resolves by design: while `currentPubkey` is still
+ * `undefined`, `combineObserverIngestionAgents` returns managed agents only,
+ * and relay-owned agents are folded in on the render after identity arrives.
+ * Do not gate this hook on identity/startup readiness — that would drop
+ * managed-agent observer coverage during startup.
  */
 export function useAgentObserverIngestion() {
   const identityQuery = useIdentityQuery();
@@ -89,7 +95,12 @@ export function useAgentObserverIngestion() {
     const ownerByPubkey = new Map<string, string>();
     for (const [pubkey, summary] of Object.entries(profiles ?? {})) {
       if (summary.ownerPubkey) {
-        ownerByPubkey.set(normalizePubkey(pubkey), summary.ownerPubkey);
+        // Store both key and value normalized so lookups and ownership
+        // comparisons never depend on the casing the relay happened to send.
+        ownerByPubkey.set(
+          normalizePubkey(pubkey),
+          normalizePubkey(summary.ownerPubkey),
+        );
       }
     }
     return combineObserverIngestionAgents(
