@@ -173,6 +173,14 @@ pub const KIND_TEAM: u32 = 30176;
 /// since these events are world-readable on the relay.
 pub const KIND_MANAGED_AGENT: u32 = 30177;
 
+// NIP-56 reporting
+/// NIP-56: Report an event, pubkey, or blob to relay moderators (kind:1984).
+///
+/// Accepted at ingest, persisted to the tenant-scoped `moderation_reports`
+/// queue, and never fanned out publicly. Reports are signals, not triggers:
+/// the relay never auto-actions on them (NIP-56).
+pub const KIND_REPORT: u32 = 1984;
+
 // NIP-29 group admin events
 /// NIP-29: Add a user to a group.
 pub const KIND_NIP29_PUT_USER: u32 = 9000;
@@ -192,6 +200,23 @@ pub const KIND_NIP29_CREATE_INVITE: u32 = 9009;
 pub const KIND_NIP29_JOIN_REQUEST: u32 = 9021;
 /// NIP-29: Request to leave a group.
 pub const KIND_NIP29_LEAVE_REQUEST: u32 = 9022;
+
+// Buzz community moderation commands (mod-signed, processed like 9030-series:
+// validated + executed directly, never stored as regular events; every
+// accepted command writes a `moderation_actions` audit row).
+/// Moderation: ban a pubkey from the community (`p` tag target, optional
+/// `expiration` + `reason` tags).
+pub const KIND_MODERATION_BAN: u32 = 9040;
+/// Moderation: lift a community ban (`p` tag target).
+pub const KIND_MODERATION_UNBAN: u32 = 9041;
+/// Moderation: timeout (write-block) a pubkey until an `expiration` tag
+/// timestamp (`p` tag target, optional `reason`).
+pub const KIND_MODERATION_TIMEOUT: u32 = 9042;
+/// Moderation: clear a timeout early (`p` tag target).
+pub const KIND_MODERATION_UNTIMEOUT: u32 = 9043;
+/// Moderation: resolve a report queue row (`report` tag = row UUID,
+/// `status` tag = resolved|dismissed|escalated).
+pub const KIND_MODERATION_RESOLVE_REPORT: u32 = 9044;
 
 // NIP-43 relay membership admin commands
 /// NIP-43: Add a pubkey to the relay member list.

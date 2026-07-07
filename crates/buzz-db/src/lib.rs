@@ -27,6 +27,8 @@ pub mod feed;
 pub mod git_repo;
 /// Embedded database migrations.
 pub mod migration;
+/// Community moderation: reports, bans/timeouts, audit actions.
+pub mod moderation;
 /// Monthly table partition management.
 pub mod partition;
 /// Reaction persistence.

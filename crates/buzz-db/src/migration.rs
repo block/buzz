@@ -471,7 +471,7 @@ mod tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 5);
+        assert_eq!(migrations.len(), 6);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -532,6 +532,23 @@ mod tests {
         assert!(migrations[4].sql.as_str().contains("search_tsv"));
         assert!(migrations[4].sql.as_str().contains("44200"));
         assert!(!migrations[0].sql.as_str().contains("44200"));
+
+        // Community moderation (reports/bans/audit): additive migration, never
+        // folded into 0001 — same brownfield checksum rule as above.
+        assert_eq!(migrations[5].version, 6);
+        assert!(migrations[5]
+            .sql
+            .as_str()
+            .contains("CREATE TABLE moderation_reports"));
+        assert!(migrations[5]
+            .sql
+            .as_str()
+            .contains("CREATE TABLE community_bans"));
+        assert!(migrations[5]
+            .sql
+            .as_str()
+            .contains("CREATE TABLE moderation_actions"));
+        assert!(!migrations[0].sql.as_str().contains("moderation_reports"));
     }
 
     #[test]
