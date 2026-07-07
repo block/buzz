@@ -9,7 +9,9 @@ use buzz_core::{
         KIND_DM_ADD_MEMBER, KIND_DM_OPEN, KIND_EMOJI_SET, KIND_GIT_ISSUE, KIND_GIT_PATCH,
         KIND_GIT_PR_UPDATE, KIND_GIT_PULL_REQUEST, KIND_GIT_REPO_ANNOUNCEMENT,
         KIND_GIT_STATUS_CLOSED, KIND_GIT_STATUS_DRAFT, KIND_GIT_STATUS_MERGED,
-        KIND_GIT_STATUS_OPEN, KIND_PRESENCE_UPDATE, KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER,
+        KIND_GIT_STATUS_OPEN, KIND_MODERATION_BAN, KIND_MODERATION_RESOLVE_REPORT,
+        KIND_MODERATION_TIMEOUT, KIND_MODERATION_UNBAN, KIND_MODERATION_UNTIMEOUT,
+        KIND_PRESENCE_UPDATE, KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER,
     },
     observer::{
         content_looks_like_nip44, OBSERVER_AGENT_TAG, OBSERVER_FRAME_CONTROL, OBSERVER_FRAME_TAG,
@@ -1509,6 +1511,111 @@ pub fn build_presence_update(status: &str) -> Result<EventBuilder, SdkError> {
     }
     let tags = vec![tag(&["status", status])?];
     Ok(EventBuilder::new(Kind::Custom(KIND_PRESENCE_UPDATE as u16), status).tags(tags))
+}
+
+// ---------------------------------------------------------------------------
+// Community moderation commands (kinds 9040–9044).
+//
+// These mirror the NIP-43 relay-admin 9030-series: mod-signed command events
+// that the relay validates + executes directly and never stores. The tenant
+// (community) is bound by the connection host, so no `h` tag is carried — a
+// stray `h` would be rejected as channel-scoping a global-only command. The
+// tag vocabulary below is pinned by `moderation_commands.rs` (relay and CLI
+// must agree).
+// ---------------------------------------------------------------------------
+
+/// Build a community ban command (kind 9040).
+///
+/// `expires_at`: `None` ⇒ permanent; `Some(unix_secs)` ⇒ ban lifts at that time.
+pub fn build_moderation_ban(
+    target_pubkey: &str,
+    expires_at: Option<u64>,
+    reason: Option<&str>,
+) -> Result<EventBuilder, SdkError> {
+    let target_pubkey = check_pubkey_hex(target_pubkey, "target_pubkey")?;
+    let mut tags = vec![tag(&["p", &target_pubkey])?];
+    if let Some(exp) = expires_at {
+        tags.push(tag(&["expiration", &exp.to_string()])?);
+    }
+    if let Some(r) = reason {
+        tags.push(tag(&["reason", r])?);
+    }
+    Ok(EventBuilder::new(Kind::Custom(KIND_MODERATION_BAN as u16), "").tags(tags))
+}
+
+/// Build a community unban command (kind 9041).
+pub fn build_moderation_unban(target_pubkey: &str) -> Result<EventBuilder, SdkError> {
+    let target_pubkey = check_pubkey_hex(target_pubkey, "target_pubkey")?;
+    let tags = vec![tag(&["p", &target_pubkey])?];
+    Ok(EventBuilder::new(Kind::Custom(KIND_MODERATION_UNBAN as u16), "").tags(tags))
+}
+
+/// Build a community timeout (write-block) command (kind 9042).
+///
+/// `expires_at` (required) is the unix-seconds timestamp the timeout lifts at.
+pub fn build_moderation_timeout(
+    target_pubkey: &str,
+    expires_at: u64,
+    reason: Option<&str>,
+) -> Result<EventBuilder, SdkError> {
+    let target_pubkey = check_pubkey_hex(target_pubkey, "target_pubkey")?;
+    let mut tags = vec![
+        tag(&["p", &target_pubkey])?,
+        tag(&["expiration", &expires_at.to_string()])?,
+    ];
+    if let Some(r) = reason {
+        tags.push(tag(&["reason", r])?);
+    }
+    Ok(EventBuilder::new(Kind::Custom(KIND_MODERATION_TIMEOUT as u16), "").tags(tags))
+}
+
+/// Build a community untimeout command (kind 9043).
+pub fn build_moderation_untimeout(target_pubkey: &str) -> Result<EventBuilder, SdkError> {
+    let target_pubkey = check_pubkey_hex(target_pubkey, "target_pubkey")?;
+    let tags = vec![tag(&["p", &target_pubkey])?];
+    Ok(EventBuilder::new(Kind::Custom(KIND_MODERATION_UNTIMEOUT as u16), "").tags(tags))
+}
+
+/// Build a resolve-report command (kind 9044).
+///
+/// `report_event_id`: hex event id of the kind:1984 report being resolved.
+/// `status`: `resolved` | `dismissed`. `action`: `delete` | `kick` | `ban` |
+/// `timeout` | `dismiss` | `escalate` (`dismiss` pairs with `dismissed`,
+/// everything else with `resolved` — the relay enforces the pairing).
+/// `reason`: optional; audited into `public_reason` and relayed in the
+/// reporter notice DM, so it must be safe for the reporter to read.
+pub fn build_moderation_resolve_report(
+    report_event_id: &str,
+    status: &str,
+    action: &str,
+    reason: Option<&str>,
+) -> Result<EventBuilder, SdkError> {
+    let report_event_id = check_hex_exact(report_event_id, 64, "report_event_id")?;
+    match status {
+        "resolved" | "dismissed" => {}
+        _ => {
+            return Err(SdkError::InvalidInput(format!(
+                "status must be resolved or dismissed (got: {status})"
+            )))
+        }
+    }
+    match action {
+        "delete" | "kick" | "ban" | "timeout" | "dismiss" | "escalate" => {}
+        _ => {
+            return Err(SdkError::InvalidInput(format!(
+                "action must be delete, kick, ban, timeout, dismiss, or escalate (got: {action})"
+            )))
+        }
+    }
+    let mut tags = vec![
+        tag(&["report", &report_event_id])?,
+        tag(&["status", status])?,
+        tag(&["action", action])?,
+    ];
+    if let Some(r) = reason {
+        tags.push(tag(&["reason", r])?);
+    }
+    Ok(EventBuilder::new(Kind::Custom(KIND_MODERATION_RESOLVE_REPORT as u16), "").tags(tags))
 }
 
 #[cfg(test)]
@@ -3132,6 +3239,124 @@ mod tests {
             ..Default::default()
         };
         let err = build_git_pr_update(&pr_repo(), "", &meta).unwrap_err();
+        assert!(matches!(err, SdkError::InvalidInput(_)));
+    }
+
+    // --- community moderation commands (9040–9044) ------------------------
+
+    #[test]
+    fn moderation_ban_permanent() {
+        let pk = "a".repeat(64);
+        let ev = sign(build_moderation_ban(&pk, None, None).unwrap());
+        assert_eq!(ev.kind.as_u16(), KIND_MODERATION_BAN as u16);
+        assert!(has_tag(&ev, "p", &pk));
+        assert!(tag_values(&ev, "expiration").is_empty());
+        assert!(tag_values(&ev, "reason").is_empty());
+    }
+
+    #[test]
+    fn moderation_ban_temporary_with_reason() {
+        let pk = "b".repeat(64);
+        let ev = sign(build_moderation_ban(&pk, Some(1783500000), Some("spam")).unwrap());
+        assert_eq!(ev.kind.as_u16(), KIND_MODERATION_BAN as u16);
+        assert!(has_tag(&ev, "p", &pk));
+        assert!(has_tag(&ev, "expiration", "1783500000"));
+        assert!(has_tag(&ev, "reason", "spam"));
+    }
+
+    #[test]
+    fn moderation_ban_lowercases_pubkey() {
+        let ev = sign(build_moderation_ban(&"A".repeat(64), None, None).unwrap());
+        assert!(has_tag(&ev, "p", &"a".repeat(64)));
+    }
+
+    #[test]
+    fn moderation_ban_rejects_short_pubkey() {
+        let err = build_moderation_ban("abc", None, None).unwrap_err();
+        assert!(matches!(err, SdkError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn moderation_ban_rejects_overlong_pubkey() {
+        // Relay `extract_p_tag_bytes` requires exactly 64 hex; the SDK must
+        // reject 65+ hex here rather than sign a `p` tag the relay drops.
+        let err = build_moderation_ban(&"a".repeat(65), None, None).unwrap_err();
+        assert!(matches!(err, SdkError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn moderation_unban_shape() {
+        let pk = "c".repeat(64);
+        let ev = sign(build_moderation_unban(&pk).unwrap());
+        assert_eq!(ev.kind.as_u16(), KIND_MODERATION_UNBAN as u16);
+        assert!(has_tag(&ev, "p", &pk));
+    }
+
+    #[test]
+    fn moderation_timeout_shape() {
+        let pk = "d".repeat(64);
+        let ev = sign(build_moderation_timeout(&pk, 1783500000, Some("cool off")).unwrap());
+        assert_eq!(ev.kind.as_u16(), KIND_MODERATION_TIMEOUT as u16);
+        assert!(has_tag(&ev, "p", &pk));
+        assert!(has_tag(&ev, "expiration", "1783500000"));
+        assert!(has_tag(&ev, "reason", "cool off"));
+    }
+
+    #[test]
+    fn moderation_untimeout_shape() {
+        let pk = "e".repeat(64);
+        let ev = sign(build_moderation_untimeout(&pk).unwrap());
+        assert_eq!(ev.kind.as_u16(), KIND_MODERATION_UNTIMEOUT as u16);
+        assert!(has_tag(&ev, "p", &pk));
+    }
+
+    #[test]
+    fn moderation_resolve_shape() {
+        let rid = event_id().to_hex();
+        let ev =
+            sign(build_moderation_resolve_report(&rid, "resolved", "ban", Some("rule 3")).unwrap());
+        assert_eq!(ev.kind.as_u16(), KIND_MODERATION_RESOLVE_REPORT as u16);
+        assert!(has_tag(&ev, "report", &rid));
+        assert!(has_tag(&ev, "status", "resolved"));
+        assert!(has_tag(&ev, "action", "ban"));
+        assert!(has_tag(&ev, "reason", "rule 3"));
+    }
+
+    #[test]
+    fn moderation_resolve_dismiss_no_reason() {
+        let rid = event_id().to_hex();
+        let ev = sign(build_moderation_resolve_report(&rid, "dismissed", "dismiss", None).unwrap());
+        assert!(has_tag(&ev, "status", "dismissed"));
+        assert!(has_tag(&ev, "action", "dismiss"));
+        assert!(tag_values(&ev, "reason").is_empty());
+    }
+
+    #[test]
+    fn moderation_resolve_rejects_bad_status() {
+        let rid = event_id().to_hex();
+        let err = build_moderation_resolve_report(&rid, "escalated", "ban", None).unwrap_err();
+        assert!(matches!(err, SdkError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn moderation_resolve_rejects_bad_action() {
+        let rid = event_id().to_hex();
+        let err = build_moderation_resolve_report(&rid, "resolved", "nuke", None).unwrap_err();
+        assert!(matches!(err, SdkError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn moderation_resolve_rejects_short_report_id() {
+        let err = build_moderation_resolve_report("abc", "resolved", "ban", None).unwrap_err();
+        assert!(matches!(err, SdkError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn moderation_resolve_rejects_overlong_report_id() {
+        // Relay `extract_report_tag` requires exactly 64 hex; the SDK must
+        // reject 65+ hex here rather than sign a `report` tag the relay drops.
+        let err =
+            build_moderation_resolve_report(&"a".repeat(65), "resolved", "ban", None).unwrap_err();
         assert!(matches!(err, SdkError::InvalidInput(_)));
     }
 }
