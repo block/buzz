@@ -347,7 +347,10 @@ export function HomeView({
       threadContext.events.map((event) => [event.id, event]),
     );
     const contextEventIds = new Set(eventById.keys());
-    const reactionEvents = (channelMessages ?? []).filter((event) => {
+    const reactionEvents = [
+      ...(channelMessages ?? []),
+      ...threadContext.reactionEvents,
+    ].filter((event) => {
       if (event.kind !== KIND_REACTION) {
         return false;
       }
@@ -394,6 +397,7 @@ export function HomeView({
     selectedChannel,
     selectedItem,
     threadContext.events,
+    threadContext.reactionEvents,
   ]);
   const selectedItemReplies = React.useMemo<InboxReply[]>(() => {
     if (!selectedItem) return [];
@@ -742,6 +746,7 @@ export function HomeView({
                         eventId: message.id,
                         remove,
                       });
+                      await threadContext.refreshReactions();
                       await channelMessagesQuery.refetch();
                       onRefresh();
                     }

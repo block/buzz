@@ -4,6 +4,7 @@ import { isInboxThreadContextEvent } from "@/features/home/lib/inboxViewHelpers"
 import { relayEventFromFeedItem } from "@/features/home/lib/inbox";
 import { getThreadReference } from "@/features/messages/lib/threading";
 import { relayClient } from "@/shared/api/relayClient";
+import { buildChannelReactionAuxFilter } from "@/shared/api/relayChannelFilters";
 import { getEventById } from "@/shared/api/tauri";
 import type { FeedItem, RelayEvent } from "@/shared/api/types";
 import { HOME_MENTION_EVENT_KINDS } from "@/shared/constants/kinds";
@@ -11,6 +12,10 @@ import { HOME_MENTION_EVENT_KINDS } from "@/shared/constants/kinds";
 type InboxThreadContextResult = {
   events: RelayEvent[];
   isLoading: boolean;
+  /** kind:7 events referencing the context messages, fetched by `#e`. */
+  reactionEvents: RelayEvent[];
+  /** Re-fetch reaction events (e.g. after a toggle) without reloading context. */
+  refreshReactions: () => Promise<void>;
 };
 
 const THREAD_CONTEXT_LIMIT = 100;
@@ -176,8 +181,62 @@ export function useInboxThreadContext(
     selectedThreadRootId,
   ]);
 
+  // Reactions carry only an `#e` reference, so the channel-window cache never
+  // has them for thread replies — fetch them for the rendered context messages.
+  const [reactionEvents, setReactionEvents] = React.useState<RelayEvent[]>([]);
+  const contextEventIdsKey = React.useMemo(
+    () =>
+      events
+        .map((event) => event.id)
+        .sort()
+        .join(","),
+    [events],
+  );
+
+  const fetchReactions = React.useCallback(async (): Promise<
+    RelayEvent[] | null
+  > => {
+    const eventIds = contextEventIdsKey ? contextEventIdsKey.split(",") : [];
+    if (!selectedChannelId || eventIds.length === 0) {
+      return [];
+    }
+
+    try {
+      return await relayClient.fetchAuxEventsByReference(
+        selectedChannelId,
+        eventIds,
+        buildChannelReactionAuxFilter,
+      );
+    } catch {
+      return null;
+    }
+  }, [contextEventIdsKey, selectedChannelId]);
+
+  React.useEffect(() => {
+    let isCancelled = false;
+
+    void fetchReactions().then((fetched) => {
+      if (!isCancelled && fetched !== null) {
+        setReactionEvents(fetched);
+      }
+    });
+
+    return () => {
+      isCancelled = true;
+    };
+  }, [fetchReactions]);
+
+  const refreshReactions = React.useCallback(async () => {
+    const fetched = await fetchReactions();
+    if (fetched !== null) {
+      setReactionEvents(fetched);
+    }
+  }, [fetchReactions]);
+
   return {
     events,
     isLoading,
+    reactionEvents,
+    refreshReactions,
   };
 }

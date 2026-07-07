@@ -683,6 +683,8 @@ declare global {
       mentionPubkeys?: string[];
       extraTags?: string[][];
       createdAt?: number;
+      /** 64-hex id required for the event to be a valid reaction target. */
+      id?: string;
     }) => RelayEvent;
     /** Prepend `count` synthetic older messages to a channel's mock store so
      *  an older-history fetch has something to paginate. Mirrors how the real
@@ -3313,6 +3315,7 @@ function emitMockChannelMessage(
   mentionPubkeys?: string[],
   extraTags?: string[][],
   createdAt?: number,
+  id?: string,
 ) {
   const eventKind = kind ?? 9;
   if (!parentEventId) {
@@ -3322,7 +3325,14 @@ function emitMockChannelMessage(
       pubkey ?? DEFAULT_MOCK_IDENTITY.pubkey,
     );
     if (extraTags) tags.push(...extraTags);
-    const event = createMockEvent(eventKind, content, tags, pubkey, createdAt);
+    const event = createMockEvent(
+      eventKind,
+      content,
+      tags,
+      pubkey,
+      createdAt,
+      id,
+    );
     recordMockMessage(channelId, event);
     emitMockLiveEvent(channelId, event);
     return event;
@@ -3353,6 +3363,7 @@ function emitMockChannelMessage(
     tags,
     authorPubkey,
     createdAt,
+    id,
   );
   recordMockMessage(channelId, event);
   emitMockLiveEvent(channelId, event);
@@ -7588,6 +7599,26 @@ function sendToMockSocket(args: {
 
     const channelId = filter["#h"]?.[0];
     if (!channelId) {
+      // Aux-backfill filters (reactions/deletions) are `#e`-keyed with no
+      // channel tag — serve them across all channel stores like the relay.
+      const referencedIds = filter["#e"];
+      if (referencedIds && referencedIds.length > 0) {
+        const targets = new Set(referencedIds);
+        for (const events of mockMessages.values()) {
+          for (const event of events) {
+            if (filter.kinds && !filter.kinds.includes(event.kind)) {
+              continue;
+            }
+            if (
+              event.tags.some(
+                (tag) => tag[0] === "e" && tag[1] && targets.has(tag[1]),
+              )
+            ) {
+              sendWsText(socket.handler, ["EVENT", subId, event]);
+            }
+          }
+        }
+      }
       sendWsText(socket.handler, ["EOSE", subId]);
       return;
     }
@@ -7751,6 +7782,7 @@ export function maybeInstallE2eTauriMocks() {
     mentionPubkeys,
     extraTags,
     createdAt,
+    id,
   }) => {
     const channel = mockChannels.find(
       (candidate) => candidate.name === channelName,
@@ -7768,6 +7800,7 @@ export function maybeInstallE2eTauriMocks() {
       mentionPubkeys,
       extraTags,
       createdAt,
+      id,
     );
   };
   window.__BUZZ_E2E_PREPEND_MOCK_HISTORY__ = prependMockHistory;

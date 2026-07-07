@@ -73,6 +73,7 @@ export default defineConfig({
         "**/human-edit-agent-content.spec.ts",
         "**/reaction-order.spec.ts",
         "**/reaction-names.spec.ts",
+        "**/inbox-reactions.spec.ts",
         "**/send-channel-binding.spec.ts",
         "**/project-commit-detail.spec.ts",
         "**/persona-model-combobox-screenshots.spec.ts",
