@@ -125,7 +125,9 @@ const overrides = new Map([
   // config-bridge-aware requirements: getRuntimeFileConfig command adds ~15 lines.
   // +26 lines from PRs landing on main between prior rebase and this rebase.
   // baked-env-required-badge: getBakedBuildEnvKeys wrapper adds ~16 lines. Queued to split.
-  ["src/shared/api/tauri.ts", 1388],
+  // restart-badge: started the queued split — start/stopManagedAgent moved to
+  // tauriManagedAgents.ts; limit ratcheted down 1388 → 1380 to bank the headroom.
+  ["src/shared/api/tauri.ts", 1380],
   // readiness-gate: PersonaDialog.tsx threads computeLocalModeGate +
   // requiredCredentialEnvKeys + RequiredFieldLabel so the "New agent" dialog
   // shows required markers and credential amber rows (parity with

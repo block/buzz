@@ -1355,6 +1355,15 @@ pub fn build_managed_agent_summary(
     // next to an "out of date" badge would contradict it.
     let (persona_out_of_date, persona_orphaned) = persona_drift_state(record, personas);
 
+    // Restart badge: the running process stamped its effective spawn config
+    // at launch; recompute from current disk state and flag drift. Only a
+    // tracked live process can drift — stopped agents spawn fresh, and
+    // adopted (runtime_pid-only) processes have no stamped hash to compare.
+    let needs_restart = runtimes.get(&record.pubkey).is_some_and(|runtime| {
+        runtime.spawn_config_hash
+            != crate::managed_agents::spawn_hash::spawn_config_hash(record, personas)
+    });
+
     // Resolve the effective harness the same way, then derive args/mcp from it,
     // so the UI reflects the persona's current harness (or an explicit pin).
     let effective_command = crate::managed_agents::effective_agent_command(
@@ -1388,6 +1397,7 @@ pub fn build_managed_agent_summary(
         provider: record.provider.clone(),
         persona_out_of_date,
         persona_orphaned,
+        needs_restart,
         mcp_toolsets: record.mcp_toolsets.clone(),
         env_vars: record.env_vars.clone(),
         backend: record.backend.clone(),
@@ -1861,6 +1871,10 @@ pub fn spawn_agent_child(
         )
     })?;
 
+    // Stamp the effective spawn config so the summary builder can flag
+    // needs_restart when disk state drifts from what this process runs.
+    let spawn_config_hash = super::spawn_hash::spawn_config_hash(record, &personas);
+
     let _ = super::write_agent_pid_file(app, &record.pubkey, child.id());
 
     // Windows: assign the harness to a Job Object so its whole tree dies with
@@ -1869,10 +1883,15 @@ pub fn spawn_agent_child(
     return Ok(super::process_lifecycle::finish_spawn(
         child,
         log_path,
+        spawn_config_hash,
         &record.name,
     ));
     #[cfg(not(windows))]
-    Ok(crate::managed_agents::ManagedAgentProcess { child, log_path })
+    Ok(crate::managed_agents::ManagedAgentProcess {
+        child,
+        log_path,
+        spawn_config_hash,
+    })
 }
 
 fn child_rust_log_filter() -> String {

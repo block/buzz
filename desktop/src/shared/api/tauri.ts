@@ -215,6 +215,7 @@ export type RawManagedAgent = {
   provider: string | null;
   persona_out_of_date: boolean;
   persona_orphaned: boolean;
+  needs_restart: boolean;
   mcp_toolsets: string | null;
   env_vars?: Record<string, string>;
   status: ManagedAgent["status"];
@@ -991,6 +992,7 @@ export function fromRawManagedAgent(agent: RawManagedAgent): ManagedAgent {
     provider: agent.provider ?? null,
     personaOutOfDate: agent.persona_out_of_date ?? false,
     personaOrphaned: agent.persona_orphaned ?? false,
+    needsRestart: agent.needs_restart ?? false,
     mcpToolsets: agent.mcp_toolsets,
     envVars: agent.env_vars ?? {},
     status: agent.status,
@@ -1159,20 +1161,6 @@ export async function createManagedAgent(input: CreateManagedAgentInput) {
     profileSyncError: response.profile_sync_error,
     spawnError: response.spawn_error,
   };
-}
-
-export async function startManagedAgent(pubkey: string): Promise<ManagedAgent> {
-  const response = await invokeTauri<RawManagedAgent>("start_managed_agent", {
-    pubkey,
-  });
-  return fromRawManagedAgent(response);
-}
-
-export async function stopManagedAgent(pubkey: string): Promise<ManagedAgent> {
-  const response = await invokeTauri<RawManagedAgent>("stop_managed_agent", {
-    pubkey,
-  });
-  return fromRawManagedAgent(response);
 }
 
 export async function deleteManagedAgent(

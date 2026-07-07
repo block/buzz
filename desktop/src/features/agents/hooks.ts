@@ -21,10 +21,13 @@ import {
   installAcpRuntime,
   listManagedAgents,
   listRelayAgents,
-  startManagedAgent,
-  stopManagedAgent,
   updateManagedAgent,
 } from "@/shared/api/tauri";
+import {
+  setManagedAgentStartOnAppLaunch,
+  startManagedAgent,
+  stopManagedAgent,
+} from "@/shared/api/tauriManagedAgents";
 import {
   createPersona,
   deletePersona,
@@ -33,7 +36,6 @@ import {
   setPersonaActive,
   updatePersona,
 } from "@/shared/api/tauriPersonas";
-import { setManagedAgentStartOnAppLaunch } from "@/shared/api/tauriManagedAgents";
 import {
   createTeam,
   deleteTeam,
