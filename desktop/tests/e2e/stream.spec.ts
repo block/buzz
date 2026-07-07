@@ -3,6 +3,7 @@ import { expect, test, type Browser, type Page } from "@playwright/test";
 import {
   installRelayBridge,
   openChannelBrowser,
+  openCreateChannelDialog,
   TEST_IDENTITIES,
 } from "../helpers/bridge";
 import { assertRelaySeeded } from "../helpers/seed";
@@ -59,7 +60,7 @@ async function createAndJoinSharedStream(
   memberPage: Page,
   channelName: string,
 ) {
-  await ownerPage.getByRole("button", { name: "Create a channel" }).click();
+  await openCreateChannelDialog(ownerPage);
   await ownerPage.getByTestId("create-channel-name").fill(channelName);
   await ownerPage.getByTestId("create-channel-submit").click();
   await expect(ownerPage.getByTestId("stream-list")).toContainText(channelName);
@@ -248,7 +249,7 @@ test("creates a relay-backed stream", async ({ page }) => {
 
   await installRelayBridge(page, "tyler");
   await page.goto("/");
-  await page.getByRole("button", { name: "Create a channel" }).click();
+  await openCreateChannelDialog(page);
   await page.getByTestId("create-channel-name").fill(channelName);
   await page
     .getByTestId("create-channel-description")

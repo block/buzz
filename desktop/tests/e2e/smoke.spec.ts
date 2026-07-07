@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 
-import { installMockBridge } from "../helpers/bridge";
+import { installMockBridge, openCreateChannelDialog } from "../helpers/bridge";
 
 const DEFAULT_AGENT_ACTIVITY_PUBKEY =
   "db0b028cd36f4d3e36c8300cce87252c1f7fc9495ffecc53f393fcac341ffd36";
@@ -100,7 +100,7 @@ test("creates a new mocked stream", async ({ page }) => {
   const channelName = `release-notes-${Date.now()}`;
 
   await page.goto("/");
-  await page.getByRole("button", { name: "Create a channel" }).click();
+  await openCreateChannelDialog(page);
   await page.getByTestId("create-channel-name").fill(channelName);
   await page
     .getByTestId("create-channel-description")

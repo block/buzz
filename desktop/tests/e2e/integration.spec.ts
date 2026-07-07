@@ -3,6 +3,7 @@ import { expect, test, type Browser } from "@playwright/test";
 import {
   installRelayBridge,
   openChannelBrowser,
+  openCreateChannelDialog,
   TEST_IDENTITIES,
 } from "../helpers/bridge";
 import { openSettings } from "../helpers/settings";
@@ -16,7 +17,7 @@ async function createStream(
   channelName: string,
   description?: string,
 ) {
-  await page.getByRole("button", { name: "Create a channel" }).click();
+  await openCreateChannelDialog(page);
   await page.getByTestId("create-channel-name").fill(channelName);
   if (description !== undefined) {
     await page.getByTestId("create-channel-description").fill(description);
@@ -182,7 +183,7 @@ test("create channel and verify in sidebar", async ({ page }) => {
 
   await installRelayBridge(page, "tyler");
   await page.goto("/");
-  await page.getByRole("button", { name: "Create a channel" }).click();
+  await openCreateChannelDialog(page);
   await page.getByTestId("create-channel-name").fill(channelName);
   await page.getByTestId("create-channel-submit").click();
 
@@ -206,7 +207,7 @@ test("two users see the same channel", async ({
     await installRelayBridge(pageTwo, "alice");
 
     await pageOne.goto("/");
-    await pageOne.getByRole("button", { name: "Create a channel" }).click();
+    await openCreateChannelDialog(pageOne);
     await pageOne.getByTestId("create-channel-name").fill(channelName);
     await pageOne.getByTestId("create-channel-submit").click();
     await expect(pageOne.getByTestId("stream-list")).toContainText(channelName);
@@ -428,12 +429,12 @@ test("multiple channels independent", async ({ page }) => {
   await installRelayBridge(page, "tyler");
   await page.goto("/");
 
-  await page.getByRole("button", { name: "Create a channel" }).click();
+  await openCreateChannelDialog(page);
   await page.getByTestId("create-channel-name").fill(channelA);
   await page.getByTestId("create-channel-submit").click();
   await expect(page.getByTestId("chat-title")).toHaveText(channelA);
 
-  await page.getByRole("button", { name: "Create a channel" }).click();
+  await openCreateChannelDialog(page);
   await page.getByTestId("create-channel-name").fill(channelB);
   await page.getByTestId("create-channel-submit").click();
   await expect(page.getByTestId("chat-title")).toHaveText(channelB);
