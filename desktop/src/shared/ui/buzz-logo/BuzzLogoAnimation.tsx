@@ -36,11 +36,17 @@ export type BuzzLogoAnimationProps = {
   fullScreen?: boolean;
   loop?: boolean;
   /**
-   * What the mark does during the rest window between plays. `"hidden"` fades
-   * the mark out for the whole rest (good for small inline indicators);
-   * `"visible"` holds the finished mark on screen and only fades briefly at
-   * the cycle boundary (good for full-screen surfaces like the boot splash,
-   * where a blank rest reads as "nothing is loading").
+   * What the mark does during the rest window between plays.
+   *
+   * `"hidden"` (default) plays the morph first, then fades the mark out for
+   * the whole rest — good for small inline indicators.
+   *
+   * `"visible"` starts each cycle AT the rest window with the finished mark
+   * held on screen, then plays the morph at the end of the cycle. The
+   * finished mark is also written as the SVG's base DOM state, so it is
+   * visible from the very first paint even before (or without) SMIL starting
+   * — good for short-lived full-screen surfaces like the boot splash, where
+   * a blank frame reads as "nothing is loading". Requires `loopRestSeconds`.
    */
   loopRestMode?: "hidden" | "visible";
   /**
@@ -318,6 +324,78 @@ function reverseVariant(variant: VariantConfig): VariantConfig {
   ) as VariantConfig;
 }
 
+/**
+ * Builds the `loopRestMode="visible"` cycle: hold the finished mark for the
+ * rest window, play the morph in reverse (deconstruct), then play it forward
+ * (rebuild) — landing back on the finished mark. The loop is seamless: the
+ * mark is on screen at keyTime 0 and never blanks out, so a short-lived
+ * mount shows a complete Buzz mark from its very first frame.
+ */
+function visibleRestTiming(
+  [keyTimes, values]: Timing,
+  restFraction: number,
+  morphFraction: number,
+): Timing {
+  const times = keyTimes.split(";").map(Number);
+  const splitValues = values.split(";");
+  const last = times.length - 1;
+
+  const outTimes: number[] = [0];
+  const outValues: string[] = [splitValues[last] ?? ""];
+
+  // Deconstruct: reversed morph, from the finished mark back to blank.
+  for (let i = last; i >= 0; i -= 1) {
+    outTimes.push(restFraction + (1 - (times[i] ?? 0)) * morphFraction);
+    outValues.push(splitValues[i] ?? "");
+  }
+  // Rebuild: forward morph. Skip i=0 — it duplicates the deconstruct's end.
+  for (let i = 1; i <= last; i += 1) {
+    outTimes.push(
+      restFraction + morphFraction + (times[i] ?? 0) * morphFraction,
+    );
+    outValues.push(splitValues[i] ?? "");
+  }
+
+  const lastOut = outTimes[outTimes.length - 1];
+  if (lastOut !== undefined && lastOut < 1) {
+    outTimes.push(1);
+    outValues.push(outValues[outValues.length - 1] ?? "");
+  }
+
+  return [
+    outTimes.map((time) => String(Number(time.toFixed(4)))).join(";"),
+    outValues.join(";"),
+  ];
+}
+
+function visibleRestVariant(
+  variant: VariantConfig,
+  duration: string,
+  restFraction: number,
+  morphFraction: number,
+): VariantConfig {
+  return Object.fromEntries(
+    Object.entries(variant).map(([part, timings]) => {
+      if (part === "duration") {
+        return [part, duration];
+      }
+      if (part === "texture") {
+        return [part, timings];
+      }
+
+      return [
+        part,
+        Object.fromEntries(
+          Object.entries(timings as PartTimings).map(([attribute, timing]) => [
+            attribute,
+            visibleRestTiming(timing, restFraction, morphFraction),
+          ]),
+        ),
+      ];
+    }),
+  ) as VariantConfig;
+}
+
 VARIANTS.v6 = scaleVariant(VARIANTS.v5, "1.38s", 0.64);
 VARIANTS.v6.leftEye.ry = [
   "0;0.64;0.72;0.78;0.84;0.9;0.96;1",
@@ -406,6 +484,34 @@ function idPart(value: string) {
   return value.replace(/[^a-zA-Z0-9_-]/g, "");
 }
 
+/**
+ * The finished-mark value of each animated attribute (the final keyframe of
+ * the forward morph). Applied as the elements' base DOM state when
+ * `loopRestMode="visible"`, so the completed Buzz mark is painted immediately
+ * — before SMIL `beginElement()` runs, and even if SMIL never starts at all
+ * (e.g. a webview that paints ahead of script, or reduced-motion hiding
+ * `<animate>`).
+ */
+type RestingAttrs = Record<string, Record<string, string>>;
+
+function restingAttrs(config: VariantConfig): RestingAttrs {
+  return Object.fromEntries(
+    Object.entries(config)
+      .filter(([part]) => part !== "duration" && part !== "texture")
+      .map(([part, timings]) => [
+        part,
+        Object.fromEntries(
+          Object.entries(timings as PartTimings).map(
+            ([attribute, [, values]]) => {
+              const splitValues = values.split(";");
+              return [attribute, splitValues[splitValues.length - 1] ?? ""];
+            },
+          ),
+        ),
+      ]),
+  );
+}
+
 function TextureFilter({
   id,
   texture,
@@ -486,11 +592,13 @@ function CutoutMask({
   duration,
   id,
   repeatCount,
+  resting,
 }: {
   config: VariantConfig;
   duration: string;
   id: string;
   repeatCount: string;
+  resting?: RestingAttrs;
 }) {
   return (
     <mask
@@ -510,6 +618,7 @@ function CutoutMask({
         ry="27"
         fill="#000"
         opacity={"opacity" in config.leftEye ? "0" : undefined}
+        {...resting?.leftEye}
       >
         {animationsFor(config.leftEye, duration, repeatCount)}
       </ellipse>
@@ -520,6 +629,7 @@ function CutoutMask({
         ry="27"
         fill="#000"
         opacity={"opacity" in config.rightEye ? "0" : undefined}
+        {...resting?.rightEye}
       >
         {animationsFor(config.rightEye, duration, repeatCount)}
       </ellipse>
@@ -531,6 +641,7 @@ function CutoutMask({
         rx="5"
         fill="#000"
         opacity="0"
+        {...resting?.topSlot}
       >
         {animationsFor(config.topSlot, duration, repeatCount)}
       </rect>
@@ -542,6 +653,7 @@ function CutoutMask({
         rx="5"
         fill="#000"
         opacity="0"
+        {...resting?.bottomSlot}
       >
         {animationsFor(config.bottomSlot, duration, repeatCount)}
       </rect>
@@ -553,10 +665,12 @@ function InkShapes({
   config,
   duration,
   repeatCount,
+  resting,
 }: {
   config: VariantConfig;
   duration: string;
   repeatCount: string;
+  resting?: RestingAttrs;
 }) {
   return (
     <>
@@ -566,6 +680,7 @@ function InkShapes({
         cy="154.5"
         r="91.7"
         opacity="0"
+        {...resting?.leftSide}
       >
         {animationsFor(config.leftSide, duration, repeatCount)}
       </circle>
@@ -575,6 +690,7 @@ function InkShapes({
         cy="154.5"
         r="91.7"
         opacity="0"
+        {...resting?.rightSide}
       >
         {animationsFor(config.rightSide, duration, repeatCount)}
       </circle>
@@ -587,6 +703,7 @@ function InkShapes({
         height="93"
         rx="14"
         opacity={"opacity" in config.body ? "0" : undefined}
+        {...resting?.body}
       >
         {animationsFor(config.body, duration, repeatCount)}
       </rect>
@@ -595,40 +712,27 @@ function InkShapes({
 }
 
 /**
- * Shapes the rest window of a stretched loop cycle. SMIL `<animate>` targets
- * its parent element.
- *
- * - `"hidden"`: fully visible while the morph plays, then a quick fade to
- *   invisible for the remainder of the cycle.
- * - `"visible"`: holds the finished mark on screen through the rest, with a
- *   quick fade only at the very end of the cycle so the repeat (which starts
- *   from hidden ink shapes) doesn't hard-cut.
+ * Hides the parent group during the rest window of a stretched hidden-rest
+ * loop cycle: fully visible while the morph plays, then a quick fade to
+ * invisible for the remainder of the cycle. SMIL `<animate>` targets its
+ * parent element. Not used for `loopRestMode="visible"` — that timeline is
+ * seamless and never needs to hide the mark.
  */
 function RestWindowFade({
   cycleSeconds,
   morphSeconds,
   repeatCount,
-  restMode,
 }: {
   cycleSeconds: number;
   morphSeconds: number;
   repeatCount: string;
-  restMode: "hidden" | "visible";
 }) {
   const fadeSeconds = 0.15;
-  let keyTimes: string;
-  let values: string;
-
-  if (restMode === "visible") {
-    const fadeStart = Math.max((cycleSeconds - fadeSeconds) / cycleSeconds, 0);
-    keyTimes = ["0", fadeStart.toFixed(4), "1"].join(";");
-    values = "1;1;0";
-  } else {
-    const visibleEnd = morphSeconds / cycleSeconds;
-    const fadeEnd = Math.min((morphSeconds + fadeSeconds) / cycleSeconds, 1);
-    keyTimes = ["0", visibleEnd.toFixed(4), fadeEnd.toFixed(4), "1"].join(";");
-    values = "1;1;0;0";
-  }
+  const visibleEnd = morphSeconds / cycleSeconds;
+  const fadeEnd = Math.min((morphSeconds + fadeSeconds) / cycleSeconds, 1);
+  const keyTimes = ["0", visibleEnd.toFixed(4), fadeEnd.toFixed(4), "1"].join(
+    ";",
+  );
 
   return (
     <animate
@@ -639,7 +743,7 @@ function RestWindowFade({
       fill={repeatCount === LOOP ? "remove" : "freeze"}
       keyTimes={keyTimes}
       repeatCount={repeatCount}
-      values={values}
+      values="1;1;0;0"
     />
   );
 }
@@ -662,19 +766,36 @@ export default function BuzzLogoAnimation({
   const baseConfig = VARIANTS[variant] ?? VARIANTS.v8;
   const restSeconds = loop ? Math.max(loopRestSeconds, 0) : 0;
   const morphSeconds = Number.parseFloat(baseConfig.duration);
-  const cycleSeconds = morphSeconds + restSeconds;
-  // Stretch the loop period to morph + rest, packing the morph keyframes into
-  // the start of the cycle at native speed. scaleTiming holds the final values
-  // for the remainder; the rest-window opacity animation below hides them.
+  const visibleRest = loopRestMode === "visible" && restSeconds > 0;
+  // Hidden rest: cycle = morph + rest (morph plays, then the mark hides).
+  // Visible rest: cycle = rest + deconstruct + rebuild (the mark is complete
+  // at keyTime 0 and never blanks out).
+  const cycleSeconds = visibleRest
+    ? restSeconds + morphSeconds * 2
+    : morphSeconds + restSeconds;
   const config =
     restSeconds > 0
-      ? scaleVariant(
-          baseConfig,
-          `${cycleSeconds}s`,
-          morphSeconds / cycleSeconds,
-        )
+      ? visibleRest
+        ? visibleRestVariant(
+            baseConfig,
+            `${cycleSeconds}s`,
+            restSeconds / cycleSeconds,
+            morphSeconds / cycleSeconds,
+          )
+        : // Stretch the loop period to morph + rest, packing the morph
+          // keyframes into the start of the cycle at native speed. scaleTiming
+          // holds the final values for the remainder; the rest-window opacity
+          // animation below hides them.
+          scaleVariant(
+            baseConfig,
+            `${cycleSeconds}s`,
+            morphSeconds / cycleSeconds,
+          )
       : baseConfig;
   const animatedConfig = reverse ? reverseVariant(config) : config;
+  // Visible rest also bakes the finished mark into the base DOM attributes so
+  // the first paint shows a complete mark even before SMIL begins.
+  const resting = visibleRest ? restingAttrs(baseConfig) : undefined;
   const repeatCount = loop ? LOOP : "1";
   const maskId = `buzz-logo-cutouts-${idSuffix}`;
   const textureId = `buzz-logo-texture-${idSuffix}`;
@@ -721,16 +842,16 @@ export default function BuzzLogoAnimation({
             config={animatedConfig}
             duration={animatedConfig.duration}
             repeatCount={repeatCount}
+            resting={resting}
           />
           {textured && <TextureFilter id={textureId} texture={texture} />}
         </defs>
         <g filter={textured ? `url(#${textureId})` : undefined}>
-          {restSeconds > 0 ? (
+          {restSeconds > 0 && !visibleRest ? (
             <RestWindowFade
               cycleSeconds={cycleSeconds}
               morphSeconds={morphSeconds}
               repeatCount={repeatCount}
-              restMode={loopRestMode}
             />
           ) : null}
           <g mask={`url(#${maskId})`}>
@@ -738,6 +859,7 @@ export default function BuzzLogoAnimation({
               config={animatedConfig}
               duration={animatedConfig.duration}
               repeatCount={repeatCount}
+              resting={resting}
             />
           </g>
         </g>

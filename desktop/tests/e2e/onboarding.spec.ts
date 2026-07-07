@@ -1110,30 +1110,40 @@ test("first-run onboarding shows setup loading until Welcome bootstrap completes
   await page.waitForTimeout(250);
   await expect(loadingGate).toBeVisible();
 
-  // The boot mark must stay visible through the loop's rest window — a blank
-  // gate between morph cycles reads as "nothing is loading." Sample the SMIL
-  // opacity across a full cycle (0.88s morph + 2s rest) and only allow the
-  // brief cycle-boundary fade to dip low. The hidden-rest treatment (used by
-  // small inline indicators) would be blank for ~69% of samples.
-  const dimFraction = await loadingGate.evaluate(async (element) => {
-    const animatedGroup = element.querySelector(
-      ".buzz-logo__mark > g",
-    ) as SVGGElement | null;
-    if (!animatedGroup) {
-      return null;
-    }
+  // The boot mark must be visible from the gate's FIRST painted frame and
+  // stay visible through the loop's rest window — a blank gate (during a
+  // short-lived boot or between morph cycles) reads as "nothing is loading."
+  // With loopRestMode="visible" the finished mark is baked into the SVG's
+  // base DOM attributes, so the mark paints complete even before (or without)
+  // SMIL starting — that's what guarantees first-frame visibility on real
+  // cold boots. Then sample across a full cycle (2s rest + 0.88s deconstruct
+  // + 0.88s rebuild): only the brief mid-cycle morph transit may dip low.
+  // The old intro-first treatment started blank and hid the whole mark for
+  // the 2s rest (~69% of samples dim).
+  const markVisibility = await loadingGate.evaluate(async (element) => {
+    const inks = [...element.querySelectorAll(".buzz-logo__ink")];
+    // Base (pre-SMIL) attribute state — what the first paint shows.
+    const baseOpacities = inks.map((ink) => ink.getAttribute("opacity") ?? "1");
 
-    const samples: number[] = [];
+    const samples: number[][] = [];
     for (let i = 0; i < 30; i += 1) {
       samples.push(
-        Number.parseFloat(window.getComputedStyle(animatedGroup).opacity),
+        inks.map((ink) =>
+          Number.parseFloat(window.getComputedStyle(ink).opacity),
+        ),
       );
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
-    return samples.filter((opacity) => opacity < 0.5).length / samples.length;
+    return { baseOpacities, samples };
   });
-  expect(dimFraction).not.toBeNull();
-  expect(dimFraction as number).toBeLessThan(0.15);
+  // First painted frame (before SMIL begins): every ink shape fully visible.
+  expect(markVisibility.baseOpacities).toEqual(["1", "1", "1"]);
+  // Across the cycle: the mark may only read as blank (all inks dim) during
+  // the brief morph transit, never for a rest-window-sized stretch.
+  const blankSamples = markVisibility.samples.filter((inks) =>
+    inks.every((opacity) => opacity < 0.5),
+  ).length;
+  expect(blankSamples / markVisibility.samples.length).toBeLessThan(0.15);
   await expect(loadingGate).toBeVisible();
 
   await expectWelcomeView(page);
