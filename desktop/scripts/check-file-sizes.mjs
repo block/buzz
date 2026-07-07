@@ -91,12 +91,7 @@ const overrides = new Map([
   // activity-feed threads avatar_url into build_managed_agent_summary for the
   // assistant-bubble pinned snapshot.
   // +1 for agent_pubkey field in setup payload (config-nudge card wire).
-  // +246: sweep_untracked_bundle_harnesses — exact-exe-path boot sweep for
-  // receiptless harness orphans (ProcessSnapshot + select_untracked + macOS/Linux
-  // collect_process_snapshots + proc_exe_path_from_procargs2 + expected_harness_exe_path
-  // + sweep fn + 6 unit tests). Load-bearing security fix; queued to split
-  // process-table sweep logic into a dedicated runtime/sweep.rs module.
-  ["src-tauri/src/managed_agents/runtime.rs", 2454],
+  ["src-tauri/src/managed_agents/runtime.rs", 2208],
   // config-bridge setup-payload env-boundary fix adds readiness wiring in
   // spawn_agent_child; load-bearing security fix, queued to split.
   ["src-tauri/src/managed_agents/config_bridge/reader.rs", 1016],

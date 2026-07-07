@@ -136,6 +136,11 @@ pub async fn restore_managed_agents_on_launch(
         // matches this bundle's harness binary but is not in the tracked set.
         // Complements the env-var sweep above — catches orphans that predate
         // BUZZ_MANAGED_AGENT injection or lost their PID-file receipt.
+        //
+        // TODO: the three sweeps above each walk the PID table independently.
+        // A future consolidation should collect a single shared process snapshot
+        // at the top of this block and thread it through all sweep functions,
+        // replacing the three separate kernel enumerations.
         super::sweep_untracked_bundle_harnesses(&tracked_pids);
 
         let candidates: Vec<String> = records
