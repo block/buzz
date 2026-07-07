@@ -82,7 +82,10 @@ const overrides = new Map([
   // to split with the rest of this list.
   // dev-nest namespace: OnceLock<Option<PathBuf>> + init_nest_dir + constants
   // added to plumb the dev/prod discriminator. Load-bearing for the D2 nest fix.
-  ["src-tauri/src/managed_agents/nest.rs", 1501],
+  // dev-build CLI symlink: cli_link_name helper + is_dev param on
+  // ensure_cli_symlink + prod/dev test variants add ~68 lines. Load-bearing;
+  // queued to split with the rest of this list.
+  ["src-tauri/src/managed_agents/nest.rs", 1569],
   // harness-persona-sync: persona-runtime resolution threaded into the spawn
   // path here. Load-bearing feature growth; queued to split in the resolver
   // unify refactor followup. +26 for resolve_effective_prompt_model_provider
