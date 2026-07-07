@@ -365,4 +365,101 @@ test.describe("drafts screenshots", () => {
       new RegExp(`autoSend=${encodeURIComponent(THREAD_DRAFT_KEY)}`),
     );
   });
+
+  test("06 — active-draft badge on inbox trigger and filter option", async ({
+    page,
+  }) => {
+    // Captures both badge placements for the PR screenshot:
+    //   1. The numeric badge on the inbox filter trigger button.
+    //   2. The badge next to "Drafts" in the filter dropdown.
+    // Two active drafts are seeded so the count is 2.
+    await installMockBridge(page);
+    await patchWorkspacePubkey(page);
+    await seedDraftStore(page, ACTIVE_DRAFTS);
+
+    await page.goto("/", { waitUntil: "domcontentloaded" });
+    await expect(page.getByTestId("home-inbox")).toBeVisible({
+      timeout: 10_000,
+    });
+
+    // Badge should be visible on the filter trigger with count = 2.
+    const triggerBadge = page.getByTestId("inbox-draft-badge");
+    await expect(triggerBadge).toBeVisible({ timeout: 6_000 });
+    await expect(triggerBadge).toHaveText("2");
+
+    // Open the filter dropdown so the badge-option is visible too.
+    await page.getByTestId("inbox-filter-trigger").click();
+    const dropdownBadge = page.getByTestId("inbox-draft-badge-option");
+    await expect(dropdownBadge).toBeVisible({ timeout: 4_000 });
+    await expect(dropdownBadge).toHaveText("2");
+
+    await page.waitForTimeout(200);
+
+    // Capture the full inbox header area including the open dropdown.
+    await page.getByTestId("home-inbox").screenshot({
+      path: `${SHOTS}/06-draft-badge.png`,
+    });
+
+    // Dismiss the dropdown cleanly.
+    await page.keyboard.press("Escape");
+  });
+
+  test("07 — thread-deleted state (orphaned thread-reply draft)", async ({
+    page,
+  }) => {
+    // A thread-reply draft whose root event is definitively deleted:
+    // `useDraftRootStatus` maps it to `deleted`, showing the "Thread deleted"
+    // label, greying the row, and disabling Open/Send.
+    const DELETED_ROOT_ID =
+      "dead0000dead0000dead0000dead0000dead0000dead0000dead0000dead0000";
+    const THREAD_DRAFT_KEY = `thread:${DELETED_ROOT_ID}`;
+
+    await installMockBridge(page, { deletedEventIds: [DELETED_ROOT_ID] });
+    await patchWorkspacePubkey(page);
+    await seedDraftStore(page, {
+      [THREAD_DRAFT_KEY]: {
+        content: "Planning to follow up on the discussion from last week.",
+        selectionStart: 52,
+        selectionEnd: 52,
+        channelId: GENERAL_CHANNEL_ID,
+        createdAt: CREATED_AT_1,
+        updatedAt: CREATED_AT_1,
+        pendingImeta: [],
+        spoileredAttachmentUrls: [],
+        status: "active",
+      },
+    });
+
+    const panel = await openDraftsPanel(page);
+
+    // The orphaned draft row should render.
+    const draftRow = panel.locator(
+      `[data-testid='home-draft-item-${THREAD_DRAFT_KEY}']`,
+    );
+    await expect(draftRow).toBeVisible({ timeout: 8_000 });
+
+    // "Thread deleted" badge must appear once the root-status query resolves.
+    const orphanLabel = panel.getByTestId(
+      `home-draft-orphaned-label-${THREAD_DRAFT_KEY}`,
+    );
+    await expect(orphanLabel).toBeVisible({ timeout: 8_000 });
+
+    // Hover the row to confirm Open and Send are disabled.
+    await draftRow.hover();
+    // Both the open and send buttons are labelled "Thread deleted" when orphaned.
+    const disabledBtns = draftRow.getByRole("button", {
+      name: "Thread deleted",
+    });
+    await expect(disabledBtns).toHaveCount(2, { timeout: 4_000 });
+    // Delete is still enabled.
+    await expect(
+      draftRow.getByRole("button", { name: "Delete draft" }),
+    ).toBeVisible({ timeout: 4_000 });
+
+    await page.waitForTimeout(200);
+
+    await panel.screenshot({
+      path: `${SHOTS}/07-thread-deleted-state.png`,
+    });
+  });
 });

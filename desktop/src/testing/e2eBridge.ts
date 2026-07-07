@@ -170,6 +170,9 @@ type E2eConfig = {
       scope_value: string;
       kinds: string; // JSON-encoded integer array, e.g. "[9,40002]"
     }>;
+    // Event IDs that `get_event` should report as definitively not found.
+    // Causes `useDraftRootStatus` to classify as `deleted`.
+    deletedEventIds?: string[];
   };
   relayHttpUrl?: string;
   relayWsUrl?: string;
@@ -7317,6 +7320,10 @@ async function handleGetEvent(
 ) {
   const identity = getIdentity(config);
   if (!identity) {
+    // Allow test specs to mark specific event IDs as definitively deleted.
+    if (config?.mock?.deletedEventIds?.includes(args.eventId)) {
+      throw new Error("event not found");
+    }
     const knownEvents: RelayEvent[] = [
       ...Array.from(mockMessages.values()).flat(),
       {
