@@ -68,47 +68,56 @@ export function hasMissingRequiredEnvKey(
 /**
  * Resolve the provider and env-vars to PERSIST on Save.
  *
- * When inheriting a persona's runtime, the runtime/provider/env that will
- * actually run come from the persona — but the agent record's own
- * `provider`/`envVars` may be stale (a previously harness-pinned agent can have
- * its provider cleared and carry no persona credential). The spawn path reads
- * ONLY the record snapshot (`record.provider`/`record.env_vars`), never the
- * live persona, so the persona snapshot must be persisted on the inherit
- * transition — otherwise the saved agent inherits e.g. buzz-agent/Anthropic
- * with no provider and no credential and fails readiness on next start. This
- * mirrors create-time, which pins the persona snapshot into the record.
+ * The spawn path reads ONLY the record snapshot (`record.provider`/
+ * `record.env_vars`), never the live persona, and the record is authoritative:
+ * `env_vars` is the complete pinned map (persona env snapshotted at create,
+ * already merged UNDER the agent's own overrides), and the provider field is
+ * user-editable in the dialog even while inheriting. So the local edit state IS
+ * the record's own value and is honored verbatim in the normal case.
  *
- * These are the SAME effective values the required-credential gate validates,
- * so the gate, the submitted record, and the spawn snapshot all agree.
+ * The ONE exception is the inherit-TRANSITION-from-cleared case: a previously
+ * harness-pinned agent (e.g. Claude) has its `provider` cleared and carries no
+ * persona credential, then switches to "Inherit runtime from persona" for a
+ * provider-backed persona (e.g. buzz-agent/Anthropic). Persisting the local
+ * (empty) provider + credential-less env would save an agent that fails
+ * readiness on next start. Only in that case — inheriting AND the local
+ * provider is empty — do we substitute the persona snapshot: the persona's
+ * provider and the persona-layered env (`{ ...personaEnv, ...agentEnv }`, agent
+ * layer wins to mirror spawn-time layering), matching create-time record
+ * pinning.
  *
- * - `provider`: the persona's provider when inheriting, else the local edit
- *   state. Normalized: trimmed, empty → `null`.
- * - `envVars`: the persona-layered map (`{ ...personaEnv, ...agentEnv }`) when
- *   inheriting, else the local edit state. The agent's own layer wins, matching
- *   the spawn-time layering.
+ * A NON-empty local provider while inheriting (e.g. an Anthropic-persona agent
+ * the user re-points to Databricks) is a deliberate edit and passes through
+ * unchanged — we never overwrite it with the persona provider.
  *
- * When not inheriting, both pass through the local edit state unchanged.
+ * The result is the SAME effective value the required-credential gate
+ * validates, so the gate, the submitted record, and the spawn snapshot agree.
+ * Provider is normalized: trimmed, empty → `null`.
  */
 export function resolveInheritedRuntimeSubmission(input: {
   inheritHarness: boolean;
-  /** Local provider edit state (from the agent record). */
+  /** Local provider edit state (from the agent record, user-editable). */
   provider: string;
   /** The linked persona's provider, or empty when none/unset. */
   personaProvider: string;
   /** Local env-vars edit state (the agent's own layer). */
   envVars: Record<string, string>;
-  /** The persona's env vars, layered under the agent's own on inherit. */
+  /** The persona's env vars, layered under the agent's own on transition. */
   personaEnvVars: Record<string, string>;
 }): { provider: string | null; envVars: Record<string, string> } {
-  if (!input.inheritHarness) {
+  const localProvider = input.provider.trim();
+  // Substitute the persona snapshot ONLY on the inherit-transition-from-cleared
+  // case (inheriting with an empty local provider). Otherwise the local edit
+  // state is authoritative and passes through unchanged.
+  if (input.inheritHarness && localProvider.length === 0) {
     return {
-      provider: input.provider.trim() || null,
-      envVars: input.envVars,
+      provider: input.personaProvider.trim() || null,
+      envVars: { ...input.personaEnvVars, ...input.envVars },
     };
   }
   return {
-    provider: input.personaProvider.trim() || null,
-    envVars: { ...input.personaEnvVars, ...input.envVars },
+    provider: localProvider || null,
+    envVars: input.envVars,
   };
 }
 

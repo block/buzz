@@ -75,10 +75,31 @@ test("resolveInheritedRuntimeSubmission layers the agent's own env over the pers
   });
 });
 
-test("resolveInheritedRuntimeSubmission normalizes an unset persona provider to null when inheriting", () => {
+test("resolveInheritedRuntimeSubmission preserves a user-edited provider + env while inheriting", () => {
+  // Regression: an already-inheriting agent (e.g. an Anthropic persona) that
+  // the user re-points to Databricks with its own DATABRICKS_HOST must persist
+  // that deliberate edit verbatim — NOT get overwritten with the persona's
+  // provider/env. The provider field is user-editable even while inheriting.
   const result = resolveInheritedRuntimeSubmission({
     inheritHarness: true,
     provider: "databricks",
+    personaProvider: "anthropic",
+    envVars: { DATABRICKS_HOST: "https://dbc-x.cloud.databricks.com" },
+    personaEnvVars: { ANTHROPIC_API_KEY: "sk-persona" },
+  });
+  assert.equal(result.provider, "databricks");
+  assert.deepEqual(result.envVars, {
+    DATABRICKS_HOST: "https://dbc-x.cloud.databricks.com",
+  });
+});
+
+test("resolveInheritedRuntimeSubmission normalizes a whitespace-only local provider while inheriting (transition case, unset persona)", () => {
+  // Inheriting with an empty local provider is the transition-from-cleared
+  // case, so we fall into the persona-snapshot branch; an unset persona
+  // provider normalizes to null.
+  const result = resolveInheritedRuntimeSubmission({
+    inheritHarness: true,
+    provider: "   ",
     personaProvider: "",
     envVars: {},
     personaEnvVars: {},
