@@ -116,6 +116,7 @@ export function AppShell() {
   const queryClient = useQueryClient();
   const {
     goAgents,
+    goChats,
     goChannel,
     goHome,
     goProjects,
@@ -204,9 +205,20 @@ export function AppShell() {
     () => channels.filter((channel) => channel.isMember),
     [channels],
   );
-  const sidebarChannels = React.useMemo(
+  const nonArchivedMemberChannels = React.useMemo(
     () => memberChannels.filter((channel) => channel.archivedAt === null),
     [memberChannels],
+  );
+  const sidebarChannels = React.useMemo(
+    () =>
+      nonArchivedMemberChannels.filter(
+        (channel) => channel.channelType !== "chat",
+      ),
+    [nonArchivedMemberChannels],
+  );
+  const searchableChannels = React.useMemo(
+    () => channels.filter((channel) => channel.channelType !== "chat"),
+    [channels],
   );
   const activeChannel = React.useMemo(
     () =>
@@ -261,7 +273,7 @@ export function AppShell() {
     mutedRootIds,
     muteThread,
     unmuteThread,
-  } = useUnreadChannels(sidebarChannels, activeChannel, {
+  } = useUnreadChannels(nonArchivedMemberChannels, activeChannel, {
     pubkey: identityQuery.data?.pubkey,
     relayClient,
     currentPubkey: identityQuery.data?.pubkey,
@@ -514,7 +526,7 @@ export function AppShell() {
     unreadChannelNotificationCount,
   ]);
 
-  // Dispatch `buzz://message` deep links into the router.
+  // Dispatch routed `buzz://` deep links into the router.
   useMessageDeepLinks();
 
   const handleOpenNewDm = React.useCallback(() => setIsNewDmOpen(true), []);
@@ -610,6 +622,8 @@ export function AppShell() {
             getMessageReadAt,
             markMessageRead,
             readStateVersion,
+            unreadChannelCounts,
+            unreadChannelIds,
             setContextParentResolver,
             followThread: handleFollowThread,
             unfollowThread: handleUnfollowThread,
@@ -795,11 +809,12 @@ export function AppShell() {
                             await goChannel(directMessage.id);
                           }}
                           onSelectAgents={() => void goAgents()}
+                          onSelectChats={() => void goChats()}
                           onSelectChannel={(channelId) =>
                             void goChannel(channelId)
                           }
                           onOpenSearchResult={handleOpenSearchResult}
-                          searchChannels={channels}
+                          searchChannels={searchableChannels}
                           searchFocusRequest={searchFocusRequest}
                           onSelectHome={() => void goHome()}
                           onSelectProjects={() => void goProjects()}
@@ -862,7 +877,7 @@ export function AppShell() {
                     <AppShellOverlays
                       activeChannel={managedChannel}
                       browseDialogType={browseDialogType}
-                      channels={channels}
+                      channels={searchableChannels}
                       currentPubkey={identityQuery.data?.pubkey}
                       isChannelManagementOpen={isChannelManagementOpen}
                       onBrowseChannelJoin={handleBrowseChannelJoin}

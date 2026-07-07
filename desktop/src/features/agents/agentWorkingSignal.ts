@@ -34,6 +34,8 @@ export type AgentWorkingChannel = {
   channelId: string;
   /** Desktop-clock anchor for elapsed displays (turn start / first typing). */
   anchorAt: number;
+  /** Live observer turn ids for this channel; typing fallback has none. */
+  turnIds: string[];
   source: Exclude<AgentWorkingSource, "none">;
 };
 
@@ -86,7 +88,6 @@ function notify() {
 export function subscribeAgentWorkingSignal(listener: () => void) {
   listeners.add(listener);
   if (listeners.size === 1) {
-    invalidateCaches();
     unsubscribeTurns = subscribeActiveAgentTurns(notify);
   }
   return () => {
@@ -94,6 +95,7 @@ export function subscribeAgentWorkingSignal(listener: () => void) {
     if (listeners.size === 0) {
       unsubscribeTurns?.();
       unsubscribeTurns = null;
+      invalidateCaches();
     }
   };
 }
@@ -140,6 +142,7 @@ function computeAgentWorkingState(
   const channels: AgentWorkingChannel[] = turns.map((turn) => ({
     channelId: turn.channelId,
     anchorAt: turn.anchorAt,
+    turnIds: turn.turnIds,
     source: "observer" as const,
   }));
   const observerChannelIds = new Set(turns.map((turn) => turn.channelId));
@@ -153,6 +156,7 @@ function computeAgentWorkingState(
       channels.push({
         channelId: typingChannelId,
         anchorAt: since,
+        turnIds: [],
         source: "typing",
       });
     }
@@ -191,17 +195,12 @@ export function getAgentWorkingState(
     return IDLE_STATE;
   }
   const cacheKey = `${normalizePubkey(agentPubkey)}|${channelId ?? ""}`;
-  const useCache = listeners.size > 0;
-  if (useCache) {
-    const cached = stateCache.get(cacheKey);
-    if (cached) {
-      return cached;
-    }
+  const cached = stateCache.get(cacheKey);
+  if (cached) {
+    return cached;
   }
   const state = computeAgentWorkingState(agentPubkey, channelId);
-  if (useCache) {
-    stateCache.set(cacheKey, state);
-  }
+  stateCache.set(cacheKey, state);
   return state;
 }
 
@@ -212,8 +211,7 @@ export function getAgentWorkingState(
  * first-seen typing.
  */
 export function getWorkingChannels(): WorkingChannelSummary[] {
-  const useCache = listeners.size > 0;
-  if (useCache && channelsCache) {
+  if (channelsCache) {
     return channelsCache;
   }
 
@@ -255,6 +253,7 @@ export function getWorkingChannels(): WorkingChannelSummary[] {
       anchorAt,
       agentCount: entries.size,
       agentPubkeys: [...entries.keys()],
+      turnIds: [],
       source: "typing",
     });
   }
@@ -262,9 +261,7 @@ export function getWorkingChannels(): WorkingChannelSummary[] {
   const result = [...byChannel.values()].sort((a, b) =>
     a.channelId.localeCompare(b.channelId),
   );
-  if (useCache) {
-    channelsCache = result;
-  }
+  channelsCache = result;
   return result;
 }
 
@@ -280,12 +277,9 @@ export function getWorkingAgentPubkeysForChannel(
   if (!channelId) {
     return EMPTY_PUBKEYS;
   }
-  const useCache = listeners.size > 0;
-  if (useCache) {
-    const cached = channelPubkeysCache.get(channelId);
-    if (cached) {
-      return cached;
-    }
+  const cached = channelPubkeysCache.get(channelId);
+  if (cached) {
+    return cached;
   }
   const merged = new Set<string>();
   for (const summary of getActiveTurnsByChannel()) {
@@ -303,9 +297,7 @@ export function getWorkingAgentPubkeysForChannel(
     }
   }
   const result = merged.size === 0 ? EMPTY_PUBKEYS : [...merged].sort();
-  if (useCache) {
-    channelPubkeysCache.set(channelId, result);
-  }
+  channelPubkeysCache.set(channelId, result);
   return result;
 }
 

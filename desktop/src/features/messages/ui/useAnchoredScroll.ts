@@ -225,6 +225,27 @@ export function useAnchoredScroll({
       container.scrollTo({ top: container.scrollHeight, behavior });
       setIsAtBottom(true);
       setNewMessageCount(0);
+
+      // The jump animates toward a scrollHeight snapshot, but virtualized
+      // rows re-measure mid-flight (estimate → real height), moving the
+      // floor. Re-assert the bottom until it stabilizes; re-issuing a
+      // smooth scrollTo re-targets the ongoing glide rather than snapping.
+      let attempts = 0;
+      const reassertBottom = () => {
+        if (anchorRef.current.kind !== "at-bottom") return;
+        const element = scrollContainerRef.current;
+        if (!element) return;
+        const gap =
+          element.scrollHeight - element.scrollTop - element.clientHeight;
+        if (gap > 1) {
+          element.scrollTo({ top: element.scrollHeight, behavior });
+        }
+        attempts += 1;
+        if (attempts < 10 && (gap > 1 || attempts < 3)) {
+          window.setTimeout(reassertBottom, 120);
+        }
+      };
+      window.setTimeout(reassertBottom, 120);
     },
     [scrollContainerRef],
   );

@@ -8,11 +8,16 @@ import {
 
 import { cacheSearchHitEvent } from "@/app/navigation/searchHitEventCache";
 import { resolveSearchHitDestination } from "@/app/navigation/resolveSearchHitDestination";
+import { NO_PROJECT_SELECTION_ID } from "@/features/chats/lib/chatSetup";
 import type { SearchHit } from "@/shared/api/types";
 
 type NavigationBehavior = {
   replace?: boolean;
   resetScroll?: boolean;
+};
+
+type ChatsNavigationBehavior = NavigationBehavior & {
+  projectId?: string | null;
 };
 
 export function useAppNavigation() {
@@ -62,6 +67,40 @@ export function useAppNavigation() {
       commitNavigation(
         {
           to: "/agents",
+        },
+        behavior,
+      ),
+    [commitNavigation],
+  );
+
+  const goChats = React.useCallback(
+    (behavior?: ChatsNavigationBehavior) =>
+      commitNavigation(
+        {
+          to: "/chats",
+          search:
+            behavior && "projectId" in behavior
+              ? {
+                  projectId:
+                    behavior.projectId === null
+                      ? NO_PROJECT_SELECTION_ID
+                      : behavior.projectId,
+                }
+              : {},
+        },
+        behavior,
+      ),
+    [commitNavigation],
+  );
+
+  const goChat = React.useCallback(
+    (chatId: string, behavior?: NavigationBehavior) =>
+      commitNavigation(
+        {
+          to: "/chats/$chatId",
+          params: {
+            chatId,
+          },
         },
         behavior,
       ),
@@ -261,12 +300,18 @@ export function useAppNavigation() {
         });
       }
 
+      if (destination.kind === "chat") {
+        return goChat(destination.chatId, {
+          resetScroll: destination.messageId ? true : undefined,
+        });
+      }
+
       return goChannel(destination.channelId, {
         messageId: destination.messageId,
         threadRootId: destination.threadRootId,
       });
     },
-    [goChannel, goForumPost],
+    [goChat, goChannel, goForumPost],
   );
 
   return {
@@ -274,6 +319,8 @@ export function useAppNavigation() {
     closeSettings,
     closeWorkflowDetail,
     goAgents,
+    goChat,
+    goChats,
     goChannel,
     goForumPost,
     goHome,

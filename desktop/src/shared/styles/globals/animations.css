@@ -123,22 +123,55 @@
   transform-origin: center;
 }
 
-.buzz-shimmer {
+/* Entrance for newly-arrived chat rows (messages, activity markers). Uses
+   transform/opacity only so the row's measured height is final on mount and
+   the message scroller's anchoring/auto-follow math is undisturbed — this is
+   the shadcn message-scroller "slide-up" preset. */
+.buzz-message-entrance {
+  animation: buzz-message-entrance 260ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+@keyframes buzz-message-entrance {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .buzz-message-entrance {
+    animation: none;
+  }
+}
+
+.buzz-shimmer,
+.shimmer {
   --buzz-shimmer-duration: 2000ms;
   --buzz-shimmer-band: 400%;
-  --buzz-shimmer-highlight: color-mix(
-    in srgb,
-    hsl(var(--foreground)) 82%,
-    hsl(var(--muted-foreground)) 18%
-  );
+  --buzz-shimmer-highlight: hsl(var(--foreground));
 
-  color: hsl(var(--muted-foreground));
+  /* Base text is dimmed while loading so the sweeping highlight band
+     (full foreground) reads clearly against it in both themes. */
+  color: hsl(var(--muted-foreground) / 0.55);
   display: inline-block;
   position: relative;
 }
 
-.buzz-shimmer::before {
+.buzz-shimmer::before,
+.shimmer::before {
   animation: buzz-shimmer var(--buzz-shimmer-duration) linear infinite;
+  /* Truncate exactly like the base text: the overlay repeats the FULL
+     data-shimmer-text, and without its own ellipsis it paints the clipped
+     characters right over the base ellipsis on truncating labels (sidebar
+     titles). Same font + box → the ellipsis lands in the same spot. */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   background-clip: text;
   background-image: linear-gradient(
     90deg,
@@ -159,18 +192,97 @@
   -webkit-text-fill-color: transparent;
 }
 
+/* One right-to-left sweep per cycle, phase-shifted to start mid-sweep so a
+   freshly mounted row (the Working marker re-mounts between tool executions)
+   shows the band immediately instead of waiting out the transparent lead-in.
+   The 50%→50.01% jump lands while the band is outside the text, so it is
+   invisible. Keyframes instead of a negative animation-delay — WKWebView
+   handles calc() delays on pseudo-elements unreliably. */
 @keyframes buzz-shimmer {
   0% {
+    background-position: 50% 0;
+  }
+
+  50% {
+    background-position: 0% 0;
+  }
+
+  50.01% {
     background-position: 100% 0;
   }
 
   100% {
-    background-position: 0% 0;
+    background-position: 50% 0;
   }
 }
 
+/* Accent variant: keeps the text at its normal color and sweeps a
+   primary-colored band across it, for places (sidebar titles) where the
+   default dimmed-base treatment reads as a de-emphasized row.
+
+   The band must contrast with the TEXT it sweeps (full foreground — this
+   variant never dims), so the primary hue is pulled toward the background:
+   lighter in light mode (against near-black text), darker in dark mode
+   (against near-white text). Raw hsl(var(--primary)) sat too close to the
+   text's lightness in both themes and the sweep barely read. The narrower
+   band (300% vs 400%) also makes the highlight cover more of the visible
+   text per pass.
+
+   Light: primary washed toward white — a pale lavender band over near-black
+   text. Dark: primary deepened toward black in oklch (which keeps the hue
+   saturated instead of graying toward the background) — a rich mid-purple
+   band over near-white text. */
+.buzz-shimmer-accent {
+  /* The band hugs the BACKGROUND color (a whisper of primary keeps the
+     hue): glyphs visibly wash out toward the background as it passes,
+     which is the strongest possible contrast against full-color text. */
+  --buzz-shimmer-highlight: color-mix(
+    in oklab,
+    hsl(var(--primary)) 8%,
+    hsl(var(--background))
+  );
+  --buzz-shimmer-band: 300%;
+  color: inherit;
+}
+
 @media (prefers-reduced-motion: reduce) {
-  .buzz-shimmer::before {
+  .buzz-shimmer,
+  .shimmer {
+    color: hsl(var(--muted-foreground));
+  }
+
+  .buzz-shimmer-accent {
+    color: inherit;
+  }
+
+  .buzz-shimmer::before,
+  .shimmer::before {
+    animation: none;
+    content: none;
+  }
+}
+
+/* Work-panel content arriving (the agent posted a PR): a gentle pop —
+   slight scale + fade, matching the message entrance feel. */
+@keyframes buzz-work-card-in {
+  from {
+    opacity: 0;
+    transform: scale(0.96);
+  }
+
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.buzz-work-card-in {
+  animation: buzz-work-card-in 260ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  transform-origin: top center;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .buzz-work-card-in {
     animation: none;
   }
 }

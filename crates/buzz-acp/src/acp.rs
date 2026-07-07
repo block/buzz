@@ -20,6 +20,9 @@ use crate::usage::{TurnUsage, UsageTracker};
 /// Lines exceeding this limit are rejected to prevent OOM from rogue agents.
 const MAX_LINE_SIZE: usize = 10_000_000; // 10 MB
 
+/// Byte cap for [`AcpClient::begin_message_capture`] accumulation.
+const MESSAGE_CAPTURE_MAX_LEN: usize = 4_096;
+
 /// An MCP server configuration passed to `session/new`.
 ///
 /// Corresponds to the `McpServerStdio` variant in the ACP schema.
@@ -173,6 +176,11 @@ pub struct AcpClient {
     /// deltas. Both goose and buzz-agent emit this notification; goose gates
     /// on client capability advertisement, buzz-agent emits unconditionally.
     goose_usage: UsageTracker,
+    /// Accumulates `agent_message_chunk` text while a capture is active.
+    /// Used by side prompts (e.g. chat-title generation) that need the
+    /// assistant's reply text, which is otherwise only streamed to logs.
+    /// `None` = capture inactive.
+    message_capture: Option<String>,
 }
 
 impl AcpClient {
@@ -265,6 +273,7 @@ impl AcpClient {
             active_run_id: None,
             steer_rx: None,
             goose_usage: UsageTracker::default(),
+            message_capture: None,
         })
     }
 
@@ -299,6 +308,20 @@ impl AcpClient {
                 payload,
             );
         }
+    }
+
+    /// Start capturing streamed assistant text (`agent_message_chunk`).
+    ///
+    /// Used by side prompts (e.g. chat-title generation) whose reply the
+    /// harness needs as a string. Call before `session_prompt_*`, then
+    /// [`take_message_capture`](Self::take_message_capture) after it returns.
+    pub fn begin_message_capture(&mut self) {
+        self.message_capture = Some(String::new());
+    }
+
+    /// Stop capturing and return the accumulated assistant text.
+    pub fn take_message_capture(&mut self) -> Option<String> {
+        self.message_capture.take()
     }
 
     /// Send the `initialize` request and return the agent's response result value.
@@ -1259,6 +1282,18 @@ impl AcpClient {
             "agent_message_chunk" => {
                 if let Some(text) = update["content"]["text"].as_str() {
                     tracing::info!(target: "acp::stream", "{text}");
+                    if let Some(capture) = self.message_capture.as_mut() {
+                        // Side prompts expect short replies; the cap bounds a
+                        // runaway stream, not legitimate output.
+                        if capture.len() < MESSAGE_CAPTURE_MAX_LEN {
+                            let budget = MESSAGE_CAPTURE_MAX_LEN - capture.len();
+                            let mut end = budget.min(text.len());
+                            while end > 0 && !text.is_char_boundary(end) {
+                                end -= 1;
+                            }
+                            capture.push_str(&text[..end]);
+                        }
+                    }
                 }
                 false
             }

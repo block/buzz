@@ -2,22 +2,49 @@
 import {
   DndContext,
   DragOverlay,
+  KeyboardSensor,
   PointerSensor,
+  closestCenter,
   pointerWithin,
+  useDndContext,
   useDraggable,
   useDroppable,
   useSensor,
   useSensors,
 } from "@dnd-kit/core";
-import type { DragEndEvent, DragStartEvent } from "@dnd-kit/core";
+import type {
+  CollisionDetection,
+  DragEndEvent,
+  DragStartEvent,
+} from "@dnd-kit/core";
 import {
   SortableContext,
   arrayMove,
+  sortableKeyboardCoordinates,
   verticalListSortingStrategy,
   useSortable,
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import { Hash } from "lucide-react";
+
+// pointerWithin is precise for mouse drags but returns nothing for the
+// keyboard sensor's synthesized coordinates — fall back to closestCenter so
+// keyboard reordering can land on a droppable.
+const sidebarCollisionDetection: CollisionDetection = (args) => {
+  const pointerCollisions = pointerWithin(args);
+  if (pointerCollisions.length > 0) {
+    return pointerCollisions;
+  }
+  // Keyboard path: only sortable siblings are valid targets — the
+  // channel-assignment drop zones overlap the section rows and would
+  // otherwise swallow every keyboard collision.
+  return closestCenter({
+    ...args,
+    droppableContainers: args.droppableContainers.filter(
+      (container) => container.data.current?.type !== "section-drop",
+    ),
+  });
+};
 import * as React from "react";
 
 import { cn } from "@/shared/lib/cn";
@@ -61,8 +88,15 @@ export function DroppableSectionBody({
   className?: string;
 }) {
   const droppableId = `section-drop:${sectionId}`;
+  // Sections can only be reordered, never dropped into another section —
+  // disable the channel-assignment zone while a section drag is active so
+  // it never competes for collisions (pointer or keyboard).
+  const { active } = useDndContext();
+  const activeType = (active?.data.current as { type?: string } | undefined)
+    ?.type;
   const { setNodeRef, isOver } = useDroppable({
     id: droppableId,
+    disabled: activeType === "section",
     data: { type: "section-drop", sectionId } satisfies DndSectionDropData,
   });
 
@@ -187,6 +221,12 @@ export function SidebarDndContext({
     React.useState<SidebarDragItem | null>(null);
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
+    // Keyboard reordering (focus a row, Space to lift, arrows to move,
+    // Space to drop) — also immune to pointer auto-scroll, so tests can
+    // reorder deterministically.
+    useSensor(KeyboardSensor, {
+      coordinateGetter: sortableKeyboardCoordinates,
+    }),
   );
 
   const handleDragStart = React.useCallback(
@@ -244,7 +284,7 @@ export function SidebarDndContext({
 
   return (
     <DndContext
-      collisionDetection={pointerWithin}
+      collisionDetection={sidebarCollisionDetection}
       onDragEnd={handleDragEnd}
       onDragStart={handleDragStart}
       sensors={sensors}

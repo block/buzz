@@ -95,6 +95,7 @@ type MessageThreadPanelProps = {
   isFollowingThread?: boolean;
   isMessageUnreadById?: (messageId: string) => boolean;
   onFollowThread?: () => void;
+  onStartSideConversation?: (message: TimelineMessage) => void;
   onUnfollowThread?: () => void;
 };
 
@@ -313,6 +314,7 @@ export function MessageThreadPanel({
   onSelectReplyTarget,
   onSend,
   onToggleReaction,
+  onStartSideConversation,
   onUnfollowThread,
   profiles,
   replyTargetMessage,
@@ -632,6 +634,7 @@ export function MessageThreadPanel({
               onMarkUnread={onMarkUnread}
               onMarkRead={onMarkRead}
               onToggleReaction={onToggleReaction}
+              onStartSideConversation={onStartSideConversation}
               onUnfollowThread={
                 onUnfollowThread ? (_msg) => onUnfollowThread() : undefined
               }
@@ -773,6 +776,7 @@ export function MessageThreadPanel({
                         }
                         onMarkUnread={onMarkUnread}
                         onMarkRead={onMarkRead}
+                        onStartSideConversation={onStartSideConversation}
                         onReply={onSelectReplyTarget}
                         onToggleReaction={onToggleReaction}
                         profiles={profiles}

@@ -47,7 +47,16 @@ export default defineConfig(async () => ({
       : undefined,
     watch: {
       // 3. tell Vite to ignore watching `src-tauri`
-      ignored: ["**/src-tauri/**"],
+      ignored: [
+        "**/src-tauri/**",
+        // Test artifacts: a Playwright/build run in the same checkout must
+        // not force-reload a live dev app window (in-flight Tauri IPC dies
+        // with "Couldn't find callback id" and interactions appear to
+        // crash mid-flow).
+        "**/playwright-report/**",
+        "**/test-results/**",
+        "**/dist/**",
+      ],
     },
   },
 }));

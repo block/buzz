@@ -2,13 +2,478 @@ use std::time::Duration;
 
 use futures_util::StreamExt;
 use reqwest::{
-    header::{ACCEPT, CONTENT_TYPE, USER_AGENT},
+    header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, USER_AGENT},
     redirect::Policy,
 };
 use url::Url;
 
 const MAX_TITLE_FETCH_BYTES: usize = 256 * 1024;
 const TITLE_FETCH_TIMEOUT: Duration = Duration::from_secs(4);
+const GITHUB_API_TIMEOUT: Duration = Duration::from_secs(8);
+
+/// Shared HTTP client for GitHub API commands: the PR monitor polls on
+/// short intervals, and building a fresh client (connection pool + TLS
+/// session cache) per call threw away keep-alive reuse on every tick.
+fn github_client() -> Result<&'static reqwest::Client, String> {
+    static CLIENT: std::sync::OnceLock<Option<reqwest::Client>> = std::sync::OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                .pool_idle_timeout(Duration::from_secs(90))
+                .pool_max_idle_per_host(2)
+                .build()
+                .ok()
+        })
+        .as_ref()
+        .ok_or_else(|| "github client failed to initialize".to_string())
+}
+
+/// Live pull-request details for the rich GitHub PR link card.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GithubPullRequestInfo {
+    pub title: String,
+    /// GitHub PR state: `open` or `closed` (merged PRs report `closed`).
+    pub state: String,
+    pub merged: bool,
+    pub draft: bool,
+    pub additions: i64,
+    pub deletions: i64,
+    pub changed_files: i64,
+    /// Source branch of the PR (`head.ref`).
+    pub head_ref: String,
+    /// Head commit sha — used to query check runs.
+    pub head_sha: String,
+    /// Issue-level comment count.
+    pub comments: i64,
+    /// Review (inline) comment count.
+    pub review_comments: i64,
+}
+
+/// Aggregate check-run state for a commit, for the chat work panel's CI
+/// monitor.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GithubCheckSummary {
+    pub total: i64,
+    pub pending: i64,
+    pub failed: i64,
+    pub succeeded: i64,
+    /// Individual runs for the expanded view (name + coarse state).
+    pub runs: Vec<GithubCheckRun>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GithubCheckRun {
+    pub name: String,
+    /// `pending` | `success` | `failure`.
+    pub state: String,
+}
+
+/// Review-thread attention state for a PR: how many threads still await a
+/// reply from the PR author. REST cannot see GitHub's "resolved" bit (that
+/// is GraphQL-only), so a thread counts as open while its latest comment is
+/// from someone other than the PR author — replying clears it, which
+/// matches the agent workflow the chat panel automates.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GithubCommentState {
+    pub open_threads: i64,
+}
+
+/// Fetch live PR details from the GitHub REST API.
+///
+/// Anonymous requests cover public repos; when the desktop was launched from
+/// a shell with `GITHUB_TOKEN`/`GH_TOKEN` set, the token is attached so
+/// private-repo cards work too. Returns `Ok(None)` on any non-success
+/// response (not found, rate limited, private without token) — the card
+/// falls back to its static form.
+#[tauri::command]
+pub async fn fetch_github_pull_request(
+    owner: String,
+    repo: String,
+    number: u64,
+) -> Result<Option<GithubPullRequestInfo>, String> {
+    if !is_valid_github_name(&owner) || !is_valid_github_name(&repo) {
+        return Err("invalid GitHub repository reference".to_string());
+    }
+
+    let client = github_client()?;
+
+    let url = format!("https://api.github.com/repos/{owner}/{repo}/pulls/{number}");
+    let mut request = client
+        .get(&url)
+        .timeout(GITHUB_API_TIMEOUT)
+        .header(ACCEPT, "application/vnd.github+json")
+        .header(USER_AGENT, "Buzz Desktop link preview")
+        .header("X-GitHub-Api-Version", "2022-11-28");
+    if let Some(token) = ambient_github_token() {
+        request = request.header(AUTHORIZATION, format!("Bearer {token}"));
+    }
+
+    let response = request
+        .send()
+        .await
+        .map_err(|error| format!("github request failed: {error}"))?;
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(None);
+    }
+    if !response.status().is_success() {
+        // Rate limits and transient failures must NOT read as "no data" —
+        // the UI keeps its last good snapshot on error.
+        return Err(format!("github request failed: {}", response.status()));
+    }
+
+    let body: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|error| format!("github response parse failed: {error}"))?;
+
+    Ok(Some(GithubPullRequestInfo {
+        title: body["title"].as_str().unwrap_or_default().to_string(),
+        state: body["state"].as_str().unwrap_or("open").to_string(),
+        merged: body["merged"].as_bool().unwrap_or(false),
+        draft: body["draft"].as_bool().unwrap_or(false),
+        additions: body["additions"].as_i64().unwrap_or(0),
+        deletions: body["deletions"].as_i64().unwrap_or(0),
+        changed_files: body["changed_files"].as_i64().unwrap_or(0),
+        head_ref: body["head"]["ref"].as_str().unwrap_or_default().to_string(),
+        head_sha: body["head"]["sha"].as_str().unwrap_or_default().to_string(),
+        comments: body["comments"].as_i64().unwrap_or(0),
+        review_comments: body["review_comments"].as_i64().unwrap_or(0),
+    }))
+}
+
+/// Fetch the check-run summary for a commit. Same auth/fallback behavior as
+/// [`fetch_github_pull_request`]: `Ok(None)` on any non-success response.
+#[tauri::command]
+pub async fn fetch_github_check_summary(
+    owner: String,
+    repo: String,
+    sha: String,
+) -> Result<Option<GithubCheckSummary>, String> {
+    if !is_valid_github_name(&owner)
+        || !is_valid_github_name(&repo)
+        || !sha.chars().all(|c| c.is_ascii_hexdigit())
+        || sha.is_empty()
+        || sha.len() > 64
+    {
+        return Err("invalid GitHub check reference".to_string());
+    }
+
+    let client = github_client()?;
+
+    let url = format!(
+        "https://api.github.com/repos/{owner}/{repo}/commits/{sha}/check-runs?per_page=100"
+    );
+    let mut request = client
+        .get(&url)
+        .timeout(GITHUB_API_TIMEOUT)
+        .header(ACCEPT, "application/vnd.github+json")
+        .header(USER_AGENT, "Buzz Desktop link preview")
+        .header("X-GitHub-Api-Version", "2022-11-28");
+    if let Some(token) = ambient_github_token() {
+        request = request.header(AUTHORIZATION, format!("Bearer {token}"));
+    }
+
+    let response = request
+        .send()
+        .await
+        .map_err(|error| format!("github request failed: {error}"))?;
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(None);
+    }
+    if !response.status().is_success() {
+        // Rate limits and transient failures must NOT read as "no data" —
+        // the UI keeps its last good snapshot on error.
+        return Err(format!("github request failed: {}", response.status()));
+    }
+
+    let body: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|error| format!("github response parse failed: {error}"))?;
+
+    let raw_runs = body["check_runs"].as_array().cloned().unwrap_or_default();
+    let mut pending = 0;
+    let mut failed = 0;
+    let mut succeeded = 0;
+    let mut runs = Vec::with_capacity(raw_runs.len());
+    for run in &raw_runs {
+        let state = match run["status"].as_str().unwrap_or_default() {
+            "completed" => match run["conclusion"].as_str().unwrap_or_default() {
+                "success" | "neutral" | "skipped" => {
+                    succeeded += 1;
+                    "success"
+                }
+                _ => {
+                    failed += 1;
+                    "failure"
+                }
+            },
+            _ => {
+                pending += 1;
+                "pending"
+            }
+        };
+        runs.push(GithubCheckRun {
+            name: run["name"].as_str().unwrap_or("check").to_string(),
+            state: state.to_string(),
+        });
+    }
+
+    Ok(Some(GithubCheckSummary {
+        total: raw_runs.len() as i64,
+        pending,
+        failed,
+        succeeded,
+        runs,
+    }))
+}
+
+/// Count review threads still awaiting the PR author's reply. See
+/// [`GithubCommentState`] for semantics and the REST limitation.
+#[tauri::command]
+pub async fn fetch_github_pr_comment_state(
+    owner: String,
+    repo: String,
+    number: u64,
+) -> Result<Option<GithubCommentState>, String> {
+    if !is_valid_github_name(&owner) || !is_valid_github_name(&repo) {
+        return Err("invalid GitHub repository reference".to_string());
+    }
+
+    let client = github_client()?;
+
+    let base = format!("https://api.github.com/repos/{owner}/{repo}");
+    let build = |url: String| {
+        let mut request = client
+            .get(url)
+            .timeout(GITHUB_API_TIMEOUT)
+            .header(ACCEPT, "application/vnd.github+json")
+            .header(USER_AGENT, "Buzz Desktop link preview")
+            .header("X-GitHub-Api-Version", "2022-11-28");
+        if let Some(token) = ambient_github_token() {
+            request = request.header(AUTHORIZATION, format!("Bearer {token}"));
+        }
+        request
+    };
+
+    let pr_response = build(format!("{base}/pulls/{number}"))
+        .send()
+        .await
+        .map_err(|error| format!("github request failed: {error}"))?;
+    if pr_response.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(None);
+    }
+    if !pr_response.status().is_success() {
+        return Err(format!("github request failed: {}", pr_response.status()));
+    }
+    let pr: serde_json::Value = pr_response
+        .json()
+        .await
+        .map_err(|error| format!("github response parse failed: {error}"))?;
+    let author = pr["user"]["login"].as_str().unwrap_or_default().to_string();
+
+    let comments_response = build(format!(
+        "{base}/pulls/{number}/comments?per_page=100&sort=created&direction=asc"
+    ))
+    .send()
+    .await
+    .map_err(|error| format!("github request failed: {error}"))?;
+    if comments_response.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(None);
+    }
+    if !comments_response.status().is_success() {
+        return Err(format!(
+            "github request failed: {}",
+            comments_response.status()
+        ));
+    }
+    let comments: serde_json::Value = comments_response
+        .json()
+        .await
+        .map_err(|error| format!("github response parse failed: {error}"))?;
+
+    // Group into threads by root comment id; the latest comment (list is
+    // created-ascending) decides whether the thread still needs the author.
+    let mut last_author_by_thread: std::collections::HashMap<i64, String> =
+        std::collections::HashMap::new();
+    for comment in comments.as_array().cloned().unwrap_or_default() {
+        let id = comment["id"].as_i64().unwrap_or_default();
+        let root = comment["in_reply_to_id"].as_i64().unwrap_or(id);
+        let login = comment["user"]["login"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        last_author_by_thread.insert(root, login);
+    }
+    let open_threads = last_author_by_thread
+        .values()
+        .filter(|login| !author.is_empty() && **login != author)
+        .count() as i64;
+
+    Ok(Some(GithubCommentState { open_threads }))
+}
+
+/// Discover the pull request for a branch when no PR link has been posted in
+/// the chat: read the project's `origin` remote to find the GitHub repo, then
+/// look the branch up via the pulls API. Returns the PR's html_url.
+#[tauri::command]
+pub async fn find_github_pr_for_branch(
+    project_path: String,
+    branch: String,
+) -> Result<Option<String>, String> {
+    if branch.is_empty()
+        || branch.len() > 255
+        || !branch
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/'))
+    {
+        return Err("invalid branch name".to_string());
+    }
+
+    let remote = tokio::task::spawn_blocking(move || {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&project_path)
+            .args(["remote", "get-url", "origin"])
+            .stdin(std::process::Stdio::null())
+            .output()
+            .map_err(|error| format!("git failed to run: {error}"))?;
+        if !output.status.success() {
+            return Ok::<Option<String>, String>(None);
+        }
+        Ok(Some(
+            String::from_utf8_lossy(&output.stdout).trim().to_string(),
+        ))
+    })
+    .await
+    .map_err(|error| format!("git task failed: {error}"))??;
+
+    let Some(remote) = remote else {
+        return Ok(None);
+    };
+    let Some((owner, repo)) = parse_github_remote(&remote) else {
+        return Ok(None);
+    };
+    if !is_valid_github_name(&owner) || !is_valid_github_name(&repo) {
+        return Ok(None);
+    }
+
+    let client = github_client()?;
+    let build = |url: String| {
+        let mut request = client
+            .get(url)
+            .timeout(GITHUB_API_TIMEOUT)
+            .header(ACCEPT, "application/vnd.github+json")
+            .header(USER_AGENT, "Buzz Desktop link preview")
+            .header("X-GitHub-Api-Version", "2022-11-28");
+        if let Some(token) = ambient_github_token() {
+            request = request.header(AUTHORIZATION, format!("Bearer {token}"));
+        }
+        request
+    };
+
+    // Same-repo branches first (the common case), then a scan of open PRs to
+    // cover fork-headed pull requests.
+    let head = format!("{owner}:{branch}");
+    let direct = build(format!(
+        "https://api.github.com/repos/{owner}/{repo}/pulls?head={head}&state=all&per_page=1"
+    ))
+    .send()
+    .await
+    .map_err(|error| format!("github request failed: {error}"))?;
+    if direct.status().is_success() {
+        let pulls: serde_json::Value = direct
+            .json()
+            .await
+            .map_err(|error| format!("github response parse failed: {error}"))?;
+        if let Some(url) = pulls[0]["html_url"].as_str() {
+            return Ok(Some(url.to_string()));
+        }
+    }
+
+    let open = build(format!(
+        "https://api.github.com/repos/{owner}/{repo}/pulls?state=open&per_page=100"
+    ))
+    .send()
+    .await
+    .map_err(|error| format!("github request failed: {error}"))?;
+    if !open.status().is_success() {
+        return Ok(None);
+    }
+    let pulls: serde_json::Value = open
+        .json()
+        .await
+        .map_err(|error| format!("github response parse failed: {error}"))?;
+    for pull in pulls.as_array().cloned().unwrap_or_default() {
+        if pull["head"]["ref"].as_str() == Some(branch.as_str()) {
+            if let Some(url) = pull["html_url"].as_str() {
+                return Ok(Some(url.to_string()));
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// Extract `(owner, repo)` from a GitHub remote URL — ssh
+/// (`git@github.com:owner/repo.git`) or https
+/// (`https://github.com/owner/repo[.git]`).
+fn parse_github_remote(remote: &str) -> Option<(String, String)> {
+    let rest = remote
+        .strip_prefix("git@github.com:")
+        .or_else(|| remote.strip_prefix("ssh://git@github.com/"))
+        .or_else(|| remote.strip_prefix("https://github.com/"))
+        .or_else(|| remote.strip_prefix("http://github.com/"))?;
+    let mut parts = rest.trim_end_matches('/').splitn(2, '/');
+    let owner = parts.next()?.to_string();
+    let repo = parts.next()?.trim_end_matches(".git").to_string();
+    if owner.is_empty() || repo.is_empty() {
+        return None;
+    }
+    Some((owner, repo))
+}
+
+fn ambient_github_token() -> Option<String> {
+    static TOKEN: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    TOKEN
+        .get_or_init(|| {
+            let env_token = ["GITHUB_TOKEN", "GH_TOKEN"].iter().find_map(|name| {
+                std::env::var(name)
+                    .ok()
+                    .map(|value| value.trim().to_string())
+                    .filter(|value| !value.is_empty())
+            });
+            if env_token.is_some() {
+                return env_token;
+            }
+            // Desktop apps rarely inherit a token env (launched from Finder or
+            // a clean shell), but the gh CLI credential is usually present —
+            // without it the anonymous 60 req/h limit starves the PR monitor
+            // within minutes. Resolved once per process.
+            let output = std::process::Command::new("gh")
+                .args(["auth", "token"])
+                .stdin(std::process::Stdio::null())
+                .output()
+                .ok()?;
+            if !output.status.success() {
+                return None;
+            }
+            let token = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            (!token.is_empty()).then_some(token)
+        })
+        .clone()
+}
+
+fn is_valid_github_name(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 100
+        && value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+}
 
 #[tauri::command]
 pub async fn fetch_link_preview_title(href: String) -> Result<Option<String>, String> {

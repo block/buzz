@@ -1,4 +1,4 @@
-export type ChannelType = "stream" | "forum" | "dm";
+export type ChannelType = "stream" | "forum" | "dm" | "chat";
 export type ChannelVisibility = "open" | "private";
 export type ChannelRole = "owner" | "admin" | "member" | "guest" | "bot";
 
@@ -12,6 +12,7 @@ export type Channel = {
   purpose: string | null;
   memberCount: number;
   memberPubkeys: string[];
+  createdAt?: string | null;
   lastMessageAt: string | null;
   archivedAt: string | null;
   participants: string[];
@@ -44,10 +45,61 @@ export type ChannelMember = {
 
 export type CreateChannelInput = {
   name: string;
-  channelType: Exclude<ChannelType, "dm">;
+  channelType: Exclude<ChannelType, "dm" | "chat">;
   visibility: ChannelVisibility;
   description?: string;
   ttlSeconds?: number;
+};
+
+export type ChatSourceInput = {
+  channelId?: string;
+  eventId?: string;
+  threadRootId?: string;
+};
+
+export type CreateChatInput = {
+  title?: string;
+  defaultAgentPubkey?: string;
+  templateId?: string;
+  projectId?: string;
+  projectName?: string;
+  projectPath?: string;
+  projectTemplateId?: string;
+  source?: ChatSourceInput;
+};
+
+export type UpdateChatMetadataInput = {
+  channelId: string;
+  title?: string;
+  defaultAgentPubkey?: string;
+  templateId?: string;
+  projectId?: string;
+  projectName?: string;
+  projectPath?: string;
+  projectTemplateId?: string;
+  source?: ChatSourceInput;
+};
+
+export type SendChatContextMessageInput = {
+  channelId: string;
+  content: string;
+  source?: ChatSourceInput;
+};
+
+export type ChatMetadata = {
+  channelId: string;
+  authorPubkey: string | null;
+  title: string | null;
+  defaultAgentPubkey: string | null;
+  templateId: string | null;
+  projectId: string | null;
+  projectName: string | null;
+  projectPath: string | null;
+  projectTemplateId: string | null;
+  sourceChannelId: string | null;
+  sourceEventId: string | null;
+  sourceThreadRootId: string | null;
+  updatedAt: number;
 };
 
 export type OpenDmInput = {
@@ -323,6 +375,7 @@ export type SearchHit = {
   pubkey: string;
   channelId: string | null;
   channelName: string | null;
+  channelType?: string | null;
   createdAt: number;
   score: number;
   threadRootId?: string | null;

@@ -1,6 +1,5 @@
 import * as React from "react";
 import { useAppShell } from "@/app/AppShellContext";
-import { cacheSearchHitEvent } from "@/app/navigation/searchHitEventCache";
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import { useActiveChannelHeader } from "@/features/channels/useActiveChannelHeader";
 import { useChannelPaneHandlers } from "@/features/channels/useChannelPaneHandlers";
@@ -55,8 +54,11 @@ import { useChannelTyping } from "@/features/messages/useChannelTyping";
 import type { TimelineMessage } from "@/features/messages/types";
 import { useUsersBatchQuery } from "@/features/profile/hooks";
 import { mergeCurrentProfileIntoLookup } from "@/features/profile/lib/identity";
-import type { RelayEvent, RespondToMode, SearchHit } from "@/shared/api/types";
-import { useChannelFind } from "@/features/search/useChannelFind";
+import type { RespondToMode } from "@/shared/api/types";
+import {
+  useChannelFind,
+  useFindTargetEvents,
+} from "@/features/search/useChannelFind";
 import { ViewLoadingFallback } from "@/shared/ui/ViewLoadingFallback";
 import { AgentSessionProvider } from "@/shared/context/AgentSessionContext";
 import { ProfilePanelProvider } from "@/shared/context/ProfilePanelContext";
@@ -75,6 +77,7 @@ import { useChannelAgentSessions } from "./useChannelAgentSessions";
 import { useChannelPanelHistoryState } from "./useChannelPanelHistoryState";
 import { useChannelProfilePanel } from "./useChannelProfilePanel";
 import { useChannelRouteTarget } from "./useChannelRouteTarget";
+import { useSideConversation } from "./useSideConversation";
 import { useChannelUnreadState } from "./useChannelUnreadState";
 import type { ChannelScreenProps } from "./ChannelScreen.types";
 
@@ -239,13 +242,8 @@ export function ChannelScreen({
   const deleteMessageMutation = useDeleteMessageMutation(activeChannel);
   const editMessageMutation = useEditMessageMutation(activeChannel);
   const joinChannelMutation = useJoinChannelMutation(activeChannelId);
-  const [findTargetEvents, setFindTargetEvents] = React.useState<RelayEvent[]>(
-    [],
-  );
-  // biome-ignore lint/correctness/useExhaustiveDependencies: clear spliced find results exactly when the active channel changes.
-  React.useEffect(() => {
-    setFindTargetEvents([]);
-  }, [activeChannelId]);
+  const { findTargetEvents, handleFindSearchHit } =
+    useFindTargetEvents(activeChannelId);
   const resolvedMessages = React.useMemo(() => {
     const currentMessages = messagesQuery.data ?? [];
     const extraEvents = [...targetMessageEvents, ...findTargetEvents];
@@ -427,14 +425,6 @@ export function ChannelScreen({
           : new Map(),
       [windowQuery.data],
     );
-  const handleFindSearchHit = React.useCallback((hit: SearchHit) => {
-    const event = cacheSearchHitEvent(hit);
-    setFindTargetEvents((currentEvents) =>
-      currentEvents.some((currentEvent) => currentEvent.id === event.id)
-        ? currentEvents
-        : [...currentEvents, event],
-    );
-  }, []);
   const channelFind = useChannelFind({
     channelId: activeChannelId,
     messages: timelineMessages,
@@ -452,6 +442,10 @@ export function ChannelScreen({
     members: channelMembers,
     personaLookup,
     respondToLookup,
+  });
+  const handleStartSideConversation = useSideConversation({
+    activeChannel,
+    timelineMessages,
   });
   const {
     firstUnreadMessageId,
@@ -919,6 +913,11 @@ export function ChannelScreen({
                   onOpenDm={handleOpenDm}
                   onOpenProfilePanel={handleOpenProfilePanel}
                   onResetThreadPanelWidth={handleThreadPanelWidthReset}
+                  onStartSideConversation={
+                    activeChannel?.archivedAt
+                      ? undefined
+                      : handleStartSideConversation
+                  }
                   onCloseProfilePanel={handleCloseProfilePanel}
                   onOpenThread={handleOpenThreadAndCloseAgentSession}
                   onSelectThreadReplyTarget={handleSelectThreadReplyTarget}

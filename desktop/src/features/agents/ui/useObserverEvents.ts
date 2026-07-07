@@ -2,6 +2,7 @@ import * as React from "react";
 
 import {
   ensureRelayObserverSubscription,
+  getAgentChatTitle,
   getAgentObserverSnapshot,
   getAgentTranscript,
   ingestArchivedObserverEvents,
@@ -155,4 +156,76 @@ export function useLoadArchivedObserverEvents(enabled: boolean) {
   }, [enabled, identityPubkey, hasSubscription, hasOlderArchived]);
 
   return { fetchOlderArchived, hasOlderArchived };
+}
+
+const EMPTY_MERGED_TRANSCRIPT: TranscriptItem[] = [];
+
+/**
+ * Transcript items merged across several agents, ordered by timestamp — for
+ * surfaces (chats) where more than one agent can be working and every
+ * agent's activity must render. The merged array reference is stable until
+ * one of the underlying per-agent transcripts changes.
+ */
+export function useAgentsTranscript(
+  enabled: boolean,
+  agentPubkeys: readonly string[],
+): TranscriptItem[] {
+  const cacheRef = React.useRef<{
+    parts: TranscriptItem[][];
+    merged: TranscriptItem[];
+  } | null>(null);
+
+  const getSnapshot = React.useCallback(() => {
+    if (!enabled || agentPubkeys.length === 0) {
+      return EMPTY_MERGED_TRANSCRIPT;
+    }
+    const parts = agentPubkeys.map((pubkey) =>
+      getAgentTranscript(pubkey, true),
+    );
+    const cached = cacheRef.current;
+    if (
+      cached &&
+      cached.parts.length === parts.length &&
+      parts.every((part, index) => part === cached.parts[index])
+    ) {
+      return cached.merged;
+    }
+    const merged =
+      parts.length === 1
+        ? parts[0]
+        : parts
+            .flat()
+            .sort(
+              (left, right) =>
+                Date.parse(left.timestamp) - Date.parse(right.timestamp),
+            );
+    cacheRef.current = { parts, merged };
+    return merged;
+  }, [agentPubkeys, enabled]);
+
+  const snapshot = React.useSyncExternalStore(subscribeToStore, getSnapshot);
+
+  React.useEffect(() => {
+    if (enabled && agentPubkeys.length > 0) {
+      void ensureRelayObserverSubscription();
+    }
+  }, [enabled, agentPubkeys]);
+
+  return snapshot;
+}
+
+/**
+ * Latest agent-generated conversation title (`chat_title` observer frame)
+ * for a channel. Requires an active observer subscription — pair with
+ * `useAgentTranscript`/`useObserverEvents`, which establish it.
+ */
+export function useAgentChatTitle(
+  channelId: string | null | undefined,
+): string | null {
+  const getSnapshot = React.useCallback(
+    () => getAgentChatTitle(channelId),
+    [channelId],
+  );
+
+  return React.useSyncExternalStore(subscribeToStore, getSnapshot);
 }

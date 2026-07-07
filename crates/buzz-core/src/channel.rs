@@ -53,6 +53,8 @@ pub enum ChannelType {
     Forum,
     /// Direct message conversation.
     Dm,
+    /// Private AI chat conversation.
+    Chat,
     /// Internal workflow execution channel.
     Workflow,
 }
@@ -64,6 +66,7 @@ impl ChannelType {
             Self::Stream => "stream",
             Self::Forum => "forum",
             Self::Dm => "dm",
+            Self::Chat => "chat",
             Self::Workflow => "workflow",
         }
     }
@@ -83,6 +86,7 @@ impl FromStr for ChannelType {
             "stream" => Ok(Self::Stream),
             "forum" => Ok(Self::Forum),
             "dm" => Ok(Self::Dm),
+            "chat" => Ok(Self::Chat),
             "workflow" => Ok(Self::Workflow),
             other => Err(format!("unknown channel type: {other:?}")),
         }
@@ -165,5 +169,24 @@ impl FromStr for MemberRole {
             "bot" => Ok(Self::Bot),
             other => Err(format!("unknown member role: {other:?}")),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::str::FromStr;
+
+    #[test]
+    fn channel_type_chat_round_trips() {
+        assert_eq!(ChannelType::from_str("chat"), Ok(ChannelType::Chat));
+        assert_eq!(ChannelType::Chat.as_str(), "chat");
+        assert_eq!(ChannelType::Chat.to_string(), "chat");
+    }
+
+    #[test]
+    fn channel_type_rejects_unknown_values() {
+        let err = ChannelType::from_str("ai-chat").unwrap_err();
+        assert!(err.contains("unknown channel type"));
     }
 }

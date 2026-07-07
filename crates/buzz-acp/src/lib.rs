@@ -81,6 +81,129 @@ async fn publish_presence(
     Ok(())
 }
 
+fn channel_is_chat(channel_info: &HashMap<Uuid, relay::ChannelInfo>, channel_id: Uuid) -> bool {
+    channel_info
+        .get(&channel_id)
+        .is_some_and(|info| info.channel_type == "chat")
+}
+
+/// Oldest chat backlog the startup replay will deliver. Bounds necro-replies
+/// to abandoned chats while comfortably covering the activation flow (owner
+/// messages a stopped agent, then starts it from the desktop).
+const CHAT_BACKLOG_MAX_AGE_SECS: u64 = 6 * 60 * 60;
+
+/// Replay floor for a chat channel's startup subscription.
+///
+/// A chat's owner often messages while the agent is stopped — the desktop's
+/// "Activate agent" card starts the agent on demand — and a `since: now`
+/// subscription would silently skip that pending message forever. Replay from
+/// just after the agent's own last reply in the channel (it has answered
+/// everything before that), capped to a recent window. Best-effort: on query
+/// failure, fall back to plain live-only subscription.
+async fn chat_backlog_replay_since(
+    rest: &relay::RestClient,
+    channel_id: Uuid,
+    agent_pubkey_hex: &str,
+    startup_watermark: u64,
+) -> Option<u64> {
+    let floor = startup_watermark.saturating_sub(CHAT_BACKLOG_MAX_AGE_SECS);
+    let author = nostr::PublicKey::from_hex(agent_pubkey_hex).ok()?;
+    let h_tag = nostr::SingleLetterTag::lowercase(nostr::Alphabet::H);
+    let filter = nostr::Filter::new()
+        .kind(nostr::Kind::Custom(9))
+        .author(author)
+        .custom_tags(h_tag, [channel_id.to_string()])
+        .limit(1);
+
+    match rest.query(&[filter]).await {
+        Ok(value) => {
+            let last_reply_ts = value.as_array().and_then(|events| {
+                events
+                    .iter()
+                    .filter_map(|event| event.get("created_at").and_then(|v| v.as_u64()))
+                    .max()
+            });
+            Some(match last_reply_ts {
+                Some(ts) => ts.saturating_add(1).max(floor),
+                None => floor,
+            })
+        }
+        Err(error) => {
+            tracing::debug!("chat backlog query failed for {channel_id}: {error}");
+            None
+        }
+    }
+}
+
+/// Reclassify compatibility chats.
+///
+/// Relays that predate `channel_type: chat` store chats as plain private
+/// channels — the chat-ness lives only in a kind 30623 (or legacy 30078)
+/// chat-metadata event. Without this, every chat behavior keyed on
+/// `channel_type == "chat"` (activation backlog replay, mention gating,
+/// reaction suppression, title emission) silently degrades against staging.
+async fn mark_compat_chats(
+    rest: &relay::RestClient,
+    channel_info: &mut HashMap<Uuid, relay::ChannelInfo>,
+) {
+    const KIND_CHAT_METADATA: u16 = 30623;
+    const LEGACY_CHAT_METADATA_KIND: u16 = 30078;
+    const LEGACY_D_PREFIX: &str = "buzz:chat:";
+
+    if channel_info
+        .values()
+        .all(|info| info.channel_type == "chat")
+    {
+        return;
+    }
+    let filters = [
+        nostr::Filter::new()
+            .kind(nostr::Kind::Custom(KIND_CHAT_METADATA))
+            .limit(500),
+        nostr::Filter::new()
+            .kind(nostr::Kind::Custom(LEGACY_CHAT_METADATA_KIND))
+            .limit(1000),
+    ];
+    let value = match rest.query(&filters).await {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::debug!("compat chat metadata query failed: {error}");
+            return;
+        }
+    };
+    let mut reclassified = 0usize;
+    for event in value.as_array().into_iter().flatten() {
+        let kind = event.get("kind").and_then(|v| v.as_u64()).unwrap_or(0);
+        let tag_value = |name: &str| -> Option<String> {
+            event.get("tags")?.as_array()?.iter().find_map(|tag| {
+                let tag = tag.as_array()?;
+                (tag.first()?.as_str()? == name)
+                    .then(|| tag.get(1)?.as_str().map(str::to_string))
+                    .flatten()
+            })
+        };
+        let channel_id = if kind == u64::from(LEGACY_CHAT_METADATA_KIND) {
+            tag_value("chat_h").or_else(|| {
+                tag_value("d").and_then(|d| d.strip_prefix(LEGACY_D_PREFIX).map(str::to_string))
+            })
+        } else {
+            tag_value("d")
+        };
+        let Some(channel_id) = channel_id.and_then(|id| id.parse::<Uuid>().ok()) else {
+            continue;
+        };
+        if let Some(info) = channel_info.get_mut(&channel_id) {
+            if info.channel_type != "chat" {
+                info.channel_type = "chat".to_string();
+                reclassified += 1;
+            }
+        }
+    }
+    if reclassified > 0 {
+        tracing::info!("reclassified {reclassified} compatibility chat channel(s)");
+    }
+}
+
 /// Resolve the agent's owner pubkey at startup.
 ///
 /// Priority:
@@ -1328,10 +1451,12 @@ async fn tokio_main() -> Result<()> {
         }
     }
 
-    let channel_info_map = relay
+    let mut channel_info_map = relay
         .discover_channels()
         .await
         .map_err(|e| anyhow::anyhow!("channel discovery error: {e}"))?;
+    mark_compat_chats(&relay.rest_client(), &mut channel_info_map).await;
+    let channel_info_map = channel_info_map;
 
     tracing::info!("discovered {} channel(s)", channel_info_map.len());
     let channel_ids: Vec<Uuid> = channel_info_map.keys().copied().collect();
@@ -1373,13 +1498,36 @@ async fn tokio_main() -> Result<()> {
         }
     };
 
-    let channel_filters = config::resolve_channel_filters(&config, &channel_ids, &rules);
+    let mut channel_filters = config::resolve_channel_filters(&config, &channel_ids, &rules);
+    for (channel_id, filter) in channel_filters.iter_mut() {
+        config::force_mention_filter_for_chat(
+            filter,
+            channel_info_map
+                .get(channel_id)
+                .map(|info| info.channel_type.as_str()),
+        );
+    }
+    let mut event_channel_info = channel_info_map.clone();
     if channel_filters.is_empty() {
         tracing::warn!("no channel subscriptions resolved — agent will sit idle");
     }
+    let backlog_rest = relay.rest_client();
     for (channel_id, filter) in &channel_filters {
-        if let Err(e) = relay.subscribe_channel(*channel_id, filter.clone()).await {
+        // Chats replay their unanswered backlog; other channel types stay
+        // live-only from the startup watermark.
+        let replay_since = if channel_is_chat(&channel_info_map, *channel_id) {
+            chat_backlog_replay_since(&backlog_rest, *channel_id, &pubkey_hex, startup_watermark)
+                .await
+        } else {
+            None
+        };
+        if let Err(e) = relay
+            .subscribe_channel_from(*channel_id, filter.clone(), replay_since)
+            .await
+        {
             tracing::warn!("failed to subscribe to channel {channel_id}: {e}");
+        } else if let Some(since) = replay_since {
+            tracing::info!("subscribed to channel {channel_id} (chat backlog since {since})");
         } else {
             tracing::info!("subscribed to channel {channel_id}");
         }
@@ -1420,6 +1568,7 @@ async fn tokio_main() -> Result<()> {
             .and_then(|hex| nostr::PublicKey::from_hex(hex).ok()),
         memory_enabled: config.memory_enabled,
         harness_name: crate::config::normalize_agent_command_identity(&config.agent_command),
+        titled_channels: std::sync::Mutex::new(std::collections::HashSet::new()),
     });
 
     if !config.memory_enabled {
@@ -1748,7 +1897,29 @@ async fn tokio_main() -> Result<()> {
                                     // stripped for a legitimately re-added channel.
                                     removed_channels.remove(&ch);
 
-                                    if let Some(filter) = config::resolve_dynamic_channel_filter(&config, ch, &rules) {
+                                    if let Some(mut filter) = config::resolve_dynamic_channel_filter(&config, ch, &rules) {
+                                        match relay.discover_channels().await {
+                                            Ok(discovered) => {
+                                                event_channel_info.extend(discovered);
+                                                mark_compat_chats(
+                                                    &ctx.rest_client,
+                                                    &mut event_channel_info,
+                                                )
+                                                .await;
+                                            }
+                                            Err(e) => {
+                                                tracing::debug!(
+                                                    channel_id = %ch,
+                                                    "membership notification: channel metadata refresh failed: {e}"
+                                                );
+                                            }
+                                        }
+                                        config::force_mention_filter_for_chat(
+                                            &mut filter,
+                                            event_channel_info
+                                                .get(&ch)
+                                                .map(|info| info.channel_type.as_str()),
+                                        );
                                         tracing::info!(channel_id = %ch, "membership notification: subscribing to new channel");
                                         if let Err(e) = relay.subscribe_channel_from(ch, filter, Some(ts)).await {
                                             tracing::warn!("failed to subscribe to new channel {ch}: {e}");
@@ -1770,6 +1941,7 @@ async fn tokio_main() -> Result<()> {
                                     // Track removed channels so checked-out agents get
                                     // their sessions stripped when they return to the pool.
                                     removed_channels.insert(ch);
+                                    event_channel_info.remove(&ch);
                                     typing_channels.remove(&ch);
                                     // Best-effort: clean up 👀 on drained events.
                                     // Note: the relay revokes membership before
@@ -1938,6 +2110,17 @@ async fn tokio_main() -> Result<()> {
                                 }
                             }
 
+                            if channel_is_chat(&event_channel_info, buzz_event.channel_id)
+                                && !event_mentions_agent(&buzz_event.event, &pubkey_hex)
+                            {
+                                tracing::debug!(
+                                    channel_id = %buzz_event.channel_id,
+                                    kind = buzz_event.event.kind.as_u16(),
+                                    "chat event did not mention this agent — dropping"
+                                );
+                                continue;
+                            }
+
                             let matched = filter::match_event(&buzz_event.event, buzz_event.channel_id, &rules, &pubkey_hex).await;
                             let prompt_tag = match matched {
                                 Some(m) => m.prompt_tag,
@@ -1973,7 +2156,15 @@ async fn tokio_main() -> Result<()> {
                             // Fire-and-forget: on rare fast-failure paths the
                             // guard's cleanup may race with this add, leaving a
                             // cosmetic stale 👀. Acceptable — see ReactionGuard docs.
-                            if accepted {
+                            // Chats skip it: their UI has live working
+                            // indicators, and reaction emoji on the user's
+                            // message reads as noise there.
+                            if accepted
+                                && !channel_is_chat(
+                                    &event_channel_info,
+                                    buzz_event.channel_id,
+                                )
+                            {
                                 let rc = ctx.rest_client.clone();
                                 let eid = event_id_hex.clone();
                                 tokio::spawn(async move {

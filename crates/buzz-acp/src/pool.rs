@@ -80,6 +80,8 @@ pub struct AgentModelCapabilities {
 pub struct SessionState {
     /// channel_id → session_id
     pub sessions: HashMap<Uuid, String>,
+    /// channel_id → cwd used when the session was created.
+    pub channel_cwds: HashMap<Uuid, String>,
     pub heartbeat_session: Option<String>,
     /// Per-channel turn counters for proactive session rotation.
     /// Incremented on each successful prompt; reset when the session is rotated.
@@ -110,12 +112,14 @@ impl SessionState {
     pub fn invalidate_channel(&mut self, channel_id: &Uuid) -> bool {
         self.turn_counts.remove(channel_id);
         self.core_sections.remove(channel_id);
+        self.channel_cwds.remove(channel_id);
         self.sessions.remove(channel_id).is_some()
     }
 
     /// Invalidate all sessions and turn counters (e.g. after agent exit).
     pub fn invalidate_all(&mut self) {
         self.sessions.clear();
+        self.channel_cwds.clear();
         self.turn_counts.clear();
         self.heartbeat_session = None;
         self.heartbeat_turn_count = 0;
@@ -127,6 +131,7 @@ impl SessionState {
         self.sessions.contains_key(channel_id)
             || self.turn_counts.contains_key(channel_id)
             || self.core_sections.contains_key(channel_id)
+            || self.channel_cwds.contains_key(channel_id)
     }
 }
 
@@ -394,6 +399,10 @@ pub struct PromptContext {
     /// Harness identity string for NIP-AM `harness` field. Derived from the
     /// configured `agent_command` at startup (e.g. `"goose"`, `"buzz-agent"`).
     pub harness_name: String,
+    /// Chat channels that already produced a `chat_title` observer frame this
+    /// process. Interior mutability because `PromptContext` is `Arc`-shared
+    /// across prompt tasks.
+    pub titled_channels: std::sync::Mutex<HashSet<Uuid>>,
 }
 
 impl AgentPool {
@@ -662,6 +671,7 @@ const PERMISSION_MODE_TIMEOUT: Duration = Duration::from_secs(5);
 async fn create_session_and_apply_model(
     agent: &mut OwnedAgent,
     ctx: &PromptContext,
+    cwd: &str,
     agent_core: Option<&str>,
 ) -> Result<String, AcpError> {
     // Combine base_prompt + system_prompt + agent core into a single
@@ -672,7 +682,7 @@ async fn create_session_and_apply_model(
     // header from `engram_fetch::build_core_section`, so we just append it.
     let combined_system_prompt: Option<String> = if agent.protocol_version >= 2 {
         with_core(
-            framed_system_prompt(&ctx.cwd, ctx.base_prompt, ctx.system_prompt.as_deref()),
+            framed_system_prompt(cwd, ctx.base_prompt, ctx.system_prompt.as_deref()),
             agent_core,
         )
     } else {
@@ -682,7 +692,7 @@ async fn create_session_and_apply_model(
     let resp = agent
         .acp
         .session_new_full(
-            &ctx.cwd,
+            cwd,
             ctx.mcp_servers.clone(),
             combined_system_prompt.as_deref(),
         )
@@ -1096,6 +1106,27 @@ pub async fn run_prompt_task(
         turn_id.clone(),
     );
 
+    let session_cwd = match &source {
+        PromptSource::Channel(cid) => resolve_channel_session_cwd(*cid, &ctx)
+            .await
+            .unwrap_or_else(|| ctx.cwd.clone()),
+        PromptSource::Heartbeat => ctx.cwd.clone(),
+    };
+    if let PromptSource::Channel(cid) = &source {
+        let has_session = agent.state.sessions.contains_key(cid);
+        let previous_cwd = agent.state.channel_cwds.get(cid).map(String::as_str);
+        if has_session && previous_cwd != Some(session_cwd.as_str()) {
+            tracing::info!(
+                target: "pool::session",
+                channel = %cid,
+                cwd = %session_cwd,
+                "channel session cwd changed — recreating session"
+            );
+            agent.state.invalidate_channel(cid);
+        }
+        agent.state.channel_cwds.insert(*cid, session_cwd.clone());
+    }
+
     //
     // Core memory is delivered inside the system prompt the harness already
     // builds (system role for protocol >= 2, the `[System]` user-message
@@ -1173,7 +1204,13 @@ pub async fn run_prompt_task(
                 (sid.clone(), false)
             } else {
                 // Create new session with model application.
-                match create_session_and_apply_model(&mut agent, &ctx, agent_core.as_deref()).await
+                match create_session_and_apply_model(
+                    &mut agent,
+                    &ctx,
+                    &session_cwd,
+                    agent_core.as_deref(),
+                )
+                .await
                 {
                     Ok(sid) => {
                         tracing::info!(
@@ -1211,7 +1248,7 @@ pub async fn run_prompt_task(
             if let Some(sid) = &agent.state.heartbeat_session {
                 (sid.clone(), false)
             } else {
-                match create_session_and_apply_model(&mut agent, &ctx, None).await {
+                match create_session_and_apply_model(&mut agent, &ctx, &session_cwd, None).await {
                     Ok(sid) => {
                         tracing::info!(
                             target: "pool::session",
@@ -1401,6 +1438,11 @@ pub async fn run_prompt_task(
         } else {
             None
         };
+        let project_cwd = if session_cwd != ctx.cwd {
+            Some(session_cwd.as_str())
+        } else {
+            None
+        };
 
         let profile_lookup =
             fetch_prompt_profile_lookup(b, conversation_context.as_ref(), &ctx.rest_client).await;
@@ -1427,6 +1469,7 @@ pub async fn run_prompt_task(
                 agent_core: agent_core.as_deref(),
                 channel_info: channel_info.as_ref(),
                 conversation_context: conversation_context.as_ref(),
+                project_cwd,
                 profile_lookup: profile_lookup.as_ref(),
                 has_system_prompt_support: agent.protocol_version >= 2,
                 base_prompt: ctx.base_prompt,
@@ -1450,10 +1493,34 @@ pub async fn run_prompt_task(
     // 💬 — fire-and-forget so the prompt fires immediately.
     // The guard's cleanup (spawned on drop) removes 💬 after the turn completes.
     // A brief race where 💬 appears slightly after the agent starts is acceptable.
+    // Chats skip the reaction entirely: their UI carries live working
+    // indicators, and reaction emoji on the user's message reads as noise.
+    // The chat check resolves inside the spawned task (cache first, REST
+    // fallback for channels created after startup) so the prompt still fires
+    // immediately.
     if !reaction_ids.is_empty() {
         let rest = ctx.rest_client.clone();
         let ids = reaction_ids.clone();
+        let cached_is_chat = batch.as_ref().map(|b| {
+            ctx.channel_info
+                .get(&b.channel_id)
+                .map(|info| info.channel_type == "chat")
+        });
+        let batch_channel_id = batch.as_ref().map(|b| b.channel_id);
         tokio::spawn(async move {
+            let is_chat = match cached_is_chat {
+                Some(Some(known)) => known,
+                Some(None) => match batch_channel_id {
+                    Some(channel_id) => fetch_channel_info(channel_id, &rest)
+                        .await
+                        .is_some_and(|info| info.channel_type == "chat"),
+                    None => false,
+                },
+                None => false,
+            };
+            if is_chat {
+                return;
+            }
             react_working(&rest, &ids).await;
         });
     }
@@ -1741,6 +1808,14 @@ pub async fn run_prompt_task(
             )
             .await;
 
+            // The turn is done — release its completion marker before the
+            // best-effort title side prompt so the desktop's "Working" row
+            // clears while the title generates.
+            drop(_turn_guard);
+            if let PromptSource::Channel(cid) = &source {
+                maybe_emit_chat_title(&mut agent, &ctx, *cid, batch.as_ref()).await;
+            }
+
             send_prompt_result(
                 &result_tx,
                 agent,
@@ -1956,17 +2031,24 @@ async fn fetch_channel_info(channel_id: Uuid, rest: &RestClient) -> Option<Promp
                 let mut name = None;
                 let mut is_hidden = false;
                 let mut is_private = false;
+                let mut explicit_channel_type = None;
                 for tag in tags {
                     if let Some(arr) = tag.as_array() {
                         match arr.first().and_then(|v| v.as_str()) {
                             Some("name") => name = arr.get(1).and_then(|v| v.as_str()),
                             Some("hidden") => is_hidden = true,
                             Some("private") => is_private = true,
+                            Some("t") => {
+                                explicit_channel_type =
+                                    arr.get(1).and_then(|v| v.as_str()).map(str::to_string);
+                            }
                             _ => {}
                         }
                     }
                 }
-                let channel_type = if is_hidden {
+                let channel_type = if let Some(channel_type) = explicit_channel_type {
+                    channel_type
+                } else if is_hidden {
                     "dm".to_string()
                 } else if is_private {
                     "private".to_string()
@@ -1997,6 +2079,234 @@ async fn fetch_channel_info(channel_id: Uuid, rest: &RestClient) -> Option<Promp
     .await
 }
 
+async fn resolve_channel_session_cwd(channel_id: Uuid, ctx: &PromptContext) -> Option<String> {
+    let channel_info = match ctx.channel_info.get(&channel_id) {
+        Some(ci) => Some(PromptChannelInfo {
+            name: ci.name.clone(),
+            channel_type: ci.channel_type.clone(),
+        }),
+        None => fetch_channel_info(channel_id, &ctx.rest_client).await,
+    };
+    let is_chat = channel_info
+        .as_ref()
+        .map(|ci| ci.channel_type == "chat")
+        .unwrap_or(false);
+    let project_path = fetch_chat_project_path(channel_id, &ctx.rest_client).await;
+    if !is_chat && project_path.is_none() {
+        return None;
+    }
+    project_path.and_then(|path| usable_project_cwd(&path))
+}
+
+async fn fetch_chat_project_path(channel_id: Uuid, rest: &RestClient) -> Option<String> {
+    use nostr::{Alphabet, SingleLetterTag};
+
+    const LEGACY_CHAT_METADATA_KIND: u16 = 30078;
+    const LEGACY_CHAT_METADATA_D_PREFIX: &str = "buzz:chat:";
+
+    let d_tag = SingleLetterTag::lowercase(Alphabet::D);
+    let channel_id_string = channel_id.to_string();
+    let legacy_d = format!("{LEGACY_CHAT_METADATA_D_PREFIX}{channel_id_string}");
+    let native_filter = nostr::Filter::new()
+        .kind(nostr::Kind::Custom(
+            buzz_core::kind::KIND_CHAT_METADATA as u16,
+        ))
+        .custom_tags(d_tag.clone(), [channel_id_string.as_str()])
+        .limit(1);
+    let legacy_filter = nostr::Filter::new()
+        .kind(nostr::Kind::Custom(LEGACY_CHAT_METADATA_KIND))
+        .custom_tags(d_tag, [legacy_d.as_str()])
+        .limit(1);
+
+    let metadata_path = fetch_with_retry(|| async {
+        match timeout(
+            CONTEXT_FETCH_TIMEOUT,
+            rest.query(&[native_filter.clone(), legacy_filter.clone()]),
+        )
+        .await
+        {
+            Ok(Ok(json)) => parse_chat_project_path(json),
+            Ok(Err(e)) => {
+                tracing::debug!(
+                    channel_id = %channel_id,
+                    "chat project metadata fetch failed: {e} — will retry"
+                );
+                None
+            }
+            Err(_) => {
+                tracing::debug!(
+                    channel_id = %channel_id,
+                    "chat project metadata fetch timed out — will retry"
+                );
+                None
+            }
+        }
+    })
+    .await;
+    if metadata_path.is_some() {
+        return metadata_path;
+    }
+
+    if let Some(canvas_path) = fetch_chat_project_path_from_canvas(channel_id, rest).await {
+        return Some(canvas_path);
+    }
+
+    fetch_chat_project_path_from_messages(channel_id, rest).await
+}
+
+async fn fetch_chat_project_path_from_canvas(
+    channel_id: Uuid,
+    rest: &RestClient,
+) -> Option<String> {
+    use nostr::{Alphabet, SingleLetterTag};
+
+    let h_tag = SingleLetterTag::lowercase(Alphabet::H);
+    let channel_id_string = channel_id.to_string();
+    let filter = nostr::Filter::new()
+        .kind(nostr::Kind::Custom(buzz_core::kind::KIND_CANVAS as u16))
+        .custom_tags(h_tag, [channel_id_string.as_str()])
+        .limit(1);
+
+    fetch_with_retry(|| async {
+        match timeout(
+            CONTEXT_FETCH_TIMEOUT,
+            rest.query(std::slice::from_ref(&filter)),
+        )
+        .await
+        {
+            Ok(Ok(json)) => parse_chat_project_path_from_canvas(json),
+            Ok(Err(e)) => {
+                tracing::debug!(
+                    channel_id = %channel_id,
+                    "chat project canvas fetch failed: {e} — will retry"
+                );
+                None
+            }
+            Err(_) => {
+                tracing::debug!(
+                    channel_id = %channel_id,
+                    "chat project canvas fetch timed out — will retry"
+                );
+                None
+            }
+        }
+    })
+    .await
+}
+
+fn parse_chat_project_path(events: serde_json::Value) -> Option<String> {
+    events.as_array()?.iter().find_map(|event| {
+        event.get("tags")?.as_array()?.iter().find_map(|tag| {
+            let arr = tag.as_array()?;
+            if arr.first().and_then(|v| v.as_str()) == Some("project_path") {
+                arr.get(1)
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string)
+            } else {
+                None
+            }
+        })
+    })
+}
+
+fn parse_chat_project_path_from_canvas(events: serde_json::Value) -> Option<String> {
+    events.as_array()?.iter().find_map(|event| {
+        event
+            .get("content")
+            .and_then(|value| value.as_str())
+            .and_then(extract_project_path_from_canvas)
+    })
+}
+
+async fn fetch_chat_project_path_from_messages(
+    channel_id: Uuid,
+    rest: &RestClient,
+) -> Option<String> {
+    use nostr::{Alphabet, SingleLetterTag};
+
+    let h_tag = SingleLetterTag::lowercase(Alphabet::H);
+    let channel_id_string = channel_id.to_string();
+    let filter = nostr::Filter::new()
+        .kinds([
+            nostr::Kind::Custom(buzz_core::kind::KIND_STREAM_MESSAGE as u16),
+            nostr::Kind::Custom(buzz_core::kind::KIND_STREAM_MESSAGE_V2 as u16),
+        ])
+        .custom_tags(h_tag, [channel_id_string.as_str()])
+        .limit(50);
+
+    fetch_with_retry(|| async {
+        match timeout(
+            CONTEXT_FETCH_TIMEOUT,
+            rest.query(std::slice::from_ref(&filter)),
+        )
+        .await
+        {
+            Ok(Ok(json)) => parse_chat_project_path_from_messages(json),
+            Ok(Err(e)) => {
+                tracing::debug!(
+                    channel_id = %channel_id,
+                    "chat project setup message fetch failed: {e} — will retry"
+                );
+                None
+            }
+            Err(_) => {
+                tracing::debug!(
+                    channel_id = %channel_id,
+                    "chat project setup message fetch timed out — will retry"
+                );
+                None
+            }
+        }
+    })
+    .await
+}
+
+fn parse_chat_project_path_from_messages(events: serde_json::Value) -> Option<String> {
+    events.as_array()?.iter().find_map(|event| {
+        event
+            .get("content")
+            .and_then(|value| value.as_str())
+            .and_then(extract_project_path_from_canvas)
+    })
+}
+
+fn extract_project_path_from_canvas(content: &str) -> Option<String> {
+    let mut in_project_setup = false;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.eq_ignore_ascii_case("Project setup") {
+            in_project_setup = true;
+            continue;
+        }
+        if in_project_setup && trimmed.is_empty() {
+            break;
+        }
+        if in_project_setup {
+            if let Some(path) = trimmed.strip_prefix("Folder:") {
+                let path = path.trim();
+                if !path.is_empty() {
+                    return Some(path.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+fn usable_project_cwd(path: &str) -> Option<String> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() || !trimmed.starts_with('/') || trimmed == "/" {
+        return None;
+    }
+    let canonical = std::fs::canonicalize(trimmed).ok()?;
+    if !canonical.is_dir() {
+        return None;
+    }
+    canonical.to_str().map(str::to_string)
+}
+
 /// Fetch conversation context (thread or DM) for a batch before prompting.
 ///
 /// Returns `None` if:
@@ -2012,9 +2322,9 @@ async fn fetch_conversation_context(
     ctx: &PromptContext,
 ) -> Option<ConversationContext> {
     let limit = ctx.context_message_limit;
-    let is_dm = channel_info
+    let is_linear_chat = channel_info
         .as_ref()
-        .map(|ci| ci.channel_type == "dm")
+        .map(|ci| ci.channel_type == "dm" || ci.channel_type == "chat")
         .unwrap_or(false);
 
     // Check thread tags on the last event first — this applies to both
@@ -2026,8 +2336,8 @@ async fn fetch_conversation_context(
         return fetch_thread_context(batch.channel_id, &root_id, limit, &ctx.rest_client).await;
     }
 
-    // DM non-reply: fetch recent conversation history.
-    if is_dm {
+    // DM/chat non-reply: fetch recent conversation history.
+    if is_linear_chat {
         return fetch_dm_context(batch.channel_id, limit, &ctx.rest_client).await;
     }
 
@@ -2640,6 +2950,192 @@ async fn run_turn_liveness(
     }
 }
 
+/// Idle/hard timeout for the chat-title side prompt. Titles are one short
+/// completion; anything slower is abandoned rather than holding the agent.
+const CHAT_TITLE_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+const CHAT_TITLE_HARD_TIMEOUT: Duration = Duration::from_secs(45);
+
+/// Character cap for an emitted chat title.
+const CHAT_TITLE_MAX_CHARS: usize = 60;
+
+/// Byte cap for the opening-message excerpt embedded in the title prompt.
+const CHAT_TITLE_REQUEST_EXCERPT_LEN: usize = 1_500;
+
+/// After the first successful turn in a chat channel, generate a succinct
+/// conversation title and emit it as a `chat_title` observer frame. The
+/// desktop applies it to the chat's metadata (never overriding a manual
+/// rename), so this stays fire-and-forget: every failure just logs.
+///
+/// The title runs in a fresh session with NO MCP servers and NO system
+/// prompt — a bare completion. The model has no tools, so it cannot post the
+/// title (or anything else) into the channel. The throwaway session is left
+/// to expire with the agent process; ACP has no portable close-session call.
+async fn maybe_emit_chat_title(
+    agent: &mut OwnedAgent,
+    ctx: &PromptContext,
+    channel_id: Uuid,
+    batch: Option<&FlushBatch>,
+) {
+    let is_chat = ctx
+        .channel_info
+        .get(&channel_id)
+        .is_some_and(|info| info.channel_type == "chat");
+    if !is_chat {
+        return;
+    }
+    {
+        // Once per channel per process — even if generation fails, don't
+        // retry every turn (the desktop has a heuristic fallback).
+        let Ok(mut titled) = ctx.titled_channels.lock() else {
+            return;
+        };
+        if !titled.insert(channel_id) {
+            return;
+        }
+    }
+
+    let Some(request_text) = first_batch_message_excerpt(batch) else {
+        return;
+    };
+
+    // Mute the observer for the side prompt: its raw wire events would carry
+    // the just-completed turn's channel/turn context, and the desktop upserts
+    // `session/prompt` / message chunks by that context — the titling prompt
+    // would overwrite the turn's real prompt and assistant transcript items.
+    let observer = agent.acp.observer_handle();
+    let observer_index = agent.acp.observer_agent_index().unwrap_or(0);
+    agent.acp.set_observer(None, observer_index);
+    let title = generate_chat_title(agent, ctx, &request_text).await;
+    agent.acp.set_observer(observer, observer_index);
+
+    let Some(title) = title else {
+        return;
+    };
+
+    tracing::info!(target: "pool::title", "chat title for {channel_id}: {title}");
+    agent.acp.observe(
+        "chat_title",
+        serde_json::json!({ "type": "chat_title", "title": title }),
+    );
+}
+
+/// Run the tool-less title side prompt and return the sanitized title.
+///
+/// Must be called with the observer muted (see `maybe_emit_chat_title`) so
+/// the side session's wire traffic never reaches transcripts.
+async fn generate_chat_title(
+    agent: &mut OwnedAgent,
+    ctx: &PromptContext,
+    request_text: &str,
+) -> Option<String> {
+    let prompt = format!(
+        "You are naming a chat conversation. Name it exactly the way you \
+         would name a git branch for this work — a few terse, concrete words \
+         that identify the task — but written as plain words separated by \
+         spaces instead of dashes. Reply with ONLY that name (2-5 words, no \
+         quotes, no dashes, no trailing punctuation), capitalized like a \
+         sentence.\n\nOpening message:\n{request_text}"
+    );
+
+    let session_id = match agent.acp.session_new(&ctx.cwd, Vec::new(), None).await {
+        Ok(session_id) => session_id,
+        Err(error) => {
+            if matches!(error, AcpError::AgentExited) {
+                agent.state.invalidate_all();
+            }
+            tracing::warn!(target: "pool::title", "chat title session/new failed: {error}");
+            return None;
+        }
+    };
+
+    agent.acp.begin_message_capture();
+    let prompt_result = agent
+        .acp
+        .session_prompt_with_idle_timeout(
+            &session_id,
+            &prompt,
+            CHAT_TITLE_IDLE_TIMEOUT,
+            CHAT_TITLE_HARD_TIMEOUT,
+        )
+        .await;
+    let captured = agent.acp.take_message_capture().unwrap_or_default();
+
+    if let Err(error) = prompt_result {
+        if matches!(error, AcpError::AgentExited) {
+            agent.state.invalidate_all();
+        }
+        tracing::warn!(target: "pool::title", "chat title prompt failed: {error}");
+        return None;
+    }
+
+    let title = sanitize_chat_title(&captured);
+    if title.is_none() {
+        tracing::debug!(target: "pool::title", "chat title reply unusable: {captured:?}");
+    }
+    title
+}
+
+/// Extract the opening user message from the batch, truncated to a prompt
+/// excerpt on a char boundary.
+fn first_batch_message_excerpt(batch: Option<&FlushBatch>) -> Option<String> {
+    let content = batch?.events.first()?.event.content.trim();
+    if content.is_empty() {
+        return None;
+    }
+    let mut end = CHAT_TITLE_REQUEST_EXCERPT_LEN.min(content.len());
+    while end > 0 && !content.is_char_boundary(end) {
+        end -= 1;
+    }
+    Some(content[..end].to_string())
+}
+
+/// Normalize a model's title reply into a clean single-line title, or `None`
+/// when nothing usable survives.
+fn sanitize_chat_title(raw: &str) -> Option<String> {
+    // Models occasionally preface with "Title:" or wrap in quotes/markdown;
+    // take the first non-empty line and strip that framing.
+    let line = raw.lines().map(str::trim).find(|line| !line.is_empty())?;
+    let mut title = line.trim_start_matches("Title:").trim();
+    title = title.trim_matches(|c| matches!(c, '"' | '\'' | '“' | '”' | '*' | '`' | '#'));
+    let mut cleaned = title.trim().to_string();
+    if cleaned.chars().count() > CHAT_TITLE_MAX_CHARS {
+        let last_space = cleaned
+            .char_indices()
+            .take(CHAT_TITLE_MAX_CHARS)
+            .filter(|(_, c)| c.is_whitespace())
+            .map(|(i, _)| i)
+            .last();
+        let hard_cut = cleaned
+            .char_indices()
+            .nth(CHAT_TITLE_MAX_CHARS)
+            .map(|(i, _)| i)
+            .unwrap_or(cleaned.len());
+        cleaned.truncate(last_space.unwrap_or(hard_cut));
+    }
+    let mut cleaned = cleaned
+        .trim_end_matches(['.', ',', ';', ':', '!', '?', '-'])
+        .trim()
+        .to_string();
+    // Despite the prompt, models sometimes answer with the literal branch
+    // slug ("fix-panel-width", "kenny/dictation-support"). A single dashed/
+    // slashed token becomes spaced words with a leading capital.
+    if !cleaned.contains(char::is_whitespace) && cleaned.contains(['-', '_', '/']) {
+        let mut words = cleaned
+            .split(['-', '_', '/'])
+            .filter(|word| !word.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
+        if let Some(first) = words.get_mut(0..1) {
+            first.make_ascii_uppercase();
+        }
+        cleaned = words;
+    }
+    if cleaned.chars().count() < 3 {
+        return None;
+    }
+    Some(cleaned)
+}
+
 // Emits a `turn_completed` observer event on drop, covering ALL exit paths
 // (success, error, timeout, cancel, panic) from `run_prompt_task`. Captures
 // observer handle and metadata at creation time so it remains valid even after
@@ -3034,6 +3530,60 @@ mod tests {
     use nostr::{EventBuilder, Keys, Kind, Tag};
     use serde_json::json;
 
+    #[test]
+    fn test_sanitize_chat_title_strips_model_framing() {
+        assert_eq!(
+            sanitize_chat_title("Title: \"Fix flaky Playwright tests\"\n"),
+            Some("Fix flaky Playwright tests".to_string())
+        );
+        assert_eq!(
+            sanitize_chat_title("**Debug relay disconnects.**"),
+            Some("Debug relay disconnects".to_string())
+        );
+        assert_eq!(
+            sanitize_chat_title("\n\n  Rename deploy workflow  \nExtra explanation line"),
+            Some("Rename deploy workflow".to_string())
+        );
+    }
+
+    #[test]
+    fn test_sanitize_chat_title_caps_on_word_boundary() {
+        let long =
+            "a very long title that keeps going well past the sixty character cap for titles";
+        let title = sanitize_chat_title(long).expect("title");
+        assert!(title.chars().count() <= CHAT_TITLE_MAX_CHARS, "{title}");
+        assert!(!title.ends_with(' '));
+        assert!(long.starts_with(&title));
+    }
+
+    #[test]
+    fn test_sanitize_chat_title_despaces_branch_slugs() {
+        assert_eq!(
+            sanitize_chat_title("fix-panel-width"),
+            Some("Fix panel width".to_string())
+        );
+        assert_eq!(
+            sanitize_chat_title("kenny/dictation-support"),
+            Some("Kenny dictation support".to_string())
+        );
+        assert_eq!(
+            sanitize_chat_title("relay_reconnect_backoff"),
+            Some("Relay reconnect backoff".to_string())
+        );
+        // Titles that already have spaces keep interior dashes untouched.
+        assert_eq!(
+            sanitize_chat_title("Fix e2e re-run flake"),
+            Some("Fix e2e re-run flake".to_string())
+        );
+    }
+
+    #[test]
+    fn test_sanitize_chat_title_rejects_empty_and_tiny() {
+        assert_eq!(sanitize_chat_title(""), None);
+        assert_eq!(sanitize_chat_title("  \n \n"), None);
+        assert_eq!(sanitize_chat_title("ok"), None);
+    }
+
     // These pin the initial_message dispatch path (run_prompt_task, ~line 855):
     // a legacy agent WITH a base_prompt must get [Base] prepended to the user
     // message. This is the exact regression that shipped in the round-2 bug.
@@ -3127,6 +3677,58 @@ mod tests {
     fn test_workspace_section_relative_cwd_is_none() {
         assert!(workspace_section("relative/path").is_none());
         assert!(workspace_section("").is_none());
+    }
+
+    #[test]
+    fn test_parse_chat_project_path_extracts_trimmed_tag() {
+        let path = parse_chat_project_path(json!([
+            {
+                "tags": [
+                    ["d", "chat-id"],
+                    ["project_path", "  /Users/me/Development/sprout  "]
+                ]
+            }
+        ]));
+
+        assert_eq!(path.as_deref(), Some("/Users/me/Development/sprout"));
+    }
+
+    #[test]
+    fn test_parse_chat_project_path_from_canvas_extracts_folder_line() {
+        let path = parse_chat_project_path_from_canvas(json!([
+            {
+                "content": "Project setup\nProject: Buzz\nFolder: /Users/me/Development/sprout\n\n# Notes"
+            }
+        ]));
+
+        assert_eq!(path.as_deref(), Some("/Users/me/Development/sprout"));
+    }
+
+    #[test]
+    fn test_parse_chat_project_path_from_messages_extracts_folder_line() {
+        let path = parse_chat_project_path_from_messages(json!([
+            {
+                "kind": 9,
+                "content": "hello"
+            },
+            {
+                "kind": 9,
+                "content": "Project setup\nProject: Buzz\nFolder: /Users/me/Development/sprout\nAgent: Fizz"
+            }
+        ]));
+
+        assert_eq!(path.as_deref(), Some("/Users/me/Development/sprout"));
+    }
+
+    #[test]
+    fn test_extract_project_path_from_canvas_requires_project_setup_block() {
+        assert!(extract_project_path_from_canvas("Folder: /tmp/nope").is_none());
+    }
+
+    #[test]
+    fn test_usable_project_cwd_rejects_relative_and_root_paths() {
+        assert!(usable_project_cwd("relative/path").is_none());
+        assert!(usable_project_cwd("/").is_none());
     }
 
     #[test]
@@ -3536,6 +4138,8 @@ mod tests {
         let mut s = SessionState::default();
         s.sessions.insert(ch_a, "sess-a".into());
         s.sessions.insert(ch_b, "sess-b".into());
+        s.channel_cwds.insert(ch_a, "/tmp/a".into());
+        s.channel_cwds.insert(ch_b, "/tmp/b".into());
         s.turn_counts.insert(ch_a, 5);
         s.turn_counts.insert(ch_b, 3);
         s.core_sections.insert(ch_a, "core-a".into());
@@ -3577,6 +4181,7 @@ mod tests {
         );
 
         assert_eq!(s.sessions.get(&ch_a).unwrap(), "sess-a");
+        assert_eq!(s.channel_cwds.get(&ch_a).unwrap(), "/tmp/a");
         assert_eq!(*s.turn_counts.get(&ch_a).unwrap(), 5);
         assert_eq!(s.core_sections.get(&ch_a).unwrap(), "core-a");
         assert_eq!(s.sessions.get(&ch_b).unwrap(), "sess-b");
@@ -3621,6 +4226,7 @@ mod tests {
         s.invalidate_all();
 
         assert!(s.sessions.is_empty());
+        assert!(s.channel_cwds.is_empty());
         assert!(s.turn_counts.is_empty());
         assert!(s.core_sections.is_empty());
         assert!(s.heartbeat_session.is_none());
@@ -3647,6 +4253,7 @@ mod tests {
         let mut s = SessionState::default();
         s.invalidate_all(); // should not panic
         assert!(s.sessions.is_empty());
+        assert!(s.channel_cwds.is_empty());
         assert!(s.turn_counts.is_empty());
         assert!(s.core_sections.is_empty());
     }
@@ -3675,6 +4282,7 @@ mod tests {
         assert!(!s.invalidate_channel(&ghost));
         // Nothing changed.
         assert_eq!(s.sessions.len(), 2);
+        assert_eq!(s.channel_cwds.len(), 2);
         assert_eq!(s.turn_counts.len(), 2);
     }
 

@@ -46,6 +46,7 @@ const channelTypeOrder = {
   stream: 0,
   forum: 1,
   dm: 2,
+  chat: 3,
 } as const;
 
 function sortChannels(channels: Channel[]) {

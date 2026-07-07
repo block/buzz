@@ -90,6 +90,7 @@ type RawChannel = {
   purpose: string | null;
   member_count: number;
   member_pubkeys: string[];
+  created_at?: string | null;
   last_message_at: string | null;
   archived_at: string | null;
   participants: string[];
@@ -167,6 +168,7 @@ type RawSearchHit = {
   pubkey: string;
   channel_id: string | null;
   channel_name: string | null;
+  channel_type?: string | null;
   created_at: number;
   score: number;
 };
@@ -356,6 +358,7 @@ function fromRawChannel(channel: RawChannel): Channel {
     purpose: channel.purpose,
     memberCount: channel.member_count,
     memberPubkeys: channel.member_pubkeys ?? [],
+    createdAt: channel.created_at ?? null,
     lastMessageAt: channel.last_message_at,
     archivedAt: channel.archived_at,
     participants: channel.participants,
@@ -415,6 +418,7 @@ function fromRawSearchHit(hit: RawSearchHit) {
     pubkey: hit.pubkey,
     channelId: hit.channel_id,
     channelName: hit.channel_name,
+    channelType: hit.channel_type,
     createdAt: hit.created_at,
     score: hit.score,
   };
@@ -833,6 +837,7 @@ export async function sendChannelMessage(
   kind?: number,
   emojiTags?: string[][],
   mentionTags?: string[][],
+  clientTags?: string[][],
 ): Promise<SendChannelMessageResult> {
   const response = await invokeTauri<RawSendChannelMessageResult>(
     "send_channel_message",
@@ -845,6 +850,7 @@ export async function sendChannelMessage(
       mentionTags: mentionTags ?? null,
       mentionPubkeys: mentionPubkeys ?? null,
       kind: kind ?? null,
+      clientTags: clientTags ?? null,
     },
   );
 
@@ -1327,20 +1333,6 @@ export async function nip44DecryptFromSelf(
   ciphertext: string,
 ): Promise<string> {
   return invokeTauri<string>("nip44_decrypt_from_self", { ciphertext });
-}
-
-// ── NIP-AB device pairing ───────────────────────────────────────────────────
-
-export async function startPairing(): Promise<string> {
-  return invokeTauri<string>("start_pairing");
-}
-
-export async function confirmPairingSas(): Promise<void> {
-  await invokeTauri("confirm_pairing_sas");
-}
-
-export async function cancelPairing(): Promise<void> {
-  await invokeTauri("cancel_pairing");
 }
 
 export async function applyWorkspace(

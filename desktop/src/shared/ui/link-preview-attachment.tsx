@@ -1,7 +1,18 @@
-import { ExternalLink } from "lucide-react";
+import {
+  ExternalLink,
+  GitMerge,
+  GitPullRequest,
+  GitPullRequestClosed,
+  GitPullRequestDraft,
+} from "lucide-react";
 
 import type { SupportedLinkPreview } from "@/shared/lib/linkPreview";
 import { cn } from "@/shared/lib/cn";
+import {
+  githubPullRequestStatus,
+  parseGithubPullRequestRef,
+  useGithubPullRequestQuery,
+} from "@/shared/lib/githubPullRequest";
 import {
   Attachment,
   AttachmentActions,
@@ -107,6 +118,200 @@ function LinkPreviewLogo({ preview }: { preview: SupportedLinkPreview }) {
     case "google-slides-presentation":
       return <GoogleSlidesLogo className="h-4 w-4" />;
   }
+}
+
+const PR_STATUS_META = {
+  open: {
+    icon: GitPullRequest,
+    label: "Open",
+    className: "text-[color:var(--status-added)]",
+  },
+  draft: {
+    icon: GitPullRequestDraft,
+    label: "Draft",
+    className: "text-muted-foreground",
+  },
+  merged: {
+    icon: GitMerge,
+    label: "Merged",
+    className: "text-violet-500 dark:text-violet-400",
+  },
+  closed: {
+    icon: GitPullRequestClosed,
+    label: "Closed",
+    className: "text-[color:var(--status-deleted)]",
+  },
+} as const;
+
+/**
+ * Rich GitHub PR card: live state, diff stats, and files changed from the
+ * GitHub API. Falls back to the compact static card while loading or when
+ * the fetch fails (rate limit, private repo without a token, offline).
+ */
+export function GithubPullRequestCard({
+  className,
+  preview,
+}: {
+  className?: string;
+  preview: SupportedLinkPreview;
+}) {
+  const ref = parseGithubPullRequestRef(preview.href);
+  const query = useGithubPullRequestQuery(ref);
+  const info = query.data ?? null;
+
+  if (!ref || !info) {
+    return <LinkPreviewAttachment className={className} preview={preview} />;
+  }
+
+  const status = githubPullRequestStatus(info);
+  const meta = PR_STATUS_META[status];
+  const StatusIcon = meta.icon;
+
+  return (
+    <Attachment
+      className={cn(
+        "w-96 max-w-full shrink-0 no-underline shadow-none",
+        className,
+      )}
+      data-link-preview="github-pull-request"
+      data-pr-status={status}
+    >
+      <AttachmentMedia className={cn("link-preview-media", meta.className)}>
+        <StatusIcon className="h-4 w-4" />
+      </AttachmentMedia>
+      <AttachmentContent>
+        <div className="flex min-w-0 items-center gap-1 text-xs font-medium leading-4 text-muted-foreground">
+          <GitHubLogo className="h-3 w-3 shrink-0" />
+          <span className="min-w-0 truncate">
+            {ref.owner}/{ref.repo}
+          </span>
+          <span aria-hidden="true">·</span>
+          <span className="shrink-0">#{ref.number}</span>
+        </div>
+        <AttachmentTitle>{info.title || preview.title}</AttachmentTitle>
+        <div className="flex min-w-0 items-center gap-2 text-xs leading-4">
+          <span className={cn("shrink-0 font-medium", meta.className)}>
+            {meta.label}
+          </span>
+          <span className="shrink-0 font-medium text-[color:var(--status-added)]">
+            +{info.additions.toLocaleString()}
+          </span>
+          <span className="shrink-0 font-medium text-[color:var(--status-deleted)]">
+            −{info.deletions.toLocaleString()}
+          </span>
+          <span className="min-w-0 truncate text-muted-foreground">
+            {info.changedFiles.toLocaleString()}{" "}
+            {info.changedFiles === 1 ? "file" : "files"} changed
+          </span>
+        </div>
+      </AttachmentContent>
+      <AttachmentActions>
+        <ExternalLink
+          aria-hidden="true"
+          className="h-4 w-4 text-muted-foreground opacity-0 transition-opacity group-hover/attachment:opacity-100 group-focus-within/attachment:opacity-100"
+        />
+      </AttachmentActions>
+      <AttachmentTrigger asChild>
+        <a
+          aria-label={`Open GitHub PR ${ref.owner}/${ref.repo} #${ref.number}: ${info.title || preview.title}`}
+          href={preview.href}
+          rel="noreferrer"
+          target="_blank"
+        >
+          <span className="sr-only">
+            Open GitHub PR {ref.owner}/{ref.repo} #{ref.number}
+          </span>
+        </a>
+      </AttachmentTrigger>
+    </Attachment>
+  );
+}
+
+/**
+ * Prominent PR card for agent-authored messages — when the agent reports a
+ * pull request it created, the card reads as a piece of delivered work
+ * (banner layout, status pill, full-width diff stats) rather than a pasted
+ * link. Falls back to the standard rich card without live data.
+ */
+export function AgentPullRequestCard({
+  className,
+  preview,
+}: {
+  className?: string;
+  preview: SupportedLinkPreview;
+}) {
+  const ref = parseGithubPullRequestRef(preview.href);
+  const query = useGithubPullRequestQuery(ref);
+  const info = query.data ?? null;
+
+  if (!ref || !info) {
+    return <GithubPullRequestCard className={className} preview={preview} />;
+  }
+
+  const status = githubPullRequestStatus(info);
+  const meta = PR_STATUS_META[status];
+  const StatusIcon = meta.icon;
+
+  return (
+    <Attachment
+      className={cn(
+        "w-full max-w-xl shrink-0 gap-2 px-4 py-3 no-underline shadow-none",
+        className,
+      )}
+      data-link-preview="github-pull-request-agent"
+      data-pr-status={status}
+      orientation="vertical"
+    >
+      <div className="flex w-full min-w-0 items-center gap-1.5 text-xs font-medium leading-4 text-muted-foreground">
+        <GitHubLogo className="h-3.5 w-3.5 shrink-0" />
+        <span className="min-w-0 truncate">
+          {ref.owner}/{ref.repo}
+        </span>
+        <span aria-hidden="true">·</span>
+        <span className="shrink-0">Pull request #{ref.number}</span>
+        <span
+          className={cn(
+            "ml-auto inline-flex shrink-0 items-center gap-1 rounded-full border border-border/70 bg-background px-2 py-0.5 text-2xs font-semibold",
+            meta.className,
+          )}
+        >
+          <StatusIcon className="h-3 w-3" />
+          {meta.label}
+        </span>
+      </div>
+      <div className="w-full min-w-0 truncate text-sm font-semibold leading-5 text-foreground">
+        {info.title || preview.title}
+      </div>
+      <div className="flex w-full min-w-0 items-center gap-2 text-xs leading-4">
+        <span className="shrink-0 font-medium text-[color:var(--status-added)]">
+          +{info.additions.toLocaleString()}
+        </span>
+        <span className="shrink-0 font-medium text-[color:var(--status-deleted)]">
+          −{info.deletions.toLocaleString()}
+        </span>
+        <span className="min-w-0 truncate text-muted-foreground">
+          {info.changedFiles.toLocaleString()}{" "}
+          {info.changedFiles === 1 ? "file" : "files"} changed
+        </span>
+        <ExternalLink
+          aria-hidden="true"
+          className="ml-auto h-3.5 w-3.5 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover/attachment:opacity-100 group-focus-within/attachment:opacity-100"
+        />
+      </div>
+      <AttachmentTrigger asChild>
+        <a
+          aria-label={`Open GitHub PR ${ref.owner}/${ref.repo} #${ref.number}: ${info.title || preview.title}`}
+          href={preview.href}
+          rel="noreferrer"
+          target="_blank"
+        >
+          <span className="sr-only">
+            Open GitHub PR {ref.owner}/{ref.repo} #{ref.number}
+          </span>
+        </a>
+      </AttachmentTrigger>
+    </Attachment>
+  );
 }
 
 export function LinkPreviewAttachment({

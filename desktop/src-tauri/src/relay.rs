@@ -16,6 +16,14 @@ const DEFAULT_RELAY_WS_URL: &str = "ws://localhost:3000";
 // classifier keys on. Extracted to a const so a test can pin that contract.
 const MALFORMED_RESPONSE_MESSAGE: &str = "relay returned malformed response: not valid JSON";
 
+// The shared `http_client` deliberately has no global timeout (the media
+// proxy streams arbitrarily large bodies through it), so every relay bridge
+// request sets its own deadline. Without one, a stalled connection — e.g. an
+// expired VPN tunnel that blackholes packets instead of resetting — leaves
+// `send()` pending forever, and every UI await upstream (message sends, chat
+// creation) spins indefinitely with no error surfaced.
+const RELAY_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 fn configured_env_var(name: &str) -> Option<String> {
     std::env::var(name)
         .ok()
@@ -294,6 +302,7 @@ pub async fn query_relay_at(
     let response = state
         .http_client
         .post(&url)
+        .timeout(RELAY_REQUEST_TIMEOUT)
         .header("Authorization", auth)
         .header("Content-Type", "application/json")
         .body(body_bytes)
@@ -393,6 +402,7 @@ pub async fn sync_managed_agent_profile(
     let mut request = state
         .http_client
         .post(&url)
+        .timeout(RELAY_REQUEST_TIMEOUT)
         .header("Authorization", auth)
         .header("Content-Type", "application/json");
     if let Some(tag) = auth_tag {
@@ -498,6 +508,7 @@ pub async fn submit_event(
     let response = state
         .http_client
         .post(&url)
+        .timeout(RELAY_REQUEST_TIMEOUT)
         .header("Authorization", auth_header)
         .header("Content-Type", "application/json")
         .body(body_bytes)
@@ -539,6 +550,7 @@ pub async fn submit_signed_event(
     let response = state
         .http_client
         .post(&url)
+        .timeout(RELAY_REQUEST_TIMEOUT)
         .header("Authorization", auth_header)
         .header("Content-Type", "application/json")
         .body(body_bytes)
@@ -580,6 +592,7 @@ pub async fn submit_event_with_keys(
     let mut request = state
         .http_client
         .post(&url)
+        .timeout(RELAY_REQUEST_TIMEOUT)
         .header("Authorization", auth_header)
         .header("Content-Type", "application/json");
     if let Some(tag) = auth_tag {

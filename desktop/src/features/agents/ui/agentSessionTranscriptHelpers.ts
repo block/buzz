@@ -33,10 +33,13 @@ export function parsePromptText(text: string): {
     };
   }
 
-  const eventSection = sections.find((section) => {
-    const title = section.title.toLowerCase();
-    return title.startsWith("buzz event");
-  });
+  // Merged prompts (cancel-merge, backlog batches) carry one section per
+  // triggering event; the LAST one is the newest message and is what the
+  // prompt item should represent (its id also drives chat activity
+  // placement, which anchors to the user's latest message).
+  const eventSection = [...sections]
+    .reverse()
+    .find((section) => section.title.toLowerCase().startsWith("buzz event"));
   const eventContent = eventSection
     ? extractEventContent(eventSection.body)
     : "";

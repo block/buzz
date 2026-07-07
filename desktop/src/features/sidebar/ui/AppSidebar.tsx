@@ -100,6 +100,7 @@ type AppSidebarProps = {
   selectedView:
     | "home"
     | "channel"
+    | "chats"
     | "agents"
     | "workflows"
     | "pulse"
@@ -140,6 +141,7 @@ type AppSidebarProps = {
   onRemoveWorkspace: (id: string) => void;
   onCreateAgent: () => void;
   onSelectAgents: () => void;
+  onSelectChats: () => void;
   onSelectProjects: () => void;
   onSelectPulse: () => void;
   onSelectWorkflows: () => void;
@@ -207,6 +209,7 @@ export function AppSidebar({
   onRemoveWorkspace,
   onCreateAgent,
   onSelectAgents,
+  onSelectChats,
   onSelectProjects,
   onSelectPulse,
   onSelectWorkflows,
@@ -556,6 +559,7 @@ export function AppSidebar({
           onOpenDm={onOpenDm}
           onOpenSearchResult={onOpenSearchResult}
           onSelectAgents={onSelectAgents}
+          onSelectChats={onSelectChats}
           onSelectChannel={onSelectChannel}
           onSelectHome={onSelectHome}
           onSelectProjects={onSelectProjects}

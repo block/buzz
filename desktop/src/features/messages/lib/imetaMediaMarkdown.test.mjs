@@ -531,12 +531,21 @@ const MENTION_REF = [
   "1111111111111111111111111111111111111111111111111111111111111111",
 ];
 
-test("splitOutgoingTags: undefined input yields three empty arrays", () => {
+test("splitOutgoingTags: undefined input yields four empty arrays", () => {
   assert.deepEqual(splitOutgoingTags(undefined), {
     mediaTags: [],
     emojiTags: [],
     mentionTags: [],
+    clientTags: [],
   });
+});
+
+test("splitOutgoingTags: routes client marker tags off the media channel", () => {
+  const { mediaTags, clientTags } = splitOutgoingTags([
+    ["client", "automation", "ci"],
+  ]);
+  assert.deepEqual(mediaTags, []);
+  assert.deepEqual(clientTags, [["client", "automation", "ci"]]);
 });
 
 test("splitOutgoingTags: separates emoji tags from imeta tags", () => {

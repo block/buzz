@@ -168,6 +168,7 @@ pub fn channel_info_from_event(
         purpose,
         member_count,
         member_pubkeys: Vec::new(),
+        created_at: timestamp_to_iso(event.created_at.as_secs()),
         last_message_at,
         archived_at,
         participants,

@@ -23,6 +23,11 @@ export type MessageDeepLinkPayload = {
   threadRootId: string | null;
 };
 
+export type ChatDeepLinkPayload = {
+  chatId: string;
+  title: string | null;
+};
+
 /**
  * Register listeners for deep-link events emitted by the Rust backend.
  *
@@ -30,9 +35,9 @@ export type MessageDeepLinkPayload = {
  * adds a workspace for the relay (deduplicating by URL) and switches
  * to it. Returns an unlisten function to tear down all listeners.
  *
- * `buzz://message?…` is handled separately by `listenForMessageDeepLinks`,
- * because it needs to dispatch into the router which only exists below the
- * `RouterProvider` in the component tree.
+ * Routed app links such as `buzz://message?…` and `buzz://chat?…` are handled
+ * separately because they need to dispatch into the router, which only exists
+ * below the `RouterProvider` in the component tree.
  */
 export function listenForDeepLinks(deps: DeepLinkDeps): Promise<UnlistenFn> {
   return listen<string>("deep-link-connect", (event) => {
@@ -61,6 +66,14 @@ export function listenForMessageDeepLinks(
   onOpen: (payload: MessageDeepLinkPayload) => void,
 ): Promise<UnlistenFn> {
   return listen<MessageDeepLinkPayload>("deep-link-message", (event) => {
+    onOpen(event.payload);
+  });
+}
+
+export function listenForChatDeepLinks(
+  onOpen: (payload: ChatDeepLinkPayload) => void,
+): Promise<UnlistenFn> {
+  return listen<ChatDeepLinkPayload>("deep-link-chat", (event) => {
     onOpen(event.payload);
   });
 }

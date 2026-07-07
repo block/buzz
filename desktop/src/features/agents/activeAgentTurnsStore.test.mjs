@@ -1107,6 +1107,52 @@ describe("activeAgentTurnsStore", () => {
       );
     });
 
+    it("establishes a turn from a tool frame when turn_started was never seen", () => {
+      // Observer frames are ephemeral: an app subscribing mid-turn missed
+      // turn_started. The first in-turn frame of ANY kind must establish the
+      // turn so working indicators light up immediately.
+      syncAgentTurnsFromEvents(AGENT, [
+        makeEvent({
+          seq: 1,
+          kind: "tool_call",
+          turnId: "t1",
+          channelId: "c1",
+          timestamp: at(0),
+        }),
+      ]);
+      assert.ok(
+        channelIdsOf(getActiveTurnsForAgent(AGENT)).has("c1"),
+        "a mid-turn tool frame must establish the turn without turn_started",
+      );
+    });
+
+    it("does NOT establish a turn from a tool frame older than its completion", () => {
+      // The tombstone gate applies to the establish path too: frames from a
+      // turn that already terminally ended must not revive it.
+      syncAgentTurnsFromEvents(AGENT, [
+        makeEvent({ seq: 1, turnId: "t1", channelId: "c1", timestamp: at(0) }),
+        makeEvent({
+          seq: 2,
+          kind: "turn_completed",
+          turnId: "t1",
+          channelId: "c1",
+          timestamp: at(10_000),
+        }),
+        makeEvent({
+          seq: 3,
+          kind: "tool_call",
+          turnId: "t1",
+          channelId: "c1",
+          timestamp: at(8_000),
+        }),
+      ]);
+      assert.equal(
+        getActiveTurnsForAgent(AGENT).length,
+        0,
+        "a stale tool frame must not revive a completed turn",
+      );
+    });
+
     it("does NOT resurrect from a liveness frame with no channelId", () => {
       // A pruned turn cannot be rebuilt without a channelId to anchor the badge.
       syncAgentTurnsFromEvents(AGENT, [

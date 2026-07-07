@@ -164,7 +164,9 @@ const overrides = new Map([
   // uid-keyed lockfile path + behavioral tests add ~303 lines. Load-bearing
   // security fix for the lost-update race that stranded agent keys.
   ["src-tauri/src/secret_store.rs", 1043],
-  ["src-tauri/src/app_state.rs", 1033],
+  // +3: connect_timeout on the shared reqwest client (hang-proofing relay
+  // bridge calls against dead VPN tunnels that blackhole packets).
+  ["src-tauri/src/app_state.rs", 1036],
   // multi-slot splitting + no-op suppression (#1309): the ReadStateManager
   // class grew from ~700 lines to ~1019 with the addition of
   // splitContextsIntoBudgetedSlots (pure fn + 5 tests), publishSplitSlots,

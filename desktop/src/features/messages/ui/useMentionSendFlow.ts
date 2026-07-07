@@ -58,6 +58,7 @@ type SendMessageWithMentionFlowInput = {
 };
 
 type UseMentionSendFlowOptions = {
+  autoInviteNonMemberMentions?: boolean;
   channelId: string | null;
   channelLinks: Pick<UseChannelLinksResult, "clearChannels">;
   channelType: ChannelType | null;
@@ -119,6 +120,7 @@ function isProviderBackedAgent(agent: ManagedAgent) {
 }
 
 export function useMentionSendFlow({
+  autoInviteNonMemberMentions = false,
   channelId,
   channelLinks,
   channelType,
@@ -453,6 +455,46 @@ export function useMentionSendFlow({
     [channelType, mentions.hasResolvedMembers, mentions.memberPubkeys],
   );
 
+  const inviteNonMemberPubkeys = React.useCallback(
+    async (pubkeys: string[]) => {
+      const managedAgentsByPubkey = await getManagedAgentsByPubkey();
+      const peoplePubkeys: string[] = [];
+      const relayAgentPubkeys: string[] = [];
+
+      for (const pubkey of uniqueNormalizedPubkeys(pubkeys)) {
+        if (managedAgentsByPubkey.has(pubkey)) {
+          continue;
+        }
+
+        if (mentions.isAgentPubkey(pubkey)) {
+          relayAgentPubkeys.push(pubkey);
+        } else {
+          peoplePubkeys.push(pubkey);
+        }
+      }
+
+      const errors: string[] = [];
+      if (peoplePubkeys.length > 0) {
+        const result = await addMembersMutation.mutateAsync({
+          pubkeys: peoplePubkeys,
+          role: "member",
+        });
+        errors.push(...result.errors.map((error) => error.error));
+      }
+
+      if (relayAgentPubkeys.length > 0) {
+        const result = await addMembersMutation.mutateAsync({
+          pubkeys: relayAgentPubkeys,
+          role: "bot",
+        });
+        errors.push(...result.errors.map((error) => error.error));
+      }
+
+      return errors;
+    },
+    [addMembersMutation, getManagedAgentsByPubkey, mentions.isAgentPubkey],
+  );
+
   const sendMessageWithMentionFlow = React.useCallback(
     async ({
       capturedChannelId,
@@ -536,6 +578,21 @@ export function useMentionSendFlow({
         };
 
         if (promptNonMemberPubkeys.length > 0) {
+          if (autoInviteNonMemberMentions) {
+            const errors = await inviteNonMemberPubkeys(promptNonMemberPubkeys);
+            if (errors.length > 0) {
+              const message = errors.join("; ");
+              setNonMemberPromptError(message);
+              toast.error("Could not share chat", {
+                description: message,
+              });
+              return;
+            }
+
+            await completeSend(pendingDraft, pubkeys, outgoingTags);
+            return;
+          }
+
           setNonMemberPromptError(null);
           setPendingNonMemberSend(pendingDraft);
           return;
@@ -551,8 +608,10 @@ export function useMentionSendFlow({
       completeSend,
       createMentionedPersonaAgents,
       customEmoji,
+      autoInviteNonMemberMentions,
       getManagedAgentsByPubkey,
       getNonMemberMentionPubkeys,
+      inviteNonMemberPubkeys,
       mentions.extractMentionPubkeys,
       mentions.isManagedAgentPubkey,
     ],
@@ -602,43 +661,9 @@ export function useMentionSendFlow({
 
     setNonMemberPromptError(null);
     void (async () => {
-      const managedAgentsByPubkey = await getManagedAgentsByPubkey();
-      const peoplePubkeys: string[] = [];
-      const relayAgentPubkeys: string[] = [];
-
-      for (const pubkey of uniqueNormalizedPubkeys(
+      const errors = await inviteNonMemberPubkeys(
         pendingNonMemberSend.nonMemberPubkeys,
-      )) {
-        if (managedAgentsByPubkey.has(pubkey)) {
-          continue;
-        }
-
-        if (mentions.isAgentPubkey(pubkey)) {
-          relayAgentPubkeys.push(pubkey);
-        } else {
-          peoplePubkeys.push(pubkey);
-        }
-      }
-
-      const errors: string[] = [];
-      if (peoplePubkeys.length > 0) {
-        const result = await addMembersMutation.mutateAsync({
-          channelId: pendingNonMemberSend.capturedChannelId ?? undefined,
-          pubkeys: peoplePubkeys,
-          role: "member",
-        });
-        errors.push(...result.errors.map((error) => error.error));
-      }
-
-      if (relayAgentPubkeys.length > 0) {
-        const result = await addMembersMutation.mutateAsync({
-          channelId: pendingNonMemberSend.capturedChannelId ?? undefined,
-          pubkeys: relayAgentPubkeys,
-          role: "bot",
-        });
-        errors.push(...result.errors.map((error) => error.error));
-      }
-
+      );
       if (errors.length > 0) {
         setNonMemberPromptError(errors.join("; "));
         return;
@@ -658,13 +683,7 @@ export function useMentionSendFlow({
         error instanceof Error ? error.message : "Could not invite members.",
       );
     });
-  }, [
-    addMembersMutation,
-    completeSend,
-    getManagedAgentsByPubkey,
-    mentions.isAgentPubkey,
-    pendingNonMemberSend,
-  ]);
+  }, [completeSend, inviteNonMemberPubkeys, pendingNonMemberSend]);
 
   const dismissNonMemberPrompt = React.useCallback(() => {
     setPendingNonMemberSend(null);

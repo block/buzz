@@ -41,6 +41,11 @@ const eventsByAgent = new Map<string, ObserverEvent[]>();
 const transcriptByAgent = new Map<string, TranscriptState>();
 const snapshotByAgent = new Map<string, ObserverSnapshot>();
 
+// Agent-generated conversation titles from `chat_title` frames, keyed by
+// channel id. Consumed by the chats auto-title flow; never rendered as a
+// transcript row.
+const chatTitleByChannel = new Map<string, string>();
+
 // Per-agent listeners for `control_result` frames. The ModelPicker subscribes
 // here to learn the async outcome of a `switch_model` frame (the send is
 // fire-and-forget; the harness replies out-of-band over the observer relay).
@@ -209,6 +214,12 @@ async function handleRelayObserverEvent(
   try {
     const parsed = (await decryptObserverEvent(event)) as ObserverEvent;
     if (activeGeneration !== generation) {
+      return;
+    }
+    if (parsed.kind === "chat_title") {
+      // Consumed by the chats auto-title flow — deliberately kept out of the
+      // transcript event stream so it never renders as an activity row.
+      recordChatTitle(parsed);
       return;
     }
     appendAgentEvent(agentPubkey, parsed);
@@ -502,6 +513,30 @@ export function syncAgentObserverEvents(
   }
 }
 
+function recordChatTitle(event: ObserverEvent) {
+  const channelId = event.channelId;
+  const title =
+    typeof (event.payload as { title?: unknown })?.title === "string"
+      ? ((event.payload as { title: string }).title ?? "").trim()
+      : "";
+  if (!channelId || title.length === 0) {
+    return;
+  }
+  if (chatTitleByChannel.get(channelId) === title) {
+    return;
+  }
+  chatTitleByChannel.set(channelId, title);
+  notifyListeners();
+}
+
+/** Latest agent-generated conversation title for a channel, if any. */
+export function getAgentChatTitle(channelId: string | null | undefined) {
+  if (!channelId) {
+    return null;
+  }
+  return chatTitleByChannel.get(channelId) ?? null;
+}
+
 export function resetAgentObserverStore() {
   generation += 1;
   const unsubscribe = unsubscribeRelay;
@@ -513,6 +548,7 @@ export function resetAgentObserverStore() {
   snapshotByAgent.clear();
   knownAgentPubkeys.clear();
   knownAgentsBySubscription.clear();
+  chatTitleByChannel.clear();
   onSessionConfigCaptured = null;
   connectionState = "idle";
   errorMessage = null;

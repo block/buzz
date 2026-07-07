@@ -21,7 +21,7 @@ mod tests {
     use super::*;
     use std::collections::BTreeSet;
 
-    const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz";
+    const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz"; // sadscan:disable np.postgres.1
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum ConstraintKind {
@@ -471,7 +471,7 @@ mod tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 5);
+        assert_eq!(migrations.len(), 6);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -532,6 +532,17 @@ mod tests {
         assert!(migrations[4].sql.as_str().contains("search_tsv"));
         assert!(migrations[4].sql.as_str().contains("44200"));
         assert!(!migrations[0].sql.as_str().contains("44200"));
+
+        // Chat channels are also additive. Existing databases receive the enum
+        // value from migration 6; 0001 stays immutable for brownfield checksum
+        // stability.
+        assert_eq!(migrations[5].version, 6);
+        assert!(migrations[5]
+            .sql
+            .as_str()
+            .contains("ALTER TYPE channel_type ADD VALUE"));
+        assert!(migrations[5].sql.as_str().contains("'chat'"));
+        assert!(!migrations[0].sql.as_str().contains("'chat'"));
     }
 
     #[test]

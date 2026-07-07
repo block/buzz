@@ -137,6 +137,10 @@ test.describe("list virtualization", () => {
   test("06 — custom-section dnd reorder commits under content-visibility", async ({
     page,
   }) => {
+    // Tall enough that the sidebar does not scroll: dnd-kit auto-scroll
+    // during the pointer drag would otherwise move the sections away from
+    // their pre-measured drop coordinates and the drop would miss.
+    await page.setViewportSize({ width: 1280, height: 1100 });
     await seedChannelSections(page);
     await installMockBridge(page);
     await page.goto("/");
@@ -165,8 +169,8 @@ test.describe("list virtualization", () => {
       );
     expect(await sectionOrder()).toEqual(["Priority", "Archive"]);
 
-    // Drag "Priority" past "Archive" — onDragEnd commits arrayMove and persists
-    // the new order. The drop must land for the order to flip.
+    // Drag "Priority" past "Archive" — onDragEnd commits arrayMove and
+    // persists the new order. The drop must land for the order to flip.
     await dragOver(page, topHeader, bottomHeader);
 
     // The drop landed: order flipped. A no-op drag would leave it unchanged.

@@ -69,6 +69,7 @@ export type ChannelPaneProps = {
   onOpenMembers?: () => void;
   onOpenProfilePanel: (pubkey: string) => void;
   onOpenThread: (message: TimelineMessage) => void;
+  onStartSideConversation?: (message: TimelineMessage) => void;
   onResetThreadPanelWidth: () => void;
   onSelectThreadReplyTarget: (message: TimelineMessage) => void;
   onSendMessage: (

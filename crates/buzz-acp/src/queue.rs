@@ -1088,8 +1088,10 @@ pub(crate) fn format_event_block(
 /// top level.
 fn append_reply_instruction(s: &mut String, event_id: &str) {
     s.push_str(&format!(
-        "\nIMPORTANT: For ordinary replies in this turn, use `--reply-to {event_id}` \
-         on `buzz messages send` so the conversation stays threaded. \
+        "\nIMPORTANT: For ordinary replies in this turn, use \
+         `buzz messages send --channel <channel UUID from Context> --reply-to {event_id} --content \"...\"` \
+         so the conversation stays threaded. Message text is not positional; always pass it with \
+         `--content`, or pipe it with `--content -` for shell-sensitive text. \
          If the human explicitly asks for a channel-root, top-level, \
          or broadcast post, send that message without `--reply-to`. \
          If the requested destination is ambiguous, ask before sending."
@@ -1104,10 +1106,36 @@ fn append_reply_instruction(s: &mut String, event_id: &str) {
 fn append_new_thread_reply_instruction(s: &mut String, event_id: &str) {
     s.push_str(&format!(
         "\nIMPORTANT: This is a new top-level message. For ordinary replies in \
-         this turn, use `--reply-to {event_id}` on `buzz messages send` — the \
-         triggering message is the thread root. Do NOT reply into any other \
+         this turn, use \
+         `buzz messages send --channel <channel UUID from Context> --reply-to {event_id} --content \"...\"` — \
+         the triggering message is the thread root. Message text is not positional; always pass it with \
+         `--content`, or pipe it with `--content -` for shell-sensitive text. Do NOT reply into any other \
          (older) thread. If the human explicitly asks for a channel-root, \
          top-level, or broadcast post, send that message without `--reply-to`."
+    ));
+}
+
+fn append_chat_final_answer_instruction(s: &mut String) {
+    s.push_str(
+        "\nIMPORTANT: This is the dedicated chat interface. The user already sees \
+         your tool calls, searches, command output, and activity markers in the chat UI. \
+         Send exactly one human-facing final answer with `buzz messages send` when \
+         the turn is complete. Do not send progress, status, or self-narration \
+         messages like \"let me check\", \"now I have\", \"I found\", \"I sent\", \
+         or \"let me reply\".",
+    );
+}
+
+fn append_chat_project_workspace_instruction(s: &mut String, cwd: &str) {
+    let cwd = cwd.trim();
+    if cwd.is_empty() || cwd == "/" {
+        return;
+    }
+    s.push_str(&format!(
+        "\nProject folder: {cwd}\n\
+         IMPORTANT: Use the project folder above as the working project for this chat. \
+         When inspecting or editing files, start from that folder. Do not clone a fresh \
+         copy into `REPOS/` or use the default agent workspace unless the human asks for that."
     ));
 }
 
@@ -1174,7 +1202,8 @@ fn format_context_hints(
     channel_id: Uuid,
     channel_info: Option<&PromptChannelInfo>,
     thread_tags: &ThreadTags,
-    is_dm: bool,
+    linear_scope: Option<&str>,
+    project_cwd: Option<&str>,
     has_conversation_context: bool,
     reply_anchor: Option<&str>,
 ) -> String {
@@ -1183,12 +1212,13 @@ fn format_context_hints(
         None => channel_id.to_string(),
     };
 
-    // DM check comes first — a DM reply has both thread tags AND is_dm=true,
-    // and the scope should be "dm" (not "thread") because the agent is in a DM.
-    if is_dm {
+    // Linear chat check comes first — a DM/chat reply has both thread tags and
+    // linear_scope, and the scope should be the conversation type rather than
+    // "thread".
+    if let Some(scope) = linear_scope {
         let is_reply = thread_tags.root_event_id.is_some();
-        // DM replies use thread command because /messages excludes thread replies.
-        // DM non-replies use get for recent conversation.
+        // Linear replies use thread command because /messages excludes thread
+        // replies. Linear non-replies use get for recent conversation.
         let ctx_hint = if has_conversation_context && is_reply {
             "Thread context included below. Use `buzz messages thread --channel <UUID> --event <ID>` for full history if truncated."
         } else if has_conversation_context {
@@ -1200,11 +1230,11 @@ fn format_context_hints(
         };
         let mut s = format!(
             "[Context]\n\
-             Scope: dm\n\
+             Scope: {scope}\n\
              Channel: {channel_display}\n\
              {ctx_hint}"
         );
-        // If this is a DM reply, include thread structural info as supplementary.
+        // If this is a linear reply, include thread structural info as supplementary.
         if let Some(ref root) = thread_tags.root_event_id {
             s.push_str(&format!("\nThread root: {root}"));
             if let Some(ref parent) = thread_tags.parent_event_id {
@@ -1215,6 +1245,12 @@ fn format_context_hints(
             if let Some(event_id) = reply_anchor {
                 append_reply_instruction(&mut s, event_id);
             }
+        }
+        if scope == "chat" {
+            if let Some(cwd) = project_cwd {
+                append_chat_project_workspace_instruction(&mut s, cwd);
+            }
+            append_chat_final_answer_instruction(&mut s);
         }
         s
     } else if let Some(ref root) = thread_tags.root_event_id {
@@ -1294,6 +1330,7 @@ pub struct FormatPromptArgs<'a> {
     pub agent_core: Option<&'a str>,
     pub channel_info: Option<&'a PromptChannelInfo>,
     pub conversation_context: Option<&'a ConversationContext>,
+    pub project_cwd: Option<&'a str>,
     pub profile_lookup: Option<&'a PromptProfileLookup>,
     /// When true, base_prompt and system_prompt are delivered via the system
     /// role (session/new) and omitted from the user message. When false
@@ -1347,10 +1384,17 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
         }
     };
     let thread_tags = parse_thread_tags(&last_event.event);
-    let is_dm = args
+    let is_linear_chat = args
         .channel_info
-        .map(|ci| ci.channel_type == "dm")
+        .map(|ci| ci.channel_type == "dm" || ci.channel_type == "chat")
         .unwrap_or(false);
+    let linear_scope = args.channel_info.and_then(|ci| {
+        if ci.channel_type == "dm" || ci.channel_type == "chat" {
+            Some(ci.channel_type.as_str())
+        } else {
+            None
+        }
+    });
 
     let mut sections: Vec<String> = Vec::with_capacity(7);
 
@@ -1383,9 +1427,10 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
     //   - in a thread  → anchor to the thread ROOT (no depth-2 nesting)
     //   - top-level     → anchor to the triggering event (it becomes the root)
     // Agent↔agent turns get no forced anchor — deep nesting is intentional
-    // there. DMs are always 1:1 with a human, so they always anchor.
+    // there. DMs/chats are always human-facing linear conversations, so they
+    // always use linear reply behavior.
     let sender_pubkey = last_event.event.pubkey.to_hex();
-    let reply_anchor = if is_dm {
+    let reply_anchor = if is_linear_chat {
         thread_tags
             .root_event_id
             .is_some()
@@ -1402,7 +1447,8 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
         batch.channel_id,
         args.channel_info,
         &thread_tags,
-        is_dm,
+        linear_scope,
+        args.project_cwd,
         args.conversation_context.is_some(),
         reply_anchor.as_deref(),
     ));
@@ -2893,6 +2939,43 @@ mod tests {
     }
 
     #[test]
+    fn test_format_prompt_chat_scope() {
+        let ch = Uuid::new_v4();
+        let event = make_event("hey fizz");
+        let batch = FlushBatch {
+            channel_id: ch,
+            events: vec![BatchEvent {
+                event,
+                prompt_tag: "chat".into(),
+                received_at: Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+        let ci = PromptChannelInfo {
+            name: "Chat with Fizz".into(),
+            channel_type: "chat".into(),
+        };
+
+        let prompt = format_prompt(
+            &batch,
+            &FormatPromptArgs {
+                channel_info: Some(&ci),
+                project_cwd: Some("/Users/me/Development/sprout"),
+                ..Default::default()
+            },
+        )
+        .join("\n\n");
+        assert!(prompt.contains("Scope: chat"));
+        assert!(prompt.contains("Project folder: /Users/me/Development/sprout"));
+        assert!(prompt.contains("Use the project folder above as the working project"));
+        assert!(prompt.contains("Do not clone a fresh"));
+        assert!(prompt.contains("dedicated chat interface"));
+        assert!(prompt.contains("Send exactly one human-facing final answer"));
+        assert!(prompt.contains("Do not send progress, status, or self-narration"));
+    }
+
+    #[test]
     fn test_format_prompt_thread_scope() {
         let ch = Uuid::new_v4();
         let event = make_event_with_tags(
@@ -3010,6 +3093,48 @@ mod tests {
         )
         .join("\n\n");
         assert!(prompt.contains("Scope: dm"));
+        assert!(prompt.contains("[Conversation Context (1 of 1 messages)]"));
+        assert!(prompt.contains("Can you deploy?"));
+    }
+
+    #[test]
+    fn test_format_prompt_with_chat_context() {
+        let ch = Uuid::new_v4();
+        let event = make_event("ok do that");
+        let batch = FlushBatch {
+            channel_id: ch,
+            events: vec![BatchEvent {
+                event,
+                prompt_tag: "chat".into(),
+                received_at: Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+        let ci = PromptChannelInfo {
+            name: "Chat with Fizz".into(),
+            channel_type: "chat".into(),
+        };
+        let ctx = ConversationContext::Dm {
+            messages: vec![ContextMessage {
+                pubkey: "npub1abc".into(),
+                timestamp: "2026-03-15T16:00:00Z".into(),
+                content: "Can you deploy?".into(),
+            }],
+            total: 1,
+            truncated: false,
+        };
+
+        let prompt = format_prompt(
+            &batch,
+            &FormatPromptArgs {
+                channel_info: Some(&ci),
+                conversation_context: Some(&ctx),
+                ..Default::default()
+            },
+        )
+        .join("\n\n");
+        assert!(prompt.contains("Scope: chat"));
         assert!(prompt.contains("[Conversation Context (1 of 1 messages)]"));
         assert!(prompt.contains("Can you deploy?"));
     }
@@ -3762,6 +3887,12 @@ mod tests {
             "human-facing thread reply should anchor to the thread root"
         );
         assert!(
+            prompt.contains(&format!(
+                "buzz messages send --channel <channel UUID from Context> --reply-to {root_id} --content"
+            )),
+            "reply instruction should show the correct --content send syntax"
+        );
+        assert!(
             prompt.contains("For ordinary replies in this turn"),
             "channel thread reply should describe reply-to as the default"
         );
@@ -3836,6 +3967,12 @@ mod tests {
         assert!(
             prompt.contains(&format!("--reply-to {event_id}")),
             "top-level human message should anchor a new thread at the triggering event"
+        );
+        assert!(
+            prompt.contains(&format!(
+                "buzz messages send --channel <channel UUID from Context> --reply-to {event_id} --content"
+            )),
+            "new-thread instruction should show the correct --content send syntax"
         );
         assert!(
             prompt.contains("new top-level message"),

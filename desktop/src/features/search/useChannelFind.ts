@@ -2,7 +2,8 @@ import * as React from "react";
 
 import { useSearchMessagesQuery } from "@/features/search/hooks";
 import type { TimelineMessage } from "@/features/messages/types";
-import type { SearchHit } from "@/shared/api/types";
+import { cacheSearchHitEvent } from "@/app/navigation/searchHitEventCache";
+import type { RelayEvent, SearchHit } from "@/shared/api/types";
 import { hasPrimaryShortcutModifier } from "@/shared/lib/platform";
 
 const MIN_QUERY_LENGTH = 2;
@@ -187,4 +188,29 @@ export function useChannelFind({
       query,
     ],
   );
+}
+
+/**
+ * Ownership of the "find target" events: search hits outside the loaded
+ * window are cached and spliced into the timeline, and cleared when the
+ * channel changes. Split from useChannelFind because the spliced events
+ * feed the very message list the find hook searches.
+ */
+export function useFindTargetEvents(channelId: string | null) {
+  const [findTargetEvents, setFindTargetEvents] = React.useState<RelayEvent[]>(
+    [],
+  );
+  // biome-ignore lint/correctness/useExhaustiveDependencies: clear spliced find results exactly when the active channel changes.
+  React.useEffect(() => {
+    setFindTargetEvents([]);
+  }, [channelId]);
+  const handleFindSearchHit = React.useCallback((hit: SearchHit) => {
+    const event = cacheSearchHitEvent(hit);
+    setFindTargetEvents((currentEvents) =>
+      currentEvents.some((currentEvent) => currentEvent.id === event.id)
+        ? currentEvents
+        : [...currentEvents, event],
+    );
+  }, []);
+  return { findTargetEvents, handleFindSearchHit };
 }

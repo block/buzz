@@ -98,6 +98,8 @@ pub struct ChannelInfo {
     pub member_count: i64,
     #[serde(default)]
     pub member_pubkeys: Vec<String>,
+    #[serde(default)]
+    pub created_at: String,
     pub last_message_at: Option<String>,
     pub archived_at: Option<String>,
     #[serde(default)]

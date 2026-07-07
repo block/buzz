@@ -108,6 +108,7 @@ fn merge_discovered_channels(
             let mut is_hidden = false;
             let mut is_private = false;
             let mut is_archived = false;
+            let mut explicit_channel_type = None;
             for tag in tags {
                 if let Some(arr) = tag.as_array() {
                     match arr.first().and_then(|v| v.as_str()) {
@@ -115,6 +116,10 @@ fn merge_discovered_channels(
                         Some("name") => name = arr.get(1).and_then(|v| v.as_str()),
                         Some("hidden") => is_hidden = true,
                         Some("private") => is_private = true,
+                        Some("t") => {
+                            explicit_channel_type =
+                                arr.get(1).and_then(|v| v.as_str()).map(str::to_string);
+                        }
                         Some("archived") => {
                             is_archived = arr.get(1).and_then(|v| v.as_str()) == Some("true")
                         }
@@ -130,7 +135,9 @@ fn merge_discovered_channels(
                     }
                     let ch_name = name.unwrap_or("unknown").to_string();
                     // DMs have the "hidden" tag; private channels have "private".
-                    let ch_type = if is_hidden {
+                    let ch_type = if let Some(channel_type) = explicit_channel_type {
+                        channel_type
+                    } else if is_hidden {
                         "dm".to_string()
                     } else if is_private {
                         "private".to_string()

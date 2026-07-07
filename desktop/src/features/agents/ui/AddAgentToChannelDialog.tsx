@@ -43,7 +43,10 @@ export function AddAgentToChannelDialog({
   const channels = React.useMemo(
     () =>
       (channelsQuery.data ?? []).filter(
-        (channel) => channel.channelType !== "dm" && !channel.archivedAt,
+        (channel) =>
+          channel.channelType !== "dm" &&
+          channel.channelType !== "chat" &&
+          !channel.archivedAt,
       ),
     [channelsQuery.data],
   );

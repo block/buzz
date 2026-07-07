@@ -822,13 +822,14 @@ pub async fn get_accessible_channels(
         WHERE c.community_id = $1 AND c.deleted_at IS NULL
           {membership_clause}
           AND (c.channel_type != 'dm' OR cm.hidden_at IS NULL)
+          AND (c.channel_type != 'chat' OR cm.channel_id IS NOT NULL)
     "#
     );
 
     let sql = if visibility_filter.is_some() {
-        format!("{base}  AND c.visibility::text = $3\n        ORDER BY array_position(ARRAY['stream','forum','dm']::text[], c.channel_type::text), c.name\n        LIMIT 1000")
+        format!("{base}  AND c.visibility::text = $3\n        ORDER BY array_position(ARRAY['stream','forum','dm','chat']::text[], c.channel_type::text), c.name\n        LIMIT 1000")
     } else {
-        format!("{base}        ORDER BY array_position(ARRAY['stream','forum','dm']::text[], c.channel_type::text), c.name\n        LIMIT 1000")
+        format!("{base}        ORDER BY array_position(ARRAY['stream','forum','dm','chat']::text[], c.channel_type::text), c.name\n        LIMIT 1000")
     };
 
     let query = sqlx::query(sqlx::AssertSqlSafe(sql))
@@ -1371,7 +1372,7 @@ mod tests {
     use crate::user::{ensure_user, set_agent_owner};
     use nostr::Keys;
 
-    const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz";
+    const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz"; // sadscan:disable np.postgres.1
 
     async fn setup_pool() -> PgPool {
         PgPool::connect(TEST_DB_URL)

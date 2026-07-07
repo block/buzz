@@ -17,10 +17,17 @@ import type { ChannelType, ChannelVisibility } from "@/shared/api/types";
 import { UpdateIndicator } from "@/features/settings/UpdateIndicator";
 import { cn } from "@/shared/lib/cn";
 import { channelChrome } from "@/shared/layout/chromeLayout";
+import { AnimatedTitleText } from "@/shared/ui/animated-title-text";
 import { Button } from "@/shared/ui/button";
 
 type ChatHeaderProps = {
   actions?: React.ReactNode;
+  /**
+   * Animate title changes with the search-placeholder character swap. Only
+   * enable where a title renames in place (e.g. chat auto-titling) — key the
+   * header by entity id so switching entities doesn't animate.
+   */
+  animatedTitle?: boolean;
   belowSystemChrome?: boolean;
   /** Ref to the outer chrome wrapper when `belowSystemChrome` is true. */
   chromeWrapperRef?: React.Ref<HTMLDivElement>;
@@ -29,7 +36,14 @@ type ChatHeaderProps = {
   channelType?: ChannelType;
   visibility?: ChannelVisibility;
   leadingContent?: React.ReactNode;
-  mode?: "home" | "channel" | "agents" | "workflows" | "pulse" | "projects";
+  mode?:
+    | "home"
+    | "channel"
+    | "chats"
+    | "agents"
+    | "workflows"
+    | "pulse"
+    | "projects";
   overlaysContent?: boolean;
   statusBadge?: React.ReactNode;
   /** Render the chrome wrapper without an individual backdrop when a parent supplies shared blur. */
@@ -46,7 +60,14 @@ function ChannelIcon({
 }: {
   channelType?: ChannelType;
   visibility?: ChannelVisibility;
-  mode?: "home" | "channel" | "agents" | "workflows" | "pulse" | "projects";
+  mode?:
+    | "home"
+    | "channel"
+    | "chats"
+    | "agents"
+    | "workflows"
+    | "pulse"
+    | "projects";
 }) {
   if (mode === "home") {
     return <House className={HEADER_ICON_CLASS} />;
@@ -85,6 +106,7 @@ function ChannelIcon({
 
 export function ChatHeader({
   actions,
+  animatedTitle = false,
   belowSystemChrome = false,
   chromeWrapperRef,
   title,
@@ -114,7 +136,10 @@ export function ChatHeader({
   const header = (
     <header
       className={cn(
-        "pointer-events-auto relative z-30 min-w-0 shrink-0 cursor-default select-none bg-transparent px-5 py-2 transition-[margin,padding] duration-200 ease-linear",
+        "pointer-events-auto relative z-30 min-w-0 shrink-0 cursor-default select-none px-5 py-2 transition-[margin,padding] duration-200 ease-linear",
+        !belowSystemChrome && transparentChrome
+          ? "bg-background/75 backdrop-blur-md supports-backdrop-filter:bg-background/65 dark:bg-background/45 dark:backdrop-blur-xl dark:supports-backdrop-filter:bg-background/35"
+          : "bg-transparent",
         overlaysContent && !belowSystemChrome && "-mb-14",
       )}
       data-testid="chat-header"
@@ -123,15 +148,18 @@ export function ChatHeader({
       <div className="flex h-9 min-w-0 items-center gap-2.5">
         <div className="min-w-0 flex-1">
           <div className="group/title flex min-w-0 items-center gap-[4px] overflow-hidden">
-            <div className="flex shrink-0 items-center">
-              {leadingContent ?? (
-                <ChannelIcon
-                  channelType={channelType}
-                  mode={mode}
-                  visibility={visibility}
-                />
-              )}
-            </div>
+            {/* Chats render no leading icon — the title stands alone. */}
+            {leadingContent || mode !== "chats" ? (
+              <div className="flex shrink-0 items-center">
+                {leadingContent ?? (
+                  <ChannelIcon
+                    channelType={channelType}
+                    mode={mode}
+                    visibility={visibility}
+                  />
+                )}
+              </div>
+            ) : null}
             <h1
               className={cn(
                 "min-w-0 truncate text-base font-semibold leading-6 tracking-tight",
@@ -140,7 +168,7 @@ export function ChatHeader({
               data-testid="chat-title"
               title={trimmedDescription || undefined}
             >
-              {title}
+              {animatedTitle ? <AnimatedTitleText text={title} /> : title}
             </h1>
             <Button
               aria-label={`Copy channel name: ${title}`}

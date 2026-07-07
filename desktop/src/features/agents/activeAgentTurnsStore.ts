@@ -42,6 +42,8 @@ type ActiveTurn = {
 export type ActiveTurnSummary = {
   channelId: string;
   anchorAt: number;
+  /** Ids of the live turns collapsed into this channel summary. */
+  turnIds: string[];
 };
 
 /** One channel with active agent work, aggregated across agents. */
@@ -51,6 +53,8 @@ export type ActiveChannelTurnSummary = {
   agentCount: number;
   agentPubkeys: string[];
   agentNames?: string[];
+  /** Live turn ids in this channel, across all tracked agents. */
+  turnIds: string[];
 };
 
 // Module-level state: agentPubkey → turnId → ActiveTurn
@@ -350,14 +354,23 @@ function processEvent(agentPubkey: string, event: ObserverEvent) {
       );
       notifyListeners();
       return;
-    case "acp_read":
-    case "acp_write":
+    // acp_read / acp_write / turn_liveness fall through here too:
+    // Any other frame carrying a turn context (tool calls, assistant text,
+    // …) is equally hard evidence the turn is alive. Observer frames are
+    // ephemeral — an app that subscribes mid-turn missed `turn_started`
+    // entirely — so every in-turn frame must be able to establish the turn,
+    // not just refresh it. Without this, a chat can stream visible activity
+    // while the working indicators (sidebar shimmer, badges) stay dark
+    // until the next liveness ping happens to land.
+    //
     // turn_liveness keeps a quiet-but-alive turn from being pruned; same
-    // refresh-only path as stream activity — no surfaced summary change on its
-    // own, so it only notifies when the offset above actually moved. If the
-    // turn was pruned out from under a still-running host (a transient drop
-    // raced the pause, or the lone-crash residual self-healed), resurrect it.
-    case "turn_liveness": {
+    // refresh-only path as stream activity — no surfaced summary change on
+    // its own, so it only notifies when the offset above actually moved. If
+    // the turn was pruned out from under a still-running host (a transient
+    // drop raced the pause, or the lone-crash residual self-healed), or was
+    // never seen to start, resurrect it. The terminal tombstone still keeps
+    // frames from a completed turn (or stale replays) from reviving it.
+    default: {
       const refreshed = recordActivity(agentPubkey, event.turnId ?? null);
       if (!refreshed && resurrectTurn(agentPubkey, event)) {
         notifyListeners();
@@ -420,17 +433,22 @@ export function getActiveTurnsForAgent(
   // should count from when the channel's oldest live turn began. Anchors are
   // derived here (startedAt + offset) so the latest skew estimate applies.
   const earliestByChannel = new Map<string, number>();
-  for (const turn of agentTurns.values()) {
+  const turnIdsByChannel = new Map<string, string[]>();
+  for (const [turnId, turn] of agentTurns.entries()) {
     const prior = earliestByChannel.get(turn.channelId);
     if (prior === undefined || turn.startedAt < prior) {
       earliestByChannel.set(turn.channelId, turn.startedAt);
     }
+    const ids = turnIdsByChannel.get(turn.channelId) ?? [];
+    ids.push(turnId);
+    turnIdsByChannel.set(turn.channelId, ids);
   }
 
   const result = [...earliestByChannel.entries()]
     .map(([channelId, startedAt]) => ({
       channelId,
       anchorAt: startedAt + offset,
+      turnIds: turnIdsByChannel.get(channelId) ?? [],
     }))
     .sort((a, b) => a.channelId.localeCompare(b.channelId));
   cachedTurnSummaries.set(key, result);
@@ -450,25 +468,27 @@ export function getActiveTurnsByChannel(): ActiveChannelTurnSummary[] {
 
   const summaries = new Map<
     string,
-    { anchorAt: number; agentPubkeys: Set<string> }
+    { anchorAt: number; agentPubkeys: Set<string>; turnIds: string[] }
   >();
 
   for (const [agentKey, agentTurns] of activeTurnsByAgent) {
     if (agentTurns.size === 0) continue;
     const offset = clockOffsetByAgent.get(agentKey) ?? 0;
 
-    for (const turn of agentTurns.values()) {
+    for (const [turnId, turn] of agentTurns.entries()) {
       const anchorAt = turn.startedAt + offset;
       const summary = summaries.get(turn.channelId);
       if (!summary) {
         summaries.set(turn.channelId, {
           anchorAt,
           agentPubkeys: new Set([agentKey]),
+          turnIds: [turnId],
         });
         continue;
       }
 
       summary.agentPubkeys.add(agentKey);
+      summary.turnIds.push(turnId);
       if (anchorAt < summary.anchorAt) {
         summary.anchorAt = anchorAt;
       }
@@ -481,6 +501,7 @@ export function getActiveTurnsByChannel(): ActiveChannelTurnSummary[] {
       anchorAt: summary.anchorAt,
       agentCount: summary.agentPubkeys.size,
       agentPubkeys: [...summary.agentPubkeys].sort(),
+      turnIds: summary.turnIds.sort(),
     }))
     .sort((a, b) => a.channelId.localeCompare(b.channelId));
   cachedChannelTurnSummaries = result;

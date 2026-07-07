@@ -76,6 +76,8 @@ export default defineConfig({
         "**/persona-model-combobox-screenshots.spec.ts",
         "**/drafts-screenshots.spec.ts",
         "**/channel-sort.spec.ts",
+        "**/chats-first-message.spec.ts",
+        "**/chats-switch-repro.spec.ts",
       ],
       use: {
         ...devices["Desktop Chrome"],

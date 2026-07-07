@@ -462,6 +462,8 @@ export function useChannelUnreadState({
   // the ids to the session-local forced-unread overlay the badge predicates OR
   // in. Cleared on channel-leave; does not survive reload (symmetric with the
   // shipped channel mark-unread).
+  // Also marks the channel unread at the sidebar level so the unread dot
+  // appears next to the channel name when navigating away.
   const handleMarkMessageUnread = React.useCallback(
     (messageId: string) => {
       for (const id of [
@@ -470,9 +472,12 @@ export function useChannelUnreadState({
       ]) {
         forcedUnreadMsgRef.current.add(id);
       }
+      if (activeChannelId) {
+        markChannelUnread(activeChannelId);
+      }
       forceUnreadRender();
     },
-    [getReplyDescendantIdsForMessage],
+    [activeChannelId, getReplyDescendantIdsForMessage, markChannelUnread],
   );
 
   return {

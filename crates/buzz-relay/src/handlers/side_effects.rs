@@ -964,10 +964,13 @@ pub async fn emit_group_discovery_events(
             // making channel visibility self-describing for clients.
             tags.push(Tag::parse(["public"])?);
         }
-        // NIP-29 hidden tag: hint to clients not to show DMs in public group lists.
+        // NIP-29 hidden tag: hint to clients not to show DMs/chats in public group lists.
         // Not a security boundary — access control is handled by channel-scoped storage.
-        if channel.channel_type == "dm" {
+        if channel.channel_type == "dm" || channel.channel_type == "chat" {
             tags.push(Tag::parse(["hidden"])?);
+        }
+
+        if channel.channel_type == "dm" {
             // Include participant pubkeys in kind:39000 for DMs so clients can
             // resolve display names without a separate kind:39002 fetch.
             for m in &members {

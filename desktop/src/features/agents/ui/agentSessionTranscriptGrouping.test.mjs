@@ -320,8 +320,58 @@ test("buildTranscriptDisplayBlocks keeps non-contiguous same-kind runs expanded"
   ]);
 
   assert.equal(block.kind, "turn");
+  // read-1 must not merge across the interleaved shell command; only the
+  // contiguous trailing pair summarizes.
   assert.deepEqual(
     block.segments.map((segment) => segment.kind),
-    ["item", "item", "item", "item"],
+    ["item", "item", "summary"],
   );
+  assert.deepEqual(
+    block.segments[2].summary.items.map((item) => item.id),
+    ["read-2", "read-3"],
+  );
+});
+
+test("buildTranscriptDisplayBlocks keeps an executing tool out of the summary run", () => {
+  const mkShell = (id, status) => ({
+    id,
+    type: "tool",
+    renderClass: "shell",
+    descriptor: {
+      renderClass: "shell",
+      label: "Ran command",
+      preview: id,
+      source: "harness",
+      groupKey: "shell:command",
+    },
+    title: "Ran command",
+    toolName: "shell",
+    buzzToolName: null,
+    status,
+    args: {},
+    result: "",
+    isError: false,
+    timestamp: "2026-06-18T00:00:00Z",
+    startedAt: "2026-06-18T00:00:00Z",
+    completedAt: status === "completed" ? "2026-06-18T00:00:01Z" : null,
+    turnId: "turn-1",
+    sessionId: "sess-1",
+    channelId: "chan-1",
+  });
+
+  const [block] = buildTranscriptDisplayBlocks([
+    mkShell("shell-1", "completed"),
+    mkShell("shell-2", "completed"),
+    mkShell("shell-3", "executing"),
+  ]);
+
+  assert.equal(block.kind, "turn");
+  // Completed commands fold into "Ran 2 commands"; the in-flight command
+  // stays visible as its own live row until it completes.
+  assert.deepEqual(
+    block.segments.map((segment) => segment.kind),
+    ["summary", "item"],
+  );
+  assert.equal(block.segments[0].summary.label, "Ran 2 commands");
+  assert.equal(block.segments[1].item.id, "shell-3");
 });

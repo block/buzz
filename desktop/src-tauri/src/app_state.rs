@@ -88,6 +88,9 @@ pub fn build_app_state() -> AppState {
         keys: Mutex::new(keys),
         http_client: reqwest::Client::builder()
             .resolve("localhost", std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
+            // Connect-phase only; request deadlines are per-request (media
+            // streaming stays unbounded, relay.rs sets RELAY_REQUEST_TIMEOUT).
+            .connect_timeout(std::time::Duration::from_secs(10))
             .pool_idle_timeout(std::time::Duration::from_secs(10))
             .pool_max_idle_per_host(1)
             .build()

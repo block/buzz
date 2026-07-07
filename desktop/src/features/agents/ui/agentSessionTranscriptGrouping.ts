@@ -128,7 +128,7 @@ function groupSameKindSegments(
       run.push(next.item);
       j += 1;
     }
-    if (run.length >= minimumSummaryRunLength(run[0])) {
+    if (run.length >= MINIMUM_SUMMARY_RUN_LENGTH) {
       grouped.push({
         kind: "summary",
         summary: {
@@ -151,6 +151,10 @@ function groupSameKindSegments(
 
 function sameKindKey(item: TranscriptItem): string | null {
   if (item.type !== "tool") return null;
+  // In-flight tools never join a summary run: the live row (running label,
+  // elapsed time, shimmer) stays visible on its own and only folds into the
+  // summary count once it completes.
+  if (item.status === "executing" || item.status === "pending") return null;
   const renderClass = getRenderClass(item);
   if (renderClass === "message") {
     return null;
@@ -176,9 +180,9 @@ function sameKindLabel(item: TranscriptItem, count: number): string {
   return `${label} ×${count}`;
 }
 
-function minimumSummaryRunLength(item: TranscriptItem): number {
-  return getRenderClass(item) === "file-edit" ? 2 : 3;
-}
+// Two adjacent same-kind rows already read as repetition ("Ran command",
+// "Ran command"), so fold them the moment a second completes.
+const MINIMUM_SUMMARY_RUN_LENGTH = 2;
 
 function getRenderClass(item: TranscriptItem) {
   if (item.type !== "tool") return item.renderClass;

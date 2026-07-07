@@ -17,7 +17,7 @@ import {
   cancelPairing,
   confirmPairingSas,
   startPairing,
-} from "@/shared/api/tauri";
+} from "@/shared/api/tauriPairing";
 import { Button } from "@/shared/ui/button";
 import {
   Dialog,
