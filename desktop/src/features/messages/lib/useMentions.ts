@@ -31,6 +31,7 @@ import type {
   UserSearchResult,
 } from "@/shared/api/types";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
+import { formatOwnerLabel } from "@/features/profile/lib/identity";
 import { detectPrefixQuery } from "@/shared/lib/detectPrefixQuery";
 import { normalizePubkey, truncatePubkey } from "@/shared/lib/pubkey";
 import { trimMapToSize } from "@/shared/lib/trimMapToSize";
@@ -103,31 +104,6 @@ function formatSearchUserSecondaryLabel(user: UserSearchResult) {
   }
 
   return null;
-}
-
-function formatOwnerLabel(
-  ownerPubkey: string | null | undefined,
-  currentPubkey: string | null | undefined,
-  ownerProfiles?: UserProfileLookup,
-) {
-  if (!ownerPubkey) {
-    return null;
-  }
-
-  const normalizedOwnerPubkey = normalizePubkey(ownerPubkey);
-  if (
-    currentPubkey &&
-    normalizedOwnerPubkey === normalizePubkey(currentPubkey)
-  ) {
-    return "you";
-  }
-
-  const owner = ownerProfiles?.[normalizedOwnerPubkey];
-  return (
-    owner?.displayName?.trim() ||
-    owner?.nip05Handle?.trim() ||
-    truncatePubkey(ownerPubkey)
-  );
 }
 
 export function useMentions(

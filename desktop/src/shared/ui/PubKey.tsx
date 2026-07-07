@@ -3,10 +3,13 @@ import * as React from "react";
 
 import { copyTextToClipboard } from "@/shared/lib/clipboard";
 import { cn } from "@/shared/lib/cn";
-import { pubkeyToNpub } from "@/shared/lib/nostrUtils";
+import { safeNpub } from "@/shared/lib/nostrUtils";
 import { truncatePubkey } from "@/shared/lib/pubkey";
 import { Button } from "@/shared/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
+
+const HOVER_OPEN_DELAY_MS = 500;
+const HOVER_CLOSE_DELAY_MS = 200;
 
 type PubKeyProps = {
   /** 64-char hex pubkey. */
@@ -25,14 +28,6 @@ type PubKeyProps = {
   className?: string;
   testId?: string;
 };
-
-function safeNpub(pubkey: string): string | null {
-  try {
-    return pubkeyToNpub(pubkey);
-  } catch {
-    return null;
-  }
-}
 
 function CopyRow({ label, value }: { label: string; value: string }) {
   const [copied, setCopied] = React.useState(false);
@@ -85,6 +80,38 @@ export function PubKey({
   className,
   testId,
 }: PubKeyProps) {
+  const [open, setOpen] = React.useState(false);
+  const hoverTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(
+    null,
+  );
+
+  const clearHoverTimer = React.useCallback(() => {
+    if (hoverTimerRef.current !== null) {
+      clearTimeout(hoverTimerRef.current);
+      hoverTimerRef.current = null;
+    }
+  }, []);
+
+  const handleTriggerMouseEnter = React.useCallback(() => {
+    clearHoverTimer();
+    hoverTimerRef.current = setTimeout(() => {
+      setOpen(true);
+    }, HOVER_OPEN_DELAY_MS);
+  }, [clearHoverTimer]);
+
+  const handleMouseLeave = React.useCallback(() => {
+    clearHoverTimer();
+    hoverTimerRef.current = setTimeout(() => {
+      setOpen(false);
+    }, HOVER_CLOSE_DELAY_MS);
+  }, [clearHoverTimer]);
+
+  const handleContentMouseEnter = React.useCallback(() => {
+    clearHoverTimer();
+  }, [clearHoverTimer]);
+
+  React.useEffect(() => clearHoverTimer, [clearHoverTimer]);
+
   if (variant === "full") {
     const npub = safeNpub(pubkey);
     return (
@@ -113,7 +140,7 @@ export function PubKey({
   }
 
   return (
-    <Popover>
+    <Popover onOpenChange={setOpen} open={open}>
       <PopoverTrigger asChild>
         <button
           aria-label="Show full public key"
@@ -122,12 +149,20 @@ export function PubKey({
             className,
           )}
           data-testid={testId}
+          onMouseEnter={handleTriggerMouseEnter}
+          onMouseLeave={handleMouseLeave}
           type="button"
         >
           {truncatePubkey(pubkey)}
         </button>
       </PopoverTrigger>
-      <PopoverContent align="start" className="w-96 max-w-[90vw]">
+      <PopoverContent
+        align="start"
+        className="w-96 max-w-[90vw]"
+        onMouseEnter={handleContentMouseEnter}
+        onMouseLeave={handleMouseLeave}
+        onOpenAutoFocus={(event) => event.preventDefault()}
+      >
         <PubKeyDetails pubkey={pubkey} />
       </PopoverContent>
     </Popover>

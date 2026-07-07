@@ -22,6 +22,7 @@ import {
   useUserSearchFetchMoreOnScroll,
   useUsersBatchQuery,
 } from "@/features/profile/hooks";
+import { formatOwnerLabel } from "@/features/profile/lib/identity";
 import { rankUserCandidatesBySearch } from "@/features/profile/lib/userCandidateSearch";
 import { usePresenceQuery } from "@/features/presence/hooks";
 import { useIdentityQuery } from "@/shared/api/hooks";
@@ -62,23 +63,6 @@ function formatAddCandidateName(user: UserSearchResult) {
     user.displayName?.trim() ||
     user.nip05Handle?.trim() ||
     truncatePubkey(user.pubkey)
-  );
-}
-function formatOwnerName(
-  user: UserSearchResult,
-  ownerProfiles?: Record<
-    string,
-    { displayName: string | null; nip05Handle: string | null }
-  >,
-) {
-  if (!user.ownerPubkey) {
-    return null;
-  }
-  const owner = ownerProfiles?.[normalizePubkey(user.ownerPubkey)];
-  return (
-    owner?.displayName?.trim() ||
-    owner?.nip05Handle?.trim() ||
-    truncatePubkey(user.ownerPubkey)
   );
 }
 type AddMemberSearchCandidate = UserSearchResult & {
@@ -710,8 +694,9 @@ export function MembersSidebar({
                             onSelect={(selectedUser) => {
                               void handleAddSearchResult(selectedUser);
                             }}
-                            ownerLabel={formatOwnerName(
-                              user,
+                            ownerLabel={formatOwnerLabel(
+                              user.ownerPubkey,
+                              identityQuery.data?.pubkey,
                               addSearchOwnerProfilesQuery.data?.profiles,
                             )}
                             user={user}
