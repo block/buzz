@@ -16,6 +16,14 @@ import { hasSameMessageAuthor } from "@/features/messages/lib/messageGrouping";
 import { KIND_SYSTEM_MESSAGE } from "@/shared/constants/kinds";
 
 /**
+ * Max gap (seconds) between two same-author messages for the later one to still
+ * render as a continuation (time-only, no avatar). Beyond this the message
+ * reads as a new thought and gets the traditional avatar + header treatment,
+ * even from the same author.
+ */
+export const MESSAGE_GROUPING_WINDOW_SECONDS = 5 * 60;
+
+/**
  * One renderable row in the flattened timeline. Dividers carry no message and
  * never appear in the index map; the three message-bearing kinds do.
  */
@@ -109,7 +117,9 @@ export function buildTimelineItems(
 
     const isContinuation =
       previousGroupEntry !== null &&
-      hasSameMessageAuthor(previousGroupEntry.message, message);
+      hasSameMessageAuthor(previousGroupEntry.message, message) &&
+      message.createdAt - previousGroupEntry.message.createdAt <=
+        MESSAGE_GROUPING_WINDOW_SECONDS;
 
     if (isContinuation && previousMessageItemIndex !== null) {
       const previousItem = items[previousMessageItemIndex];
