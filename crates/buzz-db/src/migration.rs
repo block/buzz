@@ -732,7 +732,15 @@ mod tests {
 
         run_migrations(&pool).await.expect("run migrations");
 
-        assert_eq!(applied_versions(&pool).await, vec![1, 2, 3]);
+        // Every embedded migration must apply, in order. Derive the expected
+        // list from the MIGRATOR itself so this doesn't go stale as additive
+        // migrations land (it previously hardcoded [1, 2, 3] and rotted).
+        let expected: Vec<i64> = {
+            let mut versions: Vec<i64> = MIGRATOR.iter().map(|m| m.version).collect();
+            versions.sort_unstable();
+            versions
+        };
+        assert_eq!(applied_versions(&pool).await, expected);
         let sql = migration_sql();
         let tables = create_tables(sql.as_str());
         for table in [
