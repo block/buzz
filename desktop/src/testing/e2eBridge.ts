@@ -6568,17 +6568,21 @@ async function handleCreateManagedAgent(
     .replace(/-/g, "")
     .padEnd(64, "0")
     .slice(0, 64);
+  const agentCommand = args.input.agentCommand ?? "buzz-agent";
+  const agentArgs =
+    args.input.agentArgs && args.input.agentArgs.length > 0
+      ? [...args.input.agentArgs]
+      : agentCommand === "goose"
+        ? ["acp"]
+        : [];
   const managedAgent: MockManagedAgent = {
     pubkey,
     name,
     persona_id: args.input.personaId ?? null,
     relay_url: args.input.relayUrl ?? DEFAULT_RELAY_WS_URL,
     acp_command: args.input.acpCommand ?? "buzz-acp",
-    agent_command: args.input.agentCommand ?? "buzz-agent",
-    agent_args:
-      args.input.agentArgs && args.input.agentArgs.length > 0
-        ? [...args.input.agentArgs]
-        : ["acp"],
+    agent_command: agentCommand,
+    agent_args: agentArgs,
     mcp_command: args.input.mcpCommand ?? "",
     turn_timeout_seconds: args.input.turnTimeoutSeconds ?? 320,
     idle_timeout_seconds: args.input.idleTimeoutSeconds ?? null,
