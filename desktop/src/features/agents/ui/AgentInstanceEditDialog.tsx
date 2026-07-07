@@ -249,13 +249,18 @@ export function AgentInstanceEditDialog({
     if (initialFocus.type !== "normalized_field") return;
     if (normalizedFieldFocusFiredRef.current) return;
 
-    // For "provider" focus: the provider select is only rendered when
+    // For "provider" focus: the provider dropdown is only rendered when
     // llmProviderFieldVisible is true (runtime catalog resolved). Bail until
     // it materializes — this effect re-runs when llmProviderFieldVisible flips.
     const targetId =
-      initialFocus.field === "provider" ? "agent-provider" : "agent-model";
+      initialFocus.field === "provider"
+        ? "edit-agent-llm-provider"
+        : "edit-agent-model";
     const el = document.getElementById(targetId);
-    if (!(el instanceof HTMLSelectElement)) return;
+    // PersonaDropdownField renders a <button> (DropdownMenuTrigger), not a
+    // native <select> — guard against HTMLElement (focus + scrollIntoView
+    // both exist on HTMLElement).
+    if (!(el instanceof HTMLElement)) return;
 
     normalizedFieldFocusFiredRef.current = true;
 

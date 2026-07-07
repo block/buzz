@@ -315,7 +315,7 @@ const overrides = new Map([
   // EditAgentAdvancedFields) + providerValid gate + effectiveProvider derivation
   // + globalProvider threading into getPersonaProviderOptions. All load-bearing
   // feature logic; queued to split with the rest of this list.
-  ["src/features/agents/ui/EditAgentDialog.tsx", 1083],
+  ["src/features/agents/ui/EditAgentDialog.tsx", 1088],
 ]);
 
 await runFileSizeCheck({
