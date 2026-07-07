@@ -1,5 +1,31 @@
 # Changelog
 
+## v0.3.46
+
+- fix(desktop): preserve agent model/provider when persona snapshot fields are blank ([#1583](https://github.com/block/buzz/pull/1583)) ([`a3ee2c569`](https://github.com/block/buzz/commit/a3ee2c5693d58f32b17072a49add2dbaff8e0ffd))
+- feat(acp,desktop): identify and reap stale agent harness processes ([#1582](https://github.com/block/buzz/pull/1582)) ([`3c6c0d447`](https://github.com/block/buzz/commit/3c6c0d4478e5bb6e734cc16eafa6de6a433bf8fe))
+- feat(desktop): active-draft badge, send-from-drafts confirm dialog, thread-deleted state ([#1581](https://github.com/block/buzz/pull/1581)) ([`b394e95ef`](https://github.com/block/buzz/commit/b394e95ef03b131fb43bda0954d900ae56473f31))
+- fix(desktop): treat baked build env vars as satisfying required agent config ([#1580](https://github.com/block/buzz/pull/1580)) ([`b90e80443`](https://github.com/block/buzz/commit/b90e80443ea498e2b7b97bde9069d4b7c6ab4048))
+- feat(desktop): add "Copy image" to image right-click context menu ([#1579](https://github.com/block/buzz/pull/1579)) ([`683f7fec1`](https://github.com/block/buzz/commit/683f7fec1c357f1140a4f874720f513b69d919a4))
+- fix(nest): use buzz-dev symlink name for dev builds ([#1587](https://github.com/block/buzz/pull/1587)) ([`dcbb3ff78`](https://github.com/block/buzz/commit/dcbb3ff7892891cdc3c447049444cd2be8570f5e))
+- fix(composer): address image-editor follow-up nits on #1491 ([#1565](https://github.com/block/buzz/pull/1565)) ([`49391d807`](https://github.com/block/buzz/commit/49391d80713b74d1f48a442b193d9a91b086d99a))
+- fix(desktop): render black static boot screen ([#1570](https://github.com/block/buzz/pull/1570)) ([`10444d248`](https://github.com/block/buzz/commit/10444d248e26f6ab119cb13ccef906f42dc333da))
+- feat(agents): group activity tool bursts ([#1571](https://github.com/block/buzz/pull/1571)) ([`426f04484`](https://github.com/block/buzz/commit/426f044844951fc1ced7670d2dd5d25812deced9))
+- feat(desktop): aggregated overview rail, commit detail page, and full breadcrumbs ([#1573](https://github.com/block/buzz/pull/1573)) ([`c97263901`](https://github.com/block/buzz/commit/c97263901f9757ed6e9ddbf3f47097e2c6567e24))
+- fix(desktop): fetch profiles for reaction actors and thread-reply authors ([#1550](https://github.com/block/buzz/pull/1550)) ([`62def1459`](https://github.com/block/buzz/commit/62def1459c6e4d2beb5fda9e0c4accde16aa2c8d))
+- refactor(desktop): unify EditAgentDialog styling with PersonaDialog ([#1540](https://github.com/block/buzz/pull/1540)) ([`c258ffc4a`](https://github.com/block/buzz/commit/c258ffc4a87fb523900801d0959334912f25d30a))
+- feat(desktop): add 10-minute message grouping window ([#1578](https://github.com/block/buzz/pull/1578)) ([`564ead385`](https://github.com/block/buzz/commit/564ead3856c1e9f5c8760aaa6bcc9bd16cbbd9be))
+- feat(desktop): unify sidebar section actions into a per-section ⋮ menu ([#1577](https://github.com/block/buzz/pull/1577)) ([`d94561795`](https://github.com/block/buzz/commit/d94561795a48af743278bfa1e912b894228312f3))
+- feat(desktop): emoji avatar picker for agents + reliable picker scroll ([#1576](https://github.com/block/buzz/pull/1576)) ([`ed84a8735`](https://github.com/block/buzz/commit/ed84a87358495a4cdd6e61ee1cfe01db9a367b35))
+- fix(desktop): sync derived active-turn liveness in channel activity path ([#1492](https://github.com/block/buzz/pull/1492)) ([`1f5ba5bb2`](https://github.com/block/buzz/commit/1f5ba5bb27a94d33cce5aaa7cfea1d116c7d582d))
+- fix(personas): remove goose runtime pin from Fizz built-in ([#1566](https://github.com/block/buzz/pull/1566)) ([`e3008b360`](https://github.com/block/buzz/commit/e3008b3604330803975d66920204e7365fc571a9))
+- feat(acp,buzz-agent): thread model name through NIP-AM kind 44200 emit path ([#1564](https://github.com/block/buzz/pull/1564)) ([`08e707eb5`](https://github.com/block/buzz/commit/08e707eb573a187432a950154a15f9cb4785d25f))
+- sync channel sort preferences across clients ([#1556](https://github.com/block/buzz/pull/1556)) ([`04a9d1029`](https://github.com/block/buzz/commit/04a9d10299b92c5b0e7597a53914b9a753985c51))
+- fix desktop canvas header blur in split channel management ([#1558](https://github.com/block/buzz/pull/1558)) ([`2ef26ec21`](https://github.com/block/buzz/commit/2ef26ec21048857fc11982cd8c153e1c795f2c6d))
+- feat(composer): compose spoiler, annotation, and tooltip controls ([#1491](https://github.com/block/buzz/pull/1491)) ([`1aa87bb26`](https://github.com/block/buzz/commit/1aa87bb26b96d13fa2bba042ccd933e988d79bae))
+- feat(channel list): add persistent channel sort toggle ([#1505](https://github.com/block/buzz/pull/1505)) ([`36ac5243f`](https://github.com/block/buzz/commit/36ac5243ff8aed4401d3453a115afc4a603fccf0))
+
+
 ## v0.3.45
 
 - chore(deps): bump crossbeam-epoch to 0.9.20 for RUSTSEC-2026-0204 ([#1563](https://github.com/block/buzz/pull/1563)) ([`75b52ad7e`](https://github.com/block/buzz/commit/75b52ad7e54ca7f930656e756910a08d0f146b82))
