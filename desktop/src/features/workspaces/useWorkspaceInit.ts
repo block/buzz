@@ -17,6 +17,7 @@ import { resetActiveAgentTurnsStore } from "@/features/agents/activeAgentTurnsSt
 import { resetAgentWorkingSignal } from "@/features/agents/agentWorkingSignal";
 import { resetAgentObserverStore } from "@/features/agents/observerRelayStore";
 import { resetSidebarRelayConnectionCardState } from "@/features/sidebar/ui/useSidebarRelayConnectionCard";
+import { clearMarkdownNodeCache } from "@/shared/ui/markdown/nodeCache";
 import { resetVideoPlayerState } from "@/shared/ui/videoPlayerState";
 
 import { initFirstWorkspace } from "./workspaceStorage";
@@ -40,6 +41,7 @@ function resetWorkspaceState(): void {
   resetRenderScopedReactionHydration();
   clearSearchHitEventCache();
   clearAllDrafts();
+  clearMarkdownNodeCache();
 }
 
 type WorkspaceInitResult =
