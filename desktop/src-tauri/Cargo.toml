@@ -95,6 +95,8 @@ tauri-plugin-global-shortcut = "2"
 tauri-plugin-notification = "2.3.3"
 uuid = { version = "1", features = ["v4"] }
 png = "0.18"
+arboard = "3"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif"] }
 zip = "8"
 sherpa-onnx = "1.12"
 regex = "1"

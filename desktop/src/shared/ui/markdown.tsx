@@ -515,10 +515,12 @@ function useDismissImageContextMenu(isOpen: boolean, onDismiss: () => void) {
   }, [isOpen, onDismiss]);
 }
 
-function ImageDownloadContextMenu({
+function ImageContextMenu({
+  onCopy,
   onDownload,
   position,
 }: {
+  onCopy: () => void;
   onDownload: () => void;
   position: ImageContextMenuPosition;
 }) {
@@ -535,6 +537,13 @@ function ImageDownloadContextMenu({
       <button
         type="button"
         className="flex min-h-9 w-full cursor-default select-none items-center rounded-lg py-2 pl-2 pr-4 text-sm outline-hidden hover:bg-muted/50 hover:text-foreground"
+        onClick={onCopy}
+      >
+        Copy image
+      </button>
+      <button
+        type="button"
+        className="flex min-h-9 w-full cursor-default select-none items-center rounded-lg py-2 pl-2 pr-4 text-sm outline-hidden hover:bg-muted/50 hover:text-foreground"
         onClick={onDownload}
       >
         Download image
@@ -547,6 +556,7 @@ function ImageZoomOverlay({
   alt,
   galleryIndex = 0,
   galleryItems,
+  onCopy,
   onDownload,
   onClose,
   resolvedSrc,
@@ -557,6 +567,7 @@ function ImageZoomOverlay({
   alt: string | undefined;
   galleryIndex?: number;
   galleryItems?: ImageGalleryItem[];
+  onCopy: (src: string | undefined) => void;
   onDownload: (src: string | undefined) => void;
   onClose: () => void;
   resolvedSrc: string;
@@ -1063,6 +1074,11 @@ function ImageZoomOverlay({
     },
     [canDownloadCurrentImage, markControlGesture],
   );
+  const handleMenuCopy = React.useCallback(() => {
+    setMenu(null);
+    markControlGesture();
+    onCopy(currentItem.src);
+  }, [currentItem.src, markControlGesture, onCopy]);
   const handleMenuDownload = React.useCallback(() => {
     setMenu(null);
     markControlGesture();
@@ -1292,7 +1308,8 @@ function ImageZoomOverlay({
         </div>
       </div>
       {menu && canDownloadCurrentImage ? (
-        <ImageDownloadContextMenu
+        <ImageContextMenu
+          onCopy={handleMenuCopy}
           onDownload={handleMenuDownload}
           position={menu}
         />
@@ -1460,6 +1477,19 @@ function ImageBlock({ alt, dim, resolvedSrc, src }: ImageBlockProps) {
     }
   };
 
+  const handleCopyImage = React.useCallback((copySrc: string | undefined) => {
+    setMenu(null);
+    if (!copySrc) return;
+    invokeTauri("copy_image_to_clipboard", { url: copySrc })
+      .then(() => {
+        toast.success("Image copied to clipboard");
+      })
+      .catch((err: unknown) => {
+        const msg = err instanceof Error ? err.message : "Copy failed";
+        toast.error(msg);
+      });
+  }, []);
+
   const handleDownload = React.useCallback(
     (downloadSrc: string | undefined) => {
       setMenu(null);
@@ -1510,7 +1540,8 @@ function ImageBlock({ alt, dim, resolvedSrc, src }: ImageBlockProps) {
         />
       </button>
       {menu && src ? (
-        <ImageDownloadContextMenu
+        <ImageContextMenu
+          onCopy={() => handleCopyImage(src)}
           onDownload={() => handleDownload(src)}
           position={menu}
         />
@@ -1520,6 +1551,7 @@ function ImageBlock({ alt, dim, resolvedSrc, src }: ImageBlockProps) {
           alt={alt}
           galleryIndex={lightboxState.galleryIndex}
           galleryItems={lightboxState.galleryItems}
+          onCopy={handleCopyImage}
           onDownload={handleDownload}
           onClose={() => setLightboxState(null)}
           resolvedSrc={resolvedSrc}

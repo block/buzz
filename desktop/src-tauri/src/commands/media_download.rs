@@ -148,6 +148,58 @@ pub async fn fetch_media_bytes(url: String, state: State<'_, AppState>) -> Resul
     Ok(bytes)
 }
 
+/// Copy an image from a relay media URL directly to the system clipboard.
+///
+/// Fetches the image, decodes it to RGBA8, and writes it to the clipboard via
+/// `arboard`. Same SSRF validation, size cap, and content policy as the download
+/// commands above.
+///
+/// `arboard` requires clipboard access on the main thread on macOS, so the
+/// write is dispatched via `run_on_main_thread` and the result is relayed back
+/// through a one-shot channel.
+#[tauri::command]
+pub async fn copy_image_to_clipboard(
+    url: String,
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let relay_base = relay_api_base_url_with_override(&state);
+    validate_download_url(&url, &relay_base)?;
+
+    let bytes = fetch_blob_bytes(&url, &state).await?;
+    detect_and_validate_mime(&bytes)?;
+
+    let img =
+        image::load_from_memory(&bytes).map_err(|e| format!("failed to decode image: {e}"))?;
+    let rgba = img.to_rgba8();
+    let (width, height) = (rgba.width() as usize, rgba.height() as usize);
+    let raw = rgba.into_raw();
+
+    // arboard requires main-thread access on macOS. Use a sync channel so the
+    // async command can await the result.
+    let (tx, rx) = std::sync::mpsc::sync_channel::<Result<(), String>>(1);
+    app.run_on_main_thread(move || {
+        let result = arboard::Clipboard::new()
+            .map_err(|e| format!("clipboard error: {e}"))
+            .and_then(|mut clipboard| {
+                clipboard
+                    .set_image(arboard::ImageData {
+                        width,
+                        height,
+                        bytes: std::borrow::Cow::Owned(raw),
+                    })
+                    .map_err(|e| format!("clipboard error: {e}"))
+            });
+        // Ignore send errors — the receiver dropped only if the command was
+        // cancelled, in which case nobody is waiting for the result.
+        let _ = tx.send(result);
+    })
+    .map_err(|e| format!("main thread dispatch failed: {e}"))?;
+
+    rx.recv()
+        .map_err(|_| "clipboard result channel closed unexpectedly".to_string())?
+}
+
 /// Fetch blob bytes from a (pre-validated) relay media URL through the app's
 /// HTTP client, enforcing the download size cap. The caller is responsible for
 /// validating the URL origin and for any content-type checks on the result.

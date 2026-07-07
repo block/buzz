@@ -8619,6 +8619,8 @@ export function maybeInstallE2eTauriMocks() {
         // FileCard / image-menu click handlers resolve. Specs assert the
         // command was invoked via `__BUZZ_E2E_COMMANDS__`, not the dialog.
         return true;
+      case "copy_image_to_clipboard":
+        return;
       case "get_event":
         return handleGetEvent(
           payload as Parameters<typeof handleGetEvent>[0],
