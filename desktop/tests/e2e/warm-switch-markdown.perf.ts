@@ -14,8 +14,9 @@ import { installMockBridge } from "../helpers/bridge";
  * scratch. This spec is the instrument for that cost.
  *
  * TWO SCENARIOS, one per axis of the cost:
- *   plain-text  — `deep-history` (300 seeded one-line rows): isolates the
- *                 per-row remount floor at the window ceiling.
+ *   plain-text  — `deep-history` (600 seeded one-line rows; the initial
+ *                 channel window mounts ~50 of them, verified by parse
+ *                 count): isolates the per-row remount floor.
  *   markdown    — `random` + 60 injected markdown-heavy rows (code fences,
  *                 tables, lists, mentions, links): isolates the parse cost the
  *                 markdown cache is meant to remove.
@@ -270,7 +271,7 @@ test("MEASURE: warm channel-switch cost (plain 300-row + markdown-heavy)", async
   await client.send("Emulation.setCPUThrottlingRate", { rate: THROTTLE_RATE });
 
   const plain = await runScenario(page, {
-    label: "plain-text x300 (deep-history)",
+    label: "plain-text ~50-row window (deep-history)",
     targetTestId: "channel-deep-history",
     targetTitle: "deep-history",
     rowSelector: '[data-message-id^="mock-deep-history-"]',

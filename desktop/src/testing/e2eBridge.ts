@@ -7,6 +7,7 @@ import { parse as yamlParse } from "yaml";
 import { relayClient } from "@/shared/api/relayClient";
 import type { ConnectionState } from "@/shared/api/relayClientShared";
 import type { RelayEvent } from "@/shared/api/types";
+import { getMarkdownParseCount } from "@/shared/ui/markdown/nodeCache";
 import { syncAgentTurnsFromEvents } from "@/features/agents/activeAgentTurnsStore";
 import {
   injectObserverEventsForE2E,
@@ -754,6 +755,7 @@ declare global {
     __BUZZ_E2E_QUERY_CLIENT__?: {
       invalidateQueries: (filters: { queryKey: readonly unknown[] }) => unknown;
     };
+    __BUZZ_E2E_MD_PARSE_COUNT__?: () => number;
   }
 }
 
@@ -7855,6 +7857,7 @@ export function maybeInstallE2eTauriMocks() {
     window.dispatchEvent(new CustomEvent("buzz:e2e-home-feed-updated"));
     return item;
   };
+  window.__BUZZ_E2E_MD_PARSE_COUNT__ = getMarkdownParseCount;
   window.__BUZZ_E2E_EMIT_MOCK_READ_STATE__ = ({
     clientId,
     contexts,

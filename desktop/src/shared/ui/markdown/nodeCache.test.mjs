@@ -13,8 +13,7 @@ import { clearMarkdownNodeCache, renderCachedMarkdown } from "./nodeCache.ts";
 const BASE = {
   components: {},
   content: "**bold** and `code`",
-  interactive: true,
-  mediaInset: false,
+  variant: "i",
 };
 
 test("same parse inputs return the identical cached element", () => {
@@ -75,11 +74,39 @@ test("mention and channel names are part of the key", () => {
   assert.notEqual(first, second);
 });
 
-test("render flag variants do not collide", () => {
+test("render variants do not collide", () => {
   clearMarkdownNodeCache();
   const interactive = renderCachedMarkdown({ ...BASE });
-  const nonInteractive = renderCachedMarkdown({ ...BASE, interactive: false });
+  const nonInteractive = renderCachedMarkdown({ ...BASE, variant: "" });
   assert.notEqual(interactive, nonInteractive);
+});
+
+test("crafted values cannot forge key-segment boundaries", () => {
+  clearMarkdownNodeCache();
+  // Length-prefixed segments: a single name containing arbitrary bytes must
+  // never be key-identical to two separate names, and values must not bleed
+  // across the mention/channel field boundary.
+  const joined = renderCachedMarkdown({
+    ...BASE,
+    mentionNames: ["ab"],
+  });
+  const split = renderCachedMarkdown({
+    ...BASE,
+    mentionNames: ["a", "b"],
+  });
+  assert.notEqual(joined, split);
+
+  const inMentions = renderCachedMarkdown({ ...BASE, mentionNames: ["x"] });
+  const inChannels = renderCachedMarkdown({ ...BASE, channelNames: ["x"] });
+  assert.notEqual(inMentions, inChannels);
+});
+
+test("oversized content bypasses the cache", () => {
+  clearMarkdownNodeCache();
+  const huge = { ...BASE, content: "a".repeat(40_000) };
+  const first = renderCachedMarkdown(huge);
+  const second = renderCachedMarkdown(huge);
+  assert.notEqual(first, second);
 });
 
 test("active search queries bypass the cache", () => {

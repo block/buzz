@@ -72,14 +72,9 @@ import {
   useMarkdownRuntime,
 } from "./markdown/runtimeContext";
 import { resolveFileCard } from "./markdownFileCard";
-import type {
-  ImetaEntry,
-  MarkdownProps,
-  MarkdownRuntime,
-} from "./markdown/types";
+import type { MarkdownProps, MarkdownRuntime } from "./markdown/types";
 import { SpoilerInline } from "./markdown/SpoilerInline";
 import {
-  aspectRatioFromDim,
   dimensionsFromDim,
   getDecodedImageDimensions,
   imageReserveStyle,
@@ -89,59 +84,10 @@ import {
   useFrozenImageReserve,
   useStableArray,
 } from "./markdown/utils";
-import { VideoPlayer, type VideoReviewContext } from "./VideoPlayer";
-
-/**
- * Video review context flows through React context instead of
- * `createMarkdownComponents` arguments. The component map must keep a stable
- * identity across re-renders: a new map means new element types, which makes
- * React unmount and remount every rendered node — including `<video>`
- * elements, killing playback (and any in-progress review comment draft)
- * whenever the timeline re-renders.
- */
-const VideoReviewMarkdownContext = React.createContext<
-  VideoReviewContext | undefined
->(undefined);
-
-function MarkdownVideoPlayer({
-  alt,
-  entry,
-  resolvedSrc,
-  src,
-}: {
-  alt?: string;
-  entry?: ImetaEntry;
-  resolvedSrc: string;
-  src?: string;
-}) {
-  const videoReviewContext = React.useContext(VideoReviewMarkdownContext);
-  // Look up poster frame from imeta tags (NIP-71 `image` field).
-  // Fall back to `thumb` for compatibility with older events.
-  const posterUrl = entry?.image ?? entry?.thumb;
-  const resolvedPoster = posterUrl ? rewriteRelayUrl(posterUrl) : undefined;
-  const resolvedReviewContext = React.useMemo(
-    () =>
-      videoReviewContext
-        ? {
-            ...videoReviewContext,
-            title:
-              videoReviewContext.title ?? entry?.filename ?? alt ?? "Video",
-          }
-        : undefined,
-    [alt, entry?.filename, videoReviewContext],
-  );
-
-  return (
-    <VideoPlayer
-      src={resolvedSrc}
-      aspectRatio={aspectRatioFromDim(entry?.dim)}
-      poster={resolvedPoster}
-      durationSeconds={entry?.duration}
-      reviewKey={src ?? resolvedSrc}
-      reviewContext={resolvedReviewContext}
-    />
-  );
-}
+import {
+  MarkdownVideoPlayer,
+  VideoReviewMarkdownContext,
+} from "./markdown/MarkdownVideoPlayer";
 
 type ImageLightboxBox = {
   height: number;
@@ -1974,19 +1920,31 @@ function createMarkdownComponents(
  * four instances ever exist. Module-stable maps mean cached markdown element
  * trees (see ./markdown/nodeCache.ts) never embed per-mount closures.
  */
-const markdownComponentsByVariant = new Map<string, Components>();
+const markdownComponentsByVariant = new Map<string, MarkdownComponentSet>();
 
+type MarkdownComponentSet = { components: Components; variant: string };
+
+/**
+ * Returns the component map together with the `variant` token that fully
+ * identifies it. The token doubles as the variant segment of the parse-cache
+ * key (see nodeCache.ts), so the map partitioning and the key partitioning
+ * come from one place and cannot drift apart: a new render flag added here
+ * automatically partitions the cache too.
+ */
 function getMarkdownComponents(
   interactive: boolean,
   mediaInset: boolean,
-): Components {
-  const key = `${interactive ? "i" : ""}${mediaInset ? "m" : ""}`;
-  let components = markdownComponentsByVariant.get(key);
-  if (!components) {
-    components = createMarkdownComponents(interactive, mediaInset);
-    markdownComponentsByVariant.set(key, components);
+): MarkdownComponentSet {
+  const variant = `${interactive ? "i" : ""}${mediaInset ? "m" : ""}`;
+  let entry = markdownComponentsByVariant.get(variant);
+  if (!entry) {
+    entry = {
+      components: createMarkdownComponents(interactive, mediaInset),
+      variant,
+    };
+    markdownComponentsByVariant.set(variant, entry);
   }
-  return components;
+  return entry;
 }
 
 function MarkdownInner({
@@ -2073,16 +2031,21 @@ function MarkdownInner({
 
   const resolvedLinkPreviews = useResolvedLinkPreviews(linkPreviews);
 
-  const markdownNode = renderCachedMarkdown({
-    channelNames,
-    components: getMarkdownComponents(interactive, mediaInset),
-    content: processedContent,
-    customEmoji,
-    interactive,
-    mediaInset,
-    mentionNames,
-    searchQuery,
-  });
+  // When a config-nudge suppresses the prose (selectProseOrNudge returns
+  // null), skip the parse entirely — it would be thrown away unrendered.
+  const componentSet = getMarkdownComponents(interactive, mediaInset);
+  const markdownNode =
+    configNudge === null
+      ? renderCachedMarkdown({
+          channelNames,
+          components: componentSet.components,
+          content: processedContent,
+          customEmoji,
+          mentionNames,
+          searchQuery,
+          variant: componentSet.variant,
+        })
+      : null;
 
   return (
     <div
