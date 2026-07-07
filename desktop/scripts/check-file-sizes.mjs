@@ -67,7 +67,10 @@ const overrides = new Map([
   // across the local-archive + agent-metric-archive PR series. store_tests.rs
   // (~731 lines) is under 1000 so needs no override.
   ["src-tauri/src/archive/mod_tests.rs", 1208],
-  ["src-tauri/src/commands/agents.rs", 1437],
+  // persona-blank-fallback: persona_snapshot_with_agent_config_fallback call
+  // sites in start_local_agent_with_preflight add ~3 lines vs the old
+  // persona_snapshot calls (extra fallback params). Load-bearing bug fix.
+  ["src-tauri/src/commands/agents.rs", 1441],
   // #1418 read-path fix: get_thread_replies' blocker fix (shared TIMELINE_KINDS
   // const + build_thread_replies_filter helper, mirroring the channel sibling so
   // the two p-gate filters can't drift) plus two guard unit tests. The file was

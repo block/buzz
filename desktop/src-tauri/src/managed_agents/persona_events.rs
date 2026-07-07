@@ -329,6 +329,60 @@ pub fn persona_snapshot(
     }
 }
 
+/// Build the pinned snapshot for an **existing** agent record being re-snapshotted
+/// from its linked persona (on spawn or app-launch restore).
+///
+/// Precedence rule: when the persona sets `model` or `provider` (non-`None`, non-empty),
+/// the persona wins — this is the expected inheritance. When the persona leaves
+/// these fields blank (`None` or empty string), the agent record's own values are
+/// preserved instead. This prevents a persona with no configured model/provider from
+/// clobbering a value the user already set on the agent, which would trap the agent
+/// in a permanent "needs configuration" loop that users cannot escape.
+///
+/// `source_version` is always updated to the current persona content hash so the
+/// drift badge clears correctly even when model/provider are not touched.
+///
+/// Env-var layering is unchanged: persona env < agent env (agent wins on collision).
+/// A persona with an empty env map does not wipe the agent's env vars — the agent's
+/// own overrides are merged on top and always win.
+pub fn persona_snapshot_with_agent_config_fallback(
+    persona: &PersonaRecord,
+    agent_env_overrides: &BTreeMap<String, String>,
+    current_agent_model: Option<&str>,
+    current_agent_provider: Option<&str>,
+) -> PersonaSnapshot {
+    let mut env_vars = persona.env_vars.clone();
+    for (key, value) in agent_env_overrides {
+        env_vars.insert(key.clone(), value.clone());
+    }
+
+    // Persona wins when it has a non-blank value; agent record is the fallback
+    // for blank persona fields so a configured agent stays configured.
+    let is_present = |v: &Option<String>| v.as_deref().is_some_and(|s| !s.trim().is_empty());
+    let model = if is_present(&persona.model) {
+        persona.model.clone()
+    } else {
+        current_agent_model
+            .filter(|s| !s.trim().is_empty())
+            .map(str::to_owned)
+    };
+    let provider = if is_present(&persona.provider) {
+        persona.provider.clone()
+    } else {
+        current_agent_provider
+            .filter(|s| !s.trim().is_empty())
+            .map(str::to_owned)
+    };
+
+    PersonaSnapshot {
+        system_prompt: Some(persona.system_prompt.clone()),
+        model,
+        provider,
+        env_vars,
+        source_version: persona_content_hash(&persona_event_content(persona)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -623,6 +677,156 @@ mod tests {
         assert_ne!(
             persona_content_hash(&content1),
             persona_content_hash(&content2)
+        );
+    }
+
+    // ── persona_snapshot_with_agent_config_fallback ────────────────────────────
+
+    /// Helper: a persona with no model/provider configured.
+    fn blank_model_persona() -> PersonaRecord {
+        PersonaRecord {
+            model: None,
+            provider: None,
+            ..sample_persona()
+        }
+    }
+
+    /// (a) Persona leaves model/provider blank, agent record has values →
+    /// record values preserved AND source_version still updated to current hash.
+    #[test]
+    fn fallback_preserves_record_values_when_persona_blank() {
+        let persona = blank_model_persona();
+        let expected_version = persona_content_hash(&persona_event_content(&persona));
+
+        let snapshot = persona_snapshot_with_agent_config_fallback(
+            &persona,
+            &BTreeMap::new(),
+            Some("gpt-4o"),
+            Some("openai"),
+        );
+
+        assert_eq!(
+            snapshot.model.as_deref(),
+            Some("gpt-4o"),
+            "blank persona model must fall back to agent record value"
+        );
+        assert_eq!(
+            snapshot.provider.as_deref(),
+            Some("openai"),
+            "blank persona provider must fall back to agent record value"
+        );
+        assert_eq!(
+            snapshot.source_version, expected_version,
+            "source_version must still reflect current persona hash"
+        );
+    }
+
+    /// (b) Persona has model/provider set → persona wins over agent record.
+    #[test]
+    fn fallback_persona_wins_when_set() {
+        let persona = sample_persona(); // has model=Some("claude-opus-4"), provider=Some("anthropic")
+
+        let snapshot = persona_snapshot_with_agent_config_fallback(
+            &persona,
+            &BTreeMap::new(),
+            Some("gpt-4o"), // agent had a different model
+            Some("openai"), // agent had a different provider
+        );
+
+        assert_eq!(
+            snapshot.model.as_deref(),
+            Some("claude-opus-4"),
+            "persona model must win when persona has a value"
+        );
+        assert_eq!(
+            snapshot.provider.as_deref(),
+            Some("anthropic"),
+            "persona provider must win when persona has a value"
+        );
+    }
+
+    /// (c) Both blank → snapshot keeps None; a genuinely unconfigured agent
+    /// stays unconfigured (no fabricated values).
+    #[test]
+    fn fallback_both_blank_stays_none() {
+        let persona = blank_model_persona();
+
+        let snapshot = persona_snapshot_with_agent_config_fallback(
+            &persona,
+            &BTreeMap::new(),
+            None, // agent also has no model
+            None, // agent also has no provider
+        );
+
+        assert!(
+            snapshot.model.is_none(),
+            "neither persona nor agent has model — snapshot must be None"
+        );
+        assert!(
+            snapshot.provider.is_none(),
+            "neither persona nor agent has provider — snapshot must be None"
+        );
+    }
+
+    /// Whitespace-only values on the persona are treated as blank; agent
+    /// fallback applies.
+    #[test]
+    fn fallback_treats_whitespace_only_persona_value_as_blank() {
+        let mut persona = sample_persona();
+        persona.model = Some("  ".to_string());
+        persona.provider = Some("\t".to_string());
+
+        let snapshot = persona_snapshot_with_agent_config_fallback(
+            &persona,
+            &BTreeMap::new(),
+            Some("claude-opus-4"),
+            Some("anthropic"),
+        );
+
+        assert_eq!(
+            snapshot.model.as_deref(),
+            Some("claude-opus-4"),
+            "whitespace-only persona model must be treated as blank"
+        );
+        assert_eq!(
+            snapshot.provider.as_deref(),
+            Some("anthropic"),
+            "whitespace-only persona provider must be treated as blank"
+        );
+    }
+
+    /// Env-var layering: persona env < agent env — agent overrides always win
+    /// on key collision and a persona with an empty env map does not wipe the
+    /// agent's env vars.
+    #[test]
+    fn fallback_agent_env_wins_over_persona_env() {
+        let mut persona = blank_model_persona();
+        persona.env_vars = BTreeMap::from([
+            ("SHARED_KEY".to_string(), "persona-value".to_string()),
+            ("PERSONA_ONLY".to_string(), "from-persona".to_string()),
+        ]);
+        let agent_env = BTreeMap::from([
+            ("SHARED_KEY".to_string(), "agent-override".to_string()),
+            ("AGENT_ONLY".to_string(), "from-agent".to_string()),
+        ]);
+
+        let snapshot =
+            persona_snapshot_with_agent_config_fallback(&persona, &agent_env, None, None);
+
+        assert_eq!(
+            snapshot.env_vars.get("SHARED_KEY").map(String::as_str),
+            Some("agent-override"),
+            "agent env must win on key collision"
+        );
+        assert_eq!(
+            snapshot.env_vars.get("PERSONA_ONLY").map(String::as_str),
+            Some("from-persona"),
+            "persona-only key must be present"
+        );
+        assert_eq!(
+            snapshot.env_vars.get("AGENT_ONLY").map(String::as_str),
+            Some("from-agent"),
+            "agent-only key must be present"
         );
     }
 }

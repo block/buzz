@@ -55,8 +55,15 @@ pub fn backfill_persona_snapshots(app: &tauri::AppHandle) -> Result<(), String> 
             continue;
         };
         // Layer the agent's own env overrides over persona env, matching
-        // create-time precedence (persona env < agent env).
-        let snapshot = super::persona_events::persona_snapshot(persona, &record.env_vars);
+        // create-time precedence (persona env < agent env). When the persona
+        // leaves model/provider blank, the record's own configured values are
+        // preserved — a blank persona must not clobber a user-configured agent.
+        let snapshot = super::persona_events::persona_snapshot_with_agent_config_fallback(
+            persona,
+            &record.env_vars,
+            record.model.as_deref(),
+            record.provider.as_deref(),
+        );
         if let Some(prompt) = snapshot.system_prompt {
             record.system_prompt = Some(prompt);
         }
@@ -170,7 +177,12 @@ pub async fn restore_managed_agents_on_launch(
             let Some(persona) = personas_for_snapshot.iter().find(|p| p.id == persona_id) else {
                 continue;
             };
-            let snapshot = super::persona_events::persona_snapshot(persona, &record.env_vars);
+            let snapshot = super::persona_events::persona_snapshot_with_agent_config_fallback(
+                persona,
+                &record.env_vars,
+                record.model.as_deref(),
+                record.provider.as_deref(),
+            );
             if let Some(prompt) = snapshot.system_prompt {
                 record.system_prompt = Some(prompt);
             }

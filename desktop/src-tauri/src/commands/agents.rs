@@ -258,12 +258,19 @@ async fn start_local_agent_with_preflight(
     // starts with the current persona config (system_prompt, model, provider,
     // env_vars). This clears the "out of date" drift badge without requiring a
     // delete+recreate. Agent-level env_vars overrides still win (persona_snapshot
-    // layers persona env under agent overrides).
+    // layers persona env under agent overrides). When the persona leaves model or
+    // provider blank, the agent record's own configured values are preserved so a
+    // user-set model/provider is never clobbered by an unconfigured persona.
     if let Some(persona_id) = record.persona_id.clone() {
         let personas = load_personas(app).unwrap_or_default();
         if let Some(persona) = personas.iter().find(|p| p.id == persona_id) {
             let snapshot =
-                crate::managed_agents::persona_events::persona_snapshot(persona, &record.env_vars);
+                crate::managed_agents::persona_events::persona_snapshot_with_agent_config_fallback(
+                    persona,
+                    &record.env_vars,
+                    record.model.as_deref(),
+                    record.provider.as_deref(),
+                );
             if let Some(prompt) = snapshot.system_prompt {
                 record.system_prompt = Some(prompt);
             }
