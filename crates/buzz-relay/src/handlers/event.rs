@@ -1332,9 +1332,11 @@ mod tests {
         ) -> (Uuid, mpsc::Receiver<Message>) {
             let conn_id = Uuid::new_v4();
             let (tx, rx) = mpsc::channel(10);
+            let (ctrl_tx, _ctrl_rx) = mpsc::channel(10);
             state.conn_manager.register(
                 conn_id,
                 tx,
+                ctrl_tx,
                 CancellationToken::new(),
                 buzz_core::tenant::CommunityId::from_uuid(Uuid::nil()),
                 Arc::new(AtomicU8::new(0)),
@@ -1969,9 +1971,11 @@ mod tests {
         fn register_conn(state: &AppState, pubkey: Option<Vec<u8>>) -> Uuid {
             let conn_id = Uuid::new_v4();
             let (tx, _rx) = mpsc::channel(1);
+            let (ctrl_tx, _ctrl_rx) = mpsc::channel(1);
             state.conn_manager.register(
                 conn_id,
                 tx,
+                ctrl_tx,
                 CancellationToken::new(),
                 buzz_core::tenant::CommunityId::from_uuid(Uuid::nil()),
                 Arc::new(AtomicU8::new(0)),
@@ -2292,9 +2296,11 @@ mod tests {
         ) -> Uuid {
             let conn_id = Uuid::new_v4();
             let (tx, _rx) = mpsc::channel(1);
+            let (ctrl_tx, _ctrl_rx) = mpsc::channel(1);
             state.conn_manager.register(
                 conn_id,
                 tx,
+                ctrl_tx,
                 CancellationToken::new(),
                 community_id,
                 Arc::new(AtomicU8::new(0)),

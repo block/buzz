@@ -1425,6 +1425,59 @@ async fn ingest_event_inner(
         return super::command_executor::handle_command(tenant, state, event, auth).await;
     }
 
+    // Community ban / timeout write-block (COMMUNITY_MODERATION_PLAN.md §0
+    // decision 4). A timeout is a write-block only — the connection stays open,
+    // content writes are refused with `restricted: you are timed out until <ts>`
+    // so the desktop can render a countdown. A ban is normally enforced at the
+    // auth seam, but an already-authenticated connection never re-auths: if the
+    // live-disconnect fan-out is missed (fire-and-forget publish, broadcast lag,
+    // subscriber reconnect window), a banned member's open socket would keep
+    // writing indefinitely. So the ban is re-checked here — this write-path gate
+    // is the durable backstop the fan-out's best-effort delivery relies on.
+    // Moderation/relay-admin commands are exempt: a restriction must never
+    // disarm the tools used to lift or manage it.
+    //
+    // Scope: this gate checks the *authoring* pubkey only, with no NIP-OA
+    // owner→agent cascade. That cascade lives at the auth seam for bans, where
+    // it is structural: an agent whose owner is banned can never authenticate,
+    // so its socket never exists to reach ingest. Timeout has no auth-seam
+    // presence (it is write-block-only), so an owner-timeout does not cascade to
+    // the owner's agents — a deliberate Phase-1 asymmetry. `IngestAuth` does not
+    // carry the self-proving auth tag, so resolving the owner here would mean
+    // plumbing it through the whole transport boundary; the follow-up shape is
+    // the restriction-state cache (see should-fix), which can fold in owner
+    // resolution without a per-write DB round-trip.
+    if !buzz_core::kind::is_moderation_command_kind(kind_u32) && !is_relay_admin_kind(kind_u32) {
+        match state
+            .db
+            .moderation_restriction_state(tenant.community(), auth.pubkey().as_bytes())
+            .await
+        {
+            Ok(r) => {
+                if r.banned {
+                    return Err(IngestError::AuthFailed(
+                        "blocked: you are banned from this community".to_string(),
+                    ));
+                }
+                if let Some(until) = r.muted_until {
+                    if until > chrono::Utc::now() {
+                        return Err(IngestError::AuthFailed(format!(
+                            "restricted: you are timed out until {}",
+                            until.timestamp()
+                        )));
+                    }
+                }
+            }
+            Err(e) => {
+                // Fail closed: a DB error must not let a banned/timed-out actor
+                // write.
+                return Err(IngestError::Internal(format!(
+                    "error: internal error checking restriction state: {e}"
+                )));
+            }
+        }
+    }
+
     let mut channel_id = if kind_u32 == KIND_REACTION {
         match derive_reaction_channel(tenant.community(), &state.db, &event).await {
             ReactionChannelResult::Channel(ch_id) => Some(ch_id),
