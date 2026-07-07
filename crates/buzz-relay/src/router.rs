@@ -60,6 +60,13 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/events", post(api::bridge::submit_event))
         .route("/query", post(api::bridge::query_events))
         .route("/count", post(api::bridge::count_events))
+        // Moderation queue reads (NIP-98 auth + mod-authz gate, L6)
+        .route("/moderation/reports", get(api::bridge::moderation_reports))
+        .route("/moderation/audit", get(api::bridge::moderation_audit))
+        .route(
+            "/moderation/restricted",
+            get(api::bridge::moderation_restricted),
+        )
         // Webhook trigger (secret-authenticated, no NIP-98)
         .route("/hooks/{id}", post(api::bridge::workflow_webhook))
         // Huddle audio WebSocket route
