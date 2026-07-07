@@ -49,7 +49,9 @@ test("inbox reaction on a thread-reply mention persists after refetch", async ({
 
   // Seed a thread: alice's top-level message, then alice's reply mentioning
   // tyler (the current user). The reply is the inbox item — the shape Wes hit.
-  const replyEvent = await page.evaluate(
+  // A second, unrelated mention is seeded so the test can genuinely switch
+  // selection away and back.
+  const { replyEvent, otherEvent } = await page.evaluate(
     ({ channelId, currentPubkey, senderPubkey }) => {
       const win = window as MockWindow;
       const emitMessage = win.__BUZZ_E2E_EMIT_MOCK_MESSAGE__;
@@ -84,7 +86,26 @@ test("inbox reaction on a thread-reply mention persists after refetch", async ({
         tags: reply.tags,
         category: "mention",
       });
-      return reply;
+
+      const other = emitMessage({
+        channelName: "general",
+        content: "Unrelated mention for selection switching.",
+        pubkey: senderPubkey,
+        mentionPubkeys: [currentPubkey],
+        id: "c3".repeat(32),
+      });
+      pushFeedItem({
+        id: other.id,
+        kind: other.kind,
+        pubkey: other.pubkey,
+        content: other.content,
+        created_at: other.created_at,
+        channel_id: channelId,
+        channel_name: "general",
+        tags: other.tags,
+        category: "mention",
+      });
+      return { replyEvent: reply, otherEvent: other };
     },
     {
       channelId: GENERAL_CHANNEL_ID,
@@ -115,11 +136,11 @@ test("inbox reaction on a thread-reply mention persists after refetch", async ({
   await page.screenshot({ path: `${SHOTS}/01-pill-after-refetch.png` });
 
   // Re-select the item (drops all optimistic state) — the reaction must
-  // come back purely from the fetched relay data.
-  await page.getByTestId("inbox-filter-trigger").click();
-  await page.keyboard.press("Escape");
-  const otherItem = page.getByTestId("home-inbox-list");
+  // come back purely from the fetched relay data. Select a genuinely
+  // different item first so the selection actually changes.
+  const otherItem = page.getByTestId(`home-inbox-item-${otherEvent.id}`);
   await otherItem.click();
+  await expect(detail).toContainText("Unrelated mention");
   await item.click();
   await expect(detail).toContainText("please react to this");
   await expect(

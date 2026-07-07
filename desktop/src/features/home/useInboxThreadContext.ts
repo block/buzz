@@ -207,7 +207,12 @@ export function useInboxThreadContext(
         eventIds,
         buildChannelReactionAuxFilter,
       );
-    } catch {
+    } catch (error) {
+      console.error(
+        "Failed to hydrate reactions for Inbox context messages",
+        selectedChannelId,
+        error,
+      );
       return null;
     }
   }, [contextEventIdsKey, selectedChannelId]);
