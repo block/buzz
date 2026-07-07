@@ -1,22 +1,12 @@
 import {
   ArrowDown,
   ArrowUp,
-  Bell,
-  BellOff,
-  Check,
+  ArrowUpDown,
   CheckCheck,
-  CheckCircle2,
   ChevronDown,
-  CircleDot,
-  Clipboard,
-  Copy,
   EllipsisVertical,
-  LogOut,
-  MessageCirclePlus,
   Pencil,
   Plus,
-  Star,
-  StarOff,
   Trash2,
 } from "lucide-react";
 
@@ -24,25 +14,23 @@ import { useRef } from "react";
 import type * as React from "react";
 
 import type { ChannelSortMode } from "@/features/sidebar/lib/channelSortPreference";
-import { copyTextToClipboard } from "@/shared/lib/clipboard";
 import {
   ContextMenu,
   ContextMenuContent,
   ContextMenuItem,
   ContextMenuSeparator,
-  ContextMenuSub,
-  ContextMenuSubContent,
-  ContextMenuSubTrigger,
   ContextMenuTrigger,
 } from "@/shared/ui/context-menu";
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
-  DropdownMenuLabel,
   DropdownMenuRadioGroup,
   DropdownMenuRadioItem,
   DropdownMenuSeparator,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "@/shared/ui/dropdown-menu";
 import {
@@ -53,6 +41,8 @@ import {
   SidebarMenuItem,
 } from "@/shared/ui/sidebar";
 import { ChannelMenuButton } from "@/features/sidebar/ui/SidebarSection";
+import { ChannelContextMenuItems } from "@/features/sidebar/ui/ChannelContextMenu";
+import { deferMenuAction } from "@/features/sidebar/ui/sidebarMenuHelpers";
 import {
   DraggableChannelRow,
   DroppableSectionBody,
@@ -83,13 +73,40 @@ const SORT_OPTIONS: { value: ChannelSortMode; label: string }[] = [
 ];
 
 /**
- * Run a menu action on the next tick. Radix closes the menu on select and
- * restores focus; deferring the action avoids opening a modal dialog while
- * the menu is still tearing down (which can leave `pointer-events: none`
- * stuck on <body> and freeze the app).
+ * A single always-visible "+" quick action shown at the right edge of a
+ * section header, to the left of the ⋮ menu. Used for the most common
+ * per-section create action (New channel, New message) while every other
+ * action stays folded into {@link SectionActionsMenu}.
  */
-function deferMenuAction(action: () => void) {
-  globalThis.setTimeout(action, 0);
+export function SectionQuickAction({
+  label,
+  onClick,
+  testId,
+  icon: Icon = Plus,
+  visibilityClassName = SECTION_ACTION_VISIBILITY_CLASS,
+}: {
+  label: string;
+  onClick: () => void;
+  testId?: string;
+  icon?: typeof Plus;
+  visibilityClassName?: string;
+}) {
+  return (
+    <button
+      aria-label={label}
+      className={cn(SECTION_ICON_BUTTON_CLASS, visibilityClassName)}
+      data-testid={testId}
+      onClick={(event) => {
+        event.stopPropagation();
+        onClick();
+      }}
+      onPointerDown={(event) => event.stopPropagation()}
+      title={label}
+      type="button"
+    >
+      <Icon className="h-4 w-4" />
+    </button>
+  );
 }
 
 /**
@@ -173,7 +190,7 @@ export function SectionActionsMenu({
         ) : null}
         {onNewMessage ? (
           <DropdownMenuItem onSelect={() => deferMenuAction(onNewMessage)}>
-            <MessageCirclePlus className="h-4 w-4" />
+            <Plus className="h-4 w-4" />
             <span>{newMessageLabel ?? "New message"}</span>
           </DropdownMenuItem>
         ) : null}
@@ -222,19 +239,29 @@ export function SectionActionsMenu({
         {showSort ? (
           <>
             <DropdownMenuSeparator />
-            <DropdownMenuLabel>Sort</DropdownMenuLabel>
-            <DropdownMenuRadioGroup
-              onValueChange={(value) =>
-                onSortModeChange?.(value as ChannelSortMode)
-              }
-              value={sortMode}
-            >
-              {SORT_OPTIONS.map((option) => (
-                <DropdownMenuRadioItem key={option.value} value={option.value}>
-                  {option.label}
-                </DropdownMenuRadioItem>
-              ))}
-            </DropdownMenuRadioGroup>
+            <DropdownMenuSub>
+              <DropdownMenuSubTrigger>
+                <ArrowUpDown className="h-4 w-4" />
+                <span>Sort</span>
+              </DropdownMenuSubTrigger>
+              <DropdownMenuSubContent>
+                <DropdownMenuRadioGroup
+                  onValueChange={(value) =>
+                    onSortModeChange?.(value as ChannelSortMode)
+                  }
+                  value={sortMode}
+                >
+                  {SORT_OPTIONS.map((option) => (
+                    <DropdownMenuRadioItem
+                      key={option.value}
+                      value={option.value}
+                    >
+                      {option.label}
+                    </DropdownMenuRadioItem>
+                  ))}
+                </DropdownMenuRadioGroup>
+              </DropdownMenuSubContent>
+            </DropdownMenuSub>
           </>
         ) : null}
         {onDeleteSection ? (
@@ -251,194 +278,6 @@ export function SectionActionsMenu({
         ) : null}
       </DropdownMenuContent>
     </DropdownMenu>
-  );
-}
-
-function MoveToSectionSubmenu({
-  channelId,
-  sections,
-  assignments,
-  onAssignChannel,
-  onUnassignChannel,
-  onCreateSectionForChannel,
-}: {
-  channelId: string;
-  sections: ChannelSection[];
-  assignments: Record<string, string>;
-  onAssignChannel: (channelId: string, sectionId: string) => void;
-  onUnassignChannel: (channelId: string) => void;
-  onCreateSectionForChannel: (channelId: string) => void;
-}) {
-  const currentSectionId = assignments[channelId];
-
-  return (
-    <ContextMenuSub>
-      <ContextMenuSubTrigger>Move to section</ContextMenuSubTrigger>
-      <ContextMenuSubContent>
-        {sections.map((section) => (
-          <ContextMenuItem
-            key={section.id}
-            onClick={() => onAssignChannel(channelId, section.id)}
-          >
-            {currentSectionId === section.id ? (
-              <Check className="h-4 w-4" />
-            ) : section.icon ? (
-              <StatusEmoji className="h-4 w-4" value={section.icon} />
-            ) : (
-              <span className="h-4 w-4" />
-            )}
-            {section.name}
-          </ContextMenuItem>
-        ))}
-        {sections.length > 0 ? <ContextMenuSeparator /> : null}
-        <ContextMenuItem onClick={() => onCreateSectionForChannel(channelId)}>
-          <Plus className="h-4 w-4" />
-          New section...
-        </ContextMenuItem>
-        {currentSectionId ? (
-          <ContextMenuItem onClick={() => onUnassignChannel(channelId)}>
-            Remove from section
-          </ContextMenuItem>
-        ) : null}
-      </ContextMenuSubContent>
-    </ContextMenuSub>
-  );
-}
-
-export function ChannelContextMenuItems({
-  channel,
-  hasUnread,
-  isMuted,
-  isStarred,
-  sections,
-  assignments,
-  onMarkChannelRead,
-  onMarkChannelUnread,
-  onMuteChannel,
-  onUnmuteChannel,
-  onStarChannel,
-  onUnstarChannel,
-  onAssignChannel,
-  onUnassignChannel,
-  onCreateSectionForChannel,
-  onLeaveChannel,
-}: {
-  channel: Channel;
-  hasUnread: boolean;
-  isMuted?: boolean;
-  isStarred?: boolean;
-  sections?: ChannelSection[];
-  assignments?: Record<string, string>;
-  onMarkChannelRead?: (
-    channelId: string,
-    lastMessageAt: string | null | undefined,
-  ) => void;
-  onMarkChannelUnread?: (channelId: string) => void;
-  onMuteChannel?: (channelId: string) => void;
-  onUnmuteChannel?: (channelId: string) => void;
-  onStarChannel?: (channelId: string) => void;
-  onUnstarChannel?: (channelId: string) => void;
-  onAssignChannel?: (channelId: string, sectionId: string) => void;
-  onUnassignChannel?: (channelId: string) => void;
-  onCreateSectionForChannel?: (channelId: string) => void;
-  onLeaveChannel?: (channel: Channel) => void;
-}) {
-  const showStar = Boolean(onStarChannel && onUnstarChannel);
-  const showReadToggle = hasUnread
-    ? Boolean(onMarkChannelRead)
-    : Boolean(onMarkChannelUnread);
-  return (
-    <>
-      {showStar ? (
-        isStarred ? (
-          <ContextMenuItem onClick={() => onUnstarChannel?.(channel.id)}>
-            <StarOff className="h-4 w-4" />
-            Unstar channel
-          </ContextMenuItem>
-        ) : (
-          <ContextMenuItem onClick={() => onStarChannel?.(channel.id)}>
-            <Star className="h-4 w-4" />
-            Star channel
-          </ContextMenuItem>
-        )
-      ) : null}
-      {showStar && showReadToggle ? <ContextMenuSeparator /> : null}
-      {hasUnread && onMarkChannelRead ? (
-        <ContextMenuItem
-          onClick={() => onMarkChannelRead(channel.id, channel.lastMessageAt)}
-        >
-          <CheckCircle2 className="h-4 w-4" />
-          Mark as read
-        </ContextMenuItem>
-      ) : !hasUnread && onMarkChannelUnread ? (
-        <ContextMenuItem onClick={() => onMarkChannelUnread(channel.id)}>
-          <CircleDot className="h-4 w-4" />
-          Mark unread
-        </ContextMenuItem>
-      ) : null}
-      {onMuteChannel && onUnmuteChannel ? (
-        <>
-          <ContextMenuSeparator />
-          {isMuted ? (
-            <ContextMenuItem onClick={() => onUnmuteChannel(channel.id)}>
-              <Bell className="h-4 w-4" />
-              Unmute channel
-            </ContextMenuItem>
-          ) : (
-            <ContextMenuItem onClick={() => onMuteChannel(channel.id)}>
-              <BellOff className="h-4 w-4" />
-              Mute channel
-            </ContextMenuItem>
-          )}
-        </>
-      ) : null}
-      {sections &&
-      assignments &&
-      onAssignChannel &&
-      onUnassignChannel &&
-      onCreateSectionForChannel ? (
-        <>
-          <ContextMenuSeparator />
-          <MoveToSectionSubmenu
-            channelId={channel.id}
-            sections={sections}
-            assignments={assignments}
-            onAssignChannel={onAssignChannel}
-            onUnassignChannel={onUnassignChannel}
-            onCreateSectionForChannel={onCreateSectionForChannel}
-          />
-        </>
-      ) : null}
-      <ContextMenuSeparator />
-      <ContextMenuItem
-        onClick={() =>
-          copyTextToClipboard(channel.name, "Channel name copied to clipboard")
-        }
-      >
-        <Copy className="h-4 w-4" />
-        Copy channel name
-      </ContextMenuItem>
-      <ContextMenuItem
-        onClick={() =>
-          copyTextToClipboard(channel.id, "Channel ID copied to clipboard")
-        }
-      >
-        <Clipboard className="h-4 w-4" />
-        Copy channel ID
-      </ContextMenuItem>
-      {onLeaveChannel ? (
-        <>
-          <ContextMenuSeparator />
-          <ContextMenuItem
-            className="text-destructive focus:text-destructive"
-            onClick={() => onLeaveChannel(channel)}
-          >
-            <LogOut className="h-4 w-4" />
-            Leave channel
-          </ContextMenuItem>
-        </>
-      ) : null}
-    </>
   );
 }
 
@@ -496,6 +335,7 @@ export function ChannelGroupSection({
   listTestId,
   onBrowseClick,
   onCreateClick,
+  showQuickCreate,
   onMarkAllRead,
   onMarkChannelRead,
   onMarkChannelUnread,
@@ -532,6 +372,7 @@ export function ChannelGroupSection({
   listTestId: string;
   onBrowseClick?: () => void;
   onCreateClick?: () => void;
+  showQuickCreate?: boolean;
   onMarkChannelRead: (
     channelId: string,
     lastMessageAt: string | null | undefined,
@@ -638,18 +479,29 @@ export function ChannelGroupSection({
         onToggleCollapsed={onToggleCollapsed}
         title={title}
         actions={
-          <SectionActionsMenu
-            sectionLabel={title}
-            testId={actionsTestId}
-            hasUnread={hasUnread}
-            onMarkAllRead={onMarkAllRead}
-            onBrowse={onBrowseClick}
-            browseLabel={browseLabel}
-            onCreate={onCreateClick}
-            createLabel={createLabel}
-            sortMode={sortMode}
-            onSortModeChange={onSortModeChange}
-          />
+          <>
+            {showQuickCreate && onCreateClick ? (
+              <SectionQuickAction
+                label={createLabel ?? "Create channel"}
+                onClick={onCreateClick}
+                testId={
+                  actionsTestId ? `${actionsTestId}-quick-create` : undefined
+                }
+              />
+            ) : null}
+            <SectionActionsMenu
+              sectionLabel={title}
+              testId={actionsTestId}
+              hasUnread={hasUnread}
+              onMarkAllRead={onMarkAllRead}
+              onBrowse={onBrowseClick}
+              browseLabel={browseLabel}
+              onCreate={onCreateClick}
+              createLabel={createLabel}
+              sortMode={sortMode}
+              onSortModeChange={onSortModeChange}
+            />
+          </>
         }
       />
       {!isCollapsed ? (

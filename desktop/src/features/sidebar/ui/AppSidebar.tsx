@@ -35,6 +35,7 @@ import {
   ChannelGroupSection,
   CustomChannelSection,
   SectionActionsMenu,
+  SectionQuickAction,
 } from "@/features/sidebar/ui/CustomChannelSection";
 import { CreateChannelDialog } from "@/features/sidebar/ui/CreateChannelDialog";
 import { NewDirectMessageDialog } from "@/features/sidebar/ui/NewDirectMessageDialog";
@@ -697,6 +698,7 @@ export function AppSidebar({
                     listTestId="stream-list"
                     onBrowseClick={onBrowseChannels}
                     onCreateClick={() => openCreateDialog("stream")}
+                    showQuickCreate
                     onMarkAllRead={onMarkAllChannelsRead}
                     onMarkChannelRead={onMarkChannelRead}
                     onMarkChannelUnread={onMarkChannelUnread}
@@ -750,6 +752,11 @@ export function AppSidebar({
                 <SidebarSection
                   action={
                     <div className="absolute right-1 top-1/2 z-10 flex -translate-y-1/2 items-center gap-0.5">
+                      <SectionQuickAction
+                        label="New message"
+                        onClick={() => setIsNewDmOpen(true)}
+                        testId="section-actions-dms-quick-create"
+                      />
                       <SectionActionsMenu
                         sectionLabel="direct messages"
                         testId="section-actions-dms"
