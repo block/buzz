@@ -12,9 +12,9 @@ import {
   createManagedAgent,
   getChannelMembers,
   listManagedAgents,
-  startManagedAgent,
   updateManagedAgent,
 } from "@/shared/api/tauri";
+import { startManagedAgent } from "@/shared/api/tauriManagedAgents";
 import type {
   AcpRuntime,
   ChannelRole,

@@ -21,9 +21,11 @@ import assert from "node:assert/strict";
 
 import {
   computeLocalModeGate,
+  getBakedSatisfiedEnvKeys,
   requiredCredentialEnvKeys,
   runtimeSupportsLlmProviderSelection,
 } from "./personaDialogPickers.tsx";
+import { hasMissingRequiredEnvKey } from "./personaRuntimeModel.ts";
 
 // ── Core predicate: provider-selection support ─────────────────────────────
 
@@ -409,4 +411,228 @@ test("localMode_goose_envPlusFileConfig_bothEmpty_stillRequired", () => {
     "model must be required when absent from both env and file",
   );
   assert.equal(result.satisfied, false, "gate must not be satisfied");
+});
+
+// ── Baked build env satisfaction ──────────────────────────────────────────
+
+test("baked_databricksHost_silencesRequirement", () => {
+  // Scenario: goose + databricks_v2, DATABRICKS_HOST baked in (Block build).
+  // The gate must NOT flag DATABRICKS_HOST as missing or required.
+  const result = computeLocalModeGate({
+    bakedEnvKeys: ["DATABRICKS_HOST"],
+    envVars: {},
+    isProviderMode: false,
+    model: "some-model",
+    provider: "databricks_v2",
+    runtimeId: "goose",
+    runtimeFileConfig: null,
+    useMesh: false,
+  });
+
+  assert.ok(
+    !result.missingEnvKeys.includes("DATABRICKS_HOST"),
+    "DATABRICKS_HOST must NOT appear in missingEnvKeys when satisfied by baked env",
+  );
+  assert.equal(
+    result.satisfied,
+    true,
+    "gate must be satisfied when all requirements are covered by baked env",
+  );
+});
+
+test("baked_databricksHost_andAgentLocal_agentLocalWins_keyNotRequired", () => {
+  // Scenario: DATABRICKS_HOST in both baked env AND agent-local.
+  // The key must not appear as required — agent-local takes precedence at spawn
+  // time and the key is clearly satisfied.
+  const result = computeLocalModeGate({
+    bakedEnvKeys: ["DATABRICKS_HOST"],
+    envVars: { DATABRICKS_HOST: "https://agent.example.com/" },
+    isProviderMode: false,
+    model: "some-model",
+    provider: "databricks_v2",
+    runtimeId: "goose",
+    runtimeFileConfig: null,
+    useMesh: false,
+  });
+
+  assert.ok(
+    !result.missingEnvKeys.includes("DATABRICKS_HOST"),
+    "DATABRICKS_HOST must not be in missingEnvKeys when set in agent-local env",
+  );
+  assert.equal(result.satisfied, true, "gate must be satisfied");
+});
+
+test("baked_emptyOrUndefined_behaviorUnchanged", () => {
+  // Scenario: no baked env (OSS build). DATABRICKS_HOST must still be required.
+  const resultUndefined = computeLocalModeGate({
+    bakedEnvKeys: undefined,
+    envVars: {},
+    isProviderMode: false,
+    model: "some-model",
+    provider: "databricks_v2",
+    runtimeId: "goose",
+    runtimeFileConfig: null,
+    useMesh: false,
+  });
+  const resultEmpty = computeLocalModeGate({
+    bakedEnvKeys: [],
+    envVars: {},
+    isProviderMode: false,
+    model: "some-model",
+    provider: "databricks_v2",
+    runtimeId: "goose",
+    runtimeFileConfig: null,
+    useMesh: false,
+  });
+
+  assert.ok(
+    resultUndefined.missingEnvKeys.includes("DATABRICKS_HOST"),
+    "DATABRICKS_HOST must be required when bakedEnvKeys is undefined",
+  );
+  assert.ok(
+    resultEmpty.missingEnvKeys.includes("DATABRICKS_HOST"),
+    "DATABRICKS_HOST must be required when bakedEnvKeys is empty",
+  );
+  assert.equal(
+    resultUndefined.satisfied,
+    false,
+    "gate must not be satisfied (undefined baked)",
+  );
+  assert.equal(
+    resultEmpty.satisfied,
+    false,
+    "gate must not be satisfied (empty baked)",
+  );
+});
+
+test("baked_satisfiedKey_doesNotCountAsMissing_noSaveBlock", () => {
+  // A baked-satisfied key must not appear in missingEnvKeys (which drives the
+  // save-blocking requiredEnvKeyMissing flag in useRequiredCredentialState).
+  const result = computeLocalModeGate({
+    bakedEnvKeys: ["DATABRICKS_HOST"],
+    envVars: {},
+    isProviderMode: false,
+    model: "some-model",
+    provider: "databricks_v2",
+    runtimeId: "goose",
+    runtimeFileConfig: null,
+    useMesh: false,
+  });
+
+  assert.deepEqual(
+    result.missingEnvKeys,
+    [],
+    "missingEnvKeys must be empty when all required keys are baked-satisfied",
+  );
+  assert.deepEqual(
+    result.fileSatisfiedEnvKeys,
+    [],
+    "baked-satisfied keys must not appear in fileSatisfiedEnvKeys",
+  );
+});
+
+// ── getBakedSatisfiedEnvKeys pure function ──────────────────────────────────
+
+test("getBakedSatisfiedEnvKeys_bakedKeyAndNoAgentLocal_returnsBakedKey", () => {
+  const result = getBakedSatisfiedEnvKeys(["DATABRICKS_HOST"], {}, [
+    "DATABRICKS_HOST",
+  ]);
+  assert.deepEqual(result, ["DATABRICKS_HOST"]);
+});
+
+test("getBakedSatisfiedEnvKeys_agentLocalSet_keyNotBakedSatisfied", () => {
+  // Agent-local value wins — the key is already satisfied by the agent's own
+  // env, so it doesn't need baked satisfaction.
+  const result = getBakedSatisfiedEnvKeys(
+    ["DATABRICKS_HOST"],
+    { DATABRICKS_HOST: "https://user.example.com/" },
+    ["DATABRICKS_HOST"],
+  );
+  assert.deepEqual(
+    result,
+    [],
+    "key with agent-local value must not be baked-satisfied",
+  );
+});
+
+test("getBakedSatisfiedEnvKeys_undefinedBaked_returnsEmpty", () => {
+  const result = getBakedSatisfiedEnvKeys(["DATABRICKS_HOST"], {}, undefined);
+  assert.deepEqual(result, []);
+});
+
+test("getBakedSatisfiedEnvKeys_emptyBaked_returnsEmpty", () => {
+  const result = getBakedSatisfiedEnvKeys(["DATABRICKS_HOST"], {}, []);
+  assert.deepEqual(result, []);
+});
+
+// ── requiredEnvKeys exclusion semantics (PersonaDialog / useRequiredCredentialState) ──
+
+test("requiredEnvKeys_exclusionSemantics_filledKeyStaysInAmberRow", () => {
+  // A filled required key must stay in the amber locked row (exclusion semantics,
+  // not missing-only). Regression guard for the allowlist bug fixed in review.
+  // The gate returns missingEnvKeys (empty), not filledKeys — the amber row list
+  // is derived independently as allRequired minus baked/file-satisfied.
+  const allKeys = requiredCredentialEnvKeys("goose", "databricks_v2");
+  const envVarsWithKey = { DATABRICKS_HOST: "https://filled.example.com/" };
+  const bakedSatisfied = getBakedSatisfiedEnvKeys(allKeys, envVarsWithKey, []);
+  // No baked env, no file config: all keys must stay in the amber row list
+  // regardless of whether they are filled.
+  const requiredForEditor = allKeys.filter(
+    (key) => !bakedSatisfied.includes(key),
+  );
+  assert.ok(
+    requiredForEditor.includes("DATABRICKS_HOST"),
+    "DATABRICKS_HOST must remain in the amber row list even when filled (exclusion semantics)",
+  );
+});
+
+test("requiredEnvKeys_exclusionSemantics_bakedKeyDropsFromAmberRow", () => {
+  // A baked-satisfied key must be excluded from the amber row list.
+  const allKeys = requiredCredentialEnvKeys("goose", "databricks_v2");
+  const bakedSatisfied = getBakedSatisfiedEnvKeys(allKeys, {}, [
+    "DATABRICKS_HOST",
+  ]);
+  const requiredForEditor = allKeys.filter(
+    (key) => !bakedSatisfied.includes(key),
+  );
+  assert.ok(
+    !requiredForEditor.includes("DATABRICKS_HOST"),
+    "DATABRICKS_HOST must be excluded from the amber row list when baked-satisfied",
+  );
+});
+
+// ── Save-block path: hasMissingRequiredEnvKey with baked filter ──────────────
+
+test("saveBlock_bakedSatisfiedKey_notMissing", () => {
+  // The save-block gate (hasMissingRequiredEnvKey) must return false when the
+  // only unset required key is baked-satisfied. Pins the hook path exercised by
+  // useRequiredCredentialState without needing React rendering machinery.
+  const allKeys = requiredCredentialEnvKeys("goose", "databricks_v2");
+  const bakedSatisfied = getBakedSatisfiedEnvKeys(allKeys, {}, [
+    "DATABRICKS_HOST",
+  ]);
+  // requiredEnvKeys after filtering out baked-satisfied keys (mirrors
+  // useRequiredCredentialState's requiredEnvKeys memo).
+  const requiredAfterFilter = allKeys.filter(
+    (key) => !bakedSatisfied.includes(key),
+  );
+  assert.equal(
+    hasMissingRequiredEnvKey(requiredAfterFilter, {}),
+    false,
+    "hasMissingRequiredEnvKey must be false when the only unset required key is baked-satisfied",
+  );
+});
+
+test("saveBlock_noFilterNoBaked_stillMissing", () => {
+  // Control: without baked env the same key is still required and missing.
+  const allKeys = requiredCredentialEnvKeys("goose", "databricks_v2");
+  const bakedSatisfied = getBakedSatisfiedEnvKeys(allKeys, {}, []);
+  const requiredAfterFilter = allKeys.filter(
+    (key) => !bakedSatisfied.includes(key),
+  );
+  assert.equal(
+    hasMissingRequiredEnvKey(requiredAfterFilter, {}),
+    true,
+    "hasMissingRequiredEnvKey must be true when the required key is absent and not baked",
+  );
 });

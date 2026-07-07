@@ -155,11 +155,36 @@ pub fn load_managed_agents(app: &AppHandle) -> Result<Vec<ManagedAgentRecord>, S
 
     let content = fs::read_to_string(&path)
         .map_err(|error| format!("failed to read agent store: {error}"))?;
-    let mut records: Vec<ManagedAgentRecord> = serde_json::from_str(&content)
-        .map_err(|error| format!("failed to parse agent store: {error}"))?;
+    let mut records: Vec<ManagedAgentRecord> = serde_json::from_str(&content).map_err(|error| {
+        // Fail loudly and preserve the evidence: a later in-app save rewrites
+        // this file wholesale, which would silently destroy a malformed hand
+        // edit. Best-effort file-authoring contract (see managed_agents::
+        // reconcile): the broken content survives as `.invalid` for the user
+        // to recover, and the parse error propagates instead of being
+        // swallowed into an empty store.
+        backup_invalid_store(&path);
+        format!("failed to parse agent store (preserved as .invalid): {error}")
+    })?;
 
     hydrate_keys(&mut records);
     Ok(records)
+}
+
+/// Preserve a malformed store file as `<name>.invalid` before the error path
+/// unwinds. Copy, not rename: the original stays in place so repeated boots
+/// keep failing loudly (rename would make the next launch look like a fresh
+/// install and mint an empty store over the evidence). Overwrites any prior
+/// `.invalid` — the newest broken content is the one worth keeping. Failure
+/// here is logged and swallowed; it must never mask the parse error itself.
+pub(crate) fn backup_invalid_store(path: &Path) {
+    let backup = path.with_extension("json.invalid");
+    if let Err(e) = fs::copy(path, &backup) {
+        eprintln!(
+            "buzz-desktop: failed to preserve malformed store {} as {}: {e}",
+            path.display(),
+            backup.display()
+        );
+    }
 }
 
 /// Fill in each record's in-memory `private_key_nsec` from the keyring, and

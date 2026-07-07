@@ -1,7 +1,7 @@
 import * as React from "react";
 import { Check, Copy, KeyRound, ShieldX } from "lucide-react";
 
-import { nsecToNpub, pubkeyToNpub, shortenNpub } from "@/shared/lib/nostrUtils";
+import { nsecToNpub, pubkeyToNpub } from "@/shared/lib/nostrUtils";
 import { Badge } from "@/shared/ui/badge";
 import { Button } from "@/shared/ui/button";
 import { Input } from "@/shared/ui/input";
@@ -178,7 +178,7 @@ export function MembershipDenied({
                       This will use this Nostr identity:
                     </p>
                     <p className="break-all font-mono text-2xs text-muted-foreground">
-                      {shortenNpub(previewNpub)}
+                      {previewNpub}
                     </p>
                   </div>
                 </div>

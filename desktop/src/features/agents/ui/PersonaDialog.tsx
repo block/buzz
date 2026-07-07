@@ -43,6 +43,7 @@ import {
   CUSTOM_PROVIDER_DROPDOWN_VALUE,
   computeLocalModeGate,
   formatRuntimeOptionLabel,
+  getBakedSatisfiedEnvKeys,
   getDefaultLlmProviderLabel,
   getDefaultPersonaRuntime,
   getModelSelectValue,
@@ -69,7 +70,7 @@ import {
   MODEL_DISCOVERY_LOADING_VALUE,
   usePersonaModelDiscovery,
 } from "./usePersonaModelDiscovery";
-import { useRuntimeFileConfigQuery } from "../hooks";
+import { useBakedBuildEnvKeysQuery, useRuntimeFileConfigQuery } from "../hooks";
 
 type PersonaDialogProps = {
   open: boolean;
@@ -431,7 +432,9 @@ export function PersonaDialog({
   const { data: runtimeFileConfig } = useRuntimeFileConfigQuery(runtime, {
     enabled: open,
   });
+  const { data: bakedEnvKeys } = useBakedBuildEnvKeysQuery({ enabled: open });
   const localModeGate = computeLocalModeGate({
+    bakedEnvKeys,
     envVars,
     isProviderMode: false,
     model,
@@ -440,12 +443,23 @@ export function PersonaDialog({
     runtimeFileConfig,
     useMesh: false,
   });
-  // Required keys for EnvVarsEditor amber rows: exclude file-satisfied keys
-  // so they render in the "Set in goose config" row instead.
-  const requiredEnvKeys = requiredCredentialEnvKeys(
+  // Required keys for EnvVarsEditor amber locked rows: all required keys except
+  // those silenced by baked env or file config. Filled keys stay in the amber
+  // row (exclusion semantics, not missing-only), matching the other consumers.
+  const allRequiredEnvKeys = requiredCredentialEnvKeys(
     runtime,
     trimmedProvider,
-  ).filter((key) => !localModeGate.fileSatisfiedEnvKeys.includes(key));
+  );
+  const bakedSatisfiedPersonaKeys = getBakedSatisfiedEnvKeys(
+    allRequiredEnvKeys,
+    envVars,
+    bakedEnvKeys,
+  );
+  const requiredEnvKeys = allRequiredEnvKeys.filter(
+    (key) =>
+      !bakedSatisfiedPersonaKeys.includes(key) &&
+      !localModeGate.fileSatisfiedEnvKeys.includes(key),
+  );
   // Provider required-ness is a static property of the runtime — it does not
   // change based on whether the field is currently filled. Using the dynamic
   // missingNormalizedFields check would flip the asterisk off once a value is

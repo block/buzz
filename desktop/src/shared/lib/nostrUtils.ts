@@ -12,6 +12,18 @@ export function pubkeyToNpub(hexPubkey: string): string {
 }
 
 /**
+ * Like `pubkeyToNpub`, but returns null instead of throwing on malformed
+ * input. For display surfaces that must degrade gracefully.
+ */
+export function safeNpub(pubkey: string): string | null {
+  try {
+    return npubEncode(pubkey);
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Decode a bech32 nsec string and derive the matching npub. Returns null if
  * the input is not a syntactically valid `nsec1…` (does NOT throw — this is
  * intended for live form validation where the user is mid-typing).
@@ -34,15 +46,4 @@ export function nsecToNpub(nsec: string): string | null {
   } catch {
     return null;
   }
-}
-
-/**
- * Format an npub for compact display: `npub1abcd…wxyz`. Falls back to the
- * original string if it's shorter than the truncation thresholds.
- */
-export function shortenNpub(npub: string): string {
-  if (npub.length <= 16) {
-    return npub;
-  }
-  return `${npub.slice(0, 12)}…${npub.slice(-6)}`;
 }

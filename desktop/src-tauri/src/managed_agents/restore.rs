@@ -19,6 +19,10 @@ type AgentSpawnResult = (String, SpawnResult);
 /// empty snapshot.
 ///
 /// Only records with a `persona_id` but no `persona_source_version` are touched.
+/// Records that already have a `persona_source_version` — including those whose
+/// `model`/`provider` were clobbered by the old unconditional snapshot code before
+/// this fix — are skipped here; they self-heal on the next manual start via the
+/// start-path re-snapshot in `start_local_agent_with_preflight`.
 /// If the linked persona is gone, we log loudly and leave the snapshot empty —
 /// the record's own `system_prompt`/`model` (possibly empty for persona-created
 /// agents) is then all the config that remains, which is the same fallback an
@@ -55,8 +59,15 @@ pub fn backfill_persona_snapshots(app: &tauri::AppHandle) -> Result<(), String> 
             continue;
         };
         // Layer the agent's own env overrides over persona env, matching
-        // create-time precedence (persona env < agent env).
-        let snapshot = super::persona_events::persona_snapshot(persona, &record.env_vars);
+        // create-time precedence (persona env < agent env). When the persona
+        // leaves model/provider blank, the record's own configured values are
+        // preserved — a blank persona must not clobber a user-configured agent.
+        let snapshot = super::persona_events::persona_snapshot_with_agent_config_fallback(
+            persona,
+            &record.env_vars,
+            record.model.as_deref(),    // fallback: record.model
+            record.provider.as_deref(), // fallback: record.provider
+        );
         if let Some(prompt) = snapshot.system_prompt {
             record.system_prompt = Some(prompt);
         }
@@ -132,6 +143,17 @@ pub async fn restore_managed_agents_on_launch(
         // whose desktop process is no longer running and reap them.
         super::reap_dead_instance_agents(&super::current_instance_id(app), &tracked_pids);
 
+        // Exact-path sweep: kill any buzz-acp process whose executable path
+        // matches this bundle's harness binary but is not in the tracked set.
+        // Complements the env-var sweep above — catches orphans that predate
+        // BUZZ_MANAGED_AGENT injection or lost their PID-file receipt.
+        //
+        // TODO: the three sweeps above each walk the PID table independently.
+        // A future consolidation should collect a single shared process snapshot
+        // at the top of this block and thread it through all sweep functions,
+        // replacing the three separate kernel enumerations.
+        super::sweep_untracked_bundle_harnesses(&tracked_pids);
+
         let candidates: Vec<String> = records
             .iter()
             .filter(|record| record.start_on_app_launch && record.backend == BackendKind::Local)
@@ -170,7 +192,12 @@ pub async fn restore_managed_agents_on_launch(
             let Some(persona) = personas_for_snapshot.iter().find(|p| p.id == persona_id) else {
                 continue;
             };
-            let snapshot = super::persona_events::persona_snapshot(persona, &record.env_vars);
+            let snapshot = super::persona_events::persona_snapshot_with_agent_config_fallback(
+                persona,
+                &record.env_vars,
+                record.model.as_deref(),    // fallback: record.model
+                record.provider.as_deref(), // fallback: record.provider
+            );
             if let Some(prompt) = snapshot.system_prompt {
                 record.system_prompt = Some(prompt);
             }

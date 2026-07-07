@@ -1,8 +1,12 @@
 import * as React from "react";
 
-import { useRuntimeFileConfigQuery } from "@/features/agents/hooks";
+import {
+  useBakedBuildEnvKeysQuery,
+  useRuntimeFileConfigQuery,
+} from "@/features/agents/hooks";
 
 import {
+  getBakedSatisfiedEnvKeys,
   requiredCredentialEnvKeys,
   runtimeSupportsLlmProviderSelection,
 } from "./personaDialogPickers";
@@ -61,30 +65,40 @@ export function useRequiredCredentialState(params: {
     { enabled: open },
   );
 
+  const { data: bakedEnvKeys, isFetched: bakedEnvKeysFetched } =
+    useBakedBuildEnvKeysQuery({ enabled: open });
+
+  // All required keys for this runtime + provider combination.
+  const allRequiredKeys = React.useMemo(
+    () =>
+      requiredCredentialEnvKeys(prospectiveRuntimeId, providerForRequiredKeys),
+    [prospectiveRuntimeId, providerForRequiredKeys],
+  );
+
+  // Keys covered by the baked build env — silenced, produce no info row.
+  const bakedSatisfiedKeys = React.useMemo(
+    () => getBakedSatisfiedEnvKeys(allRequiredKeys, envVars, bakedEnvKeys),
+    [allRequiredKeys, envVars, bakedEnvKeys],
+  );
+
   const fileSatisfiedEnvKeys = React.useMemo(() => {
     if (!runtimeFileConfig) return [] as string[];
-    return requiredCredentialEnvKeys(
-      prospectiveRuntimeId,
-      providerForRequiredKeys,
-    ).filter(
+    return allRequiredKeys.filter(
       (key) =>
         (envVars[key] ?? "").length === 0 &&
+        !bakedSatisfiedKeys.includes(key) &&
         runtimeFileConfig.satisfiedEnvKeys.includes(key),
     );
-  }, [
-    runtimeFileConfig,
-    prospectiveRuntimeId,
-    providerForRequiredKeys,
-    envVars,
-  ]);
+  }, [runtimeFileConfig, allRequiredKeys, envVars, bakedSatisfiedKeys]);
 
   const requiredEnvKeys = React.useMemo(
     () =>
-      requiredCredentialEnvKeys(
-        prospectiveRuntimeId,
-        providerForRequiredKeys,
-      ).filter((key) => !fileSatisfiedEnvKeys.includes(key)),
-    [prospectiveRuntimeId, providerForRequiredKeys, fileSatisfiedEnvKeys],
+      allRequiredKeys.filter(
+        (key) =>
+          !bakedSatisfiedKeys.includes(key) &&
+          !fileSatisfiedEnvKeys.includes(key),
+      ),
+    [allRequiredKeys, bakedSatisfiedKeys, fileSatisfiedEnvKeys],
   );
 
   const requiredEnvKeyMissing = React.useMemo(
@@ -93,17 +107,25 @@ export function useRequiredCredentialState(params: {
   );
 
   // Auto-expand Advanced on the missing→present-requirement transition only.
+  // Wait for the baked-keys query to settle before firing: on first dialog open
+  // the query is still in-flight so bakedEnvKeys is undefined, which transiently
+  // marks baked-covered keys as missing. An errored query still counts as settled
+  // (fail-closed for badge/save purposes, but no premature expand).
   const previousMissing = React.useRef(false);
   React.useEffect(() => {
     if (!open) {
       previousMissing.current = false;
       return;
     }
-    if (requiredEnvKeyMissing && !previousMissing.current) {
+    if (
+      requiredEnvKeyMissing &&
+      !previousMissing.current &&
+      bakedEnvKeysFetched
+    ) {
       setShowAdvancedFields(true);
     }
     previousMissing.current = requiredEnvKeyMissing;
-  }, [open, requiredEnvKeyMissing, setShowAdvancedFields]);
+  }, [open, requiredEnvKeyMissing, bakedEnvKeysFetched, setShowAdvancedFields]);
 
   return { requiredEnvKeys, fileSatisfiedEnvKeys, requiredEnvKeyMissing };
 }

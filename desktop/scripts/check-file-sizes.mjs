@@ -60,6 +60,9 @@ const overrides = new Map([
   // config-bridge: get_agent_config_surface/write_agent_config_field/put_agent_session_config
   // commands add ~40 lines. Queued to split.
   // branch cut; override bumped to cover the merged total. Queued to split.
+  // persona-blank-fallback: persona_snapshot_with_agent_config_fallback call
+  // sites add ~4 lines (extra fallback params + inline comments). build_deploy_payload
+  // fix (blank-persona provider/model fallback) adds ~6 lines. Bug fix.
   // archive/mod_tests.rs carries the full test module for archive/mod.rs:
   // unit tests + 4 real-relay integration tests (ignored, live-relay only).
   // Production logic in mod.rs is now ~527 lines (under 1000). mod_tests.rs
@@ -67,7 +70,7 @@ const overrides = new Map([
   // across the local-archive + agent-metric-archive PR series. store_tests.rs
   // (~731 lines) is under 1000 so needs no override.
   ["src-tauri/src/archive/mod_tests.rs", 1208],
-  ["src-tauri/src/commands/agents.rs", 1437],
+  ["src-tauri/src/commands/agents.rs", 1443],
   // #1418 read-path fix: get_thread_replies' blocker fix (shared TIMELINE_KINDS
   // const + build_thread_replies_filter helper, mirroring the channel sibling so
   // the two p-gate filters can't drift) plus two guard unit tests. The file was
@@ -82,7 +85,12 @@ const overrides = new Map([
   // to split with the rest of this list.
   // dev-nest namespace: OnceLock<Option<PathBuf>> + init_nest_dir + constants
   // added to plumb the dev/prod discriminator. Load-bearing for the D2 nest fix.
-  ["src-tauri/src/managed_agents/nest.rs", 1501],
+  // dev-build CLI symlink: cli_link_name helper + is_dev param on
+  // ensure_cli_symlink + prod/dev test variants add ~68 lines. Load-bearing;
+  // queued to split with the rest of this list.
+  // +4 lines: adopt shared create_symlink wrapper (behavior-preserving refactor
+  // for multi-line rustfmt expansion of the skills symlink call site).
+  ["src-tauri/src/managed_agents/nest.rs", 1575],
   // harness-persona-sync: persona-runtime resolution threaded into the spawn
   // path here. Load-bearing feature growth; queued to split in the resolver
   // unify refactor followup. +26 for resolve_effective_prompt_model_provider
@@ -91,7 +99,9 @@ const overrides = new Map([
   // activity-feed threads avatar_url into build_managed_agent_summary for the
   // assistant-bubble pinned snapshot.
   // +1 for agent_pubkey field in setup payload (config-nudge card wire).
-  ["src-tauri/src/managed_agents/runtime.rs", 2208],
+  // persona-blank-fallback: resolve_effective_prompt_model_provider gains a
+  // record_provider param + applies persona_field_with_record_fallback. +5 lines.
+  ["src-tauri/src/managed_agents/runtime.rs", 2213],
   // config-bridge setup-payload env-boundary fix adds readiness wiring in
   // spawn_agent_child; load-bearing security fix, queued to split.
   ["src-tauri/src/managed_agents/config_bridge/reader.rs", 1016],
@@ -116,14 +126,19 @@ const overrides = new Map([
   // linux-updater isAutoUpdateSupported() binding + onboarding has_profile_event field.
   // config-bridge-aware requirements: getRuntimeFileConfig command adds ~15 lines.
   // +26 lines from PRs landing on main between prior rebase and this rebase.
-  ["src/shared/api/tauri.ts", 1375],
+  // baked-env-required-badge: getBakedBuildEnvKeys wrapper adds ~16 lines. Queued to split.
+  // restart-badge: started the queued split — start/stopManagedAgent moved to
+  // tauriManagedAgents.ts; limit ratcheted down 1388 → 1380 to bank the headroom.
+  ["src/shared/api/tauri.ts", 1380],
   // readiness-gate: PersonaDialog.tsx threads computeLocalModeGate +
   // requiredCredentialEnvKeys + RequiredFieldLabel so the "New agent" dialog
   // shows required markers and credential amber rows (parity with
   // CreateAgentDialog). +23 lines of gate wiring. Queued to split.
   // config-bridge-aware requirements: useRuntimeFileConfigQuery wiring adds
   // ~16 lines. Queued to split.
-  ["src/features/agents/ui/PersonaDialog.tsx", 1032],
+  // baked-env-required-badge: useBakedBuildEnvKeysQuery + bakedEnvKeys wiring
+  // + correct exclusion-semantics for requiredEnvKeys adds ~14 lines. Queued to split.
+  ["src/features/agents/ui/PersonaDialog.tsx", 1046],
   // harness-persona-sync feature growth, queued to split in the resolver-unify
   // refactor followup. discovery.rs is dominated by the new test module
   // (the effective_agent_command / divergent / create-time override matrix);
@@ -142,11 +157,16 @@ const overrides = new Map([
   // migration_tests.rs carries the harness-sync migration coverage plus the
   // patch_json_records owner-only writeback regression test (SECURITY.md:90
   // crash-safe 0o600 fallback). Load-bearing security + feature coverage, not
-  // generic debt growth. Approved override; still queued to split.
-  ["src-tauri/src/migration_tests.rs", 1410],
+  // generic debt growth. Approved override; still queued to split. Event-sync
+  // (persona/team event reconcile) tests were split out to event_sync_tests.rs
+  // and the limit ratcheted 1410 → 1110.
+  ["src-tauri/src/migration_tests.rs", 1110],
   ["src-tauri/src/nostr_convert.rs", 1126],
   ["src/shared/api/relayClientSession.ts", 1022],
-  ["src-tauri/src/migration.rs", 1575],
+  // Boot-time event sync (persona/team/agent event reconcile) was split out
+  // to event_sync.rs, ratcheting this limit 1575 → 1310. Remaining content is
+  // the pre-identity data migrations; still queued to split further.
+  ["src-tauri/src/migration.rs", 1310],
   // onMarkRead + isUnread prop threading (mirrors the onMarkUnread prop
   // already here) for the single-toggle mark-read/unread menu item — a small
   // overage from load-bearing per-message plumbing, not generic debt growth.
@@ -221,7 +241,11 @@ const overrides = new Map([
   // +18: pendingImetaForPersistRef (local snapshot ref) + synchronous restore
   // path writes in the draft-key effect body, fixing the image-drop bug on
   // top-level nav switch (StrictMode simulate-unmount race on remount).
-  ["src/features/messages/ui/MessageComposer.tsx", 1021],
+  // +12 autoSubmitDraftKey/onAutoSubmitComplete props + onAutoSubmitCompleteRef
+  // + mount-only useEffect for the Drafts-panel "Send message" confirm-dialog
+  // flow. Load-bearing feature growth; queued to split with the rest of this
+  // list.
+  ["src/features/messages/ui/MessageComposer.tsx", 1033],
 ]);
 
 await runFileSizeCheck({

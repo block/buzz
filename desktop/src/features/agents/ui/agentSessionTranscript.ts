@@ -906,7 +906,7 @@ export function processTranscriptEvent(
             event.timestamp,
             ctx,
             parsedPrompt.userPubkey,
-            undefined,
+            "session/steer:user",
             parsedPrompt.userEventId,
           );
         }
@@ -918,6 +918,7 @@ export function processTranscriptEvent(
             parsedPrompt.sections,
             event.timestamp,
             ctx,
+            "session/steer:context",
           );
         }
       }

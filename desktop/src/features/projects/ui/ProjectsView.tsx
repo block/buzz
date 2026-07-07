@@ -29,6 +29,7 @@ import {
   useProjectsPullRequestsQuery,
   useProjectsQuery,
 } from "@/features/projects/hooks";
+import { useProjectsRepoSnapshotsQuery } from "@/features/projects/useProjectsRepoSnapshots";
 import { ProjectsIssuesList } from "@/features/projects/ui/ProjectsIssuesList";
 import { ProjectsOverviewPanel } from "@/features/projects/ui/ProjectsOverviewPanel";
 import { ProjectsPullRequestsList } from "@/features/projects/ui/ProjectsPullRequestsList";
@@ -609,6 +610,16 @@ export function ProjectsView() {
   const projectIssuesQuery = useProjectsIssuesQuery(
     filter === "issues" ? projects : [],
   );
+  // One blobless clone per unique repository — only scan while the overview
+  // header (filter === "all") is actually visible.
+  const snapshotProjects = React.useMemo(
+    () => (filter === "all" ? uniqueRepositories(projects) : []),
+    [filter, projects],
+  );
+  const repoSnapshotsQuery = useProjectsRepoSnapshotsQuery(
+    snapshotProjects,
+    activeWorkspace?.reposDir,
+  );
   const [storedViewMode, setStoredViewMode] =
     React.useState<ProjectsViewMode | null>(() => readStoredViewMode());
   const [sort, setSort] = React.useState<ProjectsSort>(() => readStoredSort());
@@ -845,6 +856,8 @@ export function ProjectsView() {
               profiles={profiles}
               projects={projects}
               relayName={activeWorkspace?.name || "Relay"}
+              snapshots={repoSnapshotsQuery.data}
+              snapshotsLoading={repoSnapshotsQuery.isLoading}
               summaries={activitySummariesQuery.data}
             />
           ) : null}

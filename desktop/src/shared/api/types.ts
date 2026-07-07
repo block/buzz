@@ -398,6 +398,13 @@ export type ManagedAgent = {
    * a respawn — the pinned snapshot is all the config that remains.
    */
   personaOrphaned: boolean;
+  /**
+   * `true` when the running process was spawned with a config that no longer
+   * matches what a spawn would use today — a plain restart would change what
+   * runs. Complements `personaOutOfDate` ("a respawn would change it").
+   * Always `false` for stopped agents.
+   */
+  needsRestart: boolean;
   mcpToolsets: string | null;
   /** Per-agent env vars. Layered on top of persona envVars. */
   envVars: Record<string, string>;

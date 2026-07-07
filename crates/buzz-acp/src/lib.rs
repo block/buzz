@@ -2764,6 +2764,19 @@ fn handle_prompt_result(
         PromptOutcome::Cancelled => "cancelled",
     };
     let agent_index = result.agent.index;
+    // Capture the spawn-time configured model and our PID before the agent is
+    // moved into match arms below. `desired_model` reflects the config/persona
+    // model at spawn time — it does NOT reflect `session/set_model` overrides,
+    // which live in buzz-agent's session state and are what `llm: (model) …`
+    // errors carry. The two can legitimately differ; `configured_model=` is
+    // still valuable for identifying a stale orphan running an old model.
+    let harness_configured_model = result
+        .agent
+        .desired_model
+        .as_deref()
+        .unwrap_or("<none>")
+        .to_string();
+    let harness_pid = std::process::id();
 
     let channel_id = match &result.source {
         PromptSource::Channel(ch) => Some(*ch),
@@ -2798,6 +2811,8 @@ fn handle_prompt_result(
             tracing::warn!(
                 agent = agent_index,
                 outcome = outcome_label,
+                configured_model = %harness_configured_model,
+                pid = harness_pid,
                 "agent_returned — respawning"
             );
             let death_message = match outcome_label {
@@ -2842,6 +2857,8 @@ fn handle_prompt_result(
             tracing::debug!(
                 agent = agent_index,
                 outcome = outcome_label,
+                configured_model = %harness_configured_model,
+                pid = harness_pid,
                 "agent_returned (cancelled)"
             );
             pool.return_agent(result.agent);
@@ -2858,6 +2875,8 @@ fn handle_prompt_result(
                 tracing::warn!(
                     agent = agent_index,
                     outcome = outcome_label,
+                    configured_model = %harness_configured_model,
+                    pid = harness_pid,
                     error = %e,
                     "transport/protocol error — respawning agent"
                 );
@@ -2882,6 +2901,8 @@ fn handle_prompt_result(
                 tracing::warn!(
                     agent = agent_index,
                     outcome = outcome_label,
+                    configured_model = %harness_configured_model,
+                    pid = harness_pid,
                     error = %e,
                     "agent_returned (application error — pipe intact)"
                 );

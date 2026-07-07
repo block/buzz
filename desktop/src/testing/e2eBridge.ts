@@ -170,6 +170,9 @@ type E2eConfig = {
       scope_value: string;
       kinds: string; // JSON-encoded integer array, e.g. "[9,40002]"
     }>;
+    // Event IDs that `get_event` should report as definitively not found.
+    // Causes `useDraftRootStatus` to classify as `deleted`.
+    deletedEventIds?: string[];
   };
   relayHttpUrl?: string;
   relayWsUrl?: string;
@@ -680,6 +683,8 @@ declare global {
       mentionPubkeys?: string[];
       extraTags?: string[][];
       createdAt?: number;
+      /** 64-hex id required for the event to be a valid reaction target. */
+      id?: string;
     }) => RelayEvent;
     /** Prepend `count` synthetic older messages to a channel's mock store so
      *  an older-history fetch has something to paginate. Mirrors how the real
@@ -3310,6 +3315,7 @@ function emitMockChannelMessage(
   mentionPubkeys?: string[],
   extraTags?: string[][],
   createdAt?: number,
+  id?: string,
 ) {
   const eventKind = kind ?? 9;
   if (!parentEventId) {
@@ -3319,7 +3325,14 @@ function emitMockChannelMessage(
       pubkey ?? DEFAULT_MOCK_IDENTITY.pubkey,
     );
     if (extraTags) tags.push(...extraTags);
-    const event = createMockEvent(eventKind, content, tags, pubkey, createdAt);
+    const event = createMockEvent(
+      eventKind,
+      content,
+      tags,
+      pubkey,
+      createdAt,
+      id,
+    );
     recordMockMessage(channelId, event);
     emitMockLiveEvent(channelId, event);
     return event;
@@ -3350,6 +3363,7 @@ function emitMockChannelMessage(
     tags,
     authorPubkey,
     createdAt,
+    id,
   );
   recordMockMessage(channelId, event);
   emitMockLiveEvent(channelId, event);
@@ -7317,6 +7331,10 @@ async function handleGetEvent(
 ) {
   const identity = getIdentity(config);
   if (!identity) {
+    // Allow test specs to mark specific event IDs as definitively deleted.
+    if (config?.mock?.deletedEventIds?.includes(args.eventId)) {
+      throw new Error("event not found");
+    }
     const knownEvents: RelayEvent[] = [
       ...Array.from(mockMessages.values()).flat(),
       {
@@ -7581,6 +7599,26 @@ function sendToMockSocket(args: {
 
     const channelId = filter["#h"]?.[0];
     if (!channelId) {
+      // Aux-backfill filters (reactions/deletions) are `#e`-keyed with no
+      // channel tag — serve them across all channel stores like the relay.
+      const referencedIds = filter["#e"];
+      if (referencedIds && referencedIds.length > 0) {
+        const targets = new Set(referencedIds);
+        for (const events of mockMessages.values()) {
+          for (const event of events) {
+            if (filter.kinds && !filter.kinds.includes(event.kind)) {
+              continue;
+            }
+            if (
+              event.tags.some(
+                (tag) => tag[0] === "e" && tag[1] && targets.has(tag[1]),
+              )
+            ) {
+              sendWsText(socket.handler, ["EVENT", subId, event]);
+            }
+          }
+        }
+      }
       sendWsText(socket.handler, ["EOSE", subId]);
       return;
     }
@@ -7744,6 +7782,7 @@ export function maybeInstallE2eTauriMocks() {
     mentionPubkeys,
     extraTags,
     createdAt,
+    id,
   }) => {
     const channel = mockChannels.find(
       (candidate) => candidate.name === channelName,
@@ -7761,6 +7800,7 @@ export function maybeInstallE2eTauriMocks() {
       mentionPubkeys,
       extraTags,
       createdAt,
+      id,
     );
   };
   window.__BUZZ_E2E_PREPEND_MOCK_HISTORY__ = prependMockHistory;
@@ -8206,6 +8246,49 @@ export function maybeInstallE2eTauriMocks() {
         };
       case "get_project_local_repo_snapshot":
         return null;
+      case "get_project_repo_diff":
+        return {
+          additions: 27,
+          deletions: 4,
+          files: [
+            {
+              path: "desktop/src/features/projects/ui/ProjectDetailScreen.tsx",
+              additions: 18,
+              deletions: 3,
+              patch: [
+                "@@ -1,6 +1,8 @@",
+                ' import { Tabs } from "@/shared/ui/tabs";',
+                "",
+                "-function WorkspaceTabs() {",
+                "+function WorkspaceTabs({ selectedCommitHash }) {",
+                '+  const [selectedTab, setSelectedTab] = useState("overview");',
+                "+",
+                "   return (",
+                '     <Tabs value="overview">',
+                "       <ProjectTabsList />",
+              ].join("\n"),
+              truncated: false,
+            },
+            {
+              path: "desktop/src/features/projects/hooks.ts",
+              additions: 9,
+              deletions: 1,
+              patch: [
+                "@@ -10,4 +10,12 @@",
+                " export function useProjectQuery(projectId) {",
+                "   return useQuery({ queryKey: [projectId] });",
+                " }",
+                "+",
+                "+export function useProjectCommitDiffQuery(project, hash) {",
+                '+  return useQuery({ queryKey: [project?.id, "commit-diff", hash] });',
+                "+}",
+              ].join("\n"),
+              truncated: false,
+            },
+          ],
+        };
+      case "get_project_local_repo_diff":
+        return null;
       case "get_project_repo_sync_status":
         return {
           local_path: null,
@@ -8607,11 +8690,12 @@ export function maybeInstallE2eTauriMocks() {
       case "upload_media_bytes":
         return (await resolveMockUploadDescriptors(activeConfig))[0];
       case "fetch_media_bytes": {
-        // The real command fetches relay media through Rust reqwest. In E2E
-        // the browser fetch suffices — specs serve the URL via page.route.
+        // The real command fetches relay media through Rust reqwest and
+        // replies with raw bytes (`tauri::ipc::Response` → ArrayBuffer). In
+        // E2E the browser fetch suffices — specs serve the URL via page.route.
         const response = await fetch((payload as { url: string }).url);
         if (!response.ok) throw new Error(`fetch failed: ${response.status}`);
-        return Array.from(new Uint8Array(await response.arrayBuffer()));
+        return await response.arrayBuffer();
       }
       case "download_image":
       case "download_file":
@@ -8619,6 +8703,8 @@ export function maybeInstallE2eTauriMocks() {
         // FileCard / image-menu click handlers resolve. Specs assert the
         // command was invoked via `__BUZZ_E2E_COMMANDS__`, not the dialog.
         return true;
+      case "copy_image_to_clipboard":
+        return;
       case "get_event":
         return handleGetEvent(
           payload as Parameters<typeof handleGetEvent>[0],

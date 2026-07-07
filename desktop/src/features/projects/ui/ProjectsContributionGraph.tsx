@@ -1,4 +1,5 @@
 import { cn } from "@/shared/lib/cn";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 
 const WEEK_COUNT = 26;
 const DAYS_PER_WEEK = 7;
@@ -109,18 +110,21 @@ export function ProjectsContributionGraph({
               day: "numeric",
             });
             return (
-              <span
-                className={cn(
-                  "aspect-square w-full rounded-[3px]",
-                  LEVEL_CLASSES[levelFor(count)],
-                )}
-                key={key}
-                title={
-                  count > 0
+              <Tooltip key={key}>
+                <TooltipTrigger asChild>
+                  <span
+                    className={cn(
+                      "aspect-square w-full rounded-[3px]",
+                      LEVEL_CLASSES[levelFor(count)],
+                    )}
+                  />
+                </TooltipTrigger>
+                <TooltipContent>
+                  {count > 0
                     ? `${count} ${count === 1 ? "event" : "events"} · ${dateLabel}`
-                    : `No activity · ${dateLabel}`
-                }
-              />
+                    : `No activity · ${dateLabel}`}
+                </TooltipContent>
+              </Tooltip>
             );
           }),
         )}

@@ -24,7 +24,7 @@ import {
 import type { RelayMember, RelayMemberRole } from "@/shared/api/types";
 import type { UserProfileSummary } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
-import { normalizePubkey } from "@/shared/lib/pubkey";
+import { normalizePubkey, truncatePubkey } from "@/shared/lib/pubkey";
 import { Button } from "@/shared/ui/button";
 import {
   DropdownMenu,
@@ -66,10 +66,7 @@ function isValidHexPubkey(value: string): boolean {
 }
 
 function formatDisplayName(member: RelayMember, displayName?: string | null) {
-  return (
-    displayName?.trim() ||
-    `${member.pubkey.slice(0, 10)}…${member.pubkey.slice(-6)}`
-  );
+  return displayName?.trim() || truncatePubkey(member.pubkey);
 }
 
 function npubFromPubkey(pubkey: string): string | null {

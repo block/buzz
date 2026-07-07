@@ -1,5 +1,6 @@
 import * as React from "react";
 import { Bot, Hash, LogIn, Plus, Sparkles, UserPlus } from "lucide-react";
+import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import { useMediaUpload } from "@/features/messages/lib/useMediaUpload";
 import { MessageComposer } from "@/features/messages/ui/MessageComposer";
 import { DropZoneOverlay } from "@/features/messages/ui/ComposerAttachments";
@@ -61,6 +62,8 @@ export const ChannelPane = React.memo(function ChannelPane({
   agentPubkeysPending = false,
   agentSessionAgents,
   activityAgents = agentSessionAgents,
+  autoSendDraftKey = null,
+  onAutoSendComplete = null,
   botTypingEntries,
   channelFind,
   channelManagementOpen = false,
@@ -148,6 +151,7 @@ export const ChannelPane = React.memo(function ChannelPane({
   const welcomeComposerHideTimerRef = React.useRef<number | null>(null);
   const [welcomeComposerBannerState, setWelcomeComposerBannerState] =
     React.useState<WelcomeComposerBannerState>("prompt");
+  const { goChannel } = useAppNavigation();
   const mainComposerMedia = useMediaUpload();
   const isNonMemberView =
     activeChannel !== null &&
@@ -156,6 +160,20 @@ export const ChannelPane = React.memo(function ChannelPane({
     !activeChannel.archivedAt;
   const hasMainComposerOverlay = !isNonMemberView;
   const activeChannelId = activeChannel?.id ?? null;
+  // Clear the ?autoSend search param once the auto-submit fires so
+  // back-navigation cannot re-trigger the send.
+  // When `onAutoSendComplete` is provided it does a surgical single-key clear
+  // that preserves `?thread` and all other panel search state (required for
+  // the thread-draft send path so the thread panel does not unmount before the
+  // deferred setTimeout(0) submit fires). The goChannel fallback is kept for
+  // callers that do not supply the prop (e.g. isolated tests / older wrappers).
+  const handleAutoSubmitComplete = React.useCallback(() => {
+    if (onAutoSendComplete) {
+      onAutoSendComplete();
+    } else if (activeChannelId) {
+      void goChannel(activeChannelId, { replace: true });
+    }
+  }, [activeChannelId, goChannel, onAutoSendComplete]);
   const huddleMemberPubkeys = React.useMemo(
     () => getDmHuddleMemberPubkeys(activeChannel, agentPubkeys, currentPubkey),
     [activeChannel, agentPubkeys, currentPubkey],
@@ -668,6 +686,8 @@ export const ChannelPane = React.memo(function ChannelPane({
                   containerClassName="px-5"
                   disabled={isComposerDisabled}
                   editTarget={mainEditTarget}
+                  autoSubmitDraftKey={autoSendDraftKey}
+                  onAutoSubmitComplete={handleAutoSubmitComplete}
                   isSending={isSending}
                   mediaController={mainComposerMedia}
                   onCancelEdit={onCancelEdit}
@@ -760,6 +780,8 @@ export const ChannelPane = React.memo(function ChannelPane({
               }
               layout={useSplitAuxiliaryPane ? "split" : "standalone"}
               transparentChrome={useSplitAuxiliaryPane}
+              autoSendDraftKey={autoSendDraftKey}
+              onAutoSubmitComplete={handleAutoSubmitComplete}
               onCancelEdit={onCancelEdit}
               onCancelReply={onCancelThreadReply}
               onClose={onCloseThread}

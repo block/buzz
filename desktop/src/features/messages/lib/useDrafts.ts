@@ -3,6 +3,42 @@ import * as React from "react";
 import type { ImetaMedia } from "@/features/messages/lib/imetaMediaMarkdown";
 import { setLocalStorageItemWithRecovery } from "@/shared/lib/localStorageQuota";
 
+// ── Store reactivity ─────────────────────────────────────────────────────────
+// `useSyncExternalStore` requires a stable subscribe/getSnapshot pair.
+// localStorage is not reactive, so we maintain a module-level subscriber set
+// and version counter. Every write bumps the counter and notifies subscribers
+// so any component consuming `useDraftsSnapshot()` re-renders immediately.
+
+type Subscriber = () => void;
+const _subscribers = new Set<Subscriber>();
+let _version = 0;
+
+/** Notify all active subscribers. Called by every write path. */
+function notifySubscribers(): void {
+  _version += 1;
+  for (const sub of _subscribers) {
+    sub();
+  }
+}
+
+function subscribeToStore(callback: Subscriber): () => void {
+  _subscribers.add(callback);
+  return () => {
+    _subscribers.delete(callback);
+  };
+}
+
+function getStoreSnapshot(): number {
+  return _version;
+}
+
+/**
+ * Subscribe to draft store changes. Returns an unsubscribe function.
+ * Exported for unit-testing the subscriber notification contract.
+ * Use `useDraftsSnapshot()` in React components.
+ */
+export { subscribeToStore, getStoreSnapshot };
+
 export type DraftState = {
   content: string;
   selectionStart: number;
@@ -181,6 +217,7 @@ export function saveDraftEntry(draftKey: string, draft: DraftState): void {
   map.set(draftKey, draft);
   evictOldest(map);
   flushStore(map);
+  notifySubscribers();
 }
 
 export function loadDraftEntry(draftKey: string): DraftState | undefined {
@@ -192,6 +229,7 @@ export function clearDraftEntry(draftKey: string): void {
   if (map.has(draftKey)) {
     map.delete(draftKey);
     flushStore(map);
+    notifySubscribers();
   }
 }
 
@@ -316,6 +354,22 @@ export function markDraftSentEntry(
   map.delete(draftKey);
   evictOldest(map);
   flushStore(map);
+  notifySubscribers();
+}
+
+// ── Reactive hooks ────────────────────────────────────────────────────────────
+
+/**
+ * Returns the current store version, re-rendering the component on every
+ * draft write (save / clear / persist / markSent). The version number itself
+ * is not meaningful — callers derive their actual data from the snapshot.
+ *
+ * Use this anywhere that needs to react to draft changes without polling:
+ * - `DraftsPanel` (replaces manual `refreshDrafts` + `useEffect`)
+ * - `useActiveDraftCount` (badge count)
+ */
+export function useDraftsSnapshot(): number {
+  return React.useSyncExternalStore(subscribeToStore, getStoreSnapshot);
 }
 
 export function useDrafts() {

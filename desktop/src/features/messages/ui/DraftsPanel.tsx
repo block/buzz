@@ -1,4 +1,4 @@
-import { FileText, Lock, Pencil, Trash2 } from "lucide-react";
+import { FileText, Lock, Pencil, Send, Trash2 } from "lucide-react";
 import * as React from "react";
 
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
@@ -7,14 +7,27 @@ import {
   clearDraftEntry,
   getActiveDraftEntries,
   getSentDraftEntries,
+  useDraftsSnapshot,
   type DraftState,
 } from "@/features/messages/lib/useDrafts";
+import {
+  useDraftRootStatus,
+  type RootStatus,
+} from "@/features/messages/lib/useDraftRootStatus";
 import { useUsersBatchQuery } from "@/features/profile/hooks";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { resolveChannelDisplayLabel } from "@/features/sidebar/lib/channelLabels";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import type { Channel } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
+import {
+  AlertDialog,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/shared/ui/alert-dialog";
 import { Button } from "@/shared/ui/button";
 import { Markdown } from "@/shared/ui/markdown";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
@@ -196,19 +209,96 @@ export function canOpenDraft(draft: DraftState, source: DraftSource): boolean {
   );
 }
 
+/** True when a draft is sendable: same conditions as openable, plus root not deleted. */
+export function canSendDraft(
+  draft: DraftState,
+  source: DraftSource,
+  rootStatus: RootStatus,
+): boolean {
+  if (!canOpenDraft(draft, source)) return false;
+  if (rootStatus === "deleted") return false;
+  // Mirror the destination composer's stable disabled states so we never
+  // offer a Send that will silently no-op:
+  //   - not a member: the composer rejects sends
+  //   - archived: read-only
+  //   - forum: forum posting is not wired
+  // `isSending` is transient runtime state not visible from the panel — omit.
+  const ch = source.channel;
+  if (ch === null) return false;
+  if (!ch.isMember) return false;
+  if (ch.archivedAt !== null) return false;
+  if (ch.channelType === "forum") return false;
+  return true;
+}
+
+// ── Send confirmation dialog ──────────────────────────────────────────────────
+
+type SendConfirmDialogProps = {
+  channelLabel: string;
+  isDm: boolean;
+  onCancel: () => void;
+  onConfirm: () => void;
+  open: boolean;
+};
+
+function SendConfirmDialog({
+  channelLabel,
+  isDm,
+  onCancel,
+  onConfirm,
+  open,
+}: SendConfirmDialogProps) {
+  const destination = isDm ? channelLabel : `#${channelLabel}`;
+  return (
+    <AlertDialog
+      onOpenChange={(nextOpen) => {
+        if (!nextOpen) {
+          onCancel();
+        }
+      }}
+      open={open}
+    >
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>Send message</AlertDialogTitle>
+          <AlertDialogDescription>
+            Are you sure you want to send this message to {destination}?
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <Button onClick={onCancel} size="sm" type="button" variant="outline">
+            Cancel
+          </Button>
+          <Button onClick={onConfirm} size="sm" type="button">
+            Send
+          </Button>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
+  );
+}
+
+// ── DraftRow ─────────────────────────────────────────────────────────────────
+
 function DraftRow({
   entry,
   onDelete,
   onOpen,
+  onSend,
+  rootStatus,
   source,
 }: {
   entry: DraftListEntry;
   onDelete: (draftKey: string) => void;
   onOpen: (entry: DraftListEntry) => void;
+  onSend: (entry: DraftListEntry) => void;
+  rootStatus: RootStatus;
   source: DraftSource;
 }) {
   const isSent = entry.draft.status === "sent";
-  const canOpen = canOpenDraft(entry.draft, source);
+  const isOrphaned = rootStatus === "deleted";
+  const canOpen = canOpenDraft(entry.draft, source) && !isOrphaned;
+  const canSend = canSendDraft(entry.draft, source, rootStatus);
   const isPrivate = source.channel?.visibility === "private";
   const isDm = source.channel?.channelType === "dm";
   const channelLabel = source.channel
@@ -219,7 +309,10 @@ function DraftRow({
 
   return (
     <div
-      className="group/draft-row relative rounded-md border border-border/70 bg-background transition-colors hover:bg-muted/40 focus-within:bg-muted/40"
+      className={cn(
+        "group/draft-row relative rounded-md border border-border/70 bg-background transition-colors hover:bg-muted/40 focus-within:bg-muted/40",
+        isOrphaned && "opacity-50",
+      )}
       data-testid={`home-draft-item-${entry.key}`}
     >
       <button
@@ -229,13 +322,14 @@ function DraftRow({
         onClick={() => onOpen(entry)}
         type="button"
       >
-        <div className="min-w-0 pr-0 transition-[padding] group-hover/draft-row:pr-16 group-focus-within/draft-row:pr-16">
+        <div className="min-w-0 pr-0 transition-[padding] group-hover/draft-row:pr-20 group-focus-within/draft-row:pr-20">
           <div className="flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
             {isPrivate ? <Lock className="h-3.5 w-3.5 shrink-0" /> : null}
             <span
               className={cn(
                 "truncate font-medium",
                 source.channel ? "text-foreground" : "text-muted-foreground",
+                isOrphaned && "text-muted-foreground",
               )}
             >
               {channelLabel}
@@ -243,6 +337,14 @@ function DraftRow({
             <span className="shrink-0 text-muted-foreground/70">
               {formatDraftCreatedAt(entry.draft)}
             </span>
+            {isOrphaned ? (
+              <span
+                className="shrink-0 rounded px-1 py-0.5 text-2xs font-medium text-destructive/70 ring-1 ring-destructive/30"
+                data-testid={`home-draft-orphaned-label-${entry.key}`}
+              >
+                thread deleted
+              </span>
+            ) : null}
           </div>
           <div className="mt-1 max-h-10 overflow-hidden text-sm font-medium leading-5 text-foreground">
             <Markdown
@@ -254,15 +356,37 @@ function DraftRow({
         </div>
       </button>
 
+      {/* Hover action buttons: edit / delete / send (order per spec) */}
       <div className="pointer-events-none absolute right-2 top-2 flex items-center gap-0.5 rounded-full bg-background/95 p-0.5 opacity-0 shadow-xs ring-1 ring-border/70 transition-opacity group-hover/draft-row:pointer-events-auto group-hover/draft-row:opacity-100 group-focus-within/draft-row:pointer-events-auto group-focus-within/draft-row:opacity-100">
         {isSent ? null : (
-          <DraftRowActionButton
-            disabled={!canOpen}
-            label={canOpen ? "Open draft" : "No channel link"}
-            onClick={() => onOpen(entry)}
-          >
-            <Pencil className="h-4 w-4" />
-          </DraftRowActionButton>
+          <>
+            <DraftRowActionButton
+              disabled={!canOpen}
+              label={
+                canOpen
+                  ? "Open draft"
+                  : isOrphaned
+                    ? "Thread deleted"
+                    : "No channel link"
+              }
+              onClick={() => onOpen(entry)}
+            >
+              <Pencil className="h-4 w-4" />
+            </DraftRowActionButton>
+            <DraftRowActionButton
+              disabled={!canSend}
+              label={
+                canSend
+                  ? "Send message"
+                  : isOrphaned
+                    ? "Thread deleted"
+                    : "No channel link"
+              }
+              onClick={() => onSend(entry)}
+            >
+              <Send className="h-4 w-4" />
+            </DraftRowActionButton>
+          </>
         )}
         <DraftRowActionButton
           label="Delete draft"
@@ -275,26 +399,95 @@ function DraftRow({
   );
 }
 
+// ── Shared derivation: active draft count ────────────────────────────────────
+// The badge (InboxListPane/HomeView) and the panel both call
+// `deriveActiveDraftCount` with the same arguments so the derivation logic
+// cannot diverge. Note: the badge call-site feeds an empty rootStatusMap
+// (panel closed → queries disabled), so orphaned thread drafts count
+// optimistically until the panel opens and the relay confirms deletion.
+// This bounded eventual-consistency is the sanctioned design (Will, 2026-07-07).
+
+/**
+ * Derives the active (non-orphaned) draft count from the draft store snapshot
+ * and root-status map. A draft is excluded from the count when its thread root
+ * is definitively deleted (`"deleted"` status).
+ *
+ * @param activeDrafts  Active draft entries from `getActiveDraftEntries()`.
+ * @param rootStatusMap Root-status map from `useDraftRootStatus()`.
+ * @returns             Count of active drafts whose root is NOT deleted.
+ */
+export function deriveActiveDraftCount(
+  activeDrafts: Array<{ key: string; draft: DraftState }>,
+  rootStatusMap: Map<string, RootStatus>,
+): number {
+  return activeDrafts.filter((entry) => {
+    const threadRootId = getThreadRootId(entry.key);
+    if (threadRootId === null) {
+      // Channel-root draft — cannot be orphaned.
+      return true;
+    }
+    const status = rootStatusMap.get(threadRootId) ?? "checking";
+    // Exclude only on definitive `deleted`; `checking`/`error` are optimistic.
+    return status !== "deleted";
+  }).length;
+}
+
+/**
+ * Reactive hook for the active (non-orphaned) draft count.
+ *
+ * Used by `HomeView` to thread the count to `InboxListPane` for the badge.
+ * Uses the same `deriveActiveDraftCount` function as the panel so the
+ * derivation logic cannot diverge.
+ *
+ * When the panel is closed, `rootStatusMap` is empty (queries disabled), so
+ * thread-reply drafts are counted optimistically — orphaned roots only drop
+ * out of the count once the panel opens and the relay lookups complete.
+ * This bounded eventual-consistency is product-approved (Will, 2026-07-07).
+ */
+export function useActiveDraftCount(
+  rootStatusMap: Map<string, RootStatus>,
+): number {
+  // Re-render on every draft write via useDraftsSnapshot.
+  useDraftsSnapshot();
+  const activeDrafts = getActiveDraftEntries().filter(isVisibleDraft);
+  return deriveActiveDraftCount(activeDrafts, rootStatusMap);
+}
+
+// ── DraftsPanel ──────────────────────────────────────────────────────────────
+
 export function DraftsPanel() {
   const { goChannel } = useAppNavigation();
   const identityQuery = useIdentityQuery();
   const currentPubkey = identityQuery.data?.pubkey;
   const channelsQuery = useChannelsQuery();
-  const [sections, setSections] =
-    React.useState<DraftSection[]>(readDraftSections);
 
-  const refreshDrafts = React.useCallback(() => {
-    setSections(readDraftSections());
-  }, []);
-
-  React.useEffect(() => {
-    refreshDrafts();
-  }, [refreshDrafts]);
+  // Collapse the old `sections` state + `refreshDrafts` pattern onto a
+  // reactive snapshot: every draft write re-renders via useSyncExternalStore.
+  useDraftsSnapshot();
+  const sections = readDraftSections();
 
   const drafts = React.useMemo(
     () => sections.flatMap((section) => section.entries),
     [sections],
   );
+
+  // Collect unique thread-root IDs from active drafts only (sent drafts cannot
+  // be sent/orphaned). Deduplicated on root id — multiple drafts can share one.
+  const threadRootIds = React.useMemo(() => {
+    const ids = new Set<string>();
+    for (const entry of sections.flatMap((s) =>
+      s.status === "active" ? s.entries : [],
+    )) {
+      const rootId = getThreadRootId(entry.key);
+      if (rootId) {
+        ids.add(rootId);
+      }
+    }
+    return [...ids];
+  }, [sections]);
+
+  // Panel is always mounted when visible; `isOpen=true` enables root queries.
+  const rootStatusMap = useDraftRootStatus(threadRootIds, true);
 
   const profilePubkeys = React.useMemo(
     () => [
@@ -324,6 +517,11 @@ export function DraftsPanel() {
     [channelsQuery.data, currentPubkey, drafts, profiles],
   );
 
+  // Send confirmation dialog state.
+  const [sendTarget, setSendTarget] = React.useState<DraftListEntry | null>(
+    null,
+  );
+
   const handleOpen = React.useCallback(
     (entry: DraftListEntry) => {
       if (!entry.draft.channelId) {
@@ -339,13 +537,41 @@ export function DraftsPanel() {
     [goChannel],
   );
 
-  const handleDelete = React.useCallback(
-    (draftKey: string) => {
-      clearDraftEntry(draftKey);
-      refreshDrafts();
-    },
-    [refreshDrafts],
-  );
+  const handleDelete = React.useCallback((draftKey: string) => {
+    clearDraftEntry(draftKey);
+    // No manual refresh needed — clearDraftEntry notifies subscribers and
+    // useDraftsSnapshot() causes DraftsPanel to re-render automatically.
+  }, []);
+
+  const handleSendRequest = React.useCallback((entry: DraftListEntry) => {
+    setSendTarget(entry);
+  }, []);
+
+  const handleSendCancel = React.useCallback(() => {
+    setSendTarget(null);
+  }, []);
+
+  const handleSendConfirm = React.useCallback(() => {
+    if (!sendTarget) return;
+    const entry = sendTarget;
+    setSendTarget(null);
+
+    if (!entry.draft.channelId) return;
+
+    const threadRootId = getThreadRootId(entry.key);
+    void goChannel(entry.draft.channelId, {
+      ...(threadRootId ? { messageId: threadRootId, threadRootId } : {}),
+      autoSend: entry.key,
+    });
+  }, [sendTarget, goChannel]);
+
+  const sendDialogSource = sendTarget
+    ? (sources.get(sendTarget.key) ?? UNKNOWN_DRAFT_SOURCE)
+    : UNKNOWN_DRAFT_SOURCE;
+  const sendDialogIsDm = sendDialogSource.channel?.channelType === "dm";
+  const sendDialogChannelLabel = sendDialogSource.channel
+    ? sendDialogSource.label
+    : UNKNOWN_CHANNEL_LABEL;
 
   if (sections.length === 0) {
     return (
@@ -357,23 +583,44 @@ export function DraftsPanel() {
   }
 
   return (
-    <div className="flex-1 space-y-4 overflow-y-auto p-4">
-      {sections.map((section) => (
-        <div className="space-y-2" key={section.status}>
-          <h3 className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-            {section.label}
-          </h3>
-          {section.entries.map((entry) => (
-            <DraftRow
-              entry={entry}
-              key={entry.key}
-              onDelete={handleDelete}
-              onOpen={handleOpen}
-              source={sources.get(entry.key) ?? UNKNOWN_DRAFT_SOURCE}
-            />
-          ))}
-        </div>
-      ))}
-    </div>
+    <>
+      <div className="flex-1 space-y-4 overflow-y-auto p-4">
+        {sections.map((section) => (
+          <div className="space-y-2" key={section.status}>
+            <h3 className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+              {section.label}
+            </h3>
+            {section.entries.map((entry) => {
+              const threadRootId = getThreadRootId(entry.key);
+              const rootStatus: RootStatus =
+                threadRootId !== null
+                  ? (rootStatusMap.get(threadRootId) ?? "checking")
+                  : "available";
+              return (
+                <DraftRow
+                  entry={entry}
+                  key={entry.key}
+                  onDelete={handleDelete}
+                  onOpen={handleOpen}
+                  onSend={handleSendRequest}
+                  rootStatus={rootStatus}
+                  source={sources.get(entry.key) ?? UNKNOWN_DRAFT_SOURCE}
+                />
+              );
+            })}
+          </div>
+        ))}
+      </div>
+
+      {sendTarget ? (
+        <SendConfirmDialog
+          channelLabel={sendDialogChannelLabel}
+          isDm={sendDialogIsDm}
+          onCancel={handleSendCancel}
+          onConfirm={handleSendConfirm}
+          open={true}
+        />
+      ) : null}
+    </>
   );
 }

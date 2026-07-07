@@ -48,6 +48,7 @@ import {
 import { formatTime } from "@/features/messages/lib/dateFormatters";
 import { splitOutgoingTags } from "@/features/messages/lib/imetaMediaMarkdown";
 import { getThreadReference } from "@/features/messages/lib/threading";
+import { useActiveDraftCount } from "@/features/messages/ui/DraftsPanel";
 import { useUsersBatchQuery } from "@/features/profile/hooks";
 import { resolveUserLabel } from "@/features/profile/lib/identity";
 import {
@@ -116,6 +117,10 @@ export function HomeView({
   const isMessagesMode = !isReminders && !isDrafts;
   const remindersQuery = useRemindersQuery(currentPubkey);
   const dueReminderCount = countDueReminders(remindersQuery.data ?? []);
+  // Active draft count for the badge. When the Drafts panel is closed,
+  // rootStatusMap is empty so orphaned drafts are counted optimistically.
+  // They drop from the count once the panel opens and relay confirms deletion.
+  const activeDraftCount = useActiveDraftCount(new Map());
   // `?item=` is Messages-mode-only machinery: a reminder never enters the
   // FeedItem selection model, so reload while in Reminders mode keeps a stale
   // `?item=` unconsumed and does not snap back to a feed-item detail view.
@@ -342,7 +347,10 @@ export function HomeView({
       threadContext.events.map((event) => [event.id, event]),
     );
     const contextEventIds = new Set(eventById.keys());
-    const reactionEvents = (channelMessages ?? []).filter((event) => {
+    const reactionEvents = [
+      ...(channelMessages ?? []),
+      ...threadContext.reactionEvents,
+    ].filter((event) => {
       if (event.kind !== KIND_REACTION) {
         return false;
       }
@@ -389,6 +397,7 @@ export function HomeView({
     selectedChannel,
     selectedItem,
     threadContext.events,
+    threadContext.reactionEvents,
   ]);
   const selectedItemReplies = React.useMemo<InboxReply[]>(() => {
     if (!selectedItem) return [];
@@ -547,6 +556,7 @@ export function HomeView({
             <InboxListPane
               activeReminderEventIds={activeReminderEventIds}
               agentPubkeys={inboxAgentPubkeys}
+              activeDraftCount={activeDraftCount}
               doneSet={effectiveDoneSet}
               dueReminderCount={dueReminderCount}
               filter={filter}
@@ -736,6 +746,7 @@ export function HomeView({
                         eventId: message.id,
                         remove,
                       });
+                      await threadContext.refreshReactions();
                       await channelMessagesQuery.refetch();
                       onRefresh();
                     }

@@ -399,3 +399,43 @@ test("forum markdown images use the markdown root as their gallery scope", async
     page.getByRole("button", { name: "Previous image" }),
   ).toBeVisible();
 });
+
+test("right-click image shows Copy image and invokes copy command", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  await page.getByTestId("message-input").fill("copy me");
+  await page.getByRole("button", { name: "Attach image" }).click();
+  await page.getByTestId("send-message").click();
+  await expect(page.getByText("Sending")).toHaveCount(0);
+
+  const row = page
+    .getByTestId("message-row")
+    .filter({ hasText: "copy me" })
+    .last();
+  const trigger = row.getByTestId("message-image-lightbox-trigger").first();
+  await expect(trigger).toBeVisible();
+
+  await trigger.click({ button: "right" });
+
+  const copyButton = page.getByRole("button", { name: "Copy image" });
+  await expect(copyButton).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Download image" }),
+  ).toBeVisible();
+
+  await copyButton.click();
+
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          (window as Window & { __BUZZ_E2E_COMMANDS__?: string[] })
+            .__BUZZ_E2E_COMMANDS__ ?? [],
+      ),
+    )
+    .toContain("copy_image_to_clipboard");
+});

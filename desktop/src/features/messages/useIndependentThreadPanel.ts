@@ -1,7 +1,6 @@
 import * as React from "react";
 
 import { buildIndependentThreadPanel } from "@/features/messages/lib/independentThreadPanel";
-import { useThreadReplies } from "@/features/messages/useThreadReplies";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type {
   Channel,
@@ -13,6 +12,7 @@ import type {
 export function useIndependentThreadPanel(args: {
   activeChannel: Channel | null;
   channelEvents: RelayEvent[];
+  threadReplyEvents: RelayEvent[];
   rootId: string | null;
   replyTargetId: string | null;
   expandedReplyIds: ReadonlySet<string>;
@@ -23,12 +23,11 @@ export function useIndependentThreadPanel(args: {
   personaLookup: Map<string, string>;
   respondToLookup: Map<string, RespondToMode>;
 }) {
-  const replies = useThreadReplies(args.activeChannel, args.rootId);
   return React.useMemo(
     () =>
       buildIndependentThreadPanel(
         args.channelEvents,
-        replies.data ?? [],
+        args.threadReplyEvents,
         args.rootId,
         args.replyTargetId,
         args.expandedReplyIds,
@@ -40,6 +39,6 @@ export function useIndependentThreadPanel(args: {
         args.personaLookup,
         args.respondToLookup,
       ),
-    [args, replies.data],
+    [args],
   );
 }

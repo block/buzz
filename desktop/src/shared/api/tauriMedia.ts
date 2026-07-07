@@ -11,6 +11,8 @@ import { invokeTauri } from "./tauri";
 export async function fetchMediaBytes(
   url: string,
 ): Promise<Uint8Array<ArrayBuffer>> {
-  const bytes = await invokeTauri<number[]>("fetch_media_bytes", { url });
+  // The Rust command replies with `tauri::ipc::Response`, so the bytes
+  // arrive as a raw ArrayBuffer rather than a JSON number array.
+  const bytes = await invokeTauri<ArrayBuffer>("fetch_media_bytes", { url });
   return new Uint8Array(bytes);
 }

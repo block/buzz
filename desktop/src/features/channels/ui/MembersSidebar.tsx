@@ -15,16 +15,14 @@ import {
 import { CreateAgentRespondToField } from "@/features/agents/ui/RespondToField";
 import { useIsArchivedPredicate } from "@/features/identity-archive/hooks";
 import { useClassifiedMembers } from "@/features/channels/lib/useClassifiedMembers";
-import {
-  formatMemberName,
-  formatPubkey,
-} from "@/features/channels/lib/memberUtils";
+import { formatMemberName } from "@/features/channels/lib/memberUtils";
 import {
   useFlattenedUserSearchResults,
   useInfiniteUserSearchQuery,
   useUserSearchFetchMoreOnScroll,
   useUsersBatchQuery,
 } from "@/features/profile/hooks";
+import { formatOwnerLabel } from "@/features/profile/lib/identity";
 import { rankUserCandidatesBySearch } from "@/features/profile/lib/userCandidateSearch";
 import { usePresenceQuery } from "@/features/presence/hooks";
 import { useIdentityQuery } from "@/shared/api/hooks";
@@ -49,7 +47,7 @@ import {
 import { useProfilePanel } from "@/shared/context/ProfilePanelContext";
 import { useFeedbackToasts } from "@/shared/hooks/useToastEffect";
 import { cn } from "@/shared/lib/cn";
-import { normalizePubkey } from "@/shared/lib/pubkey";
+import { normalizePubkey, truncatePubkey } from "@/shared/lib/pubkey";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 import {
   MODAL_SEARCH_INPUT_CLASS,
@@ -64,24 +62,7 @@ function formatAddCandidateName(user: UserSearchResult) {
   return (
     user.displayName?.trim() ||
     user.nip05Handle?.trim() ||
-    formatPubkey(user.pubkey)
-  );
-}
-function formatOwnerName(
-  user: UserSearchResult,
-  ownerProfiles?: Record<
-    string,
-    { displayName: string | null; nip05Handle: string | null }
-  >,
-) {
-  if (!user.ownerPubkey) {
-    return null;
-  }
-  const owner = ownerProfiles?.[normalizePubkey(user.ownerPubkey)];
-  return (
-    owner?.displayName?.trim() ||
-    owner?.nip05Handle?.trim() ||
-    formatPubkey(user.ownerPubkey)
+    truncatePubkey(user.pubkey)
   );
 }
 type AddMemberSearchCandidate = UserSearchResult & {
@@ -592,7 +573,9 @@ export function MembersSidebar({
           }
           member={member}
           memberIsBot={memberIsBot}
-          memberAvatarLabel={member.displayName ?? formatPubkey(member.pubkey)}
+          memberAvatarLabel={
+            member.displayName ?? truncatePubkey(member.pubkey)
+          }
           memberLabel={formatMemberName(member, currentPubkey)}
           onChangeRole={(m, role) => {
             void changeRoleMutation.mutateAsync({ pubkey: m.pubkey, role });
@@ -711,8 +694,9 @@ export function MembersSidebar({
                             onSelect={(selectedUser) => {
                               void handleAddSearchResult(selectedUser);
                             }}
-                            ownerLabel={formatOwnerName(
-                              user,
+                            ownerLabel={formatOwnerLabel(
+                              user.ownerPubkey,
+                              identityQuery.data?.pubkey,
                               addSearchOwnerProfilesQuery.data?.profiles,
                             )}
                             user={user}
@@ -807,7 +791,7 @@ export function MembersSidebar({
               <div className="mt-4 space-y-1 text-sm text-destructive">
                 {inviteSubmissionErrors.map((error) => (
                   <p key={`${error.pubkey}-${error.error}`}>
-                    {formatPubkey(error.pubkey)}: {error.error}
+                    {truncatePubkey(error.pubkey)}: {error.error}
                   </p>
                 ))}
               </div>

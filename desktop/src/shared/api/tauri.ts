@@ -215,6 +215,7 @@ export type RawManagedAgent = {
   provider: string | null;
   persona_out_of_date: boolean;
   persona_orphaned: boolean;
+  needs_restart: boolean;
   mcp_toolsets: string | null;
   env_vars?: Record<string, string>;
   status: ManagedAgent["status"];
@@ -991,6 +992,7 @@ export function fromRawManagedAgent(agent: RawManagedAgent): ManagedAgent {
     provider: agent.provider ?? null,
     personaOutOfDate: agent.persona_out_of_date ?? false,
     personaOrphaned: agent.persona_orphaned ?? false,
+    needsRestart: agent.needs_restart ?? false,
     mcpToolsets: agent.mcp_toolsets,
     envVars: agent.env_vars ?? {},
     status: agent.status,
@@ -1161,20 +1163,6 @@ export async function createManagedAgent(input: CreateManagedAgentInput) {
   };
 }
 
-export async function startManagedAgent(pubkey: string): Promise<ManagedAgent> {
-  const response = await invokeTauri<RawManagedAgent>("start_managed_agent", {
-    pubkey,
-  });
-  return fromRawManagedAgent(response);
-}
-
-export async function stopManagedAgent(pubkey: string): Promise<ManagedAgent> {
-  const response = await invokeTauri<RawManagedAgent>("stop_managed_agent", {
-    pubkey,
-  });
-  return fromRawManagedAgent(response);
-}
-
 export async function deleteManagedAgent(
   pubkey: string,
   forceRemoteDelete?: boolean,
@@ -1281,6 +1269,19 @@ export async function getRuntimeFileConfig(
       runtimeId,
     },
   );
+}
+
+/**
+ * Return the key names of all non-empty baked build env vars.
+ *
+ * Internal (Block) builds bake provider credentials into the binary at compile
+ * time. This returns the *key names only* — never the values — so dialogs can
+ * treat them as satisfied without exposing secrets to the frontend.
+ *
+ * OSS builds return an empty array (no baked env).
+ */
+export async function getBakedBuildEnvKeys(): Promise<string[]> {
+  return invokeTauri<string[]>("get_baked_build_env_keys");
 }
 
 type RawUpdateManagedAgentResponse = {

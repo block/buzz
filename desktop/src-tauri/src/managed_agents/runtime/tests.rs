@@ -179,6 +179,8 @@ fn build_env_owner_only_sets_mode_and_removes_others() {
     assert!(remove.contains(&"BUZZ_ACP_AGENT_OWNER"));
 }
 
+// select_untracked_bundle_harnesses tests live in runtime/sweep.rs (mod tests).
+
 #[test]
 fn build_env_allowlist_sets_both_envs_and_joins() {
     let a = "a".repeat(64);

@@ -72,7 +72,7 @@ impl Llm {
         effective_model: &str,
     ) -> Result<LlmResponse, AgentError> {
         let effort = cfg.thinking_effort;
-        match cfg.provider {
+        let result = match cfg.provider {
             Provider::Anthropic => {
                 let v = self
                     .post_anthropic(
@@ -140,7 +140,17 @@ impl Llm {
                 })
                 .await
             }
-        }
+        };
+        // Stamp the effective model into Llm errors so log lines carry
+        // `llm: (model-name) 404 Not Found: …` instead of the bare status.
+        // The `llm: ` prefix comes from `Display for AgentError::Llm`; the
+        // map_err here prepends `(model-name) ` to the inner string only.
+        // This is the single place all provider paths converge, so the mapping
+        // is centralized and never needs to be repeated in each provider arm.
+        result.map_err(|e| match e {
+            AgentError::Llm(s) => AgentError::Llm(format!("({effective_model}) {s}")),
+            other => other,
+        })
     }
 
     pub async fn summarize(

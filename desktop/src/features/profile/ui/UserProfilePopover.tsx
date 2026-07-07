@@ -23,10 +23,7 @@ import {
 import { useIsManagedAgent } from "@/features/agent-memory/hooks";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import { useAgentWorking } from "@/features/agents/agentWorkingSignal";
-import {
-  ownsAuthorAgent,
-  truncatePubkey,
-} from "@/features/profile/lib/identity";
+import { ownsAuthorAgent } from "@/features/profile/lib/identity";
 import { formatElapsed } from "@/features/agents/ui/agentSessionUtils";
 import { usePresenceQuery } from "@/features/presence/hooks";
 import { useUserStatusQuery } from "@/features/user-status/hooks";
@@ -43,7 +40,7 @@ import { sendChannelMessage } from "@/shared/api/tauri";
 import type { Channel, RelayEvent } from "@/shared/api/types";
 import { KIND_STREAM_MESSAGE } from "@/shared/constants/kinds";
 import { cn } from "@/shared/lib/cn";
-import { normalizePubkey } from "@/shared/lib/pubkey";
+import { normalizePubkey, truncatePubkey } from "@/shared/lib/pubkey";
 
 import { Popover, PopoverAnchor, PopoverContent } from "@/shared/ui/popover";
 import { BotIdenticon } from "@/features/messages/ui/BotIdenticon";

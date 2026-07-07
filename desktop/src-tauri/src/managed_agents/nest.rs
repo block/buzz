@@ -18,6 +18,8 @@ use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Manager};
 
 use crate::managed_agents::discovery::known_skill_dirs;
+#[cfg(unix)]
+use crate::util::create_symlink;
 
 /// Subdirectories created inside the nest.
 /// `REPOS` is intentionally absent: it is provisioned by
@@ -295,7 +297,7 @@ fn ensure_skill_symlinks(root: &Path) -> Result<(), String> {
         let depth = std::path::Path::new(skill_dir).components().count();
         let prefix = "../".repeat(depth);
         let target = format!("{prefix}{CANONICAL_SKILL_DIR}");
-        std::os::unix::fs::symlink(&target, &link)
+        create_symlink(std::path::Path::new(&target), &link)
             .map_err(|e| format!("symlink {} → {}: {e}", link.display(), target))?;
     }
     Ok(())
@@ -306,16 +308,35 @@ fn ensure_skill_symlinks(_root: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Ensures `~/.local/bin/buzz` is a symlink to the bundled CLI binary.
+/// Returns the `~/.local/bin` link name for the bundled CLI.
 ///
-/// On every boot: replaces any existing symlink unconditionally (the `buzz`
-/// name is our namespace), creates a new one if absent, and leaves regular
-/// files alone to avoid clobbering a user-compiled binary.
+/// Dev builds (`is_dev = true`) use `"buzz-dev"` so that a running DMG and a
+/// concurrent dev build each own a separate link and never clobber each other —
+/// the same isolation that separates `~/.buzz` (prod) from `~/.buzz-dev` (dev).
+pub fn cli_link_name(is_dev: bool) -> &'static str {
+    if is_dev {
+        "buzz-dev"
+    } else {
+        "buzz"
+    }
+}
+
+/// Ensures `~/.local/bin/buzz` (prod) or `~/.local/bin/buzz-dev` (dev) is a
+/// symlink to the bundled CLI binary.
+///
+/// The link name is split by `is_dev` so that an installed DMG and a
+/// concurrently running dev build each maintain their own symlink and never
+/// overwrite each other's target — the same isolation that separates the
+/// `~/.buzz` and `~/.buzz-dev` nests (see [`NEST_DIR_DEV`]).
+///
+/// On every boot: replaces any existing symlink unconditionally (the `buzz` /
+/// `buzz-dev` name is our namespace), creates a new one if absent, and leaves
+/// regular files alone to avoid clobbering a user-compiled binary.
 ///
 /// Non-fatal: callers should ignore errors — the symlink is a convenience
 /// for human Terminal use; agents find the CLI via PATH augmentation.
 #[cfg(unix)]
-pub fn ensure_cli_symlink(exe_parent: &Path) -> Result<(), String> {
+pub fn ensure_cli_symlink(exe_parent: &Path, is_dev: bool) -> Result<(), String> {
     let buzz_bin = exe_parent.join("buzz");
     if !buzz_bin.exists() {
         return Ok(()); // CLI not bundled (e.g., dev builds without sidecars).
@@ -327,18 +348,18 @@ pub fn ensure_cli_symlink(exe_parent: &Path) -> Result<(), String> {
         .join("bin");
     fs::create_dir_all(&local_bin).map_err(|e| format!("create {}: {e}", local_bin.display()))?;
 
-    let link = local_bin.join("buzz");
+    let link = local_bin.join(cli_link_name(is_dev));
     match link.symlink_metadata() {
         Ok(meta) if meta.file_type().is_symlink() => {
             let _ = fs::remove_file(&link);
-            std::os::unix::fs::symlink(&buzz_bin, &link)
+            create_symlink(&buzz_bin, &link)
                 .map_err(|e| format!("symlink {}: {e}", link.display()))?;
         }
         Ok(_) => {
             // Regular file or directory — don't clobber.
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            std::os::unix::fs::symlink(&buzz_bin, &link)
+            create_symlink(&buzz_bin, &link)
                 .map_err(|e| format!("symlink {}: {e}", link.display()))?;
         }
         Err(e) => {
@@ -351,7 +372,7 @@ pub fn ensure_cli_symlink(exe_parent: &Path) -> Result<(), String> {
 
 /// No-op on non-Unix platforms — symlink management is macOS/Linux only.
 #[cfg(not(unix))]
-pub fn ensure_cli_symlink(_exe_parent: &Path) -> Result<(), String> {
+pub fn ensure_cli_symlink(_exe_parent: &Path, _is_dev: bool) -> Result<(), String> {
     Ok(())
 }
 
@@ -485,8 +506,11 @@ fn refresh_skill_md_if_stale(root: &Path) -> Result<(), String> {
             fs::remove_file(&symlink_path)
                 .map_err(|e| format!("remove symlink {}: {e}", symlink_path.display()))?;
         }
-        std::os::unix::fs::symlink("../../.agents/skills/buzz-cli", &symlink_path)
-            .map_err(|e| format!("symlink {}: {e}", symlink_path.display()))?;
+        create_symlink(
+            std::path::Path::new("../../.agents/skills/buzz-cli"),
+            &symlink_path,
+        )
+        .map_err(|e| format!("symlink {}: {e}", symlink_path.display()))?;
     }
 
     fs::write(&version_path, format!("{NEST_SKILL_VERSION}\n"))
@@ -983,19 +1007,29 @@ mod tests {
         );
     }
 
+    #[test]
+    fn cli_link_name_prod_is_buzz() {
+        assert_eq!(cli_link_name(false), "buzz");
+    }
+
+    #[test]
+    fn cli_link_name_dev_is_buzz_dev() {
+        assert_eq!(cli_link_name(true), "buzz-dev");
+    }
+
     #[cfg(unix)]
     #[test]
-    fn ensure_cli_symlink_creates_symlink() {
+    fn ensure_cli_symlink_creates_symlink_prod() {
         let tmp = tempfile::tempdir().unwrap();
         let exe_parent = tmp.path().join("MacOS");
         fs::create_dir(&exe_parent).unwrap();
         fs::write(exe_parent.join("buzz"), "binary").unwrap();
 
-        // Simulate the symlink creation path.
         let local_bin = tmp.path().join("local_bin");
         fs::create_dir_all(&local_bin).unwrap();
-        let link = local_bin.join("buzz");
 
+        // Prod link name is "buzz"; simulate the symlink creation path.
+        let link = local_bin.join(cli_link_name(false));
         std::os::unix::fs::symlink(exe_parent.join("buzz"), &link).unwrap();
         assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
         assert_eq!(fs::read_link(&link).unwrap(), exe_parent.join("buzz"));
@@ -1003,16 +1037,55 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn ensure_cli_symlink_does_not_clobber_regular_file() {
+    fn ensure_cli_symlink_creates_symlink_dev() {
+        let tmp = tempfile::tempdir().unwrap();
+        let exe_parent = tmp.path().join("MacOS");
+        fs::create_dir(&exe_parent).unwrap();
+        fs::write(exe_parent.join("buzz"), "binary").unwrap();
+
+        let local_bin = tmp.path().join("local_bin");
+        fs::create_dir_all(&local_bin).unwrap();
+
+        // Dev link must be "buzz-dev", never "buzz".
+        assert_eq!(cli_link_name(true), "buzz-dev");
+
+        let link = local_bin.join(cli_link_name(true));
+        std::os::unix::fs::symlink(exe_parent.join("buzz"), &link).unwrap();
+        assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
+        assert_eq!(fs::read_link(&link).unwrap(), exe_parent.join("buzz"));
+        // Prod link must not exist — the two builds don't touch each other.
+        assert!(!local_bin.join("buzz").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_cli_symlink_does_not_clobber_regular_file_prod() {
         let tmp = tempfile::tempdir().unwrap();
         let local_bin = tmp.path().join("local_bin");
         fs::create_dir_all(&local_bin).unwrap();
-        let link = local_bin.join("buzz");
+        let link = local_bin.join(cli_link_name(false));
         fs::write(&link, "user-installed binary").unwrap();
 
         // Regular files are preserved — the Ok(_) branch skips them.
         assert!(link.symlink_metadata().unwrap().file_type().is_file());
         assert_eq!(fs::read_to_string(&link).unwrap(), "user-installed binary");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_cli_symlink_does_not_clobber_regular_file_dev() {
+        let tmp = tempfile::tempdir().unwrap();
+        let local_bin = tmp.path().join("local_bin");
+        fs::create_dir_all(&local_bin).unwrap();
+        let link = local_bin.join(cli_link_name(true));
+        fs::write(&link, "user-installed buzz-dev binary").unwrap();
+
+        // Regular files at the dev path are also preserved.
+        assert!(link.symlink_metadata().unwrap().file_type().is_file());
+        assert_eq!(
+            fs::read_to_string(&link).unwrap(),
+            "user-installed buzz-dev binary"
+        );
     }
 
     fn make_persona(id: &str, display_name: &str) -> PersonaRecord {

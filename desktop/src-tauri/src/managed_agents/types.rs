@@ -240,6 +240,13 @@ pub struct RelayMeshConfig {
 pub struct ManagedAgentProcess {
     pub child: Child,
     pub log_path: PathBuf,
+    /// Digest of the effective spawn config at launch (see
+    /// `spawn_hash::spawn_config_hash`). Runtime-only — never persisted. The
+    /// summary builder recomputes the hash from current disk state and flags
+    /// `needs_restart` on mismatch. Agents adopted via a persisted
+    /// `runtime_pid` have no `ManagedAgentProcess` entry, so their spawn
+    /// config is unknown and the badge stays off.
+    pub spawn_config_hash: u64,
     /// Win32 Job Object owning the harness + its entire process tree. Closing
     /// the handle (via `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`) kills the whole
     /// tree — the Windows mirror of the Unix process-group teardown. `None`
@@ -283,6 +290,13 @@ pub struct ManagedAgentSummary {
     /// so the UI should not prompt a respawn — the pinned snapshot is all the
     /// config that remains.
     pub persona_orphaned: bool,
+    /// `true` when the running process was spawned with a config that no
+    /// longer matches what a spawn would use today — a plain restart would
+    /// change what runs. Complements `persona_out_of_date`: the badge means
+    /// "a restart would change what runs"; out-of-date means "a respawn
+    /// would." Always `false` for stopped agents and for processes adopted
+    /// via a persisted `runtime_pid` (their spawn config is unknown).
+    pub needs_restart: bool,
     pub mcp_toolsets: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub env_vars: BTreeMap<String, String>,

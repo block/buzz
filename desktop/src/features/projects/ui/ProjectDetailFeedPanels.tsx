@@ -7,6 +7,7 @@ import type {
   ProjectRepoContributor,
   ProjectRepoSnapshot,
 } from "@/features/projects/hooks";
+import type { ProjectRepoCommit } from "@/shared/api/types";
 import {
   resolveUserLabel,
   type UserProfileLookup,
@@ -133,12 +134,14 @@ export function ActivityPanel({
   snapshot,
   isLoading,
   error,
+  onSelectCommit,
   profiles,
   repoContributors,
 }: {
   snapshot: ProjectRepoSnapshot | null | undefined;
   isLoading: boolean;
   error: unknown;
+  onSelectCommit?: (commit: ProjectRepoCommit) => void;
   profiles?: UserProfileLookup;
   repoContributors: ProjectRepoContributor[];
 }) {
@@ -227,11 +230,23 @@ export function ActivityPanel({
                   </time>
                 </div>
               </div>
-              <div className="rounded-lg border border-border/50 bg-background/45 px-3 py-1.5">
-                <p className="line-clamp-2 text-sm font-medium leading-5 text-foreground">
-                  {commit.subject}
-                </p>
-              </div>
+              {onSelectCommit ? (
+                <button
+                  className="block w-full rounded-lg border border-border/50 bg-background/45 px-3 py-1.5 text-left transition-colors hover:border-border hover:bg-muted/40 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+                  onClick={() => onSelectCommit(commit)}
+                  type="button"
+                >
+                  <p className="line-clamp-2 text-sm font-medium leading-5 text-foreground">
+                    {commit.subject}
+                  </p>
+                </button>
+              ) : (
+                <div className="rounded-lg border border-border/50 bg-background/45 px-3 py-1.5">
+                  <p className="line-clamp-2 text-sm font-medium leading-5 text-foreground">
+                    {commit.subject}
+                  </p>
+                </div>
+              )}
             </div>
           </article>
         );

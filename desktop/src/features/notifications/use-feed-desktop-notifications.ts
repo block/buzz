@@ -1,8 +1,8 @@
 import * as React from "react";
 
+import { truncatePubkey } from "@/shared/lib/pubkey";
 import {
   resolveUserLabel,
-  truncatePubkey,
   type UserProfileLookup,
 } from "@/features/profile/lib/identity";
 import { getThreadReference } from "@/features/messages/lib/threading";

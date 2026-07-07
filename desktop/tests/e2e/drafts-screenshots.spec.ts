@@ -238,15 +238,20 @@ test.describe("drafts screenshots", () => {
     // Hover to reveal action buttons
     await textDraftRow.hover();
 
-    // Both action buttons should become visible on hover
+    // All three action buttons should become visible on hover
     const openDraftBtn = textDraftRow.getByRole("button", {
       name: "Open draft",
+      exact: true,
+    });
+    const sendMessageBtn = textDraftRow.getByRole("button", {
+      name: "Send message",
       exact: true,
     });
     const deleteDraftBtn = textDraftRow.getByRole("button", {
       name: "Delete draft",
     });
     await expect(openDraftBtn).toBeVisible({ timeout: 4_000 });
+    await expect(sendMessageBtn).toBeVisible({ timeout: 4_000 });
     await expect(deleteDraftBtn).toBeVisible({ timeout: 4_000 });
 
     await page.waitForTimeout(200);
@@ -266,5 +271,195 @@ test.describe("drafts screenshots", () => {
     await page.waitForTimeout(200);
 
     await panel.screenshot({ path: `${SHOTS}/04-empty-state.png` });
+  });
+
+  test("05 — thread-draft send confirm dialog", async ({ page }) => {
+    // Regression test for IMPORTANT #1: thread-reply draft Send navigates to
+    // the correct channel and passes the autoSend key so the thread composer
+    // (not the main composer) arms the auto-submit.
+    await installMockBridge(page);
+    await patchWorkspacePubkey(page);
+
+    // A fixed fake root event ID — in the mock bridge get_event is unhandled
+    // so useDraftRootStatus will map it to `error` (not `deleted`), keeping
+    // the draft sendable.
+    const THREAD_ROOT_ID =
+      "aaaa1111bbbb2222cccc3333dddd4444aaaa1111bbbb2222cccc3333dddd4444";
+    const THREAD_DRAFT_KEY = `thread:${THREAD_ROOT_ID}`;
+
+    await page.addInitScript(
+      ({ storeKey, value }) => {
+        window.localStorage.setItem(storeKey, JSON.stringify(value));
+      },
+      {
+        storeKey: DRAFT_STORE_KEY,
+        value: {
+          [THREAD_DRAFT_KEY]: {
+            content: "Thread reply draft content",
+            selectionStart: 26,
+            selectionEnd: 26,
+            channelId: GENERAL_CHANNEL_ID,
+            createdAt: CREATED_AT_1,
+            updatedAt: CREATED_AT_1,
+            pendingImeta: [],
+            spoileredAttachmentUrls: [],
+            status: "active",
+          },
+        } satisfies StoredDrafts,
+      },
+    );
+
+    const panel = await openDraftsPanel(page);
+
+    // The thread draft row should appear.
+    const draftRow = panel.locator(
+      `[data-testid='home-draft-item-${THREAD_DRAFT_KEY}']`,
+    );
+    await expect(draftRow).toBeVisible({ timeout: 8_000 });
+
+    // "Thread deleted" label must NOT appear — root status is `error` (optimistic).
+    await expect(panel.getByText("Thread deleted")).not.toBeVisible();
+
+    // Hover to reveal the three action buttons.
+    await draftRow.hover();
+    const sendBtn = draftRow.getByRole("button", {
+      name: "Send message",
+      exact: true,
+    });
+    await expect(sendBtn).toBeVisible({ timeout: 4_000 });
+
+    // Click "Send message" — confirm dialog should appear.
+    await sendBtn.click();
+    const dialog = page.getByRole("alertdialog");
+    await expect(dialog).toBeVisible({ timeout: 4_000 });
+    await expect(dialog.getByText("Send message")).toBeVisible();
+    // Confirm dialog body names the channel.
+    await expect(dialog.getByText(/general/i)).toBeVisible();
+
+    await page.waitForTimeout(200);
+    await panel.screenshot({
+      path: `${SHOTS}/05-thread-draft-send-dialog.png`,
+    });
+
+    // Click Send — dialog closes and we navigate to the channel with ?autoSend.
+    await dialog.getByRole("button", { name: "Send", exact: true }).click();
+    await expect(dialog).not.toBeVisible({ timeout: 4_000 });
+
+    // URL must include all three params set by DraftsPanel.handleConfirmSend:
+    //   ?messageId=<rootId>  — scroll-targets the root message in the timeline
+    //   ?threadRootId=<rootId> — opens the thread panel for this root
+    //   ?autoSend=thread:<rootId> — arms the thread composer's once-only guard
+    //
+    // Integration boundary: the mock bridge does not support get_event or
+    // message send, so ChannelRouteScreen.fetchRouteTargetEvents fails silently,
+    // threadHeadMessage stays null, and the MessageThreadPanel (and its composer)
+    // never mount. The auto-submit effect and the actual send are NOT assertable
+    // in this E2E shard — they are covered by MessageComposerAutoSend.test.mjs
+    // (key-match guard) and MessageComposerDraftImagePersist.test.mjs (full
+    // composer mount path).
+    await expect(page).toHaveURL(new RegExp(`messageId=${THREAD_ROOT_ID}`), {
+      timeout: 6_000,
+    });
+    await expect(page).toHaveURL(new RegExp(`threadRootId=${THREAD_ROOT_ID}`));
+    await expect(page).toHaveURL(
+      new RegExp(`autoSend=${encodeURIComponent(THREAD_DRAFT_KEY)}`),
+    );
+  });
+
+  test("06 — active-draft badge on inbox trigger and filter option", async ({
+    page,
+  }) => {
+    // Captures both badge placements for the PR screenshot:
+    //   1. The numeric badge on the inbox filter trigger button.
+    //   2. The badge next to "Drafts" in the filter dropdown.
+    // Two active drafts are seeded so the count is 2.
+    await installMockBridge(page);
+    await patchWorkspacePubkey(page);
+    await seedDraftStore(page, ACTIVE_DRAFTS);
+
+    await page.goto("/", { waitUntil: "domcontentloaded" });
+    await expect(page.getByTestId("home-inbox")).toBeVisible({
+      timeout: 10_000,
+    });
+
+    // Badge should be visible on the filter trigger with count = 2.
+    const triggerBadge = page.getByTestId("inbox-draft-badge");
+    await expect(triggerBadge).toBeVisible({ timeout: 6_000 });
+    await expect(triggerBadge).toHaveText("2");
+
+    // Open the filter dropdown so the badge-option is visible too.
+    await page.getByTestId("inbox-filter-trigger").click();
+    const dropdownBadge = page.getByTestId("inbox-draft-badge-option");
+    await expect(dropdownBadge).toBeVisible({ timeout: 4_000 });
+    await expect(dropdownBadge).toHaveText("2");
+
+    await page.waitForTimeout(200);
+
+    // Capture the full inbox header area including the open dropdown.
+    await page.getByTestId("home-inbox").screenshot({
+      path: `${SHOTS}/06-draft-badge.png`,
+    });
+
+    // Dismiss the dropdown cleanly.
+    await page.keyboard.press("Escape");
+  });
+
+  test("07 — thread-deleted state (orphaned thread-reply draft)", async ({
+    page,
+  }) => {
+    // A thread-reply draft whose root event is definitively deleted:
+    // `useDraftRootStatus` maps it to `deleted`, showing the "Thread deleted"
+    // label, greying the row, and disabling Open/Send.
+    const DELETED_ROOT_ID =
+      "dead0000dead0000dead0000dead0000dead0000dead0000dead0000dead0000";
+    const THREAD_DRAFT_KEY = `thread:${DELETED_ROOT_ID}`;
+
+    await installMockBridge(page, { deletedEventIds: [DELETED_ROOT_ID] });
+    await patchWorkspacePubkey(page);
+    await seedDraftStore(page, {
+      [THREAD_DRAFT_KEY]: {
+        content: "Planning to follow up on the discussion from last week.",
+        selectionStart: 52,
+        selectionEnd: 52,
+        channelId: GENERAL_CHANNEL_ID,
+        createdAt: CREATED_AT_1,
+        updatedAt: CREATED_AT_1,
+        pendingImeta: [],
+        spoileredAttachmentUrls: [],
+        status: "active",
+      },
+    });
+
+    const panel = await openDraftsPanel(page);
+
+    // The orphaned draft row should render.
+    const draftRow = panel.locator(
+      `[data-testid='home-draft-item-${THREAD_DRAFT_KEY}']`,
+    );
+    await expect(draftRow).toBeVisible({ timeout: 8_000 });
+
+    // "Thread deleted" badge must appear once the root-status query resolves.
+    const orphanLabel = panel.getByTestId(
+      `home-draft-orphaned-label-${THREAD_DRAFT_KEY}`,
+    );
+    await expect(orphanLabel).toBeVisible({ timeout: 8_000 });
+
+    // Hover the row to confirm Open and Send are disabled.
+    await draftRow.hover();
+    // Both the open and send buttons are labelled "Thread deleted" when orphaned.
+    const disabledBtns = draftRow.getByRole("button", {
+      name: "Thread deleted",
+    });
+    await expect(disabledBtns).toHaveCount(2, { timeout: 4_000 });
+    // Delete is still enabled.
+    await expect(
+      draftRow.getByRole("button", { name: "Delete draft" }),
+    ).toBeVisible({ timeout: 4_000 });
+
+    await page.waitForTimeout(200);
+
+    await panel.screenshot({
+      path: `${SHOTS}/07-thread-deleted-state.png`,
+    });
   });
 });

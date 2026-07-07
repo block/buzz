@@ -200,6 +200,12 @@ type MockBridgeOptions = {
     scope_value: string;
     kinds: string; // JSON-encoded integer array, e.g. "[9,40002]"
   }>;
+  /**
+   * Event IDs that `get_event` should report as definitively not found.
+   * Causes `useDraftRootStatus` to map the draft to `deleted` state so specs
+   * can exercise the "Thread deleted" label / disabled-send path.
+   */
+  deletedEventIds?: string[];
 };
 
 type BridgeOptions = {

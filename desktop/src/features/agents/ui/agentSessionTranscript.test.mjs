@@ -1179,3 +1179,56 @@ test("observer feed renders system-prompt before prompt-context in display order
     "system-prompt item must have turnId=null",
   );
 });
+
+test("steer ingress bundles its prompt context into the steer prompt segment, not a standalone row", () => {
+  // The stray "Prompt context · 1 section" row was leaking from the goose
+  // session/steer path: it upserted metadata without an acpSource, so display
+  // grouping never consumed it into a prompt bundle. It must now ride behind
+  // the steer message bubble's checks-icon dialog like session/prompt context.
+  const events = [
+    {
+      seq: 1,
+      timestamp: "2026-07-01T10:00:00.000Z",
+      kind: "acp_write",
+      agentIndex: 0,
+      channelId: "ch-1",
+      sessionId: "sess-1",
+      turnId: "turn-1",
+      payload: {
+        jsonrpc: "2.0",
+        id: 5,
+        method: "_goose/unstable/session/steer",
+        params: {
+          sessionId: "sess-1",
+          prompt: [
+            {
+              type: "text",
+              text: `[Buzz event: @mention]\nEvent ID: ${"e".repeat(64)}\nFrom: x (hex: ${"f".repeat(64)})\nContent: steer me`,
+            },
+            { type: "text", text: "[Thread context]\nPrior messages here." },
+          ],
+        },
+      },
+    },
+  ];
+
+  const rawItems = buildTranscript(events);
+  const steerMessage = rawItems.find((item) => item.type === "message");
+  const steerContext = rawItems.find((item) => item.type === "metadata");
+  assert.equal(steerMessage?.acpSource, "session/steer:user");
+  assert.equal(steerContext?.acpSource, "session/steer:context");
+
+  const [block] = buildTranscriptDisplayBlocks(rawItems);
+  assert.equal(block.kind, "turn");
+  const promptSegment = block.segments.find(
+    (segment) => segment.kind === "prompt",
+  );
+  assert.ok(promptSegment, "expected steer message to render a prompt bundle");
+  assert.equal(promptSegment.context?.id, steerContext.id);
+  assert.ok(
+    !block.segments.some(
+      (segment) => segment.kind === "item" && segment.item.type === "metadata",
+    ),
+    "steer context must not leak as a standalone metadata row",
+  );
+});

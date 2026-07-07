@@ -1054,7 +1054,7 @@ test("first-run onboarding shows setup loading until Welcome bootstrap completes
   await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
   await installMockBridge(
     page,
-    { createManagedAgentDelayMs: 5_000 },
+    { createManagedAgentDelayMs: 9_000 },
     { skipOnboardingSeed: true },
   );
   await page.goto("/");
@@ -1067,47 +1067,45 @@ test("first-run onboarding shows setup loading until Welcome bootstrap completes
   await expect(page.getByTestId("onboarding-gate")).toHaveCount(0);
   await expect(loadingGate).toBeVisible();
   await expect(loadingGate).toContainText("Setting up your workspace...");
-  await expect(
-    loadingGate.getByTestId("setup-grainient-background"),
-  ).toBeVisible();
-  await expect(
-    loadingGate.getByTestId("setup-grainient-background").locator("canvas"),
-  ).toHaveCount(0);
-  await expect
-    .poll(async () =>
-      loadingGate.evaluate((element) => {
-        const wash = element.querySelector(".buzz-setup-grainient__wash");
-        if (!(wash instanceof HTMLElement)) {
-          return null;
-        }
 
-        const shellStyles = window.getComputedStyle(element);
-        const washStyles = window.getComputedStyle(wash);
-        const loadingText = element.querySelector(".buzz-setup-loading-text");
-        const textStyles =
-          loadingText instanceof HTMLElement
-            ? window.getComputedStyle(loadingText)
-            : null;
-        return {
-          animationName: washStyles.animationName,
-          backgroundMatchesTheme:
-            shellStyles.backgroundColor === washStyles.backgroundColor,
-          textAvoidsHardcodedWhite: textStyles?.color !== "rgb(255, 255, 255)",
-          usesRadialGradients:
-            washStyles.backgroundImage.includes("radial-gradient"),
-        };
-      }),
-    )
-    .toEqual({
-      animationName: "buzz-grainient-orbit",
-      backgroundMatchesTheme: true,
-      textAvoidsHardcodedWhite: true,
-      usesRadialGradients: true,
-    });
+  // The boot gate is deliberately static: a plain Buzz mark in the brand
+  // yellow (#D7D72E) over solid black. The mark must paint complete on the
+  // FIRST frame — a blank gate reads as "nothing is loading" — so nothing
+  // about it may depend on SMIL/scripted animation, and the background must
+  // be a flat color rather than the animated gradient wash.
+  const mark = loadingGate.locator(".buzz-mark");
+  await expect(mark).toBeVisible();
+  const gateTreatment = await loadingGate.evaluate((element) => {
+    const shellStyles = window.getComputedStyle(element);
+    const markSvg = element.querySelector(".buzz-mark");
+    const markStyles =
+      markSvg instanceof SVGElement ? window.getComputedStyle(markSvg) : null;
+    return {
+      animateElementCount: element.querySelectorAll("animate").length,
+      backgroundColor: shellStyles.backgroundColor,
+      backgroundImage: shellStyles.backgroundImage,
+      // The document itself must also be black (inline <style> in
+      // index.html) so the pre-React/pre-CSS first paint can't flash white
+      // before the gate mounts.
+      documentBackgroundColor: window.getComputedStyle(document.documentElement)
+        .backgroundColor,
+      markColor: markStyles?.color,
+      markUsesCurrentColor: markSvg?.getAttribute("fill") === "currentColor",
+    };
+  });
+  expect(gateTreatment).toEqual({
+    animateElementCount: 0,
+    backgroundColor: "rgb(0, 0, 0)",
+    backgroundImage: "none",
+    documentBackgroundColor: "rgb(0, 0, 0)",
+    markColor: "rgb(215, 215, 46)", // #d7d72e
+    markUsesCurrentColor: true,
+  });
   await expect(loadingGate).not.toHaveClass(/buzz-onboarding-neutral-theme/);
   await expectShellHidden(page);
   await page.waitForTimeout(250);
   await expect(loadingGate).toBeVisible();
+  await expect(mark).toBeVisible();
 
   await expectWelcomeView(page);
   await expectPrivateWelcomeChannel(page);

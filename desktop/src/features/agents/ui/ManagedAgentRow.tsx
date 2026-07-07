@@ -1,6 +1,11 @@
 import * as React from "react";
 
-import { AlertTriangle, ChevronDown, ChevronRight } from "lucide-react";
+import {
+  AlertTriangle,
+  ChevronDown,
+  ChevronRight,
+  RefreshCw,
+} from "lucide-react";
 
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import { PresenceDot } from "@/features/presence/ui/PresenceBadge";
@@ -20,7 +25,7 @@ import { Button } from "@/shared/ui/button";
 import { AgentConfigPanel } from "./AgentConfigPanel";
 import { friendlyAgentLastError } from "@/features/agents/lib/friendlyAgentLastError";
 import { ManagedAgentLogPanel } from "./ManagedAgentLogPanel";
-import { truncatePubkey } from "./agentUi";
+import { PubKey } from "@/shared/ui/PubKey";
 
 export function ManagedAgentRow({
   agent,
@@ -229,6 +234,12 @@ function AgentSummary({
               <Badge variant="secondary">{personaLabel}</Badge>
             ) : null}
             <AgentOriginBadge agent={agent} />
+            {agent.needsRestart ? (
+              <Badge className="gap-1" variant="warning">
+                <RefreshCw className="h-3 w-3" />
+                Restart required
+              </Badge>
+            ) : null}
             {agent.personaOutOfDate ? (
               <Badge className="gap-1" variant="warning">
                 <AlertTriangle className="h-3 w-3" />
@@ -237,7 +248,7 @@ function AgentSummary({
             ) : null}
           </div>
           <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
-            <span className="font-mono">{truncatePubkey(agent.pubkey)}</span>
+            <PubKey pubkey={agent.pubkey} />
             {agent.backend.type === "local" ? (
               <span>
                 {agent.startOnAppLaunch ? "Auto-start" : "Manual start"}
@@ -246,6 +257,12 @@ function AgentSummary({
               <span>Remote deployment</span>
             )}
           </div>
+          {agent.needsRestart ? (
+            <p className="mt-1.5 text-xs text-amber-600 dark:text-amber-400">
+              Configuration changed since this agent started. Restart to apply
+              it.
+            </p>
+          ) : null}
           {agent.personaOutOfDate ? (
             <p className="mt-1.5 text-xs text-amber-600 dark:text-amber-400">
               Persona updated since this agent was created. Respawn to apply the

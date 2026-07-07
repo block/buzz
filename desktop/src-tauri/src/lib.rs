@@ -2,6 +2,7 @@ mod app_state;
 mod archive;
 mod commands;
 mod deep_link;
+mod event_sync;
 mod events;
 mod huddle;
 mod managed_agents;
@@ -232,7 +233,7 @@ pub fn run() {
                 .lock()
                 .map(|k| k.clone())
                 .map_err(|e| -> Box<dyn std::error::Error> { e.to_string().into() })?;
-            migration::run_event_sync(&app_handle, &owner_keys);
+            event_sync::run_event_sync(&app_handle, &owner_keys);
 
             // Backfill the pinned persona snapshot for any pre-existing agent
             // that predates the record-authoritative-spawn cutover (persona_id
@@ -323,7 +324,7 @@ pub fn run() {
             // bundled CLI binary. Non-fatal: agents find CLI via PATH.
             if let Ok(exe) = std::env::current_exe() {
                 if let Some(parent) = exe.parent() {
-                    if let Err(error) = managed_agents::ensure_cli_symlink(parent) {
+                    if let Err(error) = managed_agents::ensure_cli_symlink(parent, is_dev_nest) {
                         eprintln!("buzz-desktop: failed to create CLI symlink: {error}");
                     }
                 }
@@ -508,6 +509,7 @@ pub fn run() {
             download_image,
             download_file,
             fetch_media_bytes,
+            copy_image_to_clipboard,
             list_relay_members,
             get_my_relay_membership,
             add_relay_member,
@@ -529,6 +531,7 @@ pub fn run() {
             discover_agent_models,
             get_agent_config_surface,
             get_runtime_file_config,
+            get_baked_build_env_keys,
             put_agent_session_config,
             mesh_availability,
             mesh_start_node,

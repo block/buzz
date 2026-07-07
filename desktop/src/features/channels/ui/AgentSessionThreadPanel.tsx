@@ -402,7 +402,7 @@ export function AgentSessionThreadPanel({
         <ManagedAgentSessionPanel
           agent={agent}
           channelId={sessionChannelId}
-          className="border-0 bg-transparent p-0 shadow-none"
+          className="border-0 bg-transparent px-0 py-2 shadow-none"
           emptyDescription={
             sessionChannelId
               ? `Mention ${agent.name} in the channel to see its work here.`
