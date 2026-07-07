@@ -12,7 +12,6 @@ import {
 } from "react";
 
 import { router } from "@/app/router";
-import { ThemeGrainientBackground } from "@/app/ThemeGrainientBackground";
 import { useReloadShortcut } from "@/app/useReloadShortcut";
 import { useAppOnboardingState } from "@/features/onboarding/hooks";
 import { OnboardingSlideTransition } from "@/features/onboarding/ui/OnboardingSlideTransition";
@@ -27,32 +26,26 @@ import { isSharedIdentity as isSharedIdentityCmd } from "@/shared/api/tauri";
 import { listenForDeepLinks } from "@/shared/deep-link";
 import { useSystemColorScheme } from "@/shared/theme/useSystemColorScheme";
 import { Button } from "@/shared/ui/button";
-import { FuzzyLogo } from "@/shared/ui/buzz-logo/FuzzyLogo";
+import { BuzzMark } from "@/shared/ui/buzz-logo/BuzzMark";
 import { Spinner } from "@/shared/ui/spinner";
 import { StartupWindowDragRegion } from "@/shared/ui/StartupWindowDragRegion";
 import { StepProgress } from "@/shared/ui/step-progress";
 
 const LOADING_TEXT = "Setting up your workspace...";
 
+// Cold boot gate: a plain static Buzz mark (#D7D72E) on solid black. No
+// animation machinery, no gradient — the mark must paint complete on the very
+// first frame, even in webviews that render before scripting or SMIL start.
 function AppLoadingGate() {
   return (
     <div
-      className="buzz-setup-loading-shell flex min-h-dvh flex-col items-center justify-center overflow-hidden px-6 py-10"
+      className="flex min-h-dvh flex-col items-center justify-center overflow-hidden bg-black px-6 py-10 text-[#d7d72e]"
       data-testid="app-loading-gate"
       role="status"
     >
       <StartupWindowDragRegion />
-      <ThemeGrainientBackground />
-
       <span className="sr-only">{LOADING_TEXT}</span>
-      <FuzzyLogo
-        ariaLabel=""
-        className="relative z-10 w-28! text-foreground"
-        fuzz={false}
-        loop
-        loopRestMode="visible"
-        loopRestSeconds={2}
-      />
+      <BuzzMark className="h-auto w-28" />
     </div>
   );
 }

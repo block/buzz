@@ -1067,84 +1067,39 @@ test("first-run onboarding shows setup loading until Welcome bootstrap completes
   await expect(page.getByTestId("onboarding-gate")).toHaveCount(0);
   await expect(loadingGate).toBeVisible();
   await expect(loadingGate).toContainText("Setting up your workspace...");
-  await expect(loadingGate.locator(".buzz-logo__mark")).toBeVisible();
-  await expect(
-    loadingGate.getByTestId("setup-grainient-background"),
-  ).toBeVisible();
-  await expect(
-    loadingGate.getByTestId("setup-grainient-background").locator("canvas"),
-  ).toHaveCount(0);
-  await expect
-    .poll(async () =>
-      loadingGate.evaluate((element) => {
-        const wash = element.querySelector(".buzz-setup-grainient__wash");
-        if (!(wash instanceof HTMLElement)) {
-          return null;
-        }
 
-        const shellStyles = window.getComputedStyle(element);
-        const washStyles = window.getComputedStyle(wash);
-        const logoMark = element.querySelector(".buzz-logo__mark");
-        const markStyles =
-          logoMark instanceof SVGElement
-            ? window.getComputedStyle(logoMark)
-            : null;
-        return {
-          animationName: washStyles.animationName,
-          backgroundMatchesTheme:
-            shellStyles.backgroundColor === washStyles.backgroundColor,
-          markAvoidsHardcodedWhite: markStyles?.color !== "rgb(255, 255, 255)",
-          usesRadialGradients:
-            washStyles.backgroundImage.includes("radial-gradient"),
-        };
-      }),
-    )
-    .toEqual({
-      animationName: "buzz-grainient-orbit",
-      backgroundMatchesTheme: true,
-      markAvoidsHardcodedWhite: true,
-      usesRadialGradients: true,
-    });
+  // The boot gate is deliberately static: a plain Buzz mark in the brand
+  // yellow (#D7D72E) over solid black. The mark must paint complete on the
+  // FIRST frame — a blank gate reads as "nothing is loading" — so nothing
+  // about it may depend on SMIL/scripted animation, and the background must
+  // be a flat color rather than the animated gradient wash.
+  const mark = loadingGate.locator(".buzz-mark");
+  await expect(mark).toBeVisible();
+  const gateTreatment = await loadingGate.evaluate((element) => {
+    const shellStyles = window.getComputedStyle(element);
+    const markSvg = element.querySelector(".buzz-mark");
+    const markStyles =
+      markSvg instanceof SVGElement ? window.getComputedStyle(markSvg) : null;
+    return {
+      animateElementCount: element.querySelectorAll("animate").length,
+      backgroundColor: shellStyles.backgroundColor,
+      backgroundImage: shellStyles.backgroundImage,
+      markColor: markStyles?.color,
+      markUsesCurrentColor: markSvg?.getAttribute("fill") === "currentColor",
+    };
+  });
+  expect(gateTreatment).toEqual({
+    animateElementCount: 0,
+    backgroundColor: "rgb(0, 0, 0)",
+    backgroundImage: "none",
+    markColor: "rgb(215, 215, 46)", // #d7d72e
+    markUsesCurrentColor: true,
+  });
   await expect(loadingGate).not.toHaveClass(/buzz-onboarding-neutral-theme/);
   await expectShellHidden(page);
   await page.waitForTimeout(250);
   await expect(loadingGate).toBeVisible();
-
-  // The boot mark must be visible from the gate's FIRST painted frame and
-  // stay visible through the loop's rest window — a blank gate (during a
-  // short-lived boot or between morph cycles) reads as "nothing is loading."
-  // With loopRestMode="visible" the finished mark is baked into the SVG's
-  // base DOM attributes, so the mark paints complete even before (or without)
-  // SMIL starting — that's what guarantees first-frame visibility on real
-  // cold boots. Then sample across a full cycle (2s rest + 0.88s deconstruct
-  // + 0.88s rebuild): only the brief mid-cycle morph transit may dip low.
-  // The old intro-first treatment started blank and hid the whole mark for
-  // the 2s rest (~69% of samples dim).
-  const markVisibility = await loadingGate.evaluate(async (element) => {
-    const inks = [...element.querySelectorAll(".buzz-logo__ink")];
-    // Base (pre-SMIL) attribute state — what the first paint shows.
-    const baseOpacities = inks.map((ink) => ink.getAttribute("opacity") ?? "1");
-
-    const samples: number[][] = [];
-    for (let i = 0; i < 30; i += 1) {
-      samples.push(
-        inks.map((ink) =>
-          Number.parseFloat(window.getComputedStyle(ink).opacity),
-        ),
-      );
-      await new Promise((resolve) => setTimeout(resolve, 100));
-    }
-    return { baseOpacities, samples };
-  });
-  // First painted frame (before SMIL begins): every ink shape fully visible.
-  expect(markVisibility.baseOpacities).toEqual(["1", "1", "1"]);
-  // Across the cycle: the mark may only read as blank (all inks dim) during
-  // the brief morph transit, never for a rest-window-sized stretch.
-  const blankSamples = markVisibility.samples.filter((inks) =>
-    inks.every((opacity) => opacity < 0.5),
-  ).length;
-  expect(blankSamples / markVisibility.samples.length).toBeLessThan(0.15);
-  await expect(loadingGate).toBeVisible();
+  await expect(mark).toBeVisible();
 
   await expectWelcomeView(page);
   await expectPrivateWelcomeChannel(page);
