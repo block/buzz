@@ -100,6 +100,12 @@ export function useOpenAgentActivity() {
       return resolveOpenableActivityChannelId({
         agentChannelIds: relayAgent?.channelIds ?? [],
         openableChannelIds,
+        // Deliberately an unsubscribed snapshot: this callback runs on click
+        // (and in canOpenAgentActivity), not in render, so we don't need to
+        // recompute when working state changes — its deps are only
+        // [channels, relayAgents]. Worst case the preferred working-channel
+        // target lags a just-changed signal; the member-channel fallback in
+        // resolveOpenableActivityChannelId keeps the destination valid.
         workingChannelIds: getAgentWorkingState(pubkey).channels.map(
           (working) => working.channelId,
         ),
@@ -113,9 +119,20 @@ export function useOpenAgentActivity() {
       if (!pubkey) {
         return false;
       }
-      return Boolean(onOpenAgentSession) || resolveChannelId(pubkey) !== null;
+      if (onOpenAgentSession) {
+        return true;
+      }
+      // While channels are still loading, resolveChannelId can only see an
+      // empty openable set and would report a transient false. Stay
+      // optimistic until channels resolve so "View activity log" doesn't
+      // flicker in on cold start; openAgentActivity still guards the actual
+      // navigation.
+      if (channels === undefined) {
+        return true;
+      }
+      return resolveChannelId(pubkey) !== null;
     },
-    [onOpenAgentSession, resolveChannelId],
+    [channels, onOpenAgentSession, resolveChannelId],
   );
 
   const openAgentActivity = React.useCallback(
