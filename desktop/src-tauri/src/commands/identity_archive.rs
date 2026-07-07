@@ -227,7 +227,7 @@ struct RelayInformationDocument {
     self_: Option<String>,
 }
 
-async fn fetch_relay_self(state: &AppState) -> Result<Option<String>, String> {
+pub(crate) async fn fetch_relay_self(state: &AppState) -> Result<Option<String>, String> {
     let relay_url = relay_ws_url_with_override(state);
     let http_url = relay_http_base_url(&relay_url);
     let response = state
@@ -316,6 +316,18 @@ pub async fn list_archived_identities(
     Ok(ArchivedIdentitiesSnapshot {
         archived: archived_pubkeys_from_snapshot(&snapshot),
     })
+}
+
+/// Read the active relay's NIP-11 `self` pubkey (its own signing key, hex).
+///
+/// A public, unauthenticated document read reused by the moderation UI to tell
+/// whether a DM peer is the relay identity (a moderation DM). Fails open: an
+/// unreachable relay, a document without `self`, or a malformed value all
+/// return `None`, and callers must treat that as "not the relay" — the disable
+/// is an affordance, not enforcement, so a false negative is the safe failure.
+#[tauri::command]
+pub async fn get_relay_self(state: State<'_, AppState>) -> Result<Option<String>, String> {
+    fetch_relay_self(&state).await
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────────

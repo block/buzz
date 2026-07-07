@@ -5,6 +5,8 @@ import { useMediaUpload } from "@/features/messages/lib/useMediaUpload";
 import { MessageComposer } from "@/features/messages/ui/MessageComposer";
 import { ComposerTimeoutBanner } from "@/features/moderation/ui/ComposerTimeoutBanner";
 import { useTimeoutState } from "@/features/moderation/lib/timeoutStore";
+import { isModerationDm } from "@/features/moderation/lib/moderationDm";
+import { useRelaySelfQuery } from "@/features/moderation/hooks";
 import { DropZoneOverlay } from "@/features/messages/ui/ComposerAttachments";
 import {
   MessageThreadPanel,
@@ -273,11 +275,22 @@ export const ChannelPane = React.memo(function ChannelPane({
 
   const timeoutState = useTimeoutState();
 
+  // A moderation DM (1:1 with the relay identity) is read-only for the member;
+  // only DMs pay for the NIP-11 `self` lookup. Fails open: no `relaySelf` →
+  // ordinary DM, composer enabled.
+  const relaySelfQuery = useRelaySelfQuery(activeChannel?.channelType === "dm");
+  const isModerationDmChannel = isModerationDm(
+    activeChannel ?? null,
+    currentPubkey,
+    relaySelfQuery.data,
+  );
+
   const isComposerDisabled =
     !activeChannel?.isMember ||
     activeChannel.archivedAt !== null ||
     activeChannel.channelType === "forum" ||
     timeoutState.active ||
+    isModerationDmChannel ||
     isSending;
   const knownAgentPubkeys = React.useMemo(() => {
     const pubkeys = new Set<string>();
@@ -707,16 +720,18 @@ export const ChannelPane = React.memo(function ChannelPane({
                   placeholder={
                     timeoutState.active
                       ? "You're timed out by community moderators."
-                      : activeChannel?.archivedAt
-                        ? "Archived channels are read-only."
-                        : activeChannel?.channelType === "forum"
-                          ? "Forum posting is not wired in this pass."
-                          : activeChannel
-                            ? activeChannel.channelType === "dm" &&
-                              directMessageIntro
-                              ? `Message ${directMessageIntro.displayName}`
-                              : `Message #${activeChannel.name}`
-                            : "Select a channel"
+                      : isModerationDmChannel
+                        ? "This channel is read-only."
+                        : activeChannel?.archivedAt
+                          ? "Archived channels are read-only."
+                          : activeChannel?.channelType === "forum"
+                            ? "Forum posting is not wired in this pass."
+                            : activeChannel
+                              ? activeChannel.channelType === "dm" &&
+                                directMessageIntro
+                                ? `Message ${directMessageIntro.displayName}`
+                                : `Message #${activeChannel.name}`
+                              : "Select a channel"
                   }
                   showTopBorder={false}
                 />
