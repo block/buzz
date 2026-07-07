@@ -21,6 +21,14 @@ export async function resolveManagedAgentAvatarUrl(
     return resolvedAvatarUrl;
   }
 
+  // Emoji avatars are stored as inline, percent-encoded SVG data URLs
+  // (`data:image/svg+xml,%3C...`) — the same self-contained form profile
+  // persists. They are not base64 and must not be run through `atob`/upload;
+  // pass them through unchanged so the emoji survives agent creation.
+  if (!isBase64DataUri(resolvedAvatarUrl)) {
+    return resolvedAvatarUrl;
+  }
+
   try {
     const [, b64] = resolvedAvatarUrl.split(",", 2);
     if (!b64) {
@@ -37,6 +45,11 @@ export async function resolveManagedAgentAvatarUrl(
 async function defaultUploadMediaBytes(data: number[], filename?: string) {
   const { uploadMediaBytes } = await import("@/shared/api/tauri");
   return uploadMediaBytes(data, filename);
+}
+
+function isBase64DataUri(dataUri: string) {
+  const header = dataUri.slice(0, dataUri.indexOf(","));
+  return header.includes(";base64");
 }
 
 function safeFallbackAvatarUrl(avatarUrl: string | null | undefined) {

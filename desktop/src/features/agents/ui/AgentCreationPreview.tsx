@@ -137,6 +137,11 @@ export function AgentCreationPreview({
         setSelectedColor(parsed.color);
         setActiveTab("emoji");
       } else {
+        // Non-emoji avatar (image/URL or empty): clear any stale emoji
+        // selection so a later color-swatch tap can't re-apply an old emoji
+        // over the current avatar.
+        setSelectedEmoji(null);
+        setSelectedColor(DEFAULT_EMOJI_AVATAR_COLOR);
         setActiveTab("image");
       }
     }
