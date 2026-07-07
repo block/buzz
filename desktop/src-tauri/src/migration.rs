@@ -101,14 +101,16 @@ fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Reconcile personas and teams into signed retention events. Both readers
-/// consume the already-synced `personas.json`/`teams.json` that
+/// Reconcile personas, teams, and managed agents into signed retention
+/// events. All readers consume the already-synced
+/// `personas.json`/`teams.json`/`managed-agents.json` that
 /// `sync_team_personas` wrote in [`run_boot_migrations`] (see its `# Ordering`
 /// guard). Event signing needs the resolved owner keys, so this runs after
 /// identity resolution, not in [`run_boot_migrations`].
 pub fn run_event_sync(app: &tauri::AppHandle, owner_keys: &nostr::Keys) {
     migrate_personas_to_events(app, owner_keys);
     migrate_teams_to_events(app, owner_keys);
+    crate::managed_agents::reconcile::reconcile_agents_to_events(app, owner_keys);
 }
 
 /// Run every data migration that must complete before identity resolution and

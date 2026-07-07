@@ -15,6 +15,7 @@ mod personas;
 #[cfg(windows)]
 mod process_lifecycle;
 pub(crate) mod readiness;
+pub(crate) mod reconcile;
 #[cfg(feature = "mesh-llm")]
 mod relay_mesh;
 mod repos;
