@@ -44,7 +44,11 @@
 //!   extra tags are ignored, not rejected
 //!   (forward-compat). `delete`/`kick`/`ban`/`timeout` actions fan out through
 //!   the existing 9005/9001 paths and the 9040/9042 handlers — no second
-//!   implementation.
+//!   implementation. The resolution audit row records the *decision*, not the
+//!   enforcement, so it is prefixed `resolve:` (`resolve:ban`, `resolve:delete`,
+//!   …); the client's paired 9040-9043 writes the unprefixed enforcement row.
+//!   `dismiss` audits as `dismiss_report` and `escalate` as `escalate` (both
+//!   unprefixed — escalate must stay queryable for the platform-safety lane).
 //!
 //! Lane ownership: L6 (Quinn) — plus `buzz-cli` `moderation` command group.
 //! The `ingest.rs` routing entries (scope map + `is_global_only_kind` +
@@ -393,6 +397,17 @@ async fn handle_resolve(
         .map_err(|e| format!("database error: {e}"))?
         .ok_or_else(|| "report not found in this community".to_string())?;
 
+    // Don't write an audit row for a report someone else already closed. The
+    // DB's `WHERE status='open'` on resolve_moderation_report below is the real
+    // guard; this early check keeps a lost-race resolve (two mods on the same
+    // report) from leaving an orphan audit row behind the failed resolve. A tiny
+    // residual race remains — the row can flip to closed between this read and
+    // the DB write — but that window yields only an audit row plus a failed
+    // resolve, which is tolerated.
+    if report.status != "open" {
+        return Err("report is not open (already resolved or dismissed)".to_string());
+    }
+
     // Carry the report's own target into the audit row so `delete`/`kick`/`ban`
     // resolutions record what they acted on.
     let (target_pubkey, target_event_id) = match &report.target {
@@ -401,10 +416,23 @@ async fn handle_resolve(
         buzz_db::moderation::ReportTarget::Blob(_) => (None, None),
     };
 
+    // Distinguish a resolution *decision* from the actual *enforcement* row.
+    // A one-click resolve with action=ban records the moderator's decision; the
+    // client then composes the real 9040, which writes its own "ban" enforcement
+    // row. Prefix the decision row (`resolve:ban`, `resolve:delete`, …) so audit
+    // consumers can tell the two apart and don't double-count. `dismiss_report`
+    // and `escalate` stay unprefixed — escalate especially must remain queryable
+    // for the platform-safety lane.
+    let resolve_audit;
     let audit_action = match action.as_str() {
         "dismiss" => "dismiss_report",
         "escalate" => "escalate",
-        other => other, // delete | kick | ban | timeout — fan out via existing paths
+        other => {
+            // delete | kick | ban | timeout — decision row; enforcement fans out
+            // via the client's paired 9040-9043 command.
+            resolve_audit = format!("resolve:{other}");
+            resolve_audit.as_str()
+        }
     };
     let action_id = insert_audit(
         state,
