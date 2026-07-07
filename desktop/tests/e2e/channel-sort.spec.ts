@@ -71,6 +71,8 @@ test.describe("per-group channel sort", () => {
     await waitForAnimations(page);
     await page.screenshot({ path: `${SHOTS}/01-channels-sort-ingress.png` });
     await trigger.click();
+    // Sort is now a submenu flyout — open it before the radio items render.
+    await page.getByRole("menuitem", { name: "Sort" }).click();
     await expect(
       page.getByRole("menuitemradio", { name: "Recent" }),
     ).toBeVisible();
@@ -156,6 +158,8 @@ test.describe("per-group channel sort", () => {
     const trigger = page.getByTestId("section-actions-dms");
     await expect(trigger).toBeVisible();
     await trigger.click();
+    // Sort is now a submenu flyout — open it before the radio items render.
+    await page.getByRole("menuitem", { name: "Sort" }).click();
     await expect(
       page.getByRole("menuitemradio", { name: "A–Z" }),
     ).toBeVisible();
