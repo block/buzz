@@ -469,6 +469,10 @@ function SameKindSummaryItem({
   const variant = useAgentSessionTranscriptVariant();
   const timestampsEnabled = useTranscriptTimestampsEnabled();
   const showTimestamp = timestampsEnabled && variant !== "compactPreview";
+  // Mixed bursts expand to their child segments in original order: raw tool
+  // rows plus nested same-kind summaries that joined the burst (which stay
+  // expandable to their own child rows).
+  const childSegments = summary.segments ?? null;
 
   return (
     <>
@@ -485,30 +489,52 @@ function SameKindSummaryItem({
         <ActivityRowContent
           className={cn(
             "flex flex-col",
-            expandsToToolItems ? "gap-0.5" : "gap-1 pl-5",
+            expandsToToolItems || childSegments ? "gap-0.5" : "gap-1 pl-5",
           )}
         >
-          {expandsToToolItems
-            ? summary.items.map((item) => (
-                <TranscriptItemView
-                  agentAvatarUrl={agentAvatarUrl}
-                  agentName={agentName}
-                  agentPubkey={agentPubkey}
-                  item={item}
-                  key={item.id}
-                  profiles={profiles}
-                />
-              ))
-            : summary.items.map((item) => (
-                <p
-                  className="truncate text-xs text-muted-foreground"
-                  key={item.id}
-                >
-                  {item.type === "tool"
-                    ? item.descriptor.preview || item.descriptor.label
-                    : item.title}
-                </p>
-              ))}
+          {childSegments
+            ? childSegments.map((child) =>
+                child.kind === "summary" ? (
+                  <SameKindSummaryItem
+                    agentAvatarUrl={agentAvatarUrl}
+                    agentName={agentName}
+                    agentPubkey={agentPubkey}
+                    key={child.summary.id}
+                    profiles={profiles}
+                    summary={child.summary}
+                  />
+                ) : (
+                  <TranscriptItemView
+                    agentAvatarUrl={agentAvatarUrl}
+                    agentName={agentName}
+                    agentPubkey={agentPubkey}
+                    item={child.item}
+                    key={child.item.id}
+                    profiles={profiles}
+                  />
+                ),
+              )
+            : expandsToToolItems
+              ? summary.items.map((item) => (
+                  <TranscriptItemView
+                    agentAvatarUrl={agentAvatarUrl}
+                    agentName={agentName}
+                    agentPubkey={agentPubkey}
+                    item={item}
+                    key={item.id}
+                    profiles={profiles}
+                  />
+                ))
+              : summary.items.map((item) => (
+                  <p
+                    className="truncate text-xs text-muted-foreground"
+                    key={item.id}
+                  >
+                    {item.type === "tool"
+                      ? item.descriptor.preview || item.descriptor.label
+                      : item.title}
+                  </p>
+                ))}
         </ActivityRowContent>
       </ActivityRow>
       {showTimestamp ? (

@@ -17,18 +17,30 @@ export type TranscriptDisplayBlock =
   | { kind: "single"; item: TranscriptItem }
   | { kind: "turn"; turnId: string; segments: TranscriptTurnSegment[] };
 
+export type TranscriptToolRunChildSegment =
+  | { kind: "item"; item: TranscriptItem }
+  | { kind: "summary"; summary: TranscriptToolRunSummary };
+
 export type TranscriptToolRunSummary = {
   id: string;
   label: string;
   count: number;
+  /** Flat leaf tool items in original order (nested summaries expanded). */
   items: TranscriptItem[];
   renderClass: TranscriptItem["renderClass"] | null;
   /**
    * "same-kind" summaries collapse runs sharing one semantic groupKey and get
-   * specific labels ("Read 3 files"). "mixed" summaries are the fallback for
-   * adjacent eligible tool runs of differing kinds ("Ran 5 tool calls").
+   * specific labels ("Read 3 files"). "mixed" summaries collapse broader
+   * bursts of routine tool work ("Ran 9 tool calls") and may contain nested
+   * same-kind summaries as children.
    */
   variant: "same-kind" | "mixed";
+  /**
+   * Child segments in original order for mixed bursts — raw tool rows plus
+   * any same-kind summaries that joined the burst. Absent on same-kind
+   * summaries, whose children are just `items`.
+   */
+  segments?: TranscriptToolRunChildSegment[];
   timestamp: string;
 };
 
@@ -208,14 +220,16 @@ function groupSameKindSegments(
   return grouped;
 }
 
-const MIXED_RUN_MINIMUM_LENGTH = 3;
+const MIXED_RUN_MINIMUM_SEGMENTS = 2;
 
 /**
- * Fallback pass: collapse adjacent eligible tool rows of differing kinds that
- * the same-kind pass left expanded (e.g. read → shell → read) into one
- * "Ran N tool calls" summary. Existing same-kind summaries, messages, errors,
- * permissions, and status rows break runs, so they stay visible and any failed
- * tool (reclassified to renderClass "error") is never buried.
+ * Burst pass: collapse an interleave-tolerant run of routine tool work into
+ * one "Ran N tool calls" summary. Both leftover raw eligible tool rows and
+ * same-kind summaries produced by the first pass participate, so alternating
+ * patterns like search → read-summary → search → read-summary collapse into a
+ * single supervision row whose children are the original segments in order.
+ * Messages, permissions, errors/failed tools, and status/suppressed rows
+ * break bursts, so intervention points stay visible.
  */
 function groupMixedToolRuns(
   segments: TranscriptTurnSegment[],
@@ -223,37 +237,54 @@ function groupMixedToolRuns(
   const grouped: TranscriptTurnSegment[] = [];
   for (let i = 0; i < segments.length; i++) {
     const segment = segments[i];
-    if (segment.kind !== "item" || !isGroupingEligible(segment.item)) {
+    if (!isBurstParticipant(segment)) {
       grouped.push(segment);
       continue;
     }
-    const run = [segment.item];
+    const run: TranscriptToolRunChildSegment[] = [segment];
     let j = i + 1;
     while (j < segments.length) {
       const next = segments[j];
-      if (next.kind !== "item" || !isGroupingEligible(next.item)) break;
-      run.push(next.item);
+      if (!isBurstParticipant(next)) break;
+      run.push(next);
       j += 1;
     }
-    if (run.length >= MIXED_RUN_MINIMUM_LENGTH) {
+    if (run.length >= MIXED_RUN_MINIMUM_SEGMENTS) {
+      const items = run.flatMap((child) =>
+        child.kind === "item" ? [child.item] : child.summary.items,
+      );
       grouped.push({
         kind: "summary",
         summary: {
-          id: `summary:mixed:${run[0].id}`,
-          label: `Ran ${run.length} tool calls`,
-          count: run.length,
-          items: run,
+          id: `summary:mixed:${items[0].id}`,
+          label: `Ran ${items.length} tool calls`,
+          count: items.length,
+          items,
           renderClass: null,
           variant: "mixed",
-          timestamp: run[0].timestamp,
+          segments: run,
+          timestamp: items[0].timestamp,
         },
       });
     } else {
-      grouped.push(...run.map((item) => ({ kind: "item" as const, item })));
+      grouped.push(...run);
     }
     i = j - 1;
   }
   return grouped;
+}
+
+/**
+ * Burst participants are raw eligible tool rows and same-kind summaries
+ * (already-collapsed routine tool work). Mixed summaries never re-enter.
+ */
+function isBurstParticipant(
+  segment: TranscriptTurnSegment,
+): segment is TranscriptToolRunChildSegment {
+  if (segment.kind === "item") {
+    return isGroupingEligible(segment.item);
+  }
+  return segment.kind === "summary" && segment.summary.variant === "same-kind";
 }
 
 const GROUPING_ELIGIBLE_RENDER_CLASSES = new Set<
