@@ -47,37 +47,21 @@ export function normalizeTimelineMessages(messages: RelayEvent[]) {
   return sortMessages(messages);
 }
 
-function isOlderHistoryPage(current: RelayEvent[], history: RelayEvent[]) {
-  if (current.length === 0 || history.length === 0) {
-    return false;
-  }
-
-  const sortedCurrent = sortMessages(current);
-  const sortedHistory = sortMessages(history);
-  const newestHistory = sortedHistory[sortedHistory.length - 1]?.created_at;
-  const oldestCurrent = sortedCurrent[0]?.created_at;
-
-  if (newestHistory === undefined || oldestCurrent === undefined) {
-    return false;
-  }
-
-  return newestHistory <= oldestCurrent;
-}
-
-function normalizeTimelineHistoryMessages(
-  current: RelayEvent[],
-  history: RelayEvent[],
-) {
-  return sortMessages([...current, ...history]);
-}
-
+/**
+ * Merge a batch of events (older scrollback page, reconnect/revalidation
+ * window, live gap-fill) into the timeline cache. Sort + dedupe only — the
+ * {@link MAX_TIMELINE_MESSAGES} cap is deliberately NOT applied here.
+ *
+ * Capping merges into an already-painted timeline evicts history out from
+ * under a reader: page back to an old day in a channel holding more than the
+ * cap, and the next capped merge (live append, revalidation) silently deletes
+ * the rows being read. The cap is applied only by
+ * {@link normalizeTimelineMessages} at moments when nothing is rendered —
+ * the cold-snapshot paint and the channel-leave trim in `hooks.ts`.
+ */
 export function mergeTimelineHistoryMessages(
   current: RelayEvent[],
   history: RelayEvent[],
 ) {
-  if (isOlderHistoryPage(current, history)) {
-    return normalizeTimelineHistoryMessages(current, history);
-  }
-
-  return normalizeTimelineMessages([...current, ...history]);
+  return sortMessages([...current, ...history]);
 }

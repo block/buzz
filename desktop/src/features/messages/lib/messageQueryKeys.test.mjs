@@ -148,3 +148,33 @@ test("sortMessages tiebreaks same-second events on id, order-independent", () =>
   assert.deepEqual(forward, reverse);
   assert.deepEqual(forward, [a.id, b.id, c.id]);
 });
+
+test("fresh-newest revalidation over an expanded cache never evicts scrolled-in history", () => {
+  // Regression: a channel holding more content events than the timeline cap
+  // (the user paged back to an old day), then a background revalidation
+  // merges the newest history window over it. The old rows must survive —
+  // capping this merge evicted the day being read (the "June 12 messages
+  // flicker away" bug).
+  const expandedCache = [];
+  for (let index = 0; index < 37; index += 1) {
+    expandedCache.push(
+      event({ id: id("jun", index), createdAt: 1_000 + index }),
+    );
+  }
+  for (let index = 0; index < 2_500; index += 1) {
+    expandedCache.push(
+      event({ id: id("mid", index), createdAt: 10_000 + index }),
+    );
+  }
+  const freshNewestPage = [];
+  for (let index = 0; index < 60; index += 1) {
+    freshNewestPage.push(
+      event({ id: id("fresh", index), createdAt: 50_000 + index }),
+    );
+  }
+
+  const merged = mergeTimelineHistoryMessages(expandedCache, freshNewestPage);
+
+  assert.equal(merged.filter((item) => item.id.startsWith("jun")).length, 37);
+  assert.equal(merged.filter((item) => item.kind === 9).length, 2_597);
+});

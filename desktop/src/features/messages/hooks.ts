@@ -124,15 +124,21 @@ export function mergeMessages(
   return mergeMessagesWithNormalizer(current, incoming, sortMessages);
 }
 
+/**
+ * Merge one incoming event (live subscription, optimistic send, edit overlay)
+ * into the timeline cache. Sort + dedupe only — deliberately NOT capped.
+ *
+ * This merge fires constantly while the user may be scrolled back; capping it
+ * evicted paged-in history out from under the reader (the "June 12 messages
+ * flicker away" bug). The MAX_TIMELINE_MESSAGES bound is applied instead when
+ * the channel is left (see useChannelSubscription's cleanup) and on cold
+ * snapshot paints — moments when no scrolled-back timeline is on screen.
+ */
 export function mergeTimelineCacheMessages(
   current: RelayEvent[],
   incoming: RelayEvent,
 ): RelayEvent[] {
-  return mergeMessagesWithNormalizer(
-    current,
-    incoming,
-    normalizeTimelineMessages,
-  );
+  return mergeMessages(current, incoming);
 }
 
 export function createOptimisticMessage(
@@ -394,6 +400,21 @@ export function useChannelSubscription(channel: Channel | null) {
     }
   });
 
+  // Leaving the channel is the safe moment to enforce the timeline cap:
+  // nothing is rendered from this cache anymore, so trimming to the newest
+  // MAX_TIMELINE_MESSAGES window cannot evict rows out from under a
+  // scrolled-back reader. Merges while the channel is open are deliberately
+  // uncapped for the same reason.
+  const trimTimelineOnLeave = useEffectEvent((leftChannelId: string) => {
+    queryClient.setQueryData<RelayEvent[]>(
+      channelMessagesKey(leftChannelId),
+      (current) =>
+        current && current.length > 0
+          ? normalizeTimelineMessages(current)
+          : current,
+    );
+  });
+
   useEffect(() => {
     if (!channelId || channelType === "forum") {
       return;
@@ -446,6 +467,7 @@ export function useChannelSubscription(channel: Channel | null) {
       if (cleanup) {
         void cleanup();
       }
+      trimTimelineOnLeave(channelId);
     };
   }, [channelId, channelType]);
 }
