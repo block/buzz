@@ -838,6 +838,59 @@ mod tests {
         );
     }
 
+    /// Cross-field independence: persona sets model but not provider → model
+    /// comes from persona, provider falls back to the record.  This is the
+    /// practically common case (model-only personas).
+    #[test]
+    fn fallback_persona_model_set_provider_blank_uses_record_provider() {
+        let mut persona = sample_persona(); // model=Some("claude-opus-4"), provider=Some("anthropic")
+        persona.provider = None; // blank provider on persona
+
+        let snapshot = persona_snapshot_with_agent_config_fallback(
+            &persona,
+            &BTreeMap::new(),
+            Some("gpt-4o"), // record model (should be overridden by persona)
+            Some("openai"), // record provider (should be preserved)
+        );
+
+        assert_eq!(
+            snapshot.model.as_deref(),
+            Some("claude-opus-4"),
+            "persona model must win when persona has a value"
+        );
+        assert_eq!(
+            snapshot.provider.as_deref(),
+            Some("openai"),
+            "record provider must be used when persona provider is blank"
+        );
+    }
+
+    /// Inverse: persona sets provider but not model → provider comes from
+    /// persona, model falls back to the record.
+    #[test]
+    fn fallback_persona_provider_set_model_blank_uses_record_model() {
+        let mut persona = sample_persona(); // model=Some("claude-opus-4"), provider=Some("anthropic")
+        persona.model = None; // blank model on persona
+
+        let snapshot = persona_snapshot_with_agent_config_fallback(
+            &persona,
+            &BTreeMap::new(),
+            Some("gpt-4o"), // record model (should be preserved)
+            Some("openai"), // record provider (should be overridden by persona)
+        );
+
+        assert_eq!(
+            snapshot.model.as_deref(),
+            Some("gpt-4o"),
+            "record model must be used when persona model is blank"
+        );
+        assert_eq!(
+            snapshot.provider.as_deref(),
+            Some("anthropic"),
+            "persona provider must win when persona has a value"
+        );
+    }
+
     /// Env-var layering: persona env < agent env — agent overrides always win
     /// on key collision and a persona with an empty env map does not wipe the
     /// agent's env vars.
