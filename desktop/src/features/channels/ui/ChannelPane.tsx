@@ -1,5 +1,6 @@
 import * as React from "react";
 import { Bot, Hash, LogIn, Plus, Sparkles, UserPlus } from "lucide-react";
+import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import { useMediaUpload } from "@/features/messages/lib/useMediaUpload";
 import { MessageComposer } from "@/features/messages/ui/MessageComposer";
 import { DropZoneOverlay } from "@/features/messages/ui/ComposerAttachments";
@@ -61,6 +62,7 @@ export const ChannelPane = React.memo(function ChannelPane({
   agentPubkeysPending = false,
   agentSessionAgents,
   activityAgents = agentSessionAgents,
+  autoSendDraftKey = null,
   botTypingEntries,
   channelFind,
   channelManagementOpen = false,
@@ -148,6 +150,7 @@ export const ChannelPane = React.memo(function ChannelPane({
   const welcomeComposerHideTimerRef = React.useRef<number | null>(null);
   const [welcomeComposerBannerState, setWelcomeComposerBannerState] =
     React.useState<WelcomeComposerBannerState>("prompt");
+  const { goChannel } = useAppNavigation();
   const mainComposerMedia = useMediaUpload();
   const isNonMemberView =
     activeChannel !== null &&
@@ -156,6 +159,13 @@ export const ChannelPane = React.memo(function ChannelPane({
     !activeChannel.archivedAt;
   const hasMainComposerOverlay = !isNonMemberView;
   const activeChannelId = activeChannel?.id ?? null;
+  // Clear the ?autoSend search param once the auto-submit fires so
+  // back-navigation cannot re-trigger the send.
+  const handleAutoSubmitComplete = React.useCallback(() => {
+    if (activeChannelId) {
+      void goChannel(activeChannelId, { replace: true });
+    }
+  }, [activeChannelId, goChannel]);
   const huddleMemberPubkeys = React.useMemo(
     () => getDmHuddleMemberPubkeys(activeChannel, agentPubkeys, currentPubkey),
     [activeChannel, agentPubkeys, currentPubkey],
@@ -668,6 +678,8 @@ export const ChannelPane = React.memo(function ChannelPane({
                   containerClassName="px-5"
                   disabled={isComposerDisabled}
                   editTarget={mainEditTarget}
+                  autoSubmitDraftKey={autoSendDraftKey}
+                  onAutoSubmitComplete={handleAutoSubmitComplete}
                   isSending={isSending}
                   mediaController={mainComposerMedia}
                   onCancelEdit={onCancelEdit}

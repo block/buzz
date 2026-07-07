@@ -221,7 +221,11 @@ const overrides = new Map([
   // +18: pendingImetaForPersistRef (local snapshot ref) + synchronous restore
   // path writes in the draft-key effect body, fixing the image-drop bug on
   // top-level nav switch (StrictMode simulate-unmount race on remount).
-  ["src/features/messages/ui/MessageComposer.tsx", 1021],
+  // +12 autoSubmitDraftKey/onAutoSubmitComplete props + onAutoSubmitCompleteRef
+  // + mount-only useEffect for the Drafts-panel "Send message" confirm-dialog
+  // flow. Load-bearing feature growth; queued to split with the rest of this
+  // list.
+  ["src/features/messages/ui/MessageComposer.tsx", 1033],
 ]);
 
 await runFileSizeCheck({

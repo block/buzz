@@ -62,6 +62,20 @@ type MessageComposerProps = {
   containerClassName?: string;
   disabled?: boolean;
   draftKey?: string;
+  /**
+   * When provided, the composer fires `submitMessage` once on mount after
+   * the draft matching this key has been loaded into the editor. This powers
+   * the "Send message" confirm-dialog flow in the Drafts panel. The callback
+   * `onAutoSubmitComplete` must clear the trigger (e.g. remove `?autoSend`
+   * from the URL) — it is called synchronously before `submitMessage` fires
+   * so the param is gone before any navigation the send might cause.
+   *
+   * Fires at most once per mount: a stable key value that persists across
+   * re-renders does NOT re-fire.
+   */
+  autoSubmitDraftKey?: string | null;
+  /** Called when the auto-submit fires so the parent can clear the trigger. */
+  onAutoSubmitComplete?: () => void;
   editTarget?: {
     author: string;
     body: string;
@@ -129,6 +143,8 @@ function MessageComposerImpl({
   containerClassName,
   disabled = false,
   draftKey,
+  autoSubmitDraftKey = null,
+  onAutoSubmitComplete,
   editTarget = null,
   isSending = false,
   onCancelEdit,
@@ -633,6 +649,43 @@ function MessageComposerImpl({
     onCaptureSendContext,
   ]);
   submitMessageRef.current = submitMessage;
+
+  // ── Auto-submit on draft send ────────────────────────────────────────────
+  // When `autoSubmitDraftKey` is set (the user clicked "Send message" in the
+  // Drafts panel and confirmed), fire `submitMessage` once after mount so the
+  // draft is sent through the real send path (mention resolution, media, etc.).
+  //
+  // Guard: only fire when the effective draft key matches the trigger so a
+  // stale URL param on a different channel never fires a spurious send.
+  //
+  // Fires at most once per mount (empty dep array after the key check) — the
+  // `onAutoSubmitComplete` callback clears the trigger before `submitMessage`
+  // runs, preventing re-fire on re-render or back-navigation.
+  const onAutoSubmitCompleteRef = React.useRef(onAutoSubmitComplete);
+  onAutoSubmitCompleteRef.current = onAutoSubmitComplete;
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: intentionally fires once on mount only
+  React.useEffect(() => {
+    if (
+      autoSubmitDraftKey === null ||
+      autoSubmitDraftKey !== effectiveDraftKey
+    ) {
+      return;
+    }
+    // Clear the trigger BEFORE firing so any navigation from the send cannot
+    // loop back with the param still present.
+    onAutoSubmitCompleteRef.current?.();
+    // Defer by one macrotask so the draft-persist lifecycle effect (which runs
+    // synchronously after mount) has a chance to load the draft content into
+    // the Tiptap editor before we try to submit.
+    const timer = window.setTimeout(() => {
+      submitMessageRef.current();
+    }, 0);
+    return () => {
+      window.clearTimeout(timer);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // mount-only
 
   const handleSubmit = React.useCallback(
     (event: React.FormEvent<HTMLFormElement>) => {

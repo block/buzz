@@ -15,6 +15,7 @@ import type { RelayEvent } from "@/shared/api/types";
 import { ViewLoadingFallback } from "@/shared/ui/ViewLoadingFallback";
 
 type ChannelRouteScreenProps = {
+  autoSendDraftKey: string | null;
   channelId: string;
   selectedPostId: string | null;
   targetMessageId: string | null;
@@ -94,6 +95,7 @@ async function fetchRouteTargetEvents(
 }
 
 export function ChannelRouteScreen({
+  autoSendDraftKey,
   channelId,
   selectedPostId,
   targetMessageId,
@@ -195,6 +197,7 @@ export function ChannelRouteScreen({
   return (
     <ChannelScreen
       activeChannel={activeChannel}
+      autoSendDraftKey={autoSendDraftKey}
       currentIdentity={identityQuery.data}
       currentProfile={profileQuery.data}
       onCloseForumPost={() => {

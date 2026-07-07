@@ -101,6 +101,7 @@ function ActivityLabel({
 type InboxListPaneProps = {
   activeReminderEventIds?: ReadonlySet<string>;
   agentPubkeys?: ReadonlySet<string>;
+  activeDraftCount: number;
   doneSet: ReadonlySet<string>;
   filter: InboxFilter;
   items: InboxItem[];
@@ -121,6 +122,7 @@ type InboxListPaneProps = {
 export function InboxListPane({
   activeReminderEventIds,
   agentPubkeys,
+  activeDraftCount,
   doneSet,
   filter,
   items,
@@ -456,6 +458,13 @@ export function InboxListPane({
                       >
                         {dueReminderCount}
                       </span>
+                    ) : activeDraftCount > 0 ? (
+                      <span
+                        className="absolute -right-1 -top-1 inline-flex h-4 min-w-4 items-center justify-center rounded-full border border-background bg-primary px-1 text-2xs font-semibold leading-none text-primary-foreground"
+                        data-testid="inbox-draft-badge"
+                      >
+                        {activeDraftCount}
+                      </span>
                     ) : null}
                   </button>
                 </DropdownMenuTrigger>
@@ -480,6 +489,14 @@ export function InboxListPane({
                               data-testid="inbox-reminder-badge-option"
                             >
                               {dueReminderCount}
+                            </span>
+                          ) : option.value === "drafts" &&
+                            activeDraftCount > 0 ? (
+                            <span
+                              className="inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-primary px-1 text-2xs font-semibold leading-none text-primary-foreground"
+                              data-testid="inbox-draft-badge-option"
+                            >
+                              {activeDraftCount}
                             </span>
                           ) : null}
                         </span>

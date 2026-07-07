@@ -19,6 +19,13 @@ export type ChannelPaneProps = {
   agentPubkeys?: ReadonlySet<string>;
   agentPubkeysPending?: boolean;
   agentSessionAgents: ChannelAgentSessionAgent[];
+  /**
+   * When non-null, the main composer fires `submitMessage` once after loading
+   * the draft identified by this key — i.e. the user clicked "Send message"
+   * in the Drafts panel and confirmed. Cleared by the composer after firing so
+   * back-navigation cannot re-trigger.
+   */
+  autoSendDraftKey?: string | null;
   botTypingEntries: TypingIndicatorEntry[];
   channelFind: ReturnType<typeof useChannelFind>;
   channelManagementOpen?: boolean;
