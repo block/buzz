@@ -1,0 +1,54 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+
+import { isTimeoutActive, parseTimeoutRejection } from "./timeout.ts";
+
+test("parses a well-formed timeout rejection to epoch ms", () => {
+  const result = parseTimeoutRejection(
+    "restricted: you are timed out until 1751920000",
+  );
+  assert.deepEqual(result, { expiresAtMs: 1751920000 * 1000 });
+});
+
+test("tolerates surrounding whitespace", () => {
+  const result = parseTimeoutRejection(
+    "  restricted: you are timed out until 1751920000  ",
+  );
+  assert.deepEqual(result, { expiresAtMs: 1751920000 * 1000 });
+});
+
+test("returns null for a non-timeout rejection", () => {
+  assert.equal(
+    parseTimeoutRejection("blocked: you are banned from this community"),
+    null,
+  );
+  assert.equal(parseTimeoutRejection("restricted: not a channel member"), null);
+  assert.equal(parseTimeoutRejection(""), null);
+  assert.equal(parseTimeoutRejection(null), null);
+  assert.equal(parseTimeoutRejection(undefined), null);
+});
+
+test("timeout with unparseable timestamp still signals timed-out", () => {
+  assert.deepEqual(
+    parseTimeoutRejection("restricted: you are timed out until soon"),
+    { expiresAtMs: null },
+  );
+  assert.deepEqual(
+    parseTimeoutRejection("restricted: you are timed out until "),
+    { expiresAtMs: null },
+  );
+  assert.deepEqual(
+    parseTimeoutRejection("restricted: you are timed out until -5"),
+    { expiresAtMs: null },
+  );
+});
+
+test("isTimeoutActive: future expiry active, past expiry inactive", () => {
+  const now = 1_000_000_000_000;
+  assert.equal(isTimeoutActive(now + 5000, now), true);
+  assert.equal(isTimeoutActive(now - 5000, now), false);
+});
+
+test("isTimeoutActive: unknown expiry fails closed (active)", () => {
+  assert.equal(isTimeoutActive(null, 1_000_000_000_000), true);
+});

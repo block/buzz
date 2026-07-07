@@ -43,7 +43,7 @@ export type ResolutionAction =
 // --- Read row shapes (api/bridge.rs report_json / action_json / ban_json) ---
 
 export type ModerationReport = {
-  id: number;
+  id: string;
   reportEventId: string;
   reporterPubkey: string;
   targetKind: "event" | "pubkey" | "blob";
@@ -53,13 +53,13 @@ export type ModerationReport = {
   note: string | null;
   status: string;
   resolvedBy: string | null;
-  resolvedAt: number | null;
+  resolvedAt: string | null;
   actionId: string | null;
-  createdAt: number;
+  createdAt: string;
 };
 
 export type ModerationAction = {
-  id: number;
+  id: string;
   actorPubkey: string;
   action: string;
   targetPubkey: string | null;
@@ -69,18 +69,18 @@ export type ModerationAction = {
   publicReason: string | null;
   privateReason: string | null;
   matchedPrincipal: string | null;
-  createdAt: number;
+  createdAt: string;
 };
 
 export type CommunityRestriction = {
   pubkey: string;
   banned: boolean;
-  banExpiresAt: number | null;
+  banExpiresAt: string | null;
   banReason: string | null;
-  mutedUntil: number | null;
+  mutedUntil: string | null;
   muteReason: string | null;
   actorPubkey: string;
-  updatedAt: number;
+  updatedAt: string;
 };
 
 function normalizePubkey(pubkey: string): string {
@@ -249,7 +249,7 @@ async function moderationGet<T>(pathWithQuery: string): Promise<T> {
 }
 
 type RawReport = {
-  id: number;
+  id: string;
   report_event_id: string;
   reporter_pubkey: string;
   target_kind: "event" | "pubkey" | "blob";
@@ -259,13 +259,13 @@ type RawReport = {
   note: string | null;
   status: string;
   resolved_by: string | null;
-  resolved_at: number | null;
+  resolved_at: string | null;
   action_id: string | null;
-  created_at: number;
+  created_at: string;
 };
 
 type RawAction = {
-  id: number;
+  id: string;
   actor_pubkey: string;
   action: string;
   target_pubkey: string | null;
@@ -275,18 +275,18 @@ type RawAction = {
   public_reason: string | null;
   private_reason: string | null;
   matched_principal: string | null;
-  created_at: number;
+  created_at: string;
 };
 
 type RawRestriction = {
   pubkey: string;
   banned: boolean;
-  ban_expires_at: number | null;
+  ban_expires_at: string | null;
   ban_reason: string | null;
-  muted_until: number | null;
+  muted_until: string | null;
   mute_reason: string | null;
   actor_pubkey: string;
-  updated_at: number;
+  updated_at: string;
 };
 
 function toReport(r: RawReport): ModerationReport {
