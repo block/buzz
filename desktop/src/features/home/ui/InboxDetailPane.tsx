@@ -14,7 +14,10 @@ import {
 } from "@/features/home/ui/InboxMessageRow";
 import type { TimelineMessage } from "@/features/messages/types";
 import { formatTime } from "@/features/messages/lib/dateFormatters";
-import { hasSameMessageAuthor } from "@/features/messages/lib/messageGrouping";
+import {
+  hasSameMessageAuthor,
+  isWithinGroupingWindow,
+} from "@/features/messages/lib/messageGrouping";
 import { MessageComposer } from "@/features/messages/ui/MessageComposer";
 import { UpdateIndicator } from "@/features/settings/UpdateIndicator";
 import type { Channel } from "@/shared/api/types";
@@ -192,6 +195,7 @@ export function InboxDetailPane({
             authorPubkey: item.item.pubkey,
             avatarUrl: item.avatarUrl,
             content: item.preview,
+            createdAt: item.item.createdAt,
             depth: 0,
             fullTimestampLabel: item.fullTimestampLabel,
             id: item.id,
@@ -325,11 +329,16 @@ export function InboxDetailPane({
           <div>
             {displayMessages.map((message, index) => {
               const isAfterSeparator = index === 1;
+              const previousMessage = displayMessages[index - 1];
               const isContinuation =
                 !isAfterSeparator &&
                 hasSameMessageAuthor(
-                  { pubkey: displayMessages[index - 1]?.authorPubkey },
+                  { pubkey: previousMessage?.authorPubkey },
                   { pubkey: message.authorPubkey },
+                ) &&
+                isWithinGroupingWindow(
+                  previousMessage?.createdAt,
+                  message.createdAt,
                 );
 
               return (

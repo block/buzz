@@ -12,7 +12,10 @@ import {
 } from "@/features/messages/lib/timelineSnapshot";
 import { shouldRenderUnreadDivider } from "@/features/messages/lib/threadPanel";
 import type { MainTimelineEntry } from "@/features/messages/lib/threadPanel";
-import { hasSameMessageAuthor } from "@/features/messages/lib/messageGrouping";
+import {
+  hasSameMessageAuthor,
+  isWithinGroupingWindow,
+} from "@/features/messages/lib/messageGrouping";
 import { KIND_SYSTEM_MESSAGE } from "@/shared/constants/kinds";
 
 /**
@@ -109,7 +112,11 @@ export function buildTimelineItems(
 
     const isContinuation =
       previousGroupEntry !== null &&
-      hasSameMessageAuthor(previousGroupEntry.message, message);
+      hasSameMessageAuthor(previousGroupEntry.message, message) &&
+      isWithinGroupingWindow(
+        previousGroupEntry.message.createdAt,
+        message.createdAt,
+      );
 
     if (isContinuation && previousMessageItemIndex !== null) {
       const previousItem = items[previousMessageItemIndex];

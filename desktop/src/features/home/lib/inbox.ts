@@ -54,6 +54,7 @@ export type InboxReply = {
   authorPubkey: string;
   avatarUrl: string | null;
   content: string;
+  createdAt: number;
   depth?: number;
   fullTimestampLabel: string;
   id: string;
