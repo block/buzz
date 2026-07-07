@@ -32,6 +32,11 @@ use super::event::dispatch_persistent_event;
 use super::side_effects::emit_group_discovery_events;
 use crate::state::AppState;
 
+/// Tag naming the moderation source row (report/action) a notice was derived
+/// from. Deliberately non-standard: `e` is reserved for 32-byte event ids, but
+/// the source is an opaque DB row UUID. Used for idempotency and client linking.
+const MODERATION_SOURCE_TAG: &str = "moderation_source";
+
 /// Which notice is being delivered — determines template + audience.
 #[derive(Debug, Clone)]
 pub enum ModerationNotice {
@@ -90,7 +95,7 @@ pub async fn send_moderation_notice(
     // 1. Create/reuse the two-party DM channel {relay mod key, recipient}.
     //    `open_dm` is participant-hash idempotent, so re-delivery to the same
     //    user reuses the one thread per (community, user).
-    let (dm_channel, was_created) = state
+    let (dm_channel, _was_created) = state
         .db
         .open_dm(
             tenant.community(),
@@ -100,40 +105,48 @@ pub async fn send_moderation_notice(
         .await?;
     let dm_channel_id = dm_channel.id;
 
-    // Idempotency: a notice for this source id already exists in this DM ⇒ no-op.
-    // The `e` tag carries the source (report/action) id; keyed on it, a retry
-    // after a crash between insert and fan-out is a safe no-op.
-    let source_hex = notice.source_id().to_string();
-    let existing = state
+    // Resurface the moderation DM for the recipient. `open_dm` only clears
+    // `hidden_at` for `created_by` (the relay key), so a user who hid the
+    // "{host} Moderation" thread would never see a later ban/resolution notice.
+    // The closed-loop trust requirement needs the notice to reappear.
+    state
         .db
-        .query_events(&buzz_db::event::EventQuery {
-            kinds: Some(vec![KIND_STREAM_MESSAGE as i32]),
-            channel_id: Some(dm_channel_id),
-            e_tags: Some(vec![source_hex.clone()]),
-            authors: Some(vec![relay_pubkey_bytes.to_vec()]),
-            limit: Some(1),
-            ..buzz_db::event::EventQuery::for_community(tenant.community())
-        })
+        .unhide_dm(tenant.community(), dm_channel_id, recipient_pubkey)
         .await?;
-    if !existing.is_empty() {
+
+    // Idempotency: a notice for this source id already exists in this DM ⇒ no-op.
+    // The source (report/action) row id is carried in a `moderation_source` tag
+    // (NOT `e` — `e` is reserved for 32-byte event ids; this is an opaque row
+    // UUID). Keyed on it, a retry after a crash between insert and fan-out is a
+    // safe no-op. Note: this is query-then-insert, so it is crash-retry safe but
+    // not concurrency-safe — two simultaneous deliveries for the same source can
+    // both miss the pre-query. Callers invoke this once per action from
+    // already-serialized side-effect paths; hard per-source serialization is a
+    // noted follow-up, not done here.
+    let source_id = notice.source_id();
+    if notice_already_sent(state, tenant, dm_channel_id, &relay_pubkey_bytes, source_id).await? {
         return Ok(());
     }
 
     // 2. Ensure the relay's "{host} Moderation" kind:0 profile exists, and 3.
     //    the DM's kind:39000 discovery (with `hidden` / `t=dm` / `p`). Both are
-    //    replaceable and cheap to re-emit, but we only need them on first use.
-    if was_created {
-        if let Err(e) = publish_moderation_profile(tenant, state, &relay_pubkey_hex).await {
-            warn!(error = %e, "moderation profile publish failed (continuing)");
-        }
-        emit_group_discovery_events(tenant, state, dm_channel_id).await?;
+    //    replaceable events, so we emit them on EVERY send rather than gating on
+    //    first creation: if discovery failed on the first delivery (it is
+    //    `?`-propagated), a `was_created`-gated retry would skip it forever and
+    //    leave the thread permanently undiscoverable — a notice delivered into a
+    //    channel no client can render. Notices are rare; unconditional re-emit is
+    //    cheap and `replace_addressable_event` makes it idempotent.
+    if let Err(e) = publish_moderation_profile(tenant, state, &relay_pubkey_hex).await {
+        warn!(error = %e, "moderation profile publish failed (continuing)");
     }
+    emit_group_discovery_events(tenant, state, dm_channel_id).await?;
 
-    // 4. Insert the relay-signed kind:9 notice with `h=<dm_channel_id>` and an
-    //    `e` tag naming the source id for idempotency + client linking.
+    // 4. Insert the relay-signed kind:9 notice with `h=<dm_channel_id>` and a
+    //    `moderation_source` tag naming the source row id (idempotency +
+    //    client linking).
     let tags = vec![
         Tag::parse(["h", &dm_channel_id.to_string()])?,
-        Tag::parse(["e", &source_hex])?,
+        Tag::parse([MODERATION_SOURCE_TAG, &source_id.to_string()])?,
     ];
     let event = EventBuilder::new(
         Kind::Custom(KIND_STREAM_MESSAGE as u16),
@@ -186,9 +199,43 @@ async fn publish_moderation_profile(
     Ok(())
 }
 
+/// True if a relay-authored notice for `source_id` already exists in this DM.
+///
+/// Idempotency scan scoped to the recipient's single moderation DM thread
+/// (kind:9, relay-authored) — bounded by that user's own notice history, so no
+/// unbounded read. Matches the opaque `moderation_source` tag in Rust because
+/// `EventQuery` only pushes down standardized `e`/`d`/`p` tags and this row id
+/// is intentionally not an `e` tag (see `MODERATION_SOURCE_TAG`).
+async fn notice_already_sent(
+    state: &Arc<AppState>,
+    tenant: &TenantContext,
+    dm_channel_id: Uuid,
+    relay_pubkey_bytes: &[u8],
+    source_id: Uuid,
+) -> anyhow::Result<bool> {
+    let existing = state
+        .db
+        .query_events(&buzz_db::event::EventQuery {
+            kinds: Some(vec![KIND_STREAM_MESSAGE as i32]),
+            channel_id: Some(dm_channel_id),
+            authors: Some(vec![relay_pubkey_bytes.to_vec()]),
+            ..buzz_db::event::EventQuery::for_community(tenant.community())
+        })
+        .await?;
+
+    let source_str = source_id.to_string();
+    Ok(existing.iter().any(|stored| {
+        stored.event.tags.iter().any(|t| {
+            let parts = t.as_slice();
+            parts.len() >= 2 && parts[0] == MODERATION_SOURCE_TAG && parts[1] == source_str
+        })
+    }))
+}
+
 impl ModerationNotice {
     /// The source row id this notice is derived from — the idempotency key and
-    /// the `e`-tag target that lets a client link the notice back to its action.
+    /// the `moderation_source` tag value that lets a client link the notice back
+    /// to its action.
     fn source_id(&self) -> Uuid {
         match self {
             ModerationNotice::ReportResolved { report_id, .. } => *report_id,
