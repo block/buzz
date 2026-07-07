@@ -1532,8 +1532,8 @@ pub fn build_moderation_ban(
     expires_at: Option<u64>,
     reason: Option<&str>,
 ) -> Result<EventBuilder, SdkError> {
-    check_hex_len(target_pubkey, 64, "target_pubkey")?;
-    let mut tags = vec![tag(&["p", &target_pubkey.to_ascii_lowercase()])?];
+    let target_pubkey = check_pubkey_hex(target_pubkey, "target_pubkey")?;
+    let mut tags = vec![tag(&["p", &target_pubkey])?];
     if let Some(exp) = expires_at {
         tags.push(tag(&["expiration", &exp.to_string()])?);
     }
@@ -1545,8 +1545,8 @@ pub fn build_moderation_ban(
 
 /// Build a community unban command (kind 9041).
 pub fn build_moderation_unban(target_pubkey: &str) -> Result<EventBuilder, SdkError> {
-    check_hex_len(target_pubkey, 64, "target_pubkey")?;
-    let tags = vec![tag(&["p", &target_pubkey.to_ascii_lowercase()])?];
+    let target_pubkey = check_pubkey_hex(target_pubkey, "target_pubkey")?;
+    let tags = vec![tag(&["p", &target_pubkey])?];
     Ok(EventBuilder::new(Kind::Custom(KIND_MODERATION_UNBAN as u16), "").tags(tags))
 }
 
@@ -1558,9 +1558,9 @@ pub fn build_moderation_timeout(
     expires_at: u64,
     reason: Option<&str>,
 ) -> Result<EventBuilder, SdkError> {
-    check_hex_len(target_pubkey, 64, "target_pubkey")?;
+    let target_pubkey = check_pubkey_hex(target_pubkey, "target_pubkey")?;
     let mut tags = vec![
-        tag(&["p", &target_pubkey.to_ascii_lowercase()])?,
+        tag(&["p", &target_pubkey])?,
         tag(&["expiration", &expires_at.to_string()])?,
     ];
     if let Some(r) = reason {
@@ -1571,8 +1571,8 @@ pub fn build_moderation_timeout(
 
 /// Build a community untimeout command (kind 9043).
 pub fn build_moderation_untimeout(target_pubkey: &str) -> Result<EventBuilder, SdkError> {
-    check_hex_len(target_pubkey, 64, "target_pubkey")?;
-    let tags = vec![tag(&["p", &target_pubkey.to_ascii_lowercase()])?];
+    let target_pubkey = check_pubkey_hex(target_pubkey, "target_pubkey")?;
+    let tags = vec![tag(&["p", &target_pubkey])?];
     Ok(EventBuilder::new(Kind::Custom(KIND_MODERATION_UNTIMEOUT as u16), "").tags(tags))
 }
 
@@ -1590,7 +1590,7 @@ pub fn build_moderation_resolve_report(
     action: &str,
     reason: Option<&str>,
 ) -> Result<EventBuilder, SdkError> {
-    check_hex_len(report_event_id, 64, "report_event_id")?;
+    let report_event_id = check_hex_exact(report_event_id, 64, "report_event_id")?;
     match status {
         "resolved" | "dismissed" => {}
         _ => {
@@ -1608,7 +1608,7 @@ pub fn build_moderation_resolve_report(
         }
     }
     let mut tags = vec![
-        tag(&["report", &report_event_id.to_ascii_lowercase()])?,
+        tag(&["report", &report_event_id])?,
         tag(&["status", status])?,
         tag(&["action", action])?,
     ];
@@ -3273,7 +3273,15 @@ mod tests {
     #[test]
     fn moderation_ban_rejects_short_pubkey() {
         let err = build_moderation_ban("abc", None, None).unwrap_err();
-        assert!(matches!(err, SdkError::InvalidDiffMeta(_)));
+        assert!(matches!(err, SdkError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn moderation_ban_rejects_overlong_pubkey() {
+        // Relay `extract_p_tag_bytes` requires exactly 64 hex; the SDK must
+        // reject 65+ hex here rather than sign a `p` tag the relay drops.
+        let err = build_moderation_ban(&"a".repeat(65), None, None).unwrap_err();
+        assert!(matches!(err, SdkError::InvalidInput(_)));
     }
 
     #[test]
@@ -3340,6 +3348,15 @@ mod tests {
     #[test]
     fn moderation_resolve_rejects_short_report_id() {
         let err = build_moderation_resolve_report("abc", "resolved", "ban", None).unwrap_err();
-        assert!(matches!(err, SdkError::InvalidDiffMeta(_)));
+        assert!(matches!(err, SdkError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn moderation_resolve_rejects_overlong_report_id() {
+        // Relay `extract_report_tag` requires exactly 64 hex; the SDK must
+        // reject 65+ hex here rather than sign a `report` tag the relay drops.
+        let err =
+            build_moderation_resolve_report(&"a".repeat(65), "resolved", "ban", None).unwrap_err();
+        assert!(matches!(err, SdkError::InvalidInput(_)));
     }
 }
