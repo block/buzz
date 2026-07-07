@@ -1,17 +1,22 @@
 // Domain logic for the community-moderation admin queue (U2 admin surface).
 //
 // Pure, hook-free transforms over the NIP-98 `/moderation/*` read contract so
-// they can be unit-tested without a relay. The wire shapes below mirror the
-// authoritative JSON emitted by the relay's `report_json` / `action_json` /
-// `ban_json` (crates/buzz-relay/src/api/bridge.rs) — field names are pinned to
-// that source. The queue view consumes these via the shared
-// `features/moderation` hooks (Dawn's lane); this module owns only the
+// they can be unit-tested without a relay. The authoritative wire row shapes
+// live in `@/shared/api/moderation` (Dawn's lane); this module owns only the
 // triage math: severity ordering, grouping by target, and prior-actions
-// correlation.
+// correlation. It reuses those row types directly, narrowing just the two
+// fields the triage math dispatches on (`reportType`, `status`) to the precise
+// unions below — the shared types keep them as `string` so the wire can carry
+// values the client doesn't yet model.
 //
 // Privacy invariant (locked, Tyler 2026-07-07): `reporterPubkey` is visible in
 // this admin queue but MUST NEVER reach any surface the reported author can
 // see. Nothing here is rendered author-side.
+
+import type {
+  ModerationAction as ApiModerationAction,
+  ModerationReport as ApiModerationReport,
+} from "@/shared/api/moderation";
 
 /** NIP-56 report categories accepted at ingest (relay `report.rs::REPORT_TYPES`). */
 export type ReportType =
@@ -33,42 +38,23 @@ export type ReportTargetKind = "event" | "pubkey" | "blob";
  */
 export type ReportStatus = "open" | "resolved" | "dismissed" | "escalated";
 
-/** Queue row: one accepted kind:1984 report (`/moderation/reports`). */
-export type ModerationReport = {
-  id: string;
-  reportEventId: string;
-  /** Reporter identity — mod-only, never author-visible. */
-  reporterPubkey: string;
-  targetKind: ReportTargetKind;
-  /** Hex event id / pubkey / blob sha, per `targetKind`. */
-  target: string;
-  channelId: string | null;
+/** Queue row: one accepted kind:1984 report (`/moderation/reports`).
+ *
+ * The shared `ApiModerationReport` shape verbatim, with `reportType` and
+ * `status` narrowed to the client-modeled unions the triage math dispatches
+ * on. `targetKind` is already the exact union upstream, so it passes through.
+ */
+export type ModerationReport = Omit<
+  ApiModerationReport,
+  "reportType" | "status"
+> & {
   reportType: ReportType;
-  /** Reporter-supplied context; mod-only. */
-  note: string | null;
   status: ReportStatus;
-  resolvedBy: string | null;
-  resolvedAt: string | null;
-  actionId: string | null;
-  createdAt: string;
 };
 
-/** Audit row: one accepted moderation action (`/moderation/audit`). */
-export type ModerationAction = {
-  id: string;
-  actorPubkey: string;
-  action: string;
-  targetPubkey: string | null;
-  targetEventId: string | null;
-  channelId: string | null;
-  reasonCode: string | null;
-  /** Sanitized, tombstone-safe. */
-  publicReason: string | null;
-  /** Mod-only; never leaves the audit surface. */
-  privateReason: string | null;
-  matchedPrincipal: string | null;
-  createdAt: string;
-};
+/** Audit row: one accepted moderation action (`/moderation/audit`). The shared
+ * shape needs no narrowing here — the triage math treats `action` opaquely. */
+export type ModerationAction = ApiModerationAction;
 
 /**
  * Severity rank per report category — higher acts first. `illegal` tops the

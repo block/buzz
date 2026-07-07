@@ -6,7 +6,6 @@ import {
   useModerationAuditQuery,
   useModerationReportsQuery,
   useResolveReportMutation,
-  type ModerationAction as HookModerationAction,
   type ModerationReport as HookModerationReport,
   type ResolutionAction,
 } from "@/features/moderation/hooks";
@@ -20,7 +19,7 @@ import {
   type ModerationAction,
   type ModerationQueueGroup,
   type ModerationReport,
-  type ReportTargetKind,
+  type ReportStatus,
   type ReportType,
   type SeverityTier,
 } from "@/features/settings/lib/moderationQueue";
@@ -42,48 +41,24 @@ import { SettingsSectionHeader } from "./SettingsSectionHeader";
 // relay returns 403 otherwise). Mirror that gate client-side so members never
 // see the panel attempt a doomed fetch.
 
-// --- Boundary normalizers -------------------------------------------------
+// --- Boundary normalizer --------------------------------------------------
 //
 // The shared hooks expose the wire rows; this card's triage math lives in
-// `lib/moderationQueue.ts` with precise string-literal unions and ISO-string
-// timestamps. These map hook rows → triage rows. `String(...)` on id/timestamp
-// fields is idempotent: the relay emits them as strings today (Uuid /
-// DateTime<Utc> → JSON strings, see api/bridge.rs report_json), so this is a
-// no-op cast that also stays correct if the shared types tighten to strings.
+// `lib/moderationQueue.ts`, which reuses the shared row shapes but narrows
+// `reportType`/`status` to precise unions. Report rows need that narrowing cast
+// at the boundary; audit rows are structurally identical (ModerationAction =
+// the shared shape), so they flow through untouched.
 
 function toQueueReport(r: HookModerationReport): ModerationReport {
   return {
-    id: String(r.id),
-    reportEventId: r.reportEventId,
-    reporterPubkey: r.reporterPubkey,
-    targetKind: r.targetKind as ReportTargetKind,
-    target: r.target,
-    channelId: r.channelId,
+    ...r,
     reportType: r.reportType as ReportType,
-    note: r.note,
-    status: r.status as ModerationReport["status"],
-    resolvedBy: r.resolvedBy,
-    resolvedAt: r.resolvedAt == null ? null : String(r.resolvedAt),
-    actionId: r.actionId,
-    createdAt: String(r.createdAt),
+    status: r.status as ReportStatus,
   };
 }
 
-function toQueueAction(a: HookModerationAction): ModerationAction {
-  return {
-    id: String(a.id),
-    actorPubkey: a.actorPubkey,
-    action: a.action,
-    targetPubkey: a.targetPubkey,
-    targetEventId: a.targetEventId,
-    channelId: a.channelId,
-    reasonCode: a.reasonCode,
-    publicReason: a.publicReason,
-    privateReason: a.privateReason,
-    matchedPrincipal: a.matchedPrincipal,
-    createdAt: String(a.createdAt),
-  };
-}
+/** Stable empty-array reference so audit-derived memos don't churn on refetch. */
+const EMPTY_ACTIONS: readonly ModerationAction[] = [];
 
 // --- Resolution vocabulary ------------------------------------------------
 //
@@ -312,8 +287,7 @@ function QueueTab() {
 
   const groups = useMemo(() => {
     const reports = (reportsQuery.data ?? []).map(toQueueReport);
-    const actions = (auditQuery.data ?? []).map(toQueueAction);
-    return buildModerationQueue(reports, actions);
+    return buildModerationQueue(reports, auditQuery.data ?? []);
   }, [reportsQuery.data, auditQuery.data]);
 
   const reporterPubkeys = useMemo(
@@ -437,10 +411,7 @@ function AuditRow({
 function AuditTab() {
   const auditQuery = useModerationAuditQuery();
 
-  const actions = useMemo(
-    () => (auditQuery.data ?? []).map(toQueueAction),
-    [auditQuery.data],
-  );
+  const actions = auditQuery.data ?? EMPTY_ACTIONS;
 
   const actorPubkeys = useMemo(
     () => actions.map((action) => action.actorPubkey),
