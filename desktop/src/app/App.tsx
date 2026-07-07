@@ -27,6 +27,7 @@ import { isSharedIdentity as isSharedIdentityCmd } from "@/shared/api/tauri";
 import { listenForDeepLinks } from "@/shared/deep-link";
 import { useSystemColorScheme } from "@/shared/theme/useSystemColorScheme";
 import { Button } from "@/shared/ui/button";
+import { FuzzyLogo } from "@/shared/ui/buzz-logo/FuzzyLogo";
 import { Spinner } from "@/shared/ui/spinner";
 import { StartupWindowDragRegion } from "@/shared/ui/StartupWindowDragRegion";
 import { StepProgress } from "@/shared/ui/step-progress";
@@ -43,15 +44,14 @@ function AppLoadingGate() {
       <StartupWindowDragRegion />
       <ThemeGrainientBackground />
 
-      <h1
-        aria-live="polite"
-        className="relative z-10 mt-6 text-center text-3xl font-semibold text-foreground"
-      >
-        <span className="sr-only">{LOADING_TEXT}</span>
-        <span aria-hidden="true" className="buzz-setup-loading-text">
-          {LOADING_TEXT}
-        </span>
-      </h1>
+      <span className="sr-only">{LOADING_TEXT}</span>
+      <FuzzyLogo
+        ariaLabel=""
+        className="relative z-10 w-28! text-foreground"
+        fuzz={false}
+        loop
+        loopRestSeconds={2}
+      />
     </div>
   );
 }

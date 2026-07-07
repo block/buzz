@@ -1067,6 +1067,7 @@ test("first-run onboarding shows setup loading until Welcome bootstrap completes
   await expect(page.getByTestId("onboarding-gate")).toHaveCount(0);
   await expect(loadingGate).toBeVisible();
   await expect(loadingGate).toContainText("Setting up your workspace...");
+  await expect(loadingGate.locator(".buzz-logo__mark")).toBeVisible();
   await expect(
     loadingGate.getByTestId("setup-grainient-background"),
   ).toBeVisible();
@@ -1083,16 +1084,16 @@ test("first-run onboarding shows setup loading until Welcome bootstrap completes
 
         const shellStyles = window.getComputedStyle(element);
         const washStyles = window.getComputedStyle(wash);
-        const loadingText = element.querySelector(".buzz-setup-loading-text");
-        const textStyles =
-          loadingText instanceof HTMLElement
-            ? window.getComputedStyle(loadingText)
+        const logoMark = element.querySelector(".buzz-logo__mark");
+        const markStyles =
+          logoMark instanceof SVGElement
+            ? window.getComputedStyle(logoMark)
             : null;
         return {
           animationName: washStyles.animationName,
           backgroundMatchesTheme:
             shellStyles.backgroundColor === washStyles.backgroundColor,
-          textAvoidsHardcodedWhite: textStyles?.color !== "rgb(255, 255, 255)",
+          markAvoidsHardcodedWhite: markStyles?.color !== "rgb(255, 255, 255)",
           usesRadialGradients:
             washStyles.backgroundImage.includes("radial-gradient"),
         };
@@ -1101,7 +1102,7 @@ test("first-run onboarding shows setup loading until Welcome bootstrap completes
     .toEqual({
       animationName: "buzz-grainient-orbit",
       backgroundMatchesTheme: true,
-      textAvoidsHardcodedWhite: true,
+      markAvoidsHardcodedWhite: true,
       usesRadialGradients: true,
     });
   await expect(loadingGate).not.toHaveClass(/buzz-onboarding-neutral-theme/);
