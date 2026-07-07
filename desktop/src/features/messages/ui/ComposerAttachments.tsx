@@ -304,6 +304,10 @@ const MediaAttachmentItem = React.forwardRef<
                           className={cn(
                             LIGHTBOX_BUTTON_CLASS,
                             "h-auto min-w-0",
+                            // Active state: swap the circular pill for the
+                            // shared button radius with a visible ring so a
+                            // spoilered attachment reads as "selected".
+                            "data-[state=on]:rounded-lg data-[state=on]:bg-black/50 data-[state=on]:text-white data-[state=on]:ring-2 data-[state=on]:ring-white/80",
                           )}
                           data-testid="composer-attachment-spoiler"
                           onPressedChange={() =>
