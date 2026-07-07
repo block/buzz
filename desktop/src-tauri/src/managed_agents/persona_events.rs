@@ -306,6 +306,24 @@ pub struct PersonaSnapshot {
     pub source_version: String,
 }
 
+/// Apply persona-wins-when-set precedence for a single optional string field.
+///
+/// Returns the persona's value when it is non-`None` and non-whitespace-only;
+/// otherwise falls back to the record's value with the same blank filter applied.
+/// Returns `None` only when both are blank — a genuinely unconfigured field stays
+/// unconfigured.
+///
+/// This is the single source of truth for the precedence rule used by
+/// `persona_snapshot_with_agent_config_fallback`, `build_deploy_payload`, and
+/// `resolve_effective_prompt_model_provider` so the three paths cannot drift.
+pub fn persona_field_with_record_fallback(
+    persona_value: Option<&str>,
+    record_value: Option<&str>,
+) -> Option<String> {
+    let non_blank = |v: Option<&str>| v.filter(|s| !s.trim().is_empty()).map(str::to_owned);
+    non_blank(persona_value).or_else(|| non_blank(record_value))
+}
+
 /// Build the pinned snapshot for an agent created from `persona`.
 ///
 /// `agent_env_overrides` are the agent's own env vars (persona-independent);
@@ -345,41 +363,29 @@ pub fn persona_snapshot(
 /// Env-var layering is unchanged: persona env < agent env (agent wins on collision).
 /// A persona with an empty env map does not wipe the agent's env vars — the agent's
 /// own overrides are merged on top and always win.
+///
+/// The two fields (`model`, `provider`) are independent: a persona that sets only
+/// `model` wins on `model` while the agent's `provider` is preserved, and vice versa.
 pub fn persona_snapshot_with_agent_config_fallback(
     persona: &PersonaRecord,
     agent_env_overrides: &BTreeMap<String, String>,
     current_agent_model: Option<&str>,
     current_agent_provider: Option<&str>,
 ) -> PersonaSnapshot {
-    let mut env_vars = persona.env_vars.clone();
-    for (key, value) in agent_env_overrides {
-        env_vars.insert(key.clone(), value.clone());
-    }
+    // Delegate env-merge, system_prompt, and source_version to persona_snapshot
+    // so future PersonaSnapshot field additions stay automatically consistent.
+    let base = persona_snapshot(persona, agent_env_overrides);
 
-    // Persona wins when it has a non-blank value; agent record is the fallback
-    // for blank persona fields so a configured agent stays configured.
-    let is_present = |v: &Option<String>| v.as_deref().is_some_and(|s| !s.trim().is_empty());
-    let model = if is_present(&persona.model) {
-        persona.model.clone()
-    } else {
-        current_agent_model
-            .filter(|s| !s.trim().is_empty())
-            .map(str::to_owned)
-    };
-    let provider = if is_present(&persona.provider) {
-        persona.provider.clone()
-    } else {
-        current_agent_provider
-            .filter(|s| !s.trim().is_empty())
-            .map(str::to_owned)
-    };
+    // Apply the shared precedence rule: persona wins when non-blank, else
+    // the agent record's value is preserved so a configured agent stays configured.
+    let model = persona_field_with_record_fallback(base.model.as_deref(), current_agent_model);
+    let provider =
+        persona_field_with_record_fallback(base.provider.as_deref(), current_agent_provider);
 
     PersonaSnapshot {
-        system_prompt: Some(persona.system_prompt.clone()),
         model,
         provider,
-        env_vars,
-        source_version: persona_content_hash(&persona_event_content(persona)),
+        ..base
     }
 }
 
@@ -677,6 +683,43 @@ mod tests {
         assert_ne!(
             persona_content_hash(&content1),
             persona_content_hash(&content2)
+        );
+    }
+
+    // ── persona_field_with_record_fallback ────────────────────────────────────
+
+    #[test]
+    fn field_fallback_persona_present_wins() {
+        assert_eq!(
+            persona_field_with_record_fallback(Some("persona-model"), Some("record-model")),
+            Some("persona-model".to_owned()),
+        );
+    }
+
+    #[test]
+    fn field_fallback_persona_blank_uses_record() {
+        assert_eq!(
+            persona_field_with_record_fallback(None, Some("record-model")),
+            Some("record-model".to_owned()),
+        );
+        assert_eq!(
+            persona_field_with_record_fallback(Some("  "), Some("record-model")),
+            Some("record-model".to_owned()),
+        );
+    }
+
+    #[test]
+    fn field_fallback_both_blank_is_none() {
+        assert_eq!(persona_field_with_record_fallback(None, None), None);
+        assert_eq!(persona_field_with_record_fallback(Some(""), Some("")), None);
+    }
+
+    #[test]
+    fn field_fallback_record_blank_is_none() {
+        assert_eq!(
+            persona_field_with_record_fallback(None, Some("  ")),
+            None,
+            "whitespace-only record value must also be treated as blank"
         );
     }
 

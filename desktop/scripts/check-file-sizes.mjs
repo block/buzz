@@ -60,6 +60,9 @@ const overrides = new Map([
   // config-bridge: get_agent_config_surface/write_agent_config_field/put_agent_session_config
   // commands add ~40 lines. Queued to split.
   // branch cut; override bumped to cover the merged total. Queued to split.
+  // persona-blank-fallback: persona_snapshot_with_agent_config_fallback call
+  // sites add ~4 lines (extra fallback params + inline comments). build_deploy_payload
+  // fix (blank-persona provider/model fallback) adds ~6 lines. Bug fix.
   // archive/mod_tests.rs carries the full test module for archive/mod.rs:
   // unit tests + 4 real-relay integration tests (ignored, live-relay only).
   // Production logic in mod.rs is now ~527 lines (under 1000). mod_tests.rs
@@ -67,10 +70,7 @@ const overrides = new Map([
   // across the local-archive + agent-metric-archive PR series. store_tests.rs
   // (~731 lines) is under 1000 so needs no override.
   ["src-tauri/src/archive/mod_tests.rs", 1208],
-  // persona-blank-fallback: persona_snapshot_with_agent_config_fallback call
-  // sites in start_local_agent_with_preflight add ~3 lines vs the old
-  // persona_snapshot calls (extra fallback params). Load-bearing bug fix.
-  ["src-tauri/src/commands/agents.rs", 1441],
+  ["src-tauri/src/commands/agents.rs", 1443],
   // #1418 read-path fix: get_thread_replies' blocker fix (shared TIMELINE_KINDS
   // const + build_thread_replies_filter helper, mirroring the channel sibling so
   // the two p-gate filters can't drift) plus two guard unit tests. The file was
@@ -94,7 +94,9 @@ const overrides = new Map([
   // activity-feed threads avatar_url into build_managed_agent_summary for the
   // assistant-bubble pinned snapshot.
   // +1 for agent_pubkey field in setup payload (config-nudge card wire).
-  ["src-tauri/src/managed_agents/runtime.rs", 2208],
+  // persona-blank-fallback: resolve_effective_prompt_model_provider gains a
+  // record_provider param + applies persona_field_with_record_fallback. +5 lines.
+  ["src-tauri/src/managed_agents/runtime.rs", 2213],
   // config-bridge setup-payload env-boundary fix adds readiness wiring in
   // spawn_agent_child; load-bearing security fix, queued to split.
   ["src-tauri/src/managed_agents/config_bridge/reader.rs", 1016],

@@ -65,6 +65,7 @@ fn resolve_config_surface(
         personas,
         record.system_prompt.clone(),
         record.model.clone(),
+        record.provider.clone(),
     );
 
     // Build the baseline the reader overrides a live model against, paired with

@@ -268,8 +268,8 @@ async fn start_local_agent_with_preflight(
                 crate::managed_agents::persona_events::persona_snapshot_with_agent_config_fallback(
                     persona,
                     &record.env_vars,
-                    record.model.as_deref(),
-                    record.provider.as_deref(),
+                    record.model.as_deref(),    // fallback: record.model
+                    record.provider.as_deref(), // fallback: record.provider
                 );
             if let Some(prompt) = snapshot.system_prompt {
                 record.system_prompt = Some(prompt);
@@ -337,9 +337,10 @@ fn build_deploy_payload(
     // stale derived env copies in `env_vars` (or have no provider at all for
     // imported personas whose derived keys were filtered at import time).
     //
-    // Precedence mirrors local spawn: persona structured model is authoritative
-    // when present; the agent record's `model` is a fallback for personas that
-    // don't specify one (or when no persona is linked).
+    // Precedence: persona field wins when non-blank; otherwise falls back to the
+    // record's own field (same blank-normalization as the snapshot path). This
+    // matches `persona_snapshot_with_agent_config_fallback` exactly — a blank
+    // persona field must not wipe a record value that the user configured.
     let (effective_model, effective_provider) = if let Some(pid) = record.persona_id.as_deref() {
         let personas = load_personas(app).map_err(|e| {
             format!(
@@ -350,11 +351,12 @@ fn build_deploy_payload(
             .into_iter()
             .find(|p| p.id == pid)
             .ok_or_else(|| format!("persona `{pid}` not found while building deploy payload"))?;
-        let model = persona.model.clone().or(record.model.clone());
-        let provider = persona.provider;
+        let fallback = crate::managed_agents::persona_events::persona_field_with_record_fallback;
+        let model = fallback(persona.model.as_deref(), record.model.as_deref()); // fallback: record.model
+        let provider = fallback(persona.provider.as_deref(), record.provider.as_deref()); // fallback: record.provider
         (model, provider)
     } else {
-        (record.model.clone(), None)
+        (record.model.clone(), record.provider.clone())
     };
 
     Ok(serde_json::json!({

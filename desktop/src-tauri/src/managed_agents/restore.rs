@@ -19,6 +19,10 @@ type AgentSpawnResult = (String, SpawnResult);
 /// empty snapshot.
 ///
 /// Only records with a `persona_id` but no `persona_source_version` are touched.
+/// Records that already have a `persona_source_version` — including those whose
+/// `model`/`provider` were clobbered by the old unconditional snapshot code before
+/// this fix — are skipped here; they self-heal on the next manual start via the
+/// start-path re-snapshot in `start_local_agent_with_preflight`.
 /// If the linked persona is gone, we log loudly and leave the snapshot empty —
 /// the record's own `system_prompt`/`model` (possibly empty for persona-created
 /// agents) is then all the config that remains, which is the same fallback an
@@ -61,8 +65,8 @@ pub fn backfill_persona_snapshots(app: &tauri::AppHandle) -> Result<(), String> 
         let snapshot = super::persona_events::persona_snapshot_with_agent_config_fallback(
             persona,
             &record.env_vars,
-            record.model.as_deref(),
-            record.provider.as_deref(),
+            record.model.as_deref(),    // fallback: record.model
+            record.provider.as_deref(), // fallback: record.provider
         );
         if let Some(prompt) = snapshot.system_prompt {
             record.system_prompt = Some(prompt);
@@ -180,8 +184,8 @@ pub async fn restore_managed_agents_on_launch(
             let snapshot = super::persona_events::persona_snapshot_with_agent_config_fallback(
                 persona,
                 &record.env_vars,
-                record.model.as_deref(),
-                record.provider.as_deref(),
+                record.model.as_deref(),    // fallback: record.model
+                record.provider.as_deref(), // fallback: record.provider
             );
             if let Some(prompt) = snapshot.system_prompt {
                 record.system_prompt = Some(prompt);
