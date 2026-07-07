@@ -304,10 +304,14 @@ const MediaAttachmentItem = React.forwardRef<
                           className={cn(
                             LIGHTBOX_BUTTON_CLASS,
                             "h-auto min-w-0",
-                            // Active state: swap the circular pill for the
-                            // shared button radius with a visible ring so a
-                            // spoilered attachment reads as "selected".
-                            "data-[state=on]:rounded-lg data-[state=on]:bg-black/50 data-[state=on]:text-white data-[state=on]:ring-2 data-[state=on]:ring-white/80",
+                            // Active state driven by component state, not
+                            // Radix's data-state: the TooltipTrigger clobbers
+                            // the Toggle's data-state attribute. Swap the
+                            // circular pill for the shared button radius with
+                            // a visible ring so a spoilered attachment reads
+                            // as "selected" on the dark lightbox backdrop.
+                            isSpoilered &&
+                              "rounded-lg bg-white/25 text-white ring-2 ring-white",
                           )}
                           data-testid="composer-attachment-spoiler"
                           onPressedChange={() =>
