@@ -161,8 +161,10 @@ fn fixture(
         respond_to,
         respond_to_allowlist: allowlist,
         display_name: None,
+        slug: None,
         name_pool: Vec::new(),
         is_builtin: false,
+        is_active: true,
         relay_mesh: None,
     }
 }

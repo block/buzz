@@ -214,6 +214,11 @@ fn hydrate_keys(records: &mut [ManagedAgentRecord]) {
 /// key this boot."
 fn hydrate_keys_with(store: &impl KeyStore, records: &mut [ManagedAgentRecord]) {
     for record in records.iter_mut() {
+        // A key-less definition (no pubkey yet — unified agent model) has no
+        // keyring entry by construction; keys are minted on first start.
+        if record.pubkey.is_empty() {
+            continue;
+        }
         if record.private_key_nsec.is_empty() {
             match store.load(&agent_keyring_name(&record.pubkey)) {
                 Ok(Some(nsec)) => record.private_key_nsec = nsec,

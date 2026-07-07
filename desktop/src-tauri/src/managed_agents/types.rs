@@ -208,6 +208,12 @@ pub struct ManagedAgentRecord {
     /// from `PersonaRecord.display_name` (unified agent model, Phase 1A).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
+    /// Stable definition slug — the former `PersonaRecord.id`. Key-less
+    /// records (definitions not yet instantiated) publish kind:30175 at
+    /// `d_tag = slug`, preserving the pre-merge event coordinates. `None` for
+    /// agents created directly (never persona-backed).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slug: Option<String>,
     /// Pool of short thematic names for clones of this agent. Absorbed from
     /// `PersonaRecord.name_pool`; feeds clone naming.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -215,6 +221,10 @@ pub struct ManagedAgentRecord {
     /// Absorbed from `PersonaRecord.is_builtin`.
     #[serde(default)]
     pub is_builtin: bool,
+    /// Absorbed from `PersonaRecord.is_active` — `false` means an archived
+    /// definition hidden from pickers. Defaults `true` for existing records.
+    #[serde(default = "default_record_active")]
+    pub is_active: bool,
     /// Typed marker for relay-mesh agents. `Some(_)` means this agent runs its
     /// inference through Buzz's relay-mesh local endpoint; the `model_ref` is
     /// the served model id to route to. `None` is a normal agent.

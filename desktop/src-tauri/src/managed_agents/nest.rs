@@ -1148,8 +1148,10 @@ mod tests {
             respond_to_allowlist: vec![],
             env_vars: std::collections::BTreeMap::new(),
             display_name: None,
+            slug: None,
             name_pool: Vec::new(),
             is_builtin: false,
+            is_active: true,
             relay_mesh: None,
         }
     }
