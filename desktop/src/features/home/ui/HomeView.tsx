@@ -371,6 +371,7 @@ export function HomeView({
         authorPubkey,
         avatarUrl: message.avatarUrl ?? null,
         content: message.body,
+        createdAt: message.createdAt,
         depth: event ? getContextMessageDepth(event, eventById) : message.depth,
         fullTimestampLabel: formatInboxFullTimestamp(message.createdAt),
         isSelected: message.id === selectedItem.id,
@@ -704,6 +705,7 @@ export function HomeView({
                             ?.avatarUrl ?? null)
                         : null,
                     content,
+                    createdAt: result.createdAt,
                     depth: result.depth,
                     fullTimestampLabel: formatInboxFullTimestamp(
                       result.createdAt,

@@ -6,7 +6,10 @@ import {
   hasNestedThreadBranches,
   type MainTimelineEntry,
 } from "@/features/messages/lib/threadPanel";
-import { hasSameMessageAuthor } from "@/features/messages/lib/messageGrouping";
+import {
+  hasSameMessageAuthor,
+  isWithinGroupingWindow,
+} from "@/features/messages/lib/messageGrouping";
 import type { ImetaMedia } from "@/features/messages/lib/imetaMediaMarkdown";
 import { canManageMessageForCurrentUser } from "@/features/messages/lib/canManageMessage";
 import type { TimelineMessage } from "@/features/messages/types";
@@ -543,7 +546,11 @@ export function MessageThreadPanel({
       const isContinuation =
         !startsUnreadSection &&
         entry.summary === null &&
-        hasSameMessageAuthor(previousGroupMessage, entry.message);
+        hasSameMessageAuthor(previousGroupMessage, entry.message) &&
+        isWithinGroupingWindow(
+          previousGroupMessage?.createdAt,
+          entry.message.createdAt,
+        );
 
       if (connectsToVisibleChild && !entry.summary) {
         ancestorStack.push({ index, message: entry.message });
