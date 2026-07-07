@@ -49,6 +49,22 @@ export function resolveAgentCommandUpdate(input: {
   return undefined;
 }
 
+/**
+ * Whether any of the runtime/provider-required credential keys is unset.
+ *
+ * A key counts as missing when its env value is absent or an empty string
+ * (matching {@link EnvVarsEditor}'s own `isMissing` rendering). The
+ * `requiredEnvKeys` list is already filtered to keys the dialog can fix —
+ * CLI-login runtimes (claude/codex) and keys satisfied by the runtime file
+ * config contribute no entries, so this never blocks on out-of-band auth.
+ */
+export function hasMissingRequiredEnvKey(
+  requiredEnvKeys: string[],
+  envVars: Record<string, string>,
+): boolean {
+  return requiredEnvKeys.some((key) => (envVars[key] ?? "").length === 0);
+}
+
 /** Inputs for {@link computeEditAgentFormValidity} — all pre-derived primitives. */
 export interface EditAgentFormValidityInput {
   name: string;
@@ -62,6 +78,13 @@ export interface EditAgentFormValidityInput {
   selectedRuntimeId: string;
   inheritHarness: boolean;
   agentCommand: string;
+  /**
+   * Whether a runtime/provider-required credential key is still unset. When
+   * true the Save button is blocked — the agent would otherwise persist with a
+   * missing credential and crash-loop on next start. See
+   * {@link hasMissingRequiredEnvKey}.
+   */
+  requiredEnvKeyMissing: boolean;
 }
 
 /**
@@ -76,6 +99,8 @@ export interface EditAgentFormValidityInput {
  * - a pinned "Custom command" runtime (custom selection with inheritance
  *   cleared) must carry a concrete command — an empty command would spawn a
  *   runtime with no command.
+ * - a runtime/provider-required credential key must be present — persisting
+ *   with a missing key would crash-loop the agent on next start.
  */
 export function computeEditAgentFormValidity(
   input: EditAgentFormValidityInput,
@@ -103,6 +128,7 @@ export function computeEditAgentFormValidity(
     timeoutValid &&
     acpCommandValid &&
     respondToValid &&
-    customCommandValid
+    customCommandValid &&
+    !input.requiredEnvKeyMissing
   );
 }

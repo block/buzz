@@ -9,6 +9,7 @@ import {
 } from "./personaDialogPickers.tsx";
 import {
   computeEditAgentFormValidity,
+  hasMissingRequiredEnvKey,
   resolveAgentCommandUpdate,
   shouldClearModelForRuntimeChange,
 } from "./personaRuntimeModel.ts";
@@ -525,6 +526,89 @@ test("editAgent_customCommandSelected_autoExpandsAdvancedSection", () => {
   );
 });
 
+test("editAgent_missingRequiredEnvKey_autoExpandsAdvancedOnTransition", () => {
+  // Codex P2: when a provider change makes a credential newly required, the
+  // EnvVarsEditor lives inside the collapsed Advanced section, so the amber
+  // required row would stay unmounted (invisible) while Save is disabled. The
+  // effect auto-expands Advanced on the missing→present-requirement transition.
+  let showAdvancedFields = false; // collapsed by default on open
+  let previousMissing = false;
+
+  // Mirror the effect's transition guard.
+  function applyMissingEffect(requiredEnvKeyMissing) {
+    if (requiredEnvKeyMissing && !previousMissing) {
+      showAdvancedFields = true;
+    }
+    previousMissing = requiredEnvKeyMissing;
+  }
+
+  // Initial render: buzz-agent with no provider — nothing required yet.
+  applyMissingEffect(
+    hasMissingRequiredEnvKey(requiredCredentialEnvKeys("buzz-agent", ""), {}),
+  );
+  assert.equal(
+    showAdvancedFields,
+    false,
+    "Advanced stays collapsed while no credential is required",
+  );
+
+  // User picks anthropic → ANTHROPIC_API_KEY becomes required and is unset.
+  applyMissingEffect(
+    hasMissingRequiredEnvKey(
+      requiredCredentialEnvKeys("buzz-agent", "anthropic"),
+      {},
+    ),
+  );
+  assert.equal(
+    showAdvancedFields,
+    true,
+    "Advanced auto-expands when a required credential is newly missing",
+  );
+
+  // User fills the key, then collapses Advanced manually — no re-expand.
+  showAdvancedFields = false;
+  applyMissingEffect(
+    hasMissingRequiredEnvKey(
+      requiredCredentialEnvKeys("buzz-agent", "anthropic"),
+      { ANTHROPIC_API_KEY: "sk-ant-test" },
+    ),
+  );
+  assert.equal(
+    showAdvancedFields,
+    false,
+    "Advanced does not re-expand once the required credential is filled",
+  );
+});
+
+test("editAgent_missingRequiredEnvKey_blocksSaveViaValidity", () => {
+  // The block-save gate is folded into computeEditAgentFormValidity so the
+  // Save button disables when a runtime/provider-required credential is unset.
+  const base = {
+    name: "My Agent",
+    parallelism: "",
+    turnTimeoutSeconds: "",
+    agentAcpCommand: "",
+    acpCommand: "",
+    respondTo: "all",
+    respondToAllowlistLength: 0,
+    selectedRuntimeId: "buzz-agent",
+    inheritHarness: false,
+    agentCommand: "buzz-agent",
+    requiredEnvKeyMissing: false,
+  };
+
+  assert.equal(
+    computeEditAgentFormValidity({ ...base, requiredEnvKeyMissing: true }),
+    false,
+    "Save must be blocked when a required credential key is missing",
+  );
+  assert.equal(
+    computeEditAgentFormValidity({ ...base, requiredEnvKeyMissing: false }),
+    true,
+    "Save must be allowed once the required credential key is present",
+  );
+});
+
 test("editAgent_customCommandPinned_blocksSaveWhenCommandEmpty", () => {
   // A pinned custom command with an empty command field must block Save — the
   // backend would spawn a runtime with no command otherwise. Exercises the real
@@ -540,6 +624,7 @@ test("editAgent_customCommandPinned_blocksSaveWhenCommandEmpty", () => {
     selectedRuntimeId: "custom",
     inheritHarness: false,
     agentCommand: "",
+    requiredEnvKeyMissing: false,
   };
 
   assert.equal(
@@ -1303,15 +1388,14 @@ test("requiredCredentialEnvKeys: custom/unknown runtime → empty", () => {
   assert.deepEqual(keys, []);
 });
 
-// ── Block-save gate: hasRequiredEnvKeyMissing logic ────────────────────────
+// ── Block-save gate: hasMissingRequiredEnvKey logic ────────────────────────
 //
 // The EditAgentDialog computes:
-//   hasRequiredEnvKeyMissing = requiredEnvKeys.some(k => (envVars[k] ?? "").length === 0)
-// and folds it into canSubmit. These tests exercise that predicate directly.
+//   requiredEnvKeyMissing = hasMissingRequiredEnvKey(requiredEnvKeys, envVars)
+// and folds it into canSubmit (via computeEditAgentFormValidity). These tests
+// exercise the exported predicate directly.
 
-function hasRequiredEnvKeyMissing(requiredKeys, envVars) {
-  return requiredKeys.some((key) => (envVars[key] ?? "").length === 0);
-}
+const hasRequiredEnvKeyMissing = hasMissingRequiredEnvKey;
 
 test("blockSave_buzzAgentAnthropicMissingKey_blocked", () => {
   // Will's exact case: buzz-agent / anthropic / opus / no ANTHROPIC_API_KEY

@@ -6,7 +6,6 @@ import {
   useAcpRuntimesQuery,
   useAgentConfigSurface,
   usePersonasQuery,
-  useRuntimeFileConfigQuery,
   useUpdateManagedAgentMutation,
 } from "@/features/agents/hooks";
 import type {
@@ -36,7 +35,6 @@ import {
   PERSONA_FIELD_SHELL_CLASS,
   PERSONA_LABEL_OPTIONAL_CLASS,
   runtimeSupportsLlmProviderSelection,
-  requiredCredentialEnvKeys,
   shouldClearKnownModelForSelectionScope,
   sortPersonaRuntimes,
   type PersonaDropdownOption,
@@ -49,6 +47,7 @@ import {
 } from "./personaRuntimeModel";
 import { AgentCreationPreview } from "./AgentCreationPreview";
 import type { EnvVarsValue } from "./EnvVarsEditor";
+import { useRequiredCredentialState } from "./useRequiredCredentialState";
 import { CreateAgentRespondToField } from "./RespondToField";
 import { PersonaDropdownField } from "./PersonaDropdownField";
 import {
@@ -251,56 +250,17 @@ export function EditAgentDialog({
     selectedRuntimeId,
   ]);
 
-  // Provider used for required-key validation — keyed off the PROSPECTIVE
-  // runtime, not the current dropdown. When the user transitions from a
-  // CLI-login pin (claude) to inherit a buzz-agent/goose persona, the current
-  // dropdown would suppress provider to "" (llmProviderFieldVisible=false),
-  // making requiredCredentialEnvKeys return [] and falsely unblocking the save.
-  // Using prospectiveRuntimeId here ensures the gate checks the credential
-  // requirements of the runtime that will actually be saved.
-  const providerForRequiredKeys = runtimeSupportsLlmProviderSelection(
-    prospectiveRuntimeId,
-  )
-    ? provider
-    : "";
-
-  // Required credential env keys for the PROSPECTIVE post-submit runtime.
-  // Using the prospective id (not the current dropdown) ensures the gate
-  // validates what will actually be saved — in particular, on the inherit
-  // transition (claude→buzz-agent or buzz-agent→claude) the gate reflects
-  // the inherited runtime's requirements, not the old pin's.
-  const { data: runtimeFileConfig } = useRuntimeFileConfigQuery(
-    prospectiveRuntimeId,
-    { enabled: open },
-  );
-  // Credential keys satisfied by the runtime file config — shown as
-  // "Set in goose config" rows rather than amber required rows.
-  const fileSatisfiedEnvKeys = React.useMemo(() => {
-    if (!runtimeFileConfig) return [] as string[];
-    const allKeys = requiredCredentialEnvKeys(
+  // Runtime/provider-required credential state, derived from the PROSPECTIVE
+  // post-submit runtime — see the hook for the inherit-transition and
+  // Advanced-auto-expand rationale.
+  const { requiredEnvKeys, fileSatisfiedEnvKeys, requiredEnvKeyMissing } =
+    useRequiredCredentialState({
+      open,
       prospectiveRuntimeId,
-      providerForRequiredKeys,
-    );
-    return allKeys.filter(
-      (key) =>
-        (envVars[key] ?? "").length === 0 &&
-        runtimeFileConfig.satisfiedEnvKeys.includes(key),
-    );
-  }, [
-    runtimeFileConfig,
-    prospectiveRuntimeId,
-    providerForRequiredKeys,
-    envVars,
-  ]);
-
-  const requiredEnvKeys = React.useMemo(
-    () =>
-      requiredCredentialEnvKeys(
-        prospectiveRuntimeId,
-        providerForRequiredKeys,
-      ).filter((key) => !fileSatisfiedEnvKeys.includes(key)),
-    [prospectiveRuntimeId, providerForRequiredKeys, fileSatisfiedEnvKeys],
-  );
+      provider,
+      envVars,
+      setShowAdvancedFields,
+    });
 
   const {
     discoveredModelOptions,
@@ -501,6 +461,7 @@ export function EditAgentDialog({
       selectedRuntimeId,
       inheritHarness,
       agentCommand,
+      requiredEnvKeyMissing,
     }) &&
     !updateMutation.isPending &&
     !isAvatarUploadPending;
