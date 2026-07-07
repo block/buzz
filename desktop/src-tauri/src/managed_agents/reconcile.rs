@@ -21,7 +21,7 @@
 use std::path::Path;
 
 use super::{
-    agent_events::{agent_event_content, build_agent_event},
+    agent_events::build_agent_event,
     persona_events::monotonic_created_at,
     retention::{get_retained_event, open_retention_db, retain_event, RetainedEvent},
     ManagedAgentRecord,
@@ -32,7 +32,7 @@ use nostr::JsonUtil;
 /// Reconcile `managed-agents.json` into kind:30177 events in the retention
 /// store. Boot-time entry point, called from `event_sync::run_event_sync`
 /// after the persona and team legs.
-pub fn reconcile_agents_to_events(app: &tauri::AppHandle, keys: &nostr::Keys) {
+pub(crate) fn reconcile_agents_to_events(app: &tauri::AppHandle, keys: &nostr::Keys) {
     let Ok(base_dir) = super::managed_agents_base_dir(app) else {
         return;
     };
@@ -53,9 +53,9 @@ pub fn reconcile_agents_to_events(app: &tauri::AppHandle, keys: &nostr::Keys) {
 /// Core reconcile logic, decoupled from the Tauri `AppHandle` for testing.
 ///
 /// Reads `managed-agents.json` raw — no keyring hydration: the published
-/// projection ([`agent_event_content`]) is the opt-IN no-secrets allowlist,
-/// so keys are never needed here. For each record it compares the freshly
-/// serialized projection against the retained row at
+/// projection ([`super::agent_events::agent_event_content`]) is the opt-IN
+/// no-secrets allowlist, so keys are never needed here. For each record it
+/// compares the freshly built event's content against the retained row at
 /// `(30177, owner, agent_pubkey)` and re-retains (marking `pending_sync = 1`)
 /// only when the row is absent or its content differs — an unchanged agent
 /// never churns `pending_sync`.
@@ -97,23 +97,24 @@ pub(crate) fn reconcile_agents_in_dir(base_dir: &Path, keys: &nostr::Keys) -> Re
         let existing =
             get_retained_event(&conn, KIND_MANAGED_AGENT, &owner_pubkey, &record.pubkey)?;
 
-        // The published content is the opt-IN projection JSON, independent of
-        // signing and created_at — compare it before building an event so an
-        // unchanged agent is a true no-op.
-        let content = serde_json::to_string(&agent_event_content(record))
-            .map_err(|e| format!("failed to serialize projection for '{}': {e}", record.name))?;
-        if existing.as_ref().is_some_and(|row| row.content == content) {
-            continue;
-        }
-
-        // Monotonic bump past the retained head so the upsert's `>=` guard
-        // always lands the UPDATE (mirrors `migrate_personas_in_dir`).
+        // Build the event first and compare ITS content, so the comparison and
+        // the retained row share one serialization of the projection (mirrors
+        // `migrate_personas_in_dir`). Serializing the projection independently
+        // here would silently diverge if `build_agent_event` ever changed how
+        // it serializes — republishing every agent every boot. Content is
+        // timestamp-independent, so the monotonic bump below never forces a
+        // spurious republish; an unchanged agent is still a true no-op.
         let event = build_agent_event(record)?
             .custom_created_at(monotonic_created_at(
                 existing.as_ref().map(|row| row.created_at),
             ))
             .sign_with_keys(keys)
             .map_err(|e| format!("failed to sign event for '{}': {e}", record.name))?;
+
+        let content = event.content.clone();
+        if existing.as_ref().is_some_and(|row| row.content == content) {
+            continue;
+        }
 
         retain_event(
             &conn,
