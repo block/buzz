@@ -35,6 +35,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/shared/ui/dropdown-menu";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/shared/ui/tabs";
 import { SettingsSectionHeader } from "./SettingsSectionHeader";
 
 // The queue is mod-only: only relay owners/admins may read /moderation/* (the
@@ -304,16 +305,9 @@ function QueueGroupCard({
   );
 }
 
-export function ModerationQueueCard() {
-  const membershipQuery = useMyRelayMembershipQuery();
-  const role = membershipQuery.data?.role;
-  const isModerator = role === "owner" || role === "admin";
-
-  const reportsQuery = useModerationReportsQuery(
-    { status: "open" },
-    isModerator,
-  );
-  const auditQuery = useModerationAuditQuery(undefined, isModerator);
+function QueueTab() {
+  const reportsQuery = useModerationReportsQuery({ status: "open" });
+  const auditQuery = useModerationAuditQuery();
   const resolveMutation = useResolveReportMutation();
 
   const groups = useMemo(() => {
@@ -330,7 +324,7 @@ export function ModerationQueueCard() {
     [groups],
   );
   const reporterProfiles = useUsersBatchQuery(reporterPubkeys, {
-    enabled: isModerator && reporterPubkeys.length > 0,
+    enabled: reporterPubkeys.length > 0,
   });
   const reporterNames = useMemo(() => {
     const map: Record<string, string | null | undefined> = {};
@@ -370,6 +364,135 @@ export function ModerationQueueCard() {
     }
   }
 
+  if (reportsQuery.error instanceof Error) {
+    return (
+      <p className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+        {reportsQuery.error.message}
+      </p>
+    );
+  }
+  if (reportsQuery.isLoading) {
+    return <p className="text-sm text-muted-foreground">Loading reports…</p>;
+  }
+  if (groups.length === 0) {
+    return (
+      <p className="rounded-lg border border-dashed border-border/70 bg-background/40 px-3 py-6 text-center text-sm text-muted-foreground">
+        No open reports. The queue is clear.
+      </p>
+    );
+  }
+  return (
+    <div className="space-y-3">
+      {groups.map((group) => (
+        <QueueGroupCard
+          disabled={resolveMutation.isPending}
+          group={group}
+          key={group.targetKey}
+          onResolve={handleResolve}
+          reporterNames={reporterNames}
+        />
+      ))}
+    </div>
+  );
+}
+
+function AuditRow({
+  action,
+  actorName,
+}: {
+  action: ModerationAction;
+  actorName?: string | null;
+}) {
+  const who = actorName?.trim() || truncatePubkey(action.actorPubkey);
+  const targetShort = action.targetPubkey
+    ? truncatePubkey(action.targetPubkey)
+    : action.targetEventId
+      ? truncatePubkey(action.targetEventId)
+      : null;
+  return (
+    <div
+      className="space-y-1 rounded-lg border border-border/60 bg-background/60 px-3 py-2"
+      data-testid={`moderation-audit-${action.id}`}
+    >
+      <div className="flex flex-wrap items-center gap-1.5 text-sm">
+        <span className="font-medium capitalize">
+          {action.action.replace(/_/g, " ")}
+        </span>
+        {targetShort ? (
+          <span className="font-mono text-xs text-muted-foreground">
+            → {targetShort}
+          </span>
+        ) : null}
+        <span className="text-xs text-muted-foreground">
+          by {who} · {formatTimestamp(action.createdAt)}
+        </span>
+      </div>
+      {action.publicReason ? (
+        <p className="text-xs text-muted-foreground">{action.publicReason}</p>
+      ) : null}
+    </div>
+  );
+}
+
+function AuditTab() {
+  const auditQuery = useModerationAuditQuery();
+
+  const actions = useMemo(
+    () => (auditQuery.data ?? []).map(toQueueAction),
+    [auditQuery.data],
+  );
+
+  const actorPubkeys = useMemo(
+    () => actions.map((action) => action.actorPubkey),
+    [actions],
+  );
+  const actorProfiles = useUsersBatchQuery(actorPubkeys, {
+    enabled: actorPubkeys.length > 0,
+  });
+  const actorNames = useMemo(() => {
+    const map: Record<string, string | null | undefined> = {};
+    const profiles = actorProfiles.data?.profiles ?? {};
+    for (const [pubkey, summary] of Object.entries(profiles)) {
+      map[pubkey.toLowerCase()] = summary?.displayName ?? null;
+    }
+    return map;
+  }, [actorProfiles.data]);
+
+  if (auditQuery.error instanceof Error) {
+    return (
+      <p className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+        {auditQuery.error.message}
+      </p>
+    );
+  }
+  if (auditQuery.isLoading) {
+    return <p className="text-sm text-muted-foreground">Loading audit log…</p>;
+  }
+  if (actions.length === 0) {
+    return (
+      <p className="rounded-lg border border-dashed border-border/70 bg-background/40 px-3 py-6 text-center text-sm text-muted-foreground">
+        No moderation actions yet.
+      </p>
+    );
+  }
+  return (
+    <div className="space-y-2">
+      {actions.map((action) => (
+        <AuditRow
+          action={action}
+          actorName={actorNames[action.actorPubkey.toLowerCase()]}
+          key={action.id}
+        />
+      ))}
+    </div>
+  );
+}
+
+export function ModerationQueueCard() {
+  const membershipQuery = useMyRelayMembershipQuery();
+  const role = membershipQuery.data?.role;
+  const isModerator = role === "owner" || role === "admin";
+
   return (
     <section
       className="flex min-h-0 flex-1 flex-col overflow-y-auto"
@@ -388,28 +511,23 @@ export function ModerationQueueCard() {
             The moderation queue is available to community moderators only.
           </p>
         )
-      ) : reportsQuery.error instanceof Error ? (
-        <p className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
-          {reportsQuery.error.message}
-        </p>
-      ) : reportsQuery.isLoading ? (
-        <p className="text-sm text-muted-foreground">Loading reports…</p>
-      ) : groups.length === 0 ? (
-        <p className="rounded-lg border border-dashed border-border/70 bg-background/40 px-3 py-6 text-center text-sm text-muted-foreground">
-          No open reports. The queue is clear.
-        </p>
       ) : (
-        <div className="space-y-3">
-          {groups.map((group) => (
-            <QueueGroupCard
-              disabled={resolveMutation.isPending}
-              group={group}
-              key={group.targetKey}
-              onResolve={handleResolve}
-              reporterNames={reporterNames}
-            />
-          ))}
-        </div>
+        <Tabs defaultValue="queue">
+          <TabsList>
+            <TabsTrigger data-testid="moderation-tab-queue" value="queue">
+              Queue
+            </TabsTrigger>
+            <TabsTrigger data-testid="moderation-tab-audit" value="audit">
+              Audit log
+            </TabsTrigger>
+          </TabsList>
+          <TabsContent value="queue">
+            <QueueTab />
+          </TabsContent>
+          <TabsContent value="audit">
+            <AuditTab />
+          </TabsContent>
+        </Tabs>
       )}
     </section>
   );
