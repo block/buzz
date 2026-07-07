@@ -40,6 +40,14 @@
       "platforms": [
         "desktop"
       ]
+    },
+    {
+      "id": "composerLiveActivity",
+      "name": "Composer live activity",
+      "description": "Merged live agent activity feed in the agents-working popover below the chat composer",
+      "platforms": [
+        "desktop"
+      ]
     }
   ]
 }

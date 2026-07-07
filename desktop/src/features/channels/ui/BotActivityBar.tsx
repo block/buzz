@@ -9,6 +9,7 @@ import {
 } from "@/features/agents/ui/agentSessionTranscriptPresentation";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type { ManagedAgent } from "@/shared/api/types";
+import { useFeatureEnabled } from "@/shared/features";
 import { cn } from "@/shared/lib/cn";
 import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
 import { Shimmer } from "@/shared/ui/Shimmer";
@@ -41,6 +42,7 @@ export function BotActivityComposerAction({
   variant = "toolbar",
 }: BotActivityBarProps) {
   const [open, setOpen] = React.useState(false);
+  const liveActivityEnabled = useFeatureEnabled("composerLiveActivity");
   const hoverTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(
     null,
   );
@@ -218,35 +220,50 @@ export function BotActivityComposerAction({
       </PopoverTrigger>
       <PopoverContent
         align={isInline ? "start" : "end"}
-        className="w-80 p-0"
+        className={cn(liveActivityEnabled ? "w-80 p-0" : "w-64 p-1")}
         onMouseEnter={keepOpen}
         onMouseLeave={closeWithDelay}
         onOpenAutoFocus={(event) => event.preventDefault()}
         side="top"
         sideOffset={8}
       >
-        <div className="px-3 pb-1 pt-2 text-xs font-medium text-muted-foreground">
+        <div
+          className={cn(
+            "text-xs font-medium text-muted-foreground",
+            liveActivityEnabled ? "px-3 pb-1 pt-2" : "px-2 py-1",
+          )}
+        >
           Agents working
         </div>
-        <ComposerLiveActivityFeed
-          agents={workingAgents}
-          channelId={channelId}
-          className="h-48"
-          onOpenAgentSession={(pubkey) => {
-            clearHoverTimer();
-            setOpen(false);
-            onOpenAgentSession(pubkey, channelId);
-          }}
-          profiles={profiles}
-        />
-        <div className="flex flex-col gap-0.5 border-t border-border/60 p-1">
+        {liveActivityEnabled ? (
+          <ComposerLiveActivityFeed
+            agents={workingAgents}
+            channelId={channelId}
+            className="h-48"
+            onOpenAgentSession={(pubkey) => {
+              clearHoverTimer();
+              setOpen(false);
+              onOpenAgentSession(pubkey, channelId);
+            }}
+            profiles={profiles}
+          />
+        ) : null}
+        <div
+          className={cn(
+            "flex flex-col",
+            liveActivityEnabled
+              ? "gap-0.5 border-t border-border/60 p-1"
+              : "mt-1 gap-1",
+          )}
+        >
           {workingAgents.map((agent) => {
             const isSelected = selectedPubkey === agent.pubkey.toLowerCase();
 
             return (
               <button
                 className={cn(
-                  "flex w-full items-center gap-2 rounded-lg px-2 py-1 text-left text-xs transition-colors",
+                  "flex w-full items-center gap-2 rounded-lg px-2 text-left transition-colors",
+                  liveActivityEnabled ? "py-1 text-xs" : "py-1.5 text-sm",
                   isSelected
                     ? "bg-primary/10 text-primary"
                     : "text-foreground hover:bg-accent hover:text-accent-foreground",
@@ -264,10 +281,15 @@ export function BotActivityComposerAction({
                   avatarUrl={agentAvatarUrl(agent)}
                   className="shrink-0"
                   displayName={agent.name}
-                  size="xs"
+                  size={liveActivityEnabled ? "xs" : "sm"}
                 />
                 <span className="min-w-0 flex-1 truncate">{agent.name}</span>
-                <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-muted-foreground/70" />
+                <Loader2
+                  className={cn(
+                    "shrink-0 animate-spin text-muted-foreground/70",
+                    liveActivityEnabled ? "h-3.5 w-3.5" : "h-4 w-4",
+                  )}
+                />
               </button>
             );
           })}
