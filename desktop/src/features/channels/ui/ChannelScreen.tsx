@@ -309,6 +309,7 @@ export function ChannelScreen({
       ...new Set([
         ...messageAuthorPubkeys,
         ...messageMentionPubkeys,
+        ...(channelMembers ?? []).map((member) => member.pubkey),
         ...activeDmParticipantPubkeys,
         ...knownAgentPubkeys,
         ...typingEntries.map((entry) => entry.pubkey),
@@ -316,6 +317,7 @@ export function ChannelScreen({
     ],
     [
       activeDmParticipantPubkeys,
+      channelMembers,
       knownAgentPubkeys,
       messageAuthorPubkeys,
       messageMentionPubkeys,
@@ -582,9 +584,7 @@ export function ChannelScreen({
   } = useChannelAgentSessions({
     activeChannel,
     activeChannelId,
-    // Loaded only once none of the three agent queries are in their initial
-    // fetch, so a channel with genuinely zero agents still auto-closes a stale
-    // agentSession param (a disabled query reports isLoading=false — fine).
+    // Wait until agent queries leave initial load before resolving stale agentSession params.
     agentsLoaded:
       !channelMembersQuery.isLoading &&
       !managedAgentsQuery.isLoading &&
