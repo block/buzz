@@ -77,6 +77,11 @@ export function AgentCreationPreview({
   const [selectedColor, setSelectedColor] = React.useState(
     DEFAULT_EMOJI_AVATAR_COLOR,
   );
+  // Whether the user has explicitly picked a color swatch (vs. the default).
+  // The color grid is always visible, so a user can choose a background color
+  // before their first emoji — in that case the first emoji must honor the
+  // chosen color instead of a random one.
+  const [hasChosenColor, setHasChosenColor] = React.useState(false);
   const [customHue, setCustomHue] = React.useState(DEFAULT_CUSTOM_HUE);
   const [customSaturation, setCustomSaturation] = React.useState(
     DEFAULT_CUSTOM_SATURATION,
@@ -135,6 +140,7 @@ export function AgentCreationPreview({
       if (parsed) {
         setSelectedEmoji(parsed.emoji);
         setSelectedColor(parsed.color);
+        setHasChosenColor(true);
         setActiveTab("emoji");
       } else {
         // Non-emoji avatar (image/URL or empty): clear any stale emoji
@@ -142,6 +148,7 @@ export function AgentCreationPreview({
         // over the current avatar.
         setSelectedEmoji(null);
         setSelectedColor(DEFAULT_EMOJI_AVATAR_COLOR);
+        setHasChosenColor(false);
         setActiveTab("image");
       }
     }
@@ -192,6 +199,7 @@ export function AgentCreationPreview({
       return;
     }
     setSelectedColor(swatch);
+    setHasChosenColor(true);
     if (selectedEmoji) {
       applyEmojiAvatar(selectedEmoji, swatch);
     }
@@ -207,6 +215,7 @@ export function AgentCreationPreview({
 
   function commitCustomColor() {
     setSelectedColor(customColorDraft);
+    setHasChosenColor(true);
     if (selectedEmoji) {
       applyEmojiAvatar(selectedEmoji, customColorDraft);
     }
@@ -528,7 +537,7 @@ export function AgentCreationPreview({
                     return;
                   }
                   const nextColor =
-                    selectedEmoji === null
+                    selectedEmoji === null && !hasChosenColor
                       ? (AVATAR_COLORS[
                           Math.floor(Math.random() * AVATAR_COLORS.length)
                         ] ?? DEFAULT_EMOJI_AVATAR_COLOR)
