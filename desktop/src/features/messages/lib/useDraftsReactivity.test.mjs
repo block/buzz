@@ -1,12 +1,15 @@
 /**
  * Unit tests for useDrafts store reactivity.
  *
- * Tests cover:
- *   - A write notifies subscribers (version bump)
- *   - Multiple writes each bump the version
- *   - clearDraftEntry notifies only when the key exists
- *   - markDraftSentEntry notifies
- *   - persistDraftEntry notifies when content is non-empty, and when clearing
+ * Tests verify the actual subscriber-notification contract:
+ *   - A write path (saveDraftEntry / clearDraftEntry / persistDraftEntry /
+ *     markDraftSentEntry) fires each registered subscriber exactly once.
+ *   - The snapshot version increments on each write.
+ *   - Unsubscribed callbacks are NOT called.
+ *   - clearDraftEntry on a nonexistent key is a no-op (no notification).
+ *
+ * Uses the exported `subscribeToStore` + `getStoreSnapshot` primitives so the
+ * contract is tested at the source — no React renderer needed.
  */
 
 import assert from "node:assert/strict";
@@ -47,32 +50,15 @@ installFreshLocalStorage();
 import {
   clearAllDrafts,
   clearDraftEntry,
+  getStoreSnapshot,
   initDraftStore,
   markDraftSentEntry,
   persistDraftEntry,
   saveDraftEntry,
+  subscribeToStore,
 } from "./useDrafts.ts";
 
-// We test reactivity by importing the internal subscribe machinery via
-// useDraftsSnapshot — since it's a React hook we can't call it directly in
-// Node, but we CAN test the underlying subscribe/getSnapshot functions
-// indirectly by calling the module's exported write functions and verifying
-// that saveDraftEntry etc. now exist without error. For the subscriber
-// notification itself, we patch into the module's module-level state via
-// a custom subscriber registered through a test-only shim.
-//
-// Since the module exports the subscriber set indirectly via
-// useSyncExternalStore, we validate the contract by:
-//   1. Checking that notifySubscribers fires by counting calls from a
-//      manually registered callback through a helper wrapper.
-
-// Helper: subscribe to store changes by accessing the _subscribers set via
-// a re-import side-channel. Since subscribers are module-level, we register
-// a callback before each write and verify it fires.
-
-// We can test the notification contract without a React renderer by calling
-// saveDraftEntry and checking subscriber callback invocation count. We do
-// this by importing the module fresh and using a patched variant.
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
 function setup(pubkey = "pubkey-reactivity") {
   installFreshLocalStorage();
@@ -96,55 +82,151 @@ function makeDraft(overrides = {}) {
   };
 }
 
-// ── Subscriber notification via module reload ─────────────────────────────────
-// Node module imports are cached. We verify reactivity by observing that
-// `saveDraftEntry` does not throw and that the store reflects the write,
-// which is the behavioral contract. The subscriber notification itself is
-// verified in the count test below using a re-usable notifyCount tracker.
-
-test("saveDraftEntry_does_not_throw_and_write_is_visible", () => {
-  setup();
-  // Should not throw (regression guard — if notifySubscribers throws it bubbles here)
-  assert.doesNotThrow(() => {
-    saveDraftEntry("chan-1", makeDraft());
+/**
+ * Subscribe, run `action`, unsubscribe, and return {callCount, versionBefore, versionAfter}.
+ */
+function observeWrite(action) {
+  let callCount = 0;
+  const versionBefore = getStoreSnapshot();
+  const unsub = subscribeToStore(() => {
+    callCount += 1;
   });
+  action();
+  unsub();
+  const versionAfter = getStoreSnapshot();
+  return { callCount, versionBefore, versionAfter };
+}
+
+// ── saveDraftEntry notifies subscriber and bumps version ──────────────────────
+
+test("saveDraftEntry_notifies_subscriber_and_bumps_version", () => {
+  setup();
+  const { callCount, versionBefore, versionAfter } = observeWrite(() => {
+    saveDraftEntry("chan-save", makeDraft());
+  });
+  assert.equal(callCount, 1, "subscriber must be called exactly once");
+  assert.equal(
+    versionAfter,
+    versionBefore + 1,
+    "version must increment by 1 on saveDraftEntry",
+  );
 });
 
-test("clearDraftEntry_does_not_throw_for_existing_key", () => {
+// ── clearDraftEntry notifies when key exists ──────────────────────────────────
+
+test("clearDraftEntry_notifies_subscriber_when_key_exists", () => {
   setup();
   saveDraftEntry("chan-del", makeDraft({ content: "to delete" }));
-  assert.doesNotThrow(() => {
+  const { callCount, versionBefore, versionAfter } = observeWrite(() => {
     clearDraftEntry("chan-del");
   });
+  assert.equal(
+    callCount,
+    1,
+    "subscriber must be called exactly once on delete",
+  );
+  assert.equal(
+    versionAfter,
+    versionBefore + 1,
+    "version must increment on delete",
+  );
 });
 
-test("clearDraftEntry_does_not_throw_for_nonexistent_key", () => {
+// ── clearDraftEntry on nonexistent key is a no-op ─────────────────────────────
+
+test("clearDraftEntry_is_noop_for_nonexistent_key", () => {
   setup();
-  // Key doesn't exist — should be a no-op and not notify
-  assert.doesNotThrow(() => {
-    clearDraftEntry("nonexistent-key");
+  const { callCount, versionBefore, versionAfter } = observeWrite(() => {
+    clearDraftEntry("key-that-does-not-exist");
   });
+  assert.equal(
+    callCount,
+    0,
+    "subscriber must NOT be called for nonexistent key",
+  );
+  assert.equal(
+    versionAfter,
+    versionBefore,
+    "version must NOT change for nonexistent key",
+  );
 });
 
-test("markDraftSentEntry_does_not_throw", () => {
-  setup();
-  persistDraftEntry("chan-sent", "content to send", "chan-sent", [], []);
-  assert.doesNotThrow(() => {
-    markDraftSentEntry("chan-sent", "content to send", "chan-sent", [], []);
-  });
-});
+// ── persistDraftEntry notifies on save ───────────────────────────────────────
 
-test("persistDraftEntry_non_empty_does_not_throw", () => {
+test("persistDraftEntry_non_empty_notifies_subscriber", () => {
   setup();
-  assert.doesNotThrow(() => {
+  const { callCount, versionBefore, versionAfter } = observeWrite(() => {
     persistDraftEntry("chan-p", "some content", "chan-p", [], []);
   });
+  assert.equal(callCount, 1, "subscriber must be called on persist");
+  assert.equal(
+    versionAfter,
+    versionBefore + 1,
+    "version must increment on persist",
+  );
 });
 
-test("persistDraftEntry_empty_clears_and_does_not_throw", () => {
+// ── persistDraftEntry clears on empty content ─────────────────────────────────
+
+test("persistDraftEntry_empty_content_notifies_subscriber", () => {
   setup();
+  // First save something.
   persistDraftEntry("chan-p2", "will be cleared", "chan-p2", [], []);
-  assert.doesNotThrow(() => {
+  const { callCount, versionBefore, versionAfter } = observeWrite(() => {
+    // Whitespace-only triggers a clear.
     persistDraftEntry("chan-p2", "   ", "chan-p2", [], []);
   });
+  assert.equal(
+    callCount,
+    1,
+    "subscriber must be called when content is cleared",
+  );
+  assert.equal(
+    versionAfter,
+    versionBefore + 1,
+    "version must increment on clear",
+  );
+});
+
+// ── markDraftSentEntry notifies subscriber ────────────────────────────────────
+
+test("markDraftSentEntry_notifies_subscriber", () => {
+  setup();
+  persistDraftEntry("chan-sent", "content to send", "chan-sent", [], []);
+  const { callCount, versionBefore, versionAfter } = observeWrite(() => {
+    markDraftSentEntry("chan-sent", "content to send", "chan-sent", [], []);
+  });
+  assert.equal(callCount, 1, "subscriber must be called on markSent");
+  assert.equal(
+    versionAfter,
+    versionBefore + 1,
+    "version must increment on markSent",
+  );
+});
+
+// ── Unsubscribed callback is NOT called ───────────────────────────────────────
+
+test("unsubscribed_callback_is_not_called", () => {
+  setup();
+  let callCount = 0;
+  const unsub = subscribeToStore(() => {
+    callCount += 1;
+  });
+  // Immediately unsubscribe before the write.
+  unsub();
+  saveDraftEntry("chan-unsub", makeDraft());
+  assert.equal(callCount, 0, "unsubscribed callback must NOT be called");
+});
+
+// ── Multiple writes each bump version independently ──────────────────────────
+
+test("multiple_writes_each_bump_version_independently", () => {
+  setup();
+  const v0 = getStoreSnapshot();
+  saveDraftEntry("chan-a", makeDraft());
+  const v1 = getStoreSnapshot();
+  saveDraftEntry("chan-b", makeDraft());
+  const v2 = getStoreSnapshot();
+  assert.equal(v1, v0 + 1, "first write must bump version");
+  assert.equal(v2, v1 + 1, "second write must bump version again");
 });

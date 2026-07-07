@@ -20,7 +20,7 @@ export type RootStatus = "checking" | "available" | "deleted" | "error";
 
 const EVENT_NOT_FOUND_MESSAGE = "event not found";
 
-function classifyError(err: unknown): RootStatus {
+export function classifyError(err: unknown): RootStatus {
   // Only the definitive relay-returned string maps to `deleted`.
   // Every other failure (transport, auth, serialization) is `error`.
   if (typeof err === "string" && err.includes(EVENT_NOT_FOUND_MESSAGE)) {

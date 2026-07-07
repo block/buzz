@@ -1,36 +1,46 @@
 /**
- * Unit tests for the orphan-status mapping logic extracted from
- * useDraftRootStatus.ts.
+ * Unit tests for useDraftRootStatus helpers.
+ *
+ * Tests import the ACTUAL exported `classifyError` and `deriveActiveDraftCount`
+ * (via DraftsPanel) so any implementation change is caught immediately.
  *
  * Tests cover:
- *   - "event not found" error string → `deleted`
- *   - Other error strings → `error`
- *   - Error instances with "event not found" message → `deleted`
- *   - Other Error instances → `error`
- *   - Resolved (no error) → `available`
- *
- * We test the classifyError function's behavior by re-implementing the same
- * classification logic and asserting the contract, since the function is
- * not separately exported. This ensures the spec is captured in tests even
- * if the implementation is refactored.
+ *   - classifyError: "event not found" → deleted; other errors → error
+ *   - deriveActiveDraftCount: exclusion by status, channel-root pass-through
  */
 
 import assert from "node:assert/strict";
 import test from "node:test";
 
-// Mirror the classifyError logic from useDraftRootStatus.ts for unit testing.
-// If the implementation diverges, the tsc check will catch a type mismatch.
-const EVENT_NOT_FOUND_MESSAGE = "event not found";
+// ── Browser-global shim for DraftsPanel imports ───────────────────────────────
 
-function classifyError(err) {
-  if (typeof err === "string" && err.includes(EVENT_NOT_FOUND_MESSAGE)) {
-    return "deleted";
-  }
-  if (err instanceof Error && err.message.includes(EVENT_NOT_FOUND_MESSAGE)) {
-    return "deleted";
-  }
-  return "error";
+function makeLocalStorage() {
+  const store = new Map();
+  return {
+    get length() {
+      return store.size;
+    },
+    key: (i) => [...store.keys()][i] ?? null,
+    getItem: (key) => store.get(key) ?? null,
+    setItem: (key, value) => store.set(key, value),
+    removeItem: (key) => store.delete(key),
+    clear: () => store.clear(),
+  };
 }
+
+if (typeof globalThis.window === "undefined") {
+  globalThis.window = { localStorage: makeLocalStorage() };
+} else {
+  globalThis.window.localStorage = makeLocalStorage();
+}
+Object.defineProperty(globalThis, "localStorage", {
+  get: () => globalThis.window.localStorage,
+  configurable: true,
+});
+
+// Import the real exported helpers.
+import { classifyError } from "./useDraftRootStatus.ts";
+import { deriveActiveDraftCount } from "../ui/DraftsPanel.tsx";
 
 // ── classifyError: string errors ─────────────────────────────────────────────
 
@@ -73,7 +83,6 @@ test("classifyError_Error_instance_with_other_message_returns_error", () => {
 // ── Only deleted excludes from count ─────────────────────────────────────────
 
 test("only_deleted_status_excludes_draft_from_count", () => {
-  // Simulate deriveActiveDraftCount logic for a thread draft
   function wouldExclude(rootStatus) {
     return rootStatus === "deleted";
   }
@@ -92,27 +101,7 @@ test("only_deleted_status_excludes_draft_from_count", () => {
   assert.equal(wouldExclude("error"), false, "error must NOT be excluded");
 });
 
-// ── deriveActiveDraftCount contract ──────────────────────────────────────────
-
-// Re-implement the deriveActiveDraftCount logic to assert its behavior
-// independently of the DraftsPanel module (which requires React).
-function getThreadRootId(draftKey) {
-  const originalKey = draftKey.startsWith("sent:")
-    ? draftKey.slice("sent:".length).split(":").slice(0, -1).join(":")
-    : draftKey;
-  if (!originalKey.startsWith("thread:")) return null;
-  const id = originalKey.slice("thread:".length).trim();
-  return id.length > 0 ? id : null;
-}
-
-function deriveActiveDraftCount(activeDrafts, rootStatusMap) {
-  return activeDrafts.filter((entry) => {
-    const threadRootId = getThreadRootId(entry.key);
-    if (threadRootId === null) return true;
-    const status = rootStatusMap.get(threadRootId) ?? "checking";
-    return status !== "deleted";
-  }).length;
-}
+// ── deriveActiveDraftCount (imported from DraftsPanel) ───────────────────────
 
 test("deriveActiveDraftCount_excludes_thread_draft_with_deleted_root", () => {
   const drafts = [{ key: "thread:root-aaa", draft: {} }];

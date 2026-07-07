@@ -32,6 +32,13 @@ function getStoreSnapshot(): number {
   return _version;
 }
 
+/**
+ * Subscribe to draft store changes. Returns an unsubscribe function.
+ * Exported for unit-testing the subscriber notification contract.
+ * Use `useDraftsSnapshot()` in React components.
+ */
+export { subscribeToStore, getStoreSnapshot };
+
 export type DraftState = {
   content: string;
   selectionStart: number;

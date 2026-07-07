@@ -772,6 +772,8 @@ export const ChannelPane = React.memo(function ChannelPane({
               }
               layout={useSplitAuxiliaryPane ? "split" : "standalone"}
               transparentChrome={useSplitAuxiliaryPane}
+              autoSendDraftKey={autoSendDraftKey}
+              onAutoSubmitComplete={handleAutoSubmitComplete}
               onCancelEdit={onCancelEdit}
               onCancelReply={onCancelThreadReply}
               onClose={onCloseThread}

@@ -267,4 +267,87 @@ test.describe("drafts screenshots", () => {
 
     await panel.screenshot({ path: `${SHOTS}/04-empty-state.png` });
   });
+
+  test("05 — thread-draft send confirm dialog", async ({ page }) => {
+    // Regression test for IMPORTANT #1: thread-reply draft Send navigates to
+    // the correct channel and passes the autoSend key so the thread composer
+    // (not the main composer) arms the auto-submit.
+    await installMockBridge(page);
+    await patchWorkspacePubkey(page);
+
+    // A fixed fake root event ID — in the mock bridge get_event is unhandled
+    // so useDraftRootStatus will map it to `error` (not `deleted`), keeping
+    // the draft sendable.
+    const THREAD_ROOT_ID =
+      "aaaa1111bbbb2222cccc3333dddd4444aaaa1111bbbb2222cccc3333dddd4444";
+    const THREAD_DRAFT_KEY = `thread:${THREAD_ROOT_ID}`;
+
+    await page.addInitScript(
+      ({ storeKey, value }) => {
+        window.localStorage.setItem(storeKey, JSON.stringify(value));
+      },
+      {
+        storeKey: DRAFT_STORE_KEY,
+        value: {
+          [THREAD_DRAFT_KEY]: {
+            content: "Thread reply draft content",
+            selectionStart: 26,
+            selectionEnd: 26,
+            channelId: GENERAL_CHANNEL_ID,
+            createdAt: CREATED_AT_1,
+            updatedAt: CREATED_AT_1,
+            pendingImeta: [],
+            spoileredAttachmentUrls: [],
+            status: "active",
+          },
+        } satisfies StoredDrafts,
+      },
+    );
+
+    const panel = await openDraftsPanel(page);
+
+    // The thread draft row should appear.
+    const draftRow = panel.locator(
+      `[data-testid='home-draft-item-${THREAD_DRAFT_KEY}']`,
+    );
+    await expect(draftRow).toBeVisible({ timeout: 8_000 });
+
+    // "Thread deleted" label must NOT appear — root status is `error` (optimistic).
+    await expect(panel.getByText("Thread deleted")).not.toBeVisible();
+
+    // Hover to reveal the three action buttons.
+    await draftRow.hover();
+    const sendBtn = draftRow.getByRole("button", {
+      name: "Send message",
+      exact: true,
+    });
+    await expect(sendBtn).toBeVisible({ timeout: 4_000 });
+
+    // Click "Send message" — confirm dialog should appear.
+    await sendBtn.click();
+    const dialog = page.getByRole("alertdialog");
+    await expect(dialog).toBeVisible({ timeout: 4_000 });
+    await expect(dialog.getByText("Send message")).toBeVisible();
+    // Confirm dialog body names the channel.
+    await expect(dialog.getByText(/general/i)).toBeVisible();
+
+    await page.waitForTimeout(200);
+    await panel.screenshot({
+      path: `${SHOTS}/05-thread-draft-send-dialog.png`,
+    });
+
+    // Click Send — dialog closes and we navigate to the channel with ?autoSend.
+    await dialog.getByRole("button", { name: "Send", exact: true }).click();
+    await expect(dialog).not.toBeVisible({ timeout: 4_000 });
+
+    // URL must include ?autoSend=thread:<rootId> immediately after confirm.
+    // (The param is cleared once MessageComposer mounts and fires onAutoSubmitComplete;
+    // in the mock bridge the full send path is not exercised, so the param may
+    // or may not clear depending on composer mount. We assert it is set at navigate
+    // time, which verifies the confirm→navigate path.)
+    await expect(page).toHaveURL(
+      new RegExp(`autoSend=${encodeURIComponent(THREAD_DRAFT_KEY)}`),
+      { timeout: 6_000 },
+    );
+  });
 });

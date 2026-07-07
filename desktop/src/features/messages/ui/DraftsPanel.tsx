@@ -215,7 +215,20 @@ export function canSendDraft(
   source: DraftSource,
   rootStatus: RootStatus,
 ): boolean {
-  return canOpenDraft(draft, source) && rootStatus !== "deleted";
+  if (!canOpenDraft(draft, source)) return false;
+  if (rootStatus === "deleted") return false;
+  // Mirror the destination composer's stable disabled states so we never
+  // offer a Send that will silently no-op:
+  //   - not a member: the composer rejects sends
+  //   - archived: read-only
+  //   - forum: forum posting is not wired
+  // `isSending` is transient runtime state not visible from the panel — omit.
+  const ch = source.channel;
+  if (ch === null) return false;
+  if (!ch.isMember) return false;
+  if (ch.archivedAt !== null) return false;
+  if (ch.channelType === "forum") return false;
+  return true;
 }
 
 // ── Send confirmation dialog ──────────────────────────────────────────────────
@@ -387,9 +400,12 @@ function DraftRow({
 }
 
 // ── Shared derivation: active draft count ────────────────────────────────────
-// This is the SINGLE source of truth for the badge count. Both the badge
-// (InboxListPane/HomeView) and the panel derive from {drafts ⋈ rootStatus}
-// through this function — never a separate store-only count.
+// The badge (InboxListPane/HomeView) and the panel both call
+// `deriveActiveDraftCount` with the same arguments so the derivation logic
+// cannot diverge. Note: the badge call-site feeds an empty rootStatusMap
+// (panel closed → queries disabled), so orphaned thread drafts count
+// optimistically until the panel opens and the relay confirms deletion.
+// This bounded eventual-consistency is the sanctioned design (Will, 2026-07-07).
 
 /**
  * Derives the active (non-orphaned) draft count from the draft store snapshot
@@ -420,14 +436,13 @@ export function deriveActiveDraftCount(
  * Reactive hook for the active (non-orphaned) draft count.
  *
  * Used by `HomeView` to thread the count to `InboxListPane` for the badge.
- * Must derive from the same `{drafts ⋈ rootStatusMap}` source the panel uses —
- * satisfying Thufir's IMPORTANT (no badge overcount for deleted-thread drafts).
+ * Uses the same `deriveActiveDraftCount` function as the panel so the
+ * derivation logic cannot diverge.
  *
  * When the panel is closed, `rootStatusMap` is empty (queries disabled), so
- * all thread-reply drafts are treated as available (optimistic). The badge
- * shows the full count when the panel is closed, which is acceptable — it
- * only becomes accurate (excludes orphaned) once the panel is opened and the
- * relay lookups complete.
+ * thread-reply drafts are counted optimistically — orphaned roots only drop
+ * out of the count once the panel opens and the relay lookups complete.
+ * This bounded eventual-consistency is product-approved (Will, 2026-07-07).
  */
 export function useActiveDraftCount(
   rootStatusMap: Map<string, RootStatus>,
@@ -555,9 +570,7 @@ export function DraftsPanel() {
     : UNKNOWN_DRAFT_SOURCE;
   const sendDialogIsDm = sendDialogSource.channel?.channelType === "dm";
   const sendDialogChannelLabel = sendDialogSource.channel
-    ? sendDialogIsDm
-      ? sendDialogSource.label
-      : sendDialogSource.label
+    ? sendDialogSource.label
     : UNKNOWN_CHANNEL_LABEL;
 
   if (sections.length === 0) {

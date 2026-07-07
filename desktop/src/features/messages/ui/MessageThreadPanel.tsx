@@ -99,6 +99,15 @@ type MessageThreadPanelProps = {
   isMessageUnreadById?: (messageId: string) => boolean;
   onFollowThread?: () => void;
   onUnfollowThread?: () => void;
+  /**
+   * When set to `thread:<threadHead.id>`, the thread composer auto-submits
+   * once on mount (Send-from-drafts flow). Must be cleared by
+   * `onAutoSubmitComplete` before `submitMessage` fires so the param cannot
+   * re-trigger on back-navigation.
+   */
+  autoSendDraftKey?: string | null;
+  /** Called when the thread-composer auto-submit fires so the parent can clear the trigger. */
+  onAutoSubmitComplete?: () => void;
 };
 
 const EMPTY_THREAD_REPLIES: MainTimelineEntry[] = [];
@@ -329,6 +338,8 @@ export function MessageThreadPanel({
   toolbarExtraActions,
   widthPx,
   transparentChrome = false,
+  autoSendDraftKey = null,
+  onAutoSubmitComplete,
 }: MessageThreadPanelProps) {
   const threadBodyRef = React.useRef<HTMLDivElement>(null);
   const threadContentRef = React.useRef<HTMLDivElement>(null);
@@ -870,6 +881,8 @@ export function MessageThreadPanel({
             containerClassName={THREAD_PANEL_COMPOSER_GUTTER_CLASS}
             disabled={disabled || isSending || !channelId}
             draftKey={`thread:${threadHead.id}`}
+            autoSubmitDraftKey={autoSendDraftKey}
+            onAutoSubmitComplete={onAutoSubmitComplete}
             editTarget={editTarget}
             isSending={isSending}
             onCancelEdit={onCancelEdit}
