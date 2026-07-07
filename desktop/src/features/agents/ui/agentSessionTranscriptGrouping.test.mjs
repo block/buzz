@@ -396,6 +396,75 @@ test("flattenDisplayBlocks preserves child order through mixed summaries", () =>
   );
 });
 
+test("buildTranscriptDisplayBlocks never same-kind groups failed tools", () => {
+  const mkFailed = (id) => ({
+    ...mkTool(id, "Ran command failed", "error", "shell:command"),
+    isError: true,
+  });
+
+  const [block] = buildTranscriptDisplayBlocks([
+    mkFailed("fail-1"),
+    mkFailed("fail-2"),
+    mkFailed("fail-3"),
+  ]);
+
+  assert.equal(block.kind, "turn");
+  assert.deepEqual(
+    block.segments.map((segment) => segment.kind),
+    ["item", "item", "item"],
+  );
+});
+
+test("buildTranscriptDisplayBlocks never same-kind groups status tool rows", () => {
+  const [block] = buildTranscriptDisplayBlocks([
+    mkTool("status-1", "Context compacted", "status", "status:post-compact"),
+    mkTool("status-2", "Context compacted", "status", "status:post-compact"),
+    mkTool("status-3", "Context compacted", "status", "status:post-compact"),
+  ]);
+
+  assert.equal(block.kind, "turn");
+  assert.deepEqual(
+    block.segments.map((segment) => segment.kind),
+    ["item", "item", "item"],
+  );
+});
+
+test("buildTranscriptDisplayBlocks never same-kind groups suppressed tool rows", () => {
+  const [block] = buildTranscriptDisplayBlocks([
+    mkTool("stop-1", "Checked todos", "suppressed", "suppressed:stop-hook"),
+    mkTool("stop-2", "Checked todos", "suppressed", "suppressed:stop-hook"),
+    mkTool("stop-3", "Checked todos", "suppressed", "suppressed:stop-hook"),
+  ]);
+
+  assert.equal(block.kind, "turn");
+  assert.deepEqual(
+    block.segments.map((segment) => segment.kind),
+    ["item", "item", "item"],
+  );
+});
+
+test("buildTranscriptDisplayBlocks breaks same-kind runs on an ineligible row", () => {
+  const failed = {
+    ...mkTool("fail-1", "Read file failed", "error", "read_file"),
+    isError: true,
+  };
+
+  const [block] = buildTranscriptDisplayBlocks([
+    mkTool("read-1", "Read file", "file-read", "read_file"),
+    mkTool("read-2", "Read file", "file-read", "read_file"),
+    failed,
+    mkTool("read-3", "Read file", "file-read", "read_file"),
+    mkTool("read-4", "Read file", "file-read", "read_file"),
+  ]);
+
+  assert.equal(block.kind, "turn");
+  assert.deepEqual(
+    block.segments.map((segment) => segment.kind),
+    ["item", "item", "item", "item", "item"],
+  );
+  assert.equal(block.segments[2].item.id, "fail-1");
+});
+
 function mkTool(id, label, renderClass = "generic", groupKey = label) {
   return {
     id,

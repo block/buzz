@@ -185,7 +185,7 @@ function groupMixedToolRuns(
   const grouped: TranscriptTurnSegment[] = [];
   for (let i = 0; i < segments.length; i++) {
     const segment = segments[i];
-    if (segment.kind !== "item" || !isMixedRunEligible(segment.item)) {
+    if (segment.kind !== "item" || !isGroupingEligible(segment.item)) {
       grouped.push(segment);
       continue;
     }
@@ -193,7 +193,7 @@ function groupMixedToolRuns(
     let j = i + 1;
     while (j < segments.length) {
       const next = segments[j];
-      if (next.kind !== "item" || !isMixedRunEligible(next.item)) break;
+      if (next.kind !== "item" || !isGroupingEligible(next.item)) break;
       run.push(next.item);
       j += 1;
     }
@@ -218,7 +218,7 @@ function groupMixedToolRuns(
   return grouped;
 }
 
-const MIXED_RUN_ELIGIBLE_RENDER_CLASSES = new Set<
+const GROUPING_ELIGIBLE_RENDER_CLASSES = new Set<
   NonNullable<TranscriptItem["renderClass"]>
 >([
   "file-read",
@@ -231,22 +231,24 @@ const MIXED_RUN_ELIGIBLE_RENDER_CLASSES = new Set<
   "generic",
 ]);
 
-function isMixedRunEligible(item: TranscriptItem): boolean {
+/**
+ * Shared eligibility for both grouping passes. Failed tools (isError or
+ * reclassified renderClass "error"), messages, permissions, status, and
+ * suppressed rows are never grouped and break runs, so intervention points
+ * stay visible.
+ */
+function isGroupingEligible(item: TranscriptItem): boolean {
   if (item.type !== "tool" || item.isError) return false;
   const renderClass = getRenderClass(item);
   return (
-    renderClass != null && MIXED_RUN_ELIGIBLE_RENDER_CLASSES.has(renderClass)
+    renderClass != null && GROUPING_ELIGIBLE_RENDER_CLASSES.has(renderClass)
   );
 }
 
 function sameKindKey(item: TranscriptItem): string | null {
-  if (item.type !== "tool") return null;
-  const renderClass = getRenderClass(item);
-  if (renderClass === "message") {
-    return null;
-  }
+  if (!isGroupingEligible(item) || item.type !== "tool") return null;
   const descriptor = item.descriptor ?? classifyToolItem(item);
-  return descriptor.groupKey ?? renderClass;
+  return descriptor.groupKey ?? getRenderClass(item);
 }
 
 function sameKindLabel(item: TranscriptItem, count: number): string {
