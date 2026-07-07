@@ -23,6 +23,8 @@
 
 /// Cross-pod cache-key invalidation over Redis pub/sub.
 pub mod cache_invalidation;
+/// Cross-pod connection-control commands over Redis pub/sub.
+pub mod conn_control;
 /// Error types for pub/sub operations.
 pub mod error;
 /// Redis-backed NIP-98 replay seen-set.
@@ -52,6 +54,7 @@ use tokio::sync::{broadcast, mpsc, Mutex};
 use crate::cache_invalidation::{
     cache_invalidation_channel, CacheInvalidation, ScopedCacheInvalidation,
 };
+use crate::conn_control::{conn_control_channel, ConnControl, ScopedConnControl};
 pub use crate::topic::{channel_key, global_key, EventTopic, EventTopicKey};
 
 /// A Nostr event received on a scoped Redis event topic, broadcast to local subscribers.
@@ -106,6 +109,7 @@ pub struct PubSubManager {
     subscription_rx: Mutex<Option<mpsc::Receiver<subscriber::SubscriptionCommand>>>,
     broadcast_tx: broadcast::Sender<ChannelEvent>,
     cache_invalidation_tx: broadcast::Sender<ScopedCacheInvalidation>,
+    conn_control_tx: broadcast::Sender<ScopedConnControl>,
 }
 
 impl PubSubManager {
@@ -121,6 +125,7 @@ impl PubSubManager {
     ) -> Result<Self, PubSubError> {
         let (broadcast_tx, _) = broadcast::channel(4096);
         let (cache_invalidation_tx, _) = broadcast::channel(4096);
+        let (conn_control_tx, _) = broadcast::channel(4096);
         let (subscription_tx, subscription_rx) = mpsc::channel(4096);
 
         Ok(Self {
@@ -132,6 +137,7 @@ impl PubSubManager {
             subscription_rx: Mutex::new(Some(subscription_rx)),
             broadcast_tx,
             cache_invalidation_tx,
+            conn_control_tx,
         })
     }
 
@@ -160,6 +166,16 @@ impl PubSubManager {
         cache_invalidation::run_cache_invalidation_subscriber(
             self.redis_url.clone(),
             self.cache_invalidation_tx.clone(),
+        )
+        .await;
+    }
+
+    /// Starts the connection-control subscriber loop with automatic
+    /// reconnection. Runs forever — spawn this in a background task.
+    pub async fn run_conn_control_subscriber(self: Arc<Self>) {
+        conn_control::run_conn_control_subscriber(
+            self.redis_url.clone(),
+            self.conn_control_tx.clone(),
         )
         .await;
     }
@@ -244,6 +260,11 @@ impl PubSubManager {
         self.cache_invalidation_tx.subscribe()
     }
 
+    /// Returns a new broadcast receiver for cross-pod connection-control commands.
+    pub fn subscribe_conn_control(&self) -> broadcast::Receiver<ScopedConnControl> {
+        self.conn_control_tx.subscribe()
+    }
+
     /// Publish a cache-key drop to all pods. Fire-and-forget at the call site:
     /// the local cache is already dropped synchronously; this carries the same
     /// drop cross-pod. A dropped publish is backstopped by the REQ denial-path
@@ -257,6 +278,26 @@ impl PubSubManager {
         let payload = serde_json::to_string(invalidation)?;
         let subscriber_count: i64 = redis::cmd("PUBLISH")
             .arg(cache_invalidation_channel(ctx))
+            .arg(&payload)
+            .query_async(&mut conn)
+            .await?;
+        Ok(subscriber_count)
+    }
+
+    /// Publish a connection-control command to all pods. Used for live ban
+    /// enforcement: the banning pod disconnects any local sockets synchronously
+    /// and calls this to reach the banned member's sockets on other pods. The DB
+    /// ban row is the durable backstop, so a dropped publish still refuses the
+    /// next auth attempt; callers may spawn this without awaiting delivery.
+    pub async fn publish_conn_control(
+        &self,
+        ctx: &TenantContext,
+        command: &ConnControl,
+    ) -> Result<i64, PubSubError> {
+        let mut conn = self.pool.get().await?;
+        let payload = serde_json::to_string(command)?;
+        let subscriber_count: i64 = redis::cmd("PUBLISH")
+            .arg(conn_control_channel(ctx))
             .arg(&payload)
             .query_async(&mut conn)
             .await?;
