@@ -808,3 +808,198 @@ async fn test_cancel_notification_no_reply() {
 
     h.shutdown().await;
 }
+
+/// Per-tool friendly titles, stage 1: the immediate `tool_call` (pending)
+/// update must carry the deterministic friendly title plus the exact tool
+/// identity in `toolName`, and receipts in `rawInput`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_pending_tool_call_carries_friendly_title_and_tool_name() {
+    let url = spawn_fake_llm(vec![
+        openai_tool_call(
+            "call_t1",
+            "fake__do_thing",
+            json!({ "command": "git status" }),
+        ),
+        openai_text("done"),
+    ])
+    .await;
+    let mut h = Harness::spawn(&[("OPENAI_COMPAT_BASE_URL", &url)]).await;
+
+    let sid = handshake(&mut h).await;
+    let p = h
+        .send(
+            "session/prompt",
+            json!({
+                "sessionId": sid,
+                "prompt": [{ "type": "text", "text": "use the tool" }],
+            }),
+        )
+        .await;
+
+    let pending = h
+        .recv_until(|v| {
+            v.get("method") == Some(&json!("session/update"))
+                && v["params"]["update"]["sessionUpdate"] == "tool_call"
+        })
+        .await;
+    let update = &pending["params"]["update"];
+    assert_eq!(update["title"], "fake: do thing · git status");
+    assert_eq!(update["toolName"], "fake__do_thing");
+    assert_eq!(update["status"], "pending");
+    assert_eq!(update["rawInput"]["command"], "git status");
+
+    let final_resp = h.recv_for_id(p).await;
+    assert_eq!(final_resp["result"]["stopReason"], "end_turn");
+    h.shutdown().await;
+}
+
+/// Per-tool friendly titles, stage 2: the async fast pass publishes a
+/// title-only `tool_call_update` tagged `_meta.buzz.toolSummary` with NO
+/// status field, so it can never regress pending/executing/terminal state.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_async_tool_summary_publishes_title_only_update() {
+    // Queue: round-1 tool call, then the fast summary response (the tool is
+    // delayed 1s so the summary request reaches the fake LLM first), then the
+    // round-2 final text.
+    let url = spawn_fake_llm(vec![
+        openai_tool_call(
+            "call_s1",
+            "fake__tool_0",
+            json!({ "command": "git status" }),
+        ),
+        openai_text("checking repository state"),
+        openai_text("done"),
+    ])
+    .await;
+    let mut h = Harness::spawn(&[("OPENAI_COMPAT_BASE_URL", &url)]).await;
+
+    let init_id = h
+        .send(
+            "initialize",
+            json!({ "protocolVersion": 2, "clientCapabilities": {} }),
+        )
+        .await;
+    let _ = h.recv_for_id(init_id).await;
+    let fake_mcp = env!("CARGO_BIN_EXE_fake-mcp");
+    let new_id = h
+        .send(
+            "session/new",
+            json!({
+                "cwd": "/tmp",
+                "mcpServers": [{
+                    "name": "fake",
+                    "command": fake_mcp,
+                    "args": [],
+                    "env": [
+                        { "name": "FAKE_MCP_TOOL_COUNT", "value": "1" },
+                        { "name": "FAKE_MCP_TOOL_DELAY", "value": "1" },
+                    ],
+                }],
+            }),
+        )
+        .await;
+    let new = h.recv_for_id(new_id).await;
+    let sid = new["result"]["sessionId"].as_str().unwrap().to_owned();
+
+    let p = h
+        .send(
+            "session/prompt",
+            json!({
+                "sessionId": sid,
+                "prompt": [{ "type": "text", "text": "use the tool" }],
+            }),
+        )
+        .await;
+
+    let summary = h
+        .recv_until(|v| {
+            v.get("method") == Some(&json!("session/update"))
+                && v["params"]["update"]["sessionUpdate"] == "tool_call_update"
+                && v["params"]["update"]["_meta"]["buzz"]["toolSummary"] == json!(true)
+        })
+        .await;
+    let update = &summary["params"]["update"];
+    assert_eq!(update["toolCallId"], "call_s1");
+    assert_eq!(update["title"], "checking repository state");
+    assert_eq!(update["toolName"], "fake__tool_0");
+    assert!(
+        update.get("status").is_none(),
+        "summary update must not carry a status: {update}"
+    );
+
+    let final_resp = h.recv_for_id(p).await;
+    assert_eq!(final_resp["result"]["stopReason"], "end_turn");
+    h.shutdown().await;
+}
+
+/// Kill switch: BUZZ_AGENT_NO_TOOL_SUMMARY=1 must suppress the fast pass
+/// entirely — no summary update on the wire, and no extra LLM request
+/// (the canned-queue accounting would break the turn if one fired).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_tool_summary_kill_switch() {
+    let url = spawn_fake_llm(vec![
+        openai_tool_call("call_k1", "fake__tool_0", json!({ "command": "ls" })),
+        openai_text("done"),
+    ])
+    .await;
+    let mut h = Harness::spawn(&[
+        ("OPENAI_COMPAT_BASE_URL", &url),
+        ("BUZZ_AGENT_NO_TOOL_SUMMARY", "1"),
+    ])
+    .await;
+
+    let init_id = h
+        .send(
+            "initialize",
+            json!({ "protocolVersion": 2, "clientCapabilities": {} }),
+        )
+        .await;
+    let _ = h.recv_for_id(init_id).await;
+    let fake_mcp = env!("CARGO_BIN_EXE_fake-mcp");
+    let new_id = h
+        .send(
+            "session/new",
+            json!({
+                "cwd": "/tmp",
+                "mcpServers": [{
+                    "name": "fake",
+                    "command": fake_mcp,
+                    "args": [],
+                    "env": [{ "name": "FAKE_MCP_TOOL_COUNT", "value": "1" }],
+                }],
+            }),
+        )
+        .await;
+    let new = h.recv_for_id(new_id).await;
+    let sid = new["result"]["sessionId"].as_str().unwrap().to_owned();
+
+    let p = h
+        .send(
+            "session/prompt",
+            json!({
+                "sessionId": sid,
+                "prompt": [{ "type": "text", "text": "use the tool" }],
+            }),
+        )
+        .await;
+
+    // Drain everything up to the final response; no notification along the
+    // way may carry the toolSummary marker. If the fast pass had fired it
+    // would also have consumed the "done" response and broken the turn.
+    let mut saw_summary = false;
+    let final_resp = loop {
+        let v = h.recv().await;
+        if v["params"]["update"]["_meta"]["buzz"]["toolSummary"] == json!(true) {
+            saw_summary = true;
+        }
+        if v["id"] == json!(p) {
+            break v;
+        }
+    };
+    assert!(
+        !saw_summary,
+        "kill switch did not suppress the summary pass"
+    );
+    assert_eq!(final_resp["result"]["stopReason"], "end_turn");
+    h.shutdown().await;
+}

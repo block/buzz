@@ -102,7 +102,12 @@ impl Harness {
             .env("BUZZ_AGENT_LLM_TIMEOUT_SECS", "5")
             .env("BUZZ_AGENT_TOOL_TIMEOUT_SECS", "5")
             .env("BUZZ_AGENT_MAX_ROUNDS", "8")
-            .env("BUZZ_AGENT_MCP_INIT_TIMEOUT_SECS", "2");
+            .env("BUZZ_AGENT_MCP_INIT_TIMEOUT_SECS", "2")
+            // These tests queue exact LLM response sequences and count
+            // requests; the async tool-summary fast pass would consume
+            // queued responses nondeterministically. Covered explicitly
+            // in golden_transcripts.rs instead.
+            .env("BUZZ_AGENT_NO_TOOL_SUMMARY", "1");
         for (k, v) in extra {
             cmd.env(k, v);
         }
