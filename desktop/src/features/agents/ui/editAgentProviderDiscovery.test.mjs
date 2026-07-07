@@ -9,6 +9,7 @@ import {
 } from "./personaDialogPickers.tsx";
 import {
   computeEditAgentFormValidity,
+  resolveAgentCommandUpdate,
   shouldClearModelForRuntimeChange,
 } from "./personaRuntimeModel.ts";
 
@@ -424,26 +425,77 @@ test("editAgent_runtimeDropdown_keepsInheritWhenCatalogEntryHasNoCommand", () =>
   );
 });
 
-test("editAgent_customCommandSelected_savePinsCustomCommandNotInherit", () => {
+test("editAgent_resolveAgentCommandUpdate_pinsCustomCommandNotInherit", () => {
   // After the custom-command selection clears inheritance, the submit path must
   // pin the (edited) custom command rather than following the inherit sentinel.
-  const inheritHarness = false; // cleared by the custom-command selection
-  const agentOriginalCommand = ""; // was inheriting, no command
-  const agentCommandOverride = null;
-  const editedCustomCommand = "/opt/bin/my-custom-agent";
-
-  const agentCommandUpdate = inheritHarness
-    ? agentCommandOverride != null
-      ? ""
-      : undefined
-    : editedCustomCommand.trim() !== agentOriginalCommand
-      ? editedCustomCommand.trim()
-      : undefined;
-
   assert.equal(
-    agentCommandUpdate,
+    resolveAgentCommandUpdate({
+      inheritHarness: false,
+      agentCommand: "/opt/bin/my-custom-agent",
+      originalAgentCommand: "", // was inheriting, no command
+      agentCommandOverride: null,
+    }),
     "/opt/bin/my-custom-agent",
-    "custom command must be persisted as a pin, not silently dropped by the inherit path",
+    "edited custom command must be persisted as a pin",
+  );
+});
+
+test("editAgent_resolveAgentCommandUpdate_pinsUnchangedPrefillOnInheritTransition", () => {
+  // Codex scenario: a persona-linked agent that was inheriting selects Custom
+  // command and Saves the visible prefilled command without editing it. The
+  // command equals the resolved original, but because the agent had no override
+  // (agentCommandOverride == null) this is an inherit→pin transition and the
+  // command MUST be sent as the pin — otherwise the update is omitted and the
+  // agent keeps inheriting (silent no-op).
+  assert.equal(
+    resolveAgentCommandUpdate({
+      inheritHarness: false,
+      agentCommand: "goose run",
+      originalAgentCommand: "goose run", // prefilled, unchanged
+      agentCommandOverride: null, // was inheriting
+    }),
+    "goose run",
+    "unchanged prefilled command must still be pinned on inherit→pin transition",
+  );
+});
+
+test("editAgent_resolveAgentCommandUpdate_noOpWhenPinnedAndUnchanged", () => {
+  // An already-pinned agent (had an override) whose command is unchanged must
+  // stay a no-op so an unrelated edit does not rewrite the command.
+  assert.equal(
+    resolveAgentCommandUpdate({
+      inheritHarness: false,
+      agentCommand: "claude",
+      originalAgentCommand: "claude",
+      agentCommandOverride: "claude", // already pinned
+    }),
+    undefined,
+    "unchanged command on an already-pinned agent must be omitted",
+  );
+});
+
+test("editAgent_resolveAgentCommandUpdate_inheritSentinelOnlyWhenPinToClear", () => {
+  // Reverting to inherit sends the empty sentinel only when there's a pin to
+  // clear; a name-only edit on an already-inheriting agent leaves it alone.
+  assert.equal(
+    resolveAgentCommandUpdate({
+      inheritHarness: true,
+      agentCommand: "claude",
+      originalAgentCommand: "claude",
+      agentCommandOverride: "claude", // had a pin → clear it
+    }),
+    "",
+    "reverting to inherit with a prior pin must send the clear sentinel",
+  );
+  assert.equal(
+    resolveAgentCommandUpdate({
+      inheritHarness: true,
+      agentCommand: "claude",
+      originalAgentCommand: "claude",
+      agentCommandOverride: null, // was already inheriting → no-op
+    }),
+    undefined,
+    "name-only edit on an inheriting agent must leave the command alone",
   );
 });
 

@@ -44,6 +44,7 @@ import {
 } from "./personaDialogPickers";
 import {
   computeEditAgentFormValidity,
+  resolveAgentCommandUpdate,
   shouldClearModelForRuntimeChange,
 } from "./personaRuntimeModel";
 import { AgentCreationPreview } from "./AgentCreationPreview";
@@ -515,19 +516,15 @@ export function EditAgentDialog({
       const normalizedModel = model.trim() || null;
       const normalizedProvider = provider.trim() || null;
 
-      // Harness pin resolution. The backend treats an empty string as the
-      // "inherit from persona" sentinel (clears the override) and any concrete
-      // command as an explicit pin. When inheriting, only send the sentinel if
-      // there's a pin to clear — a name-only edit must leave the record alone.
-      // When pinning, send the command only if it diverges from the resolved
-      // value the dialog opened with, so an unchanged save stays a no-op.
-      const agentCommandUpdate = inheritHarness
-        ? agent.agentCommandOverride != null
-          ? ""
-          : undefined
-        : agentCommand.trim() !== agent.agentCommand
-          ? agentCommand.trim()
-          : undefined;
+      // Harness pin resolution — see resolveAgentCommandUpdate for the full
+      // sentinel/pin/no-op contract, including the inherit→pin transition where
+      // the prefilled command equals the original but must still be pinned.
+      const agentCommandUpdate = resolveAgentCommandUpdate({
+        inheritHarness,
+        agentCommand,
+        originalAgentCommand: agent.agentCommand,
+        agentCommandOverride: agent.agentCommandOverride ?? null,
+      });
 
       // Derive the effective runtime at submit time — the one that will
       // actually run AFTER submit. This is the component-scope prospectiveRuntimeId,
