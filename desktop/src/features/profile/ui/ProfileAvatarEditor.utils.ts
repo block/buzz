@@ -430,6 +430,86 @@ export function dataTransferHasImage(dataTransfer: DataTransfer | null) {
   );
 }
 
+function normalizedWheelDeltaY(event: WheelEvent, scrollElement: HTMLElement) {
+  if (event.deltaMode === WheelEvent.DOM_DELTA_LINE) {
+    return event.deltaY * 16;
+  }
+
+  if (event.deltaMode === WheelEvent.DOM_DELTA_PAGE) {
+    return event.deltaY * scrollElement.clientHeight;
+  }
+
+  return event.deltaY;
+}
+
+function clampScrollTop(scrollElement: HTMLElement, scrollTop: number) {
+  const maxScrollTop = Math.max(
+    0,
+    scrollElement.scrollHeight - scrollElement.clientHeight,
+  );
+  return Math.max(0, Math.min(maxScrollTop, scrollTop));
+}
+
+// Wheel events are retargeted to the emoji-mart host outside its shadow root,
+// so the browser does not reliably apply the default scroll to `.scroll`.
+function installEmojiMartWheelScroll(shadowRoot: ShadowRoot) {
+  let removeWheelListener: (() => void) | null = null;
+  let currentScrollElement: HTMLElement | null = null;
+
+  function connectScrollElement() {
+    const nextScrollElement = shadowRoot.querySelector<HTMLElement>(".scroll");
+
+    if (nextScrollElement === currentScrollElement) {
+      return;
+    }
+
+    removeWheelListener?.();
+    currentScrollElement = nextScrollElement;
+
+    if (!nextScrollElement) {
+      removeWheelListener = null;
+      return;
+    }
+
+    const handleWheel = (event: WheelEvent) => {
+      if (event.defaultPrevented || event.ctrlKey || event.deltaY === 0) {
+        return;
+      }
+
+      const deltaY = normalizedWheelDeltaY(event, nextScrollElement);
+      const nextScrollTop = clampScrollTop(
+        nextScrollElement,
+        nextScrollElement.scrollTop + deltaY,
+      );
+
+      if (nextScrollTop === nextScrollElement.scrollTop) {
+        return;
+      }
+
+      event.preventDefault();
+      event.stopPropagation();
+      nextScrollElement.scrollTop = nextScrollTop;
+    };
+
+    nextScrollElement.addEventListener("wheel", handleWheel, {
+      passive: false,
+    });
+    removeWheelListener = () => {
+      nextScrollElement.removeEventListener("wheel", handleWheel);
+    };
+  }
+
+  connectScrollElement();
+
+  const observer = new MutationObserver(connectScrollElement);
+  observer.observe(shadowRoot, { childList: true, subtree: true });
+
+  return () => {
+    observer.disconnect();
+    removeWheelListener?.();
+  };
+}
+
 export function useEmojiMartStyles(
   containerRef: React.RefObject<HTMLDivElement | null>,
   enabled: boolean,
@@ -440,6 +520,7 @@ export function useEmojiMartStyles(
     }
 
     let animationFrame = 0;
+    let removeWheelScroll: (() => void) | null = null;
 
     const installEmojiMartStyles = () => {
       const host = containerRef.current?.querySelector("em-emoji-picker");
@@ -456,12 +537,15 @@ export function useEmojiMartStyles(
         style.textContent = EMOJI_MART_SHADOW_CSS;
         shadowRoot.appendChild(style);
       }
+
+      removeWheelScroll ??= installEmojiMartWheelScroll(shadowRoot);
     };
 
     animationFrame = window.requestAnimationFrame(installEmojiMartStyles);
 
     return () => {
       window.cancelAnimationFrame(animationFrame);
+      removeWheelScroll?.();
     };
   }, [containerRef, enabled]);
 }
