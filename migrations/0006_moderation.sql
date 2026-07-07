@@ -97,7 +97,9 @@ CREATE TABLE moderation_actions (
     actor_pubkey    BYTEA NOT NULL CHECK (length(actor_pubkey) = 32),
     action          TEXT NOT NULL CHECK (action IN (
                         'delete_message', 'kick', 'ban', 'unban',
-                        'timeout', 'untimeout', 'dismiss_report', 'escalate')),
+                        'timeout', 'untimeout', 'dismiss_report', 'escalate',
+                        'resolve:delete', 'resolve:kick', 'resolve:ban',
+                        'resolve:timeout')),
     target_pubkey   BYTEA CHECK (target_pubkey IS NULL OR length(target_pubkey) = 32),
     target_event_id BYTEA CHECK (target_event_id IS NULL OR length(target_event_id) = 32),
     channel_id      UUID,

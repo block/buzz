@@ -548,6 +548,12 @@ mod tests {
             .sql
             .as_str()
             .contains("CREATE TABLE moderation_actions"));
+        for action in crate::moderation::MODERATION_ACTION_CHECK_VOCAB {
+            assert!(
+                migrations[5].sql.as_str().contains(&format!("'{action}'")),
+                "migration 0006 moderation_actions.action CHECK must allow {action}"
+            );
+        }
         assert!(!migrations[0].sql.as_str().contains("moderation_reports"));
     }
 

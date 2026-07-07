@@ -47,6 +47,7 @@
 //!   implementation. The resolution audit row records the *decision*, not the
 //!   enforcement, so it is prefixed `resolve:` (`resolve:ban`, `resolve:delete`,
 //!   …); the client's paired 9040-9043 writes the unprefixed enforcement row.
+//!   The `resolve:*` values are part of the DB CHECK vocabulary in migration 0006.
 //!   `dismiss` audits as `dismiss_report` and `escalate` as `escalate` (both
 //!   unprefixed — escalate must stay queryable for the platform-safety lane).
 //!
@@ -102,10 +103,10 @@ pub async fn handle_moderation_command(
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
     if (event_ts - now).abs() > MAX_COMMAND_SKEW_SECS {
-        return Err(format!(
+        return Err(invalid(format!(
             "event timestamp out of range: created_at={event_ts}, now={now}, delta={}s (max ±{MAX_COMMAND_SKEW_SECS}s)",
             event_ts - now
-        ));
+        )));
     }
 
     match kind {
@@ -114,7 +115,9 @@ pub async fn handle_moderation_command(
         KIND_MODERATION_TIMEOUT => handle_timeout(tenant, state, event, &actor).await,
         KIND_MODERATION_UNTIMEOUT => handle_untimeout(tenant, state, event, &actor).await,
         KIND_MODERATION_RESOLVE_REPORT => handle_resolve(tenant, state, event, &actor).await,
-        other => Err(format!("unexpected moderation command kind: {other}")),
+        other => Err(invalid(format!(
+            "unexpected moderation command kind: {other}"
+        ))),
     }
 }
 
@@ -126,8 +129,7 @@ async fn handle_ban(
     event: &Event,
     actor: &[u8],
 ) -> Result<(), String> {
-    let target =
-        extract_p_tag_bytes(event).ok_or_else(|| "missing or invalid p tag".to_string())?;
+    let target = extract_p_tag_bytes(event).ok_or_else(|| invalid("missing or invalid p tag"))?;
     let expires_at = extract_expiration(event)?; // None ⇒ permanent
     let reason = extract_tag_value(event, "reason");
 
@@ -152,7 +154,7 @@ async fn handle_ban(
             expires_at,
         )
         .await
-        .map_err(|e| format!("database error: {e}"))?;
+        .map_err(|e| error(format!("database error: {e}")))?;
 
     let action_id = insert_audit(
         state,
@@ -208,8 +210,7 @@ async fn handle_unban(
     event: &Event,
     actor: &[u8],
 ) -> Result<(), String> {
-    let target =
-        extract_p_tag_bytes(event).ok_or_else(|| "missing or invalid p tag".to_string())?;
+    let target = extract_p_tag_bytes(event).ok_or_else(|| invalid("missing or invalid p tag"))?;
 
     authorize_moderation_action(
         tenant,
@@ -226,9 +227,9 @@ async fn handle_unban(
         .db
         .unban_community_member(tenant.community(), &target, actor)
         .await
-        .map_err(|e| format!("database error: {e}"))?;
+        .map_err(|e| error(format!("database error: {e}")))?;
     if !lifted {
-        return Err("member is not banned".to_string());
+        return Err(invalid("member is not banned"));
     }
 
     insert_audit(state, tenant, actor, "unban", Some(&target), None, None).await?;
@@ -245,10 +246,9 @@ async fn handle_timeout(
     event: &Event,
     actor: &[u8],
 ) -> Result<(), String> {
-    let target =
-        extract_p_tag_bytes(event).ok_or_else(|| "missing or invalid p tag".to_string())?;
-    let muted_until = extract_expiration(event)?
-        .ok_or_else(|| "timeout requires an expiration tag".to_string())?;
+    let target = extract_p_tag_bytes(event).ok_or_else(|| invalid("missing or invalid p tag"))?;
+    let muted_until =
+        extract_expiration(event)?.ok_or_else(|| invalid("timeout requires an expiration tag"))?;
     let reason = extract_tag_value(event, "reason");
 
     authorize_moderation_action(
@@ -272,7 +272,7 @@ async fn handle_timeout(
             reason.as_deref(),
         )
         .await
-        .map_err(|e| format!("database error: {e}"))?;
+        .map_err(|e| error(format!("database error: {e}")))?;
 
     let action_id = insert_audit(
         state,
@@ -313,8 +313,7 @@ async fn handle_untimeout(
     event: &Event,
     actor: &[u8],
 ) -> Result<(), String> {
-    let target =
-        extract_p_tag_bytes(event).ok_or_else(|| "missing or invalid p tag".to_string())?;
+    let target = extract_p_tag_bytes(event).ok_or_else(|| invalid("missing or invalid p tag"))?;
 
     authorize_moderation_action(
         tenant,
@@ -331,9 +330,9 @@ async fn handle_untimeout(
         .db
         .untimeout_community_member(tenant.community(), &target, actor)
         .await
-        .map_err(|e| format!("database error: {e}"))?;
+        .map_err(|e| error(format!("database error: {e}")))?;
     if !cleared {
-        return Err("member is not timed out".to_string());
+        return Err(invalid("member is not timed out"));
     }
 
     insert_audit(state, tenant, actor, "untimeout", Some(&target), None, None).await?;
@@ -351,30 +350,30 @@ async fn handle_resolve(
     actor: &[u8],
 ) -> Result<(), String> {
     let report_event_id = extract_report_tag(event)
-        .ok_or_else(|| "missing or invalid report tag (expect 64-hex event id)".to_string())?;
-    let status =
-        extract_tag_value(event, "status").ok_or_else(|| "missing status tag".to_string())?;
-    let action =
-        extract_tag_value(event, "action").ok_or_else(|| "missing action tag".to_string())?;
+        .ok_or_else(|| invalid("missing or invalid report tag (expect 64-hex event id)"))?;
+    let status = extract_tag_value(event, "status").ok_or_else(|| invalid("missing status tag"))?;
+    let action = extract_tag_value(event, "action").ok_or_else(|| invalid("missing action tag"))?;
     let reason = extract_tag_value(event, "reason");
 
     // Vocab is validated at build time in the SDK, but the relay must not trust
     // the client: re-validate the pinned vocabulary here.
     if status != "resolved" && status != "dismissed" {
-        return Err(format!(
+        return Err(invalid(format!(
             "invalid status: {status} (expect resolved|dismissed)"
-        ));
+        )));
     }
     if !matches!(
         action.as_str(),
         "delete" | "kick" | "ban" | "timeout" | "dismiss" | "escalate"
     ) {
-        return Err(format!(
+        return Err(invalid(format!(
             "invalid action: {action} (expect delete|kick|ban|timeout|dismiss|escalate)"
-        ));
+        )));
     }
     if (action == "dismiss") != (status == "dismissed") {
-        return Err("action `dismiss` pairs only with status `dismissed`".to_string());
+        return Err(invalid(
+            "action `dismiss` pairs only with status `dismissed`",
+        ));
     }
 
     authorize_moderation_action(
@@ -394,8 +393,8 @@ async fn handle_resolve(
         .db
         .get_moderation_report_by_event(tenant.community(), &report_event_id)
         .await
-        .map_err(|e| format!("database error: {e}"))?
-        .ok_or_else(|| "report not found in this community".to_string())?;
+        .map_err(|e| error(format!("database error: {e}")))?
+        .ok_or_else(|| invalid("report not found in this community"))?;
 
     // Don't write an audit row for a report someone else already closed. The
     // DB's `WHERE status='open'` on resolve_moderation_report below is the real
@@ -405,7 +404,9 @@ async fn handle_resolve(
     // the DB write — but that window yields only an audit row plus a failed
     // resolve, which is tolerated.
     if report.status != "open" {
-        return Err("report is not open (already resolved or dismissed)".to_string());
+        return Err(invalid(
+            "report is not open (already resolved or dismissed)",
+        ));
     }
 
     // Carry the report's own target into the audit row so `delete`/`kick`/`ban`
@@ -419,21 +420,11 @@ async fn handle_resolve(
     // Distinguish a resolution *decision* from the actual *enforcement* row.
     // A one-click resolve with action=ban records the moderator's decision; the
     // client then composes the real 9040, which writes its own "ban" enforcement
-    // row. Prefix the decision row (`resolve:ban`, `resolve:delete`, …) so audit
-    // consumers can tell the two apart and don't double-count. `dismiss_report`
-    // and `escalate` stay unprefixed — escalate especially must remain queryable
-    // for the platform-safety lane.
-    let resolve_audit;
-    let audit_action = match action.as_str() {
-        "dismiss" => "dismiss_report",
-        "escalate" => "escalate",
-        other => {
-            // delete | kick | ban | timeout — decision row; enforcement fans out
-            // via the client's paired 9040-9043 command.
-            resolve_audit = format!("resolve:{other}");
-            resolve_audit.as_str()
-        }
-    };
+    // row. `resolve:*` decision rows are part of the moderation_actions DB
+    // vocabulary so audit consumers can tell the two apart and don't double-count.
+    // `dismiss_report` and `escalate` stay unprefixed — escalate especially must
+    // remain queryable for the platform-safety lane.
+    let audit_action = resolution_audit_action(&action);
     let action_id = insert_audit(
         state,
         tenant,
@@ -455,9 +446,11 @@ async fn handle_resolve(
             Some(action_id),
         )
         .await
-        .map_err(|e| format!("database error: {e}"))?;
+        .map_err(|e| error(format!("database error: {e}")))?;
     if !resolved {
-        return Err("report is not open (already resolved or dismissed)".to_string());
+        return Err(invalid(
+            "report is not open (already resolved or dismissed)",
+        ));
     }
 
     // Close the loop: DM the reporter that their report was reviewed.
@@ -485,6 +478,19 @@ async fn handle_resolve(
 }
 
 // ── shared helpers ────────────────────────────────────────────────────────────
+
+fn resolution_audit_action(action: &str) -> &'static str {
+    match action {
+        "dismiss" => "dismiss_report",
+        "escalate" => "escalate",
+        "delete" => "resolve:delete",
+        "kick" => "resolve:kick",
+        "ban" => "resolve:ban",
+        "timeout" => "resolve:timeout",
+        // The caller validates this vocabulary before mapping.
+        _ => "resolve:unknown",
+    }
+}
 
 /// Insert a moderation audit row for an accepted command. `matched_principal`
 /// is left `None` here: that NIP-OA field records which principal an
@@ -515,12 +521,20 @@ async fn insert_audit(
             },
         )
         .await
-        .map_err(|e| format!("failed to write audit row: {e}"))
+        .map_err(|e| error(format!("failed to write audit row: {e}")))
 }
 
 /// Map an authorization error to a client-safe `restricted:`-prefixed denial.
 fn authz_denial(e: anyhow::Error) -> String {
     format!("restricted: {e}")
+}
+
+fn invalid(message: impl Into<String>) -> String {
+    format!("invalid: {}", message.into())
+}
+
+fn error(message: impl Into<String>) -> String {
+    format!("error: {}", message.into())
 }
 
 /// Extract the first valid `p` tag as raw pubkey bytes (32 bytes).
@@ -561,10 +575,10 @@ fn extract_expiration(event: &Event) -> Result<Option<DateTime<Utc>>, String> {
         Some(raw) => {
             let secs: i64 = raw
                 .parse()
-                .map_err(|_| format!("invalid expiration tag: {raw}"))?;
+                .map_err(|_| invalid(format!("invalid expiration tag: {raw}")))?;
             match Utc.timestamp_opt(secs, 0).single() {
                 Some(ts) => Ok(Some(ts)),
-                None => Err(format!("expiration out of range: {secs}")),
+                None => Err(invalid(format!("expiration out of range: {secs}"))),
             }
         }
     }
@@ -605,6 +619,30 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs()
+    }
+
+    #[test]
+    fn resolve_audit_actions_are_allowed_by_db_check_vocabulary() {
+        for action in ["dismiss", "escalate", "delete", "kick", "ban", "timeout"] {
+            let audit_action = resolution_audit_action(action);
+            assert!(
+                buzz_db::moderation::MODERATION_ACTION_CHECK_VOCAB.contains(&audit_action),
+                "9044 action={action} maps to {audit_action}, which must be accepted by migrations/0006_moderation.sql moderation_actions.action CHECK"
+            );
+        }
+    }
+
+    #[test]
+    fn command_error_prefix_helpers_preserve_machine_readable_token() {
+        assert_eq!(
+            authz_denial(anyhow::anyhow!("moderator access required")),
+            "restricted: moderator access required"
+        );
+        assert_eq!(invalid("missing status tag"), "invalid: missing status tag");
+        assert_eq!(
+            error("database error: connection lost"),
+            "error: database error: connection lost"
+        );
     }
 
     #[test]
