@@ -9,7 +9,9 @@ export type FuzzyLogoProps = {
   className?: string;
   ariaLabel?: string;
   loop?: boolean;
-  /** When looping, hide the mark for this many seconds between plays. */
+  /** During the loop rest window, hide the mark or hold it visible. */
+  loopRestMode?: BuzzLogoAnimationProps["loopRestMode"];
+  /** When looping, rest for this many seconds between plays. */
   loopRestSeconds?: number;
   /** Set false when a parent drives its own opacity animation over the mark. */
   pulse?: boolean;
@@ -27,6 +29,7 @@ export function FuzzyLogo({
   className,
   ariaLabel = "Buzz logo",
   loop = false,
+  loopRestMode = "hidden",
   loopRestSeconds = 0,
   pulse = true,
   reverse = false,
@@ -45,6 +48,7 @@ export function FuzzyLogo({
       )}
       fullScreen={false}
       loop={loop}
+      loopRestMode={loopRestMode}
       loopRestSeconds={loopRestSeconds}
       reverse={reverse}
       showBackground={false}

@@ -36,9 +36,17 @@ export type BuzzLogoAnimationProps = {
   fullScreen?: boolean;
   loop?: boolean;
   /**
-   * When looping, hide the mark for this many seconds between plays. The morph
-   * runs at its native speed, then the mark disappears for the rest window
-   * before the cycle repeats. Only applies when `loop` is true.
+   * What the mark does during the rest window between plays. `"hidden"` fades
+   * the mark out for the whole rest (good for small inline indicators);
+   * `"visible"` holds the finished mark on screen and only fades briefly at
+   * the cycle boundary (good for full-screen surfaces like the boot splash,
+   * where a blank rest reads as "nothing is loading").
+   */
+  loopRestMode?: "hidden" | "visible";
+  /**
+   * When looping, rest for this many seconds between plays. The morph runs at
+   * its native speed, then rests (per `loopRestMode`) before the cycle
+   * repeats. Only applies when `loop` is true.
    */
   loopRestSeconds?: number;
   reverse?: boolean;
@@ -587,25 +595,40 @@ function InkShapes({
 }
 
 /**
- * Hides the parent group during the rest window of a stretched loop cycle:
- * fully visible while the morph plays, then a quick fade to invisible for the
- * remainder of the cycle. SMIL `<animate>` targets its parent element.
+ * Shapes the rest window of a stretched loop cycle. SMIL `<animate>` targets
+ * its parent element.
+ *
+ * - `"hidden"`: fully visible while the morph plays, then a quick fade to
+ *   invisible for the remainder of the cycle.
+ * - `"visible"`: holds the finished mark on screen through the rest, with a
+ *   quick fade only at the very end of the cycle so the repeat (which starts
+ *   from hidden ink shapes) doesn't hard-cut.
  */
 function RestWindowFade({
   cycleSeconds,
   morphSeconds,
   repeatCount,
+  restMode,
 }: {
   cycleSeconds: number;
   morphSeconds: number;
   repeatCount: string;
+  restMode: "hidden" | "visible";
 }) {
   const fadeSeconds = 0.15;
-  const visibleEnd = morphSeconds / cycleSeconds;
-  const fadeEnd = Math.min((morphSeconds + fadeSeconds) / cycleSeconds, 1);
-  const keyTimes = ["0", visibleEnd.toFixed(4), fadeEnd.toFixed(4), "1"].join(
-    ";",
-  );
+  let keyTimes: string;
+  let values: string;
+
+  if (restMode === "visible") {
+    const fadeStart = Math.max((cycleSeconds - fadeSeconds) / cycleSeconds, 0);
+    keyTimes = ["0", fadeStart.toFixed(4), "1"].join(";");
+    values = "1;1;0";
+  } else {
+    const visibleEnd = morphSeconds / cycleSeconds;
+    const fadeEnd = Math.min((morphSeconds + fadeSeconds) / cycleSeconds, 1);
+    keyTimes = ["0", visibleEnd.toFixed(4), fadeEnd.toFixed(4), "1"].join(";");
+    values = "1;1;0;0";
+  }
 
   return (
     <animate
@@ -616,7 +639,7 @@ function RestWindowFade({
       fill={repeatCount === LOOP ? "remove" : "freeze"}
       keyTimes={keyTimes}
       repeatCount={repeatCount}
-      values="1;1;0;0"
+      values={values}
     />
   );
 }
@@ -626,6 +649,7 @@ export default function BuzzLogoAnimation({
   className = "",
   fullScreen = true,
   loop = false,
+  loopRestMode = "hidden",
   loopRestSeconds = 0,
   reverse = false,
   showBackground = true,
@@ -679,7 +703,7 @@ export default function BuzzLogoAnimation({
       animation.beginElement?.();
     });
     svg.unpauseAnimations?.();
-  }, [loop, reverse, restSeconds, textured, variant]);
+  }, [loop, loopRestMode, reverse, restSeconds, textured, variant]);
 
   return (
     <div className={classes} style={style} role="img" aria-label={ariaLabel}>
@@ -706,6 +730,7 @@ export default function BuzzLogoAnimation({
               cycleSeconds={cycleSeconds}
               morphSeconds={morphSeconds}
               repeatCount={repeatCount}
+              restMode={loopRestMode}
             />
           ) : null}
           <g mask={`url(#${maskId})`}>

@@ -50,6 +50,7 @@ function AppLoadingGate() {
         className="relative z-10 w-28! text-foreground"
         fuzz={false}
         loop
+        loopRestMode="visible"
         loopRestSeconds={2}
       />
     </div>

@@ -1054,7 +1054,7 @@ test("first-run onboarding shows setup loading until Welcome bootstrap completes
   await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
   await installMockBridge(
     page,
-    { createManagedAgentDelayMs: 5_000 },
+    { createManagedAgentDelayMs: 9_000 },
     { skipOnboardingSeed: true },
   );
   await page.goto("/");
@@ -1108,6 +1108,32 @@ test("first-run onboarding shows setup loading until Welcome bootstrap completes
   await expect(loadingGate).not.toHaveClass(/buzz-onboarding-neutral-theme/);
   await expectShellHidden(page);
   await page.waitForTimeout(250);
+  await expect(loadingGate).toBeVisible();
+
+  // The boot mark must stay visible through the loop's rest window — a blank
+  // gate between morph cycles reads as "nothing is loading." Sample the SMIL
+  // opacity across a full cycle (0.88s morph + 2s rest) and only allow the
+  // brief cycle-boundary fade to dip low. The hidden-rest treatment (used by
+  // small inline indicators) would be blank for ~69% of samples.
+  const dimFraction = await loadingGate.evaluate(async (element) => {
+    const animatedGroup = element.querySelector(
+      ".buzz-logo__mark > g",
+    ) as SVGGElement | null;
+    if (!animatedGroup) {
+      return null;
+    }
+
+    const samples: number[] = [];
+    for (let i = 0; i < 30; i += 1) {
+      samples.push(
+        Number.parseFloat(window.getComputedStyle(animatedGroup).opacity),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    return samples.filter((opacity) => opacity < 0.5).length / samples.length;
+  });
+  expect(dimFraction).not.toBeNull();
+  expect(dimFraction as number).toBeLessThan(0.15);
   await expect(loadingGate).toBeVisible();
 
   await expectWelcomeView(page);
