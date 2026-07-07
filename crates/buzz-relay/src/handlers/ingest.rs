@@ -28,11 +28,11 @@ use buzz_core::kind::{
     KIND_NIP29_DELETE_GROUP, KIND_NIP29_EDIT_METADATA, KIND_NIP29_JOIN_REQUEST,
     KIND_NIP29_LEAVE_REQUEST, KIND_NIP29_PUT_USER, KIND_NIP29_REMOVE_USER,
     KIND_NIP43_LEAVE_REQUEST, KIND_NIP65_RELAY_LIST_METADATA, KIND_PERSONA, KIND_PIN_LIST,
-    KIND_PRESENCE_UPDATE, KIND_PROFILE, KIND_REACTION, KIND_READ_STATE, KIND_STREAM_MESSAGE,
-    KIND_STREAM_MESSAGE_BOOKMARKED, KIND_STREAM_MESSAGE_DIFF, KIND_STREAM_MESSAGE_EDIT,
-    KIND_STREAM_MESSAGE_PINNED, KIND_STREAM_MESSAGE_SCHEDULED, KIND_STREAM_MESSAGE_V2,
-    KIND_STREAM_REMINDER, KIND_TEAM, KIND_TEXT_NOTE, KIND_USER_STATUS, KIND_WORKFLOW_DEF,
-    KIND_WORKFLOW_TRIGGER, RELAY_ADMIN_ADD_MEMBER, RELAY_ADMIN_CHANGE_ROLE,
+    KIND_PRESENCE_UPDATE, KIND_PROFILE, KIND_REACTION, KIND_READ_STATE, KIND_REPORT,
+    KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_BOOKMARKED, KIND_STREAM_MESSAGE_DIFF,
+    KIND_STREAM_MESSAGE_EDIT, KIND_STREAM_MESSAGE_PINNED, KIND_STREAM_MESSAGE_SCHEDULED,
+    KIND_STREAM_MESSAGE_V2, KIND_STREAM_REMINDER, KIND_TEAM, KIND_TEXT_NOTE, KIND_USER_STATUS,
+    KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER, RELAY_ADMIN_ADD_MEMBER, RELAY_ADMIN_CHANGE_ROLE,
     RELAY_ADMIN_REMOVE_MEMBER, RELAY_ADMIN_SET_WORKSPACE_PROFILE,
 };
 use buzz_core::tenant::TenantContext;
@@ -159,6 +159,14 @@ fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static s
         }
         // NIP-AM: agent turn metrics are agent-authored global events (encrypted to owner).
         KIND_AGENT_TURN_METRIC => Ok(Scope::MessagesWrite),
+        // NIP-56 reports are ordinary member writes into the mod-only queue.
+        // Ingest persists them to `moderation_reports` and suppresses public
+        // storage/fanout; reports are signals, never enforcement triggers.
+        KIND_REPORT => Ok(Scope::MessagesWrite),
+        // Community moderation commands are direct, mod-authz-gated writes.
+        // Scope only proves the transport can submit message writes; the
+        // command handler owns role/capability authorization.
+        k if buzz_core::kind::is_moderation_command_kind(k) => Ok(Scope::MessagesWrite),
         // NIP-51 standard lists and NIP-65 relay list — user-owned global state,
         // same ownership shape as kind:3 (contacts) and kind:0 (profile).
         KIND_MUTE_LIST
@@ -1425,6 +1433,41 @@ async fn ingest_event_inner(
         return super::command_executor::handle_command(tenant, state, event, auth).await;
     }
 
+    // NIP-56 reports are persisted only to the mod queue. They are not stored in
+    // the public events table and never fan out to subscribers. Reports remain
+    // available while timed out so users can signal abuse during a write-block.
+    // A banned actor in the rare missed-disconnect window may also submit a
+    // report; that is tolerated because reports are non-actioning signals and
+    // remain visible only to moderators.
+    if kind_u32 == KIND_REPORT {
+        super::report::handle_report_event(tenant, &event, state)
+            .await
+            .map_err(IngestError::Rejected)?;
+        return Ok(IngestResult {
+            event_id: event_id_hex,
+            accepted: true,
+            message: String::new(),
+        });
+    }
+
+    // Community moderation commands (9040–9044) are direct, community-global
+    // mutations. They are never stored or fanned out as ordinary events; the
+    // handler writes the durable audit/enforcement rows after its own capability
+    // authorization. These commands are intentionally routed before the
+    // timeout/write-block gate below: restriction-lifting commands must remain
+    // available so a wrongly restricted admin is not stranded, while banned
+    // actors are handled by the auth seam and live-disconnect enforcement.
+    if buzz_core::kind::is_moderation_command_kind(kind_u32) {
+        super::moderation_commands::handle_moderation_command(tenant, state, &event)
+            .await
+            .map_err(IngestError::Rejected)?;
+        return Ok(IngestResult {
+            event_id: event_id_hex,
+            accepted: true,
+            message: String::new(),
+        });
+    }
+
     // Community ban / timeout write-block (COMMUNITY_MODERATION_PLAN.md §0
     // decision 4). A timeout is a write-block only — the connection stays open,
     // content writes are refused with `restricted: you are timed out until <ts>`
@@ -2416,6 +2459,54 @@ mod tests {
     }
 
     #[test]
+    fn reports_and_moderation_commands_require_messages_write_scope() {
+        let dummy = make_dummy_event();
+        for kind in [
+            KIND_REPORT,
+            KIND_MODERATION_BAN,
+            KIND_MODERATION_UNBAN,
+            KIND_MODERATION_TIMEOUT,
+            KIND_MODERATION_UNTIMEOUT,
+            KIND_MODERATION_RESOLVE_REPORT,
+        ] {
+            assert_eq!(
+                required_scope_for_kind(kind, &dummy).unwrap(),
+                Scope::MessagesWrite,
+                "kind {kind} should require MessagesWrite scope"
+            );
+        }
+    }
+
+    #[test]
+    fn moderation_commands_are_global_only() {
+        for kind in [
+            KIND_MODERATION_BAN,
+            KIND_MODERATION_UNBAN,
+            KIND_MODERATION_TIMEOUT,
+            KIND_MODERATION_UNTIMEOUT,
+            KIND_MODERATION_RESOLVE_REPORT,
+        ] {
+            assert!(is_global_only_kind(kind), "kind {kind} must be global-only");
+            assert!(
+                !requires_h_channel_scope(kind),
+                "kind {kind} must not require an h tag"
+            );
+        }
+    }
+
+    #[test]
+    fn moderation_command_rejection_from_ingest_preserves_prefix() {
+        let rejection = "restricted: moderator access required".to_string();
+        let map_rejection = IngestError::Rejected;
+        let result: Result<(), String> = Err(rejection.clone());
+
+        match result.map_err(map_rejection).unwrap_err() {
+            IngestError::Rejected(message) => assert_eq!(message, rejection),
+            _ => panic!("expected rejected ingest error"),
+        }
+    }
+
+    #[test]
     fn global_only_and_channel_scoped_are_disjoint() {
         // A kind cannot be both global-only and channel-scoped
         for kind in 0..=65535u32 {
@@ -2438,6 +2529,12 @@ mod tests {
             KIND_PROFILE,
             KIND_DELETION,
             KIND_REACTION,
+            KIND_REPORT,
+            KIND_MODERATION_BAN,
+            KIND_MODERATION_UNBAN,
+            KIND_MODERATION_TIMEOUT,
+            KIND_MODERATION_UNTIMEOUT,
+            KIND_MODERATION_RESOLVE_REPORT,
             KIND_STREAM_MESSAGE,
             KIND_NIP29_PUT_USER,
             KIND_NIP29_REMOVE_USER,
