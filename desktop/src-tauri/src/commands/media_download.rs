@@ -171,6 +171,14 @@ pub async fn copy_image_to_clipboard(
 
     let img =
         image::load_from_memory(&bytes).map_err(|e| format!("failed to decode image: {e}"))?;
+
+    // Guard against decompression bombs: a small compressed file can decode to
+    // a huge RGBA buffer. Cap at 50 MiB (matching the download size cap).
+    let pixels = img.width() as u64 * img.height() as u64;
+    if pixels * 4 > MAX_DOWNLOAD_BYTES {
+        return Err("image too large to copy to clipboard".to_string());
+    }
+
     let rgba = img.to_rgba8();
     let (width, height) = (rgba.width() as usize, rgba.height() as usize);
     let raw = rgba.into_raw();

@@ -524,6 +524,8 @@ function ImageContextMenu({
   onDownload: () => void;
   position: ImageContextMenuPosition;
 }) {
+  const itemClass =
+    "flex min-h-9 w-full cursor-default select-none items-center rounded-lg py-2 pl-2 pr-4 text-sm outline-hidden hover:bg-muted/50 hover:text-foreground";
   return (
     <div
       className={cn(
@@ -534,18 +536,10 @@ function ImageContextMenu({
       data-image-lightbox-controls=""
       style={{ ...POPOVER_SHADOW_STYLE, left: position.x, top: position.y }}
     >
-      <button
-        type="button"
-        className="flex min-h-9 w-full cursor-default select-none items-center rounded-lg py-2 pl-2 pr-4 text-sm outline-hidden hover:bg-muted/50 hover:text-foreground"
-        onClick={onCopy}
-      >
+      <button type="button" className={itemClass} onClick={onCopy}>
         Copy image
       </button>
-      <button
-        type="button"
-        className="flex min-h-9 w-full cursor-default select-none items-center rounded-lg py-2 pl-2 pr-4 text-sm outline-hidden hover:bg-muted/50 hover:text-foreground"
-        onClick={onDownload}
-      >
+      <button type="button" className={itemClass} onClick={onDownload}>
         Download image
       </button>
     </div>
@@ -620,7 +614,7 @@ function ImageZoomOverlay({
   const zoomIdleTimerRef = React.useRef<number | null>(null);
   const hasPreviousImage = currentIndex > 0;
   const hasNextImage = currentIndex < items.length - 1;
-  const canDownloadCurrentImage = Boolean(currentItem.src);
+  const canActOnCurrentImage = Boolean(currentItem.src);
   useSmoothCorners(imageFrameSurfaceRef);
 
   const galleryTransitionFilter =
@@ -1068,11 +1062,11 @@ function ImageZoomOverlay({
       event.stopPropagation();
       event.nativeEvent.stopImmediatePropagation();
       markControlGesture();
-      if (canDownloadCurrentImage) {
+      if (canActOnCurrentImage) {
         setMenu({ x: event.clientX, y: event.clientY });
       }
     },
-    [canDownloadCurrentImage, markControlGesture],
+    [canActOnCurrentImage, markControlGesture],
   );
   const handleMenuCopy = React.useCallback(() => {
     setMenu(null);
@@ -1259,7 +1253,7 @@ function ImageZoomOverlay({
           <button
             aria-label="Download image"
             className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg transition-colors hover:bg-muted-foreground/10 hover:text-foreground outline-hidden focus-visible:ring-2 focus-visible:ring-ring/70 disabled:pointer-events-none disabled:opacity-45"
-            disabled={!canDownloadCurrentImage}
+            disabled={!canActOnCurrentImage}
             type="button"
             onClick={(event) => {
               event.stopPropagation();
@@ -1307,7 +1301,7 @@ function ImageZoomOverlay({
           </span>
         </div>
       </div>
-      {menu && canDownloadCurrentImage ? (
+      {menu && canActOnCurrentImage ? (
         <ImageContextMenu
           onCopy={handleMenuCopy}
           onDownload={handleMenuDownload}
@@ -1482,7 +1476,7 @@ function ImageBlock({ alt, dim, resolvedSrc, src }: ImageBlockProps) {
     if (!copySrc) return;
     invokeTauri("copy_image_to_clipboard", { url: copySrc })
       .then(() => {
-        toast.success("Image copied to clipboard");
+        toast.success("Copied to clipboard");
       })
       .catch((err: unknown) => {
         const msg = err instanceof Error ? err.message : "Copy failed";
