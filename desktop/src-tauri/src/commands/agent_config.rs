@@ -184,6 +184,27 @@ pub fn get_runtime_file_config(runtime_id: String) -> Option<RuntimeFileConfigSu
     }
 }
 
+/// Return the key names of all non-empty baked build env vars.
+///
+/// Internal (Block) builds bake provider credentials and other env pairs into
+/// the binary at compile time via `BUZZ_BUILD_AGENT_ENV`. The backend readiness
+/// gate already treats these keys as satisfying their requirements (Layer 1 of
+/// `resolve_effective_agent_env`). This command exposes the *key names only* —
+/// never the values — so the frontend dialogs can apply the same logic and avoid
+/// surfacing a spurious "Required" badge for keys that are covered by the baked
+/// env.
+///
+/// OSS builds have no baked env, so this returns an empty list — OSS behavior
+/// is unchanged.
+#[tauri::command]
+pub fn get_baked_build_env_keys() -> Vec<String> {
+    crate::managed_agents::baked_build_env()
+        .into_iter()
+        .filter(|(_, v)| !v.is_empty())
+        .map(|(k, _)| k)
+        .collect()
+}
+
 /// Get the full config surface for a managed agent.
 ///
 /// Returns normalized + advanced config from all available tiers.

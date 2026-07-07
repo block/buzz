@@ -1283,6 +1283,19 @@ export async function getRuntimeFileConfig(
   );
 }
 
+/**
+ * Return the key names of all non-empty baked build env vars.
+ *
+ * Internal (Block) builds bake provider credentials into the binary at compile
+ * time. This returns the *key names only* — never the values — so dialogs can
+ * treat them as satisfied without exposing secrets to the frontend.
+ *
+ * OSS builds return an empty array (no baked env).
+ */
+export async function getBakedBuildEnvKeys(): Promise<string[]> {
+  return invokeTauri<string[]>("get_baked_build_env_keys");
+}
+
 type RawUpdateManagedAgentResponse = {
   agent: RawManagedAgent;
   profile_sync_error: string | null;

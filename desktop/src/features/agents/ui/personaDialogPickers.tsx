@@ -354,6 +354,29 @@ export function getDefaultPersonaRuntime(runtimes: AcpRuntimeCatalogEntry[]) {
 }
 
 /**
+ * Filter a required-key list down to those satisfied by the baked build env.
+ *
+ * A key is baked-satisfied when the agent has no local value for it AND the
+ * baked env (compile-time, Block-internal builds) contains it. This mirrors the
+ * backend readiness gate Layer 1 (`resolve_effective_agent_env`) so the dialogs
+ * don't surface a spurious "Required" badge for keys that are already baked in.
+ *
+ * OSS builds have an empty baked env, so this always returns `[]` there —
+ * OSS behavior is unchanged.
+ */
+export function getBakedSatisfiedEnvKeys(
+  requiredKeys: readonly string[],
+  envVars: Record<string, string>,
+  bakedEnvKeys: readonly string[] | undefined,
+): string[] {
+  if (!bakedEnvKeys || bakedEnvKeys.length === 0) return [];
+  const bakedSet = new Set(bakedEnvKeys);
+  return requiredKeys.filter(
+    (key) => (envVars[key] ?? "").length === 0 && bakedSet.has(key),
+  );
+}
+
+/**
  * Pure local-mode readiness gate for Create (no existing agent, no config
  * surface query). Returns the missing normalized fields (provider, model) and
  * the missing credential env keys so the caller can derive `canSubmit`,
@@ -368,6 +391,7 @@ export function getDefaultPersonaRuntime(runtimes: AcpRuntimeCatalogEntry[]) {
  * their own gates. Pass isProviderMode=true or useMesh=true to bypass.
  */
 export function computeLocalModeGate({
+  bakedEnvKeys,
   envVars,
   isProviderMode,
   model,
@@ -376,6 +400,11 @@ export function computeLocalModeGate({
   runtimeFileConfig,
   useMesh,
 }: {
+  /** Optional baked build env key names (Block-internal builds only).
+   *  When provided, requirements already covered by the baked env are silenced,
+   *  mirroring `resolve_effective_agent_env` Layer 1 in the backend readiness
+   *  gate. Absent (or empty) on OSS builds — existing call sites are unaffected. */
+  bakedEnvKeys?: readonly string[];
   envVars: Record<string, string>;
   isProviderMode: boolean;
   model: string;
@@ -436,11 +465,19 @@ export function computeLocalModeGate({
     : "";
   const requiredKeys = requiredCredentialEnvKeys(runtimeId, providerForKeys);
 
+  // Keys satisfied by the baked build env (Block-internal builds only).
+  const bakedSatisfiedSet = new Set(
+    getBakedSatisfiedEnvKeys(requiredKeys, envVars, bakedEnvKeys),
+  );
+
   const missingEnvKeys: string[] = [];
   const fileSatisfiedEnvKeys: string[] = [];
   for (const key of requiredKeys) {
     if ((envVars[key] ?? "").length > 0) {
       // Set in Buzz env — satisfied, no action.
+    } else if (bakedSatisfiedSet.has(key)) {
+      // Not in Buzz env but covered by the baked build env — silenced.
+      // Don't add to fileSatisfiedEnvKeys; baked keys produce no info row.
     } else if (fileSatisfiedKeys.has(key)) {
       // Not in Buzz env but present in the runtime config file — silenced.
       fileSatisfiedEnvKeys.push(key);

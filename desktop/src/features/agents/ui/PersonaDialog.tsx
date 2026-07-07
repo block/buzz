@@ -69,7 +69,7 @@ import {
   MODEL_DISCOVERY_LOADING_VALUE,
   usePersonaModelDiscovery,
 } from "./usePersonaModelDiscovery";
-import { useRuntimeFileConfigQuery } from "../hooks";
+import { useBakedBuildEnvKeysQuery, useRuntimeFileConfigQuery } from "../hooks";
 
 type PersonaDialogProps = {
   open: boolean;
@@ -431,7 +431,9 @@ export function PersonaDialog({
   const { data: runtimeFileConfig } = useRuntimeFileConfigQuery(runtime, {
     enabled: open,
   });
+  const { data: bakedEnvKeys } = useBakedBuildEnvKeysQuery({ enabled: open });
   const localModeGate = computeLocalModeGate({
+    bakedEnvKeys,
     envVars,
     isProviderMode: false,
     model,
@@ -440,12 +442,16 @@ export function PersonaDialog({
     runtimeFileConfig,
     useMesh: false,
   });
-  // Required keys for EnvVarsEditor amber rows: exclude file-satisfied keys
-  // so they render in the "Set in goose config" row instead.
+  // Required keys for EnvVarsEditor amber rows: only those still unresolved
+  // (not baked-satisfied and not file-satisfied).
   const requiredEnvKeys = requiredCredentialEnvKeys(
     runtime,
     trimmedProvider,
-  ).filter((key) => !localModeGate.fileSatisfiedEnvKeys.includes(key));
+  ).filter(
+    (key) =>
+      localModeGate.missingEnvKeys.includes(key) ||
+      localModeGate.fileSatisfiedEnvKeys.includes(key),
+  );
   // Provider required-ness is a static property of the runtime — it does not
   // change based on whether the field is currently filled. Using the dynamic
   // missingNormalizedFields check would flip the asterisk off once a value is

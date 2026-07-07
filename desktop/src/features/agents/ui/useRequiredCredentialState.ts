@@ -1,8 +1,12 @@
 import * as React from "react";
 
-import { useRuntimeFileConfigQuery } from "@/features/agents/hooks";
+import {
+  useBakedBuildEnvKeysQuery,
+  useRuntimeFileConfigQuery,
+} from "@/features/agents/hooks";
 
 import {
+  getBakedSatisfiedEnvKeys,
   requiredCredentialEnvKeys,
   runtimeSupportsLlmProviderSelection,
 } from "./personaDialogPickers";
@@ -61,30 +65,39 @@ export function useRequiredCredentialState(params: {
     { enabled: open },
   );
 
+  const { data: bakedEnvKeys } = useBakedBuildEnvKeysQuery({ enabled: open });
+
+  // All required keys for this runtime + provider combination.
+  const allRequiredKeys = React.useMemo(
+    () =>
+      requiredCredentialEnvKeys(prospectiveRuntimeId, providerForRequiredKeys),
+    [prospectiveRuntimeId, providerForRequiredKeys],
+  );
+
+  // Keys covered by the baked build env — silenced, produce no info row.
+  const bakedSatisfiedKeys = React.useMemo(
+    () => getBakedSatisfiedEnvKeys(allRequiredKeys, envVars, bakedEnvKeys),
+    [allRequiredKeys, envVars, bakedEnvKeys],
+  );
+
   const fileSatisfiedEnvKeys = React.useMemo(() => {
     if (!runtimeFileConfig) return [] as string[];
-    return requiredCredentialEnvKeys(
-      prospectiveRuntimeId,
-      providerForRequiredKeys,
-    ).filter(
+    return allRequiredKeys.filter(
       (key) =>
         (envVars[key] ?? "").length === 0 &&
+        !bakedSatisfiedKeys.includes(key) &&
         runtimeFileConfig.satisfiedEnvKeys.includes(key),
     );
-  }, [
-    runtimeFileConfig,
-    prospectiveRuntimeId,
-    providerForRequiredKeys,
-    envVars,
-  ]);
+  }, [runtimeFileConfig, allRequiredKeys, envVars, bakedSatisfiedKeys]);
 
   const requiredEnvKeys = React.useMemo(
     () =>
-      requiredCredentialEnvKeys(
-        prospectiveRuntimeId,
-        providerForRequiredKeys,
-      ).filter((key) => !fileSatisfiedEnvKeys.includes(key)),
-    [prospectiveRuntimeId, providerForRequiredKeys, fileSatisfiedEnvKeys],
+      allRequiredKeys.filter(
+        (key) =>
+          !bakedSatisfiedKeys.includes(key) &&
+          !fileSatisfiedEnvKeys.includes(key),
+      ),
+    [allRequiredKeys, bakedSatisfiedKeys, fileSatisfiedEnvKeys],
   );
 
   const requiredEnvKeyMissing = React.useMemo(

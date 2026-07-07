@@ -529,6 +529,7 @@ pub fn run() {
             discover_agent_models,
             get_agent_config_surface,
             get_runtime_file_config,
+            get_baked_build_env_keys,
             put_agent_session_config,
             mesh_availability,
             mesh_start_node,
