@@ -20,6 +20,7 @@ use buzz_core::CommunityId;
 use buzz_db::Db;
 use buzz_media::MediaStorage;
 use buzz_pubsub::cache_invalidation::CacheInvalidation;
+use buzz_pubsub::conn_control::ConnControl;
 use buzz_pubsub::{PubSubManager, RedisNip98ReplayGuard};
 use buzz_search::SearchService;
 use buzz_workflow::WorkflowEngine;
@@ -654,6 +655,53 @@ impl AppState {
                 self.invalidate_channel_deleted_local();
             }
         }
+    }
+
+    /// Enforce a live ban cluster-wide: close this pod's sockets for `pubkey`
+    /// now (fenced to `tenant`'s community) and fan the same disconnect out to
+    /// every other pod over the conn-control Redis channel.
+    ///
+    /// This is the single entry point for live ban enforcement (decision 4:
+    /// "a ban takes effect immediately, everywhere, including live sessions").
+    /// Callers must not invoke the pod-local `conn_manager.disconnect_pubkey`
+    /// directly — doing so closes sockets only on the pod that processed the
+    /// ban and silently drops the cluster-wide half. Pairing both halves here
+    /// makes that mistake unrepresentable.
+    ///
+    /// Returns the number of sockets closed on *this* pod only — remote pods
+    /// close asynchronously and do not report back, so callers must not treat
+    /// the count as cluster-wide truth. The cross-pod publish is fire-and-forget
+    /// (mirrors [`Self::spawn_cache_invalidation`]): the DB ban row is the
+    /// durable backstop, so a dropped publish still refuses the banned member's
+    /// next auth and next write.
+    pub fn disconnect_pubkey_clusterwide(
+        &self,
+        tenant: &TenantContext,
+        pubkey: &[u8],
+        event_id: &str,
+        reason: &str,
+    ) -> usize {
+        let closed =
+            self.conn_manager
+                .disconnect_pubkey(tenant.community(), pubkey, event_id, reason);
+
+        // The banning pod re-receives its own publish through the subscriber and
+        // no-ops (its local sockets are already closed above) — intentional; do
+        // not add origin-suppression, it buys nothing.
+        let pubsub = Arc::clone(&self.pubsub);
+        let tenant = tenant.clone();
+        let command = ConnControl::DisconnectPubkey {
+            pubkey: pubkey.to_vec(),
+            event_id: event_id.to_string(),
+            reason: reason.to_string(),
+        };
+        tokio::spawn(async move {
+            if let Err(e) = pubsub.publish_conn_control(&tenant, &command).await {
+                tracing::warn!("Failed to publish conn-control disconnect: {e}");
+            }
+        });
+
+        closed
     }
 
     /// Get accessible channel IDs with a 10-second cache. Falls back to DB on miss.
