@@ -70,8 +70,10 @@ async function openEditDialog(
 
   await page.getByTestId("user-profile-edit-agent").click();
 
-  // Wait for the Edit dialog's provider field (goose runtime supports it).
-  await expect(page.locator("#agent-provider")).toBeVisible({
+  // Wait for the Edit dialog's LLM provider field (goose runtime supports it).
+  // The Edit dialog renders provider selection via PersonaDropdownField, whose
+  // trigger button carries this id (the Create dialog uses #agent-provider).
+  await expect(page.locator("#edit-agent-llm-provider")).toBeVisible({
     timeout: 10_000,
   });
 }
