@@ -1084,6 +1084,11 @@ test("first-run onboarding shows setup loading until Welcome bootstrap completes
       animateElementCount: element.querySelectorAll("animate").length,
       backgroundColor: shellStyles.backgroundColor,
       backgroundImage: shellStyles.backgroundImage,
+      // The document itself must also be black (inline <style> in
+      // index.html) so the pre-React/pre-CSS first paint can't flash white
+      // before the gate mounts.
+      documentBackgroundColor: window.getComputedStyle(document.documentElement)
+        .backgroundColor,
       markColor: markStyles?.color,
       markUsesCurrentColor: markSvg?.getAttribute("fill") === "currentColor",
     };
@@ -1092,6 +1097,7 @@ test("first-run onboarding shows setup loading until Welcome bootstrap completes
     animateElementCount: 0,
     backgroundColor: "rgb(0, 0, 0)",
     backgroundImage: "none",
+    documentBackgroundColor: "rgb(0, 0, 0)",
     markColor: "rgb(215, 215, 46)", // #d7d72e
     markUsesCurrentColor: true,
   });

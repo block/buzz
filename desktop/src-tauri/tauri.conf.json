@@ -21,6 +21,7 @@
         "height": 600,
         "maximized": true,
         "visible": false,
+        "backgroundColor": "#000000",
         "titleBarStyle": "Overlay",
         "hiddenTitle": true,
         "dragDropEnabled": false,
