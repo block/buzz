@@ -44,7 +44,7 @@ pub enum ModerationNotice {
     ReportResolved {
         /// The resolved report row.
         report_id: Uuid,
-        /// `resolved` | `dismissed` | `escalated`.
+        /// `resolved` | `dismissed`.
         status: String,
         /// Sanitized outcome line (no reporter/mod identities beyond policy).
         summary: String,
@@ -70,7 +70,9 @@ pub enum ModerationNotice {
 /// Deliver a moderation notice to `recipient` in this community's
 /// relay-authored DM thread (created on first use, reused after).
 ///
-/// Idempotent per (action/report id, recipient): re-delivery is a no-op.
+/// Crash-retry safe per (action/report id, recipient): a retry after a
+/// committed insert is a no-op; concurrent duplicate sends are not serialized
+/// in v1.
 pub async fn send_moderation_notice(
     tenant: &TenantContext,
     state: &Arc<AppState>,
@@ -206,6 +208,11 @@ async fn publish_moderation_profile(
 /// unbounded read. Matches the opaque `moderation_source` tag in Rust because
 /// `EventQuery` only pushes down standardized `e`/`d`/`p` tags and this row id
 /// is intentionally not an `e` tag (see `MODERATION_SOURCE_TAG`).
+///
+/// `limit` is set to the query clamp (1000): matching is post-query in Rust so
+/// `Some(1)` would be wrong, and the default 100-row window could let an old
+/// source id fall out of view and re-send a duplicate on crash-retry. 1000
+/// moderation notices to one user in one community is a practical ceiling.
 async fn notice_already_sent(
     state: &Arc<AppState>,
     tenant: &TenantContext,
@@ -219,6 +226,7 @@ async fn notice_already_sent(
             kinds: Some(vec![KIND_STREAM_MESSAGE as i32]),
             channel_id: Some(dm_channel_id),
             authors: Some(vec![relay_pubkey_bytes.to_vec()]),
+            limit: Some(1000),
             ..buzz_db::event::EventQuery::for_community(tenant.community())
         })
         .await?;
