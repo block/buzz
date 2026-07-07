@@ -445,14 +445,62 @@ jobs:
     name: Release Linux
     if: github.repository == 'block/buzz'
     runs-on: ubuntu-latest
+    container: ubuntu:22.04
     needs: setup
     timeout-minutes: 60
     permissions:
       contents: write
+    env:
+      # AppImage tools (linuxdeploy, appimagetool) are themselves AppImages.
+      # Containers lack FUSE, so we must use the extract-and-run fallback.
+      APPIMAGE_EXTRACT_AND_RUN: "1"
     outputs:
       archive_name: ${{ steps.linux-artifacts.outputs.archive_name }}
       sig: ${{ steps.read-sig.outputs.sig }}
     steps:
+      - name: Install system dependencies
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          # Must run first: bare ubuntu:22.04 ships without curl, wget, git, or
+          # ca-certificates. activate-hermit bootstraps via curl+HTTPS (needs
+          # both), and actions/checkout falls back to a REST tarball without git.
+          # Running as root — no sudo needed.
+          apt-get update \
+            -o Acquire::Retries=3 \
+            -o Acquire::http::Timeout=30 \
+            -o Acquire::https::Timeout=30
+          apt-get install -y --no-install-recommends \
+            -o Acquire::Retries=3 \
+            -o Acquire::http::Timeout=30 \
+            -o Acquire::https::Timeout=30 \
+            -o DPkg::Lock::Timeout=120 \
+            build-essential \
+            ca-certificates \
+            curl \
+            file \
+            git \
+            libasound2-dev \
+            libayatana-appindicator3-dev \
+            libgtk-3-dev \
+            librsvg2-dev \
+            libssl-dev \
+            libwebkit2gtk-4.1-dev \
+            libxdo-dev \
+            patchelf \
+            pkg-config \
+            wget
+          # Install GitHub CLI — preinstalled on runners but absent in containers.
+          # wget and ca-certificates are now available from the step above.
+          mkdir -p -m 755 /etc/apt/keyrings
+          wget -qO /usr/share/keyrings/githubcli-archive-keyring.gpg \
+            https://cli.github.com/packages/githubcli-archive-keyring.gpg
+          chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+            > /etc/apt/sources.list.d/github-cli.list
+          apt-get update
+          apt-get install -y --no-install-recommends gh
+
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           ref: ${{ github.event_name == 'push' && github.ref || inputs.ref }}
@@ -465,31 +513,27 @@ jobs:
           workspaces: desktop/src-tauri
           lookup-only: true
 
-      - name: Install Tauri dependencies (Linux)
-        env:
-          DEBIAN_FRONTEND: noninteractive
+      - name: Install appimagetool
         run: |
-          sudo apt-get update \
-            -o Acquire::Retries=3 \
-            -o Acquire::http::Timeout=30 \
-            -o Acquire::https::Timeout=30
-          sudo apt-get install -y --no-install-recommends \
-            -o Acquire::Retries=3 \
-            -o Acquire::http::Timeout=30 \
-            -o Acquire::https::Timeout=30 \
-            -o DPkg::Lock::Timeout=120 \
-            build-essential \
-            curl \
-            file \
-            libasound2-dev \
-            libayatana-appindicator3-dev \
-            libgtk-3-dev \
-            librsvg2-dev \
-            libssl-dev \
-            libwebkit2gtk-4.1-dev \
-            libxdo-dev \
-            patchelf \
-            wget
+          # Pin to an immutable release tag to avoid supply-chain drift from the
+          # mutable `continuous` tag. Tag: 1.9.1, asset: appimagetool-<arch>.AppImage
+          # (https://github.com/AppImage/appimagetool/releases/tag/1.9.1)
+          case "$(uname -m)" in
+            x86_64)  ARCH_SUFFIX="x86_64" ;;
+            aarch64) ARCH_SUFFIX="aarch64" ;;
+            *)
+              echo "::error::Unsupported architecture: $(uname -m)"
+              exit 1
+              ;;
+          esac
+          wget -qO /tmp/appimagetool \
+            "https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-${ARCH_SUFFIX}.AppImage"
+          # SHA256 integrity check — only enforced for x86_64 (the only arch CI builds today).
+          # If an aarch64 runner is added, compute and add its expected hash here.
+          if [[ "$ARCH_SUFFIX" == "x86_64" ]]; then
+            echo "ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0  /tmp/appimagetool" | sha256sum -c
+          fi
+          install -m 755 /tmp/appimagetool /usr/local/bin/appimagetool
 
       - name: Install desktop dependencies
         run: just desktop-install-ci
@@ -518,6 +562,22 @@ jobs:
           BUZZ_UPDATER_PUBLIC_KEY: ${{ secrets.BUZZ_UPDATER_PUBLIC_KEY || secrets.SPROUT_UPDATER_PUBLIC_KEY }}
           BUZZ_UPDATER_ENDPOINT: https://github.com/block/buzz/releases/download/buzz-desktop-latest/latest.json
           CMAKE_POLICY_VERSION_MINIMUM: "3.5"
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+
+      - name: Fix AppImage (remove infra libs, symlink system GStreamer)
+        run: |
+          mapfile -t APPIMAGES < <(find desktop/src-tauri/target/release/bundle/appimage -name '*.AppImage' -type f)
+          if [[ ${#APPIMAGES[@]} -eq 0 ]]; then
+            echo "::error::No AppImage found to post-process"
+            exit 1
+          fi
+          if [[ ${#APPIMAGES[@]} -gt 1 ]]; then
+            echo "::error::Expected exactly one AppImage, found ${#APPIMAGES[@]}: ${APPIMAGES[*]}"
+            exit 1
+          fi
+          bash desktop/scripts/fix-appimage.sh "${APPIMAGES[0]}"
+        env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
