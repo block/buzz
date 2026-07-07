@@ -32,11 +32,19 @@
 //! - 9042 timeout: `["p", <hex pubkey>]` + required `["expiration", <unix secs>]`;
 //!   optional `["reason", <text>]`.
 //! - 9043 untimeout: `["p", <hex pubkey>]`.
-//! - 9044 resolve: `["report", <row uuid>]` + `["status", resolved|dismissed|escalated]`
-//!   + `["resolution", dismiss|delete|kick|ban|timeout|escalate]`; optional
-//!   `["reason", <text>]` (private) and `["public_reason", <text>]` (tombstone-safe).
-//!   `delete`/`kick`/`ban`/`timeout` resolutions fan out through the existing
-//!   9005/9001 paths and the 9040/9042 handlers — no second implementation.
+//! - 9044 resolve (pinned — thread event `86f46207`, 2026-07-07): required,
+//!   exactly one each: `["report", <report event id hex>]` (the 1984 report
+//!   being resolved; resolves under `tenant.community()` only),
+//!   `["status", resolved|dismissed]`,
+//!   `["action", delete|kick|ban|timeout|dismiss|escalate]` (`dismiss` pairs
+//!   with status `dismissed`; everything else with `resolved`). Optional
+//!   `["reason", <text>]` — audited into `moderation_actions.public_reason`
+//!   and relayed in the notice DM (so it must be safe for the reporter's
+//!   eyes; `private_reason` is mod-only and not fed by 9044 tags). Unknown
+//!   extra tags are ignored, not rejected
+//!   (forward-compat). `delete`/`kick`/`ban`/`timeout` actions fan out through
+//!   the existing 9005/9001 paths and the 9040/9042 handlers — no second
+//!   implementation.
 //!
 //! Lane ownership: L6 (Quinn) — plus `buzz-cli` `moderation` command group.
 //! The `ingest.rs` routing entries (scope map + `is_global_only_kind` +

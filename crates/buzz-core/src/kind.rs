@@ -214,8 +214,10 @@ pub const KIND_MODERATION_UNBAN: u32 = 9041;
 pub const KIND_MODERATION_TIMEOUT: u32 = 9042;
 /// Moderation: clear a timeout early (`p` tag target).
 pub const KIND_MODERATION_UNTIMEOUT: u32 = 9043;
-/// Moderation: resolve a report queue row (`report` tag = row UUID,
-/// `status` tag = resolved|dismissed|escalated).
+/// Moderation: resolve a report (`report` tag = report event id hex,
+/// `status` tag = resolved|dismissed, `action` tag =
+/// delete|kick|ban|timeout|dismiss|escalate — see
+/// `handlers/moderation_commands.rs` for the pinned vocabulary).
 pub const KIND_MODERATION_RESOLVE_REPORT: u32 = 9044;
 
 /// Returns `true` for community moderation command kinds (9040–9044).
