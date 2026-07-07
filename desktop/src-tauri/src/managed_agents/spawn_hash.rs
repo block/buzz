@@ -6,14 +6,18 @@
 //! spawn) against a recomputation from current disk state and show a
 //! "restart required" badge only when a restart would change what runs.
 //!
-//! Scope rules (decided in #centralize-personas-and-agents):
-//! - Inputs mirror `spawn_agent_child`: the live-persona-resolved harness
-//!   command (persona runtime edits DO propagate on restart), its derived
-//!   args/mcp command, the effective env layering, and the record fields the
-//!   spawn env writes read.
-//! - Persona prompt/model/provider edits are EXCLUDED: spawn reads the pinned
-//!   record snapshot, so a restart would not apply them — that drift is
-//!   `persona_out_of_date`'s respawn signal, not a restart signal.
+//! Scope rules (decided in #centralize-personas-and-agents, revised in PR
+//! #1602 review):
+//! - Inputs mirror what a start would actually run: the start/restore paths
+//!   re-snapshot the linked persona's prompt/model/provider/env onto the
+//!   record immediately before spawning (`start_local_agent_with_preflight`,
+//!   `restore_managed_agents_on_launch`), so persona edits to those fields DO
+//!   apply on a plain restart and are hashed via the same prospective
+//!   re-snapshot. Harness command, args/mcp, env layering, and the record
+//!   fields the spawn env writes read are hashed as spawn resolves them.
+//! - The relay URL is hashed in resolved form (`effective_agent_relay_url`):
+//!   a record with a blank relay spawns against the active workspace relay,
+//!   so a workspace relay change means a restart would change what runs.
 //! - Channel membership is not an input: agents pick up channel changes live
 //!   (#1468), never via restart.
 //!
@@ -23,13 +27,43 @@
 use std::hash::{DefaultHasher, Hash, Hasher};
 
 use super::{
-    effective_agent_command, known_acp_runtime, normalize_agent_args, resolve_effective_agent_env,
+    effective_agent_command, known_acp_runtime, normalize_agent_args,
+    persona_events::persona_snapshot_with_agent_config_fallback,
+    resolve_effective_agent_env,
     types::{ManagedAgentRecord, PersonaRecord},
 };
 
 /// Digest the effective spawn configuration of `record` under the current
-/// `personas`. Pure — no `AppHandle`, no disk, no keyring.
-pub(crate) fn spawn_config_hash(record: &ManagedAgentRecord, personas: &[PersonaRecord]) -> u64 {
+/// `personas`, resolving a blank record relay against `workspace_relay`.
+/// Pure — no `AppHandle`, no disk, no keyring.
+pub(crate) fn spawn_config_hash(
+    record: &ManagedAgentRecord,
+    personas: &[PersonaRecord],
+    workspace_relay: &str,
+) -> u64 {
+    // Prospective re-snapshot: mirror the mutation start/restore apply to the
+    // record right before spawning, so the hash covers what a restart would
+    // actually run. Idempotent, so the spawn-time stamp (post-snapshot record)
+    // and later recomputes (persisted record) agree when nothing changed.
+    let mut record = record.clone();
+    if let Some(persona_id) = record.persona_id.clone() {
+        if let Some(persona) = personas.iter().find(|p| p.id == persona_id) {
+            let snapshot = persona_snapshot_with_agent_config_fallback(
+                persona,
+                &record.env_vars,
+                record.model.as_deref(),
+                record.provider.as_deref(),
+            );
+            if let Some(prompt) = snapshot.system_prompt {
+                record.system_prompt = Some(prompt);
+            }
+            record.model = snapshot.model;
+            record.provider = snapshot.provider;
+            record.env_vars = snapshot.env_vars;
+        }
+    }
+    let record = &record;
+
     let effective_command = effective_agent_command(
         record.persona_id.as_deref(),
         personas,
@@ -53,8 +87,10 @@ pub(crate) fn spawn_config_hash(record: &ManagedAgentRecord, personas: &[Persona
     // BTreeMap iteration is ordered, so this is deterministic.
     effective.env.hash(&mut hasher);
 
-    // Record fields the spawn env writes read directly.
-    record.relay_url.hash(&mut hasher);
+    // Record fields the spawn env writes read directly. The relay is hashed
+    // resolved: a blank record relay spawns on the workspace relay, so a
+    // workspace relay change must trip the badge.
+    crate::relay::effective_agent_relay_url(&record.relay_url, workspace_relay).hash(&mut hasher);
     record.system_prompt.hash(&mut hasher);
     record.model.hash(&mut hasher);
     record.provider.hash(&mut hasher);

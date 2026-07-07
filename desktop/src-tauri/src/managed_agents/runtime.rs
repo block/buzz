@@ -1360,8 +1360,14 @@ pub fn build_managed_agent_summary(
     // tracked live process can drift — stopped agents spawn fresh, and
     // adopted (runtime_pid-only) processes have no stamped hash to compare.
     let needs_restart = runtimes.get(&record.pubkey).is_some_and(|runtime| {
+        use tauri::Manager;
+        let state = app.state::<crate::app_state::AppState>();
         runtime.spawn_config_hash
-            != crate::managed_agents::spawn_hash::spawn_config_hash(record, personas)
+            != crate::managed_agents::spawn_hash::spawn_config_hash(
+                record,
+                personas,
+                &crate::relay::relay_ws_url_with_override(&state),
+            )
     });
 
     // Resolve the effective harness the same way, then derive args/mcp from it,
@@ -1873,7 +1879,10 @@ pub fn spawn_agent_child(
 
     // Stamp the effective spawn config so the summary builder can flag
     // needs_restart when disk state drifts from what this process runs.
-    let spawn_config_hash = super::spawn_hash::spawn_config_hash(record, &personas);
+    // `effective_relay_url` is already resolved, and resolution is idempotent,
+    // so it serves as the workspace-relay input here.
+    let spawn_config_hash =
+        super::spawn_hash::spawn_config_hash(record, &personas, &effective_relay_url);
 
     let _ = super::write_agent_pid_file(app, &record.pubkey, child.id());
 

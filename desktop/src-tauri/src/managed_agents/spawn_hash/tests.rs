@@ -67,7 +67,10 @@ fn persona(id: &str, runtime: Option<&str>, prompt: &str) -> PersonaRecord {
 #[test]
 fn hash_is_deterministic() {
     let rec = record();
-    assert_eq!(spawn_config_hash(&rec, &[]), spawn_config_hash(&rec, &[]));
+    assert_eq!(
+        spawn_config_hash(&rec, &[], "wss://ws.example"),
+        spawn_config_hash(&rec, &[], "wss://ws.example")
+    );
 }
 
 #[test]
@@ -78,8 +81,8 @@ fn record_env_var_edit_changes_hash() {
         .env_vars
         .insert("SOME_KEY".into(), "some-value".into());
     assert_ne!(
-        spawn_config_hash(&rec, &[]),
-        spawn_config_hash(&edited, &[])
+        spawn_config_hash(&rec, &[], "wss://ws.example"),
+        spawn_config_hash(&edited, &[], "wss://ws.example")
     );
 }
 
@@ -89,8 +92,8 @@ fn record_prompt_edit_changes_hash() {
     let mut edited = record();
     edited.system_prompt = Some("Edited prompt.".into());
     assert_ne!(
-        spawn_config_hash(&rec, &[]),
-        spawn_config_hash(&edited, &[])
+        spawn_config_hash(&rec, &[], "wss://ws.example"),
+        spawn_config_hash(&edited, &[], "wss://ws.example")
     );
 }
 
@@ -103,23 +106,46 @@ fn persona_runtime_edit_changes_hash() {
     let before = [persona("pers", Some("goose"), "prompt")];
     let after = [persona("pers", Some("claude"), "prompt")];
     assert_ne!(
-        spawn_config_hash(&rec, &before),
-        spawn_config_hash(&rec, &after)
+        spawn_config_hash(&rec, &before, "wss://ws.example"),
+        spawn_config_hash(&rec, &after, "wss://ws.example")
     );
 }
 
 #[test]
-fn persona_prompt_edit_does_not_change_hash() {
-    // Spawn reads the pinned record snapshot for the prompt — a restart would
-    // NOT apply a persona prompt edit, so it must not trip the restart badge
-    // (that drift is persona_out_of_date's respawn signal).
+fn persona_prompt_edit_changes_hash() {
+    // Start/restore re-snapshot the persona prompt onto the record right
+    // before spawning, so a persona prompt edit DOES apply on a plain
+    // restart → the badge must trip.
     let mut rec = record();
     rec.persona_id = Some("pers".into());
     let before = [persona("pers", Some("goose"), "old prompt")];
     let after = [persona("pers", Some("goose"), "new prompt")];
+    assert_ne!(
+        spawn_config_hash(&rec, &before, "wss://ws.example"),
+        spawn_config_hash(&rec, &after, "wss://ws.example")
+    );
+}
+
+#[test]
+fn workspace_relay_change_trips_hash_for_blank_record_relay() {
+    // A blank record relay spawns against the active workspace relay, so a
+    // workspace relay change means a restart would change what runs.
+    let mut rec = record();
+    rec.relay_url = String::new();
+    assert_ne!(
+        spawn_config_hash(&rec, &[], "wss://relay-a.example"),
+        spawn_config_hash(&rec, &[], "wss://relay-b.example")
+    );
+}
+
+#[test]
+fn workspace_relay_change_ignored_for_pinned_record_relay() {
+    // An explicit per-agent relay pins the agent regardless of workspace, so
+    // a workspace relay change must NOT badge a pinned agent.
+    let rec = record();
     assert_eq!(
-        spawn_config_hash(&rec, &before),
-        spawn_config_hash(&rec, &after)
+        spawn_config_hash(&rec, &[], "wss://relay-a.example"),
+        spawn_config_hash(&rec, &[], "wss://relay-b.example")
     );
 }
 
@@ -129,8 +155,8 @@ fn respond_to_allowlist_edit_changes_hash() {
     let mut edited = record();
     edited.respond_to_allowlist = vec!["a".repeat(64)];
     assert_ne!(
-        spawn_config_hash(&rec, &[]),
-        spawn_config_hash(&edited, &[])
+        spawn_config_hash(&rec, &[], "wss://ws.example"),
+        spawn_config_hash(&edited, &[], "wss://ws.example")
     );
 }
 
@@ -145,7 +171,7 @@ fn non_spawn_bookkeeping_fields_do_not_change_hash() {
     edited.last_started_at = Some("later".into());
     edited.last_exit_code = Some(0);
     assert_eq!(
-        spawn_config_hash(&rec, &[]),
-        spawn_config_hash(&edited, &[])
+        spawn_config_hash(&rec, &[], "wss://ws.example"),
+        spawn_config_hash(&edited, &[], "wss://ws.example")
     );
 }
