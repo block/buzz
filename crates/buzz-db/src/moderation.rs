@@ -15,7 +15,7 @@
 //! through the integration thread.
 
 use chrono::{DateTime, Utc};
-use sqlx::PgPool;
+use sqlx::{PgPool, Row as _};
 use uuid::Uuid;
 
 use crate::error::Result;
@@ -144,6 +144,8 @@ pub struct ActionRecord {
     pub public_reason: Option<String>,
     /// Mod-only reason.
     pub private_reason: Option<String>,
+    /// NIP-OA principal matched by enforcement, when relevant.
+    pub matched_principal: Option<String>,
     /// Action time.
     pub created_at: DateTime<Utc>,
 }
@@ -151,88 +153,234 @@ pub struct ActionRecord {
 /// Insert a new report row. Idempotent on `(community, report_event_id)`:
 /// re-ingesting the same signed report is a no-op returning the existing id.
 pub async fn insert_report(
-    _pool: &PgPool,
-    _community: CommunityId,
-    _report: NewReport<'_>,
+    pool: &PgPool,
+    community: CommunityId,
+    report: NewReport<'_>,
 ) -> Result<Uuid> {
-    todo!("L1 (Max): INSERT ... ON CONFLICT (community_id, report_event_id) DO NOTHING + return id")
+    let (target_kind, target_event_id, target_pubkey, target_blob_sha256) = match &report.target {
+        ReportTarget::Event(id) => ("event", Some(id.as_slice()), None, None),
+        ReportTarget::Pubkey(pubkey) => ("pubkey", None, Some(pubkey.as_slice()), None),
+        ReportTarget::Blob(sha256) => ("blob", None, None, Some(sha256.as_slice())),
+    };
+
+    let row = sqlx::query(
+        r#"
+        INSERT INTO moderation_reports (
+            community_id, report_event_id, reporter_pubkey, target_kind,
+            target_event_id, target_pubkey, target_blob_sha256, channel_id,
+            report_type, note
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        ON CONFLICT (community_id, report_event_id) DO UPDATE SET
+            report_event_id = EXCLUDED.report_event_id
+        RETURNING id
+        "#,
+    )
+    .bind(community.as_uuid())
+    .bind(report.report_event_id)
+    .bind(report.reporter_pubkey)
+    .bind(target_kind)
+    .bind(target_event_id)
+    .bind(target_pubkey)
+    .bind(target_blob_sha256)
+    .bind(report.channel_id)
+    .bind(report.report_type)
+    .bind(report.note)
+    .fetch_one(pool)
+    .await?;
+
+    Ok(row.try_get("id")?)
 }
 
 /// List reports for the moderation queue, newest first.
 /// `status = None` lists all; `Some("open")` etc. filters.
 pub async fn list_reports(
-    _pool: &PgPool,
-    _community: CommunityId,
-    _status: Option<&str>,
-    _limit: i64,
+    pool: &PgPool,
+    community: CommunityId,
+    status: Option<&str>,
+    limit: i64,
 ) -> Result<Vec<ReportRecord>> {
-    todo!("L1 (Max)")
+    let rows = sqlx::query(
+        r#"
+        SELECT id, report_event_id, reporter_pubkey, target_kind, target_event_id,
+               target_pubkey, target_blob_sha256, channel_id, report_type, note,
+               status, resolved_by, resolved_at, action_id, created_at
+        FROM moderation_reports
+        WHERE community_id = $1 AND ($2::text IS NULL OR status = $2)
+        ORDER BY created_at DESC
+        LIMIT $3
+        "#,
+    )
+    .bind(community.as_uuid())
+    .bind(status)
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+
+    rows.into_iter().map(row_to_report).collect()
 }
 
 /// Fetch one report by row id.
 pub async fn get_report(
-    _pool: &PgPool,
-    _community: CommunityId,
-    _report_id: Uuid,
+    pool: &PgPool,
+    community: CommunityId,
+    report_id: Uuid,
 ) -> Result<Option<ReportRecord>> {
-    todo!("L1 (Max)")
+    let row = sqlx::query(
+        r#"
+        SELECT id, report_event_id, reporter_pubkey, target_kind, target_event_id,
+               target_pubkey, target_blob_sha256, channel_id, report_type, note,
+               status, resolved_by, resolved_at, action_id, created_at
+        FROM moderation_reports
+        WHERE community_id = $1 AND id = $2
+        "#,
+    )
+    .bind(community.as_uuid())
+    .bind(report_id)
+    .fetch_optional(pool)
+    .await?;
+
+    row.map(row_to_report).transpose()
 }
 
 /// Mark a report resolved/dismissed/escalated, linking the audit action.
 /// Returns `false` if the report was not found or already closed.
 pub async fn resolve_report(
-    _pool: &PgPool,
-    _community: CommunityId,
-    _report_id: Uuid,
-    _status: &str,
-    _resolved_by: &[u8],
-    _action_id: Option<Uuid>,
+    pool: &PgPool,
+    community: CommunityId,
+    report_id: Uuid,
+    status: &str,
+    resolved_by: &[u8],
+    action_id: Option<Uuid>,
 ) -> Result<bool> {
-    todo!("L1 (Max)")
+    let result = sqlx::query(
+        r#"
+        UPDATE moderation_reports
+        SET status = $3, resolved_by = $4, resolved_at = now(), action_id = $5
+        WHERE community_id = $1 AND id = $2 AND status = 'open'
+        "#,
+    )
+    .bind(community.as_uuid())
+    .bind(report_id)
+    .bind(status)
+    .bind(resolved_by)
+    .bind(action_id)
+    .execute(pool)
+    .await?;
+
+    Ok(result.rows_affected() > 0)
 }
 
 /// Upsert a ban: sets `banned = true` with optional expiry + reason.
 pub async fn ban_member(
-    _pool: &PgPool,
-    _community: CommunityId,
-    _pubkey: &[u8],
-    _actor: &[u8],
-    _reason: Option<&str>,
-    _expires_at: Option<DateTime<Utc>>,
+    pool: &PgPool,
+    community: CommunityId,
+    pubkey: &[u8],
+    actor: &[u8],
+    reason: Option<&str>,
+    expires_at: Option<DateTime<Utc>>,
 ) -> Result<()> {
-    todo!("L1 (Max): INSERT ... ON CONFLICT (community_id, pubkey) DO UPDATE")
+    sqlx::query(
+        r#"
+        INSERT INTO community_bans (
+            community_id, pubkey, banned, ban_expires_at, ban_reason, actor_pubkey
+        ) VALUES ($1, $2, true, $3, $4, $5)
+        ON CONFLICT (community_id, pubkey) DO UPDATE SET
+            banned = true,
+            ban_expires_at = EXCLUDED.ban_expires_at,
+            ban_reason = EXCLUDED.ban_reason,
+            actor_pubkey = EXCLUDED.actor_pubkey,
+            updated_at = now()
+        "#,
+    )
+    .bind(community.as_uuid())
+    .bind(pubkey)
+    .bind(expires_at)
+    .bind(reason)
+    .bind(actor)
+    .execute(pool)
+    .await?;
+
+    Ok(())
 }
 
 /// Lift a ban. Returns `false` if the member was not banned.
 pub async fn unban_member(
-    _pool: &PgPool,
-    _community: CommunityId,
-    _pubkey: &[u8],
-    _actor: &[u8],
+    pool: &PgPool,
+    community: CommunityId,
+    pubkey: &[u8],
+    actor: &[u8],
 ) -> Result<bool> {
-    todo!("L1 (Max)")
+    let result = sqlx::query(
+        r#"
+        UPDATE community_bans
+        SET banned = false, ban_expires_at = NULL, ban_reason = NULL,
+            actor_pubkey = $3, updated_at = now()
+        WHERE community_id = $1 AND pubkey = $2 AND banned = true
+        "#,
+    )
+    .bind(community.as_uuid())
+    .bind(pubkey)
+    .bind(actor)
+    .execute(pool)
+    .await?;
+
+    Ok(result.rows_affected() > 0)
 }
 
 /// Upsert a timeout: sets `muted_until` + reason.
 pub async fn timeout_member(
-    _pool: &PgPool,
-    _community: CommunityId,
-    _pubkey: &[u8],
-    _actor: &[u8],
-    _muted_until: DateTime<Utc>,
-    _reason: Option<&str>,
+    pool: &PgPool,
+    community: CommunityId,
+    pubkey: &[u8],
+    actor: &[u8],
+    muted_until: DateTime<Utc>,
+    reason: Option<&str>,
 ) -> Result<()> {
-    todo!("L1 (Max)")
+    sqlx::query(
+        r#"
+        INSERT INTO community_bans (
+            community_id, pubkey, muted_until, mute_reason, actor_pubkey
+        ) VALUES ($1, $2, $3, $4, $5)
+        ON CONFLICT (community_id, pubkey) DO UPDATE SET
+            muted_until = EXCLUDED.muted_until,
+            mute_reason = EXCLUDED.mute_reason,
+            actor_pubkey = EXCLUDED.actor_pubkey,
+            updated_at = now()
+        "#,
+    )
+    .bind(community.as_uuid())
+    .bind(pubkey)
+    .bind(muted_until)
+    .bind(reason)
+    .bind(actor)
+    .execute(pool)
+    .await?;
+
+    Ok(())
 }
 
 /// Clear a timeout early. Returns `false` if the member was not timed out.
 pub async fn untimeout_member(
-    _pool: &PgPool,
-    _community: CommunityId,
-    _pubkey: &[u8],
-    _actor: &[u8],
+    pool: &PgPool,
+    community: CommunityId,
+    pubkey: &[u8],
+    actor: &[u8],
 ) -> Result<bool> {
-    todo!("L1 (Max)")
+    let result = sqlx::query(
+        r#"
+        UPDATE community_bans
+        SET muted_until = NULL, mute_reason = NULL,
+            actor_pubkey = $3, updated_at = now()
+        WHERE community_id = $1 AND pubkey = $2 AND muted_until > now()
+        "#,
+    )
+    .bind(community.as_uuid())
+    .bind(pubkey)
+    .bind(actor)
+    .execute(pool)
+    .await?;
+
+    Ok(result.rows_affected() > 0)
 }
 
 /// Restriction snapshot consumed by the auth-seam gate (L4) and write gates.
@@ -251,41 +399,190 @@ pub struct RestrictionState {
 /// Fetch the current restriction state for a pubkey in one community.
 /// Missing row ⇒ `RestrictionState::default()` (unrestricted).
 pub async fn restriction_state(
-    _pool: &PgPool,
-    _community: CommunityId,
-    _pubkey: &[u8],
+    pool: &PgPool,
+    community: CommunityId,
+    pubkey: &[u8],
 ) -> Result<RestrictionState> {
-    todo!("L1 (Max): single SELECT evaluating ban expiry + mute window in SQL")
+    let row = sqlx::query(
+        r#"
+        SELECT
+            (banned AND (ban_expires_at IS NULL OR ban_expires_at > now())) AS banned,
+            CASE WHEN muted_until > now() THEN muted_until ELSE NULL END AS muted_until
+        FROM community_bans
+        WHERE community_id = $1 AND pubkey = $2
+        "#,
+    )
+    .bind(community.as_uuid())
+    .bind(pubkey)
+    .fetch_optional(pool)
+    .await?;
+
+    match row {
+        Some(row) => Ok(RestrictionState {
+            banned: row.try_get("banned")?,
+            muted_until: row.try_get("muted_until")?,
+        }),
+        None => Ok(RestrictionState::default()),
+    }
 }
 
 /// Fetch the full ban/timeout row (moderation queue / audit views).
 pub async fn get_ban(
-    _pool: &PgPool,
-    _community: CommunityId,
-    _pubkey: &[u8],
+    pool: &PgPool,
+    community: CommunityId,
+    pubkey: &[u8],
 ) -> Result<Option<BanRecord>> {
-    todo!("L1 (Max)")
+    let row = sqlx::query(
+        r#"
+        SELECT pubkey,
+               (banned AND (ban_expires_at IS NULL OR ban_expires_at > now())) AS banned,
+               ban_expires_at, ban_reason, muted_until,
+               mute_reason, actor_pubkey, updated_at
+        FROM community_bans
+        WHERE community_id = $1 AND pubkey = $2
+        "#,
+    )
+    .bind(community.as_uuid())
+    .bind(pubkey)
+    .fetch_optional(pool)
+    .await?;
+
+    row.map(row_to_ban).transpose()
 }
 
 /// List currently-restricted members (active ban or timeout) for the queue.
-pub async fn list_restricted(_pool: &PgPool, _community: CommunityId) -> Result<Vec<BanRecord>> {
-    todo!("L1 (Max)")
+pub async fn list_restricted(pool: &PgPool, community: CommunityId) -> Result<Vec<BanRecord>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT pubkey,
+               (banned AND (ban_expires_at IS NULL OR ban_expires_at > now())) AS banned,
+               ban_expires_at, ban_reason, muted_until,
+               mute_reason, actor_pubkey, updated_at
+        FROM community_bans
+        WHERE community_id = $1
+          AND (
+              (banned AND (ban_expires_at IS NULL OR ban_expires_at > now()))
+              OR muted_until > now()
+          )
+        ORDER BY updated_at DESC
+        "#,
+    )
+    .bind(community.as_uuid())
+    .fetch_all(pool)
+    .await?;
+
+    rows.into_iter().map(row_to_ban).collect()
 }
 
 /// Insert a moderation audit row, returning its id.
 pub async fn insert_action(
-    _pool: &PgPool,
-    _community: CommunityId,
-    _action: NewAction<'_>,
+    pool: &PgPool,
+    community: CommunityId,
+    action: NewAction<'_>,
 ) -> Result<Uuid> {
-    todo!("L1 (Max)")
+    let row = sqlx::query(
+        r#"
+        INSERT INTO moderation_actions (
+            community_id, actor_pubkey, action, target_pubkey, target_event_id,
+            channel_id, reason_code, public_reason, private_reason, matched_principal
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        RETURNING id
+        "#,
+    )
+    .bind(community.as_uuid())
+    .bind(action.actor_pubkey)
+    .bind(action.action)
+    .bind(action.target_pubkey)
+    .bind(action.target_event_id)
+    .bind(action.channel_id)
+    .bind(action.reason_code)
+    .bind(action.public_reason)
+    .bind(action.private_reason)
+    .bind(action.matched_principal)
+    .fetch_one(pool)
+    .await?;
+
+    Ok(row.try_get("id")?)
 }
 
 /// List audit rows, newest first (`buzz moderation audit`).
 pub async fn list_actions(
-    _pool: &PgPool,
-    _community: CommunityId,
-    _limit: i64,
+    pool: &PgPool,
+    community: CommunityId,
+    limit: i64,
 ) -> Result<Vec<ActionRecord>> {
-    todo!("L1 (Max)")
+    let rows = sqlx::query(
+        r#"
+        SELECT id, actor_pubkey, action, target_pubkey, target_event_id, channel_id,
+               reason_code, public_reason, private_reason, matched_principal, created_at
+        FROM moderation_actions
+        WHERE community_id = $1
+        ORDER BY created_at DESC
+        LIMIT $2
+        "#,
+    )
+    .bind(community.as_uuid())
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+
+    rows.into_iter().map(row_to_action).collect()
+}
+
+fn row_to_report(row: sqlx::postgres::PgRow) -> Result<ReportRecord> {
+    let target_kind: String = row.try_get("target_kind")?;
+    let target = match target_kind.as_str() {
+        "event" => ReportTarget::Event(row.try_get("target_event_id")?),
+        "pubkey" => ReportTarget::Pubkey(row.try_get("target_pubkey")?),
+        "blob" => ReportTarget::Blob(row.try_get("target_blob_sha256")?),
+        other => {
+            return Err(crate::error::DbError::InvalidData(format!(
+                "invalid report target_kind: {other}"
+            )))
+        }
+    };
+
+    Ok(ReportRecord {
+        id: row.try_get("id")?,
+        report_event_id: row.try_get("report_event_id")?,
+        reporter_pubkey: row.try_get("reporter_pubkey")?,
+        target,
+        channel_id: row.try_get("channel_id")?,
+        report_type: row.try_get("report_type")?,
+        note: row.try_get("note")?,
+        status: row.try_get("status")?,
+        resolved_by: row.try_get("resolved_by")?,
+        resolved_at: row.try_get("resolved_at")?,
+        action_id: row.try_get("action_id")?,
+        created_at: row.try_get("created_at")?,
+    })
+}
+
+fn row_to_ban(row: sqlx::postgres::PgRow) -> Result<BanRecord> {
+    Ok(BanRecord {
+        pubkey: row.try_get("pubkey")?,
+        banned: row.try_get("banned")?,
+        ban_expires_at: row.try_get("ban_expires_at")?,
+        ban_reason: row.try_get("ban_reason")?,
+        muted_until: row.try_get("muted_until")?,
+        mute_reason: row.try_get("mute_reason")?,
+        actor_pubkey: row.try_get("actor_pubkey")?,
+        updated_at: row.try_get("updated_at")?,
+    })
+}
+
+fn row_to_action(row: sqlx::postgres::PgRow) -> Result<ActionRecord> {
+    Ok(ActionRecord {
+        id: row.try_get("id")?,
+        actor_pubkey: row.try_get("actor_pubkey")?,
+        action: row.try_get("action")?,
+        target_pubkey: row.try_get("target_pubkey")?,
+        target_event_id: row.try_get("target_event_id")?,
+        channel_id: row.try_get("channel_id")?,
+        reason_code: row.try_get("reason_code")?,
+        public_reason: row.try_get("public_reason")?,
+        private_reason: row.try_get("private_reason")?,
+        matched_principal: row.try_get("matched_principal")?,
+        created_at: row.try_get("created_at")?,
+    })
 }
