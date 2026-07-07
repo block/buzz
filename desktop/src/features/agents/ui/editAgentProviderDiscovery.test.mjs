@@ -7,7 +7,10 @@ import {
   requiredCredentialEnvKeys,
   isMissingRequiredDropdownField,
 } from "./personaDialogPickers.tsx";
-import { shouldClearModelForRuntimeChange } from "./personaRuntimeModel.ts";
+import {
+  computeEditAgentFormValidity,
+  shouldClearModelForRuntimeChange,
+} from "./personaRuntimeModel.ts";
 
 // ── LLM provider field visibility ──────────────────────────────────────────
 //
@@ -441,6 +444,91 @@ test("editAgent_customCommandSelected_savePinsCustomCommandNotInherit", () => {
     agentCommandUpdate,
     "/opt/bin/my-custom-agent",
     "custom command must be persisted as a pin, not silently dropped by the inherit path",
+  );
+});
+
+test("editAgent_customCommandSelected_autoExpandsAdvancedSection", () => {
+  // Selecting "Custom command" must reveal the Advanced command input, which is
+  // otherwise collapsed. Without this the user can Save without ever seeing the
+  // field, leaving agentCommand equal to the original effective command (so the
+  // update is omitted) and the custom selection silently no-ops.
+  let showAdvancedFields = false; // starts collapsed on open
+
+  const NO_RUNTIME_DROPDOWN_VALUE = "__none__";
+  const nextValue = "custom";
+  const nextRuntimeId =
+    nextValue === NO_RUNTIME_DROPDOWN_VALUE ? "" : nextValue;
+  const resolvedRuntimeId = nextRuntimeId || "custom";
+  const isCustomCommand = resolvedRuntimeId === "custom";
+
+  // Mirror the handler's auto-expand branch.
+  if (isCustomCommand) {
+    showAdvancedFields = true;
+  }
+
+  assert.equal(
+    showAdvancedFields,
+    true,
+    "selecting 'Custom command' must auto-expand Advanced so the command input is visible",
+  );
+});
+
+test("editAgent_customCommandPinned_blocksSaveWhenCommandEmpty", () => {
+  // A pinned custom command with an empty command field must block Save — the
+  // backend would spawn a runtime with no command otherwise. Exercises the real
+  // computeEditAgentFormValidity helper.
+  const base = {
+    name: "My Agent",
+    parallelism: "",
+    turnTimeoutSeconds: "",
+    agentAcpCommand: "",
+    acpCommand: "",
+    respondTo: "all",
+    respondToAllowlistLength: 0,
+    selectedRuntimeId: "custom",
+    inheritHarness: false,
+    agentCommand: "",
+  };
+
+  assert.equal(
+    computeEditAgentFormValidity(base),
+    false,
+    "empty pinned custom command must block Save",
+  );
+
+  assert.equal(
+    computeEditAgentFormValidity({ ...base, agentCommand: "/opt/bin/agent" }),
+    true,
+    "non-empty custom command must allow Save",
+  );
+
+  // An inherited (not pinned) selection is never gated by this rule, even with
+  // an empty command — the inherit path resolves the command server-side.
+  assert.equal(
+    computeEditAgentFormValidity({ ...base, inheritHarness: true }),
+    true,
+    "inheriting agents must not be gated by the custom-command rule",
+  );
+
+  // The other validity gates still apply through the helper.
+  assert.equal(
+    computeEditAgentFormValidity({
+      ...base,
+      agentCommand: "/opt/bin/agent",
+      name: "   ",
+    }),
+    false,
+    "blank name must block Save",
+  );
+  assert.equal(
+    computeEditAgentFormValidity({
+      ...base,
+      agentCommand: "/opt/bin/agent",
+      respondTo: "allowlist",
+      respondToAllowlistLength: 0,
+    }),
+    false,
+    "empty allowlist must block Save",
   );
 });
 

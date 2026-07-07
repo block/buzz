@@ -42,7 +42,10 @@ import {
   type PersonaDropdownOption,
   type PersonaModelOption,
 } from "./personaDialogPickers";
-import { shouldClearModelForRuntimeChange } from "./personaRuntimeModel";
+import {
+  computeEditAgentFormValidity,
+  shouldClearModelForRuntimeChange,
+} from "./personaRuntimeModel";
 import { AgentCreationPreview } from "./AgentCreationPreview";
 import type { EnvVarsValue } from "./EnvVarsEditor";
 import { CreateAgentRespondToField } from "./RespondToField";
@@ -368,6 +371,17 @@ export function EditAgentDialog({
       setInheritHarness(false);
     }
 
+    // "Custom command" is the only selection whose command must be typed by
+    // the user, and that input lives inside the collapsed Advanced section.
+    // Auto-expand Advanced so the command field is visible — otherwise the
+    // user can Save without ever seeing it, leaving agentCommand equal to the
+    // original effective command (so the update is omitted) and the custom
+    // selection silently no-ops. See handleSubmit's customCommandPinned gate,
+    // which blocks Save when the revealed field is still empty.
+    if (isCustomCommand) {
+      setShowAdvancedFields(true);
+    }
+
     // When switching to a catalog-known runtime, update the agent command to
     // its resolved command so the command field stays consistent.
     if (nextRuntime?.command) {
@@ -474,27 +488,19 @@ export function EditAgentDialog({
     onOpenChange(next);
   }
 
-  const parallelismValid =
-    parallelism.trim() === "" ||
-    !Number.isNaN(Number.parseInt(parallelism, 10));
-  const timeoutValid =
-    turnTimeoutSeconds.trim() === "" ||
-    !Number.isNaN(Number.parseInt(turnTimeoutSeconds, 10));
-  // Block clearing a previously-set command to empty — sending an empty string
-  // for a required command field would cause a runtime failure at spawn.
-  const acpCommandValid = !(agent.acpCommand && acpCommand.trim() === "");
-  // Allowlist mode requires at least one entry — mirrors the harness's own
-  // validation. The backend would reject the request anyway; we block early
-  // so the user sees the disabled button instead of a round-tripped error.
-  const respondToValid =
-    respondTo !== "allowlist" || respondToAllowlist.length > 0;
-
   const canSubmit =
-    name.trim().length > 0 &&
-    parallelismValid &&
-    timeoutValid &&
-    acpCommandValid &&
-    respondToValid &&
+    computeEditAgentFormValidity({
+      name,
+      parallelism,
+      turnTimeoutSeconds,
+      agentAcpCommand: agent.acpCommand,
+      acpCommand,
+      respondTo,
+      respondToAllowlistLength: respondToAllowlist.length,
+      selectedRuntimeId,
+      inheritHarness,
+      agentCommand,
+    }) &&
     !updateMutation.isPending &&
     !isAvatarUploadPending;
 
