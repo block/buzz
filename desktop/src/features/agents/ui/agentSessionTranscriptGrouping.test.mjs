@@ -465,6 +465,79 @@ test("buildTranscriptDisplayBlocks breaks same-kind runs on an ineligible row", 
   assert.equal(block.segments[2].item.id, "fail-1");
 });
 
+test("buildTranscriptDisplayBlocks bundles steer message with steer context behind the prompt segment", () => {
+  const steerMessage = {
+    id: "steer:chan-1:turn-1",
+    type: "message",
+    role: "user",
+    title: "Buzz event",
+    text: "@Bart new steer instruction",
+    timestamp: baseTimestamp,
+    acpSource: "session/steer:user",
+    turnId: "turn-1",
+    sessionId: "sess-1",
+    channelId: "chan-1",
+  };
+  const steerContext = {
+    id: "steer-context:chan-1:turn-1",
+    type: "metadata",
+    title: "Prompt context",
+    sections: [{ title: "Thread history", body: "prior messages" }],
+    timestamp: baseTimestamp,
+    acpSource: "session/steer:context",
+    turnId: "turn-1",
+    sessionId: "sess-1",
+    channelId: "chan-1",
+  };
+
+  const [block] = buildTranscriptDisplayBlocks([
+    assistantMessage("assistant", "Working on it.", "turn-1"),
+    steerMessage,
+    steerContext,
+    toolCall("tool", "turn-1"),
+  ]);
+
+  assert.equal(block.kind, "turn");
+  assert.deepEqual(
+    block.segments.map((segment) => segment.kind),
+    ["item", "prompt", "item"],
+  );
+  const steerSegment = block.segments[1];
+  assert.equal(steerSegment.user.id, "steer:chan-1:turn-1");
+  assert.equal(steerSegment.context?.id, "steer-context:chan-1:turn-1");
+  assert.equal(steerSegment.systemPrompt, null);
+  assert.deepEqual(steerSegment.setup, []);
+  // No standalone "Prompt context" metadata row leaks into the feed.
+  assert.ok(
+    !block.segments.some(
+      (segment) => segment.kind === "item" && segment.item.type === "metadata",
+    ),
+  );
+});
+
+test("buildTranscriptDisplayBlocks keeps orphan steer context visible when no steer message exists", () => {
+  const steerContext = {
+    id: "steer-context:chan-1:turn-1",
+    type: "metadata",
+    title: "Prompt context",
+    sections: [{ title: "Thread history", body: "prior messages" }],
+    timestamp: baseTimestamp,
+    acpSource: "session/steer:context",
+    turnId: "turn-1",
+    sessionId: "sess-1",
+    channelId: "chan-1",
+  };
+
+  const [block] = buildTranscriptDisplayBlocks([
+    steerContext,
+    toolCall("tool", "turn-1"),
+  ]);
+
+  assert.equal(block.kind, "turn");
+  const flattened = flattenDisplayBlocks([block]).map((item) => item.id);
+  assert.ok(flattened.includes("steer-context:chan-1:turn-1"));
+});
+
 function mkTool(id, label, renderClass = "generic", groupKey = label) {
   return {
     id,

@@ -42,12 +42,28 @@ function isUserPrompt(
   );
 }
 
+function isSteerPrompt(
+  item: TranscriptItem,
+): item is Extract<TranscriptItem, { type: "message" }> {
+  return (
+    item.type === "message" &&
+    item.role === "user" &&
+    item.acpSource === "session/steer:user"
+  );
+}
+
 function isPromptContext(
   item: TranscriptItem,
 ): item is Extract<TranscriptItem, { type: "metadata" }> {
   return (
     item.type === "metadata" && item.acpSource === "session/prompt:context"
   );
+}
+
+function isSteerContext(
+  item: TranscriptItem,
+): item is Extract<TranscriptItem, { type: "metadata" }> {
+  return item.type === "metadata" && item.acpSource === "session/steer:context";
 }
 
 function isSystemPrompt(
@@ -80,16 +96,41 @@ function classifyTurnItems(
   const userPrompt = items.find(isUserPrompt) ?? null;
   const setupLifecycle = items.filter(isSetupLifecycle);
   const promptContext = items.find(isPromptContext) ?? null;
+  // Steer context rides behind the steer message bubble's checks-icon dialog
+  // (same ingress treatment as session/prompt context) instead of rendering
+  // as a standalone "Prompt context" metadata row.
+  const steerContexts = items.filter(isSteerContext);
   const consumed = new Set<TranscriptItem>();
 
   if (userPrompt) consumed.add(userPrompt);
   for (const item of setupLifecycle) consumed.add(item);
   if (promptContext) consumed.add(promptContext);
+  for (const item of steerContexts) consumed.add(item);
 
   const activity = items.filter((item) => !consumed.has(item));
+  const pendingSteerContexts = [...steerContexts];
+
+  const activitySegments: TranscriptTurnSegment[] = activity.map((item) => {
+    if (isSteerPrompt(item)) {
+      return {
+        kind: "prompt",
+        user: item,
+        systemPrompt: null,
+        context: pendingSteerContexts.shift() ?? null,
+        setup: [],
+      };
+    }
+    return { kind: "item", item };
+  });
+
+  // Steer context without a matched steer message keeps its standalone row so
+  // the metadata is never silently dropped.
+  for (const orphan of pendingSteerContexts) {
+    activitySegments.push({ kind: "item", item: orphan });
+  }
 
   if (!userPrompt) {
-    return groupToolSegments(activity.map((item) => ({ kind: "item", item })));
+    return groupToolSegments(activitySegments);
   }
 
   const segments: TranscriptTurnSegment[] = [
@@ -100,11 +141,8 @@ function classifyTurnItems(
       context: promptContext,
       setup: setupLifecycle,
     },
+    ...activitySegments,
   ];
-
-  for (const item of activity) {
-    segments.push({ kind: "item", item });
-  }
 
   return groupToolSegments(segments);
 }

@@ -386,7 +386,9 @@ function getTurnSegmentKey(turnId: string, segment: TranscriptTurnSegment) {
     return `turn:${turnId}:setup`;
   }
   if (segment.kind === "prompt") {
-    return `turn:${turnId}:prompt`;
+    // A turn can hold multiple prompt segments (initial prompt + mid-turn
+    // steers), so key on the user message id rather than the bare turn id.
+    return `turn:${turnId}:prompt:${segment.user.id}`;
   }
   if (segment.kind === "summary") {
     return segment.summary.id;
