@@ -65,6 +65,53 @@ export function hasMissingRequiredEnvKey(
   return requiredEnvKeys.some((key) => (envVars[key] ?? "").length === 0);
 }
 
+/**
+ * Resolve the provider and env-vars to PERSIST on Save.
+ *
+ * When inheriting a persona's runtime, the runtime/provider/env that will
+ * actually run come from the persona — but the agent record's own
+ * `provider`/`envVars` may be stale (a previously harness-pinned agent can have
+ * its provider cleared and carry no persona credential). The spawn path reads
+ * ONLY the record snapshot (`record.provider`/`record.env_vars`), never the
+ * live persona, so the persona snapshot must be persisted on the inherit
+ * transition — otherwise the saved agent inherits e.g. buzz-agent/Anthropic
+ * with no provider and no credential and fails readiness on next start. This
+ * mirrors create-time, which pins the persona snapshot into the record.
+ *
+ * These are the SAME effective values the required-credential gate validates,
+ * so the gate, the submitted record, and the spawn snapshot all agree.
+ *
+ * - `provider`: the persona's provider when inheriting, else the local edit
+ *   state. Normalized: trimmed, empty → `null`.
+ * - `envVars`: the persona-layered map (`{ ...personaEnv, ...agentEnv }`) when
+ *   inheriting, else the local edit state. The agent's own layer wins, matching
+ *   the spawn-time layering.
+ *
+ * When not inheriting, both pass through the local edit state unchanged.
+ */
+export function resolveInheritedRuntimeSubmission(input: {
+  inheritHarness: boolean;
+  /** Local provider edit state (from the agent record). */
+  provider: string;
+  /** The linked persona's provider, or empty when none/unset. */
+  personaProvider: string;
+  /** Local env-vars edit state (the agent's own layer). */
+  envVars: Record<string, string>;
+  /** The persona's env vars, layered under the agent's own on inherit. */
+  personaEnvVars: Record<string, string>;
+}): { provider: string | null; envVars: Record<string, string> } {
+  if (!input.inheritHarness) {
+    return {
+      provider: input.provider.trim() || null,
+      envVars: input.envVars,
+    };
+  }
+  return {
+    provider: input.personaProvider.trim() || null,
+    envVars: { ...input.personaEnvVars, ...input.envVars },
+  };
+}
+
 /** Inputs for {@link computeEditAgentFormValidity} — all pre-derived primitives. */
 export interface EditAgentFormValidityInput {
   name: string;

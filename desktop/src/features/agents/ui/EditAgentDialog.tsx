@@ -43,6 +43,7 @@ import {
 import {
   computeEditAgentFormValidity,
   resolveAgentCommandUpdate,
+  resolveInheritedRuntimeSubmission,
   shouldClearModelForRuntimeChange,
 } from "./personaRuntimeModel";
 import { AgentCreationPreview } from "./AgentCreationPreview";
@@ -261,18 +262,26 @@ export function EditAgentDialog({
     selectedRuntimeId,
   ]);
 
-  // Provider and env that will be in effect after submit. When inheriting, the
-  // runtime comes from the persona, so its required-credential check must use
-  // the PERSONA's provider and the persona-layered env (inherited envVars under
-  // the agent's own). Otherwise a Claude-pinned agent inheriting a
-  // buzz-agent/Anthropic persona would check against the agent's (empty)
-  // provider/env and falsely report no required key.
-  const effectiveProvider = inheritHarness
-    ? (linkedPersona?.provider ?? "")
-    : provider;
-  const effectiveEnvVars = React.useMemo(
-    () => (inheritHarness ? { ...inheritedEnvVars, ...envVars } : envVars),
-    [inheritHarness, inheritedEnvVars, envVars],
+  // Provider + env in effect after submit, and the values to PERSIST. When
+  // inheriting, both the credential gate and the saved record must use the
+  // persona's provider + persona-layered env — spawn reads only the record
+  // snapshot, never the live persona. Single source so gate/record/spawn agree.
+  const inheritedSubmission = React.useMemo(
+    () =>
+      resolveInheritedRuntimeSubmission({
+        inheritHarness,
+        provider,
+        personaProvider: linkedPersona?.provider ?? "",
+        envVars,
+        personaEnvVars: inheritedEnvVars,
+      }),
+    [
+      inheritHarness,
+      provider,
+      linkedPersona?.provider,
+      envVars,
+      inheritedEnvVars,
+    ],
   );
 
   // Runtime/provider-required credential state, derived from the PROSPECTIVE
@@ -282,8 +291,8 @@ export function EditAgentDialog({
     useRequiredCredentialState({
       open,
       prospectiveRuntimeId,
-      provider: effectiveProvider,
-      envVars: effectiveEnvVars,
+      provider: inheritedSubmission.provider ?? "",
+      envVars: inheritedSubmission.envVars,
       setShowAdvancedFields,
     });
 
@@ -500,7 +509,6 @@ export function EditAgentDialog({
         .map((v) => v.trim())
         .filter((v) => v.length > 0);
       const normalizedModel = model.trim() || null;
-      const normalizedProvider = provider.trim() || null;
 
       // Harness pin resolution — see resolveAgentCommandUpdate for the full
       // sentinel/pin/no-op contract, including the inherit→pin transition where
@@ -512,23 +520,19 @@ export function EditAgentDialog({
         agentCommandOverride: agent.agentCommandOverride ?? null,
       });
 
-      // Derive the effective runtime at submit time — the one that will
-      // actually run AFTER submit. This is the component-scope prospectiveRuntimeId,
-      // which is shared with the block-save gate (requiredEnvKeys) so both
+      // Classify the effective post-submit runtime's provider capability as a
+      // tri-state so the provider submit branch can distinguish "known-locked"
+      // (clear) from "unknown" (omit). Clearing must ONLY happen when we KNOW
+      // the runtime is provider-locked (e.g. Claude). When capability is unknown
+      // — catalog still loading, query errored, or the inherited command matched
+      // nothing — we OMIT the field rather than sending null, so a transient
+      // discovery/loading state never becomes a destructive write. The runtime
+      // id is the shared prospectiveRuntimeId, so submit and the block-save gate
       // always agree on which runtime is being saved.
-      const effectiveRuntimeIdForSubmit = prospectiveRuntimeId;
-
-      // Classify the effective runtime's provider capability as a tri-state so
-      // the provider submit branch can distinguish "known-locked" (clear) from
-      // "unknown" (omit). Clearing must ONLY happen when we KNOW the runtime is
-      // provider-locked (e.g. Claude). When capability is unknown — because the
-      // catalog is still loading, the query errored, or the inherited command
-      // matched nothing — we OMIT the field rather than sending null, so a
-      // transient discovery/loading state never becomes a destructive write.
       type ProviderRuntimeCapability = "capable" | "locked" | "unknown";
       const matchedCatalogEntry =
-        effectiveRuntimeIdForSubmit.length > 0
-          ? runtimes.find((r) => r.id === effectiveRuntimeIdForSubmit)
+        prospectiveRuntimeId.length > 0
+          ? runtimes.find((r) => r.id === prospectiveRuntimeId)
           : undefined;
       const providerRuntimeCapability: ProviderRuntimeCapability =
         matchedCatalogEntry === undefined
@@ -537,6 +541,11 @@ export function EditAgentDialog({
             ? "capable"
             : "locked";
 
+      // Provider + env to persist — the shared inherited-submission snapshot
+      // (same values the credential gate validates), so gate ↔ record ↔ spawn
+      // all agree. See resolveInheritedRuntimeSubmission.
+      const normalizedSubmitProvider = inheritedSubmission.provider;
+      const submitEnvVars = inheritedSubmission.envVars;
       const input: UpdateManagedAgentInput = {
         pubkey: agent.pubkey,
         name: name.trim() !== agent.name ? name.trim() : undefined,
@@ -589,15 +598,17 @@ export function EditAgentDialog({
         // llmProviderFieldVisible is for UX visibility only; not used here.
         provider:
           providerRuntimeCapability === "capable"
-            ? normalizedProvider !== (agent.provider ?? null)
-              ? normalizedProvider
+            ? normalizedSubmitProvider !== (agent.provider ?? null)
+              ? normalizedSubmitProvider
               : undefined
             : providerRuntimeCapability === "locked"
               ? (agent.provider ?? null) !== null
                 ? null
                 : undefined
               : undefined, // "unknown" → omit always
-        envVars: envVarsChanged(envVars, agent.envVars) ? envVars : undefined,
+        envVars: envVarsChanged(submitEnvVars, agent.envVars)
+          ? submitEnvVars
+          : undefined,
         respondTo: respondTo !== agent.respondTo ? respondTo : undefined,
         // The allowlist is preserved across mode toggles in local UI state
         // (so a user can flip away from allowlist and back without losing
