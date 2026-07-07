@@ -8,6 +8,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 
+import { useAgentWorking } from "@/features/agents/agentWorkingSignal";
 import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlActions";
 import { scopeByChannel } from "@/features/agents/ui/agentSessionPanelLayout";
 import type {
@@ -52,13 +53,13 @@ import {
   useTranscriptTimestampsEnabled,
 } from "@/features/agents/ui/transcriptTimestampPreference";
 import type { ChannelAgentSessionAgent } from "./useChannelAgentSessions";
+import { useChannelsQuery } from "@/features/channels/hooks";
 
 type AgentSessionThreadPanelProps = {
   agent: ChannelAgentSessionAgent;
   channel: Channel | null;
   channelId?: string | null;
   canInterruptTurn: boolean;
-  isWorking: boolean;
   layout?: "standalone" | "split";
   isSinglePanelView?: boolean;
   profiles?: UserProfileLookup;
@@ -80,7 +81,6 @@ export function AgentSessionThreadPanel({
   canInterruptTurn,
   channel,
   channelId = null,
-  isWorking,
   layout = "standalone",
   isSinglePanelView = false,
   profiles,
@@ -91,11 +91,17 @@ export function AgentSessionThreadPanel({
 }: AgentSessionThreadPanelProps) {
   const isLive = isManagedAgentActive(agent);
   const isOverlay = useIsThreadPanelOverlay();
+  const sessionChannelId = channelId ?? channel?.id ?? null;
+  // Unified working signal, scoped to this panel's channel (or all channels
+  // when the panel is unscoped) — observer turns primary, typing fallback.
+  const { working: isWorking } = useAgentWorking(
+    agent.pubkey,
+    sessionChannelId,
+  );
   const canStopCurrentTurn = isWorking && canInterruptTurn;
   useEscapeKey(onClose, isOverlay || isSinglePanelView);
 
   const { ref: scrollRef, onScroll } = useStickToBottom<HTMLDivElement>();
-  const sessionChannelId = channelId ?? channel?.id ?? null;
   const now = useNow(1000);
   const { events } = useObserverEvents(isLive, agent.pubkey);
   const transcript = useAgentTranscript(isLive, agent.pubkey);
@@ -121,6 +127,29 @@ export function AgentSessionThreadPanel({
       ? undefined
       : `Last updated ${new Date(latestActivityAt).toLocaleString()}`;
   const rawFeedScopeKey = `${agent.pubkey}:${sessionChannelId ?? "all"}`;
+  // Scope label input: prefer the passed channel's name; when the pane is
+  // channel-scoped without a full Channel object (#1380's channelId prop),
+  // resolve the name from the channels cache.
+  const channelsQuery = useChannelsQuery({
+    enabled: Boolean(sessionChannelId),
+  });
+  const scopeChannelName = React.useMemo(() => {
+    if (!sessionChannelId) {
+      return null;
+    }
+    if (channel && channel.id === sessionChannelId) {
+      return channel.name;
+    }
+    return (
+      channelsQuery.data?.find((entry) => entry.id === sessionChannelId)
+        ?.name ?? null
+    );
+  }, [channel, channelsQuery.data, sessionChannelId]);
+  const scopeLabel = sessionChannelId
+    ? scopeChannelName
+      ? `#${scopeChannelName}`
+      : "1 channel"
+    : "All channels";
   const [rawFeedState, setRawFeedState] = React.useState(() => ({
     scopeKey: rawFeedScopeKey,
     show: false,
@@ -318,6 +347,14 @@ export function AgentSessionThreadPanel({
           subtitleTitle={lastUpdatedTitle}
           title={showRawFeed ? "Raw ACP Activity" : "Activity"}
         />
+        {/* Scope label: makes channel-targeted vs all-channels state obvious
+            (an all-channels pane can look "wrong" without it). */}
+        <span
+          className="min-w-0 shrink truncate text-xs text-muted-foreground"
+          data-testid="agent-session-scope-label"
+        >
+          {scopeLabel}
+        </span>
       </AuxiliaryPanelHeaderGroup>
       {agentHeaderActions}
     </>
