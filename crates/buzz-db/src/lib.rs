@@ -2203,6 +2203,15 @@ impl Db {
         moderation::get_report(&self.pool, community, report_id).await
     }
 
+    /// Fetch one moderation report by signed NIP-56 report event id.
+    pub async fn get_moderation_report_by_event(
+        &self,
+        community: CommunityId,
+        report_event_id: &[u8],
+    ) -> Result<Option<moderation::ReportRecord>> {
+        moderation::get_report_by_event(&self.pool, community, report_event_id).await
+    }
+
     /// Resolve, dismiss, or escalate an open moderation report.
     pub async fn resolve_moderation_report(
         &self,

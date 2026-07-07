@@ -242,6 +242,29 @@ pub async fn get_report(
     row.map(row_to_report).transpose()
 }
 
+/// Fetch one report by signed NIP-56 report event id.
+pub async fn get_report_by_event(
+    pool: &PgPool,
+    community: CommunityId,
+    report_event_id: &[u8],
+) -> Result<Option<ReportRecord>> {
+    let row = sqlx::query(
+        r#"
+        SELECT id, report_event_id, reporter_pubkey, target_kind, target_event_id,
+               target_pubkey, target_blob_sha256, channel_id, report_type, note,
+               status, resolved_by, resolved_at, action_id, created_at
+        FROM moderation_reports
+        WHERE community_id = $1 AND report_event_id = $2
+        "#,
+    )
+    .bind(community.as_uuid())
+    .bind(report_event_id)
+    .fetch_optional(pool)
+    .await?;
+
+    row.map(row_to_report).transpose()
+}
+
 /// Mark a report resolved/dismissed/escalated, linking the audit action.
 /// Returns `false` if the report was not found or already closed.
 pub async fn resolve_report(
@@ -795,6 +818,14 @@ mod tests {
             .await
             .expect("get report")
             .expect("report exists");
+        let row_by_event = get_report_by_event(&pool, community, &report_event_id)
+            .await
+            .expect("get report by event id")
+            .expect("report exists by event id");
+        assert_eq!(
+            row_by_event.id, first_id,
+            "report event id lookup must return the same row"
+        );
         assert_eq!(
             row.status, "resolved",
             "re-ingest must not reopen the report"
