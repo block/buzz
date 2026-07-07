@@ -44,6 +44,7 @@ import {
   computeEditAgentFormValidity,
   resolveAgentCommandUpdate,
   resolveInheritedRuntimeSubmission,
+  resolveRuntimeProviderCapability,
   shouldClearModelForRuntimeChange,
 } from "./personaRuntimeModel";
 import { AgentCreationPreview } from "./AgentCreationPreview";
@@ -273,6 +274,8 @@ export function EditAgentDialog({
         agentWasHarnessPinned: agent.agentCommandOverride != null,
         provider,
         personaProvider: linkedPersona?.provider ?? "",
+        model,
+        personaModel: linkedPersona?.model ?? null,
         envVars,
         personaEnvVars: inheritedEnvVars,
       }),
@@ -281,6 +284,8 @@ export function EditAgentDialog({
       agent.agentCommandOverride,
       provider,
       linkedPersona?.provider,
+      model,
+      linkedPersona?.model,
       envVars,
       inheritedEnvVars,
     ],
@@ -510,7 +515,10 @@ export function EditAgentDialog({
         .split(",")
         .map((v) => v.trim())
         .filter((v) => v.length > 0);
-      const normalizedModel = model.trim() || null;
+      // Model to persist — from the shared inherited-submission snapshot so a
+      // provider-backed inherit-transition carries the persona model (readiness
+      // requires one) and a deliberate local model still wins.
+      const normalizedModel = inheritedSubmission.model;
 
       // Harness pin resolution — see resolveAgentCommandUpdate for the full
       // sentinel/pin/no-op contract, including the inherit→pin transition where
@@ -523,25 +531,17 @@ export function EditAgentDialog({
       });
 
       // Classify the effective post-submit runtime's provider capability as a
-      // tri-state so the provider submit branch can distinguish "known-locked"
-      // (clear) from "unknown" (omit). Clearing must ONLY happen when we KNOW
-      // the runtime is provider-locked (e.g. Claude). When capability is unknown
-      // — catalog still loading, query errored, or the inherited command matched
-      // nothing — we OMIT the field rather than sending null, so a transient
-      // discovery/loading state never becomes a destructive write. The runtime
+      // tri-state: "capable" persists the provider, "locked" clears it (only
+      // when we KNOW it's provider-locked, e.g. Claude), "unknown" OMITS it so a
+      // transient/custom state never becomes a destructive write. Resolved
+      // STATICALLY (by id) so a not-yet-loaded catalog can't misclassify a known
+      // runtime as "unknown" — see resolveRuntimeProviderCapability. The runtime
       // id is the shared prospectiveRuntimeId, so submit and the block-save gate
       // always agree on which runtime is being saved.
-      type ProviderRuntimeCapability = "capable" | "locked" | "unknown";
-      const matchedCatalogEntry =
-        prospectiveRuntimeId.length > 0
-          ? runtimes.find((r) => r.id === prospectiveRuntimeId)
-          : undefined;
-      const providerRuntimeCapability: ProviderRuntimeCapability =
-        matchedCatalogEntry === undefined
-          ? "unknown"
-          : runtimeSupportsLlmProviderSelection(matchedCatalogEntry.id)
-            ? "capable"
-            : "locked";
+      const providerRuntimeCapability = resolveRuntimeProviderCapability(
+        prospectiveRuntimeId,
+        runtimeSupportsLlmProviderSelection(prospectiveRuntimeId),
+      );
 
       // Provider + env to persist — the shared inherited-submission snapshot
       // (same values the credential gate validates), so gate ↔ record ↔ spawn

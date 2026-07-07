@@ -1,3 +1,44 @@
+/** Runtime provider-capability tri-state used by the submit path. */
+export type ProviderRuntimeCapability = "capable" | "locked" | "unknown";
+
+/**
+ * Classify a runtime id's provider-selection capability as a tri-state,
+ * independent of whether the runtime catalog has loaded yet.
+ *
+ * The submit path keys its provider write on this: "capable" persists the
+ * provider, "locked" clears it, and "unknown" OMITS the field so a transient
+ * loading/error state (or a genuinely unknown/custom command) never becomes a
+ * destructive write.
+ *
+ * Before the catalog loads, `prospectiveRuntimeId` can already be a known
+ * persona runtime string (e.g. `buzz-agent`). A catalog lookup then returns
+ * `undefined`, which would misclassify a provider-backed runtime as "unknown"
+ * and omit the provider while still clearing the command override / writing env
+ * — leaving the record inheriting a provider-backed runtime with a null
+ * provider. To avoid that, we resolve capability STATICALLY for known ids:
+ *
+ * - buzz-agent / goose → "capable" (`isProviderCapable`, id-based).
+ * - claude / codex → "locked" (CLI-login runtimes; no LLM provider selection).
+ * - anything else (custom, empty, genuinely unknown) → "unknown".
+ *
+ * `isProviderCapable` is the caller-supplied {@link
+ * runtimeSupportsLlmProviderSelection} result, kept as the single source of
+ * truth for the capable set rather than re-hardcoding it here.
+ */
+export function resolveRuntimeProviderCapability(
+  runtimeId: string,
+  isProviderCapable: boolean,
+): ProviderRuntimeCapability {
+  if (isProviderCapable) {
+    return "capable";
+  }
+  const id = runtimeId.trim();
+  if (id === "claude" || id === "codex") {
+    return "locked";
+  }
+  return "unknown";
+}
+
 export function shouldClearModelForRuntimeChange(
   previousRuntime: string,
   nextRuntime: string,
@@ -91,6 +132,15 @@ export function hasMissingRequiredEnvKey(
  * the user re-points to Databricks) is a deliberate edit and passes through
  * unchanged — we never overwrite it with the persona provider.
  *
+ * MODEL follows the same transition rule. buzz-agent/goose readiness requires a
+ * model, but a Claude-pinned agent's record often carries no model (Claude
+ * resolves its own). On the inherit-transition to a provider-backed persona with
+ * a set `persona.model`, persisting the empty local model would save an agent
+ * that inherits the provider + credentials but no model and fails readiness on
+ * next start — so we substitute `personaModel` in that same case. A non-empty
+ * local model (deliberate pick) always passes through; an empty local model in
+ * steady state stays empty (runtime default), same authoritative logic.
+ *
  * An EMPTY local provider while inheriting on an agent that was ALREADY
  * inheriting at open (`agentWasHarnessPinned` false) is ALSO authoritative: the
  * user either never set one or deliberately picked the "Default" option to
@@ -116,12 +166,21 @@ export function resolveInheritedRuntimeSubmission(input: {
   provider: string;
   /** The linked persona's provider, or empty when none/unset. */
   personaProvider: string;
+  /** Local model edit state (from the agent record, user-editable). */
+  model: string;
+  /** The linked persona's model, or empty/null when none/unset. */
+  personaModel: string | null;
   /** Local env-vars edit state (the agent's own layer). */
   envVars: Record<string, string>;
   /** The persona's env vars, layered under the agent's own on transition. */
   personaEnvVars: Record<string, string>;
-}): { provider: string | null; envVars: Record<string, string> } {
+}): {
+  provider: string | null;
+  model: string | null;
+  envVars: Record<string, string>;
+} {
   const localProvider = input.provider.trim();
+  const localModel = input.model.trim();
   // Substitute the persona snapshot ONLY on the true inherit-transition: the
   // agent was harness-pinned at open, is now inheriting, and has an empty local
   // provider. Otherwise the local edit state is authoritative — a non-empty
@@ -134,11 +193,15 @@ export function resolveInheritedRuntimeSubmission(input: {
   ) {
     return {
       provider: input.personaProvider.trim() || null,
+      // Fill an empty local model from the persona so a provider-backed runtime
+      // isn't saved model-less; a deliberate local model still wins.
+      model: localModel || input.personaModel?.trim() || null,
       envVars: { ...input.personaEnvVars, ...input.envVars },
     };
   }
   return {
     provider: localProvider || null,
+    model: localModel || null,
     envVars: input.envVars,
   };
 }

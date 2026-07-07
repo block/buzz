@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   resolveInheritedRuntimeSubmission,
+  resolveRuntimeProviderCapability,
   shouldClearModelForRuntimeChange,
 } from "./personaRuntimeModel.ts";
 
@@ -28,11 +29,15 @@ test("resolveInheritedRuntimeSubmission passes through local edit state when not
     agentWasHarnessPinned: false,
     provider: "databricks",
     personaProvider: "anthropic",
+    model: "",
+    personaModel: "claude-sonnet",
     envVars: { FOO: "bar" },
     personaEnvVars: { ANTHROPIC_API_KEY: "sk-persona" },
   });
   assert.equal(result.provider, "databricks");
   assert.deepEqual(result.envVars, { FOO: "bar" });
+  // Not inheriting → persona model is never substituted; empty local → null.
+  assert.equal(result.model, null);
 });
 
 test("resolveInheritedRuntimeSubmission normalizes an empty local provider to null when not inheriting", () => {
@@ -41,6 +46,8 @@ test("resolveInheritedRuntimeSubmission normalizes an empty local provider to nu
     agentWasHarnessPinned: true,
     provider: "   ",
     personaProvider: "anthropic",
+    model: "",
+    personaModel: "claude-sonnet",
     envVars: {},
     personaEnvVars: {},
   });
@@ -58,11 +65,16 @@ test("resolveInheritedRuntimeSubmission persists the persona provider + layered 
     agentWasHarnessPinned: true,
     provider: "",
     personaProvider: "anthropic",
+    model: "",
+    personaModel: "claude-sonnet",
     envVars: {},
     personaEnvVars: { ANTHROPIC_API_KEY: "sk-persona" },
   });
   assert.equal(result.provider, "anthropic");
   assert.deepEqual(result.envVars, { ANTHROPIC_API_KEY: "sk-persona" });
+  // Empty local model on the transition inherits the persona model so a
+  // provider-backed runtime isn't saved model-less (readiness requires one).
+  assert.equal(result.model, "claude-sonnet");
 });
 
 test("resolveInheritedRuntimeSubmission layers the agent's own env over the persona's on the inherit-transition", () => {
@@ -71,6 +83,8 @@ test("resolveInheritedRuntimeSubmission layers the agent's own env over the pers
     agentWasHarnessPinned: true,
     provider: "",
     personaProvider: "anthropic",
+    model: "",
+    personaModel: "claude-sonnet",
     envVars: { ANTHROPIC_API_KEY: "sk-agent", EXTRA: "1" },
     personaEnvVars: { ANTHROPIC_API_KEY: "sk-persona" },
   });
@@ -91,6 +105,8 @@ test("resolveInheritedRuntimeSubmission preserves a user-edited provider + env w
     agentWasHarnessPinned: false,
     provider: "databricks",
     personaProvider: "anthropic",
+    model: "",
+    personaModel: "claude-sonnet",
     envVars: { DATABRICKS_HOST: "https://dbc-x.cloud.databricks.com" },
     personaEnvVars: { ANTHROPIC_API_KEY: "sk-persona" },
   });
@@ -98,6 +114,8 @@ test("resolveInheritedRuntimeSubmission preserves a user-edited provider + env w
   assert.deepEqual(result.envVars, {
     DATABRICKS_HOST: "https://dbc-x.cloud.databricks.com",
   });
+  // Not the transition branch → persona model is NOT substituted.
+  assert.equal(result.model, null);
 });
 
 test("resolveInheritedRuntimeSubmission clears an already-inheriting agent's provider override when the user picks Default", () => {
@@ -111,6 +129,8 @@ test("resolveInheritedRuntimeSubmission clears an already-inheriting agent's pro
     agentWasHarnessPinned: false,
     provider: "",
     personaProvider: "anthropic",
+    model: "",
+    personaModel: "claude-sonnet",
     envVars: {},
     personaEnvVars: { ANTHROPIC_API_KEY: "sk-persona" },
   });
@@ -126,9 +146,64 @@ test("resolveInheritedRuntimeSubmission normalizes a whitespace-only local provi
     agentWasHarnessPinned: true,
     provider: "   ",
     personaProvider: "",
+    model: "",
+    personaModel: null,
     envVars: {},
     personaEnvVars: {},
   });
   assert.equal(result.provider, null);
   assert.deepEqual(result.envVars, {});
+});
+
+test("resolveInheritedRuntimeSubmission keeps a deliberate local model on the inherit-transition", () => {
+  // A non-empty local model is an explicit pick and wins over the persona
+  // model even on the transition branch.
+  const result = resolveInheritedRuntimeSubmission({
+    inheritHarness: true,
+    agentWasHarnessPinned: true,
+    provider: "",
+    personaProvider: "anthropic",
+    model: "claude-opus",
+    personaModel: "claude-sonnet",
+    envVars: {},
+    personaEnvVars: { ANTHROPIC_API_KEY: "sk-persona" },
+  });
+  assert.equal(result.model, "claude-opus");
+});
+
+test("resolveInheritedRuntimeSubmission yields a null model on the inherit-transition when the persona has none", () => {
+  const result = resolveInheritedRuntimeSubmission({
+    inheritHarness: true,
+    agentWasHarnessPinned: true,
+    provider: "",
+    personaProvider: "anthropic",
+    model: "",
+    personaModel: null,
+    envVars: {},
+    personaEnvVars: { ANTHROPIC_API_KEY: "sk-persona" },
+  });
+  assert.equal(result.model, null);
+});
+
+test("resolveRuntimeProviderCapability classifies provider-capable runtimes as capable", () => {
+  assert.equal(resolveRuntimeProviderCapability("buzz-agent", true), "capable");
+  assert.equal(resolveRuntimeProviderCapability("goose", true), "capable");
+});
+
+test("resolveRuntimeProviderCapability classifies known CLI-login runtimes as locked before the catalog loads", () => {
+  // The core fix: a not-yet-loaded catalog must not force these to "unknown".
+  assert.equal(resolveRuntimeProviderCapability("claude", false), "locked");
+  assert.equal(resolveRuntimeProviderCapability("codex", false), "locked");
+  assert.equal(resolveRuntimeProviderCapability(" claude ", false), "locked");
+});
+
+test("resolveRuntimeProviderCapability leaves genuinely unknown/custom runtimes as unknown", () => {
+  // Preserves the tri-state's "omit rather than destructively write" behavior
+  // for ids we can't statically classify (custom command, empty, unknown).
+  assert.equal(resolveRuntimeProviderCapability("custom", false), "unknown");
+  assert.equal(resolveRuntimeProviderCapability("", false), "unknown");
+  assert.equal(
+    resolveRuntimeProviderCapability("some-vendor-cli", false),
+    "unknown",
+  );
 });
