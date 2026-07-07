@@ -285,6 +285,40 @@ pub fn default_agent_command() -> String {
         .to_string()
 }
 
+/// Record-first harness resolution (unified agent model, Phase 1A).
+///
+/// Resolution order:
+///   1. explicit override (non-empty) — a deliberate per-instance pin;
+///   2. the record's own `runtime` id mapped to its primary command —
+///      records materialize their runtime at create/migration time;
+///   3. legacy fallback: the linked persona's `runtime` (records created
+///      before the unified model carry `persona_id` but no `runtime`);
+///   4. `default_agent_command()`.
+pub fn record_agent_command(
+    record: &crate::managed_agents::types::ManagedAgentRecord,
+    personas: &[crate::managed_agents::types::PersonaRecord],
+) -> String {
+    if let Some(pin) = record
+        .agent_command_override
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return pin.to_string();
+    }
+
+    if let Some(command) = record
+        .runtime
+        .as_deref()
+        .and_then(known_acp_runtime_exact)
+        .and_then(|r| r.commands.first().copied())
+    {
+        return command.to_string();
+    }
+
+    effective_agent_command(record.persona_id.as_deref(), personas, None)
+}
+
 /// Resolve the agent command (harness) for a spawn/deploy/summary. The linked
 /// persona wins so persona harness edits propagate on the next spawn. An
 /// explicit per-instance override (`agent_command_override`) takes precedence.
@@ -770,8 +804,9 @@ mod tests {
     use super::{
         classify_runtime, create_time_agent_command_override, default_agent_command,
         divergent_agent_command_override, effective_agent_command, find_via_login_shell,
-        managed_agent_avatar_url, normalize_agent_args, update_time_agent_command_override,
-        BUZZ_AGENT_AVATAR_URL, CLAUDE_CODE_AVATAR_URL, CODEX_AVATAR_URL, GOOSE_AVATAR_URL,
+        managed_agent_avatar_url, normalize_agent_args, record_agent_command,
+        update_time_agent_command_override, BUZZ_AGENT_AVATAR_URL, CLAUDE_CODE_AVATAR_URL,
+        CODEX_AVATAR_URL, GOOSE_AVATAR_URL,
     };
     use crate::managed_agents::AcpAvailabilityStatus;
 
@@ -984,6 +1019,91 @@ mod tests {
             effective_agent_command(Some("p1"), &personas, Some("codex-acp")),
             "codex-acp"
         );
+    }
+
+    /// Minimal record for `record_agent_command` tests. Only the resolution
+    /// inputs (runtime / persona_id / agent_command_override) vary.
+    fn record_with(
+        runtime: Option<&str>,
+        persona_id: Option<&str>,
+        override_cmd: Option<&str>,
+    ) -> crate::managed_agents::types::ManagedAgentRecord {
+        crate::managed_agents::types::ManagedAgentRecord {
+            pubkey: String::new(),
+            name: "r".to_string(),
+            persona_id: persona_id.map(str::to_string),
+            private_key_nsec: String::new(),
+            auth_tag: None,
+            relay_url: String::new(),
+            avatar_url: None,
+            acp_command: String::new(),
+            agent_command: String::new(),
+            agent_command_override: override_cmd.map(str::to_string),
+            agent_args: vec![],
+            mcp_command: String::new(),
+            turn_timeout_seconds: 0,
+            idle_timeout_seconds: None,
+            max_turn_duration_seconds: None,
+            parallelism: 1,
+            system_prompt: None,
+            model: None,
+            provider: None,
+            persona_source_version: None,
+            mcp_toolsets: None,
+            start_on_app_launch: false,
+            runtime_pid: None,
+            backend: Default::default(),
+            backend_agent_id: None,
+            provider_binary_path: None,
+            persona_team_dir: None,
+            persona_name_in_team: None,
+            env_vars: std::collections::BTreeMap::new(),
+            created_at: String::new(),
+            updated_at: String::new(),
+            last_started_at: None,
+            last_stopped_at: None,
+            last_exit_code: None,
+            last_error: None,
+            respond_to: Default::default(),
+            respond_to_allowlist: vec![],
+            display_name: None,
+            slug: None,
+            runtime: runtime.map(str::to_string),
+            name_pool: Vec::new(),
+            is_builtin: false,
+            is_active: true,
+            relay_mesh: None,
+        }
+    }
+
+    #[test]
+    fn record_agent_command_own_runtime_wins_over_persona() {
+        // A record with its own materialized runtime never consults the
+        // persona list — the unified-model resolution.
+        let personas = vec![persona_with_runtime("p1", Some("goose"))];
+        let record = record_with(Some("claude"), Some("p1"), None);
+        assert_eq!(record_agent_command(&record, &personas), "claude-agent-acp");
+    }
+
+    #[test]
+    fn record_agent_command_override_beats_runtime() {
+        let record = record_with(Some("claude"), None, Some("codex-acp"));
+        assert_eq!(record_agent_command(&record, &[]), "codex-acp");
+    }
+
+    #[test]
+    fn record_agent_command_legacy_persona_fallback() {
+        // Pre-migration record: persona_id set, no runtime — resolves through
+        // the legacy persona path unchanged.
+        let personas = vec![persona_with_runtime("p1", Some("goose"))];
+        let record = record_with(None, Some("p1"), None);
+        assert_eq!(record_agent_command(&record, &personas), "goose");
+    }
+
+    #[test]
+    fn record_agent_command_bare_record_defaults() {
+        let record = record_with(None, None, None);
+        assert_eq!(record_agent_command(&record, &[]), default_agent_command());
     }
 
     #[test]

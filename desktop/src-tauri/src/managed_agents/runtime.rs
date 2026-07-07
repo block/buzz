@@ -1369,11 +1369,7 @@ pub fn build_managed_agent_summary(
 
     // Resolve the effective harness the same way, then derive args/mcp from it,
     // so the UI reflects the persona's current harness (or an explicit pin).
-    let effective_command = crate::managed_agents::effective_agent_command(
-        record.persona_id.as_deref(),
-        personas,
-        record.agent_command_override.as_deref(),
-    );
+    let effective_command = crate::managed_agents::record_agent_command(record, personas);
     let effective_args = normalize_agent_args(&effective_command, record.agent_args.clone());
     let effective_mcp_command = known_acp_runtime(&effective_command)
         .and_then(|r| r.mcp_command)
@@ -1522,11 +1518,7 @@ pub fn spawn_agent_child(
     // command, so we recompute them from the effective value rather than the
     // frozen record snapshot. Mirrors the model resolution below.
     let personas = super::load_personas(app).unwrap_or_default();
-    let effective_command = super::effective_agent_command(
-        record.persona_id.as_deref(),
-        &personas,
-        record.agent_command_override.as_deref(),
-    );
+    let effective_command = super::record_agent_command(record, &personas);
     let agent_args = normalize_agent_args(&effective_command, record.agent_args.clone());
     let resolved_acp_command = resolve_command(&record.acp_command)
         .ok_or_else(|| missing_command_message(&record.acp_command, "ACP harness command"))?;

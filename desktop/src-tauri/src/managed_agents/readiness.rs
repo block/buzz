@@ -45,7 +45,6 @@ use crate::managed_agents::{
     agent_env::baked_build_env,
     config_bridge::read_goose_file_config,
     discovery::{known_acp_runtime, resolve_command, KnownAcpRuntime},
-    effective_agent_command,
     env_vars::merged_user_env,
     types::{ManagedAgentRecord, PersonaRecord},
 };
@@ -86,11 +85,7 @@ pub(crate) fn resolve_effective_agent_env(
     personas: &[PersonaRecord],
     runtime: Option<&KnownAcpRuntime>,
 ) -> EffectiveAgentEnv {
-    let effective_command = effective_agent_command(
-        record.persona_id.as_deref(),
-        personas,
-        record.agent_command_override.as_deref(),
-    );
+    let effective_command = crate::managed_agents::record_agent_command(record, personas);
 
     // Layer 1: baked build defaults (floor — internal builds only; OSS = empty).
     let mut env = baked_build_env();
@@ -991,6 +986,7 @@ mod tests {
             respond_to_allowlist: vec![],
             display_name: None,
             slug: None,
+            runtime: None,
             name_pool: Vec::new(),
             is_builtin: false,
             is_active: true,

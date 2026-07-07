@@ -311,6 +311,7 @@ mod tests {
             env_vars: std::collections::BTreeMap::new(),
             display_name: None,
             slug: None,
+            runtime: None,
             name_pool: Vec::new(),
             is_builtin: false,
             is_active: true,

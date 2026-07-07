@@ -214,6 +214,12 @@ pub struct ManagedAgentRecord {
     /// agents created directly (never persona-backed).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub slug: Option<String>,
+    /// Absorbed from `PersonaRecord.runtime` — the preferred ACP runtime ID
+    /// (e.g. 'goose', 'claude'). Record-first command resolution reads this
+    /// before falling back to legacy persona lookup; populated by the store
+    /// migration and at create time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<String>,
     /// Pool of short thematic names for clones of this agent. Absorbed from
     /// `PersonaRecord.name_pool`; feeds clone naming.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

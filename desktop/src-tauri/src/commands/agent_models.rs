@@ -62,11 +62,7 @@ pub async fn get_agent_models(
         // so model discovery runs against the persona's current harness, not the
         // frozen record snapshot. An explicit per-agent override wins.
         let personas = load_personas(&app).unwrap_or_default();
-        let effective_command = crate::managed_agents::effective_agent_command(
-            record.persona_id.as_deref(),
-            &personas,
-            record.agent_command_override.as_deref(),
-        );
+        let effective_command = crate::managed_agents::record_agent_command(record, &personas);
 
         let args = normalize_agent_args(&effective_command, record.agent_args.clone());
 
@@ -936,11 +932,7 @@ pub async fn update_managed_agent(
             // not the frozen snapshot, so an inherited harness picks the right
             // default avatar.
             let personas = load_personas(&app).unwrap_or_default();
-            let effective_command = crate::managed_agents::effective_agent_command(
-                record.persona_id.as_deref(),
-                &personas,
-                record.agent_command_override.as_deref(),
-            );
+            let effective_command = crate::managed_agents::record_agent_command(record, &personas);
             let avatar_url = record
                 .avatar_url
                 .clone()

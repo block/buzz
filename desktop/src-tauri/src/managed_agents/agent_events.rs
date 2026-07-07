@@ -178,6 +178,7 @@ mod tests {
             respond_to_allowlist: vec!["79be667e".to_string()],
             display_name: None,
             slug: None,
+            runtime: None,
             name_pool: Vec::new(),
             is_builtin: false,
             is_active: true,

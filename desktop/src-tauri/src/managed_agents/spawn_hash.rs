@@ -27,7 +27,7 @@
 use std::hash::{DefaultHasher, Hash, Hasher};
 
 use super::{
-    effective_agent_command, known_acp_runtime, normalize_agent_args,
+    known_acp_runtime, normalize_agent_args,
     persona_events::persona_snapshot_with_agent_config_fallback,
     resolve_effective_agent_env,
     types::{ManagedAgentRecord, PersonaRecord},
@@ -64,11 +64,7 @@ pub(crate) fn spawn_config_hash(
     }
     let record = &record;
 
-    let effective_command = effective_agent_command(
-        record.persona_id.as_deref(),
-        personas,
-        record.agent_command_override.as_deref(),
-    );
+    let effective_command = crate::managed_agents::record_agent_command(record, personas);
     let runtime_meta = known_acp_runtime(&effective_command);
     let effective = resolve_effective_agent_env(record, personas, runtime_meta);
 

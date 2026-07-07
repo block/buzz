@@ -12,9 +12,9 @@ use crate::{
                 NormalizedField, RuntimeConfigSurface, SessionConfigCache,
             },
         },
-        current_instance_id, effective_agent_command, known_acp_runtime, load_managed_agents,
-        load_personas, resolve_effective_prompt_model_provider, save_managed_agents,
-        sync_managed_agent_processes, KnownAcpRuntime, ManagedAgentRecord, PersonaRecord,
+        current_instance_id, known_acp_runtime, load_managed_agents, load_personas,
+        resolve_effective_prompt_model_provider, save_managed_agents, sync_managed_agent_processes,
+        KnownAcpRuntime, ManagedAgentRecord, PersonaRecord,
     },
 };
 
@@ -242,11 +242,7 @@ pub async fn get_agent_config_surface(
     };
 
     let personas = load_personas(&app).unwrap_or_default();
-    let effective_cmd = effective_agent_command(
-        record.persona_id.as_deref(),
-        &personas,
-        record.agent_command_override.as_deref(),
-    );
+    let effective_cmd = crate::managed_agents::record_agent_command(&record, &personas);
     let runtime_meta = known_acp_runtime(&effective_cmd);
     let session_cache = state.get_session_cache(&pubkey);
 
@@ -518,6 +514,7 @@ mod tests {
             respond_to_allowlist: vec![],
             display_name: None,
             slug: None,
+            runtime: None,
             name_pool: Vec::new(),
             is_builtin: false,
             is_active: true,

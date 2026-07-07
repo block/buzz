@@ -333,11 +333,8 @@ pub async fn restore_managed_agents_on_launch(
                 // Resolve the effective harness for the avatar-fallback
                 // derivation (the snapshot may be empty/stale for an inherited
                 // harness). Mirrors the UI start path.
-                let effective_command = crate::managed_agents::effective_agent_command(
-                    record.persona_id.as_deref(),
-                    &reconcile_personas,
-                    record.agent_command_override.as_deref(),
-                );
+                let effective_command =
+                    crate::managed_agents::record_agent_command(record, &reconcile_personas);
                 Some((
                     pubkey.clone(),
                     crate::commands::ProfileReconcileData {

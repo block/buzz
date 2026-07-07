@@ -845,6 +845,7 @@ pub async fn create_managed_agent(
             respond_to_allowlist: respond_to_allowlist.clone(),
             display_name: None,
             slug: None,
+            runtime: None,
             name_pool: Vec::new(),
             is_builtin: false,
             is_active: true,
@@ -1047,11 +1048,8 @@ pub async fn start_managed_agent(
         // profile reconcile (the create-time snapshot may be empty or stale for
         // a persona-inherited harness).
         let reconcile_personas = load_personas(&app).unwrap_or_default();
-        let reconcile_effective_command = crate::managed_agents::effective_agent_command(
-            record.persona_id.as_deref(),
-            &reconcile_personas,
-            record.agent_command_override.as_deref(),
-        );
+        let reconcile_effective_command =
+            crate::managed_agents::record_agent_command(record, &reconcile_personas);
 
         let reconcile = ProfileReconcileData {
             private_key_nsec: record.private_key_nsec.clone(),
