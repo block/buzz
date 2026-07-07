@@ -47,7 +47,7 @@ test("upload a file and see a FileCard in the timeline", async ({ page }) => {
   // escapes the webview to the OS browser and hits a corporate CDN page.
   const card = page.getByTestId("file-card").last();
   await expect(card).toBeVisible();
-  await expectCornerRadiusPx(card, 16);
+  await expectCornerRadiusPx(card, 16, { scaleWithRootFont: true });
   await expectSmoothCorners(card);
   await expect(card).toContainText("quarterly-report.pdf");
 

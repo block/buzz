@@ -8,6 +8,7 @@ import {
   openCreateChannelDialog,
   openNewDirectMessageDialog,
 } from "../helpers/bridge";
+import { expectedScaledPx } from "../helpers/css";
 
 const GENERAL_CHANNEL_ID = "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50";
 const AGENTS_CHANNEL_ID = "94a444a4-c0a3-5966-ab05-530c6ddc2301";
@@ -285,7 +286,9 @@ async function expectSameLeftInset(
     throw new Error(`Could not measure ${firstTestId} against ${secondTestId}`);
   }
 
-  expect(Math.abs(firstBox.x - secondBox.x)).toBeLessThanOrEqual(4);
+  expect(Math.abs(firstBox.x - secondBox.x)).toBeLessThanOrEqual(
+    await expectedScaledPx(page.getByTestId(firstTestId), 4),
+  );
 }
 
 async function expectIntroSpacedAboveDayDivider(
@@ -334,9 +337,14 @@ async function expectIntroActionCardLayout(
   }
 
   expect(actionBox.height).toBeGreaterThan(actionBox.width);
-  expect(Math.round(actionBox.width)).toBe(220);
-  expect(Math.round(iconBox.width)).toBe(48);
-  expect(Math.round(iconBox.height)).toBe(48);
+  expect(Math.round(actionBox.width)).toBe(
+    Math.round(await expectedScaledPx(page.getByTestId(actionTestId), 220)),
+  );
+  const expectedIconSize = Math.round(
+    await expectedScaledPx(page.getByTestId(`${actionTestId}-icon`), 48),
+  );
+  expect(Math.round(iconBox.width)).toBe(expectedIconSize);
+  expect(Math.round(iconBox.height)).toBe(expectedIconSize);
   const introIconRadius = await page
     .getByTestId("message-channel-intro-icon")
     .evaluate((element) => window.getComputedStyle(element).borderRadius);

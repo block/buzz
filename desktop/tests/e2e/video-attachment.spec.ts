@@ -253,7 +253,7 @@ test("video upload previews use poster frames and inline videos open review mode
 
   const inlinePlayer = page.getByTestId("video-player").last();
   const inlineSurface = inlinePlayer.locator("[data-smooth-corners]").first();
-  await expectCornerRadiusPx(inlineSurface, 16);
+  await expectCornerRadiusPx(inlineSurface, 16, { scaleWithRootFont: true });
   await expectSmoothCorners(inlineSurface);
   const inlineVideo = inlinePlayer.locator("video");
   await inlinePlayer.getByRole("button", { name: "Play video" }).click();

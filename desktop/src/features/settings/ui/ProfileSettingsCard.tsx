@@ -167,6 +167,8 @@ export function ProfileSettingsCard({
   const isEditingProfileMetadataRef = React.useRef(false);
   const avatarEditorOpenFrameRef = React.useRef<number | null>(null);
   const avatarEditorFinishTimeoutRef = React.useRef<number | null>(null);
+  const rootSectionRef = React.useRef<HTMLElement>(null);
+  const settingsScrollTopBeforeEditRef = React.useRef<number | null>(null);
   isEditingProfileMetadataRef.current = isEditingProfileMetadata;
 
   React.useEffect(() => {
@@ -323,14 +325,35 @@ export function ProfileSettingsCard({
     window.clearTimeout(avatarEditorFinishTimeoutRef.current);
     avatarEditorFinishTimeoutRef.current = null;
   }, []);
+  // The avatar editor is much taller than the closed profile card, so the
+  // settings scroller often gets scrolled down while it is open (reaching the
+  // Done button, browser focus-scroll, etc.). When the editor collapses on
+  // close, the scroller clamps to the now-shorter content and the profile card
+  // lands offset from where the user left it. Snapshot the scroll position on
+  // open and re-apply it on close so closing the editor returns to the exact
+  // pre-edit view.
+  const applySavedSettingsScroll = React.useCallback(() => {
+    const saved = settingsScrollTopBeforeEditRef.current;
+    if (saved === null) {
+      return;
+    }
+    const scroller = rootSectionRef.current?.closest<HTMLElement>(
+      "[data-settings-scroller]",
+    );
+    if (scroller) {
+      scroller.scrollTop = saved;
+    }
+  }, []);
   const closeAvatarEditor = React.useCallback(() => {
     clearAvatarEditorFinishTimeout();
     setIsAvatarEditorOpen(false);
     setIsAvatarEditorFinishing(false);
-  }, [clearAvatarEditorFinishTimeout]);
+    applySavedSettingsScroll();
+  }, [applySavedSettingsScroll, clearAvatarEditorFinishTimeout]);
   const completeAvatarEditorClose = React.useCallback(() => {
     setIsAvatarEditorOpen(false);
     clearAvatarEditorFinishTimeout();
+    applySavedSettingsScroll();
     avatarEditorFinishTimeoutRef.current = window.setTimeout(
       () => {
         avatarEditorFinishTimeoutRef.current = null;
@@ -338,7 +361,11 @@ export function ProfileSettingsCard({
       },
       shouldReduceMotion ? 0 : AVATAR_EDITOR_TRANSITION_MS,
     );
-  }, [clearAvatarEditorFinishTimeout, shouldReduceMotion]);
+  }, [
+    applySavedSettingsScroll,
+    clearAvatarEditorFinishTimeout,
+    shouldReduceMotion,
+  ]);
   const reopenAvatarEditorAfterClose = React.useCallback(() => {
     clearAvatarEditorFinishTimeout();
     setShouldRenderAvatarEditor(true);
@@ -347,6 +374,10 @@ export function ProfileSettingsCard({
   }, [clearAvatarEditorFinishTimeout]);
 
   const openAvatarEditor = React.useCallback(() => {
+    const scroller = rootSectionRef.current?.closest<HTMLElement>(
+      "[data-settings-scroller]",
+    );
+    settingsScrollTopBeforeEditRef.current = scroller?.scrollTop ?? null;
     setShouldRenderAvatarEditor(true);
     setIsAvatarEditorFinishing(false);
     clearAvatarEditorFinishTimeout();
@@ -447,7 +478,11 @@ export function ProfileSettingsCard({
   }, []);
 
   return (
-    <section className="min-w-0" data-testid="settings-profile">
+    <section
+      className="min-w-0"
+      data-testid="settings-profile"
+      ref={rootSectionRef}
+    >
       <div>
         <SettingsSectionHeader
           title="Profile"

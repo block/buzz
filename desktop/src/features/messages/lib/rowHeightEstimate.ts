@@ -175,5 +175,5 @@ export function timelineRowReserveStyle(
       : item.kind === "system"
         ? estimateRowHeight(item.entry.message)
         : DIVIDER_HEIGHT;
-  return { containIntrinsicSize: `auto ${height}px` };
+  return { containIntrinsicSize: `auto ${height / 16}rem` };
 }

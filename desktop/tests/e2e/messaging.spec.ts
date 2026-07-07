@@ -1,7 +1,11 @@
 import { expect, test, type Locator } from "@playwright/test";
 
 import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
-import { expectCornerRadiusPx, expectSmoothCorners } from "../helpers/css";
+import {
+  expectCornerRadiusPx,
+  expectSmoothCorners,
+  expectedScaledPx,
+} from "../helpers/css";
 import { openSettings } from "../helpers/settings";
 
 async function expectThreadReplyUnobscured(row: Locator) {
@@ -179,7 +183,7 @@ test("supported link previews keep the message link visible", async ({
   ).toBeVisible();
   const previewCard = row.locator('[data-link-preview="github-pull-request"]');
   await expect(previewCard).toBeVisible();
-  await expectCornerRadiusPx(previewCard, 16);
+  await expectCornerRadiusPx(previewCard, 16, { scaleWithRootFont: true });
   await expectSmoothCorners(previewCard);
 });
 
@@ -233,7 +237,9 @@ test("copy a rendered code block and paste it back as code", async ({
 
   const codeBlock = page.locator("[data-code-block]");
   await expect(codeBlock).toHaveCount(1);
-  await expectCornerRadiusPx(codeBlock.locator("pre"), 16);
+  await expectCornerRadiusPx(codeBlock.locator("pre"), 16, {
+    scaleWithRootFont: true,
+  });
   await expectSmoothCorners(codeBlock.locator("pre"));
 
   const copyButton = page.getByLabel("Copy code block");
@@ -647,7 +653,19 @@ test("opens a single-level thread panel with inline expansion", async ({
           return `${Math.round(rect.width)}x${Math.round(rect.height)}`;
         }),
     )
-    .toBe("24x24");
+    .toBe(
+      `${Math.round(
+        await expectedScaledPx(
+          rootSummaryRow.getByTestId("message-thread-summary-participant"),
+          24,
+        ),
+      )}x${Math.round(
+        await expectedScaledPx(
+          rootSummaryRow.getByTestId("message-thread-summary-participant"),
+          24,
+        ),
+      )}`,
+    );
   const summaryGeometry = await measureThreadSummaryGeometry(rootSummaryRow);
   expect(
     Math.abs(summaryGeometry.authorLeft - summaryGeometry.bodyLeft),

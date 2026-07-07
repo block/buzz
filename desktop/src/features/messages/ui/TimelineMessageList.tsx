@@ -303,8 +303,18 @@ function SystemRow({
   onToggleReaction?: TimelineMessageListProps["onToggleReaction"];
   profiles?: UserProfileLookup;
 }) {
+  // `data-message-id` is load-bearing: useAnchoredScroll's computeAnchor walks
+  // `[data-message-id]` rows to decide whether the user is anchored mid-history
+  // or at the bottom. A young channel can be scrollable while its only rows are
+  // system events (channel_created / member_joined) — without an id here the
+  // walk finds nothing, falls through to "at-bottom", and a user who scrolled
+  // up never gets the scroll-to-latest pill and gets yanked to the bottom by
+  // the next arrival.
   return (
-    <div className="flex flex-col gap-1 pb-2.5">
+    <div
+      className="flex flex-col gap-1 pb-2.5"
+      data-message-id={entry.message.id}
+    >
       <SystemMessageRow
         message={entry.message}
         currentPubkey={currentPubkey}
