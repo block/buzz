@@ -669,6 +669,7 @@ export function useBakedBuildEnvKeysQuery(options?: { enabled?: boolean }) {
     enabled: options?.enabled ?? true,
     staleTime: Infinity,
     refetchInterval: false,
+    retry: false,
   });
 }
 

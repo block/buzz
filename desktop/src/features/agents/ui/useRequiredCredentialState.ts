@@ -65,7 +65,8 @@ export function useRequiredCredentialState(params: {
     { enabled: open },
   );
 
-  const { data: bakedEnvKeys } = useBakedBuildEnvKeysQuery({ enabled: open });
+  const { data: bakedEnvKeys, isFetched: bakedEnvKeysFetched } =
+    useBakedBuildEnvKeysQuery({ enabled: open });
 
   // All required keys for this runtime + provider combination.
   const allRequiredKeys = React.useMemo(
@@ -106,17 +107,25 @@ export function useRequiredCredentialState(params: {
   );
 
   // Auto-expand Advanced on the missing→present-requirement transition only.
+  // Wait for the baked-keys query to settle before firing: on first dialog open
+  // the query is still in-flight so bakedEnvKeys is undefined, which transiently
+  // marks baked-covered keys as missing. An errored query still counts as settled
+  // (fail-closed for badge/save purposes, but no premature expand).
   const previousMissing = React.useRef(false);
   React.useEffect(() => {
     if (!open) {
       previousMissing.current = false;
       return;
     }
-    if (requiredEnvKeyMissing && !previousMissing.current) {
+    if (
+      requiredEnvKeyMissing &&
+      !previousMissing.current &&
+      bakedEnvKeysFetched
+    ) {
       setShowAdvancedFields(true);
     }
     previousMissing.current = requiredEnvKeyMissing;
-  }, [open, requiredEnvKeyMissing, setShowAdvancedFields]);
+  }, [open, requiredEnvKeyMissing, bakedEnvKeysFetched, setShowAdvancedFields]);
 
   return { requiredEnvKeys, fileSatisfiedEnvKeys, requiredEnvKeyMissing };
 }

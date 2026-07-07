@@ -43,6 +43,7 @@ import {
   CUSTOM_PROVIDER_DROPDOWN_VALUE,
   computeLocalModeGate,
   formatRuntimeOptionLabel,
+  getBakedSatisfiedEnvKeys,
   getDefaultLlmProviderLabel,
   getDefaultPersonaRuntime,
   getModelSelectValue,
@@ -442,15 +443,22 @@ export function PersonaDialog({
     runtimeFileConfig,
     useMesh: false,
   });
-  // Required keys for EnvVarsEditor amber rows: only those still unresolved
-  // (not baked-satisfied and not file-satisfied).
-  const requiredEnvKeys = requiredCredentialEnvKeys(
+  // Required keys for EnvVarsEditor amber locked rows: all required keys except
+  // those silenced by baked env or file config. Filled keys stay in the amber
+  // row (exclusion semantics, not missing-only), matching the other consumers.
+  const allRequiredEnvKeys = requiredCredentialEnvKeys(
     runtime,
     trimmedProvider,
-  ).filter(
+  );
+  const bakedSatisfiedPersonaKeys = getBakedSatisfiedEnvKeys(
+    allRequiredEnvKeys,
+    envVars,
+    bakedEnvKeys,
+  );
+  const requiredEnvKeys = allRequiredEnvKeys.filter(
     (key) =>
-      localModeGate.missingEnvKeys.includes(key) ||
-      localModeGate.fileSatisfiedEnvKeys.includes(key),
+      !bakedSatisfiedPersonaKeys.includes(key) &&
+      !localModeGate.fileSatisfiedEnvKeys.includes(key),
   );
   // Provider required-ness is a static property of the runtime — it does not
   // change based on whether the field is currently filled. Using the dynamic

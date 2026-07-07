@@ -363,6 +363,16 @@ export function getDefaultPersonaRuntime(runtimes: AcpRuntimeCatalogEntry[]) {
  *
  * OSS builds have an empty baked env, so this always returns `[]` there —
  * OSS behavior is unchanged.
+ *
+ * **UX asymmetry:** baked-satisfied keys are FULLY silenced — no amber Required
+ * row, no "Set in config" info row. This differs from file-satisfied keys, which
+ * render an info row ("Set in goose config"). Baked env is invisible
+ * infrastructure; surfacing it would be noise for users.
+ *
+ * **Future precedence insertion point:** PR #1448 (global agent variables) will
+ * slot in between baked and file satisfaction. Intended precedence when both
+ * land: baked < global < file for silencing; agent-local value always wins for
+ * display and spawn.
  */
 export function getBakedSatisfiedEnvKeys(
   requiredKeys: readonly string[],

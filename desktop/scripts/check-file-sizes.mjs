@@ -116,7 +116,7 @@ const overrides = new Map([
   // linux-updater isAutoUpdateSupported() binding + onboarding has_profile_event field.
   // config-bridge-aware requirements: getRuntimeFileConfig command adds ~15 lines.
   // +26 lines from PRs landing on main between prior rebase and this rebase.
-  // baked-env-required-badge: getBakedBuildEnvKeys wrapper adds ~16 lines.
+  // baked-env-required-badge: getBakedBuildEnvKeys wrapper adds ~16 lines. Queued to split.
   ["src/shared/api/tauri.ts", 1388],
   // readiness-gate: PersonaDialog.tsx threads computeLocalModeGate +
   // requiredCredentialEnvKeys + RequiredFieldLabel so the "New agent" dialog
@@ -125,8 +125,8 @@ const overrides = new Map([
   // config-bridge-aware requirements: useRuntimeFileConfigQuery wiring adds
   // ~16 lines. Queued to split.
   // baked-env-required-badge: useBakedBuildEnvKeysQuery + bakedEnvKeys wiring
-  // adds ~6 lines. Queued to split.
-  ["src/features/agents/ui/PersonaDialog.tsx", 1038],
+  // + correct exclusion-semantics for requiredEnvKeys adds ~14 lines. Queued to split.
+  ["src/features/agents/ui/PersonaDialog.tsx", 1046],
   // harness-persona-sync feature growth, queued to split in the resolver-unify
   // refactor followup. discovery.rs is dominated by the new test module
   // (the effective_agent_command / divergent / create-time override matrix);
