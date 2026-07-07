@@ -227,14 +227,24 @@ export function EditAgentDialog({
   );
 
   // The runtime id that will actually be active after submit. When inheriting,
-  // resolve from agent.agentCommand (the persona's runtime) using the same
-  // dual-match used at submit time — command path first, then id fallback for
-  // catalog entries where the adapter binary is missing (command:null). This
-  // single prospective id feeds BOTH the block-save gate (requiredEnvKeys) and
-  // the submit path so they never disagree on which runtime is being saved.
+  // resolve from the LINKED PERSONA's runtime — that is what will run once the
+  // override is cleared. Deriving from agent.agentCommand here is wrong for a
+  // pinned agent that just toggled "Inherit runtime from persona": the override
+  // (e.g. a Claude pin) is still present on the record, so it would resolve to
+  // the old pin instead of the persona's runtime, hiding required credentials.
+  // Fall back to the agent.agentCommand dual-match (command path, then id) only
+  // when there is no linked persona or its runtime is unset. This single
+  // prospective id feeds BOTH the block-save gate (requiredEnvKeys) and the
+  // submit path so they never disagree on which runtime is being saved.
   const prospectiveRuntimeId = React.useMemo(() => {
     if (!inheritHarness) {
       return selectedRuntime?.id ?? selectedRuntimeId;
+    }
+    const personaRuntimeId = linkedPersona?.runtime?.trim();
+    if (personaRuntimeId) {
+      return (
+        runtimes.find((r) => r.id === personaRuntimeId)?.id ?? personaRuntimeId
+      );
     }
     return (
       runtimes.find((r) => r.command?.trim() === agent.agentCommand.trim())
@@ -244,11 +254,26 @@ export function EditAgentDialog({
     );
   }, [
     inheritHarness,
+    linkedPersona?.runtime,
     runtimes,
     agent.agentCommand,
     selectedRuntime?.id,
     selectedRuntimeId,
   ]);
+
+  // Provider and env that will be in effect after submit. When inheriting, the
+  // runtime comes from the persona, so its required-credential check must use
+  // the PERSONA's provider and the persona-layered env (inherited envVars under
+  // the agent's own). Otherwise a Claude-pinned agent inheriting a
+  // buzz-agent/Anthropic persona would check against the agent's (empty)
+  // provider/env and falsely report no required key.
+  const effectiveProvider = inheritHarness
+    ? (linkedPersona?.provider ?? "")
+    : provider;
+  const effectiveEnvVars = React.useMemo(
+    () => (inheritHarness ? { ...inheritedEnvVars, ...envVars } : envVars),
+    [inheritHarness, inheritedEnvVars, envVars],
+  );
 
   // Runtime/provider-required credential state, derived from the PROSPECTIVE
   // post-submit runtime — see the hook for the inherit-transition and
@@ -257,8 +282,8 @@ export function EditAgentDialog({
     useRequiredCredentialState({
       open,
       prospectiveRuntimeId,
-      provider,
-      envVars,
+      provider: effectiveProvider,
+      envVars: effectiveEnvVars,
       setShowAdvancedFields,
     });
 
