@@ -142,6 +142,12 @@ const overrides = new Map([
   // test. Load-bearing feature growth, queued to split publishSplitSlots path
   // into readStateManagerSplit.ts.
   ["src/features/channels/readState/readStateManager.ts", 1030],
+  // review feedback on #1492 restored the two-line load-bearing comment
+  // documenting why `lastMessageAt` must not be an `activeReadAt` fallback
+  // (reply-inclusive; would clear unread state early). The file was already
+  // at the 1000 ceiling; comment-only overage, not code growth. Queued to
+  // split with the rest of this list.
+  ["src/features/channels/ui/ChannelScreen.tsx", 1002],
   // Shared UI was added to this guard after splitting globals/markdown so
   // large shared renderers cannot grow further while follow-up splits land.
   ["src/shared/ui/markdown.tsx", 2119],
