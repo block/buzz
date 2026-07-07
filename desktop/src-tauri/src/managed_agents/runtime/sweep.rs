@@ -323,7 +323,10 @@ fn collect_process_snapshots(harness_name: &str) -> Vec<ProcessSnapshot> {
 /// moved since launch, `current_exe()` reflects the new path but a running
 /// harness may report the old path. In that case the exe-path comparison
 /// fails harmlessly — the orphan is not killed, but neither is anything
-/// incorrectly killed.
+/// incorrectly killed. Similarly, an orphan spawned by an older install of
+/// the same app (different bundle path, e.g. a prior DMG) will not match
+/// this path — that class is handled by `sweep_system_agent_processes`, which
+/// scopes by `BUZZ_MANAGED_AGENT` instance ID rather than exe path.
 pub fn expected_harness_exe_path() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let dir = exe.parent()?;
@@ -374,6 +377,11 @@ pub(crate) fn sweep_untracked_bundle_harnesses(skip_pids: &[u32]) {
         to_kill,
         harness_exe.display(),
     );
+    // Small snapshot→kill PID-reuse window: a PID in `to_kill` could be
+    // recycled between the snapshot and the kill call. This matches the
+    // precedent set by the neighboring sweeps; `resolve_pgids_and_kill`'s
+    // PGID-recycling retain guard (skip a resolved PGID that is alive but
+    // not one of our orphan candidates) narrows the window further.
     let to_kill_i32: Vec<i32> = to_kill.iter().map(|&p| p as i32).collect();
     super::resolve_pgids_and_kill(&to_kill_i32);
 }
