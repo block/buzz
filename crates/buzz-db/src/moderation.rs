@@ -586,3 +586,261 @@ fn row_to_action(row: sqlx::postgres::PgRow) -> Result<ActionRecord> {
         created_at: row.try_get("created_at")?,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Duration;
+    use uuid::Uuid;
+
+    const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz";
+
+    async fn setup_pool() -> PgPool {
+        let database_url = std::env::var("BUZZ_TEST_DATABASE_URL")
+            .or_else(|_| std::env::var("DATABASE_URL"))
+            .unwrap_or_else(|_| TEST_DB_URL.to_owned());
+        PgPool::connect(&database_url)
+            .await
+            .expect("connect to test DB")
+    }
+
+    async fn make_test_community(pool: &PgPool) -> CommunityId {
+        let id = Uuid::new_v4();
+        let host = format!("moderation-test-{}.example", id.simple());
+        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+            .bind(id)
+            .bind(host)
+            .execute(pool)
+            .await
+            .expect("insert test community");
+        CommunityId::from_uuid(id)
+    }
+
+    fn random_32() -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(32);
+        bytes.extend_from_slice(Uuid::new_v4().as_bytes());
+        bytes.extend_from_slice(Uuid::new_v4().as_bytes());
+        bytes
+    }
+
+    fn new_report<'a>(
+        report_event_id: &'a [u8],
+        reporter_pubkey: &'a [u8],
+        target_event_id: &'a [u8],
+        note: Option<&'a str>,
+    ) -> NewReport<'a> {
+        NewReport {
+            report_event_id,
+            reporter_pubkey,
+            target: ReportTarget::Event(target_event_id.to_vec()),
+            channel_id: None,
+            report_type: "spam",
+            note,
+        }
+    }
+
+    /// Community moderation restrictions are tenant-scoped. This guards the same
+    /// mutation class as the TLA⁺ tenant-fence invariant: a ban in community A
+    /// must not restrict the same pubkey in community B, through either the hot
+    /// `restriction_state` read or the queue-facing `list_restricted` read.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn restrictions_are_confined_to_their_community() {
+        let pool = setup_pool().await;
+        let community_a = make_test_community(&pool).await;
+        let community_b = make_test_community(&pool).await;
+        let pubkey = random_32();
+        let actor = random_32();
+
+        ban_member(
+            &pool,
+            community_a,
+            &pubkey,
+            &actor,
+            Some("tenant fence test"),
+            None,
+        )
+        .await
+        .expect("ban in community A");
+
+        let state_a = restriction_state(&pool, community_a, &pubkey)
+            .await
+            .expect("restriction_state A");
+        assert!(state_a.banned, "pubkey must be banned in community A");
+
+        let state_b = restriction_state(&pool, community_b, &pubkey)
+            .await
+            .expect("restriction_state B");
+        assert!(
+            !state_b.banned && state_b.muted_until.is_none(),
+            "ban in A must not restrict the same pubkey in community B"
+        );
+
+        let restricted_a = list_restricted(&pool, community_a)
+            .await
+            .expect("list restricted A");
+        assert!(
+            restricted_a.iter().any(|row| row.pubkey == pubkey),
+            "community A restricted list must include the banned pubkey"
+        );
+
+        let restricted_b = list_restricted(&pool, community_b)
+            .await
+            .expect("list restricted B");
+        assert!(
+            restricted_b.iter().all(|row| row.pubkey != pubkey),
+            "community B restricted list must not include community A's ban"
+        );
+    }
+
+    /// Ban expiry is evaluated in SQL, while a live timeout on the same row keeps
+    /// the member restricted for writes. This protects the one-row/two-restriction
+    /// shape used by L4's auth and ingest gates.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn expired_ban_does_not_hide_active_timeout() {
+        let pool = setup_pool().await;
+        let community = make_test_community(&pool).await;
+        let pubkey = random_32();
+        let actor = random_32();
+
+        ban_member(
+            &pool,
+            community,
+            &pubkey,
+            &actor,
+            Some("expired ban"),
+            Some(Utc::now() - Duration::hours(1)),
+        )
+        .await
+        .expect("insert expired ban");
+        timeout_member(
+            &pool,
+            community,
+            &pubkey,
+            &actor,
+            Utc::now() + Duration::hours(1),
+            Some("active timeout"),
+        )
+        .await
+        .expect("insert active timeout");
+
+        let state = restriction_state(&pool, community, &pubkey)
+            .await
+            .expect("restriction_state");
+        assert!(!state.banned, "expired ban must evaluate inactive");
+        assert!(
+            state.muted_until.is_some(),
+            "active timeout must survive an expired ban on the same row"
+        );
+
+        let ban = get_ban(&pool, community, &pubkey)
+            .await
+            .expect("get ban")
+            .expect("restriction row exists");
+        assert!(
+            !ban.banned,
+            "get_ban must also evaluate expired ban inactive"
+        );
+        assert!(ban.muted_until.is_some(), "get_ban must preserve timeout");
+
+        let restricted = list_restricted(&pool, community)
+            .await
+            .expect("list restricted");
+        let listed = restricted
+            .iter()
+            .find(|row| row.pubkey == pubkey)
+            .expect("timeout-only row remains listed");
+        assert!(
+            !listed.banned,
+            "list_restricted reports expired ban inactive"
+        );
+        assert!(
+            listed.muted_until.is_some(),
+            "list_restricted preserves timeout"
+        );
+    }
+
+    /// Re-ingesting the same signed report is idempotent by event id and must not
+    /// reopen or otherwise reset a report that a moderator already resolved.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn report_reingest_returns_same_id_and_preserves_resolution() {
+        let pool = setup_pool().await;
+        let community = make_test_community(&pool).await;
+        let report_event_id = random_32();
+        let reporter = random_32();
+        let target_event_id = random_32();
+        let resolver = random_32();
+
+        let report = new_report(&report_event_id, &reporter, &target_event_id, Some("first"));
+        let first_id = insert_report(&pool, community, report)
+            .await
+            .expect("insert report");
+
+        assert!(
+            resolve_report(&pool, community, first_id, "resolved", &resolver, None)
+                .await
+                .expect("resolve report"),
+            "first resolve should close the report"
+        );
+
+        let duplicate = new_report(&report_event_id, &reporter, &target_event_id, Some("retry"));
+        let second_id = insert_report(&pool, community, duplicate)
+            .await
+            .expect("re-ingest report");
+        assert_eq!(first_id, second_id, "re-ingest must return the same row id");
+
+        let row = get_report(&pool, community, first_id)
+            .await
+            .expect("get report")
+            .expect("report exists");
+        assert_eq!(
+            row.status, "resolved",
+            "re-ingest must not reopen the report"
+        );
+        assert!(
+            row.resolved_at.is_some(),
+            "resolution timestamp is preserved"
+        );
+        assert_eq!(
+            row.resolved_by.as_deref(),
+            Some(resolver.as_slice()),
+            "resolving moderator is preserved"
+        );
+    }
+
+    /// `resolve_report` is a guarded transition out of `open`; a second resolve
+    /// on a closed report must be a no-op and return `false`.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn resolve_report_returns_false_after_report_is_closed() {
+        let pool = setup_pool().await;
+        let community = make_test_community(&pool).await;
+        let report_event_id = random_32();
+        let reporter = random_32();
+        let target_event_id = random_32();
+        let resolver = random_32();
+
+        let report_id = insert_report(
+            &pool,
+            community,
+            new_report(&report_event_id, &reporter, &target_event_id, None),
+        )
+        .await
+        .expect("insert report");
+
+        assert!(
+            resolve_report(&pool, community, report_id, "dismissed", &resolver, None)
+                .await
+                .expect("first resolve"),
+            "first resolve should update the open report"
+        );
+        assert!(
+            !resolve_report(&pool, community, report_id, "resolved", &resolver, None)
+                .await
+                .expect("second resolve"),
+            "second resolve should return false once the report is closed"
+        );
+    }
+}
