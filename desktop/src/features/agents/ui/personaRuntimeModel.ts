@@ -75,20 +75,28 @@ export function hasMissingRequiredEnvKey(
  * user-editable in the dialog even while inheriting. So the local edit state IS
  * the record's own value and is honored verbatim in the normal case.
  *
- * The ONE exception is the inherit-TRANSITION-from-cleared case: a previously
- * harness-pinned agent (e.g. Claude) has its `provider` cleared and carries no
- * persona credential, then switches to "Inherit runtime from persona" for a
- * provider-backed persona (e.g. buzz-agent/Anthropic). Persisting the local
- * (empty) provider + credential-less env would save an agent that fails
- * readiness on next start. Only in that case — inheriting AND the local
- * provider is empty — do we substitute the persona snapshot: the persona's
- * provider and the persona-layered env (`{ ...personaEnv, ...agentEnv }`, agent
- * layer wins to mirror spawn-time layering), matching create-time record
- * pinning.
+ * The ONE exception is the inherit-TRANSITION-from-a-harness-pin: a previously
+ * harness-pinned agent (e.g. Claude — `agent.agentCommandOverride != null` at
+ * dialog open) has its `provider` cleared and carries no persona credential,
+ * then the user checks "Inherit runtime from persona" for a provider-backed
+ * persona (e.g. buzz-agent/Anthropic). Persisting the local (empty) provider +
+ * credential-less env would save an agent that fails readiness on next start.
+ * Only in that case — inheriting AND the local provider is empty AND the agent
+ * was harness-pinned at open — do we substitute the persona snapshot: the
+ * persona's provider and the persona-layered env (`{ ...personaEnv,
+ * ...agentEnv }`, agent layer wins to mirror spawn-time layering), matching
+ * create-time record pinning.
  *
  * A NON-empty local provider while inheriting (e.g. an Anthropic-persona agent
  * the user re-points to Databricks) is a deliberate edit and passes through
  * unchanged — we never overwrite it with the persona provider.
+ *
+ * An EMPTY local provider while inheriting on an agent that was ALREADY
+ * inheriting at open (`agentWasHarnessPinned` false) is ALSO authoritative: the
+ * user either never set one or deliberately picked the "Default" option to
+ * clear a saved override, so we persist `null` (runtime default) rather than
+ * resurrect the persona provider — otherwise the Default option could never
+ * actually clear an inherited agent's provider override.
  *
  * The result is the SAME effective value the required-credential gate
  * validates, so the gate, the submitted record, and the spawn snapshot agree.
@@ -96,6 +104,14 @@ export function hasMissingRequiredEnvKey(
  */
 export function resolveInheritedRuntimeSubmission(input: {
   inheritHarness: boolean;
+  /**
+   * Whether the agent was harness-pinned (`agentCommandOverride != null`) at
+   * dialog open. Distinguishes the inherit-transition (was pinned, now
+   * inheriting) from steady-state inherit (was already inheriting), so an empty
+   * provider in steady state clears the override instead of resurrecting the
+   * persona provider.
+   */
+  agentWasHarnessPinned: boolean;
   /** Local provider edit state (from the agent record, user-editable). */
   provider: string;
   /** The linked persona's provider, or empty when none/unset. */
@@ -106,10 +122,16 @@ export function resolveInheritedRuntimeSubmission(input: {
   personaEnvVars: Record<string, string>;
 }): { provider: string | null; envVars: Record<string, string> } {
   const localProvider = input.provider.trim();
-  // Substitute the persona snapshot ONLY on the inherit-transition-from-cleared
-  // case (inheriting with an empty local provider). Otherwise the local edit
-  // state is authoritative and passes through unchanged.
-  if (input.inheritHarness && localProvider.length === 0) {
+  // Substitute the persona snapshot ONLY on the true inherit-transition: the
+  // agent was harness-pinned at open, is now inheriting, and has an empty local
+  // provider. Otherwise the local edit state is authoritative — a non-empty
+  // provider is a deliberate pick, and an empty provider on an already-
+  // inheriting agent is a deliberate clear (Default) — and passes through.
+  if (
+    input.inheritHarness &&
+    input.agentWasHarnessPinned &&
+    localProvider.length === 0
+  ) {
     return {
       provider: input.personaProvider.trim() || null,
       envVars: { ...input.personaEnvVars, ...input.envVars },

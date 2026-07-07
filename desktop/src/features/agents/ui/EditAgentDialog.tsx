@@ -262,14 +262,15 @@ export function EditAgentDialog({
     selectedRuntimeId,
   ]);
 
-  // Provider + env in effect after submit, and the values to PERSIST. When
-  // inheriting, both the credential gate and the saved record must use the
-  // persona's provider + persona-layered env — spawn reads only the record
-  // snapshot, never the live persona. Single source so gate/record/spawn agree.
+  // Provider + env to PERSIST on submit — also fed to the credential gate so
+  // gate, saved record, and spawn snapshot all agree on one resolved value.
+  // See resolveInheritedRuntimeSubmission for the inherit/transition contract.
   const inheritedSubmission = React.useMemo(
     () =>
       resolveInheritedRuntimeSubmission({
         inheritHarness,
+        // Inherit-transition vs. Default-clear — see resolveInheritedRuntimeSubmission.
+        agentWasHarnessPinned: agent.agentCommandOverride != null,
         provider,
         personaProvider: linkedPersona?.provider ?? "",
         envVars,
@@ -277,6 +278,7 @@ export function EditAgentDialog({
       }),
     [
       inheritHarness,
+      agent.agentCommandOverride,
       provider,
       linkedPersona?.provider,
       envVars,
