@@ -6,15 +6,22 @@ import {
   useModerationAuditQuery,
   useModerationReportsQuery,
   useResolveReportMutation,
+  useBanMemberMutation,
   type ModerationReport as HookModerationReport,
   type ResolutionAction,
 } from "@/features/moderation/hooks";
 import { useMyRelayMembershipQuery } from "@/features/relay-members/hooks";
 import { useUsersBatchQuery } from "@/features/profile/hooks";
 import {
+  deleteMessage,
+  getEventById,
+  removeChannelMember,
+} from "@/shared/api/tauri";
+import {
   buildModerationQueue,
   groupTopReportType,
   reportTypeLabel,
+  resolvableActions,
   severityTier,
   type ModerationAction,
   type ModerationQueueGroup,
@@ -68,6 +75,66 @@ const EMPTY_ACTIONS: readonly ModerationAction[] = [];
 // submit an invalid combination.
 function statusForAction(action: ResolutionAction): "resolved" | "dismissed" {
   return action === "dismiss" ? "dismissed" : "resolved";
+}
+
+/**
+ * Resolve the author (signer) pubkey a member-directed enforcement acts on.
+ * For a pubkey-target report that IS the target; for an event-target report the
+ * report row carries only the event id (the reporter's `p` author tag is
+ * dropped at ingest), so we read the reported event and take its signer — the
+ * stored `pubkey` is signer truth, never a `p`/`actor` override. Throws if the
+ * event can't be resolved (e.g. already deleted) so the caller aborts before
+ * touching the 9044.
+ */
+async function resolveTargetAuthor(
+  group: ModerationQueueGroup,
+): Promise<string> {
+  if (group.targetKind === "pubkey") return group.target;
+  const event = await getEventById(group.target);
+  if (!event?.pubkey) {
+    throw new Error("Could not resolve the message author.");
+  }
+  return event.pubkey;
+}
+
+/**
+ * Compose the enforcement event paired with a resolution, BEFORE the 9044.
+ *
+ * A 9044 resolve records the decision and DMs the reporter "reviewed and acted
+ * on" — so it must not fire until the action actually happened. Enforce first;
+ * on success the caller sends the 9044. On failure this throws and the caller
+ * leaves the report open (no false DM, no orphan decision row). `escalate` and
+ * `dismiss` carry no enforcement — they are pure 9044 decisions.
+ */
+async function enforceResolution(
+  group: ModerationQueueGroup,
+  action: ResolutionAction,
+  ban: (input: { pubkey: string; reason?: string }) => Promise<unknown>,
+): Promise<void> {
+  switch (action) {
+    case "delete":
+      // Gated to event targets with a channel (resolvableActions).
+      if (group.channelId == null) throw new Error("Report has no channel.");
+      await deleteMessage(group.channelId, group.target);
+      return;
+    case "ban":
+      await ban({ pubkey: await resolveTargetAuthor(group) });
+      return;
+    case "kick":
+      // Gated to event targets with a channel (resolvableActions).
+      if (group.channelId == null) throw new Error("Report has no channel.");
+      await removeChannelMember(
+        group.channelId,
+        await resolveTargetAuthor(group),
+      );
+      return;
+    case "escalate":
+    case "dismiss":
+      return;
+    case "timeout":
+      // Dropped from one-click until the resolve flow collects a duration.
+      throw new Error("Timeout is not available from the queue yet.");
+  }
 }
 
 const RESOLUTION_OPTIONS: {
@@ -162,12 +229,17 @@ function ReporterLine({
 }
 
 function ResolveMenu({
+  allowed,
   disabled,
   onResolve,
 }: {
+  allowed: readonly ResolutionAction[];
   disabled: boolean;
   onResolve: (action: ResolutionAction) => void;
 }) {
+  const options = RESOLUTION_OPTIONS.filter((option) =>
+    allowed.includes(option.action),
+  );
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
@@ -184,7 +256,7 @@ function ResolveMenu({
       <DropdownMenuContent align="end" className="w-64">
         <DropdownMenuLabel>Resolution</DropdownMenuLabel>
         <DropdownMenuSeparator />
-        {RESOLUTION_OPTIONS.map((option) => (
+        {options.map((option) => (
           <DropdownMenuItem
             data-testid={`moderation-resolve-${option.action}`}
             key={option.action}
@@ -246,6 +318,10 @@ function QueueGroupCard({
         </div>
         <div className="shrink-0">
           <ResolveMenu
+            allowed={resolvableActions(
+              group.targetKind,
+              group.channelId != null,
+            )}
             disabled={disabled}
             onResolve={(action) => onResolve(group, action)}
           />
@@ -284,6 +360,7 @@ function QueueTab() {
   const reportsQuery = useModerationReportsQuery({ status: "open" });
   const auditQuery = useModerationAuditQuery();
   const resolveMutation = useResolveReportMutation();
+  const banMutation = useBanMemberMutation();
 
   const groups = useMemo(() => {
     const reports = (reportsQuery.data ?? []).map(toQueueReport);
@@ -314,11 +391,15 @@ function QueueTab() {
     action: ResolutionAction,
   ) {
     const status = statusForAction(action);
-    // Resolve every open report about this target with the chosen disposition.
     const openReports = group.reports.filter(
       (report) => report.status === "open",
     );
     try {
+      // Enforce FIRST. The 9044 resolve DMs the reporter "reviewed and acted
+      // on" — if enforcement fails we must not send that lie, and we leave the
+      // report open (retryable, no orphan decision row). Only after the paired
+      // 9040/9005/9001 lands do we resolve every open report about this target.
+      await enforceResolution(group, action, banMutation.mutateAsync);
       await Promise.all(
         openReports.map((report) =>
           resolveMutation.mutateAsync({
@@ -359,7 +440,7 @@ function QueueTab() {
     <div className="space-y-3">
       {groups.map((group) => (
         <QueueGroupCard
-          disabled={resolveMutation.isPending}
+          disabled={resolveMutation.isPending || banMutation.isPending}
           group={group}
           key={group.targetKey}
           onResolve={handleResolve}

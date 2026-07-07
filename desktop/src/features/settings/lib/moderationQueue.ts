@@ -16,6 +16,7 @@
 import type {
   ModerationAction as ApiModerationAction,
   ModerationReport as ApiModerationReport,
+  ResolutionAction,
 } from "@/shared/api/moderation";
 
 /** NIP-56 report categories accepted at ingest (relay `report.rs::REPORT_TYPES`). */
@@ -89,6 +90,13 @@ export type ModerationQueueGroup = {
   targetKey: string;
   targetKind: ReportTargetKind;
   target: string;
+  /**
+   * Channel the target lives in, if any. An event target lives in exactly one
+   * channel (all reports about it agree), so we take it from the first report;
+   * pubkey/blob targets are not channel-scoped and carry `null`. Drives which
+   * channel-scoped enforcements (delete/kick) are offerable.
+   */
+  channelId: string | null;
   /** Reports about this target, newest first. */
   reports: ModerationReport[];
   /** Highest severity among the group's reports — drives group ordering. */
@@ -149,6 +157,7 @@ export function buildModerationQueue(
         targetKey: key,
         targetKind: report.targetKind,
         target: report.target,
+        channelId: report.channelId,
         reports: [report],
         maxSeverity: reportSeverity(report.reportType),
         latestCreatedAt: report.createdAt,
@@ -220,4 +229,36 @@ export function groupTopReportType(group: ModerationQueueGroup): ReportType {
     }
   }
   return top;
+}
+
+/**
+ * Which one-click resolutions can actually be *enforced* for a given target.
+ *
+ * A 9044 resolve only records the decision + DMs the reporter; the client must
+ * compose the paired enforcement event (delete→9005, ban→9040, kick→9001).
+ * Some pairings are structurally impossible, so we never offer them as buttons
+ * (Eva's ruling: an action you can't complete shouldn't be clickable):
+ *
+ * - `delete` (9005) needs an event id + channel — only event-target reports.
+ * - `kick` (9001) is channel-scoped — needs both an author and a channel, so
+ *   only event-target reports (a pubkey report is not tied to a channel).
+ * - `ban` (9040) needs only the author pubkey — event reports resolve it from
+ *   the reported event's signer; pubkey reports carry it as the target.
+ * - `escalate` / `dismiss` are decision-only and always available.
+ *
+ * `timeout` is intentionally excluded until the resolve flow can collect a
+ * duration (a duration-less timeout would be a lie); it wires back in with the
+ * duration picker as a follow-up.
+ */
+export function resolvableActions(
+  targetKind: ReportTargetKind,
+  hasChannel: boolean,
+): ResolutionAction[] {
+  const actions: ResolutionAction[] = [];
+  if (targetKind === "event" && hasChannel) actions.push("delete");
+  // ban needs only the author; event reports look it up from the signer.
+  if (targetKind === "event" || targetKind === "pubkey") actions.push("ban");
+  if (targetKind === "event" && hasChannel) actions.push("kick");
+  actions.push("escalate", "dismiss");
+  return actions;
 }

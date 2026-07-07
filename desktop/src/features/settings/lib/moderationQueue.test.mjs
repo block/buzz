@@ -7,6 +7,7 @@ import {
   isOpenReport,
   reportSeverity,
   reportTypeLabel,
+  resolvableActions,
   severityTier,
   targetKey,
 } from "./moderationQueue.ts";
@@ -211,4 +212,46 @@ test("groupTopReportType returns the most severe type in a group", () => {
     report({ id: "r3", target: t, reportType: "profanity" }),
   ]);
   assert.equal(groupTopReportType(group), "impersonation");
+});
+
+test("resolvableActions: event target with a channel offers the full enforceable set", () => {
+  const actions = resolvableActions("event", true);
+  assert.deepEqual(actions, ["delete", "ban", "kick", "escalate", "dismiss"]);
+});
+
+test("resolvableActions: event target without a channel drops the channel-scoped enforcements", () => {
+  // Defensive: an event report should always carry a channel, but if it
+  // doesn't, delete (9005) and kick (9001) have nowhere to land.
+  const actions = resolvableActions("event", false);
+  assert.deepEqual(actions, ["ban", "escalate", "dismiss"]);
+});
+
+test("resolvableActions: pubkey target offers ban but never delete or kick", () => {
+  // A pubkey report is not tied to a channel and points at no event, so the
+  // channel-scoped delete/kick are structurally impossible.
+  const actions = resolvableActions("pubkey", false);
+  assert.deepEqual(actions, ["ban", "escalate", "dismiss"]);
+  assert.ok(!actions.includes("delete"));
+  assert.ok(!actions.includes("kick"));
+});
+
+test("resolvableActions: blob target offers only decision-only resolutions", () => {
+  const actions = resolvableActions("blob", false);
+  assert.deepEqual(actions, ["escalate", "dismiss"]);
+});
+
+test("resolvableActions: timeout is never offered from one-click yet", () => {
+  for (const kind of ["event", "pubkey", "blob"]) {
+    for (const hasChannel of [true, false]) {
+      assert.ok(!resolvableActions(kind, hasChannel).includes("timeout"));
+    }
+  }
+});
+
+test("buildModerationQueue carries channelId from the report onto the group", () => {
+  const t = "d".repeat(64);
+  const [group] = buildModerationQueue([
+    report({ target: t, targetKind: "event", channelId: "chan-1" }),
+  ]);
+  assert.equal(group.channelId, "chan-1");
 });

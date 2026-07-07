@@ -51,7 +51,10 @@ export function MessageModerationMenuItems({
   const canModerate = relayRole === "owner" || relayRole === "admin";
 
   const identityQuery = useIdentityQuery();
-  const targetPubkey = message.signerPubkey ?? message.pubkey ?? null;
+  // Fail closed: moderate only the raw signer, never the display `pubkey`
+  // (which `p`/`actor` tags can override — see the security note above). A
+  // message without a signer is not moderatable here; render nothing.
+  const targetPubkey = message.signerPubkey ?? null;
   const isSelf =
     targetPubkey != null &&
     identityQuery.data?.pubkey != null &&
