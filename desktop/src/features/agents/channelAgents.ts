@@ -6,6 +6,7 @@ import {
 } from "@/features/agents/agentReuse";
 export { findReusableAgent } from "@/features/agents/agentReuse";
 import { normalizePubkey } from "@/shared/lib/pubkey";
+import { resolveManagedAgentAvatarUrl } from "@/features/agents/ui/managedAgentAvatar";
 import {
   addChannelMembers,
   createManagedAgent,
@@ -13,7 +14,6 @@ import {
   listManagedAgents,
   startManagedAgent,
   updateManagedAgent,
-  uploadMediaBytes,
 } from "@/shared/api/tauri";
 import type {
   AcpRuntime,
@@ -341,21 +341,12 @@ export async function createChannelManagedAgent(
     }
   }
 
-  // If the avatar is a data URI (e.g. from a persona PNG card import),
-  // upload it to get a hosted URL the relay can serve.
-  let resolvedAvatarUrl = input.avatarUrl?.trim() || undefined;
-  if (resolvedAvatarUrl?.startsWith("data:image/")) {
-    try {
-      const [, b64] = resolvedAvatarUrl.split(",", 2);
-      if (!b64) throw new Error("empty data URI payload");
-      const bytes = Array.from(atob(b64), (c) => c.charCodeAt(0));
-      const blob = await uploadMediaBytes(bytes);
-      resolvedAvatarUrl = blob.url;
-    } catch (err) {
-      console.warn("Avatar upload failed, proceeding without avatar:", err);
-      resolvedAvatarUrl = undefined;
-    }
-  }
+  // Resolve the avatar for the channel-managed agent. Base64 data URIs (e.g.
+  // from a persona PNG card import) are uploaded to a hosted URL the relay can
+  // serve; percent-encoded emoji SVG data URLs pass through unchanged so the
+  // selected emoji survives deployment. Shared with agent creation so both
+  // paths handle emoji avatars identically.
+  const resolvedAvatarUrl = await resolveManagedAgentAvatarUrl(input.avatarUrl);
 
   const isProviderMode = input.backend?.type === "provider";
 

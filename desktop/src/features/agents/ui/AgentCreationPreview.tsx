@@ -446,7 +446,6 @@ export function AgentCreationPreview({
                 autoCorrect="off"
                 className="min-w-0 flex-1 bg-transparent text-xs font-medium text-foreground outline-none placeholder:text-muted-foreground/50"
                 disabled={disabled || isUploading}
-                onBlur={() => applyAvatarUrl()}
                 onChange={(event) => setAvatarUrlDraft(event.target.value)}
                 onKeyDown={(event) => {
                   if (event.key === "Enter") {
