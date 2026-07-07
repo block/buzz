@@ -3,7 +3,7 @@ import { classifyToolItem } from "./agentSessionToolClassifier";
 
 export type TranscriptTurnSegment =
   | { kind: "item"; item: TranscriptItem }
-  | { kind: "summary"; summary: TranscriptSameKindSummary }
+  | { kind: "summary"; summary: TranscriptToolRunSummary }
   | { kind: "setup"; items: Extract<TranscriptItem, { type: "lifecycle" }>[] }
   | {
       kind: "prompt";
@@ -17,12 +17,18 @@ export type TranscriptDisplayBlock =
   | { kind: "single"; item: TranscriptItem }
   | { kind: "turn"; turnId: string; segments: TranscriptTurnSegment[] };
 
-export type TranscriptSameKindSummary = {
+export type TranscriptToolRunSummary = {
   id: string;
   label: string;
   count: number;
   items: TranscriptItem[];
   renderClass: TranscriptItem["renderClass"] | null;
+  /**
+   * "same-kind" summaries collapse runs sharing one semantic groupKey and get
+   * specific labels ("Read 3 files"). "mixed" summaries are the fallback for
+   * adjacent eligible tool runs of differing kinds ("Ran 5 tool calls").
+   */
+  variant: "same-kind" | "mixed";
   timestamp: string;
 };
 
@@ -83,9 +89,7 @@ function classifyTurnItems(
   const activity = items.filter((item) => !consumed.has(item));
 
   if (!userPrompt) {
-    return groupSameKindSegments(
-      activity.map((item) => ({ kind: "item", item })),
-    );
+    return groupToolSegments(activity.map((item) => ({ kind: "item", item })));
   }
 
   const segments: TranscriptTurnSegment[] = [
@@ -102,7 +106,23 @@ function classifyTurnItems(
     segments.push({ kind: "item", item });
   }
 
-  return groupSameKindSegments(segments);
+  return groupToolSegments(segments);
+}
+
+/**
+ * Two-pass tool grouping:
+ * 1. Same-kind runs collapse into summaries with specific labels
+ *    ("Read 3 files", "Edited 2 files").
+ * 2. Leftover adjacent eligible tool rows of differing kinds collapse into a
+ *    mixed fallback summary ("Ran 5 tool calls").
+ *
+ * Messages, errors, permissions, and status/lifecycle rows never join either
+ * pass, so intervention points stay visible.
+ */
+function groupToolSegments(
+  segments: TranscriptTurnSegment[],
+): TranscriptTurnSegment[] {
+  return groupMixedToolRuns(groupSameKindSegments(segments));
 }
 
 function groupSameKindSegments(
@@ -137,6 +157,7 @@ function groupSameKindSegments(
           count: run.length,
           items: run,
           renderClass: getRenderClass(run[0]),
+          variant: "same-kind",
           timestamp: run[0].timestamp,
         },
       });
@@ -147,6 +168,75 @@ function groupSameKindSegments(
     }
   }
   return grouped;
+}
+
+const MIXED_RUN_MINIMUM_LENGTH = 3;
+
+/**
+ * Fallback pass: collapse adjacent eligible tool rows of differing kinds that
+ * the same-kind pass left expanded (e.g. read → shell → read) into one
+ * "Ran N tool calls" summary. Existing same-kind summaries, messages, errors,
+ * permissions, and status rows break runs, so they stay visible and any failed
+ * tool (reclassified to renderClass "error") is never buried.
+ */
+function groupMixedToolRuns(
+  segments: TranscriptTurnSegment[],
+): TranscriptTurnSegment[] {
+  const grouped: TranscriptTurnSegment[] = [];
+  for (let i = 0; i < segments.length; i++) {
+    const segment = segments[i];
+    if (segment.kind !== "item" || !isMixedRunEligible(segment.item)) {
+      grouped.push(segment);
+      continue;
+    }
+    const run = [segment.item];
+    let j = i + 1;
+    while (j < segments.length) {
+      const next = segments[j];
+      if (next.kind !== "item" || !isMixedRunEligible(next.item)) break;
+      run.push(next.item);
+      j += 1;
+    }
+    if (run.length >= MIXED_RUN_MINIMUM_LENGTH) {
+      grouped.push({
+        kind: "summary",
+        summary: {
+          id: `summary:mixed:${run[0].id}`,
+          label: `Ran ${run.length} tool calls`,
+          count: run.length,
+          items: run,
+          renderClass: null,
+          variant: "mixed",
+          timestamp: run[0].timestamp,
+        },
+      });
+    } else {
+      grouped.push(...run.map((item) => ({ kind: "item" as const, item })));
+    }
+    i = j - 1;
+  }
+  return grouped;
+}
+
+const MIXED_RUN_ELIGIBLE_RENDER_CLASSES = new Set<
+  NonNullable<TranscriptItem["renderClass"]>
+>([
+  "file-read",
+  "skill-read",
+  "shell",
+  "relay-op",
+  "file-edit",
+  "image",
+  "plan",
+  "generic",
+]);
+
+function isMixedRunEligible(item: TranscriptItem): boolean {
+  if (item.type !== "tool" || item.isError) return false;
+  const renderClass = getRenderClass(item);
+  return (
+    renderClass != null && MIXED_RUN_ELIGIBLE_RENDER_CLASSES.has(renderClass)
+  );
 }
 
 function sameKindKey(item: TranscriptItem): string | null {

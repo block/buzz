@@ -455,10 +455,10 @@ function SameKindSummaryItem({
 }) {
   const groupedFileEditDiffs = React.useMemo(
     () =>
-      summary.renderClass === "file-edit"
+      summary.renderClass === "file-edit" || summary.variant === "mixed"
         ? getGroupedFileEditDiffs(summary.items)
         : [],
-    [summary.items, summary.renderClass],
+    [summary.items, summary.renderClass, summary.variant],
   );
   const groupedFileEditStats = summarizeFileEditDiffs(groupedFileEditDiffs);
   const expandsToToolItems = summary.items.every(
