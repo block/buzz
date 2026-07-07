@@ -27,14 +27,12 @@ import {
   useUpdatePersonaMutation,
 } from "@/features/agents/hooks";
 import { AddAgentToChannelDialog } from "@/features/agents/ui/AddAgentToChannelDialog";
-import { useActiveAgentTurnsBridge } from "@/features/agents/activeAgentTurnsStore";
 import { resolvePersonaRuntime } from "@/features/agents/lib/resolvePersonaRuntime";
 import {
   isManagedAgentActive,
   startManagedAgentWithRules,
   stopManagedAgentWithRules,
 } from "@/features/agents/lib/managedAgentControlActions";
-import { useManagedAgentObserverBridge } from "@/features/agents/observerRelayStore";
 import { describeLogFile } from "@/features/agents/ui/agentUi";
 import { EditAgentDialog } from "@/features/agents/ui/EditAgentDialog";
 import {
@@ -82,7 +80,7 @@ import {
 } from "@/features/profile/ui/UserProfilePanelUtils";
 import { useProfileDmAction } from "@/features/profile/ui/useProfileDmAction";
 import { useUserStatusQuery } from "@/features/user-status/hooks";
-import { useAgentSession } from "@/shared/context/AgentSessionContext";
+import { useOpenAgentActivity } from "@/features/agents/useOpenAgentActivity";
 import { useEscapeKey } from "@/shared/hooks/useEscapeKey";
 import { useIsThreadPanelOverlay } from "@/shared/hooks/use-mobile";
 import { AuxiliaryPanelBody } from "@/shared/layout/AuxiliaryPanel";
@@ -231,7 +229,7 @@ export function UserProfilePanel({
   const contactListQuery = useContactListQuery(currentPubkey);
   const followMutation = useFollowMutation(currentPubkey);
   const unfollowMutation = useUnfollowMutation(currentPubkey);
-  const { onOpenAgentSession } = useAgentSession();
+  const { canOpenAgentActivity, openAgentActivity } = useOpenAgentActivity();
   const { goChannel } = useAppNavigation();
   const profile = resolvePanelProfile({
     managedAgent,
@@ -288,14 +286,9 @@ export function UserProfilePanel({
       }),
     [effectivePubkey, isBot, managedAgent, profile, relayAgent, viewerIsOwner],
   );
-  const activityBridgeAgents = React.useMemo(
-    () => (activityAgent ? [activityAgent] : []),
-    [activityAgent],
-  );
-  // Populate the active-turns store for this agent so useActiveAgentTurns works
-  // even if the Agents page hasn't been visited yet.
-  useActiveAgentTurnsBridge(activityBridgeAgents);
-  useManagedAgentObserverBridge(activityBridgeAgents);
+  // Observer ingestion (frame decryption + derived active-turn liveness) is
+  // owner-global — mounted once in AppShell via useAgentObserverIngestion —
+  // covering both locally managed agents and declared-owned relay agents.
   const canEditAgent =
     isOwner === true &&
     (managedAgent !== undefined ||
@@ -308,7 +301,9 @@ export function UserProfilePanel({
     pubkeyLower.length > 0 &&
     pubkeyLower === currentPubkey.toLowerCase();
   const canViewActivity =
-    viewerIsOwner && Boolean(onOpenAgentSession) && Boolean(effectivePubkey);
+    viewerIsOwner &&
+    Boolean(effectivePubkey) &&
+    canOpenAgentActivity(effectivePubkey);
   const canOpenAgentLogs =
     isOwner === true && managedAgent?.backend.type === "local";
   const canInstantiateAgent =
@@ -669,9 +664,9 @@ export function UserProfilePanel({
   const handleOpenActivity = React.useCallback(
     (channelId?: string | null) => {
       if (!effectivePubkey) return;
-      onOpenAgentSession?.(effectivePubkey, channelId ?? null);
+      openAgentActivity(effectivePubkey, { channelId: channelId ?? null });
     },
-    [effectivePubkey, onOpenAgentSession],
+    [effectivePubkey, openAgentActivity],
   );
 
   const handleOpenChannel = React.useCallback(

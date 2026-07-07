@@ -39,6 +39,7 @@ import { PreventSleepProvider } from "@/features/agents/usePreventSleep";
 import { requestOpenCreateAgent } from "@/features/agents/openCreateAgentEvent";
 import { useAgentsDataRefresh } from "@/features/agents/lib/useAgentsDataRefresh";
 import { usePersonaSync } from "@/features/agents/lib/usePersonaSync";
+import { useAgentObserverIngestion } from "@/features/agents/useAgentObserverIngestion";
 import {
   usePresenceSession,
   usePresenceSubscription,
@@ -147,6 +148,14 @@ export function AppShell() {
   );
   usePersonaSync(identityQuery.data?.pubkey);
   useAgentsDataRefresh();
+  // Owner-global observer ingestion: receives + decrypts agent observer
+  // frames and keeps derived active-turn liveness in sync app-wide, so no
+  // individual screen/panel has to mount its own bridge for ingestion.
+  // Intentionally mounted without a `startupReady`/identity guard: before
+  // `currentPubkey` resolves the hook ingests managed agents only, and
+  // relay-owned agents join automatically once identity arrives. Adding a
+  // guard here would drop managed-agent coverage during startup.
+  useAgentObserverIngestion();
   const profileQuery = useProfileQuery();
   const deferredPubkey = startupReady ? identityQuery.data?.pubkey : undefined;
   useRelayAutoHeal();

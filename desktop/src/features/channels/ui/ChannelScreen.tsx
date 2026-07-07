@@ -24,8 +24,6 @@ import {
   usePersonasQuery,
   useRelayAgentsQuery,
 } from "@/features/agents/hooks";
-import { useActiveAgentTurnsBridge } from "@/features/agents/activeAgentTurnsStore";
-import { useManagedAgentObserverBridge } from "@/features/agents/observerRelayStore";
 import {
   mergeMessages,
   useChannelMessagesQuery,
@@ -360,30 +358,9 @@ export function ChannelScreen({
     relayAgents,
     typingEntries,
   });
-  const observerBridgeAgents = React.useMemo(() => {
-    if (
-      !profilePanelPubkey ||
-      !openAgentSessionPubkey ||
-      normalizePubkey(profilePanelPubkey) !==
-        normalizePubkey(openAgentSessionPubkey) ||
-      managedAgents.some(
-        (agent) =>
-          normalizePubkey(agent.pubkey) === normalizePubkey(profilePanelPubkey),
-      )
-    ) {
-      return managedAgents;
-    }
-
-    return [
-      ...managedAgents,
-      {
-        pubkey: profilePanelPubkey,
-        status: "deployed" as const,
-      },
-    ];
-  }, [managedAgents, openAgentSessionPubkey, profilePanelPubkey]);
-  useManagedAgentObserverBridge(observerBridgeAgents);
-  useActiveAgentTurnsBridge(observerBridgeAgents);
+  // Observer ingestion (frame decryption + derived active-turn liveness) is
+  // owner-global — mounted once in AppShell via useAgentObserverIngestion —
+  // so this screen no longer mounts its own observer/turns bridges.
   const messageProfiles = React.useMemo(() => {
     const base =
       mergeCurrentProfileIntoLookup(

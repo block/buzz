@@ -27,6 +27,7 @@ import { ChannelFindBar } from "@/features/search/ui/ChannelFindBar";
 import { AgentSessionThreadPanel } from "@/features/channels/ui/AgentSessionThreadPanel";
 import { ChannelManagementAuxiliaryPanel } from "@/features/channels/ui/ChannelManagementAuxiliaryPanel";
 import { RightAuxiliaryPane } from "@/features/channels/ui/RightAuxiliaryPane";
+import { useChannelWorkingAgentPubkeys } from "@/features/agents/agentWorkingSignal";
 import { BotActivityComposerAction } from "@/features/channels/ui/BotActivityBar";
 import {
   containsWelcomePersonaMention,
@@ -324,24 +325,14 @@ export const ChannelPane = React.memo(function ChannelPane({
   const canDropInMainColumn =
     hasMainComposerOverlay && !isComposerDisabled && !isSinglePanelView;
   const hasTypingActivity = typingPubkeys.length > 0;
-  const composerBotTypingPubkeys = React.useMemo(() => {
-    const pubkeys: string[] = [];
-    for (const entry of botTypingEntries) {
-      if (entry.threadHeadId !== null) {
-        continue;
-      }
-
-      if (
-        !pubkeys.some(
-          (pubkey) => pubkey.toLowerCase() === entry.pubkey.toLowerCase(),
-        )
-      ) {
-        pubkeys.push(entry.pubkey);
-      }
-    }
-    return pubkeys;
-  }, [botTypingEntries]);
-  const hasComposerBotActivity = composerBotTypingPubkeys.length > 0;
+  // Unified working set for the composer bar: observer-derived turns primary,
+  // bot typing fallback (both folded together by agentWorkingSignal). This is
+  // what makes the bar show for an agent whose observer stream is live but
+  // whose typing signal never arrives — and vice versa.
+  const composerWorkingBotPubkeys = useChannelWorkingAgentPubkeys(
+    activeChannel?.id ?? null,
+  );
+  const hasComposerBotActivity = composerWorkingBotPubkeys.length > 0;
   const threadComposerBotTypingPubkeys = React.useMemo(() => {
     if (!openThreadHeadId) {
       return [];
@@ -708,7 +699,7 @@ export const ChannelPane = React.memo(function ChannelPane({
                           onOpenAgentSession={onOpenAgentSession}
                           openAgentSessionPubkey={openAgentSessionPubkey}
                           profiles={profiles}
-                          typingBotPubkeys={composerBotTypingPubkeys}
+                          workingBotPubkeys={composerWorkingBotPubkeys}
                           variant="inline"
                         />
                       </div>
@@ -803,7 +794,7 @@ export const ChannelPane = React.memo(function ChannelPane({
                     onOpenAgentSession={onOpenAgentSession}
                     openAgentSessionPubkey={openAgentSessionPubkey}
                     profiles={profiles}
-                    typingBotPubkeys={threadComposerBotTypingPubkeys}
+                    workingBotPubkeys={threadComposerBotTypingPubkeys}
                     variant="inline"
                   />
                 ) : null
@@ -846,11 +837,6 @@ export const ChannelPane = React.memo(function ChannelPane({
                     : null
               }
               channelId={openAgentSessionChannelId}
-              isWorking={botTypingEntries.some(
-                (entry) =>
-                  entry.pubkey.toLowerCase() ===
-                  selectedAgent.pubkey.toLowerCase(),
-              )}
               isSinglePanelView={
                 useSplitAuxiliaryPane ? false : isSinglePanelView
               }

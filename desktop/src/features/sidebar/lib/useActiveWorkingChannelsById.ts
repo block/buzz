@@ -1,12 +1,8 @@
 import * as React from "react";
 
-import {
-  type ActiveChannelTurnSummary,
-  useActiveAgentTurnsBridge,
-  useActiveAgentTurnsByChannel,
-} from "@/features/agents/activeAgentTurnsStore";
+import type { ActiveChannelTurnSummary } from "@/features/agents/activeAgentTurnsStore";
+import { useWorkingChannels } from "@/features/agents/agentWorkingSignal";
 import { useManagedAgentsQuery } from "@/features/agents/hooks";
-import { useManagedAgentObserverBridge } from "@/features/agents/observerRelayStore";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 
 export function resolveActiveWorkingChannelNames(
@@ -36,10 +32,10 @@ export function useActiveWorkingChannelsById(): ReadonlyMap<
     [managedAgentsQuery.data],
   );
 
-  useManagedAgentObserverBridge(managedAgents);
-  useActiveAgentTurnsBridge(managedAgents);
-
-  const activeWorkingChannels = useActiveAgentTurnsByChannel();
+  // Unified working signal: observer-derived turns primary, bot typing as
+  // fallback — so the sidebar badge appears even for agents whose observer
+  // stream is absent for this build/scope.
+  const activeWorkingChannels = useWorkingChannels();
   return React.useMemo(
     () =>
       new Map(

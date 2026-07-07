@@ -1,5 +1,6 @@
 import * as React from "react";
 
+import { reportChannelBotTyping } from "@/features/agents/agentWorkingSignal";
 import type { TypingIndicatorEntry } from "@/features/messages/useChannelTyping";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type {
@@ -13,6 +14,22 @@ import {
   buildChannelAgentSessionCandidates,
   getChannelAgentSessionAgents,
 } from "./useChannelAgentSessions";
+
+/**
+ * Key of bot typing pubkeys that may mark the *channel* as working. Only
+ * channel-scoped entries (`threadHeadId === null`) count — thread-only typing
+ * must not light channel-level surfaces (composer bar, sidebar, profile);
+ * thread surfaces apply their own `threadHeadId` filter.
+ */
+export function channelScopedBotTypingPubkeyKey(
+  entries: readonly Pick<TypingIndicatorEntry, "pubkey" | "threadHeadId">[],
+): string {
+  return entries
+    .filter((entry) => entry.threadHeadId === null)
+    .map((entry) => entry.pubkey.toLowerCase())
+    .sort()
+    .join(",");
+}
 
 export function useChannelActivityTyping({
   activeChannel,
@@ -83,6 +100,25 @@ export function useChannelActivityTyping({
     }
     return { botTypingEntries, humanTypingPubkeys };
   }, [channelAgentPubkeys, typingEntries]);
+
+  // Mirror bot typing into the unified working signal so surfaces that read
+  // agentWorkingSignal (sidebar badges, activity panel, composer bar) get the
+  // typing fallback. Entries follow the typing TTL because this effect
+  // re-reports whenever botTypingEntries changes. Thread-only typing is
+  // excluded — see channelScopedBotTypingPubkeyKey.
+  const botTypingPubkeyKey = channelScopedBotTypingPubkeyKey(botTypingEntries);
+  React.useEffect(() => {
+    if (!activeChannelId) {
+      return;
+    }
+    reportChannelBotTyping(
+      activeChannelId,
+      botTypingPubkeyKey ? botTypingPubkeyKey.split(",") : [],
+    );
+    return () => {
+      reportChannelBotTyping(activeChannelId, []);
+    };
+  }, [activeChannelId, botTypingPubkeyKey]);
 
   return {
     agentSessionCandidates: agentCandidates,

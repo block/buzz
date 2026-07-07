@@ -145,6 +145,8 @@ export function useAppNavigation() {
     (
       channelId: string,
       options?: {
+        /** Open the agent activity pane for this agent pubkey on arrival. */
+        agentSession?: string;
         messageId?: string;
         replace?: boolean;
         threadRootId?: string | null;
@@ -156,12 +158,17 @@ export function useAppNavigation() {
           params: {
             channelId,
           },
-          search: options?.messageId
-            ? {
-                messageId: options.messageId,
-                threadRootId: options.threadRootId ?? undefined,
-              }
-            : {},
+          search: {
+            ...(options?.messageId
+              ? {
+                  messageId: options.messageId,
+                  threadRootId: options.threadRootId ?? undefined,
+                }
+              : {}),
+            ...(options?.agentSession
+              ? { agentSession: options.agentSession }
+              : {}),
+          },
         },
         {
           replace: options?.replace,
