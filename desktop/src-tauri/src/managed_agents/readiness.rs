@@ -52,6 +52,8 @@ use crate::managed_agents::{
     types::{AcpAvailabilityStatus, ManagedAgentRecord, PersonaRecord},
 };
 
+mod cli_probe;
+
 // ── EffectiveAgentEnv ─────────────────────────────────────────────────────────
 
 /// The resolved environment that a spawn of `record` would actually receive.
@@ -469,11 +471,12 @@ fn cli_login_requirements(
                 }];
             };
 
-            let logged_in = std::process::Command::new(&binary_path)
-                .args(&probe_args[1..])
-                .output()
-                .map(|o| o.status.success())
-                .unwrap_or(false);
+            let augmented_path = cli_probe::augmented_path();
+            let logged_in = cli_probe::login_probe_succeeds(
+                &binary_path,
+                probe_args,
+                augmented_path.as_deref(),
+            );
 
             if logged_in {
                 vec![]

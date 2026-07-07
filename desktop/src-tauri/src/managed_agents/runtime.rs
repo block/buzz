@@ -14,7 +14,7 @@ use crate::{
 };
 
 mod path;
-use path::build_augmented_path;
+pub(in crate::managed_agents) use path::build_augmented_path;
 
 mod sweep;
 pub(crate) use sweep::sweep_untracked_bundle_harnesses;

@@ -15,7 +15,7 @@ use std::path::PathBuf;
 /// error), collapsing the entire augmented `PATH` to `None` — the bug this
 /// guards against, which left managed agents unable to find `buzz`. Returns
 /// `None` only when no entries exist.
-pub(super) fn build_augmented_path(
+pub(in crate::managed_agents) fn build_augmented_path(
     home: Option<PathBuf>,
     exe_parent: Option<PathBuf>,
     shell_path: Option<String>,
