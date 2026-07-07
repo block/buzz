@@ -12,6 +12,7 @@ import {
   LockKeyhole,
   MonitorCog,
   Moon,
+  ShieldAlert,
   Smartphone,
   Smile,
   Stethoscope,
@@ -56,6 +57,7 @@ import { ExperimentalFeaturesCard } from "./ExperimentalFeaturesCard";
 import { KeyboardShortcutsCard } from "./KeyboardShortcutsCard";
 import { MeshComputeSettingsCard } from "@/features/mesh-compute/ui/MeshComputeSettingsCard";
 import { MobilePairingCard } from "./MobilePairingCard";
+import { ModerationQueueCard } from "./ModerationQueueCard";
 import { NotificationSettingsCard } from "./NotificationSettingsCard";
 import { PreventSleepSettingsCard } from "./PreventSleepSettingsCard";
 import { ProfileSettingsCard } from "./ProfileSettingsCard";
@@ -72,6 +74,7 @@ export type SettingsSection =
   | "appearance"
   | "shortcuts"
   | "relay-members"
+  | "moderation"
   | "custom-emoji"
   | "local-archive"
   | "mobile"
@@ -90,6 +93,7 @@ const SETTINGS_SECTION_VALUES: readonly SettingsSection[] = [
   "appearance",
   "shortcuts",
   "relay-members",
+  "moderation",
   "custom-emoji",
   "local-archive",
   "mobile",
@@ -174,6 +178,11 @@ export const settingsSections: SettingsSectionDescriptor[] = [
     value: "relay-members",
     label: "Relay Access",
     icon: LockKeyhole,
+  },
+  {
+    value: "moderation",
+    label: "Moderation",
+    icon: ShieldAlert,
   },
   {
     value: "custom-emoji",
@@ -639,6 +648,8 @@ export function renderSettingsSection(
       return <KeyboardShortcutsCard />;
     case "relay-members":
       return <RelayMembersSettingsCard currentPubkey={props.currentPubkey} />;
+    case "moderation":
+      return <ModerationQueueCard />;
     case "custom-emoji":
       return <CustomEmojiSettingsCard />;
     case "local-archive":
