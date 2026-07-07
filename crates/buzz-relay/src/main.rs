@@ -273,6 +273,12 @@ async fn main() -> anyhow::Result<()> {
     let pubsub_for_cache = Arc::clone(&pubsub);
     tokio::spawn(async move { pubsub_for_cache.run_cache_invalidation_subscriber().await });
 
+    // Spawn Redis pub/sub subscriber for cross-pod connection-control commands.
+    // Bans recorded on other pods are received here and applied to any local
+    // sockets (via the consumer loop below), enforcing live disconnect fan-out.
+    let pubsub_for_conn_ctrl = Arc::clone(&pubsub);
+    tokio::spawn(async move { pubsub_for_conn_ctrl.run_conn_control_subscriber().await });
+
     let auth = AuthService::new(config.auth.clone());
 
     // Postgres FTS: the searchable row IS the persisted event row (its
@@ -723,6 +729,45 @@ async fn main() -> anyhow::Result<()> {
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                         tracing::error!("Cache-invalidation broadcast channel closed");
+                        break;
+                    }
+                }
+            }
+        });
+    }
+
+    // Cross-pod connection-control consumer: receive disconnect commands from
+    // Redis pub/sub (published by the pod that recorded a ban) and close any
+    // matching local sockets. A member's live connections may land on any pod,
+    // so this is how a ban reaches sockets the banning pod does not hold. The DB
+    // ban row is the durable backstop; even a dropped command still refuses the
+    // banned member's next auth attempt at the auth seam.
+    {
+        let state_for_conn_ctrl = Arc::clone(&state);
+        let mut rx = state_for_conn_ctrl.pubsub.subscribe_conn_control();
+        tokio::spawn(async move {
+            loop {
+                match rx.recv().await {
+                    Ok(scoped) => match scoped.command {
+                        buzz_pubsub::conn_control::ConnControl::DisconnectPubkey {
+                            pubkey,
+                            event_id,
+                            reason,
+                        } => {
+                            state_for_conn_ctrl.conn_manager.disconnect_pubkey(
+                                scoped.community_id,
+                                &pubkey,
+                                &event_id,
+                                &reason,
+                            );
+                        }
+                    },
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        metrics::counter!("buzz_conn_control_lag_total").increment(n);
+                        tracing::warn!("Connection-control consumer lagged by {n} messages");
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        tracing::error!("Connection-control broadcast channel closed");
                         break;
                     }
                 }

@@ -563,9 +563,11 @@ mod tests {
     ) {
         let conn_id = uuid::Uuid::new_v4();
         let (tx, rx) = tokio::sync::mpsc::channel(10);
+        let (ctrl_tx, _ctrl_rx) = tokio::sync::mpsc::channel(10);
         state.conn_manager.register(
             conn_id,
             tx,
+            ctrl_tx,
             tokio_util::sync::CancellationToken::new(),
             test_tenant().community(),
             std::sync::Arc::new(std::sync::atomic::AtomicU8::new(0)),

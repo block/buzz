@@ -33,6 +33,10 @@ use crate::subscription::SubscriptionRegistry;
 /// Per-connection entry in the connection manager.
 struct ConnEntry {
     tx: mpsc::Sender<WsMessage>,
+    /// Control-frame sender, drained ahead of data and before cancel wins in
+    /// the send loop. Used to deliver a ban-disconnect frame that must reach
+    /// the client before the socket is closed (see [`ConnectionManager::disconnect_pubkey`]).
+    ctrl_tx: mpsc::Sender<WsMessage>,
     cancel: CancellationToken,
     /// Community resolved from the connection host at handshake. This is the
     /// receiver-side tenant label fan-out must compare against the event label.
@@ -68,6 +72,7 @@ impl ConnectionManager {
         &self,
         conn_id: Uuid,
         tx: mpsc::Sender<WsMessage>,
+        ctrl_tx: mpsc::Sender<WsMessage>,
         cancel: CancellationToken,
         community_id: CommunityId,
         backpressure_count: Arc<AtomicU8>,
@@ -78,6 +83,7 @@ impl ConnectionManager {
             conn_id,
             ConnEntry {
                 tx,
+                ctrl_tx,
                 cancel,
                 community_id,
                 backpressure_count,
@@ -127,6 +133,50 @@ impl ConnectionManager {
         self.connections
             .get(&conn_id)
             .and_then(|entry| entry.authenticated_pubkey.read().ok()?.clone())
+    }
+
+    /// Disconnect every live connection authenticated as `pubkey` **in
+    /// `community`**, delivering a final `OK false` frame carrying `reason`
+    /// before closing.
+    ///
+    /// Used for live ban enforcement (COMMUNITY_MODERATION_PLAN.md §0 decision
+    /// 4): a ban must take effect immediately on existing sessions, not just at
+    /// the next auth. The frame is sent on the control channel, which the send
+    /// loop drains ahead of both queued data and the biased cancel branch, so
+    /// the client learns *why* it was dropped. `event_id` labels the `OK` (the
+    /// ban has no triggering client event, so a synthetic all-zero id is used).
+    ///
+    /// The `community` filter is the tenant fence: one pod holds sockets for
+    /// many communities, and the same pubkey may be live in several. A ban in
+    /// community A must close only A's sockets, never a session the member holds
+    /// in community B ("authority stays inside the tenant fence").
+    ///
+    /// Returns the number of connections closed. This is the pod-local half of
+    /// live enforcement; cross-pod fan-out publishes the same intent over Redis.
+    pub fn disconnect_pubkey(
+        &self,
+        community: CommunityId,
+        pubkey: &[u8],
+        event_id: &str,
+        reason: &str,
+    ) -> usize {
+        let frame = crate::protocol::RelayMessage::ok(event_id, false, reason);
+        let mut closed = 0usize;
+        for conn_id in self.connection_ids_for_pubkey(pubkey) {
+            if let Some(entry) = self.connections.get(&conn_id) {
+                if entry.community_id != community {
+                    continue;
+                }
+                // Best-effort delivery: a full control buffer still gets the
+                // close via cancel below, just without the reason frame.
+                let _ = entry
+                    .ctrl_tx
+                    .try_send(WsMessage::Text(frame.clone().into()));
+                entry.cancel.cancel();
+                closed += 1;
+            }
+        }
+        closed
     }
 
     /// Return the server-resolved community that the connection's host bound to.
@@ -744,12 +794,14 @@ mod tests {
     use tokio::sync::{Mutex, RwLock};
 
     /// Helper: create a ConnectionManager with one registered connection.
-    /// Returns (manager, conn_id, receiver, cancel, shared_backpressure_count).
+    /// Returns (manager, conn_id, receiver, ctrl_receiver, cancel,
+    /// shared_backpressure_count).
     fn setup_conn(
         buffer_size: usize,
     ) -> (
         ConnectionManager,
         Uuid,
+        mpsc::Receiver<WsMessage>,
         mpsc::Receiver<WsMessage>,
         CancellationToken,
         Arc<AtomicU8>,
@@ -757,23 +809,25 @@ mod tests {
         let mgr = ConnectionManager::new();
         let conn_id = Uuid::new_v4();
         let (tx, rx) = mpsc::channel(buffer_size);
+        let (ctrl_tx, ctrl_rx) = mpsc::channel(buffer_size);
         let cancel = CancellationToken::new();
         let bp = Arc::new(AtomicU8::new(0));
         mgr.register(
             conn_id,
             tx,
+            ctrl_tx,
             cancel.clone(),
             buzz_core::tenant::CommunityId::from_uuid(Uuid::nil()),
             Arc::clone(&bp),
             Arc::new(Mutex::new(HashMap::new())),
             3,
         );
-        (mgr, conn_id, rx, cancel, bp)
+        (mgr, conn_id, rx, ctrl_rx, cancel, bp)
     }
 
     #[test]
     fn send_to_resets_grace_counter_on_success() {
-        let (mgr, id, _rx, _cancel, bp) = setup_conn(16);
+        let (mgr, id, _rx, _ctrl_rx, _cancel, bp) = setup_conn(16);
         // Simulate prior backpressure.
         bp.store(2, Ordering::Relaxed);
         assert!(mgr.send_to(id, "hello".into()));
@@ -787,7 +841,7 @@ mod tests {
     #[test]
     fn send_to_increments_grace_counter_on_full() {
         // Buffer size 1 — fill it, then the next send is Full.
-        let (mgr, id, _rx, cancel, bp) = setup_conn(1);
+        let (mgr, id, _rx, _ctrl_rx, cancel, bp) = setup_conn(1);
         assert!(mgr.send_to(id, "fill".into()));
         // Buffer is now full.
         assert!(!mgr.send_to(id, "overflow-1".into()));
@@ -807,7 +861,7 @@ mod tests {
 
     #[test]
     fn send_to_cancels_after_grace_limit() {
-        let (mgr, id, _rx, cancel, _bp) = setup_conn(1);
+        let (mgr, id, _rx, _ctrl_rx, cancel, _bp) = setup_conn(1);
         assert!(mgr.send_to(id, "fill".into()));
         // Exhaust grace: 3 consecutive Full events (matches grace_limit=3 from setup_conn).
         for _ in 0..3u8 {
@@ -849,6 +903,7 @@ mod tests {
         mgr.register(
             conn_id,
             tx,
+            conn.ctrl_tx.clone(),
             cancel.clone(),
             buzz_core::tenant::CommunityId::from_uuid(Uuid::nil()),
             Arc::clone(&bp),
@@ -885,12 +940,14 @@ mod tests {
         let mgr = ConnectionManager::new();
         let conn_id = Uuid::new_v4();
         let (tx, _rx) = mpsc::channel(1);
+        let (ctrl_tx, _ctrl_rx) = mpsc::channel(1);
         let cancel = CancellationToken::new();
         let bp = Arc::new(AtomicU8::new(0));
         let subscriptions = Arc::new(Mutex::new(HashMap::new()));
         mgr.register(
             conn_id,
             tx,
+            ctrl_tx,
             cancel,
             buzz_core::tenant::CommunityId::from_uuid(Uuid::nil()),
             bp,
@@ -910,12 +967,14 @@ mod tests {
         let mgr = ConnectionManager::new();
         let conn_id = Uuid::new_v4();
         let (tx, _rx) = mpsc::channel(1);
+        let (ctrl_tx, _ctrl_rx) = mpsc::channel(1);
         let cancel = CancellationToken::new();
         let bp = Arc::new(AtomicU8::new(0));
         let subscriptions = Arc::new(Mutex::new(HashMap::new()));
         mgr.register(
             conn_id,
             tx,
+            ctrl_tx,
             cancel,
             buzz_core::tenant::CommunityId::from_uuid(Uuid::nil()),
             bp,
@@ -928,5 +987,101 @@ mod tests {
         mgr.set_authenticated_pubkey(conn_id, pubkey.clone());
         assert_eq!(mgr.pubkey_for_conn(conn_id), Some(pubkey));
         assert_eq!(mgr.pubkey_for_conn(Uuid::new_v4()), None);
+    }
+
+    #[tokio::test]
+    async fn disconnect_pubkey_closes_matching_conns_with_reason() {
+        let (mgr, id, _rx, mut ctrl_rx, cancel, _bp) = setup_conn(8);
+        let pubkey = vec![3u8; 32];
+        mgr.set_authenticated_pubkey(id, pubkey.clone());
+
+        // setup_conn registers the connection under the nil community.
+        let community = buzz_core::tenant::CommunityId::from_uuid(Uuid::nil());
+        let closed = mgr.disconnect_pubkey(
+            community,
+            &pubkey,
+            "0".repeat(64).as_str(),
+            "blocked: banned",
+        );
+
+        assert_eq!(closed, 1, "the one matching connection is closed");
+        assert!(
+            cancel.is_cancelled(),
+            "connection is cancelled (socket close)"
+        );
+        // The reason frame is queued on the control channel ahead of the close.
+        let frame = ctrl_rx.try_recv().expect("reason frame delivered");
+        match frame {
+            WsMessage::Text(t) => {
+                assert!(t.as_str().contains("blocked: banned"), "carries the reason");
+                assert!(t.as_str().contains("false"), "is an OK false frame");
+            }
+            other => panic!("expected text frame, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn disconnect_pubkey_ignores_non_matching_conns() {
+        let (mgr, id, _rx, _ctrl_rx, cancel, _bp) = setup_conn(8);
+        mgr.set_authenticated_pubkey(id, vec![1u8; 32]);
+
+        let community = buzz_core::tenant::CommunityId::from_uuid(Uuid::nil());
+        let closed = mgr.disconnect_pubkey(
+            community,
+            &[2u8; 32],
+            "0".repeat(64).as_str(),
+            "blocked: banned",
+        );
+
+        assert_eq!(closed, 0, "no connection matches a different pubkey");
+        assert!(!cancel.is_cancelled(), "unrelated connection stays live");
+    }
+
+    #[tokio::test]
+    async fn disconnect_pubkey_is_fenced_to_the_banning_community() {
+        // Same pubkey, two live sockets in two different communities on one pod.
+        // A ban in community A must close only A's socket, never B's — the
+        // tenant fence on live-disconnect fan-out (B1).
+        let mgr = ConnectionManager::new();
+        let pubkey = vec![7u8; 32];
+
+        let community_a = buzz_core::tenant::CommunityId::from_uuid(Uuid::from_u128(0xa));
+        let community_b = buzz_core::tenant::CommunityId::from_uuid(Uuid::from_u128(0xb));
+
+        let register = |community| {
+            let conn_id = Uuid::new_v4();
+            let (tx, _rx) = mpsc::channel(8);
+            let (ctrl_tx, _ctrl_rx) = mpsc::channel(8);
+            let cancel = CancellationToken::new();
+            mgr.register(
+                conn_id,
+                tx,
+                ctrl_tx,
+                cancel.clone(),
+                community,
+                Arc::new(AtomicU8::new(0)),
+                Arc::new(Mutex::new(HashMap::new())),
+                3,
+            );
+            mgr.set_authenticated_pubkey(conn_id, pubkey.clone());
+            cancel
+        };
+
+        let cancel_a = register(community_a);
+        let cancel_b = register(community_b);
+
+        let closed = mgr.disconnect_pubkey(
+            community_a,
+            &pubkey,
+            "0".repeat(64).as_str(),
+            "blocked: banned",
+        );
+
+        assert_eq!(closed, 1, "only the community-A socket is closed");
+        assert!(cancel_a.is_cancelled(), "community-A session is closed");
+        assert!(
+            !cancel_b.is_cancelled(),
+            "community-B session stays live — ban does not cross the tenant fence"
+        );
     }
 }
