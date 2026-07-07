@@ -113,6 +113,7 @@ export function ChannelScreen({
   } = useAppShell();
   const {
     channelManagementOpen,
+    clearAutoSend,
     clearMessageRouteTarget,
     openAgentSessionChannelId,
     openAgentSessionPubkey,
@@ -848,6 +849,7 @@ export function ChannelScreen({
                   agentPubkeysPending={agentPubkeysPending}
                   agentSessionAgents={agentSessionAgents}
                   autoSendDraftKey={autoSendDraftKey}
+                  onAutoSendComplete={clearAutoSend}
                   botTypingEntries={botTypingEntries}
                   channelFind={channelFind}
                   channelManagementOpen={channelManagementOpen}
