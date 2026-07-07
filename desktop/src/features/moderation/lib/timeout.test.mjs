@@ -5,6 +5,8 @@ import {
   formatTimeoutRemaining,
   isTimeoutActive,
   parseTimeoutRejection,
+  timeoutExpiresAt,
+  TIMEOUT_PRESETS,
 } from "./timeout.ts";
 
 test("parses a well-formed timeout rejection to epoch ms", () => {
@@ -75,4 +77,18 @@ test("formatTimeoutRemaining: null when unknown or elapsed", () => {
   assert.equal(formatTimeoutRemaining(null, now), null);
   assert.equal(formatTimeoutRemaining(now - 1000, now), null);
   assert.equal(formatTimeoutRemaining(now, now), null);
+});
+
+test("timeoutExpiresAt: absolute expiry is now (seconds) + preset seconds", () => {
+  const nowMs = 1_000_000_000_000;
+  assert.equal(timeoutExpiresAt(3600, nowMs), 1_000_000_000 + 3600);
+  // Floors sub-second now before adding, so the result is a whole second.
+  assert.equal(timeoutExpiresAt(60, nowMs + 999), 1_000_000_000 + 60);
+});
+
+test("TIMEOUT_PRESETS: the shared 1h/24h/7d set", () => {
+  assert.deepEqual(
+    TIMEOUT_PRESETS.map((preset) => preset.seconds),
+    [60 * 60, 24 * 60 * 60, 7 * 24 * 60 * 60],
+  );
 });

@@ -13,6 +13,32 @@
 
 const TIMEOUT_PREFIX = "restricted: you are timed out until";
 
+/**
+ * The community-timeout durations offered wherever a moderator picks one — the
+ * per-message author cluster (U2) and the report-queue timeout resolution.
+ * Kept here as the single source of truth so the two surfaces can never drift.
+ */
+export const TIMEOUT_PRESETS: ReadonlyArray<{
+  label: string;
+  seconds: number;
+}> = [
+  { label: "1 hour", seconds: 60 * 60 },
+  { label: "24 hours", seconds: 24 * 60 * 60 },
+  { label: "7 days", seconds: 7 * 24 * 60 * 60 },
+];
+
+/**
+ * Convert a preset duration into the absolute expiry (epoch **seconds**) the
+ * timeout command (`useTimeoutMemberMutation`) expects — `now + seconds`. The
+ * relay stamps its own authoritative expiry; this is the client's request.
+ */
+export function timeoutExpiresAt(
+  seconds: number,
+  nowMs: number = Date.now(),
+): number {
+  return Math.floor(nowMs / 1000) + seconds;
+}
+
 export type TimeoutRejection = {
   /**
    * Timeout expiry in epoch milliseconds, or `null` when the relay's message
