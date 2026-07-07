@@ -88,7 +88,9 @@ const overrides = new Map([
   // dev-build CLI symlink: cli_link_name helper + is_dev param on
   // ensure_cli_symlink + prod/dev test variants add ~68 lines. Load-bearing;
   // queued to split with the rest of this list.
-  ["src-tauri/src/managed_agents/nest.rs", 1569],
+  // +4 lines: adopt shared create_symlink wrapper (behavior-preserving refactor
+  // for multi-line rustfmt expansion of the skills symlink call site).
+  ["src-tauri/src/managed_agents/nest.rs", 1575],
   // harness-persona-sync: persona-runtime resolution threaded into the spawn
   // path here. Load-bearing feature growth; queued to split in the resolver
   // unify refactor followup. +26 for resolve_effective_prompt_model_provider

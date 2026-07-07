@@ -18,6 +18,8 @@
 use std::path::{Path, PathBuf};
 use tauri::Manager;
 
+use crate::util::replace_with_symlink;
+
 const CANONICAL_DEV_IDENTIFIER: &str = "xyz.block.buzz.app.dev";
 const LEGACY_CANONICAL_DEV_IDENTIFIER: &str = "xyz.block.sprout.app.dev";
 const LEGACY_RELEASE_IDENTIFIER: &str = "xyz.block.sprout.app";
@@ -36,19 +38,17 @@ const SHARED_AGENT_FILES: &[&str] = &[
 /// dev data directory. Each entry becomes a single directory symlink.
 const SHARED_AGENT_DIRS: &[&str] = &["agents/teams"];
 
-/// Create a symlink at `dst` pointing to `src`.
-///
-/// Worktree sync is a dev-only feature (`BUZZ_SHARE_IDENTITY=1`); on Windows
-/// this is a no-op so the rest of `sync_shared_agent_data` keeps compiling and
-/// running harmlessly.
-#[cfg(unix)]
-fn symlink(src: &Path, dst: &Path) -> std::io::Result<()> {
-    std::os::unix::fs::symlink(src, dst)
-}
-
-#[cfg(not(unix))]
-fn symlink(_src: &Path, _dst: &Path) -> std::io::Result<()> {
-    Ok(())
+/// Returns `true` when `name` is a dev data dir name — i.e. it is exactly the
+/// canonical dev identifier or a worktree variant separated by a `.` (e.g.
+/// `xyz.block.buzz.app.dev.my-branch`). Rejects prefix-collisions such as
+/// `xyz.block.buzz.app.developer`. This is the authoritative dev/prod
+/// discriminator shared by `run_boot_migrations`, `sync_shared_agent_data`,
+/// and `reconcile_target_dir`.
+fn is_dev_data_dir_name(name: &str) -> bool {
+    name == CANONICAL_DEV_IDENTIFIER
+        || name
+            .strip_prefix(CANONICAL_DEV_IDENTIFIER)
+            .is_some_and(|rest| rest.starts_with('.'))
 }
 
 fn canonical_dev_data_dir(current: &Path) -> Option<PathBuf> {
@@ -81,7 +81,7 @@ fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
                 if dst_path.exists() || dst_path.is_symlink() {
                     let _ = std::fs::remove_file(&dst_path);
                 }
-                std::os::unix::fs::symlink(target, &dst_path)?;
+                crate::util::create_symlink(&target, &dst_path)?;
             }
             #[cfg(not(unix))]
             {
@@ -127,7 +127,7 @@ pub fn run_boot_migrations(app: &tauri::AppHandle) {
         let dev = data_dir
             .file_name()
             .and_then(|n| n.to_str())
-            .is_some_and(|n| n.starts_with(CANONICAL_DEV_IDENTIFIER));
+            .is_some_and(is_dev_data_dir_name);
         crate::managed_agents::init_nest_dir(dev);
         dev
     } else {
@@ -488,6 +488,23 @@ pub fn sync_shared_agent_data(app: &tauri::AppHandle) {
         }
     };
 
+    // Guard: refuse to sync against a prod-identifier data directory, regardless
+    // of env vars. A release build launched from an env-armed shell (e.g. macOS
+    // `open` inherits the caller's env) must never overwrite real prod files with
+    // symlinks. Only data dirs whose name starts with CANONICAL_DEV_IDENTIFIER
+    // (the canonical dev dir and all worktree variants) are safe targets.
+    let is_dev = current_dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(is_dev_data_dir_name);
+    if !is_dev {
+        eprintln!(
+            "buzz-desktop: shared-agent-sync: skipping — data dir is not a dev dir ({})",
+            current_dir.display()
+        );
+        return;
+    }
+
     let canonical_dir = match canonical_dev_data_dir(&current_dir) {
         Some(dir) => dir,
         None => {
@@ -576,26 +593,7 @@ pub fn sync_shared_agent_data(app: &tauri::AppHandle) {
             }
         }
 
-        // Already a correct symlink — nothing to do.
-        if dst.is_symlink() {
-            if let Ok(target) = std::fs::read_link(&dst) {
-                if target == src {
-                    continue;
-                }
-            }
-        }
-
-        // Remove whatever's at dst (regular file, wrong symlink, broken symlink).
-        if dst.exists() || dst.is_symlink() {
-            let _ = std::fs::remove_file(&dst);
-        }
-
-        match symlink(&src, &dst) {
-            Ok(_) => synced += 1,
-            Err(e) => {
-                eprintln!("buzz-desktop: shared-agent-sync: failed to symlink {rel}: {e}");
-            }
-        }
+        synced += replace_with_symlink(&src, &dst);
     }
 
     // Ensure shared directories exist in canonical before symlinking.
@@ -629,8 +627,8 @@ pub fn sync_shared_agent_data(app: &tauri::AppHandle) {
                                 }
                             }
                             // Replace the sibling's dir with a symlink to canonical.
-                            let _ = std::fs::remove_dir_all(&sibling_dir);
-                            let _ = symlink(&canonical_target, &sibling_dir);
+                            // replace_with_symlink backs up any leftover real content.
+                            replace_with_symlink(&canonical_target, &sibling_dir);
                             eprintln!(
                                 "buzz-desktop: shared-agent-sync: migrated {rel} from {}",
                                 sibling.display()
@@ -661,26 +659,7 @@ pub fn sync_shared_agent_data(app: &tauri::AppHandle) {
             }
         }
 
-        if dst.is_symlink() {
-            if let Ok(target) = std::fs::read_link(&dst) {
-                if target == src {
-                    continue;
-                }
-            }
-        }
-
-        if dst.is_symlink() {
-            let _ = std::fs::remove_file(&dst);
-        } else if dst.exists() {
-            let _ = std::fs::remove_dir_all(&dst);
-        }
-
-        match symlink(&src, &dst) {
-            Ok(_) => synced += 1,
-            Err(e) => {
-                eprintln!("buzz-desktop: shared-agent-sync: failed to symlink {rel}: {e}");
-            }
-        }
+        synced += replace_with_symlink(&src, &dst);
     }
 
     if synced > 0 {
@@ -791,7 +770,7 @@ fn reconcile_target_dir(current_dir: &Path) -> PathBuf {
     let is_dev_instance = current_dir
         .file_name()
         .and_then(|n| n.to_str())
-        .is_some_and(|n| n.starts_with(CANONICAL_DEV_IDENTIFIER));
+        .is_some_and(is_dev_data_dir_name);
     if is_dev_instance {
         match canonical_dev_data_dir(current_dir) {
             Some(dir) if dir.exists() => dir,
@@ -1307,3 +1286,7 @@ mod command_tests;
 #[cfg(test)]
 #[path = "migration_team_dir_tests.rs"]
 mod team_dir_tests;
+
+#[cfg(test)]
+#[path = "migration_sync_guard_tests.rs"]
+mod sync_guard_tests;

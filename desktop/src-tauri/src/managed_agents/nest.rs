@@ -18,6 +18,8 @@ use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Manager};
 
 use crate::managed_agents::discovery::known_skill_dirs;
+#[cfg(unix)]
+use crate::util::create_symlink;
 
 /// Subdirectories created inside the nest.
 /// `REPOS` is intentionally absent: it is provisioned by
@@ -295,7 +297,7 @@ fn ensure_skill_symlinks(root: &Path) -> Result<(), String> {
         let depth = std::path::Path::new(skill_dir).components().count();
         let prefix = "../".repeat(depth);
         let target = format!("{prefix}{CANONICAL_SKILL_DIR}");
-        std::os::unix::fs::symlink(&target, &link)
+        create_symlink(std::path::Path::new(&target), &link)
             .map_err(|e| format!("symlink {} → {}: {e}", link.display(), target))?;
     }
     Ok(())
@@ -350,14 +352,14 @@ pub fn ensure_cli_symlink(exe_parent: &Path, is_dev: bool) -> Result<(), String>
     match link.symlink_metadata() {
         Ok(meta) if meta.file_type().is_symlink() => {
             let _ = fs::remove_file(&link);
-            std::os::unix::fs::symlink(&buzz_bin, &link)
+            create_symlink(&buzz_bin, &link)
                 .map_err(|e| format!("symlink {}: {e}", link.display()))?;
         }
         Ok(_) => {
             // Regular file or directory — don't clobber.
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            std::os::unix::fs::symlink(&buzz_bin, &link)
+            create_symlink(&buzz_bin, &link)
                 .map_err(|e| format!("symlink {}: {e}", link.display()))?;
         }
         Err(e) => {
@@ -504,8 +506,11 @@ fn refresh_skill_md_if_stale(root: &Path) -> Result<(), String> {
             fs::remove_file(&symlink_path)
                 .map_err(|e| format!("remove symlink {}: {e}", symlink_path.display()))?;
         }
-        std::os::unix::fs::symlink("../../.agents/skills/buzz-cli", &symlink_path)
-            .map_err(|e| format!("symlink {}: {e}", symlink_path.display()))?;
+        create_symlink(
+            std::path::Path::new("../../.agents/skills/buzz-cli"),
+            &symlink_path,
+        )
+        .map_err(|e| format!("symlink {}: {e}", symlink_path.display()))?;
     }
 
     fs::write(&version_path, format!("{NEST_SKILL_VERSION}\n"))
