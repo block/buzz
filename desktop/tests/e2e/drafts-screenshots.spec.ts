@@ -238,15 +238,20 @@ test.describe("drafts screenshots", () => {
     // Hover to reveal action buttons
     await textDraftRow.hover();
 
-    // Both action buttons should become visible on hover
+    // All three action buttons should become visible on hover
     const openDraftBtn = textDraftRow.getByRole("button", {
       name: "Open draft",
+      exact: true,
+    });
+    const sendMessageBtn = textDraftRow.getByRole("button", {
+      name: "Send message",
       exact: true,
     });
     const deleteDraftBtn = textDraftRow.getByRole("button", {
       name: "Delete draft",
     });
     await expect(openDraftBtn).toBeVisible({ timeout: 4_000 });
+    await expect(sendMessageBtn).toBeVisible({ timeout: 4_000 });
     await expect(deleteDraftBtn).toBeVisible({ timeout: 4_000 });
 
     await page.waitForTimeout(200);
@@ -340,14 +345,24 @@ test.describe("drafts screenshots", () => {
     await dialog.getByRole("button", { name: "Send", exact: true }).click();
     await expect(dialog).not.toBeVisible({ timeout: 4_000 });
 
-    // URL must include ?autoSend=thread:<rootId> immediately after confirm.
-    // (The param is cleared once MessageComposer mounts and fires onAutoSubmitComplete;
-    // in the mock bridge the full send path is not exercised, so the param may
-    // or may not clear depending on composer mount. We assert it is set at navigate
-    // time, which verifies the confirm→navigate path.)
+    // URL must include all three params set by DraftsPanel.handleConfirmSend:
+    //   ?messageId=<rootId>  — scroll-targets the root message in the timeline
+    //   ?threadRootId=<rootId> — opens the thread panel for this root
+    //   ?autoSend=thread:<rootId> — arms the thread composer's once-only guard
+    //
+    // Integration boundary: the mock bridge does not support get_event or
+    // message send, so ChannelRouteScreen.fetchRouteTargetEvents fails silently,
+    // threadHeadMessage stays null, and the MessageThreadPanel (and its composer)
+    // never mount. The auto-submit effect and the actual send are NOT assertable
+    // in this E2E shard — they are covered by MessageComposerAutoSend.test.mjs
+    // (key-match guard) and MessageComposerDraftImagePersist.test.mjs (full
+    // composer mount path).
+    await expect(page).toHaveURL(new RegExp(`messageId=${THREAD_ROOT_ID}`), {
+      timeout: 6_000,
+    });
+    await expect(page).toHaveURL(new RegExp(`threadRootId=${THREAD_ROOT_ID}`));
     await expect(page).toHaveURL(
       new RegExp(`autoSend=${encodeURIComponent(THREAD_DRAFT_KEY)}`),
-      { timeout: 6_000 },
     );
   });
 });
