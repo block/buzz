@@ -21,8 +21,8 @@ type PubKeyProps = {
    *
    * `full` — the complete npub rendered inline with copy buttons. Required on
    * security-decision surfaces (invite/approve, removal, trust/pairing, new
-   * DM, mention disambiguation, key import): a truncated key is forgeable by
-   * vanity grinding, so decisions must be made against the whole key.
+   * DM, key import): a truncated key is forgeable by vanity grinding, so
+   * decisions must be made against the whole key.
    */
   variant?: "compact" | "full";
   className?: string;

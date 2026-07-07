@@ -9,7 +9,8 @@ import {
   POPOVER_SURFACE_CLASS,
 } from "@/shared/ui/popoverSurface";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
-import { pubkeyToNpub } from "@/shared/lib/nostrUtils";
+import { safeNpub } from "@/shared/lib/nostrUtils";
+import { truncatePubkey } from "@/shared/lib/pubkey";
 
 export type MentionSuggestion = {
   pubkey?: string;
@@ -30,14 +31,6 @@ type MentionAutocompleteProps = {
   onSelect: (suggestion: MentionSuggestion) => void;
   position?: "above" | "below";
 };
-
-function safeNpub(pubkey: string): string | null {
-  try {
-    return pubkeyToNpub(pubkey);
-  } catch {
-    return null;
-  }
-}
 
 export const MentionAutocomplete = React.memo(function MentionAutocomplete({
   suggestions,
@@ -70,7 +63,7 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
 
   // Name collisions are the impersonation vector: a vanity-ground key can
   // wear any display name. When two suggestions share a name, surface each
-  // one's full npub inline so the choice is made against the whole key.
+  // one's npub (truncated; full key in the hover tooltip) to tell them apart.
   const nameCounts = new Map<string, number>();
   for (const suggestion of suggestions) {
     const name = suggestion.displayName.toLowerCase();
@@ -193,14 +186,15 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
                 {collisionNpub ? (
                   <span
                     className={cn(
-                      "min-w-0 break-all font-mono text-2xs leading-snug",
+                      "min-w-0 truncate font-mono text-2xs leading-snug",
                       index === selectedIndex
                         ? "text-accent-foreground/60"
                         : "text-muted-foreground",
                     )}
                     data-testid="mention-collision-npub"
+                    title={collisionNpub}
                   >
-                    {collisionNpub}
+                    {truncatePubkey(collisionNpub)}
                   </span>
                 ) : null}
               </span>
