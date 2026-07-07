@@ -5,6 +5,8 @@ import {
   TEST_IDENTITIES,
   installMockBridge,
   openChannelBrowser,
+  openCreateChannelDialog,
+  openNewDirectMessageDialog,
 } from "../helpers/bridge";
 
 const GENERAL_CHANNEL_ID = "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50";
@@ -430,7 +432,7 @@ test("shows presence in sidebar, DM header, and member list", async ({
 test("start a new direct message from the sidebar", async ({ page }) => {
   await page.goto("/");
 
-  await page.getByTestId("new-dm-trigger").click();
+  await openNewDirectMessageDialog(page);
   await expect(page.getByTestId("new-dm-dialog")).toBeVisible();
 
   await page.getByTestId("new-dm-search").fill("charlie");
@@ -464,7 +466,7 @@ test("start a new direct message from the sidebar", async ({ page }) => {
 
   await expect(page.getByTestId("dm-list")).toContainText("charlie");
   await expect(page.getByTestId("chat-title")).toHaveText("charlie");
-  await expect(page.getByTestId("new-dm-trigger")).not.toBeFocused();
+  await expect(page.getByTestId("section-actions-dms")).not.toBeFocused();
 });
 
 test("keeps direct message row add buttons hidden while opening", async ({
@@ -480,7 +482,7 @@ test("keeps direct message row add buttons hidden while opening", async ({
     testWindow.__BUZZ_E2E__.mock.openDmDelayMs = 1_000;
   });
 
-  await page.getByTestId("new-dm-trigger").click();
+  await openNewDirectMessageDialog(page);
   await page.getByTestId("new-dm-search").fill("charlie");
   await page
     .getByTestId(`new-dm-result-${TEST_IDENTITIES.charlie.pubkey}`)
@@ -507,7 +509,7 @@ test("shows capped participant stack in group direct message header", async ({
 }) => {
   await page.goto("/");
 
-  await page.getByTestId("new-dm-trigger").click();
+  await openNewDirectMessageDialog(page);
   await expect(page.getByTestId("new-dm-dialog")).toBeVisible();
 
   for (const identity of [
@@ -591,7 +593,7 @@ test("create stream with name and description", async ({ page }) => {
   const channelName = `my-new-stream-${Date.now()}`;
 
   await page.goto("/");
-  await page.getByRole("button", { name: "Create a channel" }).click();
+  await openCreateChannelDialog(page);
   await page.getByTestId("create-channel-name").fill(channelName);
   await page
     .getByTestId("create-channel-description")
@@ -608,7 +610,7 @@ test("create ephemeral stream shows sidebar and header affordances", async ({
   const channelName = `ephemeral-stream-${Date.now()}`;
 
   await page.goto("/");
-  await page.getByRole("button", { name: "Create a channel" }).click();
+  await openCreateChannelDialog(page);
   await page.getByTestId("create-channel-name").fill(channelName);
   await page
     .getByTestId("create-channel-description")
@@ -650,7 +652,7 @@ test("ephemeral countdown refreshes when switching channels after a clock jump",
   await page.goto("/");
 
   for (const channelName of [firstChannelName, secondChannelName]) {
-    await page.getByRole("button", { name: "Create a channel" }).click();
+    await openCreateChannelDialog(page);
     await page.getByTestId("create-channel-name").fill(channelName);
     await page
       .getByTestId("create-channel-description")
@@ -756,7 +758,7 @@ test("create stream with special characters", async ({ page }) => {
   const channelName = `dev ops-${Date.now()}`;
 
   await page.goto("/");
-  await page.getByRole("button", { name: "Create a channel" }).click();
+  await openCreateChannelDialog(page);
   await page.getByTestId("create-channel-name").fill(channelName);
   await page
     .getByTestId("create-channel-description")
@@ -845,7 +847,7 @@ test("short channel with messages shows intro actions on open", async ({
   const message = "Only message in a short channel";
 
   await page.goto("/");
-  await page.getByRole("button", { name: "Create a channel" }).click();
+  await openCreateChannelDialog(page);
   await page.getByTestId("create-channel-name").fill(channelName);
   await page.getByTestId("create-channel-submit").click();
   await expect(page.getByTestId("chat-title")).toHaveText(channelName);
@@ -881,7 +883,7 @@ test("scrollable channel with recent messages hides intro actions until top", as
   );
 
   await page.goto("/");
-  await page.getByRole("button", { name: "Create a channel" }).click();
+  await openCreateChannelDialog(page);
   await page.getByTestId("create-channel-name").fill(channelName);
   await page.getByTestId("create-channel-submit").click();
   await expect(page.getByTestId("chat-title")).toHaveText(channelName);
@@ -1875,7 +1877,7 @@ test("new DM picker pages people search beyond the first 50 results", async ({
   await installMockBridge(page, { searchProfiles });
 
   await page.goto("/");
-  await page.getByTestId("new-dm-trigger").click();
+  await openNewDirectMessageDialog(page);
   await expect(page.getByTestId("new-dm-dialog")).toBeVisible();
   await page.getByTestId("new-dm-search").fill("Alex");
 
@@ -2141,7 +2143,7 @@ test("removing a multi-channel managed bot preserves its record after removal fr
   await page.goto("/");
   const agentPubkey = await addGenericAgent(page, "general", agentName);
 
-  await page.getByRole("button", { name: "Create a channel" }).click();
+  await openCreateChannelDialog(page);
   await page.getByTestId("create-channel-name").fill(secondChannelName);
   await page
     .getByTestId("create-channel-description")
@@ -2325,7 +2327,7 @@ test("manage channel can delete an owned stream", async ({ page }) => {
   const channelName = `delete-me-${Date.now()}`;
 
   await page.goto("/");
-  await page.getByRole("button", { name: "Create a channel" }).click();
+  await openCreateChannelDialog(page);
   await page.getByTestId("create-channel-name").fill(channelName);
   await page.getByTestId("create-channel-submit").click();
   await expect(page.getByTestId("chat-title")).toHaveText(channelName);
@@ -2346,7 +2348,7 @@ test("canceling channel deletion keeps the owned stream", async ({ page }) => {
   const channelName = `keep-me-${Date.now()}`;
 
   await page.goto("/");
-  await page.getByRole("button", { name: "Create a channel" }).click();
+  await openCreateChannelDialog(page);
   await page.getByTestId("create-channel-name").fill(channelName);
   await page.getByTestId("create-channel-submit").click();
   await expect(page.getByTestId("chat-title")).toHaveText(channelName);

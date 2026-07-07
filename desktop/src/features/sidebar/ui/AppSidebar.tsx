@@ -1,6 +1,4 @@
 // biome-ignore format: keep compact to stay within file size limit
-import { MessageCirclePlus } from "lucide-react";
-
 import * as React from "react";
 import { FeatureGate } from "@/shared/features";
 import { SidebarDndContext } from "@/features/sidebar/ui/SidebarDnd";
@@ -36,8 +34,8 @@ import { SidebarSection } from "@/features/sidebar/ui/SidebarSection";
 import {
   ChannelGroupSection,
   CustomChannelSection,
+  SectionActionsMenu,
 } from "@/features/sidebar/ui/CustomChannelSection";
-import { ChannelSortDropdown } from "@/features/sidebar/ui/ChannelSortDropdown";
 import { CreateChannelDialog } from "@/features/sidebar/ui/CreateChannelDialog";
 import { NewDirectMessageDialog } from "@/features/sidebar/ui/NewDirectMessageDialog";
 import { SidebarProfileCard } from "@/features/sidebar/ui/SidebarProfileCard";
@@ -47,10 +45,6 @@ import {
   SidebarLoadingContent,
   useSidebarLoadingShape,
 } from "@/features/sidebar/ui/sidebarLoadingSkeleton";
-import {
-  SECTION_ACTION_VISIBILITY_CLASS,
-  SECTION_ICON_BUTTON_CLASS,
-} from "@/features/sidebar/ui/sidebarSectionStyles";
 import { useDeferredModalOpen } from "@/shared/ui/deferredModalOpen";
 import { SidebarUpdateCard } from "@/features/settings/SidebarUpdateCard";
 import { useUpdaterContext } from "@/features/settings/hooks/UpdaterProvider";
@@ -592,7 +586,6 @@ export function AppSidebar({
               <>
                 {starredChannels.length > 0 ? (
                   <ChannelGroupSection
-                    createAriaLabel="Starred channels"
                     hasUnread={starredChannels.some((c) =>
                       unreadChannelIds.has(c.id),
                     )}
@@ -600,16 +593,9 @@ export function AppSidebar({
                     isActiveChannel={selectedView === "channel"}
                     activeWorkingByChannelId={activeWorkingByChannelId}
                     items={starredChannels}
-                    leadingHeaderAction={
-                      <ChannelSortDropdown
-                        groupLabel="starred channels"
-                        onSortModeChange={(mode) =>
-                          setSortModeFor("starred", mode)
-                        }
-                        sortMode={sortModeFor("starred")}
-                        testId="channel-sort-trigger-starred"
-                      />
-                    }
+                    sortMode={sortModeFor("starred")}
+                    onSortModeChange={(mode) => setSortModeFor("starred", mode)}
+                    actionsTestId="section-actions-starred"
                     listTestId="starred-list"
                     onMarkAllRead={() => {
                       for (const channel of starredChannels) {
@@ -661,21 +647,9 @@ export function AppSidebar({
                       assignments={channelAssignments}
                       isFirst={idx === 0}
                       isLast={idx === channelSections.length - 1}
-                      leadingHeaderAction={
-                        <ChannelSortDropdown
-                          groupLabel={section.name}
-                          onSortModeChange={(mode) =>
-                            setSortModeFor(
-                              sectionSortGroupKey(section.id),
-                              mode,
-                            )
-                          }
-                          sortMode={sortModeFor(
-                            sectionSortGroupKey(section.id),
-                          )}
-                          testId={`channel-sort-trigger-section-${section.id}`}
-                          visibilityClassName=""
-                        />
+                      sortMode={sortModeFor(sectionSortGroupKey(section.id))}
+                      onSortModeChange={(mode) =>
+                        setSortModeFor(sectionSortGroupKey(section.id), mode)
                       }
                       onToggleCollapsed={() =>
                         toggleCollapsedSection(section.id)
@@ -707,24 +681,19 @@ export function AppSidebar({
                     />
                   ))}
                   <ChannelGroupSection
-                    browseAriaLabel="Browse channels"
-                    createAriaLabel="Create a channel"
+                    browseLabel="Browse channels"
+                    createLabel="New channel"
                     draggable
                     hasUnread={unreadChannelIds.size > 0}
                     isCollapsed={collapsedGroups.channels}
                     isActiveChannel={selectedView === "channel"}
                     activeWorkingByChannelId={activeWorkingByChannelId}
                     items={sectionBuckets.unassigned}
-                    leadingHeaderAction={
-                      <ChannelSortDropdown
-                        groupLabel="channels"
-                        onSortModeChange={(mode) =>
-                          setSortModeFor("channels", mode)
-                        }
-                        sortMode={sortModeFor("channels")}
-                        testId="channel-sort-trigger-channels"
-                      />
+                    sortMode={sortModeFor("channels")}
+                    onSortModeChange={(mode) =>
+                      setSortModeFor("channels", mode)
                     }
+                    actionsTestId="section-actions-channels"
                     listTestId="stream-list"
                     onBrowseClick={onBrowseChannels}
                     onCreateClick={() => openCreateDialog("stream")}
@@ -753,22 +722,15 @@ export function AppSidebar({
                 </SidebarDndContext>
                 <FeatureGate feature="forum">
                   <ChannelGroupSection
-                    createAriaLabel="Create a forum"
+                    createLabel="New forum"
                     hasUnread={unreadChannelIds.size > 0}
                     isCollapsed={collapsedGroups.forums}
                     isActiveChannel={selectedView === "channel"}
                     activeWorkingByChannelId={activeWorkingByChannelId}
                     items={forumChannels}
-                    leadingHeaderAction={
-                      <ChannelSortDropdown
-                        groupLabel="forums"
-                        onSortModeChange={(mode) =>
-                          setSortModeFor("forums", mode)
-                        }
-                        sortMode={sortModeFor("forums")}
-                        testId="channel-sort-trigger-forums"
-                      />
-                    }
+                    sortMode={sortModeFor("forums")}
+                    onSortModeChange={(mode) => setSortModeFor("forums", mode)}
+                    actionsTestId="section-actions-forums"
                     listTestId="forum-list"
                     onCreateClick={() => openCreateDialog("forum")}
                     onMarkAllRead={onMarkAllChannelsRead}
@@ -788,25 +750,13 @@ export function AppSidebar({
                 <SidebarSection
                   action={
                     <div className="absolute right-1 top-1/2 z-10 flex -translate-y-1/2 items-center gap-0.5">
-                      <ChannelSortDropdown
-                        groupLabel="direct messages"
-                        onSortModeChange={(mode) => setSortModeFor("dms", mode)}
+                      <SectionActionsMenu
+                        sectionLabel="direct messages"
+                        testId="section-actions-dms"
+                        onNewMessage={() => setIsNewDmOpen(true)}
                         sortMode={sortModeFor("dms")}
-                        testId="channel-sort-trigger-dms"
+                        onSortModeChange={(mode) => setSortModeFor("dms", mode)}
                       />
-                      <button
-                        aria-expanded={isNewDmOpen}
-                        aria-label="Compose new message"
-                        className={`${SECTION_ICON_BUTTON_CLASS} ${SECTION_ACTION_VISIBILITY_CLASS}`}
-                        data-testid="new-dm-trigger"
-                        onClick={() => {
-                          setIsNewDmOpen(true);
-                        }}
-                        title="Compose new message"
-                        type="button"
-                      >
-                        <MessageCirclePlus className="h-4 w-4" />
-                      </button>
                     </div>
                   }
                   dmParticipantsByChannelId={dmParticipantsByChannelId}

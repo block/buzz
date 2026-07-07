@@ -66,7 +66,7 @@ test.describe("per-group channel sort", () => {
     const streamList = page.getByTestId("stream-list");
     await expect(streamList).toBeVisible();
     await page.getByText("Channels", { exact: true }).hover();
-    const trigger = page.getByTestId("channel-sort-trigger-channels");
+    const trigger = page.getByTestId("section-actions-channels");
     await expect(trigger).toBeVisible();
     await waitForAnimations(page);
     await page.screenshot({ path: `${SHOTS}/01-channels-sort-ingress.png` });
@@ -153,7 +153,7 @@ test.describe("per-group channel sort", () => {
     const dmList = page.getByTestId("dm-list");
     await expect(dmList).toBeVisible();
     await page.getByText("Direct messages", { exact: true }).hover();
-    const trigger = page.getByTestId("channel-sort-trigger-dms");
+    const trigger = page.getByTestId("section-actions-dms");
     await expect(trigger).toBeVisible();
     await trigger.click();
     await expect(
