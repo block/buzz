@@ -179,6 +179,90 @@ fn build_env_owner_only_sets_mode_and_removes_others() {
     assert!(remove.contains(&"BUZZ_ACP_AGENT_OWNER"));
 }
 
+// ── select_untracked_bundle_harnesses tests ─────────────────────────────
+
+use super::{select_untracked_bundle_harnesses, ProcessSnapshot};
+use std::collections::HashSet;
+use std::path::PathBuf;
+
+fn snap(pid: u32, path: &str) -> ProcessSnapshot {
+    ProcessSnapshot {
+        pid,
+        exe_path: PathBuf::from(path),
+    }
+}
+
+const BUNDLE_HARNESS: &str = "/Applications/Buzz.app/Contents/MacOS/buzz-acp";
+const DEV_HARNESS: &str = "/Users/dev/buzz/.worktrees/main/target/debug/buzz-acp";
+
+#[test]
+fn untracked_same_bundle_harness_is_killed() {
+    // A process with the exact bundle harness path and not in tracked set →
+    // should be selected for reaping.
+    let snapshots = vec![snap(1001, BUNDLE_HARNESS)];
+    let tracked: HashSet<u32> = HashSet::new();
+    let result =
+        select_untracked_bundle_harnesses(&snapshots, &PathBuf::from(BUNDLE_HARNESS), &tracked);
+    assert_eq!(result, vec![1001]);
+}
+
+#[test]
+fn tracked_harness_is_spared() {
+    // Same path but pid is in the tracked set → must NOT be selected.
+    let snapshots = vec![snap(1002, BUNDLE_HARNESS)];
+    let tracked: HashSet<u32> = [1002].into_iter().collect();
+    let result =
+        select_untracked_bundle_harnesses(&snapshots, &PathBuf::from(BUNDLE_HARNESS), &tracked);
+    assert!(result.is_empty());
+}
+
+#[test]
+fn different_bundle_path_is_spared() {
+    // A dev-build harness at a different path — must NOT be selected even
+    // though the binary name is the same. Exact path match only.
+    let snapshots = vec![snap(1003, DEV_HARNESS)];
+    let tracked: HashSet<u32> = HashSet::new();
+    let result =
+        select_untracked_bundle_harnesses(&snapshots, &PathBuf::from(BUNDLE_HARNESS), &tracked);
+    assert!(result.is_empty());
+}
+
+#[test]
+fn child_of_tracked_parent_not_directly_targeted() {
+    // A process that is NOT the harness binary (different exe) — never
+    // selected regardless of tracked state.  Children of tracked harnesses
+    // die with the harness's process group; we never need to target them.
+    let snapshots = vec![snap(1004, "/Applications/Buzz.app/Contents/MacOS/goose")];
+    let tracked: HashSet<u32> = HashSet::new();
+    let result =
+        select_untracked_bundle_harnesses(&snapshots, &PathBuf::from(BUNDLE_HARNESS), &tracked);
+    assert!(result.is_empty());
+}
+
+#[test]
+fn empty_process_list_returns_empty() {
+    let result =
+        select_untracked_bundle_harnesses(&[], &PathBuf::from(BUNDLE_HARNESS), &HashSet::new());
+    assert!(result.is_empty());
+}
+
+#[test]
+fn mixed_snapshot_kills_only_untracked_same_bundle() {
+    // Four processes: tracked same-bundle, untracked same-bundle, dev-bundle,
+    // unrelated binary. Only the untracked same-bundle should be selected.
+    let snapshots = vec![
+        snap(2001, BUNDLE_HARNESS),   // tracked → spared
+        snap(2002, BUNDLE_HARNESS),   // untracked → killed
+        snap(2003, DEV_HARNESS),      // different path → spared
+        snap(2004, "/usr/bin/goose"), // unrelated → spared
+    ];
+    let tracked: HashSet<u32> = [2001].into_iter().collect();
+    let mut result =
+        select_untracked_bundle_harnesses(&snapshots, &PathBuf::from(BUNDLE_HARNESS), &tracked);
+    result.sort();
+    assert_eq!(result, vec![2002]);
+}
+
 #[test]
 fn build_env_allowlist_sets_both_envs_and_joins() {
     let a = "a".repeat(64);

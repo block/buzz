@@ -1311,6 +1311,252 @@ pub(crate) fn reap_dead_instance_agents(our_instance_id: &str, skip_pids: &[u32]
 #[cfg(not(unix))]
 pub(crate) fn reap_dead_instance_agents(_our_instance_id: &str, _skip_pids: &[u32]) {}
 
+// ── Exact-path harness sweep ──────────────────────────────────────────────
+//
+// The PID-file and env-var sweeps above cannot see a harness whose receipt is
+// gone or that predates the BUZZ_MANAGED_AGENT env var injection (e.g. a very
+// old orphan from before tracking was added). This sweep derives the expected
+// harness binary path from the running executable and kills any process whose
+// exe matches exactly, minus the tracked set. Exact-path scoping means dev
+// builds, other installs, and children of tracked parents are never touched.
+
+/// A snapshot of one process for the pure kill-decision function. Holds only
+/// the fields needed to decide whether a process is an untracked same-bundle
+/// harness — no live process handles, no system calls.
+#[derive(Debug, Clone)]
+pub struct ProcessSnapshot {
+    /// PID of the process.
+    pub pid: u32,
+    /// Full executable path, as reported by the kernel.
+    pub exe_path: std::path::PathBuf,
+}
+
+/// Pure kill-decision function: given a slice of process snapshots, the
+/// expected harness executable path, and the set of tracked pids to spare,
+/// returns the pids of processes that should be reaped.
+///
+/// Selection criteria:
+/// - `exe_path` exactly matches `harness_exe` (same-bundle harness only).
+/// - `pid` is not in `tracked_pids` (untracked — not owned by this session).
+///
+/// Children of tracked parents die when their parent's process group is
+/// signalled — this function deliberately targets only harness-level processes
+/// so we never directly kill a child of a live tracked parent.
+pub fn select_untracked_bundle_harnesses(
+    snapshots: &[ProcessSnapshot],
+    harness_exe: &std::path::Path,
+    tracked_pids: &std::collections::HashSet<u32>,
+) -> Vec<u32> {
+    snapshots
+        .iter()
+        .filter(|s| s.exe_path == harness_exe && !tracked_pids.contains(&s.pid))
+        .map(|s| s.pid)
+        .collect()
+}
+
+/// Extract the executable path from a process's `KERN_PROCARGS2` buffer.
+/// The first null-terminated string after the `i32 argc` field is the exec
+/// path. Returns `None` if the buffer is unreadable or malformed.
+#[cfg(target_os = "macos")]
+fn proc_exe_path_from_procargs2(pid: u32) -> Option<std::path::PathBuf> {
+    let mut mib: [libc::c_int; 3] = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid as libc::c_int];
+    let mut buf_size: libc::size_t = 0;
+
+    if unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            3,
+            std::ptr::null_mut(),
+            &mut buf_size,
+            std::ptr::null_mut(),
+            0,
+        )
+    } != 0
+    {
+        return None;
+    }
+
+    let mut buf: Vec<u8> = vec![0; buf_size];
+    if unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            3,
+            buf.as_mut_ptr() as *mut libc::c_void,
+            &mut buf_size,
+            std::ptr::null_mut(),
+            0,
+        )
+    } != 0
+    {
+        return None;
+    }
+    buf.truncate(buf_size);
+
+    if buf.len() < std::mem::size_of::<libc::c_int>() {
+        return None;
+    }
+    // Skip the argc i32 at the start of the buffer.
+    let pos = std::mem::size_of::<libc::c_int>();
+    // The exec path immediately follows — scan to the first null byte.
+    let end = buf[pos..].iter().position(|&b| b == 0).map(|i| pos + i)?;
+    let path_bytes = &buf[pos..end];
+    if path_bytes.is_empty() {
+        return None;
+    }
+    // KERN_PROCARGS2 exec paths are always absolute UTF-8 on macOS.
+    let s = std::str::from_utf8(path_bytes).ok()?;
+    Some(std::path::PathBuf::from(s))
+}
+
+/// Collect process snapshots for all user-owned processes on macOS.
+#[cfg(target_os = "macos")]
+fn collect_process_snapshots() -> Vec<ProcessSnapshot> {
+    let my_uid = unsafe { libc::getuid() };
+    let mut snapshots = Vec::new();
+
+    let mut pids: Vec<libc::c_int>;
+    loop {
+        let count = unsafe { proc_listallpids(std::ptr::null_mut(), 0) };
+        if count <= 0 {
+            return snapshots;
+        }
+        let buf_len = (count as usize) * 2;
+        pids = vec![0; buf_len];
+        let actual = unsafe {
+            proc_listallpids(
+                pids.as_mut_ptr(),
+                (buf_len * std::mem::size_of::<libc::c_int>()) as libc::c_int,
+            )
+        };
+        if actual <= 0 {
+            return snapshots;
+        }
+        pids.truncate(actual as usize);
+        if (actual as usize) < buf_len {
+            break;
+        }
+    }
+
+    let my_pid = std::process::id() as i32;
+    for &pid in &pids {
+        if pid <= 0 || pid == my_pid {
+            continue;
+        }
+        let upid = pid as u32;
+        // Verify UID to avoid inspecting processes owned by other users.
+        let mut info = std::mem::MaybeUninit::<BSDInfo>::zeroed();
+        let ret = unsafe {
+            proc_pidinfo(
+                pid,
+                PROC_PIDTBSDINFO,
+                0,
+                info.as_mut_ptr() as *mut libc::c_void,
+                std::mem::size_of::<BSDInfo>() as libc::c_int,
+            )
+        };
+        if ret <= 0 {
+            continue;
+        }
+        let info = unsafe { info.assume_init() };
+        if info.pbi_uid != my_uid {
+            continue;
+        }
+        if let Some(exe_path) = proc_exe_path_from_procargs2(upid) {
+            snapshots.push(ProcessSnapshot {
+                pid: upid,
+                exe_path,
+            });
+        }
+    }
+    snapshots
+}
+
+/// Collect process snapshots for all user-owned processes on Linux via /proc.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn collect_process_snapshots() -> Vec<ProcessSnapshot> {
+    let my_uid = unsafe { libc::getuid() };
+    let my_pid = std::process::id() as i32;
+    let mut snapshots = Vec::new();
+
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return snapshots;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name_str) = name.to_str() else {
+            continue;
+        };
+        let Ok(pid) = name_str.parse::<i32>() else {
+            continue;
+        };
+        if pid <= 0 || pid == my_pid {
+            continue;
+        }
+        let upid = pid as u32;
+        // Check ownership.
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
+        use std::os::unix::fs::MetadataExt;
+        if meta.uid() != my_uid {
+            continue;
+        }
+        // Resolve the executable path via the /proc symlink.
+        if let Ok(exe_path) = std::fs::read_link(format!("/proc/{upid}/exe")) {
+            snapshots.push(ProcessSnapshot {
+                pid: upid,
+                exe_path,
+            });
+        }
+    }
+    snapshots
+}
+
+/// Derive the expected path of the `buzz-acp` harness binary next to the
+/// current executable. Returns `None` if `current_exe()` fails or has no
+/// parent directory.
+///
+/// In a `.app` bundle: `.../Contents/MacOS/buzz-acp`.
+/// In a dev checkout: `<target-dir>/debug/buzz-acp` or similar.
+/// Never hardcoded — always derived from the running process.
+pub fn expected_harness_exe_path() -> Option<std::path::PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let dir = exe.parent()?;
+    Some(dir.join("buzz-acp"))
+}
+
+/// Sweep and kill harness processes that share this bundle's exact `buzz-acp`
+/// executable path but are not in `skip_pids`. Complements the env-var-based
+/// `sweep_system_agent_processes`: this sweep catches orphans that predate the
+/// `BUZZ_MANAGED_AGENT` env var injection and any that lost their receipt.
+///
+/// Scoping guarantee: only processes whose `/proc/<pid>/exe` or `KERN_PROCARGS2`
+/// exec path equals `<bundle>/buzz-acp` are considered. Dev builds, other
+/// installs, and children of tracked parents are never directly targeted.
+#[cfg(unix)]
+pub(crate) fn sweep_untracked_bundle_harnesses(skip_pids: &[u32]) {
+    let Some(harness_exe) = expected_harness_exe_path() else {
+        return;
+    };
+    let snapshots = collect_process_snapshots();
+    let tracked: std::collections::HashSet<u32> = skip_pids.iter().copied().collect();
+    let to_kill = select_untracked_bundle_harnesses(&snapshots, &harness_exe, &tracked);
+    if to_kill.is_empty() {
+        return;
+    }
+    eprintln!(
+        "buzz-desktop: sweep_untracked_bundle_harnesses: reaping {} stale harness process(es) {:?} (exe: {})",
+        to_kill.len(),
+        to_kill,
+        harness_exe.display(),
+    );
+    let to_kill_i32: Vec<i32> = to_kill.iter().map(|&p| p as i32).collect();
+    resolve_pgids_and_kill(&to_kill_i32);
+}
+
+#[cfg(not(unix))]
+pub(crate) fn sweep_untracked_bundle_harnesses(_skip_pids: &[u32]) {}
+
 /// Kill stale agent processes from a previous session whose PID is still alive
 /// but not tracked in the current `runtimes` map. Updates the record fields and
 /// returns `true` if any records were modified.
