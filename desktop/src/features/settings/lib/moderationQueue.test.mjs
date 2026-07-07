@@ -3,8 +3,11 @@ import { test } from "node:test";
 
 import {
   buildModerationQueue,
+  groupTopReportType,
   isOpenReport,
   reportSeverity,
+  reportTypeLabel,
+  severityTier,
   targetKey,
 } from "./moderationQueue.ts";
 
@@ -173,4 +176,39 @@ test("isOpenReport is true only for open status", () => {
 
 test("empty input yields empty queue", () => {
   assert.deepEqual(buildModerationQueue([]), []);
+});
+
+test("reportTypeLabel covers every category", () => {
+  for (const t of [
+    "illegal",
+    "nudity",
+    "malware",
+    "spam",
+    "impersonation",
+    "profanity",
+    "other",
+  ]) {
+    assert.equal(typeof reportTypeLabel(t), "string");
+    assert.ok(reportTypeLabel(t).length > 0);
+  }
+});
+
+test("severityTier: illegal=critical, malware/impersonation=high, rest=normal", () => {
+  assert.equal(severityTier("illegal"), "critical");
+  assert.equal(severityTier("malware"), "high");
+  assert.equal(severityTier("impersonation"), "high");
+  assert.equal(severityTier("spam"), "normal");
+  assert.equal(severityTier("nudity"), "normal");
+  assert.equal(severityTier("profanity"), "normal");
+  assert.equal(severityTier("other"), "normal");
+});
+
+test("groupTopReportType returns the most severe type in a group", () => {
+  const t = "d".repeat(64);
+  const [group] = buildModerationQueue([
+    report({ id: "r1", target: t, reportType: "spam" }),
+    report({ id: "r2", target: t, reportType: "impersonation" }),
+    report({ id: "r3", target: t, reportType: "profanity" }),
+  ]);
+  assert.equal(groupTopReportType(group), "impersonation");
 });

@@ -190,3 +190,48 @@ export function buildModerationQueue(
 export function isOpenReport(report: ModerationReport): boolean {
   return report.status === "open";
 }
+
+/** Human label for a NIP-56 report category. */
+export function reportTypeLabel(reportType: ReportType): string {
+  switch (reportType) {
+    case "illegal":
+      return "Illegal content";
+    case "nudity":
+      return "Nudity";
+    case "malware":
+      return "Malware";
+    case "spam":
+      return "Spam";
+    case "impersonation":
+      return "Impersonation";
+    case "profanity":
+      return "Profanity";
+    case "other":
+      return "Other";
+  }
+}
+
+/**
+ * Coarse severity tier for badge styling. `illegal` is `critical` (escalation
+ * lane); malware/impersonation are `high`; the rest are `normal`. Kept separate
+ * from the numeric `reportSeverity` rank so the visual tiers can be tuned
+ * without perturbing sort order.
+ */
+export type SeverityTier = "critical" | "high" | "normal";
+
+export function severityTier(reportType: ReportType): SeverityTier {
+  if (reportType === "illegal") return "critical";
+  if (reportType === "malware" || reportType === "impersonation") return "high";
+  return "normal";
+}
+
+/** The most severe report type in a group (drives the group's badge). */
+export function groupTopReportType(group: ModerationQueueGroup): ReportType {
+  let top = group.reports[0]?.reportType ?? "other";
+  for (const report of group.reports) {
+    if (reportSeverity(report.reportType) > reportSeverity(top)) {
+      top = report.reportType;
+    }
+  }
+  return top;
+}
