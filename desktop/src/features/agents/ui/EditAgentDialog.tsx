@@ -349,7 +349,16 @@ export function EditAgentDialog({
     // effect will no longer overwrite selectedRuntimeId after this point.
     runtimeTouched.current = true;
 
-    setSelectedRuntimeId(nextRuntimeId || "custom");
+    const resolvedRuntimeId = nextRuntimeId || "custom";
+    setSelectedRuntimeId(resolvedRuntimeId);
+
+    // Any explicit runtime selection pins the harness — this is the
+    // authoritative override. Disabling inheritance ensures the choice is
+    // actually persisted (Save follows the pin path, not the inherit path) and
+    // that the Advanced command input becomes editable for the custom case.
+    // "Custom command" has no catalog entry, so it must clear inheritance here
+    // rather than relying on the concrete-runtime branch below.
+    setInheritHarness(false);
 
     // When switching to a catalog-known runtime, update the agent command to
     // its resolved command so the command field stays consistent.
@@ -357,11 +366,6 @@ export function EditAgentDialog({
       setAgentCommand(nextRuntime.command);
       const newArgs = nextRuntime.defaultArgs.join(",");
       setAgentArgs(newArgs);
-      // Selecting a concrete catalog runtime pins the harness — this is the
-      // authoritative override. Disabling inheritance ensures the runtime is
-      // actually persisted and prevents a mismatched provider from being saved
-      // against an inherited runtime that will actually run something else.
-      setInheritHarness(false);
     }
 
     // Clear model when switching away from a runtime with a different model scope.

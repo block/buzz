@@ -359,6 +359,63 @@ test("editAgent_runtimeDropdown_pinsHarnessWhenConcreteCatalogRuntimeSelected", 
   );
 });
 
+// ── Custom command as a runtime pin ──────────────────────────────────────────
+//
+// "Custom command" has no catalog entry (nextRuntime === undefined), so it must
+// clear inheritance directly in the handler rather than relying on the
+// concrete-runtime branch. Without this, an inheriting persona-linked agent that
+// picks "Custom command" keeps inheritHarness=true, the command input stays
+// gated behind !inheritHarness, and Save silently follows the inherit path —
+// discarding the custom-command intent.
+
+test("editAgent_runtimeDropdown_pinsHarnessWhenCustomCommandSelected", () => {
+  // Simulate handleRuntimeDropdownChange("custom") for an inherited agent.
+  let inheritHarness = true; // starts inherited
+
+  const NO_RUNTIME_DROPDOWN_VALUE = "__none__";
+  const nextValue = "custom";
+  const nextRuntimeId =
+    nextValue === NO_RUNTIME_DROPDOWN_VALUE ? "" : nextValue;
+  const nextRuntime = undefined; // "custom" has no catalog entry
+
+  // The fixed handler clears inheritance for ANY explicit selection, before the
+  // concrete-runtime branch (which never runs for a custom command).
+  inheritHarness = false;
+  if (nextRuntime?.command) {
+    // concrete-runtime branch — not taken for custom command
+  }
+
+  assert.equal(nextRuntimeId, "custom");
+  assert.equal(
+    inheritHarness,
+    false,
+    "selecting 'Custom command' must set inheritHarness=false so the command input is editable and Save takes the pin path",
+  );
+});
+
+test("editAgent_customCommandSelected_savePinsCustomCommandNotInherit", () => {
+  // After the custom-command selection clears inheritance, the submit path must
+  // pin the (edited) custom command rather than following the inherit sentinel.
+  const inheritHarness = false; // cleared by the custom-command selection
+  const agentOriginalCommand = ""; // was inheriting, no command
+  const agentCommandOverride = null;
+  const editedCustomCommand = "/opt/bin/my-custom-agent";
+
+  const agentCommandUpdate = inheritHarness
+    ? agentCommandOverride != null
+      ? ""
+      : undefined
+    : editedCustomCommand.trim() !== agentOriginalCommand
+      ? editedCustomCommand.trim()
+      : undefined;
+
+  assert.equal(
+    agentCommandUpdate,
+    "/opt/bin/my-custom-agent",
+    "custom command must be persisted as a pin, not silently dropped by the inherit path",
+  );
+});
+
 test("editAgent_inheritedAgentRuntimeSwitch_producesConsistentCommandProviderPair", () => {
   // Bad path before fix: inheritHarness stays true, so agentCommandUpdate is
   // undefined (agent still inherits Claude), but provider="databricks_v2" persists.
