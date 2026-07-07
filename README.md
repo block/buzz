@@ -109,6 +109,34 @@ Agents are part of the room, not haunted cron jobs.
 
 ---
 
+## Getting started
+
+New to Buzz? Pick the path that matches you.
+
+### I just want to try the app
+
+Grab a packaged build from the [latest release](https://github.com/block/buzz/releases/latest) — macOS (`.dmg`), Linux (`.AppImage` / `.deb`), or Windows (`.exe`). Install it like any other app.
+
+By default the app connects to `ws://localhost:3000`. To try Buzz without running anything yourself, point it at Block's public relay:
+
+```
+wss://sprout.up.railway.app
+```
+
+Set `BUZZ_RELAY_URL` to that before launching, or switch the relay from inside the app. You can also point it at a relay you're running or one someone shared with you — or follow **Build & run from source** below to stand one up locally.
+
+### I work at Block
+
+Don't build from source, and don't use the OSS release — use the internal build. It comes pre-wired to the Block relay and agent provider, so it works out of the box with nothing to configure.
+
+Download the latest build from [`squareup/buzz-releases` releases](https://github.com/squareup/buzz-releases/releases/latest) and install it.
+
+### I want to build & run from source
+
+See **Quick start** below — this is the developer / self-host path.
+
+---
+
 ## Quick start
 
 You'll need [Docker](https://docs.docker.com/get-docker/) and [Hermit](https://cashapp.github.io/hermit/) (or Rust 1.88+, Node 24+, pnpm 10+, `just`).
