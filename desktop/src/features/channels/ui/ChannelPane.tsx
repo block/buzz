@@ -3,6 +3,8 @@ import { Bot, Hash, LogIn, Plus, Sparkles, UserPlus } from "lucide-react";
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import { useMediaUpload } from "@/features/messages/lib/useMediaUpload";
 import { MessageComposer } from "@/features/messages/ui/MessageComposer";
+import { ComposerTimeoutBanner } from "@/features/moderation/ui/ComposerTimeoutBanner";
+import { useTimeoutState } from "@/features/moderation/lib/timeoutStore";
 import { DropZoneOverlay } from "@/features/messages/ui/ComposerAttachments";
 import {
   MessageThreadPanel,
@@ -269,10 +271,13 @@ export const ChannelPane = React.memo(function ChannelPane({
     return true;
   }, [findLastOwnEditable, onEdit, threadHeadMessage, threadMessages]);
 
+  const timeoutState = useTimeoutState();
+
   const isComposerDisabled =
     !activeChannel?.isMember ||
     activeChannel.archivedAt !== null ||
     activeChannel.channelType === "forum" ||
+    timeoutState.active ||
     isSending;
   const knownAgentPubkeys = React.useMemo(() => {
     const pubkeys = new Set<string>();
@@ -676,7 +681,11 @@ export const ChannelPane = React.memo(function ChannelPane({
               ref={composerWrapperRef}
             >
               <div className="pointer-events-auto">
-                {isActiveWelcomeChannel ? (
+                {timeoutState.active ? (
+                  <ComposerTimeoutBanner
+                    expiresAtMs={timeoutState.expiresAtMs}
+                  />
+                ) : isActiveWelcomeChannel ? (
                   <WelcomeComposerBanner state={welcomeComposerBannerState} />
                 ) : null}
                 <MessageComposer
@@ -696,16 +705,18 @@ export const ChannelPane = React.memo(function ChannelPane({
                   onSend={handleSendMessage}
                   profiles={profiles}
                   placeholder={
-                    activeChannel?.archivedAt
-                      ? "Archived channels are read-only."
-                      : activeChannel?.channelType === "forum"
-                        ? "Forum posting is not wired in this pass."
-                        : activeChannel
-                          ? activeChannel.channelType === "dm" &&
-                            directMessageIntro
-                            ? `Message ${directMessageIntro.displayName}`
-                            : `Message #${activeChannel.name}`
-                          : "Select a channel"
+                    timeoutState.active
+                      ? "You're timed out by community moderators."
+                      : activeChannel?.archivedAt
+                        ? "Archived channels are read-only."
+                        : activeChannel?.channelType === "forum"
+                          ? "Forum posting is not wired in this pass."
+                          : activeChannel
+                            ? activeChannel.channelType === "dm" &&
+                              directMessageIntro
+                              ? `Message ${directMessageIntro.displayName}`
+                              : `Message #${activeChannel.name}`
+                            : "Select a channel"
                   }
                   showTopBorder={false}
                 />

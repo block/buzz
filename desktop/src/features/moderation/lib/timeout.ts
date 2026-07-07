@@ -64,3 +64,31 @@ export function isTimeoutActive(
   }
   return expiresAtMs > nowMs;
 }
+
+/**
+ * Format the time left until `expiresAtMs` as a short human string for the
+ * composer chip: `"2h 5m"`, `"3m 20s"`, `"12s"`. Returns `null` when there is
+ * no countdown to show — either the expiry is unknown or already elapsed.
+ */
+export function formatTimeoutRemaining(
+  expiresAtMs: number | null,
+  nowMs: number = Date.now(),
+): string | null {
+  if (expiresAtMs === null) {
+    return null;
+  }
+  const totalSeconds = Math.ceil((expiresAtMs - nowMs) / 1000);
+  if (totalSeconds <= 0) {
+    return null;
+  }
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  if (hours > 0) {
+    return `${hours}h ${minutes}m`;
+  }
+  if (minutes > 0) {
+    return `${minutes}m ${seconds}s`;
+  }
+  return `${seconds}s`;
+}

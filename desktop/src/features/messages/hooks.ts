@@ -19,6 +19,10 @@ import {
   resolveReplyRootId,
 } from "@/features/messages/lib/threading";
 import { splitOutgoingTags } from "@/features/messages/lib/imetaMediaMarkdown";
+import {
+  clearTimeoutState,
+  recordTimeoutFromRejection,
+} from "@/features/moderation/lib/timeoutStore";
 import { relayClient } from "@/shared/api/relayClient";
 import { customEmojiQueryKey } from "@/features/custom-emoji/hooks";
 import { channelsQueryKey } from "@/features/channels/hooks";
@@ -637,7 +641,11 @@ export function useSendMessageMutation(
         queryKey,
       };
     },
-    onError: (_error, _variables, context) => {
+    onError: (error, _variables, context) => {
+      // A community timeout surfaces here as the relay's `OK false` reason.
+      // Record it so the composer can show the timeout chip and block further
+      // sends until it expires; other errors fall through to the caller.
+      recordTimeoutFromRejection(error?.message);
       if (!context) {
         return;
       }
@@ -649,6 +657,9 @@ export function useSendMessageMutation(
       );
     },
     onSuccess: (message, _variables, context) => {
+      // An accepted send proves the write-block is lifted; clear any recorded
+      // timeout so the chip and disable state fall away immediately.
+      clearTimeoutState();
       if (!context) {
         return;
       }
