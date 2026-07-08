@@ -15,7 +15,26 @@ export type TranscriptTurnSegment =
 
 export type TranscriptDisplayBlock =
   | { kind: "single"; item: TranscriptItem }
-  | { kind: "turn"; turnId: string; segments: TranscriptTurnSegment[] };
+  | { kind: "turn"; turnId: string; segments: TranscriptTurnSegment[] }
+  | {
+      /**
+       * Session boundary divider injected between consecutive session runs.
+       * `sessionId` is the id of the session that FOLLOWS the divider (the
+       * newer session in reading order).
+       *
+       * `labelState` encodes three distinct states:
+       *  - `"current"`     — newest-visible session AND matches the live relay
+       *                      session id. Agent is actively running this session.
+       *  - `"most-recent"` — newest-visible session but no live session match
+       *                      (archived-only view or session ended). This is the
+       *                      most recently observed session — not current context.
+       *  - `"earlier"`     — an older session, not newest-visible.
+       */
+      kind: "session-boundary";
+      sessionId: string;
+      sessionStartTimestamp: string;
+      labelState: "current" | "most-recent" | "earlier";
+    };
 
 export type TranscriptToolRunChildSegment =
   | { kind: "item"; item: TranscriptItem }
@@ -357,6 +376,34 @@ function getRenderClass(item: TranscriptItem) {
 }
 
 /**
+ * Split a flat, time-ordered array of TranscriptItems into contiguous session
+ * runs. Items with a null sessionId are attributed to the most recently seen
+ * session (or a synthetic "unknown" run if no session has appeared yet).
+ *
+ * A new run begins whenever the sessionId changes to a distinct non-null value.
+ */
+function splitIntoSessionRuns(
+  items: TranscriptItem[],
+): Array<{ sessionId: string; items: TranscriptItem[] }> {
+  const runs: Array<{ sessionId: string; items: TranscriptItem[] }> = [];
+  let currentRun: { sessionId: string; items: TranscriptItem[] } | null = null;
+
+  for (const item of items) {
+    const sid: string = item.sessionId ?? currentRun?.sessionId ?? "unknown";
+    if (
+      !currentRun ||
+      (item.sessionId && item.sessionId !== currentRun.sessionId)
+    ) {
+      currentRun = { sessionId: sid, items: [] };
+      runs.push(currentRun);
+    }
+    currentRun.items.push(item);
+  }
+
+  return runs;
+}
+
+/**
  * Build presentation-only display blocks from normalized transcript items.
  * Raw observer order is preserved in the source items; this only reorders
  * within a turn for user-facing narrative flow.
@@ -365,9 +412,85 @@ function getRenderClass(item: TranscriptItem) {
  * turnId=null. They are injected into the prompt segment of the first turn
  * that follows them in stream order — placing System prompt between the user
  * message bubble and the Prompt context sections in the rendered output.
+ *
+ * When items span multiple sessions (archived history + live session), a
+ * `session-boundary` block is injected between consecutive session runs.
+ * The newest-visible run is labeled distinctly when it equals
+ * `latestLiveSessionId`, signalling "current session" vs archived history.
+ * No boundary is emitted when only one session run is present.
+ *
+ * @param latestLiveSessionId - The session ID that is currently live on the
+ *   relay (from `observerRelayStore`). Used to distinguish "current session"
+ *   from "most recent observed session". Pass `null` when the relay is idle.
  */
 export function buildTranscriptDisplayBlocks(
   items: TranscriptItem[],
+  latestLiveSessionId: string | null = null,
+): TranscriptDisplayBlock[] {
+  const sessionRuns = splitIntoSessionRuns(items);
+
+  // Fast path: single session (or zero) — no boundary blocks needed.
+  if (sessionRuns.length <= 1) {
+    return buildBlocksForRun(
+      sessionRuns[0]?.items ?? [],
+      /* isNewestRun */ true,
+      sessionRuns[0]?.sessionId ?? null,
+      latestLiveSessionId,
+      /* emitBoundary */ false,
+    );
+  }
+
+  // Multi-session: build blocks per run and interleave session-boundary blocks.
+  const allBlocks: TranscriptDisplayBlock[] = [];
+  for (let i = 0; i < sessionRuns.length; i++) {
+    const run = sessionRuns[i];
+    const isNewestRun = i === sessionRuns.length - 1;
+
+    // Inject boundary before this run's blocks (not before the oldest run).
+    if (i > 0) {
+      const firstItem = run.items.find((it) => it.timestamp);
+      const sessionStartTimestamp =
+        firstItem?.timestamp ?? new Date(0).toISOString();
+      const labelState: "current" | "most-recent" | "earlier" =
+        isNewestRun &&
+        latestLiveSessionId !== null &&
+        run.sessionId === latestLiveSessionId
+          ? "current"
+          : isNewestRun
+            ? "most-recent"
+            : "earlier";
+      allBlocks.push({
+        kind: "session-boundary",
+        sessionId: run.sessionId,
+        sessionStartTimestamp,
+        labelState,
+      });
+    }
+
+    const runBlocks = buildBlocksForRun(
+      run.items,
+      isNewestRun,
+      run.sessionId,
+      latestLiveSessionId,
+      /* emitBoundary */ false,
+    );
+    allBlocks.push(...runBlocks);
+  }
+
+  return allBlocks;
+}
+
+/**
+ * Build display blocks for a single session run's items.
+ * Internal helper — extracted so `buildTranscriptDisplayBlocks` can call it
+ * once per run without code duplication.
+ */
+function buildBlocksForRun(
+  items: TranscriptItem[],
+  _isNewestRun: boolean,
+  _sessionId: string | null,
+  _latestLiveSessionId: string | null,
+  _emitBoundary: boolean,
 ): TranscriptDisplayBlock[] {
   const blocks: TranscriptDisplayBlock[] = [];
   const turnBuckets = new Map<string, TurnBucket>();
@@ -466,6 +589,11 @@ export function flattenDisplayBlocks(
   for (const block of blocks) {
     if (block.kind === "single") {
       result.push(block.item);
+      continue;
+    }
+
+    // session-boundary blocks carry no items — skip.
+    if (block.kind === "session-boundary") {
       continue;
     }
 

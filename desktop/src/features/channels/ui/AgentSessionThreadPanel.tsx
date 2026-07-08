@@ -131,7 +131,7 @@ export function AgentSessionThreadPanel({
       : `Last updated ${new Date(latestActivityAt).toLocaleString()}`;
 
   const { fetchOlderArchived, hasOlderArchived } =
-    useLoadArchivedObserverEvents(isLive);
+    useLoadArchivedObserverEvents(isLive, sessionChannelId ?? null);
 
   useLoadOlderOnScroll({
     fetchOlder: fetchOlderArchived,

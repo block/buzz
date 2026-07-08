@@ -628,6 +628,9 @@ pub fn run() {
             archive::list_save_subscriptions,
             archive::delete_save_subscription,
             archive::read_archived_events,
+            archive::read_archived_observer_events_for_channel,
+            archive::index_observer_channel_id,
+            archive::read_unindexed_observer_rows,
             is_auto_update_supported,
         ])
         .build(tauri::generate_context!())

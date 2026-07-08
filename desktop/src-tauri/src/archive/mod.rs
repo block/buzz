@@ -475,6 +475,120 @@ pub fn delete_save_subscription(
 
 // ── read_archived_events ─────────────────────────────────────────────────────
 
+// ── read_archived_observer_events_for_channel ────────────────────────────────
+
+/// Read a paginated page of archived kind 24200 events scoped to one channel,
+/// using the `observer_channel_index` as the primary lookup.
+///
+/// The index only contains rows with a known, non-null `channelId` (frames
+/// pre-dating the channelId stamp, or rows where decryption failed, are
+/// absent from the index and thus absent from every scoped channel view —
+/// Will's (a) ruling, 2026-07-08).
+///
+/// Returns at most `limit` events (default `DEFAULT_READ_LIMIT`) in
+/// newest-first order. Compound cursor `(before_created_at, before_id)` works
+/// identically to `read_archived_events`.
+#[tauri::command]
+pub fn read_archived_observer_events_for_channel(
+    state: State<'_, AppState>,
+    channel_id: String,
+    before_created_at: Option<i64>,
+    before_id: Option<String>,
+    limit: Option<i64>,
+) -> Result<Vec<String>, String> {
+    let identity_pk = identity_pubkey(&state)?;
+    let relay_url = relay_ws_url_with_override(&state);
+    let conn = open_db()?;
+    store::read_archived_observer_events_for_channel(
+        &conn,
+        &identity_pk,
+        &relay_url,
+        &channel_id,
+        before_created_at,
+        before_id.as_deref(),
+        limit.unwrap_or(DEFAULT_READ_LIMIT),
+    )
+}
+
+// ── index_observer_channel_id ─────────────────────────────────────────────────
+
+/// Index one or more archived observer frame ids with their decoded channelId.
+///
+/// Called from the TS-side backfill after attempting `decryptObserverEvent`.
+/// `channel_id` is `Some` for frames with a non-null channelId; `None` for
+/// frames where decryption yielded no channelId or failed entirely.  Both cases
+/// write a status row so a re-run skips the frame (INSERT OR IGNORE on PK).
+///
+/// Idempotent: rows that are already indexed are left unchanged.
+#[tauri::command]
+pub fn index_observer_channel_id(
+    state: State<'_, AppState>,
+    entries: Vec<ObserverChannelIndexEntry>,
+) -> Result<(), String> {
+    let identity_pk = identity_pubkey(&state)?;
+    let relay_url = relay_ws_url_with_override(&state);
+    let conn = open_db()?;
+    for entry in &entries {
+        store::upsert_observer_channel_index(
+            &conn,
+            &identity_pk,
+            &relay_url,
+            &entry.event_id,
+            entry.channel_id.as_deref(),
+            entry.created_at,
+        )?;
+    }
+    Ok(())
+}
+
+/// A single (event_id, channel_id?, created_at) record used by
+/// `index_observer_channel_id`.
+///
+/// `channel_id` is `None` for frames where decryption found no channelId or
+/// failed; those rows are written to `observer_channel_index` with a NULL
+/// channel_id so the frame is treated as processed (no re-decrypt on re-run).
+#[derive(Debug, Deserialize)]
+pub struct ObserverChannelIndexEntry {
+    pub event_id: String,
+    pub channel_id: Option<String>,
+    pub created_at: i64,
+}
+
+// ── read_unindexed_observer_rows ─────────────────────────────────────────────
+
+/// Return raw event JSON + id + created_at for all `owner_p` kind 24200 rows
+/// that are NOT yet in `observer_channel_index`.
+///
+/// The TS-side backfill driver calls this once, decrypts each row, and sends
+/// the (id, channelId, created_at) triples back via `index_observer_channel_id`.
+/// Together these constitute the one-shot idempotent backfill required by the
+/// Slice 1 acceptance criteria (Thufir Pass 4).
+#[tauri::command]
+pub fn read_unindexed_observer_rows(
+    state: State<'_, AppState>,
+) -> Result<Vec<RawObserverRow>, String> {
+    let identity_pk = identity_pubkey(&state)?;
+    let relay_url = relay_ws_url_with_override(&state);
+    let conn = open_db()?;
+    let rows = store::read_unindexed_observer_rows(&conn, &identity_pk, &relay_url)?;
+    Ok(rows
+        .into_iter()
+        .map(|(id, raw_json, created_at)| RawObserverRow {
+            id,
+            raw_json,
+            created_at,
+        })
+        .collect())
+}
+
+/// Wire type returned by `read_unindexed_observer_rows`.
+#[derive(Debug, Serialize)]
+pub struct RawObserverRow {
+    pub id: String,
+    pub raw_json: String,
+    pub created_at: i64,
+}
+
 /// Default page size for `read_archived_events`.
 const DEFAULT_READ_LIMIT: i64 = 50;
 
