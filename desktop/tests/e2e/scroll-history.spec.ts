@@ -1577,15 +1577,25 @@ test("older-history spinner stays visible in viewport while fetching mid-scroll"
   const timeline = page.getByTestId("message-timeline");
   await expect(timeline.locator("[data-message-id]").first()).toBeVisible();
 
-  await timeline.hover();
-  await page.mouse.wheel(0, -1_500);
-  await page.waitForTimeout(100);
-  await page.mouse.wheel(0, 1_000);
-  await page.waitForTimeout(100);
-  await page.mouse.wheel(0, -1_000);
+  // Trigger the older fetch near the top, then move the reader mid-scroll
+  // while the fetch is still in flight. Set scrollTop directly instead of
+  // mouse.wheel: wheel deltas vary across CI environments and can land the
+  // timeline at scrollTop 0, which is the one position this test must avoid.
+  await timeline.evaluate((element) => {
+    const timelineElement = element as HTMLDivElement;
+    timelineElement.scrollTop = 150;
+    timelineElement.dispatchEvent(new Event("scroll", { bubbles: true }));
+  });
 
   const indicator = page.getByTestId("message-timeline-fetching-older");
   await expect(indicator).toBeVisible({ timeout: 2_000 });
+
+  await timeline.evaluate((element) => {
+    const timelineElement = element as HTMLDivElement;
+    timelineElement.scrollTop = timelineElement.clientHeight;
+    timelineElement.dispatchEvent(new Event("scroll", { bubbles: true }));
+  });
+  await expect(indicator).toBeVisible();
 
   const { scrollTop } = await getTimelineMetrics(page);
   expect(scrollTop).toBeGreaterThan(8);
