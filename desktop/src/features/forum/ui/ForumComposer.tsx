@@ -89,6 +89,7 @@ export function ForumComposer({
   const onLinkSelectionChangeRef = React.useRef<
     ((info: LinkSelectionInfo | null) => void) | null
   >(null);
+  const onLinkShortcutRef = React.useRef<(() => boolean) | null>(null);
 
   const richText = useRichTextEditor({
     placeholder,
@@ -99,6 +100,7 @@ export function ForumComposer({
     isAutocompleteOpen: isAutocompleteOpenRef,
     onEditLink: (info) => onEditLinkRef.current?.(info),
     onLinkSelectionChange: (info) => onLinkSelectionChangeRef.current?.(info),
+    onLinkShortcut: () => onLinkShortcutRef.current?.() ?? false,
     onUpdate: ({ cursor, text }) => {
       const markdown = richText.getMarkdown();
       setContent(markdown);
@@ -112,6 +114,7 @@ export function ForumComposer({
   const linkEditor = useLinkEditor(richText);
   onEditLinkRef.current = linkEditor.openFromClick;
   onLinkSelectionChangeRef.current = linkEditor.showFromCursor;
+  onLinkShortcutRef.current = linkEditor.openFromShortcut;
 
   // ── Mention / channel autocomplete insertion ────────────────────────
   // Native ProseMirror transactions — no markdown round-trip.

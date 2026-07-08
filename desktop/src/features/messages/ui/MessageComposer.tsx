@@ -276,6 +276,7 @@ function MessageComposerImpl({
   const onLinkSelectionChangeRef = React.useRef<
     ((info: LinkSelectionInfo | null) => void) | null
   >(null);
+  const onLinkShortcutRef = React.useRef<(() => boolean) | null>(null);
 
   const scrollComposerToBottom = React.useCallback(() => {
     window.requestAnimationFrame(() => {
@@ -310,6 +311,7 @@ function MessageComposerImpl({
     isAutocompleteOpen: isAutocompleteOpenRef,
     onEditLink: (info) => onEditLinkRef.current?.(info),
     onLinkSelectionChange: (info) => onLinkSelectionChangeRef.current?.(info),
+    onLinkShortcut: () => onLinkShortcutRef.current?.() ?? false,
     onUpdate: ({ cursor, text }) => {
       setComposerContentFromText(text);
 
@@ -331,6 +333,7 @@ function MessageComposerImpl({
   };
   onEditLinkRef.current = linkEditor.openFromClick;
   onLinkSelectionChangeRef.current = linkEditor.showFromCursor;
+  onLinkShortcutRef.current = linkEditor.openFromShortcut;
   useComposerSpoilerParticles(richText.editor, composerScrollRef);
 
   const mentionSendFlow = useMentionSendFlow({
