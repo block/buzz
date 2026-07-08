@@ -1,7 +1,8 @@
-import type * as React from "react";
+import * as React from "react";
 
 import { isMaskedLink } from "@/shared/lib/maskedLink";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
+import { SpoilerHiddenContext } from "./SpoilerInline";
 
 /**
  * Masked link (`[text](url)` where the text hides the destination): reveal
@@ -20,7 +21,10 @@ export function MaskedLinkTooltip({
   disabled?: boolean;
   children: React.ReactElement;
 }) {
-  if (disabled || !href || !isMaskedLink(label, href)) {
+  // A masked link inside an unrevealed spoiler must not expose its URL via a
+  // hover/focus tooltip — that would leak the spoiler's content early.
+  const hiddenInSpoiler = React.useContext(SpoilerHiddenContext);
+  if (disabled || hiddenInSpoiler || !href || !isMaskedLink(label, href)) {
     return children;
   }
   return (
