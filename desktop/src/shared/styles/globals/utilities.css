@@ -10,6 +10,18 @@
     contain-intrinsic-size: auto 200px;
   }
 
+  /* The conversation scroller owns its reading position through the JS
+     compensation writer in `useAnchoredScroll` (same-frame `scrollBy` on
+     realization/reflow deltas). Native scroll anchoring must be OFF so it
+     can't double-correct the same delta behind the writer's back: the shipped
+     WKWebView has no `overflow-anchor` at all, while Chromium does — leaving it
+     on means CI (Chromium) and macOS users (WKWebView) run different scroll
+     contracts, which is how the jitter shipped unseen. Forcing it off makes the
+     writer the single scroll authority on every engine. See L-A/L-C findings. */
+  [data-buzz-conversation-scroll] {
+    overflow-anchor: none;
+  }
+
   /* Timeline rows re-pin by measured offset on prepend; the 200px fallback
      over-reserves the common row and shifts that anchor, so reserve low. */
   .timeline-row-cv {
