@@ -1,6 +1,7 @@
 //! buzz-relay-mesh — the inter-relay QUIC mesh.
 //!
-//! One iroh endpoint per relay runtime (identity = the relay's signing key),
+//! One iroh endpoint per relay runtime (identity = a boot-unique mesh
+//! keypair, attested by the relay's signing key — see [`wire::RuntimeId`]),
 //! a warm full mesh of authenticated connections, scuttlebutt membership
 //! gossip on a control substream, and a fenced wire contract that carries
 //! tunnel traffic (reliable streams + realtime datagrams) between pods.

@@ -45,9 +45,19 @@ pub const WIRE_VERSION: u8 = 1;
 /// larger is a protocol error, not a bigger buffer.
 pub const MAX_STREAM_FRAME: u32 = 16 * 1024 * 1024;
 
-/// A relay runtime's mesh identity: the ed25519 public key of its signing
-/// key, which is also its iroh endpoint id. Mesh authentication IS relay
-/// identity — there is no separate credential.
+/// A relay runtime's mesh identity: the ed25519 public key of the **mesh
+/// endpoint keypair generated fresh at process start**. This is both the
+/// iroh endpoint id and the boot-unique runtime id used in the ready
+/// registry and ownership leases — one value, boot-unique by construction.
+///
+/// It is deliberately NOT the deployment's Nostr relay key: that key is
+/// secp256k1, and the helm chart shares one `BUZZ_RELAY_PRIVATE_KEY` Secret
+/// across all pods of a release — using it here would give every pod the
+/// same runtime id and collapse the ownership plane (Wren's contract-review
+/// blocker). Binding to the deployment identity is done out-of-band: the
+/// ready-registry record carries a relay-key-signed attestation of the
+/// runtime pubkey (membership lane), and peers accept mesh connections only
+/// from endpoint ids present in attested registry/gossip records.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct RuntimeId(pub [u8; 32]);
 
