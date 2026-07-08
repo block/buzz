@@ -90,7 +90,14 @@ export function useLoadArchivedObserverEvents(
   // initialises the backfill promise eagerly so fetchOlderArchived can await it
   // before the backfill effect fires. applyChannelReset resets cursor/exhaustion/
   // fetchLock when channelId changes; backfill state is untouched (identity-level).
-  const pagingStateRef = React.useRef(createArchivePagingState());
+  // Lazy init via nullable ref avoids creating a discarded ArchivePagingState
+  // (including a throwaway pending Promise) on every render after the first.
+  const pagingStateRef = React.useRef<ReturnType<
+    typeof createArchivePagingState
+  > | null>(null);
+  if (!pagingStateRef.current) {
+    pagingStateRef.current = createArchivePagingState();
+  }
   const ps = pagingStateRef.current;
 
   // React state mirrors the fields callers observe so re-renders fire on change.
