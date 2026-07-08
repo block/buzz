@@ -70,7 +70,9 @@ const overrides = new Map([
   // across the local-archive + agent-metric-archive PR series. store_tests.rs
   // (~731 lines) is under 1000 so needs no override.
   ["src-tauri/src/archive/mod_tests.rs", 1208],
-  ["src-tauri/src/commands/agents.rs", 1443],
+  // unified-agent-model 1A.1: profile reconcile split to agents_profile.rs,
+  // ratcheting 1443 -> 1295. Queued to split further in the A2 fold.
+  ["src-tauri/src/commands/agents.rs", 1295],
   // #1418 read-path fix: get_thread_replies' blocker fix (shared TIMELINE_KINDS
   // const + build_thread_replies_filter helper, mirroring the channel sibling so
   // the two p-gate filters can't drift) plus two guard unit tests. The file was
@@ -90,7 +92,9 @@ const overrides = new Map([
   // queued to split with the rest of this list.
   // +4 lines: adopt shared create_symlink wrapper (behavior-preserving refactor
   // for multi-line rustfmt expansion of the skills symlink call site).
-  ["src-tauri/src/managed_agents/nest.rs", 1575],
+  // unified-agent-model 1A.1: inline test module moved to nest/tests.rs,
+  // ratcheting 1575 -> 679 (under the 1000 default; entry kept as a ratchet).
+  ["src-tauri/src/managed_agents/nest.rs", 679],
   // harness-persona-sync: persona-runtime resolution threaded into the spawn
   // path here. Load-bearing feature growth; queued to split in the resolver
   // unify refactor followup. +26 for resolve_effective_prompt_model_provider
@@ -153,20 +157,26 @@ const overrides = new Map([
   // same-runtime / alias / sentinel / non-override / persona-less test matrix
   // (~135 lines, mostly tests) so a deliberate Custom pin survives the update
   // path instead of being dropped back to inherit. Load-bearing, not debt.
-  ["src-tauri/src/managed_agents/discovery.rs", 1259],
+  // unified-agent-model 1A.1: inline test module moved to discovery/tests.rs,
+  // ratcheting 1259 -> 802 (under the 1000 default; entry kept as a ratchet).
+  ["src-tauri/src/managed_agents/discovery.rs", 802],
   // migration_tests.rs carries the harness-sync migration coverage plus the
   // patch_json_records owner-only writeback regression test (SECURITY.md:90
   // crash-safe 0o600 fallback). Load-bearing security + feature coverage, not
   // generic debt growth. Approved override; still queued to split. Event-sync
   // (persona/team event reconcile) tests were split out to event_sync_tests.rs
   // and the limit ratcheted 1410 → 1110.
+  // unified-agent-model 1A.1: materialize tests live with their module in
+  // migration/materialize.rs; ratchet held at 1110.
   ["src-tauri/src/migration_tests.rs", 1110],
   ["src-tauri/src/nostr_convert.rs", 1126],
   ["src/shared/api/relayClientSession.ts", 1022],
   // Boot-time event sync (persona/team/agent event reconcile) was split out
   // to event_sync.rs, ratcheting this limit 1575 → 1310. Remaining content is
   // the pre-identity data migrations; still queued to split further.
-  ["src-tauri/src/migration.rs", 1310],
+  // unified-agent-model 1A.1: materialize_agent_runtimes split to
+  // migration/materialize.rs, ratcheting 1310 -> 1297.
+  ["src-tauri/src/migration.rs", 1297],
   // onMarkRead + isUnread prop threading (mirrors the onMarkUnread prop
   // already here) for the single-toggle mark-read/unread menu item — a small
   // overage from load-bearing per-message plumbing, not generic debt growth.

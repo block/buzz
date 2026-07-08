@@ -1261,58 +1261,6 @@ fn rename_provider_to_runtime_in_personas(path: &Path) {
     });
 }
 
-/// Materialize each persona-linked agent record's `runtime` from its linked
-/// persona (unified agent model, Phase 1A). After this, spawn resolution reads
-/// the record's own runtime (`record_agent_command` step 2) instead of the
-/// live persona — same effective command by construction, so the spawn-config
-/// hash is unchanged and no running agent shows a spurious restart badge (see
-/// `spawn_hash::tests::materializing_runtime_keeps_hash_stable`).
-///
-/// Idempotent: records that already carry `runtime` are untouched, as are
-/// records with no linked persona or a persona without a runtime (both keep
-/// resolving through the legacy fallback path unchanged).
-pub fn materialize_agent_runtimes(app: &tauri::AppHandle) {
-    let Ok(current_dir) = app.path().app_data_dir() else {
-        return;
-    };
-    let mut dirs = vec![current_dir.clone()];
-    if let Some(canonical) = canonical_dev_data_dir(&current_dir) {
-        if canonical.exists() && canonical != current_dir {
-            dirs.push(canonical);
-        }
-    }
-    for dir in dirs {
-        let path = dir.join("agents/managed-agents.json");
-        if path.exists() {
-            materialize_runtimes_in_file(&path);
-        }
-    }
-}
-
-fn materialize_runtimes_in_file(path: &Path) {
-    let persona_runtimes = load_persona_runtimes(path);
-    if persona_runtimes.is_empty() {
-        return;
-    }
-    patch_json_records(path, |obj| {
-        if obj.contains_key("runtime") {
-            return false;
-        }
-        let Some(runtime) = obj
-            .get("persona_id")
-            .and_then(|v| v.as_str())
-            .and_then(|pid| persona_runtimes.get(pid))
-        else {
-            return false;
-        };
-        obj.insert(
-            "runtime".to_string(),
-            serde_json::Value::String(runtime.clone()),
-        );
-        true
-    });
-}
-
 pub fn migrate_persona_provider_to_runtime(app: &tauri::AppHandle) {
     let Ok(dir) = app.path().app_data_dir() else {
         return;
@@ -1323,6 +1271,9 @@ pub fn migrate_persona_provider_to_runtime(app: &tauri::AppHandle) {
     }
     rename_provider_to_runtime_in_personas(&path);
 }
+
+mod materialize;
+pub use materialize::materialize_agent_runtimes;
 
 #[cfg(test)]
 #[path = "migration_test_support.rs"]
