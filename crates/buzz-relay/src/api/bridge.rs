@@ -32,6 +32,17 @@ pub(crate) fn verify_bridge_auth(
     body: Option<&[u8]>,
     require_auth_token: bool,
 ) -> Result<(nostr::PublicKey, [u8; 32]), (StatusCode, Json<Value>)> {
+    verify_bridge_auth_with_options(headers, method, url, body, require_auth_token, false)
+}
+
+pub(crate) fn verify_bridge_auth_with_options(
+    headers: &HeaderMap,
+    method: &str,
+    url: &str,
+    body: Option<&[u8]>,
+    require_auth_token: bool,
+    require_payload: bool,
+) -> Result<(nostr::PublicKey, [u8; 32]), (StatusCode, Json<Value>)> {
     // Try NIP-98 first (Authorization: Nostr <base64>)
     if let Some(auth_str) = headers
         .get("authorization")
@@ -50,6 +61,18 @@ pub(crate) fn verify_bridge_auth(
         let event: nostr::Event = serde_json::from_str(&event_json)
             .map_err(|_| api_error(StatusCode::UNAUTHORIZED, "invalid NIP-98 event JSON"))?;
         let event_id_bytes = event.id.to_bytes();
+
+        if require_payload
+            && !event
+                .tags
+                .iter()
+                .any(|tag| tag.kind() == nostr::TagKind::Payload)
+        {
+            return Err(api_error(
+                StatusCode::UNAUTHORIZED,
+                "NIP-98: missing payload tag",
+            ));
+        }
 
         let pubkey = buzz_auth::verify_nip98_event(&event_json, url, method, body)
             .map_err(|e| api_error(StatusCode::UNAUTHORIZED, &format!("NIP-98: {e}")))?;
@@ -2098,6 +2121,34 @@ mod tests {
             msg.contains("URL mismatch"),
             "rejection must carry the URL-mismatch signal so callers can \
              distinguish it from other auth failures; got body = {body:?}"
+        );
+    }
+
+    #[test]
+    fn verify_bridge_auth_can_require_payload_tag_for_json_body_endpoints() {
+        let keys = Keys::generate();
+        let signed_url = "https://host-a.example/operator/communities";
+        let event_json = build_nip98_event_json(&keys, signed_url, "POST");
+        let headers = nip98_auth_headers(&event_json);
+
+        let (status, body) = verify_bridge_auth_with_options(
+            &headers,
+            "POST",
+            signed_url,
+            Some(br#"{"host":"created.example"}"#),
+            true,
+            true,
+        )
+        .expect_err("body-bearing operator requests must require a payload tag");
+
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        let msg = body
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        assert!(
+            msg.contains("missing payload tag"),
+            "rejection should explain the payload binding failure; got body = {body:?}"
         );
     }
 

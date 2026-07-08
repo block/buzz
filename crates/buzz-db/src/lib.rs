@@ -190,6 +190,17 @@ pub struct CommunityRecord {
     pub host: String,
 }
 
+/// Community row returned by idempotent community ensure/create operations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnsuredCommunityRecord {
+    /// Stable server-resolved community id.
+    pub id: CommunityId,
+    /// Normalized host that maps to this community.
+    pub host: String,
+    /// True only when this call inserted the `communities` row.
+    pub created: bool,
+}
+
 /// Community row returned by operator-plane ownership reads.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OwnedCommunityRecord {
@@ -422,13 +433,13 @@ impl Db {
     pub async fn ensure_configured_community(
         &self,
         normalized_host: &str,
-    ) -> Result<CommunityRecord> {
+    ) -> Result<EnsuredCommunityRecord> {
         let row = sqlx::query(
             r#"
             INSERT INTO communities (host)
             VALUES ($1)
-            ON CONFLICT (lower(host)) DO UPDATE SET host = EXCLUDED.host
-            RETURNING id, host
+            ON CONFLICT (lower(host)) DO UPDATE SET host = communities.host
+            RETURNING id, host, (xmax = 0) AS created
             "#,
         )
         .bind(normalized_host)
@@ -437,10 +448,12 @@ impl Db {
 
         let id: Uuid = row.try_get("id")?;
         let host: String = row.try_get("host")?;
+        let created: bool = row.try_get("created")?;
 
-        Ok(CommunityRecord {
+        Ok(EnsuredCommunityRecord {
             id: CommunityId::from_uuid(id),
             host,
+            created,
         })
     }
 
@@ -2910,6 +2923,28 @@ mod tests {
             .expect("lookup stored-case host")
             .expect("community found by stored-case host");
         assert_eq!(found.id, CommunityId::from_uuid(id));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn ensure_configured_community_reports_insert_winner() {
+        let db = setup_db().await;
+        let host = format!("ensure-community-{}.example", Uuid::new_v4().simple());
+
+        let first = db
+            .ensure_configured_community(&host)
+            .await
+            .expect("first ensure");
+        assert!(first.created, "first ensure should report created");
+        assert_eq!(first.host, host);
+
+        let second = db
+            .ensure_configured_community(&host)
+            .await
+            .expect("second ensure");
+        assert!(!second.created, "second ensure should report existed");
+        assert_eq!(second.id, first.id);
+        assert_eq!(second.host, host);
     }
 
     #[tokio::test]
