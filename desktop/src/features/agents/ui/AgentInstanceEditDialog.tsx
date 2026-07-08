@@ -97,6 +97,9 @@ export function AgentInstanceEditDialog({
   const [relayUrl, setRelayUrl] = React.useState(agent.relayUrl);
   const [acpCommand, setAcpCommand] = React.useState(agent.acpCommand);
   const [agentCommand, setAgentCommand] = React.useState(agent.agentCommand);
+  const [originalAgentCommand, setOriginalAgentCommand] = React.useState(
+    agent.agentCommand,
+  );
   const [inheritHarness, setInheritHarness] = React.useState(
     agent.personaId != null && agent.agentCommandOverride == null,
   );
@@ -152,6 +155,7 @@ export function AgentInstanceEditDialog({
       setRelayUrl(agent.relayUrl);
       setAcpCommand(agent.acpCommand);
       setAgentCommand(agent.agentCommand);
+      setOriginalAgentCommand(agent.agentCommand);
       setInheritHarness(
         agent.personaId != null && agent.agentCommandOverride == null,
       );
@@ -230,19 +234,15 @@ export function AgentInstanceEditDialog({
     selectedRuntime?.id ?? selectedRuntimeId,
   );
 
-  // Stable snapshot: did the agent's ORIGINAL runtime support provider
-  // selection? Used by the save-gate to distinguish a legacy no-provider
-  // agent (ALREADY on a provider-capable runtime, safe to save name-only
-  // edits) from a fresh transition INTO a provider-capable runtime (which
-  // would create a provider-broken agent). Must use agent.agentCommand, NOT
-  // selectedRuntimeId or prospectiveRuntimeId — those mutate on user edits
-  // and would re-hide the defect the gate is meant to catch.
+  // Resolve the dialog-opening command as the catalog loads. Edit-state runtime
+  // ids mutate during selection changes and cannot identify the original state.
   const originalRuntimeSupportsProvider = React.useMemo(() => {
+    const originalCommand = originalAgentCommand.trim();
     const matched =
-      runtimes.find((r) => r.command?.trim() === agent.agentCommand.trim()) ??
-      runtimes.find((r) => r.id === agent.agentCommand.trim());
+      runtimes.find((r) => r.command?.trim() === originalCommand) ??
+      runtimes.find((r) => r.id === originalCommand);
     return runtimeSupportsLlmProviderSelection(matched?.id ?? "");
-  }, [runtimes, agent.agentCommand]);
+  }, [runtimes, originalAgentCommand]);
 
   // One-shot focus: when the dialog opens from a card deep-link, scroll and
   // focus the relevant field. The effect re-runs when `llmProviderFieldVisible`
@@ -1067,19 +1067,16 @@ export function AgentInstanceEditDialog({
  * Determines whether the Save button should be enabled with respect to the
  * provider field in the instance-edit dialog.
  *
- * Rules (b): An agent that never had a provider configured AND was already on
- * a provider-capable runtime stays fully editable (name, timeout, etc.) —
- * blocking Save on those legacy agents would be a regression from main's
- * behavior where provider was UX-only.
+ * Rules (b): Legacy agents that were already on a provider-capable runtime
+ * without a provider stay editable for unrelated fields. A no-provider agent
+ * that switches into a provider-capable runtime must choose a provider or rely
+ * on a global fallback.
  *
- * Four states where Save is allowed:
+ * Save is allowed when:
  * 1. Provider field is hidden — not a provider-requiring runtime, always OK.
  * 2. An effective provider resolves (per-agent or global fallback) — OK.
  * 3. The agent never had a provider AND was already on a provider-capable
  *    runtime — legacy state, don't suddenly block name/timeout edits.
- * 4. (Implicitly: agent was on a non-provider runtime.) If the user switches
- *    INTO a provider-capable runtime without setting a provider, that is
- *    blocked — it would create a provider-broken agent.
  */
 export function isEditAgentProviderSaveValid({
   llmProviderFieldVisible,
@@ -1092,20 +1089,14 @@ export function isEditAgentProviderSaveValid({
   currentProvider: string;
   originalProvider: string | null | undefined;
   globalProvider: string | null | undefined;
-  /** Whether the agent's ORIGINAL runtime (at dialog open) supported provider
-   * selection. Used to distinguish a legacy no-provider agent already on a
-   * provider-capable runtime (safe to save name-only edits) from a fresh
-   * transition INTO a provider-capable runtime (which must set a provider). */
   originalRuntimeSupportsProvider: boolean;
 }): boolean {
   if (!llmProviderFieldVisible) return true;
   const effectiveProvider =
     currentProvider.trim() || (globalProvider ?? "").trim();
   if (effectiveProvider.length > 0) return true;
-  // No effective provider. Allow only when the agent never had one AND was
-  // already on a provider-capable runtime (legacy state — don't block
-  // unrelated edits). A switch INTO a provider-capable runtime must set a
-  // provider, so we block when originalRuntimeSupportsProvider is false.
+  // No effective provider. Allow only legacy no-provider agents that were
+  // already on a provider-capable runtime when the dialog opened.
   const hadProvider = (originalProvider ?? "").trim().length > 0;
   return !hadProvider && originalRuntimeSupportsProvider;
 }

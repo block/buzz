@@ -54,11 +54,11 @@ test("isEditAgentProviderSaveValid_legacyNoProvider_nullOriginal_providerRuntime
   );
 });
 
-// ── fresh transition INTO a provider-capable runtime (Thufir's hole) ────────
+// ── fresh transition into a provider-capable runtime ────────────────────────
 
 test("isEditAgentProviderSaveValid_noProvider_switchedToProviderRuntime_blocked", () => {
   // Agent started on a non-provider runtime; user switched dropdown to goose;
-  // provider stays empty. Must be BLOCKED — would create a provider-broken agent.
+  // provider stays empty. Save is blocked to avoid a provider-broken agent.
   assert.equal(
     isEditAgentProviderSaveValid({
       llmProviderFieldVisible: visible,
