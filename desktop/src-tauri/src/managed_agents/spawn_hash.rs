@@ -33,6 +33,25 @@ use super::{
     types::{ManagedAgentRecord, PersonaRecord},
 };
 
+/// The prompt a spawn would actually deliver: `Some("")` collapses to `None`
+/// because an empty BUZZ_ACP_SYSTEM_PROMPT is no prompt — EXCEPT for
+/// team-pack records, where buzz-acp falls back to the pack persona's prompt
+/// when the env var is absent, making set-but-empty a deliberate suppression.
+///
+/// The single source of truth for the spawn env write AND the config hash:
+/// both call this, so they cannot disagree (the hash's contract is "digest
+/// what a spawn would actually run"). B5 hash row 2 depends on the collapse:
+/// backfilled prompt-less records re-snapshot to `Some("")` from their
+/// manufactured definition and must not trip the restart badge.
+pub(crate) fn effective_spawn_prompt(record: &ManagedAgentRecord) -> Option<String> {
+    let has_pack_fallback =
+        record.persona_team_dir.is_some() && record.persona_name_in_team.is_some();
+    record
+        .system_prompt
+        .clone()
+        .filter(|p| has_pack_fallback || !p.is_empty())
+}
+
 /// Digest the effective spawn configuration of `record` under the current
 /// `personas`, resolving a blank record relay against `workspace_relay`.
 /// Pure — no `AppHandle`, no disk, no keyring.
@@ -91,15 +110,9 @@ pub(crate) fn spawn_config_hash(
     // resolved: a blank record relay spawns on the workspace relay, so a
     // workspace relay change must trip the badge.
     crate::relay::effective_agent_relay_url(&record.relay_url, workspace_relay).hash(&mut hasher);
-    // Empty-filtered to mirror the spawn env write: `Some("")` and `None`
-    // both spawn with BUZZ_ACP_SYSTEM_PROMPT absent, so they must hash
-    // equal (B5 hash row 2 — backfilled prompt-less records re-snapshot to
-    // `Some("")` and must not trip the badge).
-    record
-        .system_prompt
-        .as_deref()
-        .filter(|p| !p.is_empty())
-        .hash(&mut hasher);
+    // Prompt via the shared spawn-effective filter (see its doc for the
+    // Some("")/None collapse and the team-pack exception).
+    effective_spawn_prompt(record).hash(&mut hasher);
     record.model.hash(&mut hasher);
     record.provider.hash(&mut hasher);
     record.auth_tag.hash(&mut hasher);
