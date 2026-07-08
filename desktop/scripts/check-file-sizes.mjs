@@ -217,7 +217,11 @@ const overrides = new Map([
   // +33 for config-nudge detect-and-render + author-auth gate (normalizePubkey guard).
   ["src/shared/ui/markdown.tsx", 2152],
   ["src/shared/ui/VideoPlayer.tsx", 2199],
-  ["src/shared/ui/sidebar.tsx", 1042],
+  // +1: mobile Sidebar branch forwards the app-sidebar marker (and the rest of
+  // the container props) onto SheetContent instead of the DOM-less Sheet root,
+  // so the Buzz sidebar CSS overrides reach the portaled offcanvas sheet.
+  // Load-bearing correctness fix, not generic debt. Queued to split.
+  ["src/shared/ui/sidebar.tsx", 1043],
   // permission-outcome (fix #1381 regression): pendingPermissions state map,
   // describePermissionOutcome helper, jsonRpcId key helper (handles both
   // string and finite-number JSON-RPC ids per spec), and the acp_write

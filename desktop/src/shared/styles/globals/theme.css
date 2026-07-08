@@ -297,6 +297,12 @@
  * the selected persona row in PersonaCatalogDialog). A root-level override
  * turned those white (white-on-white under Buzz Dark); scoping keeps them on
  * the normal accent-driven active colors.
+ *
+ * Covers the mobile/offcanvas sidebar too: `Sidebar` (shared/ui/sidebar.tsx)
+ * renders the `data-testid="app-sidebar"` marker on `SheetContent` in its
+ * mobile branch, so this container scope — and every other
+ * `[data-testid="app-sidebar"]` rule below (hover, search box) — reaches the
+ * portaled sheet, not just the desktop `<div>` sidebar.
  */
 :root[data-buzz-sidebar] [data-testid="app-sidebar"] {
   --sidebar-active: 0 0% 100% !important;
