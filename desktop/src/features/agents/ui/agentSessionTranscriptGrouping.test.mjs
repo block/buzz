@@ -860,3 +860,162 @@ test("isObserverEventAfter returns false for same timestamp, lower seq", () => {
   const candidate = { timestamp: "2026-07-08T00:00:01.000Z", seq: 3 };
   assert.ok(!isObserverEventAfter(candidate, stored));
 });
+
+// ── Pre-resolution null-session deferral (regression for first-turn bundle) ───
+
+/**
+ * Builds the exact wire sequence the harness emits on the first turn:
+ *   turn_started(null) → session/new(null) → session_resolved(sess) → session/prompt(sess)
+ *
+ * After processTranscriptEvent the TranscriptItems produced are:
+ *   - lifecycle turn_started: sessionId=null, turnId="turn-001"
+ *   - metadata session/new (system prompt): sessionId=null, turnId=null
+ *   - lifecycle session_resolved: sessionId="session-001", turnId="turn-001"
+ *   - message session/prompt:user: sessionId="session-001", turnId="turn-001"
+ */
+function firstTurnSequence() {
+  const ts = "2026-07-08T10:00:00.000Z";
+  return [
+    // turn_started: sessionId null, turnId present
+    {
+      id: "turn-started",
+      type: "lifecycle",
+      renderClass: "lifecycle",
+      title: "Turn started",
+      text: "",
+      timestamp: ts,
+      acpSource: "turn_started",
+      turnId: "turn-001",
+      sessionId: null,
+      channelId: "chan-1",
+    },
+    // session/new system prompt: sessionId null, turnId null (processTranscriptEvent forces turnId null)
+    {
+      id: "system-prompt:chan-1",
+      type: "metadata",
+      renderClass: "raw-rail",
+      title: "System prompt",
+      sections: [
+        { title: "Base", body: "You are a helpful AI assistant." },
+        { title: "System", body: "You are Observer Agent." },
+      ],
+      timestamp: ts,
+      acpSource: "session/new",
+      turnId: null,
+      sessionId: null,
+      channelId: "chan-1",
+    },
+    // session_resolved: first item with a non-null sessionId
+    {
+      id: "session-resolved",
+      type: "lifecycle",
+      renderClass: "lifecycle",
+      title: "Session ready",
+      text: "",
+      timestamp: ts,
+      acpSource: "session_resolved",
+      turnId: "turn-001",
+      sessionId: "session-001",
+      channelId: "chan-1",
+    },
+    // session/prompt:user — the user message bubble
+    {
+      id: "user-prompt",
+      type: "message",
+      role: "user",
+      title: "Buzz event",
+      text: "@Observer Agent help me debug this",
+      timestamp: ts,
+      acpSource: "session/prompt:user",
+      turnId: "turn-001",
+      sessionId: "session-001",
+      channelId: "chan-1",
+    },
+  ];
+}
+
+test("buildTranscriptDisplayBlocks_firstTurnSequence_noStandaloneSystemPrompt", () => {
+  // Regression for: pre-resolution null-session items (turn_started + session/new)
+  // were assigned to a synthetic "unknown" run, causing the system prompt to emit
+  // as a standalone "System prompt" row instead of staying in the prompt bundle.
+  const blocks = buildTranscriptDisplayBlocks(firstTurnSequence());
+
+  // (a) No standalone "System prompt" single block.
+  const systemPromptSingles = blocks.filter(
+    (b) => b.kind === "single" && b.item.acpSource === "session/new",
+  );
+  assert.equal(
+    systemPromptSingles.length,
+    0,
+    "system prompt must not appear as a standalone single block",
+  );
+
+  // (b) No session-boundary blocks — this is a single-session transcript.
+  const boundaryBlocks = blocks.filter((b) => b.kind === "session-boundary");
+  assert.equal(
+    boundaryBlocks.length,
+    0,
+    "must be zero session-boundary blocks for a first-turn single-session sequence",
+  );
+
+  // (c) System prompt is inside the turn group (consumed by the prompt bundle).
+  const turnBlocks = blocks.filter((b) => b.kind === "turn");
+  assert.ok(turnBlocks.length > 0, "at least one turn block must exist");
+  const allTurnItems = flattenDisplayBlocks(turnBlocks);
+  const systemPromptInTurn = allTurnItems.some(
+    (item) => item.acpSource === "session/new",
+  );
+  assert.ok(
+    systemPromptInTurn,
+    "system prompt item must be present inside a turn block (prompt bundle)",
+  );
+});
+
+test("buildTranscriptDisplayBlocks_genuineSecondSession_boundaryPreserved", () => {
+  // Regression guard: the deferral fix must not over-collapse two genuinely
+  // distinct sessions. A second session_resolved with a different sessionId
+  // still gets its own run and a session-boundary block.
+  const ts2 = "2026-07-08T11:00:00.000Z";
+  const items = [
+    // First session (may have pre-resolution preamble)
+    ...firstTurnSequence(),
+    // Second session — starts fresh with its own turn_started (no pre-null preamble here)
+    {
+      id: "turn-started-2",
+      type: "lifecycle",
+      renderClass: "lifecycle",
+      title: "Turn started",
+      text: "",
+      timestamp: ts2,
+      acpSource: "turn_started",
+      turnId: "turn-002",
+      sessionId: "session-002",
+      channelId: "chan-1",
+    },
+    {
+      id: "user-prompt-2",
+      type: "message",
+      role: "user",
+      title: "Buzz event",
+      text: "second session message",
+      timestamp: ts2,
+      acpSource: "session/prompt:user",
+      turnId: "turn-002",
+      sessionId: "session-002",
+      channelId: "chan-1",
+    },
+  ];
+
+  const blocks = buildTranscriptDisplayBlocks(items);
+  const boundaryBlocks = blocks.filter((b) => b.kind === "session-boundary");
+  assert.equal(
+    boundaryBlocks.length,
+    1,
+    "exactly one session-boundary block between two distinct sessions",
+  );
+  assert.equal(
+    boundaryBlocks[0].sessionId,
+    "session-002",
+    "boundary is labeled with the newer session id",
+  );
+});

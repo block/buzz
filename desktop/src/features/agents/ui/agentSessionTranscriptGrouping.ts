@@ -377,8 +377,22 @@ function getRenderClass(item: TranscriptItem) {
 
 /**
  * Split a flat, time-ordered array of TranscriptItems into contiguous session
- * runs. Items with a null sessionId are attributed to the most recently seen
- * session (or a synthetic "unknown" run if no session has appeared yet).
+ * runs keyed by `sessionId`.
+ *
+ * **Null-session handling**: the real first-turn wire sequence is
+ * `turn_started(null) → session/new(null) → session_resolved(sess-X) → …`.
+ * Pre-resolution items arrive with `sessionId: null` before any session has
+ * been assigned. We defer those leading null-session items and **prepend them
+ * to the first run that has a non-null sessionId**, so they stay in the same
+ * session run as the turn they belong to and the `pendingSystemPrompt` slot in
+ * `buildBlocksForRun` can consume them correctly.
+ *
+ * Mid-stream null-session items (after at least one session has resolved) are
+ * attributed to the most recently seen session run — same as before, this
+ * handles gap frames that arrive after resolution.
+ *
+ * Only if the entire stream is null-session (no session ever resolves) do the
+ * deferred items form a single fallback run keyed `"unknown"`.
  *
  * A new run begins whenever the sessionId changes to a distinct non-null value.
  */
@@ -387,17 +401,41 @@ function splitIntoSessionRuns(
 ): Array<{ sessionId: string; items: TranscriptItem[] }> {
   const runs: Array<{ sessionId: string; items: TranscriptItem[] }> = [];
   let currentRun: { sessionId: string; items: TranscriptItem[] } | null = null;
+  // Buffer for items that arrive before any session has resolved.
+  const preSessionBuffer: TranscriptItem[] = [];
 
   for (const item of items) {
-    const sid: string = item.sessionId ?? currentRun?.sessionId ?? "unknown";
-    if (
-      !currentRun ||
-      (item.sessionId && item.sessionId !== currentRun.sessionId)
-    ) {
-      currentRun = { sessionId: sid, items: [] };
+    if (item.sessionId === null || item.sessionId === undefined) {
+      if (currentRun === null) {
+        // No session resolved yet — defer into the pre-session buffer.
+        preSessionBuffer.push(item);
+      } else {
+        // Session already resolved — attribute to current run.
+        currentRun.items.push(item);
+      }
+      continue;
+    }
+
+    // item.sessionId is non-null from here.
+    if (!currentRun || item.sessionId !== currentRun.sessionId) {
+      const newRun: { sessionId: string; items: TranscriptItem[] } = {
+        sessionId: item.sessionId,
+        items: [],
+      };
+      if (currentRun === null && preSessionBuffer.length > 0) {
+        // First resolved session: prepend buffered pre-resolution items.
+        newRun.items.push(...preSessionBuffer);
+        preSessionBuffer.length = 0;
+      }
+      currentRun = newRun;
       runs.push(currentRun);
     }
     currentRun.items.push(item);
+  }
+
+  // Entire stream was null-session (no session ever resolved): emit as one run.
+  if (currentRun === null && preSessionBuffer.length > 0) {
+    runs.push({ sessionId: "unknown", items: preSessionBuffer });
   }
 
   return runs;
