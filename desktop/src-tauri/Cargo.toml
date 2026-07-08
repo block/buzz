@@ -110,3 +110,7 @@ tempfile = "3"
 strip-ansi-escapes = "0.2"
 
 [dev-dependencies]
+
+# CI-experiment (canary): shrink debug binaries — suspected Windows loader size cliff
+[profile.dev]
+debug = "line-tables-only"

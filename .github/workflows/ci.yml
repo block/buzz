@@ -897,6 +897,21 @@ jobs:
           }
           Write-Host "=== IMPORTS (per-DLL function list) ==="
           & $dumpbin.FullName /imports $exe.FullName
+          Write-Host "=== GETPROCADDRESS PROBE (catches forwarded-export gaps) ==="
+          Add-Type -Name K32 -Namespace W -MemberDefinition '
+          [DllImport("kernel32", SetLastError=true, CharSet=CharSet.Ansi)] public static extern IntPtr LoadLibraryA(string n);
+          [DllImport("kernel32", SetLastError=true, CharSet=CharSet.Ansi)] public static extern IntPtr GetProcAddress(IntPtr h, string f);'
+          $cur = $null
+          (& $dumpbin.FullName /imports $exe.FullName) | ForEach-Object {
+            if ($_ -match '^\s+(\S+\.dll)\s*$') { $cur = $Matches[1] }
+            elseif ($cur -and $_ -match '^\s+[0-9A-F]+\s+([A-Za-z_][A-Za-z0-9_]*)\s*$') {
+              $fn = $Matches[1]
+              $h = [W.K32]::LoadLibraryA($cur)
+              if ($h -eq [IntPtr]::Zero) { Write-Host "NOLIB $cur"; $cur = $null; return }
+              if ([W.K32]::GetProcAddress($h, $fn) -eq [IntPtr]::Zero) { Write-Host "MISSING $cur :: $fn" }
+            }
+          }
+          Write-Host "probe done"
 
   desktop-build-macos:
     name: Desktop Build (macOS)
