@@ -5,7 +5,7 @@ import type {
   UpdatePersonaInput,
 } from "@/shared/api/types";
 import { PersonaDeleteDialog } from "@/features/agents/ui/PersonaDeleteDialog";
-import { AgentDefinitionDialog } from "@/features/agents/ui/AgentDefinitionDialog";
+import { AgentDialog } from "@/features/agents/ui/AgentDialog";
 import type { PersonaDialogState } from "@/features/agents/ui/personaDialogState";
 
 export function UserProfilePersonaDialogs({
@@ -35,11 +35,12 @@ export function UserProfilePersonaDialogs({
 }) {
   return (
     <>
-      <AgentDefinitionDialog
+      <AgentDialog
         description={personaDialogState?.description ?? ""}
         error={updateError ?? createError}
         initialValues={personaDialogState?.initialValues ?? null}
         isPending={isPending}
+        mode="definition-edit"
         runtimes={runtimes}
         runtimesLoading={runtimesLoading}
         onOpenChange={(open) => {

@@ -8,7 +8,6 @@ import { AddTeamToChannelDialog } from "./AddTeamToChannelDialog";
 import { AgentDialog, type AgentDialogCreateMode } from "./AgentDialog";
 import { BatchImportDialog } from "./BatchImportDialog";
 import { PersonaCatalogDialog } from "./PersonaCatalogDialog";
-import { AgentDefinitionDialog } from "./AgentDefinitionDialog";
 import { PersonaDeleteDialog } from "./PersonaDeleteDialog";
 import { PersonaImportUpdateDialog } from "./PersonaImportUpdateDialog";
 import { PersonaShareDialog } from "./PersonaShareDialog";
@@ -30,8 +29,7 @@ export function AgentsView() {
   const agents = useManagedAgentActions();
   const personas = usePersonaActions();
   // Exclusivity: create never sets `personaDialogState` (edit/dup/import do),
-  // so the unified create dialog and the edit/dup/import AgentDefinitionDialog
-  // mount never coexist.
+  // so the create-mode and definition-edit AgentDialog mounts never coexist.
   const [createDialogMode, setCreateDialogMode] =
     React.useState<AgentDialogCreateMode | null>(null);
 
@@ -241,7 +239,7 @@ export function AgentsView() {
         />
       ) : null}
       {personas.personaDialogState ? (
-        <AgentDefinitionDialog
+        <AgentDialog
           description={personas.personaDialogState.description}
           error={
             personas.updatePersonaMutation.error instanceof Error
@@ -255,6 +253,7 @@ export function AgentsView() {
             personas.personaImportActions.isApplyingPersonaImportUpdate
           }
           isPending={personas.isPending}
+          mode="definition-edit"
           runtimes={personas.acpRuntimesQuery.data ?? []}
           runtimesLoading={personas.acpRuntimesQuery.isLoading}
           onImportUpdateFile={
