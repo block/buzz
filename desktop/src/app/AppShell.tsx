@@ -619,6 +619,7 @@ export function AppShell() {
             threadActivityItems,
             threadActivityFeedItems,
             feedItemState,
+            onOpenSettings: handleOpenSettings,
           }}
         >
           <HuddleProvider>

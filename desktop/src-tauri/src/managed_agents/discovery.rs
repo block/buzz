@@ -678,7 +678,7 @@ pub fn login_shell_path() -> Option<String> {
         .clone()
 }
 
-fn find_command(command: &str) -> Option<PathBuf> {
+pub(crate) fn find_command(command: &str) -> Option<PathBuf> {
     resolve_command(command)
 }
 
@@ -701,7 +701,7 @@ pub fn missing_command_message(command: &str, role: &str) -> String {
     )
 }
 
-fn classify_runtime(
+pub(crate) fn classify_runtime(
     adapter_result: Option<(&str, PathBuf)>,
     underlying_cli: Option<&str>,
     underlying_cli_found: bool,

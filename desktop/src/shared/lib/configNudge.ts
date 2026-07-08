@@ -25,6 +25,19 @@ export type ConfigNudgeRequirement =
       surface: "cli_login";
       probe_args: string[];
       setup_copy: string;
+      /**
+       * Granular install/auth state — mirrors `AcpAvailabilityStatus` from Rust.
+       * Determines which message and CTA the nudge card shows:
+       * - "available"         → tooling installed, needs login
+       * - "adapter_missing"   → CLI installed but ACP adapter missing
+       * - "cli_missing"       → ACP adapter installed but CLI missing
+       * - "not_installed"     → neither adapter nor CLI found
+       */
+      availability:
+        | "available"
+        | "adapter_missing"
+        | "cli_missing"
+        | "not_installed";
     };
 
 /**
@@ -114,7 +127,11 @@ function isConfigNudgeRequirement(v: unknown): v is ConfigNudgeRequirement {
       return (
         Array.isArray(r.probe_args) &&
         r.probe_args.every((a) => typeof a === "string") &&
-        typeof r.setup_copy === "string"
+        typeof r.setup_copy === "string" &&
+        (r.availability === "available" ||
+          r.availability === "adapter_missing" ||
+          r.availability === "cli_missing" ||
+          r.availability === "not_installed")
       );
     default:
       return false;

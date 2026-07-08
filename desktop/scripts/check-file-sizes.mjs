@@ -116,7 +116,11 @@ const overrides = new Map([
   // +2 readiness integration tests for flat-DATABRICKS_HOST canonicalization fix.
   // +1 cargo fmt whitespace reformat (readiness.rs closures inline after rebase).
   // +2 unit tests for cli_login_requirements resolve_command integration (DMG PATH fix).
-  ["src-tauri/src/managed_agents/readiness.rs", 1215],
+  // Doctor-CTA: reworked cli_login_requirements to carry AcpAvailabilityStatus,
+  // skip login probe for not-installed/adapter-missing/cli-missing states, and
+  // added 4 unit tests covering each arm. Load-bearing discoverability fix.
+  // Updated existing codex_not_ready test to use make_cli_runtime stub.
+  ["src-tauri/src/managed_agents/readiness.rs", 1370],
   // applyWorkspace reposDir parameter plus the validateReposDir binding,
   // threaded through Tauri invokes for configurable repos_dir, plus the
   // harness-persona-sync `harnessOverride` create-input bit — load-bearing
