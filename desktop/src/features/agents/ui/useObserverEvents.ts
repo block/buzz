@@ -52,6 +52,37 @@ export function useAgentTranscript(
   return React.useSyncExternalStore(subscribeToStore, getSnapshot);
 }
 
+/**
+ * Live transcripts for several agents at once, index-aligned with
+ * `agentPubkeys`. The snapshot is cached so `useSyncExternalStore` only sees
+ * a new array when at least one underlying per-agent transcript changed —
+ * required to avoid render loops.
+ */
+export function useAgentTranscripts(
+  enabled: boolean,
+  agentPubkeys: readonly string[],
+): TranscriptItem[][] {
+  const cacheRef = React.useRef<TranscriptItem[][] | null>(null);
+
+  const getSnapshot = React.useCallback(() => {
+    const next = agentPubkeys.map((pubkey) =>
+      getAgentTranscript(pubkey, enabled),
+    );
+    const cached = cacheRef.current;
+    if (
+      cached &&
+      cached.length === next.length &&
+      cached.every((transcript, index) => transcript === next[index])
+    ) {
+      return cached;
+    }
+    cacheRef.current = next;
+    return next;
+  }, [agentPubkeys, enabled]);
+
+  return React.useSyncExternalStore(subscribeToStore, getSnapshot);
+}
+
 const ARCHIVED_EVENTS_PAGE_SIZE = 50;
 
 /**
