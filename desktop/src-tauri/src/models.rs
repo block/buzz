@@ -6,6 +6,17 @@ use serde::{Deserialize, Deserializer, Serialize};
 pub struct IdentityInfo {
     pub pubkey: String,
     pub display_name: String,
+    /// True when the app booted with an ephemeral key because the OS keyring
+    /// was empty despite a prior successful migration (key was externally
+    /// deleted). The frontend routes to the nsec re-import step when true.
+    /// Mutually exclusive with `locked`.
+    pub lost: bool,
+    /// True when the app booted with an ephemeral key because the OS keyring
+    /// holding the identity is unreachable this boot (keyring locked or
+    /// unavailable). The real key still exists in the keyring; the frontend
+    /// shows a "unlock the keyring and relaunch" screen. Mutually exclusive
+    /// with `lost`.
+    pub locked: bool,
 }
 
 #[derive(Serialize, Deserialize)]

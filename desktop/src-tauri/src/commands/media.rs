@@ -208,7 +208,7 @@ async fn do_upload(
     };
     let base_url = relay_api_base_url_with_override(state);
     let auth_event = {
-        let keys = state.keys.lock().map_err(|e| e.to_string())?;
+        let keys = state.signing_keys()?;
         sign_blossom_upload_auth(&keys, &sha256, expiry_secs, &base_url)?
     };
 

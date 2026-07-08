@@ -133,7 +133,9 @@ const overrides = new Map([
   // baked-env-required-badge: getBakedBuildEnvKeys wrapper adds ~16 lines. Queued to split.
   // restart-badge: started the queued split — start/stopManagedAgent moved to
   // tauriManagedAgents.ts; limit ratcheted down 1388 → 1380 to bank the headroom.
-  ["src/shared/api/tauri.ts", 1380],
+  // identity-import-keyring: `lost`/`locked` fields in RawIdentity + getIdentity/
+  // importIdentity mappings + persistCurrentIdentity() command (merged total 1398).
+  ["src/shared/api/tauri.ts", 1398],
   // readiness-gate: PersonaDialog.tsx threads computeLocalModeGate +
   // requiredCredentialEnvKeys + RequiredFieldLabel so the "New agent" dialog
   // shows required markers and credential amber rows (parity with
@@ -198,7 +200,6 @@ const overrides = new Map([
   // uid-keyed lockfile path + behavioral tests add ~303 lines. Load-bearing
   // security fix for the lost-update race that stranded agent keys.
   ["src-tauri/src/secret_store.rs", 1043],
-  ["src-tauri/src/app_state.rs", 1033],
   // multi-slot splitting + no-op suppression (#1309): the ReadStateManager
   // class grew from ~700 lines to ~1019 with the addition of
   // splitContextsIntoBudgetedSlots (pure fn + 5 tests), publishSplitSlots,

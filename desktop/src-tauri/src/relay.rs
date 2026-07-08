@@ -486,14 +486,14 @@ pub async fn submit_event(
     // so the MutexGuard is dropped and the future remains Send.
     let url = format!("{}/events", relay_api_base_url_with_override(state));
     let (auth_header, body_bytes) = {
-        let keys = state.keys.lock().map_err(|e| e.to_string())?;
+        let keys = state.signing_keys()?;
         let event = builder
             .sign_with_keys(&keys)
             .map_err(|e| format!("failed to sign event: {e}"))?;
         let body = event.as_json().into_bytes();
         let auth = build_nip98_auth_header_for_keys(&keys, &Method::POST, &url, &body)?;
         (auth, body)
-    }; // keys lock dropped here
+    }; // keys dropped here
 
     let response = state
         .http_client
@@ -532,9 +532,9 @@ pub async fn submit_signed_event(
     let url = format!("{}/events", relay_api_base_url_with_override(state));
     let body_bytes = event.as_json().into_bytes();
     let auth_header = {
-        let keys = state.keys.lock().map_err(|e| e.to_string())?;
+        let keys = state.signing_keys()?;
         build_nip98_auth_header_for_keys(&keys, &Method::POST, &url, &body_bytes)?
-    }; // keys lock dropped here
+    }; // keys dropped here
 
     let response = state
         .http_client

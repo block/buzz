@@ -50,7 +50,12 @@ import type {
   RuntimeConfigSurface,
 } from "@/shared/api/types";
 
-type RawIdentity = { pubkey: string; display_name: string };
+type RawIdentity = {
+  pubkey: string;
+  display_name: string;
+  lost?: boolean;
+  locked?: boolean;
+};
 
 type RawProfile = {
   pubkey: string;
@@ -462,6 +467,8 @@ export async function getIdentity(): Promise<Identity> {
   return {
     pubkey: identity.pubkey,
     displayName: identity.display_name,
+    lost: identity.lost === true,
+    locked: identity.locked === true,
   };
 }
 
@@ -471,7 +478,22 @@ export async function getNsec(): Promise<string> {
 
 export async function importIdentity(nsec: string): Promise<Identity> {
   const raw = await invokeTauri<RawIdentity>("import_identity", { nsec });
-  return { pubkey: raw.pubkey, displayName: raw.display_name };
+  return {
+    pubkey: raw.pubkey,
+    displayName: raw.display_name,
+    lost: false,
+    locked: false,
+  };
+}
+
+export async function persistCurrentIdentity(): Promise<Identity> {
+  const raw = await invokeTauri<RawIdentity>("persist_current_identity");
+  return {
+    pubkey: raw.pubkey,
+    displayName: raw.display_name,
+    lost: false,
+    locked: false,
+  };
 }
 
 export async function getProfile(): Promise<Profile> {

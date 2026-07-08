@@ -122,6 +122,7 @@ type OnboardingGateStage = "blocking" | "onboarding" | "ready";
 type UseFirstRunOnboardingGateOptions = {
   currentPubkey: string | null;
   identityIsFetching: boolean;
+  identityLost: boolean;
   identityStatus: QueryStatus;
   isSharedIdentity: boolean;
   profileHasEvent: boolean | undefined;
@@ -217,6 +218,7 @@ function resolveOnboardingGateStage({
 export function useFirstRunOnboardingGate({
   currentPubkey,
   identityIsFetching,
+  identityLost,
   identityStatus,
   isSharedIdentity,
   profileHasEvent,
@@ -237,6 +239,23 @@ export function useFirstRunOnboardingGate({
         : createOnboardingGateState(currentPubkey),
     );
   }, [currentPubkey]);
+
+  // When the backend signals "identity lost" (keyring was cleared after a
+  // successful migration), force onboarding open immediately so the user can
+  // re-import their nsec. This runs once, after identity settles.
+  React.useEffect(() => {
+    if (!identityLost || !currentPubkey || identityStatus !== "success") {
+      return;
+    }
+    setGateState((current) =>
+      updateActiveGateState(current, currentPubkey, (activeGateState) => ({
+        ...activeGateState,
+        hasCompletedCurrentPubkey: false,
+        hasSettledCurrentPubkey: true,
+        isOpen: true,
+      })),
+    );
+  }, [currentPubkey, identityLost, identityStatus]);
 
   React.useEffect(() => {
     // Fast-path: shared identity worktrees have already onboarded in the
@@ -389,10 +408,27 @@ export function useAppOnboardingState(isSharedIdentity: boolean) {
   );
   const [isCompletingWelcomeSetup, setIsCompletingWelcomeSetup] =
     React.useState(false);
-  const profileQuery = useProfileQuery();
+  const identityLost = identity?.lost === true;
+  // Keyring unreachable at boot — the real key is still in the OS keyring but
+  // the session cannot access it. No in-app recovery is possible; the user
+  // must unlock the keyring externally and relaunch. Mutually exclusive with lost.
+  const identityLocked = identity?.locked === true;
+
+  // Sticky boot fact: once identity was lost at boot, this remains true for the
+  // entire session. Per-component state in OnboardingFlow cannot carry this
+  // because the flow remounts when pubkey changes after recovery.
+  const [bootedLost, setBootedLost] = React.useState(false);
+  React.useEffect(() => {
+    if (identityLost) setBootedLost(true);
+  }, [identityLost]);
+
+  const profileQuery = useProfileQuery(
+    !identityLost && !identityLocked && identityQuery.status === "success",
+  );
   const onboardingGate = useFirstRunOnboardingGate({
     currentPubkey,
     identityIsFetching: identityQuery.fetchStatus === "fetching",
+    identityLost,
     identityStatus: identityQuery.status,
     isSharedIdentity,
     profileHasEvent: profileQuery.data?.hasProfileEvent,
@@ -469,9 +505,26 @@ export function useAppOnboardingState(isSharedIdentity: boolean) {
     },
   };
 
+  // Recovery completed this boot: force a relaunch screen regardless of any
+  // other gate state. Backend startup routines (event sync, agent restore,
+  // pending-event flush) were skipped for the ephemeral key and cannot restart
+  // in-process, so nothing else can proceed until the app restarts.
+  const relaunchRequired =
+    bootedLost && !identityLost && identityQuery.status === "success";
+
   return {
     currentPubkey,
     flow,
-    stage: isCompletingWelcomeSetup ? "blocking" : onboardingGate.stage,
+    identityLost,
+    // keyring-locked is the highest-precedence stage: nothing in-session can
+    // clear a locked keyring, so this fully blocks the UI until relaunch.
+    stage:
+      identityLocked && identityQuery.status === "success"
+        ? ("keyring-locked" as const)
+        : relaunchRequired
+          ? ("relaunch-required" as const)
+          : isCompletingWelcomeSetup
+            ? ("blocking" as const)
+            : onboardingGate.stage,
   };
 }
