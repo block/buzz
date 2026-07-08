@@ -749,12 +749,20 @@ fn apply_inbound_managed_agent(
 ) {
     if let Some(local) = agents.iter_mut().find(|record| record.pubkey == d_tag) {
         local.name = inbound.name;
+        // Mirror of the slimmed writer (agent_event_content): a
+        // definition-linked event omits the definition quad because those
+        // fields resolve through the kind:30175 definition — absent means
+        // "not carried", never "clear". Definition-less events still carry
+        // the quad and apply it unconditionally (including clears).
+        let definition_linked = inbound.persona_id.is_some();
         local.persona_id = inbound.persona_id;
-        local.system_prompt = inbound.system_prompt;
-        local.model = inbound.model;
-        local.provider = inbound.provider;
+        if !definition_linked {
+            local.system_prompt = inbound.system_prompt;
+            local.model = inbound.model;
+            local.provider = inbound.provider;
+            local.persona_source_version = inbound.persona_source_version;
+        }
         local.mcp_toolsets = inbound.mcp_toolsets;
-        local.persona_source_version = inbound.persona_source_version;
         local.parallelism = inbound.parallelism;
         local.respond_to = inbound.respond_to;
         local.respond_to_allowlist = inbound.respond_to_allowlist;

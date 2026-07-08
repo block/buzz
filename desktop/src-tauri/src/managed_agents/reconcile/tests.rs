@@ -219,3 +219,41 @@ fn monotonic_bump_supersedes_future_dated_head() {
         .unwrap();
     assert!(row.content.contains("New prompt after skew"));
 }
+
+/// The slimming transition: a definition-linked record whose retained row
+/// holds the legacy fat projection republishes ONCE (the slimmed shape), and
+/// the second boot is a true no-op — the republish wave is one-time.
+#[test]
+fn slimming_republish_wave_is_one_time() {
+    let dir = TempDir::new().unwrap();
+    let keys = nostr::Keys::generate();
+    let mut record = sample_record("e".repeat(64).as_str(), "agent-five");
+    record.persona_id = Some("persona-1".to_string());
+    record.persona_source_version = Some("abc123".to_string());
+    write_store(&dir, &[record]);
+
+    // First boot after upgrade: projection content changed (fat -> slim) so
+    // the agent republishes.
+    assert_eq!(reconcile_agents_in_dir(dir.path(), &keys).unwrap(), 1);
+    let conn = open_retention_db(&dir.path().join("retention.db")).unwrap();
+    let row = get_retained_event(
+        &conn,
+        KIND_MANAGED_AGENT,
+        &keys.public_key().to_hex(),
+        &"e".repeat(64),
+    )
+    .unwrap()
+    .unwrap();
+    assert!(
+        !row.content.contains("system_prompt"),
+        "definition-linked retained content must be the slimmed shape"
+    );
+    drop(conn);
+
+    // Second boot: identical projection — a true no-op, no republish loop.
+    assert_eq!(
+        reconcile_agents_in_dir(dir.path(), &keys).unwrap(),
+        0,
+        "second boot must be a no-op (idempotence)"
+    );
+}

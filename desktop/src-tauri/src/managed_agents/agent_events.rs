@@ -70,14 +70,39 @@ pub struct ManagedAgentEventContent {
 /// operational start/stop produces an identical projection and never
 /// republishes.
 pub fn agent_event_content(record: &ManagedAgentRecord) -> ManagedAgentEventContent {
+    // Slimmed projection (NIP-AP "Slimming: kind:30177"): definition-linked
+    // instances resolve prompt/model/provider/source_version through their
+    // kind:30175 definition, so those fields are omitted from the wire.
+    // Definition-less instances ARE their own definition and keep emitting
+    // the quad — old readers parse a slimmed event successfully and would
+    // otherwise overwrite their local snapshot with absent values, with no
+    // restore path. This branch retires once every record is
+    // definition-backed (B5 backfill).
+    let definition_linked = record.persona_id.is_some();
     ManagedAgentEventContent {
         name: record.name.clone(),
         persona_id: record.persona_id.clone(),
-        system_prompt: record.system_prompt.clone(),
-        model: record.model.clone(),
-        provider: record.provider.clone(),
+        system_prompt: if definition_linked {
+            None
+        } else {
+            record.system_prompt.clone()
+        },
+        model: if definition_linked {
+            None
+        } else {
+            record.model.clone()
+        },
+        provider: if definition_linked {
+            None
+        } else {
+            record.provider.clone()
+        },
         mcp_toolsets: record.mcp_toolsets.clone(),
-        persona_source_version: record.persona_source_version.clone(),
+        persona_source_version: if definition_linked {
+            None
+        } else {
+            record.persona_source_version.clone()
+        },
         parallelism: record.parallelism,
         respond_to: record.respond_to,
         respond_to_allowlist: record.respond_to_allowlist.clone(),
@@ -266,7 +291,41 @@ mod tests {
         assert!(json.contains("\"name\""));
         assert!(json.contains("Test Agent"));
         assert!(json.contains("persona_id"));
-        assert!(json.contains("system_prompt"));
+        // Slimmed projection: a definition-linked record resolves its prompt
+        // through the definition, so the wire must NOT carry it.
+        assert!(
+            !json.contains("system_prompt"),
+            "definition-linked projection must omit system_prompt"
+        );
+    }
+
+    /// Slimming (NIP-AP): definition-linked records omit the definition quad;
+    /// definition-less records keep emitting it (they ARE their own
+    /// definition — old readers would otherwise wipe fields with no restore
+    /// path).
+    #[test]
+    fn projection_slims_definition_quad_only_when_linked() {
+        let linked = sample_agent(); // persona_id: Some
+        let json = serde_json::to_string(&agent_event_content(&linked)).unwrap();
+        assert!(!json.contains("system_prompt"));
+        assert!(!json.contains("\"model\""));
+        assert!(!json.contains("\"provider\""));
+        assert!(!json.contains("persona_source_version"));
+        // Instance fields stay on the wire.
+        assert!(json.contains("parallelism"));
+        assert!(json.contains("respond_to"));
+        assert!(json.contains("mcp_toolsets"));
+
+        let mut standalone = sample_agent();
+        standalone.persona_id = None;
+        let json = serde_json::to_string(&agent_event_content(&standalone)).unwrap();
+        assert!(json.contains("system_prompt"), "standalone keeps prompt");
+        assert!(json.contains("\"model\""), "standalone keeps model");
+        assert!(json.contains("\"provider\""), "standalone keeps provider");
+        assert!(
+            json.contains("persona_source_version"),
+            "standalone keeps source_version"
+        );
     }
 
     #[test]
@@ -297,10 +356,29 @@ mod tests {
 
     #[test]
     fn projection_changes_on_meaningful_edit() {
+        // Instance-level edit surfaces for every record.
         let agent = sample_agent();
         let mut edited = agent.clone();
-        edited.system_prompt = Some("A different prompt.".to_string());
+        edited.parallelism += 1;
         assert_ne!(agent_event_content(&agent), agent_event_content(&edited));
+
+        // Definition-level edit surfaces only for definition-less records —
+        // linked records resolve the prompt through their definition.
+        let mut standalone = sample_agent();
+        standalone.persona_id = None;
+        let mut edited = standalone.clone();
+        edited.system_prompt = Some("A different prompt.".to_string());
+        assert_ne!(
+            agent_event_content(&standalone),
+            agent_event_content(&edited)
+        );
+        let mut linked_edit = sample_agent();
+        linked_edit.system_prompt = Some("A different prompt.".to_string());
+        assert_eq!(
+            agent_event_content(&sample_agent()),
+            agent_event_content(&linked_edit),
+            "a linked record's local prompt snapshot is not wire state"
+        );
     }
 
     /// The inbound structural guard: a foreign event whose content JSON crams
