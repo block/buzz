@@ -519,14 +519,12 @@ export function AgentInstanceEditDialog({
     onOpenChange(next);
   }
 
-  // Block save when the LLM provider field is visible but no effective
-  // provider exists — neither a per-agent value nor a global fallback.
-  // When a global provider is set, an empty per-agent provider is valid
-  // (inherits the global). Only block when there is genuinely nothing.
-  const effectiveProvider =
-    provider.trim() || (globalConfig.provider ?? "").trim();
-  const providerValid =
-    !llmProviderFieldVisible || effectiveProvider.length > 0;
+  const providerValid = isEditAgentProviderSaveValid({
+    llmProviderFieldVisible,
+    currentProvider: provider,
+    originalProvider: agent.provider,
+    globalProvider: globalConfig.provider,
+  });
 
   const canSubmit =
     computeEditAgentFormValidity({
@@ -1048,6 +1046,41 @@ export function AgentInstanceEditDialog({
       </ChooserDialogContent>
     </Dialog>
   );
+}
+
+/**
+ * Determines whether the Save button should be enabled with respect to the
+ * provider field in the instance-edit dialog.
+ *
+ * Rules (b): An agent that never had a provider configured stays fully editable
+ * (name, timeout, etc.) — blocking Save on those agents would be a regression
+ * from main's behavior where provider was UX-only. Only block when the user
+ * ACTIVELY clears a provider the agent originally had AND no global fallback
+ * exists to cover it.
+ *
+ * Three states where Save is allowed:
+ * 1. Provider field is hidden — not a provider-requiring runtime, always OK.
+ * 2. An effective provider resolves (per-agent or global fallback) — OK.
+ * 3. The agent never had a provider to begin with — don't suddenly block it.
+ */
+export function isEditAgentProviderSaveValid({
+  llmProviderFieldVisible,
+  currentProvider,
+  originalProvider,
+  globalProvider,
+}: {
+  llmProviderFieldVisible: boolean;
+  currentProvider: string;
+  originalProvider: string | null | undefined;
+  globalProvider: string | null | undefined;
+}): boolean {
+  if (!llmProviderFieldVisible) return true;
+  const effectiveProvider =
+    currentProvider.trim() || (globalProvider ?? "").trim();
+  if (effectiveProvider.length > 0) return true;
+  // Agent never had a provider — don't block unrelated edits.
+  const hadProvider = (originalProvider ?? "").trim().length > 0;
+  return !hadProvider;
 }
 
 function envVarsChanged(
