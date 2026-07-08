@@ -173,7 +173,7 @@ function ProjectPeopleStack({
         );
       })}
       {remaining > 0 ? (
-        <span className="relative z-0 flex h-5 min-w-5 items-center justify-center rounded-full bg-muted px-1 text-3xs font-semibold text-muted-foreground ring-2 ring-card">
+        <span className="relative z-0 flex h-5 min-w-5 items-center justify-center rounded-sm bg-muted px-1 text-3xs font-semibold text-muted-foreground ring-2 ring-card">
           +{remaining}
         </span>
       ) : null}
@@ -239,13 +239,13 @@ function ProjectActivityBar({
   const total = counts.reduce((sum, item) => sum + item.count, 0);
 
   return (
-    <div className="flex h-1.5 w-full gap-px overflow-hidden rounded-full bg-muted/60">
+    <div className="flex h-1.5 w-full gap-px overflow-hidden bg-muted/60">
       {total > 0
         ? counts
             .filter((item) => item.count > 0)
             .map((item) => (
               <div
-                className={cn("h-full rounded-full", item.barClass)}
+                className={cn("h-full", item.barClass)}
                 key={item.barClass}
                 style={{ width: `${(item.count / total) * 100}%` }}
               />
@@ -261,7 +261,7 @@ function StatusPill({ status }: { status: string }) {
   }
 
   return (
-    <span className="shrink-0 rounded-full bg-muted/60 px-2 pb-[3px] pt-[5px] text-2xs font-semibold uppercase leading-none tracking-[0.18em] text-muted-foreground">
+    <span className="shrink-0 border border-border/60 bg-muted/40 px-2 pb-[3px] pt-[5px] text-2xs font-semibold uppercase leading-none tracking-[0.18em] text-muted-foreground">
       {status}
     </span>
   );
@@ -283,7 +283,7 @@ function EmptyState() {
 
 function EmptyFilteredState() {
   return (
-    <div className="flex flex-1 flex-col items-center justify-center gap-3 rounded-xl border border-dashed border-border/60 px-4 py-12 text-center">
+    <div className="flex flex-1 flex-col items-center justify-center gap-3 border border-dashed border-border/60 px-4 py-12 text-center">
       <FolderGit2 className="h-9 w-9 text-muted-foreground/40" />
       <div className="space-y-1">
         <p className="text-sm font-medium text-foreground">
@@ -306,7 +306,7 @@ function ProjectCardButton({
 }) {
   return (
     <button
-      className="absolute inset-0 rounded-xl"
+      className="absolute inset-0"
       onClick={() => onOpen(project)}
       type="button"
     >
@@ -437,14 +437,14 @@ function ProjectGridCard({
 }) {
   return (
     <Card
-      className="group relative flex min-h-44 flex-col overflow-hidden rounded-2xl border-border/50 bg-muted/20 p-4 shadow-none transition-colors duration-150 hover:bg-muted/30"
+      className="group relative flex min-h-44 flex-col overflow-hidden rounded-none border-border/60 bg-card shadow-none transition-colors duration-150 hover:bg-muted/20"
       data-testid={`project-card-${project.dtag}`}
     >
       <ProjectCardButton onOpen={onOpen} project={project} />
-      <div className="flex min-h-0 flex-1 flex-col gap-3">
-        <div className="flex min-w-0 items-center justify-between gap-3">
+      <div className="flex min-h-0 flex-1 flex-col">
+        <div className="flex min-w-0 items-center justify-between gap-3 border-b border-border/60 px-4 py-3">
           <div className="flex min-w-0 items-center gap-2">
-            <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-muted/60">
+            <span className="flex h-8 w-8 shrink-0 items-center justify-center border border-border/60 bg-muted/40">
               <FolderGit2 className="h-4 w-4 text-muted-foreground" />
             </span>
             <span className="min-w-0 truncate text-sm font-semibold text-foreground">
@@ -469,12 +469,12 @@ function ProjectGridCard({
           </div>
         </div>
 
-        <p className="line-clamp-2 min-h-10 text-sm text-muted-foreground">
+        <p className="line-clamp-2 min-h-10 px-4 py-3 text-sm text-muted-foreground">
           {project.description || "A shared space for internal git work."}
         </p>
 
-        <div className="mt-auto space-y-2.5">
-          <div className="flex min-w-0 items-center justify-between gap-2">
+        <div className="mt-auto">
+          <div className="flex min-w-0 items-center justify-between gap-2 border-t border-border/60 px-4 py-3">
             <ProjectStatsRow summary={summary} />
             <div className="relative z-10 flex shrink-0 items-center">
               <ProjectPeopleStack
@@ -515,14 +515,14 @@ function ProjectListRow({
   onOpenTerminal: (project: Project) => Promise<void> | void;
 }) {
   return (
-    <Card
-      className="group relative overflow-hidden rounded-2xl border-border/50 bg-muted/20 p-3 shadow-none transition-colors duration-150 hover:bg-muted/30"
+    <div
+      className="group relative px-4 py-2.5 transition-colors duration-150 hover:bg-muted/20"
       data-testid={`project-row-${project.dtag}`}
     >
       <ProjectCardButton onOpen={onOpen} project={project} />
       <div className="flex min-w-0 items-center justify-between gap-3">
         <div className="flex min-w-0 items-center gap-2">
-          <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-muted/60">
+          <span className="flex h-8 w-8 shrink-0 items-center justify-center border border-border/60 bg-muted/40">
             <FolderGit2 className="h-4 w-4 text-muted-foreground" />
           </span>
           <div className="min-w-0">
@@ -567,7 +567,7 @@ function ProjectListRow({
           />
         </div>
       </div>
-    </Card>
+    </div>
   );
 }
 
@@ -857,7 +857,7 @@ export function ProjectsView() {
                 <label className="flex items-center gap-2 text-xs text-muted-foreground">
                   <span className="sr-only">Sort projects</span>
                   <select
-                    className="h-8 rounded-md bg-background px-2 text-xs text-foreground outline-hidden focus:ring-1 focus:ring-ring"
+                    className="h-8 rounded-none border border-border/60 bg-background px-2 text-xs text-foreground outline-hidden focus:ring-1 focus:ring-ring"
                     onChange={(event) =>
                       handleSortChange(event.target.value as ProjectsSort)
                     }
@@ -918,7 +918,7 @@ export function ProjectsView() {
                 })}
               </div>
             ) : (
-              <div className="space-y-2">
+              <div className="-mx-4 divide-y divide-border/60 border-y border-border/60 bg-card">
                 {visibleProjects.map((project) => {
                   const summary =
                     activitySummariesQuery.data?.[project.repoAddress];

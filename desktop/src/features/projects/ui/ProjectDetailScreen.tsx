@@ -697,7 +697,7 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
                 viewerGitIdentity={viewerGitIdentity}
               />
 
-              <section className="flex min-w-0 items-center gap-2 rounded-xl border border-border/50 bg-card/60 px-4 py-3 text-sm text-muted-foreground">
+              <section className="flex min-w-0 items-center gap-2 border border-border/60 bg-card px-4 py-3 text-sm text-muted-foreground">
                 <span className="shrink-0 font-medium text-foreground">
                   Details:
                 </span>

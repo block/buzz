@@ -93,7 +93,7 @@ export function LanguageChips({
     <div className="flex flex-wrap gap-1.5">
       {languages.map(([language], index) => (
         <span
-          className="inline-flex items-center gap-1.5 rounded-full bg-muted/70 px-2 py-1 text-xs text-muted-foreground"
+          className="inline-flex items-center gap-1.5 border border-border/60 bg-muted/40 px-2 py-1 text-xs text-muted-foreground"
           key={language}
         >
           <span
@@ -145,7 +145,7 @@ export function ProjectOverviewPanel({
             the branch + source controls reachable. */}
         <ReadmePanel file={readmeFile} sourceControls={sourceControls} />
       </div>
-      <aside className="space-y-6 rounded-xl border border-border/50 bg-card/60 p-4">
+      <aside className="space-y-6 border border-border/60 bg-card p-4">
         <OverviewRailSection title="People">
           <div className="flex items-center justify-between gap-3">
             <PeopleAvatars people={people} profiles={profiles} />

@@ -187,7 +187,7 @@ function StatPill({
 }) {
   return (
     <button
-      className="flex flex-col rounded-xl bg-card px-3.5 py-3 text-left shadow-xs transition-colors hover:bg-muted/40"
+      className="flex flex-col bg-card px-3.5 py-3 text-left transition-colors hover:bg-muted/30"
       onClick={onClick}
       type="button"
     >
@@ -222,11 +222,11 @@ export function ProjectsOverviewPanel({
   const scanning = Boolean(snapshotsLoading);
 
   return (
-    <section className="mb-4 grid gap-4 xl:grid-cols-[minmax(0,1fr)_18rem]">
-      <div className="min-w-0 space-y-4">
-        <div className="overflow-hidden rounded-2xl border border-border/50 bg-muted/20 p-4">
-          <div className="flex min-w-0 items-start gap-3">
-            <WorkspaceEmojiIcon className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-muted/60 text-2xl" />
+    <section className="-mx-4 mb-4 grid border-y border-border/60 bg-card xl:grid-cols-[minmax(0,1fr)_18rem]">
+      <div className="min-w-0">
+        <div className="overflow-hidden border-b border-border/60">
+          <div className="flex min-w-0 items-start gap-3 border-b border-border/60 p-4">
+            <WorkspaceEmojiIcon className="flex h-10 w-10 shrink-0 items-center justify-center border border-border/60 bg-muted/40 text-2xl" />
             <div className="-mt-1 min-w-0 flex-1 space-y-0.5">
               <h2 className="text-xl font-semibold leading-7 tracking-tight text-foreground">
                 {relayName} Projects
@@ -237,7 +237,7 @@ export function ProjectsOverviewPanel({
               </p>
             </div>
           </div>
-          <div className="mt-4 grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+          <div className="grid gap-px bg-border/60 sm:grid-cols-2 xl:grid-cols-4">
             <StatPill
               count={projects.length}
               icon={FolderGit2}
@@ -264,17 +264,17 @@ export function ProjectsOverviewPanel({
             />
           </div>
         </div>
-        <div className="overflow-hidden rounded-2xl border border-border/50 bg-muted/20 p-4">
-          <h3 className="text-sm font-semibold text-foreground">
+        <div className="overflow-hidden">
+          <h3 className="border-b border-border/60 px-4 py-3 text-sm font-semibold text-foreground">
             Contribution Activity
           </h3>
           <ProjectsContributionGraph
             activityByDay={activityByDay}
-            className="mt-3"
+            className="p-4"
           />
         </div>
       </div>
-      <aside className="space-y-6 rounded-xl border border-border/50 bg-card/60 p-4">
+      <aside className="border-t border-border/60 xl:border-l xl:border-t-0 [&>section]:border-b [&>section]:border-border/60 [&>section]:p-4 [&>section:last-child]:border-b-0">
         <OverviewRailSection title="People">
           <div className="flex flex-wrap gap-1.5">
             {people.slice(0, 18).map((pubkey) => {

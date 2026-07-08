@@ -4,7 +4,7 @@ import type { ProjectPullRequest } from "@/features/projects/hooks";
 import { TabsList, TabsTrigger } from "@/shared/ui/tabs";
 
 const PROJECT_TAB_TRIGGER_CLASS =
-  "h-8 gap-1.5 rounded-full px-3 text-foreground hover:bg-accent hover:text-accent-foreground data-[state=active]:bg-secondary data-[state=active]:text-secondary-foreground data-[state=active]:shadow-xs";
+  "h-8 gap-1.5 rounded-none px-3 text-foreground hover:bg-accent hover:text-accent-foreground data-[state=active]:bg-secondary data-[state=active]:text-secondary-foreground data-[state=active]:shadow-xs";
 
 export function ProjectTabsList({ prsActive }: { prsActive?: boolean }) {
   return (
@@ -56,23 +56,23 @@ export function PullRequestTabsList({
         value="pr-conversation"
       >
         Conversation
-        <span className="rounded-full bg-muted px-1.5 py-0.5 text-2xs">
+        <span className="rounded-none bg-muted px-1.5 py-0.5 text-2xs">
           {pullRequest.comments.length}
         </span>
       </TabsTrigger>
       <TabsTrigger className={PROJECT_TAB_TRIGGER_CLASS} value="pr-commits">
         Commits
-        <span className="rounded-full bg-muted px-1.5 py-0.5 text-2xs">
+        <span className="rounded-none bg-muted px-1.5 py-0.5 text-2xs">
           {commitCount}
         </span>
       </TabsTrigger>
       <TabsTrigger className={PROJECT_TAB_TRIGGER_CLASS} value="pr-checks">
         Checks
-        <span className="rounded-full bg-muted px-1.5 py-0.5 text-2xs">0</span>
+        <span className="rounded-none bg-muted px-1.5 py-0.5 text-2xs">0</span>
       </TabsTrigger>
       <TabsTrigger className={PROJECT_TAB_TRIGGER_CLASS} value="pr-files">
         Files changed
-        <span className="rounded-full bg-muted px-1.5 py-0.5 text-2xs">
+        <span className="rounded-none bg-muted px-1.5 py-0.5 text-2xs">
           {filesCount}
         </span>
       </TabsTrigger>

@@ -107,9 +107,9 @@ export function RepoSourceToggle({
           <UploadCloud className="h-3.5 w-3.5" />
         </Button>
       ) : null}
-      <div className="flex shrink-0 items-center gap-0.5 rounded-full bg-muted/40 p-0.5">
+      <div className="flex shrink-0 items-center gap-0.5 border border-border/60 bg-muted/40 p-0.5">
         <Button
-          className="h-6 rounded-full px-2.5 text-xs"
+          className="h-6 rounded-none px-2.5 text-xs"
           onClick={() => controls.onSourceChange("remote")}
           size="sm"
           variant={controls.source === "remote" ? "secondary" : "ghost"}
@@ -117,7 +117,7 @@ export function RepoSourceToggle({
           {controls.remoteLabel}
         </Button>
         <Button
-          className="h-6 rounded-full px-2.5 text-xs"
+          className="h-6 rounded-none px-2.5 text-xs"
           disabled={controls.localDisabled}
           onClick={() => controls.onSourceChange("local")}
           size="sm"

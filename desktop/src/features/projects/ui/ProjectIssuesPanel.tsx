@@ -129,7 +129,7 @@ function IssueRow({
           <span>{issue.status}</span>
           {issue.labels.map((label) => (
             <span
-              className="rounded-full border border-border/50 px-1.5 py-0.5 text-2xs"
+              className="border border-border/60 px-1.5 py-0.5 text-2xs"
               key={label}
             >
               {label}
@@ -212,7 +212,7 @@ function IssueDetail({
               <CircleDot className="h-3.5 w-3.5" />
               Issue from {authorLabel}
               <span
-                className={`rounded-full border border-border/50 px-1.5 py-0.5 text-2xs ${issueStatusClassName(issue.status)}`}
+                className={`border border-border/60 px-1.5 py-0.5 text-2xs ${issueStatusClassName(issue.status)}`}
               >
                 {issue.status}
               </span>
@@ -229,7 +229,7 @@ function IssueDetail({
             <span>updated {compactDate(issue.updatedAt)}</span>
             {issue.labels.map((label) => (
               <span
-                className="rounded-full border border-border/50 px-1.5 py-0.5 text-2xs"
+                className="border border-border/60 px-1.5 py-0.5 text-2xs"
                 key={label}
               >
                 {label}
@@ -238,7 +238,7 @@ function IssueDetail({
           </div>
         </div>
         {issue.content ? (
-          <div className="rounded-lg border border-border/50 bg-background/45 p-3">
+          <div className="border border-border/60 bg-background/45 p-3">
             <Markdown
               className="text-sm"
               content={issue.content}
@@ -257,7 +257,7 @@ function IssueDetail({
           <div className="space-y-3">
             {issue.comments.map((item) => (
               <article
-                className="rounded-lg border border-border/50 bg-background/45 p-3"
+                className="border border-border/60 bg-background/45 p-3"
                 key={item.id}
               >
                 <div className="mb-2">
@@ -279,7 +279,7 @@ function IssueDetail({
           <p className="text-sm text-muted-foreground">No comments yet.</p>
         )}
         <ForumComposer
-          className="rounded-lg border border-border/50 bg-background/45"
+          className="border border-border/60 bg-background/45"
           disabled={commentMutation.isPending}
           isSending={commentMutation.isPending}
           members={members}

@@ -182,7 +182,7 @@ function PullRequestRow({
             {authorLabel}
           </span>
           <span>opened {relativeOpenedAt(pullRequest.createdAt)}</span>
-          <span className="rounded-full border border-border/50 px-1.5 py-0.5 text-2xs">
+          <span className="border border-border/60 px-1.5 py-0.5 text-2xs">
             Member
           </span>
           <span>·</span>
@@ -307,7 +307,7 @@ function PullRequestReviewersRow({
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <Button
-              className="h-6 gap-1 rounded-full px-2 text-2xs text-muted-foreground hover:text-foreground"
+              className="h-6 gap-1 rounded-none px-2 text-2xs text-muted-foreground hover:text-foreground"
               disabled={requestReviewMutation.isPending}
               size="xs"
               type="button"
@@ -434,7 +434,7 @@ function PullRequestReviewCard({
         pullRequest={pullRequest}
       />
       <div
-        className={`flex min-w-0 flex-wrap items-center gap-3 rounded-lg px-3 py-2.5 ${
+        className={`flex min-w-0 flex-wrap items-center gap-3 px-3 py-2.5 ${
           isDraft
             ? "bg-muted/40"
             : approvalCount > 0
@@ -467,14 +467,14 @@ function PullRequestReviewCard({
         </div>
         <div className="flex shrink-0 items-center gap-2">
           {hasApproved ? (
-            <span className="inline-flex items-center gap-1.5 rounded-full border border-green-600/40 px-2.5 py-1 text-xs font-medium text-green-600 dark:text-green-500">
+            <span className="inline-flex items-center gap-1.5 border border-green-600/40 px-2.5 py-1 text-xs font-medium text-green-600 dark:text-green-500">
               <Check className="h-3.5 w-3.5" />
               Approved
             </span>
           ) : null}
           {canApprove ? (
             <Button
-              className="h-8 gap-1.5 rounded-full bg-green-600 px-3.5 text-white shadow-sm hover:bg-green-700"
+              className="h-8 gap-1.5 rounded-none bg-green-600 px-3.5 text-white shadow-sm hover:bg-green-700"
               disabled={approveMutation.isPending}
               onClick={() => {
                 void handleApprove();
@@ -488,7 +488,7 @@ function PullRequestReviewCard({
           ) : null}
           {canChangeStatus && isDraft ? (
             <Button
-              className="h-7 gap-1.5 rounded-full px-3"
+              className="h-7 gap-1.5 rounded-none px-3"
               disabled={statusMutation.isPending}
               onClick={() => {
                 void handleStatusChange("open");
@@ -547,7 +547,7 @@ export function PullRequestDetailHeader({
       </h3>
       <div className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-1.5 text-xs leading-4 text-muted-foreground">
         <span
-          className={`mr-1 inline-flex shrink-0 items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium text-white ${pullRequestStatusBadgeClassName(pullRequest.status)}`}
+          className={`mr-1 inline-flex shrink-0 items-center gap-1.5 px-2.5 py-1 text-xs font-medium text-white ${pullRequestStatusBadgeClassName(pullRequest.status)}`}
         >
           {pullRequest.status === "Merged" ? (
             <GitMerge className="h-3.5 w-3.5" />
@@ -558,11 +558,11 @@ export function PullRequestDetailHeader({
         </span>
         <span className="font-medium text-foreground">{authorLabel}</span>
         <span>wants to merge {pluralize(commitCount, "commit")} into</span>
-        <code className="rounded-md bg-muted px-1.5 py-0.5 text-2xs text-foreground">
+        <code className="rounded-none bg-muted px-1.5 py-0.5 text-2xs text-foreground">
           {targetBranch}
         </code>
         <span>from</span>
-        <code className="rounded-md bg-muted px-1.5 py-0.5 text-2xs text-foreground">
+        <code className="rounded-none bg-muted px-1.5 py-0.5 text-2xs text-foreground">
           {sourceBranch}
         </code>
         <span>·</span>
@@ -629,7 +629,7 @@ function PullRequestDetail({
                 role={compactDate(pullRequest.createdAt)}
               />
               {pullRequest.commit ? (
-                <code className="shrink-0 rounded-md bg-background/55 px-2 py-1 text-xs text-muted-foreground">
+                <code className="shrink-0 rounded-none bg-background/55 px-2 py-1 text-xs text-muted-foreground">
                   {pullRequest.commit.slice(0, 7)}
                 </code>
               ) : null}
@@ -645,7 +645,7 @@ function PullRequestDetail({
                   role={compactDate(update.createdAt)}
                 />
                 {update.commit ? (
-                  <code className="shrink-0 rounded-md bg-background/55 px-2 py-1 text-xs text-muted-foreground">
+                  <code className="shrink-0 rounded-none bg-background/55 px-2 py-1 text-xs text-muted-foreground">
                     {update.commit.slice(0, 7)}
                   </code>
                 ) : null}
@@ -665,7 +665,7 @@ function PullRequestDetail({
   if (mode === "checks") {
     return (
       <div className="p-4">
-        <div className="rounded-lg border border-border/50 bg-background/45 p-4 text-sm text-muted-foreground">
+        <div className="border border-border/60 bg-background/45 p-4 text-sm text-muted-foreground">
           No checks have been reported for this pull request yet.
         </div>
       </div>
@@ -698,7 +698,7 @@ function PullRequestDetail({
                   role={compactDate(update.createdAt)}
                 />
                 {update.commit ? (
-                  <code className="shrink-0 rounded-md bg-background/55 px-2 py-1 text-xs text-muted-foreground">
+                  <code className="shrink-0 rounded-none bg-background/55 px-2 py-1 text-xs text-muted-foreground">
                     {update.commit.slice(0, 7)}
                   </code>
                 ) : null}
@@ -748,7 +748,7 @@ function PullRequestDetail({
               }
               return (
                 <article
-                  className="rounded-lg border border-border/50 bg-background/45 p-3"
+                  className="border border-border/60 bg-background/45 p-3"
                   key={item.id}
                 >
                   <div className="mb-2">
@@ -776,7 +776,7 @@ function PullRequestDetail({
           pullRequest={pullRequest}
         />
         <ForumComposer
-          className="rounded-lg border border-border/50 bg-background/45"
+          className="border border-border/60 bg-background/45"
           disabled={commentMutation.isPending}
           isSending={commentMutation.isPending}
           members={members}

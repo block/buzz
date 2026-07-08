@@ -32,7 +32,7 @@ export function ProfileIdentityButton({
   const labelClassName = textSize === "sm" ? "text-sm leading-5" : "text-xs";
   const roleClassName = textSize === "sm" ? "text-sm leading-5" : "text-xs";
   const className = cn(
-    "flex min-w-0 rounded-lg text-left",
+    "flex min-w-0 rounded-none text-left",
     align === "center" ? "items-center" : "items-start",
     pubkey &&
       "focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring",

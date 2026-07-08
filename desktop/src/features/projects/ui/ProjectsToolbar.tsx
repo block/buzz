@@ -19,7 +19,7 @@ export function ProjectsViewModeToggle({
   onViewModeChange: (viewMode: ProjectsViewMode) => void;
 }) {
   return (
-    <fieldset className="flex items-center rounded-lg bg-muted/30 p-0.5">
+    <fieldset className="flex items-center border border-border/60 bg-muted/30 p-0.5 [&>button]:rounded-none">
       <legend className="sr-only">Project layout</legend>
       <Button
         aria-label="Grid layout"
@@ -72,7 +72,7 @@ export function ProjectsToolbar({
         {filterOptions.map((option) => (
           <Button
             aria-pressed={filter === option.value}
-            className="h-8 gap-1.5 rounded-full px-3"
+            className="h-8 gap-1.5 rounded-none px-3"
             key={option.value}
             onClick={() => onFilterChange(option.value)}
             size="sm"

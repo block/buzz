@@ -184,7 +184,7 @@ export function WorkspaceTabs({
         {onOpenTerminal ? (
           <Button
             aria-label="Open terminal"
-            className="h-8 w-8 shrink-0 rounded-full text-muted-foreground hover:text-foreground"
+            className="h-8 w-8 shrink-0 rounded-none text-muted-foreground hover:text-foreground"
             onClick={onOpenTerminal}
             size="icon"
             title={terminalTitle ?? "Open terminal"}
@@ -254,7 +254,7 @@ export function WorkspaceTabs({
       </TabsContent>
 
       <TabsContent
-        className="m-0 overflow-hidden rounded-xl border border-border/50 bg-card/60"
+        className="m-0 overflow-hidden border border-border/60 bg-card"
         value="prs"
       >
         <PullRequestsPanel
@@ -269,7 +269,7 @@ export function WorkspaceTabs({
       </TabsContent>
 
       <TabsContent
-        className="m-0 overflow-hidden rounded-xl border border-border/50 bg-card/60"
+        className="m-0 overflow-hidden border border-border/60 bg-card"
         value="issues"
       >
         <ProjectIssuesPanel
@@ -282,7 +282,7 @@ export function WorkspaceTabs({
 
       {(["conversation", "commits", "checks"] as const).map((mode) => (
         <TabsContent
-          className="m-0 overflow-hidden rounded-xl border border-border/50 bg-card/60"
+          className="m-0 overflow-hidden border border-border/60 bg-card"
           key={mode}
           value={`pr-${mode}`}
         >
@@ -302,7 +302,7 @@ export function WorkspaceTabs({
       <TabsContent className="m-0" value="files">
         {repoSource === "local" && !localSnapshot && !localSnapshotLoading ? (
           <div className="mb-3">
-            <div className="rounded-xl border border-border/50 bg-card/60 p-4 text-sm text-muted-foreground">
+            <div className="border border-border/60 bg-card p-4 text-sm text-muted-foreground">
               No local checkout found.
             </div>
           </div>

@@ -116,7 +116,7 @@ export function ReadmePanel({
 
   if (!file?.previewContent) {
     return (
-      <section className="overflow-hidden rounded-xl border border-border/50 bg-card/60">
+      <section className="overflow-hidden border border-border/60 bg-card">
         {sourceControls ? header : null}
         <div className="p-6 text-sm text-muted-foreground">
           Add a README to this repository to describe setup, usage, and project
@@ -133,7 +133,7 @@ export function ReadmePanel({
     : file.previewContent;
 
   return (
-    <section className="overflow-hidden rounded-xl border border-border/50 bg-card/60">
+    <section className="overflow-hidden border border-border/60 bg-card">
       {header}
       <div className="p-4">
         {isMarkdown ? (
@@ -143,7 +143,7 @@ export function ReadmePanel({
             interactive={false}
           />
         ) : language ? (
-          <pre className="overflow-x-auto rounded-lg bg-muted/40 p-4">
+          <pre className="overflow-x-auto bg-muted/40 p-4">
             <SyntaxHighlightedCode
               className="text-xs leading-relaxed"
               code={file.previewContent}
@@ -151,7 +151,7 @@ export function ReadmePanel({
             />
           </pre>
         ) : (
-          <pre className="overflow-x-auto rounded-lg bg-muted/40 p-4">
+          <pre className="overflow-x-auto bg-muted/40 p-4">
             <code className="block min-w-full whitespace-pre font-mono text-xs leading-relaxed text-foreground">
               {file.previewContent}
             </code>

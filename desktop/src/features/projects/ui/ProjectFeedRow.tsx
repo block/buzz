@@ -62,7 +62,7 @@ export function ProjectFeedRowCluster({
   children: React.ReactNode;
 }) {
   return (
-    <div className="flex shrink-0 items-center divide-x divide-border/50 overflow-hidden rounded-md border border-border/50 bg-background/45">
+    <div className="flex shrink-0 items-center divide-x divide-border/60 overflow-hidden border border-border/60 bg-background/45">
       {children}
     </div>
   );
