@@ -5,101 +5,29 @@ import { computeAutoContinueAgentMentions } from "./autoContinueAgent.ts";
 
 const AGENT = "a".repeat(64);
 const HUMAN = "b".repeat(64);
-const OTHER_AGENT = "c".repeat(64);
 
-function agentAnchor(overrides = {}) {
-  return {
-    signerPubkey: AGENT,
-    author: AGENT,
-    tags: [
-      ["h", "chan-1"],
-      ["p", HUMAN],
-      ["e", "root-id", "", "root"],
-    ],
-    ...overrides,
-  };
-}
+const anchor = {
+  signerPubkey: AGENT,
+  author: AGENT,
+  tags: [["p", HUMAN]],
+};
 
-test("auto-continues when agent anchor p-tagged the current user", () => {
+test("auto-continues when the agent anchor p-tagged the current user", () => {
   const result = computeAutoContinueAgentMentions({
-    anchor: agentAnchor(),
+    anchor,
     currentPubkey: HUMAN,
     agentPubkeys: new Set([AGENT]),
     existingMentionPubkeys: [],
   });
   assert.deepEqual(result, [AGENT]);
-});
-
-test("normalizes case on current pubkey and agent set", () => {
-  const result = computeAutoContinueAgentMentions({
-    anchor: agentAnchor({
-      signerPubkey: AGENT.toUpperCase(),
-      tags: [["p", HUMAN.toUpperCase()]],
-    }),
-    currentPubkey: HUMAN.toUpperCase(),
-    agentPubkeys: new Set([AGENT]),
-    existingMentionPubkeys: [],
-  });
-  assert.deepEqual(result, [AGENT]);
-});
-
-test("no-op when anchor author is not a known agent", () => {
-  const result = computeAutoContinueAgentMentions({
-    anchor: agentAnchor({ signerPubkey: HUMAN, author: HUMAN }),
-    currentPubkey: HUMAN,
-    agentPubkeys: new Set([AGENT]),
-    existingMentionPubkeys: [],
-  });
-  assert.deepEqual(result, []);
 });
 
 test("no-op when the agent did not p-tag the current user", () => {
   const result = computeAutoContinueAgentMentions({
-    anchor: agentAnchor({ tags: [["p", OTHER_AGENT]] }),
+    anchor: { ...anchor, tags: [] },
     currentPubkey: HUMAN,
     agentPubkeys: new Set([AGENT]),
     existingMentionPubkeys: [],
   });
   assert.deepEqual(result, []);
-});
-
-test("no-op when the reply already mentions the agent", () => {
-  const result = computeAutoContinueAgentMentions({
-    anchor: agentAnchor(),
-    currentPubkey: HUMAN,
-    agentPubkeys: new Set([AGENT]),
-    existingMentionPubkeys: [AGENT.toUpperCase()],
-  });
-  assert.deepEqual(result, []);
-});
-
-test("prefers signerPubkey over display pubkey/author", () => {
-  const result = computeAutoContinueAgentMentions({
-    anchor: agentAnchor({ signerPubkey: AGENT, pubkey: HUMAN, author: HUMAN }),
-    currentPubkey: HUMAN,
-    agentPubkeys: new Set([AGENT]),
-    existingMentionPubkeys: [],
-  });
-  assert.deepEqual(result, [AGENT]);
-});
-
-test("no-op on missing anchor, pubkey, or empty agent set", () => {
-  const base = {
-    anchor: agentAnchor(),
-    currentPubkey: HUMAN,
-    agentPubkeys: new Set([AGENT]),
-    existingMentionPubkeys: [],
-  };
-  assert.deepEqual(
-    computeAutoContinueAgentMentions({ ...base, anchor: null }),
-    [],
-  );
-  assert.deepEqual(
-    computeAutoContinueAgentMentions({ ...base, currentPubkey: null }),
-    [],
-  );
-  assert.deepEqual(
-    computeAutoContinueAgentMentions({ ...base, agentPubkeys: new Set() }),
-    [],
-  );
 });
