@@ -26,7 +26,7 @@ const MODEL_NOT_FOUND_AGENT = {
   name: "Databricks Agent",
   status: "stopped" as const,
   lastError:
-    "Agent reported error: llm: (goose-databricks-llama-3-3-70b) 404 Not Found: model not found",
+    "Agent reported error (code -32002): llm model not found: (goose-databricks-llama-3-3-70b) 404 Not Found: model not found",
   lastErrorCode: -32002,
 };
 

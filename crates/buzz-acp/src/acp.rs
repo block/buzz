@@ -105,6 +105,19 @@ pub enum AcpError {
     AgentError { code: i64, message: String },
 }
 
+/// Build an [`AcpError::AgentError`] from a JSON-RPC error object,
+/// preserving the numeric code. When the `message` field is missing or
+/// non-string, fall back to the full JSON object so provider-specific
+/// detail (e.g. a `data` field) is not lost.
+fn agent_error_from_json(error: &serde_json::Value) -> AcpError {
+    let code = error.get("code").and_then(|c| c.as_i64()).unwrap_or(-32000);
+    let message = match error.get("message").and_then(|m| m.as_str()) {
+        Some(m) => m.to_string(),
+        None => error.to_string(),
+    };
+    AcpError::AgentError { code, message }
+}
+
 /// ACP client that owns an agent subprocess and communicates over its stdio.
 ///
 /// One `AcpClient` per agent process. Multiple sessions can be created on the
@@ -863,13 +876,7 @@ impl AcpClient {
             if let Some(id) = msg.get("id") {
                 if *id == serde_json::json!(expected_id) && msg.get("method").is_none() {
                     if let Some(error) = msg.get("error") {
-                        let code = error.get("code").and_then(|c| c.as_i64()).unwrap_or(-32000);
-                        let message = error
-                            .get("message")
-                            .and_then(|m| m.as_str())
-                            .unwrap_or("unknown error")
-                            .to_string();
-                        return Err(AcpError::AgentError { code, message });
+                        return Err(agent_error_from_json(error));
                     }
                     return Ok(msg["result"].clone());
                 }
@@ -1191,16 +1198,7 @@ impl AcpClient {
                                         let _ = ack_tx
                                             .send(crate::pool::SteerAck::PromptCompletedNeutral);
                                     }
-                                    let code = error
-                                        .get("code")
-                                        .and_then(|c| c.as_i64())
-                                        .unwrap_or(-32000);
-                                    let message = error
-                                        .get("message")
-                                        .and_then(|m| m.as_str())
-                                        .unwrap_or("unknown error")
-                                        .to_string();
-                                    return Err(AcpError::AgentError { code, message });
+                                    return Err(agent_error_from_json(error));
                                 }
                                 if let Some((_, ack_tx)) = pending_steer.take() {
                                     let _ =
@@ -3021,5 +3019,34 @@ mod tests {
         });
         client.handle_goose_usage_update(&bad2);
         assert!(client.take_turn_usage().is_none());
+    }
+
+    #[test]
+    fn agent_error_from_json_falls_back_to_full_json_when_message_missing() {
+        // Errors without a string `message` field (e.g. only a `data` field) must
+        // not be silently truncated to "unknown error" — the full JSON is preserved.
+        let error = serde_json::json!({"code": -32000, "data": "quota exceeded"});
+        match super::agent_error_from_json(&error) {
+            AcpError::AgentError { code, message } => {
+                assert_eq!(code, -32000);
+                assert!(
+                    message.contains("quota exceeded"),
+                    "expected full JSON in message, got: {message}"
+                );
+            }
+            other => panic!("expected AgentError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn agent_error_from_json_uses_message_field_when_present() {
+        let error = serde_json::json!({"code": -32001, "message": "auth denied"});
+        match super::agent_error_from_json(&error) {
+            AcpError::AgentError { code, message } => {
+                assert_eq!(code, -32001);
+                assert_eq!(message, "auth denied");
+            }
+            other => panic!("expected AgentError, got {other:?}"),
+        }
     }
 }

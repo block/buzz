@@ -148,3 +148,68 @@ test("friendlyTurnErrorCopy: missing code falls back to raw text", () => {
 test("friendlyTurnErrorCopy: unknown code passes raw text through", () => {
   assert.equal(friendlyTurnErrorCopy("raw error", 12345), "raw error");
 });
+
+// --- structured-code hardening ---
+
+test("unknown code prevents string-pattern cross-classification", () => {
+  // code -32003 is structured and unrecognized — must NOT fall through to
+  // the legacy string path that would wrongly promote this to denied.
+  const result = friendlyAgentLastError(
+    "llm auth: rate limiter denial",
+    -32003,
+  );
+  assert.deepEqual(result, {
+    severity: "generic",
+    copy: "llm auth: rate limiter denial",
+  });
+});
+
+test("NaN code param treated as absent — string path applies", () => {
+  // NaN is not finite; falls back to string matching.
+  const result = friendlyAgentLastError("llm auth: denied", NaN);
+  assert.deepEqual(result, {
+    severity: "denied",
+    copy: RELAY_MESH_DENIED_COPY,
+  });
+});
+
+test("embedded code -32001 recovered from message when code param is null", () => {
+  const result = friendlyAgentLastError(
+    "Agent reported error (code -32001): llm auth: 401",
+    null,
+  );
+  assert.deepEqual(result, {
+    severity: "denied",
+    copy: RELAY_MESH_DENIED_COPY,
+  });
+});
+
+test("embedded code -32002 recovered from message when code param is undefined", () => {
+  const result = friendlyAgentLastError(
+    "Agent reported error (code -32002): llm model not found: x",
+    undefined,
+  );
+  assert.deepEqual(result, {
+    severity: "denied",
+    copy: MODEL_NOT_FOUND_COPY,
+  });
+});
+
+test("embedded unknown code is authoritative — no cross-classification", () => {
+  const result = friendlyAgentLastError(
+    "Agent reported error (code -32099): llm auth: weird",
+    null,
+  );
+  assert.deepEqual(result, {
+    severity: "generic",
+    copy: "Agent reported error (code -32099): llm auth: weird",
+  });
+});
+
+test("friendlyTurnErrorCopy: garbage string code coerces to NaN → string path", () => {
+  // "garbage" → NaN → not finite → null → string prefix matches "llm auth:".
+  assert.equal(
+    friendlyTurnErrorCopy("llm auth: denied", "garbage"),
+    RELAY_MESH_DENIED_COPY,
+  );
+});

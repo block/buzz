@@ -532,8 +532,13 @@ fn bytecount_newlines(buf: &[u8]) -> usize {
     buf.iter().filter(|&&b| b == b'\n').count()
 }
 
+/// A meaningful error recovered from an exited agent's log tail.
 pub struct AgentLogError {
+    /// The full log line, wrapped as `Agent reported error…` for display.
     pub message: String,
+    /// JSON-RPC error code parsed from the line's `(code N)` marker, or a
+    /// synthetic code for known bare prefixes. `None` for legacy-format
+    /// lines that carry no code (or when the code fails to parse as i64).
     pub code: Option<i64>,
 }
 
@@ -555,6 +560,21 @@ pub fn meaningful_agent_error_from_log(path: &Path) -> Option<AgentLogError> {
             return Some(AgentLogError {
                 message: line.to_string(),
                 code: None,
+            });
+        }
+        // Bare prefixes emitted by older agent binaries whose Display still leaks
+        // unwrapped errors. Promote these so they surface instead of the generic
+        // "harness exited with status N" fallback.
+        if line.starts_with("llm auth:") {
+            return Some(AgentLogError {
+                message: format!("Agent reported error: {line}"),
+                code: Some(-32001),
+            });
+        }
+        if line.starts_with("llm model not found:") {
+            return Some(AgentLogError {
+                message: format!("Agent reported error: {line}"),
+                code: Some(-32002),
             });
         }
         None
@@ -884,7 +904,28 @@ mod tests {
     #[test]
     fn meaningful_agent_error_from_log_promotes_unwrapped_llm_auth() {
         let file = write_log("noise\nllm auth: denied\n");
-        assert!(super::meaningful_agent_error_from_log(file.path()).is_none());
+        let result = super::meaningful_agent_error_from_log(file.path()).unwrap();
+        assert_eq!(result.message, "Agent reported error: llm auth: denied");
+        assert_eq!(result.code, Some(-32001));
+    }
+
+    #[test]
+    fn meaningful_agent_error_from_log_promotes_bare_model_not_found() {
+        let file = write_log("noise\nllm model not found: (some-model) 404\n");
+        let result = super::meaningful_agent_error_from_log(file.path()).unwrap();
+        assert_eq!(
+            result.message,
+            "Agent reported error: llm model not found: (some-model) 404"
+        );
+        assert_eq!(result.code, Some(-32002));
+    }
+
+    #[test]
+    fn meaningful_agent_error_from_log_promotes_legacy_format() {
+        let file = write_log("noise\nAgent reported error: llm: 500 internal\n");
+        let result = super::meaningful_agent_error_from_log(file.path()).unwrap();
+        assert_eq!(result.message, "Agent reported error: llm: 500 internal");
+        assert_eq!(result.code, None);
     }
 
     #[test]

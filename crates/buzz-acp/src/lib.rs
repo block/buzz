@@ -2875,6 +2875,10 @@ fn handle_prompt_result(
                     | acp::AcpError::Timeout(_)
                     | acp::AcpError::Protocol(_)
             );
+            let error_code = match &e {
+                acp::AcpError::AgentError { code, .. } => Some(*code),
+                _ => None,
+            };
             if is_transport_error {
                 tracing::warn!(
                     agent = agent_index,
@@ -2884,10 +2888,6 @@ fn handle_prompt_result(
                     error = %e,
                     "transport/protocol error — respawning agent"
                 );
-                let error_code = match &e {
-                    acp::AcpError::AgentError { code, .. } => Some(*code),
-                    _ => None,
-                };
                 emit_turn_error(&e.to_string(), error_code);
 
                 let index = result.agent.index;
@@ -2914,10 +2914,6 @@ fn handle_prompt_result(
                     error = %e,
                     "agent_returned (application error — pipe intact)"
                 );
-                let error_code = match &e {
-                    acp::AcpError::AgentError { code, .. } => Some(*code),
-                    _ => None,
-                };
                 emit_turn_error(&e.to_string(), error_code);
                 pool.return_agent(result.agent);
             }
