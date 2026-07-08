@@ -7,6 +7,7 @@ use clap::{Parser, Subcommand};
 use client::BuzzClient;
 use error::CliError;
 use nostr::Keys;
+use uuid::Uuid;
 
 /// Run the Buzz CLI from raw arguments (including `argv[0]`).
 ///
@@ -297,6 +298,15 @@ pub enum MessagesCmd {
         /// Event ID to delete (64-char hex)
         #[arg(long)]
         event: String,
+        /// Optional moderation audit action UUID for the public tombstone
+        #[arg(long)]
+        action_id: Option<Uuid>,
+        /// Optional machine-readable public reason code for the tombstone
+        #[arg(long)]
+        reason_code: Option<String>,
+        /// Optional human-readable public reason for the tombstone
+        #[arg(long)]
+        public_reason: Option<String>,
     },
     /// Retrieve messages from a channel
     #[command(

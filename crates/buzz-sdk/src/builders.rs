@@ -387,15 +387,44 @@ pub fn build_edit(
     Ok(EventBuilder::new(Kind::Custom(40003), new_content).tags(tags))
 }
 
+/// Optional metadata for moderator delete tombstones (kind 9005).
+#[derive(Debug, Clone, Default)]
+pub struct DeleteMessageOptions<'a> {
+    /// Audit action UUID to link from the public tombstone.
+    pub action_id: Option<Uuid>,
+    /// Machine-readable, public-safe reason code.
+    pub reason_code: Option<&'a str>,
+    /// Human-readable reason safe for the room-facing tombstone.
+    pub public_reason: Option<&'a str>,
+}
+
 /// Build a Buzz-native delete event (kind 9005).
 pub fn build_delete_message(
     channel_id: Uuid,
     target_event_id: nostr::EventId,
 ) -> Result<EventBuilder, SdkError> {
-    let tags = vec![
+    build_delete_message_with_options(channel_id, target_event_id, DeleteMessageOptions::default())
+}
+
+/// Build a Buzz-native delete event (kind 9005) with optional moderation metadata.
+pub fn build_delete_message_with_options(
+    channel_id: Uuid,
+    target_event_id: nostr::EventId,
+    options: DeleteMessageOptions<'_>,
+) -> Result<EventBuilder, SdkError> {
+    let mut tags = vec![
         tag(&["h", &channel_id.to_string()])?,
         tag(&["e", &target_event_id.to_hex()])?,
     ];
+    if let Some(action_id) = options.action_id {
+        tags.push(tag(&["action_id", &action_id.to_string()])?);
+    }
+    if let Some(reason_code) = options.reason_code {
+        tags.push(tag(&["reason_code", reason_code])?);
+    }
+    if let Some(public_reason) = options.public_reason {
+        tags.push(tag(&["public_reason", public_reason])?);
+    }
     Ok(EventBuilder::new(Kind::Custom(9005), "").tags(tags))
 }
 
@@ -1989,6 +2018,31 @@ mod tests {
         assert!(has_tag(&ev, "h", &cid.to_string()));
         assert!(has_tag(&ev, "e", &eid.to_hex()));
         assert_eq!(ev.content, "");
+    }
+
+    #[test]
+    fn delete_message_with_moderation_metadata() {
+        let cid = uuid();
+        let eid = event_id();
+        let action_id = Uuid::new_v4();
+        let ev = sign(
+            build_delete_message_with_options(
+                cid,
+                eid,
+                DeleteMessageOptions {
+                    action_id: Some(action_id),
+                    reason_code: Some("spam"),
+                    public_reason: Some("Removed for spam."),
+                },
+            )
+            .unwrap(),
+        );
+        assert_eq!(ev.kind.as_u16(), 9005);
+        assert!(has_tag(&ev, "h", &cid.to_string()));
+        assert!(has_tag(&ev, "e", &eid.to_hex()));
+        assert!(has_tag(&ev, "action_id", &action_id.to_string()));
+        assert!(has_tag(&ev, "reason_code", "spam"));
+        assert!(has_tag(&ev, "public_reason", "Removed for spam."));
     }
 
     #[test]
