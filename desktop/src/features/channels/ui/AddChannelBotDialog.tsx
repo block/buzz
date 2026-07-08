@@ -554,7 +554,7 @@ export function AddChannelBotDialog({
                 value={selectedRuntime?.id ?? RUNTIME_NONE_SENTINEL}
               >
                 <DropdownMenuRadioItem value={RUNTIME_NONE_SENTINEL}>
-                  Use persona defaults
+                  Use agent defaults
                 </DropdownMenuRadioItem>
                 <DropdownMenuSeparator />
                 {providers.map((provider) => (
@@ -640,7 +640,7 @@ export function AddChannelBotDialog({
 
         {selectedCount === 0 ? (
           <div className="rounded-2xl border border-dashed border-border/70 bg-muted/15 px-4 py-4 text-sm text-muted-foreground">
-            Pick one or more personas, or enable Generic to add a custom agent.
+            Pick one or more agents, or enable Generic to add a custom agent.
           </div>
         ) : null}
 

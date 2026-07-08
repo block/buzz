@@ -133,7 +133,7 @@ export function BatchImportDialog({
           <DialogHeader className="shrink-0 border-b border-border/60 px-6 py-5 pr-14">
             <DialogTitle>Import Agents</DialogTitle>
             <DialogDescription>
-              Found {personas.length} persona
+              Found {personas.length} agent
               {personas.length !== 1 ? "s" : ""} in {fileName || "archive"}.
             </DialogDescription>
           </DialogHeader>

@@ -494,7 +494,7 @@ export function useTeamActions(
 
       // Both attempts failed — personas exist but team doesn't.
       actions.setActionErrorMessage(
-        `Imported ${personaIds.length} persona${personaIds.length !== 1 ? "s" : ""} but failed to create team "${teamName}". The personas are saved — create a team manually to group them.`,
+        `Imported ${personaIds.length} agent${personaIds.length !== 1 ? "s" : ""} but failed to create team "${teamName}". The personas are saved — create a team manually to group them.`,
       );
       void queryClient.invalidateQueries({ queryKey: personasQueryKey });
     })();
