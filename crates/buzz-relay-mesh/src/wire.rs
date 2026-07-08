@@ -103,8 +103,11 @@ pub struct MeshDatagram {
     /// Sender-scoped monotonic sequence for loss/reorder observability.
     /// Receivers tolerate gaps and reordering; they never wait.
     pub seq: u64,
-    /// Opaque, NIP-44-encrypted between client endpoints. The relay never
-    /// holds plaintext.
+    /// Opaque at this layer: the profile owner defines the internal layout.
+    /// For realtime media it is `[peer_index: u8][client frame]` — the
+    /// peer_index is relay routing metadata (owner pod is sole allocator);
+    /// the client frame's encrypted content is NIP-44 between client
+    /// endpoints, so server-side plaintext of the media itself never exists.
     pub payload: Vec<u8>,
 }
 
