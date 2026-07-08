@@ -1410,6 +1410,7 @@ pub fn build_managed_agent_summary(
         last_exit_code: record.last_exit_code,
         last_error: record.last_error.clone(),
         start_on_app_launch: record.start_on_app_launch,
+        auto_restart_on_config_change: record.auto_restart_on_config_change,
         log_path,
         respond_to: record.respond_to,
         respond_to_allowlist: record.respond_to_allowlist.clone(),

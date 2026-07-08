@@ -462,6 +462,7 @@ type RawManagedAgent = {
   last_error: string | null;
   log_path: string;
   start_on_app_launch: boolean;
+  auto_restart_on_config_change?: boolean;
   backend:
     | { type: "local" }
     | { type: "provider"; id: string; config: Record<string, unknown> };
@@ -1043,6 +1044,7 @@ function cloneManagedAgent(agent: MockManagedAgent): RawManagedAgent {
     last_error: agent.last_error,
     log_path: agent.log_path,
     start_on_app_launch: agent.start_on_app_launch,
+    auto_restart_on_config_change: agent.auto_restart_on_config_change ?? true,
     backend: agent.backend ?? { type: "local" as const },
     backend_agent_id: agent.backend_agent_id ?? null,
     respond_to: agent.respond_to ?? "owner-only",
@@ -1557,6 +1559,7 @@ function buildSeededManagedAgent(seed: MockManagedAgentSeed): MockManagedAgent {
     last_error: seed.lastError ?? null,
     log_path: `/tmp/mock-agent-${seed.pubkey}.log`,
     start_on_app_launch: true,
+    auto_restart_on_config_change: true,
     backend: seed.backend ?? { type: "local" },
     backend_agent_id: null,
     respond_to: seed.respondTo ?? "owner-only",
@@ -6620,6 +6623,7 @@ async function handleCreateManagedAgent(
     last_error: null,
     log_path: `/tmp/mock-agent-${pubkey}.log`,
     start_on_app_launch: args.input.startOnAppLaunch ?? true,
+    auto_restart_on_config_change: true,
     backend: args.input.backend ?? { type: "local" as const },
     backend_agent_id: null,
     respond_to: args.input.respondTo ?? "owner-only",
@@ -6765,6 +6769,16 @@ async function handleSetManagedAgentStartOnAppLaunch(args: {
 }): Promise<RawManagedAgent> {
   const agent = getMockManagedAgent(args.pubkey);
   agent.start_on_app_launch = args.startOnAppLaunch;
+  agent.updated_at = new Date().toISOString();
+  return cloneManagedAgent(agent);
+}
+
+async function handleSetManagedAgentAutoRestart(args: {
+  pubkey: string;
+  autoRestartOnConfigChange: boolean;
+}): Promise<RawManagedAgent> {
+  const agent = getMockManagedAgent(args.pubkey);
+  agent.auto_restart_on_config_change = args.autoRestartOnConfigChange;
   agent.updated_at = new Date().toISOString();
   return cloneManagedAgent(agent);
 }
@@ -8479,6 +8493,10 @@ export function maybeInstallE2eTauriMocks() {
       case "stop_managed_agent":
         return handleStopManagedAgent(
           payload as Parameters<typeof handleStopManagedAgent>[0],
+        );
+      case "set_managed_agent_auto_restart":
+        return handleSetManagedAgentAutoRestart(
+          payload as Parameters<typeof handleSetManagedAgentAutoRestart>[0],
         );
       case "set_managed_agent_start_on_app_launch":
         return handleSetManagedAgentStartOnAppLaunch(

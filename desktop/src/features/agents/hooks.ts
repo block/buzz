@@ -24,6 +24,7 @@ import {
   updateManagedAgent,
 } from "@/shared/api/tauri";
 import {
+  setManagedAgentAutoRestart,
   setManagedAgentStartOnAppLaunch,
   startManagedAgent,
   stopManagedAgent,
@@ -419,6 +420,23 @@ export function useStopManagedAgentMutation() {
     mutationFn: (pubkey: string) => stopManagedAgent(pubkey),
     onSettled: () => {
       invalidateManagedAgentQueriesInBackground(queryClient);
+    },
+  });
+}
+
+export function useSetManagedAgentAutoRestartMutation() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: ({
+      pubkey,
+      autoRestartOnConfigChange,
+    }: {
+      pubkey: string;
+      autoRestartOnConfigChange: boolean;
+    }) => setManagedAgentAutoRestart(pubkey, autoRestartOnConfigChange),
+    onSettled: async () => {
+      await queryClient.invalidateQueries({ queryKey: managedAgentsQueryKey });
     },
   });
 }

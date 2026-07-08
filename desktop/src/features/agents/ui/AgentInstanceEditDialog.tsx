@@ -18,6 +18,7 @@ import { Button } from "@/shared/ui/button";
 import { ChooserDialogContent } from "@/shared/ui/chooser-dialog-content";
 import { Dialog } from "@/shared/ui/dialog";
 import { Input } from "@/shared/ui/input";
+import { setManagedAgentAutoRestart } from "@/shared/api/tauriManagedAgents";
 import { EditAgentAdvancedFields } from "./EditAgentAdvancedFields";
 import {
   AUTO_MODEL_DROPDOWN_VALUE,
@@ -107,6 +108,8 @@ export function AgentInstanceEditDialog({
   const [isCustomProviderEditing, setIsCustomProviderEditing] =
     React.useState(false);
   const [envVars, setEnvVars] = React.useState<EnvVarsValue>(agent.envVars);
+  const [autoRestartOnConfigChange, setAutoRestartOnConfigChange] =
+    React.useState(agent.autoRestartOnConfigChange);
   const personasQuery = usePersonasQuery();
   const linkedPersona = React.useMemo(
     () =>
@@ -157,6 +160,7 @@ export function AgentInstanceEditDialog({
       setProvider(agent.provider ?? "");
       setIsCustomProviderEditing(false);
       setEnvVars(agent.envVars);
+      setAutoRestartOnConfigChange(agent.autoRestartOnConfigChange);
       setRespondTo(agent.respondTo);
       setRespondToAllowlist(agent.respondToAllowlist);
       setAvatarUrl(agent.avatarUrl ?? "");
@@ -581,6 +585,14 @@ export function AgentInstanceEditDialog({
       };
 
       const result = await updateMutation.mutateAsync(input);
+      if (autoRestartOnConfigChange !== agent.autoRestartOnConfigChange) {
+        // Standalone setter (mirrors start-on-app-launch) — not part of
+        // UpdateManagedAgentInput, so the frozen update shape stays frozen.
+        await setManagedAgentAutoRestart(
+          agent.pubkey,
+          autoRestartOnConfigChange,
+        );
+      }
       if (result.profileSyncError) {
         console.warn("Relay profile sync failed:", result.profileSyncError);
       }
@@ -896,6 +908,7 @@ export function AgentInstanceEditDialog({
                       acpCommand={acpCommand}
                       agentArgs={agentArgs}
                       agentCommand={agentCommand}
+                      autoRestartOnConfigChange={autoRestartOnConfigChange}
                       disabled={updateMutation.isPending}
                       envVars={envVars}
                       fileSatisfiedEnvKeys={fileSatisfiedEnvKeys}
@@ -913,6 +926,7 @@ export function AgentInstanceEditDialog({
                       onAcpCommandChange={setAcpCommand}
                       onAgentArgsChange={setAgentArgs}
                       onAgentCommandChange={setAgentCommand}
+                      onAutoRestartChange={setAutoRestartOnConfigChange}
                       onEnvVarsChange={setEnvVars}
                       onInheritHarnessChange={setInheritHarness}
                       onMcpCommandChange={setMcpCommand}

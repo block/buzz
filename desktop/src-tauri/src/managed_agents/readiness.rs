@@ -976,6 +976,7 @@ mod tests {
             mcp_toolsets: None,
             env_vars,
             start_on_app_launch: false,
+            auto_restart_on_config_change: true,
             runtime_pid: None,
             backend: Default::default(),
             backend_agent_id: None,

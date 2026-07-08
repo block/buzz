@@ -159,6 +159,7 @@ mod tests {
             mcp_toolsets: Some("default".to_string()),
             env_vars: BTreeMap::from([("OPENAI_API_KEY".to_string(), "sk-secret".to_string())]),
             start_on_app_launch: true,
+            auto_restart_on_config_change: true,
             runtime_pid: Some(4242),
             backend: super::super::BackendKind::Provider {
                 id: "buzz-backend-x".to_string(),

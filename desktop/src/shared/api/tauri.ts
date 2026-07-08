@@ -228,6 +228,7 @@ export type RawManagedAgent = {
   last_error: string | null;
   log_path: string;
   start_on_app_launch: boolean;
+  auto_restart_on_config_change?: boolean;
   backend: ManagedAgentBackend;
   backend_agent_id: string | null;
   // Optional: pre-feature mock fixtures may omit these. Mapped to
@@ -1005,6 +1006,7 @@ export function fromRawManagedAgent(agent: RawManagedAgent): ManagedAgent {
     lastError: agent.last_error,
     logPath: agent.log_path,
     startOnAppLaunch: agent.start_on_app_launch,
+    autoRestartOnConfigChange: agent.auto_restart_on_config_change ?? true,
     backend: agent.backend,
     backendAgentId: agent.backend_agent_id,
     // Fallbacks for pre-feature mocks/fixtures that don't carry these fields.

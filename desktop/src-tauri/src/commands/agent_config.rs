@@ -498,6 +498,7 @@ mod tests {
             mcp_toolsets: None,
             env_vars: BTreeMap::new(),
             start_on_app_launch: false,
+            auto_restart_on_config_change: true,
             runtime_pid: None,
             backend: BackendKind::Local,
             backend_agent_id: None,
