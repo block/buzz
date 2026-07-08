@@ -198,12 +198,20 @@ pub fn get_retained_personas(
 }
 
 /// Get all events marked as pending sync (not yet confirmed on relay).
+///
+/// Tombstones (kind:5) sort FIRST: a delete retained in one session and its
+/// coordinate's replacement retained in a later one (B5 backfill resurrecting
+/// a deleted definition) must publish in that order — the relay's a-tag
+/// deletion soft-deletes every live row at the coordinate with no timestamp
+/// comparison, so a tombstone published AFTER the replacement would wipe it.
+/// Within each group, oldest first for the same reason.
 pub fn get_pending_sync(conn: &Connection) -> Result<Vec<RetainedEvent>, String> {
     let mut stmt = conn
         .prepare(
             "SELECT kind, pubkey, d_tag, content, created_at, raw_event, pending_sync
              FROM persona_events
-             WHERE pending_sync = 1",
+             WHERE pending_sync = 1
+             ORDER BY (kind != 5), created_at ASC",
         )
         .map_err(|e| format!("failed to prepare pending sync query: {e}"))?;
 
@@ -629,5 +637,35 @@ mod tests {
             .unwrap();
         assert_eq!(row.created_at, 2000);
         assert!(!row.content.contains("Stale"));
+    }
+
+    #[test]
+    fn pending_sync_publishes_tombstones_before_replacements() {
+        // B5 resurrection race: a kind:5 retained in session N and the same
+        // coordinate's replacement 30175 retained on the next boot can sit
+        // pending together. The relay's a-tag deletion ignores timestamps,
+        // so the tombstone MUST publish first or it wipes the replacement.
+        let conn = test_db();
+        let replacement = RetainedEvent {
+            kind: 30175,
+            created_at: 2000,
+            pending_sync: true,
+            ..sample_event()
+        };
+        retain_event(&conn, &replacement).unwrap();
+        let tombstone = RetainedEvent {
+            kind: 5,
+            d_tag: tombstone_retention_d_tag(30175, "test-persona"),
+            content: String::new(),
+            created_at: 1000,
+            pending_sync: true,
+            ..sample_event()
+        };
+        retain_event(&conn, &tombstone).unwrap();
+
+        let pending = get_pending_sync(&conn).unwrap();
+        assert_eq!(pending.len(), 2);
+        assert_eq!(pending[0].kind, 5, "tombstone first");
+        assert_eq!(pending[1].kind, 30175, "replacement second");
     }
 }
