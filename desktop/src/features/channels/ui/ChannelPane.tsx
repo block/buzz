@@ -858,7 +858,12 @@ export const ChannelPane = React.memo(function ChannelPane({
                     ? activeChannel
                     : null
               }
-              channelId={openAgentSessionChannelId}
+              channelId={
+                openAgentSessionChannelId &&
+                activeChannel?.id !== openAgentSessionChannelId
+                  ? activeChannelId
+                  : openAgentSessionChannelId
+              }
               isSinglePanelView={
                 useSplitAuxiliaryPane ? false : isSinglePanelView
               }

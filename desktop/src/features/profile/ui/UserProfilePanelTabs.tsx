@@ -371,7 +371,7 @@ function ProfileLiveActivityEmbed({
   const activeChannelId = resolveActivityChannelId(
     slides,
     selectedChannelId,
-    feedScope.preferredChannelId,
+    callerChannelId ?? feedScope.preferredChannelId,
   );
   const selectedIndex = activeChannelId ? slides.indexOf(activeChannelId) : 0;
 
