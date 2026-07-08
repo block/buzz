@@ -4,6 +4,8 @@ import type {
   AgentPersona,
   CreateManagedAgentInput,
 } from "@/shared/api/types";
+import type { MeshAgentPresetPatch } from "@/features/mesh-compute/applyMeshAgentPreset";
+import type { MeshServeTarget } from "@/shared/api/tauriMesh";
 import {
   resolvePersonaRuntime,
   type ResolvePersonaRuntimeResult,
@@ -62,6 +64,56 @@ export function resolveStartRuntimeForDefinition(
 }
 
 /**
+ * Where the started instance should run when the user picked something other
+ * than plain local in the definition-create flow (B5). Absent intent =
+ * today's local mapping, byte-identical.
+ *
+ * - `provider`: remote backend. Mirrors the legacy provider-mode create:
+ *   no local ACP/agent/MCP commands are spawned, so none are set;
+ *   `startOnAppLaunch` is forced false (remote agents don't auto-start with
+ *   the desktop) and `spawnAfterCreate` true.
+ * - `mesh`: relay-mesh compute. The preset patch carries the instance
+ *   commands/env the legacy dialog fanned into its field state; env lands in
+ *   record env_vars (the instance-override layer — the dial pointer is
+ *   per-instance runtime state, never definition env). `harnessOverride`
+ *   is true because the preset commands deliberately override the
+ *   definition's runtime preference.
+ */
+export type BackendIntent =
+  | {
+      type: "provider";
+      id: string;
+      config: Record<string, unknown>;
+    }
+  | {
+      type: "mesh";
+      modelId: string;
+      /** The selected serve target — consumed by the pre-mint preflight. */
+      target: MeshServeTarget;
+      patch: MeshAgentPresetPatch;
+    };
+
+/**
+ * Run the relay-mesh client preflight for a mesh intent, then mint the
+ * definition. The preflight runs BEFORE the mint — definition included — so
+ * a dead mesh target aborts the whole create instead of orphaning a
+ * definition the user didn't ask for; a rejection propagates and `mint` is
+ * never invoked. Non-mesh intents mint immediately: the preflight never runs
+ * for local or provider creates. Preflight and mint live in one function so
+ * a caller cannot reorder them.
+ */
+export async function mintDefinitionWithPreflight<T>(
+  backendIntent: BackendIntent | null | undefined,
+  prepare: (modelId: string, target: MeshServeTarget) => Promise<unknown>,
+  mint: () => Promise<T>,
+): Promise<T> {
+  if (backendIntent?.type === "mesh") {
+    await prepare(backendIntent.modelId, backendIntent.target);
+  }
+  return mint();
+}
+
+/**
  * The single definition→instance mapping (Phase 1B.3.5 rows 2–4). Every
  * surface that creates a running instance from a definition builds its
  * CreateManagedAgentInput here so the mapping cannot drift per-site.
@@ -76,12 +128,15 @@ export function resolveStartRuntimeForDefinition(
  * - envVars are never seeded from the definition: record.env_vars is
  *   agent overrides only and spawn merges the live definition env
  *   underneath. Seeding would manufacture pseudo-overrides that mask
- *   later definition edits made before the first spawn.
+ *   later definition edits made before the first spawn. (Mesh preset env is
+ *   the deliberate exception: it is instance-override state, not
+ *   definition env.)
  */
 export async function buildInstanceInputForDefinition(
   persona: AgentPersona,
   runtime: AcpRuntime,
   upload?: UploadMediaBytes,
+  backendIntent?: BackendIntent,
 ): Promise<CreateManagedAgentInput> {
   const avatarUrl = await resolveManagedAgentAvatarUrl(
     persona.avatarUrl,
@@ -89,16 +144,54 @@ export async function buildInstanceInputForDefinition(
     runtime.avatarUrl,
   );
 
-  return {
+  const base = {
     name: persona.displayName,
+    personaId: persona.id,
+    systemPrompt: persona.systemPrompt,
+    avatarUrl,
+  };
+
+  if (backendIntent?.type === "provider") {
+    return {
+      ...base,
+      harnessOverride: false,
+      spawnAfterCreate: true,
+      startOnAppLaunch: false,
+      backend: {
+        type: "provider",
+        id: backendIntent.id,
+        config: backendIntent.config,
+      },
+    };
+  }
+
+  if (backendIntent?.type === "mesh") {
+    const { patch } = backendIntent;
+    return {
+      ...base,
+      acpCommand: patch.acpCommand,
+      agentCommand: patch.agentCommand,
+      agentArgs: [...patch.agentArgs],
+      mcpCommand: patch.mcpCommand,
+      harnessOverride: true,
+      model: patch.model,
+      envVars: { ...patch.envVars },
+      relayMesh: { modelRef: backendIntent.modelId },
+      spawnAfterCreate: true,
+      // Relay-mesh agents need a freshly selected serve target to start;
+      // do not auto-restore them later with only the saved model/env.
+      startOnAppLaunch: false,
+      backend: { type: "local" },
+    };
+  }
+
+  return {
+    ...base,
     acpCommand: "buzz-acp",
     agentCommand: runtime.command,
     agentArgs: runtime.defaultArgs,
     mcpCommand: runtime.mcpCommand ?? "",
-    personaId: persona.id,
     harnessOverride: !persona.runtime || persona.runtime === runtime.id,
-    systemPrompt: persona.systemPrompt,
-    avatarUrl,
     model: persona.model ?? undefined,
     spawnAfterCreate: true,
     startOnAppLaunch: true,

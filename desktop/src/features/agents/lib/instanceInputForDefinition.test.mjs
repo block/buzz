@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   availableRuntimesForStart,
   buildInstanceInputForDefinition,
+  mintDefinitionWithPreflight,
   resolveStartRuntimeForDefinition,
 } from "./instanceInputForDefinition.ts";
 
@@ -125,6 +126,157 @@ test("mapping carries the runtime and definition fields", async () => {
   assert.equal(input.spawnAfterCreate, true);
   assert.equal(input.startOnAppLaunch, true);
   assert.deepEqual(input.backend, { type: "local" });
+});
+
+test("no backend intent is byte-identical to the pre-intent mapping", async () => {
+  // The 3 pre-B5 call sites (useManagedAgentActions, usePersonaActions,
+  // UserProfilePanel) pass no intent; their output must not move.
+  const input = await buildInstanceInputForDefinition(persona(), gooseRuntime);
+  assert.deepEqual(input, {
+    name: "Test Agent",
+    personaId: "p-1",
+    systemPrompt: "prompt",
+    avatarUrl: "https://example.com/a.png",
+    acpCommand: "buzz-acp",
+    agentCommand: "goose-cmd",
+    agentArgs: ["--acp"],
+    mcpCommand: "goose-mcp",
+    harnessOverride: true,
+    model: undefined,
+    spawnAfterCreate: true,
+    startOnAppLaunch: true,
+    backend: { type: "local" },
+  });
+});
+
+test("provider intent forces startOnAppLaunch off and omits local commands", async () => {
+  const input = await buildInstanceInputForDefinition(
+    persona(),
+    gooseRuntime,
+    undefined,
+    { type: "provider", id: "blox", config: { region: "us" } },
+  );
+  assert.deepEqual(input.backend, {
+    type: "provider",
+    id: "blox",
+    config: { region: "us" },
+  });
+  assert.equal(input.startOnAppLaunch, false, "remote agents never auto-start");
+  assert.equal(input.spawnAfterCreate, true);
+  assert.equal(input.harnessOverride, false);
+  // Provider agents spawn no local ACP — the legacy provider branch omitted
+  // all local commands and model/provider, and so does the intent path.
+  for (const key of [
+    "acpCommand",
+    "agentCommand",
+    "agentArgs",
+    "mcpCommand",
+    "model",
+    "envVars",
+    "relayMesh",
+  ]) {
+    assert.equal(key in input, false, `provider intent must omit ${key}`);
+  }
+  assert.equal(input.personaId, "p-1", "definition link is kept");
+  assert.equal(input.systemPrompt, "prompt");
+});
+
+test("mesh intent applies the preset patch as instance-override state", async () => {
+  const patch = {
+    acpCommand: "buzz-acp",
+    agentCommand: "buzz-agent",
+    agentArgs: ["acp"],
+    mcpCommand: "",
+    model: "mesh/model:Q4",
+    envVars: { OPENAI_BASE_URL: "http://127.0.0.1:9337/v1" },
+  };
+  const input = await buildInstanceInputForDefinition(
+    persona(),
+    gooseRuntime,
+    undefined,
+    {
+      type: "mesh",
+      modelId: "mesh/model:Q4",
+      target: { endpointAddr: "10.0.0.1:9337", modelId: "mesh/model:Q4" },
+      patch,
+    },
+  );
+  assert.equal(input.agentCommand, "buzz-agent");
+  assert.deepEqual(input.agentArgs, ["acp"]);
+  assert.equal(input.model, "mesh/model:Q4");
+  assert.deepEqual(input.envVars, patch.envVars);
+  assert.deepEqual(input.relayMesh, { modelRef: "mesh/model:Q4" });
+  assert.equal(
+    input.harnessOverride,
+    true,
+    "preset commands deliberately override the definition runtime",
+  );
+  assert.equal(
+    input.startOnAppLaunch,
+    false,
+    "mesh agents need a fresh serve target; never auto-restore",
+  );
+  assert.deepEqual(input.backend, { type: "local" });
+  assert.equal(input.personaId, "p-1", "definition link is kept");
+  // The patch must be copied, not aliased — a caller mutating its patch
+  // after the fact must not reach into the built input.
+  patch.agentArgs.push("mutated");
+  patch.envVars.INJECTED = "x";
+  assert.deepEqual(input.agentArgs, ["acp"]);
+  assert.equal("INJECTED" in input.envVars, false);
+});
+
+test("preflight runs only for mesh intent, before the mint, and a failure never mints", async () => {
+  const calls = [];
+  const prepare = async (modelId, target) => {
+    calls.push(["prepare", modelId, target]);
+  };
+  const mint = async () => {
+    calls.push(["mint"]);
+    return "definition";
+  };
+
+  // Local (no intent) and provider intents mint immediately, no preflight.
+  assert.equal(
+    await mintDefinitionWithPreflight(undefined, prepare, mint),
+    "definition",
+  );
+  await mintDefinitionWithPreflight(null, prepare, mint);
+  await mintDefinitionWithPreflight(
+    { type: "provider", id: "blox", config: {} },
+    prepare,
+    mint,
+  );
+  assert.deepEqual(
+    calls,
+    [["mint"], ["mint"], ["mint"]],
+    "non-mesh intents must not preflight",
+  );
+
+  // Mesh intent preflights with the selected target BEFORE the mint.
+  calls.length = 0;
+  const target = { endpointAddr: "10.0.0.1:9337", modelId: "m" };
+  await mintDefinitionWithPreflight(
+    { type: "mesh", modelId: "m", target, patch: {} },
+    prepare,
+    mint,
+  );
+  assert.deepEqual(calls, [["prepare", "m", target], ["mint"]]);
+
+  // A preflight rejection propagates and the mint NEVER runs — a dead mesh
+  // target must not orphan a definition the user didn't ask for.
+  calls.length = 0;
+  await assert.rejects(
+    mintDefinitionWithPreflight(
+      { type: "mesh", modelId: "m", target, patch: {} },
+      async () => {
+        throw new Error("target unreachable");
+      },
+      mint,
+    ),
+    /target unreachable/,
+  );
+  assert.deepEqual(calls, [], "a failed preflight must not mint anything");
 });
 
 test("row 1: refuses when the configured runtime is not available", () => {

@@ -107,6 +107,10 @@ type AgentDefinitionDialogProps = {
    * import button owns that slot (`canImportPersonaUpdate`).
    */
   createFooterSlot?: React.ReactNode;
+  /** Rendered below the form fields in create mode only ("Where to run"). */
+  createRunSection?: React.ReactNode;
+  /** Extra create-mode submit gate (e.g. incomplete provider config). */
+  createSubmitBlocked?: boolean;
 };
 
 const ADVANCED_FIELDS_MOTION_TRANSITION = {
@@ -129,6 +133,8 @@ export function AgentDefinitionDialog({
   onSubmit,
   onImportUpdateFile,
   createFooterSlot,
+  createRunSection,
+  createSubmitBlocked = false,
 }: AgentDefinitionDialogProps) {
   const [displayName, setDisplayName] = React.useState("");
   const [avatarUrl, setAvatarUrl] = React.useState("");
@@ -435,6 +441,7 @@ export function AgentDefinitionDialog({
     canSubmitPersonaDialog({ displayName, isPending }) &&
     (!isCreateMode || runtime.trim().length > 0) &&
     (!isCreateMode || selectedRuntimeIsAvailable) &&
+    (!isCreateMode || !createSubmitBlocked) &&
     (!isExplicitModelRequired || model.trim().length > 0) &&
     !isAvatarUploadPending;
   const {
@@ -892,6 +899,8 @@ export function AgentDefinitionDialog({
                 />
               ) : null}
             </AnimatePresence>
+
+            {isCreateMode ? createRunSection : null}
 
             <div className="space-y-3">
               <button

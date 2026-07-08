@@ -8,6 +8,7 @@ import type {
   UpdatePersonaInput,
 } from "@/shared/api/types";
 import { Switch } from "@/shared/ui/switch";
+import type { BackendIntent } from "../lib/instanceInputForDefinition";
 import {
   definitionCreateDialogState,
   intentForStartToggle,
@@ -17,6 +18,12 @@ import { AgentInstanceEditDialog } from "./AgentInstanceEditDialog";
 import { CreateAgentDialog } from "./CreateAgentDialog";
 import { createPersonaDialogState } from "./personaDialogState";
 import { AgentDefinitionDialog } from "./AgentDefinitionDialog";
+import { WhereToRunSection } from "./WhereToRunSection";
+import {
+  canSubmitWhereToRun,
+  emptyWhereToRunDraft,
+  resolveBackendIntent,
+} from "./whereToRunIntent";
 
 export type AgentDialogCreateMode = "definition" | "instance";
 
@@ -30,6 +37,7 @@ type AgentDialogCreateProps = {
   onSubmitDefinition: (
     input: CreatePersonaInput | UpdatePersonaInput,
     intent: AgentCreateIntent,
+    backendIntent: BackendIntent | null,
   ) => Promise<boolean>;
   onInstanceCreated: (result: CreateManagedAgentResponse) => void;
 };
@@ -108,6 +116,7 @@ function AgentCreateDialogRouter({
   onInstanceCreated,
 }: AgentDialogCreateProps) {
   const [startAfterCreate, setStartAfterCreate] = React.useState(true);
+  const [runDraft, setRunDraft] = React.useState(emptyWhereToRunDraft);
   // Stable identity across toggle flips — AgentDefinitionDialog re-initializes its
   // fields whenever `initialValues` changes.
   const initialValues = React.useMemo(
@@ -144,6 +153,18 @@ function AgentCreateDialogRouter({
           Start agent after create
         </label>
       }
+      createRunSection={
+        // "Where to run" is instance state: with the start toggle off no
+        // instance exists, so the section disappears instead of dangling.
+        startAfterCreate ? (
+          <WhereToRunSection
+            draft={runDraft}
+            isPending={isDefinitionPending}
+            onDraftChange={setRunDraft}
+          />
+        ) : null
+      }
+      createSubmitBlocked={!canSubmitWhereToRun(runDraft, startAfterCreate)}
       description={copy.description}
       error={definitionError}
       initialValues={initialValues}
@@ -153,6 +174,7 @@ function AgentCreateDialogRouter({
         const submitted = await onSubmitDefinition(
           input,
           intentForStartToggle(startAfterCreate),
+          resolveBackendIntent(runDraft, startAfterCreate),
         );
         if (submitted) {
           onOpenChange(false);
