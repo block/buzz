@@ -17,6 +17,11 @@ import { decryptObserverEvent } from "@/shared/api/tauriObserver";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import type { TranscriptItem } from "./agentSessionTypes";
 import type { RelayEvent } from "@/shared/api/types";
+import {
+  createArchivePagingState,
+  applyChannelReset,
+} from "./archivePagingState";
+export type { ArchivePagingState } from "./archivePagingState";
 
 // Stable subscribe reference shared by all useSyncExternalStore hooks.
 // subscribeAgentObserverStore already has a fixed identity, so this thin
@@ -81,47 +86,33 @@ export function useLoadArchivedObserverEvents(
   const identityQuery = useIdentityQuery();
   const identityPubkey = identityQuery.data?.pubkey ?? null;
 
-  // Whether the current identity has an owner_p save subscription.
+  // All mutable paging state lives in one stable ref. createArchivePagingState
+  // initialises the backfill promise eagerly so fetchOlderArchived can await it
+  // before the backfill effect fires. applyChannelReset resets cursor/exhaustion/
+  // fetchLock when channelId changes; backfill state is untouched (identity-level).
+  const pagingStateRef = React.useRef(createArchivePagingState());
+  const ps = pagingStateRef.current;
+
+  // React state mirrors the fields callers observe so re-renders fire on change.
   const [hasSubscription, setHasSubscription] = React.useState<boolean | null>(
-    null,
+    ps.hasSubscription,
   );
-  const [hasOlderArchived, setHasOlderArchived] = React.useState(true);
-  const isFetchingRef = React.useRef(false);
-  // Backfill state: "pending" → "running" → "done".
-  // fetchOlderArchived awaits backfillPromiseRef before reading the index so
-  // the first scroll-trigger never races the write path and incorrectly marks
-  // the channel exhausted before backfill has completed.
-  const backfillStatusRef = React.useRef<"pending" | "running" | "done">(
-    "pending",
-  );
-  const backfillPromiseRef = React.useRef<Promise<void> | null>(null);
-  const backfillResolveRef = React.useRef<(() => void) | null>(null);
-  // Expose a promise that resolves when backfill is done.  Created eagerly so
-  // fetchOlderArchived can await it before the effect that starts backfill fires.
-  if (!backfillPromiseRef.current) {
-    backfillPromiseRef.current = new Promise<void>((resolve) => {
-      backfillResolveRef.current = resolve;
-    });
-  }
-  // Compound keyset cursor: tracks both `created_at` and `id` of the oldest
-  // event seen so far.  Mirrors the SQL `ORDER BY created_at DESC, id DESC` so
-  // same-second siblings are never skipped at a page boundary.
-  const cursorRef = React.useRef<{ createdAt: number; id: string } | null>(
-    null,
+  const [hasOlderArchived, setHasOlderArchived] = React.useState(
+    ps.hasOlderArchived,
   );
 
   // Reset per-channel paging state when channelId changes. Backfill state is
   // identity-level (not per-channel) and must NOT be reset here — the backfill
   // index covers all channels and only needs to run once per identity mount.
   // Only the cursor, exhaustion flag, and fetching lock are channel-scoped.
-  // biome-ignore lint/correctness/useExhaustiveDependencies: channelId is the intentional reset key; cursorRef/isFetchingRef are stable refs excluded from deps by convention; setHasOlderArchived is a stable React state setter
+  // biome-ignore lint/correctness/useExhaustiveDependencies: channelId is the intentional reset key; ps is a stable ref excluded from deps by convention; setHasOlderArchived is a stable React state setter
   React.useEffect(() => {
-    cursorRef.current = null;
-    isFetchingRef.current = false;
+    applyChannelReset(ps);
     setHasOlderArchived(true);
   }, [channelId]);
 
   // Check for an owner_p subscription once per identity.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: ps is a stable ref excluded from deps by convention; setHasSubscription/setHasOlderArchived are stable React state setters
   React.useEffect(() => {
     if (!enabled || !identityPubkey) {
       return;
@@ -136,20 +127,24 @@ export function useLoadArchivedObserverEvents(
           (s) => s.scopeType === "owner_p" && s.scopeValue === identityPubkey,
         );
         setHasSubscription(hasSub);
+        ps.hasSubscription = hasSub;
         if (!hasSub) {
           setHasOlderArchived(false);
+          ps.hasOlderArchived = false;
           // No subscription → backfill will never run; resolve the promise
           // immediately so fetchOlderArchived doesn't await indefinitely.
-          backfillStatusRef.current = "done";
-          backfillResolveRef.current?.();
+          ps.backfillStatus = "done";
+          ps.backfillResolve?.();
         }
       })
       .catch(() => {
         if (!cancelled) {
           setHasSubscription(false);
+          ps.hasSubscription = false;
           setHasOlderArchived(false);
-          backfillStatusRef.current = "done";
-          backfillResolveRef.current?.();
+          ps.hasOlderArchived = false;
+          ps.backfillStatus = "done";
+          ps.backfillResolve?.();
         }
       });
     return () => {
@@ -162,16 +157,13 @@ export function useLoadArchivedObserverEvents(
   // observer_channel_index. A status row is written for EVERY processed event —
   // null/failed channelId rows get channel_id=null, so re-runs skip them.
   // Runs once per mount when the subscription is confirmed; gated by
-  // backfillStatusRef so fetchOlderArchived can await completion.
+  // ps.backfillStatus so fetchOlderArchived can await completion.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: ps is a stable ref excluded from deps by convention
   React.useEffect(() => {
-    if (
-      !enabled ||
-      !hasSubscription ||
-      backfillStatusRef.current !== "pending"
-    ) {
+    if (!enabled || !hasSubscription || ps.backfillStatus !== "pending") {
       return;
     }
-    backfillStatusRef.current = "running";
+    ps.backfillStatus = "running";
     const promise = (async () => {
       try {
         const rows = await readUnindexedObserverRows();
@@ -226,20 +218,21 @@ export function useLoadArchivedObserverEvents(
           error,
         );
       } finally {
-        backfillStatusRef.current = "done";
-        backfillResolveRef.current?.();
+        ps.backfillStatus = "done";
+        ps.backfillResolve?.();
       }
     })();
-    backfillPromiseRef.current = promise;
+    ps.backfillPromise = promise;
   }, [enabled, hasSubscription]);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: ps is a stable ref; ps.isFetching/ps.cursor/ps.backfillPromise/ps.hasOlderArchived are read via the stable ref object, not reactive values
   const fetchOlderArchived = React.useCallback(async () => {
     if (
       !enabled ||
       !identityPubkey ||
       !hasSubscription ||
       !channelId ||
-      isFetchingRef.current ||
+      ps.isFetching ||
       !hasOlderArchived
     ) {
       return;
@@ -249,8 +242,8 @@ export function useLoadArchivedObserverEvents(
     // guarantees the index is populated before the first paginated read, so
     // a scroll-trigger that fires before backfill writes can't return 0 rows
     // and falsely mark the channel exhausted.
-    if (backfillPromiseRef.current) {
-      await backfillPromiseRef.current;
+    if (ps.backfillPromise) {
+      await ps.backfillPromise;
     }
 
     // Re-check after awaiting: hasOlderArchived might have been set false
@@ -259,9 +252,9 @@ export function useLoadArchivedObserverEvents(
       return;
     }
 
-    isFetchingRef.current = true;
+    ps.isFetching = true;
     try {
-      const before = cursorRef.current ?? undefined;
+      const before = ps.cursor ?? undefined;
       const events = await readArchivedObserverEventsForChannel(channelId, {
         before: before ?? null,
         limit: ARCHIVED_EVENTS_PAGE_SIZE,
@@ -272,7 +265,7 @@ export function useLoadArchivedObserverEvents(
         // this page.  Capture both created_at and id to mirror the compound
         // sort key so same-second siblings are not skipped on the next page.
         const oldestEvent = events[events.length - 1];
-        cursorRef.current = {
+        ps.cursor = {
           createdAt: oldestEvent.created_at,
           id: oldestEvent.id,
         };
@@ -282,11 +275,12 @@ export function useLoadArchivedObserverEvents(
       // A short page means the archive is exhausted for this channel.
       if (events.length < ARCHIVED_EVENTS_PAGE_SIZE) {
         setHasOlderArchived(false);
+        ps.hasOlderArchived = false;
       }
     } catch (error) {
       console.error("[useLoadArchivedObserverEvents] fetch failed:", error);
     } finally {
-      isFetchingRef.current = false;
+      ps.isFetching = false;
     }
   }, [enabled, identityPubkey, hasSubscription, channelId, hasOlderArchived]);
 

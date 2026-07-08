@@ -347,80 +347,101 @@ describe("load-older cursor advance logic", () => {
 // must reset when channelId changes so channel B starts with a fresh cursor
 // and hasOlderArchived=true rather than inheriting channel A's exhausted state.
 //
-// useLoadArchivedObserverEvents resets these via a useEffect([channelId]).
-// We verify the underlying state-machine semantics here without React.
+// useLoadArchivedObserverEvents delegates all mutable paging state to
+// archivePagingState.ts (createArchivePagingState / applyChannelReset).
+// We test those functions directly — tests would fail if the implementation
+// were removed or if the channel-reset touched backfill state it must not.
+
+import {
+  createArchivePagingState,
+  applyChannelReset,
+} from "@/features/agents/ui/archivePagingState.ts";
 
 describe("archive paging state reset on channel change", () => {
-  it("test_channel_switch_resets_cursor_and_exhaustion", () => {
-    // Simulate channel A paging to exhaustion.
-    let hasOlderArchived = true;
-    let cursor = null;
-    let isFetching = false;
+  it("test_fresh_state_has_correct_initial_values", () => {
+    const ps = createArchivePagingState();
 
-    // Simulate a successful full-page fetch for channel A (cursor advances).
-    const pageA = Array.from({ length: 5 }, (_, i) => ({
-      id: `a${i}`,
-      created_at: 100 - i,
-    }));
-    cursor = {
-      createdAt: pageA[pageA.length - 1].created_at,
-      id: pageA[pageA.length - 1].id,
-    };
-    // Short page → exhausted.
-    hasOlderArchived = pageA.length >= 50; // false
-
-    assert.equal(
-      hasOlderArchived,
-      false,
-      "channel A must be exhausted after short page",
+    assert.equal(ps.hasSubscription, null, "hasSubscription starts null");
+    assert.equal(ps.hasOlderArchived, true, "hasOlderArchived starts true");
+    assert.equal(ps.isFetching, false, "isFetching starts false");
+    assert.equal(ps.backfillStatus, "pending", "backfillStatus starts pending");
+    assert.notEqual(
+      ps.backfillPromise,
+      null,
+      "backfillPromise is eagerly initialized",
     );
-    assert.notEqual(cursor, null, "cursor must be set after channel A fetch");
+    assert.equal(ps.cursor, null, "cursor starts null");
+  });
 
-    // Simulate the useEffect([channelId]) reset on channel switch.
-    // This is what the new effect in useLoadArchivedObserverEvents does.
-    cursor = null;
-    isFetching = false;
-    hasOlderArchived = true;
+  it("test_channel_switch_resets_cursor_exhaustion_and_fetch_lock", () => {
+    const ps = createArchivePagingState();
 
+    // Simulate channel A paging to exhaustion with a non-null cursor.
+    ps.cursor = { createdAt: 1000, id: "event-a5" };
+    ps.hasOlderArchived = false; // channel A exhausted
+    ps.isFetching = true; // mid-flight request (edge case)
+    ps.backfillStatus = "done"; // backfill ran once already
+    const originalPromise = ps.backfillPromise; // must survive reset
+
+    // Channel switch — this is what the useEffect([channelId]) calls.
+    applyChannelReset(ps);
+
+    assert.equal(ps.cursor, null, "cursor resets to null on channel switch");
     assert.equal(
-      hasOlderArchived,
+      ps.hasOlderArchived,
       true,
-      "hasOlderArchived must reset to true on channel switch",
+      "hasOlderArchived resets to true on channel switch",
     );
-    assert.equal(cursor, null, "cursor must reset to null on channel switch");
     assert.equal(
-      isFetching,
+      ps.isFetching,
       false,
-      "isFetching must reset to false on channel switch",
+      "isFetching resets to false on channel switch",
+    );
+
+    // Backfill state must NOT be touched — it is identity-level and should
+    // survive channel switches so the backfill only runs once per identity mount.
+    assert.equal(
+      ps.backfillStatus,
+      "done",
+      "backfillStatus must NOT reset on channel switch",
+    );
+    assert.equal(
+      ps.backfillPromise,
+      originalPromise,
+      "backfillPromise must NOT reset on channel switch",
+    );
+    assert.equal(
+      ps.hasSubscription,
+      null,
+      "hasSubscription must NOT reset on channel switch",
     );
   });
 
-  it("test_channel_switch_does_not_reset_backfill_state", () => {
-    // Backfill state is identity-level, not per-channel. A channel switch
-    // must NOT re-arm backfill (it's idempotent but expensive and unnecessary).
-    // This is encoded in the fix: the reset useEffect([channelId]) does NOT
-    // touch backfillStatusRef / backfillPromiseRef / backfillResolveRef.
-    //
-    // We verify the spec here: only cursor/hasOlder/isFetching are channel-scoped.
-    const channelScopedFields = ["cursor", "hasOlderArchived", "isFetching"];
-    const identityScopedFields = [
-      "backfillStatus",
-      "backfillPromise",
-      "backfillResolve",
-    ];
+  it("test_multiple_channel_switches_each_start_fresh", () => {
+    const ps = createArchivePagingState();
 
-    // Channel-scoped fields must reset; identity-scoped must not.
-    assert.ok(
-      channelScopedFields.every((f) =>
-        ["cursor", "hasOlderArchived", "isFetching"].includes(f),
-      ),
-      "cursor, hasOlderArchived, isFetching are channel-scoped and must reset",
+    // Switch to channel A: exhaust it.
+    ps.cursor = { createdAt: 500, id: "a-oldest" };
+    ps.hasOlderArchived = false;
+    applyChannelReset(ps);
+
+    assert.equal(ps.cursor, null, "switch A→B: cursor reset");
+    assert.equal(
+      ps.hasOlderArchived,
+      true,
+      "switch A→B: hasOlderArchived reset",
     );
-    assert.ok(
-      identityScopedFields.every((f) =>
-        ["backfillStatus", "backfillPromise", "backfillResolve"].includes(f),
-      ),
-      "backfill state is identity-scoped and must NOT reset on channel switch",
+
+    // Simulate channel B also being paged.
+    ps.cursor = { createdAt: 200, id: "b-oldest" };
+    ps.hasOlderArchived = false;
+    applyChannelReset(ps);
+
+    assert.equal(ps.cursor, null, "switch B→C: cursor reset again");
+    assert.equal(
+      ps.hasOlderArchived,
+      true,
+      "switch B→C: hasOlderArchived reset again",
     );
   });
 });
