@@ -23,6 +23,7 @@ pub mod gossip;
 pub mod membership;
 pub mod peer;
 pub mod registry;
+pub mod runtime;
 pub mod status;
 pub mod wire;
 
@@ -41,6 +42,7 @@ use bytes::Bytes;
 pub use gossip::{GossipDigestEntry, GossipMessage, GossipRecord, GossipState, PhiAccrual};
 pub use membership::MeshMembership;
 pub use registry::{ReadyHeartbeat, ReadyRecord, ReadyRegistry, RuntimeAttestation};
+pub use runtime::MeshRuntime;
 pub use status::{ConnectionState, MeshCounters, MeshPeerCounters, MeshPeerStatus, MeshStatus};
 pub use wire::{
     FencedHeader, GoodbyeReason, MeshDatagram, MeshStreamFrame, Profile, RuntimeId, StreamHello,

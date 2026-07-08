@@ -146,6 +146,71 @@ impl MeshMembership {
         self.draining.load(Ordering::Relaxed)
     }
 
+    /// Whether `runtime_id` is present in the (attested) peer table. Used by
+    /// the runtime's accept loop to gate inbound connections — a dialability
+    /// hint, never an ownership statement.
+    pub fn has_peer(&self, runtime_id: RuntimeId) -> bool {
+        self.peers
+            .read()
+            .expect("membership lock poisoned")
+            .contains_key(&runtime_id)
+    }
+
+    /// All known gossip records (local + peers), for reconcile/dial decisions.
+    pub fn records(&self) -> Vec<GossipRecord> {
+        let mut records: Vec<GossipRecord> = self
+            .peers
+            .read()
+            .expect("membership lock poisoned")
+            .values()
+            .map(|peer| peer.record.clone())
+            .collect();
+        records.push(self.local_record());
+        records
+    }
+
+    /// Scuttlebutt digest over every record this runtime knows (local + peers).
+    pub fn digest(&self) -> crate::gossip::GossipMessage {
+        let mut entries: Vec<_> = self
+            .records()
+            .into_iter()
+            .map(|record| crate::gossip::GossipDigestEntry {
+                runtime_id: record.runtime_id,
+                version: record.version,
+            })
+            .collect();
+        entries.sort_by_key(|entry| entry.runtime_id.to_hex());
+        crate::gossip::GossipMessage::Digest {
+            version: crate::gossip::GOSSIP_PAYLOAD_VERSION,
+            entries,
+        }
+    }
+
+    /// Records the remote digest is missing or behind on.
+    pub fn delta_for(
+        &self,
+        digest: &[crate::gossip::GossipDigestEntry],
+    ) -> crate::gossip::GossipMessage {
+        let remote: std::collections::HashMap<_, _> = digest
+            .iter()
+            .map(|entry| (entry.runtime_id, entry.version))
+            .collect();
+        let mut records: Vec<_> = self
+            .records()
+            .into_iter()
+            .filter(|record| {
+                remote
+                    .get(&record.runtime_id)
+                    .is_none_or(|version| *version < record.version)
+            })
+            .collect();
+        records.sort_by_key(|record| record.runtime_id.to_hex());
+        crate::gossip::GossipMessage::Delta {
+            version: crate::gossip::GOSSIP_PAYLOAD_VERSION,
+            records,
+        }
+    }
+
     pub fn record_stream_opened(&self, runtime_id: RuntimeId) {
         self.update_peer_counters(runtime_id, |c| {
             c.streams_opened = c.streams_opened.saturating_add(1)

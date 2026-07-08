@@ -56,6 +56,20 @@ impl MeshEndpoint {
         self.endpoint.addr()
     }
 
+    /// The endpoint's directly-dialable IP socket addrs (no relay paths).
+    /// Lets consumers build advertise records without depending on iroh types.
+    pub fn ip_addrs(&self) -> Vec<SocketAddr> {
+        self.endpoint
+            .addr()
+            .addrs
+            .iter()
+            .filter_map(|ta| match ta {
+                TransportAddr::Ip(sock) => Some(*sock),
+                _ => None,
+            })
+            .collect()
+    }
+
     pub async fn accept(&self) -> Result<Option<crate::peer::MeshPeer>, MeshError> {
         let Some(incoming) = self.endpoint.accept().await else {
             return Ok(None);

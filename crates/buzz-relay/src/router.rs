@@ -129,6 +129,7 @@ pub fn build_health_router(state: Arc<AppState>) -> Router {
         .route("/_liveness", get(liveness_handler))
         .route("/_readiness", get(readiness_handler))
         .route("/_status", get(status_handler))
+        .route("/_mesh", get(mesh_status_handler))
         .with_state(state)
 }
 
@@ -249,6 +250,18 @@ async fn status_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse
         "version": env!("CARGO_PKG_VERSION"),
         "uptime_seconds": uptime_secs,
     }))
+}
+
+/// `/_mesh` — live mesh status: peer table, connection/phi state, per-peer
+/// counters, fence-rejection totals. Mesh-off reports `{"enabled": false}` so
+/// operators can distinguish "off" from "on with zero peers".
+async fn mesh_status_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    match state.mesh() {
+        Some(handle) => Json(serde_json::to_value(handle.status()).unwrap_or_else(
+            |e| json!({"enabled": true, "error": format!("status serialize: {e}")}),
+        )),
+        None => Json(json!({"enabled": false})),
+    }
 }
 
 /// Build a CORS layer from the configured origins list.
