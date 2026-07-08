@@ -140,6 +140,7 @@ export function ConfigNudgeCard({
               key={requirementKey(req, i)}
               onOpenDoctor={handleOpenDoctor}
               requirement={req}
+              showRowDoctorCta={!allCliLogin}
             />
           ))}
         </div>
@@ -163,9 +164,11 @@ export function ConfigNudgeCard({
 function RequirementRow({
   onOpenDoctor,
   requirement,
+  showRowDoctorCta,
 }: {
   onOpenDoctor: (e: React.MouseEvent) => void;
   requirement: ConfigNudgePayload["requirements"][number];
+  showRowDoctorCta: boolean;
 }) {
   switch (requirement.surface) {
     case "env_key":
@@ -191,16 +194,20 @@ function RequirementRow({
           <span className="flex-1 [overflow-wrap:anywhere]">
             {cliLoginMessage(requirement)}
           </span>
-          {/* (B) Inline Doctor CTA on every cli_login row — routes to Doctor
-              regardless of the card-level trigger (handles mixed-requirement
-              cards). stopPropagation prevents double-fire. */}
-          <button
-            className="relative z-20 shrink-0 font-medium text-destructive hover:underline"
-            onClick={onOpenDoctor}
-            type="button"
-          >
-            Open Doctor →
-          </button>
+          {/* (B) Inline Doctor CTA — shown only on mixed cards where the
+              card-level trigger opens Edit Agent. When allCliLogin is true the
+              card trigger already routes to Doctor; the per-row button is
+              redundant and is suppressed. stopPropagation prevents double-fire
+              on mixed cards where both card and row CTAs are visible. */}
+          {showRowDoctorCta && (
+            <button
+              className="relative z-20 shrink-0 font-medium text-destructive hover:underline"
+              onClick={onOpenDoctor}
+              type="button"
+            >
+              Open Doctor →
+            </button>
+          )}
         </div>
       );
   }
