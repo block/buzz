@@ -268,16 +268,23 @@ pub struct BakedEnvEntry {
     pub masked: bool,
 }
 
-/// Returns `true` when a key name looks like it might hold a secret.
+/// Returns `true` when a baked-env key is safe to display unmasked in the UI.
 ///
-/// Heuristic: key (case-insensitive) ends with or contains `_API_KEY`,
-/// `_TOKEN`, `_SECRET`, or `_PASSWORD`.
-fn is_secret_key(key: &str) -> bool {
+/// This uses an explicit allowlist of keys that are known safe (non-secret).
+/// Any key NOT in this set is masked — default-deny for a security surface.
+///
+/// Allowlist (case-insensitive):
+/// - `BUZZ_AGENT_PROVIDER`, `BUZZ_AGENT_MODEL` — agent runtime selection
+/// - `DATABRICKS_HOST`, `DATABRICKS_MODEL` — Block non-secret defaults
+fn is_safe_to_reveal(key: &str) -> bool {
+    const SAFE_KEYS: &[&str] = &[
+        "BUZZ_AGENT_PROVIDER",
+        "BUZZ_AGENT_MODEL",
+        "DATABRICKS_HOST",
+        "DATABRICKS_MODEL",
+    ];
     let upper = key.to_ascii_uppercase();
-    upper.contains("_API_KEY")
-        || upper.contains("_TOKEN")
-        || upper.contains("_SECRET")
-        || upper.contains("_PASSWORD")
+    SAFE_KEYS.iter().any(|safe| upper == *safe)
 }
 
 /// Expose the baked build env to the frontend with values shown, but any
@@ -296,7 +303,7 @@ pub fn get_baked_build_env() -> Vec<BakedEnvEntry> {
         .into_iter()
         .filter(|(_, v)| !v.is_empty())
         .map(|(key, value)| {
-            let masked = is_secret_key(&key);
+            let masked = !is_safe_to_reveal(&key);
             let display_value = if masked {
                 "\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}".to_string()
             } else {
@@ -872,7 +879,7 @@ mod tests {
         map.iter()
             .filter(|(_, v)| !v.is_empty())
             .map(|(k, v)| {
-                let masked = super::is_secret_key(k);
+                let masked = !super::is_safe_to_reveal(k);
                 BakedEnvEntry {
                     key: k.to_string(),
                     value: if masked {
@@ -967,13 +974,28 @@ mod tests {
     }
 
     #[test]
-    fn baked_env_secret_heuristic_is_case_insensitive() {
-        // Key lowercased — heuristic must still catch it.
-        assert!(super::is_secret_key("my_api_key"));
-        assert!(super::is_secret_key("github_token"));
-        assert!(super::is_secret_key("db_secret"));
-        assert!(super::is_secret_key("db_password"));
-        assert!(!super::is_secret_key("DATABRICKS_HOST"));
-        assert!(!super::is_secret_key("BUZZ_AGENT_PROVIDER"));
+    fn baked_env_allowlist_is_case_insensitive() {
+        // Known-safe keys — case-insensitive match must allow them.
+        assert!(super::is_safe_to_reveal("buzz_agent_provider"));
+        assert!(super::is_safe_to_reveal("BUZZ_AGENT_PROVIDER"));
+        assert!(super::is_safe_to_reveal("buzz_agent_model"));
+        assert!(super::is_safe_to_reveal("BUZZ_AGENT_MODEL"));
+        assert!(super::is_safe_to_reveal("databricks_host"));
+        assert!(super::is_safe_to_reveal("DATABRICKS_HOST"));
+        assert!(super::is_safe_to_reveal("databricks_model"));
+        assert!(super::is_safe_to_reveal("DATABRICKS_MODEL"));
+        // Keys NOT in the allowlist — masked regardless of naming pattern.
+        assert!(!super::is_safe_to_reveal("my_api_key"));
+        assert!(!super::is_safe_to_reveal("GITHUB_TOKEN"));
+        assert!(!super::is_safe_to_reveal("DB_SECRET"));
+        assert!(!super::is_safe_to_reveal("DB_PASSWORD"));
+        // Bare names that old heuristic (contains("_TOKEN") etc.) would have missed.
+        assert!(!super::is_safe_to_reveal("APIKEY"));
+        assert!(!super::is_safe_to_reveal("TOKEN"));
+        assert!(!super::is_safe_to_reveal("SECRET"));
+        assert!(!super::is_safe_to_reveal("PASSWORD"));
+        assert!(!super::is_safe_to_reveal("PRIVATE_KEY"));
+        // Unknown key → masked by default.
+        assert!(!super::is_safe_to_reveal("SOME_UNKNOWN_KEY"));
     }
 }

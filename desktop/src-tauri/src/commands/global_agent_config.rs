@@ -14,9 +14,9 @@ use tauri::AppHandle;
 use crate::{
     app_state::AppState,
     managed_agents::{
-        agent_readiness, current_instance_id, effective_agent_command, find_managed_agent_mut,
-        known_acp_runtime, load_global_agent_config, load_managed_agents, load_personas,
-        process_is_running, resolve_effective_agent_env, save_global_agent_config,
+        agent_readiness, current_instance_id, find_managed_agent_mut, known_acp_runtime,
+        load_global_agent_config, load_managed_agents, load_personas, process_is_running,
+        record_agent_command, resolve_effective_agent_env, save_global_agent_config,
         save_managed_agents, stop_managed_agent_process, sync_managed_agent_processes,
         validate_global_config, AgentReadiness, BackendKind, GlobalAgentConfig,
     },
@@ -142,11 +142,7 @@ fn collect_respawn_candidates(
             if record.runtime_pid.is_none() {
                 return false;
             }
-            let effective_cmd = effective_agent_command(
-                record.persona_id.as_deref(),
-                &all_personas,
-                record.agent_command_override.as_deref(),
-            );
+            let effective_cmd = record_agent_command(record, &all_personas);
             let runtime_meta = known_acp_runtime(&effective_cmd);
             let old_effective =
                 resolve_effective_agent_env(record, &all_personas, runtime_meta, old_global);
@@ -240,11 +236,7 @@ async fn restart_setup_listener_agent(
 
         // Re-check the NotReady → Ready transition under lock.
         let all_personas = load_personas(&app_for_stop).unwrap_or_default();
-        let effective_cmd = effective_agent_command(
-            record.persona_id.as_deref(),
-            &all_personas,
-            record.agent_command_override.as_deref(),
-        );
+        let effective_cmd = record_agent_command(record, &all_personas);
         let runtime_meta = known_acp_runtime(&effective_cmd);
         let old_effective =
             resolve_effective_agent_env(record, &all_personas, runtime_meta, &old_global_clone);

@@ -284,26 +284,34 @@ export function GlobalAgentConfigSettingsCard() {
                 Set by your build. Override any of these above.
               </p>
               <div className="flex flex-col gap-1">
-                {bakedEnv.map((entry) => (
-                  <div
-                    className="flex items-baseline gap-2 font-mono text-xs"
-                    key={entry.key}
-                  >
-                    <code className="shrink-0 text-muted-foreground">
-                      {entry.key}
-                    </code>
-                    <span className="text-muted-foreground">=</span>
-                    <code
-                      className={
-                        entry.masked
-                          ? "text-muted-foreground/50"
-                          : "text-foreground"
-                      }
+                {bakedEnv.map((entry) => {
+                  const friendlyLabel =
+                    entry.key === "BUZZ_AGENT_PROVIDER"
+                      ? "Baked provider"
+                      : entry.key === "BUZZ_AGENT_MODEL"
+                        ? "Baked model"
+                        : null;
+                  return (
+                    <div
+                      className="flex items-baseline gap-2 font-mono text-xs"
+                      key={entry.key}
                     >
-                      {entry.value}
-                    </code>
-                  </div>
-                ))}
+                      <code className="shrink-0 text-muted-foreground">
+                        {friendlyLabel ?? entry.key}
+                      </code>
+                      <span className="text-muted-foreground">=</span>
+                      <code
+                        className={
+                          entry.masked
+                            ? "text-muted-foreground/50"
+                            : "text-foreground"
+                        }
+                      >
+                        {entry.value}
+                      </code>
+                    </div>
+                  );
+                })}
               </div>
             </div>
           </SettingsOptionGroup>

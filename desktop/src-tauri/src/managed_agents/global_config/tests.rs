@@ -407,3 +407,46 @@ fn populated_global_config_round_trips() {
         "populated config must round-trip losslessly"
     );
 }
+
+// ── record_agent_command runtime resolution (regression) ─────────────────────
+
+/// When a record carries `runtime: Some("claude")` and the linked persona has
+/// `runtime: Some("goose")`, `record_agent_command` must use the RECORD runtime
+/// (`"claude-agent-acp"`) — not the persona runtime (`"goose"`).
+///
+/// This is the invariant that `collect_respawn_candidates` / the under-lock
+/// re-check in `restart_setup_listener_agent` rely on: the NotReady→Ready
+/// evaluation must use the runtime the agent actually spawns with.
+#[test]
+fn record_runtime_wins_over_persona_runtime_for_command_resolution() {
+    let mut record = bare_record();
+    record.runtime = Some("claude".to_string());
+    record.persona_id = Some("p1".to_string());
+
+    let persona = PersonaRecord {
+        id: "p1".to_string(),
+        display_name: "Goose persona".to_string(),
+        avatar_url: None,
+        system_prompt: "".to_string(),
+        runtime: Some("goose".to_string()),
+        model: None,
+        provider: None,
+        name_pool: vec![],
+        is_builtin: false,
+        is_active: true,
+        source_team: None,
+        source_team_persona_slug: None,
+        env_vars: BTreeMap::new(),
+        created_at: "".to_string(),
+        updated_at: "".to_string(),
+    };
+
+    let cmd = crate::managed_agents::record_agent_command(&record, &[persona]);
+
+    // record.runtime = "claude" → primary command is "claude-agent-acp"
+    // (NOT the persona runtime "goose" → "goose")
+    assert_eq!(
+        cmd, "claude-agent-acp",
+        "record runtime must override persona runtime in command resolution"
+    );
+}
