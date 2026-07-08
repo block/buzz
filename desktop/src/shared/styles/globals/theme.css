@@ -178,11 +178,14 @@
  *
  * The gradient is applied to every `bg-sidebar` canvas surface INSIDE the app
  * shell (`.group\/sidebar-wrapper` — the top chrome bar, the sidebar column,
- * and the inset margin behind the white content card), PLUS the portaled
- * mobile sidebar (the `SheetContent` rendered by the offcanvas branch on
- * narrow viewports, marked `[data-sidebar="sidebar"][data-mobile="true"]`).
- * The mobile sheet lives in a `SheetPortal` outside the shell wrapper, so it
- * needs its own precise selector rather than re-broadening to every portal.
+ * and the inset margin behind the white content card), PLUS two chrome
+ * surfaces rendered OUTSIDE that wrapper: the portaled mobile sidebar (the
+ * `SheetContent` rendered by the offcanvas branch on narrow viewports, marked
+ * `[data-sidebar="sidebar"][data-mobile="true"]`) and the workspace rail (the
+ * Discord-style relay column on the far left, `[data-testid="workspace-rail"]`,
+ * a sibling of the wrapper gated behind the `workspaceRail` feature flag).
+ * Both live outside `.group\/sidebar-wrapper`, so each needs its own precise
+ * selector rather than re-broadening to every portal.
  * Scoping this way keeps the branding on the app chrome and off unrelated
  * `bg-sidebar` consumers rendered in portals outside the shell (e.g. the
  * persona catalog dialog). `background-attachment: fixed` anchors the gradient
@@ -218,7 +221,8 @@
   .group\/sidebar-wrapper
   .bg-sidebar:not([data-buzz-flat]),
 :root[data-buzz-sidebar]
-  [data-sidebar="sidebar"][data-mobile="true"].bg-sidebar {
+  [data-sidebar="sidebar"][data-mobile="true"].bg-sidebar,
+:root[data-buzz-sidebar] [data-testid="workspace-rail"].bg-sidebar {
   background-color: transparent;
   background-image: linear-gradient(
     to bottom,
