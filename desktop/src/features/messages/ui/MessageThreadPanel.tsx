@@ -418,8 +418,6 @@ export function MessageThreadPanel({
         }
       : null;
 
-  // Wrap `onSend` so a reply to an agent message that p-tagged the user
-  // auto-continues the agent loop without an explicit @mention.
   const handleSend = useAutoContinueThreadSend({
     agentPubkeys,
     currentPubkey,

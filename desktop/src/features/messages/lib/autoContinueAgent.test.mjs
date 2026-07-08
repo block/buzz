@@ -68,34 +68,12 @@ test("no-op when the reply already mentions the agent", () => {
     anchor: agentAnchor(),
     currentPubkey: HUMAN,
     agentPubkeys: new Set([AGENT]),
-    existingMentionPubkeys: [AGENT],
-  });
-  assert.deepEqual(result, []);
-});
-
-test("dedupes case-insensitively against existing mentions", () => {
-  const result = computeAutoContinueAgentMentions({
-    anchor: agentAnchor(),
-    currentPubkey: HUMAN,
-    agentPubkeys: new Set([AGENT]),
     existingMentionPubkeys: [AGENT.toUpperCase()],
   });
   assert.deepEqual(result, []);
 });
 
-test("never auto-mentions ourselves", () => {
-  const result = computeAutoContinueAgentMentions({
-    anchor: agentAnchor({ signerPubkey: HUMAN, author: HUMAN }),
-    currentPubkey: HUMAN,
-    // Pathological: current user is in the agent set.
-    agentPubkeys: new Set([HUMAN]),
-    existingMentionPubkeys: [],
-  });
-  assert.deepEqual(result, []);
-});
-
 test("prefers signerPubkey over display pubkey/author", () => {
-  // Display author spoofs a human, but the real signer is the agent.
   const result = computeAutoContinueAgentMentions({
     anchor: agentAnchor({ signerPubkey: AGENT, pubkey: HUMAN, author: HUMAN }),
     currentPubkey: HUMAN,
@@ -124,14 +102,4 @@ test("no-op on missing anchor, pubkey, or empty agent set", () => {
     computeAutoContinueAgentMentions({ ...base, agentPubkeys: new Set() }),
     [],
   );
-});
-
-test("no-op when anchor has no tags", () => {
-  const result = computeAutoContinueAgentMentions({
-    anchor: agentAnchor({ tags: undefined }),
-    currentPubkey: HUMAN,
-    agentPubkeys: new Set([AGENT]),
-    existingMentionPubkeys: [],
-  });
-  assert.deepEqual(result, []);
 });

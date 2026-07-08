@@ -22,23 +22,10 @@ type UseAutoContinueThreadSendOptions = {
   currentPubkey?: string;
   threadHead: TimelineMessage | null;
   threadReplies: MainTimelineEntry[];
-  /** Live ref to the current reply target (read at submit time). */
   replyTargetMessageRef: React.MutableRefObject<TimelineMessage | null>;
   onSend: ThreadSend;
 };
 
-/**
- * Wrap a thread `onSend` so replies auto-continue an agent's turn.
- *
- * When the user replies to a message an agent authored *and that agent
- * `p`-tagged the user*, the agent's pubkey is injected into the reply's
- * mentions even if the user did not @mention it. The injected `["p", agent]`
- * tag passes both the relay's mention-gated subscription and the ACP harness
- * `require_mention` filter, so an untagged follow-up starts a fresh agent loop
- * exactly as an explicit @mention would.
- *
- * See {@link computeAutoContinueAgentMentions} for the gating rules.
- */
 export function useAutoContinueThreadSend({
   agentPubkeys,
   currentPubkey,
@@ -49,8 +36,6 @@ export function useAutoContinueThreadSend({
 }: UseAutoContinueThreadSendOptions): ThreadSend {
   const threadHeadId = threadHead?.id ?? null;
 
-  // Index thread messages by id so the send wrapper can resolve the reply
-  // anchor (the message the reply attaches to) from the captured context.
   const messageById = React.useMemo(() => {
     const index = new Map<string, TimelineMessage>();
     if (threadHead) {
