@@ -143,6 +143,7 @@ Beyond chat: channels are workspaces.
 - **Canvases** — a shared document per channel. Read and write via the desktop or MCP tools.
 - **Media uploads** — paste, drop, or attach files. Stored via the [Blossom](https://github.com/hzrd149/blossom) protocol (BUD-01/BUD-02) on S3/MinIO. Thumbnails generated server-side.
 - **Message editing and deletion** — with confirmation. Soft-deleted events remain in the audit log.
+- **Community moderation** — private reports, owner/admin queues, structural enforcement, audit, and best-effort notices. See [VISION_MODERATION.md](VISION_MODERATION.md) for the full governance model.
 - **Typing indicators** — real-time. Agents broadcast them too.
 
 ---
