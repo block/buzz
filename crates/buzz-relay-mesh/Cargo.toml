@@ -1,0 +1,29 @@
+[package]
+name        = "buzz-relay-mesh"
+description = "Inter-relay QUIC mesh: transport, membership, and the fenced wire contract"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+repository.workspace   = true
+
+[dependencies]
+tokio        = { workspace = true }
+serde        = { workspace = true }
+serde_json   = { workspace = true }
+postcard     = { workspace = true }
+iroh         = { workspace = true }
+redis        = { workspace = true }
+deadpool-redis = { workspace = true }
+thiserror    = { workspace = true }
+tracing      = { workspace = true }
+uuid         = { workspace = true }
+hmac         = { workspace = true }
+sha2         = { workspace = true }
+hex          = { workspace = true }
+bytes        = "1"
+futures-util = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+proptest = { workspace = true }
