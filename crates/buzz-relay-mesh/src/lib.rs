@@ -18,6 +18,10 @@
 //! **The law:** mesh membership is a hint; the Redis fenced generation is the
 //! arbiter. Nothing in this crate grants ownership — see [`wire::FencedHeader`].
 
+pub mod gossip;
+pub mod membership;
+pub mod registry;
+pub mod status;
 pub mod wire;
 
 // Lane modules — one owner per file (see the mesh thread for lane map):
@@ -32,6 +36,10 @@ use std::pin::Pin;
 
 use bytes::Bytes;
 
+pub use gossip::{GossipDigestEntry, GossipMessage, GossipRecord, GossipState, PhiAccrual};
+pub use membership::MeshMembership;
+pub use registry::{ReadyHeartbeat, ReadyRecord, ReadyRegistry, RuntimeAttestation};
+pub use status::{ConnectionState, MeshCounters, MeshPeerCounters, MeshPeerStatus, MeshStatus};
 pub use wire::{
     FencedHeader, GoodbyeReason, MeshDatagram, MeshStreamFrame, Profile, RuntimeId, StreamHello,
     StreamRole, ALPN, WIRE_VERSION,

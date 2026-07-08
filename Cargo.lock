@@ -1104,6 +1104,7 @@ dependencies = [
  "hex",
  "hmac 0.13.0",
  "iroh",
+ "nostr",
  "postcard",
  "proptest",
  "redis",

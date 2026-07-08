@@ -21,6 +21,7 @@ uuid         = { workspace = true }
 hmac         = { workspace = true }
 sha2         = { workspace = true }
 hex          = { workspace = true }
+nostr        = { workspace = true }
 bytes        = "1"
 futures-util = { workspace = true }
 
