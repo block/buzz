@@ -338,7 +338,7 @@ function getDisplayBlockKey(block: TranscriptDisplayBlock) {
     return block.item.id;
   }
   if (block.kind === "session-boundary") {
-    return `session-boundary:${block.sessionId}`;
+    return `session-boundary:${block.sessionId}:${block.runIndex}`;
   }
   return `turn:${block.turnId}`;
 }

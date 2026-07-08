@@ -34,6 +34,13 @@ export type TranscriptDisplayBlock =
       sessionId: string;
       sessionStartTimestamp: string;
       labelState: "current" | "most-recent" | "earlier";
+      /**
+       * Zero-based position of this boundary in the run array (i.e. the index
+       * of the run it precedes, which is always ≥ 1). Used as a tiebreaker in
+       * the React list key so that two non-contiguous runs sharing the same
+       * sessionId produce DISTINCT keys and React never duplicates/omits them.
+       */
+      runIndex: number;
     };
 
 export type TranscriptToolRunChildSegment =
@@ -502,6 +509,7 @@ export function buildTranscriptDisplayBlocks(
         sessionId: run.sessionId,
         sessionStartTimestamp,
         labelState,
+        runIndex: i,
       });
     }
 
