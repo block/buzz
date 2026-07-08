@@ -1,5 +1,11 @@
 import * as React from "react";
 
+import {
+  depthGuideActionsEqual,
+  numberArrayEqual,
+  reactionsEqual,
+  tagsEqual,
+} from "@/features/messages/lib/messageRowEquality";
 import type { TimelineMessage } from "@/features/messages/types";
 import { HuddleAttachment } from "@/features/huddle/components/HuddleAttachment";
 import { MessageReactions } from "@/features/messages/ui/MessageReactions";
@@ -788,19 +794,29 @@ export const MessageRow = React.memo(
     prev.message.kind === next.message.kind &&
     prev.message.pending === next.message.pending &&
     prev.message.edited === next.message.edited &&
-    prev.message.reactions === next.message.reactions &&
-    prev.message.tags === next.message.tags &&
+    // Value comparisons, not identity: these arrays are rebuilt with fresh
+    // identities on every ingest/refetch even when unchanged — identity
+    // checks made every row re-render on every streamed event in an open
+    // thread (see messageRowEquality.ts).
+    reactionsEqual(prev.message.reactions, next.message.reactions) &&
+    tagsEqual(prev.message.tags, next.message.tags) &&
     prev.message.role === next.message.role &&
     prev.message.personaDisplayName === next.message.personaDisplayName &&
     prev.agentPubkeys === next.agentPubkeys &&
-    prev.collapseDepthGuideActions === next.collapseDepthGuideActions &&
+    depthGuideActionsEqual(
+      prev.collapseDepthGuideActions,
+      next.collapseDepthGuideActions,
+    ) &&
     prev.collapseDescendantsLabel === next.collapseDescendantsLabel &&
     prev.connectDescendants === next.connectDescendants &&
-    prev.depthGuideDepths === next.depthGuideDepths &&
+    numberArrayEqual(prev.depthGuideDepths, next.depthGuideDepths) &&
     prev.highlightDescendantRail === next.highlightDescendantRail &&
     prev.highlighted === next.highlighted &&
     prev.highlightReplyConnector === next.highlightReplyConnector &&
-    prev.highlightThreadLineDepths === next.highlightThreadLineDepths &&
+    numberArrayEqual(
+      prev.highlightThreadLineDepths,
+      next.highlightThreadLineDepths,
+    ) &&
     prev.hoverBackground === next.hoverBackground &&
     prev.huddleMemberPubkeys === next.huddleMemberPubkeys &&
     prev.huddleMemberPubkeysPending === next.huddleMemberPubkeysPending &&
