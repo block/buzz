@@ -348,6 +348,10 @@ async fn main() -> anyhow::Result<()> {
     .await?
     {
         let runtime_id = handle.local_runtime_id;
+        // Register the per-profile inbound consumers (huddle datagram fan-in,
+        // HuddleControl accept loop, reliable-stream accept + optional
+        // BUZZ_MESH_DEMO_ECHO) before peers can route traffic here.
+        handle.wire_consumers(Arc::clone(&state.audio_rooms), state.config.mesh_demo_echo);
         if state.mesh.set(handle).is_err() {
             unreachable!("mesh handle is set exactly once, right here");
         }

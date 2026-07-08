@@ -32,6 +32,7 @@ use buzz_relay_mesh::{
 
 use crate::config::Config;
 use crate::tunnel::directory::SessionDirectory;
+use crate::tunnel::reliable::{ReliableFrame, ReliableInbound, ReliableStreamRouter};
 
 /// Handler for one inbound session-stream profile. Called on the accept task;
 /// implementations must hand off promptly (spawn) rather than block.
@@ -144,6 +145,13 @@ pub struct MeshHandle {
     /// dispatcher itself is already installed as the transport's single
     /// inbound slot by [`boot_mesh`].
     pub dispatcher: MeshInboundDispatcher,
+    /// The huddle media generation floor shared by the datagram fan-in path
+    /// and session teardown (`GenerationFloor::forget`). Owned here;
+    /// [`wire_mesh_consumers`] constructs the [`MeshAudioRouter`] with this
+    /// same `Arc` so both halves enforce exactly one floor per session.
+    ///
+    /// [`MeshAudioRouter`]: crate::audio::mesh::MeshAudioRouter
+    pub audio_fence: Arc<crate::audio::mesh::GenerationFloor>,
     /// The running mesh (status snapshots, shutdown).
     runtime: MeshRuntime,
 }
@@ -152,6 +160,154 @@ impl MeshHandle {
     /// Live `/_mesh` status snapshot.
     pub fn status(&self) -> MeshStatus {
         self.runtime.membership().status()
+    }
+
+    /// Register the per-profile inbound consumers on this handle's dispatcher.
+    ///
+    /// Called once from `main.rs` right after [`boot_mesh`]; see
+    /// [`wire_mesh_consumers`] for what gets wired.
+    pub fn wire_consumers(&self, rooms: Arc<crate::audio::AudioRoomManager>, demo_echo: bool) {
+        wire_mesh_consumers(
+            &self.dispatcher,
+            self.directory.clone(),
+            Arc::clone(&self.transport),
+            self.local_runtime_id,
+            Arc::clone(&self.audio_fence),
+            rooms,
+            demo_echo,
+        )
+    }
+}
+
+/// Wire the three inbound mesh lanes to their consumers.
+///
+/// - `RealtimeMedia` datagrams → [`MeshAudioRouter`] fan-in, constructed with
+///   the handle's shared `audio_fence` so the datagram hot path and huddle
+///   teardown (`GenerationFloor::forget`) enforce exactly one floor.
+/// - `HuddleControl` streams → [`HuddleControlAcceptor::accept_inbound`]
+///   (owner-side register/unregister control loop).
+/// - `ReliableStream` streams → [`ReliableStreamRouter::accept_inbound`], then
+///   either the `BUZZ_MESH_DEMO_ECHO` consumer (testbed evidence runs: echo
+///   every validated `Data` frame back) or accept/log/close (default — no
+///   product session consumer is wired yet).
+///
+/// Owner-side lease renewal is NOT spawned here: `spawn_observable_renewer`
+/// attaches on the *join* path's [`ReliableJoin::Owned`] arm (the pod that
+/// acquires the lease renews it), which lands with the first product session
+/// consumer. Inbound acceptance never owns a lease, so it never renews one.
+///
+/// Takes parts rather than `&MeshHandle` so tests can wire a dispatcher
+/// without standing up a live `MeshRuntime`.
+///
+/// [`MeshAudioRouter`]: crate::audio::mesh::MeshAudioRouter
+/// [`HuddleControlAcceptor::accept_inbound`]: crate::audio::join::HuddleControlAcceptor::accept_inbound
+/// [`ReliableJoin::Owned`]: crate::tunnel::reliable::ReliableJoin::Owned
+#[allow(clippy::too_many_arguments)] // boot-only parts bundle, one caller + tests
+pub fn wire_mesh_consumers(
+    dispatcher: &MeshInboundDispatcher,
+    directory: SessionDirectory,
+    transport: Arc<dyn RelayPeerTransport>,
+    local_runtime_id: RuntimeId,
+    audio_fence: Arc<crate::audio::mesh::GenerationFloor>,
+    rooms: Arc<crate::audio::AudioRoomManager>,
+    demo_echo: bool,
+) {
+    // RealtimeMedia datagrams: huddle media fan-in over the shared fence.
+    // `on_media_datagram` is synchronous and non-blocking (fence check +
+    // local room delivery), so it runs inline on the accept task.
+    let audio_router = crate::audio::mesh::MeshAudioRouter::with_fence(
+        Arc::clone(&rooms),
+        local_runtime_id,
+        audio_fence,
+    );
+    dispatcher.register_datagrams(Box::new(move |_from, dgram| {
+        audio_router.on_media_datagram(&dgram);
+    }));
+
+    // HuddleControl streams: owner-side peer registration for cross-pod
+    // huddles. The acceptor validates structurally, then Redis-fences every
+    // stateful frame in its control loop.
+    let acceptor = Arc::new(crate::audio::join::HuddleControlAcceptor::new(
+        rooms,
+        Arc::clone(&transport),
+        Arc::new(directory.clone()),
+        local_runtime_id,
+    ));
+    dispatcher.register_huddle_control(Box::new(move |from, hello, stream| {
+        let acceptor = Arc::clone(&acceptor);
+        tokio::spawn(async move {
+            if let Err(e) = acceptor.accept_inbound(from, hello, stream).await {
+                tracing::warn!(peer = %from, "huddle-control stream ended with error: {e}");
+            }
+        });
+    }));
+
+    // ReliableStream streams: owner-side accept. Every session is fence-
+    // validated on accept; what happens after depends on the wired consumer.
+    let reliable = Arc::new(ReliableStreamRouter::new(
+        directory,
+        transport,
+        local_runtime_id,
+    ));
+    dispatcher.register_reliable_stream(Box::new(move |from, hello, stream| {
+        let router = Arc::clone(&reliable);
+        tokio::spawn(async move {
+            let inbound = match router.accept_inbound(from, hello, stream).await {
+                Ok(inbound) => inbound,
+                Err(e) => {
+                    tracing::warn!(peer = %from, "reliable stream rejected: {e}");
+                    return;
+                }
+            };
+            if demo_echo {
+                run_demo_echo(router.directory().clone(), inbound).await;
+            } else {
+                tracing::info!(
+                    session_id = %inbound.fenced.session_id,
+                    peer = %inbound.from,
+                    "reliable stream accepted; no session consumer wired — closing"
+                );
+            }
+        });
+    }));
+}
+
+/// `BUZZ_MESH_DEMO_ECHO` consumer: echo every validated `Data` frame back to
+/// the sender. A transport/session-routing smoke for cross-pod evidence runs —
+/// each echoed frame proves fenced validation (Redis directory hit included)
+/// on the owner and delivery in both mesh directions. Not a product flow.
+async fn run_demo_echo(directory: SessionDirectory, inbound: ReliableInbound) {
+    let session_id = inbound.fenced.session_id;
+    let peer = inbound.from;
+    let mut stream = inbound.stream;
+    tracing::info!(%session_id, %peer, "mesh demo echo: session open");
+    loop {
+        match stream.recv_validated(&directory).await {
+            Ok(Some(ReliableFrame::Data(payload))) => {
+                // recv_validated latched the community from the frame it just
+                // validated, so it is always present here.
+                let Some(community_id) = stream.community_id() else {
+                    tracing::warn!(%session_id, "demo echo: no community after validated Data");
+                    return;
+                };
+                if let Err(e) = stream.send_bytes(community_id, &payload).await {
+                    tracing::warn!(%session_id, "demo echo: send failed: {e}");
+                    return;
+                }
+            }
+            Ok(Some(ReliableFrame::Goodbye(reason))) => {
+                tracing::info!(%session_id, ?reason, "mesh demo echo: goodbye");
+                return;
+            }
+            Ok(None) => {
+                tracing::info!(%session_id, "mesh demo echo: stream closed");
+                return;
+            }
+            Err(e) => {
+                tracing::warn!(%session_id, "mesh demo echo: recv failed: {e}");
+                return;
+            }
+        }
     }
 }
 
@@ -298,6 +454,7 @@ pub async fn boot_mesh(
         membership: membership_arc,
         local_runtime_id: runtime_id,
         dispatcher,
+        audio_fence: Arc::new(crate::audio::mesh::GenerationFloor::new()),
         runtime,
     }))
 }
@@ -459,5 +616,73 @@ mod tests {
             },
         );
         assert_eq!(*first.lock().unwrap(), 1);
+    }
+
+    /// The load-bearing wiring invariant: the datagram consumer registered by
+    /// `wire_mesh_consumers` enforces the SAME `GenerationFloor` that
+    /// `MeshHandle.audio_fence` exposes to huddle teardown. A datagram
+    /// arriving through the dispatcher must advance the shared floor so a
+    /// later `forget` on the handle's fence actually clears the hot path's
+    /// suppression state.
+    #[tokio::test]
+    async fn wired_datagram_consumer_shares_the_handle_fence() {
+        struct NoopTransport;
+        impl buzz_relay_mesh::RelayPeerTransport for NoopTransport {
+            fn send_datagram(&self, _to: RuntimeId, _dgram: MeshDatagram) -> Result<(), MeshError> {
+                Ok(())
+            }
+            fn open_session_stream(
+                &self,
+                _to: RuntimeId,
+                _hello: StreamHello,
+            ) -> std::pin::Pin<
+                Box<dyn std::future::Future<Output = Result<MeshStream, MeshError>> + Send + '_>,
+            > {
+                Box::pin(async { Err(MeshError::Transport("unused".into())) })
+            }
+            fn set_inbound(&self, _handler: Box<dyn InboundHandler>) {}
+        }
+
+        let dispatcher = MeshInboundDispatcher::default();
+        let fence = Arc::new(crate::audio::mesh::GenerationFloor::new());
+        let pool = deadpool_redis::Config::from_url("redis://127.0.0.1:1") // never dialed
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .unwrap();
+        wire_mesh_consumers(
+            &dispatcher,
+            SessionDirectory::new(pool),
+            Arc::new(NoopTransport),
+            rid(9),
+            Arc::clone(&fence),
+            Arc::new(crate::audio::AudioRoomManager::new()),
+            false,
+        );
+
+        let session = uuid::Uuid::new_v4();
+        dispatcher.on_datagram(
+            rid(1),
+            MeshDatagram {
+                fenced: FencedHeader {
+                    session_id: session,
+                    generation: 7,
+                    owner_runtime_id: rid(9),
+                },
+                seq: 0,
+                payload: vec![0, 1, 2],
+            },
+        );
+
+        // The shared fence observed the datagram's generation: a stale check
+        // through the HANDLE's Arc is rejected, proving one floor, not two.
+        assert_eq!(
+            fence.check(session, 6),
+            crate::audio::mesh::FenceVerdict::RejectStale { known: 7 }
+        );
+        // And `forget` through the handle's Arc clears the hot path's floor.
+        fence.forget(session);
+        assert!(matches!(
+            fence.check(session, 1),
+            crate::audio::mesh::FenceVerdict::Accept { .. }
+        ));
     }
 }

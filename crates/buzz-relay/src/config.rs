@@ -100,6 +100,14 @@ pub struct Config {
     /// no-regression rollout.
     pub mesh: buzz_relay_mesh::MeshConfig,
 
+    /// Testbed-only reliable-stream echo consumer (`BUZZ_MESH_DEMO_ECHO`).
+    /// When `on`, the owner side of an inbound reliable mesh stream echoes
+    /// every validated `Data` frame back to the sender — a transport/
+    /// session-routing smoke for cross-pod evidence runs, NOT a product flow.
+    /// Same strict opt-in as `BUZZ_MESH`; default off means inbound reliable
+    /// streams are accepted, logged, and closed (no session consumer yet).
+    pub mesh_demo_echo: bool,
+
     /// Optional hex-encoded pubkey of the relay owner.
     /// When set, this pubkey is automatically bootstrapped into `relay_members`
     /// with the `owner` role on first startup.
@@ -263,6 +271,12 @@ impl Config {
             bind_addr: mesh_bind_addr,
             registry_refresh: std::time::Duration::from_secs(15),
         };
+
+        // Demo echo opt-in: same strict pattern as BUZZ_MESH — explicit
+        // `on`/`true`/`1` only, anything else (absent, `off`, typos) is off.
+        let mesh_demo_echo = std::env::var("BUZZ_MESH_DEMO_ECHO")
+            .map(|v| v.eq_ignore_ascii_case("on") || v == "true" || v == "1")
+            .unwrap_or(false);
 
         let allow_nip_oa_auth = std::env::var("BUZZ_ALLOW_NIP_OA_AUTH")
             .map(|v| v == "true" || v == "1")
@@ -456,6 +470,7 @@ impl Config {
             require_relay_membership,
             huddle_audio_available,
             mesh,
+            mesh_demo_echo,
             relay_owner_pubkey,
             allow_nip_oa_auth,
             media,

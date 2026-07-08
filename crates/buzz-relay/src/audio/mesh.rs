@@ -166,9 +166,22 @@ impl MeshAudioRouter {
     /// Construct a router over this pod's rooms, tagged with the local runtime
     /// identity (used to distinguish owner vs non-owner delivery paths).
     pub fn new(rooms: Arc<AudioRoomManager>, local_runtime_id: RuntimeId) -> Self {
+        Self::with_fence(rooms, local_runtime_id, Arc::new(GenerationFloor::new()))
+    }
+
+    /// Construct a router that enforces an externally owned generation floor.
+    ///
+    /// Used by the boot wiring (`mesh_boot::wire_mesh_consumers`) so the
+    /// datagram hot path and session teardown (`GenerationFloor::forget`,
+    /// reached via `MeshHandle::audio_fence`) consult exactly one floor.
+    pub fn with_fence(
+        rooms: Arc<AudioRoomManager>,
+        local_runtime_id: RuntimeId,
+        fence: Arc<GenerationFloor>,
+    ) -> Self {
         Self {
             rooms,
-            fence: Arc::new(GenerationFloor::new()),
+            fence,
             local_runtime_id,
         }
     }
