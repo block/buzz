@@ -20,7 +20,7 @@
         "width": 800,
         "height": 600,
         "maximized": true,
-        "visible": false,
+        "visible": true,
         "backgroundColor": "#000000",
         "titleBarStyle": "Overlay",
         "hiddenTitle": true,
