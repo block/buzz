@@ -10,6 +10,7 @@ pub(crate) const RETURN_MODE: &str = "clipboard";
 pub(crate) const VERSION: &str = "1";
 
 const NONCE_CHARS: &str = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-";
+const VERIFICATION_CODE_LENGTH: usize = 6;
 
 pub(crate) fn validate_challenge_id(challenge_id: &str) -> Result<(), String> {
     if challenge_id.is_empty() {
@@ -25,6 +26,15 @@ pub(crate) fn validate_nonce(nonce: &str) -> Result<(), String> {
     }
     if nonce.len() != 43 || !nonce.chars().all(|ch| NONCE_CHARS.contains(ch)) {
         return Err("invalid nonce".into());
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_verification_code(verification_code: &str) -> Result<(), String> {
+    if verification_code.len() != VERIFICATION_CODE_LENGTH
+        || !verification_code.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return Err("verification_code must be exactly 6 digits".into());
     }
     Ok(())
 }
@@ -84,11 +94,13 @@ pub(crate) fn validate_expires_at(expires_at: &str) -> Result<(), String> {
 pub(crate) fn validate_signing_request(
     challenge_id: &str,
     nonce: &str,
+    verification_code: &str,
     origin: &str,
     expires_at: &str,
 ) -> Result<(), String> {
     validate_challenge_id(challenge_id)?;
     validate_nonce(nonce)?;
+    validate_verification_code(verification_code)?;
     validate_origin(origin)?;
     validate_expires_at(expires_at)?;
     Ok(())

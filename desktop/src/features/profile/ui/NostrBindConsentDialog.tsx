@@ -123,6 +123,7 @@ export function NostrBindConsentDialog() {
       const signed = await signNostrIdentityBinding({
         challengeId: payload.challengeId,
         nonce: payload.nonce,
+        verificationCode: payload.verificationCode,
         origin: payload.origin,
         expiresAt: payload.expiresAt,
       });
@@ -164,6 +165,19 @@ export function NostrBindConsentDialog() {
 
         {payload ? (
           <div className="space-y-4 text-sm">
+            <div className="rounded-lg border border-border/60 bg-muted/25 p-4 text-center">
+              <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                Verification code
+              </p>
+              <p className="mt-2 font-mono text-4xl font-semibold tracking-[0.35em] text-foreground">
+                {payload.verificationCode}
+              </p>
+              <p className="mt-3 text-muted-foreground">
+                Only sign if this code matches the code shown by the requesting
+                website.
+              </p>
+            </div>
+
             <dl className="space-y-2 rounded-lg border border-border/60 bg-muted/25 p-3">
               <div className="flex justify-between gap-3">
                 <dt className="text-muted-foreground">Requesting origin</dt>

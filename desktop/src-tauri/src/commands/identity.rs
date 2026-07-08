@@ -213,14 +213,22 @@ fn build_nostr_identity_binding_event(
     keys: &Keys,
     challenge_id: &str,
     nonce: &str,
+    verification_code: &str,
     origin: &str,
     expires_at: &str,
 ) -> Result<Event, String> {
-    nostr_bind::validate_signing_request(challenge_id, nonce, origin, expires_at)?;
+    nostr_bind::validate_signing_request(
+        challenge_id,
+        nonce,
+        verification_code,
+        origin,
+        expires_at,
+    )?;
 
     let tags = vec![
         nostr_bind_tag("challenge_id", challenge_id)?,
         nostr_bind_tag("nonce", nonce)?,
+        nostr_bind_tag("verification_code", verification_code)?,
         nostr_bind_tag("audience", nostr_bind::AUDIENCE)?,
         nostr_bind_tag("action", nostr_bind::ACTION)?,
         nostr_bind_tag("protocol", nostr_bind::PROTOCOL)?,
@@ -239,11 +247,18 @@ fn build_nostr_identity_binding_event(
 pub async fn sign_nostr_identity_binding(
     challenge_id: String,
     nonce: String,
+    verification_code: String,
     origin: String,
     expires_at: String,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
-    nostr_bind::validate_signing_request(&challenge_id, &nonce, &origin, &expires_at)?;
+    nostr_bind::validate_signing_request(
+        &challenge_id,
+        &nonce,
+        &verification_code,
+        &origin,
+        &expires_at,
+    )?;
 
     let keys = state
         .keys
@@ -252,8 +267,14 @@ pub async fn sign_nostr_identity_binding(
         .clone();
 
     tauri::async_runtime::spawn_blocking(move || {
-        let event =
-            build_nostr_identity_binding_event(&keys, &challenge_id, &nonce, &origin, &expires_at)?;
+        let event = build_nostr_identity_binding_event(
+            &keys,
+            &challenge_id,
+            &nonce,
+            &verification_code,
+            &origin,
+            &expires_at,
+        )?;
 
         Ok(event.as_json())
     })
@@ -348,6 +369,7 @@ mod nostr_identity_binding_tests {
             &keys,
             "550e8400-e29b-41d4-a716-446655440000",
             "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi01234567",
+            "123456",
             "https://example.com",
             "2999-01-01T00:00:00Z",
         )
@@ -369,6 +391,7 @@ mod nostr_identity_binding_tests {
             "nonce".into(),
             "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi01234567".into(),
         ]));
+        assert!(tags.contains(&vec!["verification_code".into(), "123456".into(),]));
         assert!(tags.contains(&vec!["audience".into(), "buzz:nostr-identity".into()]));
         assert!(tags.contains(&vec!["action".into(), "bind_nostr_identity".into(),]));
         assert!(tags.contains(&vec!["protocol".into(), "buzz-nostr-identity".into(),]));
@@ -378,12 +401,29 @@ mod nostr_identity_binding_tests {
     }
 
     #[test]
+    fn build_nostr_identity_binding_event_rejects_malformed_verification_code() {
+        let keys = Keys::generate();
+        let error = build_nostr_identity_binding_event(
+            &keys,
+            "550e8400-e29b-41d4-a716-446655440000",
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi01234567",
+            "12345a",
+            "https://example.com",
+            "2999-01-01T00:00:00Z",
+        )
+        .unwrap_err();
+
+        assert_eq!(error, "verification_code must be exactly 6 digits");
+    }
+
+    #[test]
     fn build_nostr_identity_binding_event_rejects_expired_link() {
         let keys = Keys::generate();
         let error = build_nostr_identity_binding_event(
             &keys,
             "550e8400-e29b-41d4-a716-446655440000",
             "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi01234567",
+            "123456",
             "https://example.com",
             "2000-01-01T00:00:00Z",
         )

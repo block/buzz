@@ -3,6 +3,7 @@ import { invokeTauri } from "@/shared/api/tauri";
 export type NostrIdentityBindingInput = {
   challengeId: string;
   nonce: string;
+  verificationCode: string;
   origin: string;
   expiresAt: string;
 };
