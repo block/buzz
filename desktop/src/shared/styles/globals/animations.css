@@ -760,13 +760,15 @@
 }
 
 /* Buzz bee wing-flap (ported from the Buzz website's BeeField, tuned for a
-   single hero bee). The two wing lobes beat continuously — a fast, small
-   in/out scale so the bee reads as actively flapping on the loading gate rather
-   than resting most of the cycle (the website staggers many bees, so it could
-   afford long rests; one bee cannot). The optional --flap-delay custom property
-   can still stagger multiple bees. */
+   single hero bee). The two wing lobes beat continuously — a fast in/out scale
+   so the bee reads as actively flapping on the loading gate rather than resting
+   most of the cycle (the website staggers many bees, so it could afford long
+   rests; one bee cannot). The loading gate can be short-lived on a warm
+   refresh, so the flap starts already mid-beat (negative animation-delay) — the
+   bee is never caught frozen at the rest pose on first paint. The optional
+   --flap-delay custom property can still stagger multiple bees. */
 .bee-sprite .bee-wing {
-  animation-delay: var(--flap-delay, 0s);
+  animation-delay: var(--flap-delay, -0.14s);
   animation-duration: 0.28s;
   animation-iteration-count: infinite;
   animation-timing-function: ease-in-out;
