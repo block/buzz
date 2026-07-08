@@ -167,6 +167,8 @@ fn local_agent() -> ManagedAgentRecord {
         name_pool: Vec::new(),
         is_builtin: false,
         is_active: true,
+        source_team: None,
+        source_team_persona_slug: None,
         relay_mesh: None,
     }
 }

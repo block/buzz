@@ -184,6 +184,8 @@ mod tests {
             name_pool: vec!["poolname".to_string()],
             is_builtin: true,
             is_active: false,
+            source_team: None,
+            source_team_persona_slug: None,
             relay_mesh: None,
         }
     }

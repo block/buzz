@@ -231,6 +231,16 @@ pub struct ManagedAgentRecord {
     /// definition hidden from pickers. Defaults `true` for existing records.
     #[serde(default = "default_record_active")]
     pub is_active: bool,
+    /// Absorbed from `PersonaRecord.source_team` — team ID when this
+    /// definition was imported from a team directory (team definitions are
+    /// non-editable). Distinct from `persona_team_dir`/`persona_name_in_team`,
+    /// which are the instance-side spawn plumbing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_team: Option<String>,
+    /// Absorbed from `PersonaRecord.source_team_persona_slug` — the
+    /// definition's slug within its source team.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_team_persona_slug: Option<String>,
     /// Typed marker for relay-mesh agents. `Some(_)` means this agent runs its
     /// inference through Buzz's relay-mesh local endpoint; the `model_ref` is
     /// the served model id to route to. `None` is a normal agent.
