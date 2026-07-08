@@ -36,6 +36,55 @@ import { StepProgress } from "@/shared/ui/step-progress";
 
 const LOADING_TEXT = "Setting up your workspace...";
 
+// Minimum time the cold-boot splash stays on screen. A real boot resolves the
+// workspace in well under 100ms, and the hidden Tauri window (visible:false
+// until getCurrentWindow().show()) takes longer than that to put its first
+// frame on screen — without a hold, the bee is unmounted before it is ever
+// visible. The hold runs as an overlay above the already-mounted app, so
+// time-to-interactive is unchanged; only the reveal waits.
+const BOOT_SPLASH_MIN_VISIBLE_MS = 1_200;
+const BOOT_SPLASH_FADE_MS = 200;
+
+type BootSplashPhase = "holding" | "fading" | "done";
+
+// E2E runs skip the hold (it would slow every spec's boot and block pointer
+// actionability); a spec can opt back in via __BUZZ_E2E__.bootSplashHoldMs.
+function bootSplashHoldMs(): number {
+  const e2e = (
+    window as Window & {
+      __BUZZ_E2E__?: { bootSplashHoldMs?: number };
+    }
+  ).__BUZZ_E2E__;
+  if (e2e) {
+    return e2e.bootSplashHoldMs ?? 0;
+  }
+  return BOOT_SPLASH_MIN_VISIBLE_MS;
+}
+
+function useBootSplashHold(): BootSplashPhase {
+  const [phase, setPhase] = useState<BootSplashPhase>(() =>
+    bootSplashHoldMs() > 0 ? "holding" : "done",
+  );
+
+  useEffect(() => {
+    const holdMs = bootSplashHoldMs();
+    if (holdMs <= 0) {
+      return;
+    }
+    const fadeTimer = window.setTimeout(() => setPhase("fading"), holdMs);
+    const doneTimer = window.setTimeout(
+      () => setPhase("done"),
+      holdMs + BOOT_SPLASH_FADE_MS,
+    );
+    return () => {
+      window.clearTimeout(fadeTimer);
+      window.clearTimeout(doneTimer);
+    };
+  }, []);
+
+  return phase;
+}
+
 // Animated Buzz mark for the loading gates. The static BuzzMark renders in
 // normal flow and sizes the box — it's plain SVG (no JS/SMIL), so it paints on
 // the very first frame even before scripting starts, avoiding a blank flash on
@@ -350,6 +399,8 @@ export function App() {
     setIsCompletingFirstRunWorkspace(false);
   }, []);
 
+  const bootSplashPhase = useBootSplashHold();
+
   // Wait for the shared-identity IPC call to resolve before rendering
   // anything that depends on it. Without this gate, children briefly see
   // isSharedIdentity=false and may flash WelcomeSetup or the onboarding flow.
@@ -380,6 +431,14 @@ export function App() {
     return isWorkspaceSwitch ? <WorkspaceSwitchGate /> : <AppLoadingGate />;
   }
 
+  // The app mounts (and starts loading data) beneath the splash overlay; the
+  // overlay just keeps the bee on screen long enough to be seen, then fades.
+  // Workspace switches and first-run completion keep their quiet gates.
+  const showBootSplashOverlay =
+    bootSplashPhase !== "done" &&
+    !isWorkspaceSwitch &&
+    !isCompletingFirstRunWorkspace;
+
   return (
     <WorkspaceQueryProvider key={workspaceKey}>
       <AppReady
@@ -391,6 +450,19 @@ export function App() {
         onFirstRunWorkspaceSettled={handleFirstRunWorkspaceSettled}
         onBackToWorkspaceSetup={handleBackToWorkspaceSetup}
       />
+      {showBootSplashOverlay ? (
+        <div
+          aria-hidden="true"
+          className={cn(
+            "fixed inset-0 z-50 transition-opacity",
+            bootSplashPhase === "fading" ? "opacity-0" : "opacity-100",
+          )}
+          data-testid="boot-splash-overlay"
+          style={{ transitionDuration: `${BOOT_SPLASH_FADE_MS}ms` }}
+        >
+          <AppLoadingGate />
+        </div>
+      ) : null}
     </WorkspaceQueryProvider>
   );
 }

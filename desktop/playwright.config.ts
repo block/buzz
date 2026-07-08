@@ -60,6 +60,7 @@ export default defineConfig({
         "**/top-chrome-zoom-clearance.spec.ts",
         "**/thread-unread.spec.ts",
         "**/workspace-rail.spec.ts",
+        "**/boot-splash.spec.ts",
         "**/thread-reply-anchor-roleplay.spec.ts",
         "**/threadpane-ultrawide.spec.ts",
         "**/animated-avatar.spec.ts",
