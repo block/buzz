@@ -120,7 +120,9 @@ const overrides = new Map([
   // skip login probe for not-installed/adapter-missing/cli-missing states, and
   // added 4 unit tests covering each arm. Load-bearing discoverability fix.
   // Updated existing codex_not_ready test to use make_cli_runtime stub.
-  ["src-tauri/src/managed_agents/readiness.rs", 1370],
+  // +4 lines: #1640 persona-env-vars-refresh rebase added availability-classification
+  // growth in the live-persona env merge path. Feature plumbing, not generic debt.
+  ["src-tauri/src/managed_agents/readiness.rs", 1374],
   // applyWorkspace reposDir parameter plus the validateReposDir binding,
   // threaded through Tauri invokes for configurable repos_dir, plus the
   // harness-persona-sync `harnessOverride` create-input bit — load-bearing
