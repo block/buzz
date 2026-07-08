@@ -121,10 +121,13 @@ test.describe("doctor CTA nudge card screenshots", () => {
 
   /**
    * 01 — pure cli_login card (all requirements are cli_login, availability=available):
-   * The whole card routes to Doctor; CTA label reads "Open Doctor →".
-   * This is the "installed but logged-out" state — the most actionable case.
+   * Tooling is installed but needs login — Doctor has no auth functionality
+   * and would be a misleading dead-end. The card is purely informational:
+   * no trigger, no CTA, no pointer/hover affordance. The inline copy
+   * ("run `claude auth login` to authenticate") already tells the user
+   * the exact command to run.
    */
-  test("01-cli-login-available-all-doctor-routing", async ({ page }) => {
+  test("01-cli-login-available-informational", async ({ page }) => {
     await installMockBridge(page, {
       managedAgents: [
         {
@@ -152,13 +155,14 @@ test.describe("doctor CTA nudge card screenshots", () => {
     // Wait for the nudge card to render.
     const card = page.locator("[data-config-nudge]").last();
     await expect(card).toBeVisible({ timeout: 10_000 });
-    await expect(card.getByText("Open Doctor →").first()).toBeVisible();
+    // Auth-only card is informational — no Doctor CTA anywhere.
+    await expect(card.getByText("Open Doctor →")).toHaveCount(0);
 
     await card.scrollIntoViewIfNeeded();
     await settleAnimations(page);
 
     await card.screenshot({
-      path: `${SHOTS}/01-cli-login-available-all-doctor-routing.png`,
+      path: `${SHOTS}/01-cli-login-available-informational.png`,
     });
   });
 

@@ -43,6 +43,21 @@ function isAllCliLogin(reqs: ConfigNudgePayload["requirements"]): boolean {
 }
 
 /**
+ * Returns true when the card is all-cli_login AND every requirement is in the
+ * `available` state (tooling installed, just needs login). In this case Doctor
+ * has no auth functionality and is a misleading dead-end — the card becomes
+ * purely informational (no trigger, no CTA, no pointer/hover affordance).
+ */
+function isAuthOnly(reqs: ConfigNudgePayload["requirements"]): boolean {
+  return (
+    reqs.length > 0 &&
+    reqs.every(
+      (r) => r.surface === "cli_login" && r.availability === "available",
+    )
+  );
+}
+
+/**
  * Per-state human-readable copy for a cli_login requirement.
  * Uses the probe_args[0] as a best-effort harness name.
  */
@@ -76,15 +91,21 @@ function cliLoginMessage(
  * the system.
  *
  * Routing:
- * (A) When ALL requirements are `cli_login`, the card trigger opens
- *     Settings → Doctor (install/login can't be fixed in Edit Agent). A
- *     card-level "Open Doctor →" label in `AttachmentActions` confirms the
- *     action at rest. No per-row CTAs — there is only one destination.
+ * (A) When ALL requirements are `cli_login` in an install state
+ *     (`not_installed` / `cli_missing` / `adapter_missing`): the card trigger
+ *     opens Settings → Doctor. A card-level "Open Doctor →" label in
+ *     `AttachmentActions` confirms the action at rest.
+ * (A-auth) When ALL requirements are `cli_login` with `availability ===
+ *     "available"` (tooling installed, just needs login): Doctor has no auth
+ *     functionality and would be a misleading dead-end. The card is purely
+ *     informational — no trigger, no CTA, no pointer/hover affordance. The
+ *     inline copy (`setup_copy`) already tells the user the exact command.
  * (B) Otherwise (mixed card), the card trigger opens Edit Agent as the
  *     card-level fallback. Each row carries its own inline CTA sharing one
  *     right edge so the actions are clearly paired with their requirement:
- *     - `cli_login` rows → "Open Doctor →" (routes to Doctor).
- *     - `env_key` / `normalized_field` rows → "Edit Agent →" (opens Edit Agent).
+ *     - `cli_login` rows in an install state → "Open Doctor →" (Doctor).
+ *     - `cli_login` rows with `availability === "available"` → no per-row CTA.
+ *     - `env_key` / `normalized_field` rows → "Edit Agent →" (Edit Agent).
  *     The `AttachmentActions` column is omitted on mixed cards — per-row CTAs
  *     replace it.
  */
@@ -99,6 +120,7 @@ export function ConfigNudgeCard({
   const { onOpenSettings } = useAppShell();
 
   const allCliLogin = isAllCliLogin(nudge.requirements);
+  const authOnly = isAuthOnly(nudge.requirements);
 
   const openDoctor = () => {
     if (!onOpenSettings) {
@@ -142,8 +164,9 @@ export function ConfigNudgeCard({
     <Attachment
       className={cn(
         "max-w-[min(100%,32rem)] shrink-0 shadow-none",
-        // Affordance #2: cursor-pointer + subtle hover lift.
-        "cursor-pointer hover:shadow-sm",
+        // Affordance: cursor-pointer + subtle hover lift — omitted for auth-only
+        // cards which are purely informational (no click destination).
+        !authOnly && "cursor-pointer hover:shadow-sm",
         className,
       )}
       orientation="horizontal"
@@ -168,21 +191,25 @@ export function ConfigNudgeCard({
           ))}
         </div>
       </AttachmentContent>
-      {/* (A) Pure cli_login card only — single card-level CTA confirming the
-          action at rest. Mixed cards render per-row CTAs instead (below). */}
-      {allCliLogin && (
+      {/* (A) Install-state all-cli_login card only — single card-level CTA
+          confirming the action at rest. Auth-only cards are informational
+          (no CTA); mixed cards render per-row CTAs instead. */}
+      {allCliLogin && !authOnly && (
         <AttachmentActions className="items-end self-end">
           <span className="text-xs text-muted-foreground">Open Doctor →</span>
         </AttachmentActions>
       )}
-      <AttachmentTrigger
-        aria-label={
-          allCliLogin
-            ? `Open Doctor settings for ${nudge.agent_name}`
-            : `Open Edit Agent for ${nudge.agent_name}`
-        }
-        onClick={handleOpen}
-      />
+      {/* Auth-only cards are purely informational — no trigger, no routing. */}
+      {!authOnly && (
+        <AttachmentTrigger
+          aria-label={
+            allCliLogin
+              ? `Open Doctor settings for ${nudge.agent_name}`
+              : `Open Edit Agent for ${nudge.agent_name}`
+          }
+          onClick={handleOpen}
+        />
+      )}
     </Attachment>
   );
 }
@@ -245,11 +272,14 @@ function RequirementRow({
             {cliLoginMessage(requirement)}
           </span>
           {/* (B) Per-row Doctor CTA — shown only on mixed cards where the
-              card-level trigger opens Edit Agent. When allCliLogin is true the
-              card trigger already routes to Doctor; the per-row button is
-              redundant and is suppressed. stopPropagation prevents double-fire
-              on mixed cards where both card and row CTAs are visible. */}
-          {!allCliLogin && (
+              card-level trigger opens Edit Agent (not auth-only cards). When
+              allCliLogin is true the card trigger already routes to Doctor; the
+              per-row button is redundant and is suppressed. Also suppressed for
+              `available` cli_login rows — Doctor has no auth functionality and
+              the setup_copy already provides the exact login command.
+              stopPropagation prevents double-fire on mixed cards where both
+              card and row CTAs are visible. */}
+          {!allCliLogin && requirement.availability !== "available" && (
             <button
               className="relative z-20 shrink-0 font-medium text-muted-foreground hover:underline"
               onClick={onOpenDoctor}
