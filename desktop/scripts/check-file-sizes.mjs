@@ -322,8 +322,10 @@ const overrides = new Map([
   // threading from the deep-link focus feature, and isEditAgentProviderSaveValid
   // extracted as a testable helper with originalRuntimeSupportsProvider to close
   // the runtime-switch hole in Will's (b) providerValid gate narrowing.
+  // E2E-fix round: added globalProvider fallback to useRequiredCredentialState
+  // call site and buzz-agent auto-expand effect for model-tuning knob visibility.
   // Feature logic, not generic debt. Approved override; still queued to split.
-  ["src/features/agents/ui/AgentInstanceEditDialog.tsx", 1103],
+  ["src/features/agents/ui/AgentInstanceEditDialog.tsx", 1118],
 ]);
 
 await runFileSizeCheck({

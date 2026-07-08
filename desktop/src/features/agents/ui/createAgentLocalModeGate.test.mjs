@@ -22,6 +22,7 @@ import assert from "node:assert/strict";
 import {
   computeLocalModeGate,
   getBakedSatisfiedEnvKeys,
+  getDefaultLlmModelLabel,
   getDefaultLlmProviderLabel,
   requiredCredentialEnvKeys,
   runtimeSupportsLlmProviderSelection,
@@ -857,8 +858,8 @@ test("providerDefaultLabel_globalSet_returnsInheritLabel", () => {
   const label = getDefaultLlmProviderLabel("buzz-agent", "anthropic");
   assert.equal(
     label,
-    "Inherit (anthropic)",
-    "global provider set must return 'Inherit (<provider>)'",
+    "Inherit global default (anthropic)",
+    "global provider set must return 'Inherit global default (<provider>)'",
   );
 });
 
@@ -867,8 +868,51 @@ test("providerDefaultLabel_globalSetWithWhitespace_trimsAndReturnsInherit", () =
   const label = getDefaultLlmProviderLabel("buzz-agent", "  openai  ");
   assert.equal(
     label,
-    "Inherit (openai)",
+    "Inherit global default (openai)",
     "global provider with surrounding whitespace must be trimmed in label",
+  );
+});
+
+// ── Model-default label ────────────────────────────────────────────────────
+
+test("modelDefaultLabel_noGlobal_returnsDefaultModel", () => {
+  // No global model → generic placeholder.
+  const label = getDefaultLlmModelLabel(undefined);
+  assert.equal(
+    label,
+    "Default model",
+    "no global model must return 'Default model'",
+  );
+});
+
+test("modelDefaultLabel_emptyGlobal_returnsDefaultModel", () => {
+  // Empty string treated the same as absent.
+  const label = getDefaultLlmModelLabel("");
+  assert.equal(
+    label,
+    "Default model",
+    "empty global model must return 'Default model'",
+  );
+});
+
+test("modelDefaultLabel_globalSet_returnsInheritLabel", () => {
+  // Global model set → label shows the model name so the user
+  // knows what they're inheriting.
+  const label = getDefaultLlmModelLabel("claude-opus-4-5");
+  assert.equal(
+    label,
+    "Inherit global default (claude-opus-4-5)",
+    "global model set must return 'Inherit global default (<model>)'",
+  );
+});
+
+test("modelDefaultLabel_globalSetWithWhitespace_trimsAndReturnsInherit", () => {
+  // Surrounding whitespace is stripped before building the label.
+  const label = getDefaultLlmModelLabel("  gpt-4o  ");
+  assert.equal(
+    label,
+    "Inherit global default (gpt-4o)",
+    "global model with surrounding whitespace must be trimmed in label",
   );
 });
 

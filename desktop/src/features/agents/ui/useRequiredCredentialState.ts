@@ -38,11 +38,17 @@ export interface RequiredCredentialState {
  * with no on-screen reason. This hook auto-expands Advanced on the
  * missing→present-requirement transition, so the user can still collapse it
  * again once the key is filled.
+ *
+ * `globalProvider` is used as the fallback when the per-agent provider is
+ * empty — without it, a global-provider-only config produces no required keys
+ * in the agent-instance dialogs even though the effective provider demands one.
  */
 export function useRequiredCredentialState(params: {
   open: boolean;
   prospectiveRuntimeId: string;
   provider: string;
+  /** Global provider default; used as fallback when per-agent provider is empty. */
+  globalProvider?: string;
   envVars: Record<string, string>;
   setShowAdvancedFields: React.Dispatch<React.SetStateAction<boolean>>;
 }): RequiredCredentialState {
@@ -50,6 +56,7 @@ export function useRequiredCredentialState(params: {
     open,
     prospectiveRuntimeId,
     provider,
+    globalProvider = "",
     envVars,
     setShowAdvancedFields,
   } = params;
@@ -57,7 +64,7 @@ export function useRequiredCredentialState(params: {
   const providerForRequiredKeys = runtimeSupportsLlmProviderSelection(
     prospectiveRuntimeId,
   )
-    ? provider
+    ? provider.trim() || globalProvider.trim()
     : "";
 
   const { data: runtimeFileConfig } = useRuntimeFileConfigQuery(

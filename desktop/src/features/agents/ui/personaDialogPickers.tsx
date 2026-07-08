@@ -213,8 +213,21 @@ export function getDefaultLlmProviderLabel(
 ) {
   const trimmedGlobal = (globalProvider ?? "").trim();
   return trimmedGlobal
-    ? `Inherit (${trimmedGlobal})`
+    ? `Inherit global default (${trimmedGlobal})`
     : "Select a provider\u2026";
+}
+
+/** Returns the zero-value model option label.
+ *
+ * When a global model is configured, the empty-model option reads
+ * `Inherit global default (<model>)` so users can see which model will run.
+ * Otherwise falls back to the generic `"Default model"` placeholder.
+ */
+export function getDefaultLlmModelLabel(globalModel?: string) {
+  const trimmedGlobal = (globalModel ?? "").trim();
+  return trimmedGlobal
+    ? `Inherit global default (${trimmedGlobal})`
+    : "Default model";
 }
 
 export function getPersonaProviderOptions(

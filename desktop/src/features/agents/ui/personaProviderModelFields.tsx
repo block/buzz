@@ -13,6 +13,7 @@ import {
   AUTO_PROVIDER_DROPDOWN_VALUE,
   CUSTOM_MODEL_DROPDOWN_VALUE,
   CUSTOM_PROVIDER_DROPDOWN_VALUE,
+  getDefaultLlmModelLabel,
   getModelSelectValue,
   getPersonaProviderOptions,
   hasPersonaModelOption,
@@ -45,6 +46,7 @@ export function RequiredFieldLabel({
 export function AgentModelField({
   disabled,
   discoveredModelOptions,
+  globalModel,
   id = "agent-model",
   isCustomModelEditing,
   isRequired,
@@ -56,6 +58,8 @@ export function AgentModelField({
 }: {
   disabled: boolean;
   discoveredModelOptions: readonly PersonaModelOption[] | null;
+  /** Global model default; when set, the zero-value option reads `Inherit global default (<model>)`. */
+  globalModel?: string;
   /** DOM id for the model select. Defaults to `"agent-model"`. Override in
    *  contexts where multiple instances coexist on the same page (e.g. the
    *  global-config settings card) to avoid duplicate DOM ids. */
@@ -74,7 +78,7 @@ export function AgentModelField({
   // returned yet. Discovered options are ADDITIVE — we never disable the picker
   // or hide the custom input just because discovery returned null.
   const staticModelOptions: readonly PersonaModelOption[] = [
-    { id: "", label: "Default model" },
+    { id: "", label: getDefaultLlmModelLabel(globalModel) },
   ];
   const effectiveModelOptions = discoveredModelOptions ?? staticModelOptions;
 
