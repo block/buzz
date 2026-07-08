@@ -93,12 +93,19 @@ type PersonaDialogProps = {
   runtimes: AcpRuntimeCatalogEntry[];
   runtimesLoading?: boolean;
   onOpenChange: (open: boolean) => void;
-  onSubmit: (input: CreatePersonaInput | UpdatePersonaInput) => Promise<void>;
+  onSubmit: (
+    input: CreatePersonaInput | UpdatePersonaInput,
+  ) => Promise<unknown>;
   onImportUpdateFile?: (
     personaId: string,
     fileBytes: number[],
     fileName: string,
   ) => Promise<void>;
+  /**
+   * Rendered in the footer's left slot in create mode only — edit mode's
+   * import button owns that slot (`canImportPersonaUpdate`).
+   */
+  createFooterSlot?: React.ReactNode;
 };
 
 const ADVANCED_FIELDS_MOTION_TRANSITION = {
@@ -120,6 +127,7 @@ export function PersonaDialog({
   onOpenChange,
   onSubmit,
   onImportUpdateFile,
+  createFooterSlot,
 }: PersonaDialogProps) {
   const [displayName, setDisplayName] = React.useState("");
   const [avatarUrl, setAvatarUrl] = React.useState("");
@@ -761,7 +769,9 @@ export function PersonaDialog({
                     ) : null}
                   </button>
                 </>
-              ) : null}
+              ) : (
+                createFooterSlot
+              )}
             </div>
 
             <div className="flex items-center gap-2">

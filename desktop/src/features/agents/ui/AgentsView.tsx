@@ -5,8 +5,8 @@ import {
 } from "@/features/agents/openCreateAgentEvent";
 import { AddAgentToChannelDialog } from "./AddAgentToChannelDialog";
 import { AddTeamToChannelDialog } from "./AddTeamToChannelDialog";
+import { AgentDialog, type AgentDialogMode } from "./AgentDialog";
 import { BatchImportDialog } from "./BatchImportDialog";
-import { CreateAgentDialog } from "./CreateAgentDialog";
 import { PersonaCatalogDialog } from "./PersonaCatalogDialog";
 import { PersonaDialog } from "./PersonaDialog";
 import { PersonaDeleteDialog } from "./PersonaDeleteDialog";
@@ -29,6 +29,17 @@ export function AgentsView() {
   const { openPersonaProfilePanel, openProfilePanel } = useProfilePanel();
   const agents = useManagedAgentActions();
   const personas = usePersonaActions();
+  // Exclusivity: create never sets `personaDialogState` (edit/dup/import do),
+  // so the unified create dialog and PersonaDialog never mount together.
+  const [createDialogMode, setCreateDialogMode] =
+    React.useState<AgentDialogMode | null>(null);
+
+  function openUnifiedCreate(mode: AgentDialogMode) {
+    if (mode === "definition") {
+      personas.prepareCreate();
+    }
+    setCreateDialogMode(mode);
+  }
   const teamActions = useTeamActions(
     {
       setActionNoticeMessage: agents.setActionNoticeMessage,
@@ -50,13 +61,13 @@ export function AgentsView() {
 
   React.useEffect(() => {
     if (consumePendingOpenCreateAgent()) {
-      agents.setIsCreateOpen(true);
+      setCreateDialogMode("instance");
     }
 
     return subscribeOpenCreateAgent(() => {
-      agents.setIsCreateOpen(true);
+      setCreateDialogMode("instance");
     });
-  }, [agents.setIsCreateOpen]);
+  }, []);
 
   return (
     <>
@@ -83,7 +94,7 @@ export function AgentsView() {
                 void agents.handleBulkStopRunning();
               }}
               onCreateAgent={() => {
-                agents.setIsCreateOpen(true);
+                openUnifiedCreate("instance");
               }}
               onOpenAgentProfile={(pubkey, options) => {
                 openProfilePanel?.(pubkey, options);
@@ -117,7 +128,9 @@ export function AgentsView() {
               }
               isPersonasLoading={personas.personasQuery.isLoading}
               isPersonasPending={personas.isPending}
-              onCreatePersona={personas.openCreate}
+              onCreatePersona={() => {
+                openUnifiedCreate("definition");
+              }}
               onChooseCatalog={personas.openCatalog}
               onDuplicatePersona={personas.openDuplicate}
               onEditPersona={personas.openEdit}
@@ -171,14 +184,27 @@ export function AgentsView() {
         </div>
       </div>
 
-      {agents.isCreateOpen ? (
-        <CreateAgentDialog
-          onCreated={(result) => {
+      {createDialogMode ? (
+        <AgentDialog
+          definitionError={
+            personas.createPersonaMutation.error instanceof Error
+              ? personas.createPersonaMutation.error
+              : null
+          }
+          isDefinitionPending={personas.isPending}
+          mode={createDialogMode}
+          onInstanceCreated={(result) => {
             agents.setLogAgentPubkey(result.agent.pubkey);
             agents.setCreatedAgent(result);
           }}
-          onOpenChange={agents.setIsCreateOpen}
-          open={agents.isCreateOpen}
+          onOpenChange={(open) => {
+            if (!open) {
+              setCreateDialogMode(null);
+            }
+          }}
+          onSubmitDefinition={personas.handleSubmit}
+          runtimes={personas.acpRuntimesQuery.data ?? []}
+          runtimesLoading={personas.acpRuntimesQuery.isLoading}
         />
       ) : null}
       {agents.agentToAddToChannel ? (

@@ -33,6 +33,10 @@ import {
   importPersonaDialogState,
   type PersonaDialogState,
 } from "./personaDialogState";
+import {
+  resolveCreateIntent,
+  type AgentCreateIntent,
+} from "./agentCreateIntent";
 import { resolveManagedAgentAvatarUrl } from "./managedAgentAvatar";
 import { usePersonaImportActions } from "./usePersonaImportActions";
 
@@ -154,9 +158,12 @@ export function usePersonaActions() {
     setPersonaErrorMessage(null);
   }
 
-  async function handleSubmit(input: CreatePersonaInput | UpdatePersonaInput) {
+  async function handleSubmit(
+    input: CreatePersonaInput | UpdatePersonaInput,
+    intent?: AgentCreateIntent,
+  ): Promise<boolean> {
     if (isPersonaSubmitPending) {
-      return;
+      return false;
     }
 
     clearFeedback("library");
@@ -173,7 +180,7 @@ export function usePersonaActions() {
           setPersonaErrorMessage(
             "Choose an available provider for this agent.",
           );
-          return;
+          return false;
         }
 
         const avatarUrl = await resolveManagedAgentAvatarUrl(
@@ -185,6 +192,12 @@ export function usePersonaActions() {
           ...input,
           avatarUrl,
         });
+
+        if (resolveCreateIntent(intent) === "definition") {
+          setPersonaNoticeMessage(`Created ${persona.displayName}.`);
+          setPersonaDialogState(null);
+          return true;
+        }
         const agentInput: CreateManagedAgentInput = {
           name: persona.displayName,
           acpCommand: "buzz-acp",
@@ -227,10 +240,12 @@ export function usePersonaActions() {
         }
       }
       setPersonaDialogState(null);
+      return true;
     } catch (error) {
       setPersonaErrorMessage(
         error instanceof Error ? error.message : "Failed to save persona.",
       );
+      return false;
     } finally {
       setIsPersonaSubmitPending(false);
     }
@@ -321,9 +336,13 @@ export function usePersonaActions() {
     void queryClient.invalidateQueries({ queryKey: personasQueryKey });
   }
 
-  function openCreate() {
+  function prepareCreate() {
     clearFeedback("library");
     setShouldLoadAcpRuntimes(true);
+  }
+
+  function openCreate() {
+    prepareCreate();
     setPersonaDialogState(createPersonaDialogState());
   }
 
@@ -420,6 +439,7 @@ export function usePersonaActions() {
     handleExport,
     handleBatchImportComplete,
     openCreate,
+    prepareCreate,
     openEdit,
     openDuplicate,
     openCatalog,
