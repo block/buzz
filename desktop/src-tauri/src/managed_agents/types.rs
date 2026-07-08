@@ -72,8 +72,6 @@ impl PersonaRecord {
     /// (Phase 1A store fold). Identity fields stay empty — keys are minted on
     /// first start. `PersonaRecord.id` becomes `slug`, preserving the 30175
     /// event coordinate (`d_tag = slug`) across the fold.
-    // Wired in by the stage-3 fold migration (same PR); allow until then.
-    #[allow(dead_code)]
     pub fn into_agent_record(self) -> ManagedAgentRecord {
         ManagedAgentRecord {
             pubkey: String::new(),
@@ -131,8 +129,6 @@ impl ManagedAgentRecord {
     /// [`PersonaRecord`] shape — the compatibility view the persona command
     /// surface serves until Phase 1B unifies the UI. Inverse of
     /// [`PersonaRecord::into_agent_record`] for the fields personas carry.
-    // Wired in by the stage-3 fold shims (same PR); allow until then.
-    #[allow(dead_code)]
     pub fn to_persona_view(&self) -> Option<PersonaRecord> {
         let slug = self.slug.clone()?;
         Some(PersonaRecord {

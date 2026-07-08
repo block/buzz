@@ -147,7 +147,9 @@ pub(crate) fn spawn_key_refusal(record: &ManagedAgentRecord) -> Option<String> {
     })
 }
 
-pub fn load_managed_agents(app: &AppHandle) -> Result<Vec<ManagedAgentRecord>, String> {
+/// Read the raw unified store — keyed instances AND key-less definitions —
+/// with fail-loud parse handling. Internal seam; public readers filter.
+fn load_agent_store(app: &AppHandle) -> Result<Vec<ManagedAgentRecord>, String> {
     let path = managed_agents_store_path(app)?;
     if !path.exists() {
         return Ok(Vec::new());
@@ -155,7 +157,7 @@ pub fn load_managed_agents(app: &AppHandle) -> Result<Vec<ManagedAgentRecord>, S
 
     let content = fs::read_to_string(&path)
         .map_err(|error| format!("failed to read agent store: {error}"))?;
-    let mut records: Vec<ManagedAgentRecord> = serde_json::from_str(&content).map_err(|error| {
+    serde_json::from_str(&content).map_err(|error| {
         // Fail loudly and preserve the evidence: a later in-app save rewrites
         // this file wholesale, which would silently destroy a malformed hand
         // edit. Best-effort file-authoring contract (see managed_agents::
@@ -164,9 +166,25 @@ pub fn load_managed_agents(app: &AppHandle) -> Result<Vec<ManagedAgentRecord>, S
         // swallowed into an empty store.
         backup_invalid_store(&path);
         format!("failed to parse agent store (preserved as .invalid): {error}")
-    })?;
+    })
+}
 
+/// Load the keyed agent *instances*. Key-less definitions (former personas,
+/// folded into the same store) are filtered out so every pre-fold call site
+/// keeps seeing exactly the records it always did.
+pub fn load_managed_agents(app: &AppHandle) -> Result<Vec<ManagedAgentRecord>, String> {
+    let mut records = load_agent_store(app)?;
+    records.retain(|record| !record.pubkey.is_empty());
     hydrate_keys(&mut records);
+    Ok(records)
+}
+
+/// Load the key-less agent *definitions* (former personas) from the unified
+/// store. The persona compatibility shim (`load_personas`) presents these in
+/// the legacy shape via `to_persona_view`.
+pub(crate) fn load_agent_definitions(app: &AppHandle) -> Result<Vec<ManagedAgentRecord>, String> {
+    let mut records = load_agent_store(app)?;
+    records.retain(|record| record.pubkey.is_empty());
     Ok(records)
 }
 
@@ -250,8 +268,17 @@ fn hydrate_keys_with(store: &impl KeyStore, records: &mut [ManagedAgentRecord]) 
     }
 }
 
+/// Save the keyed agent *instances*, preserving the key-less definitions that
+/// share the unified store: callers pass exactly the records they loaded via
+/// [`load_managed_agents`], and this re-reads the definition half from disk
+/// before the wholesale rewrite so a definition is never dropped by an
+/// instance-side save (and vice versa via [`save_agent_definitions`]).
 pub fn save_managed_agents(app: &AppHandle, records: &[ManagedAgentRecord]) -> Result<(), String> {
+    let definitions = load_agent_definitions(app).unwrap_or_default();
     let mut sorted = records.to_vec();
+    // A caller-supplied key-less record would collide with the definition
+    // half re-read below; instances always carry a pubkey.
+    sorted.retain(|record| !record.pubkey.is_empty());
     sorted.sort_by(|left, right| {
         left.name
             .to_lowercase()
@@ -264,8 +291,36 @@ pub fn save_managed_agents(app: &AppHandle, records: &[ManagedAgentRecord]) -> R
     // keyring is unreachable, the key stays inline.
     persist_agent_keys(&mut sorted);
 
+    write_agent_store(app, definitions, sorted)
+}
+
+/// Save the key-less agent *definitions*, preserving the keyed instances —
+/// the definition-side mirror of [`save_managed_agents`].
+pub(crate) fn save_agent_definitions(
+    app: &AppHandle,
+    definitions: &[ManagedAgentRecord],
+) -> Result<(), String> {
+    let mut instances = load_agent_store(app)?;
+    instances.retain(|record| !record.pubkey.is_empty());
+    let mut definitions = definitions.to_vec();
+    definitions.retain(|record| record.pubkey.is_empty());
+    write_agent_store(app, definitions, instances)
+}
+
+/// Serialize definitions + instances into the single unified store file.
+/// Definitions sort first (by slug) for stable diffs; instances keep the
+/// name/pubkey order their save path established.
+fn write_agent_store(
+    app: &AppHandle,
+    mut definitions: Vec<ManagedAgentRecord>,
+    instances: Vec<ManagedAgentRecord>,
+) -> Result<(), String> {
+    definitions.sort_by(|left, right| left.slug.cmp(&right.slug));
+    let mut all = definitions;
+    all.extend(instances);
+
     let path = managed_agents_store_path(app)?;
-    let payload = serde_json::to_vec_pretty(&sorted)
+    let payload = serde_json::to_vec_pretty(&all)
         .map_err(|error| format!("failed to serialize agent store: {error}"))?;
 
     // `managed-agents.json` carries plaintext agent nsecs in the keyringless

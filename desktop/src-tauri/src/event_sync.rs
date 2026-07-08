@@ -74,17 +74,34 @@ fn migrate_personas_in_dir(base_dir: &Path, keys: &nostr::Keys) -> Result<u32, S
 
     let pubkey = keys.public_key().to_hex();
 
-    // Read personas.json fresh at reconcile time. Nothing to do if absent.
-    let personas_path = base_dir.join("personas.json");
-    if !personas_path.exists() {
-        return Ok(0);
-    }
-
-    let content = std::fs::read_to_string(&personas_path)
-        .map_err(|e| format!("failed to read personas.json: {e}"))?;
-
-    let records: Vec<PersonaRecord> = serde_json::from_str(&content)
-        .map_err(|e| format!("failed to parse personas.json: {e}"))?;
+    // Post-fold (Phase 1A.2): definitions live as key-less records in the
+    // unified agent store, presented in the legacy shape. Pre-fold boots
+    // (run_event_sync runs after run_boot_migrations, so the fold has
+    // already happened) never reach this path with personas.json present —
+    // but read it as a fallback for one release in case the fold errored.
+    let records: Vec<PersonaRecord> = {
+        let personas_path = base_dir.join("personas.json");
+        if personas_path.exists() {
+            let content = std::fs::read_to_string(&personas_path)
+                .map_err(|e| format!("failed to read personas.json: {e}"))?;
+            serde_json::from_str(&content)
+                .map_err(|e| format!("failed to parse personas.json: {e}"))?
+        } else {
+            let agents_path = base_dir.join("managed-agents.json");
+            if !agents_path.exists() {
+                return Ok(0);
+            }
+            let content = std::fs::read_to_string(&agents_path)
+                .map_err(|e| format!("failed to read managed-agents.json: {e}"))?;
+            let all: Vec<crate::managed_agents::ManagedAgentRecord> =
+                serde_json::from_str(&content)
+                    .map_err(|e| format!("failed to parse managed-agents.json: {e}"))?;
+            all.iter()
+                .filter(|record| record.pubkey.is_empty())
+                .filter_map(|record| record.to_persona_view())
+                .collect()
+        }
+    };
 
     if records.is_empty() {
         return Ok(0);

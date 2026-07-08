@@ -1,11 +1,8 @@
-use std::{fs, path::PathBuf};
+use std::fs;
 
 use tauri::AppHandle;
 
-use crate::{
-    managed_agents::{managed_agents_base_dir, PersonaRecord},
-    util::now_iso,
-};
+use crate::{managed_agents::PersonaRecord, util::now_iso};
 
 struct BuiltInPersona {
     id: &'static str,
@@ -222,10 +219,6 @@ const RETIRED_PERSONAS: &[(&str, &str)] = &[
         "You are a review agent. Inspect plans, code, and outputs for bugs, regressions, edge cases, security issues, and missing tests. Prioritize findings by severity, cite concrete evidence, and keep summaries secondary to the actual review.",
     ),
 ];
-
-fn personas_store_path(app: &AppHandle) -> Result<PathBuf, String> {
-    Ok(managed_agents_base_dir(app)?.join("personas.json"))
-}
 
 fn built_in_persona_records(now: &str) -> Vec<PersonaRecord> {
     BUILT_IN_PERSONAS
@@ -459,34 +452,54 @@ pub fn validate_persona_activation_change(
 }
 
 pub fn load_personas(app: &AppHandle) -> Result<Vec<PersonaRecord>, String> {
-    let path = personas_store_path(app)?;
     let now = now_iso();
 
-    let records = if path.exists() {
-        let content = fs::read_to_string(&path)
-            .map_err(|error| format!("failed to read persona store: {error}"))?;
-        serde_json::from_str::<Vec<PersonaRecord>>(&content)
-            .map_err(|error| format!("failed to parse persona store: {error}"))?
-    } else {
-        Vec::new()
-    };
+    // Post-fold: definitions live in the unified agent store, presented in
+    // the legacy shape. Pre-fold stores are converted by
+    // `fold_personas_into_agent_store` in boot migrations before any caller
+    // reaches this shim.
+    let records = crate::managed_agents::storage::load_agent_definitions(app)?
+        .iter()
+        .filter_map(|record| record.to_persona_view())
+        .collect();
 
     let (records, changed) = merge_personas(records, &now);
-    if changed || !path.exists() {
+    if changed {
         save_personas(app, &records)?;
     }
 
     Ok(records)
 }
 
+/// Read the raw persona records at `path` — no built-in merge, no write-back.
+/// The single disk-read seam for persona definitions: `load_personas` layers
+/// the built-in merge on top, and the boot-time readers that need raw records
+/// without an `AppHandle` (`event_sync`, `migration::load_persona_runtimes`)
+/// call it directly. The A2 store fold retargets THIS function at the unified
+/// store; its callers stay unchanged.
+pub(crate) fn load_personas_from_path(
+    path: &std::path::Path,
+) -> Result<Vec<PersonaRecord>, String> {
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let content = fs::read_to_string(path)
+        .map_err(|error| format!("failed to read persona store: {error}"))?;
+    serde_json::from_str::<Vec<PersonaRecord>>(&content)
+        .map_err(|error| format!("failed to parse persona store: {error}"))
+}
+
 pub fn save_personas(app: &AppHandle, records: &[PersonaRecord]) -> Result<(), String> {
     let mut sorted = records.to_vec();
     sort_personas(&mut sorted);
 
-    let path = personas_store_path(app)?;
-    let payload = serde_json::to_vec_pretty(&sorted)
-        .map_err(|error| format!("failed to serialize persona store: {error}"))?;
-    crate::managed_agents::storage::atomic_write_json(&path, &payload)
+    // Post-fold: persona saves write key-less definition records into the
+    // unified agent store (instances preserved by `save_agent_definitions`).
+    let definitions: Vec<_> = sorted
+        .into_iter()
+        .map(|persona| persona.into_agent_record())
+        .collect();
+    crate::managed_agents::storage::save_agent_definitions(app, &definitions)
 }
 
 #[cfg(test)]

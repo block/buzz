@@ -149,6 +149,13 @@ pub fn run_boot_migrations(app: &tauri::AppHandle) {
     reconcile_persona_team_dirs(app);
     migrate_persona_provider_to_runtime(app);
     reconcile_legacy_command_names(app);
+    // Fold personas.json into the unified store HERE: after the JSON-level
+    // personas.json migrations above (which must see the legacy file), and
+    // before every consumer of the load/save_personas shims below —
+    // sync_team_personas would otherwise operate on an empty definition set.
+    // Post-fold readers of the runtime map (`load_persona_runtimes`) fall
+    // back to the unified store's definitions.
+    fold_personas_into_agent_store(app);
     if let Err(e) = crate::managed_agents::sync_team_personas(app) {
         eprintln!("buzz-desktop: sync-team-personas: {e}");
     }
@@ -1015,31 +1022,6 @@ fn reconcile_mcp_commands_in_file(path: &Path) {
     });
 }
 
-/// Build a `persona_id → runtime` map from the personas.json sibling of the
-/// given managed-agents.json path. Returns an empty map when personas can't be
-/// read or parsed — callers then fall back to the record's own snapshot.
-fn load_persona_runtimes(agents_path: &Path) -> std::collections::HashMap<String, String> {
-    let mut map = std::collections::HashMap::new();
-    let Some(personas_path) = agents_path.parent().map(|dir| dir.join("personas.json")) else {
-        return map;
-    };
-    let Ok(content) = std::fs::read_to_string(&personas_path) else {
-        return map;
-    };
-    let Ok(records) = serde_json::from_str::<Vec<serde_json::Value>>(&content) else {
-        return map;
-    };
-    for record in records {
-        if let (Some(id), Some(runtime)) = (
-            record.get("id").and_then(|v| v.as_str()),
-            record.get("runtime").and_then(|v| v.as_str()),
-        ) {
-            map.insert(id.to_string(), runtime.to_string());
-        }
-    }
-    map
-}
-
 fn replace_command_field(
     obj: &mut serde_json::Map<String, serde_json::Value>,
     field: &str,
@@ -1274,6 +1256,9 @@ pub fn migrate_persona_provider_to_runtime(app: &tauri::AppHandle) {
 
 mod materialize;
 pub use materialize::materialize_agent_runtimes;
+mod fold;
+pub use fold::fold_personas_into_agent_store;
+use fold::load_persona_runtimes;
 
 #[cfg(test)]
 #[path = "migration_test_support.rs"]
