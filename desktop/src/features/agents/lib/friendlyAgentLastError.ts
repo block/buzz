@@ -69,3 +69,13 @@ export function friendlyAgentLastError(
 
   return { severity: "generic", copy: trimmed };
 }
+
+/**
+ * Convenience for `turn_error` / `agent_panic` observer payloads: coerce the
+ * payload's untyped `code` JSON value and return the display copy, falling
+ * back to the raw error text when no classification applies.
+ */
+export function friendlyTurnErrorCopy(raw: string, code: unknown): string {
+  const numeric = code == null ? null : Number(code);
+  return friendlyAgentLastError(raw, numeric)?.copy ?? raw;
+}

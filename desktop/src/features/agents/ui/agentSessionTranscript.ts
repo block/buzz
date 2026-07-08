@@ -26,7 +26,7 @@ import {
   parsePromptText,
   parseSystemPromptSections,
 } from "./agentSessionTranscriptHelpers";
-import { friendlyAgentLastError } from "../lib/friendlyAgentLastError";
+import { friendlyTurnErrorCopy } from "../lib/friendlyAgentLastError";
 
 export { describeRawEvent } from "./agentSessionTranscriptHelpers";
 
@@ -772,9 +772,7 @@ export function processTranscriptEvent(
     const payload = asRecord(event.payload);
     const outcome = asString(payload.outcome) ?? "error";
     const error = asString(payload.error) ?? "Unknown error";
-    const errorCode = payload.code != null ? Number(payload.code) : null;
-    const friendly = friendlyAgentLastError(error, errorCode);
-    const displayError = friendly ? friendly.copy : error;
+    const displayError = friendlyTurnErrorCopy(error, payload.code);
     const title =
       event.kind === "agent_panic" ? "Agent error (crash)" : "Turn error";
     upsertTextItem(

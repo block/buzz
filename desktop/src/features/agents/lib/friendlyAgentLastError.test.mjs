@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   friendlyAgentLastError,
+  friendlyTurnErrorCopy,
   MODEL_NOT_FOUND_COPY,
   RELAY_MESH_DENIED_COPY,
 } from "./friendlyAgentLastError.ts";
@@ -123,4 +124,27 @@ test("unknown code falls through to generic", () => {
     severity: "generic",
     copy: "some error",
   });
+});
+
+test("friendlyTurnErrorCopy: numeric code -32002 → model-not-found copy", () => {
+  assert.equal(
+    friendlyTurnErrorCopy("raw error", -32002),
+    MODEL_NOT_FOUND_COPY,
+  );
+});
+
+test("friendlyTurnErrorCopy: string-encoded code coerces to number", () => {
+  assert.equal(
+    friendlyTurnErrorCopy("raw error", "-32001"),
+    RELAY_MESH_DENIED_COPY,
+  );
+});
+
+test("friendlyTurnErrorCopy: missing code falls back to raw text", () => {
+  assert.equal(friendlyTurnErrorCopy("raw error", undefined), "raw error");
+  assert.equal(friendlyTurnErrorCopy("raw error", null), "raw error");
+});
+
+test("friendlyTurnErrorCopy: unknown code passes raw text through", () => {
+  assert.equal(friendlyTurnErrorCopy("raw error", 12345), "raw error");
 });
