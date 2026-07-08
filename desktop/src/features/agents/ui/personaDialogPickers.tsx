@@ -252,13 +252,14 @@ export function buildTemplateModelDropdownOptions(
   const hasZeroValue = modelOptions.some((o) => o.id === "");
   const base: readonly PersonaModelOption[] =
     !hasZeroValue && trimmedGlobal.length > 0
-      ? [{ id: "", label: getDefaultLlmModelLabel(trimmedGlobal) }, ...modelOptions]
+      ? [
+          { id: "", label: getDefaultLlmModelLabel(trimmedGlobal) },
+          ...modelOptions,
+        ]
       : modelOptions;
   return base.map((option) => ({
     label:
-      option.id === ""
-        ? getDefaultLlmModelLabel(trimmedGlobal)
-        : option.label,
+      option.id === "" ? getDefaultLlmModelLabel(trimmedGlobal) : option.label,
     value: option.id || AUTO_MODEL_DROPDOWN_VALUE,
   }));
 }

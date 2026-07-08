@@ -137,6 +137,7 @@ const overrides = new Map([
   // missing-host, and DATABRICKS_MODEL fallback. Load-bearing correctness fix.
   // #1613 augmented-PATH readiness probes grew the file +3 past the prior cap.
   // +16: resolve_effective_agent_env + global-config readiness wiring (#1448).
+  // +1 rebase merge: GlobalAgentConfig import added alongside AcpAvailabilityStatus.
   ["src-tauri/src/managed_agents/readiness.rs", 1562],
   // applyWorkspace reposDir parameter plus the validateReposDir binding,
   // threaded through Tauri invokes for configurable repos_dir, plus the

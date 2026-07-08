@@ -1094,72 +1094,63 @@ test("f3_templateDialog_globalModelSet_zeroValueLabelIsInherit", () => {
 //               → zero-value already present from getPersonaModelOptions,
 //                 no double-seed.
 
-test(
-  "f3b_buildTemplateModelDropdownOptions_anthropicGlobalModelSet_containsInheritOption",
-  () => {
-    // Case 1: explicit-model provider (anthropic) + global model set.
-    // getPersonaModelOptions filters out the zero-value option for anthropic.
-    // buildTemplateModelDropdownOptions must prepend it from globalModel.
-    const staticOptions = getPersonaModelOptions("buzz-agent", "anthropic");
-    const result = buildTemplateModelDropdownOptions(
-      staticOptions,
-      "claude-opus-4-5",
-    );
-    const inheritEntry = result.find((o) => o.value === "__auto_model__");
-    assert.ok(
-      inheritEntry !== undefined,
-      "composed list must contain the zero-value inherit entry for anthropic + global model set",
-    );
-    assert.equal(
-      inheritEntry.label,
-      "Inherit global default (claude-opus-4-5)",
-      "inherit entry must carry the global model name",
-    );
-  },
-);
+test("f3b_buildTemplateModelDropdownOptions_anthropicGlobalModelSet_containsInheritOption", () => {
+  // Case 1: explicit-model provider (anthropic) + global model set.
+  // getPersonaModelOptions filters out the zero-value option for anthropic.
+  // buildTemplateModelDropdownOptions must prepend it from globalModel.
+  const staticOptions = getPersonaModelOptions("buzz-agent", "anthropic");
+  const result = buildTemplateModelDropdownOptions(
+    staticOptions,
+    "claude-opus-4-5",
+  );
+  const inheritEntry = result.find((o) => o.value === "__auto_model__");
+  assert.ok(
+    inheritEntry !== undefined,
+    "composed list must contain the zero-value inherit entry for anthropic + global model set",
+  );
+  assert.equal(
+    inheritEntry.label,
+    "Inherit global default (claude-opus-4-5)",
+    "inherit entry must carry the global model name",
+  );
+});
 
-test(
-  "f3b_buildTemplateModelDropdownOptions_anthropicNoGlobalModel_noZeroValueEntry",
-  () => {
-    // Case 2: explicit-model provider (anthropic) + NO global model.
-    // No zero-value option must be seeded — model remains required, Save stays blocked.
-    const staticOptions = getPersonaModelOptions("buzz-agent", "anthropic");
-    const result = buildTemplateModelDropdownOptions(staticOptions, "");
-    const inheritEntry = result.find((o) => o.value === "__auto_model__");
-    assert.equal(
-      inheritEntry,
-      undefined,
-      "composed list must NOT contain a zero-value entry when no global model is set",
-    );
-  },
-);
+test("f3b_buildTemplateModelDropdownOptions_anthropicNoGlobalModel_noZeroValueEntry", () => {
+  // Case 2: explicit-model provider (anthropic) + NO global model.
+  // No zero-value option must be seeded — model remains required, Save stays blocked.
+  const staticOptions = getPersonaModelOptions("buzz-agent", "anthropic");
+  const result = buildTemplateModelDropdownOptions(staticOptions, "");
+  const inheritEntry = result.find((o) => o.value === "__auto_model__");
+  assert.equal(
+    inheritEntry,
+    undefined,
+    "composed list must NOT contain a zero-value entry when no global model is set",
+  );
+});
 
-test(
-  "f3b_buildTemplateModelDropdownOptions_blankProviderGlobalModelSet_noDoubleSeed",
-  () => {
-    // Case 3: provider that does NOT require an explicit model (blank string).
-    // getPersonaModelOptions returns a zero-value option; the helper must not
-    // prepend a second one.
-    const staticOptions = getPersonaModelOptions("buzz-agent", "");
-    const hasExisting = staticOptions.some((o) => o.id === "");
-    assert.ok(
-      hasExisting,
-      "blank provider must already have a zero-value option from getPersonaModelOptions",
-    );
-    const result = buildTemplateModelDropdownOptions(
-      staticOptions,
-      "claude-opus-4-5",
-    );
-    const autoEntries = result.filter((o) => o.value === "__auto_model__");
-    assert.equal(
-      autoEntries.length,
-      1,
-      "must not double-seed the zero-value option when it already exists",
-    );
-    assert.equal(
-      autoEntries[0].label,
-      "Inherit global default (claude-opus-4-5)",
-      "existing zero-value entry must be relabeled with the global model name",
-    );
-  },
-);
+test("f3b_buildTemplateModelDropdownOptions_blankProviderGlobalModelSet_noDoubleSeed", () => {
+  // Case 3: provider that does NOT require an explicit model (blank string).
+  // getPersonaModelOptions returns a zero-value option; the helper must not
+  // prepend a second one.
+  const staticOptions = getPersonaModelOptions("buzz-agent", "");
+  const hasExisting = staticOptions.some((o) => o.id === "");
+  assert.ok(
+    hasExisting,
+    "blank provider must already have a zero-value option from getPersonaModelOptions",
+  );
+  const result = buildTemplateModelDropdownOptions(
+    staticOptions,
+    "claude-opus-4-5",
+  );
+  const autoEntries = result.filter((o) => o.value === "__auto_model__");
+  assert.equal(
+    autoEntries.length,
+    1,
+    "must not double-seed the zero-value option when it already exists",
+  );
+  assert.equal(
+    autoEntries[0].label,
+    "Inherit global default (claude-opus-4-5)",
+    "existing zero-value entry must be relabeled with the global model name",
+  );
+});

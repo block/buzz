@@ -604,7 +604,10 @@ export function AgentDefinitionDialog({
     { label: "Custom provider...", value: CUSTOM_PROVIDER_DROPDOWN_VALUE },
   ];
   const modelDropdownOptions: PersonaDropdownOption[] = [
-    ...buildTemplateModelDropdownOptions(modelOptions, globalConfig.model ?? ""),
+    ...buildTemplateModelDropdownOptions(
+      modelOptions,
+      globalConfig.model ?? "",
+    ),
     ...(modelDiscoveryLoading && discoveredModelOptions === null
       ? [
           {
