@@ -371,7 +371,7 @@ mod tests {
     #[ignore = "requires Postgres"]
     async fn post_operator_body_requires_payload_tag() {
         let operator = Keys::generate();
-        let Some(state) = operator_test_state(&[operator.clone()]).await else {
+        let Some(state) = operator_test_state(std::slice::from_ref(&operator)).await else {
             return;
         };
         let body = format!(
@@ -411,7 +411,7 @@ mod tests {
     async fn happy_path_create_returns_created_and_bootstraps_owner() {
         let operator = Keys::generate();
         let owner = Keys::generate();
-        let Some(state) = operator_test_state(&[operator.clone()]).await else {
+        let Some(state) = operator_test_state(std::slice::from_ref(&operator)).await else {
             return;
         };
         let host = format!("community-{}.example", Uuid::new_v4().simple());
