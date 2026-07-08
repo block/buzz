@@ -324,8 +324,10 @@ const overrides = new Map([
   // the runtime-switch hole in Will's (b) providerValid gate narrowing.
   // E2E-fix round: added globalProvider fallback to useRequiredCredentialState
   // call site and buzz-agent auto-expand effect for model-tuning knob visibility.
+  // F1-fix: added globalEnvVars to useRequiredCredentialState so globally-satisfied
+  // credential keys are excluded from requiredEnvKeyMissing (display/gate parity).
   // Feature logic, not generic debt. Approved override; still queued to split.
-  ["src/features/agents/ui/AgentInstanceEditDialog.tsx", 1118],
+  ["src/features/agents/ui/AgentInstanceEditDialog.tsx", 1140],
 ]);
 
 await runFileSizeCheck({

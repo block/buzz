@@ -3,6 +3,8 @@ import { cn } from "@/shared/lib/cn";
 import { EnvVarsEditor, type EnvVarsValue } from "./EnvVarsEditor";
 import { CreateAgentRespondToField } from "./RespondToField";
 import type { PersonaBehaviorDraft } from "./personaBehaviorDraft";
+import { isBuzzAgentRuntime } from "./buzzAgentConfig";
+import { BuzzAgentModelTuningFields } from "./buzzAgentModelTuningFields";
 import {
   PERSONA_FIELD_CONTROL_CLASS,
   PERSONA_FIELD_SHELL_CLASS,
@@ -13,6 +15,8 @@ export function PersonaAdvancedFields({
   behaviorDraft,
   disabled,
   envVars,
+  inheritedEnvVars = {},
+  modelTuningRuntimeId = "",
   namePoolText,
   onBehaviorDraftChange,
   onEnvVarsChange,
@@ -23,6 +27,11 @@ export function PersonaAdvancedFields({
   behaviorDraft: PersonaBehaviorDraft;
   disabled: boolean;
   envVars: EnvVarsValue;
+  /** Env vars to display as inherited defaults in tuning-field placeholders.
+   *  For templates, pass `globalConfig.env_vars` (the fallback layer). */
+  inheritedEnvVars?: EnvVarsValue;
+  /** Runtime id for the buzz-agent tuning knobs visibility gate. */
+  modelTuningRuntimeId?: string;
   namePoolText: string;
   onBehaviorDraftChange: (value: PersonaBehaviorDraft) => void;
   onEnvVarsChange: (value: EnvVarsValue) => void;
@@ -166,6 +175,23 @@ export function PersonaAdvancedFields({
         requiredKeys={requiredEnvKeys}
         value={envVars}
       />
+
+      {/* Tier-1 buzz-agent model-tuning knobs — only shown for buzz-agent. */}
+      {isBuzzAgentRuntime(modelTuningRuntimeId) ? (
+        <BuzzAgentModelTuningFields
+          envVars={envVars}
+          inheritedEnvVars={inheritedEnvVars}
+          onEnvVarChange={(key, value) => {
+            const next = { ...envVars };
+            if (value === "") {
+              delete next[key];
+            } else {
+              next[key] = value;
+            }
+            onEnvVarsChange(next);
+          }}
+        />
+      ) : null}
     </div>
   );
 }

@@ -42,6 +42,12 @@ export interface RequiredCredentialState {
  * `globalProvider` is used as the fallback when the per-agent provider is
  * empty — without it, a global-provider-only config produces no required keys
  * in the agent-instance dialogs even though the effective provider demands one.
+ *
+ * `globalEnvVars` is used to satisfy credential keys at the global layer:
+ * a key present in global env is NOT required (no amber row, save not blocked).
+ * This mirrors the same agent→global→file precedence used by
+ * `computeLocalModeGate`. Without it, a key covered only by global env still
+ * marks `requiredEnvKeyMissing=true` and silently disables Save.
  */
 export function useRequiredCredentialState(params: {
   open: boolean;
@@ -50,6 +56,9 @@ export function useRequiredCredentialState(params: {
   /** Global provider default; used as fallback when per-agent provider is empty. */
   globalProvider?: string;
   envVars: Record<string, string>;
+  /** Global config env vars; keys satisfied here are excluded from required
+   *  rows and do not block Save — mirrors the agent→global→file precedence. */
+  globalEnvVars?: Record<string, string>;
   setShowAdvancedFields: React.Dispatch<React.SetStateAction<boolean>>;
 }): RequiredCredentialState {
   const {
@@ -58,6 +67,7 @@ export function useRequiredCredentialState(params: {
     provider,
     globalProvider = "",
     envVars,
+    globalEnvVars = {},
     setShowAdvancedFields,
   } = params;
 
@@ -103,9 +113,12 @@ export function useRequiredCredentialState(params: {
       allRequiredKeys.filter(
         (key) =>
           !bakedSatisfiedKeys.includes(key) &&
-          !fileSatisfiedEnvKeys.includes(key),
+          !fileSatisfiedEnvKeys.includes(key) &&
+          // Exclude globally-satisfied keys: they are covered at the global
+          // layer and must not produce an amber row or block Save.
+          (globalEnvVars[key] ?? "").length === 0,
       ),
-    [allRequiredKeys, bakedSatisfiedKeys, fileSatisfiedEnvKeys],
+    [allRequiredKeys, bakedSatisfiedKeys, fileSatisfiedEnvKeys, globalEnvVars],
   );
 
   const requiredEnvKeyMissing = React.useMemo(

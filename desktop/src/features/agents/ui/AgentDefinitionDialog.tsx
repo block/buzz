@@ -86,6 +86,7 @@ import {
 } from "./usePersonaModelDiscovery";
 import { useBakedBuildEnvKeysQuery, useRuntimeFileConfigQuery } from "../hooks";
 import { useGlobalAgentConfig } from "../useGlobalAgentConfig";
+import { isBuzzAgentRuntime } from "./buzzAgentConfig";
 
 type AgentDefinitionDialogProps = {
   open: boolean;
@@ -500,6 +501,21 @@ export function AgentDefinitionDialog({
       setShowAdvancedFields(true);
     }
   }, [open, requiredEnvKeys.length]);
+
+  // Auto-expand Advanced once per open when the selected runtime is buzz-agent
+  // so the model-tuning knobs are immediately reachable — mirrors the agent
+  // instance dialogs' behavior.
+  const hasAutoOpenedForBuzzAgentRef = React.useRef(false);
+  React.useEffect(() => {
+    if (!open) {
+      hasAutoOpenedForBuzzAgentRef.current = false;
+      return;
+    }
+    if (isBuzzAgentRuntime(runtime) && !hasAutoOpenedForBuzzAgentRef.current) {
+      hasAutoOpenedForBuzzAgentRef.current = true;
+      setShowAdvancedFields(true);
+    }
+  }, [open, runtime]);
   const {
     discoveredModelOptions,
     modelDiscoveryLoading,
@@ -993,6 +1009,8 @@ export function AgentDefinitionDialog({
                       disabled={isPending}
                       envVars={advancedEnvVars}
                       fileSatisfiedEnvKeys={localModeGate.fileSatisfiedEnvKeys}
+                      inheritedEnvVars={globalConfig.env_vars}
+                      modelTuningRuntimeId={runtime}
                       namePoolText={namePoolText}
                       onBehaviorDraftChange={setBehaviorDraft}
                       onEnvVarsChange={handleAdvancedEnvVarsChange}

@@ -8,7 +8,7 @@ import {
   PERSONA_LABEL_OPTIONAL_CLASS,
 } from "./personaDialogPickers";
 import type { AgentPersona } from "@/shared/api/types";
-import { BuzzAgentModelTuningFields } from "./CreateAgentDialogSections";
+import { BuzzAgentModelTuningFields } from "./buzzAgentModelTuningFields";
 import { isBuzzAgentRuntime } from "./buzzAgentConfig";
 
 export function EditAgentAdvancedFields({

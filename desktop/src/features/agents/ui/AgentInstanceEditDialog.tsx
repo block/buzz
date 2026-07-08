@@ -370,6 +370,8 @@ export function AgentInstanceEditDialog({
   // Advanced-auto-expand rationale.
   // Pass globalProvider so the hook uses it as a fallback when the per-agent
   // provider is empty (global-provider-only configs must surface required keys).
+  // Pass globalEnvVars so keys satisfied by global config are excluded from
+  // requiredEnvKeys and do not block Save (display and gate agree).
   const {
     requiredEnvKeys: requiredEnvKeysRaw,
     fileSatisfiedEnvKeys,
@@ -380,6 +382,7 @@ export function AgentInstanceEditDialog({
     provider: inheritedSubmission.provider ?? "",
     globalProvider: globalConfig.provider ?? "",
     envVars: inheritedSubmission.envVars,
+    globalEnvVars: globalConfig.env_vars,
     setShowAdvancedFields,
   });
 
