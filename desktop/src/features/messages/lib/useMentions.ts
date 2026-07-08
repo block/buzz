@@ -532,6 +532,7 @@ export function useMentions(
   );
   const latestValueRef = React.useRef<string>("");
   const latestCursorRef = React.useRef<number>(0);
+  const flushedMentionStartIndexRef = React.useRef<number | null>(null);
   const searchableNamesLowerRef = React.useRef<string[]>(searchableNamesLower);
 
   // Keep the known-names ref in sync so the debounced callback never reads stale data.
@@ -696,8 +697,11 @@ export function useMentions(
       setMentionQuery(null);
       setMentionSelectedIndex(0);
 
+      const startIndex =
+        flushedMentionStartIndexRef.current ?? mentionStartIndex;
+      flushedMentionStartIndexRef.current = null;
       return {
-        replaceFromOffset: mentionStartIndex,
+        replaceFromOffset: startIndex,
         replaceToOffset: selectionEnd,
         insertText,
       };
@@ -932,8 +936,9 @@ export function useMentions(
             channelType: options?.channelType,
           });
           if (flushed) {
+            flushedMentionStartIndexRef.current = flushed.startIndex;
             setMentionQuery(null); // reset so dropdown closes
-            return { handled: true, suggestion: flushed };
+            return { handled: true, suggestion: flushed.suggestion };
           }
           // No match after flush — fall through to existing suggestions.
         }

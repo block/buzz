@@ -35,7 +35,7 @@ export function flushMentionDebounce<T extends MentionCandidateWithUI>(opts: {
   candidates: readonly T[];
   activePersonaIds: ReadonlySet<string>;
   channelType?: ChannelType | null;
-}): MentionSuggestion | null {
+}): { suggestion: MentionSuggestion; startIndex: number } | null {
   if (opts.debounceTimerRef.current !== null) {
     clearTimeout(opts.debounceTimerRef.current);
   }
@@ -64,14 +64,17 @@ export function flushMentionDebounce<T extends MentionCandidateWithUI>(opts: {
 
   const { candidate, label } = ranked[0];
   return {
-    pubkey: candidate.pubkey,
-    personaId: candidate.personaId,
-    kind: candidate.kind,
-    displayName: label,
-    avatarUrl: candidate.avatarUrl ?? null,
-    isAgent: candidate.isAgent,
-    notInChannel: opts.channelType !== "dm" && candidate.isMember === false,
-    ownerLabel: null,
-    role: !candidate.isAgent && candidate.role === "admin" ? "admin" : null,
+    suggestion: {
+      pubkey: candidate.pubkey,
+      personaId: candidate.personaId,
+      kind: candidate.kind,
+      displayName: label,
+      avatarUrl: candidate.avatarUrl ?? null,
+      isAgent: candidate.isAgent,
+      notInChannel: opts.channelType !== "dm" && candidate.isMember === false,
+      ownerLabel: null,
+      role: !candidate.isAgent && candidate.role === "admin" ? "admin" : null,
+    },
+    startIndex: mention.startIndex,
   };
 }
