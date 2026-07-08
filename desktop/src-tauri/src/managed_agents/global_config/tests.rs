@@ -204,6 +204,7 @@ fn bare_record() -> ManagedAgentRecord {
         source_team: None,
         source_team_persona_slug: None,
         relay_mesh: None,
+        auto_restart_on_config_change: false,
     }
 }
 

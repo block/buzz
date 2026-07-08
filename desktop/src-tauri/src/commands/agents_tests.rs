@@ -54,9 +54,9 @@ fn bare_agent_record(
         source_team: None,
         source_team_persona_slug: None,
         relay_mesh: None,
+        auto_restart_on_config_change: false,
     }
 }
-
 fn persona_record(id: &str, model: Option<&str>, provider: Option<&str>) -> PersonaRecord {
     use std::collections::BTreeMap;
     PersonaRecord {
