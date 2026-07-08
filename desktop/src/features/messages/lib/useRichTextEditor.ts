@@ -208,6 +208,16 @@ export function useRichTextEditor({
           // should keep the literal "#", not convert to a heading node.
           // Users type #channel-name and the "#" would get eaten otherwise.
           heading: false,
+          // Suppress spellcheck inside inline code spans — code identifiers
+          // are not natural language and should not show red squiggles.
+          code: {
+            HTMLAttributes: { spellcheck: "false" },
+          },
+          // Code blocks already render as <pre><code> which browsers skip
+          // for spellcheck, but be explicit for consistency.
+          codeBlock: {
+            HTMLAttributes: { spellcheck: "false" },
+          },
           // Disable the trailing-node plugin — it forces an empty paragraph
           // after block nodes (lists, blockquotes, code blocks) which creates
           // a phantom empty line in the compact message composer.
@@ -417,7 +427,7 @@ export function useRichTextEditor({
           autocorrect: "off",
           class: `${MESSAGE_MARKDOWN_CLASS} min-h-0 resize-none overflow-y-hidden border-0 bg-transparent px-0 py-0 text-sm leading-5 text-foreground shadow-none focus-visible:ring-0 caret-foreground outline-hidden max-w-none`,
           "data-testid": "message-input",
-          spellcheck: "false",
+          spellcheck: "true",
         },
         // ArrowUp in an empty composer → edit your last message (Slack
         // parity). Handled here in ProseMirror's own DOM `keydown` hook —

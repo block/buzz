@@ -176,6 +176,16 @@ mod tests {
             last_error: Some("some runtime error".to_string()),
             respond_to: RespondTo::Allowlist,
             respond_to_allowlist: vec!["79be667e".to_string()],
+            // Unified-model fields carry real values so the exclusion test
+            // proves they are absent from the wire, not vacuously empty.
+            display_name: Some("Display Name Secretish".to_string()),
+            slug: Some("sample-slug".to_string()),
+            runtime: Some("goose".to_string()),
+            name_pool: vec!["poolname".to_string()],
+            is_builtin: true,
+            is_active: false,
+            source_team: None,
+            source_team_persona_slug: None,
             relay_mesh: None,
         }
     }
@@ -237,6 +247,16 @@ mod tests {
         assert!(!json.contains("last_exit_code"));
         assert!(!json.contains("last_error"));
         assert!(!json.contains("some runtime error"));
+
+        // Unified-agent-model fields (Phase 1A) — deliberately NOT published
+        // yet; adding them to the wire projection is a Phase 2 (relay
+        // canonicalization) decision, not a record-shape side effect.
+        assert!(!json.contains("display_name"), "leaked display_name");
+        assert!(!json.contains("\"slug\""), "leaked slug");
+        assert!(!json.contains("\"runtime\""), "leaked runtime");
+        assert!(!json.contains("name_pool"), "leaked name_pool");
+        assert!(!json.contains("is_builtin"), "leaked is_builtin");
+        assert!(!json.contains("is_active"), "leaked is_active");
         assert!(!json.contains("backend_agent_id"));
         assert!(!json.contains("provider_binary_path"));
         assert!(!json.contains("relay_url"));

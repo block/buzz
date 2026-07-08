@@ -22,7 +22,7 @@ type BotActivityBarProps = {
   onOpenAgentSession: (pubkey: string, channelId?: string | null) => void;
   openAgentSessionPubkey: string | null;
   profiles?: UserProfileLookup;
-  typingBotPubkeys: string[];
+  workingBotPubkeys: string[];
   variant?: "toolbar" | "inline";
 };
 
@@ -36,7 +36,7 @@ export function BotActivityComposerAction({
   onOpenAgentSession,
   openAgentSessionPubkey,
   profiles,
-  typingBotPubkeys,
+  workingBotPubkeys,
   variant = "toolbar",
 }: BotActivityBarProps) {
   const [open, setOpen] = React.useState(false);
@@ -44,21 +44,21 @@ export function BotActivityComposerAction({
     null,
   );
 
-  const typingAgents = React.useMemo(() => {
-    const typingSet = new Set(
-      typingBotPubkeys.map((pubkey) => pubkey.toLowerCase()),
+  const workingAgents = React.useMemo(() => {
+    const workingSet = new Set(
+      workingBotPubkeys.map((pubkey) => pubkey.toLowerCase()),
     );
 
-    return agents.filter((agent) => typingSet.has(agent.pubkey.toLowerCase()));
-  }, [agents, typingBotPubkeys]);
-  const singleTypingAgent =
-    typingAgents.length === 1 ? (typingAgents[0] ?? null) : null;
+    return agents.filter((agent) => workingSet.has(agent.pubkey.toLowerCase()));
+  }, [agents, workingBotPubkeys]);
+  const singleWorkingAgent =
+    workingAgents.length === 1 ? (workingAgents[0] ?? null) : null;
   const transcript = useAgentTranscript(
-    Boolean(singleTypingAgent),
-    singleTypingAgent?.pubkey,
+    Boolean(singleWorkingAgent),
+    singleWorkingAgent?.pubkey,
   );
   const activityHeadlines = React.useMemo(() => {
-    if (!singleTypingAgent) {
+    if (!singleWorkingAgent) {
       return [];
     }
 
@@ -92,7 +92,7 @@ export function BotActivityComposerAction({
     }
 
     return headlines;
-  }, [channelId, singleTypingAgent, transcript]);
+  }, [channelId, singleWorkingAgent, transcript]);
   const [headlineIndex, setHeadlineIndex] = React.useState(0);
 
   const clearHoverTimer = React.useCallback(() => {
@@ -136,7 +136,7 @@ export function BotActivityComposerAction({
     return () => window.clearInterval(interval);
   }, [activityHeadlines.length]);
 
-  if (typingAgents.length === 0) {
+  if (workingAgents.length === 0) {
     return null;
   }
 
@@ -144,17 +144,17 @@ export function BotActivityComposerAction({
     profiles?.[agent.pubkey.toLowerCase()]?.avatarUrl ?? null;
   const selectedPubkey = openAgentSessionPubkey?.toLowerCase() ?? null;
   const triggerLabel =
-    typingAgents.length === 1
-      ? `${typingAgents[0]?.name ?? "Agent"} is working`
-      : `${typingAgents.length} agents working`;
+    workingAgents.length === 1
+      ? `${workingAgents[0]?.name ?? "Agent"} is working`
+      : `${workingAgents.length} agents working`;
   const isInline = variant === "inline";
   const visibleStatusLabel =
-    typingAgents.length === 1
-      ? `${typingAgents[0]?.name ?? "Agent"}: ${
+    workingAgents.length === 1
+      ? `${workingAgents[0]?.name ?? "Agent"}: ${
           activityHeadlines[headlineIndex % activityHeadlines.length] ??
           "Working"
         }`
-      : `${typingAgents[0]?.name ?? "Agent"} +${typingAgents.length - 1}`;
+      : `${workingAgents[0]?.name ?? "Agent"} +${workingAgents.length - 1}`;
 
   return (
     <Popover onOpenChange={setOpen} open={open}>
@@ -179,7 +179,7 @@ export function BotActivityComposerAction({
           type="button"
         >
           <span className="flex items-center overflow-visible py-px -space-x-1">
-            {typingAgents.slice(0, 2).map((agent) => (
+            {workingAgents.slice(0, 2).map((agent) => (
               <UserAvatar
                 avatarUrl={agentAvatarUrl(agent)}
                 className={cn(
@@ -194,9 +194,9 @@ export function BotActivityComposerAction({
               />
             ))}
           </span>
-          {typingAgents.length > 2 ? (
+          {workingAgents.length > 2 ? (
             <span className="text-2xs leading-none">
-              +{typingAgents.length - 2}
+              +{workingAgents.length - 2}
             </span>
           ) : null}
           <span
@@ -228,7 +228,7 @@ export function BotActivityComposerAction({
           Agents working
         </div>
         <div className="mt-1 flex flex-col gap-1">
-          {typingAgents.map((agent) => {
+          {workingAgents.map((agent) => {
             const isSelected = selectedPubkey === agent.pubkey.toLowerCase();
 
             return (

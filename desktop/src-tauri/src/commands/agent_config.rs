@@ -1,20 +1,40 @@
+use serde::Serialize;
 use tauri::{AppHandle, State};
 
 use crate::{
     app_state::AppState,
     managed_agents::{
         config_bridge::{
+            read_goose_file_config,
             reader::read_config_surface,
             types::{
                 AcpConfigOptionEntry, AcpConfigOptionValue, AcpModelEntry, ConfigOrigin,
                 NormalizedField, RuntimeConfigSurface, SessionConfigCache,
             },
         },
-        current_instance_id, effective_agent_command, known_acp_runtime, load_managed_agents,
-        load_personas, resolve_effective_prompt_model_provider, save_managed_agents,
-        sync_managed_agent_processes, KnownAcpRuntime, ManagedAgentRecord, PersonaRecord,
+        current_instance_id, known_acp_runtime, load_managed_agents, load_personas,
+        resolve_effective_prompt_model_provider, save_managed_agents, sync_managed_agent_processes,
+        KnownAcpRuntime, ManagedAgentRecord, PersonaRecord,
     },
 };
+
+/// Subset of the goose file config exposed to the frontend for gate evaluation.
+///
+/// Only the fields the dialog gate needs — not the full `RuntimeConfigSurface`.
+/// The gate uses this to know which requirements are already satisfied in the
+/// harness config file, so it can show "Set in goose config" rather than
+/// surfacing a false missing-key marker.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeFileConfigSubset {
+    /// Provider set in the harness config file, if any.
+    pub provider: Option<String>,
+    /// Model set in the harness config file, if any.
+    pub model: Option<String>,
+    /// Flat credential env keys found in the harness config file's `extra` map
+    /// (e.g. `DATABRICKS_HOST`).  Only non-empty values are included.
+    pub satisfied_env_keys: Vec<String>,
+}
 
 /// Resolve the config surface with persona values applied.
 ///
@@ -45,6 +65,7 @@ fn resolve_config_surface(
         personas,
         record.system_prompt.clone(),
         record.model.clone(),
+        record.provider.clone(),
     );
 
     // Build the baseline the reader overrides a live model against, paired with
@@ -136,6 +157,55 @@ fn retag_persona_default(field: &mut Option<NormalizedField>) {
     }
 }
 
+/// Get the file-layer config for a runtime — used by the Create/Edit/Persona
+/// dialogs to know which requirements are already satisfied in the harness
+/// config file (e.g. `~/.config/goose/config.yaml`), so they can show
+/// "Set in goose config" instead of surfacing a false required-field marker.
+///
+/// Returns `null` when the runtime has no config file or it cannot be parsed.
+/// Currently only "goose" is supported; other runtimes return `null`.
+#[tauri::command]
+pub fn get_runtime_file_config(runtime_id: String) -> Option<RuntimeFileConfigSubset> {
+    match runtime_id.as_str() {
+        "goose" => {
+            let cfg = read_goose_file_config()?;
+            let satisfied_env_keys = cfg
+                .extra
+                .into_iter()
+                .filter(|(_, v)| !v.is_empty())
+                .map(|(k, _)| k)
+                .collect();
+            Some(RuntimeFileConfigSubset {
+                provider: cfg.provider,
+                model: cfg.model,
+                satisfied_env_keys,
+            })
+        }
+        _ => None,
+    }
+}
+
+/// Return the key names of all non-empty baked build env vars.
+///
+/// Internal (Block) builds bake provider credentials and other env pairs into
+/// the binary at compile time via `BUZZ_BUILD_AGENT_ENV`. The backend readiness
+/// gate already treats these keys as satisfying their requirements (Layer 1 of
+/// `resolve_effective_agent_env`). This command exposes the *key names only* —
+/// never the values — so the frontend dialogs can apply the same logic and avoid
+/// surfacing a spurious "Required" badge for keys that are covered by the baked
+/// env.
+///
+/// OSS builds have no baked env, so this returns an empty list — OSS behavior
+/// is unchanged.
+#[tauri::command]
+pub fn get_baked_build_env_keys() -> Vec<String> {
+    crate::managed_agents::baked_build_env()
+        .into_iter()
+        .filter(|(_, v)| !v.is_empty())
+        .map(|(k, _)| k)
+        .collect()
+}
+
 /// Get the full config surface for a managed agent.
 ///
 /// Returns normalized + advanced config from all available tiers.
@@ -172,11 +242,7 @@ pub async fn get_agent_config_surface(
     };
 
     let personas = load_personas(&app).unwrap_or_default();
-    let effective_cmd = effective_agent_command(
-        record.persona_id.as_deref(),
-        &personas,
-        record.agent_command_override.as_deref(),
-    );
+    let effective_cmd = crate::managed_agents::record_agent_command(&record, &personas);
     let runtime_meta = known_acp_runtime(&effective_cmd);
     let session_cache = state.get_session_cache(&pubkey);
 
@@ -446,6 +512,14 @@ mod tests {
             last_error: None,
             respond_to: RespondTo::OwnerOnly,
             respond_to_allowlist: vec![],
+            display_name: None,
+            slug: None,
+            runtime: None,
+            name_pool: Vec::new(),
+            is_builtin: false,
+            is_active: true,
+            source_team: None,
+            source_team_persona_slug: None,
             relay_mesh: None,
             agent_command_override: None,
             persona_source_version: None,

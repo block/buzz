@@ -28,7 +28,7 @@ jobs:
       mobile: ${{ steps.filter.outputs.mobile }}
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
-      - uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d # v4.0.1
+      - uses: dorny/paths-filter@7b450fff21473bca461d4b92ce414b9d0420d706 # v4.0.2
         id: filter
         with:
           filters: |
@@ -65,7 +65,7 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
-      - uses: cashapp/activate-hermit@e49f5cb4dd64ff0b0b659d1d8df499595451155a # v1
+      - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           save-if: ${{ github.event_name != 'pull_request' }}
@@ -86,7 +86,7 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
-      - uses: cashapp/activate-hermit@e49f5cb4dd64ff0b0b659d1d8df499595451155a # v1
+      - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
       - uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # v1
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
@@ -108,7 +108,7 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
-      - uses: cashapp/activate-hermit@e49f5cb4dd64ff0b0b659d1d8df499595451155a # v1
+      - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
       - uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # v1
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
@@ -143,7 +143,7 @@ jobs:
         id: pnpm-cache
         run: echo "STORE_PATH=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
       - name: Restore pnpm store cache
-        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: ${{ steps.pnpm-cache.outputs.STORE_PATH }}
           key: pnpm-${{ runner.os }}-${{ hashFiles('**/pnpm-lock.yaml') }}
@@ -175,7 +175,7 @@ jobs:
           if-no-files-found: ignore
       - name: Save pnpm store cache
         if: github.event_name == 'push'
-        uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: ${{ steps.pnpm-cache.outputs.STORE_PATH }}
           key: pnpm-${{ runner.os }}-${{ hashFiles('**/pnpm-lock.yaml') }}
@@ -194,12 +194,12 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
-      - uses: cashapp/activate-hermit@e49f5cb4dd64ff0b0b659d1d8df499595451155a # v1
+      - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
       - name: Get pnpm store directory
         id: pnpm-cache
         run: echo "STORE_PATH=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
       - name: Restore pnpm store cache
-        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: ${{ steps.pnpm-cache.outputs.STORE_PATH }}
           key: pnpm-${{ runner.os }}-${{ hashFiles('**/pnpm-lock.yaml') }}
@@ -211,7 +211,7 @@ jobs:
         run: echo "version=$(cd desktop && node -e "console.log(require('@playwright/test/package.json').version)")" >> "$GITHUB_OUTPUT"
       - name: Restore Playwright browser cache
         id: playwright-cache
-        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: ${{ env.PLAYWRIGHT_BROWSERS_PATH }}
           key: playwright-${{ runner.os }}-${{ steps.pw-version.outputs.version }}
@@ -222,7 +222,7 @@ jobs:
         run: cd desktop && pnpm exec playwright install-deps chromium
       - name: Save Playwright browser cache
         if: steps.playwright-cache.outputs.cache-hit != 'true' && github.event_name == 'push' && matrix.shard == 1
-        uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: ${{ env.PLAYWRIGHT_BROWSERS_PATH }}
           key: playwright-${{ runner.os }}-${{ steps.pw-version.outputs.version }}
@@ -271,7 +271,7 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
-      - uses: cashapp/activate-hermit@e49f5cb4dd64ff0b0b659d1d8df499595451155a # v1
+      - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
       - uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # v1
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
@@ -303,7 +303,7 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
-      - uses: cashapp/activate-hermit@e49f5cb4dd64ff0b0b659d1d8df499595451155a # v1
+      - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
       - name: Start integration services
         run: |
           for attempt in 1 2 3; do
@@ -321,7 +321,7 @@ jobs:
         id: pnpm-cache
         run: echo "STORE_PATH=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
       - name: Restore pnpm store cache
-        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: ${{ steps.pnpm-cache.outputs.STORE_PATH }}
           key: pnpm-${{ runner.os }}-${{ hashFiles('**/pnpm-lock.yaml') }}
@@ -333,7 +333,7 @@ jobs:
         run: echo "version=$(cd desktop && node -e "console.log(require('@playwright/test/package.json').version)")" >> "$GITHUB_OUTPUT"
       - name: Restore Playwright browser cache
         id: playwright-cache
-        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: ${{ env.PLAYWRIGHT_BROWSERS_PATH }}
           key: playwright-${{ runner.os }}-${{ steps.pw-version.outputs.version }}
@@ -344,7 +344,7 @@ jobs:
         run: cd desktop && pnpm exec playwright install-deps chromium
       - name: Save Playwright browser cache
         if: steps.playwright-cache.outputs.cache-hit != 'true' && github.event_name == 'push' && matrix.shard == 1
-        uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: ${{ env.PLAYWRIGHT_BROWSERS_PATH }}
           key: playwright-${{ runner.os }}-${{ steps.pw-version.outputs.version }}
@@ -451,7 +451,7 @@ jobs:
           if-no-files-found: ignore
       - name: Save pnpm store cache
         if: github.event_name == 'push'
-        uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: ${{ steps.pnpm-cache.outputs.STORE_PATH }}
           key: pnpm-${{ runner.os }}-${{ hashFiles('**/pnpm-lock.yaml') }}
@@ -483,7 +483,7 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
-      - uses: cashapp/activate-hermit@e49f5cb4dd64ff0b0b659d1d8df499595451155a # v1
+      - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
       - uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # v1
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
@@ -612,7 +612,7 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
-      - uses: cashapp/activate-hermit@e49f5cb4dd64ff0b0b659d1d8df499595451155a # v1
+      - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           save-if: ${{ github.event_name != 'pull_request' }}
@@ -641,12 +641,12 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
-      - uses: cashapp/activate-hermit@e49f5cb4dd64ff0b0b659d1d8df499595451155a # v1
+      - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
       - name: Get pnpm store directory
         id: pnpm-cache
         run: echo "STORE_PATH=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
       - name: Restore pnpm store cache
-        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: ${{ steps.pnpm-cache.outputs.STORE_PATH }}
           key: pnpm-${{ runner.os }}-${{ hashFiles('**/pnpm-lock.yaml') }}
@@ -659,7 +659,7 @@ jobs:
         run: just web-build
       - name: Save pnpm store cache
         if: github.event_name == 'push'
-        uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: ${{ steps.pnpm-cache.outputs.STORE_PATH }}
           key: pnpm-${{ runner.os }}-${{ hashFiles('**/pnpm-lock.yaml') }}
@@ -674,7 +674,7 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
-      - uses: cashapp/activate-hermit@e49f5cb4dd64ff0b0b659d1d8df499595451155a # v1
+      - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
       - name: Compute Hermit cache key
         id: hermit-bin-hash
         run: |
@@ -682,7 +682,7 @@ jobs:
           echo "hash=$hash" >> "$GITHUB_OUTPUT"
       - name: Restore Hermit package cache
         id: hermit-cache
-        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: ~/.cache/hermit/pkg
           key: ${{ runner.os }}-hermit-cache-${{ steps.hermit-bin-hash.outputs.hash }}
@@ -691,14 +691,14 @@ jobs:
         run: flutter --version
       - name: Save Hermit package cache
         if: always() && steps.hermit-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
         continue-on-error: true
         with:
           path: ~/.cache/hermit/pkg
           key: ${{ runner.os }}-hermit-cache-${{ steps.hermit-bin-hash.outputs.hash }}
       - name: Restore pub cache
         id: pub-cache
-        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: ~/.pub-cache
           key: pub-${{ runner.os }}-${{ hashFiles('mobile/pubspec.lock') }}
@@ -707,7 +707,7 @@ jobs:
         run: cd mobile && flutter pub get
       - name: Save pub cache
         if: always() && steps.pub-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
         continue-on-error: true
         with:
           path: ~/.pub-cache
@@ -729,7 +729,7 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
-      - uses: cashapp/activate-hermit@e49f5cb4dd64ff0b0b659d1d8df499595451155a # v1
+      - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
       - name: Dependency policy
         run: cargo-deny check
 
@@ -770,7 +770,7 @@ jobs:
           - aarch64-unknown-linux-musl
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
-      - uses: cashapp/activate-hermit@e49f5cb4dd64ff0b0b659d1d8df499595451155a # v1
+      - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: cross-${{ matrix.target }}
@@ -837,89 +837,38 @@ jobs:
       - name: Test (buzz-dev-mcp)
         # The Windows-only bash resolver lives in buzz-dev-mcp; its unit tests
         # only gate if this crate is tested ON Windows.
-        run: cargo test -p buzz-dev-mcp --target $env:TARGET
-      # The bundled-bash staging (PortableGit download + SFX extract of the WHOLE
-      # tree, including mingw64/) runs only in release.yml on tag — so without this
-      # step the agent's only Windows transport would ship UNEXERCISED until a
-      # tagged release hits users. Stage the tree and spawn the LAUNCHER bash
-      # (bin/bash.exe, the entry the resolver now uses) to prove all of: the SFX
-      # `-o` POSIX-path extraction works; the launcher spawns and sets up
-      # MSYSTEM/PATH; the lazily-loaded MSYS DLL closure survives; and — the whole
-      # point of bundling the full toolchain — git/jq/curl resolve from the bundled
-      # mingw64/bin and git is functional (a real commit round-trips). The launcher
-      # prepending mingw64/bin to PATH under `-c` is the load-bearing behavior that
-      # only a real Windows host can confirm; this gate is where it gets proven.
-      # (End-to-end nostr-SIGNED commits compose build_git_env's GIT_CONFIG_* with
-      # the git-sign-nostr helper — covered by buzz-dev-mcp unit tests + a bare-host
-      # check, not here, since this job stages only empty sidecar placeholders.)
-      - name: Smoke-test bundled bash + git toolchain staging
+        # Serial: windows_resolver_tests mutate process-global env
+        # (BUZZ_SHELL/GIT_BASH/SystemRoot) that SharedState::new reads.
+        run: cargo test -p buzz-dev-mcp --target $env:TARGET -- --test-threads=1
+      # Smoke-test the new host-prereq contract: Git for Windows (which provides
+      # bash) is available on the runner, a shell command round-trips, and bash
+      # does NOT resolve from System32 (so WSL's launcher is never picked up).
+      # windows-latest runners have Git for Windows pre-installed; the unit tests
+      # above exercise the MCP resolver itself. This step verifies the host env.
+      - name: Smoke-test host Git Bash prereq (host env check)
         shell: bash
         run: |
           set -euo pipefail
-          stage_dir="$RUNNER_TEMP/git-bash"
-          scripts/stage-windows-bash.sh "$stage_dir"
-          launcher="$stage_dir/bin/bash.exe"
-          [[ -f "$launcher" ]] || { echo "launcher bash missing: $launcher" >&2; exit 1; }
+          # Git for Windows ships bash.exe under its bin/ directory; confirm it
+          # resolves from the standard location the runtime resolver probes first.
+          bash_path=$(command -v bash 2>/dev/null || true)
+          [[ -n "$bash_path" ]] || { echo "ERROR: bash not found on PATH — host Git for Windows missing" >&2; exit 1; }
+          echo "Resolved bash: $bash_path"
+          [[ "$bash_path" != *System32* ]] || { echo "ERROR: resolved bash is WSL's System32 launcher" >&2; exit 1; }
 
-          # Faithfulness to the agent: shell.rs spawns the launcher with PATH set
-          # wholesale to the shim PATH (shim tempdir + the MCP process's inherited
-          # PATH). We strip PATH down to just the Windows system dir before
-          # spawning — stricter than a bare host (ambient PATH stripped to force
-          # resolution through the launcher). This stops the runner's ambient
-          # git/jq from masking the launcher's own mingw64/bin prepend, so anything
-          # that resolves had to come from the launcher itself. The fidelity gap is
-          # benign: the real shim tempdir only ever holds rg/tree/buzz and the two
-          # nostr helpers, never git/jq/curl, so a richer real PATH cannot shadow
-          # mingw64/bin for these three tools.
-          win_root="${SYSTEMROOT:-${SystemRoot:-C:\\Windows}}"
-          bare_path="$win_root\\System32;$win_root"
+          # Run a basic pipeline through the resolved bash (same invocation the
+          # agent uses: bash -c '...').
+          out=$(bash -c 'echo hello | tr a-z A-Z')
+          [[ "$out" == "HELLO" ]] || { echo "bash pipeline failed: got '$out'" >&2; exit 1; }
 
-          # Coreutils pipeline through the launcher (the resolver's entry point).
-          out=$(PATH="$bare_path" "$launcher" -c 'echo hello | tr a-z A-Z')
-          [[ "$out" == "HELLO" ]] || { echo "staged bash pipeline failed: got '$out'" >&2; exit 1; }
-
-          # The full-toolchain payoff: git/jq/curl must resolve from the bundle's
-          # mingw64/bin or usr/bin. Use NON-login `-c` to match the agent's actual
-          # invocation (shell.rs spawns `bash -c`): if the launcher only fixes PATH
-          # under a login shell, `-lc` would pass here while the real agent stays
-          # broken — the exact green-but-broken trap this gate guards.
-          #
-          # Anchor to the ACTUAL staged tree, not a mount-shape: command -v reports
-          # the MSYS mount path (/mingw64/bin/git), so we cygpath -m it back to the
-          # real Windows location and assert it sits under $stage_dir. A bare
-          # `/mingw64/*` shape check would pass for any /mingw64-rooted mount; the
-          # cygpath round-trip proves the tool is literally inside the bundle we
-          # just staged. cygpath ships in the bundle's usr/bin (MSYS2 core, same
-          # tier as the `tr` proven above), so it resolves under the launcher.
-          #
-          # curl is the one tool of the three with a System32 twin
-          # (C:\Windows\System32\curl.exe, on $bare_path) — if a future PortableGit
-          # ever drops curl from mingw64/bin, the launcher would resolve the
-          # System32 twin and this REDs on a non-bug; git/jq have no such twin.
-          stage_m=$("$launcher" -c "cygpath -m '$stage_dir'")
-          for tool in git jq curl; do
-            located=$(PATH="$bare_path" "$launcher" -c "command -v $tool >/dev/null 2>&1 && cygpath -m \"\$(command -v $tool)\"" || true)
-            [[ -n "$located" ]] || { echo "$tool did not resolve in bundled bash" >&2; exit 1; }
-            case "$located" in
-              "$stage_m"/*) ;;
-              *) echo "$tool resolved outside the staged bundle: $located (stage: $stage_m)" >&2; exit 1 ;;
-            esac
-            echo "$tool -> $located"
-          done
-
-          # git is not just present but functional: a real commit round-trips,
-          # again through non-login `-c` with the bare PATH. Single-quoted on
-          # purpose — this script body runs in the launcher's shell, not ours.
-          # shellcheck disable=SC2016
-          PATH="$bare_path" "$launcher" -c '
-            set -euo pipefail
-            repo=$(mktemp -d)
-            cd "$repo"
-            git init -q
-            git -c user.name=ci -c user.email=ci@example.com commit -q --allow-empty -m smoke
-            git log -1 --format=%s | grep -qx smoke
-          ' || { echo "bundled git failed a commit round-trip" >&2; exit 1; }
-          echo "staged launcher bash spawned; git/jq/curl resolve from the bundle; git commit works"
+          # Confirm git itself works — agents run git commands frequently.
+          git --version
+          repo=$(mktemp -d)
+          cd "$repo"
+          git init -q
+          git -c user.name=ci -c user.email=ci@example.com commit -q --allow-empty -m smoke
+          git log -1 --format=%s | grep -qx smoke
+          echo "Host bash resolved and functional; git commit round-trip passed"
       - name: Check (Tauri crate)
         run: cargo check --manifest-path desktop/src-tauri/Cargo.toml --target $env:TARGET
         env:
@@ -939,7 +888,7 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
-      - uses: cashapp/activate-hermit@e49f5cb4dd64ff0b0b659d1d8df499595451155a # v1
+      - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           workspaces: desktop/src-tauri
@@ -967,7 +916,7 @@ jobs:
           echo "short=${REV:0:7}" >> "$GITHUB_OUTPUT"
       - name: Restore mesh llama build cache
         id: llama_cache
-        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: ${{ github.workspace }}/.cache/mesh-llama
           key: mesh-llama-${{ runner.os }}-metal-${{ steps.mesh_rev.outputs.rev }}
@@ -991,7 +940,7 @@ jobs:
           "$MESH_ROOT/scripts/build-llama.sh" -DCMAKE_OSX_DEPLOYMENT_TARGET=10.15
       - name: Save mesh llama build cache
         if: steps.llama_cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: ${{ github.workspace }}/.cache/mesh-llama
           key: mesh-llama-${{ runner.os }}-metal-${{ steps.mesh_rev.outputs.rev }}

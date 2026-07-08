@@ -25,7 +25,7 @@ void showMessageActions({
   required WidgetRef ref,
   required TimelineMessage message,
   required String channelId,
-  required bool isOwnMessage,
+  required bool canManageMessage,
   List<TimelineMessage>? allMessages,
   String? currentPubkey,
   bool isMember = false,
@@ -129,7 +129,7 @@ void showMessageActions({
                   Clipboard.setData(data);
                 },
               ),
-            if (isOwnMessage) ...[
+            if (canManageMessage) ...[
               ListTile(
                 leading: const Icon(LucideIcons.pencil),
                 title: const Text('Edit message'),
@@ -256,9 +256,15 @@ void _confirmDelete({
         FilledButton(
           onPressed: () {
             Navigator.of(dialogContext).pop();
+            final messenger = ScaffoldMessenger.of(context);
             ref
                 .read(channelActionsProvider)
-                .deleteMessage(channelId: channelId, eventId: messageId);
+                .deleteMessage(channelId: channelId, eventId: messageId)
+                .catchError((Object error) {
+                  messenger.showSnackBar(
+                    SnackBar(content: Text('Failed to delete message: $error')),
+                  );
+                });
           },
           style: FilledButton.styleFrom(
             backgroundColor: dialogContext.colors.error,

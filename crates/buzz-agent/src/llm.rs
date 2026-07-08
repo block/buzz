@@ -72,7 +72,7 @@ impl Llm {
         effective_model: &str,
     ) -> Result<LlmResponse, AgentError> {
         let effort = cfg.thinking_effort;
-        match cfg.provider {
+        let result = match cfg.provider {
             Provider::Anthropic => {
                 let v = self
                     .post_anthropic(
@@ -140,7 +140,17 @@ impl Llm {
                 })
                 .await
             }
-        }
+        };
+        // Stamp the effective model into Llm errors so log lines carry
+        // `llm: (model-name) 404 Not Found: …` instead of the bare status.
+        // The `llm: ` prefix comes from `Display for AgentError::Llm`; the
+        // map_err here prepends `(model-name) ` to the inner string only.
+        // This is the single place all provider paths converge, so the mapping
+        // is centralized and never needs to be repeated in each provider arm.
+        result.map_err(|e| match e {
+            AgentError::Llm(s) => AgentError::Llm(format!("({effective_model}) {s}")),
+            other => other,
+        })
     }
 
     pub async fn summarize(
@@ -778,11 +788,13 @@ fn parse_responses(v: Value) -> Result<LlmResponse, AgentError> {
         _ => ProviderStop::Other,
     };
     let input_tokens = sum_usage(&v, &["input_tokens"]);
+    let output_tokens = sum_usage(&v, &["output_tokens"]);
     Ok(LlmResponse {
         text,
         tool_calls,
         stop,
         input_tokens,
+        output_tokens,
         reasoning,
     })
 }
@@ -881,11 +893,13 @@ fn parse_anthropic(v: Value) -> Result<LlmResponse, AgentError> {
         }
     }
     let input_tokens = anthropic_input_tokens(&v);
+    let output_tokens = sum_usage(&v, &["output_tokens"]);
     Ok(LlmResponse {
         text,
         tool_calls,
         stop,
         input_tokens,
+        output_tokens,
         reasoning,
     })
 }
@@ -930,11 +944,13 @@ fn parse_openai(v: Value) -> Result<LlmResponse, AgentError> {
         }
     }
     let input_tokens = openai_chat_input_tokens(&v);
+    let output_tokens = sum_usage(&v, &["completion_tokens"]);
     Ok(LlmResponse {
         text,
         tool_calls,
         stop,
         input_tokens,
+        output_tokens,
         reasoning,
     })
 }
@@ -2465,5 +2481,76 @@ mod tests {
     async fn static_token_source_refresh_now_returns_static_token() {
         let src = StaticTokenSource::new("static-key");
         assert_eq!(src.refresh_now("rejected").await.unwrap(), "static-key");
+    }
+
+    // ── Output-token parsing tests ──────────────────────────────────────────
+
+    /// `parse_anthropic` extracts `output_tokens` from the usage object.
+    #[test]
+    fn parse_anthropic_output_tokens() {
+        let v = serde_json::json!({
+            "stop_reason": "end_turn",
+            "content": [{"type": "text", "text": "hi"}],
+            "usage": {"input_tokens": 42, "output_tokens": 7}
+        });
+        assert_eq!(parse_anthropic(v).unwrap().output_tokens, Some(7));
+    }
+
+    /// `parse_anthropic` returns `None` for `output_tokens` when usage is absent.
+    #[test]
+    fn parse_anthropic_output_tokens_missing_usage_is_none() {
+        let v = serde_json::json!({
+            "stop_reason": "end_turn",
+            "content": [{"type": "text", "text": "hi"}]
+        });
+        assert_eq!(parse_anthropic(v).unwrap().output_tokens, None);
+    }
+
+    /// `parse_openai` maps `completion_tokens` to `output_tokens`.
+    #[test]
+    fn parse_openai_output_tokens_from_completion_tokens() {
+        let v = serde_json::json!({
+            "choices": [{"finish_reason": "stop", "message": {"content": "hi"}}],
+            "usage": {"prompt_tokens": 123, "completion_tokens": 4, "total_tokens": 127}
+        });
+        assert_eq!(parse_openai(v).unwrap().output_tokens, Some(4));
+    }
+
+    /// `parse_openai` returns `None` for `output_tokens` when usage is absent.
+    #[test]
+    fn parse_openai_output_tokens_missing_usage_is_none() {
+        let v = serde_json::json!({
+            "choices": [{"finish_reason": "stop", "message": {"content": "hi"}}]
+        });
+        assert_eq!(parse_openai(v).unwrap().output_tokens, None);
+    }
+
+    /// `parse_responses` extracts `output_tokens` from the usage object.
+    #[test]
+    fn parse_responses_output_tokens() {
+        let v = serde_json::json!({
+            "status": "completed",
+            "output": [{
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "hi"}]
+            }],
+            "usage": {"input_tokens": 321, "output_tokens": 9, "total_tokens": 330}
+        });
+        assert_eq!(parse_responses(v).unwrap().output_tokens, Some(9));
+    }
+
+    /// `parse_responses` returns `None` for `output_tokens` when usage is absent.
+    #[test]
+    fn parse_responses_output_tokens_missing_usage_is_none() {
+        let v = serde_json::json!({
+            "status": "completed",
+            "output": [{
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "hi"}]
+            }]
+        });
+        assert_eq!(parse_responses(v).unwrap().output_tokens, None);
     }
 }

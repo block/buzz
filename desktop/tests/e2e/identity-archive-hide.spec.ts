@@ -1,6 +1,9 @@
 import { expect, test } from "@playwright/test";
 
-import { installMockBridge } from "../helpers/bridge";
+import {
+  installMockBridge,
+  openNewDirectMessageDialog,
+} from "../helpers/bridge";
 
 // Guards the NIP-IA discovery-suppression contract (Dawn's table v2):
 // - Members sidebar: archived members fold under "Archived (N)", not in the
@@ -89,7 +92,7 @@ test.describe("NIP-IA hide archived from discovery", () => {
   }) => {
     await installMockBridge(page, { archivedIdentities: [ALICE_PUBKEY] });
     await page.goto("/");
-    await page.getByTestId("new-dm-trigger").click();
+    await openNewDirectMessageDialog(page);
     await expect(page.getByTestId("new-dm-dialog")).toBeVisible();
 
     await page.getByTestId("new-dm-search").fill("alice");

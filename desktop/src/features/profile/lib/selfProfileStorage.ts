@@ -43,6 +43,15 @@ export type SelfProfileCache = {
   avatarDataUrl: string | null;
   /** ms timestamp of last successful profile fetch. 0 = never fetched. */
   updatedAt: number;
+  /**
+   * True only when the cached result was backed by a real kind:0 metadata
+   * event on the relay.  False (or absent in older v1 entries) means the
+   * backend returned the synthesized no-event fallback.
+   *
+   * Conservative default: absent = false.  Callers must not promote an absent
+   * or false entry to hasProfileEvent: true — that reopens the onboarding bug.
+   */
+  hasProfileEvent?: boolean;
 };
 
 const DEFAULT_CACHE: SelfProfileCache = Object.freeze({
@@ -87,8 +96,19 @@ export function parseSelfProfileCache(json: unknown): SelfProfileCache | null {
     typeof obj.updatedAt === "number" && Number.isFinite(obj.updatedAt)
       ? obj.updatedAt
       : 0;
+  // Conservative: absent field in older v1 entries defaults to false.
+  // Only a stored true value (written from a profile with has_profile_event)
+  // is promoted — absent/false must never become true.
+  const hasProfileEvent = obj.hasProfileEvent === true ? true : undefined;
 
-  return { version: 1, displayName, avatarUrl, avatarDataUrl, updatedAt };
+  return {
+    version: 1,
+    displayName,
+    avatarUrl,
+    avatarDataUrl,
+    updatedAt,
+    ...(hasProfileEvent !== undefined && { hasProfileEvent }),
+  };
 }
 
 /**

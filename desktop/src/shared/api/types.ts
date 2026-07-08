@@ -115,6 +115,11 @@ export type Profile = {
   about: string | null;
   nip05Handle: string | null;
   ownerPubkey: string | null;
+  /** True when a real kind:0 metadata event exists on the relay for this pubkey.
+   * False for the synthesized fallback returned when no event is present.
+   * Used by the onboarding gate to distinguish new users from returning users
+   * whose display name happens to be empty. */
+  hasProfileEvent: boolean;
 };
 
 export type UserProfileSummary = {
@@ -393,6 +398,13 @@ export type ManagedAgent = {
    * a respawn — the pinned snapshot is all the config that remains.
    */
   personaOrphaned: boolean;
+  /**
+   * `true` when the running process was spawned with a config that no longer
+   * matches what a spawn would use today — a plain restart would change what
+   * runs. Complements `personaOutOfDate` ("a respawn would change it").
+   * Always `false` for stopped agents.
+   */
+  needsRestart: boolean;
   mcpToolsets: string | null;
   /** Per-agent env vars. Layered on top of persona envVars. */
   envVars: Record<string, string>;
@@ -463,6 +475,7 @@ export type CreateManagedAgentInput = {
   systemPrompt?: string;
   avatarUrl?: string;
   model?: string;
+  provider?: string;
   mcpToolsets?: string;
   envVars?: Record<string, string>;
   spawnAfterCreate?: boolean;
@@ -667,6 +680,13 @@ export type UpdateManagedAgentInput = {
   relayUrl?: string;
   acpCommand?: string;
   agentCommand?: string;
+  /**
+   * True when `agentCommand` is a runtime/Custom command the user deliberately
+   * picked (the dialog is not inheriting). Preserves a pin that maps to the
+   * linked persona's own runtime instead of letting the backend drop it back to
+   * inherit. Ignored when `agentCommand` is absent or the inherit sentinel.
+   */
+  harnessOverride?: boolean;
   agentArgs?: string[];
   mcpCommand?: string;
   /** Absent = don't touch. Present = set the mode. */

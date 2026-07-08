@@ -21,6 +21,16 @@ test("resolveManagedAgentAvatarUrl uploads data image URIs", async () => {
   assert.equal(uploaded, "https://relay.example/avatar.png");
 });
 
+test("resolveManagedAgentAvatarUrl passes emoji svg data URLs through", async () => {
+  const emojiUrl =
+    "data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%3E%3C%2Fsvg%3E";
+  const uploaded = await resolveManagedAgentAvatarUrl(emojiUrl, async () => {
+    throw new Error("should not upload inline emoji svg data URLs");
+  });
+
+  assert.equal(uploaded, emojiUrl);
+});
+
 test("resolveManagedAgentAvatarUrl passes non-data URLs through", async () => {
   const uploaded = await resolveManagedAgentAvatarUrl(
     " https://relay.example/already-hosted.png ",

@@ -71,6 +71,7 @@ test("no-selection spoiler applies to every composer paragraph", async ({
   await page.keyboard.press("ControlOrMeta+V");
   await expect(input.locator("p")).toHaveCount(paragraphs.length);
 
+  await page.getByRole("button", { name: "Toggle formatting" }).click();
   await page.getByRole("button", { name: "Spoiler", exact: true }).click();
 
   await expect
@@ -100,7 +101,10 @@ test("image attachments can be marked and sent as hidden spoilers", async ({
   const composer = page.getByTestId("message-composer");
   await expect(composer.getByAltText("Attachment cccc")).toBeVisible();
 
-  await page.getByRole("button", { name: "Spoiler", exact: true }).click();
+  // Media spoilers are toggled per-attachment from the lightbox.
+  await composer.getByAltText("Attachment cccc").click();
+  await page.getByTestId("composer-attachment-spoiler").click();
+  await page.keyboard.press("Escape");
   await expect(composer.locator("[data-composer-media-spoiler]")).toBeVisible();
 
   await page.getByTestId("send-message").click();
@@ -119,7 +123,7 @@ test("image attachments can be marked and sent as hidden spoilers", async ({
   await expect(page.getByRole("dialog", { name: "image" })).toHaveCount(0);
 });
 
-test("spoiler button is disabled while attachment upload is pending", async ({
+test("text spoiler stays usable while attachment upload is pending", async ({
   page,
 }) => {
   await installSpoilerBridge(page, { uploadDelayMs: 1_000 });
@@ -127,19 +131,31 @@ test("spoiler button is disabled while attachment upload is pending", async ({
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
+  const input = page.getByTestId("message-input");
+  await input.click();
+  await page.keyboard.type("pending secret");
+
+  // Kick off the (delayed) upload first — the attach button lives in the
+  // passive toolbar, which is replaced while formatting is expanded.
+  await page.getByRole("button", { name: "Attach image" }).click();
+
+  await page.getByRole("button", { name: "Toggle formatting" }).click();
   const spoilerButton = page.getByRole("button", {
     name: "Spoiler",
     exact: true,
   });
+
+  // Text spoilers are independent of media uploads, so the button stays
+  // enabled and works while the upload is still in flight.
   await expect(spoilerButton).toBeEnabled();
+  await spoilerButton.click();
+  await expect(input.locator(".buzz-spoiler[data-spoiler]")).toContainText(
+    "pending secret",
+  );
 
-  await page.getByRole("button", { name: "Attach image" }).click();
-
-  await expect(spoilerButton).toBeDisabled({ timeout: 500 });
   await expect(
     page.getByTestId("message-composer").getByAltText("Attachment cccc"),
   ).toBeVisible();
-  await expect(spoilerButton).toBeEnabled();
 });
 
 test("hidden spoiler links reveal without opening on the first click", async ({

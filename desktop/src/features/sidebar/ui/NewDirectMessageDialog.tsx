@@ -17,7 +17,7 @@ import {
   useUserSearchFetchMoreOnScroll,
   useUsersBatchQuery,
 } from "@/features/profile/hooks";
-import { truncatePubkey } from "@/features/profile/lib/identity";
+import { formatOwnerLabel } from "@/features/profile/lib/identity";
 import {
   getKeyboardSearchSelection,
   rankUserCandidatesBySearch,
@@ -25,13 +25,11 @@ import {
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
 import { useChannelsQuery } from "@/features/channels/hooks";
 import { useIdentityQuery } from "@/shared/api/hooks";
-import type {
-  ManagedAgent,
-  UserSearchResult,
-  UserProfileSummary,
-} from "@/shared/api/types";
+import type { ManagedAgent, UserSearchResult } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
-import { normalizePubkey } from "@/shared/lib/pubkey";
+import { safeNpub } from "@/shared/lib/nostrUtils";
+import { normalizePubkey, truncatePubkey } from "@/shared/lib/pubkey";
+import { PubKey } from "@/shared/ui/PubKey";
 import { Button } from "@/shared/ui/button";
 import {
   Dialog,
@@ -62,22 +60,6 @@ function formatUserName(user: UserSearchResult) {
     user.displayName?.trim() ||
     user.nip05Handle?.trim() ||
     truncatePubkey(user.pubkey)
-  );
-}
-
-function formatOwnerName(
-  user: UserSearchResult,
-  ownerProfiles?: Record<string, UserProfileSummary>,
-) {
-  if (!user.ownerPubkey) {
-    return null;
-  }
-
-  const owner = ownerProfiles?.[normalizePubkey(user.ownerPubkey)];
-  return (
-    owner?.displayName?.trim() ||
-    owner?.nip05Handle?.trim() ||
-    truncatePubkey(user.ownerPubkey)
   );
 }
 
@@ -699,6 +681,22 @@ export function NewDirectMessageDialog({
                   ))}
                 </div>
               ) : null}
+              {selectedUsers.length > 0 ? (
+                <div className="mt-2 space-y-1">
+                  {selectedUsers.map((user) => (
+                    <div
+                      className="flex min-w-0 flex-wrap items-baseline gap-x-2 text-2xs text-muted-foreground"
+                      data-testid={`new-dm-pubkey-${user.pubkey}`}
+                      key={user.pubkey}
+                    >
+                      <span className="font-medium">
+                        {formatUserName(user)}
+                      </span>
+                      <PubKey pubkey={user.pubkey} variant="full" />
+                    </div>
+                  ))}
+                </div>
+              ) : null}
             </div>
           </div>
 
@@ -717,8 +715,9 @@ export function NewDirectMessageDialog({
               {searchResults.length > 0 ? (
                 <div>
                   {searchResults.map((user) => {
-                    const ownerLabel = formatOwnerName(
-                      user,
+                    const ownerLabel = formatOwnerLabel(
+                      user.ownerPubkey,
+                      currentPubkey ?? identityQuery.data?.pubkey,
                       ownerProfilesQuery.data?.profiles,
                     );
 
@@ -748,8 +747,8 @@ export function NewDirectMessageDialog({
                         />
                         <div className="pointer-events-none relative z-10 min-w-0 flex-1">
                           {user.isAgent ? (
-                            <div className="relative min-w-0">
-                              <div className="flex min-w-0 items-center gap-2 transition-opacity duration-150 ease-out group-hover/dm-result:opacity-0 group-focus-within/dm-result:opacity-0">
+                            <div className="min-w-0">
+                              <div className="flex min-w-0 items-center gap-2">
                                 <span className="truncate text-sm font-medium tracking-tight">
                                   {formatUserName(user)}
                                 </span>
@@ -763,14 +762,16 @@ export function NewDirectMessageDialog({
                                 </span>
                               </div>
                               {ownerLabel ? (
-                                <span className="block truncate text-xs text-muted-foreground transition-opacity duration-150 ease-out group-hover/dm-result:opacity-0 group-focus-within/dm-result:opacity-0">
+                                <span className="block truncate text-xs text-muted-foreground">
                                   owned by {ownerLabel}
                                 </span>
                               ) : null}
-                              <span className="absolute inset-0 flex items-center opacity-0 transition-opacity duration-150 ease-out group-hover/dm-result:opacity-100 group-focus-within/dm-result:opacity-100">
-                                <span className="truncate font-mono text-sm text-muted-foreground">
-                                  {truncatePubkey(user.pubkey)}
-                                </span>
+                              <span
+                                className="hidden min-w-0 break-all font-mono text-2xs leading-snug text-muted-foreground group-hover/dm-result:block group-focus-within/dm-result:block"
+                                data-testid={`new-dm-npub-${user.pubkey}`}
+                              >
+                                {safeNpub(user.pubkey) ??
+                                  truncatePubkey(user.pubkey)}
                               </span>
                             </div>
                           ) : (

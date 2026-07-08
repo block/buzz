@@ -3,11 +3,17 @@ import { describe, it, beforeEach, afterEach, mock } from "node:test";
 
 import {
   syncAgentTurnsFromEvents,
+  syncActiveAgentTurnsFromObserver,
   getActiveTurnsForAgent,
   getActiveTurnsByChannel,
   resetActiveAgentTurnsStore,
   subscribeActiveAgentTurns,
 } from "./activeAgentTurnsStore.ts";
+import {
+  injectObserverEventsForE2E,
+  getAgentObserverSnapshot,
+  resetAgentObserverStore,
+} from "./observerRelayStore.ts";
 import { formatElapsed } from "./ui/agentSessionUtils.ts";
 
 const AGENT =
@@ -1227,6 +1233,71 @@ describe("activeAgentTurnsStore", () => {
         "the oldest tombstone must be evicted once past the cap",
       );
     });
+  });
+});
+
+/**
+ * Regression: raw observer ingestion and derived active-turn liveness must
+ * stay in sync. The channel activity path previously mounted only the observer
+ * bridge, so a raw `turn_completed` could be visible in the activity feed
+ * while the derived liveness indicator kept spinning. This drives events
+ * through the real observer store (appendAgentEvent path) and the same sync
+ * the bridge hook runs, asserting derived liveness clears with the raw feed.
+ */
+describe("observer → active-turns bridge sync", () => {
+  const bridgeAgents = [{ pubkey: AGENT, status: "deployed" }];
+
+  beforeEach(() => {
+    resetActiveAgentTurnsStore();
+    resetAgentObserverStore();
+  });
+
+  afterEach(() => {
+    resetAgentObserverStore();
+  });
+
+  it("clears derived liveness when raw turn_completed arrives", () => {
+    injectObserverEventsForE2E(AGENT, [
+      makeEvent({ seq: 1, kind: "turn_started" }),
+    ]);
+    syncActiveAgentTurnsFromObserver(bridgeAgents);
+    assert.ok(
+      channelIdsOf(getActiveTurnsForAgent(AGENT)).has("chan-1"),
+      "turn_started must surface an active turn",
+    );
+
+    injectObserverEventsForE2E(AGENT, [
+      makeEvent({
+        seq: 2,
+        kind: "turn_completed",
+        timestamp: "2024-01-01T00:00:05Z",
+      }),
+    ]);
+    syncActiveAgentTurnsFromObserver(bridgeAgents);
+
+    const rawEvents = getAgentObserverSnapshot(AGENT, true).events;
+    assert.equal(
+      rawEvents.at(-1)?.kind,
+      "turn_completed",
+      "raw feed must contain the completion event",
+    );
+    assert.equal(
+      getActiveTurnsForAgent(AGENT).length,
+      0,
+      "derived liveness must clear when the raw feed shows turn_completed",
+    );
+  });
+
+  it("skips agents that are neither running nor deployed", () => {
+    injectObserverEventsForE2E(AGENT, [
+      makeEvent({ seq: 1, kind: "turn_started" }),
+    ]);
+    syncActiveAgentTurnsFromObserver([{ pubkey: AGENT, status: "stopped" }]);
+    assert.equal(
+      getActiveTurnsForAgent(AGENT).length,
+      0,
+      "inactive agents must not populate the active-turns store",
+    );
   });
 });
 

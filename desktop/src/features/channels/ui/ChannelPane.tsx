@@ -1,5 +1,6 @@
 import * as React from "react";
 import { Bot, Hash, LogIn, Plus, Sparkles, UserPlus } from "lucide-react";
+import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import { useMediaUpload } from "@/features/messages/lib/useMediaUpload";
 import { MessageComposer } from "@/features/messages/ui/MessageComposer";
 import { DropZoneOverlay } from "@/features/messages/ui/ComposerAttachments";
@@ -27,6 +28,7 @@ import { ChannelFindBar } from "@/features/search/ui/ChannelFindBar";
 import { AgentSessionThreadPanel } from "@/features/channels/ui/AgentSessionThreadPanel";
 import { ChannelManagementAuxiliaryPanel } from "@/features/channels/ui/ChannelManagementAuxiliaryPanel";
 import { RightAuxiliaryPane } from "@/features/channels/ui/RightAuxiliaryPane";
+import { useChannelWorkingAgentPubkeys } from "@/features/agents/agentWorkingSignal";
 import { BotActivityComposerAction } from "@/features/channels/ui/BotActivityBar";
 import {
   containsWelcomePersonaMention,
@@ -60,6 +62,8 @@ export const ChannelPane = React.memo(function ChannelPane({
   agentPubkeysPending = false,
   agentSessionAgents,
   activityAgents = agentSessionAgents,
+  autoSendDraftKey = null,
+  onAutoSendComplete = null,
   botTypingEntries,
   channelFind,
   channelManagementOpen = false,
@@ -147,6 +151,7 @@ export const ChannelPane = React.memo(function ChannelPane({
   const welcomeComposerHideTimerRef = React.useRef<number | null>(null);
   const [welcomeComposerBannerState, setWelcomeComposerBannerState] =
     React.useState<WelcomeComposerBannerState>("prompt");
+  const { goChannel } = useAppNavigation();
   const mainComposerMedia = useMediaUpload();
   const isNonMemberView =
     activeChannel !== null &&
@@ -155,6 +160,20 @@ export const ChannelPane = React.memo(function ChannelPane({
     !activeChannel.archivedAt;
   const hasMainComposerOverlay = !isNonMemberView;
   const activeChannelId = activeChannel?.id ?? null;
+  // Clear the ?autoSend search param once the auto-submit fires so
+  // back-navigation cannot re-trigger the send.
+  // When `onAutoSendComplete` is provided it does a surgical single-key clear
+  // that preserves `?thread` and all other panel search state (required for
+  // the thread-draft send path so the thread panel does not unmount before the
+  // deferred setTimeout(0) submit fires). The goChannel fallback is kept for
+  // callers that do not supply the prop (e.g. isolated tests / older wrappers).
+  const handleAutoSubmitComplete = React.useCallback(() => {
+    if (onAutoSendComplete) {
+      onAutoSendComplete();
+    } else if (activeChannelId) {
+      void goChannel(activeChannelId, { replace: true });
+    }
+  }, [activeChannelId, goChannel, onAutoSendComplete]);
   const huddleMemberPubkeys = React.useMemo(
     () => getDmHuddleMemberPubkeys(activeChannel, agentPubkeys, currentPubkey),
     [activeChannel, agentPubkeys, currentPubkey],
@@ -324,24 +343,14 @@ export const ChannelPane = React.memo(function ChannelPane({
   const canDropInMainColumn =
     hasMainComposerOverlay && !isComposerDisabled && !isSinglePanelView;
   const hasTypingActivity = typingPubkeys.length > 0;
-  const composerBotTypingPubkeys = React.useMemo(() => {
-    const pubkeys: string[] = [];
-    for (const entry of botTypingEntries) {
-      if (entry.threadHeadId !== null) {
-        continue;
-      }
-
-      if (
-        !pubkeys.some(
-          (pubkey) => pubkey.toLowerCase() === entry.pubkey.toLowerCase(),
-        )
-      ) {
-        pubkeys.push(entry.pubkey);
-      }
-    }
-    return pubkeys;
-  }, [botTypingEntries]);
-  const hasComposerBotActivity = composerBotTypingPubkeys.length > 0;
+  // Unified working set for the composer bar: observer-derived turns primary,
+  // bot typing fallback (both folded together by agentWorkingSignal). This is
+  // what makes the bar show for an agent whose observer stream is live but
+  // whose typing signal never arrives — and vice versa.
+  const composerWorkingBotPubkeys = useChannelWorkingAgentPubkeys(
+    activeChannel?.id ?? null,
+  );
+  const hasComposerBotActivity = composerWorkingBotPubkeys.length > 0;
   const threadComposerBotTypingPubkeys = React.useMemo(() => {
     if (!openThreadHeadId) {
       return [];
@@ -611,6 +620,7 @@ export const ChannelPane = React.memo(function ChannelPane({
             }
             isLoading={isTimelineLoading}
             mainEntries={mainTimelineEntries}
+            threadSummaries={threadSummaries}
             messages={visibleMessages}
             firstUnreadMessageId={firstUnreadMessageId}
             unreadCount={unreadCount}
@@ -676,6 +686,8 @@ export const ChannelPane = React.memo(function ChannelPane({
                   containerClassName="px-5"
                   disabled={isComposerDisabled}
                   editTarget={mainEditTarget}
+                  autoSubmitDraftKey={autoSendDraftKey}
+                  onAutoSubmitComplete={handleAutoSubmitComplete}
                   isSending={isSending}
                   mediaController={mainComposerMedia}
                   onCancelEdit={onCancelEdit}
@@ -707,7 +719,7 @@ export const ChannelPane = React.memo(function ChannelPane({
                           onOpenAgentSession={onOpenAgentSession}
                           openAgentSessionPubkey={openAgentSessionPubkey}
                           profiles={profiles}
-                          typingBotPubkeys={composerBotTypingPubkeys}
+                          workingBotPubkeys={composerWorkingBotPubkeys}
                           variant="inline"
                         />
                       </div>
@@ -768,6 +780,8 @@ export const ChannelPane = React.memo(function ChannelPane({
               }
               layout={useSplitAuxiliaryPane ? "split" : "standalone"}
               transparentChrome={useSplitAuxiliaryPane}
+              autoSendDraftKey={autoSendDraftKey}
+              onAutoSubmitComplete={handleAutoSubmitComplete}
               onCancelEdit={onCancelEdit}
               onCancelReply={onCancelThreadReply}
               onClose={onCloseThread}
@@ -802,7 +816,7 @@ export const ChannelPane = React.memo(function ChannelPane({
                     onOpenAgentSession={onOpenAgentSession}
                     openAgentSessionPubkey={openAgentSessionPubkey}
                     profiles={profiles}
-                    typingBotPubkeys={threadComposerBotTypingPubkeys}
+                    workingBotPubkeys={threadComposerBotTypingPubkeys}
                     variant="inline"
                   />
                 ) : null
@@ -845,11 +859,6 @@ export const ChannelPane = React.memo(function ChannelPane({
                     : null
               }
               channelId={openAgentSessionChannelId}
-              isWorking={botTypingEntries.some(
-                (entry) =>
-                  entry.pubkey.toLowerCase() ===
-                  selectedAgent.pubkey.toLowerCase(),
-              )}
               isSinglePanelView={
                 useSplitAuxiliaryPane ? false : isSinglePanelView
               }

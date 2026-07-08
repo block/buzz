@@ -1,12 +1,18 @@
 import * as React from "react";
 
-import { AlertTriangle, ChevronDown, ChevronRight } from "lucide-react";
+import {
+  AlertTriangle,
+  ChevronDown,
+  ChevronRight,
+  RefreshCw,
+} from "lucide-react";
 
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import { PresenceDot } from "@/features/presence/ui/PresenceBadge";
 import { Badge } from "@/shared/ui/badge";
 import { AgentStatusBadge } from "@/features/agents/ui/AgentStatusBadge";
-import { useActiveAgentTurns } from "@/features/agents/activeAgentTurnsStore";
+import { useAgentWorking } from "@/features/agents/agentWorkingSignal";
+import { useOpenAgentActivity } from "@/features/agents/useOpenAgentActivity";
 import { formatElapsed } from "@/features/agents/ui/agentSessionUtils";
 import { useNow } from "@/shared/lib/useNow";
 import type {
@@ -19,7 +25,7 @@ import { Button } from "@/shared/ui/button";
 import { AgentConfigPanel } from "./AgentConfigPanel";
 import { friendlyAgentLastError } from "@/features/agents/lib/friendlyAgentLastError";
 import { ManagedAgentLogPanel } from "./ManagedAgentLogPanel";
-import { truncatePubkey } from "./agentUi";
+import { PubKey } from "@/shared/ui/PubKey";
 
 export function ManagedAgentRow({
   agent,
@@ -55,7 +61,7 @@ export function ManagedAgentRow({
     ? (personaLabelsById[agent.personaId] ?? null)
     : null;
   const presenceStatus = presenceLookup[agent.pubkey.trim().toLowerCase()];
-  const activeTurns = useActiveAgentTurns(agent.pubkey);
+  const activeTurns = useAgentWorking(agent.pubkey).channels;
   const activeWorkingChannels = React.useMemo(
     () =>
       activeTurns
@@ -202,6 +208,7 @@ function AgentSummary({
   presenceStatus: PresenceStatus | undefined;
 }) {
   const { goChannel } = useAppNavigation();
+  const { openAgentActivity } = useOpenAgentActivity();
 
   return (
     <div className="min-w-0">
@@ -227,6 +234,12 @@ function AgentSummary({
               <Badge variant="secondary">{personaLabel}</Badge>
             ) : null}
             <AgentOriginBadge agent={agent} />
+            {agent.needsRestart ? (
+              <Badge className="gap-1" variant="warning">
+                <RefreshCw className="h-3 w-3" />
+                Restart required
+              </Badge>
+            ) : null}
             {agent.personaOutOfDate ? (
               <Badge className="gap-1" variant="warning">
                 <AlertTriangle className="h-3 w-3" />
@@ -235,7 +248,7 @@ function AgentSummary({
             ) : null}
           </div>
           <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
-            <span className="font-mono">{truncatePubkey(agent.pubkey)}</span>
+            <PubKey pubkey={agent.pubkey} />
             {agent.backend.type === "local" ? (
               <span>
                 {agent.startOnAppLaunch ? "Auto-start" : "Manual start"}
@@ -244,6 +257,12 @@ function AgentSummary({
               <span>Remote deployment</span>
             )}
           </div>
+          {agent.needsRestart ? (
+            <p className="mt-1.5 text-xs text-amber-600 dark:text-amber-400">
+              Configuration changed since this agent started. Restart to apply
+              it.
+            </p>
+          ) : null}
           {agent.personaOutOfDate ? (
             <p className="mt-1.5 text-xs text-amber-600 dark:text-amber-400">
               Persona updated since this agent was created. Respawn to apply the
@@ -275,7 +294,11 @@ function AgentSummary({
                   channelId={channel.id}
                   name={channel.name}
                   anchorAt={channel.anchorAt}
-                  onNavigate={goChannel}
+                  // Deep-link straight into the agent's activity pane in the
+                  // working channel, not just the channel timeline.
+                  onNavigate={(channelId) =>
+                    openAgentActivity(agent.pubkey, { channelId })
+                  }
                 />
               ))}
             </div>

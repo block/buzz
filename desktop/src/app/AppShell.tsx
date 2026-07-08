@@ -39,6 +39,7 @@ import { PreventSleepProvider } from "@/features/agents/usePreventSleep";
 import { requestOpenCreateAgent } from "@/features/agents/openCreateAgentEvent";
 import { useAgentsDataRefresh } from "@/features/agents/lib/useAgentsDataRefresh";
 import { usePersonaSync } from "@/features/agents/lib/usePersonaSync";
+import { useAgentObserverIngestion } from "@/features/agents/useAgentObserverIngestion";
 import {
   usePresenceSession,
   usePresenceSubscription,
@@ -49,6 +50,9 @@ import {
   useUserStatusSubscription,
 } from "@/features/user-status/hooks";
 import { useWorkspaceEmojiLiveUpdates } from "@/features/custom-emoji/hooks";
+import { useArchiveSync } from "@/features/local-archive/archiveSyncManager";
+import { useObserverArchiveSeed } from "@/features/local-archive/useObserverArchiveSeed";
+import { useAgentMetricArchiveSeed } from "@/features/local-archive/useAgentMetricArchiveSeed";
 import { useProfileQuery } from "@/features/profile/hooks";
 import {
   DEFAULT_SETTINGS_SECTION,
@@ -147,6 +151,17 @@ export function AppShell() {
   );
   usePersonaSync(identityQuery.data?.pubkey);
   useAgentsDataRefresh();
+  // Owner-global observer ingestion: receives + decrypts agent observer
+  // frames and keeps derived active-turn liveness in sync app-wide, so no
+  // individual screen/panel has to mount its own bridge for ingestion.
+  // Intentionally mounted without a `startupReady`/identity guard: before
+  // `currentPubkey` resolves the hook ingests managed agents only, and
+  // relay-owned agents join automatically once identity arrives. Adding a
+  // guard here would drop managed-agent coverage during startup.
+  useAgentObserverIngestion();
+  useArchiveSync();
+  useObserverArchiveSeed(identityQuery.data?.pubkey);
+  useAgentMetricArchiveSeed(identityQuery.data?.pubkey);
   const profileQuery = useProfileQuery();
   const deferredPubkey = startupReady ? identityQuery.data?.pubkey : undefined;
   useRelayAutoHeal();
@@ -624,7 +639,9 @@ export function AppShell() {
                         workspacesHook.activeWorkspace?.id ?? null
                       }
                       onAddWorkspace={() => setIsAddWorkspaceOpen(true)}
+                      onRemoveWorkspace={workspacesHook.removeWorkspace}
                       onSwitchWorkspace={workspacesHook.switchWorkspace}
+                      onUpdateWorkspace={workspacesHook.updateWorkspace}
                       workspaces={workspacesHook.workspaces}
                     />
                   ) : null}
@@ -824,7 +841,7 @@ export function AppShell() {
                           <SidebarInset
                             ref={mainInsetRef}
                             className="isolate min-h-0 min-w-0 overflow-hidden bg-sidebar"
-                            style={chromeCssVarDefaults}
+                            style={chromeCssVarDefaults as React.CSSProperties}
                           >
                             <div className="relative z-10 mb-2 ml-px mr-2 mt-px flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl bg-background shadow-[-1px_-1px_0_0_hsl(var(--sidebar-border)/0.45)]">
                               <Outlet />

@@ -2,7 +2,7 @@ import * as React from "react";
 import { Check, KeyRound } from "lucide-react";
 
 import { cn } from "@/shared/lib/cn";
-import { nsecToNpub, shortenNpub } from "@/shared/lib/nostrUtils";
+import { nsecToNpub } from "@/shared/lib/nostrUtils";
 import { Button } from "@/shared/ui/button";
 import { Input } from "@/shared/ui/input";
 import { Spinner } from "@/shared/ui/spinner";
@@ -228,7 +228,7 @@ export function NostrKeyImportForm({
               This will use this Nostr identity:
             </p>
             <p className="break-all font-mono text-2xs text-muted-foreground">
-              {shortenNpub(previewNpub)}
+              {previewNpub}
             </p>
           </div>
         </div>

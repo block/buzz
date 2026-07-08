@@ -3,7 +3,8 @@ import { MoreHorizontal, Plus, Shield, ShieldCheck, User } from "lucide-react";
 import { toast } from "sonner";
 
 import { useUsersBatchQuery } from "@/features/profile/hooks";
-import { truncatePubkey } from "@/features/profile/lib/identity";
+import { truncatePubkey } from "@/shared/lib/pubkey";
+import { PubKey } from "@/shared/ui/PubKey";
 import {
   useChangeRelayMemberRoleMutation,
   useMyRelayMembershipQuery,
@@ -107,8 +108,9 @@ function MemberRow({
               <span className="text-xs text-muted-foreground">(you)</span>
             ) : null}
           </div>
-          <p className="text-xs text-muted-foreground">
-            Joined {formatRelativeDate(member.createdAt)}
+          <p className="flex items-center gap-2 text-xs text-muted-foreground">
+            <PubKey className="text-xs" pubkey={member.pubkey} />
+            <span>Joined {formatRelativeDate(member.createdAt)}</span>
           </p>
         </div>
       </div>

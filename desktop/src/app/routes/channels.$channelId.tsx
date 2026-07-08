@@ -11,6 +11,12 @@ import { ViewLoadingFallback } from "@/shared/ui/ViewLoadingFallback";
 
 type ChannelRouteSearch = {
   agentSession?: string;
+  /**
+   * When set, the composer on mount will auto-submit its loaded draft once,
+   * then clear this param. Value is the draft key that was loaded so the
+   * composer can verify it has the right draft before firing.
+   */
+  autoSend?: string;
   messageId?: string;
   profile?: string;
   profileTab?: ProfilePanelTab;
@@ -28,6 +34,7 @@ function validateChannelSearch(
 ): ChannelRouteSearch {
   return {
     agentSession: nonEmptyString(search.agentSession),
+    autoSend: nonEmptyString(search.autoSend),
     messageId: nonEmptyString(search.messageId),
     profile: nonEmptyString(search.profile),
     profileTab: parseProfilePanelTab(search.profileTab) ?? undefined,
@@ -56,6 +63,7 @@ function ChannelRouteComponent() {
       fallback={<ViewLoadingFallback includeHeader kind="channel" />}
     >
       <ChannelRouteScreen
+        autoSendDraftKey={search.autoSend ?? null}
         channelId={channelId}
         selectedPostId={null}
         targetMessageId={search.messageId ?? null}

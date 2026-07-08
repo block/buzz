@@ -501,6 +501,34 @@ export function ProjectPullRequestFilesChangedPanel({
   isLoading: boolean;
   pullRequest: ProjectPullRequest | null;
 }) {
+  return (
+    <ProjectDiffFilesPanel
+      diff={pullRequest ? diff : null}
+      error={error}
+      headerLabel={
+        pullRequest
+          ? `${pullRequest.title} · ${pullRequest.commit?.slice(0, 7) ?? "PR"}`
+          : ""
+      }
+      isLoading={isLoading}
+      subjectLabel="pull request"
+    />
+  );
+}
+
+export function ProjectDiffFilesPanel({
+  error,
+  diff,
+  isLoading,
+  headerLabel,
+  subjectLabel,
+}: {
+  error: unknown;
+  diff: ProjectRepoDiff | null | undefined;
+  isLoading: boolean;
+  headerLabel: string;
+  subjectLabel: string;
+}) {
   const [query, setQuery] = React.useState("");
   const [selectedPath, setSelectedPath] = React.useState<string | null>(null);
   const files = diff?.files ?? [];
@@ -546,7 +574,7 @@ export function ProjectPullRequestFilesChangedPanel({
     const message = errorMessage(error);
     return (
       <div className="space-y-1 rounded-xl border border-border/50 bg-card/60 p-4 text-sm text-muted-foreground">
-        <p>Could not load changed files for this pull request.</p>
+        <p>Could not load changed files for this {subjectLabel}.</p>
         {message ? (
           <p className="font-mono text-xs text-muted-foreground/80">
             {message}
@@ -556,10 +584,10 @@ export function ProjectPullRequestFilesChangedPanel({
     );
   }
 
-  if (!pullRequest || files.length === 0) {
+  if (files.length === 0) {
     return (
       <div className="rounded-xl border border-border/50 bg-card/60 p-6 text-center text-sm text-muted-foreground">
-        No changed files are available for this pull request yet.
+        No changed files are available for this {subjectLabel} yet.
       </div>
     );
   }
@@ -595,9 +623,7 @@ export function ProjectPullRequestFilesChangedPanel({
         <div className="flex min-h-12 flex-wrap items-center justify-between gap-3 border-border/50 border-b bg-background/30 px-4 py-2 text-xs text-muted-foreground">
           <div className="flex min-w-0 items-center gap-2">
             <GitCommitHorizontal className="h-3.5 w-3.5" />
-            <span className="truncate">
-              {pullRequest.title} · {pullRequest.commit?.slice(0, 7) ?? "PR"}
-            </span>
+            <span className="truncate">{headerLabel}</span>
           </div>
           <div className="flex items-center gap-3">
             <span>{files.length} files changed</span>

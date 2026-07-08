@@ -127,6 +127,7 @@ export class ChannelSectionSyncManager {
         !last ||
         last.id !== current.id ||
         last.name !== current.name ||
+        last.icon !== current.icon ||
         last.order !== current.order
       )
         return false;

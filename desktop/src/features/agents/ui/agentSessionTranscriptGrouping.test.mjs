@@ -285,8 +285,335 @@ test("buildTranscriptDisplayBlocks groups consecutive file edit tool runs", () =
   );
 });
 
-test("buildTranscriptDisplayBlocks keeps non-contiguous same-kind runs expanded", () => {
-  const mkTool = (id, label, renderClass = "generic", groupKey = label) => ({
+test("buildTranscriptDisplayBlocks groups mixed consecutive eligible tool runs", () => {
+  const [block] = buildTranscriptDisplayBlocks([
+    mkTool("read-1", "Read file", "file-read", "read_file"),
+    mkTool("shell-1", "Ran command", "shell", "shell:command"),
+    mkTool("read-2", "Read file", "file-read", "read_file"),
+    mkTool("read-3", "Read file", "file-read", "read_file"),
+  ]);
+
+  assert.equal(block.kind, "turn");
+  assert.equal(block.segments.length, 1);
+  assert.equal(block.segments[0].kind, "summary");
+  assert.equal(block.segments[0].summary.variant, "mixed");
+  assert.equal(block.segments[0].summary.label, "Ran 4 tool calls");
+  assert.deepEqual(
+    block.segments[0].summary.items.map((item) => item.id),
+    ["read-1", "shell-1", "read-2", "read-3"],
+  );
+});
+
+test("buildTranscriptDisplayBlocks groups tool bursts at threshold 2", () => {
+  const [block] = buildTranscriptDisplayBlocks([
+    mkTool("read-1", "Read file", "file-read", "read_file"),
+    mkTool("shell-1", "Ran command", "shell", "shell:command"),
+  ]);
+
+  assert.equal(block.kind, "turn");
+  assert.equal(block.segments.length, 1);
+  assert.equal(block.segments[0].kind, "summary");
+  assert.equal(block.segments[0].summary.variant, "mixed");
+  assert.equal(block.segments[0].summary.label, "Ran 2 tool calls");
+});
+
+test("buildTranscriptDisplayBlocks keeps a lone eligible tool row expanded", () => {
+  const [block] = buildTranscriptDisplayBlocks([
+    mkTool("read-1", "Read file", "file-read", "read_file"),
+  ]);
+
+  assert.equal(block.kind, "turn");
+  assert.deepEqual(
+    block.segments.map((segment) => segment.kind),
+    ["item"],
+  );
+});
+
+test("buildTranscriptDisplayBlocks nests same-kind summaries inside tool bursts", () => {
+  const [block] = buildTranscriptDisplayBlocks([
+    mkTool("read-1", "Read file", "file-read", "read_file"),
+    mkTool("read-2", "Read file", "file-read", "read_file"),
+    mkTool("read-3", "Read file", "file-read", "read_file"),
+    mkTool("shell-1", "Ran command", "shell", "shell:command"),
+    mkTool("skill-1", "Read skill", "skill-read", "skill:load"),
+  ]);
+
+  assert.equal(block.kind, "turn");
+  assert.equal(block.segments.length, 1);
+  assert.equal(block.segments[0].kind, "summary");
+  assert.equal(block.segments[0].summary.variant, "mixed");
+  assert.equal(block.segments[0].summary.label, "Ran 5 tool calls");
+  // Mixed summaries are the only visible burst summary; nested same-kind
+  // summaries flatten back to leaf rows to avoid redundant rows such as
+  // "Ran 16 tool calls" → "Ran 12 commands".
+  assert.deepEqual(
+    block.segments[0].summary.segments.map((child) =>
+      child.kind === "item" ? child.item.id : child.summary.label,
+    ),
+    ["read-1", "read-2", "read-3", "shell-1", "skill-1"],
+  );
+  // Flat leaf items preserve original order.
+  assert.deepEqual(
+    block.segments[0].summary.items.map((item) => item.id),
+    ["read-1", "read-2", "read-3", "shell-1", "skill-1"],
+  );
+});
+
+test("buildTranscriptDisplayBlocks collapses alternating search/read bursts into one summary", () => {
+  const [block] = buildTranscriptDisplayBlocks([
+    mkTool("shell-1", "Ran command", "shell", "shell:command"),
+    mkTool("read-1", "Read file", "file-read", "read_file"),
+    mkTool("read-2", "Read file", "file-read", "read_file"),
+    mkTool("read-3", "Read file", "file-read", "read_file"),
+    mkTool("shell-2", "Ran command", "shell", "shell:command"),
+    mkTool("read-4", "Read file", "file-read", "read_file"),
+    mkTool("read-5", "Read file", "file-read", "read_file"),
+    mkTool("read-6", "Read file", "file-read", "read_file"),
+  ]);
+
+  assert.equal(block.kind, "turn");
+  assert.equal(block.segments.length, 1);
+  assert.equal(block.segments[0].kind, "summary");
+  assert.equal(block.segments[0].summary.variant, "mixed");
+  assert.equal(block.segments[0].summary.label, "Ran 8 tool calls");
+  assert.deepEqual(
+    block.segments[0].summary.segments.map((child) =>
+      child.kind === "summary" ? child.summary.label : child.item.id,
+    ),
+    [
+      "shell-1",
+      "read-1",
+      "read-2",
+      "read-3",
+      "shell-2",
+      "read-4",
+      "read-5",
+      "read-6",
+    ],
+  );
+});
+
+test("buildTranscriptDisplayBlocks keeps messages out of mixed tool runs", () => {
+  const [block] = buildTranscriptDisplayBlocks([
+    mkTool("read-1", "Read file", "file-read", "read_file"),
+    mkTool("shell-1", "Ran command", "shell", "shell:command"),
+    assistantMessage("assistant", "Here is what I found.", "turn-1"),
+    mkTool("read-2", "Read file", "file-read", "read_file"),
+    mkTool("shell-2", "Ran command", "shell", "shell:command"),
+  ]);
+
+  assert.equal(block.kind, "turn");
+  assert.deepEqual(
+    block.segments.map((segment) => segment.kind),
+    ["summary", "item", "summary"],
+  );
+  assert.equal(block.segments[1].item.id, "assistant");
+  assert.deepEqual(
+    block.segments[0].summary.items.map((item) => item.id),
+    ["read-1", "shell-1"],
+  );
+  assert.deepEqual(
+    block.segments[2].summary.items.map((item) => item.id),
+    ["read-2", "shell-2"],
+  );
+});
+
+test("buildTranscriptDisplayBlocks breaks failed tools out of mixed tool runs", () => {
+  const failed = {
+    ...mkTool("shell-fail", "Ran command failed", "error", "shell:command"),
+    isError: true,
+  };
+
+  const [block] = buildTranscriptDisplayBlocks([
+    mkTool("read-1", "Read file", "file-read", "read_file"),
+    mkTool("shell-1", "Ran command", "shell", "shell:command"),
+    mkTool("skill-1", "Read skill", "skill-read", "skill:load"),
+    failed,
+    mkTool("read-2", "Read file", "file-read", "read_file"),
+    mkTool("shell-2", "Ran command", "shell", "shell:command"),
+    mkTool("image-1", "Viewed image", "image", "view_image"),
+  ]);
+
+  assert.equal(block.kind, "turn");
+  assert.deepEqual(
+    block.segments.map((segment) => segment.kind),
+    ["summary", "item", "summary"],
+  );
+  assert.equal(block.segments[0].summary.variant, "mixed");
+  assert.equal(block.segments[0].summary.label, "Ran 3 tool calls");
+  assert.equal(block.segments[1].item.id, "shell-fail");
+  assert.equal(block.segments[2].summary.variant, "mixed");
+  assert.deepEqual(
+    block.segments[2].summary.items.map((item) => item.id),
+    ["read-2", "shell-2", "image-1"],
+  );
+});
+
+test("flattenDisplayBlocks preserves child order through mixed summaries", () => {
+  const blocks = buildTranscriptDisplayBlocks([
+    mkTool("read-1", "Read file", "file-read", "read_file"),
+    mkTool("shell-1", "Ran command", "shell", "shell:command"),
+    mkTool("edit-1", "Edited file", "file-edit", "file-edit:str_replace"),
+  ]);
+
+  assert.deepEqual(
+    flattenDisplayBlocks(blocks).map((item) => item.id),
+    ["read-1", "shell-1", "edit-1"],
+  );
+});
+
+test("buildTranscriptDisplayBlocks never same-kind groups failed tools", () => {
+  const mkFailed = (id) => ({
+    ...mkTool(id, "Ran command failed", "error", "shell:command"),
+    isError: true,
+  });
+
+  const [block] = buildTranscriptDisplayBlocks([
+    mkFailed("fail-1"),
+    mkFailed("fail-2"),
+    mkFailed("fail-3"),
+  ]);
+
+  assert.equal(block.kind, "turn");
+  assert.deepEqual(
+    block.segments.map((segment) => segment.kind),
+    ["item", "item", "item"],
+  );
+});
+
+test("buildTranscriptDisplayBlocks never same-kind groups status tool rows", () => {
+  const [block] = buildTranscriptDisplayBlocks([
+    mkTool("status-1", "Context compacted", "status", "status:post-compact"),
+    mkTool("status-2", "Context compacted", "status", "status:post-compact"),
+    mkTool("status-3", "Context compacted", "status", "status:post-compact"),
+  ]);
+
+  assert.equal(block.kind, "turn");
+  assert.deepEqual(
+    block.segments.map((segment) => segment.kind),
+    ["item", "item", "item"],
+  );
+});
+
+test("buildTranscriptDisplayBlocks never same-kind groups suppressed tool rows", () => {
+  const [block] = buildTranscriptDisplayBlocks([
+    mkTool("stop-1", "Checked todos", "suppressed", "suppressed:stop-hook"),
+    mkTool("stop-2", "Checked todos", "suppressed", "suppressed:stop-hook"),
+    mkTool("stop-3", "Checked todos", "suppressed", "suppressed:stop-hook"),
+  ]);
+
+  assert.equal(block.kind, "turn");
+  assert.deepEqual(
+    block.segments.map((segment) => segment.kind),
+    ["item", "item", "item"],
+  );
+});
+
+test("buildTranscriptDisplayBlocks breaks same-kind runs on an ineligible row", () => {
+  const failed = {
+    ...mkTool("fail-1", "Read file failed", "error", "read_file"),
+    isError: true,
+  };
+
+  const [block] = buildTranscriptDisplayBlocks([
+    mkTool("read-1", "Read file", "file-read", "read_file"),
+    mkTool("read-2", "Read file", "file-read", "read_file"),
+    failed,
+    mkTool("read-3", "Read file", "file-read", "read_file"),
+    mkTool("read-4", "Read file", "file-read", "read_file"),
+  ]);
+
+  assert.equal(block.kind, "turn");
+  assert.deepEqual(
+    block.segments.map((segment) => segment.kind),
+    ["summary", "item", "summary"],
+  );
+  assert.equal(block.segments[1].item.id, "fail-1");
+  assert.deepEqual(
+    block.segments[0].summary.items.map((item) => item.id),
+    ["read-1", "read-2"],
+  );
+  assert.deepEqual(
+    block.segments[2].summary.items.map((item) => item.id),
+    ["read-3", "read-4"],
+  );
+});
+
+test("buildTranscriptDisplayBlocks bundles steer message with steer context behind the prompt segment", () => {
+  const steerMessage = {
+    id: "steer:chan-1:turn-1",
+    type: "message",
+    role: "user",
+    title: "Buzz event",
+    text: "@Bart new steer instruction",
+    timestamp: baseTimestamp,
+    acpSource: "session/steer:user",
+    turnId: "turn-1",
+    sessionId: "sess-1",
+    channelId: "chan-1",
+  };
+  const steerContext = {
+    id: "steer-context:chan-1:turn-1",
+    type: "metadata",
+    title: "Prompt context",
+    sections: [{ title: "Thread history", body: "prior messages" }],
+    timestamp: baseTimestamp,
+    acpSource: "session/steer:context",
+    turnId: "turn-1",
+    sessionId: "sess-1",
+    channelId: "chan-1",
+  };
+
+  const [block] = buildTranscriptDisplayBlocks([
+    assistantMessage("assistant", "Working on it.", "turn-1"),
+    steerMessage,
+    steerContext,
+    toolCall("tool", "turn-1"),
+  ]);
+
+  assert.equal(block.kind, "turn");
+  assert.deepEqual(
+    block.segments.map((segment) => segment.kind),
+    ["item", "prompt", "item"],
+  );
+  const steerSegment = block.segments[1];
+  assert.equal(steerSegment.user.id, "steer:chan-1:turn-1");
+  assert.equal(steerSegment.context?.id, "steer-context:chan-1:turn-1");
+  assert.equal(steerSegment.systemPrompt, null);
+  assert.deepEqual(steerSegment.setup, []);
+  // No standalone "Prompt context" metadata row leaks into the feed.
+  assert.ok(
+    !block.segments.some(
+      (segment) => segment.kind === "item" && segment.item.type === "metadata",
+    ),
+  );
+});
+
+test("buildTranscriptDisplayBlocks keeps orphan steer context visible when no steer message exists", () => {
+  const steerContext = {
+    id: "steer-context:chan-1:turn-1",
+    type: "metadata",
+    title: "Prompt context",
+    sections: [{ title: "Thread history", body: "prior messages" }],
+    timestamp: baseTimestamp,
+    acpSource: "session/steer:context",
+    turnId: "turn-1",
+    sessionId: "sess-1",
+    channelId: "chan-1",
+  };
+
+  const [block] = buildTranscriptDisplayBlocks([
+    steerContext,
+    toolCall("tool", "turn-1"),
+  ]);
+
+  assert.equal(block.kind, "turn");
+  const flattened = flattenDisplayBlocks([block]).map((item) => item.id);
+  assert.ok(flattened.includes("steer-context:chan-1:turn-1"));
+});
+
+function mkTool(id, label, renderClass = "generic", groupKey = label) {
+  return {
     id,
     type: "tool",
     renderClass,
@@ -310,18 +637,5 @@ test("buildTranscriptDisplayBlocks keeps non-contiguous same-kind runs expanded"
     turnId: "turn-1",
     sessionId: "sess-1",
     channelId: "chan-1",
-  });
-
-  const [block] = buildTranscriptDisplayBlocks([
-    mkTool("read-1", "Read file", "file-read", "read_file"),
-    mkTool("shell-1", "Ran command", "shell", "shell:command"),
-    mkTool("read-2", "Read file", "file-read", "read_file"),
-    mkTool("read-3", "Read file", "file-read", "read_file"),
-  ]);
-
-  assert.equal(block.kind, "turn");
-  assert.deepEqual(
-    block.segments.map((segment) => segment.kind),
-    ["item", "item", "item", "item"],
-  );
-});
+  };
+}

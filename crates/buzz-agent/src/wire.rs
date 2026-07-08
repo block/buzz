@@ -136,6 +136,18 @@ pub fn session_update(sid: &str, update: Value) -> Value {
     })
 }
 
+/// A `_goose/unstable/session/update` notification — the separate top-level
+/// method goose uses for custom usage and status events.  Used by buzz-agent
+/// to emit the `usage_update` payload so buzz-acp's `UsageTracker` can treat
+/// buzz-agent and goose symmetrically.
+pub fn goose_session_update(sid: &str, update: Value) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "method": "_goose/unstable/session/update",
+        "params": { "sessionId": sid, "update": update },
+    })
+}
+
 /// A `session/update` notification carrying a `update._meta.goose.<key>` field.
 /// Used to advertise `activeRunId` (so steer-capable clients can target the
 /// in-flight run) and `queuedSteer` (so they can correlate an accepted steer

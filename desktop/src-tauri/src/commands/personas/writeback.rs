@@ -774,7 +774,7 @@ You are Paul.
             description: None,
             persona_ids: vec![],
             is_builtin: false,
-            source_dir: source_dir.map(|s| std::path::PathBuf::from(s)),
+            source_dir: source_dir.map(std::path::PathBuf::from),
             is_symlink: false,
             symlink_target: None,
             version: None,

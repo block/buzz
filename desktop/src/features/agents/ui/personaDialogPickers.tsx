@@ -1,4 +1,5 @@
 import type { AcpRuntimeCatalogEntry } from "@/shared/api/types";
+import type { RuntimeFileConfigSubset } from "@/shared/api/tauri";
 
 export const PERSONA_FIELD_SHELL_CLASS =
   "rounded-xl border border-input bg-muted/40 transition-colors duration-150 ease-out hover:border-muted-foreground/40 focus-within:border-muted-foreground/50";
@@ -73,6 +74,49 @@ function isKnownLlmProvider(
   providerId: string,
 ): providerId is PersonaLlmProviderId {
   return (KNOWN_LLM_PROVIDER_IDS as readonly string[]).includes(providerId);
+}
+
+/**
+ * Returns the credential env-var keys that are required for a given
+ * runtime + provider combination. These are the keys that must be present
+ * in the agent's effective env for it to start successfully.
+ *
+ * Used by EnvVarsEditor to render first-class "required" rows that make the
+ * gap visible before the user tries to save or start the agent.
+ *
+ * Mirrors the Rust `readiness::buzz_agent_requirements` /
+ * `readiness::goose_requirements` logic — keep in sync.
+ */
+export function requiredCredentialEnvKeys(
+  runtimeId: string,
+  provider: string,
+): readonly string[] {
+  const normalizedRuntime = runtimeId.trim();
+  const normalizedProvider = provider.trim().toLowerCase();
+
+  // buzz-agent and goose both use provider-specific credentials.
+  if (normalizedRuntime === "buzz-agent" || normalizedRuntime === "goose") {
+    if (normalizedProvider === "anthropic") return ["ANTHROPIC_API_KEY"];
+    if (normalizedProvider === "openai") return ["OPENAI_COMPAT_API_KEY"];
+    if (
+      normalizedProvider === "databricks" ||
+      normalizedProvider === "databricks_v2"
+    ) {
+      // DATABRICKS_TOKEN is NOT required — OAuth PKCE is the normal path.
+      return ["DATABRICKS_HOST"];
+    }
+  }
+
+  // claude and codex handle auth via CLI login (not env keys) — those
+  // requirements are surfaced separately via the CliLogin surface.
+  return [];
+}
+
+export function isMissingRequiredDropdownField(
+  field: { isRequired: boolean } | null | undefined,
+  value: string,
+) {
+  return field?.isRequired === true && value.trim().length === 0;
 }
 
 export function runtimeSupportsLlmProviderSelection(runtimeId: string) {
@@ -307,4 +351,156 @@ export function getDefaultPersonaRuntime(runtimes: AcpRuntimeCatalogEntry[]) {
     available[0] ??
     null
   );
+}
+
+/**
+ * Filter a required-key list down to those satisfied by the baked build env.
+ *
+ * A key is baked-satisfied when the agent has no local value for it AND the
+ * baked env (compile-time, Block-internal builds) contains it. This mirrors the
+ * backend readiness gate Layer 1 (`resolve_effective_agent_env`) so the dialogs
+ * don't surface a spurious "Required" badge for keys that are already baked in.
+ *
+ * OSS builds have an empty baked env, so this always returns `[]` there —
+ * OSS behavior is unchanged.
+ *
+ * **UX asymmetry:** baked-satisfied keys are FULLY silenced — no amber Required
+ * row, no "Set in config" info row. This differs from file-satisfied keys, which
+ * render an info row ("Set in goose config"). Baked env is invisible
+ * infrastructure; surfacing it would be noise for users.
+ *
+ * **Future precedence insertion point:** PR #1448 (global agent variables) will
+ * slot in between baked and file satisfaction. Intended precedence when both
+ * land: baked < global < file for silencing; agent-local value always wins for
+ * display and spawn.
+ */
+export function getBakedSatisfiedEnvKeys(
+  requiredKeys: readonly string[],
+  envVars: Record<string, string>,
+  bakedEnvKeys: readonly string[] | undefined,
+): string[] {
+  if (!bakedEnvKeys || bakedEnvKeys.length === 0) return [];
+  const bakedSet = new Set(bakedEnvKeys);
+  return requiredKeys.filter(
+    (key) => (envVars[key] ?? "").length === 0 && bakedSet.has(key),
+  );
+}
+
+/**
+ * Pure local-mode readiness gate for Create (no existing agent, no config
+ * surface query). Returns the missing normalized fields (provider, model) and
+ * the missing credential env keys so the caller can derive `canSubmit`,
+ * field `isRequired`, and `EnvVarsEditor.requiredKeys` from the same source.
+ *
+ * Two classes of required field for provider-selection runtimes (buzz-agent,
+ * goose) — both required unconditionally per readiness.rs:
+ *   1. Normalized fields: provider + model (empty string = NotReady)
+ *   2. Credential env keys: provider-specific (e.g. ANTHROPIC_API_KEY)
+ *
+ * isProviderMode / useMesh modes are NOT subject to this gate — they have
+ * their own gates. Pass isProviderMode=true or useMesh=true to bypass.
+ */
+export function computeLocalModeGate({
+  bakedEnvKeys,
+  envVars,
+  isProviderMode,
+  model,
+  provider,
+  runtimeId,
+  runtimeFileConfig,
+  useMesh,
+}: {
+  /** Optional baked build env key names (Block-internal builds only).
+   *  When provided, requirements already covered by the baked env are silenced,
+   *  mirroring `resolve_effective_agent_env` Layer 1 in the backend readiness
+   *  gate. Absent (or empty) on OSS builds — existing call sites are unaffected. */
+  bakedEnvKeys?: readonly string[];
+  envVars: Record<string, string>;
+  isProviderMode: boolean;
+  model: string;
+  provider: string;
+  runtimeId: string;
+  /** Optional file-layer config for the runtime (e.g. goose config.yaml).
+   *  When provided, requirements already satisfied there are silenced. */
+  runtimeFileConfig?: RuntimeFileConfigSubset | null;
+  useMesh: boolean;
+}): {
+  /** Normalized field names that are required but empty ("provider", "model"). */
+  missingNormalizedFields: string[];
+  /** Credential env key names that are required but missing or empty. */
+  missingEnvKeys: string[];
+  /** Env keys that are not set in Buzz but are satisfied in the runtime's
+   *  config file (e.g. "Set in goose config"). */
+  fileSatisfiedEnvKeys: string[];
+  /** True when the create button may be enabled (from this gate's perspective). */
+  satisfied: boolean;
+} {
+  if (isProviderMode || useMesh) {
+    return {
+      missingNormalizedFields: [],
+      missingEnvKeys: [],
+      fileSatisfiedEnvKeys: [],
+      satisfied: true,
+    };
+  }
+
+  const needsProviderSelection = runtimeSupportsLlmProviderSelection(runtimeId);
+
+  // A normalized field is satisfied by the runtime file config when the file
+  // provides the value (provider or model). The file layer silences the
+  // requirement; the value is not injected into the Buzz env.
+  const fileProvider = runtimeFileConfig?.provider?.trim() ?? "";
+  const fileModel = runtimeFileConfig?.model?.trim() ?? "";
+  const fileSatisfiedKeys = new Set(runtimeFileConfig?.satisfiedEnvKeys ?? []);
+
+  const missingNormalizedFields: string[] = [];
+  if (needsProviderSelection) {
+    if (provider.trim().length === 0 && fileProvider.length === 0) {
+      missingNormalizedFields.push("provider");
+    }
+    if (model.trim().length === 0 && fileModel.length === 0) {
+      missingNormalizedFields.push("model");
+    }
+  }
+
+  // Credential keys depend on the selected provider (empty provider → no keys
+  // required beyond the normalized field gate above).
+  // Use the file provider as fallback when the env provider is empty, so
+  // credential requirements are computed correctly for file-config runtimes.
+  const effectiveProviderForKeys = needsProviderSelection
+    ? provider.trim() || fileProvider
+    : "";
+  const providerForKeys = needsProviderSelection
+    ? effectiveProviderForKeys
+    : "";
+  const requiredKeys = requiredCredentialEnvKeys(runtimeId, providerForKeys);
+
+  // Keys satisfied by the baked build env (Block-internal builds only).
+  const bakedSatisfiedSet = new Set(
+    getBakedSatisfiedEnvKeys(requiredKeys, envVars, bakedEnvKeys),
+  );
+
+  const missingEnvKeys: string[] = [];
+  const fileSatisfiedEnvKeys: string[] = [];
+  for (const key of requiredKeys) {
+    if ((envVars[key] ?? "").length > 0) {
+      // Set in Buzz env — satisfied, no action.
+    } else if (bakedSatisfiedSet.has(key)) {
+      // Not in Buzz env but covered by the baked build env — silenced.
+      // Don't add to fileSatisfiedEnvKeys; baked keys produce no info row.
+    } else if (fileSatisfiedKeys.has(key)) {
+      // Not in Buzz env but present in the runtime config file — silenced.
+      fileSatisfiedEnvKeys.push(key);
+    } else {
+      missingEnvKeys.push(key);
+    }
+  }
+
+  return {
+    missingNormalizedFields,
+    missingEnvKeys,
+    fileSatisfiedEnvKeys,
+    satisfied:
+      missingNormalizedFields.length === 0 && missingEnvKeys.length === 0,
+  };
 }

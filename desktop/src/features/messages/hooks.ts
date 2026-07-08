@@ -1,5 +1,6 @@
 import { useEffect, useEffectEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { toast } from "sonner";
 
 import {
   channelMessagesKey,
@@ -39,13 +40,18 @@ import {
   emptyChannelWindowStore,
   flattenChannelWindowEvents,
   mergeLiveChannelWindowEvent,
+  mergeLiveThreadSummary,
   replaceNewestChannelWindow,
   type ChannelWindowStore,
 } from "@/features/messages/lib/channelWindowStore";
-import { parseChannelWindowResponse } from "@/features/messages/lib/channelWindowResponse";
+import {
+  parseChannelWindowResponse,
+  parseLiveThreadSummary,
+} from "@/features/messages/lib/channelWindowResponse";
 import {
   CHANNEL_AUX_EVENT_KINDS,
   CHANNEL_TIMELINE_CONTENT_KINDS,
+  KIND_CHANNEL_THREAD_SUMMARY,
   KIND_STREAM_MESSAGE,
   KIND_SYSTEM_MESSAGE,
 } from "@/shared/constants/kinds";
@@ -318,6 +324,19 @@ export function useChannelSubscription(channel: Channel | null) {
 
   const appendMessage = useEffectEvent((event: RelayEvent) => {
     if (!channelId) return;
+    if (event.kind === KIND_CHANNEL_THREAD_SUMMARY) {
+      // Relay-pushed live badge recount — window-store overlay only, never a
+      // timeline row (mirrors the page path, where 39005 is metadata).
+      const parsed = parseLiveThreadSummary(event);
+      if (!parsed) return;
+      const windowKey = channelWindowKey(channelId);
+      const current =
+        queryClient.getQueryData<ChannelWindowStore>(windowKey) ??
+        emptyChannelWindowStore();
+      const next = mergeLiveThreadSummary(current, parsed.rootId, parsed.live);
+      if (next !== current) queryClient.setQueryData(windowKey, next);
+      return;
+    }
     const isTimelineRow = CHANNEL_TIMELINE_KINDS.has(event.kind);
     const threadReference = isTimelineRow
       ? getThreadReference(event.tags)
@@ -702,6 +721,9 @@ export function useDeleteMessageMutation(channel: Channel | null) {
         channelMessagesKey(channel.id),
         (current = []) => current.filter((message) => message.id !== eventId),
       );
+    },
+    onError: (error) => {
+      toast.error(`Failed to delete message: ${error.message}`);
     },
   });
 }

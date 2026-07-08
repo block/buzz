@@ -1,6 +1,8 @@
 mod app_state;
+mod archive;
 mod commands;
 mod deep_link;
+mod event_sync;
 mod events;
 mod huddle;
 mod managed_agents;
@@ -84,17 +86,9 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(
             tauri_plugin_window_state::Builder::default()
-                // The main window should always launch edge-to-edge in the
-                // available desktop area. Do not let stale saved geometry or
-                // fullscreen state override the maximized launch config.
-                .with_state_flags(
-                    StateFlags::all()
-                        & !(StateFlags::VISIBLE
-                            | StateFlags::POSITION
-                            | StateFlags::SIZE
-                            | StateFlags::MAXIMIZED
-                            | StateFlags::FULLSCREEN),
-                )
+                // Visibility is excluded: the window starts hidden and the
+                // frontend shows it once ready.
+                .with_state_flags(StateFlags::all() & !StateFlags::VISIBLE)
                 .build(),
         )
         .plugin(tauri_plugin_websocket::init())
@@ -239,7 +233,7 @@ pub fn run() {
                 .lock()
                 .map(|k| k.clone())
                 .map_err(|e| -> Box<dyn std::error::Error> { e.to_string().into() })?;
-            migration::run_event_sync(&app_handle, &owner_keys);
+            event_sync::run_event_sync(&app_handle, &owner_keys);
 
             // Backfill the pinned persona snapshot for any pre-existing agent
             // that predates the record-authoritative-spawn cutover (persona_id
@@ -330,7 +324,7 @@ pub fn run() {
             // bundled CLI binary. Non-fatal: agents find CLI via PATH.
             if let Ok(exe) = std::env::current_exe() {
                 if let Some(parent) = exe.parent() {
-                    if let Err(error) = managed_agents::ensure_cli_symlink(parent) {
+                    if let Err(error) = managed_agents::ensure_cli_symlink(parent, is_dev_nest) {
                         eprintln!("buzz-desktop: failed to create CLI symlink: {error}");
                     }
                 }
@@ -514,6 +508,8 @@ pub fn run() {
             upload_media_bytes,
             download_image,
             download_file,
+            fetch_media_bytes,
+            copy_image_to_clipboard,
             list_relay_members,
             get_my_relay_membership,
             add_relay_member,
@@ -534,6 +530,8 @@ pub fn run() {
             get_agent_models,
             discover_agent_models,
             get_agent_config_surface,
+            get_runtime_file_config,
+            get_baked_build_env_keys,
             put_agent_session_config,
             mesh_availability,
             mesh_start_node,
@@ -621,6 +619,16 @@ pub fn run() {
             get_agent_memory,
             relay_reconnect_hook,
             relay_reconnect_hook_configured,
+            observer_archive_default_enabled,
+            agent_metric_archive_default_enabled,
+            archive::archive_events,
+            archive::create_save_subscription,
+            archive::merge_save_subscription_kinds,
+            archive::remove_save_subscription_kind,
+            archive::list_save_subscriptions,
+            archive::delete_save_subscription,
+            archive::read_archived_events,
+            is_auto_update_supported,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

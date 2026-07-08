@@ -18,15 +18,13 @@ dashmap     = { workspace = true }
 moka        = { workspace = true }
 evalexpr    = "11"
 cron        = "0.16"
+nostr       = { workspace = true }
 uuid        = { workspace = true }
 chrono      = { workspace = true }
 tokio       = { workspace = true }
 tracing     = { workspace = true }
 thiserror   = { workspace = true }
 reqwest     = { workspace = true, optional = true }
-
-[dev-dependencies]
-nostr = { workspace = true }
 
 [features]
 reqwest = ["dep:reqwest"]

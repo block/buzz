@@ -99,11 +99,15 @@ test("owner can edit their owned agent's message", async ({ page }) => {
   // Edit banner must appear confirming edit mode is active.
   await expect(page.getByTestId("edit-target")).toBeVisible({ timeout: 5_000 });
 
-  // Clear the composer and type the new content, then submit.
+  // Wait for the editor to be populated with the original message content
+  // (edit mode calls richText.setContent which is async in Tiptap's
+  // transaction pipeline). Then select-all and type the replacement.
   const input = page.getByTestId("message-input");
-  await input.clear();
-  await input.fill(editedContent);
-  await input.press("Enter");
+  await expect(input).not.toBeEmpty({ timeout: 5_000 });
+  await input.click();
+  await page.keyboard.press("ControlOrMeta+A");
+  await page.keyboard.type(editedContent);
+  await page.keyboard.press("Enter");
 
   // Edit mode must exit (banner gone) and the updated content must render.
   await expect(page.getByTestId("edit-target")).toBeHidden();

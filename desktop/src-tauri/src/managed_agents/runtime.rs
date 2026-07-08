@@ -16,6 +16,9 @@ use crate::{
 mod path;
 use path::build_augmented_path;
 
+mod sweep;
+pub(crate) use sweep::sweep_untracked_bundle_harnesses;
+
 type RespondToEnv = (Vec<(&'static str, String)>, Vec<&'static str>);
 
 /// Binary name fragments for all known agent/harness processes that Buzz
@@ -66,9 +69,7 @@ fn name_matches_known_binary(name: &str) -> bool {
 /// a managed agent wrapper (e.g. `node` running an npm shim for `codex-acp`).
 /// Callers must additionally verify `BUZZ_MANAGED_AGENT` ownership.
 fn name_matches_interpreter(name: &str) -> bool {
-    KNOWN_SCRIPT_INTERPRETERS
-        .iter()
-        .any(|&interp| name == interp)
+    KNOWN_SCRIPT_INTERPRETERS.contains(&name)
 }
 
 #[cfg(unix)]
@@ -169,40 +170,9 @@ fn buzz_marker_entry(instance_id: &str) -> Vec<u8> {
 #[cfg(target_os = "macos")]
 fn process_has_buzz_marker(pid: u32, instance_id: &str) -> bool {
     let marker = buzz_marker_entry(instance_id);
-
-    let mut mib: [libc::c_int; 3] = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid as libc::c_int];
-    let mut buf_size: libc::size_t = 0;
-
-    // First call: get required buffer size.
-    if unsafe {
-        libc::sysctl(
-            mib.as_mut_ptr(),
-            3,
-            std::ptr::null_mut(),
-            &mut buf_size,
-            std::ptr::null_mut(),
-            0,
-        )
-    } != 0
-    {
+    let Some(buf) = sweep::procargs2_buffer(pid) else {
         return false;
-    }
-
-    let mut buf: Vec<u8> = vec![0; buf_size];
-    if unsafe {
-        libc::sysctl(
-            mib.as_mut_ptr(),
-            3,
-            buf.as_mut_ptr() as *mut libc::c_void,
-            &mut buf_size,
-            std::ptr::null_mut(),
-            0,
-        )
-    } != 0
-    {
-        return false;
-    }
-    buf.truncate(buf_size);
+    };
 
     // Buffer layout: [i32 argc][exec_path\0][null padding][argv\0...][env\0...]
     if buf.len() < std::mem::size_of::<libc::c_int>() {
@@ -463,11 +433,16 @@ pub(crate) fn sweep_orphaned_agent_processes(app: &AppHandle, _skip_pids: &[u32]
 }
 
 // ── macOS process-info FFI (shared by all sweep/reap functions) ──────────
+//
+// `proc_listallpids` lives in `sweep.rs` (which owns `collect_all_pids`).
+// All callers in this file reach it through `sweep::collect_all_pids()`.
+// `proc_pidinfo` and `BSDInfo` are declared here as `pub(super)` so that
+// `sweep.rs` can call `super::proc_pidinfo` / use `super::BSDInfo` without
+// redefining the struct layout in two places.
 
 #[cfg(target_os = "macos")]
 extern "C" {
-    fn proc_listallpids(buffer: *mut libc::c_int, buffersize: libc::c_int) -> libc::c_int;
-    fn proc_pidinfo(
+    pub(super) fn proc_pidinfo(
         pid: libc::c_int,
         flavor: libc::c_int,
         arg: u64,
@@ -480,11 +455,11 @@ extern "C" {
 /// against the macOS SDK — total size 136 bytes.
 #[cfg(target_os = "macos")]
 #[repr(C)]
-struct BSDInfo {
+pub(super) struct BSDInfo {
     _flags_status_xstatus: [u8; 12], // pbi_flags + pbi_status + pbi_xstatus
-    pbi_pid: u32,                    // offset 12
-    pbi_ppid: u32,                   // offset 16
-    pbi_uid: u32,                    // offset 20
+    pub(super) pbi_pid: u32,         // offset 12
+    pub(super) pbi_ppid: u32,        // offset 16
+    pub(super) pbi_uid: u32,         // offset 20
     _rest: [u8; 112],
 }
 
@@ -492,7 +467,7 @@ struct BSDInfo {
 const _: () = assert!(std::mem::size_of::<BSDInfo>() == 136);
 
 #[cfg(target_os = "macos")]
-const PROC_PIDTBSDINFO: libc::c_int = 3;
+pub(super) const PROC_PIDTBSDINFO: libc::c_int = 3;
 
 /// Enumerate all processes on the system owned by the current user and kill any
 /// agent binary stamped with *this* instance's `BUZZ_MANAGED_AGENT` marker
@@ -503,33 +478,10 @@ const PROC_PIDTBSDINFO: libc::c_int = 3;
 #[cfg(target_os = "macos")]
 pub(crate) fn sweep_system_agent_processes(instance_id: &str, skip_pids: &[u32]) {
     let my_uid = unsafe { libc::getuid() };
-
-    // Loop until the buffer is large enough to hold all PIDs. Under a fork
-    // storm the process table can outgrow the initial estimate between the
-    // probe and the fill call.
-    let mut pids: Vec<libc::c_int>;
-    loop {
-        let count = unsafe { proc_listallpids(std::ptr::null_mut(), 0) };
-        if count <= 0 {
-            return;
-        }
-        let buf_len = (count as usize) * 2;
-        pids = vec![0; buf_len];
-        let actual = unsafe {
-            proc_listallpids(
-                pids.as_mut_ptr(),
-                (buf_len * std::mem::size_of::<libc::c_int>()) as libc::c_int,
-            )
-        };
-        if actual <= 0 {
-            return;
-        }
-        pids.truncate(actual as usize);
-        if (actual as usize) < buf_len {
-            break;
-        }
+    let pids = sweep::collect_all_pids();
+    if pids.is_empty() {
+        return;
     }
-
     let my_pid = std::process::id() as i32;
     let mut orphans: Vec<i32> = Vec::new();
 
@@ -729,27 +681,9 @@ pub(crate) fn collect_same_instance_orphans(
     let my_pid = std::process::id() as i32;
     let mut orphans = std::collections::HashSet::new();
 
-    let mut pids: Vec<libc::c_int>;
-    loop {
-        let count = unsafe { proc_listallpids(std::ptr::null_mut(), 0) };
-        if count <= 0 {
-            return orphans;
-        }
-        let buf_len = (count as usize) * 2;
-        pids = vec![0; buf_len];
-        let actual = unsafe {
-            proc_listallpids(
-                pids.as_mut_ptr(),
-                (buf_len * std::mem::size_of::<libc::c_int>()) as libc::c_int,
-            )
-        };
-        if actual <= 0 {
-            return orphans;
-        }
-        pids.truncate(actual as usize);
-        if (actual as usize) < buf_len {
-            break;
-        }
+    let pids = sweep::collect_all_pids();
+    if pids.is_empty() {
+        return orphans;
     }
 
     for &pid in &pids {
@@ -904,39 +838,7 @@ fn buffer_contains_identifier(buf: &[u8], id: &[u8]) -> bool {
 #[cfg(target_os = "macos")]
 fn extract_buzz_marker_value(pid: u32) -> Option<String> {
     let prefix = b"BUZZ_MANAGED_AGENT=";
-
-    let mut mib: [libc::c_int; 3] = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid as libc::c_int];
-    let mut buf_size: libc::size_t = 0;
-
-    if unsafe {
-        libc::sysctl(
-            mib.as_mut_ptr(),
-            3,
-            std::ptr::null_mut(),
-            &mut buf_size,
-            std::ptr::null_mut(),
-            0,
-        )
-    } != 0
-    {
-        return None;
-    }
-
-    let mut buf: Vec<u8> = vec![0; buf_size];
-    if unsafe {
-        libc::sysctl(
-            mib.as_mut_ptr(),
-            3,
-            buf.as_mut_ptr() as *mut libc::c_void,
-            &mut buf_size,
-            std::ptr::null_mut(),
-            0,
-        )
-    } != 0
-    {
-        return None;
-    }
-    buf.truncate(buf_size);
+    let buf = sweep::procargs2_buffer(pid)?;
 
     if buf.len() < std::mem::size_of::<libc::c_int>() {
         return None;
@@ -1009,27 +911,9 @@ fn desktop_is_alive_for_instance(instance_id: &str) -> bool {
     let my_uid = unsafe { libc::getuid() };
     let identifier_bytes = instance_id.as_bytes();
 
-    let mut pids: Vec<libc::c_int>;
-    loop {
-        let count = unsafe { proc_listallpids(std::ptr::null_mut(), 0) };
-        if count <= 0 {
-            return false;
-        }
-        let buf_len = (count as usize) * 2;
-        pids = vec![0; buf_len];
-        let actual = unsafe {
-            proc_listallpids(
-                pids.as_mut_ptr(),
-                (buf_len * std::mem::size_of::<libc::c_int>()) as libc::c_int,
-            )
-        };
-        if actual <= 0 {
-            return false;
-        }
-        pids.truncate(actual as usize);
-        if (actual as usize) < buf_len {
-            break;
-        }
+    let pids = sweep::collect_all_pids();
+    if pids.is_empty() {
+        return false;
     }
 
     for &pid in &pids {
@@ -1072,36 +956,9 @@ fn desktop_is_alive_for_instance(instance_id: &str) -> bool {
         }
         // Check if this desktop process's args/env contain the identifier.
         // The KERN_PROCARGS2 buffer holds argv + environ as null-delimited strings.
-        let mut mib: [libc::c_int; 3] = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid];
-        let mut buf_size: libc::size_t = 0;
-        if unsafe {
-            libc::sysctl(
-                mib.as_mut_ptr(),
-                3,
-                std::ptr::null_mut(),
-                &mut buf_size,
-                std::ptr::null_mut(),
-                0,
-            )
-        } != 0
-        {
+        let Some(args_buf) = sweep::procargs2_buffer(pid as u32) else {
             continue;
-        }
-        let mut args_buf: Vec<u8> = vec![0; buf_size];
-        if unsafe {
-            libc::sysctl(
-                mib.as_mut_ptr(),
-                3,
-                args_buf.as_mut_ptr() as *mut libc::c_void,
-                &mut buf_size,
-                std::ptr::null_mut(),
-                0,
-            )
-        } != 0
-        {
-            continue;
-        }
-        args_buf.truncate(buf_size);
+        };
         // Boundary-anchored search: the identifier in the config JSON is
         // followed by a non-identifier char (typically `"`). A raw substring
         // match would let `...app` match inside `...app.dev`.
@@ -1168,27 +1025,9 @@ pub(crate) fn reap_dead_instance_agents(our_instance_id: &str, skip_pids: &[u32]
     let my_uid = unsafe { libc::getuid() };
     let my_pid = std::process::id() as i32;
 
-    let mut pids: Vec<libc::c_int>;
-    loop {
-        let count = unsafe { proc_listallpids(std::ptr::null_mut(), 0) };
-        if count <= 0 {
-            return;
-        }
-        let buf_len = (count as usize) * 2;
-        pids = vec![0; buf_len];
-        let actual = unsafe {
-            proc_listallpids(
-                pids.as_mut_ptr(),
-                (buf_len * std::mem::size_of::<libc::c_int>()) as libc::c_int,
-            )
-        };
-        if actual <= 0 {
-            return;
-        }
-        pids.truncate(actual as usize);
-        if (actual as usize) < buf_len {
-            break;
-        }
+    let pids = sweep::collect_all_pids();
+    if pids.is_empty() {
+        return;
     }
 
     // Collect (pid, instance_id) for all foreign agent processes.
@@ -1310,6 +1149,8 @@ pub(crate) fn reap_dead_instance_agents(our_instance_id: &str, skip_pids: &[u32]
 
 #[cfg(not(unix))]
 pub(crate) fn reap_dead_instance_agents(_our_instance_id: &str, _skip_pids: &[u32]) {}
+
+// Exact-path harness sweep lives in runtime/sweep.rs (re-exported above).
 
 /// Kill stale agent processes from a previous session whose PID is still alive
 /// but not tracked in the current `runtimes` map. Updates the record fields and
@@ -1511,13 +1352,24 @@ pub fn build_managed_agent_summary(
     // next to an "out of date" badge would contradict it.
     let (persona_out_of_date, persona_orphaned) = persona_drift_state(record, personas);
 
+    // Restart badge: the running process stamped its effective spawn config
+    // at launch; recompute from current disk state and flag drift. Only a
+    // tracked live process can drift — stopped agents spawn fresh, and
+    // adopted (runtime_pid-only) processes have no stamped hash to compare.
+    let needs_restart = runtimes.get(&record.pubkey).is_some_and(|runtime| {
+        use tauri::Manager;
+        let state = app.state::<crate::app_state::AppState>();
+        runtime.spawn_config_hash
+            != crate::managed_agents::spawn_hash::spawn_config_hash(
+                record,
+                personas,
+                &crate::relay::relay_ws_url_with_override(&state),
+            )
+    });
+
     // Resolve the effective harness the same way, then derive args/mcp from it,
     // so the UI reflects the persona's current harness (or an explicit pin).
-    let effective_command = crate::managed_agents::effective_agent_command(
-        record.persona_id.as_deref(),
-        personas,
-        record.agent_command_override.as_deref(),
-    );
+    let effective_command = crate::managed_agents::record_agent_command(record, personas);
     let effective_args = normalize_agent_args(&effective_command, record.agent_args.clone());
     let effective_mcp_command = known_acp_runtime(&effective_command)
         .and_then(|r| r.mcp_command)
@@ -1544,6 +1396,7 @@ pub fn build_managed_agent_summary(
         provider: record.provider.clone(),
         persona_out_of_date,
         persona_orphaned,
+        needs_restart,
         mcp_toolsets: record.mcp_toolsets.clone(),
         env_vars: record.env_vars.clone(),
         backend: record.backend.clone(),
@@ -1665,11 +1518,7 @@ pub fn spawn_agent_child(
     // command, so we recompute them from the effective value rather than the
     // frozen record snapshot. Mirrors the model resolution below.
     let personas = super::load_personas(app).unwrap_or_default();
-    let effective_command = super::effective_agent_command(
-        record.persona_id.as_deref(),
-        &personas,
-        record.agent_command_override.as_deref(),
-    );
+    let effective_command = super::record_agent_command(record, &personas);
     let agent_args = normalize_agent_args(&effective_command, record.agent_args.clone());
     let resolved_acp_command = resolve_command(&record.acp_command)
         .ok_or_else(|| missing_command_message(&record.acp_command, "ACP harness command"))?;
@@ -1746,6 +1595,92 @@ pub fn spawn_agent_child(
     let runtime_meta = known_acp_runtime(&effective_command);
     if runtime_meta.is_some_and(|r| r.mcp_hooks) {
         command.env("MCP_HOOK_SERVERS", "*");
+    }
+
+    // ── Readiness check: set setup-payload if agent is not ready ─────────────
+    //
+    // Build the effective env the agent would have at start-time, run the
+    // readiness predicate, and if anything is missing, serialize the payload
+    // into BUZZ_ACP_SETUP_PAYLOAD.  buzz-acp detects this env var on startup
+    // and enters the minimal setup-listener mode instead of the agent pool.
+    //
+    // SECURITY: BUZZ_ACP_SETUP_PAYLOAD is in RESERVED_ENV_KEYS so user env
+    // cannot set it, but we also explicitly remove it after writing user env
+    // to guard against the parent-process environment. We then set it only
+    // when desktop has computed NotReady — the desktop is the sole readiness
+    // source and buzz-acp only transports the payload.
+    //
+    // The JSON format mirrors `setup_mode::SetupPayload` in buzz-acp:
+    //   { "agent_name": "...", "agent_pubkey": "...", "requirements": [{ "surface": "...", ... }] }
+    {
+        use crate::managed_agents::{
+            agent_readiness, resolve_effective_agent_env, AgentReadiness, Requirement,
+        };
+
+        let effective = resolve_effective_agent_env(record, &personas, runtime_meta);
+        // Compute the optional payload before touching the command.
+        let setup_payload_json =
+            if let AgentReadiness::NotReady { requirements } = agent_readiness(&effective) {
+                let reqs: Vec<serde_json::Value> = requirements
+                    .into_iter()
+                    .map(|r| match r {
+                        Requirement::NormalizedField { field } => serde_json::json!({
+                            "surface": "normalized_field",
+                            "field": field,
+                        }),
+                        Requirement::EnvKey { key } => serde_json::json!({
+                            "surface": "env_key",
+                            "key": key,
+                        }),
+                        Requirement::CliLogin {
+                            probe_args,
+                            setup_copy,
+                        } => serde_json::json!({
+                            "surface": "cli_login",
+                            "probe_args": probe_args,
+                            "setup_copy": setup_copy,
+                        }),
+                    })
+                    .collect();
+                let payload = serde_json::json!({
+                    "agent_name": record.name,
+                    "agent_pubkey": record.pubkey,
+                    "requirements": reqs,
+                });
+                match serde_json::to_string(&payload) {
+                    Ok(json) => Some(json),
+                    Err(e) => {
+                        eprintln!(
+                            "buzz-desktop: failed to serialize setup payload for {}: {e}",
+                            record.name
+                        );
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+
+        // Strip the key from the process-spawned command on every path.
+        // Two independent guards protect the invariant:
+        //   1. BUZZ_ACP_SETUP_PAYLOAD is in RESERVED_ENV_KEYS, so
+        //      merged_user_env() can never write it via saved/persona env.
+        //   2. This env_remove() clears any ambient parent-process value
+        //      inherited by std::process::Command before we conditionally
+        //      set the desktop-computed trusted value below.
+        // Note: merged_user_env() is written further below in this function;
+        // ordering relative to that call is NOT what makes this safe — the
+        // reserved-key strip (guard 1) handles user env regardless of order.
+        command.env_remove("BUZZ_ACP_SETUP_PAYLOAD");
+
+        // Set the payload only when desktop computed NotReady.
+        if let Some(json) = setup_payload_json {
+            command.env("BUZZ_ACP_SETUP_PAYLOAD", json);
+            eprintln!(
+                "buzz-desktop: agent {} not ready — spawning in setup-listener mode",
+                record.name
+            );
+        }
     }
     // Only emit BUZZ_ACP_IDLE_TIMEOUT when the user has explicitly set an
     // override. When unset, the buzz-acp harness applies its own default
@@ -1931,6 +1866,13 @@ pub fn spawn_agent_child(
         )
     })?;
 
+    // Stamp the effective spawn config so the summary builder can flag
+    // needs_restart when disk state drifts from what this process runs.
+    // `effective_relay_url` is already resolved, and resolution is idempotent,
+    // so it serves as the workspace-relay input here.
+    let spawn_config_hash =
+        super::spawn_hash::spawn_config_hash(record, &personas, &effective_relay_url);
+
     let _ = super::write_agent_pid_file(app, &record.pubkey, child.id());
 
     // Windows: assign the harness to a Job Object so its whole tree dies with
@@ -1939,10 +1881,15 @@ pub fn spawn_agent_child(
     return Ok(super::process_lifecycle::finish_spawn(
         child,
         log_path,
+        spawn_config_hash,
         &record.name,
     ));
     #[cfg(not(windows))]
-    Ok(crate::managed_agents::ManagedAgentProcess { child, log_path })
+    Ok(crate::managed_agents::ManagedAgentProcess {
+        child,
+        log_path,
+        spawn_config_hash,
+    })
 }
 
 fn child_rust_log_filter() -> String {
@@ -2095,8 +2042,11 @@ pub(crate) fn runtime_metadata_env_vars<'a>(
 /// Resolve the effective (prompt, model, provider) triple for a persona-linked agent.
 ///
 /// Given a persona_id, finds the persona in the list and returns its system_prompt,
-/// model, and provider as the authoritative values. Falls back to the record's own
-/// prompt/model and None for provider when no persona is linked or found.
+/// model, and provider as the authoritative values. When the persona leaves `model`
+/// or `provider` blank (None or whitespace-only), falls back to the record's own
+/// field using the same precedence rule as `persona_snapshot_with_agent_config_fallback`
+/// so the display surface matches spawn behavior. Falls back to the record's own
+/// prompt/model/provider when no persona is linked or found.
 ///
 /// Used by `agent_config.rs` to inject persona defaults into the config surface
 /// before running the reader, so BuzzExplicit-tagged fields can be re-tagged to
@@ -2106,14 +2056,16 @@ pub(crate) fn resolve_effective_prompt_model_provider(
     personas: &[crate::managed_agents::types::PersonaRecord],
     record_prompt: Option<String>,
     record_model: Option<String>,
+    record_provider: Option<String>,
 ) -> (Option<String>, Option<String>, Option<String>) {
+    let fallback = crate::managed_agents::persona_events::persona_field_with_record_fallback;
     match persona_id.and_then(|pid| personas.iter().find(|p| p.id == pid)) {
         Some(p) => (
             Some(p.system_prompt.clone()),
-            p.model.clone(),
-            p.provider.clone(),
+            fallback(p.model.as_deref(), record_model.as_deref()), // fallback: record.model
+            fallback(p.provider.as_deref(), record_provider.as_deref()), // fallback: record.provider
         ),
-        None => (record_prompt, record_model, None),
+        None => (record_prompt, record_model, record_provider),
     }
 }
 

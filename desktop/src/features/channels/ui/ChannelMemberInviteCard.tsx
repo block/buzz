@@ -1,7 +1,8 @@
 import { Search, UserPlus, X } from "lucide-react";
 import * as React from "react";
 
-import { formatPubkey } from "@/features/channels/lib/memberUtils";
+import { truncatePubkey } from "@/shared/lib/pubkey";
+import { PubKey } from "@/shared/ui/PubKey";
 import { useIsArchivedPredicate } from "@/features/identity-archive/hooks";
 import { useUserSearchQuery } from "@/features/profile/hooks";
 import type {
@@ -17,7 +18,7 @@ function formatSearchUserName(user: UserSearchResult) {
   return (
     user.displayName?.trim() ||
     user.nip05Handle?.trim() ||
-    formatPubkey(user.pubkey)
+    truncatePubkey(user.pubkey)
   );
 }
 
@@ -198,6 +199,22 @@ export function ChannelMemberInviteCard({
               ))}
             </div>
           ) : null}
+          {selectedInvitees.length > 0 ? (
+            <div className="space-y-1 border-t border-border/70 px-2.5 py-2">
+              {selectedInvitees.map((invitee) => (
+                <div
+                  className="flex min-w-0 flex-wrap items-baseline gap-x-2 text-2xs text-muted-foreground"
+                  data-testid={`invitee-pubkey-${invitee.pubkey}`}
+                  key={invitee.pubkey}
+                >
+                  <span className="font-medium">
+                    {formatSearchUserName(invitee)}
+                  </span>
+                  <PubKey pubkey={invitee.pubkey} variant="full" />
+                </div>
+              ))}
+            </div>
+          ) : null}
           {deferredInviteQuery.length > 0 ? (
             <div className="border-t border-border/70 px-2 py-2">
               {userSearchQuery.isLoading ? (
@@ -292,7 +309,7 @@ export function ChannelMemberInviteCard({
         <div className="space-y-1 text-sm text-destructive">
           {submissionErrors.map((error) => (
             <p key={`${error.pubkey}-${error.error}`}>
-              {formatPubkey(error.pubkey)}: {error.error}
+              {truncatePubkey(error.pubkey)}: {error.error}
             </p>
           ))}
         </div>

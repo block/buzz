@@ -67,6 +67,97 @@ pub struct PersonaRecord {
     pub updated_at: String,
 }
 
+impl PersonaRecord {
+    /// Project this persona onto a key-less unified [`ManagedAgentRecord`]
+    /// (Phase 1A store fold). Identity fields stay empty — keys are minted on
+    /// first start. `PersonaRecord.id` becomes `slug`, preserving the 30175
+    /// event coordinate (`d_tag = slug`) across the fold.
+    // Wired in by the stage-3 fold migration (same PR); allow until then.
+    #[allow(dead_code)]
+    pub fn into_agent_record(self) -> ManagedAgentRecord {
+        ManagedAgentRecord {
+            pubkey: String::new(),
+            name: self.display_name.clone(),
+            persona_id: None,
+            private_key_nsec: String::new(),
+            auth_tag: None,
+            relay_url: String::new(),
+            avatar_url: self.avatar_url,
+            acp_command: DEFAULT_ACP_COMMAND.to_string(),
+            agent_command: String::new(),
+            agent_command_override: None,
+            agent_args: Vec::new(),
+            mcp_command: String::new(),
+            turn_timeout_seconds: DEFAULT_AGENT_TURN_TIMEOUT_SECONDS,
+            idle_timeout_seconds: None,
+            max_turn_duration_seconds: None,
+            parallelism: default_agent_parallelism(),
+            system_prompt: (!self.system_prompt.is_empty()).then_some(self.system_prompt),
+            model: self.model,
+            provider: self.provider,
+            persona_source_version: None,
+            mcp_toolsets: None,
+            env_vars: self.env_vars,
+            start_on_app_launch: false,
+            runtime_pid: None,
+            backend: BackendKind::default(),
+            backend_agent_id: None,
+            provider_binary_path: None,
+            persona_team_dir: None,
+            persona_name_in_team: None,
+            created_at: self.created_at,
+            updated_at: self.updated_at,
+            last_started_at: None,
+            last_stopped_at: None,
+            last_exit_code: None,
+            last_error: None,
+            respond_to: RespondTo::default(),
+            respond_to_allowlist: Vec::new(),
+            display_name: Some(self.display_name),
+            slug: Some(self.id),
+            runtime: self.runtime,
+            name_pool: self.name_pool,
+            is_builtin: self.is_builtin,
+            is_active: self.is_active,
+            source_team: self.source_team,
+            source_team_persona_slug: self.source_team_persona_slug,
+            relay_mesh: None,
+        }
+    }
+}
+
+impl ManagedAgentRecord {
+    /// Present a key-less definition record back in the legacy
+    /// [`PersonaRecord`] shape — the compatibility view the persona command
+    /// surface serves until Phase 1B unifies the UI. Inverse of
+    /// [`PersonaRecord::into_agent_record`] for the fields personas carry.
+    // Wired in by the stage-3 fold shims (same PR); allow until then.
+    #[allow(dead_code)]
+    pub fn to_persona_view(&self) -> Option<PersonaRecord> {
+        let slug = self.slug.clone()?;
+        Some(PersonaRecord {
+            id: slug,
+            display_name: self
+                .display_name
+                .clone()
+                .unwrap_or_else(|| self.name.clone()),
+            avatar_url: self.avatar_url.clone(),
+            system_prompt: self.system_prompt.clone().unwrap_or_default(),
+            runtime: self.runtime.clone(),
+            model: self.model.clone(),
+            provider: self.provider.clone(),
+            name_pool: self.name_pool.clone(),
+            is_builtin: self.is_builtin,
+            is_active: self.is_active,
+            source_team: self.source_team.clone(),
+            source_team_persona_slug: self.source_team_persona_slug.clone(),
+            env_vars: self.env_vars.clone(),
+            created_at: self.created_at.clone(),
+            updated_at: self.updated_at.clone(),
+        })
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RelayAgentInfo {
     pub pubkey: String,
@@ -204,6 +295,43 @@ pub struct ManagedAgentRecord {
     /// Preserved across mode toggles so users don't lose state.
     #[serde(default)]
     pub respond_to_allowlist: Vec<String>,
+    /// Optional display name distinct from the unique `name` handle. Absorbed
+    /// from `PersonaRecord.display_name` (unified agent model, Phase 1A).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    /// Stable definition slug — the former `PersonaRecord.id`. Key-less
+    /// records (definitions not yet instantiated) publish kind:30175 at
+    /// `d_tag = slug`, preserving the pre-merge event coordinates. `None` for
+    /// agents created directly (never persona-backed).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slug: Option<String>,
+    /// Absorbed from `PersonaRecord.runtime` — the preferred ACP runtime ID
+    /// (e.g. 'goose', 'claude'). Record-first command resolution reads this
+    /// before falling back to legacy persona lookup; populated by the store
+    /// migration and at create time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<String>,
+    /// Pool of short thematic names for clones of this agent. Absorbed from
+    /// `PersonaRecord.name_pool`; feeds clone naming.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub name_pool: Vec<String>,
+    /// Absorbed from `PersonaRecord.is_builtin`.
+    #[serde(default)]
+    pub is_builtin: bool,
+    /// Absorbed from `PersonaRecord.is_active` — `false` means an archived
+    /// definition hidden from pickers. Defaults `true` for existing records.
+    #[serde(default = "default_record_active")]
+    pub is_active: bool,
+    /// Absorbed from `PersonaRecord.source_team` — team ID when this
+    /// definition was imported from a team directory (team definitions are
+    /// non-editable). Distinct from `persona_team_dir`/`persona_name_in_team`,
+    /// which are the instance-side spawn plumbing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_team: Option<String>,
+    /// Absorbed from `PersonaRecord.source_team_persona_slug` — the
+    /// definition's slug within its source team.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_team_persona_slug: Option<String>,
     /// Typed marker for relay-mesh agents. `Some(_)` means this agent runs its
     /// inference through Buzz's relay-mesh local endpoint; the `model_ref` is
     /// the served model id to route to. `None` is a normal agent.
@@ -240,6 +368,13 @@ pub struct RelayMeshConfig {
 pub struct ManagedAgentProcess {
     pub child: Child,
     pub log_path: PathBuf,
+    /// Digest of the effective spawn config at launch (see
+    /// `spawn_hash::spawn_config_hash`). Runtime-only — never persisted. The
+    /// summary builder recomputes the hash from current disk state and flags
+    /// `needs_restart` on mismatch. Agents adopted via a persisted
+    /// `runtime_pid` have no `ManagedAgentProcess` entry, so their spawn
+    /// config is unknown and the badge stays off.
+    pub spawn_config_hash: u64,
     /// Win32 Job Object owning the harness + its entire process tree. Closing
     /// the handle (via `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`) kills the whole
     /// tree — the Windows mirror of the Unix process-group teardown. `None`
@@ -283,6 +418,13 @@ pub struct ManagedAgentSummary {
     /// so the UI should not prompt a respawn — the pinned snapshot is all the
     /// config that remains.
     pub persona_orphaned: bool,
+    /// `true` when the running process was spawned with a config that no
+    /// longer matches what a spawn would use today — a plain restart would
+    /// change what runs. Complements `persona_out_of_date`: the badge means
+    /// "a restart would change what runs"; out-of-date means "a respawn
+    /// would." Always `false` for stopped agents and for processes adopted
+    /// via a persisted `runtime_pid` (their spawn config is unknown).
+    pub needs_restart: bool,
     pub mcp_toolsets: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub env_vars: BTreeMap<String, String>,
@@ -327,6 +469,7 @@ pub struct CreateManagedAgentRequest {
     pub system_prompt: Option<String>,
     pub avatar_url: Option<String>,
     pub model: Option<String>,
+    pub provider: Option<String>,
     pub mcp_toolsets: Option<String>,
     /// Environment variables for this agent. Layered on top of persona env.
     #[serde(default)]
@@ -502,6 +645,14 @@ pub struct UpdateManagedAgentRequest {
     pub acp_command: Option<String>,
     #[serde(default)]
     pub agent_command: Option<String>,
+    /// True when the accompanying `agent_command` is a runtime/Custom command
+    /// the user deliberately picked for a linked persona (i.e. the dialog is
+    /// not inheriting). Distinguishes a real pin — including one that maps to
+    /// the persona's own runtime — from a persona-authoritative restatement,
+    /// so a same-runtime pick is preserved instead of being dropped back to
+    /// inherit. Ignored when `agent_command` is absent or the inherit sentinel.
+    #[serde(default)]
+    pub harness_override: bool,
     #[serde(default)]
     pub agent_args: Option<Vec<String>>,
     #[serde(default)]

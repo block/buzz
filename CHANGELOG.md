@@ -1,5 +1,91 @@
 # Changelog
 
+## v0.3.46
+
+- fix(desktop): preserve agent model/provider when persona snapshot fields are blank ([#1583](https://github.com/block/buzz/pull/1583)) ([`a3ee2c569`](https://github.com/block/buzz/commit/a3ee2c5693d58f32b17072a49add2dbaff8e0ffd))
+- feat(acp,desktop): identify and reap stale agent harness processes ([#1582](https://github.com/block/buzz/pull/1582)) ([`3c6c0d447`](https://github.com/block/buzz/commit/3c6c0d4478e5bb6e734cc16eafa6de6a433bf8fe))
+- feat(desktop): active-draft badge, send-from-drafts confirm dialog, thread-deleted state ([#1581](https://github.com/block/buzz/pull/1581)) ([`b394e95ef`](https://github.com/block/buzz/commit/b394e95ef03b131fb43bda0954d900ae56473f31))
+- fix(desktop): treat baked build env vars as satisfying required agent config ([#1580](https://github.com/block/buzz/pull/1580)) ([`b90e80443`](https://github.com/block/buzz/commit/b90e80443ea498e2b7b97bde9069d4b7c6ab4048))
+- feat(desktop): add "Copy image" to image right-click context menu ([#1579](https://github.com/block/buzz/pull/1579)) ([`683f7fec1`](https://github.com/block/buzz/commit/683f7fec1c357f1140a4f874720f513b69d919a4))
+- fix(nest): use buzz-dev symlink name for dev builds ([#1587](https://github.com/block/buzz/pull/1587)) ([`dcbb3ff78`](https://github.com/block/buzz/commit/dcbb3ff7892891cdc3c447049444cd2be8570f5e))
+- fix(composer): address image-editor follow-up nits on #1491 ([#1565](https://github.com/block/buzz/pull/1565)) ([`49391d807`](https://github.com/block/buzz/commit/49391d80713b74d1f48a442b193d9a91b086d99a))
+- fix(desktop): render black static boot screen ([#1570](https://github.com/block/buzz/pull/1570)) ([`10444d248`](https://github.com/block/buzz/commit/10444d248e26f6ab119cb13ccef906f42dc333da))
+- feat(agents): group activity tool bursts ([#1571](https://github.com/block/buzz/pull/1571)) ([`426f04484`](https://github.com/block/buzz/commit/426f044844951fc1ced7670d2dd5d25812deced9))
+- feat(desktop): aggregated overview rail, commit detail page, and full breadcrumbs ([#1573](https://github.com/block/buzz/pull/1573)) ([`c97263901`](https://github.com/block/buzz/commit/c97263901f9757ed6e9ddbf3f47097e2c6567e24))
+- fix(desktop): fetch profiles for reaction actors and thread-reply authors ([#1550](https://github.com/block/buzz/pull/1550)) ([`62def1459`](https://github.com/block/buzz/commit/62def1459c6e4d2beb5fda9e0c4accde16aa2c8d))
+- refactor(desktop): unify EditAgentDialog styling with PersonaDialog ([#1540](https://github.com/block/buzz/pull/1540)) ([`c258ffc4a`](https://github.com/block/buzz/commit/c258ffc4a87fb523900801d0959334912f25d30a))
+- feat(desktop): add 10-minute message grouping window ([#1578](https://github.com/block/buzz/pull/1578)) ([`564ead385`](https://github.com/block/buzz/commit/564ead3856c1e9f5c8760aaa6bcc9bd16cbbd9be))
+- feat(desktop): unify sidebar section actions into a per-section ⋮ menu ([#1577](https://github.com/block/buzz/pull/1577)) ([`d94561795`](https://github.com/block/buzz/commit/d94561795a48af743278bfa1e912b894228312f3))
+- feat(desktop): emoji avatar picker for agents + reliable picker scroll ([#1576](https://github.com/block/buzz/pull/1576)) ([`ed84a8735`](https://github.com/block/buzz/commit/ed84a87358495a4cdd6e61ee1cfe01db9a367b35))
+- fix(desktop): sync derived active-turn liveness in channel activity path ([#1492](https://github.com/block/buzz/pull/1492)) ([`1f5ba5bb2`](https://github.com/block/buzz/commit/1f5ba5bb27a94d33cce5aaa7cfea1d116c7d582d))
+- fix(personas): remove goose runtime pin from Fizz built-in ([#1566](https://github.com/block/buzz/pull/1566)) ([`e3008b360`](https://github.com/block/buzz/commit/e3008b3604330803975d66920204e7365fc571a9))
+- feat(acp,buzz-agent): thread model name through NIP-AM kind 44200 emit path ([#1564](https://github.com/block/buzz/pull/1564)) ([`08e707eb5`](https://github.com/block/buzz/commit/08e707eb573a187432a950154a15f9cb4785d25f))
+- sync channel sort preferences across clients ([#1556](https://github.com/block/buzz/pull/1556)) ([`04a9d1029`](https://github.com/block/buzz/commit/04a9d10299b92c5b0e7597a53914b9a753985c51))
+- fix desktop canvas header blur in split channel management ([#1558](https://github.com/block/buzz/pull/1558)) ([`2ef26ec21`](https://github.com/block/buzz/commit/2ef26ec21048857fc11982cd8c153e1c795f2c6d))
+- feat(composer): compose spoiler, annotation, and tooltip controls ([#1491](https://github.com/block/buzz/pull/1491)) ([`1aa87bb26`](https://github.com/block/buzz/commit/1aa87bb26b96d13fa2bba042ccd933e988d79bae))
+- feat(channel list): add persistent channel sort toggle ([#1505](https://github.com/block/buzz/pull/1505)) ([`36ac5243f`](https://github.com/block/buzz/commit/36ac5243ff8aed4401d3453a115afc4a603fccf0))
+
+
+## v0.3.45
+
+- chore(deps): bump crossbeam-epoch to 0.9.20 for RUSTSEC-2026-0204 ([#1563](https://github.com/block/buzz/pull/1563)) ([`75b52ad7e`](https://github.com/block/buzz/commit/75b52ad7e54ca7f930656e756910a08d0f146b82))
+- fix(archive): atomic remove-kind path + split test modules ([#1562](https://github.com/block/buzz/pull/1562)) ([`484bede75`](https://github.com/block/buzz/commit/484bede7597814dd7dc322d1f72f69c08545ef42))
+- feat(archive): add agent turn-metric (kind 44200) local archive ([#1555](https://github.com/block/buzz/pull/1555)) ([`429f54b4f`](https://github.com/block/buzz/commit/429f54b4f45df0d5f4a52aafb8913e903ebdc6b3))
+- feat(desktop,buzz-acp): add harness-agnostic config bridge and setup-listener mode ([#1411](https://github.com/block/buzz/pull/1411)) ([`d8355d318`](https://github.com/block/buzz/commit/d8355d318853f85ffaf53dc7b5215bc998b460c4))
+- fix(desktop): stop edit-channel dialog hanging on "Saving..." ([#1557](https://github.com/block/buzz/pull/1557)) ([`76806cb1f`](https://github.com/block/buzz/commit/76806cb1f654650a412b7f0368f495062a9ee224))
+- feat(archive): add local-save archive with observer-feed default-on option ([#1442](https://github.com/block/buzz/pull/1442)) ([`711078807`](https://github.com/block/buzz/commit/711078807777db77960404e51ffd862c08a33ded))
+- feat(desktop): add Slack-like Drafts inbox with persistence and image fix ([#1539](https://github.com/block/buzz/pull/1539)) ([`4c598dcef`](https://github.com/block/buzz/commit/4c598dcef577bb204f9666eaac5b95743a0f8736))
+- fix(setup): fix syntax error in seed-local-community.sh ([#1547](https://github.com/block/buzz/pull/1547)) ([`3729a6515`](https://github.com/block/buzz/commit/3729a6515617abdae03117d9713dfeb7e1ff74c2))
+- feat(desktop): add right-click context menu to workspace rail ([#1552](https://github.com/block/buzz/pull/1552)) ([`0e87998f8`](https://github.com/block/buzz/commit/0e87998f8fcac0ff1612d661cbd505a63b51c550))
+- fix(desktop): restore saved window geometry on launch ([#1554](https://github.com/block/buzz/pull/1554)) ([`e790c9828`](https://github.com/block/buzz/commit/e790c9828f1ae85ce7618d06e67e78732be4221b))
+- feat(desktop): add typeahead search to persona model dropdown ([#1542](https://github.com/block/buzz/pull/1542)) ([`3b43743e1`](https://github.com/block/buzz/commit/3b43743e1f2acd192705a80629ceadfa7a737831))
+- fix(desktop): publish new agent profiles to active relay ([#1546](https://github.com/block/buzz/pull/1546)) ([`346efe08b`](https://github.com/block/buzz/commit/346efe08b3ca6e847b6c9c2f843cdb8834db123c))
+- chore(desktop): use dot access for host header assignment ([#1548](https://github.com/block/buzz/pull/1548)) ([`ccfdf45bc`](https://github.com/block/buzz/commit/ccfdf45bc5dd61ef7d59644293d84deed24e1789))
+- fix(onboarding): guard against webkit2gtk WAL race with explicit profile-event signal ([#1508](https://github.com/block/buzz/pull/1508)) ([`c2ee4d162`](https://github.com/block/buzz/commit/c2ee4d162753a3338dc434f85c80a82eb284b3d2))
+
+
+## v0.3.44
+
+- fix(desktop): keep thread-summary badges mounted through scrollback prepends ([#1533](https://github.com/block/buzz/pull/1533)) ([`6abf614fd`](https://github.com/block/buzz/commit/6abf614fd4eb512cf2e4175f17dc09892a8b472d))
+- refactor(shell): drop bundled PortableGit, add BUZZ_SHELL override + dialect hint ([#1536](https://github.com/block/buzz/pull/1536)) ([`cfa208983`](https://github.com/block/buzz/commit/cfa20898313080b7a106ae0e092d8ed6815daeb0))
+- feat(nips,relay,acp): NIP-AM durable encrypted agent turn metrics (kind 44200) ([#1441](https://github.com/block/buzz/pull/1441)) ([`71265ca36`](https://github.com/block/buzz/commit/71265ca36105dbf62453a99c998c3f3dd134a304))
+
+
+## v0.3.43
+
+- fix(desktop): sync agent relay profile when persona avatar changes ([#1512](https://github.com/block/buzz/pull/1512)) ([`ce901f7c1`](https://github.com/block/buzz/commit/ce901f7c1e548a0aab0d9e97f4951ea134f6b3d2))
+- feat(desktop): redesign appearance settings with mode-first theme picker ([#1528](https://github.com/block/buzz/pull/1528)) ([`9e773f103`](https://github.com/block/buzz/commit/9e773f103a2829d1b0195a2bf4f01a4b3ff69291))
+- fix(deps): restore windows-* crates downgraded by chrono bump (fixes Windows Rust on main) ([#1532](https://github.com/block/buzz/pull/1532)) ([`d40837085`](https://github.com/block/buzz/commit/d408370851643fca1525cdb00147e589e7408f21))
+- chore(renovate): stop rebase churn between weekly sweeps ([#1530](https://github.com/block/buzz/pull/1530)) ([`a8238cd67`](https://github.com/block/buzz/commit/a8238cd670031bf3595fa8d0f2e79e6f64571054))
+- fix(deps): unversion isomorphic-git pnpm patch key ([#1529](https://github.com/block/buzz/pull/1529)) ([`2a24765fd`](https://github.com/block/buzz/commit/2a24765fd74f66764890746a84f9654e578986f3))
+- chore(deps): update dependency @tanstack/react-virtual to v3.14.5 ([#1523](https://github.com/block/buzz/pull/1523)) ([`b66a53f5b`](https://github.com/block/buzz/commit/b66a53f5b5ba4355511043ab621f1219417b0a4b))
+- chore(deps): update redis to v1.2.2 ([#1049](https://github.com/block/buzz/pull/1049)) ([`f1b29140c`](https://github.com/block/buzz/commit/f1b29140c66e2987fedb0fa66174552754721d97))
+- feat(desktop): restore section icon/emoji picker ([#1516](https://github.com/block/buzz/pull/1516)) ([`232b6066c`](https://github.com/block/buzz/commit/232b6066c0fe54e849537aaa8da644d42bc3e33c))
+- chore(deps): update radix-ui-primitives monorepo ([#1524](https://github.com/block/buzz/pull/1524)) ([`dc383c199`](https://github.com/block/buzz/commit/dc383c1993c5dfe8fea95f4e10f1e5ee5648f7aa))
+- fix(desktop): stop Leave-channel dialog from freezing the app ([#1482](https://github.com/block/buzz/pull/1482)) ([`668d30b0c`](https://github.com/block/buzz/commit/668d30b0cf7a466480d07d024583963dc51e2d51))
+- perf: lazy-load avatars and message images ([#1517](https://github.com/block/buzz/pull/1517)) ([`d09d7dea5`](https://github.com/block/buzz/commit/d09d7dea558bcd17d66315ca099a5a2752a3be60))
+- Live thread-summary push: badge counts update on reply ingest ([#1521](https://github.com/block/buzz/pull/1521)) ([`74a30c3de`](https://github.com/block/buzz/commit/74a30c3de8ff61005fecac53eb007e8a616a9229))
+- chore(deps): update all non-major dependencies ([#1163](https://github.com/block/buzz/pull/1163)) ([`a255a7735`](https://github.com/block/buzz/commit/a255a7735855048065b3cc4e530b4af5a70f444d))
+- chore(deps): update rust crate anyhow to v1.0.103 ([#1525](https://github.com/block/buzz/pull/1525)) ([`26d609cbe`](https://github.com/block/buzz/commit/26d609cbe1770b3bb5809c57bb0d66e775e6ac63))
+- chore(deps): update cashapp/activate-hermit digest to cea9af7 ([#1522](https://github.com/block/buzz/pull/1522)) ([`19d98319a`](https://github.com/block/buzz/commit/19d98319a811cbc63dd34300ac732fa9941f054a))
+- chore(deps): update rust crate chrono to v0.4.45 ([#1050](https://github.com/block/buzz/pull/1050)) ([`3caa66d4f`](https://github.com/block/buzz/commit/3caa66d4f047fced63626667261372d49d3c04a9))
+- chore(deps): update actions/cache digest to caa2961 ([#1341](https://github.com/block/buzz/pull/1341)) ([`8dea817fa`](https://github.com/block/buzz/commit/8dea817fa97b384b7ea8a2f20789300d5e0a8c60))
+- chore(deps): pin dependencies ([#1162](https://github.com/block/buzz/pull/1162)) ([`4b01040af`](https://github.com/block/buzz/commit/4b01040afb3cc778f3a2a1d8f89af37352b2ef35))
+- feat(desktop): replace placeholder icon with actual app icon on welcome screen ([#1527](https://github.com/block/buzz/pull/1527)) ([`5b88e5956`](https://github.com/block/buzz/commit/5b88e595657cf4ffc740e30b187439fe53547331))
+- feat(desktop): enable native spellcheck in message composer ([#1515](https://github.com/block/buzz/pull/1515)) ([`a1b5983e5`](https://github.com/block/buzz/commit/a1b5983e5400a6bd9f4c8056086de616931e33b4))
+- fix: let agent owners delete their agent's messages (relay kind:5 + desktop/mobile UX) ([#1519](https://github.com/block/buzz/pull/1519)) ([`642800548`](https://github.com/block/buzz/commit/6428005487f0690019dc27449a6a52cc29cc6479))
+- chore(desktop): bring ChannelScreen back under the size gate ([#1520](https://github.com/block/buzz/pull/1520)) ([`8174f2b0a`](https://github.com/block/buzz/commit/8174f2b0a0aee3d0252ef8923a043b2aa2773499))
+- fix(zoom) desktop chrome clearance under text zoom ([#1490](https://github.com/block/buzz/pull/1490)) ([`ee4c9ef13`](https://github.com/block/buzz/commit/ee4c9ef139724a3cb82841d449674e6c96932b7b))
+- fix(activity panel): handle back navigation ([#1487](https://github.com/block/buzz/pull/1487)) ([`caf644eda`](https://github.com/block/buzz/commit/caf644eda730c8472183e6801d428f3fd8c05ef7))
+- Port channel windows to mobile ([#1518](https://github.com/block/buzz/pull/1518)) ([`6716cd31a`](https://github.com/block/buzz/commit/6716cd31a5303f3964a7acac8159c365d28f55f0))
+- perf: GIN index for e-tag containment + delta profile fetch (scroll-back ~2.1s/page) ([#1514](https://github.com/block/buzz/pull/1514)) ([`33886e3de`](https://github.com/block/buzz/commit/33886e3dec4130e512d8242207adfe2811a92579))
+- GUI read-model overhaul: server-assembled channel windows (Correct™ pagination + relay-signed bounds) ([#1500](https://github.com/block/buzz/pull/1500)) ([`62bb9fe8c`](https://github.com/block/buzz/commit/62bb9fe8c81eee6573c434ffa3227fa96ad9dd4b))
+- feat(desktop): show activity timestamps on demand ([#1506](https://github.com/block/buzz/pull/1506)) ([`c7a8b0bab`](https://github.com/block/buzz/commit/c7a8b0babb35e296fbc4a1fc3df0015518085d32))
+- feat(reconnect): replace top banner with animated sidebar overlay ([#1510](https://github.com/block/buzz/pull/1510)) ([`f35aeb798`](https://github.com/block/buzz/commit/f35aeb7986b2751f3ff2e4e33403aa5c28af0b43))
+- docs(nest-skill): explain agent-owned git repos and automatic auth ([#1437](https://github.com/block/buzz/pull/1437)) ([`20d3cdc22`](https://github.com/block/buzz/commit/20d3cdc22f4a53a792c4b249ef0338ff6411581d))
+- fix(agent): make stop-hook rejection budget per-prompt, fix stale hook docs ([#1503](https://github.com/block/buzz/pull/1503)) ([`4a0951042`](https://github.com/block/buzz/commit/4a095104297a58e50d3ffb0ce600162b9a298323))
+
+
 ## v0.3.42
 
 - fix(desktop): bound read-state localStorage growth and recover from quota errors ([#1502](https://github.com/block/buzz/pull/1502)) ([`a3cf7eec1`](https://github.com/block/buzz/commit/a3cf7eec1d5c876c65aabc827620ca2b7b79127b))

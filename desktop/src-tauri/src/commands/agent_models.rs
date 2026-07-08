@@ -62,11 +62,7 @@ pub async fn get_agent_models(
         // so model discovery runs against the persona's current harness, not the
         // frozen record snapshot. An explicit per-agent override wins.
         let personas = load_personas(&app).unwrap_or_default();
-        let effective_command = crate::managed_agents::effective_agent_command(
-            record.persona_id.as_deref(),
-            &personas,
-            record.agent_command_override.as_deref(),
-        );
+        let effective_command = crate::managed_agents::record_agent_command(record, &personas);
 
         let args = normalize_agent_args(&effective_command, record.agent_args.clone());
 
@@ -366,16 +362,16 @@ fn openai_dated_snapshot_alias(id: &str) -> Option<String> {
 fn openai_model_display_name(id: &str) -> String {
     let canonical = openai_dated_snapshot_alias(id).unwrap_or_else(|| id.to_string());
     if let Some(rest) = canonical.strip_prefix("chatgpt-") {
-        return format!("ChatGPT {}", title_case_model_suffix(rest, false));
+        return format!("ChatGPT {}", title_case_model_suffix(rest));
     }
     if let Some(rest) = canonical.strip_prefix("gpt-") {
-        return format!("GPT-{}", title_case_model_suffix(rest, true));
+        return format!("GPT-{}", title_case_model_suffix(rest));
     }
 
     canonical
 }
 
-fn title_case_model_suffix(value: &str, preserve_first_separator: bool) -> String {
+fn title_case_model_suffix(value: &str) -> String {
     value
         .split('-')
         .enumerate()
@@ -390,9 +386,7 @@ fn title_case_model_suffix(value: &str, preserve_first_separator: bool) -> Strin
                 part.to_string()
             };
 
-            if preserve_first_separator && index == 0 {
-                part
-            } else if index == 0 {
+            if index == 0 {
                 part
             } else {
                 format!(" {part}")
@@ -860,13 +854,21 @@ pub async fn update_managed_agent(
         // that diverges from the persona. An empty/whitespace value (the
         // "Inherit from persona" sentinel) clears the pin back to `None`. A
         // name-only edit (`agent_command == None`) leaves the pin intact.
+        //
+        // `harness_override` threads the user's explicit intent: when they pick
+        // a runtime/Custom command in the dialog it is a real pin even if it
+        // maps to the persona's own runtime, so a same-runtime pick is kept
+        // rather than dropped back to inherit (see
+        // `update_time_agent_command_override`).
         if let Some(agent_command) = input.agent_command {
             let personas = load_personas(&app).unwrap_or_default();
-            record.agent_command_override = crate::managed_agents::divergent_agent_command_override(
-                record.persona_id.as_deref(),
-                &personas,
-                Some(&agent_command),
-            );
+            record.agent_command_override =
+                crate::managed_agents::update_time_agent_command_override(
+                    record.persona_id.as_deref(),
+                    &personas,
+                    Some(&agent_command),
+                    input.harness_override,
+                );
         }
         if let Some(agent_args) = input.agent_args {
             record.agent_args = agent_args;
@@ -930,11 +932,7 @@ pub async fn update_managed_agent(
             // not the frozen snapshot, so an inherited harness picks the right
             // default avatar.
             let personas = load_personas(&app).unwrap_or_default();
-            let effective_command = crate::managed_agents::effective_agent_command(
-                record.persona_id.as_deref(),
-                &personas,
-                record.agent_command_override.as_deref(),
-            );
+            let effective_command = crate::managed_agents::record_agent_command(record, &personas);
             let avatar_url = record
                 .avatar_url
                 .clone()

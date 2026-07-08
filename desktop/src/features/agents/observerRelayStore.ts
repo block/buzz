@@ -20,7 +20,7 @@ import {
   processTranscriptEvent,
 } from "./ui/agentSessionTranscript";
 
-const MAX_OBSERVER_EVENTS = 800;
+const MAX_OBSERVER_EVENTS = 3000;
 
 export type ObserverSnapshot = {
   connectionState: ConnectionState;
@@ -425,6 +425,52 @@ export function useManagedAgentObserverBridge(
 }
 
 /**
+ * Ingest a batch of raw archived observer events from the local archive into
+ * the store. Applies the same security guards as the live relay path:
+ *
+ * - Event must have an `agent` tag pointing to a known/trusted pubkey
+ *   (registered via `useManagedAgentObserverBridge`).
+ * - The event sender (`pubkey`) must match the `agent` tag value.
+ * - Event must decrypt successfully via `decryptObserverEvent`.
+ *
+ * Routes through `appendAgentEvent` so dedup on `(seq, timestamp)` and
+ * sort are reused — archived events that are already present (live-delivered)
+ * are silently skipped. Failed decryptions are silently dropped (same as
+ * live path error handling).
+ *
+ * Note: events for agents not currently registered in `knownAgentPubkeys`
+ * (e.g. an agent that is stopped but has archived history) are dropped.
+ * The caller should ensure the agent is registered before calling.
+ *
+ * `_decryptFn` is only used by tests to inject a mock decryption function.
+ * Production callers must always omit it.
+ */
+export async function ingestArchivedObserverEvents(
+  rawEvents: RelayEvent[],
+  _decryptFn: (event: RelayEvent) => Promise<unknown> = decryptObserverEvent,
+): Promise<void> {
+  for (const event of rawEvents) {
+    const agentPubkey = observerTag(event, "agent");
+    const frame = observerTag(event, "frame");
+    if (!agentPubkey || frame !== "telemetry") {
+      continue;
+    }
+    if (!knownAgentPubkeys.has(normalizePubkey(agentPubkey))) {
+      continue;
+    }
+    if (normalizePubkey(event.pubkey) !== normalizePubkey(agentPubkey)) {
+      continue;
+    }
+    try {
+      const parsed = (await _decryptFn(event)) as ObserverEvent;
+      appendAgentEvent(agentPubkey, parsed);
+    } catch {
+      // Silently drop decrypt failures — same as live path error handling.
+    }
+  }
+}
+
+/**
  * E2E-only: inject synthetic observer events directly into the store, bypassing
  * the relay-security knownAgentPubkeys filter. Exercises the real
  * appendAgentEvent → processTranscriptEvent ingestion path so screenshot specs
@@ -472,4 +518,16 @@ export function resetAgentObserverStore() {
   errorMessage = null;
   notifyListeners();
   void unsubscribe?.();
+}
+
+/**
+ * Test-only: register a set of agent pubkeys as trusted for a given
+ * subscription id. Mirrors the effect of mounting `useManagedAgentObserverBridge`
+ * in a React tree. Only call from tests — never from production code.
+ */
+export function _testRegisterKnownAgents(
+  subscriptionId: string,
+  pubkeys: readonly string[],
+): void {
+  registerKnownAgents(subscriptionId, pubkeys);
 }

@@ -11,6 +11,11 @@ export type ChannelWindowRow = {
   event: RelayEvent;
   thread: ChannelWindowThreadSummary | null;
 };
+export type LiveThreadSummary = {
+  summary: ChannelWindowThreadSummary;
+  /** `created_at` of the relay 39005 that carried it — newest wins per root. */
+  createdAt: number;
+};
 export type ChannelWindowPage = {
   startCursor: ChannelWindowCursor | null;
   rows: ChannelWindowRow[];
@@ -24,12 +29,18 @@ export type ChannelWindowStore = {
   liveOverlay: RelayEvent[];
   /** Live structural events retained independently from frozen page closure. */
   liveAux: RelayEvent[];
+  /**
+   * Relay-pushed 39005 summaries (keyed by thread root id) not yet superseded
+   * by a page. A page response supersedes them for the roots it re-delivers.
+   */
+  liveSummaries: Record<string, LiveThreadSummary>;
 };
 
 export const emptyChannelWindowStore = (): ChannelWindowStore => ({
   pages: [],
   liveOverlay: [],
   liveAux: [],
+  liveSummaries: {},
 });
 
 function cursorsEqual(
@@ -103,6 +114,10 @@ export function replaceNewestChannelWindow(
     pages: [page],
     liveOverlay: current.liveOverlay.filter((event) => !ids.has(event.id)),
     liveAux: current.liveAux.filter((event) => !auxIds.has(event.id)),
+    // A head refetch is the authoritative resync moment (subscribe/reconnect
+    // both funnel here): every retained page is replaced, so live summaries
+    // pinned to the old snapshot are cleared rather than diffed.
+    liveSummaries: {},
   };
 }
 
@@ -137,6 +152,27 @@ export function appendOlderChannelWindow(
     ...current,
     pages: [...current.pages, page],
     liveOverlay: current.liveOverlay.filter((event) => !pageIds.has(event.id)),
+  };
+}
+
+/**
+ * Record a relay-pushed live `39005` summary. Newest `created_at` wins per
+ * root: the relay pushes a full recount on every thread mutation, so the
+ * latest push is authoritative for that root — including counting *down*
+ * after a delete. Retained across scrollback pages (a racing push can be
+ * fresher than a just-fetched page summary) and cleared only by the head
+ * refetch in `replaceNewestChannelWindow`.
+ */
+export function mergeLiveThreadSummary(
+  current: ChannelWindowStore,
+  rootId: string,
+  incoming: LiveThreadSummary,
+): ChannelWindowStore {
+  const existing = current.liveSummaries[rootId];
+  if (existing && existing.createdAt >= incoming.createdAt) return current;
+  return {
+    ...current,
+    liveSummaries: { ...current.liveSummaries, [rootId]: incoming },
   };
 }
 
@@ -205,12 +241,22 @@ export function channelWindowHasMore(store: ChannelWindowStore) {
   return tail?.hasMore ?? false;
 }
 
+/**
+ * Per-root thread summaries for badge rendering: authoritative page summaries
+ * overlaid with any fresher relay-pushed live summaries. The live overlay also
+ * covers roots that reached the screen outside a page (liveOverlay rows,
+ * refetch-reconciled rows), which have no page summary at all.
+ */
 export function channelWindowThreadSummaries(store: ChannelWindowStore) {
-  return new Map(
+  const summaries = new Map(
     store.pages.flatMap((page) =>
       page.rows.flatMap((row) =>
         row.thread ? ([[row.event.id, row.thread]] as const) : [],
       ),
     ),
   );
+  for (const [rootId, live] of Object.entries(store.liveSummaries)) {
+    summaries.set(rootId, live.summary);
+  }
+  return summaries;
 }

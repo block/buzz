@@ -9,6 +9,9 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+#[cfg(unix)]
+use crate::util::{create_symlink, symlink_points_to};
+
 /// Validate a user-supplied `repos_dir`, returning the canonical target path.
 ///
 /// Requires an **existing absolute directory**. Rejects relative paths,
@@ -98,7 +101,7 @@ pub fn ensure_repos_symlink(nest_root: &Path, repos_dir: Option<&str>) -> Result
         // Existing symlink → replace it if it points elsewhere. Re-pointing a
         // symlink is data-safe; remove_file never follows the link.
         Ok(meta) if meta.file_type().is_symlink() => {
-            if repos_path.read_link().ok().as_deref() == Some(target.as_path()) {
+            if symlink_points_to(&repos_path, &target) {
                 return Ok(()); // already correct
             }
             fs::remove_file(&repos_path)
@@ -134,7 +137,7 @@ pub fn ensure_repos_symlink(nest_root: &Path, repos_dir: Option<&str>) -> Result
 
 #[cfg(unix)]
 fn symlink_repos(target: &Path, link: &Path) -> Result<(), String> {
-    std::os::unix::fs::symlink(target, link)
+    create_symlink(target, link)
         .map_err(|e| format!("symlink {} → {}: {e}", link.display(), target.display()))
 }
 

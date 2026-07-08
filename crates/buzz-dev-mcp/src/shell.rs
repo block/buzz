@@ -28,6 +28,10 @@ pub struct SharedState {
     pub shim: Shim,
     pub session_dir: TempDir,
     pub bootstrap_instructions: String,
+    /// The shell resolved at construction: `Ok((path, display_name))` when a shell
+    /// is available, `Err(msg)` when none was found. Stored once so both the
+    /// bootstrap hint and every `run()` call read the SAME resolution — no drift.
+    pub resolved_shell: Result<(PathBuf, String), String>,
     pub artifacts: Mutex<VecDeque<PathBuf>>,
     next_call_id: Mutex<u64>,
 }
@@ -37,12 +41,22 @@ impl SharedState {
         let session_dir = tempfile::Builder::new()
             .prefix("buzz-dev-mcp-session-")
             .tempdir()?;
-        let bootstrap_instructions = build_bootstrap(&cwd);
+        // Resolve the shell ONCE using the same PATH the spawn will use.
+        // Both the bootstrap dialect hint and every run() call read this result,
+        // so they can never disagree. A failed resolution is stored as Err and
+        // surfaces as an actionable error on the first tool call.
+        let resolved_shell = resolve_bash(&shim.path_env);
+        let shell_hint = match &resolved_shell {
+            Ok((_, name)) => name.as_str(),
+            Err(_) => "bash",
+        };
+        let bootstrap_instructions = build_bootstrap(&cwd, shell_hint);
         Ok(Self {
             cwd,
             shim,
             session_dir,
             bootstrap_instructions,
+            resolved_shell,
             artifacts: Mutex::new(VecDeque::with_capacity(ARTIFACT_RING_SIZE)),
             next_call_id: Mutex::new(0),
         })
@@ -58,7 +72,7 @@ impl SharedState {
     }
 }
 
-fn build_bootstrap(cwd: &Path) -> String {
+fn build_bootstrap(cwd: &Path, shell_hint: &str) -> String {
     let stack = detect_stack(cwd);
     let buzz_hint =
         if std::env::var("BUZZ_RELAY_URL").is_ok() && std::env::var("BUZZ_PRIVATE_KEY").is_ok() {
@@ -69,6 +83,7 @@ fn build_bootstrap(cwd: &Path) -> String {
     format!(
         "Working directory: {}\n\
          Detected stack: {}\n\
+         Shell: {shell_hint} (set BUZZ_SHELL to override) — write command strings in that shell's syntax.\n\
          Pass `workdir` per call rather than `cd`.\n\
          {buzz_hint}",
         cwd.display(),
@@ -143,12 +158,13 @@ pub async fn run(
         ));
     }
 
-    let bash = match resolve_bash(&state.shim.path_env) {
-        Ok(path) => path,
-        Err(msg) => return Ok(CallToolResult::error(vec![Content::text(msg)])),
+    let bash = match &state.resolved_shell {
+        Ok((path, _)) => path.clone(),
+        Err(msg) => return Ok(CallToolResult::error(vec![Content::text(msg.clone())])),
     };
+    let shell_arg = shell_flag(&bash);
     let mut cmd = Command::new(&bash);
-    cmd.arg("-c").arg(&p.command);
+    cmd.arg(shell_arg).arg(&p.command);
     cmd.current_dir(&workdir);
     cmd.env("PATH", &state.shim.path_env);
     // NOSTR_PRIVATE_KEY is already removed from this process's env (shim.rs).
@@ -167,7 +183,7 @@ pub async fn run(
         Ok(c) => c,
         Err(e) => {
             return Ok(CallToolResult::error(vec![Content::text(format!(
-                "failed to spawn bash: {e}"
+                "failed to spawn shell: {e}"
             ))]));
         }
     };
@@ -306,55 +322,119 @@ pub async fn run(
     Ok(CallToolResult::success(vec![Content::text(text)]))
 }
 
-/// The bundled bash subtree's directory name under the install root, and the
-/// relative path to its `bash.exe`. This is the THREE-FILE PATH CONTRACT — it must
-/// stay byte-identical with:
-///   1. `scripts/bundle-sidecars.sh`  — stages the bash tree to
-///      `desktop/src-tauri/binaries/git-bash/` (the bundle-source dir).
-///   2. `desktop/scripts/build-release-config.mjs` — emits the Windows-only
-///      `bundle.resources` Map `{ "binaries/git-bash": "git-bash" }`, whose TARGET
-///      (`git-bash`) is what Tauri's NSIS/MSI installer stages next to the exe.
-///   3. this resolver — joins `current_exe().parent()` + `git-bash\bin\bash.exe`.
+/// The flag used to pass a command string to the shell.
 ///
-/// Drift between (2)'s target and this string ships a working bundle but a broken
-/// runtime path. Keep all three in lockstep.
+/// bash/zsh/sh: `-c`
+/// cmd.exe:     `/C`
+/// powershell/pwsh: `-Command`
 ///
-/// The bundled constant points at `bin\bash.exe` — the git-for-windows launcher,
-/// NOT `usr\bin\bash.exe`. The bundle now ships the WHOLE PortableGit tree
-/// (including `mingw64/`), so it has the sibling `mingw64\bin` the launcher needs:
-/// the launcher is the correct entry because it sets `MSYSTEM=MINGW64` and prepends
-/// `mingw64\bin` to the in-shell PATH, which is what makes `git`/`jq`/`curl` resolve
-/// inside the agent's shell with no Rust-side PATH injection. The installed-Git
-/// branch below uses the SAME `bin\bash.exe` entry for the same reason — same tree
-/// shape, same correct entry point.
-#[cfg(windows)]
-const BUNDLED_BASH_REL: &str = r"git-bash\bin\bash.exe";
+/// The resolver supports `BUZZ_SHELL=cmd`/`pwsh` (explicit operator overrides
+/// resolve without the System32 exclusion, so these shells work). The dispatch
+/// here ensures each shell receives the correct flag regardless of which one
+/// was resolved.
+fn shell_flag(shell: &Path) -> &'static str {
+    match shell
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("cmd") => "/C",
+        Some("powershell" | "pwsh") => "-Command",
+        _ => "-c",
+    }
+}
 
-/// Resolve a genuine, non-WSL bash to an absolute path so we spawn it directly
-/// instead of letting `Command::new("bash")` re-enter PATH search — on Windows
-/// that search finds `System32\bash.exe` (the WSL launcher), which fails at spawn
-/// with `0x8007072c` and can never run the agent's POSIX commands.
+/// Extract a short display name from a resolved shell path (e.g. `pwsh.exe` → `"pwsh"`).
+fn shell_name_from_path(p: &Path) -> String {
+    p.file_stem()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_ascii_lowercase())
+        .unwrap_or_else(|| "bash".to_string())
+}
+
+/// Resolve the shell to spawn. On Unix, bash on PATH is correct and was never
+/// broken, so the resolver only needs to honor BUZZ_SHELL. The probe logic and
+/// System32 exclusion are Windows-only.
 ///
-/// On Unix, bare `bash` resolved via PATH is correct and was never broken, so the
-/// resolver is a no-op there. The probe logic is Windows-only.
+/// Returns `(resolved_path, display_name)`. The display name is derived from the
+/// resolved path so the caller can use it for diagnostics without a second lookup.
 #[cfg(not(windows))]
-fn resolve_bash(_path_env: &str) -> Result<PathBuf, String> {
-    Ok(PathBuf::from("bash"))
+fn resolve_bash(_path_env: &str) -> Result<(PathBuf, String), String> {
+    // Honor BUZZ_SHELL on Unix so power users can opt into zsh or another shell.
+    if let Some(raw) = std::env::var_os("BUZZ_SHELL") {
+        let p = PathBuf::from(&raw);
+        // Absolute / rooted path: must exist as a file.
+        if p.components().count() > 1 || p.has_root() {
+            if p.is_file() {
+                let name = shell_name_from_path(&p);
+                return Ok((p, name));
+            }
+            // Non-existent path: fall through to bash.
+        } else {
+            // Bare command name: scan the process PATH directly.
+            let path_var = std::env::var_os("PATH").unwrap_or_default();
+            for dir in std::env::split_paths(&path_var) {
+                let candidate = dir.join(&p);
+                if candidate.is_file() {
+                    let name = shell_name_from_path(&candidate);
+                    return Ok((candidate, name));
+                }
+            }
+            // Not found: fall through to bash.
+        }
+    }
+    Ok((PathBuf::from("bash"), "bash".to_string()))
 }
 
 /// Windows bash resolution. Probe order (first hit wins):
-///   1. `GIT_BASH` env override (escape hatch / explicit operator choice).
-///   2. Installed Git for Windows (fast path when the user has Git).
-///   3. The bundled bash staged next to our exe (guaranteed target — this
-///      is what makes a bare, Git-less host work since the app is self-contained).
-///   4. PATH scan, EXCLUDING System32 (so we never resolve WSL's `bash.exe`).
+///   1. `BUZZ_SHELL` env override — explicit operator choice, any shell (cmd,
+///      PowerShell, bash, etc.). Bare command names are resolved through PATH
+///      WITHOUT the System32 exclusion — the operator explicitly chose this shell,
+///      and cmd.exe/powershell.exe live in System32 legitimately.
+///   2. `GIT_BASH` env override — legacy escape hatch (kept for back-compat).
+///   3. Installed Git for Windows (fast path when the user has Git).
+///   4. PATH scan for `bash.exe`, EXCLUDING System32 (so we never resolve WSL's
+///      `bash.exe` — the `0x8007072c` hazard).
 ///
-/// No bash found -> actionable error returned BEFORE spawn.
+/// Returns `(resolved_path, display_name)`. The display name is derived from the
+/// resolved path, guaranteeing the dialect hint and the spawned shell agree.
+///
+/// The previously-bundled PortableGit fallback (probe 3 in the old order) has
+/// been removed: Git for Windows is a documented host prerequisite, and shipping
+/// a multi-hundred-MB runtime contradicts the VISION_AGENT.md "minimal" principle.
+///
+/// No bash found -> actionable error pointing at the prerequisite.
 #[cfg(windows)]
-fn resolve_bash(path_env: &str) -> Result<PathBuf, String> {
+fn resolve_bash(path_env: &str) -> Result<(PathBuf, String), String> {
+    // BUZZ_SHELL: explicit operator override — any shell, including cmd or PowerShell.
+    // Bare command names are resolved WITHOUT System32 exclusion: the operator
+    // chose this shell on purpose, and cmd/pwsh legitimately live in System32.
+    if let Some(raw) = std::env::var_os("BUZZ_SHELL") {
+        let p = PathBuf::from(&raw);
+        // Absolute / rooted path: must exist as a file.
+        if p.components().count() > 1 || p.has_root() {
+            if p.is_file() {
+                let name = shell_name_from_path(&p);
+                return Ok((p, name));
+            }
+            // Non-existent absolute path: fall through, do NOT report this shell.
+        } else {
+            // Bare command name (e.g. "pwsh", "cmd"): scan PATH, NO System32
+            // exclusion — the operator explicitly wants this shell.
+            if let Some(found) = scan_path_for_command(&p, path_env, None) {
+                let name = shell_name_from_path(&found);
+                return Ok((found, name));
+            }
+            // Not found on PATH: fall through.
+        }
+    }
+
+    // GIT_BASH: legacy override kept for back-compat.
     if let Some(p) = std::env::var_os("GIT_BASH").map(PathBuf::from) {
         if p.is_file() {
-            return Ok(p);
+            let name = shell_name_from_path(&p);
+            return Ok((p, name));
         }
     }
 
@@ -367,42 +447,24 @@ fn resolve_bash(path_env: &str) -> Result<PathBuf, String> {
             .join("bin")
             .join("bash.exe");
             if candidate.is_file() {
-                return Ok(candidate);
+                return Ok((candidate, "bash".to_string()));
             }
         }
     }
 
-    // Bundled bash, located relative to OUR OWN executable. On Windows, Tauri
-    // stages `bundle.resources` flat in the directory that contains the exe
-    // (tauri 2.11.2 `resource_dir()` == exe parent on Windows), and every sidecar
-    // — including this one — lives in that same dir. This relative-to-self resolution
-    // is Windows-ONLY: macOS stages resources to `../Resources` and Linux to
-    // `usr/lib/<app>`, so a cross-platform "resource relative to exe" helper would
-    // be wrong on those platforms.
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            if let Some(p) = bundled_bash(dir) {
-                return Ok(p);
-            }
-        }
-    }
-
+    // PATH scan for bash.exe, skipping System32 to avoid WSL's bash.exe launcher.
     if let Some(p) = scan_path_for_bash(path_env, std::env::var_os("SystemRoot").map(PathBuf::from))
     {
-        return Ok(p);
+        return Ok((p, "bash".to_string()));
     }
 
-    Err("no bash found: install Git for Windows, or set GIT_BASH to a bash.exe path".into())
-}
-
-/// Compute the bundled bash path relative to the install dir (the exe's parent),
-/// `is_file`-gated so dev/CI builds without a staged resource return None and let
-/// the caller fall through cleanly — never returning a non-existent path that
-/// would fail later at spawn with a worse message.
-#[cfg(windows)]
-fn bundled_bash(install_dir: &Path) -> Option<PathBuf> {
-    let bundled = install_dir.join(BUNDLED_BASH_REL);
-    bundled.is_file().then_some(bundled)
+    Err(
+        "Git for Windows (git bash) is required but was not found.\n\
+         Install it from https://git-scm.com/download/win and re-launch Buzz,\n\
+         or set BUZZ_SHELL to the path of any bash-compatible executable (or a bare\n\
+         command name like cmd or pwsh if it is on PATH)."
+            .into(),
+    )
 }
 
 /// True if `dir` is `root` or lives under it, comparing path components
@@ -432,17 +494,37 @@ fn is_under_dir(dir: &Path, root: &Path) -> bool {
 /// hand-split on ';') so it matches exactly what the spawned child would see.
 #[cfg(windows)]
 fn scan_path_for_bash(path_env: &str, system_root: Option<PathBuf>) -> Option<PathBuf> {
+    scan_path_for_command(Path::new("bash.exe"), path_env, system_root.as_deref())
+}
+
+/// Scan `path_env` for `name` (or `name.exe` on Windows if `name` has no
+/// extension), skipping any directory under `system_root` to avoid resolving
+/// WSL helpers. Returns the first absolute path found.
+#[cfg(windows)]
+fn scan_path_for_command(
+    name: &Path,
+    path_env: &str,
+    system_root: Option<&Path>,
+) -> Option<PathBuf> {
+    let needs_exe = name.extension().is_none();
     for dir in std::env::split_paths(path_env) {
-        if let Some(ref root) = system_root {
-            // Skip System32 (and any other dir under %SystemRoot%) — that's where
-            // WSL's bash.exe lives.
+        if let Some(root) = system_root {
             if is_under_dir(&dir, root) {
                 continue;
             }
         }
-        let candidate = dir.join("bash.exe");
+        // Try as-is first.
+        let candidate = dir.join(name);
         if candidate.is_file() {
             return Some(candidate);
+        }
+        // On Windows, also try with .exe suffix when the name has no extension.
+        if needs_exe {
+            let mut with_exe = dir.join(name);
+            with_exe.set_extension("exe");
+            if with_exe.is_file() {
+                return Some(with_exe);
+            }
         }
     }
     None
@@ -860,7 +942,13 @@ mod tests {
 mod windows_resolver_tests {
     use super::*;
     use std::env;
+    use std::sync::Mutex;
     use tempfile::tempdir;
+
+    // Process-global env mutation guard: tests that mutate BUZZ_SHELL,
+    // SystemRoot, or GIT_BASH must hold this lock for the duration of the
+    // test so parallel test threads cannot race on these env vars.
+    static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
     fn touch(path: &Path) {
         if let Some(parent) = path.parent() {
@@ -870,23 +958,176 @@ mod windows_resolver_tests {
     }
 
     #[test]
-    fn bundled_branch_returns_none_when_path_absent() {
-        // Dev/CI: no staged resource next to the exe -> the bundled branch must
-        // yield None so the resolver falls through instead of returning a
-        // non-existent path that would fail at spawn.
+    fn buzz_shell_override_wins_over_everything() {
+        let _guard = ENV_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+        // BUZZ_SHELL pointing at a real file must be returned without probing
+        // the standard Git-for-Windows locations or PATH.
         let dir = tempdir().expect("tempdir");
-        assert!(bundled_bash(dir.path()).is_none());
+        let fake_bash = dir.path().join("my-bash.exe");
+        touch(&fake_bash);
+        // Temporarily set BUZZ_SHELL; clean up after the test.
+        env::set_var("BUZZ_SHELL", &fake_bash);
+        let result = resolve_bash("");
+        env::remove_var("BUZZ_SHELL");
+        let (resolved, _name) = result.expect("BUZZ_SHELL override should resolve");
+        assert_eq!(resolved, fake_bash);
     }
 
     #[test]
-    fn bundled_branch_returns_absolute_path_when_staged() {
-        // A staged PortableGit bash runtime next to the exe resolves to the absolute bash path.
+    fn buzz_shell_override_skipped_when_path_absent() {
+        let _guard = ENV_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+        // If BUZZ_SHELL points at a non-existent path the resolver must fall
+        // through rather than returning a dead path.
+        env::set_var("BUZZ_SHELL", r"C:\does\not\exist\bash.exe");
+        // We cannot easily assert the fallback here without a full Git install,
+        // but we can assert the override itself is not returned.
+        let result = resolve_bash("");
+        env::remove_var("BUZZ_SHELL");
+        if let Ok((resolved, _)) = result {
+            assert_ne!(
+                resolved.to_str().unwrap_or(""),
+                r"C:\does\not\exist\bash.exe",
+                "non-existent BUZZ_SHELL must not be returned"
+            );
+        }
+        // An Err is also acceptable (no Git installed on test host).
+    }
+
+    /// Explicit BUZZ_SHELL bare name resolves through PATH and uses NO System32
+    /// exclusion — cmd/pwsh live in System32 legitimately.
+    #[test]
+    fn buzz_shell_explicit_bare_name_resolves_from_system32() {
+        let _guard = ENV_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+        // Simulate cmd.exe living in a dir that would be excluded by the WSL guard.
+        // The explicit BUZZ_SHELL branch must NOT skip System32.
+        let sys32 = tempdir().expect("sys32");
+        let fake_cmd = sys32.path().join("cmd.exe");
+        touch(&fake_cmd);
+
+        // Build a path_env with only sys32 (the WSL exclusion would skip this dir
+        // for bash.exe, but must NOT skip it for an explicit BUZZ_SHELL).
+        let path_env = env::join_paths([sys32.path().to_path_buf()]).expect("join");
+        env::set_var("BUZZ_SHELL", "cmd");
+        // Override SystemRoot so the exclusion would trigger on sys32 if applied.
+        let old_sysroot = env::var_os("SystemRoot");
+        env::set_var("SystemRoot", sys32.path());
+
+        let result = resolve_bash(path_env.to_str().expect("utf8"));
+
+        env::remove_var("BUZZ_SHELL");
+        match old_sysroot {
+            Some(v) => env::set_var("SystemRoot", v),
+            None => env::remove_var("SystemRoot"),
+        }
+
+        let (resolved, name) =
+            result.expect("explicit BUZZ_SHELL=cmd should resolve even from System32-like dir");
+        assert_eq!(resolved, fake_cmd);
+        assert_eq!(name, "cmd");
+    }
+
+    /// Implicit bash.exe scan still skips System32 (WSL guard intact).
+    #[test]
+    fn implicit_bash_scan_still_skips_system32() {
+        let _guard = ENV_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+        // Same setup: bash.exe is only in a dir that is under SystemRoot.
+        // Without an explicit BUZZ_SHELL, the fallback scan must skip it.
+        let sys32 = tempdir().expect("sys32");
+        touch(&sys32.path().join("bash.exe"));
+
+        let path_env = env::join_paths([sys32.path().to_path_buf()]).expect("join");
+        // No BUZZ_SHELL — trigger the implicit bash fallback scan.
+        env::remove_var("BUZZ_SHELL");
+        env::remove_var("GIT_BASH");
+        // Point SystemRoot at sys32's parent so sys32 is "under SystemRoot".
+        let parent = sys32.path().parent().unwrap().to_path_buf();
+        let old_sysroot = env::var_os("SystemRoot");
+        env::set_var("SystemRoot", &parent);
+
+        let result = resolve_bash(path_env.to_str().expect("utf8"));
+
+        match old_sysroot {
+            Some(v) => env::set_var("SystemRoot", v),
+            None => env::remove_var("SystemRoot"),
+        }
+
+        // Should be Err (no Git installed on test host, and the only bash.exe was
+        // under SystemRoot so it was skipped). Ok is also acceptable if git bash
+        // happens to be installed at the fixed Program Files path — we just assert
+        // the System32 bash was NOT returned.
+        if let Ok((resolved, _)) = result {
+            assert!(
+                !resolved.starts_with(sys32.path()),
+                "implicit bash scan must not return the System32 bash: {resolved:?}"
+            );
+        }
+    }
+
+    /// The bootstrap hint (resolved_shell field) and the spawn path are the
+    /// same object — both come from SharedState.resolved_shell.
+    /// Verify that constructing SharedState with BUZZ_SHELL set produces a
+    /// resolved_shell whose display name appears in bootstrap_instructions.
+    #[test]
+    fn shared_state_bootstrap_hint_matches_resolved_shell() {
+        let _guard = ENV_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
         let dir = tempdir().expect("tempdir");
-        let bash = dir.path().join(BUNDLED_BASH_REL);
-        touch(&bash);
-        let resolved = bundled_bash(dir.path()).expect("bundled bash");
-        assert!(resolved.is_absolute());
-        assert_eq!(resolved, bash);
+        let fake_pwsh = dir.path().join("pwsh.exe");
+        touch(&fake_pwsh);
+        env::set_var("BUZZ_SHELL", &fake_pwsh);
+
+        let shim = crate::shim::Shim::install().expect("shim");
+        let state = SharedState::new(dir.path().to_path_buf(), shim).expect("state");
+
+        env::remove_var("BUZZ_SHELL");
+
+        let (_, name) = state.resolved_shell.as_ref().expect("resolved ok");
+        assert_eq!(name, "pwsh");
+        assert!(
+            state.bootstrap_instructions.contains("pwsh"),
+            "bootstrap must mention the resolved shell name"
+        );
+    }
+
+    /// F3: BUZZ_SHELL bare command name (e.g. "pwsh") resolved through PATH.
+    /// When pwsh.exe is on PATH, resolve_bash must return it and report "pwsh".
+    #[test]
+    fn buzz_shell_bare_name_resolved_through_path_when_present() {
+        let _guard = ENV_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+        let dir = tempdir().expect("tempdir");
+        let fake_pwsh = dir.path().join("pwsh.exe");
+        touch(&fake_pwsh);
+
+        let path_env = env::join_paths([dir.path().to_path_buf()]).expect("join");
+        env::set_var("BUZZ_SHELL", "pwsh");
+        let result = resolve_bash(path_env.to_str().expect("utf8"));
+        env::remove_var("BUZZ_SHELL");
+
+        let (resolved, name) = result.expect("bare BUZZ_SHELL=pwsh should resolve from PATH");
+        assert_eq!(resolved, fake_pwsh, "should resolve to pwsh.exe on PATH");
+        assert_eq!(name, "pwsh", "display name must match resolved shell");
+    }
+
+    /// F3: BUZZ_SHELL bare command name absent from PATH → fall through, do not
+    /// report pwsh as the active shell.
+    #[test]
+    fn buzz_shell_bare_name_absent_from_path_falls_through() {
+        let _guard = ENV_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+        // Set BUZZ_SHELL to a command that won't be on any real PATH.
+        env::set_var("BUZZ_SHELL", "buzz-shell-does-not-exist-xyz");
+        let result = resolve_bash("");
+        env::remove_var("BUZZ_SHELL");
+        if let Ok((resolved, name)) = result {
+            assert_ne!(
+                resolved.file_name().and_then(|n| n.to_str()).unwrap_or(""),
+                "buzz-shell-does-not-exist-xyz.exe",
+                "absent BUZZ_SHELL must not be returned as the resolved path"
+            );
+            assert_ne!(
+                name, "buzz-shell-does-not-exist-xyz",
+                "absent BUZZ_SHELL must not be reported as the shell name"
+            );
+        }
+        // Err is also acceptable (no Git on test host).
     }
 
     #[test]
@@ -946,5 +1187,28 @@ mod windows_resolver_tests {
             found.is_none(),
             "case-divergent System32 must still be excluded"
         );
+    }
+
+    /// PATH-only discovery — a bash.exe custom-installed on PATH (not under
+    /// the standard Program Files locations) must be found by the runtime
+    /// resolver. This verifies the PATH fallback in resolve_bash: a custom
+    /// install that lives outside Program Files is still usable as a shell.
+    #[test]
+    fn path_only_bash_is_found_by_scan() {
+        // scan_path_for_bash is the runtime resolver's PATH fallback helper.
+        // Verify it returns the bash.
+        let real = tempdir().expect("real");
+        let real_bash = real.path().join("bash.exe");
+        touch(&real_bash);
+
+        let path_env = env::join_paths([real.path().to_path_buf()]).expect("join");
+        let sys_root = tempdir().expect("sysroot"); // empty — no System32 here
+
+        let found = scan_path_for_bash(
+            path_env.to_str().expect("utf8"),
+            Some(sys_root.path().to_path_buf()),
+        )
+        .expect("bash on PATH must be found");
+        assert_eq!(found, real_bash);
     }
 }

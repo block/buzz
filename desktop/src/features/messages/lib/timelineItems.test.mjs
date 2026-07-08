@@ -8,9 +8,9 @@ import {
   getTimelineItemKey,
 } from "./timelineItems.ts";
 
-function dayAt(year, month, day, hour = 12) {
+function dayAt(year, month, day, hour = 12, minute = 0) {
   return Math.floor(
-    new Date(year, month - 1, day, hour, 0, 0).getTime() / 1_000,
+    new Date(year, month - 1, day, hour, minute, 0).getTime() / 1_000,
   );
 }
 
@@ -90,11 +90,19 @@ test("buildTimelineItems: system messages flatten to a 'system' item", () => {
   assert.deepEqual(kinds(items), ["day-divider", "message", "system"]);
 });
 
-test("buildTimelineItems: consecutive messages from the same author are grouped", () => {
+test("buildTimelineItems: consecutive same-author messages within the window are grouped", () => {
   const entries = [
     entry({ id: "a", pubkey: "author-a", createdAt: dayAt(2026, 6, 14) }),
-    entry({ id: "b", pubkey: "AUTHOR-A", createdAt: dayAt(2026, 6, 14, 13) }),
-    entry({ id: "c", pubkey: "author-b", createdAt: dayAt(2026, 6, 14, 14) }),
+    entry({
+      id: "b",
+      pubkey: "AUTHOR-A",
+      createdAt: dayAt(2026, 6, 14, 12, 2),
+    }),
+    entry({
+      id: "c",
+      pubkey: "author-b",
+      createdAt: dayAt(2026, 6, 14, 12, 3),
+    }),
   ];
 
   const messageItems = buildTimelineItems(entries, null).items.filter(
@@ -111,6 +119,53 @@ test("buildTimelineItems: consecutive messages from the same author are grouped"
   );
 });
 
+test("buildTimelineItems: same-author messages past the window start a new group", () => {
+  const author = "author-a";
+  const entries = [
+    entry({ id: "a", pubkey: author, createdAt: dayAt(2026, 6, 14, 12, 0) }),
+    // 8 min later — within the 10-min window, groups as a continuation.
+    entry({ id: "b", pubkey: author, createdAt: dayAt(2026, 6, 14, 12, 8) }),
+    // 12 min after "b" — past the window, breaks into a new thought.
+    entry({ id: "c", pubkey: author, createdAt: dayAt(2026, 6, 14, 12, 20) }),
+    // 5 min after "c" — within the window again, groups onto "c".
+    entry({ id: "d", pubkey: author, createdAt: dayAt(2026, 6, 14, 12, 25) }),
+  ];
+
+  const messageItems = buildTimelineItems(entries, null).items.filter(
+    (item) => item.kind === "message",
+  );
+
+  assert.deepEqual(
+    messageItems.map((item) => item.isContinuation),
+    [false, true, false, true],
+  );
+  assert.deepEqual(
+    messageItems.map((item) => item.isFollowedByContinuation),
+    [true, false, true, false],
+  );
+});
+
+test("buildTimelineItems: window is measured against the previous message, not the group start", () => {
+  const author = "author-a";
+  // Each message is 8 min after the one above it — a steady stream that never
+  // gaps out, so grouping continues even though the span (16 min) exceeds the
+  // 10-min window.
+  const entries = [
+    entry({ id: "a", pubkey: author, createdAt: dayAt(2026, 6, 14, 12, 0) }),
+    entry({ id: "b", pubkey: author, createdAt: dayAt(2026, 6, 14, 12, 8) }),
+    entry({ id: "c", pubkey: author, createdAt: dayAt(2026, 6, 14, 12, 16) }),
+  ];
+
+  const messageItems = buildTimelineItems(entries, null).items.filter(
+    (item) => item.kind === "message",
+  );
+
+  assert.deepEqual(
+    messageItems.map((item) => item.isContinuation),
+    [false, true, true],
+  );
+});
+
 test("buildTimelineItems: dividers break grouping while thread summaries do not", () => {
   const sameAuthor = "author-a";
   const entries = [
@@ -119,16 +174,20 @@ test("buildTimelineItems: dividers break grouping while thread summaries do not"
       ...entry({
         id: "b",
         pubkey: sameAuthor,
-        createdAt: dayAt(2026, 6, 14, 13),
+        createdAt: dayAt(2026, 6, 14, 12, 1),
       }),
       summary: {
         threadHeadId: "b",
         replyCount: 1,
-        lastReplyAt: dayAt(2026, 6, 14, 13),
+        lastReplyAt: dayAt(2026, 6, 14, 12, 1),
         participants: [],
       },
     },
-    entry({ id: "c", pubkey: sameAuthor, createdAt: dayAt(2026, 6, 14, 14) }),
+    entry({
+      id: "c",
+      pubkey: sameAuthor,
+      createdAt: dayAt(2026, 6, 14, 12, 2),
+    }),
     entry({ id: "d", pubkey: sameAuthor, createdAt: dayAt(2026, 6, 15) }),
   ];
 

@@ -37,8 +37,13 @@ import remarkMentions from "@/shared/lib/remarkMentions";
 import remarkSpoilers from "@/shared/lib/remarkSpoilers";
 import remarkMessageLinks from "@/features/messages/lib/remarkMessageLinks";
 import { AttachmentGroup } from "@/shared/ui/attachment";
+import { ConfigNudgeCard } from "@/shared/ui/config-nudge-attachment";
 import { LinkPreviewAttachment } from "@/shared/ui/link-preview-attachment";
 import { useSmoothCorners } from "@/shared/ui/smoothCorners";
+import {
+  computeConfigNudge,
+  selectProseOrNudge,
+} from "@/shared/lib/computeConfigNudge";
 import {
   INLINE_CODE_CHIP_CLASS,
   MENTION_CHIP_BASE_CLASSES,
@@ -510,13 +515,17 @@ function useDismissImageContextMenu(isOpen: boolean, onDismiss: () => void) {
   }, [isOpen, onDismiss]);
 }
 
-function ImageDownloadContextMenu({
+function ImageContextMenu({
+  onCopy,
   onDownload,
   position,
 }: {
+  onCopy: () => void;
   onDownload: () => void;
   position: ImageContextMenuPosition;
 }) {
+  const itemClass =
+    "flex min-h-9 w-full cursor-default select-none items-center rounded-lg py-2 pl-2 pr-4 text-sm outline-hidden hover:bg-muted/50 hover:text-foreground";
   return (
     <div
       className={cn(
@@ -527,11 +536,10 @@ function ImageDownloadContextMenu({
       data-image-lightbox-controls=""
       style={{ ...POPOVER_SHADOW_STYLE, left: position.x, top: position.y }}
     >
-      <button
-        type="button"
-        className="flex min-h-9 w-full cursor-default select-none items-center rounded-lg py-2 pl-2 pr-4 text-sm outline-hidden hover:bg-muted/50 hover:text-foreground"
-        onClick={onDownload}
-      >
+      <button type="button" className={itemClass} onClick={onCopy}>
+        Copy image
+      </button>
+      <button type="button" className={itemClass} onClick={onDownload}>
         Download image
       </button>
     </div>
@@ -542,6 +550,7 @@ function ImageZoomOverlay({
   alt,
   galleryIndex = 0,
   galleryItems,
+  onCopy,
   onDownload,
   onClose,
   resolvedSrc,
@@ -552,6 +561,7 @@ function ImageZoomOverlay({
   alt: string | undefined;
   galleryIndex?: number;
   galleryItems?: ImageGalleryItem[];
+  onCopy: (src: string | undefined) => void;
   onDownload: (src: string | undefined) => void;
   onClose: () => void;
   resolvedSrc: string;
@@ -604,7 +614,7 @@ function ImageZoomOverlay({
   const zoomIdleTimerRef = React.useRef<number | null>(null);
   const hasPreviousImage = currentIndex > 0;
   const hasNextImage = currentIndex < items.length - 1;
-  const canDownloadCurrentImage = Boolean(currentItem.src);
+  const canActOnCurrentImage = Boolean(currentItem.src);
   useSmoothCorners(imageFrameSurfaceRef);
 
   const galleryTransitionFilter =
@@ -1052,12 +1062,17 @@ function ImageZoomOverlay({
       event.stopPropagation();
       event.nativeEvent.stopImmediatePropagation();
       markControlGesture();
-      if (canDownloadCurrentImage) {
+      if (canActOnCurrentImage) {
         setMenu({ x: event.clientX, y: event.clientY });
       }
     },
-    [canDownloadCurrentImage, markControlGesture],
+    [canActOnCurrentImage, markControlGesture],
   );
+  const handleMenuCopy = React.useCallback(() => {
+    setMenu(null);
+    markControlGesture();
+    onCopy(currentItem.src);
+  }, [currentItem.src, markControlGesture, onCopy]);
   const handleMenuDownload = React.useCallback(() => {
     setMenu(null);
     markControlGesture();
@@ -1238,7 +1253,7 @@ function ImageZoomOverlay({
           <button
             aria-label="Download image"
             className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg transition-colors hover:bg-muted-foreground/10 hover:text-foreground outline-hidden focus-visible:ring-2 focus-visible:ring-ring/70 disabled:pointer-events-none disabled:opacity-45"
-            disabled={!canDownloadCurrentImage}
+            disabled={!canActOnCurrentImage}
             type="button"
             onClick={(event) => {
               event.stopPropagation();
@@ -1286,8 +1301,9 @@ function ImageZoomOverlay({
           </span>
         </div>
       </div>
-      {menu && canDownloadCurrentImage ? (
-        <ImageDownloadContextMenu
+      {menu && canActOnCurrentImage ? (
+        <ImageContextMenu
+          onCopy={handleMenuCopy}
           onDownload={handleMenuDownload}
           position={menu}
         />
@@ -1455,6 +1471,19 @@ function ImageBlock({ alt, dim, resolvedSrc, src }: ImageBlockProps) {
     }
   };
 
+  const handleCopyImage = React.useCallback((copySrc: string | undefined) => {
+    setMenu(null);
+    if (!copySrc) return;
+    invokeTauri("copy_image_to_clipboard", { url: copySrc })
+      .then(() => {
+        toast.success("Copied to clipboard");
+      })
+      .catch((err: unknown) => {
+        const msg = err instanceof Error ? err.message : "Copy failed";
+        toast.error(msg);
+      });
+  }, []);
+
   const handleDownload = React.useCallback(
     (downloadSrc: string | undefined) => {
       setMenu(null);
@@ -1494,7 +1523,9 @@ function ImageBlock({ alt, dim, resolvedSrc, src }: ImageBlockProps) {
           alt={alt}
           className="block h-auto max-h-64 max-w-[min(24rem,100%)] rounded-2xl object-contain"
           data-spoiler-media-size={hiddenSpoilerMediaSize ? "" : undefined}
+          decoding="async"
           height={intrinsicDimensions.height}
+          loading="lazy"
           ref={imageRef}
           src={resolvedSrc}
           style={spoilerMediaStyle}
@@ -1503,7 +1534,8 @@ function ImageBlock({ alt, dim, resolvedSrc, src }: ImageBlockProps) {
         />
       </button>
       {menu && src ? (
-        <ImageDownloadContextMenu
+        <ImageContextMenu
+          onCopy={() => handleCopyImage(src)}
           onDownload={() => handleDownload(src)}
           position={menu}
         />
@@ -1513,6 +1545,7 @@ function ImageBlock({ alt, dim, resolvedSrc, src }: ImageBlockProps) {
           alt={alt}
           galleryIndex={lightboxState.galleryIndex}
           galleryItems={lightboxState.galleryItems}
+          onCopy={handleCopyImage}
           onDownload={handleDownload}
           onClose={() => setLightboxState(null)}
           resolvedSrc={resolvedSrc}
@@ -1932,6 +1965,7 @@ function createMarkdownComponents(
 function MarkdownInner({
   channelNames,
   className,
+  configNudgeAuthorPubkey,
   content,
   customEmoji,
   imetaByUrl,
@@ -1971,6 +2005,10 @@ function MarkdownInner({
   const linkPreviews = React.useMemo(
     () => (interactive ? extractSupportedLinkPreviews(content) : []),
     [content, interactive],
+  );
+  const configNudge = React.useMemo(
+    () => computeConfigNudge(content, interactive, configNudgeAuthorPubkey),
+    [content, interactive, configNudgeAuthorPubkey],
   );
   const runtimeRef = useLatestRef<MarkdownRuntime>({
     agentMentionPubkeysByName,
@@ -2012,11 +2050,16 @@ function MarkdownInner({
 
   let processedContent = content;
 
-  if (/^(?:\s{2}\n)+/.test(content)) {
+  // Note: stripping the sentinel here is intentionally omitted. When
+  // configNudge !== null, selectProseOrNudge() returns null — suppressing
+  // the prose node entirely — so processedContent is never rendered and
+  // stripConfigNudgeSentinel would be dead work on that path.
+
+  if (/^(?:\s{2}\n)+/.test(processedContent)) {
     processedContent = `\u200B${processedContent}`;
   }
 
-  if (/(?:\s{2}\n)+$/.test(content)) {
+  if (/(?:\s{2}\n)+$/.test(processedContent)) {
     processedContent = `${processedContent}\u200B`;
   }
 
@@ -2055,7 +2098,15 @@ function MarkdownInner({
       )}
     >
       <VideoReviewMarkdownContext.Provider value={videoReviewContext}>
-        {markdownNode}
+        {selectProseOrNudge(configNudge, markdownNode)}
+        {configNudge !== null ? (
+          <AttachmentGroup
+            className="max-w-full flex-wrap overflow-visible pb-0"
+            data-config-nudge=""
+          >
+            <ConfigNudgeCard nudge={configNudge} />
+          </AttachmentGroup>
+        ) : null}
         {resolvedLinkPreviews.length > 0 ? (
           <AttachmentGroup
             className="max-w-full flex-wrap overflow-visible pb-0"
@@ -2084,6 +2135,7 @@ export const Markdown = React.memo(
     shallowArrayEqual(prev.mentionNames, next.mentionNames) &&
     shallowArrayEqual(prev.channelNames, next.channelNames) &&
     prev.imetaByUrl === next.imetaByUrl &&
+    prev.configNudgeAuthorPubkey === next.configNudgeAuthorPubkey &&
     prev.searchQuery === next.searchQuery &&
     prev.videoReviewContext === next.videoReviewContext,
 );

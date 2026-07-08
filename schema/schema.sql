@@ -206,9 +206,9 @@ CREATE TABLE events (
     -- Privacy: encrypted/private routing wrappers and p-gated membership notices
     -- must never be discoverable through NIP-50 full-text search. NULL tsvector
     -- never matches `@@`.
-    -- Keep in sync with migrations/0001_initial_schema.sql.
+    -- Keep in sync with migrations (final state: 0001 + 0005_agent_turn_metric_fts).
     search_tsv  TSVECTOR GENERATED ALWAYS AS (
-        CASE WHEN kind IN (1059, 30300, 30622, 44100, 44101) THEN NULL::tsvector
+        CASE WHEN kind IN (1059, 30300, 30622, 44100, 44101, 44200) THEN NULL::tsvector
              ELSE to_tsvector('simple', content)
         END
     ) STORED,

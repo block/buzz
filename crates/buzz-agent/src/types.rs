@@ -139,6 +139,10 @@ pub struct LlmResponse {
     /// tokens, so reading it alone would undercount). Used to gate handoff on
     /// the real token budget rather than a byte estimate.
     pub input_tokens: Option<u64>,
+    /// Output tokens the provider reported for this request, or `None` if the
+    /// response carried no usage. Used to accumulate per-turn output counts
+    /// for NIP-AM metric publishing.
+    pub output_tokens: Option<u64>,
     /// Reasoning/thinking content emitted by the model before its answer, if
     /// any. Non-empty when the provider returns extended-thinking tokens:
     ///

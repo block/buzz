@@ -467,3 +467,70 @@ fn sample_agent_record() -> ManagedAgentRecord {
     )
     .expect("sample record")
 }
+
+// ── PersonaRecord ↔ AgentRecord fold mapping (Phase 1A) ─────────────────────
+
+fn sample_persona() -> PersonaRecord {
+    PersonaRecord {
+        id: "custom:helper".to_string(),
+        display_name: "Helper".to_string(),
+        avatar_url: Some("https://example.com/a.png".to_string()),
+        system_prompt: "You help.".to_string(),
+        runtime: Some("goose".to_string()),
+        model: Some("gpt-x".to_string()),
+        provider: Some("openai".to_string()),
+        name_pool: vec!["Nimble".to_string()],
+        is_builtin: false,
+        is_active: true,
+        source_team: Some("team-1".to_string()),
+        source_team_persona_slug: Some("helper".to_string()),
+        env_vars: [("K".to_string(), "v".to_string())].into_iter().collect(),
+        created_at: "2026-01-01T00:00:00Z".to_string(),
+        updated_at: "2026-01-02T00:00:00Z".to_string(),
+    }
+}
+
+#[test]
+fn persona_into_agent_record_is_keyless_and_slugged() {
+    let record = sample_persona().into_agent_record();
+    assert!(record.pubkey.is_empty(), "fold must not mint identity");
+    assert!(record.private_key_nsec.is_empty());
+    assert_eq!(record.slug.as_deref(), Some("custom:helper"));
+    assert_eq!(record.display_name.as_deref(), Some("Helper"));
+    assert_eq!(record.system_prompt.as_deref(), Some("You help."));
+    assert_eq!(record.runtime.as_deref(), Some("goose"));
+    assert_eq!(record.source_team.as_deref(), Some("team-1"));
+    assert_eq!(record.env_vars.get("K").map(String::as_str), Some("v"));
+}
+
+#[test]
+fn persona_view_round_trips_through_agent_record() {
+    let persona = sample_persona();
+    let view = persona
+        .clone()
+        .into_agent_record()
+        .to_persona_view()
+        .expect("slugged record must present a persona view");
+    assert_eq!(
+        serde_json::to_value(&view).unwrap(),
+        serde_json::to_value(&persona).unwrap(),
+        "fold + view must round-trip every persona field"
+    );
+}
+
+#[test]
+fn keyed_record_without_slug_has_no_persona_view() {
+    let mut record = sample_persona().into_agent_record();
+    record.slug = None;
+    assert!(
+        record.to_persona_view().is_none(),
+        "instances (no slug) are not definitions"
+    );
+}
+
+#[test]
+fn empty_prompt_folds_to_none() {
+    let mut persona = sample_persona();
+    persona.system_prompt = String::new();
+    assert_eq!(persona.into_agent_record().system_prompt, None);
+}

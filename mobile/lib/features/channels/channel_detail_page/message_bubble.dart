@@ -47,8 +47,10 @@ class _MessageBubble extends ConsumerWidget {
         ref: ref,
         message: message,
         channelId: currentChannelId,
-        isOwnMessage:
-            currentPubkey?.toLowerCase() == message.pubkey.toLowerCase(),
+        canManageMessage:
+            currentPubkey?.toLowerCase() == pk ||
+            (profile?.ownerPubkey != null &&
+                profile?.ownerPubkey == currentPubkey?.toLowerCase()),
         allMessages: allMessages,
         currentPubkey: currentPubkey,
         isMember: isMember,

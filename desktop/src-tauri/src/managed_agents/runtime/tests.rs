@@ -160,6 +160,14 @@ fn fixture(
         last_error: None,
         respond_to,
         respond_to_allowlist: allowlist,
+        display_name: None,
+        slug: None,
+        runtime: None,
+        name_pool: Vec::new(),
+        is_builtin: false,
+        is_active: true,
+        source_team: None,
+        source_team_persona_slug: None,
         relay_mesh: None,
     }
 }
@@ -178,6 +186,8 @@ fn build_env_owner_only_sets_mode_and_removes_others() {
     // auth_tag is present → no AGENT_OWNER fallback fires.
     assert!(remove.contains(&"BUZZ_ACP_AGENT_OWNER"));
 }
+
+// select_untracked_bundle_harnesses tests live in runtime/sweep.rs (mod tests).
 
 #[test]
 fn build_env_allowlist_sets_both_envs_and_joins() {

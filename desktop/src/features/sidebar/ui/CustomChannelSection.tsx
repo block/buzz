@@ -1,35 +1,38 @@
 import {
   ArrowDown,
   ArrowUp,
-  Bell,
-  BellOff,
-  Check,
+  ArrowUpDown,
   CheckCheck,
-  CheckCircle2,
   ChevronDown,
-  CircleDot,
-  Clipboard,
-  Copy,
-  GripVertical,
-  LogOut,
+  EllipsisVertical,
   Pencil,
   Plus,
-  Star,
-  StarOff,
   Trash2,
 } from "lucide-react";
 
-import { copyTextToClipboard } from "@/shared/lib/clipboard";
+import { useRef } from "react";
+import type * as React from "react";
+
+import type { ChannelSortMode } from "@/features/sidebar/lib/channelSortPreference";
 import {
   ContextMenu,
   ContextMenuContent,
   ContextMenuItem,
   ContextMenuSeparator,
-  ContextMenuSub,
-  ContextMenuSubContent,
-  ContextMenuSubTrigger,
   ContextMenuTrigger,
 } from "@/shared/ui/context-menu";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuSeparator,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
+  DropdownMenuTrigger,
+} from "@/shared/ui/dropdown-menu";
 import {
   SidebarGroup,
   SidebarGroupContent,
@@ -38,6 +41,8 @@ import {
   SidebarMenuItem,
 } from "@/shared/ui/sidebar";
 import { ChannelMenuButton } from "@/features/sidebar/ui/SidebarSection";
+import { ChannelContextMenuItems } from "@/features/sidebar/ui/ChannelContextMenu";
+import { deferMenuAction } from "@/features/sidebar/ui/sidebarMenuHelpers";
 import {
   DraggableChannelRow,
   DroppableSectionBody,
@@ -53,6 +58,7 @@ import type { ChannelSection } from "@/features/sidebar/lib/useChannelSections";
 import type { Channel } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import { HashSearch } from "@/shared/ui/icons";
+import { StatusEmoji } from "@/features/user-status/ui/StatusEmoji";
 
 const SECTION_LABEL_BUTTON_CLASS =
   "group/section-label flex w-fit max-w-[calc(100%-3rem)] cursor-pointer appearance-none items-center gap-1 text-left transition-colors hover:text-sidebar-foreground focus-visible:text-sidebar-foreground";
@@ -61,257 +67,264 @@ const SECTION_LABEL_CHEVRON_CLASS =
 const SECTION_LABEL_CHEVRON_ICON_CLASS =
   "absolute left-1/2 top-1/2 size-2.5 -translate-x-1/2 -translate-y-1/2";
 
-function MoveToSectionSubmenu({
-  channelId,
-  sections,
-  assignments,
-  onAssignChannel,
-  onUnassignChannel,
-  onCreateSectionForChannel,
-}: {
-  channelId: string;
-  sections: ChannelSection[];
-  assignments: Record<string, string>;
-  onAssignChannel: (channelId: string, sectionId: string) => void;
-  onUnassignChannel: (channelId: string) => void;
-  onCreateSectionForChannel: (channelId: string) => void;
-}) {
-  const currentSectionId = assignments[channelId];
+const SORT_OPTIONS: { value: ChannelSortMode; label: string }[] = [
+  { value: "recent", label: "Recent" },
+  { value: "alpha", label: "A–Z" },
+];
 
+/**
+ * A single always-visible "+" quick action shown at the right edge of a
+ * section header, to the left of the ⋮ menu. Used for the most common
+ * per-section create action (New channel, New message) while every other
+ * action stays folded into {@link SectionActionsMenu}.
+ */
+export function SectionQuickAction({
+  label,
+  onClick,
+  testId,
+  icon: Icon = Plus,
+  visibilityClassName = SECTION_ACTION_VISIBILITY_CLASS,
+}: {
+  label: string;
+  onClick: () => void;
+  testId?: string;
+  icon?: typeof Plus;
+  visibilityClassName?: string;
+}) {
   return (
-    <ContextMenuSub>
-      <ContextMenuSubTrigger>Move to section</ContextMenuSubTrigger>
-      <ContextMenuSubContent>
-        {sections.map((section) => (
-          <ContextMenuItem
-            key={section.id}
-            onClick={() => onAssignChannel(channelId, section.id)}
-          >
-            {currentSectionId === section.id ? (
-              <Check className="h-4 w-4" />
-            ) : (
-              <span className="h-4 w-4" />
-            )}
-            {section.name}
-          </ContextMenuItem>
-        ))}
-        {sections.length > 0 ? <ContextMenuSeparator /> : null}
-        <ContextMenuItem onClick={() => onCreateSectionForChannel(channelId)}>
-          <Plus className="h-4 w-4" />
-          New section...
-        </ContextMenuItem>
-        {currentSectionId ? (
-          <ContextMenuItem onClick={() => onUnassignChannel(channelId)}>
-            Remove from section
-          </ContextMenuItem>
-        ) : null}
-      </ContextMenuSubContent>
-    </ContextMenuSub>
+    <button
+      aria-label={label}
+      className={cn(SECTION_ICON_BUTTON_CLASS, visibilityClassName)}
+      data-testid={testId}
+      onClick={(event) => {
+        event.stopPropagation();
+        onClick();
+      }}
+      onPointerDown={(event) => event.stopPropagation()}
+      title={label}
+      type="button"
+    >
+      <Icon className="h-4 w-4" />
+    </button>
   );
 }
 
-export function ChannelContextMenuItems({
-  channel,
+/**
+ * The single "more actions" menu shown at the right edge of every sidebar
+ * section header (Starred, Channels, Forums, Direct messages, and each custom
+ * section). Items render only when their handler is provided; a Sort radio
+ * group is appended whenever a sort preference is supplied.
+ */
+export function SectionActionsMenu({
+  sectionLabel,
+  testId,
+  visibilityClassName = SECTION_ACTION_VISIBILITY_CLASS,
   hasUnread,
-  isMuted,
-  isStarred,
-  sections,
-  assignments,
-  onMarkChannelRead,
-  onMarkChannelUnread,
-  onMuteChannel,
-  onUnmuteChannel,
-  onStarChannel,
-  onUnstarChannel,
-  onAssignChannel,
-  onUnassignChannel,
-  onCreateSectionForChannel,
-  onLeaveChannel,
-}: {
-  channel: Channel;
-  hasUnread: boolean;
-  isMuted?: boolean;
-  isStarred?: boolean;
-  sections?: ChannelSection[];
-  assignments?: Record<string, string>;
-  onMarkChannelRead?: (
-    channelId: string,
-    lastMessageAt: string | null | undefined,
-  ) => void;
-  onMarkChannelUnread?: (channelId: string) => void;
-  onMuteChannel?: (channelId: string) => void;
-  onUnmuteChannel?: (channelId: string) => void;
-  onStarChannel?: (channelId: string) => void;
-  onUnstarChannel?: (channelId: string) => void;
-  onAssignChannel?: (channelId: string, sectionId: string) => void;
-  onUnassignChannel?: (channelId: string) => void;
-  onCreateSectionForChannel?: (channelId: string) => void;
-  onLeaveChannel?: (channel: Channel) => void;
-}) {
-  const showStar = Boolean(onStarChannel && onUnstarChannel);
-  const showReadToggle = hasUnread
-    ? Boolean(onMarkChannelRead)
-    : Boolean(onMarkChannelUnread);
-  return (
-    <>
-      {showStar ? (
-        isStarred ? (
-          <ContextMenuItem onClick={() => onUnstarChannel?.(channel.id)}>
-            <StarOff className="h-4 w-4" />
-            Unstar channel
-          </ContextMenuItem>
-        ) : (
-          <ContextMenuItem onClick={() => onStarChannel?.(channel.id)}>
-            <Star className="h-4 w-4" />
-            Star channel
-          </ContextMenuItem>
-        )
-      ) : null}
-      {showStar && showReadToggle ? <ContextMenuSeparator /> : null}
-      {hasUnread && onMarkChannelRead ? (
-        <ContextMenuItem
-          onClick={() => onMarkChannelRead(channel.id, channel.lastMessageAt)}
-        >
-          <CheckCircle2 className="h-4 w-4" />
-          Mark as read
-        </ContextMenuItem>
-      ) : !hasUnread && onMarkChannelUnread ? (
-        <ContextMenuItem onClick={() => onMarkChannelUnread(channel.id)}>
-          <CircleDot className="h-4 w-4" />
-          Mark unread
-        </ContextMenuItem>
-      ) : null}
-      {onMuteChannel && onUnmuteChannel ? (
-        <>
-          <ContextMenuSeparator />
-          {isMuted ? (
-            <ContextMenuItem onClick={() => onUnmuteChannel(channel.id)}>
-              <Bell className="h-4 w-4" />
-              Unmute channel
-            </ContextMenuItem>
-          ) : (
-            <ContextMenuItem onClick={() => onMuteChannel(channel.id)}>
-              <BellOff className="h-4 w-4" />
-              Mute channel
-            </ContextMenuItem>
-          )}
-        </>
-      ) : null}
-      {sections &&
-      assignments &&
-      onAssignChannel &&
-      onUnassignChannel &&
-      onCreateSectionForChannel ? (
-        <>
-          <ContextMenuSeparator />
-          <MoveToSectionSubmenu
-            channelId={channel.id}
-            sections={sections}
-            assignments={assignments}
-            onAssignChannel={onAssignChannel}
-            onUnassignChannel={onUnassignChannel}
-            onCreateSectionForChannel={onCreateSectionForChannel}
-          />
-        </>
-      ) : null}
-      <ContextMenuSeparator />
-      <ContextMenuItem
-        onClick={() =>
-          copyTextToClipboard(channel.name, "Channel name copied to clipboard")
-        }
-      >
-        <Copy className="h-4 w-4" />
-        Copy channel name
-      </ContextMenuItem>
-      <ContextMenuItem
-        onClick={() =>
-          copyTextToClipboard(channel.id, "Channel ID copied to clipboard")
-        }
-      >
-        <Clipboard className="h-4 w-4" />
-        Copy channel ID
-      </ContextMenuItem>
-      {onLeaveChannel ? (
-        <>
-          <ContextMenuSeparator />
-          <ContextMenuItem
-            className="text-destructive focus:text-destructive"
-            onClick={() => onLeaveChannel(channel)}
-          >
-            <LogOut className="h-4 w-4" />
-            Leave channel
-          </ContextMenuItem>
-        </>
-      ) : null}
-    </>
-  );
-}
-
-function SectionHeaderActions({
-  browseAriaLabel,
-  createAriaLabel,
-  hasUnread,
-  onBrowseClick,
-  onCreateClick,
   onMarkAllRead,
+  onBrowse,
+  browseLabel,
+  onCreate,
+  createLabel,
+  onNewMessage,
+  newMessageLabel,
+  onRenameSection,
+  onMoveSectionUp,
+  onMoveSectionDown,
+  onDeleteSection,
+  isFirstSection,
+  isLastSection,
+  sortMode,
+  onSortModeChange,
 }: {
-  browseAriaLabel?: string;
-  createAriaLabel: string;
+  sectionLabel: string;
+  testId?: string;
+  visibilityClassName?: string;
   hasUnread?: boolean;
-  onBrowseClick?: () => void;
-  onCreateClick?: () => void;
   onMarkAllRead?: () => void;
+  onBrowse?: () => void;
+  browseLabel?: string;
+  onCreate?: () => void;
+  createLabel?: string;
+  onNewMessage?: () => void;
+  newMessageLabel?: string;
+  onRenameSection?: () => void;
+  onMoveSectionUp?: () => void;
+  onMoveSectionDown?: () => void;
+  onDeleteSection?: () => void;
+  isFirstSection?: boolean;
+  isLastSection?: boolean;
+  sortMode?: ChannelSortMode;
+  onSortModeChange?: (mode: ChannelSortMode) => void;
+}) {
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const showSectionManagement = Boolean(onRenameSection || onDeleteSection);
+  const showSort = Boolean(sortMode && onSortModeChange);
+
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <button
+          aria-label={`More actions for ${sectionLabel}`}
+          className={cn(SECTION_ICON_BUTTON_CLASS, visibilityClassName)}
+          data-testid={testId}
+          onClick={(event) => event.stopPropagation()}
+          onPointerDown={(event) => event.stopPropagation()}
+          ref={triggerRef}
+          type="button"
+        >
+          <EllipsisVertical className="h-4 w-4" />
+        </button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent
+        align="end"
+        onCloseAutoFocus={(event) => {
+          event.preventDefault();
+          triggerRef.current?.blur();
+        }}
+      >
+        {hasUnread && onMarkAllRead ? (
+          <DropdownMenuItem onSelect={() => deferMenuAction(onMarkAllRead)}>
+            <CheckCheck className="h-4 w-4" />
+            <span>Mark all as read</span>
+          </DropdownMenuItem>
+        ) : null}
+        {onNewMessage ? (
+          <DropdownMenuItem onSelect={() => deferMenuAction(onNewMessage)}>
+            <Plus className="h-4 w-4" />
+            <span>{newMessageLabel ?? "New message"}</span>
+          </DropdownMenuItem>
+        ) : null}
+        {onBrowse ? (
+          <DropdownMenuItem onSelect={() => deferMenuAction(onBrowse)}>
+            <HashSearch className="h-4 w-4" />
+            <span>{browseLabel ?? "Browse channels"}</span>
+          </DropdownMenuItem>
+        ) : null}
+        {onCreate ? (
+          <DropdownMenuItem onSelect={() => deferMenuAction(onCreate)}>
+            <Plus className="h-4 w-4" />
+            <span>{createLabel ?? "Create channel"}</span>
+          </DropdownMenuItem>
+        ) : null}
+        {showSectionManagement ? (
+          <>
+            {onRenameSection ? (
+              <DropdownMenuItem
+                onSelect={() => deferMenuAction(onRenameSection)}
+              >
+                <Pencil className="h-4 w-4" />
+                <span>Rename section</span>
+              </DropdownMenuItem>
+            ) : null}
+            {onMoveSectionUp ? (
+              <DropdownMenuItem
+                disabled={isFirstSection}
+                onSelect={() => deferMenuAction(onMoveSectionUp)}
+              >
+                <ArrowUp className="h-4 w-4" />
+                <span>Move up</span>
+              </DropdownMenuItem>
+            ) : null}
+            {onMoveSectionDown ? (
+              <DropdownMenuItem
+                disabled={isLastSection}
+                onSelect={() => deferMenuAction(onMoveSectionDown)}
+              >
+                <ArrowDown className="h-4 w-4" />
+                <span>Move down</span>
+              </DropdownMenuItem>
+            ) : null}
+          </>
+        ) : null}
+        {showSort ? (
+          <>
+            <DropdownMenuSeparator />
+            <DropdownMenuSub>
+              <DropdownMenuSubTrigger>
+                <ArrowUpDown className="h-4 w-4" />
+                <span>Sort</span>
+              </DropdownMenuSubTrigger>
+              <DropdownMenuSubContent>
+                <DropdownMenuRadioGroup
+                  onValueChange={(value) =>
+                    onSortModeChange?.(value as ChannelSortMode)
+                  }
+                  value={sortMode}
+                >
+                  {SORT_OPTIONS.map((option) => (
+                    <DropdownMenuRadioItem
+                      key={option.value}
+                      value={option.value}
+                    >
+                      {option.label}
+                    </DropdownMenuRadioItem>
+                  ))}
+                </DropdownMenuRadioGroup>
+              </DropdownMenuSubContent>
+            </DropdownMenuSub>
+          </>
+        ) : null}
+        {onDeleteSection ? (
+          <>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem
+              className="text-destructive focus:text-destructive"
+              onSelect={() => deferMenuAction(onDeleteSection)}
+            >
+              <Trash2 className="h-4 w-4" />
+              <span>Delete section</span>
+            </DropdownMenuItem>
+          </>
+        ) : null}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
+function ChannelSectionHeader({
+  contentId,
+  isCollapsed,
+  onToggleCollapsed,
+  title,
+  actions,
+}: {
+  contentId: string;
+  isCollapsed: boolean;
+  onToggleCollapsed: () => void;
+  title: string;
+  actions: React.ReactNode;
 }) {
   return (
-    <div className="absolute right-1 top-1/2 z-10 flex -translate-y-1/2 items-center gap-0.5">
-      {hasUnread && onMarkAllRead ? (
+    <div className="relative">
+      <SidebarGroupLabel asChild>
         <button
-          aria-label="Mark all as read"
-          className={cn(
-            SECTION_ICON_BUTTON_CLASS,
-            SECTION_ACTION_VISIBILITY_CLASS,
-          )}
-          onClick={onMarkAllRead}
-          title="Mark all as read"
+          aria-controls={contentId}
+          aria-expanded={!isCollapsed}
+          className={SECTION_LABEL_BUTTON_CLASS}
+          onClick={onToggleCollapsed}
           type="button"
         >
-          <CheckCheck className="h-4 w-4" />
+          <span>{title}</span>
+          <span aria-hidden="true" className={SECTION_LABEL_CHEVRON_CLASS}>
+            <ChevronDown
+              className={cn(
+                SECTION_LABEL_CHEVRON_ICON_CLASS,
+                isCollapsed ? "-rotate-90" : "rotate-0",
+              )}
+            />
+          </span>
         </button>
-      ) : null}
-      {onBrowseClick ? (
-        <button
-          aria-label={browseAriaLabel}
-          className={cn(
-            SECTION_ICON_BUTTON_CLASS,
-            SECTION_ACTION_VISIBILITY_CLASS,
-          )}
-          onClick={onBrowseClick}
-          title={browseAriaLabel}
-          type="button"
-        >
-          <HashSearch className="h-4 w-4" />
-        </button>
-      ) : null}
-      {onCreateClick ? (
-        <button
-          aria-label={createAriaLabel}
-          className={cn(
-            SECTION_ICON_BUTTON_CLASS,
-            SECTION_ACTION_VISIBILITY_CLASS,
-          )}
-          onClick={onCreateClick}
-          type="button"
-        >
-          <Plus className="h-4 w-4" />
-        </button>
-      ) : null}
+      </SidebarGroupLabel>
+      <div className="absolute right-1 top-1/2 z-10 flex -translate-y-1/2 items-center gap-0.5">
+        {actions}
+      </div>
     </div>
   );
 }
 
 export function ChannelGroupSection({
-  browseAriaLabel,
-  createAriaLabel,
+  browseLabel,
+  createLabel,
   draggable,
   groupClassName,
   hasUnread,
@@ -322,12 +335,16 @@ export function ChannelGroupSection({
   listTestId,
   onBrowseClick,
   onCreateClick,
+  showQuickCreate,
   onMarkAllRead,
   onMarkChannelRead,
   onMarkChannelUnread,
   onSelectChannel,
   onToggleCollapsed,
   selectedChannelId,
+  sortMode,
+  onSortModeChange,
+  actionsTestId,
   title,
   unreadChannelCounts,
   unreadChannelIds,
@@ -344,8 +361,8 @@ export function ChannelGroupSection({
   onUnstarChannel,
   onLeaveChannel,
 }: {
-  browseAriaLabel?: string;
-  createAriaLabel: string;
+  browseLabel?: string;
+  createLabel?: string;
   draggable?: boolean;
   groupClassName?: string;
   isCollapsed: boolean;
@@ -355,6 +372,7 @@ export function ChannelGroupSection({
   listTestId: string;
   onBrowseClick?: () => void;
   onCreateClick?: () => void;
+  showQuickCreate?: boolean;
   onMarkChannelRead: (
     channelId: string,
     lastMessageAt: string | null | undefined,
@@ -363,6 +381,9 @@ export function ChannelGroupSection({
   onSelectChannel: (channelId: string) => void;
   onToggleCollapsed: () => void;
   selectedChannelId: string | null;
+  sortMode?: ChannelSortMode;
+  onSortModeChange?: (mode: ChannelSortMode) => void;
+  actionsTestId?: string;
   title: string;
   unreadChannelCounts: ReadonlyMap<string, number>;
   unreadChannelIds: ReadonlySet<string>;
@@ -387,7 +408,11 @@ export function ChannelGroupSection({
     items.length > 0 ? (
       <SidebarMenu data-testid={listTestId}>
         {items.map((channel) => (
-          <ContextMenu key={channel.id}>
+          // modal={false}: menu items (e.g. Leave channel) open a modal
+          // AlertDialog. A modal ContextMenu would leave `pointer-events: none`
+          // stuck on <body> when it closes as the dialog mounts, freezing the
+          // whole app. Non-modal avoids installing that body guard entirely.
+          <ContextMenu key={channel.id} modal={false}>
             <ContextMenuTrigger asChild>
               <SidebarMenuItem className="content-visibility-auto-row">
                 {draggable ? (
@@ -448,35 +473,37 @@ export function ChannelGroupSection({
     <SidebarGroup
       className={cn("group/sidebar-section select-none", groupClassName)}
     >
-      <div className="relative">
-        <SidebarGroupLabel asChild>
-          <button
-            aria-controls={contentId}
-            aria-expanded={!isCollapsed}
-            className={SECTION_LABEL_BUTTON_CLASS}
-            onClick={onToggleCollapsed}
-            type="button"
-          >
-            <span>{title}</span>
-            <span aria-hidden="true" className={SECTION_LABEL_CHEVRON_CLASS}>
-              <ChevronDown
-                className={cn(
-                  SECTION_LABEL_CHEVRON_ICON_CLASS,
-                  isCollapsed ? "-rotate-90" : "rotate-0",
-                )}
+      <ChannelSectionHeader
+        contentId={contentId}
+        isCollapsed={isCollapsed}
+        onToggleCollapsed={onToggleCollapsed}
+        title={title}
+        actions={
+          <>
+            {showQuickCreate && onCreateClick ? (
+              <SectionQuickAction
+                label={createLabel ?? "Create channel"}
+                onClick={onCreateClick}
+                testId={
+                  actionsTestId ? `${actionsTestId}-quick-create` : undefined
+                }
               />
-            </span>
-          </button>
-        </SidebarGroupLabel>
-        <SectionHeaderActions
-          browseAriaLabel={browseAriaLabel}
-          createAriaLabel={createAriaLabel}
-          hasUnread={hasUnread}
-          onBrowseClick={onBrowseClick}
-          onCreateClick={onCreateClick}
-          onMarkAllRead={onMarkAllRead}
-        />
-      </div>
+            ) : null}
+            <SectionActionsMenu
+              sectionLabel={title}
+              testId={actionsTestId}
+              hasUnread={hasUnread}
+              onMarkAllRead={onMarkAllRead}
+              onBrowse={onBrowseClick}
+              browseLabel={browseLabel}
+              onCreate={onCreateClick}
+              createLabel={createLabel}
+              sortMode={sortMode}
+              onSortModeChange={onSortModeChange}
+            />
+          </>
+        }
+      />
       {!isCollapsed ? (
         <SidebarGroupContent id={contentId}>{channelList}</SidebarGroupContent>
       ) : null}
@@ -504,6 +531,8 @@ export function CustomChannelSection({
   assignments,
   isFirst,
   isLast,
+  sortMode,
+  onSortModeChange,
   onToggleCollapsed,
   onSelectChannel,
   onMarkChannelRead,
@@ -537,6 +566,8 @@ export function CustomChannelSection({
   assignments: Record<string, string>;
   isFirst: boolean;
   isLast: boolean;
+  sortMode?: ChannelSortMode;
+  onSortModeChange?: (mode: ChannelSortMode) => void;
   onToggleCollapsed: () => void;
   onSelectChannel: (channelId: string) => void;
   onMarkChannelRead: (
@@ -572,7 +603,10 @@ export function CustomChannelSection({
               isDragging && "opacity-30",
             )}
           >
-            <ContextMenu>
+            {/* modal={false}: Rename/Delete section open a modal dialog;
+                a modal ContextMenu would leave `pointer-events: none` stuck on
+                <body> after it closes, freezing the app. */}
+            <ContextMenu modal={false}>
               <ContextMenuTrigger asChild>
                 <div className="relative" {...dragHandleProps}>
                   <SidebarGroupLabel asChild>
@@ -583,65 +617,52 @@ export function CustomChannelSection({
                       onClick={onToggleCollapsed}
                       type="button"
                     >
-                      <GripVertical
-                        className={cn(
-                          "h-4 w-4 shrink-0 text-sidebar-foreground/30",
-                          SECTION_ACTION_VISIBILITY_CLASS,
-                        )}
+                      {section.icon ? (
+                        <span
+                          aria-hidden="true"
+                          className="flex h-4 w-4 shrink-0 items-center justify-center"
+                          data-testid={`section-icon-${section.id}`}
+                        >
+                          <StatusEmoji
+                            className="h-4 w-4"
+                            value={section.icon}
+                          />
+                        </span>
+                      ) : null}
+                      <span
+                        className="truncate"
+                        data-testid={`section-title-${section.id}`}
+                      >
+                        {section.name}
+                      </span>
+                      <span
                         aria-hidden="true"
-                      />
-                      <span>{section.name}</span>
-                      <ChevronDown
-                        aria-hidden="true"
-                        className={cn(
-                          SECTION_LABEL_CHEVRON_CLASS,
-                          isCollapsed ? "-rotate-90" : "rotate-0",
-                        )}
-                      />
+                        className={SECTION_LABEL_CHEVRON_CLASS}
+                      >
+                        <ChevronDown
+                          className={cn(
+                            SECTION_LABEL_CHEVRON_ICON_CLASS,
+                            isCollapsed ? "-rotate-90" : "rotate-0",
+                          )}
+                        />
+                      </span>
                     </button>
                   </SidebarGroupLabel>
-                  <div
-                    className={cn(
-                      "absolute right-1 top-1/2 z-10 flex -translate-y-1/2 items-center gap-0.5",
-                      SECTION_ACTION_VISIBILITY_CLASS,
-                    )}
-                  >
-                    {hasUnread ? (
-                      <button
-                        aria-label="Mark all as read"
-                        className={SECTION_ICON_BUTTON_CLASS}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          onMarkSectionRead();
-                        }}
-                        title="Mark all as read"
-                        type="button"
-                      >
-                        <CheckCheck className="h-4 w-4" />
-                      </button>
-                    ) : null}
-                    <button
-                      aria-label="Rename section"
-                      className={SECTION_ICON_BUTTON_CLASS}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        onRenameSection();
-                      }}
-                      type="button"
-                    >
-                      <Pencil className="h-4 w-4" />
-                    </button>
-                    <button
-                      aria-label="Delete section"
-                      className={SECTION_ICON_BUTTON_CLASS}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        onDeleteSection();
-                      }}
-                      type="button"
-                    >
-                      <Trash2 className="h-4 w-4" />
-                    </button>
+                  <div className="absolute right-1 top-1/2 z-10 flex -translate-y-1/2 items-center gap-0.5">
+                    <SectionActionsMenu
+                      sectionLabel={section.name}
+                      testId={`section-actions-${section.id}`}
+                      hasUnread={hasUnread}
+                      onMarkAllRead={onMarkSectionRead}
+                      onRenameSection={onRenameSection}
+                      onMoveSectionUp={onMoveSectionUp}
+                      onMoveSectionDown={onMoveSectionDown}
+                      onDeleteSection={onDeleteSection}
+                      isFirstSection={isFirst}
+                      isLastSection={isLast}
+                      sortMode={sortMode}
+                      onSortModeChange={onSortModeChange}
+                    />
                   </div>
                 </div>
               </ContextMenuTrigger>
@@ -673,7 +694,10 @@ export function CustomChannelSection({
                 {channels.length > 0 ? (
                   <SidebarMenu>
                     {channels.map((channel) => (
-                      <ContextMenu key={channel.id}>
+                      // modal={false}: see note on the other channel ContextMenu
+                      // above — avoids the pointer-events lockup when Leave
+                      // channel's AlertDialog opens.
+                      <ContextMenu key={channel.id} modal={false}>
                         <ContextMenuTrigger asChild>
                           <SidebarMenuItem>
                             <DraggableChannelRow channelId={channel.id}>

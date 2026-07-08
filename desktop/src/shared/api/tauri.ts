@@ -59,6 +59,7 @@ type RawProfile = {
   about: string | null;
   nip05_handle: string | null;
   owner_pubkey: string | null;
+  has_profile_event?: boolean;
 };
 
 type RawUserProfileSummary = Omit<RawProfile, "pubkey" | "about"> & {
@@ -214,6 +215,7 @@ export type RawManagedAgent = {
   provider: string | null;
   persona_out_of_date: boolean;
   persona_orphaned: boolean;
+  needs_restart: boolean;
   mcp_toolsets: string | null;
   env_vars?: Record<string, string>;
   status: ManagedAgent["status"];
@@ -427,6 +429,7 @@ function fromRawProfile(profile: RawProfile): Profile {
     about: profile.about,
     nip05Handle: profile.nip05_handle,
     ownerPubkey: profile.owner_pubkey,
+    hasProfileEvent: profile.has_profile_event ?? false,
   };
 }
 
@@ -989,6 +992,7 @@ export function fromRawManagedAgent(agent: RawManagedAgent): ManagedAgent {
     provider: agent.provider ?? null,
     personaOutOfDate: agent.persona_out_of_date ?? false,
     personaOrphaned: agent.persona_orphaned ?? false,
+    needsRestart: agent.needs_restart ?? false,
     mcpToolsets: agent.mcp_toolsets,
     envVars: agent.env_vars ?? {},
     status: agent.status,
@@ -1159,20 +1163,6 @@ export async function createManagedAgent(input: CreateManagedAgentInput) {
   };
 }
 
-export async function startManagedAgent(pubkey: string): Promise<ManagedAgent> {
-  const response = await invokeTauri<RawManagedAgent>("start_managed_agent", {
-    pubkey,
-  });
-  return fromRawManagedAgent(response);
-}
-
-export async function stopManagedAgent(pubkey: string): Promise<ManagedAgent> {
-  const response = await invokeTauri<RawManagedAgent>("stop_managed_agent", {
-    pubkey,
-  });
-  return fromRawManagedAgent(response);
-}
-
 export async function deleteManagedAgent(
   pubkey: string,
   forceRemoteDelete?: boolean,
@@ -1253,6 +1243,45 @@ export async function putAgentSessionConfig(
   payload: unknown,
 ): Promise<void> {
   return invokeTauri<void>("put_agent_session_config", { pubkey, payload });
+}
+
+/** File-layer config for a runtime (e.g. `~/.config/goose/config.yaml`). */
+export type RuntimeFileConfigSubset = {
+  /** Provider set in the harness config file. */
+  provider: string | null;
+  /** Model set in the harness config file. */
+  model: string | null;
+  /** Credential env key names whose values are present in the file config. */
+  satisfiedEnvKeys: string[];
+};
+
+/**
+ * Get the file-layer config for a runtime so dialogs can show
+ * "Set in goose config" instead of surfacing a false required-field marker.
+ * Returns `null` when the runtime has no config file or it cannot be parsed.
+ */
+export async function getRuntimeFileConfig(
+  runtimeId: string,
+): Promise<RuntimeFileConfigSubset | null> {
+  return invokeTauri<RuntimeFileConfigSubset | null>(
+    "get_runtime_file_config",
+    {
+      runtimeId,
+    },
+  );
+}
+
+/**
+ * Return the key names of all non-empty baked build env vars.
+ *
+ * Internal (Block) builds bake provider credentials into the binary at compile
+ * time. This returns the *key names only* — never the values — so dialogs can
+ * treat them as satisfied without exposing secrets to the frontend.
+ *
+ * OSS builds return an empty array (no baked env).
+ */
+export async function getBakedBuildEnvKeys(): Promise<string[]> {
+  return invokeTauri<string[]>("get_baked_build_env_keys");
 }
 
 type RawUpdateManagedAgentResponse = {
@@ -1337,3 +1366,10 @@ export async function validateReposDir(dir: string): Promise<void> {
 
 export const setPreventSleepActive = (active: boolean) =>
   invokeTauri("set_prevent_sleep_active", { active });
+
+/** Returns true on macOS, Windows, and Linux AppImage installs.
+ *  Returns false on Linux non-AppImage packages (e.g. .deb) where
+ *  Tauri's updater cannot swap the binary. */
+export function isAutoUpdateSupported(): Promise<boolean> {
+  return invokeTauri<boolean>("is_auto_update_supported");
+}

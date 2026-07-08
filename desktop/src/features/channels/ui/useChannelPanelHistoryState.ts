@@ -10,6 +10,11 @@ import {
   type HistorySearchSetterOptions,
   useHistorySearchState,
 } from "@/shared/hooks/useHistorySearchState";
+import {
+  buildAutoSendClearPatch,
+  CHANNEL_SEARCH_KEYS,
+} from "./channelSearchKeys";
+export type { ChannelSearchKey } from "./channelSearchKeys";
 
 /**
  * Auxiliary-panel state for the channel routes, backed by URL search params
@@ -21,7 +26,9 @@ import {
  * tab), `agentSession` (agent session panel pubkey), `agentSessionChannel`
  * (optional channel scope for the agent session panel), `channelManagement`
  * (presence flag for the channel-management panel — open/closed only, so it
- * carries a sentinel `"1"` rather than an id).
+ * carries a sentinel `"1"` rather than an id), `autoSend` (draft auto-submit
+ * trigger — cleared surgically after the auto-submit fires so `thread` and
+ * all other panel state are preserved).
  */
 
 export type PanelSetterOptions = HistorySearchSetterOptions;
@@ -30,18 +37,6 @@ export type PanelValueSetter = (
   value: string | null,
   options?: PanelSetterOptions,
 ) => void;
-
-const CHANNEL_SEARCH_KEYS = [
-  "agentSession",
-  "agentSessionChannel",
-  "channelManagement",
-  "messageId",
-  "profile",
-  "profileTab",
-  "profileView",
-  "thread",
-  "threadRootId",
-] as const;
 
 const CHANNEL_MANAGEMENT_OPEN_VALUE = "1";
 
@@ -105,8 +100,19 @@ export function useChannelPanelHistoryState() {
     [applyPatch],
   );
 
+  // Clears only the ?autoSend param, preserving `thread` and all other panel
+  // search state. Use this instead of a full goChannel() re-navigation so the
+  // thread panel does not unmount between the auto-submit trigger clear and the
+  // deferred setTimeout(0) send.
+  const clearAutoSend = React.useCallback(
+    (options?: PanelSetterOptions) =>
+      applyPatch(buildAutoSendClearPatch(), { replace: true, ...options }),
+    [applyPatch],
+  );
+
   return {
     channelManagementOpen: values.channelManagement != null,
+    clearAutoSend,
     clearMessageRouteTarget,
     openAgentSessionChannelId: values.agentSessionChannel,
     openAgentSessionPubkey: values.agentSession,

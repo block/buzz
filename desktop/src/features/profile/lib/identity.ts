@@ -1,11 +1,9 @@
 import type { Profile, UserProfileSummary } from "@/shared/api/types";
-import { normalizePubkey } from "@/shared/lib/pubkey";
+import { normalizePubkey, truncatePubkey } from "@/shared/lib/pubkey";
 
 export type UserProfileLookup = Record<string, UserProfileSummary>;
 
-export function truncatePubkey(pubkey: string) {
-  return `${pubkey.slice(0, 8)}…${pubkey.slice(-4)}`;
-}
+export { truncatePubkey };
 
 function getResolvedProfile(
   pubkey: string,
@@ -115,4 +113,33 @@ export function resolveUserSecondaryLabel(input: {
   }
 
   return null;
+}
+
+/**
+ * Label for an agent's owner: "you" when the current user owns it, otherwise
+ * the owner's display name, NIP-05 handle, or truncated pubkey.
+ */
+export function formatOwnerLabel(
+  ownerPubkey: string | null | undefined,
+  currentPubkey: string | null | undefined,
+  ownerProfiles?: UserProfileLookup,
+) {
+  if (!ownerPubkey) {
+    return null;
+  }
+
+  const normalizedOwnerPubkey = normalizePubkey(ownerPubkey);
+  if (
+    currentPubkey &&
+    normalizedOwnerPubkey === normalizePubkey(currentPubkey)
+  ) {
+    return "you";
+  }
+
+  const owner = ownerProfiles?.[normalizedOwnerPubkey];
+  return (
+    owner?.displayName?.trim() ||
+    owner?.nip05Handle?.trim() ||
+    truncatePubkey(ownerPubkey)
+  );
 }

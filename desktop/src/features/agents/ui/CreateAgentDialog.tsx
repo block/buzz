@@ -5,8 +5,10 @@ import {
   useAcpRuntimesQuery,
   useAvailableAcpRuntimes,
   useBackendProvidersQuery,
+  useBakedBuildEnvKeysQuery,
   useCreateManagedAgentMutation,
   useManagedAgentPrereqsQuery,
+  useRuntimeFileConfigQuery,
 } from "@/features/agents/hooks";
 import { probeBackendProvider } from "@/shared/api/tauri";
 import type {
@@ -39,6 +41,21 @@ import { RelayMeshAgentSection } from "@/features/mesh-compute/ui/RelayMeshAgent
 import { meshPrepareRelayMeshClient } from "@/shared/api/tauriMesh";
 import type { MeshServeTarget } from "@/shared/api/tauriMesh";
 import { useLastRuntime } from "@/features/agents/lib/useLastRuntime";
+import {
+  getBakedSatisfiedEnvKeys,
+  requiredCredentialEnvKeys,
+  runtimeSupportsLlmProviderSelection,
+  shouldClearKnownModelForSelectionScope,
+  getProviderApiKeyEnvVar,
+  CUSTOM_PROVIDER_DROPDOWN_VALUE,
+  AUTO_PROVIDER_DROPDOWN_VALUE,
+} from "./personaDialogPickers";
+import { shouldClearModelForRuntimeChange } from "./personaRuntimeModel";
+import {
+  AgentModelField,
+  AgentProviderField,
+} from "./personaProviderModelFields";
+import { usePersonaModelDiscovery } from "./usePersonaModelDiscovery";
 
 export function CreateAgentDialog({
   open,
@@ -88,6 +105,15 @@ export function CreateAgentDialog({
     React.useState<BackendProviderProbeResult | null>(null);
   const [probeError, setProbeError] = React.useState<string | null>(null);
 
+  // Local-mode LLM provider and model — structured state for the credential
+  // gate and live discovery. Only rendered when the runtime supports provider
+  // selection (buzz-agent / goose).
+  const [provider, setProvider] = React.useState("");
+  const [model, setModel] = React.useState("");
+  const [isCustomProviderEditing, setIsCustomProviderEditing] =
+    React.useState(false);
+  const [isCustomModelEditing, setIsCustomModelEditing] = React.useState(false);
+
   // When `useMesh` is on, the agent runs buzz-agent against a member's
   // shared compute. The ACP runtime + backend selectors are hidden; runtime
   // fields are driven by `mesh_agent_preset(meshModelId)` and the submit
@@ -130,6 +156,97 @@ export function CreateAgentDialog({
   const spawnToggleDisabled =
     prereqsQuery.isLoading || (prereqs !== null && !isSpawnSupported);
   const isDiscoveryPending = providersQuery.isLoading || prereqsQuery.isLoading;
+
+  // Local mode: provider/model field visibility and live discovery.
+  // Create has no inherit checkbox — selectedRuntimeId IS the prospective runtime.
+  const llmProviderFieldVisible =
+    !isProviderMode &&
+    !useMesh &&
+    runtimeSupportsLlmProviderSelection(selectedRuntimeId);
+  const providerForDiscovery = llmProviderFieldVisible ? provider : "";
+
+  const {
+    discoveredModelOptions,
+    modelDiscoveryLoading,
+    modelDiscoveryStatus,
+  } = usePersonaModelDiscovery({
+    envVars,
+    isCustomProviderEditing,
+    modelFieldVisible: llmProviderFieldVisible,
+    open,
+    provider: providerForDiscovery,
+    selectedRuntime: selectedRuntime ?? undefined,
+  });
+
+  // Full required credential key list for EnvVarsEditor amber locked rows —
+  // includes already-satisfied keys, not just missing ones.
+  const { data: runtimeFileConfig } = useRuntimeFileConfigQuery(
+    selectedRuntimeId,
+    { enabled: open },
+  );
+  const { data: bakedEnvKeys } = useBakedBuildEnvKeysQuery({ enabled: open });
+
+  // All required keys for the selected runtime + provider.
+  const allRequiredEnvKeys = React.useMemo(
+    () =>
+      requiredCredentialEnvKeys(
+        selectedRuntimeId,
+        runtimeSupportsLlmProviderSelection(selectedRuntimeId) ? provider : "",
+      ),
+    [selectedRuntimeId, provider],
+  );
+
+  // Keys covered by the baked build env (Block-internal builds only) — silenced,
+  // produce no amber row or info row.
+  const bakedSatisfiedEnvKeys = React.useMemo(
+    () => getBakedSatisfiedEnvKeys(allRequiredEnvKeys, envVars, bakedEnvKeys),
+    [allRequiredEnvKeys, envVars, bakedEnvKeys],
+  );
+
+  // Credential keys satisfied by the runtime file config (e.g. goose config.yaml).
+  // These are shown as "Set in goose config" rows rather than amber required rows.
+  const fileSatisfiedEnvKeys = React.useMemo(() => {
+    if (!runtimeFileConfig) return [] as string[];
+    return allRequiredEnvKeys.filter(
+      (key) =>
+        (envVars[key] ?? "").length === 0 &&
+        !bakedSatisfiedEnvKeys.includes(key) &&
+        runtimeFileConfig.satisfiedEnvKeys.includes(key),
+    );
+  }, [runtimeFileConfig, allRequiredEnvKeys, envVars, bakedSatisfiedEnvKeys]);
+
+  const requiredEnvKeys = React.useMemo(
+    () =>
+      allRequiredEnvKeys.filter(
+        (key) =>
+          !bakedSatisfiedEnvKeys.includes(key) &&
+          !fileSatisfiedEnvKeys.includes(key),
+      ),
+    [allRequiredEnvKeys, bakedSatisfiedEnvKeys, fileSatisfiedEnvKeys],
+  );
+
+  // Clear model when provider scope changes, mirroring EditAgentDialog.
+  React.useEffect(() => {
+    if (
+      !open ||
+      isCustomModelEditing ||
+      !shouldClearKnownModelForSelectionScope({
+        model,
+        provider: providerForDiscovery,
+        runtime: selectedRuntimeId,
+      })
+    ) {
+      return;
+    }
+    setModel("");
+    setIsCustomModelEditing(false);
+  }, [
+    isCustomModelEditing,
+    model,
+    open,
+    providerForDiscovery,
+    selectedRuntimeId,
+  ]);
 
   React.useEffect(() => {
     if (hasSyncedProviderSelection || providersQuery.isLoading) {
@@ -249,6 +366,10 @@ export function CreateAgentDialog({
     setProviderConfig({});
     setProbedProvider(null);
     setProbeError(null);
+    setProvider("");
+    setModel("");
+    setIsCustomProviderEditing(false);
+    setIsCustomModelEditing(false);
     setUseMesh(false);
     setMeshModelId("");
     setMeshClientError(null);
@@ -266,24 +387,40 @@ export function CreateAgentDialog({
   }
 
   function handleProviderChange(nextProviderId: string) {
+    const previousRuntimeId = selectedRuntimeId;
     setSelectedRuntimeId(nextProviderId);
 
     if (nextProviderId === "custom") {
       setShowAdvanced(true);
-      return;
+    } else {
+      const runtime = runtimes.find(
+        (candidate) => candidate.id === nextProviderId,
+      );
+      if (runtime) {
+        setLastRuntime(nextProviderId);
+        setAgentCommand(runtime.command);
+        setAgentArgs(runtime.defaultArgs.join(","));
+        setMcpCommand(runtime.mcpCommand ?? "");
+      }
     }
 
-    const provider = runtimes.find(
-      (candidate) => candidate.id === nextProviderId,
-    );
-    if (!provider) {
-      return;
+    // Clear model when switching to a runtime with a different model scope,
+    // and clear provider/model when switching away from provider-selection runtimes.
+    if (
+      shouldClearModelForRuntimeChange(previousRuntimeId, nextProviderId) ||
+      shouldClearKnownModelForSelectionScope({
+        model,
+        provider,
+        runtime: nextProviderId,
+      })
+    ) {
+      setModel("");
+      setIsCustomModelEditing(false);
     }
-
-    setLastRuntime(nextProviderId);
-    setAgentCommand(provider.command);
-    setAgentArgs(provider.defaultArgs.join(","));
-    setMcpCommand(provider.mcpCommand ?? "");
+    if (!runtimeSupportsLlmProviderSelection(nextProviderId)) {
+      setProvider("");
+      setIsCustomProviderEditing(false);
+    }
   }
 
   function handleRunOnChange(value: string) {
@@ -291,6 +428,52 @@ export function CreateAgentDialog({
     setProviderConfig({});
     setProbedProvider(null);
     setProbeError(null);
+  }
+
+  // Provider dropdown handler for local-mode provider field — mirrors Edit.
+  function handleProviderDropdownChange(nextValue: string) {
+    if (nextValue === CUSTOM_PROVIDER_DROPDOWN_VALUE) {
+      const previousApiKey = getProviderApiKeyEnvVar(provider);
+      if (previousApiKey) {
+        setEnvVars((current) => {
+          const next = { ...current };
+          delete next[previousApiKey];
+          return next;
+        });
+      }
+      setIsCustomProviderEditing(true);
+      setProvider("");
+      return;
+    }
+
+    const nextProvider =
+      nextValue === AUTO_PROVIDER_DROPDOWN_VALUE ? "" : nextValue;
+
+    // Clear the old API key when switching providers.
+    const previousApiKey = getProviderApiKeyEnvVar(provider);
+    const nextApiKey = getProviderApiKeyEnvVar(nextProvider);
+    if (previousApiKey && previousApiKey !== nextApiKey) {
+      setEnvVars((current) => {
+        const next = { ...current };
+        delete next[previousApiKey];
+        return next;
+      });
+    }
+
+    setIsCustomProviderEditing(false);
+    setProvider(nextProvider);
+
+    if (
+      !isCustomModelEditing &&
+      shouldClearKnownModelForSelectionScope({
+        model,
+        provider: nextProvider,
+        runtime: selectedRuntimeId,
+      })
+    ) {
+      setModel("");
+      setIsCustomModelEditing(false);
+    }
   }
 
   // Check provider config required fields are filled.
@@ -407,7 +590,10 @@ export function CreateAgentDialog({
                 : undefined,
             systemPrompt: systemPrompt.trim() || undefined,
             envVars,
-            model: useMesh ? meshModelId.trim() || undefined : undefined,
+            model: useMesh
+              ? meshModelId.trim() || undefined
+              : model.trim() || undefined,
+            provider: !useMesh ? provider.trim() || undefined : undefined,
             relayMesh: useMesh ? { modelRef: meshModelId.trim() } : undefined,
             spawnAfterCreate,
             // Relay-mesh agents need a freshly selected serve target to start;
@@ -546,6 +732,32 @@ export function CreateAgentDialog({
               />
             ) : null}
 
+            {/* Local mode: structured provider + model fields for credential
+                gate and live discovery. Only when the runtime supports it. */}
+            {llmProviderFieldVisible ? (
+              <AgentProviderField
+                disabled={createMutation.isPending}
+                isCustomProviderEditing={isCustomProviderEditing}
+                isRequired={true}
+                onProviderChange={handleProviderDropdownChange}
+                provider={provider}
+                selectedRuntime={selectedRuntime ?? undefined}
+              />
+            ) : null}
+            {llmProviderFieldVisible ? (
+              <AgentModelField
+                disabled={createMutation.isPending}
+                discoveredModelOptions={discoveredModelOptions}
+                isCustomModelEditing={isCustomModelEditing}
+                isRequired={true}
+                model={model}
+                modelDiscoveryLoading={modelDiscoveryLoading}
+                modelDiscoveryStatus={modelDiscoveryStatus}
+                onIsCustomModelEditingChange={setIsCustomModelEditing}
+                onModelChange={setModel}
+              />
+            ) : null}
+
             <CreateAgentOptionToggles
               isSpawnSupported={isSpawnSupported}
               onToggleStartOnAppLaunch={() => {
@@ -641,8 +853,10 @@ export function CreateAgentDialog({
 
             <EnvVarsEditor
               disabled={createMutation.isPending}
+              fileSatisfiedKeys={fileSatisfiedEnvKeys}
               helperText="Injected at spawn. Overrides the persona's env vars on collision."
               onChange={setEnvVars}
+              requiredKeys={requiredEnvKeys}
               value={envVars}
             />
 

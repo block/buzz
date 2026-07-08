@@ -8,6 +8,10 @@ mod observer;
 mod pool;
 mod queue;
 mod relay;
+mod setup_mode;
+mod usage;
+
+pub use usage::TurnUsage;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -1091,6 +1095,19 @@ async fn tokio_main() -> Result<()> {
         .init();
 
     let mut config = Config::from_cli().map_err(|e| anyhow::anyhow!("configuration error: {e}"))?;
+
+    // ── Setup-mode early branch ───────────────────────────────────────────────
+    //
+    // When the desktop determines an agent is not ready (missing credentials,
+    // model, or provider), it spawns buzz-acp with BUZZ_ACP_SETUP_PAYLOAD set.
+    // We enter the minimal setup-listener path and never start the agent pool.
+    if let Some(payload) = setup_mode::SetupPayload::from_env()
+        .map_err(|e| anyhow::anyhow!("setup payload error: {e}"))?
+    {
+        tracing::info!("buzz-acp: setup payload present, entering setup-listener mode");
+        return setup_mode::run_setup_listener(config, payload).await;
+    }
+
     tracing::info!("buzz-acp starting: {}", config.summary());
 
     let observer = config
@@ -1402,6 +1419,7 @@ async fn tokio_main() -> Result<()> {
             .as_deref()
             .and_then(|hex| nostr::PublicKey::from_hex(hex).ok()),
         memory_enabled: config.memory_enabled,
+        harness_name: crate::config::normalize_agent_command_identity(&config.agent_command),
     });
 
     if !config.memory_enabled {
@@ -2746,6 +2764,19 @@ fn handle_prompt_result(
         PromptOutcome::Cancelled => "cancelled",
     };
     let agent_index = result.agent.index;
+    // Capture the spawn-time configured model and our PID before the agent is
+    // moved into match arms below. `desired_model` reflects the config/persona
+    // model at spawn time — it does NOT reflect `session/set_model` overrides,
+    // which live in buzz-agent's session state and are what `llm: (model) …`
+    // errors carry. The two can legitimately differ; `configured_model=` is
+    // still valuable for identifying a stale orphan running an old model.
+    let harness_configured_model = result
+        .agent
+        .desired_model
+        .as_deref()
+        .unwrap_or("<none>")
+        .to_string();
+    let harness_pid = std::process::id();
 
     let channel_id = match &result.source {
         PromptSource::Channel(ch) => Some(*ch),
@@ -2780,6 +2811,8 @@ fn handle_prompt_result(
             tracing::warn!(
                 agent = agent_index,
                 outcome = outcome_label,
+                configured_model = %harness_configured_model,
+                pid = harness_pid,
                 "agent_returned — respawning"
             );
             let death_message = match outcome_label {
@@ -2824,6 +2857,8 @@ fn handle_prompt_result(
             tracing::debug!(
                 agent = agent_index,
                 outcome = outcome_label,
+                configured_model = %harness_configured_model,
+                pid = harness_pid,
                 "agent_returned (cancelled)"
             );
             pool.return_agent(result.agent);
@@ -2840,6 +2875,8 @@ fn handle_prompt_result(
                 tracing::warn!(
                     agent = agent_index,
                     outcome = outcome_label,
+                    configured_model = %harness_configured_model,
+                    pid = harness_pid,
                     error = %e,
                     "transport/protocol error — respawning agent"
                 );
@@ -2864,6 +2901,8 @@ fn handle_prompt_result(
                 tracing::warn!(
                     agent = agent_index,
                     outcome = outcome_label,
+                    configured_model = %harness_configured_model,
+                    pid = harness_pid,
                     error = %e,
                     "agent_returned (application error — pipe intact)"
                 );

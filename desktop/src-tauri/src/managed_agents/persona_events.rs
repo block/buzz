@@ -306,6 +306,24 @@ pub struct PersonaSnapshot {
     pub source_version: String,
 }
 
+/// Apply persona-wins-when-set precedence for a single optional string field.
+///
+/// Returns the persona's value when it is non-`None` and non-whitespace-only;
+/// otherwise falls back to the record's value with the same blank filter applied.
+/// Returns `None` only when both are blank — a genuinely unconfigured field stays
+/// unconfigured.
+///
+/// This is the single source of truth for the precedence rule used by
+/// `persona_snapshot_with_agent_config_fallback`, `build_deploy_payload`, and
+/// `resolve_effective_prompt_model_provider` so the three paths cannot drift.
+pub fn persona_field_with_record_fallback(
+    persona_value: Option<&str>,
+    record_value: Option<&str>,
+) -> Option<String> {
+    let non_blank = |v: Option<&str>| v.filter(|s| !s.trim().is_empty()).map(str::to_owned);
+    non_blank(persona_value).or_else(|| non_blank(record_value))
+}
+
 /// Build the pinned snapshot for an agent created from `persona`.
 ///
 /// `agent_env_overrides` are the agent's own env vars (persona-independent);
@@ -326,6 +344,48 @@ pub fn persona_snapshot(
         provider: persona.provider.clone(),
         env_vars,
         source_version: persona_content_hash(&persona_event_content(persona)),
+    }
+}
+
+/// Build the pinned snapshot for an **existing** agent record being re-snapshotted
+/// from its linked persona (on spawn or app-launch restore).
+///
+/// Precedence rule: when the persona sets `model` or `provider` (non-`None`, non-empty),
+/// the persona wins — this is the expected inheritance. When the persona leaves
+/// these fields blank (`None` or empty string), the agent record's own values are
+/// preserved instead. This prevents a persona with no configured model/provider from
+/// clobbering a value the user already set on the agent, which would trap the agent
+/// in a permanent "needs configuration" loop that users cannot escape.
+///
+/// `source_version` is always updated to the current persona content hash so the
+/// drift badge clears correctly even when model/provider are not touched.
+///
+/// Env-var layering is unchanged: persona env < agent env (agent wins on collision).
+/// A persona with an empty env map does not wipe the agent's env vars — the agent's
+/// own overrides are merged on top and always win.
+///
+/// The two fields (`model`, `provider`) are independent: a persona that sets only
+/// `model` wins on `model` while the agent's `provider` is preserved, and vice versa.
+pub fn persona_snapshot_with_agent_config_fallback(
+    persona: &PersonaRecord,
+    agent_env_overrides: &BTreeMap<String, String>,
+    current_agent_model: Option<&str>,
+    current_agent_provider: Option<&str>,
+) -> PersonaSnapshot {
+    // Delegate env-merge, system_prompt, and source_version to persona_snapshot
+    // so future PersonaSnapshot field additions stay automatically consistent.
+    let base = persona_snapshot(persona, agent_env_overrides);
+
+    // Apply the shared precedence rule: persona wins when non-blank, else
+    // the agent record's value is preserved so a configured agent stays configured.
+    let model = persona_field_with_record_fallback(base.model.as_deref(), current_agent_model);
+    let provider =
+        persona_field_with_record_fallback(base.provider.as_deref(), current_agent_provider);
+
+    PersonaSnapshot {
+        model,
+        provider,
+        ..base
     }
 }
 
@@ -623,6 +683,246 @@ mod tests {
         assert_ne!(
             persona_content_hash(&content1),
             persona_content_hash(&content2)
+        );
+    }
+
+    // ── persona_field_with_record_fallback ────────────────────────────────────
+
+    #[test]
+    fn field_fallback_persona_present_wins() {
+        assert_eq!(
+            persona_field_with_record_fallback(Some("persona-model"), Some("record-model")),
+            Some("persona-model".to_owned()),
+        );
+    }
+
+    #[test]
+    fn field_fallback_persona_blank_uses_record() {
+        assert_eq!(
+            persona_field_with_record_fallback(None, Some("record-model")),
+            Some("record-model".to_owned()),
+        );
+        assert_eq!(
+            persona_field_with_record_fallback(Some("  "), Some("record-model")),
+            Some("record-model".to_owned()),
+        );
+    }
+
+    #[test]
+    fn field_fallback_both_blank_is_none() {
+        assert_eq!(persona_field_with_record_fallback(None, None), None);
+        assert_eq!(persona_field_with_record_fallback(Some(""), Some("")), None);
+    }
+
+    #[test]
+    fn field_fallback_record_blank_is_none() {
+        assert_eq!(
+            persona_field_with_record_fallback(None, Some("  ")),
+            None,
+            "whitespace-only record value must also be treated as blank"
+        );
+    }
+
+    // ── persona_snapshot_with_agent_config_fallback ────────────────────────────
+
+    /// Helper: a persona with no model/provider configured.
+    fn blank_model_persona() -> PersonaRecord {
+        PersonaRecord {
+            model: None,
+            provider: None,
+            ..sample_persona()
+        }
+    }
+
+    /// (a) Persona leaves model/provider blank, agent record has values →
+    /// record values preserved AND source_version still updated to current hash.
+    #[test]
+    fn fallback_preserves_record_values_when_persona_blank() {
+        let persona = blank_model_persona();
+        let expected_version = persona_content_hash(&persona_event_content(&persona));
+
+        let snapshot = persona_snapshot_with_agent_config_fallback(
+            &persona,
+            &BTreeMap::new(),
+            Some("gpt-4o"),
+            Some("openai"),
+        );
+
+        assert_eq!(
+            snapshot.model.as_deref(),
+            Some("gpt-4o"),
+            "blank persona model must fall back to agent record value"
+        );
+        assert_eq!(
+            snapshot.provider.as_deref(),
+            Some("openai"),
+            "blank persona provider must fall back to agent record value"
+        );
+        assert_eq!(
+            snapshot.source_version, expected_version,
+            "source_version must still reflect current persona hash"
+        );
+    }
+
+    /// (b) Persona has model/provider set → persona wins over agent record.
+    #[test]
+    fn fallback_persona_wins_when_set() {
+        let persona = sample_persona(); // has model=Some("claude-opus-4"), provider=Some("anthropic")
+
+        let snapshot = persona_snapshot_with_agent_config_fallback(
+            &persona,
+            &BTreeMap::new(),
+            Some("gpt-4o"), // agent had a different model
+            Some("openai"), // agent had a different provider
+        );
+
+        assert_eq!(
+            snapshot.model.as_deref(),
+            Some("claude-opus-4"),
+            "persona model must win when persona has a value"
+        );
+        assert_eq!(
+            snapshot.provider.as_deref(),
+            Some("anthropic"),
+            "persona provider must win when persona has a value"
+        );
+    }
+
+    /// (c) Both blank → snapshot keeps None; a genuinely unconfigured agent
+    /// stays unconfigured (no fabricated values).
+    #[test]
+    fn fallback_both_blank_stays_none() {
+        let persona = blank_model_persona();
+
+        let snapshot = persona_snapshot_with_agent_config_fallback(
+            &persona,
+            &BTreeMap::new(),
+            None, // agent also has no model
+            None, // agent also has no provider
+        );
+
+        assert!(
+            snapshot.model.is_none(),
+            "neither persona nor agent has model — snapshot must be None"
+        );
+        assert!(
+            snapshot.provider.is_none(),
+            "neither persona nor agent has provider — snapshot must be None"
+        );
+    }
+
+    /// Whitespace-only values on the persona are treated as blank; agent
+    /// fallback applies.
+    #[test]
+    fn fallback_treats_whitespace_only_persona_value_as_blank() {
+        let mut persona = sample_persona();
+        persona.model = Some("  ".to_string());
+        persona.provider = Some("\t".to_string());
+
+        let snapshot = persona_snapshot_with_agent_config_fallback(
+            &persona,
+            &BTreeMap::new(),
+            Some("claude-opus-4"),
+            Some("anthropic"),
+        );
+
+        assert_eq!(
+            snapshot.model.as_deref(),
+            Some("claude-opus-4"),
+            "whitespace-only persona model must be treated as blank"
+        );
+        assert_eq!(
+            snapshot.provider.as_deref(),
+            Some("anthropic"),
+            "whitespace-only persona provider must be treated as blank"
+        );
+    }
+
+    /// Cross-field independence: persona sets model but not provider → model
+    /// comes from persona, provider falls back to the record.  This is the
+    /// practically common case (model-only personas).
+    #[test]
+    fn fallback_persona_model_set_provider_blank_uses_record_provider() {
+        let mut persona = sample_persona(); // model=Some("claude-opus-4"), provider=Some("anthropic")
+        persona.provider = None; // blank provider on persona
+
+        let snapshot = persona_snapshot_with_agent_config_fallback(
+            &persona,
+            &BTreeMap::new(),
+            Some("gpt-4o"), // record model (should be overridden by persona)
+            Some("openai"), // record provider (should be preserved)
+        );
+
+        assert_eq!(
+            snapshot.model.as_deref(),
+            Some("claude-opus-4"),
+            "persona model must win when persona has a value"
+        );
+        assert_eq!(
+            snapshot.provider.as_deref(),
+            Some("openai"),
+            "record provider must be used when persona provider is blank"
+        );
+    }
+
+    /// Inverse: persona sets provider but not model → provider comes from
+    /// persona, model falls back to the record.
+    #[test]
+    fn fallback_persona_provider_set_model_blank_uses_record_model() {
+        let mut persona = sample_persona(); // model=Some("claude-opus-4"), provider=Some("anthropic")
+        persona.model = None; // blank model on persona
+
+        let snapshot = persona_snapshot_with_agent_config_fallback(
+            &persona,
+            &BTreeMap::new(),
+            Some("gpt-4o"), // record model (should be preserved)
+            Some("openai"), // record provider (should be overridden by persona)
+        );
+
+        assert_eq!(
+            snapshot.model.as_deref(),
+            Some("gpt-4o"),
+            "record model must be used when persona model is blank"
+        );
+        assert_eq!(
+            snapshot.provider.as_deref(),
+            Some("anthropic"),
+            "persona provider must win when persona has a value"
+        );
+    }
+
+    /// Env-var layering: persona env < agent env — agent overrides always win
+    /// on key collision and a persona with an empty env map does not wipe the
+    /// agent's env vars.
+    #[test]
+    fn fallback_agent_env_wins_over_persona_env() {
+        let mut persona = blank_model_persona();
+        persona.env_vars = BTreeMap::from([
+            ("SHARED_KEY".to_string(), "persona-value".to_string()),
+            ("PERSONA_ONLY".to_string(), "from-persona".to_string()),
+        ]);
+        let agent_env = BTreeMap::from([
+            ("SHARED_KEY".to_string(), "agent-override".to_string()),
+            ("AGENT_ONLY".to_string(), "from-agent".to_string()),
+        ]);
+
+        let snapshot =
+            persona_snapshot_with_agent_config_fallback(&persona, &agent_env, None, None);
+
+        assert_eq!(
+            snapshot.env_vars.get("SHARED_KEY").map(String::as_str),
+            Some("agent-override"),
+            "agent env must win on key collision"
+        );
+        assert_eq!(
+            snapshot.env_vars.get("PERSONA_ONLY").map(String::as_str),
+            Some("from-persona"),
+            "persona-only key must be present"
+        );
+        assert_eq!(
+            snapshot.env_vars.get("AGENT_ONLY").map(String::as_str),
+            Some("from-agent"),
+            "agent-only key must be present"
         );
     }
 }

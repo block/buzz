@@ -141,6 +141,9 @@ type MockBridgeOptions = {
   updateChannelDelayMs?: number;
   updateDownloadDelayMs?: number;
   updateVersion?: string;
+  /** Set to false to simulate a Linux .deb install where auto-update is not
+   *  supported. Defaults to true. See e2eBridge mock.autoUpdateSupported. */
+  autoUpdateSupported?: boolean;
   stallWebsocketSends?: boolean;
   userSearchDelayMs?: number;
   // NIP-IA gate inputs — drive the archive-button gate matrix in
@@ -187,6 +190,22 @@ type MockBridgeOptions = {
     image?: string;
     filename?: string;
   }[];
+  /**
+   * Seed rows returned by the mocked `list_save_subscriptions` command.
+   * Drives the LocalArchiveSettingsCard subscription list view in screenshot
+   * and UI tests without a real SQLite backend.
+   */
+  saveSubscriptions?: Array<{
+    scope_type: string;
+    scope_value: string;
+    kinds: string; // JSON-encoded integer array, e.g. "[9,40002]"
+  }>;
+  /**
+   * Event IDs that `get_event` should report as definitively not found.
+   * Causes `useDraftRootStatus` to map the draft to `deleted` state so specs
+   * can exercise the "Thread deleted" label / disabled-send path.
+   */
+  deletedEventIds?: string[];
 };
 
 type BridgeOptions = {
@@ -545,4 +564,23 @@ export async function openChannelBrowser(page: Page) {
       }),
     );
   }, isMacBrowser);
+}
+
+// Section header actions (create channel, new DM, mark all read, sort) now
+// live inside a per-section "more actions" (⋮) menu instead of standalone
+// header icon buttons. These helpers open that menu and pick an item.
+async function openSectionMenu(page: Page, actionsTestId: string) {
+  const trigger = page.getByTestId(actionsTestId);
+  await trigger.scrollIntoViewIfNeeded();
+  await trigger.click();
+}
+
+export async function openCreateChannelDialog(page: Page) {
+  await openSectionMenu(page, "section-actions-channels");
+  await page.getByRole("menuitem", { name: "New channel" }).click();
+}
+
+export async function openNewDirectMessageDialog(page: Page) {
+  await openSectionMenu(page, "section-actions-dms");
+  await page.getByRole("menuitem", { name: "New message" }).click();
 }

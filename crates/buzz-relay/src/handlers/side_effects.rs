@@ -11,7 +11,9 @@ use buzz_core::kind::{
     KIND_GIT_REPO_ANNOUNCEMENT, KIND_IA_ARCHIVED, KIND_IA_ARCHIVED_LIST, KIND_IA_UNARCHIVED,
     KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION, KIND_NIP29_GROUP_ADMINS,
     KIND_NIP29_GROUP_MEMBERS, KIND_NIP29_GROUP_METADATA, KIND_NIP43_MEMBERSHIP_LIST, KIND_REACTION,
+    KIND_THREAD_SUMMARY,
 };
+use buzz_core::StoredEvent;
 use buzz_db::channel::MemberRole;
 
 use super::event::dispatch_persistent_event;
@@ -169,8 +171,9 @@ pub async fn handle_side_effects(
 
 /// Validate a standard NIP-09 deletion event before it is stored.
 ///
-/// Buzz accepts standard deletions for self-authored events only. Channel
-/// admin deletions continue to use kind 9005.
+/// Buzz accepts standard deletions for self-authored events, plus the owning
+/// human deleting their agent's events (mirrors `validate_edit_ownership`).
+/// Channel admin deletions continue to use kind 9005.
 pub async fn validate_standard_deletion_event(
     tenant: &TenantContext,
     event: &Event,
@@ -193,7 +196,12 @@ pub async fn validate_standard_deletion_event(
         }
         let target_pubkey_bytes =
             hex::decode(parts[1]).map_err(|_| anyhow::anyhow!("invalid pubkey in a-tag"))?;
-        if target_pubkey_bytes != actor_bytes {
+        if target_pubkey_bytes != actor_bytes
+            && !state
+                .db
+                .is_agent_owner(tenant.community(), &target_pubkey_bytes, &actor_bytes)
+                .await?
+        {
             return Err(anyhow::anyhow!("must be event author"));
         }
         return Ok(());
@@ -208,7 +216,12 @@ pub async fn validate_standard_deletion_event(
 
         let target_author =
             effective_message_author(&target_event.event, &state.relay_keypair.public_key());
-        if target_author != actor_bytes {
+        if target_author != actor_bytes
+            && !state
+                .db
+                .is_agent_owner(tenant.community(), &target_author, &actor_bytes)
+                .await?
+        {
             return Err(anyhow::anyhow!("must be event author"));
         }
     }
@@ -671,6 +684,108 @@ pub async fn emit_system_message(
     }
 
     Ok(())
+}
+
+/// Sign and fan out a fresh relay-signed `kind:39005` thread-summary overlay
+/// for `root_id` after a thread mutation (reply insert or threaded delete).
+///
+/// Fan-out only — never stored. Channel-window pages recompute summaries from
+/// `thread_metadata` on every fetch (`api/bridge.rs`), so a persisted copy
+/// would only add staleness; this live emit exists purely so subscribed
+/// clients can update badge counts without refetching the head window. The
+/// counts are re-read from `thread_metadata` post-commit rather than
+/// incremented, so the emitted summary is exact even under concurrent
+/// replies/deletes (newest `created_at` wins client-side).
+///
+/// Spawned: runs after the triggering write committed and must not add
+/// latency to the ingest acknowledgement, mirroring
+/// `dispatch_persistent_event`.
+pub fn emit_live_thread_summary(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    channel_id: Uuid,
+    root_id: Vec<u8>,
+) {
+    let tenant = tenant.clone();
+    let state = Arc::clone(state);
+    tokio::spawn(async move {
+        let summary = match state
+            .db
+            .get_thread_summary(tenant.community(), &root_id)
+            .await
+        {
+            Ok(Some(summary)) => summary,
+            // Root has no thread row — nothing to summarize (e.g., the root
+            // itself was just deleted).
+            Ok(None) => return,
+            Err(e) => {
+                warn!(
+                    root = %hex::encode(&root_id),
+                    "live thread summary lookup failed: {e}"
+                );
+                return;
+            }
+        };
+
+        let root_hex = hex::encode(&root_id);
+        // Same tags/content shape as the channel-window page overlay in
+        // `api/bridge.rs` — one contract, two delivery doors.
+        let content = serde_json::json!({
+            "reply_count": summary.reply_count,
+            "descendant_count": summary.descendant_count,
+            "last_reply_at": summary.last_reply_at.map(|t| t.timestamp()),
+            "participants": summary.participants.iter().map(hex::encode).collect::<Vec<_>>(),
+        });
+        let tags = [
+            Tag::parse(["e", &root_hex]),
+            Tag::parse(["d", &root_hex]),
+            Tag::parse(["h", &channel_id.to_string()]),
+        ];
+        let mut parsed = Vec::with_capacity(tags.len());
+        for tag in tags {
+            match tag {
+                Ok(tag) => parsed.push(tag),
+                Err(e) => {
+                    warn!(root = %root_hex, "live thread summary tag failed: {e}");
+                    return;
+                }
+            }
+        }
+        let event = match EventBuilder::new(
+            Kind::Custom(KIND_THREAD_SUMMARY as u16),
+            content.to_string(),
+        )
+        .tags(parsed)
+        .sign_with_keys(&state.relay_keypair)
+        {
+            Ok(event) => event,
+            Err(e) => {
+                warn!(root = %root_hex, "live thread summary sign failed: {e}");
+                return;
+            }
+        };
+
+        // Redis before local fan-out so subscribers on other relay pods
+        // receive it too, matching `dispatch_persistent_event`.
+        state.mark_local_event(tenant.community(), &event.id);
+        if let Err(e) = state
+            .pubsub
+            .publish_event(&tenant, EventTopic::Channel(channel_id), &event)
+            .await
+        {
+            state
+                .local_event_ids
+                .invalidate(&(tenant.community(), event.id.to_bytes()));
+            warn!(root = %root_hex, "live thread summary Redis publish failed: {e}");
+        }
+        let stored = StoredEvent::new(event, Some(channel_id));
+        crate::handlers::event::fan_out_event_to_local_subscribers(
+            &state,
+            tenant.community(),
+            &stored,
+        )
+        .await;
+    });
 }
 
 /// Emit a relay-signed membership notification event stored globally (channel_id = None).
@@ -1485,6 +1600,12 @@ async fn handle_delete_event_side_effect(
         return Ok(()); // No-op: skip system message to avoid false audit records.
     }
 
+    // Thread counters were decremented in the same transaction — push a fresh
+    // relay-signed 39005 so live badge counts also count *down*.
+    if let Some(root_id) = root_id {
+        emit_live_thread_summary(tenant, state, channel_id, root_id);
+    }
+
     let actor_hex = hex::encode(event.pubkey.to_bytes());
     emit_system_message(
         tenant,
@@ -1966,6 +2087,12 @@ async fn handle_standard_deletion_event(
 
         if !deleted {
             continue;
+        }
+
+        // Thread counters were decremented in the same transaction — push a
+        // fresh relay-signed 39005 so live badge counts also count *down*.
+        if let (Some(root_id), Some(channel_id)) = (root_id, target_event.channel_id) {
+            emit_live_thread_summary(tenant, state, channel_id, root_id);
         }
 
         if u32::from(target_event.event.kind.as_u16()) == KIND_REACTION {

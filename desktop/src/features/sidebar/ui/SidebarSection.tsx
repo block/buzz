@@ -15,7 +15,7 @@ import {
   ContextMenuTrigger,
 } from "@/shared/ui/context-menu";
 
-import { ChannelContextMenuItems } from "@/features/sidebar/ui/CustomChannelSection";
+import { ChannelContextMenuItems } from "@/features/sidebar/ui/ChannelContextMenu";
 import type { ActiveChannelTurnSummary } from "@/features/agents/activeAgentTurnsStore";
 import { formatElapsed } from "@/features/agents/ui/agentSessionUtils";
 import { getEphemeralChannelDisplay } from "@/features/channels/lib/ephemeralChannel";

@@ -12,9 +12,9 @@ use uuid::Uuid;
 use buzz_auth::Scope;
 use buzz_core::kind::{
     event_kind_u32, is_identity_archive_request_kind, is_parameterized_replaceable,
-    is_relay_admin_kind, KIND_AGENT_ENGRAM, KIND_AGENT_PROFILE, KIND_APPROVAL_DENY,
-    KIND_APPROVAL_GRANT, KIND_AUTH, KIND_BOOKMARK_LIST, KIND_BOOKMARK_SET, KIND_CANVAS,
-    KIND_CONTACT_LIST, KIND_DELETION, KIND_DM_ADD_MEMBER, KIND_DM_HIDE, KIND_DM_OPEN,
+    is_relay_admin_kind, KIND_AGENT_ENGRAM, KIND_AGENT_PROFILE, KIND_AGENT_TURN_METRIC,
+    KIND_APPROVAL_DENY, KIND_APPROVAL_GRANT, KIND_AUTH, KIND_BOOKMARK_LIST, KIND_BOOKMARK_SET,
+    KIND_CANVAS, KIND_CONTACT_LIST, KIND_DELETION, KIND_DM_ADD_MEMBER, KIND_DM_HIDE, KIND_DM_OPEN,
     KIND_EMOJI_LIST, KIND_EMOJI_SET, KIND_EVENT_REMINDER, KIND_FOLLOW_SET, KIND_FORUM_COMMENT,
     KIND_FORUM_POST, KIND_FORUM_VOTE, KIND_GIFT_WRAP, KIND_GIT_ISSUE, KIND_GIT_PATCH,
     KIND_GIT_PR_UPDATE, KIND_GIT_PULL_REQUEST, KIND_GIT_REPO_ANNOUNCEMENT, KIND_GIT_REPO_STATE,
@@ -156,6 +156,8 @@ fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static s
         | KIND_EVENT_REMINDER | KIND_PERSONA | KIND_TEAM | KIND_MANAGED_AGENT => {
             Ok(Scope::UsersWrite)
         }
+        // NIP-AM: agent turn metrics are agent-authored global events (encrypted to owner).
+        KIND_AGENT_TURN_METRIC => Ok(Scope::MessagesWrite),
         // NIP-51 standard lists and NIP-65 relay list — user-owned global state,
         // same ownership shape as kind:3 (contacts) and kind:0 (profile).
         KIND_MUTE_LIST
@@ -379,6 +381,9 @@ pub(crate) fn is_global_only_kind(kind: u32) -> bool {
             // Mesh-LLM relay status is relay-signed and global. Clients may
             // subscribe to it, but must not channel-scope or submit it.
             | KIND_MESH_LLM_RELAY_STATUS
+            // NIP-AM: agent turn metrics are owner-scoped global events.
+            // Channel identity is encrypted inside the payload — no `h` tag.
+            | KIND_AGENT_TURN_METRIC
     )
 }
 
@@ -1066,6 +1071,82 @@ fn validate_engram_nip44_content(content: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Validate the public envelope of a NIP-AM `kind:44200` event.
+///
+/// Enforces (without touching the encrypted payload):
+/// - Exactly one `p` tag: 64 lowercase hex chars (the owner pubkey).
+/// - Exactly one `agent` tag: 64 lowercase hex chars equal to `event.pubkey`.
+/// - No `h` tag (channel identity belongs inside the encrypted payload).
+/// - Content syntactically resembles NIP-44 v2 ciphertext (delegated to
+///   `validate_engram_nip44_content`, which does the same length/base64/version check).
+///
+/// Ownership (`is_agent_owner`) is an async DB check performed separately in
+/// `ingest_event_inner` after this synchronous envelope check.
+fn validate_agent_turn_metric_envelope(event: &nostr::Event) -> Result<(), String> {
+    let event_pubkey_hex = event.pubkey.to_hex();
+    let mut p_tags: Vec<&str> = Vec::new();
+    let mut agent_tags: Vec<&str> = Vec::new();
+    let mut has_h_tag = false;
+
+    for tag in event.tags.iter() {
+        let parts = tag.as_slice();
+        if parts.len() < 2 {
+            continue;
+        }
+        match parts[0].as_str() {
+            "p" => p_tags.push(&parts[1]),
+            "agent" => agent_tags.push(&parts[1]),
+            "h" => has_h_tag = true,
+            _ => {}
+        }
+    }
+
+    if has_h_tag {
+        return Err(
+            "agent-turn-metric event must not have an `h` tag (channel identity belongs inside the encrypted payload)".to_string(),
+        );
+    }
+
+    if p_tags.len() != 1 {
+        return Err(format!(
+            "agent-turn-metric event must have exactly one `p` tag (got {})",
+            p_tags.len()
+        ));
+    }
+    let p = p_tags[0];
+    if p.len() != 64
+        || !p
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+    {
+        return Err("agent-turn-metric `p` tag must be 64 lowercase hex chars".to_string());
+    }
+
+    if agent_tags.len() != 1 {
+        return Err(format!(
+            "agent-turn-metric event must have exactly one `agent` tag (got {})",
+            agent_tags.len()
+        ));
+    }
+    let agent = agent_tags[0];
+    if agent.len() != 64
+        || !agent
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+    {
+        return Err("agent-turn-metric `agent` tag must be 64 lowercase hex chars".to_string());
+    }
+    if agent != event_pubkey_hex {
+        return Err("agent-turn-metric `agent` tag must equal event pubkey".to_string());
+    }
+
+    // Content must look like a NIP-44 v2 ciphertext (length, base64, version prefix).
+    validate_engram_nip44_content(&event.content)
+        .map_err(|e| e.replace("agent-engram", "agent-turn-metric"))?;
+
+    Ok(())
+}
+
 /// Parse a NIP-ER `not_before` tag value into a Unix timestamp.
 ///
 /// The value MUST be a decimal integer string containing only ASCII digits, with
@@ -1671,6 +1752,43 @@ async fn ingest_event_inner(
             .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
     }
 
+    if kind_u32 == KIND_AGENT_TURN_METRIC {
+        validate_agent_turn_metric_envelope(&event)
+            .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
+
+        // Ownership check: `p` tag must be the registered owner of `event.pubkey`.
+        // Tag shape is already verified above; these extractions are infallible.
+        let owner_hex = event
+            .tags
+            .iter()
+            .find_map(|t| {
+                let parts = t.as_slice();
+                if parts.len() >= 2 && parts[0].as_str() == "p" {
+                    Some(parts[1].as_str())
+                } else {
+                    None
+                }
+            })
+            .expect("p tag present (validated above)");
+        let agent_bytes = event.pubkey.to_bytes().to_vec();
+        let owner_bytes = hex::decode(owner_hex).expect("hex validated above");
+        let is_owner = state
+            .db
+            .is_agent_owner(tenant.community(), &agent_bytes, &owner_bytes)
+            .await
+            .map_err(|e| {
+                IngestError::Internal(format!(
+                    "error: db error checking agent-turn-metric ownership: {e}"
+                ))
+            })?;
+        if !is_owner {
+            return Err(IngestError::AuthFailed(
+                "restricted: agent-turn-metric `p` tag must be the registered owner of this agent"
+                    .into(),
+            ));
+        }
+    }
+
     if kind_u32 == KIND_EVENT_REMINDER {
         validate_event_reminder(&event)
             .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
@@ -2047,6 +2165,20 @@ async fn ingest_event_inner(
         }
     }
 
+    // A freshly inserted reply changed its thread's counters (updated in the
+    // same transaction as the insert) — push a fresh relay-signed 39005 so
+    // subscribed clients can update badge counts without refetching the head
+    // window. Page responses recompute summaries independently, so this is
+    // fan-out-only and best-effort.
+    if let Some(meta) = &thread_meta {
+        crate::handlers::side_effects::emit_live_thread_summary(
+            tenant,
+            state,
+            meta.channel_id,
+            meta.root_event_id.clone(),
+        );
+    }
+
     let pubkey_hex = auth.pubkey().to_hex();
     // Spec WriteInsert (line 514) / WriteInsertGlobal (line 559) /
     // WriteDuplicate (line 606): emit the abstract write at the trailing
@@ -2274,6 +2406,7 @@ mod tests {
             KIND_PERSONA,
             KIND_TEAM,
             KIND_MANAGED_AGENT,
+            KIND_AGENT_TURN_METRIC,
         ];
         for kind in migrated {
             assert!(
@@ -2309,6 +2442,24 @@ mod tests {
             KIND_MESH_LLM_RELAY_STATUS
         ));
         assert!(!requires_h_channel_scope(KIND_MESH_LLM_RELAY_STATUS));
+    }
+
+    #[test]
+    fn agent_turn_metric_is_global_only_and_in_scope_allowlist() {
+        let dummy = make_dummy_event();
+        assert!(
+            is_global_only_kind(KIND_AGENT_TURN_METRIC),
+            "kind:44200 must be global-only (no h tag)"
+        );
+        assert!(
+            !requires_h_channel_scope(KIND_AGENT_TURN_METRIC),
+            "kind:44200 must not require an h-tag"
+        );
+        assert_eq!(
+            required_scope_for_kind(KIND_AGENT_TURN_METRIC, &dummy).unwrap(),
+            Scope::MessagesWrite,
+            "kind:44200 requires MessagesWrite scope"
+        );
     }
 
     #[test]
@@ -2943,5 +3094,105 @@ mod tests {
         let ev = make_persona(&[&["d", "has.dot"]]);
         let err = validate_persona_envelope(&ev).unwrap_err();
         assert!(err.contains("`d` tag"), "got: {err}");
+    }
+
+    // ─── agent_turn_metric envelope tests ────────────────────────────────────
+
+    /// Build an event for kind:44200 with the given tags and content.
+    /// The signing key IS the agent key, so `event.pubkey` matches the agent.
+    fn make_agent_turn_metric(
+        agent_keys: &nostr::Keys,
+        tags: &[&[&str]],
+        content: &str,
+    ) -> nostr::Event {
+        let nostr_tags: Vec<nostr::Tag> = tags
+            .iter()
+            .map(|t| nostr::Tag::parse(t.iter().copied()).unwrap())
+            .collect();
+        nostr::EventBuilder::new(
+            nostr::Kind::Custom(buzz_core::kind::KIND_AGENT_TURN_METRIC as u16),
+            content,
+        )
+        .tags(nostr_tags)
+        .sign_with_keys(agent_keys)
+        .unwrap()
+    }
+
+    #[test]
+    fn agent_turn_metric_envelope_accepts_canonical() {
+        let agent = nostr::Keys::generate();
+        let owner_hex = "b".repeat(64);
+        let agent_hex = agent.public_key().to_hex();
+        let ev = make_agent_turn_metric(
+            &agent,
+            &[&["p", &owner_hex], &["agent", &agent_hex]],
+            &fake_nip44_v2(),
+        );
+        assert!(validate_agent_turn_metric_envelope(&ev).is_ok());
+    }
+
+    #[test]
+    fn agent_turn_metric_envelope_rejects_h_tag() {
+        let agent = nostr::Keys::generate();
+        let owner_hex = "b".repeat(64);
+        let agent_hex = agent.public_key().to_hex();
+        let ev = make_agent_turn_metric(
+            &agent,
+            &[
+                &["p", &owner_hex],
+                &["agent", &agent_hex],
+                &["h", "some-channel-uuid"],
+            ],
+            &fake_nip44_v2(),
+        );
+        let err = validate_agent_turn_metric_envelope(&ev).unwrap_err();
+        assert!(err.contains("`h` tag"), "got: {err}");
+    }
+
+    #[test]
+    fn agent_turn_metric_envelope_rejects_missing_p() {
+        let agent = nostr::Keys::generate();
+        let agent_hex = agent.public_key().to_hex();
+        let ev = make_agent_turn_metric(&agent, &[&["agent", &agent_hex]], &fake_nip44_v2());
+        let err = validate_agent_turn_metric_envelope(&ev).unwrap_err();
+        assert!(err.contains("`p` tag"), "got: {err}");
+    }
+
+    #[test]
+    fn agent_turn_metric_envelope_rejects_missing_agent() {
+        let agent = nostr::Keys::generate();
+        let owner_hex = "b".repeat(64);
+        let ev = make_agent_turn_metric(&agent, &[&["p", &owner_hex]], &fake_nip44_v2());
+        let err = validate_agent_turn_metric_envelope(&ev).unwrap_err();
+        assert!(err.contains("`agent` tag"), "got: {err}");
+    }
+
+    #[test]
+    fn agent_turn_metric_envelope_rejects_agent_mismatch() {
+        let agent = nostr::Keys::generate();
+        let owner_hex = "b".repeat(64);
+        let wrong_agent_hex = "c".repeat(64); // not event.pubkey
+        let ev = make_agent_turn_metric(
+            &agent,
+            &[&["p", &owner_hex], &["agent", &wrong_agent_hex]],
+            &fake_nip44_v2(),
+        );
+        let err = validate_agent_turn_metric_envelope(&ev).unwrap_err();
+        assert!(err.contains("equal event pubkey"), "got: {err}");
+    }
+
+    #[test]
+    fn agent_turn_metric_envelope_rejects_bad_content() {
+        let agent = nostr::Keys::generate();
+        let owner_hex = "b".repeat(64);
+        let agent_hex = agent.public_key().to_hex();
+        let ev = make_agent_turn_metric(
+            &agent,
+            &[&["p", &owner_hex], &["agent", &agent_hex]],
+            "not-a-ciphertext",
+        );
+        let err = validate_agent_turn_metric_envelope(&ev).unwrap_err();
+        // error comes from validate_engram_nip44_content with label replaced
+        assert!(err.contains("agent-turn-metric"), "got: {err}");
     }
 }

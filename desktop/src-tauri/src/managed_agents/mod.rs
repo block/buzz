@@ -1,6 +1,8 @@
 mod agent_env;
 pub(crate) mod agent_events;
-pub(crate) use agent_env::{build_buzz_agent_provider_defaults, discovery_env_with_baked_floor};
+pub(crate) use agent_env::{
+    baked_build_env, build_buzz_agent_provider_defaults, discovery_env_with_baked_floor,
+};
 mod backend;
 pub(crate) mod config_bridge;
 mod discovery;
@@ -12,12 +14,15 @@ pub(crate) mod persona_events;
 mod personas;
 #[cfg(windows)]
 mod process_lifecycle;
+pub(crate) mod readiness;
+pub(crate) mod reconcile;
 #[cfg(feature = "mesh-llm")]
 mod relay_mesh;
 mod repos;
 mod restore;
 pub mod retention;
 mod runtime;
+pub(crate) mod spawn_hash;
 mod storage;
 pub(crate) mod team_events;
 mod team_repair;
@@ -32,6 +37,9 @@ pub use persona_card::*;
 pub use personas::*;
 #[cfg(windows)]
 pub use process_lifecycle::*;
+pub(crate) use readiness::{
+    agent_readiness, resolve_effective_agent_env, AgentReadiness, Requirement,
+};
 #[cfg(feature = "mesh-llm")]
 pub use relay_mesh::*;
 pub use repos::{

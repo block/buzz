@@ -471,7 +471,7 @@ mod tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 4);
+        assert_eq!(migrations.len(), 5);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -515,7 +515,6 @@ mod tests {
             .as_str()
             .contains("ALTER TABLE communities ADD COLUMN icon"));
         assert!(!migrations[0].sql.as_str().contains("icon"));
-
         // Same additive-migration rule for the e-tag containment GIN index
         // (channel-window aux closure): its own version, never folded into 0001.
         assert_eq!(migrations[3].version, 4);
@@ -524,6 +523,15 @@ mod tests {
             .as_str()
             .contains("CREATE INDEX idx_events_tags_gin"));
         assert!(!migrations[0].sql.as_str().contains("idx_events_tags_gin"));
+
+        // NIP-AM (kind 44200) FTS exclusion: additive migration, never folded
+        // into 0001 — folding would change 0001's checksum and break brownfield
+        // startup. Migration 5 drops and re-adds the generated `search_tsv`
+        // column with the extended kind-44200 exclusion. 0001 must NOT carry 44200.
+        assert_eq!(migrations[4].version, 5);
+        assert!(migrations[4].sql.as_str().contains("search_tsv"));
+        assert!(migrations[4].sql.as_str().contains("44200"));
+        assert!(!migrations[0].sql.as_str().contains("44200"));
     }
 
     #[test]

@@ -15,14 +15,19 @@ import {
   discoverBackendProviders,
   discoverManagedAgentPrereqs,
   getAgentConfigSurface,
+  getBakedBuildEnvKeys,
   getManagedAgentLog,
+  getRuntimeFileConfig,
   installAcpRuntime,
   listManagedAgents,
   listRelayAgents,
-  startManagedAgent,
-  stopManagedAgent,
   updateManagedAgent,
 } from "@/shared/api/tauri";
+import {
+  setManagedAgentStartOnAppLaunch,
+  startManagedAgent,
+  stopManagedAgent,
+} from "@/shared/api/tauriManagedAgents";
 import {
   createPersona,
   deletePersona,
@@ -31,7 +36,6 @@ import {
   setPersonaActive,
   updatePersona,
 } from "@/shared/api/tauriPersonas";
-import { setManagedAgentStartOnAppLaunch } from "@/shared/api/tauriManagedAgents";
 import {
   createTeam,
   deleteTeam,
@@ -326,10 +330,32 @@ export function useUpdatePersonaMutation() {
 
   return useMutation({
     mutationFn: (input: UpdatePersonaInput) => updatePersona(input),
-    onSettled: async () => {
+    onSettled: async (_data, _error, variables) => {
+      // Evict per-pubkey users-batch-entry caches for agents linked to this
+      // persona so the subsequent batch invalidation refetches fresh profiles
+      // instead of re-reading stale entries (mirrors useUpdateManagedAgentMutation).
+      const agents = queryClient.getQueryData<ManagedAgent[]>(
+        managedAgentsQueryKey,
+      );
+      if (agents) {
+        const linkedPubkeys = agents
+          .filter((a) => a.personaId === variables.id)
+          .map((a) => a.pubkey.toLowerCase());
+        evictUsersBatchEntries(queryClient, linkedPubkeys);
+      }
+
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: personasQueryKey }),
         queryClient.invalidateQueries({ queryKey: managedAgentsQueryKey }),
+        // Persona avatar changes re-sync linked agents' relay profiles;
+        // invalidate cached user-profile and users-batch queries so the UI
+        // picks up the updated kind:0 picture without waiting for staleTime
+        // expiry — covers agent cards, message timelines, and member lists.
+        queryClient.invalidateQueries({
+          predicate: (query) =>
+            query.queryKey[0] === "user-profile" ||
+            query.queryKey[0] === "users-batch",
+        }),
       ]);
     },
   });
@@ -595,6 +621,57 @@ export function useAgentConfigSurface(pubkey: string | null) {
     enabled: !!pubkey,
     staleTime: 10_000,
     refetchInterval: 30_000,
+  });
+}
+
+export const runtimeFileConfigQueryKey = (runtimeId: string) =>
+  ["runtime-file-config", runtimeId] as const;
+
+/**
+ * Query the file-layer config for a runtime (e.g. `~/.config/goose/config.yaml`).
+ *
+ * Used by Create/Edit/Persona dialogs to know which requirements are already
+ * satisfied in the harness config file, so they can show "Set in goose config"
+ * rather than surfacing a false required-field marker.
+ *
+ * Enabled only when `runtimeId` is non-empty and the dialog is open.
+ */
+export function useRuntimeFileConfigQuery(
+  runtimeId: string,
+  options?: { enabled?: boolean },
+) {
+  return useQuery({
+    queryKey: runtimeFileConfigQueryKey(runtimeId),
+    queryFn: () => getRuntimeFileConfig(runtimeId),
+    enabled: (options?.enabled ?? true) && runtimeId.trim().length > 0,
+    staleTime: 30_000,
+    // File config rarely changes mid-session; no aggressive refetch needed.
+    refetchInterval: false,
+  });
+}
+
+export const bakedBuildEnvKeysQueryKey = ["baked-build-env-keys"] as const;
+
+/**
+ * Query the key names of baked build env vars.
+ *
+ * Internal (Block) builds bake provider credentials into the binary at compile
+ * time. This query returns the *key names only* so dialogs can treat baked keys
+ * as satisfying their requirements — mirroring the backend readiness gate.
+ *
+ * The value is a compile-time constant, so `staleTime: Infinity` is correct.
+ * In web-dev and E2E contexts where the Tauri command doesn't exist the query
+ * fails soft and resolves to `undefined` without crashing (same class as
+ * `useRuntimeFileConfigQuery`).
+ */
+export function useBakedBuildEnvKeysQuery(options?: { enabled?: boolean }) {
+  return useQuery({
+    queryKey: bakedBuildEnvKeysQueryKey,
+    queryFn: () => getBakedBuildEnvKeys(),
+    enabled: options?.enabled ?? true,
+    staleTime: Infinity,
+    refetchInterval: false,
+    retry: false,
   });
 }
 

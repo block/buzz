@@ -3,7 +3,7 @@ import { classifyToolItem } from "./agentSessionToolClassifier";
 
 export type TranscriptTurnSegment =
   | { kind: "item"; item: TranscriptItem }
-  | { kind: "summary"; summary: TranscriptSameKindSummary }
+  | { kind: "summary"; summary: TranscriptToolRunSummary }
   | { kind: "setup"; items: Extract<TranscriptItem, { type: "lifecycle" }>[] }
   | {
       kind: "prompt";
@@ -17,12 +17,30 @@ export type TranscriptDisplayBlock =
   | { kind: "single"; item: TranscriptItem }
   | { kind: "turn"; turnId: string; segments: TranscriptTurnSegment[] };
 
-export type TranscriptSameKindSummary = {
+export type TranscriptToolRunChildSegment =
+  | { kind: "item"; item: TranscriptItem }
+  | { kind: "summary"; summary: TranscriptToolRunSummary };
+
+export type TranscriptToolRunSummary = {
   id: string;
   label: string;
   count: number;
+  /** Flat leaf tool items in original order (nested summaries expanded). */
   items: TranscriptItem[];
   renderClass: TranscriptItem["renderClass"] | null;
+  /**
+   * "same-kind" summaries collapse runs sharing one semantic groupKey and get
+   * specific labels ("Read 3 files"). "mixed" summaries collapse broader
+   * bursts of routine tool work ("Ran 9 tool calls") and may contain nested
+   * same-kind summaries as children.
+   */
+  variant: "same-kind" | "mixed";
+  /**
+   * Child segments in original order for mixed bursts — raw tool rows plus
+   * any same-kind summaries that joined the burst. Absent on same-kind
+   * summaries, whose children are just `items`.
+   */
+  segments?: TranscriptToolRunChildSegment[];
   timestamp: string;
 };
 
@@ -36,12 +54,28 @@ function isUserPrompt(
   );
 }
 
+function isSteerPrompt(
+  item: TranscriptItem,
+): item is Extract<TranscriptItem, { type: "message" }> {
+  return (
+    item.type === "message" &&
+    item.role === "user" &&
+    item.acpSource === "session/steer:user"
+  );
+}
+
 function isPromptContext(
   item: TranscriptItem,
 ): item is Extract<TranscriptItem, { type: "metadata" }> {
   return (
     item.type === "metadata" && item.acpSource === "session/prompt:context"
   );
+}
+
+function isSteerContext(
+  item: TranscriptItem,
+): item is Extract<TranscriptItem, { type: "metadata" }> {
+  return item.type === "metadata" && item.acpSource === "session/steer:context";
 }
 
 function isSystemPrompt(
@@ -74,18 +108,41 @@ function classifyTurnItems(
   const userPrompt = items.find(isUserPrompt) ?? null;
   const setupLifecycle = items.filter(isSetupLifecycle);
   const promptContext = items.find(isPromptContext) ?? null;
+  // Steer context rides behind the steer message bubble's checks-icon dialog
+  // (same ingress treatment as session/prompt context) instead of rendering
+  // as a standalone "Prompt context" metadata row.
+  const steerContexts = items.filter(isSteerContext);
   const consumed = new Set<TranscriptItem>();
 
   if (userPrompt) consumed.add(userPrompt);
   for (const item of setupLifecycle) consumed.add(item);
   if (promptContext) consumed.add(promptContext);
+  for (const item of steerContexts) consumed.add(item);
 
   const activity = items.filter((item) => !consumed.has(item));
+  const pendingSteerContexts = [...steerContexts];
+
+  const activitySegments: TranscriptTurnSegment[] = activity.map((item) => {
+    if (isSteerPrompt(item)) {
+      return {
+        kind: "prompt",
+        user: item,
+        systemPrompt: null,
+        context: pendingSteerContexts.shift() ?? null,
+        setup: [],
+      };
+    }
+    return { kind: "item", item };
+  });
+
+  // Steer context without a matched steer message keeps its standalone row so
+  // the metadata is never silently dropped.
+  for (const orphan of pendingSteerContexts) {
+    activitySegments.push({ kind: "item", item: orphan });
+  }
 
   if (!userPrompt) {
-    return groupSameKindSegments(
-      activity.map((item) => ({ kind: "item", item })),
-    );
+    return groupToolSegments(activitySegments);
   }
 
   const segments: TranscriptTurnSegment[] = [
@@ -96,13 +153,26 @@ function classifyTurnItems(
       context: promptContext,
       setup: setupLifecycle,
     },
+    ...activitySegments,
   ];
 
-  for (const item of activity) {
-    segments.push({ kind: "item", item });
-  }
+  return groupToolSegments(segments);
+}
 
-  return groupSameKindSegments(segments);
+/**
+ * Two-pass tool grouping:
+ * 1. Same-kind runs collapse into summaries with specific labels
+ *    ("Read 3 files", "Edited 2 files").
+ * 2. Leftover adjacent eligible tool rows of differing kinds collapse into a
+ *    mixed fallback summary ("Ran 5 tool calls").
+ *
+ * Messages, errors, permissions, and status/lifecycle rows never join either
+ * pass, so intervention points stay visible.
+ */
+function groupToolSegments(
+  segments: TranscriptTurnSegment[],
+): TranscriptTurnSegment[] {
+  return groupMixedToolRuns(groupSameKindSegments(segments));
 }
 
 function groupSameKindSegments(
@@ -137,6 +207,7 @@ function groupSameKindSegments(
           count: run.length,
           items: run,
           renderClass: getRenderClass(run[0]),
+          variant: "same-kind",
           timestamp: run[0].timestamp,
         },
       });
@@ -149,14 +220,113 @@ function groupSameKindSegments(
   return grouped;
 }
 
-function sameKindKey(item: TranscriptItem): string | null {
-  if (item.type !== "tool") return null;
-  const renderClass = getRenderClass(item);
-  if (renderClass === "message") {
-    return null;
+const MIXED_RUN_MINIMUM_SEGMENTS = 2;
+
+/**
+ * Burst pass: collapse an interleave-tolerant run of routine tool work into
+ * one "Ran N tool calls" summary. Both leftover raw eligible tool rows and
+ * same-kind summaries produced by the first pass participate, so alternating
+ * patterns like search → read-summary → search → read-summary collapse into a
+ * single supervision row whose children are the original segments in order.
+ * Messages, permissions, errors/failed tools, and status/suppressed rows
+ * break bursts, so intervention points stay visible.
+ */
+function groupMixedToolRuns(
+  segments: TranscriptTurnSegment[],
+): TranscriptTurnSegment[] {
+  const grouped: TranscriptTurnSegment[] = [];
+  for (let i = 0; i < segments.length; i++) {
+    const segment = segments[i];
+    if (!isBurstParticipant(segment)) {
+      grouped.push(segment);
+      continue;
+    }
+    const run: TranscriptToolRunChildSegment[] = [segment];
+    let j = i + 1;
+    while (j < segments.length) {
+      const next = segments[j];
+      if (!isBurstParticipant(next)) break;
+      run.push(next);
+      j += 1;
+    }
+    if (run.length >= MIXED_RUN_MINIMUM_SEGMENTS) {
+      const items = run.flatMap((child) =>
+        child.kind === "item" ? [child.item] : child.summary.items,
+      );
+      // Mixed bursts are already the visual summary. Expanding nested
+      // same-kind summaries here creates redundant rows like
+      // "Ran 16 tool calls" → "Ran 12 commands". Keep same-kind summaries as
+      // grouping inputs, but flatten the mixed summary's visible children back
+      // to leaf tool rows.
+      const childSegments = items.map((item) => ({
+        kind: "item" as const,
+        item,
+      }));
+      grouped.push({
+        kind: "summary",
+        summary: {
+          id: `summary:mixed:${items[0].id}`,
+          label: `Ran ${items.length} tool calls`,
+          count: items.length,
+          items,
+          renderClass: null,
+          variant: "mixed",
+          segments: childSegments,
+          timestamp: items[0].timestamp,
+        },
+      });
+    } else {
+      grouped.push(...run);
+    }
+    i = j - 1;
   }
+  return grouped;
+}
+
+/**
+ * Burst participants are raw eligible tool rows and same-kind summaries
+ * (already-collapsed routine tool work). Mixed summaries never re-enter.
+ */
+function isBurstParticipant(
+  segment: TranscriptTurnSegment,
+): segment is TranscriptToolRunChildSegment {
+  if (segment.kind === "item") {
+    return isGroupingEligible(segment.item);
+  }
+  return segment.kind === "summary" && segment.summary.variant === "same-kind";
+}
+
+const GROUPING_ELIGIBLE_RENDER_CLASSES = new Set<
+  NonNullable<TranscriptItem["renderClass"]>
+>([
+  "file-read",
+  "skill-read",
+  "shell",
+  "relay-op",
+  "file-edit",
+  "image",
+  "plan",
+  "generic",
+]);
+
+/**
+ * Shared eligibility for both grouping passes. Failed tools (isError or
+ * reclassified renderClass "error"), messages, permissions, status, and
+ * suppressed rows are never grouped and break runs, so intervention points
+ * stay visible.
+ */
+function isGroupingEligible(item: TranscriptItem): boolean {
+  if (item.type !== "tool" || item.isError) return false;
+  const renderClass = getRenderClass(item);
+  return (
+    renderClass != null && GROUPING_ELIGIBLE_RENDER_CLASSES.has(renderClass)
+  );
+}
+
+function sameKindKey(item: TranscriptItem): string | null {
+  if (!isGroupingEligible(item) || item.type !== "tool") return null;
   const descriptor = item.descriptor ?? classifyToolItem(item);
-  return descriptor.groupKey ?? renderClass;
+  return descriptor.groupKey ?? getRenderClass(item);
 }
 
 function sameKindLabel(item: TranscriptItem, count: number): string {

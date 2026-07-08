@@ -36,10 +36,12 @@ import {
   KIND_SYSTEM_MESSAGE,
 } from "@/shared/constants/kinds";
 import { resolveEventAuthorPubkey } from "@/shared/lib/authors";
+import { normalizePubkey } from "@/shared/lib/pubkey";
 import { formatTime } from "@/features/messages/lib/dateFormatters";
 // Pure overlay helper lives in a sibling .mjs so node:test (no TS loader)
 // can exercise the exact same source the renderer uses.
 import { applyEditTagOverlay } from "@/features/messages/lib/applyEditTagOverlay.mjs";
+import { truncatePubkey } from "@/shared/lib/pubkey";
 
 const HEX_RE = /^[0-9a-f]+$/i;
 
@@ -333,7 +335,7 @@ export function formatTimelineMessages(
         ? "You"
         : profile?.displayName?.trim() ||
           profile?.nip05Handle?.trim() ||
-          `${actorPubkey.slice(0, 8)}…`;
+          truncatePubkey(actorPubkey);
     existing.users.push({
       pubkey: actorPubkey,
       displayName,
@@ -417,6 +419,7 @@ export function formatTimelineMessages(
       renderKey: event.localKey ?? event.id,
       createdAt: event.created_at,
       pubkey: authorPubkey,
+      signerPubkey: normalizePubkey(event.pubkey),
       author,
       avatarUrl: getAuthorAvatarUrl({
         authorPubkey,
@@ -482,6 +485,40 @@ function extractSystemMessagePubkeys(event: RelayEvent): string[] {
   } catch {
     return [];
   }
+}
+
+export function collectReactionActorPubkeys(events: RelayEvent[]) {
+  const deletedEventIds = new Set<string>();
+  for (const event of events) {
+    if (
+      event.kind !== KIND_DELETION &&
+      event.kind !== KIND_NIP29_DELETE_EVENT
+    ) {
+      continue;
+    }
+    for (const targetId of getDeletionTargets(event.tags)) {
+      deletedEventIds.add(targetId.toLowerCase());
+    }
+  }
+
+  const pubkeys = new Set<string>();
+  for (const event of events) {
+    if (
+      event.kind !== KIND_REACTION ||
+      deletedEventIds.has(event.id.toLowerCase())
+    ) {
+      continue;
+    }
+    pubkeys.add(
+      resolveEventAuthorPubkey({
+        pubkey: event.pubkey,
+        tags: event.tags,
+        preferActorTag: true,
+        requireChannelTagForPTags: true,
+      }).toLowerCase(),
+    );
+  }
+  return [...pubkeys];
 }
 
 export function collectMessageAuthorPubkeys(events: RelayEvent[]) {

@@ -285,6 +285,40 @@ pub fn default_agent_command() -> String {
         .to_string()
 }
 
+/// Record-first harness resolution (unified agent model, Phase 1A).
+///
+/// Resolution order:
+///   1. explicit override (non-empty) — a deliberate per-instance pin;
+///   2. the record's own `runtime` id mapped to its primary command —
+///      records materialize their runtime at create/migration time;
+///   3. legacy fallback: the linked persona's `runtime` (records created
+///      before the unified model carry `persona_id` but no `runtime`);
+///   4. `default_agent_command()`.
+pub fn record_agent_command(
+    record: &crate::managed_agents::types::ManagedAgentRecord,
+    personas: &[crate::managed_agents::types::PersonaRecord],
+) -> String {
+    if let Some(pin) = record
+        .agent_command_override
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return pin.to_string();
+    }
+
+    if let Some(command) = record
+        .runtime
+        .as_deref()
+        .and_then(known_acp_runtime_exact)
+        .and_then(|r| r.commands.first().copied())
+    {
+        return command.to_string();
+    }
+
+    effective_agent_command(record.persona_id.as_deref(), personas, None)
+}
+
 /// Resolve the agent command (harness) for a spawn/deploy/summary. The linked
 /// persona wins so persona harness edits propagate on the next spawn. An
 /// explicit per-instance override (`agent_command_override`) takes precedence.
@@ -346,6 +380,47 @@ pub fn divergent_agent_command_override(
     } else {
         Some(picked.to_string())
     }
+}
+
+/// Decide the `agent_command_override` to persist at AGENT UPDATE time.
+///
+/// The edit dialog sends `agent_command` as a tri-state string: the empty
+/// "inherit from persona" sentinel (clear the pin), or a concrete command
+/// (pin). Resolution:
+///
+/// - EMPTY / whitespace → the inherit sentinel: always `None` regardless of
+///   `harness_override`, so toggling "Inherit runtime from persona" clears the
+///   pin.
+/// - DELIBERATE OVERRIDE (`harness_override` true, persona linked): the user
+///   explicitly picked a runtime/Custom command in the dialog. This is a real
+///   pin and is preserved VERBATIM — even when the picked command maps to, or
+///   is byte-identical to, the persona's own runtime command. Selecting "Custom
+///   command" and saving e.g. `goose` for a goose persona is a deliberate act
+///   to freeze the harness against future persona runtime edits; dropping it
+///   back to inherit (as [`divergent_agent_command_override`] would) defeats
+///   that intent. Unlike the create-time path, there is no byte-identical
+///   exception here: at create the command is machine-derived from the persona,
+///   so equality means "no user divergence"; at update an equal command reached
+///   the force branch only because the user picked Custom, which IS the
+///   divergence.
+/// - NO OVERRIDE INTENT (`harness_override` false) or NO PERSONA: defer to
+///   [`divergent_agent_command_override`], which keeps the persona authoritative
+///   and treats a same-runtime restatement as inherit.
+pub fn update_time_agent_command_override(
+    persona_id: Option<&str>,
+    personas: &[crate::managed_agents::types::PersonaRecord],
+    picked_command: Option<&str>,
+    harness_override: bool,
+) -> Option<String> {
+    let picked = picked_command
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+
+    if persona_id.is_some() && harness_override {
+        return Some(picked.to_string());
+    }
+
+    divergent_agent_command_override(persona_id, personas, Some(picked))
 }
 
 /// Decide the `agent_command_override` to persist at AGENT CREATE time.
@@ -723,401 +798,4 @@ pub fn managed_agent_avatar_url(command: &str) -> Option<String> {
 }
 
 #[cfg(test)]
-mod tests {
-    use std::path::PathBuf;
-
-    use super::{
-        classify_runtime, create_time_agent_command_override, default_agent_command,
-        divergent_agent_command_override, effective_agent_command, find_via_login_shell,
-        managed_agent_avatar_url, normalize_agent_args, BUZZ_AGENT_AVATAR_URL,
-        CLAUDE_CODE_AVATAR_URL, CODEX_AVATAR_URL, GOOSE_AVATAR_URL,
-    };
-    use crate::managed_agents::AcpAvailabilityStatus;
-
-    #[test]
-    fn resolves_known_avatar_for_bare_command() {
-        let avatar_url = managed_agent_avatar_url("goose").expect("goose avatar should resolve");
-
-        assert_eq!(avatar_url, GOOSE_AVATAR_URL);
-    }
-
-    #[test]
-    fn resolves_known_avatar_for_command_paths_and_aliases() {
-        assert_eq!(
-            managed_agent_avatar_url("/usr/local/bin/codex-acp"),
-            Some(CODEX_AVATAR_URL.to_string())
-        );
-        assert_eq!(
-            managed_agent_avatar_url("Claude Code"),
-            Some(CLAUDE_CODE_AVATAR_URL.to_string())
-        );
-        assert_eq!(
-            managed_agent_avatar_url(r"C:\Tools\claude-agent-acp.exe"),
-            Some(CLAUDE_CODE_AVATAR_URL.to_string())
-        );
-        assert_eq!(
-            managed_agent_avatar_url("/usr/local/bin/claude-code-acp"),
-            Some(CLAUDE_CODE_AVATAR_URL.to_string())
-        );
-    }
-
-    #[test]
-    fn returns_none_for_unknown_commands() {
-        assert!(managed_agent_avatar_url("custom-agent").is_none());
-    }
-
-    #[test]
-    fn default_agent_command_resolves_bundled_buzz_agent() {
-        // The create-path default must be the bundled buzz-agent, never the
-        // bare `goose` that isn't on PATH on a stock Windows install.
-        assert_eq!(default_agent_command(), "buzz-agent");
-        // And buzz-agent takes no `acp` arg — confirm no arg leakage from the default.
-        assert_eq!(
-            normalize_agent_args(&default_agent_command(), vec!["acp".into()]),
-            Vec::<String>::new()
-        );
-    }
-
-    #[test]
-    fn normalizes_claude_and_codex_args_to_empty() {
-        assert_eq!(
-            normalize_agent_args("claude-agent-acp", vec!["acp".into()]),
-            Vec::<String>::new()
-        );
-        assert_eq!(
-            normalize_agent_args("claude-code-acp", vec!["acp".into()]),
-            Vec::<String>::new()
-        );
-        assert_eq!(
-            normalize_agent_args("codex-acp", vec!["acp".into()]),
-            Vec::<String>::new()
-        );
-    }
-
-    #[test]
-    fn resolves_buzz_agent_avatar() {
-        assert_eq!(
-            managed_agent_avatar_url("buzz-agent"),
-            Some(BUZZ_AGENT_AVATAR_URL.to_string())
-        );
-        assert_eq!(
-            managed_agent_avatar_url("/usr/local/bin/buzz-agent"),
-            Some(BUZZ_AGENT_AVATAR_URL.to_string())
-        );
-    }
-
-    #[test]
-    fn normalizes_buzz_agent_args_to_empty() {
-        assert_eq!(
-            normalize_agent_args("buzz-agent", Vec::new()),
-            Vec::<String>::new()
-        );
-        assert_eq!(
-            normalize_agent_args("buzz-agent", vec!["acp".into()]),
-            Vec::<String>::new()
-        );
-    }
-
-    #[test]
-    fn login_shell_lookup_treats_command_as_data() {
-        let marker =
-            std::env::temp_dir().join(format!("buzz-discovery-marker-{}", uuid::Uuid::new_v4()));
-        let payload = format!("doesnotexist; touch {} #", marker.display());
-
-        let resolved = find_via_login_shell(&payload);
-
-        assert!(
-            resolved.is_none(),
-            "payload should not resolve to a command"
-        );
-        assert!(
-            !marker.exists(),
-            "shell lookup must not execute injected commands"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn explicit_path_resolution_ignores_non_executable_files() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let dir =
-            std::env::temp_dir().join(format!("buzz-discovery-path-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).expect("create temp dir");
-        let bin = dir.join("buzz-acp");
-        std::fs::write(&bin, "").expect("write placeholder");
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o644))
-            .expect("chmod placeholder");
-
-        assert!(
-            super::resolve_workspace_command(bin.to_str().expect("utf8 path")).is_none(),
-            "non-executable placeholder must not resolve"
-        );
-
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755))
-            .expect("chmod executable");
-        assert_eq!(
-            super::resolve_workspace_command(bin.to_str().expect("utf8 path")),
-            Some(bin.clone())
-        );
-
-        let _ = std::fs::remove_dir_all(dir);
-    }
-
-    #[test]
-    fn classifies_available_when_adapter_found() {
-        let (status, cmd, path) = classify_runtime(
-            Some(("goose", PathBuf::from("/usr/local/bin/goose"))),
-            None,
-            false,
-        );
-        assert_eq!(status, AcpAvailabilityStatus::Available);
-        assert_eq!(cmd.as_deref(), Some("goose"));
-        assert_eq!(path.as_deref(), Some("/usr/local/bin/goose"));
-    }
-
-    #[test]
-    fn classifies_adapter_missing_when_cli_present() {
-        let (status, cmd, path) = classify_runtime(None, Some("claude"), true);
-        assert_eq!(status, AcpAvailabilityStatus::AdapterMissing);
-        assert!(cmd.is_none());
-        assert!(path.is_none());
-    }
-
-    #[test]
-    fn classifies_not_installed_when_nothing_found() {
-        let (status, cmd, path) = classify_runtime(None, Some("claude"), false);
-        assert_eq!(status, AcpAvailabilityStatus::NotInstalled);
-        assert!(cmd.is_none());
-        assert!(path.is_none());
-    }
-
-    #[test]
-    fn classifies_not_installed_when_no_underlying_cli() {
-        let (status, cmd, path) = classify_runtime(None, None, false);
-        assert_eq!(status, AcpAvailabilityStatus::NotInstalled);
-        assert!(cmd.is_none());
-        assert!(path.is_none());
-    }
-
-    #[test]
-    fn classifies_cli_missing_when_adapter_found_but_cli_absent() {
-        let (status, cmd, path) = classify_runtime(
-            Some(("codex-acp", PathBuf::from("/opt/homebrew/bin/codex-acp"))),
-            Some("codex"),
-            false,
-        );
-        assert_eq!(status, AcpAvailabilityStatus::CliMissing);
-        assert_eq!(cmd.as_deref(), Some("codex-acp"));
-        assert_eq!(path.as_deref(), Some("/opt/homebrew/bin/codex-acp"));
-    }
-
-    fn persona_with_runtime(
-        id: &str,
-        runtime: Option<&str>,
-    ) -> crate::managed_agents::PersonaRecord {
-        crate::managed_agents::PersonaRecord {
-            id: id.to_string(),
-            display_name: id.to_string(),
-            avatar_url: None,
-            system_prompt: String::new(),
-            runtime: runtime.map(str::to_string),
-            model: None,
-            provider: None,
-            name_pool: Vec::new(),
-            is_builtin: false,
-            is_active: true,
-            source_team: None,
-            source_team_persona_slug: None,
-            env_vars: std::collections::BTreeMap::new(),
-            created_at: "2026-06-09T00:00:00Z".to_string(),
-            updated_at: "2026-06-09T00:00:00Z".to_string(),
-        }
-    }
-
-    #[test]
-    fn effective_agent_command_explicit_override_wins() {
-        // An explicit pin beats the persona's runtime.
-        let personas = vec![persona_with_runtime("p1", Some("claude"))];
-        assert_eq!(
-            effective_agent_command(Some("p1"), &personas, Some("codex-acp")),
-            "codex-acp"
-        );
-    }
-
-    #[test]
-    fn effective_agent_command_inherits_persona_runtime() {
-        // No override → persona runtime id maps to its primary command.
-        let personas = vec![persona_with_runtime("p1", Some("claude"))];
-        assert_eq!(
-            effective_agent_command(Some("p1"), &personas, None),
-            "claude-agent-acp"
-        );
-    }
-
-    #[test]
-    fn effective_agent_command_empty_override_is_inherit() {
-        // A blank/whitespace override is treated as "inherit", not a pin.
-        let personas = vec![persona_with_runtime("p1", Some("goose"))];
-        assert_eq!(
-            effective_agent_command(Some("p1"), &personas, Some("   ")),
-            "goose"
-        );
-    }
-
-    #[test]
-    fn effective_agent_command_falls_back_to_default() {
-        // No override, no persona runtime, and a deleted persona all fall back
-        // to the bundled default.
-        let personas = vec![persona_with_runtime("p1", None)];
-        assert_eq!(
-            effective_agent_command(Some("p1"), &personas, None),
-            default_agent_command()
-        );
-        assert_eq!(
-            effective_agent_command(Some("gone"), &personas, None),
-            default_agent_command()
-        );
-        assert_eq!(
-            effective_agent_command(None, &personas, None),
-            default_agent_command()
-        );
-    }
-
-    #[test]
-    fn divergent_override_none_when_picked_matches_persona_runtime() {
-        // The persona-backed create/edit flow sends the persona's resolved
-        // command. It must be treated as "inherit" (None), not a pin.
-        let personas = vec![persona_with_runtime("p1", Some("goose"))];
-        assert_eq!(
-            divergent_agent_command_override(Some("p1"), &personas, Some("goose")),
-            None
-        );
-    }
-
-    #[test]
-    fn divergent_override_none_for_alternate_command_of_same_runtime() {
-        // A client with only `claude-code-acp` installed sends that command for
-        // a `claude` persona whose primary command is `claude-agent-acp`. Both
-        // map to the `claude` runtime, so it inherits — string equality would
-        // wrongly bake a pin (CRITICAL-3).
-        let personas = vec![persona_with_runtime("p1", Some("claude"))];
-        assert_eq!(
-            divergent_agent_command_override(Some("p1"), &personas, Some("claude-code-acp")),
-            None
-        );
-    }
-
-    #[test]
-    fn divergent_override_some_when_picked_is_different_runtime() {
-        // A deliberate pin to a different runtime is preserved.
-        let personas = vec![persona_with_runtime("p1", Some("goose"))];
-        assert_eq!(
-            divergent_agent_command_override(Some("p1"), &personas, Some("codex-acp")),
-            Some("codex-acp".to_string())
-        );
-    }
-
-    #[test]
-    fn divergent_override_none_for_empty_or_absent_pick() {
-        // The "Inherit from persona" sentinel (empty) and a name-only edit
-        // (absent) both clear the pin.
-        let personas = vec![persona_with_runtime("p1", Some("goose"))];
-        assert_eq!(
-            divergent_agent_command_override(Some("p1"), &personas, Some("   ")),
-            None
-        );
-        assert_eq!(
-            divergent_agent_command_override(Some("p1"), &personas, None),
-            None
-        );
-    }
-
-    #[test]
-    fn create_time_override_none_when_persona_runtime_not_installed() {
-        // CRITICAL-3 (Case 3): a `claude`-persona agent created on a machine
-        // where the claude adapter isn't installed. `resolvePersonaRuntime`
-        // falls back to the default (`buzz-agent`) and sends THAT command with
-        // `harness_override` false (the user did not pick it). At create this
-        // is a fallback, not a deliberate pin — it must store `None` so the
-        // agent inherits the persona's runtime once it's installed and the
-        // persona is re-edited. Baking `Some("buzz-agent")` here is the exact
-        // bug this resolver chain exists to kill.
-        let personas = vec![persona_with_runtime("p1", Some("claude"))];
-        assert_eq!(
-            create_time_agent_command_override(Some("p1"), &personas, Some("buzz-agent"), false),
-            None
-        );
-    }
-
-    #[test]
-    fn create_time_override_some_when_user_deliberately_overrides_installed_runtime() {
-        // Case 2 + deliberate override: the persona's `claude` runtime IS
-        // available, but the user explicitly picked `codex` in a deploy dialog's
-        // runtime selector ("overriding persona preferences"), so the frontend
-        // sends `codex-acp` with `harness_override` true. This is a real pin and
-        // MUST be preserved — returning `None` would silently swallow the
-        // deliberate override and inherit `claude` on spawn.
-        let personas = vec![persona_with_runtime("p1", Some("claude"))];
-        assert_eq!(
-            create_time_agent_command_override(Some("p1"), &personas, Some("codex-acp"), true),
-            Some("codex-acp".to_string())
-        );
-    }
-
-    #[test]
-    fn create_time_override_none_when_persona_runtime_installed() {
-        // Case 2: the persona's runtime is available, so `resolvePersonaRuntime`
-        // sends the persona's own command with no override. Inherits — no pin.
-        let personas = vec![persona_with_runtime("p1", Some("goose"))];
-        assert_eq!(
-            create_time_agent_command_override(Some("p1"), &personas, Some("goose"), false),
-            None
-        );
-    }
-
-    #[test]
-    fn create_time_override_preserves_selected_runtime_alias() {
-        // A `claude` persona inherits the primary command `claude-agent-acp`,
-        // but discovery may select an installed alias such as `claude-code-acp`.
-        // When UI marks that create-time selection as explicit, preserve the
-        // alias so the first spawn uses a command known to be installed.
-        let personas = vec![persona_with_runtime("p1", Some("claude"))];
-        assert_eq!(
-            create_time_agent_command_override(
-                Some("p1"),
-                &personas,
-                Some("claude-code-acp"),
-                true
-            ),
-            Some("claude-code-acp".to_string())
-        );
-    }
-
-    #[test]
-    fn create_time_override_inherits_exact_persona_command() {
-        let personas = vec![persona_with_runtime("p1", Some("claude"))];
-        assert_eq!(
-            create_time_agent_command_override(
-                Some("p1"),
-                &personas,
-                Some("claude-agent-acp"),
-                true
-            ),
-            None
-        );
-    }
-
-    #[test]
-    fn create_time_override_preserves_pin_for_persona_less_create() {
-        // The standalone CreateAgentDialog creates persona-LESS agents. With no
-        // persona to inherit, the picked command IS the agent's harness and must
-        // be preserved as a real pin (divergence from the bundled default),
-        // regardless of the override flag.
-        let personas = vec![persona_with_runtime("p1", Some("goose"))];
-        assert_eq!(
-            create_time_agent_command_override(None, &personas, Some("codex-acp"), false),
-            Some("codex-acp".to_string())
-        );
-    }
-}
+mod tests;

@@ -304,11 +304,22 @@ function addMatchesForPatterns(
         decorations.push(
           Decoration.inline(from, from + 1, {
             class: "agent-mention-at-hidden",
+            spellcheck: "false",
           }),
         );
-        decorations.push(Decoration.inline(from + 1, to, { class: className }));
+        decorations.push(
+          Decoration.inline(from + 1, to, {
+            class: className,
+            spellcheck: "false",
+          }),
+        );
       } else {
-        decorations.push(Decoration.inline(from, to, { class: className }));
+        decorations.push(
+          Decoration.inline(from, to, {
+            class: className,
+            spellcheck: "false",
+          }),
+        );
       }
       match = pattern.exec(text);
     }

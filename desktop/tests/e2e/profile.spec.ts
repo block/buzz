@@ -1274,6 +1274,9 @@ test("opens settings with the keyboard shortcut and updates theme", async ({
     )
     .toBe(true);
 
+  // Switch to Light mode tab to reveal light themes
+  await page.getByRole("button", { name: "Light" }).click();
+
   // Switch to a light theme — verifies dark→light transition
   await page.getByTestId("theme-option-github-light").click();
 
@@ -1302,6 +1305,9 @@ test("opens settings with the keyboard shortcut and updates theme", async ({
   await expect
     .poll(() => page.evaluate(() => localStorage.getItem("buzz-theme")))
     .toBe("github-light");
+
+  // Switch to Dark mode tab to reveal dark themes
+  await page.getByRole("button", { name: "Dark" }).click();
 
   // Switch back to a dark theme — verifies light→dark transition
   await page.getByTestId("theme-option-dracula").click();

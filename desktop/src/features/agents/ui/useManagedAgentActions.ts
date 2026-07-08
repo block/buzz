@@ -14,8 +14,6 @@ import {
 } from "@/features/agents/hooks";
 import { useChannelsQuery } from "@/features/channels/hooks";
 import { usePresenceQuery } from "@/features/presence/hooks";
-import { useManagedAgentObserverBridge } from "@/features/agents/observerRelayStore";
-import { useActiveAgentTurnsBridge } from "@/features/agents/activeAgentTurnsStore";
 import type {
   AcpRuntime,
   AcpRuntimeCatalogEntry,
@@ -85,8 +83,8 @@ export function useManagedAgentActions() {
       }),
     [managedAgentsQuery.data],
   );
-  useManagedAgentObserverBridge(managedAgents);
-  useActiveAgentTurnsBridge(managedAgents);
+  // Observer ingestion is owner-global (useAgentObserverIngestion in
+  // AppShell); this hook only reads derived state.
 
   const managedPubkeys = React.useMemo(
     () => new Set(managedAgents.map((agent) => agent.pubkey)),

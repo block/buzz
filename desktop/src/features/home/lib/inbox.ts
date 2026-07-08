@@ -23,7 +23,8 @@ export type InboxFilter =
   | "needs_action"
   | "activity"
   | "agent_activity"
-  | "reminders";
+  | "reminders"
+  | "drafts";
 
 export type InboxItem = {
   avatarUrl: string | null;
@@ -53,6 +54,7 @@ export type InboxReply = {
   authorPubkey: string;
   avatarUrl: string | null;
   content: string;
+  createdAt: number;
   depth?: number;
   fullTimestampLabel: string;
   id: string;
