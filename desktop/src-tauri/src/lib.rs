@@ -13,6 +13,7 @@ mod migration;
 #[cfg(test)]
 mod model_tests;
 mod models;
+mod nostr_bind;
 pub mod nostr_convert;
 mod prevent_sleep;
 mod ptt_shortcut;
@@ -464,6 +465,7 @@ pub fn run() {
             install_acp_runtime,
             discover_managed_agent_prereqs,
             sign_event,
+            sign_nostr_identity_binding,
             decrypt_observer_event,
             build_observer_control_event,
             create_auth_event,
