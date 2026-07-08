@@ -671,3 +671,5 @@ pub fn run() {
         _ => {}
     });
 }
+
+// CI canary: forces the Windows Rust job to run on a PR from origin/main.
