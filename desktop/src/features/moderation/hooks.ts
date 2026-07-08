@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
+import { getRelaySelf } from "@/features/moderation/lib/relaySelf";
 import {
   banMember,
   type CommunityRestriction,
@@ -23,6 +24,22 @@ export const moderationAuditQueryKey = ["moderationAudit"] as const;
 export const moderationRestrictionsQueryKey = [
   "moderationRestrictions",
 ] as const;
+export const relaySelfQueryKey = ["relaySelf"] as const;
+
+/**
+ * The active relay's NIP-11 `self` pubkey (hex), or `null` when it advertises
+ * none / is unreachable. Used to recognize a moderation DM. Workspace-scoped
+ * and effectively static for a session, so it is cached indefinitely; a `null`
+ * result is a valid answer (fail open), not an error to retry into.
+ */
+export function useRelaySelfQuery(enabled = true) {
+  return useQuery({
+    enabled,
+    queryKey: relaySelfQueryKey,
+    queryFn: getRelaySelf,
+    staleTime: Number.POSITIVE_INFINITY,
+  });
+}
 
 // --- Reads (mod-authz gated; consumed by the U2 queue/audit surfaces) ---
 
