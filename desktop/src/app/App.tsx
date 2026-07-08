@@ -12,6 +12,7 @@ import {
 } from "react";
 
 import { router } from "@/app/router";
+import { ThemeGrainientBackground } from "@/app/ThemeGrainientBackground";
 import { useReloadShortcut } from "@/app/useReloadShortcut";
 import { useAppOnboardingState } from "@/features/onboarding/hooks";
 import { OnboardingSlideTransition } from "@/features/onboarding/ui/OnboardingSlideTransition";
@@ -62,19 +63,24 @@ function BeeLoader({
   );
 }
 
-// Cold boot gate: the animated Buzz mark (fuzzy texture, theme-adaptive tint)
-// on the app background, with a static mark underneath so it paints instantly
-// on reload rather than flashing blank while the animation boots.
+// Cold boot gate: the theme-adaptive grainient background with the animated
+// Buzz mark as the hero (replacing the old "Setting up your workspace" text —
+// the caption stays as sr-only for screen readers). A static mark renders
+// underneath the animation so it paints instantly on hard reload.
 function AppLoadingGate() {
   return (
     <div
-      className="flex min-h-dvh flex-col items-center justify-center overflow-hidden bg-background px-6 py-10 text-foreground"
+      className="buzz-setup-loading-shell flex min-h-dvh flex-col items-center justify-center overflow-hidden px-6 py-10"
       data-testid="app-loading-gate"
       role="status"
     >
       <StartupWindowDragRegion />
+      <ThemeGrainientBackground />
       <span className="sr-only">{LOADING_TEXT}</span>
-      <BeeLoader ariaLabel={LOADING_TEXT} className="h-auto w-28" />
+      <BeeLoader
+        ariaLabel={LOADING_TEXT}
+        className="relative z-10 h-auto w-28"
+      />
     </div>
   );
 }

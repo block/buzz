@@ -6,18 +6,35 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title></title>
     <!--
-      Boot background: the document must be black from its very first paint,
-      before the app bundle (and its stylesheets) load, so cold boot never
-      flashes white ahead of the loading gate. The window itself is also
-      black pre-document via `backgroundColor` in tauri.conf.json. The body
-      paints its own themed background once the app CSS loads, so this never
-      shows through after boot.
+      Boot background: the document must be painted before the app bundle (and
+      its stylesheets) load so cold boot never flashes ahead of the loading
+      gate. The window itself is also painted pre-document via `backgroundColor`
+      in tauri.conf.json. The body paints its own themed background once the app
+      CSS loads, so this never shows through after boot.
+
+      The inline script below reads the cached theme background (same
+      `buzz-theme-cache` entry ThemeProvider writes) and applies it synchronously
+      so the boot color matches the themed loading gate — no black flash on light
+      themes. Falls back to black on the first-ever launch (no cache yet).
     -->
     <style>
       html {
         background-color: #000;
       }
     </style>
+    <script>
+      (() => {
+        var cached, bg;
+        try {
+          cached = window.localStorage.getItem("buzz-theme-cache");
+          if (!cached) return;
+          bg = JSON.parse(cached).vars["--background"];
+          if (bg) document.documentElement.style.backgroundColor = "hsl(" + bg + ")";
+        } catch {
+          /* fall back to the black default above */
+        }
+      })();
+    </script>
   </head>
 
   <body>
