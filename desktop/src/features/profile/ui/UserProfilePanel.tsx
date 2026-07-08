@@ -27,14 +27,18 @@ import {
   useUpdatePersonaMutation,
 } from "@/features/agents/hooks";
 import { AddAgentToChannelDialog } from "@/features/agents/ui/AddAgentToChannelDialog";
-import { resolvePersonaRuntime } from "@/features/agents/lib/resolvePersonaRuntime";
+import {
+  availableRuntimesForStart,
+  buildInstanceInputForDefinition,
+  resolveStartRuntimeForDefinition,
+} from "@/features/agents/lib/instanceInputForDefinition";
 import {
   isManagedAgentActive,
   startManagedAgentWithRules,
   stopManagedAgentWithRules,
 } from "@/features/agents/lib/managedAgentControlActions";
 import { describeLogFile } from "@/features/agents/ui/agentUi";
-import { EditAgentDialog } from "@/features/agents/ui/EditAgentDialog";
+import { AgentDialog } from "@/features/agents/ui/AgentDialog";
 import {
   consumePendingOpenEditAgent,
   subscribeOpenEditAgent,
@@ -92,7 +96,6 @@ import { cn } from "@/shared/lib/cn";
 import type {
   AgentPersona,
   Channel,
-  CreateManagedAgentInput,
   CreatePersonaInput,
   UpdatePersonaInput,
 } from "@/shared/api/types";
@@ -403,37 +406,20 @@ export function UserProfilePanel({
 
   const createManagedAgentForPersona = React.useCallback(
     async (personaToStart: AgentPersona) => {
-      const runtimes = availableRuntimesQuery.data ?? [];
-      const defaultRuntime = runtimes[0] ?? null;
-      const { runtime, warnings } = resolvePersonaRuntime(
-        personaToStart.runtime,
+      const runtimes = await availableRuntimesForStart(availableRuntimesQuery);
+      const { runtime, warnings } = resolveStartRuntimeForDefinition(
+        personaToStart,
         runtimes,
-        defaultRuntime,
       );
 
       for (const warning of warnings) {
         toast.warning(warning);
       }
 
-      if (!runtime) {
-        throw new Error("No available runtime found for this agent.");
-      }
-
-      const input: CreateManagedAgentInput = {
-        name: personaToStart.displayName,
-        acpCommand: "buzz-acp",
-        agentCommand: runtime.command,
-        agentArgs: runtime.defaultArgs,
-        mcpCommand: runtime.mcpCommand ?? "",
-        personaId: personaToStart.id,
-        systemPrompt: personaToStart.systemPrompt,
-        avatarUrl: personaToStart.avatarUrl ?? undefined,
-        model: personaToStart.model ?? undefined,
-        envVars: personaToStart.envVars,
-        spawnAfterCreate: true,
-        startOnAppLaunch: true,
-        backend: { type: "local" },
-      };
+      const input = await buildInstanceInputForDefinition(
+        personaToStart,
+        runtime,
+      );
 
       const created = await createAgentMutation.mutateAsync(input);
       void managedAgentsQuery.refetch();
@@ -441,7 +427,7 @@ export function UserProfilePanel({
       return created;
     },
     [
-      availableRuntimesQuery.data,
+      availableRuntimesQuery,
       createAgentMutation.mutateAsync,
       managedAgentsQuery.refetch,
       relayAgentsQuery.refetch,
@@ -918,8 +904,9 @@ export function UserProfilePanel({
   );
   const editAgentDialog =
     canEditAgent && managedAgent ? (
-      <EditAgentDialog
+      <AgentDialog
         agent={managedAgent}
+        mode="instance-edit"
         onOpenChange={setEditAgentOpen}
         open={editAgentOpen}
       />

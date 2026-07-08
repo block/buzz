@@ -14,7 +14,7 @@ use buzz_core::kind::{
     KIND_THREAD_SUMMARY,
 };
 use buzz_core::StoredEvent;
-use buzz_db::channel::MemberRole;
+use buzz_db::channel::{MemberRecord, MemberRole};
 
 use super::event::dispatch_persistent_event;
 use crate::protocol::RelayMessage;
@@ -529,6 +529,11 @@ pub async fn validate_admin_event(
         }
         9005 => {
             // DELETE_EVENT: event author OR channel owner/admin.
+            if let Some(action_id) = extract_tag_value(event, "action_id") {
+                Uuid::parse_str(&action_id)
+                    .map_err(|_| anyhow::anyhow!("invalid action_id tag"))?;
+            }
+
             // Extract target event from e tag to check authorship.
             let target_id = event
                 .tags
@@ -567,7 +572,7 @@ pub async fn validate_admin_event(
             // For relay-signed REST messages, the real author is in the p tag.
             let author =
                 effective_message_author(&target_event.event, &state.relay_keypair.public_key());
-            if author == actor_bytes {
+            if author_delete_can_use_self_delete_path(&author, &actor_bytes, event) {
                 // Author deleting their own message: re-gate on membership/open visibility so that
                 // a removed private-channel member cannot mutate old messages after access is revoked.
                 let is_member = state
@@ -591,23 +596,21 @@ pub async fn validate_admin_event(
             // Not the author, or author who is no longer a member of a private channel —
             // must be owner/admin or the owning human of the message's agent-author.
             let members = state.db.get_members(tenant.community(), channel_id).await?;
-            let actor_member = members.iter().find(|m| m.pubkey == actor_bytes);
-            match actor_member {
-                Some(m) if m.role == "owner" || m.role == "admin" => Ok(()),
-                _ => {
-                    // Allow the owning human of the agent that authored the target message,
-                    // even when the human is not a channel member.
-                    if state
-                        .db
-                        .is_agent_owner(tenant.community(), &author, &actor_bytes)
-                        .await?
-                    {
-                        Ok(())
-                    } else {
-                        Err(anyhow::anyhow!(
-                            "must be event author or channel owner/admin"
-                        ))
-                    }
+            if actor_is_channel_owner_or_admin(&members, &actor_bytes) {
+                Ok(())
+            } else {
+                // Allow the owning human of the agent that authored the target message,
+                // even when the human is not a channel member.
+                if state
+                    .db
+                    .is_agent_owner(tenant.community(), &author, &actor_bytes)
+                    .await?
+                {
+                    Ok(())
+                } else {
+                    Err(anyhow::anyhow!(
+                        "must be event author or channel owner/admin"
+                    ))
                 }
             }
         }
@@ -1607,17 +1610,16 @@ async fn handle_delete_event_side_effect(
     }
 
     let actor_hex = hex::encode(event.pubkey.to_bytes());
-    emit_system_message(
-        tenant,
-        state,
-        channel_id,
-        serde_json::json!({
-            "type": "message_deleted",
-            "actor": actor_hex,
-            "target_event_id": hex::encode(&target_id),
-        }),
-    )
-    .await?;
+    let mut tombstone = serde_json::json!({
+        "type": "message_deleted",
+        "actor": actor_hex,
+        "target_event_id": hex::encode(&target_id),
+    });
+    copy_optional_string_field(event, &mut tombstone, "action_id");
+    copy_optional_string_field(event, &mut tombstone, "reason_code");
+    copy_optional_string_field(event, &mut tombstone, "public_reason");
+
+    emit_system_message(tenant, state, channel_id, tombstone).await?;
 
     info!(target_event = %hex::encode(&target_id), "NIP-29 DELETE_EVENT processed");
     Ok(())
@@ -2262,6 +2264,60 @@ fn extract_tag_value(event: &Event, tag_name: &str) -> Option<String> {
         }
     }
     None
+}
+
+fn copy_optional_string_field(event: &Event, object: &mut serde_json::Value, tag_name: &str) {
+    let Some(value) = extract_tag_value(event, tag_name) else {
+        return;
+    };
+    copy_optional_string_value(object, tag_name, value);
+}
+
+fn copy_optional_string_value(object: &mut serde_json::Value, field_name: &str, value: String) {
+    if let Some(map) = object.as_object_mut() {
+        map.insert(field_name.to_string(), serde_json::Value::String(value));
+    }
+}
+
+fn has_moderation_delete_metadata(event: &Event) -> bool {
+    ["action_id", "reason_code", "public_reason"]
+        .iter()
+        .any(|tag_name| extract_tag_value(event, tag_name).is_some())
+}
+
+fn author_delete_can_use_self_delete_path(author: &[u8], actor: &[u8], event: &Event) -> bool {
+    author == actor && !has_moderation_delete_metadata(event)
+}
+
+fn actor_is_channel_owner_or_admin(members: &[MemberRecord], actor: &[u8]) -> bool {
+    members
+        .iter()
+        .any(|m| m.pubkey == actor && (m.role == "owner" || m.role == "admin"))
+}
+
+#[cfg(test)]
+fn delete_tombstone_content(
+    actor_hex: String,
+    target_event_id: String,
+    action_id: Option<String>,
+    reason_code: Option<String>,
+    public_reason: Option<String>,
+) -> serde_json::Value {
+    let mut tombstone = serde_json::json!({
+        "type": "message_deleted",
+        "actor": actor_hex,
+        "target_event_id": target_event_id,
+    });
+    if let Some(action_id) = action_id {
+        copy_optional_string_value(&mut tombstone, "action_id", action_id);
+    }
+    if let Some(reason_code) = reason_code {
+        copy_optional_string_value(&mut tombstone, "reason_code", reason_code);
+    }
+    if let Some(public_reason) = public_reason {
+        copy_optional_string_value(&mut tombstone, "public_reason", public_reason);
+    }
+    tombstone
 }
 
 /// Validate a git repo identifier (d-tag value from kind:30617).
@@ -3087,5 +3143,88 @@ fn topic_for_subscription(channel_id: Option<Uuid>) -> EventTopic {
     match channel_id {
         Some(channel_id) => EventTopic::Channel(channel_id),
         None => EventTopic::Global,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn delete_tombstone_omits_absent_moderation_metadata() {
+        let content =
+            delete_tombstone_content("actor".to_string(), "target".to_string(), None, None, None);
+
+        assert_eq!(content["type"], "message_deleted");
+        assert_eq!(content["actor"], "actor");
+        assert_eq!(content["target_event_id"], "target");
+        assert!(content.get("action_id").is_none());
+        assert!(content.get("reason_code").is_none());
+        assert!(content.get("public_reason").is_none());
+    }
+
+    #[test]
+    fn delete_tombstone_carries_optional_moderation_metadata() {
+        let content = delete_tombstone_content(
+            "actor".to_string(),
+            "target".to_string(),
+            Some("550e8400-e29b-41d4-a716-446655440000".to_string()),
+            Some("spam".to_string()),
+            Some("Removed for spam.".to_string()),
+        );
+
+        assert_eq!(content["type"], "message_deleted");
+        assert_eq!(content["actor"], "actor");
+        assert_eq!(content["target_event_id"], "target");
+        assert_eq!(content["action_id"], "550e8400-e29b-41d4-a716-446655440000");
+        assert_eq!(content["reason_code"], "spam");
+        assert_eq!(content["public_reason"], "Removed for spam.");
+        assert!(!content.to_string().contains("reporter"));
+    }
+
+    #[test]
+    fn author_self_delete_with_moderation_metadata_skips_self_delete_path() {
+        let keys = nostr::Keys::generate();
+        let actor = keys.public_key().to_bytes();
+        let event = EventBuilder::new(Kind::Custom(9005), "")
+            .tags([Tag::parse(["public_reason", "Removed for spam."]).unwrap()])
+            .sign_with_keys(&keys)
+            .expect("sign");
+
+        assert!(!author_delete_can_use_self_delete_path(
+            &actor, &actor, &event
+        ));
+    }
+
+    #[test]
+    fn member_role_is_not_owner_or_admin_for_moderation_metadata() {
+        let channel_id = Uuid::new_v4();
+        let actor = vec![7_u8; 32];
+        let members = vec![MemberRecord {
+            channel_id,
+            pubkey: actor.clone(),
+            role: "member".to_string(),
+            joined_at: chrono::Utc::now(),
+            invited_by: None,
+            removed_at: None,
+        }];
+
+        assert!(!actor_is_channel_owner_or_admin(&members, &actor));
+    }
+
+    #[test]
+    fn admin_role_is_owner_or_admin_for_moderation_metadata() {
+        let channel_id = Uuid::new_v4();
+        let actor = vec![7_u8; 32];
+        let members = vec![MemberRecord {
+            channel_id,
+            pubkey: actor.clone(),
+            role: "admin".to_string(),
+            joined_at: chrono::Utc::now(),
+            invited_by: None,
+            removed_at: None,
+        }];
+
+        assert!(actor_is_channel_owner_or_admin(&members, &actor));
     }
 }

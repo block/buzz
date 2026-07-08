@@ -1186,7 +1186,7 @@ test("editAgent_findingE_capableBuzzAgentLoadedCatalog_preservedOnNoOpSave", () 
 // to id-based matching when command-path matching misses — same id-fallback used
 // by effectiveRuntimeIdForSubmit.
 
-// Helper mirrors the fixed seeding logic from EditAgentDialog.tsx open-effect /
+// Helper mirrors the fixed seeding logic from AgentInstanceEditDialog.tsx open-effect /
 // catalog-arrival effect.
 function deriveSelectedRuntimeId(agentCommand, runtimes) {
   const matched =
@@ -1390,7 +1390,7 @@ test("requiredCredentialEnvKeys: custom/unknown runtime → empty", () => {
 
 // ── Block-save gate: hasMissingRequiredEnvKey logic ────────────────────────
 //
-// The EditAgentDialog computes:
+// The AgentInstanceEditDialog computes:
 //   requiredEnvKeyMissing = hasMissingRequiredEnvKey(requiredEnvKeys, envVars)
 // and folds it into canSubmit (via computeEditAgentFormValidity). These tests
 // exercise the exported predicate directly.
@@ -1472,7 +1472,7 @@ test("blockSave_buzzAgentDatabricksHostProvided_allowed", () => {
 
 // ── Block-save gate: isMissingRequiredDropdownField ────────────────────────
 //
-// The EditAgentDialog also gates on modelRequired / providerRequired.
+// The AgentInstanceEditDialog also gates on modelRequired / providerRequired.
 // These tests guard the isMissingRequiredDropdownField predicate used for both.
 
 test("blockSave_missingRequiredModel_blocked", () => {

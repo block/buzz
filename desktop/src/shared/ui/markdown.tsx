@@ -73,6 +73,7 @@ import { FileCard } from "./markdown/FileCard";
 import { InlineEmojiPopover } from "./markdown/InlineEmojiPopover";
 import { MarkdownInput } from "./markdown/MarkdownInput";
 import { MarkdownTable } from "./markdown/MarkdownTable";
+import { MaskedLinkTooltip } from "./markdown/MaskedLinkTooltip";
 import { MessageLinkPill } from "./markdown/MessageLinkPill";
 import { resolveFileCard } from "./markdownFileCard";
 import type {
@@ -1658,7 +1659,7 @@ function createMarkdownComponents(
         : null;
       const isLinearLink = supportedLinkPreview?.kind === "linear-issue";
 
-      return (
+      const anchor = (
         <a
           {...props}
           className={cn(
@@ -1671,6 +1672,12 @@ function createMarkdownComponents(
         >
           {children}
         </a>
+      );
+
+      return (
+        <MaskedLinkTooltip disabled={isLinearLink} href={href} label={label}>
+          {anchor}
+        </MaskedLinkTooltip>
       );
     },
     blockquote: ({ children }) => (

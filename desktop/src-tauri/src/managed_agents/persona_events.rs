@@ -299,9 +299,6 @@ pub struct PersonaSnapshot {
     pub system_prompt: Option<String>,
     pub model: Option<String>,
     pub provider: Option<String>,
-    /// Persona env layered under the agent's own overrides (agent wins). This
-    /// is the complete env map the agent spawns with — no live persona lookup.
-    pub env_vars: BTreeMap<String, String>,
     /// `persona_content_hash` of the persona at snapshot time; the drift basis.
     pub source_version: String,
 }
@@ -326,23 +323,15 @@ pub fn persona_field_with_record_fallback(
 
 /// Build the pinned snapshot for an agent created from `persona`.
 ///
-/// `agent_env_overrides` are the agent's own env vars (persona-independent);
-/// they win over persona env on key collision, matching spawn-time precedence
-/// (persona env < agent env). The persona's `system_prompt` is always present,
-/// so it is wrapped in `Some`.
-pub fn persona_snapshot(
-    persona: &PersonaRecord,
-    agent_env_overrides: &BTreeMap<String, String>,
-) -> PersonaSnapshot {
-    let mut env_vars = persona.env_vars.clone();
-    for (key, value) in agent_env_overrides {
-        env_vars.insert(key.clone(), value.clone());
-    }
+/// The persona's `system_prompt` is always present, so it is wrapped in
+/// `Some`. Env vars are deliberately absent: `record.env_vars` holds agent
+/// overrides only, and the live persona env is merged underneath at read
+/// time (spawn / readiness / deploy) — never snapshotted.
+pub fn persona_snapshot(persona: &PersonaRecord) -> PersonaSnapshot {
     PersonaSnapshot {
         system_prompt: Some(persona.system_prompt.clone()),
         model: persona.model.clone(),
         provider: persona.provider.clone(),
-        env_vars,
         source_version: persona_content_hash(&persona_event_content(persona)),
     }
 }
@@ -360,21 +349,19 @@ pub fn persona_snapshot(
 /// `source_version` is always updated to the current persona content hash so the
 /// drift badge clears correctly even when model/provider are not touched.
 ///
-/// Env-var layering is unchanged: persona env < agent env (agent wins on collision).
-/// A persona with an empty env map does not wipe the agent's env vars — the agent's
-/// own overrides are merged on top and always win.
+/// Env vars are not part of the snapshot: `record.env_vars` (agent overrides)
+/// is left untouched and the live persona env is merged underneath at read time.
 ///
 /// The two fields (`model`, `provider`) are independent: a persona that sets only
 /// `model` wins on `model` while the agent's `provider` is preserved, and vice versa.
 pub fn persona_snapshot_with_agent_config_fallback(
     persona: &PersonaRecord,
-    agent_env_overrides: &BTreeMap<String, String>,
     current_agent_model: Option<&str>,
     current_agent_provider: Option<&str>,
 ) -> PersonaSnapshot {
-    // Delegate env-merge, system_prompt, and source_version to persona_snapshot
-    // so future PersonaSnapshot field additions stay automatically consistent.
-    let base = persona_snapshot(persona, agent_env_overrides);
+    // Delegate system_prompt and source_version to persona_snapshot so future
+    // PersonaSnapshot field additions stay automatically consistent.
+    let base = persona_snapshot(persona);
 
     // Apply the shared precedence rule: persona wins when non-blank, else
     // the agent record's value is preserved so a configured agent stays configured.
@@ -741,12 +728,8 @@ mod tests {
         let persona = blank_model_persona();
         let expected_version = persona_content_hash(&persona_event_content(&persona));
 
-        let snapshot = persona_snapshot_with_agent_config_fallback(
-            &persona,
-            &BTreeMap::new(),
-            Some("gpt-4o"),
-            Some("openai"),
-        );
+        let snapshot =
+            persona_snapshot_with_agent_config_fallback(&persona, Some("gpt-4o"), Some("openai"));
 
         assert_eq!(
             snapshot.model.as_deref(),
@@ -771,7 +754,6 @@ mod tests {
 
         let snapshot = persona_snapshot_with_agent_config_fallback(
             &persona,
-            &BTreeMap::new(),
             Some("gpt-4o"), // agent had a different model
             Some("openai"), // agent had a different provider
         );
@@ -795,9 +777,7 @@ mod tests {
         let persona = blank_model_persona();
 
         let snapshot = persona_snapshot_with_agent_config_fallback(
-            &persona,
-            &BTreeMap::new(),
-            None, // agent also has no model
+            &persona, None, // agent also has no model
             None, // agent also has no provider
         );
 
@@ -821,7 +801,6 @@ mod tests {
 
         let snapshot = persona_snapshot_with_agent_config_fallback(
             &persona,
-            &BTreeMap::new(),
             Some("claude-opus-4"),
             Some("anthropic"),
         );
@@ -848,7 +827,6 @@ mod tests {
 
         let snapshot = persona_snapshot_with_agent_config_fallback(
             &persona,
-            &BTreeMap::new(),
             Some("gpt-4o"), // record model (should be overridden by persona)
             Some("openai"), // record provider (should be preserved)
         );
@@ -874,7 +852,6 @@ mod tests {
 
         let snapshot = persona_snapshot_with_agent_config_fallback(
             &persona,
-            &BTreeMap::new(),
             Some("gpt-4o"), // record model (should be preserved)
             Some("openai"), // record provider (should be overridden by persona)
         );
@@ -888,41 +865,6 @@ mod tests {
             snapshot.provider.as_deref(),
             Some("anthropic"),
             "persona provider must win when persona has a value"
-        );
-    }
-
-    /// Env-var layering: persona env < agent env — agent overrides always win
-    /// on key collision and a persona with an empty env map does not wipe the
-    /// agent's env vars.
-    #[test]
-    fn fallback_agent_env_wins_over_persona_env() {
-        let mut persona = blank_model_persona();
-        persona.env_vars = BTreeMap::from([
-            ("SHARED_KEY".to_string(), "persona-value".to_string()),
-            ("PERSONA_ONLY".to_string(), "from-persona".to_string()),
-        ]);
-        let agent_env = BTreeMap::from([
-            ("SHARED_KEY".to_string(), "agent-override".to_string()),
-            ("AGENT_ONLY".to_string(), "from-agent".to_string()),
-        ]);
-
-        let snapshot =
-            persona_snapshot_with_agent_config_fallback(&persona, &agent_env, None, None);
-
-        assert_eq!(
-            snapshot.env_vars.get("SHARED_KEY").map(String::as_str),
-            Some("agent-override"),
-            "agent env must win on key collision"
-        );
-        assert_eq!(
-            snapshot.env_vars.get("PERSONA_ONLY").map(String::as_str),
-            Some("from-persona"),
-            "persona-only key must be present"
-        );
-        assert_eq!(
-            snapshot.env_vars.get("AGENT_ONLY").map(String::as_str),
-            Some("from-agent"),
-            "agent-only key must be present"
         );
     }
 }

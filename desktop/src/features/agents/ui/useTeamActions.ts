@@ -158,7 +158,7 @@ export function useTeamActions(
     actions.setActionErrorMessage(null);
     setTeamDialogState({
       title: "Create team",
-      description: "Group personas together for quick deployment to channels.",
+      description: "Group agents together for quick deployment to channels.",
       submitLabel: "Create team",
       initialValues: {
         name: "",

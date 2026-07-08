@@ -6,7 +6,7 @@
 use std::sync::Arc;
 
 use axum::{
-    extract::{Path, Query, State},
+    extract::{Path, Query, RawQuery, State},
     http::{HeaderMap, StatusCode},
     response::Json,
 };
@@ -1635,6 +1635,203 @@ async fn synthesize_presence(
     Some(events)
 }
 
+// ── Moderation queue reads (L6 — Quinn) ───────────────────────────────────────
+//
+// Mod-only structured rows (`moderation_reports`/`moderation_actions`/
+// `community_bans`) are not nostr events, so they are served over dedicated
+// NIP-98-authed GET endpoints rather than the REQ/`/query` path (which would
+// force a synthetic event shape and thread a privileged branch onto the shared
+// read hot path). Gated on `ModerationAction::ViewQueue` via the one capability
+// helper — never an inline role check. Host-scoped: community from the request
+// host, no channel context (queue reads are community-wide).
+
+/// Shared prelude for a moderation read: bind tenant, verify NIP-98 GET auth,
+/// replay-check, and confirm the caller may view the queue.
+///
+/// `raw_query` is the request's raw query string (from [`axum::extract::RawQuery`]),
+/// e.g. `Some("limit=20&status=open")`. NIP-98 signs the *full* request URL, so the
+/// client's `u` tag includes any query string; the expected URL reconstructed here
+/// must therefore append the same query verbatim or query-bearing reads
+/// (`reports?limit=…`, `audit?limit=…`) 401 on a URL mismatch. Query-less reads
+/// (`restricted`) pass `None` and keep the bare-path expectation. The verbatim
+/// request query is used (not a re-serialized parse) so the match stays byte-exact
+/// with what the client signed regardless of param order or encoding.
+async fn authorize_moderation_read(
+    state: &Arc<AppState>,
+    headers: &HeaderMap,
+    path: &str,
+    raw_query: Option<&str>,
+) -> Result<TenantContext, (StatusCode, Json<Value>)> {
+    let raw_host = headers
+        .get(axum::http::header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let tenant = crate::tenant::bind_community(&state.db, raw_host)
+        .await
+        .map_err(|_| {
+            api_error(
+                StatusCode::NOT_FOUND,
+                "relay: no community is configured for this host",
+            )
+        })?;
+
+    let path_with_query = match raw_query {
+        Some(q) if !q.is_empty() => format!("{path}?{q}"),
+        _ => path.to_string(),
+    };
+    let url = nip98_expected_url(&state.config.relay_url, &tenant, &path_with_query);
+    let (pubkey, event_id_bytes) =
+        verify_bridge_auth(headers, "GET", &url, None, state.config.require_auth_token)?;
+    check_nip98_replay(state, &tenant, event_id_bytes).await?;
+    let pubkey_bytes = pubkey.to_bytes().to_vec();
+
+    crate::handlers::moderation_authz::authorize_moderation_action(
+        &tenant,
+        state,
+        &pubkey_bytes,
+        None,
+        crate::handlers::moderation_authz::ModerationTarget::None,
+        crate::handlers::moderation_authz::ModerationAction::ViewQueue,
+    )
+    .await
+    .map_err(|_| {
+        api_error(
+            StatusCode::FORBIDDEN,
+            "restricted: moderator access required",
+        )
+    })?;
+
+    Ok(tenant)
+}
+
+/// Cap on rows returned by a single moderation read.
+const MODERATION_READ_LIMIT: i64 = 500;
+
+/// Optional `?status=` and `?limit=` query for moderation reads.
+#[derive(serde::Deserialize, Default)]
+pub struct ModerationReadQuery {
+    status: Option<String>,
+    limit: Option<i64>,
+}
+
+fn clamp_limit(requested: Option<i64>) -> i64 {
+    requested
+        .filter(|n| *n > 0)
+        .map(|n| n.min(MODERATION_READ_LIMIT))
+        .unwrap_or(MODERATION_READ_LIMIT)
+}
+
+/// `GET /moderation/reports` — the moderation queue (NIP-98 + mod-authz).
+pub async fn moderation_reports(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    RawQuery(raw_query): RawQuery,
+    Query(q): Query<ModerationReadQuery>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let tenant = authorize_moderation_read(
+        &state,
+        &headers,
+        "/moderation/reports",
+        raw_query.as_deref(),
+    )
+    .await?;
+    let rows = state
+        .db
+        .list_moderation_reports(
+            tenant.community(),
+            q.status.as_deref(),
+            clamp_limit(q.limit),
+        )
+        .await
+        .map_err(|e| internal_error(&format!("list reports: {e}")))?;
+    Ok(Json(Value::Array(rows.iter().map(report_json).collect())))
+}
+
+/// `GET /moderation/audit` — the moderation audit log (NIP-98 + mod-authz).
+pub async fn moderation_audit(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    RawQuery(raw_query): RawQuery,
+    Query(q): Query<ModerationReadQuery>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let tenant =
+        authorize_moderation_read(&state, &headers, "/moderation/audit", raw_query.as_deref())
+            .await?;
+    let rows = state
+        .db
+        .list_moderation_actions(tenant.community(), clamp_limit(q.limit))
+        .await
+        .map_err(|e| internal_error(&format!("list actions: {e}")))?;
+    Ok(Json(Value::Array(rows.iter().map(action_json).collect())))
+}
+
+/// `GET /moderation/restricted` — currently banned/timed-out members.
+pub async fn moderation_restricted(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let tenant =
+        authorize_moderation_read(&state, &headers, "/moderation/restricted", None).await?;
+    let rows = state
+        .db
+        .list_community_restrictions(tenant.community())
+        .await
+        .map_err(|e| internal_error(&format!("list restrictions: {e}")))?;
+    Ok(Json(Value::Array(rows.iter().map(ban_json).collect())))
+}
+
+fn report_json(r: &buzz_db::moderation::ReportRecord) -> Value {
+    let (target_kind, target) = match &r.target {
+        buzz_db::moderation::ReportTarget::Event(id) => ("event", hex::encode(id)),
+        buzz_db::moderation::ReportTarget::Pubkey(pk) => ("pubkey", hex::encode(pk)),
+        buzz_db::moderation::ReportTarget::Blob(sha) => ("blob", hex::encode(sha)),
+    };
+    serde_json::json!({
+        "id": r.id,
+        "report_event_id": hex::encode(&r.report_event_id),
+        "reporter_pubkey": hex::encode(&r.reporter_pubkey),
+        "target_kind": target_kind,
+        "target": target,
+        "channel_id": r.channel_id,
+        "report_type": r.report_type,
+        "note": r.note,
+        "status": r.status,
+        "resolved_by": r.resolved_by.as_ref().map(hex::encode),
+        "resolved_at": r.resolved_at,
+        "action_id": r.action_id,
+        "created_at": r.created_at,
+    })
+}
+
+fn action_json(a: &buzz_db::moderation::ActionRecord) -> Value {
+    serde_json::json!({
+        "id": a.id,
+        "actor_pubkey": hex::encode(&a.actor_pubkey),
+        "action": a.action,
+        "target_pubkey": a.target_pubkey.as_ref().map(hex::encode),
+        "target_event_id": a.target_event_id.as_ref().map(hex::encode),
+        "channel_id": a.channel_id,
+        "reason_code": a.reason_code,
+        "public_reason": a.public_reason,
+        "private_reason": a.private_reason,
+        "matched_principal": a.matched_principal,
+        "created_at": a.created_at,
+    })
+}
+
+fn ban_json(b: &buzz_db::moderation::BanRecord) -> Value {
+    serde_json::json!({
+        "pubkey": hex::encode(&b.pubkey),
+        "banned": b.banned,
+        "ban_expires_at": b.ban_expires_at,
+        "ban_reason": b.ban_reason,
+        "muted_until": b.muted_until,
+        "mute_reason": b.mute_reason,
+        "actor_pubkey": hex::encode(&b.actor_pubkey),
+        "updated_at": b.updated_at,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1925,6 +2122,133 @@ mod tests {
             keys.public_key(),
             "returned pubkey must be the signer's"
         );
+    }
+
+    /// Mirror of the query-reconstruction `authorize_moderation_read` performs
+    /// before calling [`nip98_expected_url`], so the tests below pin the exact
+    /// seam without a DB harness. Kept in lockstep with the production match arm.
+    fn moderation_read_expected_url(
+        config_relay_url: &str,
+        tenant: &TenantContext,
+        path: &str,
+        raw_query: Option<&str>,
+    ) -> String {
+        let path_with_query = match raw_query {
+            Some(q) if !q.is_empty() => format!("{path}?{q}"),
+            _ => path.to_string(),
+        };
+        nip98_expected_url(config_relay_url, tenant, &path_with_query)
+    }
+
+    /// L7 read-auth blocker (Wren, #1591 sweep): the CLI signs the *full*
+    /// request URL — including `?limit=…&status=…` — but the relay used to
+    /// reconstruct the expected URL from the bare path only, so
+    /// `buzz moderation reports` / `audit` 401'd on a NIP-98 URL mismatch in
+    /// normal use. This pins that a query-bearing GET verifies iff the expected
+    /// URL carries the same query verbatim. Bites if the query is ever dropped
+    /// from `authorize_moderation_read`'s expected-URL reconstruction.
+    #[test]
+    fn moderation_read_query_bearing_nip98_event_verifies_with_matching_query() {
+        let keys = Keys::generate();
+        // CLI signs the URL it actually requests, query and all.
+        let signed_url = "https://host-a.example/moderation/reports?limit=20&status=open";
+        let event_json = build_nip98_event_json(&keys, signed_url, "GET");
+        let headers = nip98_auth_headers(&event_json);
+
+        let tenant_a = fresh_tenant("host-a.example");
+        let expected_url = moderation_read_expected_url(
+            "wss://config-host.example",
+            &tenant_a,
+            "/moderation/reports",
+            Some("limit=20&status=open"),
+        );
+
+        let (pubkey, _event_id_bytes) =
+            verify_bridge_auth(&headers, "GET", &expected_url, None, true)
+                .expect("query-bearing moderation read must verify against the same query");
+        assert_eq!(pubkey, keys.public_key());
+    }
+
+    /// Anti-regression control proving the fix is load-bearing: the same
+    /// query-bearing event MUST be rejected when the expected URL omits the
+    /// query — the pre-fix behavior. If this ever passes, the relay has
+    /// silently reverted to bare-path reconstruction.
+    #[test]
+    fn moderation_read_query_bearing_nip98_event_rejected_against_bare_path() {
+        let keys = Keys::generate();
+        let signed_url = "https://host-a.example/moderation/reports?limit=20&status=open";
+        let event_json = build_nip98_event_json(&keys, signed_url, "GET");
+        let headers = nip98_auth_headers(&event_json);
+
+        let tenant_a = fresh_tenant("host-a.example");
+        // No query — the broken pre-fix reconstruction.
+        let bare_url = moderation_read_expected_url(
+            "wss://config-host.example",
+            &tenant_a,
+            "/moderation/reports",
+            None,
+        );
+
+        let (status, body) = verify_bridge_auth(&headers, "GET", &bare_url, None, true)
+            .expect_err("query-signed event MUST NOT match a bare-path expected URL");
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        let msg = body
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        assert!(
+            msg.contains("URL mismatch"),
+            "rejection must be a URL mismatch; got body = {body:?}"
+        );
+    }
+
+    /// `audit?limit=20` — the second query-bearing read path — verifies the
+    /// same way. Pins that the reconstruction is generic over the path, not
+    /// special-cased to `reports`.
+    #[test]
+    fn moderation_read_audit_query_bearing_nip98_event_verifies() {
+        let keys = Keys::generate();
+        let signed_url = "https://host-a.example/moderation/audit?limit=20";
+        let event_json = build_nip98_event_json(&keys, signed_url, "GET");
+        let headers = nip98_auth_headers(&event_json);
+
+        let tenant_a = fresh_tenant("host-a.example");
+        let expected_url = moderation_read_expected_url(
+            "wss://config-host.example",
+            &tenant_a,
+            "/moderation/audit",
+            Some("limit=20"),
+        );
+
+        let (pubkey, _event_id_bytes) =
+            verify_bridge_auth(&headers, "GET", &expected_url, None, true)
+                .expect("audit query-bearing read must verify");
+        assert_eq!(pubkey, keys.public_key());
+    }
+
+    /// `restricted` has no query and passes `None`, so its expected URL stays
+    /// the bare path — a query-less signed event verifies. Pins Wren's
+    /// "preserve restricted no-query behavior" checklist item.
+    #[test]
+    fn moderation_read_restricted_no_query_still_verifies() {
+        let keys = Keys::generate();
+        let signed_url = "https://host-a.example/moderation/restricted";
+        let event_json = build_nip98_event_json(&keys, signed_url, "GET");
+        let headers = nip98_auth_headers(&event_json);
+
+        let tenant_a = fresh_tenant("host-a.example");
+        let expected_url = moderation_read_expected_url(
+            "wss://config-host.example",
+            &tenant_a,
+            "/moderation/restricted",
+            None,
+        );
+        assert_eq!(expected_url, "https://host-a.example/moderation/restricted");
+
+        let (pubkey, _event_id_bytes) =
+            verify_bridge_auth(&headers, "GET", &expected_url, None, true)
+                .expect("query-less restricted read must verify against the bare path");
+        assert_eq!(pubkey, keys.public_key());
     }
 
     /// `nip98_expected_url` derives host from `tenant`, not from

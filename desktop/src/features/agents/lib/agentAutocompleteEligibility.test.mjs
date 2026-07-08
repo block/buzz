@@ -6,6 +6,7 @@ import {
   getMentionableAgentPubkeys,
   getSharedChannelIds,
   relayAgentIsSharedWithUser,
+  shouldHideAgentFromMentions,
 } from "./agentAutocompleteEligibility.ts";
 
 const CURRENT_PUBKEY = "a".repeat(64);
@@ -132,6 +133,87 @@ test("getMentionableAgentPubkeys: keeps managed agents and shared relay agents",
   });
 
   assert.deepEqual(result, new Set([PUB_A, PUB_B, PUB_C]));
+});
+
+test("shouldHideAgentFromMentions: never hides non-agents", () => {
+  assert.equal(
+    shouldHideAgentFromMentions({
+      isAgent: false,
+      isMember: false,
+      pubkey: PUB_A,
+      mentionableAgentPubkeys: new Set(),
+      directoryAgentPubkeys: new Set([PUB_A]),
+    }),
+    false,
+  );
+});
+
+test("shouldHideAgentFromMentions: shows invocable agents even when non-member", () => {
+  assert.equal(
+    shouldHideAgentFromMentions({
+      isAgent: true,
+      isMember: false,
+      pubkey: PUB_A,
+      mentionableAgentPubkeys: new Set([PUB_A]),
+      directoryAgentPubkeys: new Set([PUB_A]),
+    }),
+    false,
+  );
+});
+
+test("shouldHideAgentFromMentions: hides non-member non-invocable agents", () => {
+  assert.equal(
+    shouldHideAgentFromMentions({
+      isAgent: true,
+      isMember: false,
+      pubkey: PUB_A,
+      mentionableAgentPubkeys: new Set(),
+      directoryAgentPubkeys: new Set(),
+    }),
+    true,
+  );
+});
+
+test("shouldHideAgentFromMentions: hides member agents with an explicit not-invocable directory entry (Fizz)", () => {
+  assert.equal(
+    shouldHideAgentFromMentions({
+      isAgent: true,
+      isMember: true,
+      pubkey: PUB_A,
+      mentionableAgentPubkeys: new Set(),
+      directoryAgentPubkeys: new Set([PUB_A]),
+    }),
+    true,
+  );
+});
+
+test("shouldHideAgentFromMentions: shows member agents with unknown invocability (not in directory)", () => {
+  assert.equal(
+    shouldHideAgentFromMentions({
+      isAgent: true,
+      isMember: true,
+      pubkey: PUB_A,
+      mentionableAgentPubkeys: new Set(),
+      directoryAgentPubkeys: new Set(),
+    }),
+    false,
+  );
+});
+
+test("shouldHideAgentFromMentions: normalizes the pubkey before lookup", () => {
+  const mixedCase = "Ab".repeat(32);
+  const normalized = mixedCase.toLowerCase();
+
+  assert.equal(
+    shouldHideAgentFromMentions({
+      isAgent: true,
+      isMember: true,
+      pubkey: mixedCase,
+      mentionableAgentPubkeys: new Set(),
+      directoryAgentPubkeys: new Set([normalized]),
+    }),
+    true,
+  );
 });
 
 test("coalesceAgentAutocompleteCandidates: merges agents with the same persona id", () => {

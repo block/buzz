@@ -226,7 +226,7 @@ export function CreateAgentDialog({
     [allRequiredEnvKeys, bakedSatisfiedEnvKeys, fileSatisfiedEnvKeys],
   );
 
-  // Clear model when provider scope changes, mirroring EditAgentDialog.
+  // Clear model when provider scope changes, mirroring AgentInstanceEditDialog.
   React.useEffect(() => {
     if (
       !open ||
@@ -828,7 +828,7 @@ export function CreateAgentDialog({
             <EnvVarsEditor
               disabled={createMutation.isPending}
               fileSatisfiedKeys={fileSatisfiedEnvKeys}
-              helperText="Injected at spawn. Overrides the persona's env vars on collision."
+              helperText="Injected at spawn. Overrides the template's env vars on collision."
               onChange={setEnvVars}
               requiredKeys={requiredEnvKeys}
               value={envVars}

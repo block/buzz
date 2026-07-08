@@ -8,6 +8,7 @@ import type {
   UpdatePersonaInput,
 } from "@/shared/api/types";
 import { useFileImportZone } from "@/shared/hooks/useFileImportZone";
+import { useWindowFileDragOver } from "./useWindowFileDragOver";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 import { ChooserDialogContent } from "@/shared/ui/chooser-dialog-content";
@@ -81,7 +82,7 @@ import {
 } from "./usePersonaModelDiscovery";
 import { useBakedBuildEnvKeysQuery, useRuntimeFileConfigQuery } from "../hooks";
 
-type PersonaDialogProps = {
+type AgentDefinitionDialogProps = {
   open: boolean;
   title: string;
   description: string;
@@ -93,12 +94,19 @@ type PersonaDialogProps = {
   runtimes: AcpRuntimeCatalogEntry[];
   runtimesLoading?: boolean;
   onOpenChange: (open: boolean) => void;
-  onSubmit: (input: CreatePersonaInput | UpdatePersonaInput) => Promise<void>;
+  onSubmit: (
+    input: CreatePersonaInput | UpdatePersonaInput,
+  ) => Promise<unknown>;
   onImportUpdateFile?: (
     personaId: string,
     fileBytes: number[],
     fileName: string,
   ) => Promise<void>;
+  /**
+   * Rendered in the footer's left slot in create mode only — edit mode's
+   * import button owns that slot (`canImportPersonaUpdate`).
+   */
+  createFooterSlot?: React.ReactNode;
 };
 
 const ADVANCED_FIELDS_MOTION_TRANSITION = {
@@ -106,7 +114,7 @@ const ADVANCED_FIELDS_MOTION_TRANSITION = {
   ease: [0.23, 1, 0.32, 1],
 } as const;
 
-export function PersonaDialog({
+export function AgentDefinitionDialog({
   open,
   title,
   description,
@@ -120,7 +128,8 @@ export function PersonaDialog({
   onOpenChange,
   onSubmit,
   onImportUpdateFile,
-}: PersonaDialogProps) {
+  createFooterSlot,
+}: AgentDefinitionDialogProps) {
   const [displayName, setDisplayName] = React.useState("");
   const [avatarUrl, setAvatarUrl] = React.useState("");
   const [systemPrompt, setSystemPrompt] = React.useState("");
@@ -139,7 +148,6 @@ export function PersonaDialog({
   const [importErrorMessage, setImportErrorMessage] = React.useState<
     string | null
   >(null);
-  const [isWindowFileDragOver, setIsWindowFileDragOver] = React.useState(false);
   const isEditMode = Boolean(initialValues && "id" in initialValues);
   const editPersonaId =
     isEditMode && initialValues && "id" in initialValues
@@ -207,68 +215,9 @@ export function PersonaDialog({
     setRuntime(defaultRuntime.id);
   }, [defaultRuntime, initialValues, open, runtime, runtimesLoading]);
 
-  React.useEffect(() => {
-    if (!open || !canImportPersonaUpdate) {
-      setIsWindowFileDragOver(false);
-      return;
-    }
-
-    let dragDepth = 0;
-
-    function isFileDrag(event: DragEvent): boolean {
-      return Array.from(event.dataTransfer?.types ?? []).includes("Files");
-    }
-
-    function handleWindowDragEnter(event: DragEvent) {
-      if (!isFileDrag(event)) {
-        return;
-      }
-      dragDepth += 1;
-      setIsWindowFileDragOver(true);
-    }
-
-    function handleWindowDragOver(event: DragEvent) {
-      if (!isFileDrag(event)) {
-        return;
-      }
-      event.preventDefault();
-      if (event.dataTransfer) {
-        event.dataTransfer.dropEffect = "copy";
-      }
-      setIsWindowFileDragOver(true);
-    }
-
-    function handleWindowDragLeave(event: DragEvent) {
-      if (!isFileDrag(event)) {
-        return;
-      }
-      dragDepth = Math.max(0, dragDepth - 1);
-      if (dragDepth === 0) {
-        setIsWindowFileDragOver(false);
-      }
-    }
-
-    function handleWindowDrop(event: DragEvent) {
-      if (!isFileDrag(event)) {
-        return;
-      }
-      event.preventDefault();
-      dragDepth = 0;
-      setIsWindowFileDragOver(false);
-    }
-
-    window.addEventListener("dragenter", handleWindowDragEnter);
-    window.addEventListener("dragover", handleWindowDragOver);
-    window.addEventListener("dragleave", handleWindowDragLeave);
-    window.addEventListener("drop", handleWindowDrop);
-
-    return () => {
-      window.removeEventListener("dragenter", handleWindowDragEnter);
-      window.removeEventListener("dragover", handleWindowDragOver);
-      window.removeEventListener("dragleave", handleWindowDragLeave);
-      window.removeEventListener("drop", handleWindowDrop);
-    };
-  }, [canImportPersonaUpdate, open]);
+  const isWindowFileDragOver = useWindowFileDragOver(
+    open && canImportPersonaUpdate,
+  );
 
   React.useEffect(() => {
     if (!open || !importErrorMessage) {
@@ -331,7 +280,6 @@ export function PersonaDialog({
       setIsAvatarUploadPending(false);
       setImportErrorMessage(null);
       setIsImportingUpdate(false);
-      setIsWindowFileDragOver(false);
     }
 
     onOpenChange(next);
@@ -761,7 +709,9 @@ export function PersonaDialog({
                     ) : null}
                   </button>
                 </>
-              ) : null}
+              ) : (
+                createFooterSlot
+              )}
             </div>
 
             <div className="flex items-center gap-2">

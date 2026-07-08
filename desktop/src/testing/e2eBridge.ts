@@ -1445,7 +1445,7 @@ function buildMockConfigSurface(pubkey: string): {
 
   // Mixed-provenance showcase — top-level rows carry different origins so the
   // panel witnesses distinct provenance labels in one frame: "Set in Buzz",
-  // "Inherited from persona", "From config file (...)" and
+  // "Inherited from template", "From config file (...)" and
   // "From environment variable (...)".
   const multiOriginSurface = {
     runtimeId: "goose",

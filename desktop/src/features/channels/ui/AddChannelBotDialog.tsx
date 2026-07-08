@@ -433,7 +433,7 @@ export function AddChannelBotDialog({
     ? "Loading runtimes..."
     : providers.length === 0
       ? "No runtimes found"
-      : (selectedRuntime?.label ?? "Use persona defaults");
+      : (selectedRuntime?.label ?? "Use agent defaults");
   const addButtonLabel = createBotsMutation.isPending
     ? selectedCount > 1
       ? `Adding ${selectedCount}...`
@@ -447,7 +447,7 @@ export function AddChannelBotDialog({
       <ChooserDialogContent
         className="max-w-3xl"
         data-testid="add-channel-bot-dialog"
-        description="Select any combination of saved personas, or turn on Generic for a one-off custom agent."
+        description="Select any combination of saved agents, or turn on Generic for a one-off custom agent."
         footer={
           <>
             <Button
@@ -567,8 +567,8 @@ export function AddChannelBotDialog({
           </DropdownMenu>
           <p className="text-xs text-muted-foreground">
             {isOverrideActive
-              ? "All agents will use this runtime, overriding persona preferences."
-              : "Each persona uses its preferred runtime. Choose a runtime above to override all."}
+              ? "All agents will use this runtime, overriding their configured preferences."
+              : "Each agent uses its preferred runtime. Choose a runtime above to override all."}
           </p>
         </div>
 

@@ -14,7 +14,10 @@ const repoRoot = path.resolve(
 );
 
 function resolveSourcePath(basePath) {
-  if (path.extname(basePath)) {
+  // Existence decides, not path.extname — a dotted basename like
+  // `ProfileAvatarEditor.utils` (→ .utils.ts on disk) looks like an
+  // extension but still needs resolving.
+  if (fs.existsSync(basePath) && fs.statSync(basePath).isFile()) {
     return basePath;
   }
 
@@ -32,7 +35,7 @@ function resolveSourcePath(basePath) {
     }
   }
 
-  return `${basePath}.ts`;
+  return null;
 }
 
 // emoji-mart ships a bundled CJS main that node's cjs-module-lexer cannot
@@ -70,22 +73,26 @@ export function resolve(specifier, context, nextResolve) {
     // Otherwise paths like `@/.../foo.mjs` would be coerced into `foo.mjs.ts`
     // and fail to resolve.
     const resolved = resolveSourcePath(`${srcRoot}/${stripped}`);
-    return nextResolve(resolved, context);
+    return nextResolve(resolved ?? `${srcRoot}/${stripped}`, context);
   }
   // Resolve extensionless relative TS imports (e.g. `./parseImeta`) — the app's
   // bundler adds the extension, but node's ESM resolver does not. Without this,
   // any .ts that relative-imports a sibling .ts can't be imported from a test,
   // which previously forced stale inlined copies of the source under test.
+  // Dotted basenames (`./ProfileAvatarEditor.utils`) look like extensions to
+  // path.extname, so resolveSourcePath existence-checks instead.
   if (
     (specifier.startsWith("./") || specifier.startsWith("../")) &&
-    !path.extname(specifier) &&
-    context.parentURL
+    context.parentURL?.startsWith("file:")
   ) {
     const parentPath = fileURLToPath(context.parentURL);
     const resolved = resolveSourcePath(
       path.resolve(path.dirname(parentPath), specifier),
     );
-    return nextResolve(resolved, context);
+    if (resolved) {
+      return nextResolve(resolved, context);
+    }
+    return nextResolve(specifier, context);
   }
   return nextResolve(specifier, context);
 }

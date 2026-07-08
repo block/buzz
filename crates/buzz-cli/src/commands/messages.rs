@@ -1,4 +1,4 @@
-use buzz_sdk::{DiffMeta, ThreadRef, VoteDirection};
+use buzz_sdk::{DeleteMessageOptions, DiffMeta, ThreadRef, VoteDirection};
 use nostr::PublicKey;
 use uuid::Uuid;
 
@@ -551,15 +551,29 @@ pub async fn cmd_send_diff_message(client: &BuzzClient, p: SendDiffParams) -> Re
     Ok(())
 }
 
-pub async fn cmd_delete_message(client: &BuzzClient, event_id: &str) -> Result<(), CliError> {
+pub async fn cmd_delete_message(
+    client: &BuzzClient,
+    event_id: &str,
+    action_id: Option<Uuid>,
+    reason_code: Option<&str>,
+    public_reason: Option<&str>,
+) -> Result<(), CliError> {
     validate_hex64(event_id)?;
 
     // Resolve channel_id from the event's h-tag
     let channel_uuid = resolve_channel_id(client, event_id).await?;
     let target_eid = parse_event_id(event_id)?;
 
-    let builder = buzz_sdk::build_delete_message(channel_uuid, target_eid)
-        .map_err(|e| CliError::Other(format!("build_delete_message failed: {e}")))?;
+    let builder = buzz_sdk::build_delete_message_with_options(
+        channel_uuid,
+        target_eid,
+        DeleteMessageOptions {
+            action_id,
+            reason_code,
+            public_reason,
+        },
+    )
+    .map_err(|e| CliError::Other(format!("build_delete_message failed: {e}")))?;
 
     let event = client.sign_event(builder)?;
 
@@ -684,7 +698,21 @@ pub async fn dispatch(
             .await
         }
         MessagesCmd::Edit { event, content } => cmd_edit_message(client, &event, &content).await,
-        MessagesCmd::Delete { event } => cmd_delete_message(client, &event).await,
+        MessagesCmd::Delete {
+            event,
+            action_id,
+            reason_code,
+            public_reason,
+        } => {
+            cmd_delete_message(
+                client,
+                &event,
+                action_id,
+                reason_code.as_deref(),
+                public_reason.as_deref(),
+            )
+            .await
+        }
         MessagesCmd::Get {
             channel,
             limit,

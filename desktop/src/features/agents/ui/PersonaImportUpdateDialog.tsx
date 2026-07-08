@@ -131,7 +131,7 @@ export function PersonaImportUpdateDialog({
     <Dialog onOpenChange={onOpenChange} open={open}>
       <DialogContent className="flex max-h-[85vh] max-w-3xl flex-col overflow-hidden p-0">
         <DialogHeader className="shrink-0 space-y-1 border-b border-border/60 px-6 py-5 pr-14">
-          <DialogTitle>Import persona</DialogTitle>
+          <DialogTitle>Import agent</DialogTitle>
         </DialogHeader>
 
         <div className="min-h-0 flex-1 overflow-y-auto px-6 py-4">

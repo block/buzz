@@ -48,7 +48,7 @@ export function usePersonaImportActions(
       (candidate) => candidate.id === personaId,
     );
     if (!persona) {
-      const message = "Persona not found. Refresh and try again.";
+      const message = "Agent not found. Refresh and try again.";
       feedback.setPersonaErrorMessage(message);
       throw new Error(message);
     }
@@ -56,7 +56,7 @@ export function usePersonaImportActions(
     try {
       const result = await parsePersonaFiles(fileBytes, fileName);
       if (result.personas.length === 0) {
-        const message = "No valid personas found in file.";
+        const message = "No valid agents found in file.";
         feedback.setPersonaErrorMessage(message);
         throw new Error(message);
       }
@@ -66,7 +66,7 @@ export function usePersonaImportActions(
       feedback.setPersonaDialogState(null);
     } catch (err) {
       const message =
-        err instanceof Error ? err.message : "Failed to parse persona file.";
+        err instanceof Error ? err.message : "Failed to parse agent file.";
       feedback.setPersonaErrorMessage(message);
       throw err instanceof Error ? err : new Error(message);
     }

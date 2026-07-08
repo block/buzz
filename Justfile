@@ -747,3 +747,17 @@ goose-bg relay="ws://localhost:3000" agents="1" heartbeat="0" prompt="" key="$BU
     source ./scripts/_goose-env.sh "{{relay}}" "{{key}}" "{{agents}}" "{{heartbeat}}" "{{prompt}}"
     screen -dmS goose-agent-{{agents}} bash -c "$(printf '%q ' env "${env_args[@]}") ./target/release/buzz-acp"
     echo "Agent running in screen session 'goose-agent-{{agents}}'. Attach with: screen -r goose-agent-{{agents}}"
+
+# ─── Benchmarking ─────────────────────────────────────────────────────────────
+
+# Run the Buzz orchestra benchmark — leaderboard-eligible by default (TB 2.1, k=5, Sonnet+Haiku). Stands up its own Docker stack; --gui opens a live spectator desktop app; other flags pass to benchmark.py (--dataset/--path, --include-task, --attempts, --manifest, --dry-run, ...)
+benchmark *ARGS:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export PATH="{{justfile_directory()}}/bin:$PATH"
+    uv run --project benchmarks/harbor-buzz-orchestra/testbed \
+        benchmarks/harbor-buzz-orchestra/scripts/benchmark.py {{ARGS}}
+
+# Stop the benchmark Docker stack (state and channels are kept)
+benchmark-down:
+    docker compose --project-name buzz-benchmark down

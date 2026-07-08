@@ -255,7 +255,10 @@ const overrides = new Map([
   // + mount-only useEffect for the Drafts-panel "Send message" confirm-dialog
   // flow. Load-bearing feature growth; queued to split with the rest of this
   // list.
-  ["src/features/messages/ui/MessageComposer.tsx", 1033],
+  // +3: onLinkShortcutRef wiring (ref decl + editor option + assignment) for
+  // the ⌘K link-editor shortcut, mirroring the existing onEditLinkRef
+  // pattern. Queued to split with the rest of this list.
+  ["src/features/messages/ui/MessageComposer.tsx", 1036],
 ]);
 
 await runFileSizeCheck({

@@ -471,7 +471,7 @@ mod tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 5);
+        assert_eq!(migrations.len(), 6);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -532,6 +532,29 @@ mod tests {
         assert!(migrations[4].sql.as_str().contains("search_tsv"));
         assert!(migrations[4].sql.as_str().contains("44200"));
         assert!(!migrations[0].sql.as_str().contains("44200"));
+
+        // Community moderation (reports/bans/audit): additive migration, never
+        // folded into 0001 — same brownfield checksum rule as above.
+        assert_eq!(migrations[5].version, 6);
+        assert!(migrations[5]
+            .sql
+            .as_str()
+            .contains("CREATE TABLE moderation_reports"));
+        assert!(migrations[5]
+            .sql
+            .as_str()
+            .contains("CREATE TABLE community_bans"));
+        assert!(migrations[5]
+            .sql
+            .as_str()
+            .contains("CREATE TABLE moderation_actions"));
+        for action in crate::moderation::MODERATION_ACTION_CHECK_VOCAB {
+            assert!(
+                migrations[5].sql.as_str().contains(&format!("'{action}'")),
+                "migration 0006 moderation_actions.action CHECK must allow {action}"
+            );
+        }
+        assert!(!migrations[0].sql.as_str().contains("moderation_reports"));
     }
 
     #[test]
@@ -715,7 +738,15 @@ mod tests {
 
         run_migrations(&pool).await.expect("run migrations");
 
-        assert_eq!(applied_versions(&pool).await, vec![1, 2, 3]);
+        // Every embedded migration must apply, in order. Derive the expected
+        // list from the MIGRATOR itself so this doesn't go stale as additive
+        // migrations land (it previously hardcoded [1, 2, 3] and rotted).
+        let expected: Vec<i64> = {
+            let mut versions: Vec<i64> = MIGRATOR.iter().map(|m| m.version).collect();
+            versions.sort_unstable();
+            versions
+        };
+        assert_eq!(applied_versions(&pool).await, expected);
         let sql = migration_sql();
         let tables = create_tables(sql.as_str());
         for table in [

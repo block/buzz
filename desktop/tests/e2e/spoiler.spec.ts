@@ -175,10 +175,32 @@ test("hidden spoiler links reveal without opening on the first click", async ({
   const spoiler = lastMessage.locator(".buzz-spoiler").first();
   await expect(spoiler).toHaveAttribute("data-revealed", "false");
 
+  // The freshly sent row can still be settling layout; a forced click
+  // computed from a pre-shift bounding box lands on the wrong element
+  // (force skips Playwright's stability check). Wait until the link's
+  // position is identical across two animation frames before clicking.
+  const secretLink = spoiler.getByRole("link", { name: "secret" });
+  await secretLink.evaluate(
+    (el) =>
+      new Promise<void>((resolve) => {
+        let last = -1;
+        const tick = () =>
+          requestAnimationFrame(() => {
+            const { y } = el.getBoundingClientRect();
+            if (y === last) resolve();
+            else {
+              last = y;
+              tick();
+            }
+          });
+        tick();
+      }),
+  );
+
   const popupPromise = page
     .waitForEvent("popup", { timeout: 500 })
     .catch(() => null);
-  await spoiler.getByRole("link", { name: "secret" }).click({ force: true });
+  await secretLink.click({ force: true });
 
   const popup = await popupPromise;
   await popup?.close();
@@ -224,6 +246,65 @@ test("hidden spoilers stay masked on hover and focus until reveal", async ({
   await expect(spoiler).toHaveAttribute("data-revealed", "true");
   await expect(content).toHaveCSS("opacity", "1");
   await expect(particles).toHaveCSS("opacity", "0");
+});
+
+test("masked link inside a hidden spoiler does not leak its URL until revealed", async ({
+  page,
+}) => {
+  const SECRET_URL = "https://private.example/leak-path";
+  await installSpoilerBridge(page);
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  const input = page.getByTestId("message-input");
+  await input.click();
+  await page.keyboard.type(`||[secret](${SECRET_URL})||`);
+  await page.getByTestId("send-message").click();
+
+  const lastMessage = page.getByTestId("message-row").last();
+  const spoiler = lastMessage.locator(".buzz-spoiler").first();
+  await expect(spoiler).toHaveAttribute("data-revealed", "false");
+
+  const secretLink = spoiler.getByRole("link", { name: "secret" });
+
+  // Neither hovering nor focusing the still-hidden link may open the URL
+  // tooltip — that would leak the destination before the spoiler is revealed.
+  await secretLink.hover({ force: true });
+  await page.waitForTimeout(500); // exceed the tooltip open delay
+  await expect(page.getByRole("tooltip")).toHaveCount(0);
+
+  await page.mouse.move(0, 0);
+  await secretLink.focus();
+  await page.waitForTimeout(500);
+  await expect(page.getByRole("tooltip")).toHaveCount(0);
+  await expect(page.getByText(SECRET_URL)).toHaveCount(0);
+  await secretLink.blur();
+
+  // Reveal the spoiler (first click reveals; it must not open the link).
+  await page.mouse.move(0, 0);
+  await secretLink.evaluate(
+    (el) =>
+      new Promise<void>((resolve) => {
+        let last = -1;
+        const tick = () =>
+          requestAnimationFrame(() => {
+            const { y } = el.getBoundingClientRect();
+            if (y === last) resolve();
+            else {
+              last = y;
+              tick();
+            }
+          });
+        tick();
+      }),
+  );
+  await secretLink.click({ force: true });
+  await expect(spoiler).toHaveAttribute("data-revealed", "true");
+
+  // Now revealed, hovering the link reveals the URL tooltip as normal.
+  await secretLink.hover();
+  await expect(page.getByRole("tooltip")).toContainText(SECRET_URL);
 });
 
 test("non-interactive inbox preview spoilers let row clicks pass through", async ({

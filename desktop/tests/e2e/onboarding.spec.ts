@@ -1068,38 +1068,52 @@ test("first-run onboarding shows setup loading until Welcome bootstrap completes
   await expect(loadingGate).toBeVisible();
   await expect(loadingGate).toContainText("Setting up your workspace...");
 
-  // The boot gate is deliberately static: a plain Buzz mark in the brand
-  // yellow (#D7D72E) over solid black. The mark must paint complete on the
-  // FIRST frame — a blank gate reads as "nothing is loading" — so nothing
-  // about it may depend on SMIL/scripted animation, and the background must
-  // be a flat color rather than the animated gradient wash.
+  // The boot gate is the theme-adaptive grainient with the flapping Buzz bee
+  // as its hero. The mark must paint complete on the FIRST frame — a blank
+  // gate reads as "nothing is loading" — so nothing about it may depend on
+  // SMIL/scripted animation (<animate> count stays 0); the wing flap is pure
+  // CSS on HTML-level wing layers so it keeps running on the compositor even
+  // while boot work hogs the main thread.
+  await expect(
+    loadingGate.getByTestId("setup-grainient-background"),
+  ).toBeVisible();
   const mark = loadingGate.locator(".buzz-mark");
   await expect(mark).toBeVisible();
   const gateTreatment = await loadingGate.evaluate((element) => {
-    const shellStyles = window.getComputedStyle(element);
-    const markSvg = element.querySelector(".buzz-mark");
-    const markStyles =
-      markSvg instanceof SVGElement ? window.getComputedStyle(markSvg) : null;
+    const markElement = element.querySelector(".buzz-mark");
+    const markSvgs = markElement
+      ? Array.from(markElement.querySelectorAll("svg"))
+      : [];
+    const wing = element.querySelector(".bee-wing");
+    const wingStyles =
+      wing instanceof SVGElement ? window.getComputedStyle(wing) : null;
+    const wash = element.querySelector(".buzz-setup-grainient__wash");
+    const washStyles =
+      wash instanceof HTMLElement ? window.getComputedStyle(wash) : null;
     return {
       animateElementCount: element.querySelectorAll("animate").length,
-      backgroundColor: shellStyles.backgroundColor,
-      backgroundImage: shellStyles.backgroundImage,
-      // The document itself must also be black (inline <style> in
-      // index.html) so the pre-React/pre-CSS first paint can't flash white
-      // before the gate mounts.
+      // The document itself must not flash white before the gate mounts
+      // (inline <style> in index.html; black fallback when no cached theme).
       documentBackgroundColor: window.getComputedStyle(document.documentElement)
         .backgroundColor,
-      markColor: markStyles?.color,
-      markUsesCurrentColor: markSvg?.getAttribute("fill") === "currentColor",
+      grainientAnimation: washStyles?.animationName,
+      grainientUsesRadialGradients:
+        washStyles?.backgroundImage.includes("radial-gradient"),
+      markSvgsUseCurrentColor:
+        markSvgs.length > 0 &&
+        markSvgs.every((svg) => svg.getAttribute("fill") === "currentColor"),
+      wingFlapAnimation: wingStyles?.animationName,
+      wingFlapRunning: wingStyles?.animationPlayState,
     };
   });
   expect(gateTreatment).toEqual({
     animateElementCount: 0,
-    backgroundColor: "rgb(0, 0, 0)",
-    backgroundImage: "none",
     documentBackgroundColor: "rgb(0, 0, 0)",
-    markColor: "rgb(215, 215, 46)", // #d7d72e
-    markUsesCurrentColor: true,
+    grainientAnimation: "buzz-grainient-orbit",
+    grainientUsesRadialGradients: true,
+    markSvgsUseCurrentColor: true,
+    wingFlapAnimation: "bee-wing-left-flap",
+    wingFlapRunning: "running",
   });
   await expect(loadingGate).not.toHaveClass(/buzz-onboarding-neutral-theme/);
   await expectShellHidden(page);

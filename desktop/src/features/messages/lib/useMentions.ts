@@ -16,6 +16,7 @@ import {
   coalesceAutocompleteCandidatesByKey,
   getMentionableAgentPubkeys,
   getSharedChannelIds,
+  shouldHideAgentFromMentions,
 } from "@/features/agents/lib/agentAutocompleteEligibility";
 import {
   useInfiniteUserSearchQuery,
@@ -209,6 +210,15 @@ export function useMentions(
       ),
     [relayAgentsQuery.data],
   );
+  const directoryAgentPubkeys = React.useMemo(
+    () =>
+      new Set(
+        (relayAgentsQuery.data ?? []).map((agent) =>
+          normalizePubkey(agent.pubkey),
+        ),
+      ),
+    [relayAgentsQuery.data],
+  );
   const sharedChannelIds = React.useMemo(
     () => getSharedChannelIds(channelsQuery.data),
     [channelsQuery.data],
@@ -269,9 +279,13 @@ export function useMentions(
         return;
       }
       if (
-        candidate.isAgent &&
-        !candidate.isMember &&
-        !mentionableAgentPubkeys.has(pubkey)
+        shouldHideAgentFromMentions({
+          isAgent: candidate.isAgent === true,
+          isMember: candidate.isMember === true,
+          pubkey,
+          mentionableAgentPubkeys,
+          directoryAgentPubkeys,
+        })
       ) {
         return;
       }
@@ -425,6 +439,7 @@ export function useMentions(
     userSearchResults,
     canSearchGlobalUsers,
     currentPubkey,
+    directoryAgentPubkeys,
     isArchivedDiscovery,
     managedAgentNamesByPubkey,
     managedAgentPersonaIds,
