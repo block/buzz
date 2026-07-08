@@ -3,9 +3,11 @@ import test from "node:test";
 
 import { isEditAgentProviderSaveValid } from "./AgentInstanceEditDialog.tsx";
 
-// Helper: build args for the common "goose runtime, provider field visible" case.
+// Shorthand for test args.
 const visible = true;
 const hidden = false;
+const providerRuntime = true; // original runtime supported provider selection
+const nonProviderRuntime = false; // original runtime did not
 
 // ── provider field hidden ───────────────────────────────────────────────────
 
@@ -16,36 +18,71 @@ test("isEditAgentProviderSaveValid_fieldHidden_always_true", () => {
       currentProvider: "",
       originalProvider: "",
       globalProvider: undefined,
+      originalRuntimeSupportsProvider: nonProviderRuntime,
     }),
     "provider field hidden → always valid regardless of values",
   );
 });
 
-// ── agent never had a provider (no-provider agent) ─────────────────────────
+// ── legacy no-provider agent ALREADY on a provider-capable runtime ─────────
 
-test("isEditAgentProviderSaveValid_noProviderAgent_nameEditAllowed", () => {
-  // Agent was created without a provider; user edits only the name (provider
-  // field stays empty). Save must remain enabled — regression from main.
+test("isEditAgentProviderSaveValid_legacyNoProvider_onProviderRuntime_nameEditAllowed", () => {
+  // Agent was on goose (provider-capable) but never had a provider set.
+  // User edits only the name. Save must remain enabled — regression from main.
   assert.ok(
     isEditAgentProviderSaveValid({
       llmProviderFieldVisible: visible,
       currentProvider: "",
       originalProvider: "",
       globalProvider: undefined,
+      originalRuntimeSupportsProvider: providerRuntime,
     }),
-    "no-provider agent, no global → Save must be enabled for name/timeout edits",
+    "legacy no-provider agent on provider-capable runtime → name edit allowed",
   );
 });
 
-test("isEditAgentProviderSaveValid_noProviderAgent_nullOriginal_allowed", () => {
+test("isEditAgentProviderSaveValid_legacyNoProvider_nullOriginal_providerRuntime_allowed", () => {
   assert.ok(
     isEditAgentProviderSaveValid({
       llmProviderFieldVisible: visible,
       currentProvider: "",
       originalProvider: null,
       globalProvider: null,
+      originalRuntimeSupportsProvider: providerRuntime,
     }),
-    "null originalProvider treated as no provider → allowed",
+    "null originalProvider on provider-capable runtime → treated as legacy → allowed",
+  );
+});
+
+// ── fresh transition INTO a provider-capable runtime (Thufir's hole) ────────
+
+test("isEditAgentProviderSaveValid_noProvider_switchedToProviderRuntime_blocked", () => {
+  // Agent started on a non-provider runtime; user switched dropdown to goose;
+  // provider stays empty. Must be BLOCKED — would create a provider-broken agent.
+  assert.equal(
+    isEditAgentProviderSaveValid({
+      llmProviderFieldVisible: visible,
+      currentProvider: "",
+      originalProvider: "",
+      globalProvider: undefined,
+      originalRuntimeSupportsProvider: nonProviderRuntime,
+    }),
+    false,
+    "no-provider agent switched INTO provider-capable runtime → Save must be blocked",
+  );
+});
+
+test("isEditAgentProviderSaveValid_noProvider_switchedToProviderRuntime_globalCovers_allowed", () => {
+  // Switched to provider-capable runtime, but a global provider covers it.
+  assert.ok(
+    isEditAgentProviderSaveValid({
+      llmProviderFieldVisible: visible,
+      currentProvider: "",
+      originalProvider: "",
+      globalProvider: "openai",
+      originalRuntimeSupportsProvider: nonProviderRuntime,
+    }),
+    "switched to provider runtime but global covers it → allowed",
   );
 });
 
@@ -58,6 +95,7 @@ test("isEditAgentProviderSaveValid_globalFallback_coversEmpty", () => {
       currentProvider: "",
       originalProvider: "",
       globalProvider: "openai",
+      originalRuntimeSupportsProvider: providerRuntime,
     }),
     "global fallback present → effectiveProvider resolves → allowed",
   );
@@ -73,6 +111,7 @@ test("isEditAgentProviderSaveValid_clearingExistingProvider_noGlobal_blocked", (
       currentProvider: "",
       originalProvider: "openai",
       globalProvider: undefined,
+      originalRuntimeSupportsProvider: providerRuntime,
     }),
     false,
     "clearing a set provider with no global → Save must be blocked",
@@ -87,6 +126,7 @@ test("isEditAgentProviderSaveValid_clearingExistingProvider_withGlobal_allowed",
       currentProvider: "",
       originalProvider: "openai",
       globalProvider: "anthropic",
+      originalRuntimeSupportsProvider: providerRuntime,
     }),
     "clearing per-agent provider but global covers it → allowed",
   );
@@ -101,6 +141,7 @@ test("isEditAgentProviderSaveValid_providerExplicitlySet_allowed", () => {
       currentProvider: "openai",
       originalProvider: "",
       globalProvider: undefined,
+      originalRuntimeSupportsProvider: nonProviderRuntime,
     }),
     "user typed a provider → effectiveProvider resolves → allowed",
   );
@@ -116,6 +157,7 @@ test("isEditAgentProviderSaveValid_whitespaceProvider_treatedAsEmpty", () => {
       currentProvider: "   ",
       originalProvider: "openai",
       globalProvider: "   ",
+      originalRuntimeSupportsProvider: providerRuntime,
     }),
     false,
     "whitespace-only current + global with hadProvider → still blocked",

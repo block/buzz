@@ -230,6 +230,20 @@ export function AgentInstanceEditDialog({
     selectedRuntime?.id ?? selectedRuntimeId,
   );
 
+  // Stable snapshot: did the agent's ORIGINAL runtime support provider
+  // selection? Used by the save-gate to distinguish a legacy no-provider
+  // agent (ALREADY on a provider-capable runtime, safe to save name-only
+  // edits) from a fresh transition INTO a provider-capable runtime (which
+  // would create a provider-broken agent). Must use agent.agentCommand, NOT
+  // selectedRuntimeId or prospectiveRuntimeId — those mutate on user edits
+  // and would re-hide the defect the gate is meant to catch.
+  const originalRuntimeSupportsProvider = React.useMemo(() => {
+    const matched =
+      runtimes.find((r) => r.command?.trim() === agent.agentCommand.trim()) ??
+      runtimes.find((r) => r.id === agent.agentCommand.trim());
+    return runtimeSupportsLlmProviderSelection(matched?.id ?? "");
+  }, [runtimes, agent.agentCommand]);
+
   // One-shot focus: when the dialog opens from a card deep-link, scroll and
   // focus the relevant field. The effect re-runs when `llmProviderFieldVisible`
   // changes so a provider-field focus request fires once the field materializes
@@ -524,6 +538,7 @@ export function AgentInstanceEditDialog({
     currentProvider: provider,
     originalProvider: agent.provider,
     globalProvider: globalConfig.provider,
+    originalRuntimeSupportsProvider,
   });
 
   const canSubmit =
@@ -1052,35 +1067,47 @@ export function AgentInstanceEditDialog({
  * Determines whether the Save button should be enabled with respect to the
  * provider field in the instance-edit dialog.
  *
- * Rules (b): An agent that never had a provider configured stays fully editable
- * (name, timeout, etc.) — blocking Save on those agents would be a regression
- * from main's behavior where provider was UX-only. Only block when the user
- * ACTIVELY clears a provider the agent originally had AND no global fallback
- * exists to cover it.
+ * Rules (b): An agent that never had a provider configured AND was already on
+ * a provider-capable runtime stays fully editable (name, timeout, etc.) —
+ * blocking Save on those legacy agents would be a regression from main's
+ * behavior where provider was UX-only.
  *
- * Three states where Save is allowed:
+ * Four states where Save is allowed:
  * 1. Provider field is hidden — not a provider-requiring runtime, always OK.
  * 2. An effective provider resolves (per-agent or global fallback) — OK.
- * 3. The agent never had a provider to begin with — don't suddenly block it.
+ * 3. The agent never had a provider AND was already on a provider-capable
+ *    runtime — legacy state, don't suddenly block name/timeout edits.
+ * 4. (Implicitly: agent was on a non-provider runtime.) If the user switches
+ *    INTO a provider-capable runtime without setting a provider, that is
+ *    blocked — it would create a provider-broken agent.
  */
 export function isEditAgentProviderSaveValid({
   llmProviderFieldVisible,
   currentProvider,
   originalProvider,
   globalProvider,
+  originalRuntimeSupportsProvider,
 }: {
   llmProviderFieldVisible: boolean;
   currentProvider: string;
   originalProvider: string | null | undefined;
   globalProvider: string | null | undefined;
+  /** Whether the agent's ORIGINAL runtime (at dialog open) supported provider
+   * selection. Used to distinguish a legacy no-provider agent already on a
+   * provider-capable runtime (safe to save name-only edits) from a fresh
+   * transition INTO a provider-capable runtime (which must set a provider). */
+  originalRuntimeSupportsProvider: boolean;
 }): boolean {
   if (!llmProviderFieldVisible) return true;
   const effectiveProvider =
     currentProvider.trim() || (globalProvider ?? "").trim();
   if (effectiveProvider.length > 0) return true;
-  // Agent never had a provider — don't block unrelated edits.
+  // No effective provider. Allow only when the agent never had one AND was
+  // already on a provider-capable runtime (legacy state — don't block
+  // unrelated edits). A switch INTO a provider-capable runtime must set a
+  // provider, so we block when originalRuntimeSupportsProvider is false.
   const hadProvider = (originalProvider ?? "").trim().length > 0;
-  return !hadProvider;
+  return !hadProvider && originalRuntimeSupportsProvider;
 }
 
 function envVarsChanged(
