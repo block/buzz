@@ -13,10 +13,12 @@ use std::path::Path;
 /// manual recovery. Built-ins are skipped — `merge_personas` regenerates them
 /// from code on every load, exactly as before.
 ///
-/// Ordering (see `run_boot_migrations`): MUST run after
-/// `materialize_agent_runtimes` (whose `load_persona_runtimes` reads the
-/// sibling `personas.json`) and after `sync_team_personas` (the last
-/// pre-fold writer of `personas.json`).
+/// Ordering (see `run_boot_migrations`): runs after the JSON-level
+/// `personas.json` migrations (which must see the legacy file) and BEFORE
+/// every consumer of the `load/save_personas` shims — `sync_team_personas`,
+/// `reconcile_provider_mcp_commands`, and `materialize_agent_runtimes` all
+/// read definitions post-fold via [`load_persona_runtimes`]'s unified-store
+/// branch.
 pub fn fold_personas_into_agent_store(app: &tauri::AppHandle) {
     let Ok(base_dir) = crate::managed_agents::managed_agents_base_dir(app) else {
         return;
