@@ -1023,42 +1023,44 @@ test("buildTranscriptDisplayBlocks_genuineSecondSession_boundaryPreserved", () =
 // ── Duplicate-key guard: non-contiguous runs of the same sessionId ────────────
 
 test("buildTranscriptDisplayBlocks_nonContiguousRunsSameSession_distinctBoundaryKeys", () => {
-  // Scenario: archived sess-A frames, then sess-B frames, then live sess-A
-  // frames re-resolve (e.g. same agent session re-observed in a new live
-  // subscription). splitIntoSessionRuns treats each session-id change as a
-  // new run, so sess-A appears twice — once at runIndex=0 and once at
-  // runIndex=2 — yielding two session-boundary blocks, both with
+  // Scenario: sess-B frames, then sess-A frames, then sess-C frames, then
+  // sess-A frames re-resolve (e.g. same agent session re-observed in a new
+  // live subscription). splitIntoSessionRuns treats each session-id change as
+  // a new run, so sess-A appears twice — once at runIndex=1 and once at
+  // runIndex=3 — yielding two session-boundary blocks both with
   // sessionId="sess-A".
   //
   // The React key for a session-boundary is
   //   `session-boundary:${sessionId}:${runIndex}`
-  // If runIndex is omitted the two blocks share the same key, causing React
-  // to silently duplicate or omit children. This test asserts the runIndex
-  // tiebreaker keeps the keys distinct.
+  // Without the runIndex tiebreaker the two sess-A boundaries share the same
+  // key, causing React to silently duplicate or omit children. This test
+  // asserts the runIndex tiebreaker keeps the keys distinct.
   const items = [
-    sessionItem("archived-a", "sess-A", "2026-07-08T00:00:01.000Z"),
-    sessionItem("b-item", "sess-B", "2026-07-08T00:00:02.000Z"),
-    sessionItem("live-a", "sess-A", "2026-07-08T00:00:03.000Z"),
+    sessionItem("b-item", "sess-B", "2026-07-08T00:00:01.000Z"),
+    sessionItem("a-item", "sess-A", "2026-07-08T00:00:02.000Z"),
+    sessionItem("c-item", "sess-C", "2026-07-08T00:00:03.000Z"),
+    sessionItem("a-item-2", "sess-A", "2026-07-08T00:00:04.000Z"),
   ];
 
   const blocks = buildTranscriptDisplayBlocks(items, "sess-A");
   const boundaryBlocks = blocks.filter((b) => b.kind === "session-boundary");
 
-  // Three distinct session runs → two boundaries (before sess-B and before
-  // the re-occurring sess-A).
+  // Four distinct session runs → three boundaries (before sess-A, before
+  // sess-C, and before the re-occurring sess-A).
   assert.equal(
     boundaryBlocks.length,
-    2,
-    "two boundaries for three runs (sess-A, sess-B, sess-A)",
+    3,
+    "three boundaries for four runs (sess-B, sess-A, sess-C, sess-A)",
   );
 
-  // Both boundary blocks share the same sessionId.
-  const allSessionIds = boundaryBlocks.map((b) => b.sessionId);
-  // Boundaries are before sess-B (sessionId="sess-B") and before the second
-  // sess-A run (sessionId="sess-A"); at least one must be "sess-A".
-  assert.ok(
-    allSessionIds.includes("sess-A"),
-    "at least one boundary has sessionId=sess-A",
+  // Two boundaries share sessionId="sess-A" (the collision case pre-fix).
+  const sessABoundaries = boundaryBlocks.filter(
+    (b) => b.sessionId === "sess-A",
+  );
+  assert.equal(
+    sessABoundaries.length,
+    2,
+    "two boundary blocks both carry sessionId=sess-A (the collision the fix guards)",
   );
 
   // The runIndex values must be distinct across ALL boundary blocks so that

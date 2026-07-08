@@ -273,6 +273,7 @@ export function ProfileInfoTabContent({
   activeTurns,
   activityAgent,
   agentInfoFields,
+  callerChannelId,
   channelIdToName,
   isArchived,
   onOpenActivity,
@@ -282,6 +283,7 @@ export function ProfileInfoTabContent({
   activeTurns: ActiveTurnSummary[];
   activityAgent: ProfileActivityAgent | null;
   agentInfoFields: ProfileField[];
+  callerChannelId: string | null;
   channelIdToName: Record<string, string>;
   isArchived: boolean;
   onOpenActivity: (channelId?: string | null) => void;
@@ -316,6 +318,7 @@ export function ProfileInfoTabContent({
           <ProfileLiveActivityEmbed
             activeTurns={activeTurns}
             activityAgent={activityAgent}
+            callerChannelId={callerChannelId}
             channelIdToName={channelIdToName}
             feedScope={feedScope}
             onOpenActivity={onOpenActivity}
@@ -338,12 +341,14 @@ export function ProfileInfoTabContent({
 function ProfileLiveActivityEmbed({
   activeTurns,
   activityAgent,
+  callerChannelId,
   channelIdToName,
   feedScope,
   onOpenActivity,
 }: {
   activeTurns: ActiveTurnSummary[];
   activityAgent: ProfileActivityAgent;
+  callerChannelId: string | null;
   channelIdToName: Record<string, string>;
   feedScope: ProfileActivityFeedScope;
   onOpenActivity: (channelId?: string | null) => void;
@@ -467,7 +472,7 @@ function ProfileLiveActivityEmbed({
         <ManagedAgentSessionPanel
           agent={activityAgent}
           autoTail={true}
-          channelId={null}
+          channelId={callerChannelId}
           className="relative z-0 min-h-0 flex-1 border-0 bg-transparent px-4 text-xs shadow-none **:data-message-id:pointer-events-none"
           emptyDescription={emptyDescription}
           emptyState={emptyState}
