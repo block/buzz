@@ -91,7 +91,15 @@ pub(crate) fn spawn_config_hash(
     // resolved: a blank record relay spawns on the workspace relay, so a
     // workspace relay change must trip the badge.
     crate::relay::effective_agent_relay_url(&record.relay_url, workspace_relay).hash(&mut hasher);
-    record.system_prompt.hash(&mut hasher);
+    // Empty-filtered to mirror the spawn env write: `Some("")` and `None`
+    // both spawn with BUZZ_ACP_SYSTEM_PROMPT absent, so they must hash
+    // equal (B5 hash row 2 — backfilled prompt-less records re-snapshot to
+    // `Some("")` and must not trip the badge).
+    record
+        .system_prompt
+        .as_deref()
+        .filter(|p| !p.is_empty())
+        .hash(&mut hasher);
     record.model.hash(&mut hasher);
     record.provider.hash(&mut hasher);
     record.auth_tag.hash(&mut hasher);

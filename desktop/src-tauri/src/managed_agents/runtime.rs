@@ -1732,7 +1732,11 @@ pub fn spawn_agent_child(
     // persona) is what keeps a running agent pinned across restarts: a persona
     // edit reaches the agent only via delete+respawn, which rewrites the
     // snapshot.
-    let effective_prompt = record.system_prompt.clone();
+    // An empty prompt IS no prompt: `Some("")` and `None` spawn identically
+    // (filter must match spawn_config_hash's, or the badge lies — see B5
+    // backfill: manufactured definitions carry prompt-present-even-if-empty,
+    // and the re-snapshot must not flip the hash of a prompt-less record).
+    let effective_prompt = record.system_prompt.clone().filter(|p| !p.is_empty());
     let effective_model = record.model.clone();
     let effective_provider = record.provider.clone();
 

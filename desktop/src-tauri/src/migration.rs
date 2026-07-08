@@ -156,6 +156,11 @@ pub fn run_boot_migrations(app: &tauri::AppHandle) {
     // Post-fold readers of the runtime map (`load_persona_runtimes`) fall
     // back to the unified store's definitions.
     fold_personas_into_agent_store(app);
+    // B5: manufacture definitions for standalone agents AFTER the fold (so
+    // pre-existing definition slugs are present for collision checks) and
+    // before event sync republishes — the backfilled link is what flips the
+    // 30177 projection to its slim shape.
+    backfill_standalone_agents(app);
     if let Err(e) = crate::managed_agents::sync_team_personas(app) {
         eprintln!("buzz-desktop: sync-team-personas: {e}");
     }
@@ -1259,6 +1264,8 @@ pub use materialize::materialize_agent_runtimes;
 mod fold;
 pub use fold::fold_personas_into_agent_store;
 use fold::load_persona_runtimes;
+mod backfill;
+pub use backfill::backfill_standalone_agents;
 
 #[cfg(test)]
 #[path = "migration_test_support.rs"]
