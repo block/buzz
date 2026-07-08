@@ -142,8 +142,7 @@ export function TeamImportDialog({
                   ) : null}
                 </div>
                 <span className="text-xs text-muted-foreground">
-                  {personas.length}{" "}
-                  {personas.length === 1 ? "agent" : "agents"}
+                  {personas.length} {personas.length === 1 ? "agent" : "agents"}
                 </span>
               </div>
 
