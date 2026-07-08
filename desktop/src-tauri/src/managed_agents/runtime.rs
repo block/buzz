@@ -1324,11 +1324,14 @@ pub fn build_managed_agent_summary(
     let needs_restart = runtimes.get(&record.pubkey).is_some_and(|runtime| {
         use tauri::Manager;
         let state = app.state::<crate::app_state::AppState>();
+        let global_for_hash =
+            crate::managed_agents::load_global_agent_config(app).unwrap_or_default();
         runtime.spawn_config_hash
             != crate::managed_agents::spawn_hash::spawn_config_hash(
                 record,
                 personas,
                 &crate::relay::relay_ws_url_with_override(&state),
+                &global_for_hash,
             )
     });
 
@@ -1844,7 +1847,7 @@ pub fn spawn_agent_child(
     // `effective_relay_url` is already resolved, and resolution is idempotent,
     // so it serves as the workspace-relay input here.
     let spawn_config_hash =
-        super::spawn_hash::spawn_config_hash(record, &personas, &effective_relay_url);
+        super::spawn_hash::spawn_config_hash(record, &personas, &effective_relay_url, &global);
 
     let _ = super::write_agent_pid_file(app, &record.pubkey, child.id());
 

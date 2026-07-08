@@ -31,6 +31,7 @@ use super::{
     persona_events::apply_persona_snapshot,
     resolve_effective_agent_env,
     types::{ManagedAgentRecord, PersonaRecord},
+    GlobalAgentConfig,
 };
 
 /// The prompt a spawn would actually deliver: `Some("")` collapses to `None`
@@ -59,6 +60,7 @@ pub(crate) fn spawn_config_hash(
     record: &ManagedAgentRecord,
     personas: &[PersonaRecord],
     workspace_relay: &str,
+    global: &GlobalAgentConfig,
 ) -> u64 {
     // Prospective re-snapshot: apply the same `apply_persona_snapshot` the
     // start/restore paths run right before spawning, so the hash covers what a
@@ -77,7 +79,7 @@ pub(crate) fn spawn_config_hash(
 
     let effective_command = crate::managed_agents::record_agent_command(record, personas);
     let runtime_meta = known_acp_runtime(&effective_command);
-    let effective = resolve_effective_agent_env(record, personas, runtime_meta);
+    let effective = resolve_effective_agent_env(record, personas, runtime_meta, global);
 
     let mut hasher = DefaultHasher::new();
 
