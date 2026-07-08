@@ -131,7 +131,14 @@ export function AgentSessionThreadPanel({
       : `Last updated ${new Date(latestActivityAt).toLocaleString()}`;
 
   const { fetchOlderArchived, hasOlderArchived } =
-    useLoadArchivedObserverEvents(isLive, sessionChannelId ?? null);
+    useLoadArchivedObserverEvents(
+      // Archive history must load regardless of live status — an idle agent's
+      // channel should still show its archived observer history. Enable whenever
+      // there is a resolved sessionChannelId (the hook's owner_p guard handles
+      // the case where no save subscription exists).
+      Boolean(sessionChannelId),
+      sessionChannelId ?? null,
+    );
 
   useLoadOlderOnScroll({
     fetchOlder: fetchOlderArchived,
