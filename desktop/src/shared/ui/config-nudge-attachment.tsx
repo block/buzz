@@ -35,8 +35,10 @@ function requirementKey(
 
 /**
  * Returns true when every requirement in the nudge is a `cli_login` surface.
- * In that case the card routes to Doctor (install/login can't be fixed in
- * Edit Agent), per design decision (A).
+ * Non-authOnly all-cli_login cards (at least one install-state row) route to
+ * Doctor — install/login problems can't be fixed in Edit Agent. AuthOnly cards
+ * (every row is `availability === "available"`) are purely informational and
+ * do not route anywhere.
  */
 function isAllCliLogin(reqs: ConfigNudgePayload["requirements"]): boolean {
   return reqs.length > 0 && reqs.every((r) => r.surface === "cli_login");
@@ -138,7 +140,9 @@ export function ConfigNudgeCard({
 
   const handleOpen = () => {
     if (allCliLogin) {
-      // (A) Pure cli_login card — route to Doctor.
+      // (A) Non-authOnly install-state all-cli_login card — route to Doctor.
+      // AuthOnly cards never mount this trigger, so this branch only runs for
+      // install-state cards where Doctor is the correct destination.
       openDoctor();
     } else {
       // (B) Mixed card — card-level fallback to Edit Agent.
