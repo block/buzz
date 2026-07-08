@@ -23,6 +23,14 @@ export function useIndependentThreadPanel(args: {
   personaLookup: Map<string, string>;
   respondToLookup: Map<string, RespondToMode>;
 }) {
+  // Depend on the individual fields, NOT the `args` object — callers pass a
+  // fresh object literal every render, so `[args]` never memoizes and the
+  // full O(replies) formatTimelineMessages + buildThreadPanelData rebuild
+  // runs on every ChannelScreen render. In a long thread with agents
+  // streaming (an event or typing tick per ~150ms, each re-rendering the
+  // screen) that saturates the main thread and starves keystrokes — see
+  // typing-latency.perf.ts scenario "thread68+". Mirrors the main timeline's
+  // memoization of the same formatter (ChannelScreen `timelineMessages`).
   return React.useMemo(
     () =>
       buildIndependentThreadPanel(
@@ -39,6 +47,20 @@ export function useIndependentThreadPanel(args: {
         args.personaLookup,
         args.respondToLookup,
       ),
-    [args],
+    // biome-ignore lint/correctness/useExhaustiveDependencies: fields listed explicitly — see comment above
+    [
+      args.channelEvents,
+      args.threadReplyEvents,
+      args.rootId,
+      args.replyTargetId,
+      args.expandedReplyIds,
+      args.activeChannel,
+      args.currentPubkey,
+      args.currentAvatarUrl,
+      args.profiles,
+      args.members,
+      args.personaLookup,
+      args.respondToLookup,
+    ],
   );
 }
