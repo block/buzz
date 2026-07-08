@@ -112,7 +112,7 @@ export function BatchImportDialog({
         });
         setStatus("error");
         setErrorMessage(
-          `Imported ${completed} of ${selected.size}. Failed on '${persona.displayName}': ${error instanceof Error ? error.message : String(error)}. Already-imported personas are saved.`,
+          `Imported ${completed} of ${selected.size}. Failed on '${persona.displayName}': ${error instanceof Error ? error.message : String(error)}. Already-imported agents are saved.`,
         );
         return;
       }

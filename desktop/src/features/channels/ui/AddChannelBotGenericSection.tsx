@@ -21,7 +21,7 @@ export function AddChannelBotGenericSection({
       <div>
         <div className="text-sm font-medium">Generic agent</div>
         <p className="text-xs text-muted-foreground">
-          Add one custom agent alongside any selected personas.
+          Add one custom agent alongside any selected agents.
         </p>
       </div>
 
