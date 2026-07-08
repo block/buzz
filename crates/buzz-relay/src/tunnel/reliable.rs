@@ -177,8 +177,31 @@ where
     /// caller should also validate/write through the fenced stream boundary and
     /// close clients when the session layer observes loss.
     pub fn spawn_renewer(&self, lease: SessionLease, cancel: CancellationToken) -> JoinHandle<()> {
+        self.spawn_observable_renewer(lease, cancel).task
+    }
+
+    /// Start background lease renewal and return a loss signal consumers can
+    /// observe.
+    ///
+    /// `lost` is cancelled when this runtime loses ownership or Redis renewal
+    /// fails, so session consumers can tear down local state (`Room`, generation
+    /// floors, client bridges). Caller-initiated `cancel` is treated as normal
+    /// shutdown and does not trip the loss signal.
+    pub fn spawn_observable_renewer(
+        &self,
+        lease: SessionLease,
+        cancel: CancellationToken,
+    ) -> ReliableLeaseRenewer {
         spawn_lease_renewer(self.directory.clone(), lease, cancel)
     }
+}
+
+/// Background lease renewer plus an observable ownership-loss signal.
+pub struct ReliableLeaseRenewer {
+    /// Worker task. Await during teardown if the caller needs release completion.
+    pub task: JoinHandle<()>,
+    /// Cancelled when renewal observes loss/NotOwner or a renewal error.
+    pub lost: CancellationToken,
 }
 
 /// Result of a local client joining a reliable tunnel session.
@@ -542,13 +565,24 @@ fn spawn_lease_renewer(
     directory: SessionDirectory,
     lease: SessionLease,
     cancel: CancellationToken,
-) -> JoinHandle<()> {
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(DEFAULT_RENEW_INTERVAL);
+) -> ReliableLeaseRenewer {
+    spawn_lease_renewer_with_interval(directory, lease, cancel, DEFAULT_RENEW_INTERVAL)
+}
+
+fn spawn_lease_renewer_with_interval(
+    directory: SessionDirectory,
+    lease: SessionLease,
+    cancel: CancellationToken,
+    renew_interval: Duration,
+) -> ReliableLeaseRenewer {
+    let lost = CancellationToken::new();
+    let lost_for_task = lost.clone();
+    let task = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(renew_interval);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        loop {
+        let caller_cancelled = loop {
             tokio::select! {
-                _ = cancel.cancelled() => break,
+                _ = cancel.cancelled() => break true,
                 _ = interval.tick() => {
                     match directory.renew(&lease).await {
                         Ok(RenewResult::Renewed(_)) => {}
@@ -561,7 +595,8 @@ fn spawn_lease_renewer(
                                 ?known_generation,
                                 "reliable tunnel lease renewal lost"
                             );
-                            break;
+                            lost_for_task.cancel();
+                            break false;
                         }
                         Err(err) => {
                             tracing::warn!(
@@ -571,15 +606,30 @@ fn spawn_lease_renewer(
                                 error = %err,
                                 "reliable tunnel lease renewal failed"
                             );
-                            break;
+                            lost_for_task.cancel();
+                            break false;
                         }
                     }
                 }
             }
-        }
+        };
 
         match directory.release(&lease).await {
-            Ok(ReleaseResult::Released(_)) | Ok(ReleaseResult::NotOwner { .. }) => {}
+            Ok(ReleaseResult::Released(_)) => {}
+            Ok(ReleaseResult::NotOwner {
+                current,
+                known_generation,
+            }) => {
+                tracing::warn!(
+                    session_id = %lease.session_id,
+                    owner_runtime_id = %lease.owner_runtime_id,
+                    generation = lease.generation,
+                    ?current,
+                    ?known_generation,
+                    "reliable tunnel lease release found non-owner"
+                );
+                lost_for_task.cancel();
+            }
             Err(err) => {
                 tracing::warn!(
                     session_id = %lease.session_id,
@@ -588,9 +638,14 @@ fn spawn_lease_renewer(
                     error = %err,
                     "reliable tunnel lease release failed"
                 );
+                if !caller_cancelled {
+                    lost_for_task.cancel();
+                }
             }
         }
-    })
+    });
+
+    ReliableLeaseRenewer { task, lost }
 }
 
 #[cfg(test)]
@@ -785,6 +840,80 @@ mod tests {
                     profile: Profile::ReliableStream,
                 },
             })
+        );
+    }
+
+    #[tokio::test]
+    async fn observable_renewer_signals_loss_when_lease_disappears() {
+        let Some(directory) = redis_directory_if_available().await else {
+            return;
+        };
+        let community_id = community();
+        let session_id = Uuid::new_v4();
+        clear_keys(&directory, community_id, session_id).await;
+        let lease = match directory
+            .acquire(
+                community_id,
+                session_id,
+                runtime(1),
+                Profile::ReliableStream,
+            )
+            .await
+            .unwrap()
+        {
+            AcquireResult::Acquired(lease) => lease,
+            AcquireResult::Exists(_) => panic!("fresh session should acquire"),
+        };
+
+        let cancel = CancellationToken::new();
+        let renewer = spawn_lease_renewer_with_interval(
+            directory.clone(),
+            lease.clone(),
+            cancel,
+            Duration::from_millis(10),
+        );
+        directory.release(&lease).await.unwrap();
+
+        tokio::time::timeout(Duration::from_secs(2), renewer.lost.cancelled())
+            .await
+            .expect("lost token is cancelled after ownership loss");
+        renewer.task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn observable_renewer_normal_cancel_does_not_signal_loss() {
+        let Some(directory) = redis_directory_if_available().await else {
+            return;
+        };
+        let community_id = community();
+        let session_id = Uuid::new_v4();
+        clear_keys(&directory, community_id, session_id).await;
+        let lease = match directory
+            .acquire(
+                community_id,
+                session_id,
+                runtime(1),
+                Profile::ReliableStream,
+            )
+            .await
+            .unwrap()
+        {
+            AcquireResult::Acquired(lease) => lease,
+            AcquireResult::Exists(_) => panic!("fresh session should acquire"),
+        };
+
+        let cancel = CancellationToken::new();
+        let renewer = spawn_lease_renewer_with_interval(
+            directory,
+            lease,
+            cancel.clone(),
+            Duration::from_millis(10),
+        );
+        cancel.cancel();
+        renewer.task.await.unwrap();
+        assert!(
+            !renewer.lost.is_cancelled(),
+            "caller-initiated shutdown is not ownership loss"
         );
     }
 
