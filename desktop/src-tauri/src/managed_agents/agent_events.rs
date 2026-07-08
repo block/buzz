@@ -175,6 +175,7 @@ mod tests {
             last_stopped_at: Some("2025-01-03T00:00:00Z".to_string()),
             last_exit_code: Some(0),
             last_error: Some("some runtime error".to_string()),
+            last_error_code: None,
             respond_to: RespondTo::Allowlist,
             respond_to_allowlist: vec!["79be667e".to_string()],
             // Unified-model fields carry real values so the exclusion test

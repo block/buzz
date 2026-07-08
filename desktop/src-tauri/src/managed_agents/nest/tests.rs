@@ -467,6 +467,7 @@ fn make_agent(name: &str, persona_id: Option<&str>) -> ManagedAgentRecord {
         last_stopped_at: None,
         last_exit_code: None,
         last_error: None,
+        last_error_code: None,
         respond_to: RespondTo::default(),
         respond_to_allowlist: vec![],
         env_vars: std::collections::BTreeMap::new(),

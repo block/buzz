@@ -1218,11 +1218,14 @@ pub fn sync_managed_agent_processes(
             let log_err = if status.success() {
                 None
             } else {
-                Some(super::meaningful_agent_error_from_log(&runtime.log_path)
-                    .unwrap_or_else(|| super::storage::AgentLogError {
-                        message: format!("harness exited with status {status}"),
-                        code: None,
-                    }))
+                Some(
+                    super::meaningful_agent_error_from_log(&runtime.log_path).unwrap_or_else(
+                        || super::storage::AgentLogError {
+                            message: format!("harness exited with status {status}"),
+                            code: None,
+                        },
+                    ),
+                )
             };
             record.last_error = log_err.as_ref().map(|e| e.message.clone());
             record.last_error_code = log_err.as_ref().and_then(|e| e.code);

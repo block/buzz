@@ -374,7 +374,10 @@ function StandaloneAgentCard({
 }) {
   const title = agent.name;
   const profileQuery = useUserProfileQuery(agent.pubkey);
-  const friendlyError = friendlyAgentLastError(agent.lastError)?.copy;
+  const friendlyError = friendlyAgentLastError(
+    agent.lastError,
+    agent.lastErrorCode,
+  )?.copy;
   const isActive = isManagedAgentActive(agent);
   const opensRuntimeTab = Boolean(friendlyError && !isActive);
 

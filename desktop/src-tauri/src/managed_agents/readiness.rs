@@ -989,6 +989,7 @@ mod tests {
             last_stopped_at: None,
             last_exit_code: None,
             last_error: None,
+            last_error_code: None,
             respond_to: Default::default(),
             respond_to_allowlist: vec![],
             display_name: None,

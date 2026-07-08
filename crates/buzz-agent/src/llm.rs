@@ -149,7 +149,9 @@ impl Llm {
         // is centralized and never needs to be repeated in each provider arm.
         result.map_err(|e| match e {
             AgentError::Llm(s) => AgentError::Llm(format!("({effective_model}) {s}")),
-            AgentError::LlmModelNotFound(s) => AgentError::LlmModelNotFound(format!("({effective_model}) {s}")),
+            AgentError::LlmModelNotFound(s) => {
+                AgentError::LlmModelNotFound(format!("({effective_model}) {s}"))
+            }
             other => other,
         })
     }

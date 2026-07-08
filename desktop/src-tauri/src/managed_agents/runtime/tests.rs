@@ -159,6 +159,7 @@ fn fixture(
         last_stopped_at: None,
         last_exit_code: None,
         last_error: None,
+        last_error_code: None,
         respond_to,
         respond_to_allowlist: allowlist,
         display_name: None,

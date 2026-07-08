@@ -101,7 +101,7 @@ pub enum AcpError {
     #[error("Protocol error: {0}")]
     Protocol(String),
 
-    #[error("Agent reported error: {message}")]
+    #[error("Agent reported error (code {code}): {message}")]
     AgentError { code: i64, message: String },
 }
 
@@ -864,8 +864,11 @@ impl AcpClient {
                 if *id == serde_json::json!(expected_id) && msg.get("method").is_none() {
                     if let Some(error) = msg.get("error") {
                         let code = error.get("code").and_then(|c| c.as_i64()).unwrap_or(-32000);
-                        let message = error.get("message").and_then(|m| m.as_str())
-                            .unwrap_or("unknown error").to_string();
+                        let message = error
+                            .get("message")
+                            .and_then(|m| m.as_str())
+                            .unwrap_or("unknown error")
+                            .to_string();
                         return Err(AcpError::AgentError { code, message });
                     }
                     return Ok(msg["result"].clone());
@@ -1188,9 +1191,15 @@ impl AcpClient {
                                         let _ = ack_tx
                                             .send(crate::pool::SteerAck::PromptCompletedNeutral);
                                     }
-                                    let code = error.get("code").and_then(|c| c.as_i64()).unwrap_or(-32000);
-                                    let message = error.get("message").and_then(|m| m.as_str())
-                                        .unwrap_or("unknown error").to_string();
+                                    let code = error
+                                        .get("code")
+                                        .and_then(|c| c.as_i64())
+                                        .unwrap_or(-32000);
+                                    let message = error
+                                        .get("message")
+                                        .and_then(|m| m.as_str())
+                                        .unwrap_or("unknown error")
+                                        .to_string();
                                     return Err(AcpError::AgentError { code, message });
                                 }
                                 if let Some((_, ack_tx)) = pending_steer.take() {

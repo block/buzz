@@ -772,8 +772,7 @@ export function processTranscriptEvent(
     const payload = asRecord(event.payload);
     const outcome = asString(payload.outcome) ?? "error";
     const error = asString(payload.error) ?? "Unknown error";
-    const errorCode =
-      payload.code != null ? Number(payload.code) : null;
+    const errorCode = payload.code != null ? Number(payload.code) : null;
     const friendly = friendlyAgentLastError(error, errorCode);
     const displayError = friendly ? friendly.copy : error;
     const title =
