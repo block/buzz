@@ -58,13 +58,12 @@ pub fn backfill_persona_snapshots(app: &tauri::AppHandle) -> Result<(), String> 
             );
             continue;
         };
-        // Layer the agent's own env overrides over persona env, matching
-        // create-time precedence (persona env < agent env). When the persona
-        // leaves model/provider blank, the record's own configured values are
-        // preserved — a blank persona must not clobber a user-configured agent.
+        // Layer precedence at read time: persona env < agent env. When the
+        // persona leaves model/provider blank, the record's own configured
+        // values are preserved — a blank persona must not clobber a
+        // user-configured agent.
         let snapshot = super::persona_events::persona_snapshot_with_agent_config_fallback(
             persona,
-            &record.env_vars,
             record.model.as_deref(),    // fallback: record.model
             record.provider.as_deref(), // fallback: record.provider
         );
@@ -73,7 +72,11 @@ pub fn backfill_persona_snapshots(app: &tauri::AppHandle) -> Result<(), String> 
         }
         record.model = snapshot.model;
         record.provider = snapshot.provider;
-        record.env_vars = snapshot.env_vars;
+        // env_vars stay overrides-only; see the create-path comment. Self-heal
+        // pre-refresh records that baked persona env in as pseudo-overrides.
+        record
+            .env_vars
+            .retain(|k, v| persona.env_vars.get(k) != Some(v));
         record.persona_source_version = Some(snapshot.source_version);
         record.updated_at = util::now_iso();
         changed = true;
@@ -194,7 +197,6 @@ pub async fn restore_managed_agents_on_launch(
             };
             let snapshot = super::persona_events::persona_snapshot_with_agent_config_fallback(
                 persona,
-                &record.env_vars,
                 record.model.as_deref(),    // fallback: record.model
                 record.provider.as_deref(), // fallback: record.provider
             );
@@ -203,7 +205,12 @@ pub async fn restore_managed_agents_on_launch(
             }
             record.model = snapshot.model;
             record.provider = snapshot.provider;
-            record.env_vars = snapshot.env_vars;
+            // env_vars stay overrides-only; see the create-path comment.
+            // Self-heal pre-refresh records that baked persona env in as
+            // pseudo-overrides.
+            record
+                .env_vars
+                .retain(|k, v| persona.env_vars.get(k) != Some(v));
             record.persona_source_version = Some(snapshot.source_version);
             record.updated_at = util::now_iso();
             changed = true;

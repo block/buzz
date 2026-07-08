@@ -1812,24 +1812,24 @@ pub fn spawn_agent_child(
         );
     }
 
-    // ── User env vars: the record snapshot ─────────────────────────────
+    // ── User env vars: live persona env under agent overrides ──────────
     //
-    // The record's `env_vars` is the complete, pinned env map — persona env
-    // (snapshotted at create) already merged under the agent's own overrides.
-    // We read it directly and never look up the live persona, so credential
-    // edits on the persona reach the agent only via delete+respawn (which
-    // rewrites the snapshot), not on a plain restart. `merged_user_env` with an
-    // empty persona map still applies the reserved-key / malformed-key / NUL
-    // filtering as defense-in-depth for older on-disk records.
+    // The record's `env_vars` holds agent-level overrides only. The linked
+    // persona's env is read live and merged underneath (agent wins on
+    // collision), so persona credential edits reach the agent on the next
+    // spawn — same refresh semantics as prompt/model/provider above and the
+    // provider deploy path. `merged_user_env` also applies the reserved-key /
+    // malformed-key / NUL filtering.
     //
     // These writes go LAST so user-provided values win over every Buzz-set env
     // above — EXCEPT reserved keys (BUZZ_PRIVATE_KEY, NOSTR_PRIVATE_KEY,
     // BUZZ_AUTH_TAG, BUZZ_API_TOKEN, BUZZ_ACP_PRIVATE_KEY, BUZZ_ACP_API_TOKEN),
     // which `merged_user_env` strips. Those carry Buzz's identity and must
     // never be GUI-overridable.
-    for (key, value) in
-        super::env_vars::merged_user_env(&std::collections::BTreeMap::new(), &record.env_vars)
-    {
+    for (key, value) in super::env_vars::merged_user_env(
+        &super::env_vars::live_persona_env(&personas, record.persona_id.as_deref()),
+        &record.env_vars,
+    ) {
         command.env(key, value);
     }
 

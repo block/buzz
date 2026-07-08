@@ -255,19 +255,20 @@ async fn start_local_agent_with_preflight(
         return Err(format!("agent {pubkey} is no longer a local agent"));
     }
     // Re-snapshot the persona onto the record at every spawn so the agent always
-    // starts with the current persona config (system_prompt, model, provider,
-    // env_vars). This clears the "out of date" drift badge without requiring a
-    // delete+recreate. Agent-level env_vars overrides still win (persona_snapshot
-    // layers persona env under agent overrides). When the persona leaves model or
-    // provider blank, the agent record's own configured values are preserved so a
-    // user-set model/provider is never clobbered by an unconfigured persona.
+    // starts with the current persona config (system_prompt, model, provider).
+    // This clears the "out of date" drift badge without requiring a
+    // delete+recreate. `record.env_vars` is NOT rewritten: it holds agent-level
+    // overrides only, and spawn merges the live persona env underneath at read
+    // time — so persona env edits refresh here too. When the persona leaves
+    // model or provider blank, the agent record's own configured values are
+    // preserved so a user-set model/provider is never clobbered by an
+    // unconfigured persona.
     if let Some(persona_id) = record.persona_id.clone() {
         let personas = load_personas(app).unwrap_or_default();
         if let Some(persona) = personas.iter().find(|p| p.id == persona_id) {
             let snapshot =
                 crate::managed_agents::persona_events::persona_snapshot_with_agent_config_fallback(
                     persona,
-                    &record.env_vars,
                     record.model.as_deref(),    // fallback: record.model
                     record.provider.as_deref(), // fallback: record.provider
                 );
@@ -276,7 +277,14 @@ async fn start_local_agent_with_preflight(
             }
             record.model = snapshot.model;
             record.provider = snapshot.provider;
-            record.env_vars = snapshot.env_vars;
+            // Self-heal records written before env refresh: persona env used to
+            // be baked into `record.env_vars` at create/spawn, turning inherited
+            // values into pseudo-overrides that shadow later persona edits. An
+            // override equal to the persona's current value is indistinguishable
+            // from inheritance, so drop it and let the live merge supply it.
+            record
+                .env_vars
+                .retain(|k, v| persona.env_vars.get(k) != Some(v));
             record.persona_source_version = Some(snapshot.source_version);
             record.updated_at = crate::util::now_iso();
         }
@@ -296,8 +304,7 @@ async fn start_local_agent_with_preflight(
 
 /// Build the standard agent JSON payload for provider deploy calls.
 ///
-/// Unlike local spawn (which uses only pinned `record.env_vars` for
-/// determinism), provider deploy re-reads live persona env vars and
+/// Like local spawn, provider deploy re-reads live persona env vars and
 /// structured model/provider so remote agents receive current credentials
 /// and the same authoritative values that local spawn derives from
 /// `runtime_metadata_env_vars`. The only field still pinned is
@@ -322,11 +329,10 @@ fn build_deploy_payload(
         return Err(err);
     }
 
-    // Merge persona env_vars + agent env_vars for provider deploy. Provider
-    // deploy re-reads live persona env vars so remote agents receive current
-    // credentials; local spawn uses only pinned record.env_vars for determinism
-    // across restarts. Without this, provider-backed agents wouldn't receive
-    // credentials saved on the persona or the agent itself.
+    // Merge persona env_vars + agent env_vars for provider deploy — the same
+    // live-persona-under-overrides semantics as local spawn. Without this,
+    // provider-backed agents wouldn't receive credentials saved on the persona
+    // or the agent itself.
     let persona_env =
         crate::managed_agents::resolve_persona_env(app, record.persona_id.as_deref())?;
     let merged_env = crate::managed_agents::merged_user_env(&persona_env, &record.env_vars);
@@ -733,20 +739,16 @@ pub async fn create_managed_agent(
         // and deploy read these snapshotted fields, never the live persona, so
         // the agent stays on the config it was created with across restarts;
         // delete+respawn re-runs create and rewrites the snapshot. env_vars are
-        // pinned too — without that, persona credential edits would leak into a
-        // running agent on restart. Agent-level env overrides (input.env_vars)
-        // layer on top, matching spawn precedence (persona env < agent env).
+        // NOT pinned: `record.env_vars` holds agent-level overrides only
+        // (input.env_vars), and the live persona env is merged underneath at
+        // read time (spawn / readiness / deploy) so persona credential edits
+        // refresh on the next spawn like prompt/model/provider already do.
         let persona_snapshot = requested_persona_id.as_deref().and_then(|pid| {
             load_personas(&app)
                 .ok()?
                 .into_iter()
                 .find(|persona| persona.id == pid)
-                .map(|persona| {
-                    crate::managed_agents::persona_events::persona_snapshot(
-                        &persona,
-                        &input.env_vars,
-                    )
-                })
+                .map(|persona| crate::managed_agents::persona_events::persona_snapshot(&persona))
         });
         let snapshot_prompt = persona_snapshot
             .as_ref()
@@ -754,9 +756,6 @@ pub async fn create_managed_agent(
         let snapshot_model = persona_snapshot.as_ref().and_then(|s| s.model.clone());
         let snapshot_provider = persona_snapshot.as_ref().and_then(|s| s.provider.clone());
         let snapshot_source_version = persona_snapshot.as_ref().map(|s| s.source_version.clone());
-        let snapshot_env_vars = persona_snapshot
-            .map(|s| s.env_vars)
-            .unwrap_or_else(|| input.env_vars.clone());
 
         let record = crate::managed_agents::ManagedAgentRecord {
             pubkey: pubkey.clone(),
@@ -834,7 +833,7 @@ pub async fn create_managed_agent(
             // NOT the display_name — ACP's resolve_persona_by_name() matches slugs.
             persona_team_dir: pack_metadata.as_ref().map(|(path, _)| path.clone()),
             persona_name_in_team: pack_metadata.as_ref().map(|(_, name)| name.clone()),
-            env_vars: snapshot_env_vars,
+            env_vars: input.env_vars.clone(),
             created_at: now_iso(),
             updated_at: now_iso(),
             last_started_at: None,

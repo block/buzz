@@ -300,12 +300,26 @@ pub(crate) fn merged_user_env(
     merged
 }
 
-/// Resolve live env_vars for a linked persona.
+/// Look up the live env map of `persona_id` within an already-loaded persona
+/// slice. Returns an empty map for standalone agents (`None`) and for links
+/// to personas that no longer exist (an orphaned agent spawns from its own
+/// overrides alone — same fallback the prompt/model resolution uses).
+pub(crate) fn live_persona_env(
+    personas: &[super::types::PersonaRecord],
+    persona_id: Option<&str>,
+) -> BTreeMap<String, String> {
+    persona_id
+        .and_then(|pid| personas.iter().find(|p| p.id == pid))
+        .map(|p| p.env_vars.clone())
+        .unwrap_or_default()
+}
+
+/// Resolve live env_vars for a linked persona, loading personas from disk.
 ///
 /// Returns the persona's `env_vars` map if a persona_id is provided and found;
-/// returns an empty map if no persona is linked or the persona is not found.
-/// Used by the provider deploy path so remote agents receive current credentials;
-/// local spawn uses only the pinned `record.env_vars` for determinism.
+/// returns an empty map if no persona is linked. Errors if the linked persona
+/// is missing. Used by the provider deploy path, which has no pre-loaded
+/// persona slice.
 pub(crate) fn resolve_persona_env(
     app: &tauri::AppHandle,
     persona_id: Option<&str>,

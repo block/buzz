@@ -29,8 +29,9 @@
 //! 2. Runtime metadata env vars (`runtime_metadata_env_vars`) — provider /
 //!    model env keys derived from the record's `model`/`provider` fields and
 //!    the runtime's `model_env_var`/`provider_env_var`.
-//! 3. Merged user env (`merged_user_env`) — the record's `env_vars` after
-//!    reserved-key and malformed-key filtering.  Last-wins on collision.
+//! 3. Merged user env (`merged_user_env`) — live persona env under the
+//!    record's `env_vars` overrides, after reserved-key and malformed-key
+//!    filtering.  Last-wins on collision.
 //!
 //! The config-file tier (Goose `~/.config/goose/config.yaml`) is tracked
 //! separately because it is not part of the process env — the harness reads
@@ -106,9 +107,14 @@ pub(crate) fn resolve_effective_agent_env(
         }
     }
 
-    // Layer 3: merged user env (agent env_vars after reserved/malformed-key
-    // filtering; last-wins on collision).
-    let user_env = merged_user_env(&BTreeMap::new(), &record.env_vars);
+    // Layer 3: merged user env — live persona env under the record's own
+    // overrides (last-wins), after reserved/malformed-key filtering. Reading
+    // the persona live is what makes persona credential edits refresh on the
+    // next spawn instead of being frozen into the record.
+    let user_env = merged_user_env(
+        &super::env_vars::live_persona_env(personas, record.persona_id.as_deref()),
+        &record.env_vars,
+    );
     env.extend(user_env);
 
     EffectiveAgentEnv {

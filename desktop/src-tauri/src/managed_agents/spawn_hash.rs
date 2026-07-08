@@ -50,7 +50,6 @@ pub(crate) fn spawn_config_hash(
         if let Some(persona) = personas.iter().find(|p| p.id == persona_id) {
             let snapshot = persona_snapshot_with_agent_config_fallback(
                 persona,
-                &record.env_vars,
                 record.model.as_deref(),
                 record.provider.as_deref(),
             );
@@ -59,7 +58,12 @@ pub(crate) fn spawn_config_hash(
             }
             record.model = snapshot.model;
             record.provider = snapshot.provider;
-            record.env_vars = snapshot.env_vars;
+            // Mirror the start/restore self-heal: overrides equal to the live
+            // persona value are treated as inherited. The persona env itself
+            // reaches the hash through `resolve_effective_agent_env` below.
+            record
+                .env_vars
+                .retain(|k, v| persona.env_vars.get(k) != Some(v));
         }
     }
     let record = &record;
