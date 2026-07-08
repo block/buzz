@@ -386,3 +386,69 @@ test("buildCompactToolSummary trims only trailing blank diff lines", () => {
     { kind: "add", text: "+const after = true;" },
   ]);
 });
+
+test("buildCompactToolSummary prefers the ACP summaryTitle over the classifier label", () => {
+  const summary = buildCompactToolSummary(
+    makeTool({
+      toolName: "developer__shell",
+      args: { command: "git status" },
+      summaryTitle: "checking repository state",
+    }),
+    { summaryTitleEnabled: true },
+  );
+
+  assert.equal(summary.label, "checking repository state");
+});
+
+test("buildCompactToolSummary ignores the ACP summaryTitle when the experiment is off", () => {
+  // Default (no options) and explicit false are both the off state: the
+  // friendly phrase never reaches the label and the raw classifier wins.
+  const byDefault = buildCompactToolSummary(
+    makeTool({
+      toolName: "developer__shell",
+      args: { command: "git status" },
+      summaryTitle: "checking repository state",
+    }),
+  );
+  const explicitOff = buildCompactToolSummary(
+    makeTool({
+      toolName: "developer__shell",
+      args: { command: "git status" },
+      summaryTitle: "checking repository state",
+    }),
+    { summaryTitleEnabled: false },
+  );
+
+  assert.equal(byDefault.label, "Ran command");
+  assert.equal(byDefault.summaryTitle, null);
+  assert.equal(explicitOff.label, "Ran command");
+  assert.equal(explicitOff.summaryTitle, null);
+});
+
+test("buildCompactToolSummary lets failure labels win over the ACP summaryTitle", () => {
+  const summary = buildCompactToolSummary(
+    makeTool({
+      toolName: "developer__shell",
+      args: { command: "false" },
+      status: "failed",
+      isError: true,
+      summaryTitle: "running a quick command",
+    }),
+    { summaryTitleEnabled: true },
+  );
+
+  assert.match(summary.label, /failed$/);
+});
+
+test("buildCompactToolSummary falls back to the classifier when summaryTitle is blank", () => {
+  const summary = buildCompactToolSummary(
+    makeTool({
+      toolName: "shell",
+      args: { command: "echo hi" },
+      summaryTitle: "   ",
+    }),
+    { summaryTitleEnabled: true },
+  );
+
+  assert.equal(summary.label, "Ran command");
+});

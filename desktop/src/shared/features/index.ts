@@ -1,6 +1,7 @@
 export { FeatureGate } from "./FeatureGate";
 export { allFeatures, desktopFeatures, getFeature, manifest } from "./manifest";
 export { getOverrides, setOverride, clearOverride } from "./store";
+export { useDesktopExperimentsMirror } from "./useDesktopExperimentsMirror";
 export type {
   FeatureDefinition,
   FeaturesManifest,

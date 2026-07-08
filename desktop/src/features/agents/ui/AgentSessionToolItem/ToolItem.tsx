@@ -4,6 +4,7 @@ import {
   resolveUserLabel,
   type UserProfileLookup,
 } from "@/features/profile/lib/identity";
+import { useFeatureEnabled } from "@/shared/features";
 import { cn } from "@/shared/lib/cn";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import type { TranscriptItem } from "../agentSessionTypes";
@@ -38,7 +39,10 @@ export function ToolItem({
   const hasResult = item.result.trim().length > 0;
   const canonicalToolName = item.buzzToolName ?? item.toolName;
   const buzzTool = getBuzzToolInfo(canonicalToolName);
-  const compactSummary = buildCompactToolSummary(item);
+  // Preview experiment: friendly ACP summary titles only paint when the
+  // user opted in. Off (default) keeps the raw classifier/status labels.
+  const summaryTitleEnabled = useFeatureEnabled("acpToolSummaries");
+  const compactSummary = buildCompactToolSummary(item, { summaryTitleEnabled });
   const duration = getToolDurationDisplay(item);
   const messageLink = getSentMessageLink(item);
   const timestampTitle = formatTranscriptTimestampTitle(item.timestamp);
@@ -120,9 +124,11 @@ export function ToolItem({
           <CompactToolSummaryRow
             action={compactSummary.action}
             duration={duration}
+            failed={compactSummary.failed}
             fileEditSummary={compactSummary.fileEditSummary}
             kind={compactSummary.kind}
             preview={compactSummary.preview}
+            summaryTitle={compactSummary.summaryTitle}
             thumbnailSrc={compactSummary.thumbnailSrc}
             label={compactSummary.label}
           />

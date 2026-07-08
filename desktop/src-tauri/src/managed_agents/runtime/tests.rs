@@ -660,3 +660,54 @@ fn grandchild_inherits_pgid_of_process_group_leader() {
     unsafe { libc::kill(-harness_pid, libc::SIGTERM) };
     let _ = harness.wait();
 }
+
+// ── apply_tool_summary_gate tests ───────────────────────────────────────
+//
+// The acpToolSummaries experiment gate: off-spawns must carry the buzz-agent
+// kill switch so disabled agents never spend the async LLM summary call;
+// on-spawns must leave the env alone.
+
+fn command_env(command: &std::process::Command, key: &str) -> Option<String> {
+    command.get_envs().find_map(|(k, v)| {
+        (k == key).then(|| {
+            v.map(|v| v.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        })
+    })
+}
+
+#[test]
+fn tool_summary_gate_off_sets_kill_switch() {
+    let mut command = std::process::Command::new("true");
+    super::apply_tool_summary_gate(&mut command, false);
+    assert_eq!(
+        command_env(&command, "BUZZ_AGENT_NO_TOOL_SUMMARY").as_deref(),
+        Some("1"),
+        "experiment-off spawn must carry the tool-summary kill switch"
+    );
+}
+
+#[test]
+fn tool_summary_gate_on_leaves_env_untouched() {
+    let mut command = std::process::Command::new("true");
+    super::apply_tool_summary_gate(&mut command, true);
+    assert_eq!(
+        command_env(&command, "BUZZ_AGENT_NO_TOOL_SUMMARY"),
+        None,
+        "experiment-on spawn must not set the kill switch"
+    );
+}
+
+#[test]
+fn tool_summary_gate_on_preserves_user_opt_out() {
+    // A user-provided kill switch (record env vars, written before the gate)
+    // must survive the experiment-on path untouched.
+    let mut command = std::process::Command::new("true");
+    command.env("BUZZ_AGENT_NO_TOOL_SUMMARY", "1");
+    super::apply_tool_summary_gate(&mut command, true);
+    assert_eq!(
+        command_env(&command, "BUZZ_AGENT_NO_TOOL_SUMMARY").as_deref(),
+        Some("1"),
+        "user opt-out must win even when the experiment is on"
+    );
+}

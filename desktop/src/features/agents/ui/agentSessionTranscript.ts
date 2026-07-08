@@ -19,6 +19,7 @@ import {
   extractBlockText,
   extractContentText,
   extractPromptText,
+  extractBuzzToolSummaryTitle,
   extractTriggeringEventIds,
   extractToolArgs,
   extractToolIdentity,
@@ -594,6 +595,22 @@ function isTerminalToolStatus(status: ToolStatus) {
   return status === "completed" || status === "failed";
 }
 
+/**
+ * Attach a Buzz ACP friendly title to an existing tool row without touching
+ * status, args, result, or timestamps — the receipts stay exactly as
+ * ingested. A summary arriving before its tool_call (out-of-order wire
+ * delivery) is dropped; the deterministic title still renders.
+ */
+function applyToolSummaryTitle(
+  d: TranscriptDraft,
+  id: string,
+  summaryTitle: string,
+) {
+  const existing = d.itemsById.get(id);
+  if (existing?.type !== "tool") return;
+  replaceItem(d, id, { ...existing, summaryTitle });
+}
+
 function mergeToolStatus(existing: ToolStatus, next: ToolStatus): ToolStatus {
   if (isTerminalToolStatus(existing) && !isTerminalToolStatus(next)) {
     return existing;
@@ -991,24 +1008,34 @@ export function processTranscriptEvent(
         );
       } else if (updateType === "tool_call_update") {
         const toolId = asString(update.toolCallId) ?? `tool:${event.seq}`;
-        const status = normalizeToolStatus(
-          asString(update.status) ?? "completed",
-        );
-        const identity = extractToolIdentity(update);
-        upsertTool(
-          d,
-          `tool:${ch}:${toolId}`,
-          identity.title,
-          identity.toolName,
-          identity.buzzToolName,
-          status,
-          extractToolArgs(update),
-          extractToolResult(update),
-          status === "failed",
-          event.timestamp,
-          ctx,
-          updateType,
-        );
+        const summaryTitle = extractBuzzToolSummaryTitle(update);
+        if (summaryTitle !== null) {
+          // Buzz ACP friendly-title pass: a title-only update tagged
+          // `_meta.buzz.toolSummary`. It intentionally carries no status —
+          // routing it through upsertTool would default the status to
+          // "completed" and could clobber a pending/executing row, so it
+          // only ever sets summaryTitle.
+          applyToolSummaryTitle(d, `tool:${ch}:${toolId}`, summaryTitle);
+        } else {
+          const status = normalizeToolStatus(
+            asString(update.status) ?? "completed",
+          );
+          const identity = extractToolIdentity(update);
+          upsertTool(
+            d,
+            `tool:${ch}:${toolId}`,
+            identity.title,
+            identity.toolName,
+            identity.buzzToolName,
+            status,
+            extractToolArgs(update),
+            extractToolResult(update),
+            status === "failed",
+            event.timestamp,
+            ctx,
+            updateType,
+          );
+        }
       } else if (updateType === "plan") {
         upsertPlan(
           d,

@@ -281,6 +281,22 @@ export function extractToolResult(update: Record<string, unknown>): string {
   return extractBlockText(update.rawOutput);
 }
 
+/**
+ * Extract the friendly title from a Buzz ACP tool-summary update — a
+ * `tool_call_update` tagged `_meta.buzz.toolSummary: true`. Returns `null`
+ * for ordinary updates (including all older/raw events, which never carry
+ * the marker).
+ */
+export function extractBuzzToolSummaryTitle(
+  update: Record<string, unknown>,
+): string | null {
+  const meta = asRecord(update._meta);
+  const buzz = asRecord(meta.buzz);
+  if (buzz.toolSummary !== true) return null;
+  const title = asString(update.title)?.trim();
+  return title ? title : null;
+}
+
 export function extractTriggeringEventIds(payload: unknown): string[] {
   const record = asRecord(payload);
   return Array.isArray(record.triggeringEventIds)

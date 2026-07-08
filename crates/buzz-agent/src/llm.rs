@@ -1193,6 +1193,8 @@ mod tests {
             openai_api: OpenAiApi::Chat,
             hints_enabled: true,
             thinking_effort: None,
+            tool_summary_enabled: false,
+            tool_summary_model: None,
         }
     }
 

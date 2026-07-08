@@ -1232,3 +1232,104 @@ test("steer ingress bundles its prompt context into the steer prompt segment, no
     "steer context must not leak as a standalone metadata row",
   );
 });
+
+// --- Buzz ACP friendly tool titles (_meta.buzz.toolSummary) ---
+
+test("a later ACP tool-summary update improves the row label without touching status or receipts", () => {
+  const [item] = toolItems([
+    acpToolUpdate(200, {
+      sessionUpdate: "tool_call",
+      toolCallId: "call-summary",
+      status: "executing",
+      title: "developer: shell · git status",
+      toolName: "developer__shell",
+      kind: "shell",
+      rawInput: { command: "git status" },
+    }),
+    acpToolUpdate(201, {
+      sessionUpdate: "tool_call_update",
+      toolCallId: "call-summary",
+      title: "checking repository state",
+      toolName: "developer__shell",
+      _meta: { buzz: { toolSummary: true } },
+    }),
+  ]);
+
+  assert.equal(item.summaryTitle, "checking repository state");
+  // The summary update carries no status — the row must stay executing.
+  assert.equal(item.status, "executing");
+  // Receipts intact: exact command still available for the expanded view.
+  assert.deepEqual(item.args, { command: "git status" });
+  // Existing normalizeToolName behavior collapses the server separator;
+  // identity is preserved either way.
+  assert.equal(item.toolName, "developer_shell");
+});
+
+test("an ACP tool-summary update never clobbers a terminal failed row", () => {
+  const [item] = toolItems([
+    acpToolUpdate(210, {
+      sessionUpdate: "tool_call",
+      toolCallId: "call-summary-fail",
+      status: "executing",
+      title: "shell",
+      kind: "shell",
+      rawInput: { command: "false" },
+    }),
+    acpToolUpdate(211, {
+      sessionUpdate: "tool_call_update",
+      toolCallId: "call-summary-fail",
+      status: "failed",
+      title: "shell",
+      kind: "shell",
+      rawOutput: { error: "exit 1" },
+    }),
+    acpToolUpdate(212, {
+      sessionUpdate: "tool_call_update",
+      toolCallId: "call-summary-fail",
+      title: "running a quick command",
+      _meta: { buzz: { toolSummary: true } },
+    }),
+  ]);
+
+  assert.equal(item.status, "failed");
+  assert.equal(item.isError, true);
+  assert.equal(item.summaryTitle, "running a quick command");
+});
+
+test("older/raw tool_call_update events without the toolSummary marker keep today's ingestion path", () => {
+  const [item] = toolItems([
+    acpToolUpdate(220, {
+      sessionUpdate: "tool_call",
+      toolCallId: "call-legacy",
+      status: "executing",
+      title: "shell",
+      kind: "shell",
+      rawInput: { command: "echo hi" },
+    }),
+    acpToolUpdate(221, {
+      sessionUpdate: "tool_call_update",
+      toolCallId: "call-legacy",
+      status: "completed",
+      title: "shell",
+      kind: "shell",
+      rawOutput: "hi",
+    }),
+  ]);
+
+  assert.equal(item.summaryTitle, undefined);
+  assert.equal(item.status, "completed");
+  assert.equal(item.result, "hi");
+});
+
+test("a tool-summary update arriving before its tool_call is dropped, not rendered as a phantom row", () => {
+  const items = toolItems([
+    acpToolUpdate(230, {
+      sessionUpdate: "tool_call_update",
+      toolCallId: "call-orphan-summary",
+      title: "doing something",
+      _meta: { buzz: { toolSummary: true } },
+    }),
+  ]);
+
+  assert.equal(items.length, 0);
+});

@@ -4,11 +4,23 @@ use crate::{
     app_state::AppState,
     managed_agents::{
         build_managed_agent_summary, current_instance_id, find_managed_agent_mut,
-        load_managed_agents, load_personas, save_managed_agents, sync_managed_agent_processes,
-        ManagedAgentSummary,
+        load_managed_agents, load_personas, save_experiments, save_managed_agents,
+        sync_managed_agent_processes, ManagedAgentSummary,
     },
     util::now_iso,
 };
+
+/// Mirror the frontend preview-experiment overrides to disk so spawn-time
+/// code (which cannot read the webview's localStorage) can consult them.
+/// The frontend calls this on boot and on every experiment toggle. See
+/// `managed_agents::experiments` for read-side semantics (unknown = off).
+#[tauri::command]
+pub fn set_desktop_experiments(
+    experiments: std::collections::BTreeMap<String, bool>,
+    app: AppHandle,
+) -> Result<(), String> {
+    save_experiments(&app, &experiments)
+}
 
 #[tauri::command]
 pub fn set_managed_agent_start_on_app_launch(

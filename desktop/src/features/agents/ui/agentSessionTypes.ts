@@ -129,6 +129,13 @@ export type TranscriptItem =
       title: string;
       toolName: string;
       buzzToolName: string | null;
+      /**
+       * Friendly per-tool phrase published by the agent runtime as a
+       * title-only `tool_call_update` tagged `_meta.buzz.toolSummary`.
+       * Preferred as the row label; the classifier label remains the
+       * fallback and failure labels always win.
+       */
+      summaryTitle?: string | null;
       status: ToolStatus;
       args: Record<string, unknown>;
       result: string;

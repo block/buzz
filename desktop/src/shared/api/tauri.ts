@@ -1163,6 +1163,17 @@ export async function createManagedAgent(input: CreateManagedAgentInput) {
   };
 }
 
+/**
+ * Mirror the preview-experiment overrides to the Rust side so agent
+ * spawn-time code (which cannot read localStorage) can consult them.
+ * Called on app boot and on every experiment toggle.
+ */
+export async function setDesktopExperiments(
+  experiments: Record<string, boolean>,
+): Promise<void> {
+  await invokeTauri<void>("set_desktop_experiments", { experiments });
+}
+
 export async function deleteManagedAgent(
   pubkey: string,
   forceRemoteDelete?: boolean,

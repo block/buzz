@@ -49,6 +49,22 @@ test("getActivityHeadline formats tool titles and assistant text", () => {
   assert.equal(getActivityHeadline(makeMessage({ text: "   " })), "Responding");
 });
 
+test("getActivityHeadline gates the friendly summaryTitle on the experiment", () => {
+  const tool = makeTool({ summaryTitle: "sending a status update" });
+
+  // Off (default): raw tool label, friendly phrase never consulted.
+  assert.equal(getActivityHeadline(tool), "Send Message · abc");
+  assert.equal(
+    getActivityHeadline(tool, { summaryTitleEnabled: false }),
+    "Send Message · abc",
+  );
+  // On: friendly phrase wins the headline.
+  assert.equal(
+    getActivityHeadline(tool, { summaryTitleEnabled: true }),
+    "sending a status update · abc",
+  );
+});
+
 test("isMeaningfulItem ignores lifecycle noise and raw JSON-RPC metadata", () => {
   assert.equal(
     isMeaningfulItem({

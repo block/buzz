@@ -28,7 +28,7 @@ pub struct RunCtx<'a> {
     pub effective_model: &'a str,
     pub session_id: &'a str,
     pub system_prompt: &'a str,
-    pub llm: &'a Llm,
+    pub llm: &'a Arc<Llm>,
     pub mcp: &'a Arc<McpRegistry>,
     /// Skills discovered at session creation; used by the built-in `load_skill` tool.
     pub skills: &'a [SkillEntry],
@@ -333,6 +333,20 @@ impl RunCtx<'_> {
                 results[idx] = Some(synthetic_tool_result(call, err));
                 continue;
             }
+            // Second stage of the friendly-title flow: fire-and-forget fast
+            // summarization for real (runnable) tool calls only — fast-failed
+            // and built-in calls keep their deterministic title.
+            if self.cfg.tool_summary_enabled {
+                spawn_tool_summary(
+                    Arc::clone(self.llm),
+                    self.cfg.clone(),
+                    self.effective_model.to_owned(),
+                    self.wire.clone(),
+                    self.session_id.to_owned(),
+                    call.clone(),
+                    self.cancel.clone(),
+                );
+            }
             runnable.push(idx);
         }
 
@@ -557,7 +571,11 @@ async fn emit_pending(wire: &WireSender, sid: &str, call: &ToolCall) {
             json!({
                 "sessionUpdate": "tool_call",
                 "toolCallId": call.provider_id,
-                "title": call.name,
+                // Deterministic friendly title, available immediately. The
+                // exact tool identity rides alongside in `toolName` so
+                // clients never lose it to the friendlier phrasing.
+                "title": friendly_tool_title(&call.name, &call.arguments),
+                "toolName": call.name,
                 "kind": "other",
                 "status": "pending",
                 "rawInput": call.arguments,
@@ -565,6 +583,175 @@ async fn emit_pending(wire: &WireSender, sid: &str, call: &ToolCall) {
         ),
     )
     .await;
+}
+
+/// Format a qualified tool name (`server__tool`) as a human-readable base
+/// label. Mirrors goose's `format_tool_name`.
+fn format_tool_name(tool_name: &str) -> String {
+    if let Some((server, tool)) = tool_name.split_once("__") {
+        format!("{}: {}", server.replace('_', " "), tool.replace('_', " "))
+    } else {
+        tool_name.replace('_', " ")
+    }
+}
+
+/// Build a short deterministic title from the tool name plus the most useful
+/// argument value (file path, command, query, url, etc.). Port of goose's
+/// `summarize_tool_call` fallback-title builder.
+fn friendly_tool_title(tool_name: &str, arguments: &serde_json::Value) -> String {
+    const DETAIL_KEYS: [&str; 9] = [
+        "path", "file", "command", "query", "url", "uri", "name", "pattern", "source",
+    ];
+    const MAX_DETAIL_CHARS: usize = 60;
+
+    let base = format_tool_name(tool_name);
+    let detail = arguments.as_object().and_then(|obj| {
+        for key in &DETAIL_KEYS {
+            if let Some(v) = obj.get(*key) {
+                let s = match v {
+                    serde_json::Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                };
+                if !s.is_empty() {
+                    let first_line = s.lines().next().unwrap_or(&s);
+                    let mut out: String = first_line.chars().take(MAX_DETAIL_CHARS).collect();
+                    if first_line.chars().count() > MAX_DETAIL_CHARS {
+                        out.push('…');
+                    }
+                    return Some(out);
+                }
+            }
+        }
+        None
+    });
+    match detail {
+        Some(d) => format!("{base} · {d}"),
+        None => base,
+    }
+}
+
+const TOOL_SUMMARY_SYSTEM_PROMPT: &str =
+    "Summarize this tool call in a short lowercase phrase (3-8 words). \
+     No punctuation. No quotes. Examples: reading project configuration, \
+     checking network connectivity, listing files in src directory";
+
+/// Max output tokens for a tool-title summary — a short phrase, not prose.
+const TOOL_SUMMARY_MAX_OUTPUT_TOKENS: u32 = 64;
+
+/// Cap on the serialized-arguments excerpt sent to the fast model.
+const TOOL_SUMMARY_MAX_ARGS_CHARS: usize = 300;
+
+/// Cap on the accepted summary phrase; longer responses are rejected as
+/// non-conforming rather than truncated mid-thought.
+const TOOL_SUMMARY_MAX_TITLE_CHARS: usize = 80;
+
+/// Normalize a fast-model response into a row-label phrase, or `None` when
+/// the response is unusable (empty, multi-paragraph rambling, oversized).
+fn sanitize_tool_summary(raw: &str) -> Option<String> {
+    let first_line = raw.trim().lines().next()?.trim();
+    let cleaned = first_line.trim_matches(|c| c == '"' || c == '\'' || c == '`');
+    if cleaned.is_empty() || cleaned.chars().count() > TOOL_SUMMARY_MAX_TITLE_CHARS {
+        return None;
+    }
+    Some(cleaned.to_string())
+}
+
+/// Fire-and-forget fast summarization pass for one tool call (goose's
+/// two-stage title pattern). Publishes a title-only `tool_call_update`
+/// tagged `_meta.buzz.toolSummary` — deliberately no `status` field, so a
+/// late summary can never clobber pending/executing/terminal state. Failures
+/// are silent: the deterministic title from `emit_pending` stays.
+fn spawn_tool_summary(
+    llm: Arc<Llm>,
+    cfg: Config,
+    model: String,
+    wire: WireSender,
+    sid: String,
+    call: ToolCall,
+    cancel: watch::Receiver<bool>,
+) {
+    tokio::spawn(async move {
+        let args_json = {
+            let s = call.arguments.to_string();
+            if s.chars().count() > TOOL_SUMMARY_MAX_ARGS_CHARS {
+                let mut t: String = s.chars().take(TOOL_SUMMARY_MAX_ARGS_CHARS).collect();
+                t.push('…');
+                t
+            } else {
+                s
+            }
+        };
+        let user_prompt = format!("Tool: {}\nArguments: {args_json}", call.name);
+        let effective_model = cfg.tool_summary_model.as_deref().unwrap_or(&model);
+
+        // The fast model occasionally returns an empty/errored response under
+        // load. One retry with a short backoff recovers the common cases.
+        let mut title: Option<String> = None;
+        for attempt in 0..2 {
+            if *cancel.borrow() {
+                return;
+            }
+            match llm
+                .summarize(
+                    &cfg,
+                    TOOL_SUMMARY_SYSTEM_PROMPT,
+                    &user_prompt,
+                    TOOL_SUMMARY_MAX_OUTPUT_TOKENS,
+                    effective_model,
+                )
+                .await
+            {
+                Ok(s) => {
+                    if let Some(clean) = sanitize_tool_summary(&s) {
+                        title = Some(clean);
+                        break;
+                    }
+                    if attempt == 0 {
+                        tracing::debug!(
+                            "tool summary: empty/unusable response for {} ({}), retrying once",
+                            call.provider_id,
+                            call.name
+                        );
+                        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                    }
+                }
+                Err(e) => {
+                    if attempt == 0 {
+                        tracing::debug!(
+                            "tool summary: fast pass errored for {} ({}): {e}, retrying once",
+                            call.provider_id,
+                            call.name
+                        );
+                        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                    } else {
+                        tracing::debug!(
+                            "tool summary: fast pass errored for {} ({}) after retry: {e}",
+                            call.provider_id,
+                            call.name
+                        );
+                    }
+                }
+            }
+        }
+        let Some(title) = title else { return };
+        if *cancel.borrow() {
+            return;
+        }
+        wire::send(
+            &wire,
+            wire::session_update(
+                &sid,
+                json!({
+                    "sessionUpdate": "tool_call_update",
+                    "toolCallId": call.provider_id,
+                    "title": title,
+                    "toolName": call.name,
+                    "_meta": { "buzz": { "toolSummary": true } },
+                }),
+            ),
+        )
+        .await;
+    });
 }
 
 async fn emit_in_progress(wire: &WireSender, sid: &str, call: &ToolCall) {
@@ -742,5 +929,74 @@ fn map_stop(p: ProviderStop) -> StopReason {
         ProviderStop::EndTurn | ProviderStop::ToolUse | ProviderStop::Other => StopReason::EndTurn,
         ProviderStop::MaxTokens => StopReason::MaxTokens,
         ProviderStop::Refusal => StopReason::Refusal,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{friendly_tool_title, sanitize_tool_summary};
+    use serde_json::json;
+
+    #[test]
+    fn friendly_title_formats_qualified_name_with_detail() {
+        assert_eq!(
+            friendly_tool_title("developer__shell", &json!({ "command": "git status" })),
+            "developer: shell · git status"
+        );
+    }
+
+    #[test]
+    fn friendly_title_prefers_path_over_later_keys() {
+        assert_eq!(
+            friendly_tool_title(
+                "fs__read_file",
+                &json!({ "name": "x", "path": "/tmp/a.txt" })
+            ),
+            "fs: read file · /tmp/a.txt"
+        );
+    }
+
+    #[test]
+    fn friendly_title_without_useful_args_is_just_the_name() {
+        assert_eq!(friendly_tool_title("do_thing", &json!({})), "do thing");
+        assert_eq!(friendly_tool_title("do_thing", &json!(null)), "do thing");
+    }
+
+    #[test]
+    fn friendly_title_truncates_long_first_line_only() {
+        let long = "x".repeat(200);
+        let title = friendly_tool_title("t", &json!({ "command": format!("{long}\nsecond") }));
+        assert!(title.ends_with('…'));
+        // "t · " + 60 chars + ellipsis.
+        assert_eq!(title.chars().count(), 4 + 60 + 1);
+        assert!(!title.contains("second"));
+    }
+
+    #[test]
+    fn friendly_title_handles_multibyte_without_panicking() {
+        let title = friendly_tool_title("t", &json!({ "query": "héllo wörld 🚀".repeat(20) }));
+        assert!(title.starts_with("t · "));
+    }
+
+    #[test]
+    fn sanitize_accepts_short_phrase_and_strips_quotes() {
+        assert_eq!(
+            sanitize_tool_summary("\"checking repository state\"\n"),
+            Some("checking repository state".to_string())
+        );
+    }
+
+    #[test]
+    fn sanitize_rejects_empty_and_oversized() {
+        assert_eq!(sanitize_tool_summary("   \n  "), None);
+        assert_eq!(sanitize_tool_summary(&"x".repeat(200)), None);
+    }
+
+    #[test]
+    fn sanitize_keeps_only_first_line() {
+        assert_eq!(
+            sanitize_tool_summary("reading config\nextra rambling"),
+            Some("reading config".to_string())
+        );
     }
 }

@@ -1483,6 +1483,16 @@ pub(crate) fn build_respond_to_env(
     Ok((set, remove))
 }
 
+/// Apply the acpToolSummaries experiment gate to a spawn command's env.
+/// Experiment off → set the buzz-agent kill switch (`BUZZ_AGENT_NO_TOOL_SUMMARY=1`)
+/// so the child never spends the async LLM summary call. Experiment on →
+/// leave the env untouched (a user-provided kill switch still wins).
+fn apply_tool_summary_gate(command: &mut std::process::Command, experiment_enabled: bool) {
+    if !experiment_enabled {
+        command.env("BUZZ_AGENT_NO_TOOL_SUMMARY", "1");
+    }
+}
+
 /// Spawn an agent process without holding any locks on records or runtimes.
 /// Returns the child process and log path on success. The caller is responsible
 /// for updating `ManagedAgentRecord` fields and inserting into the runtimes map.
@@ -1832,6 +1842,19 @@ pub fn spawn_agent_child(
     ) {
         command.env(key, value);
     }
+
+    // ── acpToolSummaries preview experiment gate ────────────────────────
+    //
+    // When the experiment is OFF (default, including unknown state during
+    // app-startup restore), force the buzz-agent tool-summary kill switch so
+    // disabled agents never spend the async LLM summary call. Written AFTER
+    // user env so the off-state is authoritative. When the experiment is ON
+    // we leave the env untouched: summaries run, and a user-provided
+    // BUZZ_AGENT_NO_TOOL_SUMMARY=1 opt-out still wins.
+    apply_tool_summary_gate(
+        &mut command,
+        super::experiments::experiment_enabled(app, super::ACP_TOOL_SUMMARIES_EXPERIMENT),
+    );
 
     // Mark as Buzz-managed *and* which desktop instance owns us, so the
     // system-wide orphan sweep only reaps this instance's own agents and never

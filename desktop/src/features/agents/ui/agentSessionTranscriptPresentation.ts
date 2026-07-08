@@ -27,9 +27,14 @@ const LIFECYCLE_NOISE = new Set([
 ]);
 
 /** Human-readable headline for a single transcript item. */
-export function getActivityHeadline(item: TranscriptItem): string | null {
+export function getActivityHeadline(
+  item: TranscriptItem,
+  options?: { summaryTitleEnabled?: boolean },
+): string | null {
   if (item.type === "tool") {
-    const summary = buildCompactToolSummary(item);
+    const summary = buildCompactToolSummary(item, {
+      summaryTitleEnabled: options?.summaryTitleEnabled === true,
+    });
     return [summary.label, summary.preview].filter(Boolean).join(" · ");
   }
 

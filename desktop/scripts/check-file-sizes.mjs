@@ -105,7 +105,10 @@ const overrides = new Map([
   // +1 for agent_pubkey field in setup payload (config-nudge card wire).
   // persona-blank-fallback: resolve_effective_prompt_model_provider gains a
   // record_provider param + applies persona_field_with_record_fallback. +5 lines.
-  ["src-tauri/src/managed_agents/runtime.rs", 2213],
+  // acp-tool-summaries experiment gate: apply_tool_summary_gate helper +
+  // spawn-time kill-switch wiring (~23 lines incl. off/on env tests context).
+  // Load-bearing prod-safety gate, queued to split.
+  ["src-tauri/src/managed_agents/runtime.rs", 2236],
   // config-bridge setup-payload env-boundary fix adds readiness wiring in
   // spawn_agent_child; load-bearing security fix, queued to split.
   ["src-tauri/src/managed_agents/config_bridge/reader.rs", 1016],
@@ -133,7 +136,9 @@ const overrides = new Map([
   // baked-env-required-badge: getBakedBuildEnvKeys wrapper adds ~16 lines. Queued to split.
   // restart-badge: started the queued split — start/stopManagedAgent moved to
   // tauriManagedAgents.ts; limit ratcheted down 1388 → 1380 to bank the headroom.
-  ["src/shared/api/tauri.ts", 1380],
+  // acp-tool-summaries: setDesktopExperiments binding (+11 lines) mirrors
+  // preview-experiment overrides to Rust for spawn-time gating.
+  ["src/shared/api/tauri.ts", 1391],
   // readiness-gate: PersonaDialog.tsx threads computeLocalModeGate +
   // requiredCredentialEnvKeys + RequiredFieldLabel so the "New agent" dialog
   // shows required markers and credential amber rows (parity with
@@ -229,7 +234,12 @@ const overrides = new Map([
   // config_option_update) + replaceLifecycleItem helper for usage coalescing +
   // system-prompt ordering fix (turnId: null for per-channel items).
   // Load-bearing feature growth; queued to split in next transcript refactor.
-  ["src/features/agents/ui/agentSessionTranscript.ts", 1167],
+  // +24: Buzz ACP per-tool friendly titles — toolSummary-tagged
+  // tool_call_update ingestion (applyToolSummaryTitle) that must not route
+  // through upsertTool's status merge. Queued to split with the rest.
+  // +1: rebase auto-merge of main's steer-context bundling alongside the
+  // toolSummary ingestion — combined growth, same queued split.
+  ["src/features/agents/ui/agentSessionTranscript.ts", 1192],
   // catalog module; agent_models.rs retains the thin wrapper (~50 lines).
   // File still exceeds 1000 due to OpenAI/Anthropic discovery + subprocess
   // fallback. Queued to split into dedicated discovery modules.

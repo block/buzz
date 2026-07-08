@@ -40,6 +40,14 @@
       "platforms": [
         "desktop"
       ]
+    },
+    {
+      "id": "acpToolSummaries",
+      "name": "Friendly Tool Summaries",
+      "description": "Agent activity rows show intent-level summaries instead of raw tool commands",
+      "platforms": [
+        "desktop"
+      ]
     }
   ]
 }

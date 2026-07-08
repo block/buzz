@@ -70,7 +70,10 @@ import { useChannelStars } from "@/features/sidebar/lib/useChannelStars";
 import { useWorkspaces } from "@/features/workspaces/useWorkspaces";
 import { useApplyTemplate } from "@/features/channel-templates/useApplyTemplate";
 import { relayClient } from "@/shared/api/relayClient";
-import { useFeatureEnabled } from "@/shared/features";
+import {
+  useDesktopExperimentsMirror,
+  useFeatureEnabled,
+} from "@/shared/features";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import { useRelayAutoHeal } from "@/shared/api/useRelayAutoHeal";
 import { useDeferredStartup } from "@/shared/hooks/useDeferredStartup";
@@ -96,6 +99,8 @@ export function AppShell() {
   useWebviewZoomShortcuts();
   useTauriWindowDrag();
   useWebviewScrollBoundaryLock();
+  // Keep the Rust-side experiments mirror fresh for agent spawn gating.
+  useDesktopExperimentsMirror();
 
   const workspacesHook = useWorkspaces();
   const workspaceRailEnabled = useFeatureEnabled("workspaceRail");

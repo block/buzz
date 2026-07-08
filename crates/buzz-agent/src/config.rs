@@ -637,6 +637,15 @@ pub struct Config {
     /// Thinking/reasoning effort level. `None` = use provider default (no
     /// thinking config sent). Set via `BUZZ_AGENT_THINKING_EFFORT`.
     pub thinking_effort: Option<ThinkingEffort>,
+    /// Per-tool friendly title summarization: after emitting a tool call,
+    /// spawn a fast LLM pass that publishes a short human phrase as a
+    /// title-only `tool_call_update`. Default on; disable via
+    /// `BUZZ_AGENT_NO_TOOL_SUMMARY=1`.
+    pub tool_summary_enabled: bool,
+    /// Optional model override for tool title summaries (a cheaper/faster
+    /// model than the session model). Set via `BUZZ_AGENT_TOOL_SUMMARY_MODEL`;
+    /// `None` falls back to the session's effective model.
+    pub tool_summary_model: Option<String>,
 }
 
 impl Config {
@@ -731,6 +740,8 @@ impl Config {
             hook_servers: parse_hook_servers_env("MCP_HOOK_SERVERS"),
             hints_enabled: parse_env("BUZZ_AGENT_NO_HINTS", 0u8)? == 0,
             thinking_effort: parse_thinking_effort(env("BUZZ_AGENT_THINKING_EFFORT").as_deref())?,
+            tool_summary_enabled: parse_env("BUZZ_AGENT_NO_TOOL_SUMMARY", 0u8)? == 0,
+            tool_summary_model: env("BUZZ_AGENT_TOOL_SUMMARY_MODEL"),
         };
         cfg.validate()?;
         Ok(cfg)
@@ -771,6 +782,8 @@ impl Config {
             hook_servers: HookServers::None,
             hints_enabled: false,
             thinking_effort: None,
+            tool_summary_enabled: false,
+            tool_summary_model: None,
         }
     }
 

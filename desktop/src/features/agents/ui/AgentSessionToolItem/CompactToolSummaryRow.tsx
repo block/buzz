@@ -22,18 +22,22 @@ export function compactSummaryTone() {
 export function CompactToolSummaryRow({
   action,
   duration,
+  failed,
   fileEditSummary,
   kind,
   label,
   preview,
+  summaryTitle,
   thumbnailSrc,
 }: {
   action: AgentActivityAction | null;
   duration: string | null;
+  failed: boolean;
   fileEditSummary: CompactFileEditSummary | null;
   kind: CompactToolKind;
   label: string;
   preview: string | null;
+  summaryTitle: string | null;
   thumbnailSrc: string | null;
 }) {
   const [thumbnailFailed, setThumbnailFailed] = React.useState(false);
@@ -44,14 +48,30 @@ export function CompactToolSummaryRow({
     if (!thumbnailSrc || thumbnailFailed) return null;
     return resolveToolImageSrc(thumbnailSrc);
   }, [thumbnailFailed, thumbnailSrc]);
-  const actionLabel = fileEditSummary
-    ? null
-    : getCompactToolActionLabel(action, kind, label, preview);
+  // Failed rows bypass the structured action descriptor entirely: the
+  // descriptor would repaint "Ran <command>" and swallow the failure label.
+  const actionLabel =
+    fileEditSummary || failed
+      ? null
+      : getCompactToolActionLabel(action, kind, label, preview);
 
   return (
     <>
       {fileEditSummary ? (
         <CompactFileEditSummaryView summary={fileEditSummary} />
+      ) : summaryTitle && !failed ? (
+        // The agent-provided friendly phrase wins the visible row label.
+        // The exact command/path receipt stays on hover and on expand.
+        <span
+          className={cn(
+            "min-w-0 truncate font-semibold",
+            isCompactPreview ? "text-xs" : "text-sm",
+            mutedTone,
+          )}
+          title={preview ?? undefined}
+        >
+          {summaryTitle}
+        </span>
       ) : actionLabel ? (
         <ActivityRowLabel
           object={actionLabel.object}

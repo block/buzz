@@ -9,6 +9,7 @@ import {
 } from "@/features/agents/ui/agentSessionTranscriptPresentation";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type { ManagedAgent } from "@/shared/api/types";
+import { useFeatureEnabled } from "@/shared/features";
 import { cn } from "@/shared/lib/cn";
 import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
 import { Shimmer } from "@/shared/ui/Shimmer";
@@ -57,6 +58,8 @@ export function BotActivityComposerAction({
     Boolean(singleWorkingAgent),
     singleWorkingAgent?.pubkey,
   );
+  // Preview experiment: friendly ACP summary titles in the headline scan.
+  const summaryTitleEnabled = useFeatureEnabled("acpToolSummaries");
   const activityHeadlines = React.useMemo(() => {
     if (!singleWorkingAgent) {
       return [];
@@ -79,7 +82,7 @@ export function BotActivityComposerAction({
       if (!passFilter(item)) {
         continue;
       }
-      const headline = getActivityHeadline(item);
+      const headline = getActivityHeadline(item, { summaryTitleEnabled });
       if (!headline || seen.has(headline)) {
         continue;
       }
@@ -92,7 +95,7 @@ export function BotActivityComposerAction({
     }
 
     return headlines;
-  }, [channelId, singleWorkingAgent, transcript]);
+  }, [channelId, singleWorkingAgent, summaryTitleEnabled, transcript]);
   const [headlineIndex, setHeadlineIndex] = React.useState(0);
 
   const clearHoverTimer = React.useCallback(() => {
