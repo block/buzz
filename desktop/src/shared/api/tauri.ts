@@ -226,6 +226,7 @@ export type RawManagedAgent = {
   last_stopped_at: string | null;
   last_exit_code: number | null;
   last_error: string | null;
+  last_error_code: number | null;
   log_path: string;
   start_on_app_launch: boolean;
   auto_restart_on_config_change?: boolean;
@@ -1004,6 +1005,7 @@ export function fromRawManagedAgent(agent: RawManagedAgent): ManagedAgent {
     lastStoppedAt: agent.last_stopped_at,
     lastExitCode: agent.last_exit_code,
     lastError: agent.last_error,
+    lastErrorCode: agent.last_error_code ?? null,
     logPath: agent.log_path,
     startOnAppLaunch: agent.start_on_app_launch,
     autoRestartOnConfigChange: agent.auto_restart_on_config_change ?? true,

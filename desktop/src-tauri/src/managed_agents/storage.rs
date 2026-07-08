@@ -532,14 +532,31 @@ fn bytecount_newlines(buf: &[u8]) -> usize {
     buf.iter().filter(|&&b| b == b'\n').count()
 }
 
-pub fn meaningful_agent_error_from_log(path: &Path) -> Option<String> {
+pub struct AgentLogError {
+    pub message: String,
+    pub code: Option<i64>,
+}
+
+pub fn meaningful_agent_error_from_log(path: &Path) -> Option<AgentLogError> {
     let tail = read_log_tail(path, 200).ok()?;
     tail.lines().rev().map(str::trim).find_map(|line| {
         if line.starts_with("Agent reported error:") {
-            return Some(line.to_string());
+            return Some(AgentLogError {
+                message: line.to_string(),
+                code: None,
+            });
         }
         if line.starts_with("llm auth:") {
-            return Some(format!("Agent reported error: {line}"));
+            return Some(AgentLogError {
+                message: format!("Agent reported error: {line}"),
+                code: Some(-32001),
+            });
+        }
+        if line.starts_with("llm model not found:") {
+            return Some(AgentLogError {
+                message: format!("Agent reported error: {line}"),
+                code: Some(-32002),
+            });
         }
         None
     })

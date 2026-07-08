@@ -101,8 +101,8 @@ pub enum AcpError {
     #[error("Protocol error: {0}")]
     Protocol(String),
 
-    #[error("Agent reported error: {0}")]
-    AgentError(String),
+    #[error("Agent reported error: {message}")]
+    AgentError { code: i64, message: String },
 }
 
 /// ACP client that owns an agent subprocess and communicates over its stdio.
@@ -863,7 +863,10 @@ impl AcpClient {
             if let Some(id) = msg.get("id") {
                 if *id == serde_json::json!(expected_id) && msg.get("method").is_none() {
                     if let Some(error) = msg.get("error") {
-                        return Err(AcpError::AgentError(error.to_string()));
+                        let code = error.get("code").and_then(|c| c.as_i64()).unwrap_or(-32000);
+                        let message = error.get("message").and_then(|m| m.as_str())
+                            .unwrap_or("unknown error").to_string();
+                        return Err(AcpError::AgentError { code, message });
                     }
                     return Ok(msg["result"].clone());
                 }
@@ -1185,7 +1188,10 @@ impl AcpClient {
                                         let _ = ack_tx
                                             .send(crate::pool::SteerAck::PromptCompletedNeutral);
                                     }
-                                    return Err(AcpError::AgentError(error.to_string()));
+                                    let code = error.get("code").and_then(|c| c.as_i64()).unwrap_or(-32000);
+                                    let message = error.get("message").and_then(|m| m.as_str())
+                                        .unwrap_or("unknown error").to_string();
+                                    return Err(AcpError::AgentError { code, message });
                                 }
                                 if let Some((_, ack_tx)) = pending_steer.take() {
                                     let _ =

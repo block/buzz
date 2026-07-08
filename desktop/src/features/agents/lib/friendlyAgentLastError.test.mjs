@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   friendlyAgentLastError,
+  MODEL_NOT_FOUND_COPY,
   RELAY_MESH_DENIED_COPY,
 } from "./friendlyAgentLastError.ts";
 
@@ -73,4 +74,53 @@ test("non-auth Agent reported error stays generic", () => {
     result?.copy,
     "Agent reported error: llm: 500 internal server error",
   );
+});
+
+test("code -32002 → model-not-found copy (severity: denied)", () => {
+  const result = friendlyAgentLastError(
+    "Agent reported error: llm model not found: (goose-claude-opus-4-8) 404 Not Found: ...",
+    -32002,
+  );
+  assert.deepEqual(result, {
+    severity: "denied",
+    copy: MODEL_NOT_FOUND_COPY,
+  });
+});
+
+test("code -32001 → relay mesh denied copy (structured path)", () => {
+  const result = friendlyAgentLastError("any error text", -32001);
+  assert.deepEqual(result, {
+    severity: "denied",
+    copy: RELAY_MESH_DENIED_COPY,
+  });
+});
+
+test("code null falls through to legacy string matching", () => {
+  const result = friendlyAgentLastError(
+    "Agent reported error: llm auth: 401 unauthorized",
+    null,
+  );
+  assert.deepEqual(result, {
+    severity: "denied",
+    copy: RELAY_MESH_DENIED_COPY,
+  });
+});
+
+test("code undefined falls through to legacy string matching", () => {
+  const result = friendlyAgentLastError(
+    "Agent reported error: llm auth: 403 forbidden",
+    undefined,
+  );
+  assert.deepEqual(result, {
+    severity: "denied",
+    copy: RELAY_MESH_DENIED_COPY,
+  });
+});
+
+test("unknown code falls through to generic", () => {
+  const result = friendlyAgentLastError("some error", -99999);
+  assert.deepEqual(result, {
+    severity: "generic",
+    copy: "some error",
+  });
 });

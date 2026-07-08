@@ -110,6 +110,7 @@ impl PersonaRecord {
             last_stopped_at: None,
             last_exit_code: None,
             last_error: None,
+            last_error_code: None,
             respond_to: RespondTo::default(),
             respond_to_allowlist: Vec::new(),
             display_name: Some(self.display_name),
@@ -289,6 +290,8 @@ pub struct ManagedAgentRecord {
     pub last_stopped_at: Option<String>,
     pub last_exit_code: Option<i32>,
     pub last_error: Option<String>,
+    #[serde(default)]
+    pub last_error_code: Option<i64>,
     /// Inbound author gate mode. Translates to `BUZZ_ACP_RESPOND_TO`.
     #[serde(default)]
     pub respond_to: RespondTo,
@@ -440,6 +443,7 @@ pub struct ManagedAgentSummary {
     pub last_stopped_at: Option<String>,
     pub last_exit_code: Option<i32>,
     pub last_error: Option<String>,
+    pub last_error_code: Option<i64>,
     pub start_on_app_launch: bool,
     pub auto_restart_on_config_change: bool,
     pub log_path: String,

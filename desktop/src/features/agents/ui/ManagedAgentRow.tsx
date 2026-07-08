@@ -88,7 +88,7 @@ export function ManagedAgentRow({
   // friendly "Relay mesh denied this agent — check your relay membership."
   // for auth failures so the user knows it's a membership thing, not a
   // crash. Generic exits stay verbatim so we don't lie about other failures.
-  const friendlyError = friendlyAgentLastError(agent.lastError);
+  const friendlyError = friendlyAgentLastError(agent.lastError, agent.lastErrorCode);
 
   return (
     <div

@@ -1884,7 +1884,7 @@ pub async fn run_prompt_task(
             // AgentError means the agent caught a problem before mutating
             // session state (e.g. bad LLM response). The session is healthy —
             // don't invalidate it. Other errors may have corrupted state.
-            if !matches!(e, AcpError::AgentError(_)) {
+            if !matches!(e, AcpError::AgentError { .. }) {
                 agent.state.invalidate(&source);
             }
             let usage = agent.acp.take_turn_usage();

@@ -1198,6 +1198,7 @@ pub fn sync_managed_agent_processes(
                 if let Some(record) = records.iter_mut().find(|record| record.pubkey == *pubkey) {
                     record.updated_at = now_iso();
                     record.last_error = Some(format!("failed to inspect process state: {error}"));
+                    record.last_error_code = None;
                 }
                 changed = true;
                 exited.push(pubkey.clone());
@@ -1214,13 +1215,17 @@ pub fn sync_managed_agent_processes(
             record.runtime_pid = None;
             record.last_stopped_at = Some(now_iso());
             record.last_exit_code = status.code();
-            record.last_error = if status.success() {
+            let log_err = if status.success() {
                 None
             } else {
-                super::meaningful_agent_error_from_log(&runtime.log_path)
-                    .unwrap_or_else(|| format!("harness exited with status {status}"))
-                    .into()
+                Some(super::meaningful_agent_error_from_log(&runtime.log_path)
+                    .unwrap_or_else(|| super::storage::AgentLogError {
+                        message: format!("harness exited with status {status}"),
+                        code: None,
+                    }))
             };
+            record.last_error = log_err.as_ref().map(|e| e.message.clone());
+            record.last_error_code = log_err.as_ref().and_then(|e| e.code);
         }
 
         changed = true;
@@ -1409,6 +1414,7 @@ pub fn build_managed_agent_summary(
         last_stopped_at: record.last_stopped_at.clone(),
         last_exit_code: record.last_exit_code,
         last_error: record.last_error.clone(),
+        last_error_code: record.last_error_code,
         start_on_app_launch: record.start_on_app_launch,
         auto_restart_on_config_change: record.auto_restart_on_config_change,
         log_path,
@@ -1927,6 +1933,7 @@ pub fn start_managed_agent_process(
         {
             record.updated_at = now_iso();
             record.last_error = None;
+            record.last_error_code = None;
             return Ok(());
         }
 
@@ -1942,6 +1949,7 @@ pub fn start_managed_agent_process(
     record.last_stopped_at = None;
     record.last_exit_code = None;
     record.last_error = None;
+    record.last_error_code = None;
 
     runtimes.insert(record.pubkey.clone(), process);
     Ok(())
@@ -1964,6 +1972,7 @@ pub fn stop_managed_agent_process(
             record.last_stopped_at = Some(now);
             record.last_exit_code = None;
             record.last_error = None;
+            record.last_error_code = None;
         }
         super::remove_agent_pid_file(app, &record.pubkey);
         return Ok(());
@@ -1998,6 +2007,7 @@ pub fn stop_managed_agent_process(
     record.last_stopped_at = Some(now);
     record.last_exit_code = status.code();
     record.last_error = None;
+    record.last_error_code = None;
 
     super::remove_agent_pid_file(app, &record.pubkey);
 

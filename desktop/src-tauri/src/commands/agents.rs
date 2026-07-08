@@ -840,6 +840,7 @@ pub async fn create_managed_agent(
             last_stopped_at: None,
             last_exit_code: None,
             last_error: None,
+            last_error_code: None,
             respond_to: input.respond_to,
             respond_to_allowlist: respond_to_allowlist.clone(),
             display_name: None,

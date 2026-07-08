@@ -2782,16 +2782,20 @@ fn handle_prompt_result(
         PromptSource::Channel(ch) => Some(*ch),
         PromptSource::Heartbeat => None,
     };
-    let emit_turn_error = |error_msg: &str| {
+    let emit_turn_error = |error_msg: &str, error_code: Option<i64>| {
         if let Some(ref observer) = observer {
+            let mut payload = serde_json::json!({
+                "outcome": outcome_label,
+                "error": error_msg,
+            });
+            if let Some(code) = error_code {
+                payload["code"] = serde_json::json!(code);
+            }
             observer.emit(
                 "turn_error",
                 Some(agent_index),
                 &observer::context_for(channel_id, None, None),
-                serde_json::json!({
-                    "outcome": outcome_label,
-                    "error": error_msg,
-                }),
+                payload,
             );
         }
     };
@@ -2819,7 +2823,7 @@ fn handle_prompt_result(
                 "exited" => "Agent process exited unexpectedly",
                 _ => "Agent session timed out due to inactivity",
             };
-            emit_turn_error(death_message);
+            emit_turn_error(death_message, None);
 
             let index = result.agent.index;
             let slot_history = &mut crash_history[index];
@@ -2880,7 +2884,11 @@ fn handle_prompt_result(
                     error = %e,
                     "transport/protocol error — respawning agent"
                 );
-                emit_turn_error(&e.to_string());
+                let error_code = match &e {
+                    acp::AcpError::AgentError { code, .. } => Some(*code),
+                    _ => None,
+                };
+                emit_turn_error(&e.to_string(), error_code);
 
                 let index = result.agent.index;
                 let slot_history = &mut crash_history[index];
@@ -2906,7 +2914,11 @@ fn handle_prompt_result(
                     error = %e,
                     "agent_returned (application error — pipe intact)"
                 );
-                emit_turn_error(&e.to_string());
+                let error_code = match &e {
+                    acp::AcpError::AgentError { code, .. } => Some(*code),
+                    _ => None,
+                };
+                emit_turn_error(&e.to_string(), error_code);
                 pool.return_agent(result.agent);
             }
         }

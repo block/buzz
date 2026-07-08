@@ -304,7 +304,7 @@ function AgentPersonaCard({
     ? firstAvatarUrl(persona.avatarUrl, profileQuery.data?.avatarUrl)
     : persona.avatarUrl;
   const friendlyError = agent
-    ? friendlyAgentLastError(agent.lastError)?.copy
+    ? friendlyAgentLastError(agent.lastError, agent.lastErrorCode)?.copy
     : null;
   const opensRuntimeTab = Boolean(agent && friendlyError && !isActive);
 

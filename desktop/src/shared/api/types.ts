@@ -416,6 +416,7 @@ export type ManagedAgent = {
   lastStoppedAt: string | null;
   lastExitCode: number | null;
   lastError: string | null;
+  lastErrorCode: number | null;
   logPath: string;
   startOnAppLaunch: boolean;
   autoRestartOnConfigChange: boolean;
