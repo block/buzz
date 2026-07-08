@@ -29,7 +29,7 @@
           cached = window.localStorage.getItem("buzz-theme-cache");
           if (!cached) return;
           bg = JSON.parse(cached).vars["--background"];
-          if (bg) document.documentElement.style.backgroundColor = "hsl(" + bg + ")";
+          if (bg) document.documentElement.style.backgroundColor = `hsl(${bg})`;
         } catch {
           /* fall back to the black default above */
         }

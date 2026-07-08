@@ -758,3 +758,52 @@
     animation: none;
   }
 }
+
+/* Buzz bee wing-flap (ported from the Buzz website's BeeField, tuned for a
+   single hero bee). The two wing lobes beat continuously — a fast, small
+   in/out scale so the bee reads as actively flapping on the loading gate rather
+   than resting most of the cycle (the website staggers many bees, so it could
+   afford long rests; one bee cannot). The optional --flap-delay custom property
+   can still stagger multiple bees. */
+.bee-sprite .bee-wing {
+  animation-delay: var(--flap-delay, 0s);
+  animation-duration: 0.28s;
+  animation-iteration-count: infinite;
+  animation-timing-function: ease-in-out;
+  transform-box: fill-box;
+  transform-origin: center;
+}
+
+.bee-sprite .bee-wing-left {
+  animation-name: bee-wing-left-flap;
+}
+
+.bee-sprite .bee-wing-right {
+  animation-name: bee-wing-right-flap;
+}
+
+@keyframes bee-wing-left-flap {
+  0%,
+  100% {
+    transform: translateX(0) scaleX(1);
+  }
+  50% {
+    transform: translateX(30px) scaleX(0.62);
+  }
+}
+
+@keyframes bee-wing-right-flap {
+  0%,
+  100% {
+    transform: translateX(0) scaleX(1);
+  }
+  50% {
+    transform: translateX(-30px) scaleX(0.62);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bee-sprite .bee-wing {
+    animation: none;
+  }
+}

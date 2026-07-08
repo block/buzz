@@ -29,6 +29,7 @@ import { useSystemColorScheme } from "@/shared/theme/useSystemColorScheme";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 import { BuzzMark } from "@/shared/ui/buzz-logo/BuzzMark";
+import { FlappingBee } from "@/shared/ui/buzz-logo/FlappingBee";
 import { FuzzyLogo } from "@/shared/ui/buzz-logo/FuzzyLogo";
 import { StartupWindowDragRegion } from "@/shared/ui/StartupWindowDragRegion";
 import { StepProgress } from "@/shared/ui/step-progress";
@@ -63,10 +64,10 @@ function BeeLoader({
   );
 }
 
-// Cold boot gate: the theme-adaptive grainient background with the animated
-// Buzz mark as the hero (replacing the old "Setting up your workspace" text —
-// the caption stays as sr-only for screen readers). A static mark renders
-// underneath the animation so it paints instantly on hard reload.
+// Cold boot gate: the theme-adaptive grainient background with a single
+// centered Buzz bee flying over it — the same static mark as before, now with
+// its wings flapping (ported from the Buzz website's wing-flap). Replaces the
+// old "Setting up your workspace" text, which stays as an sr-only caption.
 function AppLoadingGate() {
   return (
     <div
@@ -77,10 +78,7 @@ function AppLoadingGate() {
       <StartupWindowDragRegion />
       <ThemeGrainientBackground />
       <span className="sr-only">{LOADING_TEXT}</span>
-      <BeeLoader
-        ariaLabel={LOADING_TEXT}
-        className="relative z-10 h-auto w-28"
-      />
+      <FlappingBee className="relative z-10 h-auto w-28" />
     </div>
   );
 }
