@@ -768,6 +768,9 @@ pub const DEFAULT_AGENT_TURN_TIMEOUT_SECONDS: u64 = 320;
 /// 1 hour — absolute wall-clock safety cap per turn.
 pub const DEFAULT_AGENT_MAX_TURN_DURATION_SECONDS: u64 = 3600;
 pub const DEFAULT_AGENT_PARALLELISM: u32 = 24;
+/// Toolsets injected as `BUZZ_TOOLSETS` when the record doesn't pin its own —
+/// single source of truth for the spawn env and the spawn-config hash.
+pub const DEFAULT_MCP_TOOLSETS: &str = "default,canvas,forums,dms,media";
 
 fn default_agent_parallelism() -> u32 {
     DEFAULT_AGENT_PARALLELISM

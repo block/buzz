@@ -1752,7 +1752,7 @@ pub fn spawn_agent_child(
     if let Some(toolsets) = &record.mcp_toolsets {
         command.env("BUZZ_TOOLSETS", toolsets);
     } else {
-        command.env("BUZZ_TOOLSETS", "default,canvas,forums,dms,media");
+        command.env("BUZZ_TOOLSETS", super::types::DEFAULT_MCP_TOOLSETS);
     }
     command.env_remove("BUZZ_ACP_PRIVATE_KEY");
     command.env_remove("BUZZ_ACP_API_TOKEN");

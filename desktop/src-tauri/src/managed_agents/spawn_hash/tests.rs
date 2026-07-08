@@ -1,4 +1,5 @@
 use super::*;
+use crate::managed_agents::types::RespondTo;
 use std::collections::BTreeMap;
 
 fn record() -> ManagedAgentRecord {
@@ -183,7 +184,101 @@ fn workspace_relay_change_ignored_for_pinned_record_relay() {
 fn respond_to_allowlist_edit_changes_hash() {
     let rec = record();
     let mut edited = record();
+    edited.respond_to = RespondTo::Allowlist;
     edited.respond_to_allowlist = vec!["a".repeat(64)];
+    assert_ne!(
+        spawn_config_hash(&rec, &[], "wss://ws.example"),
+        spawn_config_hash(&edited, &[], "wss://ws.example")
+    );
+}
+
+#[test]
+fn allowlist_ignored_when_mode_is_not_allowlist() {
+    // Spawn only sets BUZZ_ACP_RESPOND_TO_ALLOWLIST in allowlist mode, so
+    // editing the (dormant) list under owner-only must not badge.
+    let rec = record();
+    let mut edited = record();
+    edited.respond_to_allowlist = vec!["a".repeat(64)];
+    assert_eq!(
+        spawn_config_hash(&rec, &[], "wss://ws.example"),
+        spawn_config_hash(&edited, &[], "wss://ws.example")
+    );
+}
+
+#[test]
+fn allowlist_normalization_equivalent_edits_do_not_change_hash() {
+    // The env receives the normalized list (trim/lowercase/dedup), so edits
+    // that normalize to the same value must not badge.
+    let mut rec = record();
+    rec.respond_to = RespondTo::Allowlist;
+    rec.respond_to_allowlist = vec!["a".repeat(64)];
+    let mut edited = rec.clone();
+    edited.respond_to_allowlist = vec![
+        format!(" {} ", "A".repeat(64)), // whitespace + case
+        "a".repeat(64),                  // duplicate
+    ];
+    assert_eq!(
+        spawn_config_hash(&rec, &[], "wss://ws.example"),
+        spawn_config_hash(&edited, &[], "wss://ws.example")
+    );
+}
+
+#[test]
+fn allowlist_content_edit_still_changes_hash() {
+    let mut rec = record();
+    rec.respond_to = RespondTo::Allowlist;
+    rec.respond_to_allowlist = vec!["a".repeat(64)];
+    let mut edited = rec.clone();
+    edited.respond_to_allowlist = vec!["b".repeat(64)];
+    assert_ne!(
+        spawn_config_hash(&rec, &[], "wss://ws.example"),
+        spawn_config_hash(&edited, &[], "wss://ws.example")
+    );
+}
+
+#[test]
+fn explicit_default_max_turn_duration_does_not_change_hash() {
+    // Spawn writes BUZZ_ACP_MAX_TURN_DURATION with the default filled in, so
+    // None → Some(default) is the same spawned value and must not badge.
+    let rec = record();
+    let mut edited = record();
+    edited.max_turn_duration_seconds =
+        Some(crate::managed_agents::types::DEFAULT_AGENT_MAX_TURN_DURATION_SECONDS);
+    assert_eq!(
+        spawn_config_hash(&rec, &[], "wss://ws.example"),
+        spawn_config_hash(&edited, &[], "wss://ws.example")
+    );
+}
+
+#[test]
+fn non_default_max_turn_duration_changes_hash() {
+    let rec = record();
+    let mut edited = record();
+    edited.max_turn_duration_seconds = Some(42);
+    assert_ne!(
+        spawn_config_hash(&rec, &[], "wss://ws.example"),
+        spawn_config_hash(&edited, &[], "wss://ws.example")
+    );
+}
+
+#[test]
+fn explicit_default_toolsets_do_not_change_hash() {
+    // Spawn falls BUZZ_TOOLSETS back to the default set, so None → an
+    // explicit copy of the default is the same spawned value.
+    let rec = record();
+    let mut edited = record();
+    edited.mcp_toolsets = Some(crate::managed_agents::types::DEFAULT_MCP_TOOLSETS.to_string());
+    assert_eq!(
+        spawn_config_hash(&rec, &[], "wss://ws.example"),
+        spawn_config_hash(&edited, &[], "wss://ws.example")
+    );
+}
+
+#[test]
+fn non_default_toolsets_change_hash() {
+    let rec = record();
+    let mut edited = record();
+    edited.mcp_toolsets = Some("default,canvas".to_string());
     assert_ne!(
         spawn_config_hash(&rec, &[], "wss://ws.example"),
         spawn_config_hash(&edited, &[], "wss://ws.example")

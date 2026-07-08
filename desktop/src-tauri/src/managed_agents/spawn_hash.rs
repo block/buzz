@@ -92,11 +92,31 @@ pub(crate) fn spawn_config_hash(
     record.provider.hash(&mut hasher);
     record.auth_tag.hash(&mut hasher);
     record.respond_to.as_str().hash(&mut hasher);
-    record.respond_to_allowlist.hash(&mut hasher);
+    // The allowlist is hashed as the env receives it: spawn sets
+    // BUZZ_ACP_RESPOND_TO_ALLOWLIST only in allowlist mode, and normalized
+    // (trim/lowercase/dedup via `validate_respond_to_allowlist`) — so edits
+    // that don't survive normalization, or edits while another mode is
+    // active, must not badge. A list spawn would reject hashes raw: the
+    // stamped hash comes from a successful spawn, so any invalid edit
+    // correctly compares unequal.
+    if record.respond_to == super::types::RespondTo::Allowlist {
+        super::types::validate_respond_to_allowlist(&record.respond_to_allowlist)
+            .unwrap_or_else(|_| record.respond_to_allowlist.clone())
+            .hash(&mut hasher);
+    }
     record.idle_timeout_seconds.hash(&mut hasher);
-    record.max_turn_duration_seconds.hash(&mut hasher);
+    // Spawn writes BUZZ_ACP_MAX_TURN_DURATION and BUZZ_TOOLSETS with defaults
+    // filled in, so None and an explicit default are the same spawned value.
+    record
+        .max_turn_duration_seconds
+        .unwrap_or(super::types::DEFAULT_AGENT_MAX_TURN_DURATION_SECONDS)
+        .hash(&mut hasher);
     record.parallelism.hash(&mut hasher);
-    record.mcp_toolsets.hash(&mut hasher);
+    record
+        .mcp_toolsets
+        .as_deref()
+        .unwrap_or(super::types::DEFAULT_MCP_TOOLSETS)
+        .hash(&mut hasher);
     record.persona_team_dir.hash(&mut hasher);
     record.persona_name_in_team.hash(&mut hasher);
 
