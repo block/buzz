@@ -8,7 +8,7 @@ import { AddTeamToChannelDialog } from "./AddTeamToChannelDialog";
 import { AgentDialog, type AgentDialogMode } from "./AgentDialog";
 import { BatchImportDialog } from "./BatchImportDialog";
 import { PersonaCatalogDialog } from "./PersonaCatalogDialog";
-import { PersonaDialog } from "./PersonaDialog";
+import { AgentDefinitionDialog } from "./AgentDefinitionDialog";
 import { PersonaDeleteDialog } from "./PersonaDeleteDialog";
 import { PersonaImportUpdateDialog } from "./PersonaImportUpdateDialog";
 import { PersonaShareDialog } from "./PersonaShareDialog";
@@ -30,7 +30,8 @@ export function AgentsView() {
   const agents = useManagedAgentActions();
   const personas = usePersonaActions();
   // Exclusivity: create never sets `personaDialogState` (edit/dup/import do),
-  // so the unified create dialog and PersonaDialog never mount together.
+  // so the unified create dialog and the edit/dup/import AgentDefinitionDialog
+  // mount never coexist.
   const [createDialogMode, setCreateDialogMode] =
     React.useState<AgentDialogMode | null>(null);
 
@@ -240,7 +241,7 @@ export function AgentsView() {
         />
       ) : null}
       {personas.personaDialogState ? (
-        <PersonaDialog
+        <AgentDefinitionDialog
           description={personas.personaDialogState.description}
           error={
             personas.updatePersonaMutation.error instanceof Error

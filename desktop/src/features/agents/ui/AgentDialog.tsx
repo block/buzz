@@ -14,7 +14,7 @@ import {
 } from "./agentCreateIntent";
 import { CreateAgentDialog } from "./CreateAgentDialog";
 import { createPersonaDialogState } from "./personaDialogState";
-import { PersonaDialog } from "./PersonaDialog";
+import { AgentDefinitionDialog } from "./AgentDefinitionDialog";
 
 export type AgentDialogMode = "definition" | "instance";
 
@@ -34,10 +34,10 @@ type AgentDialogProps = {
 
 /**
  * Unified create entry point (Phase 1B.2): routes a create intent to the
- * form that owns it. The definition family renders PersonaDialog in create
- * mode with a "start after create" toggle; the standalone-instance intent
- * renders CreateAgentDialog unchanged. Physical consolidation of the two
- * forms is Phase 1B.3.
+ * form that owns it. The definition family renders AgentDefinitionDialog in
+ * create mode with a "start after create" toggle; the standalone-instance
+ * intent renders CreateAgentDialog unchanged. Physical consolidation of the
+ * two forms is Phase 1B.3.
  */
 export function AgentDialog({
   mode,
@@ -50,7 +50,7 @@ export function AgentDialog({
   onInstanceCreated,
 }: AgentDialogProps) {
   const [startAfterCreate, setStartAfterCreate] = React.useState(true);
-  // Stable identity across toggle flips — PersonaDialog re-initializes its
+  // Stable identity across toggle flips — AgentDefinitionDialog re-initializes its
   // fields whenever `initialValues` changes.
   const initialValues = React.useMemo(
     () => createPersonaDialogState().initialValues,
@@ -70,7 +70,7 @@ export function AgentDialog({
   const copy = definitionCreateDialogState(startAfterCreate);
 
   return (
-    <PersonaDialog
+    <AgentDefinitionDialog
       createFooterSlot={
         <label
           className="flex cursor-pointer items-center gap-2 text-sm text-muted-foreground"

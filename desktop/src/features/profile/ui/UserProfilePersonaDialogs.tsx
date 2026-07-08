@@ -5,7 +5,7 @@ import type {
   UpdatePersonaInput,
 } from "@/shared/api/types";
 import { PersonaDeleteDialog } from "@/features/agents/ui/PersonaDeleteDialog";
-import { PersonaDialog } from "@/features/agents/ui/PersonaDialog";
+import { AgentDefinitionDialog } from "@/features/agents/ui/AgentDefinitionDialog";
 import type { PersonaDialogState } from "@/features/agents/ui/personaDialogState";
 
 export function UserProfilePersonaDialogs({
@@ -35,7 +35,7 @@ export function UserProfilePersonaDialogs({
 }) {
   return (
     <>
-      <PersonaDialog
+      <AgentDefinitionDialog
         description={personaDialogState?.description ?? ""}
         error={updateError ?? createError}
         initialValues={personaDialogState?.initialValues ?? null}
