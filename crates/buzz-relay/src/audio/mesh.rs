@@ -223,9 +223,11 @@ impl MeshAudioRouter {
             return verdict;
         }
 
-        let Some(room) = self.rooms.get(session_id) else {
+        let Some(room) = self.rooms.get_unambiguous_by_channel(session_id) else {
             // No local room for this session: nothing to deliver to. Not an
-            // error — membership can race a datagram in flight.
+            // error — membership can race a datagram in flight. An ambiguous
+            // same-UUID room collision is also dropped because the current
+            // media envelope has no community label.
             return verdict;
         };
 

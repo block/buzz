@@ -341,7 +341,9 @@ async fn handle_active_audio_connection(
         }
     }
 
-    let room = state.audio_rooms.get_or_create(channel_id);
+    let room = state
+        .audio_rooms
+        .get_or_create(tenant.community(), channel_id);
 
     // Re-check archived status after obtaining the room. This closes the
     // cross-boundary race: a joiner that passed ensure_membership before
@@ -359,12 +361,16 @@ async fn handle_active_audio_connection(
                         .into(),
                 ))
                 .await;
-            state.audio_rooms.cleanup_if_empty(channel_id);
+            state
+                .audio_rooms
+                .cleanup_if_empty(tenant.community(), channel_id);
             return;
         }
         Err(e) => {
             warn!(channel_id = %channel_id, "pre-join channel check failed (fail-closed): {e}");
-            state.audio_rooms.cleanup_if_empty(channel_id);
+            state
+                .audio_rooms
+                .cleanup_if_empty(tenant.community(), channel_id);
             return;
         }
         Ok(_) => {} // Channel exists and is not archived — proceed.
@@ -438,7 +444,9 @@ async fn handle_active_audio_connection(
                         remote_rejection_ws_error(&reason).to_string().into(),
                     ))
                     .await;
-                state.audio_rooms.cleanup_if_empty(channel_id);
+                state
+                    .audio_rooms
+                    .cleanup_if_empty(tenant.community(), channel_id);
                 return;
             }
             Err(crate::audio::join::DialError::Mesh(e)) => {
@@ -453,7 +461,9 @@ async fn handle_active_audio_connection(
                         .into(),
                     ))
                     .await;
-                state.audio_rooms.cleanup_if_empty(channel_id);
+                state
+                    .audio_rooms
+                    .cleanup_if_empty(tenant.community(), channel_id);
                 return;
             }
         }
@@ -587,7 +597,9 @@ async fn handle_active_audio_connection(
             .is_err()
         {
             room.remove_peer(peer_id);
-            state.audio_rooms.cleanup_if_empty(channel_id);
+            state
+                .audio_rooms
+                .cleanup_if_empty(tenant.community(), channel_id);
             return;
         }
     } else {
@@ -797,7 +809,9 @@ async fn handle_active_audio_connection(
                 room_emptied = false;
             }
             Ok(()) => {
-                room_emptied = state.audio_rooms.cleanup_if_empty(channel_id);
+                room_emptied = state
+                    .audio_rooms
+                    .cleanup_if_empty(tenant.community(), channel_id);
 
                 emit_participant_event(
                     &state,
@@ -811,7 +825,9 @@ async fn handle_active_audio_connection(
             }
         }
     } else {
-        room_emptied = state.audio_rooms.cleanup_if_empty(channel_id);
+        room_emptied = state
+            .audio_rooms
+            .cleanup_if_empty(tenant.community(), channel_id);
     }
 
     // Owner path: release this room's lease when the room empties, so a new
