@@ -230,6 +230,39 @@ export function getDefaultLlmModelLabel(globalModel?: string) {
     : "Default model";
 }
 
+/**
+ * Builds the base model dropdown options for the template dialog
+ * (`AgentDefinitionDialog`), applying the global-model inherit-option guard.
+ *
+ * Explicit-model providers (e.g. anthropic) have their zero-value option
+ * filtered out by `getPersonaModelOptions`, so a relabel-only map would never
+ * produce the `Inherit global default (<model>)` entry.  This helper prepends
+ * it when `globalModel` is non-empty AND no zero-value option already exists,
+ * making the inherited global model visible and selectable in the dropdown.
+ *
+ * GUARD: prepend only when `globalModel.trim()` is non-empty — if no global
+ * model is set, an explicit-model provider must still block Save (no empty
+ * inherit entry that bypasses the model requirement).
+ */
+export function buildTemplateModelDropdownOptions(
+  modelOptions: readonly PersonaModelOption[],
+  globalModel: string,
+): PersonaDropdownOption[] {
+  const trimmedGlobal = globalModel.trim();
+  const hasZeroValue = modelOptions.some((o) => o.id === "");
+  const base: readonly PersonaModelOption[] =
+    !hasZeroValue && trimmedGlobal.length > 0
+      ? [{ id: "", label: getDefaultLlmModelLabel(trimmedGlobal) }, ...modelOptions]
+      : modelOptions;
+  return base.map((option) => ({
+    label:
+      option.id === ""
+        ? getDefaultLlmModelLabel(trimmedGlobal)
+        : option.label,
+    value: option.id || AUTO_MODEL_DROPDOWN_VALUE,
+  }));
+}
+
 export function getPersonaProviderOptions(
   currentProvider: string,
   runtimeId: string,

@@ -44,13 +44,12 @@ import {
   personaBehaviorDraftValid,
 } from "./personaBehaviorDraft";
 import {
-  AUTO_MODEL_DROPDOWN_VALUE,
   AUTO_PROVIDER_DROPDOWN_VALUE,
+  buildTemplateModelDropdownOptions,
   CUSTOM_MODEL_DROPDOWN_VALUE,
   CUSTOM_PROVIDER_DROPDOWN_VALUE,
   computeLocalModeGate,
   formatRuntimeOptionLabel,
-  getDefaultLlmModelLabel,
   getDefaultLlmProviderLabel,
   getDefaultPersonaRuntime,
   getModelSelectValue,
@@ -605,13 +604,7 @@ export function AgentDefinitionDialog({
     { label: "Custom provider...", value: CUSTOM_PROVIDER_DROPDOWN_VALUE },
   ];
   const modelDropdownOptions: PersonaDropdownOption[] = [
-    ...modelOptions.map((option) => ({
-      label:
-        option.id === ""
-          ? getDefaultLlmModelLabel(globalConfig.model ?? "")
-          : option.label,
-      value: option.id || AUTO_MODEL_DROPDOWN_VALUE,
-    })),
+    ...buildTemplateModelDropdownOptions(modelOptions, globalConfig.model ?? ""),
     ...(modelDiscoveryLoading && discoveredModelOptions === null
       ? [
           {
