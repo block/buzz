@@ -840,9 +840,9 @@ mod tests {
     // `from_raw_env_value` → `nudge_body()` re-serializes into the sentinel →
     // the sentinel JSON is extracted and checked for the `availability` field.
     //
-    // This is the exact path Thufir's CRITICAL finding identified as broken
-    // (the old `RequirementPayload::CliLogin` had no `availability` field, so
-    // serde silently dropped it during deserialization).
+    // This guards the prior regression where `RequirementPayload::CliLogin`
+    // had no `availability` field, so serde silently dropped it during
+    // deserialization and the desktop card never rendered.
 
     fn extract_sentinel_json(body: &str) -> String {
         let fence_open = "```buzz:config-nudge\n";
