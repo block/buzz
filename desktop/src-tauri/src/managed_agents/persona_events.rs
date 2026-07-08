@@ -226,7 +226,8 @@ pub async fn flush_pending_events(
     state: &AppState,
 ) -> Result<u32, String> {
     use crate::managed_agents::retention::{
-        get_pending_sync, get_retained_event, mark_synced, open_retention_db,
+        deferred_behind_failed_tombstone, get_pending_sync, get_retained_event, mark_synced,
+        open_retention_db,
     };
     use nostr::JsonUtil;
 
@@ -236,7 +237,12 @@ pub async fn flush_pending_events(
     }; // connection dropped before any .await
 
     let mut flushed = 0u32;
+    let mut failed_tombstones: std::collections::HashSet<(String, String)> =
+        std::collections::HashSet::new();
     for row in pending {
+        if deferred_behind_failed_tombstone(row.kind, &row.pubkey, &row.d_tag, &failed_tombstones) {
+            continue; // its tombstone failed this sweep; next sweep re-orders them
+        }
         // Re-read immediately before publishing; the row may have been edited
         // or deleted since the pending snapshot above.
         let current = {
@@ -257,6 +263,9 @@ pub async fn flush_pending_events(
             .await
             .is_err()
         {
+            if current.kind == 5 {
+                failed_tombstones.insert((current.pubkey.clone(), current.d_tag.clone()));
+            }
             continue; // relay unreachable — stays pending for the next sweep
         }
 
@@ -1046,5 +1055,147 @@ mod tests {
             Some("anthropic"),
             "persona provider must win when persona has a value"
         );
+    }
+
+    // Gated off Windows for the same reason as `archive::real_relay`:
+    // `build_app_state()` pulls native DLLs unavailable in the Windows CI
+    // runner. This stub-relay test is hermetic (localhost axum) otherwise.
+    #[cfg(not(target_os = "windows"))]
+    mod flush_barrier {
+        use super::*;
+        use crate::app_state::build_app_state;
+        use crate::managed_agents::retention::{
+            get_retained_event, open_retention_db, retain_event, tombstone_retention_d_tag,
+            RetainedEvent,
+        };
+        use nostr::JsonUtil;
+
+        /// Stub relay: `POST /events` rejects kind:5 with HTTP 500, accepts
+        /// everything else. Returns the HTTP base URL.
+        async fn spawn_stub_relay() -> String {
+            use axum::{http::StatusCode, routing::post, Router};
+
+            let app = Router::new().route(
+                "/events",
+                post(|body: String| async move {
+                    let event: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+                    if event.get("kind").and_then(serde_json::Value::as_u64) == Some(5) {
+                        return (StatusCode::INTERNAL_SERVER_ERROR, String::new());
+                    }
+                    (
+                        StatusCode::OK,
+                        serde_json::json!({
+                            "event_id": event.get("id").and_then(serde_json::Value::as_str).unwrap_or(""),
+                            "accepted": true,
+                            "message": ""
+                        })
+                        .to_string(),
+                    )
+                }),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind stub relay");
+            let addr = listener.local_addr().expect("stub relay addr");
+            tokio::spawn(async move {
+                axum::serve(listener, app).await.ok();
+            });
+            format!("http://{addr}")
+        }
+
+        fn retain_signed(
+            conn: &rusqlite::Connection,
+            keys: &nostr::Keys,
+            kind: u32,
+            retention_d_tag: &str,
+            builder: nostr::EventBuilder,
+            created_at: i64,
+        ) {
+            let event = builder.sign_with_keys(keys).expect("sign test event");
+            retain_event(
+                conn,
+                &RetainedEvent {
+                    kind,
+                    pubkey: keys.public_key().to_hex(),
+                    d_tag: retention_d_tag.to_string(),
+                    content: event.content.to_string(),
+                    created_at,
+                    raw_event: event.as_json(),
+                    pending_sync: true,
+                },
+            )
+            .expect("retain test event");
+        }
+
+        /// The mid-sweep barrier: a tombstone the relay rejects must defer its
+        /// own replacement to the next sweep (still pending, not counted as
+        /// flushed) while unrelated rows in the same sweep publish normally.
+        /// Failing toward stay-deleted is the safe direction — the deferred
+        /// replacement can never be wiped by its own late tombstone.
+        #[tokio::test]
+        async fn failed_tombstone_defers_replacement_within_sweep() {
+            let keys = nostr::Keys::generate();
+            let pubkey = keys.public_key().to_hex();
+            let dir = tempfile::tempdir().expect("tempdir");
+            let db_path = dir.path().join("retention.db");
+
+            {
+                let conn = open_retention_db(&db_path).expect("open db");
+                // Tombstone (publishes first, relay rejects it).
+                retain_signed(
+                    &conn,
+                    &keys,
+                    5,
+                    &tombstone_retention_d_tag(KIND_PERSONA, "covered"),
+                    build_persona_delete("covered", &pubkey).unwrap(),
+                    1000,
+                );
+                // Its replacement at the same coordinate (must defer).
+                retain_signed(
+                    &conn,
+                    &keys,
+                    KIND_PERSONA,
+                    "covered",
+                    EventBuilder::new(Kind::Custom(KIND_PERSONA as u16), "{}")
+                        .tags(vec![Tag::parse(["d", "covered"]).unwrap()]),
+                    2000,
+                );
+                // Unrelated coordinate (must publish despite the barrier).
+                retain_signed(
+                    &conn,
+                    &keys,
+                    KIND_PERSONA,
+                    "unrelated",
+                    EventBuilder::new(Kind::Custom(KIND_PERSONA as u16), "{}")
+                        .tags(vec![Tag::parse(["d", "unrelated"]).unwrap()]),
+                    1500,
+                );
+            }
+
+            let state = build_app_state();
+            *state.relay_url_override.lock().unwrap() = Some(spawn_stub_relay().await);
+
+            let flushed = flush_pending_events(&db_path, &state).await.expect("flush");
+            assert_eq!(flushed, 1, "only the unrelated row publishes");
+
+            let conn = open_retention_db(&db_path).expect("reopen db");
+            let row = |kind: u32, d_tag: &str| {
+                get_retained_event(&conn, kind, &pubkey, d_tag)
+                    .unwrap()
+                    .unwrap()
+            };
+            assert!(
+                row(5, &tombstone_retention_d_tag(KIND_PERSONA, "covered")).pending_sync,
+                "failed tombstone stays pending"
+            );
+            assert!(
+                row(KIND_PERSONA, "covered").pending_sync,
+                "deferred replacement stays pending"
+            );
+            assert!(
+                !row(KIND_PERSONA, "unrelated").pending_sync,
+                "unrelated row marked synced"
+            );
+        }
     }
 }

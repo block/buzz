@@ -64,6 +64,26 @@ pub fn tombstone_retention_d_tag(target_kind: u32, d_tag: &str) -> String {
     format!("{target_kind}:{d_tag}")
 }
 
+/// Whether a pending row must be deferred to the next sweep because a kind:5
+/// tombstone covering its coordinate failed to publish earlier in the same
+/// sweep.
+///
+/// `get_pending_sync` orders tombstones first so a deletion always reaches the
+/// relay before the replacement that supersedes it — but the flush is
+/// best-effort per row, so a tombstone that fails mid-sweep would otherwise be
+/// leapfrogged by its own replacement and then wipe it on the next sweep.
+/// Deferring the replacement restores the ordering guarantee: next sweep the
+/// `ORDER BY` puts the tombstone first again. Kind:5 rows are never deferred.
+pub fn deferred_behind_failed_tombstone(
+    kind: u32,
+    pubkey: &str,
+    d_tag: &str,
+    failed_tombstones: &std::collections::HashSet<(String, String)>,
+) -> bool {
+    kind != 5
+        && failed_tombstones.contains(&(pubkey.to_string(), tombstone_retention_d_tag(kind, d_tag)))
+}
+
 /// Upsert a persona event into the retention store.
 ///
 /// Only replaces if the new event has a newer or equal `created_at` (NIP-33 semantics).
@@ -667,5 +687,55 @@ mod tests {
         assert_eq!(pending.len(), 2);
         assert_eq!(pending[0].kind, 5, "tombstone first");
         assert_eq!(pending[1].kind, 30175, "replacement second");
+    }
+
+    #[test]
+    fn deferral_predicate_is_kind_and_pubkey_qualified() {
+        // Mid-sweep barrier semantics: a failed tombstone defers ONLY the
+        // replacement at its exact coordinate — same target kind, same pubkey.
+        use std::collections::HashSet;
+
+        let failed: HashSet<(String, String)> = HashSet::from([(
+            "abc123".to_string(),
+            tombstone_retention_d_tag(30175, "test-persona"),
+        )]);
+
+        // The covered replacement defers.
+        assert!(deferred_behind_failed_tombstone(
+            30175,
+            "abc123",
+            "test-persona",
+            &failed
+        ));
+        // Kind-qualified: a coinciding slug under a DIFFERENT kind is a
+        // distinct coordinate (the cross-kind collision the retention d-tag
+        // encoding exists to prevent) — never deferred.
+        assert!(!deferred_behind_failed_tombstone(
+            30177,
+            "abc123",
+            "test-persona",
+            &failed
+        ));
+        // Never crosses pubkeys.
+        assert!(!deferred_behind_failed_tombstone(
+            30175,
+            "other-key",
+            "test-persona",
+            &failed
+        ));
+        // Never defers kind:5 rows, even at a "matching" retention key.
+        assert!(!deferred_behind_failed_tombstone(
+            5,
+            "abc123",
+            "test-persona",
+            &failed
+        ));
+        // Unrelated d-tags publish normally.
+        assert!(!deferred_behind_failed_tombstone(
+            30175,
+            "abc123",
+            "other-persona",
+            &failed
+        ));
     }
 }
