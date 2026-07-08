@@ -284,6 +284,24 @@ impl Room {
         }
     }
 
+    /// Deliver an already-`[peer_index]`-prefixed frame that arrived over the
+    /// mesh to every local peer except the one whose `peer_index` authored it.
+    ///
+    /// Used by the cross-pod media path ([`super::mesh`]): the frame is
+    /// byte-identical to what `broadcast_frame` produces, but the author is a
+    /// *remote* participant identified only by its (owner-assigned) index, not
+    /// a local peer UUID. Skipping by index keeps a participant whose own frame
+    /// round-tripped owner→back-to-their-pod from hearing themselves. Drops on
+    /// full — real-time audio never queues.
+    pub fn deliver_prefixed(&self, author_index: u8, prefixed: Bytes) {
+        for entry in self.peers.iter() {
+            if entry.peer_index == author_index {
+                continue;
+            }
+            let _ = entry.audio_tx.try_send(prefixed.clone());
+        }
+    }
+
     /// Send a JSON control message to all peers via the control channel.
     /// Separate from audio so control is never starved by audio backpressure.
     /// Control messages (joined/left) are state-bearing — the client's
@@ -338,6 +356,14 @@ impl AudioRoomManager {
             .entry(channel_id)
             .or_insert_with(|| Arc::new(Room::new(channel_id)))
             .clone()
+    }
+
+    /// Look up an existing room without creating one. Returns `None` when this
+    /// pod hosts no room for the channel — the cross-pod media path uses this
+    /// so an inbound datagram for a session we don't participate in is dropped,
+    /// never materializing an empty room.
+    pub fn get(&self, channel_id: Uuid) -> Option<Arc<Room>> {
+        self.rooms.get(&channel_id).map(|r| r.clone())
     }
 
     /// Remove the room if it has no peers. Returns `true` if the room was removed.
