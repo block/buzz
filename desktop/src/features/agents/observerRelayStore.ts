@@ -417,9 +417,15 @@ export function subscribeControlResults(
 
 export function getAgentObserverSnapshot(
   agentPubkey?: string | null,
-  enabled?: boolean,
+  // `_enabled` previously gated store reads — now only gates the relay
+  // subscription in useObserverEvents. Kept for call-site compatibility.
+  _enabled?: boolean,
 ): ObserverSnapshot {
-  if (!enabled || !agentPubkey) {
+  // `_enabled` gates the live-relay subscription in useObserverEvents, but we
+  // always serve stored data when agentPubkey is present — archived frames are
+  // ingested into eventsByAgent regardless of live status and must be readable
+  // by idle-agent panels showing channel-scoped history.
+  if (!agentPubkey) {
     return IDLE_SNAPSHOT;
   }
   const key = normalizePubkey(agentPubkey);
@@ -442,9 +448,14 @@ export function getAgentObserverSnapshot(
 
 export function getAgentTranscript(
   agentPubkey?: string | null,
-  enabled?: boolean,
+  // `_enabled` previously gated store reads — now only gates the relay
+  // subscription in useObserverEvents. Kept for call-site compatibility.
+  _enabled?: boolean,
 ): TranscriptItem[] {
-  if (!enabled || !agentPubkey) {
+  // Same decoupling as getAgentObserverSnapshot: `_enabled` gates relay
+  // subscription, not store reads. Archived items are in transcriptByAgent
+  // and must be readable regardless of live status.
+  if (!agentPubkey) {
     return EMPTY_TRANSCRIPT;
   }
   const key = normalizePubkey(agentPubkey);

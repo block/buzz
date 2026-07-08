@@ -110,6 +110,17 @@ export function useLoadArchivedObserverEvents(
     null,
   );
 
+  // Reset per-channel paging state when channelId changes. Backfill state is
+  // identity-level (not per-channel) and must NOT be reset here — the backfill
+  // index covers all channels and only needs to run once per identity mount.
+  // Only the cursor, exhaustion flag, and fetching lock are channel-scoped.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: channelId is the intentional reset key; cursorRef/isFetchingRef are stable refs excluded from deps by convention; setHasOlderArchived is a stable React state setter
+  React.useEffect(() => {
+    cursorRef.current = null;
+    isFetchingRef.current = false;
+    setHasOlderArchived(true);
+  }, [channelId]);
+
   // Check for an owner_p subscription once per identity.
   React.useEffect(() => {
     if (!enabled || !identityPubkey) {
