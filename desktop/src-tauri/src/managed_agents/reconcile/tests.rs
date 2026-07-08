@@ -232,6 +232,35 @@ fn slimming_republish_wave_is_one_time() {
     record.persona_source_version = Some("abc123".to_string());
     write_store(&dir, &[record]);
 
+    // Seed a SYNCED legacy-fat retained row — the pre-upgrade state — so the
+    // first-boot republish below is distinctly the fat→slim content change,
+    // not the ordinary fresh-record retain.
+    let fat_content = serde_json::json!({
+        "name": "agent-five",
+        "persona_id": "persona-1",
+        "system_prompt": "You are a test agent.",
+        "persona_source_version": "abc123",
+        "parallelism": 1,
+        "respond_to": "owner-only"
+    })
+    .to_string();
+    {
+        let conn = open_retention_db(&dir.path().join("retention.db")).unwrap();
+        retain_event(
+            &conn,
+            &RetainedEvent {
+                kind: KIND_MANAGED_AGENT,
+                pubkey: keys.public_key().to_hex(),
+                d_tag: "e".repeat(64),
+                content: fat_content,
+                created_at: 1,
+                raw_event: String::new(),
+                pending_sync: false,
+            },
+        )
+        .unwrap();
+    }
+
     // First boot after upgrade: projection content changed (fat -> slim) so
     // the agent republishes.
     assert_eq!(reconcile_agents_in_dir(dir.path(), &keys).unwrap(), 1);
@@ -248,6 +277,7 @@ fn slimming_republish_wave_is_one_time() {
         !row.content.contains("system_prompt"),
         "definition-linked retained content must be the slimmed shape"
     );
+    assert!(row.pending_sync, "slimmed rewrite must queue for publish");
     drop(conn);
 
     // Second boot: identical projection — a true no-op, no republish loop.
