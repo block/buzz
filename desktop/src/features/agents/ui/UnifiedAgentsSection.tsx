@@ -20,7 +20,6 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
-  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/shared/ui/dropdown-menu";
 import { IdentityCardSkeleton } from "@/shared/ui/identity-card-skeleton";
@@ -41,7 +40,6 @@ type UnifiedAgentsSectionProps = {
   startingPersonaIds: ReadonlySet<string>;
   onBulkRemoveStopped: () => void;
   onBulkStopRunning: () => void;
-  onCreateAgent: () => void;
   onOpenAgentProfile: (
     pubkey: string,
     options?: ProfilePanelOpenOptions,
@@ -81,7 +79,6 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
     startingPersonaIds,
     onBulkRemoveStopped,
     onBulkStopRunning,
-    onCreateAgent,
     onOpenAgentProfile,
     onOpenPersonaProfile,
     onStartAgent,
@@ -210,7 +207,6 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
               isPersonasPending={isPersonasPending}
               openFilePicker={openFilePicker}
               onChooseCatalog={onChooseCatalog}
-              onCreateAgent={onCreateAgent}
               onCreatePersona={onCreatePersona}
             />
           </div>
@@ -503,14 +499,12 @@ function NewAgentCard({
   isPersonasPending,
   openFilePicker,
   onChooseCatalog,
-  onCreateAgent,
   onCreatePersona,
 }: {
   canChooseCatalog: boolean;
   isPersonasPending: boolean;
   openFilePicker: () => void;
   onChooseCatalog: () => void;
-  onCreateAgent: () => void;
   onCreatePersona: () => void;
 }) {
   return (
@@ -540,12 +534,8 @@ function NewAgentCard({
             Choose from catalog
           </DropdownMenuItem>
         ) : null}
-        <DropdownMenuSeparator />
-        <DropdownMenuItem onClick={onCreateAgent}>
-          Custom agent
-        </DropdownMenuItem>
         <DropdownMenuItem onClick={openFilePicker}>
-          Import persona file
+          Import agent file
         </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>

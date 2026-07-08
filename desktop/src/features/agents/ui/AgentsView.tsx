@@ -58,13 +58,16 @@ export function AgentsView() {
     teamActions.updateTeamMutation.isPending ||
     teamActions.deleteTeamMutation.isPending;
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: mount-only shortcut subscription; openUnifiedCreate only calls stable setState-backed callbacks
   React.useEffect(() => {
+    // The app-wide "create agent" shortcut routes to the unified definition
+    // flow (B5): one create path, with the start-after-create toggle on.
     if (consumePendingOpenCreateAgent()) {
-      setCreateDialogMode("instance");
+      openUnifiedCreate("definition");
     }
 
     return subscribeOpenCreateAgent(() => {
-      setCreateDialogMode("instance");
+      openUnifiedCreate("definition");
     });
   }, []);
 
@@ -91,9 +94,6 @@ export function AgentsView() {
               }}
               onBulkStopRunning={() => {
                 void agents.handleBulkStopRunning();
-              }}
-              onCreateAgent={() => {
-                openUnifiedCreate("instance");
               }}
               onOpenAgentProfile={(pubkey, options) => {
                 openProfilePanel?.(pubkey, options);
