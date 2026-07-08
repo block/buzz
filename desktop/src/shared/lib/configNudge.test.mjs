@@ -62,7 +62,7 @@ test("extractConfigNudge parses cli_login requirement", () => {
       {
         surface: "cli_login",
         probe_args: ["codex", "login", "status"],
-        setup_copy: "run `codex login --with-api-key`",
+        setup_copy: "run `codex login`",
         availability: "available",
       },
     ],
@@ -81,7 +81,7 @@ test("extractConfigNudge returns null for cli_login without availability", () =>
       {
         surface: "cli_login",
         probe_args: ["codex", "login", "status"],
-        setup_copy: "run `codex login --with-api-key`",
+        setup_copy: "run `codex login`",
         // no availability field
       },
     ],

@@ -94,10 +94,19 @@ export function ConfigNudgeCard({
 
   const allCliLogin = isAllCliLogin(nudge.requirements);
 
+  const openDoctor = () => {
+    if (!onOpenSettings) {
+      console.warn(
+        "[ConfigNudgeCard] onOpenSettings is null — Doctor deep-link unavailable on this surface",
+      );
+    }
+    onOpenSettings?.("doctor");
+  };
+
   const handleOpen = () => {
     if (allCliLogin) {
       // (A) Pure cli_login card — route to Doctor.
-      onOpenSettings?.("doctor");
+      openDoctor();
     } else {
       openProfilePanel?.(nudge.agent_pubkey);
       requestOpenEditAgent(nudge.agent_pubkey);
@@ -108,7 +117,7 @@ export function ConfigNudgeCard({
     // (B) Inline Doctor CTA — stop propagation so the card trigger doesn't
     // double-fire (which would also open Edit Agent on mixed cards).
     e.stopPropagation();
-    onOpenSettings?.("doctor");
+    openDoctor();
   };
 
   // CTA label shown in AttachmentActions.
@@ -145,7 +154,7 @@ export function ConfigNudgeCard({
           ))}
         </div>
       </AttachmentContent>
-      <AttachmentActions>
+      <AttachmentActions className="items-end self-end">
         {/* Affordance #3: always-visible CTA text (was opacity-0 fade-in). */}
         <span className="text-xs text-muted-foreground">{ctaLabel}</span>
       </AttachmentActions>
@@ -201,7 +210,7 @@ function RequirementRow({
               on mixed cards where both card and row CTAs are visible. */}
           {showRowDoctorCta && (
             <button
-              className="relative z-20 shrink-0 font-medium text-destructive hover:underline"
+              className="relative z-20 shrink-0 font-medium text-muted-foreground hover:underline"
               onClick={onOpenDoctor}
               type="button"
             >

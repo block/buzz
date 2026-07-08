@@ -151,7 +151,7 @@ pub enum Requirement {
         /// Arguments for the login-status probe (e.g. `["claude", "auth", "status"]`).
         probe_args: Vec<String>,
         /// Human-readable instruction for completing the login
-        /// (e.g. `"run \`codex login --with-api-key\`"`).
+        /// (e.g. `"run \`codex login\`"`).
         setup_copy: String,
         /// Granular install/auth state for this runtime — distinguishes
         /// "not installed" from "logged out" from "adapter missing".
@@ -251,11 +251,7 @@ fn collect_missing_requirements(
             "complete Claude Code authentication by running the Claude CLI",
             rt,
         ),
-        "codex" => cli_login_requirements(
-            &["codex", "login", "status"],
-            "run `codex login --with-api-key`",
-            rt,
-        ),
+        "codex" => cli_login_requirements(&["codex", "login", "status"], "run `codex login`", rt),
         _ => vec![],
     }
 }
@@ -844,16 +840,12 @@ mod tests {
 
     #[test]
     fn codex_not_ready_copy_does_not_mention_openai_api_key() {
-        // codex uses its own credential store via `codex login --with-api-key`.
+        // codex uses its own credential store via `codex login` (OAuth or API key).
         // The nudge copy must NOT say "set OPENAI_API_KEY".
         // Use a not-installed runtime so the requirement is always emitted
         // regardless of whether codex is on the test machine's PATH.
         let rt = make_cli_runtime(&["__buzz_nonexistent_adapter_xyz789__"], None);
-        let reqs = cli_login_requirements(
-            &["codex", "login", "status"],
-            "run `codex login --with-api-key`",
-            &rt,
-        );
+        let reqs = cli_login_requirements(&["codex", "login", "status"], "run `codex login`", &rt);
         // Whether codex is installed or not, the copy (if any) must not mention OPENAI_API_KEY.
         for req in &reqs {
             if let Requirement::CliLogin { setup_copy, .. } = req {
@@ -907,6 +899,23 @@ mod tests {
         }
     }
 
+    /// Returns the absolute path of the currently-running test binary as a
+    /// `&'static str`.  Host-portable stand-in for a "present" binary:
+    /// the path is absolute so `find_command` resolves it via `path.exists()`
+    /// rather than searching `PATH`, and the file always exists on the host.
+    ///
+    /// The tiny allocation is intentionally leaked — this runs at most once per
+    /// test process and the process exits immediately after tests complete.
+    fn present_binary_str() -> &'static str {
+        let path = std::env::current_exe().expect("current_exe must be available in tests");
+        Box::leak(path.to_string_lossy().into_owned().into_boxed_str())
+    }
+
+    /// Leak a runtime slice of `'static` strs for use in `make_cli_runtime`.
+    fn static_commands(commands: Vec<&'static str>) -> &'static [&'static str] {
+        Box::leak(commands.into_boxed_slice())
+    }
+
     #[test]
     fn cli_login_requirements_missing_binary_is_not_ready() {
         // Both adapter and underlying CLI are nonexistent → NotInstalled state
@@ -943,13 +952,13 @@ mod tests {
 
     #[test]
     fn cli_login_requirements_adapter_missing_emits_adapter_missing() {
-        // Underlying CLI present (`true` is always on PATH), adapter absent.
+        // Underlying CLI present (use the running test binary as a portable
+        // stand-in — it's always present and resolves via absolute path),
+        // adapter absent.
         // → AdapterMissing state → no probe run → CliLogin{AdapterMissing}.
-        let rt = make_cli_runtime(
-            &["__buzz_nonexistent_adapter_xyz789__"],
-            Some("true"), // "true" is always on PATH on POSIX
-        );
-        let reqs = cli_login_requirements(&["true", "status"], "install the adapter", &rt);
+        let exe = present_binary_str();
+        let rt = make_cli_runtime(&["__buzz_nonexistent_adapter_xyz789__"], Some(exe));
+        let reqs = cli_login_requirements(&[exe, "--list"], "install the adapter", &rt);
         assert!(
             !reqs.is_empty(),
             "adapter missing must produce a CliLogin requirement"
@@ -968,13 +977,15 @@ mod tests {
 
     #[test]
     fn cli_login_requirements_cli_missing_emits_cli_missing() {
-        // Adapter present (`true` stands in for the adapter binary), CLI absent.
+        // Adapter present (use the running test binary as a portable stand-in),
+        // underlying CLI absent.
         // → CliMissing state → no probe run → CliLogin{CliMissing}.
+        let exe = present_binary_str();
         let rt = make_cli_runtime(
-            &["true"],                               // adapter found via "true"
+            static_commands(vec![exe]),              // adapter found via absolute path
             Some("__buzz_nonexistent_cli_abc123__"), // underlying CLI missing
         );
-        let reqs = cli_login_requirements(&["true", "status"], "install the CLI", &rt);
+        let reqs = cli_login_requirements(&[exe, "--list"], "install the CLI", &rt);
         assert!(
             !reqs.is_empty(),
             "CLI missing must produce a CliLogin requirement"
@@ -993,20 +1004,21 @@ mod tests {
 
     #[test]
     fn cli_login_requirements_resolvable_binary_runs_probe_at_resolved_path() {
-        // Both adapter and CLI present (`true` stands in for both), probe exits 0
+        // Both adapter and CLI present (use the running test binary as a
+        // portable stand-in — always present, resolves via absolute path),
+        // probe exits 0 (run with `--list` which lists tests and exits 0).
         // → logged_in = true → requirements is empty (Ready).
-        // `true` is universally resolvable on POSIX/macOS/Linux CI.
-        let rt = make_cli_runtime(&["true"], Some("true"));
+        let exe = present_binary_str();
+        let rt = make_cli_runtime(static_commands(vec![exe]), Some(exe));
         let reqs = cli_login_requirements(
-            &["true", "--probe-arg"],
-            "this should not show (true always succeeds)",
+            &[exe, "--list"],
+            "this should not show (probe exits 0)",
             &rt,
         );
         assert!(
             reqs.is_empty(),
             "expected Ready (no requirements) when probe binary resolves and exits 0; \
-             got {:?} — `true` is always on PATH on POSIX/macOS/Linux CI so this \
-             must be empty",
+             got {:?}",
             reqs
         );
     }
@@ -1014,10 +1026,12 @@ mod tests {
     #[test]
     fn cli_login_requirements_logged_out_emits_available() {
         // Both adapter and CLI present, but probe exits non-zero (logged out).
-        // Use `false` as the probe — always exits 1 on POSIX.
+        // Use the test binary with an unrecognized argument as the probe —
+        // libtest exits non-zero for unknown flags on all platforms.
         // → CliLogin{Available} (tooling installed, needs login).
-        let rt = make_cli_runtime(&["true"], Some("true"));
-        let reqs = cli_login_requirements(&["false", "status"], "run `tool login`", &rt);
+        let exe = present_binary_str();
+        let rt = make_cli_runtime(static_commands(vec![exe]), Some(exe));
+        let reqs = cli_login_requirements(&[exe, "--buzz-probe-fail-xyz"], "run `tool login`", &rt);
         assert!(
             !reqs.is_empty(),
             "non-zero probe must produce a CliLogin requirement (logged out)"
@@ -1093,7 +1107,7 @@ mod tests {
                 "login".to_string(),
                 "status".to_string(),
             ],
-            setup_copy: "run `codex login --with-api-key`".to_string(),
+            setup_copy: "run `codex login`".to_string(),
             availability: crate::managed_agents::AcpAvailabilityStatus::Available,
         };
         let json = serde_json::to_value(&r).unwrap();

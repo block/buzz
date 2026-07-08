@@ -122,7 +122,10 @@ const overrides = new Map([
   // Updated existing codex_not_ready test to use make_cli_runtime stub.
   // +4 lines: #1640 persona-env-vars-refresh rebase added availability-classification
   // growth in the live-persona env merge path. Feature plumbing, not generic debt.
-  ["src-tauri/src/managed_agents/readiness.rs", 1374],
+  // Windows-CI portability: replaced POSIX true/false probes with current_exe()
+  // stand-in + present_binary_str()/static_commands() helpers (+29 lines).
+  // Tests now pass on windows-latest CI shard without POSIX shell utilities.
+  ["src-tauri/src/managed_agents/readiness.rs", 1403],
   // applyWorkspace reposDir parameter plus the validateReposDir binding,
   // threaded through Tauri invokes for configurable repos_dir, plus the
   // harness-persona-sync `harnessOverride` create-input bit — load-bearing

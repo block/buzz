@@ -651,7 +651,7 @@ mod tests {
                     "login".to_string(),
                     "status".to_string(),
                 ],
-                setup_copy: "run `codex login --with-api-key`".to_string(),
+                setup_copy: "run `codex login`".to_string(),
                 availability: AcpAvailabilityStatus::Available,
             }],
         };
