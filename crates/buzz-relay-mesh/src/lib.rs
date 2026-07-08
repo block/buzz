@@ -18,6 +18,8 @@
 //! **The law:** mesh membership is a hint; the Redis fenced generation is the
 //! arbiter. Nothing in this crate grants ownership — see [`wire::FencedHeader`].
 
+pub mod endpoint;
+pub mod peer;
 pub mod wire;
 
 // Lane modules — one owner per file (see the mesh thread for lane map):
