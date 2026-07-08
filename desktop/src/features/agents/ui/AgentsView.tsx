@@ -5,7 +5,7 @@ import {
 } from "@/features/agents/openCreateAgentEvent";
 import { AddAgentToChannelDialog } from "./AddAgentToChannelDialog";
 import { AddTeamToChannelDialog } from "./AddTeamToChannelDialog";
-import { AgentDialog, type AgentDialogMode } from "./AgentDialog";
+import { AgentDialog, type AgentDialogCreateMode } from "./AgentDialog";
 import { BatchImportDialog } from "./BatchImportDialog";
 import { PersonaCatalogDialog } from "./PersonaCatalogDialog";
 import { AgentDefinitionDialog } from "./AgentDefinitionDialog";
@@ -33,9 +33,9 @@ export function AgentsView() {
   // so the unified create dialog and the edit/dup/import AgentDefinitionDialog
   // mount never coexist.
   const [createDialogMode, setCreateDialogMode] =
-    React.useState<AgentDialogMode | null>(null);
+    React.useState<AgentDialogCreateMode | null>(null);
 
-  function openUnifiedCreate(mode: AgentDialogMode) {
+  function openUnifiedCreate(mode: AgentDialogCreateMode) {
     if (mode === "definition") {
       personas.prepareCreate();
     }

@@ -34,7 +34,7 @@ import {
   stopManagedAgentWithRules,
 } from "@/features/agents/lib/managedAgentControlActions";
 import { describeLogFile } from "@/features/agents/ui/agentUi";
-import { EditAgentDialog } from "@/features/agents/ui/EditAgentDialog";
+import { AgentDialog } from "@/features/agents/ui/AgentDialog";
 import {
   consumePendingOpenEditAgent,
   subscribeOpenEditAgent,
@@ -918,8 +918,9 @@ export function UserProfilePanel({
   );
   const editAgentDialog =
     canEditAgent && managedAgent ? (
-      <EditAgentDialog
+      <AgentDialog
         agent={managedAgent}
+        mode="instance-edit"
         onOpenChange={setEditAgentOpen}
         open={editAgentOpen}
       />

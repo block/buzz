@@ -66,7 +66,7 @@ const ADVANCED_FIELDS_MOTION_TRANSITION = {
   ease: [0.23, 1, 0.32, 1],
 } as const;
 
-export function EditAgentDialog({
+export function AgentInstanceEditDialog({
   agent,
   open,
   onOpenChange,

@@ -4,6 +4,7 @@ import type {
   AcpRuntimeCatalogEntry,
   CreateManagedAgentResponse,
   CreatePersonaInput,
+  ManagedAgent,
   UpdatePersonaInput,
 } from "@/shared/api/types";
 import { Switch } from "@/shared/ui/switch";
@@ -12,14 +13,15 @@ import {
   intentForStartToggle,
   type AgentCreateIntent,
 } from "./agentCreateIntent";
+import { AgentInstanceEditDialog } from "./AgentInstanceEditDialog";
 import { CreateAgentDialog } from "./CreateAgentDialog";
 import { createPersonaDialogState } from "./personaDialogState";
 import { AgentDefinitionDialog } from "./AgentDefinitionDialog";
 
-export type AgentDialogMode = "definition" | "instance";
+export type AgentDialogCreateMode = "definition" | "instance";
 
-type AgentDialogProps = {
-  mode: AgentDialogMode;
+type AgentDialogCreateProps = {
+  mode: AgentDialogCreateMode;
   onOpenChange: (open: boolean) => void;
   definitionError: Error | null;
   isDefinitionPending: boolean;
@@ -32,14 +34,39 @@ type AgentDialogProps = {
   onInstanceCreated: (result: CreateManagedAgentResponse) => void;
 };
 
+type AgentDialogInstanceEditProps = {
+  mode: "instance-edit";
+  agent: ManagedAgent;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  onUpdated?: (agent: ManagedAgent) => void;
+};
+
+type AgentDialogProps = AgentDialogCreateProps | AgentDialogInstanceEditProps;
+
 /**
- * Unified create entry point (Phase 1B.2): routes a create intent to the
- * form that owns it. The definition family renders AgentDefinitionDialog in
- * create mode with a "start after create" toggle; the standalone-instance
- * intent renders CreateAgentDialog unchanged. Physical consolidation of the
- * two forms is Phase 1B.3.
+ * Unified entry point (Phase 1B.2/1B.3b): routes an intent to the form that
+ * owns it. The definition family renders AgentDefinitionDialog in create mode
+ * with a "start after create" toggle; the standalone-instance intent renders
+ * CreateAgentDialog unchanged; instance-edit renders AgentInstanceEditDialog
+ * (persistent mount + `open` toggle — its reset lifecycle is keyed on
+ * [open, agent.pubkey]). Physical consolidation of the forms is Phase 1B.3c+.
  */
-export function AgentDialog({
+export function AgentDialog(props: AgentDialogProps) {
+  if (props.mode === "instance-edit") {
+    return (
+      <AgentInstanceEditDialog
+        agent={props.agent}
+        onOpenChange={props.onOpenChange}
+        onUpdated={props.onUpdated}
+        open={props.open}
+      />
+    );
+  }
+  return <AgentCreateDialogRouter {...props} />;
+}
+
+function AgentCreateDialogRouter({
   mode,
   onOpenChange,
   definitionError,
@@ -48,7 +75,7 @@ export function AgentDialog({
   runtimesLoading,
   onSubmitDefinition,
   onInstanceCreated,
-}: AgentDialogProps) {
+}: AgentDialogCreateProps) {
   const [startAfterCreate, setStartAfterCreate] = React.useState(true);
   // Stable identity across toggle flips — AgentDefinitionDialog re-initializes its
   // fields whenever `initialValues` changes.

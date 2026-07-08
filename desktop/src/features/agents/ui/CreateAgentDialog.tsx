@@ -226,7 +226,7 @@ export function CreateAgentDialog({
     [allRequiredEnvKeys, bakedSatisfiedEnvKeys, fileSatisfiedEnvKeys],
   );
 
-  // Clear model when provider scope changes, mirroring EditAgentDialog.
+  // Clear model when provider scope changes, mirroring AgentInstanceEditDialog.
   React.useEffect(() => {
     if (
       !open ||
