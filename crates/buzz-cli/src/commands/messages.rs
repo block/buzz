@@ -339,21 +339,136 @@ pub async fn cmd_get_thread(
 
 pub async fn cmd_search(
     client: &BuzzClient,
-    query: &str,
+    query: Option<&str>,
+    author: Option<&str>,
+    since: Option<i64>,
     limit: Option<u32>,
     format: &crate::OutputFormat,
 ) -> Result<(), CliError> {
+    if query.is_none() && author.is_none() {
+        return Err(CliError::Usage(
+            "at least one of --query or --author is required".into(),
+        ));
+    }
     let limit = limit.unwrap_or(20).min(100);
-    let filter = serde_json::json!({
+
+    let author_hex = match author {
+        Some(a) => Some(resolve_author(client, a).await?),
+        None => None,
+    };
+
+    let mut filter = serde_json::json!({
         "kinds": [9, 40002, 45001, 45003],
-        "search": query,
         "limit": limit
     });
+    if let Some(q) = query {
+        filter["search"] = serde_json::json!(q);
+    }
+    if let Some(ref pk) = author_hex {
+        filter["authors"] = serde_json::json!([pk]);
+    }
+    if let Some(s) = since {
+        filter["since"] = serde_json::json!(s);
+    }
     let resp = client.query(&filter).await?;
-    let events: Vec<serde_json::Value> = serde_json::from_str(&resp).unwrap_or_default();
+    let mut events: Vec<serde_json::Value> = serde_json::from_str(&resp).unwrap_or_default();
+    // The full-text path returns relevance order; a pure author/time query has
+    // no relevance, so present newest-first like `messages get`.
+    if query.is_none() {
+        events.sort_by_key(|e| {
+            std::cmp::Reverse(e.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0))
+        });
+    }
     let normalized = normalize_events(&events);
     println!("{}", format_events(&normalized, format));
     Ok(())
+}
+
+/// Resolve an `--author` value to a 64-char hex pubkey.
+///
+/// Accepts, in order of precedence: 64-char hex (validated), an `npub1…`
+/// bech32 key, or a display name resolved via NIP-50 profile search. A name
+/// must match exactly one user (case-insensitive, on `display_name` or
+/// `name`) — ambiguity is an error listing the candidates rather than a
+/// silent mix of authors.
+async fn resolve_author(client: &BuzzClient, author: &str) -> Result<String, CliError> {
+    let author = author.trim();
+    if author.len() == 64 && author.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Ok(author.to_ascii_lowercase());
+    }
+    if author.starts_with("npub1") {
+        return nostr::PublicKey::parse(author)
+            .map(|pk| pk.to_hex())
+            .map_err(|_| CliError::Usage(format!("invalid npub: {author}")));
+    }
+
+    // Display name → NIP-50 search on kind:0, exact case-insensitive match.
+    let filter = serde_json::json!({
+        "kinds": [0],
+        "search": author,
+        "limit": 100
+    });
+    let raw = client.query(&filter).await?;
+    let events: Vec<serde_json::Value> = serde_json::from_str(&raw).unwrap_or_default();
+    let mut matches = match_profiles_by_name(&events, author);
+    match matches.len() {
+        0 => Err(CliError::Usage(format!(
+            "no user found with name '{author}' — pass a hex pubkey or npub instead"
+        ))),
+        1 => Ok(matches.remove(0).0),
+        _ => {
+            // Cap the candidate listing — some names are shared by dozens of
+            // users, and an unbounded list turns the error into a wall of text.
+            let shown = 5.min(matches.len());
+            let mut listing: Vec<String> = matches[..shown]
+                .iter()
+                .map(|(pk, name)| format!("{name} ({pk})"))
+                .collect();
+            if matches.len() > shown {
+                listing.push(format!("… and {} more", matches.len() - shown));
+            }
+            Err(CliError::Usage(format!(
+                "name '{author}' is ambiguous — matches: {}. Pass a pubkey instead",
+                listing.join(", ")
+            )))
+        }
+    }
+}
+
+/// Exact case-insensitive profile match on `display_name` or `name` across
+/// kind:0 events. Returns deduped `(pubkey, shown name)` pairs. Pure so the
+/// name-resolution semantics are unit-testable without a relay.
+fn match_profiles_by_name(events: &[serde_json::Value], name: &str) -> Vec<(String, String)> {
+    let lower = name.to_ascii_lowercase();
+    let mut matches: Vec<(String, String)> = Vec::new();
+    for e in events {
+        let Some(pubkey) = e.get("pubkey").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let Some(content) = e
+            .get("content")
+            .and_then(|v| v.as_str())
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+        else {
+            continue;
+        };
+        let display_name = content
+            .get("display_name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let plain_name = content.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        if display_name.to_ascii_lowercase() == lower || plain_name.to_ascii_lowercase() == lower {
+            let shown = if display_name.is_empty() {
+                plain_name
+            } else {
+                display_name
+            };
+            matches.push((pubkey.to_string(), shown.to_string()));
+        }
+    }
+    matches.sort();
+    matches.dedup();
+    matches
 }
 
 pub struct SendMessageParams {
@@ -737,7 +852,22 @@ pub async fn dispatch(
             limit,
             depth_limit,
         } => cmd_get_thread(client, &channel, &event, limit, depth_limit, format).await,
-        MessagesCmd::Search { query, limit } => cmd_search(client, &query, limit, format).await,
+        MessagesCmd::Search {
+            query,
+            author,
+            since,
+            limit,
+        } => {
+            cmd_search(
+                client,
+                query.as_deref(),
+                author.as_deref(),
+                since,
+                limit,
+                format,
+            )
+            .await
+        }
         MessagesCmd::Vote { event, direction } => {
             cmd_vote_on_post(client, &event, &direction).await
         }
@@ -746,7 +876,7 @@ pub async fn dispatch(
 
 #[cfg(test)]
 mod tests {
-    use super::{find_root_from_tags, parse_member_pubkeys};
+    use super::{find_root_from_tags, match_profiles_by_name, parse_member_pubkeys};
     use buzz_sdk::mentions::{
         extract_at_mentions_with_known, extract_at_names, match_names_to_profiles, MentionProfile,
     };
@@ -971,5 +1101,67 @@ mod tests {
             ],
         });
         assert_eq!(parse_member_pubkeys(&event), vec![PK_VALID_A, PK_VALID_A]);
+    }
+
+    // ---- match_profiles_by_name (author resolution for `messages search --author`) ----
+
+    fn profile_event(
+        pubkey: &str,
+        display_name: Option<&str>,
+        name: Option<&str>,
+    ) -> serde_json::Value {
+        let mut content = serde_json::Map::new();
+        if let Some(d) = display_name {
+            content.insert("display_name".into(), json!(d));
+        }
+        if let Some(n) = name {
+            content.insert("name".into(), json!(n));
+        }
+        json!({
+            "pubkey": pubkey,
+            "content": serde_json::Value::Object(content).to_string(),
+        })
+    }
+
+    #[test]
+    fn author_name_match_is_exact_case_insensitive() {
+        let events = vec![
+            profile_event(PK_VALID_A, Some("Aaron"), Some("aaron")),
+            // Substring only — NIP-50 may return it, but it must not match.
+            profile_event(PK_VALID_B, Some("Aaronson"), None),
+        ];
+        let matches = match_profiles_by_name(&events, "aArOn");
+        assert_eq!(matches, vec![(PK_VALID_A.to_string(), "Aaron".to_string())]);
+    }
+
+    #[test]
+    fn author_name_ambiguity_returns_all_candidates() {
+        let events = vec![
+            profile_event(PK_VALID_A, Some("Sam"), None),
+            profile_event(PK_VALID_B, None, Some("sam")),
+        ];
+        let matches = match_profiles_by_name(&events, "sam");
+        assert_eq!(matches.len(), 2);
+    }
+
+    #[test]
+    fn author_name_no_match_and_malformed_content() {
+        let events = vec![
+            profile_event(PK_VALID_A, Some("Aaron"), None),
+            json!({"pubkey": PK_VALID_B, "content": "not-json"}),
+            json!({"content": "{}"}), // missing pubkey
+        ];
+        assert!(match_profiles_by_name(&events, "Zoe").is_empty());
+    }
+
+    #[test]
+    fn author_name_dedups_replaceable_event_copies() {
+        // Same (pubkey, name) appearing twice (e.g. duplicate kind:0 rows)
+        // must resolve unambiguously.
+        let events = vec![
+            profile_event(PK_VALID_A, Some("Aaron"), None),
+            profile_event(PK_VALID_A, Some("Aaron"), None),
+        ];
+        assert_eq!(match_profiles_by_name(&events, "Aaron").len(), 1);
     }
 }

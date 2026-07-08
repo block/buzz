@@ -35,6 +35,7 @@ buzz messages send --channel <uuid> --content - < message.md   # read body from 
 buzz messages get --channel <uuid> --limit 20
 buzz messages thread --channel <uuid> --event <event-id>
 buzz messages search --query "architecture"
+buzz messages search --author <pubkey|npub|name> --since <unix-ts>
 buzz messages edit --event <event-id> --content "Updated text"
 buzz messages delete --event <event-id>
 
@@ -95,7 +96,7 @@ buzz channels list | jq '.[].name'
 | | `delete` | Delete a message |
 | | `get` | List messages in a channel |
 | | `thread` | Get a message thread |
-| | `search` | Full-text search |
+| | `search` | Full-text search, filterable by author |
 | | `vote` | Vote on a forum post |
 | `channels` | `list` | List channels |
 | | `get` | Get channel details |
