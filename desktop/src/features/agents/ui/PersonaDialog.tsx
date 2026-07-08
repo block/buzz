@@ -64,8 +64,17 @@ import {
   shouldClearKnownModelForSelectionScope,
   sortPersonaRuntimes,
 } from "./personaDialogPickers";
-import { shouldClearModelForRuntimeChange } from "./personaRuntimeModel";
 import { RequiredFieldLabel } from "./personaProviderModelFields";
+import {
+  envVarsMergingAdvancedEdit,
+  envVarsWithProviderApiKey,
+} from "./providerEnvVarUpdates";
+import {
+  selectionOnModelDropdownChange,
+  selectionOnProviderDropdownChange,
+  selectionOnRuntimeChange,
+  type RuntimeModelProviderSelection,
+} from "./runtimeModelProviderSelection";
 import {
   MODEL_DISCOVERY_LOADING_VALUE,
   usePersonaModelDiscovery,
@@ -624,136 +633,76 @@ export function PersonaDialog({
     runtime,
   ]);
 
-  function updateProviderApiKey(envKey: string, value: string) {
-    setEnvVars((current) => {
-      if ((current[envKey] ?? "") === value) {
-        return current;
-      }
-
-      const next = { ...current };
-      if (value.length > 0) {
-        next[envKey] = value;
-      } else {
-        delete next[envKey];
-      }
-      return next;
-    });
-  }
-
-  function removeEnvVar(envKey: string) {
-    setEnvVars((current) => {
-      if (!(envKey in current)) {
-        return current;
-      }
-
-      const next = { ...current };
-      delete next[envKey];
-      return next;
-    });
-  }
-
-  function clearManagedProviderApiKeyWhenLeaving(
-    previousProvider: string,
-    nextProvider: string,
-  ) {
-    const previousEnvVar = getProviderApiKeyEnvVar(previousProvider);
-    const nextEnvVar = getProviderApiKeyEnvVar(nextProvider);
-    if (previousEnvVar && previousEnvVar !== nextEnvVar) {
-      removeEnvVar(previousEnvVar);
-    }
-  }
-
   function handleProviderApiKeyChange(value: string) {
     if (!providerApiKeyConfig) {
       return;
     }
 
-    updateProviderApiKey(providerApiKeyConfig.envVar, value);
+    setEnvVars((current) =>
+      envVarsWithProviderApiKey(current, providerApiKeyConfig.envVar, value),
+    );
   }
 
   function handleAdvancedEnvVarsChange(nextAdvancedEnvVars: EnvVarsValue) {
-    setEnvVars((current) => {
-      const managedEnvVar = providerApiKeyConfig?.envVar ?? null;
-      if (!managedEnvVar || !(managedEnvVar in current)) {
-        return nextAdvancedEnvVars;
-      }
+    setEnvVars((current) =>
+      envVarsMergingAdvancedEdit(
+        current,
+        nextAdvancedEnvVars,
+        providerApiKeyConfig?.envVar ?? null,
+      ),
+    );
+  }
 
-      return {
-        ...nextAdvancedEnvVars,
-        [managedEnvVar]: current[managedEnvVar],
-      };
-    });
+  const selection: RuntimeModelProviderSelection = {
+    provider,
+    model,
+    isCustomProviderEditing,
+    isCustomModelEditing,
+    envVars,
+  };
+
+  function applySelection(next: RuntimeModelProviderSelection) {
+    setProvider(next.provider);
+    setModel(next.model);
+    setIsCustomProviderEditing(next.isCustomProviderEditing);
+    setIsCustomModelEditing(next.isCustomModelEditing);
+    setEnvVars(next.envVars);
   }
 
   function handleRuntimeDropdownChange(nextValue: string) {
     const nextRuntime =
       nextValue === NO_RUNTIME_DROPDOWN_VALUE ? "" : nextValue;
-    const previousRuntime = runtime;
-    const nextRuntimeCanChooseLlmProvider =
-      nextRuntime.trim().length > 0 &&
-      runtimeSupportsLlmProviderSelection(nextRuntime);
     setRuntime(nextRuntime);
-    if (
-      shouldClearModelForRuntimeChange(previousRuntime, nextRuntime) ||
-      shouldClearKnownModelForSelectionScope({
-        model,
-        provider,
-        runtime: nextRuntime,
-      })
-    ) {
-      setModel("");
-      setIsCustomModelEditing(false);
-    }
-    if (!nextRuntimeCanChooseLlmProvider) {
-      clearManagedProviderApiKeyWhenLeaving(provider, "");
-      setIsCustomModelEditing(false);
-      setIsCustomProviderEditing(false);
-      setProvider("");
-    }
+    applySelection(
+      selectionOnRuntimeChange(selection, {
+        previousRuntime: runtime,
+        nextRuntime,
+        nextRuntimeCanChooseProvider:
+          nextRuntime.trim().length > 0 &&
+          runtimeSupportsLlmProviderSelection(nextRuntime),
+        lockedRuntimeReset: "full",
+      }),
+    );
   }
 
   function handleProviderDropdownChange(nextValue: string) {
-    if (nextValue === CUSTOM_PROVIDER_DROPDOWN_VALUE) {
-      clearManagedProviderApiKeyWhenLeaving(provider, "");
-      setIsCustomProviderEditing(true);
-      setProvider("");
-      return;
-    }
-
-    const nextProvider =
-      nextValue === AUTO_PROVIDER_DROPDOWN_VALUE ? "" : nextValue;
-    clearManagedProviderApiKeyWhenLeaving(provider, nextProvider);
-    setIsCustomProviderEditing(false);
-    setProvider(nextProvider);
-    const requiredEnvVar = getProviderApiKeyEnvVar(nextProvider);
-    if (requiredEnvVar && !envVars[requiredEnvVar]?.trim()) {
-      setModel("");
-      setIsCustomModelEditing(false);
-    }
-    if (
-      !isCustomModelEditing &&
-      shouldClearKnownModelForSelectionScope({
-        model,
-        provider: nextProvider,
+    applySelection(
+      selectionOnProviderDropdownChange(selection, {
         runtime,
-      })
-    ) {
-      setModel("");
-      setIsCustomModelEditing(false);
-    }
+        nextValue,
+        clearModelWhenApiKeyMissing: true,
+      }),
+    );
   }
 
   function handleModelDropdownChange(nextValue: string) {
-    if (nextValue === CUSTOM_MODEL_DROPDOWN_VALUE) {
-      setIsCustomModelEditing(true);
-      if (!isModelCustom) {
-        setModel("");
-      }
-      return;
-    }
-
-    setIsCustomModelEditing(false);
-    setModel(nextValue === AUTO_MODEL_DROPDOWN_VALUE ? "" : nextValue);
+    applySelection(
+      selectionOnModelDropdownChange(selection, {
+        nextValue,
+        clearKnownModelOnCustomEntry: true,
+        isModelCustom,
+      }),
+    );
   }
 
   return (

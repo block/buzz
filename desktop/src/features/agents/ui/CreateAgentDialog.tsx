@@ -46,11 +46,12 @@ import {
   requiredCredentialEnvKeys,
   runtimeSupportsLlmProviderSelection,
   shouldClearKnownModelForSelectionScope,
-  getProviderApiKeyEnvVar,
-  CUSTOM_PROVIDER_DROPDOWN_VALUE,
-  AUTO_PROVIDER_DROPDOWN_VALUE,
 } from "./personaDialogPickers";
-import { shouldClearModelForRuntimeChange } from "./personaRuntimeModel";
+import {
+  selectionOnProviderDropdownChange,
+  selectionOnRuntimeChange,
+  type RuntimeModelProviderSelection,
+} from "./runtimeModelProviderSelection";
 import {
   AgentModelField,
   AgentProviderField,
@@ -386,6 +387,22 @@ export function CreateAgentDialog({
     onOpenChange(next);
   }
 
+  const selection: RuntimeModelProviderSelection = {
+    provider,
+    model,
+    isCustomProviderEditing,
+    isCustomModelEditing,
+    envVars,
+  };
+
+  function applySelection(next: RuntimeModelProviderSelection) {
+    setProvider(next.provider);
+    setModel(next.model);
+    setIsCustomProviderEditing(next.isCustomProviderEditing);
+    setIsCustomModelEditing(next.isCustomModelEditing);
+    setEnvVars(next.envVars);
+  }
+
   function handleProviderChange(nextProviderId: string) {
     const previousRuntimeId = selectedRuntimeId;
     setSelectedRuntimeId(nextProviderId);
@@ -404,23 +421,15 @@ export function CreateAgentDialog({
       }
     }
 
-    // Clear model when switching to a runtime with a different model scope,
-    // and clear provider/model when switching away from provider-selection runtimes.
-    if (
-      shouldClearModelForRuntimeChange(previousRuntimeId, nextProviderId) ||
-      shouldClearKnownModelForSelectionScope({
-        model,
-        provider,
-        runtime: nextProviderId,
-      })
-    ) {
-      setModel("");
-      setIsCustomModelEditing(false);
-    }
-    if (!runtimeSupportsLlmProviderSelection(nextProviderId)) {
-      setProvider("");
-      setIsCustomProviderEditing(false);
-    }
+    applySelection(
+      selectionOnRuntimeChange(selection, {
+        previousRuntime: previousRuntimeId,
+        nextRuntime: nextProviderId,
+        nextRuntimeCanChooseProvider:
+          runtimeSupportsLlmProviderSelection(nextProviderId),
+        lockedRuntimeReset: "provider-only",
+      }),
+    );
   }
 
   function handleRunOnChange(value: string) {
@@ -432,48 +441,13 @@ export function CreateAgentDialog({
 
   // Provider dropdown handler for local-mode provider field — mirrors Edit.
   function handleProviderDropdownChange(nextValue: string) {
-    if (nextValue === CUSTOM_PROVIDER_DROPDOWN_VALUE) {
-      const previousApiKey = getProviderApiKeyEnvVar(provider);
-      if (previousApiKey) {
-        setEnvVars((current) => {
-          const next = { ...current };
-          delete next[previousApiKey];
-          return next;
-        });
-      }
-      setIsCustomProviderEditing(true);
-      setProvider("");
-      return;
-    }
-
-    const nextProvider =
-      nextValue === AUTO_PROVIDER_DROPDOWN_VALUE ? "" : nextValue;
-
-    // Clear the old API key when switching providers.
-    const previousApiKey = getProviderApiKeyEnvVar(provider);
-    const nextApiKey = getProviderApiKeyEnvVar(nextProvider);
-    if (previousApiKey && previousApiKey !== nextApiKey) {
-      setEnvVars((current) => {
-        const next = { ...current };
-        delete next[previousApiKey];
-        return next;
-      });
-    }
-
-    setIsCustomProviderEditing(false);
-    setProvider(nextProvider);
-
-    if (
-      !isCustomModelEditing &&
-      shouldClearKnownModelForSelectionScope({
-        model,
-        provider: nextProvider,
+    applySelection(
+      selectionOnProviderDropdownChange(selection, {
         runtime: selectedRuntimeId,
-      })
-    ) {
-      setModel("");
-      setIsCustomModelEditing(false);
-    }
+        nextValue,
+        clearModelWhenApiKeyMissing: false,
+      }),
+    );
   }
 
   // Check provider config required fields are filled.

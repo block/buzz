@@ -27,7 +27,6 @@ import {
   formatRuntimeOptionLabel,
   getModelSelectValue,
   getPersonaProviderOptions,
-  getProviderApiKeyEnvVar,
   hasPersonaModelOption,
   isMissingRequiredDropdownField,
   NO_RUNTIME_DROPDOWN_VALUE,
@@ -45,8 +44,13 @@ import {
   resolveAgentCommandUpdate,
   resolveInheritedRuntimeSubmission,
   resolveRuntimeProviderCapability,
-  shouldClearModelForRuntimeChange,
 } from "./personaRuntimeModel";
+import {
+  selectionOnModelDropdownChange,
+  selectionOnProviderDropdownChange,
+  selectionOnRuntimeChange,
+  type RuntimeModelProviderSelection,
+} from "./runtimeModelProviderSelection";
 import { AgentCreationPreview } from "./AgentCreationPreview";
 import type { EnvVarsValue } from "./EnvVarsEditor";
 import { useRequiredCredentialState } from "./useRequiredCredentialState";
@@ -341,14 +345,27 @@ export function EditAgentDialog({
     selectedRuntimeId,
   ]);
 
+  const selection: RuntimeModelProviderSelection = {
+    provider,
+    model,
+    isCustomProviderEditing,
+    isCustomModelEditing,
+    envVars,
+  };
+
+  function applySelection(next: RuntimeModelProviderSelection) {
+    setProvider(next.provider);
+    setModel(next.model);
+    setIsCustomProviderEditing(next.isCustomProviderEditing);
+    setIsCustomModelEditing(next.isCustomModelEditing);
+    setEnvVars(next.envVars);
+  }
+
   function handleRuntimeDropdownChange(nextValue: string) {
     const nextRuntimeId =
       nextValue === NO_RUNTIME_DROPDOWN_VALUE ? "" : nextValue;
     const previousRuntimeId = selectedRuntimeId;
     const nextRuntime = runtimes.find((r) => r.id === nextRuntimeId);
-    const nextCanChooseProvider = runtimeSupportsLlmProviderSelection(
-      nextRuntime?.id ?? nextRuntimeId,
-    );
 
     // Mark that the user has made an explicit runtime choice. The catalog-arrival
     // effect will no longer overwrite selectedRuntimeId after this point.
@@ -392,98 +409,36 @@ export function EditAgentDialog({
       setAgentArgs(newArgs);
     }
 
-    // Clear model when switching away from a runtime with a different model scope.
-    if (
-      shouldClearModelForRuntimeChange(previousRuntimeId, nextRuntimeId) ||
-      shouldClearKnownModelForSelectionScope({
-        model,
-        provider,
-        runtime: nextRuntime?.id ?? nextRuntimeId,
-      })
-    ) {
-      setModel("");
-      setIsCustomModelEditing(false);
-    }
-
-    // When switching to a provider-locked runtime, clear provider state so no
-    // conflicting provider is persisted on a runtime that doesn't support it.
-    if (!nextCanChooseProvider) {
-      const previousProviderApiKeyEnvVar = getProviderApiKeyEnvVar(provider);
-      if (previousProviderApiKeyEnvVar) {
-        setEnvVars((current) => {
-          const next = { ...current };
-          delete next[previousProviderApiKeyEnvVar];
-          return next;
-        });
-      }
-      setIsCustomModelEditing(false);
-      setIsCustomProviderEditing(false);
-      setProvider("");
-    }
+    applySelection(
+      selectionOnRuntimeChange(selection, {
+        previousRuntime: previousRuntimeId,
+        nextRuntime: nextRuntime?.id ?? nextRuntimeId,
+        nextRuntimeCanChooseProvider: runtimeSupportsLlmProviderSelection(
+          nextRuntime?.id ?? nextRuntimeId,
+        ),
+        lockedRuntimeReset: "full",
+      }),
+    );
   }
 
   function handleProviderDropdownChange(nextValue: string) {
-    if (nextValue === CUSTOM_PROVIDER_DROPDOWN_VALUE) {
-      const previousProviderApiKeyEnvVar = getProviderApiKeyEnvVar(provider);
-      if (previousProviderApiKeyEnvVar) {
-        setEnvVars((current) => {
-          const next = { ...current };
-          delete next[previousProviderApiKeyEnvVar];
-          return next;
-        });
-      }
-      setIsCustomProviderEditing(true);
-      setProvider("");
-      return;
-    }
-
-    const nextProvider =
-      nextValue === AUTO_PROVIDER_DROPDOWN_VALUE ? "" : nextValue;
-
-    // Clear the old provider API key when switching providers.
-    const previousProviderApiKeyEnvVar = getProviderApiKeyEnvVar(provider);
-    const nextProviderApiKeyEnvVar = getProviderApiKeyEnvVar(nextProvider);
-    if (
-      previousProviderApiKeyEnvVar &&
-      previousProviderApiKeyEnvVar !== nextProviderApiKeyEnvVar
-    ) {
-      setEnvVars((current) => {
-        const next = { ...current };
-        delete next[previousProviderApiKeyEnvVar];
-        return next;
-      });
-    }
-
-    setIsCustomProviderEditing(false);
-    setProvider(nextProvider);
-
-    // Clear the model when switching to a provider that requires a different
-    // explicit model selection.
-    if (
-      !isCustomModelEditing &&
-      shouldClearKnownModelForSelectionScope({
-        model,
-        provider: nextProvider,
+    applySelection(
+      selectionOnProviderDropdownChange(selection, {
         runtime: selectedRuntime?.id ?? selectedRuntimeId,
-      })
-    ) {
-      setModel("");
-      setIsCustomModelEditing(false);
-    }
+        nextValue,
+        clearModelWhenApiKeyMissing: false,
+      }),
+    );
   }
 
   function handleModelDropdownChange(nextValue: string) {
-    if (nextValue === CUSTOM_MODEL_DROPDOWN_VALUE) {
-      setIsCustomModelEditing(true);
-      return;
-    }
-    if (nextValue === AUTO_MODEL_DROPDOWN_VALUE) {
-      setIsCustomModelEditing(false);
-      setModel("");
-      return;
-    }
-    setIsCustomModelEditing(false);
-    setModel(nextValue);
+    applySelection(
+      selectionOnModelDropdownChange(selection, {
+        nextValue,
+        clearKnownModelOnCustomEntry: false,
+        isModelCustom: false,
+      }),
+    );
   }
 
   function handleOpenChange(next: boolean) {
