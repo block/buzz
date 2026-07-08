@@ -199,7 +199,9 @@ jobs:
           echo "dmg=$DMG" >> "$GITHUB_OUTPUT"
 
       - name: Set DMG Finder label text size
-        run: desktop/scripts/set-dmg-finder-text-size.sh "${{ steps.unsigned.outputs.dmg }}" 14
+        env:
+          DMG_PATH: ${{ steps.unsigned.outputs.dmg }}
+        run: desktop/scripts/set-dmg-finder-text-size.sh "$DMG_PATH" 14
 
       - name: Codesign and Notarize
         id: codesign
@@ -363,7 +365,9 @@ jobs:
           echo "dmg=$DMG" >> "$GITHUB_OUTPUT"
 
       - name: Set DMG Finder label text size
-        run: desktop/scripts/set-dmg-finder-text-size.sh "${{ steps.unsigned.outputs.dmg }}" 14
+        env:
+          DMG_PATH: ${{ steps.unsigned.outputs.dmg }}
+        run: desktop/scripts/set-dmg-finder-text-size.sh "$DMG_PATH" 14
 
       - name: Codesign and Notarize
         id: codesign
