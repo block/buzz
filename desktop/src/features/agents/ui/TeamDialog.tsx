@@ -363,7 +363,7 @@ export function TeamDialog({
               </div>
 
               <div className="space-y-2">
-                <span className="text-sm font-medium">Personas</span>
+                <span className="text-sm font-medium">Agents</span>
                 <p className="text-xs text-muted-foreground">
                   Select the personas to include in this team.
                 </p>
@@ -384,7 +384,7 @@ export function TeamDialog({
                   <div
                     className="max-h-60 space-y-1 overflow-y-auto rounded-lg border border-border/70 p-2"
                     role="listbox"
-                    aria-label="Personas"
+                    aria-label="Agents"
                     aria-multiselectable="true"
                   >
                     {orderedPersonas.map((persona) => {

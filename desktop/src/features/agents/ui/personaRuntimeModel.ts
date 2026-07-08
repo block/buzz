@@ -119,7 +119,7 @@ export function hasMissingRequiredEnvKey(
  * The ONE exception is the inherit-TRANSITION-from-a-harness-pin: a previously
  * harness-pinned agent (e.g. Claude — `agent.agentCommandOverride != null` at
  * dialog open) has its `provider` cleared and carries no persona credential,
- * then the user checks "Inherit runtime from persona" for a provider-backed
+ * then the user checks "Inherit runtime from template" for a provider-backed
  * persona (e.g. buzz-agent/Anthropic). Persisting the local (empty) provider +
  * credential-less env would save an agent that fails readiness on next start.
  * Only in that case — inheriting AND the local provider is empty AND the agent

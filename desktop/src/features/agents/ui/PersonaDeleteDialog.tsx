@@ -28,11 +28,11 @@ export function PersonaDeleteDialog({
     <AlertDialog onOpenChange={onOpenChange} open={open}>
       <AlertDialogContent>
         <AlertDialogHeader>
-          <AlertDialogTitle>Delete persona?</AlertDialogTitle>
+          <AlertDialogTitle>Delete agent?</AlertDialogTitle>
           <AlertDialogDescription>
             {persona
               ? `Delete ${persona.displayName}. Existing agents keep their copied settings, but this template will no longer be available for new deployments.`
-              : "Delete this persona."}
+              : "Delete this agent."}
           </AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter>

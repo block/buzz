@@ -235,7 +235,7 @@ export function AgentInstanceEditDialog({
   // The runtime id that will actually be active after submit. When inheriting,
   // resolve from the LINKED PERSONA's runtime — that is what will run once the
   // override is cleared. Deriving from agent.agentCommand here is wrong for a
-  // pinned agent that just toggled "Inherit runtime from persona": the override
+  // pinned agent that just toggled "Inherit runtime from template": the override
   // (e.g. a Claude pin) is still present on the record, so it would resolve to
   // the old pin instead of the persona's runtime, hiding required credentials.
   // Fall back to the agent.agentCommand dual-match (command path, then id) only

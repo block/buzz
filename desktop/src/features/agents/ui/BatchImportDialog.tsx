@@ -131,7 +131,7 @@ export function BatchImportDialog({
       <DialogContent className="max-w-2xl overflow-hidden p-0">
         <div className="flex max-h-[85vh] flex-col">
           <DialogHeader className="shrink-0 border-b border-border/60 px-6 py-5 pr-14">
-            <DialogTitle>Import Personas</DialogTitle>
+            <DialogTitle>Import Agents</DialogTitle>
             <DialogDescription>
               Found {personas.length} persona
               {personas.length !== 1 ? "s" : ""} in {fileName || "archive"}.

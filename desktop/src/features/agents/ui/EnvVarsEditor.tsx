@@ -424,7 +424,7 @@ export function EnvVarsEditor({
 
 /**
  * Render a masked preview of an inherited (persona) env value so the agent
- * dialog can show "Overrides persona value •••• (last 4)" without exposing
+ * dialog can show "Overrides template value •••• (last 4)" without exposing
  * the persona's actual secret to anyone viewing the agent UI. Empty values
  * render as "(empty)" so the user can still tell the persona had a value
  * set at all.

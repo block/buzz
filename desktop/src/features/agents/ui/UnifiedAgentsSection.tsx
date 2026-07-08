@@ -232,7 +232,7 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
               agents={unknown}
               collapsed={collapsed}
               groupKey="__unknown__"
-              label="Unknown Persona"
+              label="Unknown Agent"
               startingAgentPubkey={startingAgentPubkey}
               onToggle={toggle}
               onOpenAgentProfile={onOpenAgentProfile}

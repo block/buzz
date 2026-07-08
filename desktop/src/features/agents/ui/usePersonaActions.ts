@@ -232,7 +232,7 @@ export function usePersonaActions() {
       return true;
     } catch (error) {
       setPersonaErrorMessage(
-        error instanceof Error ? error.message : "Failed to save persona.",
+        error instanceof Error ? error.message : "Failed to save agent.",
       );
       return false;
     } finally {
@@ -248,7 +248,7 @@ export function usePersonaActions() {
       setPersonaToDelete(null);
     } catch (error) {
       setPersonaErrorMessage(
-        error instanceof Error ? error.message : "Failed to delete persona.",
+        error instanceof Error ? error.message : "Failed to delete agent.",
       );
     }
   }
@@ -271,8 +271,8 @@ export function usePersonaActions() {
         error instanceof Error
           ? error.message
           : active
-            ? "Failed to select persona for My Agents."
-            : "Failed to deselect persona from My Agents.",
+            ? "Failed to select agent for My Agents."
+            : "Failed to deselect agent from My Agents.",
       );
     }
   }
@@ -291,11 +291,11 @@ export function usePersonaActions() {
         setBatchImportResult(result);
         setBatchImportFileName(fileName);
       } else {
-        setPersonaErrorMessage("No valid personas found in file.");
+        setPersonaErrorMessage("No valid agents found in file.");
       }
     } catch (err) {
       setPersonaErrorMessage(
-        err instanceof Error ? err.message : "Failed to parse persona file.",
+        err instanceof Error ? err.message : "Failed to parse agent file.",
       );
     }
   }
@@ -310,7 +310,7 @@ export function usePersonaActions() {
       },
       onError: (error) => {
         setPersonaErrorMessage(
-          error instanceof Error ? error.message : "Failed to export persona.",
+          error instanceof Error ? error.message : "Failed to export agent.",
         );
       },
     });

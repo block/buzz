@@ -148,7 +148,7 @@ export function TeamImportDialog({
               </div>
 
               <div className="space-y-1">
-                <p className="text-sm font-medium">Personas to import</p>
+                <p className="text-sm font-medium">Agents to import</p>
                 <p className="text-xs text-muted-foreground">
                   Each persona will be created, then grouped into a new team.
                 </p>

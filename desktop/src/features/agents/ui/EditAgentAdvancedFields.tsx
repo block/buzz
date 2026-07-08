@@ -70,7 +70,7 @@ export function EditAgentAdvancedFields({
 }) {
   return (
     <div className="space-y-5 pt-2">
-      {/* Inherit runtime from persona */}
+      {/* Inherit runtime from template */}
       {linkedPersona ? (
         <div className="space-y-1.5">
           <label
@@ -83,14 +83,14 @@ export function EditAgentAdvancedFields({
               onChange={(event) => onInheritHarnessChange(event.target.checked)}
               type="checkbox"
             />
-            Inherit runtime from persona
+            Inherit runtime from template
           </label>
           <p className="text-xs text-muted-foreground">
             {inheritHarness
-              ? `Uses the ${linkedPersona.displayName} persona's runtime${
+              ? `Uses the ${linkedPersona.displayName} template's runtime${
                   linkedPersona.runtime ? ` (${linkedPersona.runtime})` : ""
-                }. Editing the persona and respawning propagates the new runtime.`
-              : "Pins this agent to a specific runtime command, overriding the persona's runtime."}
+                }. Editing the template and respawning propagates the new runtime.`
+              : "Pins this agent to a specific runtime command, overriding the template's runtime."}
           </p>
         </div>
       ) : null}
@@ -366,9 +366,9 @@ export function EditAgentAdvancedFields({
       <EnvVarsEditor
         disabled={disabled}
         fileSatisfiedKeys={fileSatisfiedEnvKeys}
-        helperText="Per-agent env vars. Override the persona's vars on collision."
+        helperText="Per-agent env vars. Override the template's vars on collision."
         inheritedFrom={inheritedEnvVars}
-        inheritedLabel="persona"
+        inheritedLabel="template"
         onChange={onEnvVarsChange}
         requiredKeys={requiredEnvKeys}
         value={envVars}

@@ -73,7 +73,7 @@ export function resolvePersonaRuntime(
     return {
       runtime: defaultRuntime,
       warnings: [
-        `Persona is configured for runtime "${personaRuntimeId}" but it is not available. Using ${defaultRuntime.label} instead.`,
+        `This agent is configured for runtime "${personaRuntimeId}" but it is not available. Using ${defaultRuntime.label} instead.`,
       ],
       isOverridden: true,
     };
@@ -82,7 +82,7 @@ export function resolvePersonaRuntime(
   return {
     runtime: null,
     warnings: [
-      `Persona is configured for runtime "${personaRuntimeId}" but it is not available, and no other runtimes were found.`,
+      `This agent is configured for runtime "${personaRuntimeId}" but it is not available, and no other runtimes were found.`,
     ],
     isOverridden: false,
   };

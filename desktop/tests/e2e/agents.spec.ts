@@ -336,7 +336,7 @@ test("catalog detail pane shows the full persona details", async ({ page }) => {
     "You are Fizz.",
   );
   await expect(page.getByTestId("persona-catalog-detail-pane")).toContainText(
-    "Built-in persona",
+    "Built-in agent",
   );
   await expect(page.getByTestId("persona-catalog-detail-pane")).toContainText(
     "Preferred model",
@@ -409,7 +409,7 @@ test("custom personas can be shown in the agent catalog", async ({ page }) => {
   ).toContainText("Analyst");
   await selectCatalogPersona(page, analystPersonaId);
   await expect(page.getByTestId("persona-catalog-detail-pane")).toContainText(
-    "Custom persona",
+    "Custom agent",
   );
   await expect(
     page.getByTestId(`persona-catalog-use-agent-target-${analystPersonaId}`),

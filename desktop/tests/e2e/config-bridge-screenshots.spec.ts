@@ -210,7 +210,7 @@ test.describe("config bridge screenshots", () => {
 
     // Multiple distinct provenance origins visible at once.
     await expect(panel.getByText("Set in Buzz").first()).toBeVisible();
-    await expect(panel.getByText("Inherited from persona")).toBeVisible();
+    await expect(panel.getByText("Inherited from template")).toBeVisible();
     await expect(
       panel.getByText("From environment variable (GOOSE_MODE)"),
     ).toBeVisible();
