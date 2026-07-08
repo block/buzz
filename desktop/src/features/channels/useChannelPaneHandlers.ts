@@ -80,6 +80,23 @@ export function useChannelPaneHandlers({
   const toggleMutateRef = React.useRef(toggleReactionMutation.mutateAsync);
   toggleMutateRef.current = toggleReactionMutation.mutateAsync;
 
+  // These three recompute whenever timelineMessages changes (every ingest).
+  // Read them through refs so handleExpandThreadReplies keeps a stable
+  // identity — it feeds MessageThreadPanel's per-row onCollapseDepthGuide,
+  // and an identity change there re-renders every thread row. With agents
+  // streaming into an open long thread that meant all rows re-rendered
+  // several times per second (see typing-latency.perf.ts "thread68+").
+  const getFirstReplyIdRef = React.useRef(getFirstReplyIdForMessage);
+  getFirstReplyIdRef.current = getFirstReplyIdForMessage;
+
+  const getReplyDescendantIdsRef = React.useRef(
+    getReplyDescendantIdsForMessage,
+  );
+  getReplyDescendantIdsRef.current = getReplyDescendantIdsForMessage;
+
+  const markRevealedRepliesReadRef = React.useRef(markRevealedRepliesRead);
+  markRevealedRepliesReadRef.current = markRevealedRepliesRead;
+
   const deferPanelState = React.useCallback((update: () => void) => {
     window.setTimeout(() => {
       React.startTransition(update);
@@ -188,7 +205,7 @@ export function useChannelPaneHandlers({
   const handleExpandThreadReplies = React.useCallback(
     (message: { id: string }) => {
       if (expandedThreadReplyIdsRef.current.has(message.id)) {
-        const descendantIds = getReplyDescendantIdsForMessage(message.id);
+        const descendantIds = getReplyDescendantIdsRef.current(message.id);
         setExpandedThreadReplyIds((current) => {
           const next = new Set(current);
           next.delete(message.id);
@@ -200,7 +217,7 @@ export function useChannelPaneHandlers({
         return;
       }
 
-      const firstReplyId = getFirstReplyIdForMessage(message.id);
+      const firstReplyId = getFirstReplyIdRef.current(message.id);
       setExpandedThreadReplyIds((current) => {
         const next = new Set(current);
         next.add(message.id);
@@ -212,19 +229,13 @@ export function useChannelPaneHandlers({
       // reply still nested in a collapsed grandchild branch keeps its badge
       // until it too is revealed — the deliberate reversal of #1118's
       // whole-subtree-on-open collapse.
-      markRevealedRepliesRead(message.id);
+      markRevealedRepliesReadRef.current(message.id);
 
       if (firstReplyId) {
         setThreadScrollTargetId(firstReplyId);
       }
     },
-    [
-      getFirstReplyIdForMessage,
-      getReplyDescendantIdsForMessage,
-      markRevealedRepliesRead,
-      setExpandedThreadReplyIds,
-      setThreadScrollTargetId,
-    ],
+    [setExpandedThreadReplyIds, setThreadScrollTargetId],
   );
 
   const handleSendMessage = React.useCallback(
