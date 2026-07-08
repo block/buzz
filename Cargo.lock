@@ -1040,6 +1040,7 @@ name = "buzz-relay"
 version = "0.1.1"
 dependencies = [
  "anyhow",
+ "async-trait",
  "axum",
  "base64",
  "buzz-audit",
@@ -1070,6 +1071,7 @@ dependencies = [
  "opentelemetry 0.32.0",
  "opentelemetry-otlp 0.32.0",
  "opentelemetry_sdk 0.32.1",
+ "postcard",
  "rand 0.10.1",
  "redis",
  "reqwest 0.13.3",
