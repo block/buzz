@@ -532,10 +532,13 @@ pub async fn create_managed_agent(
     // Validate & normalize the respond-to allowlist BEFORE any side effects.
     // The harness has its own validator (buzz-acp/src/config.rs) but we want
     // to catch malformed input at the boundary so the agent never tries to
-    // start with a list that will crash it on launch.
+    // start with a list that will crash it on launch. The mode/allowlist
+    // pairing (and the definition-default fallback) is resolved later at the
+    // mint site via `resolve_mint_behavioral_defaults`, where the linked
+    // definition is in hand.
     let respond_to_allowlist =
         crate::managed_agents::validate_respond_to_allowlist(&input.respond_to_allowlist)?;
-    if input.respond_to == crate::managed_agents::RespondTo::Allowlist
+    if input.respond_to == Some(crate::managed_agents::RespondTo::Allowlist)
         && respond_to_allowlist.is_empty()
     {
         return Err(
@@ -742,19 +745,38 @@ pub async fn create_managed_agent(
         // (input.env_vars), and the live persona env is merged underneath at
         // read time (spawn / readiness / deploy) so persona credential edits
         // refresh on the next spawn like prompt/model/provider already do.
-        let persona_snapshot = requested_persona_id.as_deref().and_then(|pid| {
+        let linked_persona = requested_persona_id.as_deref().and_then(|pid| {
             load_personas(&app)
                 .ok()?
                 .into_iter()
                 .find(|persona| persona.id == pid)
-                .map(|persona| crate::managed_agents::persona_events::persona_snapshot(&persona))
         });
+        let persona_snapshot = linked_persona
+            .as_ref()
+            .map(crate::managed_agents::persona_events::persona_snapshot);
         let snapshot_prompt = persona_snapshot
             .as_ref()
             .and_then(|s| s.system_prompt.clone());
         let snapshot_model = persona_snapshot.as_ref().and_then(|s| s.model.clone());
         let snapshot_provider = persona_snapshot.as_ref().and_then(|s| s.provider.clone());
         let snapshot_source_version = persona_snapshot.as_ref().map(|s| s.source_version.clone());
+
+        // Mint-time behavioral quad: explicit input wins, then the linked
+        // definition's NIP-AP defaults, then client defaults. The ONLY parse
+        // point for definition behavioral strings — fails loudly on a bad
+        // mode/range instead of minting an agent the author didn't describe.
+        let minted = crate::managed_agents::resolve_mint_behavioral_defaults(
+            input.respond_to,
+            respond_to_allowlist.clone(),
+            input
+                .mcp_toolsets
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string),
+            input.parallelism,
+            linked_persona.as_ref(),
+        )?;
 
         let record = crate::managed_agents::ManagedAgentRecord {
             pubkey: pubkey.clone(),
@@ -782,10 +804,7 @@ pub async fn create_managed_agent(
             // 0 or None → harness uses its own default (320s idle, 3600s max), and the CLI also clamps 0 → minimum.
             idle_timeout_seconds: input.idle_timeout_seconds.filter(|s| *s > 0),
             max_turn_duration_seconds: input.max_turn_duration_seconds.filter(|s| *s > 0),
-            parallelism: input
-                .parallelism
-                .filter(|count| (1..=32).contains(count))
-                .unwrap_or(DEFAULT_AGENT_PARALLELISM),
+            parallelism: minted.parallelism.unwrap_or(DEFAULT_AGENT_PARALLELISM),
             system_prompt: snapshot_prompt.or_else(|| {
                 input
                     .system_prompt
@@ -811,12 +830,7 @@ pub async fn create_managed_agent(
                     .map(str::to_string)
             }),
             persona_source_version: snapshot_source_version,
-            mcp_toolsets: input
-                .mcp_toolsets
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(str::to_string),
+            mcp_toolsets: minted.mcp_toolsets.clone(),
             // Provider agents are managed externally — force false.
             start_on_app_launch: if input.backend != BackendKind::Local {
                 false
@@ -841,8 +855,8 @@ pub async fn create_managed_agent(
             last_exit_code: None,
             last_error: None,
             last_error_code: None,
-            respond_to: input.respond_to,
-            respond_to_allowlist: respond_to_allowlist.clone(),
+            respond_to: minted.respond_to,
+            respond_to_allowlist: minted.respond_to_allowlist.clone(),
             display_name: None,
             slug: None,
             runtime: None,
@@ -851,6 +865,10 @@ pub async fn create_managed_agent(
             is_active: true,
             source_team: None,
             source_team_persona_slug: None,
+            definition_respond_to: None,
+            definition_respond_to_allowlist: Vec::new(),
+            definition_mcp_toolsets: None,
+            definition_parallelism: None,
             relay_mesh: relay_mesh.clone(),
         };
 

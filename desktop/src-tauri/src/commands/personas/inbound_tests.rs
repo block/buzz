@@ -23,6 +23,10 @@ fn local_in_app() -> PersonaRecord {
         source_team: Some("team-1".to_string()),
         source_team_persona_slug: None,
         env_vars: BTreeMap::from([("API_KEY".to_string(), "secret".to_string())]),
+        respond_to: None,
+        respond_to_allowlist: Vec::new(),
+        mcp_toolsets: None,
+        parallelism: None,
         created_at: "2025-01-01T00:00:00Z".to_string(),
         updated_at: "2025-01-01T00:00:00Z".to_string(),
     }
@@ -45,6 +49,10 @@ fn inbound_for(d_tag: &str, display_name: &str) -> PersonaRecord {
         source_team: None,
         source_team_persona_slug: Some(d_tag.to_string()),
         env_vars: BTreeMap::new(),
+        respond_to: None,
+        respond_to_allowlist: Vec::new(),
+        mcp_toolsets: None,
+        parallelism: None,
         created_at: "2025-06-01T00:00:00Z".to_string(),
         updated_at: "2025-06-01T00:00:00Z".to_string(),
     }
@@ -171,6 +179,10 @@ fn local_agent() -> ManagedAgentRecord {
         is_active: true,
         source_team: None,
         source_team_persona_slug: None,
+        definition_respond_to: None,
+        definition_respond_to_allowlist: Vec::new(),
+        definition_mcp_toolsets: None,
+        definition_parallelism: None,
         relay_mesh: None,
     }
 }

@@ -207,6 +207,10 @@ pub async fn create_persona(
             source_team: None,
             source_team_persona_slug: None,
             env_vars: input.env_vars,
+            respond_to: None,
+            respond_to_allowlist: Vec::new(),
+            mcp_toolsets: None,
+            parallelism: None,
             created_at: now.clone(),
             updated_at: now,
         };

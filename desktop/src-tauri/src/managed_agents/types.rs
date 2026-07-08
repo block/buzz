@@ -63,6 +63,19 @@ pub struct PersonaRecord {
     /// Stored as a BTreeMap for deterministic on-disk ordering.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub env_vars: BTreeMap<String, String>,
+    /// NIP-AP behavioral defaults, stored in WIRE shape (kebab-case string,
+    /// not the `RespondTo` enum) so `persona_event_content` is a verbatim
+    /// copy and quad-absent records serialize byte-identically to the
+    /// pre-activation era. Copied onto instances at mint time only — spawn
+    /// re-snapshot never touches them. Validated at the instance boundary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub respond_to: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub respond_to_allowlist: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_toolsets: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parallelism: Option<u32>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -121,6 +134,10 @@ impl PersonaRecord {
             is_active: self.is_active,
             source_team: self.source_team,
             source_team_persona_slug: self.source_team_persona_slug,
+            definition_respond_to: self.respond_to,
+            definition_respond_to_allowlist: self.respond_to_allowlist,
+            definition_mcp_toolsets: self.mcp_toolsets,
+            definition_parallelism: self.parallelism,
             relay_mesh: None,
         }
     }
@@ -150,6 +167,10 @@ impl ManagedAgentRecord {
             source_team: self.source_team.clone(),
             source_team_persona_slug: self.source_team_persona_slug.clone(),
             env_vars: self.env_vars.clone(),
+            respond_to: self.definition_respond_to.clone(),
+            respond_to_allowlist: self.definition_respond_to_allowlist.clone(),
+            mcp_toolsets: self.definition_mcp_toolsets.clone(),
+            parallelism: self.definition_parallelism,
             created_at: self.created_at.clone(),
             updated_at: self.updated_at.clone(),
         })
@@ -337,6 +358,22 @@ pub struct ManagedAgentRecord {
     /// definition's slug within its source team.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_team_persona_slug: Option<String>,
+    /// NIP-AP definition-level behavioral defaults, absorbed from
+    /// `PersonaRecord` in WIRE shape (kebab-case string / optional u32),
+    /// distinct from the instance-side `respond_to`/`respond_to_allowlist`/
+    /// `parallelism` fields above: these are what a *definition* advertises
+    /// and are copied onto instances at mint time only. Wire shape (not the
+    /// `RespondTo` enum) so absent-ness and unknown future mode strings
+    /// round-trip byte-identically through the store — parsed/validated
+    /// solely at the mint boundary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub definition_respond_to: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub definition_respond_to_allowlist: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub definition_mcp_toolsets: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub definition_parallelism: Option<u32>,
     /// Typed marker for relay-mesh agents. `Some(_)` means this agent runs its
     /// inference through Buzz's relay-mesh local endpoint; the `model_ref` is
     /// the served model id to route to. `None` is a normal agent.
@@ -487,8 +524,12 @@ pub struct CreateManagedAgentRequest {
     pub start_on_app_launch: bool,
     #[serde(default)]
     pub backend: BackendKind,
+    /// `None` = caller expressed no preference: the definition's
+    /// `respond_to` default applies when linked, `RespondTo::default()`
+    /// otherwise. `Some` is an explicit instance-level choice and always
+    /// wins over the definition default.
     #[serde(default)]
-    pub respond_to: RespondTo,
+    pub respond_to: Option<RespondTo>,
     /// Raw allowlist as received from the frontend. Validated and normalized
     /// before being written to the record.
     #[serde(default)]
@@ -828,6 +869,22 @@ impl RespondTo {
             Self::Anyone => "anyone",
         }
     }
+
+    /// Parse the NIP-AP wire string. Definitions carry `respond_to` as
+    /// opaque data everywhere else; this is the single parse boundary
+    /// (instance mint), and an unrecognized mode fails LOUDLY here rather
+    /// than silently defaulting — a typo'd definition must not mint an
+    /// agent with a different audience than its author intended.
+    pub fn parse_wire(value: &str) -> Result<Self, String> {
+        match value {
+            "owner-only" => Ok(Self::OwnerOnly),
+            "allowlist" => Ok(Self::Allowlist),
+            "anyone" => Ok(Self::Anyone),
+            other => Err(format!(
+                "definition respond_to '{other}' is not a recognized mode (expected 'owner-only', 'allowlist', or 'anyone')"
+            )),
+        }
+    }
 }
 
 /// Validate and normalize a respond-to allowlist.
@@ -855,6 +912,88 @@ pub fn validate_respond_to_allowlist(input: &[String]) -> Result<Vec<String>, St
         }
     }
     Ok(out)
+}
+
+/// The behavioral fields resolved for a new instance at mint time.
+#[derive(Debug, PartialEq, Eq)]
+pub struct MintBehavioralDefaults {
+    pub respond_to: RespondTo,
+    pub respond_to_allowlist: Vec<String>,
+    pub mcp_toolsets: Option<String>,
+    /// Validated (1..=32) when present; caller applies its own default.
+    pub parallelism: Option<u32>,
+}
+
+/// Resolve the NIP-AP behavioral quad for a new instance: explicit input
+/// wins, then the linked definition's defaults, then client defaults.
+///
+/// This is the ONLY place definition behavioral strings are parsed — an
+/// unrecognized `respond_to` mode or out-of-range `parallelism` on a
+/// definition fails the mint loudly instead of silently substituting a
+/// default the definition author did not choose. The empty-allowlist guard
+/// fires here too, because inbound definitions bypass the dialog entirely.
+///
+/// `input_allowlist` must already be normalized via
+/// [`validate_respond_to_allowlist`]; the definition's allowlist is
+/// validated here since it arrives from the wire.
+pub fn resolve_mint_behavioral_defaults(
+    input_respond_to: Option<RespondTo>,
+    input_allowlist: Vec<String>,
+    input_mcp_toolsets: Option<String>,
+    input_parallelism: Option<u32>,
+    definition: Option<&PersonaRecord>,
+) -> Result<MintBehavioralDefaults, String> {
+    let (respond_to, respond_to_allowlist) = match input_respond_to {
+        // Explicit instance-level choice: the definition default is ignored
+        // wholesale (mode AND list travel together).
+        Some(mode) => (mode, input_allowlist),
+        None => match definition.and_then(|d| d.respond_to.as_deref()) {
+            Some(wire) => {
+                let mode = RespondTo::parse_wire(wire)?;
+                let list = if input_allowlist.is_empty() {
+                    validate_respond_to_allowlist(
+                        definition
+                            .map(|d| d.respond_to_allowlist.as_slice())
+                            .unwrap_or(&[]),
+                    )
+                    .map_err(|e| format!("definition respond-to allowlist is invalid: {e}"))?
+                } else {
+                    input_allowlist
+                };
+                (mode, list)
+            }
+            None => (RespondTo::default(), input_allowlist),
+        },
+    };
+    if respond_to == RespondTo::Allowlist && respond_to_allowlist.is_empty() {
+        return Err(
+            "respond-to mode 'allowlist' requires at least one pubkey in the allowlist".to_string(),
+        );
+    }
+
+    let non_blank = |v: Option<String>| v.filter(|s| !s.trim().is_empty());
+    let mcp_toolsets = non_blank(input_mcp_toolsets)
+        .or_else(|| non_blank(definition.and_then(|d| d.mcp_toolsets.clone())));
+
+    let parallelism = match input_parallelism {
+        Some(count) => Some(count),
+        None => match definition.and_then(|d| d.parallelism) {
+            Some(count) if (1..=32).contains(&count) => Some(count),
+            Some(count) => {
+                return Err(format!(
+                    "definition parallelism {count} is out of range (must be between 1 and 32)"
+                ))
+            }
+            None => None,
+        },
+    };
+
+    Ok(MintBehavioralDefaults {
+        respond_to,
+        respond_to_allowlist,
+        mcp_toolsets,
+        parallelism,
+    })
 }
 
 #[cfg(test)]

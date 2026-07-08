@@ -485,6 +485,10 @@ fn sample_persona() -> PersonaRecord {
         source_team: Some("team-1".to_string()),
         source_team_persona_slug: Some("helper".to_string()),
         env_vars: [("K".to_string(), "v".to_string())].into_iter().collect(),
+        respond_to: None,
+        respond_to_allowlist: Vec::new(),
+        mcp_toolsets: None,
+        parallelism: None,
         created_at: "2026-01-01T00:00:00Z".to_string(),
         updated_at: "2026-01-02T00:00:00Z".to_string(),
     }
@@ -533,4 +537,99 @@ fn empty_prompt_folds_to_none() {
     let mut persona = sample_persona();
     persona.system_prompt = String::new();
     assert_eq!(persona.into_agent_record().system_prompt, None);
+}
+
+// ── Mint-time behavioral defaults (B5 quad activation) ──────────────────────
+
+use super::resolve_mint_behavioral_defaults;
+
+fn quad_definition(respond_to: &str, allowlist: Vec<&str>) -> PersonaRecord {
+    let mut persona = sample_persona();
+    persona.respond_to = Some(respond_to.to_string());
+    persona.respond_to_allowlist = allowlist.into_iter().map(str::to_string).collect();
+    persona.mcp_toolsets = Some("default,canvas".to_string());
+    persona.parallelism = Some(8);
+    persona
+}
+
+#[test]
+fn mint_explicit_input_wins_over_definition() {
+    let definition = quad_definition("anyone", vec![]);
+    let minted = resolve_mint_behavioral_defaults(
+        Some(RespondTo::OwnerOnly),
+        Vec::new(),
+        Some("default".to_string()),
+        Some(2),
+        Some(&definition),
+    )
+    .unwrap();
+    assert_eq!(minted.respond_to, RespondTo::OwnerOnly);
+    assert_eq!(minted.mcp_toolsets.as_deref(), Some("default"));
+    assert_eq!(minted.parallelism, Some(2));
+}
+
+#[test]
+fn mint_copies_definition_quad_when_input_silent() {
+    let allow = "a".repeat(64);
+    let definition = quad_definition("allowlist", vec![&allow]);
+    let minted =
+        resolve_mint_behavioral_defaults(None, Vec::new(), None, None, Some(&definition)).unwrap();
+    assert_eq!(minted.respond_to, RespondTo::Allowlist);
+    assert_eq!(minted.respond_to_allowlist, vec![allow]);
+    assert_eq!(minted.mcp_toolsets.as_deref(), Some("default,canvas"));
+    assert_eq!(minted.parallelism, Some(8));
+}
+
+#[test]
+fn mint_without_definition_or_input_uses_client_defaults() {
+    let minted = resolve_mint_behavioral_defaults(None, Vec::new(), None, None, None).unwrap();
+    assert_eq!(minted.respond_to, RespondTo::default());
+    assert!(minted.respond_to_allowlist.is_empty());
+    assert_eq!(minted.mcp_toolsets, None);
+    assert_eq!(minted.parallelism, None);
+}
+
+#[test]
+fn mint_fails_loudly_on_unknown_definition_respond_to() {
+    // A typo'd mode must never silently become owner-only — the definition
+    // author intended SOMETHING, and guessing which thing is the one wrong
+    // move. The error must carry the offending string.
+    let definition = quad_definition("allowlst", vec![]);
+    let err = resolve_mint_behavioral_defaults(None, Vec::new(), None, None, Some(&definition))
+        .unwrap_err();
+    assert!(
+        err.contains("allowlst"),
+        "error must name the bad mode: {err}"
+    );
+}
+
+#[test]
+fn mint_fails_loudly_on_empty_definition_allowlist() {
+    // Inbound definitions bypass the dialog guard entirely — the mint
+    // boundary is the backstop against a crash-looping instance.
+    let definition = quad_definition("allowlist", vec![]);
+    let err = resolve_mint_behavioral_defaults(None, Vec::new(), None, None, Some(&definition))
+        .unwrap_err();
+    assert!(
+        err.contains("at least one pubkey"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn mint_fails_loudly_on_out_of_range_definition_parallelism() {
+    let mut definition = quad_definition("anyone", vec![]);
+    definition.parallelism = Some(64);
+    let err = resolve_mint_behavioral_defaults(None, Vec::new(), None, None, Some(&definition))
+        .unwrap_err();
+    assert!(err.contains("64"), "error must name the bad value: {err}");
+}
+
+#[test]
+fn mint_normalizes_definition_allowlist_from_wire() {
+    let upper = "A".repeat(64);
+    let definition = quad_definition("allowlist", vec![&upper]);
+    let minted =
+        resolve_mint_behavioral_defaults(None, Vec::new(), None, None, Some(&definition)).unwrap();
+    assert_eq!(minted.respond_to_allowlist, vec!["a".repeat(64)]);
 }

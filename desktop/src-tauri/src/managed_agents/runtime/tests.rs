@@ -170,6 +170,10 @@ fn fixture(
         is_active: true,
         source_team: None,
         source_team_persona_slug: None,
+        definition_respond_to: None,
+        definition_respond_to_allowlist: Vec::new(),
+        definition_mcp_toolsets: None,
+        definition_parallelism: None,
         relay_mesh: None,
     }
 }
@@ -287,6 +291,10 @@ fn persona_with_provider(
         source_team: None,
         source_team_persona_slug: None,
         env_vars: std::collections::BTreeMap::new(),
+        respond_to: None,
+        respond_to_allowlist: Vec::new(),
+        mcp_toolsets: None,
+        parallelism: None,
         created_at: "2026-06-09T00:00:00Z".to_string(),
         updated_at: "2026-06-09T00:00:00Z".to_string(),
     }

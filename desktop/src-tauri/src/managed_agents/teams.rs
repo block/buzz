@@ -295,6 +295,10 @@ pub fn import_team_from_directory(
             env_vars: crate::managed_agents::env_vars::filter_derived_provider_model_env_vars(
                 p.runtime_env_vars.iter().cloned(),
             ),
+            respond_to: None,
+            respond_to_allowlist: Vec::new(),
+            mcp_toolsets: None,
+            parallelism: None,
             created_at: now.clone(),
             updated_at: now.clone(),
         })
@@ -530,6 +534,10 @@ pub fn sync_team_from_dir(
                 env_vars: crate::managed_agents::env_vars::filter_derived_provider_model_env_vars(
                     dir_persona.runtime_env_vars.iter().cloned(),
                 ),
+                respond_to: None,
+                respond_to_allowlist: Vec::new(),
+                mcp_toolsets: None,
+                parallelism: None,
                 created_at: now.clone(),
                 updated_at: now.clone(),
             };
@@ -784,6 +792,10 @@ mod tests {
             source_team: None,
             source_team_persona_slug: None,
             env_vars: std::collections::BTreeMap::new(),
+            respond_to: None,
+            respond_to_allowlist: Vec::new(),
+            mcp_toolsets: None,
+            parallelism: None,
             created_at: "2026-03-20T00:00:00Z".to_string(),
             updated_at: "2026-03-20T00:00:00Z".to_string(),
         }

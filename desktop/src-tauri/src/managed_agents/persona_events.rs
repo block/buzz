@@ -193,6 +193,10 @@ pub fn persona_from_event(event: &nostr::Event) -> Result<PersonaRecord, String>
         source_team: None,
         source_team_persona_slug: Some(d_tag),
         env_vars: BTreeMap::new(),
+        respond_to: content.respond_to,
+        respond_to_allowlist: content.respond_to_allowlist,
+        mcp_toolsets: content.mcp_toolsets,
+        parallelism: content.parallelism,
         created_at: created_at.clone(),
         updated_at: created_at,
     })
@@ -300,14 +304,15 @@ pub fn persona_event_content(record: &PersonaRecord) -> PersonaEventContent {
         model: record.model.clone(),
         provider: record.provider.clone(),
         name_pool: record.name_pool.clone(),
-        // NIP-AP behavioral defaults: RESERVED this release — parsed at the
-        // wire layer but not yet carried on PersonaRecord or applied at
-        // instance creation (that lands with the create-path unification).
-        // Guarded by `behavioral_defaults_are_staged_not_applied`.
-        respond_to: None,
-        respond_to_allowlist: Vec::new(),
-        mcp_toolsets: None,
-        parallelism: None,
+        // NIP-AP behavioral defaults: live since the create-path unification
+        // (B5) — carried on PersonaRecord in wire shape and copied verbatim.
+        // Quad-absent records serialize identically to the reserved era, so
+        // persona_content_hash is stable across the activation (guarded by
+        // `quad_absent_definition_hash_stable_across_activation`).
+        respond_to: record.respond_to.clone(),
+        respond_to_allowlist: record.respond_to_allowlist.clone(),
+        mcp_toolsets: record.mcp_toolsets.clone(),
+        parallelism: record.parallelism,
     }
 }
 
@@ -416,6 +421,10 @@ mod tests {
             source_team: None,
             source_team_persona_slug: Some("test-slug".to_string()),
             env_vars: BTreeMap::from([("KEY".to_string(), "value".to_string())]),
+            respond_to: None,
+            respond_to_allowlist: Vec::new(),
+            mcp_toolsets: None,
+            parallelism: None,
             created_at: "2025-01-01T00:00:00Z".to_string(),
             updated_at: "2025-01-01T00:00:00Z".to_string(),
         }
@@ -620,6 +629,10 @@ mod tests {
             source_team: None,
             source_team_persona_slug: None,
             env_vars: BTreeMap::new(),
+            respond_to: None,
+            respond_to_allowlist: Vec::new(),
+            mcp_toolsets: None,
+            parallelism: None,
             created_at: "2025-01-01T00:00:00Z".to_string(),
             updated_at: "2025-01-01T00:00:00Z".to_string(),
         };
@@ -646,6 +659,10 @@ mod tests {
             source_team: Some("team-1".to_string()),
             source_team_persona_slug: None,
             env_vars: BTreeMap::new(),
+            respond_to: None,
+            respond_to_allowlist: Vec::new(),
+            mcp_toolsets: None,
+            parallelism: None,
             created_at: "2025-01-01T00:00:00Z".to_string(),
             updated_at: "2025-01-01T00:00:00Z".to_string(),
         };
@@ -694,26 +711,76 @@ mod tests {
             .all(|t| t.as_slice().first().map(String::as_str) != Some("e")));
     }
 
-    /// NIP-AP behavioral defaults are RESERVED this release: the wire type
-    /// parses them (foreign data survives deserialization) but the local
-    /// projection does not emit them and PersonaRecord does not carry them.
-    /// This test locks the staged behavior so activating the fields later is
-    /// a deliberate act — and documents that a foreign definition's
-    /// behavioral values do NOT survive a local edit-and-republish cycle yet.
+    /// NIP-AP behavioral defaults are LIVE since B5 (create-path
+    /// unification): the wire fields are carried on PersonaRecord in wire
+    /// shape and re-emitted verbatim by the projection — a foreign
+    /// definition's behavioral values now survive a local
+    /// edit-and-republish cycle. This test replaces
+    /// `behavioral_defaults_are_staged_not_applied` (the staging lock),
+    /// whose deliberate removal was pinned in the B5 review gates.
     #[test]
-    fn behavioral_defaults_are_staged_not_applied() {
+    fn behavioral_defaults_survive_record_round_trip() {
         const FOREIGN: &str = r#"{"display_name":"F","system_prompt":"p","respond_to":"anyone","respond_to_allowlist":["deadbeef"],"mcp_toolsets":"default","parallelism":4}"#;
         let parsed: PersonaEventContent = serde_json::from_str(FOREIGN).unwrap();
         // Wire layer preserves the fields...
         assert_eq!(parsed.respond_to.as_deref(), Some("anyone"));
         assert_eq!(parsed.parallelism, Some(4));
-        // ...but the record round-trip drops them (staged, not applied).
+        // ...and the record round-trip now carries them through.
         let record = persona_from_event_content_for_test(parsed);
         let reprojected = persona_event_content(&record);
-        assert_eq!(reprojected.respond_to, None);
-        assert_eq!(reprojected.respond_to_allowlist, Vec::<String>::new());
-        assert_eq!(reprojected.mcp_toolsets, None);
-        assert_eq!(reprojected.parallelism, None);
+        assert_eq!(reprojected.respond_to.as_deref(), Some("anyone"));
+        assert_eq!(reprojected.respond_to_allowlist, vec!["deadbeef"]);
+        assert_eq!(reprojected.mcp_toolsets.as_deref(), Some("default"));
+        assert_eq!(reprojected.parallelism, Some(4));
+    }
+
+    /// B5 hash row 1: a quad-absent definition's content bytes — and
+    /// therefore `persona_content_hash` — are identical before and after
+    /// quad activation. Pre-activation the projection hardcoded `None`;
+    /// post-activation it copies the record's (absent) quad. Both serialize
+    /// to the same bytes via `skip_serializing_if`, so no drift badge flips
+    /// and no republish wave fires for quad-absent definitions.
+    #[test]
+    fn quad_absent_definition_hash_stable_across_activation() {
+        let record = PersonaRecord {
+            id: "quad-absent".to_string(),
+            display_name: "Test".to_string(),
+            avatar_url: None,
+            system_prompt: "Hello".to_string(),
+            runtime: Some("goose".to_string()),
+            model: Some("gpt-oss".to_string()),
+            provider: None,
+            name_pool: vec!["nib".to_string()],
+            is_builtin: false,
+            is_active: true,
+            source_team: None,
+            source_team_persona_slug: None,
+            env_vars: BTreeMap::new(),
+            respond_to: None,
+            respond_to_allowlist: Vec::new(),
+            mcp_toolsets: None,
+            parallelism: None,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
+        };
+        let live = persona_event_content(&record);
+        // The reserved-era projection: identical fields, quad hardcoded off.
+        let reserved_era = PersonaEventContent {
+            respond_to: None,
+            respond_to_allowlist: Vec::new(),
+            mcp_toolsets: None,
+            parallelism: None,
+            ..live.clone()
+        };
+        assert_eq!(
+            serde_json::to_string(&live).unwrap(),
+            serde_json::to_string(&reserved_era).unwrap(),
+            "quad-absent projection must serialize byte-identically to the reserved era"
+        );
+        assert_eq!(
+            persona_content_hash(&live),
+            persona_content_hash(&reserved_era)
+        );
     }
 
     /// Test-only bridge: build a PersonaRecord from parsed content the same
@@ -733,6 +800,10 @@ mod tests {
             source_team: None,
             source_team_persona_slug: None,
             env_vars: BTreeMap::new(),
+            respond_to: content.respond_to,
+            respond_to_allowlist: content.respond_to_allowlist,
+            mcp_toolsets: content.mcp_toolsets,
+            parallelism: content.parallelism,
             created_at: "2026-01-01T00:00:00Z".to_string(),
             updated_at: "2026-01-01T00:00:00Z".to_string(),
         }

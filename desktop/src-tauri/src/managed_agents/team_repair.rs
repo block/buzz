@@ -249,6 +249,10 @@ mod tests {
             source_team: source_team.map(|s| s.to_string()),
             source_team_persona_slug: slug.map(|s| s.to_string()),
             env_vars: Default::default(),
+            respond_to: None,
+            respond_to_allowlist: Vec::new(),
+            mcp_toolsets: None,
+            parallelism: None,
             created_at: "2025-01-01T00:00:00Z".to_string(),
             updated_at: "2025-01-01T00:00:00Z".to_string(),
         }
@@ -319,6 +323,10 @@ mod tests {
             is_active: true,
             source_team: None,
             source_team_persona_slug: None,
+            definition_respond_to: None,
+            definition_respond_to_allowlist: Vec::new(),
+            definition_mcp_toolsets: None,
+            definition_parallelism: None,
             relay_mesh: None,
         }
     }

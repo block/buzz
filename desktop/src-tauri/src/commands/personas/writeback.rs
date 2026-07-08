@@ -279,6 +279,10 @@ mod writeback_tests {
             source_team: Some("team-1".to_string()),
             source_team_persona_slug: Some("paul".to_string()),
             env_vars: BTreeMap::new(),
+            respond_to: None,
+            respond_to_allowlist: Vec::new(),
+            mcp_toolsets: None,
+            parallelism: None,
             created_at: "2025-01-01T00:00:00Z".to_string(),
             updated_at: "2025-01-01T00:00:00Z".to_string(),
         }
