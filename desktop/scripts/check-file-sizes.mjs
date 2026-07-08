@@ -317,6 +317,11 @@ const overrides = new Map([
   // + globalProvider threading into getPersonaProviderOptions. All load-bearing
   // feature logic; queued to split with the rest of this list.
   ["src/features/agents/ui/EditAgentDialog.tsx", 1088],
+  // global-agent-config rebase over #1639: AgentInstanceEditDialog (renamed from
+  // EditAgentDialog by #1639) gained initialFocus?/EditAgentFocusTarget prop
+  // threading from the deep-link focus feature. Feature plumbing, not generic
+  // debt growth. Approved override; still queued to split with this list.
+  ["src/features/agents/ui/AgentInstanceEditDialog.tsx", 1043],
 ]);
 
 await runFileSizeCheck({
