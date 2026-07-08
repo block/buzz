@@ -77,10 +77,16 @@ function cliLoginMessage(
  *
  * Routing:
  * (A) When ALL requirements are `cli_login`, the card trigger opens
- *     Settings → Doctor (install/login can't be fixed in Edit Agent).
- * (B) Otherwise, the card trigger opens Edit Agent, and each `cli_login` row
- *     renders its own "Open Doctor →" inline CTA that routes to Doctor
- *     regardless of the card-level trigger.
+ *     Settings → Doctor (install/login can't be fixed in Edit Agent). A
+ *     card-level "Open Doctor →" label in `AttachmentActions` confirms the
+ *     action at rest. No per-row CTAs — there is only one destination.
+ * (B) Otherwise (mixed card), the card trigger opens Edit Agent as the
+ *     card-level fallback. Each row carries its own inline CTA sharing one
+ *     right edge so the actions are clearly paired with their requirement:
+ *     - `cli_login` rows → "Open Doctor →" (routes to Doctor).
+ *     - `env_key` / `normalized_field` rows → "Edit Agent →" (opens Edit Agent).
+ *     The `AttachmentActions` column is omitted on mixed cards — per-row CTAs
+ *     replace it.
  */
 export function ConfigNudgeCard({
   className,
@@ -103,27 +109,34 @@ export function ConfigNudgeCard({
     onOpenSettings?.("doctor");
   };
 
+  const openEditAgent = () => {
+    openProfilePanel?.(nudge.agent_pubkey);
+    requestOpenEditAgent(nudge.agent_pubkey);
+  };
+
   const handleOpen = () => {
     if (allCliLogin) {
       // (A) Pure cli_login card — route to Doctor.
       openDoctor();
     } else {
-      openProfilePanel?.(nudge.agent_pubkey);
-      requestOpenEditAgent(nudge.agent_pubkey);
+      // (B) Mixed card — card-level fallback to Edit Agent.
+      openEditAgent();
     }
   };
 
   const handleOpenDoctor = (e: React.MouseEvent) => {
-    // (B) Inline Doctor CTA — stop propagation so the card trigger doesn't
-    // double-fire (which would also open Edit Agent on mixed cards).
+    // (B) Per-row Doctor CTA — stop propagation so the card trigger doesn't
+    // double-fire to Edit Agent on mixed cards.
     e.stopPropagation();
     openDoctor();
   };
 
-  // CTA label shown in AttachmentActions.
-  // Always-visible pill (replaces the opacity-0 fade-in hint) so the card
-  // reads as clickable at rest (affordance #3).
-  const ctaLabel = allCliLogin ? "Open Doctor →" : "Edit Agent →";
+  const handleOpenEditAgent = (e: React.MouseEvent) => {
+    // (B) Per-row Edit Agent CTA — stop propagation so the card trigger
+    // doesn't double-fire.
+    e.stopPropagation();
+    openEditAgent();
+  };
 
   return (
     <Attachment
@@ -147,17 +160,21 @@ export function ConfigNudgeCard({
           {nudge.requirements.map((req, i) => (
             <RequirementRow
               key={requirementKey(req, i)}
+              allCliLogin={allCliLogin}
               onOpenDoctor={handleOpenDoctor}
+              onOpenEditAgent={handleOpenEditAgent}
               requirement={req}
-              showRowDoctorCta={!allCliLogin}
             />
           ))}
         </div>
       </AttachmentContent>
-      <AttachmentActions className="items-end self-end">
-        {/* Affordance #3: always-visible CTA text (was opacity-0 fade-in). */}
-        <span className="text-xs text-muted-foreground">{ctaLabel}</span>
-      </AttachmentActions>
+      {/* (A) Pure cli_login card only — single card-level CTA confirming the
+          action at rest. Mixed cards render per-row CTAs instead (below). */}
+      {allCliLogin && (
+        <AttachmentActions className="items-end self-end">
+          <span className="text-xs text-muted-foreground">Open Doctor →</span>
+        </AttachmentActions>
+      )}
       <AttachmentTrigger
         aria-label={
           allCliLogin
@@ -171,30 +188,54 @@ export function ConfigNudgeCard({
 }
 
 function RequirementRow({
+  allCliLogin,
   onOpenDoctor,
+  onOpenEditAgent,
   requirement,
-  showRowDoctorCta,
 }: {
+  allCliLogin: boolean;
   onOpenDoctor: (e: React.MouseEvent) => void;
+  onOpenEditAgent: (e: React.MouseEvent) => void;
   requirement: ConfigNudgePayload["requirements"][number];
-  showRowDoctorCta: boolean;
 }) {
   switch (requirement.surface) {
     case "env_key":
       return (
-        <div className="text-xs leading-4 text-muted-foreground [overflow-wrap:anywhere]">
-          Set{" "}
-          <code className="rounded bg-muted px-1 py-0.5 font-mono text-xs text-foreground">
-            {requirement.key}
-          </code>{" "}
-          in Edit Agent → Environment variables
+        <div className="flex items-center gap-2 text-xs leading-4 text-muted-foreground">
+          <span className="flex-1 [overflow-wrap:anywhere]">
+            Set{" "}
+            <code className="rounded bg-muted px-1 py-0.5 font-mono text-xs text-foreground">
+              {requirement.key}
+            </code>{" "}
+            in Edit Agent → Environment variables
+          </span>
+          {!allCliLogin && (
+            <button
+              className="relative z-20 shrink-0 font-medium text-muted-foreground hover:underline"
+              onClick={onOpenEditAgent}
+              type="button"
+            >
+              Edit Agent →
+            </button>
+          )}
         </div>
       );
     case "normalized_field":
       return (
-        <div className="text-xs leading-4 text-muted-foreground [overflow-wrap:anywhere]">
-          Set the <strong>{requirement.field}</strong> field in Edit Agent
-          dropdowns
+        <div className="flex items-center gap-2 text-xs leading-4 text-muted-foreground">
+          <span className="flex-1 [overflow-wrap:anywhere]">
+            Set the <strong>{requirement.field}</strong> field in Edit Agent
+            dropdowns
+          </span>
+          {!allCliLogin && (
+            <button
+              className="relative z-20 shrink-0 font-medium text-muted-foreground hover:underline"
+              onClick={onOpenEditAgent}
+              type="button"
+            >
+              Edit Agent →
+            </button>
+          )}
         </div>
       );
     case "cli_login":
@@ -203,12 +244,12 @@ function RequirementRow({
           <span className="flex-1 [overflow-wrap:anywhere]">
             {cliLoginMessage(requirement)}
           </span>
-          {/* (B) Inline Doctor CTA — shown only on mixed cards where the
+          {/* (B) Per-row Doctor CTA — shown only on mixed cards where the
               card-level trigger opens Edit Agent. When allCliLogin is true the
               card trigger already routes to Doctor; the per-row button is
               redundant and is suppressed. stopPropagation prevents double-fire
               on mixed cards where both card and row CTAs are visible. */}
-          {showRowDoctorCta && (
+          {!allCliLogin && (
             <button
               className="relative z-20 shrink-0 font-medium text-muted-foreground hover:underline"
               onClick={onOpenDoctor}
