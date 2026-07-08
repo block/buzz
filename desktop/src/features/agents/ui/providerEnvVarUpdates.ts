@@ -7,25 +7,6 @@ import { getProviderApiKeyEnvVar } from "./personaDialogPickers";
  * changes, so `setEnvVars(fn(current))` skips a no-op re-render.
  */
 
-/** Set `envKey` to `value`, or remove it when `value` is empty. */
-export function envVarsWithProviderApiKey(
-  current: EnvVarsValue,
-  envKey: string,
-  value: string,
-): EnvVarsValue {
-  if ((current[envKey] ?? "") === value) {
-    return current;
-  }
-
-  const next = { ...current };
-  if (value.length > 0) {
-    next[envKey] = value;
-  } else {
-    delete next[envKey];
-  }
-  return next;
-}
-
 /** Remove `envKey` when present. */
 export function envVarsWithoutKey(
   current: EnvVarsValue,

@@ -88,13 +88,6 @@ const PROVIDER_CREDENTIAL_CONFIG: Partial<
   },
 };
 
-/** @deprecated Use ProviderCredentialConfig instead. */
-export type ProviderApiKeyConfig = {
-  envVar: string;
-  label: string;
-  placeholder: string;
-};
-
 const DEFAULT_MODEL_OPTION: PersonaModelOption = {
   id: "",
   label: "Default model",
@@ -322,34 +315,6 @@ export function getPersonaProviderOptions(
     ...options,
     { id: trimmedProvider, label: `${trimmedProvider} (current)` },
   ];
-}
-
-/** @deprecated Use PROVIDER_CREDENTIAL_CONFIG.secretEnvVar directly. */
-export function getProviderApiKeyConfig(
-  providerId: string,
-): ProviderApiKeyConfig | null {
-  switch (providerId.trim()) {
-    case "anthropic":
-      return {
-        envVar: "ANTHROPIC_API_KEY",
-        label: "Anthropic API key",
-        placeholder: "sk-ant-...",
-      };
-    case "openai":
-      return {
-        envVar: "OPENAI_COMPAT_API_KEY",
-        label: "OpenAI API key",
-        placeholder: "sk-...",
-      };
-    case "openai-compat":
-      return {
-        envVar: "OPENAI_COMPAT_API_KEY",
-        label: "OpenAI-compatible API key",
-        placeholder: "sk-...",
-      };
-    default:
-      return null;
-  }
 }
 
 /**
