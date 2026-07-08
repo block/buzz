@@ -571,13 +571,47 @@ load-bearing *backstop*.
   stops a B-stamped token authorizing over an A-host stops a B-host AUTH
   registering into A. Its in-relay counterpart is I5's open-community branch
   (`AuthenticateOpenCommunity`, mutation M10).
+- **S9 (Operator-plane provisioning confinement).** Runtime community
+  provisioning (`POST /operator/communities`) is the one admitted surface whose
+  *effect* spans tenants: it creates a community, binds its host, and
+  bootstraps or rotates that community's owner. Its authority is the
+  deployment-level `RELAY_OPERATOR_PUBKEYS` allowlist
+  (`crates/buzz-relay/src/api/operator.rs`), never a `relay_members` role —
+  deployment-root authority, documented as such on the endpoint. Three lemmas:
+  `provisioning_requires_operator_authorization` (every owner
+  bootstrap/rotation — the plane's only membership effect, emitted by both the
+  provision and the converge/rotate path — names an operator-registered key;
+  there is deliberately **no** compromise disjunct, because compromising an
+  operator's secret does not put a new key on the allowlist, so the claim
+  holds unconditionally); `provision_accepts_only_operator_signed_payload`
+  (the accepted `(host, owner)` pair is exactly a pair the named operator
+  signed — the NIP-98 payload hash over the JSON body is what forces this, so
+  a captured `Authorization` header can only *replay* the same pair, which is
+  the documented idempotent convergence, never *re-target* it); and
+  `rotation_confined_to_host_community` (an owner rotation lands only in the
+  community bound to the request's host — the request names a host, never a
+  community id, the same single-witness framing as S5/S6 via
+  `RotationResolved(owner, used_comm, host, host_comm)`). The payload-binding
+  lemma pins the PR #1657 review finding that `buzz-auth`'s NIP-98
+  verification treats the `payload` tag as *optional* if absent:
+  `MUTATION_Provision_Unsigned_Body` models exactly that gap (operator signs
+  without the payload hash; relay accepts body fields from the wire unbound)
+  and falsifies the lemma, so requiring the payload tag on this endpoint is a
+  conformance obligation, not a nicety. `Create_Community` remains the
+  trusted startup-seed path (`ensure_configured_community` at boot); the S9
+  theorems quantify over the provisioning action facts, so they constrain the
+  protocol path without pretending the config path is adversarial.
 
 Each Tamarin lemma is paired with an exists-trace sanity lemma (the honest
 protocol can run), the Tamarin analog of the mutation test.
 
-**Verification status.** S1–S8 are **machine-verified green** on
-Tamarin 1.12.0 / Maude 3.5.1 — the full selected run verifies all 32 lemmas in
-~12s with zero `analyzed` failures. S1/S2: `token_confinement`,
+**Verification status.** S1–S9 are **machine-verified green** on
+Tamarin 1.12.0 / Maude 3.5.1 — the full selected run verifies all 38 lemmas in
+~141s with zero `analyzed` failures. (The step counts and wall-clock figures
+below are from earlier, smaller revisions of the model; each addition enlarges
+the search space for the pre-existing lemmas — e.g.
+`other_community_key_compromise_does_not_authorize` closes at 486 steps in the
+current run versus 147 pre-S9 — but every lemma still closes.) S1/S2: `token_confinement`,
 `cross_community_use_attempts_are_not_authorized`, the two
 `minted_*_channels_match_stamp` lemmas, `token_stamp_matches_mint`,
 `cross_community_mint_yields_no_token_for_that_request`, and the
@@ -620,6 +654,23 @@ S8 (open-community AUTH confinement): `open_auth_registration_confined_to_host_c
 (5 steps) proving a legitimate open-community registration is producible, so the
 confinement lemma is non-vacuous; its in-relay counterpart is the M10 open-AUTH
 stamp mutation, confirmed red in TLA+ (a 2-state `Inv_AdmissionFence` violation).
+S9 (operator-plane provisioning): `provisioning_requires_operator_authorization`
+(6 steps), `provision_accepts_only_operator_signed_payload` (7 steps), and
+`rotation_confined_to_host_community` (2 steps — the S5/S6 single-witness
+framing, so a counterexample is one rule instance), with three exists-trace
+probes (`executable_provision`, 12 steps; `executable_rotate`, 10 steps; and
+`executable_rotate_after_provision`, 12 steps — the create-then-converge
+lifecycle end to end, proving a rotate on an already-bound host lands in the
+community the original provision bound). All three S9 mutations are confirmed
+red: `MUTATION_Provision_Unsigned_Body` (the payload tag omitted, so the signed
+NIP-98 event binds URL/method/freshness but not the JSON body — the PR #1657
+review finding) falsifies `provision_accepts_only_operator_signed_payload` with
+an 8-step trace; `MUTATION_Provision_Any_Client` (the `RELAY_OPERATOR_PUBKEYS`
+gate replaced by "any valid signature") falsifies
+`provisioning_requires_operator_authorization` with an 8-step trace; and
+`MUTATION_Rotate_Ignore_Host` (the rotation applied to a community other than
+the host's binding — the operator-plane confused deputy) falsifies
+`rotation_confined_to_host_community` with a 12-step trace.
 
 The S5 confinement lemma was deliberately framed to keep its mutation
 *cheaply* refutable. An earlier framing joined two action facts
@@ -700,6 +751,31 @@ Each axiom is *admitted* per deployment, not assumed universally:
   token under the deployment's routing/storage shape (and that the seen-set TTL
   covers the full ±60 s window). A failing test or an unmet gate rejects the
   deployment.
+- **P-HOST-APPEND (operator plane)** — the host→community map is **append-only**:
+  a host, once bound, is never re-pointed to a different community. Admitted by
+  `ensure_configured_community`'s upsert
+  (`crates/buzz-db/src/lib.rs`): `INSERT ... ON CONFLICT (lower(host)) DO UPDATE
+  SET host = EXCLUDED.host RETURNING id` — a second request for an
+  already-bound host returns the *same* community id and only refreshes the
+  host's stored casing; there is no code path (startup seeding or
+  `POST /operator/communities`) that changes an existing binding's community.
+  This is the assumption that lets the TLA+ model keep `HostCommunity` a
+  *constant* function per checked segment (runtime provisioning appends a new
+  host↦community pair, which is a fresh constant assignment for subsequent
+  behavior — never a mutation of an existing one), so every TLC result over the
+  fixed `HostA/HostB/HostBad` harness remains valid across provisioning events
+  without remodeling `HostCommunity` as a variable. Tamarin imports the same
+  assumption as the `UniqueHostBinding` restriction and discharges the operator
+  plane's authorization obligations as S9 (three lemmas + three confirmed-red
+  mutations). Two further conformance obligations ride on this surface: the
+  NIP-98 `payload` tag MUST be required (not merely verified-if-present) on
+  `POST /operator/communities`, since `MUTATION_Provision_Unsigned_Body` shows
+  an optional payload tag lets a captured `Authorization` header be raced with
+  a swapped JSON body on the one endpoint that mints tenancy; and
+  `RELAY_OPERATOR_PUBKEYS` must be checked against the *signer* of the NIP-98
+  event, never inferred from the body or connection. A migration lint asserting
+  no `UPDATE communities SET host` path (mirroring P-RESOLVE's
+  channel-immutability lint) admits the append-only axiom structurally.
 
 ## Prior Art
 
@@ -831,14 +907,16 @@ as label-flow non-interference is, to our knowledge, new for a Nostr relay.
   actors, and ids explodes the space; symmetry + bounded observations keep the
   core isolation surface exhaustively checkable.
 - **`docs/spec/MultiTenantAuth.spthy`** — the Tamarin authorization model. Run:
-  `tamarin-prover --prove docs/spec/MultiTenantAuth.spthy`. All 32 lemmas (S1–S8)
-  verify green (Tamarin 1.12.0 / Maude 3.5.1, ~12 s) — each safety lemma paired with
+  `tamarin-prover --prove docs/spec/MultiTenantAuth.spthy`. All 38 lemmas (S1–S9)
+  verify green (Tamarin 1.12.0 / Maude 3.5.1, ~141 s) — each safety lemma paired with
   a verified exists-trace sanity lemma, and the documented mutations
   (`MUTATION_Use_Token_Claimed_Community` for S1, the S3 bad-accept and S4
   splice-as-append mutations, `MUTATION_Use_Token_ChannelLess_Ignore_Host`
   for S5's host fence, `MUTATION_Use_Token_Ignore_Host` for S6's channel-bearing
-  host/channel-agreement fence, and `MUTATION_Admit_Ignore_Community` for S7's
-  NIP-43 admission confinement) confirmed red. The 32 lemmas include the
+  host/channel-agreement fence, `MUTATION_Admit_Ignore_Community` for S7's
+  NIP-43 admission confinement, and the three S9 operator-plane mutations —
+  `MUTATION_Provision_Unsigned_Body`, `MUTATION_Provision_Any_Client`,
+  `MUTATION_Rotate_Ignore_Host`) confirmed red. The 38 lemmas include the
   open-community AUTH pair added with the host-scoped-open-auth surfaces:
   `open_auth_registration_confined_to_host_community` (2 steps) proves an
   open-community auto-registration commits to the host-resolved community and never
@@ -849,12 +927,13 @@ as label-flow non-interference is, to our knowledge, new for a Nostr relay.
   full lemma list, the S5/S6 single-witness framing, and the corrected
   `other_community_key_compromise_does_not_authorize` vacuity fix.
 
-  **Machine-check hygiene.** S1–S8 lemmas close by two distinct shapes.
+  **Machine-check hygiene.** S1–S9 lemmas close by two distinct shapes.
   **Rule-shape closure** means the lemma's conclusion follows by unification on a
   single rule's action multiset: `token_confinement`,
   `audit_append_advances_same_community_head`,
   `channelless_use_confined_to_host_community` (the S5 single-witness fact),
-  `channelbearing_use_agrees_with_host` (the S6 single-witness fact), and
+  `channelbearing_use_agrees_with_host` (the S6 single-witness fact),
+  `rotation_confined_to_host_community` (the S9 single-witness fact), and
   the S2 supporting set
   (`minted_token_channels_match_stamp`, `minted_request_channels_match_stamp`,
   `token_stamp_matches_mint`). These are well-formedness guards on the model's
@@ -869,9 +948,13 @@ as label-flow non-interference is, to our knowledge, new for a Nostr relay.
   **Substantive closure** requires cross-rule reasoning over
   persistent-fact invariance (`cross_community_mint_yields_no_token_for_that_request`,
   `leaked_token_blast_radius_contained`,
-  `cross_community_use_attempts_are_not_authorized`), linear-fact lifecycle
+  `cross_community_use_attempts_are_not_authorized`,
+  `provisioning_requires_operator_authorization`), linear-fact lifecycle
   (`cross_community_audit_splice_attempt_is_not_append`), or signed-preimage
-  unification (`system_event_acceptance_requires_same_community_key_or_compromise`).
+  unification (`system_event_acceptance_requires_same_community_key_or_compromise`,
+  `provision_accepts_only_operator_signed_payload` — the S9 payload-binding
+  claim, which needs both the operator's signature over the payload hash and
+  the allowlist premise).
   Tamarin proves both kinds identically; the distinction is for reviewer hygiene,
   not a weakened theorem claim. This paragraph is prose-only to preserve the
   `.spthy` byte hash above.
@@ -999,7 +1082,7 @@ The model's obligations map to concrete code seams:
   red — so admit-into-A-then-act-in-B is a *caught* escape, not an invisible one.
   On the authorization side, NIP-43 member-list events are signed and accepted
   per-community in Tamarin (`Community_Signs_NIP43_MemberList` /
-  `Relay_Accepts_NIP43_MemberList`, `MultiTenantAuth.spthy:403`/`:413`), and
+  `Relay_Accepts_NIP43_MemberList`, `MultiTenantAuth.spthy:427`/`:437`), and
   `nip43_admission_confined_to_signing_community` proves B's signing key can
   never admit a pubkey into A (Theorem S7).
 

@@ -133,6 +133,22 @@ InitialChannelOwners == [ch \in Channels |->
 \* NoCommunity sentinel (an unmapped/unknown host) -> the connection fails closed
 \* and no channel-less write may derive a community from it.  This is the upstream
 \* of ResolveTenant: ctx.community is *derived* from the host, never free-chosen.
+\*
+\* Stated assumption (P-HOST-APPEND): HostCommunity is a CONSTANT-per-segment
+\* function even though the operator plane (POST /operator/communities) can
+\* provision new communities at runtime.  The host map is append-only —
+\* ensure_configured_community's upsert (ON CONFLICT (lower(host)) DO UPDATE
+\* SET host = EXCLUDED.host RETURNING id) returns the SAME community id for an
+\* already-bound host and no code path re-points an existing binding — so a
+\* provisioning event only extends the function's domain with a fresh
+\* host |-> community pair.  Every behavior TLC checks over the fixed
+\* HostA/HostB/HostBad harness therefore remains valid across provisioning:
+\* new hosts are new constant assignments for subsequent behavior, never
+\* mutations of the bindings modeled here.  The authorization obligations of
+\* the operator plane itself (allowlist gate, payload binding, rotation
+\* confinement) live in the Tamarin model (MultiTenantAuth.spthy S9, with the
+\* append-only assumption imported as the UniqueHostBinding restriction); see
+\* docs/multi-tenant-relay.md SS-Conformance (P-HOST-APPEND).
 HostCommunity == [h \in Hosts |->
                     CASE h = HostA -> CommA
                       [] h = HostB -> CommB

@@ -473,6 +473,264 @@ rule Relay_Accepts_NIP43_MemberList:
 // goes red.
 
 // ============================================================================
+// S9: Deployment-operator community provisioning (POST /operator/communities)
+// ============================================================================
+//
+// PR #1657 adds a deployment-operator HTTP plane that can create a community
+// (and its host mapping) at runtime and bootstrap/rotate that community's
+// owner. This is intentionally the ONLY admitted surface whose effect spans
+// tenants: its authority is the deployment-level RELAY_OPERATOR_PUBKEYS
+// allowlist (`!OperatorKey`), never a `relay_members` role. `Create_Community`
+// above remains the CONFIG/STARTUP seeding path (ensure_configured_community
+// at boot — trusted by deployment, not by protocol); this section models the
+// runtime protocol path, so its theorems quantify over the provisioning
+// action facts, not over `CommunityCreated`.
+//
+// Wire shape: one NIP-98-signed POST whose signed preimage includes the
+// payload hash over the JSON body (host, owner). The payload binding is
+// load-bearing — see MUTATION_Provision_Unsigned_Body below, which models the
+// real "NIP-98 payload tag optional" gap (kalvin's review finding #1 on
+// PR #1657) and falsifies the S9 lemmas.
+//
+// Create-vs-rotate is decided by DB state, exactly like the endpoint: the
+// SAME signed request provisions when the host is unbound and converges
+// (owner bootstrap/rotation) when it is already bound. A replayed create can
+// therefore only re-assert the SAME (host, owner) it signed — benign
+// convergence, the documented idempotency — because the payload binds both.
+
+rule Register_Operator:
+  [ Fr(~sk_op) ]
+  --[
+      OperatorRegistered(pk(~sk_op))
+    ]->
+  [
+      !OperatorKey(pk(~sk_op)),
+      !OperatorSecret(pk(~sk_op), ~sk_op),
+      Out(pk(~sk_op))
+  ]
+
+rule Compromise_Operator_Key:
+  [ !OperatorSecret(op, sk) ]
+  --[
+      OperatorKeyCompromised(op)
+    ]->
+  [ Out(sk) ]
+
+// The operator signs a provision request for a fresh host. The signed
+// preimage commits to the payload hash h(<host, owner>) alongside URL,
+// method, and freshness — the NIP-98 payload-tag discipline made mandatory.
+// `OperatorAuthorizedProvision` is the single authorization witness both
+// relay rules (provision + rotate) are checked against: it names the exact
+// (host, owner) the operator signed.
+rule Operator_Sends_Provision_Request:
+  [ !OperatorSecret(op, sk), !ClientPublic(owner), Fr(~host), Fr(~url), Fr(~time) ]
+  --[
+      OperatorAuthorizedProvision(op, ~host, owner),
+      ProvisionRequested(op, ~host, owner)
+    ]->
+  [
+      Out(
+        < 'operator_provision',
+          op,
+          ~url,
+          'POST',
+          ~time,
+          ~host,
+          owner,
+          sign(< 'kind27235_operator', op, ~url, 'POST', ~time, h(< ~host, owner >) >, sk)
+        >
+      ),
+      Out(~host)
+  ]
+
+// The operator signs the same request shape for an ALREADY-BOUND host: the
+// endpoint converges (bootstrap_owner re-runs), which rotates the community
+// owner. Deployment-root authority, documented as such on the endpoint.
+rule Operator_Sends_Rotate_Request:
+  [ !OperatorSecret(op, sk), !HostCommunity(host, comm), !ClientPublic(owner),
+    Fr(~url), Fr(~time) ]
+  --[
+      OperatorAuthorizedProvision(op, host, owner),
+      RotateRequested(op, host, owner)
+    ]->
+  [
+      Out(
+        < 'operator_provision',
+          op,
+          ~url,
+          'POST',
+          ~time,
+          host,
+          owner,
+          sign(< 'kind27235_operator', op, ~url, 'POST', ~time, h(< host, owner >) >, sk)
+        >
+      )
+  ]
+
+// Provision path: the host has no existing binding, so the upsert inserts a
+// fresh community, binds the host, and bootstraps the owner. The signature is
+// verified against the payload hash recomputed over the RECEIVED body — an
+// adversary who swaps host/owner in transit fails verification (P-SIG).
+// The relay checks the sender against `!OperatorKey` — the model's
+// RELAY_OPERATOR_PUBKEYS allowlist. A registered client key is NOT sufficient
+// (see MUTATION_Provision_Any_Client).
+rule Relay_Provisions_Community:
+  [ In(< 'operator_provision', op, url, 'POST', time, host, owner, sig >),
+    !OperatorKey(op),
+    Fr(~comm), Fr(~sk_comm) ]
+  --[
+      Eq(verify(sig, < 'kind27235_operator', op, url, 'POST', time, h(< host, owner >) >, op), true),
+      CommunityProvisioned(~comm, host, op),
+      ProvisionAccepted(op, host, owner),
+      OwnerBootstrapped(owner, ~comm, host, op),
+      HostBound(host, ~comm)
+    ]->
+  [
+      !Community(~comm),
+      !CommunitySigningKey(~comm, ~sk_comm),
+      !HostCommunity(host, ~comm),
+      AuditHead(~comm, 'genesis'),
+      !Admitted(owner, ~comm)
+  ]
+
+// Converge/rotate path: the host is already bound, so the upsert is a no-op
+// on the community row and bootstrap_owner (re)runs for that SAME community.
+// The effect is confined to the host's bound community — the request names a
+// host, never a community id (see MUTATION_Rotate_Ignore_Host).
+rule Relay_Rotates_Owner:
+  [ In(< 'operator_provision', op, url, 'POST', time, host, owner, sig >),
+    !OperatorKey(op),
+    !HostCommunity(host, comm) ]
+  --[
+      Eq(verify(sig, < 'kind27235_operator', op, url, 'POST', time, h(< host, owner >) >, op), true),
+      OwnerRotated(owner, comm, host, op),
+      OwnerBootstrapped(owner, comm, host, op),
+      RotationResolved(owner, comm, host, comm)
+    ]->
+  [ !Admitted(owner, comm) ]
+
+// Idempotency / append-only host map, imported as a restriction: a host is
+// bound to at most one community, ever. Grounded in the implementation:
+// `ensure_configured_community` upserts `ON CONFLICT (lower(host)) DO UPDATE
+// SET host = EXCLUDED.host RETURNING id` — a second request for the same host
+// returns the SAME community id and never re-points the host. This is the
+// same append-only assumption the TLA+ model's header states for keeping
+// `HostCommunity` a constant-per-segment function; here it excludes traces
+// where a replayed provision would mint a second community for a bound host
+// (the real relay converges instead — the rotate rule above is that path).
+restriction UniqueHostBinding:
+  "All host c1 c2 #i #j.
+      HostBound(host, c1) @ i & HostBound(host, c2) @ j ==> #i = #j"
+
+// MUTATION_Provision_Unsigned_Body (DO NOT ENABLE in the real model): the
+// real-world gap this pins is kalvin's finding #1 on PR #1657 — NIP-98
+// verification treats the payload tag as OPTIONAL, so an operator client that
+// omits it produces a signature binding only URL/method/freshness, and anyone
+// who captures the Authorization header can race it with a swapped JSON body.
+// Modeled as the pair: the operator signs WITHOUT the payload hash, and the
+// relay accepts the body fields from the wire unbound.
+//
+// rule MUTATION_Operator_Signs_Without_Payload:
+//   [ !OperatorSecret(op, sk), !ClientPublic(owner), Fr(~host), Fr(~url), Fr(~time) ]
+//   --[
+//       OperatorAuthorizedProvision(op, ~host, owner),
+//       ProvisionRequested(op, ~host, owner)
+//     ]->
+//   [
+//       Out(< 'operator_provision_nopayload', op, ~url, 'POST', ~time, ~host, owner,
+//             sign(< 'kind27235_operator_nopayload', op, ~url, 'POST', ~time >, sk) >),
+//       Out(~host)
+//   ]
+//
+// rule MUTATION_Relay_Provisions_Unbound_Body:
+//   [ In(< 'operator_provision_nopayload', op, url, 'POST', time, host, owner, sig >),
+//     !OperatorKey(op),
+//     Fr(~comm), Fr(~sk_comm) ]
+//   --[
+//       Eq(verify(sig, < 'kind27235_operator_nopayload', op, url, 'POST', time >, op), true),
+//       CommunityProvisioned(~comm, host, op),
+//       ProvisionAccepted(op, host, owner),
+//       OwnerBootstrapped(owner, ~comm, host, op),
+//       HostBound(host, ~comm)
+//     ]->
+//   [
+//       !Community(~comm), !CommunitySigningKey(~comm, ~sk_comm),
+//       !HostCommunity(host, ~comm), AuditHead(~comm, 'genesis'),
+//       !Admitted(owner, ~comm)
+//     ]
+//
+// Expected mutation result: `provision_accepts_only_operator_signed_payload`
+// goes red — the adversary intercepts the unsigned-body message, substitutes
+// its own (host, owner), and the relay emits ProvisionAccepted for a pair the
+// operator never authorized. Confirmed: falsified with an 8-step trace on
+// Tamarin 1.12.0 / Maude 3.5.1 (see docs/multi-tenant-relay.md §Mechanized
+// Verification).
+
+// MUTATION_Provision_Any_Client (DO NOT ENABLE in the real model): the relay
+// authorizes provisioning from ANY registered client key instead of the
+// operator allowlist — the RELAY_OPERATOR_PUBKEYS gate replaced by "any valid
+// signature". Modeled by swapping the `!OperatorKey(op)` premise for
+// `!ClientPublic(op)` in Relay_Provisions_Community (clients can sign the
+// operator preimage with their own key; only the allowlist premise stops the
+// relay accepting it).
+//
+// rule MUTATION_Client_Signs_Provision:
+//   [ !ClientSecret(op, sk), !ClientPublic(owner), Fr(~host), Fr(~url), Fr(~time) ]
+//   --[ ClientSignedProvision(op, ~host, owner) ]->
+//   [
+//       Out(< 'operator_provision', op, ~url, 'POST', ~time, ~host, owner,
+//             sign(< 'kind27235_operator', op, ~url, 'POST', ~time, h(< ~host, owner >) >, sk) >),
+//       Out(~host)
+//   ]
+//
+// rule MUTATION_Relay_Provisions_For_Any_Client:
+//   [ In(< 'operator_provision', op, url, 'POST', time, host, owner, sig >),
+//     !ClientPublic(op),
+//     Fr(~comm), Fr(~sk_comm) ]
+//   --[
+//       Eq(verify(sig, < 'kind27235_operator', op, url, 'POST', time, h(< host, owner >) >, op), true),
+//       CommunityProvisioned(~comm, host, op),
+//       ProvisionAccepted(op, host, owner),
+//       OwnerBootstrapped(owner, ~comm, host, op),
+//       HostBound(host, ~comm)
+//     ]->
+//   [
+//       !Community(~comm), !CommunitySigningKey(~comm, ~sk_comm),
+//       !HostCommunity(host, ~comm), AuditHead(~comm, 'genesis'),
+//       !Admitted(owner, ~comm)
+//     ]
+//
+// Expected mutation result: `provisioning_requires_operator_authorization`
+// goes red — a mere registered client (never OperatorRegistered, never
+// compromised as an operator) mints a community. Confirmed: falsified with an
+// 8-step trace on Tamarin 1.12.0 / Maude 3.5.1.
+
+// MUTATION_Rotate_Ignore_Host (DO NOT ENABLE in the real model): the relay
+// applies the owner rotation to a community OTHER than the request host's
+// binding — the operator-plane confused deputy (effect escapes the named
+// host). The real rule's `!HostCommunity(host, comm)` premise pins the
+// effect; this mutation re-binds it to an arbitrary community.
+//
+// rule MUTATION_Relay_Rotates_Owner_Other_Community:
+//   [ In(< 'operator_provision', op, url, 'POST', time, host, owner, sig >),
+//     !OperatorKey(op),
+//     !HostCommunity(host, host_comm),
+//     !Community(other_comm) ]
+//   --[
+//       Eq(verify(sig, < 'kind27235_operator', op, url, 'POST', time, h(< host, owner >) >, op), true),
+//       Neq(host_comm, other_comm),
+//       OwnerRotated(owner, other_comm, host, op),
+//       OwnerBootstrapped(owner, other_comm, host, op),
+//       RotationResolved(owner, other_comm, host, host_comm)
+//     ]->
+//   [ !Admitted(owner, other_comm) ]
+//
+// Expected mutation result: `rotation_confined_to_host_community` goes red —
+// the single RotationResolved witness carries used_comm # host_comm in one
+// rule instance (same single-witness framing as S5/S6). Confirmed: falsified
+// with a 12-step trace on Tamarin 1.12.0 / Maude 3.5.1.
+
+// ============================================================================
 // Independent per-community audit chains
 // ============================================================================
 //
@@ -684,6 +942,44 @@ lemma cross_community_audit_splice_attempt_is_not_append:
       CrossCommunityAuditSpliceAttempt(commA, commB, prevA, prevB, forged) @ i
     ==> not (Ex #j. AuditAppended(commA, prevB, forged) @ j)"
 
+// S9: every owner bootstrap/rotation — the operator plane's only effect,
+// emitted by BOTH the provision and the rotate rule — names an
+// operator-allowlisted key. Registration (`!OperatorKey`) is the
+// RELAY_OPERATOR_PUBKEYS gate; there is intentionally NO compromise
+// disjunct: compromising an operator's secret does not put a new key on the
+// allowlist, so the claim holds unconditionally. Enabling
+// MUTATION_Provision_Any_Client (relay accepts any registered client key)
+// falsifies this.
+lemma provisioning_requires_operator_authorization:
+  "All owner comm host op #i.
+      OwnerBootstrapped(owner, comm, host, op) @ i
+    ==> (Ex #j. OperatorRegistered(op) @ j & #j < #i)"
+
+// S9 payload binding: an accepted provision's (host, owner) pair is exactly a
+// pair the named operator signed — the payload hash h(<host, owner>) in the
+// NIP-98 preimage is what forces this. An adversary who captures the
+// Authorization material can replay it (benign convergence, same pair) but
+// cannot re-target it. The disjunct admits operator-key compromise, after
+// which the adversary can sign arbitrary pairs itself. Enabling
+// MUTATION_Provision_Unsigned_Body (payload tag omitted — kalvin's finding #1
+// on PR #1657) falsifies this.
+lemma provision_accepts_only_operator_signed_payload:
+  "All op host owner #i.
+      ProvisionAccepted(op, host, owner) @ i
+    ==> (Ex #j. OperatorAuthorizedProvision(op, host, owner) @ j & #j < #i)
+      | (Ex #k. OperatorKeyCompromised(op) @ k & #k < #i)"
+
+// S9 confinement: an owner rotation lands in exactly the community bound to
+// the request's host. Same single-witness framing as the S1-host lemmas: the
+// rotate rule emits one RotationResolved(owner, used_comm, host, host_comm)
+// fact carrying both the community actually mutated and the host's binding,
+// so a counterexample is one rule instance. Enabling
+// MUTATION_Rotate_Ignore_Host falsifies this fast.
+lemma rotation_confined_to_host_community:
+  "All owner used_comm host host_comm #i.
+      RotationResolved(owner, used_comm, host, host_comm) @ i
+    ==> used_comm = host_comm"
+
 // Reachability / anti-vacuity probes.
 lemma executable_token_leak:
   exists-trace
@@ -744,5 +1040,27 @@ lemma executable_member_admitted:
 lemma executable_open_auth_registration:
   exists-trace
   "Ex pk comm host #i. OpenCommunityAutoRegistered(pk, comm, host) @ i"
+
+// S9 anti-vacuity probes: the operator plane's provision and rotate paths are
+// both reachable, so the S9 safety lemmas are not vacuously true.
+lemma executable_provision:
+  exists-trace
+  "Ex op host owner #i #j.
+      OperatorAuthorizedProvision(op, host, owner) @ i
+    & ProvisionAccepted(op, host, owner) @ j
+    & #i < #j"
+
+lemma executable_rotate:
+  exists-trace
+  "Ex owner comm host op #i. OwnerRotated(owner, comm, host, op) @ i"
+
+// A rotate on an already-bound host lands in the community the ORIGINAL
+// provision bound — the create-then-converge lifecycle end to end.
+lemma executable_rotate_after_provision:
+  exists-trace
+  "Ex comm host op op2 owner2 #i #j.
+      CommunityProvisioned(comm, host, op) @ i
+    & OwnerRotated(owner2, comm, host, op2) @ j
+    & #i < #j"
 
 end
