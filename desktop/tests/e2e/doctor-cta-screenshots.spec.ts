@@ -205,8 +205,9 @@ test.describe("doctor CTA nudge card screenshots", () => {
 
   /**
    * 03 — mixed card: one cli_login (adapter_missing) + one env_key requirement.
-   * Card trigger routes to Edit Agent; each cli_login row shows inline
-   * "Open Doctor →" with stopPropagation. CTA label reads "Edit Agent →".
+   * Each requirement row owns its CTA, right-aligned to a shared edge:
+   * the cli_login row shows "Open Doctor →" and the env_key row shows
+   * "Edit Agent →", both at the same x (vertically aligned).
    */
   test("03-mixed-requirements-inline-doctor-cta", async ({ page }) => {
     await installMockBridge(page, {
@@ -239,9 +240,9 @@ test.describe("doctor CTA nudge card screenshots", () => {
 
     const card = page.locator("[data-config-nudge]").last();
     await expect(card).toBeVisible({ timeout: 10_000 });
-    // Mixed card shows inline Doctor CTA on the cli_login row.
+    // Mixed card: cli_login row shows "Open Doctor →", env_key row shows "Edit Agent →".
     await expect(card.getByText("Open Doctor →")).toBeVisible();
-    // And the card-level CTA says "Edit Agent →".
+    // Both per-row CTAs share the same right edge (vertically aligned).
     await expect(card.getByText("Edit Agent →", { exact: true })).toBeVisible();
 
     await card.scrollIntoViewIfNeeded();
