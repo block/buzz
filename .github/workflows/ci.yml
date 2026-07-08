@@ -877,6 +877,26 @@ jobs:
         run: cargo test --manifest-path desktop/src-tauri/Cargo.toml --target $env:TARGET
         env:
           CMAKE_POLICY_VERSION_MINIMUM: "3.5"
+      - name: Diagnose loader failure (canary only)
+        if: failure()
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem "desktop\src-tauri\target\$env:TARGET\debug\deps\buzz_lib-*.exe" | Select-Object -First 1
+          if (-not $exe) { Write-Host "no buzz_lib exe found"; exit 0 }
+          Write-Host "=== EXE: $($exe.FullName) $($exe.Length) bytes ==="
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs = & $vswhere -latest -property installationPath
+          $dumpbin = Get-ChildItem "$vs\VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe" | Select-Object -First 1
+          Write-Host "=== DEPENDENTS ==="
+          & $dumpbin.FullName /dependents $exe.FullName
+          Write-Host "=== DLL LOAD PROBE ==="
+          $deps = (& $dumpbin.FullName /dependents $exe.FullName) | Where-Object { $_ -match '^\s+\S+\.dll$' } | ForEach-Object { $_.Trim() }
+          foreach ($d in $deps) {
+            try { [void][System.Runtime.InteropServices.NativeLibrary]::Load($d); Write-Host "OK   $d" }
+            catch { Write-Host "FAIL $d :: $($_.Exception.Message)" }
+          }
+          Write-Host "=== IMPORTS (per-DLL function list) ==="
+          & $dumpbin.FullName /imports $exe.FullName
 
   desktop-build-macos:
     name: Desktop Build (macOS)
