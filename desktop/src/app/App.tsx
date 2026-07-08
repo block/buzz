@@ -55,7 +55,7 @@ function BeeLoader({
       <BuzzMark className="block h-auto w-full" />
       <FuzzyLogo
         ariaLabel={ariaLabel}
-        className="absolute inset-0 h-full w-full [&>svg]:h-full [&>svg]:w-full [&>svg]:max-w-full"
+        className="absolute inset-0 h-full! w-full! [&>svg]:h-full [&>svg]:w-full [&>svg]:max-w-full"
         fuzz
         loop
         loopRestSeconds={0}
