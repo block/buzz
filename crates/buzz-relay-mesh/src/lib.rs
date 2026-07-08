@@ -18,8 +18,10 @@
 //! **The law:** mesh membership is a hint; the Redis fenced generation is the
 //! arbiter. Nothing in this crate grants ownership — see [`wire::FencedHeader`].
 
+pub mod endpoint;
 pub mod gossip;
 pub mod membership;
+pub mod peer;
 pub mod registry;
 pub mod status;
 pub mod wire;
