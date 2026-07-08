@@ -46,6 +46,7 @@ export default defineConfig({
         "**/composer-image-draw.spec.ts",
         "**/video-attachment.spec.ts",
         "**/spoiler.spec.ts",
+        "**/composer-link-shortcut.spec.ts",
         "**/composer-tooltip-dismiss.spec.ts",
         "**/mentions.spec.ts",
         "**/relay-reconnect.spec.ts",

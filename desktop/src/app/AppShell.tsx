@@ -528,7 +528,16 @@ export function AppShell() {
     }
 
     function handleKeyDown(event: KeyboardEvent) {
-      if (!hasPrimaryShortcutModifier(event) || event.altKey) {
+      if (!hasPrimaryShortcutModifier(event) || event.altKey || event.repeat) {
+        return;
+      }
+
+      // A focused surface may claim the shortcut first — e.g. the composer
+      // consumes ⌘K to open the link editor when text is selected. Its
+      // element-level handler runs before this window-level bubble listener
+      // and calls `preventDefault()`; respect that instead of also opening
+      // the global dialog.
+      if (event.defaultPrevented) {
         return;
       }
 

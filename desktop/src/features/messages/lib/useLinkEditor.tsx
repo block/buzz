@@ -58,6 +58,9 @@ type LinkCardState = {
  * Returns:
  * - `openFromToolbar` — wire to the formatting toolbar's link button. Seeds
  *   the dialog from the current selection (existing link or selected text).
+ * - `openFromShortcut` — wire to the editor's ⌘K handler. Opens the dialog
+ *   only when a selection or caret-adjacent link exists; returns whether it
+ *   consumed the shortcut.
  * - `openFromClick` — wire to `useRichTextEditor`'s `onEditLink`. Moves the
  *   clicked link into the hover-card state.
  * - `showFromCursor` — wire to cursor/selection updates to show the same card
@@ -177,6 +180,20 @@ export function useLinkEditor(richText: UseRichTextEditorResult) {
       isExistingLink: false,
       initialFocus: "text",
     });
+  }, [getLinkSelectionInfo, openDialogFromInfo]);
+
+  /**
+   * ⌘K/Ctrl+K handler. Opens the link dialog only when the shortcut applies —
+   * text is selected or the caret sits inside an existing link — and reports
+   * whether it did, so the caller can leave the keystroke to the app-wide
+   * quick-search binding otherwise.
+   */
+  const openFromShortcut = React.useCallback((): boolean => {
+    const info = getLinkSelectionInfo();
+    if (!info) return false;
+    setCardState(null);
+    openDialogFromInfo(info);
+    return true;
   }, [getLinkSelectionInfo, openDialogFromInfo]);
 
   const close = React.useCallback(() => setDraft(null), []);
@@ -431,6 +448,7 @@ export function useLinkEditor(richText: UseRichTextEditorResult) {
 
   return {
     openFromToolbar,
+    openFromShortcut,
     openFromClick,
     showFromCursor: showCard,
     focusCardFirstControl,
