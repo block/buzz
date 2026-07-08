@@ -996,3 +996,84 @@ test("globalAwareGate_globalProviderAndKeySet_requiredKeyAbsent", () => {
     "ANTHROPIC_API_KEY must NOT appear in requiredEnvKeys when it is satisfied globally",
   );
 });
+
+// ── F3 regression: template dialog global-model/provider fallback ──────────
+//
+// AgentDefinitionDialog now wires missingNormalizedFields (from
+// computeLocalModeGate) directly into canSubmit, replacing the old local-only
+// isExplicitModelRequired check.  These tests pin the three concrete failure
+// cases Thufir identified in pass-2 review so a future regression can't
+// silently re-introduce split source-of-truth between display and Save gate.
+
+test("f3_templateDialog_localAnthropicWithGlobalModel_modelNotRequired", () => {
+  // Case 1: local provider = anthropic, global model set, local model blank.
+  // The gate's effectiveModel = "" || "claude-opus-4-5" || "" = "claude-opus-4-5"
+  // → model field satisfied by global → missingNormalizedFields must be empty
+  // → canSubmit must NOT be blocked by the model field.
+  const result = computeLocalModeGate({
+    envVars: { ANTHROPIC_API_KEY: "sk-ant-test" },
+    globalEnvVars: {},
+    globalModel: "claude-opus-4-5",
+    globalProvider: "",
+    isProviderMode: false,
+    model: "",
+    provider: "anthropic",
+    runtimeId: "buzz-agent",
+    useMesh: false,
+  });
+
+  assert.equal(
+    result.missingNormalizedFields.includes("model"),
+    false,
+    "model must not be in missingNormalizedFields when global model satisfies it",
+  );
+  assert.equal(
+    result.missingNormalizedFields.length,
+    0,
+    "missingNormalizedFields must be empty — canSubmit must not be blocked",
+  );
+});
+
+test("f3_templateDialog_localProviderBlankGlobalAnthropicNoModel_saveBlocked", () => {
+  // Case 2: local provider blank, global provider = anthropic, global model blank.
+  // effectiveProvider = "" || "anthropic" → model required.
+  // effectiveModel = "" || "" = "" → model missing.
+  // missingNormalizedFields must contain "model" → canSubmit blocked.
+  const result = computeLocalModeGate({
+    envVars: {},
+    globalEnvVars: {},
+    globalModel: "",
+    globalProvider: "anthropic",
+    isProviderMode: false,
+    model: "",
+    provider: "",
+    runtimeId: "buzz-agent",
+    useMesh: false,
+  });
+
+  assert.ok(
+    result.missingNormalizedFields.includes("model"),
+    "model must be in missingNormalizedFields when global provider requires a model that is not set",
+  );
+  assert.equal(
+    result.satisfied,
+    false,
+    "gate must not be satisfied — canSubmit must be blocked (no silent NotReady save)",
+  );
+});
+
+test("f3_templateDialog_globalModelSet_zeroValueLabelIsInherit", () => {
+  // Case 3: global model set → the zero-value model dropdown option must show
+  // "Inherit global default (<model>)" not the generic "Default model".
+  // getDefaultLlmModelLabel is what AgentDefinitionDialog now uses for that slot.
+  assert.equal(
+    getDefaultLlmModelLabel("claude-opus-4-5"),
+    "Inherit global default (claude-opus-4-5)",
+    "zero-value model option label must show the global model name when set",
+  );
+  assert.equal(
+    getDefaultLlmModelLabel(""),
+    "Default model",
+    "zero-value model option label must be generic when no global model is set",
+  );
+});

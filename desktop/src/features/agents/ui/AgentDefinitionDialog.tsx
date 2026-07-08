@@ -50,6 +50,7 @@ import {
   CUSTOM_PROVIDER_DROPDOWN_VALUE,
   computeLocalModeGate,
   formatRuntimeOptionLabel,
+  getDefaultLlmModelLabel,
   getDefaultLlmProviderLabel,
   getDefaultPersonaRuntime,
   getModelSelectValue,
@@ -402,7 +403,6 @@ export function AgentDefinitionDialog({
   const llmProviderFieldVisible =
     (runtime.trim().length > 0 && runtimeCanChooseLlmProvider) ||
     blankRuntimeModelProviderEditable;
-  const providerForModelScope = llmProviderFieldVisible ? provider : "";
   const trimmedProvider = provider.trim();
   const providerApiKeyConfig =
     llmProviderFieldVisible && !isCustomProviderEditing
@@ -451,7 +451,13 @@ export function AgentDefinitionDialog({
   );
   // requiredEnvKeys: the gate already handles baked-, global-, and file-
   // satisfied keys so no further filtering is needed.
-  const { requiredEnvKeys } = localModeGate;
+  const { requiredEnvKeys, missingNormalizedFields } = localModeGate;
+  // Effective provider: agent value → global fallback → file fallback.
+  // Mirrors the chain inside computeLocalModeGate so model-option scoping and
+  // model requiredness are consistent with the readiness gate.
+  const fileProvider = runtimeFileConfig?.provider?.trim() ?? "";
+  const effectiveProvider =
+    trimmedProvider || (globalConfig.provider ?? "").trim() || fileProvider;
   // Provider required-ness is a static property of the runtime — it does not
   // change based on whether the field is currently filled. Using the dynamic
   // missingNormalizedFields check would flip the asterisk off once a value is
@@ -460,12 +466,16 @@ export function AgentDefinitionDialog({
   const providerIsRequired = runtimeSupportsLlmProviderSelection(runtime);
   const modelFieldVisible =
     runtime.trim().length > 0 || blankRuntimeModelProviderEditable;
+  // Static asterisk on the model label: uses effectiveProvider so a globally-
+  // set provider correctly marks the model field required.
   const isExplicitModelRequired =
-    modelFieldVisible && providerRequiresExplicitModel(providerForModelScope);
+    modelFieldVisible && providerRequiresExplicitModel(effectiveProvider);
   const isCreateMode = Boolean(initialValues && !("id" in initialValues));
   const selectedRuntimeIsAvailable =
     runtime.trim().length === 0 ||
     selectedRuntime?.availability === "available";
+  // Gate model/provider validity through missingNormalizedFields — single
+  // source of truth with the readiness gate so display and Save can't drift.
   const canSubmit =
     canSubmitPersonaDialog({ displayName, isPending }) &&
     (!isCreateMode || runtime.trim().length > 0) &&
@@ -474,16 +484,7 @@ export function AgentDefinitionDialog({
     // Crash-loop guard, create AND edit: an empty allowlist would crash
     // every instance minted from this definition at startup.
     personaBehaviorDraftValid(behaviorDraft) &&
-    (!isExplicitModelRequired || model.trim().length > 0) &&
-    // Block save when the LLM provider field is visible but no effective
-    // provider exists — neither a per-agent value nor a global fallback.
-    // When a global provider is set, an empty per-agent provider is valid
-    // (inherits the global). Only block when there is genuinely nothing.
-    !(
-      llmProviderFieldVisible &&
-      !provider.trim() &&
-      !(globalConfig.provider ?? "").trim()
-    ) &&
+    missingNormalizedFields.length === 0 &&
     !isAvatarUploadPending;
 
   // Auto-expand the Advanced section once per dialog-open cycle when required
@@ -525,13 +526,10 @@ export function AgentDefinitionDialog({
     isCustomProviderEditing,
     modelFieldVisible,
     open,
-    provider: providerForModelScope,
+    provider: effectiveProvider,
     selectedRuntime,
   });
-  const staticModelOptions = getPersonaModelOptions(
-    runtime,
-    providerForModelScope,
-  );
+  const staticModelOptions = getPersonaModelOptions(runtime, effectiveProvider);
   const runtimeModelOptions = getRuntimePersonaModelOptions(runtime);
   const modelOptions = discoveredModelOptions ?? staticModelOptions;
   const isModelCustom = !hasPersonaModelOption(
@@ -546,7 +544,7 @@ export function AgentDefinitionDialog({
   const showCustomModelInput =
     modelFieldVisible && (isCustomModelEditing || isModelCustom);
   const providerOptions = getPersonaProviderOptions(
-    providerForModelScope,
+    trimmedProvider,
     runtime,
     globalConfig.provider ?? "",
   );
@@ -608,7 +606,10 @@ export function AgentDefinitionDialog({
   ];
   const modelDropdownOptions: PersonaDropdownOption[] = [
     ...modelOptions.map((option) => ({
-      label: option.label,
+      label:
+        option.id === ""
+          ? getDefaultLlmModelLabel(globalConfig.model ?? "")
+          : option.label,
       value: option.id || AUTO_MODEL_DROPDOWN_VALUE,
     })),
     ...(modelDiscoveryLoading && discoveredModelOptions === null
@@ -646,7 +647,7 @@ export function AgentDefinitionDialog({
       isCustomModelEditing ||
       !shouldClearKnownModelForSelectionScope({
         model,
-        provider: providerForModelScope,
+        provider: effectiveProvider,
         runtime,
       })
     ) {
@@ -660,7 +661,7 @@ export function AgentDefinitionDialog({
     model,
     modelFieldVisible,
     open,
-    providerForModelScope,
+    effectiveProvider,
     runtime,
   ]);
 
