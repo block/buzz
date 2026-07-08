@@ -102,5 +102,20 @@ fn main() {
         println!("cargo:rustc-cfg=buzz_updater_enabled");
     }
 
+    // Cargo test executables get no embedded Windows manifest (tauri_build
+    // attaches one to bin targets only), so the loader binds comctl32 v5, which
+    // lacks TaskDialogIndirect (statically imported via tauri-plugin-dialog/rfd)
+    // and debug test exes die at load with STATUS_ENTRYPOINT_NOT_FOUND. Declaring
+    // the Common Controls v6 dependency makes link.exe emit a side-by-side
+    // <exe>.manifest that the loader honors for manifest-less executables;
+    // binaries with an embedded manifest (the real app) ignore it.
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows")
+        && std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc")
+    {
+        println!(
+            "cargo:rustc-link-arg=/MANIFESTDEPENDENCY:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'"
+        );
+    }
+
     tauri_build::build()
 }

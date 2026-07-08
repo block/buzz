@@ -7,7 +7,11 @@ import {
 } from "@/features/profile/hooks";
 import { relayClient } from "@/shared/api/relayClient";
 import { getMyRelayMembershipLookup } from "@/shared/api/relayMembers";
-import { getIdentity, importIdentity } from "@/shared/api/tauri";
+import {
+  getIdentity,
+  importIdentity,
+  persistCurrentIdentity,
+} from "@/shared/api/tauriIdentity";
 import {
   ACCENT_STORAGE_KEY,
   NEUTRAL_ACCENT,
@@ -73,6 +77,7 @@ async function checkMembershipDenied(): Promise<boolean> {
 type OnboardingFlowProps = {
   actions: OnboardingActions;
   canBackToWorkspaceSetup: boolean;
+  identityLost?: boolean;
   initialProfile: OnboardingProfileSeed;
   onBackToWorkspaceSetup: () => void;
 };
@@ -142,6 +147,7 @@ function resolveProfileSaveRecovery(
 export function OnboardingFlow({
   actions,
   canBackToWorkspaceSetup,
+  identityLost = false,
   initialProfile,
   onBackToWorkspaceSetup,
 }: OnboardingFlowProps) {
@@ -151,11 +157,15 @@ export function OnboardingFlow({
   const profileUpdateMutation = useUpdateProfileMutation();
   const { error: profileSaveError, isPending: isSavingProfile } =
     profileUpdateMutation;
-  const [currentPage, setCurrentPage] =
-    React.useState<OnboardingPage>("profile");
+  // When identity was lost (keyring cleared after migration), land the user
+  // directly on the import step with a recovery notice rather than profile setup.
+  const [currentPage, setCurrentPage] = React.useState<OnboardingPage>(
+    identityLost ? "key-import" : "profile",
+  );
   const [profileDraft, setProfileDraft] =
     React.useState<OnboardingProfileValues>(savedProfile);
   const [deniedPubkey, setDeniedPubkey] = React.useState<string>("");
+  const [persistError, setPersistError] = React.useState<string | null>(null);
   const [isUploadingAvatar, setIsUploadingAvatar] = React.useState(false);
   const [isProfileAdvancePending, setIsProfileAdvancePending] =
     React.useState(false);
@@ -403,6 +413,22 @@ export function OnboardingFlow({
     [profileUpdateMutation, queryClient],
   );
 
+  // Lost-mode "go back": persist the ephemeral key so the new identity is
+  // durable, then let the stage machinery (bootedLost + !identityLost) replace
+  // this flow with RelaunchRequiredScreen. No navigation needed here.
+  const handleLostModeBack = React.useCallback(async () => {
+    try {
+      const identity = await persistCurrentIdentity();
+      queryClient.setQueryData(["identity"], identity);
+    } catch (error) {
+      setPersistError(
+        error instanceof Error
+          ? error.message
+          : "Failed to create a new identity. Please try again.",
+      );
+    }
+  }, [queryClient]);
+
   if (currentPage === "membership-denied") {
     return (
       <MembershipDenied
@@ -495,18 +521,40 @@ export function OnboardingFlow({
             transitionKey={`key-import-${transitionDirection}`}
           >
             <div className="w-full max-w-[440px]">
-              <h1 className="text-3xl font-semibold tracking-tight">
-                Use your existing key
-              </h1>
-              <p className="mt-3 text-sm leading-6 text-muted-foreground">
-                Import your Nostr private key to use that identity with Buzz. If
-                this key already has a profile on the relay, your name and
-                avatar are restored automatically.
-              </p>
+              {identityLost ? (
+                <>
+                  <h1 className="text-3xl font-semibold tracking-tight">
+                    Re-import your key
+                  </h1>
+                  <p className="mt-3 text-sm leading-6 text-muted-foreground">
+                    Your identity is no longer in the system keyring. Re-import
+                    your nsec to restore it — Buzz will restart to finish
+                    recovery. Or go back to start a new identity with a fresh
+                    key.
+                  </p>
+                </>
+              ) : (
+                <>
+                  <h1 className="text-3xl font-semibold tracking-tight">
+                    Use your existing key
+                  </h1>
+                  <p className="mt-3 text-sm leading-6 text-muted-foreground">
+                    Import your Nostr private key to use that identity with
+                    Buzz. If this key already has a profile on the relay, your
+                    name and avatar are restored automatically.
+                  </p>
+                </>
+              )}
             </div>
 
+            {persistError ? (
+              <p className="mt-4 w-full max-w-[440px] text-sm text-destructive">
+                {persistError}
+              </p>
+            ) : null}
+
             <NostrKeyImportForm
-              onBack={showProfilePage}
+              onBack={identityLost ? handleLostModeBack : showProfilePage}
               onImport={importExistingKey}
             />
           </OnboardingSlideTransition>

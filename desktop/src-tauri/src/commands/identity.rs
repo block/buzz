@@ -11,23 +11,37 @@ use crate::{
     relay::{self, relay_api_base_url_with_override, relay_ws_url_with_override},
 };
 
+/// Encode `pubkey` as npub bech32 and truncate it for display: first 10 chars
+/// + "…" + last 4 chars. Returns the full bech32 when it is 16 chars or fewer.
+fn truncated_display_name(pubkey: &PublicKey) -> Result<String, String> {
+    let bech32 = pubkey
+        .to_bech32()
+        .map_err(|error| format!("bech32 encode failed: {error}"))?;
+    Ok(if bech32.len() > 16 {
+        format!("{}…{}", &bech32[..10], &bech32[bech32.len() - 4..])
+    } else {
+        bech32
+    })
+}
+
 #[tauri::command]
 pub fn get_identity(state: State<'_, AppState>) -> Result<IdentityInfo, String> {
     let keys = state.keys.lock().map_err(|error| error.to_string())?;
     let pubkey = keys.public_key();
     let pubkey_hex = pubkey.to_hex();
-    let bech32 = pubkey
-        .to_bech32()
-        .map_err(|error| format!("bech32 encode failed: {error}"))?;
-    let display_name = if bech32.len() > 16 {
-        format!("{}…{}", &bech32[..10], &bech32[bech32.len() - 4..])
-    } else {
-        bech32
-    };
+    let display_name = truncated_display_name(&pubkey)?;
+    let lost = state
+        .identity_lost
+        .load(std::sync::atomic::Ordering::Acquire);
+    let locked = state
+        .keyring_locked
+        .load(std::sync::atomic::Ordering::Acquire);
 
     Ok(IdentityInfo {
         pubkey: pubkey_hex,
         display_name,
+        lost,
+        locked,
     })
 }
 
@@ -72,11 +86,7 @@ pub async fn sign_event(
     tags: Vec<Vec<String>>,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
-    let keys = state
-        .keys
-        .lock()
-        .map_err(|error| error.to_string())?
-        .clone();
+    let keys = state.signing_keys()?;
 
     tauri::async_runtime::spawn_blocking(move || {
         let nostr_tags = tags
@@ -104,13 +114,7 @@ pub fn decrypt_observer_event(
     event_json: String,
     state: State<'_, AppState>,
 ) -> Result<serde_json::Value, String> {
-    let nsec = {
-        let keys = state.keys.lock().map_err(|error| error.to_string())?;
-        keys.secret_key()
-            .to_bech32()
-            .map_err(|error| format!("encode nsec: {error}"))?
-    };
-    let keys = Keys::parse(&nsec).map_err(|error| format!("parse nsec: {error}"))?;
+    let keys = state.signing_keys()?;
     let event = Event::from_json(event_json).map_err(|error| format!("invalid event: {error}"))?;
 
     // Defense-in-depth: verify event ID and signature before decrypting.
@@ -131,13 +135,7 @@ pub fn build_observer_control_event(
     payload: serde_json::Value,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
-    let nsec = {
-        let keys = state.keys.lock().map_err(|error| error.to_string())?;
-        keys.secret_key()
-            .to_bech32()
-            .map_err(|error| format!("encode nsec: {error}"))?
-    };
-    let keys = Keys::parse(&nsec).map_err(|error| format!("parse nsec: {error}"))?;
+    let keys = state.signing_keys()?;
     let agent_pubkey = PublicKey::from_hex(agent_pubkey.trim())
         .map_err(|error| format!("invalid agent pubkey: {error}"))?;
     let agent_pubkey_hex = agent_pubkey.to_hex();
@@ -159,7 +157,7 @@ pub fn build_observer_control_event(
 
 #[tauri::command]
 pub fn get_nsec(state: State<'_, AppState>) -> Result<String, String> {
-    let keys = state.keys.lock().map_err(|error| error.to_string())?;
+    let keys = state.signing_keys()?;
     keys.secret_key()
         .to_bech32()
         .map_err(|error| format!("encode nsec: {error}"))
@@ -174,36 +172,121 @@ pub async fn import_identity(
         let trimmed = nsec.trim();
         let keys = Keys::parse(trimmed).map_err(|e| format!("Invalid private key: {e}"))?;
 
-        // Persist to identity.key before swapping in-memory state. If the disk
-        // write fails, the running app keeps the old identity.
+        // Serialize against persist_current_identity: hold this guard for the
+        // full function body so a concurrent stale persist can't overwrite
+        // this import.
+        let state = app_handle.state::<AppState>();
+        let _mutation_guard = state.identity_mutation.lock().map_err(|e| e.to_string())?;
+
         let data_dir = app_handle
             .path()
             .app_data_dir()
             .map_err(|e| format!("app data dir: {e}"))?;
         std::fs::create_dir_all(&data_dir).map_err(|e| format!("create app data dir: {e}"))?;
         let key_path = data_dir.join("identity.key");
-        crate::app_state::save_key_file(&key_path, &keys)?;
 
-        // Update in-memory keys only after persistence succeeds.
-        let state = app_handle.state::<AppState>();
+        // Persist into the OS keyring first (store → read-back verify → marker →
+        // delete file). Falls back to the 0o600 file when the keyring is
+        // unavailable; returns Err only when both backends fail.
+        let store = crate::secret_store::SecretStore::shared(crate::app_state::KEYRING_SERVICE);
+        crate::app_state::persist_imported_identity(store, &keys, &key_path, &data_dir)?;
+
+        // Update in-memory keys BEFORE clearing recovery flags. The Release
+        // stores below pair with Acquire loads in get_identity: a reader
+        // observing false is guaranteed to see the updated keys.
         let pubkey = keys.public_key();
         *state.keys.lock().map_err(|e| e.to_string())? = keys;
 
+        // Clear both recovery flags — an import is valid in either lost or
+        // keyring-locked state and resolves both. In the locked case the
+        // keyring is unreachable, so persist_imported_identity already fell
+        // back to identity.key; on the next Unreachable boot the file is
+        // loaded directly and when the keyring returns the adoption path
+        // picks it up.
+        state
+            .identity_lost
+            .store(false, std::sync::atomic::Ordering::Release);
+        state
+            .keyring_locked
+            .store(false, std::sync::atomic::Ordering::Release);
+
         let pubkey_hex = pubkey.to_hex();
-        let bech32 = pubkey
-            .to_bech32()
-            .map_err(|error| format!("bech32 encode failed: {error}"))?;
-        let display_name = if bech32.len() > 16 {
-            format!("{}…{}", &bech32[..10], &bech32[bech32.len() - 4..])
-        } else {
-            bech32
-        };
+        let display_name = truncated_display_name(&pubkey)?;
 
         eprintln!("buzz-desktop: imported identity pubkey {}", pubkey_hex);
 
         Ok(IdentityInfo {
             pubkey: pubkey_hex,
             display_name,
+            lost: false,
+            locked: false,
+        })
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking failed: {e}"))?
+}
+
+/// Make the current ephemeral identity durable by persisting it to the OS
+/// keyring (or falling back to identity.key). This is called when the user
+/// chooses to start a new identity instead of re-importing their previous one
+/// — it converts the transient lost-state key into a permanent identity.
+///
+/// **LOST-ONLY**: returns `Err` when `identity_lost` is false, and deliberately
+/// does NOT accept `keyring_locked`. In locked state the user's real identity
+/// still exists in the unreachable keyring; persisting the ephemeral key to
+/// `identity.key` would make it appear as a "different key" on next boot,
+/// and the mismatched-file adoption path would then clobber the real keyring
+/// key once the keyring becomes reachable again. The correct action in locked
+/// state is to unlock the keyring and relaunch — not to adopt the ephemeral key.
+#[tauri::command]
+pub async fn persist_current_identity(
+    app_handle: tauri::AppHandle,
+) -> Result<IdentityInfo, String> {
+    tokio::task::spawn_blocking(move || {
+        let state = app_handle.state::<AppState>();
+
+        // Acquire mutation lock before reading identity_lost so that a
+        // concurrent import_identity cannot complete between our check and
+        // our persist, which would let the stale ephemeral key overwrite the
+        // imported one.
+        let _mutation_guard = state.identity_mutation.lock().map_err(|e| e.to_string())?;
+
+        if !state
+            .identity_lost
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err("identity is not in a lost state".to_string());
+        }
+
+        // Clone current keys without holding the mutex across keyring I/O.
+        let keys = state.keys.lock().map_err(|e| e.to_string())?.clone();
+
+        let data_dir = app_handle
+            .path()
+            .app_data_dir()
+            .map_err(|e| format!("app data dir: {e}"))?;
+        std::fs::create_dir_all(&data_dir).map_err(|e| format!("create app data dir: {e}"))?;
+        let key_path = data_dir.join("identity.key");
+
+        let store = crate::secret_store::SecretStore::shared(crate::app_state::KEYRING_SERVICE);
+        crate::app_state::persist_imported_identity(store, &keys, &key_path, &data_dir)?;
+
+        // Keys are already the live identity — only clear identity_lost.
+        // Release pairs with Acquire in get_identity so readers see
+        // consistent state.
+        state
+            .identity_lost
+            .store(false, std::sync::atomic::Ordering::Release);
+
+        let pubkey = keys.public_key();
+        let pubkey_hex = pubkey.to_hex();
+        let display_name = truncated_display_name(&pubkey)?;
+
+        Ok(IdentityInfo {
+            pubkey: pubkey_hex,
+            display_name,
+            lost: false,
+            locked: false,
         })
     })
     .await
@@ -293,11 +376,7 @@ pub async fn create_auth_event(
     relay_url: String,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
-    let keys = state
-        .keys
-        .lock()
-        .map_err(|error| error.to_string())?
-        .clone();
+    let keys = state.signing_keys()?;
 
     tauri::async_runtime::spawn_blocking(move || {
         let tags = vec![
@@ -323,7 +402,7 @@ pub async fn nip44_encrypt_to_self(
     plaintext: String,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
-    let keys = state.keys.lock().map_err(|e| e.to_string())?.clone();
+    let keys = state.signing_keys()?;
 
     tauri::async_runtime::spawn_blocking(move || {
         nip44::encrypt(
@@ -343,7 +422,7 @@ pub async fn nip44_decrypt_from_self(
     ciphertext: String,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
-    let keys = state.keys.lock().map_err(|e| e.to_string())?.clone();
+    let keys = state.signing_keys()?;
 
     tauri::async_runtime::spawn_blocking(move || {
         nip44::decrypt(keys.secret_key(), &keys.public_key(), &ciphertext)

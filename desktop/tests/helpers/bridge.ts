@@ -207,6 +207,16 @@ type MockBridgeOptions = {
    * can exercise the "Thread deleted" label / disabled-send path.
    */
   deletedEventIds?: string[];
+  /**
+   * When true, `get_identity` returns `lost: true` until `persist_current_identity`
+   * or `import_identity` is invoked. Drives the identity-lost recovery UX in tests.
+   */
+  identityLost?: boolean;
+  /**
+   * When true, `get_identity` returns `locked: true` until `import_identity` is
+   * invoked. Drives the keyring-locked screen in tests.
+   */
+  identityLocked?: boolean;
 };
 
 type BridgeOptions = {

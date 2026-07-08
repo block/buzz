@@ -60,7 +60,7 @@ pub(super) fn retain_managed_agent_pending(
         let content = serde_json::to_string(&agent_event_content(record))
             .map_err(|e| format!("failed to serialize managed-agent content: {e}"))?;
         let (owner_pubkey, event) = {
-            let keys = state.keys.lock().map_err(|e| e.to_string())?;
+            let keys = state.signing_keys()?;
             let owner_pubkey = keys.public_key().to_hex();
             let existing =
                 get_retained_event(&conn, KIND_MANAGED_AGENT, &owner_pubkey, &record.pubkey)?;
@@ -122,7 +122,7 @@ fn tombstone_managed_agent_pending(app: &AppHandle, state: &AppState, agent_pubk
 
     let result = (|| -> Result<(), String> {
         let (owner_pubkey, event) = {
-            let keys = state.keys.lock().map_err(|e| e.to_string())?;
+            let keys = state.signing_keys()?;
             let owner_pubkey = keys.public_key().to_hex();
             let event = build_agent_delete(agent_pubkey, &owner_pubkey)?
                 .sign_with_keys(&keys)
@@ -512,7 +512,7 @@ pub async fn create_managed_agent(
     // Agents authenticate via the auth tag in their kind:0 profile event.
     // No tokens are minted. Fail closed: bad auth tag → don't create agent.
     let auth_tag = {
-        let owner_keys = state.keys.lock().map_err(|e| e.to_string())?;
+        let owner_keys = state.signing_keys()?;
         // Bridge nostr 0.37 → 0.36 (buzz-sdk) via hex round-trip.
         let compat_owner = nostr::Keys::parse(&owner_keys.secret_key().to_secret_hex())
             .map_err(|e| format!("failed to bridge owner keys: {e}"))?;

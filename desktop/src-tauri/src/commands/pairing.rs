@@ -76,15 +76,12 @@ pub async fn start_pairing(
     }
     pairing.clear();
 
-    let (nsec, pubkey_hex) = {
-        let keys = state.keys.lock().map_err(|e| e.to_string())?;
-        let nsec = keys
-            .secret_key()
-            .to_bech32()
-            .map_err(|e| format!("encode nsec: {e}"))?;
-        let pubkey = keys.public_key().to_hex();
-        (nsec, pubkey)
-    };
+    let keys = state.signing_keys()?;
+    let nsec = keys
+        .secret_key()
+        .to_bech32()
+        .map_err(|e| format!("encode nsec: {e}"))?;
+    let pubkey_hex = keys.public_key().to_hex();
 
     let ws_url = relay_ws_url_with_override(&state);
     let http_url = relay_api_base_url_with_override(&state);

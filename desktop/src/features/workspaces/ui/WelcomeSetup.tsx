@@ -4,7 +4,7 @@ import { flushSync } from "react-dom";
 import {
   getIdentity,
   importIdentity as tauriImportIdentity,
-} from "@/shared/api/tauri";
+} from "@/shared/api/tauriIdentity";
 import { NostrKeyImportForm } from "@/features/onboarding/ui/NostrKeyImportForm";
 import {
   type OnboardingTransitionDirection,

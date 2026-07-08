@@ -88,6 +88,7 @@ export default defineConfig({
         "**/drafts-screenshots.spec.ts",
         "**/buzz-theme-screenshots.spec.ts",
         "**/channel-sort.spec.ts",
+        "**/identity-lost.spec.ts",
       ],
       use: {
         ...devices["Desktop Chrome"],

@@ -179,6 +179,12 @@ type E2eConfig = {
     // Event IDs that `get_event` should report as definitively not found.
     // Causes `useDraftRootStatus` to classify as `deleted`.
     deletedEventIds?: string[];
+    // When true, `get_identity` returns `lost: true` until `persist_current_identity`
+    // or `import_identity` is called. Drives the identity-lost recovery UX in tests.
+    identityLost?: boolean;
+    // When true, `get_identity` returns `locked: true` until `import_identity` is
+    // called. Drives the keyring-locked screen in tests.
+    identityLocked?: boolean;
   };
   relayHttpUrl?: string;
   relayWsUrl?: string;
@@ -838,6 +844,13 @@ const PROFILE_ONLY_AGENT_PUBKEY =
 const OWNED_RELAY_AGENT_PUBKEY =
   "a1b2c3d4e5f60718293a4b5c6d7e8f90112233445566778899aabbccddeeff00";
 const MOCK_IDENTITY_PUBKEY = DEFAULT_MOCK_IDENTITY.pubkey;
+
+// Tracks whether `persist_current_identity` or `import_identity` has cleared
+// the lost flag set by `mock.identityLost`. Reset to false on each fresh page
+// load (module re-evaluation), so tests start in a clean state.
+let mockIdentityLostCleared = false;
+// Same pattern for `mock.identityLocked`.
+let mockIdentityLockedCleared = false;
 
 const mockDisplayNames = new Map<string, string>([
   [MOCK_IDENTITY_PUBKEY, DEFAULT_MOCK_IDENTITY.display_name],
@@ -8189,18 +8202,43 @@ export function maybeInstallE2eTauriMocks() {
           },
         };
       }
-      case "get_identity":
+      case "get_identity": {
+        const isLost =
+          !mockIdentityLostCleared && activeConfig?.mock?.identityLost === true;
+        const isLocked =
+          !mockIdentityLockedCleared &&
+          activeConfig?.mock?.identityLocked === true;
         if (identity) {
           return {
             pubkey: identity.pubkey,
             display_name: identity.username,
+            lost: false,
+            locked: false,
           };
         }
 
-        return DEFAULT_MOCK_IDENTITY;
+        return { ...DEFAULT_MOCK_IDENTITY, lost: isLost, locked: isLocked };
+      }
       case "get_nsec":
         return "nsec1mock000000000000000000000000000000000000000000000000000000";
+      case "persist_current_identity": {
+        // Persist the ephemeral key: clears only the lost flag. The locked flag
+        // is cleared only by import_identity; production rejects
+        // persist_current_identity when the identity is in the locked state.
+        mockIdentityLostCleared = true;
+        const currentPubkey = identity?.pubkey ?? DEFAULT_MOCK_IDENTITY.pubkey;
+        const currentDisplayName =
+          identity?.username ?? DEFAULT_MOCK_IDENTITY.display_name;
+        return {
+          pubkey: currentPubkey,
+          display_name: currentDisplayName,
+          lost: false,
+          locked: false,
+        };
+      }
       case "import_identity":
+        mockIdentityLostCleared = true;
+        mockIdentityLockedCleared = true;
         return importMockIdentity(
           (payload as { nsec?: string } | null)?.nsec ?? "",
         );

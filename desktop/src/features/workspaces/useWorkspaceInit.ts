@@ -1,11 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 
 import { relayClient } from "@/shared/api/relayClient";
-import {
-  applyWorkspace,
-  getDefaultRelayUrl,
-  getIdentity,
-} from "@/shared/api/tauri";
+import { applyWorkspace, getDefaultRelayUrl } from "@/shared/api/tauri";
+import { getIdentity } from "@/shared/api/tauriIdentity";
 import { resetMediaCaches } from "@/shared/lib/mediaUrl";
 import { clearSearchHitEventCache } from "@/app/navigation/searchHitEventCache";
 import {

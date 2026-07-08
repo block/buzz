@@ -148,7 +148,11 @@ const overrides = new Map([
   // baked-env-required-badge: getBakedBuildEnvKeys wrapper adds ~16 lines. Queued to split.
   // restart-badge: started the queued split — start/stopManagedAgent moved to
   // tauriManagedAgents.ts; limit ratcheted down 1388 → 1380 to bank the headroom.
-  ["src/shared/api/tauri.ts", 1380],
+  // identity-import-keyring: identity wrappers (RawIdentity, getIdentity, getNsec,
+  // importIdentity, persistCurrentIdentity) moved to tauriIdentity.ts;
+  // limit ratcheted down 1380 → 1360 to bank the headroom (absorbs main-side
+  // growth landed between the split and the rebase).
+  ["src/shared/api/tauri.ts", 1360],
   // readiness-gate: PersonaDialog.tsx threads computeLocalModeGate +
   // requiredCredentialEnvKeys + RequiredFieldLabel so the "New agent" dialog
   // shows required markers and credential amber rows (parity with
@@ -175,6 +179,12 @@ const overrides = new Map([
   // unified-agent-model 1A.1: inline test module moved to discovery/tests.rs,
   // ratcheting 1259 -> 802 (under the 1000 default; entry kept as a ratchet).
   ["src-tauri/src/managed_agents/discovery.rs", 802],
+  // identity-import-keyring: the identity resolution state machine's behavioral
+  // matrix (46 tests over FakeIdentityStore — probe × marker × file cells,
+  // adoption / read-back-corruption / marker-failure arms, recovery-mode
+  // gating). Load-bearing regression coverage for silent identity rotation,
+  // not generic debt growth. Approved override; split if the matrix grows.
+  ["src-tauri/src/app_state_tests.rs", 1290],
   // migration_tests.rs carries the harness-sync migration coverage plus the
   // patch_json_records owner-only writeback regression test (SECURITY.md:90
   // crash-safe 0o600 fallback). Load-bearing security + feature coverage, not

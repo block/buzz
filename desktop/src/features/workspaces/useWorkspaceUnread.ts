@@ -1,6 +1,6 @@
 import * as React from "react";
 
-import { getIdentity } from "@/shared/api/tauri";
+import { getIdentity } from "@/shared/api/tauriIdentity";
 import { markWorkspaceRead } from "@/features/workspaces/workspaceMarkRead";
 import { pollWorkspaceUnread } from "@/features/workspaces/workspaceUnreadObserver";
 

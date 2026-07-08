@@ -312,6 +312,19 @@ pub fn run() {
             resolve_persisted_identity(&app_handle, &state)
                 .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
 
+            // When the identity is in recovery mode (lost = keyring empty after
+            // migration, or keyring-locked = keyring unreachable but marker
+            // present), all owner-keyed side effects (event sync, agent restore,
+            // relay publish) are skipped. The frontend shows a recovery screen;
+            // the user must relaunch after restoring the identity.
+            let identity_lost = state
+                .identity_lost
+                .load(std::sync::atomic::Ordering::Acquire);
+            let keyring_locked = state
+                .keyring_locked
+                .load(std::sync::atomic::Ordering::Acquire);
+            let recovery_mode = identity_lost || keyring_locked;
+
             // Snapshot owner keys after identity resolution; the best-effort
             // event reconcile itself runs off the synchronous setup path below.
             let owner_keys = state
@@ -420,8 +433,11 @@ pub fn run() {
             // Sync team-dir edits and reconcile persona/team/agent events after
             // setup can continue. It is best-effort retention backfill, unlike
             // identity resolution above, so JSON/SQLite/signing work must not
-            // hold the boot path hostage.
-            event_sync::spawn_event_sync(app_handle.clone(), owner_keys);
+            // hold the boot path hostage. Skipped in recovery mode — the owner
+            // key is ephemeral.
+            if !recovery_mode {
+                event_sync::spawn_event_sync(app_handle.clone(), owner_keys);
+            }
 
             if let Some(mgr) = huddle::models::global_model_manager() {
                 mgr.start_stt_download(state.http_client.clone());
@@ -447,7 +463,9 @@ pub fn run() {
             // the boot-time repos symlink result (see restore_agents above):
             // skip when a configured repos_dir could not be resolved, so no
             // agent clones into a REPOS that isn't the user's target.
-            if restore_agents {
+            // Also skipped in recovery mode — agents must not be spawned
+            // under an ephemeral owner key.
+            if restore_agents && !recovery_mode {
                 tauri::async_runtime::spawn(async move {
                     if let Err(error) =
                         restore_managed_agents_on_launch(&app_handle, shutdown_started.as_ref())
@@ -502,26 +520,31 @@ pub fn run() {
             // One loop is the sole publisher for persona, team, and managed-
             // agent writers; a relay-unreachable tick leaves rows pending for
             // the next sweep.
-            let flush_handle = app.handle().clone();
-            tauri::async_runtime::spawn(async move {
-                use std::time::Duration;
-                use tauri::Manager;
-                let Ok(db_path) = managed_agents::managed_agents_base_dir(&flush_handle)
-                    .map(|d| d.join("retention.db"))
-                else {
-                    eprintln!("buzz-desktop: event-flush: cannot resolve retention db path");
-                    return;
-                };
-                loop {
-                    let state = flush_handle.state::<AppState>();
-                    if let Err(e) =
-                        managed_agents::persona_events::flush_pending_events(&db_path, &state).await
-                    {
-                        eprintln!("buzz-desktop: event-flush: {e}");
+            // Skipped in recovery mode — flushing under an ephemeral key would
+            // publish events attributed to an identity the user doesn't own.
+            if !recovery_mode {
+                let flush_handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    use std::time::Duration;
+                    use tauri::Manager;
+                    let Ok(db_path) = managed_agents::managed_agents_base_dir(&flush_handle)
+                        .map(|d| d.join("retention.db"))
+                    else {
+                        eprintln!("buzz-desktop: event-flush: cannot resolve retention db path");
+                        return;
+                    };
+                    loop {
+                        let state = flush_handle.state::<AppState>();
+                        if let Err(e) =
+                            managed_agents::persona_events::flush_pending_events(&db_path, &state)
+                                .await
+                        {
+                            eprintln!("buzz-desktop: event-flush: {e}");
+                        }
+                        tokio::time::sleep(Duration::from_secs(30)).await;
                     }
-                    tokio::time::sleep(Duration::from_secs(30)).await;
-                }
-            });
+                });
+            }
 
             Ok(())
         })
@@ -530,6 +553,7 @@ pub fn run() {
             get_identity,
             get_nsec,
             import_identity,
+            persist_current_identity,
             get_profile,
             update_profile,
             get_user_profile,

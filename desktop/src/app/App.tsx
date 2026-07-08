@@ -17,6 +17,8 @@ import { useReloadShortcut } from "@/app/useReloadShortcut";
 import { useAppOnboardingState } from "@/features/onboarding/hooks";
 import { OnboardingSlideTransition } from "@/features/onboarding/ui/OnboardingSlideTransition";
 import { OnboardingFlow } from "@/features/onboarding/ui/OnboardingFlow";
+import { KeyringLockedScreen } from "@/features/onboarding/ui/KeyringLockedScreen";
+import { RelaunchRequiredScreen } from "@/features/onboarding/ui/RelaunchRequiredScreen";
 import type { Workspace } from "@/features/workspaces/types";
 import { useWorkspaceInit } from "@/features/workspaces/useWorkspaceInit";
 import { useNestNotifications } from "@/features/workspaces/useNestNotifications";
@@ -285,11 +287,20 @@ function AppReady({
     onFirstRunWorkspaceSettled,
   ]);
 
+  if (onboarding.stage === "keyring-locked") {
+    return <KeyringLockedScreen />;
+  }
+
+  if (onboarding.stage === "relaunch-required") {
+    return <RelaunchRequiredScreen />;
+  }
+
   if (onboarding.stage === "onboarding") {
     return (
       <OnboardingFlow
         actions={onboarding.flow.actions}
         canBackToWorkspaceSetup={canBackToWorkspaceSetup}
+        identityLost={onboarding.identityLost}
         initialProfile={onboarding.flow.initialProfile}
         key={onboarding.currentPubkey ?? "anonymous"}
         onBackToWorkspaceSetup={onBackToWorkspaceSetup}
