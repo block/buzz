@@ -20,7 +20,6 @@ import { PersonaDropdownField } from "./PersonaDropdownField";
 import type { EnvVarsValue } from "./EnvVarsEditor";
 import { PersonaAdvancedFields } from "./PersonaAdvancedFields";
 import { PersonaModelField } from "./PersonaModelField";
-import { PersonaProviderApiKeyField } from "./PersonaProviderApiKeyField";
 import {
   getImportButtonLabel,
   getImportButtonTone,
@@ -32,11 +31,7 @@ import {
   formatPersonaNamePoolText,
   parsePersonaNamePoolText,
 } from "./personaDialogState";
-import {
-  getAdvancedEnvVars,
-  hasAdvancedEnvVars,
-  hasText,
-} from "./personaDialogEnvVars";
+import { hasText } from "./personaDialogEnvVars";
 import {
   behaviorForSubmit,
   draftFromBehavior,
@@ -55,8 +50,6 @@ import {
   getModelSelectValue,
   getPersonaModelOptions,
   getPersonaProviderOptions,
-  getProviderApiKeyConfig,
-  getProviderApiKeyEnvVar,
   getRuntimePersonaModelOptions,
   hasPersonaModelOption,
   NO_RUNTIME_DROPDOWN_VALUE,
@@ -70,10 +63,6 @@ import {
   sortPersonaRuntimes,
 } from "./personaDialogPickers";
 import { RequiredFieldLabel } from "./personaProviderModelFields";
-import {
-  envVarsMergingAdvancedEdit,
-  envVarsWithProviderApiKey,
-} from "./providerEnvVarUpdates";
 import {
   selectionOnModelDropdownChange,
   selectionOnProviderDropdownChange,
@@ -204,9 +193,6 @@ export function AgentDefinitionDialog({
         : "";
     const nextEnvVars =
       "envVars" in initialValues ? (initialValues.envVars ?? {}) : {};
-    const managedApiKeyEnvVar = getProviderApiKeyEnvVar(
-      initialValues.provider ?? "",
-    );
     const nextBehaviorDraft = draftFromBehavior(initialValues.behavior);
     behaviorSeedRef.current = draftFromBehavior(initialValues.behavior);
     setBehaviorDraft(nextBehaviorDraft);
@@ -214,7 +200,7 @@ export function AgentDefinitionDialog({
     setEnvVars(nextEnvVars);
     setShowAdvancedFields(
       nextNamePoolText.trim().length > 0 ||
-        hasAdvancedEnvVars(nextEnvVars, managedApiKeyEnvVar) ||
+        Object.keys(nextEnvVars).length > 0 ||
         nextBehaviorDraft.respondTo !== null ||
         nextBehaviorDraft.mcpToolsets.trim().length > 0 ||
         nextBehaviorDraft.parallelism.trim().length > 0,
@@ -403,15 +389,6 @@ export function AgentDefinitionDialog({
     (runtime.trim().length > 0 && runtimeCanChooseLlmProvider) ||
     blankRuntimeModelProviderEditable;
   const trimmedProvider = provider.trim();
-  const providerApiKeyConfig =
-    llmProviderFieldVisible && !isCustomProviderEditing
-      ? getProviderApiKeyConfig(trimmedProvider)
-      : null;
-  const providerApiKeyValue = providerApiKeyConfig
-    ? (envVars[providerApiKeyConfig.envVar] ?? "")
-    : "";
-  const providerApiKeyFieldVisible =
-    llmProviderFieldVisible && providerApiKeyConfig !== null;
   // Required credential env keys for this runtime + provider combination.
   // Used to show required markers on the LLM provider label and amber
   // locked rows in the env vars editor.
@@ -556,10 +533,6 @@ export function AgentDefinitionDialog({
     : trimmedProvider || AUTO_PROVIDER_DROPDOWN_VALUE;
   const showCustomProviderInput =
     llmProviderFieldVisible && isCustomProviderEditing;
-  const advancedEnvVars = getAdvancedEnvVars(
-    envVars,
-    providerApiKeyConfig?.envVar ?? null,
-  );
   const runtimeDropdownValue = runtime.trim() || NO_RUNTIME_DROPDOWN_VALUE;
   const sortedRuntimes = React.useMemo(
     () => sortPersonaRuntimes(runtimes),
@@ -660,26 +633,6 @@ export function AgentDefinitionDialog({
     effectiveProvider,
     runtime,
   ]);
-
-  function handleProviderApiKeyChange(value: string) {
-    if (!providerApiKeyConfig) {
-      return;
-    }
-
-    setEnvVars((current) =>
-      envVarsWithProviderApiKey(current, providerApiKeyConfig.envVar, value),
-    );
-  }
-
-  function handleAdvancedEnvVarsChange(nextAdvancedEnvVars: EnvVarsValue) {
-    setEnvVars((current) =>
-      envVarsMergingAdvancedEdit(
-        current,
-        nextAdvancedEnvVars,
-        providerApiKeyConfig?.envVar ?? null,
-      ),
-    );
-  }
 
   const selection: RuntimeModelProviderSelection = {
     provider,
@@ -945,14 +898,8 @@ export function AgentDefinitionDialog({
                     />
                   </div>
                 ) : null}
-                {providerApiKeyFieldVisible && providerApiKeyConfig ? (
-                  <PersonaProviderApiKeyField
-                    config={providerApiKeyConfig}
-                    disabled={isPending}
-                    onChange={handleProviderApiKeyChange}
-                    value={providerApiKeyValue}
-                  />
-                ) : null}
+                {/* Provider API key is now surfaced as an amber required row
+                    in EnvVarsEditor — no dedicated field needed. */}
               </div>
             ) : null}
 
@@ -1004,17 +951,15 @@ export function AgentDefinitionDialog({
                     <PersonaAdvancedFields
                       behaviorDraft={behaviorDraft}
                       disabled={isPending}
-                      envVars={advancedEnvVars}
+                      envVars={envVars}
                       fileSatisfiedEnvKeys={localModeGate.fileSatisfiedEnvKeys}
                       inheritedEnvVars={globalConfig.env_vars}
                       modelTuningRuntimeId={runtime}
                       namePoolText={namePoolText}
                       onBehaviorDraftChange={setBehaviorDraft}
-                      onEnvVarsChange={handleAdvancedEnvVarsChange}
+                      onEnvVarsChange={setEnvVars}
                       onNamePoolTextChange={setNamePoolText}
-                      requiredEnvKeys={requiredEnvKeys.filter(
-                        (k) => k !== (providerApiKeyConfig?.envVar ?? null),
-                      )}
+                      requiredEnvKeys={requiredEnvKeys}
                     />
                   </motion.div>
                 ) : null}

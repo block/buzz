@@ -3,7 +3,6 @@ import test from "node:test";
 
 import {
   envVarsClearingManagedApiKey,
-  envVarsMergingAdvancedEdit,
   envVarsWithProviderApiKey,
   envVarsWithoutKey,
 } from "./providerEnvVarUpdates.ts";
@@ -76,26 +75,5 @@ test("envVarsClearingManagedApiKey is a no-op when the managed key is shared or 
   assert.equal(
     envVarsClearingManagedApiKey(noManaged, "", "openai"),
     noManaged,
-  );
-});
-
-test("envVarsMergingAdvancedEdit preserves the managed key over the advanced edit", () => {
-  const next = envVarsMergingAdvancedEdit(
-    { ANTHROPIC_API_KEY: "sk-1", OLD: "x" },
-    { NEW: "y" },
-    "ANTHROPIC_API_KEY",
-  );
-  assert.deepEqual(next, { NEW: "y", ANTHROPIC_API_KEY: "sk-1" });
-});
-
-test("envVarsMergingAdvancedEdit passes the edit through when no managed key is set", () => {
-  const advanced = { NEW: "y" };
-  assert.equal(
-    envVarsMergingAdvancedEdit({ OLD: "x" }, advanced, null),
-    advanced,
-  );
-  assert.equal(
-    envVarsMergingAdvancedEdit({ OLD: "x" }, advanced, "ANTHROPIC_API_KEY"),
-    advanced,
   );
 });

@@ -34,6 +34,61 @@ export type PersonaDropdownOption = {
   value: string;
 };
 
+/**
+ * Per-provider credential configuration.
+ *
+ * `requiredEnvKeys`: keys that must be present in the agent's effective env for
+ *   the provider to work (surfaced as amber required rows in EnvVarsEditor).
+ * `secretEnvVar`: the one env key that holds a user-typed secret (API key).
+ *   Only set for providers where the credential is a plaintext secret the user
+ *   pastes in. Cleared automatically when the user switches away from the
+ *   provider. Databricks uses OAuth PKCE (no typed secret), so it has no
+ *   secretEnvVar.
+ *
+ * Mirrors the Rust `readiness::buzz_agent_requirements` /
+ * `readiness::goose_requirements` logic — keep in sync.
+ */
+export type ProviderCredentialConfig = {
+  requiredEnvKeys: readonly string[];
+  secretEnvVar?: string;
+};
+
+/**
+ * Unified provider credential config table.  Single source of truth for both
+ * required-key surfacing and provider-switch clearing semantics.
+ */
+const PROVIDER_CREDENTIAL_CONFIG: Partial<
+  Record<string, ProviderCredentialConfig>
+> = {
+  anthropic: {
+    requiredEnvKeys: ["ANTHROPIC_API_KEY"],
+    secretEnvVar: "ANTHROPIC_API_KEY",
+  },
+  openai: {
+    requiredEnvKeys: ["OPENAI_COMPAT_API_KEY"],
+    secretEnvVar: "OPENAI_COMPAT_API_KEY",
+  },
+  "openai-compat": {
+    requiredEnvKeys: ["OPENAI_COMPAT_API_KEY"],
+    secretEnvVar: "OPENAI_COMPAT_API_KEY",
+  },
+  databricks: {
+    // DATABRICKS_TOKEN is NOT required — OAuth PKCE is the normal path.
+    requiredEnvKeys: ["DATABRICKS_HOST"],
+    // No secretEnvVar: DATABRICKS_HOST is a URL, not a secret credential, and
+    // is not cleared on provider switch (unlike API keys).
+  },
+  databricks_v2: {
+    // DATABRICKS_TOKEN is NOT required — OAuth PKCE is the normal path.
+    requiredEnvKeys: ["DATABRICKS_HOST"],
+  },
+  // Hyphen-alias for databricks_v2 emitted by the migration (#1686).
+  "databricks-v2": {
+    requiredEnvKeys: ["DATABRICKS_HOST"],
+  },
+};
+
+/** @deprecated Use ProviderCredentialConfig instead. */
 export type ProviderApiKeyConfig = {
   envVar: string;
   label: string;
@@ -75,40 +130,22 @@ function isKnownLlmProvider(
 }
 
 /**
- * Returns the credential env-var keys that are required for a given
- * runtime + provider combination. These are the keys that must be present
- * in the agent's effective env for it to start successfully.
+ * Required credential env keys for the given runtime + provider combination.
+ * Derived from PROVIDER_CREDENTIAL_CONFIG — single source of truth.
  *
- * Used by EnvVarsEditor to render first-class "required" rows that make the
- * gap visible before the user tries to save or start the agent.
- *
- * Mirrors the Rust `readiness::buzz_agent_requirements` /
- * `readiness::goose_requirements` logic — keep in sync.
+ * buzz-agent and goose use provider-specific credentials; claude and codex
+ * handle auth via CLI login (surfaced separately via the CliLogin surface).
  */
 export function requiredCredentialEnvKeys(
   runtimeId: string,
   provider: string,
 ): readonly string[] {
   const normalizedRuntime = runtimeId.trim();
-  const normalizedProvider = provider.trim().toLowerCase();
-
-  // buzz-agent and goose both use provider-specific credentials.
-  if (normalizedRuntime === "buzz-agent" || normalizedRuntime === "goose") {
-    if (normalizedProvider === "anthropic") return ["ANTHROPIC_API_KEY"];
-    if (normalizedProvider === "openai") return ["OPENAI_COMPAT_API_KEY"];
-    if (
-      normalizedProvider === "databricks" ||
-      normalizedProvider === "databricks_v2" ||
-      normalizedProvider === "databricks-v2"
-    ) {
-      // DATABRICKS_TOKEN is NOT required — OAuth PKCE is the normal path.
-      return ["DATABRICKS_HOST"];
-    }
+  if (normalizedRuntime !== "buzz-agent" && normalizedRuntime !== "goose") {
+    return [];
   }
-
-  // claude and codex handle auth via CLI login (not env keys) — those
-  // requirements are surfaced separately via the CliLogin surface.
-  return [];
+  const config = PROVIDER_CREDENTIAL_CONFIG[provider.trim().toLowerCase()];
+  return config?.requiredEnvKeys ?? [];
 }
 
 export function isMissingRequiredDropdownField(
@@ -287,6 +324,7 @@ export function getPersonaProviderOptions(
   ];
 }
 
+/** @deprecated Use PROVIDER_CREDENTIAL_CONFIG.secretEnvVar directly. */
 export function getProviderApiKeyConfig(
   providerId: string,
 ): ProviderApiKeyConfig | null {
@@ -314,8 +352,15 @@ export function getProviderApiKeyConfig(
   }
 }
 
+/**
+ * Returns the secret credential env var for the provider, if any.
+ * Derived from PROVIDER_CREDENTIAL_CONFIG.secretEnvVar.
+ */
 export function getProviderApiKeyEnvVar(providerId: string): string | null {
-  return getProviderApiKeyConfig(providerId)?.envVar ?? null;
+  return (
+    PROVIDER_CREDENTIAL_CONFIG[providerId.trim().toLowerCase()]?.secretEnvVar ??
+    null
+  );
 }
 
 export function shouldClearKnownModelForSelectionScope({

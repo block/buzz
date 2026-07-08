@@ -57,22 +57,3 @@ export function envVarsClearingManagedApiKey(
   }
   return current;
 }
-
-/**
- * Apply an Advanced-section env-vars edit while preserving the managed
- * provider API key (which is edited via its own field, not the editor).
- */
-export function envVarsMergingAdvancedEdit(
-  current: EnvVarsValue,
-  nextAdvancedEnvVars: EnvVarsValue,
-  managedEnvKey: string | null,
-): EnvVarsValue {
-  if (!managedEnvKey || !(managedEnvKey in current)) {
-    return nextAdvancedEnvVars;
-  }
-
-  return {
-    ...nextAdvancedEnvVars,
-    [managedEnvKey]: current[managedEnvKey],
-  };
-}

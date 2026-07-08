@@ -26,6 +26,7 @@ import {
   getDefaultLlmModelLabel,
   getDefaultLlmProviderLabel,
   getPersonaModelOptions,
+  getProviderApiKeyEnvVar,
   requiredCredentialEnvKeys,
   runtimeSupportsLlmProviderSelection,
 } from "./personaDialogPickers.tsx";
@@ -1152,5 +1153,55 @@ test("f3b_buildTemplateModelDropdownOptions_blankProviderGlobalModelSet_noDouble
     autoEntries[0].label,
     "Inherit global default (claude-opus-4-5)",
     "existing zero-value entry must be relabeled with the global model name",
+  );
+});
+
+// ── Unified PROVIDER_CREDENTIAL_CONFIG table regression ───────────────────
+// These tests guard the dialog-level fix: requiredCredentialEnvKeys must
+// include ANTHROPIC_API_KEY for explicit buzz-agent/anthropic so that the
+// EnvVarsEditor amber row renders without a separate dedicated field.
+
+test("providerConfig_explicitAnthropic_requiredKeysIncludesApiKey", () => {
+  // Before the fix, AgentDefinitionDialog filtered ANTHROPIC_API_KEY out of
+  // the required-row list (via the now-deleted PersonaProviderApiKeyField
+  // special-case). The gate itself was always correct — this test documents
+  // that requiredCredentialEnvKeys + computeLocalModeGate produce the row.
+  const required = requiredCredentialEnvKeys("buzz-agent", "anthropic");
+  assert.ok(
+    required.includes("ANTHROPIC_API_KEY"),
+    "buzz-agent + explicit anthropic must list ANTHROPIC_API_KEY as required",
+  );
+});
+
+test("providerConfig_inheritThenExplicitAnthropic_sameRequiredKeys", () => {
+  // Regression: switching from inherit ("") to explicit "anthropic" must still
+  // produce ANTHROPIC_API_KEY as a required key (the row was disappearing on
+  // the inherit→explicit switch because the filter re-engaged).
+  const inheritKeys = requiredCredentialEnvKeys("buzz-agent", "");
+  const explicitKeys = requiredCredentialEnvKeys("buzz-agent", "anthropic");
+  assert.ok(
+    !inheritKeys.includes("ANTHROPIC_API_KEY"),
+    "inherit (empty provider) must not list ANTHROPIC_API_KEY",
+  );
+  assert.ok(
+    explicitKeys.includes("ANTHROPIC_API_KEY"),
+    "explicit anthropic must list ANTHROPIC_API_KEY — row must not vanish on switch",
+  );
+});
+
+test("providerConfig_databricks_requiredKeyIsHost_noSecretClear", () => {
+  // Verify Databricks and Anthropic are symmetric: both produce required rows,
+  // and the clearing semantics differ only by secretEnvVar presence.
+  const databricksKeys = requiredCredentialEnvKeys("buzz-agent", "databricks");
+  assert.ok(
+    databricksKeys.includes("DATABRICKS_HOST"),
+    "buzz-agent + databricks must list DATABRICKS_HOST as required",
+  );
+  // getProviderApiKeyEnvVar (secretEnvVar) must return null for databricks:
+  // DATABRICKS_HOST is a URL, not a secret, and must not be cleared on switch.
+  assert.equal(
+    getProviderApiKeyEnvVar("databricks"),
+    null,
+    "databricks must have no secretEnvVar — DATABRICKS_HOST is not cleared on provider switch",
   );
 });
