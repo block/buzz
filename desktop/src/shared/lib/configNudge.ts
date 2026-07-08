@@ -17,6 +17,8 @@
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
+import type { AcpAvailabilityStatus } from "@/shared/api/types";
+
 /** A single missing requirement — mirrors the Rust `RequirementPayload` enum. */
 export type ConfigNudgeRequirement =
   | { surface: "normalized_field"; field: string }
@@ -33,11 +35,7 @@ export type ConfigNudgeRequirement =
        * - "cli_missing"       → ACP adapter installed but CLI missing
        * - "not_installed"     → neither adapter nor CLI found
        */
-      availability:
-        | "available"
-        | "adapter_missing"
-        | "cli_missing"
-        | "not_installed";
+      availability: AcpAvailabilityStatus;
     };
 
 /**
