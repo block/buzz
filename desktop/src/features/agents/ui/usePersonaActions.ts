@@ -21,7 +21,6 @@ import { isSingleItemFile } from "@/shared/lib/fileMagic";
 import type {
   AcpRuntime,
   AgentPersona,
-  CreateManagedAgentInput,
   CreateManagedAgentResponse,
   CreatePersonaInput,
   UpdatePersonaInput,
@@ -38,6 +37,7 @@ import {
   type AgentCreateIntent,
 } from "./agentCreateIntent";
 import { resolveManagedAgentAvatarUrl } from "./managedAgentAvatar";
+import { buildInstanceInputForDefinition } from "../lib/instanceInputForDefinition";
 import { usePersonaImportActions } from "./usePersonaImportActions";
 
 type PersonaFeedbackSurface = "catalog" | "library";
@@ -198,21 +198,10 @@ export function usePersonaActions() {
           setPersonaDialogState(null);
           return true;
         }
-        const agentInput: CreateManagedAgentInput = {
-          name: persona.displayName,
-          acpCommand: "buzz-acp",
-          agentCommand: runtime.command,
-          agentArgs: runtime.defaultArgs,
-          mcpCommand: runtime.mcpCommand ?? "",
-          personaId: persona.id,
-          harnessOverride: true,
-          systemPrompt: persona.systemPrompt,
-          avatarUrl: persona.avatarUrl ?? avatarUrl,
-          model: persona.model ?? undefined,
-          spawnAfterCreate: true,
-          startOnAppLaunch: true,
-          backend: { type: "local" },
-        };
+        const agentInput = await buildInstanceInputForDefinition(
+          persona,
+          runtime,
+        );
 
         try {
           const created = await createAgentMutation.mutateAsync(agentInput);

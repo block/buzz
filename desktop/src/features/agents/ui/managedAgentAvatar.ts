@@ -6,7 +6,7 @@ type BlobDescriptor = {
   uploaded: number;
 };
 
-type UploadMediaBytes = (
+export type UploadMediaBytes = (
   data: number[],
   filename?: string,
 ) => Promise<BlobDescriptor>;
