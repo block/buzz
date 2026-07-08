@@ -62,6 +62,7 @@ test("instance-edit routes to AgentInstanceEditDialog with its contract props", 
     onOpenChange,
     onUpdated,
     open: true,
+    initialFocus: undefined,
   });
 });
 
