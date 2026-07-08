@@ -36,6 +36,7 @@ import { formatOwnerLabel } from "@/features/profile/lib/identity";
 import { detectPrefixQuery } from "@/shared/lib/detectPrefixQuery";
 import { normalizePubkey, truncatePubkey } from "@/shared/lib/pubkey";
 import { trimMapToSize } from "@/shared/lib/trimMapToSize";
+import { flushMentionDebounce } from "./flushMentionDebounce";
 import { hasMention } from "./hasMention";
 import { rankMentionCandidates } from "./mentionRanking";
 
@@ -917,6 +918,26 @@ export function useMentions(
           !event.shiftKey)
       ) {
         event.preventDefault();
+
+        // If a debounce is pending, the suggestions array reflects a stale query.
+        // Flush: re-detect synchronously and re-derive the correct suggestion.
+        if (debounceTimerRef.current !== null) {
+          const flushed = flushMentionDebounce({
+            debounceTimerRef,
+            latestValueRef,
+            latestCursorRef,
+            searchableNamesLowerRef,
+            candidates: mentionCandidates,
+            activePersonaIds,
+            channelType: options?.channelType,
+          });
+          if (flushed) {
+            setMentionQuery(null); // reset so dropdown closes
+            return { handled: true, suggestion: flushed };
+          }
+          // No match after flush — fall through to existing suggestions.
+        }
+
         return { handled: true, suggestion: suggestions[mentionSelectedIndex] };
       }
 
@@ -928,7 +949,14 @@ export function useMentions(
 
       return { handled: false };
     },
-    [isMentionOpen, mentionSelectedIndex, suggestions],
+    [
+      activePersonaIds,
+      isMentionOpen,
+      mentionCandidates,
+      mentionSelectedIndex,
+      options?.channelType,
+      suggestions,
+    ],
   );
 
   return {
