@@ -725,6 +725,10 @@ fn apply_inbound_persona(personas: &mut Vec<PersonaRecord>, inbound: PersonaReco
             local.model = inbound.model;
             local.provider = inbound.provider;
             local.name_pool = inbound.name_pool;
+            local.respond_to = inbound.respond_to;
+            local.respond_to_allowlist = inbound.respond_to_allowlist;
+            local.mcp_toolsets = inbound.mcp_toolsets;
+            local.parallelism = inbound.parallelism;
             local.updated_at = inbound.updated_at;
         }
         None => personas.push(inbound),

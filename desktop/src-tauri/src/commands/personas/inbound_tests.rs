@@ -78,6 +78,36 @@ fn in_app_persona_matches_existing_uuid_and_patches() {
 }
 
 #[test]
+fn inbound_quad_edit_applies_to_existing_matched_record() {
+    // B5 quad activation: a remote quad edit must land on the MATCH branch,
+    // not just the insert branch — otherwise device B keeps its stale quad
+    // and its next reconcile republishes it over device A's edit, and the
+    // two devices never converge (permanent ping-pong).
+    let mut local = local_in_app();
+    local.respond_to = Some("owner-only".to_string());
+    local.parallelism = Some(2);
+    let mut personas = vec![local];
+
+    let mut inbound = inbound_for(UUID, "Remote");
+    inbound.respond_to = Some("allowlist".to_string());
+    inbound.respond_to_allowlist = vec!["a".repeat(64)];
+    inbound.mcp_toolsets = Some("default,canvas".to_string());
+    inbound.parallelism = Some(8);
+    apply_inbound_persona(&mut personas, inbound);
+
+    assert_eq!(personas.len(), 1, "no duplicate row");
+    let p = &personas[0];
+    assert_eq!(p.respond_to, Some("allowlist".to_string()));
+    assert_eq!(p.respond_to_allowlist, vec!["a".repeat(64)]);
+    assert_eq!(p.mcp_toolsets, Some("default,canvas".to_string()));
+    assert_eq!(p.parallelism, Some(8));
+    // A quad-absent inbound also applies (clears), same as prompt/model.
+    apply_inbound_persona(&mut personas, inbound_for(UUID, "Remote"));
+    assert_eq!(personas[0].respond_to, None);
+    assert_eq!(personas[0].parallelism, None);
+}
+
+#[test]
 fn re_received_in_app_persona_is_idempotent_no_duplicate() {
     let mut personas = vec![local_in_app()];
     apply_inbound_persona(&mut personas, inbound_for(UUID, "Remote"));
