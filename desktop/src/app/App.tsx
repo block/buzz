@@ -25,27 +25,56 @@ import { createBuzzQueryClient } from "@/shared/api/queryClient";
 import { isSharedIdentity as isSharedIdentityCmd } from "@/shared/api/tauri";
 import { listenForDeepLinks } from "@/shared/deep-link";
 import { useSystemColorScheme } from "@/shared/theme/useSystemColorScheme";
+import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 import { BuzzMark } from "@/shared/ui/buzz-logo/BuzzMark";
-import { Spinner } from "@/shared/ui/spinner";
+import { FuzzyLogo } from "@/shared/ui/buzz-logo/FuzzyLogo";
 import { StartupWindowDragRegion } from "@/shared/ui/StartupWindowDragRegion";
 import { StepProgress } from "@/shared/ui/step-progress";
 
 const LOADING_TEXT = "Setting up your workspace...";
 
-// Cold boot gate: a plain static Buzz mark (#D7D72E) on solid black. No
-// animation machinery, no gradient — the mark must paint complete on the very
-// first frame, even in webviews that render before scripting or SMIL start.
+// Animated Buzz mark for the loading gates. The static BuzzMark renders in
+// normal flow and sizes the box — it's plain SVG (no JS/SMIL), so it paints on
+// the very first frame even before scripting starts, avoiding a blank flash on
+// hard reload. The animated FuzzyLogo is layered on top and takes over once it
+// begins playing.
+function BeeLoader({
+  ariaLabel,
+  className,
+  tintClassName = "text-foreground",
+}: {
+  ariaLabel: string;
+  className?: string;
+  tintClassName?: string;
+}) {
+  return (
+    <div className={cn("relative", tintClassName, className)}>
+      <BuzzMark className="block h-auto w-full" />
+      <FuzzyLogo
+        ariaLabel={ariaLabel}
+        className="absolute inset-0 h-full w-full [&>svg]:h-full [&>svg]:w-full [&>svg]:max-w-full"
+        fuzz
+        loop
+        loopRestSeconds={0}
+      />
+    </div>
+  );
+}
+
+// Cold boot gate: the animated Buzz mark (fuzzy texture, theme-adaptive tint)
+// on the app background, with a static mark underneath so it paints instantly
+// on reload rather than flashing blank while the animation boots.
 function AppLoadingGate() {
   return (
     <div
-      className="flex min-h-dvh flex-col items-center justify-center overflow-hidden bg-black px-6 py-10 text-[#d7d72e]"
+      className="flex min-h-dvh flex-col items-center justify-center overflow-hidden bg-background px-6 py-10 text-foreground"
       data-testid="app-loading-gate"
       role="status"
     >
       <StartupWindowDragRegion />
       <span className="sr-only">{LOADING_TEXT}</span>
-      <BuzzMark className="h-auto w-28" />
+      <BeeLoader ariaLabel={LOADING_TEXT} className="h-auto w-28" />
     </div>
   );
 }
@@ -69,7 +98,11 @@ function WorkspaceSwitchGate() {
       <StartupWindowDragRegion />
       <span className="sr-only">Switching workspace…</span>
       {showSpinner ? (
-        <Spinner aria-hidden="true" className="text-muted-foreground" />
+        <BeeLoader
+          ariaLabel="Switching workspace…"
+          className="h-auto w-20"
+          tintClassName="text-muted-foreground"
+        />
       ) : null}
     </div>
   );
