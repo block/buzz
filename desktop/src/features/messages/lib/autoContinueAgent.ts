@@ -29,6 +29,18 @@ function anchorMentions(anchor: AutoContinueAnchor, pubkey: string): boolean {
   );
 }
 
+export function resolveAutoContinueAnchorId({
+  replyTargetId,
+  latestMessageId,
+  threadHeadId,
+}: {
+  replyTargetId: string | null | undefined;
+  latestMessageId: string | null | undefined;
+  threadHeadId: string | null | undefined;
+}): string | null {
+  return replyTargetId ?? latestMessageId ?? threadHeadId ?? null;
+}
+
 export function computeAutoContinueAgentMentions({
   anchor,
   currentPubkey,
