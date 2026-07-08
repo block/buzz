@@ -175,10 +175,32 @@ test("hidden spoiler links reveal without opening on the first click", async ({
   const spoiler = lastMessage.locator(".buzz-spoiler").first();
   await expect(spoiler).toHaveAttribute("data-revealed", "false");
 
+  // The freshly sent row can still be settling layout; a forced click
+  // computed from a pre-shift bounding box lands on the wrong element
+  // (force skips Playwright's stability check). Wait until the link's
+  // position is identical across two animation frames before clicking.
+  const secretLink = spoiler.getByRole("link", { name: "secret" });
+  await secretLink.evaluate(
+    (el) =>
+      new Promise<void>((resolve) => {
+        let last = -1;
+        const tick = () =>
+          requestAnimationFrame(() => {
+            const { y } = el.getBoundingClientRect();
+            if (y === last) resolve();
+            else {
+              last = y;
+              tick();
+            }
+          });
+        tick();
+      }),
+  );
+
   const popupPromise = page
     .waitForEvent("popup", { timeout: 500 })
     .catch(() => null);
-  await spoiler.getByRole("link", { name: "secret" }).click({ force: true });
+  await secretLink.click({ force: true });
 
   const popup = await popupPromise;
   await popup?.close();
