@@ -277,6 +277,19 @@ fn slimming_republish_wave_is_one_time() {
         !row.content.contains("system_prompt"),
         "definition-linked retained content must be the slimmed shape"
     );
+    assert!(!row.content.contains("\"model\""), "model must be slimmed");
+    assert!(
+        !row.content.contains("\"provider\""),
+        "provider must be slimmed"
+    );
+    assert!(
+        !row.content.contains("persona_source_version"),
+        "persona_source_version must be slimmed"
+    );
+    assert!(
+        !row.content.contains("abc123"),
+        "source version value must be absent"
+    );
     assert!(row.pending_sync, "slimmed rewrite must queue for publish");
     drop(conn);
 

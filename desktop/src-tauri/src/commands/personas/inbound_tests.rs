@@ -297,6 +297,7 @@ fn inbound_definition_less_agent_applies_quad() {
         "model": "remote-model",
         "provider": "remote-provider",
         "mcp_toolsets": "remote",
+        "persona_source_version": "remote-version",
         "parallelism": 99,
         "respond_to": "anyone",
         "respond_to_allowlist": ["deadbeef"],
@@ -317,6 +318,11 @@ fn inbound_definition_less_agent_applies_quad() {
     assert_eq!(a.system_prompt, Some("remote prompt".to_string()));
     assert_eq!(a.model, Some("remote-model".to_string()));
     assert_eq!(a.provider, Some("remote-provider".to_string()));
+    assert_eq!(
+        a.persona_source_version,
+        Some("remote-version".to_string()),
+        "all four quad fields must apply on a definition-less sync"
+    );
 }
 
 #[test]

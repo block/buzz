@@ -300,6 +300,10 @@ pub fn persona_event_content(record: &PersonaRecord) -> PersonaEventContent {
         model: record.model.clone(),
         provider: record.provider.clone(),
         name_pool: record.name_pool.clone(),
+        // NIP-AP behavioral defaults: RESERVED this release — parsed at the
+        // wire layer but not yet carried on PersonaRecord or applied at
+        // instance creation (that lands with the create-path unification).
+        // Guarded by `behavioral_defaults_are_staged_not_applied`.
         respond_to: None,
         respond_to_allowlist: Vec::new(),
         mcp_toolsets: None,
@@ -588,6 +592,17 @@ mod tests {
             "persona_content_hash of pre-revision bytes must equal the direct digest"
         );
 
+        // Hash stability, adversarial shapes: the empty prompt and the
+        // minimal old-writer body (display_name + system_prompt only) are the
+        // two easiest regressions if the projection or skip attributes ever
+        // change.
+        const EMPTY_PROMPT: &str = r#"{"display_name":"X","system_prompt":""}"#;
+        let parsed: PersonaEventContent = serde_json::from_str(EMPTY_PROMPT).unwrap();
+        assert_eq!(serde_json::to_string(&parsed).unwrap(), EMPTY_PROMPT);
+        const MINIMAL: &str = r#"{"display_name":"Minimal","system_prompt":"Hello."}"#;
+        let parsed: PersonaEventContent = serde_json::from_str(MINIMAL).unwrap();
+        assert_eq!(serde_json::to_string(&parsed).unwrap(), MINIMAL);
+
         // An event built from this content carries the byte-exact vector as its
         // signed content, so a second implementer following the spec computes
         // the same NIP-01 id.
@@ -677,6 +692,50 @@ mod tests {
             .tags
             .iter()
             .all(|t| t.as_slice().first().map(String::as_str) != Some("e")));
+    }
+
+    /// NIP-AP behavioral defaults are RESERVED this release: the wire type
+    /// parses them (foreign data survives deserialization) but the local
+    /// projection does not emit them and PersonaRecord does not carry them.
+    /// This test locks the staged behavior so activating the fields later is
+    /// a deliberate act — and documents that a foreign definition's
+    /// behavioral values do NOT survive a local edit-and-republish cycle yet.
+    #[test]
+    fn behavioral_defaults_are_staged_not_applied() {
+        const FOREIGN: &str = r#"{"display_name":"F","system_prompt":"p","respond_to":"anyone","respond_to_allowlist":["deadbeef"],"mcp_toolsets":"default","parallelism":4}"#;
+        let parsed: PersonaEventContent = serde_json::from_str(FOREIGN).unwrap();
+        // Wire layer preserves the fields...
+        assert_eq!(parsed.respond_to.as_deref(), Some("anyone"));
+        assert_eq!(parsed.parallelism, Some(4));
+        // ...but the record round-trip drops them (staged, not applied).
+        let record = persona_from_event_content_for_test(parsed);
+        let reprojected = persona_event_content(&record);
+        assert_eq!(reprojected.respond_to, None);
+        assert_eq!(reprojected.respond_to_allowlist, Vec::<String>::new());
+        assert_eq!(reprojected.mcp_toolsets, None);
+        assert_eq!(reprojected.parallelism, None);
+    }
+
+    /// Test-only bridge: build a PersonaRecord from parsed content the same
+    /// way `persona_from_event` maps fields, without needing a signed event.
+    fn persona_from_event_content_for_test(content: PersonaEventContent) -> PersonaRecord {
+        PersonaRecord {
+            id: "staged".to_string(),
+            display_name: content.display_name,
+            avatar_url: content.avatar_url,
+            system_prompt: content.system_prompt.unwrap_or_default(),
+            runtime: content.runtime,
+            model: content.model,
+            provider: content.provider,
+            name_pool: content.name_pool,
+            is_builtin: false,
+            is_active: true,
+            source_team: None,
+            source_team_persona_slug: None,
+            env_vars: BTreeMap::new(),
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
+        }
     }
 
     #[test]
