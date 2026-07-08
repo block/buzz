@@ -47,6 +47,8 @@ export function useAutoRestartPolicy() {
     return () => clearInterval(timer);
   }, []);
 
+  // No dependency array by design: the tick pattern re-runs this effect
+  // every render so it reads live store state; all mutation is ref-local.
   React.useEffect(() => {
     if (!agents) return;
     const now = Date.now();

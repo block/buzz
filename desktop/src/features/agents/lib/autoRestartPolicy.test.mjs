@@ -39,15 +39,27 @@ test("fires only when every gate is green and the window has elapsed", () => {
 const NEVER_FIRE_ROWS = [
   ["opt-out toggle off", { autoRestartEnabled: false }],
   ["no config drift", { needsRestart: false }],
-  ["agent mid-turn (working, observer)", { working: true, workingSource: "observer" }],
-  ["typing source counts as working", { working: true, workingSource: "typing" }],
+  [
+    "agent mid-turn (working, observer)",
+    { working: true, workingSource: "observer" },
+  ],
+  [
+    "typing source counts as working",
+    { working: true, workingSource: "typing" },
+  ],
   ["working flag alone defers (defensive)", { working: true }],
-  ["source alone defers even if working flag lies (defensive)", { workingSource: "observer" }],
+  [
+    "source alone defers even if working flag lies (defensive)",
+    { workingSource: "observer" },
+  ],
   ["typing source alone defers", { workingSource: "typing" }],
   ["observer relay not connected", { connected: false }],
   ["remote backend", { isLocalBackend: false }],
   ["agent not running", { isRunning: false }],
-  ["edge already consumed (one attempt per rising edge)", { edgeConsumed: true }],
+  [
+    "edge already consumed (one attempt per rising edge)",
+    { edgeConsumed: true },
+  ],
 ];
 
 for (const [label, overrides] of NEVER_FIRE_ROWS) {
@@ -65,7 +77,9 @@ for (const [label, overrides] of NEVER_FIRE_ROWS) {
 test("arms (does not fire) before the window elapses", () => {
   assert.equal(decideAutoRestart(greenInputs({ quiescentForMs: 0 })), "arm");
   assert.equal(
-    decideAutoRestart(greenInputs({ quiescentForMs: AUTO_RESTART_QUIESCENCE_MS - 1 })),
+    decideAutoRestart(
+      greenInputs({ quiescentForMs: AUTO_RESTART_QUIESCENCE_MS - 1 }),
+    ),
     "arm",
   );
 });
@@ -80,13 +94,19 @@ test("window is minutes-scale — far beyond the 25s turn-store prune", () => {
 
 test("falling needsRestart edge re-arms a consumed edge", () => {
   const consumed = { consumed: true, armedAt: null };
-  const next = nextEdgeState(consumed, { needsRestart: false, isRunning: true });
+  const next = nextEdgeState(consumed, {
+    needsRestart: false,
+    isRunning: true,
+  });
   assert.deepEqual(next, { consumed: false, armedAt: null });
 });
 
 test("agent stop re-arms a consumed edge (manual stop/start cycle can auto-fire again)", () => {
   const consumed = { consumed: true, armedAt: null };
-  const next = nextEdgeState(consumed, { needsRestart: true, isRunning: false });
+  const next = nextEdgeState(consumed, {
+    needsRestart: true,
+    isRunning: false,
+  });
   assert.deepEqual(next, { consumed: false, armedAt: null });
 });
 
