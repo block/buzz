@@ -3,165 +3,134 @@ import { expect, test } from "@playwright/test";
 import { installMockBridge } from "../helpers/bridge";
 
 /**
- * UPSCROLL-JITTER GATE (L-E) — the RED-today metric the fix train rides on.
+ * UPSCROLL-JITTER GATE (L-E / T1.1) — the RED-today metric the fix train rides on.
  *
  * Tyler's report: scrolling UP a fully-loaded channel is jumpy in tiny
  * variations; scrolling DOWN is smooth. Eva's H1 says why: rows above the
  * opening viewport have NEVER painted, so they sit at `estimateRowHeight()`
  * reserves under `content-visibility: auto`. Scrolling up, each row realizes
  * at its TRUE height the instant it enters the realization band; the delta
- * (true - estimate) shifts content, and the browser's scroll anchoring only
- * corrects APPROXIMATELY, one lurch per realization. Down is smooth because
- * `contain-intrinsic-size: auto` has already remembered every passed row's
- * exact size.
+ * (true - estimate) shifts content, and (on WKWebView) NOTHING corrects it —
+ * one lurch per realization. Down is smooth because `contain-intrinsic-size:
+ * auto` has already remembered every passed row's exact size.
  *
- * WHAT THIS MEASURES (the honest signal, not a proxy):
- * During a steady upscroll the content already on screen must translate by
- * exactly the wheel delta. If the viewport moves up by D px, every currently
- * visible element's `top` must increase by exactly D. Any residual
- * `(delta_top - D)` is content that jumped for a reason OTHER than the wheel —
- * a realization-induced anchor correction. That residual IS the jump Tyler
- * feels. A perfectly smooth scroll keeps every step's residual at 0.
+ * WHAT THIS MEASURES — MOTION CONSISTENCY, not scrollTop-referenced residual.
+ * (This is the T1.1 reframe. The original gate subtracted the REALIZED
+ * scrollTop delta, which INCLUDES the fix-writer's compensating `scrollBy`, so
+ * the writer cancelled out of the metric and the gate scored raw estimate error
+ * R — invariant to whether the fix ran. Dawn found it; Quinn and Eva confirmed
+ * the algebra. See the diagnostic below for that residual — it is T3's estimator
+ * acceptance number, kept but NON-GATING.)
  *
- * We track a row sitting COMFORTABLY INSIDE the viewport (a SAFE_MARGIN band
- * from both edges) so it stays realized across the whole step — its `top`
- * therefore reflects only true motion, never the ~one-row-height box jump a
- * STRADDLING row suffers when `content-visibility` un-realizes it as it exits
- * the top. When rows ABOVE the tracked row realize this step (true != estimate)
- * and native anchoring is off, the content below them — including our tracked
- * row — shifts down by the accumulated realization delta. That extra motion IS
- * the reading-position jump Tyler feels, and it lands cleanly in the residual.
- * We re-pick the tracked row each step and only score a step when the SAME id
- * stayed inside the safe band both before and after (a partial exit would
- * reintroduce the un-realization artifact). The gate is the WORST single-step
- * residual (peak lurch) plus the RMS residual (sustained micro-jitter) — a user
- * feels both the spike and the accumulated shimmer.
+ * The honest signal: during a steady upscroll a comfortably-visible reading row
+ * must move down the viewport by the SAME amount every notch. We actuate a
+ * fixed synchronous step (`scrollTop -= STEP`) so the input delta is a known
+ * constant every notch — this bypasses Blink's wheel-scaling entirely (a wheel
+ * notch can apply 218/220/222… and median-of-run would misread that per-notch
+ * scaling as jitter; a fixed step cannot). A perfectly-compensated scroll then
+ * moves the reading row by EXACTLY STEP every notch — deviation 0. A broken
+ * scroll lurches: rows realizing ABOVE the reading row shove it by the
+ * realization delta, which varies notch-to-notch, so its per-notch motion
+ * scatters around the run median. The metric is that scatter:
  *
- * VALIDITY (why this is the honest metric, not a proxy): a fully-realized
- * ("prewarmed") channel has NO realization deltas, so this residual collapses
- * to ~0 — the make-or-break control. A uniform channel realizes near-estimate,
- * so it stays low. Only the heterogeneous corpus, whose estimates miss, is RED.
+ *   rowMove_i   = after.top - before.top          (reading row's viewport motion; NO scrollTop reference)
+ *   deviation_i = | rowMove_i - median(rowMove) |
+ *   gate        = peak deviation (worst lurch) and rms deviation (sustained shimmer)
  *
- * WHY IT IS RED TODAY: the `jitter-corpus` seed (e2eBridge.ts) is 400
- * structurally-rich rows whose true height `estimateRowHeight` is known to
- * miss (markdown headings/lists/blockquotes counted as flat 20px prose lines;
- * long prose vs the fixed CHARS_PER_LINE=64 guess; code-fence chrome). Every
- * never-painted row realizes with true != estimate, so a real per-step
- * residual appears. The thresholds sit under the baseline this corpus produces
- * at tip 77bd0e70, so the gate FAILS now and only a genuine estimator/anchor
- * fix turns it green.
+ * WHY THIS ESCAPES THE INVARIANCE that killed the old gate and the co-visible
+ * idea: it references the reading row's own motion ACROSS NOTCHES (temporal
+ * self-reference), never a neighbouring row (spatial) and never the realized
+ * scrollTop. The fix-writer's `scrollBy` moves the row and is NOT subtracted
+ * back out, so it survives into rowMove and the metric SEES it. A uniform
+ * global offset (which is all compensation is) cancels out of any row-vs-row
+ * differential — that is exactly why co-visible and the old residual were
+ * blind, and exactly why per-notch-motion-vs-run-median is not.
  *
- * SCOPE / ENGINE FIDELITY: this runs under Playwright headed Chromium, which
- * ships `overflow-anchor` (native scroll anchoring). The app ships in
- * WKWebView, which — per Eva's L-C finding (Mari) — has NO `overflow-anchor`
- * at all: it corrects NOTHING, so every above-viewport realization delta lands
- * raw on the reading position. To make the red bar honest we therefore FORCE
- * `overflow-anchor: none` on the timeline scroller before measuring, so
- * Chromium reproduces the shipped engine's behavior instead of hiding exactly
- * the drift Tyler feels. We also log `CSS.supports("overflow-anchor","auto")`
- * so the per-engine baseline is on the record. A correct owned-compensation
- * fix (the converged train: `overflow-anchor: none` + same-frame
- * scrollBy(realized − reserved)) zeros this residual on ANY engine — which is
- * the point: it makes Chromium CI test what macOS users actually feel.
+ * ANTI-CHEAT FLOOR: a frozen or half-applying scroller has near-zero motion
+ * variance and would false-green. We assert mean rowMove ≈ STEP so a scroller
+ * that does not actually track the input cannot pass.
+ *
+ * RED-AT-TIP IS A HARD GATE, NOT CEREMONY. median-of-run is only valid if the
+ * corpus produces VARYING realization (dispersion); a degenerate constant-R
+ * corpus would green a broken writer. The tip run being RED IS the proof that
+ * `jitter-corpus` produces that dispersion. If a future corpus edit turns the
+ * tip-run green here, this gate is VOID and must fail loudly — see the assert.
+ *
+ * VALIDITY CONTROL: this metric goes to ~0 only when the reading row tracks the
+ * input every notch — i.e. when a correct owned-compensation fix
+ * (`overflow-anchor: none` + same-frame `scrollBy(realized − reserved)`) holds
+ * it. A synthetic per-notch-varying perfect-comp oracle drives 74/77 notches to
+ * EXACTLY STEP (T1.1 bake-off); the real T2 writer re-pins in the same
+ * ResizeObserver cycle and closes the remaining synthetic-only outliers.
+ *
+ * ENGINE FIDELITY: runs under Playwright headed Chromium, which ships
+ * `overflow-anchor`. The app ships in WKWebView, which — per Eva's L-C finding
+ * (Mari) — has NO `overflow-anchor`: it corrects NOTHING, so every
+ * above-viewport realization delta lands raw on the reading position. We FORCE
+ * `overflow-anchor: none` on the scroller before measuring so Chromium
+ * reproduces the shipped engine, and log `CSS.supports(...)` for the record.
  *
  * Run headed to watch it:
  *   pnpm build && npx playwright test --config=playwright.perf.config.ts \
  *     upscroll-jitter --headed
  */
 
-// Peak single-step residual we tolerate (px). Above this is a realization
-// lurch the eye catches. RED at tip: baseline peaks well above.
-const MAX_PEAK_RESIDUAL_PX = 2.0;
-// RMS residual across steps (px) — the sustained micro-jitter floor.
-const MAX_RMS_RESIDUAL_PX = 0.6;
+// Peak per-notch motion deviation we tolerate (px). Above this is a lurch the
+// eye catches. RED at tip: baseline peaks ~41px on the heterogeneous corpus.
+const MAX_PEAK_DEVIATION_PX = 2.0;
+// RMS motion deviation across notches (px) — the sustained micro-jitter floor.
+const MAX_RMS_DEVIATION_PX = 0.6;
 
-const WHEEL_NOTCH = 220; // px per wheel step (Blink scales the applied delta)
+// Fixed synchronous scroll step per notch (px). Constant by construction — no
+// wheel-scaling variance for median-of-run to misread as jitter.
+const STEP = 220;
 const MAX_STEPS = 80; // cap; stop early once we near the top of the window
 // Keep the tracked row this far (px) from both viewport edges so it stays
 // realized across the step — no straddling-row un-realization artifact.
 const SAFE_MARGIN = 100;
 
-type StepSample = { residual: number; appliedDelta: number };
+type StepSample = { rowMove: number; appliedTop: number; residual: number };
 
 type Result = {
   samples: StepSample[];
-  steps: number;
   reachedTop: boolean;
   rowCount: number;
 };
 
-test("GATE: upscroll anchor residual stays below the realization-jitter threshold", async ({
-  page,
-}) => {
-  await installMockBridge(page);
-  await page.goto("/");
-  await page.waitForFunction(
-    () => typeof window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__ === "function",
-  );
-
-  // The `jitter-corpus` channel is pre-seeded (e2eBridge.ts) with 400
-  // heterogeneous rows in its mock store — no dependence on live-emit timing,
-  // the same reliable cold-load path scroll-history.spec.ts uses.
-  await page.getByTestId("channel-jitter-corpus").click();
-  await expect(page.getByTestId("chat-title")).toHaveText("jitter-corpus");
+// Drive one upscroll run and collect per-notch samples. `actuate` selects the
+// input mode: "sync" (fixed STEP, the gate) or "wheel" (Blink-scaled, printed
+// as a non-gating felt-mode diagnostic — Tyler's real input is a wheel).
+async function measure(
+  page: import("@playwright/test").Page,
+  actuate: "sync" | "wheel",
+): Promise<Result> {
   const timeline = page.getByTestId("message-timeline");
-  await expect(timeline.locator("[data-message-id]").first()).toBeVisible();
-  await page.waitForFunction(() => {
-    const el = document.querySelector(
-      '[data-testid="message-timeline"]',
-    ) as HTMLDivElement | null;
-    return !!el && el.scrollHeight > el.clientHeight + 1000;
-  });
-
-  // Pin to the true bottom so everything above is unpainted (at estimate).
+  // Re-pin to the true bottom so everything above is unpainted (at estimate).
   await timeline.evaluate((element) => {
     const el = element as HTMLDivElement;
     el.scrollTop = el.scrollHeight;
     el.dispatchEvent(new Event("scroll", { bubbles: true }));
   });
   await page.waitForTimeout(150);
-
-  // Log native-anchoring support for this engine, then FORCE it off so
-  // Chromium reproduces the shipped WKWebView (which has no `overflow-anchor`).
-  // Without this, Blink's native anchoring silently corrects the realization
-  // shift and the gate would measure a world macOS users never see.
-  const anchorSupport = await page.evaluate(() =>
-    typeof CSS !== "undefined" && typeof CSS.supports === "function"
-      ? CSS.supports("overflow-anchor", "auto")
-      : false,
-  );
   await timeline.evaluate((element) => {
     (element as HTMLElement).style.overflowAnchor = "none";
   });
-  /* eslint-disable no-console */
-  console.log(
-    `overflow-anchor supported by this engine: ${anchorSupport} ` +
-      `(forced to 'none' on the scroller to mirror shipped WKWebView)`,
-  );
-  /* eslint-enable no-console */
   await page.waitForTimeout(50);
-
-  // Hover so the timeline owns wheel scrolling (mirrors a real reader; also
-  // engages the `:hover` realization rule, utilities.css:21).
   await timeline.hover();
 
   const samples: StepSample[] = [];
   let reachedTop = false;
 
   for (let step = 0; step < MAX_STEPS; step += 1) {
-    // Pick a row sitting comfortably inside the viewport (SAFE_MARGIN from both
-    // edges) so it stays realized across the wheel notch. Capture its top and
-    // the scrollTop BEFORE the notch. reachedTop is decided by scrollTop, not by
-    // whether a safe-band row exists.
+    // Pick a row comfortably inside the viewport (SAFE_MARGIN from both edges)
+    // so it stays realized across the notch. Capture its top + scrollTop BEFORE.
     const before = await timeline.evaluate((element, margin: number) => {
       const el = element as HTMLDivElement;
       const box = el.getBoundingClientRect();
-      const safeTop = box.top + margin;
-      const safeBottom = box.bottom - margin;
       const rows = el.querySelectorAll<HTMLElement>("[data-message-id]");
       for (const row of rows) {
         const rect = row.getBoundingClientRect();
-        if (rect.top > safeTop && rect.bottom < safeBottom) {
+        if (rect.top > box.top + margin && rect.bottom < box.bottom - margin) {
           return {
             id: row.dataset.messageId ?? null,
             top: rect.top,
@@ -176,28 +145,30 @@ test("GATE: upscroll anchor residual stays below the realization-jitter threshol
       reachedTop = true;
       break;
     }
-    if (!before.id) {
-      // No row fully inside the safe band this step (rare: a single row taller
-      // than the band). Nudge up and try the next step rather than scoring it.
-      await page.mouse.wheel(0, -WHEEL_NOTCH);
-      await timeline.evaluate(
-        () =>
-          new Promise<void>((r) =>
-            requestAnimationFrame(() => requestAnimationFrame(() => r())),
-          ),
-      );
-      continue;
-    }
 
-    // One real wheel notch upward, then settle two frames so realization +
-    // any anchor correction land before we read positions back.
-    await page.mouse.wheel(0, -WHEEL_NOTCH);
+    // Actuate one notch upward.
+    if (actuate === "sync") {
+      await timeline.evaluate((element, s: number) => {
+        const el = element as HTMLDivElement;
+        el.scrollTop = Math.max(0, el.scrollTop - s);
+        el.dispatchEvent(new Event("scroll", { bubbles: true }));
+      }, STEP);
+    } else {
+      await page.mouse.wheel(0, -STEP);
+    }
+    // Settle two frames so realization + any writer compensation land before we
+    // read positions back.
     await timeline.evaluate(
       () =>
         new Promise<void>((r) =>
           requestAnimationFrame(() => requestAnimationFrame(() => r())),
         ),
     );
+
+    if (!before.id) {
+      // No safe-band row this step (rare) — nudged already, try the next.
+      continue;
+    }
 
     const after = await timeline.evaluate(
       (element, args: { id: string; margin: number }) => {
@@ -211,8 +182,6 @@ test("GATE: upscroll anchor residual stays below the realization-jitter threshol
         const rect = row.getBoundingClientRect();
         return {
           top: rect.top,
-          // Only score the step if the SAME row is still fully inside the band —
-          // otherwise a partial exit would reintroduce the un-realization jump.
           inSafeBand:
             rect.top > box.top + args.margin &&
             rect.bottom < box.bottom - args.margin,
@@ -222,64 +191,146 @@ test("GATE: upscroll anchor residual stays below the realization-jitter threshol
       { id: before.id, margin: SAFE_MARGIN },
     );
 
-    const appliedDelta = before.scrollTop - after.scrollTop; // px moved up
-    if (appliedDelta <= 0) {
-      // No movement (already at top / wheel absorbed) — stop.
+    const appliedTop = before.scrollTop - after.scrollTop; // realized px moved up
+    if (appliedTop <= 0) {
       reachedTop = after.scrollTop <= 0;
       break;
     }
     if (after.top === null || !after.inSafeBand) {
-      // Tracked row left the safe band this step — skip scoring, keep scrolling.
+      // Tracked row left the safe band — skip scoring, keep scrolling.
       continue;
     }
-    // Smooth: reducing scrollTop by appliedDelta moves the row DOWN the
-    // viewport by exactly appliedDelta. Residual = motion NOT from the wheel,
-    // i.e. realization deltas from rows that crossed the band ABOVE this row.
-    const residual = after.top - before.top - appliedDelta;
-    samples.push({ residual, appliedDelta });
+    const rowMove = after.top - before.top; // viewport motion — the gated signal
+    // NON-GATING diagnostic: motion minus REALIZED scrollTop delta = raw
+    // estimate error R (comp-invariant). This is T3's estimator acceptance
+    // number, printed for the record; it is NOT the gate.
+    const residual = rowMove - appliedTop;
+    samples.push({ rowMove, appliedTop, residual });
   }
 
-  const result: Result = {
+  return {
     samples,
-    steps: samples.length,
     reachedTop,
     rowCount: await timeline.evaluate(
       (el) =>
         (el as HTMLDivElement).querySelectorAll("[data-message-id]").length,
     ),
   };
+}
 
-  const abs = result.samples.map((s) => Math.abs(s.residual));
-  const peak = abs.length ? Math.max(...abs) : 0;
-  const rms = abs.length
-    ? Math.sqrt(abs.reduce((a, r) => a + r * r, 0) / abs.length)
+function stats(samples: StepSample[]) {
+  const moves = samples.map((s) => s.rowMove);
+  const sorted = moves.slice().sort((a, b) => a - b);
+  const median = sorted.length ? sorted[Math.floor(sorted.length / 2)] : 0;
+  const dev = moves.map((m) => Math.abs(m - median));
+  const peakDev = dev.length ? Math.max(...dev) : 0;
+  const rmsDev = dev.length
+    ? Math.sqrt(dev.reduce((a, d) => a + d * d, 0) / dev.length)
     : 0;
-  const mean = abs.length ? abs.reduce((a, r) => a + r, 0) / abs.length : 0;
+  const meanMove = moves.length
+    ? moves.reduce((a, m) => a + m, 0) / moves.length
+    : 0;
+  // Old scrollTop-referenced residual (= estimate error R) — non-gating diag.
+  const resAbs = samples.map((s) => Math.abs(s.residual));
+  const resPeak = resAbs.length ? Math.max(...resAbs) : 0;
+  const resRms = resAbs.length
+    ? Math.sqrt(resAbs.reduce((a, r) => a + r * r, 0) / resAbs.length)
+    : 0;
+  return { median, peakDev, rmsDev, meanMove, resPeak, resRms };
+}
+
+test("GATE: upscroll motion consistency stays below the realization-jitter threshold", async ({
+  page,
+}) => {
+  await installMockBridge(page);
+  await page.goto("/");
+  await page.waitForFunction(
+    () => typeof window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__ === "function",
+  );
+
+  // The `jitter-corpus` channel is pre-seeded (e2eBridge.ts) with 400
+  // heterogeneous rows in its mock store — the same reliable cold-load path
+  // scroll-history.spec.ts uses, no dependence on live-emit timing.
+  await page.getByTestId("channel-jitter-corpus").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("jitter-corpus");
+  const timeline = page.getByTestId("message-timeline");
+  await expect(timeline.locator("[data-message-id]").first()).toBeVisible();
+  await page.waitForFunction(() => {
+    const el = document.querySelector(
+      '[data-testid="message-timeline"]',
+    ) as HTMLDivElement | null;
+    return !!el && el.scrollHeight > el.clientHeight + 1000;
+  });
+
+  // Log native-anchoring support for this engine (measure() forces it off).
+  const anchorSupport = await page.evaluate(() =>
+    typeof CSS !== "undefined" && typeof CSS.supports === "function"
+      ? CSS.supports("overflow-anchor", "auto")
+      : false,
+  );
+
+  // GATED run: fixed synchronous step (deterministic input, no Blink scaling).
+  const result = await measure(page, "sync");
+  const s = stats(result.samples);
+
+  // NON-GATING felt-mode diagnostic: same metric under a real wheel. Tyler's
+  // input is a wheel; we want the felt number on the record every run even
+  // though Blink's per-notch scaling makes it unsafe to gate on.
+  const wheelResult = await measure(page, "wheel");
+  const w = stats(wheelResult.samples);
 
   /* eslint-disable no-console */
-  console.log("\n=== UPSCROLL JITTER GATE (anchor residual, Chromium) ===");
+  console.log(
+    `overflow-anchor supported by this engine: ${anchorSupport} ` +
+      `(forced to 'none' on the scroller to mirror shipped WKWebView)`,
+  );
+  console.log("\n=== UPSCROLL JITTER GATE (motion consistency, Chromium) ===");
   console.log(`rows mounted (live DOM):     ${result.rowCount}`);
-  console.log(`steps measured:              ${result.steps}`);
+  console.log(`steps measured (sync):       ${result.samples.length}`);
   console.log(`reached top of history:      ${result.reachedTop}`);
   console.log(
-    `peak single-step residual:   ${peak.toFixed(2)}px  (gate <= ${MAX_PEAK_RESIDUAL_PX})`,
+    `median per-notch motion:     ${s.median.toFixed(1)}px  (STEP=${STEP})`,
   );
   console.log(
-    `rms residual:                ${rms.toFixed(2)}px  (gate <= ${MAX_RMS_RESIDUAL_PX})`,
+    `peak motion deviation:       ${s.peakDev.toFixed(2)}px  (gate <= ${MAX_PEAK_DEVIATION_PX})`,
   );
-  console.log(`mean |residual|:             ${mean.toFixed(2)}px`);
-  console.log("(0 == every on-screen row tracked the wheel exactly)");
-  console.log("========================================================\n");
+  console.log(
+    `rms motion deviation:        ${s.rmsDev.toFixed(2)}px  (gate <= ${MAX_RMS_DEVIATION_PX})`,
+  );
+  console.log(
+    `mean per-notch motion:       ${s.meanMove.toFixed(1)}px  (anti-cheat: ~= ${STEP})`,
+  );
+  console.log("--- non-gating diagnostics ---");
+  console.log(
+    `estimate-error R (old resid):peak=${s.resPeak.toFixed(2)}px rms=${s.resRms.toFixed(2)}px  (T3 estimator acceptance number)`,
+  );
+  console.log(
+    `wheel-actuated (felt mode):  peak-dev=${w.peakDev.toFixed(2)}px rms-dev=${w.rmsDev.toFixed(2)}px over ${wheelResult.samples.length} steps`,
+  );
+  console.log("(0 == the reading row tracked the input exactly every notch)");
+  console.log("===========================================================\n");
   /* eslint-enable no-console */
 
-  // Sanity: the run actually exercised a meaningful upscroll. The cold-load
-  // windows the 400-row seed to the newest ~100 rows (CHANNEL_HISTORY_LIMIT),
-  // all in the DOM (de-virtualized), so ~100 mounted rows is the expected
-  // fully-loaded window we scroll within.
+  // Sanity: the run actually exercised a meaningful upscroll. Cold-load windows
+  // the 400-row seed to the newest ~100 rows (CHANNEL_HISTORY_LIMIT), all in the
+  // DOM (de-virtualized), so ~100 mounted rows is the expected window.
   expect(result.rowCount).toBeGreaterThanOrEqual(80);
   expect(result.samples.length).toBeGreaterThan(8);
 
-  // THE GATE. RED at tip 77bd0e70; a real estimator/anchor fix turns it green.
-  expect(peak).toBeLessThanOrEqual(MAX_PEAK_RESIDUAL_PX);
-  expect(rms).toBeLessThanOrEqual(MAX_RMS_RESIDUAL_PX);
+  // ANTI-CHEAT: the reading row must actually track the input — a frozen or
+  // half-applying scroller (near-zero motion, would false-green on deviation)
+  // is caught here because its mean motion falls well below STEP.
+  expect(s.meanMove).toBeGreaterThan(STEP * 0.75);
+
+  // THE GATE — per-notch motion consistency. RED at tip (~41px peak / ~23px rms
+  // on jitter-corpus); a correct owned-compensation fix (T2 writer) drives the
+  // reading row to STEP every notch and turns it green.
+  //
+  // ⚠️ RED-AT-TIP IS LOAD-BEARING: median-of-run is only valid while the corpus
+  // produces VARYING realization. This gate failing at tip IS the proof of that
+  // dispersion. If a future corpus edit makes the tip run PASS here WITHOUT a
+  // compensation fix, this gate is VOID — do not relax the thresholds; restore a
+  // heterogeneous corpus so the gate reds again, or the whole metric is moot.
+  expect(s.peakDev).toBeLessThanOrEqual(MAX_PEAK_DEVIATION_PX);
+  expect(s.rmsDev).toBeLessThanOrEqual(MAX_RMS_DEVIATION_PX);
 });
