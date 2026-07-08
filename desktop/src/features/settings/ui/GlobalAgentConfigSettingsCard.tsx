@@ -17,6 +17,7 @@ import {
   setGlobalAgentConfig,
 } from "@/shared/api/tauriGlobalAgentConfig";
 import type { GlobalAgentConfig } from "@/shared/api/types";
+import { getBakedBuildEnv, type BakedEnvEntry } from "@/shared/api/tauri";
 import { globalAgentConfigQueryKey } from "@/features/agents/useGlobalAgentConfig";
 import { useAcpRuntimesQuery } from "@/features/agents/hooks";
 import { EnvVarsEditor } from "@/features/agents/ui/EnvVarsEditor";
@@ -53,6 +54,7 @@ export function GlobalAgentConfigSettingsCard() {
     null,
   );
   const queryClient = useQueryClient();
+  const [bakedEnv, setBakedEnv] = React.useState<BakedEnvEntry[]>([]);
 
   // Load on mount — seed the shared TanStack Query cache so any dialog that
   // opens after this point reads the populated value on first render (no async
@@ -79,6 +81,16 @@ export function GlobalAgentConfigSettingsCard() {
       cancelled = true;
     };
   }, [queryClient]);
+
+  // Load baked build env once on mount. OSS builds return [] — the section
+  // stays hidden. Failures are silently swallowed (non-critical display data).
+  React.useEffect(() => {
+    getBakedBuildEnv()
+      .then(setBakedEnv)
+      .catch(() => {
+        // non-critical — leave bakedEnv empty
+      });
+  }, []);
 
   // Resolve the buzz-agent runtime catalog entry for model discovery.
   // The card is always visible (open=true), so the query is always enabled.
@@ -257,6 +269,45 @@ export function GlobalAgentConfigSettingsCard() {
             />
           </div>
         </SettingsOptionGroup>
+      )}
+
+      {/* Baked build defaults — only visible in internal (Block) builds.
+          OSS builds return an empty array, so this section is hidden entirely. */}
+      {bakedEnv.length > 0 && (
+        <div className="mt-4">
+          <SettingsOptionGroup>
+            <div className="p-3">
+              <p className="mb-1.5 text-xs font-medium text-foreground">
+                Baked build defaults
+              </p>
+              <p className="mb-2 text-xs text-muted-foreground">
+                Set by your build. Override any of these above.
+              </p>
+              <div className="flex flex-col gap-1">
+                {bakedEnv.map((entry) => (
+                  <div
+                    className="flex items-baseline gap-2 font-mono text-xs"
+                    key={entry.key}
+                  >
+                    <code className="shrink-0 text-muted-foreground">
+                      {entry.key}
+                    </code>
+                    <span className="text-muted-foreground">=</span>
+                    <code
+                      className={
+                        entry.masked
+                          ? "text-muted-foreground/50"
+                          : "text-foreground"
+                      }
+                    >
+                      {entry.value}
+                    </code>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </SettingsOptionGroup>
+        </div>
       )}
 
       {/* Save bar */}

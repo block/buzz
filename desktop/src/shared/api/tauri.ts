@@ -1149,6 +1149,34 @@ export async function getBakedBuildEnvKeys(): Promise<string[]> {
   return invokeTauri<string[]>("get_baked_build_env_keys");
 }
 
+/**
+ * A single baked build env entry.
+ *
+ * The value is already masked in Rust for secret keys (keys whose names match
+ * the secret heuristic: `_API_KEY`, `_TOKEN`, `_SECRET`, `_PASSWORD`).
+ * Non-secret values are shown as-is. Empty-value keys are filtered out.
+ */
+export type BakedEnvEntry = {
+  key: string;
+  /** Display value — real value or `••••••` for masked keys. */
+  value: string;
+  /** `true` when the value was replaced by the mask placeholder in Rust. */
+  masked: boolean;
+};
+
+/**
+ * Return the baked build env entries with values shown (masked where
+ * appropriate) for display in the Agent defaults card.
+ *
+ * Provider and model arrive as `BUZZ_AGENT_PROVIDER` / `BUZZ_AGENT_MODEL`
+ * keys and are included in the list alongside other baked vars.
+ *
+ * OSS builds return an empty array — the baked-env section is hidden.
+ */
+export async function getBakedBuildEnv(): Promise<BakedEnvEntry[]> {
+  return invokeTauri<BakedEnvEntry[]>("get_baked_build_env");
+}
+
 type RawUpdateManagedAgentResponse = {
   agent: RawManagedAgent;
   profile_sync_error: string | null;

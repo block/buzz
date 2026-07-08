@@ -161,7 +161,8 @@ const overrides = new Map([
   // mention-alias fix: profile wrappers (RawProfile/RawUserProfileSummary types,
   // getProfile/updateProfile/getUserProfile/getUsersBatch/searchUsers) moved to
   // tauriProfiles.ts; limit ratcheted down 1360 → 1241 to bank the headroom.
-  ["src/shared/api/tauri.ts", 1241],
+  // baked-env fold-in: getBakedBuildEnv + BakedEnvEntry type adds ~28 lines.
+  ["src/shared/api/tauri.ts", 1271],
   // readiness-gate: PersonaDialog.tsx threads computeLocalModeGate +
   // requiredCredentialEnvKeys + RequiredFieldLabel so the "New agent" dialog
   // shows required markers and credential amber rows (parity with

@@ -253,6 +253,64 @@ pub fn get_baked_build_env_keys() -> Vec<String> {
         .collect()
 }
 
+/// A single baked build env entry returned to the frontend.
+///
+/// Values are masked in Rust so unmasked secret values never cross the
+/// Tauri IPC boundary. The `masked` flag lets the frontend style masked
+/// rows distinctly.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct BakedEnvEntry {
+    pub key: String,
+    /// The display value — real value for non-secret keys, `••••••` for
+    /// secret keys whose names match the secret heuristic.
+    pub value: String,
+    /// `true` when the value was replaced by the mask placeholder.
+    pub masked: bool,
+}
+
+/// Returns `true` when a key name looks like it might hold a secret.
+///
+/// Heuristic: key (case-insensitive) ends with or contains `_API_KEY`,
+/// `_TOKEN`, `_SECRET`, or `_PASSWORD`.
+fn is_secret_key(key: &str) -> bool {
+    let upper = key.to_ascii_uppercase();
+    upper.contains("_API_KEY")
+        || upper.contains("_TOKEN")
+        || upper.contains("_SECRET")
+        || upper.contains("_PASSWORD")
+}
+
+/// Expose the baked build env to the frontend with values shown, but any
+/// key matching the secret heuristic has its value replaced by `••••••`.
+///
+/// Provider and model arrive as `BUZZ_AGENT_PROVIDER` / `BUZZ_AGENT_MODEL`
+/// keys in `baked_build_env()` and are included in the returned list like any
+/// other key. Empty-value keys are filtered out (same as
+/// `get_baked_build_env_keys`).
+///
+/// OSS builds return an empty list — the baked-env section is hidden entirely
+/// in OSS installations.
+#[tauri::command]
+pub fn get_baked_build_env() -> Vec<BakedEnvEntry> {
+    crate::managed_agents::baked_build_env()
+        .into_iter()
+        .filter(|(_, v)| !v.is_empty())
+        .map(|(key, value)| {
+            let masked = is_secret_key(&key);
+            let display_value = if masked {
+                "\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}".to_string()
+            } else {
+                value
+            };
+            BakedEnvEntry {
+                key,
+                value: display_value,
+                masked,
+            }
+        })
+        .collect()
+}
+
 /// Re-tag a field's origin from `BuzzExplicit` to `GlobalDefault`, leaving any
 /// other origin untouched. No-op when the field is absent.
 fn retag_global_default(field: &mut Option<NormalizedField>) {
@@ -803,5 +861,119 @@ mod tests {
             Some(ConfigOrigin::GlobalDefault),
             "override baseline origin must be GlobalDefault, not PersonaDefault or BuzzExplicit"
         );
+    }
+
+    // ── get_baked_build_env / is_secret_key tests ──────────────────────────
+
+    /// Build a `BakedEnvEntry` vec from a synthetic map, mirroring what
+    /// `get_baked_build_env()` does. Used to test masking without relying on
+    /// compile-time `option_env!` vars (OSS builds have empty `baked_build_env`).
+    fn baked_env_from_map(map: &[(&str, &str)]) -> Vec<BakedEnvEntry> {
+        map.iter()
+            .filter(|(_, v)| !v.is_empty())
+            .map(|(k, v)| {
+                let masked = super::is_secret_key(k);
+                BakedEnvEntry {
+                    key: k.to_string(),
+                    value: if masked {
+                        "\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}".to_string()
+                    } else {
+                        v.to_string()
+                    },
+                    masked,
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn baked_env_non_secret_key_shows_real_value() {
+        let entries = baked_env_from_map(&[("BUZZ_AGENT_PROVIDER", "databricks_v2")]);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].key, "BUZZ_AGENT_PROVIDER");
+        assert_eq!(entries[0].value, "databricks_v2");
+        assert!(!entries[0].masked);
+    }
+
+    #[test]
+    fn baked_env_api_key_is_masked() {
+        let entries = baked_env_from_map(&[("ANTHROPIC_API_KEY", "sk-secret")]);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].value, "••••••");
+        assert!(entries[0].masked);
+    }
+
+    #[test]
+    fn baked_env_token_key_is_masked() {
+        let entries = baked_env_from_map(&[("GITHUB_TOKEN", "ghp_secret")]);
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].masked);
+    }
+
+    #[test]
+    fn baked_env_secret_key_is_masked() {
+        let entries = baked_env_from_map(&[("MY_DB_SECRET", "s3cr3t")]);
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].masked);
+    }
+
+    #[test]
+    fn baked_env_password_key_is_masked() {
+        let entries = baked_env_from_map(&[("DB_PASSWORD", "hunter2")]);
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].masked);
+    }
+
+    #[test]
+    fn baked_env_empty_value_filtered_out() {
+        let entries = baked_env_from_map(&[("BUZZ_AGENT_PROVIDER", "")]);
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn baked_env_mixed_keys_correct_masking() {
+        let entries = baked_env_from_map(&[
+            ("BUZZ_AGENT_PROVIDER", "databricks_v2"),
+            ("BUZZ_AGENT_MODEL", "goose-claude-opus-4-8"),
+            ("DATABRICKS_HOST", "https://example.com"),
+            ("DATABRICKS_TOKEN", "dapi-secret"),
+        ]);
+        assert_eq!(entries.len(), 4);
+
+        let provider = entries
+            .iter()
+            .find(|e| e.key == "BUZZ_AGENT_PROVIDER")
+            .unwrap();
+        assert_eq!(provider.value, "databricks_v2");
+        assert!(!provider.masked);
+
+        let model = entries
+            .iter()
+            .find(|e| e.key == "BUZZ_AGENT_MODEL")
+            .unwrap();
+        assert_eq!(model.value, "goose-claude-opus-4-8");
+        assert!(!model.masked);
+
+        let host = entries.iter().find(|e| e.key == "DATABRICKS_HOST").unwrap();
+        assert_eq!(host.value, "https://example.com");
+        assert!(!host.masked);
+
+        let token = entries
+            .iter()
+            .find(|e| e.key == "DATABRICKS_TOKEN")
+            .unwrap();
+        assert_eq!(token.value, "••••••");
+        assert!(token.masked);
+    }
+
+    #[test]
+    fn baked_env_secret_heuristic_is_case_insensitive() {
+        // Key lowercased — heuristic must still catch it.
+        assert!(super::is_secret_key("my_api_key"));
+        assert!(super::is_secret_key("github_token"));
+        assert!(super::is_secret_key("db_secret"));
+        assert!(super::is_secret_key("db_password"));
+        assert!(!super::is_secret_key("DATABRICKS_HOST"));
+        assert!(!super::is_secret_key("BUZZ_AGENT_PROVIDER"));
     }
 }

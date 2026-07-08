@@ -652,6 +652,7 @@ pub fn run() {
             get_agent_config_surface,
             get_runtime_file_config,
             get_baked_build_env_keys,
+            get_baked_build_env,
             put_agent_session_config,
             get_global_agent_config,
             set_global_agent_config,
