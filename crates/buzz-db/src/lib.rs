@@ -201,6 +201,15 @@ pub struct EnsuredCommunityRecord {
     pub created: bool,
 }
 
+/// Community row returned by an atomic create-with-owner operation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreatedCommunityRecord {
+    /// Stable server-resolved community id.
+    pub id: CommunityId,
+    /// Normalized host stored for the community.
+    pub host: String,
+}
+
 /// Community row returned by operator-plane ownership reads.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OwnedCommunityRecord {
@@ -455,6 +464,50 @@ impl Db {
             host,
             created,
         })
+    }
+
+    /// Atomically creates a community and its initial owner.
+    ///
+    /// Returns `None` when the normalized host already exists. The host insert
+    /// and owner insert share one transaction, so callers never observe a
+    /// partially provisioned community and cannot rotate an existing owner.
+    pub async fn create_community_with_owner(
+        &self,
+        normalized_host: &str,
+        owner_pubkey: &str,
+    ) -> Result<Option<CreatedCommunityRecord>> {
+        let mut tx = self.pool.begin().await?;
+        let row = sqlx::query(
+            r#"
+            INSERT INTO communities (host)
+            VALUES ($1)
+            ON CONFLICT (lower(host)) DO NOTHING
+            RETURNING id, host
+            "#,
+        )
+        .bind(normalized_host)
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        let Some(row) = row else {
+            tx.rollback().await?;
+            return Ok(None);
+        };
+        let id: Uuid = row.try_get("id")?;
+        let host: String = row.try_get("host")?;
+        sqlx::query(
+            "INSERT INTO relay_members (community_id, pubkey, role, added_by) VALUES ($1, $2, 'owner', NULL)",
+        )
+        .bind(id)
+        .bind(owner_pubkey.to_ascii_lowercase())
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+
+        Ok(Some(CreatedCommunityRecord {
+            id: CommunityId::from_uuid(id),
+            host,
+        }))
     }
 
     /// Returns the community that owns a channel, if the channel exists.
@@ -2923,6 +2976,45 @@ mod tests {
             .expect("lookup stored-case host")
             .expect("community found by stored-case host");
         assert_eq!(found.id, CommunityId::from_uuid(id));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn create_community_with_owner_is_atomic_and_create_only() {
+        let db = setup_db().await;
+        let host = format!("create-only-{}.example", Uuid::new_v4().simple());
+        let owner = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let other = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+        let created = db
+            .create_community_with_owner(&host, owner)
+            .await
+            .expect("create community")
+            .expect("new host");
+        assert_eq!(created.host, host);
+        let owner_role: Option<String> = sqlx::query_scalar(
+            "SELECT role FROM relay_members WHERE community_id = $1 AND pubkey = $2",
+        )
+        .bind(created.id.as_uuid())
+        .bind(owner)
+        .fetch_optional(&db.pool)
+        .await
+        .expect("owner role");
+        assert_eq!(owner_role.as_deref(), Some("owner"));
+
+        let collision = db
+            .create_community_with_owner(&host, other)
+            .await
+            .expect("collision result");
+        assert!(collision.is_none());
+        let roles: Vec<(String, String)> = sqlx::query_as(
+            "SELECT pubkey, role FROM relay_members WHERE community_id = $1 ORDER BY pubkey",
+        )
+        .bind(created.id.as_uuid())
+        .fetch_all(&db.pool)
+        .await
+        .expect("community roles");
+        assert_eq!(roles, vec![(owner.to_string(), "owner".to_string())]);
     }
 
     #[tokio::test]

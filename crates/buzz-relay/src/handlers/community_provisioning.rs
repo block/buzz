@@ -47,6 +47,10 @@ pub struct ProvisionCommunityRequest {
     /// rotates the owner through the same bootstrap path used at startup.
     #[serde(default)]
     pub initial_owner_pubkey: Option<String>,
+    /// When true, atomically create the host and owner and reject an existing
+    /// host instead of converging or rotating ownership.
+    #[serde(default)]
+    pub create_only: bool,
 }
 
 /// JSON response from `POST /operator/communities`.
@@ -245,10 +249,35 @@ pub async fn provision_community(
         })
         .transpose()?;
 
-    // Same idempotent upsert as the startup seed — creating a community is an
-    // INSERT, never DDL (docs/multi-tenant-relay.md §System Model). The helper
-    // returns whether this call inserted the row, so concurrent provisioners do
-    // not both report `created` after an upsert conflict.
+    if request.create_only {
+        let owner_hex = initial_owner.as_deref().ok_or_else(|| {
+            "initial_owner_pubkey is required when create_only is true".to_string()
+        })?;
+        let record = state
+            .db
+            .create_community_with_owner(&request.host, owner_hex)
+            .await
+            .map_err(|e| format!("failed to create community: {e}"))?
+            .ok_or_else(|| "community already exists".to_string())?;
+
+        info!(
+            operator = %operator_hex,
+            community = %record.id,
+            host = %record.host,
+            owner = %owner_hex,
+            "community created via operator endpoint"
+        );
+        return Ok(ProvisionCommunityResponse {
+            community_id: record.id.to_string(),
+            host: record.host,
+            status: "created",
+            owner_pubkey: initial_owner,
+        });
+    }
+
+    // Legacy convergence mode remains available to deployment operators and
+    // startup tooling. Clients provisioning on behalf of end users must use
+    // create_only so an existing owner can never be rotated by a create race.
     let record = state
         .db
         .ensure_configured_community(&request.host)

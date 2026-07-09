@@ -135,6 +135,7 @@ pub async fn provision_community(
         Err(msg) if msg.starts_with("actor not authorized") => {
             Err(api_error(StatusCode::FORBIDDEN, &msg))
         }
+        Err(msg) if msg == "community already exists" => Err(api_error(StatusCode::CONFLICT, &msg)),
         Err(msg) => Err(api_error(StatusCode::BAD_REQUEST, &msg)),
     }
 }
