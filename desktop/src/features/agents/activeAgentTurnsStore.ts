@@ -634,9 +634,7 @@ export function saveActiveAgentTurnsForWorkspace(workspaceId: string): void {
  * Consumes the snapshot (deletes it from `savedByWorkspace`) — a given
  * workspace's snapshot is only usable once per round-trip.
  */
-export function restoreActiveAgentTurnsForWorkspace(
-  workspaceId: string,
-): void {
+export function restoreActiveAgentTurnsForWorkspace(workspaceId: string): void {
   const snap = savedByWorkspace.get(workspaceId);
   if (!snap) return;
   savedByWorkspace.delete(workspaceId);
