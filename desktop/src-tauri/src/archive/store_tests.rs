@@ -728,3 +728,125 @@ fn test_read_archived_events_same_second_cursor_no_skip() {
     // No overlap with page1.
     assert!(page2.iter().all(|r| !r.contains("\"z\"")));
 }
+
+// ── observer_channel_index ───────────────────────────────────────────────────
+
+#[test]
+fn test_upsert_observer_channel_index_non_null_is_idempotent() {
+    let conn = in_memory();
+    let pk = "owner";
+    let relay = "wss://r";
+
+    upsert_observer_channel_index(&conn, pk, relay, "ev1", Some("ch-abc"), 1000).unwrap();
+    // Second call with same PK → INSERT OR IGNORE, no error, row unchanged.
+    upsert_observer_channel_index(&conn, pk, relay, "ev1", Some("ch-abc"), 2000).unwrap();
+
+    // Only one row should exist and created_at stays at 1000 (first write wins).
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM observer_channel_index WHERE id = 'ev1'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 1, "INSERT OR IGNORE must not duplicate rows");
+
+    let at: i64 = conn
+        .query_row(
+            "SELECT created_at FROM observer_channel_index WHERE id = 'ev1'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(at, 1000, "first write's created_at must be preserved");
+}
+
+#[test]
+fn test_upsert_observer_channel_index_null_channel_id_is_idempotent() {
+    let conn = in_memory();
+    let pk = "owner";
+    let relay = "wss://r";
+
+    // Write a NULL channel_id status row (unscoped / decrypt-failed frame).
+    upsert_observer_channel_index(&conn, pk, relay, "ev-null", None, 500).unwrap();
+    // Re-run → no-op.
+    upsert_observer_channel_index(&conn, pk, relay, "ev-null", None, 600).unwrap();
+
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM observer_channel_index WHERE id = 'ev-null'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        count, 1,
+        "null-channel_id row must not be duplicated on re-run"
+    );
+
+    let channel_id: Option<String> = conn
+        .query_row(
+            "SELECT channel_id FROM observer_channel_index WHERE id = 'ev-null'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(
+        channel_id.is_none(),
+        "channel_id must be NULL for unscoped frames"
+    );
+}
+
+#[test]
+fn test_read_archived_observer_excludes_null_channel_id_rows() {
+    // Scoped reads filter channel_id = '?'; NULL rows must never appear.
+    let conn = in_memory();
+    let pk = "owner";
+    let relay = "wss://r";
+
+    // Seed an archived event row.
+    upsert_archived_event(&conn, pk, relay, "ev-null", 24200, "agent", 1000, "{}", 0).unwrap();
+    upsert_event_scope(&conn, pk, relay, "ev-null", "owner_p", pk, 0).unwrap();
+
+    // Index it with a NULL channel_id.
+    upsert_observer_channel_index(&conn, pk, relay, "ev-null", None, 1000).unwrap();
+
+    // Scoped read for ANY channel must return nothing (NULL != 'some-channel').
+    let rows =
+        read_archived_observer_events_for_channel(&conn, pk, relay, "some-channel", None, None, 50)
+            .unwrap();
+    assert!(
+        rows.is_empty(),
+        "scoped read must not return null-channel_id rows"
+    );
+}
+
+#[test]
+fn test_read_unindexed_observer_rows_excludes_processed_rows() {
+    // After a NULL channel_id row is written, the event must no longer appear
+    // in read_unindexed_observer_rows (it is "processed").
+    let conn = in_memory();
+    let pk = "owner";
+    let relay = "wss://r";
+
+    // Seed an archived observer event with owner_p scope.
+    upsert_archived_event(&conn, pk, relay, "ev-old", 24200, "agent", 1000, "{}", 0).unwrap();
+    upsert_event_scope(&conn, pk, relay, "ev-old", "owner_p", pk, 0).unwrap();
+
+    // Before indexing: ev-old must appear in unindexed rows.
+    let unindexed = read_unindexed_observer_rows(&conn, pk, relay).unwrap();
+    assert!(
+        unindexed.iter().any(|(id, _, _)| id == "ev-old"),
+        "ev-old must appear in unindexed rows before indexing"
+    );
+
+    // Index it with NULL channel_id (decrypt-failed / unscoped).
+    upsert_observer_channel_index(&conn, pk, relay, "ev-old", None, 1000).unwrap();
+
+    // After indexing: ev-old must NOT appear in unindexed rows (re-run is a no-op).
+    let unindexed2 = read_unindexed_observer_rows(&conn, pk, relay).unwrap();
+    assert!(
+        !unindexed2.iter().any(|(id, _, _)| id == "ev-old"),
+        "ev-old must be excluded from unindexed rows after null-channel_id indexing"
+    );
+}

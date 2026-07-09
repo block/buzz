@@ -3,6 +3,10 @@ import { Bot, Hash, LogIn, Plus, Sparkles, UserPlus } from "lucide-react";
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import { useMediaUpload } from "@/features/messages/lib/useMediaUpload";
 import { MessageComposer } from "@/features/messages/ui/MessageComposer";
+import { ComposerTimeoutBanner } from "@/features/moderation/ui/ComposerTimeoutBanner";
+import { useTimeoutState } from "@/features/moderation/lib/timeoutStore";
+import { isModerationDm } from "@/features/moderation/lib/moderationDm";
+import { useRelaySelfQuery } from "@/features/moderation/hooks";
 import { DropZoneOverlay } from "@/features/messages/ui/ComposerAttachments";
 import {
   MessageThreadPanel,
@@ -269,10 +273,24 @@ export const ChannelPane = React.memo(function ChannelPane({
     return true;
   }, [findLastOwnEditable, onEdit, threadHeadMessage, threadMessages]);
 
+  const timeoutState = useTimeoutState();
+
+  // A moderation DM (1:1 with the relay identity) is read-only for the member;
+  // only DMs pay for the NIP-11 `self` lookup. Fails open: no `relaySelf` →
+  // ordinary DM, composer enabled.
+  const relaySelfQuery = useRelaySelfQuery(activeChannel?.channelType === "dm");
+  const isModerationDmChannel = isModerationDm(
+    activeChannel ?? null,
+    currentPubkey,
+    relaySelfQuery.data,
+  );
+
   const isComposerDisabled =
     !activeChannel?.isMember ||
     activeChannel.archivedAt !== null ||
     activeChannel.channelType === "forum" ||
+    timeoutState.active ||
+    isModerationDmChannel ||
     isSending;
   const knownAgentPubkeys = React.useMemo(() => {
     const pubkeys = new Set<string>();
@@ -676,7 +694,11 @@ export const ChannelPane = React.memo(function ChannelPane({
               ref={composerWrapperRef}
             >
               <div className="pointer-events-auto">
-                {isActiveWelcomeChannel ? (
+                {timeoutState.active ? (
+                  <ComposerTimeoutBanner
+                    expiresAtMs={timeoutState.expiresAtMs}
+                  />
+                ) : isActiveWelcomeChannel ? (
                   <WelcomeComposerBanner state={welcomeComposerBannerState} />
                 ) : null}
                 <MessageComposer
@@ -696,16 +718,20 @@ export const ChannelPane = React.memo(function ChannelPane({
                   onSend={handleSendMessage}
                   profiles={profiles}
                   placeholder={
-                    activeChannel?.archivedAt
-                      ? "Archived channels are read-only."
-                      : activeChannel?.channelType === "forum"
-                        ? "Forum posting is not wired in this pass."
-                        : activeChannel
-                          ? activeChannel.channelType === "dm" &&
-                            directMessageIntro
-                            ? `Message ${directMessageIntro.displayName}`
-                            : `Message #${activeChannel.name}`
-                          : "Select a channel"
+                    timeoutState.active
+                      ? "You're timed out by community moderators."
+                      : isModerationDmChannel
+                        ? "This channel is read-only."
+                        : activeChannel?.archivedAt
+                          ? "Archived channels are read-only."
+                          : activeChannel?.channelType === "forum"
+                            ? "Forum posting is not wired in this pass."
+                            : activeChannel
+                              ? activeChannel.channelType === "dm" &&
+                                directMessageIntro
+                                ? `Message ${directMessageIntro.displayName}`
+                                : `Message #${activeChannel.name}`
+                              : "Select a channel"
                   }
                   showTopBorder={false}
                 />
@@ -842,13 +868,22 @@ export const ChannelPane = React.memo(function ChannelPane({
         })()
       ) : activeChannel && selectedAgent ? (
         (() => {
+          // When the panel was opened from a different channel than the
+          // currently active one, re-scope it to the active channel so
+          // that both the content/header AND channel-backed actions (e.g.
+          // Stop current turn) operate on the same channel object.
+          const effectiveAgentSessionChannelId =
+            openAgentSessionChannelId &&
+            activeChannel.id !== openAgentSessionChannelId
+              ? activeChannelId
+              : openAgentSessionChannelId;
           const panel = (
             <AgentSessionThreadPanel
               agent={selectedAgent}
               canInterruptTurn={selectedAgent.canInterruptTurn}
               channel={
-                openAgentSessionChannelId
-                  ? activeChannel?.id === openAgentSessionChannelId
+                effectiveAgentSessionChannelId
+                  ? effectiveAgentSessionChannelId === activeChannel.id
                     ? activeChannel
                     : null
                   : agentSessionSelection.isAgentInActivityList({
@@ -858,7 +893,7 @@ export const ChannelPane = React.memo(function ChannelPane({
                     ? activeChannel
                     : null
               }
-              channelId={openAgentSessionChannelId}
+              channelId={effectiveAgentSessionChannelId}
               isSinglePanelView={
                 useSplitAuxiliaryPane ? false : isSinglePanelView
               }
@@ -877,6 +912,7 @@ export const ChannelPane = React.memo(function ChannelPane({
           const panel = (
             <UserProfilePanel
               currentPubkey={currentPubkey}
+              callerChannelId={activeChannelId}
               isSinglePanelView={
                 useSplitAuxiliaryPane ? false : isSinglePanelView
               }

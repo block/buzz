@@ -1,6 +1,6 @@
 import * as React from "react";
 import { createPortal } from "react-dom";
-import ReactMarkdown, { type Components } from "react-markdown";
+import type { Components } from "react-markdown";
 import {
   ChevronLeft,
   ChevronRight,
@@ -9,8 +9,6 @@ import {
   ZoomOut,
 } from "lucide-react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
-import remarkBreaks from "remark-breaks";
-import remarkGfm from "remark-gfm";
 import { toast } from "sonner";
 
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
@@ -29,13 +27,6 @@ import {
 } from "@/shared/lib/linkPreview";
 import { useResolvedLinkPreviews } from "@/shared/lib/useResolvedLinkPreviews";
 import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
-import rehypeImageGallery from "@/shared/lib/rehypeImageGallery";
-import rehypeSearchHighlight from "@/shared/lib/rehypeSearchHighlight";
-import remarkChannelLinks from "@/shared/lib/remarkChannelLinks";
-import remarkCustomEmoji from "@/shared/lib/remarkCustomEmoji";
-import remarkMentions from "@/shared/lib/remarkMentions";
-import remarkSpoilers from "@/shared/lib/remarkSpoilers";
-import remarkMessageLinks from "@/features/messages/lib/remarkMessageLinks";
 import { AttachmentGroup } from "@/shared/ui/attachment";
 import { ConfigNudgeCard } from "@/shared/ui/config-nudge-attachment";
 import { LinkPreviewAttachment } from "@/shared/ui/link-preview-attachment";
@@ -75,84 +66,28 @@ import { MarkdownInput } from "./markdown/MarkdownInput";
 import { MarkdownTable } from "./markdown/MarkdownTable";
 import { MaskedLinkTooltip } from "./markdown/MaskedLinkTooltip";
 import { MessageLinkPill } from "./markdown/MessageLinkPill";
+import { renderCachedMarkdown } from "./markdown/nodeCache";
+import {
+  MarkdownRuntimeContext,
+  useMarkdownRuntime,
+} from "./markdown/runtimeContext";
 import { resolveFileCard } from "./markdownFileCard";
-import type {
-  ImetaEntry,
-  MarkdownProps,
-  MarkdownRuntime,
-} from "./markdown/types";
+import type { MarkdownProps, MarkdownRuntime } from "./markdown/types";
 import { SpoilerInline } from "./markdown/SpoilerInline";
 import {
-  aspectRatioFromDim,
   dimensionsFromDim,
   getDecodedImageDimensions,
   imageReserveStyle,
   isInsideHiddenSpoiler,
   getReactNodeText,
-  messageLinkUrlTransform,
   rememberDecodedImageDimensions,
   useFrozenImageReserve,
   useStableArray,
 } from "./markdown/utils";
-import { VideoPlayer, type VideoReviewContext } from "./VideoPlayer";
-
-/**
- * Video review context flows through React context instead of
- * `createMarkdownComponents` arguments. The component map must keep a stable
- * identity across re-renders: a new map means new element types, which makes
- * React unmount and remount every rendered node — including `<video>`
- * elements, killing playback (and any in-progress review comment draft)
- * whenever the timeline re-renders.
- */
-const VideoReviewMarkdownContext = React.createContext<
-  VideoReviewContext | undefined
->(undefined);
-
-function useLatestRef<T>(value: T) {
-  const ref = React.useRef(value);
-  ref.current = value;
-  return ref;
-}
-
-function MarkdownVideoPlayer({
-  alt,
-  entry,
-  resolvedSrc,
-  src,
-}: {
-  alt?: string;
-  entry?: ImetaEntry;
-  resolvedSrc: string;
-  src?: string;
-}) {
-  const videoReviewContext = React.useContext(VideoReviewMarkdownContext);
-  // Look up poster frame from imeta tags (NIP-71 `image` field).
-  // Fall back to `thumb` for compatibility with older events.
-  const posterUrl = entry?.image ?? entry?.thumb;
-  const resolvedPoster = posterUrl ? rewriteRelayUrl(posterUrl) : undefined;
-  const resolvedReviewContext = React.useMemo(
-    () =>
-      videoReviewContext
-        ? {
-            ...videoReviewContext,
-            title:
-              videoReviewContext.title ?? entry?.filename ?? alt ?? "Video",
-          }
-        : undefined,
-    [alt, entry?.filename, videoReviewContext],
-  );
-
-  return (
-    <VideoPlayer
-      src={resolvedSrc}
-      aspectRatio={aspectRatioFromDim(entry?.dim)}
-      poster={resolvedPoster}
-      durationSeconds={entry?.duration}
-      reviewKey={src ?? resolvedSrc}
-      reviewContext={resolvedReviewContext}
-    />
-  );
-}
+import {
+  MarkdownVideoPlayer,
+  VideoReviewMarkdownContext,
+} from "./markdown/MarkdownVideoPlayer";
 
 type ImageLightboxBox = {
   height: number;
@@ -1560,12 +1495,108 @@ function ImageBlock({ alt, dim, resolvedSrc, src }: ImageBlockProps) {
 }
 
 function createMarkdownComponents(
-  runtimeRef: React.RefObject<MarkdownRuntime>,
   interactive = true,
   mediaInset = false,
 ): Components {
   const listItemClassName = "[&_p]:inline";
   const listClassName = "space-y-1 pl-6 marker:text-muted-foreground/80";
+
+  function MarkdownAnchor({
+    children,
+    href,
+    ...props
+  }: React.ComponentPropsWithoutRef<"a">) {
+    const { channels, imetaByUrl, onOpenMessageLink } = useMarkdownRuntime();
+    if (!interactive) {
+      return <span className="font-medium text-current">{children}</span>;
+    }
+
+    // Markdown image-link syntax (`[![alt](src)](href)`) otherwise nests the
+    // image lightbox button inside an anchor. Keep the image as the lightbox
+    // trigger and suppress the parent link activation for block media.
+    if (hasBlockMedia(React.Children.toArray(children))) {
+      return <>{children}</>;
+    }
+
+    const label = getReactNodeText(children);
+
+    // Generic file attachment: a `[filename](url)` link whose href matches an
+    // imeta entry with a non-image, non-video MIME. Render a download card
+    // instead of a plain link. (Media uses the `img` renderer, not this path.)
+    const card = resolveFileCard(
+      href ? imetaByUrl?.get(href) : undefined,
+      href,
+      label,
+    );
+    if (card) {
+      return (
+        <FileCard href={card.href} filename={card.filename} size={card.size} />
+      );
+    }
+
+    // Intercept `buzz://message?channel=…&id=…` links so a click navigates
+    // in-app instead of opening the URL in the OS browser. http(s) links
+    // continue to use the existing target="_blank" behavior.
+    if (href) {
+      const messageLinkTarget = resolveMessageLinkRenderTarget({
+        href,
+        label,
+      });
+      if (messageLinkTarget.kind !== "none") {
+        if (messageLinkTarget.kind === "pill") {
+          return (
+            <MessageLinkPill
+              channels={channels}
+              href={href}
+              interactive={interactive}
+              link={messageLinkTarget.link}
+              onOpenMessageLink={onOpenMessageLink}
+            />
+          );
+        }
+
+        return (
+          <a
+            {...props}
+            className="font-medium text-primary underline underline-offset-4 transition-colors hover:text-primary/80 cursor-pointer"
+            href={href}
+            onClick={(event) => {
+              event.preventDefault();
+              onOpenMessageLink(messageLinkTarget.link);
+            }}
+          >
+            {children}
+          </a>
+        );
+      }
+      // Malformed message deep link — fall through to the default
+      // anchor (renders as a normal external link).
+    }
+
+    const supportedLinkPreview = href ? parseSupportedLinkPreview(href) : null;
+    const isLinearLink = supportedLinkPreview?.kind === "linear-issue";
+
+    const anchor = (
+      <a
+        {...props}
+        className={cn(
+          "font-medium underline underline-offset-4 transition-colors",
+          isLinearLink ? "linear-link" : "text-primary hover:text-primary/80",
+        )}
+        href={href}
+        rel="noreferrer"
+        target="_blank"
+      >
+        {children}
+      </a>
+    );
+
+    return (
+      <MaskedLinkTooltip disabled={isLinearLink} href={href} label={label}>
+        {anchor}
+      </MaskedLinkTooltip>
+    );
+  }
 
   return {
     spoiler: ({
@@ -1582,104 +1613,7 @@ function createMarkdownComponents(
         {children}
       </SpoilerInline>
     ),
-    a: ({ children, href, ...props }) => {
-      const { imetaByUrl, onOpenMessageLink } = runtimeRef.current;
-      if (!interactive) {
-        return <span className="font-medium text-current">{children}</span>;
-      }
-
-      // Markdown image-link syntax (`[![alt](src)](href)`) otherwise nests the
-      // image lightbox button inside an anchor. Keep the image as the lightbox
-      // trigger and suppress the parent link activation for block media.
-      if (hasBlockMedia(React.Children.toArray(children))) {
-        return <>{children}</>;
-      }
-
-      const label = getReactNodeText(children);
-
-      // Generic file attachment: a `[filename](url)` link whose href matches an
-      // imeta entry with a non-image, non-video MIME. Render a download card
-      // instead of a plain link. (Media uses the `img` renderer, not this path.)
-      const card = resolveFileCard(
-        href ? imetaByUrl?.get(href) : undefined,
-        href,
-        label,
-      );
-      if (card) {
-        return (
-          <FileCard
-            href={card.href}
-            filename={card.filename}
-            size={card.size}
-          />
-        );
-      }
-
-      // Intercept `buzz://message?channel=…&id=…` links so a click navigates
-      // in-app instead of opening the URL in the OS browser. http(s) links
-      // continue to use the existing target="_blank" behavior.
-      if (href) {
-        const messageLinkTarget = resolveMessageLinkRenderTarget({
-          href,
-          label,
-        });
-        if (messageLinkTarget.kind !== "none") {
-          if (messageLinkTarget.kind === "pill") {
-            return (
-              <MessageLinkPill
-                channels={runtimeRef.current.channels}
-                href={href}
-                interactive={interactive}
-                link={messageLinkTarget.link}
-                onOpenMessageLink={onOpenMessageLink}
-              />
-            );
-          }
-
-          return (
-            <a
-              {...props}
-              className="font-medium text-primary underline underline-offset-4 transition-colors hover:text-primary/80 cursor-pointer"
-              href={href}
-              onClick={(event) => {
-                event.preventDefault();
-                onOpenMessageLink(messageLinkTarget.link);
-              }}
-            >
-              {children}
-            </a>
-          );
-        }
-        // Malformed message deep link — fall through to the default
-        // anchor (renders as a normal external link).
-      }
-
-      const supportedLinkPreview = href
-        ? parseSupportedLinkPreview(href)
-        : null;
-      const isLinearLink = supportedLinkPreview?.kind === "linear-issue";
-
-      const anchor = (
-        <a
-          {...props}
-          className={cn(
-            "font-medium underline underline-offset-4 transition-colors",
-            isLinearLink ? "linear-link" : "text-primary hover:text-primary/80",
-          )}
-          href={href}
-          rel="noreferrer"
-          target="_blank"
-        >
-          {children}
-        </a>
-      );
-
-      return (
-        <MaskedLinkTooltip disabled={isLinearLink} href={href} label={label}>
-          {anchor}
-        </MaskedLinkTooltip>
-      );
-    },
+    a: MarkdownAnchor,
     blockquote: ({ children }) => (
       <blockquote className="border-l-2 border-border pl-4 italic text-muted-foreground [&>*:first-child]:mt-0 [&>*+*]:mt-2">
         {children}
@@ -1751,8 +1685,8 @@ function createMarkdownComponents(
       </h6>
     ),
     hr: () => <hr className="border-border/80" />,
-    img: ({ alt, src }) => {
-      const { imetaByUrl } = runtimeRef.current;
+    img: function MarkdownImage({ alt, src }) {
+      const { imetaByUrl } = useMarkdownRuntime();
       const resolvedSrc = src ? rewriteRelayUrl(src) : src;
       if (!interactive) {
         const fallbackLabel = resolvedSrc?.endsWith(".mp4")
@@ -1851,9 +1785,13 @@ function createMarkdownComponents(
     ul: ({ children }) => (
       <ul className={cn("list-disc", listClassName)}>{children}</ul>
     ),
-    mention: ({ children }: { children?: React.ReactNode }) => {
+    mention: function MarkdownMention({
+      children,
+    }: {
+      children?: React.ReactNode;
+    }) {
       const { agentMentionPubkeysByName, mentionPubkeysByName } =
-        runtimeRef.current;
+        useMarkdownRuntime();
       const mentionText = String(children ?? "");
       const mentionName = mentionText.replace(/^@/, "").trim().toLowerCase();
       const pubkey = mentionPubkeysByName?.[mentionName];
@@ -1910,8 +1848,12 @@ function createMarkdownComponents(
       }
       return <InlineEmojiPopover alt={alt} resolvedSrc={resolvedSrc} />;
     },
-    "channel-link": ({ children }: { children?: React.ReactNode }) => {
-      const { channels, onOpenChannel } = runtimeRef.current;
+    "channel-link": function MarkdownChannelLink({
+      children,
+    }: {
+      children?: React.ReactNode;
+    }) {
+      const { channels, onOpenChannel } = useMarkdownRuntime();
       const text = String(children ?? "");
       const channelName = text.startsWith("#") ? text.slice(1) : text;
       const channel = channels.find(
@@ -1946,8 +1888,12 @@ function createMarkdownComponents(
         </span>
       );
     },
-    "message-link": ({ children }: { children?: React.ReactNode }) => {
-      const { channels, onOpenMessageLink } = runtimeRef.current;
+    "message-link": function MarkdownMessageLink({
+      children,
+    }: {
+      children?: React.ReactNode;
+    }) {
+      const { channels, onOpenMessageLink } = useMarkdownRuntime();
       const href = String(children ?? "");
       const parsed = parseMessageLink(href);
       if (!parsed.ok) {
@@ -1967,6 +1913,38 @@ function createMarkdownComponents(
       );
     },
   } as Components;
+}
+
+/**
+ * The component map only varies by the two boolean render flags, so at most
+ * four instances ever exist. Module-stable maps mean cached markdown element
+ * trees (see ./markdown/nodeCache.ts) never embed per-mount closures.
+ */
+const markdownComponentsByVariant = new Map<string, MarkdownComponentSet>();
+
+type MarkdownComponentSet = { components: Components; variant: string };
+
+/**
+ * Returns the component map together with the `variant` token that fully
+ * identifies it. The token doubles as the variant segment of the parse-cache
+ * key (see nodeCache.ts), so the map partitioning and the key partitioning
+ * come from one place and cannot drift apart: a new render flag added here
+ * automatically partitions the cache too.
+ */
+function getMarkdownComponents(
+  interactive: boolean,
+  mediaInset: boolean,
+): MarkdownComponentSet {
+  const variant = `${interactive ? "i" : ""}${mediaInset ? "m" : ""}`;
+  let entry = markdownComponentsByVariant.get(variant);
+  if (!entry) {
+    entry = {
+      components: createMarkdownComponents(interactive, mediaInset),
+      variant,
+    };
+    markdownComponentsByVariant.set(variant, entry);
+  }
+  return entry;
 }
 
 function MarkdownInner({
@@ -2017,43 +1995,24 @@ function MarkdownInner({
     () => computeConfigNudge(content, interactive, configNudgeAuthorPubkey),
     [content, interactive, configNudgeAuthorPubkey],
   );
-  const runtimeRef = useLatestRef<MarkdownRuntime>({
-    agentMentionPubkeysByName,
-    channels,
-    imetaByUrl,
-    mentionPubkeysByName,
-    onOpenChannel,
-    onOpenMessageLink,
-  });
-
-  const components = React.useMemo(
-    () => createMarkdownComponents(runtimeRef, interactive, mediaInset),
-    [runtimeRef, interactive, mediaInset],
-  );
-
-  // biome-ignore lint/suspicious/noExplicitAny: PluggableList type not directly importable
-  const remarkPlugins = React.useMemo<any[]>(
-    () => [
-      remarkGfm,
-      remarkBreaks,
-      remarkSpoilers,
-      remarkMessageLinks,
-      [remarkMentions, { mentionNames }],
-      [remarkChannelLinks, { channelNames }],
-      [remarkCustomEmoji, { customEmoji }],
+  const runtime = React.useMemo<MarkdownRuntime>(
+    () => ({
+      agentMentionPubkeysByName,
+      channels,
+      imetaByUrl,
+      mentionPubkeysByName,
+      onOpenChannel,
+      onOpenMessageLink,
+    }),
+    [
+      agentMentionPubkeysByName,
+      channels,
+      imetaByUrl,
+      mentionPubkeysByName,
+      onOpenChannel,
+      onOpenMessageLink,
     ],
-    [mentionNames, channelNames, customEmoji],
   );
-
-  // biome-ignore lint/suspicious/noExplicitAny: PluggableList type not directly importable
-  const rehypePlugins = React.useMemo<any[]>(() => {
-    // biome-ignore lint/suspicious/noExplicitAny: PluggableList type not directly importable
-    const plugins: any[] = [rehypeImageGallery];
-    if (searchQuery && searchQuery.trim().length >= 2) {
-      plugins.push([rehypeSearchHighlight, { query: searchQuery }]);
-    }
-    return plugins;
-  }, [searchQuery]);
 
   let processedContent = content;
 
@@ -2072,16 +2031,21 @@ function MarkdownInner({
 
   const resolvedLinkPreviews = useResolvedLinkPreviews(linkPreviews);
 
-  const markdownNode = (
-    <ReactMarkdown
-      components={components}
-      remarkPlugins={remarkPlugins}
-      rehypePlugins={rehypePlugins}
-      urlTransform={messageLinkUrlTransform}
-    >
-      {processedContent}
-    </ReactMarkdown>
-  );
+  // When a config-nudge suppresses the prose (selectProseOrNudge returns
+  // null), skip the parse entirely — it would be thrown away unrendered.
+  const componentSet = getMarkdownComponents(interactive, mediaInset);
+  const markdownNode =
+    configNudge === null
+      ? renderCachedMarkdown({
+          channelNames,
+          components: componentSet.components,
+          content: processedContent,
+          customEmoji,
+          mentionNames,
+          searchQuery,
+          variant: componentSet.variant,
+        })
+      : null;
 
   return (
     <div
@@ -2104,27 +2068,29 @@ function MarkdownInner({
         className,
       )}
     >
-      <VideoReviewMarkdownContext.Provider value={videoReviewContext}>
-        {selectProseOrNudge(configNudge, markdownNode)}
-        {configNudge !== null ? (
-          <AttachmentGroup
-            className="max-w-full flex-wrap overflow-visible pb-0"
-            data-config-nudge=""
-          >
-            <ConfigNudgeCard nudge={configNudge} />
-          </AttachmentGroup>
-        ) : null}
-        {resolvedLinkPreviews.length > 0 ? (
-          <AttachmentGroup
-            className="max-w-full flex-wrap overflow-visible pb-0"
-            data-link-preview-list=""
-          >
-            {resolvedLinkPreviews.map((preview) => (
-              <LinkPreviewAttachment key={preview.href} preview={preview} />
-            ))}
-          </AttachmentGroup>
-        ) : null}
-      </VideoReviewMarkdownContext.Provider>
+      <MarkdownRuntimeContext.Provider value={runtime}>
+        <VideoReviewMarkdownContext.Provider value={videoReviewContext}>
+          {selectProseOrNudge(configNudge, markdownNode)}
+          {configNudge !== null ? (
+            <AttachmentGroup
+              className="max-w-full flex-wrap overflow-visible pb-0"
+              data-config-nudge=""
+            >
+              <ConfigNudgeCard nudge={configNudge} />
+            </AttachmentGroup>
+          ) : null}
+          {resolvedLinkPreviews.length > 0 ? (
+            <AttachmentGroup
+              className="max-w-full flex-wrap overflow-visible pb-0"
+              data-link-preview-list=""
+            >
+              {resolvedLinkPreviews.map((preview) => (
+                <LinkPreviewAttachment key={preview.href} preview={preview} />
+              ))}
+            </AttachmentGroup>
+          ) : null}
+        </VideoReviewMarkdownContext.Provider>
+      </MarkdownRuntimeContext.Provider>
     </div>
   );
 }

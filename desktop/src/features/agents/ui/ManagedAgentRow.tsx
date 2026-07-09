@@ -88,7 +88,10 @@ export function ManagedAgentRow({
   // friendly "Relay mesh denied this agent — check your relay membership."
   // for auth failures so the user knows it's a membership thing, not a
   // crash. Generic exits stay verbatim so we don't lie about other failures.
-  const friendlyError = friendlyAgentLastError(agent.lastError);
+  const friendlyError = friendlyAgentLastError(
+    agent.lastError,
+    agent.lastErrorCode,
+  );
 
   return (
     <div
@@ -265,8 +268,8 @@ function AgentSummary({
           ) : null}
           {agent.personaOutOfDate ? (
             <p className="mt-1.5 text-xs text-amber-600 dark:text-amber-400">
-              Persona updated since this agent was created. Respawn to apply the
-              new configuration.
+              Template updated since this agent was created. Respawn to apply
+              the new configuration.
             </p>
           ) : null}
           {channelNames.length > 0 ? (

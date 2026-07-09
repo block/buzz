@@ -43,6 +43,31 @@ use nostr::EventId;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+// ── Availability mirror ────────────────────────────────────────────────────────
+
+/// Granular install/auth state for a CLI-backed ACP harness.
+///
+/// Mirrors the desktop `AcpAvailabilityStatus` enum (and the FE
+/// `AcpAvailabilityStatus` type in `api/types.ts`). Carried on
+/// `RequirementPayload::CliLogin` so the sentinel JSON the desktop parses
+/// contains the exact wire literals the FE expects.
+///
+/// buzz-acp is a separate crate and must NOT depend on desktop types —
+/// this explicit mirror is the correct pattern (same as the rest of
+/// `RequirementPayload` as "the Rust counterpart to desktop's `Requirement`").
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum AcpAvailabilityStatus {
+    /// Adapter + CLI both present; may still need login.
+    Available,
+    /// ACP adapter binary missing; underlying CLI may be present.
+    AdapterMissing,
+    /// CLI binary missing; ACP adapter may be present.
+    CliMissing,
+    /// Neither adapter nor CLI found.
+    NotInstalled,
+}
+
 use crate::{
     author_allowed,
     config::Config,
@@ -72,6 +97,11 @@ pub(crate) enum RequirementPayload {
     CliLogin {
         probe_args: Vec<String>,
         setup_copy: String,
+        /// Granular install/auth state — determines copy and CTA routing on
+        /// the desktop card. `Available` means tooling is present but login
+        /// is needed; the other three variants mean the tooling itself is
+        /// missing and the probe was skipped.
+        availability: AcpAvailabilityStatus,
     },
 }
 
@@ -85,7 +115,40 @@ impl RequirementPayload {
             RequirementPayload::EnvKey { key } => {
                 format!("set `{}` in Edit Agent → Environment variables", key)
             }
-            RequirementPayload::CliLogin { setup_copy, .. } => setup_copy.clone(),
+            RequirementPayload::CliLogin {
+                setup_copy,
+                availability,
+                probe_args,
+            } => match availability {
+                AcpAvailabilityStatus::Available => setup_copy.clone(),
+                AcpAvailabilityStatus::AdapterMissing => {
+                    let harness = probe_args
+                        .first()
+                        .map(String::as_str)
+                        .unwrap_or("the agent");
+                    format!(
+                        "install the {} ACP adapter (open Doctor in Settings to diagnose)",
+                        harness
+                    )
+                }
+                AcpAvailabilityStatus::CliMissing => {
+                    let harness = probe_args
+                        .first()
+                        .map(String::as_str)
+                        .unwrap_or("the agent");
+                    format!(
+                        "install {} CLI (open Doctor in Settings to diagnose)",
+                        harness
+                    )
+                }
+                AcpAvailabilityStatus::NotInstalled => {
+                    let harness = probe_args
+                        .first()
+                        .map(String::as_str)
+                        .unwrap_or("the agent");
+                    format!("install {} (open Doctor in Settings to diagnose)", harness)
+                }
+            },
         }
     }
 }
@@ -588,7 +651,8 @@ mod tests {
                     "login".to_string(),
                     "status".to_string(),
                 ],
-                setup_copy: "run `codex login --with-api-key`".to_string(),
+                setup_copy: "run `codex login`".to_string(),
+                availability: AcpAvailabilityStatus::Available,
             }],
         };
         let body = payload.nudge_body();
@@ -655,6 +719,7 @@ mod tests {
                 RequirementPayload::CliLogin {
                     probe_args: vec!["codex".to_string(), "login".to_string()],
                     setup_copy: "run `codex login`".to_string(),
+                    availability: AcpAvailabilityStatus::Available,
                 },
             ],
         };
@@ -764,6 +829,96 @@ mod tests {
         assert!(
             !second,
             "replay of the same event-id must be rejected (dedup)"
+        );
+    }
+
+    // ── availability round-trip tests ─────────────────────────────────────────
+    //
+    // These tests prove the desktop→buzz-acp→sentinel path preserves the
+    // `availability` field. They simulate what actually happens at runtime:
+    // desktop serializes a `cli_login` JSON blob → buzz-acp parses it via
+    // `from_raw_env_value` → `nudge_body()` re-serializes into the sentinel →
+    // the sentinel JSON is extracted and checked for the `availability` field.
+    //
+    // This guards the prior regression where `RequirementPayload::CliLogin`
+    // had no `availability` field, so serde silently dropped it during
+    // deserialization and the desktop card never rendered.
+
+    fn extract_sentinel_json(body: &str) -> String {
+        let fence_open = "```buzz:config-nudge\n";
+        let fence_close = "\n```";
+        let start = body
+            .rfind(fence_open)
+            .expect("sentinel open fence not found")
+            + fence_open.len();
+        let end = body[start..]
+            .rfind(fence_close)
+            .expect("sentinel close fence not found")
+            + start;
+        body[start..end].to_string()
+    }
+
+    fn make_desktop_cli_login_json(availability: &str) -> String {
+        // Simulate the JSON desktop's runtime.rs emits — a full SetupPayload
+        // with one cli_login requirement carrying the given availability state.
+        format!(
+            r#"{{"agent_name":"TestAgent","agent_pubkey":"aa","requirements":[{{"surface":"cli_login","probe_args":["claude"],"setup_copy":"run claude login","availability":"{availability}"}}]}}"#
+        )
+    }
+
+    #[test]
+    fn cli_login_availability_available_survives_sentinel_round_trip() {
+        let raw = make_desktop_cli_login_json("available");
+        let payload = SetupPayload::from_raw_env_value(Some(raw))
+            .unwrap()
+            .expect("must parse");
+        let body = payload.nudge_body();
+        let sentinel_json = extract_sentinel_json(&body);
+        assert!(
+            sentinel_json.contains(r#""availability":"available""#),
+            "sentinel must carry availability=available; got: {sentinel_json:?}"
+        );
+    }
+
+    #[test]
+    fn cli_login_availability_adapter_missing_survives_sentinel_round_trip() {
+        let raw = make_desktop_cli_login_json("adapter_missing");
+        let payload = SetupPayload::from_raw_env_value(Some(raw))
+            .unwrap()
+            .expect("must parse");
+        let body = payload.nudge_body();
+        let sentinel_json = extract_sentinel_json(&body);
+        assert!(
+            sentinel_json.contains(r#""availability":"adapter_missing""#),
+            "sentinel must carry availability=adapter_missing; got: {sentinel_json:?}"
+        );
+    }
+
+    #[test]
+    fn cli_login_availability_cli_missing_survives_sentinel_round_trip() {
+        let raw = make_desktop_cli_login_json("cli_missing");
+        let payload = SetupPayload::from_raw_env_value(Some(raw))
+            .unwrap()
+            .expect("must parse");
+        let body = payload.nudge_body();
+        let sentinel_json = extract_sentinel_json(&body);
+        assert!(
+            sentinel_json.contains(r#""availability":"cli_missing""#),
+            "sentinel must carry availability=cli_missing; got: {sentinel_json:?}"
+        );
+    }
+
+    #[test]
+    fn cli_login_availability_not_installed_survives_sentinel_round_trip() {
+        let raw = make_desktop_cli_login_json("not_installed");
+        let payload = SetupPayload::from_raw_env_value(Some(raw))
+            .unwrap()
+            .expect("must parse");
+        let body = payload.nudge_body();
+        let sentinel_json = extract_sentinel_json(&body);
+        assert!(
+            sentinel_json.contains(r#""availability":"not_installed""#),
+            "sentinel must carry availability=not_installed; got: {sentinel_json:?}"
         );
     }
 }

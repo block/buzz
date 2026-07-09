@@ -3,6 +3,7 @@ import * as React from "react";
 import { useQueryClient } from "@tanstack/react-query";
 
 import type { ConnectionState } from "@/shared/api/relayClientShared";
+import { isRelayDependentQuery } from "@/shared/api/relayQueryInvalidation";
 import {
   isRelayConnectionDegraded,
   useRelayConnection,
@@ -82,12 +83,12 @@ export class RelayAutoHealScheduler {
 
 /**
  * Auto-heal: when the connection recovers from a degraded state, invalidate
- * all queries so errored queries (e.g. messages, which don't poll) refetch
- * automatically without requiring a manual reconnect action.
+ * relay-dependent queries so errored queries (e.g. messages, which don't poll)
+ * refetch automatically without requiring a manual reconnect action.
  *
  * Rate-limited to prevent a flappy connection (e.g. VPN toggling) from
- * firing an unfiltered invalidation — ~20-40 requests across active queries
- * with retry:1 — every time the relay briefly recovers.
+ * firing a relay-wide invalidation across active queries with retry:1 every
+ * time the relay briefly recovers.
  *
  * When a recovery is suppressed by the rate limiter (an earlier flap consumed
  * the budget), a deferred heal is scheduled for the remaining window so the
@@ -101,7 +102,10 @@ export function useRelayAutoHeal(): void {
 
   if (schedulerRef.current === null) {
     schedulerRef.current = new RelayAutoHealScheduler(
-      () => void queryClient.invalidateQueries(),
+      () =>
+        void queryClient.invalidateQueries({
+          predicate: isRelayDependentQuery,
+        }),
       AUTO_HEAL_MIN_INTERVAL_MS,
       window.setTimeout.bind(window),
       window.clearTimeout.bind(window),

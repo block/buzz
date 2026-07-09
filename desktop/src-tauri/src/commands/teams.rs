@@ -336,27 +336,31 @@ pub async fn export_team_to_json(
 const MAX_TEAM_ZIP_BYTES: usize = 100 * 1024 * 1024;
 
 #[tauri::command]
-pub fn parse_team_file(
+pub async fn parse_team_file(
     file_bytes: Vec<u8>,
     _file_name: String,
 ) -> Result<ParsedTeamPreview, String> {
-    if file_bytes.is_empty() {
-        return Err("File is empty.".to_string());
-    }
-
-    // Detect zip files (persona packs) BEFORE the JSON size check — zips can be larger.
-    if file_bytes.len() >= 4 && file_bytes[..4] == [0x50, 0x4B, 0x03, 0x04] {
-        if file_bytes.len() > MAX_TEAM_ZIP_BYTES {
-            return Err("ZIP file is too large (max 100 MB).".to_string());
+    tokio::task::spawn_blocking(move || {
+        if file_bytes.is_empty() {
+            return Err("File is empty.".to_string());
         }
-        return parse_team_from_pack_zip(&file_bytes);
-    }
 
-    if file_bytes.len() > MAX_TEAM_JSON_BYTES {
-        return Err("File is too large (max 5 MB).".to_string());
-    }
+        // Detect zip files (persona packs) BEFORE the JSON size check — zips can be larger.
+        if file_bytes.len() >= 4 && file_bytes[..4] == [0x50, 0x4B, 0x03, 0x04] {
+            if file_bytes.len() > MAX_TEAM_ZIP_BYTES {
+                return Err("ZIP file is too large (max 100 MB).".to_string());
+            }
+            return parse_team_from_pack_zip(&file_bytes);
+        }
 
-    parse_team_json(&file_bytes)
+        if file_bytes.len() > MAX_TEAM_JSON_BYTES {
+            return Err("File is too large (max 5 MB).".to_string());
+        }
+
+        parse_team_json(&file_bytes)
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking failed: {e}"))?
 }
 
 /// Parse a persona pack zip as a team: pack name → team name, personas → members.

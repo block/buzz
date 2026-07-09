@@ -41,6 +41,41 @@ const eventsByAgent = new Map<string, ObserverEvent[]>();
 const transcriptByAgent = new Map<string, TranscriptState>();
 const snapshotByAgent = new Map<string, ObserverSnapshot>();
 
+// Per-agent, per-channel latest-live-session-id.
+// Key: `${normalizePubkey(agentPubkey)}:${channelId}`.
+// Set when a live relay observer event with a sessionId arrives.
+// Cleared in resetAgentObserverStore.
+//
+// "Latest-live" means: the sessionId that most recently appeared via the
+// live relay path (handleRelayObserverEvent). It is NOT derived from
+// connectionState or an ever-live Set — an ever-live Set would incorrectly
+// mark session A as "current" after session B has started (Thufir Pass 3).
+//
+// Stored as `{ sessionId, timestamp, seq }` so that late-arriving live frames
+// from an older session never regress the latest-live id. We only advance when
+// the parsed event sorts strictly AFTER the stored one, using the same
+// two-key ordering as `compareObserverEvents`: timestamp first, then seq on a
+// tie — so a higher-seq frame at equal timestamp still advances the entry.
+type LatestLiveEntry = { sessionId: string; timestamp: string; seq: number };
+const latestLiveSessionByAgentChannel = new Map<string, LatestLiveEntry>();
+
+function liveSessionKey(agentPubkey: string, channelId: string | null): string {
+  return `${normalizePubkey(agentPubkey)}:${channelId ?? ""}`;
+}
+
+/** Read the latest-live-session-id for a (agent, channel) pair. */
+export function getLatestLiveSessionId(
+  agentPubkey: string | null | undefined,
+  channelId: string | null | undefined,
+): string | null {
+  if (!agentPubkey) return null;
+  return (
+    latestLiveSessionByAgentChannel.get(
+      liveSessionKey(agentPubkey, channelId ?? null),
+    )?.sessionId ?? null
+  );
+}
+
 // Per-agent listeners for `control_result` frames. The ModelPicker subscribes
 // here to learn the async outcome of a `switch_model` frame (the send is
 // fire-and-forget; the harness replies out-of-band over the observer relay).
@@ -184,6 +219,26 @@ export function compareObserverEvents(
   return left.seq - right.seq;
 }
 
+/**
+ * Returns true if `candidate` sorts strictly after `stored` using the same
+ * two-key ordering as `compareObserverEvents`: later timestamp wins; equal
+ * timestamp falls back to higher seq.  Extracted so latest-live advancement
+ * cannot drift from transcript ordering.
+ */
+export function isObserverEventAfter(
+  candidate: { timestamp: string; seq: number },
+  stored: { timestamp: string; seq: number },
+): boolean {
+  const candidateTime = Date.parse(candidate.timestamp);
+  const storedTime = Date.parse(stored.timestamp);
+  if (Number.isFinite(candidateTime) && Number.isFinite(storedTime)) {
+    if (candidateTime !== storedTime) {
+      return candidateTime > storedTime;
+    }
+  }
+  return candidate.seq > stored.seq;
+}
+
 async function handleRelayObserverEvent(
   event: RelayEvent,
   activeGeneration: number,
@@ -210,6 +265,25 @@ async function handleRelayObserverEvent(
     const parsed = (await decryptObserverEvent(event)) as ObserverEvent;
     if (activeGeneration !== generation) {
       return;
+    }
+    // Track the latest-live-session-id per (agent, channel) on the live path.
+    // Only set when the parsed event carries both a sessionId and channelId,
+    // so we never attribute a session to the wrong channel.
+    if (parsed.sessionId && parsed.channelId) {
+      const key = liveSessionKey(agentPubkey, parsed.channelId);
+      const stored = latestLiveSessionByAgentChannel.get(key);
+      // Advance only when this event sorts strictly AFTER the stored one via
+      // isObserverEventAfter (timestamp then seq — same ordering as
+      // compareObserverEvents). This prevents late-arriving live frames from
+      // older sessions from regressing the latest-live id, while also
+      // correctly advancing on a same-timestamp frame with a higher seq.
+      if (!stored || isObserverEventAfter(parsed, stored)) {
+        latestLiveSessionByAgentChannel.set(key, {
+          sessionId: parsed.sessionId,
+          timestamp: parsed.timestamp,
+          seq: parsed.seq,
+        });
+      }
     }
     appendAgentEvent(agentPubkey, parsed);
     if (parsed.kind === "session_config_captured") {
@@ -343,9 +417,15 @@ export function subscribeControlResults(
 
 export function getAgentObserverSnapshot(
   agentPubkey?: string | null,
-  enabled?: boolean,
+  // `_enabled` previously gated store reads — now only gates the relay
+  // subscription in useObserverEvents. Kept for call-site compatibility.
+  _enabled?: boolean,
 ): ObserverSnapshot {
-  if (!enabled || !agentPubkey) {
+  // `_enabled` gates the live-relay subscription in useObserverEvents, but we
+  // always serve stored data when agentPubkey is present — archived frames are
+  // ingested into eventsByAgent regardless of live status and must be readable
+  // by idle-agent panels showing channel-scoped history.
+  if (!agentPubkey) {
     return IDLE_SNAPSHOT;
   }
   const key = normalizePubkey(agentPubkey);
@@ -368,9 +448,14 @@ export function getAgentObserverSnapshot(
 
 export function getAgentTranscript(
   agentPubkey?: string | null,
-  enabled?: boolean,
+  // `_enabled` previously gated store reads — now only gates the relay
+  // subscription in useObserverEvents. Kept for call-site compatibility.
+  _enabled?: boolean,
 ): TranscriptItem[] {
-  if (!enabled || !agentPubkey) {
+  // Same decoupling as getAgentObserverSnapshot: `_enabled` gates relay
+  // subscription, not store reads. Archived items are in transcriptByAgent
+  // and must be readable regardless of live status.
+  if (!agentPubkey) {
     return EMPTY_TRANSCRIPT;
   }
   const key = normalizePubkey(agentPubkey);
@@ -513,6 +598,7 @@ export function resetAgentObserverStore() {
   snapshotByAgent.clear();
   knownAgentPubkeys.clear();
   knownAgentsBySubscription.clear();
+  latestLiveSessionByAgentChannel.clear();
   onSessionConfigCaptured = null;
   connectionState = "idle";
   errorMessage = null;

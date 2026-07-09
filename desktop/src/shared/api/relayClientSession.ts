@@ -29,6 +29,7 @@ import {
   buildChannelMentionFilter,
   buildGlobalStreamFilter,
 } from "@/shared/api/relayChannelFilters";
+import { collectWithConcurrency } from "@/shared/api/concurrency";
 import { replayLiveSubscriptions } from "@/shared/api/relayReconnectReplay";
 import { RelayConnectionStateEmitter } from "@/shared/api/relayConnectionStateEmitter";
 import {
@@ -41,7 +42,8 @@ import { buildThreadReferenceTags } from "@/features/messages/lib/threading";
 
 const RECONNECT_BASE_DELAY_MS = 1_000,
   RECONNECT_MAX_DELAY_MS = 30_000,
-  EVENT_BATCH_MS = 16;
+  EVENT_BATCH_MS = 16,
+  AUX_BACKFILL_CONCURRENCY = 4;
 
 /**
  * Passive liveness check. The relay sends heartbeat pings every 30s; if no
@@ -217,10 +219,11 @@ export class RelayClient {
       chunks.push(eventIds.slice(i, i + AUX_BACKFILL_CHUNK_SIZE));
     }
 
-    const batches: RelayEvent[][] = [];
-    for (const ids of chunks) {
-      batches.push(await this.requestHistory(buildFilter(channelId, ids)));
-    }
+    const batches = await collectWithConcurrency(
+      chunks,
+      AUX_BACKFILL_CONCURRENCY,
+      (ids) => this.requestHistory(buildFilter(channelId, ids)),
+    );
 
     return batches.flat();
   }

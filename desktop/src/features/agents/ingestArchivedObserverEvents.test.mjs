@@ -229,6 +229,64 @@ describe("ingestArchivedObserverEvents", () => {
       [1, 2, 3],
     );
   });
+
+  // F7 regression: idle agent (enabled=false for relay subscription) with
+  // archived rows in the store must render those rows, scoped to the viewed
+  // channel. Prior to the fix, getAgentObserverSnapshot returned IDLE_SNAPSHOT
+  // when enabled=false, discarding ingested archived events.
+  it("test_idle_agent_archived_events_readable_when_enabled_false", async () => {
+    _testRegisterKnownAgents(SUB_ID, [AGENT_PUBKEY]);
+    // Ingest two archived events: one for channel-A, one for channel-B.
+    const chanAEvent = makeObserverEvent({
+      seq: 1,
+      timestamp: "2026-01-01T00:00:01.000Z",
+      channelId: "channel-A",
+    });
+    const chanBEvent = makeObserverEvent({
+      seq: 2,
+      timestamp: "2026-01-01T00:00:02.000Z",
+      channelId: "channel-B",
+    });
+    let callIdx = 0;
+    const events = [chanAEvent, chanBEvent];
+    await ingestArchivedObserverEvents(
+      [
+        makeRawEvent({ id: `e1${"0".repeat(62)}` }),
+        makeRawEvent({ id: `e2${"0".repeat(62)}` }),
+      ],
+      () => Promise.resolve(events[callIdx++]),
+    );
+
+    // With enabled=false (simulating isManagedAgentActive=false for idle agent):
+    // getAgentObserverSnapshot must still return stored events.
+    const snap = getAgentObserverSnapshot(AGENT_PUBKEY, false);
+    assert.equal(
+      snap.events.length,
+      2,
+      "idle agent (enabled=false) must still read archived events from store",
+    );
+
+    // scopeByChannel on channel-A must return only the channel-A frame.
+    const { scopeByChannel } = await import(
+      "@/features/agents/ui/agentSessionPanelLayout.ts"
+    );
+    const scopedA = scopeByChannel(snap.events, "channel-A");
+    assert.equal(
+      scopedA.length,
+      1,
+      "scopeByChannel(channel-A) must include only channel-A frames",
+    );
+    assert.equal(scopedA[0].channelId, "channel-A");
+
+    // scopeByChannel on channel-A must exclude channel-B frames — the core
+    // cross-channel-contamination guard.
+    const channelBFrames = scopedA.filter((e) => e.channelId === "channel-B");
+    assert.equal(
+      channelBFrames.length,
+      0,
+      "channel-B frames must NOT appear in channel-A scoped view",
+    );
+  });
 });
 
 // ── Cursor advance test (pure logic, no store needed) ─────────────────────────
@@ -279,6 +337,111 @@ describe("load-older cursor advance logic", () => {
       exhausted,
       false,
       "full page must signal more archive may be available",
+    );
+  });
+});
+
+// ── Archive paging state reset on channel change (F8 regression) ──────────────
+//
+// The paging cursor, exhaustion flag, and fetch lock are per-channel — they
+// must reset when channelId changes so channel B starts with a fresh cursor
+// and hasOlderArchived=true rather than inheriting channel A's exhausted state.
+//
+// useLoadArchivedObserverEvents delegates all mutable paging state to
+// archivePagingState.ts (createArchivePagingState / applyChannelReset).
+// We test those functions directly — tests would fail if the implementation
+// were removed or if the channel-reset touched backfill state it must not.
+
+import {
+  createArchivePagingState,
+  applyChannelReset,
+} from "@/features/agents/ui/archivePagingState.ts";
+
+describe("archive paging state reset on channel change", () => {
+  it("test_fresh_state_has_correct_initial_values", () => {
+    const ps = createArchivePagingState();
+
+    assert.equal(ps.hasSubscription, null, "hasSubscription starts null");
+    assert.equal(ps.hasOlderArchived, true, "hasOlderArchived starts true");
+    assert.equal(ps.isFetching, false, "isFetching starts false");
+    assert.equal(ps.backfillStatus, "pending", "backfillStatus starts pending");
+    assert.notEqual(
+      ps.backfillPromise,
+      null,
+      "backfillPromise is eagerly initialized",
+    );
+    assert.equal(ps.cursor, null, "cursor starts null");
+  });
+
+  it("test_channel_switch_resets_cursor_exhaustion_and_fetch_lock", () => {
+    const ps = createArchivePagingState();
+
+    // Simulate channel A paging to exhaustion with a non-null cursor.
+    ps.cursor = { createdAt: 1000, id: "event-a5" };
+    ps.hasOlderArchived = false; // channel A exhausted
+    ps.isFetching = true; // mid-flight request (edge case)
+    ps.backfillStatus = "done"; // backfill ran once already
+    const originalPromise = ps.backfillPromise; // must survive reset
+
+    // Channel switch — this is what the useEffect([channelId]) calls.
+    applyChannelReset(ps);
+
+    assert.equal(ps.cursor, null, "cursor resets to null on channel switch");
+    assert.equal(
+      ps.hasOlderArchived,
+      true,
+      "hasOlderArchived resets to true on channel switch",
+    );
+    assert.equal(
+      ps.isFetching,
+      false,
+      "isFetching resets to false on channel switch",
+    );
+
+    // Backfill state must NOT be touched — it is identity-level and should
+    // survive channel switches so the backfill only runs once per identity mount.
+    assert.equal(
+      ps.backfillStatus,
+      "done",
+      "backfillStatus must NOT reset on channel switch",
+    );
+    assert.equal(
+      ps.backfillPromise,
+      originalPromise,
+      "backfillPromise must NOT reset on channel switch",
+    );
+    assert.equal(
+      ps.hasSubscription,
+      null,
+      "hasSubscription must NOT reset on channel switch",
+    );
+  });
+
+  it("test_multiple_channel_switches_each_start_fresh", () => {
+    const ps = createArchivePagingState();
+
+    // Switch to channel A: exhaust it.
+    ps.cursor = { createdAt: 500, id: "a-oldest" };
+    ps.hasOlderArchived = false;
+    applyChannelReset(ps);
+
+    assert.equal(ps.cursor, null, "switch A→B: cursor reset");
+    assert.equal(
+      ps.hasOlderArchived,
+      true,
+      "switch A→B: hasOlderArchived reset",
+    );
+
+    // Simulate channel B also being paged.
+    ps.cursor = { createdAt: 200, id: "b-oldest" };
+    ps.hasOlderArchived = false;
+    applyChannelReset(ps);
+
+    assert.equal(ps.cursor, null, "switch B→C: cursor reset again");
+    assert.equal(
+      ps.hasOlderArchived,
+      true,
+      "switch B→C: hasOlderArchived reset again",
     );
   });
 });

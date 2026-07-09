@@ -106,7 +106,7 @@ export function TeamImportDialog({
         });
         setStatus("error");
         setErrorMessage(
-          `Imported ${completed} of ${personas.length} personas. Failed on '${persona.display_name}': ${error instanceof Error ? error.message : String(error)}. Already-imported personas are saved.`,
+          `Imported ${completed} of ${personas.length} agents. Failed on '${persona.display_name}': ${error instanceof Error ? error.message : String(error)}. Already-imported agents are saved.`,
         );
         return;
       }
@@ -142,15 +142,14 @@ export function TeamImportDialog({
                   ) : null}
                 </div>
                 <span className="text-xs text-muted-foreground">
-                  {personas.length}{" "}
-                  {personas.length === 1 ? "persona" : "personas"}
+                  {personas.length} {personas.length === 1 ? "agent" : "agents"}
                 </span>
               </div>
 
               <div className="space-y-1">
                 <p className="text-sm font-medium">Agents to import</p>
                 <p className="text-xs text-muted-foreground">
-                  Each persona will be created, then grouped into a new team.
+                  Each agent will be created, then grouped into a new team.
                 </p>
               </div>
 
@@ -211,7 +210,7 @@ export function TeamImportDialog({
           >
             {status === "importing"
               ? `Importing ${importedCount}/${personas.length}...`
-              : `Import team (${personas.length} personas)`}
+              : `Import team (${personas.length} agents)`}
           </Button>
         </div>
       </DialogContent>

@@ -63,6 +63,7 @@ export { AgentInstructionsFocusedView } from "@/features/profile/ui/UserProfileP
 
 export type ProfileSummaryViewProps = {
   activityAgent: ProfileActivityAgent | null;
+  callerChannelId: string | null;
   canAddToChannel: boolean;
   canEditAgent: boolean;
   canOpenAgentLogs: boolean;
@@ -172,6 +173,7 @@ function RuntimeTabStatusDot({ status }: { status: RuntimeTabStatus }) {
 
 export function ProfileSummaryView({
   activityAgent,
+  callerChannelId,
   canAddToChannel,
   canEditAgent,
   canOpenAgentLogs,
@@ -384,6 +386,7 @@ export function ProfileSummaryView({
               activeTurns={activeTurns}
               activityAgent={activityAgent}
               agentInfoFields={agentInfoFields}
+              callerChannelId={callerChannelId}
               channelIdToName={channelIdToName}
               isArchived={isArchived}
               onOpenActivity={onOpenActivity}

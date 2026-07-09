@@ -33,6 +33,12 @@ type SystemMessagePayload = {
   target?: string;
   topic?: string;
   purpose?: string;
+  // Moderation tombstone fields (kind:40099 "message_deleted"). All optional and
+  // moderator-authored — present when a moderator removed the message, absent for
+  // a plain member self-delete. Reporter identity/evidence never appears here.
+  public_reason?: string;
+  reason_code?: string;
+  action_id?: string;
 };
 
 type SystemMessageDescription = {
@@ -326,6 +332,21 @@ function describeSystemEvent(
         title: actorName,
         action: "unarchived this channel",
       };
+    case "message_deleted": {
+      // Room-facing tombstone. When a moderator removed the message, the relay
+      // stamps a sanitized public_reason; a plain self-delete carries none. The
+      // content and the reporter are never disclosed here.
+      if (payload.public_reason) {
+        return {
+          title: "Removed by community moderators",
+          action: payload.public_reason,
+        };
+      }
+      return {
+        title: actorName,
+        action: "removed a message",
+      };
+    }
     default:
       return null;
   }

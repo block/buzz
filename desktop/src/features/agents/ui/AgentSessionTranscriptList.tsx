@@ -1,11 +1,15 @@
 import * as React from "react";
 import { motion, useReducedMotion } from "motion/react";
-import { CheckCheck, Radio } from "lucide-react";
+import { CheckCheck, Clock, Radio } from "lucide-react";
 
 import {
   useActiveAgentTurns,
   type ActiveTurnSummary,
 } from "@/features/agents/activeAgentTurnsStore";
+import {
+  subscribeAgentObserverStore,
+  getLatestLiveSessionId,
+} from "@/features/agents/observerRelayStore";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { useAnchoredScroll } from "@/features/messages/ui/useAnchoredScroll";
 import { cn } from "@/shared/lib/cn";
@@ -134,9 +138,21 @@ export function AgentSessionTranscriptList({
     () => isAgentTurnLive(activeTurns, channelId),
     [activeTurns, channelId],
   );
+
+  // Subscribe to the observer relay store so we read the latest-live-session-id
+  // reactively. We don't need the full snapshot — only the key for boundary labeling.
+  const getLatestLive = React.useCallback(
+    () => getLatestLiveSessionId(agentPubkey, channelId),
+    [agentPubkey, channelId],
+  );
+  const latestLiveSessionId = React.useSyncExternalStore(
+    subscribeAgentObserverStore,
+    getLatestLive,
+  );
+
   const displayBlocks = React.useMemo(
-    () => buildTranscriptDisplayBlocks(items),
-    [items],
+    () => buildTranscriptDisplayBlocks(items, latestLiveSessionId),
+    [items, latestLiveSessionId],
   );
   const scrollContainerRef = React.useRef<HTMLDivElement>(null);
   const contentRef = React.useRef<HTMLDivElement>(null);
@@ -282,6 +298,11 @@ function hasRenderableCompactBlock(block: TranscriptDisplayBlock) {
     return isRenderableCompactItem(block.item);
   }
 
+  // session-boundary dividers are not renderable content in compact view.
+  if (block.kind === "session-boundary") {
+    return false;
+  }
+
   return block.segments.some((segment) => {
     if (segment.kind === "item") {
       return isRenderableCompactItem(segment.item);
@@ -316,6 +337,9 @@ function getDisplayBlockKey(block: TranscriptDisplayBlock) {
   if (block.kind === "single") {
     return block.item.id;
   }
+  if (block.kind === "session-boundary") {
+    return `session-boundary:${block.sessionId}:${block.runIndex}`;
+  }
   return `turn:${block.turnId}`;
 }
 
@@ -340,6 +364,15 @@ function TranscriptDisplayBlockView({
   // turn — the block wrapper already animates that) skip the transition.
   const hasCompletedInitialRenderRef = useHasCompletedInitialRender();
   const animateSegmentEnter = animationPreferenceEnabled && !shouldReduceMotion;
+
+  if (block.kind === "session-boundary") {
+    return (
+      <SessionBoundaryDivider
+        labelState={block.labelState}
+        sessionStartTimestamp={block.sessionStartTimestamp}
+      />
+    );
+  }
 
   if (block.kind === "single") {
     return (
@@ -893,6 +926,51 @@ function TurnSetupStatus({
         showTimestamp={false}
         timestamp={timestamp}
       />
+    </div>
+  );
+}
+
+/**
+ * Horizontal rule rendered between session runs in the observer transcript.
+ *
+ * Three label states:
+ *  - `"current"`     — live session, agent is actively running in this context.
+ *  - `"most-recent"` — newest visible session but no live match (archived-only
+ *                      or session ended). Shown as "Most recent observed session"
+ *                      so users know it is history, not active context.
+ *  - `"earlier"`     — an older session. Always labeled with the archive signal.
+ */
+function SessionBoundaryDivider({
+  labelState,
+  sessionStartTimestamp,
+}: {
+  labelState: "current" | "most-recent" | "earlier";
+  sessionStartTimestamp: string;
+}) {
+  const label =
+    labelState === "current"
+      ? "Current session"
+      : labelState === "most-recent"
+        ? "Most recent observed session — not in current context"
+        : "Earlier session — not in current context";
+  const formattedDate = new Date(sessionStartTimestamp).toLocaleString();
+  return (
+    <div
+      className="flex items-center gap-2 px-3 py-2"
+      data-testid="session-boundary-divider"
+    >
+      <div className="h-px flex-1 bg-border" />
+      <span className="flex items-center gap-1 text-xs text-muted-foreground">
+        {labelState === "current" ? (
+          <Radio aria-hidden="true" className="h-3 w-3" />
+        ) : (
+          <Clock aria-hidden="true" className="h-3 w-3" />
+        )}
+        {label}
+        {" · "}
+        {formattedDate}
+      </span>
+      <div className="h-px flex-1 bg-border" />
     </div>
   );
 }

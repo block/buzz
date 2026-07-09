@@ -95,6 +95,89 @@ async fn test_persona_publish_and_query() {
     client.disconnect().await.expect("disconnect");
 }
 
+/// NIP-AP revision: a prompt-less definition (display_name only) must ingest
+/// through the REAL relay path and round-trip byte-for-byte — not just pass
+/// the envelope validator helper.
+#[tokio::test]
+#[ignore]
+async fn test_promptless_persona_ingests_and_round_trips() {
+    let url = relay_url();
+    let keys = Keys::generate();
+    let d_tag = format!("promptless-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+    let content = serde_json::json!({ "display_name": "Config Only" }).to_string();
+
+    let mut client = BuzzTestClient::connect(&url, &keys).await.expect("connect");
+    let event = persona_event(&keys, &d_tag, &content);
+    let ok = client.send_event(event).await.expect("send promptless");
+    assert!(
+        ok.accepted,
+        "relay rejected prompt-less persona: {}",
+        ok.message
+    );
+
+    let sid = sub_id("promptless");
+    let filter = Filter::new()
+        .kind(Kind::Custom(PERSONA_KIND))
+        .author(keys.public_key())
+        .custom_tags(SingleLetterTag::lowercase(Alphabet::D), [d_tag.as_str()]);
+    client
+        .subscribe(&sid, vec![filter])
+        .await
+        .expect("subscribe");
+    let events = client
+        .collect_until_eose(&sid, Duration::from_secs(5))
+        .await
+        .expect("collect");
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].content, content, "byte-for-byte round-trip");
+    client.disconnect().await.expect("disconnect");
+}
+
+/// NIP-AP revision: the reserved behavioral fields ingest through the real
+/// relay path as opaque content and round-trip byte-for-byte.
+#[tokio::test]
+#[ignore]
+async fn test_behavioral_fields_persona_ingests_and_round_trips() {
+    let url = relay_url();
+    let keys = Keys::generate();
+    let d_tag = format!("behavioral-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+    let content = serde_json::json!({
+        "display_name": "Behavioral",
+        "system_prompt": "p",
+        "respond_to": "owner-only",
+        "respond_to_allowlist": [],
+        "mcp_toolsets": "default",
+        "parallelism": 2
+    })
+    .to_string();
+
+    let mut client = BuzzTestClient::connect(&url, &keys).await.expect("connect");
+    let event = persona_event(&keys, &d_tag, &content);
+    let ok = client.send_event(event).await.expect("send behavioral");
+    assert!(
+        ok.accepted,
+        "relay rejected behavioral-fields persona: {}",
+        ok.message
+    );
+
+    let sid = sub_id("behavioral");
+    let filter = Filter::new()
+        .kind(Kind::Custom(PERSONA_KIND))
+        .author(keys.public_key())
+        .custom_tags(SingleLetterTag::lowercase(Alphabet::D), [d_tag.as_str()]);
+    client
+        .subscribe(&sid, vec![filter])
+        .await
+        .expect("subscribe");
+    let events = client
+        .collect_until_eose(&sid, Duration::from_secs(5))
+        .await
+        .expect("collect");
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].content, content, "byte-for-byte round-trip");
+    client.disconnect().await.expect("disconnect");
+}
+
 #[tokio::test]
 #[ignore]
 async fn test_persona_nip33_replacement_newer_wins() {

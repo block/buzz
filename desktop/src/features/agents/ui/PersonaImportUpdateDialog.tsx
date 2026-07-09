@@ -90,7 +90,7 @@ export function PersonaImportUpdateDialog({
       setErrorMessage(
         error instanceof Error
           ? error.message
-          : "Failed to apply imported persona update.",
+          : "Failed to apply imported agent update.",
       );
     }
   }

@@ -23,7 +23,12 @@ use crate::app_state::AppState;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PersonaEventContent {
     pub display_name: String,
-    pub system_prompt: String,
+    /// Optional since the unified agent model (NIP-AP revision): a definition
+    /// can be pure configuration. Writers emit `Some` whenever the record has
+    /// a prompt (including the empty string) so pre-revision content bytes —
+    /// and therefore `persona_content_hash` — are unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_prompt: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub avatar_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -34,6 +39,17 @@ pub struct PersonaEventContent {
     pub provider: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub name_pool: Vec<String>,
+    /// Definition-level defaults copied onto instances at creation
+    /// (NIP-AP behavioral fields). Absent = defer to client defaults;
+    /// `skip_serializing_if` keeps pre-revision hashes stable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub respond_to: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub respond_to_allowlist: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_toolsets: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parallelism: Option<u32>,
 }
 
 /// Derive the d-tag (persona slug) from a `PersonaRecord`.
@@ -116,15 +132,9 @@ pub fn monotonic_created_at(prior_head_created_at: Option<i64>) -> nostr::Timest
 ///
 /// Returns an unsigned `EventBuilder` — the caller signs and submits.
 pub fn build_persona_event(record: &PersonaRecord) -> Result<EventBuilder, String> {
-    let content = PersonaEventContent {
-        display_name: record.display_name.clone(),
-        avatar_url: record.avatar_url.clone(),
-        system_prompt: record.system_prompt.clone(),
-        runtime: record.runtime.clone(),
-        model: record.model.clone(),
-        provider: record.provider.clone(),
-        name_pool: record.name_pool.clone(),
-    };
+    // Single projection point — persona_event_content owns the field mapping
+    // (and the hash-stability rules that come with it).
+    let content = persona_event_content(record);
 
     let content_json = serde_json::to_string(&content)
         .map_err(|e| format!("failed to serialize persona content: {e}"))?;
@@ -173,7 +183,7 @@ pub fn persona_from_event(event: &nostr::Event) -> Result<PersonaRecord, String>
         id: d_tag.clone(),
         display_name: content.display_name,
         avatar_url: content.avatar_url,
-        system_prompt: content.system_prompt,
+        system_prompt: content.system_prompt.unwrap_or_default(),
         runtime: content.runtime,
         model: content.model,
         provider: content.provider,
@@ -282,11 +292,22 @@ pub fn persona_event_content(record: &PersonaRecord) -> PersonaEventContent {
     PersonaEventContent {
         display_name: record.display_name.clone(),
         avatar_url: record.avatar_url.clone(),
-        system_prompt: record.system_prompt.clone(),
+        // Always Some — including for an empty prompt — so pre-revision
+        // records serialize byte-identically and persona_content_hash is
+        // stable across the upgrade (drift badges must not flip).
+        system_prompt: Some(record.system_prompt.clone()),
         runtime: record.runtime.clone(),
         model: record.model.clone(),
         provider: record.provider.clone(),
         name_pool: record.name_pool.clone(),
+        // NIP-AP behavioral defaults: RESERVED this release — parsed at the
+        // wire layer but not yet carried on PersonaRecord or applied at
+        // instance creation (that lands with the create-path unification).
+        // Guarded by `behavioral_defaults_are_staged_not_applied`.
+        respond_to: None,
+        respond_to_allowlist: Vec::new(),
+        mcp_toolsets: None,
+        parallelism: None,
     }
 }
 
@@ -533,18 +554,54 @@ mod tests {
 
         let content = PersonaEventContent {
             display_name: "Test Agent".to_string(),
-            system_prompt: "You are a test assistant.".to_string(),
+            system_prompt: Some("You are a test assistant.".to_string()),
             avatar_url: Some("https://example.com/avatar.png".to_string()),
             runtime: Some("goose".to_string()),
             model: Some("claude-opus-4".to_string()),
             provider: Some("anthropic".to_string()),
             name_pool: vec!["Alpha".to_string(), "Beta".to_string()],
+            respond_to: None,
+            respond_to_allowlist: Vec::new(),
+            mcp_toolsets: None,
+            parallelism: None,
         };
         assert_eq!(
             serde_json::to_string(&content).unwrap(),
             VECTOR,
             "serialized content drifted from the NIP-AP Event 1 vector"
         );
+
+        // Hash invariance across the unified-model widening: REAL pre-revision
+        // content bytes (fixture string, not a round-trip through the new
+        // struct) must parse and re-serialize byte-identically, so
+        // persona_content_hash — the drift-badge basis — is unchanged on
+        // upgrade. A bare Option serializing "system_prompt":null would flip
+        // every persona's hash fleet-wide.
+        let parsed: PersonaEventContent = serde_json::from_str(VECTOR).unwrap();
+        assert_eq!(
+            serde_json::to_string(&parsed).unwrap(),
+            VECTOR,
+            "pre-revision content bytes must survive a parse/serialize round-trip unchanged"
+        );
+        assert_eq!(
+            persona_content_hash(&parsed),
+            {
+                use sha2::{Digest, Sha256};
+                hex::encode(Sha256::digest(VECTOR.as_bytes()))
+            },
+            "persona_content_hash of pre-revision bytes must equal the direct digest"
+        );
+
+        // Hash stability, adversarial shapes: the empty prompt and the
+        // minimal old-writer body (display_name + system_prompt only) are the
+        // two easiest regressions if the projection or skip attributes ever
+        // change.
+        const EMPTY_PROMPT: &str = r#"{"display_name":"X","system_prompt":""}"#;
+        let parsed: PersonaEventContent = serde_json::from_str(EMPTY_PROMPT).unwrap();
+        assert_eq!(serde_json::to_string(&parsed).unwrap(), EMPTY_PROMPT);
+        const MINIMAL: &str = r#"{"display_name":"Minimal","system_prompt":"Hello."}"#;
+        let parsed: PersonaEventContent = serde_json::from_str(MINIMAL).unwrap();
+        assert_eq!(serde_json::to_string(&parsed).unwrap(), MINIMAL);
 
         // An event built from this content carries the byte-exact vector as its
         // signed content, so a second implementer following the spec computes
@@ -637,16 +694,64 @@ mod tests {
             .all(|t| t.as_slice().first().map(String::as_str) != Some("e")));
     }
 
+    /// NIP-AP behavioral defaults are RESERVED this release: the wire type
+    /// parses them (foreign data survives deserialization) but the local
+    /// projection does not emit them and PersonaRecord does not carry them.
+    /// This test locks the staged behavior so activating the fields later is
+    /// a deliberate act — and documents that a foreign definition's
+    /// behavioral values do NOT survive a local edit-and-republish cycle yet.
+    #[test]
+    fn behavioral_defaults_are_staged_not_applied() {
+        const FOREIGN: &str = r#"{"display_name":"F","system_prompt":"p","respond_to":"anyone","respond_to_allowlist":["deadbeef"],"mcp_toolsets":"default","parallelism":4}"#;
+        let parsed: PersonaEventContent = serde_json::from_str(FOREIGN).unwrap();
+        // Wire layer preserves the fields...
+        assert_eq!(parsed.respond_to.as_deref(), Some("anyone"));
+        assert_eq!(parsed.parallelism, Some(4));
+        // ...but the record round-trip drops them (staged, not applied).
+        let record = persona_from_event_content_for_test(parsed);
+        let reprojected = persona_event_content(&record);
+        assert_eq!(reprojected.respond_to, None);
+        assert_eq!(reprojected.respond_to_allowlist, Vec::<String>::new());
+        assert_eq!(reprojected.mcp_toolsets, None);
+        assert_eq!(reprojected.parallelism, None);
+    }
+
+    /// Test-only bridge: build a PersonaRecord from parsed content the same
+    /// way `persona_from_event` maps fields, without needing a signed event.
+    fn persona_from_event_content_for_test(content: PersonaEventContent) -> PersonaRecord {
+        PersonaRecord {
+            id: "staged".to_string(),
+            display_name: content.display_name,
+            avatar_url: content.avatar_url,
+            system_prompt: content.system_prompt.unwrap_or_default(),
+            runtime: content.runtime,
+            model: content.model,
+            provider: content.provider,
+            name_pool: content.name_pool,
+            is_builtin: false,
+            is_active: true,
+            source_team: None,
+            source_team_persona_slug: None,
+            env_vars: BTreeMap::new(),
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
+        }
+    }
+
     #[test]
     fn persona_content_hash_is_deterministic() {
         let content = PersonaEventContent {
             display_name: "Test".to_string(),
             avatar_url: None,
-            system_prompt: "Hello".to_string(),
+            system_prompt: Some("Hello".to_string()),
             runtime: None,
             model: None,
             provider: None,
             name_pool: vec![],
+            respond_to: None,
+            respond_to_allowlist: Vec::new(),
+            mcp_toolsets: None,
+            parallelism: None,
         };
         let hash1 = persona_content_hash(&content);
         let hash2 = persona_content_hash(&content);
@@ -659,14 +764,18 @@ mod tests {
         let content1 = PersonaEventContent {
             display_name: "Test".to_string(),
             avatar_url: None,
-            system_prompt: "Hello".to_string(),
+            system_prompt: Some("Hello".to_string()),
             runtime: None,
             model: None,
             provider: None,
             name_pool: vec![],
+            respond_to: None,
+            respond_to_allowlist: Vec::new(),
+            mcp_toolsets: None,
+            parallelism: None,
         };
         let mut content2 = content1.clone();
-        content2.system_prompt = "Goodbye".to_string();
+        content2.system_prompt = Some("Goodbye".to_string());
         assert_ne!(
             persona_content_hash(&content1),
             persona_content_hash(&content2)

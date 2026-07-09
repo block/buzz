@@ -62,12 +62,16 @@ The `content` field is a **plaintext** (unencrypted) JSON object:
 ```jsonc
 {
   "display_name": "<string>",
-  "system_prompt": "<string>",
+  "system_prompt": "<string | null>",
   "avatar_url": "<string | null>",
   "runtime": "<string | null>",
   "model": "<string | null>",
   "provider": "<string | null>",
-  "name_pool": ["<string>", ...]
+  "name_pool": ["<string>", ...],
+  "respond_to": "<string | null>",
+  "respond_to_allowlist": ["<64-hex pubkey>", ...],
+  "mcp_toolsets": "<string | null>",
+  "parallelism": "<integer | null>"
 }
 ```
 
@@ -75,18 +79,36 @@ The `content` field is a **plaintext** (unencrypted) JSON object:
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `display_name` | string | Human-readable name for the persona. |
-| `system_prompt` | string | The system prompt injected into agent sessions. |
+| `display_name` | string | Human-readable name for the agent definition. |
 
 ### Optional fields
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
+| `system_prompt` | string \| null | `null` | The system prompt injected into agent sessions. Optional since the unified agent model: a definition can be pure configuration (e.g. provider/model only). Readers MUST treat an absent or `null` prompt as "no prompt". |
 | `avatar_url` | string \| null | `null` | URL to an avatar image. |
 | `runtime` | string \| null | `null` | ACP runtime identifier (e.g. `"goose"`, `"claude-code"`). |
 | `model` | string \| null | `null` | Model identifier (e.g. `"claude-opus-4"`). |
 | `provider` | string \| null | `null` | Model provider (e.g. `"anthropic"`). |
-| `name_pool` | string[] | `[]` | Pool of display names for agent instances spawned from this persona. When non-empty, the spawning system picks a name from this pool for each new agent instance, enabling multiple concurrent agents from the same persona to have distinct identities. |
+| `name_pool` | string[] | `[]` | Pool of display names for agent instances spawned from this definition. When non-empty, the spawning system picks a name from this pool for each new agent instance, enabling multiple concurrent agents from the same definition to have distinct identities. |
+| `respond_to` | string \| null | `null` | **Reserved.** Default respond-to policy for instances spawned from this definition: `"anyone"`, `"owner-only"`, or `"allowlist"`. `null` defers to the client default. |
+| `respond_to_allowlist` | string[] | `[]` | **Reserved.** Allowlisted author pubkeys (64-char lowercase hex) when `respond_to` is `"allowlist"`. Ignored otherwise. |
+| `mcp_toolsets` | string \| null | `null` | **Reserved.** MCP toolset selector string passed to spawned instances. |
+| `parallelism` | integer \| null | `null` | **Reserved.** Default max concurrent turns for spawned instances. `null` defers to the client default. |
+
+The behavioral fields (`respond_to`, `respond_to_allowlist`, `mcp_toolsets`,
+`parallelism`) are definition-level *defaults*: a spawned instance copies them
+at creation and may be reconfigured independently afterwards. They were
+previously carried only on the kind:30177 projection (see
+"Slimming: kind:30177" below).
+
+**Status: reserved.** In the current implementation these four fields are
+*parsed but not yet applied*: readers tolerate and preserve them at the wire
+layer, but the local definition store does not yet carry them and writers do
+not emit them. The instance-copy-at-creation behavior activates in a
+subsequent release (the create-path unification). Until then a definition
+carrying these fields round-trips through the wire type but the values do not
+survive a local edit-and-republish cycle.
 
 Unknown fields MUST be ignored by readers (forward compatibility).
 
@@ -155,6 +177,43 @@ Agents spawned from a persona MAY store a private snapshot at the reserved engra
 
 The `mem/persona` slug conforms to [NIP-AE](NIP-AE.md)'s slug grammar and requires no amendment to that spec.
 
+### Slimming: kind:30177 (instance state)
+
+Kind:30177 is keyed by **agent pubkey** (one event per instance) while
+kind:30175 is keyed by **definition slug** — they occupy different key
+spaces and serve different roles. 30177 remains the per-instance
+cross-device sync channel; with the unified agent model it is **slimmed**
+to carry only instance-level state:
+
+- Writers MUST NOT include definition-level fields
+  (`system_prompt`, `model`, `provider`, `persona_source_version`) in new
+  kind:30177 events **for definition-linked instances**. Those resolve
+  through the linked kind:30175 definition. Writers continue to publish
+  instance-level fields (name, linked definition id, `respond_to` +
+  allowlist, `parallelism`, `mcp_toolsets`).
+- **Exception — definition-less instances:** an instance with no linked
+  definition is its own definition; writers MUST keep emitting the
+  definition-level fields for such instances. (Rationale: old readers
+  parse a slimmed event successfully and would overwrite their local
+  snapshot with absent values; a definition-linked instance self-heals
+  from its definition at next spawn, but a definition-less one has no
+  restore path.) This exception retires naturally once all instances are
+  definition-backed.
+- Readers SHOULD continue to accept legacy "fat" kind:30177 events
+  during the transition. Where the linked 30175 head and a legacy 30177
+  event both carry a field, the 30175 head is authoritative.
+- Deletion/retention rules for kind:30177 are unchanged so historical
+  tombstones keep working.
+
+### Mixed-version note
+
+Clients released before this revision require `system_prompt` in 30175
+content and will fail to parse (and therefore silently drop) prompt-less
+definitions published by newer clients. This is a benign divergence —
+old devices simply do not see new-style definitions until upgraded — not
+data corruption. Implementations SHOULD log dropped events rather than
+surface per-event errors.
+
 ### NIP-OA (Owner Attestation)
 
 Agents spawned from a persona carry [NIP-OA](NIP-OA.md) owner attestation — an `auth` tag proving that `pubkey_o` authorized the agent's key. The persona event itself does not contain attestation; it is the *definition* from which attestation is issued at spawn time.
@@ -209,11 +268,14 @@ id              = <derived per NIP-01: sha256([0, pubkey, created_at, kind, tags
 sig             = <BIP-340 Schnorr signature with aux=0x00…00>
 ```
 
-### Event 2 — minimal persona (required fields only)
+### Event 2 — minimal definition (required fields only)
+
+A definition need not carry a prompt — pure-configuration definitions
+(e.g. provider/model presets) are valid:
 
 ```jsonc
 // Body:
-{"display_name":"Minimal","system_prompt":"Hello."}
+{"display_name":"Minimal"}
 ```
 
 ```
@@ -221,7 +283,7 @@ kind            = 30175
 pubkey          = 79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798
 created_at      = 1700000001
 tags            = [["d", "minimal"]]
-content         = {"display_name":"Minimal","system_prompt":"Hello."}
+content         = {"display_name":"Minimal"}
 id              = <derived per NIP-01>
 sig             = <BIP-340 Schnorr signature with aux=0x00…00>
 ```

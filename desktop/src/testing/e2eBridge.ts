@@ -7,6 +7,7 @@ import { parse as yamlParse } from "yaml";
 import { relayClient } from "@/shared/api/relayClient";
 import type { ConnectionState } from "@/shared/api/relayClientShared";
 import type { RelayEvent } from "@/shared/api/types";
+import { getMarkdownParseCount } from "@/shared/ui/markdown/nodeCache";
 import { syncAgentTurnsFromEvents } from "@/features/agents/activeAgentTurnsStore";
 import {
   injectObserverEventsForE2E,
@@ -65,6 +66,7 @@ type MockManagedAgentSeed = {
   channelIds?: string[];
   backend?: RawManagedAgent["backend"];
   lastError?: string | null;
+  lastErrorCode?: number | null;
   respondTo?: RawManagedAgent["respond_to"];
   respondToAllowlist?: string[];
 };
@@ -153,6 +155,10 @@ type E2eConfig = {
     // - `resolve_oa_owner` (oaOwnerIsMe)
     // - `resetMockRelayMembers` (relayRole)
     archivedIdentities?: string[];
+    // Relay's NIP-11 `self` pubkey (hex) for `get_relay_self`. A DM whose peer
+    // equals this is treated as a moderation DM (composer disabled). Absent →
+    // fail open (no mod-DM detection), matching the Rust command's contract.
+    relaySelf?: string | null;
     oaOwnerIsMe?: boolean;
     relayRole?: "owner" | "admin" | "member" | null;
     // Descriptors returned by the mocked `pick_and_upload_media` /
@@ -456,8 +462,10 @@ type RawManagedAgent = {
   last_stopped_at: string | null;
   last_exit_code: number | null;
   last_error: string | null;
+  last_error_code: number | null;
   log_path: string;
   start_on_app_launch: boolean;
+  auto_restart_on_config_change?: boolean;
   backend:
     | { type: "local" }
     | { type: "provider"; id: string; config: Record<string, unknown> };
@@ -749,6 +757,7 @@ declare global {
     __BUZZ_E2E_QUERY_CLIENT__?: {
       invalidateQueries: (filters: { queryKey: readonly unknown[] }) => unknown;
     };
+    __BUZZ_E2E_MD_PARSE_COUNT__?: () => number;
   }
 }
 
@@ -1037,8 +1046,10 @@ function cloneManagedAgent(agent: MockManagedAgent): RawManagedAgent {
     last_stopped_at: agent.last_stopped_at,
     last_exit_code: agent.last_exit_code,
     last_error: agent.last_error,
+    last_error_code: agent.last_error_code,
     log_path: agent.log_path,
     start_on_app_launch: agent.start_on_app_launch,
+    auto_restart_on_config_change: agent.auto_restart_on_config_change ?? true,
     backend: agent.backend ?? { type: "local" as const },
     backend_agent_id: agent.backend_agent_id ?? null,
     respond_to: agent.respond_to ?? "owner-only",
@@ -1551,8 +1562,10 @@ function buildSeededManagedAgent(seed: MockManagedAgentSeed): MockManagedAgent {
     last_stopped_at: status === "stopped" ? now : null,
     last_exit_code: null,
     last_error: seed.lastError ?? null,
+    last_error_code: seed.lastErrorCode ?? null,
     log_path: `/tmp/mock-agent-${seed.pubkey}.log`,
     start_on_app_launch: true,
+    auto_restart_on_config_change: true,
     backend: seed.backend ?? { type: "local" },
     backend_agent_id: null,
     respond_to: seed.respondTo ?? "owner-only",
@@ -2366,6 +2379,13 @@ function parseWorkflowDefinition(
 
 function handleGetChannelWorkflows(args: { channelId: string }) {
   return mockWorkflows.filter((w) => w.channel_id === args.channelId);
+}
+
+function handleGetChannelsWorkflows(args: { channelIds: string[] }) {
+  const ids = new Set(args.channelIds);
+  return mockWorkflows.filter(
+    (w) => w.channel_id != null && ids.has(w.channel_id),
+  );
 }
 
 function handleGetWorkflow(args: { workflowId: string }) {
@@ -6627,8 +6647,10 @@ async function handleCreateManagedAgent(
     last_stopped_at: null,
     last_exit_code: null,
     last_error: null,
+    last_error_code: null,
     log_path: `/tmp/mock-agent-${pubkey}.log`,
     start_on_app_launch: args.input.startOnAppLaunch ?? true,
+    auto_restart_on_config_change: true,
     backend: args.input.backend ?? { type: "local" as const },
     backend_agent_id: null,
     respond_to: args.input.respondTo ?? "owner-only",
@@ -6774,6 +6796,16 @@ async function handleSetManagedAgentStartOnAppLaunch(args: {
 }): Promise<RawManagedAgent> {
   const agent = getMockManagedAgent(args.pubkey);
   agent.start_on_app_launch = args.startOnAppLaunch;
+  agent.updated_at = new Date().toISOString();
+  return cloneManagedAgent(agent);
+}
+
+async function handleSetManagedAgentAutoRestart(args: {
+  pubkey: string;
+  autoRestartOnConfigChange: boolean;
+}): Promise<RawManagedAgent> {
+  const agent = getMockManagedAgent(args.pubkey);
+  agent.auto_restart_on_config_change = args.autoRestartOnConfigChange;
   agent.updated_at = new Date().toISOString();
   return cloneManagedAgent(agent);
 }
@@ -7854,6 +7886,7 @@ export function maybeInstallE2eTauriMocks() {
     window.dispatchEvent(new CustomEvent("buzz:e2e-home-feed-updated"));
     return item;
   };
+  window.__BUZZ_E2E_MD_PARSE_COUNT__ = getMarkdownParseCount;
   window.__BUZZ_E2E_EMIT_MOCK_READ_STATE__ = ({
     clientId,
     contexts,
@@ -8504,6 +8537,10 @@ export function maybeInstallE2eTauriMocks() {
         return handleStopManagedAgent(
           payload as Parameters<typeof handleStopManagedAgent>[0],
         );
+      case "set_managed_agent_auto_restart":
+        return handleSetManagedAgentAutoRestart(
+          payload as Parameters<typeof handleSetManagedAgentAutoRestart>[0],
+        );
       case "set_managed_agent_start_on_app_launch":
         return handleSetManagedAgentStartOnAppLaunch(
           payload as Parameters<
@@ -8834,6 +8871,10 @@ export function maybeInstallE2eTauriMocks() {
         return handleGetChannelWorkflows(
           payload as Parameters<typeof handleGetChannelWorkflows>[0],
         );
+      case "get_channels_workflows":
+        return handleGetChannelsWorkflows(
+          payload as Parameters<typeof handleGetChannelsWorkflows>[0],
+        );
       case "get_workflow":
         return handleGetWorkflow(
           payload as Parameters<typeof handleGetWorkflow>[0],
@@ -8883,6 +8924,8 @@ export function maybeInstallE2eTauriMocks() {
         const archived = activeConfig?.mock?.archivedIdentities ?? [];
         return { archived };
       }
+      case "get_relay_self":
+        return activeConfig?.mock?.relaySelf ?? null;
       case "archive_identity":
       case "unarchive_identity":
         // The spec only verifies UI state, not the submitted request shape;

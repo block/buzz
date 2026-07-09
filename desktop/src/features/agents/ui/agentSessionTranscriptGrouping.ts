@@ -15,7 +15,33 @@ export type TranscriptTurnSegment =
 
 export type TranscriptDisplayBlock =
   | { kind: "single"; item: TranscriptItem }
-  | { kind: "turn"; turnId: string; segments: TranscriptTurnSegment[] };
+  | { kind: "turn"; turnId: string; segments: TranscriptTurnSegment[] }
+  | {
+      /**
+       * Session boundary divider injected between consecutive session runs.
+       * `sessionId` is the id of the session that FOLLOWS the divider (the
+       * newer session in reading order).
+       *
+       * `labelState` encodes three distinct states:
+       *  - `"current"`     — newest-visible session AND matches the live relay
+       *                      session id. Agent is actively running this session.
+       *  - `"most-recent"` — newest-visible session but no live session match
+       *                      (archived-only view or session ended). This is the
+       *                      most recently observed session — not current context.
+       *  - `"earlier"`     — an older session, not newest-visible.
+       */
+      kind: "session-boundary";
+      sessionId: string;
+      sessionStartTimestamp: string;
+      labelState: "current" | "most-recent" | "earlier";
+      /**
+       * Zero-based position of this boundary in the run array (i.e. the index
+       * of the run it precedes, which is always ≥ 1). Used as a tiebreaker in
+       * the React list key so that two non-contiguous runs sharing the same
+       * sessionId produce DISTINCT keys and React never duplicates/omits them.
+       */
+      runIndex: number;
+    };
 
 export type TranscriptToolRunChildSegment =
   | { kind: "item"; item: TranscriptItem }
@@ -357,6 +383,72 @@ function getRenderClass(item: TranscriptItem) {
 }
 
 /**
+ * Split a flat, time-ordered array of TranscriptItems into contiguous session
+ * runs keyed by `sessionId`.
+ *
+ * **Null-session handling**: the real first-turn wire sequence is
+ * `turn_started(null) → session/new(null) → session_resolved(sess-X) → …`.
+ * Pre-resolution items arrive with `sessionId: null` before any session has
+ * been assigned. We defer those leading null-session items and **prepend them
+ * to the first run that has a non-null sessionId**, so they stay in the same
+ * session run as the turn they belong to and the `pendingSystemPrompt` slot in
+ * `buildBlocksForRun` can consume them correctly.
+ *
+ * Mid-stream null-session items (after at least one session has resolved) are
+ * attributed to the most recently seen session run — same as before, this
+ * handles gap frames that arrive after resolution.
+ *
+ * Only if the entire stream is null-session (no session ever resolves) do the
+ * deferred items form a single fallback run keyed `"unknown"`.
+ *
+ * A new run begins whenever the sessionId changes to a distinct non-null value.
+ */
+function splitIntoSessionRuns(
+  items: TranscriptItem[],
+): Array<{ sessionId: string; items: TranscriptItem[] }> {
+  const runs: Array<{ sessionId: string; items: TranscriptItem[] }> = [];
+  let currentRun: { sessionId: string; items: TranscriptItem[] } | null = null;
+  // Buffer for items that arrive before any session has resolved.
+  const preSessionBuffer: TranscriptItem[] = [];
+
+  for (const item of items) {
+    if (item.sessionId === null || item.sessionId === undefined) {
+      if (currentRun === null) {
+        // No session resolved yet — defer into the pre-session buffer.
+        preSessionBuffer.push(item);
+      } else {
+        // Session already resolved — attribute to current run.
+        currentRun.items.push(item);
+      }
+      continue;
+    }
+
+    // item.sessionId is non-null from here.
+    if (!currentRun || item.sessionId !== currentRun.sessionId) {
+      const newRun: { sessionId: string; items: TranscriptItem[] } = {
+        sessionId: item.sessionId,
+        items: [],
+      };
+      if (currentRun === null && preSessionBuffer.length > 0) {
+        // First resolved session: prepend buffered pre-resolution items.
+        newRun.items.push(...preSessionBuffer);
+        preSessionBuffer.length = 0;
+      }
+      currentRun = newRun;
+      runs.push(currentRun);
+    }
+    currentRun.items.push(item);
+  }
+
+  // Entire stream was null-session (no session ever resolved): emit as one run.
+  if (currentRun === null && preSessionBuffer.length > 0) {
+    runs.push({ sessionId: "unknown", items: preSessionBuffer });
+  }
+
+  return runs;
+}
+
+/**
  * Build presentation-only display blocks from normalized transcript items.
  * Raw observer order is preserved in the source items; this only reorders
  * within a turn for user-facing narrative flow.
@@ -365,9 +457,86 @@ function getRenderClass(item: TranscriptItem) {
  * turnId=null. They are injected into the prompt segment of the first turn
  * that follows them in stream order — placing System prompt between the user
  * message bubble and the Prompt context sections in the rendered output.
+ *
+ * When items span multiple sessions (archived history + live session), a
+ * `session-boundary` block is injected between consecutive session runs.
+ * The newest-visible run is labeled distinctly when it equals
+ * `latestLiveSessionId`, signalling "current session" vs archived history.
+ * No boundary is emitted when only one session run is present.
+ *
+ * @param latestLiveSessionId - The session ID that is currently live on the
+ *   relay (from `observerRelayStore`). Used to distinguish "current session"
+ *   from "most recent observed session". Pass `null` when the relay is idle.
  */
 export function buildTranscriptDisplayBlocks(
   items: TranscriptItem[],
+  latestLiveSessionId: string | null = null,
+): TranscriptDisplayBlock[] {
+  const sessionRuns = splitIntoSessionRuns(items);
+
+  // Fast path: single session (or zero) — no boundary blocks needed.
+  if (sessionRuns.length <= 1) {
+    return buildBlocksForRun(
+      sessionRuns[0]?.items ?? [],
+      /* isNewestRun */ true,
+      sessionRuns[0]?.sessionId ?? null,
+      latestLiveSessionId,
+      /* emitBoundary */ false,
+    );
+  }
+
+  // Multi-session: build blocks per run and interleave session-boundary blocks.
+  const allBlocks: TranscriptDisplayBlock[] = [];
+  for (let i = 0; i < sessionRuns.length; i++) {
+    const run = sessionRuns[i];
+    const isNewestRun = i === sessionRuns.length - 1;
+
+    // Inject boundary before this run's blocks (not before the oldest run).
+    if (i > 0) {
+      const firstItem = run.items.find((it) => it.timestamp);
+      const sessionStartTimestamp =
+        firstItem?.timestamp ?? new Date(0).toISOString();
+      const labelState: "current" | "most-recent" | "earlier" =
+        isNewestRun &&
+        latestLiveSessionId !== null &&
+        run.sessionId === latestLiveSessionId
+          ? "current"
+          : isNewestRun
+            ? "most-recent"
+            : "earlier";
+      allBlocks.push({
+        kind: "session-boundary",
+        sessionId: run.sessionId,
+        sessionStartTimestamp,
+        labelState,
+        runIndex: i,
+      });
+    }
+
+    const runBlocks = buildBlocksForRun(
+      run.items,
+      isNewestRun,
+      run.sessionId,
+      latestLiveSessionId,
+      /* emitBoundary */ false,
+    );
+    allBlocks.push(...runBlocks);
+  }
+
+  return allBlocks;
+}
+
+/**
+ * Build display blocks for a single session run's items.
+ * Internal helper — extracted so `buildTranscriptDisplayBlocks` can call it
+ * once per run without code duplication.
+ */
+function buildBlocksForRun(
+  items: TranscriptItem[],
+  _isNewestRun: boolean,
+  _sessionId: string | null,
+  _latestLiveSessionId: string | null,
+  _emitBoundary: boolean,
 ): TranscriptDisplayBlock[] {
   const blocks: TranscriptDisplayBlock[] = [];
   const turnBuckets = new Map<string, TurnBucket>();
@@ -466,6 +635,11 @@ export function flattenDisplayBlocks(
   for (const block of blocks) {
     if (block.kind === "single") {
       result.push(block.item);
+      continue;
+    }
+
+    // session-boundary blocks carry no items — skip.
+    if (block.kind === "session-boundary") {
       continue;
     }
 

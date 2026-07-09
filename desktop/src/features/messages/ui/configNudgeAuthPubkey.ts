@@ -18,7 +18,7 @@ import type { TimelineMessage } from "@/features/messages/types";
  */
 export function getConfigNudgeAuthorPubkey(
   message: Pick<TimelineMessage, "kind" | "signerPubkey">,
-  resolvedAgentPubkeys: Set<string>,
+  resolvedAgentPubkeys: ReadonlySet<string>,
 ): string | undefined {
   if (
     message.kind === KIND_STREAM_MESSAGE &&

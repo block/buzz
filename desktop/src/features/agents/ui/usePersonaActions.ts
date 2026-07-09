@@ -320,7 +320,7 @@ export function usePersonaActions() {
     clearFeedback("library");
     setBatchImportResult(null);
     setPersonaNoticeMessage(
-      `Imported ${count} persona${count !== 1 ? "s" : ""}.`,
+      `Imported ${count} agent${count !== 1 ? "s" : ""}.`,
     );
     void queryClient.invalidateQueries({ queryKey: personasQueryKey });
   }

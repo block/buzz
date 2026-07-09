@@ -24,14 +24,18 @@ pub(crate) async fn post_connect_setup(
     state: &AppState,
     ephemeral_channel_id: &str,
 ) -> Result<(), String> {
-    // Hydrate agent pubkeys from relay (authoritative — overrides local guess).
-    if let Ok(agents) = fetch_channel_members(ephemeral_channel_id, Some("bot"), state).await {
+    // Hydrate agent pubkeys and participants from relay in parallel
+    // (authoritative — overrides local guesses).
+    let (agents_result, all_members_result) = tokio::join!(
+        fetch_channel_members(ephemeral_channel_id, Some("bot"), state),
+        fetch_channel_members(ephemeral_channel_id, None, state),
+    );
+    if let Ok(agents) = agents_result {
         let hs = state.huddle()?;
         *hs.agent_pubkeys.lock().unwrap_or_else(|e| e.into_inner()) = agents;
     }
 
-    // Hydrate participants from relay (authoritative state).
-    if let Ok(all_members) = fetch_channel_members(ephemeral_channel_id, None, state).await {
+    if let Ok(all_members) = all_members_result {
         if !all_members.is_empty() {
             let mut hs = state.huddle()?;
             hs.participants = all_members;
@@ -133,15 +137,23 @@ pub(crate) async fn maybe_start_stt_pipeline(
     // Drop the old pipeline OUTSIDE the lock — thread join happens here.
     drop(old_stt);
 
-    let (pipeline, text_rx) =
-        match stt::SttPipeline::new(model_dir, tts_active, tts_cancel, ptt_active_for_stt) {
-            Ok(p) => p,
-            Err(e) => {
-                let hs = state.huddle()?;
-                hs.stt_starting.store(false, Ordering::Release);
-                return Err(e);
-            }
-        };
+    let constructed = tokio::task::spawn_blocking(move || {
+        stt::SttPipeline::new(model_dir, tts_active, tts_cancel, ptt_active_for_stt)
+    })
+    .await;
+    let (pipeline, text_rx) = match constructed {
+        Ok(Ok(p)) => p,
+        Ok(Err(e)) => {
+            let hs = state.huddle()?;
+            hs.stt_starting.store(false, Ordering::Release);
+            return Err(e);
+        }
+        Err(e) => {
+            let hs = state.huddle()?;
+            hs.stt_starting.store(false, Ordering::Release);
+            return Err(format!("spawn_blocking failed: {e}"));
+        }
+    };
     let pipeline = Arc::new(pipeline);
 
     {
@@ -204,12 +216,21 @@ pub(crate) async fn maybe_start_tts_pipeline(state: &AppState) -> Result<bool, S
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .clone();
-    let pipeline = match tts::TtsPipeline::new(model_dir, tts_active, tts_cancel, output_device) {
-        Ok(p) => Arc::new(p),
-        Err(e) => {
+    let constructed = tokio::task::spawn_blocking(move || {
+        tts::TtsPipeline::new(model_dir, tts_active, tts_cancel, output_device)
+    })
+    .await;
+    let pipeline = match constructed {
+        Ok(Ok(p)) => Arc::new(p),
+        Ok(Err(e)) => {
             let hs = state.huddle()?;
             hs.tts_starting.store(false, Ordering::Release);
             return Err(e);
+        }
+        Err(e) => {
+            let hs = state.huddle()?;
+            hs.tts_starting.store(false, Ordering::Release);
+            return Err(format!("spawn_blocking failed: {e}"));
         }
     };
 

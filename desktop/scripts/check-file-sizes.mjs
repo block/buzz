@@ -116,7 +116,16 @@ const overrides = new Map([
   // +2 readiness integration tests for flat-DATABRICKS_HOST canonicalization fix.
   // +1 cargo fmt whitespace reformat (readiness.rs closures inline after rebase).
   // +2 unit tests for cli_login_requirements resolve_command integration (DMG PATH fix).
-  ["src-tauri/src/managed_agents/readiness.rs", 1215],
+  // Doctor-CTA: reworked cli_login_requirements to carry AcpAvailabilityStatus,
+  // skip login probe for not-installed/adapter-missing/cli-missing states, and
+  // added 4 unit tests covering each arm. Load-bearing discoverability fix.
+  // Updated existing codex_not_ready test to use make_cli_runtime stub.
+  // +4 lines: #1640 persona-env-vars-refresh rebase added availability-classification
+  // growth in the live-persona env merge path. Feature plumbing, not generic debt.
+  // Windows-CI portability: replaced POSIX true/false probes with current_exe()
+  // stand-in + present_binary_str()/static_commands() helpers (+29 lines).
+  // Tests now pass on windows-latest CI shard without POSIX shell utilities.
+  ["src-tauri/src/managed_agents/readiness.rs", 1403],
   // applyWorkspace reposDir parameter plus the validateReposDir binding,
   // threaded through Tauri invokes for configurable repos_dir, plus the
   // harness-persona-sync `harnessOverride` create-input bit — load-bearing

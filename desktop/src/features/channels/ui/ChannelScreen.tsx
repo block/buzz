@@ -56,7 +56,10 @@ import { useThreadReplies } from "@/features/messages/useThreadReplies";
 import { useChannelTyping } from "@/features/messages/useChannelTyping";
 import type { TimelineMessage } from "@/features/messages/types";
 import { useUsersBatchQuery } from "@/features/profile/hooks";
-import { mergeCurrentProfileIntoLookup } from "@/features/profile/lib/identity";
+import {
+  mergeCurrentProfileIntoLookup,
+  profileLookupsEqual,
+} from "@/features/profile/lib/identity";
 import type { RelayEvent, RespondToMode, SearchHit } from "@/shared/api/types";
 import { useChannelFind } from "@/features/search/useChannelFind";
 import { ViewLoadingFallback } from "@/shared/ui/ViewLoadingFallback";
@@ -324,17 +327,6 @@ export function ChannelScreen({
   const messageProfilesQuery = useUsersBatchQuery(messageProfilePubkeys, {
     enabled: messageProfilePubkeys.length > 0,
   });
-  const agentPubkeys = React.useMemo(() => {
-    const pubkeys = new Set(knownAgentPubkeys);
-    for (const [pubkey, profile] of Object.entries(
-      messageProfilesQuery.data?.profiles ?? {},
-    )) {
-      if (profile.isAgent) {
-        pubkeys.add(normalizePubkey(pubkey));
-      }
-    }
-    return pubkeys;
-  }, [knownAgentPubkeys, messageProfilesQuery.data]);
   const agentPubkeysPending =
     activeChannel?.channelType === "dm" &&
     (channelMembersQuery.isPending ||
@@ -360,7 +352,7 @@ export function ChannelScreen({
   // Observer ingestion (frame decryption + derived active-turn liveness) is
   // owner-global — mounted once in AppShell via useAgentObserverIngestion —
   // so this screen no longer mounts its own observer/turns bridges.
-  const messageProfiles = React.useMemo(() => {
+  const messageProfilesRaw = React.useMemo(() => {
     const base =
       mergeCurrentProfileIntoLookup(
         messageProfilesQuery.data?.profiles,
@@ -379,6 +371,28 @@ export function ChannelScreen({
     messageProfilesQuery.data?.profiles,
     relayAgents,
   ]);
+  // Stabilise the merged lookup's reference across renders when no profile
+  // value changed. `messageProfilesRaw` gets a fresh identity whenever the
+  // `users-batch` query re-keys — which typing churn triggers constantly — and
+  // that identity flows to MessageRow's `prev.profiles === next.profiles` memo
+  // check, so an unstable reference re-renders the whole timeline per keystroke.
+  const messageProfilesRef = React.useRef(messageProfilesRaw);
+  if (!profileLookupsEqual(messageProfilesRef.current, messageProfilesRaw)) {
+    messageProfilesRef.current = messageProfilesRaw;
+  }
+  const messageProfiles = messageProfilesRef.current;
+  // Derived from the stabilised lookup so this Set only churns when a profile
+  // value actually changed — MessageRow compares `agentPubkeys` by reference,
+  // and each row previously re-derived this same scan locally (removed).
+  const agentPubkeys = React.useMemo(() => {
+    const pubkeys = new Set(knownAgentPubkeys);
+    for (const [pubkey, profile] of Object.entries(messageProfiles)) {
+      if (profile.isAgent) {
+        pubkeys.add(normalizePubkey(pubkey));
+      }
+    }
+    return pubkeys;
+  }, [knownAgentPubkeys, messageProfiles]);
   const personasQuery = usePersonasQuery();
   const { personaLookup, respondToLookup } = React.useMemo(() => {
     const agents = managedAgentsQuery.data ?? [];

@@ -3,6 +3,7 @@ import type { ContextParentResolver } from "@/features/channels/readState/readSt
 import type { ThreadActivityItem } from "@/features/channels/useUnreadChannels";
 import type { FeedItemState } from "@/features/home/useFeedItemState";
 import type { FeedItem } from "@/shared/api/types";
+import type { SettingsSection } from "@/features/settings/ui/SettingsPanels";
 
 const EMPTY_SET = new Set<string>();
 
@@ -45,6 +46,10 @@ type AppShellContextValue = {
   threadActivityItems: ThreadActivityItem[];
   threadActivityFeedItems: FeedItem[];
   feedItemState: FeedItemState;
+  // Open the Settings panel at the given section. Available on all surfaces
+  // that render under AppShell (channel, home, projects, pulse, agents).
+  // Used by config-nudge cards to deep-link to Settings → Doctor.
+  onOpenSettings: ((section: SettingsSection) => void) | null;
 };
 
 const AppShellContext = React.createContext<AppShellContextValue>({
@@ -75,6 +80,7 @@ const AppShellContext = React.createContext<AppShellContextValue>({
     undoUnread: () => {},
     unreadSet: EMPTY_SET,
   },
+  onOpenSettings: null,
 });
 
 export function AppShellProvider({

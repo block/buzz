@@ -149,6 +149,9 @@ impl Llm {
         // is centralized and never needs to be repeated in each provider arm.
         result.map_err(|e| match e {
             AgentError::Llm(s) => AgentError::Llm(format!("({effective_model}) {s}")),
+            AgentError::LlmModelNotFound(s) => {
+                AgentError::LlmModelNotFound(format!("({effective_model}) {s}"))
+            }
             other => other,
         })
     }
@@ -1070,6 +1073,12 @@ where
             );
             backoff_with_jitter(attempt).await;
             continue;
+        }
+        if status == 404 {
+            return Err(AgentError::LlmModelNotFound(format!(
+                "{status}: {}",
+                read_error_body(resp).await
+            )));
         }
         if !status.is_success() {
             return Err(AgentError::Llm(format!(

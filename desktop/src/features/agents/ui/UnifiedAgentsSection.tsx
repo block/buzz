@@ -304,7 +304,7 @@ function AgentPersonaCard({
     ? firstAvatarUrl(persona.avatarUrl, profileQuery.data?.avatarUrl)
     : persona.avatarUrl;
   const friendlyError = agent
-    ? friendlyAgentLastError(agent.lastError)?.copy
+    ? friendlyAgentLastError(agent.lastError, agent.lastErrorCode)?.copy
     : null;
   const opensRuntimeTab = Boolean(agent && friendlyError && !isActive);
 
@@ -374,7 +374,10 @@ function StandaloneAgentCard({
 }) {
   const title = agent.name;
   const profileQuery = useUserProfileQuery(agent.pubkey);
-  const friendlyError = friendlyAgentLastError(agent.lastError)?.copy;
+  const friendlyError = friendlyAgentLastError(
+    agent.lastError,
+    agent.lastErrorCode,
+  )?.copy;
   const isActive = isManagedAgentActive(agent);
   const opensRuntimeTab = Boolean(friendlyError && !isActive);
 

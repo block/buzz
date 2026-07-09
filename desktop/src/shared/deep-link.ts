@@ -23,6 +23,19 @@ export type MessageDeepLinkPayload = {
   threadRootId: string | null;
 };
 
+export type NostrBindDeepLinkPayload = {
+  challengeId: string;
+  nonce: string;
+  verificationCode: string;
+  audience: "buzz:nostr-identity";
+  action: "bind_nostr_identity";
+  protocol: "buzz-nostr-identity";
+  version: "1";
+  origin: string;
+  expiresAt: string;
+  returnMode: "clipboard";
+};
+
 /**
  * Register listeners for deep-link events emitted by the Rust backend.
  *
@@ -61,6 +74,14 @@ export function listenForMessageDeepLinks(
   onOpen: (payload: MessageDeepLinkPayload) => void,
 ): Promise<UnlistenFn> {
   return listen<MessageDeepLinkPayload>("deep-link-message", (event) => {
+    onOpen(event.payload);
+  });
+}
+
+export function listenForNostrBindDeepLinks(
+  onOpen: (payload: NostrBindDeepLinkPayload) => void,
+): Promise<UnlistenFn> {
+  return listen<NostrBindDeepLinkPayload>("deep-link-nostr-bind", (event) => {
     onOpen(event.payload);
   });
 }

@@ -41,9 +41,29 @@ fn sub_id(name: &str) -> String {
 /// `desktop/src-tauri/src/managed_agents/agent_events.rs`). Built inline here
 /// because the e2e crate does not depend on the desktop crate; the
 /// projection-function exclusion contract is unit-tested in that module. This
-/// is exactly the field set the desktop publishes — secrets, the backend blob,
-/// env vars, and runtime fields are absent by construction.
+/// is exactly the field set the desktop publishes for a definition-less
+/// record (a definition-linked one omits the definition quad — the slimmed
+/// NIP-AP shape; the relay accepts both, as the legacy-fat test below proves) —
+/// secrets, the backend blob, env vars, and runtime fields are absent by
+/// construction.
 fn agent_projection_content(name: &str) -> String {
+    serde_json::json!({
+        "name": name,
+        "system_prompt": "You are a test agent.",
+        "model": "claude-opus-4",
+        "provider": "anthropic",
+        "mcp_toolsets": "default",
+        "parallelism": 24,
+        "respond_to": "allowlist",
+        "respond_to_allowlist": ["79be667e"]
+    })
+    .to_string()
+}
+
+/// A legacy "fat" definition-linked projection (pre-slimming shape): carries
+/// both `persona_id` and the definition quad. Old clients still publish this;
+/// the relay must keep accepting it.
+fn legacy_fat_agent_projection_content(name: &str) -> String {
     serde_json::json!({
         "name": name,
         "persona_id": "persona-1",
@@ -131,6 +151,27 @@ async fn test_managed_agent_publish_and_query() {
     assert_eq!(ev.pubkey, keys.public_key());
     assert_eq!(ev.kind, Kind::Custom(AGENT_KIND));
 
+    client.disconnect().await.expect("disconnect");
+}
+
+/// The relay keeps accepting the legacy "fat" definition-linked projection
+/// (pre-slimming shape) — old clients publish it during the transition.
+#[tokio::test]
+#[ignore]
+async fn test_legacy_fat_agent_event_still_accepted() {
+    let url = relay_url();
+    let keys = Keys::generate();
+    let d_tag = agent_d_tag();
+    let content = legacy_fat_agent_projection_content("Legacy Agent");
+
+    let mut client = BuzzTestClient::connect(&url, &keys).await.expect("connect");
+    let event = agent_event(&keys, &d_tag, &content);
+    let ok = client.send_event(event).await.expect("send legacy agent");
+    assert!(
+        ok.accepted,
+        "relay rejected legacy fat managed-agent event: {}",
+        ok.message
+    );
     client.disconnect().await.expect("disconnect");
 }
 

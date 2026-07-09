@@ -32,3 +32,17 @@ export async function setManagedAgentStartOnAppLaunch(
   );
   return fromRawManagedAgent(response);
 }
+
+export async function setManagedAgentAutoRestart(
+  pubkey: string,
+  autoRestartOnConfigChange: boolean,
+): Promise<ManagedAgent> {
+  const response = await invokeTauri<RawManagedAgent>(
+    "set_managed_agent_auto_restart",
+    {
+      pubkey,
+      autoRestartOnConfigChange,
+    },
+  );
+  return fromRawManagedAgent(response);
+}

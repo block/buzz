@@ -96,7 +96,7 @@ export function usePersonaImportActions(
     selectedFields: string[];
   }) {
     if (!personaImportTarget || !personaImportTargetPreview) {
-      throw new Error("No persona import update is currently open.");
+      throw new Error("No agent import update is currently open.");
     }
 
     feedback.clearPersonaFeedback();
@@ -140,7 +140,7 @@ export function usePersonaImportActions(
       const message =
         error instanceof Error
           ? error.message
-          : "Failed to apply imported persona update.";
+          : "Failed to apply imported agent update.";
       feedback.setPersonaErrorMessage(message);
       throw error instanceof Error ? error : new Error(message);
     } finally {
