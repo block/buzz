@@ -586,11 +586,18 @@ impl SecretStore {
     /// Returns `Ok(Some(value))` when the key is present in the blob,
     /// `Ok(None)` when the blob is absent or the key is not in it, and `Err`
     /// only when the backend is unavailable.
-    #[cfg(feature = "system-keyring")]
     pub fn load_readonly(&self, key: &str) -> Result<Option<String>, String> {
-        match self.load_blob()? {
-            Some(map) => Ok(map.get(key).cloned()),
-            None => Ok(None),
+        #[cfg(feature = "system-keyring")]
+        {
+            match self.load_blob()? {
+                Some(map) => Ok(map.get(key).cloned()),
+                None => Ok(None),
+            }
+        }
+        #[cfg(not(feature = "system-keyring"))]
+        {
+            let _ = key;
+            Err("system-keyring feature disabled".to_string())
         }
     }
 
