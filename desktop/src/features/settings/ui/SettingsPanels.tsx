@@ -598,9 +598,9 @@ function ThemeSettingsCard() {
       </div>
 
       {/* Accent color picker — hidden for Buzz themes (pinned neutral accent).
-          Reveal/hide with a subtle settings fade/scale reveal (adjacent to, not
-          identical to, the modal zoom-95 vocabulary). Reduced motion skips the
-          spatial collapse/expand and just renders/unrenders. */}
+          Reveal/hide with the translate-up + opacity fade defined by
+          ACCENT_PICKER_TRANSITION above. Reduced motion skips the transition
+          and just renders/unrenders. */}
       {shouldReduceMotion ? (
         accentPickerHidden ? null : (
           <AccentPickerContent
