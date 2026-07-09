@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   friendlyAgentLastError,
   friendlyTurnErrorCopy,
+  turnErrorTitle,
   MODEL_NOT_FOUND_COPY,
   RELAY_MESH_DENIED_COPY,
 } from "./friendlyAgentLastError.ts";
@@ -212,4 +213,12 @@ test("friendlyTurnErrorCopy: garbage string code coerces to NaN → string path"
     friendlyTurnErrorCopy("llm auth: denied", "garbage"),
     RELAY_MESH_DENIED_COPY,
   );
+});
+
+test("turnErrorTitle: maps harness error_class values", () => {
+  assert.equal(turnErrorTitle("agent_error", -32001), "Auth error");
+  assert.equal(turnErrorTitle("transport"), "Transport error");
+  assert.equal(turnErrorTitle("idle_timeout"), "Timed out");
+  assert.equal(turnErrorTitle("panic"), "Agent error (crash)");
+  assert.equal(turnErrorTitle("error"), "Turn error");
 });

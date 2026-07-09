@@ -26,7 +26,7 @@ import {
   parsePromptText,
   parseSystemPromptSections,
 } from "./agentSessionTranscriptHelpers";
-import { friendlyTurnErrorCopy } from "../lib/friendlyAgentLastError";
+import { friendlyTurnErrorCopy, turnErrorTitle } from "../lib/friendlyAgentLastError";
 
 export { describeRawEvent } from "./agentSessionTranscriptHelpers";
 
@@ -773,8 +773,11 @@ export function processTranscriptEvent(
     const outcome = asString(payload.outcome) ?? "error";
     const error = asString(payload.error) ?? "Unknown error";
     const displayError = friendlyTurnErrorCopy(error, payload.code);
-    const title =
-      event.kind === "agent_panic" ? "Agent error (crash)" : "Turn error";
+    const errorClass = asString(payload.error_class) ?? asString(payload.errorClass);
+    const title = turnErrorTitle(
+      errorClass ?? (event.kind === "agent_panic" ? "panic" : "error"),
+      payload.code,
+    );
     upsertTextItem(
       d,
       `${event.kind}:${ch}:${event.turnId ?? event.seq}`,

@@ -321,6 +321,61 @@ describe("activeAgentTurnsStore", () => {
     });
   });
 
+  describe("turn_error tombstones", () => {
+    it("preserves classified error state until turn_started clears it", () => {
+      syncAgentTurnsFromEvents(AGENT, [
+        makeEvent({ seq: 1, turnId: "t1", channelId: "c1" }),
+        makeEvent({
+          seq: 2,
+          kind: "turn_error",
+          turnId: "t1",
+          channelId: "c1",
+          payload: {
+            error_class: "agent_error",
+            code: -32001,
+            error: "auth expired",
+          },
+        }),
+      ]);
+
+      const [summary] = getActiveTurnsForAgent(AGENT);
+      assert.equal(summary.channelId, "c1");
+      assert.equal(summary.isError, true);
+      assert.equal(summary.errorLabel, "Auth error");
+
+      syncAgentTurnsFromEvents(AGENT, [
+        makeEvent({
+          seq: 3,
+          turnId: "t2",
+          channelId: "c1",
+          timestamp: "2024-01-01T00:00:02Z",
+        }),
+      ]);
+
+      const [cleared] = getActiveTurnsForAgent(AGENT);
+      assert.equal(cleared.isError, undefined);
+    });
+
+    it("clears error tombstone on turn_completed", () => {
+      syncAgentTurnsFromEvents(AGENT, [
+        makeEvent({ seq: 1, turnId: "t1", channelId: "c1" }),
+        makeEvent({
+          seq: 2,
+          kind: "turn_error",
+          turnId: "t1",
+          channelId: "c1",
+          payload: { error_class: "transport", error: "pipe broke" },
+        }),
+      ]);
+      assert.equal(getActiveTurnsForAgent(AGENT)[0]?.isError, true);
+
+      syncAgentTurnsFromEvents(AGENT, [
+        makeEvent({ seq: 3, kind: "turn_completed", turnId: "t1", channelId: "c1" }),
+      ]);
+      assert.equal(getActiveTurnsForAgent(AGENT).length, 0);
+    });
+  });
+
   describe("replay idempotency", () => {
     it("replaying the same buffer produces no additional state change or notifications", () => {
       const buffer = [

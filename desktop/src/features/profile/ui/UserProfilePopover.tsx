@@ -590,11 +590,12 @@ export function UserProfilePopover({
 
           {activeTurns.length > 0 ? (
             <div className="flex flex-wrap gap-1.5">
-              {activeTurns.map(({ channelId, anchorAt }) => (
+              {activeTurns.map(({ channelId, anchorAt, isError, errorLabel }) => (
                 <PopoverWorkingBadge
                   key={channelId}
                   name={channelIdToName[channelId] ?? channelId}
                   anchorAt={anchorAt}
+                  errorLabel={isError ? errorLabel : undefined}
                 />
               ))}
             </div>
@@ -729,11 +730,21 @@ export function UserProfilePopover({
 function PopoverWorkingBadge({
   name,
   anchorAt,
+  errorLabel,
 }: {
   name: string;
   anchorAt: number;
+  errorLabel?: string;
 }) {
   const now = useNow(1000);
+
+  if (errorLabel) {
+    return (
+      <span className="inline-flex items-center rounded-full bg-destructive/10 px-2 py-0.5 text-xs font-medium text-destructive">
+        {errorLabel} in #{name}
+      </span>
+    );
+  }
 
   return (
     <span className="inline-flex items-center rounded-full bg-primary/10 px-2 py-0.5 text-xs font-medium text-primary motion-safe:animate-pulse">
