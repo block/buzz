@@ -7,6 +7,7 @@ import {
   BUZZ_AGENT_MAX_ROUNDS,
   BUZZ_AGENT_THINKING_EFFORT,
   BUZZ_AGENT_THINKING_EFFORT_VALUES,
+  getProviderEffortConfig,
   isBuzzAgentRuntime,
 } from "./buzzAgentConfig.ts";
 
@@ -221,4 +222,285 @@ test("isBuzzAgentRuntime(prospectiveRuntimeId) hides fields when Edit resolves t
 test("isBuzzAgentRuntime(prospectiveRuntimeId) hides fields when Edit has no resolved runtime (empty string)", () => {
   // prospectiveRuntimeId falls back to "" when catalog hasn't loaded yet
   assert.equal(isBuzzAgentRuntime(""), false);
+});
+
+// ---------------------------------------------------------------------------
+// getProviderEffortConfig — Anthropic model families
+// ---------------------------------------------------------------------------
+
+test("anthropic unknown model returns adaptive full set with high default", () => {
+  const { validValues, defaultValue } = getProviderEffortConfig(
+    "anthropic",
+    "",
+  );
+  assert.deepEqual([...validValues], ["low", "medium", "high", "xhigh", "max"]);
+  assert.equal(defaultValue, "high");
+});
+
+test("anthropic claude-3 model returns manual-budget set with null default", () => {
+  const { validValues, defaultValue } = getProviderEffortConfig(
+    "anthropic",
+    "claude-3-7-sonnet-20250219",
+  );
+  assert.deepEqual([...validValues], ["low", "medium", "high"]);
+  assert.equal(defaultValue, null);
+});
+
+test("anthropic claude-opus-4-5 returns manual-budget set with null default", () => {
+  const { validValues, defaultValue } = getProviderEffortConfig(
+    "anthropic",
+    "claude-opus-4-5",
+  );
+  assert.deepEqual([...validValues], ["low", "medium", "high"]);
+  assert.equal(defaultValue, null);
+});
+
+test("anthropic claude-opus-4-7 returns xhigh-supporting set with high default", () => {
+  const { validValues, defaultValue } = getProviderEffortConfig(
+    "anthropic",
+    "claude-opus-4-7",
+  );
+  assert.deepEqual([...validValues], ["low", "medium", "high", "xhigh", "max"]);
+  assert.equal(defaultValue, "high");
+});
+
+test("anthropic claude-opus-4-6 returns non-xhigh adaptive set (no xhigh)", () => {
+  const { validValues, defaultValue } = getProviderEffortConfig(
+    "anthropic",
+    "claude-opus-4-6",
+  );
+  assert.deepEqual([...validValues], ["low", "medium", "high", "max"]);
+  assert.equal(defaultValue, "high");
+});
+
+test("anthropic claude-sonnet-5 returns xhigh-supporting set", () => {
+  const { validValues, defaultValue } = getProviderEffortConfig(
+    "anthropic",
+    "claude-sonnet-5-20260101",
+  );
+  assert.deepEqual([...validValues], ["low", "medium", "high", "xhigh", "max"]);
+  assert.equal(defaultValue, "high");
+});
+
+test("anthropic claude-sonnet-4-6 returns non-xhigh adaptive set", () => {
+  const { validValues, defaultValue } = getProviderEffortConfig(
+    "anthropic",
+    "claude-sonnet-4-6",
+  );
+  assert.deepEqual([...validValues], ["low", "medium", "high", "max"]);
+  assert.equal(defaultValue, "high");
+});
+
+test("anthropic claude-mythos-preview returns non-xhigh adaptive set", () => {
+  const { validValues, defaultValue } = getProviderEffortConfig(
+    "anthropic",
+    "claude-mythos-preview",
+  );
+  assert.deepEqual([...validValues], ["low", "medium", "high", "max"]);
+  assert.equal(defaultValue, "high");
+});
+
+test("anthropic claude-mythos-5 returns xhigh-supporting set", () => {
+  const { validValues, defaultValue } = getProviderEffortConfig(
+    "anthropic",
+    "claude-mythos-5",
+  );
+  assert.deepEqual([...validValues], ["low", "medium", "high", "xhigh", "max"]);
+  assert.equal(defaultValue, "high");
+});
+
+// ---------------------------------------------------------------------------
+// getProviderEffortConfig — OpenAI model families
+// ---------------------------------------------------------------------------
+
+test("openai gpt-5-pro returns only high with high default", () => {
+  const { validValues, defaultValue } = getProviderEffortConfig(
+    "openai",
+    "gpt-5-pro",
+  );
+  assert.deepEqual([...validValues], ["high"]);
+  assert.equal(defaultValue, "high");
+});
+
+test("openai gpt-5.5 returns none/low/medium/high/xhigh with medium default", () => {
+  const { validValues, defaultValue } = getProviderEffortConfig(
+    "openai",
+    "gpt-5.5",
+  );
+  assert.deepEqual(
+    [...validValues],
+    ["none", "low", "medium", "high", "xhigh"],
+  );
+  assert.equal(defaultValue, "medium");
+});
+
+test("openai gpt-5.4 returns same table as gpt-5.5", () => {
+  const { validValues, defaultValue } = getProviderEffortConfig(
+    "openai",
+    "gpt-5.4",
+  );
+  assert.deepEqual(
+    [...validValues],
+    ["none", "low", "medium", "high", "xhigh"],
+  );
+  assert.equal(defaultValue, "medium");
+});
+
+test("openai gpt-5.1 returns none/low/medium/high with none default", () => {
+  const { validValues, defaultValue } = getProviderEffortConfig(
+    "openai",
+    "gpt-5.1",
+  );
+  assert.deepEqual([...validValues], ["none", "low", "medium", "high"]);
+  assert.equal(defaultValue, "none");
+});
+
+test("openai gpt-5 base returns minimal/low/medium/high with medium default", () => {
+  const { validValues, defaultValue } = getProviderEffortConfig(
+    "openai",
+    "gpt-5",
+  );
+  assert.deepEqual([...validValues], ["minimal", "low", "medium", "high"]);
+  assert.equal(defaultValue, "medium");
+});
+
+test("openai unknown model returns all-except-max with medium default", () => {
+  const { validValues, defaultValue } = getProviderEffortConfig(
+    "openai",
+    "gpt-4o",
+  );
+  assert.deepEqual(
+    [...validValues],
+    ["none", "minimal", "low", "medium", "high", "xhigh"],
+  );
+  assert.equal(defaultValue, "medium");
+});
+
+test("openai empty model returns all-except-max with medium default", () => {
+  const { validValues, defaultValue } = getProviderEffortConfig("openai", "");
+  assert.deepEqual(
+    [...validValues],
+    ["none", "minimal", "low", "medium", "high", "xhigh"],
+  );
+  assert.equal(defaultValue, "medium");
+});
+
+// gpt-5-pro must not match the gpt-5 base bucket
+test("openai gpt-5-pro is not matched by gpt-5 base bucket", () => {
+  const { validValues } = getProviderEffortConfig("openai", "gpt-5-pro");
+  assert.deepEqual(
+    [...validValues],
+    ["high"],
+    "gpt-5-pro must use its own table",
+  );
+});
+
+// gpt-5.10 must NOT match gpt-5.1 (digit boundary)
+test("openai gpt-5.10 is not matched by gpt-5.1 token", () => {
+  const { validValues } = getProviderEffortConfig("openai", "gpt-5.10");
+  // gpt-5.10 doesn't match any specific family → falls into unknown table
+  assert.deepEqual(
+    [...validValues],
+    ["none", "minimal", "low", "medium", "high", "xhigh"],
+  );
+});
+
+// ---------------------------------------------------------------------------
+// getProviderEffortConfig — DatabricksV2 routing
+// ---------------------------------------------------------------------------
+
+test("databricks_v2 with claude-opus-4-7 routes to anthropic xhigh table", () => {
+  const { validValues, defaultValue } = getProviderEffortConfig(
+    "databricks_v2",
+    "claude-opus-4-7",
+  );
+  assert.deepEqual([...validValues], ["low", "medium", "high", "xhigh", "max"]);
+  assert.equal(defaultValue, "high");
+});
+
+test("databricks_v2 with databricks-prefixed claude model strips prefix and routes correctly", () => {
+  const { validValues, defaultValue } = getProviderEffortConfig(
+    "databricks_v2",
+    "databricks-claude-opus-4-7",
+  );
+  assert.deepEqual([...validValues], ["low", "medium", "high", "xhigh", "max"]);
+  assert.equal(defaultValue, "high");
+});
+
+test("databricks_v2 with gpt-5.4 routes to openai gpt-5.5/5.4 table", () => {
+  const { validValues, defaultValue } = getProviderEffortConfig(
+    "databricks_v2",
+    "gpt-5.4",
+  );
+  assert.deepEqual(
+    [...validValues],
+    ["none", "low", "medium", "high", "xhigh"],
+  );
+  assert.equal(defaultValue, "medium");
+});
+
+test("databricks_v2 with databricks-gpt-5.1 strips prefix and routes to OpenAI gpt-5.1", () => {
+  const { validValues, defaultValue } = getProviderEffortConfig(
+    "databricks_v2",
+    "databricks-gpt-5.1",
+  );
+  assert.deepEqual([...validValues], ["none", "low", "medium", "high"]);
+  assert.equal(defaultValue, "none");
+});
+
+test("databricks_v2 with unknown model returns all-7 with medium default", () => {
+  const { validValues, defaultValue } = getProviderEffortConfig(
+    "databricks_v2",
+    "llama-3",
+  );
+  assert.equal(validValues.length, 7);
+  assert.equal(defaultValue, "medium");
+});
+
+// ---------------------------------------------------------------------------
+// getProviderEffortConfig — databricks v1 and other providers
+// ---------------------------------------------------------------------------
+
+test("databricks v1 routes like openai unknown (no gpt-5 model)", () => {
+  const { validValues, defaultValue } = getProviderEffortConfig(
+    "databricks",
+    "",
+  );
+  assert.deepEqual(
+    [...validValues],
+    ["none", "minimal", "low", "medium", "high", "xhigh"],
+  );
+  assert.equal(defaultValue, "medium");
+});
+
+test("openai-compat returns all-7 with medium default", () => {
+  const { validValues, defaultValue } = getProviderEffortConfig(
+    "openai-compat",
+    "",
+  );
+  assert.equal(validValues.length, 7);
+  assert.equal(defaultValue, "medium");
+});
+
+test("empty provider returns all-7 with medium default", () => {
+  const { validValues, defaultValue } = getProviderEffortConfig("", "");
+  assert.equal(validValues.length, 7);
+  assert.equal(defaultValue, "medium");
+});
+
+test("unknown provider returns all-7 with medium default", () => {
+  const { validValues, defaultValue } = getProviderEffortConfig("goose", "");
+  assert.equal(validValues.length, 7);
+  assert.equal(defaultValue, "medium");
+});
+
+// ---------------------------------------------------------------------------
+// getProviderEffortConfig — provider case-insensitivity
+// ---------------------------------------------------------------------------
+
+test("provider id matching is case-insensitive", () => {
+  const lower = getProviderEffortConfig("anthropic", "claude-opus-4-7");
+  const upper = getProviderEffortConfig("Anthropic", "claude-opus-4-7");
+  assert.deepEqual([...lower.validValues], [...upper.validValues]);
+  assert.equal(lower.defaultValue, upper.defaultValue);
 });

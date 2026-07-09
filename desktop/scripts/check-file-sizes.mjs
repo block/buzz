@@ -335,7 +335,8 @@ const overrides = new Map([
   // Feature logic, not generic debt. Approved override; still queued to split.
   // +23 rebase onto #1667: behavioral quad fields (respond_to/parallelism/toolsets)
   // plumbed through AgentInstanceEditDialog from PersonaAdvancedFields.
-  ["src/features/agents/ui/AgentInstanceEditDialog.tsx", 1163],
+  // +2 provider-aware effort: model/provider props threaded to BuzzAgentModelTuningFields.
+  ["src/features/agents/ui/AgentInstanceEditDialog.tsx", 1165],
 ]);
 
 await runFileSizeCheck({

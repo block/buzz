@@ -24,8 +24,10 @@ export function EditAgentAdvancedFields({
   inheritHarness,
   linkedPersona,
   mcpToolsets,
+  model,
   modelTuningRuntimeId,
   parallelism,
+  provider,
   relayUrl,
   requiredEnvKeys,
   selectedRuntimeId,
@@ -54,6 +56,8 @@ export function EditAgentAdvancedFields({
   inheritHarness: boolean;
   linkedPersona: AgentPersona | null;
   mcpToolsets: string;
+  /** Active LLM model — forwarded to BuzzAgentModelTuningFields for effort filtering. */
+  model?: string;
   /**
    * The actual/prospective runtime id used to decide whether to show the
    * buzz-agent model-tuning fields. Uses `prospectiveRuntimeId` from
@@ -61,6 +65,8 @@ export function EditAgentAdvancedFields({
    */
   modelTuningRuntimeId: string;
   parallelism: string;
+  /** Active LLM provider id — forwarded to BuzzAgentModelTuningFields for effort filtering. */
+  provider?: string;
   relayUrl: string;
   requiredEnvKeys: readonly string[];
   selectedRuntimeId: string;
@@ -348,6 +354,7 @@ export function EditAgentAdvancedFields({
         <BuzzAgentModelTuningFields
           envVars={envVars}
           inheritedEnvVars={inheritedEnvVars}
+          model={model}
           onEnvVarChange={(key, value) => {
             const next = { ...envVars };
             if (value === "") {
@@ -357,6 +364,7 @@ export function EditAgentAdvancedFields({
             }
             onEnvVarsChange(next);
           }}
+          provider={provider}
         />
       ) : null}
     </div>

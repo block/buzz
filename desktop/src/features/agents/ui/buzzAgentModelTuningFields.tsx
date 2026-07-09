@@ -13,17 +13,27 @@ import {
   BUZZ_AGENT_MAX_ROUNDS,
   BUZZ_AGENT_THINKING_EFFORT,
   BUZZ_AGENT_THINKING_EFFORT_VALUES,
+  getProviderEffortConfig,
 } from "./buzzAgentConfig";
 
 export function BuzzAgentModelTuningFields({
   envVars,
   inheritedEnvVars,
+  model,
   onEnvVarChange,
+  provider,
 }: {
   envVars: EnvVarsValue;
   inheritedEnvVars: EnvVarsValue;
+  /** Active LLM model (optional) — used with `provider` for effort filtering. */
+  model?: string;
   onEnvVarChange: (key: string, value: string) => void;
+  /** Active LLM provider id (optional) — used for effort filtering + default labels. */
+  provider?: string;
 }) {
+  const effortConfig = getProviderEffortConfig(provider ?? "", model);
+  const { validValues: effortValid, defaultValue: effortDefault } =
+    effortConfig;
   return (
     <div className="space-y-4">
       <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
@@ -48,13 +58,19 @@ export function BuzzAgentModelTuningFields({
             <option value="">
               {inheritedEnvVars[BUZZ_AGENT_THINKING_EFFORT]
                 ? `Inherit (${inheritedEnvVars[BUZZ_AGENT_THINKING_EFFORT]})`
-                : "Inherit (agent default)"}
+                : effortDefault === null
+                  ? "Inherit (default)"
+                  : "Inherit (agent default)"}
             </option>
-            {BUZZ_AGENT_THINKING_EFFORT_VALUES.map((v) => (
-              <option key={v} value={v}>
-                {v}
-              </option>
-            ))}
+            {BUZZ_AGENT_THINKING_EFFORT_VALUES.map((v) => {
+              const isValid = (effortValid as readonly string[]).includes(v);
+              const isDefault = v === effortDefault;
+              return (
+                <option disabled={!isValid} key={v} value={v}>
+                  {isDefault ? `${v} (default)` : v}
+                </option>
+              );
+            })}
           </select>
           <p
             className="text-xs text-muted-foreground"

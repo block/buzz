@@ -28,6 +28,11 @@ import {
 } from "@/features/agents/ui/personaDialogPickers";
 import { AgentModelField } from "@/features/agents/ui/personaProviderModelFields";
 import { usePersonaModelDiscovery } from "@/features/agents/ui/usePersonaModelDiscovery";
+import {
+  BUZZ_AGENT_THINKING_EFFORT,
+  BUZZ_AGENT_THINKING_EFFORT_VALUES,
+  getProviderEffortConfig,
+} from "@/features/agents/ui/buzzAgentConfig";
 import { Button } from "@/shared/ui/button";
 import { Input } from "@/shared/ui/input";
 import { SettingsSectionHeader } from "./SettingsSectionHeader";
@@ -259,11 +264,84 @@ export function GlobalAgentConfigSettingsCard() {
             </p>
           </div>
 
+          {/* Thinking / Effort — tier-1 dropdown, single editable surface for BUZZ_AGENT_THINKING_EFFORT */}
+          {(() => {
+            const effortConfig = getProviderEffortConfig(
+              config.provider ?? "",
+              config.model ?? "",
+            );
+            const { validValues: effortValid, defaultValue: effortDefault } =
+              effortConfig;
+            const currentEffort =
+              config.env_vars[BUZZ_AGENT_THINKING_EFFORT] ?? "";
+            return (
+              <div className="space-y-1.5 p-3">
+                <label
+                  className="text-sm font-medium"
+                  htmlFor="global-agent-thinking-effort"
+                >
+                  Default thinking / effort
+                </label>
+                <select
+                  className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-2 text-sm shadow-xs"
+                  data-testid="global-agent-thinking-effort-select"
+                  id="global-agent-thinking-effort"
+                  onChange={(event) => {
+                    const value = event.target.value;
+                    setConfig((prev) => {
+                      const nextEnvVars = { ...prev.env_vars };
+                      if (value === "") {
+                        delete nextEnvVars[BUZZ_AGENT_THINKING_EFFORT];
+                      } else {
+                        nextEnvVars[BUZZ_AGENT_THINKING_EFFORT] = value;
+                      }
+                      return { ...prev, env_vars: nextEnvVars };
+                    });
+                    setDirty(true);
+                  }}
+                  value={currentEffort}
+                >
+                  <option value="">
+                    {effortDefault === null ? "Inherit (default)" : "Inherit"}
+                  </option>
+                  {BUZZ_AGENT_THINKING_EFFORT_VALUES.map((v) => {
+                    const isValid = (effortValid as readonly string[]).includes(
+                      v,
+                    );
+                    const isDefault = v === effortDefault;
+                    return (
+                      <option disabled={!isValid} key={v} value={v}>
+                        {isDefault ? `${v} (default)` : v}
+                      </option>
+                    );
+                  })}
+                </select>
+                <p className="text-xs text-muted-foreground">
+                  Default thinking/reasoning effort applied to all agents.
+                  Per-agent settings override this.
+                </p>
+              </div>
+            );
+          })()}
+
           {/* Env vars */}
           <div className="p-3">
             <EnvVarsEditor
-              value={config.env_vars}
-              onChange={handleEnvVarsChange}
+              value={Object.fromEntries(
+                Object.entries(config.env_vars).filter(
+                  ([k]) => k !== BUZZ_AGENT_THINKING_EFFORT,
+                ),
+              )}
+              onChange={(next) => {
+                // Merge with the thinking-effort value managed by the tier-1
+                // dropdown above, preserving it across raw env-var edits.
+                const effort = config.env_vars[BUZZ_AGENT_THINKING_EFFORT];
+                const merged =
+                  effort !== undefined
+                    ? { ...next, [BUZZ_AGENT_THINKING_EFFORT]: effort }
+                    : next;
+                handleEnvVarsChange(merged);
+              }}
               label="Global environment variables"
               helperText="Injected into all agents as the lowest-priority layer. Per-agent values override these."
             />

@@ -16,11 +16,13 @@ export function PersonaAdvancedFields({
   disabled,
   envVars,
   inheritedEnvVars = {},
+  model,
   modelTuningRuntimeId = "",
   namePoolText,
   onBehaviorDraftChange,
   onEnvVarsChange,
   onNamePoolTextChange,
+  provider,
   requiredEnvKeys = [],
   fileSatisfiedEnvKeys = [],
 }: {
@@ -30,12 +32,16 @@ export function PersonaAdvancedFields({
   /** Env vars to display as inherited defaults in tuning-field placeholders.
    *  For templates, pass `globalConfig.env_vars` (the fallback layer). */
   inheritedEnvVars?: EnvVarsValue;
+  /** Active LLM model — forwarded to BuzzAgentModelTuningFields for effort filtering. */
+  model?: string;
   /** Runtime id for the buzz-agent tuning knobs visibility gate. */
   modelTuningRuntimeId?: string;
   namePoolText: string;
   onBehaviorDraftChange: (value: PersonaBehaviorDraft) => void;
   onEnvVarsChange: (value: EnvVarsValue) => void;
   onNamePoolTextChange: (value: string) => void;
+  /** Active LLM provider id — forwarded to BuzzAgentModelTuningFields for effort filtering. */
+  provider?: string;
   requiredEnvKeys?: readonly string[];
   fileSatisfiedEnvKeys?: readonly string[];
 }) {
@@ -181,6 +187,7 @@ export function PersonaAdvancedFields({
         <BuzzAgentModelTuningFields
           envVars={envVars}
           inheritedEnvVars={inheritedEnvVars}
+          model={model}
           onEnvVarChange={(key, value) => {
             const next = { ...envVars };
             if (value === "") {
@@ -190,6 +197,7 @@ export function PersonaAdvancedFields({
             }
             onEnvVarsChange(next);
           }}
+          provider={provider}
         />
       ) : null}
     </div>

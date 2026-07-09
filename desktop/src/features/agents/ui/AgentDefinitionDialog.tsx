@@ -954,11 +954,13 @@ export function AgentDefinitionDialog({
                       envVars={envVars}
                       fileSatisfiedEnvKeys={localModeGate.fileSatisfiedEnvKeys}
                       inheritedEnvVars={globalConfig.env_vars}
+                      model={model}
                       modelTuningRuntimeId={runtime}
                       namePoolText={namePoolText}
                       onBehaviorDraftChange={setBehaviorDraft}
                       onEnvVarsChange={setEnvVars}
                       onNamePoolTextChange={setNamePoolText}
+                      provider={provider}
                       requiredEnvKeys={requiredEnvKeys}
                     />
                   </motion.div>
