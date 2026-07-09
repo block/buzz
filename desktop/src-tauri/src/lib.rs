@@ -70,15 +70,15 @@ fn perform_sidebar_default_haptic() {
 /// Performs the window action matching the macOS "double-click a window's
 /// title bar to" preference (`AppleActionOnDoubleClick`).
 ///
-/// macOS values are `Minimize`, `Maximize` (default when unset), or `None`.
+/// macOS values are `Minimize`, `Maximize` (default when unset), `Fill`, or
+/// `None`.
 /// The desktop app uses a web-based title-bar drag region, so the frontend
 /// forwards double-clicks here and suppresses Tauri's injected drag-region
 /// handler, whose default macOS path hardcodes maximize.
 ///
-/// For the `Minimize` case we call the native `NSWindow.miniaturize:` so the
-/// window genies into the Dock like other macOS apps. Tauri's own
-/// `Window::minimize()` collapses the window in place for this window style
-/// rather than miniaturizing to the Dock, so we go through AppKit directly.
+/// For `Fill`, resize to the current monitor work area instead of using
+/// Tauri's maximize path, which maps to macOS zoom for titled, resizable
+/// windows.
 ///
 /// On non-macOS platforms this always toggles maximize (the historical
 /// behavior).
@@ -101,28 +101,10 @@ fn title_bar_double_click(window: tauri::Window) {
         match action.as_str() {
             "None" => {}
             "Minimize" => {
-                let window_for_main = window.clone();
-                if window
-                    .run_on_main_thread(move || {
-                        if let Ok(ptr) = window_for_main.ns_window() {
-                            if !ptr.is_null() {
-                                // SAFETY: `ns_window()` returns this live
-                                // window's NSWindow. The call is dispatched to
-                                // AppKit's main thread and sends a standard
-                                // `miniaturize:` message so Dock animation
-                                // preferences, including Genie, are honored.
-                                let ns_window: &objc2_app_kit::NSWindow = unsafe { &*ptr.cast() };
-                                ns_window.miniaturize(None);
-                                return;
-                            }
-                        }
-
-                        let _ = window_for_main.minimize();
-                    })
-                    .is_err()
-                {
-                    let _ = window.minimize();
-                }
+                let _ = window.minimize();
+            }
+            "Fill" => {
+                fill_window(&window);
             }
             // "Maximize" or any unexpected value.
             _ => {
@@ -134,6 +116,26 @@ fn title_bar_double_click(window: tauri::Window) {
     #[cfg(not(target_os = "macos"))]
     {
         toggle_maximize(&window);
+    }
+}
+
+/// Fills the current display work area, excluding system UI like the menu bar
+/// and Dock.
+#[cfg(target_os = "macos")]
+fn fill_window(window: &tauri::Window) {
+    match window.current_monitor() {
+        Ok(Some(monitor)) => {
+            if window.is_maximized().unwrap_or(false) {
+                let _ = window.unmaximize();
+            }
+
+            let work_area = monitor.work_area();
+            let _ = window.set_position(work_area.position);
+            let _ = window.set_size(work_area.size);
+        }
+        _ => {
+            let _ = window.maximize();
+        }
     }
 }
 
