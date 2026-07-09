@@ -4,21 +4,24 @@
  * window where Tab/Enter fires before the debounce catches up to typed text.
  */
 import type { MentionSuggestion } from "@/features/messages/ui/MentionAutocomplete";
+import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type { ChannelType } from "@/shared/api/types";
 import { detectPrefixQuery } from "@/shared/lib/detectPrefixQuery";
 import {
   type MentionCandidateForRanking,
   rankMentionCandidates,
 } from "./mentionRanking";
+import {
+  mapMentionCandidateToSuggestion,
+  type MentionSuggestionCandidate,
+} from "./mentionSuggestionMapping";
 
-type MentionCandidateWithUI = MentionCandidateForRanking & {
-  avatarUrl?: string | null;
-  kind: "identity" | "persona";
-  personaId?: string;
-  pubkey?: string;
-  isMember: boolean;
-  role?: string | null;
-};
+type MentionCandidateWithUI = MentionCandidateForRanking &
+  MentionSuggestionCandidate;
+
+export type FlushMentionDebounceResult =
+  | { type: "match"; suggestion: MentionSuggestion; startIndex: number }
+  | { type: "no-match" };
 
 /**
  * Cancel the pending debounce timer, re-detect the prefix query from the
@@ -35,7 +38,10 @@ export function flushMentionDebounce<T extends MentionCandidateWithUI>(opts: {
   candidates: readonly T[];
   activePersonaIds: ReadonlySet<string>;
   channelType?: ChannelType | null;
-}): { suggestion: MentionSuggestion; startIndex: number } | null {
+  currentPubkey?: string | null;
+  ownerProfiles?: UserProfileLookup;
+  profiles?: UserProfileLookup;
+}): FlushMentionDebounceResult | null {
   if (opts.debounceTimerRef.current !== null) {
     clearTimeout(opts.debounceTimerRef.current);
   }
@@ -59,22 +65,20 @@ export function flushMentionDebounce<T extends MentionCandidateWithUI>(opts: {
   );
 
   if (ranked.length === 0) {
-    return null;
+    return { type: "no-match" };
   }
 
   const { candidate, label } = ranked[0];
   return {
-    suggestion: {
-      pubkey: candidate.pubkey,
-      personaId: candidate.personaId,
-      kind: candidate.kind,
-      displayName: label,
-      avatarUrl: candidate.avatarUrl ?? null,
-      isAgent: candidate.isAgent,
-      notInChannel: opts.channelType !== "dm" && candidate.isMember === false,
-      ownerLabel: null,
-      role: !candidate.isAgent && candidate.role === "admin" ? "admin" : null,
-    },
+    type: "match",
+    suggestion: mapMentionCandidateToSuggestion({
+      candidate,
+      label,
+      channelType: opts.channelType,
+      currentPubkey: opts.currentPubkey,
+      ownerProfiles: opts.ownerProfiles,
+      profiles: opts.profiles,
+    }),
     startIndex: mention.startIndex,
   };
 }

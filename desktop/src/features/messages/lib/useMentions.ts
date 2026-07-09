@@ -32,13 +32,13 @@ import type {
   UserSearchResult,
 } from "@/shared/api/types";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
-import { formatOwnerLabel } from "@/features/profile/lib/identity";
 import { detectPrefixQuery } from "@/shared/lib/detectPrefixQuery";
 import { normalizePubkey, truncatePubkey } from "@/shared/lib/pubkey";
 import { trimMapToSize } from "@/shared/lib/trimMapToSize";
 import { flushMentionDebounce } from "./flushMentionDebounce";
 import { hasMention } from "./hasMention";
 import { rankMentionCandidates } from "./mentionRanking";
+import { mapMentionCandidateToSuggestion } from "./mentionSuggestionMapping";
 
 const MENTION_DEBOUNCE_MS = 120;
 const MENTION_SUGGESTION_LIMIT = 50;
@@ -560,35 +560,16 @@ export function useMentions(
       activePersonaIds,
     )
       .slice(0, Math.max(MENTION_SUGGESTION_LIMIT, mentionCandidates.length))
-      .map(({ candidate, label }) => {
-        const ownerLabel = candidate.isAgent
-          ? formatOwnerLabel(
-              candidate.ownerPubkey,
-              currentPubkey,
-              ownerProfilesQuery.data?.profiles,
-            )
-          : null;
-        const notInChannel =
-          options?.channelType !== "dm" && candidate.isMember === false;
-
-        return {
-          pubkey: candidate.pubkey,
-          personaId: candidate.personaId,
-          kind: candidate.kind,
-          displayName: label,
-          avatarUrl:
-            candidate.avatarUrl ??
-            (candidate.pubkey
-              ? profiles?.[normalizePubkey(candidate.pubkey)]?.avatarUrl
-              : null) ??
-            null,
-          isAgent: candidate.isAgent,
-          notInChannel,
-          ownerLabel,
-          role:
-            !candidate.isAgent && candidate.role === "admin" ? "admin" : null,
-        };
-      });
+      .map(({ candidate, label }) =>
+        mapMentionCandidateToSuggestion({
+          candidate,
+          label,
+          channelType: options?.channelType,
+          currentPubkey,
+          ownerProfiles: ownerProfilesQuery.data?.profiles,
+          profiles,
+        }),
+      );
   }, [
     activePersonaIds,
     currentPubkey,
@@ -934,13 +915,20 @@ export function useMentions(
             candidates: mentionCandidates,
             activePersonaIds,
             channelType: options?.channelType,
+            currentPubkey,
+            ownerProfiles: ownerProfilesQuery.data?.profiles,
+            profiles,
           });
-          if (flushed) {
+          if (flushed?.type === "match") {
             flushedMentionStartIndexRef.current = flushed.startIndex;
             setMentionQuery(null); // reset so dropdown closes
             return { handled: true, suggestion: flushed.suggestion };
           }
-          // No match after flush — fall through to existing suggestions.
+          if (flushed?.type === "no-match") {
+            setMentionQuery(null);
+            return { handled: true };
+          }
+          // Plain `@` after flush intentionally falls through to existing suggestions.
         }
 
         return { handled: true, suggestion: suggestions[mentionSelectedIndex] };
@@ -956,10 +944,13 @@ export function useMentions(
     },
     [
       activePersonaIds,
+      currentPubkey,
       isMentionOpen,
       mentionCandidates,
       mentionSelectedIndex,
       options?.channelType,
+      ownerProfilesQuery.data?.profiles,
+      profiles,
       suggestions,
     ],
   );

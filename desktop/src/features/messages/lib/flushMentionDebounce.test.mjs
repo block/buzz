@@ -35,15 +35,30 @@ test("flushMentionDebounce returns the fresh suggestion with its fresh start ind
   });
 
   assert.equal(debounceTimerRef.current, null);
+  assert.equal(flushed?.type, "match");
   assert.equal(flushed?.suggestion.displayName, "Beta");
   assert.equal(flushed?.startIndex, 7);
 });
 
-test("flushMentionDebounce returns null for a fresh query with no matches", () => {
+test("flushMentionDebounce returns no-match for a fresh query with no matches", () => {
   const flushed = flushMentionDebounce({
     debounceTimerRef: ref(setTimeout(() => {}, 1000)),
     latestValueRef: ref("@Alpha @zzzq"),
     latestCursorRef: ref("@Alpha @zzzq".length),
+    searchableNamesLowerRef: ref(["alpha", "beta"]),
+    candidates: [candidate()],
+    activePersonaIds: new Set(),
+    channelType: "group",
+  });
+
+  assert.deepEqual(flushed, { type: "no-match" });
+});
+
+test("flushMentionDebounce returns null for an empty fresh query", () => {
+  const flushed = flushMentionDebounce({
+    debounceTimerRef: ref(setTimeout(() => {}, 1000)),
+    latestValueRef: ref("@"),
+    latestCursorRef: ref("@".length),
     searchableNamesLowerRef: ref(["alpha", "beta"]),
     candidates: [candidate()],
     activePersonaIds: new Set(),
