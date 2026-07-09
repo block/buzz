@@ -8,8 +8,10 @@ import 'features/channels/unread_badge/unread_badge_provider.dart';
 import 'features/home/home_page.dart';
 import 'features/pairing/pairing_page.dart';
 import 'features/channels/agent_activity/observer_subscription.dart';
+import 'features/channels/deep_link_dispatcher.dart';
 import 'features/profile/user_status_cache_provider.dart';
 import 'shared/auth/auth.dart';
+import 'shared/deeplink/pending_deep_link_provider.dart';
 import 'shared/relay/relay.dart';
 import 'shared/theme/theme.dart';
 
@@ -39,6 +41,10 @@ class App extends HookConsumerWidget {
       ref.watch(userStatusCacheProvider);
     }
 
+    // Start listening for buzz:// links immediately (even pre-auth) so a
+    // cold-start link survives until the authenticated UI can dispatch it.
+    ref.watch(pendingDeepLinkProvider);
+
     void applyBadge(UnreadBadgeState state) {
       if (state.highPriorityCount > 0) {
         AppBadgePlus.updateBadge(state.highPriorityCount);
@@ -66,7 +72,9 @@ class App extends HookConsumerWidget {
         loading: () => const _SplashScreen(),
         error: (_, _) => const PairingPage(),
         data: (state) => switch (state.status) {
-          AuthStatus.authenticated => const HomePage(),
+          AuthStatus.authenticated => const DeepLinkDispatcher(
+            child: HomePage(),
+          ),
           _ => const PairingPage(),
         },
       ),
