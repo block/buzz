@@ -355,6 +355,106 @@ fn persist_agent_keys_with(store: &impl KeyStore, records: &mut [ManagedAgentRec
         }
     }
 }
+
+/// One-time migration of agent keys from the production keyring service
+/// (`"buzz-desktop"`) to the dev service (`"buzz-desktop-dev"`). Only runs
+/// in debug builds — release builds never touch `"buzz-desktop"` from this
+/// path.
+///
+/// Idempotent: skips any key that already exists in the dev service so
+/// repeated boots after migration are no-ops. Leaves the production keyring
+/// untouched — a dev build and a prod install can coexist without sharing
+/// keys after this migration.
+///
+/// Call this at boot before `hydrate_keys` runs (i.e. before
+/// `load_managed_agents` is called) so agents find their keys on first boot
+/// after the service-name change.
+#[cfg(debug_assertions)]
+pub fn migrate_agent_keys_to_dev_service(app: &tauri::AppHandle) {
+    if !cfg!(feature = "system-keyring") {
+        return;
+    }
+
+    // Read the JSON store for pubkeys only — we want every instance
+    // record without running hydrate_keys (which would try the dev
+    // keyring that is empty, and log noisy "has no key" warnings).
+    let records = match load_agent_store(app) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("buzz-desktop: keyring-dev-migration: cannot read agent store: {e}");
+            return;
+        }
+    };
+
+    let pubkeys: Vec<String> = records
+        .into_iter()
+        .filter(|r| !r.pubkey.is_empty())
+        .map(|r| r.pubkey)
+        .collect();
+
+    if pubkeys.is_empty() {
+        return;
+    }
+
+    // A fresh non-singleton store for the prod service — its own empty
+    // cache so reads go to the OS keyring without polluting the dev
+    // singleton's cache.
+    let prod_store = crate::secret_store::SecretStore::keyring("buzz-desktop");
+    let dev_store = crate::secret_store::SecretStore::shared(keyring_service());
+    copy_agent_keys_between_stores(&pubkeys, &prod_store, dev_store);
+}
+
+/// Testable core of [`migrate_agent_keys_to_dev_service`]: copy `agent:<pubkey>`
+/// entries from `src` to `dst` for each pubkey, skipping entries that already
+/// exist in `dst` (idempotency) and entries absent from `src` (new agents that
+/// will mint fresh keys). Does NOT copy `"identity"`.
+#[cfg(debug_assertions)]
+fn copy_agent_keys_between_stores(
+    pubkeys: &[String],
+    src: &impl KeyStore,
+    dst: &impl KeyStore,
+) {
+    let mut copied = 0usize;
+    for pubkey in pubkeys {
+        let name = agent_keyring_name(pubkey);
+
+        // Idempotency: if the dst keyring already has this key, skip.
+        match dst.load(&name) {
+            Ok(Some(_)) => continue,
+            Ok(None) => {}
+            Err(_) => continue, // dst keyring unreachable — skip silently
+        }
+
+        // Read from src keyring.
+        let nsec = match src.load(&name) {
+            Ok(Some(v)) => v,
+            Ok(None) => continue, // not in src keyring — new key, minted fresh later
+            Err(e) => {
+                eprintln!(
+                    "buzz-desktop: keyring-dev-migration: cannot read agent {pubkey} from source keyring: {e}"
+                );
+                continue;
+            }
+        };
+
+        // Write to dst keyring.
+        if let Err(e) = dst.write_and_verify(&name, &nsec) {
+            eprintln!(
+                "buzz-desktop: keyring-dev-migration: cannot write agent {pubkey} to dev service: {e}"
+            );
+            continue;
+        }
+
+        copied += 1;
+    }
+
+    if copied > 0 {
+        eprintln!(
+            "buzz-desktop: keyring-dev-migration: copied {copied} agent key(s) from buzz-desktop"
+        );
+    }
+}
+
 /// Remove an agent's key from the keyring (best-effort). Called when an agent
 /// is deleted so its secret does not linger in the OS store.
 pub fn delete_agent_key(pubkey: &str) {
@@ -941,5 +1041,102 @@ mod tests {
             strip_ansi_escapes::strip_str(input),
             "2026-05-27T15:16:32  INFO buzz_acp: starting"
         );
+    }
+
+    // ── keyring-dev-migration tests ────────────────────────────────────────
+
+    #[test]
+    fn copy_agent_keys_copies_keys_present_in_src_to_dst() {
+        // Keys in src but not in dst must be copied.
+        let src = FakeKeyStore::reachable()
+            .with_key(&agent_keyring_name("agent-alpha"), "nsec1alpha")
+            .with_key(&agent_keyring_name("agent-beta"), "nsec1beta");
+        let dst = FakeKeyStore::reachable();
+
+        super::copy_agent_keys_between_stores(
+            &[
+                "agent-alpha".to_string(),
+                "agent-beta".to_string(),
+            ],
+            &src,
+            &dst,
+        );
+
+        assert_eq!(
+            dst.stored.borrow().get(&agent_keyring_name("agent-alpha")).map(String::as_str),
+            Some("nsec1alpha"),
+            "agent-alpha must be copied from src to dst"
+        );
+        assert_eq!(
+            dst.stored.borrow().get(&agent_keyring_name("agent-beta")).map(String::as_str),
+            Some("nsec1beta"),
+            "agent-beta must be copied from src to dst"
+        );
+    }
+
+    #[test]
+    fn copy_agent_keys_skips_keys_already_in_dst() {
+        // Idempotency: a key already present in dst must NOT be overwritten
+        // — the agent may have rotated their key in the dev service.
+        let src = FakeKeyStore::reachable()
+            .with_key(&agent_keyring_name("agent-alpha"), "nsec1old");
+        let dst = FakeKeyStore::reachable()
+            .with_key(&agent_keyring_name("agent-alpha"), "nsec1new");
+
+        super::copy_agent_keys_between_stores(
+            &["agent-alpha".to_string()],
+            &src,
+            &dst,
+        );
+
+        // dst value must remain unchanged — src must not overwrite it.
+        assert_eq!(
+            dst.stored.borrow().get(&agent_keyring_name("agent-alpha")).map(String::as_str),
+            Some("nsec1new"),
+            "key already in dst must not be overwritten by migration"
+        );
+        assert_eq!(
+            *dst.write_count.borrow(),
+            0,
+            "no writes should occur when key already present in dst"
+        );
+    }
+
+    #[test]
+    fn copy_agent_keys_skips_keys_absent_from_src() {
+        // A pubkey with no entry in src (new agent that will mint a fresh key)
+        // must be silently skipped — no write to dst.
+        let src = FakeKeyStore::reachable(); // empty
+        let dst = FakeKeyStore::reachable();
+
+        super::copy_agent_keys_between_stores(
+            &["new-agent".to_string()],
+            &src,
+            &dst,
+        );
+
+        assert!(
+            dst.stored.borrow().is_empty(),
+            "absent src key must produce no write to dst"
+        );
+    }
+
+    #[test]
+    fn copy_agent_keys_skips_all_when_dst_unreachable() {
+        // When dst keyring is unreachable the migration must be a no-op — never
+        // data-loss (failing to write is fine; the agent will re-mint on next
+        // onboarding run).
+        let src = FakeKeyStore::reachable()
+            .with_key(&agent_keyring_name("agent-alpha"), "nsec1alpha");
+        let dst = FakeKeyStore::unreachable();
+
+        super::copy_agent_keys_between_stores(
+            &["agent-alpha".to_string()],
+            &src,
+            &dst,
+        );
+
+        // No writes attempted to an unreachable dst.
+        assert_eq!(*dst.write_count.borrow(), 0);
     }
 }

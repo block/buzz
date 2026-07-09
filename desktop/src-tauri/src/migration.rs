@@ -145,6 +145,16 @@ pub fn run_boot_migrations(app: &tauri::AppHandle) {
 
     migrate_legacy_app_data_dir(app);
     sync_shared_agent_data(app);
+    // Dev-build-only: copy any agent keys that exist in the production
+    // keyring ("buzz-desktop") into the dev service ("buzz-desktop-dev")
+    // so existing agents don't lose their keys after the service-name split.
+    // Must run after sync_shared_agent_data (JSON symlinked) and before
+    // any load_managed_agents call (which runs hydrate_keys against the
+    // dev service and would log "has no key" for un-migrated entries).
+    #[cfg(debug_assertions)]
+    if is_dev {
+        crate::managed_agents::migrate_agent_keys_to_dev_service(app);
+    }
     migrate_packs_to_teams(app);
     reconcile_persona_team_dirs(app);
     migrate_persona_provider_to_runtime(app);
