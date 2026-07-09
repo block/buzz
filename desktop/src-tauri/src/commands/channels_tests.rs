@@ -2,10 +2,14 @@
 // channels.rs under the per-file line cap.
 
 use super::*;
-use nostr::{EventBuilder, Keys, Kind, Tag};
+use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
 
 /// Build a signed event for testing with the given kind, content, and tags.
 fn ev(kind: u16, content: &str, tags: Vec<Vec<&str>>) -> nostr::Event {
+    ev_at(kind, content, tags, Timestamp::now())
+}
+
+fn ev_at(kind: u16, content: &str, tags: Vec<Vec<&str>>, created_at: Timestamp) -> nostr::Event {
     let keys = Keys::generate();
     let parsed: Vec<Tag> = tags
         .into_iter()
@@ -13,6 +17,7 @@ fn ev(kind: u16, content: &str, tags: Vec<Vec<&str>>) -> nostr::Event {
         .collect();
     EventBuilder::new(Kind::from_u16(kind), content)
         .tags(parsed)
+        .custom_created_at(created_at)
         .sign_with_keys(&keys)
         .expect("sign")
 }
@@ -21,6 +26,18 @@ fn ev(kind: u16, content: &str, tags: Vec<Vec<&str>>) -> nostr::Event {
 const PK_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const PK_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const PK_C: &str = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+
+#[test]
+fn directory_cursor_keeps_same_second_tiebreaker() {
+    let timestamp = Timestamp::from(1_700_000_000);
+    let event = ev_at(39000, "{}", vec![], timestamp);
+    let mut filter = serde_json::json!({"kinds": [39000], "limit": DIRECTORY_PAGE_SIZE});
+
+    advance_directory_cursor(&mut filter, &[event.clone()]);
+
+    assert_eq!(filter["until"], serde_json::json!(timestamp.as_secs()));
+    assert_eq!(filter["before_id"], serde_json::json!(event.id.to_hex()));
+}
 
 #[test]
 fn counts_unique_p_tags_per_channel() {
