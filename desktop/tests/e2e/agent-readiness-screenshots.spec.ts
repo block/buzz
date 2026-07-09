@@ -4,10 +4,10 @@ import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
 
 const SHOTS = "test-results/agent-readiness";
 
-// An existing buzz-agent managed agent for the Edit-dialog shot.
+// An existing goose-runtime managed agent for the Edit-dialog shot.
 // Tyler's pubkey maps to gooseSurface in the mock bridge (runtimeId: "goose"),
-// which supports LLM provider selection — the shared AgentProviderField /
-// AgentModelField components render for it just as they do for buzz-agent.
+// which supports LLM provider selection — the edit dialog's provider/model
+// pickers render for it just as they do for buzz-agent.
 const EDIT_AGENT_PUBKEY = TEST_IDENTITIES.tyler.pubkey;
 
 /**
@@ -277,7 +277,7 @@ test.describe("agent readiness gate screenshots", () => {
   });
 
   // Shot 07: Edit dialog for an existing managed agent (goose runtime) showing
-  // the shared AgentProviderField / AgentModelField extraction.
+  // the provider/model pickers.
   test("07-edit-dialog-extracted-fields", async ({ page }) => {
     await installMockBridge(page, {
       managedAgents: [

@@ -66,19 +66,23 @@ async function setMesh(
 
 async function triggerManagedAgentPrimaryAction(
   page: import("@playwright/test").Page,
-  pubkey: string,
+  agentName: string,
 ) {
   // Agent lifecycle actions moved from the old per-row dropdown into the
   // profile sidebar (PR #1200): the Agents-page surfaces each agent as an
   // identity card that opens the profile panel on click, where a single
   // primary-action button toggles Stop (when running/deployed) / Start (when
   // stopped). Open the panel for this agent if it isn't already showing it,
-  // then click that toggle.
+  // then click that toggle. The card is looked up by its aria-label because
+  // persona-linked agents (the definition_start flow) render under the
+  // persona group card, which has no managed-agent-<pubkey> testid.
   const panel = page.getByTestId("user-profile-panel");
   const primaryAction = panel.getByTestId("user-profile-agent-primary-action");
   if (!(await primaryAction.isVisible().catch(() => false))) {
-    const card = page.getByTestId(`managed-agent-${pubkey}`);
-    await card.getByRole("button", { name: /agent profile$/ }).click();
+    await page
+      .getByRole("button", { name: `${agentName} agent profile` })
+      .first()
+      .click();
     await expect(panel).toBeVisible();
   }
   await expect(primaryAction).toBeEnabled();
@@ -329,17 +333,25 @@ test("saved relay-mesh agents restart via the backend serve-target preflight", a
   )?.pubkey;
   expect(pubkey).toBeTruthy();
 
-  const row = page.getByTestId(`managed-agent-${pubkey}`);
-  await expect(row).toContainText("Saved relay mesh agent");
-  await expect(
-    page.getByTestId(`agent-runtime-active-${pubkey}`),
-  ).toBeVisible();
+  // Dismiss the reveal dialog BEFORE asserting the card: the modal makes the
+  // rest of the page aria-hidden, so role-based queries can't see it yet.
   await page.getByRole("button", { name: "Done" }).click();
   await expect(page.getByRole("dialog", { name: "Agent created" })).toHaveCount(
     0,
   );
 
-  await triggerManagedAgentPrimaryAction(page, pubkey);
+  // definition_start mints the instance WITH a personaId, so it files under
+  // the persona group card (persona-agent-row-<personaId>), not the
+  // standalone managed-agent-<pubkey> card. Locate the card by the runtime
+  // control keyed on the instance pubkey and assert the agent's NAME reaches
+  // that same card (the profile-open button is an empty aria-label overlay,
+  // so the text check must target the card container).
+  const card = page
+    .locator('[data-testid^="persona-agent-row-"]')
+    .filter({ has: page.getByTestId(`agent-runtime-active-${pubkey}`) });
+  await expect(card).toContainText("Saved relay mesh agent");
+
+  await triggerManagedAgentPrimaryAction(page, "Saved relay mesh agent");
   await expect
     .poll(async () => await commands(page))
     .toContain("stop_managed_agent");
@@ -347,7 +359,7 @@ test("saved relay-mesh agents restart via the backend serve-target preflight", a
 
   // With a live serve target for the model, manual restart goes through:
   // the backend preflight re-resolves the target and the agent starts.
-  await triggerManagedAgentPrimaryAction(page, pubkey);
+  await triggerManagedAgentPrimaryAction(page, "Saved relay mesh agent");
   await expect
     .poll(async () => await commands(page))
     .toContain("start_managed_agent");
@@ -355,13 +367,13 @@ test("saved relay-mesh agents restart via the backend serve-target preflight", a
     page.getByTestId(`agent-runtime-active-${pubkey}`),
   ).toBeVisible();
 
-  await triggerManagedAgentPrimaryAction(page, pubkey);
+  await triggerManagedAgentPrimaryAction(page, "Saved relay mesh agent");
   await expect(page.getByTestId(`agent-runtime-start-${pubkey}`)).toBeVisible();
 
   // Without a live serve target, the backend preflight rejects the start
   // with an actionable error, surfaced as a toast; the agent stays stopped.
   await setMesh(page, { models: [] });
-  await triggerManagedAgentPrimaryAction(page, pubkey);
+  await triggerManagedAgentPrimaryAction(page, "Saved relay mesh agent");
 
   await expect(
     page
