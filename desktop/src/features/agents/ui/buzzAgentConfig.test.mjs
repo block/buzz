@@ -448,10 +448,32 @@ test("databricks_v2 with databricks-gpt-5.1 strips prefix and routes to OpenAI g
   assert.equal(defaultValue, "none");
 });
 
-test("databricks_v2 with unknown model returns all-7 with medium default", () => {
+test("databricks_v2 with concrete non-claude non-gpt model excludes max (MLflow clamps it)", () => {
+  // llama-3 routes through MlflowChatCompletions → normalize_effort_for_openai_route
+  // → max is clamped to xhigh. Show all-except-max so the UI is honest.
   const { validValues, defaultValue } = getProviderEffortConfig(
     "databricks_v2",
     "llama-3",
+  );
+  assert.deepEqual(
+    [...validValues],
+    ["none", "minimal", "low", "medium", "high", "xhigh"],
+  );
+  assert.equal(defaultValue, "medium");
+});
+
+test("databricks_v2 with databricks-prefixed llama model strips prefix and excludes max", () => {
+  const { validValues } = getProviderEffortConfig(
+    "databricks_v2",
+    "databricks-llama-3",
+  );
+  assert.ok(!validValues.includes("max"));
+});
+
+test("databricks_v2 with empty model returns all-7 (blank = route unknown)", () => {
+  const { validValues, defaultValue } = getProviderEffortConfig(
+    "databricks_v2",
+    "",
   );
   assert.equal(validValues.length, 7);
   assert.equal(defaultValue, "medium");
@@ -503,4 +525,53 @@ test("provider id matching is case-insensitive", () => {
   const upper = getProviderEffortConfig("Anthropic", "claude-opus-4-7");
   assert.deepEqual([...lower.validValues], [...upper.validValues]);
   assert.equal(lower.defaultValue, upper.defaultValue);
+});
+
+// ---------------------------------------------------------------------------
+// getProviderEffortConfig — auto-clear logic (valid-values membership)
+// ---------------------------------------------------------------------------
+
+// Tests below verify the validValues membership check that the auto-clear
+// useEffect in BuzzAgentModelTuningFields and GlobalAgentConfigSettingsCard
+// use to decide whether to reset the current effort to Inherit.
+
+test("effort max is invalid for OpenAI (should trigger auto-clear)", () => {
+  const { validValues } = getProviderEffortConfig("openai", "gpt-5.1");
+  assert.ok(!validValues.includes("max"), "max must not be in gpt-5.1 set");
+});
+
+test("effort none is invalid for Anthropic adaptive (should trigger auto-clear)", () => {
+  const { validValues } = getProviderEffortConfig(
+    "anthropic",
+    "claude-opus-4-7",
+  );
+  assert.ok(!validValues.includes("none"), "none must not be in anthropic set");
+});
+
+test("effort high is valid for all providers (must not trigger auto-clear)", () => {
+  for (const provider of [
+    "anthropic",
+    "openai",
+    "databricks_v2",
+    "databricks",
+    "openai-compat",
+    "",
+  ]) {
+    const { validValues } = getProviderEffortConfig(provider, "");
+    assert.ok(
+      validValues.includes("high"),
+      `high must be valid for provider "${provider}"`,
+    );
+  }
+});
+
+test("effort none is invalid for anthropic manual-budget (should trigger auto-clear)", () => {
+  const { validValues } = getProviderEffortConfig(
+    "anthropic",
+    "claude-3-7-sonnet-20250219",
+  );
+  assert.ok(
+    !validValues.includes("none"),
+    "none must not be in manual-budget set",
+  );
 });

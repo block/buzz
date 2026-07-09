@@ -123,6 +123,28 @@ export function GlobalAgentConfigSettingsCard() {
     selectedRuntime: buzzAgentRuntime,
   });
 
+  // Auto-clear BUZZ_AGENT_THINKING_EFFORT when provider/model change makes the
+  // current value invalid. Prevents stale invalid values from being saved.
+  // config.env_vars is intentionally excluded from deps — including it would re-run
+  // on every env-var edit and could cause loops; effect fires on provider/model changes.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: see comment above
+  React.useEffect(() => {
+    const currentEffort = config.env_vars[BUZZ_AGENT_THINKING_EFFORT];
+    if (!currentEffort) return;
+    const { validValues } = getProviderEffortConfig(
+      config.provider ?? "",
+      config.model ?? "",
+    );
+    if (!(validValues as readonly string[]).includes(currentEffort)) {
+      setConfig((prev) => {
+        const nextEnvVars = { ...prev.env_vars };
+        delete nextEnvVars[BUZZ_AGENT_THINKING_EFFORT];
+        return { ...prev, env_vars: nextEnvVars };
+      });
+      setDirty(true);
+    }
+  }, [config.provider, config.model]);
+
   function handleEnvVarsChange(next: Record<string, string>) {
     setConfig((prev) => ({ ...prev, env_vars: next }));
     setDirty(true);
@@ -298,6 +320,8 @@ export function GlobalAgentConfigSettingsCard() {
                       return { ...prev, env_vars: nextEnvVars };
                     });
                     setDirty(true);
+                    setSaveState("idle");
+                    setSaveError(null);
                   }}
                   value={currentEffort}
                 >

@@ -5,6 +5,7 @@
  * coupling tuning knobs to a legacy create-dialog.  Imported by
  * PersonaAdvancedFields and EditAgentAdvancedFields.
  */
+import * as React from "react";
 import { Input } from "@/shared/ui/input";
 import type { EnvVarsValue } from "./EnvVarsEditor";
 import {
@@ -34,6 +35,21 @@ export function BuzzAgentModelTuningFields({
   const effortConfig = getProviderEffortConfig(provider ?? "", model);
   const { validValues: effortValid, defaultValue: effortDefault } =
     effortConfig;
+
+  // Auto-clear effort to Inherit when provider/model change makes the current
+  // value invalid. Prevents stale invalid values from being silently saved.
+  // onEnvVarChange is intentionally excluded from deps — it's recreated each render
+  // and adding it would cause infinite loops; the effect fires on valid-set changes.
+  const currentEffort = envVars[BUZZ_AGENT_THINKING_EFFORT] ?? "";
+  // biome-ignore lint/correctness/useExhaustiveDependencies: see comment above
+  React.useEffect(() => {
+    if (
+      currentEffort !== "" &&
+      !(effortValid as readonly string[]).includes(currentEffort)
+    ) {
+      onEnvVarChange(BUZZ_AGENT_THINKING_EFFORT, "");
+    }
+  }, [effortValid, currentEffort]);
   return (
     <div className="space-y-4">
       <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">

@@ -91,13 +91,21 @@ export function getProviderEffortConfig(
   }
   if (provider === "databricks_v2") {
     // Route by model family: claude* → Anthropic tables, gpt-5* → OpenAI tables.
+    // Non-Claude concrete models (e.g. llama-3) go through MlflowChatCompletions,
+    // which applies normalize_effort_for_openai_route → clamps max to xhigh.
+    // Route them through openaiConfig to exclude max. Only blank/unknown model
+    // uses the all-7 fallback (can't know the route without a concrete model).
     if (m.startsWith("claude-")) {
       return anthropicConfig(m);
     }
     if (gpt5FamilyModel(m)) {
       return openaiConfig(m);
     }
-    // Unknown Databricks route — show all, default medium.
+    if (m.length > 0) {
+      // Concrete non-Claude, non-GPT model → MLflow path clamps max → xhigh.
+      return openaiConfig(m);
+    }
+    // Blank model — route unknown, show all 7.
     return { validValues: ALL_VALUES, defaultValue: "medium" };
   }
   if (provider === "databricks") {
