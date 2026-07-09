@@ -293,6 +293,14 @@ impl ReliableMeshStream {
         Ok(())
     }
 
+    /// Finish the send half without fabricating a session frame. Used when an
+    /// owner-side stream is draining before the first validated frame has
+    /// latched its community id.
+    pub fn finish(&mut self) -> Result<(), ReliableStreamError> {
+        self.stream.finish()?;
+        Ok(())
+    }
+
     /// Send a clean reliable-session close frame and finish the send half.
     pub async fn send_goodbye(
         &mut self,

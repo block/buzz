@@ -586,12 +586,29 @@ struct HuddleOwnerEntry {
     /// Owner-loss signal fanned into every control loop and owner WS peer for
     /// the room. Cancelled by the renewer on fenced loss.
     lost: CancellationToken,
+    /// Owner-drain signal fanned into every control loop and owner WS peer for
+    /// the room. Cancelled by [`Self::drain`] so peers close with
+    /// `Goodbye(Draining)` rather than the fenced-loss `StaleGeneration` path.
+    draining: CancellationToken,
     /// Caller-cancel handed to the renewer; cancelled by [`Self::release`] on
-    /// room-empty so the lease is released cleanly (silent, not owner-loss).
+    /// room-empty so the lease is released cleanly (silent, not owner-loss), and
+    /// by [`Self::drain`] after the drain signal so Redis releases the fenced
+    /// lease promptly.
     cancel: CancellationToken,
-    /// Generation this entry's lease owns. `release` is fenced on it so a stale
-    /// room-empty cannot tear down a newer epoch a re-acquire installed.
+    /// Generation this entry's lease owns. `release`/`drain` are fenced on it so
+    /// a stale room-empty/drain cannot tear down a newer epoch a re-acquire
+    /// installed.
     generation: u64,
+}
+
+/// Owner-side signals for one huddle epoch. Returned atomically from attach so
+/// the CAS winner cannot miss a concurrent drain between installing the owner
+/// entry and looking the drain token back up.
+pub struct HuddleOwnerSignals {
+    /// Fenced-loss signal.
+    pub lost: CancellationToken,
+    /// Intentional-drain signal.
+    pub draining: CancellationToken,
 }
 
 impl HuddleOwnerRegistry {
@@ -608,6 +625,13 @@ impl HuddleOwnerRegistry {
         self.entries.get(&session_id).map(|e| e.lost.clone())
     }
 
+    /// The room's owner-drain signal, or `None` when this pod holds no live
+    /// owner lease for the session. Cancelled by [`Self::drain`] / [`Self::drain_all`]
+    /// to close local owner WS peers and emit `Goodbye(Draining)` to remote pods.
+    pub fn drain_for(&self, session_id: Uuid) -> Option<CancellationToken> {
+        self.entries.get(&session_id).map(|e| e.draining.clone())
+    }
+
     /// Install the single per-room renewer for a freshly-acquired lease and
     /// return its `lost` signal.
     ///
@@ -622,6 +646,19 @@ impl HuddleOwnerRegistry {
         directory: Arc<D>,
         lease: HuddleLease,
     ) -> CancellationToken {
+        self.attach_signals(session_id, directory, lease).lost
+    }
+
+    /// Install the single per-room renewer and return both owner-side signals.
+    /// The returned pair is captured from the entry while it is live, so the CAS
+    /// winner cannot miss a concurrent drain between attach and a separate
+    /// `drain_for` lookup.
+    pub fn attach_signals<D: HuddleDirectory + ?Sized + 'static>(
+        &self,
+        session_id: Uuid,
+        directory: Arc<D>,
+        lease: HuddleLease,
+    ) -> HuddleOwnerSignals {
         let generation = lease.generation();
         if let Some(existing) = self.entries.get(&session_id) {
             // A live entry already owns this room; release our extra lease
@@ -629,19 +666,25 @@ impl HuddleOwnerRegistry {
             let cancel = CancellationToken::new();
             cancel.cancel();
             spawn_observable_huddle_renewer(directory, lease, cancel);
-            return existing.lost.clone();
+            return HuddleOwnerSignals {
+                lost: existing.lost.clone(),
+                draining: existing.draining.clone(),
+            };
         }
         let cancel = CancellationToken::new();
         let renewer = spawn_observable_huddle_renewer(directory, lease, cancel.clone());
+        let draining = CancellationToken::new();
+        let lost = renewer.lost.clone();
         self.entries.insert(
             session_id,
             HuddleOwnerEntry {
-                lost: renewer.lost.clone(),
+                lost: lost.clone(),
+                draining: draining.clone(),
                 cancel,
                 generation,
             },
         );
-        renewer.lost
+        HuddleOwnerSignals { lost, draining }
     }
 
     /// Release the room's owner lease on room-empty: cancel the renewer's
@@ -660,6 +703,41 @@ impl HuddleOwnerRegistry {
         });
     }
 
+    /// Drain a room this pod owns: first fan out an explicit draining signal to
+    /// local owner WS peers and remote control streams, then cancel the renewer
+    /// so it CAS-releases the fenced lease. Fenced on generation exactly like
+    /// [`Self::release`]; drain never transfers ownership, it only clears this
+    /// pod's lease so rejoiners acquire through Redis.
+    pub fn drain(&self, session_id: Uuid, generation: u64) -> bool {
+        let mut drained = false;
+        self.entries.remove_if(&session_id, |_, entry| {
+            if entry.generation == generation {
+                entry.draining.cancel();
+                entry.cancel.cancel();
+                drained = true;
+                true
+            } else {
+                false
+            }
+        });
+        drained
+    }
+
+    /// Drain every room currently owned by this runtime. Used by SIGTERM
+    /// choreography after readiness has flipped and mesh membership is marked
+    /// draining. Each individual room remains generation-fenced by [`Self::drain`].
+    pub fn drain_all(&self) -> usize {
+        let rooms: Vec<(Uuid, u64)> = self
+            .entries
+            .iter()
+            .map(|entry| (*entry.key(), entry.generation))
+            .collect();
+        rooms
+            .into_iter()
+            .filter(|(session_id, generation)| self.drain(*session_id, *generation))
+            .count()
+    }
+
     /// Install an entry with a caller-supplied `lost` token and no renewer, for
     /// tests that exercise the fan-out to the control loop / WS peers in
     /// isolation from the (separately tested) renewer timing.
@@ -670,6 +748,7 @@ impl HuddleOwnerRegistry {
             session_id,
             HuddleOwnerEntry {
                 lost: lost.clone(),
+                draining: CancellationToken::new(),
                 cancel: CancellationToken::new(),
                 generation,
             },
@@ -921,7 +1000,9 @@ impl<D: HuddleDirectory + ?Sized> HuddleControlAcceptor<D> {
         }
 
         let lost = self.owners.lost_for(fenced.session_id);
-        self.serve_control_loop(from, fenced, stream, lost).await
+        let draining = self.owners.drain_for(fenced.session_id);
+        self.serve_control_loop(from, fenced, stream, lost, draining)
+            .await
     }
 
     /// Serve register/unregister frames for one non-owner pod's stream.
@@ -950,6 +1031,7 @@ impl<D: HuddleDirectory + ?Sized> HuddleControlAcceptor<D> {
         fenced: FencedHeader,
         mut stream: MeshStream,
         lost: Option<CancellationToken>,
+        draining: Option<CancellationToken>,
     ) -> Result<(), MeshError> {
         let session_id = fenced.session_id;
         // pubkey -> peer_id, for UnregisterPeer and teardown on stream close.
@@ -959,10 +1041,10 @@ impl<D: HuddleDirectory + ?Sized> HuddleControlAcceptor<D> {
         // frame must agree. `None` until the first register arrives.
         let mut stream_community: Option<Uuid> = None;
 
-        // Owner-loss latch: set when `lost` fires so teardown sends a proactive
-        // `Goodbye(StaleGeneration)`. A stream faulting on its own leaves this
-        // false and the close stays silent, as before.
-        let mut owner_lost = false;
+        // Owner teardown latch: set when `lost`/`draining` fires so teardown
+        // sends the matching proactive Goodbye. A stream faulting on its own
+        // leaves this empty and the close stays silent, as before.
+        let mut teardown_reason: Option<GoodbyeReason> = None;
 
         let result = loop {
             // A future that never resolves when there is no loss signal, so the
@@ -973,9 +1055,19 @@ impl<D: HuddleDirectory + ?Sized> HuddleControlAcceptor<D> {
                     None => std::future::pending().await,
                 }
             };
+            let drain_fired = async {
+                match &draining {
+                    Some(token) => token.cancelled().await,
+                    None => std::future::pending().await,
+                }
+            };
             let frame = tokio::select! {
+                _ = drain_fired => {
+                    teardown_reason = Some(GoodbyeReason::Draining);
+                    break Ok(());
+                }
                 _ = lost_fired => {
-                    owner_lost = true;
+                    teardown_reason = Some(GoodbyeReason::StaleGeneration);
                     break Ok(());
                 }
                 frame = stream.recv_frame() => frame,
@@ -1080,16 +1172,13 @@ impl<D: HuddleDirectory + ?Sized> HuddleControlAcceptor<D> {
             }
         };
 
-        // Owner-loss: tell the non-owner pod its owner fenced itself out, so it
-        // rejoins against the new owner. Best-effort — teardown proceeds even if
-        // the send fails (the stream may already be gone). This is the only
-        // place the owner side emits `StaleGeneration`; a normal close does not.
-        if owner_lost {
+        // Owner-initiated teardown: tell the non-owner pod why this owner is
+        // closing so it can rejoin against Redis. Best-effort — teardown
+        // proceeds even if the stream is already gone. Normal stream/client
+        // closes stay silent.
+        if let Some(reason) = teardown_reason {
             let _ = stream
-                .send_frame(MeshStreamFrame::Goodbye {
-                    fenced,
-                    reason: GoodbyeReason::StaleGeneration,
-                })
+                .send_frame(MeshStreamFrame::Goodbye { fenced, reason })
                 .await;
         }
 
@@ -2032,6 +2121,54 @@ mod tests {
         );
     }
 
+    /// `drain` is generation-fenced like `release`, but unlike room-empty it
+    /// also cancels the drain signal so local owner peers and remote control
+    /// streams can rejoin with an explicit draining cause before the renewer
+    /// releases the lease.
+    #[tokio::test]
+    async fn registry_drain_signals_rejoin_and_releases_lease() {
+        let dir = Arc::new(FakeDir::default());
+        let registry = HuddleOwnerRegistry::new();
+        let session = Uuid::new_v4();
+
+        let lost = registry.attach(
+            session,
+            Arc::clone(&dir) as Arc<dyn HuddleDirectory>,
+            lease_for(session, 4),
+        );
+        let draining = registry.drain_for(session).expect("drain signal installed");
+
+        assert!(registry.drain(session, 4), "matching generation drains");
+        assert!(
+            registry.lost_for(session).is_none(),
+            "drain drops the owner entry"
+        );
+        assert!(draining.is_cancelled(), "drain fans out to owners/streams");
+        await_release_calls(&dir, 1).await;
+        assert!(!lost.is_cancelled(), "drain is not fenced owner-loss");
+    }
+
+    /// A stale drain racing a fresh re-acquire must not cancel the new epoch's
+    /// drain signal or release its renewer.
+    #[tokio::test]
+    async fn registry_drain_is_generation_fenced() {
+        let dir = Arc::new(FakeDir::default());
+        let registry = HuddleOwnerRegistry::new();
+        let session = Uuid::new_v4();
+
+        registry.attach(
+            session,
+            Arc::clone(&dir) as Arc<dyn HuddleDirectory>,
+            lease_for(session, 9),
+        );
+        let draining = registry.drain_for(session).expect("drain signal installed");
+
+        assert!(!registry.drain(session, 8), "stale generation is no-op");
+        assert!(registry.lost_for(session).is_some());
+        assert!(!draining.is_cancelled());
+        assert_eq!(*dir.release_calls.lock().unwrap(), 0);
+    }
+
     // --- resolve_join_owner_ready: the LocalOwner reuse race gate ------------
 
     /// The exact interleaving the review flagged: the CAS winner has resolved
@@ -2185,6 +2322,53 @@ mod tests {
                 }
             ),
             "expected Goodbye(StaleGeneration), got {frame:?}"
+        );
+        served.await.unwrap().unwrap();
+    }
+
+    /// Owner drain is distinct from fenced loss: control streams emit
+    /// `Goodbye(Draining)` so non-owner clients rejoin for rollout rather than
+    /// recording a stale-generation loss.
+    #[tokio::test]
+    async fn serve_control_loop_emits_draining_goodbye_on_drain() {
+        let owner_rt = rt(1);
+        let from = rt(2);
+        let session_id = Uuid::new_v4();
+        let fenced = fenced_owned_by(owner_rt, session_id);
+
+        let draining = CancellationToken::new();
+        let acceptor = HuddleControlAcceptor::new(
+            Arc::new(AudioRoomManager::new()),
+            Arc::new(NullTransport) as Arc<dyn RelayPeerTransport>,
+            Arc::new(FakeDir::default()),
+            owner_rt,
+            Arc::new(HuddleOwnerRegistry::new()),
+        );
+
+        let (owner_stream, mut client) = stream_pair();
+        let draining_for_loop = draining.clone();
+        let served = tokio::spawn(async move {
+            acceptor
+                .serve_control_loop(from, fenced, owner_stream, None, Some(draining_for_loop))
+                .await
+        });
+
+        draining.cancel();
+
+        let frame = tokio::time::timeout(Duration::from_secs(2), client.recv_frame())
+            .await
+            .expect("goodbye arrives")
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(
+                frame,
+                MeshStreamFrame::Goodbye {
+                    reason: GoodbyeReason::Draining,
+                    ..
+                }
+            ),
+            "expected Goodbye(Draining), got {frame:?}"
         );
         served.await.unwrap().unwrap();
     }

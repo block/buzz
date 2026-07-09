@@ -311,7 +311,12 @@ mod tests {
             );
             let from = hello.sender;
             let inbound = router.accept_inbound(from, hello, stream).await.unwrap();
-            crate::mesh_boot::run_demo_echo(echo_directory, inbound).await;
+            crate::mesh_boot::run_demo_echo(
+                echo_directory,
+                inbound,
+                std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            )
+            .await;
         });
 
         // Forwarding side: join the same session through the demo core.

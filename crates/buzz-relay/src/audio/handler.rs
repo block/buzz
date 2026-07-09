@@ -433,19 +433,21 @@ async fn handle_audio_connection(
     // fence) cannot occur. A `None` on the reuse arm is therefore an invariant
     // violation, not a benign race; log it loudly rather than proceed silently.
     let mut owner_lost: Option<CancellationToken> = None;
+    let mut owner_draining: Option<CancellationToken> = None;
     let mut owner_generation: Option<u64> = None;
     if let Some(mesh) = state.mesh() {
         match (pending_remote, acquired_lease.take()) {
             (Some(crate::audio::join::JoinOutcome::LocalOwner { generation }), Some(lease)) => {
-                owner_lost = Some(mesh.owners.attach(
-                    channel_id,
-                    Arc::new(mesh.directory.clone()),
-                    lease,
-                ));
+                let signals =
+                    mesh.owners
+                        .attach_signals(channel_id, Arc::new(mesh.directory.clone()), lease);
+                owner_lost = Some(signals.lost);
+                owner_draining = Some(signals.draining);
                 owner_generation = Some(generation);
             }
             (Some(crate::audio::join::JoinOutcome::LocalOwner { generation }), None) => {
                 owner_lost = mesh.owners.lost_for(channel_id);
+                owner_draining = mesh.owners.drain_for(channel_id);
                 owner_generation = Some(generation);
                 if owner_lost.is_none() {
                     error!(
@@ -624,22 +626,42 @@ async fn handle_audio_connection(
         })
     });
 
-    // Owner path: watch the room's owner-loss signal. When the renewer trips
-    // `owner_lost` (Redis no longer names this pod at this generation), tear
-    // this owner client down exactly as the non-owner reader does on a remote
-    // teardown — cancel the connection so the client's WS closes and it rejoins
-    // against the new owner, and forget the local generation floor so the
-    // rejoin's fresh generation is accepted. This is the owner-side reflection
-    // of `teardown_remote_huddle`; Redis fenced CAS stays the ownership
-    // arbiter, `forget` only clears local stale-frame suppression. Silent on a
-    // normal connection cancel (client left / shutdown): the renewer's `lost`
-    // fires only on fenced loss, never on caller cancel.
-    let owner_loss_task = owner_lost.clone().and_then(|lost| {
-        let fence = Arc::clone(&state.mesh()?.audio_fence);
+    // Owner path: watch the room's owner-loss / owner-drain signals. Fenced loss
+    // and intentional drain both close local owner clients for rejoin and forget
+    // the local generation floor so the fresh generation is accepted. The cause
+    // distinction is carried on the remote control streams; locally the action
+    // is the same WS teardown. Silent on ordinary client leave.
+    let owner_teardown_task = if owner_lost.is_some() || owner_draining.is_some() {
+        let fence = Arc::clone(
+            &state
+                .mesh()
+                .expect("owner teardown watcher only exists when mesh owner state exists")
+                .audio_fence,
+        );
         let owner_cancel = cancel.clone();
         Some(tokio::spawn(async move {
+            let lost_fired = async {
+                match &owner_lost {
+                    Some(token) => token.cancelled().await,
+                    None => std::future::pending().await,
+                }
+            };
+            let drain_fired = async {
+                match &owner_draining {
+                    Some(token) => token.cancelled().await,
+                    None => std::future::pending().await,
+                }
+            };
             tokio::select! {
-                _ = lost.cancelled() => {
+                _ = drain_fired => {
+                    info!(
+                        channel_id = %channel_id,
+                        "huddle owner is draining — closing local client for rejoin"
+                    );
+                    owner_cancel.cancel();
+                    fence.forget(channel_id);
+                }
+                _ = lost_fired => {
                     info!(
                         channel_id = %channel_id,
                         "huddle owner lost its lease — closing local client for rejoin"
@@ -650,7 +672,9 @@ async fn handle_audio_connection(
                 _ = owner_cancel.cancelled() => {}
             }
         }))
-    });
+    } else {
+        None
+    };
 
     recv_loop(
         ws_recv,
@@ -673,10 +697,10 @@ async fn handle_audio_connection(
     if let Some(reader_task) = reader_task {
         let _ = reader_task.await;
     }
-    // The owner-loss watcher is cancelled by `cancel.cancel()` above (or has
+    // The owner teardown watcher is cancelled by `cancel.cancel()` above (or has
     // already fired); join it so it settles before cleanup.
-    if let Some(owner_loss_task) = owner_loss_task {
-        let _ = owner_loss_task.await;
+    if let Some(owner_teardown_task) = owner_teardown_task {
+        let _ = owner_teardown_task.await;
     }
 
     // Atomic remove + end check: remove_peer_and_check_ended holds the

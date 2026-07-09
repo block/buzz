@@ -12,8 +12,8 @@
 //! 3. starts the [`MeshRuntime`] loops (accept, reconcile/dial, gossip) and
 //!    runs one immediate reconcile pass so seed peers are dialed at boot,
 //! 4. spawns a drain watcher: when the relay's `shutting_down` flag flips,
-//!    membership gossips `draining=true` and the heartbeat clears the
-//!    registry record.
+//!    membership gossips `draining=true`, locally-owned huddle leases are
+//!    generation-fenced drained, and the heartbeat clears the registry record.
 //!
 //! Consumers (huddle control plane, reliable-stream tunnels) reach the mesh
 //! exclusively through [`MeshHandle`] via `AppState::mesh()` — `None` means
@@ -26,8 +26,9 @@ use buzz_relay_mesh::endpoint::MeshEndpoint;
 use buzz_relay_mesh::gossip::GossipRecord;
 use buzz_relay_mesh::registry::{ReadyRecord, ReadyRegistry};
 use buzz_relay_mesh::{
-    InboundHandler, MeshDatagram, MeshMembership, MeshRuntime, MeshStatus, MeshStream, Profile,
-    RelayMeshMembership, RelayPeerTransport, RuntimeId, StreamHello, StreamRole,
+    GoodbyeReason, InboundHandler, MeshDatagram, MeshMembership, MeshRuntime, MeshStatus,
+    MeshStream, Profile, RelayMeshMembership, RelayPeerTransport, RuntimeId, StreamHello,
+    StreamRole,
 };
 
 use crate::config::Config;
@@ -176,7 +177,12 @@ impl MeshHandle {
     ///
     /// Called once from `main.rs` right after [`boot_mesh`]; see
     /// [`wire_mesh_consumers`] for what gets wired.
-    pub fn wire_consumers(&self, rooms: Arc<crate::audio::AudioRoomManager>, demo_echo: bool) {
+    pub fn wire_consumers(
+        &self,
+        rooms: Arc<crate::audio::AudioRoomManager>,
+        demo_echo: bool,
+        shutting_down: Arc<AtomicBool>,
+    ) {
         wire_mesh_consumers(
             &self.dispatcher,
             self.directory.clone(),
@@ -186,6 +192,7 @@ impl MeshHandle {
             rooms,
             Arc::clone(&self.owners),
             demo_echo,
+            shutting_down,
         )
     }
 }
@@ -223,6 +230,7 @@ pub fn wire_mesh_consumers(
     rooms: Arc<crate::audio::AudioRoomManager>,
     owners: Arc<crate::audio::join::HuddleOwnerRegistry>,
     demo_echo: bool,
+    shutting_down: Arc<AtomicBool>,
 ) {
     // RealtimeMedia datagrams: huddle media fan-in over the shared fence.
     // `on_media_datagram` is synchronous and non-blocking (fence check +
@@ -268,6 +276,7 @@ pub fn wire_mesh_consumers(
     ));
     dispatcher.register_reliable_stream(Box::new(move |from, hello, stream| {
         let router = Arc::clone(&reliable);
+        let shutting_down = Arc::clone(&shutting_down);
         tokio::spawn(async move {
             let inbound = match router.accept_inbound(from, hello, stream).await {
                 Ok(inbound) => inbound,
@@ -277,7 +286,7 @@ pub fn wire_mesh_consumers(
                 }
             };
             if demo_echo {
-                run_demo_echo(router.directory().clone(), inbound).await;
+                run_demo_echo(router.directory().clone(), inbound, shutting_down).await;
             } else {
                 tracing::info!(
                     session_id = %inbound.fenced.session_id,
@@ -295,13 +304,37 @@ pub fn wire_mesh_consumers(
 /// on the owner and delivery in both mesh directions. Not a product flow.
 /// `pub(crate)` so the join-side probe (`api::mesh_demo`) can exercise the
 /// real consumer in its round-trip test.
-pub(crate) async fn run_demo_echo(directory: SessionDirectory, inbound: ReliableInbound) {
+pub(crate) async fn run_demo_echo(
+    directory: SessionDirectory,
+    inbound: ReliableInbound,
+    shutting_down: Arc<AtomicBool>,
+) {
     let session_id = inbound.fenced.session_id;
     let peer = inbound.from;
     let mut stream = inbound.stream;
     tracing::info!(%session_id, %peer, "mesh demo echo: session open");
+    let mut drain_tick = tokio::time::interval(std::time::Duration::from_millis(100));
     loop {
-        match stream.recv_validated(&directory).await {
+        let frame = tokio::select! {
+            _ = drain_tick.tick() => {
+                if shutting_down.load(Ordering::Relaxed) {
+                    if let Some(community_id) = stream.community_id() {
+                        if let Err(e) = stream.send_goodbye(community_id, GoodbyeReason::Draining).await {
+                            tracing::warn!(%session_id, "mesh demo echo: draining goodbye failed: {e}");
+                        } else {
+                            tracing::info!(%session_id, "mesh demo echo: sent draining goodbye");
+                        }
+                    } else {
+                        let _ = stream.finish();
+                        tracing::info!(%session_id, "mesh demo echo: drain before community latch — closing");
+                    }
+                    return;
+                }
+                continue;
+            }
+            frame = stream.recv_validated(&directory) => frame,
+        };
+        match frame {
             Ok(Some(ReliableFrame::Data(payload))) => {
                 // recv_validated latched the community from the frame it just
                 // validated, so it is always present here.
@@ -438,19 +471,26 @@ pub async fn boot_mesh(
     );
 
     let runtime = MeshRuntime::start(endpoint, membership, Some(registry));
+    let owners = Arc::new(crate::audio::join::HuddleOwnerRegistry::new());
     // Dial seed peers now rather than waiting for the first reconcile tick.
     runtime.reconcile_now().await;
 
     // Drain watcher: SIGTERM flips `shutting_down`; gossip `draining=true` so
-    // peers stop routing new sessions here while in-flight ones drain.
+    // peers stop routing new sessions here, then actively drain locally-owned
+    // huddles so clients rejoin and Redis leases release inside the graceful window.
     {
         let runtime = runtime.clone();
+        let owners = Arc::clone(&owners);
         let flag = shutting_down;
         tokio::spawn(async move {
             loop {
                 if flag.load(Ordering::Relaxed) {
                     runtime.membership().begin_drain();
-                    tracing::info!("mesh drain started (draining=true gossiped)");
+                    let huddle_drained = owners.drain_all();
+                    tracing::info!(
+                        huddle_drained,
+                        "mesh drain started (draining=true gossiped)"
+                    );
                     return;
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(500)).await;
@@ -475,7 +515,7 @@ pub async fn boot_mesh(
         dispatcher,
         audio_fence: Arc::new(crate::audio::mesh::GenerationFloor::new()),
         runtime,
-        owners: Arc::new(crate::audio::join::HuddleOwnerRegistry::new()),
+        owners,
     }))
 }
 
@@ -677,6 +717,7 @@ mod tests {
             Arc::new(crate::audio::AudioRoomManager::new()),
             Arc::new(crate::audio::join::HuddleOwnerRegistry::new()),
             false,
+            Arc::new(AtomicBool::new(false)),
         );
 
         let session = uuid::Uuid::new_v4();
