@@ -5,7 +5,7 @@ use super::{
     divergent_agent_command_override, effective_agent_command, find_via_login_shell,
     managed_agent_avatar_url, normalize_agent_args, record_agent_command,
     update_time_agent_command_override, BUZZ_AGENT_AVATAR_URL, CLAUDE_CODE_AVATAR_URL,
-    CODEX_AVATAR_URL, GOOSE_AVATAR_URL,
+    CODEX_AVATAR_URL, CURSOR_AVATAR_URL, GOOSE_AVATAR_URL,
 };
 use crate::managed_agents::AcpAvailabilityStatus;
 
@@ -66,6 +66,48 @@ fn normalizes_claude_and_codex_args_to_empty() {
     assert_eq!(
         normalize_agent_args("codex-acp", vec!["acp".into()]),
         Vec::<String>::new()
+    );
+}
+
+#[test]
+fn normalizes_cursor_args_to_acp_subcommand() {
+    // Cursor speaks ACP natively as `agent acp` (same shape as goose).
+    assert_eq!(
+        normalize_agent_args("agent", Vec::new()),
+        vec!["acp".to_string()]
+    );
+    assert_eq!(
+        normalize_agent_args("cursor-agent", Vec::new()),
+        vec!["acp".to_string()]
+    );
+    assert_eq!(
+        normalize_agent_args("cursor", Vec::new()),
+        vec!["acp".to_string()]
+    );
+    // Explicit `acp` is preserved (default is already `["acp"]`).
+    assert_eq!(
+        normalize_agent_args("agent", vec!["acp".into()]),
+        vec!["acp".to_string()]
+    );
+}
+
+#[test]
+fn resolves_cursor_avatar() {
+    assert_eq!(
+        managed_agent_avatar_url("agent"),
+        Some(CURSOR_AVATAR_URL.to_string())
+    );
+    assert_eq!(
+        managed_agent_avatar_url("cursor-agent"),
+        Some(CURSOR_AVATAR_URL.to_string())
+    );
+    assert_eq!(
+        managed_agent_avatar_url("/Users/me/.local/bin/agent"),
+        Some(CURSOR_AVATAR_URL.to_string())
+    );
+    assert_eq!(
+        managed_agent_avatar_url("cursor"),
+        Some(CURSOR_AVATAR_URL.to_string())
     );
 }
 

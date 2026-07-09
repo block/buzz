@@ -9,7 +9,7 @@ Buzz Relay ──WS──→ buzz-acp ──stdio──→ Your Agent
                                        (send_message, etc.)
 ```
 
-Supports any agent that speaks [ACP](https://agentclientprotocol.com/) over stdio: **goose**, **codex** (via [codex-acp](https://github.com/zed-industries/codex-acp)), and **claude code** (via [claude-agent-acp](https://github.com/agentclientprotocol/claude-agent-acp)).
+Supports any agent that speaks [ACP](https://agentclientprotocol.com/) over stdio: **goose**, **codex** (via [codex-acp](https://github.com/zed-industries/codex-acp)), **claude code** (via [claude-agent-acp](https://github.com/agentclientprotocol/claude-agent-acp)), and **cursor** (native `agent acp` — no separate adapter).
 
 ## Prerequisites
 
@@ -90,6 +90,26 @@ buzz-acp
 
 Older installs that still expose `claude-code-acp` are also supported. `buzz-acp`
 treats both Claude ACP command names as the same zero-arg runtime.
+
+## Running with Cursor
+
+Cursor's Agent CLI speaks ACP natively — no separate `*-acp` adapter.
+
+```bash
+# Install: https://cursor.com/docs/cli (binary lands as `agent` / `cursor-agent`)
+agent login   # or export CURSOR_API_KEY=...
+
+export BUZZ_ACP_AGENT_COMMAND="agent"
+export BUZZ_ACP_AGENT_ARGS="acp"
+
+buzz-acp
+```
+
+> **Harness note:** Cursor ACP can emit blocking extension methods
+> (`cursor/ask_question`, `cursor/create_plan`). Headless `buzz-acp` needs an
+> explicit client policy for those (auto-allow vs reject-with-reason) so turns
+> neither hang nor over-permit. That policy is a separate design item from
+> registering the runtime in Desktop's `KNOWN_ACP_RUNTIMES`.
 
 ## Configuration
 

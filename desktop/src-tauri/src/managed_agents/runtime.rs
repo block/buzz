@@ -38,6 +38,10 @@ pub(crate) const KNOWN_AGENT_BINARIES: &[&str] = &[
     "codex-acp",
     "codex_acp",
     "goose",
+    // Cursor Agent CLI (native ACP via `agent acp` / `cursor-agent acp`).
+    "agent",
+    "cursor-agent",
+    "cursor_agent",
     // buzz-dev-mcp's multicall personalities (rg, tree, buzz,
     // git-credential-nostr, git-sign-nostr) are short-lived per-tool-call
     // invocations — not listed here.
