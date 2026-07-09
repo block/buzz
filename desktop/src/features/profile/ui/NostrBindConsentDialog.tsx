@@ -1,7 +1,7 @@
 import * as React from "react";
 import { toast } from "sonner";
 
-import { getIdentity } from "@/shared/api/tauri";
+import { getIdentity } from "@/shared/api/tauriIdentity";
 import type { Identity } from "@/shared/api/types";
 import type { NostrBindDeepLinkPayload } from "@/shared/deep-link";
 import { listenForNostrBindDeepLinks } from "@/shared/deep-link";

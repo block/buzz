@@ -733,12 +733,10 @@ impl SecretStore {
             match raw {
                 None => Ok(false),
                 Some(bytes) => {
-                    let json =
-                        String::from_utf8(bytes).map_err(|e| format!("blob utf8: {e}"))?;
-                    let map = serde_json::from_str::<std::collections::HashMap<String, String>>(
-                        &json,
-                    )
-                    .map_err(|e| format!("blob json: {e}"))?;
+                    let json = String::from_utf8(bytes).map_err(|e| format!("blob utf8: {e}"))?;
+                    let map =
+                        serde_json::from_str::<std::collections::HashMap<String, String>>(&json)
+                            .map_err(|e| format!("blob json: {e}"))?;
                     Ok(map.get(key).is_some_and(|v| v == expected))
                 }
             }

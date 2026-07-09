@@ -1411,8 +1411,7 @@ fn corrupt_keyring_no_marker_no_file_generates_fresh() {
 
     // A fresh, valid key was stored (keyring or file).
     assert!(
-        store.slot.borrow().contains_key(IDENTITY_KEY_NAME)
-            || legacy_path.exists(),
+        store.slot.borrow().contains_key(IDENTITY_KEY_NAME) || legacy_path.exists(),
         "a fresh key must be stored in the keyring or the file after generate_and_persist"
     );
 }

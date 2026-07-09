@@ -101,8 +101,7 @@ export function useAutoRestartPolicy() {
           const fresh = await listManagedAgents();
           const current = fresh.find((a) => a.pubkey === agent.pubkey);
           if (
-            !current ||
-            !current.needsRestart ||
+            !current?.needsRestart ||
             !current.autoRestartOnConfigChange ||
             current.status !== "running" ||
             getAgentWorkingState(agent.pubkey).source !== "none"

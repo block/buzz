@@ -184,7 +184,7 @@ const overrides = new Map([
   // adoption / read-back-corruption / marker-failure arms, recovery-mode
   // gating). Load-bearing regression coverage for silent identity rotation,
   // not generic debt growth. Approved override; split if the matrix grows.
-  ["src-tauri/src/app_state_tests.rs", 1290],
+  ["src-tauri/src/app_state_tests.rs", 1420],
   // migration_tests.rs carries the harness-sync migration coverage plus the
   // patch_json_records owner-only writeback regression test (SECURITY.md:90
   // crash-safe 0o600 fallback). Load-bearing security + feature coverage, not
@@ -227,7 +227,9 @@ const overrides = new Map([
   // cross-process keychain race fix (D3): interprocess lock + BlobLockGuard +
   // uid-keyed lockfile path + behavioral tests add ~303 lines. Load-bearing
   // security fix for the lost-update race that stranded agent keys.
-  ["src-tauri/src/secret_store.rs", 1110],
+  // identity-import-keyring: KeyringLockedScreen, RecoveryScreen,
+  // load_readonly + load_all_readonly + store_all for safe cross-service reads.
+  ["src-tauri/src/secret_store.rs", 1140],
   // keyring-dev-isolation: keyring_service() fn (7 lines) replaces the const
   // to return "buzz-desktop-dev" in debug builds. Load-bearing isolation fix.
   ["src-tauri/src/app_state.rs", 1042],
