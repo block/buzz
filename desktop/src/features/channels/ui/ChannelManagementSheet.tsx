@@ -34,6 +34,7 @@ import {
 } from "@/features/channels/hooks";
 import { compareMembersByRole } from "@/features/channels/lib/memberUtils";
 import {
+  DEFAULT_EPHEMERAL_TTL_SECONDS,
   formatTtlDuration,
   parseTtlDuration,
 } from "@/features/channels/lib/ephemeralChannel";
@@ -94,8 +95,6 @@ type ChannelManagementSheetProps = {
   open: boolean;
   transparentChrome?: boolean;
 };
-
-const DEFAULT_EPHEMERAL_TTL_SECONDS = 7 * 24 * 60 * 60;
 
 export function ChannelManagementSheet({
   animateSplitEnter = false,
@@ -549,7 +548,7 @@ export function ChannelManagementSheet({
                         >
                           {ttlInvalid
                             ? "Enter a duration like 1d, 12h, or 30m."
-                            : "Defaults to 1d when left empty. Resets the deletion countdown from now whenever changed."}
+                            : "Defaults to 7d when left empty. Resets the deletion countdown from now whenever changed."}
                         </p>
                       </div>
                     ) : null}
