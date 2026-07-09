@@ -12,8 +12,9 @@
 //! Token format, key derivation, and security trade-offs live in
 //! [`crate::invite_token`].
 
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use axum::{
     extract::State,
@@ -29,11 +30,15 @@ use crate::state::AppState;
 
 use super::{api_error, bridge, internal_error};
 
-/// Sliding-window size for the per-pubkey claim rate limiter.
-const CLAIM_RATE_WINDOW: Duration = Duration::from_secs(60);
+/// Fixed-window size for the per-pubkey claim rate limiter.
+pub(crate) const CLAIM_RATE_WINDOW: Duration = Duration::from_secs(60);
 /// Max claim attempts per pubkey per window. Claims are idempotent and a real
 /// user performs exactly one, so this only bounds brute-force probing.
 const CLAIM_RATE_LIMIT: u32 = 10;
+/// Maximum distinct pubkeys retained by the process-local claim limiter.
+/// NIP-98 proves key ownership, not that a key is costly to create, so this
+/// bound is required in addition to expiry.
+pub(crate) const CLAIM_RATE_CACHE_CAPACITY: u64 = 10_000;
 
 /// Body for `POST /api/invites`.
 #[derive(Debug, Default, Deserialize)]
@@ -209,31 +214,30 @@ pub async fn claim_invite(
     })))
 }
 
-/// Sliding-window rate limit on claim attempts, keyed by claimer pubkey.
+/// Fixed-window rate limit on claim attempts, keyed by claimer pubkey.
+///
+/// Entries expire after one window and the cache has a hard capacity. Both are
+/// important because a pre-membership caller can cheaply create fresh Nostr
+/// keypairs; retaining one immortal entry per key would make the limiter itself
+/// an unbounded-memory denial-of-service vector.
 fn claim_rate_limited(state: &AppState, pubkey: &nostr::PublicKey) -> bool {
-    let key: [u8; 32] = pubkey.to_bytes();
-    let now = Instant::now();
-    let mut entry = state
-        .invite_claim_rate_limiter
-        .entry(key)
-        .or_insert((0, now));
-    let (count, window_start) = entry.value_mut();
-    if now.duration_since(*window_start) >= CLAIM_RATE_WINDOW {
-        *count = 1;
-        *window_start = now;
-        return false;
-    }
-    if *count >= CLAIM_RATE_LIMIT {
-        return true;
-    }
-    *count += 1;
-    false
+    claim_key_rate_limited(&state.invite_claim_rate_limiter, pubkey.to_bytes())
+}
+
+fn claim_key_rate_limited(
+    cache: &moka::sync::Cache<[u8; 32], Arc<std::sync::atomic::AtomicU32>>,
+    key: [u8; 32],
+) -> bool {
+    let counter = cache.get_with(key, || Arc::new(std::sync::atomic::AtomicU32::new(0)));
+    counter.fetch_add(1, Ordering::Relaxed) >= CLAIM_RATE_LIMIT
 }
 
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::time::Duration;
 
+    use super::{claim_key_rate_limited, CLAIM_RATE_LIMIT};
     use axum::{
         body::{to_bytes, Body},
         http::{header, Request, StatusCode},
@@ -264,6 +268,55 @@ mod tests {
     }
 
     const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz"; // sadscan:disable np.postgres.1
+
+    fn claim_cache(
+        capacity: u64,
+        ttl: Duration,
+    ) -> moka::sync::Cache<[u8; 32], Arc<std::sync::atomic::AtomicU32>> {
+        moka::sync::Cache::builder()
+            .max_capacity(capacity)
+            .time_to_live(ttl)
+            .build()
+    }
+
+    #[test]
+    fn claim_limiter_rejects_after_limit() {
+        let cache = claim_cache(100, Duration::from_secs(60));
+        let key = [7; 32];
+
+        for _ in 0..CLAIM_RATE_LIMIT {
+            assert!(!claim_key_rate_limited(&cache, key));
+        }
+        assert!(claim_key_rate_limited(&cache, key));
+    }
+
+    #[test]
+    fn claim_limiter_expires_entries() {
+        let cache = claim_cache(100, Duration::from_millis(10));
+        let key = [8; 32];
+        assert!(!claim_key_rate_limited(&cache, key));
+        assert!(cache.get(&key).is_some());
+
+        std::thread::sleep(Duration::from_millis(25));
+        cache.run_pending_tasks();
+
+        assert!(cache.get(&key).is_none());
+        assert!(!claim_key_rate_limited(&cache, key));
+    }
+
+    #[test]
+    fn claim_limiter_bounds_distinct_pubkeys() {
+        let capacity = 10;
+        let cache = claim_cache(capacity, Duration::from_secs(60));
+        for id in 0..100_u64 {
+            let mut key = [0; 32];
+            key[..8].copy_from_slice(&id.to_le_bytes());
+            assert!(!claim_key_rate_limited(&cache, key));
+        }
+        cache.run_pending_tasks();
+
+        assert!(cache.entry_count() <= capacity);
+    }
 
     fn nip98_auth_header(keys: &Keys, url: &str, body: &[u8]) -> String {
         let hash: [u8; 32] = Sha256::digest(body).into();
