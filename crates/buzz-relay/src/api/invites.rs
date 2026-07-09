@@ -127,6 +127,14 @@ pub async fn mint_invite(
     let ttl = request.ttl_secs.unwrap_or(DEFAULT_INVITE_TTL_SECS);
     let (code, expires_at) = invite_token::mint_invite(&key, tenant.community(), ttl);
 
+    // Same TLS-posture logic as nip98_expected_url: wss deployments get an
+    // https landing page URL, ws dev/test deployments get http.
+    let scheme = if state.config.relay_url.trim_start().starts_with("wss://") {
+        "https"
+    } else {
+        "http"
+    };
+
     tracing::info!(
         community = %tenant.community(),
         minted_by = %sender_hex,
@@ -137,7 +145,7 @@ pub async fn mint_invite(
     Ok(Json(serde_json::json!({
         "code": code,
         "expires_at": expires_at,
-        "url": format!("https://{}/invite/{}", tenant.host(), code),
+        "url": format!("{scheme}://{}/invite/{}", tenant.host(), code),
     })))
 }
 
