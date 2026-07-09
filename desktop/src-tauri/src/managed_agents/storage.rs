@@ -61,6 +61,9 @@ trait KeyStore {
     /// Read a key. `Ok(None)` is "no such entry" (absent); `Err` is a backend
     /// failure (keyring unreachable) — the caller MUST NOT collapse the two.
     fn load(&self, name: &str) -> Result<Option<String>, String>;
+    /// Read a key without any side effects (no legacy-key migration, no writes).
+    /// `Ok(None)` when the blob or the key is absent; `Err` only on backend failure.
+    fn load_readonly(&self, name: &str) -> Result<Option<String>, String>;
     /// Write `value` and read it back to confirm before the caller strips the
     /// inline copy.
     fn write_and_verify(&self, name: &str, value: &str) -> Result<(), String>;
@@ -72,6 +75,9 @@ impl KeyStore for SecretStore {
     }
     fn load(&self, name: &str) -> Result<Option<String>, String> {
         SecretStore::load(self, name)
+    }
+    fn load_readonly(&self, name: &str) -> Result<Option<String>, String> {
+        SecretStore::load_readonly(self, name)
     }
     fn write_and_verify(&self, name: &str, value: &str) -> Result<(), String> {
         self.store(name, value)?;
@@ -425,8 +431,8 @@ fn copy_agent_keys_between_stores(
             Err(_) => continue, // dst keyring unreachable — skip silently
         }
 
-        // Read from src keyring.
-        let nsec = match src.load(&name) {
+        // Read from src keyring (read-only: must not mutate the source service).
+        let nsec = match src.load_readonly(&name) {
             Ok(Some(v)) => v,
             Ok(None) => continue, // not in src keyring — new key, minted fresh later
             Err(e) => {
@@ -753,6 +759,10 @@ mod tests {
                 return Err("keyring backend unreachable".to_string());
             }
             Ok(self.stored.borrow().get(name).cloned())
+        }
+        fn load_readonly(&self, name: &str) -> Result<Option<String>, String> {
+            // The fake has no side effects, so load_readonly is identical to load.
+            self.load(name)
         }
         fn write_and_verify(&self, name: &str, value: &str) -> Result<(), String> {
             if self.fail_verify {

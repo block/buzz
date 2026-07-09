@@ -575,6 +575,25 @@ impl SecretStore {
         }
     }
 
+    /// Read the secret for `key` without any legacy-migration side effects.
+    ///
+    /// Unlike [`load`](Self::load), this method never calls
+    /// `migrate_legacy_key` and therefore never writes to or deletes from the
+    /// keyring. Use this when the caller must guarantee the store is not
+    /// mutated — for example, when reading from a foreign service (prod) to
+    /// copy values into a dev service.
+    ///
+    /// Returns `Ok(Some(value))` when the key is present in the blob,
+    /// `Ok(None)` when the blob is absent or the key is not in it, and `Err`
+    /// only when the backend is unavailable.
+    #[cfg(feature = "system-keyring")]
+    pub fn load_readonly(&self, key: &str) -> Result<Option<String>, String> {
+        match self.load_blob()? {
+            Some(map) => Ok(map.get(key).cloned()),
+            None => Ok(None),
+        }
+    }
+
     /// On first launch after upgrading from the per-key DPK format, read the
     /// old DPK entry for `key`, write it into a new blob, and delete the old
     /// item. Returns `Ok(None)` when no old entry exists.
