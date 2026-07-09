@@ -90,6 +90,14 @@ void _insertTriggerAtCursor(
 /// via HTTP. Ephemeral events like typing indicators are broadcast-only and
 /// the relay doesn't persist them, so the HTTP `/api/events` endpoint may
 /// silently discard them.
+bool hasMention(String text, String name) {
+  final pattern = RegExp(
+    '(?:^|\\s|[*_]{1,3}|\\|\\|)@${RegExp.escape(name)}(?=\\|\\||[\\s,;.!?:)\\]}*_]|\$)',
+    caseSensitive: false,
+  );
+  return pattern.hasMatch(text);
+}
+
 void _sendTypingIndicator(
   WidgetRef ref, {
   required String channelId,

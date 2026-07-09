@@ -1,3 +1,5 @@
+import 'dart:collection';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -75,9 +77,10 @@ class ComposeBar extends HookConsumerWidget {
     // Mention state --------------------------------------------------------
     final mentionQuery = useState<String?>(null);
     final mentionStartIdx = useState(-1);
-    // Map of displayName → pubkey built as the user selects mentions.
-    // Used to pass resolved pubkeys directly to onSend, avoiding regex.
-    final mentionMap = useRef(<String, String>{});
+    // Map of displayName → selected mention candidate built as the user selects
+    // mentions. Used to pass resolved pubkeys directly to onSend and to attach
+    // selected non-member agents before the message is published.
+    final mentionMap = useRef(<String, MentionCandidate>{});
 
     // Channel autocomplete state ----------------------------------------------
     final channelQuery = useState<String?>(null);
@@ -213,8 +216,9 @@ class ComposeBar extends HookConsumerWidget {
     // Insert a selected mention into the text field.
     void insertMention(MentionCandidate candidate) {
       final name = candidate.label;
-      // Track the resolved pubkey so we can pass it at send time.
-      mentionMap.value[name] = candidate.pubkey;
+      // Track the resolved candidate so we can pass its pubkey and prepare
+      // selected non-member agents at send time.
+      mentionMap.value[name] = candidate;
 
       final start = mentionStartIdx.value.clamp(0, controller.text.length);
       spliceAndMoveCursor(
@@ -269,10 +273,18 @@ class ComposeBar extends HookConsumerWidget {
       }
 
       // Extract pubkeys for mentions present in the final text.
-      final pubkeys = <String>[
+      final selectedMentions = <MentionCandidate>[
         for (final entry in mentionMap.value.entries)
-          if (text.contains('@${entry.key}')) entry.value,
+          if (hasMention(text, entry.key)) entry.value,
       ];
+      final pubkeys = LinkedHashSet<String>.from(
+        selectedMentions.map((candidate) => candidate.pubkey.toLowerCase()),
+      ).toList();
+      final nonMemberAgentPubkeys = LinkedHashSet<String>.from(
+        selectedMentions
+            .where((candidate) => candidate.isAgent && !candidate.isMember)
+            .map((candidate) => candidate.pubkey.toLowerCase()),
+      ).toList();
 
       final payload = _ComposeDraftPayload.fromDraft(
         text: text,
@@ -282,6 +294,15 @@ class ComposeBar extends HookConsumerWidget {
 
       isSending.value = true;
       try {
+        if (nonMemberAgentPubkeys.isNotEmpty) {
+          await ref
+              .read(channelActionsProvider)
+              .addMembers(
+                channelId: channelId,
+                pubkeys: nonMemberAgentPubkeys,
+                role: 'bot',
+              );
+        }
         await onSend(payload.content, pubkeys, mediaTags: payload.mediaTags);
         if (context.mounted) {
           clearComposer();
