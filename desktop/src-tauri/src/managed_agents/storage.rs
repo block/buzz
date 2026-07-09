@@ -415,11 +415,7 @@ pub fn migrate_agent_keys_to_dev_service(app: &tauri::AppHandle) {
 /// exist in `dst` (idempotency) and entries absent from `src` (new agents that
 /// will mint fresh keys). Does NOT copy `"identity"`.
 #[cfg(debug_assertions)]
-fn copy_agent_keys_between_stores(
-    pubkeys: &[String],
-    src: &impl KeyStore,
-    dst: &impl KeyStore,
-) {
+fn copy_agent_keys_between_stores(pubkeys: &[String], src: &impl KeyStore, dst: &impl KeyStore) {
     let mut copied = 0usize;
     for pubkey in pubkeys {
         let name = agent_keyring_name(pubkey);
@@ -1064,21 +1060,24 @@ mod tests {
         let dst = FakeKeyStore::reachable();
 
         super::copy_agent_keys_between_stores(
-            &[
-                "agent-alpha".to_string(),
-                "agent-beta".to_string(),
-            ],
+            &["agent-alpha".to_string(), "agent-beta".to_string()],
             &src,
             &dst,
         );
 
         assert_eq!(
-            dst.stored.borrow().get(&agent_keyring_name("agent-alpha")).map(String::as_str),
+            dst.stored
+                .borrow()
+                .get(&agent_keyring_name("agent-alpha"))
+                .map(String::as_str),
             Some("nsec1alpha"),
             "agent-alpha must be copied from src to dst"
         );
         assert_eq!(
-            dst.stored.borrow().get(&agent_keyring_name("agent-beta")).map(String::as_str),
+            dst.stored
+                .borrow()
+                .get(&agent_keyring_name("agent-beta"))
+                .map(String::as_str),
             Some("nsec1beta"),
             "agent-beta must be copied from src to dst"
         );
@@ -1088,20 +1087,19 @@ mod tests {
     fn copy_agent_keys_skips_keys_already_in_dst() {
         // Idempotency: a key already present in dst must NOT be overwritten
         // — the agent may have rotated their key in the dev service.
-        let src = FakeKeyStore::reachable()
-            .with_key(&agent_keyring_name("agent-alpha"), "nsec1old");
-        let dst = FakeKeyStore::reachable()
-            .with_key(&agent_keyring_name("agent-alpha"), "nsec1new");
+        let src =
+            FakeKeyStore::reachable().with_key(&agent_keyring_name("agent-alpha"), "nsec1old");
+        let dst =
+            FakeKeyStore::reachable().with_key(&agent_keyring_name("agent-alpha"), "nsec1new");
 
-        super::copy_agent_keys_between_stores(
-            &["agent-alpha".to_string()],
-            &src,
-            &dst,
-        );
+        super::copy_agent_keys_between_stores(&["agent-alpha".to_string()], &src, &dst);
 
         // dst value must remain unchanged — src must not overwrite it.
         assert_eq!(
-            dst.stored.borrow().get(&agent_keyring_name("agent-alpha")).map(String::as_str),
+            dst.stored
+                .borrow()
+                .get(&agent_keyring_name("agent-alpha"))
+                .map(String::as_str),
             Some("nsec1new"),
             "key already in dst must not be overwritten by migration"
         );
@@ -1119,11 +1117,7 @@ mod tests {
         let src = FakeKeyStore::reachable(); // empty
         let dst = FakeKeyStore::reachable();
 
-        super::copy_agent_keys_between_stores(
-            &["new-agent".to_string()],
-            &src,
-            &dst,
-        );
+        super::copy_agent_keys_between_stores(&["new-agent".to_string()], &src, &dst);
 
         assert!(
             dst.stored.borrow().is_empty(),
@@ -1136,15 +1130,11 @@ mod tests {
         // When dst keyring is unreachable the migration must be a no-op — never
         // data-loss (failing to write is fine; the agent will re-mint on next
         // onboarding run).
-        let src = FakeKeyStore::reachable()
-            .with_key(&agent_keyring_name("agent-alpha"), "nsec1alpha");
+        let src =
+            FakeKeyStore::reachable().with_key(&agent_keyring_name("agent-alpha"), "nsec1alpha");
         let dst = FakeKeyStore::unreachable();
 
-        super::copy_agent_keys_between_stores(
-            &["agent-alpha".to_string()],
-            &src,
-            &dst,
-        );
+        super::copy_agent_keys_between_stores(&["agent-alpha".to_string()], &src, &dst);
 
         // No writes attempted to an unreachable dst.
         assert_eq!(*dst.write_count.borrow(), 0);

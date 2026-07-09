@@ -95,6 +95,9 @@ const overrides = new Map([
   // unified-agent-model 1A.1: inline test module moved to nest/tests.rs,
   // ratcheting 1575 -> 679 (under the 1000 default; entry kept as a ratchet).
   ["src-tauri/src/managed_agents/nest.rs", 679],
+  // keyring-dev-isolation: agent key migration added copy_agent_keys_between_stores
+  // and load_readonly support; file grew past 1000 default. Queued to split.
+  ["src-tauri/src/managed_agents/storage.rs", 1145],
   // harness-persona-sync: persona-runtime resolution threaded into the spawn
   // path here. Load-bearing feature growth; queued to split in the resolver
   // unify refactor followup. +26 for resolve_effective_prompt_model_provider
@@ -213,7 +216,7 @@ const overrides = new Map([
   // cross-process keychain race fix (D3): interprocess lock + BlobLockGuard +
   // uid-keyed lockfile path + behavioral tests add ~303 lines. Load-bearing
   // security fix for the lost-update race that stranded agent keys.
-  ["src-tauri/src/secret_store.rs", 1043],
+  ["src-tauri/src/secret_store.rs", 1075],
   // keyring-dev-isolation: keyring_service() fn (7 lines) replaces the const
   // to return "buzz-desktop-dev" in debug builds. Load-bearing isolation fix.
   ["src-tauri/src/app_state.rs", 1042],
