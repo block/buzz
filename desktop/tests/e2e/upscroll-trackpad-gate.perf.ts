@@ -416,8 +416,11 @@ test("GATE: trackpad-momentum upscroll — peak jerk in rect.top stays below the
   // Whole-run cumulative anti-scroll drift: the same anti-scroll component as
   // Leg 2 but summed over EVERY step, no trailing window. LOG-ONLY, never gated
   // — the windowed peakDrift is the felt-relevant burst (what you perceive); this
-  // is the W4a reference scale, the monotone accumulation of non-recovering
-  // under-corrections (12 × ~18.5 ≈ 220px). Windowed can't reach it by
+  // is the W4a reference scale: summed-magnitude of ALL anti-scroll motion
+  // (non-recovering under-corrections + the reversal halves of recovering
+  // frame-late flashes + multi-frame realizations). The ~220px figure quoted
+  // earlier was the non-recovering subset only; measured whole-run baseline at
+  // e7297849 is WebKit 1042.81 / Chromium 0.00. Windowed can't reach it by
   // construction. The sharp W2 signal: the band should collapse THIS number even
   // if the windowed burst barely moves (RESEARCH/FELT_WHEEL_GATE_METRIC_W4.md).
   let totalDrift = 0;
