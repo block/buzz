@@ -53,14 +53,14 @@ if git rev-parse --is-inside-work-tree &>/dev/null; then
                     _BUZZ_NSEC=$(security find-generic-password \
                         -s "buzz-desktop-dev" -a "secrets" -w 2>/dev/null \
                         | python3 -c "import json,sys; print(json.load(sys.stdin).get('identity',''))" \
-                        2>/dev/null)
+                        2>/dev/null) || true
                     ;;
                 Linux)
                     CANONICAL_KEY="$HOME/.local/share/xyz.block.buzz.app.dev/identity.key"
                     LEGACY_CANONICAL_KEY="$HOME/.local/share/xyz.block.sprout.app.dev/identity.key"
                     _BUZZ_NSEC=$(secret-tool lookup service buzz-desktop-dev username secrets 2>/dev/null \
                         | python3 -c "import json,sys; print(json.load(sys.stdin).get('identity',''))" \
-                        2>/dev/null)
+                        2>/dev/null) || true
                     ;;
                 *)
                     CANONICAL_KEY=""
