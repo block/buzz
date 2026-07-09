@@ -368,6 +368,11 @@ pub struct AppState {
     /// Per-uploader sliding-window rate limiter for media upload starts.
     /// Key: (community_id, uploader pubkey bytes). Value: (count, window_start).
     pub media_upload_rate_limiter: Arc<ScopedRateLimiter>,
+    /// Per-claimer sliding-window rate limiter for invite claim attempts
+    /// (`POST /api/invites/claim`). Key: claimer pubkey bytes (32). Value:
+    /// (count, window_start). The claim route sits outside the membership
+    /// gate by design, so this bounds brute-force probing of invite codes.
+    pub invite_claim_rate_limiter: Arc<DashMap<[u8; 32], (u32, Instant)>>,
     /// Current in-flight media uploads per (community, uploader pubkey).
     pub media_uploads_in_flight: Arc<DashMap<ScopedPubkeyKey, u32>>,
     /// Cache for observer agent-owner authorization (kind 24200).
@@ -509,6 +514,7 @@ impl AppState {
             observer_rate_limiter: Arc::new(DashMap::new()),
             mesh_connect_rate_limiter: Arc::new(DashMap::new()),
             media_upload_rate_limiter: Arc::new(DashMap::new()),
+            invite_claim_rate_limiter: Arc::new(DashMap::new()),
             media_uploads_in_flight: Arc::new(DashMap::new()),
             observer_owner_cache: Arc::new(
                 moka::sync::Cache::builder()
