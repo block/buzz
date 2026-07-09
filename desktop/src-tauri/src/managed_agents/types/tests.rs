@@ -249,6 +249,44 @@ fn update_request_provider_tristate_value_means_set() {
     );
 }
 
+#[test]
+fn update_request_avatar_url_tristate_absent_means_no_touch() {
+    // No "avatarUrl" key → None → leave the record's existing avatar unchanged.
+    let request: super::UpdateManagedAgentRequest =
+        serde_json::from_str(r#"{"pubkey": "abcd1234"}"#)
+            .expect("minimal update request should deserialize");
+    assert!(
+        request.avatar_url.is_none(),
+        "absent avatarUrl must deserialize to None (don't touch)"
+    );
+}
+
+#[test]
+fn update_request_avatar_url_tristate_null_means_clear() {
+    // `"avatarUrl": null` → Some(None) → clear to the harness default avatar.
+    let request: super::UpdateManagedAgentRequest =
+        serde_json::from_str(r#"{"pubkey": "abcd1234", "avatarUrl": null}"#)
+            .expect("null avatarUrl request should deserialize");
+    assert_eq!(
+        request.avatar_url,
+        Some(None),
+        "explicit null must deserialize to Some(None) (clear)"
+    );
+}
+
+#[test]
+fn update_request_avatar_url_tristate_value_means_set() {
+    // A hosted URL → Some(Some(url)) → set the avatar.
+    let request: super::UpdateManagedAgentRequest =
+        serde_json::from_str(r#"{"pubkey": "abcd1234", "avatarUrl": "https://cdn.example/a.png"}"#)
+            .expect("avatarUrl value request should deserialize");
+    assert_eq!(
+        request.avatar_url,
+        Some(Some("https://cdn.example/a.png".to_string())),
+        "avatarUrl value must deserialize to Some(Some(value)) (set)"
+    );
+}
+
 use super::{CreateManagedAgentRequest, RelayMeshConfig};
 
 /// Wire-shape test: the create request arrives from TS as camelCase

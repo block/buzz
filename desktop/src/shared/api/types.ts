@@ -675,6 +675,12 @@ export type UpdateManagedAgentInput = {
   provider?: string | null;
   systemPrompt?: string | null;
   mcpToolsets?: string | null;
+  /**
+   * Absent = don't touch. null = clear to the harness default avatar.
+   * A hosted URL sets it. Data URIs must be resolved to a hosted URL
+   * (via resolveManagedAgentAvatarUrl) before being sent.
+   */
+  avatarUrl?: string | null;
   /** Absent = don't touch. Present = replace the env_vars map entirely. */
   envVars?: Record<string, string>;
   parallelism?: number;

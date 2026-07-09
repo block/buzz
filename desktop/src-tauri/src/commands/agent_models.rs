@@ -827,6 +827,22 @@ pub async fn update_managed_agent(
         if let Some(prompt_update) = input.system_prompt {
             record.system_prompt = prompt_update;
         }
+        // Avatar edit: normalize (trim + treat empty as cleared), then track
+        // whether it actually changed so an avatar-only edit still re-publishes
+        // the kind:0 profile below. A cleared avatar (None) falls back to the
+        // harness default avatar at sync time.
+        let mut avatar_changed = false;
+        if let Some(avatar_update) = input.avatar_url {
+            let normalized = avatar_update
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .map(str::to_string);
+            if normalized != record.avatar_url {
+                record.avatar_url = normalized;
+                avatar_changed = true;
+            }
+        }
         if let Some(toolsets_update) = input.mcp_toolsets {
             record.mcp_toolsets = toolsets_update
                 .as_deref()
@@ -918,11 +934,12 @@ pub async fn update_managed_agent(
         // update that touched only runtime/local fields is a no-op publish.
         super::agents::retain_managed_agent_pending(&app, &state, record);
 
-        let sync_params = if name_changed {
+        let sync_params = if name_changed || avatar_changed {
             let agent_keys = Keys::parse(&record.private_key_nsec)
                 .map_err(|e| format!("failed to parse agent keys: {e}"))?;
-            // Re-publish the renamed profile to the agent's effective relay:
-            // an explicit per-agent relay wins; empty falls back to workspace.
+            // Re-publish the profile to the agent's effective relay when the
+            // display name or avatar changed. Relay selection: an explicit
+            // per-agent relay wins; empty falls back to the workspace relay.
             let relay_url = crate::relay::effective_agent_relay_url(
                 &record.relay_url,
                 &relay_ws_url_with_override(&state),
@@ -967,7 +984,7 @@ pub async fn update_managed_agent(
             {
                 Ok(()) => None,
                 Err(e) => {
-                    eprintln!("buzz-desktop: relay profile sync failed after rename: {e}");
+                    eprintln!("buzz-desktop: relay profile sync failed after profile edit: {e}");
                     Some(e)
                 }
             }

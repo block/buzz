@@ -20,6 +20,7 @@ import { Dialog } from "@/shared/ui/dialog";
 import { Input } from "@/shared/ui/input";
 import { setManagedAgentAutoRestart } from "@/shared/api/tauriManagedAgents";
 import { EditAgentAdvancedFields } from "./EditAgentAdvancedFields";
+import { resolveManagedAgentAvatarUrl } from "./managedAgentAvatar";
 import {
   AUTO_MODEL_DROPDOWN_VALUE,
   AUTO_PROVIDER_DROPDOWN_VALUE,
@@ -507,6 +508,22 @@ export function AgentInstanceEditDialog({
       // all agree. See resolveInheritedRuntimeSubmission.
       const normalizedSubmitProvider = inheritedSubmission.provider;
       const submitEnvVars = inheritedSubmission.envVars;
+
+      // Resolve the avatar to a hosted URL (base64 data URIs are uploaded;
+      // emoji SVG data URIs pass through unchanged), mirroring the create path.
+      // On upload failure the helper falls back to the existing avatar, so a
+      // transient failure never clobbers the current image. Tri-state on the
+      // wire: null clears to the harness default, a URL sets it, undefined
+      // (unchanged) is omitted.
+      const resolvedAvatarUrl = await resolveManagedAgentAvatarUrl(
+        avatarUrl,
+        undefined,
+        agent.avatarUrl,
+      );
+      const nextAvatarUrl = resolvedAvatarUrl ?? null;
+      const avatarUrlUpdate =
+        nextAvatarUrl !== (agent.avatarUrl ?? null) ? nextAvatarUrl : undefined;
+
       const input: UpdateManagedAgentInput = {
         pubkey: agent.pubkey,
         name: name.trim() !== agent.name ? name.trim() : undefined,
@@ -548,6 +565,7 @@ export function AgentInstanceEditDialog({
           (systemPrompt.trim() || null) !== agent.systemPrompt
             ? systemPrompt.trim() || null
             : undefined,
+        avatarUrl: avatarUrlUpdate,
         model:
           normalizedModel !== (agent.model ?? null)
             ? normalizedModel
@@ -690,12 +708,11 @@ export function AgentInstanceEditDialog({
         }
       >
         <div className="grid gap-5 lg:grid-cols-[220px_minmax(0,1fr)]">
-          {/* Avatar is display-only — UpdateManagedAgentInput has no
-              avatarUrl field, so edits can't be persisted yet. Keep the
-              preview disabled until the backend supports avatar updates. */}
+          {/* Avatar edits persist via UpdateManagedAgentInput.avatarUrl —
+              resolved to a hosted URL on submit and re-published to the
+              agent's kind:0 profile when it changes. */}
           <AgentCreationPreview
             avatarUrl={previewAvatarUrl}
-            disabled
             label={previewLabel}
             onClearAvatar={() => setAvatarUrl("")}
             onUploadPendingChange={setIsAvatarUploadPending}

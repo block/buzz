@@ -639,6 +639,10 @@ pub struct UpdateManagedAgentRequest {
     pub system_prompt: Option<Option<String>>,
     #[serde(default)]
     pub mcp_toolsets: Option<Option<String>>,
+    /// Absent = don't touch. null = clear to the harness default avatar.
+    /// "url" = set. Data URIs are resolved to a hosted URL client-side.
+    #[serde(default, deserialize_with = "crate::util::double_option")]
+    pub avatar_url: Option<Option<String>>,
     /// Absent = don't touch. Present = replace the env_vars map entirely.
     #[serde(default)]
     pub env_vars: Option<BTreeMap<String, String>>,
