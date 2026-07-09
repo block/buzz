@@ -118,7 +118,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
                         || path == "/_status"
                         || path == "/info";
                     // Files with extensions (e.g. /assets/missing.js) should 404.
-                    let has_ext = path.rsplit('/').next().is_some_and(|seg| seg.contains('.'));
+                    // Exception: /invite/<code> — invite codes contain a "."
+                    // (payload.mac separator) but are SPA routes, not files.
+                    let has_ext = !path.starts_with("/invite/")
+                        && path.rsplit('/').next().is_some_and(|seg| seg.contains('.'));
                     if reserved || has_ext {
                         Ok(StatusCode::NOT_FOUND.into_response())
                     } else {
