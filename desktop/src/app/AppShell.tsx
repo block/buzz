@@ -65,7 +65,6 @@ import { useDueReminderBadgeCount } from "@/features/reminders/hooks";
 import { RemindMeLaterProvider } from "@/features/reminders/ui/RemindMeLaterProvider";
 import { useReminderNotifications } from "@/features/reminders/useReminderNotifications";
 import { AppSidebar } from "@/features/sidebar/ui/AppSidebar";
-import { BuzzThemeLab } from "@/features/sidebar/ui/BuzzThemeLab";
 import { WorkspaceRail } from "@/features/sidebar/ui/WorkspaceRail";
 import { useChannelMutes } from "@/features/sidebar/lib/useChannelMutes";
 import { useChannelStars } from "@/features/sidebar/lib/useChannelStars";
@@ -904,7 +903,6 @@ export function AppShell() {
                       }}
                     />
                   </SidebarProvider>
-                  {import.meta.env.DEV ? <BuzzThemeLab /> : null}
                 </div>
 
                 <div className="absolute inset-x-0 bottom-0 z-0 h-(--buzz-huddle-drawer-height)">

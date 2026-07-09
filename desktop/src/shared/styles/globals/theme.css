@@ -393,18 +393,16 @@
 }
 
 /*
- * Per-row-type text color knobs (Buzz theme).
+ * Per-row-type text colors (Buzz theme).
  *
  * By default the whole sidebar inherits a single `--sidebar-foreground`, so
  * channels, direct messages, and the Inbox/Agents nav rows all share one text
- * color. These variables let each row type carry its OWN foreground so the
- * Buzz Theme Lab (BuzzThemeLab) can tune them independently and we can commit
- * the values we settle on.
+ * color. These variables let each row type carry its own foreground while
+ * keeping the default value unchanged.
  *
  * Each var defaults to `inherit`, so with nothing set the sidebar looks
- * exactly as before - no visual change until a value is assigned (live by the
- * lab, or here once we lock in the palette). Scoped to the Buzz sidebar
- * container so other themes are untouched.
+ * exactly as before. Scoped to the Buzz sidebar container so other themes are
+ * untouched.
  */
 /* Channels: rows live inside the `stream-list` / `starred-list` menus. */
 :root[data-buzz-sidebar]
@@ -451,11 +449,11 @@
 }
 
 /*
- * Translucency (dev-only, Buzz Theme Lab).
+ * Translucency (Buzz theme).
  *
- * The lab writes derived alpha vars onto <html>. Keep the actual frosted
- * layer on the outer canvases only; nested sidebar/header/footer surfaces pass
- * through so the nav reads as one continuous pane.
+ * ThemeProvider toggles `data-buzz-translucent` for Buzz themes. Keep the
+ * frosted layer on the outer canvases only; nested sidebar/header/footer
+ * surfaces pass through so the nav reads as one continuous pane.
  */
 :root[data-buzz-translucent] {
   /* Neutral frosted wash; alpha applied via color-mix below. */
