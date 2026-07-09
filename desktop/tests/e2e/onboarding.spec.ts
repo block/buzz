@@ -595,7 +595,7 @@ test("first-run default workspace handoff gives immediate stepper feedback", asy
 
   await expect(page.getByText("Welcome to Buzz")).toBeVisible();
   await page
-    .getByRole("button", { name: "Continue with Block Inc. workspace" })
+    .getByRole("button", { name: "Continue with default workspace" })
     .click();
 
   await page.waitForTimeout(80);
@@ -603,7 +603,7 @@ test("first-run default workspace handoff gives immediate stepper feedback", asy
     0,
   );
   await expect(
-    page.getByRole("button", { name: "Continue with Block Inc. workspace" }),
+    page.getByRole("button", { name: "Continue with default workspace" }),
   ).toBeVisible();
   await expect(page.getByRole("progressbar")).toHaveAttribute(
     "aria-valuenow",
@@ -671,7 +671,7 @@ test("welcome presents custom workspace setup as joining a workspace", async ({
   await page.goto("/");
 
   await expect(
-    page.getByRole("button", { name: "Continue with Block Inc. workspace" }),
+    page.getByRole("button", { name: "Continue with default workspace" }),
   ).toHaveCount(0);
   await page.getByRole("button", { name: "Join a workspace" }).click();
 
