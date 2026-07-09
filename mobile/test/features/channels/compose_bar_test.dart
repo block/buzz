@@ -474,7 +474,6 @@ void main() {
       await tester.pumpAndSettle();
       await tester.enterText(find.byType(TextField), 'hello @Helper Bot');
       await tester.tap(find.byIcon(LucideIcons.sendHorizontal));
-      await tester.pump();
       await tester.pumpAndSettle();
 
       expect(sentContent, 'hello @Helper Bot');

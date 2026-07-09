@@ -84,12 +84,6 @@ void _insertTriggerAtCursor(
   focusNode.requestFocus();
 }
 
-/// Send a typing indicator over the WebSocket (fire-and-forget).
-///
-/// Desktop sends these as `["EVENT", signedEvent]` over the WebSocket — not
-/// via HTTP. Ephemeral events like typing indicators are broadcast-only and
-/// the relay doesn't persist them, so the HTTP `/api/events` endpoint may
-/// silently discard them.
 bool hasMention(String text, String name) {
   final pattern = RegExp(
     '(?:^|\\s|[*_]{1,3}|\\|\\|)@${RegExp.escape(name)}(?=\\|\\||[\\s,;.!?:)\\]}*_]|\$)',
@@ -98,6 +92,12 @@ bool hasMention(String text, String name) {
   return pattern.hasMatch(text);
 }
 
+/// Send a typing indicator over the WebSocket (fire-and-forget).
+///
+/// Desktop sends these as `["EVENT", signedEvent]` over the WebSocket — not
+/// via HTTP. Ephemeral events like typing indicators are broadcast-only and
+/// the relay doesn't persist them, so the HTTP `/api/events` endpoint may
+/// silently discard them.
 void _sendTypingIndicator(
   WidgetRef ref, {
   required String channelId,
