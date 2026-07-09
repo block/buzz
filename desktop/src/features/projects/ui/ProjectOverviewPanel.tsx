@@ -1,4 +1,10 @@
-import { FileCode2, GitBranch, GitCommitHorizontal, Users } from "lucide-react";
+import {
+  FileCode2,
+  GitBranch,
+  GitCommitHorizontal,
+  GitPullRequest,
+  Users,
+} from "lucide-react";
 import type * as React from "react";
 
 import type {
@@ -93,7 +99,7 @@ export function LanguageChips({
     <div className="flex flex-wrap gap-1.5">
       {languages.map(([language], index) => (
         <span
-          className="inline-flex items-center gap-1.5 rounded-full bg-muted/70 px-2 py-1 text-xs text-muted-foreground"
+          className="inline-flex items-center gap-1.5 rounded-full border border-border/60 bg-muted/40 px-2 py-1 text-xs text-muted-foreground"
           key={language}
         >
           <span
@@ -139,13 +145,13 @@ export function ProjectOverviewPanel({
   const latestCommit = snapshot?.latestCommit ?? null;
 
   return (
-    <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_18rem]">
+    <div className="grid overflow-hidden rounded-xl border border-border/60 bg-card xl:grid-cols-[minmax(0,1fr)_18rem]">
       <div className="min-w-0">
         {/* ReadmePanel renders its own "no README" fallback while keeping
             the branch + source controls reachable. */}
         <ReadmePanel file={readmeFile} sourceControls={sourceControls} />
       </div>
-      <aside className="space-y-6 rounded-xl border border-border/50 bg-card/60 p-4">
+      <aside className="space-y-6 border-t border-border/60 p-4 xl:border-l xl:border-t-0">
         <OverviewRailSection title="People">
           <div className="flex items-center justify-between gap-3">
             <PeopleAvatars people={people} profiles={profiles} />
@@ -204,7 +210,10 @@ export function ProjectOverviewPanel({
               </dd>
             </div>
             <div className="flex items-center justify-between gap-3">
-              <dt className="text-muted-foreground">PRs</dt>
+              <dt className="flex items-center gap-1.5 text-muted-foreground">
+                <GitPullRequest className="h-3.5 w-3.5" />
+                Pull Requests
+              </dt>
               <dd className="font-medium text-foreground">
                 {pullRequests.length}
               </dd>

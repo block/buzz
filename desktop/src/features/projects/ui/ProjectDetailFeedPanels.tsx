@@ -91,14 +91,14 @@ export function ContributorsPanel({
 
   if (rows.length === 0) {
     return (
-      <p className="rounded-xl border border-border/50 bg-card/60 p-4 text-sm text-muted-foreground">
+      <p className="border border-border/60 bg-card p-4 text-sm text-muted-foreground">
         No git contributors are available yet.
       </p>
     );
   }
 
   return (
-    <div className="overflow-hidden rounded-xl border border-border/50 bg-card/60">
+    <div className="overflow-hidden border border-border/60 bg-card">
       {rows.map((row, index) => (
         <div
           className={cn(
@@ -122,7 +122,7 @@ export function ContributorsPanel({
             </p>
             <div className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5 text-xs leading-4 text-muted-foreground">
               <span className="truncate">{row.role}</span>
-              <span className="rounded-full border border-border/50 px-1.5 py-0.5 text-2xs">
+              <span className="rounded-full border border-border/60 px-1.5 py-0.5 text-2xs">
                 {row.commitCount === null
                   ? "No git commits"
                   : `${row.commitCount} commit${row.commitCount === 1 ? "" : "s"}`}
@@ -189,7 +189,7 @@ export function ActivityPanel({
 
   if (isLoading) {
     return (
-      <p className="rounded-xl border border-border/50 bg-card/60 p-4 text-sm text-muted-foreground">
+      <p className="border border-border/60 bg-card p-4 text-sm text-muted-foreground">
         Loading activity…
       </p>
     );
@@ -197,7 +197,7 @@ export function ActivityPanel({
 
   if (commits.length === 0) {
     return (
-      <p className="rounded-xl border border-border/50 bg-card/60 p-4 text-sm text-muted-foreground">
+      <p className="border border-border/60 bg-card p-4 text-sm text-muted-foreground">
         {error
           ? "Could not load repository activity from git."
           : "No commits are available yet."}
@@ -222,7 +222,7 @@ export function ActivityPanel({
           <h3 className="text-xs font-medium text-muted-foreground">
             Commits on {group.label}
           </h3>
-          <div className="mt-2 divide-y divide-border/50 overflow-hidden rounded-xl border border-border/50 bg-card/60">
+          <div className="mt-2 divide-y divide-border/50 overflow-hidden border border-border/60 bg-card">
             {group.commits.map((commit) => {
               const matchedProfile = profileForCommit(
                 commit,
@@ -262,7 +262,7 @@ export function ActivityPanel({
                         authored {relativeCommitTime(commit.timestamp)}
                       </span>
                       {matchingContributor?.commitCount ? (
-                        <span className="rounded-full border border-border/50 px-1.5 py-0.5 text-2xs">
+                        <span className="rounded-full border border-border/60 px-1.5 py-0.5 text-2xs">
                           {pluralize(matchingContributor.commitCount, "commit")}
                         </span>
                       ) : null}

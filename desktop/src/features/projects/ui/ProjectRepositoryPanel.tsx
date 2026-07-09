@@ -442,7 +442,7 @@ function RepositoryEntryIcon({ entry }: { entry: RepositoryFileEntry }) {
   return (
     <span
       className={cn(
-        "flex h-6 w-6 shrink-0 items-center justify-center rounded-md",
+        "flex h-6 w-6 shrink-0 items-center justify-center",
         visual.containerClassName,
       )}
     >
@@ -573,7 +573,7 @@ function FileContentPanel({
   const directorySegments = pathSegments.slice(0, -1);
 
   return (
-    <div className="overflow-hidden rounded-xl border border-border/50 bg-card/60">
+    <div className="overflow-hidden rounded-xl border border-border/60 bg-card">
       <div className="flex min-h-10 items-center gap-1 border-border/50 border-b bg-muted/20 px-3">
         <BreadcrumbButton onClick={() => onOpenPath("")}>
           Files
@@ -710,13 +710,13 @@ export function RepositoryFilesPanel({
   if (stateMessage) {
     if (!sourceControls) {
       return (
-        <div className="rounded-xl border border-border/50 bg-card/60 p-4 text-sm text-muted-foreground">
+        <div className="rounded-xl border border-border/60 bg-card p-4 text-sm text-muted-foreground">
           {stateMessage}
         </div>
       );
     }
     return (
-      <div className="overflow-hidden rounded-xl border border-border/50 bg-card/60">
+      <div className="overflow-hidden rounded-xl border border-border/60 bg-card">
         <div className="flex min-h-10 min-w-0 items-center gap-1 border-border/50 border-b px-3 py-1.5">
           <RepositoryBranchDropdown
             branch={sourceControls.branch}
@@ -746,7 +746,7 @@ export function RepositoryFilesPanel({
   }
 
   return (
-    <div className="overflow-hidden rounded-xl border border-border/50 bg-card/60">
+    <div className="overflow-hidden rounded-xl border border-border/60 bg-card">
       <div className="flex min-h-10 min-w-0 items-center gap-1 border-border/50 border-b px-3 py-1.5">
         {sourceControls ? (
           <RepositoryBranchDropdown

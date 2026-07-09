@@ -114,7 +114,7 @@ function ProjectUpdatedLabel({
     <Tooltip>
       <TooltipTrigger asChild>
         <span className="whitespace-nowrap text-xs text-muted-foreground">
-          Updated {relativeTime(updatedAt)}
+          {relativeTime(updatedAt)}
         </span>
       </TooltipTrigger>
       <TooltipContent className="max-w-96 break-words">
@@ -173,7 +173,7 @@ function ProjectPeopleStack({
         );
       })}
       {remaining > 0 ? (
-        <span className="relative z-0 flex h-5 min-w-5 items-center justify-center rounded-full bg-muted px-1 text-3xs font-semibold text-muted-foreground ring-2 ring-card">
+        <span className="relative z-0 flex h-5 min-w-5 items-center justify-center rounded-sm bg-muted px-1 text-3xs font-semibold text-muted-foreground ring-2 ring-card">
           +{remaining}
         </span>
       ) : null}
@@ -185,73 +185,112 @@ const PROJECT_STAT_ITEMS = [
   {
     key: "commitCount",
     icon: GitCommit,
-    iconClass: "text-emerald-500",
-    barClass: "bg-emerald-500",
+    iconClass: "text-primary/60",
+    barClass: "bg-primary/60",
+    columnClass: "w-24",
     label: (count: number) => (count === 1 ? "commit" : "commits"),
   },
   {
     key: "prCount",
     icon: GitPullRequest,
-    iconClass: "text-violet-500",
-    barClass: "bg-violet-500",
+    iconClass: "text-primary",
+    barClass: "bg-primary",
+    columnClass: "w-16",
     label: (count: number) => (count === 1 ? "PR" : "PRs"),
   },
   {
     key: "issueCount",
     icon: CircleDot,
-    iconClass: "text-amber-500",
-    barClass: "bg-amber-500",
+    iconClass: "text-orange-500",
+    barClass: "bg-orange-500",
+    columnClass: "w-20",
     label: (count: number) => (count === 1 ? "issue" : "issues"),
   },
 ] as const;
 
 function ProjectStatsRow({
   summary,
+  fixedColumns = false,
 }: {
   summary: ProjectActivitySummary | undefined;
+  /** Give each stat a fixed width so stats align vertically across list rows. */
+  fixedColumns?: boolean;
 }) {
   return (
-    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
-      {PROJECT_STAT_ITEMS.map(({ key, icon: Icon, iconClass, label }) => {
-        const count = summary?.[key] ?? 0;
-        return (
-          <span className="flex items-center gap-1" key={key}>
-            <Icon className={cn("h-3.5 w-3.5 shrink-0", iconClass)} />
-            <span className="font-medium text-foreground">{count}</span>
-            {label(count)}
-          </span>
-        );
-      })}
+    <div
+      className={cn(
+        "flex items-center gap-x-3 gap-y-1 text-xs text-muted-foreground",
+        !fixedColumns && "flex-wrap",
+      )}
+    >
+      {PROJECT_STAT_ITEMS.map(
+        ({ key, icon: Icon, iconClass, label, columnClass }) => {
+          const count = summary?.[key] ?? 0;
+          return (
+            <span
+              className={cn(
+                "flex items-center gap-1",
+                fixedColumns && cn("shrink-0", columnClass),
+              )}
+              key={key}
+            >
+              <Icon className={cn("h-3.5 w-3.5 shrink-0", iconClass)} />
+              <span className="font-medium text-foreground">{count}</span>
+              {label(count)}
+            </span>
+          );
+        },
+      )}
     </div>
   );
 }
 
 // Segmented commits/PRs/issues distribution — the card's "progress bar".
+// Hovering thickens the bar and reveals a tooltip with the exact breakdown.
 function ProjectActivityBar({
   summary,
 }: {
   summary: ProjectActivitySummary | undefined;
 }) {
-  const counts = PROJECT_STAT_ITEMS.map(({ key, barClass }) => ({
-    barClass,
-    count: summary?.[key] ?? 0,
-  }));
-  const total = counts.reduce((sum, item) => sum + item.count, 0);
+  const items = PROJECT_STAT_ITEMS.map(({ key, barClass, label }) => {
+    const count = summary?.[key] ?? 0;
+    return { barClass, count, text: label(count) };
+  });
+  const total = items.reduce((sum, item) => sum + item.count, 0);
 
   return (
-    <div className="flex h-1.5 w-full gap-px overflow-hidden rounded-full bg-muted/60">
-      {total > 0
-        ? counts
-            .filter((item) => item.count > 0)
-            .map((item) => (
-              <div
-                className={cn("h-full rounded-full", item.barClass)}
-                key={item.barClass}
-                style={{ width: `${(item.count / total) * 100}%` }}
-              />
-            ))
-        : null}
-    </div>
+    <Tooltip>
+      <TooltipTrigger asChild>
+        {/* z-10 lifts the bar above the card's full-surface open button so it
+            can receive hover events. Fixed h-2 wrapper keeps layout stable
+            while the inner bar grows on hover. */}
+        <div className="group/activity-bar relative z-10 flex h-2 w-full items-center">
+          <div className="flex h-1.5 w-full gap-px overflow-hidden rounded-full bg-muted/60 transition-all duration-150 group-hover/activity-bar:h-2">
+            {total > 0
+              ? items
+                  .filter((item) => item.count > 0)
+                  .map((item) => (
+                    <div
+                      className={cn("h-full", item.barClass)}
+                      key={item.barClass}
+                      style={{ width: `${(item.count / total) * 100}%` }}
+                    />
+                  ))
+              : null}
+          </div>
+        </div>
+      </TooltipTrigger>
+      <TooltipContent>
+        <div className="flex items-center gap-3">
+          {items.map((item) => (
+            <span className="flex items-center gap-1.5" key={item.barClass}>
+              <span className={cn("h-2 w-2 rounded-full", item.barClass)} />
+              {item.count} {item.text}
+            </span>
+          ))}
+        </div>
+      </TooltipContent>
+    </Tooltip>
   );
 }
 
@@ -261,7 +300,7 @@ function StatusPill({ status }: { status: string }) {
   }
 
   return (
-    <span className="shrink-0 rounded-full bg-muted/60 px-2 pb-[3px] pt-[5px] text-2xs font-semibold uppercase leading-none tracking-[0.18em] text-muted-foreground">
+    <span className="shrink-0 rounded-full border border-border/60 bg-muted/40 px-2 pb-[3px] pt-[5px] text-2xs font-semibold uppercase leading-none tracking-[0.18em] text-muted-foreground">
       {status}
     </span>
   );
@@ -283,7 +322,7 @@ function EmptyState() {
 
 function EmptyFilteredState() {
   return (
-    <div className="flex flex-1 flex-col items-center justify-center gap-3 rounded-xl border border-dashed border-border/60 px-4 py-12 text-center">
+    <div className="flex flex-1 flex-col items-center justify-center gap-3 border border-dashed border-border/60 px-4 py-12 text-center">
       <FolderGit2 className="h-9 w-9 text-muted-foreground/40" />
       <div className="space-y-1">
         <p className="text-sm font-medium text-foreground">
@@ -306,7 +345,7 @@ function ProjectCardButton({
 }) {
   return (
     <button
-      className="absolute inset-0 rounded-xl"
+      className="absolute inset-0"
       onClick={() => onOpen(project)}
       type="button"
     >
@@ -437,14 +476,14 @@ function ProjectGridCard({
 }) {
   return (
     <Card
-      className="group relative flex min-h-44 flex-col overflow-hidden rounded-2xl border-border/50 bg-muted/20 p-4 shadow-none transition-colors duration-150 hover:bg-muted/30"
+      className="group relative flex min-h-44 flex-col overflow-hidden border-border/60 bg-card shadow-none transition-colors duration-150 hover:bg-muted/20"
       data-testid={`project-card-${project.dtag}`}
     >
       <ProjectCardButton onOpen={onOpen} project={project} />
-      <div className="flex min-h-0 flex-1 flex-col gap-3">
-        <div className="flex min-w-0 items-center justify-between gap-3">
+      <div className="flex min-h-0 flex-1 flex-col">
+        <div className="flex min-w-0 items-center justify-between gap-3 px-4 pt-3">
           <div className="flex min-w-0 items-center gap-2">
-            <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-muted/60">
+            <span className="flex h-8 w-8 shrink-0 items-center justify-center border border-border/60 bg-muted/40">
               <FolderGit2 className="h-4 w-4 text-muted-foreground" />
             </span>
             <span className="min-w-0 truncate text-sm font-semibold text-foreground">
@@ -469,22 +508,25 @@ function ProjectGridCard({
           </div>
         </div>
 
-        <p className="line-clamp-2 min-h-10 text-sm text-muted-foreground">
+        <p className="line-clamp-2 min-h-10 px-4 py-2 text-sm text-muted-foreground">
           {project.description || "A shared space for internal git work."}
         </p>
 
-        <div className="mt-auto space-y-2.5">
-          <div className="flex min-w-0 items-center justify-between gap-2">
+        <div className="relative z-10 flex items-center px-4 pb-1">
+          <ProjectPeopleStack
+            profiles={profiles}
+            pubkeys={people}
+            workOwnerPubkey={project.owner}
+          />
+        </div>
+
+        <div className="mt-auto">
+          <div className="flex min-w-0 items-center px-4 pb-2 pt-1">
             <ProjectStatsRow summary={summary} />
-            <div className="relative z-10 flex shrink-0 items-center">
-              <ProjectPeopleStack
-                profiles={profiles}
-                pubkeys={people}
-                workOwnerPubkey={project.owner}
-              />
-            </div>
           </div>
-          <ProjectActivityBar summary={summary} />
+          <div className="px-4 pb-3">
+            <ProjectActivityBar summary={summary} />
+          </div>
         </div>
       </div>
     </Card>
@@ -515,14 +557,14 @@ function ProjectListRow({
   onOpenTerminal: (project: Project) => Promise<void> | void;
 }) {
   return (
-    <Card
-      className="group relative overflow-hidden rounded-2xl border-border/50 bg-muted/20 p-3 shadow-none transition-colors duration-150 hover:bg-muted/30"
+    <div
+      className="group relative px-4 py-2.5 transition-colors duration-150 hover:bg-muted/20"
       data-testid={`project-row-${project.dtag}`}
     >
       <ProjectCardButton onOpen={onOpen} project={project} />
       <div className="flex min-w-0 items-center justify-between gap-3">
         <div className="flex min-w-0 items-center gap-2">
-          <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-muted/60">
+          <span className="flex h-8 w-8 shrink-0 items-center justify-center border border-border/60 bg-muted/40">
             <FolderGit2 className="h-4 w-4 text-muted-foreground" />
           </span>
           <div className="min-w-0">
@@ -540,17 +582,19 @@ function ProjectListRow({
 
         <div className="relative z-10 flex shrink-0 items-center gap-3">
           <div className="hidden items-center gap-3 md:flex">
-            <ProjectStatsRow summary={summary} />
-            <div className="w-20">
+            <ProjectStatsRow fixedColumns summary={summary} />
+            <div className="w-20 shrink-0">
               <ProjectActivityBar summary={summary} />
             </div>
           </div>
-          <ProjectPeopleStack
-            profiles={profiles}
-            pubkeys={people}
-            workOwnerPubkey={project.owner}
-          />
-          <div className="hidden sm:block">
+          <div className="flex w-24 shrink-0 justify-end">
+            <ProjectPeopleStack
+              profiles={profiles}
+              pubkeys={people}
+              workOwnerPubkey={project.owner}
+            />
+          </div>
+          <div className="hidden w-24 shrink-0 text-right sm:block">
             <ProjectUpdatedLabel
               profiles={profiles}
               project={project}
@@ -567,7 +611,7 @@ function ProjectListRow({
           />
         </div>
       </div>
-    </Card>
+    </div>
   );
 }
 
@@ -857,7 +901,7 @@ export function ProjectsView() {
                 <label className="flex items-center gap-2 text-xs text-muted-foreground">
                   <span className="sr-only">Sort projects</span>
                   <select
-                    className="h-8 rounded-md bg-background px-2 text-xs text-foreground outline-hidden focus:ring-1 focus:ring-ring"
+                    className="h-8 rounded-md border border-border/60 bg-background px-2 text-xs text-foreground outline-hidden focus:ring-1 focus:ring-ring"
                     onChange={(event) =>
                       handleSortChange(event.target.value as ProjectsSort)
                     }
@@ -918,7 +962,7 @@ export function ProjectsView() {
                 })}
               </div>
             ) : (
-              <div className="space-y-2">
+              <div className="-mx-4 divide-y divide-border/60 border-y border-border/60 bg-card">
                 {visibleProjects.map((project) => {
                   const summary =
                     activitySummariesQuery.data?.[project.repoAddress];

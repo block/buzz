@@ -84,7 +84,7 @@ export function ProjectsContributionGraph({
 
   return (
     <div className={cn("space-y-2", className)}>
-      <div className="grid gap-1" style={{ gridTemplateColumns }}>
+      <div className="grid gap-2" style={{ gridTemplateColumns }}>
         {labels.map((label, index) => (
           <span
             className="overflow-visible whitespace-nowrap text-2xs font-medium text-muted-foreground"
@@ -97,7 +97,7 @@ export function ProjectsContributionGraph({
         ))}
       </div>
       <div
-        className="grid grid-flow-col grid-rows-7 gap-1"
+        className="grid grid-flow-col grid-rows-7 gap-2"
         style={{ gridTemplateColumns }}
       >
         {weeks.map((week) =>

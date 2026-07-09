@@ -55,7 +55,7 @@ export function ProjectCommitDetailPanel({
 
   return (
     <div className="space-y-3">
-      <header className="space-y-2 rounded-xl border border-border/50 bg-card/60 p-4">
+      <header className="space-y-2 border border-border/60 bg-card p-4">
         <p className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
           <GitCommitHorizontal className="h-3.5 w-3.5" />
           Commit from {authorLabel}
@@ -78,7 +78,7 @@ export function ProjectCommitDetailPanel({
               <span className="flex items-center gap-0.5 font-mono">
                 {shortHash}
                 <CopyCommitHashButton
-                  className="h-6 w-6 rounded-md"
+                  className="h-6 w-6"
                   hash={commit?.hash ?? commitHash}
                 />
               </span>

@@ -23,7 +23,7 @@ export function CopyCommitHashButton({
     <button
       aria-label="Copy commit hash"
       className={cn(
-        "flex h-7 w-7 items-center justify-center text-muted-foreground transition-colors hover:bg-muted/40 hover:text-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring",
+        "flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted/40 hover:text-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring",
         className,
       )}
       onClick={handleCopy}
