@@ -97,7 +97,7 @@ const overrides = new Map([
   ["src-tauri/src/managed_agents/nest.rs", 679],
   // keyring-dev-isolation: agent key migration added copy_agent_keys_between_stores
   // and load_readonly support; file grew past 1000 default. Queued to split.
-  ["src-tauri/src/managed_agents/storage.rs", 1145],
+  ["src-tauri/src/managed_agents/storage.rs", 1325],
   // harness-persona-sync: persona-runtime resolution threaded into the spawn
   // path here. Load-bearing feature growth; queued to split in the resolver
   // unify refactor followup. +26 for resolve_effective_prompt_model_provider
@@ -195,7 +195,8 @@ const overrides = new Map([
   // + inner fn with baked-env gate + 26 tests. Load-bearing correctness fix.
   // am review fix: also clear stale V1 model field on provider rewrite +
   // new model-clear test. Load-bearing chimera fix.
-  ["src-tauri/src/migration.rs", 1402],
+  // keyring-dev-isolation: run_boot_migrations wires agent-key migration.
+  ["src-tauri/src/migration.rs", 1415],
   // onMarkRead + isUnread prop threading (mirrors the onMarkUnread prop
   // already here) for the single-toggle mark-read/unread menu item — a small
   // overage from load-bearing per-message plumbing, not generic debt growth.
@@ -216,7 +217,7 @@ const overrides = new Map([
   // cross-process keychain race fix (D3): interprocess lock + BlobLockGuard +
   // uid-keyed lockfile path + behavioral tests add ~303 lines. Load-bearing
   // security fix for the lost-update race that stranded agent keys.
-  ["src-tauri/src/secret_store.rs", 1075],
+  ["src-tauri/src/secret_store.rs", 1110],
   // keyring-dev-isolation: keyring_service() fn (7 lines) replaces the const
   // to return "buzz-desktop-dev" in debug builds. Load-bearing isolation fix.
   ["src-tauri/src/app_state.rs", 1042],
