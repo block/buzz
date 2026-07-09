@@ -376,6 +376,75 @@ pub async fn resolve_join<D: HuddleDirectory + ?Sized>(
     })
 }
 
+/// How long to wait between re-resolves while a `LocalOwner` snapshot has no
+/// live registry entry yet, and how many times to try before failing closed.
+/// The CAS winner installs its registry entry immediately after the (fast,
+/// local) `add_peer`, so the ambiguous window is tiny; ~500 ms of bounded
+/// polling covers it with wide margin without ever proceeding ownerless.
+const OWNER_READY_RETRY_INTERVAL: Duration = Duration::from_millis(20);
+const OWNER_READY_MAX_ATTEMPTS: u32 = 25;
+
+/// Resolve a join and, on the steady-state `LocalOwner` reuse arm, ensure a
+/// live owner renewer actually exists before the caller admits a local owner
+/// peer.
+///
+/// [`resolve_join`] returns `LocalOwner { generation }` with `acquired = None`
+/// whenever Redis names this pod the owner but this call did not mint the lease
+/// — the steady-state reuse arm. Reuse is only correct when a live entry exists
+/// in the [`HuddleOwnerRegistry`]: that entry carries the `lost` signal the
+/// admitted peer's owner-loss watcher selects on. If the CAS winner has
+/// resolved but not yet installed its entry (the window between its
+/// `resolve_join` and its post-`add_peer` `attach`), a naive reuse would admit
+/// a local owner peer with **no** loss watcher — it would fan media at a
+/// generation it cannot observe losing, the exact consumer-#2 split-brain the
+/// fence exists to prevent.
+///
+/// So the registry lookup — never the `resolve_join` snapshot — gates reuse:
+/// when the snapshot says `LocalOwner`/`acquired = None` but no live entry
+/// exists, re-resolve in a bounded loop. Each retry lands on one of:
+/// - the winner installed in the meantime → live entry → **reuse**;
+/// - the room emptied and released underneath us → `owner_of` is now unowned →
+///   our re-acquire wins CAS → `acquired = Some` → **fresh lease**;
+/// - still the ambiguous window → sleep and retry.
+///
+/// If the loop exhausts we fail the join closed (a transient contention error,
+/// surfaced to the client exactly like a lost CAS) rather than ever admit an
+/// ownerless owner peer. The CAS-winning and remote-owner arms return
+/// immediately — only the reuse arm can loop.
+pub async fn resolve_join_owner_ready<D: HuddleDirectory + ?Sized>(
+    directory: &D,
+    community_id: CommunityId,
+    session_id: Uuid,
+    local_runtime_id: RuntimeId,
+    owners: &HuddleOwnerRegistry,
+) -> Result<ResolvedJoin, MeshError> {
+    for _ in 0..OWNER_READY_MAX_ATTEMPTS {
+        let resolved = resolve_join(directory, community_id, session_id, local_runtime_id).await?;
+
+        // Only the steady-state reuse arm (LocalOwner minted by another
+        // connection) can be ambiguous. The CAS winner (acquired = Some) and
+        // every remote-owner arm are authoritative — return them as-is.
+        match (&resolved.outcome, &resolved.acquired) {
+            (JoinOutcome::LocalOwner { .. }, None) => {
+                if owners.lost_for(session_id).is_some() {
+                    return Ok(resolved); // live entry → reuse is safe
+                }
+                // Ambiguous window: winner not yet attached (or room released
+                // underneath us). Wait and re-resolve — the retry either finds
+                // the installed entry or wins a fresh CAS.
+                tokio::time::sleep(OWNER_READY_RETRY_INTERVAL).await;
+            }
+            _ => return Ok(resolved),
+        }
+    }
+
+    // Exhausted: fail closed. Never admit a local owner peer with no live
+    // renewer — that is the ownerless split-brain this loop exists to prevent.
+    Err(MeshError::Transport(format!(
+        "huddle owner not ready for session {session_id} after {OWNER_READY_MAX_ATTEMPTS} attempts"
+    )))
+}
+
 /// Renewal cadence for an owned huddle lease. Mirrors the reliable lane
 /// (`crate::tunnel::reliable::DEFAULT_RENEW_INTERVAL`): renew every 10s against
 /// the directory's 30s TTL, giving three renew attempts per lease lifetime.
@@ -1960,6 +2029,112 @@ mod tests {
         assert!(
             !lost.is_cancelled(),
             "room-empty is a clean release, not owner-loss"
+        );
+    }
+
+    // --- resolve_join_owner_ready: the LocalOwner reuse race gate ------------
+
+    /// The exact interleaving the review flagged: the CAS winner has resolved
+    /// (Redis names this pod owner) but has not yet installed its registry entry
+    /// when a second joiner resolves `LocalOwner`. `resolve_join_owner_ready`
+    /// must NOT return the bare snapshot — it re-resolves until the winner's
+    /// entry appears, then returns reuse. Never admits an ownerless owner peer.
+    #[tokio::test]
+    async fn owner_ready_waits_for_winner_install_then_reuses() {
+        // Redis says this pod (rt(1)) owns generation 5 — the steady-state
+        // reuse arm (acquired = None), winner not yet attached.
+        let dir = Arc::new(FakeDir::owned_by(Ownership {
+            owner_runtime_id: rt(1),
+            generation: 5,
+        }));
+        let registry = Arc::new(HuddleOwnerRegistry::new());
+        let session = Uuid::new_v4();
+
+        // The winner installs its entry after a couple of retry intervals.
+        let installer = Arc::clone(&registry);
+        let dir_for_install = Arc::clone(&dir);
+        let install = tokio::spawn(async move {
+            tokio::time::sleep(OWNER_READY_RETRY_INTERVAL * 3).await;
+            installer.attach(
+                session,
+                dir_for_install as Arc<dyn HuddleDirectory>,
+                lease_for(session, 5),
+            );
+        });
+
+        let resolved = resolve_join_owner_ready(&*dir, community(), session, rt(1), &registry)
+            .await
+            .unwrap();
+
+        install.await.unwrap();
+        // Reuse: LocalOwner with no fresh lease (the winner holds it), and the
+        // live entry now exists so the caller gets a real loss watcher.
+        assert_eq!(resolved.outcome, JoinOutcome::LocalOwner { generation: 5 });
+        assert!(resolved.acquired.is_none(), "reuse arm mints no new lease");
+        assert!(
+            registry.lost_for(session).is_some(),
+            "returned only once a live entry gated reuse"
+        );
+    }
+
+    /// If the room emptied and released underneath the racing joiner, the
+    /// re-resolve wins a fresh CAS instead of adopting the torn-down lease:
+    /// `owner_of` now reports unowned, `acquire` grants a new generation, and
+    /// the result carries the real lease (acquired = Some) for the caller to
+    /// install.
+    #[tokio::test]
+    async fn owner_ready_reacquires_when_room_released_underneath() {
+        // Starts LocalOwner/no-entry (the ambiguous window)...
+        let dir = Arc::new(FakeDir::owned_by(Ownership {
+            owner_runtime_id: rt(1),
+            generation: 5,
+        }));
+        // ...then the room empties + releases: owner_of goes unowned and our
+        // acquire wins a fresh generation.
+        let dir_flip = Arc::clone(&dir);
+        let flip = tokio::spawn(async move {
+            tokio::time::sleep(OWNER_READY_RETRY_INTERVAL * 2).await;
+            *dir_flip.owner.lock().unwrap() = None;
+            *dir_flip.acquire.lock().unwrap() =
+                Some(AcquireOutcome::Acquired(lease_for(Uuid::nil(), 6)));
+        });
+        let registry = HuddleOwnerRegistry::new(); // stays empty → forces retry
+
+        let resolved =
+            resolve_join_owner_ready(&*dir, community(), Uuid::new_v4(), rt(1), &registry)
+                .await
+                .unwrap();
+
+        flip.await.unwrap();
+        assert_eq!(resolved.outcome, JoinOutcome::LocalOwner { generation: 6 });
+        assert_eq!(
+            resolved.acquired.as_ref().map(HuddleLease::generation),
+            Some(6),
+            "re-acquire mints a fresh lease for the caller to install"
+        );
+    }
+
+    /// The window never resolves (winner wedged, entry never installed, room
+    /// never releases): the loop exhausts and fails closed rather than admit an
+    /// ownerless owner. The handler surfaces this to the client exactly like a
+    /// lost CAS.
+    #[tokio::test]
+    async fn owner_ready_fails_closed_when_window_never_resolves() {
+        // Perpetual LocalOwner/no-entry: owner_of always names us, registry
+        // stays empty, acquire is never scripted (and never reached). The
+        // bounded loop (~500ms real time) must terminate and fail closed.
+        let dir = FakeDir::owned_by(Ownership {
+            owner_runtime_id: rt(1),
+            generation: 5,
+        });
+        let registry = HuddleOwnerRegistry::new();
+
+        let err = resolve_join_owner_ready(&dir, community(), Uuid::new_v4(), rt(1), &registry)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, MeshError::Transport(_)),
+            "exhaustion fails closed with a transient error, not an ownerless success"
         );
     }
 

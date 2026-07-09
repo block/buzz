@@ -27,7 +27,7 @@ use nostr::{EventBuilder, Kind, Tag};
 use serde::Deserialize;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 use buzz_auth::generate_challenge;
@@ -244,11 +244,12 @@ async fn handle_audio_connection(
     let mut acquired_lease: Option<crate::audio::join::HuddleLease> = None;
     match state.mesh() {
         Some(mesh) => {
-            match crate::audio::join::resolve_join(
+            match crate::audio::join::resolve_join_owner_ready(
                 &mesh.directory,
                 tenant.community(),
                 channel_id,
                 mesh.local_runtime_id,
+                &mesh.owners,
             )
             .await
             {
@@ -423,11 +424,14 @@ async fn handle_audio_connection(
     // below; `owner_generation` fences the release on room-empty so a stale
     // teardown cannot release a newer epoch a re-acquire installed.
     //
-    // A control stream from a non-owner pod that raced this install finds no
-    // entry and serves recv-only for its lifetime — degraded, not incorrect:
-    // the per-frame fence in `serve_control_loop` still tears it down when the
-    // owner's generation moves. The proactive `Goodbye` is an optimization on
-    // top of the fence, not the sole protection.
+    // The reuse arm's live entry is guaranteed by `resolve_join_owner_ready`:
+    // it re-resolves until the CAS winner has installed (reuse) or a fresh CAS
+    // wins (acquire), never returning a `LocalOwner` snapshot with a missing
+    // registry entry. So a local owner peer here always gets a real `lost`
+    // watcher — the ownerless split-brain (an owner peer fanning stale media
+    // with no way to observe lease loss, since local WS peers have no per-frame
+    // fence) cannot occur. A `None` on the reuse arm is therefore an invariant
+    // violation, not a benign race; log it loudly rather than proceed silently.
     let mut owner_lost: Option<CancellationToken> = None;
     let mut owner_generation: Option<u64> = None;
     if let Some(mesh) = state.mesh() {
@@ -443,6 +447,14 @@ async fn handle_audio_connection(
             (Some(crate::audio::join::JoinOutcome::LocalOwner { generation }), None) => {
                 owner_lost = mesh.owners.lost_for(channel_id);
                 owner_generation = Some(generation);
+                if owner_lost.is_none() {
+                    error!(
+                        channel_id = %channel_id,
+                        "huddle owner-ready invariant violated: LocalOwner reuse with no live \
+                         registry entry after resolve_join_owner_ready — owner peer has no \
+                         lease-loss watcher"
+                    );
+                }
             }
             _ => {}
         }
