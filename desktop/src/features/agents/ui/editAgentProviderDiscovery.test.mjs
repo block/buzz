@@ -55,17 +55,35 @@ test("editAgent_providerFieldHidden_forBlankRuntime", () => {
 
 // ── Provider dropdown options for EditAgentProviderField ────────────────────
 //
-// The provider dropdown must always contain the well-known providers
-// (databricks, databricks_v2, anthropic, openai, openai-compat) plus a
-// default-provider fallback entry so users can clear a saved provider.
+// The provider dropdown contains the well-known providers
+// (databricks_v2, anthropic, openai, openai-compat) plus a default-provider
+// fallback entry so users can clear a saved provider.
+// Note: bare "databricks" (V1 / Model Serving) is no longer offered as a
+// fresh choice in the default picker — Block builds migrate it to V2 at boot
+// and the picker would silently undo any intentional V1 selection.
 
-test("editAgent_providerOptions_includesDatabricksProviders", () => {
+test("editAgent_providerOptions_includesDatabricksV2Provider", () => {
   const options = getPersonaProviderOptions("", "buzz-agent");
   const ids = options.map((o) => o.id);
-  assert.ok(ids.includes("databricks"), "databricks must be a provider option");
   assert.ok(
     ids.includes("databricks_v2"),
     "databricks_v2 must be a provider option",
+  );
+  assert.ok(
+    !ids.includes("databricks"),
+    "bare databricks (V1) must NOT be in the default provider list",
+  );
+});
+
+test("editAgent_providerOptions_includesDatabricksV1AsCurrentIfSaved", () => {
+  // A record that already has provider="databricks" (OSS / pre-migration)
+  // must still show it in the dropdown as the current selection so it
+  // remains visible without offering it as a fresh default choice.
+  const options = getPersonaProviderOptions("databricks", "buzz-agent");
+  const ids = options.map((o) => o.id);
+  assert.ok(
+    ids.includes("databricks"),
+    "databricks must appear as current provider when it is the saved value",
   );
 });
 
