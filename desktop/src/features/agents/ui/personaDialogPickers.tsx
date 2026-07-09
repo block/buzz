@@ -16,7 +16,6 @@ export const NO_RUNTIME_DROPDOWN_VALUE = "__no_runtime__";
 
 const KNOWN_LLM_PROVIDER_IDS = [
   "anthropic",
-  "databricks",
   "databricks_v2",
   "openai",
   "openai-compat",
@@ -50,7 +49,6 @@ const PERSONA_LLM_PROVIDER_OPTIONS: readonly PersonaModelOption[] = [
   { id: "anthropic", label: "Anthropic" },
   { id: "openai", label: "OpenAI" },
   { id: "openai-compat", label: "OpenAI-compatible" },
-  { id: "databricks", label: "Databricks" },
   { id: "databricks_v2", label: "Databricks v2" },
 ];
 
@@ -100,7 +98,8 @@ export function requiredCredentialEnvKeys(
     if (normalizedProvider === "openai") return ["OPENAI_COMPAT_API_KEY"];
     if (
       normalizedProvider === "databricks" ||
-      normalizedProvider === "databricks_v2"
+      normalizedProvider === "databricks_v2" ||
+      normalizedProvider === "databricks-v2"
     ) {
       // DATABRICKS_TOKEN is NOT required — OAuth PKCE is the normal path.
       return ["DATABRICKS_HOST"];

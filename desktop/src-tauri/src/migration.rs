@@ -165,6 +165,7 @@ pub fn run_boot_migrations(app: &tauri::AppHandle) {
         eprintln!("buzz-desktop: sync-team-personas: {e}");
     }
     reconcile_provider_mcp_commands(app);
+    reconcile_databricks_v1_to_v2(app);
     materialize_agent_runtimes(app);
 }
 
@@ -1234,6 +1235,81 @@ pub fn reconcile_provider_mcp_commands(app: &tauri::AppHandle) {
     }
 }
 
+fn reconcile_databricks_v1_to_v2_in_file(path: &Path) {
+    use crate::managed_agents::DERIVED_PROVIDER_MODEL_ENV_KEYS;
+    patch_json_records(path, |obj| {
+        let mut changed = false;
+
+        // Rewrite stale v1 provider field to v2.
+        if obj.get("provider").and_then(|v| v.as_str()) == Some("databricks") {
+            eprintln!(
+                "buzz-desktop: databricks-v1-to-v2: {:?}: provider \"databricks\" → \"databricks_v2\"",
+                obj.get("name").and_then(|v| v.as_str()).unwrap_or("?"),
+            );
+            obj.insert(
+                "provider".to_string(),
+                serde_json::Value::String("databricks_v2".to_string()),
+            );
+            changed = true;
+        }
+
+        // Strip derived provider/model keys from env_vars on ALL records.
+        // These keys are re-derived from structured fields at spawn time;
+        // stale copies in env_vars silently override the structured fields
+        // (last-write-wins in Command::env) and can cause V1 routing even
+        // when the provider dropdown shows V2.
+        if let Some(serde_json::Value::Object(env_vars)) = obj.get_mut("env_vars") {
+            for key in DERIVED_PROVIDER_MODEL_ENV_KEYS {
+                if env_vars.remove(*key).is_some() {
+                    eprintln!(
+                        "buzz-desktop: databricks-v1-to-v2: removed stale env_vars[\"{key}\"]",
+                    );
+                    changed = true;
+                }
+            }
+        }
+
+        changed
+    });
+}
+
+/// Migrate persisted agent records from Databricks V1 to V2 and strip stale
+/// derived provider/model keys from `env_vars`.
+///
+/// Two classes of record corruption are fixed:
+///
+/// 1. `record.provider == "databricks"` — upgraded builds bake
+///    `BUZZ_AGENT_PROVIDER=databricks_v2`, but the persisted structured field
+///    overwrites it at spawn time (last-write-wins). Rewrite to `"databricks_v2"`.
+///
+/// 2. Stale `BUZZ_AGENT_PROVIDER` / `BUZZ_AGENT_MODEL` / `GOOSE_PROVIDER` /
+///    `GOOSE_MODEL` in `record.env_vars` — these are derived from structured
+///    fields at spawn time and must never live in `env_vars`. A stale copy
+///    silently overrides the structured fields, causing V1 routing even when
+///    the UI shows V2 (or pinning a thinking-effort value after the user
+///    changes it). Stripped for ALL records regardless of provider.
+///
+/// Covers both the current app data dir and the canonical dev data dir
+/// (for worktree instances) — same dual-dir pattern as
+/// `reconcile_legacy_command_names` and `reconcile_provider_mcp_commands`.
+pub fn reconcile_databricks_v1_to_v2(app: &tauri::AppHandle) {
+    let Ok(current_dir) = app.path().app_data_dir() else {
+        return;
+    };
+    let mut dirs = vec![current_dir.clone()];
+    if let Some(canonical) = canonical_dev_data_dir(&current_dir) {
+        if canonical.exists() && canonical != current_dir {
+            dirs.push(canonical);
+        }
+    }
+    for dir in dirs {
+        let path = dir.join("agents/managed-agents.json");
+        if path.exists() {
+            reconcile_databricks_v1_to_v2_in_file(&path);
+        }
+    }
+}
+
 fn rename_provider_to_runtime_in_personas(path: &Path) {
     patch_json_records(path, |obj| {
         if obj.contains_key("runtime") {
@@ -1278,6 +1354,10 @@ mod tests;
 #[cfg(test)]
 #[path = "migration_command_tests.rs"]
 mod command_tests;
+
+#[cfg(test)]
+#[path = "migration_databricks_tests.rs"]
+mod databricks_tests;
 
 #[cfg(test)]
 #[path = "migration_team_dir_tests.rs"]
