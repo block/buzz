@@ -50,6 +50,14 @@ pub fn set_window_vibrancy(
             _ => NSVisualEffectMaterial::Sidebar,
         };
 
+        // `apply_vibrancy` appends a new tagged `NSVisualEffectView` each call,
+        // while `clear_vibrancy` only removes one. Repeated enables (theme
+        // switches, follow-system flips) would otherwise stack blur views and
+        // leave a stale one behind on the next non-Buzz theme. Clear any
+        // existing view first so exactly one material is ever installed. The
+        // clear is a no-op (returns `false`) when none is present.
+        let _ = clear_vibrancy(&window);
+
         apply_vibrancy(&window, material, None, None).map_err(|e| e.to_string())?;
         Ok(())
     }

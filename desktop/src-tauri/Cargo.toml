@@ -45,7 +45,7 @@ notify-rust = "4"
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSHapticFeedback"] }
 keyring = { version = "3.6.3", default-features = false, features = ["apple-native", "vendored"], optional = true }
 security-framework = { version = "3.7.0", features = ["OSX_10_15"] }
-window-vibrancy = "0.7"
+window-vibrancy = "0.6"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Security", "Win32_Storage_FileSystem", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_Foundation"] }
