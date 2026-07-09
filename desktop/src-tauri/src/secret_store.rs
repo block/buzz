@@ -601,6 +601,43 @@ impl SecretStore {
         }
     }
 
+    /// Read the entire blob without any legacy-migration side effects.
+    ///
+    /// Returns the full key→value map when a blob exists, `Ok(None)` when no
+    /// blob has been written yet, and `Err` only when the backend is
+    /// unavailable. Never calls `migrate_legacy_key`.
+    pub fn load_all_readonly(&self) -> Result<Option<HashMap<String, String>>, String> {
+        #[cfg(feature = "system-keyring")]
+        {
+            self.load_blob()
+        }
+        #[cfg(not(feature = "system-keyring"))]
+        {
+            Err("system-keyring feature disabled".to_string())
+        }
+    }
+
+    /// Insert all entries from `entries` into the blob in a single mutation.
+    ///
+    /// Entries that already exist in the blob are overwritten; entries not
+    /// present in `entries` are left unchanged. If the resulting blob is
+    /// identical to what is already stored, no keychain write occurs.
+    pub fn store_all(&self, entries: &HashMap<String, String>) -> Result<(), String> {
+        #[cfg(feature = "system-keyring")]
+        {
+            self.mutate_blob(|map| {
+                for (k, v) in entries {
+                    map.insert(k.clone(), v.clone());
+                }
+            })
+        }
+        #[cfg(not(feature = "system-keyring"))]
+        {
+            let _ = entries;
+            Err("system-keyring feature disabled".to_string())
+        }
+    }
+
     /// On first launch after upgrading from the per-key DPK format, read the
     /// old DPK entry for `key`, write it into a new blob, and delete the old
     /// item. Returns `Ok(None)` when no old entry exists.

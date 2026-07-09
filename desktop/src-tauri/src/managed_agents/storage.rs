@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     fs::{self, File, OpenOptions},
     io::{Read as _, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
@@ -64,9 +65,15 @@ trait KeyStore {
     /// Read a key without any side effects (no legacy-key migration, no writes).
     /// `Ok(None)` when the blob or the key is absent; `Err` only on backend failure.
     fn load_readonly(&self, name: &str) -> Result<Option<String>, String>;
+    /// Read the entire blob as a map without any side effects.
+    /// `Ok(None)` when no blob exists yet; `Err` only on backend failure.
+    /// Callers must not call `migrate_legacy_key` — this is a read-only view.
+    fn load_all_readonly(&self) -> Result<Option<HashMap<String, String>>, String>;
     /// Write `value` and read it back to confirm before the caller strips the
     /// inline copy.
     fn write_and_verify(&self, name: &str, value: &str) -> Result<(), String>;
+    /// Insert all entries from `entries` in a single blob mutation.
+    fn store_all(&self, entries: &HashMap<String, String>) -> Result<(), String>;
 }
 
 impl KeyStore for SecretStore {
@@ -79,12 +86,18 @@ impl KeyStore for SecretStore {
     fn load_readonly(&self, name: &str) -> Result<Option<String>, String> {
         SecretStore::load_readonly(self, name)
     }
+    fn load_all_readonly(&self) -> Result<Option<HashMap<String, String>>, String> {
+        SecretStore::load_all_readonly(self)
+    }
     fn write_and_verify(&self, name: &str, value: &str) -> Result<(), String> {
         self.store(name, value)?;
         match self.load(name)? {
             Some(stored) if stored == value => Ok(()),
             _ => Err("keyring read-back verify failed".to_string()),
         }
+    }
+    fn store_all(&self, entries: &HashMap<String, String>) -> Result<(), String> {
+        SecretStore::store_all(self, entries)
     }
 }
 
@@ -410,44 +423,80 @@ pub fn migrate_agent_keys_to_dev_service(app: &tauri::AppHandle) {
     copy_agent_keys_between_stores(&pubkeys, &prod_store, dev_store);
 }
 
+/// Marker key stored inside the dev blob after a successful agent-key migration.
+/// Its presence means all agent keys that existed in the prod service at
+/// migration time have been copied; subsequent dev boots skip the migration
+/// entirely (no prod keyring access).
+#[cfg(debug_assertions)]
+const DEV_MIGRATION_MARKER: &str = "_dev_migration_v1";
+
 /// Testable core of [`migrate_agent_keys_to_dev_service`]: copy `agent:<pubkey>`
-/// entries from `src` to `dst` for each pubkey, skipping entries that already
-/// exist in `dst` (idempotency) and entries absent from `src` (new agents that
-/// will mint fresh keys). Does NOT copy `"identity"`.
+/// entries from `src` to `dst` for each pubkey, then write a migration-complete
+/// marker so future boots skip the entire function with zero prod-keyring access.
+///
+/// On the first migration boot:
+///   1. One `dst.load_all_readonly()` — dev blob read (1 keychain prompt)
+///   2. One `src.load_all_readonly()` — prod blob read (1 keychain prompt)
+///   3. One `dst.store_all()` — dev blob write (same service as #1; macOS may
+///      skip the ACL prompt if the initial grant was "Always Allow")
+///
+/// On subsequent boots (marker already present):
+///   1. One `dst.load_all_readonly()` — dev blob read (1 keychain prompt)
+///   Returns immediately — prod keyring is NEVER accessed.
+///
+/// Idempotency: keys already present in `dst` are not overwritten (the agent
+/// may have rotated their key in the dev service after initial migration).
+/// New agents (pubkey not in `src`) are silently skipped — they will mint a
+/// fresh key on their next onboarding run.
 #[cfg(debug_assertions)]
 fn copy_agent_keys_between_stores(pubkeys: &[String], src: &impl KeyStore, dst: &impl KeyStore) {
+    // One read of the dev blob. If the migration-complete marker is present,
+    // all prior agent keys are already in the dev service — skip entirely.
+    let dst_map: HashMap<String, String> = match dst.load_all_readonly() {
+        Ok(Some(map)) if map.contains_key(DEV_MIGRATION_MARKER) => {
+            return; // already migrated: 0 prod keyring accesses
+        }
+        Ok(Some(map)) => map,
+        Ok(None) => HashMap::new(),
+        Err(e) => {
+            eprintln!("buzz-desktop: keyring-dev-migration: cannot read dev keyring: {e}");
+            return;
+        }
+    };
+
+    // One read of the prod blob.
+    let src_map: HashMap<String, String> = match src.load_all_readonly() {
+        Ok(Some(map)) => map,
+        Ok(None) => HashMap::new(), // prod has no blob yet — nothing to copy
+        Err(e) => {
+            eprintln!("buzz-desktop: keyring-dev-migration: cannot read prod keyring: {e}");
+            return;
+        }
+    };
+
+    // Compute the set of entries to write: agent keys absent from dst, plus
+    // the migration-complete marker.
+    let mut to_write: HashMap<String, String> = HashMap::new();
     let mut copied = 0usize;
     for pubkey in pubkeys {
         let name = agent_keyring_name(pubkey);
-
-        // Idempotency: if the dst keyring already has this key, skip.
-        match dst.load(&name) {
-            Ok(Some(_)) => continue,
-            Ok(None) => {}
-            Err(_) => continue, // dst keyring unreachable — skip silently
+        if dst_map.contains_key(&name) {
+            continue; // already in dev service — do not overwrite (idempotent)
         }
-
-        // Read from src keyring (read-only: must not mutate the source service).
-        let nsec = match src.load_readonly(&name) {
-            Ok(Some(v)) => v,
-            Ok(None) => continue, // not in src keyring — new key, minted fresh later
-            Err(e) => {
-                eprintln!(
-                    "buzz-desktop: keyring-dev-migration: cannot read agent {pubkey} from source keyring: {e}"
-                );
-                continue;
-            }
-        };
-
-        // Write to dst keyring.
-        if let Err(e) = dst.write_and_verify(&name, &nsec) {
-            eprintln!(
-                "buzz-desktop: keyring-dev-migration: cannot write agent {pubkey} to dev service: {e}"
-            );
-            continue;
+        if let Some(nsec) = src_map.get(&name) {
+            to_write.insert(name, nsec.clone());
+            copied += 1;
         }
+        // absent from src → new agent, will mint a fresh key
+    }
 
-        copied += 1;
+    // Always write the marker so future boots skip the prod read entirely,
+    // even when there were no keys to copy (empty dev environment).
+    to_write.insert(DEV_MIGRATION_MARKER.to_string(), "done".to_string());
+
+    if let Err(e) = dst.store_all(&to_write) {
+        eprintln!("buzz-desktop: keyring-dev-migration: cannot write to dev keyring: {e}");
+        return;
     }
 
     if copied > 0 {
@@ -704,6 +753,7 @@ mod tests {
         fail_verify: bool,
         stored: RefCell<HashMap<String, String>>,
         write_count: RefCell<usize>,
+        read_count: RefCell<usize>,
     }
 
     impl FakeKeyStore {
@@ -713,6 +763,7 @@ mod tests {
                 fail_verify: false,
                 stored: RefCell::new(HashMap::new()),
                 write_count: RefCell::new(0),
+                read_count: RefCell::new(0),
             }
         }
         fn unreachable() -> Self {
@@ -721,6 +772,7 @@ mod tests {
                 fail_verify: false,
                 stored: RefCell::new(HashMap::new()),
                 write_count: RefCell::new(0),
+                read_count: RefCell::new(0),
             }
         }
         fn verify_fails() -> Self {
@@ -729,6 +781,7 @@ mod tests {
                 fail_verify: true,
                 stored: RefCell::new(HashMap::new()),
                 write_count: RefCell::new(0),
+                read_count: RefCell::new(0),
             }
         }
         /// Seed a key as already present in the keyring.
@@ -754,11 +807,25 @@ mod tests {
             if !self.reachable {
                 return Err("keyring backend unreachable".to_string());
             }
+            *self.read_count.borrow_mut() += 1;
             Ok(self.stored.borrow().get(name).cloned())
         }
         fn load_readonly(&self, name: &str) -> Result<Option<String>, String> {
             // The fake has no side effects, so load_readonly is identical to load.
             self.load(name)
+        }
+        fn load_all_readonly(&self) -> Result<Option<HashMap<String, String>>, String> {
+            if !self.reachable {
+                return Err("keyring backend unreachable".to_string());
+            }
+            *self.read_count.borrow_mut() += 1;
+            let map = self.stored.borrow().clone();
+            // Return None when completely empty (simulates no blob written yet).
+            if map.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(map))
+            }
         }
         fn write_and_verify(&self, name: &str, value: &str) -> Result<(), String> {
             if self.fail_verify {
@@ -768,6 +835,20 @@ mod tests {
             self.stored
                 .borrow_mut()
                 .insert(name.to_string(), value.to_string());
+            Ok(())
+        }
+        fn store_all(&self, entries: &HashMap<String, String>) -> Result<(), String> {
+            if !self.reachable {
+                return Err("keyring backend unreachable".to_string());
+            }
+            if self.fail_verify {
+                return Err("read-back verify failed".to_string());
+            }
+            *self.write_count.borrow_mut() += 1;
+            let mut stored = self.stored.borrow_mut();
+            for (k, v) in entries {
+                stored.insert(k.clone(), v.clone());
+            }
             Ok(())
         }
     }
@@ -1053,7 +1134,8 @@ mod tests {
 
     #[test]
     fn copy_agent_keys_copies_keys_present_in_src_to_dst() {
-        // Keys in src but not in dst must be copied.
+        // Keys in src but not in dst must be copied in a single bulk write,
+        // and the migration-complete marker must be set.
         let src = FakeKeyStore::reachable()
             .with_key(&agent_keyring_name("agent-alpha"), "nsec1alpha")
             .with_key(&agent_keyring_name("agent-beta"), "nsec1beta");
@@ -1081,6 +1163,26 @@ mod tests {
             Some("nsec1beta"),
             "agent-beta must be copied from src to dst"
         );
+        assert_eq!(
+            dst.stored
+                .borrow()
+                .get(super::DEV_MIGRATION_MARKER)
+                .map(String::as_str),
+            Some("done"),
+            "migration-complete marker must be set after first migration"
+        );
+        // Bulk write: exactly 1 store_all call.
+        assert_eq!(
+            *dst.write_count.borrow(),
+            1,
+            "must perform exactly one bulk write"
+        );
+        // Src accessed exactly once (bulk blob read).
+        assert_eq!(
+            *src.read_count.borrow(),
+            1,
+            "src must be read exactly once (bulk)"
+        );
     }
 
     #[test]
@@ -1103,25 +1205,41 @@ mod tests {
             Some("nsec1new"),
             "key already in dst must not be overwritten by migration"
         );
+        // Marker must still be written even though no new keys were copied.
         assert_eq!(
-            *dst.write_count.borrow(),
-            0,
-            "no writes should occur when key already present in dst"
+            dst.stored
+                .borrow()
+                .get(super::DEV_MIGRATION_MARKER)
+                .map(String::as_str),
+            Some("done"),
+            "marker must be set even when all keys are already present"
         );
     }
 
     #[test]
     fn copy_agent_keys_skips_keys_absent_from_src() {
         // A pubkey with no entry in src (new agent that will mint a fresh key)
-        // must be silently skipped — no write to dst.
+        // must be silently skipped — no agent key written to dst.
         let src = FakeKeyStore::reachable(); // empty
         let dst = FakeKeyStore::reachable();
 
         super::copy_agent_keys_between_stores(&["new-agent".to_string()], &src, &dst);
 
         assert!(
-            dst.stored.borrow().is_empty(),
-            "absent src key must produce no write to dst"
+            dst.stored
+                .borrow()
+                .get(&agent_keyring_name("new-agent"))
+                .is_none(),
+            "absent src key must produce no agent key write to dst"
+        );
+        // Marker must still be written.
+        assert_eq!(
+            dst.stored
+                .borrow()
+                .get(super::DEV_MIGRATION_MARKER)
+                .map(String::as_str),
+            Some("done"),
+            "marker must be set even when no keys were present in src"
         );
     }
 
@@ -1138,5 +1256,65 @@ mod tests {
 
         // No writes attempted to an unreachable dst.
         assert_eq!(*dst.write_count.borrow(), 0);
+        // Src must not have been accessed (failed on dst read, returned early).
+        assert_eq!(
+            *src.read_count.borrow(),
+            0,
+            "src must not be accessed when dst is unreachable"
+        );
+    }
+
+    #[test]
+    fn copy_agent_keys_skips_entirely_when_marker_present() {
+        // After the first migration, the marker is in dst. Subsequent calls
+        // must return immediately — the prod keyring (src) must never be read.
+        let src =
+            FakeKeyStore::reachable().with_key(&agent_keyring_name("agent-alpha"), "nsec1alpha");
+        let dst = FakeKeyStore::reachable()
+            .with_key(super::DEV_MIGRATION_MARKER, "done")
+            .with_key(&agent_keyring_name("agent-alpha"), "nsec1dev");
+
+        super::copy_agent_keys_between_stores(&["agent-alpha".to_string()], &src, &dst);
+
+        // Src must not have been accessed at all.
+        assert_eq!(
+            *src.read_count.borrow(),
+            0,
+            "src must not be read when migration-complete marker is present"
+        );
+        // Dst must not have been written.
+        assert_eq!(
+            *dst.write_count.borrow(),
+            0,
+            "dst must not be written when migration-complete marker is present"
+        );
+        // Dev key must remain unchanged.
+        assert_eq!(
+            dst.stored
+                .borrow()
+                .get(&agent_keyring_name("agent-alpha"))
+                .map(String::as_str),
+            Some("nsec1dev"),
+            "dev key must not be overwritten on subsequent boots"
+        );
+    }
+
+    #[test]
+    fn copy_agent_keys_writes_marker_even_with_empty_agent_list() {
+        // An empty pubkey list (no agents yet) must still write the marker so
+        // future boots skip the prod read.
+        let src = FakeKeyStore::reachable();
+        let dst = FakeKeyStore::reachable();
+
+        super::copy_agent_keys_between_stores(&[], &src, &dst);
+
+        assert_eq!(
+            dst.stored
+                .borrow()
+                .get(super::DEV_MIGRATION_MARKER)
+                .map(String::as_str),
+            Some("done"),
+            "marker must be set even when pubkey list is empty"
+        );
     }
 }
