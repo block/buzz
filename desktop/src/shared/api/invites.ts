@@ -1,3 +1,4 @@
+import { relayHttpFromWs } from "@/shared/api/inviteHelpers";
 import { getRelayHttpUrl, signRelayEvent } from "@/shared/api/tauri";
 
 // Relay invite data layer. Both endpoints are NIP-98-authed HTTP POSTs
@@ -23,13 +24,6 @@ export type ClaimResult = {
   host: string;
   role: string;
 };
-
-/** Convert a ws(s) relay URL to its http(s) equivalent. */
-export function relayHttpFromWs(wsUrl: string): string {
-  if (wsUrl.startsWith("wss://")) return `https://${wsUrl.slice(6)}`;
-  if (wsUrl.startsWith("ws://")) return `http://${wsUrl.slice(5)}`;
-  return wsUrl;
-}
 
 async function sha256Hex(text: string): Promise<string> {
   const digest = await crypto.subtle.digest(

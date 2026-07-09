@@ -1,6 +1,10 @@
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { toast } from "sonner";
 
+import {
+  inviteErrorMessage,
+  isInviteExpiredError,
+} from "@/shared/api/inviteHelpers";
 import { claimInvite } from "@/shared/api/invites";
 import type { Workspace } from "@/features/workspaces/types";
 import {
@@ -96,9 +100,9 @@ export function listenForDeepLinks(deps: DeepLinkDeps): Promise<UnlistenFn> {
         );
       })
       .catch((error: unknown) => {
-        const message = error instanceof Error ? error.message : `${error}`;
+        const message = inviteErrorMessage(error);
         toast.error(
-          message === "invite_expired"
+          isInviteExpiredError(error)
             ? "This invite link has expired — ask for a new one."
             : `Couldn't accept the invite: ${message}`,
         );

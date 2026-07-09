@@ -51,11 +51,12 @@ export function InviteLinkSection() {
     TTL_OPTIONS.find((option) => option.value === ttlSecs)?.label ?? "3 days";
 
   async function handleCreate() {
+    setInvite(null);
+    setCopied(false);
     setMinting(true);
     try {
       const minted = await mintInvite(ttlSecs);
       setInvite({ url: minted.url, expiresAt: minted.expiresAt });
-      setCopied(false);
     } catch (error) {
       toast.error(
         error instanceof Error

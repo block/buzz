@@ -163,7 +163,7 @@ pub async fn claim_invite(
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let (tenant, pubkey) = authenticate(&state, &headers, "/api/invites/claim", &body).await?;
 
-    if claim_rate_limited(&state, &pubkey) {
+    if claim_rate_limited(&state, tenant.community(), &pubkey) {
         return Err(api_error(
             StatusCode::TOO_MANY_REQUESTS,
             "too many invite claim attempts, slow down",
@@ -214,19 +214,27 @@ pub async fn claim_invite(
     })))
 }
 
-/// Fixed-window rate limit on claim attempts, keyed by claimer pubkey.
+/// Fixed-window rate limit on claim attempts, keyed by community and claimer
+/// pubkey so traffic for one tenant cannot consume another tenant's allowance.
 ///
 /// Entries expire after one window and the cache has a hard capacity. Both are
 /// important because a pre-membership caller can cheaply create fresh Nostr
 /// keypairs; retaining one immortal entry per key would make the limiter itself
 /// an unbounded-memory denial-of-service vector.
-fn claim_rate_limited(state: &AppState, pubkey: &nostr::PublicKey) -> bool {
-    claim_key_rate_limited(&state.invite_claim_rate_limiter, pubkey.to_bytes())
+fn claim_rate_limited(
+    state: &AppState,
+    community: buzz_core::tenant::CommunityId,
+    pubkey: &nostr::PublicKey,
+) -> bool {
+    claim_key_rate_limited(
+        &state.invite_claim_rate_limiter,
+        (community, pubkey.to_bytes()),
+    )
 }
 
 fn claim_key_rate_limited(
-    cache: &moka::sync::Cache<[u8; 32], Arc<std::sync::atomic::AtomicU32>>,
-    key: [u8; 32],
+    cache: &moka::sync::Cache<crate::state::ScopedPubkeyKey, Arc<std::sync::atomic::AtomicU32>>,
+    key: crate::state::ScopedPubkeyKey,
 ) -> bool {
     let counter = cache.get_with(key, || Arc::new(std::sync::atomic::AtomicU32::new(0)));
     counter.fetch_add(1, Ordering::Relaxed) >= CLAIM_RATE_LIMIT
@@ -272,7 +280,7 @@ mod tests {
     fn claim_cache(
         capacity: u64,
         ttl: Duration,
-    ) -> moka::sync::Cache<[u8; 32], Arc<std::sync::atomic::AtomicU32>> {
+    ) -> moka::sync::Cache<crate::state::ScopedPubkeyKey, Arc<std::sync::atomic::AtomicU32>> {
         moka::sync::Cache::builder()
             .max_capacity(capacity)
             .time_to_live(ttl)
@@ -282,7 +290,7 @@ mod tests {
     #[test]
     fn claim_limiter_rejects_after_limit() {
         let cache = claim_cache(100, Duration::from_secs(60));
-        let key = [7; 32];
+        let key = (buzz_core::CommunityId::from_uuid(Uuid::nil()), [7; 32]);
 
         for _ in 0..CLAIM_RATE_LIMIT {
             assert!(!claim_key_rate_limited(&cache, key));
@@ -293,7 +301,7 @@ mod tests {
     #[test]
     fn claim_limiter_expires_entries() {
         let cache = claim_cache(100, Duration::from_millis(10));
-        let key = [8; 32];
+        let key = (buzz_core::CommunityId::from_uuid(Uuid::nil()), [8; 32]);
         assert!(!claim_key_rate_limited(&cache, key));
         assert!(cache.get(&key).is_some());
 
@@ -305,12 +313,27 @@ mod tests {
     }
 
     #[test]
+    fn claim_limiter_isolates_communities_for_same_pubkey() {
+        let cache = claim_cache(100, Duration::from_secs(60));
+        let pubkey = [9; 32];
+        let community_a = buzz_core::CommunityId::from_uuid(Uuid::from_u128(0xAAAA));
+        let community_b = buzz_core::CommunityId::from_uuid(Uuid::from_u128(0xBBBB));
+
+        for _ in 0..CLAIM_RATE_LIMIT {
+            assert!(!claim_key_rate_limited(&cache, (community_a, pubkey)));
+        }
+        assert!(claim_key_rate_limited(&cache, (community_a, pubkey)));
+        assert!(!claim_key_rate_limited(&cache, (community_b, pubkey)));
+    }
+
+    #[test]
     fn claim_limiter_bounds_distinct_pubkeys() {
         let capacity = 10;
         let cache = claim_cache(capacity, Duration::from_secs(60));
         for id in 0..100_u64 {
-            let mut key = [0; 32];
-            key[..8].copy_from_slice(&id.to_le_bytes());
+            let mut pubkey = [0; 32];
+            pubkey[..8].copy_from_slice(&id.to_le_bytes());
+            let key = (buzz_core::CommunityId::from_uuid(Uuid::nil()), pubkey);
             assert!(!claim_key_rate_limited(&cache, key));
         }
         cache.run_pending_tasks();

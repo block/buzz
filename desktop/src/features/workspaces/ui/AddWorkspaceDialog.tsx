@@ -6,6 +6,10 @@ import {
   expandTilde,
   normalizeRelayUrl,
 } from "@/features/workspaces/workspaceStorage";
+import {
+  inviteErrorMessage,
+  isInviteExpiredError,
+} from "@/shared/api/inviteHelpers";
 import { claimInvite } from "@/shared/api/invites";
 import { validateReposDir } from "@/shared/api/tauri";
 import { Button } from "@/shared/ui/button";
@@ -74,9 +78,9 @@ export function AddWorkspaceDialog({
         try {
           await claimInvite(normalizedRelayUrl, inviteCode.trim());
         } catch (error) {
-          const message = error instanceof Error ? error.message : `${error}`;
+          const message = inviteErrorMessage(error);
           setInviteError(
-            message === "invite_expired"
+            isInviteExpiredError(error)
               ? "This invite code has expired — ask for a new one."
               : `Invite rejected: ${message}`,
           );

@@ -373,7 +373,7 @@ pub struct AppState {
     /// the cache has a hard capacity because pre-membership callers can cheaply
     /// generate fresh Nostr keys.
     pub invite_claim_rate_limiter:
-        Arc<moka::sync::Cache<[u8; 32], Arc<std::sync::atomic::AtomicU32>>>,
+        Arc<moka::sync::Cache<ScopedPubkeyKey, Arc<std::sync::atomic::AtomicU32>>>,
     /// Current in-flight media uploads per (community, uploader pubkey).
     pub media_uploads_in_flight: Arc<DashMap<ScopedPubkeyKey, u32>>,
     /// Cache for observer agent-owner authorization (kind 24200).
