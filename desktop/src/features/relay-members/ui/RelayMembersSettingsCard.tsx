@@ -39,6 +39,7 @@ import { Input } from "@/shared/ui/input";
 import { SettingsSectionHeader } from "@/features/settings/ui/SettingsSectionHeader";
 import { WorkspaceIconSettingsCard } from "@/features/workspaces/ui/WorkspaceIconSettingsCard";
 import { VirtualizedList } from "@/shared/ui/VirtualizedList";
+import { InviteLinkSection } from "./InviteLinkSection";
 
 type AssignableRelayRole = Exclude<RelayMemberRole, "owner">;
 
@@ -442,6 +443,8 @@ export function RelayMembersSettingsCard({
             </p>
           ) : null}
         </form>
+
+        <InviteLinkSection />
 
         {membersQuery.error instanceof Error ? (
           <p className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
