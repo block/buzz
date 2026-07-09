@@ -61,6 +61,7 @@ pub(crate) struct KnownAcpRuntime {
 const GOOSE_AVATAR_URL: &str = "https://goose-docs.ai/img/logo_dark.png";
 const CLAUDE_CODE_AVATAR_URL: &str = "https://anthropic.gallerycdn.vsassets.io/extensions/anthropic/claude-code/2.1.77/1773707456892/Microsoft.VisualStudio.Services.Icons.Default";
 const CODEX_AVATAR_URL: &str = "https://openai.gallerycdn.vsassets.io/extensions/openai/chatgpt/26.5313.41514/1773706730621/Microsoft.VisualStudio.Services.Icons.Default";
+pub(crate) const CURSOR_AVATAR_URL: &str = "https://www.cursor.com/favicon.ico";
 const BUZZ_AGENT_AVATAR_URL: &str =
     "https://raw.githubusercontent.com/block/buzz/refs/heads/main/crates/buzz-agent/buzz-agent.png";
 
@@ -153,10 +154,10 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         mcp_hooks: false,
         underlying_cli: Some("codex"),
         cli_install_commands: &["curl -fsSL https://chatgpt.com/codex/install.sh | sh"],
-        adapter_install_commands: &["npm install -g @zed-industries/codex-acp"],
+        adapter_install_commands: &["nix profile install --impure --file ~/buzz/nix/codex-acp-latest.nix"],
         install_instructions_url: "https://github.com/zed-industries/codex-acp",
         cli_install_hint: "Install the Codex CLI via the official install script.",
-        adapter_install_hint: "Install the Codex ACP adapter via npm.",
+        adapter_install_hint: "Install the latest Codex ACP adapter via the Buzz Nix package.",
         skill_dir: Some(".codex/skills"),
         supports_acp_model_switching: false,
         model_env_var: None,
@@ -165,6 +166,40 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         default_env: &[],
         config_file_path: Some("~/.codex/config.toml"),
         config_file_format: Some("toml"),
+        supports_acp_native_config: false,
+        thinking_env_var: None,
+        max_tokens_env_var: None,
+        context_limit_env_var: None,
+        required_normalized_fields: &[],
+    },
+    // Cursor CLI speaks ACP natively (`agent acp`) — no separate *-acp adapter.
+    // Auth is `agent login` / CURSOR_API_KEY; see readiness probe.
+    // NOTE (sprout): Cursor ACP extension methods (cursor/ask_question,
+    // cursor/create_plan) are blocking client RPCs. Headless buzz-acp needs an
+    // explicit permission/policy decision so turns neither hang nor over-permit.
+    // That harness policy is intentionally NOT part of this registry entry.
+    KnownAcpRuntime {
+        id: "cursor",
+        label: "Cursor",
+        commands: &["agent", "cursor-agent"],
+        aliases: &["cursor"],
+        avatar_url: CURSOR_AVATAR_URL,
+        mcp_command: Some("buzz-dev-mcp"),
+        mcp_hooks: false,
+        underlying_cli: Some("agent"),
+        cli_install_commands: &["curl -fsSL https://cursor.com/install | bash"],
+        adapter_install_commands: &[],
+        install_instructions_url: "https://cursor.com/docs/cli/acp",
+        cli_install_hint: "Install the Cursor Agent CLI via the official install script.",
+        adapter_install_hint: "",
+        skill_dir: Some(".cursor/skills"),
+        supports_acp_model_switching: false,
+        model_env_var: None,
+        provider_env_var: None,
+        provider_locked: false,
+        default_env: &[],
+        config_file_path: Some("~/.cursor/cli-config.json"),
+        config_file_format: Some("json"),
         supports_acp_native_config: false,
         thinking_env_var: None,
         max_tokens_env_var: None,
@@ -470,7 +505,8 @@ pub fn create_time_agent_command_override(
 
 fn default_agent_args(command: &str) -> Option<Vec<String>> {
     match normalize_command_identity(command).as_str() {
-        "goose" => Some(vec!["acp".to_string()]),
+        // goose and Cursor both speak ACP as a subcommand (`goose acp`, `agent acp`).
+        "goose" | "agent" | "cursor-agent" | "cursor" => Some(vec!["acp".to_string()]),
         "codex" | "codex-acp" | "claude-agent-acp" | "claude-code-acp" | "claude-code"
         | "claudecode" | "buzz-agent" => Some(Vec::new()),
         _ => None,

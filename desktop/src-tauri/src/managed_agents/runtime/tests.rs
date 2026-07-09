@@ -96,6 +96,20 @@ fn codex_has_mcp_command() {
     let p = known_acp_runtime("codex-acp").expect("should resolve");
     assert!(!p.mcp_hooks, "codex-acp does not handle MCP_HOOK_SERVERS");
     assert_eq!(p.mcp_command, Some("buzz-dev-mcp"));
+
+    let p = known_acp_runtime("agent").expect("cursor agent should resolve");
+    assert_eq!(p.id, "cursor");
+    assert!(!p.mcp_hooks, "cursor does not handle MCP_HOOK_SERVERS");
+    assert_eq!(p.skill_dir, Some(".cursor/skills"));
+    assert_eq!(p.mcp_command, Some("buzz-dev-mcp"));
+    assert!(
+        known_acp_runtime("cursor-agent").is_some_and(|r| r.id == "cursor"),
+        "cursor-agent alias should resolve"
+    );
+    assert!(
+        known_acp_runtime("cursor").is_some_and(|r| r.id == "cursor"),
+        "cursor id/alias should resolve"
+    );
 }
 
 #[test]
