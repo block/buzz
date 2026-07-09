@@ -5,41 +5,37 @@
       "id": "workflows",
       "name": "Workflows",
       "description": "YAML-defined automations with approval gates",
-      "platforms": [
-        "desktop"
-      ]
+      "platforms": ["desktop"]
     },
     {
       "id": "projects",
       "name": "Projects",
       "description": "Git repository browser and collaboration",
-      "platforms": [
-        "desktop"
-      ]
+      "platforms": ["desktop"]
     },
     {
       "id": "pulse",
       "name": "Pulse",
       "description": "Activity feed with notes, social posts, and agent activity",
-      "platforms": [
-        "desktop"
-      ]
+      "platforms": ["desktop"]
     },
     {
       "id": "workspaceRail",
       "name": "Workspace Rail",
       "description": "Far-left rail for switching relays with cross-relay unread indicators",
-      "platforms": [
-        "desktop"
-      ]
+      "platforms": ["desktop"]
     },
     {
       "id": "forum",
       "name": "Forum Channels",
       "description": "Forum-style threaded channels for long-form discussions",
-      "platforms": [
-        "desktop"
-      ]
+      "platforms": ["desktop"]
+    },
+    {
+      "id": "virtuosoTimeline",
+      "name": "Virtuoso Timeline",
+      "description": "Virtualized channel timeline using react-virtuoso",
+      "platforms": ["desktop"]
     }
   ]
 }

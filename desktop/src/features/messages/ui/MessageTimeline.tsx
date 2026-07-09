@@ -13,6 +13,7 @@ import type { MainTimelineEntry } from "@/features/messages/lib/threadPanel";
 import type { ChannelWindowThreadSummary } from "@/features/messages/lib/channelWindowStore";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type { ChannelType } from "@/shared/api/types";
+import { useFeatureEnabled } from "@/shared/features";
 import { cn } from "@/shared/lib/cn";
 import { channelChrome } from "@/shared/layout/chromeLayout";
 import { Spinner } from "@/shared/ui/spinner";
@@ -198,7 +199,7 @@ const MessageTimelineBase = React.forwardRef<
     React.useReducer((version: number) => version + 1, 0);
   const [timelineVirtualizerApi, setTimelineVirtualizerApi] =
     React.useState<TimelineVirtualizerApi | null>(null);
-  const useTimelineVirtualizer = true;
+  const useTimelineVirtualizer = useFeatureEnabled("virtuosoTimeline");
   const activeScrollContainerRef = React.useMemo(
     () => ({
       get current() {
@@ -246,6 +247,7 @@ const MessageTimelineBase = React.forwardRef<
   // painted at a stale offset until the user's next scroll event forces layout.
   const scrollContainerDomKey = channelId ?? "none";
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: this effect is scoped to scroll DOM swaps; when the Experiments flag hydrates, the virtualizer child registers its own scroller/API via callbacks, and re-running this reset on the flag transition can briefly clear that API during navigation tests.
   React.useLayoutEffect(() => {
     // Re-read after `scrollContainerDomKey` swaps the keyed scroll DOM node.
     void scrollContainerDomKey;
@@ -390,6 +392,18 @@ const MessageTimelineBase = React.forwardRef<
   React.useEffect(() => {
     const target = pendingSearchTargetRef.current;
     if (!target || showTimelineSkeleton) return;
+    if (
+      useTimelineVirtualizer &&
+      !activeScrollContainerRef.current?.querySelector(
+        `[data-message-id="${CSS.escape(target)}"]`,
+      )
+    ) {
+      // Phase 1: ask Virtuoso to realize the match's index. The retry effect
+      // runs again on range change and the DOM-visible path does the actual
+      // center + highlight once the row exists.
+      void jumpToMessage(target, { behavior: "auto" });
+      return;
+    }
     if (jumpToMessage(target, { behavior: "auto" })) {
       pendingSearchTargetRef.current = null;
     }
@@ -418,6 +432,11 @@ const MessageTimelineBase = React.forwardRef<
     isLoading: showTimelineSkeleton,
     messages: showTimelineSkeleton ? EMPTY_MESSAGES : deferredMessages,
   });
+
+  const handleVirtualizerRangeChanged = React.useCallback(() => {
+    bumpVirtualizerRenderVersion();
+    onScroll();
+  }, [onScroll]);
 
   const timelineList = showMessageList ? (
     <TimelineMessageList
@@ -448,7 +467,8 @@ const MessageTimelineBase = React.forwardRef<
       onStartReached={loadOlderViaVirtualizer}
       onToggleReaction={onToggleReaction}
       onVirtualizerApiChange={setTimelineVirtualizerApi}
-      onVirtualizerRangeChanged={bumpVirtualizerRenderVersion}
+      onVirtualizerRangeChanged={handleVirtualizerRangeChanged}
+      onVirtualizerScroll={onScroll}
       onVirtualizerScrollerChange={setVirtualizerScrollParent}
       onAtBottomStateChange={onVirtualizerAtBottomStateChange}
       personaLookup={personaLookup}

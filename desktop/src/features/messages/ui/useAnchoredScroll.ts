@@ -286,7 +286,10 @@ export function useAnchoredScroll({
       if (!el) {
         if (
           virtualScrollToMessage?.(messageId, {
-            behavior: options.behavior ?? "auto",
+            // Phase 1 only asks the virtualizer to realize an off-DOM row.
+            // Keep this jump synchronous; the DOM-visible phase below applies
+            // the caller's smooth/auto behavior once the target can be measured.
+            behavior: "auto",
           })
         ) {
           anchorRef.current = { kind: "message", messageId, topOffset: 0 };
@@ -547,7 +550,7 @@ export function useAnchoredScroll({
   // *without* marking the target handled until its row actually exists — each
   // subsequent message commit re-runs the effect and retries the centering.
   // ---------------------------------------------------------------------------
-  // biome-ignore lint/correctness/useExhaustiveDependencies: `messages` is an intentional trigger, not a read — the effect reads the DOM (querySelector), and we need it to re-run each time the rendered row set changes so a target spliced into older history gets centered once its row commits.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: `messages` and `virtualizerRenderVersion` are intentional retry triggers, not values read by the effect body — the effect reads the DOM (querySelector), and we need it to re-run each time the message list or virtualized rendered range changes so a target spliced into older history gets centered once its row commits.
   React.useEffect(() => {
     if (!targetMessageId) {
       handledTargetIdRef.current = null;
@@ -556,6 +559,7 @@ export function useAnchoredScroll({
     if (handledTargetIdRef.current === targetMessageId || isLoading) return;
     if (!hasInitializedRef.current) return; // initial-mount path will handle.
 
+    void virtualizerRenderVersion;
     const container = scrollContainerRef.current;
     if (!container) return;
     const el = container.querySelector<HTMLElement>(
