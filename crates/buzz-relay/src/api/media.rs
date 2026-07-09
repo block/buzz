@@ -42,15 +42,15 @@ const MEDIA_UPLOAD_RATE_WINDOW: Duration = Duration::from_secs(60);
 
 struct UploadPermit {
     _global: tokio::sync::OwnedSemaphorePermit,
-    in_flight: Arc<dashmap::DashMap<[u8; 32], u32>>,
-    pubkey: [u8; 32],
+    in_flight: Arc<dashmap::DashMap<crate::state::ScopedPubkeyKey, u32>>,
+    key: crate::state::ScopedPubkeyKey,
 }
 
 impl Drop for UploadPermit {
     fn drop(&mut self) {
         use dashmap::mapref::entry::Entry;
 
-        if let Entry::Occupied(mut entry) = self.in_flight.entry(self.pubkey) {
+        if let Entry::Occupied(mut entry) = self.in_flight.entry(self.key) {
             if *entry.get() <= 1 {
                 entry.remove();
             } else {
@@ -60,8 +60,12 @@ impl Drop for UploadPermit {
     }
 }
 
-fn upload_rate_limited(state: &AppState, pubkey: &nostr::PublicKey) -> bool {
-    let key: [u8; 32] = pubkey.to_bytes();
+fn upload_rate_limited(
+    state: &AppState,
+    community_id: buzz_core::CommunityId,
+    pubkey: &nostr::PublicKey,
+) -> bool {
+    let key = (community_id, pubkey.to_bytes());
     let now = Instant::now();
     let limit = state.config.media_uploads_per_minute;
     let mut entry = state
@@ -83,6 +87,7 @@ fn upload_rate_limited(state: &AppState, pubkey: &nostr::PublicKey) -> bool {
 
 fn acquire_upload_permit(
     state: &AppState,
+    community_id: buzz_core::CommunityId,
     pubkey: &nostr::PublicKey,
 ) -> Result<UploadPermit, MediaError> {
     let global = state
@@ -91,7 +96,7 @@ fn acquire_upload_permit(
         .try_acquire_owned()
         .map_err(|_| MediaError::UploadConcurrencyLimitReached)?;
 
-    let key: [u8; 32] = pubkey.to_bytes();
+    let key = (community_id, pubkey.to_bytes());
     let mut in_flight = state.media_uploads_in_flight.entry(key).or_insert(0);
     if *in_flight >= state.config.media_max_concurrent_uploads_per_pubkey {
         return Err(MediaError::UploadConcurrencyLimitReached);
@@ -102,7 +107,7 @@ fn acquire_upload_permit(
     Ok(UploadPermit {
         _global: global,
         in_flight: Arc::clone(&state.media_uploads_in_flight),
-        pubkey: key,
+        key,
     })
 }
 
@@ -185,15 +190,16 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedUpload {
         .await
         .map_err(|_| MediaError::RelayMembershipRequired)?;
 
-        if upload_rate_limited(state, &auth_event.pubkey) {
+        if upload_rate_limited(state, tenant.community(), &auth_event.pubkey) {
             metrics::counter!("buzz_media_upload_rejections_total", "reason" => "rate_limit")
                 .increment(1);
             return Err(MediaError::UploadRateLimitExceeded);
         }
-        let upload_permit = acquire_upload_permit(state, &auth_event.pubkey).inspect_err(|_| {
-            metrics::counter!("buzz_media_upload_rejections_total", "reason" => "concurrency")
-                .increment(1);
-        })?;
+        let upload_permit = acquire_upload_permit(state, tenant.community(), &auth_event.pubkey)
+            .inspect_err(|_| {
+                metrics::counter!("buzz_media_upload_rejections_total", "reason" => "concurrency")
+                    .increment(1);
+            })?;
 
         Ok(AuthenticatedUpload {
             auth_event,
@@ -743,8 +749,87 @@ fn extract_blossom_auth(headers: &HeaderMap) -> Result<nostr::Event, MediaError>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
+    use uuid::Uuid;
 
     const VALID_HASH: &str = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+
+    async fn test_state() -> Arc<AppState> {
+        let mut config = crate::config::Config::from_env().expect("default config loads");
+        config.require_relay_membership = false;
+        config.redis_url = "redis://127.0.0.1:1".to_string();
+        config.media_uploads_per_minute = 1;
+        config.media_max_concurrent_uploads = 2;
+        config.media_max_concurrent_uploads_per_pubkey = 1;
+
+        let pool = sqlx::PgPool::connect_lazy(&config.database_url).expect("lazy pg pool");
+        let db = buzz_db::Db::from_pool(pool.clone());
+        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("redis pool");
+        let pubsub = Arc::new(
+            buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
+                .await
+                .expect("pubsub manager"),
+        );
+        let audit = buzz_audit::AuditService::new(pool.clone());
+        let auth = buzz_auth::AuthService::new(config.auth.clone());
+        let search = buzz_search::SearchService::new(pool.clone());
+        let workflow_engine = Arc::new(buzz_workflow::WorkflowEngine::new(
+            db.clone(),
+            buzz_workflow::WorkflowConfig::default(),
+        ));
+        let media_storage = buzz_media::MediaStorage::new(&config.media).expect("media storage");
+        let (state, _audit_shutdown) = AppState::new(
+            config,
+            db,
+            redis_pool,
+            audit,
+            pubsub,
+            auth,
+            search,
+            workflow_engine,
+            nostr::Keys::generate(),
+            media_storage,
+        );
+        Arc::new(state)
+    }
+
+    #[tokio::test]
+    async fn upload_rate_limiter_is_scoped_by_community() {
+        let state = test_state().await;
+        let pubkey = nostr::Keys::generate().public_key();
+        let community_a = buzz_core::CommunityId::from_uuid(Uuid::from_u128(0xAAAA));
+        let community_b = buzz_core::CommunityId::from_uuid(Uuid::from_u128(0xBBBB));
+
+        assert!(!upload_rate_limited(&state, community_a, &pubkey));
+        assert!(upload_rate_limited(&state, community_a, &pubkey));
+        assert!(
+            !upload_rate_limited(&state, community_b, &pubkey),
+            "A's exhausted upload budget must not rate-limit the same key in B"
+        );
+    }
+
+    #[tokio::test]
+    async fn upload_concurrency_limit_is_scoped_by_community() {
+        let state = test_state().await;
+        let pubkey = nostr::Keys::generate().public_key();
+        let community_a = buzz_core::CommunityId::from_uuid(Uuid::from_u128(0xAAAA));
+        let community_b = buzz_core::CommunityId::from_uuid(Uuid::from_u128(0xBBBB));
+
+        let permit_a =
+            acquire_upload_permit(&state, community_a, &pubkey).expect("first A upload allowed");
+        assert!(matches!(
+            acquire_upload_permit(&state, community_a, &pubkey),
+            Err(MediaError::UploadConcurrencyLimitReached)
+        ));
+        let permit_b = acquire_upload_permit(&state, community_b, &pubkey)
+            .expect("A's in-flight upload must not block B");
+
+        drop(permit_b);
+        drop(permit_a);
+    }
 
     #[test]
     fn test_validate_media_path_bare_hash() {

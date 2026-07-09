@@ -42,7 +42,9 @@ async fn evict_live_channel_subscriptions(
     channel_id: Uuid,
     target_pubkey: &[u8],
 ) {
-    let conn_ids = state.conn_manager.connection_ids_for_pubkey(target_pubkey);
+    let conn_ids = state
+        .conn_manager
+        .connection_ids_for_pubkey_in_community(tenant.community(), target_pubkey);
 
     for conn_id in conn_ids {
         evict_conn_channel_subscriptions(tenant, state, channel_id, conn_id).await;

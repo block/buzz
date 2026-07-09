@@ -243,9 +243,10 @@ pub async fn handle_connection(
     }
     state.conn_manager.deregister(conn.conn_id);
     if let AuthState::Authenticated(ref auth_ctx) = *conn.auth_state.read().await {
-        let remaining = state
-            .conn_manager
-            .connection_ids_for_pubkey(auth_ctx.pubkey.to_bytes().as_slice());
+        let remaining = state.conn_manager.connection_ids_for_pubkey_in_community(
+            conn.tenant.community(),
+            auth_ctx.pubkey.to_bytes().as_slice(),
+        );
         if remaining.is_empty() {
             let _ = state
                 .pubsub

@@ -815,7 +815,11 @@ async fn handle_ephemeral_event(
     if event_kind_u32(&event) == KIND_MESH_CONNECT_REQUEST {
         // Per-requester rate limit shared with the HTTP door — see
         // `mesh_signaling::connect_request_rate_limited` for rationale.
-        if super::mesh_signaling::connect_request_rate_limited(&state, &auth_pubkey) {
+        if super::mesh_signaling::connect_request_rate_limited(
+            &state,
+            conn.tenant.community(),
+            &auth_pubkey,
+        ) {
             conn.send(RelayMessage::ok(
                 event_id_hex,
                 false,
@@ -922,6 +926,32 @@ struct AgentObserverRoute {
     agent: PublicKey,
     owner: PublicKey,
     direction: AgentObserverDirection,
+}
+
+/// Check + bump the per-agent observer telemetry limit (100/sec window).
+///
+/// Observer frames are ephemeral, but the rejection is visible to the sender.
+/// Scope the counter by community so an agent key active in one tenant does not
+/// consume another tenant's logical rate budget.
+fn observer_frame_rate_limited(
+    state: &AppState,
+    community_id: CommunityId,
+    agent_key: [u8; 32],
+) -> bool {
+    let now = std::time::Instant::now();
+    let mut entry = state
+        .observer_rate_limiter
+        .entry((community_id, agent_key))
+        .or_insert((0, now));
+    let (count, window_start) = entry.value_mut();
+    if now.duration_since(*window_start).as_secs() >= 1 {
+        *count = 1;
+        *window_start = now;
+        false
+    } else {
+        *count += 1;
+        *count > 100
+    }
 }
 
 /// Handle encrypted agent observer frames (kind 24200).
@@ -1041,25 +1071,13 @@ async fn handle_agent_observer_event(
     // be starved by bursty telemetry from the agent.
     if matches!(route.direction, AgentObserverDirection::Telemetry) {
         let agent_key: [u8; 32] = agent_bytes.as_slice().try_into().unwrap_or([0u8; 32]);
-        let now = std::time::Instant::now();
-        let mut entry = state
-            .observer_rate_limiter
-            .entry(agent_key)
-            .or_insert((0, now));
-        let (count, window_start) = entry.value_mut();
-        if now.duration_since(*window_start).as_secs() >= 1 {
-            *count = 1;
-            *window_start = now;
-        } else {
-            *count += 1;
-            if *count > 100 {
-                conn.send(RelayMessage::ok(
-                    event_id_hex,
-                    false,
-                    "rate-limited: observer frame rate exceeded (100/sec per agent)",
-                ));
-                return;
-            }
+        if observer_frame_rate_limited(&state, conn.tenant.community(), agent_key) {
+            conn.send(RelayMessage::ok(
+                event_id_hex,
+                false,
+                "rate-limited: observer frame rate exceeded (100/sec per agent)",
+            ));
+            return;
         }
     }
 
@@ -1302,6 +1320,31 @@ mod tests {
 
         let err = super::agent_observer_route(&event).expect_err("route should reject plaintext");
         assert!(err.contains("NIP-44"));
+    }
+
+    #[tokio::test]
+    async fn observer_frame_rate_limiter_is_scoped_by_community() {
+        let state = fanout_access::test_state().await;
+        let agent_key = Keys::generate().public_key().to_bytes();
+        let community_a = buzz_core::tenant::CommunityId::from_uuid(uuid::Uuid::from_u128(0xAAAA));
+        let community_b = buzz_core::tenant::CommunityId::from_uuid(uuid::Uuid::from_u128(0xBBBB));
+
+        for _ in 0..100 {
+            assert!(!super::observer_frame_rate_limited(
+                &state,
+                community_a,
+                agent_key
+            ));
+        }
+        assert!(super::observer_frame_rate_limited(
+            &state,
+            community_a,
+            agent_key
+        ));
+        assert!(
+            !super::observer_frame_rate_limited(&state, community_b, agent_key),
+            "A's exhausted budget must not rate-limit the same agent key in B"
+        );
     }
 
     mod pubsub_fanout {

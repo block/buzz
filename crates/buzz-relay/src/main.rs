@@ -716,10 +716,10 @@ async fn main() -> anyhow::Result<()> {
             loop {
                 match rx.recv().await {
                     Ok(scoped) => {
-                        // The local moka caches key on globally-unique UUIDs /
-                        // pubkeys, so applying the tenant-local op by key is
-                        // correct regardless of community; the `community_id`
-                        // scope rides the Redis topic, not the moka key.
+                        // The Redis topic carries the originating community,
+                        // and the local moka keys carry that same label. Apply
+                        // only the matching tenant-local drop; a mutation in A
+                        // must not flush B's derived state.
                         state_for_cache
                             .apply_cache_invalidation(scoped.community_id, scoped.invalidation);
                     }

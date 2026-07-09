@@ -31,6 +31,10 @@ use crate::config::Config;
 use crate::connection::ConnectionSubscriptions;
 use crate::subscription::SubscriptionRegistry;
 
+pub(crate) type ScopedPubkeyKey = (CommunityId, [u8; 32]);
+type SlidingWindowCounter = (u32, Instant);
+type ScopedRateLimiter = DashMap<ScopedPubkeyKey, SlidingWindowCounter>;
+
 /// Per-connection entry in the connection manager.
 struct ConnEntry {
     tx: mpsc::Sender<WsMessage>,
@@ -109,21 +113,31 @@ impl ConnectionManager {
         }
     }
 
-    /// Return all live connection IDs authenticated as `pubkey_bytes`.
-    pub fn connection_ids_for_pubkey(&self, pubkey_bytes: &[u8]) -> Vec<Uuid> {
+    /// Return live connection IDs authenticated as `pubkey_bytes` in one community.
+    ///
+    /// The same Nostr key may be connected to multiple communities at once.
+    /// Callers use this for tenant-visible cleanup such as presence clearing and
+    /// subscription eviction, so a connection in B must not keep A's derived
+    /// state alive.
+    pub fn connection_ids_for_pubkey_in_community(
+        &self,
+        community_id: CommunityId,
+        pubkey_bytes: &[u8],
+    ) -> Vec<Uuid> {
         self.connections
             .iter()
             .filter_map(|entry| {
-                let matches = entry
-                    .authenticated_pubkey
-                    .read()
-                    .ok()
-                    .and_then(|value| {
-                        value
-                            .as_ref()
-                            .map(|stored| stored.as_slice() == pubkey_bytes)
-                    })
-                    .unwrap_or(false);
+                let matches = entry.community_id == community_id
+                    && entry
+                        .authenticated_pubkey
+                        .read()
+                        .ok()
+                        .and_then(|value| {
+                            value
+                                .as_ref()
+                                .map(|stored| stored.as_slice() == pubkey_bytes)
+                        })
+                        .unwrap_or(false);
                 matches.then_some(*entry.key())
             })
             .collect()
@@ -163,7 +177,7 @@ impl ConnectionManager {
     ) -> usize {
         let frame = crate::protocol::RelayMessage::ok(event_id, false, reason);
         let mut closed = 0usize;
-        for conn_id in self.connection_ids_for_pubkey(pubkey) {
+        for conn_id in self.connection_ids_for_pubkey_in_community(community, pubkey) {
             if let Some(entry) = self.connections.get(&conn_id) {
                 if entry.community_id != community {
                     continue;
@@ -342,20 +356,20 @@ pub struct AppState {
     pub nip98_replay: Arc<dyn Nip98ReplayGuard>,
 
     /// Per-agent sliding-window rate limiter for observer frames (kind 24200).
-    /// Key: agent pubkey bytes (32). Value: (count, window_start).
+    /// Key: (community_id, agent pubkey bytes). Value: (count, window_start).
     /// 100 events/sec per agent — prevents relay/DB pressure from bursty telemetry.
-    pub observer_rate_limiter: Arc<DashMap<[u8; 32], (u32, Instant)>>,
+    pub observer_rate_limiter: Arc<ScopedRateLimiter>,
     /// Per-requester sliding-window rate limiter for mesh connect requests
-    /// (kind 24621). Key: requester pubkey bytes (32). Value: (count,
+    /// (kind 24621). Key: (community_id, requester pubkey bytes). Value: (count,
     /// window_start). Bounds the 1→2 call-me-now amplification: a member is
     /// trusted, but a buggy desktop loop shouldn't make the relay sign+fan
     /// unboundedly. 20/sec is far above any real interactive use.
-    pub mesh_connect_rate_limiter: Arc<DashMap<[u8; 32], (u32, Instant)>>,
+    pub mesh_connect_rate_limiter: Arc<ScopedRateLimiter>,
     /// Per-uploader sliding-window rate limiter for media upload starts.
-    /// Key: uploader pubkey bytes (32). Value: (count, window_start).
-    pub media_upload_rate_limiter: Arc<DashMap<[u8; 32], (u32, Instant)>>,
-    /// Current in-flight media uploads per uploader pubkey.
-    pub media_uploads_in_flight: Arc<DashMap<[u8; 32], u32>>,
+    /// Key: (community_id, uploader pubkey bytes). Value: (count, window_start).
+    pub media_upload_rate_limiter: Arc<ScopedRateLimiter>,
+    /// Current in-flight media uploads per (community, uploader pubkey).
+    pub media_uploads_in_flight: Arc<DashMap<ScopedPubkeyKey, u32>>,
     /// Cache for observer agent-owner authorization (kind 24200).
     /// Key: (agent_pubkey_bytes, owner_pubkey_bytes). Value: is_owner.
     /// agent_owner_pubkey is immutable so a long TTL (5 min) is safe.
@@ -468,18 +482,21 @@ impl AppState {
                 moka::sync::Cache::builder()
                     .max_capacity(10_000)
                     .time_to_live(std::time::Duration::from_secs(10))
+                    .support_invalidation_closures()
                     .build(),
             ),
             accessible_channels_cache: Arc::new(
                 moka::sync::Cache::builder()
                     .max_capacity(10_000)
                     .time_to_live(std::time::Duration::from_secs(10))
+                    .support_invalidation_closures()
                     .build(),
             ),
             channel_visibility_cache: Arc::new(
                 moka::sync::Cache::builder()
                     .max_capacity(10_000)
                     .time_to_live(std::time::Duration::from_secs(10))
+                    .support_invalidation_closures()
                     .build(),
             ),
             audit_tx,
@@ -575,13 +592,25 @@ impl AppState {
 
     /// Invalidate all users' accessible-channels cache (e.g. new open channel created).
     pub fn invalidate_all_accessible_channels(&self, tenant: &TenantContext) {
-        self.invalidate_all_accessible_channels_local();
+        self.invalidate_all_accessible_channels_local(tenant.community());
         self.spawn_cache_invalidation(tenant, CacheInvalidation::AccessibleAll);
     }
 
     /// Local-only accessible-channels drop. See [`invalidate_membership_local`].
-    pub(crate) fn invalidate_all_accessible_channels_local(&self) {
-        self.accessible_channels_cache.invalidate_all();
+    pub(crate) fn invalidate_all_accessible_channels_local(&self, community_id: CommunityId) {
+        if let Err(error) = self
+            .accessible_channels_cache
+            .invalidate_entries_if(move |(entry_community, _), _| *entry_community == community_id)
+        {
+            // AppState enables invalidation closures at construction time. If
+            // that invariant ever regresses, prefer over-invalidating to
+            // serving stale access state.
+            tracing::error!(
+                ?error,
+                "community-scoped accessible-channel invalidation unavailable; falling back to full invalidation"
+            );
+            self.accessible_channels_cache.invalidate_all();
+        }
     }
 
     /// Invalidate the cached visibility for a single channel (e.g. after a flip).
@@ -602,20 +631,50 @@ impl AppState {
 
     /// Invalidate all caches after a channel is deleted.
     ///
-    /// Channel deletion is a rare admin operation. We clear the entire membership
-    /// cache because moka doesn't support prefix-based invalidation on composite
-    /// keys, and stale `is_member=true` entries for a deleted channel would bypass
-    /// the DB's `deleted_at IS NULL` guard.
+    /// Channel deletion is a rare admin operation, but it is still tenant-local:
+    /// a deletion in A must not flush B's cache entries. Predicate invalidation
+    /// keeps the safety property that stale `is_member=true` entries for the
+    /// deleted channel are removed without turning the cache drop into a
+    /// cross-community signal.
     pub fn invalidate_channel_deleted(&self, tenant: &TenantContext) {
-        self.invalidate_channel_deleted_local();
+        self.invalidate_channel_deleted_local(tenant.community());
         self.spawn_cache_invalidation(tenant, CacheInvalidation::ChannelDeleted);
     }
 
     /// Local-only channel-deleted drop. See [`invalidate_membership_local`].
-    pub(crate) fn invalidate_channel_deleted_local(&self) {
-        self.membership_cache.invalidate_all();
-        self.accessible_channels_cache.invalidate_all();
-        self.channel_visibility_cache.invalidate_all();
+    pub(crate) fn invalidate_channel_deleted_local(&self, community_id: CommunityId) {
+        if let Err(error) =
+            self.membership_cache
+                .invalidate_entries_if(move |(entry_community, _, _), _| {
+                    *entry_community == community_id
+                })
+        {
+            tracing::error!(
+                ?error,
+                "community-scoped membership invalidation unavailable; falling back to full invalidation"
+            );
+            self.membership_cache.invalidate_all();
+        }
+        if let Err(error) = self
+            .accessible_channels_cache
+            .invalidate_entries_if(move |(entry_community, _), _| *entry_community == community_id)
+        {
+            tracing::error!(
+                ?error,
+                "community-scoped accessible-channel invalidation unavailable; falling back to full invalidation"
+            );
+            self.accessible_channels_cache.invalidate_all();
+        }
+        if let Err(error) = self
+            .channel_visibility_cache
+            .invalidate_entries_if(move |(entry_community, _), _| *entry_community == community_id)
+        {
+            tracing::error!(
+                ?error,
+                "community-scoped visibility invalidation unavailable; falling back to full invalidation"
+            );
+            self.channel_visibility_cache.invalidate_all();
+        }
     }
 
     /// Fire-and-forget publish of a cache-key drop to all other pods. Failures
@@ -646,13 +705,13 @@ impl AppState {
                 self.invalidate_membership_local(community_id, channel_id, &pubkey);
             }
             CacheInvalidation::AccessibleAll => {
-                self.invalidate_all_accessible_channels_local();
+                self.invalidate_all_accessible_channels_local(community_id);
             }
             CacheInvalidation::Visibility { channel_id } => {
                 self.invalidate_channel_visibility_local(community_id, channel_id);
             }
             CacheInvalidation::ChannelDeleted => {
-                self.invalidate_channel_deleted_local();
+                self.invalidate_channel_deleted_local(community_id);
             }
         }
     }
@@ -873,6 +932,43 @@ mod tests {
         (mgr, conn_id, rx, ctrl_rx, cancel, bp)
     }
 
+    async fn test_state() -> Arc<AppState> {
+        let mut config = crate::config::Config::from_env().expect("default config loads");
+        config.require_relay_membership = false;
+        config.redis_url = "redis://127.0.0.1:1".to_string();
+        let pool = sqlx::PgPool::connect_lazy(&config.database_url).expect("lazy pg pool");
+        let db = buzz_db::Db::from_pool(pool.clone());
+        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("redis pool");
+        let pubsub = Arc::new(
+            buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
+                .await
+                .expect("pubsub manager"),
+        );
+        let audit = buzz_audit::AuditService::new(pool.clone());
+        let auth = buzz_auth::AuthService::new(config.auth.clone());
+        let search = buzz_search::SearchService::new(pool.clone());
+        let workflow_engine = Arc::new(buzz_workflow::WorkflowEngine::new(
+            db.clone(),
+            buzz_workflow::WorkflowConfig::default(),
+        ));
+        let media_storage = buzz_media::MediaStorage::new(&config.media).expect("media storage");
+        let (state, _audit_shutdown) = AppState::new(
+            config,
+            db,
+            redis_pool,
+            audit,
+            pubsub,
+            auth,
+            search,
+            workflow_engine,
+            nostr::Keys::generate(),
+            media_storage,
+        );
+        Arc::new(state)
+    }
+
     #[test]
     fn send_to_resets_grace_counter_on_success() {
         let (mgr, id, _rx, _ctrl_rx, _cancel, bp) = setup_conn(16);
@@ -984,30 +1080,51 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tracks_connections_by_authenticated_pubkey() {
+    async fn tracks_connections_by_authenticated_pubkey_within_community() {
         let mgr = ConnectionManager::new();
-        let conn_id = Uuid::new_v4();
-        let (tx, _rx) = mpsc::channel(1);
-        let (ctrl_tx, _ctrl_rx) = mpsc::channel(1);
-        let cancel = CancellationToken::new();
-        let bp = Arc::new(AtomicU8::new(0));
-        let subscriptions = Arc::new(Mutex::new(HashMap::new()));
+        let community_a = buzz_core::tenant::CommunityId::from_uuid(Uuid::from_u128(0xAAAA));
+        let community_b = buzz_core::tenant::CommunityId::from_uuid(Uuid::from_u128(0xBBBB));
+        let conn_a = Uuid::new_v4();
+        let conn_b = Uuid::new_v4();
+        let (tx_a, _rx_a) = mpsc::channel(1);
+        let (ctrl_tx_a, _ctrl_rx_a) = mpsc::channel(1);
+        let (tx_b, _rx_b) = mpsc::channel(1);
+        let (ctrl_tx_b, _ctrl_rx_b) = mpsc::channel(1);
         mgr.register(
-            conn_id,
-            tx,
-            ctrl_tx,
-            cancel,
-            buzz_core::tenant::CommunityId::from_uuid(Uuid::nil()),
-            bp,
-            Arc::clone(&subscriptions),
+            conn_a,
+            tx_a,
+            ctrl_tx_a,
+            CancellationToken::new(),
+            community_a,
+            Arc::new(AtomicU8::new(0)),
+            Arc::new(Mutex::new(HashMap::new())),
+            3,
+        );
+        mgr.register(
+            conn_b,
+            tx_b,
+            ctrl_tx_b,
+            CancellationToken::new(),
+            community_b,
+            Arc::new(AtomicU8::new(0)),
+            Arc::new(Mutex::new(HashMap::new())),
             3,
         );
 
         let pubkey = vec![7u8; 32];
-        mgr.set_authenticated_pubkey(conn_id, pubkey.clone());
+        mgr.set_authenticated_pubkey(conn_a, pubkey.clone());
+        mgr.set_authenticated_pubkey(conn_b, pubkey.clone());
 
-        assert_eq!(mgr.connection_ids_for_pubkey(&pubkey), vec![conn_id]);
-        assert!(mgr.subscriptions_for(conn_id).is_some());
+        assert_eq!(
+            mgr.connection_ids_for_pubkey_in_community(community_a, &pubkey),
+            vec![conn_a]
+        );
+        assert_eq!(
+            mgr.connection_ids_for_pubkey_in_community(community_b, &pubkey),
+            vec![conn_b]
+        );
+        assert!(mgr.subscriptions_for(conn_a).is_some());
+        assert!(mgr.subscriptions_for(conn_b).is_some());
     }
 
     #[tokio::test]
@@ -1035,6 +1152,100 @@ mod tests {
         mgr.set_authenticated_pubkey(conn_id, pubkey.clone());
         assert_eq!(mgr.pubkey_for_conn(conn_id), Some(pubkey));
         assert_eq!(mgr.pubkey_for_conn(Uuid::new_v4()), None);
+    }
+
+    #[tokio::test]
+    async fn accessible_channel_invalidation_is_scoped_to_community() {
+        let state = test_state().await;
+        let community_a = CommunityId::from_uuid(Uuid::from_u128(0xAAAA));
+        let community_b = CommunityId::from_uuid(Uuid::from_u128(0xBBBB));
+        let pubkey = vec![7u8; 32];
+        let channels_a = vec![Uuid::from_u128(1)];
+        let channels_b = vec![Uuid::from_u128(2)];
+
+        state
+            .accessible_channels_cache
+            .insert((community_a, pubkey.clone()), channels_a);
+        state
+            .accessible_channels_cache
+            .insert((community_b, pubkey.clone()), channels_b.clone());
+
+        state.invalidate_all_accessible_channels_local(community_a);
+
+        assert_eq!(
+            state
+                .accessible_channels_cache
+                .get(&(community_a, pubkey.clone())),
+            None
+        );
+        assert_eq!(
+            state
+                .accessible_channels_cache
+                .get(&(community_b, pubkey.clone())),
+            Some(channels_b),
+            "A's cache drop must not evict B's accessible-channel entry"
+        );
+    }
+
+    #[tokio::test]
+    async fn channel_deleted_invalidation_is_scoped_to_community() {
+        let state = test_state().await;
+        let community_a = CommunityId::from_uuid(Uuid::from_u128(0xAAAA));
+        let community_b = CommunityId::from_uuid(Uuid::from_u128(0xBBBB));
+        let channel_id = Uuid::from_u128(1);
+        let pubkey = vec![7u8; 32];
+
+        for community in [community_a, community_b] {
+            state
+                .membership_cache
+                .insert((community, channel_id, pubkey.clone()), true);
+            state
+                .accessible_channels_cache
+                .insert((community, pubkey.clone()), vec![channel_id]);
+            state
+                .channel_visibility_cache
+                .insert((community, channel_id), "private".to_string());
+        }
+
+        state.invalidate_channel_deleted_local(community_a);
+
+        assert_eq!(
+            state
+                .membership_cache
+                .get(&(community_a, channel_id, pubkey.clone())),
+            None
+        );
+        assert_eq!(
+            state
+                .accessible_channels_cache
+                .get(&(community_a, pubkey.clone())),
+            None
+        );
+        assert_eq!(
+            state
+                .channel_visibility_cache
+                .get(&(community_a, channel_id)),
+            None
+        );
+        assert_eq!(
+            state
+                .membership_cache
+                .get(&(community_b, channel_id, pubkey.clone())),
+            Some(true)
+        );
+        assert_eq!(
+            state
+                .accessible_channels_cache
+                .get(&(community_b, pubkey.clone())),
+            Some(vec![channel_id])
+        );
+        assert_eq!(
+            state
+                .channel_visibility_cache
+                .get(&(community_b, channel_id)),
+            Some("private".to_string()),
+            "A's channel deletion must not evict B's cache entries"
+        );
     }
 
     #[tokio::test]
