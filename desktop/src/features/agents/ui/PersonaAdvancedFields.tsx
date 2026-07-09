@@ -6,10 +6,8 @@ import type { PersonaBehaviorDraft } from "./personaBehaviorDraft";
 import {
   PERSONA_FIELD_CONTROL_CLASS,
   PERSONA_FIELD_SHELL_CLASS,
+  PERSONA_LABEL_OPTIONAL_CLASS,
 } from "./personaDialogPickers";
-
-const PERSONA_LABEL_OPTIONAL_CLASS =
-  "ml-1 text-xs font-normal text-muted-foreground/50";
 
 export function PersonaAdvancedFields({
   behaviorDraft,
@@ -87,7 +85,7 @@ export function PersonaAdvancedFields({
             />
           </div>
           <p className="text-xs text-muted-foreground">
-            Concurrent turns each started instance handles (1-32).
+            How many conversations each running instance handles at once (1–32).
           </p>
         </div>
 

@@ -185,7 +185,6 @@ export function WhereToRunSection({
               model: null,
               envVars: {},
             }}
-            modelId={draft.meshModelId}
             targetEndpointAddr={draft.meshTarget?.endpointAddr ?? ""}
             onModelIdChange={(nextId, patch) => {
               emit({

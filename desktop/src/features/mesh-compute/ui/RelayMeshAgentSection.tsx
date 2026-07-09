@@ -42,7 +42,6 @@ export function RelayMeshAgentSection({
     envVars: Record<string, string>;
   };
   useMesh: boolean;
-  modelId: string; // Parent-owned selected model id; retained for API symmetry with onModelIdChange.
   targetEndpointAddr: string;
   onUseMeshChange: (next: boolean) => void;
   /**
@@ -64,7 +63,7 @@ export function RelayMeshAgentSection({
   const disabledReason =
     availability == null
       ? (error ?? "Checking relay mesh availability…")
-      : (availability.reason ?? "Relay compute isn't available right now.");
+      : (availability.reason ?? "The relay mesh isn't available right now.");
 
   // Compute overrides from the currently-selected model's preset, *not* from
   // an arbitrary one — the warning must reflect what'll actually happen.
@@ -87,7 +86,7 @@ export function RelayMeshAgentSection({
     if (!target) {
       onTargetChange(null);
       onModelIdChange("", null);
-      setPresetError("Selected relay mesh target is no longer available.");
+      setPresetError("The selected relay mesh target is no longer available.");
       return;
     }
     setPresetError(null);
@@ -167,7 +166,8 @@ export function RelayMeshAgentSection({
             <p className="flex items-start gap-1.5 rounded bg-warning-bg/60 px-2 py-1.5 text-xs text-warning">
               <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
               <span>
-                Using Relay mesh overrides this agent's {overrides.join(", ")}.
+                Using the relay mesh overrides this agent's{" "}
+                {overrides.join(", ")}.
               </span>
             </p>
           ) : null}

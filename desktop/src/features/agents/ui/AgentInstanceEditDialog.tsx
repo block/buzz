@@ -2,12 +2,16 @@ import * as React from "react";
 import { ChevronDown } from "lucide-react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 
+import { toast } from "sonner";
+
 import {
   useAcpRuntimesQuery,
   useAgentConfigSurface,
   usePersonasQuery,
+  useStartManagedAgentMutation,
   useUpdateManagedAgentMutation,
 } from "@/features/agents/hooks";
+import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlActions";
 import type {
   ManagedAgent,
   RespondToMode,
@@ -79,6 +83,7 @@ export function AgentInstanceEditDialog({
   onUpdated?: (agent: ManagedAgent) => void;
 }) {
   const updateMutation = useUpdateManagedAgentMutation();
+  const startMutation = useStartManagedAgentMutation();
   const runtimesQuery = useAcpRuntimesQuery({ enabled: open });
   const configSurfaceQuery = useAgentConfigSurface(open ? agent.pubkey : null);
   const runtimes = runtimesQuery.data ?? [];
@@ -598,6 +603,29 @@ export function AgentInstanceEditDialog({
       }
       handleOpenChange(false);
       onUpdated?.(result.agent);
+      // The auto-restart policy deliberately never fires for a stopped or
+      // failing agent (a broken agent must not auto-loop), so an edit meant
+      // to FIX one silently waits for a manual start. Offer that start
+      // explicitly instead of relying on the user to know the policy.
+      if (!isManagedAgentActive(result.agent)) {
+        const startedName = result.agent.name;
+        toast(`${startedName} saved while stopped.`, {
+          action: {
+            label: "Start now",
+            onClick: () => {
+              startMutation.mutate(result.agent.pubkey, {
+                onSuccess: () => toast.success(`${startedName} started.`),
+                onError: (error) =>
+                  toast.error(
+                    error instanceof Error
+                      ? `${startedName} failed to start: ${error.message}`
+                      : `${startedName} failed to start.`,
+                  ),
+              });
+            },
+          },
+        });
+      }
     } catch {
       // React Query stores the error; keep dialog open and render it inline.
     }

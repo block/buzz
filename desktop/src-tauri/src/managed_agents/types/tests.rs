@@ -633,3 +633,38 @@ fn mint_normalizes_definition_allowlist_from_wire() {
         resolve_mint_behavioral_defaults(None, Vec::new(), None, None, Some(&definition)).unwrap();
     assert_eq!(minted.respond_to_allowlist, vec!["a".repeat(64)]);
 }
+
+#[test]
+fn mint_resolves_each_quad_field_independently() {
+    // PR #1667 review (convergent): the input-wins rule is per-FIELD, not
+    // all-or-nothing — explicit toolsets must not stop respond_to or
+    // parallelism from inheriting.
+    let definition = quad_definition("anyone", vec![]);
+    let minted = resolve_mint_behavioral_defaults(
+        None,
+        Vec::new(),
+        Some("explicit-toolsets".to_string()),
+        None,
+        Some(&definition),
+    )
+    .unwrap();
+    assert_eq!(minted.respond_to, RespondTo::Anyone, "inherited");
+    assert_eq!(
+        minted.mcp_toolsets.as_deref(),
+        Some("explicit-toolsets"),
+        "explicit input wins"
+    );
+    assert_eq!(minted.parallelism, Some(8), "inherited");
+}
+
+#[test]
+fn mint_rejects_out_of_range_input_parallelism() {
+    // The "validated when present" contract on MintBehavioralDefaults holds
+    // for the INPUT branch too, not just definition values.
+    let err = resolve_mint_behavioral_defaults(None, Vec::new(), None, Some(64), None).unwrap_err();
+    assert!(err.contains("64"), "error must name the bad value: {err}");
+    assert!(
+        !err.contains("definition"),
+        "input-branch error must not blame the definition: {err}"
+    );
+}

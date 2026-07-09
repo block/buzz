@@ -47,6 +47,6 @@ export function definitionCreateDialogState(
   return {
     ...legacy,
     description:
-      "Create an agent profile without starting an instance. You can start it from its card at any time.",
+      "Create an agent without starting it. You can start it from its card at any time.",
   };
 }

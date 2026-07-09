@@ -24,7 +24,7 @@ export const personaCatalogCopy = {
   emptyCatalogTitle: "No agents in the catalog yet",
   detailsAction: "View details",
   selectAction: "Choose",
-  deselectAction: "Selected",
+  deselectAction: "Deselect",
   selectedState: "Selected",
   availableState: "Available",
   detailSelectedTitle: "Selected for My Agents",

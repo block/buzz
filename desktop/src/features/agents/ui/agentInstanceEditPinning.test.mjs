@@ -249,3 +249,38 @@ test("rehost_steadyStateInherit_localEditsStayAuthoritative", () => {
   );
   assert.deepEqual(submission.envVars, { DATABRICKS_TOKEN: "tok" });
 });
+
+test("editValidity_allowlistWithEmptyList_blocksSave", () => {
+  // PR #1667 review: the edit-path crash-loop guard (respondToValid) was
+  // never exercised — every other row uses a non-allowlist mode. An agent
+  // saved as allowlist-with-empty-list crash-loops at startup.
+  const base = {
+    name: pinnedAgent.name,
+    parallelism: "1",
+    turnTimeoutSeconds: "60",
+    agentAcpCommand: pinnedAgent.acpCommand,
+    acpCommand: pinnedAgent.acpCommand,
+    selectedRuntimeId: "claude",
+    inheritHarness: true,
+    agentCommand: pinnedAgent.agentCommand,
+    requiredEnvKeyMissing: false,
+  };
+  assert.equal(
+    computeEditAgentFormValidity({
+      ...base,
+      respondTo: "allowlist",
+      respondToAllowlistLength: 0,
+    }),
+    false,
+    "allowlist with an empty list must block Save",
+  );
+  assert.equal(
+    computeEditAgentFormValidity({
+      ...base,
+      respondTo: "allowlist",
+      respondToAllowlistLength: 1,
+    }),
+    true,
+    "allowlist with at least one pubkey must allow Save",
+  );
+});

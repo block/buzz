@@ -174,3 +174,54 @@ fn legacy_avatar_empty_when_nothing_resolves() {
 
     assert!(resolved.is_empty());
 }
+
+// ── Provider deploy payload completeness ─────────────────────────────────────
+
+/// Regression (PR #1667 review, Thufir): the provider deploy payload must
+/// carry every behavioral field the local spawn path applies — a field
+/// missing here silently strips it from provider-backed agents.
+#[test]
+fn deploy_payload_carries_the_full_behavioral_quad() {
+    let allow = "a".repeat(64);
+    let record: ManagedAgentRecord = serde_json::from_str(&format!(
+        r#"{{
+            "pubkey": "abcd1234",
+            "name": "test-agent",
+            "private_key_nsec": "nsec1fake",
+            "relay_url": "wss://localhost:3000",
+            "acp_command": "buzz-acp",
+            "agent_command": "goose",
+            "agent_args": [],
+            "mcp_command": "",
+            "turn_timeout_seconds": 320,
+            "system_prompt": null,
+            "parallelism": 4,
+            "mcp_toolsets": "developer,search",
+            "respond_to": "allowlist",
+            "respond_to_allowlist": ["{allow}"],
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:00Z",
+            "last_started_at": null,
+            "last_stopped_at": null,
+            "last_exit_code": null,
+            "last_error": null
+        }}"#
+    ))
+    .expect("sample record");
+
+    let payload = deploy_payload_json(
+        &record,
+        "wss://relay.example".to_string(),
+        Some("gpt-x".to_string()),
+        Some("openai".to_string()),
+        std::collections::BTreeMap::new(),
+    );
+
+    assert_eq!(payload["parallelism"], 4);
+    assert_eq!(payload["mcp_toolsets"], "developer,search");
+    assert_eq!(payload["respond_to"], "allowlist");
+    assert_eq!(payload["respond_to_allowlist"][0], "a".repeat(64));
+    assert_eq!(payload["model"], "gpt-x");
+    assert_eq!(payload["provider"], "openai");
+    assert_eq!(payload["relay_url"], "wss://relay.example");
+}

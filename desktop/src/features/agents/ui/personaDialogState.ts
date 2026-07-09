@@ -69,8 +69,7 @@ export function parsePersonaNamePoolText(text: string): string[] {
 export function createPersonaDialogState(): PersonaDialogState {
   return {
     title: "Create agent",
-    description:
-      "Create an agent profile and start its managed agent instance.",
+    description: "Create an agent and start it immediately.",
     submitLabel: "Create agent",
     initialValues: {
       displayName: "",

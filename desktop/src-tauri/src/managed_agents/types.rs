@@ -932,12 +932,20 @@ pub fn resolve_mint_behavioral_defaults(
         .or_else(|| non_blank(definition.and_then(|d| d.mcp_toolsets.clone())));
 
     let parallelism = match input_parallelism {
-        Some(count) => Some(count),
+        // Explicit input is validated here too (not just at the command
+        // call sites) so the "validated when present" contract on
+        // `MintBehavioralDefaults.parallelism` is unskippable.
+        Some(count) if (1..=32).contains(&count) => Some(count),
+        Some(count) => {
+            return Err(format!(
+                "parallelism {count} is out of range (must be between 1 and 32)"
+            ))
+        }
         None => match definition.and_then(|d| d.parallelism) {
             Some(count) if (1..=32).contains(&count) => Some(count),
             Some(count) => {
                 return Err(format!(
-                    "definition parallelism {count} is out of range (must be between 1 and 32)"
+                    "parallelism {count} on the linked agent definition is out of range (must be between 1 and 32)"
                 ))
             }
             None => None,

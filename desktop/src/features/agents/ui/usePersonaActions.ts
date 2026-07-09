@@ -26,7 +26,6 @@ import type {
   UpdatePersonaInput,
 } from "@/shared/api/types";
 import {
-  createPersonaDialogState,
   duplicatePersonaDialogState,
   editPersonaDialogState,
   importPersonaDialogState,
@@ -349,11 +348,6 @@ export function usePersonaActions() {
     setShouldLoadAcpRuntimes(true);
   }
 
-  function openCreate() {
-    prepareCreate();
-    setPersonaDialogState(createPersonaDialogState());
-  }
-
   function openEdit(persona: AgentPersona) {
     clearFeedback("library");
     setShouldLoadAcpRuntimes(true);
@@ -446,7 +440,6 @@ export function usePersonaActions() {
     handleImportFile,
     handleExport,
     handleBatchImportComplete,
-    openCreate,
     prepareCreate,
     openEdit,
     openDuplicate,

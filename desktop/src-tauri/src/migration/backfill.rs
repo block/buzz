@@ -80,10 +80,14 @@ fn backfill_standalone_agents_in_dir(base_dir: &Path) -> Result<usize, String> {
     for record in all.iter_mut().filter(|r| needs_backfill(r)) {
         // Pubkeys are unique so this cannot fire against another manufactured
         // definition — only against a pre-existing definition improbably
-        // slugged as this agent's pubkey. Fail loudly, skip, continue.
+        // slugged as this agent's pubkey. Fail loudly, skip, continue: the
+        // agent keeps working persona-less (`persona_id: None`), and the
+        // backfill retries it on every boot. Recovery path: delete or re-slug
+        // the colliding definition, then relaunch.
         if existing_slugs.contains(&record.pubkey) {
             eprintln!(
-                "buzz-desktop: standalone-backfill: slug collision for agent {} — skipped",
+                "buzz-desktop: standalone-backfill: slug collision for agent {} — skipped; \
+                 delete or re-slug the colliding definition to let the next launch backfill it",
                 record.pubkey
             );
             continue;

@@ -132,7 +132,7 @@ function AgentCreateDialogRouter({
             id="agent-dialog-start-toggle"
             onCheckedChange={setStartAfterCreate}
           />
-          Start agent after create
+          Start agent after creation
         </label>
       }
       createRunSection={
