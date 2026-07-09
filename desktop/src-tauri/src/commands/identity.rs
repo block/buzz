@@ -188,7 +188,7 @@ pub async fn import_identity(
         // Persist into the OS keyring first (store → read-back verify → marker →
         // delete file). Falls back to the 0o600 file when the keyring is
         // unavailable; returns Err only when both backends fail.
-        let store = crate::secret_store::SecretStore::shared(crate::app_state::KEYRING_SERVICE);
+        let store = crate::secret_store::SecretStore::shared(crate::app_state::keyring_service());
         crate::app_state::persist_imported_identity(store, &keys, &key_path, &data_dir)?;
 
         // Update in-memory keys BEFORE clearing recovery flags. The Release
@@ -268,7 +268,7 @@ pub async fn persist_current_identity(
         std::fs::create_dir_all(&data_dir).map_err(|e| format!("create app data dir: {e}"))?;
         let key_path = data_dir.join("identity.key");
 
-        let store = crate::secret_store::SecretStore::shared(crate::app_state::KEYRING_SERVICE);
+        let store = crate::secret_store::SecretStore::shared(crate::app_state::keyring_service());
         crate::app_state::persist_imported_identity(store, &keys, &key_path, &data_dir)?;
 
         // Keys are already the live identity — only clear identity_lost.
