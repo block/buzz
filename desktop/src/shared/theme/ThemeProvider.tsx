@@ -210,8 +210,26 @@ function applyAccentColor(value: string) {
   root.style.setProperty("--sidebar-active-foreground", fgHsl);
 }
 
-function isBuzzTheme(themeName: string): boolean {
+/**
+ * The Buzz themes ship with a fixed neutral accent (the GitHub black/white
+ * foreground) rather than a user-selectable accent color. When a Buzz theme is
+ * active we force `NEUTRAL_ACCENT` regardless of the stored preference, and the
+ * appearance panel hides the accent picker. The user's chosen accent is left
+ * untouched in storage so it returns when they switch back to another theme.
+ */
+export function isBuzzTheme(themeName: string): boolean {
   return themeName === "buzz" || themeName === "buzz-dark";
+}
+
+/**
+ * Resolve the accent to actually apply for a theme: Buzz themes are pinned to
+ * the neutral accent; every other theme uses the stored/selected accent.
+ */
+function resolveEffectiveAccent(
+  themeName: string,
+  accentColor: string,
+): string {
+  return isBuzzTheme(themeName) ? NEUTRAL_ACCENT : accentColor;
 }
 
 /** Toggle the Buzz sidebar-gradient and translucency markers on the root. */
@@ -362,9 +380,13 @@ export function ThemeProvider({
       if (loadingRef.current === thisTheme) {
         setIsDark(dark);
         setIsLoading(false);
-        // Re-apply accent after theme load (theme vars don't include primary)
+        // Re-apply accent after theme load (theme vars don't include primary).
+        // Buzz themes force the neutral accent regardless of stored value.
         applyAccentColor(
-          window.localStorage.getItem(ACCENT_STORAGE_KEY) ?? DEFAULT_ACCENT,
+          resolveEffectiveAccent(
+            thisTheme,
+            window.localStorage.getItem(ACCENT_STORAGE_KEY) ?? DEFAULT_ACCENT,
+          ),
         );
       }
     });
@@ -390,8 +412,8 @@ export function ThemeProvider({
   }, [followSystem]);
 
   useEffect(() => {
-    applyAccentColor(accentColor);
-  }, [accentColor]);
+    applyAccentColor(resolveEffectiveAccent(effectiveTheme, accentColor));
+  }, [accentColor, effectiveTheme]);
 
   const setTheme = useCallback((name: string) => {
     if (!isValidThemeName(name)) return;
