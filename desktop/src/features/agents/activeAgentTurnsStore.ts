@@ -568,3 +568,102 @@ export function resetActiveAgentTurnsStore() {
   terminalAtByAgent.clear();
   notifyListeners();
 }
+
+// ---------------------------------------------------------------------------
+// Workspace-switch save / restore
+// ---------------------------------------------------------------------------
+
+type TurnsStoreSnapshot = {
+  turns: Map<string, Map<string, ActiveTurn>>;
+  offsets: Map<string, number>;
+  watermarks: Map<string, ObserverEvent>;
+  terminals: Map<string, Map<string, number>>;
+};
+
+/** Per-workspace snapshots. Keyed by workspace ID. */
+const savedByWorkspace = new Map<string, TurnsStoreSnapshot>();
+
+/**
+ * Snapshot the current active-turns state under `workspaceId` so it can be
+ * restored when the user switches back.  If both the turns map and the
+ * tombstone map are empty there is nothing worth restoring — discard any
+ * previously-saved snapshot instead.
+ *
+ * Deep-clones all four maps so subsequent mutations on the live maps do not
+ * corrupt the snapshot.
+ */
+export function saveActiveAgentTurnsForWorkspace(workspaceId: string): void {
+  if (activeTurnsByAgent.size === 0 && terminalAtByAgent.size === 0) {
+    savedByWorkspace.delete(workspaceId);
+    return;
+  }
+
+  // Deep-clone activeTurnsByAgent: outer map + inner per-agent maps + turn
+  // objects (plain structs, no nested references beyond primitives).
+  const turns = new Map<string, Map<string, ActiveTurn>>();
+  for (const [agentKey, agentTurns] of activeTurnsByAgent) {
+    const clonedAgent = new Map<string, ActiveTurn>();
+    for (const [turnId, turn] of agentTurns) {
+      clonedAgent.set(turnId, { ...turn });
+    }
+    turns.set(agentKey, clonedAgent);
+  }
+
+  // Shallow-clone scalar maps (primitives as values).
+  const offsets = new Map(clockOffsetByAgent);
+  const watermarks = new Map(lastProcessed);
+
+  // Deep-clone terminalAtByAgent: outer map + inner per-agent maps.
+  const terminals = new Map<string, Map<string, number>>();
+  for (const [agentKey, tombstones] of terminalAtByAgent) {
+    terminals.set(agentKey, new Map(tombstones));
+  }
+
+  savedByWorkspace.set(workspaceId, { turns, offsets, watermarks, terminals });
+}
+
+/**
+ * Restore a previously saved active-turns snapshot for `workspaceId` into the
+ * (already-reset) module maps.  No-op when no snapshot exists.
+ *
+ * Refreshes `lastActivityAt` on every restored turn so the prune interval
+ * doesn't immediately kill turns that were saved more than 25 s ago (the prune
+ * threshold).  New observer events arriving after restore will update
+ * `lastActivityAt` normally via `recordActivity`.
+ *
+ * Consumes the snapshot (deletes it from `savedByWorkspace`) — a given
+ * workspace's snapshot is only usable once per round-trip.
+ */
+export function restoreActiveAgentTurnsForWorkspace(
+  workspaceId: string,
+): void {
+  const snap = savedByWorkspace.get(workspaceId);
+  if (!snap) return;
+  savedByWorkspace.delete(workspaceId);
+
+  const now = Date.now();
+
+  for (const [agentKey, agentTurns] of snap.turns) {
+    const restored = new Map<string, ActiveTurn>();
+    for (const [turnId, turn] of agentTurns) {
+      restored.set(turnId, { ...turn, lastActivityAt: now });
+    }
+    activeTurnsByAgent.set(agentKey, restored);
+  }
+
+  for (const [agentKey, offset] of snap.offsets) {
+    clockOffsetByAgent.set(agentKey, offset);
+  }
+
+  for (const [agentKey, event] of snap.watermarks) {
+    lastProcessed.set(agentKey, event);
+  }
+
+  for (const [agentKey, tombstones] of snap.terminals) {
+    terminalAtByAgent.set(agentKey, new Map(tombstones));
+  }
+
+  cachedTurnSummaries.clear();
+  cachedChannelTurnSummaries = null;
+  notifyListeners();
+}

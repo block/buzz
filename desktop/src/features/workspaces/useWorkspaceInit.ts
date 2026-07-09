@@ -13,7 +13,11 @@ import {
   initDraftStore,
 } from "@/features/messages/lib/useDrafts";
 import { resetRenderScopedReactionHydration } from "@/features/messages/lib/renderScopedReactions";
-import { resetActiveAgentTurnsStore } from "@/features/agents/activeAgentTurnsStore";
+import {
+  resetActiveAgentTurnsStore,
+  saveActiveAgentTurnsForWorkspace,
+  restoreActiveAgentTurnsForWorkspace,
+} from "@/features/agents/activeAgentTurnsStore";
 import { resetAgentWorkingSignal } from "@/features/agents/agentWorkingSignal";
 import { resetAgentObserverStore } from "@/features/agents/observerRelayStore";
 import { resetSidebarRelayConnectionCardState } from "@/features/sidebar/ui/useSidebarRelayConnectionCard";
@@ -76,6 +80,10 @@ export function useWorkspaceInit(
   // On the initial mount we skip resetting singletons (they're fresh).
   const hasInitializedRef = useRef(false);
 
+  // Track the previously-applied workspace ID so we can save its turn state
+  // before resetting when the user switches to a different workspace.
+  const prevWorkspaceIdRef = useRef<string | null>(null);
+
   // biome-ignore lint/correctness/useExhaustiveDependencies: we intentionally depend on specific properties (id/relayUrl/token/reposDir) — depending on the whole object would trigger resets on name-only changes
   useEffect(() => {
     let cancelled = false;
@@ -127,6 +135,11 @@ export function useWorkspaceInit(
       // On workspace switch (not initial mount), reset module singletons
       // so the new tree starts with a clean slate.
       if (hasInitializedRef.current) {
+        // Save the outgoing workspace's turn state before wiping the store so
+        // timers survive a round-trip (A → B → A keeps A's elapsed time).
+        if (prevWorkspaceIdRef.current) {
+          saveActiveAgentTurnsForWorkspace(prevWorkspaceIdRef.current);
+        }
         resetWorkspaceState();
       }
       hasInitializedRef.current = true;
@@ -170,6 +183,12 @@ export function useWorkspaceInit(
         if (activeWorkspace.pubkey) {
           initDraftStore(activeWorkspace.pubkey);
         }
+        // Restore any turn state saved for this workspace (a prior A→B round-
+        // trip). This runs after applyWorkspace succeeds and before the app
+        // renders so components see the restored timers on first render.
+        restoreActiveAgentTurnsForWorkspace(activeWorkspace.id);
+        // Prime the ref so the NEXT switch saves this workspace's state.
+        prevWorkspaceIdRef.current = activeWorkspace.id;
         setResult({
           isReady: true,
           needsSetup: false,
