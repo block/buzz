@@ -4,7 +4,7 @@ import type { ProjectPullRequest } from "@/features/projects/hooks";
 import { TabsList, TabsTrigger } from "@/shared/ui/tabs";
 
 const PROJECT_TAB_TRIGGER_CLASS =
-  "h-8 gap-1.5 rounded-none px-3 text-foreground hover:bg-accent hover:text-accent-foreground data-[state=active]:bg-secondary data-[state=active]:text-secondary-foreground data-[state=active]:shadow-xs";
+  "h-8 gap-1.5 px-3 text-foreground hover:bg-accent hover:text-accent-foreground data-[state=active]:bg-secondary data-[state=active]:text-secondary-foreground data-[state=active]:shadow-xs";
 
 export function ProjectTabsList({ prsActive }: { prsActive?: boolean }) {
   return (
@@ -41,6 +41,9 @@ export function ProjectTabsList({ prsActive }: { prsActive?: boolean }) {
   );
 }
 
+const PR_TAB_TRIGGER_CLASS =
+  "h-9 gap-1.5 rounded-none border-b-2 border-transparent px-0 text-muted-foreground hover:text-foreground data-[state=active]:border-foreground data-[state=active]:bg-transparent data-[state=active]:text-foreground data-[state=active]:shadow-none";
+
 export function PullRequestTabsList({
   filesCount,
   pullRequest,
@@ -50,29 +53,26 @@ export function PullRequestTabsList({
 }) {
   const commitCount = Math.max(1, pullRequest.updateCount + 1);
   return (
-    <TabsList className="h-9 w-fit justify-start gap-0.5 bg-transparent p-0">
-      <TabsTrigger
-        className={PROJECT_TAB_TRIGGER_CLASS}
-        value="pr-conversation"
-      >
+    <TabsList className="h-9 w-fit justify-start gap-6 bg-transparent p-0">
+      <TabsTrigger className={PR_TAB_TRIGGER_CLASS} value="pr-conversation">
         Conversation
-        <span className="rounded-none bg-muted px-1.5 py-0.5 text-2xs">
+        <span className="rounded-full bg-muted px-1.5 py-0.5 text-2xs">
           {pullRequest.comments.length}
         </span>
       </TabsTrigger>
-      <TabsTrigger className={PROJECT_TAB_TRIGGER_CLASS} value="pr-commits">
+      <TabsTrigger className={PR_TAB_TRIGGER_CLASS} value="pr-commits">
         Commits
-        <span className="rounded-none bg-muted px-1.5 py-0.5 text-2xs">
+        <span className="rounded-full bg-muted px-1.5 py-0.5 text-2xs">
           {commitCount}
         </span>
       </TabsTrigger>
-      <TabsTrigger className={PROJECT_TAB_TRIGGER_CLASS} value="pr-checks">
+      <TabsTrigger className={PR_TAB_TRIGGER_CLASS} value="pr-checks">
         Checks
-        <span className="rounded-none bg-muted px-1.5 py-0.5 text-2xs">0</span>
+        <span className="rounded-full bg-muted px-1.5 py-0.5 text-2xs">0</span>
       </TabsTrigger>
-      <TabsTrigger className={PROJECT_TAB_TRIGGER_CLASS} value="pr-files">
+      <TabsTrigger className={PR_TAB_TRIGGER_CLASS} value="pr-files">
         Files changed
-        <span className="rounded-none bg-muted px-1.5 py-0.5 text-2xs">
+        <span className="rounded-full bg-muted px-1.5 py-0.5 text-2xs">
           {filesCount}
         </span>
       </TabsTrigger>

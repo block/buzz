@@ -41,6 +41,7 @@ import {
   ProjectFeedRowCluster,
   ProjectFeedRowMonoCell,
 } from "./ProjectFeedRow";
+import { OverviewRailSection } from "./ProjectOverviewPanel";
 import { ProfileIdentityButton } from "./ProjectProfileIdentity";
 
 function compactDate(createdAt: number) {
@@ -182,7 +183,7 @@ function PullRequestRow({
             {authorLabel}
           </span>
           <span>opened {relativeOpenedAt(pullRequest.createdAt)}</span>
-          <span className="border border-border/60 px-1.5 py-0.5 text-2xs">
+          <span className="rounded-full border border-border/60 px-1.5 py-0.5 text-2xs">
             Member
           </span>
           <span>·</span>
@@ -307,7 +308,7 @@ function PullRequestReviewersRow({
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <Button
-              className="h-6 gap-1 rounded-none px-2 text-2xs text-muted-foreground hover:text-foreground"
+              className="h-6 gap-1 px-2 text-2xs text-muted-foreground hover:text-foreground"
               disabled={requestReviewMutation.isPending}
               size="xs"
               type="button"
@@ -434,7 +435,7 @@ function PullRequestReviewCard({
         pullRequest={pullRequest}
       />
       <div
-        className={`flex min-w-0 flex-wrap items-center gap-3 px-3 py-2.5 ${
+        className={`min-w-0 space-y-2.5 px-3 py-2.5 ${
           isDraft
             ? "bg-muted/40"
             : approvalCount > 0
@@ -442,69 +443,75 @@ function PullRequestReviewCard({
               : "border-green-600/35 border-l-2 bg-green-600/[0.04] pl-3 dark:border-green-500/35 dark:bg-green-500/[0.06]"
         }`}
       >
-        {isDraft ? (
-          <GitPullRequestDraft className="h-4 w-4 shrink-0 text-muted-foreground" />
-        ) : approvalCount > 0 ? (
-          <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-green-600 text-white">
-            <Check className="h-3 w-3" />
-          </span>
-        ) : (
-          <GitPullRequest className="h-4 w-4 shrink-0 text-muted-foreground" />
-        )}
-        <div className="min-w-0 flex-1">
-          <p
-            className={`text-sm font-medium ${
-              approvalCount > 0
-                ? "text-green-700 dark:text-green-400"
-                : "text-foreground"
-            }`}
-          >
-            {reviewState}
-          </p>
-          {reviewStateDetail ? (
-            <p className="text-xs text-muted-foreground">{reviewStateDetail}</p>
-          ) : null}
-        </div>
-        <div className="flex shrink-0 items-center gap-2">
-          {hasApproved ? (
-            <span className="inline-flex items-center gap-1.5 border border-green-600/40 px-2.5 py-1 text-xs font-medium text-green-600 dark:text-green-500">
-              <Check className="h-3.5 w-3.5" />
-              Approved
+        <div className="flex min-w-0 items-start gap-2">
+          {isDraft ? (
+            <GitPullRequestDraft className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
+          ) : approvalCount > 0 ? (
+            <span className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-green-600 text-white">
+              <Check className="h-3 w-3" />
             </span>
-          ) : null}
-          {canApprove ? (
-            <Button
-              className="h-8 gap-1.5 rounded-none bg-green-600 px-3.5 text-white shadow-sm hover:bg-green-700"
-              disabled={approveMutation.isPending}
-              onClick={() => {
-                void handleApprove();
-              }}
-              size="xs"
-              type="button"
+          ) : (
+            <GitPullRequest className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
+          )}
+          <div className="min-w-0 flex-1">
+            <p
+              className={`text-sm font-medium ${
+                approvalCount > 0
+                  ? "text-green-700 dark:text-green-400"
+                  : "text-foreground"
+              }`}
             >
-              <Check className="h-3.5 w-3.5" />
-              Approve
-            </Button>
-          ) : null}
-          {canChangeStatus && isDraft ? (
-            <Button
-              className="h-7 gap-1.5 rounded-none px-3"
-              disabled={statusMutation.isPending}
-              onClick={() => {
-                void handleStatusChange("open");
-              }}
-              size="xs"
-              type="button"
-              variant="secondary"
-            >
-              <GitPullRequest className="h-3.5 w-3.5" />
-              Ready for review
-            </Button>
-          ) : null}
+              {reviewState}
+            </p>
+            {reviewStateDetail ? (
+              <p className="text-xs text-muted-foreground">
+                {reviewStateDetail}
+              </p>
+            ) : null}
+          </div>
         </div>
+        {hasApproved || canApprove || (canChangeStatus && isDraft) ? (
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
+            {hasApproved ? (
+              <span className="inline-flex items-center gap-1.5 rounded-md border border-green-600/40 px-2.5 py-1 text-xs font-medium text-green-600 dark:text-green-500">
+                <Check className="h-3.5 w-3.5" />
+                Approved
+              </span>
+            ) : null}
+            {canApprove ? (
+              <Button
+                className="h-8 gap-1.5 bg-green-600 px-3.5 text-white shadow-sm hover:bg-green-700"
+                disabled={approveMutation.isPending}
+                onClick={() => {
+                  void handleApprove();
+                }}
+                size="xs"
+                type="button"
+              >
+                <Check className="h-3.5 w-3.5" />
+                Approve
+              </Button>
+            ) : null}
+            {canChangeStatus && isDraft ? (
+              <Button
+                className="h-7 gap-1.5 px-3"
+                disabled={statusMutation.isPending}
+                onClick={() => {
+                  void handleStatusChange("open");
+                }}
+                size="xs"
+                type="button"
+                variant="secondary"
+              >
+                <GitPullRequest className="h-3.5 w-3.5" />
+                Ready for review
+              </Button>
+            ) : null}
+          </div>
+        ) : null}
       </div>
       {canChangeStatus && pullRequest.status === "Open" ? (
-        <p className="px-1 text-right text-xs text-muted-foreground">
+        <p className="px-1 text-xs text-muted-foreground">
           Still in progress?{" "}
           <button
             className="font-medium underline-offset-2 hover:text-foreground hover:underline disabled:opacity-50"
@@ -522,8 +529,48 @@ function PullRequestReviewCard({
   );
 }
 
-/** GitHub-style PR title + status line, rendered above the PR tab row. */
+/** GitHub-style PR title line, rendered as the top section of the PR detail
+ * card. Status, branches, and dates live in the right-hand meta rail. */
 export function PullRequestDetailHeader({
+  profiles,
+  pullRequest,
+}: {
+  profiles?: UserProfileLookup;
+  pullRequest: ProjectPullRequest;
+}) {
+  const authorProfile = profileForPubkey(pullRequest.author, profiles);
+  const authorLabel = labelForPubkey(pullRequest.author, profiles);
+
+  return (
+    <header className="min-w-0 space-y-2 p-4 pb-2">
+      <p className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
+        <GitPullRequest className="h-3.5 w-3.5" />
+        Pull request from {authorLabel}
+      </p>
+      <div className="flex min-w-0 items-center gap-3">
+        <ProfileIdentityButton
+          avatarClassName="shrink-0"
+          avatarSize="md"
+          avatarUrl={authorProfile?.avatarUrl ?? null}
+          isAgent={authorProfile?.isAgent === true}
+          label={authorLabel}
+          pubkey={pullRequest.author}
+          showLabel={false}
+        />
+        <h3 className="line-clamp-2 min-w-0 flex-1 text-base font-semibold text-foreground">
+          {pullRequest.title}{" "}
+          <span className="font-normal text-muted-foreground">
+            #{pullRequest.id.slice(0, 8)}
+          </span>
+        </h3>
+      </div>
+    </header>
+  );
+}
+
+/** Right-hand meta column for the PR detail view: status, author, branches,
+ * dates, and review actions — keeps the conversation column focused. */
+export function PullRequestMetaRail({
   profiles,
   project,
   pullRequest,
@@ -532,22 +579,17 @@ export function PullRequestDetailHeader({
   project: Project;
   pullRequest: ProjectPullRequest;
 }) {
+  const authorProfile = profileForPubkey(pullRequest.author, profiles);
   const authorLabel = labelForPubkey(pullRequest.author, profiles);
   const targetBranch = project.defaultBranch || "default branch";
   const sourceBranch = pullRequest.branchName || "unknown branch";
   const commitCount = Math.max(1, pullRequest.updateCount + 1);
 
   return (
-    <div className="min-w-0 space-y-2.5">
-      <h3 className="min-w-0 text-xl font-semibold leading-snug text-foreground">
-        {pullRequest.title}{" "}
-        <span className="font-normal text-muted-foreground">
-          #{pullRequest.id.slice(0, 8)}
-        </span>
-      </h3>
-      <div className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-1.5 text-xs leading-4 text-muted-foreground">
+    <aside className="min-w-0 space-y-6 border-t border-border/60 p-4 xl:border-l xl:border-t-0">
+      <OverviewRailSection title="Status">
         <span
-          className={`mr-1 inline-flex shrink-0 items-center gap-1.5 px-2.5 py-1 text-xs font-medium text-white ${pullRequestStatusBadgeClassName(pullRequest.status)}`}
+          className={`inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium text-white ${pullRequestStatusBadgeClassName(pullRequest.status)}`}
         >
           {pullRequest.status === "Merged" ? (
             <GitMerge className="h-3.5 w-3.5" />
@@ -556,21 +598,55 @@ export function PullRequestDetailHeader({
           )}
           {pullRequest.status}
         </span>
-        <span className="font-medium text-foreground">{authorLabel}</span>
-        <span>wants to merge {pluralize(commitCount, "commit")} into</span>
-        <code className="rounded-none bg-muted px-1.5 py-0.5 text-2xs text-foreground">
-          {targetBranch}
-        </code>
-        <span>from</span>
-        <code className="rounded-none bg-muted px-1.5 py-0.5 text-2xs text-foreground">
-          {sourceBranch}
-        </code>
-        <span>·</span>
-        <span>opened {compactDate(pullRequest.createdAt)}</span>
-        <span>·</span>
-        <span>updated {compactDate(pullRequest.updatedAt)}</span>
-      </div>
-    </div>
+      </OverviewRailSection>
+      <OverviewRailSection title="Author">
+        <ProfileIdentityButton
+          align="center"
+          avatarSize="xs"
+          avatarUrl={authorProfile?.avatarUrl ?? null}
+          isAgent={authorProfile?.isAgent === true}
+          label={authorLabel}
+          pubkey={pullRequest.author}
+        />
+      </OverviewRailSection>
+      <OverviewRailSection title="Branches">
+        <div className="space-y-1.5 text-xs text-muted-foreground">
+          <p>Merges {pluralize(commitCount, "commit")}</p>
+          <p className="flex min-w-0 flex-wrap items-center gap-1.5">
+            <code className="rounded-sm bg-muted px-1.5 py-0.5 text-2xs text-foreground">
+              {sourceBranch}
+            </code>
+            <span aria-hidden>→</span>
+            <code className="rounded-sm bg-muted px-1.5 py-0.5 text-2xs text-foreground">
+              {targetBranch}
+            </code>
+          </p>
+        </div>
+      </OverviewRailSection>
+      <OverviewRailSection title="Activity">
+        <dl className="space-y-1.5 text-xs text-muted-foreground">
+          <div className="flex items-center justify-between gap-3">
+            <dt>Opened</dt>
+            <dd className="font-medium text-foreground">
+              {compactDate(pullRequest.createdAt)}
+            </dd>
+          </div>
+          <div className="flex items-center justify-between gap-3">
+            <dt>Updated</dt>
+            <dd className="font-medium text-foreground">
+              {compactDate(pullRequest.updatedAt)}
+            </dd>
+          </div>
+        </dl>
+      </OverviewRailSection>
+      <OverviewRailSection title="Review">
+        <PullRequestReviewCard
+          profiles={profiles}
+          project={project}
+          pullRequest={pullRequest}
+        />
+      </OverviewRailSection>
+    </aside>
   );
 }
 
@@ -629,7 +705,7 @@ function PullRequestDetail({
                 role={compactDate(pullRequest.createdAt)}
               />
               {pullRequest.commit ? (
-                <code className="shrink-0 rounded-none bg-background/55 px-2 py-1 text-xs text-muted-foreground">
+                <code className="shrink-0 rounded-md bg-background/55 px-2 py-1 text-xs text-muted-foreground">
                   {pullRequest.commit.slice(0, 7)}
                 </code>
               ) : null}
@@ -645,7 +721,7 @@ function PullRequestDetail({
                   role={compactDate(update.createdAt)}
                 />
                 {update.commit ? (
-                  <code className="shrink-0 rounded-none bg-background/55 px-2 py-1 text-xs text-muted-foreground">
+                  <code className="shrink-0 rounded-md bg-background/55 px-2 py-1 text-xs text-muted-foreground">
                     {update.commit.slice(0, 7)}
                   </code>
                 ) : null}
@@ -664,11 +740,9 @@ function PullRequestDetail({
 
   if (mode === "checks") {
     return (
-      <div className="p-4">
-        <div className="border border-border/60 bg-background/45 p-4 text-sm text-muted-foreground">
-          No checks have been reported for this pull request yet.
-        </div>
-      </div>
+      <p className="p-4 text-sm text-muted-foreground">
+        No checks have been reported for this pull request yet.
+      </p>
     );
   }
 
@@ -698,7 +772,7 @@ function PullRequestDetail({
                   role={compactDate(update.createdAt)}
                 />
                 {update.commit ? (
-                  <code className="shrink-0 rounded-none bg-background/55 px-2 py-1 text-xs text-muted-foreground">
+                  <code className="shrink-0 rounded-md bg-background/55 px-2 py-1 text-xs text-muted-foreground">
                     {update.commit.slice(0, 7)}
                   </code>
                 ) : null}
@@ -726,7 +800,7 @@ function PullRequestDetail({
               if (item.isApproval || item.isReviewRequest) {
                 return (
                   <div
-                    className="flex min-w-0 flex-wrap items-center gap-1.5 px-1 text-xs text-muted-foreground"
+                    className="flex min-w-0 flex-wrap items-center gap-1.5 text-xs text-muted-foreground"
                     key={item.id}
                   >
                     {item.isApproval ? (
@@ -747,10 +821,7 @@ function PullRequestDetail({
                 );
               }
               return (
-                <article
-                  className="border border-border/60 bg-background/45 p-3"
-                  key={item.id}
-                >
+                <article key={item.id}>
                   <div className="mb-2">
                     <AuthorIdentity
                       profiles={profiles}
@@ -770,11 +841,6 @@ function PullRequestDetail({
         ) : (
           <p className="text-sm text-muted-foreground">No comments yet.</p>
         )}
-        <PullRequestReviewCard
-          profiles={profiles}
-          project={project}
-          pullRequest={pullRequest}
-        />
         <ForumComposer
           className="border border-border/60 bg-background/45"
           disabled={commentMutation.isPending}

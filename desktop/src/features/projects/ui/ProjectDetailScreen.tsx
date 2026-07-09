@@ -649,11 +649,6 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
                         </Button>
                       ) : null}
                     </div>
-                    {project.description ? (
-                      <p className="max-w-2xl text-sm font-normal text-muted-foreground">
-                        {project.description}
-                      </p>
-                    ) : null}
                   </div>
                 </div>
               </section>

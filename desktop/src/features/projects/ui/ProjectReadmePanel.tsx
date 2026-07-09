@@ -116,7 +116,7 @@ export function ReadmePanel({
 
   if (!file?.previewContent) {
     return (
-      <section className="overflow-hidden border border-border/60 bg-card">
+      <section className="overflow-hidden">
         {sourceControls ? header : null}
         <div className="p-6 text-sm text-muted-foreground">
           Add a README to this repository to describe setup, usage, and project
@@ -133,7 +133,7 @@ export function ReadmePanel({
     : file.previewContent;
 
   return (
-    <section className="overflow-hidden border border-border/60 bg-card">
+    <section className="overflow-hidden">
       {header}
       <div className="p-4">
         {isMarkdown ? (

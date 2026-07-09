@@ -109,7 +109,7 @@ export function RepoSourceToggle({
       ) : null}
       <div className="flex shrink-0 items-center gap-0.5 border border-border/60 bg-muted/40 p-0.5">
         <Button
-          className="h-6 rounded-none px-2.5 text-xs"
+          className="h-6 px-2.5 text-xs"
           onClick={() => controls.onSourceChange("remote")}
           size="sm"
           variant={controls.source === "remote" ? "secondary" : "ghost"}
@@ -117,7 +117,7 @@ export function RepoSourceToggle({
           {controls.remoteLabel}
         </Button>
         <Button
-          className="h-6 rounded-none px-2.5 text-xs"
+          className="h-6 px-2.5 text-xs"
           disabled={controls.localDisabled}
           onClick={() => controls.onSourceChange("local")}
           size="sm"

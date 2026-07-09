@@ -504,6 +504,7 @@ export function ProjectPullRequestFilesChangedPanel({
   return (
     <ProjectDiffFilesPanel
       diff={pullRequest ? diff : null}
+      embedded
       error={error}
       headerLabel={
         pullRequest
@@ -520,15 +521,19 @@ export function ProjectDiffFilesPanel({
   error,
   diff,
   isLoading,
+  embedded = false,
   headerLabel,
   subjectLabel,
 }: {
   error: unknown;
   diff: ProjectRepoDiff | null | undefined;
   isLoading: boolean;
+  /** Render without an outer border, for nesting inside an existing card. */
+  embedded?: boolean;
   headerLabel: string;
   subjectLabel: string;
 }) {
+  const outerBorderClass = embedded ? "" : "border border-border/60 bg-card";
   const [query, setQuery] = React.useState("");
   const [selectedPath, setSelectedPath] = React.useState<string | null>(null);
   const files = diff?.files ?? [];
@@ -564,7 +569,9 @@ export function ProjectDiffFilesPanel({
 
   if (isLoading) {
     return (
-      <div className="border border-border/60 bg-card p-4 text-sm text-muted-foreground">
+      <div
+        className={cn("p-4 text-sm text-muted-foreground", outerBorderClass)}
+      >
         Loading changed files…
       </div>
     );
@@ -573,7 +580,12 @@ export function ProjectDiffFilesPanel({
   if (error) {
     const message = errorMessage(error);
     return (
-      <div className="space-y-1 border border-border/60 bg-card p-4 text-sm text-muted-foreground">
+      <div
+        className={cn(
+          "space-y-1 p-4 text-sm text-muted-foreground",
+          outerBorderClass,
+        )}
+      >
         <p>Could not load changed files for this {subjectLabel}.</p>
         {message ? (
           <p className="font-mono text-xs text-muted-foreground/80">
@@ -586,14 +598,24 @@ export function ProjectDiffFilesPanel({
 
   if (files.length === 0) {
     return (
-      <div className="border border-border/60 bg-card p-6 text-center text-sm text-muted-foreground">
+      <div
+        className={cn(
+          "p-6 text-center text-sm text-muted-foreground",
+          outerBorderClass,
+        )}
+      >
         No changed files are available for this {subjectLabel} yet.
       </div>
     );
   }
 
   return (
-    <div className="grid min-h-0 overflow-hidden border border-border/60 bg-card lg:grid-cols-[17rem_minmax(0,1fr)]">
+    <div
+      className={cn(
+        "grid min-h-0 overflow-hidden lg:grid-cols-[17rem_minmax(0,1fr)]",
+        outerBorderClass,
+      )}
+    >
       <aside className="border-border/50 border-b bg-background/30 lg:border-r lg:border-b-0">
         <div className="space-y-3 p-3">
           <div className="flex items-center gap-2 text-xs text-muted-foreground">

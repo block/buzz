@@ -25,6 +25,7 @@ import { ProjectIssuesPanel } from "./ProjectIssuesPanel";
 import { ProjectOverviewPanel } from "./ProjectOverviewPanel";
 import {
   PullRequestDetailHeader,
+  PullRequestMetaRail,
   PullRequestsPanel,
 } from "./ProjectPullRequestsPanel";
 import {
@@ -184,7 +185,7 @@ export function WorkspaceTabs({
         {onOpenTerminal ? (
           <Button
             aria-label="Open terminal"
-            className="h-8 w-8 shrink-0 rounded-none text-muted-foreground hover:text-foreground"
+            className="h-8 w-8 shrink-0 text-muted-foreground hover:text-foreground"
             onClick={onOpenTerminal}
             size="icon"
             title={terminalTitle ?? "Open terminal"}
@@ -196,16 +197,50 @@ export function WorkspaceTabs({
       </div>
 
       {selectedPullRequest ? (
-        <div className="space-y-4">
+        <div className="overflow-hidden rounded-xl border border-border/60 bg-card">
           <PullRequestDetailHeader
             profiles={profiles}
-            project={project}
             pullRequest={selectedPullRequest}
           />
-          <PullRequestTabsList
-            filesCount={repoDiff?.files.length ?? files.length}
-            pullRequest={selectedPullRequest}
-          />
+          <div className="border-b border-border/60 px-4">
+            <PullRequestTabsList
+              filesCount={repoDiff?.files.length ?? files.length}
+              pullRequest={selectedPullRequest}
+            />
+          </div>
+          {(["conversation", "commits", "checks"] as const).map((mode) => (
+            <TabsContent className="m-0" key={mode} value={`pr-${mode}`}>
+              <div className="grid xl:grid-cols-[minmax(0,1fr)_18rem]">
+                <div className="min-w-0">
+                  <PullRequestsPanel
+                    error={pullRequestsError}
+                    isLoading={pullRequestsLoading}
+                    mode={mode}
+                    onSelectedPullRequestIdChange={
+                      onSelectedPullRequestIdChange
+                    }
+                    profiles={profiles}
+                    project={project}
+                    pullRequests={pullRequests}
+                    selectedPullRequestId={selectedPullRequestId}
+                  />
+                </div>
+                <PullRequestMetaRail
+                  profiles={profiles}
+                  project={project}
+                  pullRequest={selectedPullRequest}
+                />
+              </div>
+            </TabsContent>
+          ))}
+          <TabsContent className="m-0" value="pr-files">
+            <ProjectPullRequestFilesChangedPanel
+              diff={repoDiff}
+              error={repoDiffError}
+              isLoading={repoDiffLoading}
+              pullRequest={selectedPullRequest}
+            />
+          </TabsContent>
         </div>
       ) : null}
 
@@ -254,7 +289,7 @@ export function WorkspaceTabs({
       </TabsContent>
 
       <TabsContent
-        className="m-0 overflow-hidden border border-border/60 bg-card"
+        className="m-0 overflow-hidden rounded-xl border border-border/60 bg-card"
         value="prs"
       >
         <PullRequestsPanel
@@ -269,7 +304,7 @@ export function WorkspaceTabs({
       </TabsContent>
 
       <TabsContent
-        className="m-0 overflow-hidden border border-border/60 bg-card"
+        className="m-0 overflow-hidden rounded-xl border border-border/60 bg-card"
         value="issues"
       >
         <ProjectIssuesPanel
@@ -279,25 +314,6 @@ export function WorkspaceTabs({
           selectedIssueId={selectedIssueId}
         />
       </TabsContent>
-
-      {(["conversation", "commits", "checks"] as const).map((mode) => (
-        <TabsContent
-          className="m-0 overflow-hidden border border-border/60 bg-card"
-          key={mode}
-          value={`pr-${mode}`}
-        >
-          <PullRequestsPanel
-            error={pullRequestsError}
-            isLoading={pullRequestsLoading}
-            mode={mode}
-            onSelectedPullRequestIdChange={onSelectedPullRequestIdChange}
-            profiles={profiles}
-            project={project}
-            pullRequests={pullRequests}
-            selectedPullRequestId={selectedPullRequestId}
-          />
-        </TabsContent>
-      ))}
 
       <TabsContent className="m-0" value="files">
         {repoSource === "local" && !localSnapshot && !localSnapshotLoading ? (
@@ -315,15 +331,6 @@ export function WorkspaceTabs({
           profiles={profiles}
           snapshot={displayedSnapshot}
           sourceControls={sourceControls}
-        />
-      </TabsContent>
-
-      <TabsContent className="m-0" value="pr-files">
-        <ProjectPullRequestFilesChangedPanel
-          diff={repoDiff}
-          error={repoDiffError}
-          isLoading={repoDiffLoading}
-          pullRequest={selectedPullRequest}
         />
       </TabsContent>
 

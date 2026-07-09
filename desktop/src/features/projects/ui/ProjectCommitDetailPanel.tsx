@@ -78,7 +78,7 @@ export function ProjectCommitDetailPanel({
               <span className="flex items-center gap-0.5 font-mono">
                 {shortHash}
                 <CopyCommitHashButton
-                  className="h-6 w-6 rounded-none"
+                  className="h-6 w-6"
                   hash={commit?.hash ?? commitHash}
                 />
               </span>

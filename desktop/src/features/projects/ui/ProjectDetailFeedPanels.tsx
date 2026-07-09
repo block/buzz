@@ -122,7 +122,7 @@ export function ContributorsPanel({
             </p>
             <div className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5 text-xs leading-4 text-muted-foreground">
               <span className="truncate">{row.role}</span>
-              <span className="border border-border/60 px-1.5 py-0.5 text-2xs">
+              <span className="rounded-full border border-border/60 px-1.5 py-0.5 text-2xs">
                 {row.commitCount === null
                   ? "No git commits"
                   : `${row.commitCount} commit${row.commitCount === 1 ? "" : "s"}`}
@@ -262,7 +262,7 @@ export function ActivityPanel({
                         authored {relativeCommitTime(commit.timestamp)}
                       </span>
                       {matchingContributor?.commitCount ? (
-                        <span className="border border-border/60 px-1.5 py-0.5 text-2xs">
+                        <span className="rounded-full border border-border/60 px-1.5 py-0.5 text-2xs">
                           {pluralize(matchingContributor.commitCount, "commit")}
                         </span>
                       ) : null}

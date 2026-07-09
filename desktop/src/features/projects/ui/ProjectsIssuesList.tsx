@@ -114,7 +114,7 @@ function IssueGridCard({
   const authorLabel = resolveUserLabel({ profiles, pubkey: issue.author });
 
   return (
-    <Card className="group relative flex min-h-40 flex-col overflow-hidden rounded-none border-border/60 bg-card p-4 shadow-none transition-colors duration-150 hover:bg-muted/20">
+    <Card className="group relative flex min-h-40 flex-col overflow-hidden border-border/60 bg-card p-4 shadow-none transition-colors duration-150 hover:bg-muted/20">
       <button
         className="absolute inset-0"
         onClick={() => onOpen(project, issue)}
@@ -126,7 +126,7 @@ function IssueGridCard({
         <div className="flex min-w-0 items-start gap-3">
           <IssueHeader issue={issue} profiles={profiles} project={project} />
           <Button
-            className="relative z-10 h-7 shrink-0 rounded-none px-2.5"
+            className="relative z-10 h-7 shrink-0 px-2.5"
             onClick={(event) => {
               event.stopPropagation();
               onOpen(project, issue);
@@ -196,7 +196,7 @@ function IssueListRow({
             {authorLabel}
           </span>
           <Button
-            className="h-7 rounded-none px-2.5"
+            className="h-7 px-2.5"
             onClick={(event) => {
               event.stopPropagation();
               onOpen(project, issue);

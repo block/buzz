@@ -187,7 +187,7 @@ function StatPill({
 }) {
   return (
     <button
-      className="flex flex-col bg-card px-3.5 py-3 text-left transition-colors hover:bg-muted/30"
+      className="flex flex-col rounded-lg border border-border/60 bg-card px-3.5 py-3 text-left transition-colors hover:bg-muted/30"
       onClick={onClick}
       type="button"
     >
@@ -222,22 +222,22 @@ export function ProjectsOverviewPanel({
   const scanning = Boolean(snapshotsLoading);
 
   return (
-    <section className="-mx-4 mb-4 grid border-y border-border/60 bg-card xl:grid-cols-[minmax(0,1fr)_18rem]">
-      <div className="min-w-0">
-        <div className="overflow-hidden border-b border-border/60">
-          <div className="flex min-w-0 items-start gap-3 border-b border-border/60 p-4">
-            <WorkspaceEmojiIcon className="flex h-10 w-10 shrink-0 items-center justify-center border border-border/60 bg-muted/40 text-2xl" />
-            <div className="-mt-1 min-w-0 flex-1 space-y-0.5">
-              <h2 className="text-xl font-semibold leading-7 tracking-tight text-foreground">
-                {relayName} Projects
-              </h2>
-              <p className="max-w-2xl text-sm font-normal text-muted-foreground">
-                Browse shared repositories, pull requests, and local project
-                checkouts in this workspace.
-              </p>
-            </div>
-          </div>
-          <div className="grid gap-px bg-border/60 sm:grid-cols-2 xl:grid-cols-4">
+    <section className="-mx-4 mb-4 bg-card">
+      <div className="flex min-w-0 items-start gap-3 p-4">
+        <WorkspaceEmojiIcon className="flex h-10 w-10 shrink-0 items-center justify-center border border-border/60 bg-muted/40 text-2xl" />
+        <div className="-mt-1 min-w-0 flex-1">
+          <h2 className="text-xl font-semibold leading-6 tracking-tight text-foreground">
+            {relayName} Projects
+          </h2>
+          <p className="max-w-2xl text-sm font-normal text-muted-foreground">
+            Browse shared repositories, pull requests, and local project
+            checkouts in this workspace.
+          </p>
+        </div>
+      </div>
+      <div className="grid xl:grid-cols-[minmax(0,1fr)_18rem]">
+        <div className="min-w-0">
+          <div className="grid gap-3 p-4 sm:grid-cols-2 xl:grid-cols-4">
             <StatPill
               count={projects.length}
               icon={FolderGit2}
@@ -263,91 +263,95 @@ export function ProjectsOverviewPanel({
               onClick={() => onSelectSection("issues")}
             />
           </div>
-        </div>
-        <div className="overflow-hidden">
-          <h3 className="border-b border-border/60 px-4 py-3 text-sm font-semibold text-foreground">
-            Contribution Activity
-          </h3>
-          <ProjectsContributionGraph
-            activityByDay={activityByDay}
-            className="p-4"
-          />
-        </div>
-      </div>
-      <aside className="border-t border-border/60 xl:border-l xl:border-t-0 [&>section]:border-b [&>section]:border-border/60 [&>section]:p-4 [&>section:last-child]:border-b-0">
-        <OverviewRailSection title="People">
-          <div className="flex flex-wrap gap-1.5">
-            {people.slice(0, 18).map((pubkey) => {
-              const profile = profiles?.[normalizePubkey(pubkey)];
-              const label = resolveUserLabel({ pubkey, profiles });
-              return (
-                <Tooltip key={pubkey}>
-                  <TooltipTrigger asChild>
-                    <span className="inline-flex">
-                      <UserAvatar
-                        accent={profile?.isAgent === true}
-                        avatarUrl={profile?.avatarUrl ?? null}
-                        displayName={label}
-                        size="sm"
-                      />
-                    </span>
-                  </TooltipTrigger>
-                  <TooltipContent>{label}</TooltipContent>
-                </Tooltip>
-              );
-            })}
+          <div className="overflow-hidden">
+            <h3 className="px-4 pt-3 text-sm font-semibold text-foreground">
+              Contribution Activity
+            </h3>
+            <ProjectsContributionGraph
+              activityByDay={activityByDay}
+              className="p-4"
+            />
           </div>
-        </OverviewRailSection>
-        <OverviewRailSection title="Top Languages">
-          {languages.length > 0 ? (
-            <LanguageChips languages={languages} />
-          ) : (
-            <p className="text-sm text-muted-foreground">
-              {scanning
-                ? "Scanning repositories..."
-                : "No language data is available yet."}
-            </p>
-          )}
-        </OverviewRailSection>
-        <OverviewRailSection title="Repositories">
-          <dl className="space-y-2 text-sm">
-            <RepoTotalRow
-              icon={FolderGit2}
-              label="Repositories"
-              value={projects.length}
-            />
-            <RepoTotalRow
-              icon={GitCommitHorizontal}
-              label="Latest"
-              mono
-              value={
-                repoTotals.latestCommit
-                  ? repoTotals.latestCommit.shortHash
-                  : scanning
+        </div>
+        <aside className="[&>section]:p-4">
+          <OverviewRailSection title="People">
+            <div className="flex flex-wrap gap-1.5">
+              {people.slice(0, 18).map((pubkey) => {
+                const profile = profiles?.[normalizePubkey(pubkey)];
+                const label = resolveUserLabel({ pubkey, profiles });
+                return (
+                  <Tooltip key={pubkey}>
+                    <TooltipTrigger asChild>
+                      <span className="inline-flex">
+                        <UserAvatar
+                          accent={profile?.isAgent === true}
+                          avatarUrl={profile?.avatarUrl ?? null}
+                          displayName={label}
+                          size="sm"
+                        />
+                      </span>
+                    </TooltipTrigger>
+                    <TooltipContent>{label}</TooltipContent>
+                  </Tooltip>
+                );
+              })}
+            </div>
+          </OverviewRailSection>
+          <OverviewRailSection title="Top Languages">
+            {languages.length > 0 ? (
+              <LanguageChips languages={languages} />
+            ) : (
+              <p className="text-sm text-muted-foreground">
+                {scanning
+                  ? "Scanning repositories..."
+                  : "No language data is available yet."}
+              </p>
+            )}
+          </OverviewRailSection>
+          <OverviewRailSection title="Repositories">
+            <dl className="space-y-2 text-sm">
+              <RepoTotalRow
+                icon={FolderGit2}
+                label="Repositories"
+                value={projects.length}
+              />
+              <RepoTotalRow
+                icon={GitCommitHorizontal}
+                label="Latest"
+                mono
+                value={
+                  repoTotals.latestCommit
+                    ? repoTotals.latestCommit.shortHash
+                    : scanning
+                      ? "..."
+                      : "None"
+                }
+              />
+              <RepoTotalRow
+                icon={FileCode2}
+                label="Files"
+                value={
+                  scanning && repoTotals.files === 0 ? "..." : repoTotals.files
+                }
+              />
+              <RepoTotalRow
+                icon={Users}
+                label="Contributors"
+                value={
+                  scanning && repoTotals.contributors === 0
                     ? "..."
-                    : "None"
-              }
-            />
-            <RepoTotalRow
-              icon={FileCode2}
-              label="Files"
-              value={
-                scanning && repoTotals.files === 0 ? "..." : repoTotals.files
-              }
-            />
-            <RepoTotalRow
-              icon={Users}
-              label="Contributors"
-              value={
-                scanning && repoTotals.contributors === 0
-                  ? "..."
-                  : repoTotals.contributors
-              }
-            />
-            <RepoTotalRow label="PRs" value={stats.prs} />
-          </dl>
-        </OverviewRailSection>
-      </aside>
+                    : repoTotals.contributors
+                }
+              />
+              <RepoTotalRow
+                icon={GitPullRequest}
+                label="Pull Requests"
+                value={stats.prs}
+              />
+            </dl>
+          </OverviewRailSection>
+        </aside>
+      </div>
     </section>
   );
 }
