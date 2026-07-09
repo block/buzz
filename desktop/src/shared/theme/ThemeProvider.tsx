@@ -275,6 +275,18 @@ function setBuzzTranslucent(enabled: boolean) {
 }
 
 /**
+ * Monotonic token identifying the most recent vibrancy request. Because
+ * {@link applyBuzzVibrancy} awaits the native `set_window_vibrancy` IPC, a rapid
+ * Buzz → non-Buzz toggle can fire two overlapping calls whose awaits resolve out
+ * of order. Each call captures the token before awaiting and re-checks it after;
+ * a stale continuation (superseded by a newer request) bails without touching
+ * translucency — otherwise the earlier Buzz call could re-add
+ * `data-buzz-translucent` after the later non-Buzz call already cleared it,
+ * leaving the window transparent under a non-Buzz theme.
+ */
+let buzzVibrancyRequest = 0;
+
+/**
  * Sequence the native vibrancy layer and the CSS translucency so they land in
  * the right order and never leave a transparent webview with nothing painted
  * behind it:
@@ -288,9 +300,13 @@ function setBuzzTranslucent(enabled: boolean) {
  *
  * On non-macOS `set_window_vibrancy` is a no-op and translucency stays off, so
  * these platforms fall back to the opaque Buzz gradient.
+ *
+ * Overlapping calls are guarded by {@link buzzVibrancyRequest} so a stale async
+ * continuation can't re-enable translucency after a newer theme superseded it.
  */
 async function applyBuzzVibrancy(themeName: string) {
   const buzz = isBuzzTheme(themeName);
+  const requestToken = ++buzzVibrancyRequest;
 
   if (!isTauri()) {
     // Web/dev preview: no native vibrancy layer exists, so translucency would
@@ -304,12 +320,16 @@ async function applyBuzzVibrancy(themeName: string) {
       enabled: buzz,
       material: BUZZ_VIBRANCY_MATERIAL,
     });
+    // A newer theme change superseded this request while the IPC was in flight;
+    // that later call owns the current translucency state, so don't clobber it.
+    if (requestToken !== buzzVibrancyRequest) return;
     // Only now that the native layer is installed is it safe to go transparent.
     if (buzz && isMacPlatform()) {
       setBuzzTranslucent(true);
     }
   } catch (error) {
     console.warn("set_window_vibrancy failed", error);
+    if (requestToken !== buzzVibrancyRequest) return;
     // Vibrancy failed — don't go transparent or we'd show through to nothing.
     setBuzzTranslucent(false);
   }
