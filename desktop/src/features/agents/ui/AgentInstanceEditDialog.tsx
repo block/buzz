@@ -718,9 +718,9 @@ export function AgentInstanceEditDialog({
         }
       >
         <div className="grid gap-5 lg:grid-cols-[220px_minmax(0,1fr)]">
-          {/* Avatar is display-only — UpdateManagedAgentInput has no
-              avatarUrl field, so edits can't be persisted yet. Keep the
-              preview disabled until the backend supports avatar updates. */}
+          {/* Avatar is definition-level identity (Wes decision 2026-07-09,
+              "2a"): edit it on the agent profile; instances inherit and
+              re-sync on restart. Read-only here by design. */}
           <AgentCreationPreview
             avatarUrl={previewAvatarUrl}
             disabled
