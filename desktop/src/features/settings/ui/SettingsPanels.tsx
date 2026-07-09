@@ -380,11 +380,14 @@ function SingleThemeTile({
 
 type AppearanceMode = "system" | "light" | "dark";
 
-// Reveal/hide motion for the accent picker — mirrors the app's modal motion
-// (fade + zoom-95) and the ProfileSettingsCard reveal easing so it reads as one
-// consistent motion vocabulary.
+// Reveal/hide motion for the accent picker: a small translate-up + opacity
+// fade (rises into place from below on reveal, continues upward and fades on
+// hide). No height/scale — height collapse clipped the swatches behind the
+// grid's bottom fade (the "white bar"). Slightly snappier than the modal 0.2s
+// since this is a small settings control, sharing the modal/ProfileSettingsCard
+// easing curve.
 const ACCENT_PICKER_TRANSITION = {
-  duration: 0.2,
+  duration: 0.16,
   ease: [0.23, 1, 0.32, 1] as const,
 };
 
@@ -539,15 +542,19 @@ function ThemeSettingsCard() {
               "linear-gradient(to bottom, hsl(var(--background)), hsl(var(--background) / 0))",
           }}
         />
-        {/* Bottom fade */}
-        <div
-          aria-hidden="true"
-          className="pointer-events-none absolute inset-x-0 bottom-0 z-10 h-3"
-          style={{
-            background:
-              "linear-gradient(to top, hsl(var(--background)), hsl(var(--background) / 0))",
-          }}
-        />
+        {/* Bottom fade — hidden while the accent picker is visible so its
+            near-white gradient (Buzz light) can't mask the swatches below it
+            (the "white bar"). Kept only when the picker is hidden. */}
+        {accentPickerHidden ? (
+          <div
+            aria-hidden="true"
+            className="pointer-events-none absolute inset-x-0 bottom-0 z-10 h-3"
+            style={{
+              background:
+                "linear-gradient(to top, hsl(var(--background)), hsl(var(--background) / 0))",
+            }}
+          />
+        ) : null}
         <div className="max-h-[430px] overflow-y-auto rounded-lg pt-2">
           <div className="flex flex-wrap gap-4 p-1">
             {selectedMode === "system" &&
@@ -602,14 +609,15 @@ function ThemeSettingsCard() {
           />
         )
       ) : (
-        <AnimatePresence initial={false}>
+        <AnimatePresence initial={false} mode="popLayout">
           {accentPickerHidden ? null : (
             <motion.div
-              animate={{ opacity: 1, scale: 1, height: "auto" }}
-              className="origin-top overflow-hidden will-change-[opacity,transform]"
-              exit={{ opacity: 0, scale: 0.98, height: 0 }}
-              initial={{ opacity: 0, scale: 0.98, height: 0 }}
+              animate={{ opacity: 1, y: 0 }}
+              className="will-change-[opacity,transform]"
+              exit={{ opacity: 0, y: -10 }}
+              initial={{ opacity: 0, y: 10 }}
               key="accent-picker"
+              layout
               transition={ACCENT_PICKER_TRANSITION}
             >
               <AccentPickerContent
