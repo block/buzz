@@ -196,8 +196,10 @@ test.describe("agent readiness gate screenshots", () => {
     await openCreateDialog(page);
     await selectProvider(page, "Anthropic");
     await setCustomModel(page, "claude-opus-4-5");
+    // Fill the required ANTHROPIC_API_KEY amber row in the EnvVarsEditor.
+    // Advanced auto-expands when required keys are missing.
     await page
-      .getByTestId("persona-provider-api-key")
+      .getByLabel("Value for ANTHROPIC_API_KEY")
       .fill("sk-test-api-key-for-e2e");
 
     // All required fields satisfied → submit enabled.
