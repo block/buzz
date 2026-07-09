@@ -380,12 +380,13 @@ function SingleThemeTile({
 
 type AppearanceMode = "system" | "light" | "dark";
 
-// Reveal/hide motion for the accent picker: a small translate-up + opacity
-// fade (rises into place from below on reveal, continues upward and fades on
-// hide). No height/scale — height collapse clipped the swatches behind the
-// grid's bottom fade (the "white bar"). Slightly snappier than the modal 0.2s
-// since this is a small settings control, sharing the modal/ProfileSettingsCard
-// easing curve.
+// Reveal/hide motion for the accent picker: a small translate + opacity fade.
+// The picker sits below the theme grid and reads as tucking up behind it, so
+// it enters from above (slides *down* into place when a non-Buzz theme reveals
+// it) and exits upward (slides up behind the grid when Buzz hides it). No
+// height/scale — height collapse clipped the swatches behind the grid's bottom
+// fade (the "white bar"). Snappier than the modal 0.2s since this is a small
+// settings control, sharing the modal/ProfileSettingsCard easing curve.
 const ACCENT_PICKER_TRANSITION = {
   duration: 0.16,
   ease: [0.23, 1, 0.32, 1] as const,
@@ -609,15 +610,14 @@ function ThemeSettingsCard() {
           />
         )
       ) : (
-        <AnimatePresence initial={false} mode="popLayout">
+        <AnimatePresence initial={false}>
           {accentPickerHidden ? null : (
             <motion.div
               animate={{ opacity: 1, y: 0 }}
               className="will-change-[opacity,transform]"
               exit={{ opacity: 0, y: -10 }}
-              initial={{ opacity: 0, y: 10 }}
+              initial={{ opacity: 0, y: -10 }}
               key="accent-picker"
-              layout
               transition={ACCENT_PICKER_TRANSITION}
             >
               <AccentPickerContent
