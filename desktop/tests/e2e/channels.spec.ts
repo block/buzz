@@ -1906,6 +1906,44 @@ test("new DM picker pages people search beyond the first 50 results", async ({
   );
 });
 
+test("member people search starts at two characters", async ({ page }) => {
+  const jmPubkey =
+    "abababababababababababababababababababababababababababababababab";
+  await installMockBridge(page, {
+    searchProfiles: [{ pubkey: jmPubkey, displayName: "jm" }],
+  });
+
+  await page.goto("/");
+  await openMembersSidebar(page, "general");
+  await page.getByTestId("channel-management-search-users").fill("j");
+  await expect(
+    page.getByTestId(`channel-user-search-result-${jmPubkey}`),
+  ).toHaveCount(0);
+  expect(
+    (await readCommandPayloadLog(page)).filter(
+      (entry) =>
+        entry.command === "search_users" &&
+        (entry.payload as { query?: string }).query === "j",
+    ),
+  ).toHaveLength(0);
+
+  await page.getByTestId("channel-management-search-users").fill("jm");
+  await expect(
+    page.getByTestId(`channel-user-search-result-${jmPubkey}`),
+  ).toContainText("jm");
+
+  const searchCalls = (await readCommandPayloadLog(page)).filter(
+    (entry) => entry.command === "search_users",
+  );
+  expect(searchCalls).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        payload: expect.objectContaining({ query: "jm" }),
+      }),
+    ]),
+  );
+});
+
 test("members modal does not show direct pubkey entry", async ({ page }) => {
   await page.goto("/");
   await openMembersSidebar(page, "general");

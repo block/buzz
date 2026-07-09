@@ -54,6 +54,7 @@ import { EditRespondToDialog } from "./EditRespondToDialog";
 import { useMembersSidebarActions } from "./useMembersSidebarActions";
 import { useMembersSidebarModeration } from "./useMembersSidebarModeration";
 const MEMBER_ADD_RESULT_LIMIT = 50;
+const MEMBER_SEARCH_MIN_QUERY_LENGTH = 2;
 const MEMBER_ROW_INSET_DIVIDER_CLASS =
   "after:pointer-events-none after:absolute after:bottom-0 after:left-[3.75rem] after:right-0 after:h-px after:bg-border/60 after:content-[''] last:after:hidden";
 
@@ -235,7 +236,10 @@ export function MembersSidebar({
     channel?.channelType !== "dm";
   const userSearchQuery = useInfiniteUserSearchQuery(deferredSearchQuery, {
     allowEmpty: false,
-    enabled: open && canAddMembers && deferredSearchQuery.length > 0,
+    enabled:
+      open &&
+      canAddMembers &&
+      deferredSearchQuery.length >= MEMBER_SEARCH_MIN_QUERY_LENGTH,
     limit: MEMBER_ADD_RESULT_LIMIT,
   });
   const userSearchResults = useFlattenedUserSearchResults(userSearchQuery.data);
