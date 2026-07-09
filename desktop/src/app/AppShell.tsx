@@ -75,7 +75,6 @@ import { useFeatureEnabled } from "@/shared/features";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import { useRelayAutoHeal } from "@/shared/api/useRelayAutoHeal";
 import { useDeferredStartup } from "@/shared/hooks/useDeferredStartup";
-import { useWebviewScrollBoundaryLock } from "@/shared/hooks/useWebviewScrollBoundaryLock";
 import { joinChannel } from "@/shared/api/tauri";
 import type { SearchHit } from "@/shared/api/types";
 import { ChannelNavigationProvider } from "@/shared/context/ChannelNavigationContext";
@@ -96,8 +95,6 @@ const LazySettingsScreen = React.lazy(async () => {
 export function AppShell() {
   useWebviewZoomShortcuts();
   useTauriWindowDrag();
-  const virtuaTimelineEnabled = useFeatureEnabled("virtuaTimeline");
-  useWebviewScrollBoundaryLock(!virtuaTimelineEnabled);
 
   const workspacesHook = useWorkspaces();
   const workspaceRailEnabled = useFeatureEnabled("workspaceRail");

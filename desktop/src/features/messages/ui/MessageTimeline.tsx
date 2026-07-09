@@ -13,7 +13,6 @@ import type { MainTimelineEntry } from "@/features/messages/lib/threadPanel";
 import type { ChannelWindowThreadSummary } from "@/features/messages/lib/channelWindowStore";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type { ChannelType } from "@/shared/api/types";
-import { useFeatureEnabled } from "@/shared/features";
 import { cn } from "@/shared/lib/cn";
 import { channelChrome } from "@/shared/layout/chromeLayout";
 import { Spinner } from "@/shared/ui/spinner";
@@ -199,7 +198,7 @@ const MessageTimelineBase = React.forwardRef<
     React.useReducer((version: number) => version + 1, 0);
   const [timelineVirtualizerApi, setTimelineVirtualizerApi] =
     React.useState<TimelineVirtualizerApi | null>(null);
-  const useTimelineVirtualizer = useFeatureEnabled("virtuaTimeline");
+  const useTimelineVirtualizer = true;
   const activeScrollContainerRef = React.useMemo(
     () => ({
       get current() {
@@ -247,7 +246,6 @@ const MessageTimelineBase = React.forwardRef<
   // painted at a stale offset until the user's next scroll event forces layout.
   const scrollContainerDomKey = channelId ?? "none";
 
-  // biome-ignore lint/correctness/useExhaustiveDependencies: this effect is scoped to scroll DOM swaps; when the Experiments flag hydrates, the virtualizer child registers its own scroller/API via callbacks, and re-running this reset on the flag transition can briefly clear that API during navigation tests.
   React.useLayoutEffect(() => {
     // Re-read after `scrollContainerDomKey` swaps the keyed scroll DOM node.
     void scrollContainerDomKey;
@@ -298,16 +296,10 @@ const MessageTimelineBase = React.forwardRef<
   const showDirectMessageIntro =
     timelineIntroSurface === "direct-message-intro";
   const showChannelIntro = timelineIntroSurface === "channel-intro";
-  const activeDirectMessageIntro =
-    showDirectMessageIntro &&
-    (!useTimelineVirtualizer || timelineBodySurface !== "list")
-      ? directMessageIntro
-      : null;
-  const activeChannelIntro =
-    showChannelIntro &&
-    (!useTimelineVirtualizer || timelineBodySurface !== "list")
-      ? channelIntro
-      : null;
+  const activeDirectMessageIntro = showDirectMessageIntro
+    ? directMessageIntro
+    : null;
+  const activeChannelIntro = showChannelIntro ? channelIntro : null;
   const showIntro =
     activeDirectMessageIntro !== null || activeChannelIntro !== null;
   const showGenericEmpty = timelineBodySurface === "empty" && !showIntro;
@@ -448,6 +440,96 @@ const MessageTimelineBase = React.forwardRef<
     messages: showTimelineSkeleton ? EMPTY_MESSAGES : deferredMessages,
   });
 
+  const virtualizedLeadingContent = React.useMemo(
+    () =>
+      activeChannelIntro ? (
+        <div
+          className="flex w-full max-w-2xl flex-col items-start px-3 pb-4 pt-2 text-left"
+          data-testid="message-channel-intro"
+        >
+          <div className="flex h-[60px] w-[60px] items-center justify-center rounded-2xl border border-border/70 bg-muted/40 text-muted-foreground">
+            {activeChannelIntro.icon ?? (
+              <Hash aria-hidden className="h-7 w-7" />
+            )}
+          </div>
+          <p className="mt-4 max-w-full truncate text-xl font-semibold leading-7 tracking-tight text-foreground">
+            #{activeChannelIntro.channelName}
+          </p>
+          <p className="mt-1 max-w-full text-sm leading-5 text-muted-foreground">
+            This is the beginning of the{" "}
+            <span className="font-medium text-foreground">
+              {activeChannelIntro.channelKindLabel}
+            </span>
+            .
+          </p>
+          {activeChannelIntro.description ? (
+            <p className="mt-2 max-w-xl text-sm leading-5 text-muted-foreground">
+              {activeChannelIntro.description}
+            </p>
+          ) : null}
+          {activeChannelIntro.actions?.length ? (
+            <div className="mt-4 flex max-w-full flex-nowrap gap-3 overflow-x-auto pb-1">
+              {activeChannelIntro.actions.map((action) => (
+                <button
+                  className={cn(
+                    "flex shrink-0 border border-border/70 bg-background/70 text-left transition-colors hover:bg-muted/60 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring",
+                    action.description
+                      ? "h-56 w-[13.75rem] flex-col rounded-2xl p-4"
+                      : "h-28 w-64 flex-col rounded-2xl p-4",
+                  )}
+                  data-testid={action.testId}
+                  key={action.label}
+                  onClick={action.onClick}
+                  type="button"
+                >
+                  <span
+                    className={cn(
+                      "flex shrink-0 items-center justify-center rounded-full bg-muted/70 text-muted-foreground",
+                      action.description
+                        ? "h-12 w-12 [&_svg]:h-6 [&_svg]:w-6"
+                        : "h-10 w-10 [&_svg]:h-4 [&_svg]:w-4",
+                    )}
+                  >
+                    {action.icon}
+                  </span>
+                  <span className="mt-auto min-w-0">
+                    <span className="block whitespace-normal break-words text-base font-medium leading-6 text-foreground">
+                      {action.label}
+                    </span>
+                    {action.description ? (
+                      <span className="mt-1 block whitespace-normal break-words text-sm leading-5 text-muted-foreground">
+                        {action.description}
+                      </span>
+                    ) : null}
+                  </span>
+                </button>
+              ))}
+            </div>
+          ) : null}
+        </div>
+      ) : activeDirectMessageIntro ? (
+        <div
+          className="flex w-full flex-col items-start px-3 pb-4 pt-2 text-left"
+          data-testid="message-dm-intro"
+        >
+          <DirectMessageIntroAvatarStack
+            participants={activeDirectMessageIntro.participants}
+          />
+          <p className="mt-4 max-w-full truncate text-xl font-semibold leading-7 tracking-tight text-foreground">
+            {activeDirectMessageIntro.displayName}
+          </p>
+          <p className="mt-1 max-w-full truncate whitespace-nowrap text-sm leading-5 text-muted-foreground">
+            This is the beginning of your direct message with{" "}
+            <span className="font-medium text-foreground">
+              {activeDirectMessageIntro.displayName}
+            </span>
+            .
+          </p>
+        </div>
+      ) : null,
+    [activeChannelIntro, activeDirectMessageIntro],
+  );
+
   const handleVirtualizerRangeChanged = React.useCallback(() => {
     bumpVirtualizerRenderVersion();
   }, []);
@@ -469,6 +551,7 @@ const MessageTimelineBase = React.forwardRef<
       isMessageUnreadById={isMessageUnreadById}
       messageFooters={messageFooters}
       mainEntries={deferredMessages === messages ? mainEntries : undefined}
+      leadingContent={virtualizedLeadingContent}
       threadSummaries={threadSummaries}
       messages={deferredMessages}
       onDelete={onDelete}

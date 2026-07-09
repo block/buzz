@@ -92,6 +92,8 @@ type TimelineMessageListProps = {
   searchQuery?: string;
   /** Per-thread unread counts keyed by thread root id. */
   threadUnreadCounts?: ReadonlyMap<string, number>;
+  /** Content rendered as the first virtual row before channel history. */
+  leadingContent?: React.ReactNode;
   /** The virtualized timeline owns its scroll node when enabled. */
   useVirtualizer?: boolean;
   onStartReached?: () => void;
@@ -132,6 +134,7 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
   searchQuery,
   threadUnreadCounts,
   unfollowThreadById,
+  leadingContent,
   useVirtualizer = false,
   onStartReached,
   onAtBottomStateChange,
@@ -283,6 +286,7 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
     return (
       <VirtualizedTimelineRows
         dayGroups={dayGroups}
+        leadingContent={leadingContent}
         onAtBottomStateChange={onAtBottomStateChange}
         onStartReached={onStartReached}
         onVirtualizerApiChange={onVirtualizerApiChange}
@@ -325,6 +329,7 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
 });
 
 type VirtualizedTimelineItem =
+  | { kind: "leading-content"; content: React.ReactNode }
   | { kind: "day-heading"; group: TimelineDayGroup }
   | { kind: "timeline-item"; item: TimelineNonDayItem };
 
@@ -335,6 +340,7 @@ function timelineItemMessageId(item: TimelineNonDayItem): string | null {
 }
 
 function virtualizedItemKey(item: VirtualizedTimelineItem): string {
+  if (item.kind === "leading-content") return "leading-content";
   return item.kind === "day-heading"
     ? `day-${item.group.key}`
     : getTimelineItemKey(item.item);
@@ -342,15 +348,22 @@ function virtualizedItemKey(item: VirtualizedTimelineItem): string {
 
 function buildVirtualizedItems(
   dayGroups: readonly TimelineDayGroup[],
+  leadingContent?: React.ReactNode,
 ): VirtualizedTimelineItem[] {
-  return dayGroups.flatMap((group) => [
-    { kind: "day-heading" as const, group },
-    ...group.items.map((item) => ({ kind: "timeline-item" as const, item })),
-  ]);
+  return [
+    ...(leadingContent
+      ? [{ kind: "leading-content" as const, content: leadingContent }]
+      : []),
+    ...dayGroups.flatMap((group) => [
+      { kind: "day-heading" as const, group },
+      ...group.items.map((item) => ({ kind: "timeline-item" as const, item })),
+    ]),
+  ];
 }
 
 type VirtualizedTimelineRowsProps = {
   dayGroups: TimelineDayGroup[];
+  leadingContent?: React.ReactNode;
   onAtBottomStateChange?: (atBottom: boolean) => void;
   onStartReached?: () => void;
   onVirtualizerApiChange?: (api: TimelineVirtualizerApi | null) => void;
@@ -361,6 +374,7 @@ type VirtualizedTimelineRowsProps = {
 
 function VirtualizedTimelineRows({
   dayGroups,
+  leadingContent,
   onAtBottomStateChange,
   onStartReached,
   onVirtualizerApiChange,
@@ -372,8 +386,8 @@ function VirtualizedTimelineRows({
   const hostRef = React.useRef<HTMLDivElement>(null);
   const hasInitialPositionedRef = React.useRef(false);
   const items = React.useMemo(
-    () => buildVirtualizedItems(dayGroups),
-    [dayGroups],
+    () => buildVirtualizedItems(dayGroups, leadingContent),
+    [dayGroups, leadingContent],
   );
   const previousFirstTimelineKeyRef = React.useRef<string | null>(null);
   const keys = React.useMemo(() => items.map(virtualizedItemKey), [items]);
@@ -463,7 +477,7 @@ function VirtualizedTimelineRows({
     <div className="h-full min-h-0 w-full" ref={hostRef}>
       <VList
         ref={listRef}
-        className="h-full min-h-0 w-full overflow-y-auto overflow-x-hidden overscroll-contain px-2 pt-1 pb-24"
+        className="h-full min-h-0 w-full overflow-y-auto overflow-x-hidden overscroll-contain px-2 pt-[var(--channel-top-chrome-height,4.5rem)] pb-[var(--composer-overlay-height,6rem)]"
         data={items}
         bufferSize={1_500}
         keepMounted={persistentIndexes}
@@ -471,6 +485,9 @@ function VirtualizedTimelineRows({
         onScroll={handleScroll}
       >
         {(item) => {
+          if (item.kind === "leading-content") {
+            return <div key={virtualizedItemKey(item)}>{item.content}</div>;
+          }
           if (item.kind === "day-heading") {
             const { group } = item;
             return (

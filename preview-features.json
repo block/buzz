@@ -40,14 +40,6 @@
       "platforms": [
         "desktop"
       ]
-    },
-    {
-      "id": "virtuaTimeline",
-      "name": "Virtua Timeline",
-      "description": "Virtualized channel timeline using Virtua",
-      "platforms": [
-        "desktop"
-      ]
     }
   ]
 }

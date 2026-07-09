@@ -14,6 +14,7 @@ export function useComposerHeightPadding(
   scrollContainerRef: React.RefObject<HTMLElement | null>,
   composerRef: React.RefObject<HTMLElement | null>,
   resetKey?: unknown,
+  mode: "padding" | "css-variable" = "padding",
 ) {
   React.useEffect(() => {
     void resetKey;
@@ -43,7 +44,11 @@ export function useComposerHeightPadding(
       const previousPadding = lastPadding;
       const wasAtBottom = isNearBottom();
 
-      scrollEl.style.paddingBottom = `${padding}px`;
+      if (mode === "css-variable") {
+        scrollEl.style.setProperty("--composer-overlay-height", `${padding}px`);
+      } else {
+        scrollEl.style.paddingBottom = `${padding}px`;
+      }
       lastPadding = padding;
 
       if (
@@ -58,7 +63,11 @@ export function useComposerHeightPadding(
 
     return () => {
       disconnect();
-      scrollEl.style.paddingBottom = "";
+      if (mode === "css-variable") {
+        scrollEl.style.removeProperty("--composer-overlay-height");
+      } else {
+        scrollEl.style.paddingBottom = "";
+      }
     };
-  }, [scrollContainerRef, composerRef, resetKey]);
+  }, [scrollContainerRef, composerRef, mode, resetKey]);
 }
