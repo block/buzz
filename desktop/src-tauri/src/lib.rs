@@ -71,11 +71,9 @@ fn perform_sidebar_default_haptic() {
 /// title bar to" preference (`AppleActionOnDoubleClick`).
 ///
 /// macOS values are `Minimize`, `Maximize` (default when unset), or `None`.
-/// The desktop app uses a web-based title-bar drag region, so macOS does not
-/// act on a title-bar double-click itself — the frontend forwards the
-/// double-click here so the app can honor the user's system setting instead of
-/// hardcoding maximize (which fought the OS and caused a minimize/restore
-/// flicker).
+/// The desktop app uses a web-based title-bar drag region, so the frontend
+/// forwards double-clicks here and suppresses Tauri's injected drag-region
+/// handler, whose default macOS path hardcodes maximize.
 ///
 /// For the `Minimize` case we call the native `NSWindow.miniaturize:` so the
 /// window genies into the Dock like other macOS apps. Tauri's own
@@ -103,18 +101,28 @@ fn title_bar_double_click(window: tauri::Window) {
         match action.as_str() {
             "None" => {}
             "Minimize" => {
-                // SAFETY: `ns_window()` returns the live NSWindow for this
-                // window; we only send it the standard `miniaturize:` message
-                // on the main thread (Tauri commands run on the main thread).
-                if let Ok(ptr) = window.ns_window() {
-                    if !ptr.is_null() {
-                        let ns_window: &objc2_app_kit::NSWindow = unsafe { &*ptr.cast() };
-                        ns_window.miniaturize(None);
-                        return;
-                    }
+                let window_for_main = window.clone();
+                if window
+                    .run_on_main_thread(move || {
+                        if let Ok(ptr) = window_for_main.ns_window() {
+                            if !ptr.is_null() {
+                                // SAFETY: `ns_window()` returns this live
+                                // window's NSWindow. The call is dispatched to
+                                // AppKit's main thread and sends a standard
+                                // `miniaturize:` message so Dock animation
+                                // preferences, including Genie, are honored.
+                                let ns_window: &objc2_app_kit::NSWindow = unsafe { &*ptr.cast() };
+                                ns_window.miniaturize(None);
+                                return;
+                            }
+                        }
+
+                        let _ = window_for_main.minimize();
+                    })
+                    .is_err()
+                {
+                    let _ = window.minimize();
                 }
-                // Fall back to Tauri's minimize if the NSWindow is unavailable.
-                let _ = window.minimize();
             }
             // "Maximize" or any unexpected value.
             _ => {

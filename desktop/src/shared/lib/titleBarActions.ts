@@ -5,12 +5,9 @@ import { invoke, isTauri } from "@tauri-apps/api/core";
  * bar to" preference (macOS `AppleActionOnDoubleClick`).
  *
  * The app uses a web-based title-bar drag region, so the OS does not act on a
- * title-bar double-click on its own. Previously this hardcoded
- * `toggleMaximize()`, which fought the native minimize behavior and produced a
- * minimize/restore flicker for users whose system pref was "Minimize". The
- * Rust `title_bar_double_click` command reads the preference and dispatches a
- * single matching action (native `miniaturize:` for minimize, so the window
- * genies into the Dock).
+ * title-bar double-click on its own. The Rust `title_bar_double_click` command
+ * reads the preference and dispatches a single matching action (native
+ * `miniaturize:` for minimize, so the window genies into the Dock).
  */
 export async function performTitleBarDoubleClickAction(): Promise<void> {
   if (!isTauri()) {
@@ -20,6 +17,6 @@ export async function performTitleBarDoubleClickAction(): Promise<void> {
   try {
     await invoke("title_bar_double_click");
   } catch {
-    // No-op on failure — a missed maximize toggle is not worth surfacing.
+    // No-op on failure; a missed titlebar action is not worth surfacing.
   }
 }
