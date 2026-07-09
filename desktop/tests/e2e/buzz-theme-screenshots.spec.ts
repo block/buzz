@@ -121,3 +121,22 @@ test("appearance hides accent picker under Buzz", async ({ page }) => {
   await expect(page.getByTestId("accent-color-neutral")).toHaveCount(0);
   await panel.screenshot({ path: `${SHOTS}/08-appearance-no-accent.png` });
 });
+
+test("accent picker reveals/hides when toggling Buzz", async ({ page }) => {
+  // Start on a non-Buzz theme so the accent picker is present, then select the
+  // Buzz tile — the picker should animate out and unmount. Reselecting a
+  // non-Buzz tile brings it back. Asserts the presence toggle (the motion
+  // wrapper) works end to end.
+  await seedTheme(page, "github-light");
+  await installMockBridge(page);
+  await openAppearance(page, "light");
+  await expect(page.getByTestId("accent-color-neutral")).toBeVisible();
+
+  // Switch to Buzz — picker should leave (allow the exit animation to settle).
+  await page.getByTestId("theme-option-buzz").click();
+  await expect(page.getByTestId("accent-color-neutral")).toHaveCount(0);
+
+  // Back to a non-Buzz theme — picker returns.
+  await page.getByTestId("theme-option-github-light").click();
+  await expect(page.getByTestId("accent-color-neutral")).toBeVisible();
+});

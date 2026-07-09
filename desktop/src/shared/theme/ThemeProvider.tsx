@@ -319,6 +319,18 @@ async function applyTheme(name: SyntaxThemeName): Promise<{ isDark: boolean }> {
   root.classList.add(isDark ? "dark" : "light");
   applyBuzzSidebar(name);
 
+  // Apply the accent synchronously in the same batch as the theme vars so the
+  // browser paints the new theme + accent together. Doing this in a later
+  // microtask (e.g. the caller's `.then`) let the previous accent flash on the
+  // new theme for a frame — the flicker seen when switching to Buzz. Buzz
+  // themes resolve to the neutral accent regardless of the stored value.
+  applyAccentColor(
+    resolveEffectiveAccent(
+      name,
+      window.localStorage.getItem(ACCENT_STORAGE_KEY) ?? DEFAULT_ACCENT,
+    ),
+  );
+
   // Cache for FOUC prevention
   try {
     window.localStorage.setItem(
@@ -376,18 +388,12 @@ export function ThemeProvider({
     setIsLoading(true);
 
     applyTheme(effectiveTheme as SyntaxThemeName).then(({ isDark: dark }) => {
-      // Only update if this is still the theme we want
+      // Only update if this is still the theme we want. The accent is applied
+      // inside applyTheme (synchronously with the theme vars), so there's no
+      // separate re-application here — that avoided the switch-time flicker.
       if (loadingRef.current === thisTheme) {
         setIsDark(dark);
         setIsLoading(false);
-        // Re-apply accent after theme load (theme vars don't include primary).
-        // Buzz themes force the neutral accent regardless of stored value.
-        applyAccentColor(
-          resolveEffectiveAccent(
-            thisTheme,
-            window.localStorage.getItem(ACCENT_STORAGE_KEY) ?? DEFAULT_ACCENT,
-          ),
-        );
       }
     });
   }, [effectiveTheme]);
@@ -411,6 +417,10 @@ export function ThemeProvider({
     return () => mq.removeEventListener("change", handler);
   }, [followSystem]);
 
+  // Re-apply the accent when the user picks a new swatch or the effective theme
+  // changes. applyTheme already applies the (Buzz-neutral-aware) accent in the
+  // same synchronous batch as the theme vars — the flicker fix — so this effect
+  // is idempotent on theme changes and simply covers accent-only changes.
   useEffect(() => {
     applyAccentColor(resolveEffectiveAccent(effectiveTheme, accentColor));
   }, [accentColor, effectiveTheme]);

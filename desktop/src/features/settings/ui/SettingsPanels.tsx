@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import {
   Archive,
   BellRing,
@@ -379,6 +380,14 @@ function SingleThemeTile({
 
 type AppearanceMode = "system" | "light" | "dark";
 
+// Reveal/hide motion for the accent picker — mirrors the app's modal motion
+// (fade + zoom-95) and the ProfileSettingsCard reveal easing so it reads as one
+// consistent motion vocabulary.
+const ACCENT_PICKER_TRANSITION = {
+  duration: 0.2,
+  ease: [0.23, 1, 0.32, 1] as const,
+};
+
 function ThemeSettingsCard() {
   const {
     setTheme,
@@ -395,6 +404,7 @@ function ThemeSettingsCard() {
   // so the accent picker is hidden while a Buzz theme is active. `themeName` is
   // the effective theme, so this also covers System mode resolving to Buzz.
   const accentPickerHidden = isBuzzTheme(themeName);
+  const shouldReduceMotion = useReducedMotion();
 
   const previewVarsByTheme = useThemePreviewVars();
   const { pairedLight, lightOnly, darkOnly } = useThemeCategories();
@@ -579,42 +589,66 @@ function ThemeSettingsCard() {
         </div>
       </div>
 
-      {/* Accent color picker — hidden for Buzz themes (pinned neutral accent) */}
-      {accentPickerHidden ? null : (
-        <div className="shrink-0 px-1 pb-2">
-          <h3 className="mb-2 text-sm font-medium">Accent color</h3>
-          <div className="flex flex-wrap gap-2 p-1">
-            {ACCENT_COLORS.map((color) => {
-              const isNeutral = color.value === NEUTRAL_ACCENT;
-              const swatchColor = isNeutral
-                ? "hsl(var(--foreground))"
-                : color.value;
-              const checkClassName =
-                isNeutral && isDark ? "text-black" : "text-white";
+      {/* Accent color picker — hidden for Buzz themes (pinned neutral accent).
+          Reveal/hide with the app's modal fade + zoom-95 motion. */}
+      <AnimatePresence initial={false}>
+        {accentPickerHidden ? null : (
+          <motion.div
+            animate={
+              shouldReduceMotion
+                ? { opacity: 1, height: "auto" }
+                : { opacity: 1, scale: 1, height: "auto" }
+            }
+            className="origin-top overflow-hidden"
+            exit={
+              shouldReduceMotion
+                ? { opacity: 0, height: 0 }
+                : { opacity: 0, scale: 0.95, height: 0 }
+            }
+            initial={
+              shouldReduceMotion
+                ? { opacity: 0, height: 0 }
+                : { opacity: 0, scale: 0.95, height: 0 }
+            }
+            key="accent-picker"
+            transition={ACCENT_PICKER_TRANSITION}
+          >
+            <div className="shrink-0 px-1 pb-2 pt-1">
+              <h3 className="mb-2 text-sm font-medium">Accent color</h3>
+              <div className="flex flex-wrap gap-2 p-1">
+                {ACCENT_COLORS.map((color) => {
+                  const isNeutral = color.value === NEUTRAL_ACCENT;
+                  const swatchColor = isNeutral
+                    ? "hsl(var(--foreground))"
+                    : color.value;
+                  const checkClassName =
+                    isNeutral && isDark ? "text-black" : "text-white";
 
-              return (
-                <button
-                  className={cn(
-                    "flex h-7 w-7 items-center justify-center rounded-full border border-border/50 transition-transform hover:scale-110",
-                    accentColor === color.value &&
-                      "ring-2 ring-ring ring-offset-2 ring-offset-background",
-                  )}
-                  data-testid={`accent-color-${color.name.toLowerCase()}`}
-                  key={color.value}
-                  onClick={() => setAccentColor(color.value)}
-                  style={{ backgroundColor: swatchColor }}
-                  title={color.name}
-                  type="button"
-                >
-                  {accentColor === color.value && (
-                    <Check className={cn("h-4 w-4", checkClassName)} />
-                  )}
-                </button>
-              );
-            })}
-          </div>
-        </div>
-      )}
+                  return (
+                    <button
+                      className={cn(
+                        "flex h-7 w-7 items-center justify-center rounded-full border border-border/50 transition-transform hover:scale-110",
+                        accentColor === color.value &&
+                          "ring-2 ring-ring ring-offset-2 ring-offset-background",
+                      )}
+                      data-testid={`accent-color-${color.name.toLowerCase()}`}
+                      key={color.value}
+                      onClick={() => setAccentColor(color.value)}
+                      style={{ backgroundColor: swatchColor }}
+                      title={color.name}
+                      type="button"
+                    >
+                      {accentColor === color.value && (
+                        <Check className={cn("h-4 w-4", checkClassName)} />
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </section>
   );
 }
