@@ -61,7 +61,7 @@ type MentionCandidate = {
 function mentionCandidateLabel(candidate: MentionCandidate) {
   return (
     candidate.displayName ??
-    (candidate.pubkey ? truncatePubkey(candidate.pubkey) : "persona")
+    (candidate.pubkey ? truncatePubkey(candidate.pubkey) : "agent")
   );
 }
 

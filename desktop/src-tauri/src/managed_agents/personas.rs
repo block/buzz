@@ -378,7 +378,7 @@ pub fn ensure_persona_is_active(
     let persona = personas
         .iter()
         .find(|candidate| candidate.id == persona_id)
-        .ok_or_else(|| format!("persona {persona_id} not found"))?;
+        .ok_or_else(|| format!("agent {persona_id} not found"))?;
 
     if !persona.is_active {
         return Err(format!(
@@ -406,7 +406,7 @@ pub fn validate_persona_deletion(
     referenced_by_team: bool,
 ) -> Result<(), String> {
     if persona.is_builtin {
-        return Err("Built-in personas cannot be deleted.".to_string());
+        return Err("Built-in agents cannot be deleted.".to_string());
     }
 
     if persona.source_team.is_some() {
@@ -433,9 +433,7 @@ pub fn validate_persona_activation_change(
     referenced_by_team: bool,
 ) -> Result<(), String> {
     if !persona.is_builtin {
-        return Err(
-            "Only built-in personas can be added to or removed from My Agents.".to_string(),
-        );
+        return Err("Only built-in agents can be added to or removed from My Agents.".to_string());
     }
 
     if !active && referenced_by_managed_agent {

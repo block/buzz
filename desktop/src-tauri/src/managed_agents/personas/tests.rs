@@ -215,7 +215,7 @@ fn merge_personas_demotes_retired_builtins() {
 fn ensure_persona_is_active_rejects_missing_personas() {
     let err = ensure_persona_is_active(&[], "missing").unwrap_err();
 
-    assert_eq!(err, "persona missing not found");
+    assert_eq!(err, "agent missing not found");
 }
 
 #[test]
@@ -254,7 +254,7 @@ fn validate_persona_activation_change_rejects_non_builtins() {
 
     assert_eq!(
         err,
-        "Only built-in personas can be added to or removed from My Agents."
+        "Only built-in agents can be added to or removed from My Agents."
     );
 }
 
@@ -300,7 +300,7 @@ fn validate_persona_deletion_rejects_builtins() {
 
     let err = validate_persona_deletion(&persona, false).unwrap_err();
 
-    assert_eq!(err, "Built-in personas cannot be deleted.");
+    assert_eq!(err, "Built-in agents cannot be deleted.");
 }
 
 #[test]

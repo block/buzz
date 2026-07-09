@@ -6325,10 +6325,10 @@ async function handleUpdatePersona(args: {
     (candidate) => candidate.id === args.input.id,
   );
   if (!persona) {
-    throw new Error(`Persona ${args.input.id} not found.`);
+    throw new Error(`agent ${args.input.id} not found`);
   }
   if (persona.is_builtin) {
-    throw new Error("Built-in personas cannot be edited.");
+    throw new Error("Built-in agents cannot be edited.");
   }
 
   persona.display_name = args.input.displayName.trim();
@@ -6347,10 +6347,10 @@ async function handleUpdatePersona(args: {
 async function handleDeletePersona(args: { id: string }): Promise<void> {
   const persona = mockPersonas.find((candidate) => candidate.id === args.id);
   if (!persona) {
-    throw new Error(`Persona ${args.id} not found.`);
+    throw new Error(`agent ${args.id} not found`);
   }
   if (persona.is_builtin) {
-    throw new Error("Built-in personas cannot be deleted.");
+    throw new Error("Built-in agents cannot be deleted.");
   }
   if (mockTeams.some((team) => team.persona_ids.includes(args.id))) {
     throw new Error(
@@ -6374,11 +6374,11 @@ async function handleSetPersonaActive(args: {
 }): Promise<RawPersona> {
   const persona = mockPersonas.find((candidate) => candidate.id === args.id);
   if (!persona) {
-    throw new Error(`Persona ${args.id} not found.`);
+    throw new Error(`agent ${args.id} not found`);
   }
   if (!persona.is_builtin) {
     throw new Error(
-      "Only built-in personas can be added to or removed from My Agents.",
+      "Only built-in agents can be added to or removed from My Agents.",
     );
   }
   if (
@@ -6406,7 +6406,7 @@ async function handleSetPersonaActive(args: {
 function ensureMockPersonaIsActive(personaId: string) {
   const persona = mockPersonas.find((candidate) => candidate.id === personaId);
   if (!persona) {
-    throw new Error(`persona ${personaId} not found`);
+    throw new Error(`agent ${personaId} not found`);
   }
   if (!persona.is_active) {
     throw new Error(
@@ -6596,7 +6596,7 @@ async function handleExportPersonaToJson(args: {
 }): Promise<boolean> {
   // In test mode, just verify the persona exists
   const persona = mockPersonas.find((p) => p.id === args.id);
-  if (!persona) throw new Error(`Persona ${args.id} not found.`);
+  if (!persona) throw new Error(`agent ${args.id} not found`);
   return true; // Simulate successful save
 }
 

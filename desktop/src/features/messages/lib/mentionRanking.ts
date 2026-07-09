@@ -64,7 +64,7 @@ export function rankMentionCandidates<T extends MentionCandidateForRanking>(
         : "";
       const label =
         candidate.displayName ??
-        (candidate.pubkey ? truncatePubkey(candidate.pubkey) : "persona");
+        (candidate.pubkey ? truncatePubkey(candidate.pubkey) : "agent");
       const groupRank = getMentionCandidateGroupRank(
         candidate,
         activePersonaIds,

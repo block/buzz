@@ -145,10 +145,10 @@ pub async fn update_persona(
             let persona = personas
                 .iter_mut()
                 .find(|record| record.id == input.id)
-                .ok_or_else(|| format!("persona {} not found", input.id))?;
+                .ok_or_else(|| format!("agent {} not found", input.id))?;
 
             if persona.is_builtin {
-                return Err("Built-in personas cannot be edited.".to_string());
+                return Err("Built-in agents cannot be edited.".to_string());
             }
 
             // Track whether avatar changed so we can sync linked agents.
@@ -177,7 +177,7 @@ pub async fn update_persona(
             let result = personas
                 .into_iter()
                 .find(|record| record.id == input.id)
-                .ok_or_else(|| format!("persona {} disappeared unexpectedly", input.id))?;
+                .ok_or_else(|| format!("agent {} disappeared unexpectedly", input.id))?;
 
             // For pack-backed personas, also write the edit back to the source
             // `.persona.md` so that launch sync (which reads the file) becomes a
@@ -291,7 +291,7 @@ pub async fn delete_persona(id: String, app: AppHandle) -> Result<(), String> {
         let persona = personas
             .iter()
             .find(|record| record.id == id)
-            .ok_or_else(|| format!("persona {id} not found"))?;
+            .ok_or_else(|| format!("agent {id} not found"))?;
         let referenced_by_team = load_teams(&app)?.iter().any(|team| {
             team.persona_ids
                 .iter()
@@ -306,7 +306,7 @@ pub async fn delete_persona(id: String, app: AppHandle) -> Result<(), String> {
         let original_len = personas.len();
         personas.retain(|record| record.id != id);
         if personas.len() == original_len {
-            return Err(format!("persona {id} not found"));
+            return Err(format!("agent {id} not found"));
         }
         save_personas(&app, &personas)?;
         tombstone_persona_pending(&app, &state, &d_tag);
@@ -736,7 +736,7 @@ pub async fn set_persona_active(
         let persona = personas
             .iter_mut()
             .find(|record| record.id == id)
-            .ok_or_else(|| format!("persona {id} not found"))?;
+            .ok_or_else(|| format!("agent {id} not found"))?;
 
         let referenced_by_managed_agent = !active
             && load_managed_agents(&app)?
@@ -881,7 +881,7 @@ pub async fn export_persona_to_json(
         let persona = personas
             .iter()
             .find(|p| p.id == id)
-            .ok_or_else(|| format!("persona {id} not found"))?;
+            .ok_or_else(|| format!("agent {id} not found"))?;
         (
             persona.display_name.clone(),
             persona.system_prompt.clone(),
