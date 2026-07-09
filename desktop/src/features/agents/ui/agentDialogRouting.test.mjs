@@ -65,26 +65,23 @@ test("instance-edit routes to AgentInstanceEditDialog with its contract props", 
   });
 });
 
-test("create modes route to the internal create router, not a form directly", () => {
-  for (const mode of ["definition", "instance"]) {
-    const element = AgentDialog({
-      mode,
-      definitionError: null,
-      isDefinitionPending: false,
-      onInstanceCreated: noop,
-      onOpenChange: noop,
-      onSubmitDefinition: async () => true,
-      runtimes: [],
-      runtimesLoading: false,
-    });
+test("create mode routes to the internal create router, not a form directly", () => {
+  const element = AgentDialog({
+    mode: "definition",
+    definitionError: null,
+    isDefinitionPending: false,
+    onOpenChange: noop,
+    onSubmitDefinition: async () => true,
+    runtimes: [],
+    runtimesLoading: false,
+  });
 
-    assert.notEqual(element.type, AgentDefinitionDialog);
-    assert.notEqual(element.type, AgentInstanceEditDialog);
-    assert.equal(
-      typeof element.type,
-      "function",
-      `${mode} must route through the internal create router`,
-    );
-    assert.equal(element.type.name, "AgentCreateDialogRouter");
-  }
+  assert.notEqual(element.type, AgentDefinitionDialog);
+  assert.notEqual(element.type, AgentInstanceEditDialog);
+  assert.equal(
+    typeof element.type,
+    "function",
+    "definition must route through the internal create router",
+  );
+  assert.equal(element.type.name, "AgentCreateDialogRouter");
 });

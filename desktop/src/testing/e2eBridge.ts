@@ -525,6 +525,10 @@ type RawPersona = {
   is_active: boolean;
   source_team?: string | null;
   env_vars?: Record<string, string>;
+  respond_to?: string | null;
+  respond_to_allowlist?: string[];
+  mcp_toolsets?: string | null;
+  parallelism?: number | null;
   created_at: string;
   updated_at: string;
 };
@@ -6240,12 +6244,37 @@ async function handleListPersonas(): Promise<RawPersona[]> {
   return mockPersonas.map((persona) => ({ ...persona }));
 }
 
+type PersonaBehaviorInput = {
+  respondTo?: "owner-only" | "allowlist" | "anyone";
+  respondToAllowlist?: string[];
+  mcpToolsets?: string;
+  parallelism?: number;
+};
+
+/** Mirrors `apply_persona_behavior`: replace all four as a unit. */
+function applyMockPersonaBehavior(
+  persona: RawPersona,
+  behavior: PersonaBehaviorInput | undefined,
+) {
+  if (behavior === undefined) {
+    return;
+  }
+  persona.respond_to = behavior.respondTo ?? null;
+  persona.respond_to_allowlist =
+    behavior.respondTo === "allowlist"
+      ? [...(behavior.respondToAllowlist ?? [])]
+      : [];
+  persona.mcp_toolsets = behavior.mcpToolsets?.trim() || null;
+  persona.parallelism = behavior.parallelism ?? null;
+}
+
 async function handleCreatePersona(args: {
   input: {
     displayName: string;
     avatarUrl?: string;
     systemPrompt: string;
     envVars?: Record<string, string>;
+    behavior?: PersonaBehaviorInput;
   };
 }): Promise<RawPersona> {
   const now = new Date().toISOString();
@@ -6261,6 +6290,7 @@ async function handleCreatePersona(args: {
     created_at: now,
     updated_at: now,
   };
+  applyMockPersonaBehavior(persona, args.input.behavior);
   mockPersonas.push(persona);
   return { ...persona };
 }
@@ -6272,6 +6302,7 @@ async function handleUpdatePersona(args: {
     avatarUrl?: string;
     systemPrompt: string;
     envVars?: Record<string, string>;
+    behavior?: PersonaBehaviorInput;
   };
 }): Promise<RawPersona> {
   const persona = mockPersonas.find(
@@ -6291,6 +6322,7 @@ async function handleUpdatePersona(args: {
     // Absent = preserve; present = replace entirely (matches Rust handler).
     persona.env_vars = { ...args.input.envVars };
   }
+  applyMockPersonaBehavior(persona, args.input.behavior);
   persona.updated_at = new Date().toISOString();
 
   return { ...persona };
@@ -6589,6 +6621,23 @@ async function handleCreateManagedAgent(
   if (args.input.personaId) {
     ensureMockPersonaIsActive(args.input.personaId);
   }
+  // Mint-parity with resolve_mint_behavioral_defaults: an explicit input
+  // wins; otherwise the linked definition's stored quad applies (mode+list
+  // travel together); otherwise the schema default.
+  const linkedPersona = args.input.personaId
+    ? (mockPersonas.find((persona) => persona.id === args.input.personaId) ??
+      null)
+    : null;
+  const mintRespondTo =
+    args.input.respondTo ??
+    (linkedPersona?.respond_to as RawManagedAgent["respond_to"] | null) ??
+    "owner-only";
+  const mintRespondToAllowlist =
+    args.input.respondTo !== undefined
+      ? (args.input.respondToAllowlist ?? [])
+      : (linkedPersona?.respond_to_allowlist ?? []);
+  const mintParallelism =
+    args.input.parallelism ?? linkedPersona?.parallelism ?? 1;
   const personaAvatarUrl =
     args.input.personaId === undefined
       ? null
@@ -6621,7 +6670,7 @@ async function handleCreateManagedAgent(
     turn_timeout_seconds: args.input.turnTimeoutSeconds ?? 320,
     idle_timeout_seconds: args.input.idleTimeoutSeconds ?? null,
     max_turn_duration_seconds: args.input.maxTurnDurationSeconds ?? null,
-    parallelism: args.input.parallelism ?? 1,
+    parallelism: mintParallelism,
     system_prompt: args.input.systemPrompt?.trim() || null,
     avatar_url: avatarUrl,
     model: args.input.model?.trim() || null,
@@ -6640,11 +6689,11 @@ async function handleCreateManagedAgent(
     auto_restart_on_config_change: true,
     backend: args.input.backend ?? { type: "local" as const },
     backend_agent_id: null,
-    respond_to: args.input.respondTo ?? "owner-only",
-    respond_to_allowlist: args.input.respondToAllowlist ?? [],
+    respond_to: mintRespondTo,
+    respond_to_allowlist: [...mintRespondToAllowlist],
     private_key_nsec: `nsec1mock${pubkey.slice(0, 20)}`,
     log_lines: [
-      `buzz-acp starting: relay=${args.input.relayUrl ?? DEFAULT_RELAY_WS_URL} agent_pubkey=${pubkey} parallelism=${args.input.parallelism ?? 1}`,
+      `buzz-acp starting: relay=${args.input.relayUrl ?? DEFAULT_RELAY_WS_URL} agent_pubkey=${pubkey} parallelism=${mintParallelism}`,
       args.input.systemPrompt?.trim()
         ? `system prompt override configured (${args.input.systemPrompt.trim().length} chars)`
         : "system prompt override not set",

@@ -5,7 +5,7 @@ import {
 } from "@/features/agents/openCreateAgentEvent";
 import { AddAgentToChannelDialog } from "./AddAgentToChannelDialog";
 import { AddTeamToChannelDialog } from "./AddTeamToChannelDialog";
-import { AgentDialog, type AgentDialogCreateMode } from "./AgentDialog";
+import { AgentDialog } from "./AgentDialog";
 import { BatchImportDialog } from "./BatchImportDialog";
 import { PersonaCatalogDialog } from "./PersonaCatalogDialog";
 import { PersonaDeleteDialog } from "./PersonaDeleteDialog";
@@ -30,14 +30,11 @@ export function AgentsView() {
   const personas = usePersonaActions();
   // Exclusivity: create never sets `personaDialogState` (edit/dup/import do),
   // so the create-mode and definition-edit AgentDialog mounts never coexist.
-  const [createDialogMode, setCreateDialogMode] =
-    React.useState<AgentDialogCreateMode | null>(null);
+  const [isCreateDialogOpen, setIsCreateDialogOpen] = React.useState(false);
 
-  function openUnifiedCreate(mode: AgentDialogCreateMode) {
-    if (mode === "definition") {
-      personas.prepareCreate();
-    }
-    setCreateDialogMode(mode);
+  function openUnifiedCreate() {
+    personas.prepareCreate();
+    setIsCreateDialogOpen(true);
   }
   const teamActions = useTeamActions(
     {
@@ -63,11 +60,11 @@ export function AgentsView() {
     // The app-wide "create agent" shortcut routes to the unified definition
     // flow (B5): one create path, with the start-after-create toggle on.
     if (consumePendingOpenCreateAgent()) {
-      openUnifiedCreate("definition");
+      openUnifiedCreate();
     }
 
     return subscribeOpenCreateAgent(() => {
-      openUnifiedCreate("definition");
+      openUnifiedCreate();
     });
   }, []);
 
@@ -128,7 +125,7 @@ export function AgentsView() {
               isPersonasLoading={personas.personasQuery.isLoading}
               isPersonasPending={personas.isPending}
               onCreatePersona={() => {
-                openUnifiedCreate("definition");
+                openUnifiedCreate();
               }}
               onChooseCatalog={personas.openCatalog}
               onDuplicatePersona={personas.openDuplicate}
@@ -183,7 +180,7 @@ export function AgentsView() {
         </div>
       </div>
 
-      {createDialogMode ? (
+      {isCreateDialogOpen ? (
         <AgentDialog
           definitionError={
             personas.createPersonaMutation.error instanceof Error
@@ -191,14 +188,10 @@ export function AgentsView() {
               : null
           }
           isDefinitionPending={personas.isPending}
-          mode={createDialogMode}
-          onInstanceCreated={(result) => {
-            agents.setLogAgentPubkey(result.agent.pubkey);
-            agents.setCreatedAgent(result);
-          }}
+          mode="definition"
           onOpenChange={(open) => {
             if (!open) {
-              setCreateDialogMode(null);
+              setIsCreateDialogOpen(false);
             }
           }}
           onSubmitDefinition={personas.handleSubmit}

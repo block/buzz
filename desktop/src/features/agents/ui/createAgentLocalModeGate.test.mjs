@@ -1,5 +1,5 @@
 /**
- * Unit tests for the CreateAgentDialog local-mode readiness gate.
+ * Unit tests for the agent-dialog local-mode readiness gate.
  *
  * The gate computes whether required fields are present for the selected
  * runtime: when missing, it surfaces field markers (isRequired) and env-key

@@ -18,7 +18,6 @@ test("resolveCreateIntent defaults to quick-start for un-migrated callers", () =
 test("resolveCreateIntent passes explicit intents through", () => {
   assert.equal(resolveCreateIntent("definition"), "definition");
   assert.equal(resolveCreateIntent("definition_start"), "definition_start");
-  assert.equal(resolveCreateIntent("instance"), "instance");
 });
 
 test("intentForStartToggle maps the toggle to definition-family intents", () => {

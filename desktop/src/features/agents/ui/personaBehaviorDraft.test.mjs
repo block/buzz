@@ -140,3 +140,29 @@ test("draftFromBehavior round-trips a full quad and copies the list", () => {
   assert.deepEqual(behavior.respondToAllowlist, [HEX], "list must be copied");
   assert.deepEqual(draftFromBehavior(undefined), emptyPersonaBehaviorDraft);
 });
+
+test("edit full-clear submits an explicit empty group, not nothing", () => {
+  // Pinky's 48f260a11 finding: a mode-less quad (toolsets/parallelism only)
+  // cleared to completely empty must still submit, or the stored quad
+  // silently resurrects on reopen.
+  const seed = {
+    ...emptyPersonaBehaviorDraft,
+    mcpToolsets: "developer",
+    parallelism: "4",
+  };
+  const group = behaviorForSubmit(emptyPersonaBehaviorDraft, seed, true);
+  assert.deepEqual(group, {}, "full clear must submit a replace-with-empty");
+  // Partial clear keeps working: one field left set submits that field.
+  const partial = behaviorForSubmit({ ...seed, mcpToolsets: "" }, seed, true);
+  assert.equal(partial.parallelism, 4);
+  assert.equal(partial.mcpToolsets, undefined);
+  // Hash-quiet survives the fix: a no-op edit of an ALREADY-quad-less
+  // definition still submits nothing — `{}` here would republish and flip
+  // content hashes for exactly the definitions the hash-quiet row protects.
+  const noop = behaviorForSubmit(
+    emptyPersonaBehaviorDraft,
+    emptyPersonaBehaviorDraft,
+    true,
+  );
+  assert.equal(noop, undefined, "empty-vs-empty must stay silent");
+});

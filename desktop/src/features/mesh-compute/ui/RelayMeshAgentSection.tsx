@@ -11,14 +11,13 @@ import {
 import { useMeshAvailability } from "../hooks/useMeshAvailability";
 
 /**
- * The "Run on relay mesh" entry inside CreateAgentDialog. When enabled, the
- * user picks a model from `mesh_availability().models`, the dialog's runtime
- * + env-var state is fanned out from `mesh_agent_preset()`, and the existing
- * runtime/backend pickers are hidden in the parent.
+ * The "Run on relay mesh" entry in the agent create flow (WhereToRunSection).
+ * When enabled, the user picks a model from `mesh_availability().models` and
+ * the instance preset is fanned out from `mesh_agent_preset()`.
  *
- * Lives outside `CreateAgentDialog` so the dialog file's diff stays narrow —
- * the dialog only renders this and reacts to its `onPatch` and `useMesh`
- * callbacks. The dialog is the single source of truth for state; this
+ * Lives outside the dialog so its diff stays narrow — the parent only renders
+ * this and reacts to its `onPatch` and `useMesh`
+ * callbacks. The parent is the single source of truth for state; this
  * component is purely a controller for the mesh-specific subset.
  */
 export function RelayMeshAgentSection({

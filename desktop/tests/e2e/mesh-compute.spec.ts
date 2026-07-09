@@ -157,11 +157,11 @@ test("Run-on-relay-mesh ensures the client node BEFORE spawning the agent", asyn
   await gotoApp(page);
   await page.getByTestId("open-agents-view").click();
   await openNewAgentMenu(page);
-  await page.getByText("Custom agent").click();
+  await page.getByRole("menuitem", { name: /^New agent$/ }).click();
 
   // Member is admitted -> the relay-mesh toggle becomes enabled (availability
   // resolves to available). Wait for that before driving the flow.
-  await page.getByTestId("agent-name-input").fill("Mesh Agent");
+  await page.locator("#persona-display-name").fill("Mesh Agent");
 
   const toggle = page.getByTestId("agent-relay-mesh-toggle");
   await expect(toggle).toBeEnabled({ timeout: 10_000 });
@@ -170,7 +170,7 @@ test("Run-on-relay-mesh ensures the client node BEFORE spawning the agent", asyn
     .getByTestId("agent-relay-mesh-model")
     .selectOption({ label: "SmolLM2 135M — Mock desktop" });
 
-  await expect(page.getByTestId("create-agent-submit")).toBeEnabled({
+  await expect(page.getByTestId("persona-dialog-submit")).toBeEnabled({
     timeout: 10_000,
   });
 
@@ -178,7 +178,7 @@ test("Run-on-relay-mesh ensures the client node BEFORE spawning the agent", asyn
   // ensure→spawn ordering WITHIN this user action's fresh slice, not merely
   // that ensure appeared somewhere earlier (e.g. an availability probe).
   const before = (await commands(page)).length;
-  await page.getByTestId("create-agent-submit").click();
+  await page.getByTestId("persona-dialog-submit").click();
 
   await expect
     .poll(async () => (await commands(page)).slice(before))
@@ -201,8 +201,8 @@ test("Run-on-relay-mesh skips connect signaling for own serve target", async ({
   await gotoApp(page);
   await page.getByTestId("open-agents-view").click();
   await openNewAgentMenu(page);
-  await page.getByText("Custom agent").click();
-  await page.getByTestId("agent-name-input").fill("Own Mesh Agent");
+  await page.getByRole("menuitem", { name: /^New agent$/ }).click();
+  await page.locator("#persona-display-name").fill("Own Mesh Agent");
 
   const toggle = page.getByTestId("agent-relay-mesh-toggle");
   await expect(toggle).toBeEnabled({ timeout: 10_000 });
@@ -212,7 +212,7 @@ test("Run-on-relay-mesh skips connect signaling for own serve target", async ({
     .selectOption({ label: "SmolLM2 135M — Mock desktop" });
 
   const before = (await commands(page)).length;
-  await page.getByTestId("create-agent-submit").click();
+  await page.getByTestId("persona-dialog-submit").click();
   await expect
     .poll(async () => (await commands(page)).slice(before))
     .toContain("create_managed_agent");
@@ -241,8 +241,8 @@ test("Run-on-relay-mesh canonicalizes the mesh connect #p target", async ({
   await gotoApp(page);
   await page.getByTestId("open-agents-view").click();
   await openNewAgentMenu(page);
-  await page.getByText("Custom agent").click();
-  await page.getByTestId("agent-name-input").fill("Mesh Agent");
+  await page.getByRole("menuitem", { name: /^New agent$/ }).click();
+  await page.locator("#persona-display-name").fill("Mesh Agent");
 
   const toggle = page.getByTestId("agent-relay-mesh-toggle");
   await expect(toggle).toBeEnabled({ timeout: 10_000 });
@@ -251,7 +251,7 @@ test("Run-on-relay-mesh canonicalizes the mesh connect #p target", async ({
     .getByTestId("agent-relay-mesh-model")
     .selectOption({ label: "SmolLM2 135M — Mock desktop" });
 
-  await page.getByTestId("create-agent-submit").click();
+  await page.getByTestId("persona-dialog-submit").click();
   await expect
     .poll(async () =>
       (await signedEvents(page)).find((event) => event.kind === 24621),
@@ -279,7 +279,7 @@ test("a non-member cannot enable relay-mesh — membership is the gate", async (
 
   await page.getByTestId("open-agents-view").click();
   await openNewAgentMenu(page);
-  await page.getByText("Custom agent").click();
+  await page.getByRole("menuitem", { name: /^New agent$/ }).click();
 
   // The relay-mesh toggle stays disabled — a non-member cannot even opt into
   // running on the mesh, let alone spawn an agent against it.
@@ -298,8 +298,8 @@ test("saved relay-mesh agents restart via the backend serve-target preflight", a
   await gotoApp(page);
   await page.getByTestId("open-agents-view").click();
   await openNewAgentMenu(page);
-  await page.getByText("Custom agent").click();
-  await page.getByTestId("agent-name-input").fill("Saved relay mesh agent");
+  await page.getByRole("menuitem", { name: /^New agent$/ }).click();
+  await page.locator("#persona-display-name").fill("Saved relay mesh agent");
 
   const toggle = page.getByTestId("agent-relay-mesh-toggle");
   await expect(toggle).toBeEnabled({ timeout: 10_000 });
@@ -308,7 +308,7 @@ test("saved relay-mesh agents restart via the backend serve-target preflight", a
     .getByTestId("agent-relay-mesh-model")
     .selectOption({ label: "SmolLM2 135M — Mock desktop" });
 
-  await page.getByTestId("create-agent-submit").click();
+  await page.getByTestId("persona-dialog-submit").click();
   await expect
     .poll(async () => await commands(page))
     .toContain("create_managed_agent");

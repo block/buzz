@@ -2,7 +2,6 @@ import * as React from "react";
 
 import type {
   AcpRuntimeCatalogEntry,
-  CreateManagedAgentResponse,
   CreatePersonaInput,
   ManagedAgent,
   UpdatePersonaInput,
@@ -15,7 +14,6 @@ import {
   type AgentCreateIntent,
 } from "./agentCreateIntent";
 import { AgentInstanceEditDialog } from "./AgentInstanceEditDialog";
-import { CreateAgentDialog } from "./CreateAgentDialog";
 import { createPersonaDialogState } from "./personaDialogState";
 import { AgentDefinitionDialog } from "./AgentDefinitionDialog";
 import { WhereToRunSection } from "./WhereToRunSection";
@@ -25,10 +23,8 @@ import {
   resolveBackendIntent,
 } from "./whereToRunIntent";
 
-export type AgentDialogCreateMode = "definition" | "instance";
-
 type AgentDialogCreateProps = {
-  mode: AgentDialogCreateMode;
+  mode: "definition";
   onOpenChange: (open: boolean) => void;
   definitionError: Error | null;
   isDefinitionPending: boolean;
@@ -39,7 +35,6 @@ type AgentDialogCreateProps = {
     intent: AgentCreateIntent,
     backendIntent: BackendIntent | null,
   ) => Promise<boolean>;
-  onInstanceCreated: (result: CreateManagedAgentResponse) => void;
 };
 
 type AgentDialogInstanceEditProps = {
@@ -83,7 +78,6 @@ type AgentDialogProps =
  * that owns it. The definition family renders AgentDefinitionDialog — create
  * mode adds a "start after create" toggle, definition-edit passes the caller's
  * PersonaDialogState-derived props through unchanged (edit/duplicate/import).
- * The standalone-instance intent renders CreateAgentDialog unchanged;
  * instance-edit renders AgentInstanceEditDialog (persistent mount + `open`
  * toggle — its reset lifecycle is keyed on [open, agent.pubkey]).
  */
@@ -106,14 +100,12 @@ export function AgentDialog(props: AgentDialogProps) {
 }
 
 function AgentCreateDialogRouter({
-  mode,
   onOpenChange,
   definitionError,
   isDefinitionPending,
   runtimes,
   runtimesLoading,
   onSubmitDefinition,
-  onInstanceCreated,
 }: AgentDialogCreateProps) {
   const [startAfterCreate, setStartAfterCreate] = React.useState(true);
   const [runDraft, setRunDraft] = React.useState(emptyWhereToRunDraft);
@@ -123,16 +115,6 @@ function AgentCreateDialogRouter({
     () => createPersonaDialogState().initialValues,
     [],
   );
-
-  if (mode === "instance") {
-    return (
-      <CreateAgentDialog
-        onCreated={onInstanceCreated}
-        onOpenChange={onOpenChange}
-        open
-      />
-    );
-  }
 
   const copy = definitionCreateDialogState(startAfterCreate);
 

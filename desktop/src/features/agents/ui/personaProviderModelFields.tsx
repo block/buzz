@@ -1,8 +1,8 @@
 /**
  * Shared provider and model field components for agent dialogs.
  *
- * Both CreateAgentDialog (local mode) and AgentInstanceEditDialog import these
- * instead of duplicating the picker logic.
+ * AgentInstanceEditDialog imports these instead of duplicating the picker
+ * logic.
  */
 import type * as React from "react";
 

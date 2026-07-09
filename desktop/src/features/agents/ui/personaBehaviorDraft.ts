@@ -76,7 +76,10 @@ function behaviorFromDraft(
  *   unrelated edit (rename, prompt tweak) must not rewrite the published
  *   definition's quad bytes or flip its content hash;
  * - an empty quad submits nothing — plain creates stay quad-less;
- * - any real change submits the full group (replace-all-four semantics).
+ * - any real change submits the full group (replace-all-four semantics);
+ * - EXCEPT a full clear on edit: draft empty but seed non-empty submits an
+ *   explicit empty group, because "submit nothing" would silently no-op the
+ *   clear and the stored quad would resurrect on reopen.
  *
  * Duplicate flows pass the source persona's quad as `seed` but with
  * `isEdit: false`: a duplicate is a CREATE, so a non-empty inherited quad
@@ -92,7 +95,8 @@ export function behaviorForSubmit(
     return group;
   }
   const seedGroup = behaviorFromDraft(seed);
-  return JSON.stringify(group) === JSON.stringify(seedGroup)
-    ? undefined
-    : group;
+  if (JSON.stringify(group) === JSON.stringify(seedGroup)) {
+    return undefined;
+  }
+  return group ?? {};
 }

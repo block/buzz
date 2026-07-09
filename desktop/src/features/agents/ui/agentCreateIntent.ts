@@ -9,9 +9,8 @@ import {
  * - `definition` — a keyless agent definition (persona record) only.
  * - `definition_start` — definition plus an immediately created + spawned
  *   managed instance linked via `personaId` (today's quick-start flow).
- * - `instance` — a standalone keyed managed agent (no definition record).
  */
-export type AgentCreateIntent = "definition" | "definition_start" | "instance";
+export type AgentCreateIntent = "definition" | "definition_start";
 
 /**
  * Default intent for callers that don't pass one. Un-migrated callers of
