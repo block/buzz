@@ -96,7 +96,8 @@ const LazySettingsScreen = React.lazy(async () => {
 export function AppShell() {
   useWebviewZoomShortcuts();
   useTauriWindowDrag();
-  useWebviewScrollBoundaryLock();
+  const virtuaTimelineEnabled = useFeatureEnabled("virtuaTimeline");
+  useWebviewScrollBoundaryLock(!virtuaTimelineEnabled);
 
   const workspacesHook = useWorkspaces();
   const workspaceRailEnabled = useFeatureEnabled("workspaceRail");

@@ -80,8 +80,10 @@ function isConversationScroller(element: HTMLElement) {
  * remain; every other boundary — including all horizontal ones — is locked and
  * cannot chain to the viewport.
  */
-export function useWebviewScrollBoundaryLock() {
+export function useWebviewScrollBoundaryLock(enabled = true) {
   React.useEffect(() => {
+    if (!enabled) return;
+
     function handleWheel(event: WheelEvent) {
       if (event.defaultPrevented || event.ctrlKey) {
         return;
@@ -137,5 +139,5 @@ export function useWebviewScrollBoundaryLock() {
     return () => {
       window.removeEventListener("wheel", handleWheel, { capture: true });
     };
-  }, []);
+  }, [enabled]);
 }
