@@ -638,12 +638,14 @@ fn is_databricks_provider(provider: Option<&str>) -> bool {
             .map(str::trim)
             .map(str::to_ascii_lowercase)
             .as_deref(),
-        Some("databricks" | "databricks_v2")
+        Some("databricks" | "databricks_v2" | "databricks-v2")
     )
 }
 
 fn databricks_agent_provider(provider: &str) -> buzz_agent_pkg::config::Provider {
-    if provider.trim().eq_ignore_ascii_case("databricks_v2") {
+    if provider.trim().eq_ignore_ascii_case("databricks_v2")
+        || provider.trim().eq_ignore_ascii_case("databricks-v2")
+    {
         buzz_agent_pkg::config::Provider::DatabricksV2
     } else {
         buzz_agent_pkg::config::Provider::Databricks

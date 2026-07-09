@@ -1235,13 +1235,18 @@ pub fn reconcile_provider_mcp_commands(app: &tauri::AppHandle) {
     }
 }
 
-fn reconcile_databricks_v1_to_v2_in_file(path: &Path) {
-    use crate::managed_agents::DERIVED_PROVIDER_MODEL_ENV_KEYS;
+fn reconcile_databricks_v1_to_v2_in_file(path: &Path, rewrite_v1_provider: bool) {
+    use crate::managed_agents::is_derived_provider_model_key;
     patch_json_records(path, |obj| {
         let mut changed = false;
 
-        // Rewrite stale v1 provider field to v2.
-        if obj.get("provider").and_then(|v| v.as_str()) == Some("databricks") {
+        // Only rewrite the structured provider field when the baked build env
+        // marks this as a Block build (BUZZ_AGENT_PROVIDER == "databricks_v2").
+        // OSS users may intentionally select V1 (Model Serving), so we must not
+        // silently migrate their provider to V2 (AI Gateway).
+        if rewrite_v1_provider
+            && obj.get("provider").and_then(|v| v.as_str()) == Some("databricks")
+        {
             eprintln!(
                 "buzz-desktop: databricks-v1-to-v2: {:?}: provider \"databricks\" → \"databricks_v2\"",
                 obj.get("name").and_then(|v| v.as_str()).unwrap_or("?"),
@@ -1253,19 +1258,26 @@ fn reconcile_databricks_v1_to_v2_in_file(path: &Path) {
             changed = true;
         }
 
-        // Strip derived provider/model keys from env_vars on ALL records.
-        // These keys are re-derived from structured fields at spawn time;
-        // stale copies in env_vars silently override the structured fields
-        // (last-write-wins in Command::env) and can cause V1 routing even
-        // when the provider dropdown shows V2.
+        // Strip derived provider/model keys from env_vars on ALL records,
+        // regardless of rewrite_v1_provider. These keys are re-derived from
+        // structured fields at spawn time; stale copies in env_vars silently
+        // override the structured fields (last-write-wins in Command::env) and
+        // can cause V1 routing even when the provider dropdown shows V2.
+        //
+        // The check is case-insensitive (matching the established helper)
+        // to cover any case-variant that may have been written historically.
         if let Some(serde_json::Value::Object(env_vars)) = obj.get_mut("env_vars") {
-            for key in DERIVED_PROVIDER_MODEL_ENV_KEYS {
-                if env_vars.remove(*key).is_some() {
-                    eprintln!(
-                        "buzz-desktop: databricks-v1-to-v2: removed stale env_vars[\"{key}\"]",
-                    );
-                    changed = true;
-                }
+            let stale_keys: Vec<String> = env_vars
+                .keys()
+                .filter(|k| is_derived_provider_model_key(k))
+                .cloned()
+                .collect();
+            for key in stale_keys {
+                env_vars.remove(key.as_str());
+                eprintln!(
+                    "buzz-desktop: databricks-v1-to-v2: removed stale env_vars[\"{key}\"]",
+                );
+                changed = true;
             }
         }
 
@@ -1273,26 +1285,37 @@ fn reconcile_databricks_v1_to_v2_in_file(path: &Path) {
     });
 }
 
-/// Migrate persisted agent records from Databricks V1 to V2 and strip stale
-/// derived provider/model keys from `env_vars`.
+/// Strip stale derived provider/model keys from `env_vars` in all
+/// managed-agent records, and — on Block builds — also migrate any persisted
+/// `provider: "databricks"` to `"databricks_v2"`.
 ///
-/// Two classes of record corruption are fixed:
+/// **Block builds** (where `baked_build_env()` contains
+/// `BUZZ_AGENT_PROVIDER=databricks_v2`): the structured `provider` field is
+/// rewritten V1→V2 because the baked release targets V2 exclusively. Records
+/// that were saved before this migration would otherwise silently override the
+/// baked value at spawn time (last-write-wins in `Command::env`).
 ///
-/// 1. `record.provider == "databricks"` — upgraded builds bake
-///    `BUZZ_AGENT_PROVIDER=databricks_v2`, but the persisted structured field
-///    overwrites it at spawn time (last-write-wins). Rewrite to `"databricks_v2"`.
+/// **OSS builds** (baked env empty): the `provider` field is left alone —
+/// V1 (`databricks`) is a valid Model Serving choice for OSS users.
 ///
-/// 2. Stale `BUZZ_AGENT_PROVIDER` / `BUZZ_AGENT_MODEL` / `GOOSE_PROVIDER` /
-///    `GOOSE_MODEL` in `record.env_vars` — these are derived from structured
-///    fields at spawn time and must never live in `env_vars`. A stale copy
-///    silently overrides the structured fields, causing V1 routing even when
-///    the UI shows V2 (or pinning a thinking-effort value after the user
-///    changes it). Stripped for ALL records regardless of provider.
+/// In both cases, stale `BUZZ_AGENT_PROVIDER` / `BUZZ_AGENT_MODEL` /
+/// `GOOSE_PROVIDER` / `GOOSE_MODEL` are stripped from `env_vars`. These keys
+/// are always re-derived from structured fields at spawn time; persisted copies
+/// silence UI edits and cause stale routing.
 ///
 /// Covers both the current app data dir and the canonical dev data dir
 /// (for worktree instances) — same dual-dir pattern as
 /// `reconcile_legacy_command_names` and `reconcile_provider_mcp_commands`.
 pub fn reconcile_databricks_v1_to_v2(app: &tauri::AppHandle) {
+    use crate::managed_agents::baked_build_env;
+    // On Block builds, the baked env contains BUZZ_AGENT_PROVIDER=databricks_v2.
+    // Use that as a reliable signal that this is a Block build and the V1
+    // provider should be migrated. OSS builds have an empty baked env, so
+    // rewrite_v1_provider is false and the structured provider is preserved.
+    let rewrite_v1_provider = baked_build_env()
+        .get("BUZZ_AGENT_PROVIDER")
+        .map(|v| v == "databricks_v2")
+        .unwrap_or(false);
     let Ok(current_dir) = app.path().app_data_dir() else {
         return;
     };
@@ -1305,7 +1328,7 @@ pub fn reconcile_databricks_v1_to_v2(app: &tauri::AppHandle) {
     for dir in dirs {
         let path = dir.join("agents/managed-agents.json");
         if path.exists() {
-            reconcile_databricks_v1_to_v2_in_file(&path);
+            reconcile_databricks_v1_to_v2_in_file(&path, rewrite_v1_provider);
         }
     }
 }

@@ -4,7 +4,10 @@ use super::*;
 // ── reconcile_databricks_v1_to_v2_in_file ────────────────────────────────
 
 #[test]
-fn reconcile_databricks_v1_to_v2_rewrites_v1_provider_to_v2() {
+fn reconcile_databricks_v1_to_v2_rewrites_v1_provider_on_block_build() {
+    // rewrite_v1_provider=true simulates a Block build (baked env has
+    // BUZZ_AGENT_PROVIDER=databricks_v2). The structured provider field
+    // must be migrated V1→V2.
     let dir = tempfile::tempdir().unwrap();
     write_agents_json(
         dir.path(),
@@ -15,15 +18,53 @@ fn reconcile_databricks_v1_to_v2_rewrites_v1_provider_to_v2() {
         }]),
     );
 
-    reconcile_databricks_v1_to_v2_in_file(&dir.path().join("agents/managed-agents.json"));
+    reconcile_databricks_v1_to_v2_in_file(
+        &dir.path().join("agents/managed-agents.json"),
+        /*rewrite_v1_provider=*/ true,
+    );
 
     let records = read_agents_json(dir.path());
     assert_eq!(
         records[0]["provider"], "databricks_v2",
-        "provider: \"databricks\" must be rewritten to \"databricks_v2\""
+        "provider: \"databricks\" must be rewritten to \"databricks_v2\" on Block builds"
     );
     // Model and other fields must be unchanged.
     assert_eq!(records[0]["model"], "dbrx-instruct");
+}
+
+#[test]
+fn reconcile_databricks_v1_to_v2_preserves_v1_provider_on_oss_build() {
+    // rewrite_v1_provider=false simulates an OSS build (empty baked env).
+    // V1 ("databricks") is a valid Model Serving provider for OSS users;
+    // the structured provider field must NOT be rewritten.
+    let dir = tempfile::tempdir().unwrap();
+    write_agents_json(
+        dir.path(),
+        &serde_json::json!([{
+            "name": "Brain",
+            "provider": "databricks",
+            "model": "dbrx-instruct",
+            "env_vars": { "BUZZ_AGENT_PROVIDER": "databricks" }
+        }]),
+    );
+
+    reconcile_databricks_v1_to_v2_in_file(
+        &dir.path().join("agents/managed-agents.json"),
+        /*rewrite_v1_provider=*/ false,
+    );
+
+    let records = read_agents_json(dir.path());
+    // Provider field preserved.
+    assert_eq!(
+        records[0]["provider"], "databricks",
+        "provider field must not be rewritten on OSS builds"
+    );
+    assert_eq!(records[0]["model"], "dbrx-instruct");
+    // Stale env var is still stripped even on OSS builds.
+    assert!(
+        records[0]["env_vars"].get("BUZZ_AGENT_PROVIDER").is_none(),
+        "BUZZ_AGENT_PROVIDER must be stripped even when provider rewrite is disabled"
+    );
 }
 
 #[test]
@@ -38,7 +79,7 @@ fn reconcile_databricks_v1_to_v2_preserves_v2_provider() {
     let path = dir.path().join("agents/managed-agents.json");
     let before = std::fs::read_to_string(&path).unwrap();
 
-    reconcile_databricks_v1_to_v2_in_file(&path);
+    reconcile_databricks_v1_to_v2_in_file(&path, /*rewrite_v1_provider=*/ true);
 
     // File must be unchanged — no spurious re-write.
     assert_eq!(before, std::fs::read_to_string(&path).unwrap());
@@ -60,7 +101,10 @@ fn reconcile_databricks_v1_to_v2_strips_stale_buzz_agent_provider_from_env_vars(
         }]),
     );
 
-    reconcile_databricks_v1_to_v2_in_file(&dir.path().join("agents/managed-agents.json"));
+    reconcile_databricks_v1_to_v2_in_file(
+        &dir.path().join("agents/managed-agents.json"),
+        /*rewrite_v1_provider=*/ true,
+    );
 
     let records = read_agents_json(dir.path());
     // Stale derived key must be removed.
@@ -94,7 +138,10 @@ fn reconcile_databricks_v1_to_v2_strips_all_derived_keys_from_env_vars() {
         }]),
     );
 
-    reconcile_databricks_v1_to_v2_in_file(&dir.path().join("agents/managed-agents.json"));
+    reconcile_databricks_v1_to_v2_in_file(
+        &dir.path().join("agents/managed-agents.json"),
+        /*rewrite_v1_provider=*/ true,
+    );
 
     let records = read_agents_json(dir.path());
     let env_vars = &records[0]["env_vars"];
@@ -108,9 +155,9 @@ fn reconcile_databricks_v1_to_v2_strips_all_derived_keys_from_env_vars() {
 }
 
 #[test]
-fn reconcile_databricks_v1_to_v2_handles_multiple_records() {
-    // Both the V1 rewrite and env_vars stripping must apply to every record,
-    // not just the first.
+fn reconcile_databricks_v1_to_v2_handles_multiple_records_block_build() {
+    // On Block builds (rewrite_v1_provider=true): V1 provider is migrated and
+    // env_vars stripping applies to every record.
     let dir = tempfile::tempdir().unwrap();
     write_agents_json(
         dir.path(),
@@ -133,7 +180,10 @@ fn reconcile_databricks_v1_to_v2_handles_multiple_records() {
         ]),
     );
 
-    reconcile_databricks_v1_to_v2_in_file(&dir.path().join("agents/managed-agents.json"));
+    reconcile_databricks_v1_to_v2_in_file(
+        &dir.path().join("agents/managed-agents.json"),
+        /*rewrite_v1_provider=*/ true,
+    );
 
     let records = read_agents_json(dir.path());
     // A: provider rewritten, stale env_var stripped.
@@ -142,7 +192,7 @@ fn reconcile_databricks_v1_to_v2_handles_multiple_records() {
     // B: provider untouched, stale BUZZ_AGENT_MODEL stripped.
     assert_eq!(records[1]["provider"], "anthropic");
     assert!(records[1]["env_vars"].get("BUZZ_AGENT_MODEL").is_none());
-    // C: already V2, no stale keys — unchanged.
+    // C: V2 provider, no stale keys — unchanged.
     assert_eq!(records[2]["provider"], "databricks_v2");
 }
 
@@ -159,9 +209,9 @@ fn reconcile_databricks_v1_to_v2_is_idempotent() {
     );
     let path = dir.path().join("agents/managed-agents.json");
 
-    reconcile_databricks_v1_to_v2_in_file(&path);
+    reconcile_databricks_v1_to_v2_in_file(&path, /*rewrite_v1_provider=*/ true);
     let after_first = std::fs::read_to_string(&path).unwrap();
-    reconcile_databricks_v1_to_v2_in_file(&path);
+    reconcile_databricks_v1_to_v2_in_file(&path, /*rewrite_v1_provider=*/ true);
     let after_second = std::fs::read_to_string(&path).unwrap();
 
     assert_eq!(
@@ -182,7 +232,7 @@ fn reconcile_databricks_v1_to_v2_preserves_non_databricks_providers() {
     let path = dir.path().join("agents/managed-agents.json");
     let before = std::fs::read_to_string(&path).unwrap();
 
-    reconcile_databricks_v1_to_v2_in_file(&path);
+    reconcile_databricks_v1_to_v2_in_file(&path, /*rewrite_v1_provider=*/ true);
 
     // No provider is modified, so the file content is identical.
     assert_eq!(before, std::fs::read_to_string(&path).unwrap());
@@ -210,7 +260,10 @@ fn reconcile_databricks_v1_to_v2_strips_derived_keys_from_keyless_persona_defini
         }]),
     );
 
-    reconcile_databricks_v1_to_v2_in_file(&dir.path().join("agents/managed-agents.json"));
+    reconcile_databricks_v1_to_v2_in_file(
+        &dir.path().join("agents/managed-agents.json"),
+        /*rewrite_v1_provider=*/ true,
+    );
 
     let records = read_agents_json(dir.path());
     let env_vars = &records[0]["env_vars"];
@@ -223,6 +276,38 @@ fn reconcile_databricks_v1_to_v2_strips_derived_keys_from_keyless_persona_defini
         env_vars.get("BUZZ_AGENT_MODEL").is_none(),
         "BUZZ_AGENT_MODEL must be stripped from keyless persona definition env_vars"
     );
+    // Non-derived key preserved.
+    assert_eq!(env_vars["DATABRICKS_HOST"], "https://dbc.example.com");
+}
+
+#[test]
+fn reconcile_databricks_v1_to_v2_strips_derived_keys_case_insensitively() {
+    // The derived-key check is case-insensitive (matching is_derived_provider_model_key).
+    // A record with mixed-case variants must have those keys stripped.
+    let dir = tempfile::tempdir().unwrap();
+    write_agents_json(
+        dir.path(),
+        &serde_json::json!([{
+            "name": "Brain",
+            "provider": "databricks_v2",
+            "env_vars": {
+                "buzz_agent_provider": "databricks",
+                "Buzz_Agent_Model": "goose-claude-4-6-sonnet",
+                "DATABRICKS_HOST": "https://dbc.example.com"
+            }
+        }]),
+    );
+
+    reconcile_databricks_v1_to_v2_in_file(
+        &dir.path().join("agents/managed-agents.json"),
+        /*rewrite_v1_provider=*/ true,
+    );
+
+    let records = read_agents_json(dir.path());
+    let env_vars = &records[0]["env_vars"];
+    // Mixed-case derived keys must be stripped.
+    assert!(env_vars.get("buzz_agent_provider").is_none());
+    assert!(env_vars.get("Buzz_Agent_Model").is_none());
     // Non-derived key preserved.
     assert_eq!(env_vars["DATABRICKS_HOST"], "https://dbc.example.com");
 }

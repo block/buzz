@@ -319,7 +319,7 @@ fn buzz_agent_requirements(effective: &EffectiveAgentEnv) -> Vec<Requirement> {
                     key: "OPENAI_COMPAT_API_KEY".to_string(),
                 });
             }
-        Some("databricks") | Some("databricks_v2")
+        Some("databricks") | Some("databricks_v2") | Some("databricks-v2")
             // DATABRICKS_HOST is hard-required; DATABRICKS_TOKEN is optional
             // (OAuth PKCE is the normal path — see buzz-agent/src/config.rs:143).
             if env_key_missing("DATABRICKS_HOST") => {
@@ -427,7 +427,7 @@ fn goose_requirements(
                 key: "OPENAI_COMPAT_API_KEY".to_string(),
             });
         }
-        Some("databricks") | Some("databricks_v2")
+        Some("databricks") | Some("databricks_v2") | Some("databricks-v2")
             if env_key_missing("DATABRICKS_HOST") && !file_key_present("DATABRICKS_HOST") =>
         {
             missing.push(Requirement::EnvKey {
@@ -1250,6 +1250,30 @@ mod tests {
         assert!(
             agent_readiness(&env).is_ready(),
             "databricks-v2 alias with DATABRICKS_MODEL must be Ready"
+        );
+    }
+
+    #[test]
+    fn buzz_agent_databricks_hyphen_alias_missing_host_returns_not_ready() {
+        // The hyphen alias "databricks-v2" requires DATABRICKS_HOST just like
+        // the underscore variants. Without it the agent cannot reach the endpoint.
+        let env = make_env(
+            "buzz-agent",
+            env_with(&[
+                ("BUZZ_AGENT_PROVIDER", "databricks-v2"),
+                ("DATABRICKS_MODEL", "goose-claude-4-6-sonnet"),
+                // DATABRICKS_HOST intentionally absent
+            ]),
+        );
+        let result = agent_readiness(&env);
+        assert!(
+            !result.is_ready(),
+            "databricks-v2 without DATABRICKS_HOST must be NotReady"
+        );
+        let reqs = result.requirements();
+        assert!(
+            reqs.iter().any(|r| matches!(r, Requirement::EnvKey { key } if key == "DATABRICKS_HOST")),
+            "missing requirements must include DATABRICKS_HOST; got {reqs:?}"
         );
     }
 

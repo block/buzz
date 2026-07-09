@@ -16,6 +16,7 @@ export const NO_RUNTIME_DROPDOWN_VALUE = "__no_runtime__";
 
 const KNOWN_LLM_PROVIDER_IDS = [
   "anthropic",
+  "databricks",
   "databricks_v2",
   "openai",
   "openai-compat",
@@ -49,7 +50,8 @@ const PERSONA_LLM_PROVIDER_OPTIONS: readonly PersonaModelOption[] = [
   { id: "anthropic", label: "Anthropic" },
   { id: "openai", label: "OpenAI" },
   { id: "openai-compat", label: "OpenAI-compatible" },
-  { id: "databricks_v2", label: "Databricks v2" },
+  { id: "databricks", label: "Databricks (Model Serving)" },
+  { id: "databricks_v2", label: "Databricks v2 (AI Gateway)" },
 ];
 
 const PERSONA_MODEL_OPTIONS_BY_RUNTIME: Record<
