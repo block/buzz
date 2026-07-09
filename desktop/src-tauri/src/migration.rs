@@ -1244,8 +1244,7 @@ fn reconcile_databricks_v1_to_v2_in_file(path: &Path, rewrite_v1_provider: bool)
         // marks this as a Block build (BUZZ_AGENT_PROVIDER == "databricks_v2").
         // OSS users may intentionally select V1 (Model Serving), so we must not
         // silently migrate their provider to V2 (AI Gateway).
-        if rewrite_v1_provider
-            && obj.get("provider").and_then(|v| v.as_str()) == Some("databricks")
+        if rewrite_v1_provider && obj.get("provider").and_then(|v| v.as_str()) == Some("databricks")
         {
             eprintln!(
                 "buzz-desktop: databricks-v1-to-v2: {:?}: provider \"databricks\" → \"databricks_v2\"",
@@ -1274,9 +1273,7 @@ fn reconcile_databricks_v1_to_v2_in_file(path: &Path, rewrite_v1_provider: bool)
                 .collect();
             for key in stale_keys {
                 env_vars.remove(key.as_str());
-                eprintln!(
-                    "buzz-desktop: databricks-v1-to-v2: removed stale env_vars[\"{key}\"]",
-                );
+                eprintln!("buzz-desktop: databricks-v1-to-v2: removed stale env_vars[\"{key}\"]",);
                 changed = true;
             }
         }

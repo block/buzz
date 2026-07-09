@@ -282,7 +282,9 @@ fn buzz_agent_requirements(effective: &EffectiveAgentEnv) -> Vec<Requirement> {
     // baked buzz-releases env sets DATABRICKS_MODEL but not BUZZ_AGENT_MODEL,
     // so without this fallback agents baked from releases appear "not ready".
     let provider_model_key = match provider {
-        Some("databricks") | Some("databricks_v2") | Some("databricks-v2") => Some("DATABRICKS_MODEL"),
+        Some("databricks") | Some("databricks_v2") | Some("databricks-v2") => {
+            Some("DATABRICKS_MODEL")
+        }
         Some("anthropic") => Some("ANTHROPIC_MODEL"),
         Some("openai") | Some("openai-compat") => Some("OPENAI_COMPAT_MODEL"),
         _ => None,
@@ -1272,7 +1274,8 @@ mod tests {
         );
         let reqs = result.requirements();
         assert!(
-            reqs.iter().any(|r| matches!(r, Requirement::EnvKey { key } if key == "DATABRICKS_HOST")),
+            reqs.iter()
+                .any(|r| matches!(r, Requirement::EnvKey { key } if key == "DATABRICKS_HOST")),
             "missing requirements must include DATABRICKS_HOST; got {reqs:?}"
         );
     }
@@ -1342,9 +1345,11 @@ mod tests {
             !result.is_ready(),
             "empty DATABRICKS_MODEL with no BUZZ_AGENT_MODEL must be NotReady"
         );
-        assert!(result.requirements().contains(&Requirement::NormalizedField {
-            field: "model".to_string()
-        }));
+        assert!(result
+            .requirements()
+            .contains(&Requirement::NormalizedField {
+                field: "model".to_string()
+            }));
     }
 }
 

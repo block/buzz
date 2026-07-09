@@ -125,7 +125,10 @@ const overrides = new Map([
   // Windows-CI portability: replaced POSIX true/false probes with current_exe()
   // stand-in + present_binary_str()/static_commands() helpers (+29 lines).
   // Tests now pass on windows-latest CI shard without POSIX shell utilities.
-  ["src-tauri/src/managed_agents/readiness.rs", 1403],
+  // databricks-v1-to-v2-migration: databricks-v2 hyphen-alias added to all
+  // host/credential match arms + 30+ readiness tests for provider aliases,
+  // missing-host, and DATABRICKS_MODEL fallback. Load-bearing correctness fix.
+  ["src-tauri/src/managed_agents/readiness.rs", 1546],
   // applyWorkspace reposDir parameter plus the validateReposDir binding,
   // threaded through Tauri invokes for configurable repos_dir, plus the
   // harness-persona-sync `harnessOverride` create-input bit — load-bearing
@@ -185,7 +188,9 @@ const overrides = new Map([
   // the pre-identity data migrations; still queued to split further.
   // unified-agent-model 1A.1: materialize_agent_runtimes split to
   // migration/materialize.rs, ratcheting 1310 -> 1297.
-  ["src-tauri/src/migration.rs", 1297],
+  // databricks-v1-to-v2-migration: reconcile_databricks_v1_to_v2 migration
+  // + inner fn with baked-env gate + 26 tests. Load-bearing correctness fix.
+  ["src-tauri/src/migration.rs", 1389],
   // onMarkRead + isUnread prop threading (mirrors the onMarkUnread prop
   // already here) for the single-toggle mark-read/unread menu item — a small
   // overage from load-bearing per-message plumbing, not generic debt growth.
