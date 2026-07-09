@@ -79,8 +79,7 @@ pub(super) fn build_deploy_payload(
     let persona_env =
         crate::managed_agents::resolve_persona_env(app, record.persona_id.as_deref())?;
     // Merge: global < persona (persona wins over global).
-    let global_persona_merged =
-        crate::managed_agents::merged_user_env(&global_env, &persona_env);
+    let global_persona_merged = crate::managed_agents::merged_user_env(&global_env, &persona_env);
     // Merge: global+persona < agent (agent wins over everything).
     let merged_env =
         crate::managed_agents::merged_user_env(&global_persona_merged, &record.env_vars);

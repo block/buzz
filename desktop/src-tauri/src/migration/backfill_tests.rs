@@ -131,7 +131,7 @@ fn backfill_of_promptless_record_keeps_spawn_hash_stable() {
 
     let pre_records = load_typed(dir.path());
     let pre_instance = pre_records.iter().find(|r| !r.pubkey.is_empty()).unwrap();
-    let hash_before = spawn_config_hash(pre_instance, &[], "wss://ws.example");
+    let hash_before = spawn_config_hash(pre_instance, &[], "wss://ws.example", &Default::default());
 
     backfill_standalone_agents_in_dir(&base(dir.path())).unwrap();
 
@@ -141,7 +141,12 @@ fn backfill_of_promptless_record_keeps_spawn_hash_stable() {
         .iter()
         .filter_map(|r| r.to_persona_view())
         .collect();
-    let hash_after = spawn_config_hash(post_instance, &personas, "wss://ws.example");
+    let hash_after = spawn_config_hash(
+        post_instance,
+        &personas,
+        "wss://ws.example",
+        &Default::default(),
+    );
 
     assert_eq!(
         hash_before, hash_after,
@@ -168,7 +173,7 @@ fn backfill_of_prompted_record_keeps_spawn_hash_stable() {
 
     let pre_records = load_typed(dir.path());
     let pre_instance = pre_records.iter().find(|r| !r.pubkey.is_empty()).unwrap();
-    let hash_before = spawn_config_hash(pre_instance, &[], "wss://ws.example");
+    let hash_before = spawn_config_hash(pre_instance, &[], "wss://ws.example", &Default::default());
 
     backfill_standalone_agents_in_dir(&base(dir.path())).unwrap();
 
@@ -178,7 +183,12 @@ fn backfill_of_prompted_record_keeps_spawn_hash_stable() {
         .iter()
         .filter_map(|r| r.to_persona_view())
         .collect();
-    let hash_after = spawn_config_hash(post_instance, &personas, "wss://ws.example");
+    let hash_after = spawn_config_hash(
+        post_instance,
+        &personas,
+        "wss://ws.example",
+        &Default::default(),
+    );
 
     assert_eq!(hash_before, hash_after);
 }

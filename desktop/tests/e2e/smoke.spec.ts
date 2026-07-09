@@ -148,7 +148,10 @@ test("create agent supports parallelism and system prompt overrides", async ({
 
   // Fix 3 (auto-open Advanced when required keys appear) may have already
   // opened the section; only click to open if it is currently collapsed.
-  const advancedToggle = page.getByRole("button", { name: "Advanced", exact: true });
+  const advancedToggle = page.getByRole("button", {
+    name: "Advanced",
+    exact: true,
+  });
   if ((await advancedToggle.getAttribute("aria-expanded")) === "false") {
     await advancedToggle.click();
   }

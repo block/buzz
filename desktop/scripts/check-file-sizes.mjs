@@ -138,6 +138,7 @@ const overrides = new Map([
   // #1613 augmented-PATH readiness probes grew the file +3 past the prior cap.
   // +16: resolve_effective_agent_env + global-config readiness wiring (#1448).
   // +1 rebase merge: GlobalAgentConfig import added alongside AcpAvailabilityStatus.
+  // +2 rebase onto #1667: behavioral quad fields in PersonaRecord/ManagedAgentRecord.
   ["src-tauri/src/managed_agents/readiness.rs", 1562],
   // applyWorkspace reposDir parameter plus the validateReposDir binding,
   // threaded through Tauri invokes for configurable repos_dir, plus the
@@ -298,6 +299,10 @@ const overrides = new Map([
   // +8: harness_override thread-through in update_managed_agent so a deliberate
   // Custom pin routes to update_time_agent_command_override (comment + call).
   ["src-tauri/src/commands/agent_models.rs", 1079],
+  // global-agent-config: get_agent_config_surface / write_agent_config_field /
+  // put_agent_session_config commands + GlobalAgentConfig serde types. New file
+  // in this PR; queued to split with the command module refactor.
+  ["src-tauri/src/commands/agent_config.rs", 1002],
   // draft-persistence predicate: submit-time `loadDraft` check + inline comment
   // + deps-array entry in submitMessage closes the never-persisted-boundary
   // defect (Thufir Pass-3 finding). Load-bearing correctness fix; queued to
@@ -328,7 +333,9 @@ const overrides = new Map([
   // F1-fix: added globalEnvVars to useRequiredCredentialState so globally-satisfied
   // credential keys are excluded from requiredEnvKeyMissing (display/gate parity).
   // Feature logic, not generic debt. Approved override; still queued to split.
-  ["src/features/agents/ui/AgentInstanceEditDialog.tsx", 1140],
+  // +23 rebase onto #1667: behavioral quad fields (respond_to/parallelism/toolsets)
+  // plumbed through AgentInstanceEditDialog from PersonaAdvancedFields.
+  ["src/features/agents/ui/AgentInstanceEditDialog.tsx", 1163],
 ]);
 
 await runFileSizeCheck({

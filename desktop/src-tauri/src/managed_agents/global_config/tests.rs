@@ -206,6 +206,10 @@ fn bare_record() -> ManagedAgentRecord {
         source_team_persona_slug: None,
         relay_mesh: None,
         auto_restart_on_config_change: false,
+        definition_respond_to: None,
+        definition_respond_to_allowlist: vec![],
+        definition_mcp_toolsets: None,
+        definition_parallelism: None,
     }
 }
 
@@ -224,6 +228,10 @@ fn persona(id: &str, model: Option<&str>, provider: Option<&str>) -> PersonaReco
         source_team: None,
         source_team_persona_slug: None,
         env_vars: BTreeMap::new(),
+        respond_to: None,
+        respond_to_allowlist: vec![],
+        mcp_toolsets: None,
+        parallelism: None,
         created_at: "".to_string(),
         updated_at: "".to_string(),
     }
@@ -439,6 +447,10 @@ fn record_runtime_wins_over_persona_runtime_for_command_resolution() {
         source_team: None,
         source_team_persona_slug: None,
         env_vars: BTreeMap::new(),
+        respond_to: None,
+        respond_to_allowlist: vec![],
+        mcp_toolsets: None,
+        parallelism: None,
         created_at: "".to_string(),
         updated_at: "".to_string(),
     };

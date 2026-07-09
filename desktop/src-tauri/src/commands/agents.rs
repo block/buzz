@@ -1153,9 +1153,9 @@ pub async fn delete_managed_agent(
 #[path = "agents_deploy.rs"]
 mod deploy;
 use deploy::build_deploy_payload;
-pub(crate) use deploy::resolve_deploy_model_provider;
 #[cfg(test)]
 use deploy::deploy_payload_json;
+pub(crate) use deploy::resolve_deploy_model_provider;
 
 #[path = "agents_profile.rs"]
 mod profile;

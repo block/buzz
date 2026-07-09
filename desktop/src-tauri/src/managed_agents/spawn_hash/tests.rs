@@ -334,8 +334,18 @@ fn resnapshot_does_not_clobber_record_quad_with_definition_absent_quad() {
     definition_with_quad[0].mcp_toolsets = Some("default".into());
 
     assert_eq!(
-        spawn_config_hash(&rec, &quadless_definition, "wss://ws.example"),
-        spawn_config_hash(&rec, &definition_with_quad, "wss://ws.example"),
+        spawn_config_hash(
+            &rec,
+            &quadless_definition,
+            "wss://ws.example",
+            &Default::default()
+        ),
+        spawn_config_hash(
+            &rec,
+            &definition_with_quad,
+            "wss://ws.example",
+            &Default::default()
+        ),
         "definition quad must not leak into the spawn hash of an existing instance"
     );
 }
@@ -350,8 +360,8 @@ fn empty_prompt_hashes_like_absent_prompt() {
     let mut empty = record();
     empty.system_prompt = Some(String::new());
     assert_eq!(
-        spawn_config_hash(&absent, &[], "wss://ws.example"),
-        spawn_config_hash(&empty, &[], "wss://ws.example"),
+        spawn_config_hash(&absent, &[], "wss://ws.example", &Default::default()),
+        spawn_config_hash(&empty, &[], "wss://ws.example", &Default::default()),
     );
 }
 
@@ -370,8 +380,8 @@ fn team_pack_records_keep_empty_vs_absent_prompt_distinction() {
     empty.system_prompt = Some(String::new());
 
     assert_ne!(
-        spawn_config_hash(&absent, &[], "wss://ws.example"),
-        spawn_config_hash(&empty, &[], "wss://ws.example"),
+        spawn_config_hash(&absent, &[], "wss://ws.example", &Default::default()),
+        spawn_config_hash(&empty, &[], "wss://ws.example", &Default::default()),
         "suppressed pack prompt is a different spawn than inherited pack prompt"
     );
 }

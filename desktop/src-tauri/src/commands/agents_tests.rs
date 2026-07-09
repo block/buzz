@@ -56,6 +56,10 @@ fn bare_agent_record(
         source_team_persona_slug: None,
         relay_mesh: None,
         auto_restart_on_config_change: false,
+        definition_respond_to: None,
+        definition_respond_to_allowlist: vec![],
+        definition_mcp_toolsets: None,
+        definition_parallelism: None,
     }
 }
 fn persona_record(id: &str, model: Option<&str>, provider: Option<&str>) -> PersonaRecord {
@@ -74,6 +78,10 @@ fn persona_record(id: &str, model: Option<&str>, provider: Option<&str>) -> Pers
         source_team: None,
         source_team_persona_slug: None,
         env_vars: BTreeMap::new(),
+        respond_to: None,
+        respond_to_allowlist: vec![],
+        mcp_toolsets: None,
+        parallelism: None,
         created_at: "".to_string(),
         updated_at: "".to_string(),
     }
