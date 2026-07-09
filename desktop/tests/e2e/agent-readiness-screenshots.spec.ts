@@ -181,7 +181,10 @@ test.describe("agent readiness gate screenshots", () => {
     });
 
     // Scroll the required row into view so it is visible in the screenshot.
-    await page.getByTestId("env-vars-required-key").scrollIntoViewIfNeeded();
+    // Use evaluate to avoid detachment races with the motion.div container.
+    await page
+      .getByTestId("env-vars-required-key")
+      .evaluate((el) => el.scrollIntoView({ block: "nearest" }));
     await settleAnimations(page);
 
     const dialog = page.getByRole("dialog");

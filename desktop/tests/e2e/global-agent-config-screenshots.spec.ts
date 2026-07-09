@@ -30,14 +30,14 @@ async function openAgentsView(page: import("@playwright/test").Page) {
 
 /**
  * Navigate to the Agents view and open the Create Agent dialog via the
- * "Custom agent" option, then fill a placeholder name.
+ * "New agent" menu item, then fill a placeholder name.
  */
 async function openCreateDialog(page: import("@playwright/test").Page) {
   await page.goto("/");
   await page.getByTestId("open-agents-view").click();
   await page.getByTestId("new-agent-card").click();
-  await page.getByText("Custom agent").click();
-  await page.getByTestId("agent-name-input").fill("Test Agent");
+  await page.getByRole("menuitem", { name: /^New agent$/ }).click();
+  await page.locator("#persona-display-name").fill("Test Agent");
 }
 
 test.describe("global agent config screenshots", () => {
@@ -101,7 +101,10 @@ test.describe("global agent config screenshots", () => {
     );
 
     // Scroll the required row into view.
-    await page.getByTestId("env-vars-required-key").scrollIntoViewIfNeeded();
+    // Use evaluate to avoid detachment races with the motion.div container.
+    await page
+      .getByTestId("env-vars-required-key")
+      .evaluate((el) => el.scrollIntoView({ block: "nearest" }));
     await settleAnimations(page);
 
     const dialog = page.getByRole("dialog");
@@ -117,7 +120,7 @@ test.describe("global agent config screenshots", () => {
     await installMockBridge(page, {
       globalAgentConfig: {
         provider: "anthropic",
-        model: null,
+        model: "claude-opus-4-5",
         env_vars: { ANTHROPIC_API_KEY: "sk-ant-global-value" },
       },
     });
@@ -126,7 +129,7 @@ test.describe("global agent config screenshots", () => {
 
     // Global env_vars satisfies ANTHROPIC_API_KEY, so computeLocalModeGate
     // excludes it from requiredEnvKeys — no locked amber row rendered.
-    await expect(page.locator("#agent-provider")).toBeVisible({
+    await expect(page.locator("#persona-llm-provider")).toBeVisible({
       timeout: 10_000,
     });
     // No required rows present — globally satisfied keys have no amber row.
@@ -134,7 +137,7 @@ test.describe("global agent config screenshots", () => {
       timeout: 5_000,
     });
     // Submit is enabled: effectiveProvider = global "anthropic" is valid.
-    await expect(page.getByTestId("create-agent-submit")).toBeEnabled({
+    await expect(page.getByTestId("persona-dialog-submit")).toBeEnabled({
       timeout: 5_000,
     });
 
@@ -142,7 +145,7 @@ test.describe("global agent config screenshots", () => {
     // the globally-satisfied key is excluded from requiredEnvKeys entirely.
     const dialog = page.getByRole("dialog");
     const envEditor = dialog.getByTestId("env-vars-editor");
-    await envEditor.scrollIntoViewIfNeeded();
+    await envEditor.evaluate((el) => el.scrollIntoView({ block: "nearest" }));
     await settleAnimations(page);
 
     await dialog.screenshot({
@@ -160,7 +163,7 @@ test.describe("global agent config screenshots", () => {
     await openCreateDialog(page);
 
     // Provider empty + no global provider → submit BLOCKED.
-    await expect(page.getByTestId("create-agent-submit")).toBeDisabled({
+    await expect(page.getByTestId("persona-dialog-submit")).toBeDisabled({
       timeout: 10_000,
     });
     await settleAnimations(page);
@@ -177,7 +180,7 @@ test.describe("global agent config screenshots", () => {
     await installMockBridge(page, {
       globalAgentConfig: {
         provider: "anthropic",
-        model: null,
+        model: "claude-opus-4-5",
         env_vars: { ANTHROPIC_API_KEY: "sk-ant-global-value" },
       },
     });
@@ -185,7 +188,7 @@ test.describe("global agent config screenshots", () => {
     await openCreateDialog(page);
 
     // Global provider satisfies the provider-default rule → submit enabled.
-    await expect(page.getByTestId("create-agent-submit")).toBeEnabled({
+    await expect(page.getByTestId("persona-dialog-submit")).toBeEnabled({
       timeout: 10_000,
     });
     await settleAnimations(page);
