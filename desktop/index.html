@@ -27,7 +27,7 @@
     </style>
     <script>
       (() => {
-        var cached, bg, parsed;
+        var cached, bg, parsed, vars, key;
         try {
           cached = window.localStorage.getItem("buzz-theme-cache");
           if (!cached) {
@@ -38,7 +38,21 @@
             return;
           }
           parsed = JSON.parse(cached);
-          bg = parsed.vars["--background"];
+          // Seed the full cached vars map on <html> before paint, mirroring
+          // ThemeProvider.applyCachedVars(). The loading gate's grainient reads
+          // --chart-*, --primary, --foreground, etc. — not just --background —
+          // so seeding only --background would let a cached non-Latte theme
+          // (houston/buzz/custom) paint the splash from the static Catppuccin
+          // :root vars until React mounts.
+          vars = parsed.vars;
+          if (vars) {
+            for (key in vars) {
+              if (Object.hasOwn(vars, key)) {
+                document.documentElement.style.setProperty(key, vars[key]);
+              }
+            }
+          }
+          bg = vars && vars["--background"];
           if (bg) document.documentElement.style.backgroundColor = `hsl(${bg})`;
           // Match the cached light/dark class so themed vars resolve correctly
           // before ThemeProvider mounts.
