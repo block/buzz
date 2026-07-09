@@ -19,6 +19,7 @@ import {
 import { removeSelfProfileCachesForRelay } from "@/features/profile/lib/selfProfileStorage";
 import { removeChannelSnapshotForRelay } from "@/features/channels/channelSnapshot";
 import { removeMessageSnapshotsForRelay } from "@/features/messages/lib/messageSnapshot";
+import { clearSavedWorkspaceSnapshot } from "@/features/agents/activeAgentTurnsStore";
 
 export type UseWorkspacesReturn = {
   workspaces: Workspace[];
@@ -120,6 +121,7 @@ function useWorkspacesInternal(): UseWorkspacesReturn {
           removeSelfProfileCachesForRelay(removed.relayUrl);
           removeChannelSnapshotForRelay(removed.relayUrl);
           removeMessageSnapshotsForRelay(removed.relayUrl);
+          clearSavedWorkspaceSnapshot(id);
         }
       }
 

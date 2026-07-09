@@ -559,6 +559,11 @@ export function useActiveAgentTurnsBridge(
   }, [agents]);
 }
 
+/**
+ * Clears all live turn state (active turns, offsets, watermarks, tombstones).
+ * Intentionally preserves `savedByWorkspace` — workspace-switch snapshots
+ * must survive the reset that runs between save and restore.
+ */
 export function resetActiveAgentTurnsStore() {
   activeTurnsByAgent.clear();
   lastProcessed.clear();
@@ -624,7 +629,13 @@ export function saveActiveAgentTurnsForWorkspace(workspaceId: string): void {
 
 /**
  * Restore a previously saved active-turns snapshot for `workspaceId` into the
- * (already-reset) module maps.  No-op when no snapshot exists.
+ * module maps.  No-op when no snapshot exists.
+ *
+ * Clears all four module maps before writing so the function is
+ * self-contained — it replaces rather than merging, regardless of whether the
+ * caller pre-cleared.  At the primary call site (`useWorkspaceInit`) the maps
+ * are already empty after `resetWorkspaceState()`, but this guard makes the
+ * contract explicit.
  *
  * Refreshes `lastActivityAt` on every restored turn so the prune interval
  * doesn't immediately kill turns that were saved more than 25 s ago (the prune
@@ -638,6 +649,12 @@ export function restoreActiveAgentTurnsForWorkspace(workspaceId: string): void {
   const snap = savedByWorkspace.get(workspaceId);
   if (!snap) return;
   savedByWorkspace.delete(workspaceId);
+
+  // Clear before writing so this is a replace, not a merge.
+  activeTurnsByAgent.clear();
+  clockOffsetByAgent.clear();
+  lastProcessed.clear();
+  terminalAtByAgent.clear();
 
   const now = Date.now();
 
@@ -664,4 +681,13 @@ export function restoreActiveAgentTurnsForWorkspace(workspaceId: string): void {
   cachedTurnSummaries.clear();
   cachedChannelTurnSummaries = null;
   notifyListeners();
+}
+
+/**
+ * Discard the saved turn-state snapshot for a workspace that has been
+ * permanently deleted so the entry doesn't sit in memory indefinitely.
+ * Call this alongside the other relay-specific GC in `removeWorkspace`.
+ */
+export function clearSavedWorkspaceSnapshot(workspaceId: string): void {
+  savedByWorkspace.delete(workspaceId);
 }

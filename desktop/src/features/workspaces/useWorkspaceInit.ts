@@ -139,9 +139,9 @@ export function useWorkspaceInit(
         // timers survive a round-trip (A → B → A keeps A's elapsed time).
         if (prevWorkspaceIdRef.current) {
           saveActiveAgentTurnsForWorkspace(prevWorkspaceIdRef.current);
-          // Null out immediately so a cancelled/failed incoming workspace
-          // switch doesn't re-save the now-empty store under the outgoing
-          // workspace ID and delete its snapshot.
+          // Null out immediately so a rapid workspace switch (A→B→C before
+          // B's applyWorkspace resolves) doesn't re-save the now-empty
+          // store under the outgoing workspace ID and delete its snapshot.
           prevWorkspaceIdRef.current = null;
         }
         resetWorkspaceState();

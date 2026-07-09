@@ -10,6 +10,7 @@ import {
   subscribeActiveAgentTurns,
   saveActiveAgentTurnsForWorkspace,
   restoreActiveAgentTurnsForWorkspace,
+  clearSavedWorkspaceSnapshot,
 } from "./activeAgentTurnsStore.ts";
 import {
   injectObserverEventsForE2E,
@@ -1374,7 +1375,13 @@ describe("workspace-switch save / restore", () => {
     syncAgentTurnsFromEvents(AGENT, [
       makeEvent({ seq: 1, turnId: "t1", channelId: "c1" }),
     ]);
+    let notified = 0;
+    const unsub = subscribeActiveAgentTurns(() => {
+      notified++;
+    });
     restoreActiveAgentTurnsForWorkspace("ws-unknown");
+    unsub();
+    assert.equal(notified, 0, "no-op restore must not notify listeners");
     // Store should be unchanged — still has the turn we set up above.
     assert.equal(getActiveTurnsForAgent(AGENT).length, 1);
   });
@@ -1544,5 +1551,23 @@ describe("workspace-switch save / restore", () => {
       getActiveTurnsForAgent(AGENT_2).map((s) => s.channelId),
     );
     assert.ok(bChannels.has("c2"), "ws-b must restore c2");
+  });
+
+  it("clearSavedWorkspaceSnapshot discards the snapshot so restore is a no-op", () => {
+    syncAgentTurnsFromEvents(AGENT, [
+      makeEvent({ seq: 1, turnId: "t1", channelId: "c1" }),
+    ]);
+    saveActiveAgentTurnsForWorkspace("ws-a");
+
+    // Simulate workspace deletion: GC the snapshot before switching back.
+    clearSavedWorkspaceSnapshot("ws-a");
+
+    resetActiveAgentTurnsStore();
+    restoreActiveAgentTurnsForWorkspace("ws-a");
+    assert.equal(
+      getActiveTurnsForAgent(AGENT).length,
+      0,
+      "restore must be no-op after clearSavedWorkspaceSnapshot",
+    );
   });
 });
