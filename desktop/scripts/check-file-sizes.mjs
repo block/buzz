@@ -190,7 +190,9 @@ const overrides = new Map([
   // migration/materialize.rs, ratcheting 1310 -> 1297.
   // databricks-v1-to-v2-migration: reconcile_databricks_v1_to_v2 migration
   // + inner fn with baked-env gate + 26 tests. Load-bearing correctness fix.
-  ["src-tauri/src/migration.rs", 1389],
+  // am review fix: also clear stale V1 model field on provider rewrite +
+  // new model-clear test. Load-bearing chimera fix.
+  ["src-tauri/src/migration.rs", 1402],
   // onMarkRead + isUnread prop threading (mirrors the onMarkUnread prop
   // already here) for the single-toggle mark-read/unread menu item — a small
   // overage from load-bearing per-message plumbing, not generic debt growth.

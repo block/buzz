@@ -1246,14 +1246,27 @@ fn reconcile_databricks_v1_to_v2_in_file(path: &Path, rewrite_v1_provider: bool)
         // silently migrate their provider to V2 (AI Gateway).
         if rewrite_v1_provider && obj.get("provider").and_then(|v| v.as_str()) == Some("databricks")
         {
+            let name = obj
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?")
+                .to_string();
             eprintln!(
-                "buzz-desktop: databricks-v1-to-v2: {:?}: provider \"databricks\" → \"databricks_v2\"",
-                obj.get("name").and_then(|v| v.as_str()).unwrap_or("?"),
+                "buzz-desktop: databricks-v1-to-v2: {name:?}: provider \"databricks\" → \"databricks_v2\"",
             );
             obj.insert(
                 "provider".to_string(),
                 serde_json::Value::String("databricks_v2".to_string()),
             );
+            // Also clear the model field — a V1 model name (e.g. "dbrx-instruct")
+            // on a V2 provider would shadow the baked DATABRICKS_MODEL at spawn time
+            // (BUZZ_AGENT_MODEL from runtime_metadata_env_vars takes priority in
+            // buzz-agent config.rs). Clearing it lets the baked V2 default win.
+            if obj.remove("model").is_some() {
+                eprintln!(
+                    "buzz-desktop: databricks-v1-to-v2: {name:?}: cleared stale V1 model field",
+                );
+            }
             changed = true;
         }
 

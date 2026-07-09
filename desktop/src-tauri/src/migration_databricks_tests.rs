@@ -7,7 +7,8 @@ use super::*;
 fn reconcile_databricks_v1_to_v2_rewrites_v1_provider_on_block_build() {
     // rewrite_v1_provider=true simulates a Block build (baked env has
     // BUZZ_AGENT_PROVIDER=databricks_v2). The structured provider field
-    // must be migrated V1→V2.
+    // must be migrated V1→V2 and the stale V1 model field must be cleared
+    // so the baked DATABRICKS_MODEL wins at spawn time instead of the V1 name.
     let dir = tempfile::tempdir().unwrap();
     write_agents_json(
         dir.path(),
@@ -28,8 +29,12 @@ fn reconcile_databricks_v1_to_v2_rewrites_v1_provider_on_block_build() {
         records[0]["provider"], "databricks_v2",
         "provider: \"databricks\" must be rewritten to \"databricks_v2\" on Block builds"
     );
-    // Model and other fields must be unchanged.
-    assert_eq!(records[0]["model"], "dbrx-instruct");
+    // Stale V1 model must be cleared so the baked DATABRICKS_MODEL is not
+    // shadowed by BUZZ_AGENT_MODEL at spawn time (last-write-wins in Command::env).
+    assert!(
+        records[0].get("model").map_or(true, |v| v.is_null()),
+        "stale V1 model field must be cleared when provider is rewritten to V2"
+    );
 }
 
 #[test]
@@ -64,6 +69,48 @@ fn reconcile_databricks_v1_to_v2_preserves_v1_provider_on_oss_build() {
     assert!(
         records[0]["env_vars"].get("BUZZ_AGENT_PROVIDER").is_none(),
         "BUZZ_AGENT_PROVIDER must be stripped even when provider rewrite is disabled"
+    );
+}
+
+#[test]
+fn reconcile_databricks_v1_to_v2_clears_model_on_provider_rewrite() {
+    // When a V1 record is migrated to V2 on a Block build, the model field
+    // must be removed. A stale V1 model name (e.g. "dbrx-instruct") emitted
+    // via BUZZ_AGENT_MODEL at spawn time would shadow the baked DATABRICKS_MODEL
+    // (last-write-wins), sending the agent to a V1 model on V2 endpoints.
+    let dir = tempfile::tempdir().unwrap();
+    write_agents_json(
+        dir.path(),
+        &serde_json::json!([
+            { "name": "A", "provider": "databricks", "model": "dbrx-instruct" },
+            { "name": "B", "provider": "databricks", "model": "goose-claude-opus-4-8-wrong" },
+            // V2 record with model — model must NOT be cleared.
+            { "name": "C", "provider": "databricks_v2", "model": "goose-claude-4-8-opus" }
+        ]),
+    );
+
+    reconcile_databricks_v1_to_v2_in_file(
+        &dir.path().join("agents/managed-agents.json"),
+        /*rewrite_v1_provider=*/ true,
+    );
+
+    let records = read_agents_json(dir.path());
+    // V1 records: provider migrated, model cleared.
+    assert_eq!(records[0]["provider"], "databricks_v2");
+    assert!(
+        records[0].get("model").map_or(true, |v| v.is_null()),
+        "model must be cleared for V1→V2 migrated record A"
+    );
+    assert_eq!(records[1]["provider"], "databricks_v2");
+    assert!(
+        records[1].get("model").map_or(true, |v| v.is_null()),
+        "model must be cleared for V1→V2 migrated record B"
+    );
+    // V2 record: model untouched.
+    assert_eq!(records[2]["provider"], "databricks_v2");
+    assert_eq!(
+        records[2]["model"], "goose-claude-4-8-opus",
+        "model must not be cleared for already-V2 record C"
     );
 }
 
