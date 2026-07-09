@@ -565,6 +565,11 @@ fn inbound_gate_rejects_tampered_event() {
         "\"content\":\"{}\"",
         "\"content\":\"{\\\"system_prompt\\\":\\\"pwned\\\"}\"",
     );
+    assert_ne!(
+        tampered,
+        event.as_json(),
+        "string replace must have taken effect — if this fails the test is testing an un-tampered event"
+    );
 
     let err = parse_verified_inbound_event(&tampered).unwrap_err();
     assert!(

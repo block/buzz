@@ -411,7 +411,7 @@ pub fn validate_persona_deletion(
 
     if persona.source_team.is_some() {
         return Err(format!(
-            "{} belongs to a team. Delete the team to remove all team personas together.",
+            "{} belongs to a team. Delete the team to remove all team agents together.",
             persona.display_name
         ));
     }
