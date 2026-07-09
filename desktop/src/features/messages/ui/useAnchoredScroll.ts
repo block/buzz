@@ -95,6 +95,20 @@ export type SettleGateOptions = {
  */
 export const DEFAULT_SETTLE_QUIET_FRAMES = 3;
 
+/**
+ * How recently a `scroll` event must have fired for the gate to treat the
+ * scroll as *in live motion* at layout-effect time. Live momentum emits a
+ * `scroll` event every frame (~16ms) continuously; a discrete one-shot
+ * `scrollTop` write emits a single event and then goes silent. A window a few
+ * frames wide cleanly separates "still fling" from "settled after a discrete
+ * jump" without a deferred sample — which is the requirement: the still-path
+ * must correct synchronously in the layout effect, paying zero painted frames
+ * of displacement, exactly as main does (Dawn's ruling on
+ * `timeline-no-shift.spec.ts:429`). A deferred rAF probe leaks one painted
+ * frame at full prepend height; a timestamp read does not.
+ */
+export const SETTLE_MOTION_WINDOW_MS = 100;
+
 type UseAnchoredScrollResult = {
   /** Pass through to the scroll container's `onScroll`. */
   onScroll: () => void;
@@ -291,6 +305,13 @@ export function useAnchoredScroll({
   // before its `onSettle` fires — otherwise a stale re-anchor could snap the
   // view after the user has already flung somewhere else.
   const settleObserverCancelRef = React.useRef<(() => void) | null>(null);
+  // Timestamp (ms) of the most recent `scroll` event, written in `onScroll`.
+  // The prepend re-anchor reads it synchronously at layout-effect time to
+  // decide still-vs-moving without a deferred sample (see
+  // `SETTLE_MOTION_WINDOW_MS`): a still scroll gets a synchronous, main-identical
+  // re-anchor (no displaced frame paints); only a live fling arms the async
+  // settle path.
+  const lastScrollTsRef = React.useRef(0);
   // Keep the latest settle-gate config in a ref so the layout effect can read
   // it without adding it to the dependency array (it must not re-run the
   // restoration logic just because the caller passed a new options object).
@@ -421,6 +442,10 @@ export function useAnchoredScroll({
   const onScroll = React.useCallback(() => {
     const container = scrollContainerRef.current;
     if (!container) return;
+    // Record when this scroll event fired so the prepend re-anchor can read
+    // live-motion state synchronously at layout-effect time (settle gate).
+    lastScrollTsRef.current =
+      typeof performance !== "undefined" ? performance.now() : Date.now();
     // Row measurement can grow `scrollHeight` after a bottom pin and emit scroll
     // events while `scrollTop` holds at the old floor — opening a transient gap
     // above the true bottom. `computeAnchor` would read that as a deliberate
@@ -562,28 +587,47 @@ export function useAnchoredScroll({
       if (gate?.enabled) {
         // Settle gate on: the prepend re-anchor is the one mid-fling scroll
         // writer, and firing it against live user momentum is what produces the
-        // walk-blind jump. Defer it behind the polled quiet-window — apply the
-        // correction only once the scroll has been still for k consecutive
-        // frames (k clears WebKit's coalesced-freeze window; see
-        // `observeScrollSettle`). Supersede any correction still pending from a
-        // prior prepend so only the newest anchor is ever re-pinned.
+        // walk-blind jump. But deferral is only worth its cost under live
+        // momentum — when the reader is at rest there is no jerk to avoid, and
+        // deferring the correction (even by a single rAF) lets one frame paint
+        // at full prepend height, a visible jump the sampler catches (Dawn's
+        // ruling on `timeline-no-shift.spec.ts:429`). So decide still-vs-moving
+        // from a signal already known *here*, synchronously: the freshness of
+        // the last `scroll` event. Live momentum keeps `scroll` firing every
+        // frame; a discrete jump or a settled reader leaves the stamp stale.
+        // The window is a few frames wide so WebKit's ~2-frame coalesced freeze
+        // (the same physics the k≥3 clamp respects) cannot misread a live fling
+        // as still and fire the synchronous correction into real momentum.
         //
-        // A3 trade (stated in the PR body): this removes the mid-fling jerk by
-        // *deferring* the re-anchor to settle, which means the reading row can
-        // drift during the fling and snap back once at rest. The artifact the
-        // user feels moves from "jump mid-scroll" to "small settle-time
-        // adjustment"; it is a trade, not a free correction.
+        // Still ⇒ `applyReanchor()` inline, identical to main's synchronous
+        // commit — no displaced frame ever paints. Moving ⇒ defer behind the
+        // polled quiet window, superseding any correction still pending from a
+        // prior prepend so only the newest anchor is re-pinned.
+        //
+        // A3 trade (stated in the PR body): at rest the correction is
+        // synchronous and behaves exactly as main. Only under a live fling is
+        // the reading row held at full prepend height until the fling ends,
+        // then snapped back once at settle — confined to true flings, the only
+        // window the gate was ever meant to touch.
+        const now =
+          typeof performance !== "undefined" ? performance.now() : Date.now();
+        const moving = now - lastScrollTsRef.current < SETTLE_MOTION_WINDOW_MS;
         if (settleObserverCancelRef.current !== null) {
           settleObserverCancelRef.current();
+          settleObserverCancelRef.current = null;
         }
-        settleObserverCancelRef.current = observeScrollSettle(
-          container,
-          gate.quietFrames ?? DEFAULT_SETTLE_QUIET_FRAMES,
-          () => {
-            settleObserverCancelRef.current = null;
-            applyReanchor();
-          },
-        );
+        if (moving) {
+          settleObserverCancelRef.current = observeScrollSettle(
+            container,
+            gate.quietFrames ?? DEFAULT_SETTLE_QUIET_FRAMES,
+            () => {
+              settleObserverCancelRef.current = null;
+              applyReanchor();
+            },
+          );
+        } else {
+          applyReanchor();
+        }
       } else {
         applyReanchor();
       }

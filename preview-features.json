@@ -40,6 +40,14 @@
       "platforms": [
         "desktop"
       ]
+    },
+    {
+      "id": "settleGate",
+      "name": "Scroll settle gate",
+      "description": "Defer the mid-history re-anchor until scrolling settles (k consecutive still frames) instead of correcting mid-fling — smoother momentum scrolling on WebKit. At rest, identical to today; only under a live fling is the reading row held until the fling ends, then snapped once at settle.",
+      "platforms": [
+        "desktop"
+      ]
     }
   ]
 }

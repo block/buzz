@@ -14,6 +14,7 @@ import type { ChannelWindowThreadSummary } from "@/features/messages/lib/channel
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type { ChannelType } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
+import { useFeatureEnabled } from "@/shared/features";
 import { channelChrome } from "@/shared/layout/chromeLayout";
 import { Spinner } from "@/shared/ui/spinner";
 import { TooltipProvider } from "@/shared/ui/tooltip";
@@ -237,6 +238,13 @@ const MessageTimelineBase = React.forwardRef<
   });
   const showTimelineSkeleton = timelineBodySurface === "skeleton";
 
+  // Preview feature (Settings → Experiments, default-off): when enabled, the
+  // mid-history prepend re-anchor is deferred behind the polled settle gate.
+  // Off ⇒ the re-anchor runs immediately on the prepend commit, exactly as on
+  // main. Read here (not inside the hook) so the switch stays a single, visible
+  // wiring point tied to the manifest id.
+  const settleGateEnabled = useFeatureEnabled("settleGate");
+
   const {
     highlightedMessageId,
     isAtBottom,
@@ -253,6 +261,7 @@ const MessageTimelineBase = React.forwardRef<
     onTargetReached,
     scrollContainerRef,
     targetMessageId,
+    settleGate: { enabled: settleGateEnabled },
   });
 
   const timelineIntroSurface = selectTimelineIntroSurface({
