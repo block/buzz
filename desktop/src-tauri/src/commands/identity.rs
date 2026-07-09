@@ -7,6 +7,7 @@ use tauri::State;
 use crate::{
     app_state::AppState,
     models::IdentityInfo,
+    nostr_bind,
     relay::{self, relay_api_base_url_with_override, relay_ws_url_with_override},
 };
 
@@ -165,43 +166,125 @@ pub fn get_nsec(state: State<'_, AppState>) -> Result<String, String> {
 }
 
 #[tauri::command]
-pub fn import_identity(
+pub async fn import_identity(
     nsec: String,
     app_handle: tauri::AppHandle,
-    state: State<'_, AppState>,
 ) -> Result<IdentityInfo, String> {
-    let trimmed = nsec.trim();
-    let keys = Keys::parse(trimmed).map_err(|e| format!("Invalid private key: {e}"))?;
+    tokio::task::spawn_blocking(move || {
+        let trimmed = nsec.trim();
+        let keys = Keys::parse(trimmed).map_err(|e| format!("Invalid private key: {e}"))?;
 
-    // Persist to identity.key
-    let data_dir = app_handle
-        .path()
-        .app_data_dir()
-        .map_err(|e| format!("app data dir: {e}"))?;
-    std::fs::create_dir_all(&data_dir).map_err(|e| format!("create app data dir: {e}"))?;
-    let key_path = data_dir.join("identity.key");
-    crate::app_state::save_key_file(&key_path, &keys)?;
+        // Persist to identity.key before swapping in-memory state. If the disk
+        // write fails, the running app keeps the old identity.
+        let data_dir = app_handle
+            .path()
+            .app_data_dir()
+            .map_err(|e| format!("app data dir: {e}"))?;
+        std::fs::create_dir_all(&data_dir).map_err(|e| format!("create app data dir: {e}"))?;
+        let key_path = data_dir.join("identity.key");
+        crate::app_state::save_key_file(&key_path, &keys)?;
 
-    // Update in-memory keys
-    let pubkey = keys.public_key();
-    *state.keys.lock().map_err(|e| e.to_string())? = keys;
+        // Update in-memory keys only after persistence succeeds.
+        let state = app_handle.state::<AppState>();
+        let pubkey = keys.public_key();
+        *state.keys.lock().map_err(|e| e.to_string())? = keys;
 
-    let pubkey_hex = pubkey.to_hex();
-    let bech32 = pubkey
-        .to_bech32()
-        .map_err(|error| format!("bech32 encode failed: {error}"))?;
-    let display_name = if bech32.len() > 16 {
-        format!("{}…{}", &bech32[..10], &bech32[bech32.len() - 4..])
-    } else {
-        bech32
-    };
+        let pubkey_hex = pubkey.to_hex();
+        let bech32 = pubkey
+            .to_bech32()
+            .map_err(|error| format!("bech32 encode failed: {error}"))?;
+        let display_name = if bech32.len() > 16 {
+            format!("{}…{}", &bech32[..10], &bech32[bech32.len() - 4..])
+        } else {
+            bech32
+        };
 
-    eprintln!("buzz-desktop: imported identity pubkey {}", pubkey_hex);
+        eprintln!("buzz-desktop: imported identity pubkey {}", pubkey_hex);
 
-    Ok(IdentityInfo {
-        pubkey: pubkey_hex,
-        display_name,
+        Ok(IdentityInfo {
+            pubkey: pubkey_hex,
+            display_name,
+        })
     })
+    .await
+    .map_err(|e| format!("spawn_blocking failed: {e}"))?
+}
+
+fn nostr_bind_tag(name: &str, value: &str) -> Result<Tag, String> {
+    Tag::parse(vec![name, value]).map_err(|error| format!("{name} tag failed: {error}"))
+}
+
+fn build_nostr_identity_binding_event(
+    keys: &Keys,
+    challenge_id: &str,
+    nonce: &str,
+    verification_code: &str,
+    origin: &str,
+    expires_at: &str,
+) -> Result<Event, String> {
+    nostr_bind::validate_signing_request(
+        challenge_id,
+        nonce,
+        verification_code,
+        origin,
+        expires_at,
+    )?;
+
+    let tags = vec![
+        nostr_bind_tag("challenge_id", challenge_id)?,
+        nostr_bind_tag("nonce", nonce)?,
+        nostr_bind_tag("verification_code", verification_code)?,
+        nostr_bind_tag("audience", nostr_bind::AUDIENCE)?,
+        nostr_bind_tag("action", nostr_bind::ACTION)?,
+        nostr_bind_tag("protocol", nostr_bind::PROTOCOL)?,
+        nostr_bind_tag("version", nostr_bind::VERSION)?,
+        nostr_bind_tag("origin", origin)?,
+        nostr_bind_tag("expires_at", expires_at)?,
+    ];
+
+    EventBuilder::new(Kind::Custom(nostr_bind::KIND), nostr_bind::CONTENT)
+        .tags(tags)
+        .sign_with_keys(keys)
+        .map_err(|error| format!("sign failed: {error}"))
+}
+
+#[tauri::command]
+pub async fn sign_nostr_identity_binding(
+    challenge_id: String,
+    nonce: String,
+    verification_code: String,
+    origin: String,
+    expires_at: String,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    nostr_bind::validate_signing_request(
+        &challenge_id,
+        &nonce,
+        &verification_code,
+        &origin,
+        &expires_at,
+    )?;
+
+    let keys = state
+        .keys
+        .lock()
+        .map_err(|error| error.to_string())?
+        .clone();
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let event = build_nostr_identity_binding_event(
+            &keys,
+            &challenge_id,
+            &nonce,
+            &verification_code,
+            &origin,
+            &expires_at,
+        )?;
+
+        Ok(event.as_json())
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking failed: {e}"))?
 }
 
 #[tauri::command]
@@ -268,4 +351,89 @@ pub async fn nip44_decrypt_from_self(
     })
     .await
     .map_err(|e| format!("spawn_blocking failed: {e}"))?
+}
+
+#[cfg(test)]
+mod nostr_identity_binding_tests {
+    use super::build_nostr_identity_binding_event;
+    use crate::nostr_bind;
+    use nostr::{JsonUtil, Keys};
+
+    fn tag_values(event: &nostr::Event) -> Vec<Vec<String>> {
+        event
+            .tags
+            .iter()
+            .map(|tag| tag.as_slice().to_vec())
+            .collect()
+    }
+
+    #[test]
+    fn build_nostr_identity_binding_event_signs_exact_shape() {
+        let keys = Keys::generate();
+        let event = build_nostr_identity_binding_event(
+            &keys,
+            "550e8400-e29b-41d4-a716-446655440000",
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi01234567",
+            "123456",
+            "https://example.com",
+            "2999-01-01T00:00:00Z",
+        )
+        .unwrap();
+
+        assert_eq!(event.kind.as_u16(), nostr_bind::KIND);
+        assert_eq!(event.content, nostr_bind::CONTENT);
+        assert_eq!(event.pubkey, keys.public_key());
+        assert!(event.verify_id());
+        assert!(event.verify_signature());
+        assert!(nostr::Event::from_json(event.as_json()).is_ok());
+
+        let tags = tag_values(&event);
+        assert!(tags.contains(&vec![
+            "challenge_id".into(),
+            "550e8400-e29b-41d4-a716-446655440000".into(),
+        ]));
+        assert!(tags.contains(&vec![
+            "nonce".into(),
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi01234567".into(),
+        ]));
+        assert!(tags.contains(&vec!["verification_code".into(), "123456".into(),]));
+        assert!(tags.contains(&vec!["audience".into(), "buzz:nostr-identity".into()]));
+        assert!(tags.contains(&vec!["action".into(), "bind_nostr_identity".into(),]));
+        assert!(tags.contains(&vec!["protocol".into(), "buzz-nostr-identity".into(),]));
+        assert!(tags.contains(&vec!["version".into(), "1".into(),]));
+        assert!(tags.contains(&vec!["origin".into(), "https://example.com".into(),]));
+        assert!(tags.contains(&vec!["expires_at".into(), "2999-01-01T00:00:00Z".into(),]));
+    }
+
+    #[test]
+    fn build_nostr_identity_binding_event_rejects_malformed_verification_code() {
+        let keys = Keys::generate();
+        let error = build_nostr_identity_binding_event(
+            &keys,
+            "550e8400-e29b-41d4-a716-446655440000",
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi01234567",
+            "12345a",
+            "https://example.com",
+            "2999-01-01T00:00:00Z",
+        )
+        .unwrap_err();
+
+        assert_eq!(error, "verification_code must be exactly 6 digits");
+    }
+
+    #[test]
+    fn build_nostr_identity_binding_event_rejects_expired_link() {
+        let keys = Keys::generate();
+        let error = build_nostr_identity_binding_event(
+            &keys,
+            "550e8400-e29b-41d4-a716-446655440000",
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi01234567",
+            "123456",
+            "https://example.com",
+            "2000-01-01T00:00:00Z",
+        )
+        .unwrap_err();
+
+        assert_eq!(error, "expires_at is expired");
+    }
 }

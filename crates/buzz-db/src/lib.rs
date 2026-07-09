@@ -151,7 +151,7 @@ pub struct DbPoolStats {
 /// Configuration for the Postgres connection pool.
 #[derive(Debug, Clone)]
 pub struct DbConfig {
-    /// Postgres connection URL (e.g. `postgres://user:pass@host/db`).
+    /// Postgres connection URL (usually sourced from `DATABASE_URL`).
     pub database_url: String,
     /// Maximum number of connections in the pool.
     pub max_connections: u32,
@@ -171,7 +171,7 @@ impl Default for DbConfig {
     /// At 20 main + 5 audit = 25/pod, four relay pods fit within the PG limit.
     fn default() -> Self {
         Self {
-            database_url: "postgres://buzz:buzz_dev@localhost:5432/buzz".to_string(),
+            database_url: "postgres://buzz:buzz_dev@localhost:5432/buzz".to_string(), // sadscan:disable np.postgres.1
             max_connections: 20,
             min_connections: 2,
             acquire_timeout_secs: 3,
@@ -188,6 +188,28 @@ pub struct CommunityRecord {
     pub id: CommunityId,
     /// Normalized host that maps to this community.
     pub host: String,
+}
+
+/// Community row returned by idempotent community ensure/create operations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnsuredCommunityRecord {
+    /// Stable server-resolved community id.
+    pub id: CommunityId,
+    /// Normalized host that maps to this community.
+    pub host: String,
+    /// True only when this call inserted the `communities` row.
+    pub created: bool,
+}
+
+/// Community row returned by operator-plane ownership reads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OwnedCommunityRecord {
+    /// Stable server-resolved community id.
+    pub id: CommunityId,
+    /// Normalized host that maps to this community.
+    pub host: String,
+    /// When the community row was created.
+    pub created_at: DateTime<Utc>,
 }
 
 /// Token summary returned by [`Db::list_active_tokens`].
@@ -294,6 +316,43 @@ impl Db {
         .transpose()
     }
 
+    /// Lists communities where `owner_pubkey` currently holds the `owner` role.
+    ///
+    /// This is an operator-plane helper, not a tenant-scoped data-plane read:
+    /// callers must gate it on deployment-level operator auth before exposing it.
+    pub async fn list_communities_owned_by(
+        &self,
+        owner_pubkey: &str,
+    ) -> Result<Vec<OwnedCommunityRecord>> {
+        let owner_pubkey = owner_pubkey.to_ascii_lowercase();
+        let rows = sqlx::query(
+            r#"
+            SELECT c.id, c.host, c.created_at
+            FROM communities c
+            JOIN relay_members rm ON rm.community_id = c.id
+            WHERE rm.pubkey = $1
+              AND rm.role = 'owner'
+            ORDER BY c.created_at ASC, c.host ASC
+            "#,
+        )
+        .bind(owner_pubkey)
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter()
+            .map(|row| {
+                let id: Uuid = row.try_get("id")?;
+                let host: String = row.try_get("host")?;
+                let created_at: DateTime<Utc> = row.try_get("created_at")?;
+                Ok(OwnedCommunityRecord {
+                    id: CommunityId::from_uuid(id),
+                    host,
+                    created_at,
+                })
+            })
+            .collect()
+    }
+
     /// Returns the normalized host mapped to a community id, if the community
     /// exists.
     ///
@@ -374,13 +433,13 @@ impl Db {
     pub async fn ensure_configured_community(
         &self,
         normalized_host: &str,
-    ) -> Result<CommunityRecord> {
+    ) -> Result<EnsuredCommunityRecord> {
         let row = sqlx::query(
             r#"
             INSERT INTO communities (host)
             VALUES ($1)
-            ON CONFLICT (lower(host)) DO UPDATE SET host = EXCLUDED.host
-            RETURNING id, host
+            ON CONFLICT (lower(host)) DO UPDATE SET host = communities.host
+            RETURNING id, host, (xmax = 0) AS created
             "#,
         )
         .bind(normalized_host)
@@ -389,10 +448,12 @@ impl Db {
 
         let id: Uuid = row.try_get("id")?;
         let host: String = row.try_get("host")?;
+        let created: bool = row.try_get("created")?;
 
-        Ok(CommunityRecord {
+        Ok(EnsuredCommunityRecord {
             id: CommunityId::from_uuid(id),
             host,
+            created,
         })
     }
 
@@ -2862,6 +2923,57 @@ mod tests {
             .expect("lookup stored-case host")
             .expect("community found by stored-case host");
         assert_eq!(found.id, CommunityId::from_uuid(id));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn ensure_configured_community_reports_insert_winner() {
+        let db = setup_db().await;
+        let host = format!("ensure-community-{}.example", Uuid::new_v4().simple());
+
+        let first = db
+            .ensure_configured_community(&host)
+            .await
+            .expect("first ensure");
+        assert!(first.created, "first ensure should report created");
+        assert_eq!(first.host, host);
+
+        let second = db
+            .ensure_configured_community(&host)
+            .await
+            .expect("second ensure");
+        assert!(!second.created, "second ensure should report existed");
+        assert_eq!(second.id, first.id);
+        assert_eq!(second.host, host);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn list_communities_owned_by_returns_only_owner_rows() {
+        let db = setup_db().await;
+        let community_a = CommunityId::from_uuid(make_community(&db.pool).await);
+        let community_b = CommunityId::from_uuid(make_community(&db.pool).await);
+        let community_c = CommunityId::from_uuid(make_community(&db.pool).await);
+        let owner = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let other = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+        db.bootstrap_owner(community_a, owner)
+            .await
+            .expect("owner A");
+        db.bootstrap_owner(community_b, other)
+            .await
+            .expect("other owner B");
+        db.add_relay_member(community_c, owner, "admin", None)
+            .await
+            .expect("admin C");
+
+        let owned = db
+            .list_communities_owned_by(owner)
+            .await
+            .expect("list owned communities");
+
+        assert_eq!(owned.len(), 1);
+        assert_eq!(owned[0].id, community_a);
     }
 
     async fn insert_channel(pool: &PgPool, community_id: Uuid, channel_id: Uuid) {

@@ -225,6 +225,7 @@ pub enum AgentError {
     InvalidParams(String),
     Llm(String),
     LlmAuth(String),
+    LlmModelNotFound(String),
     Mcp(String),
     Cancelled,
 }
@@ -235,6 +236,7 @@ impl std::fmt::Display for AgentError {
             Self::InvalidParams(s) => write!(f, "invalid params: {s}"),
             Self::Llm(s) => write!(f, "llm: {s}"),
             Self::LlmAuth(s) => write!(f, "llm auth: {s}"),
+            Self::LlmModelNotFound(s) => write!(f, "llm model not found: {s}"),
             Self::Mcp(s) => write!(f, "mcp: {s}"),
             Self::Cancelled => write!(f, "cancelled"),
         }
@@ -248,6 +250,7 @@ impl AgentError {
         match self {
             Self::InvalidParams(_) => -32602,
             Self::LlmAuth(_) => -32001,
+            Self::LlmModelNotFound(_) => -32002,
             _ => -32000,
         }
     }

@@ -98,6 +98,19 @@ pub struct Config {
     /// with the `owner` role on first startup.
     pub relay_owner_pubkey: Option<String>,
 
+    /// Deployment-level relay operator pubkeys allowed to use the
+    /// `POST /operator/communities` provisioning endpoint.
+    ///
+    /// Unlike `relay_owner_pubkey` (a role *within* the deployment community),
+    /// operators span tenants: they may create new communities and rotate owners
+    /// via the operator endpoint, but hold no implicit tenant membership row.
+    /// Empty (the default) disables community provisioning entirely — fail closed.
+    ///
+    /// Set via `RELAY_OPERATOR_PUBKEYS` as a comma-separated list of 64-char
+    /// hex pubkeys. Invalid entries are rejected at startup (config error), not
+    /// skipped — a typo must not silently disable an operator.
+    pub relay_operator_pubkeys: Vec<String>,
+
     /// Allow NIP-OA owner attestation for relay membership.
     ///
     /// When `true` and `require_relay_membership` is also `true`, agents
@@ -184,7 +197,7 @@ impl Config {
         let bind_addr = parse_bind_addr(&bind_addr_raw)?;
 
         let database_url = std::env::var("DATABASE_URL")
-            .unwrap_or_else(|_| "postgres://buzz:buzz_dev@localhost:5432/buzz".to_string());
+            .unwrap_or_else(|_| "postgres://buzz:buzz_dev@localhost:5432/buzz".to_string()); // sadscan:disable np.postgres.1
 
         let redis_url =
             std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://localhost:6379".to_string());
@@ -259,6 +272,34 @@ impl Config {
                     None
                 }
             });
+
+        // Note: intentionally not prefixed with BUZZ_ — same relay-identity
+        // config family as RELAY_OWNER_PUBKEY. Comma-separated 64-char hex
+        // pubkeys. Unlike RELAY_OWNER_PUBKEY (warn-and-ignore), an invalid
+        // entry here is a hard config error: silently dropping an operator
+        // pubkey would silently disable provisioning for that operator.
+        let relay_operator_pubkeys = match std::env::var("RELAY_OPERATOR_PUBKEYS") {
+            Ok(raw) => {
+                let mut pubkeys = Vec::new();
+                for entry in raw.split(',') {
+                    let entry = entry.trim().to_lowercase();
+                    if entry.is_empty() {
+                        continue;
+                    }
+                    let valid = entry.len() == 64 && entry.chars().all(|c| c.is_ascii_hexdigit());
+                    if !valid {
+                        return Err(ConfigError::InvalidValue(format!(
+                            "RELAY_OPERATOR_PUBKEYS entry is not a valid 64-char hex pubkey: {entry:?}"
+                        )));
+                    }
+                    if !pubkeys.contains(&entry) {
+                        pubkeys.push(entry);
+                    }
+                }
+                pubkeys
+            }
+            Err(_) => Vec::new(),
+        };
 
         let auth = buzz_auth::AuthConfig::default();
 
@@ -428,6 +469,7 @@ impl Config {
             require_relay_membership,
             huddle_audio_available,
             relay_owner_pubkey,
+            relay_operator_pubkeys,
             allow_nip_oa_auth,
             media,
             media_max_concurrent_uploads,
@@ -478,6 +520,10 @@ mod tests {
             "relay_owner_pubkey should default to None"
         );
         assert!(
+            config.relay_operator_pubkeys.is_empty(),
+            "relay_operator_pubkeys should default empty (provisioning disabled)"
+        );
+        assert!(
             !config.allow_nip_oa_auth,
             "allow_nip_oa_auth should default to false"
         );
@@ -485,6 +531,38 @@ mod tests {
             config.huddle_audio_available,
             "huddle_audio_available should default to true so single-pod (N=1) keeps today's huddle behavior"
         );
+    }
+
+    #[test]
+    fn relay_operator_pubkeys_parse_dedupe_and_normalize() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        std::env::set_var(
+            "RELAY_OPERATOR_PUBKEYS",
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA,bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb,aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        );
+        let config = Config::from_env().expect("config");
+        std::env::remove_var("RELAY_OPERATOR_PUBKEYS");
+
+        assert_eq!(
+            config.relay_operator_pubkeys,
+            vec![
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn relay_operator_pubkeys_invalid_entry_is_error() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        std::env::set_var("RELAY_OPERATOR_PUBKEYS", "not-a-pubkey");
+        let result = Config::from_env();
+        std::env::remove_var("RELAY_OPERATOR_PUBKEYS");
+
+        assert!(matches!(
+            result,
+            Err(ConfigError::InvalidValue(ref msg)) if msg.contains("RELAY_OPERATOR_PUBKEYS")
+        ));
     }
 
     #[test]

@@ -19,6 +19,24 @@ pub fn run_event_sync(app: &tauri::AppHandle, owner_keys: &nostr::Keys) {
     crate::managed_agents::reconcile::reconcile_agents_to_events(app, owner_keys);
 }
 
+/// Spawn the best-effort event reconcile off the synchronous Tauri setup path.
+///
+/// The owner keys are cloned before spawning so the task never touches the
+/// `AppState::keys` mutex. The reconcile itself is still synchronous JSON,
+/// SQLite, and signing work, so it runs on the blocking pool rather than an
+/// async worker.
+pub fn spawn_event_sync(app: tauri::AppHandle, owner_keys: nostr::Keys) {
+    tauri::async_runtime::spawn(async move {
+        if let Err(e) = tauri::async_runtime::spawn_blocking(move || {
+            run_event_sync(&app, &owner_keys);
+        })
+        .await
+        {
+            eprintln!("buzz-desktop: event-sync: spawn_blocking failed: {e}");
+        }
+    });
+}
+
 /// Reconcile `personas.json` into the persona-event retention store.
 ///
 /// Must run AFTER `migrate_packs_to_teams` (depends on field renames being

@@ -25,12 +25,23 @@ use super::{api_error, internal_error, not_found};
 ///
 /// Returns the authenticated public key and an event ID for replay detection.
 /// For X-Pubkey dev mode, the event ID is a zero hash (no replay concern).
-fn verify_bridge_auth(
+pub(crate) fn verify_bridge_auth(
     headers: &HeaderMap,
     method: &str,
     url: &str,
     body: Option<&[u8]>,
     require_auth_token: bool,
+) -> Result<(nostr::PublicKey, [u8; 32]), (StatusCode, Json<Value>)> {
+    verify_bridge_auth_with_options(headers, method, url, body, require_auth_token, false)
+}
+
+pub(crate) fn verify_bridge_auth_with_options(
+    headers: &HeaderMap,
+    method: &str,
+    url: &str,
+    body: Option<&[u8]>,
+    require_auth_token: bool,
+    require_payload: bool,
 ) -> Result<(nostr::PublicKey, [u8; 32]), (StatusCode, Json<Value>)> {
     // Try NIP-98 first (Authorization: Nostr <base64>)
     if let Some(auth_str) = headers
@@ -50,6 +61,18 @@ fn verify_bridge_auth(
         let event: nostr::Event = serde_json::from_str(&event_json)
             .map_err(|_| api_error(StatusCode::UNAUTHORIZED, "invalid NIP-98 event JSON"))?;
         let event_id_bytes = event.id.to_bytes();
+
+        if require_payload
+            && !event
+                .tags
+                .iter()
+                .any(|tag| tag.kind() == nostr::TagKind::Payload)
+        {
+            return Err(api_error(
+                StatusCode::UNAUTHORIZED,
+                "NIP-98: missing payload tag",
+            ));
+        }
 
         let pubkey = buzz_auth::verify_nip98_event(&event_json, url, method, body)
             .map_err(|e| api_error(StatusCode::UNAUTHORIZED, &format!("NIP-98: {e}")))?;
@@ -76,7 +99,7 @@ fn verify_bridge_auth(
 /// `AppState`, not process-local memory. Any Redis/guard error fails closed:
 /// without the shared `SET NX EX` proof, a stateless worker cannot admit the
 /// NIP-98 request safely.
-async fn check_nip98_replay(
+pub(crate) async fn check_nip98_replay(
     state: &AppState,
     tenant: &TenantContext,
     event_id_bytes: [u8; 32],
@@ -135,7 +158,11 @@ async fn check_nip98_replay_with_guard(
 /// pass and the relay would proceed against the wrong tenant's auth context),
 /// and (b) reject every legitimate request whose community host isn't the
 /// single configured one. Substituting `tenant.host()` closes both directions.
-fn nip98_expected_url(config_relay_url: &str, tenant: &TenantContext, path: &str) -> String {
+pub(crate) fn nip98_expected_url(
+    config_relay_url: &str,
+    tenant: &TenantContext,
+    path: &str,
+) -> String {
     let scheme = if config_relay_url.trim_start().starts_with("wss://") {
         "https"
     } else {
@@ -560,6 +587,10 @@ pub async fn submit_event(
     check_nip98_replay(&state, &tenant, event_id_bytes).await?;
     let pubkey_bytes = pubkey.to_bytes().to_vec();
 
+    let event: nostr::Event = serde_json::from_slice(&body)
+        .map_err(|e| api_error(StatusCode::BAD_REQUEST, &format!("invalid event JSON: {e}")))?;
+    let kind_u32 = buzz_core::kind::event_kind_u32(&event);
+
     // Enforce relay membership (with NIP-OA fallback via x-auth-tag header).
     let auth_tag = headers.get("x-auth-tag").and_then(|v| v.to_str().ok());
     super::relay_members::enforce_relay_membership(
@@ -570,16 +601,12 @@ pub async fn submit_event(
     )
     .await?;
 
-    let event: nostr::Event = serde_json::from_slice(&body)
-        .map_err(|e| api_error(StatusCode::BAD_REQUEST, &format!("invalid event JSON: {e}")))?;
-
     // Mesh signaling kinds (24620 status report, 24621 connect request) are
     // ephemeral and deliberately absent from ingest_event's per-kind allowlist.
     // The desktop's Rust coordinator publishes them via this bridge, so route
     // them to the mesh handlers — the HTTP twin of the WS door's special-casing
     // in handlers::event. Membership was enforced above; the handlers re-check
     // it fail-closed.
-    let kind_u32 = buzz_core::kind::event_kind_u32(&event);
     if kind_u32 == buzz_core::kind::KIND_MESH_STATUS_REPORT
         || kind_u32 == buzz_core::kind::KIND_MESH_CONNECT_REQUEST
     {
@@ -2094,6 +2121,34 @@ mod tests {
             msg.contains("URL mismatch"),
             "rejection must carry the URL-mismatch signal so callers can \
              distinguish it from other auth failures; got body = {body:?}"
+        );
+    }
+
+    #[test]
+    fn verify_bridge_auth_can_require_payload_tag_for_json_body_endpoints() {
+        let keys = Keys::generate();
+        let signed_url = "https://host-a.example/operator/communities";
+        let event_json = build_nip98_event_json(&keys, signed_url, "POST");
+        let headers = nip98_auth_headers(&event_json);
+
+        let (status, body) = verify_bridge_auth_with_options(
+            &headers,
+            "POST",
+            signed_url,
+            Some(br#"{"host":"created.example"}"#),
+            true,
+            true,
+        )
+        .expect_err("body-bearing operator requests must require a payload tag");
+
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        let msg = body
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        assert!(
+            msg.contains("missing payload tag"),
+            "rejection should explain the payload binding failure; got body = {body:?}"
         );
     }
 

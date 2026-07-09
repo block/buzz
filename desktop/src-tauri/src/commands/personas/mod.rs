@@ -1,4 +1,4 @@
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use uuid::Uuid;
 
 use super::export_util::save_json_with_dialog;
@@ -466,10 +466,18 @@ pub async fn delete_persona(id: String, app: AppHandle) -> Result<(), String> {
 /// a pending local edit leaves the local record — and its queued publish —
 /// untouched.
 #[tauri::command]
-pub fn reconcile_inbound_persona_event(
+pub async fn reconcile_inbound_persona_event(
     event_json: String,
     app: AppHandle,
-    state: State<'_, AppState>,
+) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || reconcile_inbound_persona_event_blocking(event_json, app))
+        .await
+        .map_err(|e| format!("spawn_blocking failed: {e}"))?
+}
+
+fn reconcile_inbound_persona_event_blocking(
+    event_json: String,
+    app: AppHandle,
 ) -> Result<(), String> {
     use crate::managed_agents::{
         agent_events::managed_agent_content_from_event,
@@ -482,6 +490,7 @@ pub fn reconcile_inbound_persona_event(
     use buzz_core_pkg::kind::{KIND_DELETION, KIND_MANAGED_AGENT, KIND_PERSONA, KIND_TEAM};
     use nostr::JsonUtil;
 
+    let state = app.state::<AppState>();
     let event = nostr::Event::from_json(&event_json)
         .map_err(|e| format!("failed to parse inbound event: {e}"))?;
 
@@ -740,12 +749,20 @@ fn apply_inbound_managed_agent(
 ) {
     if let Some(local) = agents.iter_mut().find(|record| record.pubkey == d_tag) {
         local.name = inbound.name;
+        // Mirror of the slimmed writer (agent_event_content): a
+        // definition-linked event omits the definition quad because those
+        // fields resolve through the kind:30175 definition — absent means
+        // "not carried", never "clear". Definition-less events still carry
+        // the quad and apply it unconditionally (including clears).
+        let definition_linked = inbound.persona_id.is_some();
         local.persona_id = inbound.persona_id;
-        local.system_prompt = inbound.system_prompt;
-        local.model = inbound.model;
-        local.provider = inbound.provider;
+        if !definition_linked {
+            local.system_prompt = inbound.system_prompt;
+            local.model = inbound.model;
+            local.provider = inbound.provider;
+            local.persona_source_version = inbound.persona_source_version;
+        }
         local.mcp_toolsets = inbound.mcp_toolsets;
-        local.persona_source_version = inbound.persona_source_version;
         local.parallelism = inbound.parallelism;
         local.respond_to = inbound.respond_to;
         local.respond_to_allowlist = inbound.respond_to_allowlist;
@@ -847,29 +864,47 @@ const ZIP_MAGIC: [u8; 4] = [0x50, 0x4B, 0x03, 0x04];
 const JSON_OPEN_BRACE: u8 = 0x7B;
 
 #[tauri::command]
-pub fn parse_persona_files(
+pub async fn parse_persona_files(
     file_bytes: Vec<u8>,
     file_name: String,
 ) -> Result<ParsePersonaFilesResult, String> {
-    if file_bytes.len() > MAX_ZIP_BYTES {
-        return Err("File is too large (max 100 MB).".to_string());
-    }
-    if file_bytes.is_empty() {
-        return Err("File is empty.".to_string());
-    }
+    tokio::task::spawn_blocking(move || {
+        if file_bytes.len() > MAX_ZIP_BYTES {
+            return Err("File is too large (max 100 MB).".to_string());
+        }
+        if file_bytes.is_empty() {
+            return Err("File is empty.".to_string());
+        }
 
-    let first_byte = file_bytes[0];
+        let first_byte = file_bytes[0];
 
-    if file_bytes.len() >= 4 {
-        let magic: [u8; 4] = file_bytes[..4]
-            .try_into()
-            .map_err(|_| "Failed to read file header".to_string())?;
+        if file_bytes.len() >= 4 {
+            let magic: [u8; 4] = file_bytes[..4]
+                .try_into()
+                .map_err(|_| "Failed to read file header".to_string())?;
 
-        if magic == PNG_MAGIC {
-            if file_bytes.len() > MAX_PNG_BYTES {
-                return Err("PNG file is too large (max 10 MB).".to_string());
+            if magic == PNG_MAGIC {
+                if file_bytes.len() > MAX_PNG_BYTES {
+                    return Err("PNG file is too large (max 10 MB).".to_string());
+                }
+                let mut preview = parse_png_persona(&file_bytes)?;
+                preview.source_file = file_name;
+                return Ok(ParsePersonaFilesResult {
+                    personas: vec![preview],
+                    skipped: vec![],
+                });
             }
-            let mut preview = parse_png_persona(&file_bytes)?;
+
+            if magic == ZIP_MAGIC {
+                return parse_zip_personas(&file_bytes);
+            }
+        }
+
+        if first_byte == JSON_OPEN_BRACE {
+            if file_bytes.len() > MAX_JSON_BYTES {
+                return Err("JSON file is too large (max 5 MB).".to_string());
+            }
+            let mut preview = parse_json_persona(&file_bytes)?;
             preview.source_file = file_name;
             return Ok(ParsePersonaFilesResult {
                 personas: vec![preview],
@@ -877,48 +912,34 @@ pub fn parse_persona_files(
             });
         }
 
-        if magic == ZIP_MAGIC {
-            return parse_zip_personas(&file_bytes);
+        // .persona.md: YAML frontmatter starts with "---"
+        let lower_name = file_name.to_ascii_lowercase();
+        if lower_name.ends_with(".persona.md") {
+            if file_bytes.len() > MAX_JSON_BYTES {
+                return Err("Markdown file is too large (max 5 MB).".to_string());
+            }
+            let mut preview = parse_md_persona(&file_bytes)?;
+            preview.source_file = file_name;
+            return Ok(ParsePersonaFilesResult {
+                personas: vec![preview],
+                skipped: vec![],
+            });
         }
-    }
 
-    if first_byte == JSON_OPEN_BRACE {
-        if file_bytes.len() > MAX_JSON_BYTES {
-            return Err("JSON file is too large (max 5 MB).".to_string());
+        // If it's a .md file but not .persona.md, give a specific hint.
+        if lower_name.ends_with(".md") {
+            return Err(
+                "Only .persona.md files are supported. Rename to <name>.persona.md".to_string(),
+            );
         }
-        let mut preview = parse_json_persona(&file_bytes)?;
-        preview.source_file = file_name;
-        return Ok(ParsePersonaFilesResult {
-            personas: vec![preview],
-            skipped: vec![],
-        });
-    }
 
-    // .persona.md: YAML frontmatter starts with "---"
-    let lower_name = file_name.to_ascii_lowercase();
-    if lower_name.ends_with(".persona.md") {
-        if file_bytes.len() > MAX_JSON_BYTES {
-            return Err("Markdown file is too large (max 5 MB).".to_string());
-        }
-        let mut preview = parse_md_persona(&file_bytes)?;
-        preview.source_file = file_name;
-        return Ok(ParsePersonaFilesResult {
-            personas: vec![preview],
-            skipped: vec![],
-        });
-    }
-
-    // If it's a .md file but not .persona.md, give a specific hint.
-    if lower_name.ends_with(".md") {
-        return Err(
-            "Only .persona.md files are supported. Rename to <name>.persona.md".to_string(),
-        );
-    }
-
-    Err(
-        "Unsupported file format. Expected .persona.md, .persona.png, .persona.json, or .zip"
-            .to_string(),
-    )
+        Err(
+            "Unsupported file format. Expected .persona.md, .persona.png, .persona.json, or .zip"
+                .to_string(),
+        )
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking failed: {e}"))?
 }
 
 #[tauri::command]

@@ -221,6 +221,92 @@ export async function archiveEvents(
 }
 
 /**
+ * Read a paginated page of archived kind 24200 (observer) events for a
+ * specific channel, using the `observer_channel_index`.
+ *
+ * Only returns frames whose `channelId` was successfully decrypted and
+ * matched this channel. Frames with null/decrypt-failed channelId are
+ * excluded (Will's (a) ruling). Compound cursor + short-page exhaustion
+ * signal work identically to `readArchivedEvents`.
+ */
+export async function readArchivedObserverEventsForChannel(
+  channelId: string,
+  opts?: {
+    before?: { createdAt: number; id: string } | null;
+    limit?: number;
+  },
+): Promise<import("@/shared/api/types").RelayEvent[]> {
+  const rawRows = await invokeTauri<string[]>(
+    "read_archived_observer_events_for_channel",
+    {
+      channelId,
+      beforeCreatedAt: opts?.before?.createdAt ?? null,
+      beforeId: opts?.before?.id ?? null,
+      limit: opts?.limit ?? null,
+    },
+  );
+  return rawRows
+    .map((raw) => {
+      try {
+        return JSON.parse(raw) as import("@/shared/api/types").RelayEvent;
+      } catch {
+        console.warn(
+          "[tauriArchive] failed to parse archived observer raw_json:",
+          raw,
+        );
+        return null;
+      }
+    })
+    .filter((e): e is import("@/shared/api/types").RelayEvent => e !== null);
+}
+
+/**
+ * Index one or more archived observer frames by channelId.
+ *
+ * `channelId` is nullable: pass `null` for frames that are unscoped,
+ * malformed, or whose payload could not be decrypted. Null rows are written
+ * as a processed-state marker so re-runs skip them; they are never returned
+ * by channel-scoped reads (which filter `channel_id = ?`).
+ *
+ * Idempotent — already-indexed frames are silently skipped.
+ */
+export async function indexObserverChannelId(
+  entries: Array<{
+    eventId: string;
+    channelId: string | null;
+    createdAt: number;
+  }>,
+): Promise<void> {
+  if (entries.length === 0) return;
+  await invokeTauri("index_observer_channel_id", {
+    entries: entries.map((e) => ({
+      event_id: e.eventId,
+      channel_id: e.channelId,
+      created_at: e.createdAt,
+    })),
+  });
+}
+
+/**
+ * Return all `owner_p` kind 24200 archived event rows not yet indexed.
+ *
+ * Used by the one-shot backfill driver. Returns raw Nostr event JSON plus
+ * event id and created_at for each row so the caller can decrypt and index.
+ */
+export async function readUnindexedObserverRows(): Promise<
+  Array<{ id: string; rawJson: string; createdAt: number }>
+> {
+  const rows = await invokeTauri<
+    Array<{ id: string; raw_json: string; created_at: number }>
+  >("read_unindexed_observer_rows");
+  return rows.map((r) => ({
+    id: r.id,
+    rawJson: r.raw_json,
+    createdAt: r.created_at,
+  }));
+}
+
+/**
  * Read a paginated page of archived raw events for a scope.
  *
  * Returns at most `limit` raw Nostr events (default 50) in newest-first order.

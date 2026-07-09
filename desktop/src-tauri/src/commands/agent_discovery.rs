@@ -20,9 +20,13 @@ fn active_installs() -> &'static std::sync::Mutex<std::collections::HashSet<Stri
 }
 
 #[tauri::command]
-pub fn discover_acp_providers() -> Vec<AcpRuntimeCatalogEntry> {
-    crate::managed_agents::clear_resolve_cache();
-    crate::managed_agents::discover_acp_runtimes()
+pub async fn discover_acp_providers() -> Result<Vec<AcpRuntimeCatalogEntry>, String> {
+    tokio::task::spawn_blocking(|| {
+        crate::managed_agents::clear_resolve_cache();
+        crate::managed_agents::discover_acp_runtimes()
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking failed: {e}"))
 }
 
 #[tauri::command]
@@ -292,26 +296,30 @@ fn floor_char_boundary(s: &str, mut index: usize) -> usize {
 }
 
 #[tauri::command]
-pub fn discover_managed_agent_prereqs(
+pub async fn discover_managed_agent_prereqs(
     input: DiscoverManagedAgentPrereqsRequest,
-) -> ManagedAgentPrereqsInfo {
-    let acp_command = input
-        .acp_command
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or(DEFAULT_ACP_COMMAND);
-    let mcp_command = input
-        .mcp_command
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or("");
+) -> Result<ManagedAgentPrereqsInfo, String> {
+    tokio::task::spawn_blocking(move || {
+        let acp_command = input
+            .acp_command
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(DEFAULT_ACP_COMMAND);
+        let mcp_command = input
+            .mcp_command
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("");
 
-    ManagedAgentPrereqsInfo {
-        acp: command_availability(acp_command),
-        mcp: command_availability(mcp_command),
-    }
+        ManagedAgentPrereqsInfo {
+            acp: command_availability(acp_command),
+            mcp: command_availability(mcp_command),
+        }
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking failed: {e}"))
 }
 
 #[tauri::command]

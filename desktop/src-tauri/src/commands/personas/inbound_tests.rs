@@ -144,6 +144,7 @@ fn local_agent() -> ManagedAgentRecord {
         mcp_toolsets: Some("local".to_string()),
         env_vars: BTreeMap::from([("API_KEY".to_string(), "localsecret".to_string())]),
         start_on_app_launch: true,
+        auto_restart_on_config_change: true,
         runtime_pid: Some(1234),
         backend: crate::managed_agents::BackendKind::Provider {
             id: "buzz-backend".to_string(),
@@ -159,6 +160,7 @@ fn local_agent() -> ManagedAgentRecord {
         last_stopped_at: None,
         last_exit_code: None,
         last_error: None,
+        last_error_code: None,
         respond_to: crate::managed_agents::RespondTo::OwnerOnly,
         respond_to_allowlist: vec![],
         display_name: None,
@@ -267,14 +269,61 @@ fn inbound_managed_agent_drops_injected_secrets_and_harness() {
     ] {
         assert!(!json.contains(needle), "injected value leaked: {needle}");
     }
-    // Projected fields ARE updated from the inbound event.
+    // Instance-level projected fields ARE updated from the inbound event.
     assert_eq!(a.name, "Remote Agent");
-    assert_eq!(a.system_prompt, Some("remote prompt".to_string()));
-    assert_eq!(a.model, Some("remote-model".to_string()));
-    assert_eq!(a.provider, Some("remote-provider".to_string()));
     assert_eq!(a.parallelism, 99);
     assert_eq!(a.respond_to, crate::managed_agents::RespondTo::Anyone);
     assert_eq!(a.respond_to_allowlist, vec!["deadbeef".to_string()]);
+    // Definition-linked inbound (persona_id present): the definition quad is
+    // NOT applied — those fields resolve through the kind:30175 definition,
+    // and absent-on-the-wire must never clear a local snapshot.
+    assert_eq!(
+        a.system_prompt,
+        Some("local prompt".to_string()),
+        "linked inbound must not touch the local prompt snapshot"
+    );
+}
+
+/// Definition-less inbound (persona_id absent) still applies the definition
+/// quad unconditionally — the record is its own definition and the wire is
+/// its sync channel.
+#[test]
+fn inbound_definition_less_agent_applies_quad() {
+    use nostr::{EventBuilder, Keys, Kind, Tag};
+    // Same wire shape as the hostile fixture, minus persona_id — a
+    // definition-less instance syncing its own definition fields.
+    let content = serde_json::json!({
+        "name": "Remote Agent",
+        "system_prompt": "remote prompt",
+        "model": "remote-model",
+        "provider": "remote-provider",
+        "mcp_toolsets": "remote",
+        "persona_source_version": "remote-version",
+        "parallelism": 99,
+        "respond_to": "anyone",
+        "respond_to_allowlist": ["deadbeef"],
+    });
+    let keys = Keys::generate();
+    let event = EventBuilder::new(Kind::Custom(30177), content.to_string())
+        .tags(vec![Tag::parse(["d", AGENT_PUBKEY]).unwrap()])
+        .sign_with_keys(&keys)
+        .unwrap();
+
+    let content =
+        crate::managed_agents::agent_events::managed_agent_content_from_event(&event).unwrap();
+    let mut agents = vec![local_agent()];
+    apply_inbound_managed_agent(&mut agents, AGENT_PUBKEY, content);
+
+    let a = &agents[0];
+    assert_eq!(a.persona_id, None);
+    assert_eq!(a.system_prompt, Some("remote prompt".to_string()));
+    assert_eq!(a.model, Some("remote-model".to_string()));
+    assert_eq!(a.provider, Some("remote-provider".to_string()));
+    assert_eq!(
+        a.persona_source_version,
+        Some("remote-version".to_string()),
+        "all four quad fields must apply on a definition-less sync"
+    );
 }
 
 #[test]

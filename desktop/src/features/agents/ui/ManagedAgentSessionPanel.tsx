@@ -72,6 +72,10 @@ export function ManagedAgentSessionPanel({
   transcriptOverride,
 }: ManagedAgentSessionPanelProps) {
   const hasObserver = isManagedAgentActive(agent);
+  // Always read from the store — archived frames are ingested regardless of
+  // live status and must be renderable for idle agents with channel history.
+  // The `hasObserver` flag still gates the relay subscription (via the
+  // useEffect in useObserverEvents) and the empty-state message below.
   const { connectionState, errorMessage, events } = useObserverEvents(
     hasObserver,
     agent.pubkey,
@@ -234,7 +238,10 @@ function SessionBody({
 
   return (
     <>
-      {!hasObserver && !hasTranscriptOverride ? (
+      {!hasObserver &&
+      !hasTranscriptOverride &&
+      transcript.length === 0 &&
+      events.length === 0 ? (
         <EmptyObserverState />
       ) : connectionState === "connecting" &&
         events.length === 0 &&

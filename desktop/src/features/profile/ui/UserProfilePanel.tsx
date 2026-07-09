@@ -104,6 +104,7 @@ import { getUserProfilePanelHeaderContent } from "@/features/profile/ui/UserProf
 export type { ProfilePanelTab, ProfilePanelView };
 
 export function UserProfilePanel({
+  callerChannelId = null,
   canResetWidth,
   currentPubkey,
   isSinglePanelView = false,
@@ -805,6 +806,7 @@ export function UserProfilePanel({
           canInstantiateAgent={canInstantiateAgent}
           canOpenAgentLogs={canOpenAgentLogs}
           canViewActivity={canViewActivity}
+          callerChannelId={callerChannelId}
           channelCount={profileChannels.length}
           channelIdToName={channelIdToName}
           channels={profileChannels}

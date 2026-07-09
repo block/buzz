@@ -38,6 +38,7 @@ import { setDesktopAppBadge } from "@/features/notifications/lib/desktop";
 import { PreventSleepProvider } from "@/features/agents/usePreventSleep";
 import { requestOpenCreateAgent } from "@/features/agents/openCreateAgentEvent";
 import { useAgentsDataRefresh } from "@/features/agents/lib/useAgentsDataRefresh";
+import { useAutoRestartPolicy } from "@/features/agents/lib/useAutoRestartPolicy";
 import { usePersonaSync } from "@/features/agents/lib/usePersonaSync";
 import { useAgentObserverIngestion } from "@/features/agents/useAgentObserverIngestion";
 import {
@@ -151,6 +152,8 @@ export function AppShell() {
   );
   usePersonaSync(identityQuery.data?.pubkey);
   useAgentsDataRefresh();
+  // Chunk F: auto-restart drifted idle agents (per-agent opt-out, default ON).
+  useAutoRestartPolicy();
   // Owner-global observer ingestion: receives + decrypts agent observer
   // frames and keeps derived active-turn liveness in sync app-wide, so no
   // individual screen/panel has to mount its own bridge for ingestion.
@@ -160,10 +163,16 @@ export function AppShell() {
   // guard here would drop managed-agent coverage during startup.
   useAgentObserverIngestion();
   useArchiveSync();
-  useObserverArchiveSeed(identityQuery.data?.pubkey);
-  useAgentMetricArchiveSeed(identityQuery.data?.pubkey);
-  const profileQuery = useProfileQuery();
+  // Defer the archive *seeds* until startup is idle: they're first-run catch-up
+  // config (a one-shot mergeSaveSubscriptionKinds), not live-ingest — that's
+  // useArchiveSync's job, which stays eager above. Passing deferredPubkey makes
+  // each seed hook wait on its own `if (!pubkey) return` guard until the shell
+  // is interactive, so their IPC + sqlite archive open doesn't compete with
+  // first paint. The explicit-choice guard inside each hook is unchanged.
   const deferredPubkey = startupReady ? identityQuery.data?.pubkey : undefined;
+  useObserverArchiveSeed(deferredPubkey);
+  useAgentMetricArchiveSeed(deferredPubkey);
+  const profileQuery = useProfileQuery();
   useRelayAutoHeal();
   usePresenceSubscription();
   useUserStatusSubscription();
@@ -628,6 +637,7 @@ export function AppShell() {
             threadActivityItems,
             threadActivityFeedItems,
             feedItemState,
+            onOpenSettings: handleOpenSettings,
           }}
         >
           <HuddleProvider>

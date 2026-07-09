@@ -97,6 +97,7 @@ impl PersonaRecord {
             mcp_toolsets: None,
             env_vars: self.env_vars,
             start_on_app_launch: false,
+            auto_restart_on_config_change: true,
             runtime_pid: None,
             backend: BackendKind::default(),
             backend_agent_id: None,
@@ -109,6 +110,7 @@ impl PersonaRecord {
             last_stopped_at: None,
             last_exit_code: None,
             last_error: None,
+            last_error_code: None,
             respond_to: RespondTo::default(),
             respond_to_allowlist: Vec::new(),
             display_name: Some(self.display_name),
@@ -255,6 +257,11 @@ pub struct ManagedAgentRecord {
     pub env_vars: BTreeMap<String, String>,
     #[serde(default = "default_start_on_app_launch")]
     pub start_on_app_launch: bool,
+    /// Auto-restart this agent when its effective spawn config drifts from
+    /// the running process (Chunk F). Default ON; the policy loop in the
+    /// frontend only fires when the agent is idle, connected, and local.
+    #[serde(default = "default_auto_restart_on_config_change")]
+    pub auto_restart_on_config_change: bool,
     #[serde(default)]
     pub runtime_pid: Option<u32>,
     #[serde(default)]
@@ -283,6 +290,8 @@ pub struct ManagedAgentRecord {
     pub last_stopped_at: Option<String>,
     pub last_exit_code: Option<i32>,
     pub last_error: Option<String>,
+    #[serde(default)]
+    pub last_error_code: Option<i64>,
     /// Inbound author gate mode. Translates to `BUZZ_ACP_RESPOND_TO`.
     #[serde(default)]
     pub respond_to: RespondTo,
@@ -434,7 +443,9 @@ pub struct ManagedAgentSummary {
     pub last_stopped_at: Option<String>,
     pub last_exit_code: Option<i32>,
     pub last_error: Option<String>,
+    pub last_error_code: Option<i64>,
     pub start_on_app_launch: bool,
+    pub auto_restart_on_config_change: bool,
     pub log_path: String,
     pub respond_to: RespondTo,
     pub respond_to_allowlist: Vec<String>,
@@ -544,7 +555,7 @@ pub struct ManagedAgentLogResponse {
     pub log_path: String,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum AcpAvailabilityStatus {
     Available,
@@ -773,6 +784,10 @@ fn default_agent_parallelism() -> u32 {
 }
 
 fn default_start_on_app_launch() -> bool {
+    true
+}
+
+fn default_auto_restart_on_config_change() -> bool {
     true
 }
 

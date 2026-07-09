@@ -6,13 +6,12 @@ use crate::{
     managed_agents::{
         build_managed_agent_summary, current_instance_id, discover_provider_candidates,
         ensure_persona_is_active, find_managed_agent_mut, load_managed_agents, load_personas,
-        managed_agent_avatar_url, managed_agent_log_path, managed_agents_base_dir,
-        normalize_agent_args, provider_deploy, read_log_tail, resolve_provider_binary,
-        save_managed_agents, start_managed_agent_process, stop_managed_agent_process,
-        sync_managed_agent_processes, try_regenerate_nest, validate_provider_config, BackendKind,
-        CreateManagedAgentRequest, CreateManagedAgentResponse, ManagedAgentLogResponse,
-        ManagedAgentRecord, ManagedAgentSummary, RelayMeshConfig, DEFAULT_ACP_COMMAND,
-        DEFAULT_AGENT_PARALLELISM, DEFAULT_AGENT_TURN_TIMEOUT_SECONDS,
+        managed_agent_avatar_url, managed_agents_base_dir, normalize_agent_args, provider_deploy,
+        resolve_provider_binary, save_managed_agents, start_managed_agent_process,
+        stop_managed_agent_process, sync_managed_agent_processes, try_regenerate_nest,
+        validate_provider_config, BackendKind, CreateManagedAgentRequest,
+        CreateManagedAgentResponse, ManagedAgentRecord, ManagedAgentSummary, RelayMeshConfig,
+        DEFAULT_ACP_COMMAND, DEFAULT_AGENT_PARALLELISM, DEFAULT_AGENT_TURN_TIMEOUT_SECONDS,
     },
     relay::{relay_ws_url_with_override, sync_managed_agent_profile},
     util::now_iso,
@@ -824,6 +823,7 @@ pub async fn create_managed_agent(
             } else {
                 input.start_on_app_launch
             },
+            auto_restart_on_config_change: true,
             runtime_pid: None,
             backend: input.backend.clone(),
             backend_agent_id: None,
@@ -840,6 +840,7 @@ pub async fn create_managed_agent(
             last_stopped_at: None,
             last_exit_code: None,
             last_error: None,
+            last_error_code: None,
             respond_to: input.respond_to,
             respond_to_allowlist: respond_to_allowlist.clone(),
             display_name: None,
@@ -1247,33 +1248,6 @@ pub async fn delete_managed_agent(
     })
     .await
     .map_err(|e| format!("spawn_blocking failed: {e}"))?
-}
-
-#[tauri::command]
-pub fn get_managed_agent_log(
-    pubkey: String,
-    line_count: Option<u32>,
-    app: AppHandle,
-    state: State<'_, AppState>,
-) -> Result<ManagedAgentLogResponse, String> {
-    let _store_guard = state
-        .managed_agents_store_lock
-        .lock()
-        .map_err(|error| error.to_string())?;
-    let records = load_managed_agents(&app)?;
-    let record = records
-        .iter()
-        .find(|record| record.pubkey == pubkey)
-        .ok_or_else(|| format!("agent {pubkey} not found"))?;
-    if record.backend != BackendKind::Local {
-        return Err("logs are not available for remote agents".to_string());
-    }
-
-    let log_path = managed_agent_log_path(&app, &pubkey)?;
-    Ok(ManagedAgentLogResponse {
-        content: read_log_tail(&log_path, line_count.unwrap_or(120) as usize)?,
-        log_path: log_path.display().to_string(),
-    })
 }
 
 // Remote agent shutdown is handled entirely by the frontend:

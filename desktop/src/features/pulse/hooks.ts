@@ -1,4 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import * as React from "react";
 
 import {
   getGlobalNotes,
@@ -12,6 +13,37 @@ import {
 import { allPulseTimelinesQueryKey } from "@/features/profile/hooks";
 import { withoutProjectComments } from "@/features/pulse/lib/projectComments";
 import type { UserNote, UserNotesResponse } from "@/shared/api/socialTypes";
+
+function isDocumentVisible() {
+  return typeof document === "undefined"
+    ? true
+    : document.visibilityState === "visible";
+}
+
+function useDocumentVisible() {
+  const [visible, setVisible] = React.useState(isDocumentVisible);
+
+  React.useEffect(() => {
+    if (typeof document === "undefined") {
+      return;
+    }
+
+    function handleVisibilityChange() {
+      setVisible(isDocumentVisible());
+    }
+
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => {
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
+  }, []);
+
+  return visible;
+}
+
+function useVisibleRefetchInterval(intervalMs: number) {
+  return useDocumentVisible() ? intervalMs : false;
+}
 
 // ── Query keys ──────────────────────────────────────────────────────────────
 
@@ -31,6 +63,8 @@ export const pulseQueryKeys = {
 // ── Own notes ───────────────────────────────────────────────────────────────
 
 export function useLikedNotesQuery(pubkey?: string, enabled = true) {
+  const refetchInterval = useVisibleRefetchInterval(30_000);
+
   return useQuery<UserNotesResponse>({
     queryKey: pulseQueryKeys.likedNotes(pubkey ?? ""),
     queryFn: async () =>
@@ -39,11 +73,13 @@ export function useLikedNotesQuery(pubkey?: string, enabled = true) {
     enabled: enabled && !!pubkey,
     staleTime: 15_000,
     gcTime: 5 * 60_000,
-    refetchInterval: 30_000,
+    refetchInterval,
   });
 }
 
 export function useMyNotesQuery(pubkey?: string) {
+  const refetchInterval = useVisibleRefetchInterval(30_000);
+
   return useQuery<UserNotesResponse>({
     queryKey: pulseQueryKeys.myNotes(pubkey ?? ""),
     queryFn: async () =>
@@ -52,13 +88,15 @@ export function useMyNotesQuery(pubkey?: string) {
     enabled: !!pubkey,
     staleTime: 15_000,
     gcTime: 5 * 60_000,
-    refetchInterval: 30_000,
+    refetchInterval,
   });
 }
 
 // ── Timeline (notes from contacts) ─────────────────────────────────────────
 
 export function useTimelineQuery(contactPubkeys: string[], enabled: boolean) {
+  const refetchInterval = useVisibleRefetchInterval(30_000);
+
   return useQuery<UserNotesResponse>({
     queryKey: pulseQueryKeys.timeline(contactPubkeys),
     queryFn: async () =>
@@ -66,7 +104,7 @@ export function useTimelineQuery(contactPubkeys: string[], enabled: boolean) {
     enabled: enabled && contactPubkeys.length > 0,
     staleTime: 15_000,
     gcTime: 5 * 60_000,
-    refetchInterval: 30_000,
+    refetchInterval,
   });
 }
 
@@ -79,6 +117,8 @@ export function usePulseReactionsQuery(
   noteIds: string[],
   currentPubkey?: string,
 ) {
+  const refetchInterval = useVisibleRefetchInterval(60_000);
+
   return useQuery<Map<string, PulseReactionState>>({
     queryKey: pulseQueryKeys.reactions(noteIds),
     queryFn: async () => {
@@ -100,7 +140,7 @@ export function usePulseReactionsQuery(
     enabled: noteIds.length > 0,
     staleTime: 15_000,
     gcTime: 5 * 60_000,
-    refetchInterval: 60_000,
+    refetchInterval,
   });
 }
 
@@ -115,6 +155,8 @@ export function useNoteByIdQuery(noteId: string | null) {
 }
 
 export function useGlobalNotesQuery(enabled: boolean) {
+  const refetchInterval = useVisibleRefetchInterval(30_000);
+
   return useQuery<UserNotesResponse>({
     queryKey: pulseQueryKeys.globalNotes,
     queryFn: async () =>
@@ -122,7 +164,7 @@ export function useGlobalNotesQuery(enabled: boolean) {
     enabled,
     staleTime: 15_000,
     gcTime: 5 * 60_000,
-    refetchInterval: 30_000,
+    refetchInterval,
   });
 }
 

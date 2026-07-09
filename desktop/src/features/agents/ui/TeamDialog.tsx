@@ -365,11 +365,11 @@ export function TeamDialog({
               <div className="space-y-2">
                 <span className="text-sm font-medium">Agents</span>
                 <p className="text-xs text-muted-foreground">
-                  Select the personas to include in this team.
+                  Select the agents to include in this team.
                 </p>
                 {missingInitialPersonaCount > 0 ? (
                   <p className="rounded-2xl border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
-                    This team references {missingInitialPersonaCount} persona
+                    This team references {missingInitialPersonaCount} agent
                     {missingInitialPersonaCount === 1 ? "" : "s"} that{" "}
                     {missingInitialPersonaCount === 1 ? "is" : "are"} no longer
                     in My Agents. Save to remove them, or add them back to My

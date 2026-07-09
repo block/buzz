@@ -171,34 +171,39 @@ fn merge_legacy_workspace_storage(
 /// under `~/Library/WebKit/<identifier>/...` on macOS and is not included in the
 /// app data directory.
 #[tauri::command]
-pub fn get_legacy_workspace_storage(
+pub async fn get_legacy_workspace_storage(
     app: tauri::AppHandle,
 ) -> Result<LegacyWorkspaceStorage, String> {
-    let Some(identifier) = legacy_identifier(&app.config().identifier) else {
-        return Ok(LegacyWorkspaceStorage::default());
-    };
-    let Some(root) = legacy_webkit_data_root(&identifier) else {
-        return Ok(LegacyWorkspaceStorage::default());
-    };
-    if !root.exists() {
-        return Ok(LegacyWorkspaceStorage::default());
-    }
-
-    let mut databases = Vec::new();
-    collect_local_storage_databases(&root, &mut databases);
-
-    let mut result = LegacyWorkspaceStorage::default();
-    for database in databases {
-        match read_legacy_workspace_storage_db(&database) {
-            Ok(storage) => merge_legacy_workspace_storage(&mut result, storage),
-            Err(error) => eprintln!(
-                "buzz-desktop: legacy-local-storage-migration: {}: {error}",
-                database.display()
-            ),
+    let identifier = app.config().identifier.clone();
+    tokio::task::spawn_blocking(move || {
+        let Some(identifier) = legacy_identifier(&identifier) else {
+            return Ok(LegacyWorkspaceStorage::default());
+        };
+        let Some(root) = legacy_webkit_data_root(&identifier) else {
+            return Ok(LegacyWorkspaceStorage::default());
+        };
+        if !root.exists() {
+            return Ok(LegacyWorkspaceStorage::default());
         }
-    }
 
-    Ok(result)
+        let mut databases = Vec::new();
+        collect_local_storage_databases(&root, &mut databases);
+
+        let mut result = LegacyWorkspaceStorage::default();
+        for database in databases {
+            match read_legacy_workspace_storage_db(&database) {
+                Ok(storage) => merge_legacy_workspace_storage(&mut result, storage),
+                Err(error) => eprintln!(
+                    "buzz-desktop: legacy-local-storage-migration: {}: {error}",
+                    database.display()
+                ),
+            }
+        }
+
+        Ok(result)
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking failed: {e}"))?
 }
 
 #[cfg(test)]

@@ -169,6 +169,22 @@ export async function getChannelWorkflows(
   return raw.map(fromRawWorkflow);
 }
 
+/**
+ * Fetch workflows across many channels in a single relay round-trip.
+ *
+ * Replaces the per-channel `Promise.all(getChannelWorkflows)` fanout on the
+ * Workflows overview: the backend `#h` filter matches any listed channel, and
+ * each returned workflow carries its own `channelId` so callers can group.
+ */
+export async function getChannelsWorkflows(
+  channelIds: string[],
+): Promise<Workflow[]> {
+  const raw = await invokeTauri<RawWorkflow[]>("get_channels_workflows", {
+    channelIds,
+  });
+  return raw.map(fromRawWorkflow);
+}
+
 export async function getWorkflow(workflowId: string): Promise<Workflow> {
   const raw = await invokeTauri<RawWorkflow>("get_workflow", { workflowId });
   return fromRawWorkflow(raw);

@@ -3,6 +3,8 @@ import * as React from "react";
 
 import { relayClient } from "@/shared/api/relayClient";
 
+const AGENT_PUBKEY_REFRESH_INTERVAL_MS = 30_000;
+
 /**
  * Subscribe to agent TTS messages on the ephemeral huddle channel.
  * Pipes agent kind:9 messages to `speak_agent_message` on the Rust backend.
@@ -51,7 +53,7 @@ export function useTtsSubscription(
     void loadAgentPubkeys();
     const agentRefreshId = window.setInterval(() => {
       void loadAgentPubkeys();
-    }, 10_000);
+    }, AGENT_PUBKEY_REFRESH_INTERVAL_MS);
 
     // ── Live-only subscription ───────────────────────────────────────────
     // subscribeToChannelLive uses `since: now` — the relay never sends

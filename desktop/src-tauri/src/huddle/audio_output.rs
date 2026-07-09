@@ -6,7 +6,13 @@ use crate::app_state::AppState;
 
 /// List available audio output devices. Returns (name, is_default) pairs.
 #[tauri::command]
-pub fn list_audio_output_devices() -> Result<Vec<AudioOutputDevice>, String> {
+pub async fn list_audio_output_devices() -> Result<Vec<AudioOutputDevice>, String> {
+    tokio::task::spawn_blocking(list_audio_output_devices_blocking)
+        .await
+        .map_err(|e| format!("spawn_blocking failed: {e}"))?
+}
+
+fn list_audio_output_devices_blocking() -> Result<Vec<AudioOutputDevice>, String> {
     use rodio::cpal::traits::HostTrait;
     use rodio::DeviceTrait;
 

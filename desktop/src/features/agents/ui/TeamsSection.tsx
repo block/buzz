@@ -217,7 +217,7 @@ export function TeamsSection({
               >
                 {hasMissingPersonas ? (
                   <p className="border-t border-destructive/20 bg-destructive/10 px-3 py-2 text-xs text-destructive">
-                    {missingPersonaCount} persona
+                    {missingPersonaCount} agent
                     {missingPersonaCount === 1 ? "" : "s"} in this team{" "}
                     {missingPersonaCount === 1 ? "is" : "are"} no longer in your
                     My Agents. Edit the team to repair it before deploying or

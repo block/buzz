@@ -60,6 +60,14 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/events", post(api::bridge::submit_event))
         .route("/query", post(api::bridge::query_events))
         .route("/count", post(api::bridge::count_events))
+        .route(
+            "/operator/communities",
+            get(api::operator::list_owned_communities).post(api::operator::provision_community),
+        )
+        .route(
+            "/operator/communities/availability",
+            get(api::operator::community_availability),
+        )
         // Moderation queue reads (NIP-98 auth + mod-authz gate, L6)
         .route("/moderation/reports", get(api::bridge::moderation_reports))
         .route("/moderation/audit", get(api::bridge::moderation_audit))
@@ -96,6 +104,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
                     // Reserved API prefixes must 404 normally, not serve index.html.
                     let reserved = path.starts_with("/api/")
                         || path.starts_with("/media/")
+                        || path.starts_with("/operator/")
                         || path.starts_with("/git/")
                         || path.starts_with("/internal/")
                         || path.starts_with("/.well-known/")

@@ -416,8 +416,10 @@ export type ManagedAgent = {
   lastStoppedAt: string | null;
   lastExitCode: number | null;
   lastError: string | null;
+  lastErrorCode: number | null;
   logPath: string;
   startOnAppLaunch: boolean;
+  autoRestartOnConfigChange: boolean;
   backend: ManagedAgentBackend;
   backendAgentId: string | null;
   /** Who the agent should respond to. Maps to `buzz-acp --respond-to`. */

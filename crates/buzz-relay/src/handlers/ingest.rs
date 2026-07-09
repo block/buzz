@@ -200,7 +200,7 @@ fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static s
             Ok(Scope::AdminChannels)
         }
         // NIP-43: relay membership admin commands (9030–9032) + Buzz
-        // workspace-profile command (9033)
+        // workspace-profile command (9033).
         k if k == RELAY_ADMIN_ADD_MEMBER
             || k == RELAY_ADMIN_REMOVE_MEMBER
             || k == RELAY_ADMIN_CHANGE_ROLE
@@ -3176,6 +3176,31 @@ mod tests {
     #[test]
     fn persona_envelope_accepts_valid_slug() {
         let ev = make_persona(&[&["d", "my-persona-1"]]);
+        assert!(validate_persona_envelope(&ev).is_ok());
+    }
+
+    #[test]
+    fn persona_envelope_accepts_promptless_content() {
+        // Unified agent model: system_prompt is optional — a definition can be
+        // pure configuration. The relay validates only the envelope, so a
+        // prompt-less body must ingest identically to a full one.
+        let ev = make_event_with_tags(
+            KIND_PERSONA,
+            r#"{"display_name":"config-only"}"#,
+            &[&["d", "config-only"]],
+        );
+        assert!(validate_persona_envelope(&ev).is_ok());
+    }
+
+    #[test]
+    fn persona_envelope_accepts_behavioral_fields() {
+        // Widened content (respond_to / mcp_toolsets / parallelism) is opaque
+        // to the relay — unknown-field tolerance is the contract.
+        let ev = make_event_with_tags(
+            KIND_PERSONA,
+            r#"{"display_name":"x","respond_to":"owner-only","respond_to_allowlist":[],"mcp_toolsets":"default","parallelism":2}"#,
+            &[&["d", "behavioral"]],
+        );
         assert!(validate_persona_envelope(&ev).is_ok());
     }
 

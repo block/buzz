@@ -1,5 +1,8 @@
+use serde::Serialize;
 use tauri::Emitter;
 use url::Url;
+
+use crate::nostr_bind;
 
 /// Parse the query string of a `buzz://message?…` URL into the JSON
 /// payload emitted on `deep-link-message`. Returns `None` when a required
@@ -31,6 +34,67 @@ fn parse_message_deep_link(url: &Url) -> Option<serde_json::Value> {
         "messageId": message_id,
         "threadRootId": thread,
     }))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NostrBindDeepLinkPayload {
+    challenge_id: String,
+    nonce: String,
+    verification_code: String,
+    audience: String,
+    action: String,
+    protocol: String,
+    version: String,
+    origin: String,
+    expires_at: String,
+    return_mode: String,
+}
+
+fn non_empty_param(url: &Url, name: &str) -> Result<String, String> {
+    url.query_pairs()
+        .find(|(key, _)| key == name)
+        .map(|(_, value)| value.into_owned())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| format!("missing {name}"))
+}
+
+fn parse_nostr_bind_deep_link(url: &Url) -> Result<NostrBindDeepLinkPayload, String> {
+    let challenge_id = non_empty_param(url, "challenge_id")?;
+    let nonce = non_empty_param(url, "nonce")?;
+    let verification_code = non_empty_param(url, "verification_code")?;
+    let audience = non_empty_param(url, "audience")?;
+    let action = non_empty_param(url, "action")?;
+    let protocol = non_empty_param(url, "protocol")?;
+    let version = non_empty_param(url, "version")?;
+    let origin = non_empty_param(url, "origin")?;
+    let expires_at = non_empty_param(url, "expires_at")?;
+    let return_mode = non_empty_param(url, "return")?;
+
+    nostr_bind::validate_challenge_id(&challenge_id)?;
+    nostr_bind::validate_nonce(&nonce)?;
+    nostr_bind::validate_verification_code(&verification_code)?;
+    nostr_bind::validate_protocol_fields(&audience, &action, &protocol, &version)?;
+    nostr_bind::validate_origin(&origin)?;
+    // Expired links still reach the consent surface so the user gets an explicit
+    // failure instead of a silent stderr-only rejection from a launched app.
+    nostr_bind::validate_expires_at_format(&expires_at)?;
+    if return_mode != nostr_bind::RETURN_MODE {
+        return Err("unsupported return mode".into());
+    }
+
+    Ok(NostrBindDeepLinkPayload {
+        challenge_id,
+        nonce,
+        verification_code,
+        audience,
+        action,
+        protocol,
+        version,
+        origin,
+        expires_at,
+        return_mode,
+    })
 }
 
 /// Handle an incoming `buzz://` deep link URL.
@@ -93,6 +157,14 @@ pub(crate) fn handle_deep_link_url(app: &tauri::AppHandle, url_str: &str) {
             };
             let _ = app.emit("deep-link-message", payload);
         }
+        Some("nostr-bind") => match parse_nostr_bind_deep_link(&url) {
+            Ok(payload) => {
+                let _ = app.emit("deep-link-nostr-bind", payload);
+            }
+            Err(error) => {
+                eprintln!("buzz-desktop: rejecting nostr-bind deep link: {error}: {url_str}");
+            }
+        },
         Some(action) => {
             eprintln!("buzz-desktop: unknown deep link action: {action}");
         }
@@ -106,7 +178,14 @@ pub(crate) fn handle_deep_link_url(app: &tauri::AppHandle, url_str: &str) {
 mod tests {
     use url::Url;
 
-    use super::parse_message_deep_link;
+    use super::{parse_message_deep_link, parse_nostr_bind_deep_link};
+
+    fn valid_nostr_bind_url() -> Url {
+        Url::parse(
+            "buzz://nostr-bind?challenge_id=550e8400-e29b-41d4-a716-446655440000&nonce=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi01234567&verification_code=123456&audience=buzz%3Anostr-identity&action=bind_nostr_identity&protocol=buzz-nostr-identity&version=1&origin=https%3A%2F%2Fexample.com&expires_at=2999-01-01T00%3A00%3A00Z&return=clipboard",
+        )
+        .unwrap()
+    }
 
     #[test]
     fn parse_message_deep_link_extracts_required_params() {
@@ -156,5 +235,99 @@ mod tests {
         let url = Url::parse("buzz://message?channel=abc&id=xyz&thread=").unwrap();
         let payload = parse_message_deep_link(&url).expect("required params present");
         assert!(payload["threadRootId"].is_null());
+    }
+
+    #[test]
+    fn parse_nostr_bind_deep_link_accepts_valid_url() {
+        let payload = parse_nostr_bind_deep_link(&valid_nostr_bind_url()).unwrap();
+        assert_eq!(payload.challenge_id, "550e8400-e29b-41d4-a716-446655440000");
+        assert_eq!(payload.nonce, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi01234567");
+        assert_eq!(payload.verification_code, "123456");
+        assert_eq!(payload.audience, "buzz:nostr-identity");
+        assert_eq!(payload.action, "bind_nostr_identity");
+        assert_eq!(payload.protocol, "buzz-nostr-identity");
+        assert_eq!(payload.version, "1");
+        assert_eq!(payload.origin, "https://example.com");
+        assert_eq!(payload.expires_at, "2999-01-01T00:00:00Z");
+        assert_eq!(payload.return_mode, "clipboard");
+    }
+
+    #[test]
+    fn parse_nostr_bind_deep_link_rejects_missing_challenge_id() {
+        let url = Url::parse("buzz://nostr-bind?nonce=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi01234567&verification_code=123456&audience=buzz%3Anostr-identity&action=bind_nostr_identity&protocol=buzz-nostr-identity&version=1&origin=https%3A%2F%2Fexample.com&expires_at=2999-01-01T00%3A00%3A00Z&return=clipboard").unwrap();
+        assert!(parse_nostr_bind_deep_link(&url).is_err());
+    }
+
+    #[test]
+    fn parse_nostr_bind_deep_link_rejects_empty_nonce() {
+        let url = Url::parse("buzz://nostr-bind?challenge_id=550e8400-e29b-41d4-a716-446655440000&nonce=&verification_code=123456&audience=buzz%3Anostr-identity&action=bind_nostr_identity&protocol=buzz-nostr-identity&version=1&origin=https%3A%2F%2Fexample.com&expires_at=2999-01-01T00%3A00%3A00Z&return=clipboard").unwrap();
+        assert!(parse_nostr_bind_deep_link(&url).is_err());
+    }
+
+    #[test]
+    fn parse_nostr_bind_deep_link_rejects_missing_verification_code() {
+        let url = Url::parse("buzz://nostr-bind?challenge_id=550e8400-e29b-41d4-a716-446655440000&nonce=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi01234567&audience=buzz%3Anostr-identity&action=bind_nostr_identity&protocol=buzz-nostr-identity&version=1&origin=https%3A%2F%2Fexample.com&expires_at=2999-01-01T00%3A00%3A00Z&return=clipboard").unwrap();
+        assert!(parse_nostr_bind_deep_link(&url).is_err());
+    }
+
+    #[test]
+    fn parse_nostr_bind_deep_link_rejects_short_verification_code() {
+        let url = Url::parse("buzz://nostr-bind?challenge_id=550e8400-e29b-41d4-a716-446655440000&nonce=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi01234567&verification_code=12345&audience=buzz%3Anostr-identity&action=bind_nostr_identity&protocol=buzz-nostr-identity&version=1&origin=https%3A%2F%2Fexample.com&expires_at=2999-01-01T00%3A00%3A00Z&return=clipboard").unwrap();
+        assert!(parse_nostr_bind_deep_link(&url).is_err());
+    }
+
+    #[test]
+    fn parse_nostr_bind_deep_link_rejects_long_verification_code() {
+        let url = Url::parse("buzz://nostr-bind?challenge_id=550e8400-e29b-41d4-a716-446655440000&nonce=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi01234567&verification_code=1234567&audience=buzz%3Anostr-identity&action=bind_nostr_identity&protocol=buzz-nostr-identity&version=1&origin=https%3A%2F%2Fexample.com&expires_at=2999-01-01T00%3A00%3A00Z&return=clipboard").unwrap();
+        assert!(parse_nostr_bind_deep_link(&url).is_err());
+    }
+
+    #[test]
+    fn parse_nostr_bind_deep_link_rejects_non_digit_verification_code() {
+        let url = Url::parse("buzz://nostr-bind?challenge_id=550e8400-e29b-41d4-a716-446655440000&nonce=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi01234567&verification_code=12345a&audience=buzz%3Anostr-identity&action=bind_nostr_identity&protocol=buzz-nostr-identity&version=1&origin=https%3A%2F%2Fexample.com&expires_at=2999-01-01T00%3A00%3A00Z&return=clipboard").unwrap();
+        assert!(parse_nostr_bind_deep_link(&url).is_err());
+    }
+
+    #[test]
+    fn parse_nostr_bind_deep_link_rejects_wrong_action() {
+        let url = Url::parse("buzz://nostr-bind?challenge_id=550e8400-e29b-41d4-a716-446655440000&nonce=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi01234567&verification_code=123456&audience=buzz%3Anostr-identity&action=wrong&protocol=buzz-nostr-identity&version=1&origin=https%3A%2F%2Fexample.com&expires_at=2999-01-01T00%3A00%3A00Z&return=clipboard").unwrap();
+        assert!(parse_nostr_bind_deep_link(&url).is_err());
+    }
+
+    #[test]
+    fn parse_nostr_bind_deep_link_rejects_wrong_audience() {
+        let url = Url::parse("buzz://nostr-bind?challenge_id=550e8400-e29b-41d4-a716-446655440000&nonce=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi01234567&verification_code=123456&audience=other&action=bind_nostr_identity&protocol=buzz-nostr-identity&version=1&origin=https%3A%2F%2Fexample.com&expires_at=2999-01-01T00%3A00%3A00Z&return=clipboard").unwrap();
+        assert!(parse_nostr_bind_deep_link(&url).is_err());
+    }
+
+    #[test]
+    fn parse_nostr_bind_deep_link_rejects_non_https_origin() {
+        let url = Url::parse("buzz://nostr-bind?challenge_id=550e8400-e29b-41d4-a716-446655440000&nonce=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi01234567&verification_code=123456&audience=buzz%3Anostr-identity&action=bind_nostr_identity&protocol=buzz-nostr-identity&version=1&origin=http%3A%2F%2Fexample.com&expires_at=2999-01-01T00%3A00%3A00Z&return=clipboard").unwrap();
+        assert!(parse_nostr_bind_deep_link(&url).is_err());
+    }
+
+    #[test]
+    fn parse_nostr_bind_deep_link_rejects_origin_with_path() {
+        let url = Url::parse("buzz://nostr-bind?challenge_id=550e8400-e29b-41d4-a716-446655440000&nonce=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi01234567&verification_code=123456&audience=buzz%3Anostr-identity&action=bind_nostr_identity&protocol=buzz-nostr-identity&version=1&origin=https%3A%2F%2Fexample.com%2Fbind&expires_at=2999-01-01T00%3A00%3A00Z&return=clipboard").unwrap();
+        assert!(parse_nostr_bind_deep_link(&url).is_err());
+    }
+
+    #[test]
+    fn parse_nostr_bind_deep_link_rejects_origin_with_credentials() {
+        let url = Url::parse("buzz://nostr-bind?challenge_id=550e8400-e29b-41d4-a716-446655440000&nonce=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi01234567&verification_code=123456&audience=buzz%3Anostr-identity&action=bind_nostr_identity&protocol=buzz-nostr-identity&version=1&origin=https%3A%2F%2Fuser%40example.com&expires_at=2999-01-01T00%3A00%3A00Z&return=clipboard").unwrap();
+        assert!(parse_nostr_bind_deep_link(&url).is_err());
+    }
+
+    #[test]
+    fn parse_nostr_bind_deep_link_rejects_unsupported_return_mode() {
+        let url = Url::parse("buzz://nostr-bind?challenge_id=550e8400-e29b-41d4-a716-446655440000&nonce=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi01234567&verification_code=123456&audience=buzz%3Anostr-identity&action=bind_nostr_identity&protocol=buzz-nostr-identity&version=1&origin=https%3A%2F%2Fexample.com&expires_at=2999-01-01T00%3A00%3A00Z&return=callback").unwrap();
+        assert!(parse_nostr_bind_deep_link(&url).is_err());
+    }
+
+    #[test]
+    fn parse_nostr_bind_deep_link_accepts_expired_link_for_user_facing_error() {
+        let url = Url::parse("buzz://nostr-bind?challenge_id=550e8400-e29b-41d4-a716-446655440000&nonce=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi01234567&verification_code=123456&audience=buzz%3Anostr-identity&action=bind_nostr_identity&protocol=buzz-nostr-identity&version=1&origin=https%3A%2F%2Fexample.com&expires_at=2000-01-01T00%3A00%3A00Z&return=clipboard").unwrap();
+        let payload = parse_nostr_bind_deep_link(&url).unwrap();
+        assert_eq!(payload.expires_at, "2000-01-01T00:00:00Z");
     }
 }

@@ -46,7 +46,61 @@ CREATE TABLE IF NOT EXISTS save_subscriptions (
     created_at      INTEGER NOT NULL,
     PRIMARY KEY (identity_pubkey, relay_url, scope_type, scope_value)
 );
+
+-- Processing-status index for kind 24200 (observer) frames.
+--
+-- Every examined observer row — whether its channelId was successfully
+-- decrypted or not — gets exactly one row here keyed by (identity, relay, id).
+-- `channel_id` is nullable:
+--   NOT NULL  → frame was attributed to a channel; visible in that channel's feed.
+--   NULL      → frame was examined but had no channelId (pre-stamp or decrypt
+--               failure); excluded from all scoped views per Will's (a) ruling
+--               (2026-07-08), but the row exists so a re-run is a no-op.
+--
+-- Scoped reads filter `channel_id = ?`; NULL rows never match, staying hidden.
+CREATE TABLE IF NOT EXISTS observer_channel_index (
+    identity_pubkey TEXT NOT NULL,
+    relay_url       TEXT NOT NULL,
+    id              TEXT NOT NULL,
+    channel_id      TEXT,
+    created_at      INTEGER NOT NULL,
+    PRIMARY KEY (identity_pubkey, relay_url, id)
+);
+CREATE INDEX IF NOT EXISTS idx_observer_channel
+    ON observer_channel_index (identity_pubkey, relay_url, channel_id, created_at DESC, id DESC);
+
+-- One-row migration state table: tracks which idempotent migrations have run.
+CREATE TABLE IF NOT EXISTS archive_migrations (
+    name       TEXT PRIMARY KEY,
+    applied_at INTEGER NOT NULL
+);
 ";
+
+// ── Migration helpers ────────────────────────────────────────────────────────
+
+/// Returns true if a named migration has already been applied.
+pub fn migration_applied(conn: &Connection, name: &str) -> Result<bool, String> {
+    // The table is created in SCHEMA above, so it always exists after open.
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM archive_migrations WHERE name = ?1",
+            params![name],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("migration_applied query: {e}"))?;
+    Ok(count > 0)
+}
+
+/// Mark a named migration as applied (idempotent: no-op if already recorded).
+pub fn mark_migration_applied(conn: &Connection, name: &str, now: i64) -> Result<(), String> {
+    conn.execute(
+        "INSERT INTO archive_migrations (name, applied_at) VALUES (?1, ?2)
+         ON CONFLICT (name) DO NOTHING",
+        params![name, now],
+    )
+    .map_err(|e| format!("mark_migration_applied: {e}"))?;
+    Ok(())
+}
 
 // ── Open / init ─────────────────────────────────────────────────────────────
 
@@ -566,6 +620,157 @@ pub fn read_archived_events(
 
     rows.collect::<Result<Vec<_>, _>>()
         .map_err(|e| format!("read read_archived_events row: {e}"))
+}
+
+/// Upsert a row in `observer_channel_index` for an examined kind 24200 frame.
+///
+/// `channel_id` is `Some` for frames with a successfully-decrypted, non-null
+/// channelId; `None` for frames that had no channelId or where decryption
+/// failed. Null-channel_id rows are excluded from all scoped channel reads
+/// (scoped queries filter `channel_id = ?`; NULLs never match), satisfying
+/// Will's (a) ruling (2026-07-08), while ensuring the row exists so a re-run
+/// is a no-op.
+///
+/// Idempotent: if the (identity, relay, id) PK already exists the row is left
+/// unchanged (INSERT OR IGNORE). Called both at ingest time (new frames) and
+/// from the one-shot backfill for existing archived rows.
+pub fn upsert_observer_channel_index(
+    conn: &Connection,
+    identity_pubkey: &str,
+    relay_url: &str,
+    event_id: &str,
+    channel_id: Option<&str>,
+    created_at: i64,
+) -> Result<(), String> {
+    conn.execute(
+        "INSERT OR IGNORE INTO observer_channel_index
+             (identity_pubkey, relay_url, id, channel_id, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![identity_pubkey, relay_url, event_id, channel_id, created_at],
+    )
+    .map_err(|e| format!("failed to upsert observer_channel_index: {e}"))?;
+    Ok(())
+}
+
+/// Read all `owner_p` kind 24200 archived event rows (id + raw_json +
+/// created_at) that have NOT yet been processed (i.e., have no row in
+/// `observer_channel_index`, regardless of what channel_id would be).
+///
+/// Used by the one-shot backfill migration to discover which existing rows
+/// still need channel attribution attempted. A row is "processed" as soon as
+/// we attempt decryption — whether it succeeds (non-null channel_id written)
+/// or fails (null channel_id written) — so re-runs skip those rows.
+pub fn read_unindexed_observer_rows(
+    conn: &Connection,
+    identity_pubkey: &str,
+    relay_url: &str,
+) -> Result<Vec<(String, String, i64)>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT ae.id, ae.raw_json, ae.created_at
+             FROM archived_events ae
+             INNER JOIN archived_event_scopes aes
+                 ON aes.identity_pubkey = ae.identity_pubkey
+                AND aes.relay_url       = ae.relay_url
+                AND aes.id              = ae.id
+             WHERE ae.identity_pubkey = ?1
+               AND ae.relay_url       = ?2
+               AND ae.kind            = 24200
+               AND aes.scope_type     = 'owner_p'
+               AND ae.id NOT IN (
+                   SELECT id FROM observer_channel_index
+                   WHERE identity_pubkey = ?1
+                     AND relay_url       = ?2
+               )
+             ORDER BY ae.created_at DESC, ae.id DESC",
+        )
+        .map_err(|e| format!("prepare read_unindexed_observer_rows: {e}"))?;
+
+    let rows = stmt
+        .query_map(params![identity_pubkey, relay_url], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        })
+        .map_err(|e| format!("query read_unindexed_observer_rows: {e}"))?;
+
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("read read_unindexed_observer_rows row: {e}"))
+}
+
+/// Read a paginated page of archived kind 24200 events scoped to one channel,
+/// using the `observer_channel_index` as the primary lookup.
+///
+/// Returns `raw_json` strings in newest-first order. The compound cursor
+/// `(before_created_at, before_id)` works identically to `read_archived_events`.
+/// A page shorter than `limit` signals the archive is exhausted for this channel.
+#[allow(clippy::too_many_arguments)]
+pub fn read_archived_observer_events_for_channel(
+    conn: &Connection,
+    identity_pubkey: &str,
+    relay_url: &str,
+    channel_id: &str,
+    before_created_at: Option<i64>,
+    before_id: Option<&str>,
+    limit: i64,
+) -> Result<Vec<String>, String> {
+    let mut next_slot: usize = 4;
+    let mut extra_clauses = String::new();
+    let mut before_at_val: Option<i64> = None;
+    let mut before_id_val: Option<String> = None;
+
+    if let (Some(bat), Some(bid)) = (before_created_at, before_id) {
+        before_at_val = Some(bat);
+        before_id_val = Some(bid.to_owned());
+        extra_clauses.push_str(&format!(
+            " AND (oci.created_at < ?{next_slot} \
+              OR (oci.created_at = ?{next_slot} AND oci.id < ?{}))",
+            next_slot + 1,
+        ));
+        next_slot += 2;
+    }
+    let limit_slot = next_slot;
+
+    let sql = format!(
+        "SELECT ae.raw_json \
+         FROM observer_channel_index oci \
+         INNER JOIN archived_events ae \
+             ON ae.identity_pubkey = oci.identity_pubkey \
+            AND ae.relay_url       = oci.relay_url \
+            AND ae.id              = oci.id \
+         WHERE oci.identity_pubkey = ?1 \
+           AND oci.relay_url       = ?2 \
+           AND oci.channel_id      = ?3\
+         {extra_clauses}\
+         ORDER BY oci.created_at DESC, oci.id DESC \
+         LIMIT ?{limit_slot}",
+    );
+
+    let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = vec![
+        Box::new(identity_pubkey.to_owned()),
+        Box::new(relay_url.to_owned()),
+        Box::new(channel_id.to_owned()),
+    ];
+    if let (Some(bat), Some(bid)) = (before_at_val, before_id_val) {
+        params_vec.push(Box::new(bat));
+        params_vec.push(Box::new(bid));
+    }
+    params_vec.push(Box::new(limit));
+
+    let param_refs: Vec<&dyn rusqlite::ToSql> = params_vec.iter().map(|p| p.as_ref()).collect();
+
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|e| format!("prepare read_archived_observer_events_for_channel: {e}"))?;
+
+    let rows = stmt
+        .query_map(param_refs.as_slice(), |row| row.get::<_, String>(0))
+        .map_err(|e| format!("query read_archived_observer_events_for_channel: {e}"))?;
+
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("read read_archived_observer_events_for_channel row: {e}"))
 }
 
 /// GC: delete orphaned event rows whose last scope row was just removed.

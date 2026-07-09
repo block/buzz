@@ -43,6 +43,10 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 const DiffMessage = React.lazy(() => import("./DiffMessage"));
 const DiffMessageExpanded = React.lazy(() => import("./DiffMessageExpanded"));
 
+/** Stable empty fallback so rows without an agent-pubkey set keep a constant
+ *  reference (a fresh `new Set()` per render would defeat downstream memos). */
+const EMPTY_AGENT_PUBKEYS: ReadonlySet<string> = new Set();
+
 export type ThreadDepthGuideAction = {
   active?: boolean;
   depth: number;
@@ -149,6 +153,17 @@ export const MessageRow = React.memo(
     } = useReactionHandler(message, onToggleReaction);
     const { openReminder, activeReminderEventIds } = useRemindLater();
     const hasActiveReminder = activeReminderEventIds.has(message.id);
+    const handleRemindLater = React.useCallback(
+      (msg: TimelineMessage) => {
+        openReminder({
+          eventId: msg.id,
+          channelId: channelId ?? "",
+          preview: msg.body.slice(0, 100),
+          authorPubkey: msg.pubkey ?? "",
+        });
+      },
+      [channelId, openReminder],
+    );
     const mentionNames = React.useMemo(
       () => resolveMentionNames(message.tags, profiles),
       [profiles, message.tags],
@@ -157,17 +172,11 @@ export const MessageRow = React.memo(
       () => resolveMentionPubkeysByName(message.tags, profiles),
       [profiles, message.tags],
     );
-    const resolvedAgentPubkeys = React.useMemo(() => {
-      const pubkeys = new Set(agentPubkeys ?? []);
-
-      for (const [pubkey, profile] of Object.entries(profiles ?? {})) {
-        if (profile.isAgent) {
-          pubkeys.add(normalizePubkey(pubkey));
-        }
-      }
-
-      return pubkeys;
-    }, [agentPubkeys, profiles]);
+    // The agent-pubkey set is computed once by the parent (ChannelScreen)
+    // from the same profile lookup and passed down already normalised — no
+    // per-row rescan of `profiles` (that duplicated the parent's work in every
+    // mounted row and re-ran on each profile-lookup change).
+    const resolvedAgentPubkeys = agentPubkeys ?? EMPTY_AGENT_PUBKEYS;
     const profilePopoverRole =
       message.role === "bot" ||
       (message.pubkey &&
@@ -200,11 +209,7 @@ export const MessageRow = React.memo(
     );
     const bodyOffsetClass = emojiOnly ? "mt-1" : "-mt-0.5";
 
-    const { channels } = useChannelNavigation();
-    const channelNames = React.useMemo(
-      () => channels.filter((c) => c.channelType !== "dm").map((c) => c.name),
-      [channels],
-    );
+    const { nonDmChannelNames: channelNames } = useChannelNavigation();
 
     const indentRem = getThreadReplyIndentRem(message.depth);
     const descendantGuideOffsetRem = connectDescendants
@@ -452,14 +457,7 @@ export const MessageRow = React.memo(
           onReactionSelect={
             canToggleReactions ? handleReactionSelect : undefined
           }
-          onRemindLater={(msg) => {
-            openReminder({
-              eventId: msg.id,
-              channelId: channelId ?? "",
-              preview: msg.body.slice(0, 100),
-              authorPubkey: msg.pubkey ?? "",
-            });
-          }}
+          onRemindLater={handleRemindLater}
           onReply={onReply}
           onUnfollowThread={onUnfollowThread}
           reactionErrorMessage={reactionErrorMessage}

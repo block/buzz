@@ -77,6 +77,8 @@ pub const KIND_READ_STATE: u32 = 30078;
 pub const KIND_AUTH: u32 = 22242;
 /// BUD-01: Blossom upload auth (used in upload.rs, not stored).
 pub const KIND_BLOSSOM_AUTH: u32 = 24242;
+/// Buzz custom one-time identity binding proof (ephemeral, not stored).
+pub const KIND_NOSTR_IDENTITY_BINDING: u32 = 24243;
 /// NIP-98: HTTP auth event (used in nip98.rs, not stored).
 pub const KIND_HTTP_AUTH: u32 = 27235;
 

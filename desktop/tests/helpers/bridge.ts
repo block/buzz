@@ -53,6 +53,7 @@ type MockManagedAgentSeed = {
     | { type: "local" }
     | { type: "provider"; id: string; config: Record<string, unknown> };
   lastError?: string | null;
+  lastErrorCode?: number | null;
   respondTo?: "owner-only" | "allowlist" | "anyone";
   respondToAllowlist?: string[];
 };
