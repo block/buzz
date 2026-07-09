@@ -214,7 +214,9 @@ const overrides = new Map([
   // uid-keyed lockfile path + behavioral tests add ~303 lines. Load-bearing
   // security fix for the lost-update race that stranded agent keys.
   ["src-tauri/src/secret_store.rs", 1043],
-  ["src-tauri/src/app_state.rs", 1033],
+  // keyring-dev-isolation: keyring_service() fn (9 lines) replaces the const
+  // to return "buzz-desktop-dev" in debug builds. Load-bearing isolation fix.
+  ["src-tauri/src/app_state.rs", 1042],
   // multi-slot splitting + no-op suppression (#1309): the ReadStateManager
   // class grew from ~700 lines to ~1019 with the addition of
   // splitContextsIntoBudgetedSlots (pure fn + 5 tests), publishSplitSlots,

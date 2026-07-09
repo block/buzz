@@ -203,7 +203,7 @@ function OnboardingLoadingGate() {
               tabIndex={-1}
               type="button"
             >
-              Continue with Block Inc. workspace
+              Continue with default workspace
             </Button>
 
             <Button

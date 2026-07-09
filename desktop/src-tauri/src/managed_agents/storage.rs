@@ -6,7 +6,7 @@ use std::{
 
 use tauri::{AppHandle, Manager};
 
-use crate::app_state::KEYRING_SERVICE;
+use crate::app_state::keyring_service;
 use crate::managed_agents::ManagedAgentRecord;
 use crate::secret_store::{KeyringProbe, SecretStore};
 
@@ -23,7 +23,7 @@ fn agent_keyring_name(pubkey: &str) -> String {
 /// races on concurrent blob writes.
 fn agent_secret_store() -> Option<&'static SecretStore> {
     if cfg!(feature = "system-keyring") {
-        Some(SecretStore::shared(KEYRING_SERVICE))
+        Some(SecretStore::shared(keyring_service()))
     } else {
         None
     }

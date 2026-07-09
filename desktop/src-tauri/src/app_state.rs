@@ -184,7 +184,16 @@ pub fn resolve_persisted_identity(app: &AppHandle, state: &AppState) -> Result<(
 
 /// Service name for the desktop OS keyring. Shared by the human identity key
 /// and managed-agent keys (each addressed by a distinct key name within it).
-pub(crate) const KEYRING_SERVICE: &str = "buzz-desktop";
+///
+/// Debug builds use a distinct service name so dev and production keyring
+/// entries never collide on the same machine.
+pub(crate) fn keyring_service() -> &'static str {
+    if cfg!(debug_assertions) {
+        "buzz-desktop-dev"
+    } else {
+        "buzz-desktop"
+    }
+}
 
 /// Keyring key name for the human identity nsec.
 const IDENTITY_KEY_NAME: &str = "identity";
@@ -238,7 +247,7 @@ fn load_or_create_identity(data_dir: &std::path::Path) -> Result<Keys, String> {
         return load_file_or_generate(&legacy_path, data_dir);
     }
 
-    let store = crate::secret_store::SecretStore::shared(KEYRING_SERVICE);
+    let store = crate::secret_store::SecretStore::shared(keyring_service());
     resolve_identity_with_store(store, &legacy_path, data_dir)
 }
 

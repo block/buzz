@@ -249,7 +249,7 @@ export function WelcomeSetup({
                   }}
                   type="button"
                 >
-                  Continue with Block Inc. workspace
+                  Continue with default workspace
                 </Button>
               )}
 
