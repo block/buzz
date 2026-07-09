@@ -201,8 +201,8 @@ const PROJECT_STAT_ITEMS = [
   {
     key: "issueCount",
     icon: CircleDot,
-    iconClass: "text-destructive/70",
-    barClass: "bg-destructive/70",
+    iconClass: "text-orange-500",
+    barClass: "bg-orange-500",
     columnClass: "w-20",
     label: (count: number) => (count === 1 ? "issue" : "issues"),
   },
