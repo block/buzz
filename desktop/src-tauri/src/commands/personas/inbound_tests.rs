@@ -463,24 +463,35 @@ fn inbound_team_no_match_inserts_idempotently() {
 // ── Tombstone (kind:5) consume ────────────────────────────────────────────
 
 fn deletion_event(coord: &str) -> nostr::Event {
-    use nostr::{EventBuilder, JsonUtil, Keys, Kind, Tag};
+    deletion_event_with_keys(coord, &nostr::Keys::generate())
+}
+
+fn deletion_event_with_keys(coord: &str, keys: &nostr::Keys) -> nostr::Event {
+    use nostr::{EventBuilder, JsonUtil, Kind, Tag};
     let event = EventBuilder::new(Kind::Custom(5), "")
         .tags(vec![Tag::parse(["a", coord]).unwrap()])
-        .sign_with_keys(&Keys::generate())
+        .sign_with_keys(keys)
         .unwrap();
     nostr::Event::from_json(event.as_json()).unwrap()
 }
 
+/// A deletion event whose coordinate owner IS its signer — the only shape
+/// `parse_deletion_coordinate` accepts since the owner check landed.
+fn owned_deletion_event(kind: u32, d_tag: &str) -> nostr::Event {
+    let keys = nostr::Keys::generate();
+    let owner = keys.public_key().to_hex();
+    deletion_event_with_keys(&format!("{kind}:{owner}:{d_tag}"), &keys)
+}
+
 #[test]
 fn parse_deletion_coordinate_extracts_kind_and_d_tag() {
-    let owner = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
     // Persona / team / agent coordinates all route by their leading kind.
-    let p = deletion_event(&format!("30175:{owner}:my-persona"));
+    let p = owned_deletion_event(30175, "my-persona");
     assert_eq!(
         parse_deletion_coordinate(&p),
         Some((30175, "my-persona".to_string()))
     );
-    let a = deletion_event(&format!("30177:{owner}:agentpubkeyhex"));
+    let a = owned_deletion_event(30177, "agentpubkeyhex");
     assert_eq!(
         parse_deletion_coordinate(&a),
         Some((30177, "agentpubkeyhex".to_string()))
@@ -488,10 +499,18 @@ fn parse_deletion_coordinate_extracts_kind_and_d_tag() {
 }
 
 #[test]
+fn parse_deletion_coordinate_rejects_foreign_owner() {
+    // A validly signed kind:5 naming ANOTHER owner's coordinate must no-op:
+    // NIP-09 scopes deletion to the record's own author.
+    let foreign_owner = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+    let forged = deletion_event(&format!("30175:{foreign_owner}:my-persona"));
+    assert_eq!(parse_deletion_coordinate(&forged), None);
+}
+
+#[test]
 fn parse_deletion_coordinate_handles_colon_in_d_tag_and_rejects_malformed() {
-    let owner = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
     // A d-tag containing ':' keeps its remainder intact (splitn(3)).
-    let weird = deletion_event(&format!("30176:{owner}:a:b:c"));
+    let weird = owned_deletion_event(30176, "a:b:c");
     assert_eq!(
         parse_deletion_coordinate(&weird),
         Some((30176, "a:b:c".to_string()))
@@ -527,4 +546,41 @@ fn tombstone_removal_predicates_match_apply_fn_keys() {
     assert_eq!(agents.len(), 1, "non-matching agent tombstone no-ops");
     agents.retain(|r| r.pubkey != AGENT_PUBKEY);
     assert!(agents.is_empty(), "agent removed by pubkey");
+}
+
+// ── Inbound signature gate ──────────────────────────────────────────────────
+
+#[test]
+fn inbound_gate_rejects_tampered_event() {
+    use nostr::JsonUtil;
+    // A validly signed event whose content was altered post-signing: the
+    // pubkey is real, the sig no longer covers the bytes. Must die at the
+    // gate before any store logic runs.
+    let keys = nostr::Keys::generate();
+    let event = nostr::EventBuilder::new(nostr::Kind::Custom(30175), "{}")
+        .tags(vec![nostr::Tag::parse(["d", "victim-slug"]).unwrap()])
+        .sign_with_keys(&keys)
+        .unwrap();
+    let tampered = event.as_json().replace(
+        "\"content\":\"{}\"",
+        "\"content\":\"{\\\"system_prompt\\\":\\\"pwned\\\"}\"",
+    );
+
+    let err = parse_verified_inbound_event(&tampered).unwrap_err();
+    assert!(
+        err.contains("signature"),
+        "tampered event must fail the signature gate: {err}"
+    );
+}
+
+#[test]
+fn inbound_gate_accepts_validly_signed_event() {
+    use nostr::JsonUtil;
+    let keys = nostr::Keys::generate();
+    let event = nostr::EventBuilder::new(nostr::Kind::Custom(30175), "{}")
+        .tags(vec![nostr::Tag::parse(["d", "slug"]).unwrap()])
+        .sign_with_keys(&keys)
+        .unwrap();
+    let parsed = parse_verified_inbound_event(&event.as_json()).unwrap();
+    assert_eq!(parsed.pubkey, keys.public_key());
 }

@@ -383,8 +383,7 @@ fn reconcile_inbound_persona_event_blocking(
     use nostr::JsonUtil;
 
     let state = app.state::<AppState>();
-    let event = nostr::Event::from_json(&event_json)
-        .map_err(|e| format!("failed to parse inbound event: {e}"))?;
+    let event = parse_verified_inbound_event(&event_json)?;
 
     // The live filter subscribes to 30175/30176/30177 (upserts) plus kind:5
     // (NIP-09 deletions). d-tags are NOT unique across kinds, so every path
@@ -474,6 +473,21 @@ fn reconcile_inbound_persona_event_blocking(
     Ok(())
 }
 
+/// Parse an inbound wire event and enforce the signature gate. Everything
+/// downstream trusts `event.pubkey` (ownership routing, tombstone scoping,
+/// behavioral-quad application), so a forged pubkey must die here — the
+/// TS-side owner filter reads the same attacker-controlled field and is no
+/// defense.
+fn parse_verified_inbound_event(event_json: &str) -> Result<nostr::Event, String> {
+    use nostr::JsonUtil;
+    let event = nostr::Event::from_json(event_json)
+        .map_err(|e| format!("failed to parse inbound event: {e}"))?;
+    event
+        .verify()
+        .map_err(|e| format!("inbound event failed signature verification: {e}"))?;
+    Ok(event)
+}
+
 /// Parse a NIP-09 `a`-tag coordinate `<kind>:<owner_pubkey>:<d_tag>` into its
 /// target kind and d-tag. Returns `None` if the tag is absent or malformed, so
 /// the caller no-ops on a tombstone it can't route.
@@ -488,7 +502,14 @@ fn parse_deletion_coordinate(event: &nostr::Event) -> Option<(u32, String)> {
         // most twice and keep the remainder as the d_tag.
         let mut parts = coord.splitn(3, ':');
         let kind: u32 = parts.next()?.parse().ok()?;
-        let _owner = parts.next()?;
+        let owner = parts.next()?;
+        // NIP-09 scoping: only the record's author may tombstone it. The
+        // signature gate upstream proves `event.pubkey`; requiring the
+        // coordinate owner to match closes the other half — a validly
+        // signed kind:5 naming ANOTHER owner's coordinate must no-op.
+        if owner != event.pubkey.to_hex() {
+            return None;
+        }
         let d_tag = parts.next()?;
         Some((kind, d_tag.to_string()))
     })
