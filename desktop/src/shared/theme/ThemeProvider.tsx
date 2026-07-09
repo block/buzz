@@ -232,47 +232,86 @@ function resolveEffectiveAccent(
   return isBuzzTheme(themeName) ? NEUTRAL_ACCENT : accentColor;
 }
 
-/** Toggle the Buzz sidebar-gradient and translucency markers on the root. */
+/**
+ * Toggle the opaque Buzz sidebar-gradient marker. This is always safe to apply
+ * synchronously: `data-buzz-sidebar` paints solid gradient colors, so it never
+ * makes the window see-through. The *translucent* treatment (transparent
+ * root/body) is handled separately via {@link setBuzzTranslucent} because it
+ * must be sequenced against the native vibrancy layer — see
+ * {@link applyBuzzVibrancy}.
+ */
 function applyBuzzSidebar(themeName: string) {
   const root = document.documentElement;
   if (isBuzzTheme(themeName)) {
     root.setAttribute("data-buzz-sidebar", "");
-    // The translucent treatment (transparent root/body + semi-transparent
-    // sidebar gradient) relies on the native macOS `NSVisualEffectView`
-    // vibrancy layer painting behind the webview. On Windows/Linux
-    // `set_window_vibrancy` is a no-op, but the window is transparent
-    // globally (tauri.conf.json), so a transparent root would show raw
-    // desktop content through the UI. Gate the translucent marker and
-    // transparent root background to macOS; other platforms fall back to the
-    // opaque Buzz gradient (`data-buzz-sidebar` paints solid colors) with the
-    // normal `bg-background` body fill.
-    if (isMacPlatform()) {
-      root.setAttribute("data-buzz-translucent", "");
-      root.style.setProperty("background-color", "transparent");
-      root.style.setProperty("background-image", "none");
-    } else {
-      root.removeAttribute("data-buzz-translucent");
-      root.style.removeProperty("background-color");
-      root.style.removeProperty("background-image");
-    }
   } else {
     root.removeAttribute("data-buzz-sidebar");
-    root.removeAttribute("data-buzz-translucent");
-    root.style.removeProperty("background-color");
-    root.style.removeProperty("background-image");
+    // Leaving Buzz: drop translucency synchronously here too. Going *opaque*
+    // never shows desktop/prior content through, so there's no ordering risk
+    // on the way out — only on the way in.
+    setBuzzTranslucent(false);
   }
 }
 
+/**
+ * Toggle the translucent (see-through) treatment: transparent root/body so the
+ * native macOS vibrancy layer shows through behind the sidebar glass. The
+ * transparent root/body themselves are driven by the `data-buzz-translucent`
+ * CSS rule (theme.css), so we only flip the attribute here — no inline styles.
+ *
+ * IMPORTANT: enabling translucency exposes whatever the compositor paints
+ * behind the webview. Only enable it once the native `NSVisualEffectView`
+ * vibrancy layer is confirmed installed, otherwise there's a frame where the
+ * transparent webview reveals the content behind it (the "main app nav
+ * underneath" flicker). {@link applyBuzzVibrancy} owns that sequencing.
+ */
+function setBuzzTranslucent(enabled: boolean) {
+  const root = document.documentElement;
+  if (enabled) {
+    root.setAttribute("data-buzz-translucent", "");
+  } else {
+    root.removeAttribute("data-buzz-translucent");
+  }
+}
+
+/**
+ * Sequence the native vibrancy layer and the CSS translucency so they land in
+ * the right order and never leave a transparent webview with nothing painted
+ * behind it:
+ *
+ * - Entering Buzz (macOS): install the vibrancy layer first (await the IPC),
+ *   *then* flip on translucency. This closes the frame-gap where the root was
+ *   transparent before the vibrancy view existed — the flicker.
+ * - Leaving Buzz: translucency was already removed synchronously in
+ *   `applyBuzzSidebar` (safe — opaque never shows through), so here we just
+ *   clear the native layer.
+ *
+ * On non-macOS `set_window_vibrancy` is a no-op and translucency stays off, so
+ * these platforms fall back to the opaque Buzz gradient.
+ */
 async function applyBuzzVibrancy(themeName: string) {
-  if (!isTauri()) return;
+  const buzz = isBuzzTheme(themeName);
+
+  if (!isTauri()) {
+    // Web/dev preview: no native vibrancy layer exists, so translucency would
+    // show raw page background. Keep it off; the opaque gradient stands in.
+    setBuzzTranslucent(false);
+    return;
+  }
 
   try {
     await invokeTauri<void>("set_window_vibrancy", {
-      enabled: isBuzzTheme(themeName),
+      enabled: buzz,
       material: BUZZ_VIBRANCY_MATERIAL,
     });
+    // Only now that the native layer is installed is it safe to go transparent.
+    if (buzz && isMacPlatform()) {
+      setBuzzTranslucent(true);
+    }
   } catch (error) {
     console.warn("set_window_vibrancy failed", error);
+    // Vibrancy failed — don't go transparent or we'd show through to nothing.
+    setBuzzTranslucent(false);
   }
 }
 
