@@ -65,6 +65,7 @@ import { useDueReminderBadgeCount } from "@/features/reminders/hooks";
 import { RemindMeLaterProvider } from "@/features/reminders/ui/RemindMeLaterProvider";
 import { useReminderNotifications } from "@/features/reminders/useReminderNotifications";
 import { AppSidebar } from "@/features/sidebar/ui/AppSidebar";
+import { BuzzThemeLab } from "@/features/sidebar/ui/BuzzThemeLab";
 import { WorkspaceRail } from "@/features/sidebar/ui/WorkspaceRail";
 import { useChannelMutes } from "@/features/sidebar/lib/useChannelMutes";
 import { useChannelStars } from "@/features/sidebar/lib/useChannelStars";
@@ -860,6 +861,7 @@ export function AppShell() {
                           <SidebarInset
                             ref={mainInsetRef}
                             className="isolate min-h-0 min-w-0 overflow-hidden bg-sidebar"
+                            data-buzz-glass-inset
                             style={chromeCssVarDefaults as React.CSSProperties}
                           >
                             <div className="relative z-10 mb-2 ml-px mr-2 mt-px flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl bg-background shadow-[-1px_-1px_0_0_hsl(var(--sidebar-border)/0.45)]">
@@ -902,6 +904,7 @@ export function AppShell() {
                       }}
                     />
                   </SidebarProvider>
+                  {import.meta.env.DEV ? <BuzzThemeLab /> : null}
                 </div>
 
                 <div className="absolute inset-x-0 bottom-0 z-0 h-(--buzz-huddle-drawer-height)">

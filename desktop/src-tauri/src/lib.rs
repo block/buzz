@@ -642,6 +642,7 @@ pub fn run() {
             archive::index_observer_channel_id,
             archive::read_unindexed_observer_rows,
             is_auto_update_supported,
+            set_window_vibrancy,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

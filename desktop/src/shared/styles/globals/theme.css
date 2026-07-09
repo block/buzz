@@ -165,7 +165,7 @@
 }
 
 /*
- * Buzz theme — sidebar gradient.
+ * Buzz theme - sidebar gradient.
  *
  * Buzz reuses the GitHub Light palette for every base color; its one
  * distinguishing feature is this gradient painted across the sidebar/nav
@@ -176,16 +176,14 @@
  * lives in Tailwind's `utilities` layer, and unlayered declarations win over
  * any layered ones, so this reliably overrides it without an `!important`.
  *
- * The gradient is applied to every `bg-sidebar` canvas surface INSIDE the app
- * shell (`.group\/sidebar-wrapper` — the top chrome bar, the sidebar column,
- * and the inset margin behind the white content card), PLUS two chrome
- * surfaces rendered OUTSIDE that wrapper: the portaled mobile sidebar (the
- * `SheetContent` rendered by the offcanvas branch on narrow viewports, marked
- * `[data-sidebar="sidebar"][data-mobile="true"]`) and the workspace rail (the
- * Discord-style relay column on the far left, `[data-testid="workspace-rail"]`,
- * a sibling of the wrapper gated behind the `workspaceRail` feature flag).
- * Both live outside `.group\/sidebar-wrapper`, so each needs its own precise
- * selector rather than re-broadening to every portal.
+ * The gradient is applied to the shell wrapper plus every `bg-sidebar` canvas
+ * surface inside it (top chrome, sidebar column, and the inset margin behind
+ * the white content card). A few panes that do not literally carry
+ * `bg-sidebar` are marked explicitly (`data-buzz-glass-inset` /
+ * `data-buzz-glass-footer-wrap`) so they join the same visual layer. Two
+ * chrome surfaces rendered outside the wrapper also get precise selectors: the
+ * portaled mobile sidebar (`[data-sidebar="sidebar"][data-mobile="true"]`) and
+ * the workspace rail (`[data-testid="workspace-rail"]`).
  * Scoping this way keeps the branding on the app chrome and off unrelated
  * `bg-sidebar` consumers rendered in portals outside the shell (e.g. the
  * persona catalog dialog). `background-attachment: fixed` anchors the gradient
@@ -194,7 +192,7 @@
  * grey `--sidebar-background` never shows through.
  *
  * Small transient `bg-sidebar` chips inside the shell that are NOT canvas
- * surfaces (the drag-overlay pills) opt out via `[data-buzz-flat]` — a
+ * surfaces (the drag-overlay pills) opt out via `[data-buzz-flat]` - a
  * viewport-fixed gradient behind a small floating chip would show an arbitrary
  * slice of the ramp.
  *
@@ -204,6 +202,18 @@
 :root[data-buzz-sidebar] {
   --buzz-gradient-top: #e6e6b6;
   --buzz-gradient-bottom: #c4d0da;
+  --buzz-channel-fg: inherit;
+  --buzz-dm-fg: inherit;
+  --buzz-nav-fg: inherit;
+  --buzz-hover-fill: #ffffff;
+  --buzz-hover-alpha: 48%;
+  --buzz-hover-surface: color-mix(
+    in srgb,
+    var(--buzz-hover-fill) var(--buzz-hover-alpha),
+    transparent
+  );
+  --buzz-active-fill: 0 0% 100%;
+  --buzz-active-foreground: var(--foreground);
 }
 
 /*
@@ -215,8 +225,21 @@
 :root[data-buzz-sidebar].dark {
   --buzz-gradient-top: #2b2b18;
   --buzz-gradient-bottom: #1b2530;
+  --buzz-hover-alpha: 9.6%;
+  --buzz-active-fill: 0 0% 100%;
+  --buzz-active-foreground: 0 0% 100%;
 }
 
+:root[data-buzz-sidebar]
+  [data-testid="app-sidebar"]
+  [data-testid="sidebar-pinned-header"] {
+  padding-top: 0.75rem;
+}
+
+:root[data-buzz-sidebar] .group\/sidebar-wrapper,
+:root[data-buzz-sidebar] [data-testid="app-sidebar"],
+:root[data-buzz-sidebar] [data-buzz-glass-inset],
+:root[data-buzz-sidebar] [data-buzz-glass-footer-wrap],
 :root[data-buzz-sidebar]
   .group\/sidebar-wrapper
   .bg-sidebar:not([data-buzz-flat]),
@@ -268,34 +291,17 @@
 }
 
 /*
- * Shared translucent-white fill for sidebar hover states and the search box.
- * Only the sidebar rules below consume it, but it is safe at :root and other
- * Buzz sidebar rules reference it, so it stays here.
- */
-:root[data-buzz-sidebar] {
-  --buzz-hover-surface: rgb(255 255 255 / 0.6);
-}
-
-/*
- * Dark variant: 60%-white fills are too harsh on the dark gradient, so use a
- * lower-opacity white for hover / search surfaces.
- */
-:root[data-buzz-sidebar].dark {
-  --buzz-hover-surface: rgb(255 255 255 / 0.12);
-}
-
-/*
  * Active nav item. The accent system (`applyAccentColor` in ThemeProvider)
  * sets `--sidebar-active` to the theme foreground as an INLINE style on
  * :root, which renders the selected page as a solid black pill under GitHub
  * Light. For the Buzz theme we want a white pill instead. Override the two
- * active tokens — `!important` is required because an important stylesheet
- * declaration is what beats the non-important inline style set by the accent
- * system. Text flips to the theme foreground so it stays legible on the white
- * pill; the derived `bg-sidebar-active-foreground/20` badge on active items
- * follows automatically.
+ * active tokens on the sidebar element itself; element-local custom properties
+ * win over the inherited inline values from :root. Text flips to the theme
+ * foreground so it stays legible on the white pill; the derived
+ * `bg-sidebar-active-foreground/20` badge on active items follows
+ * automatically.
  *
- * SCOPED to the app sidebar container, NOT :root — the `bg-sidebar-active` /
+ * SCOPED to the app sidebar container, NOT :root - the `bg-sidebar-active` /
  * `text-sidebar-active-foreground` tokens are also consumed by non-sidebar
  * controls (avatar edit buttons in ProfileSettingsCard / AgentCreationPreview,
  * the selected persona row in PersonaCatalogDialog). A root-level override
@@ -303,8 +309,8 @@
  * the normal accent-driven active colors.
  */
 :root[data-buzz-sidebar] [data-testid="app-sidebar"] {
-  --sidebar-active: 0 0% 100% !important;
-  --sidebar-active-foreground: var(--foreground) !important;
+  --sidebar-active: var(--buzz-active-fill);
+  --sidebar-active-foreground: var(--buzz-active-foreground);
 }
 
 /*
@@ -312,17 +318,8 @@
  * (The pill itself is repainted to a translucent tint by the rule below.)
  */
 :root[data-buzz-sidebar].dark [data-testid="app-sidebar"] {
-  --sidebar-active: 0 0% 100% !important;
-  --sidebar-active-foreground: 0 0% 100% !important;
-}
-
-/*
- * On dark the active pill is a translucent white tint rather than a solid
- * fill, so it sits on the gradient without blowing out. The `!important`
- * background overrides the `bg-sidebar-active` utility for this state only.
- */
-:root[data-buzz-sidebar].dark [data-testid="app-sidebar"] [data-active="true"] {
-  background-color: rgb(255 255 255 / 0.16) !important;
+  --sidebar-active: var(--buzz-active-fill);
+  --sidebar-active-foreground: var(--buzz-active-foreground);
 }
 
 /*
@@ -335,9 +332,21 @@
 }
 
 /*
+ * On dark the active pill is a translucent white tint rather than a solid
+ * fill, so it sits on the gradient without blowing out.
+ */
+:root[data-buzz-sidebar].dark [data-testid="app-sidebar"] [data-active="true"] {
+  background-color: color-mix(
+    in srgb,
+    hsl(var(--buzz-active-fill)) 16%,
+    transparent
+  );
+}
+
+/*
  * Hover on non-active nav items uses a translucent white fill (see
  * `--buzz-hover-surface`) instead of the grey `--sidebar-accent`. Active
- * items are excluded — they stay solid on hover (their
+ * items are excluded - they stay solid on hover (their
  * `data-[active=true]:hover:bg-sidebar-active` rule). Covers both top-level
  * menu buttons and channel sub-buttons.
  */
@@ -368,7 +377,7 @@
 }
 
 /*
- * Section action buttons (the "+" and "…" at the right edge of each sidebar
+ * Section action buttons (the "+" and "..." at the right edge of each sidebar
  * section header): match the same translucent white fill (see
  * `--buzz-hover-surface`) on hover/focus instead of the grey
  * `bg-sidebar-border/35` fill. Unlayered + `[data-buzz-sidebar]` prefix beats
@@ -381,4 +390,177 @@
   [data-testid="app-sidebar"]
   .sidebar-section-action:focus-visible {
   background-color: var(--buzz-hover-surface);
+}
+
+/*
+ * Per-row-type text color knobs (Buzz theme).
+ *
+ * By default the whole sidebar inherits a single `--sidebar-foreground`, so
+ * channels, direct messages, and the Inbox/Agents nav rows all share one text
+ * color. These variables let each row type carry its OWN foreground so the
+ * Buzz Theme Lab (BuzzThemeLab) can tune them independently and we can commit
+ * the values we settle on.
+ *
+ * Each var defaults to `inherit`, so with nothing set the sidebar looks
+ * exactly as before - no visual change until a value is assigned (live by the
+ * lab, or here once we lock in the palette). Scoped to the Buzz sidebar
+ * container so other themes are untouched.
+ */
+/* Channels: rows live inside the `stream-list` / `starred-list` menus. */
+:root[data-buzz-sidebar]
+  [data-testid="app-sidebar"]
+  [data-testid="stream-list"]
+  [data-sidebar="menu-button"]:not([data-active="true"]),
+:root[data-buzz-sidebar]
+  [data-testid="app-sidebar"]
+  [data-testid="stream-list"]
+  [data-sidebar="menu-sub-button"]:not([data-active="true"]),
+:root[data-buzz-sidebar]
+  [data-testid="app-sidebar"]
+  [data-testid="starred-list"]
+  [data-sidebar="menu-button"]:not([data-active="true"]),
+:root[data-buzz-sidebar]
+  [data-testid="app-sidebar"]
+  [data-testid="starred-list"]
+  [data-sidebar="menu-sub-button"]:not([data-active="true"]) {
+  color: var(--buzz-channel-fg);
+}
+
+/* Direct messages: rows live inside the `dm-list` menu. */
+:root[data-buzz-sidebar]
+  [data-testid="app-sidebar"]
+  [data-testid="dm-list"]
+  [data-sidebar="menu-button"]:not([data-active="true"]),
+:root[data-buzz-sidebar]
+  [data-testid="app-sidebar"]
+  [data-testid="dm-list"]
+  [data-sidebar="menu-sub-button"]:not([data-active="true"]) {
+  color: var(--buzz-dm-fg);
+}
+
+/*
+ * Inbox + Agents nav rows: the pinned-header nav buttons (Inbox, Pulse,
+ * Projects, Agents, Workflows). Excludes the active row so the active-pill
+ * foreground still wins.
+ */
+:root[data-buzz-sidebar]
+  [data-testid="app-sidebar"]
+  [data-testid="sidebar-pinned-header"]
+  [data-sidebar="menu-button"]:not([data-active="true"]) {
+  color: var(--buzz-nav-fg);
+}
+
+/*
+ * Translucency (dev-only, Buzz Theme Lab).
+ *
+ * The lab writes derived alpha vars onto <html>. Keep the actual frosted
+ * layer on the outer canvases only; nested sidebar/header/footer surfaces pass
+ * through so the nav reads as one continuous pane.
+ */
+:root[data-buzz-translucent] {
+  /* Neutral frosted wash; alpha applied via color-mix below. */
+  --buzz-glass-tint: #ffffff;
+  --buzz-glass-intensity: 1;
+  --buzz-translucency-gradient-alpha: 70%;
+  --buzz-translucency-wash-alpha: 2.4%;
+}
+:root[data-buzz-translucent].dark {
+  --buzz-glass-tint: #12161d;
+}
+
+:root[data-buzz-translucent] .group\/sidebar-wrapper,
+:root[data-buzz-translucent]
+  [data-sidebar="sidebar"][data-mobile="true"].bg-sidebar,
+:root[data-buzz-translucent] [data-testid="workspace-rail"].bg-sidebar {
+  background-color: transparent;
+  /* Buzz color wash above a neutral frost wash. */
+  background-image:
+    linear-gradient(
+      to bottom,
+      color-mix(
+        in srgb,
+        var(--buzz-gradient-top) var(--buzz-translucency-gradient-alpha, 70%),
+        transparent
+      ),
+      color-mix(
+        in srgb,
+        var(--buzz-gradient-bottom) var(--buzz-translucency-gradient-alpha, 70%),
+        transparent
+      )
+    ),
+    linear-gradient(
+      to bottom,
+      color-mix(
+        in srgb,
+        var(--buzz-glass-tint) var(--buzz-translucency-wash-alpha, 2.4%),
+        transparent
+      ),
+      color-mix(
+        in srgb,
+        var(--buzz-glass-tint) var(--buzz-translucency-wash-alpha, 2.4%),
+        transparent
+      )
+    );
+  background-attachment: fixed, fixed;
+  background-size:
+    100vw 100vh,
+    100vw 100vh;
+  background-repeat: no-repeat, no-repeat;
+}
+
+:root[data-buzz-translucent] [data-testid="app-sidebar"],
+:root[data-buzz-translucent] [data-buzz-glass-inset],
+:root[data-buzz-translucent] [data-buzz-glass-footer-wrap],
+:root[data-buzz-translucent]
+  .group\/sidebar-wrapper
+  .bg-sidebar:not([data-buzz-flat]),
+:root[data-buzz-translucent]
+  [data-testid="app-sidebar"]
+  [data-testid="sidebar-pinned-header"],
+:root[data-buzz-translucent]
+  [data-testid="app-sidebar"]
+  [data-sidebar="footer"] {
+  background-color: transparent;
+  background-image: none;
+}
+
+/* Remove edge fades and stacking contexts that made header/footer look separate. */
+:root[data-buzz-translucent]
+  [data-testid="app-sidebar"]
+  [data-testid="sidebar-pinned-header"],
+:root[data-buzz-translucent] [data-buzz-glass-inset],
+:root[data-buzz-translucent]
+  [data-testid="app-sidebar"]
+  [data-buzz-glass-footer-wrap],
+:root[data-buzz-translucent]
+  [data-testid="app-sidebar"]
+  [data-sidebar="footer"] {
+  isolation: auto;
+  z-index: auto;
+}
+
+:root[data-buzz-translucent]
+  [data-testid="app-sidebar"]
+  [data-testid="sidebar-pinned-header"]::before,
+:root[data-buzz-translucent]
+  [data-testid="app-sidebar"]
+  [data-sidebar="footer"]::before {
+  background: none;
+}
+
+/* Let the native transparent window show through behind the sidebar glass. */
+:root[data-buzz-translucent],
+:root[data-buzz-translucent] body {
+  background-color: transparent;
+  background-image: none;
+}
+
+/* Shell wrappers stay clear; the main content card remains opaque. */
+:root[data-buzz-translucent] .buzz-huddle-shell,
+:root[data-buzz-translucent] .buzz-huddle-app-surface {
+  background: transparent;
+}
+
+:root[data-buzz-translucent] .buzz-huddle-app-surface::after {
+  background: transparent;
 }

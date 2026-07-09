@@ -39,6 +39,7 @@ mod relay_reconnect;
 mod social;
 mod teams;
 mod updater;
+mod window_vibrancy;
 mod workflows;
 mod workspace;
 
@@ -79,5 +80,6 @@ pub use relay_reconnect::*;
 pub use social::*;
 pub use teams::*;
 pub use updater::*;
+pub use window_vibrancy::*;
 pub use workflows::*;
 pub use workspace::*;

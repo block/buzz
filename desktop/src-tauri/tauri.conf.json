@@ -21,7 +21,7 @@
         "height": 600,
         "maximized": true,
         "visible": true,
-        "backgroundColor": "#000000",
+        "transparent": true,
         "titleBarStyle": "Overlay",
         "hiddenTitle": true,
         "dragDropEnabled": false,
@@ -34,6 +34,7 @@
         "minHeight": 500
       }
     ],
+    "macOSPrivateApi": true,
     "security": {
       "csp": null
     }

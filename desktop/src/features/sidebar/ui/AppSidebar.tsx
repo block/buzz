@@ -803,7 +803,7 @@ export function AppSidebar({
           </SidebarContent>
         </div>
 
-        <div className="relative z-30 shrink-0">
+        <div className="relative z-30 shrink-0" data-buzz-glass-footer-wrap>
           {unreadBelowCount > 0 ? (
             <MoreUnreadButton
               bottomClassName="bottom-full"
