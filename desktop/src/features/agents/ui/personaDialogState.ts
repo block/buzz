@@ -2,6 +2,7 @@ import type { ParsedPersonaPreview } from "@/shared/api/tauriPersonas";
 import type {
   AgentPersona,
   CreatePersonaInput,
+  PersonaBehaviorInput,
   UpdatePersonaInput,
 } from "@/shared/api/types";
 
@@ -103,6 +104,35 @@ export function duplicatePersonaDialogState(
       // them if they want a blank template.
       namePool: persona.namePool ?? [],
       envVars: persona.envVars ?? {},
+      ...behaviorEntry(persona),
+    },
+  };
+}
+
+/**
+ * Seed a dialog behavior group from a stored persona. A quad-less persona
+ * yields no `behavior` key at all, keeping initialValues byte-identical to
+ * the pre-quad shape (spread-in entry, matching the namePool import pattern).
+ */
+function behaviorEntry(
+  persona: AgentPersona,
+): { behavior: PersonaBehaviorInput } | Record<string, never> {
+  if (
+    persona.respondTo == null &&
+    persona.mcpToolsets == null &&
+    persona.parallelism == null
+  ) {
+    return {};
+  }
+  return {
+    behavior: {
+      respondTo: persona.respondTo ?? undefined,
+      respondToAllowlist:
+        persona.respondTo === "allowlist"
+          ? persona.respondToAllowlist
+          : undefined,
+      mcpToolsets: persona.mcpToolsets ?? undefined,
+      parallelism: persona.parallelism ?? undefined,
     },
   };
 }
@@ -128,6 +158,7 @@ export function editPersonaDialogState(
       // the dialog must therefore round-trip the existing values.)
       namePool: persona.namePool ?? [],
       envVars: persona.envVars ?? {},
+      ...behaviorEntry(persona),
     },
   };
 }

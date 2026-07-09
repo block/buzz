@@ -172,39 +172,47 @@ export function WhereToRunSection({
       ) : null}
 
       {!isProviderMode ? (
-        <RelayMeshAgentSection
-          current={{
-            // The definition's own fields are never overwritten by the mesh
-            // preset — only the minted instance carries it — so the override
-            // warning has nothing to warn about.
-            acpCommand: "",
-            agentCommand: "",
-            agentArgs: [],
-            mcpCommand: "",
-            model: null,
-            envVars: {},
-          }}
-          modelId={draft.meshModelId}
-          targetEndpointAddr={draft.meshTarget?.endpointAddr ?? ""}
-          onModelIdChange={(nextId, patch) => {
-            emit({
-              ...draftRef.current,
-              meshModelId: nextId,
-              meshPatch: patch,
-            });
-          }}
-          onTargetChange={(target) => {
-            emit({ ...draftRef.current, meshTarget: target });
-          }}
-          onUseMeshChange={(next) => {
-            emit(
-              next
-                ? { ...emptyWhereToRunDraft, runOn: "mesh" }
-                : { ...emptyWhereToRunDraft },
-            );
-          }}
-          useMesh={useMesh}
-        />
+        <>
+          <RelayMeshAgentSection
+            current={{
+              // The definition's own fields are never overwritten by the mesh
+              // preset — only the minted instance carries it — so the override
+              // warning has nothing to warn about.
+              acpCommand: "",
+              agentCommand: "",
+              agentArgs: [],
+              mcpCommand: "",
+              model: null,
+              envVars: {},
+            }}
+            modelId={draft.meshModelId}
+            targetEndpointAddr={draft.meshTarget?.endpointAddr ?? ""}
+            onModelIdChange={(nextId, patch) => {
+              emit({
+                ...draftRef.current,
+                meshModelId: nextId,
+                meshPatch: patch,
+              });
+            }}
+            onTargetChange={(target) => {
+              emit({ ...draftRef.current, meshTarget: target });
+            }}
+            onUseMeshChange={(next) => {
+              emit(
+                next
+                  ? { ...emptyWhereToRunDraft, runOn: "mesh" }
+                  : { ...emptyWhereToRunDraft },
+              );
+            }}
+            useMesh={useMesh}
+          />
+          {useMesh ? (
+            <p className="text-xs text-muted-foreground">
+              The started instance runs on the mesh model; the agent profile
+              keeps its own settings.
+            </p>
+          ) : null}
+        </>
       ) : null}
     </div>
   );

@@ -5,10 +5,10 @@ use super::export_util::save_json_with_dialog;
 use crate::{
     app_state::AppState,
     managed_agents::{
-        agent_events::ManagedAgentEventContent, effective_agent_command, encode_persona_json,
-        load_managed_agents, load_personas, load_teams, managed_agent_avatar_url,
-        parse_json_persona, parse_md_persona, parse_png_persona, parse_zip_personas,
-        persona_events::persona_d_tag, save_managed_agents, save_personas,
+        agent_events::ManagedAgentEventContent, apply_persona_behavior, effective_agent_command,
+        encode_persona_json, load_managed_agents, load_personas, load_teams,
+        managed_agent_avatar_url, parse_json_persona, parse_md_persona, parse_png_persona,
+        parse_zip_personas, persona_events::persona_d_tag, save_managed_agents, save_personas,
         team_events::TeamEventContent, team_persona_key, try_regenerate_nest,
         validate_persona_activation_change, validate_persona_deletion, CreatePersonaRequest,
         ManagedAgentRecord, ParsePersonaFilesResult, PersonaRecord, TeamRecord,
@@ -79,7 +79,7 @@ pub async fn create_persona(
             .filter(|s| !s.is_empty())
             .collect();
         crate::managed_agents::validate_user_env_keys(&input.env_vars)?;
-        let persona = PersonaRecord {
+        let mut persona = PersonaRecord {
             id: Uuid::new_v4().to_string(),
             display_name,
             avatar_url,
@@ -100,6 +100,7 @@ pub async fn create_persona(
             created_at: now.clone(),
             updated_at: now,
         };
+        apply_persona_behavior(&mut persona, input.behavior)?;
         personas.push(persona.clone());
         save_personas(&app, &personas)?;
         retain_persona_pending(&app, &state, &persona);
@@ -169,6 +170,7 @@ pub async fn update_persona(
                 crate::managed_agents::validate_user_env_keys(&env_vars)?;
                 persona.env_vars = env_vars;
             }
+            apply_persona_behavior(persona, input.behavior)?;
             persona.updated_at = now_iso();
 
             save_personas(&app, &personas)?;

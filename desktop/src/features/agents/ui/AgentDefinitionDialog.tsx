@@ -38,6 +38,12 @@ import {
   hasText,
 } from "./personaDialogEnvVars";
 import {
+  behaviorForSubmit,
+  draftFromBehavior,
+  emptyPersonaBehaviorDraft,
+  personaBehaviorDraftValid,
+} from "./personaBehaviorDraft";
+import {
   AUTO_MODEL_DROPDOWN_VALUE,
   AUTO_PROVIDER_DROPDOWN_VALUE,
   CUSTOM_MODEL_DROPDOWN_VALUE,
@@ -147,6 +153,12 @@ export function AgentDefinitionDialog({
     React.useState(false);
   const [namePoolText, setNamePoolText] = React.useState("");
   const [envVars, setEnvVars] = React.useState<EnvVarsValue>({});
+  const [behaviorDraft, setBehaviorDraft] = React.useState(
+    emptyPersonaBehaviorDraft,
+  );
+  // The seed the draft is diffed against at submit: an untouched quad
+  // submits no behavior group, keeping unrelated edits hash-quiet.
+  const behaviorSeedRef = React.useRef(emptyPersonaBehaviorDraft);
   const [showAdvancedFields, setShowAdvancedFields] = React.useState(false);
   const [isAvatarUploadPending, setIsAvatarUploadPending] =
     React.useState(false);
@@ -194,11 +206,17 @@ export function AgentDefinitionDialog({
     const managedApiKeyEnvVar = getProviderApiKeyEnvVar(
       initialValues.provider ?? "",
     );
+    const nextBehaviorDraft = draftFromBehavior(initialValues.behavior);
+    behaviorSeedRef.current = draftFromBehavior(initialValues.behavior);
+    setBehaviorDraft(nextBehaviorDraft);
     setNamePoolText(nextNamePoolText);
     setEnvVars(nextEnvVars);
     setShowAdvancedFields(
       nextNamePoolText.trim().length > 0 ||
-        hasAdvancedEnvVars(nextEnvVars, managedApiKeyEnvVar),
+        hasAdvancedEnvVars(nextEnvVars, managedApiKeyEnvVar) ||
+        nextBehaviorDraft.respondTo !== null ||
+        nextBehaviorDraft.mcpToolsets.trim().length > 0 ||
+        nextBehaviorDraft.parallelism.trim().length > 0,
     );
     setIsAvatarUploadPending(false);
     setImportErrorMessage(null);
@@ -282,6 +300,8 @@ export function AgentDefinitionDialog({
       setIsCustomProviderEditing(false);
       setNamePoolText("");
       setEnvVars({});
+      setBehaviorDraft(emptyPersonaBehaviorDraft);
+      behaviorSeedRef.current = emptyPersonaBehaviorDraft;
       setShowAdvancedFields(false);
       setIsAvatarUploadPending(false);
       setImportErrorMessage(null);
@@ -338,6 +358,11 @@ export function AgentDefinitionDialog({
           : undefined,
       namePool: namePoolInput,
       envVars,
+      behavior: behaviorForSubmit(
+        behaviorDraft,
+        behaviorSeedRef.current,
+        "id" in initialValues,
+      ),
     };
 
     if ("id" in initialValues) {
@@ -442,6 +467,9 @@ export function AgentDefinitionDialog({
     (!isCreateMode || runtime.trim().length > 0) &&
     (!isCreateMode || selectedRuntimeIsAvailable) &&
     (!isCreateMode || !createSubmitBlocked) &&
+    // Crash-loop guard, create AND edit: an empty allowlist would crash
+    // every instance minted from this definition at startup.
+    personaBehaviorDraftValid(behaviorDraft) &&
     (!isExplicitModelRequired || model.trim().length > 0) &&
     !isAvatarUploadPending;
   const {
@@ -929,10 +957,12 @@ export function AgentDefinitionDialog({
                     transition={advancedFieldsTransition}
                   >
                     <PersonaAdvancedFields
+                      behaviorDraft={behaviorDraft}
                       disabled={isPending}
                       envVars={advancedEnvVars}
                       fileSatisfiedEnvKeys={localModeGate.fileSatisfiedEnvKeys}
                       namePoolText={namePoolText}
+                      onBehaviorDraftChange={setBehaviorDraft}
                       onEnvVarsChange={handleAdvancedEnvVarsChange}
                       onNamePoolTextChange={setNamePoolText}
                       requiredEnvKeys={requiredEnvKeys}

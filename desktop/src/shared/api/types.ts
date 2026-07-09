@@ -718,8 +718,25 @@ export type AgentPersona = {
   /** Environment variables injected for agents created from this persona.
    * Layered as: desktop parent env < persona envVars < agent envVars. */
   envVars: Record<string, string>;
+  /** NIP-AP behavioral defaults (wire shape). Null/empty = unset. */
+  respondTo: RespondToMode | null;
+  respondToAllowlist: string[];
+  mcpToolsets: string | null;
+  parallelism: number | null;
   createdAt: string;
   updatedAt: string;
+};
+
+/**
+ * NIP-AP behavioral quad for a definition, sent as one group: absent = don't
+ * touch the stored quad (legacy callers), present = replace all four as a
+ * unit. Mirrors `PersonaBehaviorRequest`.
+ */
+export type PersonaBehaviorInput = {
+  respondTo?: RespondToMode;
+  respondToAllowlist?: string[];
+  mcpToolsets?: string;
+  parallelism?: number;
 };
 
 export type CreatePersonaInput = {
@@ -731,6 +748,7 @@ export type CreatePersonaInput = {
   provider?: string;
   namePool?: string[];
   envVars?: Record<string, string>;
+  behavior?: PersonaBehaviorInput;
 };
 
 export type UpdatePersonaInput = {
@@ -743,6 +761,7 @@ export type UpdatePersonaInput = {
   provider?: string;
   namePool?: string[];
   envVars?: Record<string, string>;
+  behavior?: PersonaBehaviorInput;
 };
 
 // ── Team types ────────────────────────────────────────────────────────────────

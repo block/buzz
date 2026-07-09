@@ -364,3 +364,65 @@ test("importPersonaDialogState preserves provider=anthropic", () => {
 
   assert.equal(state.initialValues.provider, "anthropic");
 });
+
+test("edit and duplicate seed the behavior group from a quad-bearing persona", () => {
+  const persona = {
+    id: "persona-quad",
+    displayName: "Gated",
+    avatarUrl: null,
+    systemPrompt: "Guarded.",
+    runtime: null,
+    model: null,
+    provider: null,
+    isBuiltIn: false,
+    isActive: true,
+    respondTo: "allowlist",
+    respondToAllowlist: ["a".repeat(64)],
+    mcpToolsets: "developer",
+    parallelism: 4,
+    createdAt: "2025-01-01T00:00:00Z",
+    updatedAt: "2025-01-02T00:00:00Z",
+  };
+
+  const expected = {
+    respondTo: "allowlist",
+    respondToAllowlist: ["a".repeat(64)],
+    mcpToolsets: "developer",
+    parallelism: 4,
+  };
+  assert.deepEqual(
+    editPersonaDialogState(persona).initialValues.behavior,
+    expected,
+  );
+  assert.deepEqual(
+    duplicatePersonaDialogState(persona).initialValues.behavior,
+    expected,
+  );
+});
+
+test("a non-allowlist mode does not seed a stale allowlist into the dialog", () => {
+  const state = editPersonaDialogState({
+    id: "persona-mode-flip",
+    displayName: "Open",
+    avatarUrl: null,
+    systemPrompt: "Open.",
+    runtime: null,
+    model: null,
+    provider: null,
+    isBuiltIn: false,
+    isActive: true,
+    respondTo: "owner-only",
+    respondToAllowlist: ["b".repeat(64)],
+    mcpToolsets: null,
+    parallelism: null,
+    createdAt: "2025-01-01T00:00:00Z",
+    updatedAt: "2025-01-02T00:00:00Z",
+  });
+
+  assert.equal(state.initialValues.behavior.respondTo, "owner-only");
+  assert.equal(
+    state.initialValues.behavior.respondToAllowlist,
+    undefined,
+    "stale pubkeys must not resurrect through the dialog seed",
+  );
+});
