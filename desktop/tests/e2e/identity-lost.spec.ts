@@ -42,7 +42,7 @@ test("importing a key from lost mode shows the relaunch-required screen", async 
   await expect(page.getByTestId("relaunch-required")).toBeVisible();
 });
 
-test("going back from lost mode persists the ephemeral key and shows relaunch-required", async ({
+test("start-new-identity from lost mode persists the ephemeral key after confirmation", async ({
   page,
 }) => {
   await installMockBridge(
@@ -56,7 +56,8 @@ test("going back from lost mode persists the ephemeral key and shows relaunch-re
     page.getByRole("heading", { name: "Re-import your key" }),
   ).toBeVisible();
 
-  await page.getByRole("button", { name: "Back" }).click();
+  page.on("dialog", (dialog) => dialog.accept());
+  await page.getByRole("button", { name: "Start new identity" }).click();
 
   await expect(page.getByTestId("relaunch-required")).toBeVisible();
   await expect
@@ -73,6 +74,30 @@ test("going back from lost mode persists the ephemeral key and shows relaunch-re
       ),
     )
     .toBe(true);
+});
+
+test("cancelling start-new-identity in lost mode stays on the import screen", async ({
+  page,
+}) => {
+  await installMockBridge(
+    page,
+    { identityLost: true },
+    { skipOnboardingSeed: true },
+  );
+  await page.goto("/");
+
+  await expect(
+    page.getByRole("heading", { name: "Re-import your key" }),
+  ).toBeVisible();
+
+  page.on("dialog", (dialog) => dialog.dismiss());
+  await page.getByRole("button", { name: "Start new identity" }).click();
+
+  // Still on the import screen — no navigation, no persist
+  await expect(
+    page.getByRole("heading", { name: "Re-import your key" }),
+  ).toBeVisible();
+  await expect(page.getByTestId("relaunch-required")).toHaveCount(0);
 });
 
 test("locked boot shows the keyring-locked screen without the onboarding gate or key-import UI", async ({

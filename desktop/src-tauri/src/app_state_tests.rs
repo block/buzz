@@ -176,6 +176,10 @@ struct FakeIdentityStore {
     /// the subsequent `load()` returns a different value, causing
     /// `persist_identity_to_keyring`'s read-back verify to fail.
     load_override: Option<String>,
+    /// When true, `verify_stored()` always returns `Ok(false)` — simulates
+    /// a backend that stores successfully but cannot be read back (e.g. an OS
+    /// keyring that advances its in-process cache but fails to durably persist).
+    verify_fails: bool,
 }
 
 impl FakeIdentityStore {
@@ -188,6 +192,7 @@ impl FakeIdentityStore {
             deleted: RefCell::new(Vec::new()),
             store_fails: false,
             load_override: None,
+            verify_fails: false,
         }
     }
 
@@ -200,6 +205,7 @@ impl FakeIdentityStore {
             deleted: RefCell::new(Vec::new()),
             store_fails: false,
             load_override: None,
+            verify_fails: false,
         }
     }
 
@@ -212,6 +218,7 @@ impl FakeIdentityStore {
             deleted: RefCell::new(Vec::new()),
             store_fails: false,
             load_override: None,
+            verify_fails: false,
         }
     }
 
@@ -226,6 +233,7 @@ impl FakeIdentityStore {
             deleted: RefCell::new(Vec::new()),
             store_fails: true,
             load_override: None,
+            verify_fails: false,
         }
     }
 
@@ -238,6 +246,7 @@ impl FakeIdentityStore {
             deleted: RefCell::new(Vec::new()),
             store_fails: true,
             load_override: None,
+            verify_fails: false,
         }
     }
 
@@ -252,6 +261,22 @@ impl FakeIdentityStore {
             deleted: RefCell::new(Vec::new()),
             store_fails: false,
             load_override: Some(corrupt_nsec.to_string()),
+            verify_fails: false,
+        }
+    }
+
+    /// Reachable-but-empty probe whose `store` succeeds but whose
+    /// `verify_stored` always returns `Ok(false)` — simulates a backend that
+    /// writes to a cache but cannot confirm the OS-level round-trip.
+    /// `persist_identity_to_keyring` will treat this as a read-back failure.
+    fn with_verify_failing() -> Self {
+        Self {
+            probe: KeyringProbe::ReachableButEmpty,
+            slot: RefCell::new(HashMap::new()),
+            deleted: RefCell::new(Vec::new()),
+            store_fails: false,
+            load_override: None,
+            verify_fails: true,
         }
     }
 }
@@ -279,6 +304,19 @@ impl IdentityKeyStore for FakeIdentityStore {
         self.deleted.borrow_mut().push(name.to_string());
         self.slot.borrow_mut().remove(name);
         Ok(())
+    }
+    fn verify_stored(&self, name: &str, expected: &str) -> Result<bool, String> {
+        if self.verify_fails {
+            return Ok(false);
+        }
+        // When load_override is set, verify_stored must also reflect the
+        // override — the override simulates a backend that returns a different
+        // value regardless of what was stored, so both load() and verify_stored()
+        // should see it. This mirrors the real `with_readback_corruption` scenario.
+        if let Some(v) = &self.load_override {
+            return Ok(v == expected);
+        }
+        Ok(self.slot.borrow().get(name).is_some_and(|v| v == expected))
     }
 }
 
@@ -1280,5 +1318,101 @@ fn present_keyring_no_file_no_marker_self_heals_marker() {
     assert!(
         migration_marker_path(dir.path()).exists(),
         "marker must be self-healed by A3 when Present(valid) + no file + no marker"
+    );
+}
+
+// ── I1: uncached read-back verify ─────────────────────────────────────────
+
+#[test]
+fn verify_fails_store_does_not_write_marker_or_delete_file() {
+    // I1: when verify_stored() returns Ok(false) (simulating a backend that
+    // stores to a cache but does NOT confirm the OS round-trip),
+    // persist_identity_to_keyring must return Err — the durable state is
+    // uncertain. The caller must NOT write the migration marker or delete
+    // identity.key while the durability of the write is unconfirmed.
+    let dir = tempfile::tempdir().unwrap();
+    let legacy_path = dir.path().join("identity.key");
+    let imported_keys = Keys::generate();
+    save_key_file(&legacy_path, &imported_keys).unwrap();
+
+    let store = FakeIdentityStore::with_verify_failing();
+
+    let result = persist_identity_to_keyring(&store, &imported_keys, &legacy_path, dir.path());
+
+    // Must return Err — durability of the write was not confirmed.
+    assert!(
+        result.is_err(),
+        "persist_identity_to_keyring must return Err when verify_stored returns false"
+    );
+    let err_msg = result.unwrap_err();
+    assert!(
+        err_msg.contains("read-back"),
+        "error must mention read-back verify failure: {err_msg}"
+    );
+
+    // No migration marker written — the write was not confirmed durable.
+    assert!(
+        !migration_marker_path(dir.path()).exists(),
+        "migration marker must NOT be written when verify_stored fails"
+    );
+
+    // identity.key must still exist — must not be deleted without confirmation.
+    assert!(
+        legacy_path.exists(),
+        "identity.key must NOT be deleted when verify_stored fails"
+    );
+}
+
+// ── I2: corrupt keyring + marker = Lost recovery ──────────────────────────
+
+#[test]
+fn corrupt_keyring_marker_present_no_file_is_lost() {
+    // I2: Present(corrupt) + migration marker + no identity.key → the prior
+    // identity was migrated into the keyring and is now unrecoverable (corrupt
+    // AND no file backup). Must enter Lost recovery, NOT generate a fresh key.
+    let dir = tempfile::tempdir().unwrap();
+    let legacy_path = dir.path().join("identity.key");
+    write_migration_marker(&migration_marker_path(dir.path())).unwrap();
+    assert!(!legacy_path.exists());
+
+    let store = FakeIdentityStore::present_with("not-a-valid-nsec");
+    let resolved = resolve_identity_with_store(&store, &legacy_path, dir.path()).unwrap();
+
+    // Must enter Lost recovery — a prior identity existed and is now unrecoverable.
+    assert_eq!(
+        resolved.recovery,
+        RecoveryState::Lost,
+        "corrupt keyring + marker + no file must return Lost recovery, not a fresh key"
+    );
+
+    // No identity.key written — the ephemeral key is in-memory only.
+    assert!(!legacy_path.exists());
+}
+
+#[test]
+fn corrupt_keyring_no_marker_no_file_generates_fresh() {
+    // I2 (counter-case): Present(corrupt) + NO marker + no identity.key →
+    // genuine first launch with a corrupt keyring, no prior identity to
+    // protect. generate_and_persist is still the correct last resort.
+    let dir = tempfile::tempdir().unwrap();
+    let legacy_path = dir.path().join("identity.key");
+    assert!(!legacy_path.exists());
+    assert!(!migration_marker_path(dir.path()).exists());
+
+    let store = FakeIdentityStore::present_with("not-a-valid-nsec");
+    let resolved = resolve_identity_with_store(&store, &legacy_path, dir.path()).unwrap();
+
+    // No lost recovery — this is a fresh machine with no prior identity.
+    assert_eq!(
+        resolved.recovery,
+        RecoveryState::None,
+        "corrupt keyring + no marker + no file must generate a fresh key (no prior identity)"
+    );
+
+    // A fresh, valid key was stored (keyring or file).
+    assert!(
+        store.slot.borrow().contains_key(IDENTITY_KEY_NAME)
+            || legacy_path.exists(),
+        "a fresh key must be stored in the keyring or the file after generate_and_persist"
     );
 }

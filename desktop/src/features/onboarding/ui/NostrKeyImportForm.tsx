@@ -10,6 +10,7 @@ import { Spinner } from "@/shared/ui/spinner";
 const NOSTR_KEY_FILE_MAX_BYTES = 1024;
 
 type NostrKeyImportFormProps = {
+  backLabel?: string;
   disabled?: boolean;
   errorMessage?: string | null;
   onBack: () => void;
@@ -24,6 +25,7 @@ type NostrKeyImportFormProps = {
  * existing key). The caller owns what happens after `onImport` resolves.
  */
 export function NostrKeyImportForm({
+  backLabel = "Back",
   disabled = false,
   errorMessage: externalErrorMessage = null,
   onBack,
@@ -265,7 +267,7 @@ export function NostrKeyImportForm({
           type="button"
           variant="ghost"
         >
-          Back
+          {backLabel}
         </Button>
       </div>
     </form>

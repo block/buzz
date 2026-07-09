@@ -718,6 +718,38 @@ impl SecretStore {
         }
     }
 
+    /// Verify that `key` holds `expected` by reading directly from the OS
+    /// backend, bypassing the in-process cache. This is the key innovation for
+    /// read-back verification: it proves the OS keyring round-trip, not just
+    /// that the in-process cache was updated.
+    ///
+    /// Returns `Ok(true)` when the stored value matches `expected`, `Ok(false)`
+    /// when the entry is absent or holds a different value, and `Err` when the
+    /// backend is unavailable.
+    pub fn verify_stored_raw(&self, key: &str, expected: &str) -> Result<bool, String> {
+        #[cfg(feature = "system-keyring")]
+        {
+            let raw = self.read_blob_raw()?;
+            match raw {
+                None => Ok(false),
+                Some(bytes) => {
+                    let json =
+                        String::from_utf8(bytes).map_err(|e| format!("blob utf8: {e}"))?;
+                    let map = serde_json::from_str::<std::collections::HashMap<String, String>>(
+                        &json,
+                    )
+                    .map_err(|e| format!("blob json: {e}"))?;
+                    Ok(map.get(key).is_some_and(|v| v == expected))
+                }
+            }
+        }
+        #[cfg(not(feature = "system-keyring"))]
+        {
+            let _ = (key, expected);
+            Err("system-keyring feature disabled".to_string())
+        }
+    }
+
     /// Store `value` for `key`. Reports `Err` on availability failures — callers
     /// decide whether to fall back to file storage.
     pub fn store(&self, key: &str, value: &str) -> Result<(), String> {

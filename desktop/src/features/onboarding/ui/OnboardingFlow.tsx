@@ -413,10 +413,17 @@ export function OnboardingFlow({
     [profileUpdateMutation, queryClient],
   );
 
-  // Lost-mode "go back": persist the ephemeral key so the new identity is
-  // durable, then let the stage machinery (bootedLost + !identityLost) replace
-  // this flow with RelaunchRequiredScreen. No navigation needed here.
+  // Lost-mode "start new identity": confirm first (irreversible), then persist
+  // the ephemeral key so the new identity is durable, then let the stage
+  // machinery (bootedLost + !identityLost) replace this flow with
+  // RelaunchRequiredScreen. No navigation needed here.
   const handleLostModeBack = React.useCallback(async () => {
+    const confirmed = window.confirm(
+      "This will create a new identity and abandon your previous key. This cannot be undone. Continue?",
+    );
+    if (!confirmed) {
+      return;
+    }
     try {
       const identity = await persistCurrentIdentity();
       queryClient.setQueryData(["identity"], identity);
@@ -554,6 +561,7 @@ export function OnboardingFlow({
             ) : null}
 
             <NostrKeyImportForm
+              backLabel={identityLost ? "Start new identity" : undefined}
               onBack={identityLost ? handleLostModeBack : showProfilePage}
               onImport={importExistingKey}
             />
