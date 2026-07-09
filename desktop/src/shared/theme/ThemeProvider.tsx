@@ -9,6 +9,7 @@ import {
 } from "react";
 import { isTauri } from "@tauri-apps/api/core";
 import { invokeTauri } from "@/shared/api/tauri";
+import { isMacPlatform } from "@/shared/lib/platform";
 import { createThemeVars, hexToHsl } from "./adaptive-theme";
 import {
   SYNTAX_THEMES,
@@ -218,9 +219,24 @@ function applyBuzzSidebar(themeName: string) {
   const root = document.documentElement;
   if (isBuzzTheme(themeName)) {
     root.setAttribute("data-buzz-sidebar", "");
-    root.setAttribute("data-buzz-translucent", "");
-    root.style.setProperty("background-color", "transparent");
-    root.style.setProperty("background-image", "none");
+    // The translucent treatment (transparent root/body + semi-transparent
+    // sidebar gradient) relies on the native macOS `NSVisualEffectView`
+    // vibrancy layer painting behind the webview. On Windows/Linux
+    // `set_window_vibrancy` is a no-op, but the window is transparent
+    // globally (tauri.conf.json), so a transparent root would show raw
+    // desktop content through the UI. Gate the translucent marker and
+    // transparent root background to macOS; other platforms fall back to the
+    // opaque Buzz gradient (`data-buzz-sidebar` paints solid colors) with the
+    // normal `bg-background` body fill.
+    if (isMacPlatform()) {
+      root.setAttribute("data-buzz-translucent", "");
+      root.style.setProperty("background-color", "transparent");
+      root.style.setProperty("background-image", "none");
+    } else {
+      root.removeAttribute("data-buzz-translucent");
+      root.style.removeProperty("background-color");
+      root.style.removeProperty("background-image");
+    }
   } else {
     root.removeAttribute("data-buzz-sidebar");
     root.removeAttribute("data-buzz-translucent");
