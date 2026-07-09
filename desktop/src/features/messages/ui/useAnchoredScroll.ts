@@ -37,9 +37,32 @@ const COMPENSATION_SCROLL_SKIP_PX = 120;
 // SAFE_MARGIN so the gate measures the same anchor the writer pins.
 const READING_ANCHOR_SAFE_MARGIN_PX = 60;
 
+// How far ABOVE the current viewport top the reflow-attribution walk
+// (`sumAboveAnchorShift`) reaches. The realization/reflow that moves the anchor
+// happens in the freshly-exposed band just above the fold; a row straddling the
+// top edge still shifts the anchor when it realizes, so the band extends one
+// generous row-height above `scrollTop`. Anything further up scrolled past long
+// ago and does not move the anchor this frame — including it would sum stale
+// de-realization drift AND make the walk O(channel) on the non-virtualized DOM.
+const REFLOW_BAND_ABOVE_FOLD_PX = 250;
+
 type AnchorState =
   | { kind: "at-bottom" }
   | { kind: "message"; messageId: string; topOffset: number };
+
+/**
+ * A pre-realization snapshot of the reading-anchor row: its id, viewport-
+ * relative top offset, the scrollTop at capture, and a live handle to the row
+ * element so a later observer can re-measure the SAME row post-layout without
+ * a fresh `querySelector`. Written by the per-rAF sampler; read as the baseline
+ * by both mid-history observers (rAF and RO).
+ */
+type ReadingAnchor = {
+  id: string;
+  topOffset: number;
+  scrollTop: number;
+  row: HTMLElement;
+};
 
 type BottomSettleContainer = Pick<
   HTMLDivElement,
@@ -191,7 +214,7 @@ function computeAnchor(container: HTMLDivElement): AnchorState {
  */
 function snapshotReadingAnchor(
   container: HTMLDivElement,
-): { id: string; topOffset: number; scrollTop: number } | null {
+): ReadingAnchor | null {
   const containerTop = container.getBoundingClientRect().top;
   const safeTop = containerTop + READING_ANCHOR_SAFE_MARGIN_PX;
   const rows = container.querySelectorAll<HTMLElement>("[data-message-id]");
@@ -204,6 +227,7 @@ function snapshotReadingAnchor(
           id,
           topOffset: rect.top - containerTop,
           scrollTop: container.scrollTop,
+          row,
         };
     }
   }
@@ -259,6 +283,230 @@ export function computeAnchorCorrection(
   return current.scrollTop + shift;
 }
 
+/**
+ * Net height change since the previous frame of the `.timeline-row-cv` rows in
+ * the REALIZATION BAND above the anchor — rows whose document position is
+ * between the top of the current viewport and the anchor's pre-reflow position.
+ * Bounding to the band (not the whole above-anchor history) is load-bearing on
+ * two counts:
+ *
+ *   - Correctness: only rows near the fold realize/reflow as the user scrolls
+ *     up into them and thereby move the anchor *this frame*. Rows hundreds of px
+ *     above scrolled past long ago; they quietly de-realize back toward their
+ *     reserve as they leave the viewport, and summing that drift (which no walk
+ *     re-synced) is exactly what pins `aboveShift` to a large bogus value.
+ *   - Cost: the timeline is not DOM-virtualized — every message is a
+ *     `.timeline-row-cv` — so an unbounded walk is O(channel) per realization
+ *     frame. The band is viewport-sized, O(visible rows).
+ *
+ * Because the band is small and its rows are on-screen, this walk maintains the
+ * height cache in place for band rows: a row's `last` is refreshed to its
+ * current height every walk, so `height - last` is the single-frame reflow. A
+ * band row's first sighting is seeded from its `contain-intrinsic-size` reserve
+ * so a realization counts as its true `realized - reserve` delta (see
+ * `reservedRowHeight`). Rows outside the band are neither read nor written.
+ *
+ * The iteration is bounded to the band, not just the sum: we start at the
+ * anchor's own `.timeline-row-cv` and walk PRECEDING rows in document order via
+ * a `TreeWalker`, stopping the moment a row falls below the band floor. Because
+ * rows are laid out top-to-bottom in document order, everything before that
+ * floor is older still, so the break is safe. This avoids the O(channel)
+ * `querySelectorAll(".timeline-row-cv")` enumeration every frame — critical now
+ * that the walk runs on every mid-history frame, not only realization frames.
+ *
+ * It is the SECOND, independent instrument the rAF writer cross-checks against
+ * the anchor's net document-position shift (`computeAnchorCorrection`): the two
+ * agree only when the net shift is genuinely an above-anchor reflow, not a
+ * straddling-row miscount or scroll artifact.
+ */
+export function sumAboveAnchorShift(
+  container: HTMLElement,
+  // The anchor row's own `.timeline-row-cv` wrapper — the walk's start node. We
+  // step to its PRECEDING rows; the anchor itself is at the anchor position by
+  // definition and never counts toward the above-anchor shift.
+  anchorRow: HTMLElement,
+  // The anchor's document position BEFORE this frame's reflow
+  // (`baseline.scrollTop + baseline.topOffset`). A row moved the anchor iff it
+  // sat above the anchor's *pre-realization* position; classifying by the
+  // post-realization position miscounts a boundary row that realized up to
+  // straddle the anchor (it didn't move the anchor, but ends up above it).
+  anchorDocTop: number,
+  // The current viewport's document top (`container.scrollTop`). The band's
+  // lower bound is one row-reserve above it so a row straddling the top fold —
+  // whose realization still shifts the anchor — is included.
+  scrollTop: number,
+  heights: WeakMap<Element, number>,
+): number {
+  const wrapper = anchorRow.closest<HTMLElement>(".timeline-row-cv");
+  if (!wrapper) return 0;
+  const containerTop = container.getBoundingClientRect().top;
+  const bandTop = scrollTop - REFLOW_BAND_ABOVE_FOLD_PX;
+  // Document-order walk over `.timeline-row-cv` rows, structure-agnostic: rows
+  // are nested under day-group `<section>`s, so a plain sibling walk can't cross
+  // group boundaries — `TreeWalker` does, and stays O(band).
+  const walker = document.createTreeWalker(container, NodeFilter.SHOW_ELEMENT, {
+    acceptNode: (node) =>
+      (node as HTMLElement).classList.contains("timeline-row-cv")
+        ? NodeFilter.FILTER_ACCEPT
+        : NodeFilter.FILTER_SKIP,
+  });
+  walker.currentNode = wrapper;
+  let aboveShift = 0;
+  for (
+    let row = walker.previousNode() as HTMLElement | null;
+    row;
+    row = walker.previousNode() as HTMLElement | null
+  ) {
+    const rect = row.getBoundingClientRect();
+    // Row's document position = viewport-relative top + scrollTop, compared
+    // against document-coord bounds so scroll between frames cancels.
+    const rowDocTop = rect.top - containerTop + scrollTop;
+    if (rowDocTop >= anchorDocTop) continue; // at/below anchor: doesn't move it.
+    if (rowDocTop < bandTop) break; // older than the band; all prior are too.
+    const height = rect.height;
+    const last = heights.get(row);
+    heights.set(row, height);
+    if (last === undefined) continue; // first sighting in band: seed, don't count.
+    aboveShift += height - last;
+  }
+  return aboveShift;
+}
+
+/**
+ * Result of an attempted mid-history correction, surfaced for the E2E gate's
+ * would-fire tripwires (Chromium rAF would-fire must be 0; WebKit RO fires must
+ * be no-ops against the refreshed cache). `wouldFire` is true when both
+ * instruments agreed on a real above-anchor reflow this call; `residual` is the
+ * `|aboveShift|` the walk saw — the second observer of the same realization
+ * sees this at ~0 because the first observer's walk already refreshed the cache.
+ */
+type MidHistoryCorrection = {
+  wouldFire: boolean;
+  residual: number;
+};
+
+/**
+ * The single mid-history correction, shared verbatim by BOTH the per-rAF
+ * sampler and the ResizeObserver callback. Which one actually issues the write
+ * on a given engine is NOT decided by an engine branch — it falls out of the
+ * frame lifecycle (rAF → layout → RO → paint) plus the shared height cache:
+ *
+ *   - On Chromium the on-time RO delivers the realization pre-paint, so the RO
+ *     call runs the walk first, corrects, and refreshes the band cache. The
+ *     next rAF's walk then sees residual ≈ 0 and does nothing (wouldFire=false).
+ *   - On WebKit the RO delivers one frame late, so the rAF call runs the walk
+ *     first, corrects, refreshes; when the late RO finally fires it sees the
+ *     refreshed cache → residual ≈ 0 → no-op.
+ *
+ * "First observer wins, second observer no-ops" is therefore implicit in the
+ * cache, not coordinated by a flag. `sumAboveAnchorShift` both reads AND
+ * refreshes the band entries (`heights.set` runs unconditionally as it walks),
+ * so a correction and its cache refresh are one indivisible pass — the second
+ * observer cannot double-correct because the delta it would sum is already 0.
+ *
+ * `baseline` is the anchor's PRE-realization snapshot (the rAF frame-start read
+ * of the reading row). We re-measure that same row NOW (post-layout) and diff.
+ * All height reads are `getBoundingClientRect().height` — one clock, matching
+ * the band walk — so no sub-pixel basis disagreement leaves a phantom residual.
+ */
+function applyMidHistoryCorrection(
+  container: HTMLElement,
+  baseline: ReadingAnchor,
+  heights: WeakMap<Element, number>,
+): MidHistoryCorrection {
+  // Momentum in flight: a large scroll delta since baseline means the two reads
+  // may not describe one coherent state — skip rather than fold the wheel in.
+  const currentScrollTop = container.scrollTop;
+  if (
+    Math.abs(currentScrollTop - baseline.scrollTop) >
+    COMPENSATION_SCROLL_SKIP_PX
+  ) {
+    return { wouldFire: false, residual: 0 };
+  }
+  const containerTop = container.getBoundingClientRect().top;
+  const currentTopOffset =
+    baseline.row.getBoundingClientRect().top - containerTop;
+  const current = { topOffset: currentTopOffset, scrollTop: currentScrollTop };
+  // The band walk both computes `aboveShift` AND refreshes the band cache in
+  // place — this call is the refresh that zeroes the second observer.
+  const aboveShift = sumAboveAnchorShift(
+    container,
+    baseline.row,
+    baseline.scrollTop + baseline.topOffset,
+    currentScrollTop,
+    heights,
+  );
+  // Net document-position shift of the anchor since baseline (scroll-invariant),
+  // and the gated correction target — same math, epsilon gate, as the unit-
+  // tested `computeAnchorCorrection`.
+  const observedShift =
+    currentScrollTop +
+    currentTopOffset -
+    (baseline.scrollTop + baseline.topOffset);
+  const residual = Math.abs(aboveShift);
+  const target = computeAnchorCorrection(baseline, current);
+  if (target === null) return { wouldFire: false, residual };
+  // Fire only when the two instruments agree — sufficiency cross-check that the
+  // net shift is a real above-anchor reflow, not a straddler miscount.
+  if (Math.abs(aboveShift - observedShift) > 0.5) {
+    return { wouldFire: false, residual };
+  }
+  // Synchronous setter (not `scrollTo`, which WebKit may defer past paint).
+  container.scrollTop = target;
+  return { wouldFire: true, residual };
+}
+
+/**
+ * Build stamp for the E2E gate's stale-`dist` guard. `pnpm build` is
+ * `tsc && vite build`; on a tsc failure it leaves the PRIOR `dist/` in place, so
+ * a fixture can silently exercise a stale bundle and report a fabricated pass.
+ * The fixture asserts this exact value is present on `window` after load, which
+ * catches BOTH failure modes: "build failed, stale dist" (stamp absent, probe
+ * never ran) and "build succeeded but I'm serving the previous experiment's
+ * dist" (stamp present but not equal to the value the fixture expects). Bump
+ * this string whenever the correction mechanism under test changes so a stale
+ * bundle can never masquerade as the current experiment.
+ */
+const ANCHOR_BUILD_STAMP = "w4a-ungated-ro-2";
+
+/**
+ * Test-only tripwire hook. In production `window.__ANCHOR_PROBE__` is undefined
+ * and this is a single truthiness check per correction attempt — no allocation,
+ * no cost. The E2E gate installs the array and asserts the ratified invariants
+ * from it: Chromium's on-time RO is the sole mid-history writer (`source==="ro"
+ * && wouldFire` count > 0 AND `source==="raf" && wouldFire` count == 0); WebKit's
+ * late RO no-ops against the rAF-refreshed cache (rAF fires AND every
+ * `source==="ro" && wouldFire` entry has residual ≤ 0.5). One record per
+ * attempt, both observers. On the first record we also stamp
+ * `window.__ANCHOR_BUILD_STAMP__` so the fixture can prove it loaded THIS
+ * build's bundle, not a stale one.
+ */
+function reportCorrection(
+  source: "raf" | "ro",
+  result: MidHistoryCorrection,
+): void {
+  const probe = (
+    globalThis as unknown as {
+      __ANCHOR_PROBE__?: Array<{
+        source: "raf" | "ro";
+        wouldFire: boolean;
+        residual: number;
+      }>;
+      __ANCHOR_BUILD_STAMP__?: string;
+    }
+  ).__ANCHOR_PROBE__;
+  if (probe) {
+    (
+      globalThis as unknown as { __ANCHOR_BUILD_STAMP__?: string }
+    ).__ANCHOR_BUILD_STAMP__ = ANCHOR_BUILD_STAMP;
+    probe.push({
+      source,
+      wouldFire: result.wouldFire,
+      residual: result.residual,
+    });
+  }
+}
+
 export function useAnchoredScroll({
   scrollContainerRef,
   contentRef,
@@ -301,28 +549,24 @@ export function useAnchoredScroll({
   const settlingRef = React.useRef(false);
   // Baseline for realization/reflow compensation: the first row fully inside
   // the viewport (top at/below the scroller top), its top offset, and the
-  // scrollTop at capture. Sampled every rAF by a running loop while mid-history
-  // (see the rAF baseline effect) — NOT per-scroll-event, because scroll events
-  // dispatch async off WebKit's scrolling thread and would hand the RO a stale
-  // snapshot. rAF callbacks run in the frame's rendering steps before layout/RO
-  // delivery on every engine, so this baseline is the freshest pre-shift read
-  // cross-engine. The ResizeObserver re-pins THIS row using the scroll-invariant
-  // document-position delta (see the RO callback).
-  const readingAnchorRef = React.useRef<{
-    id: string;
-    topOffset: number;
-    scrollTop: number;
-  } | null>(null);
-  // The reading-anchor snapshot from the PREVIOUS rAF tick. On WebKit the
-  // current-frame snapshot is captured post-realization (blind to this frame's
-  // reflow), so the RO fallback diffs against this older, pre-realization read
-  // to recover the anchor's true document-position shift. Same shape as
-  // `readingAnchorRef`; the sampler shifts current->previous each frame.
-  const prevReadingAnchorRef = React.useRef<{
-    id: string;
-    topOffset: number;
-    scrollTop: number;
-  } | null>(null);
+  // scrollTop at capture. Holds the PREVIOUS frame's snapshot: the rAF sampler
+  // reads it as the pre-realization baseline, then overwrites it with this
+  // frame's snapshot (see the rAF sampler). Sampled every rAF by a running loop
+  // while mid-history — NOT per-scroll-event, because scroll events dispatch
+  // async off WebKit's scrolling thread and would hand a stale snapshot. rAF
+  // callbacks run in the frame's rendering steps before layout on every engine,
+  // and the sampler's synchronous read forces this frame's realization into
+  // layout, so the pair (prev, this frame) spans the reflow.
+  const readingAnchorRef = React.useRef<ReadingAnchor | null>(null);
+  // Last-known laid-out height per observed `.timeline-row-cv` row, hoisted to
+  // component scope so BOTH the ResizeObserver effect (which observes/seeds it)
+  // and the per-rAF sampler (which owns the mid-history correction and reads it
+  // to attribute per-row reflow) share one cache. The compensable delta of a
+  // realization is `realized - reserve`, so each row is seeded at its
+  // `contain-intrinsic-size` reserve (see `reservedRowHeight`); the rAF walk
+  // then reads the realized height and diffs. If this cache lived in the RO
+  // closure the rAF walk would have no baseline and would silently no-op.
+  const rowHeightsRef = React.useRef<WeakMap<Element, number>>(new WeakMap());
 
   // Reset everything when the channel changes — the layout effect that runs
   // immediately after this reset is responsible for either jumping to bottom
@@ -594,53 +838,40 @@ export function useAnchoredScroll({
   ]);
 
   // ---------------------------------------------------------------------------
-  // Content resize: a height change React isn't driving — a bottom-pinned
-  // in-viewport reflow (image decode, embed expand, late font), OR an
-  // off-screen row above the reading position realizing to its true height as
-  // the user scrolls up into it (content-visibility skip -> visible). Both grow
-  // `scrollHeight` without a `messages` change, so the layout effect doesn't
-  // fire. The ResizeObserver callback runs in the rendering steps AFTER layout
-  // and BEFORE paint, which makes a `scrollBy` here same-frame invisible — this
-  // is the correct trigger for compensation, not the async-dispatched
-  // `contentvisibilityautostatechange` event (which may fire after the shifted
-  // frame has already painted).
+  // Content resize while AT BOTTOM: a bottom-pinned in-viewport reflow (image
+  // decode, embed expand, late font) or a row realizing grows `scrollHeight`
+  // without a `messages` change, so the layout effect doesn't fire. The RO
+  // callback runs in the rendering steps AFTER layout and BEFORE paint, which
+  // makes a `scrollTo` here same-frame invisible — this is the correct trigger
+  // for bottom-glue, not the async-dispatched `contentvisibilityautostatechange`
+  // event (which may fire after the shifted frame has already painted).
   //
-  //   - at-bottom: re-pin to the new floor to stay glued.
-  //   - mid-history: `overflow-anchor: none` is set on the scroller and the
-  //     shipped WKWebView has no native anchoring anyway, so nothing holds the
-  //     reading row across the reflow/realization — our writer must. This is
-  //     the fix for the up-scroll jitter AND the latent reflow bug (both were
-  //     previously left to a native anchoring that does not run here).
-  //
-  // Freshness (single-writer + no-fighting-the-wheel): `anchorRef.current` is
-  // re-baselined by `onScroll` every scroll event, and scroll events are
-  // dispatched earlier in the same frame's rendering steps than ResizeObserver
-  // delivery — so when a realization RO fires mid-gesture, the anchor's saved
-  // offset already reflects the user's current scroll position, and the drift
-  // we measure is purely the layout shift above the reading row, not the user's
-  // own wheel delta. We skip while settling a programmatic bottom pin so this
-  // never races the floor-chase in `onScroll`.
+  // This effect owns ONLY bottom-glue and maintaining the shared row-height
+  // cache. Mid-history realization correction moved to the per-rAF sampler
+  // below: on WebKit the RO for a realization delivers one frame LATE (paint at
+  // N, RO at N+1), so a correction issued here lands after the shifted frame
+  // has painted — the visible row snap. The rAF sampler's synchronous
+  // `getBoundingClientRect` forces the realization into its OWN frame's layout,
+  // so it observes and corrects the shift same-frame, before paint. Keeping RO
+  // as a second scroll writer would reintroduce the two-callback fight; RO
+  // writes only the bottom floor.
   // ---------------------------------------------------------------------------
   // biome-ignore lint/correctness/useExhaustiveDependencies: `messages` is an intentional re-sync trigger — on each committed render we (re)observe any newly-mounted `.timeline-row-cv` rows so a row appended by a load-older page starts being watched. The callback reads only stable refs; `channelId` forces a full re-subscribe when the keyed scroll container remounts.
   React.useEffect(() => {
     const content = contentRef.current;
     if (!content || typeof ResizeObserver === "undefined") return;
-    // Last-known laid-out height per observed row. The compensable delta of a
-    // resize is `newHeight - lastHeight`. We SEED each row at observe time with
-    // the height the browser is currently using for layout — for a
-    // `content-visibility: auto` row that has never painted, that is its
-    // `contain-intrinsic-size` reserve (the estimate), NOT its realized height
-    // (which the row does not report until it realizes). Seeding with the
-    // reserve is what makes the very first RO delivery — the realization itself
-    // — yield the true `realized - reserve` delta instead of being silently
-    // swallowed as an unmeasurable first sighting.
-    const lastHeights = new WeakMap<Element, number>();
+    // Shared component-scope height cache (see `rowHeightsRef`). Seeded here at
+    // observe time with each row's `contain-intrinsic-size` reserve so the rAF
+    // walk reads a true `realized - reserve` delta on realization rather than
+    // swallowing it as an unmeasurable first sighting.
+    const lastHeights = rowHeightsRef.current;
     const observer = new ResizeObserver((entries) => {
       const container = scrollContainerRef.current;
       if (!container) return;
       // A programmatic bottom pin is still settling; `onScroll` owns the
       // floor-chase, so stay out of its way and don't double-write.
       if (settlingRef.current) return;
+      // Only bottom-glue lives here. Mid-history is the rAF sampler's job.
       // Bottom vs mid-history is decided by SYNCHRONOUS geometry, not
       // `anchorRef.current.kind` (scroll-event-maintained → stale under WebKit
       // momentum). `isAtBottomNow` reads live scroll metrics, and it matches the
@@ -648,8 +879,12 @@ export function useAnchoredScroll({
       // anchor exists — so the branch here and the baseline can't disagree.
       if (isAtBottomNow(container)) {
         // Bottom-glue: a row realizing/reflowing while pinned grows the content,
-        // so re-pin to the new floor to stay glued, and refresh the height map
-        // so we don't treat this growth as a mid-history delta later.
+        // so re-pin to the new floor to stay glued, and refresh the height cache
+        // for the resized rows so the rAF walk doesn't later treat this
+        // already-absorbed growth as a mid-history delta after the user scrolls
+        // up. Partitioned from mid-history by `isAtBottomNow` — at-bottom and
+        // mid-history are disjoint, so this scrollTo and the mid-history one
+        // below can never both fire in one callback.
         for (const entry of entries) {
           lastHeights.set(
             entry.target,
@@ -659,112 +894,77 @@ export function useAnchoredScroll({
         container.scrollTo({ top: container.scrollHeight, behavior: "auto" });
         return;
       }
-      // Mid-history: a batch of rows realized/reflowed this frame. The reading
-      // anchor — the first row a safe margin below the fold, snapshotted by the
-      // per-rAF baseline sampler — has shifted by the net height change of
-      // everything above it, and must be re-pinned to its saved offset so it
-      // stays visually fixed. This is the single scroll writer for realization;
-      // `overflow-anchor: none` (and WKWebView's absence of it) mean nothing
-      // else competes. We use the RO batch as the TRIGGER — a row's laid-out
-      // height actually changed (seeded from the reserve so a first-realization
-      // delivery counts, not swallowed as a first sighting) — and correct via
-      // one of two engine-order-independent signals computed below.
+      // Mid-history: the RO is the on-time observer on Chromium (delivers the
+      // realization pre-paint), so it is the mid-history corrector THERE. On
+      // WebKit the RO is late — by the time it fires the per-rAF sampler has
+      // already corrected this realization and refreshed the height cache, so
+      // the entry deltas below read ~0 (`changed` stays false) and this branch
+      // no-ops. "First observer wins" falls out of the frame lifecycle + the
+      // shared cache, with no engine branch.
+      //
+      // This corrector is UNGATED by the rAF path's `observedShift`/`aboveShift`
+      // agreement cross-check, and deliberately so: that cross-check exists to
+      // suppress the rAF band walk's straddler-miscount fabrication (see
+      // `applyMidHistoryCorrection` and commit history), a risk the RO does not
+      // have — the RO entries ARE ground truth for which rows resized. Applying
+      // the cross-check here strangled the on-time Chromium observer (its box-
+      // growth and the anchor's shove land one frame apart on a pipelined
+      // engine, so the same-frame equality never held) and regressed Chromium
+      // to 16 reversals. So: RO entries are the TRIGGER; correct by the anchor's
+      // own measured drift; refresh the cache in the same callback.
+      //
+      // Baseline is the rAF's frame-start (pre-realization) snapshot of the
+      // reading row, produced by `snapshotReadingAnchor` — the first FULLY
+      // visible row held `READING_ANCHOR_SAFE_MARGIN_PX` below the fold. That
+      // safe-margin anchor is the straddler guard on THIS path: because the
+      // anchor sits a notch below the realization band, a row realizing across
+      // the top fold is above the anchor and its delta is summed into the drift
+      // correctly by the layout engine — it never corrupts the anchor's own
+      // position. The agreement gate is the rAF band walk's straddler guard
+      // (that walk sums per-row deltas and can fabricate); the RO path's guard
+      // is the anchor margin, not the gate. Load-bearing invariant (Eva's
+      // design-of-record (c), Quinn's merge-bar checklist #4): a refactor that
+      // re-points this at a bare top-crossing anchor reintroduces the Shape-B
+      // lurch on Chromium — the `changed` trigger does NOT cover straddlers, the
+      // margin does. If no baseline yet (before the first rAF), skip.
+      const baseline = readingAnchorRef.current;
+      if (!baseline) return;
+      // Trigger + refresh: did any observed row's laid-out height actually
+      // change this batch? Refresh the cache to the realized height as we go
+      // (same `getBoundingClientRect().height` basis as the rAF walk — one
+      // clock) so a late WebKit RO for a realization the rAF already handled
+      // sees a zero delta and this branch stays inert.
       let changed = false;
-      let aboveShift = 0;
-      const anchorForShift = readingAnchorRef.current;
-      const anchorRowForShift = anchorForShift
-        ? container.querySelector<HTMLElement>(
-            `[data-message-id="${CSS.escape(anchorForShift.id)}"]`,
-          )
-        : null;
-      const anchorTopForShift = anchorRowForShift
-        ? anchorRowForShift.getBoundingClientRect().top
-        : Number.POSITIVE_INFINITY;
       for (const entry of entries) {
         const row = entry.target as HTMLElement;
-        const rect = row.getBoundingClientRect();
-        const height = rect.height;
+        const height = row.getBoundingClientRect().height;
         const last = lastHeights.get(row);
         lastHeights.set(row, height);
-        if (last === undefined) continue; // never seeded (defensive).
+        if (last === undefined) continue; // first sighting: seed, don't count.
         if (Math.abs(height - last) > 0.5) changed = true;
-        // A row that grew/shrank ABOVE the anchor shifts the anchor by its
-        // height delta. Rows at/below the anchor don't move it.
-        if (rect.top < anchorTopForShift) aboveShift += height - last;
       }
-      if (!changed) return;
-      const baseline = readingAnchorRef.current;
-      if (!baseline) return; // no stable pre-batch snapshot: skip, don't drift.
-      const anchorRow = container.querySelector<HTMLElement>(
-        `[data-message-id="${CSS.escape(baseline.id)}"]`,
-      );
-      if (!anchorRow) return;
-      const containerTop = container.getBoundingClientRect().top;
-      const currentScrollTop = container.scrollTop;
-      // Staleness skip. The baseline was captured in this frame's rAF (pre-
-      // layout), but under async scrolling a compositor commit can land between
-      // that read and this post-layout read. A large scroll delta since
-      // baseline means momentum is in flight and the two reads may not describe
-      // one coherent state — skip rather than fold the wheel into the pin.
-      if (
-        Math.abs(currentScrollTop - baseline.scrollTop) >
-        COMPENSATION_SCROLL_SKIP_PX
-      ) {
+      if (!changed) {
+        reportCorrection("ro", { wouldFire: false, residual: 0 });
         return;
       }
+      // Correct from the anchor's own measured drift. The layout engine already
+      // summed every above-anchor height delta into the anchor row's top, and
+      // rows resizing below the anchor don't move it — so the single measured
+      // drift IS the net above-anchor shift, no per-row summation needed.
+      const containerTop = container.getBoundingClientRect().top;
       const currentTopOffset =
-        anchorRow.getBoundingClientRect().top - containerTop;
-      // Scroll-invariant correction: isolates the reflow above the reading row
-      // from the user's own scroll motion since baseline (see
-      // `computeAnchorCorrection`). Reads are taken as late as possible, here in
-      // the post-layout RO callback, and the write is absolute — no compounding
-      // of a stale `scrollTop` read against a newer committed offset.
-      const target = computeAnchorCorrection(baseline, {
-        topOffset: currentTopOffset,
-        scrollTop: currentScrollTop,
-      });
-      if (target !== null) {
-        // The anchor's own document position moved (Chromium: the rAF baseline
-        // is captured pre-reflow, so this fires and measures the exact shift).
-        container.scrollTo({ top: target, behavior: "auto" });
-      } else if (Math.abs(aboveShift) > 0.5) {
-        // The baseline-relative position diff is blind. On WebKit the rAF
-        // baseline is captured post-realization, so `baseline` and `current`
-        // sit on the SAME side of the reflow and the diff reads 0 — but that is
-        // ALSO what a frame with no genuine displacement reads, and `aboveShift`
-        // (summed from the RO entries) is not by itself enough to tell them
-        // apart: a row straddling the anchor boundary is misclassified, so
-        // `aboveShift` can be nonzero on a frame where the anchor did not move
-        // (the "Shape B" slow-trackpad lurch — firing it IS the visible jump).
-        //
-        // Sufficient signal: the anchor's own document-position shift measured
-        // independently of the RO entries, over the PREVIOUS rAF tick (which,
-        // unlike the same-frame baseline, was captured before this frame's
-        // realization, so it spans the reflow and is not blind). Document
-        // position (`scrollTop + topOffset`) is scroll-invariant: the user's own
-        // scroll moves `scrollTop` and `topOffset` equal-and-opposite, so this
-        // observed shift is the reflow alone — Eva's probe `e = rowMove +
-        // dScroll`, computed from one coherent prev-tick snapshot.
-        //
-        // Fire only when the two instruments AGREE (`aboveShift ≈ observed`):
-        // agreement is the sufficiency condition — both the RO sum and the
-        // independent geometry see the same reflow, so it is real (not a
-        // straddler miscount). Correct by the observed shift, never by raw
-        // on-screen motion (that would refold the user's scroll into the pin).
-        const prev = prevReadingAnchorRef.current;
-        if (prev && prev.id === baseline.id) {
-          const observedShift =
-            currentScrollTop +
-            currentTopOffset -
-            (prev.scrollTop + prev.topOffset);
-          if (Math.abs(aboveShift - observedShift) <= 0.5) {
-            container.scrollTo({
-              top: currentScrollTop + observedShift,
-              behavior: "auto",
-            });
-          }
-        }
+        baseline.row.getBoundingClientRect().top - containerTop;
+      const drift = currentTopOffset - baseline.topOffset;
+      if (Math.abs(drift) <= 0.5) {
+        reportCorrection("ro", { wouldFire: false, residual: Math.abs(drift) });
+        return;
       }
+      // Synchronous setter (not `scrollTo`, which WebKit may defer past paint).
+      container.scrollTop = container.scrollTop + drift;
+      // Re-baseline so a second RO batch this frame measures from where we
+      // pinned, not the pre-correction position.
+      readingAnchorRef.current = snapshotReadingAnchor(container);
+      reportCorrection("ro", { wouldFire: true, residual: Math.abs(drift) });
     });
     // Observe every timeline row (not the content wrapper): a
     // `content-visibility: auto` row realizing to its true height is a resize
@@ -782,25 +982,51 @@ export function useAnchoredScroll({
   }, [channelId, contentRef, scrollContainerRef, messages]);
 
   // ---------------------------------------------------------------------------
-  // Per-rAF reading-anchor baseline. This is the single writer of
-  // `readingAnchorRef`, and the crux of the cross-engine fix. The RO
-  // compensation needs a "before the reflow" snapshot of the reading row; the
-  // natural place to take it — the scroll event — is wrong on WebKit, which
-  // dispatches scroll asynchronously off its scrolling thread, so under momentum
-  // the snapshot the RO consumes lags the live offset and the correction folds
-  // the user's own wheel delta into the pin (the 204px lurch). rAF callbacks
-  // run in every engine's frame rendering steps BEFORE style/layout and RO
-  // delivery, so a baseline captured here is the freshest possible pre-reflow
-  // read on both engines, decoupled from scroll-event timing entirely.
+  // Per-rAF reading-anchor sampler AND the sole mid-history scroll writer.
+  //
+  // rAF callbacks run in every engine's frame rendering steps BEFORE
+  // style/layout, and the synchronous `getBoundingClientRect` in
+  // `snapshotReadingAnchor` forces THIS frame's layout — including any
+  // `content-visibility` realization — into the read. So the sampler observes a
+  // realization same-frame, and a `scrollTo` issued here lands before the frame
+  // paints. That is the whole cross-engine fix: on WebKit the ResizeObserver for
+  // the same realization delivers one frame LATE (paint N, RO N+1), so an
+  // RO-driven correction snaps visibly; correcting in the rAF that forced the
+  // layout collapses N+1 → N. On Chromium the same rAF read sees the realization
+  // same-frame too, so the single writer is correct on both engines.
+  //
+  // Two instruments, read from ONE forced-layout pass so they describe the SAME
+  // realization (never a late-carried prior one):
+  //   1. `observedShift` — the anchor row's net document-position delta since
+  //      the previous frame's (pre-realization) snapshot. Cheap: two snapshots,
+  //      no row walk. Scroll-invariant (`scrollTop + topOffset`): the user's own
+  //      scroll moves both equal-and-opposite, so this is the reflow alone.
+  //   2. `aboveShift` — the per-row-attributed sum of height deltas for rows
+  //      laid out ABOVE the anchor (`sumAboveAnchorShift`), against the shared
+  //      height cache. This is the SUFFICIENCY cross-check: `observedShift`
+  //      alone moves for any reason (a straddling row miscount, an anchor-row
+  //      top-edge resize), so we correct only when the two AGREE — that is the
+  //      evidence the net shift is a genuine above-anchor reflow, not the
+  //      "Shape B" straddler lurch. Losing this cross-check is exactly the W1
+  //      sufficiency gap; it survives here because both reads are same-frame.
+  //
+  // Cost: the row walk runs ONLY when `|observedShift| > ε` — i.e. on
+  // realization frames, the same frequency the RO fired at — so there is no
+  // steady-state per-frame draw cost.
+  //
+  // Guards ported from the old RO path (both load-bearing):
+  //   - Re-pick guard `prev.id === cur.id`: `snapshotReadingAnchor` re-selects
+  //     the anchor by geometry every frame, so without this the shift would diff
+  //     two DIFFERENT rows on a re-pick frame (constant during scroll).
+  //   - Staleness skip: a large `scrollTop` delta since the previous frame means
+  //     momentum is in flight and the two reads may not describe one coherent
+  //     state — skip rather than fold the wheel into the pin.
   //
   // Mid-history is derived from SYNCHRONOUS geometry every frame
-  // (`isAtBottomNow`), NOT from `anchorRef.current.kind`. `anchorRef` is
-  // maintained by the scroll event — the very thing that goes stale on WebKit
-  // under momentum — so gating on it would clear the baseline during exactly
-  // the frames the sampler exists to protect. Reading live scroll geometry is
-  // immune to scroll-event staleness. When at-bottom we clear the baseline
-  // (bottom-glue owns that path); while a programmatic bottom pin is settling
-  // we hold off — `onScroll` owns that window.
+  // (`isAtBottomNow`), NOT from `anchorRef.current.kind` (scroll-event
+  // maintained → stale under WebKit momentum). When at-bottom we clear the
+  // anchor (bottom-glue in the RO effect owns that path); while a programmatic
+  // bottom pin is settling we hold off — `onScroll` owns that window.
   //
   // No `channelId` dep: the loop reads `scrollContainerRef.current` fresh every
   // frame, so it re-binds to the new scroller on channel switch on its own.
@@ -808,16 +1034,32 @@ export function useAnchoredScroll({
     let rafId = requestAnimationFrame(function sample() {
       const container = scrollContainerRef.current;
       if (container && !settlingRef.current) {
-        // Shift the current snapshot into the previous slot BEFORE overwriting
-        // it, so the RO callback (which runs after this rAF in the same frame)
-        // can diff the anchor's document position against the PREVIOUS frame's
-        // pre-realization read — the only rAF snapshot old enough to span this
-        // frame's reflow on WebKit. The same-frame snapshot below is captured
-        // post-realization and is blind to it.
-        prevReadingAnchorRef.current = readingAnchorRef.current;
-        readingAnchorRef.current = isAtBottomNow(container)
+        // `prev` is last frame's snapshot (pre-realization); take this frame's
+        // snapshot into `cur`. The read forces layout, so `cur` reflects this
+        // frame's realization — the pair (prev, cur) spans the reflow.
+        const prev = readingAnchorRef.current;
+        const cur = isAtBottomNow(container)
           ? null
           : snapshotReadingAnchor(container);
+        readingAnchorRef.current = cur;
+
+        // rAF is ONE of the two mid-history observers (see
+        // `applyMidHistoryCorrection`). We attempt a correction every frame we
+        // have a coherent prev→cur pair on the SAME anchor row (re-pick guard):
+        // the band walk inside runs every frame to keep its cache single-frame
+        // fresh, and issues the write only when both instruments agree. On
+        // WebKit the rAF is the first observer (late RO) and this fires; on
+        // Chromium the on-time RO already corrected + refreshed the cache last
+        // step, so the walk here sees residual ≈ 0 and no-ops. `prev` is the
+        // pre-realization baseline; the helper re-measures `prev.row` now.
+        if (cur && prev && prev.id === cur.id) {
+          const result = applyMidHistoryCorrection(
+            container,
+            prev,
+            rowHeightsRef.current,
+          );
+          reportCorrection("raf", result);
+        }
       }
       rafId = requestAnimationFrame(sample);
     });

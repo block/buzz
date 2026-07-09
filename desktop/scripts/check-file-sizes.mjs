@@ -182,6 +182,17 @@ const overrides = new Map([
   // overage from load-bearing per-message plumbing, not generic debt growth.
   // Approved override; still queued to split with the rest of this list.
   ["src/features/messages/ui/MessageThreadPanel.tsx", 1006],
+  // W4a realizing-upscroll reversal fix (design-of-record (c), targets #1662):
+  // the hook is the sole cross-engine reading-anchor scroll writer, and the
+  // fix's correctness lives in WHY each observer wins per engine — so the
+  // ungated-RO mid-history corrector, the safe-margin straddler-guard invariant
+  // (Quinn's merge-bar checklist #4), the one-clock/single-writer reasoning, and
+  // the build-stamp/probe contract are all documented AT their sites. The file
+  // was 888 lines at HEAD; this fix's code + load-bearing provenance comments
+  // crossed 1000. Comment-dominated overage on a correctness fix, not generic
+  // debt growth. Approved override; queued to split (extract the mid-history
+  // corrector + band walk into a sibling module) with the rest of this list.
+  ["src/features/messages/ui/useAnchoredScroll.ts", 1140],
   // AgentConfigPanel footer fold into ProfileFieldGroup for the config-bridge
   // panel — a small overage from load-bearing UI plumbing, not generic debt
   // growth. Approved override; still queued to split with the rest of this list.
