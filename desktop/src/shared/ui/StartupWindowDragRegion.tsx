@@ -1,6 +1,8 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import * as React from "react";
 
+import { performTitleBarDoubleClickAction } from "@/shared/lib/titleBarActions";
+
 const WINDOW_DRAG_HANDLE_HEIGHT = 44;
 const WINDOW_DRAG_INTERACTIVE_SELECTOR =
   'button, a, input, textarea, select, [role="button"], [contenteditable="true"]';
@@ -37,7 +39,7 @@ export function StartupWindowDragRegion() {
       }
 
       event.preventDefault();
-      void getCurrentWindow().toggleMaximize();
+      void performTitleBarDoubleClickAction();
     }
 
     window.addEventListener("pointerdown", handlePointerDown, true);

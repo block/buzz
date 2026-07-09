@@ -67,6 +67,81 @@ fn perform_sidebar_default_haptic() {
     }
 }
 
+/// Performs the window action matching the macOS "double-click a window's
+/// title bar to" preference (`AppleActionOnDoubleClick`).
+///
+/// macOS values are `Minimize`, `Maximize` (default when unset), or `None`.
+/// The desktop app uses a web-based title-bar drag region, so macOS does not
+/// act on a title-bar double-click itself — the frontend forwards the
+/// double-click here so the app can honor the user's system setting instead of
+/// hardcoding maximize (which fought the OS and caused a minimize/restore
+/// flicker).
+///
+/// For the `Minimize` case we call the native `NSWindow.miniaturize:` so the
+/// window genies into the Dock like other macOS apps. Tauri's own
+/// `Window::minimize()` collapses the window in place for this window style
+/// rather than miniaturizing to the Dock, so we go through AppKit directly.
+///
+/// On non-macOS platforms this always toggles maximize (the historical
+/// behavior).
+#[tauri::command]
+fn title_bar_double_click(window: tauri::Window) {
+    #[cfg(target_os = "macos")]
+    {
+        let action = {
+            let output = std::process::Command::new("defaults")
+                .args(["read", "-g", "AppleActionOnDoubleClick"])
+                .output();
+            match output {
+                Ok(output) if output.status.success() => {
+                    String::from_utf8_lossy(&output.stdout).trim().to_string()
+                }
+                _ => "Maximize".to_string(),
+            }
+        };
+
+        match action.as_str() {
+            "None" => {}
+            "Minimize" => {
+                // SAFETY: `ns_window()` returns the live NSWindow for this
+                // window; we only send it the standard `miniaturize:` message
+                // on the main thread (Tauri commands run on the main thread).
+                if let Ok(ptr) = window.ns_window() {
+                    if !ptr.is_null() {
+                        let ns_window: &objc2_app_kit::NSWindow = unsafe { &*ptr.cast() };
+                        ns_window.miniaturize(None);
+                        return;
+                    }
+                }
+                // Fall back to Tauri's minimize if the NSWindow is unavailable.
+                let _ = window.minimize();
+            }
+            // "Maximize" or any unexpected value.
+            _ => {
+                toggle_maximize(&window);
+            }
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        toggle_maximize(&window);
+    }
+}
+
+/// Toggles the window between maximized and its previous size, matching the
+/// historical double-click behavior.
+fn toggle_maximize(window: &tauri::Window) {
+    match window.is_maximized() {
+        Ok(true) => {
+            let _ = window.unmaximize();
+        }
+        _ => {
+            let _ = window.maximize();
+        }
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let builder = tauri::Builder::default()
@@ -441,6 +516,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            title_bar_double_click,
             get_identity,
             get_nsec,
             import_identity,

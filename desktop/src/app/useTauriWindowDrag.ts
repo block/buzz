@@ -2,6 +2,7 @@ import * as React from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 
 import { isWindowDragHandleEvent } from "@/app/AppShell.helpers";
+import { performTitleBarDoubleClickAction } from "@/shared/lib/titleBarActions";
 
 export function useTauriWindowDrag() {
   React.useEffect(() => {
@@ -23,7 +24,7 @@ export function useTauriWindowDrag() {
       }
 
       event.preventDefault();
-      void getCurrentWindow().toggleMaximize();
+      void performTitleBarDoubleClickAction();
     }
 
     window.addEventListener("pointerdown", handlePointerDown, true);
