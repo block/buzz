@@ -8,6 +8,7 @@ import {
   selectTimelineIntroSurface,
 } from "@/features/messages/lib/timelineSnapshot";
 import { getDmParticipantPreview } from "@/features/channels/lib/dmParticipantDisplay";
+import { preloadTimelineImages } from "@/features/messages/lib/timelineImagePreload";
 import type { TimelineMessage } from "@/features/messages/types";
 import type { MainTimelineEntry } from "@/features/messages/lib/threadPanel";
 import type { ChannelWindowThreadSummary } from "@/features/messages/lib/channelWindowStore";
@@ -232,6 +233,13 @@ const MessageTimelineBase = React.forwardRef<
     EMPTY_TIMELINE_SNAPSHOT,
   );
   const deferredMessages = deferredSnapshot.messages;
+  const imagePreloadStateRef = React.useRef({
+    activeImages: new Set<HTMLImageElement>(),
+    requestedUrls: new Set<string>(),
+  });
+  React.useEffect(() => {
+    preloadTimelineImages(messages, imagePreloadStateRef.current);
+  }, [messages]);
   const isDeferredSnapshotStale = isDeferredTimelineSnapshotStale({
     deferredSnapshot,
     liveSnapshot,
