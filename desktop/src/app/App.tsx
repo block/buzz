@@ -15,6 +15,7 @@ import {
 import { router } from "@/app/router";
 import { ThemeGrainientBackground } from "@/app/ThemeGrainientBackground";
 import { useReloadShortcut } from "@/app/useReloadShortcut";
+import { KnownAgentPubkeysProvider } from "@/features/agents/useKnownAgentPubkeys";
 import { useAppOnboardingState } from "@/features/onboarding/hooks";
 import { OnboardingSlideTransition } from "@/features/onboarding/ui/OnboardingSlideTransition";
 import { OnboardingFlow } from "@/features/onboarding/ui/OnboardingFlow";
@@ -327,7 +328,11 @@ function AppReady({
     return isWorkspaceSwitch ? <WorkspaceSwitchGate /> : <AppLoadingGate />;
   }
 
-  return <RouterProvider router={router} />;
+  return (
+    <KnownAgentPubkeysProvider>
+      <RouterProvider router={router} />
+    </KnownAgentPubkeysProvider>
+  );
 }
 
 export function App() {
