@@ -59,11 +59,11 @@ export type DraftState = {
   /** URLs of imeta attachments marked as spoilered. */
   spoileredAttachmentUrls: string[];
   /**
-   * Lifecycle status of this draft.
-   * - "active": draft is in progress (not yet sent).
-   * - "sent": draft was sent; kept for the Drafts inbox "Sent" subsection.
+   * Lifecycle status of this draft. Always `"active"` at runtime.
+   * The `"sent"` value is accepted on read for backwards compatibility with
+   * older stored entries and normalised to `"active"` by `isValidDraftState`.
    * Entries persisted before this field was added have no status field —
-   * the read path treats absent status as "active" (see `isValidDraftState`).
+   * the read path treats absent status as `"active"` (see `isValidDraftState`).
    */
   status: "active" | "sent";
 };
@@ -76,10 +76,6 @@ const MAX_DRAFTS = 100;
 
 /** Module-level pubkey set by `initDraftStore`. Empty string = no identity. */
 let currentPubkey = "";
-
-/** Monotonically-incrementing counter used to guarantee unique sent-record keys
- *  even when two sends happen within the same millisecond (e.g. in tests). */
-let _sentSeq = 0;
 
 function storageKey(): string {
   return `${DRAFT_STORE_KEY_PREFIX}:${currentPubkey}`;
@@ -171,9 +167,11 @@ function isValidDraftState(v: unknown): v is DraftState {
   // Migration: entries written before the status field was introduced have no
   // status. Treat absent/invalid status as "active" rather than rejecting the
   // entry — this avoids data loss on first run after the upgrade.
-  if (d.status === undefined || d.status === null) {
+  // Entries written with status "sent" are normalised to "active" so they
+  // resurface in the Drafts panel rather than remaining hidden forever.
+  if (d.status === undefined || d.status === null || d.status === "sent") {
     (d as DraftState).status = "active";
-  } else if (d.status !== "active" && d.status !== "sent") {
+  } else if (d.status !== "active") {
     return false;
   }
   return true;
@@ -301,60 +299,20 @@ export function getSentDraftEntries(): Array<{
 }
 
 /**
- * Mark a draft as sent by writing its content to a durable sent-record key.
+ * Clear the active draft entry for a sent draft.
  *
- * The active draft key is simultaneously cleared so the composer can create
- * a fresh draft in the same channel without inheriting the sent status, and so
- * the composer's empty-content cleanup can never delete the sent record.
- *
- * The sent record is stored under `sent:<draftKey>:<timestamp>` — a key the
- * composer never writes to — so active and sent records for the same channel
- * can coexist in the store independently.
- *
- * The "never-persisted draft writes no sent record" boundary is enforced at
- * the call site: callers only invoke this function when `sentDraftKey` is
- * non-null, which only holds for drafts that were persisted before submit.
- * This function writes unconditionally so the sent record is created even
- * when the active key was already cleared by a composer cleanup that raced
- * the async send (e.g. the user switched channels while send was in flight).
+ * Kept as a named export so callers (`useMentionSendFlow`) don't need
+ * updating. Previously wrote a visible sent-record to the store; the
+ * sent section has been removed, so we now just clear the active draft.
  */
 export function markDraftSentEntry(
   draftKey: string,
-  content: string,
-  channelId: string,
-  pendingImeta: ImetaMedia[],
-  spoileredAttachmentUrls: string[],
+  _content: string,
+  _channelId: string,
+  _pendingImeta: ImetaMedia[],
+  _spoileredAttachmentUrls: string[],
 ): void {
-  const map = readStore();
-  const existing = map.get(draftKey);
-  const now = new Date().toISOString();
-  // Use the live entry's createdAt when available; fall back to now when the
-  // active key was already cleared by a navigation-during-send race. Either
-  // way the sent record is written — the race cannot cause data loss.
-  const createdAt = existing?.createdAt ?? now;
-  // Write the sent record under a stable, distinct key so it can never be
-  // overwritten by the composer's active-draft persist path.
-  // The `Date.now()-seq` suffix guarantees uniqueness even if two sends in the
-  // same channel happen within the same millisecond.
-  const sentKey = `sent:${draftKey}:${Date.now()}-${++_sentSeq}`;
-  map.set(sentKey, {
-    content,
-    selectionStart: content.length,
-    selectionEnd: content.length,
-    channelId,
-    createdAt,
-    updatedAt: now,
-    pendingImeta,
-    spoileredAttachmentUrls,
-    status: "sent",
-  });
-
-  // Clear the active draft key (if still present) so the composer starts fresh
-  // and any subsequent empty-content persist doesn't encounter the sent record.
-  map.delete(draftKey);
-  evictOldest(map);
-  flushStore(map);
-  notifySubscribers();
+  clearDraftEntry(draftKey);
 }
 
 // ── Reactive hooks ────────────────────────────────────────────────────────────
