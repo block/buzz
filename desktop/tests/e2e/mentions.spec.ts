@@ -1110,14 +1110,14 @@ test("system agent profile only exposes message action", async ({ page }) => {
 
 test("system agent avatar only exposes message action", async ({ page }) => {
   await page.goto("/");
-  await page.getByTestId("channel-general").click();
-  await expect(page.getByTestId("chat-title")).toHaveText("general");
-  await waitForMockLiveSubscription(page, "general", SYSTEM_MESSAGE_KIND);
+  await page.getByTestId("channel-random").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("random");
+  await waitForMockLiveSubscription(page, "random", SYSTEM_MESSAGE_KIND);
 
   await page.evaluate(
     ({ kind, targetPubkey }) => {
       window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
-        channelName: "general",
+        channelName: "random",
         content: JSON.stringify({
           type: "member_joined",
           actor: targetPubkey,
