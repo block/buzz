@@ -77,6 +77,7 @@ pub(crate) fn spawn_config_hash(
             }
             record.model = snapshot.model;
             record.provider = snapshot.provider;
+            record.runtime = snapshot.runtime;
             // Mirror the start/restore self-heal: overrides equal to the live
             // persona value are treated as inherited. The persona env itself
             // reaches the hash through `resolve_effective_agent_env` below.

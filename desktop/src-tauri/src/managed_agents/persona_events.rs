@@ -334,6 +334,12 @@ pub struct PersonaSnapshot {
     pub system_prompt: Option<String>,
     pub model: Option<String>,
     pub provider: Option<String>,
+    /// Preferred ACP runtime ID, copied verbatim from the persona (including
+    /// `None`). Unlike `model`/`provider`, there is no record-fallback: the
+    /// materialized instance `runtime` must mirror the definition so that
+    /// definition edits propagate on the next spawn rather than being silently
+    /// shadowed by the stale materialized value.
+    pub runtime: Option<String>,
     /// `persona_content_hash` of the persona at snapshot time; the drift basis.
     pub source_version: String,
 }
@@ -367,6 +373,7 @@ pub fn persona_snapshot(persona: &PersonaRecord) -> PersonaSnapshot {
         system_prompt: Some(persona.system_prompt.clone()),
         model: persona.model.clone(),
         provider: persona.provider.clone(),
+        runtime: persona.runtime.clone(),
         source_version: persona_content_hash(&persona_event_content(persona)),
     }
 }

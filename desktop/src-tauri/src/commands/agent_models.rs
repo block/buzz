@@ -871,6 +871,13 @@ pub async fn update_managed_agent(
                     Some(&agent_command),
                     input.harness_override,
                 );
+            // The empty/whitespace sentinel means "Inherit runtime from
+            // persona": clear the materialized record runtime so the resolution
+            // ladder falls through to the live definition rather than silently
+            // keeping the stale instance copy.
+            if agent_command.trim().is_empty() {
+                record.runtime = None;
+            }
         }
         if let Some(agent_args) = input.agent_args {
             record.agent_args = agent_args;

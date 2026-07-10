@@ -276,6 +276,7 @@ async fn start_local_agent_with_preflight(
             }
             record.model = snapshot.model;
             record.provider = snapshot.provider;
+            record.runtime = snapshot.runtime;
             // Self-heal records written before env refresh: persona env used to
             // be baked into `record.env_vars` at create/spawn, turning inherited
             // values into pseudo-overrides that shadow later persona edits. An

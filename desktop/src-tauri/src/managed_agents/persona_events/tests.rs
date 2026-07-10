@@ -484,6 +484,33 @@ fn field_fallback_record_blank_is_none() {
     );
 }
 
+// ── PersonaSnapshot.runtime ───────────────────────────────────────────────
+
+/// (b) The snapshot carries the persona's runtime VERBATIM — including None,
+/// which clears a stale materialized value on the instance record. Unlike
+/// model/provider, runtime does not fall back to the record's own value:
+/// instances have no user-owned runtime, so the definition must stay
+/// authoritative.
+#[test]
+fn snapshot_runtime_verbatim_from_persona() {
+    let persona = sample_persona(); // runtime = Some("goose")
+    let snap = persona_snapshot_with_agent_config_fallback(&persona, Some("gpt-4"), Some("openai"));
+    assert_eq!(
+        snap.runtime.as_deref(),
+        Some("goose"),
+        "persona runtime Some must be copied verbatim into snapshot"
+    );
+
+    let mut no_runtime = sample_persona();
+    no_runtime.runtime = None;
+    let snap =
+        persona_snapshot_with_agent_config_fallback(&no_runtime, Some("gpt-4"), Some("openai"));
+    assert_eq!(
+        snap.runtime, None,
+        "persona runtime None must produce None snapshot (clears stale materialized value)"
+    );
+}
+
 // ── persona_snapshot_with_agent_config_fallback ────────────────────────────
 
 /// Helper: a persona with no model/provider configured.

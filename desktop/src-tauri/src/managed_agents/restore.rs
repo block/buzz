@@ -72,6 +72,7 @@ pub fn backfill_persona_snapshots(app: &tauri::AppHandle) -> Result<(), String> 
         }
         record.model = snapshot.model;
         record.provider = snapshot.provider;
+        record.runtime = snapshot.runtime;
         // env_vars stay overrides-only; see the create-path comment. Self-heal
         // pre-refresh records that baked persona env in as pseudo-overrides.
         record
@@ -205,6 +206,7 @@ pub async fn restore_managed_agents_on_launch(
             }
             record.model = snapshot.model;
             record.provider = snapshot.provider;
+            record.runtime = snapshot.runtime;
             // env_vars stay overrides-only; see the create-path comment.
             // Self-heal pre-refresh records that baked persona env in as
             // pseudo-overrides.

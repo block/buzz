@@ -376,6 +376,62 @@ fn team_pack_records_keep_empty_vs_absent_prompt_distinction() {
     );
 }
 
+/// (a) A definition-runtime edit must change spawn_config_hash for a
+/// materialized, override-free record — the prospective re-snapshot now
+/// copies the persona's runtime onto the record before hashing.
+#[test]
+fn definition_runtime_edit_changes_hash_for_materialized_record() {
+    let mut rec = record();
+    rec.persona_id = Some("pers".into());
+    rec.runtime = Some("goose".into()); // materialized runtime on instance
+
+    let before = [persona("pers", Some("goose"), "prompt")];
+    let after = [persona("pers", Some("claude"), "prompt")];
+    assert_ne!(
+        spawn_config_hash(&rec, &before, "wss://ws.example"),
+        spawn_config_hash(&rec, &after, "wss://ws.example"),
+        "definition runtime edit must badge a materialized, override-free instance"
+    );
+}
+
+/// (c) An explicit agent_command_override (ladder step 1) must beat a
+/// changed definition runtime — the badge must NOT fire for a pinned instance.
+#[test]
+fn agent_command_override_beats_definition_runtime_change() {
+    let mut rec = record();
+    rec.persona_id = Some("pers".into());
+    rec.runtime = Some("goose".into()); // materialized runtime
+    rec.agent_command_override = Some("goose".into()); // explicit per-instance pin
+
+    let before = [persona("pers", Some("goose"), "prompt")];
+    let after = [persona("pers", Some("claude"), "prompt")];
+    assert_eq!(
+        spawn_config_hash(&rec, &before, "wss://ws.example"),
+        spawn_config_hash(&rec, &after, "wss://ws.example"),
+        "explicit override must win regardless of definition runtime change"
+    );
+}
+
+/// (d) When the linked definition is absent the prospective re-snapshot is
+/// skipped entirely: the materialized runtime must still affect the hash.
+#[test]
+fn missing_definition_leaves_materialized_runtime_in_hash() {
+    let mut rec = record();
+    rec.persona_id = Some("missing".into());
+    rec.runtime = Some("goose".into()); // materialized runtime
+
+    let no_personas: &[PersonaRecord] = &[];
+
+    let mut no_runtime = rec.clone();
+    no_runtime.runtime = None;
+
+    assert_ne!(
+        spawn_config_hash(&rec, no_personas, "wss://ws.example"),
+        spawn_config_hash(&no_runtime, no_personas, "wss://ws.example"),
+        "materialized runtime must still affect hash when definition is absent"
+    );
+}
+
 #[test]
 fn effective_spawn_prompt_matches_hash_semantics() {
     // The env write and the hash share effective_spawn_prompt — this row
