@@ -134,6 +134,11 @@ ok "Relay built"
 RELAY_LOG="${RELAY_LOG:-/tmp/dawn-relay-run.log}"
 TMUX_SESSION="${TMUX_SESSION:-dawn-relay}"
 tmux kill-session -t "${TMUX_SESSION}" 2>/dev/null || true
+if command -v lsof >/dev/null 2>&1 && lsof -nP -iTCP:"${RELAY_MAIN}" -sTCP:LISTEN >/dev/null 2>&1; then
+  err "Port ${RELAY_MAIN} is already in use; refusing to report a stale relay as this harness."
+  lsof -nP -iTCP:"${RELAY_MAIN}" -sTCP:LISTEN >&2 || true
+  exit 1
+fi
 log "Starting relay in tmux session '${TMUX_SESSION}' on :${RELAY_MAIN} (health :${RELAY_HEALTH}, metrics :${RELAY_METRICS})..."
 tmux new-session -d -s "${TMUX_SESSION}" "cd '${REPO_ROOT}' && env \
   DATABASE_URL=postgres://buzz:buzz_dev@localhost:${PG_PORT}/buzz \
