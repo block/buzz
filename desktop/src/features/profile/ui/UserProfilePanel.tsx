@@ -917,6 +917,15 @@ export function UserProfilePanel({
         agent={managedAgent}
         mode="instance-edit"
         initialFocus={editAgentFocus}
+        onEditLinkedPersona={
+          resolvedPersona && !resolvedPersona.isBuiltIn
+            ? () => {
+                setEditAgentOpen(false);
+                setEditAgentFocus(undefined);
+                setPersonaDialogState(editPersonaDialogState(resolvedPersona));
+              }
+            : undefined
+        }
         onOpenChange={(next) => {
           setEditAgentOpen(next);
           if (!next) setEditAgentFocus(undefined);

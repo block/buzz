@@ -45,6 +45,13 @@ type AgentDialogInstanceEditProps = {
   onOpenChange: (open: boolean) => void;
   onUpdated?: (agent: ManagedAgent) => void;
   initialFocus?: EditAgentFocusTarget;
+  /**
+   * Called when the user clicks "Edit avatar" inside the instance-edit dialog.
+   * Caller (UserProfilePanel) is responsible for closing this dialog and
+   * opening the definition-edit dialog. Only passed when the linked definition
+   * is editable (non-built-in, resolved).
+   */
+  onEditLinkedPersona?: () => void;
 };
 
 type AgentDialogDefinitionEditProps = {
@@ -88,6 +95,7 @@ export function AgentDialog(props: AgentDialogProps) {
     return (
       <AgentInstanceEditDialog
         agent={props.agent}
+        onEditLinkedPersona={props.onEditLinkedPersona}
         onOpenChange={props.onOpenChange}
         onUpdated={props.onUpdated}
         open={props.open}
