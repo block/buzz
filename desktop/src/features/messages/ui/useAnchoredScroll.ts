@@ -1,6 +1,7 @@
 import * as React from "react";
 
 import { classifyTimelineMessageDelta } from "@/features/messages/lib/timelineSnapshot";
+import { useFeatureEnabled } from "@/shared/features";
 
 /**
  * Distance (in CSS pixels) below which we consider the scroll position
@@ -18,6 +19,7 @@ const TRUE_BOTTOM_THRESHOLD_PX = 1;
 
 type AnchorState =
   | { kind: "at-bottom" }
+  | { kind: "away" }
   | { kind: "message"; messageId: string; topOffset: number };
 
 type BottomSettleContainer = Pick<
@@ -61,6 +63,8 @@ type UseAnchoredScrollResult = {
   newMessageCount: number;
   /** Message id that should pulse a highlight (target/active-search). */
   highlightedMessageId: string | null;
+  /** Capture the visible row immediately before older history is fetched. */
+  captureAnchorBeforePrepend: () => void;
   /** Imperative: scroll to bottom. */
   scrollToBottom: (behavior?: ScrollBehavior) => void;
   /** Arm a one-shot scroll-to-bottom that fires on the next appended message
@@ -151,6 +155,9 @@ export function useAnchoredScroll({
   targetMessageId = null,
   onTargetReached,
 }: UseAnchoredScrollOptions): UseAnchoredScrollResult {
+  const captureAnchorAtMutationBoundary = useFeatureEnabled(
+    "captureAnchorAtMutationBoundary",
+  );
   // Anchor lives in a ref because it must survive renders and is updated
   // both on scroll (commit-time read) and in the layout effect (post-render
   // restoration). useState would force re-renders we don't want.
@@ -314,13 +321,33 @@ export function useAnchoredScroll({
         return;
       }
     }
+    if (captureAnchorAtMutationBoundary) {
+      const atBottom = isAtBottomNow(container);
+      anchorRef.current = atBottom ? { kind: "at-bottom" } : { kind: "away" };
+      setIsAtBottom((prev) => (prev === atBottom ? prev : atBottom));
+      if (atBottom) {
+        setNewMessageCount(0);
+      }
+      return;
+    }
+
     anchorRef.current = computeAnchor(container);
     const atBottom = anchorRef.current.kind === "at-bottom";
     setIsAtBottom((prev) => (prev === atBottom ? prev : atBottom));
     if (atBottom) {
       setNewMessageCount(0);
     }
-  }, [scrollContainerRef]);
+  }, [captureAnchorAtMutationBoundary, scrollContainerRef]);
+
+  // Experimental path: scrolling only tracks the cheap bottom/away state.
+  // Pay for the exact row geometry once, immediately before a history fetch
+  // can prepend rows, instead of forcing a full row walk on every scroll event.
+  const captureAnchorBeforePrepend = React.useCallback(() => {
+    if (!captureAnchorAtMutationBoundary) return;
+    const container = scrollContainerRef.current;
+    if (!container || isAtBottomNow(container)) return;
+    anchorRef.current = computeAnchor(container);
+  }, [captureAnchorAtMutationBoundary, scrollContainerRef]);
 
   // ---------------------------------------------------------------------------
   // Anchor restoration: after every render, stick to the bottom if the user is
@@ -410,7 +437,7 @@ export function useAnchoredScroll({
       // Stick to bottom across the append.
       container.scrollTo({ top: container.scrollHeight, behavior: "auto" });
       if (newLatestArrived) setNewMessageCount(0);
-    } else if (messagesArrived > 0) {
+    } else if (anchor.kind === "message" && messagesArrived > 0) {
       // Anchored mid-history. An older-history prepend grows the content above
       // the reading row; the browser's native scroll anchoring does NOT correct
       // this at the top edge (no anchor node above the viewport when scrollTop
@@ -435,6 +462,8 @@ export function useAnchoredScroll({
       if (!isPrepend) {
         setNewMessageCount((current) => current + messagesArrived);
       }
+    } else if (anchor.kind === "away" && messagesArrived > 0 && !isPrepend) {
+      setNewMessageCount((current) => current + messagesArrived);
     }
 
     prevLastMessageIdRef.current = lastMessage?.id;
@@ -527,6 +556,7 @@ export function useAnchoredScroll({
   }, []);
 
   return {
+    captureAnchorBeforePrepend,
     onScroll,
     isAtBottom,
     newMessageCount,

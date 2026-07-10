@@ -34,6 +34,14 @@
       ]
     },
     {
+      "id": "captureAnchorAtMutationBoundary",
+      "name": "Mutation-boundary timeline anchoring",
+      "description": "Avoid full message-row geometry scans during timeline scrolling",
+      "platforms": [
+        "desktop"
+      ]
+    },
+    {
       "id": "forum",
       "name": "Forum Channels",
       "description": "Forum-style threaded channels for long-form discussions",

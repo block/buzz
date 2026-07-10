@@ -238,6 +238,7 @@ const MessageTimelineBase = React.forwardRef<
   const showTimelineSkeleton = timelineBodySurface === "skeleton";
 
   const {
+    captureAnchorBeforePrepend,
     highlightedMessageId,
     isAtBottom,
     newMessageCount,
@@ -358,8 +359,14 @@ const MessageTimelineBase = React.forwardRef<
     }
   }, [deferredMessages, jumpToMessage, showTimelineSkeleton]);
 
+  const fetchOlderWithAnchorCapture = React.useCallback(async () => {
+    if (!fetchOlder) return;
+    captureAnchorBeforePrepend();
+    await fetchOlder();
+  }, [captureAnchorBeforePrepend, fetchOlder]);
+
   useLoadOlderOnScroll({
-    fetchOlder,
+    fetchOlder: fetchOlder ? fetchOlderWithAnchorCapture : undefined,
     hasOlderMessages,
     isLoading: showTimelineSkeleton,
     scrollContainerRef,
