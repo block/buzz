@@ -40,6 +40,14 @@
       "platforms": [
         "desktop"
       ]
+    },
+    {
+      "id": "tanstackTimeline",
+      "name": "TanStack Timeline",
+      "description": "Experimental virtualized channel timeline using TanStack range math",
+      "platforms": [
+        "desktop"
+      ]
     }
   ]
 }

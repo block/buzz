@@ -68,6 +68,35 @@ async function getMessagePosition(
   }, messageId);
 }
 
+async function scrollTimelineUntilMessageVisible(
+  page: import("@playwright/test").Page,
+  messageId: string,
+  options: { direction?: "up" | "down"; steps?: number } = {},
+) {
+  const timeline = page.getByTestId("message-timeline");
+  const direction = options.direction ?? "up";
+  const steps = options.steps ?? 80;
+  const row = timeline.locator(`[data-message-id="${messageId}"]`).first();
+
+  await timeline.hover();
+  for (let attempt = 0; attempt < steps; attempt += 1) {
+    if ((await row.count()) > 0) {
+      try {
+        await row.scrollIntoViewIfNeeded({ timeout: 250 });
+        await expect(row).toBeVisible({ timeout: 250 });
+        return row;
+      } catch {
+        // Keep walking the virtual window below.
+      }
+    }
+
+    await page.mouse.wheel(0, direction === "up" ? -2500 : 2500);
+    await page.waitForTimeout(50);
+  }
+
+  throw new Error(`Message ${messageId} did not mount`);
+}
+
 test("first channel load paints the first window without waiting for the row-floor top-up", async ({
   page,
 }) => {
@@ -1845,16 +1874,17 @@ test("older-history prepend keeps the reading row fixed (no jump to oldest)", as
   );
 });
 
-// Regression: thread-summary badges must not flash during a scrollback prepend.
+// Regression: thread-summary badges must survive real virtualization.
 // When an older page lands, the urgent render pass still paints the OLD
 // deferred message snapshot, so MessageTimeline passes `mainEntries=undefined`
 // and TimelineMessageList rebuilds entries itself. That fallback used to drop
 // the relay summary map — and since thread replies are usually not local
-// timeline rows, every relay-driven badge unmounted for the whole deferred
-// window and remounted when the heavy render committed (the visible flash).
-// A MutationObserver is commit-granular, so it catches even a single-frame
-// unmount that a polling assertion would race past.
-test("thread summary badge survives an older-history prepend without unmounting", async ({
+// timeline rows, every relay-driven badge disappeared for the whole deferred
+// window and returned only when the heavy render committed. Under virtualization
+// the row itself may legitimately unmount when it leaves the visible range; the
+// contract is that the relay-backed badge state is still present when the row
+// remounts.
+test("thread summary badge survives an older-history prepend across virtual remount", async ({
   page,
 }, testInfo) => {
   testInfo.setTimeout(60_000);
@@ -1864,24 +1894,24 @@ test("thread summary badge survives an older-history prepend without unmounting"
     () => typeof window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__ === "function",
   );
 
-  // Seed a reply to the NEWEST deep-history row before the channel is opened:
+  // Seed a reply to the newest deep-history row before the channel is opened:
   // no live subscription exists yet, so the reply lands only in the mock store.
   // It is not a top-level timeline row, so the badge rendered for #599 is
   // driven purely by the relay-shaped 39005 page summary — exactly the state
   // the deferred-pass entry fallback used to drop.
-  await page.evaluate(() => {
+  const headId = "mock-deep-history-599";
+  await page.evaluate((parentEventId) => {
     window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
       channelName: "deep-history",
       content: "summary-only reply",
-      parentEventId: "mock-deep-history-599",
+      parentEventId,
     });
-  });
+  }, headId);
 
   await page.getByTestId("channel-deep-history").click();
   await expect(page.getByTestId("chat-title")).toHaveText("deep-history");
   const timeline = page.getByTestId("message-timeline");
-  const badgeSelector =
-    '[data-testid="message-thread-summary"][data-thread-head-id="mock-deep-history-599"]';
+  const badgeSelector = `[data-testid="message-thread-summary"][data-thread-head-id="${headId}"]`;
   await expect(timeline.locator(badgeSelector)).toBeVisible();
 
   const oldestRenderedIndex = () =>
@@ -1895,26 +1925,24 @@ test("thread summary badge survives an older-history prepend without unmounting"
       }
       return Number.isFinite(min) ? min : null;
     });
+  const newestRenderedIndex = () =>
+    timeline.evaluate((element) => {
+      let max = Number.NEGATIVE_INFINITY;
+      for (const row of (
+        element as HTMLDivElement
+      ).querySelectorAll<HTMLElement>("[data-message-id]")) {
+        const match = row.textContent?.match(/#(\d+)/);
+        if (match) max = Math.max(max, Number(match[1]));
+      }
+      return Number.isFinite(max) ? max : null;
+    });
+
   const oldestBefore = await oldestRenderedIndex();
   expect(oldestBefore).not.toBeNull();
 
-  // Arm the observer AFTER the initial window has settled, so the only
-  // mutations it sees are the prepend landing and any (buggy) badge unmount.
-  await timeline.evaluate((element, selector) => {
-    const scroller = element as HTMLDivElement;
-    const win = window as typeof window & {
-      __SUMMARY_FLASH_PROBE__?: { missingCommits: number };
-    };
-    const probe = { missingCommits: 0 };
-    win.__SUMMARY_FLASH_PROBE__ = probe;
-    new MutationObserver(() => {
-      if (!scroller.querySelector(selector)) {
-        probe.missingCommits += 1;
-      }
-    }).observe(scroller, { childList: true, subtree: true });
-  }, badgeSelector);
-
-  // Scroll back until a genuinely older page has landed.
+  // Scroll back until a genuinely older page has landed and the #599 row is
+  // allowed to leave the virtual window. This proves the next badge assertion is
+  // exercising remount/state restoration, not an always-mounted range pin.
   await timeline.hover();
   await expect
     .poll(
@@ -1927,16 +1955,17 @@ test("thread summary badge survives an older-history prepend without unmounting"
     )
     .toBeLessThan(oldestBefore ?? Number.POSITIVE_INFINITY);
 
-  // The badge row must have stayed mounted through every DOM commit of the
-  // prepend — zero commits observed it missing — and still be attached now.
-  const missingCommits = await page.evaluate(
-    () =>
-      (
-        window as typeof window & {
-          __SUMMARY_FLASH_PROBE__?: { missingCommits: number };
-        }
-      ).__SUMMARY_FLASH_PROBE__?.missingCommits,
+  await expect
+    .poll(async () => await newestRenderedIndex(), { timeout: 8_000 })
+    .toBeLessThan(599);
+  await expect(timeline.locator(`[data-message-id="${headId}"]`)).toHaveCount(
+    0,
   );
-  expect(missingCommits).toBe(0);
+
+  await scrollTimelineUntilMessageVisible(page, headId, {
+    direction: "down",
+    steps: 120,
+  });
+  await expect(timeline.locator(badgeSelector)).toBeVisible();
   await expect(timeline.locator(badgeSelector)).toHaveCount(1);
 });

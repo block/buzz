@@ -1,12 +1,16 @@
+import { useVirtualizer } from "@tanstack/react-virtual";
 import * as React from "react";
 
 import { formatDayHeading } from "@/features/messages/lib/dateFormatters";
-import { timelineRowReserveStyle } from "@/features/messages/lib/rowHeightEstimate";
+import {
+  estimateTimelineItemHeight,
+  timelineRowReserveStyle,
+} from "@/features/messages/lib/rowHeightEstimate";
 import {
   buildTimelineDayGroups,
   buildTimelineItems,
   getTimelineItemKey,
-  type TimelineNonDayItem,
+  type TimelineItem,
 } from "@/features/messages/lib/timelineItems";
 import { THREAD_REPLY_ROW_MARGIN_INLINE_REM } from "@/features/messages/lib/threadTreeLayout";
 import { buildMainTimelineEntries } from "@/features/messages/lib/threadPanel";
@@ -46,9 +50,10 @@ type TimelineMessageListProps = {
   /** Hoisted main-timeline entries (computed once in ChannelPane). Falls back
    *  to deriving them here when omitted (e.g. the deferred-render pass). */
   mainEntries?: MainTimelineEntry[];
-  /** Relay thread summaries keyed by thread root id. Keeps badge rows alive on
-   *  the deferred-render fallback — replies usually are not local timeline
-   *  rows, so without the relay map every summary row unmounts mid-scrollback. */
+  /** Relay thread summaries keyed by thread root id. Keeps relay-backed badge
+   *  state available to the deferred-render fallback. Replies usually are not
+   *  local timeline rows, so virtualized summary rows may unmount; the badge
+   *  must still be reconstructed correctly when the row remounts. */
   threadSummaries?: ReadonlyMap<string, ChannelWindowThreadSummary>;
   messages: TimelineMessage[];
   onDelete?: (message: TimelineMessage) => void;
@@ -81,7 +86,36 @@ type TimelineMessageListProps = {
   searchQuery?: string;
   /** Per-thread unread counts keyed by thread root id. */
   threadUnreadCounts?: ReadonlyMap<string, number>;
+  /** Scroll container owned by MessageTimeline. Required for the TanStack spike. */
+  scrollContainerRef?: React.RefObject<HTMLElement | null>;
+  /** Enabled only for Lane B experiments; default path keeps current non-virtualized DOM. */
+  useTanStackVirtualization?: boolean;
+  /** Receives the current TanStack range-model adapter for offscreen message jumps. */
+  onTanStackVirtualizer?: (
+    virtualizer: TimelineTanStackVirtualizerHandle | null,
+  ) => void;
+  /** Bumped after TanStack range changes so pending offscreen target retries can re-check mounted DOM. */
+  onTanStackRangeChanged?: () => void;
 };
+
+export type TimelineTanStackScrollTarget = {
+  top: number;
+  topOffset: number;
+};
+
+export type TimelineTanStackVirtualizerHandle = {
+  getScrollTargetForMessage: (
+    messageId: string,
+  ) => TimelineTanStackScrollTarget | null;
+  getStartOffsetForMessage: (messageId: string) => number | null;
+};
+
+type TimelineVirtualRow = {
+  item: TimelineItem;
+  dayLabel: string | null;
+};
+
+const TIMELINE_VIRTUALIZER_OVERSCAN = 8;
 
 export const TimelineMessageList = React.memo(function TimelineMessageList({
   agentPubkeys,
@@ -113,6 +147,10 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
   searchMatchingMessageIds,
   searchQuery,
   threadUnreadCounts,
+  scrollContainerRef,
+  useTanStackVirtualization = false,
+  onTanStackVirtualizer,
+  onTanStackRangeChanged,
   unfollowThreadById,
 }: TimelineMessageListProps) {
   const entries = React.useMemo(
@@ -179,8 +217,10 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
   );
 
   const renderItem = React.useCallback(
-    (item: TimelineNonDayItem) => {
+    (item: TimelineItem) => {
       switch (item.kind) {
+        case "day-divider":
+          return <DayDivider label={formatDayHeading(item.headingTimestamp)} />;
         case "unread-divider":
           return <UnreadDivider />;
         case "system":
@@ -254,6 +294,127 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
       videoReviewContextById,
     ],
   );
+
+  const virtualRows = React.useMemo<TimelineVirtualRow[]>(() => {
+    let currentDayLabel: string | null = null;
+    return itemsResult.items.map((item) => {
+      if (item.kind === "day-divider") {
+        currentDayLabel = formatDayHeading(item.headingTimestamp);
+      }
+      return { item, dayLabel: currentDayLabel };
+    });
+  }, [itemsResult.items]);
+
+  const messageIndexById = React.useMemo(() => {
+    const indexById = new Map<string, number>();
+    virtualRows.forEach((row, index) => {
+      if (row.item.kind === "message" || row.item.kind === "system") {
+        indexById.set(row.item.entry.message.id, index);
+      }
+    });
+    return indexById;
+  }, [virtualRows]);
+
+  const getScrollElement = React.useCallback(
+    () => scrollContainerRef?.current ?? null,
+    [scrollContainerRef],
+  );
+
+  const tanStackVirtualizer = useVirtualizer({
+    count: virtualRows.length,
+    enabled: useTanStackVirtualization && scrollContainerRef !== undefined,
+    estimateSize: (index) =>
+      estimateTimelineItemHeight(virtualRows[index].item),
+    getItemKey: (index) => getTimelineItemKey(virtualRows[index].item),
+    getScrollElement,
+    overscan: TIMELINE_VIRTUALIZER_OVERSCAN,
+    onChange: onTanStackRangeChanged,
+    scrollToFn: () => {
+      // Lane B thesis: TanStack supplies range math only. All scroll writes
+      // must stay in the existing timeline anchoring adapter for this spike.
+      // If TanStack cannot function with a no-op scroll writer, this lane is a
+      // fast honest kill rather than another two-writer integration.
+    },
+  });
+
+  const tanStackHandle = React.useMemo<TimelineTanStackVirtualizerHandle>(
+    () => ({
+      getScrollTargetForMessage: (messageId) => {
+        const index = messageIndexById.get(messageId);
+        if (index === undefined) return null;
+        const offsetInfo = tanStackVirtualizer.getOffsetForIndex(
+          index,
+          "center",
+        );
+        if (!offsetInfo) return null;
+        const [top] = offsetInfo;
+        const container = scrollContainerRef?.current;
+        const item = tanStackVirtualizer
+          .getVirtualItems()
+          .find((virtualItem) => virtualItem.index === index);
+        const size =
+          item?.size ?? estimateTimelineItemHeight(virtualRows[index].item);
+        const topOffset = container ? (container.clientHeight - size) / 2 : 0;
+        return { top, topOffset };
+      },
+      getStartOffsetForMessage: (messageId) => {
+        const index = messageIndexById.get(messageId);
+        if (index === undefined) return null;
+        const offsetInfo = tanStackVirtualizer.getOffsetForIndex(
+          index,
+          "start",
+        );
+        if (!offsetInfo) return null;
+        return offsetInfo[0];
+      },
+    }),
+    [messageIndexById, scrollContainerRef, tanStackVirtualizer, virtualRows],
+  );
+
+  React.useLayoutEffect(() => {
+    if (!useTanStackVirtualization) {
+      onTanStackVirtualizer?.(null);
+      return;
+    }
+    onTanStackVirtualizer?.(tanStackHandle);
+    return () => onTanStackVirtualizer?.(null);
+  }, [onTanStackVirtualizer, tanStackHandle, useTanStackVirtualization]);
+
+  if (useTanStackVirtualization && scrollContainerRef) {
+    const virtualItems = tanStackVirtualizer.getVirtualItems();
+    return (
+      <div
+        className="relative w-full"
+        style={{ height: `${tanStackVirtualizer.getTotalSize()}px` }}
+      >
+        {virtualItems.map((virtualItem) => {
+          const row = virtualRows[virtualItem.index];
+          return (
+            <div
+              data-index={virtualItem.index}
+              data-day-label={row.dayLabel ?? undefined}
+              key={virtualItem.key}
+              ref={tanStackVirtualizer.measureElement}
+              style={{
+                position: "absolute",
+                top: 0,
+                left: 0,
+                width: "100%",
+                transform: `translateY(${virtualItem.start}px)`,
+              }}
+            >
+              <div
+                className="timeline-row-cv"
+                style={timelineRowReserveStyle(row.item)}
+              >
+                {renderItem(row.item)}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    );
+  }
 
   return (
     <div className="flex flex-col">

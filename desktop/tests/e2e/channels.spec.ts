@@ -888,26 +888,52 @@ test("scrollable channel with recent messages hides intro actions until top", as
   await page.getByTestId("create-channel-submit").click();
   await expect(page.getByTestId("chat-title")).toHaveText(channelName);
 
-  for (const message of messages) {
-    await page.getByTestId("message-input").fill(message);
-    await page.getByTestId("send-message").click();
-    await expect(page.getByTestId("message-timeline")).toContainText(message);
-  }
+  const timeline = page.getByTestId("message-timeline");
+  const isOutsideTimelineViewport = async (testId: string) =>
+    timeline.evaluate((element, targetTestId) => {
+      const target = element.querySelector<HTMLElement>(
+        `[data-testid="${targetTestId}"]`,
+      );
+      if (!target) return true;
+      const scrollerRect = (element as HTMLElement).getBoundingClientRect();
+      const targetRect = target.getBoundingClientRect();
+      return (
+        targetRect.bottom <= scrollerRect.top ||
+        targetRect.top >= scrollerRect.bottom
+      );
+    }, testId);
+
+  await waitForMockLiveSubscription(page, channelName);
+  await page.evaluate(
+    ({ channelName: targetChannelName, messages: seededMessages }) => {
+      const baseCreatedAt =
+        Math.floor(Date.now() / 1000) - seededMessages.length;
+      seededMessages.forEach((content, index) => {
+        window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+          channelName: targetChannelName,
+          content,
+          createdAt: baseCreatedAt + index,
+        });
+      });
+    },
+    { channelName, messages },
+  );
+  await expect(timeline).toContainText(messages[messages.length - 1]);
 
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
   await page.getByTestId(`channel-${channelName}`).click();
   await expect(page.getByTestId("chat-title")).toHaveText(channelName);
-  await expect(page.getByTestId("message-channel-intro")).toHaveCount(0);
-  await expect(
-    page.getByTestId("channel-intro-action-create-agent"),
-  ).toHaveCount(0);
-  await expect(page.getByTestId("channel-intro-action-add-people")).toHaveCount(
-    0,
-  );
-  await expect(page.getByTestId("message-timeline")).toContainText(
-    messages[messages.length - 1],
-  );
+  await expect(timeline).toContainText(messages[messages.length - 1]);
+  await expect
+    .poll(() => isOutsideTimelineViewport("message-channel-intro"))
+    .toBe(true);
+  await expect
+    .poll(() => isOutsideTimelineViewport("channel-intro-action-create-agent"))
+    .toBe(true);
+  await expect
+    .poll(() => isOutsideTimelineViewport("channel-intro-action-add-people"))
+    .toBe(true);
 
   await page.getByTestId("message-timeline").evaluate((element) => {
     element.scrollTop = 0;

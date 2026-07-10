@@ -13,6 +13,7 @@ import type { MainTimelineEntry } from "@/features/messages/lib/threadPanel";
 import type { ChannelWindowThreadSummary } from "@/features/messages/lib/channelWindowStore";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type { ChannelType } from "@/shared/api/types";
+import { useFeatureEnabled } from "@/shared/features";
 import { cn } from "@/shared/lib/cn";
 import { channelChrome } from "@/shared/layout/chromeLayout";
 import { Spinner } from "@/shared/ui/spinner";
@@ -20,7 +21,10 @@ import { TooltipProvider } from "@/shared/ui/tooltip";
 import { UnreadPill, unreadCountLabel } from "@/shared/ui/UnreadPill";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 import { TimelineSkeleton, useTimelineSkeletonRows } from "./TimelineSkeleton";
-import { TimelineMessageList } from "./TimelineMessageList";
+import {
+  TimelineMessageList,
+  type TimelineTanStackVirtualizerHandle,
+} from "./TimelineMessageList";
 import { useAnchoredScroll } from "./useAnchoredScroll";
 import { useLoadOlderOnScroll } from "./useLoadOlderOnScroll";
 
@@ -39,7 +43,8 @@ type MessageTimelineProps = {
   messages: TimelineMessage[];
   mainEntries?: MainTimelineEntry[];
   /** Relay thread summaries (root id → summary) for the deferred-pass entry
-   *  fallback, so badge rows survive while a scrollback page commits. */
+   *  fallback, so relay-backed badges are reconstructed correctly if their
+   *  summary rows unmount/remount during scrollback virtualization. */
   threadSummaries?: ReadonlyMap<string, ChannelWindowThreadSummary>;
   directMessageIntro?: {
     displayName: string;
@@ -236,6 +241,13 @@ const MessageTimelineBase = React.forwardRef<
     liveCount: messages.length,
   });
   const showTimelineSkeleton = timelineBodySurface === "skeleton";
+  const useTanStackTimeline = useFeatureEnabled("tanstackTimeline");
+  const [tanStackRenderVersion, bumpTanStackRenderVersion] = React.useReducer(
+    (version: number) => version + 1,
+    0,
+  );
+  const tanStackVirtualizerRef =
+    React.useRef<TimelineTanStackVirtualizerHandle | null>(null);
 
   const {
     highlightedMessageId,
@@ -253,6 +265,20 @@ const MessageTimelineBase = React.forwardRef<
     onTargetReached,
     scrollContainerRef,
     targetMessageId,
+    virtualScrollTargetForMessage: useTanStackTimeline
+      ? (messageId: string) =>
+          tanStackVirtualizerRef.current?.getScrollTargetForMessage(
+            messageId,
+          ) ?? null
+      : undefined,
+    virtualStartOffsetForMessage: useTanStackTimeline
+      ? (messageId: string) =>
+          tanStackVirtualizerRef.current?.getStartOffsetForMessage(messageId) ??
+          null
+      : undefined,
+    virtualizerRenderVersion: useTanStackTimeline
+      ? tanStackRenderVersion
+      : undefined,
   });
 
   const timelineIntroSurface = selectTimelineIntroSurface({
@@ -282,8 +308,10 @@ const MessageTimelineBase = React.forwardRef<
     [scrollToBottomOnNextUpdate],
   );
 
-  // Jump-to-message is purely DOM-based now: all loaded rows are mounted, so
-  // `scrollToMessage` always finds the target row. No virtualizer convergence.
+  // Jump-to-message first tries the existing DOM path; with the TanStack list,
+  // offscreen rows are intentionally unmounted, so fall back to TanStack's
+  // measured/estimated index model and still keep the scroll write centralized
+  // in the timeline anchoring adapter.
   const jumpToMessage = React.useCallback(
     (messageId: string, options?: { behavior?: ScrollBehavior }) => {
       return scrollToMessage(messageId, { highlight: true, ...options });
@@ -612,6 +640,12 @@ const MessageTimelineBase = React.forwardRef<
                     searchActiveMessageId={searchActiveMessageId}
                     searchMatchingMessageIds={searchMatchingMessageIds}
                     searchQuery={searchQuery}
+                    scrollContainerRef={scrollContainerRef}
+                    useTanStackVirtualization={useTanStackTimeline}
+                    onTanStackVirtualizer={(virtualizer) => {
+                      tanStackVirtualizerRef.current = virtualizer;
+                    }}
+                    onTanStackRangeChanged={bumpTanStackRenderVersion}
                     threadUnreadCounts={threadUnreadCounts}
                     unfollowThreadById={unfollowThreadById}
                   />

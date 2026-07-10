@@ -18,7 +18,12 @@ const TRUE_BOTTOM_THRESHOLD_PX = 1;
 
 type AnchorState =
   | { kind: "at-bottom" }
-  | { kind: "message"; messageId: string; topOffset: number };
+  | {
+      kind: "message";
+      messageId: string;
+      topOffset: number;
+      virtualStartOffset?: number;
+    };
 
 type BottomSettleContainer = Pick<
   HTMLDivElement,
@@ -31,6 +36,11 @@ export function settleProgrammaticBottomPin(
   container.scrollTo({ top: container.scrollHeight, behavior: "auto" });
   return isAtTrueBottom(container);
 }
+
+type VirtualScrollTarget = {
+  top: number;
+  topOffset: number;
+};
 
 type UseAnchoredScrollOptions = {
   /** Scroll container. Owned by the parent so external refs still compose. */
@@ -49,6 +59,13 @@ type UseAnchoredScrollOptions = {
   /** When set, scroll to and highlight this message on mount and on change. */
   targetMessageId?: string | null;
   onTargetReached?: (messageId: string) => void;
+  /** Optional virtualizer index-model lookup for loaded rows that are not currently mounted. */
+  virtualScrollTargetForMessage?: (
+    messageId: string,
+  ) => VirtualScrollTarget | null;
+  virtualStartOffsetForMessage?: (messageId: string) => number | null;
+  /** Bumps when a virtualized range changes, so phase-1 offscreen target jumps can retry once the row mounts. */
+  virtualizerRenderVersion?: number;
 };
 
 type UseAnchoredScrollResult = {
@@ -150,6 +167,9 @@ export function useAnchoredScroll({
 
   targetMessageId = null,
   onTargetReached,
+  virtualScrollTargetForMessage,
+  virtualStartOffsetForMessage,
+  virtualizerRenderVersion = 0,
 }: UseAnchoredScrollOptions): UseAnchoredScrollResult {
   // Anchor lives in a ref because it must survive renders and is updated
   // both on scroll (commit-time read) and in the layout effect (post-render
@@ -167,6 +187,8 @@ export function useAnchoredScroll({
   const prevMessageCountRef = React.useRef(0);
   const prevMessagesRef = React.useRef<Array<{ id: string }>>([]);
   const handledTargetIdRef = React.useRef<string | null>(null);
+  const pendingVirtualTargetIdRef = React.useRef<string | null>(null);
+  const pendingVirtualAnchorRestoreRef = React.useRef(false);
   const highlightTimeoutRef = React.useRef<number | null>(null);
   // Tracks a pending rAF queued by pinToBottomOnMount so it can be cancelled
   // on channel switch (the channelId reset effect clears it).
@@ -181,6 +203,19 @@ export function useAnchoredScroll({
   // ignores transient gaps and keeps chasing the floor. A `ref`, not state — the
   // guard runs on a native scroll event, outside React's render cycle.
   const settlingRef = React.useRef(false);
+
+  const virtualScrollTargetForMessageRef = React.useRef(
+    virtualScrollTargetForMessage,
+  );
+  React.useLayoutEffect(() => {
+    virtualScrollTargetForMessageRef.current = virtualScrollTargetForMessage;
+  }, [virtualScrollTargetForMessage]);
+  const virtualStartOffsetForMessageRef = React.useRef(
+    virtualStartOffsetForMessage,
+  );
+  React.useLayoutEffect(() => {
+    virtualStartOffsetForMessageRef.current = virtualStartOffsetForMessage;
+  }, [virtualStartOffsetForMessage]);
 
   // Reset everything when the channel changes — the layout effect that runs
   // immediately after this reset is responsible for either jumping to bottom
@@ -197,6 +232,8 @@ export function useAnchoredScroll({
     prevMessageCountRef.current = 0;
     prevMessagesRef.current = [];
     handledTargetIdRef.current = null;
+    pendingVirtualTargetIdRef.current = null;
+    pendingVirtualAnchorRestoreRef.current = false;
     forceBottomOnNextAppendRef.current = false;
     settlingRef.current = false;
     if (highlightTimeoutRef.current !== null) {
@@ -236,6 +273,19 @@ export function useAnchoredScroll({
     forceBottomOnNextAppendRef.current = true;
   }, []);
 
+  const highlightMessage = React.useCallback((messageId: string) => {
+    if (highlightTimeoutRef.current !== null) {
+      window.clearTimeout(highlightTimeoutRef.current);
+    }
+    setHighlightedMessageId(messageId);
+    highlightTimeoutRef.current = window.setTimeout(() => {
+      setHighlightedMessageId((current) =>
+        current === messageId ? null : current,
+      );
+      highlightTimeoutRef.current = null;
+    }, 2_000);
+  }, []);
+
   const scrollToMessageImperative = React.useCallback(
     (
       messageId: string,
@@ -244,9 +294,46 @@ export function useAnchoredScroll({
       const container = scrollContainerRef.current;
       if (!container) return false;
       const el = container.querySelector<HTMLElement>(
-        `[data-message-id="${messageId}"]`,
+        `[data-message-id="${CSS.escape(messageId)}"]`,
       );
-      if (!el) return false;
+      if (!el) {
+        const virtualTarget =
+          virtualScrollTargetForMessageRef.current?.(messageId);
+        if (!virtualTarget) return false;
+        const maxScrollTop = Math.max(
+          0,
+          container.scrollHeight - container.clientHeight,
+        );
+        const targetScrollTop = Math.min(
+          maxScrollTop,
+          Math.max(0, virtualTarget.top),
+        );
+        container.scrollTo({
+          top: targetScrollTop,
+          behavior: options.behavior ?? "auto",
+        });
+        anchorRef.current = {
+          kind: "message",
+          messageId,
+          topOffset: virtualTarget.topOffset,
+          virtualStartOffset:
+            virtualStartOffsetForMessageRef.current?.(messageId) ?? undefined,
+        };
+        setIsAtBottom(maxScrollTop - targetScrollTop <= AT_BOTTOM_THRESHOLD_PX);
+
+        pendingVirtualTargetIdRef.current = messageId;
+        // This is only the phase-1 realization request for a virtualized row:
+        // the target is not in the DOM yet, so centering must retry once the
+        // range changes and the row mounts. Start the 2s highlight clock only
+        // on that later DOM-visible path; otherwise it can fade before the row
+        // has settled in view.
+        return false;
+      }
+
+      pendingVirtualTargetIdRef.current =
+        pendingVirtualTargetIdRef.current === messageId
+          ? null
+          : pendingVirtualTargetIdRef.current;
 
       const rect = el.getBoundingClientRect();
       const containerRect = container.getBoundingClientRect();
@@ -280,20 +367,11 @@ export function useAnchoredScroll({
       setIsAtBottom(maxScrollTop - targetScrollTop <= AT_BOTTOM_THRESHOLD_PX);
 
       if (options.highlight) {
-        if (highlightTimeoutRef.current !== null) {
-          window.clearTimeout(highlightTimeoutRef.current);
-        }
-        setHighlightedMessageId(messageId);
-        highlightTimeoutRef.current = window.setTimeout(() => {
-          setHighlightedMessageId((current) =>
-            current === messageId ? null : current,
-          );
-          highlightTimeoutRef.current = null;
-        }, 2_000);
+        highlightMessage(messageId);
       }
       return true;
     },
-    [scrollContainerRef],
+    [highlightMessage, scrollContainerRef],
   );
 
   // Scroll handler: recompute anchor + bottom state from the current
@@ -314,7 +392,17 @@ export function useAnchoredScroll({
         return;
       }
     }
-    anchorRef.current = computeAnchor(container);
+    if (pendingVirtualAnchorRestoreRef.current) {
+      pendingVirtualAnchorRestoreRef.current = false;
+      return;
+    }
+    const anchor = computeAnchor(container);
+    if (anchor.kind === "message") {
+      anchor.virtualStartOffset =
+        virtualStartOffsetForMessageRef.current?.(anchor.messageId) ??
+        undefined;
+    }
+    anchorRef.current = anchor;
     const atBottom = anchorRef.current.kind === "at-bottom";
     setIsAtBottom((prev) => (prev === atBottom ? prev : atBottom));
     if (atBottom) {
@@ -329,6 +417,7 @@ export function useAnchoredScroll({
   // loaded row stays in the DOM, so there is no JS message-anchor restore.
   // ---------------------------------------------------------------------------
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: virtualizerRenderVersion is an intentional trigger, not a closure read — TanStack range/measurement commits can change virtualStartOffsetForMessageRef.current values without changing messages, and anchor restoration must retry against the updated virtual range.
   React.useLayoutEffect(() => {
     const container = scrollContainerRef.current;
     if (!container) return;
@@ -355,7 +444,7 @@ export function useAnchoredScroll({
         if (scrollToMessageImperative(targetMessageId, { highlight: true })) {
           handledTargetIdRef.current = targetMessageId;
           onTargetReached?.(targetMessageId);
-        } else {
+        } else if (pendingVirtualTargetIdRef.current !== targetMessageId) {
           pinToBottomOnMount();
         }
       } else {
@@ -420,6 +509,10 @@ export function useAnchoredScroll({
       // observer's promise callback) because the prepended rows commit on a
       // deferred snapshot a few frames later, so the row's true position is only
       // known here.
+      const virtualAnchorTopBefore =
+        anchor.virtualStartOffset ??
+        virtualStartOffsetForMessageRef.current?.(anchor.messageId) ??
+        null;
       const row = container.querySelector<HTMLElement>(
         `[data-message-id="${CSS.escape(anchor.messageId)}"]`,
       );
@@ -430,6 +523,26 @@ export function useAnchoredScroll({
         const drift = currentTopOffset - anchor.topOffset;
         if (Math.abs(drift) > 0.5) {
           container.scrollBy(0, drift);
+        }
+        anchorRef.current = {
+          ...anchor,
+          virtualStartOffset:
+            virtualStartOffsetForMessageRef.current?.(anchor.messageId) ??
+            anchor.virtualStartOffset,
+        };
+      } else if (virtualAnchorTopBefore !== null) {
+        const virtualAnchorTopAfter =
+          virtualStartOffsetForMessageRef.current?.(anchor.messageId) ?? null;
+        if (virtualAnchorTopAfter !== null) {
+          const drift = virtualAnchorTopAfter - virtualAnchorTopBefore;
+          if (Math.abs(drift) > 0.5) {
+            container.scrollBy(0, drift);
+            pendingVirtualAnchorRestoreRef.current = true;
+          }
+          anchorRef.current = {
+            ...anchor,
+            virtualStartOffset: virtualAnchorTopAfter,
+          };
         }
       }
       if (!isPrepend) {
@@ -449,6 +562,7 @@ export function useAnchoredScroll({
     scrollToBottomImperative,
     scrollToMessageImperative,
     targetMessageId,
+    virtualizerRenderVersion,
   ]);
 
   // ---------------------------------------------------------------------------
@@ -466,9 +580,49 @@ export function useAnchoredScroll({
     const observer = new ResizeObserver(() => {
       const container = scrollContainerRef.current;
       if (!container) return;
-      if (anchorRef.current.kind === "at-bottom") {
+      const anchor = anchorRef.current;
+      if (anchor.kind === "at-bottom") {
         container.scrollTo({ top: container.scrollHeight, behavior: "auto" });
+        return;
       }
+
+      const virtualAnchorTopBefore =
+        anchor.virtualStartOffset ??
+        virtualStartOffsetForMessageRef.current?.(anchor.messageId) ??
+        null;
+      const row = container.querySelector<HTMLElement>(
+        `[data-message-id="${CSS.escape(anchor.messageId)}"]`,
+      );
+      if (row) {
+        const currentTopOffset =
+          row.getBoundingClientRect().top -
+          container.getBoundingClientRect().top;
+        const drift = currentTopOffset - anchor.topOffset;
+        if (Math.abs(drift) > 0.5) {
+          container.scrollBy(0, drift);
+        }
+        anchorRef.current = {
+          ...anchor,
+          virtualStartOffset:
+            virtualStartOffsetForMessageRef.current?.(anchor.messageId) ??
+            anchor.virtualStartOffset,
+        };
+        pendingVirtualAnchorRestoreRef.current = false;
+        return;
+      }
+
+      if (virtualAnchorTopBefore === null) return;
+      const virtualAnchorTopAfter =
+        virtualStartOffsetForMessageRef.current?.(anchor.messageId) ?? null;
+      if (virtualAnchorTopAfter === null) return;
+      const drift = virtualAnchorTopAfter - virtualAnchorTopBefore;
+      if (Math.abs(drift) > 0.5) {
+        container.scrollBy(0, drift);
+      }
+      anchorRef.current = {
+        ...anchor,
+        virtualStartOffset: virtualAnchorTopAfter,
+      };
     });
     observer.observe(content);
     return () => observer.disconnect();
@@ -495,19 +649,11 @@ export function useAnchoredScroll({
     if (handledTargetIdRef.current === targetMessageId || isLoading) return;
     if (!hasInitializedRef.current) return; // initial-mount path will handle.
 
-    const container = scrollContainerRef.current;
-    if (!container) return;
-    const el = container.querySelector<HTMLElement>(
-      `[data-message-id="${targetMessageId}"]`,
-    );
-    if (!el) {
-      // Row not in the DOM yet. A cold deep-link target is fetched by id and
-      // spliced into `messages` a render or two later; this effect re-runs on
-      // each `messages` commit and retries until the row exists.
-      return;
-    }
+    const foundTarget = scrollToMessageImperative(targetMessageId, {
+      highlight: true,
+    });
+    if (!foundTarget) return;
     handledTargetIdRef.current = targetMessageId;
-    scrollToMessageImperative(targetMessageId, { highlight: true });
     onTargetReached?.(targetMessageId);
   }, [
     isLoading,
@@ -516,6 +662,7 @@ export function useAnchoredScroll({
     scrollContainerRef,
     scrollToMessageImperative,
     targetMessageId,
+    virtualizerRenderVersion,
   ]);
 
   React.useEffect(() => {

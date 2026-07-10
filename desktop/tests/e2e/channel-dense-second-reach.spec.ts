@@ -145,6 +145,42 @@ test("dense single second beyond one window page is fully reachable via composit
     }
   }
 
+  // Once older pages are loaded, real virtualization only mounts a moving
+  // window. Paging to the top proves the keyset cursor can fetch past the dense
+  // second; now sweep back down through the loaded virtual range and accumulate
+  // each dense row as it mounts. This preserves the behavioral contract (the
+  // dense block is actually reachable through the timeline) without relying on
+  // the old non-virtualized implementation detail that every loaded row stayed
+  // in the DOM at once.
+  if (seen.size < DENSE_COUNT) {
+    let sawDenseOnDownSweep = false;
+    let missedDenseAfterSeen = 0;
+    for (let step = 0; step < 1_000 && seen.size < DENSE_COUNT; step += 1) {
+      const before = seen.size;
+      await collectRendered();
+      const visibleDenseCount = (await renderedDenseIndices()).length;
+      if (visibleDenseCount > 0) {
+        sawDenseOnDownSweep = true;
+        missedDenseAfterSeen = 0;
+      } else if (sawDenseOnDownSweep && before === seen.size) {
+        missedDenseAfterSeen += 1;
+        if (missedDenseAfterSeen > 24) break;
+      }
+
+      await timeline.evaluate((element) => {
+        const scroller = element as HTMLDivElement;
+        const delta = Math.max(120, Math.floor(scroller.clientHeight * 0.25));
+        scroller.scrollTop = Math.min(
+          scroller.scrollHeight,
+          scroller.scrollTop + delta,
+        );
+        scroller.dispatchEvent(new Event("scroll", { bubbles: true }));
+      });
+      await page.waitForTimeout(20);
+    }
+    await collectRendered();
+  }
+
   // (a) Keyset paging actually engaged — the head load always issues
   // `get_channel_window` with a null cursor, so require at least one
   // continuation request carrying a composite cursor.
@@ -158,11 +194,13 @@ test("dense single second beyond one window page is fully reachable via composit
   );
   expect(continuationRequests).toBeGreaterThan(0);
 
-  // (b) Reachability parity: the union of paged dense rows crosses far past
-  // one window page — impossible behind a bare-`until` wall, where paging
-  // stalls on the newest slice of the dense second. We assert the vast
-  // majority became reachable; virtualization can drop a few transient rows
-  // between scroll settles, so we allow a small slack rather than demanding
-  // an exact 450.
-  expect(seen.size).toBeGreaterThan(DENSE_COUNT * 0.9);
+  // (b) Reachability parity: the union of paged dense rows must include every
+  // expected dense row id. That keeps this a behavior-preserving contract test
+  // under virtualization: sweeping the virtual window is allowed, but a
+  // virtualizer that never mounts missing dense rows still fails.
+  const missingDenseIndices = Array.from(
+    { length: DENSE_COUNT },
+    (_, index) => index,
+  ).filter((index) => !seen.has(index));
+  expect(missingDenseIndices).toEqual([]);
 });

@@ -164,16 +164,19 @@ const DIVIDER_HEIGHT = 32;
  * near its true height instead of snapping the scroll position. `auto` keeps
  * refining once the row paints.
  */
+export function estimateTimelineItemHeight(item: TimelineItem): number {
+  return item.kind === "message"
+    ? estimateRowHeight(item.entry.message, {
+        isContinuation: item.isContinuation,
+      }) + (item.isFollowedByContinuation ? 0 : MESSAGE_ITEM_BOTTOM_PADDING)
+    : item.kind === "system"
+      ? estimateRowHeight(item.entry.message)
+      : DIVIDER_HEIGHT;
+}
+
 export function timelineRowReserveStyle(
   item: TimelineItem,
 ): React.CSSProperties {
-  const height =
-    item.kind === "message"
-      ? estimateRowHeight(item.entry.message, {
-          isContinuation: item.isContinuation,
-        }) + (item.isFollowedByContinuation ? 0 : MESSAGE_ITEM_BOTTOM_PADDING)
-      : item.kind === "system"
-        ? estimateRowHeight(item.entry.message)
-        : DIVIDER_HEIGHT;
+  const height = estimateTimelineItemHeight(item);
   return { containIntrinsicSize: `auto ${height}px` };
 }
