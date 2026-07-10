@@ -111,20 +111,61 @@ pub async fn create_persona(
     .map_err(|e| format!("spawn_blocking failed: {e}"))?
 }
 
+/// Return value of the `update_persona` command. Uses flatten so all
+/// `PersonaRecord` fields appear at the top level of the JSON response,
+/// alongside the optional `writeback_warning` field — backward-compatible with
+/// callers that already destructure a raw persona object.
+#[derive(Debug, serde::Serialize)]
+pub struct UpdatePersonaResult {
+    #[serde(flatten)]
+    persona: PersonaRecord,
+    /// Non-`None` when the pack `.persona.md` write-back failed (non-fatal).
+    /// The in-app edit was already saved; the frontend can use this to surface
+    /// a "pack file diverged" indicator so the user knows to check the file.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub writeback_warning: Option<String>,
+}
+
+/// Propagate a persona definition's display_name rename to linked agent instances.
+/// Only instances whose current `name` equals `old_display_name` are updated;
+/// pool-named instances (e.g. "Birch", "Compass") keep their individualised name.
+/// Updates both `record.name` (relay display name) and `record.display_name`.
+/// Returns `true` if any record was modified.
+fn propagate_persona_name_rename(
+    records: &mut [ManagedAgentRecord],
+    persona_id: &str,
+    old_display_name: &str,
+    new_display_name: &str,
+) -> bool {
+    let mut any_changed = false;
+    for record in records.iter_mut() {
+        if record.persona_id.as_deref() != Some(persona_id) {
+            continue;
+        }
+        if record.name != old_display_name {
+            continue; // pool-named instance — keep its individualised name
+        }
+        record.name = new_display_name.to_string();
+        record.display_name = Some(new_display_name.to_string());
+        any_changed = true;
+    }
+    any_changed
+}
+
 #[tauri::command]
 pub async fn update_persona(
     input: UpdatePersonaRequest,
     app: AppHandle,
-) -> Result<PersonaRecord, String> {
+) -> Result<UpdatePersonaResult, String> {
     use tauri::Manager;
 
     /// Profile sync params collected under the store lock for async relay publish.
     type ProfileSyncParams = Vec<(nostr::Keys, String, String, Option<String>, Option<String>)>;
 
     // Phase 1: synchronous save (persona record + linked agent avatar updates)
-    let (result, profile_sync_params) = tokio::task::spawn_blocking({
+    let (result, profile_sync_params, writeback_warning) = tokio::task::spawn_blocking({
         let app = app.clone();
-        move || -> Result<(PersonaRecord, ProfileSyncParams), String> {
+        move || -> Result<(PersonaRecord, ProfileSyncParams, Option<String>), String> {
             let state = app.state::<AppState>();
             let display_name = trim_required(&input.display_name, "Display name")?;
             // Do not trim system_prompt: `compose_prompt` appends pack_instructions
@@ -151,8 +192,10 @@ pub async fn update_persona(
                 return Err("Built-in agents cannot be edited.".to_string());
             }
 
-            // Track whether avatar changed so we can sync linked agents.
+            // Track what changed so we can propagate to linked agent records.
             let avatar_changed = persona.avatar_url != avatar_url;
+            let name_changed = persona.display_name != display_name;
+            let old_display_name = persona.display_name.clone();
 
             persona.display_name = display_name;
             persona.avatar_url = avatar_url;
@@ -182,14 +225,14 @@ pub async fn update_persona(
             // For pack-backed personas, also write the edit back to the source
             // `.persona.md` so that launch sync (which reads the file) becomes a
             // no-op rather than overwriting the record we just saved.
-            write_back_persona_md(&app, &result);
+            let writeback_warning = write_back_persona_md(&app, &result);
 
             retain_persona_pending(&app, &state, &result);
             try_regenerate_nest(&app);
 
-            // If the avatar changed, propagate to linked agent records and
-            // collect relay profile sync params for the async phase.
-            let sync_params: ProfileSyncParams = if avatar_changed {
+            // If the avatar or display_name changed, propagate to linked agent
+            // records and collect relay profile sync params for the async phase.
+            let sync_params: ProfileSyncParams = if avatar_changed || name_changed {
                 let mut records = load_managed_agents(&app)?;
                 let mut params: ProfileSyncParams = Vec::new();
                 let mut agents_modified = false;
@@ -199,34 +242,57 @@ pub async fn update_persona(
                     if record.persona_id.as_deref() != Some(&result.id) {
                         continue;
                     }
-                    // Update the persisted avatar so reconciliation on next
-                    // start agrees with what we're about to publish.
-                    // When the persona avatar is cleared, fall back to the
-                    // command-default icon so the record never stores `None`
-                    // (which reconcile_agent_profile treats as "un-migrated").
-                    let effective_cmd = effective_agent_command(
-                        record.persona_id.as_deref(),
-                        std::slice::from_ref(&result),
-                        record.agent_command_override.as_deref(),
-                    );
-                    record.avatar_url = result
-                        .avatar_url
-                        .clone()
-                        .or_else(|| managed_agent_avatar_url(&effective_cmd));
-                    agents_modified = true;
+                    let mut record_changed = false;
 
-                    if let Ok(agent_keys) = nostr::Keys::parse(&record.private_key_nsec) {
-                        let relay_url = crate::relay::effective_agent_relay_url(
-                            &record.relay_url,
-                            &workspace_relay,
+                    // Propagate display_name rename to instances that still carry
+                    // the old definition display_name. Pool-named instances keep
+                    // their individualised name — only those whose `name` equals
+                    // the old definition name are updated.
+                    if name_changed {
+                        let renamed = propagate_persona_name_rename(
+                            std::slice::from_mut(record),
+                            &result.id,
+                            &old_display_name,
+                            &result.display_name,
                         );
-                        params.push((
-                            agent_keys,
-                            relay_url,
-                            record.name.clone(),
-                            record.avatar_url.clone(),
-                            record.auth_tag.clone(),
-                        ));
+                        if renamed {
+                            record_changed = true;
+                        }
+                    }
+
+                    if avatar_changed {
+                        // Update the persisted avatar so reconciliation on next
+                        // start agrees with what we're about to publish.
+                        // When the persona avatar is cleared, fall back to the
+                        // command-default icon so the record never stores `None`
+                        // (which reconcile_agent_profile treats as "un-migrated").
+                        let effective_cmd = effective_agent_command(
+                            record.persona_id.as_deref(),
+                            std::slice::from_ref(&result),
+                            record.agent_command_override.as_deref(),
+                        );
+                        record.avatar_url = result
+                            .avatar_url
+                            .clone()
+                            .or_else(|| managed_agent_avatar_url(&effective_cmd));
+                        record_changed = true;
+                    }
+
+                    if record_changed {
+                        agents_modified = true;
+                        if let Ok(agent_keys) = nostr::Keys::parse(&record.private_key_nsec) {
+                            let relay_url = crate::relay::effective_agent_relay_url(
+                                &record.relay_url,
+                                &workspace_relay,
+                            );
+                            params.push((
+                                agent_keys,
+                                relay_url,
+                                record.name.clone(),
+                                record.avatar_url.clone(),
+                                record.auth_tag.clone(),
+                            ));
+                        }
                     }
                 }
 
@@ -239,16 +305,16 @@ pub async fn update_persona(
                 Vec::new()
             };
 
-            Ok((result, sync_params))
+            Ok((result, sync_params, writeback_warning))
         }
     })
     .await
     .map_err(|e| format!("spawn_blocking failed: {e}"))??;
 
-    // Phase 2: await relay profile sync for linked agents whose avatar was
-    // just updated. We await (rather than fire-and-forget) so the frontend
-    // cache invalidation that follows the mutation settlement sees the fresh
-    // relay profile. Best-effort — failures are logged, not surfaced.
+    // Phase 2: await relay profile sync for linked agents whose avatar or
+    // display_name was just updated. We await (rather than fire-and-forget)
+    // so the frontend cache invalidation that follows the mutation settlement
+    // sees the fresh relay profile. Best-effort — failures are logged, not surfaced.
     if !profile_sync_params.is_empty() {
         let state = app.state::<AppState>();
         for (agent_keys, relay_url, display_name, avatar_url, auth_tag) in profile_sync_params {
@@ -262,14 +328,15 @@ pub async fn update_persona(
             )
             .await
             {
-                eprintln!(
-                    "buzz-desktop: relay profile sync failed after persona avatar update: {e}"
-                );
+                eprintln!("buzz-desktop: relay profile sync failed after persona update: {e}");
             }
         }
     }
 
-    Ok(result)
+    Ok(UpdatePersonaResult {
+        persona: result,
+        writeback_warning,
+    })
 }
 
 mod writeback;
@@ -277,6 +344,8 @@ use writeback::write_back_persona_md;
 
 #[cfg(test)]
 mod inbound_tests;
+#[cfg(test)]
+mod name_propagation_tests;
 
 #[tauri::command]
 pub async fn delete_persona(id: String, app: AppHandle) -> Result<(), String> {
