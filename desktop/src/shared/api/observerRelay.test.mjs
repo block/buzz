@@ -30,3 +30,33 @@ test("subscribeToAgentObserverFrames requests a replay-capable limit with a sinc
 
   mock.reset();
 });
+
+// Regression guard: the live subscription lookback MUST be at least 300s so
+// session/prompt frames from long-running active turns are captured when the
+// desktop subscribes mid-turn. This test mocks Date.now() to a fixed epoch and
+// asserts the computed `since` equals exactly (now/1000 - 300). It MUST fail
+// if OBSERVER_LIVE_LOOKBACK_SECS is reverted to 0 or less than 300.
+test("subscribeToAgentObserverFrames since is at least 300s before now", () => {
+  // Pin Date.now() to a known value so the assertion is deterministic.
+  const FIXED_NOW_MS = 1_750_000_000_000;
+  const expectedSince = Math.floor(FIXED_NOW_MS / 1_000) - 300;
+
+  mock.method(Date, "now", () => FIXED_NOW_MS);
+
+  const calls = [];
+  mock.method(relayClient, "subscribeLive", (filter) => {
+    calls.push(filter);
+    return () => {};
+  });
+
+  subscribeToAgentObserverFrames("owner-pubkey", () => {});
+
+  assert.equal(calls.length, 1);
+  assert.equal(
+    calls[0].since,
+    expectedSince,
+    `observer since must be now-300s (${expectedSince}) so session/prompt frames from long-running turns are captured — zero lookback recreates the lifecycle-only turn bug`,
+  );
+
+  mock.reset();
+});

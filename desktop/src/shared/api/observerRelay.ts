@@ -5,11 +5,11 @@ import { relayClient } from "./relayClient";
 
 // How far back (in seconds) the live subscription looks on connect/reconnect.
 // session/prompt is the first frame emitted at turn start, so it can arrive
-// before the desktop subscribes when the agent was already running. A 60s
-// lookback ensures those frames are included. The archive backfill deduplicates
-// any frames that also arrive via the local Tauri archive, so there is no
-// double-processing risk.
-const OBSERVER_LIVE_LOOKBACK_SECS = 60;
+// before the desktop subscribes when the agent was already running. A 5-minute
+// lookback covers long-running active turns (coding/review turns routinely
+// exceed 60s). The archive backfill deduplicates any frames already in the
+// local Tauri archive, so there is no double-processing risk.
+const OBSERVER_LIVE_LOOKBACK_SECS = 300;
 
 export function subscribeToAgentObserverFrames(
   ownerPubkey: string,
