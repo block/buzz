@@ -372,19 +372,16 @@ export function AgentInstanceEditDialog({
   // provider is empty (global-provider-only configs must surface required keys).
   // Pass globalEnvVars so keys satisfied by global config are excluded from
   // requiredEnvKeys and do not block Save (display and gate agree).
-  const {
-    requiredEnvKeys: requiredEnvKeysRaw,
-    fileSatisfiedEnvKeys,
-    requiredEnvKeyMissing,
-  } = useRequiredCredentialState({
-    open,
-    prospectiveRuntimeId,
-    provider: inheritedSubmission.provider ?? "",
-    globalProvider: globalConfig.provider ?? "",
-    envVars: inheritedSubmission.envVars,
-    globalEnvVars: globalConfig.env_vars,
-    setShowAdvancedFields,
-  });
+  const { requiredEnvKeys, fileSatisfiedEnvKeys, requiredEnvKeyMissing } =
+    useRequiredCredentialState({
+      open,
+      prospectiveRuntimeId,
+      provider: inheritedSubmission.provider ?? "",
+      globalProvider: globalConfig.provider ?? "",
+      envVars: inheritedSubmission.envVars,
+      globalEnvVars: globalConfig.env_vars,
+      setShowAdvancedFields,
+    });
 
   const {
     discoveredModelOptions,
@@ -398,16 +395,6 @@ export function AgentInstanceEditDialog({
     provider: providerForDiscovery,
     selectedRuntime,
   });
-
-  // Filter out keys already satisfied by global defaults — they should not
-  // render as amber required rows; they appear as inherited hints instead.
-  const requiredEnvKeys = React.useMemo(
-    () =>
-      requiredEnvKeysRaw.filter(
-        (key) => (globalConfig.env_vars[key] ?? "").length === 0,
-      ),
-    [requiredEnvKeysRaw, globalConfig.env_vars],
-  );
 
   // Merge global + persona env for the inherited display hint in EnvVarsEditor
   // (inside EditAgentAdvancedFields). Persona wins over global on collision

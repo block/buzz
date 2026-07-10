@@ -1152,9 +1152,11 @@ export async function getBakedBuildEnvKeys(): Promise<string[]> {
 /**
  * A single baked build env entry.
  *
- * The value is already masked in Rust for secret keys (keys whose names match
- * the secret heuristic: `_API_KEY`, `_TOKEN`, `_SECRET`, `_PASSWORD`).
- * Non-secret values are shown as-is. Empty-value keys are filtered out.
+ * The value is already masked in Rust for secret keys (keys not in the
+ * explicit safe-to-reveal allowlist: `BUZZ_AGENT_PROVIDER`, `BUZZ_AGENT_MODEL`,
+ * `DATABRICKS_HOST`, `DATABRICKS_MODEL`). Non-allowlisted keys have their
+ * values replaced with `••••••`. Non-secret values are shown as-is.
+ * Empty-value keys are filtered out.
  */
 export type BakedEnvEntry = {
   key: string;

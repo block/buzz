@@ -30,9 +30,12 @@ import { AgentModelField } from "@/features/agents/ui/personaProviderModelFields
 import { usePersonaModelDiscovery } from "@/features/agents/ui/usePersonaModelDiscovery";
 import {
   BUZZ_AGENT_THINKING_EFFORT,
-  BUZZ_AGENT_THINKING_EFFORT_VALUES,
   getProviderEffortConfig,
 } from "@/features/agents/ui/buzzAgentConfig";
+import {
+  EffortSelectField,
+  useEffortAutoClear,
+} from "@/features/agents/ui/buzzAgentModelTuningFields";
 import { Button } from "@/shared/ui/button";
 import { Input } from "@/shared/ui/input";
 import { SettingsSectionHeader } from "./SettingsSectionHeader";
@@ -125,25 +128,24 @@ export function GlobalAgentConfigSettingsCard() {
 
   // Auto-clear BUZZ_AGENT_THINKING_EFFORT when provider/model change makes the
   // current value invalid. Prevents stale invalid values from being saved.
-  // config.env_vars is intentionally excluded from deps — including it would re-run
-  // on every env-var edit and could cause loops; effect fires on provider/model changes.
-  // biome-ignore lint/correctness/useExhaustiveDependencies: see comment above
-  React.useEffect(() => {
-    const currentEffort = config.env_vars[BUZZ_AGENT_THINKING_EFFORT];
-    if (!currentEffort) return;
-    const { validValues } = getProviderEffortConfig(
-      config.provider ?? "",
-      config.model ?? "",
-    );
-    if (!(validValues as readonly string[]).includes(currentEffort)) {
+  const currentEffortForAutoClear =
+    config.env_vars[BUZZ_AGENT_THINKING_EFFORT] ?? "";
+  const { validValues: effortValidForAutoClear } = getProviderEffortConfig(
+    config.provider ?? "",
+    config.model ?? "",
+  );
+  useEffortAutoClear({
+    currentEffort: currentEffortForAutoClear,
+    effortValid: effortValidForAutoClear,
+    onClear: () => {
       setConfig((prev) => {
         const nextEnvVars = { ...prev.env_vars };
         delete nextEnvVars[BUZZ_AGENT_THINKING_EFFORT];
         return { ...prev, env_vars: nextEnvVars };
       });
       setDirty(true);
-    }
-  }, [config.provider, config.model]);
+    },
+  });
 
   function handleEnvVarsChange(next: Record<string, string>) {
     setConfig((prev) => ({ ...prev, env_vars: next }));
@@ -203,7 +205,10 @@ export function GlobalAgentConfigSettingsCard() {
     }
   }
 
-  const providerOptions = getPersonaProviderOptions(providerValue, "goose");
+  const providerOptions = getPersonaProviderOptions(
+    providerValue,
+    "buzz-agent",
+  );
   const providerSelectValue = isCustomProvider
     ? CUSTOM_PROVIDER_DROPDOWN_VALUE
     : providerValue || AUTO_PROVIDER_DROPDOWN_VALUE;
@@ -287,66 +292,47 @@ export function GlobalAgentConfigSettingsCard() {
           </div>
 
           {/* Thinking / Effort — tier-1 dropdown, single editable surface for BUZZ_AGENT_THINKING_EFFORT */}
-          {(() => {
-            const effortConfig = getProviderEffortConfig(
-              config.provider ?? "",
-              config.model ?? "",
-            );
-            const { validValues: effortValid, defaultValue: effortDefault } =
-              effortConfig;
-            const currentEffort =
-              config.env_vars[BUZZ_AGENT_THINKING_EFFORT] ?? "";
-            return (
-              <div className="space-y-1.5 p-3">
-                <label
-                  className="text-sm font-medium"
-                  htmlFor="global-agent-thinking-effort"
-                >
-                  Default thinking / effort
-                </label>
-                <select
-                  className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-2 text-sm shadow-xs"
-                  data-testid="global-agent-thinking-effort-select"
-                  id="global-agent-thinking-effort"
-                  onChange={(event) => {
-                    const value = event.target.value;
-                    setConfig((prev) => {
-                      const nextEnvVars = { ...prev.env_vars };
-                      if (value === "") {
-                        delete nextEnvVars[BUZZ_AGENT_THINKING_EFFORT];
-                      } else {
-                        nextEnvVars[BUZZ_AGENT_THINKING_EFFORT] = value;
-                      }
-                      return { ...prev, env_vars: nextEnvVars };
-                    });
-                    setDirty(true);
-                    setSaveState("idle");
-                    setSaveError(null);
-                  }}
-                  value={currentEffort}
-                >
-                  <option value="">
-                    {effortDefault === null ? "Inherit (default)" : "Inherit"}
-                  </option>
-                  {BUZZ_AGENT_THINKING_EFFORT_VALUES.map((v) => {
-                    const isValid = (effortValid as readonly string[]).includes(
-                      v,
-                    );
-                    const isDefault = v === effortDefault;
-                    return (
-                      <option disabled={!isValid} key={v} value={v}>
-                        {isDefault ? `${v} (default)` : v}
-                      </option>
-                    );
-                  })}
-                </select>
-                <p className="text-xs text-muted-foreground">
-                  Default thinking/reasoning effort applied to all agents.
-                  Per-agent settings override this.
-                </p>
-              </div>
-            );
-          })()}
+          <div className="p-3">
+            {(() => {
+              const { validValues: effortValid, defaultValue: effortDefault } =
+                getProviderEffortConfig(
+                  config.provider ?? "",
+                  config.model ?? "",
+                );
+              const currentEffort =
+                config.env_vars[BUZZ_AGENT_THINKING_EFFORT] ?? "";
+              return (
+                <>
+                  <EffortSelectField
+                    currentEffort={currentEffort}
+                    effortDefault={effortDefault}
+                    effortValid={effortValid}
+                    htmlFor="global-agent-thinking-effort"
+                    label="Default thinking / effort"
+                    onChange={(value) => {
+                      setConfig((prev) => {
+                        const nextEnvVars = { ...prev.env_vars };
+                        if (value === "") {
+                          delete nextEnvVars[BUZZ_AGENT_THINKING_EFFORT];
+                        } else {
+                          nextEnvVars[BUZZ_AGENT_THINKING_EFFORT] = value;
+                        }
+                        return { ...prev, env_vars: nextEnvVars };
+                      });
+                      setDirty(true);
+                      setSaveState("idle");
+                      setSaveError(null);
+                    }}
+                    testId="global-agent-thinking-effort-select"
+                  />
+                  <p className="text-xs text-muted-foreground mt-1.5">
+                    Default thinking/reasoning effort applied to all agents.
+                    Per-agent settings override this.
+                  </p>
+                </>
+              );
+            })()}
+          </div>
 
           {/* Env vars */}
           <div className="p-3">

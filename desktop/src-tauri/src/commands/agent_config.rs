@@ -288,7 +288,7 @@ fn is_safe_to_reveal(key: &str) -> bool {
 }
 
 /// Expose the baked build env to the frontend with values shown, but any
-/// key matching the secret heuristic has its value replaced by `••••••`.
+/// key not in the safe-to-reveal allowlist has its value replaced by `••••••`.
 ///
 /// Provider and model arrive as `BUZZ_AGENT_PROVIDER` / `BUZZ_AGENT_MODEL`
 /// keys in `baked_build_env()` and are included in the returned list like any

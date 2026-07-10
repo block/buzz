@@ -2366,4 +2366,177 @@ mod tests {
             );
         }
     }
+
+    // ---- effort-table fixture sync guard ----------------------------------------
+    //
+    // Loads `effortTable.fixture.json` (the single source of truth shared with
+    // the TS test in `buzzAgentConfig.test.mjs`) and verifies that this Rust
+    // implementation produces the same valid-effort-value sets and default values
+    // as the TS `getProviderEffortConfig` function.
+    //
+    // Drift (a new model family added to one side but not the other) fails CI here
+    // before it can silently diverge in production.
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    /// Compute the valid effort values for a provider/model pair, mirroring
+    /// `getProviderEffortConfig` in `buzzAgentConfig.ts`.
+    ///
+    /// Returns `(valid_values, default_value)` where `default_value` is `None`
+    /// for Anthropic manual-budget models (TS `defaultValue: null`), otherwise
+    /// `Some("medium")` or `Some("high")`.
+    fn valid_effort_values_for_provider_model(
+        provider: &str,
+        model: &str,
+    ) -> (Vec<&'static str>, Option<&'static str>) {
+        const ALL_7: &[&str] = &["none", "minimal", "low", "medium", "high", "xhigh", "max"];
+        const ALL_EXCEPT_MAX: &[&str] = &["none", "minimal", "low", "medium", "high", "xhigh"];
+        const ANTHROPIC_XHIGH: &[&str] = &["low", "medium", "high", "xhigh", "max"];
+        const ANTHROPIC_NO_XHIGH: &[&str] = &["low", "medium", "high", "max"];
+        const ANTHROPIC_MANUAL: &[&str] = &["low", "medium", "high"];
+        const GPT5_PRO: &[&str] = &["high"];
+        const GPT5_1: &[&str] = &["none", "low", "medium", "high"];
+
+        let p = provider.to_ascii_lowercase();
+        // Strip databricks- prefix before model matching, mirroring TS.
+        let raw_model = model.trim();
+        let stripped = if raw_model.to_ascii_lowercase().starts_with("databricks-") {
+            &raw_model["databricks-".len()..]
+        } else {
+            raw_model
+        };
+        let m = stripped.to_ascii_lowercase();
+
+        fn anthropic_result(
+            m: &str,
+        ) -> (Vec<&'static str>, Option<&'static str>) {
+            if m.starts_with("claude-3") || m == "claude-opus-4-5" {
+                return (ANTHROPIC_MANUAL.to_vec(), None);
+            }
+            // xhigh-capable adaptive families.
+            if m.starts_with("claude-opus-4-7")
+                || m.starts_with("claude-opus-4-8")
+                || m.starts_with("claude-sonnet-5")
+                || m.starts_with("claude-fable-5")
+                || m.starts_with("claude-mythos-5")
+            {
+                return (ANTHROPIC_XHIGH.to_vec(), Some("high"));
+            }
+            // Non-xhigh adaptive families.
+            if m.starts_with("claude-opus-4-6")
+                || m.starts_with("claude-sonnet-4-6")
+                || m.starts_with("claude-mythos-preview")
+            {
+                return (ANTHROPIC_NO_XHIGH.to_vec(), Some("high"));
+            }
+            // Unknown Anthropic model — assume full adaptive.
+            (ANTHROPIC_XHIGH.to_vec(), Some("high"))
+        }
+
+        fn openai_result(m: &str) -> (Vec<&'static str>, Option<&'static str>) {
+            if let Some(values) = openai_efforts_for_model(m) {
+                let strs: Vec<&'static str> = values.iter().map(|e| e.openai_effort_str()).collect();
+                // Determine default from the family.
+                let default_val = if strs == GPT5_PRO {
+                    Some("high")
+                } else if strs == GPT5_1 {
+                    Some("none")
+                } else {
+                    Some("medium")
+                };
+                (strs, default_val)
+            } else {
+                // Unknown model → all-except-max, default medium.
+                (ALL_EXCEPT_MAX.to_vec(), Some("medium"))
+            }
+        }
+
+        if p == "anthropic" {
+            return anthropic_result(&m);
+        }
+        if p == "openai" {
+            return openai_result(&m);
+        }
+        if p == "databricks_v2" {
+            if m.starts_with("claude-") {
+                return anthropic_result(&m);
+            }
+            // gpt-5 family check mirrors gpt5FamilyModel in TS.
+            let is_gpt5 = gpt5_token_matches(&m, "gpt-5-pro")
+                || gpt5_token_matches(&m, "gpt5-pro")
+                || gpt5_token_matches(&m, "gpt-5.5")
+                || gpt5_token_matches(&m, "gpt5.5")
+                || gpt5_token_matches(&m, "gpt-5.4")
+                || gpt5_token_matches(&m, "gpt5.4")
+                || gpt5_token_matches(&m, "gpt-5.1")
+                || gpt5_token_matches(&m, "gpt5.1")
+                || gpt5_base_matches(&m, "gpt-5")
+                || gpt5_base_matches(&m, "gpt5");
+            if is_gpt5 {
+                return openai_result(&m);
+            }
+            if !m.is_empty() {
+                // Concrete non-claude, non-gpt5: MLflow path → all-except-max.
+                return openai_result(&m);
+            }
+            // Blank model: route unknown, all-7.
+            return (ALL_7.to_vec(), Some("medium"));
+        }
+        if p == "databricks" {
+            return openai_result(&m);
+        }
+        // openai-compat, unknown, empty → all-7, default medium.
+        (ALL_7.to_vec(), Some("medium"))
+    }
+
+    #[derive(serde::Deserialize)]
+    struct FixtureEntry {
+        note: Option<String>,
+        provider: String,
+        model: String,
+        #[serde(rename = "validValues")]
+        valid_values: Vec<String>,
+        #[serde(rename = "defaultValue")]
+        default_value: Option<String>,
+    }
+
+    #[test]
+    fn effort_table_fixture_matches_rust_implementation() {
+        let fixture_json = include_str!(
+            "../../../desktop/src/features/agents/ui/effortTable.fixture.json"
+        );
+        let entries: Vec<FixtureEntry> =
+            serde_json::from_str(fixture_json).expect("fixture must be valid JSON");
+
+        assert!(
+            !entries.is_empty(),
+            "fixture must contain at least one entry"
+        );
+
+        for entry in &entries {
+            let label = entry
+                .note
+                .as_deref()
+                .unwrap_or_else(|| entry.model.as_str());
+            let (valid_values, default_value) =
+                valid_effort_values_for_provider_model(&entry.provider, &entry.model);
+
+            let expected: Vec<&str> = entry.valid_values.iter().map(String::as_str).collect();
+            assert_eq!(
+                valid_values, expected,
+                "validValues mismatch for fixture entry \"{label}\" \
+                 (provider={}, model={}): Rust side has {valid_values:?}, \
+                 fixture expects {expected:?}",
+                entry.provider, entry.model,
+            );
+
+            let expected_default: Option<&str> = entry.default_value.as_deref();
+            assert_eq!(
+                default_value, expected_default,
+                "defaultValue mismatch for fixture entry \"{label}\" \
+                 (provider={}, model={}): Rust side has {default_value:?}, \
+                 fixture expects {expected_default:?}",
+                entry.provider, entry.model,
+            );
+        }
+    }
 }

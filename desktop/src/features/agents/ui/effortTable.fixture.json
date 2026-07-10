@@ -1,0 +1,191 @@
+[
+  {
+    "note": "Anthropic manual-budget: claude-3 family",
+    "provider": "anthropic",
+    "model": "claude-3-7-sonnet-20250219",
+    "validValues": ["low", "medium", "high"],
+    "defaultValue": null
+  },
+  {
+    "note": "Anthropic manual-budget: claude-opus-4-5",
+    "provider": "anthropic",
+    "model": "claude-opus-4-5",
+    "validValues": ["low", "medium", "high"],
+    "defaultValue": null
+  },
+  {
+    "note": "Anthropic adaptive xhigh-capable: claude-opus-4-7",
+    "provider": "anthropic",
+    "model": "claude-opus-4-7",
+    "validValues": ["low", "medium", "high", "xhigh", "max"],
+    "defaultValue": "high"
+  },
+  {
+    "note": "Anthropic adaptive xhigh-capable: claude-opus-4-8",
+    "provider": "anthropic",
+    "model": "claude-opus-4-8",
+    "validValues": ["low", "medium", "high", "xhigh", "max"],
+    "defaultValue": "high"
+  },
+  {
+    "note": "Anthropic adaptive xhigh-capable: claude-sonnet-5",
+    "provider": "anthropic",
+    "model": "claude-sonnet-5-20260101",
+    "validValues": ["low", "medium", "high", "xhigh", "max"],
+    "defaultValue": "high"
+  },
+  {
+    "note": "Anthropic adaptive xhigh-capable: claude-fable-5",
+    "provider": "anthropic",
+    "model": "claude-fable-5",
+    "validValues": ["low", "medium", "high", "xhigh", "max"],
+    "defaultValue": "high"
+  },
+  {
+    "note": "Anthropic adaptive xhigh-capable: claude-mythos-5",
+    "provider": "anthropic",
+    "model": "claude-mythos-5",
+    "validValues": ["low", "medium", "high", "xhigh", "max"],
+    "defaultValue": "high"
+  },
+  {
+    "note": "Anthropic adaptive no-xhigh: claude-opus-4-6",
+    "provider": "anthropic",
+    "model": "claude-opus-4-6",
+    "validValues": ["low", "medium", "high", "max"],
+    "defaultValue": "high"
+  },
+  {
+    "note": "Anthropic adaptive no-xhigh: claude-sonnet-4-6",
+    "provider": "anthropic",
+    "model": "claude-sonnet-4-6",
+    "validValues": ["low", "medium", "high", "max"],
+    "defaultValue": "high"
+  },
+  {
+    "note": "Anthropic adaptive no-xhigh: claude-mythos-preview",
+    "provider": "anthropic",
+    "model": "claude-mythos-preview",
+    "validValues": ["low", "medium", "high", "max"],
+    "defaultValue": "high"
+  },
+  {
+    "note": "Anthropic unknown model: blank — assume full adaptive",
+    "provider": "anthropic",
+    "model": "",
+    "validValues": ["low", "medium", "high", "xhigh", "max"],
+    "defaultValue": "high"
+  },
+  {
+    "note": "OpenAI gpt-5-pro: high only",
+    "provider": "openai",
+    "model": "gpt-5-pro",
+    "validValues": ["high"],
+    "defaultValue": "high"
+  },
+  {
+    "note": "OpenAI gpt-5.5: none/low/medium/high/xhigh",
+    "provider": "openai",
+    "model": "gpt-5.5",
+    "validValues": ["none", "low", "medium", "high", "xhigh"],
+    "defaultValue": "medium"
+  },
+  {
+    "note": "OpenAI gpt-5.4: same table as gpt-5.5",
+    "provider": "openai",
+    "model": "gpt-5.4",
+    "validValues": ["none", "low", "medium", "high", "xhigh"],
+    "defaultValue": "medium"
+  },
+  {
+    "note": "OpenAI gpt-5.1: none/low/medium/high",
+    "provider": "openai",
+    "model": "gpt-5.1",
+    "validValues": ["none", "low", "medium", "high"],
+    "defaultValue": "none"
+  },
+  {
+    "note": "OpenAI gpt-5 base: minimal/low/medium/high",
+    "provider": "openai",
+    "model": "gpt-5",
+    "validValues": ["minimal", "low", "medium", "high"],
+    "defaultValue": "medium"
+  },
+  {
+    "note": "OpenAI unknown model (gpt-4o): all-except-max",
+    "provider": "openai",
+    "model": "gpt-4o",
+    "validValues": ["none", "minimal", "low", "medium", "high", "xhigh"],
+    "defaultValue": "medium"
+  },
+  {
+    "note": "OpenAI empty model: all-except-max",
+    "provider": "openai",
+    "model": "",
+    "validValues": ["none", "minimal", "low", "medium", "high", "xhigh"],
+    "defaultValue": "medium"
+  },
+  {
+    "note": "DatabricksV2 claude route (claude-opus-4-7): xhigh-capable anthropic table",
+    "provider": "databricks_v2",
+    "model": "claude-opus-4-7",
+    "validValues": ["low", "medium", "high", "xhigh", "max"],
+    "defaultValue": "high"
+  },
+  {
+    "note": "DatabricksV2 claude route with databricks- prefix stripped",
+    "provider": "databricks_v2",
+    "model": "databricks-claude-opus-4-7",
+    "validValues": ["low", "medium", "high", "xhigh", "max"],
+    "defaultValue": "high"
+  },
+  {
+    "note": "DatabricksV2 gpt-5.4 route: OpenAI gpt-5.5/5.4 table",
+    "provider": "databricks_v2",
+    "model": "gpt-5.4",
+    "validValues": ["none", "low", "medium", "high", "xhigh"],
+    "defaultValue": "medium"
+  },
+  {
+    "note": "DatabricksV2 gpt-5.1 with databricks- prefix: OpenAI gpt-5.1 table",
+    "provider": "databricks_v2",
+    "model": "databricks-gpt-5.1",
+    "validValues": ["none", "low", "medium", "high"],
+    "defaultValue": "none"
+  },
+  {
+    "note": "DatabricksV2 concrete non-claude non-gpt5 (llama-3): MLflow path, all-except-max",
+    "provider": "databricks_v2",
+    "model": "llama-3",
+    "validValues": ["none", "minimal", "low", "medium", "high", "xhigh"],
+    "defaultValue": "medium"
+  },
+  {
+    "note": "DatabricksV2 blank model: route unknown, all-7",
+    "provider": "databricks_v2",
+    "model": "",
+    "validValues": ["none", "minimal", "low", "medium", "high", "xhigh", "max"],
+    "defaultValue": "medium"
+  },
+  {
+    "note": "databricks v1: routes like openai unknown, all-except-max",
+    "provider": "databricks",
+    "model": "",
+    "validValues": ["none", "minimal", "low", "medium", "high", "xhigh"],
+    "defaultValue": "medium"
+  },
+  {
+    "note": "openai-compat: all-7 with medium default",
+    "provider": "openai-compat",
+    "model": "",
+    "validValues": ["none", "minimal", "low", "medium", "high", "xhigh", "max"],
+    "defaultValue": "medium"
+  },
+  {
+    "note": "empty provider: all-7 with medium default",
+    "provider": "",
+    "model": "",
+    "validValues": ["none", "minimal", "low", "medium", "high", "xhigh", "max"],
+    "defaultValue": "medium"
+  }
+]

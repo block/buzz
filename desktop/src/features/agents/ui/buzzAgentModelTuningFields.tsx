@@ -17,6 +17,111 @@ import {
   getProviderEffortConfig,
 } from "./buzzAgentConfig";
 
+/**
+ * Shared effort-select dropdown for the `BUZZ_AGENT_THINKING_EFFORT` env var.
+ *
+ * Used by both `BuzzAgentModelTuningFields` (per-agent/persona dialogs) and
+ * `GlobalAgentConfigSettingsCard` (global defaults settings card) to ensure a
+ * single rendering surface for this control.
+ *
+ * The caller is responsible for the auto-clear `useEffect` that resets the
+ * value when the provider/model changes — `useEffortAutoClear` is provided for
+ * that purpose. Keeping the effect in the parent avoids coupling the dropdown
+ * render to its parent's state update mechanism (which differs between the
+ * env-vars map pattern and the `setConfig` pattern).
+ */
+export function EffortSelectField({
+  currentEffort,
+  effortDefault,
+  effortValid,
+  htmlFor,
+  inheritedEffort,
+  label,
+  onChange,
+  testId,
+}: {
+  /** Current effort value from env vars ("" = inherit). */
+  currentEffort: string;
+  /** Semantic default for this provider/model combination, or null for manual-budget. */
+  effortDefault: string | null;
+  /** Valid effort values for this provider/model. */
+  effortValid: ReadonlyArray<string>;
+  /** `htmlFor` attribute for the label element. */
+  htmlFor: string;
+  /** Inherited effort from a higher-precedence layer (shown in the Inherit option label). */
+  inheritedEffort?: string;
+  /** Label text for the dropdown. */
+  label: string;
+  /** Called when the user selects a new value. */
+  onChange: (value: string) => void;
+  /** data-testid attribute for the select element. */
+  testId: string;
+}) {
+  return (
+    <div className="space-y-1.5">
+      <label className="text-sm font-medium" htmlFor={htmlFor}>
+        {label}
+      </label>
+      <select
+        className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-2 text-sm shadow-xs"
+        data-testid={testId}
+        id={htmlFor}
+        onChange={(event) => onChange(event.target.value)}
+        value={currentEffort}
+      >
+        <option value="">
+          {inheritedEffort
+            ? `Inherit (${inheritedEffort})`
+            : effortDefault === null
+              ? "Inherit (default)"
+              : "Inherit"}
+        </option>
+        {BUZZ_AGENT_THINKING_EFFORT_VALUES.map((v) => {
+          const isValid = (effortValid as readonly string[]).includes(v);
+          const isDefault = v === effortDefault;
+          return (
+            <option disabled={!isValid} key={v} value={v}>
+              {isDefault ? `${v} (default)` : v}
+            </option>
+          );
+        })}
+      </select>
+    </div>
+  );
+}
+
+/**
+ * Auto-clear hook: resets `BUZZ_AGENT_THINKING_EFFORT` to "" (Inherit) when
+ * the current value is no longer valid for the new provider/model.
+ *
+ * Call this in any component that renders `EffortSelectField` and owns the
+ * effort env var. `onClear` is called with `""` when the current value is
+ * invalid; it should delete the key from the env-vars map.
+ *
+ * `onClear` is intentionally excluded from deps — it is recreated each render
+ * and adding it would cause infinite loops; the effect fires on valid-set
+ * changes only.
+ */
+export function useEffortAutoClear({
+  currentEffort,
+  effortValid,
+  onClear,
+}: {
+  currentEffort: string;
+  effortValid: ReadonlyArray<string>;
+  onClear: () => void;
+}): void {
+  // biome-ignore lint/correctness/useExhaustiveDependencies: onClear excluded intentionally — see comment above
+  React.useEffect(() => {
+    if (
+      currentEffort !== "" &&
+      !(effortValid as readonly string[]).includes(currentEffort)
+    ) {
+      onClear();
+    }
+  }, [effortValid, currentEffort]);
+}
+
 export function BuzzAgentModelTuningFields({
   envVars,
   inheritedEnvVars,
@@ -36,20 +141,13 @@ export function BuzzAgentModelTuningFields({
   const { validValues: effortValid, defaultValue: effortDefault } =
     effortConfig;
 
-  // Auto-clear effort to Inherit when provider/model change makes the current
-  // value invalid. Prevents stale invalid values from being silently saved.
-  // onEnvVarChange is intentionally excluded from deps — it's recreated each render
-  // and adding it would cause infinite loops; the effect fires on valid-set changes.
   const currentEffort = envVars[BUZZ_AGENT_THINKING_EFFORT] ?? "";
-  // biome-ignore lint/correctness/useExhaustiveDependencies: see comment above
-  React.useEffect(() => {
-    if (
-      currentEffort !== "" &&
-      !(effortValid as readonly string[]).includes(currentEffort)
-    ) {
-      onEnvVarChange(BUZZ_AGENT_THINKING_EFFORT, "");
-    }
-  }, [effortValid, currentEffort]);
+  useEffortAutoClear({
+    currentEffort,
+    effortValid,
+    onClear: () => onEnvVarChange(BUZZ_AGENT_THINKING_EFFORT, ""),
+  });
+
   return (
     <div className="space-y-4">
       <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
@@ -59,35 +157,18 @@ export function BuzzAgentModelTuningFields({
       <div className="grid gap-4 md:grid-cols-2">
         {/* Thinking / Effort */}
         <div className="space-y-1.5">
-          <label className="text-sm font-medium" htmlFor="ba-thinking-effort">
-            Thinking / Effort
-          </label>
-          <select
-            className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-2 text-sm shadow-xs"
-            data-testid="ba-thinking-effort-select"
-            id="ba-thinking-effort"
-            onChange={(event) =>
-              onEnvVarChange(BUZZ_AGENT_THINKING_EFFORT, event.target.value)
+          <EffortSelectField
+            currentEffort={currentEffort}
+            effortDefault={effortDefault}
+            effortValid={effortValid}
+            htmlFor="ba-thinking-effort"
+            inheritedEffort={inheritedEnvVars[BUZZ_AGENT_THINKING_EFFORT]}
+            label="Thinking / Effort"
+            onChange={(value) =>
+              onEnvVarChange(BUZZ_AGENT_THINKING_EFFORT, value)
             }
-            value={envVars[BUZZ_AGENT_THINKING_EFFORT] ?? ""}
-          >
-            <option value="">
-              {inheritedEnvVars[BUZZ_AGENT_THINKING_EFFORT]
-                ? `Inherit (${inheritedEnvVars[BUZZ_AGENT_THINKING_EFFORT]})`
-                : effortDefault === null
-                  ? "Inherit (default)"
-                  : "Inherit (agent default)"}
-            </option>
-            {BUZZ_AGENT_THINKING_EFFORT_VALUES.map((v) => {
-              const isValid = (effortValid as readonly string[]).includes(v);
-              const isDefault = v === effortDefault;
-              return (
-                <option disabled={!isValid} key={v} value={v}>
-                  {isDefault ? `${v} (default)` : v}
-                </option>
-              );
-            })}
-          </select>
+            testId="ba-thinking-effort-select"
+          />
           <p
             className="text-xs text-muted-foreground"
             id="help-ba-thinking-effort"
