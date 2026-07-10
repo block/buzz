@@ -1232,3 +1232,111 @@ test("steer ingress bundles its prompt context into the steer prompt segment, no
     "steer context must not leak as a standalone metadata row",
   );
 });
+
+// --- session/prompt late delivery (live subscription timing race) ---
+
+test("buildTranscript correctly renders prompt segment when session/prompt arrives after status lifecycle events", () => {
+  // Simulates the live-subscription timing race: status events (commands, mode,
+  // usage) arrive first because the desktop subscribed slightly after turn start,
+  // then session/prompt arrives later (e.g. via reconnect replay or archive
+  // backfill). buildTranscript is called in out-of-order sequence order but
+  // processTranscriptEvent handles insertion — the full rebuild path in
+  // appendAgentEvent (slow path for out-of-order) re-processes events sorted by
+  // timestamp+seq, so the prompt segment must appear.
+  const TURN = "turn-oot";
+  const SESS = "sess-oot";
+  const CH = "22222222-2222-2222-2222-222222222222";
+  const AUTHOR_HEX = "b".repeat(64);
+  const EVENT_HEX = "d".repeat(64);
+
+  const makeEvent = (seq, kind, timestamp, payload) => ({
+    seq,
+    kind,
+    timestamp,
+    agentIndex: 0,
+    channelId: CH,
+    sessionId: SESS,
+    turnId: TURN,
+    payload,
+  });
+
+  // Status events arrive first (lower seq but same timestamp as prompt)
+  const commandsEvent = makeEvent(
+    2,
+    "acp_read",
+    "2026-06-18T00:01:01Z",
+    {
+      method: "session/update",
+      params: {
+        sessionId: SESS,
+        update: {
+          sessionUpdate: "available_commands_update",
+          availableCommands: ["cmd1", "cmd2"],
+        },
+      },
+    },
+  );
+
+  const modeEvent = makeEvent(
+    3,
+    "acp_read",
+    "2026-06-18T00:01:01Z",
+    {
+      method: "session/update",
+      params: {
+        sessionId: SESS,
+        update: { sessionUpdate: "current_mode_update", currentModeId: "code" },
+      },
+    },
+  );
+
+  // session/prompt has the lowest seq — it was published first but arrived last
+  const promptEvent = makeEvent(
+    1,
+    "acp_write",
+    "2026-06-18T00:01:00Z",
+    {
+      method: "session/prompt",
+      params: {
+        sessionId: SESS,
+        prompt: [
+          {
+            type: "text",
+            text: `[Buzz event: @mention]\nEvent ID: ${EVENT_HEX.toUpperCase()}\nFrom: Alice (hex: ${AUTHOR_HEX})\nContent: please help`,
+          },
+          { type: "text", text: "[Context]\nScope: thread" },
+        ],
+      },
+    },
+  );
+
+  // Deliver events out of order: status first, then prompt
+  const items = buildTranscript([commandsEvent, modeEvent, promptEvent]);
+
+  const userMsg = items.find(
+    (i) => i.type === "message" && i.role === "user",
+  );
+  assert.ok(
+    userMsg,
+    "user message item must be present even when session/prompt arrives after status events",
+  );
+  assert.equal(
+    userMsg.text,
+    "please help",
+    "user message text extracted from session/prompt Content: line",
+  );
+
+  const blocks = buildTranscriptDisplayBlocks(items);
+  const turnBlock = blocks.find((b) => b.kind === "turn");
+  assert.ok(turnBlock, "expected a turn block");
+  const promptSegment = turnBlock.segments.find((s) => s.kind === "prompt");
+  assert.ok(
+    promptSegment,
+    "prompt segment must be present when session/prompt arrives out-of-order",
+  );
+  assert.equal(
+    promptSegment.user.text,
+    "please help",
+    "prompt segment carries the correct user text",
+  );
+});
