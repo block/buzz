@@ -440,11 +440,9 @@ function VirtualizedTimelineRows({
   }, [firstTimelineKey, keys, prependShiftEpoch]);
 
   const capturePrependAnchor = React.useCallback(() => {
-    if (
-      prependAnchorRef.current !== null ||
-      prependWatcherFrameRef.current !== null
-    )
-      return;
+    // Keep the pending capture current while the fetch is in flight. Once the
+    // prepend commits and the watcher starts, its baseline is frozen.
+    if (prependWatcherFrameRef.current !== null) return;
     const scroller = hostRef.current?.firstElementChild;
     if (!(scroller instanceof HTMLDivElement)) return;
     const scrollerTop = scroller.getBoundingClientRect().top;
@@ -470,6 +468,21 @@ function VirtualizedTimelineRows({
       cancelAnimationFrame(prependWatcherFrameRef.current);
     }
     const anchor = prependAnchorRef.current;
+    const scroller = hostRef.current?.firstElementChild;
+    if (scroller instanceof HTMLDivElement) {
+      const row = Array.from(
+        scroller.querySelectorAll<HTMLElement>("[data-message-id]"),
+      ).find((candidate) => candidate.dataset.messageId === anchor.messageId);
+      if (row) {
+        const top =
+          row.getBoundingClientRect().top -
+          scroller.getBoundingClientRect().top;
+        const delta = top - anchor.top;
+        // Close the commit-frame displacement before paint. The watcher below
+        // remains responsible for late measurements and temporary unmounts.
+        if (Math.abs(delta) > 4) scroller.scrollBy({ top: delta });
+      }
+    }
     const deadline = performance.now() + 3_000;
     let previousScrollTop: number | null = null;
     let settledFrames = 0;
@@ -603,10 +616,10 @@ function VirtualizedTimelineRows({
       onAtBottomStateChange?.(
         list.scrollSize - list.viewportSize - offset <= 32,
       );
-      if (offset <= 200) {
+      if (prependAnchorRef.current !== null || offset <= 200) {
         capturePrependAnchor();
-        onStartReached?.();
       }
+      if (offset <= 200) onStartReached?.();
     },
     [
       capturePrependAnchor,

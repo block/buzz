@@ -309,7 +309,11 @@ test.describe("list virtualization", () => {
   test("08 — cascading older pages never snap the viewport toward newest", async ({
     page,
   }) => {
-    await installMockBridge(page, { deepHistoryMessageCount: 1_800 });
+    test.setTimeout(120_000);
+    await installMockBridge(page, {
+      deepHistoryMessageCount: 1_800,
+      channelWindowDelayMs: 100,
+    });
     await page.goto("/#/channels/feedf00d-0000-4000-8000-000000000007");
     const timeline = page.getByTestId("message-timeline");
     await expect(timeline.locator("[data-message-id]").first()).toBeVisible();
@@ -365,6 +369,46 @@ test.describe("list virtualization", () => {
       await timeline.evaluate((element) => {
         element.scrollTop = 150;
       });
+      const motion = await timeline.evaluate(
+        async (scroller, { anchorId, anchorTop, oldHeight }) => {
+          const s = scroller as HTMLElement;
+          let maxDrift = 0;
+          let sawPrepend = false;
+          let sawAnchorAfterPrepend = false;
+          let finalDrift = 0;
+          let stableFrames = 0;
+          for (let frame = 0; frame < 180; frame += 1) {
+            const row = Array.from(
+              s.querySelectorAll<HTMLElement>("[data-message-id]"),
+            ).find((candidate) => candidate.dataset.messageId === anchorId);
+            if (s.scrollHeight > oldHeight + 800 && !sawPrepend) {
+              sawPrepend = true;
+            }
+            if (row) {
+              const top =
+                row.getBoundingClientRect().top - s.getBoundingClientRect().top;
+              const drift = Math.abs(top - anchorTop);
+              if (sawPrepend) {
+                maxDrift = Math.max(maxDrift, drift);
+                sawAnchorAfterPrepend = true;
+                stableFrames =
+                  Math.abs(drift - finalDrift) < 0.5 ? stableFrames + 1 : 0;
+                finalDrift = drift;
+              }
+            }
+            if (sawAnchorAfterPrepend && stableFrames >= 8) break;
+            await new Promise((resolve) => requestAnimationFrame(resolve));
+          }
+          return { maxDrift, sawPrepend };
+        },
+        {
+          anchorId: before.id,
+          anchorTop: before.top,
+          oldHeight: before.scrollHeight,
+        },
+      );
+      expect(motion.sawPrepend).toBe(true);
+      expect(motion.maxDrift).toBeLessThan(5);
 
       await expect
         .poll(
@@ -375,12 +419,14 @@ test.describe("list virtualization", () => {
         )
         .toBeGreaterThan(before.scrollHeight + 800);
 
-      const after = await sampleVisibleAnchor(before.id);
-      expect(Math.abs(after.top - before.top)).toBeLessThan(150);
       // A snap to newest leaves this near zero. Keep a full viewport of history
       // below the reader after every prepend, rather than checking only the
       // final page and missing a transient cascade failure.
-      expect(after.bottomDistance).toBeGreaterThan(
+      const bottomDistance = await timeline.evaluate(
+        (element) =>
+          element.scrollHeight - element.clientHeight - element.scrollTop,
+      );
+      expect(bottomDistance).toBeGreaterThan(
         await timeline.evaluate((element) => element.clientHeight),
       );
     }
