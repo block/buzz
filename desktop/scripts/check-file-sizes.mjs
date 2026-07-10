@@ -165,7 +165,11 @@ const overrides = new Map([
   // getProfile/updateProfile/getUserProfile/getUsersBatch/searchUsers) moved to
   // tauriProfiles.ts; limit ratcheted down 1360 → 1241 to bank the headroom.
   // baked-env fold-in: getBakedBuildEnv + BakedEnvEntry type adds ~28 lines.
-  ["src/shared/api/tauri.ts", 1271],
+  // doctor-npm-eacces-preflight: hint field on RawInstallStepResult + mapper
+  // passthrough (+2 lines).
+  ["src/shared/api/tauri.ts", 1273],
+  // doctor-npm-eacces-preflight: hint field added to InstallStepResult (+1 line).
+  ["src/shared/api/types.ts", 1001],
   // readiness-gate: PersonaDialog.tsx threads computeLocalModeGate +
   // requiredCredentialEnvKeys + RequiredFieldLabel so the "New agent" dialog
   // shows required markers and credential amber rows (parity with

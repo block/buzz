@@ -237,6 +237,7 @@ export type RawInstallStepResult = {
   stdout: string;
   stderr: string;
   exit_code: number | null;
+  hint?: string;
 };
 
 export type RawInstallRuntimeResult = {
@@ -910,6 +911,7 @@ function fromRawInstallRuntimeResult(
       stdout: step.stdout,
       stderr: step.stderr,
       exitCode: step.exit_code,
+      hint: step.hint,
     })),
   };
 }

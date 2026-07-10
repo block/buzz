@@ -15,6 +15,7 @@ import {
 } from "@/features/agents/hooks";
 import { describeResolvedCommand } from "@/features/agents/ui/agentUi";
 import type { AcpRuntimeCatalogEntry } from "@/shared/api/types";
+import { getInstallErrorMessage } from "@/shared/lib/installError";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 import { SettingsOptionGroup } from "./SettingsOptionGroup";
@@ -213,7 +214,7 @@ function RuntimeRow({
           </p>
         ) : null}
         {installError ? (
-          <p className="mt-2 rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-1.5 text-sm text-destructive">
+          <p className="mt-2 whitespace-pre-line rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-1.5 text-sm text-destructive">
             {installError}
           </p>
         ) : null}
@@ -244,14 +245,11 @@ export function DoctorSettingsPanel() {
             [runtimeId]: { success: true, error: null },
           }));
         } else {
-          const lastStep = result.steps[result.steps.length - 1];
           setInstallResults((prev) => ({
             ...prev,
             [runtimeId]: {
               success: false,
-              error: lastStep
-                ? `Step "${lastStep.step}" failed: ${lastStep.stderr || lastStep.stdout || "unknown error"}`
-                : "Install failed with no output.",
+              error: getInstallErrorMessage(result.steps),
             },
           }));
         }

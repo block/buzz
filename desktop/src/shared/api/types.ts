@@ -578,6 +578,7 @@ export type InstallStepResult = {
   stdout: string;
   stderr: string;
   exitCode: number | null;
+  hint?: string;
 };
 
 export type InstallRuntimeResult = {

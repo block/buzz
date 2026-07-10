@@ -90,7 +90,19 @@ fn install_acp_runtime_blocking(runtime_id: &str) -> Result<InstallRuntimeResult
         .any(|cmd| crate::managed_agents::resolve_command(cmd).is_some());
     if !adapter_found {
         for cmd in runtime.adapter_install_commands {
-            let result = run_install_command("adapter", cmd);
+            if is_npm_global_install(cmd) {
+                if let Some(step) = npm_preflight_check("adapter", cmd) {
+                    steps.push(step);
+                    return Ok(InstallRuntimeResult {
+                        success: false,
+                        steps,
+                    });
+                }
+            }
+            let mut result = run_install_command("adapter", cmd);
+            if !result.success && result.hint.is_none() && is_npm_global_install(cmd) {
+                result.hint = npm_eacces_hint(&result.stderr, cmd);
+            }
             let success = result.success;
             steps.push(result);
             if !success {
@@ -161,6 +173,7 @@ fn run_install_command(step: &str, command: &str) -> InstallStepResult {
                 stdout: String::new(),
                 stderr: format!("failed to spawn shell: {e}"),
                 exit_code: None,
+                hint: None,
             };
         }
     };
@@ -216,6 +229,7 @@ fn run_install_command(step: &str, command: &str) -> InstallStepResult {
                 stdout: String::new(),
                 stderr: "install command timed out after 5 minutes".to_string(),
                 exit_code: None,
+                hint: None,
             };
         }
 
@@ -231,6 +245,7 @@ fn run_install_command(step: &str, command: &str) -> InstallStepResult {
                     stdout: truncate_output(stdout),
                     stderr: truncate_output(stderr_raw),
                     exit_code: status.code(),
+                    hint: None,
                 };
             }
             Ok(Err(e)) => {
@@ -244,6 +259,7 @@ fn run_install_command(step: &str, command: &str) -> InstallStepResult {
                     stdout: String::new(),
                     stderr: format!("failed to check process status: {e}"),
                     exit_code: None,
+                    hint: None,
                 };
             }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
@@ -262,6 +278,7 @@ fn run_install_command(step: &str, command: &str) -> InstallStepResult {
                     stdout: String::new(),
                     stderr: "internal error: wait thread disconnected".to_string(),
                     exit_code: None,
+                    hint: None,
                 };
             }
         }
@@ -294,6 +311,163 @@ fn floor_char_boundary(s: &str, mut index: usize) -> usize {
     }
     index
 }
+
+// ── npm EACCES preflight ──────────────────────────────────────────────────────
+
+/// Returns true when `command` is an npm global install invocation.
+fn is_npm_global_install(command: &str) -> bool {
+    let t = command.trim_start();
+    t.starts_with("npm install -g ") || t.starts_with("npm i -g ")
+}
+
+/// Guidance text for the EACCES / unwritable-prefix case.
+fn npm_eacces_guidance(command: &str) -> String {
+    format!(
+        "npm's global install directory isn't writable by your user.\n\
+\n\
+Fix (no sudo):\n\
+  1. Run:  npm config set prefix ~/.npm-global\n\
+  2. Add to ~/.zprofile:  export PATH=\"$HOME/.npm-global/bin:$PATH\"\n\
+  3. Restart Buzz, then click Install again.\n\
+\n\
+Or install manually, then click Refresh:\n\
+  sudo {command}"
+    )
+}
+
+/// Guidance text shown when npm / Node.js is not found in the login-shell PATH.
+const NPM_MISSING_HINT: &str = "Node.js / npm was not found. Install Node.js \
+(https://nodejs.org or your version manager), restart Buzz, then click Install again.\n\
+If npm works in your terminal, make sure your Node version manager is initialized in \
+~/.zprofile (not only ~/.zshrc) — Buzz resolves tools via non-interactive login shells.";
+
+/// Spawn the same login shell used by `run_install_command` and run
+/// `npm prefix -g` to discover where npm would install global packages.
+/// Returns `None` when npm is not found or the output cannot be parsed.
+#[cfg(unix)]
+fn resolve_npm_prefix() -> Option<std::path::PathBuf> {
+    use std::process::Stdio;
+    let shell = if std::path::Path::new("/bin/zsh").exists() {
+        "/bin/zsh"
+    } else {
+        "/bin/bash"
+    };
+    let shell_path = crate::managed_agents::login_shell_path();
+
+    let mut cmd = std::process::Command::new(shell);
+    cmd.args(["-l", "-c", "npm prefix -g"]);
+    cmd.env_remove("NPM_CONFIG_PREFIX");
+    cmd.env_remove("NPM_CONFIG_CACHE");
+    cmd.env_remove("COREPACK_HOME");
+    if let Some(ref path) = shell_path {
+        cmd.env("PATH", path);
+    }
+    cmd.stdin(Stdio::null());
+
+    let output = cmd.output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let raw = String::from_utf8_lossy(&output.stdout);
+    // Version managers can print banner lines before the real prefix — take the
+    // last non-empty line to skip any preamble.
+    let prefix = raw.lines().filter(|l| !l.trim().is_empty()).last()?.trim();
+    if prefix.is_empty() {
+        return None;
+    }
+    Some(std::path::PathBuf::from(prefix))
+}
+
+/// Check write access to a file-system path using the POSIX `access(2)` syscall.
+#[cfg(unix)]
+fn unix_is_writable(path: &std::path::Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    let bytes = path.as_os_str().as_bytes();
+    let Ok(c_path) = std::ffi::CString::new(bytes) else {
+        return false;
+    };
+    // SAFETY: `access` is a pure read-only syscall; we pass a valid NUL-terminated
+    // path and a standard flag constant.  This mirrors the existing `setsid`/`kill`
+    // usage in this file.
+    unsafe { libc::access(c_path.as_ptr(), libc::W_OK) == 0 }
+}
+
+/// Returns true when the directory where npm would write global packages is
+/// writable by the current process user.
+///
+/// On non-unix platforms always returns `true` — the EACCES preflight is a
+/// no-op there; the stderr classifier still applies.
+fn npm_install_target_is_writable(prefix: &std::path::Path) -> bool {
+    #[cfg(unix)]
+    {
+        // Probe the most specific candidate that exists; fall back up the tree.
+        for candidate in &[
+            prefix.join("lib/node_modules"),
+            prefix.join("lib"),
+            prefix.to_path_buf(),
+        ] {
+            if candidate.exists() {
+                return unix_is_writable(candidate);
+            }
+        }
+        // Nothing exists — npm couldn't create it either.
+        unix_is_writable(prefix)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = prefix;
+        true
+    }
+}
+
+/// Inspect `stderr` for known npm EACCES patterns and return actionable
+/// guidance if matched, or `None` when the error is unrelated.
+fn npm_eacces_hint(stderr: &str, command: &str) -> Option<String> {
+    if stderr.contains("EACCES: permission denied") || stderr.contains("npm error EACCES") {
+        Some(npm_eacces_guidance(command))
+    } else {
+        None
+    }
+}
+
+/// Run the npm preflight before executing an npm global install command.
+/// Returns `Some(failed InstallStepResult)` to abort, or `None` to proceed.
+fn npm_preflight_check(step: &str, command: &str) -> Option<InstallStepResult> {
+    #[cfg(unix)]
+    {
+        match resolve_npm_prefix() {
+            None => Some(InstallStepResult {
+                step: step.to_string(),
+                command: command.to_string(),
+                success: false,
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: None,
+                hint: Some(NPM_MISSING_HINT.to_string()),
+            }),
+            Some(prefix) if !npm_install_target_is_writable(&prefix) => Some(InstallStepResult {
+                step: step.to_string(),
+                command: command.to_string(),
+                success: false,
+                stdout: String::new(),
+                stderr: format!(
+                    "npm global prefix '{}' is not writable by the current user.",
+                    prefix.display()
+                ),
+                exit_code: None,
+                hint: Some(npm_eacces_guidance(command)),
+            }),
+            _ => None,
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (step, command);
+        None
+    }
+}
+
+// ── end npm preflight ─────────────────────────────────────────────────────────
 
 #[tauri::command]
 pub async fn discover_managed_agent_prereqs(
@@ -341,4 +515,127 @@ pub async fn list_relay_agents(state: State<'_, AppState>) -> Result<Vec<RelayAg
         .cloned()
         .unwrap_or_else(|| serde_json::json!([]));
     serde_json::from_value(agents).map_err(|e| format!("agent parse failed: {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── is_npm_global_install ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_is_npm_global_install_accepts_catalog_claude_command() {
+        assert!(is_npm_global_install(
+            "npm install -g @agentclientprotocol/claude-agent-acp"
+        ));
+    }
+
+    #[test]
+    fn test_is_npm_global_install_accepts_catalog_codex_command() {
+        assert!(is_npm_global_install(
+            "npm install -g @zed-industries/codex-acp"
+        ));
+    }
+
+    #[test]
+    fn test_is_npm_global_install_accepts_short_flag() {
+        assert!(is_npm_global_install("npm i -g some-package"));
+    }
+
+    #[test]
+    fn test_is_npm_global_install_accepts_leading_whitespace() {
+        assert!(is_npm_global_install("  npm install -g foo"));
+    }
+
+    #[test]
+    fn test_is_npm_global_install_rejects_curl_pipe() {
+        assert!(!is_npm_global_install(
+            "curl -fsSL https://example.com/install.sh | bash"
+        ));
+    }
+
+    #[test]
+    fn test_is_npm_global_install_rejects_non_global_install() {
+        assert!(!is_npm_global_install("npm install foo"));
+    }
+
+    #[test]
+    fn test_is_npm_global_install_rejects_unrelated_command() {
+        assert!(!is_npm_global_install("cargo install some-tool"));
+    }
+
+    // ── npm_eacces_hint ───────────────────────────────────────────────────────
+
+    #[test]
+    fn test_npm_eacces_hint_detects_old_format() {
+        let stderr = "npm ERR! code EACCES\nnpm ERR! syscall mkdir\nnpm ERR! path /usr/local/lib/node_modules\nnpm ERR! errno -13\nnpm ERR! Error: EACCES: permission denied, mkdir '/usr/local/lib/node_modules'";
+        assert!(npm_eacces_hint(stderr, "npm install -g foo").is_some());
+    }
+
+    #[test]
+    fn test_npm_eacces_hint_detects_new_format() {
+        let stderr = "npm error EACCES: permission denied, mkdir '/usr/local/lib/node_modules'";
+        assert!(npm_eacces_hint(stderr, "npm install -g foo").is_some());
+    }
+
+    #[test]
+    fn test_npm_eacces_hint_returns_none_for_404_stderr() {
+        let stderr = "npm error 404 Not Found - GET https://registry.npmjs.org/no-such-pkg";
+        assert!(npm_eacces_hint(stderr, "npm install -g no-such-pkg").is_none());
+    }
+
+    #[test]
+    fn test_npm_eacces_hint_guidance_contains_npm_global_path() {
+        let hint = npm_eacces_hint("EACCES: permission denied", "npm install -g foo").unwrap();
+        assert!(hint.contains("~/.npm-global"), "hint: {hint}");
+    }
+
+    #[test]
+    fn test_npm_eacces_hint_guidance_contains_zprofile() {
+        let hint = npm_eacces_hint("EACCES: permission denied", "npm install -g foo").unwrap();
+        assert!(hint.contains("~/.zprofile"), "hint: {hint}");
+    }
+
+    #[test]
+    fn test_npm_eacces_hint_guidance_contains_sudo_command() {
+        let hint = npm_eacces_hint("EACCES: permission denied", "npm install -g foo").unwrap();
+        assert!(hint.contains("sudo npm install -g foo"), "hint: {hint}");
+    }
+
+    // ── npm_install_target_is_writable ────────────────────────────────────────
+
+    #[cfg(unix)]
+    #[test]
+    fn test_npm_install_target_is_writable_true_on_writable_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(npm_install_target_is_writable(dir.path()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_npm_install_target_is_writable_false_when_lib_node_modules_unwritable() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let lib = dir.path().join("lib");
+        let node_modules = lib.join("node_modules");
+        std::fs::create_dir_all(&node_modules).unwrap();
+        // Make node_modules read-only.
+        std::fs::set_permissions(&node_modules, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let result = npm_install_target_is_writable(dir.path());
+        // Restore before the dir is dropped so cleanup can delete it.
+        std::fs::set_permissions(&node_modules, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // Skip this assertion when running as root (root can write to 0o555).
+        if unsafe { libc::getuid() } != 0 {
+            assert!(!result);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_npm_install_target_is_writable_walks_up_to_lib() {
+        let dir = tempfile::tempdir().unwrap();
+        // Create only `lib/` — no `lib/node_modules`.
+        std::fs::create_dir(dir.path().join("lib")).unwrap();
+        assert!(npm_install_target_is_writable(dir.path()));
+    }
 }
