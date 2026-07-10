@@ -1,3 +1,4 @@
+import { makeRootIdStore } from "@/features/channels/unreadRootIdStore";
 import { DM_NOTIFIABLE_EVENT_KINDS } from "@/features/channels/isDmNotifiableKind";
 import { mergeReadStateEvents } from "@/features/channels/readState/readStateSnapshot";
 import {
@@ -8,6 +9,7 @@ import {
   getThreadReference,
   isBroadcastReply,
 } from "@/features/messages/lib/threading";
+import { shouldNotifyForEvent } from "@/features/notifications/lib/shouldNotify";
 import {
   mutedChannelIdsFromStore,
   parseMutePayload,
@@ -27,6 +29,53 @@ import {
 
 const KIND_NIP29_GROUP_METADATA = 39000;
 const KIND_NIP29_GROUP_MEMBERS = 39002;
+
+// Stores for thread-relationship sets. Keyed by pubkey only (no relay/workspace),
+// so they read correctly from the same origin regardless of which workspace is active.
+const participationStore = makeRootIdStore("buzz-thread-participation.v1");
+const authoredStore = makeRootIdStore("buzz-thread-authored.v1");
+const mutedRootsStore = makeRootIdStore("buzz-thread-muted.v1");
+const FOLLOWS_STORAGE_KEY_PREFIX = "buzz-thread-follows.v1";
+
+export type ThreadRelationships = {
+  participatedRootIds: ReadonlySet<string>;
+  followedRootIds: ReadonlySet<string>;
+  authoredRootIds: ReadonlySet<string>;
+  mutedRootIds: ReadonlySet<string>;
+};
+
+function readFollowedRootIds(pubkey: string): Set<string> {
+  try {
+    const raw = window.localStorage.getItem(
+      `${FOLLOWS_STORAGE_KEY_PREFIX}:${pubkey}`,
+    );
+    if (!raw) return new Set();
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return new Set();
+    const ids = new Set<string>();
+    for (const entry of parsed) {
+      if (
+        typeof entry === "object" &&
+        entry !== null &&
+        typeof entry.rootId === "string"
+      ) {
+        ids.add(entry.rootId);
+      }
+    }
+    return ids;
+  } catch {
+    return new Set();
+  }
+}
+
+function defaultReadThreadRelationships(pubkey: string): ThreadRelationships {
+  return {
+    participatedRootIds: participationStore.read(pubkey),
+    followedRootIds: readFollowedRootIds(pubkey),
+    authoredRootIds: authoredStore.read(pubkey),
+    mutedRootIds: mutedRootsStore.read(pubkey),
+  };
+}
 
 const MEMBER_CHANNEL_LIMIT = 1000;
 const METADATA_LIMIT = 1000;
@@ -105,11 +154,14 @@ export async function fetchWorkspaceUnread(args: {
   nowSeconds?: number;
   decryptReadState?: (ciphertext: string) => Promise<string>;
   decryptMutes?: (ciphertext: string) => Promise<string>;
+  readThreadRelationships?: (pubkey: string) => ThreadRelationships;
 }): Promise<WorkspaceUnreadObserverResult> {
   const { client, pubkey } = args;
   const normalizedPubkey = pubkey.toLowerCase();
   const nowSeconds = args.nowSeconds ?? Math.floor(Date.now() / 1_000);
   const decryptMutes = args.decryptMutes ?? nip44DecryptFromSelf;
+  const readRelationships =
+    args.readThreadRelationships ?? defaultReadThreadRelationships;
 
   const channels = await fetchObservedChannels(client, pubkey);
   if (channels.length === 0) {
@@ -151,6 +203,13 @@ export async function fetchWorkspaceUnread(args: {
     }
   }
 
+  const {
+    participatedRootIds,
+    followedRootIds,
+    authoredRootIds,
+    mutedRootIds,
+  } = readRelationships(normalizedPubkey);
+
   let hasUnread = false;
   let mentionCount = 0;
 
@@ -182,8 +241,17 @@ export async function fetchWorkspaceUnread(args: {
     ]);
 
     if (!hasUnread) {
-      hasUnread = unreadEvents.some((event) =>
-        isUnreadExternalEvent(event, readState, readAt, normalizedPubkey),
+      hasUnread = unreadEvents.some(
+        (event) =>
+          isUnreadExternalEvent(event, readState, readAt, normalizedPubkey) &&
+          shouldNotifyForEvent(event, normalizedPubkey, {
+            participatedRootIds,
+            followedRootIds,
+            authoredRootIds,
+            mutedRootIds,
+            mutedChannelIds: mutedIds,
+            channelId: channel.id,
+          }),
       );
     }
 
