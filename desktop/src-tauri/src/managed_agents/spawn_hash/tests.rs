@@ -398,8 +398,8 @@ fn definition_runtime_edit_changes_hash_for_materialized_record() {
     let before = [persona("pers", Some("goose"), "prompt")];
     let after = [persona("pers", Some("claude"), "prompt")];
     assert_ne!(
-        spawn_config_hash(&rec, &before, "wss://ws.example"),
-        spawn_config_hash(&rec, &after, "wss://ws.example"),
+        spawn_config_hash(&rec, &before, "wss://ws.example", &Default::default()),
+        spawn_config_hash(&rec, &after, "wss://ws.example", &Default::default()),
         "definition runtime edit must badge a materialized, override-free instance"
     );
 }
@@ -416,8 +416,8 @@ fn agent_command_override_beats_definition_runtime_change() {
     let before = [persona("pers", Some("goose"), "prompt")];
     let after = [persona("pers", Some("claude"), "prompt")];
     assert_eq!(
-        spawn_config_hash(&rec, &before, "wss://ws.example"),
-        spawn_config_hash(&rec, &after, "wss://ws.example"),
+        spawn_config_hash(&rec, &before, "wss://ws.example", &Default::default()),
+        spawn_config_hash(&rec, &after, "wss://ws.example", &Default::default()),
         "explicit override must win regardless of definition runtime change"
     );
 }
@@ -436,8 +436,8 @@ fn missing_definition_leaves_materialized_runtime_in_hash() {
     no_runtime.runtime = None;
 
     assert_ne!(
-        spawn_config_hash(&rec, no_personas, "wss://ws.example"),
-        spawn_config_hash(&no_runtime, no_personas, "wss://ws.example"),
+        spawn_config_hash(&rec, no_personas, "wss://ws.example", &Default::default()),
+        spawn_config_hash(&no_runtime, no_personas, "wss://ws.example", &Default::default()),
         "materialized runtime must still affect hash when definition is absent"
     );
 }
