@@ -67,6 +67,11 @@ fn install_acp_runtime_blocking(runtime_id: &str) -> Result<InstallRuntimeResult
     let mut steps = Vec::new();
 
     // Phase 1: Install CLI if missing and commands are available.
+    // NOTE: the npm EACCES preflight and `npm_eacces_hint` classifier only run
+    // in Phase 2 below. Today every entry in `cli_install_commands` is a
+    // curl-pipe; all `npm install -g` commands live in `adapter_install_commands`.
+    // If a future runtime adds an npm-global CLI install it must also add the
+    // preflight and classifier to this loop.
     if let Some(cli) = runtime.underlying_cli {
         if crate::managed_agents::resolve_command(cli).is_none() {
             for cmd in runtime.cli_install_commands {
@@ -123,8 +128,12 @@ fn install_acp_runtime_blocking(runtime_id: &str) -> Result<InstallRuntimeResult
     })
 }
 
-fn run_install_command(step: &str, command: &str) -> InstallStepResult {
-    let shell_path = crate::managed_agents::login_shell_path();
+/// Build a login-shell `Command` for `command` with the hermit env vars
+/// stripped and the user's PATH set. This is the single source of truth for
+/// the shell selection and environment cleanup shared by `run_install_command`
+/// and `resolve_npm_prefix` — keeping them in sync so the hermit-strip list
+/// can't drift between the two paths.
+fn install_shell_command(command: &str) -> std::process::Command {
     let shell = if std::path::Path::new("/bin/zsh").exists() {
         "/bin/zsh"
     } else {
@@ -140,7 +149,7 @@ fn run_install_command(step: &str, command: &str) -> InstallStepResult {
     cmd.env_remove("NPM_CONFIG_CACHE");
     cmd.env_remove("COREPACK_HOME");
 
-    if let Some(ref path) = shell_path {
+    if let Some(ref path) = crate::managed_agents::login_shell_path() {
         cmd.env("PATH", path);
     }
 
@@ -157,6 +166,12 @@ fn run_install_command(step: &str, command: &str) -> InstallStepResult {
             });
         }
     }
+
+    cmd
+}
+
+fn run_install_command(step: &str, command: &str) -> InstallStepResult {
+    let mut cmd = install_shell_command(command);
 
     let mut child = match cmd
         .stdin(std::process::Stdio::null())
@@ -343,35 +358,81 @@ If npm works in your terminal, make sure your Node version manager is initialize
 
 /// Spawn the same login shell used by `run_install_command` and run
 /// `npm prefix -g` to discover where npm would install global packages.
-/// Returns `None` when npm is not found or the output cannot be parsed.
+/// Returns `None` when npm is not found, the output cannot be parsed, or the
+/// command exceeds the 30-second timeout.
 #[cfg(unix)]
 fn resolve_npm_prefix() -> Option<std::path::PathBuf> {
-    use std::process::Stdio;
-    let shell = if std::path::Path::new("/bin/zsh").exists() {
-        "/bin/zsh"
-    } else {
-        "/bin/bash"
+    let mut cmd = install_shell_command("npm prefix -g");
+    let mut child = cmd
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .ok()?;
+
+    // Drain stdout/stderr on background threads to prevent pipe-buffer deadlock.
+    let stdout_pipe = child.stdout.take();
+    let stderr_pipe = child.stderr.take();
+    let stdout_thread = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(mut pipe) = stdout_pipe {
+            let _ = pipe.read_to_end(&mut buf);
+        }
+        buf
+    });
+    let stderr_thread = std::thread::spawn(move || {
+        // Drain stderr so the child doesn't block on a full pipe.
+        if let Some(mut pipe) = stderr_pipe {
+            let _ = std::io::copy(&mut pipe, &mut std::io::sink());
+        }
+    });
+
+    let child_pid = child.id();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let wait_thread = std::thread::spawn(move || {
+        let status = child.wait();
+        let _ = tx.send(status);
+    });
+
+    // 30-second timeout — plenty for `npm prefix -g`; intentionally shorter
+    // than the 5-minute install budget in `run_install_command`.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let result = loop {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            // Timed out: send SIGTERM, clean up threads, return None.
+            unsafe { libc::kill(child_pid as i32, libc::SIGTERM) };
+            drop(rx);
+            let _ = wait_thread.join();
+            let _ = stdout_thread.join();
+            let _ = stderr_thread.join();
+            break None;
+        }
+        match rx.recv_timeout(std::time::Duration::from_millis(200).min(remaining)) {
+            Ok(Ok(status)) => {
+                let _ = wait_thread.join();
+                let stdout = stdout_thread.join().unwrap_or_default();
+                let _ = stderr_thread.join();
+                break if status.success() { Some(stdout) } else { None };
+            }
+            Ok(Err(_)) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                let _ = wait_thread.join();
+                let _ = stdout_thread.join();
+                let _ = stderr_thread.join();
+                break None;
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+        }
     };
-    let shell_path = crate::managed_agents::login_shell_path();
 
-    let mut cmd = std::process::Command::new(shell);
-    cmd.args(["-l", "-c", "npm prefix -g"]);
-    cmd.env_remove("NPM_CONFIG_PREFIX");
-    cmd.env_remove("NPM_CONFIG_CACHE");
-    cmd.env_remove("COREPACK_HOME");
-    if let Some(ref path) = shell_path {
-        cmd.env("PATH", path);
-    }
-    cmd.stdin(Stdio::null());
-
-    let output = cmd.output().ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let raw = String::from_utf8_lossy(&output.stdout);
+    let raw = String::from_utf8_lossy(result?.as_slice()).into_owned();
     // Version managers can print banner lines before the real prefix — take the
     // last non-empty line to skip any preamble.
-    let prefix = raw.lines().filter(|l| !l.trim().is_empty()).last()?.trim();
+    let prefix = raw
+        .lines()
+        .rfind(|l| !l.trim().is_empty())?
+        .trim()
+        .to_string();
     if prefix.is_empty() {
         return None;
     }
