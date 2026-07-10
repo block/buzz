@@ -1,4 +1,11 @@
 import * as React from "react";
+import { GroupedVirtuoso } from "react-virtuoso";
+import type {
+  Components,
+  GroupedVirtuosoHandle,
+  ListRange,
+  ScrollerProps,
+} from "react-virtuoso";
 
 import { formatDayHeading } from "@/features/messages/lib/dateFormatters";
 import { timelineRowReserveStyle } from "@/features/messages/lib/rowHeightEstimate";
@@ -6,6 +13,7 @@ import {
   buildTimelineDayGroups,
   buildTimelineItems,
   getTimelineItemKey,
+  type TimelineDayGroup,
   type TimelineNonDayItem,
 } from "@/features/messages/lib/timelineItems";
 import { THREAD_REPLY_ROW_MARGIN_INLINE_REM } from "@/features/messages/lib/threadTreeLayout";
@@ -27,6 +35,14 @@ import { MessageRow } from "./MessageRow";
 import { MessageThreadSummaryRow } from "./MessageThreadSummaryRow";
 import { SystemMessageRow } from "./SystemMessageRow";
 import { UnreadDivider } from "./UnreadDivider";
+
+export type TimelineVirtualizerApi = {
+  scrollToBottom: (behavior?: ScrollBehavior) => void;
+  scrollToMessage: (
+    messageId: string,
+    options?: { behavior?: ScrollBehavior },
+  ) => boolean;
+};
 
 type TimelineMessageListProps = {
   agentPubkeys?: ReadonlySet<string>;
@@ -81,6 +97,14 @@ type TimelineMessageListProps = {
   searchQuery?: string;
   /** Per-thread unread counts keyed by thread root id. */
   threadUnreadCounts?: ReadonlyMap<string, number>;
+  /** Existing scroll container, reused by the virtualizer spike so MessageTimeline owns the scroll node. */
+  useVirtualizer?: boolean;
+  onStartReached?: () => void;
+  onAtBottomStateChange?: (atBottom: boolean) => void;
+  onVirtualizerApiChange?: (api: TimelineVirtualizerApi | null) => void;
+  onVirtualizerRangeChanged?: () => void;
+  onVirtualizerScroll?: () => void;
+  onVirtualizerScrollerChange?: (element: HTMLDivElement | null) => void;
 };
 
 export const TimelineMessageList = React.memo(function TimelineMessageList({
@@ -114,6 +138,13 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
   searchQuery,
   threadUnreadCounts,
   unfollowThreadById,
+  useVirtualizer = false,
+  onStartReached,
+  onAtBottomStateChange,
+  onVirtualizerApiChange,
+  onVirtualizerRangeChanged,
+  onVirtualizerScroll,
+  onVirtualizerScrollerChange,
 }: TimelineMessageListProps) {
   const entries = React.useMemo(
     () =>
@@ -255,6 +286,21 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
     ],
   );
 
+  if (useVirtualizer) {
+    return (
+      <VirtualizedTimelineRows
+        dayGroups={dayGroups}
+        onAtBottomStateChange={onAtBottomStateChange}
+        onStartReached={onStartReached}
+        onVirtualizerApiChange={onVirtualizerApiChange}
+        onVirtualizerRangeChanged={onVirtualizerRangeChanged}
+        onVirtualizerScroll={onVirtualizerScroll}
+        onVirtualizerScrollerChange={onVirtualizerScrollerChange}
+        renderItem={renderItem}
+      />
+    );
+  }
+
   return (
     <div className="flex flex-col">
       {dayGroups.map((group) => (
@@ -276,19 +322,373 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
             <DayDivider label={formatDayHeading(group.headingTimestamp)} />
           )}
           {group.items.map((item) => (
-            <div
-              className="timeline-row-cv"
-              key={getTimelineItemKey(item)}
-              style={timelineRowReserveStyle(item)}
-            >
+            <TimelineRowShell item={item} key={getTimelineItemKey(item)}>
               {renderItem(item)}
-            </div>
+            </TimelineRowShell>
           ))}
         </section>
       ))}
     </div>
   );
 });
+
+const FIRST_ITEM_INDEX_BASE = 1_000_000;
+
+function timelineItemMessageId(item: TimelineNonDayItem): string | null {
+  return item.kind === "message" || item.kind === "system"
+    ? item.entry.message.id
+    : null;
+}
+
+function groupedInternalIndexForItem(
+  groupCounts: readonly number[],
+  itemIndex: number,
+): number {
+  let itemCount = 0;
+
+  for (let groupIndex = 0; groupIndex < groupCounts.length; groupIndex += 1) {
+    if (itemIndex < itemCount + groupCounts[groupIndex]) {
+      return itemIndex + groupIndex + 1;
+    }
+    itemCount += groupCounts[groupIndex];
+  }
+
+  return itemIndex + groupCounts.length;
+}
+
+function buildGroupedInternalKeyByIndex(
+  firstItemIndex: number,
+  dayGroups: readonly TimelineDayGroup[],
+): Map<number, string> {
+  const keyByIndex = new Map<number, string>();
+  let internalIndex = 0;
+
+  for (const group of dayGroups) {
+    keyByIndex.set(firstItemIndex + internalIndex, `day-${group.key}`);
+    internalIndex += 1;
+
+    for (const item of group.items) {
+      keyByIndex.set(firstItemIndex + internalIndex, getTimelineItemKey(item));
+      internalIndex += 1;
+    }
+  }
+
+  return keyByIndex;
+}
+
+function buildGroupedInternalData(
+  dayGroups: readonly TimelineDayGroup[],
+): Array<TimelineNonDayItem | undefined> {
+  const data: Array<TimelineNonDayItem | undefined> = [];
+
+  for (const group of dayGroups) {
+    data.push(undefined);
+    data.push(...group.items);
+  }
+
+  return data;
+}
+
+type VirtualizedTimelineRowsProps = {
+  dayGroups: TimelineDayGroup[];
+  onAtBottomStateChange?: (atBottom: boolean) => void;
+  onStartReached?: () => void;
+  onVirtualizerApiChange?: (api: TimelineVirtualizerApi | null) => void;
+  onVirtualizerRangeChanged?: () => void;
+  onVirtualizerScroll?: () => void;
+  onVirtualizerScrollerChange?: (element: HTMLDivElement | null) => void;
+  renderItem: (item: TimelineNonDayItem) => React.ReactNode;
+};
+
+function VirtualizedTimelineRows({
+  dayGroups,
+  onAtBottomStateChange,
+  onStartReached,
+  onVirtualizerApiChange,
+  onVirtualizerRangeChanged,
+  onVirtualizerScroll,
+  onVirtualizerScrollerChange,
+  renderItem,
+}: VirtualizedTimelineRowsProps) {
+  const virtuosoRef = React.useRef<GroupedVirtuosoHandle>(null);
+  const [scrollerElement, setScrollerElement] =
+    React.useState<HTMLDivElement | null>(null);
+  const firstItemIndexStateRef = React.useRef<StableFirstItemIndexState>({
+    firstItemIndex: FIRST_ITEM_INDEX_BASE,
+    keys: [],
+  });
+  const timelineModel = React.useMemo(() => {
+    const items = dayGroups.flatMap((group) => group.items);
+    return {
+      firstItemIndex: getStableFirstItemIndex(
+        firstItemIndexStateRef.current,
+        items,
+      ),
+      flattenedItems: items,
+      groupCounts: dayGroups.map((group) => group.items.length),
+    };
+  }, [dayGroups]);
+  const { firstItemIndex, flattenedItems, groupCounts } = timelineModel;
+  const groupedInternalKeyByIndex = React.useMemo(
+    () => buildGroupedInternalKeyByIndex(firstItemIndex, dayGroups),
+    [dayGroups, firstItemIndex],
+  );
+  const groupedInternalData = React.useMemo(
+    () => buildGroupedInternalData(dayGroups),
+    [dayGroups],
+  );
+  const virtualizerModelRef = React.useRef<{
+    firstItemIndex: number;
+    flattenedCount: number;
+    groupCounts: readonly number[];
+    messageItemIndexById: Map<string, number>;
+  }>({
+    firstItemIndex,
+    flattenedCount: flattenedItems.length,
+    groupCounts,
+    messageItemIndexById: new Map(),
+  });
+  const deferredScrollFrameRef = React.useRef<number | null>(null);
+  React.useEffect(
+    () => () => {
+      if (deferredScrollFrameRef.current !== null) {
+        window.cancelAnimationFrame(deferredScrollFrameRef.current);
+        deferredScrollFrameRef.current = null;
+      }
+    },
+    [],
+  );
+  const messageItemIndexById = React.useMemo(() => {
+    const byId = new Map<string, number>();
+    flattenedItems.forEach((item, index) => {
+      const messageId = timelineItemMessageId(item);
+      if (messageId) byId.set(messageId, index);
+    });
+    return byId;
+  }, [flattenedItems]);
+  React.useLayoutEffect(() => {
+    virtualizerModelRef.current = {
+      firstItemIndex,
+      flattenedCount: flattenedItems.length,
+      groupCounts,
+      messageItemIndexById,
+    };
+  }, [
+    firstItemIndex,
+    flattenedItems.length,
+    groupCounts,
+    messageItemIndexById,
+  ]);
+
+  React.useLayoutEffect(() => {
+    if (!onVirtualizerApiChange) return;
+    const api: TimelineVirtualizerApi = {
+      scrollToBottom(behavior = "auto") {
+        virtuosoRef.current?.scrollToIndex({
+          align: "end",
+          behavior: behavior === "smooth" ? "smooth" : "auto",
+          index: "LAST",
+        });
+      },
+      scrollToMessage(messageId, options = {}) {
+        const itemIndex = messageItemIndexById.get(messageId);
+        if (itemIndex === undefined) return false;
+        if (deferredScrollFrameRef.current !== null) {
+          window.cancelAnimationFrame(deferredScrollFrameRef.current);
+        }
+        const requested = {
+          count: flattenedItems.length,
+          firstItemIndex,
+          itemIndex,
+          messageId,
+        };
+        deferredScrollFrameRef.current = window.requestAnimationFrame(() => {
+          deferredScrollFrameRef.current = null;
+          const current = virtualizerModelRef.current;
+          const currentIndex = current.messageItemIndexById.get(messageId);
+          if (
+            currentIndex !== requested.itemIndex ||
+            current.firstItemIndex !== requested.firstItemIndex ||
+            current.flattenedCount !== requested.count
+          ) {
+            return;
+          }
+          virtuosoRef.current?.scrollToIndex({
+            align: "center",
+            behavior: options.behavior === "smooth" ? "smooth" : "auto",
+            index: groupedInternalIndexForItem(
+              current.groupCounts,
+              requested.itemIndex,
+            ),
+          });
+        });
+        return true;
+      },
+    };
+    onVirtualizerApiChange(api);
+    return () => onVirtualizerApiChange(null);
+  }, [
+    flattenedItems.length,
+    firstItemIndex,
+    messageItemIndexById,
+    onVirtualizerApiChange,
+  ]);
+
+  const handleScrollerRef = React.useCallback(
+    (ref: HTMLElement | Window | null) => {
+      const scroller = ref instanceof HTMLDivElement ? ref : null;
+      onVirtualizerScrollerChange?.(scroller);
+      setScrollerElement(scroller);
+    },
+    [onVirtualizerScrollerChange],
+  );
+
+  React.useEffect(() => {
+    if (!scrollerElement || !onVirtualizerScroll) return;
+    scrollerElement.addEventListener("scroll", onVirtualizerScroll, {
+      passive: true,
+    });
+    return () =>
+      scrollerElement.removeEventListener("scroll", onVirtualizerScroll);
+  }, [onVirtualizerScroll, scrollerElement]);
+
+  const handleRangeChanged = React.useCallback(
+    (_range: ListRange) => {
+      onVirtualizerRangeChanged?.();
+    },
+    [onVirtualizerRangeChanged],
+  );
+
+  return (
+    <GroupedVirtuoso<TimelineNonDayItem | undefined>
+      ref={virtuosoRef}
+      className="h-full min-h-0 w-full"
+      components={virtuosoComponents}
+      computeItemKey={(index, item) =>
+        item === undefined
+          ? (groupedInternalKeyByIndex.get(index) ??
+            `timeline-missing-${index}`)
+          : getTimelineItemKey(item)
+      }
+      data={groupedInternalData}
+      defaultItemHeight={72}
+      firstItemIndex={firstItemIndex}
+      followOutput="auto"
+      atBottomStateChange={onAtBottomStateChange}
+      initialTopMostItemIndex={{ align: "end", index: "LAST" }}
+      groupContent={(groupIndex) => {
+        const group = dayGroups[groupIndex];
+        return (
+          <div
+            className={cn(
+              "relative flex flex-col",
+              group.headingTimestamp !== null &&
+                "before:absolute before:inset-x-0 before:top-4 before:h-px before:bg-border/35 before:content-['']",
+            )}
+            data-day-label={
+              group.headingTimestamp === null
+                ? undefined
+                : formatDayHeading(group.headingTimestamp)
+            }
+            data-testid="message-timeline-day-group"
+          >
+            {group.headingTimestamp === null ? null : (
+              <DayDivider label={formatDayHeading(group.headingTimestamp)} />
+            )}
+          </div>
+        );
+      }}
+      groupCounts={groupCounts}
+      itemContent={(_index, _groupIndex, item) => {
+        if (!item) return null;
+        return (
+          <TimelineRowShell item={item} useContentVisibility={false}>
+            {renderItem(item)}
+          </TimelineRowShell>
+        );
+      }}
+      rangeChanged={handleRangeChanged}
+      scrollerRef={handleScrollerRef}
+      startReached={onStartReached ? () => onStartReached() : undefined}
+    />
+  );
+}
+
+const virtuosoComponents: Components<TimelineNonDayItem | undefined> = {
+  Scroller: React.forwardRef<
+    HTMLDivElement,
+    ScrollerProps & { className?: string }
+  >(function TimelineVirtuosoScroller({ className, ...props }, ref) {
+    return (
+      <div
+        {...props}
+        className={cn(
+          "h-full min-h-0 overflow-y-auto overflow-x-hidden overscroll-contain px-2 pt-1 pb-24",
+          className,
+        )}
+        data-buzz-conversation-scroll
+        data-testid="message-timeline"
+        data-virtuoso-scroller="true"
+        ref={ref}
+      />
+    );
+  }),
+  List: React.forwardRef<HTMLDivElement, React.ComponentPropsWithoutRef<"div">>(
+    function TimelineVirtuosoList({ className, ...props }, ref) {
+      return (
+        <div {...props} className={cn("flex flex-col", className)} ref={ref} />
+      );
+    },
+  ),
+};
+
+function TimelineRowShell({
+  children,
+  item,
+  useContentVisibility = true,
+}: {
+  children: React.ReactNode;
+  item: TimelineNonDayItem;
+  useContentVisibility?: boolean;
+}) {
+  return (
+    <div
+      className={useContentVisibility ? "timeline-row-cv" : undefined}
+      style={useContentVisibility ? timelineRowReserveStyle(item) : undefined}
+    >
+      {children}
+    </div>
+  );
+}
+
+type StableFirstItemIndexState = {
+  firstItemIndex: number;
+  keys: string[];
+};
+
+function getStableFirstItemIndex(
+  state: StableFirstItemIndexState,
+  items: TimelineNonDayItem[],
+): number {
+  const keys = items.map(getTimelineItemKey);
+  let firstItemIndex = state.firstItemIndex;
+
+  if (state.keys.length === 0 || keys.length === 0) {
+    firstItemIndex = FIRST_ITEM_INDEX_BASE;
+  } else {
+    const previousFirstKey = state.keys[0];
+    const previousFirstIndex = keys.indexOf(previousFirstKey);
+    if (previousFirstIndex > 0) {
+      firstItemIndex -= previousFirstIndex;
+    } else if (previousFirstIndex === -1) {
+      firstItemIndex = FIRST_ITEM_INDEX_BASE;
+    }
+  }
+
+  state.firstItemIndex = firstItemIndex;
+  state.keys = keys;
+  return firstItemIndex;
+}
 
 function SystemRow({
   currentPubkey,
