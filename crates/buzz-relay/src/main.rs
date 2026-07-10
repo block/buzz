@@ -39,16 +39,16 @@ fn buzz_auto_migrate_enabled(value: Option<&str>) -> bool {
 /// Fleet-wide totals (`buzz_total_*`) always emit regardless of mode.
 ///
 /// Set via `BUZZ_USAGE_METRICS_PER_COMMUNITY`:
-///   - `all`     — emit per-community series for every community (default)
-///   - `off`     — suppress all per-community series; fleet totals only
-///   - `top:<k>` — emit per-community series for the k communities with the
-///     most stored messages (uses message_counts already computed each tick —
-///     no extra query)
+///   - `all` — emit per-community series for every community (default)
+///   - `off` — suppress all per-community series; fleet totals only
+///
+/// A `top:<k>` mode (per-community series for the k most-active communities)
+/// is planned as a fast-follow once the series-lifecycle (gauge idle-timeout
+/// and stable tie-breaking across pods) is fully designed.
 #[derive(Debug, Clone)]
 enum PerCommunityMode {
     All,
     Off,
-    Top(usize),
 }
 
 impl PerCommunityMode {
@@ -60,16 +60,6 @@ impl PerCommunityMode {
         match raw.as_str() {
             "" | "all" => PerCommunityMode::All,
             "off" => PerCommunityMode::Off,
-            s if s.starts_with("top:") => {
-                let k: usize = s["top:".len()..].parse().unwrap_or_else(|_| {
-                    warn!(
-                        value = s,
-                        "BUZZ_USAGE_METRICS_PER_COMMUNITY: invalid top:<k> — defaulting to all"
-                    );
-                    usize::MAX
-                });
-                PerCommunityMode::Top(k)
-            }
             other => {
                 warn!(
                     value = other,
@@ -886,9 +876,10 @@ async fn main() -> anyhow::Result<()> {
             // Jitter the first tick by a random fraction of the interval so
             // that a rolling deploy with N pods doesn't hammer the DB
             // simultaneously at boot. Each pod picks a start delay in
-            // [0, interval_secs) using its PID as the seed.
-            let jitter_secs =
-                (std::process::id() as u64).wrapping_mul(2_654_435_761) % interval_secs;
+            // [0, interval_secs) using true per-process randomness (PID-derived
+            // seeds are unsafe in containers where the relay is typically PID 1
+            // in every pod, which would make all pods compute the same delay).
+            let jitter_secs = rand::random::<u64>() % interval_secs;
             tokio::time::sleep(std::time::Duration::from_secs(jitter_secs)).await;
 
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
@@ -1114,27 +1105,9 @@ async fn run_usage_metrics_tick(
     //
     // `active_set` is the subset of host_map IDs that get per-community gauges
     // this tick. Fleet-wide totals (buzz_total_*) always emit regardless.
-    //
-    // top:<k> ranking reuses message_rows (already fetched above — no extra
-    // query) as the activity proxy: communities with more stored messages are
-    // the ones operators most want to dashboard per-community.
-    let message_by_id: HashMap<Uuid, i64> = message_rows
-        .iter()
-        .map(|r| (r.community_id, r.count))
-        .collect();
-
     let active_set: std::collections::HashSet<Uuid> = match per_community_mode {
         PerCommunityMode::All => host_map.keys().copied().collect(),
         PerCommunityMode::Off => std::collections::HashSet::new(),
-        PerCommunityMode::Top(k) => {
-            let mut ranked: Vec<Uuid> = host_map.keys().copied().collect();
-            ranked.sort_by(|a, b| {
-                let ma = message_by_id.get(a).copied().unwrap_or(0);
-                let mb = message_by_id.get(b).copied().unwrap_or(0);
-                mb.cmp(&ma) // descending: most messages first
-            });
-            ranked.into_iter().take(*k).collect()
-        }
     };
 
     // --- Publish phase: emit all metrics now that every query succeeded ---
