@@ -62,9 +62,6 @@ trait KeyStore {
     /// Read a key. `Ok(None)` is "no such entry" (absent); `Err` is a backend
     /// failure (keyring unreachable) — the caller MUST NOT collapse the two.
     fn load(&self, name: &str) -> Result<Option<String>, String>;
-    /// Read a key without any side effects (no legacy-key migration, no writes).
-    /// `Ok(None)` when the blob or the key is absent; `Err` only on backend failure.
-    fn load_readonly(&self, name: &str) -> Result<Option<String>, String>;
     /// Read the entire blob as a map without any side effects.
     /// `Ok(None)` when no blob exists yet; `Err` only on backend failure.
     /// Callers must not call `migrate_legacy_key` — this is a read-only view.
@@ -82,9 +79,6 @@ impl KeyStore for SecretStore {
     }
     fn load(&self, name: &str) -> Result<Option<String>, String> {
         SecretStore::load(self, name)
-    }
-    fn load_readonly(&self, name: &str) -> Result<Option<String>, String> {
-        SecretStore::load_readonly(self, name)
     }
     fn load_all_readonly(&self) -> Result<Option<HashMap<String, String>>, String> {
         SecretStore::load_all_readonly(self)
@@ -809,10 +803,6 @@ mod tests {
             }
             *self.read_count.borrow_mut() += 1;
             Ok(self.stored.borrow().get(name).cloned())
-        }
-        fn load_readonly(&self, name: &str) -> Result<Option<String>, String> {
-            // The fake has no side effects, so load_readonly is identical to load.
-            self.load(name)
         }
         fn load_all_readonly(&self) -> Result<Option<HashMap<String, String>>, String> {
             if !self.reachable {
