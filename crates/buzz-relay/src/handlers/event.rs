@@ -591,9 +591,16 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
         .record("kind", kind_u32);
 
     debug!(event_id = %event_id_hex, kind = kind_u32, "EVENT");
+    // Fleet-wide received counter: kind-only, no community tag.
+    // Rationale: bounded_kind_label passes through all 10k values in
+    // 20000..=29999 (client-controlled ephemeral range). Crossing kind ×
+    // community would produce up to millions of series. Keep kind fleet-wide.
+    metrics::counter!("buzz_events_received_total", "kind" => kind_str.clone()).increment(1);
+    // Per-community volume counter: community-only, no kind tag.
+    // Use this for per-community throughput graphs; the fleet counter above
+    // for per-kind breakdowns.
     metrics::counter!(
-        "buzz_events_received_total",
-        "kind" => kind_str.clone(),
+        "buzz_community_events_received_total",
         "community" => conn.tenant.host().to_owned()
     )
     .increment(1);
@@ -695,12 +702,9 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
     match super::ingest::ingest_event(&state, &conn.tenant, event, ingest_auth).await {
         Ok(result) => {
             if result.accepted {
-                metrics::counter!(
-                    "buzz_events_stored_total",
-                    "kind" => kind_str,
-                    "community" => conn.tenant.host().to_owned()
-                )
-                .increment(1);
+                // Fleet-wide stored counter: kind-only, no community tag.
+                // Same cardinality rationale as buzz_events_received_total above.
+                metrics::counter!("buzz_events_stored_total", "kind" => kind_str).increment(1);
                 info!(
                     event_id = %result.event_id,
                     kind = kind_u32,

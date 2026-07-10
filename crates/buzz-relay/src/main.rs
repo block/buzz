@@ -29,6 +29,58 @@ fn buzz_auto_migrate_enabled(value: Option<&str>) -> bool {
     })
 }
 
+/// Controls how many per-community gauge series the usage poller emits.
+///
+/// Datadog cost is proportional to the number of unique time-series.  With ~25
+/// gauge label combinations per community, a relay hosting thousands of
+/// communities would incur five-figure monthly costs if every community always
+/// gets a full set of series.  This knob is the cost lever.
+///
+/// Fleet-wide totals (`buzz_total_*`) always emit regardless of mode.
+///
+/// Set via `BUZZ_USAGE_METRICS_PER_COMMUNITY`:
+///   - `all`     — emit per-community series for every community (default)
+///   - `off`     — suppress all per-community series; fleet totals only
+///   - `top:<k>` — emit per-community series for the k communities with the
+///     most stored messages (uses message_counts already computed each tick —
+///     no extra query)
+#[derive(Debug, Clone)]
+enum PerCommunityMode {
+    All,
+    Off,
+    Top(usize),
+}
+
+impl PerCommunityMode {
+    fn from_env() -> Self {
+        let raw = std::env::var("BUZZ_USAGE_METRICS_PER_COMMUNITY")
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase();
+        match raw.as_str() {
+            "" | "all" => PerCommunityMode::All,
+            "off" => PerCommunityMode::Off,
+            s if s.starts_with("top:") => {
+                let k: usize = s["top:".len()..].parse().unwrap_or_else(|_| {
+                    warn!(
+                        value = s,
+                        "BUZZ_USAGE_METRICS_PER_COMMUNITY: invalid top:<k> — defaulting to all"
+                    );
+                    usize::MAX
+                });
+                PerCommunityMode::Top(k)
+            }
+            other => {
+                warn!(
+                    value = other,
+                    "BUZZ_USAGE_METRICS_PER_COMMUNITY: unknown value — defaulting to all"
+                );
+                PerCommunityMode::All
+            }
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // Install the ring CryptoProvider for rustls. Required before any rustls
@@ -821,6 +873,7 @@ async fn main() -> anyhow::Result<()> {
     //   In-memory:  each pod exports its partition → dashboard uses sum()
     {
         let usage_state = Arc::clone(&state);
+        let per_community_mode = PerCommunityMode::from_env();
         let interval_secs = std::env::var("BUZZ_USAGE_METRICS_INTERVAL_SECS")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
@@ -844,7 +897,7 @@ async fn main() -> anyhow::Result<()> {
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
                 interval.tick().await;
-                if let Err(e) = run_usage_metrics_tick(&usage_state).await {
+                if let Err(e) = run_usage_metrics_tick(&usage_state, &per_community_mode).await {
                     error!(error = %e, "Usage metrics tick failed — skipping");
                 }
             }
@@ -1024,7 +1077,10 @@ fn reminder_to_event(reminder: &buzz_db::event::DueReminder) -> nostr::Event {
 ///
 /// All DB-derived gauges use absolute SET (not increment), so they self-heal
 /// after a missed tick or a pod restart.
-async fn run_usage_metrics_tick(state: &AppState) -> anyhow::Result<()> {
+async fn run_usage_metrics_tick(
+    state: &AppState,
+    per_community_mode: &PerCommunityMode,
+) -> anyhow::Result<()> {
     // --- community id → host label map (one query, cached for this tick) ---
     let hosts = state.db.usage_community_hosts().await?;
     let host_map: HashMap<Uuid, String> = hosts.into_iter().map(|c| (c.id, c.host)).collect();
@@ -1054,6 +1110,33 @@ async fn run_usage_metrics_tick(state: &AppState) -> anyhow::Result<()> {
     let online_snapshot = state.conn_manager.per_community_users_online();
     let subs_snapshot = state.sub_registry.per_community_subscriptions();
 
+    // --- Determine which community IDs receive per-community series (K1) ---
+    //
+    // `active_set` is the subset of host_map IDs that get per-community gauges
+    // this tick. Fleet-wide totals (buzz_total_*) always emit regardless.
+    //
+    // top:<k> ranking reuses message_rows (already fetched above — no extra
+    // query) as the activity proxy: communities with more stored messages are
+    // the ones operators most want to dashboard per-community.
+    let message_by_id: HashMap<Uuid, i64> = message_rows
+        .iter()
+        .map(|r| (r.community_id, r.count))
+        .collect();
+
+    let active_set: std::collections::HashSet<Uuid> = match per_community_mode {
+        PerCommunityMode::All => host_map.keys().copied().collect(),
+        PerCommunityMode::Off => std::collections::HashSet::new(),
+        PerCommunityMode::Top(k) => {
+            let mut ranked: Vec<Uuid> = host_map.keys().copied().collect();
+            ranked.sort_by(|a, b| {
+                let ma = message_by_id.get(a).copied().unwrap_or(0);
+                let mb = message_by_id.get(b).copied().unwrap_or(0);
+                mb.cmp(&ma) // descending: most messages first
+            });
+            ranked.into_iter().take(*k).collect()
+        }
+    };
+
     // --- Publish phase: emit all metrics now that every query succeeded ---
 
     // --- A. Adoption stocks (DB-polled) ---
@@ -1066,7 +1149,17 @@ async fn run_usage_metrics_tick(state: &AppState) -> anyhow::Result<()> {
     // rather than keeping the last nonzero value until process restart.
     {
         let rows: HashMap<Uuid, _> = user_rows.into_iter().map(|r| (r.community_id, r)).collect();
+        // Fleet totals (always emitted).
+        let (total_human, total_agent): (i64, i64) = rows
+            .values()
+            .fold((0, 0), |(h, a), r| (h + r.human, a + r.agent));
+        metrics::gauge!("buzz_total_users", "type" => "human").set(total_human as f64);
+        metrics::gauge!("buzz_total_users", "type" => "agent").set(total_agent as f64);
+        // Per-community series (gated by active_set).
         for (&id, community) in &host_map {
+            if !active_set.contains(&id) {
+                continue;
+            }
             let (human, agent) = rows.get(&id).map(|r| (r.human, r.agent)).unwrap_or((0, 0));
             metrics::gauge!("buzz_community_users", "community" => community.clone(), "type" => "human")
                 .set(human as f64);
@@ -1096,7 +1189,19 @@ async fn run_usage_metrics_tick(state: &AppState) -> anyhow::Result<()> {
                 matched
             })
             .collect();
+        // Fleet totals (always emitted).
+        for &ct in CHANNEL_TYPES {
+            let total: i64 = host_map
+                .keys()
+                .map(|id| rows.get(&(*id, ct)).copied().unwrap_or(0))
+                .sum();
+            metrics::gauge!("buzz_total_channels", "type" => ct).set(total as f64);
+        }
+        // Per-community series (gated by active_set).
         for (&id, community) in &host_map {
+            if !active_set.contains(&id) {
+                continue;
+            }
             for &ct in CHANNEL_TYPES {
                 let count = rows.get(&(id, ct)).copied().unwrap_or(0);
                 metrics::gauge!(
@@ -1116,7 +1221,14 @@ async fn run_usage_metrics_tick(state: &AppState) -> anyhow::Result<()> {
             .into_iter()
             .map(|r| (r.community_id, r.count))
             .collect();
+        // Fleet total (always emitted).
+        let total: i64 = rows.values().sum();
+        metrics::gauge!("buzz_total_messages").set(total as f64);
+        // Per-community series (gated by active_set).
         for (&id, community) in &host_map {
+            if !active_set.contains(&id) {
+                continue;
+            }
             let count = rows.get(&id).copied().unwrap_or(0);
             metrics::gauge!("buzz_community_messages", "community" => community.clone())
                 .set(count as f64);
@@ -1144,7 +1256,19 @@ async fn run_usage_metrics_tick(state: &AppState) -> anyhow::Result<()> {
                 matched
             })
             .collect();
+        // Fleet totals (always emitted).
+        for &role in RELAY_ROLES {
+            let total: i64 = host_map
+                .keys()
+                .map(|id| rows.get(&(*id, role)).copied().unwrap_or(0))
+                .sum();
+            metrics::gauge!("buzz_total_relay_members", "role" => role).set(total as f64);
+        }
+        // Per-community series (gated by active_set).
         for (&id, community) in &host_map {
+            if !active_set.contains(&id) {
+                continue;
+            }
             for &role in RELAY_ROLES {
                 let count = rows.get(&(id, role)).copied().unwrap_or(0);
                 metrics::gauge!(
@@ -1178,7 +1302,19 @@ async fn run_usage_metrics_tick(state: &AppState) -> anyhow::Result<()> {
                 matched
             })
             .collect();
+        // Fleet totals (always emitted).
+        for &status in WORKFLOW_STATUSES {
+            let total: i64 = host_map
+                .keys()
+                .map(|id| rows.get(&(*id, status)).copied().unwrap_or(0))
+                .sum();
+            metrics::gauge!("buzz_total_workflows", "status" => status).set(total as f64);
+        }
+        // Per-community series (gated by active_set).
         for (&id, community) in &host_map {
+            if !active_set.contains(&id) {
+                continue;
+            }
             for &status in WORKFLOW_STATUSES {
                 let count = rows.get(&(id, status)).copied().unwrap_or(0);
                 metrics::gauge!(
@@ -1198,7 +1334,14 @@ async fn run_usage_metrics_tick(state: &AppState) -> anyhow::Result<()> {
             .into_iter()
             .map(|r| (r.community_id, r.count))
             .collect();
+        // Fleet total (always emitted).
+        let total: i64 = rows.values().sum();
+        metrics::gauge!("buzz_total_git_repos").set(total as f64);
+        // Per-community series (gated by active_set).
         for (&id, community) in &host_map {
+            if !active_set.contains(&id) {
+                continue;
+            }
             let count = rows.get(&id).copied().unwrap_or(0);
             metrics::gauge!("buzz_community_git_repos", "community" => community.clone())
                 .set(count as f64);
@@ -1216,7 +1359,22 @@ async fn run_usage_metrics_tick(state: &AppState) -> anyhow::Result<()> {
         (active_users_30d, "30d"),
     ] {
         let rows: HashMap<Uuid, _> = data.into_iter().map(|r| (r.community_id, r)).collect();
+        // Fleet totals (always emitted).
+        let (total_human, total_agent, total_unknown): (i64, i64, i64) =
+            rows.values().fold((0, 0, 0), |(h, a, u), r| {
+                (h + r.human, a + r.agent, u + r.unknown)
+            });
+        metrics::gauge!("buzz_total_active_users", "window" => label, "type" => "human")
+            .set(total_human as f64);
+        metrics::gauge!("buzz_total_active_users", "window" => label, "type" => "agent")
+            .set(total_agent as f64);
+        metrics::gauge!("buzz_total_active_users", "window" => label, "type" => "unknown")
+            .set(total_unknown as f64);
+        // Per-community series (gated by active_set).
         for (&id, community) in &host_map {
+            if !active_set.contains(&id) {
+                continue;
+            }
             let (human, agent, unknown) = rows
                 .get(&id)
                 .map(|r| (r.human, r.agent, r.unknown))
@@ -1250,7 +1408,14 @@ async fn run_usage_metrics_tick(state: &AppState) -> anyhow::Result<()> {
             .into_iter()
             .map(|r| (r.community_id, r.count))
             .collect();
+        // Fleet total (always emitted).
+        let total: i64 = rows.values().sum();
+        metrics::gauge!("buzz_total_active_channels", "window" => label).set(total as f64);
+        // Per-community series (gated by active_set).
         for (&id, community) in &host_map {
+            if !active_set.contains(&id) {
+                continue;
+            }
             let count = rows.get(&id).copied().unwrap_or(0);
             metrics::gauge!(
                 "buzz_community_active_channels",
@@ -1269,7 +1434,14 @@ async fn run_usage_metrics_tick(state: &AppState) -> anyhow::Result<()> {
 
     // buzz_community_ws_connections{community}
     {
+        // Fleet total (always emitted).
+        let total: u64 = conns_snapshot.values().sum();
+        metrics::gauge!("buzz_total_ws_connections").set(total as f64);
+        // Per-community series (gated by active_set).
         for (&id, community) in &host_map {
+            if !active_set.contains(&id) {
+                continue;
+            }
             let count = conns_snapshot
                 .get(&CommunityId::from_uuid(id))
                 .copied()
@@ -1285,7 +1457,14 @@ async fn run_usage_metrics_tick(state: &AppState) -> anyhow::Result<()> {
     // the fleet-wide total (with the caveat that multi-pod connections are
     // counted N times). The metric name "_pod" suffix makes this explicit.
     {
+        // Fleet total (always emitted; same pod-local caveat applies).
+        let total: u64 = online_snapshot.values().sum();
+        metrics::gauge!("buzz_total_users_online_pod").set(total as f64);
+        // Per-community series (gated by active_set).
         for (&id, community) in &host_map {
+            if !active_set.contains(&id) {
+                continue;
+            }
             let count = online_snapshot
                 .get(&CommunityId::from_uuid(id))
                 .copied()
@@ -1297,7 +1476,14 @@ async fn run_usage_metrics_tick(state: &AppState) -> anyhow::Result<()> {
 
     // buzz_community_subscriptions{community}
     {
+        // Fleet total (always emitted).
+        let total: u64 = subs_snapshot.values().sum();
+        metrics::gauge!("buzz_total_subscriptions").set(total as f64);
+        // Per-community series (gated by active_set).
         for (&id, community) in &host_map {
+            if !active_set.contains(&id) {
+                continue;
+            }
             let count = subs_snapshot
                 .get(&CommunityId::from_uuid(id))
                 .copied()
