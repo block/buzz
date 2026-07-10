@@ -1,4 +1,4 @@
-import { Bug, ImageIcon, Paperclip, ThumbsUp, Wrench, X } from "lucide-react";
+import { Bug, ImageIcon, ThumbsUp, Wrench, X } from "lucide-react";
 import * as React from "react";
 
 import { cn } from "@/shared/lib/cn";
@@ -162,7 +162,13 @@ export function SendFeedbackDialog({
             void submitFeedback();
           }}
         >
-          {/* Category pills — styled like DM recipient pills, single-select. */}
+          {/*
+            Category pills — mirror the New DM recipient chips: the same
+            rounded-full silhouette with a circular icon slot on the left. When
+            a pill is selected, hovering swaps its icon for an X (the same
+            avatar→X affordance DM chips use to remove a recipient), signalling
+            that clicking deselects it.
+          */}
           <div className="flex flex-wrap items-center gap-2 pb-4">
             {FEEDBACK_CATEGORIES.map((entry) => {
               const Icon = entry.icon;
@@ -172,9 +178,9 @@ export function SendFeedbackDialog({
                   aria-label={entry.label}
                   aria-pressed={selected}
                   className={cn(
-                    "inline-flex items-center gap-2 rounded-full border py-1 pl-2.5 pr-3 text-xs transition-colors duration-150 ease-out focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-60",
+                    "group/feedback-pill inline-flex items-center gap-2 rounded-full border py-1 pl-1 pr-3 text-xs transition-colors duration-150 ease-out focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-60",
                     selected
-                      ? "border-primary bg-primary text-primary-foreground"
+                      ? "border-primary/60 bg-primary/10 text-foreground"
                       : "border-border/80 bg-background/80 text-foreground hover:bg-muted/50",
                   )}
                   data-testid={`feedback-category-${entry.id}`}
@@ -183,7 +189,23 @@ export function SendFeedbackDialog({
                   onClick={(event) => selectCategory(entry, event)}
                   type="button"
                 >
-                  <Icon className="h-3.5 w-3.5" />
+                  <span className="relative flex h-8 w-8 shrink-0 items-center justify-center">
+                    <span
+                      className={cn(
+                        "flex h-8 w-8 items-center justify-center rounded-full transition-colors duration-150 ease-out",
+                        selected
+                          ? "bg-primary/20 text-primary group-hover/feedback-pill:opacity-0 group-focus-visible/feedback-pill:opacity-0"
+                          : "bg-muted text-muted-foreground",
+                      )}
+                    >
+                      <Icon className="h-4 w-4" />
+                    </span>
+                    {selected ? (
+                      <span className="absolute inset-0 flex items-center justify-center rounded-full bg-primary text-primary-foreground opacity-0 transition-opacity duration-150 ease-out group-hover/feedback-pill:opacity-100 group-focus-visible/feedback-pill:opacity-100">
+                        <X aria-hidden="true" className="h-4 w-4" />
+                      </span>
+                    ) : null}
+                  </span>
                   <span className="font-medium">{entry.label}</span>
                 </button>
               );
@@ -264,7 +286,6 @@ export function SendFeedbackDialog({
               id="feedback-include-logs"
               onCheckedChange={(checked) => setIncludeLogs(checked === true)}
             />
-            <Paperclip aria-hidden="true" className="h-3.5 w-3.5" />
             Attach logs
           </label>
 
