@@ -505,7 +505,8 @@ jobs:
             libxdo-dev \
             patchelf \
             pkg-config \
-            wget
+            wget \
+            xdg-utils
           # Install GitHub CLI — preinstalled on runners but absent in containers.
           # wget and ca-certificates are now available from the step above.
           mkdir -p -m 755 /etc/apt/keyrings
