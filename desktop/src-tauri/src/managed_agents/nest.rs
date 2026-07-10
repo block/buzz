@@ -106,6 +106,33 @@ pub fn nest_dir() -> Option<PathBuf> {
     }
 }
 
+/// Returns `true` iff `path` ends with the dev-nest directory name (`.buzz-dev`).
+///
+/// Pure function — no globals — so it can be unit-tested without touching the
+/// process-lifetime [`NEST_DIR`] `OnceLock`.
+fn path_is_dev_nest(path: &std::path::Path) -> bool {
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .map(|n| n == NEST_DIR_DEV)
+        .unwrap_or(false)
+}
+
+/// Returns `true` when the running binary is using the dev nest (`~/.buzz-dev`).
+///
+/// This is `true` for all dev builds — `just staging` and `just dev` — because
+/// [`init_nest_dir`] is called with `is_dev = true` when the Tauri app-data
+/// directory starts with `"xyz.block.buzz.app.dev"`.
+///
+/// Returns `false` when:
+/// - The nest is the production nest (`~/.buzz`, signed DMG).
+/// - [`init_nest_dir`] has not been called yet (unit tests, home dir
+///   unresolvable) — the fallback path is always the prod nest.
+pub fn nest_is_dev() -> bool {
+    nest_dir()
+        .map(|p| path_is_dev_nest(&p))
+        .unwrap_or(false)
+}
+
 /// Creates the Buzz nest at `~/.buzz` if it doesn't already exist.
 ///
 /// Delegates to [`ensure_nest_at`] with the resolved nest directory.
