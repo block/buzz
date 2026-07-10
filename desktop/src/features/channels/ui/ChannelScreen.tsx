@@ -22,6 +22,7 @@ import {
   usePersonasQuery,
   useRelayAgentsQuery,
 } from "@/features/agents/hooks";
+import { useKnownAgentPubkeys } from "@/features/agents/useKnownAgentPubkeys";
 import {
   mergeMessages,
   useChannelMessagesQuery,
@@ -378,18 +379,21 @@ export function ChannelScreen({
     messageProfilesRef.current = messageProfilesRaw;
   }
   const messageProfiles = messageProfilesRef.current;
-  // Derived from the stabilised lookup so this Set only churns when a profile
-  // value actually changed — MessageRow compares `agentPubkeys` by reference,
-  // and each row previously re-derived this same scan locally (removed).
+  // Agent set for ChannelPane's own consumers (DM huddle member resolution,
+  // the agents list): the workspace-scoped baseline shared by every surface,
+  // widened with channel-member roles and this screen's profile lookup.
+  // Message rows no longer take this — MessageRow derives agent-ness itself
+  // from useKnownAgentPubkeys + per-pubkey profile checks.
+  const workspaceAgentPubkeys = useKnownAgentPubkeys();
   const agentPubkeys = React.useMemo(() => {
-    const pubkeys = new Set(knownAgentPubkeys);
+    const pubkeys = new Set([...workspaceAgentPubkeys, ...knownAgentPubkeys]);
     for (const [pubkey, profile] of Object.entries(messageProfiles)) {
       if (profile.isAgent) {
         pubkeys.add(normalizePubkey(pubkey));
       }
     }
     return pubkeys;
-  }, [knownAgentPubkeys, messageProfiles]);
+  }, [knownAgentPubkeys, messageProfiles, workspaceAgentPubkeys]);
   const personasQuery = usePersonasQuery();
   const { personaLookup, respondToLookup } = React.useMemo(() => {
     const agents = managedAgentsQuery.data ?? [];

@@ -3,6 +3,7 @@ import { RefreshCcw } from "lucide-react";
 
 import { useAppShell } from "@/app/AppShellContext";
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
+import { useKnownAgentPubkeys } from "@/features/agents/useKnownAgentPubkeys";
 import { useChannelsQuery, useOpenDmMutation } from "@/features/channels/hooks";
 import { RightAuxiliaryPane } from "@/features/channels/ui/RightAuxiliaryPane";
 import { ChannelManagementSheet } from "@/features/channels/ui/ChannelManagementSheet";
@@ -331,12 +332,12 @@ export function HomeView({
     enabled: feedProfilePubkeys.length > 0,
   });
   const feedProfiles = feedProfilesQuery.data?.profiles;
+  // Agent set for the inbox list/detail bot badges: the workspace-scoped
+  // baseline (which already includes feed agent activity) widened with this
+  // surface's profile lookup.
+  const workspaceAgentPubkeys = useKnownAgentPubkeys();
   const inboxAgentPubkeys = React.useMemo(() => {
-    const pubkeys = new Set<string>();
-
-    for (const item of feed?.feed.agentActivity ?? []) {
-      pubkeys.add(normalizePubkey(item.pubkey));
-    }
+    const pubkeys = new Set(workspaceAgentPubkeys);
 
     for (const [pubkey, profile] of Object.entries(feedProfiles ?? {})) {
       if (profile.isAgent) {
@@ -345,7 +346,7 @@ export function HomeView({
     }
 
     return pubkeys;
-  }, [feed?.feed.agentActivity, feedProfiles]);
+  }, [feedProfiles, workspaceAgentPubkeys]);
   const inboxItems = React.useMemo(
     () =>
       buildInboxItems({

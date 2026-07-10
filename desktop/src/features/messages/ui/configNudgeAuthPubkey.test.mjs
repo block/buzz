@@ -27,7 +27,11 @@ const HUMAN_SIGNER =
 const AGENT_PUBKEY =
   "2222222222222222222222222222222222222222222222222222222222222222";
 
+// MessageRow passes a predicate combining the workspace known-agent set with
+// per-pubkey profile `isAgent` checks; the set-membership form is the minimal
+// equivalent for exercising the signer-selection seam.
 const AGENT_PUBKEYS = new Set([AGENT_PUBKEY]);
+const isKnownAgentPubkey = (pubkey) => AGENT_PUBKEYS.has(pubkey);
 
 function makeEvent(overrides = {}) {
   return {
@@ -80,7 +84,7 @@ test("signerIsHuman_actorTagAttributedToAgent_returnsUndefined", () => {
 
   // The guard must reject: signer is human, not in AGENT_PUBKEYS.
   assert.equal(
-    getConfigNudgeAuthorPubkey(msg, AGENT_PUBKEYS),
+    getConfigNudgeAuthorPubkey(msg, isKnownAgentPubkey),
     undefined,
     "human signer with actor-tag attribution to agent must NOT enable the card",
   );
@@ -103,7 +107,7 @@ test("signerIsAgent_genuine_returnsAgentPubkey", () => {
   );
 
   assert.equal(
-    getConfigNudgeAuthorPubkey(msg, AGENT_PUBKEYS),
+    getConfigNudgeAuthorPubkey(msg, isKnownAgentPubkey),
     AGENT_PUBKEY,
     "genuine agent-signed kind:9 must enable the card",
   );
@@ -123,7 +127,7 @@ test("nonKind9_agentSigner_returnsUndefined", () => {
   const [msg] = format(event);
 
   assert.equal(
-    getConfigNudgeAuthorPubkey(msg, AGENT_PUBKEYS),
+    getConfigNudgeAuthorPubkey(msg, isKnownAgentPubkey),
     undefined,
     "non-kind:9 events must never enable the card even if signer is known agent",
   );
