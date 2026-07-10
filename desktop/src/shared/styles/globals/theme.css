@@ -230,12 +230,6 @@
   --buzz-active-foreground: 0 0% 100%;
 }
 
-:root[data-buzz-sidebar]
-  [data-testid="app-sidebar"]
-  [data-testid="sidebar-pinned-header"] {
-  padding-top: 0.75rem;
-}
-
 :root[data-buzz-sidebar] .group\/sidebar-wrapper,
 :root[data-buzz-sidebar] [data-testid="app-sidebar"],
 :root[data-buzz-sidebar] [data-buzz-glass-inset],
