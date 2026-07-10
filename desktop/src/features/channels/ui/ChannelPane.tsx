@@ -190,7 +190,6 @@ export const ChannelPane = React.memo(function ChannelPane({
     timelineScrollRef,
     composerWrapperRef,
     `${activeChannelId}:${isSinglePanelView}:${hasMainComposerOverlay}`,
-    "css-variable",
   );
   const clearWelcomeComposerDismissTimer = React.useCallback(() => {
     if (welcomeComposerDismissTimerRef.current !== null) {
