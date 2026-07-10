@@ -1073,10 +1073,17 @@ async fn handle_agent_profile(
         .ok_or_else(|| anyhow::anyhow!("kind:10100 missing channel_add_policy field"))?;
 
     let pubkey_bytes = event.pubkey.to_bytes().to_vec();
-    state
+    if state
         .db
         .ensure_user(tenant.community(), &pubkey_bytes)
-        .await?;
+        .await?
+    {
+        metrics::counter!(
+            "buzz_users_created_total",
+            "community" => tenant.host().to_owned()
+        )
+        .increment(1);
+    }
     state
         .db
         .set_channel_add_policy(tenant.community(), &pubkey_bytes, policy)
@@ -1124,10 +1131,17 @@ async fn handle_kind0_profile(
 
     let pubkey_bytes = event.pubkey.to_bytes().to_vec();
 
-    state
+    if state
         .db
         .ensure_user(tenant.community(), &pubkey_bytes)
-        .await?;
+        .await?
+    {
+        metrics::counter!(
+            "buzz_users_created_total",
+            "community" => tenant.host().to_owned()
+        )
+        .increment(1);
+    }
 
     // Pass all fields as Some — empty string clears the field in the DB.
     // This ensures kind:0 is treated as absolute state, not a partial update.
@@ -1659,7 +1673,7 @@ async fn handle_create_group(
             Err(_) => {
                 // Channel not found — shouldn't happen (ingest_event pre-created it),
                 // but fall back to creation to stay resilient.
-                state
+                let ch = state
                     .db
                     .create_channel(
                         tenant.community(),
@@ -1670,11 +1684,18 @@ async fn handle_create_group(
                         &actor_bytes,
                         ttl_seconds,
                     )
-                    .await?
+                    .await?;
+                metrics::counter!(
+                    "buzz_channels_created_total",
+                    "community" => tenant.host().to_owned(),
+                    "type" => channel_type.to_string()
+                )
+                .increment(1);
+                ch
             }
         }
     } else {
-        state
+        let ch = state
             .db
             .create_channel(
                 tenant.community(),
@@ -1685,7 +1706,14 @@ async fn handle_create_group(
                 &actor_bytes,
                 ttl_seconds,
             )
-            .await?
+            .await?;
+        metrics::counter!(
+            "buzz_channels_created_total",
+            "community" => tenant.host().to_owned(),
+            "type" => channel_type.to_string()
+        )
+        .increment(1);
+        ch
     };
 
     // Creator becomes owner — evict any stale negative membership lookup.

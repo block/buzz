@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use tracing::{error, info, warn};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
+use uuid::Uuid;
 
 use buzz_audit::AuditService;
 use buzz_auth::AuthService;
@@ -806,6 +807,34 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
+    // Usage metrics: periodic background task polling per-community stats.
+    //
+    // DB-derived gauges (users, channels, messages, members, workflows, git
+    // repos, active users/channels) are SET from GROUP BY queries — one per
+    // tick. In-memory gauges (ws_connections, subscriptions, users_online)
+    // are snapshotted from live in-memory state. Both avoid inc/dec drift.
+    //
+    // Multi-pod semantics:
+    //   DB-derived: all pods export the same value → dashboard uses max()
+    //   In-memory:  each pod exports its partition → dashboard uses sum()
+    {
+        let usage_state = Arc::clone(&state);
+        let interval_secs = std::env::var("BUZZ_USAGE_METRICS_INTERVAL_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(60)
+            .max(5); // 5s minimum: cheaper than pool poller's 1s minimum
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
+            loop {
+                interval.tick().await;
+                if let Err(e) = run_usage_metrics_tick(&usage_state).await {
+                    error!(error = %e, "Usage metrics tick failed — skipping");
+                }
+            }
+        });
+    }
+
     serve(router, health_router, Arc::clone(&state)).await?;
 
     // Signal the audit worker to stop accepting, flush buffered entries, and
@@ -969,6 +998,142 @@ fn reminder_to_event(reminder: &buzz_db::event::DueReminder) -> nostr::Event {
     });
 
     serde_json::from_value(event_json).expect("valid event JSON from DB row")
+}
+
+/// Run one tick of the usage metrics poller.
+///
+/// Queries the DB for per-community stock counts and snapshots in-memory
+/// state for connection/subscription gauges. On any DB error, returns `Err`
+/// so the caller can log and skip the tick without crashing.
+///
+/// All DB-derived gauges use absolute SET (not increment), so they self-heal
+/// after a missed tick or a pod restart.
+async fn run_usage_metrics_tick(state: &AppState) -> anyhow::Result<()> {
+    // --- community id → host label map (one query, cached for this tick) ---
+    let hosts = state.db.usage_community_hosts().await?;
+    let host_map: std::collections::HashMap<Uuid, String> =
+        hosts.into_iter().map(|c| (c.id, c.host)).collect();
+
+    // Helper: resolve community UUID → host label string.
+    let host =
+        |id: Uuid| -> String { host_map.get(&id).cloned().unwrap_or_else(|| id.to_string()) };
+
+    // --- A. Adoption stocks (DB-polled) ---
+
+    // buzz_communities_total (no tag — fleet-wide count)
+    let total = state.db.usage_community_count().await?;
+    metrics::gauge!("buzz_communities_total").set(total as f64);
+
+    // buzz_community_users{community, type:human|agent}
+    for row in state.db.usage_user_counts().await? {
+        let community = host(row.community_id);
+        metrics::gauge!("buzz_community_users", "community" => community.clone(), "type" => "human")
+            .set(row.human as f64);
+        metrics::gauge!("buzz_community_users", "community" => community, "type" => "agent")
+            .set(row.agent as f64);
+    }
+
+    // buzz_community_channels{community, type}
+    for row in state.db.usage_channel_counts().await? {
+        let community = host(row.community_id);
+        metrics::gauge!(
+            "buzz_community_channels",
+            "community" => community,
+            "type" => row.channel_type
+        )
+        .set(row.count as f64);
+    }
+
+    // buzz_community_messages{community}
+    for row in state.db.usage_message_counts().await? {
+        let community = host(row.community_id);
+        metrics::gauge!("buzz_community_messages", "community" => community).set(row.count as f64);
+    }
+
+    // buzz_community_relay_members{community, role}
+    for row in state.db.usage_relay_member_counts().await? {
+        let community = host(row.community_id);
+        metrics::gauge!(
+            "buzz_community_relay_members",
+            "community" => community,
+            "role" => row.role
+        )
+        .set(row.count as f64);
+    }
+
+    // buzz_community_workflows{community, status}
+    for row in state.db.usage_workflow_counts().await? {
+        let community = host(row.community_id);
+        metrics::gauge!(
+            "buzz_community_workflows",
+            "community" => community,
+            "status" => row.status
+        )
+        .set(row.count as f64);
+    }
+
+    // buzz_community_git_repos{community}
+    for row in state.db.usage_git_repo_counts().await? {
+        let community = host(row.community_id);
+        metrics::gauge!("buzz_community_git_repos", "community" => community).set(row.count as f64);
+    }
+
+    // --- C. Engagement — windowed DAU/WAU/MAU + active channels ---
+
+    for (interval, label) in [("1 day", "1d"), ("7 days", "7d"), ("30 days", "30d")] {
+        for row in state.db.usage_active_user_counts(interval).await? {
+            let community = host(row.community_id);
+            metrics::gauge!(
+                "buzz_community_active_users",
+                "community" => community.clone(),
+                "window" => label,
+                "type" => "human"
+            )
+            .set(row.human as f64);
+            metrics::gauge!(
+                "buzz_community_active_users",
+                "community" => community,
+                "window" => label,
+                "type" => "agent"
+            )
+            .set(row.agent as f64);
+        }
+    }
+
+    for (interval, label) in [("1 day", "1d"), ("7 days", "7d")] {
+        for row in state.db.usage_active_channel_counts(interval).await? {
+            let community = host(row.community_id);
+            metrics::gauge!(
+                "buzz_community_active_channels",
+                "community" => community,
+                "window" => label
+            )
+            .set(row.count as f64);
+        }
+    }
+
+    // --- D. Realtime — in-memory snapshots ---
+
+    // buzz_community_ws_connections{community}
+    for (community_id, count) in state.conn_manager.per_community_ws_connections() {
+        let community = host(*community_id.as_uuid());
+        metrics::gauge!("buzz_community_ws_connections", "community" => community)
+            .set(count as f64);
+    }
+
+    // buzz_community_users_online{community}
+    for (community_id, count) in state.conn_manager.per_community_users_online() {
+        let community = host(*community_id.as_uuid());
+        metrics::gauge!("buzz_community_users_online", "community" => community).set(count as f64);
+    }
+
+    // buzz_community_subscriptions{community}
+    for (community_id, count) in state.sub_registry.per_community_subscriptions() {
+        let community = host(*community_id.as_uuid());
+        metrics::gauge!("buzz_community_subscriptions", "community" => community).set(count as f64);
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]

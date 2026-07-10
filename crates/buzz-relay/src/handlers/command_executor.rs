@@ -42,12 +42,22 @@ pub async fn handle_command(
     // Ensure the authenticated user exists in the users table (foreign key requirement).
     // The old REST handlers did this via extract_auth_context; command executor must do it explicitly.
     let pubkey_bytes = auth.pubkey().to_bytes().to_vec();
-    if let Err(e) = state
+    match state
         .db
         .ensure_user(tenant.community(), &pubkey_bytes)
         .await
     {
-        tracing::warn!("command_executor: ensure_user failed: {e}");
+        Ok(true) => {
+            metrics::counter!(
+                "buzz_users_created_total",
+                "community" => tenant.host().to_owned()
+            )
+            .increment(1);
+        }
+        Ok(false) => {}
+        Err(e) => {
+            tracing::warn!("command_executor: ensure_user failed: {e}");
+        }
     }
 
     let kind = event.kind.as_u16() as u32;

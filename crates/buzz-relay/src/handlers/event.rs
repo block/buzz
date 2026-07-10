@@ -43,6 +43,7 @@ fn bounded_kind_label(kind: u32) -> String {
         41001 | 41010..=41012 => kind.to_string(),
         43001..=43006 => kind.to_string(),
         44100..=44101 => kind.to_string(),
+        44200 => kind.to_string(),
         45001..=45003 => kind.to_string(),
         46001..=46012 | 46020 | 46030..=46031 => kind.to_string(),
         48001 | 48100..=48103 | 48106 => kind.to_string(),
@@ -509,6 +510,7 @@ async fn dispatch_persistent_event_inner(
         let workflow_engine = Arc::clone(&state.workflow_engine);
         let workflow_event = stored_event.clone();
         let trigger_kind = kind_u32.to_string();
+        let workflow_community_host = tenant.host().to_owned();
         // The event was stored under `tenant.community()`; `StoredEvent` does
         // not carry the community, so pass it explicitly. The same channel UUID
         // can exist in another community — scoping the workflow lookup to this
@@ -522,8 +524,12 @@ async fn dispatch_persistent_event_inner(
             {
                 tracing::error!(event_id = ?workflow_event.event.id, "Workflow trigger failed: {e}");
             } else {
-                metrics::counter!("buzz_workflow_runs_total", "trigger" => trigger_kind)
-                    .increment(1);
+                metrics::counter!(
+                    "buzz_workflow_runs_total",
+                    "trigger" => trigger_kind,
+                    "community" => workflow_community_host
+                )
+                .increment(1);
             }
         });
     }
@@ -585,7 +591,12 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
         .record("kind", kind_u32);
 
     debug!(event_id = %event_id_hex, kind = kind_u32, "EVENT");
-    metrics::counter!("buzz_events_received_total", "kind" => kind_str.clone()).increment(1);
+    metrics::counter!(
+        "buzz_events_received_total",
+        "kind" => kind_str.clone(),
+        "community" => conn.tenant.host().to_owned()
+    )
+    .increment(1);
 
     let (conn_id, pubkey_bytes, auth_pubkey, scopes, channel_ids) = {
         let auth = conn.auth_state.read().await;
@@ -684,7 +695,12 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
     match super::ingest::ingest_event(&state, &conn.tenant, event, ingest_auth).await {
         Ok(result) => {
             if result.accepted {
-                metrics::counter!("buzz_events_stored_total", "kind" => kind_str).increment(1);
+                metrics::counter!(
+                    "buzz_events_stored_total",
+                    "kind" => kind_str,
+                    "community" => conn.tenant.host().to_owned()
+                )
+                .increment(1);
                 info!(
                     event_id = %result.event_id,
                     kind = kind_u32,

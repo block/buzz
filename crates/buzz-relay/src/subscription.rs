@@ -351,6 +351,21 @@ impl SubscriptionRegistry {
         self.subs.len()
     }
 
+    /// Snapshot the number of active subscriptions per community.
+    ///
+    /// Used by the usage poller to emit `buzz_community_subscriptions{community}`.
+    /// Snapshotting avoids gauge drift from mismatched inc/dec across communities.
+    pub fn per_community_subscriptions(&self) -> std::collections::HashMap<CommunityId, u64> {
+        let mut counts: std::collections::HashMap<CommunityId, u64> =
+            std::collections::HashMap::new();
+        for conn_entry in self.subs.iter() {
+            for (_, community_id, _) in conn_entry.value().values() {
+                *counts.entry(*community_id).or_default() += 1;
+            }
+        }
+        counts
+    }
+
     fn push_match(
         &self,
         conn_id: ConnId,
@@ -1462,5 +1477,50 @@ mod tests {
             registry.fan_out_scoped(community_b, &event),
             vec![(conn_b, "b".to_string())]
         );
+    }
+
+    #[test]
+    fn per_community_subscriptions_snapshot_is_correctly_scoped() {
+        // Verify that per_community_subscriptions() returns the correct
+        // per-community counts and that removal keeps the snapshot accurate.
+        let registry = SubscriptionRegistry::new();
+        let community_a = CommunityId::from_uuid(Uuid::from_u128(0xaaaa));
+        let community_b = CommunityId::from_uuid(Uuid::from_u128(0xbbbb));
+        let conn_a = Uuid::new_v4();
+        let conn_b = Uuid::new_v4();
+        let channel = Uuid::new_v4();
+
+        // 2 subs in community A, 1 sub in community B.
+        registry.register_scoped(
+            community_a,
+            conn_a,
+            "a1".to_string(),
+            vec![Filter::new().kind(Kind::TextNote)],
+            Some(channel),
+        );
+        registry.register_scoped(
+            community_a,
+            conn_a,
+            "a2".to_string(),
+            vec![Filter::new().kind(Kind::Metadata)],
+            None,
+        );
+        registry.register_scoped(
+            community_b,
+            conn_b,
+            "b1".to_string(),
+            vec![Filter::new().kind(Kind::TextNote)],
+            Some(channel),
+        );
+
+        let snap = registry.per_community_subscriptions();
+        assert_eq!(snap.get(&community_a), Some(&2), "community A: 2 subs");
+        assert_eq!(snap.get(&community_b), Some(&1), "community B: 1 sub");
+
+        // Remove one sub from community A — snapshot should reflect it.
+        registry.remove_subscription(conn_a, "a1");
+        let snap2 = registry.per_community_subscriptions();
+        assert_eq!(snap2.get(&community_a), Some(&1), "community A: 1 sub after removal");
+        assert_eq!(snap2.get(&community_b), Some(&1), "community B: unchanged");
     }
 }

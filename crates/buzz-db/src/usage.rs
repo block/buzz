@@ -1,0 +1,538 @@
+//! Per-community usage rollup queries for Prometheus gauges.
+//!
+//! All queries use `GROUP BY community_id` against indexed columns —
+//! no per-community loops, no full-table scans.
+//!
+//! Returned structs are plain data; the caller (relay poller) maps them
+//! to Prometheus labels and calls `metrics::gauge!(...).set(...)`.
+
+use crate::error::Result;
+use sqlx::PgPool;
+use uuid::Uuid;
+
+/// Total number of communities registered on this relay.
+pub async fn community_count(pool: &PgPool) -> Result<i64> {
+    let row = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM communities")
+        .fetch_one(pool)
+        .await?;
+    Ok(row)
+}
+
+/// Per-community user counts split by human/agent.
+#[derive(Debug)]
+pub struct CommunityUserCounts {
+    /// The UUID of the community.
+    pub community_id: Uuid,
+    /// Number of active human users (no `agent_owner_pubkey`).
+    pub human: i64,
+    /// Number of active agent users (`agent_owner_pubkey IS NOT NULL`).
+    pub agent: i64,
+}
+
+/// Return active (non-deactivated) user counts per community, split by type.
+///
+/// Agent discriminator: `agent_owner_pubkey IS NOT NULL`.
+pub async fn user_counts(pool: &PgPool) -> Result<Vec<CommunityUserCounts>> {
+    // Single GROUP BY query; two conditional SUMs avoid two round-trips.
+    let rows = sqlx::query_as::<_, (Uuid, i64, i64)>(
+        r#"
+        SELECT
+            community_id,
+            COUNT(*) FILTER (WHERE agent_owner_pubkey IS NULL)     AS human,
+            COUNT(*) FILTER (WHERE agent_owner_pubkey IS NOT NULL) AS agent
+        FROM users
+        WHERE deactivated_at IS NULL
+        GROUP BY community_id
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|(community_id, human, agent)| CommunityUserCounts {
+            community_id,
+            human,
+            agent,
+        })
+        .collect())
+}
+
+/// Per-community channel counts by type.
+#[derive(Debug)]
+pub struct CommunityChannelCount {
+    /// The UUID of the community.
+    pub community_id: Uuid,
+    /// Channel type string (e.g. `"stream"`, `"dm"`, `"forum"`, `"workflow"`).
+    pub channel_type: String,
+    /// Number of non-deleted channels of this type.
+    pub count: i64,
+}
+
+/// Return non-deleted channel counts per community per type.
+pub async fn channel_counts(pool: &PgPool) -> Result<Vec<CommunityChannelCount>> {
+    let rows = sqlx::query_as::<_, (Uuid, String, i64)>(
+        r#"
+        SELECT community_id, channel_type::text, COUNT(*) AS count
+        FROM channels
+        WHERE deleted_at IS NULL
+        GROUP BY community_id, channel_type
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(
+            |(community_id, channel_type, count)| CommunityChannelCount {
+                community_id,
+                channel_type,
+                count,
+            },
+        )
+        .collect())
+}
+
+/// Per-community message (kind=9) count.
+#[derive(Debug)]
+pub struct CommunityMessageCount {
+    /// The UUID of the community.
+    pub community_id: Uuid,
+    /// Number of stored non-deleted kind=9 events.
+    pub count: i64,
+}
+
+/// Return non-deleted kind=9 event counts per community.
+pub async fn message_counts(pool: &PgPool) -> Result<Vec<CommunityMessageCount>> {
+    let rows = sqlx::query_as::<_, (Uuid, i64)>(
+        r#"
+        SELECT community_id, COUNT(*) AS count
+        FROM events
+        WHERE kind = 9 AND deleted_at IS NULL
+        GROUP BY community_id
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|(community_id, count)| CommunityMessageCount {
+            community_id,
+            count,
+        })
+        .collect())
+}
+
+/// Per-community relay-member counts by role.
+#[derive(Debug)]
+pub struct CommunityMemberCount {
+    /// The UUID of the community.
+    pub community_id: Uuid,
+    /// Role string (e.g. `"owner"`, `"admin"`, `"member"`).
+    pub role: String,
+    /// Number of members with this role.
+    pub count: i64,
+}
+
+/// Return relay-member counts per community per role.
+pub async fn relay_member_counts(pool: &PgPool) -> Result<Vec<CommunityMemberCount>> {
+    let rows = sqlx::query_as::<_, (Uuid, String, i64)>(
+        r#"
+        SELECT community_id, role::text, COUNT(*) AS count
+        FROM relay_members
+        GROUP BY community_id, role
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|(community_id, role, count)| CommunityMemberCount {
+            community_id,
+            role,
+            count,
+        })
+        .collect())
+}
+
+/// Per-community workflow counts by status.
+#[derive(Debug)]
+pub struct CommunityWorkflowCount {
+    /// The UUID of the community.
+    pub community_id: Uuid,
+    /// Workflow status string (e.g. `"active"`, `"inactive"`).
+    pub status: String,
+    /// Number of workflows in this status.
+    pub count: i64,
+}
+
+/// Return workflow counts per community per status.
+pub async fn workflow_counts(pool: &PgPool) -> Result<Vec<CommunityWorkflowCount>> {
+    let rows = sqlx::query_as::<_, (Uuid, String, i64)>(
+        r#"
+        SELECT community_id, status::text, COUNT(*) AS count
+        FROM workflows
+        GROUP BY community_id, status
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|(community_id, status, count)| CommunityWorkflowCount {
+            community_id,
+            status,
+            count,
+        })
+        .collect())
+}
+
+/// Per-community git-repo count.
+#[derive(Debug)]
+pub struct CommunityGitRepoCount {
+    /// The UUID of the community.
+    pub community_id: Uuid,
+    /// Number of git repos registered for this community.
+    pub count: i64,
+}
+
+/// Return git repo counts per community.
+pub async fn git_repo_counts(pool: &PgPool) -> Result<Vec<CommunityGitRepoCount>> {
+    let rows = sqlx::query_as::<_, (Uuid, i64)>(
+        r#"
+        SELECT community_id, COUNT(*) AS count
+        FROM git_repos
+        GROUP BY community_id
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|(community_id, count)| CommunityGitRepoCount {
+            community_id,
+            count,
+        })
+        .collect())
+}
+
+/// Per-community active-user counts for a given window (e.g. 1d, 7d, 30d),
+/// split by human/agent.
+#[derive(Debug)]
+pub struct CommunityActiveUsers {
+    /// The UUID of the community.
+    pub community_id: Uuid,
+    /// Distinct human pubkeys that published at least one event in the window.
+    pub human: i64,
+    /// Distinct agent pubkeys that published at least one event in the window.
+    pub agent: i64,
+}
+
+/// Return distinct-publisher counts for events in `[now - interval, now]`
+/// per community, split by human/agent.
+///
+/// `interval_sql` must be a trusted literal (e.g. `"1 day"`, `"7 days"`) —
+/// it is not user-controlled; callers are in the relay process.
+pub async fn active_user_counts(
+    pool: &PgPool,
+    interval_sql: &'static str,
+) -> Result<Vec<CommunityActiveUsers>> {
+    // JOIN users so we can discriminate human vs. agent. Events are authored
+    // by pubkeys; the users.agent_owner_pubkey column is the discriminator.
+    // We use encode(e.pubkey, 'hex') and encode(u.pubkey, 'hex') to join on
+    // bytea — the columns are the same type so direct equality works.
+    let sql = format!(
+        r#"
+        SELECT
+            e.community_id,
+            COUNT(DISTINCT e.pubkey) FILTER (WHERE u.agent_owner_pubkey IS NULL)     AS human,
+            COUNT(DISTINCT e.pubkey) FILTER (WHERE u.agent_owner_pubkey IS NOT NULL) AS agent
+        FROM events e
+        LEFT JOIN users u
+            ON u.community_id = e.community_id AND u.pubkey = e.pubkey
+        WHERE e.created_at >= NOW() - INTERVAL '{interval_sql}'
+          AND e.deleted_at IS NULL
+        GROUP BY e.community_id
+        "#
+    );
+    let rows = sqlx::query_as::<_, (Uuid, i64, i64)>(sqlx::AssertSqlSafe(sql))
+        .fetch_all(pool)
+        .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|(community_id, human, agent)| CommunityActiveUsers {
+            community_id,
+            human,
+            agent,
+        })
+        .collect())
+}
+
+/// Per-community active-channel counts for a given window.
+#[derive(Debug)]
+pub struct CommunityActiveChannels {
+    /// The UUID of the community.
+    pub community_id: Uuid,
+    /// Distinct channel IDs with ≥1 kind=9 message in the window.
+    pub count: i64,
+}
+
+/// Return distinct channel IDs with ≥1 kind=9 message in `[now - interval, now]`.
+pub async fn active_channel_counts(
+    pool: &PgPool,
+    interval_sql: &'static str,
+) -> Result<Vec<CommunityActiveChannels>> {
+    let sql = format!(
+        r#"
+        SELECT community_id, COUNT(DISTINCT channel_id) AS count
+        FROM events
+        WHERE kind = 9
+          AND channel_id IS NOT NULL
+          AND created_at >= NOW() - INTERVAL '{interval_sql}'
+          AND deleted_at IS NULL
+        GROUP BY community_id
+        "#
+    );
+    let rows = sqlx::query_as::<_, (Uuid, i64)>(sqlx::AssertSqlSafe(sql))
+        .fetch_all(pool)
+        .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|(community_id, count)| CommunityActiveChannels {
+            community_id,
+            count,
+        })
+        .collect())
+}
+
+/// Mapping from community UUID to host string, used by the poller to resolve
+/// Prometheus label values.
+#[derive(Debug)]
+pub struct CommunityHost {
+    /// The UUID of the community.
+    pub id: Uuid,
+    /// The canonical host string for this community (used as the Prometheus label value).
+    pub host: String,
+}
+
+/// Fetch all community id → host mappings in one query.
+pub async fn community_hosts(pool: &PgPool) -> Result<Vec<CommunityHost>> {
+    let rows = sqlx::query_as::<_, (Uuid, String)>("SELECT id, host FROM communities")
+        .fetch_all(pool)
+        .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(id, host)| CommunityHost { id, host })
+        .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use buzz_core::CommunityId;
+    use nostr::Keys;
+    use sqlx::PgPool;
+
+    const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz";
+
+    async fn get_pool() -> PgPool {
+        PgPool::connect(TEST_DB_URL)
+            .await
+            .expect("connect to test DB")
+    }
+
+    fn random_pubkey() -> Vec<u8> {
+        Keys::generate().public_key().to_bytes().to_vec()
+    }
+
+    async fn make_community(pool: &PgPool) -> (Uuid, CommunityId, String) {
+        let id = uuid::Uuid::new_v4();
+        let host = format!("usage-test-{}.example", id.simple());
+        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+            .bind(id)
+            .bind(&host)
+            .execute(pool)
+            .await
+            .expect("insert test community");
+        (id, CommunityId::from_uuid(id), host)
+    }
+
+    async fn insert_user(pool: &PgPool, community_id: Uuid, pubkey: &[u8], is_agent: bool) {
+        if is_agent {
+            let owner = random_pubkey();
+            // Insert owner first (FK constraint).
+            sqlx::query(
+                "INSERT INTO users (community_id, pubkey) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+            )
+            .bind(community_id)
+            .bind(&owner)
+            .execute(pool)
+            .await
+            .expect("insert owner");
+            sqlx::query(
+                "INSERT INTO users (community_id, pubkey, agent_owner_pubkey) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
+            )
+            .bind(community_id)
+            .bind(pubkey)
+            .bind(&owner)
+            .execute(pool)
+            .await
+            .expect("insert agent user");
+        } else {
+            sqlx::query(
+                "INSERT INTO users (community_id, pubkey) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+            )
+            .bind(community_id)
+            .bind(pubkey)
+            .execute(pool)
+            .await
+            .expect("insert human user");
+        }
+    }
+
+    /// user_counts returns correct human/agent split and is scoped per community.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn test_user_counts_scoped_per_community() {
+        let pool = get_pool().await;
+        let (comm_a_uuid, _, _) = make_community(&pool).await;
+        let (comm_b_uuid, _, _) = make_community(&pool).await;
+
+        // Community A: 2 human, 1 agent
+        insert_user(&pool, comm_a_uuid, &random_pubkey(), false).await;
+        insert_user(&pool, comm_a_uuid, &random_pubkey(), false).await;
+        insert_user(&pool, comm_a_uuid, &random_pubkey(), true).await;
+
+        // Community B: 0 human, 1 agent
+        insert_user(&pool, comm_b_uuid, &random_pubkey(), true).await;
+
+        let counts = user_counts(&pool).await.expect("user_counts");
+
+        let a = counts.iter().find(|r| r.community_id == comm_a_uuid);
+        let b = counts.iter().find(|r| r.community_id == comm_b_uuid);
+
+        let a = a.expect("community A row");
+        assert_eq!(a.human, 2, "community A: 2 humans");
+        assert_eq!(a.agent, 1, "community A: 1 agent");
+
+        let b = b.expect("community B row");
+        assert_eq!(b.human, 0, "community B: 0 humans");
+        assert_eq!(b.agent, 1, "community B: 1 agent");
+    }
+
+    /// Deactivated users are excluded from user_counts.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn test_user_counts_excludes_deactivated() {
+        let pool = get_pool().await;
+        let (comm_uuid, _, _) = make_community(&pool).await;
+
+        let active_pk = random_pubkey();
+        let deactivated_pk = random_pubkey();
+
+        insert_user(&pool, comm_uuid, &active_pk, false).await;
+        insert_user(&pool, comm_uuid, &deactivated_pk, false).await;
+        // Deactivate the second user.
+        sqlx::query(
+            "UPDATE users SET deactivated_at = NOW() WHERE community_id = $1 AND pubkey = $2",
+        )
+        .bind(comm_uuid)
+        .bind(&deactivated_pk)
+        .execute(&pool)
+        .await
+        .expect("deactivate user");
+
+        let counts = user_counts(&pool).await.expect("user_counts");
+        let row = counts
+            .iter()
+            .find(|r| r.community_id == comm_uuid)
+            .expect("row");
+        assert_eq!(row.human, 1, "only active user counted");
+    }
+
+    /// channel_counts is scoped per community and excludes deleted channels.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn test_channel_counts_scoped_and_excludes_deleted() {
+        let pool = get_pool().await;
+        let (comm_uuid, comm_id, _) = make_community(&pool).await;
+        let owner = random_pubkey();
+        insert_user(&pool, comm_uuid, &owner, false).await;
+
+        // Insert a stream and a DM channel.
+        sqlx::query(
+            "INSERT INTO channels (id, community_id, name, channel_type, visibility, owner_pubkey)
+             VALUES ($1, $2, 'test-stream', 'stream', 'open', $3)",
+        )
+        .bind(uuid::Uuid::new_v4())
+        .bind(comm_uuid)
+        .bind(&owner)
+        .execute(&pool)
+        .await
+        .expect("insert stream channel");
+
+        let dm_id = uuid::Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO channels (id, community_id, name, channel_type, visibility, owner_pubkey)
+             VALUES ($1, $2, 'test-dm', 'dm', 'private', $3)",
+        )
+        .bind(dm_id)
+        .bind(comm_uuid)
+        .bind(&owner)
+        .execute(&pool)
+        .await
+        .expect("insert dm channel");
+
+        // Soft-delete the DM.
+        sqlx::query("UPDATE channels SET deleted_at = NOW() WHERE id = $1")
+            .bind(dm_id)
+            .execute(&pool)
+            .await
+            .expect("delete channel");
+
+        // Use comm_id to satisfy unused import warning.
+        let _ = comm_id;
+
+        let counts = channel_counts(&pool).await.expect("channel_counts");
+        let comm_counts: Vec<_> = counts
+            .iter()
+            .filter(|r| r.community_id == comm_uuid)
+            .collect();
+
+        // Only the stream channel should be counted.
+        assert_eq!(comm_counts.len(), 1);
+        assert_eq!(comm_counts[0].channel_type, "stream");
+        assert_eq!(comm_counts[0].count, 1);
+    }
+
+    /// community_hosts returns id → host mapping.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn test_community_hosts_returns_mapping() {
+        let pool = get_pool().await;
+        let (id, _, host) = make_community(&pool).await;
+
+        let hosts = community_hosts(&pool).await.expect("community_hosts");
+        let found = hosts.iter().find(|h| h.id == id);
+        assert!(found.is_some(), "inserted community not found");
+        assert_eq!(found.unwrap().host, host);
+    }
+
+    /// community_count reflects newly inserted communities.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn test_community_count_increases() {
+        let pool = get_pool().await;
+        let before = community_count(&pool).await.expect("count before");
+        make_community(&pool).await;
+        let after = community_count(&pool).await.expect("count after");
+        assert!(after > before, "count should increase after insert");
+    }
+}

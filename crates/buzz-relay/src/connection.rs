@@ -157,7 +157,11 @@ pub async fn handle_connection(
     });
 
     info!(conn_id = %conn_id, addr = %addr, "WebSocket connection established");
-    metrics::counter!("buzz_ws_connections_total").increment(1);
+    metrics::counter!(
+        "buzz_ws_connections_total",
+        "community" => conn.tenant.host().to_owned()
+    )
+    .increment(1);
 
     let challenge_msg = RelayMessage::auth_challenge(&challenge);
     if tx

@@ -1997,6 +1997,12 @@ async fn ingest_event_inner(
                 });
             }
             pre_created_channel = Some(client_uuid);
+            metrics::counter!(
+                "buzz_channels_created_total",
+                "community" => tenant.host().to_owned(),
+                "type" => channel_type.to_string()
+            )
+            .increment(1);
         }
     }
 
