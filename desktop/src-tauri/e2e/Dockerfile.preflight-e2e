@@ -1,0 +1,75 @@
+#
+# Containerised E2E harness for the npm-preflight scenarios in
+# desktop/src-tauri/src/commands/agent_discovery.rs.
+#
+# This image:
+#   1. Compiles the buzz_lib test binary (via cargo test --no-run).
+#   2. Runs four #[ignore]d E2E tests in sequence, each in a crafted
+#      environment that controls npm presence and prefix writability.
+#
+# Build context: repository root (so COPY . . captures everything needed).
+# Invoked via:   just desktop-preflight-e2e
+#
+# Host isolation: npm is installed INSIDE the image; no host volume is
+# mounted that could write to the host's npm prefix or PATH.
+
+ARG RUST_VERSION=1.95
+FROM rust:${RUST_VERSION}-slim-bookworm
+
+# Install Node.js LTS (provides npm) and zsh plus the system libs required by
+# Tauri / buzz-desktop build dependencies (webkitgtk etc. are test-binary deps).
+RUN apt-get update -y && \
+    apt-get install -y --no-install-recommends \
+        curl \
+        ca-certificates \
+        pkg-config \
+        cmake \
+        zsh \
+        libasound2-dev \
+        libwebkit2gtk-4.1-dev \
+        libssl-dev \
+        libgtk-3-dev \
+        libayatana-appindicator3-dev \
+        librsvg2-dev \
+    && curl -fsSL https://deb.nodesource.com/setup_lts.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create a non-root user for running the tests. Writability / EACCES
+# scenarios require a genuinely unprivileged user.
+RUN useradd --create-home --shell /bin/bash testuser
+
+# Copy the repo source. The per-Dockerfile .dockerignore excludes target/,
+# node_modules/, and web/ to keep the context lean while including
+# desktop/src-tauri/ (which the root .dockerignore would exclude).
+WORKDIR /build
+COPY . .
+
+# Create sidecar stubs, compile the buzz_lib test binary, and install it.
+# All done as root so the resulting binary is available system-wide.
+RUN arch=$(rustc -vV | sed -n 's|host: ||p') && \
+    mkdir -p /build/desktop/src-tauri/binaries && \
+    for bin in buzz-acp buzz-agent buzz-dev-mcp git-credential-nostr buzz; do \
+        touch "/build/desktop/src-tauri/binaries/${bin}-${arch}"; \
+    done && \
+    cd /build/desktop/src-tauri && \
+    cargo test --lib --no-run --message-format=json 2>/dev/null \
+        | grep '"executable"' \
+        | grep 'buzz_lib' \
+        | sed 's/.*"executable":"\([^"]*\)".*/\1/' \
+        | head -1 > /tmp/test-bin-path.txt && \
+    TEST_BIN=$(cat /tmp/test-bin-path.txt) && \
+    echo "Test binary: $TEST_BIN" && \
+    test -f "$TEST_BIN" && \
+    cp "$TEST_BIN" /usr/local/bin/buzz-lib-tests && \
+    chmod 755 /usr/local/bin/buzz-lib-tests
+
+# Install the scenario entrypoint.
+COPY desktop/src-tauri/e2e/run-e2e-scenarios.sh /usr/local/bin/run-e2e-scenarios.sh
+RUN chmod 755 /usr/local/bin/run-e2e-scenarios.sh
+
+# Run as the non-root user so the EACCES writability test behaves correctly.
+USER testuser
+WORKDIR /home/testuser
+
+ENTRYPOINT ["/usr/local/bin/run-e2e-scenarios.sh"]

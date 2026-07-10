@@ -726,4 +726,196 @@ mod tests {
         std::fs::create_dir(dir.path().join("lib")).unwrap();
         assert!(npm_install_target_is_writable(dir.path()));
     }
+
+    // ── npm-preflight E2E (container-only) ───────────────────────────────────
+    //
+    // These tests drive the real `resolve_npm_prefix` / `npm_preflight_check`
+    // path against a crafted environment. They are `#[ignore]`d so normal
+    // `cargo test` / CI skips them; the dedicated Docker harness at
+    // `desktop/src-tauri/e2e/Dockerfile.preflight-e2e` runs them with
+    // `cargo test --lib -- --ignored <test_name>` in a pre-configured container
+    // where npm presence and global-prefix writability are controlled.
+    //
+    // Run locally via:  just desktop-preflight-e2e
+
+    /// (a) npm present, global prefix writable →  preflight returns None (proceed).
+    ///
+    /// Preconditions (set by the container entrypoint for this scenario):
+    ///   - npm is on PATH in the login shell.
+    ///   - ~/.npmrc sets `prefix` to a writable user dir, e.g. ~/.npm-global.
+    ///   - HOME is a temp dir with the npmrc and a minimal .zprofile / .bash_profile
+    ///     that preserves a PATH containing npm.
+    #[cfg(unix)]
+    #[ignore]
+    #[test]
+    fn test_e2e_writable_prefix_proceeds() {
+        // resolve_npm_prefix() must find npm and return a writable prefix.
+        let prefix = match resolve_npm_prefix() {
+            NpmPrefix::Found(p) => p,
+            NpmPrefix::Unavailable => {
+                panic!("resolve_npm_prefix() returned Unavailable — npm must be on PATH in the login shell for this scenario. Check the container HOME setup.");
+            }
+            NpmPrefix::TimedOut => {
+                panic!("resolve_npm_prefix() timed out — check that the login shell init files do not block.");
+            }
+        };
+        assert!(
+            npm_install_target_is_writable(&prefix),
+            "npm global prefix '{}' must be writable for this scenario; \
+             check that ~/.npmrc sets prefix to a user-writable directory",
+            prefix.display()
+        );
+        // The full preflight must pass (return None = proceed).
+        let result = npm_preflight_check("adapter", "npm install -g some-pkg");
+        assert!(
+            result.is_none(),
+            "npm_preflight_check should return None (proceed) when prefix is writable, \
+             got: {result:?}"
+        );
+    }
+
+    /// (b) npm present, global prefix NOT writable → preflight aborts with EACCES guidance.
+    ///
+    /// Preconditions (set by the container entrypoint for this scenario):
+    ///   - npm is on PATH in the login shell.
+    ///   - npm's global prefix resolves to a root-owned path (e.g. /usr/local).
+    ///     No ~/.npmrc prefix override — npm uses its compiled-in default.
+    ///   - Container user is non-root.
+    #[cfg(unix)]
+    #[ignore]
+    #[test]
+    fn test_e2e_readonly_prefix_aborts_with_eacces_guidance() {
+        // resolve_npm_prefix() must find npm.
+        let prefix = match resolve_npm_prefix() {
+            NpmPrefix::Found(p) => p,
+            NpmPrefix::Unavailable => {
+                panic!("resolve_npm_prefix() returned Unavailable — npm must be on PATH in the login shell for this scenario. Check the container HOME setup.");
+            }
+            NpmPrefix::TimedOut => {
+                panic!("resolve_npm_prefix() timed out — check that the login shell init files do not block.");
+            }
+        };
+        assert!(
+            !npm_install_target_is_writable(&prefix),
+            "npm global prefix '{}' must be NOT writable for this scenario; \
+             the container user must not own the prefix (e.g. /usr/local is root-owned)",
+            prefix.display()
+        );
+        // The preflight must abort with success:false and the EACCES guidance hint.
+        let step_result = npm_preflight_check("adapter", "npm install -g some-pkg")
+            .expect("npm_preflight_check should return Some(abort) when prefix is not writable");
+        assert!(
+            !step_result.success,
+            "InstallStepResult.success must be false for an EACCES abort"
+        );
+        let hint = step_result
+            .hint
+            .expect("InstallStepResult.hint must be Some for an EACCES abort");
+        assert!(
+            hint.contains("npm-global"),
+            "EACCES hint should contain npm-global remediation; got: {hint}"
+        );
+        assert!(
+            hint.contains(".zprofile"),
+            "EACCES hint should mention .zprofile; got: {hint}"
+        );
+    }
+
+    /// (c) npm not on PATH → preflight aborts with NPM_MISSING_HINT (regression guard).
+    ///
+    /// This verifies the genuine npm-missing branch is byte-for-byte unchanged
+    /// after the NpmPrefix enum refactor.
+    ///
+    /// Preconditions (set by the container entrypoint for this scenario):
+    ///   - HOME is a temp dir whose .zprofile / .bash_profile explicitly sets
+    ///     PATH to a directory that does NOT contain npm (e.g. PATH=/usr/bin:/bin
+    ///     on a system where npm lives only in /usr/local/bin).
+    ///   - No npm shim on any PATH component.
+    #[cfg(unix)]
+    #[ignore]
+    #[test]
+    fn test_e2e_npm_missing_aborts_with_missing_hint() {
+        // resolve_npm_prefix() must report Unavailable (not TimedOut).
+        match resolve_npm_prefix() {
+            NpmPrefix::Unavailable => {} // expected
+            NpmPrefix::Found(p) => {
+                panic!(
+                    "resolve_npm_prefix() returned Found({}) — npm must NOT be on PATH \
+                     for this scenario; check that HOME's shell init strips npm from PATH",
+                    p.display()
+                );
+            }
+            NpmPrefix::TimedOut => {
+                panic!(
+                    "resolve_npm_prefix() timed out — the shell init must fail quickly, not block"
+                );
+            }
+        }
+        // The preflight must hard-abort with NPM_MISSING_HINT.
+        let step_result = npm_preflight_check("adapter", "npm install -g some-pkg")
+            .expect("npm_preflight_check should return Some(abort) when npm is missing");
+        assert!(
+            !step_result.success,
+            "InstallStepResult.success must be false for a missing-npm abort"
+        );
+        let hint = step_result
+            .hint
+            .expect("InstallStepResult.hint must be Some for a missing-npm abort");
+        assert!(
+            hint.contains("nodejs.org"),
+            "missing-npm hint should contain nodejs.org; got: {hint}"
+        );
+        assert!(
+            hint.contains(".zprofile"),
+            "missing-npm hint should mention .zprofile; got: {hint}"
+        );
+        // Regression guard: the hint text must exactly match NPM_MISSING_HINT.
+        assert_eq!(
+            hint, NPM_MISSING_HINT,
+            "missing-npm hint text must be byte-for-byte NPM_MISSING_HINT"
+        );
+    }
+
+    /// (d) Login shell blocks (wedged version-manager init) → 30s timeout fires,
+    /// preflight returns None so Phase 2 install runs (stderr classifier is backstop).
+    ///
+    /// This is the new behavior added by the NpmPrefix enum: TimedOut → proceed,
+    /// not abort with a misleading "npm not found" message.
+    ///
+    /// Preconditions (set by the container entrypoint for this scenario):
+    ///   - HOME is a temp dir with a .zprofile / .bash_profile that is NORMAL for
+    ///     the `echo $PATH` call made by login_shell_path(), but where PATH contains
+    ///     an npm shim script that runs `sleep 60` — so the npm invocation itself
+    ///     blocks, not the PATH discovery.
+    ///
+    /// Wall-clock: ~30s (the timeout deadline).
+    #[cfg(unix)]
+    #[ignore]
+    #[test]
+    fn test_e2e_wedged_shell_timeout_proceeds() {
+        // resolve_npm_prefix() must return TimedOut, not Unavailable or Found.
+        match resolve_npm_prefix() {
+            NpmPrefix::TimedOut => {} // expected
+            NpmPrefix::Unavailable => {
+                panic!(
+                    "resolve_npm_prefix() returned Unavailable — expected TimedOut. \
+                     Check that the npm shim on PATH blocks (sleeps) rather than failing immediately."
+                );
+            }
+            NpmPrefix::Found(p) => {
+                panic!(
+                    "resolve_npm_prefix() returned Found({}) — npm shim must block, \
+                     not return a valid prefix",
+                    p.display()
+                );
+            }
+        }
+        // The preflight must return None (proceed), not abort.
+        let result = npm_preflight_check("adapter", "npm install -g some-pkg");
+        assert!(
+            result.is_none(),
+            "npm_preflight_check should return None (proceed to install) on timeout; \
+             a wedged shell must not abort with NPM_MISSING_HINT. Got: {result:?}"
+        );
+    }
 }

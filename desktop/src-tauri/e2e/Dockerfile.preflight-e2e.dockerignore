@@ -1,0 +1,33 @@
+# Per-Dockerfile .dockerignore for the npm-preflight E2E harness.
+# Overrides the root .dockerignore for this build target.
+# The root .dockerignore excludes desktop/ (correct for the relay image)
+# but this harness needs desktop/src-tauri/ for the Rust source.
+
+# Large build artifacts — exclude to keep context lean.
+**/target/
+desktop/src-tauri/target/
+node_modules/
+**/node_modules/
+web/dist/
+
+# VCS, IDE
+.git/
+.github/
+.vscode/
+.idea/
+.scratch/
+
+# Secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+
+# Non-Rust things the E2E build doesn't need.
+web/
+mobile/
+docs/
+desktop/dist/
+desktop/node_modules/
