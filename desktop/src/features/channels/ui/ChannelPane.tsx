@@ -439,9 +439,9 @@ export const ChannelPane = React.memo(function ChannelPane({
     if (!activeChannel.archivedAt && activeChannel.isMember) {
       if (onAddAgent) {
         actions.push({
-          description: "Add an agent here.",
+          description: "Add an agent or team.",
           icon: <Bot aria-hidden className="h-6 w-6" />,
-          label: "Create agent",
+          label: "Add agent",
           onClick: onAddAgent,
           testId: "channel-intro-action-create-agent",
         });
