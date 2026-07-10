@@ -490,7 +490,19 @@ export function useUpdateProfileMutation() {
 
   return useMutation({
     mutationFn: (input: UpdateProfileInput) => updateProfile(input),
-    onSuccess: (profile: Profile) => {
+    onMutate: async () => {
+      // Discard any in-flight profile fetch: a background refetch started
+      // before the update (e.g. by a route mount) can resolve AFTER
+      // onSuccess writes the fresh profile below and clobber it with the
+      // pre-update snapshot — the avatar/name then silently reverts until
+      // some later refetch. (Masked historically by users-batch refetch
+      // churn from per-keystroke app renders; exposed when those renders
+      // were removed.)
+      await queryClient.cancelQueries({ queryKey: profileQueryKey });
+    },
+    onSuccess: async (profile: Profile) => {
+      // Cancel again: a refetch may have started while mutationFn awaited.
+      await queryClient.cancelQueries({ queryKey: profileQueryKey });
       queryClient.setQueryData(profileQueryKey, profile);
       const relayUrl = activeWorkspace?.relayUrl ?? "";
       const pubkey = identityQuery.data?.pubkey ?? profile.pubkey;
