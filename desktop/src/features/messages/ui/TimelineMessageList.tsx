@@ -96,7 +96,7 @@ type TimelineMessageListProps = {
   leadingContent?: React.ReactNode;
   /** The virtualized timeline owns its scroll node when enabled. */
   useVirtualizer?: boolean;
-  onStartReached?: () => void;
+  onStartReached?: () => boolean;
   onAtBottomStateChange?: (atBottom: boolean) => void;
   onVirtualizerApiChange?: (api: TimelineVirtualizerApi | null) => void;
   onVirtualizerRangeChanged?: () => void;
@@ -371,7 +371,7 @@ type VirtualizedTimelineRowsProps = {
   dayGroups: TimelineDayGroup[];
   leadingContent?: React.ReactNode;
   onAtBottomStateChange?: (atBottom: boolean) => void;
-  onStartReached?: () => void;
+  onStartReached?: () => boolean;
   onVirtualizerApiChange?: (api: TimelineVirtualizerApi | null) => void;
   onVirtualizerRangeChanged?: () => void;
   onVirtualizerScrollerChange?: (element: HTMLDivElement | null) => void;
@@ -416,6 +416,7 @@ function VirtualizedTimelineRows({
     top: number;
   } | null>(null);
   const prependWatcherFrameRef = React.useRef<number | null>(null);
+  const cancelUpwardMomentumRef = React.useRef(false);
   const [prependShiftEpoch, clearPrependShift] = React.useReducer(
     (version: number) => version + 1,
     0,
@@ -608,6 +609,34 @@ function VirtualizedTimelineRows({
     return () => resizeObserver.disconnect();
   }, []);
 
+  React.useLayoutEffect(() => {
+    const scroller = hostRef.current?.firstElementChild;
+    if (!(scroller instanceof HTMLDivElement)) return;
+    let releaseTimer: number | null = null;
+    const onWheel = (event: WheelEvent) => {
+      if (event.deltaY >= 0) {
+        cancelUpwardMomentumRef.current = false;
+        if (releaseTimer !== null) window.clearTimeout(releaseTimer);
+        releaseTimer = null;
+        return;
+      }
+      if (!cancelUpwardMomentumRef.current) return;
+      event.preventDefault();
+      // Momentum wheel events arrive as one burst. Suppress only that burst;
+      // after a short quiet period, a fresh gesture is admitted normally.
+      if (releaseTimer !== null) window.clearTimeout(releaseTimer);
+      releaseTimer = window.setTimeout(() => {
+        cancelUpwardMomentumRef.current = false;
+        releaseTimer = null;
+      }, 80);
+    };
+    scroller.addEventListener("wheel", onWheel, { passive: false });
+    return () => {
+      scroller.removeEventListener("wheel", onWheel);
+      if (releaseTimer !== null) window.clearTimeout(releaseTimer);
+    };
+  }, []);
+
   const handleScroll = React.useCallback(
     (offset: number) => {
       const list = listRef.current;
@@ -619,7 +648,9 @@ function VirtualizedTimelineRows({
       if (prependAnchorRef.current !== null || offset <= 200) {
         capturePrependAnchor();
       }
-      if (offset <= 200) onStartReached?.();
+      if (offset <= 200 && onStartReached?.()) {
+        cancelUpwardMomentumRef.current = true;
+      }
     },
     [
       capturePrependAnchor,

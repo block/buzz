@@ -369,6 +369,20 @@ test.describe("list virtualization", () => {
       await timeline.evaluate((element) => {
         element.scrollTop = 150;
       });
+      if (pageIndex === 0) {
+        // The threshold-crossing event has already armed the page load. Cancel
+        // only the following upward momentum event; downward input stays live.
+        const admitted = await timeline.evaluate((element) => ({
+          upward: element.dispatchEvent(
+            new WheelEvent("wheel", { cancelable: true, deltaY: -40 }),
+          ),
+          downward: element.dispatchEvent(
+            new WheelEvent("wheel", { cancelable: true, deltaY: 40 }),
+          ),
+        }));
+        expect(admitted.upward).toBe(false);
+        expect(admitted.downward).toBe(true);
+      }
       const motion = await timeline.evaluate(
         async (scroller, { anchorId, anchorTop, oldHeight }) => {
           const s = scroller as HTMLElement;

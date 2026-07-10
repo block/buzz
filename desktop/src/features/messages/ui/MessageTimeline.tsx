@@ -494,22 +494,25 @@ const MessageTimelineBase = React.forwardRef<
     virtualizerRenderVersion,
   ]);
 
-  const loadOlderViaVirtualizer = React.useCallback(() => {
+  const loadOlderViaVirtualizer = React.useCallback((): boolean => {
     // Indexed find navigation can legitimately land near the current history
     // boundary. Do not mistake that programmatic jump for scrollback intent and
     // prepend underneath the active match.
     if (
       searchActiveMessageId ||
       !fetchOlder ||
+      isFetchingOlder ||
       showTimelineSkeleton ||
       !hasOlderMessages
     ) {
-      return;
+      return false;
     }
     void fetchOlder();
+    return true;
   }, [
     fetchOlder,
     hasOlderMessages,
+    isFetchingOlder,
     searchActiveMessageId,
     showTimelineSkeleton,
   ]);
