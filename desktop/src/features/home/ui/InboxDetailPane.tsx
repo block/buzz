@@ -201,6 +201,7 @@ export function InboxDetailPane({
             id: item.id,
             isSelected: true,
             mentionNames: item.mentionNames,
+            mentionPubkeysByName: item.mentionPubkeysByName,
             timeLabel: formatTime(item.item.createdAt),
           },
           ...pendingReplyMessages,

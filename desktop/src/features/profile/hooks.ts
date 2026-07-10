@@ -18,7 +18,7 @@ import {
   getUserProfile,
   getUsersBatch,
   updateProfile,
-} from "@/shared/api/tauri";
+} from "@/shared/api/tauriProfiles";
 import { getContactList, setContactList } from "@/shared/api/social";
 import type { ContactListResponse } from "@/shared/api/socialTypes";
 import type {

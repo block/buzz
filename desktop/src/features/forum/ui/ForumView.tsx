@@ -3,6 +3,7 @@ import * as React from "react";
 
 import { useProfileQuery, useUsersBatchQuery } from "@/features/profile/hooks";
 import { mergeCurrentProfileIntoLookup } from "@/features/profile/lib/identity";
+import { getMentionTagPubkey } from "@/shared/lib/resolveMentionNames";
 import type { Channel } from "@/shared/api/types";
 import { channelChrome } from "@/shared/layout/chromeLayout";
 import { cn } from "@/shared/lib/cn";
@@ -66,11 +67,23 @@ export function ForumView({
 
   const posts = postsQuery.data?.posts ?? [];
 
-  // Collect all pubkeys from posts and thread for profile resolution
+  // Collect all pubkeys from posts and thread for profile resolution.
+  // Mentioned pubkeys (`p`/`mention` tags) must be included too: mention
+  // chips resolve names from this same lookup, and a mentioned user who
+  // never authored a post would otherwise render as a dead chip.
   const allPubkeys = React.useMemo(() => {
     const pubkeys = new Set<string>();
+    const addMentionPubkeys = (tags?: string[][]) => {
+      for (const tag of tags ?? []) {
+        const pubkey = getMentionTagPubkey(tag);
+        if (pubkey) {
+          pubkeys.add(pubkey);
+        }
+      }
+    };
     for (const post of posts) {
       pubkeys.add(post.pubkey);
+      addMentionPubkeys(post.tags);
       if (post.threadSummary?.participants) {
         for (const pk of post.threadSummary.participants) {
           pubkeys.add(pk);
@@ -79,8 +92,10 @@ export function ForumView({
     }
     if (threadQuery.data) {
       pubkeys.add(threadQuery.data.post.pubkey);
+      addMentionPubkeys(threadQuery.data.post.tags);
       for (const reply of threadQuery.data.replies) {
         pubkeys.add(reply.pubkey);
+        addMentionPubkeys(reply.tags);
       }
     }
     return [...pubkeys];

@@ -14,10 +14,8 @@ import {
 } from "@/features/channels/readState/readStateFormat";
 import { ChannelScreenEmptyState } from "@/features/channels/ui/ChannelScreenEmptyState";
 import { ChannelScreenHeader } from "@/features/channels/ui/ChannelScreenHeader";
-import {
-  ChannelPane,
-  ForumView,
-} from "@/features/channels/ui/ChannelScreenLazyViews";
+import { ChannelPane } from "@/features/channels/ui/ChannelScreenLazyViews";
+import { ForumChannelContent } from "@/features/channels/ui/ForumChannelContent";
 import { MembersSidebar } from "@/features/channels/ui/MembersSidebar";
 import {
   useManagedAgentsQuery,
@@ -839,19 +837,27 @@ export function ChannelScreen({
         >
           {activeChannel ? (
             activeChannel.channelType === "forum" ? (
-              <>
-                {channelHeader}
-                <React.Suspense fallback={<ViewLoadingFallback kind="forum" />}>
-                  <ForumView
-                    channel={activeChannel}
-                    currentPubkey={currentPubkey}
-                    onClosePost={onCloseForumPost}
-                    onSelectPost={onSelectForumPost}
-                    selectedPostId={selectedForumPostId}
-                    targetReplyId={targetForumReplyId}
-                  />
-                </React.Suspense>
-              </>
+              <ForumChannelContent
+                canResetPanelWidth={canResetThreadPanelWidth}
+                channel={activeChannel}
+                currentPubkey={currentPubkey}
+                header={channelHeader}
+                onClosePost={onCloseForumPost}
+                onCloseProfilePanel={handleCloseProfilePanel}
+                onOpenDm={handleOpenDm}
+                onOpenProfilePanel={handleOpenProfilePanel}
+                onPanelResizeStart={handleThreadPanelResizeStart}
+                onProfilePanelTabChange={setProfilePanelTab}
+                onProfilePanelViewChange={setProfilePanelView}
+                onResetPanelWidth={handleThreadPanelWidthReset}
+                onSelectPost={onSelectForumPost}
+                panelWidthPx={threadPanelWidthPx}
+                profilePanelPubkey={profilePanelPubkey}
+                profilePanelTab={profilePanelTab}
+                profilePanelView={profilePanelView}
+                selectedPostId={selectedForumPostId}
+                targetReplyId={targetForumReplyId}
+              />
             ) : (
               <React.Suspense
                 fallback={<ViewLoadingFallback includeHeader kind="channel" />}

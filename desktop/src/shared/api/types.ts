@@ -135,6 +135,10 @@ export type Profile = {
 
 export type UserProfileSummary = {
   displayName: string | null;
+  /** Kind-0 `name` field, kept separate from `displayName` so @mention text
+   * can be matched against either alias (agents/CLI resolve mentions against
+   * `display_name` *or* `name` at send time). */
+  name?: string | null;
   avatarUrl: string | null;
   nip05Handle: string | null;
   ownerPubkey: string | null;

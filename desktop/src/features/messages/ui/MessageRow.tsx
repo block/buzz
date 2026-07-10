@@ -28,10 +28,7 @@ import { useChannelNavigation } from "@/shared/context/ChannelNavigationContext"
 import { parseImetaTags } from "@/features/messages/lib/parseImeta";
 import { useMessageEmoji } from "@/features/messages/lib/useMessageEmoji";
 import { parseWaveMessageContent } from "@/features/messages/lib/waveMessage";
-import {
-  resolveMentionNames,
-  resolveMentionPubkeysByName,
-} from "@/shared/lib/resolveMentionNames";
+import { resolveMentionProps } from "@/shared/lib/resolveMentionNames";
 import { Markdown } from "@/shared/ui/markdown";
 import type { VideoReviewContext } from "@/shared/ui/VideoPlayer";
 import { MessageActionBar } from "./MessageActionBar";
@@ -164,12 +161,8 @@ export const MessageRow = React.memo(
       },
       [channelId, openReminder],
     );
-    const mentionNames = React.useMemo(
-      () => resolveMentionNames(message.tags, profiles),
-      [profiles, message.tags],
-    );
-    const mentionPubkeysByName = React.useMemo(
-      () => resolveMentionPubkeysByName(message.tags, profiles),
+    const { mentionNames, mentionPubkeysByName } = React.useMemo(
+      () => resolveMentionProps(message.tags, profiles),
       [profiles, message.tags],
     );
     // The agent-pubkey set is computed once by the parent (ChannelScreen)
