@@ -411,6 +411,11 @@ function VirtualizedTimelineRows({
     [dayGroups, leadingContent],
   );
   const previousFirstTimelineKeyRef = React.useRef<string | null>(null);
+  const prependAnchorRef = React.useRef<{
+    messageId: string;
+    top: number;
+  } | null>(null);
+  const prependWatcherFrameRef = React.useRef<number | null>(null);
   const [prependShiftEpoch, clearPrependShift] = React.useReducer(
     (version: number) => version + 1,
     0,
@@ -433,6 +438,100 @@ function VirtualizedTimelineRows({
       keys,
     );
   }, [firstTimelineKey, keys, prependShiftEpoch]);
+
+  const capturePrependAnchor = React.useCallback(() => {
+    if (
+      prependAnchorRef.current !== null ||
+      prependWatcherFrameRef.current !== null
+    )
+      return;
+    const scroller = hostRef.current?.firstElementChild;
+    if (!(scroller instanceof HTMLDivElement)) return;
+    const scrollerTop = scroller.getBoundingClientRect().top;
+    const row = Array.from(
+      scroller.querySelectorAll<HTMLElement>("[data-message-id]"),
+    ).find((candidate) => candidate.getBoundingClientRect().top >= scrollerTop);
+    const messageId = row?.dataset.messageId;
+    if (!row || !messageId) return;
+    prependAnchorRef.current = {
+      messageId,
+      top: row.getBoundingClientRect().top - scrollerTop,
+    };
+  }, []);
+
+  React.useLayoutEffect(() => {
+    if (!isPrepend || !prependAnchorRef.current) return;
+    // Virtua's shift mode correctly absorbs most prepended measurements, but
+    // estimated offsets can misclassify late row growth deep in history. Keep
+    // the semantic row identity as a short-lived, deviation-gated backstop.
+    // This watcher deliberately survives a temporary row unmount and uses only
+    // relative correction so Virtua remains the primary scroll owner.
+    if (prependWatcherFrameRef.current !== null) {
+      cancelAnimationFrame(prependWatcherFrameRef.current);
+    }
+    const anchor = prependAnchorRef.current;
+    const deadline = performance.now() + 3_000;
+    let previousScrollTop: number | null = null;
+    let settledFrames = 0;
+
+    const watch = () => {
+      const scroller = hostRef.current?.firstElementChild;
+      if (!(scroller instanceof HTMLDivElement)) {
+        prependWatcherFrameRef.current = null;
+        prependAnchorRef.current = null;
+        return;
+      }
+      const atBottom =
+        scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop <=
+        32;
+      const row = Array.from(
+        scroller.querySelectorAll<HTMLElement>("[data-message-id]"),
+      ).find((candidate) => candidate.dataset.messageId === anchor.messageId);
+      const top = row
+        ? row.getBoundingClientRect().top - scroller.getBoundingClientRect().top
+        : null;
+      const scrollTop = scroller.scrollTop;
+      settledFrames =
+        previousScrollTop !== null &&
+        Math.abs(scrollTop - previousScrollTop) < 0.5
+          ? settledFrames + 1
+          : 0;
+      previousScrollTop = scrollTop;
+
+      if (row && top !== null && settledFrames >= 2) {
+        const delta = top - anchor.top;
+        if (Math.abs(delta) > 4) {
+          scroller.scrollBy({ top: delta });
+          settledFrames = 0;
+          previousScrollTop = null;
+        }
+      }
+
+      const retired =
+        performance.now() >= deadline ||
+        atBottom ||
+        (top !== null && top > scroller.clientHeight * 2);
+      if (retired) {
+        prependWatcherFrameRef.current = null;
+        prependAnchorRef.current = null;
+        return;
+      }
+      prependWatcherFrameRef.current = requestAnimationFrame(watch);
+    };
+    prependWatcherFrameRef.current = requestAnimationFrame(watch);
+  }, [isPrepend]);
+
+  React.useEffect(
+    () => () => {
+      if (prependWatcherFrameRef.current !== null) {
+        cancelAnimationFrame(prependWatcherFrameRef.current);
+      }
+      prependWatcherFrameRef.current = null;
+      prependAnchorRef.current = null;
+    },
+    [],
+  );
+
   React.useLayoutEffect(() => {
     previousFirstTimelineKeyRef.current = firstTimelineKey;
     if (isPrepend) clearPrependShift();
@@ -504,9 +603,17 @@ function VirtualizedTimelineRows({
       onAtBottomStateChange?.(
         list.scrollSize - list.viewportSize - offset <= 32,
       );
-      if (offset <= 200) onStartReached?.();
+      if (offset <= 200) {
+        capturePrependAnchor();
+        onStartReached?.();
+      }
     },
-    [onAtBottomStateChange, onStartReached, onVirtualizerRangeChanged],
+    [
+      capturePrependAnchor,
+      onAtBottomStateChange,
+      onStartReached,
+      onVirtualizerRangeChanged,
+    ],
   );
 
   return (

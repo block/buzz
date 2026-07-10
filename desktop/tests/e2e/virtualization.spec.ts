@@ -305,6 +305,86 @@ test.describe("list virtualization", () => {
       expect(Math.abs(settled1 - settled2)).toBeLessThan(2);
     }
   });
+
+  test("08 — cascading older pages never snap the viewport toward newest", async ({
+    page,
+  }) => {
+    await installMockBridge(page, { deepHistoryMessageCount: 1_800 });
+    await page.goto("/#/channels/feedf00d-0000-4000-8000-000000000007");
+    const timeline = page.getByTestId("message-timeline");
+    await expect(timeline.locator("[data-message-id]").first()).toBeVisible();
+    // Initial bottom positioning can momentarily cross the start threshold. Let
+    // any resulting page transaction settle before driving explicit crossings.
+    await page.waitForTimeout(1_000);
+
+    const sampleVisibleAnchor = (expectedId?: string) =>
+      timeline.evaluate(async (scroller, anchorId) => {
+        const s = scroller as HTMLElement;
+        for (let frame = 0; frame < 60; frame += 1) {
+          const scrollerTop = s.getBoundingClientRect().top;
+          const rows = Array.from(
+            s.querySelectorAll<HTMLElement>("[data-message-id]"),
+          );
+          const row = anchorId
+            ? rows.find((candidate) => candidate.dataset.messageId === anchorId)
+            : rows.find(
+                (candidate) =>
+                  candidate.getBoundingClientRect().top >= scrollerTop,
+              );
+          if (row) {
+            return {
+              id: row.dataset.messageId ?? "",
+              top: row.getBoundingClientRect().top - scrollerTop,
+              scrollHeight: s.scrollHeight,
+              bottomDistance: s.scrollHeight - s.clientHeight - s.scrollTop,
+            };
+          }
+          await new Promise((resolve) => requestAnimationFrame(resolve));
+        }
+        throw new Error(
+          `anchor row ${anchorId ?? "at viewport top"} not mounted`,
+        );
+      }, expectedId);
+
+    // Load fifteen consecutive server pages in one mounted virtualizer. This
+    // is the production shape that exposed the intermittent end-cache snap:
+    // variable-height rows and repeated front insertions exercise the full
+    // index-shift path rather than allowing a single lucky pass.
+    for (let pageIndex = 0; pageIndex < 15; pageIndex += 1) {
+      // Leave the threshold first so Virtua emits a fresh start-edge crossing;
+      // initial positioning can briefly report offset 0 while mounting.
+      await timeline.evaluate((element) => {
+        element.scrollTop = 4000;
+      });
+      await page.waitForTimeout(300);
+      await timeline.evaluate((element) => {
+        element.scrollTop = 250;
+      });
+      await page.waitForTimeout(150);
+      const before = await sampleVisibleAnchor();
+      await timeline.evaluate((element) => {
+        element.scrollTop = 150;
+      });
+
+      await expect
+        .poll(
+          async () => timeline.evaluate((element) => element.scrollHeight),
+          {
+            timeout: 10_000,
+          },
+        )
+        .toBeGreaterThan(before.scrollHeight + 800);
+
+      const after = await sampleVisibleAnchor(before.id);
+      expect(Math.abs(after.top - before.top)).toBeLessThan(150);
+      // A snap to newest leaves this near zero. Keep a full viewport of history
+      // below the reader after every prepend, rather than checking only the
+      // final page and missing a transient cascade failure.
+      expect(after.bottomDistance).toBeGreaterThan(
+        await timeline.evaluate((element) => element.clientHeight),
+      );
+    }
+  });
 });
 
 test("thread-heavy history keeps a bounded mounted window", async ({
