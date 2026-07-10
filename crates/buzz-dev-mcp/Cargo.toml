@@ -15,14 +15,19 @@ path = "src/main.rs"
 
 [dependencies]
 buzz-cli = { path = "../buzz-cli" }
+buzz-core = { path = "../buzz-core" }
+buzz-sdk = { path = "../buzz-sdk" }
+buzz-ws-client = { path = "../buzz-ws-client" }
 git-credential-nostr = { path = "../git-credential-nostr" }
 git-sign-nostr = { path = "../git-sign-nostr" }
 nostr = { workspace = true }
+chrono = { workspace = true }
 zeroize = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+uuid = { workspace = true }
 rmcp = { workspace = true }
 schemars = { workspace = true }
 similar = "3"
@@ -30,6 +35,9 @@ tempfile = "3"
 ignore = "0.4.25"
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+# wss:// tool calls use rustls via tokio-tungstenite/reqwest. The workspace
+# pulls both ring and aws-lc-rs transitively, so install ring explicitly.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 # view_image tool: HTTP fetch (workspace reqwest is already used by buzz-cli;
 # adding it here is essentially free), base64 encoding, and decode/resize.
 reqwest = { workspace = true }

@@ -10,6 +10,7 @@ use rmcp::{
 use std::path::Path;
 use std::sync::Arc;
 
+mod agent_management;
 mod paths;
 mod read_file;
 mod rg;
@@ -35,6 +36,28 @@ impl DevMcp {
             todos: Arc::new(todo::TodoState::new()),
             tool_router: Self::tool_router(),
         }
+    }
+
+    #[tool(
+        name = "create_agent",
+        description = "Ask the Buzz Desktop owner to create a reusable agent and add it to the current channel. Use after collaboratively deciding the name, instructions, and access. This creates a review request only: Buzz will show the owner the details and they must confirm before anything is saved. Never ask for or accept API keys, credentials, environment variables, shell commands, or arbitrary MCP setup."
+    )]
+    async fn create_agent(
+        &self,
+        Parameters(params): Parameters<agent_management::CreateAgentParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        agent_management::create(params).await
+    }
+
+    #[tool(
+        name = "update_agent",
+        description = "Ask the Buzz Desktop owner to review an update to a reusable agent profile. Use for changes agreed in conversation. This creates a review request only: Buzz will show the owner the changes and they must confirm before anything is saved. Never ask for or accept API keys, credentials, environment variables, shell commands, or arbitrary MCP setup."
+    )]
+    async fn update_agent(
+        &self,
+        Parameters(params): Parameters<agent_management::UpdateAgentParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        agent_management::update(params).await
     }
 
     #[tool(
@@ -161,6 +184,8 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 async fn async_main(cmd: String) -> Result<(), Box<dyn std::error::Error>> {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     // buzz CLI needs tokio (async HTTP client).
     if cmd == "buzz" {
         std::process::exit(buzz_cli::run_from_args(std::env::args()).await);

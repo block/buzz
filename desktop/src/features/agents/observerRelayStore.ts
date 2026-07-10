@@ -6,6 +6,10 @@ import type { ControlResultFrame } from "@/shared/api/types";
 import { putAgentSessionConfig } from "@/shared/api/tauri";
 import { getIdentity } from "@/shared/api/tauriIdentity";
 import { decryptObserverEvent } from "@/shared/api/tauriObserver";
+import {
+  parseFizzAgentManagementRequest,
+  type FizzAgentManagementRequest,
+} from "./fizzAgentManagement";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { useQueryClient } from "@tanstack/react-query";
 import { agentConfigSurfaceQueryKey } from "@/features/agents/hooks";
@@ -93,6 +97,10 @@ export function getLatestLiveSessionId(
 const controlResultListeners = new Map<
   string,
   Set<(frame: ControlResultFrame) => void>
+>();
+
+const fizzManagementListeners = new Set<
+  (agentPubkey: string, request: FizzAgentManagementRequest) => void
 >();
 
 // Normalized pubkeys of agents we are actively managing. Only events whose
@@ -366,6 +374,12 @@ async function handleRelayObserverEvent(
       }
     }
     appendAgentEvent(agentPubkey, parsed);
+    const managementRequest = parseFizzAgentManagementRequest(parsed.payload);
+    if (managementRequest) {
+      for (const listener of fizzManagementListeners) {
+        listener(agentPubkey, managementRequest);
+      }
+    }
     if (parsed.kind === "session_config_captured") {
       void putAgentSessionConfig(agentPubkey, parsed.payload);
       onSessionConfigCaptured?.(agentPubkey);
@@ -475,6 +489,15 @@ function dispatchControlResult(agentPubkey: string, payload: unknown) {
  * unsubscribe function. Used by the ModelPicker to learn the async outcome of
  * a `switch_model` frame.
  */
+export function subscribeFizzAgentManagementRequests(
+  listener: (agentPubkey: string, request: FizzAgentManagementRequest) => void,
+) {
+  fizzManagementListeners.add(listener);
+  return () => {
+    fizzManagementListeners.delete(listener);
+  };
+}
+
 export function subscribeControlResults(
   agentPubkey: string,
   listener: (frame: ControlResultFrame) => void,
@@ -701,6 +724,7 @@ export function resetAgentObserverStore() {
   knownAgentPubkeys.clear();
   knownAgentsBySubscription.clear();
   latestLiveSessionByAgentChannel.clear();
+  fizzManagementListeners.clear();
   onSessionConfigCaptured = null;
   connectionState = "idle";
   errorMessage = null;

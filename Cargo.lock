@@ -927,6 +927,10 @@ version = "0.1.0"
 dependencies = [
  "base64",
  "buzz-cli",
+ "buzz-core",
+ "buzz-sdk",
+ "buzz-ws-client",
+ "chrono",
  "git-credential-nostr",
  "git-sign-nostr",
  "ignore",
@@ -935,6 +939,7 @@ dependencies = [
  "nostr",
  "reqwest 0.13.3",
  "rmcp",
+ "rustls",
  "schemars",
  "serde",
  "serde_json",
@@ -944,6 +949,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "tracing-subscriber",
+ "uuid",
  "windows-sys 0.61.2",
  "zeroize",
 ]
