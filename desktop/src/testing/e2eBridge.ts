@@ -215,6 +215,9 @@ type RawRelayMember = {
 type RawProfile = {
   pubkey: string;
   display_name: string | null;
+  /** Kind-0 `name` field, kept separate from `display_name` so mention
+   * resolution can match either alias. */
+  name?: string | null;
   avatar_url: string | null;
   about: string | null;
   nip05_handle: string | null;
@@ -227,6 +230,7 @@ type RawProfile = {
 
 type RawUserProfileSummary = {
   display_name: string | null;
+  name?: string | null;
   avatar_url: string | null;
   nip05_handle: string | null;
   owner_pubkey: string | null;
@@ -868,6 +872,10 @@ const mockAgentPubkeys = new Set([
   PROFILE_ONLY_AGENT_PUBKEY,
   OWNED_RELAY_AGENT_PUBKEY,
 ]);
+// Kind-0 `name` aliases, distinct from the display name, for exercising the
+// alias-tolerant mention resolution path (e.g. a message that says "@bobby"
+// while bob's display name is "bob").
+const mockKind0Names = new Map<string, string>([[BOB_PUBKEY, "bobby"]]);
 
 function isoMinutesAgo(minutesAgo: number): string {
   return new Date(Date.now() - minutesAgo * 60_000).toISOString();
@@ -1851,6 +1859,7 @@ function getMockProfileByPubkey(pubkey: string): RawProfile | null {
   return {
     pubkey: normalizedPubkey,
     display_name: mockDisplayNames.get(normalizedPubkey) ?? null,
+    name: mockKind0Names.get(normalizedPubkey) ?? null,
     avatar_url: null,
     about: null,
     nip05_handle: null,
@@ -4828,6 +4837,7 @@ async function handleGetUsersBatch(
 
       profiles[normalizedPubkey] = {
         display_name: profile.display_name,
+        name: profile.name ?? null,
         avatar_url: profile.avatar_url,
         nip05_handle: profile.nip05_handle,
         owner_pubkey: profile.owner_pubkey,
@@ -4852,6 +4862,7 @@ async function handleGetUsersBatch(
     const content = JSON.parse(ev.content ?? "{}");
     profiles[pk] = {
       display_name: content.display_name ?? content.name ?? null,
+      name: content.name ?? null,
       avatar_url: content.picture ?? null,
       nip05_handle: content.nip05 ?? null,
       owner_pubkey:
@@ -4880,6 +4891,7 @@ async function handleGetUsersBatch(
     found.add(normalizedPubkey);
     profiles[normalizedPubkey] = {
       display_name: profile.display_name,
+      name: profile.name ?? null,
       avatar_url: profile.avatar_url,
       nip05_handle: profile.nip05_handle,
       owner_pubkey: profile.owner_pubkey,

@@ -37,6 +37,7 @@ export function profileLookupsEqual(
     if (
       next === undefined ||
       prev.displayName !== next.displayName ||
+      prev.name !== next.name ||
       prev.avatarUrl !== next.avatarUrl ||
       prev.nip05Handle !== next.nip05Handle ||
       prev.ownerPubkey !== next.ownerPubkey ||
@@ -75,6 +76,9 @@ export function mergeCurrentProfileIntoLookup(
     ...(profiles ?? {}),
     [normalizePubkey(currentProfile.pubkey)]: {
       displayName: currentProfile.displayName,
+      // `Profile` does not carry the kind-0 `name`; keep whatever the batch
+      // lookup already resolved so mention aliases survive the merge.
+      name: profiles?.[normalizePubkey(currentProfile.pubkey)]?.name ?? null,
       avatarUrl: currentProfile.avatarUrl,
       nip05Handle: currentProfile.nip05Handle,
       isAgent: profiles?.[normalizePubkey(currentProfile.pubkey)]?.isAgent,
