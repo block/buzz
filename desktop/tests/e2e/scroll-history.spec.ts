@@ -1121,6 +1121,83 @@ test("composer expansion does not push bottom row out of viewport", async ({
   expect(after.gapAboveComposer).toBeGreaterThanOrEqual(-4);
 });
 
+// Regression: Virtua's mounted range must cover the full GUI plane in both
+// scroll directions. The composer overlays the timeline; it is not the bottom
+// of the viewport. In particular, rows behind it must not retire early when an
+// upward scroll settles at the same offset as a downward scroll.
+test("mounted rows cover the viewport beneath the composer in both directions", async ({
+  page,
+}) => {
+  await installMockBridge(page);
+  await page.goto("/");
+  await page.waitForFunction(
+    () => typeof window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__ === "function",
+  );
+
+  await page.evaluate(() => {
+    for (let index = 0; index < 120; index += 1) {
+      window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+        channelName: "general",
+        content: `direction row ${index}\nsecond line ${index}`,
+        createdAt: 1_700_000_000 + index,
+      });
+    }
+  });
+
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  const timeline = page.getByTestId("message-timeline");
+  await expect(timeline).toContainText("direction row 119");
+  await page.waitForFunction(() => {
+    const element = document.querySelector<HTMLDivElement>(
+      '[data-testid="message-timeline"]',
+    );
+    return element && element.scrollHeight > element.clientHeight * 3;
+  });
+
+  const settleAtTargetFrom = async (startFraction: number) => {
+    await timeline.evaluate((element, fraction) => {
+      const maxOffset = element.scrollHeight - element.clientHeight;
+      element.scrollTop = maxOffset * fraction;
+      element.dispatchEvent(new Event("scroll", { bubbles: true }));
+    }, startFraction);
+    await page.waitForTimeout(100);
+    await timeline.evaluate((element) => {
+      const maxOffset = element.scrollHeight - element.clientHeight;
+      element.scrollTop = maxOffset / 2;
+      element.dispatchEvent(new Event("scroll", { bubbles: true }));
+    });
+    await expect
+      .poll(() =>
+        timeline.evaluate((element) => {
+          const maxOffset = element.scrollHeight - element.clientHeight;
+          return Math.abs(element.scrollTop - maxOffset / 2);
+        }),
+      )
+      .toBeLessThan(100);
+  };
+  const bottomCoverage = () =>
+    timeline.evaluate((element) => {
+      const viewportBottom = element.getBoundingClientRect().bottom;
+      const mountedRows = Array.from(
+        element.querySelectorAll<HTMLElement>("[data-message-id]"),
+      );
+      return Math.max(
+        ...mountedRows.map(
+          (row) => row.getBoundingClientRect().bottom - viewportBottom,
+        ),
+      );
+    });
+
+  // Arrive from below (upward scroll), then from above (downward scroll). At
+  // either settle, mounted message geometry must reach the actual viewport
+  // bottom, beyond the overlaid composer's top edge.
+  await settleAtTargetFrom(0.75);
+  await expect.poll(bottomCoverage).toBeGreaterThanOrEqual(0);
+  await settleAtTargetFrom(0.25);
+  await expect.poll(bottomCoverage).toBeGreaterThanOrEqual(0);
+});
+
 // Criterion 8: in-viewport content resize while scrolled up preserves the
 // anchor row's position.
 //

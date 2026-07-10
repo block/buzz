@@ -690,7 +690,7 @@ export const ChannelPane = React.memo(function ChannelPane({
             </div>
           ) : (
             <div
-              className="pointer-events-none absolute inset-x-0 bottom-0 z-40"
+              className="pointer-events-none absolute inset-x-0 bottom-0 z-40 bg-background/70 backdrop-blur-md supports-[backdrop-filter]:bg-background/55"
               data-testid="channel-composer-overlay"
               ref={composerWrapperRef}
             >

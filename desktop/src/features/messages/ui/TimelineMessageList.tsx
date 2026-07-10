@@ -329,7 +329,9 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
 });
 
 type VirtualizedTimelineItem =
+  | { kind: "top-spacer" }
   | { kind: "leading-content"; content: React.ReactNode }
+  | { kind: "bottom-spacer" }
   | { kind: "day-heading"; group: TimelineDayGroup }
   | { kind: "timeline-item"; item: TimelineNonDayItem };
 
@@ -340,6 +342,8 @@ function timelineItemMessageId(item: TimelineNonDayItem): string | null {
 }
 
 function virtualizedItemKey(item: VirtualizedTimelineItem): string {
+  if (item.kind === "top-spacer") return "top-spacer";
+  if (item.kind === "bottom-spacer") return "bottom-spacer";
   if (item.kind === "leading-content") return "leading-content";
   return item.kind === "day-heading"
     ? `day-${item.group.key}`
@@ -351,6 +355,7 @@ function buildVirtualizedItems(
   leadingContent?: React.ReactNode,
 ): VirtualizedTimelineItem[] {
   return [
+    { kind: "top-spacer" as const },
     ...(leadingContent
       ? [{ kind: "leading-content" as const, content: leadingContent }]
       : []),
@@ -358,6 +363,7 @@ function buildVirtualizedItems(
       { kind: "day-heading" as const, group },
       ...group.items.map((item) => ({ kind: "timeline-item" as const, item })),
     ]),
+    { kind: "bottom-spacer" as const },
   ];
 }
 
@@ -477,7 +483,7 @@ function VirtualizedTimelineRows({
     <div className="h-full min-h-0 w-full" ref={hostRef}>
       <VList
         ref={listRef}
-        className="h-full min-h-0 w-full overflow-y-auto overflow-x-hidden overscroll-contain px-2 pt-[var(--channel-top-chrome-height,4.5rem)] pb-[var(--composer-overlay-height,6rem)]"
+        className="h-full min-h-0 w-full overflow-y-auto overflow-x-hidden overscroll-contain px-2"
         data={items}
         bufferSize={1_500}
         keepMounted={persistentIndexes}
@@ -485,6 +491,24 @@ function VirtualizedTimelineRows({
         onScroll={handleScroll}
       >
         {(item) => {
+          if (item.kind === "top-spacer") {
+            return (
+              <div
+                aria-hidden
+                className="h-[var(--channel-top-chrome-height,4.5rem)]"
+                key={virtualizedItemKey(item)}
+              />
+            );
+          }
+          if (item.kind === "bottom-spacer") {
+            return (
+              <div
+                aria-hidden
+                className="h-[var(--composer-overlay-height,6rem)]"
+                key={virtualizedItemKey(item)}
+              />
+            );
+          }
           if (item.kind === "leading-content") {
             return <div key={virtualizedItemKey(item)}>{item.content}</div>;
           }
