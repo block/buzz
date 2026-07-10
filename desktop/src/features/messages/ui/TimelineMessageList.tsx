@@ -426,6 +426,7 @@ function VirtualizedTimelineRows({
   const [offscreenBufferSize, setOffscreenBufferSize] = React.useState(() =>
     typeof window === "undefined" ? 1_000 : window.innerHeight,
   );
+  const initialPositionFrameRef = React.useRef<number | null>(null);
   const hasInitialPositionedRef = React.useRef(false);
   const items = React.useMemo(
     () => buildVirtualizedItems(dayGroups, leadingContent),
@@ -560,9 +561,25 @@ function VirtualizedTimelineRows({
     if (isPrepend) clearPrependShift();
     if (!hasInitialPositionedRef.current && items.length > 0) {
       hasInitialPositionedRef.current = true;
-      listRef.current?.scrollToIndex(items.length - 1, { align: "end" });
+      const scrollToSettledBottom = () => {
+        listRef.current?.scrollToIndex(items.length - 1, { align: "end" });
+      };
+      scrollToSettledBottom();
+      initialPositionFrameRef.current = requestAnimationFrame(() => {
+        initialPositionFrameRef.current = null;
+        scrollToSettledBottom();
+      });
     }
   }, [isPrepend, items.length, keys]);
+
+  React.useEffect(
+    () => () => {
+      if (initialPositionFrameRef.current !== null) {
+        cancelAnimationFrame(initialPositionFrameRef.current);
+      }
+    },
+    [],
+  );
 
   const messageItemIndexById = React.useMemo(() => {
     const byId = new Map<string, number>();
@@ -693,7 +710,6 @@ function VirtualizedTimelineRows({
         className="h-full min-h-0 w-full overflow-y-auto overflow-x-hidden overscroll-contain px-2"
         data={items}
         bufferSize={offscreenBufferSize}
-        keepMounted={items.map((_, index) => index)}
         style={{ overflowAnchor: "none" }}
         shift={isPrepend}
         onScroll={handleScroll}

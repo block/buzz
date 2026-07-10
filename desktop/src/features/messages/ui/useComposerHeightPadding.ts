@@ -34,6 +34,7 @@ export function useComposerHeightPadding(
     };
 
     let lastPadding: number | null = null;
+    let followBottomFrame: number | null = null;
 
     const applyPadding = (height: number) => {
       const padding = Math.ceil(height);
@@ -56,6 +57,13 @@ export function useComposerHeightPadding(
         (previousPadding === null || padding > previousPadding)
       ) {
         scrollEl.scrollTop = scrollEl.scrollHeight;
+        if (followBottomFrame !== null) {
+          cancelAnimationFrame(followBottomFrame);
+        }
+        followBottomFrame = requestAnimationFrame(() => {
+          followBottomFrame = null;
+          scrollEl.scrollTop = scrollEl.scrollHeight;
+        });
       }
     };
 
@@ -63,6 +71,9 @@ export function useComposerHeightPadding(
 
     return () => {
       disconnect();
+      if (followBottomFrame !== null) {
+        cancelAnimationFrame(followBottomFrame);
+      }
       if (mode === "css-variable") {
         scrollEl.style.removeProperty("--composer-overlay-height");
       } else {

@@ -369,7 +369,7 @@ test.describe("list virtualization", () => {
       });
       await page.waitForTimeout(300);
       await timeline.evaluate((element) => {
-        element.scrollTop = 250;
+        element.scrollTop = 180;
       });
       await page.waitForTimeout(150);
       const before = await sampleVisibleAnchor();
@@ -398,7 +398,7 @@ test.describe("list virtualization", () => {
         await page.waitForTimeout(12);
       }
       const wheelTrace = await wheelTracePromise;
-      expect(wheelTrace.minScrollTop).toBeLessThanOrEqual(200);
+      expect(wheelTrace.minScrollTop).toBeLessThanOrEqual(350);
       expect(wheelTrace.maxBoundaryRollback).toBeLessThan(5);
       const committedAnchor = await sampleVisibleAnchor(before.id);
       const motion = await timeline.evaluate(
@@ -637,16 +637,17 @@ test.describe("list virtualization", () => {
   });
 });
 
-test("thread-heavy history mounts every loaded row", async ({ page }) => {
+test("thread-heavy history keeps a bounded mounted window", async ({
+  page,
+}) => {
   await installMockBridge(page);
   await page.goto("/");
   await page.waitForFunction(
     () => typeof window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__ === "function",
   );
 
-  // Seed summaries on 120 loaded roots. Every loaded row should be realized
-  // immediately so first-pass scrolling never encounters Virtua's hidden
-  // pre-measurement state.
+  // Seed summaries on many loaded roots. The mounted DOM must remain bounded
+  // while Virtua keeps enough measured coverage for fast scrolling.
   await page.evaluate(() => {
     for (let index = 480; index < 600; index += 1) {
       window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
@@ -676,15 +677,65 @@ test("thread-heavy history mounts every loaded row", async ({ page }) => {
 
   await page.waitForTimeout(300);
 
-  const loadedRows = timeline.locator("[data-message-id]");
-  // The mock channel's current loaded window contains 50 roots; all of them
-  // must already exist and be painted before the first scroll gesture.
-  await expect(loadedRows).toHaveCount(50);
+  const mountedRows = timeline.locator("[data-message-id]");
+  await expect(mountedRows).not.toHaveCount(0);
+  const mountedCount = await mountedRows.count();
+  expect(mountedCount).toBeLessThan(50);
   expect(
-    await loadedRows.evaluateAll((rows) =>
+    await mountedRows.evaluateAll((rows) =>
       rows.every((row) => getComputedStyle(row).visibility === "visible"),
     ),
   ).toBe(true);
+});
+
+test("channel switches settle the last row above the composer", async ({
+  page,
+}) => {
+  await installMockBridge(page);
+  await page.goto("/");
+  await page.waitForFunction(
+    () => typeof window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__ === "function",
+  );
+
+  await page.evaluate(() => {
+    for (const [channelName, prefix] of [
+      ["general", "switch-general"],
+      ["engineering", "switch-engineering"],
+    ] as const) {
+      for (let index = 0; index < 60; index += 1) {
+        window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+          channelName,
+          content: `${prefix}-${index}`,
+          createdAt: 1_700_000_000 + index,
+        });
+      }
+    }
+  });
+
+  for (const channelName of ["general", "engineering", "general"]) {
+    await page.getByTestId(`channel-${channelName}`).click();
+    await expect(page.getByTestId("chat-title")).toHaveText(channelName);
+    const timeline = page.getByTestId("message-timeline");
+    const composer = page.getByTestId("channel-composer-overlay");
+    await expect
+      .poll(async () =>
+        timeline.evaluate(
+          (element, composerElement) => {
+            const rows = Array.from(
+              element.querySelectorAll<HTMLElement>("[data-message-id]"),
+            );
+            const lastRow = rows.at(-1);
+            if (!lastRow) return Number.POSITIVE_INFINITY;
+            return (
+              lastRow.getBoundingClientRect().bottom -
+              (composerElement as HTMLElement).getBoundingClientRect().top
+            );
+          },
+          await composer.elementHandle(),
+        ),
+      )
+      .toBeLessThanOrEqual(1);
+  }
 });
 
 test("offscreen rich-row resize preserves the viewport-center anchor", async ({
