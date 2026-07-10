@@ -94,6 +94,70 @@ pub(super) fn procargs2_buffer(pid: u32) -> Option<Vec<u8>> {
     Some(buf)
 }
 
+// ── Ancestor walk ────────────────────────────────────────────────────────
+
+/// True if walking `start`'s parent chain reaches any PID in `skip_pids`.
+/// Bounded to 32 hops to guard against PPID cycles from PID reuse; a lookup
+/// failure or reaching PID ≤ 1 ends the walk (process is not a descendant of
+/// any tracked harness).
+///
+/// The candidate itself being in `skip_pids` is handled at the call site —
+/// this function checks strict ancestors only.
+#[cfg(unix)]
+pub(super) fn walk_has_tracked_ancestor(
+    start: u32,
+    skip_pids: &[u32],
+    parent_of: impl Fn(u32) -> Option<u32>,
+) -> bool {
+    const MAX_DEPTH: usize = 32;
+    let mut cur = start;
+    for _ in 0..MAX_DEPTH {
+        let Some(parent) = parent_of(cur) else {
+            return false;
+        };
+        if parent <= 1 || parent == cur {
+            return false;
+        }
+        if skip_pids.contains(&parent) {
+            return true;
+        }
+        cur = parent;
+    }
+    false
+}
+
+/// Return the parent PID of a process on macOS via `proc_pidinfo`.
+/// Returns `None` if the syscall fails (process may have exited).
+#[cfg(target_os = "macos")]
+pub(super) fn ppid_of_macos(pid: u32) -> Option<u32> {
+    let mut info = std::mem::MaybeUninit::<super::BSDInfo>::zeroed();
+    let ret = unsafe {
+        super::proc_pidinfo(
+            pid as libc::c_int,
+            super::PROC_PIDTBSDINFO,
+            0,
+            info.as_mut_ptr() as *mut libc::c_void,
+            std::mem::size_of::<super::BSDInfo>() as libc::c_int,
+        )
+    };
+    if ret <= 0 {
+        return None;
+    }
+    Some(unsafe { info.assume_init() }.pbi_ppid)
+}
+
+/// Return the parent PID of a process from `/proc/<pid>/stat`.
+/// Same parsing strategy as `read_pgid_linux` — field 1 after the last `)`
+/// is state, field 2 (index 1) is PPID.
+#[cfg(all(unix, not(target_os = "macos")))]
+pub(super) fn ppid_of_linux(pid: u32) -> Option<u32> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let after_comm = stat.rsplit_once(')')?.1;
+    // Fields after ')': " S ppid pgid ..."
+    let ppid_str = after_comm.split_whitespace().nth(1)?;
+    ppid_str.parse::<u32>().ok()
+}
+
 // ── ProcessSnapshot and pure decision function ────────────────────────────
 
 /// A snapshot of one process for the pure kill-decision function. Holds only
@@ -496,5 +560,65 @@ mod tests {
         }];
         let result = select_untracked_bundle_harnesses(&snaps, &PathBuf::from(BUNDLE_HARNESS), &[]);
         assert_eq!(result, vec![3001]);
+    }
+
+    // ── walk_has_tracked_ancestor ────────────────────────────────────────
+
+    #[cfg(unix)]
+    fn map_parent(tree: &std::collections::HashMap<u32, u32>, pid: u32) -> Option<u32> {
+        tree.get(&pid).copied()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn walk_direct_child_of_tracked_harness_is_exempted() {
+        // PID 101's parent is 100 (tracked) → live descendant, not an orphan.
+        let tree: std::collections::HashMap<u32, u32> = [(101, 100)].into_iter().collect();
+        assert!(walk_has_tracked_ancestor(101, &[100], |p| map_parent(
+            &tree, p
+        )));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn walk_grandchild_via_own_group_wrapper_is_exempted() {
+        // Production tree: harness(100) → node-wrapper(101, own group) → codex-acp(102).
+        // One-level PPID check misses 102; the walk catches it.
+        let tree: std::collections::HashMap<u32, u32> =
+            [(101, 100), (102, 101)].into_iter().collect();
+        assert!(walk_has_tracked_ancestor(102, &[100], |p| map_parent(
+            &tree, p
+        )));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn walk_real_orphan_ending_at_pid1_returns_false() {
+        // Genuine orphan: chain ends at init (PID 1), no tracked ancestor.
+        let tree: std::collections::HashMap<u32, u32> = [(201, 1)].into_iter().collect();
+        assert!(!walk_has_tracked_ancestor(201, &[100], |p| map_parent(
+            &tree, p
+        )));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn walk_ppid_cycle_terminates_and_returns_false() {
+        // PPID cycle (a → b → a) from PID reuse must terminate, not loop.
+        let tree: std::collections::HashMap<u32, u32> =
+            [(300, 301), (301, 300)].into_iter().collect();
+        assert!(!walk_has_tracked_ancestor(300, &[999], |p| map_parent(
+            &tree, p
+        )));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn walk_missing_parent_entry_returns_false() {
+        // proc_pidinfo / /proc stat failure (process exited) → not a descendant.
+        let tree: std::collections::HashMap<u32, u32> = [].into_iter().collect();
+        assert!(!walk_has_tracked_ancestor(400, &[100], |p| map_parent(
+            &tree, p
+        )));
     }
 }

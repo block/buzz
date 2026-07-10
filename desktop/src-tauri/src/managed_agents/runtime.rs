@@ -356,6 +356,12 @@ fn resolve_pgids_and_kill(candidate_pids: &[i32]) {
         let alive = unsafe { libc::kill(pgid, 0) } == 0;
         !alive
     });
+    if pgids.is_empty() && !candidate_pids.is_empty() {
+        eprintln!(
+            "buzz-desktop: orphan sweep: all {} candidate group(s) skipped by PID-recycling guard (live foreign group leader); nothing signalled",
+            candidate_pids.len()
+        );
+    }
     let unique: Vec<i32> = pgids.into_iter().collect();
     sigterm_then_sigkill(&unique);
 }
@@ -384,6 +390,12 @@ fn resolve_pgids_and_kill(candidate_pids: &[i32]) {
         let alive = unsafe { libc::kill(pgid, 0) } == 0;
         !alive
     });
+    if pgids.is_empty() && !candidate_pids.is_empty() {
+        eprintln!(
+            "buzz-desktop: orphan sweep: all {} candidate group(s) skipped by PID-recycling guard (live foreign group leader); nothing signalled",
+            candidate_pids.len()
+        );
+    }
     let unique: Vec<i32> = pgids.into_iter().collect();
     sigterm_then_sigkill(&unique);
 }
@@ -515,13 +527,14 @@ pub(crate) fn sweep_system_agent_processes(instance_id: &str, skip_pids: &[u32])
         if info.pbi_uid != my_uid {
             continue;
         }
-        // Live child of a tracked harness — not an orphan.
-        if skip_pids.contains(&info.pbi_ppid) {
+        // Walk the full ancestor chain: each harness child may start its own
+        // process group, so a one-level PPID check misses grandchildren like
+        // codex-acp. A bounded walk (32 hops) catches all live descendants.
+        if sweep::walk_has_tracked_ancestor(upid, skip_pids, sweep::ppid_of_macos) {
             continue;
         }
-        // Grandchild check: the harness is spawned with process_group(0), so
-        // all descendants share its PGID. If this process's PGID matches a
-        // tracked harness PID, it's a live descendant — not an orphan.
+        // PGID fast-path: if this process's PGID is itself a tracked harness
+        // PID, the whole group is a live descendant — not an orphan.
         let pgid = unsafe { libc::getpgid(pid) };
         if pgid > 0 && skip_pids.contains(&(pgid as u32)) {
             continue;
@@ -541,20 +554,8 @@ pub(crate) fn sweep_system_agent_processes(instance_id: &str, skip_pids: &[u32])
     }
 }
 
-/// Read the parent PID of a process from /proc/<pid>/stat.
-/// The comm field (field 2) may contain spaces and parens, so we find the last
-/// ')' and parse fields after it. Field 1 after ')' is state, field 2 is PPID.
-#[cfg(all(unix, not(target_os = "macos")))]
-fn read_ppid_linux(pid: u32) -> Option<u32> {
-    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    let after_comm = stat.rsplit_once(')')?.1;
-    // Fields after ')': " S ppid pgid ..."
-    let ppid_str = after_comm.split_whitespace().nth(1)?;
-    ppid_str.parse::<u32>().ok()
-}
-
 /// Read the process group ID from /proc/<pid>/stat. Same parsing strategy as
-/// `read_ppid_linux` — field 3 after the closing ')' is the PGID.
+/// `sweep::ppid_of_linux` — field 3 after the closing ')' is the PGID.
 #[cfg(all(unix, not(target_os = "macos")))]
 fn read_pgid_linux(pid: u32) -> Option<u32> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
@@ -599,19 +600,17 @@ pub(crate) fn sweep_system_agent_processes(instance_id: &str, skip_pids: &[u32])
         if !process_belongs_to_us(upid) || !process_has_buzz_marker(upid, instance_id) {
             continue;
         }
-        // Live child of a tracked harness — not an orphan. If /proc/<pid>/stat
-        // is unreadable (process exiting, transient I/O error), we treat the
-        // process as orphaned — safe because an exiting process will disappear
-        // shortly, and the two-tick grace in the periodic path prevents acting
-        // on transient failures.
-        if let Some(ppid) = read_ppid_linux(upid) {
-            if skip_pids.contains(&ppid) {
-                continue;
-            }
+        // Walk the full ancestor chain: each harness child may start its own
+        // process group, so a one-level PPID check misses grandchildren like
+        // codex-acp. A bounded walk (32 hops) catches all live descendants.
+        // If /proc/<pid>/stat is unreadable the walk returns false (not a
+        // known descendant) — an exiting process will disappear shortly, and
+        // the two-tick grace prevents acting on transient failures.
+        if sweep::walk_has_tracked_ancestor(upid, skip_pids, sweep::ppid_of_linux) {
+            continue;
         }
-        // Grandchild check: the harness is spawned with process_group(0), so
-        // all descendants share its PGID. If this process's PGID matches a
-        // tracked harness PID, it's a live descendant — not an orphan.
+        // PGID fast-path: if this process's PGID is itself a tracked harness
+        // PID, the whole group is a live descendant — not an orphan.
         if let Some(pgid) = read_pgid_linux(upid) {
             if skip_pids.contains(&pgid) {
                 continue;
@@ -714,13 +713,14 @@ pub(crate) fn collect_same_instance_orphans(
         if info.pbi_uid != my_uid {
             continue;
         }
-        // Live child of a tracked harness — not an orphan.
-        if skip_pids.contains(&info.pbi_ppid) {
+        // Walk the full ancestor chain: each harness child may start its own
+        // process group, so a one-level PPID check misses grandchildren like
+        // codex-acp. A bounded walk (32 hops) catches all live descendants.
+        if sweep::walk_has_tracked_ancestor(upid, skip_pids, sweep::ppid_of_macos) {
             continue;
         }
-        // Grandchild check: the harness is spawned with process_group(0), so
-        // all descendants share its PGID. If this process's PGID matches a
-        // tracked harness PID, it's a live descendant — not an orphan.
+        // PGID fast-path: if this process's PGID is itself a tracked harness
+        // PID, the whole group is a live descendant — not an orphan.
         let pgid = unsafe { libc::getpgid(pid) };
         if pgid > 0 && skip_pids.contains(&(pgid as u32)) {
             continue;
@@ -769,18 +769,17 @@ pub(crate) fn collect_same_instance_orphans(
         if !process_belongs_to_us(upid) || !process_has_buzz_marker(upid, instance_id) {
             continue;
         }
-        // Live child of a tracked harness — not an orphan. If /proc/<pid>/stat
-        // is unreadable (process exiting, transient I/O error), we treat the
-        // process as orphaned — safe because an exiting process will disappear
-        // shortly, and the two-tick grace prevents acting on transient failures.
-        if let Some(ppid) = read_ppid_linux(upid) {
-            if skip_pids.contains(&ppid) {
-                continue;
-            }
+        // Walk the full ancestor chain: each harness child may start its own
+        // process group, so a one-level PPID check misses grandchildren like
+        // codex-acp. A bounded walk (32 hops) catches all live descendants.
+        // If /proc/<pid>/stat is unreadable the walk returns false (not a
+        // known descendant) — an exiting process will disappear shortly, and
+        // the two-tick grace prevents acting on transient failures.
+        if sweep::walk_has_tracked_ancestor(upid, skip_pids, sweep::ppid_of_linux) {
+            continue;
         }
-        // Grandchild check: the harness is spawned with process_group(0), so
-        // all descendants share its PGID. If this process's PGID matches a
-        // tracked harness PID, it's a live descendant — not an orphan.
+        // PGID fast-path: if this process's PGID is itself a tracked harness
+        // PID, the whole group is a live descendant — not an orphan.
         if let Some(pgid) = read_pgid_linux(upid) {
             if skip_pids.contains(&pgid) {
                 continue;
