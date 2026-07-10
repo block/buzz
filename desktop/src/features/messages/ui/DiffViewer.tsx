@@ -79,10 +79,13 @@ export function DiffViewer({
       <div className="space-y-3">
         {files.map((file) => {
           const label = getDiffFileLabel(file, fallbackFilePath);
-          const showFileHeader =
-            files.length > 1 || !fallbackFilePath || label !== fallbackFilePath;
           const { additions, deletions } = countDiffFileChanges(file);
           const diffType = normalizeDiffType(file.type);
+          const showFileHeader =
+            files.length > 1 ||
+            !fallbackFilePath ||
+            label !== fallbackFilePath ||
+            diffType !== "modify";
           const fileKey = [
             file.oldPath || "",
             file.newPath || "",
