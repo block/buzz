@@ -471,8 +471,7 @@ test("databricks_v2 with databricks-prefixed llama model strips prefix and exclu
 });
 
 test("databricks_v2 goose-claude-fable-5 strips goose- prefix and routes to anthropic adaptive+xhigh", () => {
-  // goose- is a Block/Goose Databricks catalog prefix. Must be stripped so
-  // claude-family matching routes correctly — same as databricks- stripping.
+  // "goose-claude-fable-5": first claude- occurrence at index 6 → strips "goose-"
   const { validValues, defaultValue } = getProviderEffortConfig(
     "databricks_v2",
     "goose-claude-fable-5",
@@ -489,6 +488,7 @@ test("databricks_v2 goose-claude-fable-5 strips goose- prefix and routes to anth
 });
 
 test("databricks_v2 goose-gpt-5.5 strips goose- prefix and routes to openai gpt-5.5 table", () => {
+  // "goose-gpt-5.5": first gpt- occurrence at index 6 → strips "goose-"
   const { validValues } = getProviderEffortConfig(
     "databricks_v2",
     "goose-gpt-5.5",
@@ -499,6 +499,21 @@ test("databricks_v2 goose-gpt-5.5 strips goose- prefix and routes to openai gpt-
     !validValues.includes("minimal"),
     "minimal is not in gpt-5.5 table",
   );
+});
+
+test("databricks_v2 arbitrary prefix team-x-claude-opus-4-7 strips to claude-opus-4-7 and routes to anthropic xhigh", () => {
+  // "team-x-claude-opus-4-7": first claude- occurrence at index 7 → strips "team-x-"
+  // Same routing result as bare "claude-opus-4-7" — verifies prefix allowlist is not required.
+  const { validValues, defaultValue } = getProviderEffortConfig(
+    "databricks_v2",
+    "team-x-claude-opus-4-7",
+  );
+  assert.ok(
+    validValues.includes("max"),
+    "max must be valid: claude-opus-4-7 is adaptive xhigh",
+  );
+  assert.ok(validValues.includes("xhigh"), "xhigh must be valid");
+  assert.equal(defaultValue, "high");
 });
 
 test("databricks_v2 with empty model returns all-7 (blank = route unknown)", () => {

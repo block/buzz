@@ -235,7 +235,7 @@ test("resolveInheritedRuntimeSubmission inherit-transition includes persona cred
   });
 
   assert.equal(
-    result.envVars["ANTHROPIC_API_KEY"],
+    result.envVars.ANTHROPIC_API_KEY,
     "sk-from-persona",
     "persona ANTHROPIC_API_KEY must be present in resolved envVars on inherit-transition",
   );
@@ -258,7 +258,7 @@ test("resolveInheritedRuntimeSubmission agent-local env overrides persona creden
   });
 
   assert.equal(
-    result.envVars["ANTHROPIC_API_KEY"],
+    result.envVars.ANTHROPIC_API_KEY,
     "sk-from-agent",
     "agent-local credential must override persona credential on inherit-transition",
   );
