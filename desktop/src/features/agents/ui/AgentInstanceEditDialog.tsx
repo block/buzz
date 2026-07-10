@@ -383,12 +383,23 @@ export function AgentInstanceEditDialog({
       setShowAdvancedFields,
     });
 
+  // Merge global env as the base layer so credential keys satisfied via global
+  // config (e.g. ANTHROPIC_API_KEY) are available to model discovery. Agent-local
+  // env takes precedence (higher specificity), matching the agent → global → file
+  // precedence used by the spawn path and the credential gate. Without this merge,
+  // a key satisfied globally produces a "Enter an API key to load models" discovery
+  // hint even though the amber row is correctly absent.
+  const envVarsForDiscovery = React.useMemo(
+    () => ({ ...globalConfig.env_vars, ...envVars }),
+    [globalConfig.env_vars, envVars],
+  );
+
   const {
     discoveredModelOptions,
     modelDiscoveryLoading,
     modelDiscoveryStatus,
   } = usePersonaModelDiscovery({
-    envVars,
+    envVars: envVarsForDiscovery,
     isCustomProviderEditing,
     modelFieldVisible: true,
     open,

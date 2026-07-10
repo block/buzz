@@ -500,12 +500,18 @@ export function AgentDefinitionDialog({
       setShowAdvancedFields(true);
     }
   }, [open, runtime]);
+  // Merge global env as the base layer so credential keys satisfied via global
+  // config are available to model discovery — same rationale as in AgentInstanceEditDialog.
+  const envVarsForDiscovery = React.useMemo(
+    () => ({ ...globalConfig.env_vars, ...envVars }),
+    [globalConfig.env_vars, envVars],
+  );
   const {
     discoveredModelOptions,
     modelDiscoveryLoading,
     modelDiscoveryStatus,
   } = usePersonaModelDiscovery({
-    envVars,
+    envVars: envVarsForDiscovery,
     isCustomProviderEditing,
     modelFieldVisible,
     open,

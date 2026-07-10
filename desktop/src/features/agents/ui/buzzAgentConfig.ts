@@ -80,7 +80,9 @@ export function getProviderEffortConfig(
   const rawModel = (model ?? "").trim();
   const strippedModel = rawModel.startsWith("databricks-")
     ? rawModel.slice("databricks-".length)
-    : rawModel;
+    : rawModel.startsWith("goose-")
+      ? rawModel.slice("goose-".length)
+      : rawModel;
   const m = strippedModel.toLowerCase();
 
   if (provider === "anthropic") {

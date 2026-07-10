@@ -70,6 +70,26 @@ impl ThinkingEffort {
     }
 }
 
+/// Strip Databricks catalog gateway prefixes from a model name so that family classifiers
+/// (`is_manual_budget_model`, `is_adaptive_thinking_model`, etc.) can match on the canonical
+/// `claude-*` form regardless of how the model is stored in the Databricks catalog.
+///
+/// Known catalog prefixes:
+/// - `databricks-` — standard Databricks-proxied model name (e.g. `databricks-claude-fable-5`)
+/// - `goose-` — Goose/Block catalog prefix (e.g. `goose-claude-fable-5`)
+///
+/// If neither prefix is present the name is returned unchanged.
+/// If both are present (not currently observed), `databricks-` is stripped first.
+fn strip_catalog_prefix(model: &str) -> &str {
+    if let Some(rest) = model.strip_prefix("databricks-") {
+        return rest;
+    }
+    if let Some(rest) = model.strip_prefix("goose-") {
+        return rest;
+    }
+    model
+}
+
 /// Build the Anthropic thinking/effort request fields for the given model and effort level.
 ///
 /// API shape selection (per Anthropic extended-thinking support table,
@@ -90,8 +110,9 @@ impl ThinkingEffort {
 /// **Everything else** — omit both fields. This includes unknown/future `claude-*` names
 /// not yet in the support table. Safer to omit than to guess an unverified shape.
 ///
-/// The Databricks `databricks-` prefix is stripped before matching so that
-/// `databricks-claude-opus-4-7` routes to the adaptive bucket.
+/// The Databricks `databricks-` and Goose catalog `goose-` prefixes are stripped before
+/// matching so that `databricks-claude-opus-4-7` and `goose-claude-fable-5` both route
+/// to the correct bucket. See `strip_catalog_prefix` for the full prefix list.
 ///
 /// Returns `(thinking_field, output_config_field)` where each is `None` if not applicable.
 pub fn anthropic_thinking_config(
@@ -100,11 +121,10 @@ pub fn anthropic_thinking_config(
     max_output_tokens: u32,
 ) -> (Option<serde_json::Value>, Option<serde_json::Value>) {
     use serde_json::json;
-    // Normalise the model name for matching: strip Databricks gateway prefixes
-    // (e.g. "databricks-claude-opus-4-7" → "claude-opus-4-7").
-    let model = effective_model
-        .strip_prefix("databricks-")
-        .unwrap_or(effective_model);
+    // Normalise the model name for matching: strip Databricks/catalog gateway prefixes
+    // (e.g. "databricks-claude-opus-4-7" → "claude-opus-4-7",
+    //       "goose-claude-fable-5"        → "claude-fable-5").
+    let model = strip_catalog_prefix(effective_model);
 
     if is_manual_budget_model(model) {
         // Manual-budget shape: budget_tokens must be strictly < max_tokens AND must leave
@@ -153,7 +173,7 @@ pub fn anthropic_thinking_config(
 /// Used by both `clamp_adaptive_effort` (request-time) and `anthropic_efforts_for_model`
 /// (UI capability table) to keep xhigh-support classification in a single place.
 ///
-/// `model` must already have the `databricks-` prefix stripped.
+/// `model` must already have catalog prefixes stripped (via `strip_catalog_prefix`).
 fn anthropic_model_supports_xhigh(model: &str) -> bool {
     model.starts_with("claude-opus-4-7")
         || model.starts_with("claude-opus-4-8")
@@ -174,7 +194,7 @@ fn anthropic_model_supports_xhigh(model: &str) -> bool {
 /// supported level below the requested one, and logs a warning. This is dynamic (not
 /// startup-time) because `session/set_model` can change the model after startup.
 ///
-/// `model` must already have the `databricks-` prefix stripped.
+/// `model` must already have catalog prefixes stripped (via `strip_catalog_prefix`).
 pub fn clamp_adaptive_effort(model: &str, effort: ThinkingEffort) -> ThinkingEffort {
     // Models that support all levels including xhigh (and max).
     let supports_xhigh = anthropic_model_supports_xhigh(model);
@@ -368,7 +388,7 @@ fn openai_efforts_for_model(model: &str) -> Option<&'static [ThinkingEffort]> {
 /// - `default` is `None` for manual-budget models (no semantic default —
 ///   user must choose) or `Some(High)` for adaptive families.
 ///
-/// `model` must already have any `databricks-` gateway prefix stripped.
+/// `model` must already have catalog prefixes stripped (via `strip_catalog_prefix`).
 pub fn anthropic_efforts_for_model(
     model: &str,
 ) -> (&'static [ThinkingEffort], Option<ThinkingEffort>) {
@@ -549,7 +569,7 @@ pub fn normalize_effort_for_anthropic_route(effort: ThinkingEffort) -> Option<Th
 /// - claude-opus-4-5: effort page states "uses manual thinking, where effort works alongside
 ///   the thinking token budget" — manual bucket, not adaptive.
 ///
-/// `model` must already have the `databricks-` prefix stripped.
+/// `model` must already have catalog prefixes stripped (via `strip_catalog_prefix`).
 fn is_manual_budget_model(model: &str) -> bool {
     model.starts_with("claude-3") || model == "claude-opus-4-5"
 }
@@ -566,7 +586,7 @@ fn is_manual_budget_model(model: &str) -> bool {
 /// Note: Opus 4.5 is NOT in this bucket — it uses manual budget (see `is_manual_budget_model`).
 /// No prefix wildcards over version numbers; each entry is doc-verified explicitly.
 ///
-/// `model` must already have the `databricks-` prefix stripped.
+/// `model` must already have catalog prefixes stripped (via `strip_catalog_prefix`).
 fn is_adaptive_thinking_model(model: &str) -> bool {
     // Exact version strings for Opus 4.x adaptive models (4.6, 4.7, 4.8).
     // Opus 4.5 is excluded — manual budget only.
@@ -1586,6 +1606,31 @@ mod tests {
         assert_eq!(oc["effort"], "medium");
     }
 
+    #[test]
+    fn anthropic_thinking_config_goose_prefix_stripped_for_fable_5() {
+        // "goose-" catalog prefix must be stripped so goose-claude-fable-5 routes to
+        // the adaptive + xhigh/max bucket, not the "unknown model → (None, None)" path.
+        let (thinking, output_config) =
+            anthropic_thinking_config("goose-claude-fable-5", ThinkingEffort::Max, 32_768);
+        let t =
+            thinking.expect("thinking:{type:adaptive} must be present for goose-claude-fable-5");
+        assert_eq!(t["type"], "adaptive");
+        let oc = output_config.expect("output_config must be present for goose-claude-fable-5");
+        assert_eq!(oc["effort"], "max");
+    }
+
+    #[test]
+    fn anthropic_thinking_config_goose_prefix_stripped_for_sonnet_5() {
+        // Adaptive xhigh model via goose- prefix.
+        let (thinking, output_config) =
+            anthropic_thinking_config("goose-claude-sonnet-5", ThinkingEffort::XHigh, 32_768);
+        let t =
+            thinking.expect("thinking:{type:adaptive} must be present for goose-claude-sonnet-5");
+        assert_eq!(t["type"], "adaptive");
+        let oc = output_config.expect("output_config must be present for goose-claude-sonnet-5");
+        assert_eq!(oc["effort"], "xhigh");
+    }
+
     // ---- clamp_adaptive_effort — per-model clamping tests ----
 
     #[test]
@@ -2454,10 +2499,14 @@ mod tests {
         const GPT5_1: &[&str] = &["none", "low", "medium", "high"];
 
         let p = provider.to_ascii_lowercase();
-        // Strip databricks- prefix before model matching, mirroring TS.
+        // Strip Databricks/catalog gateway prefixes before model matching, mirroring TS
+        // (strip_catalog_prefix in config.rs handles databricks- and goose-).
         let raw_model = model.trim();
-        let stripped = if raw_model.to_ascii_lowercase().starts_with("databricks-") {
+        let lower_raw = raw_model.to_ascii_lowercase();
+        let stripped = if lower_raw.starts_with("databricks-") {
             &raw_model["databricks-".len()..]
+        } else if lower_raw.starts_with("goose-") {
+            &raw_model["goose-".len()..]
         } else {
             raw_model
         };
