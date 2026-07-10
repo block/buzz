@@ -402,6 +402,11 @@ function VirtualizedTimelineRows({
 }: VirtualizedTimelineRowsProps) {
   const listRef = React.useRef<VListHandle>(null);
   const hostRef = React.useRef<HTMLDivElement>(null);
+  const settledAnchorRef = React.useRef<{
+    messageId: string;
+    top: number;
+  } | null>(null);
+  const isScrollingRef = React.useRef(false);
   const hasInitialPositionedRef = React.useRef(false);
   const items = React.useMemo(
     () => buildVirtualizedItems(dayGroups, leadingContent),
@@ -490,8 +495,24 @@ function VirtualizedTimelineRows({
     return () => onVirtualizerApiChange(null);
   }, [items.length, messageItemIndexById, onVirtualizerApiChange]);
 
+  const captureSettledAnchor = React.useCallback(() => {
+    const scroller = hostRef.current?.firstElementChild;
+    if (!(scroller instanceof HTMLDivElement)) return;
+    const scrollerRect = scroller.getBoundingClientRect();
+    const anchor = Array.from(
+      scroller.querySelectorAll<HTMLElement>("[data-message-id]"),
+    ).find((row) => row.getBoundingClientRect().top >= scrollerRect.top);
+    settledAnchorRef.current = anchor
+      ? {
+          messageId: anchor.dataset.messageId ?? "",
+          top: anchor.getBoundingClientRect().top - scrollerRect.top,
+        }
+      : null;
+  }, []);
+
   const handleScroll = React.useCallback(
     (offset: number) => {
+      isScrollingRef.current = true;
       const list = listRef.current;
       if (!list) return;
       onVirtualizerRangeChanged?.();
@@ -503,6 +524,49 @@ function VirtualizedTimelineRows({
     [onAtBottomStateChange, onStartReached, onVirtualizerRangeChanged],
   );
 
+  const handleScrollEnd = React.useCallback(() => {
+    isScrollingRef.current = false;
+    captureSettledAnchor();
+  }, [captureSettledAnchor]);
+
+  React.useLayoutEffect(() => {
+    const scroller = hostRef.current?.firstElementChild;
+    const content = scroller?.firstElementChild;
+    if (
+      !(scroller instanceof HTMLDivElement) ||
+      !(content instanceof HTMLElement)
+    ) {
+      return;
+    }
+    captureSettledAnchor();
+    const resizeObserver = new ResizeObserver(() => {
+      requestAnimationFrame(() => {
+        if (isScrollingRef.current) return;
+        const anchor = settledAnchorRef.current;
+        if (!anchor) return;
+        const row = scroller.querySelector<HTMLElement>(
+          `[data-message-id="${CSS.escape(anchor.messageId)}"]`,
+        );
+        if (!row) return;
+        const nextTop =
+          row.getBoundingClientRect().top -
+          scroller.getBoundingClientRect().top;
+        const delta = nextTop - anchor.top;
+        if (Math.abs(delta) > 0.5) scroller.scrollTop += delta;
+      });
+    });
+    const observeItems = () => {
+      for (const item of content.children) resizeObserver.observe(item);
+    };
+    observeItems();
+    const mutationObserver = new MutationObserver(observeItems);
+    mutationObserver.observe(content, { childList: true });
+    return () => {
+      mutationObserver.disconnect();
+      resizeObserver.disconnect();
+    };
+  }, [captureSettledAnchor]);
+
   return (
     <div className="h-full min-h-0 w-full" ref={hostRef}>
       <VList
@@ -513,6 +577,7 @@ function VirtualizedTimelineRows({
         keepMounted={persistentIndexes}
         shift={isPrepend}
         onScroll={handleScroll}
+        onScrollEnd={handleScrollEnd}
       >
         {(item) => {
           if (item.kind === "top-spacer") {

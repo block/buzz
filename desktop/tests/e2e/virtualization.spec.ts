@@ -306,3 +306,74 @@ test.describe("list virtualization", () => {
     }
   });
 });
+
+test("stationary rich-row resize preserves the visible reading anchor", async ({
+  page,
+}) => {
+  await installMockBridge(page);
+  await page.goto("/");
+  await page.waitForFunction(
+    () => typeof window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__ === "function",
+  );
+  await page.evaluate(() => {
+    for (let index = 0; index < 240; index += 1) {
+      window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+        channelName: "general",
+        content: [
+          `rich resize row ${index}`,
+          "long wrapped text ".repeat((index % 8) + 1),
+        ].join("\n"),
+        createdAt: 1_700_700_000 + index,
+      });
+    }
+  });
+
+  await page.getByTestId("channel-general").click();
+  const timeline = page.getByTestId("message-timeline");
+  await expect(timeline.locator("[data-message-id]").first()).toBeVisible();
+
+  const result = await timeline.evaluate(async (element) => {
+    const scroller = element as HTMLDivElement;
+    scroller.scrollTop = scroller.scrollHeight / 2;
+    scroller.dispatchEvent(new Event("scroll", { bubbles: true }));
+    await new Promise((resolve) => setTimeout(resolve, 250));
+
+    const scrollerRect = scroller.getBoundingClientRect();
+    const rows = Array.from(
+      scroller.querySelectorAll<HTMLElement>("[data-message-id]"),
+    );
+    const visibleRows = rows.filter((row) => {
+      const rect = row.getBoundingClientRect();
+      return rect.bottom > scrollerRect.top && rect.top < scrollerRect.bottom;
+    });
+    const anchor =
+      visibleRows.find(
+        (row) => row.getBoundingClientRect().top >= scrollerRect.top,
+      ) ?? visibleRows[0];
+    if (!anchor) throw new Error("no visible reading anchor");
+    const rowAbove = rows
+      .filter(
+        (row) =>
+          row.getBoundingClientRect().bottom <=
+          anchor.getBoundingClientRect().top,
+      )
+      .at(-1);
+    if (!rowAbove) throw new Error("no mounted rich row above anchor");
+
+    const anchorTop = anchor.getBoundingClientRect().top - scrollerRect.top;
+    const scrollTop = scroller.scrollTop;
+    rowAbove.style.minHeight = `${rowAbove.getBoundingClientRect().height + 240}px`;
+    await new Promise((resolve) => setTimeout(resolve, 500));
+
+    return {
+      anchorDrift:
+        anchor.getBoundingClientRect().top -
+        scroller.getBoundingClientRect().top -
+        anchorTop,
+      scrollCorrection: scroller.scrollTop - scrollTop,
+    };
+  });
+
+  expect(Math.abs(result.anchorDrift)).toBeLessThanOrEqual(2);
+  expect(result.scrollCorrection).toBeGreaterThanOrEqual(238);
+});
