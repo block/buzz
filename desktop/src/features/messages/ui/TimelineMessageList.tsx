@@ -329,11 +329,18 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
 });
 
 type VirtualizedTimelineItem =
-  | { kind: "top-spacer" }
-  | { kind: "leading-content"; content: React.ReactNode }
+  | {
+      kind: "leading-content";
+      content: React.ReactNode;
+      hasTopClearance: boolean;
+    }
   | { kind: "bottom-spacer" }
-  | { kind: "day-heading"; group: TimelineDayGroup }
-  | { kind: "timeline-item"; item: TimelineNonDayItem };
+  | {
+      kind: "timeline-item";
+      item: TimelineNonDayItem;
+      dayHeading: Pick<TimelineDayGroup, "headingTimestamp"> | null;
+      hasTopClearance: boolean;
+    };
 
 function timelineItemMessageId(item: TimelineNonDayItem): string | null {
   return item.kind === "message" || item.kind === "system"
@@ -342,27 +349,40 @@ function timelineItemMessageId(item: TimelineNonDayItem): string | null {
 }
 
 function virtualizedItemKey(item: VirtualizedTimelineItem): string {
-  if (item.kind === "top-spacer") return "top-spacer";
   if (item.kind === "bottom-spacer") return "bottom-spacer";
   if (item.kind === "leading-content") return "leading-content";
-  return item.kind === "day-heading"
-    ? `day-${item.group.key}`
-    : getTimelineItemKey(item.item);
+  return getTimelineItemKey(item.item);
 }
 
 function buildVirtualizedItems(
   dayGroups: readonly TimelineDayGroup[],
   leadingContent?: React.ReactNode,
 ): VirtualizedTimelineItem[] {
+  const timelineItems = dayGroups.flatMap((group) =>
+    group.items.map((item, index) => ({
+      kind: "timeline-item" as const,
+      item,
+      dayHeading:
+        index === 0
+          ? {
+              headingTimestamp: group.headingTimestamp,
+            }
+          : null,
+      hasTopClearance: !leadingContent && group === dayGroups[0] && index === 0,
+    })),
+  );
+
   return [
-    { kind: "top-spacer" as const },
     ...(leadingContent
-      ? [{ kind: "leading-content" as const, content: leadingContent }]
+      ? [
+          {
+            kind: "leading-content" as const,
+            content: leadingContent,
+            hasTopClearance: true,
+          },
+        ]
       : []),
-    ...dayGroups.flatMap((group) => [
-      { kind: "day-heading" as const, group },
-      ...group.items.map((item) => ({ kind: "timeline-item" as const, item })),
-    ]),
+    ...timelineItems,
     { kind: "bottom-spacer" as const },
   ];
 }
@@ -379,14 +399,15 @@ type VirtualizedTimelineRowsProps = {
 };
 
 function didPrependVirtualizedTimeline(
-  previousFirstKey: string | null,
-  firstTimelineKey: string | null,
+  previousKeys: readonly string[],
   keys: readonly string[],
 ): boolean {
+  const prependedCount = keys.length - previousKeys.length;
+  // Virtua shifts its positional size cache by the length delta, so enable
+  // `shift` only when every previous slot is the exact suffix it expects.
   return (
-    previousFirstKey !== null &&
-    previousFirstKey !== firstTimelineKey &&
-    keys.includes(previousFirstKey)
+    prependedCount > 0 &&
+    previousKeys.every((key, index) => key === keys[index + prependedCount])
   );
 }
 
@@ -410,7 +431,7 @@ function VirtualizedTimelineRows({
     () => buildVirtualizedItems(dayGroups, leadingContent),
     [dayGroups, leadingContent],
   );
-  const previousFirstTimelineKeyRef = React.useRef<string | null>(null);
+  const previousKeysRef = React.useRef<readonly string[]>([]);
   const prependAnchorRef = React.useRef<{
     messageId: string;
     top: number;
@@ -425,20 +446,10 @@ function VirtualizedTimelineRows({
   // stays true after a prepend, later measurement changes can keep anchoring
   // from the end and leave a stale blank range until the next scroll event.
   const keys = React.useMemo(() => items.map(virtualizedItemKey), [items]);
-  const firstTimelineKey = React.useMemo(() => {
-    const first = items.find((item) => item.kind === "timeline-item");
-    return first?.kind === "timeline-item"
-      ? getTimelineItemKey(first.item)
-      : null;
-  }, [items]);
   const isPrepend = React.useMemo(() => {
     void prependShiftEpoch;
-    return didPrependVirtualizedTimeline(
-      previousFirstTimelineKeyRef.current,
-      firstTimelineKey,
-      keys,
-    );
-  }, [firstTimelineKey, keys, prependShiftEpoch]);
+    return didPrependVirtualizedTimeline(previousKeysRef.current, keys);
+  }, [keys, prependShiftEpoch]);
 
   const retirePrependAnchor = React.useCallback(() => {
     if (prependWatcherFrameRef.current !== null) {
@@ -545,13 +556,13 @@ function VirtualizedTimelineRows({
   React.useEffect(() => () => retirePrependAnchor(), [retirePrependAnchor]);
 
   React.useLayoutEffect(() => {
-    previousFirstTimelineKeyRef.current = firstTimelineKey;
+    previousKeysRef.current = keys;
     if (isPrepend) clearPrependShift();
     if (!hasInitialPositionedRef.current && items.length > 0) {
       hasInitialPositionedRef.current = true;
       listRef.current?.scrollToIndex(items.length - 1, { align: "end" });
     }
-  }, [firstTimelineKey, isPrepend, items.length]);
+  }, [isPrepend, items.length, keys]);
 
   const messageItemIndexById = React.useMemo(() => {
     const byId = new Map<string, number>();
@@ -688,15 +699,6 @@ function VirtualizedTimelineRows({
         onScroll={handleScroll}
       >
         {(item) => {
-          if (item.kind === "top-spacer") {
-            return (
-              <div
-                aria-hidden
-                className="h-[var(--channel-top-chrome-height,4.5rem)]"
-                key={virtualizedItemKey(item)}
-              />
-            );
-          }
           if (item.kind === "bottom-spacer") {
             return (
               <div
@@ -707,39 +709,41 @@ function VirtualizedTimelineRows({
             );
           }
           if (item.kind === "leading-content") {
-            return <div key={virtualizedItemKey(item)}>{item.content}</div>;
-          }
-          if (item.kind === "day-heading") {
-            const { group } = item;
             return (
-              <div
-                className={cn(
-                  "relative flex flex-col",
-                  group.headingTimestamp !== null &&
-                    "before:absolute before:inset-x-0 before:top-4 before:h-px before:bg-border/35 before:content-['']",
-                )}
-                data-day-label={
-                  group.headingTimestamp === null
-                    ? undefined
-                    : formatDayHeading(group.headingTimestamp)
-                }
-                data-testid="message-timeline-day-group"
-                key={virtualizedItemKey(item)}
-              >
-                {group.headingTimestamp === null ? null : (
-                  <DayDivider
-                    label={formatDayHeading(group.headingTimestamp)}
+              <div key={virtualizedItemKey(item)}>
+                {item.hasTopClearance ? (
+                  <div
+                    aria-hidden
+                    className="h-[var(--channel-top-chrome-height,4.5rem)]"
                   />
-                )}
+                ) : null}
+                {item.content}
               </div>
             );
           }
+          const { dayHeading } = item;
           return (
             <TimelineRowShell
+              dayLabel={
+                dayHeading?.headingTimestamp === null || !dayHeading
+                  ? undefined
+                  : formatDayHeading(dayHeading.headingTimestamp)
+              }
               item={item.item}
               key={virtualizedItemKey(item)}
               useContentVisibility={false}
             >
+              {item.hasTopClearance ? (
+                <div
+                  aria-hidden
+                  className="h-[var(--channel-top-chrome-height,4.5rem)]"
+                />
+              ) : null}
+              {dayHeading?.headingTimestamp !== null && dayHeading ? (
+                <DayDivider
+                  label={formatDayHeading(dayHeading.headingTimestamp)}
+                />
+              ) : null}
               {renderItem(item.item)}
             </TimelineRowShell>
           );
@@ -751,16 +755,24 @@ function VirtualizedTimelineRows({
 
 function TimelineRowShell({
   children,
+  dayLabel,
   item,
   useContentVisibility = true,
 }: {
   children: React.ReactNode;
+  dayLabel?: string;
   item: TimelineNonDayItem;
   useContentVisibility?: boolean;
 }) {
   return (
     <div
-      className={useContentVisibility ? "timeline-row-cv" : undefined}
+      className={cn(
+        dayLabel &&
+          "relative flex flex-col before:absolute before:inset-x-0 before:top-4 before:h-px before:bg-border/35 before:content-['']",
+        useContentVisibility && "timeline-row-cv",
+      )}
+      data-day-label={dayLabel}
+      data-testid={dayLabel ? "message-timeline-day-group" : undefined}
       style={useContentVisibility ? timelineRowReserveStyle(item) : undefined}
     >
       {children}

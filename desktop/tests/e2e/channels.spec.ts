@@ -975,7 +975,16 @@ test("channel date divider keeps the date sticky while the separator rule scroll
     if (!firstGroup) {
       throw new Error("missing first day group");
     }
-    element.scrollTop = firstGroup.offsetTop + 180;
+    const groupRect = firstGroup.getBoundingClientRect();
+    const stickyTop = Number.parseFloat(
+      getComputedStyle(
+        firstGroup.querySelector<HTMLElement>(
+          '[data-testid="message-timeline-day-divider"]',
+        ) ?? firstGroup,
+      ).top,
+    );
+    element.scrollTop +=
+      groupRect.top - (element.getBoundingClientRect().top + stickyTop - 32);
     element.dispatchEvent(new Event("scroll", { bubbles: true }));
   });
   await page.waitForTimeout(50);
