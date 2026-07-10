@@ -711,7 +711,17 @@ _release-pr lane version:
     PR_BODY="## ${ARTIFACT} release v${VERSION}"$'\n\n'
     if [[ -n "$LAST_TAG" ]]; then
         PR_BODY+="### Changes since ${LAST_TAG}:"$'\n\n'
-        PR_BODY+="$(format_log "${LAST_TAG}..HEAD~1")"$'\n\n'
+        CHANGELOG_BODY=$(format_log "${LAST_TAG}..HEAD~1")
+        MAX_LOG=62000
+        if (( ${#CHANGELOG_BODY} > MAX_LOG )); then
+            TRUNCATED=$(printf '%s' "$CHANGELOG_BODY" | awk -v max="$MAX_LOG" \
+                'BEGIN{n=0} {line_len=length($0)+1; if(n+line_len>max) exit; n+=line_len; print}')
+            SHOWN=$(printf '%s\n' "$TRUNCATED" | grep -c '^-' || true)
+            TOTAL=$(printf '%s\n' "$CHANGELOG_BODY" | grep -c '^-' || true)
+            SKIPPED=$(( TOTAL - SHOWN ))
+            CHANGELOG_BODY="${TRUNCATED}"$'\n'"_… and ${SKIPPED} more commits — [compare ${LAST_TAG}…${TAG_PREFIX}${VERSION}](https://github.com/${REPO}/compare/${LAST_TAG}...${TAG_PREFIX}${VERSION})_"
+        fi
+        PR_BODY+="${CHANGELOG_BODY}"$'\n\n'
     else
         PR_BODY+="Initial release."$'\n\n'
     fi
