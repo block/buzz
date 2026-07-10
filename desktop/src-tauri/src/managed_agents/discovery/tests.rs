@@ -1,10 +1,10 @@
 use std::path::PathBuf;
 
+use super::overrides::{divergent_agent_command_override, update_time_agent_command_override};
 use super::{
     apply_agent_command_update, classify_runtime, create_time_agent_command_override,
-    default_agent_command, divergent_agent_command_override, effective_agent_command,
-    find_via_login_shell, managed_agent_avatar_url, normalize_agent_args, record_agent_command,
-    update_time_agent_command_override, BUZZ_AGENT_AVATAR_URL, CLAUDE_CODE_AVATAR_URL,
+    default_agent_command, effective_agent_command, find_via_login_shell, managed_agent_avatar_url,
+    normalize_agent_args, record_agent_command, BUZZ_AGENT_AVATAR_URL, CLAUDE_CODE_AVATAR_URL,
     CODEX_AVATAR_URL, GOOSE_AVATAR_URL,
 };
 use crate::managed_agents::AcpAvailabilityStatus;

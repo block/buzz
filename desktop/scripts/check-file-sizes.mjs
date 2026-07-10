@@ -179,7 +179,10 @@ const overrides = new Map([
   // path instead of being dropped back to inherit. Load-bearing, not debt.
   // unified-agent-model 1A.1: inline test module moved to discovery/tests.rs,
   // ratcheting 1259 -> 802 (under the 1000 default; entry kept as a ratchet).
-  ["src-tauri/src/managed_agents/discovery.rs", 802],
+  // agent-config-propagation: the agent_command_override decision family
+  // (divergent / create-time / update-time / apply) moved to
+  // discovery/overrides.rs; ratcheting 802 -> 685 to bank the headroom.
+  ["src-tauri/src/managed_agents/discovery.rs", 685],
   // identity-import-keyring: the identity resolution state machine's behavioral
   // matrix (46 tests over FakeIdentityStore — probe × marker × file cells,
   // adoption / read-back-corruption / marker-failure arms, recovery-mode
