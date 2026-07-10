@@ -236,9 +236,19 @@ pub struct ManagedAgentRecord {
     #[serde(default)]
     pub agent_command_override: Option<String>,
     pub agent_args: Vec<String>,
+    /// Create-time snapshot of the catalog MCP command. Never read at spawn —
+    /// the effective MCP command is always re-derived from the runtime catalog
+    /// (`known_acp_runtime`) — and no longer written by updates. Kept for
+    /// serde compatibility with existing stores.
     pub mcp_command: String,
+    /// Deprecated: `BUZZ_ACP_TURN_TIMEOUT` is ignored by the harness and the
+    /// desktop no longer emits or edits it. Kept for serde compatibility with
+    /// existing stores; use `idle_timeout_seconds` or
+    /// `max_turn_duration_seconds` for turn-length control.
     pub turn_timeout_seconds: u64,
-    /// Idle timeout in seconds. If set, overrides turn_timeout_seconds.
+    /// Idle timeout in seconds (`BUZZ_ACP_IDLE_TIMEOUT`): how long the agent
+    /// may stay silent on its ACP channel mid-turn before the harness times
+    /// the turn out.
     #[serde(default)]
     pub idle_timeout_seconds: Option<u64>,
     /// Absolute wall-clock cap per turn.
@@ -334,7 +344,16 @@ pub struct ManagedAgentRecord {
     /// Absorbed from `PersonaRecord.runtime` — the preferred ACP runtime ID
     /// (e.g. 'goose', 'claude'). Record-first command resolution reads this
     /// before falling back to legacy persona lookup; populated by the store
-    /// migration and at create time.
+    /// migration and at create time, and re-mirrored from the linked
+    /// definition at every snapshot apply (`apply_persona_snapshot`).
+    ///
+    /// `None` means "inherit from the linked definition" (the Inherit sentinel
+    /// clears it). Serialization then omits the key, so boot-time
+    /// `materialize_agent_runtimes` re-inserts a mirror of the definition's
+    /// current runtime on the next launch — behaviorally identical, because
+    /// every apply site re-mirrors the live definition anyway. A literal
+    /// `"runtime": null` in the store (key present, e.g. hand-edited) is
+    /// honored: materialization skips it and it deserializes to `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime: Option<String>,
     /// Pool of short thematic names for clones of this agent. Absorbed from
@@ -439,7 +458,11 @@ pub struct ManagedAgentSummary {
     /// concrete pin (`agent_command` above is the resolved/effective command).
     pub agent_command_override: Option<String>,
     pub agent_args: Vec<String>,
+    /// Catalog-derived from the effective harness (not the record's stored
+    /// field), so the UI always shows what a spawn would actually use.
     pub mcp_command: String,
+    /// Deprecated passthrough of the stored record value; the harness ignores
+    /// it. Kept for wire compatibility.
     pub turn_timeout_seconds: u64,
     pub idle_timeout_seconds: Option<u64>,
     pub max_turn_duration_seconds: Option<u64>,
@@ -486,56 +509,6 @@ pub struct ManagedAgentSummary {
     pub log_path: String,
     pub respond_to: RespondTo,
     pub respond_to_allowlist: Vec<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CreateManagedAgentRequest {
-    pub name: String,
-    #[serde(default)]
-    pub persona_id: Option<String>,
-    pub relay_url: Option<String>,
-    pub acp_command: Option<String>,
-    pub agent_command: Option<String>,
-    /// True when `agent_command` is a runtime command the user deliberately
-    /// picked for a linked persona. Distinguishes a real selection, including an
-    /// installed alias, from a missing-runtime fallback so a persona-backed
-    /// create only stores an `agent_command_override` for the former.
-    #[serde(default)]
-    pub harness_override: bool,
-    #[serde(default)]
-    pub agent_args: Vec<String>,
-    pub mcp_command: Option<String>,
-    pub turn_timeout_seconds: Option<u64>,
-    pub idle_timeout_seconds: Option<u64>,
-    pub max_turn_duration_seconds: Option<u64>,
-    pub parallelism: Option<u32>,
-    pub system_prompt: Option<String>,
-    pub avatar_url: Option<String>,
-    pub model: Option<String>,
-    pub provider: Option<String>,
-    pub mcp_toolsets: Option<String>,
-    /// Environment variables for this agent. Layered on top of persona env.
-    #[serde(default)]
-    pub env_vars: BTreeMap<String, String>,
-    #[serde(default)]
-    pub spawn_after_create: bool,
-    #[serde(default = "default_start_on_app_launch")]
-    pub start_on_app_launch: bool,
-    #[serde(default)]
-    pub backend: BackendKind,
-    /// `None` = caller expressed no preference: the definition's
-    /// `respond_to` default applies when linked, `RespondTo::default()`
-    /// otherwise. `Some` is an explicit instance-level choice and always
-    /// wins over the definition default.
-    #[serde(default)]
-    pub respond_to: Option<RespondTo>,
-    /// Raw allowlist as received from the frontend. Validated and normalized
-    /// before being written to the record.
-    #[serde(default)]
-    pub respond_to_allowlist: Vec<String>,
-    #[serde(default)]
-    pub relay_mesh: Option<RelayMeshConfig>,
 }
 
 #[derive(Debug, Serialize)]
@@ -614,63 +587,6 @@ pub struct DiscoverManagedAgentPrereqsRequest {
 pub struct ManagedAgentPrereqsInfo {
     pub acp: CommandAvailabilityInfo,
     pub mcp: CommandAvailabilityInfo,
-}
-
-/// Patch request for updating a managed agent's mutable fields.
-///
-/// Tri-state nullable semantics via `Option<Option<T>>`:
-/// - Field absent in JSON → `None` (don't touch)
-/// - `"field": null` → `Some(None)` (clear to default)
-/// - `"field": "value"` → `Some(Some("value"))` (set)
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct UpdateManagedAgentRequest {
-    pub pubkey: String,
-    /// Absent = don't touch. Present = rename the agent.
-    #[serde(default)]
-    pub name: Option<String>,
-    /// Absent = don't touch. null = clear to agent default. "id" = set.
-    #[serde(default)]
-    pub model: Option<Option<String>>,
-    #[serde(default)]
-    pub system_prompt: Option<Option<String>>,
-    #[serde(default)]
-    pub mcp_toolsets: Option<Option<String>>,
-    /// Absent = don't touch. Present = replace the env_vars map entirely.
-    #[serde(default)]
-    pub env_vars: Option<BTreeMap<String, String>>,
-    #[serde(default)]
-    pub parallelism: Option<u32>,
-    #[serde(default)]
-    pub turn_timeout_seconds: Option<u64>,
-    #[serde(default)]
-    pub relay_url: Option<String>,
-    #[serde(default)]
-    pub acp_command: Option<String>,
-    #[serde(default)]
-    pub agent_command: Option<String>,
-    /// True when the accompanying `agent_command` is a runtime/Custom command
-    /// the user deliberately picked for a linked persona (i.e. the dialog is
-    /// not inheriting). Distinguishes a real pin — including one that maps to
-    /// the persona's own runtime — from a persona-authoritative restatement,
-    /// so a same-runtime pick is preserved instead of being dropped back to
-    /// inherit. Ignored when `agent_command` is absent or the inherit sentinel.
-    #[serde(default)]
-    pub harness_override: bool,
-    #[serde(default)]
-    pub agent_args: Option<Vec<String>>,
-    #[serde(default)]
-    pub mcp_command: Option<String>,
-    /// Absent = don't touch. null = clear to runtime default. "id" = set.
-    #[serde(default, deserialize_with = "crate::util::double_option")]
-    pub provider: Option<Option<String>>,
-    /// Absent = don't touch. Present = set mode.
-    #[serde(default)]
-    pub respond_to: Option<RespondTo>,
-    /// Absent = don't touch. Present = replace the allowlist (validated &
-    /// normalized server-side).
-    #[serde(default)]
-    pub respond_to_allowlist: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize)]

@@ -98,12 +98,20 @@ pub struct Config {
     /// with the `owner` role on first startup.
     pub relay_owner_pubkey: Option<String>,
 
+    /// Canonical HTTP origin of the deployment-global operator API.
+    ///
+    /// Every operator NIP-98 `u` tag is verified against this origin, independent
+    /// of the inbound HTTP `Host` header and tenant registry. Required when
+    /// `RELAY_OPERATOR_PUBKEYS` is non-empty. Set via `RELAY_OPERATOR_API_ORIGIN`
+    /// as an `http://` or `https://` origin with no path, query, or fragment.
+    pub relay_operator_api_origin: Option<String>,
+
     /// Deployment-level relay operator pubkeys allowed to use the
-    /// `POST /operator/communities` provisioning endpoint.
+    /// `/operator/communities` management endpoints.
     ///
     /// Unlike `relay_owner_pubkey` (a role *within* the deployment community),
-    /// operators span tenants: they may create new communities and rotate owners
-    /// via the operator endpoint, but hold no implicit tenant membership row.
+    /// operators span tenants: they may create new communities and bootstrap
+    /// initial owners, but hold no implicit tenant membership row.
     /// Empty (the default) disables community provisioning entirely — fail closed.
     ///
     /// Set via `RELAY_OPERATOR_PUBKEYS` as a comma-separated list of 64-char
@@ -174,6 +182,27 @@ pub struct Config {
 fn parse_bind_addr(raw: &str) -> Result<SocketAddr, ConfigError> {
     raw.parse::<SocketAddr>()
         .map_err(|e| ConfigError::InvalidBindAddr(e.to_string()))
+}
+
+fn parse_operator_api_origin(raw: &str) -> Result<String, ConfigError> {
+    let raw = raw.trim();
+    let url = url::Url::parse(raw).map_err(|e| {
+        ConfigError::InvalidValue(format!("RELAY_OPERATOR_API_ORIGIN is not a valid URL: {e}"))
+    })?;
+    if !matches!(url.scheme(), "http" | "https")
+        || url.host().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.path() != "/"
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(ConfigError::InvalidValue(
+            "RELAY_OPERATOR_API_ORIGIN must be an http(s) origin with no credentials, path, query, or fragment"
+                .to_string(),
+        ));
+    }
+    Ok(raw.trim_end_matches('/').to_string())
 }
 
 fn ensure_git_repo_path(
@@ -278,6 +307,12 @@ impl Config {
         // pubkeys. Unlike RELAY_OWNER_PUBKEY (warn-and-ignore), an invalid
         // entry here is a hard config error: silently dropping an operator
         // pubkey would silently disable provisioning for that operator.
+        let relay_operator_api_origin = std::env::var("RELAY_OPERATOR_API_ORIGIN")
+            .ok()
+            .filter(|raw| !raw.trim().is_empty())
+            .map(|raw| parse_operator_api_origin(&raw))
+            .transpose()?;
+
         let relay_operator_pubkeys = match std::env::var("RELAY_OPERATOR_PUBKEYS") {
             Ok(raw) => {
                 let mut pubkeys = Vec::new();
@@ -300,6 +335,12 @@ impl Config {
             }
             Err(_) => Vec::new(),
         };
+        if !relay_operator_pubkeys.is_empty() && relay_operator_api_origin.is_none() {
+            return Err(ConfigError::InvalidValue(
+                "RELAY_OPERATOR_API_ORIGIN is required when RELAY_OPERATOR_PUBKEYS is configured"
+                    .to_string(),
+            ));
+        }
 
         let auth = buzz_auth::AuthConfig::default();
 
@@ -363,6 +404,20 @@ impl Config {
                 .unwrap_or(100 * 1024 * 1024),
             public_base_url: std::env::var("BUZZ_MEDIA_BASE_URL")
                 .unwrap_or_else(|_| "http://localhost:3000/media".to_string()),
+            // Per-upload-event records (`_uploads/` moderation side channel).
+            // Off by default; coherence between the three knobs is enforced in
+            // MediaConfig::validate at startup.
+            upload_records_enabled: std::env::var("BUZZ_MEDIA_UPLOAD_RECORDS")
+                .map(|v| v == "true" || v == "1")
+                .unwrap_or(false),
+            upload_ip_header: std::env::var("BUZZ_MEDIA_UPLOAD_IP_HEADER")
+                .ok()
+                .map(|s| s.trim().to_lowercase())
+                .filter(|s| !s.is_empty()),
+            upload_port_header: std::env::var("BUZZ_MEDIA_UPLOAD_PORT_HEADER")
+                .ok()
+                .map(|s| s.trim().to_lowercase())
+                .filter(|s| !s.is_empty()),
         };
         let media_max_concurrent_uploads: usize =
             std::env::var("BUZZ_MEDIA_MAX_CONCURRENT_UPLOADS")
@@ -469,6 +524,7 @@ impl Config {
             require_relay_membership,
             huddle_audio_available,
             relay_owner_pubkey,
+            relay_operator_api_origin,
             relay_operator_pubkeys,
             allow_nip_oa_auth,
             media,
@@ -540,8 +596,13 @@ mod tests {
             "RELAY_OPERATOR_PUBKEYS",
             "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA,bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb,aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         );
+        std::env::set_var(
+            "RELAY_OPERATOR_API_ORIGIN",
+            "http://buzz.mesh.bb-production.com",
+        );
         let config = Config::from_env().expect("config");
         std::env::remove_var("RELAY_OPERATOR_PUBKEYS");
+        std::env::remove_var("RELAY_OPERATOR_API_ORIGIN");
 
         assert_eq!(
             config.relay_operator_pubkeys,
@@ -562,6 +623,36 @@ mod tests {
         assert!(matches!(
             result,
             Err(ConfigError::InvalidValue(ref msg)) if msg.contains("RELAY_OPERATOR_PUBKEYS")
+        ));
+    }
+
+    #[test]
+    fn relay_operator_pubkeys_require_api_origin() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        std::env::set_var(
+            "RELAY_OPERATOR_PUBKEYS",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        );
+        std::env::remove_var("RELAY_OPERATOR_API_ORIGIN");
+        let result = Config::from_env();
+        std::env::remove_var("RELAY_OPERATOR_PUBKEYS");
+
+        assert!(matches!(
+            result,
+            Err(ConfigError::InvalidValue(ref msg)) if msg.contains("RELAY_OPERATOR_API_ORIGIN is required")
+        ));
+    }
+
+    #[test]
+    fn relay_operator_api_origin_rejects_paths() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        std::env::set_var("RELAY_OPERATOR_API_ORIGIN", "https://buzz.example/operator");
+        let result = Config::from_env();
+        std::env::remove_var("RELAY_OPERATOR_API_ORIGIN");
+
+        assert!(matches!(
+            result,
+            Err(ConfigError::InvalidValue(ref msg)) if msg.contains("must be an http(s) origin")
         ));
     }
 

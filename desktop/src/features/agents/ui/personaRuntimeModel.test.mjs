@@ -207,3 +207,59 @@ test("resolveRuntimeProviderCapability leaves genuinely unknown/custom runtimes 
     "unknown",
   );
 });
+
+// ── F2 regression: inherit-transition merges persona env into discovery snapshot ─
+//
+// AgentInstanceEditDialog's envVarsForDiscovery is now:
+//   { ...globalConfig.env_vars, ...inheritedSubmission.envVars }
+// On an inherit-transition (was harness-pinned, now inheriting with empty local
+// provider), resolveInheritedRuntimeSubmission returns
+//   envVars = { ...personaEnvVars, ...agentLocalEnvVars }
+// This test pins that persona env vars are included in the submission snapshot,
+// proving that a credential held only in the persona's env satisfies discovery
+// after the fix (not discoverable without F2's snapshot alignment).
+
+test("resolveInheritedRuntimeSubmission inherit-transition includes persona credential in envVars for discovery", () => {
+  // Scenario: agent was harness-pinned (agentCommandOverride != null).
+  // User switches to inherit. Persona has ANTHROPIC_API_KEY; agent-local does not.
+  // The resolved envVars must include ANTHROPIC_API_KEY so discovery can use it.
+  const result = resolveInheritedRuntimeSubmission({
+    inheritHarness: true,
+    agentWasHarnessPinned: true,
+    provider: "", // empty → inherit-transition path
+    personaProvider: "anthropic",
+    model: "",
+    personaModel: "claude-opus-4-5",
+    envVars: {}, // no agent-local credential
+    personaEnvVars: { ANTHROPIC_API_KEY: "sk-from-persona" },
+  });
+
+  assert.equal(
+    result.envVars.ANTHROPIC_API_KEY,
+    "sk-from-persona",
+    "persona ANTHROPIC_API_KEY must be present in resolved envVars on inherit-transition",
+  );
+  // envVarsForDiscovery = { ...global, ...result.envVars } would then include
+  // ANTHROPIC_API_KEY, preventing the misleading 'Enter an API key' hint.
+});
+
+test("resolveInheritedRuntimeSubmission agent-local env overrides persona credential on inherit-transition", () => {
+  // Agent-local key wins over persona key — consistent with the spawn-path
+  // precedence used everywhere else.
+  const result = resolveInheritedRuntimeSubmission({
+    inheritHarness: true,
+    agentWasHarnessPinned: true,
+    provider: "",
+    personaProvider: "anthropic",
+    model: "",
+    personaModel: null,
+    envVars: { ANTHROPIC_API_KEY: "sk-from-agent" },
+    personaEnvVars: { ANTHROPIC_API_KEY: "sk-from-persona" },
+  });
+
+  assert.equal(
+    result.envVars.ANTHROPIC_API_KEY,
+    "sk-from-agent",
+    "agent-local credential must override persona credential on inherit-transition",
+  );
+});

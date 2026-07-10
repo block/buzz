@@ -135,6 +135,10 @@ export type Profile = {
 
 export type UserProfileSummary = {
   displayName: string | null;
+  /** Kind-0 `name` field, kept separate from `displayName` so @mention text
+   * can be matched against either alias (agents/CLI resolve mentions against
+   * `display_name` *or* `name` at send time). */
+  name?: string | null;
   avatarUrl: string | null;
   nip05Handle: string | null;
   ownerPubkey: string | null;
@@ -615,6 +619,7 @@ export type ConfigOrigin =
   | "envVar"
   | "configFile"
   | "personaDefault"
+  | "globalDefault"
   | "runtimeOverride"
   | "harnessConstraint";
 
@@ -972,4 +977,23 @@ export type ChannelMessagesPageResponse = {
   events: RelayEvent[];
   /** Present only when a full page was returned — pass back to fetch the next (older) page. */
   nextCursor: ChannelPageCursor | null;
+};
+
+// ── Global agent configuration ────────────────────────────────────────────────
+
+/**
+ * Global agent configuration defaults applied to ALL agents.
+ *
+ * Lowest user-settable layer — per-agent and persona values win on any key
+ * collision. Mirrors the Rust `GlobalAgentConfig` struct.
+ *
+ * Precedence: baked floor < global < persona < per-agent.
+ */
+export type GlobalAgentConfig = {
+  /** Global env vars injected into all agents unconditionally. */
+  env_vars: Record<string, string>;
+  /** Global fallback provider (e.g. "anthropic", "databricks_v2"). Null = no global default. */
+  provider: string | null;
+  /** Global fallback model identifier. Null = no global default. */
+  model: string | null;
 };

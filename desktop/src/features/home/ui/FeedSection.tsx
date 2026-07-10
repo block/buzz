@@ -17,7 +17,7 @@ import {
   KIND_JOB_RESULT,
   KIND_REMINDER,
 } from "@/shared/constants/kinds";
-import { resolveMentionNames } from "@/shared/lib/resolveMentionNames";
+import { resolveMentionProps } from "@/shared/lib/resolveMentionNames";
 import { Button } from "@/shared/ui/button";
 import { Markdown } from "@/shared/ui/markdown";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
@@ -166,7 +166,10 @@ export function FeedSection({
             const canOpenChannel =
               channelId !== null && availableChannelIds.has(channelId);
             const isDone = doneSet.has(item.id);
-            const mentionNames = resolveMentionNames(item.tags, profiles);
+            const { mentionNames, mentionPubkeysByName } = resolveMentionProps(
+              item.tags,
+              profiles,
+            );
 
             return (
               <div
@@ -226,6 +229,7 @@ export function FeedSection({
                     className="max-w-none text-sm leading-snug text-muted-foreground"
                     content={feedContent(item)}
                     mentionNames={mentionNames}
+                    mentionPubkeysByName={mentionPubkeysByName}
                   />
                 </div>
 

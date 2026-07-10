@@ -76,32 +76,6 @@ CREATE TABLE IF NOT EXISTS archive_migrations (
 );
 ";
 
-// ── Migration helpers ────────────────────────────────────────────────────────
-
-/// Returns true if a named migration has already been applied.
-pub fn migration_applied(conn: &Connection, name: &str) -> Result<bool, String> {
-    // The table is created in SCHEMA above, so it always exists after open.
-    let count: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM archive_migrations WHERE name = ?1",
-            params![name],
-            |row| row.get(0),
-        )
-        .map_err(|e| format!("migration_applied query: {e}"))?;
-    Ok(count > 0)
-}
-
-/// Mark a named migration as applied (idempotent: no-op if already recorded).
-pub fn mark_migration_applied(conn: &Connection, name: &str, now: i64) -> Result<(), String> {
-    conn.execute(
-        "INSERT INTO archive_migrations (name, applied_at) VALUES (?1, ?2)
-         ON CONFLICT (name) DO NOTHING",
-        params![name, now],
-    )
-    .map_err(|e| format!("mark_migration_applied: {e}"))?;
-    Ok(())
-}
-
 // ── Open / init ─────────────────────────────────────────────────────────────
 
 /// Open (or create) the archive database at the given path.

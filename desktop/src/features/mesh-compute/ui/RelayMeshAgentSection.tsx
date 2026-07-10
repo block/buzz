@@ -69,6 +69,13 @@ export function RelayMeshAgentSection({
   // an arbitrary one — the warning must reflect what'll actually happen.
   const [overrides, setOverrides] = React.useState<string[]>([]);
 
+  // Null means the first availability fetch hasn't succeeded — either still
+  // loading, or the backend was built without mesh-llm and never will resolve.
+  // Hide the card entirely rather than showing a permanently disabled toggle.
+  if (availability === null) {
+    return null;
+  }
+
   const targets = availability?.serveTargets ?? [];
   const selectedValue = targetEndpointAddr;
 

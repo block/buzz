@@ -1232,3 +1232,356 @@ test("steer ingress bundles its prompt context into the steer prompt segment, no
     "steer context must not leak as a standalone metadata row",
   );
 });
+
+// --- session/prompt late delivery (live subscription timing race) ---
+
+test("buildTranscript correctly renders prompt segment when session/prompt arrives after status lifecycle events", () => {
+  // Simulates the live-subscription timing race: status events (commands, mode,
+  // usage) arrive first because the desktop subscribed slightly after turn start,
+  // then session/prompt arrives later (e.g. via reconnect replay or archive
+  // backfill). buildTranscript is called in out-of-order sequence order but
+  // processTranscriptEvent handles insertion — the full rebuild path in
+  // appendAgentEvent (slow path for out-of-order) re-processes events sorted by
+  // timestamp+seq, so the prompt segment must appear.
+  const TURN = "turn-oot";
+  const SESS = "sess-oot";
+  const CH = "22222222-2222-2222-2222-222222222222";
+  const AUTHOR_HEX = "b".repeat(64);
+  const EVENT_HEX = "d".repeat(64);
+
+  const makeEvent = (seq, kind, timestamp, payload) => ({
+    seq,
+    kind,
+    timestamp,
+    agentIndex: 0,
+    channelId: CH,
+    sessionId: SESS,
+    turnId: TURN,
+    payload,
+  });
+
+  // Status events arrive first (lower seq but same timestamp as prompt)
+  const commandsEvent = makeEvent(2, "acp_read", "2026-06-18T00:01:01Z", {
+    method: "session/update",
+    params: {
+      sessionId: SESS,
+      update: {
+        sessionUpdate: "available_commands_update",
+        availableCommands: ["cmd1", "cmd2"],
+      },
+    },
+  });
+
+  const modeEvent = makeEvent(3, "acp_read", "2026-06-18T00:01:01Z", {
+    method: "session/update",
+    params: {
+      sessionId: SESS,
+      update: { sessionUpdate: "current_mode_update", currentModeId: "code" },
+    },
+  });
+
+  // session/prompt has the lowest seq — it was published first but arrived last
+  const promptEvent = makeEvent(1, "acp_write", "2026-06-18T00:01:00Z", {
+    method: "session/prompt",
+    params: {
+      sessionId: SESS,
+      prompt: [
+        {
+          type: "text",
+          text: `[Buzz event: @mention]\nEvent ID: ${EVENT_HEX.toUpperCase()}\nFrom: Alice (hex: ${AUTHOR_HEX})\nContent: please help`,
+        },
+        { type: "text", text: "[Context]\nScope: thread" },
+      ],
+    },
+  });
+
+  // Deliver events out of order: status first, then prompt
+  const items = buildTranscript([commandsEvent, modeEvent, promptEvent]);
+
+  const userMsg = items.find((i) => i.type === "message" && i.role === "user");
+  assert.ok(
+    userMsg,
+    "user message item must be present even when session/prompt arrives after status events",
+  );
+  assert.equal(
+    userMsg.text,
+    "please help",
+    "user message text extracted from session/prompt Content: line",
+  );
+
+  const blocks = buildTranscriptDisplayBlocks(items);
+  const turnBlock = blocks.find((b) => b.kind === "turn");
+  assert.ok(turnBlock, "expected a turn block");
+  const promptSegment = turnBlock.segments.find((s) => s.kind === "prompt");
+  assert.ok(
+    promptSegment,
+    "prompt segment must be present when session/prompt arrives out-of-order",
+  );
+  assert.equal(
+    promptSegment.user.text,
+    "please help",
+    "prompt segment carries the correct user text",
+  );
+});
+
+// --- session-boundary ordering: restart scenario end-to-end ─────────────────
+
+test("buildTranscript restart sequence: system-prompt renders after session-boundary, not before", () => {
+  // Full two-session restart sequence routed through processTranscriptEvent.
+  // This is the production scenario that the grouping-only fix missed:
+  // upsertMetadata's replaceItem kept the system-prompt item at its first-session
+  // array position (before any sess-1 activity), so splitIntoSessionRuns saw it
+  // first (currentRun === null) and placed it in run sess-1 — above the boundary.
+  //
+  // Fix requires BOTH:
+  //   1. Normalizer: reposition system-prompt to the stream tail on re-fire
+  //      (removeItem + pushItem with new timestamp) so it arrives at the restart
+  //      event position in stream order.
+  //   2. Grouping: splitIntoSessionRuns pending-buffer re-anchors the
+  //      stale-stamped tail item into the new session run's head.
+  //
+  // Final display order must be: boundary < system-prompt < user-prompt < sess-2 activity.
+  // The session/prompt:user event mirrors production (a restart is triggered by
+  // a user @mention; the screenshot that surfaced the bug shows exactly this).
+  const CH = "33333333-3333-3333-3333-333333333333";
+  const AUTHOR_HEX = "c".repeat(64);
+  const USER_EVENT_HEX = "e".repeat(64);
+
+  const sess1Events = [
+    // sess-1 turn_started
+    {
+      seq: 1,
+      timestamp: "2026-07-01T10:00:00.000Z",
+      kind: "turn_started",
+      agentIndex: 0,
+      channelId: CH,
+      sessionId: null,
+      turnId: "turn-1",
+      payload: { source: "channel", triggeringEventIds: [] },
+    },
+    // sess-1 session/new (first fire — pushes system-prompt to the stream)
+    {
+      seq: 2,
+      timestamp: "2026-07-01T10:00:00.100Z",
+      kind: "acp_write",
+      agentIndex: 0,
+      channelId: CH,
+      sessionId: null,
+      turnId: "turn-1",
+      payload: {
+        jsonrpc: "2.0",
+        id: 1,
+        method: "session/new",
+        params: {
+          systemPrompt:
+            "[Base]\nYou are a helpful assistant.\n\n[System]\nObserver.",
+        },
+      },
+    },
+    // sess-1 resolves
+    {
+      seq: 3,
+      timestamp: "2026-07-01T10:00:00.200Z",
+      kind: "session_resolved",
+      agentIndex: 0,
+      channelId: CH,
+      sessionId: "sess-1",
+      turnId: "turn-1",
+      payload: { sessionId: "sess-1", isNewSession: true },
+    },
+    // sess-1 activity
+    {
+      seq: 4,
+      timestamp: "2026-07-01T10:00:01.000Z",
+      kind: "acp_read",
+      agentIndex: 0,
+      channelId: CH,
+      sessionId: "sess-1",
+      turnId: "turn-1",
+      payload: {
+        method: "session/update",
+        params: {
+          sessionId: "sess-1",
+          update: {
+            sessionUpdate: "tool_call",
+            toolCallId: "call-1",
+            status: "completed",
+            title: "shell",
+            kind: "shell",
+            rawInput: { command: "echo hello" },
+            content: { type: "text", text: "hello" },
+          },
+        },
+      },
+    },
+  ];
+
+  const restartEvents = [
+    // Restart: turn_started with null sessionId
+    {
+      seq: 5,
+      timestamp: "2026-07-01T11:00:00.000Z",
+      kind: "turn_started",
+      agentIndex: 0,
+      channelId: CH,
+      sessionId: null,
+      turnId: "turn-2",
+      payload: { source: "channel", triggeringEventIds: [] },
+    },
+    // session/new re-fires for the same channel (restart signal):
+    // upsertMetadata must REPOSITION to tail, not replace in-place.
+    {
+      seq: 6,
+      timestamp: "2026-07-01T11:00:00.100Z",
+      kind: "acp_write",
+      agentIndex: 0,
+      channelId: CH,
+      sessionId: null,
+      turnId: "turn-2",
+      payload: {
+        jsonrpc: "2.0",
+        id: 2,
+        method: "session/new",
+        params: {
+          systemPrompt:
+            "[Base]\nYou are a helpful assistant.\n\n[System]\nObserver.",
+        },
+      },
+    },
+    // New session resolves
+    {
+      seq: 7,
+      timestamp: "2026-07-01T11:00:00.200Z",
+      kind: "session_resolved",
+      agentIndex: 0,
+      channelId: CH,
+      sessionId: "sess-2",
+      turnId: "turn-2",
+      payload: { sessionId: "sess-2", isNewSession: true },
+    },
+    // sess-2 user @mention prompt (production shape: a restart is triggered by
+    // a user message; this is what surfaced the original bug in the screenshot).
+    {
+      seq: 8,
+      timestamp: "2026-07-01T11:00:00.300Z",
+      kind: "acp_write",
+      agentIndex: 0,
+      channelId: CH,
+      sessionId: "sess-2",
+      turnId: "turn-2",
+      payload: {
+        jsonrpc: "2.0",
+        id: 3,
+        method: "session/prompt",
+        params: {
+          sessionId: "sess-2",
+          prompt: [
+            {
+              type: "text",
+              text: `[Buzz event: @mention]\nEvent ID: ${USER_EVENT_HEX.toUpperCase()}\nFrom: Will (hex: ${AUTHOR_HEX})\nContent: @Paul status check? I had to restart`,
+            },
+          ],
+        },
+      },
+    },
+    // sess-2 activity
+    {
+      seq: 9,
+      timestamp: "2026-07-01T11:00:01.000Z",
+      kind: "acp_read",
+      agentIndex: 0,
+      channelId: CH,
+      sessionId: "sess-2",
+      turnId: "turn-2",
+      payload: {
+        method: "session/update",
+        params: {
+          sessionId: "sess-2",
+          update: {
+            sessionUpdate: "tool_call",
+            toolCallId: "call-2",
+            status: "completed",
+            title: "shell",
+            kind: "shell",
+            rawInput: { command: "echo world" },
+            content: { type: "text", text: "world" },
+          },
+        },
+      },
+    },
+  ];
+
+  const items = buildTranscript([...sess1Events, ...restartEvents]);
+  const blocks = buildTranscriptDisplayBlocks(items, "sess-2");
+
+  // (a) Exactly one session-boundary block between the two sessions.
+  const boundaryBlocks = blocks.filter((b) => b.kind === "session-boundary");
+  assert.equal(
+    boundaryBlocks.length,
+    1,
+    "exactly one session-boundary block for a two-session restart",
+  );
+
+  const boundaryIdx = blocks.indexOf(boundaryBlocks[0]);
+
+  // (b) The system-prompt must appear AFTER the boundary — not before it.
+  // Production path: system-prompt rides in the prompt bundle of the turn that
+  // carries the user @mention (acpSource "session/new" in the prompt segment).
+  const systemPromptBlockIdx = blocks.findIndex(
+    (b) =>
+      (b.kind === "single" && b.item?.acpSource === "session/new") ||
+      (b.kind === "turn" &&
+        b.segments.some(
+          (seg) =>
+            seg.kind === "prompt" &&
+            seg.systemPrompt?.acpSource === "session/new",
+        )),
+  );
+  assert.ok(
+    systemPromptBlockIdx !== -1,
+    "system-prompt item must be present in the output",
+  );
+  assert.ok(
+    boundaryIdx < systemPromptBlockIdx,
+    `boundary (idx ${boundaryIdx}) must precede system-prompt (idx ${systemPromptBlockIdx})`,
+  );
+
+  // (c) sess-2 activity must appear AFTER both boundary AND system-prompt.
+  // This pins the full required order: boundary → system-prompt → activity.
+  // Because session/prompt:user is present, the system-prompt rides inside the
+  // prompt bundle of the same turn as the tool activity — they share the same
+  // block. Use flat item order to assert system-prompt precedes activity.
+  const flat = flattenDisplayBlocks(blocks);
+  const sess2ActivityItem = flat.find(
+    (i) => i.type === "tool" && i.sessionId === "sess-2",
+  );
+  assert.ok(
+    sess2ActivityItem,
+    "sess-2 tool activity must be present in flattened output",
+  );
+  const sess2BlockIdx = blocks.findIndex((b) =>
+    flattenDisplayBlocks([b]).some(
+      (i) => i.type === "tool" && i.sessionId === "sess-2",
+    ),
+  );
+  assert.ok(
+    boundaryIdx < sess2BlockIdx,
+    `boundary (idx ${boundaryIdx}) must precede sess-2 activity (idx ${sess2BlockIdx})`,
+  );
+  // system-prompt and tool activity may be in the same turn block (prompt bundle
+  // + activity segment). Assert ordering via flat item indices.
+  const flatSystemPromptIdx = flat.findIndex(
+    (i) => i.acpSource === "session/new",
+  );
+  const flatSess2ActivityIdx = flat.findIndex(
+    (i) => i.type === "tool" && i.sessionId === "sess-2",
+  );
+  assert.ok(
+    flatSystemPromptIdx !== -1,
+    "system-prompt must appear in flattened output",
+  );
+  assert.ok(
+    flatSystemPromptIdx < flatSess2ActivityIdx,
+    `system-prompt (flat idx ${flatSystemPromptIdx}) must precede sess-2 activity (flat idx ${flatSess2ActivityIdx})`,
+  );
+});

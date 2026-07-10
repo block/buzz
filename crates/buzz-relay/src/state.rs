@@ -368,6 +368,12 @@ pub struct AppState {
     /// Per-uploader sliding-window rate limiter for media upload starts.
     /// Key: (community_id, uploader pubkey bytes). Value: (count, window_start).
     pub media_upload_rate_limiter: Arc<ScopedRateLimiter>,
+    /// Per-claimer fixed-window rate limiter for invite claim attempts
+    /// (`POST /api/invites/claim`). Entries expire after the claim window and
+    /// the cache has a hard capacity because pre-membership callers can cheaply
+    /// generate fresh Nostr keys.
+    pub invite_claim_rate_limiter:
+        Arc<moka::sync::Cache<ScopedPubkeyKey, Arc<std::sync::atomic::AtomicU32>>>,
     /// Current in-flight media uploads per (community, uploader pubkey).
     pub media_uploads_in_flight: Arc<DashMap<ScopedPubkeyKey, u32>>,
     /// Cache for observer agent-owner authorization (kind 24200).
@@ -509,6 +515,12 @@ impl AppState {
             observer_rate_limiter: Arc::new(DashMap::new()),
             mesh_connect_rate_limiter: Arc::new(DashMap::new()),
             media_upload_rate_limiter: Arc::new(DashMap::new()),
+            invite_claim_rate_limiter: Arc::new(
+                moka::sync::Cache::builder()
+                    .max_capacity(crate::api::invites::CLAIM_RATE_CACHE_CAPACITY)
+                    .time_to_live(crate::api::invites::CLAIM_RATE_WINDOW)
+                    .build(),
+            ),
             media_uploads_in_flight: Arc::new(DashMap::new()),
             observer_owner_cache: Arc::new(
                 moka::sync::Cache::builder()

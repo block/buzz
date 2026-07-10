@@ -57,6 +57,7 @@ type EmojiMartEmoji = {
 export function AgentCreationPreview({
   avatarUrl,
   disabled = false,
+  hideEditControl = false,
   label,
   onClearAvatar,
   onUploadPendingChange,
@@ -64,6 +65,10 @@ export function AgentCreationPreview({
 }: {
   avatarUrl: string | null;
   disabled?: boolean;
+  /** When true, omit all upload/edit controls and render the avatar as a
+   *  plain display element. Use in contexts where avatar editing is
+   *  handled by an external affordance (e.g. AgentInstanceEditDialog). */
+  hideEditControl?: boolean;
   label: string;
   onClearAvatar?: () => void;
   onUploadPendingChange?: (isPending: boolean) => void;
@@ -643,6 +648,37 @@ export function AgentCreationPreview({
       </fieldset>
     </PopoverContent>
   );
+
+  // Display-only path: no upload controls, no pencil badge, no popover.
+  // Used when the caller provides its own edit affordance.
+  if (hideEditControl) {
+    return (
+      <div className="mx-auto w-full max-w-[220px] lg:sticky lg:top-0">
+        <div className="group/avatar-preview relative m-0 flex min-h-[190px] min-w-0 flex-col items-center justify-center gap-3 rounded-xl border border-transparent p-0">
+          <div className="relative h-36 w-36">
+            {emojiAvatarPreview ? (
+              <div
+                aria-label={`${label} avatar`}
+                className="relative flex h-full w-full shrink-0 items-center justify-center overflow-hidden rounded-full shadow-xs transition-[background-color] duration-200 ease-out"
+                role="img"
+                style={{ backgroundColor: emojiAvatarPreview.color }}
+              >
+                <span className="flex h-full w-full items-center justify-center text-[4rem] leading-none">
+                  {emojiAvatarPreview.emoji}
+                </span>
+              </div>
+            ) : (
+              <ProfileAvatar
+                avatarUrl={avatarUrl}
+                className="h-full w-full text-4xl"
+                label={label}
+              />
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="mx-auto w-full max-w-[220px] lg:sticky lg:top-0">

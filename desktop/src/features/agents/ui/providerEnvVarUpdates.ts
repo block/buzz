@@ -7,25 +7,6 @@ import { getProviderApiKeyEnvVar } from "./personaDialogPickers";
  * changes, so `setEnvVars(fn(current))` skips a no-op re-render.
  */
 
-/** Set `envKey` to `value`, or remove it when `value` is empty. */
-export function envVarsWithProviderApiKey(
-  current: EnvVarsValue,
-  envKey: string,
-  value: string,
-): EnvVarsValue {
-  if ((current[envKey] ?? "") === value) {
-    return current;
-  }
-
-  const next = { ...current };
-  if (value.length > 0) {
-    next[envKey] = value;
-  } else {
-    delete next[envKey];
-  }
-  return next;
-}
-
 /** Remove `envKey` when present. */
 export function envVarsWithoutKey(
   current: EnvVarsValue,
@@ -56,23 +37,4 @@ export function envVarsClearingManagedApiKey(
     return envVarsWithoutKey(current, previousEnvVar);
   }
   return current;
-}
-
-/**
- * Apply an Advanced-section env-vars edit while preserving the managed
- * provider API key (which is edited via its own field, not the editor).
- */
-export function envVarsMergingAdvancedEdit(
-  current: EnvVarsValue,
-  nextAdvancedEnvVars: EnvVarsValue,
-  managedEnvKey: string | null,
-): EnvVarsValue {
-  if (!managedEnvKey || !(managedEnvKey in current)) {
-    return nextAdvancedEnvVars;
-  }
-
-  return {
-    ...nextAdvancedEnvVars,
-    [managedEnvKey]: current[managedEnvKey],
-  };
 }

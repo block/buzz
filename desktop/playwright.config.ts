@@ -89,6 +89,7 @@ export default defineConfig({
         "**/buzz-theme-screenshots.spec.ts",
         "**/channel-sort.spec.ts",
         "**/identity-lost.spec.ts",
+        "**/global-agent-config-screenshots.spec.ts",
       ],
       use: {
         ...devices["Desktop Chrome"],

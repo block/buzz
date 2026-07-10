@@ -20,7 +20,6 @@ import { PersonaDropdownField } from "./PersonaDropdownField";
 import type { EnvVarsValue } from "./EnvVarsEditor";
 import { PersonaAdvancedFields } from "./PersonaAdvancedFields";
 import { PersonaModelField } from "./PersonaModelField";
-import { PersonaProviderApiKeyField } from "./PersonaProviderApiKeyField";
 import {
   getImportButtonLabel,
   getImportButtonTone,
@@ -32,11 +31,7 @@ import {
   formatPersonaNamePoolText,
   parsePersonaNamePoolText,
 } from "./personaDialogState";
-import {
-  getAdvancedEnvVars,
-  hasAdvancedEnvVars,
-  hasText,
-} from "./personaDialogEnvVars";
+import { hasText } from "./personaDialogEnvVars";
 import {
   behaviorForSubmit,
   draftFromBehavior,
@@ -44,25 +39,21 @@ import {
   personaBehaviorDraftValid,
 } from "./personaBehaviorDraft";
 import {
-  AUTO_MODEL_DROPDOWN_VALUE,
   AUTO_PROVIDER_DROPDOWN_VALUE,
+  buildTemplateModelDropdownOptions,
   CUSTOM_MODEL_DROPDOWN_VALUE,
   CUSTOM_PROVIDER_DROPDOWN_VALUE,
   computeLocalModeGate,
   formatRuntimeOptionLabel,
-  getBakedSatisfiedEnvKeys,
   getDefaultLlmProviderLabel,
   getDefaultPersonaRuntime,
   getModelSelectValue,
   getPersonaModelOptions,
   getPersonaProviderOptions,
-  getProviderApiKeyConfig,
-  getProviderApiKeyEnvVar,
   getRuntimePersonaModelOptions,
   hasPersonaModelOption,
   NO_RUNTIME_DROPDOWN_VALUE,
   providerRequiresExplicitModel,
-  requiredCredentialEnvKeys,
   runtimeSupportsLlmProviderSelection,
   type PersonaDropdownOption,
   PERSONA_FIELD_CONTROL_CLASS,
@@ -72,10 +63,6 @@ import {
   sortPersonaRuntimes,
 } from "./personaDialogPickers";
 import { RequiredFieldLabel } from "./personaProviderModelFields";
-import {
-  envVarsMergingAdvancedEdit,
-  envVarsWithProviderApiKey,
-} from "./providerEnvVarUpdates";
 import {
   selectionOnModelDropdownChange,
   selectionOnProviderDropdownChange,
@@ -87,6 +74,8 @@ import {
   usePersonaModelDiscovery,
 } from "./usePersonaModelDiscovery";
 import { useBakedBuildEnvKeysQuery, useRuntimeFileConfigQuery } from "../hooks";
+import { useGlobalAgentConfig } from "../useGlobalAgentConfig";
+import { isBuzzAgentRuntime } from "./buzzAgentConfig";
 
 type AgentDefinitionDialogProps = {
   open: boolean;
@@ -117,6 +106,11 @@ type AgentDefinitionDialogProps = {
   createRunSection?: React.ReactNode;
   /** Extra create-mode submit gate (e.g. incomplete provider config). */
   createSubmitBlocked?: boolean;
+  /**
+   * When true, the agent is being created to run on the relay mesh — the
+   * local-mode provider/model gate does not apply and must be bypassed.
+   */
+  createRunOnMesh?: boolean;
 };
 
 const ADVANCED_FIELDS_MOTION_TRANSITION = {
@@ -141,6 +135,7 @@ export function AgentDefinitionDialog({
   createFooterSlot,
   createRunSection,
   createSubmitBlocked = false,
+  createRunOnMesh = false,
 }: AgentDefinitionDialogProps) {
   const [displayName, setDisplayName] = React.useState("");
   const [avatarUrl, setAvatarUrl] = React.useState("");
@@ -166,6 +161,7 @@ export function AgentDefinitionDialog({
   const [importErrorMessage, setImportErrorMessage] = React.useState<
     string | null
   >(null);
+  const { globalConfig } = useGlobalAgentConfig();
   const isEditMode = Boolean(initialValues && "id" in initialValues);
   const editPersonaId =
     isEditMode && initialValues && "id" in initialValues
@@ -203,9 +199,6 @@ export function AgentDefinitionDialog({
         : "";
     const nextEnvVars =
       "envVars" in initialValues ? (initialValues.envVars ?? {}) : {};
-    const managedApiKeyEnvVar = getProviderApiKeyEnvVar(
-      initialValues.provider ?? "",
-    );
     const nextBehaviorDraft = draftFromBehavior(initialValues.behavior);
     behaviorSeedRef.current = draftFromBehavior(initialValues.behavior);
     setBehaviorDraft(nextBehaviorDraft);
@@ -213,7 +206,7 @@ export function AgentDefinitionDialog({
     setEnvVars(nextEnvVars);
     setShowAdvancedFields(
       nextNamePoolText.trim().length > 0 ||
-        hasAdvancedEnvVars(nextEnvVars, managedApiKeyEnvVar) ||
+        Object.keys(nextEnvVars).length > 0 ||
         nextBehaviorDraft.respondTo !== null ||
         nextBehaviorDraft.mcpToolsets.trim().length > 0 ||
         nextBehaviorDraft.parallelism.trim().length > 0,
@@ -401,17 +394,7 @@ export function AgentDefinitionDialog({
   const llmProviderFieldVisible =
     (runtime.trim().length > 0 && runtimeCanChooseLlmProvider) ||
     blankRuntimeModelProviderEditable;
-  const providerForModelScope = llmProviderFieldVisible ? provider : "";
   const trimmedProvider = provider.trim();
-  const providerApiKeyConfig =
-    llmProviderFieldVisible && !isCustomProviderEditing
-      ? getProviderApiKeyConfig(trimmedProvider)
-      : null;
-  const providerApiKeyValue = providerApiKeyConfig
-    ? (envVars[providerApiKeyConfig.envVar] ?? "")
-    : "";
-  const providerApiKeyFieldVisible =
-    llmProviderFieldVisible && providerApiKeyConfig !== null;
   // Required credential env keys for this runtime + provider combination.
   // Used to show required markers on the LLM provider label and amber
   // locked rows in the env vars editor.
@@ -421,33 +404,43 @@ export function AgentDefinitionDialog({
     enabled: open,
   });
   const { data: bakedEnvKeys } = useBakedBuildEnvKeysQuery({ enabled: open });
-  const localModeGate = computeLocalModeGate({
-    bakedEnvKeys,
-    envVars,
-    isProviderMode: false,
-    model,
-    provider: trimmedProvider,
-    runtimeId: runtime,
-    runtimeFileConfig,
-    useMesh: false,
-  });
-  // Required keys for EnvVarsEditor amber locked rows: all required keys except
-  // those silenced by baked env or file config. Filled keys stay in the amber
-  // row (exclusion semantics, not missing-only), matching the other consumers.
-  const allRequiredEnvKeys = requiredCredentialEnvKeys(
-    runtime,
-    trimmedProvider,
+  const localModeGate = React.useMemo(
+    () =>
+      computeLocalModeGate({
+        bakedEnvKeys,
+        envVars,
+        globalEnvVars: globalConfig.env_vars,
+        globalProvider: globalConfig.provider ?? "",
+        globalModel: globalConfig.model ?? "",
+        isProviderMode: false,
+        model,
+        provider: trimmedProvider,
+        runtimeId: runtime,
+        runtimeFileConfig,
+        useMesh: createRunOnMesh,
+      }),
+    [
+      bakedEnvKeys,
+      createRunOnMesh,
+      envVars,
+      globalConfig.env_vars,
+      globalConfig.provider,
+      globalConfig.model,
+      model,
+      trimmedProvider,
+      runtime,
+      runtimeFileConfig,
+    ],
   );
-  const bakedSatisfiedPersonaKeys = getBakedSatisfiedEnvKeys(
-    allRequiredEnvKeys,
-    envVars,
-    bakedEnvKeys,
-  );
-  const requiredEnvKeys = allRequiredEnvKeys.filter(
-    (key) =>
-      !bakedSatisfiedPersonaKeys.includes(key) &&
-      !localModeGate.fileSatisfiedEnvKeys.includes(key),
-  );
+  // requiredEnvKeys: the gate already handles baked-, global-, and file-
+  // satisfied keys so no further filtering is needed.
+  const { requiredEnvKeys, missingNormalizedFields } = localModeGate;
+  // Effective provider: agent value → global fallback → file fallback.
+  // Mirrors the chain inside computeLocalModeGate so model-option scoping and
+  // model requiredness are consistent with the readiness gate.
+  const fileProvider = runtimeFileConfig?.provider?.trim() ?? "";
+  const effectiveProvider =
+    trimmedProvider || (globalConfig.provider ?? "").trim() || fileProvider;
   // Provider required-ness is a static property of the runtime — it does not
   // change based on whether the field is currently filled. Using the dynamic
   // missingNormalizedFields check would flip the asterisk off once a value is
@@ -456,12 +449,16 @@ export function AgentDefinitionDialog({
   const providerIsRequired = runtimeSupportsLlmProviderSelection(runtime);
   const modelFieldVisible =
     runtime.trim().length > 0 || blankRuntimeModelProviderEditable;
+  // Static asterisk on the model label: uses effectiveProvider so a globally-
+  // set provider correctly marks the model field required.
   const isExplicitModelRequired =
-    modelFieldVisible && providerRequiresExplicitModel(providerForModelScope);
+    modelFieldVisible && providerRequiresExplicitModel(effectiveProvider);
   const isCreateMode = Boolean(initialValues && !("id" in initialValues));
   const selectedRuntimeIsAvailable =
     runtime.trim().length === 0 ||
     selectedRuntime?.availability === "available";
+  // Gate model/provider validity through missingNormalizedFields — single
+  // source of truth with the readiness gate so display and Save can't drift.
   const canSubmit =
     canSubmitPersonaDialog({ displayName, isPending }) &&
     (!isCreateMode || runtime.trim().length > 0) &&
@@ -470,24 +467,58 @@ export function AgentDefinitionDialog({
     // Crash-loop guard, create AND edit: an empty allowlist would crash
     // every instance minted from this definition at startup.
     personaBehaviorDraftValid(behaviorDraft) &&
-    (!isExplicitModelRequired || model.trim().length > 0) &&
+    missingNormalizedFields.length === 0 &&
     !isAvatarUploadPending;
+
+  // Auto-expand the Advanced section once per dialog-open cycle when required
+  // env keys are present, so the user sees a clear signal that action is
+  // needed (e.g. provider API key required). Does not re-open if the user
+  // manually collapses the section afterward.
+  const hasAutoOpenedAdvancedRef = React.useRef(false);
+  React.useEffect(() => {
+    if (!open) {
+      hasAutoOpenedAdvancedRef.current = false;
+      return;
+    }
+    if (requiredEnvKeys.length > 0 && !hasAutoOpenedAdvancedRef.current) {
+      hasAutoOpenedAdvancedRef.current = true;
+      setShowAdvancedFields(true);
+    }
+  }, [open, requiredEnvKeys.length]);
+
+  // Auto-expand Advanced once per open when the selected runtime is buzz-agent
+  // so the model-tuning knobs are immediately reachable — mirrors the agent
+  // instance dialogs' behavior.
+  const hasAutoOpenedForBuzzAgentRef = React.useRef(false);
+  React.useEffect(() => {
+    if (!open) {
+      hasAutoOpenedForBuzzAgentRef.current = false;
+      return;
+    }
+    if (isBuzzAgentRuntime(runtime) && !hasAutoOpenedForBuzzAgentRef.current) {
+      hasAutoOpenedForBuzzAgentRef.current = true;
+      setShowAdvancedFields(true);
+    }
+  }, [open, runtime]);
+  // Merge global env as the base layer so credential keys satisfied via global
+  // config are available to model discovery — same rationale as in AgentInstanceEditDialog.
+  const envVarsForDiscovery = React.useMemo(
+    () => ({ ...globalConfig.env_vars, ...envVars }),
+    [globalConfig.env_vars, envVars],
+  );
   const {
     discoveredModelOptions,
     modelDiscoveryLoading,
     modelDiscoveryStatus,
   } = usePersonaModelDiscovery({
-    envVars,
+    envVars: envVarsForDiscovery,
     isCustomProviderEditing,
     modelFieldVisible,
     open,
-    provider: providerForModelScope,
+    provider: effectiveProvider,
     selectedRuntime,
   });
-  const staticModelOptions = getPersonaModelOptions(
-    runtime,
-    providerForModelScope,
-  );
+  const staticModelOptions = getPersonaModelOptions(runtime, effectiveProvider);
   const runtimeModelOptions = getRuntimePersonaModelOptions(runtime);
   const modelOptions = discoveredModelOptions ?? staticModelOptions;
   const isModelCustom = !hasPersonaModelOption(
@@ -502,19 +533,19 @@ export function AgentDefinitionDialog({
   const showCustomModelInput =
     modelFieldVisible && (isCustomModelEditing || isModelCustom);
   const providerOptions = getPersonaProviderOptions(
-    providerForModelScope,
+    trimmedProvider,
     runtime,
+    globalConfig.provider ?? "",
   );
-  const defaultLlmProviderLabel = getDefaultLlmProviderLabel(runtime);
+  const defaultLlmProviderLabel = getDefaultLlmProviderLabel(
+    runtime,
+    globalConfig.provider ?? "",
+  );
   const providerSelectValue = isCustomProviderEditing
     ? CUSTOM_PROVIDER_DROPDOWN_VALUE
     : trimmedProvider || AUTO_PROVIDER_DROPDOWN_VALUE;
   const showCustomProviderInput =
     llmProviderFieldVisible && isCustomProviderEditing;
-  const advancedEnvVars = getAdvancedEnvVars(
-    envVars,
-    providerApiKeyConfig?.envVar ?? null,
-  );
   const runtimeDropdownValue = runtime.trim() || NO_RUNTIME_DROPDOWN_VALUE;
   const sortedRuntimes = React.useMemo(
     () => sortPersonaRuntimes(runtimes),
@@ -559,10 +590,10 @@ export function AgentDefinitionDialog({
     { label: "Custom provider...", value: CUSTOM_PROVIDER_DROPDOWN_VALUE },
   ];
   const modelDropdownOptions: PersonaDropdownOption[] = [
-    ...modelOptions.map((option) => ({
-      label: option.label,
-      value: option.id || AUTO_MODEL_DROPDOWN_VALUE,
-    })),
+    ...buildTemplateModelDropdownOptions(
+      modelOptions,
+      globalConfig.model ?? "",
+    ),
     ...(modelDiscoveryLoading && discoveredModelOptions === null
       ? [
           {
@@ -598,7 +629,7 @@ export function AgentDefinitionDialog({
       isCustomModelEditing ||
       !shouldClearKnownModelForSelectionScope({
         model,
-        provider: providerForModelScope,
+        provider: effectiveProvider,
         runtime,
       })
     ) {
@@ -612,29 +643,9 @@ export function AgentDefinitionDialog({
     model,
     modelFieldVisible,
     open,
-    providerForModelScope,
+    effectiveProvider,
     runtime,
   ]);
-
-  function handleProviderApiKeyChange(value: string) {
-    if (!providerApiKeyConfig) {
-      return;
-    }
-
-    setEnvVars((current) =>
-      envVarsWithProviderApiKey(current, providerApiKeyConfig.envVar, value),
-    );
-  }
-
-  function handleAdvancedEnvVarsChange(nextAdvancedEnvVars: EnvVarsValue) {
-    setEnvVars((current) =>
-      envVarsMergingAdvancedEdit(
-        current,
-        nextAdvancedEnvVars,
-        providerApiKeyConfig?.envVar ?? null,
-      ),
-    );
-  }
 
   const selection: RuntimeModelProviderSelection = {
     provider,
@@ -900,14 +911,8 @@ export function AgentDefinitionDialog({
                     />
                   </div>
                 ) : null}
-                {providerApiKeyFieldVisible && providerApiKeyConfig ? (
-                  <PersonaProviderApiKeyField
-                    config={providerApiKeyConfig}
-                    disabled={isPending}
-                    onChange={handleProviderApiKeyChange}
-                    value={providerApiKeyValue}
-                  />
-                ) : null}
+                {/* Provider API key is now surfaced as an amber required row
+                    in EnvVarsEditor — no dedicated field needed. */}
               </div>
             ) : null}
 
@@ -959,12 +964,16 @@ export function AgentDefinitionDialog({
                     <PersonaAdvancedFields
                       behaviorDraft={behaviorDraft}
                       disabled={isPending}
-                      envVars={advancedEnvVars}
+                      envVars={envVars}
                       fileSatisfiedEnvKeys={localModeGate.fileSatisfiedEnvKeys}
+                      inheritedEnvVars={globalConfig.env_vars}
+                      model={model}
+                      modelTuningRuntimeId={runtime}
                       namePoolText={namePoolText}
                       onBehaviorDraftChange={setBehaviorDraft}
-                      onEnvVarsChange={handleAdvancedEnvVarsChange}
+                      onEnvVarsChange={setEnvVars}
                       onNamePoolTextChange={setNamePoolText}
+                      provider={provider}
                       requiredEnvKeys={requiredEnvKeys}
                     />
                   </motion.div>

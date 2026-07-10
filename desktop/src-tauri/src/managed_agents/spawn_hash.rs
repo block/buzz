@@ -28,9 +28,10 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 
 use super::{
     known_acp_runtime, normalize_agent_args,
-    persona_events::persona_snapshot_with_agent_config_fallback,
+    persona_events::apply_persona_snapshot,
     resolve_effective_agent_env,
     types::{ManagedAgentRecord, PersonaRecord},
+    GlobalAgentConfig,
 };
 
 /// The prompt a spawn would actually deliver: `Some("")` collapses to `None`
@@ -59,37 +60,26 @@ pub(crate) fn spawn_config_hash(
     record: &ManagedAgentRecord,
     personas: &[PersonaRecord],
     workspace_relay: &str,
+    global: &GlobalAgentConfig,
 ) -> u64 {
-    // Prospective re-snapshot: mirror the mutation start/restore apply to the
-    // record right before spawning, so the hash covers what a restart would
-    // actually run. Idempotent, so the spawn-time stamp (post-snapshot record)
-    // and later recomputes (persisted record) agree when nothing changed.
+    // Prospective re-snapshot: apply the same `apply_persona_snapshot` the
+    // start/restore paths run right before spawning, so the hash covers what a
+    // restart would actually run. Idempotent, so the spawn-time stamp
+    // (post-snapshot record) and later recomputes (persisted record) agree
+    // when nothing changed. The persona env itself reaches the hash through
+    // `resolve_effective_agent_env` below; `persona_source_version` is set on
+    // the clone but is not a hash input.
     let mut record = record.clone();
     if let Some(persona_id) = record.persona_id.clone() {
         if let Some(persona) = personas.iter().find(|p| p.id == persona_id) {
-            let snapshot = persona_snapshot_with_agent_config_fallback(
-                persona,
-                record.model.as_deref(),
-                record.provider.as_deref(),
-            );
-            if let Some(prompt) = snapshot.system_prompt {
-                record.system_prompt = Some(prompt);
-            }
-            record.model = snapshot.model;
-            record.provider = snapshot.provider;
-            // Mirror the start/restore self-heal: overrides equal to the live
-            // persona value are treated as inherited. The persona env itself
-            // reaches the hash through `resolve_effective_agent_env` below.
-            record
-                .env_vars
-                .retain(|k, v| persona.env_vars.get(k) != Some(v));
+            apply_persona_snapshot(&mut record, persona);
         }
     }
     let record = &record;
 
     let effective_command = crate::managed_agents::record_agent_command(record, personas);
     let runtime_meta = known_acp_runtime(&effective_command);
-    let effective = resolve_effective_agent_env(record, personas, runtime_meta);
+    let effective = resolve_effective_agent_env(record, personas, runtime_meta, global);
 
     let mut hasher = DefaultHasher::new();
 

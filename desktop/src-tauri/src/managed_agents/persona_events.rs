@@ -9,7 +9,7 @@ use buzz_core_pkg::kind::KIND_PERSONA;
 use nostr::{EventBuilder, Kind, Tag};
 use serde::{Deserialize, Serialize};
 
-use super::PersonaRecord;
+use super::{ManagedAgentRecord, PersonaRecord};
 use crate::app_state::AppState;
 
 /// The JSON body stored in a persona event's content field.
@@ -334,6 +334,12 @@ pub struct PersonaSnapshot {
     pub system_prompt: Option<String>,
     pub model: Option<String>,
     pub provider: Option<String>,
+    /// Preferred ACP runtime ID, copied verbatim from the persona (including
+    /// `None`). Unlike `model`/`provider`, there is no record-fallback: the
+    /// materialized instance `runtime` must mirror the definition so that
+    /// definition edits propagate on the next spawn rather than being silently
+    /// shadowed by the stale materialized value.
+    pub runtime: Option<String>,
     /// `persona_content_hash` of the persona at snapshot time; the drift basis.
     pub source_version: String,
 }
@@ -367,6 +373,7 @@ pub fn persona_snapshot(persona: &PersonaRecord) -> PersonaSnapshot {
         system_prompt: Some(persona.system_prompt.clone()),
         model: persona.model.clone(),
         provider: persona.provider.clone(),
+        runtime: persona.runtime.clone(),
         source_version: persona_content_hash(&persona_event_content(persona)),
     }
 }
@@ -409,6 +416,44 @@ pub fn persona_snapshot_with_agent_config_fallback(
         provider,
         ..base
     }
+}
+
+/// Re-pin `record` to `persona`: build the snapshot (via
+/// [`persona_snapshot_with_agent_config_fallback`], so blank persona
+/// `model`/`provider` preserve the record's own values) and mirror it onto the
+/// record — the definition quad (`system_prompt`/`model`/`provider`/`runtime`),
+/// the env-override self-heal, and the `persona_source_version` drift basis.
+///
+/// This is the single apply used by every snapshot-apply site: the spawn
+/// re-pin (`start_local_agent_with_preflight`), the launch backfill and
+/// restore re-snapshot (`restore.rs`), and the prospective re-snapshot inside
+/// `spawn_config_hash` — so a future `PersonaSnapshot` field addition
+/// propagates to all of them at once.
+///
+/// Deliberately does NOT touch `updated_at`: persistence stamps are the
+/// caller's concern, and `spawn_config_hash` (which applies this to a clone)
+/// must stay pure.
+pub fn apply_persona_snapshot(record: &mut ManagedAgentRecord, persona: &PersonaRecord) {
+    let snapshot = persona_snapshot_with_agent_config_fallback(
+        persona,
+        record.model.as_deref(),    // fallback: record.model
+        record.provider.as_deref(), // fallback: record.provider
+    );
+    if let Some(prompt) = snapshot.system_prompt {
+        record.system_prompt = Some(prompt);
+    }
+    record.model = snapshot.model;
+    record.provider = snapshot.provider;
+    record.runtime = snapshot.runtime;
+    // env_vars stay overrides-only. Self-heal records written before the env
+    // refresh: persona env used to be baked into `record.env_vars`, turning
+    // inherited values into pseudo-overrides that shadow later persona edits.
+    // An override equal to the persona's current value is indistinguishable
+    // from inheritance, so drop it and let the live merge supply it.
+    record
+        .env_vars
+        .retain(|k, v| persona.env_vars.get(k) != Some(v));
+    record.persona_source_version = Some(snapshot.source_version);
 }
 #[cfg(test)]
 mod tests;

@@ -604,7 +604,6 @@ test("editAgent_missingRequiredEnvKey_blocksSaveViaValidity", () => {
   const base = {
     name: "My Agent",
     parallelism: "",
-    turnTimeoutSeconds: "",
     agentAcpCommand: "",
     acpCommand: "",
     respondTo: "all",
@@ -634,7 +633,6 @@ test("editAgent_customCommandPinned_blocksSaveWhenCommandEmpty", () => {
   const base = {
     name: "My Agent",
     parallelism: "",
-    turnTimeoutSeconds: "",
     agentAcpCommand: "",
     acpCommand: "",
     respondTo: "all",

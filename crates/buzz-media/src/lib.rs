@@ -9,6 +9,7 @@ pub mod storage;
 pub mod thumbnail;
 pub mod types;
 pub mod upload;
+pub mod upload_record;
 pub mod validation;
 
 pub use config::MediaConfig;
@@ -16,4 +17,8 @@ pub use error::MediaError;
 pub use storage::{BlobHeadMeta, BlobMeta, ByteStream, MediaStorage};
 pub use types::BlobDescriptor;
 pub use upload::{process_file_upload, process_upload, process_video_upload};
+pub use upload_record::{
+    parse_port, parse_public_ip, upload_record_key, UploadAttribution, UploadNetworkInfo,
+    UploadRecord, UPLOAD_RECORD_VERSION,
+};
 pub use validation::{serve_inline, validate_video_file, VideoMeta};

@@ -1,6 +1,9 @@
 import { AlertTriangle } from "lucide-react";
 
-import { requestOpenEditAgent } from "@/features/agents/openEditAgentEvent";
+import {
+  requestOpenEditAgent,
+  type EditAgentFocusTarget,
+} from "@/features/agents/openEditAgentEvent";
 import { useAppShell } from "@/app/AppShellContext";
 import type { ConfigNudgePayload } from "@/shared/lib/configNudge";
 import { cn } from "@/shared/lib/cn";
@@ -85,6 +88,44 @@ function cliLoginMessage(
 }
 
 /**
+ * Derive a field-focus target from the first actionable requirement.
+ * `cli_login` requirements don't map to a focusable Edit Agent field,
+ * so they are skipped. Returns `undefined` for cli_login-only nudges.
+ */
+function firstFocusTarget(
+  requirements: ConfigNudgePayload["requirements"],
+): EditAgentFocusTarget | undefined {
+  for (const req of requirements) {
+    if (req.surface === "env_key") {
+      return { type: "env_key", key: req.key };
+    }
+    if (req.surface === "normalized_field") {
+      return { type: "normalized_field", field: req.field };
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Derive a field-focus target from a SINGLE requirement.
+ * Mirrors `firstFocusTarget` but operates on one row — used so per-row
+ * Edit Agent CTAs focus the field that row describes, not the first editable
+ * field on the card.
+ * Returns `undefined` for `cli_login` requirements (Doctor, not Edit Agent).
+ */
+export function focusTargetForRequirement(
+  req: ConfigNudgePayload["requirements"][number],
+): EditAgentFocusTarget | undefined {
+  if (req.surface === "env_key") {
+    return { type: "env_key", key: req.key };
+  }
+  if (req.surface === "normalized_field") {
+    return { type: "normalized_field", field: req.field };
+  }
+  return undefined;
+}
+
+/**
  * Inline card rendered when the desktop detects a `buzz:config-nudge`
  * sentinel in a kind:9 message body.
  *
@@ -133,9 +174,9 @@ export function ConfigNudgeCard({
     onOpenSettings?.("doctor");
   };
 
-  const openEditAgent = () => {
+  const openEditAgent = (focus?: EditAgentFocusTarget) => {
     openProfilePanel?.(nudge.agent_pubkey);
-    requestOpenEditAgent(nudge.agent_pubkey);
+    requestOpenEditAgent(nudge.agent_pubkey, focus);
   };
 
   const handleOpen = () => {
@@ -145,8 +186,8 @@ export function ConfigNudgeCard({
       // install-state cards where Doctor is the correct destination.
       openDoctor();
     } else {
-      // (B) Mixed card — card-level fallback to Edit Agent.
-      openEditAgent();
+      // (B) Mixed card — card-level fallback: focus the first editable field.
+      openEditAgent(firstFocusTarget(nudge.requirements));
     }
   };
 
@@ -157,11 +198,14 @@ export function ConfigNudgeCard({
     openDoctor();
   };
 
-  const handleOpenEditAgent = (e: React.MouseEvent) => {
-    // (B) Per-row Edit Agent CTA — stop propagation so the card trigger
-    // doesn't double-fire.
+  const handleOpenEditAgent = (
+    e: React.MouseEvent,
+    focus: EditAgentFocusTarget | undefined,
+  ) => {
+    // (B) Per-row Edit Agent CTA — focus the field this specific row describes.
+    // Stop propagation so the card trigger doesn't double-fire.
     e.stopPropagation();
-    openEditAgent();
+    openEditAgent(focus);
   };
 
   return (
@@ -226,7 +270,10 @@ function RequirementRow({
 }: {
   allCliLogin: boolean;
   onOpenDoctor: (e: React.MouseEvent) => void;
-  onOpenEditAgent: (e: React.MouseEvent) => void;
+  onOpenEditAgent: (
+    e: React.MouseEvent,
+    focus: EditAgentFocusTarget | undefined,
+  ) => void;
   requirement: ConfigNudgePayload["requirements"][number];
 }) {
   switch (requirement.surface) {
@@ -243,7 +290,9 @@ function RequirementRow({
           {!allCliLogin && (
             <button
               className="relative z-20 shrink-0 font-medium text-muted-foreground hover:underline"
-              onClick={onOpenEditAgent}
+              onClick={(e) =>
+                onOpenEditAgent(e, focusTargetForRequirement(requirement))
+              }
               type="button"
             >
               Edit Agent →
@@ -261,7 +310,9 @@ function RequirementRow({
           {!allCliLogin && (
             <button
               className="relative z-20 shrink-0 font-medium text-muted-foreground hover:underline"
-              onClick={onOpenEditAgent}
+              onClick={(e) =>
+                onOpenEditAgent(e, focusTargetForRequirement(requirement))
+              }
               type="button"
             >
               Edit Agent →

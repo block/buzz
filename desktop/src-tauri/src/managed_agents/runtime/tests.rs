@@ -670,3 +670,91 @@ fn grandchild_inherits_pgid_of_process_group_leader() {
     unsafe { libc::kill(-harness_pid, libc::SIGTERM) };
     let _ = harness.wait();
 }
+
+/// Validates that `walk_has_tracked_ancestor` catches the production case the
+/// old PGID check missed: the intermediate process is in its OWN process group
+/// (mirroring the node npm-shim wrapper that starts `codex-acp`). The
+/// grandchild's PGID matches the intermediate's PID, not the harness's — so
+/// `skip_pids.contains(&grandchild_pgid)` returns false. The ancestor walk
+/// must still find the harness as an ancestor and return true.
+#[cfg(unix)]
+#[test]
+fn own_group_grandchild_detected_by_ancestor_walk() {
+    use std::os::unix::process::CommandExt;
+    use std::process::Command;
+
+    // The test process is the "harness". Spawn an intermediate with its own
+    // process group (mirrors the node shim). It backgrounds a grandchild
+    // (sleep 30) and prints the grandchild PID so we can inspect it.
+    let mut intermediate = {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "sleep 30 & echo $!; wait"])
+            .stdout(std::process::Stdio::piped())
+            .process_group(0);
+        cmd.spawn().expect("spawn intermediate")
+    };
+
+    use std::io::BufRead;
+    let stdout = intermediate.stdout.take().unwrap();
+    let reader = std::io::BufReader::new(stdout);
+    let grandchild_pid: u32 = reader
+        .lines()
+        .next()
+        .expect("should get a line")
+        .expect("should read line")
+        .trim()
+        .parse()
+        .expect("should parse grandchild PID");
+
+    let intermediate_pid = intermediate.id();
+    let harness_pid = std::process::id();
+
+    // The intermediate is its own process group leader.
+    let intermediate_pgid = unsafe { libc::getpgid(intermediate_pid as i32) };
+    assert_eq!(
+        intermediate_pgid, intermediate_pid as i32,
+        "intermediate should be its own process group leader"
+    );
+
+    // The grandchild inherits the intermediate's group — NOT the harness's.
+    let grandchild_pgid = unsafe { libc::getpgid(grandchild_pid as i32) };
+    assert_eq!(
+        grandchild_pgid, intermediate_pid as i32,
+        "grandchild PGID should be the intermediate, not the harness"
+    );
+    assert_ne!(
+        grandchild_pgid, harness_pid as i32,
+        "grandchild PGID must not equal harness PID — this is the false-positive shape"
+    );
+
+    // The ancestor walk finds the harness even though PGID doesn't match it.
+    let skip_pids = vec![harness_pid];
+    let found =
+        super::sweep::walk_has_tracked_ancestor(grandchild_pid, &skip_pids, super::sweep::ppid_of);
+    assert!(
+        found,
+        "walk must detect grandchild as a live descendant of the tracked harness"
+    );
+
+    // Contrast: empty skip_pids → not a descendant of any tracked harness.
+    let not_found =
+        super::sweep::walk_has_tracked_ancestor(grandchild_pid, &[], super::sweep::ppid_of);
+    assert!(
+        !not_found,
+        "walk with empty skip_pids must return false for a real orphan"
+    );
+
+    // Guard against PID reuse: verify the intermediate is still alive before
+    // cleanup so a recycled PID can't corrupt the kill target.
+    assert!(
+        intermediate
+            .try_wait()
+            .expect("try_wait on intermediate")
+            .is_none(),
+        "intermediate exited before cleanup — its PID may have been recycled"
+    );
+
+    // Cleanup: SIGKILL the intermediate's process group (takes sleep 30 with it).
+    unsafe { libc::kill(-(intermediate_pid as i32), libc::SIGKILL) };
+    let _ = intermediate.wait();
+}

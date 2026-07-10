@@ -4,9 +4,11 @@ import { useMemo } from "react";
 
 import {
   countDiffFileChanges,
+  DIFF_TYPE_LABELS,
   getDiffFileLabel,
   normalizeDiffType,
   parseUnifiedDiff,
+  shouldShowDiffFileHeader,
 } from "@/features/messages/lib/parseDiff";
 import { cn } from "@/shared/lib/cn";
 import "./DiffViewer.css";
@@ -17,14 +19,6 @@ type DiffViewerProps = {
   viewType?: ViewType;
   className?: string;
 };
-
-const DIFF_TYPE_LABELS = {
-  add: "New file",
-  copy: "Copied",
-  delete: "Deleted",
-  modify: "Modified",
-  rename: "Renamed",
-} as const;
 
 function FileChangeBadge({
   tone,
@@ -79,10 +73,13 @@ export function DiffViewer({
       <div className="space-y-3">
         {files.map((file) => {
           const label = getDiffFileLabel(file, fallbackFilePath);
-          const showFileHeader =
-            files.length > 1 || !fallbackFilePath || label !== fallbackFilePath;
           const { additions, deletions } = countDiffFileChanges(file);
           const diffType = normalizeDiffType(file.type);
+          const showFileHeader = shouldShowDiffFileHeader(
+            label,
+            files.length,
+            fallbackFilePath,
+          );
           const fileKey = [
             file.oldPath || "",
             file.newPath || "",

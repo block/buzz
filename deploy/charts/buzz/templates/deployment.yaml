@@ -85,6 +85,15 @@ spec:
             {{- if gt (.Values.relay.ephemeralTtlOverride | int) 0 }}
             - { name: BUZZ_EPHEMERAL_TTL_OVERRIDE, value: {{ .Values.relay.ephemeralTtlOverride | quote }} }
             {{- end }}
+            {{- if .Values.relay.uploadRecords }}
+            - { name: BUZZ_MEDIA_UPLOAD_RECORDS, value: "true" }
+            {{- end }}
+            {{- if .Values.relay.uploadIpHeader }}
+            - { name: BUZZ_MEDIA_UPLOAD_IP_HEADER, value: {{ .Values.relay.uploadIpHeader | quote }} }
+            {{- end }}
+            {{- if .Values.relay.uploadPortHeader }}
+            - { name: BUZZ_MEDIA_UPLOAD_PORT_HEADER, value: {{ .Values.relay.uploadPortHeader | quote }} }
+            {{- end }}
 
             # ── Owner ────────────────────────────────────────────────
             - { name: RELAY_OWNER_PUBKEY, value: {{ .Values.ownerPubkey | quote }} }

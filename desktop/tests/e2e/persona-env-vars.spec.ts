@@ -272,39 +272,41 @@ test("env vars editor renders in PersonaDialog new-persona form", async ({
   await page.getByTestId("new-agent-card").click();
   await page.getByRole("menuitem", { name: /^New agent$/ }).click();
 
-  await expect(page.getByTestId("env-vars-editor")).toHaveCount(0);
-  await page.getByRole("button", { name: "Advanced", exact: true }).click();
+  // Scope all env-vars queries to the dialog: GlobalAgentConfigSettingsCard
+  // also renders an EnvVarsEditor in the background settings pane (introduced
+  // by this branch), so page-wide testid queries would match both.
+  const dialog = page.getByRole("dialog");
 
-  // The env vars editor should be present after opening Advanced.
-  await expect(page.getByTestId("env-vars-editor")).toBeVisible();
-  // Initially empty (no rows).
-  await expect(page.getByTestId("env-vars-key")).toHaveCount(0);
+  // The default runtime is buzz-agent — Advanced auto-expands on open so the
+  // model-tuning knobs are immediately reachable.  The env-vars editor is
+  // already visible; no click needed to expand.
+  await expect(dialog.getByTestId("env-vars-editor")).toBeVisible();
+  // Initially empty (no rows — buzz-agent with no provider has no required keys).
+  await expect(dialog.getByTestId("env-vars-key")).toHaveCount(0);
 
   // Add a row.
-  await page.getByTestId("env-vars-add").click();
-  await expect(page.getByTestId("env-vars-key")).toHaveCount(1);
+  await dialog.getByTestId("env-vars-add").click();
+  await expect(dialog.getByTestId("env-vars-key")).toHaveCount(1);
 
   // Fill it in with realistic-looking keys/values to cover masked secrets and row controls.
-  const keys = page.getByTestId("env-vars-key");
-  const values = page.getByTestId("env-vars-value");
+  const keys = dialog.getByTestId("env-vars-key");
+  const values = dialog.getByTestId("env-vars-value");
   await keys.nth(0).fill("ANTHROPIC_API_KEY");
   await values.nth(0).fill("sk-ant-abc");
-  await page.getByTestId("env-vars-add").click();
+  await dialog.getByTestId("env-vars-add").click();
   await keys.nth(1).fill("GOOSE_PROVIDER");
   await values.nth(1).fill("anthropic");
-  await page.getByTestId("env-vars-add").click();
+  await dialog.getByTestId("env-vars-add").click();
   await keys.nth(2).fill("OPENAI_BASE_URL");
   await values.nth(2).fill("https://api.openai.com/v1");
 
   // Capture a screenshot of the dialog with three env vars filled. Helps
   // reviewers see the UI at a glance.
   await waitForAnimations(page);
-  await page
-    .getByRole("dialog")
-    .screenshot({ path: "test-results/persona-env-dialog.png" });
+  await dialog.screenshot({ path: "test-results/persona-env-dialog.png" });
 
   // Remove the first row to verify per-row removal still works.
-  await page.getByTestId("env-vars-remove").first().click();
+  await dialog.getByTestId("env-vars-remove").first().click();
   await expect(keys).toHaveCount(2);
 });
 
@@ -326,12 +328,20 @@ test("persona model options follow the selected LLM provider", async ({
   // Without live discovery, the only static option is "Default model".
   await expect(model).toContainText("Default model");
 
-  // Switch to OpenAI — the API-key field appears and is labelled correctly.
+  // Switch to OpenAI — OPENAI_COMPAT_API_KEY appears as an amber required row
+  // in the EnvVarsEditor (Advanced auto-expands when a required key is missing).
   await selectDropdownOption(page, llmProvider, "OpenAI");
-  const providerApiKey = page.getByTestId("persona-provider-api-key");
-  await expect(page.getByText("OpenAI API key")).toBeVisible();
-  await expect(providerApiKey).toBeVisible();
-  await expect(page.getByTestId("env-vars-editor")).toHaveCount(0);
+  const dialog = page.getByRole("dialog");
+  // Advanced is now expanded and the editor is visible.
+  await expect(dialog.getByTestId("env-vars-editor")).toBeVisible();
+  // The required amber row for OPENAI_COMPAT_API_KEY is present.
+  const openAiRequiredRow = dialog.locator(
+    '[data-testid="env-vars-required-key"]',
+    {
+      hasText: "OPENAI_COMPAT_API_KEY",
+    },
+  );
+  await expect(openAiRequiredRow).toBeVisible();
   await expect(model).toBeVisible();
   // OpenAI requires an explicit model, so "Default model" is filtered out.
   // The combobox offers only "Custom model..." — verify it is present and selectable.
@@ -340,18 +350,22 @@ test("persona model options follow the selected LLM provider", async ({
     .getByRole("button", { name: "Custom model...", exact: true })
     .click();
 
-  // Switch to Anthropic — API-key field label changes and value clears.
+  // Switch to Anthropic — ANTHROPIC_API_KEY amber row appears; OPENAI_COMPAT_API_KEY gone.
   await selectDropdownOption(page, llmProvider, "Anthropic");
-  await expect(page.getByText("Anthropic API key")).toBeVisible();
-  await expect(providerApiKey).toHaveValue("");
+  const anthropicRequiredRow = dialog.locator(
+    '[data-testid="env-vars-required-key"]',
+    {
+      hasText: "ANTHROPIC_API_KEY",
+    },
+  );
+  await expect(anthropicRequiredRow).toBeVisible();
   await expect(model).toBeVisible();
 
-  // Fill in the Anthropic key and verify the model field is still present.
-  await providerApiKey.fill("sk-ant-test");
-  await expect(model).toBeVisible();
-
-  // Switch to Default (no explicit provider) — model resets to "Default model".
-  await selectDropdownOption(page, llmProvider, "Default");
+  // Switch to Default (no explicit provider) — required rows disappear,
+  // model resets to "Default model".
+  // Provider blank option was renamed from "Default" to "Select a provider\u2026"
+  // by the global-provider label change in this branch (getDefaultLlmProviderLabel).
+  await selectDropdownOption(page, llmProvider, "Select a provider\u2026");
   await expect(model).toBeVisible();
   await expect(model).toContainText("Default model");
 });

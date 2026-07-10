@@ -62,7 +62,7 @@ import { KIND_REACTION } from "@/shared/constants/kinds";
 import { topChromeInset } from "@/shared/layout/chromeLayout";
 import { cn } from "@/shared/lib/cn";
 import { normalizePubkey } from "@/shared/lib/pubkey";
-import { resolveMentionNames } from "@/shared/lib/resolveMentionNames";
+import { resolveMentionProps } from "@/shared/lib/resolveMentionNames";
 import { useElementWidth } from "@/shared/hooks/use-mobile";
 import { useThreadPanelWidth } from "@/shared/hooks/useThreadPanelWidth";
 import { AUXILIARY_PANEL_SINGLE_COLUMN_BREAKPOINT_PX } from "@/shared/layout/AuxiliaryPanel";
@@ -373,6 +373,10 @@ export function HomeView({
       const event = eventById.get(message.id);
       const authorPubkey =
         message.pubkey ?? event?.pubkey ?? selectedItem.item.pubkey;
+      const { mentionNames, mentionPubkeysByName } = resolveMentionProps(
+        message.tags ?? [],
+        feedProfiles,
+      );
       return {
         id: message.id,
         authorLabel: message.author,
@@ -383,8 +387,8 @@ export function HomeView({
         depth: event ? getContextMessageDepth(event, eventById) : message.depth,
         fullTimestampLabel: formatInboxFullTimestamp(message.createdAt),
         isSelected: message.id === selectedItem.id,
-        mentionNames:
-          resolveMentionNames(message.tags ?? [], feedProfiles) ?? [],
+        mentionNames: mentionNames ?? [],
+        mentionPubkeysByName,
         reactions: message.reactions,
         tags: message.tags,
         timeLabel: message.time,

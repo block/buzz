@@ -10,13 +10,13 @@
  * these tests immediately.
  *
  * Three properties under test:
- *   (a) never-persisted key → null  (fast send must not produce a sent record)
- *   (b) persisted key       → key   (normal send produces a sent record)
+ *   (a) never-persisted key → null  (fast send: no active draft to clear)
+ *   (b) persisted key       → key   (key is captured at submit time)
  *   (c) submit-time capture semantics: the value returned at submit time is
  *       stable even if the store entry is cleared before send success (proving
  *       the predicate is evaluated once at submit, not re-read at success).
  *
- * Integration scenarios (d)+(e) drive the full storage flow to confirm
+ * Integration scenarios (d)+(e)+(f) drive the full storage flow to confirm
  * that the predicate output correctly gates markDraftSentEntry.
  */
 
@@ -125,7 +125,7 @@ test("resolveSentDraftKey_null_effectiveKey_returns_null", () => {
   assert.equal(result2, null, "undefined effectiveDraftKey → null");
 });
 
-// ── (d) Integration: never-persisted send → no sent record ───────────────────
+// ── (d) Integration: never-persisted send → no active draft to clear ─────────
 // Simulates submitMessage calling resolveSentDraftKey before the send:
 // the resolver returns null → markDraftSentEntry is never called.
 
@@ -138,13 +138,17 @@ test("submit_predicate_never_persisted_send_produces_no_sent_record", () => {
   assert.equal(sentDraftKey, null, "resolver returns null for fast send");
 
   // markDraftSentEntry is never called (sentDraftKey is null → gate in
-  // useMentionSendFlow.ts:399 fires false). No sent record.
-  assert.equal(getSentDraftEntries().length, 0, "no sent record for fast send");
+  // useMentionSendFlow.ts:399 fires false). Active draft was never written.
+  assert.equal(
+    getSentDraftEntries().length,
+    0,
+    "no active draft for fast send",
+  );
 });
 
-// ── (e) Integration: persisted draft → sent record written ───────────────────
+// ── (e) Integration: persisted draft → active draft cleared on send ───────────
 
-test("submit_predicate_persisted_draft_produces_sent_record", () => {
+test("submit_predicate_persisted_draft_clears_active_entry_on_send", () => {
   setup("pubkey-normal-send");
   const draftKey = "chan-normal-integration";
 
@@ -162,18 +166,21 @@ test("submit_predicate_persisted_draft_produces_sent_record", () => {
   // Send succeeds — markDraftSentEntry called with the captured key.
   markDraftSentEntry(draftKey, "my draft content", draftKey, [], []);
 
-  const sent = getSentDraftEntries();
-  assert.equal(sent.length, 1, "sent record created");
-  assert.equal(sent[0].draft.content, "my draft content");
-  assert.equal(sent[0].draft.status, "sent");
+  // Active key is cleared; active draft removed.
+  assert.equal(loadDraftEntry(draftKey), undefined, "active key cleared");
+  assert.equal(
+    getSentDraftEntries().length,
+    0,
+    "no active draft entries remain",
+  );
 });
 
-// ── (f) Integration: persisted draft + race → sent record still written ───────
+// ── (f) Integration: persisted draft + race → active key already gone, no-op ──
 // Simulates: persist → resolveSentDraftKey captures key at submit time →
 // navigation race clears the active entry → send succeeds with captured key.
-// markDraftSentEntry writes unconditionally → sent record exists with snapshot.
+// markDraftSentEntry now just calls clearDraftEntry — a no-op when key is gone.
 
-test("submit_predicate_persisted_then_race_clears_key_sent_record_still_written", () => {
+test("submit_predicate_persisted_then_race_clears_key_markDraftSent_is_noop", () => {
   setup("pubkey-race-send");
   const draftKey = "chan-race-pred";
 
@@ -193,23 +200,9 @@ test("submit_predicate_persisted_then_race_clears_key_sent_record_still_written"
   );
 
   // Step 4: send succeeds; markDraftSentEntry called with captured sentDraftKey.
+  // Key is already gone — no-op.
   markDraftSentEntry(sentDraftKey, "race content", draftKey, [IMG_A], []);
 
-  const sent = getSentDraftEntries();
-  assert.equal(
-    sent.length,
-    1,
-    "sent record written despite active key being cleared",
-  );
-  assert.equal(
-    sent[0].draft.content,
-    "race content",
-    "snapshot content preserved",
-  );
-  assert.equal(
-    sent[0].draft.pendingImeta.length,
-    1,
-    "snapshot image preserved",
-  );
-  assert.equal(sent[0].draft.status, "sent");
+  assert.equal(getSentDraftEntries().length, 0, "no entries in store");
+  assert.equal(loadDraftEntry(draftKey), undefined, "active key still absent");
 });

@@ -12,6 +12,18 @@ const PUBKEY = "a".repeat(64);
 const OTHER = "b".repeat(64);
 const CHANNEL_ID = "channel-1";
 const THREAD_ROOT = "c".repeat(64);
+const THREAD_ROOT_2 = "d".repeat(64);
+
+const EMPTY_RELATIONSHIPS = {
+  participatedRootIds: new Set(),
+  followedRootIds: new Set(),
+  authoredRootIds: new Set(),
+  mutedRootIds: new Set(),
+};
+
+function readRelationships(overrides = {}) {
+  return () => ({ ...EMPTY_RELATIONSHIPS, ...overrides });
+}
 
 function event(overrides = {}) {
   return {
@@ -33,6 +45,15 @@ function relayFor(filters) {
       return filters.shift()?.(filter) ?? [];
     },
   };
+}
+
+// Helper: encode a mutes payload as JSON (decryptMutes stub returns content as-is)
+function mutesContent(mutedIds) {
+  const channels = {};
+  for (const id of mutedIds) {
+    channels[id] = { muted: true, updatedAt: 1 };
+  }
+  return JSON.stringify({ version: 1, channels });
 }
 
 test("extractMemberChannelIds deduplicates d tags", () => {
@@ -103,6 +124,7 @@ test("extractHiddenDmIds reads h tags from latest visibility snapshot", () => {
 
 test("fetchWorkspaceUnread returns dot and mention count without total unread count", async () => {
   const relay = relayFor([
+    // 1. member events
     () => [
       event({
         tags: [
@@ -111,6 +133,7 @@ test("fetchWorkspaceUnread returns dot and mention count without total unread co
         ],
       }),
     ],
+    // 2. metadata events (parallel with visibility)
     () => [
       event({
         tags: [
@@ -119,8 +142,13 @@ test("fetchWorkspaceUnread returns dot and mention count without total unread co
         ],
       }),
     ],
+    // 3. visibility events (parallel with metadata)
     () => [],
+    // 4. read-state events (parallel with mutes)
     () => [],
+    // 5. mutes events (parallel with read-state)
+    () => [],
+    // 6. unread events
     () => [
       event({
         id: "unread".padEnd(64, "0"),
@@ -128,6 +156,7 @@ test("fetchWorkspaceUnread returns dot and mention count without total unread co
         tags: [["h", CHANNEL_ID]],
       }),
     ],
+    // 7. mention events
     () => [
       event({
         id: "mention".padEnd(64, "0"),
@@ -145,6 +174,8 @@ test("fetchWorkspaceUnread returns dot and mention count without total unread co
     pubkey: PUBKEY,
     nowSeconds: 100,
     decryptReadState: async (value) => value,
+    decryptMutes: async (value) => value,
+    readThreadRelationships: readRelationships(),
   });
 
   assert.deepEqual(result, { hasUnread: true, mentionCount: 1 });
@@ -173,6 +204,7 @@ test("fetchWorkspaceUnread ignores self-authored and read thread/message events"
   });
 
   const relay = relayFor([
+    // 1. member events
     () => [
       event({
         tags: [
@@ -181,6 +213,7 @@ test("fetchWorkspaceUnread ignores self-authored and read thread/message events"
         ],
       }),
     ],
+    // 2. metadata events (parallel with visibility)
     () => [
       event({
         tags: [
@@ -189,7 +222,9 @@ test("fetchWorkspaceUnread ignores self-authored and read thread/message events"
         ],
       }),
     ],
+    // 3. visibility events (parallel with metadata)
     () => [],
+    // 4. read-state events (parallel with mutes)
     () => [
       event({
         pubkey: PUBKEY,
@@ -208,7 +243,11 @@ test("fetchWorkspaceUnread ignores self-authored and read thread/message events"
         }),
       }),
     ],
+    // 5. mutes events (parallel with read-state)
+    () => [],
+    // 6. unread events
     () => [threadReply, selfMention],
+    // 7. mention events
     () => [threadReply, selfMention],
   ]);
 
@@ -217,6 +256,386 @@ test("fetchWorkspaceUnread ignores self-authored and read thread/message events"
     pubkey: PUBKEY,
     nowSeconds: 100,
     decryptReadState: async (value) => value,
+    decryptMutes: async (value) => value,
+    readThreadRelationships: readRelationships(),
+  });
+
+  assert.deepEqual(result, { hasUnread: false, mentionCount: 0 });
+});
+
+test("fetchWorkspaceUnread excludes muted-only channel — returns hasUnread:false mentionCount:0", async () => {
+  const MUTED_CHANNEL = "muted-channel-1";
+
+  const relay = relayFor([
+    // 1. member events — one muted channel
+    () => [
+      event({
+        tags: [
+          ["d", MUTED_CHANNEL],
+          ["p", PUBKEY],
+        ],
+      }),
+    ],
+    // 2. metadata events (parallel with visibility)
+    () => [
+      event({
+        tags: [
+          ["d", MUTED_CHANNEL],
+          ["t", "stream"],
+        ],
+      }),
+    ],
+    // 3. visibility events (parallel with metadata)
+    () => [],
+    // 4. read-state events (parallel with mutes)
+    () => [],
+    // 5. mutes events — MUTED_CHANNEL is muted
+    () => [
+      event({
+        pubkey: PUBKEY,
+        content: mutesContent([MUTED_CHANNEL]),
+      }),
+    ],
+    // No per-channel fetches should follow — muted channel is skipped
+  ]);
+
+  const result = await fetchWorkspaceUnread({
+    client: relay,
+    pubkey: PUBKEY,
+    nowSeconds: 100,
+    decryptReadState: async (value) => value,
+    decryptMutes: async (value) => value,
+    readThreadRelationships: readRelationships(),
+  });
+
+  assert.deepEqual(result, { hasUnread: false, mentionCount: 0 });
+});
+
+test("fetchWorkspaceUnread counts unmuted channel but skips muted channel", async () => {
+  const UNMUTED_CHANNEL = "channel-unmuted";
+  const MUTED_CHANNEL = "channel-muted";
+
+  const relay = relayFor([
+    // 1. member events — two channels
+    () => [
+      event({
+        tags: [
+          ["d", UNMUTED_CHANNEL],
+          ["d", MUTED_CHANNEL],
+          ["p", PUBKEY],
+        ],
+      }),
+    ],
+    // 2. metadata events (parallel with visibility)
+    () => [
+      event({
+        tags: [
+          ["d", UNMUTED_CHANNEL],
+          ["t", "stream"],
+        ],
+      }),
+      event({
+        tags: [
+          ["d", MUTED_CHANNEL],
+          ["t", "stream"],
+        ],
+      }),
+    ],
+    // 3. visibility events (parallel with metadata)
+    () => [],
+    // 4. read-state events (parallel with mutes)
+    () => [],
+    // 5. mutes events — only MUTED_CHANNEL is muted
+    () => [
+      event({
+        pubkey: PUBKEY,
+        content: mutesContent([MUTED_CHANNEL]),
+      }),
+    ],
+    // 6. unread events for UNMUTED_CHANNEL (muted channel loop iteration never fires)
+    () => [
+      event({
+        id: "unread".padEnd(64, "0"),
+        created_at: 20,
+        tags: [["h", UNMUTED_CHANNEL]],
+      }),
+    ],
+    // 7. mention events for UNMUTED_CHANNEL
+    () => [
+      event({
+        id: "mention".padEnd(64, "0"),
+        created_at: 30,
+        tags: [
+          ["h", UNMUTED_CHANNEL],
+          ["p", PUBKEY],
+        ],
+      }),
+    ],
+  ]);
+
+  const result = await fetchWorkspaceUnread({
+    client: relay,
+    pubkey: PUBKEY,
+    nowSeconds: 100,
+    decryptReadState: async (value) => value,
+    decryptMutes: async (value) => value,
+    readThreadRelationships: readRelationships(),
+  });
+
+  assert.deepEqual(result, { hasUnread: true, mentionCount: 1 });
+});
+
+test("fetchWorkspaceUnread treats decryption failure as empty mutes set", async () => {
+  const relay = relayFor([
+    // 1. member events
+    () => [
+      event({
+        tags: [
+          ["d", CHANNEL_ID],
+          ["p", PUBKEY],
+        ],
+      }),
+    ],
+    // 2. metadata events (parallel with visibility)
+    () => [
+      event({
+        tags: [
+          ["d", CHANNEL_ID],
+          ["t", "stream"],
+        ],
+      }),
+    ],
+    // 3. visibility events (parallel with metadata)
+    () => [],
+    // 4. read-state events (parallel with mutes)
+    () => [],
+    // 5. mutes events — present but decryption will throw
+    () => [
+      event({
+        pubkey: PUBKEY,
+        content: "corrupted-ciphertext",
+      }),
+    ],
+    // 6. unread events — channel is NOT muted (decryption failed → empty set)
+    () => [
+      event({
+        id: "unread".padEnd(64, "0"),
+        created_at: 20,
+        tags: [["h", CHANNEL_ID]],
+      }),
+    ],
+    // 7. mention events
+    () => [],
+  ]);
+
+  const result = await fetchWorkspaceUnread({
+    client: relay,
+    pubkey: PUBKEY,
+    nowSeconds: 100,
+    decryptReadState: async (value) => value,
+    decryptMutes: async () => {
+      throw new Error("decryption failed");
+    },
+    readThreadRelationships: readRelationships(),
+  });
+
+  // Channel counted as if no mutes
+  assert.deepEqual(result, { hasUnread: true, mentionCount: 0 });
+});
+
+test("fetchWorkspaceUnread treats absent mutes blob as empty mutes set", async () => {
+  const relay = relayFor([
+    // 1. member events
+    () => [
+      event({
+        tags: [
+          ["d", CHANNEL_ID],
+          ["p", PUBKEY],
+        ],
+      }),
+    ],
+    // 2. metadata events (parallel with visibility)
+    () => [
+      event({
+        tags: [
+          ["d", CHANNEL_ID],
+          ["t", "stream"],
+        ],
+      }),
+    ],
+    // 3. visibility events (parallel with metadata)
+    () => [],
+    // 4. read-state events (parallel with mutes)
+    () => [],
+    // 5. mutes events — none
+    () => [],
+    // 6. unread events
+    () => [
+      event({
+        id: "unread".padEnd(64, "0"),
+        created_at: 20,
+        tags: [["h", CHANNEL_ID]],
+      }),
+    ],
+    // 7. mention events
+    () => [],
+  ]);
+
+  const result = await fetchWorkspaceUnread({
+    client: relay,
+    pubkey: PUBKEY,
+    nowSeconds: 100,
+    decryptReadState: async (value) => value,
+    decryptMutes: async (value) => value,
+    readThreadRelationships: readRelationships(),
+  });
+
+  assert.deepEqual(result, { hasUnread: true, mentionCount: 0 });
+});
+
+// ── Thread-relevance gate tests ────────────────────────────────────────────
+
+function threadedReplyEvent(overrides = {}) {
+  return event({
+    id: overrides.id ?? "reply".padEnd(64, "0"),
+    created_at: overrides.created_at ?? 20,
+    pubkey: overrides.pubkey ?? OTHER,
+    tags: [
+      ["h", CHANNEL_ID],
+      ["e", THREAD_ROOT_2, "", "root"],
+      ["e", "parent".padEnd(64, "0"), "", "reply"],
+      ...(overrides.extraTags ?? []),
+    ],
+    ...overrides,
+  });
+}
+
+function baseRelay(unreadEvent, mutesPayload = null) {
+  return relayFor([
+    // 1. member events
+    () => [
+      event({
+        tags: [
+          ["d", CHANNEL_ID],
+          ["p", PUBKEY],
+        ],
+      }),
+    ],
+    // 2. metadata events (parallel with visibility)
+    () => [
+      event({
+        tags: [
+          ["d", CHANNEL_ID],
+          ["t", "stream"],
+        ],
+      }),
+    ],
+    // 3. visibility events (parallel with metadata)
+    () => [],
+    // 4. read-state events (parallel with mutes)
+    () => [],
+    // 5. mutes events
+    () =>
+      mutesPayload ? [event({ pubkey: PUBKEY, content: mutesPayload })] : [],
+    // 6. unread events — the single event under test
+    () => [unreadEvent],
+    // 7. mention events
+    () => [],
+  ]);
+}
+
+test("fetchWorkspaceUnread threaded reply in untracked root → hasUnread:false", async () => {
+  const relay = baseRelay(threadedReplyEvent());
+
+  const result = await fetchWorkspaceUnread({
+    client: relay,
+    pubkey: PUBKEY,
+    nowSeconds: 100,
+    decryptReadState: async (v) => v,
+    decryptMutes: async (v) => v,
+    // No root in any set → gate rejects the threaded reply
+    readThreadRelationships: readRelationships(),
+  });
+
+  assert.deepEqual(result, { hasUnread: false, mentionCount: 0 });
+});
+
+test("fetchWorkspaceUnread threaded reply in participatedRootIds → hasUnread:true", async () => {
+  const relay = baseRelay(threadedReplyEvent());
+
+  const result = await fetchWorkspaceUnread({
+    client: relay,
+    pubkey: PUBKEY,
+    nowSeconds: 100,
+    decryptReadState: async (v) => v,
+    decryptMutes: async (v) => v,
+    readThreadRelationships: readRelationships({
+      participatedRootIds: new Set([THREAD_ROOT_2]),
+    }),
+  });
+
+  assert.deepEqual(result, { hasUnread: true, mentionCount: 0 });
+});
+
+test("fetchWorkspaceUnread #p-mention reply in untracked root → hasUnread:true (mention overrides)", async () => {
+  // A @mention of the user bypasses the follow/participation gate
+  const relay = baseRelay(
+    threadedReplyEvent({
+      id: "mention-reply".padEnd(64, "0"),
+      extraTags: [["p", PUBKEY]],
+    }),
+  );
+
+  const result = await fetchWorkspaceUnread({
+    client: relay,
+    pubkey: PUBKEY,
+    nowSeconds: 100,
+    decryptReadState: async (v) => v,
+    decryptMutes: async (v) => v,
+    readThreadRelationships: readRelationships(),
+  });
+
+  assert.deepEqual(result, { hasUnread: true, mentionCount: 0 });
+});
+
+test("fetchWorkspaceUnread top-level post → hasUnread:true (no thread gate)", async () => {
+  // Top-level posts have no parentId — shouldNotifyForEvent returns true
+  const relay = baseRelay(
+    event({
+      id: "toplevel".padEnd(64, "0"),
+      created_at: 20,
+      tags: [["h", CHANNEL_ID]],
+    }),
+  );
+
+  const result = await fetchWorkspaceUnread({
+    client: relay,
+    pubkey: PUBKEY,
+    nowSeconds: 100,
+    decryptReadState: async (v) => v,
+    decryptMutes: async (v) => v,
+    readThreadRelationships: readRelationships(),
+  });
+
+  assert.deepEqual(result, { hasUnread: true, mentionCount: 0 });
+});
+
+test("fetchWorkspaceUnread threaded reply whose root is in mutedRootIds → hasUnread:false", async () => {
+  const relay = baseRelay(
+    threadedReplyEvent({ id: "muted-reply".padEnd(64, "0") }),
+  );
+
+  const result = await fetchWorkspaceUnread({
+    client: relay,
+    pubkey: PUBKEY,
+    nowSeconds: 100,
+    decryptReadState: async (v) => v,
+    decryptMutes: async (v) => v,
+    // Root is participated but also muted — mute wins
+    readThreadRelationships: readRelationships({
+      participatedRootIds: new Set([THREAD_ROOT_2]),
+      mutedRootIds: new Set([THREAD_ROOT_2]),
+    }),
   });
 
   assert.deepEqual(result, { hasUnread: false, mentionCount: 0 });
