@@ -193,6 +193,18 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
               profiles={profiles}
             />
           );
+        case "system-group":
+          return (
+            <SystemRow
+              currentPubkey={currentPubkey}
+              entries={item.entries}
+              footer={item.entries.map(
+                (entry) => messageFooters?.[entry.message.id] ?? null,
+              )}
+              onToggleReaction={onToggleReaction}
+              profiles={profiles}
+            />
+          );
         case "message":
           return (
             <MessageRowItem
@@ -292,21 +304,32 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
 
 function SystemRow({
   currentPubkey,
+  entries,
   entry,
   footer,
   onToggleReaction,
   profiles,
 }: {
   currentPubkey?: string;
-  entry: MainTimelineEntry;
+  entries?: MainTimelineEntry[];
+  entry?: MainTimelineEntry;
   footer: React.ReactNode;
   onToggleReaction?: TimelineMessageListProps["onToggleReaction"];
   profiles?: UserProfileLookup;
 }) {
+  const systemEntries = entries ?? (entry ? [entry] : []);
+  const firstEntry = systemEntries[0];
+  const groupedMessages = React.useMemo(
+    () => entries?.map((systemEntry) => systemEntry.message),
+    [entries],
+  );
+  if (!firstEntry) return null;
+
   return (
     <div className="flex flex-col gap-1 pb-2.5">
       <SystemMessageRow
-        message={entry.message}
+        groupedMessages={groupedMessages}
+        message={firstEntry.message}
         currentPubkey={currentPubkey}
         onToggleReaction={onToggleReaction}
         profiles={profiles}
