@@ -532,6 +532,54 @@ impl Db {
         }))
     }
 
+    /// Hard-deletes a community when `owner_pubkey` is still its current owner.
+    ///
+    /// The community and matching owner row are locked before deletion so an
+    /// owner rotation cannot race authorization. All tenant-scoped rows are
+    /// removed by the community foreign keys' `ON DELETE CASCADE` actions.
+    /// Returns the deleted community, or `None` when the host does not exist or
+    /// the asserted pubkey is not its owner.
+    pub async fn delete_community_owned_by(
+        &self,
+        normalized_host: &str,
+        owner_pubkey: &str,
+    ) -> Result<Option<CommunityRecord>> {
+        let mut tx = self.pool.begin().await?;
+        let row = sqlx::query(
+            r#"
+            SELECT c.id, c.host
+            FROM communities c
+            JOIN relay_members rm ON rm.community_id = c.id
+            WHERE lower(c.host) = lower($1)
+              AND lower(rm.pubkey) = lower($2)
+              AND rm.role = 'owner'
+            FOR UPDATE OF c, rm
+            "#,
+        )
+        .bind(normalized_host)
+        .bind(owner_pubkey)
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        let Some(row) = row else {
+            tx.rollback().await?;
+            return Ok(None);
+        };
+        let id: Uuid = row.try_get("id")?;
+        let host: String = row.try_get("host")?;
+
+        sqlx::query("DELETE FROM communities WHERE id = $1")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+
+        Ok(Some(CommunityRecord {
+            id: CommunityId::from_uuid(id),
+            host,
+        }))
+    }
+
     /// Returns the community that owns a channel, if the channel exists.
     ///
     /// Internal relay producers use this to derive tenant context from the row
@@ -3053,6 +3101,73 @@ mod tests {
             .await
             .expect("post-rotation retry");
         assert!(post_rotation_retry.is_none());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn hard_delete_requires_current_owner_and_cascades_tenant_rows() {
+        let db = setup_db().await;
+        let host = format!("hard-delete-{}.example", Uuid::new_v4().simple());
+        let owner = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let other = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+        let original = db
+            .create_community_with_owner(&host, owner)
+            .await
+            .expect("create community")
+            .expect("new host");
+        sqlx::query(
+            "INSERT INTO pubkey_allowlist (community_id, pubkey) VALUES ($1, decode($2, 'hex'))",
+        )
+        .bind(original.id.as_uuid())
+        .bind(other)
+        .execute(&db.pool)
+        .await
+        .expect("insert tenant child row");
+
+        assert!(db
+            .delete_community_owned_by(&host, other)
+            .await
+            .expect("reject non-owner delete")
+            .is_none());
+        assert!(db
+            .lookup_community_by_host(&host)
+            .await
+            .expect("lookup retained community")
+            .is_some());
+
+        let deleted = db
+            .delete_community_owned_by(&host.to_ascii_uppercase(), owner)
+            .await
+            .expect("delete owned community")
+            .expect("community deleted");
+        assert_eq!(deleted.id, original.id);
+        assert_eq!(deleted.host, host);
+        assert!(db
+            .lookup_community_by_host(&host)
+            .await
+            .expect("lookup deleted community")
+            .is_none());
+
+        let child_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM pubkey_allowlist WHERE community_id = $1")
+                .bind(original.id.as_uuid())
+                .fetch_one(&db.pool)
+                .await
+                .expect("count cascaded children");
+        assert_eq!(child_count, 0);
+        assert!(db
+            .delete_community_owned_by(&host, owner)
+            .await
+            .expect("repeat delete")
+            .is_none());
+
+        let recreated = db
+            .create_community_with_owner(&host, owner)
+            .await
+            .expect("recreate community")
+            .expect("deleted host reusable");
+        assert_ne!(recreated.id, original.id);
     }
 
     #[tokio::test]

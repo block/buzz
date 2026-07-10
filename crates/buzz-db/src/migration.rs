@@ -471,7 +471,7 @@ mod tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 6);
+        assert_eq!(migrations.len(), 7);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -555,6 +555,18 @@ mod tests {
             );
         }
         assert!(!migrations[0].sql.as_str().contains("moderation_reports"));
+
+        assert_eq!(migrations[6].version, 7);
+        assert_eq!(&*migrations[6].description, "community cascade delete");
+        assert_eq!(
+            migrations[6]
+                .sql
+                .as_str()
+                .matches("REFERENCES communities(id) ON DELETE CASCADE")
+                .count(),
+            22,
+            "migration 0007 must replace all 22 parent-table community foreign keys"
+        );
     }
 
     #[test]
@@ -769,5 +781,22 @@ mod tests {
             );
             assert!(exists, "migration should create {table}");
         }
+
+        let non_cascading_community_fks: i64 = sqlx::query_scalar(
+            r#"
+            SELECT COUNT(*)
+            FROM pg_constraint
+            WHERE contype = 'f'
+              AND confrelid = 'communities'::regclass
+              AND confdeltype <> 'c'
+            "#,
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("count non-cascading community foreign keys");
+        assert_eq!(
+            non_cascading_community_fks, 0,
+            "every direct community foreign key, including partition clones, must cascade"
+        );
     }
 }

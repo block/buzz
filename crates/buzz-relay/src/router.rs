@@ -68,6 +68,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/operator/communities/availability",
             get(api::operator::community_availability),
         )
+        .route(
+            "/operator/communities/{host}",
+            axum::routing::delete(api::operator::delete_community),
+        )
         // Relay invites: mint (owner/admin) + claim (membership-gate exempt)
         .route("/api/invites", post(api::invites::mint_invite))
         .route("/api/invites/claim", post(api::invites::claim_invite))

@@ -71,7 +71,7 @@ CREATE UNIQUE INDEX idx_communities_host ON communities (lower(host));
 
 CREATE TABLE channels (
     id              UUID NOT NULL DEFAULT gen_random_uuid(),
-    community_id    UUID NOT NULL REFERENCES communities(id),
+    community_id    UUID NOT NULL REFERENCES communities(id) ON DELETE CASCADE,
     name            VARCHAR(255) NOT NULL,
     channel_type    channel_type NOT NULL DEFAULT 'stream',
     visibility      channel_visibility NOT NULL DEFAULT 'open',
@@ -130,7 +130,7 @@ CREATE TRIGGER trg_channels_community_id_immutable
 -- Conformance: "Channels and channel membership". PK leads with community_id.
 
 CREATE TABLE channel_members (
-    community_id UUID NOT NULL REFERENCES communities(id),
+    community_id UUID NOT NULL REFERENCES communities(id) ON DELETE CASCADE,
     channel_id  UUID NOT NULL,
     pubkey      BYTEA NOT NULL,
     role        member_role NOT NULL DEFAULT 'member',
@@ -152,7 +152,7 @@ CREATE INDEX idx_channel_members_pubkey ON channel_members (community_id, pubkey
 -- (community, pubkey): the same key reposts kind:0 in each community it joins.
 
 CREATE TABLE users (
-    community_id        UUID NOT NULL REFERENCES communities(id),
+    community_id        UUID NOT NULL REFERENCES communities(id) ON DELETE CASCADE,
     pubkey              BYTEA NOT NULL,
     nip05_handle        VARCHAR(255),
     display_name        VARCHAR(255),
@@ -188,7 +188,7 @@ CREATE UNIQUE INDEX idx_users_okta ON users (community_id, okta_user_id)
 -- (community_id, created_at, id) dedupes within one, allows across.
 
 CREATE TABLE events (
-    community_id UUID NOT NULL REFERENCES communities(id),
+    community_id UUID NOT NULL REFERENCES communities(id) ON DELETE CASCADE,
     id          BYTEA NOT NULL,
     pubkey      BYTEA NOT NULL,
     created_at  TIMESTAMPTZ NOT NULL,
@@ -272,7 +272,7 @@ CREATE INDEX idx_events_search_tsv ON events USING GIN (search_tsv);
 -- mentions (Max, verified at event.rs:222).
 
 CREATE TABLE event_mentions (
-    community_id        UUID NOT NULL REFERENCES communities(id),
+    community_id        UUID NOT NULL REFERENCES communities(id) ON DELETE CASCADE,
     pubkey_hex          VARCHAR(64) NOT NULL,
     event_id            BYTEA NOT NULL,
     event_created_at    TIMESTAMPTZ NOT NULL,
@@ -290,7 +290,7 @@ CREATE INDEX idx_event_mentions_pubkey_kind_created
 -- Conformance: "Mesh, agents, ACP/MCP, and CLI" (persisted subscriptions).
 
 CREATE TABLE subscriptions (
-    community_id        UUID NOT NULL REFERENCES communities(id),
+    community_id        UUID NOT NULL REFERENCES communities(id) ON DELETE CASCADE,
     id                  VARCHAR(255) NOT NULL,
     owner_pubkey        BYTEA NOT NULL,
     filter_kinds        JSONB,
@@ -315,7 +315,7 @@ CREATE TABLE subscriptions (
 -- attribution; child of subscriptions.
 
 CREATE TABLE delivery_log (
-    community_id    UUID NOT NULL REFERENCES communities(id),
+    community_id    UUID NOT NULL REFERENCES communities(id) ON DELETE CASCADE,
     id              BIGINT GENERATED ALWAYS AS IDENTITY,
     subscription_id VARCHAR(255),
     event_id        BYTEA,
@@ -348,7 +348,7 @@ CREATE INDEX idx_delivery_log_community_sub ON delivery_log (community_id, subsc
 -- community fixed at create from req.community; runs/approvals inherit it.
 
 CREATE TABLE workflows (
-    community_id    UUID NOT NULL REFERENCES communities(id),
+    community_id    UUID NOT NULL REFERENCES communities(id) ON DELETE CASCADE,
     id              UUID NOT NULL DEFAULT gen_random_uuid(),
     name            VARCHAR(255) NOT NULL,
     owner_pubkey    BYTEA NOT NULL,
@@ -372,7 +372,7 @@ CREATE INDEX idx_workflows_enabled ON workflows (enabled, status) WHERE enabled;
 -- ── Workflow runs ─────────────────────────────────────────────────────────────
 
 CREATE TABLE workflow_runs (
-    community_id        UUID NOT NULL REFERENCES communities(id),
+    community_id        UUID NOT NULL REFERENCES communities(id) ON DELETE CASCADE,
     id                  UUID NOT NULL DEFAULT gen_random_uuid(),
     workflow_id         UUID NOT NULL,
     status              run_status NOT NULL DEFAULT 'pending',
@@ -397,7 +397,7 @@ CREATE INDEX idx_workflow_runs_status ON workflow_runs (community_id, status);
 -- community's same hash (conformance).
 
 CREATE TABLE workflow_approvals (
-    community_id    UUID NOT NULL REFERENCES communities(id),
+    community_id    UUID NOT NULL REFERENCES communities(id) ON DELETE CASCADE,
     token           BYTEA NOT NULL,
     workflow_id     UUID NOT NULL,
     run_id          UUID NOT NULL,
@@ -437,7 +437,7 @@ CREATE INDEX idx_workflow_approvals_status ON workflow_approvals (community_id, 
 -- claim row. workflow_runs are not pruned today, so this is a guardrail, not a path.
 
 CREATE TABLE scheduled_workflow_fires (
-    community_id    UUID NOT NULL REFERENCES communities(id),
+    community_id    UUID NOT NULL REFERENCES communities(id) ON DELETE CASCADE,
     workflow_id     UUID NOT NULL,
     scheduled_for   TIMESTAMPTZ NOT NULL,
     claimed_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -458,7 +458,7 @@ CREATE INDEX idx_scheduled_fires_claimed_at ON scheduled_workflow_fires (claimed
 -- (community_id, token_hash); channel claims reference channels in same community.
 
 CREATE TABLE api_tokens (
-    community_id        UUID NOT NULL REFERENCES communities(id),
+    community_id        UUID NOT NULL REFERENCES communities(id) ON DELETE CASCADE,
     id                  UUID NOT NULL DEFAULT gen_random_uuid(),
     token_hash          BYTEA NOT NULL,
     owner_pubkey        BYTEA NOT NULL,
@@ -498,7 +498,7 @@ CREATE TABLE rate_limit_violations (
 -- Conformance: thread lookups filter by community before event matching.
 
 CREATE TABLE thread_metadata (
-    community_id            UUID NOT NULL REFERENCES communities(id),
+    community_id            UUID NOT NULL REFERENCES communities(id) ON DELETE CASCADE,
     event_created_at        TIMESTAMPTZ NOT NULL,
     event_id                BYTEA NOT NULL,
     channel_id              UUID NOT NULL,
@@ -525,7 +525,7 @@ CREATE INDEX idx_thread_metadata_event_id ON thread_metadata (community_id, even
 -- Conformance: reactions filter by community before event/pubkey matching.
 
 CREATE TABLE reactions (
-    community_id        UUID NOT NULL REFERENCES communities(id),
+    community_id        UUID NOT NULL REFERENCES communities(id) ON DELETE CASCADE,
     event_created_at    TIMESTAMPTZ NOT NULL,
     event_id            BYTEA NOT NULL,
     pubkey              BYTEA NOT NULL,
@@ -547,7 +547,7 @@ CREATE UNIQUE INDEX idx_reactions_source_event ON reactions (community_id, react
 -- PK becomes (community_id, pubkey).
 
 CREATE TABLE pubkey_allowlist (
-    community_id UUID NOT NULL REFERENCES communities(id),
+    community_id UUID NOT NULL REFERENCES communities(id) ON DELETE CASCADE,
     pubkey      BYTEA NOT NULL,
     added_by    BYTEA,
     added_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -560,7 +560,7 @@ CREATE TABLE pubkey_allowlist (
 -- (unchanged wire form). PK (community_id, pubkey).
 
 CREATE TABLE relay_members (
-    community_id UUID NOT NULL REFERENCES communities(id),
+    community_id UUID NOT NULL REFERENCES communities(id) ON DELETE CASCADE,
     pubkey      TEXT NOT NULL,
     role        TEXT NOT NULL CHECK (role IN ('owner', 'admin', 'member')),
     added_by    TEXT,
@@ -575,7 +575,7 @@ CREATE INDEX idx_relay_members_role ON relay_members (community_id, role);
 -- Conformance: archive cannot hide a key in another community. PK scoped.
 
 CREATE TABLE archived_identities (
-    community_id      UUID NOT NULL REFERENCES communities(id),
+    community_id      UUID NOT NULL REFERENCES communities(id) ON DELETE CASCADE,
     pubkey            TEXT NOT NULL,
     consent_path      TEXT NOT NULL CHECK (consent_path IN ('self', 'owner', 'admin')),
     actor             TEXT NOT NULL,
@@ -592,7 +592,7 @@ CREATE TABLE archived_identities (
 -- (Lane Audit/Dawn builds the chain logic; Lane 0 fixes the scoped schema.)
 
 CREATE TABLE audit_log (
-    community_id    UUID NOT NULL REFERENCES communities(id),
+    community_id    UUID NOT NULL REFERENCES communities(id) ON DELETE CASCADE,
     seq             BIGINT NOT NULL,
     hash            BYTEA NOT NULL,
     prev_hash       BYTEA,
@@ -612,7 +612,7 @@ CREATE UNIQUE INDEX idx_audit_log_hash ON audit_log (community_id, hash);
 -- moderators in the queue but never revealed to the reported author.
 
 CREATE TABLE moderation_reports (
-    community_id        UUID NOT NULL REFERENCES communities(id),
+    community_id        UUID NOT NULL REFERENCES communities(id) ON DELETE CASCADE,
     id                  UUID NOT NULL DEFAULT gen_random_uuid(),
     -- The signed kind:1984 event id (stored for audit/idempotency).
     report_event_id     BYTEA NOT NULL CHECK (length(report_event_id) = 32),
@@ -669,7 +669,7 @@ CREATE UNIQUE INDEX idx_moderation_reports_event
 -- A row may be ban-only, timeout-only, or both over its lifetime.
 
 CREATE TABLE community_bans (
-    community_id    UUID NOT NULL REFERENCES communities(id),
+    community_id    UUID NOT NULL REFERENCES communities(id) ON DELETE CASCADE,
     pubkey          BYTEA NOT NULL CHECK (length(pubkey) = 32),
     banned          BOOLEAN NOT NULL DEFAULT false,
     -- NULL + banned=true ⇒ permanent.
@@ -691,7 +691,7 @@ CREATE TABLE community_bans (
 -- tombstone carries only action_id + reason_code + sanitized public_reason.
 
 CREATE TABLE moderation_actions (
-    community_id    UUID NOT NULL REFERENCES communities(id),
+    community_id    UUID NOT NULL REFERENCES communities(id) ON DELETE CASCADE,
     id              UUID NOT NULL DEFAULT gen_random_uuid(),
     actor_pubkey    BYTEA NOT NULL CHECK (length(actor_pubkey) = 32),
     action          TEXT NOT NULL CHECK (action IN (
@@ -721,6 +721,20 @@ CREATE INDEX idx_moderation_actions_created
 CREATE INDEX idx_moderation_actions_target_pubkey
     ON moderation_actions (community_id, target_pubkey)
     WHERE target_pubkey IS NOT NULL;
+
+-- ── Git repo name registry (NIP-34 kind:30617) ───────────────────────────────
+-- Final-state snapshot of migration 0002 plus the cascade policy in 0007.
+
+CREATE TABLE git_repo_names (
+    community_id  UUID NOT NULL REFERENCES communities(id) ON DELETE CASCADE,
+    repo_id       TEXT NOT NULL,
+    owner_pubkey  TEXT NOT NULL,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (community_id, repo_id)
+);
+
+CREATE INDEX idx_git_repo_names_owner
+    ON git_repo_names (community_id, owner_pubkey);
 
 -- Same-community resolution provenance: a report can only be resolved by an
 -- action row in its own community. Added after moderation_actions exists.

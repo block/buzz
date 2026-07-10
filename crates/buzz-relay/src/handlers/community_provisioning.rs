@@ -53,6 +53,24 @@ pub struct ProvisionCommunityRequest {
     pub create_only: bool,
 }
 
+/// Query parameters for `DELETE /operator/communities/{host}`.
+#[derive(Debug, Deserialize)]
+pub struct DeleteCommunityRequest {
+    /// Pubkey asserted by the operator proxy as the deleting community owner.
+    pub owner_pubkey: String,
+}
+
+/// JSON response from `DELETE /operator/communities/{host}`.
+#[derive(Debug, Serialize)]
+pub struct DeleteCommunityResponse {
+    /// UUID of the community row that was permanently deleted.
+    pub community_id: String,
+    /// Canonical host stored on the deleted community row.
+    pub host: String,
+    /// Always `deleted` for a successful response.
+    pub status: &'static str,
+}
+
 /// JSON response from `POST /operator/communities`.
 #[derive(Debug, Serialize)]
 pub struct ProvisionCommunityResponse {
@@ -306,6 +324,53 @@ pub async fn provision_community(
         host: record.host,
         status: if record.created { "created" } else { "existed" },
         owner_pubkey: initial_owner,
+    })
+}
+
+/// Permanently delete a community after verifying the operator's owner assertion.
+///
+/// The NIP-98 signer is a deployment operator acting as a trusted proxy. The
+/// asserted owner must still hold `role = 'owner'`; the database checks that
+/// predicate atomically with deletion so a concurrent owner rotation cannot
+/// authorize deletion with stale state.
+pub async fn delete_community(
+    state: &Arc<AppState>,
+    operator_pubkey: &nostr::PublicKey,
+    host: &str,
+    owner_pubkey: &str,
+) -> Result<DeleteCommunityResponse, String> {
+    let operator_hex = operator_pubkey.to_hex();
+    if !state
+        .config
+        .relay_operator_pubkeys
+        .iter()
+        .any(|pk| pk == &operator_hex)
+    {
+        return Err("actor not authorized: not a relay operator".to_string());
+    }
+
+    let normalized_host = normalize_candidate_host(host)?;
+    let owner_hex = validate_pubkey_hex(owner_pubkey)
+        .ok_or_else(|| "invalid owner_pubkey: expected 64-char hex pubkey".to_string())?;
+    let deleted = state
+        .db
+        .delete_community_owned_by(&normalized_host, &owner_hex)
+        .await
+        .map_err(|e| format!("failed to delete community: {e}"))?
+        .ok_or_else(|| "community not found or owner does not match".to_string())?;
+
+    info!(
+        operator = %operator_hex,
+        community = %deleted.id,
+        host = %deleted.host,
+        owner = %owner_hex,
+        "community permanently deleted via operator endpoint"
+    );
+
+    Ok(DeleteCommunityResponse {
+        community_id: deleted.id.to_string(),
+        host: deleted.host,
+        status: "deleted",
     })
 }
 
