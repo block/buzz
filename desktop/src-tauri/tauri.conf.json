@@ -20,15 +20,11 @@
         "width": 800,
         "height": 600,
         "maximized": true,
-        "visible": true,
+        "visible": false,
         "transparent": true,
         "titleBarStyle": "Overlay",
         "hiddenTitle": true,
         "dragDropEnabled": false,
-        "trafficLightPosition": {
-          "x": 16,
-          "y": 24
-        },
         "backgroundThrottling": "disabled",
         "minWidth": 800,
         "minHeight": 500

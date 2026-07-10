@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 
 import { installMockBridge } from "../helpers/bridge";
+import { waitForAnimations } from "../helpers/animations";
 
 // Reaction ordering end-to-end guard.
 //
@@ -52,6 +53,17 @@ async function getPillOrder(
   return labels;
 }
 
+async function getBodyToReactionGap(
+  row: import("@playwright/test").Locator,
+): Promise<number> {
+  const body = await row.locator(".message-markdown").first().boundingBox();
+  const reactions = await row.getByTestId("message-reactions").boundingBox();
+  if (!body || !reactions) {
+    throw new Error("message body or reactions are not laid out");
+  }
+  return Math.round(reactions.y - (body.y + body.height));
+}
+
 /** Click a quick-reaction tray button by emoji (hover → click tray button). */
 async function addQuickReaction(
   row: import("@playwright/test").Locator,
@@ -93,11 +105,13 @@ test("reaction pills render left-to-right in the order reactions were added", as
 
   const pills = await getPillOrder(row);
   expect(pills).toEqual(["👍", "❤️", "😂"]);
+  await expect.poll(() => getBodyToReactionGap(row)).toBe(6);
 
   // Screenshot for PR visual proof.
   const screenshotDir = path.resolve("test-results/reaction-order-screenshots");
   fs.mkdirSync(screenshotDir, { recursive: true });
   const reactionBar = row.getByTestId("message-reactions");
+  await waitForAnimations(page);
   await reactionBar.screenshot({
     path: path.join(screenshotDir, "reaction-order-chronological.png"),
   });
@@ -154,6 +168,7 @@ test("a later emoji that accrues more reactors stays to the right of an earlier 
   const screenshotDir = path.resolve("test-results/reaction-order-screenshots");
   fs.mkdirSync(screenshotDir, { recursive: true });
   const reactionBar = row.getByTestId("message-reactions");
+  await waitForAnimations(page);
   await reactionBar.screenshot({
     path: path.join(screenshotDir, "reaction-order-count-stable.png"),
   });
