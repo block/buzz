@@ -221,11 +221,16 @@ fn escape_like(input: &str) -> String {
 /// Search users by display name, NIP-05 handle, or pubkey prefix.
 ///
 /// Empty queries return an empty vec and do not hit the database.
+///
+/// `offset` is 0-based and used for bridge people-directory paging (the desktop
+/// member picker pages with `page`/`limit`). Clamped so a huge offset cannot
+/// force an unbounded scan beyond the page window.
 pub async fn search_users(
     pool: &PgPool,
     community_id: CommunityId,
     query: &str,
     limit: u32,
+    offset: u32,
 ) -> Result<Vec<UserSearchProfile>> {
     let normalized = query.trim().to_lowercase();
     if normalized.is_empty() {
@@ -236,6 +241,7 @@ pub async fn search_users(
     let contains_pattern = format!("%{escaped}%");
     let prefix_pattern = format!("{escaped}%");
     let limit = limit.clamp(1, 500) as i64;
+    let offset = offset.min(100_000) as i64;
 
     let rows = sqlx::query_as::<_, (Vec<u8>, Option<String>, Option<String>, Option<String>)>(
         r#"
@@ -256,7 +262,7 @@ pub async fn search_users(
                 ELSE 6
             END,
             COALESCE(NULLIF(display_name, ''), NULLIF(nip05_handle, ''), LOWER(encode(pubkey, 'hex')))
-        LIMIT $5
+        LIMIT $5 OFFSET $6
         "#,
     )
     .bind(community_id.as_uuid())
@@ -264,6 +270,7 @@ pub async fn search_users(
     .bind(&normalized)
     .bind(&prefix_pattern)
     .bind(limit)
+    .bind(offset)
     .fetch_all(pool)
     .await?;
 
