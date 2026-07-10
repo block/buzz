@@ -367,10 +367,10 @@ test("thread-heavy history keeps a bounded mounted window", async ({
   const mounted = timeline.locator("[data-message-id]");
   await expect(mounted).not.toHaveCount(0);
   const mountedCount = await mounted.count();
-  // Zulip-style retention keeps at most 250 real message rows mounted and only
-  // swaps that coarse window near a 50-row edge. Thread summaries must not pin
-  // rows outside the retained page.
-  expect(mountedCount).toBeLessThanOrEqual(250);
+  // Two viewports of real overscan intentionally mounts more than the old
+  // sub-30 window, while still evicting a substantial part of this 120-row
+  // history after every row has been visited.
+  expect(mountedCount).toBeLessThan(80);
 });
 
 test("offscreen rich-row resize preserves the viewport-center anchor", async ({
@@ -452,4 +452,43 @@ test("offscreen rich-row resize preserves the viewport-center anchor", async ({
 
   expect(Math.abs(result.anchorDrift)).toBeLessThanOrEqual(2);
   expect(result.scrollCorrection).toBeGreaterThanOrEqual(238);
+});
+
+test("live tail arrivals stay buffered while reading and release on jump", async ({
+  page,
+}) => {
+  await installMockBridge(page);
+  await page.goto("/");
+  await page.waitForFunction(
+    () => typeof window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__ === "function",
+  );
+  await page.getByTestId("channel-deep-history").click();
+
+  const timeline = page.getByTestId("message-timeline");
+  await expect(timeline.locator("[data-message-id]").first()).toBeVisible();
+  await timeline.evaluate((element) => {
+    element.scrollTop = Math.max(500, element.scrollHeight / 2);
+    element.dispatchEvent(new Event("scroll", { bubbles: true }));
+  });
+  await expect(page.getByTestId("message-scroll-to-latest")).toBeVisible();
+  const frozenHeight = await timeline.evaluate(
+    (element) => element.scrollHeight,
+  );
+
+  await page.evaluate(() => {
+    window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+      channelName: "deep-history",
+      content: "buffered live tail sentinel",
+      createdAt: 1_900_000_000,
+    });
+  });
+
+  await expect(page.getByText("buffered live tail sentinel")).toHaveCount(0);
+  await expect(page.getByTestId("message-scroll-to-latest")).toContainText("1");
+  expect(await timeline.evaluate((element) => element.scrollHeight)).toBe(
+    frozenHeight,
+  );
+
+  await page.getByTestId("message-scroll-to-latest").click();
+  await expect(page.getByText("buffered live tail sentinel")).toBeVisible();
 });
