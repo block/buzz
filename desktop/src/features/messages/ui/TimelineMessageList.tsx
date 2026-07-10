@@ -710,6 +710,7 @@ function VirtualizedTimelineRows({
         className="h-full min-h-0 w-full overflow-y-auto overflow-x-hidden overscroll-contain px-2"
         data={items}
         bufferSize={offscreenBufferSize}
+        keepMounted={items.map((_, index) => index)}
         style={{ overflowAnchor: "none" }}
         shift={isPrepend}
         onScroll={handleScroll}

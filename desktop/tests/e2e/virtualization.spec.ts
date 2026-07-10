@@ -637,17 +637,16 @@ test.describe("list virtualization", () => {
   });
 });
 
-test("thread-heavy history keeps a bounded mounted window", async ({
-  page,
-}) => {
+test("thread-heavy history mounts every loaded row", async ({ page }) => {
   await installMockBridge(page);
   await page.goto("/");
   await page.waitForFunction(
     () => typeof window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__ === "function",
   );
 
-  // Seed summaries on many loaded roots. The mounted DOM must remain bounded
-  // while Virtua keeps enough measured coverage for fast scrolling.
+  // Seed summaries on 120 loaded roots. Every loaded row should be realized
+  // immediately so first-pass scrolling never encounters Virtua's hidden
+  // pre-measurement state.
   await page.evaluate(() => {
     for (let index = 480; index < 600; index += 1) {
       window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
@@ -677,12 +676,12 @@ test("thread-heavy history keeps a bounded mounted window", async ({
 
   await page.waitForTimeout(300);
 
-  const mountedRows = timeline.locator("[data-message-id]");
-  await expect(mountedRows).not.toHaveCount(0);
-  const mountedCount = await mountedRows.count();
-  expect(mountedCount).toBeLessThan(50);
+  const loadedRows = timeline.locator("[data-message-id]");
+  // The mock channel's current loaded window contains 50 roots; all of them
+  // must already exist and be painted before the first scroll gesture.
+  await expect(loadedRows).toHaveCount(50);
   expect(
-    await mountedRows.evaluateAll((rows) =>
+    await loadedRows.evaluateAll((rows) =>
       rows.every((row) => getComputedStyle(row).visibility === "visible"),
     ),
   ).toBe(true);
