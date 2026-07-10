@@ -96,8 +96,7 @@ type TimelineMessageListProps = {
   leadingContent?: React.ReactNode;
   /** The virtualized timeline owns its scroll node when enabled. */
   useVirtualizer?: boolean;
-  onStartReached?: () => boolean;
-  isFetchingOlder?: boolean;
+  onStartReached?: () => void;
   onAtBottomStateChange?: (atBottom: boolean) => void;
   onVirtualizerApiChange?: (api: TimelineVirtualizerApi | null) => void;
   onVirtualizerRangeChanged?: () => void;
@@ -138,7 +137,6 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
   leadingContent,
   useVirtualizer = false,
   onStartReached,
-  isFetchingOlder = false,
   onAtBottomStateChange,
   onVirtualizerApiChange,
   onVirtualizerRangeChanged,
@@ -291,7 +289,6 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
         leadingContent={leadingContent}
         onAtBottomStateChange={onAtBottomStateChange}
         onStartReached={onStartReached}
-        isFetchingOlder={isFetchingOlder}
         onVirtualizerApiChange={onVirtualizerApiChange}
         onVirtualizerRangeChanged={onVirtualizerRangeChanged}
         onVirtualizerScrollerChange={onVirtualizerScrollerChange}
@@ -374,8 +371,7 @@ type VirtualizedTimelineRowsProps = {
   dayGroups: TimelineDayGroup[];
   leadingContent?: React.ReactNode;
   onAtBottomStateChange?: (atBottom: boolean) => void;
-  onStartReached?: () => boolean;
-  isFetchingOlder?: boolean;
+  onStartReached?: () => void;
   onVirtualizerApiChange?: (api: TimelineVirtualizerApi | null) => void;
   onVirtualizerRangeChanged?: () => void;
   onVirtualizerScrollerChange?: (element: HTMLDivElement | null) => void;
@@ -394,34 +390,11 @@ function didPrependVirtualizedTimeline(
   );
 }
 
-type PrependAnchor = {
-  messageId: string;
-  topOffset: number;
-};
-
-function capturePrependAnchor(scroller: HTMLElement): PrependAnchor | null {
-  const scrollerTop = scroller.getBoundingClientRect().top;
-  const rows = Array.from(
-    scroller.querySelectorAll<HTMLElement>("[data-message-id]"),
-  );
-  const row =
-    rows.find(
-      (candidate) => candidate.getBoundingClientRect().top >= scrollerTop,
-    ) ?? rows[rows.length - 1];
-  const messageId = row?.dataset.messageId;
-  if (!row || !messageId) return null;
-  return {
-    messageId,
-    topOffset: row.getBoundingClientRect().top - scrollerTop,
-  };
-}
-
 function VirtualizedTimelineRows({
   dayGroups,
   leadingContent,
   onAtBottomStateChange,
   onStartReached,
-  isFetchingOlder,
   onVirtualizerApiChange,
   onVirtualizerRangeChanged,
   onVirtualizerScrollerChange,
@@ -438,9 +411,6 @@ function VirtualizedTimelineRows({
     [dayGroups, leadingContent],
   );
   const previousFirstTimelineKeyRef = React.useRef<string | null>(null);
-  const pendingPrependAnchorRef = React.useRef<PrependAnchor | null>(null);
-  const isLoadingOlderRef = React.useRef(false);
-  const observedOlderFetchRef = React.useRef(false);
   const [prependShiftEpoch, clearPrependShift] = React.useReducer(
     (version: number) => version + 1,
     0,
@@ -463,58 +433,14 @@ function VirtualizedTimelineRows({
       keys,
     );
   }, [firstTimelineKey, keys, prependShiftEpoch]);
-  React.useEffect(() => {
-    if (!isLoadingOlderRef.current) return;
-    if (isFetchingOlder) {
-      observedOlderFetchRef.current = true;
-    } else if (observedOlderFetchRef.current) {
-      // No prepend committed before the request settled (error, cancellation,
-      // or an empty page). Re-arm top-edge loading for a later retry.
-      observedOlderFetchRef.current = false;
-      isLoadingOlderRef.current = false;
-      pendingPrependAnchorRef.current = null;
-    }
-  }, [isFetchingOlder]);
   React.useLayoutEffect(() => {
     previousFirstTimelineKeyRef.current = firstTimelineKey;
-    if (isPrepend) {
-      clearPrependShift();
-      isLoadingOlderRef.current = false;
-      observedOlderFetchRef.current = false;
-      const anchor = pendingPrependAnchorRef.current;
-      pendingPrependAnchorRef.current = null;
-      const scroller = hostRef.current?.firstElementChild;
-      if (anchor && scroller instanceof HTMLElement) {
-        // Virtua normally preserves a prepend with `shift`, but a transient
-        // end-anchored cache can occasionally win and jump near the tail. The
-        // pre-fetch message identity is the semantic invariant; restore it once
-        // after the prepended rows commit, then leave all later measurement
-        // correction to Virtua.
-        const anchorIndex = items.findIndex(
-          (item) =>
-            item.kind === "timeline-item" &&
-            timelineItemMessageId(item.item) === anchor.messageId,
-        );
-        if (anchorIndex >= 0) {
-          listRef.current?.scrollToIndex(anchorIndex, { align: "start" });
-        }
-        window.requestAnimationFrame(() => {
-          const row = scroller.querySelector<HTMLElement>(
-            `[data-message-id="${CSS.escape(anchor.messageId)}"]`,
-          );
-          if (!row) return;
-          const currentTopOffset =
-            row.getBoundingClientRect().top -
-            scroller.getBoundingClientRect().top;
-          listRef.current?.scrollBy(currentTopOffset - anchor.topOffset);
-        });
-      }
-    }
+    if (isPrepend) clearPrependShift();
     if (!hasInitialPositionedRef.current && items.length > 0) {
       hasInitialPositionedRef.current = true;
       listRef.current?.scrollToIndex(items.length - 1, { align: "end" });
     }
-  }, [firstTimelineKey, isPrepend, items]);
+  }, [firstTimelineKey, isPrepend, items.length]);
 
   const messageItemIndexById = React.useMemo(() => {
     const byId = new Map<string, number>();
@@ -578,18 +504,7 @@ function VirtualizedTimelineRows({
       onAtBottomStateChange?.(
         list.scrollSize - list.viewportSize - offset <= 32,
       );
-      if (offset <= 200 && !isLoadingOlderRef.current) {
-        const scroller = hostRef.current?.firstElementChild;
-        pendingPrependAnchorRef.current =
-          scroller instanceof HTMLElement
-            ? capturePrependAnchor(scroller)
-            : null;
-        if (onStartReached?.()) {
-          isLoadingOlderRef.current = true;
-        } else {
-          pendingPrependAnchorRef.current = null;
-        }
-      }
+      if (offset <= 200) onStartReached?.();
     },
     [onAtBottomStateChange, onStartReached, onVirtualizerRangeChanged],
   );
