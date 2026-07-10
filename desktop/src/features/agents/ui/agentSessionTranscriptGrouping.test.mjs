@@ -1139,7 +1139,8 @@ test("buildTranscriptDisplayBlocks_restartScenario_systemPromptAfterBoundary", (
       (b.kind === "turn" &&
         b.segments.some(
           (seg) =>
-            seg.kind === "prompt" && seg.systemPrompt?.acpSource === "session/new",
+            seg.kind === "prompt" &&
+            seg.systemPrompt?.acpSource === "session/new",
         )),
   );
   assert.ok(
@@ -1166,10 +1167,7 @@ test("buildTranscriptDisplayBlocks_restartScenario_systemPromptAfterBoundary", (
     toolAIdx < boundaryIndex,
     "toolA block must be before the boundary",
   );
-  assert.ok(
-    toolBIdx > boundaryIndex,
-    "toolB block must be after the boundary",
-  );
+  assert.ok(toolBIdx > boundaryIndex, "toolB block must be after the boundary");
 });
 
 test("buildTranscriptDisplayBlocks_firstEverSession_systemPromptInSingleRun", () => {

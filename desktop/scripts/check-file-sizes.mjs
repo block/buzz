@@ -287,8 +287,11 @@ const overrides = new Map([
   // (current_mode_update, usage_update, available_commands_update,
   // config_option_update) + replaceLifecycleItem helper for usage coalescing +
   // system-prompt ordering fix (turnId: null for per-channel items).
+  // +35: session/new reposition-on-refire fix — removeItem helper +
+  // upsertMetadata restart branch (remove+sealOpenMessages+push instead of
+  // replaceItem in-place) so system-prompt anchor moves to stream tail.
   // Load-bearing feature growth; queued to split in next transcript refactor.
-  ["src/features/agents/ui/agentSessionTranscript.ts", 1167],
+  ["src/features/agents/ui/agentSessionTranscript.ts", 1202],
   // catalog module; agent_models.rs retains the thin wrapper (~50 lines).
   // File still exceeds 1000 due to OpenAI/Anthropic discovery + subprocess
   // fallback. Queued to split into dedicated discovery modules.

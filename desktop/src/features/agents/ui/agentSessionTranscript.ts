@@ -115,6 +115,19 @@ function replaceItem(d: TranscriptDraft, id: string, updated: TranscriptItem) {
   d.itemsById.set(id, updated);
 }
 
+/**
+ * Remove an item from the draft by id. Used when an item needs to be
+ * repositioned — remove it from its current slot then push it to the tail.
+ */
+function removeItem(d: TranscriptDraft, id: string) {
+  ensureMutable(d);
+  const idx = d.items.findIndex((it) => it.id === id);
+  if (idx !== -1) {
+    d.items.splice(idx, 1);
+  }
+  d.itemsById.delete(id);
+}
+
 function pushItem(d: TranscriptDraft, item: TranscriptItem) {
   ensureMutable(d);
   d.items.push(item);
@@ -566,6 +579,28 @@ function upsertMetadata(
 ) {
   const existing = d.itemsById.get(id);
   if (existing?.type === "metadata") {
+    // A re-fire of a system-prompt item (acpSource "session/new") is a
+    // session-restart signal. The existing item sits at the position of the
+    // FIRST session's event, not the restart event — keeping it there would
+    // leave it before the new-session boundary divider in the display feed.
+    // Reposition it to the stream TAIL with the new event's timestamp so the
+    // display grouper can forward it to the correct (new) session run.
+    // All other metadata items (prompt-context, steer-context) replace in-place
+    // as before — they don't carry cross-session boundary semantics.
+    if (acpSource === "session/new") {
+      removeItem(d, id);
+      sealOpenMessages(d);
+      pushItem(d, {
+        ...existing,
+        sections,
+        timestamp,
+        channelId: ctx.channelId,
+        turnId: ctx.turnId ?? existing.turnId,
+        sessionId: ctx.sessionId ?? existing.sessionId,
+        acpSource,
+      });
+      return;
+    }
     replaceItem(d, id, {
       ...existing,
       sections,
