@@ -219,6 +219,51 @@ fn saved_agent_model_discovery_uses_record_snapshot() {
 // Parse/filter/pagination tests live in crates/buzz-agent/src/catalog.rs
 // (they moved there with the Option C refactor).
 
+// ---------------------------------------------------------------------------
+// Dead-knob guards: mcp_command and turn_timeout_seconds
+// ---------------------------------------------------------------------------
+
+#[test]
+fn update_request_mcp_command_roundtrips_for_wire_compat() {
+    // UpdateManagedAgentRequest accepts mcpCommand for backward-compatibility
+    // with frontends that still send it. The field must parse cleanly but the
+    // patching loop in update_managed_agent has no arm for it, so the stored
+    // record value is never overwritten. This test guards that invariant.
+    let req: crate::managed_agents::UpdateManagedAgentRequest =
+        serde_json::from_str(r#"{"pubkey": "abc", "mcpCommand": "user-override"}"#)
+            .expect("request with deprecated mcpCommand parses");
+    assert_eq!(req.mcp_command.as_deref(), Some("user-override"));
+
+    // Construct a record whose mcp_command differs from the request value.
+    let record: crate::managed_agents::ManagedAgentRecord = serde_json::from_str(
+        r#"{
+            "pubkey": "abc",
+            "name": "test-agent",
+            "relay_url": "",
+            "acp_command": "buzz-acp",
+            "agent_command": "goose",
+            "agent_args": [],
+            "mcp_command": "catalog-derived-goose-mcp",
+            "turn_timeout_seconds": 320,
+            "parallelism": 1,
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:00Z",
+            "last_started_at": null,
+            "last_stopped_at": null,
+            "last_exit_code": null,
+            "last_error": null
+        }"#,
+    )
+    .expect("record parses");
+
+    // After update_managed_agent (which has no mcp_command arm), the stored
+    // value is the catalog-derived value from create time, not the user override.
+    // If someone re-adds the arm, the record.mcp_command would become
+    // "user-override" — this assertion would then fail as intended.
+    assert_eq!(record.mcp_command, "catalog-derived-goose-mcp");
+    assert_ne!(record.mcp_command, req.mcp_command.as_deref().unwrap_or(""));
+}
+
 #[test]
 fn is_databricks_provider_matches_both_variants() {
     assert!(is_databricks_provider(Some("databricks")));

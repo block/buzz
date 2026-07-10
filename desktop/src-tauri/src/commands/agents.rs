@@ -595,18 +595,14 @@ pub async fn create_managed_agent(
                 .collect::<Vec<_>>(),
         );
 
-        let mcp_command = input
-            .mcp_command
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_string)
-            .unwrap_or_else(
-                || match crate::managed_agents::known_acp_runtime(&agent_command) {
-                    Some(p) => p.mcp_command.unwrap_or("").to_string(),
-                    None => String::new(),
-                },
-            );
+        // Derive MCP command exclusively from the runtime catalog — the
+        // per-record field is never read at spawn time so user-supplied input
+        // is silently discarded. Always sourcing from the catalog ensures
+        // new agents pick up the correct value without any stored override.
+        let mcp_command = match crate::managed_agents::known_acp_runtime(&agent_command) {
+            Some(p) => p.mcp_command.unwrap_or("").to_string(),
+            None => String::new(),
+        };
 
         // For pack-backed personas, resolve the installed pack path and the
         // persona's internal name (slug). ACP's resolve_persona_by_name()

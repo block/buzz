@@ -505,7 +505,18 @@ pub struct CreateManagedAgentRequest {
     pub harness_override: bool,
     #[serde(default)]
     pub agent_args: Vec<String>,
+    /// Accepted for wire compatibility; not applied to the record. The
+    /// effective MCP command is always derived from the runtime catalog at
+    /// spawn time — a per-record override is never read.
+    ///
+    /// @deprecated — sending this field has no effect.
+    #[allow(dead_code)]
     pub mcp_command: Option<String>,
+    /// Accepted for wire compatibility; not applied to the record.
+    /// `BUZZ_ACP_TURN_TIMEOUT` is deprecated and ignored by the harness.
+    ///
+    /// @deprecated — sending this field has no effect.
+    #[allow(dead_code)]
     pub turn_timeout_seconds: Option<u64>,
     pub idle_timeout_seconds: Option<u64>,
     pub max_turn_duration_seconds: Option<u64>,
@@ -641,6 +652,11 @@ pub struct UpdateManagedAgentRequest {
     pub env_vars: Option<BTreeMap<String, String>>,
     #[serde(default)]
     pub parallelism: Option<u32>,
+    /// Accepted for wire compatibility; not applied to the stored record.
+    /// `BUZZ_ACP_TURN_TIMEOUT` is deprecated and ignored by the harness.
+    ///
+    /// @deprecated — sending this field has no effect.
+    #[allow(dead_code)]
     #[serde(default)]
     pub turn_timeout_seconds: Option<u64>,
     #[serde(default)]
@@ -659,6 +675,11 @@ pub struct UpdateManagedAgentRequest {
     pub harness_override: bool,
     #[serde(default)]
     pub agent_args: Option<Vec<String>>,
+    /// Accepted for wire compatibility; not applied to the stored record.
+    /// The effective MCP command is always catalog-derived at spawn time.
+    ///
+    /// @deprecated — sending this field has no effect.
+    #[allow(dead_code)]
     #[serde(default)]
     pub mcp_command: Option<String>,
     /// Absent = don't touch. null = clear to runtime default. "id" = set.

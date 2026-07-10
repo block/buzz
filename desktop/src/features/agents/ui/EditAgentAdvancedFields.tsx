@@ -20,7 +20,6 @@ export function EditAgentAdvancedFields({
   inheritedEnvVars,
   inheritHarness,
   linkedPersona,
-  mcpCommand,
   mcpToolsets,
   parallelism,
   relayUrl,
@@ -33,7 +32,6 @@ export function EditAgentAdvancedFields({
   onAgentCommandChange,
   onEnvVarsChange,
   onInheritHarnessChange,
-  onMcpCommandChange,
   onMcpToolsetsChange,
   onParallelismChange,
   onRelayUrlChange,
@@ -51,7 +49,6 @@ export function EditAgentAdvancedFields({
   inheritedEnvVars: Record<string, string>;
   inheritHarness: boolean;
   linkedPersona: AgentPersona | null;
-  mcpCommand: string;
   mcpToolsets: string;
   parallelism: string;
   relayUrl: string;
@@ -64,7 +61,6 @@ export function EditAgentAdvancedFields({
   onAgentCommandChange: (value: string) => void;
   onEnvVarsChange: (value: EnvVarsValue) => void;
   onInheritHarnessChange: (value: boolean) => void;
-  onMcpCommandChange: (value: string) => void;
   onMcpToolsetsChange: (value: string) => void;
   onParallelismChange: (value: string) => void;
   onRelayUrlChange: (value: string) => void;
@@ -177,36 +173,6 @@ export function EditAgentAdvancedFields({
             onChange={(event) => onAgentArgsChange(event.target.value)}
             placeholder="Comma-separated"
             value={agentArgs}
-          />
-        </div>
-      </div>
-
-      {/* MCP command */}
-      <div className="space-y-1.5">
-        <label
-          className="text-sm font-medium text-foreground"
-          htmlFor="edit-agent-mcp-command"
-        >
-          MCP command
-          <span className={PERSONA_LABEL_OPTIONAL_CLASS}>Optional</span>
-        </label>
-        <div
-          className={cn(
-            "flex min-h-11 items-center px-3",
-            PERSONA_FIELD_SHELL_CLASS,
-          )}
-        >
-          <Input
-            autoCorrect="off"
-            className={cn(
-              "h-8 px-0 py-0 leading-6",
-              PERSONA_FIELD_CONTROL_CLASS,
-            )}
-            disabled={disabled}
-            id="edit-agent-mcp-command"
-            onChange={(event) => onMcpCommandChange(event.target.value)}
-            placeholder="Optional MCP server command"
-            value={mcpCommand}
           />
         </div>
       </div>

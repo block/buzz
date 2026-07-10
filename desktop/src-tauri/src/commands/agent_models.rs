@@ -882,9 +882,9 @@ pub async fn update_managed_agent(
         if let Some(agent_args) = input.agent_args {
             record.agent_args = agent_args;
         }
-        if let Some(mcp_command) = input.mcp_command {
-            record.mcp_command = mcp_command;
-        }
+        // mcp_command is intentionally not applied here — the effective MCP
+        // command is always catalog-derived (known_acp_runtime at spawn time)
+        // and the per-record field is never read by the runtime.
         if let Some(env_vars) = input.env_vars {
             crate::managed_agents::validate_user_env_keys(&env_vars)?;
             record.env_vars = env_vars;

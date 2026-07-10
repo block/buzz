@@ -96,7 +96,6 @@ export function AgentInstanceEditDialog({
     agent.personaId != null && agent.agentCommandOverride == null,
   );
   const [agentArgs, setAgentArgs] = React.useState(agent.agentArgs.join(","));
-  const [mcpCommand, setMcpCommand] = React.useState(agent.mcpCommand);
   const [mcpToolsets, setMcpToolsets] = React.useState(agent.mcpToolsets ?? "");
   const [turnTimeoutSeconds, setTurnTimeoutSeconds] = React.useState(
     String(agent.turnTimeoutSeconds),
@@ -155,7 +154,6 @@ export function AgentInstanceEditDialog({
         agent.personaId != null && agent.agentCommandOverride == null,
       );
       setAgentArgs(agent.agentArgs.join(","));
-      setMcpCommand(agent.mcpCommand);
       setMcpToolsets(agent.mcpToolsets ?? "");
       setTurnTimeoutSeconds(String(agent.turnTimeoutSeconds));
       setParallelism(String(agent.parallelism));
@@ -531,10 +529,6 @@ export function AgentInstanceEditDialog({
         agentArgs:
           parsedArgs.join(",") !== agent.agentArgs.join(",")
             ? parsedArgs
-            : undefined,
-        mcpCommand:
-          mcpCommand.trim() !== agent.mcpCommand
-            ? mcpCommand.trim()
             : undefined,
         mcpToolsets:
           (mcpToolsets.trim() || null) !== agent.mcpToolsets
@@ -943,7 +937,6 @@ export function AgentInstanceEditDialog({
                       inheritedEnvVars={inheritedEnvVars}
                       inheritHarness={inheritHarness}
                       linkedPersona={linkedPersona}
-                      mcpCommand={mcpCommand}
                       mcpToolsets={mcpToolsets}
                       parallelism={parallelism}
                       relayUrl={relayUrl}
@@ -957,7 +950,6 @@ export function AgentInstanceEditDialog({
                       onAutoRestartChange={setAutoRestartOnConfigChange}
                       onEnvVarsChange={setEnvVars}
                       onInheritHarnessChange={setInheritHarness}
-                      onMcpCommandChange={setMcpCommand}
                       onMcpToolsetsChange={setMcpToolsets}
                       onParallelismChange={setParallelism}
                       onRelayUrlChange={setRelayUrl}
