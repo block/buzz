@@ -10,7 +10,7 @@
  * these tests immediately.
  *
  * Three properties under test:
- *   (a) never-persisted key → null  (fast send must not produce a sent record)
+ *   (a) never-persisted key → null  (fast send: no active draft to clear)
  *   (b) persisted key       → key   (key is captured at submit time)
  *   (c) submit-time capture semantics: the value returned at submit time is
  *       stable even if the store entry is cleared before send success (proving
@@ -125,7 +125,7 @@ test("resolveSentDraftKey_null_effectiveKey_returns_null", () => {
   assert.equal(result2, null, "undefined effectiveDraftKey → null");
 });
 
-// ── (d) Integration: never-persisted send → no sent record ───────────────────
+// ── (d) Integration: never-persisted send → no active draft to clear ─────────
 // Simulates submitMessage calling resolveSentDraftKey before the send:
 // the resolver returns null → markDraftSentEntry is never called.
 
@@ -138,8 +138,12 @@ test("submit_predicate_never_persisted_send_produces_no_sent_record", () => {
   assert.equal(sentDraftKey, null, "resolver returns null for fast send");
 
   // markDraftSentEntry is never called (sentDraftKey is null → gate in
-  // useMentionSendFlow.ts:399 fires false). No sent record.
-  assert.equal(getSentDraftEntries().length, 0, "no sent record for fast send");
+  // useMentionSendFlow.ts:399 fires false). Active draft was never written.
+  assert.equal(
+    getSentDraftEntries().length,
+    0,
+    "no active draft for fast send",
+  );
 });
 
 // ── (e) Integration: persisted draft → active draft cleared on send ───────────
@@ -162,9 +166,13 @@ test("submit_predicate_persisted_draft_clears_active_entry_on_send", () => {
   // Send succeeds — markDraftSentEntry called with the captured key.
   markDraftSentEntry(draftKey, "my draft content", draftKey, [], []);
 
-  // Active key is cleared; no sent record written.
+  // Active key is cleared; active draft removed.
   assert.equal(loadDraftEntry(draftKey), undefined, "active key cleared");
-  assert.equal(getSentDraftEntries().length, 0, "no sent record written");
+  assert.equal(
+    getSentDraftEntries().length,
+    0,
+    "no active draft entries remain",
+  );
 });
 
 // ── (f) Integration: persisted draft + race → active key already gone, no-op ──
@@ -192,9 +200,9 @@ test("submit_predicate_persisted_then_race_clears_key_markDraftSent_is_noop", ()
   );
 
   // Step 4: send succeeds; markDraftSentEntry called with captured sentDraftKey.
-  // Key is already gone — no-op, no sent record.
+  // Key is already gone — no-op.
   markDraftSentEntry(sentDraftKey, "race content", draftKey, [IMG_A], []);
 
-  assert.equal(getSentDraftEntries().length, 0, "no sent record");
+  assert.equal(getSentDraftEntries().length, 0, "no entries in store");
   assert.equal(loadDraftEntry(draftKey), undefined, "active key still absent");
 });

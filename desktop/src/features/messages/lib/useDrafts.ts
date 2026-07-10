@@ -60,8 +60,8 @@ export type DraftState = {
   spoileredAttachmentUrls: string[];
   /**
    * Lifecycle status of this draft. Always `"active"` at runtime.
-   * The `"sent"` value is accepted on read for backwards compatibility with
-   * older stored entries and normalised to `"active"` by `isValidDraftState`.
+   * The `"sent"` value is not written by any production path; legacy `sent:`
+   * keyed records from older builds are dropped on read by `readStore`.
    * Entries persisted before this field was added have no status field —
    * the read path treats absent status as `"active"` (see `isValidDraftState`).
    */
@@ -136,6 +136,12 @@ function readStore(): Map<string, DraftState> {
       !Array.isArray(parsed)
     ) {
       for (const [key, value] of Object.entries(parsed as StoredDrafts)) {
+        // Drop legacy sent: records — they were written by the old
+        // markDraftSentEntry and have no role now that the Sent section is
+        // removed. Skipping here compacts them out on the next flush.
+        if (key.startsWith("sent:")) {
+          continue;
+        }
         if (isValidDraftState(value)) {
           map.set(key, value);
         }
@@ -165,11 +171,11 @@ function isValidDraftState(v: unknown): v is DraftState {
     return false;
   }
   // Migration: entries written before the status field was introduced have no
-  // status. Treat absent/invalid status as "active" rather than rejecting the
-  // entry — this avoids data loss on first run after the upgrade.
-  // Entries written with status "sent" are normalised to "active" so they
-  // resurface in the Drafts panel rather than remaining hidden forever.
-  if (d.status === undefined || d.status === null || d.status === "sent") {
+  // status field. Treat absent status as "active" to avoid data loss on the
+  // first run after the upgrade.
+  // Legacy sent: keys are skipped by readStore before reaching this function;
+  // reject any remaining entry whose status is not "active".
+  if (d.status === undefined || d.status === null) {
     (d as DraftState).status = "active";
   } else if (d.status !== "active") {
     return false;
@@ -289,7 +295,7 @@ export function getActiveDraftEntries(): Array<{
 
 /**
  * Returns only sent drafts, sorted most-recently-updated first.
- * Used by the "Sent" subsection of the Drafts inbox panel.
+ * Returns empty — sent records are dropped on read. Kept for test assertions.
  */
 export function getSentDraftEntries(): Array<{
   key: string;

@@ -565,10 +565,10 @@ test("pre_status_entry_appears_in_getActiveDraftEntries_after_migration", () => 
   assert.equal(active[0].draft.status, "active");
 });
 
-test("pre_status_sent_entry_is_normalised_to_active_on_read", () => {
+test("pre_status_sent_entry_is_dropped_on_read", () => {
   // Entries previously written with status "sent" (by the old markDraftSentEntry)
-  // are normalised to "active" by isValidDraftState so they resurface in the
-  // Drafts panel rather than remaining permanently hidden.
+  // used a "sent:" key prefix. readStore now skips those keys entirely so legacy
+  // sent records cannot resurface as ghost drafts.
   setup("pubkey-normalise");
   const oldSentEntry = {
     content: "a message I sent a while ago",
@@ -587,11 +587,8 @@ test("pre_status_sent_entry_is_normalised_to_active_on_read", () => {
   );
   clearAllDrafts();
   initDraftStore("pubkey-normalise");
-  // The entry must not be rejected — it appears as active.
+  // The sent: key is skipped — the entry must NOT appear as an active draft.
   const active = getActiveDraftEntries();
-  assert.equal(active.length, 1, "old sent entry resurfaces as active");
-  assert.equal(active[0].draft.status, "active", "status normalised to active");
-  assert.equal(active[0].draft.content, "a message I sent a while ago");
-  // getSentDraftEntries returns nothing — no entries have status "sent" at runtime.
+  assert.equal(active.length, 0, "old sent: entry is dropped, not promoted");
   assert.equal(getSentDraftEntries().length, 0, "no entries read as sent");
 });
