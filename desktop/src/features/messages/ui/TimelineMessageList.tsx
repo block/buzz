@@ -402,6 +402,7 @@ function VirtualizedTimelineRows({
 }: VirtualizedTimelineRowsProps) {
   const listRef = React.useRef<VListHandle>(null);
   const hostRef = React.useRef<HTMLDivElement>(null);
+  const [offscreenBufferSize, setOffscreenBufferSize] = React.useState(2_000);
   const settledAnchorRef = React.useRef<{
     messageId: string;
     top: number;
@@ -484,6 +485,20 @@ function VirtualizedTimelineRows({
     return () => onVirtualizerApiChange(null);
   }, [items.length, messageItemIndexById, onVirtualizerApiChange]);
 
+  React.useLayoutEffect(() => {
+    const host = hostRef.current;
+    if (!host) return;
+    const updateBufferSize = () => {
+      // Keep two complete viewports mounted on either side so variable-height
+      // rows can render and settle before the user scrolls them into view.
+      setOffscreenBufferSize(Math.max(2_000, host.clientHeight * 2));
+    };
+    updateBufferSize();
+    const resizeObserver = new ResizeObserver(updateBufferSize);
+    resizeObserver.observe(host);
+    return () => resizeObserver.disconnect();
+  }, []);
+
   const captureSettledAnchor = React.useCallback(() => {
     const scroller = hostRef.current?.firstElementChild;
     if (!(scroller instanceof HTMLDivElement)) return;
@@ -562,7 +577,7 @@ function VirtualizedTimelineRows({
         ref={listRef}
         className="h-full min-h-0 w-full overflow-y-auto overflow-x-hidden overscroll-contain px-2"
         data={items}
-        bufferSize={1_000}
+        bufferSize={offscreenBufferSize}
         shift={isPrepend}
         onScroll={handleScroll}
         onScrollEnd={handleScrollEnd}

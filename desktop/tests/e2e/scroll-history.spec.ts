@@ -1176,26 +1176,39 @@ test("mounted rows cover the viewport beneath the composer in both directions", 
       )
       .toBeLessThan(100);
   };
-  const bottomCoverage = () =>
+  const mountedCoverage = () =>
     timeline.evaluate((element) => {
-      const viewportBottom = element.getBoundingClientRect().bottom;
+      const viewport = element.getBoundingClientRect();
       const mountedRows = Array.from(
         element.querySelectorAll<HTMLElement>("[data-message-id]"),
       );
-      return Math.max(
-        ...mountedRows.map(
-          (row) => row.getBoundingClientRect().bottom - viewportBottom,
-        ),
-      );
+      return {
+        above: viewport.top - mountedRows[0].getBoundingClientRect().top,
+        below:
+          mountedRows[mountedRows.length - 1].getBoundingClientRect().bottom -
+          viewport.bottom,
+        viewportHeight: viewport.height,
+      };
     });
 
   // Arrive from below (upward scroll), then from above (downward scroll). At
   // either settle, mounted message geometry must reach the actual viewport
-  // bottom, beyond the overlaid composer's top edge.
+  // bottom, beyond the overlaid composer's top edge. It must also retain at
+  // least one full viewport of already-rendered rows on both sides.
   await settleAtTargetFrom(0.75);
-  await expect.poll(bottomCoverage).toBeGreaterThanOrEqual(0);
+  await expect
+    .poll(async () => {
+      const coverage = await mountedCoverage();
+      return Math.min(coverage.above, coverage.below) / coverage.viewportHeight;
+    })
+    .toBeGreaterThanOrEqual(1);
   await settleAtTargetFrom(0.25);
-  await expect.poll(bottomCoverage).toBeGreaterThanOrEqual(0);
+  await expect
+    .poll(async () => {
+      const coverage = await mountedCoverage();
+      return Math.min(coverage.above, coverage.below) / coverage.viewportHeight;
+    })
+    .toBeGreaterThanOrEqual(1);
 });
 
 // Regression: after a real prepend, Virtua's `shift` instruction must not stay
