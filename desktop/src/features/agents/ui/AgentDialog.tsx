@@ -150,7 +150,7 @@ function AgentCreateDialogRouter({
         ) : null
       }
       createSubmitBlocked={!canSubmitWhereToRun(runDraft, startAfterCreate)}
-      createRunOnMesh={runDraft.runOn === "mesh"}
+      createRunOnMesh={startAfterCreate && runDraft.runOn === "mesh"}
       description={copy.description}
       error={definitionError}
       initialValues={initialValues}

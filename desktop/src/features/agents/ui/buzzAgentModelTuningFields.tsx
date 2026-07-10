@@ -36,6 +36,7 @@ export function EffortSelectField({
   effortValid,
   htmlFor,
   inheritedEffort,
+  inheritFallbackLabel,
   label,
   onChange,
   testId,
@@ -50,6 +51,14 @@ export function EffortSelectField({
   htmlFor: string;
   /** Inherited effort from a higher-precedence layer (shown in the Inherit option label). */
   inheritedEffort?: string;
+  /**
+   * Label for the "Inherit" option when no inherited effort is set and the model
+   * has a semantic default (i.e. `effortDefault !== null`).
+   *
+   * Defaults to `"Inherit"`. Per-agent callers may pass `"Inherit (agent default)"`
+   * to preserve the label that appeared before this component was extracted.
+   */
+  inheritFallbackLabel?: string;
   /** Label text for the dropdown. */
   label: string;
   /** Called when the user selects a new value. */
@@ -74,7 +83,7 @@ export function EffortSelectField({
             ? `Inherit (${inheritedEffort})`
             : effortDefault === null
               ? "Inherit (default)"
-              : "Inherit"}
+              : (inheritFallbackLabel ?? "Inherit")}
         </option>
         {BUZZ_AGENT_THINKING_EFFORT_VALUES.map((v) => {
           const isValid = (effortValid as readonly string[]).includes(v);
@@ -163,6 +172,7 @@ export function BuzzAgentModelTuningFields({
             effortValid={effortValid}
             htmlFor="ba-thinking-effort"
             inheritedEffort={inheritedEnvVars[BUZZ_AGENT_THINKING_EFFORT]}
+            inheritFallbackLabel="Inherit (agent default)"
             label="Thinking / Effort"
             onChange={(value) =>
               onEnvVarChange(BUZZ_AGENT_THINKING_EFFORT, value)

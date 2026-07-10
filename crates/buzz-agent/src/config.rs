@@ -148,6 +148,20 @@ pub fn anthropic_thinking_config(
     }
 }
 
+/// Returns true for adaptive Anthropic models that support the `xhigh` effort level.
+///
+/// Used by both `clamp_adaptive_effort` (request-time) and `anthropic_efforts_for_model`
+/// (UI capability table) to keep xhigh-support classification in a single place.
+///
+/// `model` must already have the `databricks-` prefix stripped.
+fn anthropic_model_supports_xhigh(model: &str) -> bool {
+    model.starts_with("claude-opus-4-7")
+        || model.starts_with("claude-opus-4-8")
+        || model.starts_with("claude-sonnet-5")
+        || model.starts_with("claude-fable-5")
+        || model.starts_with("claude-mythos-5")
+}
+
 /// Clamp the requested effort level to the highest doc-verified level for the given adaptive model.
 ///
 /// Doc-verified availability (Anthropic effort page, July 2025):
@@ -163,13 +177,7 @@ pub fn anthropic_thinking_config(
 /// `model` must already have the `databricks-` prefix stripped.
 pub fn clamp_adaptive_effort(model: &str, effort: ThinkingEffort) -> ThinkingEffort {
     // Models that support all levels including xhigh (and max).
-    let supports_xhigh = model.starts_with("claude-opus-4-7")
-        || model.starts_with("claude-opus-4-8")
-        || model.starts_with("claude-sonnet-5")
-        || model.starts_with("claude-fable-5")
-        || model.starts_with("claude-mythos-5");
-    // NOTE: claude-mythos-preview does NOT support xhigh (xhigh → clamp to high).
-    // All adaptive models support low/medium/high and max.
+    let supports_xhigh = anthropic_model_supports_xhigh(model);
 
     let clamped = if supports_xhigh {
         effort // all levels pass through
@@ -345,6 +353,58 @@ fn openai_efforts_for_model(model: &str) -> Option<&'static [ThinkingEffort]> {
         // Unknown model — not doc-verified; server validates.
         None
     }
+}
+
+/// Returns the effort capability set for a given Anthropic model.
+///
+/// This is the single production source of truth for Anthropic family routing.
+/// Both `anthropic_thinking_config` (request-time) and the effort-table UI
+/// (`valid_effort_values_for_provider_model`, via its Anthropic branch) must
+/// derive their behaviour from this helper so the two stay in sync.
+///
+/// Returns `(valid_values, default)` where:
+/// - `valid_values` is the static slice of `ThinkingEffort` values accepted
+///   by this model family's effort dropdown.
+/// - `default` is `None` for manual-budget models (no semantic default —
+///   user must choose) or `Some(High)` for adaptive families.
+///
+/// `model` must already have any `databricks-` gateway prefix stripped.
+pub fn anthropic_efforts_for_model(
+    model: &str,
+) -> (&'static [ThinkingEffort], Option<ThinkingEffort>) {
+    const MANUAL: &[ThinkingEffort] = &[
+        ThinkingEffort::Low,
+        ThinkingEffort::Medium,
+        ThinkingEffort::High,
+    ];
+    const ADAPTIVE_XHIGH: &[ThinkingEffort] = &[
+        ThinkingEffort::Low,
+        ThinkingEffort::Medium,
+        ThinkingEffort::High,
+        ThinkingEffort::XHigh,
+        ThinkingEffort::Max,
+    ];
+    const ADAPTIVE_NO_XHIGH: &[ThinkingEffort] = &[
+        ThinkingEffort::Low,
+        ThinkingEffort::Medium,
+        ThinkingEffort::High,
+        ThinkingEffort::Max,
+    ];
+
+    if is_manual_budget_model(model) {
+        return (MANUAL, None);
+    }
+    if is_adaptive_thinking_model(model) {
+        // Reuse `anthropic_model_supports_xhigh` (the single source of truth
+        // shared with `clamp_adaptive_effort`) — no side-effects, no duplication.
+        if anthropic_model_supports_xhigh(model) {
+            return (ADAPTIVE_XHIGH, Some(ThinkingEffort::High));
+        } else {
+            return (ADAPTIVE_NO_XHIGH, Some(ThinkingEffort::High));
+        }
+    }
+    // Unknown Anthropic model — assume full adaptive (xhigh-capable) as a safe default.
+    (ADAPTIVE_XHIGH, Some(ThinkingEffort::High))
 }
 
 /// Resolve the nearest supported effort level for a given OpenAI model.
@@ -2390,9 +2450,6 @@ mod tests {
     ) -> (Vec<&'static str>, Option<&'static str>) {
         const ALL_7: &[&str] = &["none", "minimal", "low", "medium", "high", "xhigh", "max"];
         const ALL_EXCEPT_MAX: &[&str] = &["none", "minimal", "low", "medium", "high", "xhigh"];
-        const ANTHROPIC_XHIGH: &[&str] = &["low", "medium", "high", "xhigh", "max"];
-        const ANTHROPIC_NO_XHIGH: &[&str] = &["low", "medium", "high", "max"];
-        const ANTHROPIC_MANUAL: &[&str] = &["low", "medium", "high"];
         const GPT5_PRO: &[&str] = &["high"];
         const GPT5_1: &[&str] = &["none", "low", "medium", "high"];
 
@@ -2406,35 +2463,18 @@ mod tests {
         };
         let m = stripped.to_ascii_lowercase();
 
-        fn anthropic_result(
-            m: &str,
-        ) -> (Vec<&'static str>, Option<&'static str>) {
-            if m.starts_with("claude-3") || m == "claude-opus-4-5" {
-                return (ANTHROPIC_MANUAL.to_vec(), None);
-            }
-            // xhigh-capable adaptive families.
-            if m.starts_with("claude-opus-4-7")
-                || m.starts_with("claude-opus-4-8")
-                || m.starts_with("claude-sonnet-5")
-                || m.starts_with("claude-fable-5")
-                || m.starts_with("claude-mythos-5")
-            {
-                return (ANTHROPIC_XHIGH.to_vec(), Some("high"));
-            }
-            // Non-xhigh adaptive families.
-            if m.starts_with("claude-opus-4-6")
-                || m.starts_with("claude-sonnet-4-6")
-                || m.starts_with("claude-mythos-preview")
-            {
-                return (ANTHROPIC_NO_XHIGH.to_vec(), Some("high"));
-            }
-            // Unknown Anthropic model — assume full adaptive.
-            (ANTHROPIC_XHIGH.to_vec(), Some("high"))
+        // Thin adapter: converts production helper output to the string-based
+        // return type used by this function.
+        fn anthropic_result(m: &str) -> (Vec<&'static str>, Option<&'static str>) {
+            let (values, default) = anthropic_efforts_for_model(m);
+            let strs: Vec<&'static str> = values.iter().map(|e| e.openai_effort_str()).collect();
+            (strs, default.map(|e| e.openai_effort_str()))
         }
 
         fn openai_result(m: &str) -> (Vec<&'static str>, Option<&'static str>) {
             if let Some(values) = openai_efforts_for_model(m) {
-                let strs: Vec<&'static str> = values.iter().map(|e| e.openai_effort_str()).collect();
+                let strs: Vec<&'static str> =
+                    values.iter().map(|e| e.openai_effort_str()).collect();
                 // Determine default from the family.
                 let default_val = if strs == GPT5_PRO {
                     Some("high")
@@ -2501,9 +2541,8 @@ mod tests {
 
     #[test]
     fn effort_table_fixture_matches_rust_implementation() {
-        let fixture_json = include_str!(
-            "../../../desktop/src/features/agents/ui/effortTable.fixture.json"
-        );
+        let fixture_json =
+            include_str!("../../../desktop/src/features/agents/ui/effortTable.fixture.json");
         let entries: Vec<FixtureEntry> =
             serde_json::from_str(fixture_json).expect("fixture must be valid JSON");
 
@@ -2513,10 +2552,7 @@ mod tests {
         );
 
         for entry in &entries {
-            let label = entry
-                .note
-                .as_deref()
-                .unwrap_or_else(|| entry.model.as_str());
+            let label = entry.note.as_deref().unwrap_or(entry.model.as_str());
             let (valid_values, default_value) =
                 valid_effort_values_for_provider_model(&entry.provider, &entry.model);
 
