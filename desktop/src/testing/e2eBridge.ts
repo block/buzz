@@ -2272,6 +2272,71 @@ const mockChannels: MockChannel[] = [
       createMockMember(MOCK_IDENTITY_PUBKEY, "member", 1900),
     ],
   }),
+  // Jitter-corpus channel for the upscroll-jitter GATE (upscroll-jitter.perf.ts).
+  // Seeded with 400 structurally HETEROGENEOUS messages (headings, lists,
+  // blockquotes, fenced code, long wrapped prose) so `estimateRowHeight`'s known
+  // biases produce a genuine reserve-vs-true error on every never-painted row.
+  // Its own channel so the uniform `deep-history` seed the load-older specs
+  // depend on stays undisturbed.
+  createMockChannel({
+    id: "feedf00d-0000-4000-8000-000000000008",
+    name: "jitter-corpus",
+    channel_type: "stream",
+    visibility: "open",
+    description: "Heterogeneous history for the upscroll-jitter gate",
+    topic: null,
+    purpose: null,
+    last_message_at: isoMinutesAgo(1),
+    archived_at: null,
+    created_by: ALICE_PUBKEY,
+    topic_set_by: null,
+    topic_set_at: null,
+    purpose_set_by: null,
+    purpose_set_at: null,
+    topic_required: false,
+    max_members: null,
+    nip29_group_id: null,
+    created_minutes_ago: 2000,
+    updated_minutes_ago: 1,
+    members: [
+      createMockMember(ALICE_PUBKEY, "owner", 2000),
+      createMockMember(MOCK_IDENTITY_PUBKEY, "member", 1900),
+    ],
+  }),
+  // Media-corpus channel for the W4a upscroll gate's MEDIA class
+  // (upscroll-media.perf.ts). Seeded with 400 rows whose realization error
+  // comes from MEDIA reserve-vs-true mismatch, not text mis-estimation:
+  // synchronous link-preview cards reserved flat at PREVIEW_CARD=70 but
+  // rendered taller, and dim-carrying images whose reserved scaled box differs
+  // from the rendered `h-auto object-contain` height. Deliberately does NOT
+  // lean on dim-less image decode — that path is pinned to a fixed 256px box
+  // (markdown/utils.ts:resolveImageReserveBox) and provably cannot reflow.
+  // Its own channel so the jitter-corpus seed stays undisturbed.
+  createMockChannel({
+    id: "feedf00d-0000-4000-8000-000000000009",
+    name: "media-corpus",
+    channel_type: "stream",
+    visibility: "open",
+    description: "Media-heavy history for the upscroll gate's media class",
+    topic: null,
+    purpose: null,
+    last_message_at: isoMinutesAgo(1),
+    archived_at: null,
+    created_by: ALICE_PUBKEY,
+    topic_set_by: null,
+    topic_set_at: null,
+    purpose_set_by: null,
+    purpose_set_at: null,
+    topic_required: false,
+    max_members: null,
+    nip29_group_id: null,
+    created_minutes_ago: 2000,
+    updated_minutes_ago: 1,
+    members: [
+      createMockMember(ALICE_PUBKEY, "owner", 2000),
+      createMockMember(MOCK_IDENTITY_PUBKEY, "member", 1900),
+    ],
+  }),
 ];
 
 const mockMessages = new Map<string, RelayEvent[]>();
@@ -2978,12 +3043,130 @@ function buildReplyMessageTags(
   return tags;
 }
 
+// Body generator for the jitter-corpus seed. Six structurally distinct row
+// kinds, cycled by index, chosen because `estimateRowHeight` mis-reserves most
+// of them — the reserve-vs-true error the upscroll-jitter gate measures.
+function jitterCorpusBody(i: number): string {
+  switch (i % 6) {
+    case 0:
+      // Short prose — estimator is close here (control rows).
+      return `quick note ${i}`;
+    case 1:
+      // Heading + list: estimated as flat 20px lines; rendered line boxes and
+      // list margins are taller.
+      return `# Heading ${i}\n\n- alpha item ${i}\n- beta item ${i}\n- gamma item ${i}\n- delta item ${i}`;
+    case 2:
+      // Long wrapped prose: real wrap width differs from CHARS_PER_LINE=64.
+      return `This is a deliberately long paragraph number ${i} that wraps across several visual lines depending on the true column width, which the fixed characters-per-line heuristic only approximates and therefore systematically mis-estimates on wide and narrow windows alike.`;
+    case 3:
+      // Blockquote: block margins the flat estimate ignores.
+      return `> quoted reply ${i}\n>\n> second quoted line ${i}\n\nfollow-up prose ${i}`;
+    case 4:
+      // Fenced code: code line-height is modeled, block padding/border is not.
+      return `runtime log ${i}:\n\`\`\`\nconst x = ${i};\nconsole.log(x * 2);\nreturn x;\n\`\`\``;
+    default:
+      // Medium two-paragraph prose.
+      return `paragraph one for row ${i}\n\nparagraph two for row ${i} with a little more text to push it onto a second wrapped line`;
+  }
+}
+
+// A 1x1 transparent PNG as a data URL. Decodes synchronously and reliably in
+// both headless engines, so a seeded media row realizes a real rendered box
+// regardless of network — the mock harness never serves image bytes. The
+// intrinsic 1x1 shape is irrelevant to layout: dim-carrying images get explicit
+// width/height attributes (markdown.tsx:1528/1533) that drive the reserved
+// aspect box, and `object-contain` letterboxes the 1x1 inside it.
+const TINY_PNG_DATA_URL =
+  "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M8AAAMBAQDJ/1p3AAAAAElFTkSuQmCC";
+
+// Body + imeta-tag generator for the media-corpus seed. Eight row kinds cycled
+// by index. The realization error is MEDIA reserve-vs-true mismatch, from three
+// sources verified in-source (thread: Eva's premise verification, mainbase
+// 2cc0eb53), NOT text mis-estimation:
+//
+//  A. Link-preview cards (kinds 1-3): parsed synchronously from URL TEXT
+//     (parseSupportedLinkPreview — no network). Card renders at mount at its
+//     true height while estimateRowHeight reserved a flat PREVIEW_CARD=70. A
+//     title + provider + type label renders taller than 70 → GROW. Deterministic.
+//  B. Width-clamp images (kinds 4-5): CORRECT dims, but the estimator hardcodes
+//     MEDIA_MAX_WIDTH=384 while the render clamps to `max-w-[min(24rem,100%)]`.
+//     In a timeline column narrower than 384px the rendered image is width-
+//     limited SHORTER than the estimator's 384-based scale reserved → SHRINK,
+//     with no lying dim and no decode timing. (Eva's third divergence source.)
+//  C. Dim-mismatch images, BOTH directions (kinds 6-7): a dim that OVERSTATES
+//     height (reserve tall, render short → SHRINK) and one that UNDERSTATES
+//     (reserve short, render tall → GROW). Seeded in both directions so the
+//     corpus CAN produce SHRINK as well as GROW — a corpus that only makes GROW
+//     can't falsify the GROW-dominant prediction.
+//  Control (kind 0): short prose, no media — the calibration row.
+//
+// Deliberately NO dim-less-only image band: that path is pinned to a fixed
+// 256px box (resolveImageReserveBox → useFixedReserveBox), reserve==mount, and
+// provably cannot reflow. Including it would only add rows that never move.
+function mediaCorpusBody(i: number): { content: string; imeta?: string[] } {
+  const url = (tag: string) => `${TINY_PNG_DATA_URL}#${tag}-${i}`;
+  switch (i % 8) {
+    case 0:
+      // Control — no media, estimator close.
+      return { content: `media note ${i}` };
+    case 1:
+      // GitHub PR link: supported preview card.
+      return {
+        content: `landed the fix — https://github.com/block/buzz/pull/${1600 + i}`,
+      };
+    case 2:
+      // Linear issue link: supported preview card.
+      return {
+        content: `tracking this in https://linear.app/block/issue/BUZZ-${i}/upscroll-anchor-reversal-in-the-slow-momentum-regime`,
+      };
+    case 3:
+      // Google Docs link: supported preview card.
+      return {
+        content: `notes are in https://docs.google.com/document/d/1AbCdEfGhIjKlMnOpQrStUvWxYz${i}/edit`,
+      };
+    case 4: {
+      // Width-clamp SHRINK: a wide image with a CORRECT dim. Estimator scales
+      // 900x600 against 384 → reserves ~256 (height-capped); a column < 384px
+      // wide renders it shorter than that. Width clamp, no lying dim.
+      const u = url("wide");
+      return {
+        content: `wide shot ${i}:\n![grab](${u})`,
+        imeta: [`url ${u}`, "m image/png", "dim 900x600"],
+      };
+    }
+    case 5: {
+      // Width-clamp SHRINK (portrait): 480x900 scales to ~256 tall at 384 wide,
+      // but a narrower column scales width-first and renders shorter.
+      const u = url("tall");
+      return {
+        content: `portrait ${i}:\n![grab](${u})`,
+        imeta: [`url ${u}`, "m image/png", "dim 480x900"],
+      };
+    }
+    case 6: {
+      // Dim OVERSTATES height → reserve tall, render short → SHRINK.
+      const u = url("overstate");
+      return {
+        content: `overstated ${i}:\n![grab](${u})`,
+        imeta: [`url ${u}`, "m image/png", "dim 200x800"],
+      };
+    }
+    default: {
+      // Dim UNDERSTATES height → reserve short, render tall → GROW.
+      const u = url("understate");
+      return {
+        content: `understated ${i}:\n![grab](${u})`,
+        imeta: [`url ${u}`, "m image/png", "dim 800x120"],
+      };
+    }
+  }
+}
+
 function getMockMessageStore(channelId: string): RelayEvent[] {
   const existing = mockMessages.get(channelId);
   if (existing) {
     return existing;
   }
-
   const seeded: RelayEvent[] =
     channelId === "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50"
       ? [
@@ -3163,7 +3346,49 @@ function getMockMessageStore(channelId: string): RelayEvent[] {
                 content: `Deep history message #${index}`,
                 sig: "mocksig".repeat(20).slice(0, 128),
               }))
-            : [];
+            : channelId === "feedf00d-0000-4000-8000-000000000008"
+              ? // Heterogeneous corpus for the upscroll-jitter gate. Row height
+                // varies widely AND `estimateRowHeight` is known to misjudge
+                // several of these kinds (headings/lists/blockquotes counted as
+                // flat 20px prose lines; long prose vs the fixed CHARS_PER_LINE
+                // wrap guess; code-fence chrome) — that reserve-vs-true mismatch
+                // is exactly the realization error the gate measures.
+                Array.from({ length: 400 }, (_, index) => ({
+                  id: `mock-jitter-${index}`,
+                  pubkey: index % 2 === 0 ? ALICE_PUBKEY : MOCK_IDENTITY_PUBKEY,
+                  created_at:
+                    Math.floor(Date.now() / 1000) - (400 - index) * 60,
+                  kind: 9,
+                  tags: [["h", channelId]],
+                  content: jitterCorpusBody(index),
+                  sig: "mocksig".repeat(20).slice(0, 128),
+                }))
+              : channelId === "feedf00d-0000-4000-8000-000000000009"
+                ? // Media corpus for the W4a gate's media class. Row height error
+                  // is MEDIA reserve-vs-true mismatch (link-preview cards flat-
+                  // reserved at PREVIEW_CARD=70 but rendered taller; dim-lying
+                  // images whose object-contain render diverges from the reserved
+                  // scaled box) — not text mis-estimation. See mediaCorpusBody.
+                  Array.from({ length: 400 }, (_, index) => {
+                    const body = mediaCorpusBody(index);
+                    return {
+                      id: `mock-media-${index}`,
+                      pubkey:
+                        index % 2 === 0 ? ALICE_PUBKEY : MOCK_IDENTITY_PUBKEY,
+                      created_at:
+                        Math.floor(Date.now() / 1000) - (400 - index) * 60,
+                      kind: 9,
+                      tags: body.imeta
+                        ? [
+                            ["h", channelId],
+                            ["imeta", ...body.imeta],
+                          ]
+                        : [["h", channelId]],
+                      content: body.content,
+                      sig: "mocksig".repeat(20).slice(0, 128),
+                    };
+                  })
+                : [];
 
   mockMessages.set(channelId, seeded);
   return seeded;

@@ -236,6 +236,30 @@ const overrides = new Map([
   // overage from load-bearing per-message plumbing, not generic debt growth.
   // Approved override; still queued to split with the rest of this list.
   ["src/features/messages/ui/MessageThreadPanel.tsx", 1006],
+  // W4a realizing-upscroll reversal fix (design-of-record (c), targets #1662):
+  // the hook is the sole cross-engine reading-anchor scroll writer, and the
+  // fix's correctness lives in WHY each observer wins per engine — so the
+  // ungated-RO mid-history corrector, the safe-margin straddler-guard invariant
+  // (Quinn's merge-bar checklist #4), the one-clock/single-writer reasoning, and
+  // the build-stamp/probe contract are all documented AT their sites. The file
+  // was 888 lines at HEAD; this fix's code + load-bearing provenance comments
+  // crossed 1000. The 1140→1210 bump is the W4a chase instrumentation inflating
+  // a load-bearing hook mid-investigation: the signed-shift grow/shrink probe
+  // (classifier arm, 1140→1156) and the renderedScroll gate-clock rekey
+  // (w4a-gate-1 arm, ~1156→1206). The gate-arm growth is the deferred-refresh
+  // commit path + the momentum-gate rationale + the `renderedScroll` field
+  // threaded through the shared result type and all four returns so the
+  // classifier fixture can PROVE the scroll/reflow decomposition (Eva required
+  // this in the arm's first run); biome reflows each 4-prop return object to
+  // multi-line, which is most of the line cost. FLAGGED to Eva: this is heavy
+  // for a diagnostic — if the decomposition proof moves behind a lighter
+  // gate-only probe, this drops back toward 1185. EXIT CONDITION: once #1662's
+  // fate is decided, the diagnostic emits get stripped or gated and the
+  // mid-history corrector + band walk split into a sibling module — Eva's ruling
+  // holds the structural split until the arms in flight settle, so it is NOT
+  // done mid-chase. Comment-dominated overage on a correctness fix, not generic
+  // debt growth. Approved override; queued to split.
+  ["src/features/messages/ui/useAnchoredScroll.ts", 1210],
   // AgentConfigPanel footer fold into ProfileFieldGroup for the config-bridge
   // panel — a small overage from load-bearing UI plumbing, not generic debt
   // growth. Approved override; still queued to split with the rest of this list.
