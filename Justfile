@@ -601,6 +601,7 @@ _release-pr lane version:
             TAG_PREFIX="v"
             CHANGELOG="CHANGELOG.md"
             ADD_FILES=(desktop/package.json desktop/src-tauri/tauri.conf.json desktop/src-tauri/Cargo.toml desktop/src-tauri/Cargo.lock pnpm-lock.yaml CHANGELOG.md)
+            LOG_PATHS=(desktop/ crates/buzz-core/ crates/buzz-persona/ crates/buzz-sdk/ crates/buzz-agent/)
             ARTIFACT="Buzz Desktop" ;;
         relay)
             BRANCH_PREFIX="relay-release"
@@ -610,6 +611,7 @@ _release-pr lane version:
             TAG_PREFIX="relay-v"
             CHANGELOG="crates/buzz-relay/CHANGELOG.md"
             ADD_FILES=(crates/buzz-relay/Cargo.toml Cargo.lock crates/buzz-relay/CHANGELOG.md)
+            LOG_PATHS=(crates/buzz-relay/ crates/buzz-core/ crates/buzz-db/ crates/buzz-auth/ crates/buzz-pubsub/ crates/buzz-search/ crates/buzz-audit/ crates/buzz-media/ crates/buzz-sdk/ crates/buzz-workflow/ crates/buzz-conformance/ migrations/)
             ARTIFACT="Buzz Relay" ;;
         mobile)
             BRANCH_PREFIX="mobile-release"
@@ -619,6 +621,7 @@ _release-pr lane version:
             TAG_PREFIX="mobile-v"
             CHANGELOG="mobile/CHANGELOG.md"
             ADD_FILES=(mobile/pubspec.yaml mobile/pubspec.lock mobile/CHANGELOG.md)
+            LOG_PATHS=(mobile/)
             ARTIFACT="Buzz Mobile" ;;
         *)
             echo "Error: unknown release lane '{{ lane }}'"
@@ -667,7 +670,7 @@ _release-pr lane version:
     REPO=$(git remote get-url origin | sed -E 's|.*github\.com[:/]||; s|\.git$||')
     format_log() {
         local range="$1"
-        git log "$range" --format="%h %H %s" --no-merges | while IFS=' ' read -r short full rest; do
+        git log "$range" --format="%h %H %s" --no-merges -- "${LOG_PATHS[@]}" | while IFS=' ' read -r short full rest; do
             local pr subject
             pr=$(printf '%s' "$rest" | grep -oE '\(#[0-9]+\)$' | grep -oE '[0-9]+' || true)
             if [[ -n "$pr" ]]; then
