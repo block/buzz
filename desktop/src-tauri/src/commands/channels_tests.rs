@@ -33,7 +33,7 @@ fn directory_cursor_keeps_same_second_tiebreaker() {
     let event = ev_at(39000, "{}", vec![], timestamp);
     let mut filter = serde_json::json!({"kinds": [39000], "limit": DIRECTORY_PAGE_SIZE});
 
-    advance_directory_cursor(&mut filter, &[event.clone()]);
+    advance_directory_cursor(&mut filter, std::slice::from_ref(&event));
 
     assert_eq!(filter["until"], serde_json::json!(timestamp.as_secs()));
     assert_eq!(filter["before_id"], serde_json::json!(event.id.to_hex()));
