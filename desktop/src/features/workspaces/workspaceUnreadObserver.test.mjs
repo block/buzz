@@ -35,6 +35,15 @@ function relayFor(filters) {
   };
 }
 
+// Helper: encode a mutes payload as JSON (decryptMutes stub returns content as-is)
+function mutesContent(mutedIds) {
+  const channels = {};
+  for (const id of mutedIds) {
+    channels[id] = { muted: true, updatedAt: 1 };
+  }
+  return JSON.stringify({ version: 1, channels });
+}
+
 test("extractMemberChannelIds deduplicates d tags", () => {
   assert.deepEqual(
     extractMemberChannelIds([
@@ -103,6 +112,7 @@ test("extractHiddenDmIds reads h tags from latest visibility snapshot", () => {
 
 test("fetchWorkspaceUnread returns dot and mention count without total unread count", async () => {
   const relay = relayFor([
+    // 1. member events
     () => [
       event({
         tags: [
@@ -111,6 +121,7 @@ test("fetchWorkspaceUnread returns dot and mention count without total unread co
         ],
       }),
     ],
+    // 2. metadata events (parallel with visibility)
     () => [
       event({
         tags: [
@@ -119,8 +130,13 @@ test("fetchWorkspaceUnread returns dot and mention count without total unread co
         ],
       }),
     ],
+    // 3. visibility events (parallel with metadata)
     () => [],
+    // 4. read-state events (parallel with mutes)
     () => [],
+    // 5. mutes events (parallel with read-state)
+    () => [],
+    // 6. unread events
     () => [
       event({
         id: "unread".padEnd(64, "0"),
@@ -128,6 +144,7 @@ test("fetchWorkspaceUnread returns dot and mention count without total unread co
         tags: [["h", CHANNEL_ID]],
       }),
     ],
+    // 7. mention events
     () => [
       event({
         id: "mention".padEnd(64, "0"),
@@ -145,6 +162,7 @@ test("fetchWorkspaceUnread returns dot and mention count without total unread co
     pubkey: PUBKEY,
     nowSeconds: 100,
     decryptReadState: async (value) => value,
+    decryptMutes: async (value) => value,
   });
 
   assert.deepEqual(result, { hasUnread: true, mentionCount: 1 });
@@ -173,6 +191,7 @@ test("fetchWorkspaceUnread ignores self-authored and read thread/message events"
   });
 
   const relay = relayFor([
+    // 1. member events
     () => [
       event({
         tags: [
@@ -181,6 +200,7 @@ test("fetchWorkspaceUnread ignores self-authored and read thread/message events"
         ],
       }),
     ],
+    // 2. metadata events (parallel with visibility)
     () => [
       event({
         tags: [
@@ -189,7 +209,9 @@ test("fetchWorkspaceUnread ignores self-authored and read thread/message events"
         ],
       }),
     ],
+    // 3. visibility events (parallel with metadata)
     () => [],
+    // 4. read-state events (parallel with mutes)
     () => [
       event({
         pubkey: PUBKEY,
@@ -208,7 +230,11 @@ test("fetchWorkspaceUnread ignores self-authored and read thread/message events"
         }),
       }),
     ],
+    // 5. mutes events (parallel with read-state)
+    () => [],
+    // 6. unread events
     () => [threadReply, selfMention],
+    // 7. mention events
     () => [threadReply, selfMention],
   ]);
 
@@ -217,7 +243,234 @@ test("fetchWorkspaceUnread ignores self-authored and read thread/message events"
     pubkey: PUBKEY,
     nowSeconds: 100,
     decryptReadState: async (value) => value,
+    decryptMutes: async (value) => value,
   });
 
   assert.deepEqual(result, { hasUnread: false, mentionCount: 0 });
+});
+
+test("fetchWorkspaceUnread excludes muted-only channel — returns hasUnread:false mentionCount:0", async () => {
+  const MUTED_CHANNEL = "muted-channel-1";
+
+  const relay = relayFor([
+    // 1. member events — one muted channel
+    () => [
+      event({
+        tags: [
+          ["d", MUTED_CHANNEL],
+          ["p", PUBKEY],
+        ],
+      }),
+    ],
+    // 2. metadata events (parallel with visibility)
+    () => [
+      event({
+        tags: [
+          ["d", MUTED_CHANNEL],
+          ["t", "stream"],
+        ],
+      }),
+    ],
+    // 3. visibility events (parallel with metadata)
+    () => [],
+    // 4. read-state events (parallel with mutes)
+    () => [],
+    // 5. mutes events — MUTED_CHANNEL is muted
+    () => [
+      event({
+        pubkey: PUBKEY,
+        content: mutesContent([MUTED_CHANNEL]),
+      }),
+    ],
+    // No per-channel fetches should follow — muted channel is skipped
+  ]);
+
+  const result = await fetchWorkspaceUnread({
+    client: relay,
+    pubkey: PUBKEY,
+    nowSeconds: 100,
+    decryptReadState: async (value) => value,
+    decryptMutes: async (value) => value,
+  });
+
+  assert.deepEqual(result, { hasUnread: false, mentionCount: 0 });
+});
+
+test("fetchWorkspaceUnread counts unmuted channel but skips muted channel", async () => {
+  const UNMUTED_CHANNEL = "channel-unmuted";
+  const MUTED_CHANNEL = "channel-muted";
+
+  const relay = relayFor([
+    // 1. member events — two channels
+    () => [
+      event({
+        tags: [
+          ["d", UNMUTED_CHANNEL],
+          ["d", MUTED_CHANNEL],
+          ["p", PUBKEY],
+        ],
+      }),
+    ],
+    // 2. metadata events (parallel with visibility)
+    () => [
+      event({
+        tags: [
+          ["d", UNMUTED_CHANNEL],
+          ["t", "stream"],
+        ],
+      }),
+      event({
+        tags: [
+          ["d", MUTED_CHANNEL],
+          ["t", "stream"],
+        ],
+      }),
+    ],
+    // 3. visibility events (parallel with metadata)
+    () => [],
+    // 4. read-state events (parallel with mutes)
+    () => [],
+    // 5. mutes events — only MUTED_CHANNEL is muted
+    () => [
+      event({
+        pubkey: PUBKEY,
+        content: mutesContent([MUTED_CHANNEL]),
+      }),
+    ],
+    // 6. unread events for UNMUTED_CHANNEL (muted channel loop iteration never fires)
+    () => [
+      event({
+        id: "unread".padEnd(64, "0"),
+        created_at: 20,
+        tags: [["h", UNMUTED_CHANNEL]],
+      }),
+    ],
+    // 7. mention events for UNMUTED_CHANNEL
+    () => [
+      event({
+        id: "mention".padEnd(64, "0"),
+        created_at: 30,
+        tags: [
+          ["h", UNMUTED_CHANNEL],
+          ["p", PUBKEY],
+        ],
+      }),
+    ],
+  ]);
+
+  const result = await fetchWorkspaceUnread({
+    client: relay,
+    pubkey: PUBKEY,
+    nowSeconds: 100,
+    decryptReadState: async (value) => value,
+    decryptMutes: async (value) => value,
+  });
+
+  assert.deepEqual(result, { hasUnread: true, mentionCount: 1 });
+});
+
+test("fetchWorkspaceUnread treats decryption failure as empty mutes set", async () => {
+  const relay = relayFor([
+    // 1. member events
+    () => [
+      event({
+        tags: [
+          ["d", CHANNEL_ID],
+          ["p", PUBKEY],
+        ],
+      }),
+    ],
+    // 2. metadata events (parallel with visibility)
+    () => [
+      event({
+        tags: [
+          ["d", CHANNEL_ID],
+          ["t", "stream"],
+        ],
+      }),
+    ],
+    // 3. visibility events (parallel with metadata)
+    () => [],
+    // 4. read-state events (parallel with mutes)
+    () => [],
+    // 5. mutes events — present but decryption will throw
+    () => [
+      event({
+        pubkey: PUBKEY,
+        content: "corrupted-ciphertext",
+      }),
+    ],
+    // 6. unread events — channel is NOT muted (decryption failed → empty set)
+    () => [
+      event({
+        id: "unread".padEnd(64, "0"),
+        created_at: 20,
+        tags: [["h", CHANNEL_ID]],
+      }),
+    ],
+    // 7. mention events
+    () => [],
+  ]);
+
+  const result = await fetchWorkspaceUnread({
+    client: relay,
+    pubkey: PUBKEY,
+    nowSeconds: 100,
+    decryptReadState: async (value) => value,
+    decryptMutes: async () => {
+      throw new Error("decryption failed");
+    },
+  });
+
+  // Channel counted as if no mutes
+  assert.deepEqual(result, { hasUnread: true, mentionCount: 0 });
+});
+
+test("fetchWorkspaceUnread treats absent mutes blob as empty mutes set", async () => {
+  const relay = relayFor([
+    // 1. member events
+    () => [
+      event({
+        tags: [
+          ["d", CHANNEL_ID],
+          ["p", PUBKEY],
+        ],
+      }),
+    ],
+    // 2. metadata events (parallel with visibility)
+    () => [
+      event({
+        tags: [
+          ["d", CHANNEL_ID],
+          ["t", "stream"],
+        ],
+      }),
+    ],
+    // 3. visibility events (parallel with metadata)
+    () => [],
+    // 4. read-state events (parallel with mutes)
+    () => [],
+    // 5. mutes events — none
+    () => [],
+    // 6. unread events
+    () => [
+      event({
+        id: "unread".padEnd(64, "0"),
+        created_at: 20,
+        tags: [["h", CHANNEL_ID]],
+      }),
+    ],
+    // 7. mention events
+    () => [],
+  ]);
+
+  const result = await fetchWorkspaceUnread({
+    client: relay,
+    pubkey: PUBKEY,
+    nowSeconds: 100,
+    decryptReadState: async (value) => value,
+    decryptMutes: async (value) => value,
+  });
+
+  assert.deepEqual(result, { hasUnread: true, mentionCount: 0 });
 });

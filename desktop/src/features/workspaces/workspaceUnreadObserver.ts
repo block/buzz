@@ -8,13 +8,19 @@ import {
   getThreadReference,
   isBroadcastReply,
 } from "@/features/messages/lib/threading";
+import {
+  mutedChannelIdsFromStore,
+  parseMutePayload,
+} from "@/features/sidebar/lib/channelMutesStorage";
 import type { Workspace } from "@/features/workspaces/types";
 import { withReadOnlyRelayClient } from "@/shared/api/readOnlyRelayClient";
 import type { RelaySubscriptionFilter } from "@/shared/api/relayClientShared";
+import { nip44DecryptFromSelf } from "@/shared/api/tauri";
 import type { ChannelType, RelayEvent } from "@/shared/api/types";
 import {
   CHANNEL_MESSAGE_EVENT_KINDS,
   HOME_MENTION_EVENT_KINDS,
+  KIND_CHANNEL_MUTES,
   KIND_DM_VISIBILITY,
   KIND_READ_STATE,
 } from "@/shared/constants/kinds";
@@ -98,32 +104,58 @@ export async function fetchWorkspaceUnread(args: {
   pubkey: string;
   nowSeconds?: number;
   decryptReadState?: (ciphertext: string) => Promise<string>;
+  decryptMutes?: (ciphertext: string) => Promise<string>;
 }): Promise<WorkspaceUnreadObserverResult> {
   const { client, pubkey } = args;
   const normalizedPubkey = pubkey.toLowerCase();
   const nowSeconds = args.nowSeconds ?? Math.floor(Date.now() / 1_000);
+  const decryptMutes = args.decryptMutes ?? nip44DecryptFromSelf;
 
   const channels = await fetchObservedChannels(client, pubkey);
   if (channels.length === 0) {
     return { hasUnread: false, mentionCount: 0 };
   }
-  const readStateEvents = await client.fetchEvents({
-    kinds: [KIND_READ_STATE],
-    authors: [pubkey],
-    "#t": ["read-state"],
-    since: nowSeconds - READ_STATE_HORIZON_SECONDS,
-    limit: READ_STATE_FETCH_LIMIT,
-  });
+
+  const [readStateEvents, mutesEvents] = await Promise.all([
+    client.fetchEvents({
+      kinds: [KIND_READ_STATE],
+      authors: [pubkey],
+      "#t": ["read-state"],
+      since: nowSeconds - READ_STATE_HORIZON_SECONDS,
+      limit: READ_STATE_FETCH_LIMIT,
+    }),
+    client.fetchEvents({
+      kinds: [KIND_CHANNEL_MUTES],
+      authors: [pubkey],
+      "#d": ["channel-mutes"],
+      limit: 1,
+    }),
+  ]);
+
   const readState = await mergeReadStateEvents(
     readStateEvents,
     pubkey,
     args.decryptReadState,
   );
 
+  let mutedIds = new Set<string>();
+  if (mutesEvents.length > 0) {
+    try {
+      const plaintext = await decryptMutes(mutesEvents[0].content);
+      const store = parseMutePayload(JSON.parse(plaintext));
+      if (store) {
+        mutedIds = mutedChannelIdsFromStore(store);
+      }
+    } catch {
+      // decryption failure → treat as empty mutes set
+    }
+  }
+
   let hasUnread = false;
   let mentionCount = 0;
 
   for (const channel of channels) {
+    if (mutedIds.has(channel.id)) continue;
     const readAt = readState.get(channel.id) ?? null;
     const since = readAt === null ? 0 : readAt + 1;
     const kinds = unreadKindsForChannel(channel.channelType);
