@@ -191,14 +191,14 @@ async fn wait_for_stable_initial_window_geometry<R: tauri::Runtime>(window: &tau
     let mut stable_polls = 0;
 
     for _ in 0..MAX_POLLS {
-        let bounds = match (
-            window.is_maximized(),
-            window.outer_position(),
-            window.outer_size(),
-        ) {
-            (Ok(true), Ok(position), Ok(size)) => {
-                Some((position.x, position.y, size.width, size.height))
-            }
+        // Accept whatever geometry the window-state plugin restores — maximized
+        // or a normal saved size. macOS applies the restore asynchronously, so
+        // we only need consecutive identical outer bounds to know it settled.
+        // Gating on `is_maximized()` here would leave `bounds` permanently
+        // `None` for restored non-maximized windows and stall the reveal until
+        // the poll timeout.
+        let bounds = match (window.outer_position(), window.outer_size()) {
+            (Ok(position), Ok(size)) => Some((position.x, position.y, size.width, size.height)),
             _ => None,
         };
 
@@ -250,8 +250,8 @@ pub fn run() {
                         return;
                     }
 
-                    // macOS applies the initial maximize asynchronously. Wait
-                    // for several identical maximized bounds and for React to
+                    // macOS applies the restored geometry asynchronously. Wait
+                    // for several identical outer bounds and for React to
                     // commit the startup surface before revealing it.
                     let window = webview.window();
 
