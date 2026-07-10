@@ -18,7 +18,27 @@ const TRUE_BOTTOM_THRESHOLD_PX = 1;
 
 type AnchorState =
   | { kind: "at-bottom" }
-  | { kind: "message"; messageId: string; topOffset: number };
+  /** `contentOffset` is the row's top relative to the scrolled CONTENT
+   *  element (the container's first child), measured rect-to-rect. Content
+   *  space is scroll-invariant: wheel motion translates the content and the
+   *  row together, so the saved offset only drifts when layout ABOVE the row
+   *  changes height. `viewportOffset` is retained only as a safety check for
+   *  cases where the browser's native scroll anchoring has already absorbed a
+   *  prepend; it must not be used as the correction target during a live fling.
+   *  Two prior forms both jerked against a live fling: saving only the viewport
+   *  offset (rect.top − container top) made the prepend re-pin cancel any
+   *  scrolling between anchor capture and the deferred commit; and deriving
+   *  content space as viewport offset + `scrollTop` mixed two clocks — WebKit's
+   *  committed scroll offset desyncs from getBoundingClientRect near the top
+   *  clamp mid-momentum (the Lane C frozen-offset family), inflating drift by
+   *  ~17px and over-correcting. Rect-to-rect against the content element reads
+   *  a single clock. */
+  | {
+      kind: "message";
+      messageId: string;
+      contentOffset: number;
+      viewportOffset: number;
+    };
 
 type BottomSettleContainer = Pick<
   HTMLDivElement,
@@ -99,13 +119,24 @@ function isAtTrueBottom(
 }
 
 /**
+ * Top of the scrolled content in viewport coordinates. Measuring row
+ * positions against this (rect-to-rect) instead of `container top +
+ * scrollTop` reads a single layout clock — WebKit's committed `scrollTop`
+ * desyncs from getBoundingClientRect mid-momentum near the top clamp.
+ */
+function contentTopOf(container: HTMLDivElement): number {
+  return (container.firstElementChild ?? container).getBoundingClientRect().top;
+}
+
+/**
  * Pick an anchor for the current scroll position.
  *
  * Top-crossing walk: chronological children, top-down. The first
  * `data-message-id` row whose bottom edge has crossed below the container
  * top is the anchor — that's the row the reader's eye is on when they've
- * scrolled up through history. `topOffset` is the row's top relative to
- * the container's top and may be negative when the row straddles the edge.
+ * scrolled up through history. `contentOffset` is the row's top relative to
+ * the scrolled content element — scroll-invariant, so saved state stays
+ * valid however far a fling travels before the next commit.
  *
  * If no such row exists (e.g. nothing scrolled past the top, list shorter
  * than the viewport, etc.) the anchor is `at-bottom`.
@@ -121,6 +152,7 @@ function computeAnchor(container: HTMLDivElement): AnchorState {
   }
 
   const containerTop = container.getBoundingClientRect().top;
+  const contentTop = contentTopOf(container);
   const rows = container.querySelectorAll<HTMLElement>("[data-message-id]");
 
   for (let i = 0; i < rows.length; i++) {
@@ -132,7 +164,8 @@ function computeAnchor(container: HTMLDivElement): AnchorState {
         return {
           kind: "message",
           messageId,
-          topOffset: rect.top - containerTop,
+          contentOffset: rect.top - contentTop,
+          viewportOffset: rect.top - containerTop,
         };
       }
     }
@@ -251,6 +284,7 @@ export function useAnchoredScroll({
       const rect = el.getBoundingClientRect();
       const containerRect = container.getBoundingClientRect();
       const currentTopOffset = rect.top - containerRect.top;
+      const currentContentOffset = rect.top - contentTopOf(container);
       const centeredTopOffset = (container.clientHeight - rect.height) / 2;
       const maxScrollTop = Math.max(
         0,
@@ -260,8 +294,6 @@ export function useAnchoredScroll({
         maxScrollTop,
         Math.max(0, container.scrollTop + currentTopOffset - centeredTopOffset),
       );
-      const targetTopOffset =
-        currentTopOffset - (targetScrollTop - container.scrollTop);
 
       container.scrollTo({
         top: targetScrollTop,
@@ -269,13 +301,15 @@ export function useAnchoredScroll({
       });
 
       // Smooth scrolling starts an async animation, so measuring after the call can still return the pre-animation position.
-      // Save the clamped destination offset instead; otherwise a concurrent
-      // render/ResizeObserver restore can fight the smooth scroll back toward
+      // Save the current content-space offset; unlike a viewport offset, it is
+      // invariant under the pending scroll animation itself, so concurrent
+      // render/ResizeObserver restores do not fight the scroll back toward
       // where it started.
       anchorRef.current = {
         kind: "message",
         messageId,
-        topOffset: targetTopOffset,
+        contentOffset: currentContentOffset,
+        viewportOffset: currentTopOffset,
       };
       setIsAtBottom(maxScrollTop - targetScrollTop <= AT_BOTTOM_THRESHOLD_PX);
 
@@ -414,8 +448,14 @@ export function useAnchoredScroll({
       // Anchored mid-history. An older-history prepend grows the content above
       // the reading row; the browser's native scroll anchoring does NOT correct
       // this at the top edge (no anchor node above the viewport when scrollTop
-      // is ~0), so re-pin the anchored row to its saved offset by id. This is
-      // the single scroll writer for the prepend — the load-older observer only
+      // is ~0), so re-pin the anchored row by its saved CONTENT-space offset.
+      // Content-space drift measures only layout growth above the row — wheel
+      // motion between anchor capture and this deferred commit cancels out of
+      // the rect-to-rect read, so the compensation never rewinds a live fling
+      // (the once-per-page backward jerk). If native scroll anchoring has
+      // already held the row in viewport space, skip the JS write instead of
+      // double-applying the same prepend. This is the single scroll writer for
+      // the prepend — the load-older observer only
       // triggers the fetch. We run it in this post-commit layout effect (not the
       // observer's promise callback) because the prepended rows commit on a
       // deferred snapshot a few frames later, so the row's true position is only
@@ -424,12 +464,31 @@ export function useAnchoredScroll({
         `[data-message-id="${CSS.escape(anchor.messageId)}"]`,
       );
       if (row) {
-        const currentTopOffset =
-          row.getBoundingClientRect().top -
-          container.getBoundingClientRect().top;
-        const drift = currentTopOffset - anchor.topOffset;
-        if (Math.abs(drift) > 0.5) {
+        const rect = row.getBoundingClientRect();
+        const containerTop = container.getBoundingClientRect().top;
+        const currentContentOffset = rect.top - contentTopOf(container);
+        const currentViewportOffset = rect.top - containerTop;
+        const contentDrift = currentContentOffset - anchor.contentOffset;
+        const viewportDrift = currentViewportOffset - anchor.viewportOffset;
+        const nativeAnchorAlreadyHeld =
+          isPrepend && Math.abs(viewportDrift) <= 0.5;
+        const drift = nativeAnchorAlreadyHeld ? 0 : contentDrift;
+        if (nativeAnchorAlreadyHeld) {
+          anchorRef.current = {
+            ...anchor,
+            contentOffset: currentContentOffset,
+            viewportOffset: currentViewportOffset,
+          };
+        } else if (Math.abs(drift) > 0.5) {
           container.scrollBy(0, drift);
+          // The content under the viewport moved by `drift`; keep the saved
+          // anchor in step so a follow-up pass (second page, late reflow)
+          // measures fresh drift instead of re-applying this one.
+          anchorRef.current = {
+            ...anchor,
+            contentOffset: currentContentOffset,
+            viewportOffset: currentViewportOffset - drift,
+          };
         }
       }
       if (!isPrepend) {
