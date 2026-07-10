@@ -96,3 +96,36 @@ export function friendlyTurnErrorCopy(raw: string, code: unknown): string {
   const safe = Number.isFinite(numeric) ? (numeric as number) : null;
   return friendlyAgentLastError(raw, safe)?.copy ?? raw;
 }
+
+/** Short headline for classified `turn_error` / `agent_panic` observer events. */
+export function turnErrorTitle(
+  errorClass: string | null | undefined,
+  code?: unknown,
+): string {
+  const cls = errorClass?.trim() || "error";
+  const numeric = code == null ? null : Number(code);
+  const safeCode = Number.isFinite(numeric) ? (numeric as number) : null;
+
+  if (cls === "agent_error") {
+    if (safeCode === -32001) return "Auth error";
+    if (safeCode === -32002) return "Model unavailable";
+    return "Agent error";
+  }
+
+  switch (cls) {
+    case "transport":
+      return "Transport error";
+    case "timeout":
+    case "idle_timeout":
+    case "hard_timeout":
+      return "Timed out";
+    case "exited":
+      return "Agent exited";
+    case "protocol":
+      return "Protocol error";
+    case "panic":
+      return "Agent error (crash)";
+    default:
+      return "Turn error";
+  }
+}

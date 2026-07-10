@@ -6,6 +6,7 @@ import {
   compareObserverEvents,
 } from "@/features/agents/observerRelayStore";
 import { normalizePubkey } from "@/shared/lib/pubkey";
+import { turnErrorTitle } from "@/features/agents/lib/friendlyAgentLastError";
 import type { ObserverEvent } from "./ui/agentSessionTypes";
 
 /** Harness emits turn_liveness every ~10s (BUZZ_ACP_TURN_LIVENESS_SECS). */
@@ -36,12 +37,17 @@ type ActiveTurn = {
   channelId: string;
   startedAt: number;
   lastActivityAt: number;
+  isError?: boolean;
+  errorClass?: string;
+  errorCode?: number | null;
 };
 
 /** One working channel surfaced to the UI, anchored to the desktop clock. */
 export type ActiveTurnSummary = {
   channelId: string;
   anchorAt: number;
+  isError?: boolean;
+  errorLabel?: string;
 };
 
 /** One channel with active agent work, aggregated across agents. */
@@ -51,6 +57,8 @@ export type ActiveChannelTurnSummary = {
   agentCount: number;
   agentPubkeys: string[];
   agentNames?: string[];
+  isError?: boolean;
+  errorLabel?: string;
 };
 
 // Module-level state: agentPubkey → turnId → ActiveTurn
@@ -123,6 +131,39 @@ function sampleClockOffset(agentKey: string, timestamp: string): boolean {
   return true;
 }
 
+function readTurnErrorPayload(event: ObserverEvent): {
+  errorClass: string;
+  errorCode: number | null;
+} {
+  const payload =
+    event.payload &&
+    typeof event.payload === "object" &&
+    !Array.isArray(event.payload)
+      ? (event.payload as Record<string, unknown>)
+      : null;
+  const rawClass = payload?.error_class ?? payload?.errorClass;
+  const errorClass =
+    typeof rawClass === "string" && rawClass.length > 0
+      ? rawClass
+      : event.kind === "agent_panic"
+        ? "panic"
+        : "error";
+  const codeRaw = payload?.code;
+  const code = codeRaw == null ? null : Number(codeRaw);
+  return {
+    errorClass,
+    errorCode: Number.isFinite(code) ? (code as number) : null,
+  };
+}
+
+function clearErrorTurnsInChannel(agentTurns: Map<string, ActiveTurn>, channelId: string) {
+  for (const [turnId, turn] of agentTurns) {
+    if (turn.channelId === channelId && turn.isError) {
+      agentTurns.delete(turnId);
+    }
+  }
+}
+
 function startTurn(
   agentPubkey: string,
   channelId: string,
@@ -135,6 +176,9 @@ function startTurn(
     agentTurns = new Map();
     activeTurnsByAgent.set(key, agentTurns);
   }
+
+  // A successful new turn in this channel supersedes any error tombstone.
+  clearErrorTurnsInChannel(agentTurns, channelId);
 
   // Cap at MAX_TURNS_PER_AGENT — evict oldest if exceeded
   if (agentTurns.size >= MAX_TURNS_PER_AGENT && !agentTurns.has(turnId)) {
@@ -159,6 +203,75 @@ function startTurn(
     lastActivityAt: Date.now(),
   });
   invalidateCache(key);
+}
+
+function markTurnError(
+  agentPubkey: string,
+  turnId: string | null,
+  channelId: string | null,
+  errorClass: string,
+  errorCode: number | null,
+  timestamp: string,
+) {
+  const key = normalizePubkey(agentPubkey);
+  let agentTurns = activeTurnsByAgent.get(key);
+  if (!agentTurns) {
+    agentTurns = new Map();
+    activeTurnsByAgent.set(key, agentTurns);
+  }
+
+  const applyError = (turn: ActiveTurn) => {
+    turn.isError = true;
+    turn.errorClass = errorClass;
+    turn.errorCode = errorCode;
+    turn.lastActivityAt = Date.now();
+  };
+
+  if (turnId) {
+    const existing = agentTurns.get(turnId);
+    if (existing) {
+      applyError(existing);
+      invalidateCache(key);
+      return;
+    }
+  }
+
+  if (channelId) {
+    for (const turn of agentTurns.values()) {
+      if (turn.channelId === channelId) {
+        applyError(turn);
+        invalidateCache(key);
+        return;
+      }
+    }
+
+    const syntheticTurnId = turnId ?? `error-${Date.parse(timestamp) || Date.now()}`;
+    if (!agentTurns.has(syntheticTurnId)) {
+      if (agentTurns.size >= MAX_TURNS_PER_AGENT) {
+        let oldestKey: string | null = null;
+        let oldestTime = Number.POSITIVE_INFINITY;
+        for (const [tid, turn] of agentTurns) {
+          if (turn.startedAt < oldestTime) {
+            oldestTime = turn.startedAt;
+            oldestKey = tid;
+          }
+        }
+        if (oldestKey) {
+          agentTurns.delete(oldestKey);
+        }
+      }
+      agentTurns.set(syntheticTurnId, {
+        turnId: syntheticTurnId,
+        channelId,
+        startedAt: Date.parse(timestamp) || Date.now(),
+        lastActivityAt: Date.now(),
+        isError: true,
+        errorClass,
+        errorCode,
+      });
+      invalidateCache(key);
+    }
+  }
 }
 
 function recordActivity(agentPubkey: string, turnId: string | null): boolean {
@@ -284,6 +397,10 @@ function pruneExpired() {
   let changed = false;
   for (const [agentKey, agentTurns] of activeTurnsByAgent) {
     for (const [turnId, turn] of agentTurns) {
+      // Error tombstones clear on the next successful turn, not on idle timeout.
+      if (turn.isError) {
+        continue;
+      }
       if (now - turn.lastActivityAt > REMOVE_AFTER_MS) {
         agentTurns.delete(turnId);
         invalidateCache(agentKey);
@@ -340,8 +457,6 @@ function processEvent(agentPubkey: string, event: ObserverEvent) {
       }
       break;
     case "turn_completed":
-    case "turn_error":
-    case "agent_panic":
       endTurn(
         agentPubkey,
         event.turnId ?? null,
@@ -350,6 +465,20 @@ function processEvent(agentPubkey: string, event: ObserverEvent) {
       );
       notifyListeners();
       return;
+    case "turn_error":
+    case "agent_panic": {
+      const { errorClass, errorCode } = readTurnErrorPayload(event);
+      markTurnError(
+        agentPubkey,
+        event.turnId ?? null,
+        event.channelId ?? null,
+        errorClass,
+        errorCode,
+        event.timestamp,
+      );
+      notifyListeners();
+      return;
+    }
     case "acp_read":
     case "acp_write":
     // turn_liveness keeps a quiet-but-alive turn from being pruned; same
@@ -416,21 +545,47 @@ export function getActiveTurnsForAgent(
 
   const offset = clockOffsetByAgent.get(key) ?? 0;
 
-  // Collapse multiple turns in one channel to the earliest start — the badge
-  // should count from when the channel's oldest live turn began. Anchors are
-  // derived here (startedAt + offset) so the latest skew estimate applies.
-  const earliestByChannel = new Map<string, number>();
+  // Collapse multiple turns in one channel. Error tombstones take precedence
+  // over working turns until the next successful turn clears them.
+  const summaryByChannel = new Map<
+    string,
+    {
+      startedAt: number;
+      anchorAt: number;
+      isError?: boolean;
+      errorLabel?: string;
+    }
+  >();
   for (const turn of agentTurns.values()) {
-    const prior = earliestByChannel.get(turn.channelId);
-    if (prior === undefined || turn.startedAt < prior) {
-      earliestByChannel.set(turn.channelId, turn.startedAt);
+    const anchorAt = turn.startedAt + offset;
+    const existing = summaryByChannel.get(turn.channelId);
+    if (turn.isError) {
+      summaryByChannel.set(turn.channelId, {
+        startedAt: turn.startedAt,
+        anchorAt,
+        isError: true,
+        errorLabel: turnErrorTitle(turn.errorClass, turn.errorCode),
+      });
+      continue;
+    }
+    if (existing?.isError) {
+      continue;
+    }
+    if (existing === undefined || turn.startedAt < existing.startedAt) {
+      summaryByChannel.set(turn.channelId, {
+        startedAt: turn.startedAt,
+        anchorAt,
+      });
     }
   }
 
-  const result = [...earliestByChannel.entries()]
-    .map(([channelId, startedAt]) => ({
+  const result = [...summaryByChannel.entries()]
+    .map(([channelId, summary]) => ({
       channelId,
-      anchorAt: startedAt + offset,
+      anchorAt: summary.anchorAt,
+      ...(summary.isError
+        ? { isError: true as const, errorLabel: summary.errorLabel }
+        : {}),
     }))
     .sort((a, b) => a.channelId.localeCompare(b.channelId));
   cachedTurnSummaries.set(key, result);
@@ -450,7 +605,12 @@ export function getActiveTurnsByChannel(): ActiveChannelTurnSummary[] {
 
   const summaries = new Map<
     string,
-    { anchorAt: number; agentPubkeys: Set<string> }
+    {
+      anchorAt: number;
+      agentPubkeys: Set<string>;
+      isError?: boolean;
+      errorLabel?: string;
+    }
   >();
 
   for (const [agentKey, agentTurns] of activeTurnsByAgent) {
@@ -464,12 +624,26 @@ export function getActiveTurnsByChannel(): ActiveChannelTurnSummary[] {
         summaries.set(turn.channelId, {
           anchorAt,
           agentPubkeys: new Set([agentKey]),
+          ...(turn.isError
+            ? {
+                isError: true as const,
+                errorLabel: turnErrorTitle(turn.errorClass, turn.errorCode),
+              }
+            : {}),
         });
         continue;
       }
 
       summary.agentPubkeys.add(agentKey);
-      if (anchorAt < summary.anchorAt) {
+      if (turn.isError) {
+        summary.isError = true;
+        summary.errorLabel = turnErrorTitle(turn.errorClass, turn.errorCode);
+        if (anchorAt < summary.anchorAt) {
+          summary.anchorAt = anchorAt;
+        }
+        continue;
+      }
+      if (!summary.isError && anchorAt < summary.anchorAt) {
         summary.anchorAt = anchorAt;
       }
     }
@@ -481,6 +655,9 @@ export function getActiveTurnsByChannel(): ActiveChannelTurnSummary[] {
       anchorAt: summary.anchorAt,
       agentCount: summary.agentPubkeys.size,
       agentPubkeys: [...summary.agentPubkeys].sort(),
+      ...(summary.isError
+        ? { isError: true as const, errorLabel: summary.errorLabel }
+        : {}),
     }))
     .sort((a, b) => a.channelId.localeCompare(b.channelId));
   cachedChannelTurnSummaries = result;

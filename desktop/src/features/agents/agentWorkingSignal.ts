@@ -35,6 +35,8 @@ export type AgentWorkingChannel = {
   /** Desktop-clock anchor for elapsed displays (turn start / first typing). */
   anchorAt: number;
   source: Exclude<AgentWorkingSource, "none">;
+  isError?: boolean;
+  errorLabel?: string;
 };
 
 export type AgentWorkingState = {
@@ -141,6 +143,9 @@ function computeAgentWorkingState(
     channelId: turn.channelId,
     anchorAt: turn.anchorAt,
     source: "observer" as const,
+    ...(turn.isError
+      ? { isError: true as const, errorLabel: turn.errorLabel }
+      : {}),
   }));
   const observerChannelIds = new Set(turns.map((turn) => turn.channelId));
 

@@ -212,4 +212,22 @@ describe("subscription and caching", () => {
     resetAgentWorkingSignal();
     assert.equal(getAgentWorkingState(AGENT, "chan-1").working, false);
   });
+
+  it("surfaces observer error tombstones in working state", () => {
+    syncAgentTurnsFromEvents(AGENT, [
+      makeEvent({ seq: 1, turnId: "t1", channelId: "chan-1" }),
+      makeEvent({
+        seq: 2,
+        kind: "turn_error",
+        turnId: "t1",
+        channelId: "chan-1",
+        payload: { error_class: "transport", error: "pipe broke" },
+      }),
+    ]);
+
+    const state = getAgentWorkingState(AGENT);
+    assert.equal(state.working, true);
+    assert.equal(state.channels[0]?.isError, true);
+    assert.equal(state.channels[0]?.errorLabel, "Transport error");
+  });
 });

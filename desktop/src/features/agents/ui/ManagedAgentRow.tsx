@@ -65,15 +65,19 @@ export function ManagedAgentRow({
   const activeWorkingChannels = React.useMemo(
     () =>
       activeTurns
-        .map(({ channelId, anchorAt }) => ({
+        .map(({ channelId, anchorAt, isError, errorLabel }) => ({
           id: channelId,
           name: channelIdToName[channelId] ?? channelId,
           anchorAt,
+          isError,
+          errorLabel,
         }))
         .slice(0, 3),
     [activeTurns, channelIdToName],
   );
   const isWorking = activeWorkingChannels.length > 0;
+  const workingStatusLabel = activeWorkingChannels.find((c) => c.isError)
+    ?.errorLabel;
   const processDetail =
     agent.pid !== null
       ? `PID ${agent.pid}`
@@ -128,6 +132,7 @@ export function ManagedAgentRow({
                 presenceStatus={presenceStatus}
                 processDetail={processDetail}
                 status={agent.status}
+                workingStatusLabel={workingStatusLabel}
               />
               <RuntimeBlock agent={agent} runtimeSource={runtimeSource} />
             </div>
@@ -151,6 +156,7 @@ export function ManagedAgentRow({
                 presenceStatus={presenceStatus}
                 processDetail={processDetail}
                 status={agent.status}
+                workingStatusLabel={workingStatusLabel}
               />
               <RuntimeBlock agent={agent} runtimeSource={runtimeSource} />
             </div>
@@ -297,6 +303,8 @@ function AgentSummary({
                   channelId={channel.id}
                   name={channel.name}
                   anchorAt={channel.anchorAt}
+                  isError={channel.isError}
+                  errorLabel={channel.errorLabel}
                   // Deep-link straight into the agent's activity pane in the
                   // working channel, not just the channel timeline.
                   onNavigate={(channelId) =>
@@ -317,15 +325,34 @@ function WorkingBadge({
   name,
   anchorAt,
   onNavigate,
+  isError,
+  errorLabel,
 }: {
   channelId: string;
   name: string;
   anchorAt: number;
   onNavigate: (channelId: string) => void;
+  isError?: boolean;
+  errorLabel?: string;
 }) {
   // The 1s tick lives here, at the leaf, so only visible working badges
   // re-render each second — idle rows never mount this hook.
   const now = useNow(1000);
+
+  if (isError && errorLabel) {
+    return (
+      <Badge
+        className="cursor-pointer normal-case tracking-normal hover:opacity-80"
+        variant="destructive"
+        onClick={(e) => {
+          e.stopPropagation();
+          onNavigate(channelId);
+        }}
+      >
+        {errorLabel} in #{name}
+      </Badge>
+    );
+  }
 
   return (
     <Badge
@@ -348,6 +375,7 @@ function StatusBlock({
   presenceStatus,
   processDetail,
   status,
+  workingStatusLabel,
 }: {
   friendlyError: ReturnType<typeof friendlyAgentLastError>;
   isWorking: boolean;
@@ -355,6 +383,7 @@ function StatusBlock({
   presenceStatus: PresenceStatus | undefined;
   processDetail: string;
   status: ManagedAgent["status"];
+  workingStatusLabel?: string;
 }) {
   return (
     <div className="space-y-1 lg:pt-0.5">
@@ -366,6 +395,7 @@ function StatusBlock({
         presenceLoaded={presenceLoaded}
         presenceStatus={presenceStatus}
         status={status}
+        workingLabel={workingStatusLabel}
       />
       <p className="text-xs text-muted-foreground">{processDetail}</p>
       {friendlyError ? (

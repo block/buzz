@@ -2669,6 +2669,37 @@ fn dispatch_pending(
     dispatched_channels
 }
 
+/// True when the stdio pipe may be corrupted — caller should respawn the agent.
+fn is_acp_transport_error(e: &acp::AcpError) -> bool {
+    matches!(
+        e,
+        acp::AcpError::Io(_)
+            | acp::AcpError::WriteTimeout(_)
+            | acp::AcpError::Timeout(_)
+            | acp::AcpError::Protocol(_)
+    )
+}
+
+/// Stable classifier for `turn_error` observer payloads. Distinct from
+/// `outcome`, which collapses all `PromptOutcome::Error` variants to `"error"`.
+fn turn_error_class(outcome: &PromptOutcome) -> &'static str {
+    match outcome {
+        PromptOutcome::AgentExited => "exited",
+        PromptOutcome::Timeout => "timeout",
+        PromptOutcome::Error(e) => match e {
+            acp::AcpError::IdleTimeout(_) => "idle_timeout",
+            acp::AcpError::HardTimeout => "hard_timeout",
+            acp::AcpError::AgentError { .. } => "agent_error",
+            // serde parse failure on a wire line — not the same as `Protocol` (transport).
+            acp::AcpError::Json(_) => "protocol",
+            acp::AcpError::AgentExited => "exited",
+            e if is_acp_transport_error(e) => "transport",
+            _ => "error",
+        },
+        _ => "error",
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn handle_prompt_result(
     pool: &mut AgentPool,
@@ -2782,10 +2813,12 @@ fn handle_prompt_result(
         PromptSource::Channel(ch) => Some(*ch),
         PromptSource::Heartbeat => None,
     };
+    let error_class = turn_error_class(&result.outcome);
     let emit_turn_error = |error_msg: &str, error_code: Option<i64>| {
         if let Some(ref observer) = observer {
             let mut payload = serde_json::json!({
                 "outcome": outcome_label,
+                "error_class": error_class,
                 "error": error_msg,
             });
             if let Some(code) = error_code {
@@ -2868,13 +2901,7 @@ fn handle_prompt_result(
             pool.return_agent(result.agent);
         }
         PromptOutcome::Error(ref e) => {
-            let is_transport_error = matches!(
-                e,
-                acp::AcpError::Io(_)
-                    | acp::AcpError::WriteTimeout(_)
-                    | acp::AcpError::Timeout(_)
-                    | acp::AcpError::Protocol(_)
-            );
+            let is_transport_error = is_acp_transport_error(e);
             let error_code = match &e {
                 acp::AcpError::AgentError { code, .. } => Some(*code),
                 _ => None,
@@ -3958,6 +3985,58 @@ mod build_mcp_servers_tests {
 }
 
 #[cfg(test)]
+mod turn_error_class_tests {
+    use super::{is_acp_transport_error, turn_error_class};
+    use crate::acp::AcpError;
+    use crate::pool::PromptOutcome;
+
+    #[test]
+    fn classifies_all_failure_variants() {
+        assert_eq!(turn_error_class(&PromptOutcome::AgentExited), "exited");
+        assert_eq!(turn_error_class(&PromptOutcome::Timeout), "timeout");
+        assert_eq!(
+            turn_error_class(&PromptOutcome::Error(AcpError::IdleTimeout(
+                std::time::Duration::from_secs(1)
+            ))),
+            "idle_timeout"
+        );
+        assert_eq!(
+            turn_error_class(&PromptOutcome::Error(AcpError::HardTimeout)),
+            "hard_timeout"
+        );
+        assert_eq!(
+            turn_error_class(&PromptOutcome::Error(AcpError::AgentError {
+                code: -32001,
+                message: "llm auth".into(),
+            })),
+            "agent_error"
+        );
+        assert_eq!(
+            turn_error_class(&PromptOutcome::Error(AcpError::AgentExited)),
+            "exited"
+        );
+
+        let json_err =
+            AcpError::Json(serde_json::from_str::<serde_json::Value>("not json").unwrap_err());
+        assert!(!is_acp_transport_error(&json_err));
+        assert_eq!(
+            turn_error_class(&PromptOutcome::Error(json_err)),
+            "protocol"
+        );
+
+        for err in [
+            AcpError::Io(std::io::Error::other("pipe")),
+            AcpError::WriteTimeout(std::time::Duration::from_secs(1)),
+            AcpError::Timeout(std::time::Duration::from_secs(1)),
+            AcpError::Protocol("desync".into()),
+        ] {
+            assert!(is_acp_transport_error(&err), "{err:?} should be transport");
+            assert_eq!(turn_error_class(&PromptOutcome::Error(err)), "transport");
+        }
+    }
+}
+
+#[cfg(test)]
 mod error_outcome_emission_tests {
     //! Pins the policy that error-class outcomes surface to the activity feed
     //! and never to the channel:
@@ -4041,9 +4120,7 @@ mod error_outcome_emission_tests {
         }
     }
 
-    /// Drive one error outcome through `handle_prompt_result` and return how
-    /// many `turn_error` events it emitted to the observer feed.
-    async fn turn_errors_emitted_for(outcome: PromptOutcome) -> usize {
+    async fn drive_prompt_outcome(outcome: PromptOutcome, observer: &ObserverHandle) {
         let agent = dummy_agent(0).await;
         let mut pool = AgentPool::from_slots(vec![None]);
 
@@ -4074,7 +4151,6 @@ mod error_outcome_emission_tests {
         }];
         let (respawn_tx, _respawn_rx) = mpsc::channel(8);
         let mut respawn_tasks = tokio::task::JoinSet::new();
-        let observer = ObserverHandle::in_process();
 
         let result = PromptResult {
             agent,
@@ -4096,12 +4172,36 @@ mod error_outcome_emission_tests {
             Some(observer.clone()),
             None,
         );
+    }
 
+    /// Drive one error outcome through `handle_prompt_result` and return how
+    /// many `turn_error` events it emitted to the observer feed.
+    async fn turn_errors_emitted_for(outcome: PromptOutcome) -> usize {
+        let observer = ObserverHandle::in_process();
+        drive_prompt_outcome(outcome, &observer).await;
         observer
             .snapshot()
             .iter()
             .filter(|e| e.kind == "turn_error")
             .count()
+    }
+
+    async fn turn_error_payload_for(outcome: PromptOutcome) -> serde_json::Value {
+        let observer = ObserverHandle::in_process();
+        drive_prompt_outcome(outcome, &observer).await;
+        observer
+            .snapshot()
+            .into_iter()
+            .find(|e| e.kind == "turn_error")
+            .expect("expected one turn_error event")
+            .payload
+    }
+
+    fn payload_error_class(payload: &serde_json::Value) -> &str {
+        payload
+            .get("error_class")
+            .and_then(|value| value.as_str())
+            .expect("turn_error payload must include error_class")
     }
 
     #[tokio::test]
@@ -4124,6 +4224,36 @@ mod error_outcome_emission_tests {
     async fn application_error_emits_exactly_one_feed_event() {
         let app = AcpError::IdleTimeout(std::time::Duration::from_secs(1));
         assert_eq!(turn_errors_emitted_for(PromptOutcome::Error(app)).await, 1);
+    }
+
+    #[tokio::test]
+    async fn turn_error_payload_includes_error_class_for_representative_outcomes() {
+        let cases = [
+            (PromptOutcome::AgentExited, "exited", "exited"),
+            (PromptOutcome::Timeout, "timeout", "timeout"),
+            (
+                PromptOutcome::Error(AcpError::AgentError {
+                    code: -32001,
+                    message: "llm auth: token expired".into(),
+                }),
+                "error",
+                "agent_error",
+            ),
+            (
+                PromptOutcome::Error(AcpError::Io(std::io::Error::other("pipe broke"))),
+                "error",
+                "transport",
+            ),
+        ];
+
+        for (outcome, expected_outcome, expected_class) in cases {
+            let payload = turn_error_payload_for(outcome).await;
+            assert_eq!(payload_error_class(&payload), expected_class);
+            assert_eq!(payload["outcome"], expected_outcome);
+            if expected_class == "agent_error" {
+                assert_eq!(payload["code"], -32001);
+            }
+        }
     }
 }
 

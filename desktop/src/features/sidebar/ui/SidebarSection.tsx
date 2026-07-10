@@ -131,17 +131,24 @@ function ChannelWorkingBadge({
 }) {
   const now = useNow(1000);
   const elapsed = formatElapsed(now - summary.anchorAt);
-  const label =
-    summary.agentCount > 1 ? `${elapsed} (${summary.agentCount})` : elapsed;
-  const title = formatWorkingTooltip(summary);
+  const label = summary.isError
+    ? (summary.errorLabel ?? "Turn error")
+    : summary.agentCount > 1
+      ? `${elapsed} (${summary.agentCount})`
+      : elapsed;
+  const title = summary.isError
+    ? `${summary.errorLabel ?? "Turn error"} in #${channelName}`
+    : formatWorkingTooltip(summary);
 
   return (
     <span
       className={cn(
-        "hidden max-w-32 shrink-0 truncate rounded-full px-1.5 py-0.5 text-2xs font-medium leading-none tabular-nums motion-safe:animate-pulse group-data-[collapsible=icon]:hidden sm:inline-flex",
-        isActive
-          ? "bg-sidebar-active-foreground/20 text-sidebar-active-foreground"
-          : "bg-primary/10 text-primary",
+        "hidden max-w-32 shrink-0 truncate rounded-full px-1.5 py-0.5 text-2xs font-medium leading-none tabular-nums group-data-[collapsible=icon]:hidden sm:inline-flex",
+        summary.isError
+          ? "bg-destructive/15 text-destructive"
+          : isActive
+            ? "bg-sidebar-active-foreground/20 text-sidebar-active-foreground motion-safe:animate-pulse"
+            : "bg-primary/10 text-primary motion-safe:animate-pulse",
       )}
       data-testid={`channel-working-${channelName}`}
       title={title}
