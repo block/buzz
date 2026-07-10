@@ -437,7 +437,12 @@ fn missing_definition_leaves_materialized_runtime_in_hash() {
 
     assert_ne!(
         spawn_config_hash(&rec, no_personas, "wss://ws.example", &Default::default()),
-        spawn_config_hash(&no_runtime, no_personas, "wss://ws.example", &Default::default()),
+        spawn_config_hash(
+            &no_runtime,
+            no_personas,
+            "wss://ws.example",
+            &Default::default()
+        ),
         "materialized runtime must still affect hash when definition is absent"
     );
 }
