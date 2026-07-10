@@ -851,33 +851,23 @@ pub async fn update_managed_agent(
         if let Some(acp_command) = input.acp_command {
             record.acp_command = acp_command;
         }
-        // Harness edit: the persona's runtime is authoritative, so we persist an
-        // explicit `agent_command_override` ONLY when the user picks a command
-        // that diverges from the persona. An empty/whitespace value (the
-        // "Inherit from persona" sentinel) clears the pin back to `None`. A
-        // name-only edit (`agent_command == None`) leaves the pin intact.
-        //
-        // `harness_override` threads the user's explicit intent: when they pick
-        // a runtime/Custom command in the dialog it is a real pin even if it
-        // maps to the persona's own runtime, so a same-runtime pick is kept
-        // rather than dropped back to inherit (see
-        // `update_time_agent_command_override`).
+        // Harness edit: the persona's runtime is authoritative, so an explicit
+        // `agent_command_override` is persisted ONLY when the user picks a
+        // command that diverges from the persona, and the empty/whitespace
+        // "Inherit from persona" sentinel clears both the pin and the
+        // materialized record runtime. A name-only edit
+        // (`agent_command == None`) leaves the pin intact. `harness_override`
+        // threads the user's explicit intent — see `apply_agent_command_update`
+        // and `update_time_agent_command_override` for the full resolution
+        // rules.
         if let Some(agent_command) = input.agent_command {
             let personas = load_personas(&app).unwrap_or_default();
-            record.agent_command_override =
-                crate::managed_agents::update_time_agent_command_override(
-                    record.persona_id.as_deref(),
-                    &personas,
-                    Some(&agent_command),
-                    input.harness_override,
-                );
-            // The empty/whitespace sentinel means "Inherit runtime from
-            // persona": clear the materialized record runtime so the resolution
-            // ladder falls through to the live definition rather than silently
-            // keeping the stale instance copy.
-            if agent_command.trim().is_empty() {
-                record.runtime = None;
-            }
+            crate::managed_agents::apply_agent_command_update(
+                record,
+                &personas,
+                &agent_command,
+                input.harness_override,
+            );
         }
         if let Some(agent_args) = input.agent_args {
             record.agent_args = agent_args;

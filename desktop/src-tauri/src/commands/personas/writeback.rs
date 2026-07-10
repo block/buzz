@@ -105,8 +105,26 @@ fn try_write_back_persona_md(teams: &[TeamRecord], persona: &PersonaRecord) -> R
         })?;
     let path = &loaded.source_path;
 
-    let content =
-        std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    // Containment: the manifest-resolved file must stay inside the pack root.
+    // Both sides are canonicalized so a symlinked pack dir (the legacy deploy
+    // layout) compares on its resolved location — the check only rejects a
+    // manifest that redirects the write outside the pack.
+    let canonical_path = path
+        .canonicalize()
+        .map_err(|e| format!("resolve {}: {e}", path.display()))?;
+    let canonical_root = source_dir
+        .canonicalize()
+        .map_err(|e| format!("resolve {}: {e}", source_dir.display()))?;
+    if !canonical_path.starts_with(&canonical_root) {
+        return Err(format!(
+            "persona file {} resolves outside its pack root {}",
+            canonical_path.display(),
+            canonical_root.display()
+        ));
+    }
+
+    let content = std::fs::read_to_string(&canonical_path)
+        .map_err(|e| format!("read {}: {e}", canonical_path.display()))?;
 
     let updated = rewrite_persona_md(
         &content,
@@ -117,7 +135,40 @@ fn try_write_back_persona_md(teams: &[TeamRecord], persona: &PersonaRecord) -> R
     if updated == content {
         return Ok(());
     }
-    std::fs::write(path, &updated).map_err(|e| format!("write {}: {e}", path.display()))?;
+    write_file_atomic(&canonical_path, &updated)
+}
+
+/// Replace `path`'s content atomically: write a sibling temp file, then rename
+/// it over the target so a crash mid-write can never leave a truncated
+/// `.persona.md`. The target's write permission is probed first because a
+/// rename only needs directory permission — without the probe, an atomic
+/// replace would silently defeat a deliberately read-only pack file that the
+/// previous in-place write (and the surfaced warning) honored.
+fn write_file_atomic(path: &std::path::Path, content: &str) -> Result<(), String> {
+    use std::io::Write;
+
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(path)
+        .map_err(|e| format!("write {}: {e}", path.display()))?;
+
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("no parent directory for {}", path.display()))?;
+    let mut tmp = tempfile::NamedTempFile::new_in(parent)
+        .map_err(|e| format!("create temp file in {}: {e}", parent.display()))?;
+    tmp.write_all(content.as_bytes())
+        .map_err(|e| format!("write {}: {e}", path.display()))?;
+    // NamedTempFile creates with 0600; carry the target's permissions over so
+    // the replacement doesn't change the file's mode.
+    let perms = std::fs::metadata(path)
+        .map_err(|e| format!("stat {}: {e}", path.display()))?
+        .permissions();
+    tmp.as_file()
+        .set_permissions(perms)
+        .map_err(|e| format!("set permissions on temp for {}: {e}", path.display()))?;
+    tmp.persist(path)
+        .map_err(|e| format!("write {}: {e}", path.display()))?;
     Ok(())
 }
 
