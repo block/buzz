@@ -20,8 +20,8 @@ const rules = [
 ];
 
 // Decorative / chrome exceptions: `relativePath:lineNumber`. The avatar emoji
-// glyph is a fixed display size sized to its avatar box (not readable message
-// text), so it stays as the lone documented `text-[6rem]` literal.
+// glyphs are fixed display sizes sized to their avatar box (not readable
+// message text), so they are exempted from the readable-text px rule.
 const overrides = new Set([
   "src/features/settings/ui/ProfileSettingsCard.tsx:584",
   "src/features/onboarding/ui/AvatarStep.tsx:89",
