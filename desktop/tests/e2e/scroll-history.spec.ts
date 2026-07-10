@@ -1198,6 +1198,105 @@ test("mounted rows cover the viewport beneath the composer in both directions", 
   await expect.poll(bottomCoverage).toBeGreaterThanOrEqual(0);
 });
 
+// Regression: after a real prepend, Virtua's `shift` instruction must not stay
+// enabled while the reader later fast-scrolls through the middle of the list.
+// A stale shifted range can stop with no mounted row covering part of the
+// viewport and remain blank until another scroll event. The idle samples below
+// deliberately dispatch no follow-up scroll.
+test("fast middle-page scroll settles with continuous mounted coverage", async ({
+  page,
+}) => {
+  await installMockBridge(page);
+  await page.goto("/");
+  await page.waitForFunction(
+    () =>
+      typeof window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__ === "function" &&
+      typeof window.__BUZZ_E2E_PREPEND_MOCK_HISTORY__ === "function",
+  );
+
+  await page.evaluate(() => {
+    for (let index = 0; index < 180; index += 1) {
+      window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+        channelName: "general",
+        content: `settle row ${index}\nline two ${index}\nline three ${index}`,
+        createdAt: 1_700_000_000 + index,
+      });
+    }
+  });
+
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  const timeline = page.getByTestId("message-timeline");
+  await expect(timeline).toContainText("settle row 179");
+  await page.waitForFunction(() => {
+    const element = document.querySelector<HTMLDivElement>(
+      '[data-testid="message-timeline"]',
+    );
+    return element && element.scrollHeight > element.clientHeight * 3;
+  });
+
+  // Land a genuine prepend first. This is what turns `shift` on; subsequent
+  // ordinary list updates and measurements must happen with it cleared.
+  const scrollHeightBeforePrepend = (await getTimelineMetrics(page))
+    .scrollHeight;
+  await page.evaluate(() => {
+    for (let index = 0; index < 100; index += 1) {
+      window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+        channelName: "general",
+        content: `prepended settle row ${index}\nolder line two ${index}\nolder line three ${index}`,
+        createdAt: 1_699_999_000 + index,
+      });
+    }
+  });
+  await expect
+    .poll(() =>
+      getTimelineMetrics(page).then((metrics) => metrics.scrollHeight),
+    )
+    .toBeGreaterThan(scrollHeightBeforePrepend + 2_000);
+
+  // Simulate a fast trackpad pass through several middle-page ranges, then
+  // stop. The final evaluate emits the last scroll event; all coverage samples
+  // after it are passive observations.
+  await timeline.evaluate((element) => {
+    const maxOffset = element.scrollHeight - element.clientHeight;
+    for (const fraction of [0.72, 0.28, 0.64, 0.36, 0.58, 0.44, 0.52]) {
+      element.scrollTop = maxOffset * fraction;
+      element.dispatchEvent(new Event("scroll", { bubbles: true }));
+    }
+  });
+  await page.waitForTimeout(250);
+
+  const viewportCoverage = () =>
+    timeline.evaluate((element) => {
+      const viewport = element.getBoundingClientRect();
+      const rows = Array.from(
+        element.querySelectorAll<HTMLElement>("[data-message-id]"),
+      )
+        .map((row) => row.getBoundingClientRect())
+        .filter(
+          (rect) => rect.bottom > viewport.top && rect.top < viewport.bottom,
+        )
+        .sort((left, right) => left.top - right.top);
+      if (rows.length === 0) return Number.POSITIVE_INFINITY;
+
+      let cursor = viewport.top;
+      let largestGap = Math.max(0, rows[0].top - viewport.top);
+      for (const row of rows) {
+        largestGap = Math.max(largestGap, row.top - cursor);
+        cursor = Math.max(cursor, row.bottom);
+      }
+      return Math.max(largestGap, viewport.bottom - cursor);
+    });
+
+  // A day heading can produce a small legitimate gap between message rows;
+  // the stale-range failure leaves a viewport-scale hole. Check repeatedly
+  // while idle so a transient good frame cannot mask a stuck blank range.
+  for (let sample = 0; sample < 5; sample += 1) {
+    expect(await viewportCoverage()).toBeLessThan(100);
+    await page.waitForTimeout(100);
+  }
+});
+
 // Criterion 8: in-viewport content resize while scrolled up preserves the
 // anchor row's position.
 //

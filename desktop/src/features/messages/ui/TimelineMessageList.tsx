@@ -378,6 +378,18 @@ type VirtualizedTimelineRowsProps = {
   renderItem: (item: TimelineNonDayItem) => React.ReactNode;
 };
 
+function didPrependVirtualizedTimeline(
+  previousFirstKey: string | null,
+  firstTimelineKey: string | null,
+  keys: readonly string[],
+): boolean {
+  return (
+    previousFirstKey !== null &&
+    previousFirstKey !== firstTimelineKey &&
+    keys.includes(previousFirstKey)
+  );
+}
+
 function VirtualizedTimelineRows({
   dayGroups,
   leadingContent,
@@ -396,6 +408,13 @@ function VirtualizedTimelineRows({
     [dayGroups, leadingContent],
   );
   const previousFirstTimelineKeyRef = React.useRef<string | null>(null);
+  const [prependShiftEpoch, clearPrependShift] = React.useReducer(
+    (version: number) => version + 1,
+    0,
+  );
+  // Virtua's `shift` is a one-render instruction, not a persistent mode. If it
+  // stays true after a prepend, later measurement changes can keep anchoring
+  // from the end and leave a stale blank range until the next scroll event.
   const keys = React.useMemo(() => items.map(virtualizedItemKey), [items]);
   const firstTimelineKey = React.useMemo(() => {
     const first = items.find((item) => item.kind === "timeline-item");
@@ -404,16 +423,21 @@ function VirtualizedTimelineRows({
       : null;
   }, [items]);
   const isPrepend = React.useMemo(() => {
-    const previousFirstKey = previousFirstTimelineKeyRef.current;
-    return previousFirstKey !== null && keys.indexOf(previousFirstKey) > 0;
-  }, [keys]);
+    void prependShiftEpoch;
+    return didPrependVirtualizedTimeline(
+      previousFirstTimelineKeyRef.current,
+      firstTimelineKey,
+      keys,
+    );
+  }, [firstTimelineKey, keys, prependShiftEpoch]);
   React.useLayoutEffect(() => {
     previousFirstTimelineKeyRef.current = firstTimelineKey;
+    if (isPrepend) clearPrependShift();
     if (!hasInitialPositionedRef.current && items.length > 0) {
       hasInitialPositionedRef.current = true;
       listRef.current?.scrollToIndex(items.length - 1, { align: "end" });
     }
-  }, [firstTimelineKey, items.length]);
+  }, [firstTimelineKey, isPrepend, items.length]);
 
   const messageItemIndexById = React.useMemo(() => {
     const byId = new Map<string, number>();
