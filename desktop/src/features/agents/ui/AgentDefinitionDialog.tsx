@@ -620,13 +620,20 @@ export function AgentDefinitionDialog({
   }
 
   function handleProviderDropdownChange(nextValue: string) {
-    applySelection(
-      selectionOnProviderDropdownChange(selection, {
-        runtime,
-        nextValue,
-        clearModelWhenApiKeyMissing: true,
-      }),
-    );
+    const nextProvider =
+      nextValue === AUTO_PROVIDER_DROPDOWN_VALUE ? "" : nextValue;
+    if (nextProvider === "relay-mesh" && runtime !== "buzz-agent") {
+      handleRuntimeDropdownChange("buzz-agent");
+    }
+    const nextSelection = selectionOnProviderDropdownChange(selection, {
+      runtime: nextProvider === "relay-mesh" ? "buzz-agent" : runtime,
+      nextValue,
+      clearModelWhenApiKeyMissing: true,
+    });
+    applySelection({
+      ...nextSelection,
+      model: nextProvider === "relay-mesh" ? "auto" : nextSelection.model,
+    });
   }
 
   function handleModelDropdownChange(nextValue: string) {

@@ -258,13 +258,20 @@ export function providerRequiresExplicitModel(
   );
 }
 
+export function providerDisplayLabel(providerId: string) {
+  const trimmedProvider = providerId.trim();
+  return trimmedProvider === "relay-mesh"
+    ? "Buzz shared compute"
+    : trimmedProvider;
+}
+
 export function getDefaultLlmProviderLabel(
   _runtimeId: string,
   globalProvider?: string,
 ) {
   const trimmedGlobal = (globalProvider ?? "").trim();
   return trimmedGlobal
-    ? `Inherit global default (${trimmedGlobal})`
+    ? `Inherit global default (${providerDisplayLabel(trimmedGlobal)})`
     : "Select a provider\u2026";
 }
 

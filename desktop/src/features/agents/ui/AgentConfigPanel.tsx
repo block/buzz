@@ -25,6 +25,7 @@ import type {
   NormalizedConfig,
   NormalizedField,
 } from "@/shared/api/types";
+import { providerDisplayLabel } from "./personaDialogPickers";
 
 type Props = {
   pubkey: string;
@@ -180,10 +181,14 @@ function NormalizedRow({
   // ACP-sourced origins only become meaningful post-spawn
   const isAcpOnly =
     field.origin === "acpNativeRead" || field.origin === "acpConfigOption";
-  const displayValue =
+  const rawDisplayValue =
     isPreSpawn && isAcpOnly
       ? "Available after agent starts"
       : (field.value ?? "—");
+  const displayValue =
+    fieldKey === "provider"
+      ? providerDisplayLabel(rawDisplayValue)
+      : rawDisplayValue;
   const provenance = field.value
     ? provenanceSentence(field.origin, field.writeVia, configFilePath)
     : null;

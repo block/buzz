@@ -129,7 +129,11 @@ export function GlobalAgentConfigFields({
       onConfigChange({ ...config, provider: null });
     } else {
       onIsCustomProviderChange(false);
-      onConfigChange({ ...config, provider: value });
+      onConfigChange({
+        ...config,
+        provider: value,
+        model: value === "relay-mesh" ? config.model || "auto" : config.model,
+      });
     }
   }
 
@@ -138,7 +142,10 @@ export function GlobalAgentConfigFields({
   }
 
   function handleModelChange(value: string) {
-    onConfigChange({ ...config, model: value || null });
+    onConfigChange({
+      ...config,
+      model: config.provider === "relay-mesh" ? value || "auto" : value || null,
+    });
   }
 
   function handleEnvVarsChange(next: Record<string, string>) {
@@ -233,6 +240,7 @@ export function GlobalAgentConfigFields({
           modelDiscoveryStatus={modelDiscoveryStatus}
           onIsCustomModelEditingChange={onCustomModelEditingChange}
           onModelChange={handleModelChange}
+          provider={providerForDiscovery}
         />
         <p className="text-xs text-muted-foreground">
           Applies to all agents that don't have a per-agent model set.
