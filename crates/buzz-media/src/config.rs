@@ -112,7 +112,7 @@ impl MediaConfig {
             ("BUZZ_MEDIA_UPLOAD_PORT_HEADER", &self.upload_port_header),
         ] {
             if let Some(h) = value {
-                if h.is_empty() || !h.chars().all(|c| c.is_ascii_graphic() && c != ':') {
+                if axum::http::HeaderName::from_bytes(h.as_bytes()).is_err() {
                     return Err(format!("{name} is not a valid header name: {h:?}"));
                 }
             }
@@ -179,7 +179,7 @@ mod tests {
     fn malformed_header_names_fail_startup() {
         let mut cfg = valid_config();
         cfg.upload_records_enabled = true;
-        for bad in ["with space", "colon:name", ""] {
+        for bad in ["with space", "colon:name", "bad/header", "bad,header", ""] {
             cfg.upload_ip_header = Some(bad.to_string());
             assert!(cfg.validate().is_err(), "should reject header name {bad:?}");
         }

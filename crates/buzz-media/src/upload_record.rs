@@ -31,9 +31,10 @@
 //! The moderation pipeline triggers on `ObjectCreated` events under the
 //! `_uploads/` prefix and parses this record instead of HEADing blobs:
 //!
-//! - The record is written **last** — after blob, thumbnail, and sidecar are
-//!   durably stored — so record existence implies the blob and sidecar are
-//!   readable.
+//! - For fresh uploads, the record is written after the blob and derived
+//!   artifacts but before the sidecar serve gate. Record existence therefore
+//!   implies the scan inputs are readable, while record failure cannot leave
+//!   unscanned media publicly servable.
 //! - `ext`, `mime_type`, and `size` are always present so the consumer can
 //!   derive the blob key (`{sha256}.{ext}`) and scan eligibility without
 //!   extra round-trips.
@@ -130,13 +131,11 @@ pub struct UploadEventFacts<'a> {
 
 /// Build and store the per-event record for one accepted upload.
 ///
-/// Called **last** in the upload sequence — after blob, thumbnail, and
-/// sidecar are durably stored — on both the fresh-upload path and the
-/// idempotent short-circuit. A write failure propagates and fails the upload:
-/// the record's `ObjectCreated` event is the moderation pipeline's only scan
-/// trigger, so "upload accepted" must imply "record exists". The blob is
-/// content-addressed and durable, so a client retry lands on the idempotent
-/// path and writes a fresh record.
+/// Called after blob and derived-artifact durability but before the sidecar
+/// publish gate on fresh uploads; called on the existing published state for
+/// idempotent re-uploads. A write failure propagates and fails the upload. The
+/// record's `ObjectCreated` event is the moderation pipeline's only scan
+/// trigger, so no newly published media may exist without a record.
 pub async fn record_upload_event(
     storage: &crate::storage::MediaStorage,
     ctx: &TenantContext,
@@ -216,6 +215,8 @@ fn is_public_ip(ip: &IpAddr) -> bool {
                 || v4.is_documentation()
                 || v4.is_multicast()
                 || v4.is_unspecified()
+                // This network 0.0.0.0/8 (RFC 1122)
+                || octets[0] == 0
                 // CGNAT 100.64.0.0/10 (RFC 6598)
                 || (octets[0] == 100 && (octets[1] & 0b1100_0000) == 64)
                 // Reserved 240.0.0.0/4 (RFC 1112) — is_broadcast covers .255 only
@@ -234,8 +235,18 @@ fn is_public_ip(ip: &IpAddr) -> bool {
                 || (seg[0] & 0xFE00) == 0xFC00
                 // Link-local fe80::/10 (RFC 4291)
                 || (seg[0] & 0xFFC0) == 0xFE80
+                // Discard-only 100::/64 (RFC 6666)
+                || (seg[0] == 0x0100 && seg[1..4] == [0, 0, 0])
+                // Teredo 2001::/32 (RFC 4380)
+                || (seg[0] == 0x2001 && seg[1] == 0)
+                // Benchmarking 2001:2::/48 (RFC 5180)
+                || (seg[0] == 0x2001 && seg[1] == 2 && seg[2] == 0)
                 // Documentation 2001:db8::/32 (RFC 3849)
                 || (seg[0] == 0x2001 && seg[1] == 0x0DB8)
+                // 6to4 2002::/16 (RFC 3056)
+                || seg[0] == 0x2002
+                // Documentation 3fff::/20 (RFC 9637)
+                || (seg[0] & 0xFFF0) == 0x3FF0
                 // IPv4-mapped ::ffff:0:0/96 — the embedded v4 was already
                 // rejected above if it arrived as dotted quad; reject the
                 // mapped form outright rather than re-deriving it.
@@ -365,6 +376,7 @@ mod tests {
             "100.64.0.1",       // CGNAT
             "100.127.255.255",  // CGNAT upper edge
             "0.0.0.0",          // unspecified
+            "0.1.2.3",          // this network 0.0.0.0/8
             "255.255.255.255",  // broadcast
             "224.0.0.1",        // multicast
             "240.0.0.1",        // reserved
@@ -379,7 +391,12 @@ mod tests {
             "fc00::1",          // v6 ULA
             "fd12:3456::1",     // v6 ULA
             "ff02::1",          // v6 multicast
+            "100::1",           // v6 discard-only
+            "2001::1",          // Teredo
+            "2001:2::1",        // v6 benchmarking
             "2001:db8::1",      // v6 documentation
+            "2002::1",          // 6to4
+            "3fff::1",          // v6 documentation
             "::ffff:8.8.8.8",   // v4-mapped — reject the mapped form
             "8.8.8.8, 1.1.1.1", // comma list — not a single IP
             "8.8.8.8:443",      // ip:port — not a bare IP

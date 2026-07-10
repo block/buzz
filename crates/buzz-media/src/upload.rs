@@ -22,11 +22,11 @@ use crate::validation::{
 /// - `validate`: a CPU-bound check (run inside `spawn_blocking`) that returns
 ///   the `(mime, ext)` pair for the body. Images derive `ext` from the MIME;
 ///   generic files get both from the deny-list validator.
-/// - `store_metadata`: stores the sidecar (and any derived artifacts such as a
-///   thumbnail) and returns the resulting [`BlobMeta`]. Images run the full
-///   image-metadata pipeline; generic files write a minimal sidecar. It
-///   receives the already-computed `(sha256, ext, mime, uploaded_at)` so no
-///   work is repeated.
+/// - `prepare_metadata`: builds metadata and stores any derived artifacts such
+///   as a thumbnail, but deliberately does not write the sidecar. The sidecar
+///   is the media serve gate and is published only after the moderation record
+///   succeeds. It receives the already-computed
+///   `(sha256, ext, mime, uploaded_at)` so no work is repeated.
 ///
 /// Everything else — hash, Blossom auth (10-minute window), content-addressed
 /// key, the both-exist idempotency short-circuit, blob store, orphan-blob
@@ -36,23 +36,39 @@ use crate::validation::{
 /// `attribution` is `Some` when per-event upload records are enabled
 /// (`BUZZ_MEDIA_UPLOAD_RECORDS`): a record is then written for **every**
 /// accepted upload — including the idempotent short-circuit, which does no
-/// blob PUT and would otherwise be invisible to the moderation pipeline. The
-/// record is written last, after all other objects are durably stored.
-async fn process_buffered_upload<V, M, Fut>(
-    storage: &MediaStorage,
-    config: &MediaConfig,
-    ctx: &TenantContext,
-    auth_event: &nostr::Event,
+/// blob PUT and would otherwise be invisible to the moderation pipeline.
+/// For fresh uploads, the record is written after the blob and derived
+/// artifacts but before the sidecar. This preserves both contracts: record
+/// existence implies referenced objects are readable, while a record failure
+/// cannot publish media without triggering moderation.
+struct BufferedUploadInput<'a> {
+    storage: &'a MediaStorage,
+    config: &'a MediaConfig,
+    ctx: &'a TenantContext,
+    auth_event: &'a nostr::Event,
     body: Bytes,
     attribution: Option<UploadAttribution>,
+}
+
+async fn process_buffered_upload<V, M, Fut>(
+    input: BufferedUploadInput<'_>,
     validate: V,
-    store_metadata: M,
+    prepare_metadata: M,
 ) -> Result<BlobDescriptor, MediaError>
 where
     V: FnOnce(&Bytes, &MediaConfig) -> Result<(String, String), MediaError> + Send + 'static,
     M: FnOnce(MetadataInput) -> Fut,
     Fut: std::future::Future<Output = Result<BlobMeta, MediaError>>,
 {
+    let BufferedUploadInput {
+        storage,
+        config,
+        ctx,
+        auth_event,
+        body,
+        attribution,
+    } = input;
+
     // CPU-bound: validate content, compute hash, verify auth.
     let auth = auth_event.clone();
     let bytes = body.clone();
@@ -123,52 +139,52 @@ where
     // matching sidecar after a grace period.
     storage.put(&key, &body, &mime).await?;
 
-    let meta_result = store_metadata(MetadataInput {
+    let meta = match prepare_metadata(MetadataInput {
         sha256: sha256.clone(),
         ext: ext.clone(),
         mime: mime.clone(),
         body: body.clone(),
         uploaded_at,
     })
-    .await;
-
-    match meta_result {
-        Ok(meta) => {
-            // Per-event record LAST — blob, thumbnail, and sidecar are all
-            // durably stored, so the record's ObjectCreated event (the
-            // moderation scan trigger) implies everything it references is
-            // readable.
-            if let Some(attribution) = &attribution {
-                record_upload_event(
-                    storage,
-                    ctx,
-                    &auth_event.pubkey,
-                    attribution,
-                    UploadEventFacts {
-                        sha256: &sha256,
-                        ext: &ext,
-                        mime: &mime,
-                        size: body.len() as u64,
-                        uploaded_at,
-                    },
-                )
-                .await?;
-            }
-            Ok(build_descriptor(
-                config,
-                &sha256,
-                &ext,
-                &mime,
-                body.len() as u64,
-                Some(&meta),
-                uploaded_at,
-            ))
-        }
+    .await
+    {
+        Ok(meta) => meta,
         Err(e) => {
             tracing::warn!(sha256 = %sha256, error = %e, "metadata generation failed; orphan blob left for GC");
-            Err(e)
+            return Err(e);
         }
+    };
+
+    // The moderation record precedes the sidecar publish gate. If this write
+    // fails, the blob and any thumbnail remain orphaned but the media cannot be
+    // served. Conversely, record existence still implies those objects exist.
+    if let Some(attribution) = &attribution {
+        record_upload_event(
+            storage,
+            ctx,
+            &auth_event.pubkey,
+            attribution,
+            UploadEventFacts {
+                sha256: &sha256,
+                ext: &ext,
+                mime: &mime,
+                size: body.len() as u64,
+                uploaded_at,
+            },
+        )
+        .await?;
     }
+    storage.put_sidecar(ctx, &sha256, &meta).await?;
+
+    Ok(build_descriptor(
+        config,
+        &sha256,
+        &ext,
+        &mime,
+        body.len() as u64,
+        Some(&meta),
+        uploaded_at,
+    ))
 }
 
 /// Inputs handed to a buffered-upload metadata builder, after the shared
@@ -196,18 +212,20 @@ pub async fn process_upload(
     attribution: Option<UploadAttribution>,
 ) -> Result<BlobDescriptor, MediaError> {
     process_buffered_upload(
-        storage,
-        config,
-        ctx,
-        auth_event,
-        body,
-        attribution,
+        BufferedUploadInput {
+            storage,
+            config,
+            ctx,
+            auth_event,
+            body,
+            attribution,
+        },
         |bytes, cfg| {
             let mime = validate_content(bytes, cfg)?;
             let ext = mime_to_ext(&mime).to_string();
             Ok((mime, ext))
         },
-        |input| async move { generate_and_store_metadata(storage, config, ctx, input).await },
+        |input| async move { prepare_image_metadata(storage, config, input).await },
     )
     .await
 }
@@ -231,12 +249,14 @@ pub async fn process_file_upload(
     attribution: Option<UploadAttribution>,
 ) -> Result<BlobDescriptor, MediaError> {
     process_buffered_upload(
-        storage,
-        config,
-        ctx,
-        auth_event,
-        body,
-        attribution,
+        BufferedUploadInput {
+            storage,
+            config,
+            ctx,
+            auth_event,
+            body,
+            attribution,
+        },
         |bytes, cfg| validate_file_content(bytes, cfg),
         |input| async move {
             // Minimal sidecar — no thumbnail/dim/blurhash/duration for generic files.
@@ -250,7 +270,6 @@ pub async fn process_file_upload(
                 uploaded_at: input.uploaded_at,
                 duration_secs: None,
             };
-            storage.put_sidecar(ctx, &input.sha256, &meta).await?;
             Ok(meta)
         },
     )
@@ -447,7 +466,7 @@ pub async fn process_video_upload(
     storage.put_file(&key, &tmp_path, &mime).await?;
     drop(tmp); // Free temp file disk space immediately after S3 upload.
 
-    // --- 7. Write sidecar (no thumbnail for video — desktop handles that) ---
+    // --- 7. Build metadata (no thumbnail for video — desktop handles that) ---
     let meta = BlobMeta {
         dim: format!("{}x{}", video_meta.width, video_meta.height),
         blurhash: String::new(),
@@ -458,9 +477,8 @@ pub async fn process_video_upload(
         uploaded_at,
         duration_secs: Some(video_meta.duration_secs),
     };
-    storage.put_sidecar(ctx, &sha256_hex, &meta).await?;
 
-    // Per-event record LAST — see the buffered path for ordering rationale.
+    // Record before publishing the sidecar serve gate. See the buffered path.
     if let Some(attribution) = &attribution {
         record_upload_event(
             storage,
@@ -477,6 +495,7 @@ pub async fn process_video_upload(
         )
         .await?;
     }
+    storage.put_sidecar(ctx, &sha256_hex, &meta).await?;
 
     Ok(build_descriptor(
         config,
@@ -489,12 +508,11 @@ pub async fn process_video_upload(
     ))
 }
 
-/// Generate thumbnail, blurhash, and sidecar metadata, then store them.
+/// Generate thumbnail and metadata without publishing the sidecar serve gate.
 /// Returns the completed [`BlobMeta`] on success.
-async fn generate_and_store_metadata(
+async fn prepare_image_metadata(
     storage: &MediaStorage,
     config: &MediaConfig,
-    ctx: &TenantContext,
     input: MetadataInput,
 ) -> Result<BlobMeta, MediaError> {
     let body_ref = input.body.clone();
@@ -515,7 +533,6 @@ async fn generate_and_store_metadata(
         storage.put(&thumb_key, tb, "image/jpeg").await?;
     }
 
-    storage.put_sidecar(ctx, &input.sha256, &meta).await?;
     Ok(meta)
 }
 
