@@ -468,6 +468,23 @@ test("sends a mocked channel message", async ({ page }) => {
   await page.getByTestId("send-message").click();
 
   await expect(page.getByTestId("message-timeline")).toContainText(message);
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const row = Array.from(
+          document.querySelectorAll<HTMLElement>("[data-message-id]"),
+        ).at(-1);
+        const composer = document.querySelector<HTMLElement>(
+          '[data-testid="message-composer"]',
+        );
+        if (!row || !composer) return Number.NEGATIVE_INFINITY;
+        return (
+          composer.getBoundingClientRect().top -
+          row.getBoundingClientRect().bottom
+        );
+      }),
+    )
+    .toBeGreaterThanOrEqual(0);
 });
 
 test("supports multiline drafts with Ctrl+Enter and sends with Enter", async ({

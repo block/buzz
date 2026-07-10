@@ -269,6 +269,10 @@ const MessageTimelineBase = React.forwardRef<
   const showTimelineSkeleton = timelineBodySurface === "skeleton";
   const [isSemanticallyAtBottom, setIsSemanticallyAtBottom] =
     React.useState(true);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: reset semantic tail state when the active channel changes
+  React.useEffect(() => {
+    setIsSemanticallyAtBottom(true);
+  }, [channelId]);
   // Zulip-style data semantics: once the reader leaves the bottom, keep the
   // virtualizer's logical tail frozen. Live arrivals accumulate behind the
   // "new messages" affordance instead of changing Virtua's item model under
@@ -611,7 +615,7 @@ const MessageTimelineBase = React.forwardRef<
         </div>
       ) : activeDirectMessageIntro ? (
         <div
-          className="flex w-full flex-col items-start px-3 pb-4 pt-2 text-left"
+          className="mb-2 flex w-full flex-col items-start px-3 pb-2 pt-2 text-left"
           data-testid="message-dm-intro"
         >
           <DirectMessageIntroAvatarStack
@@ -719,17 +723,23 @@ const MessageTimelineBase = React.forwardRef<
         <div
           className={cn(
             "absolute inset-0 overflow-hidden",
-            !useTimelineVirtualizer &&
+            (!useTimelineVirtualizer || !showMessageList) &&
               cn(
                 "overflow-y-auto overflow-x-hidden overscroll-contain px-2 pt-1",
-                hasComposerOverlay ? "pb-24" : "pb-4",
+                hasComposerOverlay
+                  ? "pb-[var(--composer-overlay-height,6rem)]"
+                  : "pb-4",
               ),
           )}
           data-buzz-conversation-scroll={
-            useTimelineVirtualizer ? undefined : "true"
+            useTimelineVirtualizer && showMessageList ? undefined : "true"
           }
           data-scroll-restoration-id={scrollRestorationId}
-          data-testid={useTimelineVirtualizer ? undefined : "message-timeline"}
+          data-testid={
+            useTimelineVirtualizer && showMessageList
+              ? undefined
+              : "message-timeline"
+          }
           key={scrollContainerDomKey}
           onScroll={useTimelineVirtualizer ? undefined : onScroll}
           ref={scrollContainerRef}

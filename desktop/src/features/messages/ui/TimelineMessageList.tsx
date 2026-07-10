@@ -423,6 +423,10 @@ function VirtualizedTimelineRows({
 }: VirtualizedTimelineRowsProps) {
   const listRef = React.useRef<VListHandle>(null);
   const hostRef = React.useRef<HTMLDivElement>(null);
+  const itemsLengthRef = React.useRef(0);
+  const messageItemIndexByIdRef = React.useRef<ReadonlyMap<string, number>>(
+    new Map(),
+  );
   const [offscreenBufferSize, setOffscreenBufferSize] = React.useState(() =>
     typeof window === "undefined" ? 1_000 : window.innerHeight,
   );
@@ -432,6 +436,7 @@ function VirtualizedTimelineRows({
     () => buildVirtualizedItems(dayGroups, leadingContent),
     [dayGroups, leadingContent],
   );
+  itemsLengthRef.current = items.length;
   const previousKeysRef = React.useRef<readonly string[]>([]);
   const prependAnchorRef = React.useRef<{
     messageId: string;
@@ -590,6 +595,7 @@ function VirtualizedTimelineRows({
     });
     return byId;
   }, [items]);
+  messageItemIndexByIdRef.current = messageItemIndexById;
 
   React.useLayoutEffect(() => {
     const scroller = hostRef.current?.firstElementChild;
@@ -606,12 +612,13 @@ function VirtualizedTimelineRows({
     if (!onVirtualizerApiChange) return;
     const api: TimelineVirtualizerApi = {
       scrollToBottom() {
-        if (items.length > 0) {
-          listRef.current?.scrollToIndex(items.length - 1, { align: "end" });
+        const lastIndex = itemsLengthRef.current - 1;
+        if (lastIndex >= 0) {
+          listRef.current?.scrollToIndex(lastIndex, { align: "end" });
         }
       },
       scrollToMessage(messageId) {
-        const index = messageItemIndexById.get(messageId);
+        const index = messageItemIndexByIdRef.current.get(messageId);
         if (index === undefined) return false;
         listRef.current?.scrollToIndex(index, { align: "center" });
         return true;
@@ -619,7 +626,7 @@ function VirtualizedTimelineRows({
     };
     onVirtualizerApiChange(api);
     return () => onVirtualizerApiChange(null);
-  }, [items.length, messageItemIndexById, onVirtualizerApiChange]);
+  }, [onVirtualizerApiChange]);
 
   React.useLayoutEffect(() => {
     const host = hostRef.current;

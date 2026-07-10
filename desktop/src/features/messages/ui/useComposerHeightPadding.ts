@@ -25,16 +25,28 @@ export function useComposerHeightPadding(
       return;
     }
 
+    const getScrollElement = (): HTMLElement =>
+      mode === "css-variable"
+        ? (scrollEl.querySelector<HTMLElement>(
+            '[data-testid="message-timeline"]',
+          ) ?? scrollEl)
+        : scrollEl;
+
     const isNearBottom = (): boolean => {
+      const target = getScrollElement();
       const threshold = 32;
       return (
-        scrollEl.scrollHeight - scrollEl.scrollTop - scrollEl.clientHeight <
-        threshold
+        target.scrollHeight - target.scrollTop - target.clientHeight < threshold
       );
     };
 
     let lastPadding: number | null = null;
     let followBottomFrame: number | null = null;
+
+    const followBottom = () => {
+      const target = getScrollElement();
+      target.scrollTop = target.scrollHeight;
+    };
 
     const applyPadding = (height: number) => {
       const padding = Math.ceil(height);
@@ -56,13 +68,13 @@ export function useComposerHeightPadding(
         wasAtBottom &&
         (previousPadding === null || padding > previousPadding)
       ) {
-        scrollEl.scrollTop = scrollEl.scrollHeight;
+        followBottom();
         if (followBottomFrame !== null) {
           cancelAnimationFrame(followBottomFrame);
         }
         followBottomFrame = requestAnimationFrame(() => {
           followBottomFrame = null;
-          scrollEl.scrollTop = scrollEl.scrollHeight;
+          followBottom();
         });
       }
     };
