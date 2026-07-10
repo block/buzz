@@ -436,7 +436,7 @@ export function GlobalAgentConfigSettingsCard() {
           {saveState === "saved" && (
             <span className="flex items-center gap-1 text-sm text-green-600 dark:text-green-400">
               <Check className="size-3.5" />
-              Saved
+              Saved. Running agents keep their current settings until restarted.
             </span>
           )}
           {saveState === "error" && saveError && (
