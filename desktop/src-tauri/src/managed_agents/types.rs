@@ -236,9 +236,19 @@ pub struct ManagedAgentRecord {
     #[serde(default)]
     pub agent_command_override: Option<String>,
     pub agent_args: Vec<String>,
+    /// Create-time snapshot of the catalog MCP command. Never read at spawn —
+    /// the effective MCP command is always re-derived from the runtime catalog
+    /// (`known_acp_runtime`) — and no longer written by updates. Kept for
+    /// serde compatibility with existing stores.
     pub mcp_command: String,
+    /// Deprecated: `BUZZ_ACP_TURN_TIMEOUT` is ignored by the harness and the
+    /// desktop no longer emits or edits it. Kept for serde compatibility with
+    /// existing stores; use `idle_timeout_seconds` or
+    /// `max_turn_duration_seconds` for turn-length control.
     pub turn_timeout_seconds: u64,
-    /// Idle timeout in seconds. If set, overrides turn_timeout_seconds.
+    /// Idle timeout in seconds (`BUZZ_ACP_IDLE_TIMEOUT`): how long the agent
+    /// may stay silent on its ACP channel mid-turn before the harness times
+    /// the turn out.
     #[serde(default)]
     pub idle_timeout_seconds: Option<u64>,
     /// Absolute wall-clock cap per turn.
@@ -334,7 +344,16 @@ pub struct ManagedAgentRecord {
     /// Absorbed from `PersonaRecord.runtime` — the preferred ACP runtime ID
     /// (e.g. 'goose', 'claude'). Record-first command resolution reads this
     /// before falling back to legacy persona lookup; populated by the store
-    /// migration and at create time.
+    /// migration and at create time, and re-mirrored from the linked
+    /// definition at every snapshot apply (`apply_persona_snapshot`).
+    ///
+    /// `None` means "inherit from the linked definition" (the Inherit sentinel
+    /// clears it). Serialization then omits the key, so boot-time
+    /// `materialize_agent_runtimes` re-inserts a mirror of the definition's
+    /// current runtime on the next launch — behaviorally identical, because
+    /// every apply site re-mirrors the live definition anyway. A literal
+    /// `"runtime": null` in the store (key present, e.g. hand-edited) is
+    /// honored: materialization skips it and it deserializes to `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime: Option<String>,
     /// Pool of short thematic names for clones of this agent. Absorbed from
@@ -439,7 +458,11 @@ pub struct ManagedAgentSummary {
     /// concrete pin (`agent_command` above is the resolved/effective command).
     pub agent_command_override: Option<String>,
     pub agent_args: Vec<String>,
+    /// Catalog-derived from the effective harness (not the record's stored
+    /// field), so the UI always shows what a spawn would actually use.
     pub mcp_command: String,
+    /// Deprecated passthrough of the stored record value; the harness ignores
+    /// it. Kept for wire compatibility.
     pub turn_timeout_seconds: u64,
     pub idle_timeout_seconds: Option<u64>,
     pub max_turn_duration_seconds: Option<u64>,
