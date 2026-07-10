@@ -287,6 +287,37 @@ function setBuzzTranslucent(enabled: boolean) {
 let buzzVibrancyRequest = 0;
 
 /**
+ * Whether the native vibrancy layer is confirmed installed for a Buzz theme.
+ * Set true only after `set_window_vibrancy(true)` resolves; cleared as soon as a
+ * new vibrancy request is issued (its outcome is not yet known).
+ */
+let buzzVibrancyReady = false;
+
+/**
+ * Enable the CSS translucency treatment, but only once BOTH prerequisites for
+ * the current request are in place:
+ *
+ *  1. the native vibrancy layer is installed ({@link buzzVibrancyReady}), and
+ *  2. the Buzz sidebar marker + gradient vars are applied (`data-buzz-sidebar`,
+ *     set synchronously by {@link applyBuzzSidebar} inside {@link applyTheme}).
+ *
+ * Translucency clears the body/sidebar surfaces so the vibrancy layer shows
+ * through; enabling it before the Buzz gradient vars are installed would flash a
+ * transparent/unstyled sidebar. `applyTheme` (theme vars) and
+ * `applyBuzzVibrancy` (native layer) are independent async effects that can win
+ * their race in either order, so each calls this after its own step completes —
+ * whichever lands last flips translucency on. The token check drops stale
+ * continuations superseded by a newer theme switch.
+ */
+function maybeEnableBuzzTranslucent(themeName: string, requestToken: number) {
+  if (requestToken !== buzzVibrancyRequest) return;
+  if (!isBuzzTheme(themeName) || !isMacPlatform()) return;
+  if (!buzzVibrancyReady) return;
+  if (!document.documentElement.hasAttribute("data-buzz-sidebar")) return;
+  setBuzzTranslucent(true);
+}
+
+/**
  * Sequence the native vibrancy layer and the CSS translucency so they land in
  * the right order and never leave a transparent webview with nothing painted
  * behind it:
@@ -307,6 +338,9 @@ let buzzVibrancyRequest = 0;
 async function applyBuzzVibrancy(themeName: string) {
   const buzz = isBuzzTheme(themeName);
   const requestToken = ++buzzVibrancyRequest;
+  // A new request is in flight — the vibrancy layer's readiness for it is not
+  // yet known, so any stale "ready" from a prior request must not gate this one.
+  buzzVibrancyReady = false;
 
   if (!isTauri()) {
     // Web/dev preview: no native vibrancy layer exists, so translucency would
@@ -323,9 +357,13 @@ async function applyBuzzVibrancy(themeName: string) {
     // A newer theme change superseded this request while the IPC was in flight;
     // that later call owns the current translucency state, so don't clobber it.
     if (requestToken !== buzzVibrancyRequest) return;
-    // Only now that the native layer is installed is it safe to go transparent.
+    // Native layer is installed. Record readiness and try to enable translucency
+    // — but only if `applyBuzzSidebar` has already installed the Buzz gradient
+    // vars. If that effect hasn't landed yet (the IPC won the race), it will
+    // call maybeEnableBuzzTranslucent itself once the marker is applied.
     if (buzz && isMacPlatform()) {
-      setBuzzTranslucent(true);
+      buzzVibrancyReady = true;
+      maybeEnableBuzzTranslucent(themeName, requestToken);
     }
   } catch (error) {
     console.warn("set_window_vibrancy failed", error);
@@ -377,6 +415,12 @@ async function applyTheme(name: SyntaxThemeName): Promise<{ isDark: boolean }> {
   root.classList.remove("light", "dark");
   root.classList.add(isDark ? "dark" : "light");
   applyBuzzSidebar(name);
+  // The Buzz gradient vars are now installed. If the vibrancy layer already
+  // resolved for the current request (the IPC won the race against this theme
+  // load), enable translucency now — otherwise applyBuzzVibrancy does it. This
+  // is the second half of the two-effect handshake; the token guards against a
+  // superseding theme switch.
+  maybeEnableBuzzTranslucent(name, buzzVibrancyRequest);
 
   // Apply the accent synchronously in the same batch as the theme vars so the
   // browser paints the new theme + accent together. Doing this in a later
