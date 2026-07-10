@@ -265,6 +265,49 @@ fn update_request_mcp_command_roundtrips_for_wire_compat() {
 }
 
 #[test]
+fn update_request_turn_timeout_roundtrips_for_wire_compat() {
+    // UpdateManagedAgentRequest accepts turnTimeoutSeconds for backward-compatibility
+    // with frontends that still send it. The field must parse cleanly but the
+    // patching loop in update_managed_agent has no arm for it — the stored value
+    // is never updated. This test guards that invariant.
+    let req: crate::managed_agents::UpdateManagedAgentRequest =
+        serde_json::from_str(r#"{"pubkey": "abc", "turnTimeoutSeconds": 9999}"#)
+            .expect("request with deprecated turnTimeoutSeconds parses");
+    assert_eq!(req.turn_timeout_seconds, Some(9999));
+
+    // Construct a record whose turn_timeout_seconds differs from the request value.
+    let record: crate::managed_agents::ManagedAgentRecord = serde_json::from_str(
+        r#"{
+            "pubkey": "abc",
+            "name": "test-agent",
+            "relay_url": "",
+            "acp_command": "buzz-acp",
+            "agent_command": "goose",
+            "agent_args": [],
+            "mcp_command": "",
+            "turn_timeout_seconds": 320,
+            "parallelism": 1,
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:00Z",
+            "last_started_at": null,
+            "last_stopped_at": null,
+            "last_exit_code": null,
+            "last_error": null
+        }"#,
+    )
+    .expect("record parses");
+
+    // After update_managed_agent (which has no turn_timeout_seconds arm), the
+    // stored value stays at 320 — not the user-supplied 9999. BUZZ_ACP_TURN_TIMEOUT
+    // is deprecated and ignored by the harness; the knob is intentionally removed.
+    assert_eq!(record.turn_timeout_seconds, 320);
+    assert_ne!(
+        record.turn_timeout_seconds,
+        req.turn_timeout_seconds.unwrap_or(0)
+    );
+}
+
+#[test]
 fn is_databricks_provider_matches_both_variants() {
     assert!(is_databricks_provider(Some("databricks")));
     assert!(is_databricks_provider(Some("databricks_v2")));

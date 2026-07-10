@@ -839,9 +839,9 @@ pub async fn update_managed_agent(
         if let Some(parallelism) = input.parallelism {
             record.parallelism = parallelism;
         }
-        if let Some(turn_timeout_seconds) = input.turn_timeout_seconds {
-            record.turn_timeout_seconds = turn_timeout_seconds;
-        }
+        // turn_timeout_seconds is intentionally not applied here —
+        // BUZZ_ACP_TURN_TIMEOUT is deprecated and ignored by the harness.
+        // Use idle_timeout_seconds or max_turn_duration_seconds instead.
         // Store the relay override exactly as supplied (trimmed). An explicit
         // value pins the agent; empty falls back to the workspace relay at
         // read-time. A name-only edit (relay_url == None) leaves the pin intact.
