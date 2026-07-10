@@ -461,6 +461,41 @@ test.describe("list virtualization", () => {
       expect(bottomDistance).toBeGreaterThan(
         await timeline.evaluate((element) => element.clientHeight),
       );
+
+      // Leave the boundary with real downward wheel input while this prepend's
+      // three-second semantic-anchor watcher is still alive. The watcher belongs
+      // only to the completed prepend: it must not reinterpret this deliberate
+      // reader movement as row drift and pull the viewport back toward its stale
+      // baseline before the next upward load.
+      const exitTracePromise = timeline.evaluate(async (scroller) => {
+        const s = scroller as HTMLElement;
+        const startScrollTop = s.scrollTop;
+        let previousScrollTop = startScrollTop;
+        let maxForwardTravel = 0;
+        let maxRollback = 0;
+        const deadline = performance.now() + 400;
+        while (performance.now() < deadline) {
+          const travel = s.scrollTop - startScrollTop;
+          maxForwardTravel = Math.max(maxForwardTravel, travel);
+          maxRollback = Math.max(maxRollback, previousScrollTop - s.scrollTop);
+          previousScrollTop = s.scrollTop;
+          await new Promise((resolve) => requestAnimationFrame(resolve));
+        }
+        return { maxForwardTravel, maxRollback };
+      });
+      const exitBox = await timeline.boundingBox();
+      if (!exitBox) throw new Error("timeline has no bounding box");
+      await page.mouse.move(
+        exitBox.x + exitBox.width / 2,
+        exitBox.y + exitBox.height / 2,
+      );
+      for (const deltaY of [120, 100, 80]) {
+        await page.mouse.wheel(0, deltaY);
+        await page.waitForTimeout(12);
+      }
+      const exitTrace = await exitTracePromise;
+      expect(exitTrace.maxForwardTravel).toBeGreaterThan(200);
+      expect(exitTrace.maxRollback).toBeLessThan(5);
     }
   });
 });

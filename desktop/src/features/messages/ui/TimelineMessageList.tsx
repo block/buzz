@@ -440,6 +440,14 @@ function VirtualizedTimelineRows({
     );
   }, [firstTimelineKey, keys, prependShiftEpoch]);
 
+  const retirePrependAnchor = React.useCallback(() => {
+    if (prependWatcherFrameRef.current !== null) {
+      cancelAnimationFrame(prependWatcherFrameRef.current);
+    }
+    prependWatcherFrameRef.current = null;
+    prependAnchorRef.current = null;
+  }, []);
+
   const capturePrependAnchor = React.useCallback(() => {
     // Keep the pending capture current while the fetch is in flight. Once the
     // prepend commits and the watcher starts, its baseline is frozen.
@@ -526,25 +534,15 @@ function VirtualizedTimelineRows({
         atBottom ||
         (top !== null && top > scroller.clientHeight * 2);
       if (retired) {
-        prependWatcherFrameRef.current = null;
-        prependAnchorRef.current = null;
+        retirePrependAnchor();
         return;
       }
       prependWatcherFrameRef.current = requestAnimationFrame(watch);
     };
     prependWatcherFrameRef.current = requestAnimationFrame(watch);
-  }, [isPrepend]);
+  }, [isPrepend, retirePrependAnchor]);
 
-  React.useEffect(
-    () => () => {
-      if (prependWatcherFrameRef.current !== null) {
-        cancelAnimationFrame(prependWatcherFrameRef.current);
-      }
-      prependWatcherFrameRef.current = null;
-      prependAnchorRef.current = null;
-    },
-    [],
-  );
+  React.useEffect(() => () => retirePrependAnchor(), [retirePrependAnchor]);
 
   React.useLayoutEffect(() => {
     previousFirstTimelineKeyRef.current = firstTimelineKey;
@@ -650,6 +648,12 @@ function VirtualizedTimelineRows({
       onAtBottomStateChange?.(
         list.scrollSize - list.viewportSize - offset <= 32,
       );
+      if (offset > 200 && prependWatcherFrameRef.current !== null) {
+        // The reader has deliberately left the page boundary. A watcher from
+        // the previous prepend must not carry its old row baseline into the
+        // next trip to the edge and pull that later viewport back down.
+        retirePrependAnchor();
+      }
       if (prependAnchorRef.current !== null || offset <= 200) {
         capturePrependAnchor();
       }
@@ -667,6 +671,7 @@ function VirtualizedTimelineRows({
       onAtBottomStateChange,
       onStartReached,
       onVirtualizerRangeChanged,
+      retirePrependAnchor,
     ],
   );
 
