@@ -121,9 +121,9 @@ export function LifecycleActivity(props: ActivityRenderClassItemProps) {
   return (
     <ActivityRow testId="transcript-lifecycle-item" title={timestampTitle}>
       <ActivityRowLabel
-        object={[props.item.title, props.item.text].filter(Boolean).join(" · ")}
+        object={props.item.text || undefined}
         openToneScope="none"
-        verb="Status"
+        verb={props.item.title}
       />
     </ActivityRow>
   );
