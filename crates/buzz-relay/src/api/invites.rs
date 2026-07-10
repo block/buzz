@@ -263,9 +263,9 @@ mod tests {
     struct AlwaysFreshReplayGuard;
 
     impl buzz_auth::Nip98ReplayGuard for AlwaysFreshReplayGuard {
-        fn try_mark<'a>(
+        fn try_mark_in_scope<'a>(
             &'a self,
-            _ctx: &'a buzz_core::TenantContext,
+            _scope: &'a str,
             _event_id: &'a nostr::EventId,
             _ttl_secs: u64,
         ) -> std::pin::Pin<
