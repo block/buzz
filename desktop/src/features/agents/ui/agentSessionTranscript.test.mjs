@@ -1340,8 +1340,12 @@ test("buildTranscript restart sequence: system-prompt renders after session-boun
   //   2. Grouping: splitIntoSessionRuns pending-buffer re-anchors the
   //      stale-stamped tail item into the new session run's head.
   //
-  // Final display order must be: boundary < system-prompt < sess-2 activity.
+  // Final display order must be: boundary < system-prompt < user-prompt < sess-2 activity.
+  // The session/prompt:user event mirrors production (a restart is triggered by
+  // a user @mention; the screenshot that surfaced the bug shows exactly this).
   const CH = "33333333-3333-3333-3333-333333333333";
+  const AUTHOR_HEX = "c".repeat(64);
+  const USER_EVENT_HEX = "e".repeat(64);
 
   const sess1Events = [
     // sess-1 turn_started
@@ -1455,9 +1459,34 @@ test("buildTranscript restart sequence: system-prompt renders after session-boun
       turnId: "turn-2",
       payload: { sessionId: "sess-2", isNewSession: true },
     },
-    // sess-2 activity
+    // sess-2 user @mention prompt (production shape: a restart is triggered by
+    // a user message; this is what surfaced the original bug in the screenshot).
     {
       seq: 8,
+      timestamp: "2026-07-01T11:00:00.300Z",
+      kind: "acp_write",
+      agentIndex: 0,
+      channelId: CH,
+      sessionId: "sess-2",
+      turnId: "turn-2",
+      payload: {
+        jsonrpc: "2.0",
+        id: 3,
+        method: "session/prompt",
+        params: {
+          sessionId: "sess-2",
+          prompt: [
+            {
+              type: "text",
+              text: `[Buzz event: @mention]\nEvent ID: ${USER_EVENT_HEX.toUpperCase()}\nFrom: Will (hex: ${AUTHOR_HEX})\nContent: @Paul status check? I had to restart`,
+            },
+          ],
+        },
+      },
+    },
+    // sess-2 activity
+    {
+      seq: 9,
       timestamp: "2026-07-01T11:00:01.000Z",
       kind: "acp_read",
       agentIndex: 0,
@@ -1495,8 +1524,9 @@ test("buildTranscript restart sequence: system-prompt renders after session-boun
 
   const boundaryIdx = blocks.indexOf(boundaryBlocks[0]);
 
-  // (b) The system-prompt block (single or in a turn's prompt bundle) must
-  // appear AFTER the boundary — not before it.
+  // (b) The system-prompt must appear AFTER the boundary — not before it.
+  // Production path: system-prompt rides in the prompt bundle of the turn that
+  // carries the user @mention (acpSource "session/new" in the prompt segment).
   const systemPromptBlockIdx = blocks.findIndex(
     (b) =>
       (b.kind === "single" && b.item?.acpSource === "session/new") ||
@@ -1516,7 +1546,11 @@ test("buildTranscript restart sequence: system-prompt renders after session-boun
     `boundary (idx ${boundaryIdx}) must precede system-prompt (idx ${systemPromptBlockIdx})`,
   );
 
-  // (c) sess-2 activity must appear after the boundary.
+  // (c) sess-2 activity must appear AFTER both boundary AND system-prompt.
+  // This pins the full required order: boundary → system-prompt → activity.
+  // Because session/prompt:user is present, the system-prompt rides inside the
+  // prompt bundle of the same turn as the tool activity — they share the same
+  // block. Use flat item order to assert system-prompt precedes activity.
   const flat = flattenDisplayBlocks(blocks);
   const sess2ActivityItem = flat.find(
     (i) => i.type === "tool" && i.sessionId === "sess-2",
@@ -1533,5 +1567,21 @@ test("buildTranscript restart sequence: system-prompt renders after session-boun
   assert.ok(
     boundaryIdx < sess2BlockIdx,
     `boundary (idx ${boundaryIdx}) must precede sess-2 activity (idx ${sess2BlockIdx})`,
+  );
+  // system-prompt and tool activity may be in the same turn block (prompt bundle
+  // + activity segment). Assert ordering via flat item indices.
+  const flatSystemPromptIdx = flat.findIndex(
+    (i) => i.acpSource === "session/new",
+  );
+  const flatSess2ActivityIdx = flat.findIndex(
+    (i) => i.type === "tool" && i.sessionId === "sess-2",
+  );
+  assert.ok(
+    flatSystemPromptIdx !== -1,
+    "system-prompt must appear in flattened output",
+  );
+  assert.ok(
+    flatSystemPromptIdx < flatSess2ActivityIdx,
+    `system-prompt (flat idx ${flatSystemPromptIdx}) must precede sess-2 activity (flat idx ${flatSess2ActivityIdx})`,
   );
 });

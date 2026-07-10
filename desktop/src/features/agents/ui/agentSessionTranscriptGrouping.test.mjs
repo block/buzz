@@ -1269,3 +1269,62 @@ test("buildTranscriptDisplayBlocks_sessionNewNoFollowingSession_notDropped", () 
     "toolA must be present when session/new has no following new session",
   );
 });
+
+// --- no-user-prompt ordering: system-prompt leads turns in the same run ─────
+
+test("splitIntoSessionRuns: system-prompt renders before turn blocks when no user-prompt follows", () => {
+  // Covers buildBlocksForRun's no-user-prompt branch: when session/new is
+  // followed by a tool turn but no session/prompt:user, the system-prompt must
+  // appear as a standalone block BEFORE the turn (boundary → prompt → activity),
+  // not appended after all turns (the old behaviour).
+  const ts1 = "2026-07-08T12:00:00.000Z";
+  const ts2 = "2026-07-08T12:01:00.000Z";
+  const ts3 = "2026-07-08T12:02:00.000Z";
+  const items = [
+    // A preceding tool item establishes run sess-1 so a boundary is emitted.
+    { ...sessionItem("toolA", "sess-1", ts1), turnId: "turn-1" },
+    // system/new repositioned to tail (stale sess-1 stamp) — represents the
+    // restart marker after the normalizer's reposition-on-refire fix.
+    systemPromptItem("system-prompt", "sess-1", ts2),
+    // New run's tool item (no user prompt in turn-2).
+    { ...sessionItem("toolB", "sess-2", ts3), turnId: "turn-2" },
+  ];
+
+  const blocks = buildTranscriptDisplayBlocks(items);
+
+  // One boundary between the two sessions.
+  const boundaryBlocks = blocks.filter((b) => b.kind === "session-boundary");
+  assert.equal(boundaryBlocks.length, 1, "exactly one boundary");
+
+  const boundaryIdx = blocks.indexOf(boundaryBlocks[0]);
+
+  const systemPromptIdx = blocks.findIndex(
+    (b) => b.kind === "single" && b.item?.id === "system-prompt",
+  );
+  assert.ok(systemPromptIdx !== -1, "system-prompt block must be present");
+
+  const toolBIdx = blocks.findIndex((b) =>
+    flattenDisplayBlocks([b]).some((i) => i.id === "toolB"),
+  );
+  assert.ok(toolBIdx !== -1, "toolB block must be present");
+
+  // Required order: boundary → system-prompt → toolB activity.
+  assert.ok(
+    boundaryIdx < systemPromptIdx,
+    `boundary (${boundaryIdx}) must precede system-prompt (${systemPromptIdx})`,
+  );
+  assert.ok(
+    systemPromptIdx < toolBIdx,
+    `system-prompt (${systemPromptIdx}) must precede toolB activity (${toolBIdx})`,
+  );
+
+  // toolA (sess-1) must appear before the boundary.
+  const toolAIdx = blocks.findIndex((b) =>
+    flattenDisplayBlocks([b]).some((i) => i.id === "toolA"),
+  );
+  assert.ok(toolAIdx !== -1, "toolA block must be present");
+  assert.ok(
+    toolAIdx < boundaryIdx,
+    `toolA (${toolAIdx}) must be before boundary (${boundaryIdx})`,
+  );
+});

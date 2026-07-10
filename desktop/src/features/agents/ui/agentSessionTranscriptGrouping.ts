@@ -632,19 +632,29 @@ function buildBlocksForRun(
       continue;
     }
 
-    // Inject system-prompt into the first turn that has a user-prompt item.
-    // On subsequent turns, system-prompt stays null (session/new doesn't re-fire).
+    // Inject system-prompt into the first turn that has a user-prompt item
+    // (it surfaces in the prompt bundle before user/context/activity).
+    // If the turn has no user prompt, emit the system-prompt as a standalone
+    // block BEFORE the turn so it always leads the session regardless of
+    // whether a user prompt is present.
     let systemPromptForTurn: Extract<
       TranscriptItem,
       { type: "metadata" }
     > | null = null;
     if (
       pendingSystemPrompt &&
-      !consumedSystemPrompts.has(pendingSystemPrompt.id) &&
-      bucket.items.some(isUserPrompt)
+      !consumedSystemPrompts.has(pendingSystemPrompt.id)
     ) {
-      systemPromptForTurn = pendingSystemPrompt;
-      consumedSystemPrompts.add(pendingSystemPrompt.id);
+      if (bucket.items.some(isUserPrompt)) {
+        // Consume into the prompt bundle.
+        systemPromptForTurn = pendingSystemPrompt;
+        consumedSystemPrompts.add(pendingSystemPrompt.id);
+      } else {
+        // No user prompt in this turn — emit standalone before the turn block
+        // so the system prompt leads the session (boundary → prompt → activity).
+        blocks.push({ kind: "single", item: pendingSystemPrompt });
+        consumedSystemPrompts.add(pendingSystemPrompt.id);
+      }
     }
 
     const segments = classifyTurnItems(bucket.items, systemPromptForTurn);
@@ -657,9 +667,9 @@ function buildBlocksForRun(
     }
   }
 
-  // If system-prompt was never consumed (no session/prompt followed — e.g.
-  // session/new arrived without a subsequent turn, or the stream is still
-  // incomplete), emit it as a standalone single so it remains visible.
+  // If system-prompt was never consumed (session/new arrived without any
+  // subsequent turn — stream still incomplete or mid-restart), emit it as a
+  // standalone single so it remains visible and is not silently dropped.
   if (
     pendingSystemPrompt &&
     !consumedSystemPrompts.has(pendingSystemPrompt.id)
