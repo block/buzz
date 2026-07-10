@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 
 use super::{
-    resolve_effective_model_provider, strip_empty_env_vars, validate_global_config,
-    GlobalAgentConfig,
+    normalize_global_config_fields, resolve_effective_model_provider, strip_empty_env_vars,
+    validate_global_config, GlobalAgentConfig,
 };
 use crate::managed_agents::{BackendKind, ManagedAgentRecord, PersonaRecord, RespondTo};
 
@@ -85,6 +85,146 @@ fn validate_ignores_empty_values_for_reserved_key_check() {
         validate_global_config(&config).is_ok(),
         "empty value for reserved key should be treated as unset"
     );
+}
+
+// ── validate_global_config: provider/model field rules ───────────────────────
+
+#[test]
+fn validate_rejects_provider_with_nul_byte() {
+    let config = GlobalAgentConfig {
+        provider: Some("anthropic\0evil".to_string()),
+        ..Default::default()
+    };
+    let err = validate_global_config(&config).unwrap_err();
+    assert!(
+        err.contains("provider") && err.contains("NUL"),
+        "expected NUL-byte error for provider, got: {err}"
+    );
+}
+
+#[test]
+fn validate_rejects_model_with_nul_byte() {
+    let config = GlobalAgentConfig {
+        model: Some("claude-opus-4\0evil".to_string()),
+        ..Default::default()
+    };
+    let err = validate_global_config(&config).unwrap_err();
+    assert!(
+        err.contains("model") && err.contains("NUL"),
+        "expected NUL-byte error for model, got: {err}"
+    );
+}
+
+#[test]
+fn validate_rejects_provider_exceeding_size_cap() {
+    use crate::managed_agents::env_vars::MAX_ENV_VALUE_BYTES;
+    let config = GlobalAgentConfig {
+        provider: Some("x".repeat(MAX_ENV_VALUE_BYTES + 1)),
+        ..Default::default()
+    };
+    let err = validate_global_config(&config).unwrap_err();
+    assert!(
+        err.contains("provider") && err.contains("maximum allowed length"),
+        "expected size-cap error for provider, got: {err}"
+    );
+}
+
+#[test]
+fn validate_rejects_model_exceeding_size_cap() {
+    use crate::managed_agents::env_vars::MAX_ENV_VALUE_BYTES;
+    let config = GlobalAgentConfig {
+        model: Some("x".repeat(MAX_ENV_VALUE_BYTES + 1)),
+        ..Default::default()
+    };
+    let err = validate_global_config(&config).unwrap_err();
+    assert!(
+        err.contains("model") && err.contains("maximum allowed length"),
+        "expected size-cap error for model, got: {err}"
+    );
+}
+
+#[test]
+fn validate_accepts_valid_provider_and_model() {
+    let config = GlobalAgentConfig {
+        provider: Some("anthropic".to_string()),
+        model: Some("claude-opus-4-5".to_string()),
+        ..Default::default()
+    };
+    assert!(validate_global_config(&config).is_ok());
+}
+
+// ── normalize_global_config_fields ───────────────────────────────────────────
+
+#[test]
+fn normalize_some_empty_provider_becomes_none() {
+    let mut config = GlobalAgentConfig {
+        provider: Some("".to_string()),
+        ..Default::default()
+    };
+    normalize_global_config_fields(&mut config);
+    assert!(
+        config.provider.is_none(),
+        "Some(\"\") provider must be normalized to None"
+    );
+}
+
+#[test]
+fn normalize_whitespace_only_provider_becomes_none() {
+    let mut config = GlobalAgentConfig {
+        provider: Some("   ".to_string()),
+        ..Default::default()
+    };
+    normalize_global_config_fields(&mut config);
+    assert!(
+        config.provider.is_none(),
+        "whitespace-only provider must be normalized to None"
+    );
+}
+
+#[test]
+fn normalize_some_empty_model_becomes_none() {
+    let mut config = GlobalAgentConfig {
+        model: Some("".to_string()),
+        ..Default::default()
+    };
+    normalize_global_config_fields(&mut config);
+    assert!(
+        config.model.is_none(),
+        "Some(\"\") model must be normalized to None"
+    );
+}
+
+#[test]
+fn normalize_whitespace_only_model_becomes_none() {
+    let mut config = GlobalAgentConfig {
+        model: Some("  \t ".to_string()),
+        ..Default::default()
+    };
+    normalize_global_config_fields(&mut config);
+    assert!(
+        config.model.is_none(),
+        "whitespace-only model must be normalized to None"
+    );
+}
+
+#[test]
+fn normalize_valid_provider_and_model_unchanged() {
+    let mut config = GlobalAgentConfig {
+        provider: Some("anthropic".to_string()),
+        model: Some("claude-opus-4-5".to_string()),
+        ..Default::default()
+    };
+    normalize_global_config_fields(&mut config);
+    assert_eq!(config.provider.as_deref(), Some("anthropic"));
+    assert_eq!(config.model.as_deref(), Some("claude-opus-4-5"));
+}
+
+#[test]
+fn normalize_none_fields_stay_none() {
+    let mut config = GlobalAgentConfig::default();
+    normalize_global_config_fields(&mut config);
+    assert!(config.provider.is_none());
+    assert!(config.model.is_none());
 }
 
 // ── strip_empty_env_vars ──────────────────────────────────────────────────────

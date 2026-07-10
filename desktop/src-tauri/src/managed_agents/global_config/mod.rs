@@ -26,7 +26,9 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use tauri::AppHandle;
 
-use crate::managed_agents::env_vars::{validate_user_env_keys, DERIVED_PROVIDER_MODEL_ENV_KEYS};
+use crate::managed_agents::env_vars::{
+    validate_user_env_keys, DERIVED_PROVIDER_MODEL_ENV_KEYS, MAX_ENV_VALUE_BYTES,
+};
 use crate::managed_agents::storage::{atomic_write_json_restricted, managed_agents_base_dir};
 use crate::managed_agents::types::{ManagedAgentRecord, PersonaRecord};
 
@@ -72,6 +74,13 @@ pub struct GlobalAgentConfig {
 ///   must use the structured fields instead.
 /// - Empty per-key values are stripped before validation so a caller that
 ///   passes `KEY=""` does not accidentally shadow a real global value.
+///
+/// `provider` and `model` rules (applied to `Some` values only):
+/// - Interior NUL bytes are rejected (they truncate C-string env injection).
+/// - Values exceeding [`MAX_ENV_VALUE_BYTES`] are rejected.
+/// - Blank / whitespace-only values are normalized to `None` by
+///   [`normalize_global_config_fields`], which must be called before
+///   persisting (done inside [`save_global_agent_config`]).
 pub fn validate_global_config(config: &GlobalAgentConfig) -> Result<(), String> {
     // Strip empty values first — they mean "inherit" and must not be stored.
     let non_empty: BTreeMap<String, String> = config
@@ -102,6 +111,28 @@ pub fn validate_global_config(config: &GlobalAgentConfig) -> Result<(), String> 
         ));
     }
 
+    // Validate the structured provider and model fields.
+    for (field, value) in [("provider", &config.provider), ("model", &config.model)] {
+        if let Some(v) = value {
+            // Reject interior NUL bytes — they truncate C-string env injection.
+            if v.contains('\0') {
+                return Err(format!(
+                    "global config `{field}` must not contain NUL bytes"
+                ));
+            }
+            // Size cap: match the per-value env-var cap.
+            if v.len() > MAX_ENV_VALUE_BYTES {
+                return Err(format!(
+                    "global config `{field}` exceeds the maximum allowed length \
+                     ({} bytes)",
+                    MAX_ENV_VALUE_BYTES
+                ));
+            }
+            // Note: blank/whitespace-only values are normalized to None by
+            // normalize_global_config_fields, called from save_global_agent_config.
+        }
+    }
+
     Ok(())
 }
 
@@ -112,6 +143,28 @@ pub fn validate_global_config(config: &GlobalAgentConfig) -> Result<(), String> 
 /// caller that clears a row cannot accidentally shadow global.
 pub fn strip_empty_env_vars(config: &mut GlobalAgentConfig) {
     config.env_vars.retain(|_, v| !v.is_empty());
+}
+
+/// Normalize `provider` and `model` to `None` when blank or whitespace-only.
+///
+/// `Some("")` and `Some("  ")` have no meaningful value and break
+/// unset/fallback semantics (a blank provider would be treated as "provider
+/// explicitly set to nothing" rather than "inherit"). Normalizing to `None`
+/// preserves the invariant that `Some(s)` always contains a non-blank string.
+///
+/// Called from [`save_global_agent_config`] so normalization is applied at
+/// every persist boundary.
+pub fn normalize_global_config_fields(config: &mut GlobalAgentConfig) {
+    if let Some(v) = &config.provider {
+        if v.trim().is_empty() {
+            config.provider = None;
+        }
+    }
+    if let Some(v) = &config.model {
+        if v.trim().is_empty() {
+            config.model = None;
+        }
+    }
 }
 
 fn global_config_path(app: &AppHandle) -> Result<std::path::PathBuf, String> {
@@ -133,11 +186,13 @@ pub fn load_global_agent_config(app: &AppHandle) -> Result<GlobalAgentConfig, St
 
 /// Save the global agent config to disk.
 ///
-/// Strips empty env values before writing (empty = "inherit" semantics).
+/// Strips empty env values and normalizes blank provider/model to `None`
+/// before writing (empty = "inherit" semantics).
 /// Written `0o600` — same protection as `managed-agents.json`.
 pub fn save_global_agent_config(app: &AppHandle, config: &GlobalAgentConfig) -> Result<(), String> {
     let mut config = config.clone();
     strip_empty_env_vars(&mut config);
+    normalize_global_config_fields(&mut config);
 
     let path = global_config_path(app)?;
     let payload = serde_json::to_vec_pretty(&config)
