@@ -70,24 +70,30 @@ impl ThinkingEffort {
     }
 }
 
-/// Strip Databricks catalog gateway prefixes from a model name so that family classifiers
+/// Strip any endpoint-naming prefix from a model name so the family classifiers
 /// (`is_manual_budget_model`, `is_adaptive_thinking_model`, etc.) can match on the canonical
 /// `claude-*` form regardless of how the model is stored in the Databricks catalog.
 ///
-/// Known catalog prefixes:
-/// - `databricks-` — standard Databricks-proxied model name (e.g. `databricks-claude-fable-5`)
-/// - `goose-` — Goose/Block catalog prefix (e.g. `goose-claude-fable-5`)
+/// Rather than maintaining an allowlist of known prefixes, this function finds the first
+/// occurrence of a known model-family token (`claude-`, `gpt-`) and drops everything before
+/// it. This handles any endpoint naming convention without needing to enumerate prefixes.
 ///
-/// If neither prefix is present the name is returned unchanged.
-/// If both are present (not currently observed), `databricks-` is stripped first.
+/// Examples:
+/// - `databricks-claude-fable-5`  → `claude-fable-5`
+/// - `goose-claude-fable-5`       → `claude-fable-5`
+/// - `team-x-claude-opus-4-7`     → `claude-opus-4-7`
+/// - `goose-gpt-5.5`              → `gpt-5.5`
+/// - `llama-3`                    → `llama-3` (no family token, returned unchanged)
+///
+/// If no family token is present the name is returned unchanged.
 fn strip_catalog_prefix(model: &str) -> &str {
-    if let Some(rest) = model.strip_prefix("databricks-") {
-        return rest;
+    const FAMILY_TOKENS: &[&str] = &["claude-", "gpt-"];
+    let lower = model.to_ascii_lowercase();
+    let first_idx = FAMILY_TOKENS.iter().filter_map(|tok| lower.find(tok)).min();
+    match first_idx {
+        Some(idx) => &model[idx..],
+        None => model,
     }
-    if let Some(rest) = model.strip_prefix("goose-") {
-        return rest;
-    }
-    model
 }
 
 /// Build the Anthropic thinking/effort request fields for the given model and effort level.
@@ -110,9 +116,9 @@ fn strip_catalog_prefix(model: &str) -> &str {
 /// **Everything else** — omit both fields. This includes unknown/future `claude-*` names
 /// not yet in the support table. Safer to omit than to guess an unverified shape.
 ///
-/// The Databricks `databricks-` and Goose catalog `goose-` prefixes are stripped before
-/// matching so that `databricks-claude-opus-4-7` and `goose-claude-fable-5` both route
-/// to the correct bucket. See `strip_catalog_prefix` for the full prefix list.
+/// The Databricks `databricks-` and other endpoint-naming prefixes are stripped before
+/// matching so that `databricks-claude-opus-4-7`, `goose-claude-fable-5`, and
+/// `team-x-claude-opus-4-7` all route to the correct bucket. See `strip_catalog_prefix`.
 ///
 /// Returns `(thinking_field, output_config_field)` where each is `None` if not applicable.
 pub fn anthropic_thinking_config(
@@ -121,9 +127,10 @@ pub fn anthropic_thinking_config(
     max_output_tokens: u32,
 ) -> (Option<serde_json::Value>, Option<serde_json::Value>) {
     use serde_json::json;
-    // Normalise the model name for matching: strip Databricks/catalog gateway prefixes
+    // Normalise the model name for matching: strip any endpoint-naming prefix
     // (e.g. "databricks-claude-opus-4-7" → "claude-opus-4-7",
-    //       "goose-claude-fable-5"        → "claude-fable-5").
+    //       "goose-claude-fable-5"        → "claude-fable-5",
+    //       "team-x-claude-opus-4-7"      → "claude-opus-4-7").
     let model = strip_catalog_prefix(effective_model);
 
     if is_manual_budget_model(model) {
@@ -1631,6 +1638,20 @@ mod tests {
         assert_eq!(oc["effort"], "xhigh");
     }
 
+    #[test]
+    fn anthropic_thinking_config_arbitrary_prefix_stripped_for_opus_4_7() {
+        // team-x-claude-opus-4-7: first claude- token at index 7 → strips "team-x-"
+        // Verifies the arbitrary-prefix normalization reaches anthropic_thinking_config
+        // end-to-end: UI exposes max as valid, and runtime must honor it.
+        let (thinking, output_config) =
+            anthropic_thinking_config("team-x-claude-opus-4-7", ThinkingEffort::Max, 32_768);
+        let t =
+            thinking.expect("thinking:{type:adaptive} must be present for team-x-claude-opus-4-7");
+        assert_eq!(t["type"], "adaptive");
+        let oc = output_config.expect("output_config must be present for team-x-claude-opus-4-7");
+        assert_eq!(oc["effort"], "max");
+    }
+
     // ---- clamp_adaptive_effort — per-model clamping tests ----
 
     #[test]
@@ -2499,16 +2520,19 @@ mod tests {
         const GPT5_1: &[&str] = &["none", "low", "medium", "high"];
 
         let p = provider.to_ascii_lowercase();
-        // Strip Databricks/catalog gateway prefixes before model matching, mirroring TS
-        // (strip_catalog_prefix in config.rs handles databricks- and goose-).
+        // Strip arbitrary endpoint-naming prefix before model matching, mirroring TS and
+        // strip_catalog_prefix: find the first known family token (claude-, gpt-) and
+        // drop everything before it. Handles any catalog naming convention.
         let raw_model = model.trim();
         let lower_raw = raw_model.to_ascii_lowercase();
-        let stripped = if lower_raw.starts_with("databricks-") {
-            &raw_model["databricks-".len()..]
-        } else if lower_raw.starts_with("goose-") {
-            &raw_model["goose-".len()..]
-        } else {
-            raw_model
+        const FAMILY_TOKENS: &[&str] = &["claude-", "gpt-"];
+        let first_idx = FAMILY_TOKENS
+            .iter()
+            .filter_map(|tok| lower_raw.find(tok))
+            .min();
+        let stripped = match first_idx {
+            Some(idx) => &raw_model[idx..],
+            None => raw_model,
         };
         let m = stripped.to_ascii_lowercase();
 

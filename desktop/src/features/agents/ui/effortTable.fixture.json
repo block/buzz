@@ -208,5 +208,12 @@
     "model": "goose-claude-sonnet-5",
     "validValues": ["low", "medium", "high", "xhigh", "max"],
     "defaultValue": "high"
+  },
+  {
+    "note": "databricks_v2 arbitrary prefix team-x-claude-opus-4-7: strips to claude-opus-4-7, routes anthropic adaptive+xhigh, max valid",
+    "provider": "databricks_v2",
+    "model": "team-x-claude-opus-4-7",
+    "validValues": ["low", "medium", "high", "xhigh", "max"],
+    "defaultValue": "high"
   }
 ]
