@@ -585,7 +585,7 @@ test.describe("observer feed screenshots", () => {
       },
     ]);
 
-    await expect(feedPanel.getByText("Commands")).toBeVisible({
+    await expect(feedPanel.getByText("Commands", { exact: true })).toBeVisible({
       timeout: 5_000,
     });
     await settleAnimations(feedPanel);
