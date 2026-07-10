@@ -367,10 +367,13 @@ test("thread-heavy history keeps a bounded mounted window", async ({
   const mounted = timeline.locator("[data-message-id]");
   await expect(mounted).not.toHaveCount(0);
   const mountedCount = await mounted.count();
-  expect(mountedCount).toBeLessThan(30);
+  // Two viewports of real overscan intentionally mounts more than the old
+  // sub-30 window, while still evicting a substantial part of this 120-row
+  // history after every row has been visited.
+  expect(mountedCount).toBeLessThan(80);
 });
 
-test("stationary rich-row resize preserves the visible reading anchor", async ({
+test("offscreen rich-row resize preserves the viewport-center anchor", async ({
   page,
 }) => {
   await installMockBridge(page);
@@ -409,30 +412,40 @@ test("stationary rich-row resize preserves the visible reading anchor", async ({
       const rect = row.getBoundingClientRect();
       return rect.bottom > scrollerRect.top && rect.top < scrollerRect.bottom;
     });
-    const anchor =
-      visibleRows.find(
-        (row) => row.getBoundingClientRect().top >= scrollerRect.top,
-      ) ?? visibleRows[0];
-    if (!anchor) throw new Error("no visible reading anchor");
+    const viewportCenter = scrollerRect.top + scroller.clientHeight / 2;
+    const anchor = visibleRows.reduce<HTMLElement | null>((nearest, row) => {
+      if (!nearest) return row;
+      const rowRect = row.getBoundingClientRect();
+      const nearestRect = nearest.getBoundingClientRect();
+      const rowDistance = Math.abs(
+        (rowRect.top + rowRect.bottom) / 2 - viewportCenter,
+      );
+      const nearestDistance = Math.abs(
+        (nearestRect.top + nearestRect.bottom) / 2 - viewportCenter,
+      );
+      return rowDistance < nearestDistance ? row : nearest;
+    }, null);
+    if (!anchor) throw new Error("no visible center anchor");
     const rowAbove = rows
-      .filter(
-        (row) =>
-          row.getBoundingClientRect().bottom <=
-          anchor.getBoundingClientRect().top,
-      )
+      .filter((row) => row.getBoundingClientRect().bottom <= scrollerRect.top)
       .at(-1);
-    if (!rowAbove) throw new Error("no mounted rich row above anchor");
+    if (!rowAbove) throw new Error("no mounted offscreen rich row above");
 
-    const anchorTop = anchor.getBoundingClientRect().top - scrollerRect.top;
+    const anchorRect = anchor.getBoundingClientRect();
+    const anchorCenterOffset =
+      (anchorRect.top + anchorRect.bottom) / 2 - viewportCenter;
     const scrollTop = scroller.scrollTop;
     rowAbove.style.minHeight = `${rowAbove.getBoundingClientRect().height + 240}px`;
     await new Promise((resolve) => setTimeout(resolve, 500));
 
+    const nextScrollerRect = scroller.getBoundingClientRect();
+    const nextAnchorRect = anchor.getBoundingClientRect();
+    const nextViewportCenter = nextScrollerRect.top + scroller.clientHeight / 2;
     return {
       anchorDrift:
-        anchor.getBoundingClientRect().top -
-        scroller.getBoundingClientRect().top -
-        anchorTop,
+        (nextAnchorRect.top + nextAnchorRect.bottom) / 2 -
+        nextViewportCenter -
+        anchorCenterOffset,
       scrollCorrection: scroller.scrollTop - scrollTop,
     };
   });

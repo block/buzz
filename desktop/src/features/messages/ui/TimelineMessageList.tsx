@@ -403,9 +403,9 @@ function VirtualizedTimelineRows({
   const listRef = React.useRef<VListHandle>(null);
   const hostRef = React.useRef<HTMLDivElement>(null);
   const [offscreenBufferSize, setOffscreenBufferSize] = React.useState(2_000);
-  const settledAnchorRef = React.useRef<{
+  const centerAnchorRef = React.useRef<{
     messageId: string;
-    top: number;
+    centerOffset: number;
   } | null>(null);
   const isScrollingRef = React.useRef(false);
   const hasInitialPositionedRef = React.useRef(false);
@@ -499,19 +499,32 @@ function VirtualizedTimelineRows({
     return () => resizeObserver.disconnect();
   }, []);
 
-  const captureSettledAnchor = React.useCallback(() => {
+  const captureCenterAnchor = React.useCallback(() => {
     const scroller = hostRef.current?.firstElementChild;
     if (!(scroller instanceof HTMLDivElement)) return;
     const scrollerRect = scroller.getBoundingClientRect();
-    const anchor = Array.from(
-      scroller.querySelectorAll<HTMLElement>("[data-message-id]"),
-    ).find((row) => row.getBoundingClientRect().top >= scrollerRect.top);
-    settledAnchorRef.current = anchor
-      ? {
-          messageId: anchor.dataset.messageId ?? "",
-          top: anchor.getBoundingClientRect().top - scrollerRect.top,
-        }
-      : null;
+    const viewportCenter = scrollerRect.top + scroller.clientHeight / 2;
+    let anchor: HTMLElement | null = null;
+    let nearestDistance = Number.POSITIVE_INFINITY;
+    for (const row of scroller.querySelectorAll<HTMLElement>(
+      "[data-message-id]",
+    )) {
+      const rect = row.getBoundingClientRect();
+      if (rect.bottom < scrollerRect.top || rect.top > scrollerRect.bottom) {
+        continue;
+      }
+      const distance = Math.abs((rect.top + rect.bottom) / 2 - viewportCenter);
+      if (distance < nearestDistance) {
+        anchor = row;
+        nearestDistance = distance;
+      }
+    }
+    if (!anchor) return;
+    const rect = anchor.getBoundingClientRect();
+    centerAnchorRef.current = {
+      messageId: anchor.dataset.messageId ?? "",
+      centerOffset: (rect.top + rect.bottom) / 2 - viewportCenter,
+    };
   }, []);
 
   const handleScroll = React.useCallback(
@@ -530,8 +543,8 @@ function VirtualizedTimelineRows({
 
   const handleScrollEnd = React.useCallback(() => {
     isScrollingRef.current = false;
-    captureSettledAnchor();
-  }, [captureSettledAnchor]);
+    captureCenterAnchor();
+  }, [captureCenterAnchor]);
 
   React.useLayoutEffect(() => {
     const scroller = hostRef.current?.firstElementChild;
@@ -542,20 +555,22 @@ function VirtualizedTimelineRows({
     ) {
       return;
     }
-    captureSettledAnchor();
+    captureCenterAnchor();
     const resizeObserver = new ResizeObserver(() => {
       requestAnimationFrame(() => {
         if (isScrollingRef.current) return;
-        const anchor = settledAnchorRef.current;
+        const anchor = centerAnchorRef.current;
         if (!anchor) return;
         const row = scroller.querySelector<HTMLElement>(
           `[data-message-id="${CSS.escape(anchor.messageId)}"]`,
         );
         if (!row) return;
-        const nextTop =
-          row.getBoundingClientRect().top -
-          scroller.getBoundingClientRect().top;
-        const delta = nextTop - anchor.top;
+        const scrollerRect = scroller.getBoundingClientRect();
+        const rowRect = row.getBoundingClientRect();
+        const viewportCenter = scrollerRect.top + scroller.clientHeight / 2;
+        const nextCenterOffset =
+          (rowRect.top + rowRect.bottom) / 2 - viewportCenter;
+        const delta = nextCenterOffset - anchor.centerOffset;
         if (Math.abs(delta) > 0.5) scroller.scrollTop += delta;
       });
     });
@@ -569,7 +584,7 @@ function VirtualizedTimelineRows({
       mutationObserver.disconnect();
       resizeObserver.disconnect();
     };
-  }, [captureSettledAnchor]);
+  }, [captureCenterAnchor]);
 
   return (
     <div className="h-full min-h-0 w-full" ref={hostRef}>
