@@ -224,87 +224,32 @@ fn saved_agent_model_discovery_uses_record_snapshot() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn update_request_mcp_command_roundtrips_for_wire_compat() {
+fn update_request_mcp_command_parses_for_wire_compat() {
     // UpdateManagedAgentRequest accepts mcpCommand for backward-compatibility
-    // with frontends that still send it. The field must parse cleanly but the
-    // patching loop in update_managed_agent has no arm for it, so the stored
-    // record value is never overwritten. This test guards that invariant.
+    // with frontends that still send it: the deprecated field must keep
+    // parsing cleanly. Nothing consumes it — the patching loop in
+    // update_managed_agent has no mcp_command arm (the effective MCP command
+    // is always catalog-derived at spawn). That absent-arm invariant lives in
+    // the code, not in this test: it only guards the wire shape.
     let req: crate::managed_agents::UpdateManagedAgentRequest =
         serde_json::from_str(r#"{"pubkey": "abc", "mcpCommand": "user-override"}"#)
             .expect("request with deprecated mcpCommand parses");
     assert_eq!(req.mcp_command.as_deref(), Some("user-override"));
-
-    // Construct a record whose mcp_command differs from the request value.
-    let record: crate::managed_agents::ManagedAgentRecord = serde_json::from_str(
-        r#"{
-            "pubkey": "abc",
-            "name": "test-agent",
-            "relay_url": "",
-            "acp_command": "buzz-acp",
-            "agent_command": "goose",
-            "agent_args": [],
-            "mcp_command": "catalog-derived-goose-mcp",
-            "turn_timeout_seconds": 320,
-            "parallelism": 1,
-            "created_at": "2026-01-01T00:00:00Z",
-            "updated_at": "2026-01-01T00:00:00Z",
-            "last_started_at": null,
-            "last_stopped_at": null,
-            "last_exit_code": null,
-            "last_error": null
-        }"#,
-    )
-    .expect("record parses");
-
-    // After update_managed_agent (which has no mcp_command arm), the stored
-    // value is the catalog-derived value from create time, not the user override.
-    // If someone re-adds the arm, the record.mcp_command would become
-    // "user-override" — this assertion would then fail as intended.
-    assert_eq!(record.mcp_command, "catalog-derived-goose-mcp");
-    assert_ne!(record.mcp_command, req.mcp_command.as_deref().unwrap_or(""));
 }
 
 #[test]
-fn update_request_turn_timeout_roundtrips_for_wire_compat() {
-    // UpdateManagedAgentRequest accepts turnTimeoutSeconds for backward-compatibility
-    // with frontends that still send it. The field must parse cleanly but the
-    // patching loop in update_managed_agent has no arm for it — the stored value
-    // is never updated. This test guards that invariant.
+fn update_request_turn_timeout_parses_for_wire_compat() {
+    // UpdateManagedAgentRequest accepts turnTimeoutSeconds for
+    // backward-compatibility with frontends that still send it: the deprecated
+    // field must keep parsing cleanly. Nothing consumes it — the patching loop
+    // in update_managed_agent has no turn_timeout_seconds arm
+    // (BUZZ_ACP_TURN_TIMEOUT is deprecated and ignored by the harness). That
+    // absent-arm invariant lives in the code, not in this test: it only
+    // guards the wire shape.
     let req: crate::managed_agents::UpdateManagedAgentRequest =
         serde_json::from_str(r#"{"pubkey": "abc", "turnTimeoutSeconds": 9999}"#)
             .expect("request with deprecated turnTimeoutSeconds parses");
     assert_eq!(req.turn_timeout_seconds, Some(9999));
-
-    // Construct a record whose turn_timeout_seconds differs from the request value.
-    let record: crate::managed_agents::ManagedAgentRecord = serde_json::from_str(
-        r#"{
-            "pubkey": "abc",
-            "name": "test-agent",
-            "relay_url": "",
-            "acp_command": "buzz-acp",
-            "agent_command": "goose",
-            "agent_args": [],
-            "mcp_command": "",
-            "turn_timeout_seconds": 320,
-            "parallelism": 1,
-            "created_at": "2026-01-01T00:00:00Z",
-            "updated_at": "2026-01-01T00:00:00Z",
-            "last_started_at": null,
-            "last_stopped_at": null,
-            "last_exit_code": null,
-            "last_error": null
-        }"#,
-    )
-    .expect("record parses");
-
-    // After update_managed_agent (which has no turn_timeout_seconds arm), the
-    // stored value stays at 320 — not the user-supplied 9999. BUZZ_ACP_TURN_TIMEOUT
-    // is deprecated and ignored by the harness; the knob is intentionally removed.
-    assert_eq!(record.turn_timeout_seconds, 320);
-    assert_ne!(
-        record.turn_timeout_seconds,
-        req.turn_timeout_seconds.unwrap_or(0)
-    );
 }
 
 #[test]
