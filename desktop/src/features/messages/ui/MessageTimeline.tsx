@@ -501,15 +501,18 @@ const MessageTimelineBase = React.forwardRef<
     if (
       searchActiveMessageId ||
       !fetchOlder ||
+      isFetchingOlder ||
       showTimelineSkeleton ||
       !hasOlderMessages
     ) {
-      return;
+      return false;
     }
     void fetchOlder();
+    return true;
   }, [
     fetchOlder,
     hasOlderMessages,
+    isFetchingOlder,
     searchActiveMessageId,
     showTimelineSkeleton,
   ]);
@@ -652,6 +655,7 @@ const MessageTimelineBase = React.forwardRef<
       isSendingVideoReviewComment={isSendingVideoReviewComment}
       onSendVideoReviewComment={onSendVideoReviewComment}
       onStartReached={loadOlderViaVirtualizer}
+      isFetchingOlder={isFetchingOlder}
       onToggleReaction={onToggleReaction}
       onVirtualizerApiChange={setTimelineVirtualizerApi}
       onVirtualizerRangeChanged={handleVirtualizerRangeChanged}
