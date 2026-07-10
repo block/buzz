@@ -234,13 +234,20 @@ pub struct CommunityActiveUsers {
     /// The UUID of the community.
     pub community_id: Uuid,
     /// Distinct human pubkeys that published at least one event in the window.
+    /// A pubkey is human when its `users` row exists and `agent_owner_pubkey IS NULL`.
     pub human: i64,
     /// Distinct agent pubkeys that published at least one event in the window.
+    /// A pubkey is an agent when its `users` row exists and `agent_owner_pubkey IS NOT NULL`.
     pub agent: i64,
+    /// Distinct pubkeys that published at least one event but have no `users` row.
+    /// Ingest does not guarantee a `users` row for every pubkey (profileless posters,
+    /// agents with missing rows). These are not classified and must not be folded into
+    /// `human` to avoid inflating the human count.
+    pub unknown: i64,
 }
 
 /// Return distinct-publisher counts for events in `[now - interval, now]`
-/// per community, split by human/agent.
+/// per community, split by human/agent/unknown.
 ///
 /// `interval_sql` must be a trusted literal (e.g. `"1 day"`, `"7 days"`) —
 /// it is not user-controlled; callers are in the relay process.
@@ -248,16 +255,21 @@ pub async fn active_user_counts(
     pool: &PgPool,
     interval_sql: &'static str,
 ) -> Result<Vec<CommunityActiveUsers>> {
-    // JOIN users so we can discriminate human vs. agent. Events are authored
-    // by pubkeys; the users.agent_owner_pubkey column is the discriminator.
-    // We use encode(e.pubkey, 'hex') and encode(u.pubkey, 'hex') to join on
-    // bytea — the columns are the same type so direct equality works.
+    // LEFT JOIN users: pubkeys with no row have u.* = NULL.
+    // Three-way classification:
+    //   human   — row exists (u.pubkey IS NOT NULL) and agent_owner_pubkey IS NULL
+    //   agent   — row exists and agent_owner_pubkey IS NOT NULL
+    //   unknown — no row (u.pubkey IS NULL); not classified, reported separately
     let sql = format!(
         r#"
         SELECT
             e.community_id,
-            COUNT(DISTINCT e.pubkey) FILTER (WHERE u.agent_owner_pubkey IS NULL)     AS human,
-            COUNT(DISTINCT e.pubkey) FILTER (WHERE u.agent_owner_pubkey IS NOT NULL) AS agent
+            COUNT(DISTINCT e.pubkey)
+                FILTER (WHERE u.pubkey IS NOT NULL AND u.agent_owner_pubkey IS NULL)     AS human,
+            COUNT(DISTINCT e.pubkey)
+                FILTER (WHERE u.pubkey IS NOT NULL AND u.agent_owner_pubkey IS NOT NULL) AS agent,
+            COUNT(DISTINCT e.pubkey)
+                FILTER (WHERE u.pubkey IS NULL)                                          AS unknown
         FROM events e
         LEFT JOIN users u
             ON u.community_id = e.community_id AND u.pubkey = e.pubkey
@@ -266,17 +278,20 @@ pub async fn active_user_counts(
         GROUP BY e.community_id
         "#
     );
-    let rows = sqlx::query_as::<_, (Uuid, i64, i64)>(sqlx::AssertSqlSafe(sql))
+    let rows = sqlx::query_as::<_, (Uuid, i64, i64, i64)>(sqlx::AssertSqlSafe(sql))
         .fetch_all(pool)
         .await?;
 
     Ok(rows
         .into_iter()
-        .map(|(community_id, human, agent)| CommunityActiveUsers {
-            community_id,
-            human,
-            agent,
-        })
+        .map(
+            |(community_id, human, agent, unknown)| CommunityActiveUsers {
+                community_id,
+                human,
+                agent,
+                unknown,
+            },
+        )
         .collect())
 }
 
@@ -601,6 +616,55 @@ mod tests {
 
         assert_eq!(comm_counts.len(), 1, "one row per community");
         assert_eq!(comm_counts[0].count, 2, "two repos");
+    }
+
+    /// active_user_counts classifies pubkeys with no users row as "unknown",
+    /// not "human" — the old LEFT JOIN treated NULL.agent_owner_pubkey as human.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn test_active_user_counts_unknown_bucket_for_profileless_poster() {
+        let pool = get_pool().await;
+        let (comm_uuid, _, _) = make_community(&pool).await;
+
+        // One known human (has a users row).
+        let human_pk = random_pubkey();
+        insert_user(&pool, comm_uuid, &human_pk, false).await;
+
+        // One profileless poster (no users row at all).
+        let profileless_pk = random_pubkey();
+
+        // Insert events for both pubkeys in this community.
+        let event_id1 = random_pubkey(); // 32-byte id
+        let event_id2 = random_pubkey();
+        let sig = vec![0u8; 64];
+        for (pk, eid) in [(&human_pk, &event_id1), (&profileless_pk, &event_id2)] {
+            sqlx::query(
+                "INSERT INTO events \
+                 (community_id, id, pubkey, created_at, kind, tags, content, sig, received_at) \
+                 VALUES ($1, $2, $3, NOW(), 9, '[]', '', $4, NOW()) \
+                 ON CONFLICT DO NOTHING",
+            )
+            .bind(comm_uuid)
+            .bind(eid)
+            .bind(pk)
+            .bind(&sig)
+            .execute(&pool)
+            .await
+            .expect("insert event");
+        }
+
+        let counts = active_user_counts(&pool, "1 day")
+            .await
+            .expect("active_user_counts");
+        let row = counts.iter().find(|r| r.community_id == comm_uuid);
+        assert!(row.is_some(), "row for community must exist");
+        let row = row.unwrap();
+        assert_eq!(row.human, 1, "known human poster counts as human");
+        assert_eq!(row.agent, 0, "no agents");
+        assert_eq!(
+            row.unknown, 1,
+            "profileless poster must land in unknown, not human"
+        );
     }
 
     /// Regression: channel_counts returns no row for a community once all

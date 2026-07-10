@@ -1667,6 +1667,14 @@ async fn handle_create_group(
     // If the event has an h-tag UUID, ingest_event() already created the channel
     // via create_channel_with_id(). Fetch it rather than creating a duplicate.
     // If no h-tag, fall back to the original auto-UUID creation path.
+    //
+    // Double-count analysis (C5): the counter increments below do NOT
+    // double-count vs. ingest.rs. For the h-tag path, ingest increments on
+    // was_created=true and this handler only reaches create_channel() on a DB
+    // lookup Err — an error recovery path where ingest's channel is
+    // inaccessible, so the counter correctly records a new creation. For the
+    // no-h-tag path, ingest never creates the channel, so this is the sole
+    // increment.
     let channel = if let Some(client_uuid) = extract_h_tag_channel(event) {
         match state.db.get_channel(tenant.community(), client_uuid).await {
             Ok(ch) => ch,
