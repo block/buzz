@@ -1,7 +1,13 @@
 //! Per-community usage rollup queries for Prometheus gauges.
 //!
-//! All queries use `GROUP BY community_id` against indexed columns —
-//! no per-community loops, no full-table scans.
+//! Stock queries (`user_counts`, `channel_counts`, `relay_member_counts`,
+//! `workflow_counts`, `git_repo_counts`) use `GROUP BY community_id` against
+//! indexed columns — no per-community loops, no full-table scans.
+//!
+//! Event-derived queries (`message_counts`, `active_user_counts`,
+//! `active_channel_counts`) are exact aggregates over the `events` table.
+//! At scale these can become recurring partition scans; if that becomes a
+//! problem, move them to a maintained rollup table and drop the interval.
 //!
 //! Returned structs are plain data; the caller (relay poller) maps them
 //! to Prometheus labels and calls `metrics::gauge!(...).set(...)`.
