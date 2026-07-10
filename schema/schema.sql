@@ -55,10 +55,12 @@ CREATE TABLE communities (
     host            VARCHAR(255) NOT NULL,
     signing_key     BYTEA,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    deleted_at      TIMESTAMPTZ,
     CONSTRAINT chk_communities_id_not_nil CHECK (id <> '00000000-0000-0000-0000-000000000000'::uuid)
 );
 
-CREATE UNIQUE INDEX idx_communities_host ON communities (lower(host));
+CREATE UNIQUE INDEX idx_communities_host ON communities (lower(host))
+    WHERE deleted_at IS NULL;
 
 -- ── Channels ──────────────────────────────────────────────────────────────────
 -- Conformance: "Channels and channel membership". `community_id` immutable.

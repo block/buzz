@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use axum::{
-    extract::{Query, RawQuery, State},
+    extract::{Path, Query, RawQuery, State},
     http::{HeaderMap, StatusCode},
     response::Json,
 };
@@ -15,7 +15,8 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::handlers::community_provisioning::{
-    normalize_candidate_host, validate_pubkey_hex, ProvisionCommunityRequest,
+    normalize_candidate_host, validate_pubkey_hex, DeleteCommunityRequest,
+    ProvisionCommunityRequest,
 };
 use crate::state::AppState;
 
@@ -166,6 +167,55 @@ pub async fn provision_community(
         {
             tracing::error!(error = %msg, "operator community persistence failed");
             Err(internal_error("operator community persistence failed"))
+        }
+        Err(msg) => Err(api_error(StatusCode::BAD_REQUEST, &msg)),
+    }
+}
+
+/// Soft-delete a community after validating an operator-proxied owner request.
+pub async fn delete_community(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(host): Path<String>,
+    RawQuery(raw_query): RawQuery,
+    Query(request): Query<DeleteCommunityRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let path = format!("/operator/communities/{host}");
+    let pubkey = authorize_operator_request(
+        &state,
+        &headers,
+        "DELETE",
+        &path,
+        raw_query.as_deref(),
+        None,
+    )
+    .await?;
+
+    match crate::handlers::community_provisioning::delete_community(
+        &state,
+        &pubkey,
+        &host,
+        &request.owner_pubkey,
+    )
+    .await
+    {
+        Ok(response) => Ok(Json(serde_json::to_value(response).map_err(|e| {
+            tracing::error!("failed to serialize delete-community response: {e}");
+            internal_error("operator delete response serialization failed")
+        })?)),
+        Err(msg) if msg.starts_with("actor not authorized") => {
+            Err(api_error(StatusCode::FORBIDDEN, &msg))
+        }
+        Err(msg) if msg == "community not found" => Err(api_error(StatusCode::NOT_FOUND, &msg)),
+        Err(msg) if msg == "provided pubkey is not the community owner" => {
+            Err(api_error(StatusCode::FORBIDDEN, &msg))
+        }
+        Err(msg)
+            if msg.starts_with("failed to look up community:")
+                || msg.starts_with("failed to delete community:") =>
+        {
+            tracing::error!(error = %msg, "operator community deletion failed");
+            Err(internal_error("operator community deletion failed"))
         }
         Err(msg) => Err(api_error(StatusCode::BAD_REQUEST, &msg)),
     }
@@ -498,6 +548,71 @@ mod tests {
             json.get("owner_pubkey").and_then(Value::as_str),
             Some(owner_hex.as_str())
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn delete_requires_matching_owner_and_hides_community() {
+        let operator = Keys::generate();
+        let owner = Keys::generate();
+        let outsider = Keys::generate();
+        let Some(state) = operator_test_state(std::slice::from_ref(&operator)).await else {
+            return;
+        };
+        let host = format!("delete-community-{}.example", Uuid::new_v4().simple());
+        let original = state
+            .db
+            .create_community_with_owner(&host, &owner.public_key().to_hex())
+            .await
+            .expect("create community")
+            .expect("new community");
+
+        let outsider_query = format!("owner_pubkey={}", outsider.public_key().to_hex());
+        let outsider_url =
+            format!("http://{INGRESS_HOST}/operator/communities/{host}?{outsider_query}");
+        let outsider_auth = nip98_auth_header(&operator, &outsider_url, "DELETE", None);
+        let response = build_router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/operator/communities/{host}?{outsider_query}"))
+                    .header(header::HOST, INGRESS_HOST)
+                    .header(header::AUTHORIZATION, outsider_auth)
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+        let owner_query = format!("owner_pubkey={}", owner.public_key().to_hex());
+        let owner_url = format!("http://{INGRESS_HOST}/operator/communities/{host}?{owner_query}");
+        let owner_auth = nip98_auth_header(&operator, &owner_url, "DELETE", None);
+        let response = build_router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/operator/communities/{host}?{owner_query}"))
+                    .header(header::HOST, INGRESS_HOST)
+                    .header(header::AUTHORIZATION, owner_auth)
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = read_json(response).await;
+        assert_eq!(json.get("status").and_then(Value::as_str), Some("deleted"));
+        assert_eq!(
+            json.get("community_id").and_then(Value::as_str),
+            Some(original.id.to_string().as_str())
+        );
+        assert!(state
+            .db
+            .lookup_community_by_host(&host)
+            .await
+            .expect("lookup community")
+            .is_none());
     }
 
     #[tokio::test]

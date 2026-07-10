@@ -53,6 +53,24 @@ pub struct ProvisionCommunityRequest {
     pub create_only: bool,
 }
 
+/// Query parameters for `DELETE /operator/communities/{host}`.
+#[derive(Debug, Deserialize)]
+pub struct DeleteCommunityRequest {
+    /// Pubkey asserted by the operator proxy as the deleting community owner.
+    pub owner_pubkey: String,
+}
+
+/// JSON response from `DELETE /operator/communities/{host}`.
+#[derive(Debug, Serialize)]
+pub struct DeleteCommunityResponse {
+    /// UUID of the community row that was soft-deleted.
+    pub community_id: String,
+    /// Canonical host stored on the deleted community row.
+    pub host: String,
+    /// Always `deleted` for a successful response.
+    pub status: &'static str,
+}
+
 /// JSON response from `POST /operator/communities`.
 #[derive(Debug, Serialize)]
 pub struct ProvisionCommunityResponse {
@@ -306,6 +324,65 @@ pub async fn provision_community(
         host: record.host,
         status: if record.created { "created" } else { "existed" },
         owner_pubkey: initial_owner,
+    })
+}
+
+/// Soft-delete a community after verifying the operator's owner assertion.
+///
+/// The NIP-98 signer is a deployment operator acting as a trusted proxy. The
+/// asserted owner must still hold `role = 'owner'` on the active community; the
+/// database checks that predicate atomically with the state transition.
+pub async fn delete_community(
+    state: &Arc<AppState>,
+    operator_pubkey: &nostr::PublicKey,
+    host: &str,
+    owner_pubkey: &str,
+) -> Result<DeleteCommunityResponse, String> {
+    let operator_hex = operator_pubkey.to_hex();
+    if !state
+        .config
+        .relay_operator_pubkeys
+        .iter()
+        .any(|pk| pk == &operator_hex)
+    {
+        return Err("actor not authorized: not a relay operator".to_string());
+    }
+
+    let normalized_host = normalize_candidate_host(host)?;
+    let owner_hex = validate_pubkey_hex(owner_pubkey)
+        .ok_or_else(|| "invalid owner_pubkey: expected 64-char hex pubkey".to_string())?;
+    let community = state
+        .db
+        .lookup_community_by_host(&normalized_host)
+        .await
+        .map_err(|e| format!("failed to look up community: {e}"))?
+        .ok_or_else(|| "community not found".to_string())?;
+
+    let deleted = state
+        .db
+        .soft_delete_community_owned_by(community.id, &owner_hex)
+        .await
+        .map_err(|e| format!("failed to delete community: {e}"))?;
+    if !deleted {
+        return Err("provided pubkey is not the community owner".to_string());
+    }
+
+    let tenant = buzz_core::tenant::TenantContext::resolved(community.id, community.host.clone());
+    let disconnected = state.disconnect_community_clusterwide(&tenant);
+
+    info!(
+        operator = %operator_hex,
+        community = %community.id,
+        host = %community.host,
+        owner = %owner_hex,
+        disconnected,
+        "community soft-deleted via operator endpoint"
+    );
+
+    Ok(DeleteCommunityResponse {
+        community_id: community.id.to_string(),
+        host: community.host,
+        status: "deleted",
     })
 }
 

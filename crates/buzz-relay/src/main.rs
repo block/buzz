@@ -749,6 +749,11 @@ async fn main() -> anyhow::Result<()> {
             loop {
                 match rx.recv().await {
                     Ok(scoped) => match scoped.command {
+                        buzz_pubsub::conn_control::ConnControl::DisconnectCommunity => {
+                            state_for_conn_ctrl
+                                .conn_manager
+                                .disconnect_community(scoped.community_id);
+                        }
                         buzz_pubsub::conn_control::ConnControl::DisconnectPubkey {
                             pubkey,
                             event_id,

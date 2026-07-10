@@ -194,6 +194,30 @@ impl ConnectionManager {
         closed
     }
 
+    /// Disconnect every live connection bound to `community`.
+    ///
+    /// Community deletion must terminate already-bound sockets; host lookup only
+    /// protects new handshakes, while existing connections retain their resolved
+    /// tenant id for their lifetime. Returns the number of local sockets closed.
+    pub fn disconnect_community(&self, community: CommunityId) -> usize {
+        let conn_ids = self
+            .connections
+            .iter()
+            .filter_map(|entry| (entry.community_id == community).then_some(*entry.key()))
+            .collect::<Vec<_>>();
+        let mut closed = 0;
+        for conn_id in conn_ids {
+            if let Some(entry) = self.connections.get(&conn_id) {
+                if entry.community_id != community {
+                    continue;
+                }
+                entry.cancel.cancel();
+                closed += 1;
+            }
+        }
+        closed
+    }
+
     /// Return the server-resolved community that the connection's host bound to.
     pub fn community_for_conn(&self, conn_id: Uuid) -> Option<CommunityId> {
         self.connections
@@ -775,6 +799,22 @@ impl AppState {
         closed
     }
 
+    /// Disconnect all sockets for a soft-deleted community on every relay pod.
+    pub fn disconnect_community_clusterwide(&self, tenant: &TenantContext) -> usize {
+        let closed = self.conn_manager.disconnect_community(tenant.community());
+        let pubsub = Arc::clone(&self.pubsub);
+        let tenant = tenant.clone();
+        tokio::spawn(async move {
+            if let Err(e) = pubsub
+                .publish_conn_control(&tenant, &ConnControl::DisconnectCommunity)
+                .await
+            {
+                tracing::warn!("Failed to publish community disconnect: {e}");
+            }
+        });
+        closed
+    }
+
     /// Get accessible channel IDs with a 10-second cache. Falls back to DB on miss.
     pub async fn get_accessible_channel_ids_cached(
         &self,
@@ -1258,6 +1298,45 @@ mod tests {
             Some("private".to_string()),
             "A's channel deletion must not evict B's cache entries"
         );
+    }
+
+    #[tokio::test]
+    async fn disconnect_community_closes_only_matching_tenant() {
+        let community_a = CommunityId::from_uuid(Uuid::from_u128(0xaaaa));
+        let community_b = CommunityId::from_uuid(Uuid::from_u128(0xbbbb));
+        let mgr = ConnectionManager::new();
+        let conn_a = Uuid::new_v4();
+        let (tx_a, _rx_a) = mpsc::channel(4);
+        let (ctrl_tx_a, _ctrl_rx_a) = mpsc::channel(1);
+        let cancel_a = CancellationToken::new();
+        mgr.register(
+            conn_a,
+            tx_a,
+            ctrl_tx_a,
+            cancel_a.clone(),
+            community_a,
+            Arc::new(AtomicU8::new(0)),
+            Arc::new(Mutex::new(HashMap::new())),
+            3,
+        );
+        let conn_b = Uuid::new_v4();
+        let (tx_b, _rx_b) = mpsc::channel(4);
+        let (ctrl_tx_b, _ctrl_rx_b) = mpsc::channel(1);
+        let cancel_b = CancellationToken::new();
+        mgr.register(
+            conn_b,
+            tx_b,
+            ctrl_tx_b,
+            cancel_b.clone(),
+            community_b,
+            Arc::new(AtomicU8::new(0)),
+            Arc::new(Mutex::new(HashMap::new())),
+            3,
+        );
+
+        assert_eq!(mgr.disconnect_community(community_a), 1);
+        assert!(cancel_a.is_cancelled());
+        assert!(!cancel_b.is_cancelled());
     }
 
     #[tokio::test]

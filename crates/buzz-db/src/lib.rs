@@ -307,6 +307,7 @@ impl Db {
             SELECT id, host
             FROM communities
             WHERE lower(host) = lower($1)
+              AND deleted_at IS NULL
             "#,
         )
         .bind(normalized_host)
@@ -341,6 +342,7 @@ impl Db {
             JOIN relay_members rm ON rm.community_id = c.id
             WHERE rm.pubkey = $1
               AND rm.role = 'owner'
+              AND c.deleted_at IS NULL
             ORDER BY c.created_at ASC, c.host ASC
             "#,
         )
@@ -378,6 +380,7 @@ impl Db {
             SELECT host
             FROM communities
             WHERE id = $1
+              AND deleted_at IS NULL
             "#,
         )
         .bind(community_id.as_uuid())
@@ -447,7 +450,7 @@ impl Db {
             r#"
             INSERT INTO communities (host)
             VALUES ($1)
-            ON CONFLICT (lower(host)) DO UPDATE SET host = communities.host
+            ON CONFLICT (lower(host)) WHERE deleted_at IS NULL DO UPDATE SET host = communities.host
             RETURNING id, host, (xmax = 0) AS created
             "#,
         )
@@ -484,7 +487,7 @@ impl Db {
             r#"
             INSERT INTO communities (host)
             VALUES ($1)
-            ON CONFLICT (lower(host)) DO NOTHING
+            ON CONFLICT (lower(host)) WHERE deleted_at IS NULL DO NOTHING
             RETURNING id, host
             "#,
         )
@@ -512,6 +515,7 @@ impl Db {
                 WHERE lower(c.host) = lower($1)
                   AND lower(rm.pubkey) = lower($2)
                   AND rm.role = 'owner'
+                  AND c.deleted_at IS NULL
                 "#,
             )
             .bind(normalized_host)
@@ -530,6 +534,39 @@ impl Db {
             id: CommunityId::from_uuid(id),
             host,
         }))
+    }
+
+    /// Soft-deletes an active community if `owner_pubkey` still owns it.
+    ///
+    /// The owner predicate and state transition execute in one statement so an
+    /// ownership change cannot race between authorization and deletion. Returns
+    /// `true` only when the active community row was updated.
+    pub async fn soft_delete_community_owned_by(
+        &self,
+        community_id: CommunityId,
+        owner_pubkey: &str,
+    ) -> Result<bool> {
+        let result = sqlx::query(
+            r#"
+            UPDATE communities c
+            SET deleted_at = NOW()
+            WHERE c.id = $1
+              AND c.deleted_at IS NULL
+              AND EXISTS (
+                  SELECT 1
+                  FROM relay_members rm
+                  WHERE rm.community_id = c.id
+                    AND lower(rm.pubkey) = lower($2)
+                    AND rm.role = 'owner'
+              )
+            "#,
+        )
+        .bind(community_id.as_uuid())
+        .bind(owner_pubkey)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(result.rows_affected() == 1)
     }
 
     /// Returns the community that owns a channel, if the channel exists.
@@ -3053,6 +3090,78 @@ mod tests {
             .await
             .expect("post-rotation retry");
         assert!(post_rotation_retry.is_none());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn soft_delete_hides_community_and_recreate_uses_new_uuid() {
+        let db = setup_db().await;
+        let host = format!("soft-delete-{}.example", Uuid::new_v4().simple());
+        let owner = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let other = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+        let original = db
+            .create_community_with_owner(&host, owner)
+            .await
+            .expect("create original community")
+            .expect("new host");
+        assert!(!db
+            .soft_delete_community_owned_by(original.id, other)
+            .await
+            .expect("reject non-owner delete"));
+        assert!(db
+            .lookup_community_by_host(&host)
+            .await
+            .expect("lookup active community")
+            .is_some());
+
+        assert!(db
+            .soft_delete_community_owned_by(original.id, owner)
+            .await
+            .expect("delete owned community"));
+        assert!(db
+            .lookup_community_by_host(&host)
+            .await
+            .expect("lookup deleted community")
+            .is_none());
+        assert!(db
+            .lookup_community_host(original.id)
+            .await
+            .expect("reverse lookup deleted community")
+            .is_none());
+        assert!(db
+            .list_communities_owned_by(owner)
+            .await
+            .expect("list owned communities")
+            .iter()
+            .all(|community| community.id != original.id));
+        assert!(!db
+            .soft_delete_community_owned_by(original.id, owner)
+            .await
+            .expect("repeat delete"));
+
+        let recreated = db
+            .create_community_with_owner(&host, owner)
+            .await
+            .expect("recreate community")
+            .expect("deleted host is reusable");
+        assert_ne!(recreated.id, original.id);
+
+        let old_owner_role: Option<String> = sqlx::query_scalar(
+            "SELECT role FROM relay_members WHERE community_id = $1 AND pubkey = $2",
+        )
+        .bind(original.id.as_uuid())
+        .bind(owner)
+        .fetch_optional(&db.pool)
+        .await
+        .expect("old owner role");
+        assert_eq!(old_owner_role.as_deref(), Some("owner"));
+        let active = db
+            .lookup_community_by_host(&host)
+            .await
+            .expect("lookup recreated community")
+            .expect("recreated community active");
+        assert_eq!(active.id, recreated.id);
     }
 
     #[tokio::test]

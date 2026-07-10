@@ -471,7 +471,7 @@ mod tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 6);
+        assert_eq!(migrations.len(), 7);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -548,6 +548,13 @@ mod tests {
             .sql
             .as_str()
             .contains("CREATE TABLE moderation_actions"));
+        assert_eq!(migrations[6].version, 7);
+        assert!(migrations[6].sql.as_str().contains("ADD COLUMN deleted_at"));
+        assert!(migrations[6]
+            .sql
+            .as_str()
+            .contains("WHERE deleted_at IS NULL"));
+
         for action in crate::moderation::MODERATION_ACTION_CHECK_VOCAB {
             assert!(
                 migrations[5].sql.as_str().contains(&format!("'{action}'")),
