@@ -375,6 +375,25 @@ class ChannelActions {
         '${hex.substring(20, 32)}';
   }
 
+  /// Add a person or agent to a channel via NIP-29 put-user (kind 9000).
+  ///
+  /// Matches desktop `add_channel_members`: any channel member may grant the
+  /// non-elevated `member` role (and optionally `guest` / `bot`). Elevated
+  /// roles still go through [changeMemberRole].
+  Future<void> addMember({
+    required String channelId,
+    required String pubkey,
+    String role = 'member',
+  }) async {
+    final tags = <List<String>>[
+      ['h', channelId],
+      ['p', pubkey.toLowerCase()],
+      if (role != 'member') ['role', role],
+    ];
+    await _signedEventRelay.submit(kind: 9000, content: '', tags: tags);
+    _ref.invalidate(channelMembersProvider(channelId));
+  }
+
   Future<void> changeMemberRole({
     required String channelId,
     required String pubkey,

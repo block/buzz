@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -12,6 +14,9 @@ import 'agent_activity/agent_activity_sheet.dart';
 import 'agent_activity/working_bots_provider.dart';
 import 'channel.dart';
 import 'channel_management_provider.dart';
+
+/// Minimum characters before we hit NIP-50 user search (matches desktop).
+const _memberSearchMinQueryLength = 2;
 
 class MembersSheet extends HookConsumerWidget {
   final Channel channel;
@@ -33,15 +38,63 @@ class MembersSheet extends HookConsumerWidget {
     final typingBotPubkeys = ref.watch(workingBotPubkeysProvider(channel.id));
     final statusCache = ref.watch(userStatusCacheProvider);
 
-    // Determine if the current user can manage members.
+    final queryController = useTextEditingController();
+    final query = useState('');
+    final debouncedQuery = useState('');
+    final addingPubkeys = useState<Set<String>>(const <String>{});
+    final addError = useState<String?>(null);
+
+    useEffect(() {
+      final timer = Timer(const Duration(milliseconds: 250), () {
+        debouncedQuery.value = query.value.trim();
+      });
+      return timer.cancel;
+    }, [query.value]);
+
+    // Any active channel member can add people (desktop parity, PR #815).
+    // DMs have a fixed participant set and archived channels are frozen.
     final currentMember = allMembers.cast<ChannelMember?>().firstWhere(
       (m) => m!.pubkey.toLowerCase() == currentPubkey?.toLowerCase(),
       orElse: () => null,
     );
+    final canAddMembers =
+        !channel.isDm &&
+        !channel.isArchived &&
+        (currentMember != null || channel.visibility == 'open');
     final canManage =
         currentMember != null &&
         currentMember.isElevated &&
         !channel.isArchived;
+
+    final memberPubkeys = {
+      for (final member in allMembers) member.pubkey.toLowerCase(),
+    };
+
+    // Same search pattern as the DM composer sheet — useMemoized + useFuture
+    // so Flutter Hooks tracks the future lifecycle correctly in tests.
+    final searchFuture = useMemoized(() {
+      if (!canAddMembers ||
+          debouncedQuery.value.length < _memberSearchMinQueryLength) {
+        return Future.value(const <DirectoryUser>[]);
+      }
+      return ref
+          .read(channelActionsProvider)
+          .searchUsers(debouncedQuery.value, limit: 12);
+    }, [canAddMembers, debouncedQuery.value, memberPubkeys.length]);
+    final searchSnapshot = useFuture(searchFuture);
+    final isSearching =
+        canAddMembers &&
+        debouncedQuery.value.length >= _memberSearchMinQueryLength &&
+        searchSnapshot.connectionState == ConnectionState.waiting;
+    final availableResults =
+        searchSnapshot.data
+            ?.where(
+              (user) =>
+                  !memberPubkeys.contains(user.pubkey.toLowerCase()) &&
+                  user.pubkey.toLowerCase() != currentPubkey?.toLowerCase(),
+            )
+            .toList() ??
+        const <DirectoryUser>[];
 
     void openActivity(ChannelMember bot) {
       final navigator = Navigator.of(context);
@@ -58,6 +111,30 @@ class MembersSheet extends HookConsumerWidget {
           ),
         );
       });
+    }
+
+    Future<void> handleAdd(DirectoryUser user) async {
+      final pubkey = user.pubkey.toLowerCase();
+      if (addingPubkeys.value.contains(pubkey)) return;
+
+      addingPubkeys.value = {...addingPubkeys.value, pubkey};
+      addError.value = null;
+      try {
+        await ref
+            .read(channelActionsProvider)
+            .addMember(channelId: channel.id, pubkey: user.pubkey);
+        if (!context.mounted) return;
+        queryController.clear();
+        query.value = '';
+        debouncedQuery.value = '';
+      } catch (error) {
+        addError.value = error.toString();
+      } finally {
+        addingPubkeys.value = {
+          for (final candidate in addingPubkeys.value)
+            if (candidate != pubkey) candidate,
+        };
+      }
     }
 
     // Preload profiles for all members so avatars appear.
@@ -78,6 +155,10 @@ class MembersSheet extends HookConsumerWidget {
       return null;
     }, [allMembers.length]);
 
+    final showSearchResults =
+        canAddMembers &&
+        debouncedQuery.value.length >= _memberSearchMinQueryLength;
+
     return Padding(
       padding: EdgeInsets.fromLTRB(
         Grid.gutter,
@@ -91,8 +172,36 @@ class MembersSheet extends HookConsumerWidget {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text('Members', style: context.textTheme.titleMedium),
+            if (!channel.isDm) ...[
+              const SizedBox(height: Grid.xxs),
+              TextField(
+                controller: queryController,
+                enabled: canAddMembers,
+                decoration: InputDecoration(
+                  prefixIcon: const Icon(LucideIcons.search, size: 18),
+                  hintText: canAddMembers
+                      ? 'Add people and agents'
+                      : 'Search people and agents',
+                  isDense: true,
+                ),
+                onChanged: (value) {
+                  query.value = value;
+                  addError.value = null;
+                },
+                textInputAction: TextInputAction.search,
+              ),
+              if (addError.value case final error?) ...[
+                const SizedBox(height: Grid.half),
+                Text(
+                  error,
+                  style: context.textTheme.bodySmall?.copyWith(
+                    color: context.colors.error,
+                  ),
+                ),
+              ],
+            ],
             const SizedBox(height: Grid.xxs),
-            if (!channel.isDm) ...[const Divider(height: 1)],
+            const Divider(height: 1),
             ConstrainedBox(
               constraints: const BoxConstraints(maxHeight: 400),
               child: membersAsync.when(
@@ -100,6 +209,34 @@ class MembersSheet extends HookConsumerWidget {
                   shrinkWrap: true,
                   padding: const EdgeInsets.only(top: Grid.xxs),
                   children: [
+                    if (showSearchResults) ...[
+                      _SectionLabel(
+                        label: availableResults.isEmpty && !isSearching
+                            ? 'No matching people'
+                            : 'Not in this channel',
+                      ),
+                      if (isSearching)
+                        const Padding(
+                          padding: EdgeInsets.symmetric(vertical: Grid.xxs),
+                          child: Center(
+                            child: SizedBox(
+                              width: 18,
+                              height: 18,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            ),
+                          ),
+                        ),
+                      for (final user in availableResults)
+                        _AddMemberTile(
+                          user: user,
+                          isAdding: addingPubkeys.value.contains(
+                            user.pubkey.toLowerCase(),
+                          ),
+                          onAdd: () => handleAdd(user),
+                        ),
+                      if (people.isNotEmpty || bots.isNotEmpty)
+                        const SizedBox(height: Grid.xxs),
+                    ],
                     if (people.isNotEmpty) ...[
                       _SectionLabel(label: 'People — ${people.length}'),
                       for (final member in people)
@@ -138,7 +275,7 @@ class MembersSheet extends HookConsumerWidget {
                               : null,
                         ),
                     ],
-                    if (people.isEmpty && bots.isEmpty)
+                    if (people.isEmpty && bots.isEmpty && !showSearchResults)
                       Center(
                         child: Text(
                           'No members found.',
@@ -184,6 +321,44 @@ class _SectionLabel extends StatelessWidget {
           letterSpacing: 0.8,
         ),
       ),
+    );
+  }
+}
+
+class _AddMemberTile extends StatelessWidget {
+  final DirectoryUser user;
+  final bool isAdding;
+  final VoidCallback onAdd;
+
+  const _AddMemberTile({
+    required this.user,
+    required this.isAdding,
+    required this.onAdd,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final label = user.label;
+    final initial = label.isNotEmpty ? label[0].toUpperCase() : '?';
+
+    return ListTile(
+      contentPadding: EdgeInsets.zero,
+      leading: _MemberAvatar(avatarUrl: user.avatarUrl, initial: initial),
+      title: Text(label),
+      subtitle: Text(
+        user.secondaryLabel,
+        style: context.textTheme.bodySmall?.copyWith(
+          color: context.colors.onSurfaceVariant,
+        ),
+      ),
+      trailing: isAdding
+          ? const SizedBox(
+              width: 18,
+              height: 18,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            )
+          : TextButton(onPressed: onAdd, child: const Text('Add')),
+      onTap: isAdding ? null : onAdd,
     );
   }
 }
@@ -449,7 +624,7 @@ class _RoleSelector extends StatelessWidget {
   }
 }
 
-class _MemberAvatar extends HookWidget {
+class _MemberAvatar extends StatelessWidget {
   final String? avatarUrl;
   final String initial;
 
@@ -457,21 +632,18 @@ class _MemberAvatar extends HookWidget {
 
   @override
   Widget build(BuildContext context) {
-    final failed = useState(false);
-
-    useEffect(() {
-      failed.value = false;
-      return null;
-    }, [avatarUrl]);
-
-    final url = avatarUrl;
-    if (url == null || failed.value) {
-      return CircleAvatar(child: Text(initial));
-    }
     return CircleAvatar(
-      backgroundImage: NetworkImage(url),
-      onBackgroundImageError: (_, _) => failed.value = true,
-      child: null,
+      radius: 18,
+      backgroundColor: context.colors.primaryContainer,
+      backgroundImage: avatarUrl != null ? NetworkImage(avatarUrl!) : null,
+      child: avatarUrl == null
+          ? Text(
+              initial,
+              style: context.textTheme.labelMedium?.copyWith(
+                color: context.colors.onPrimaryContainer,
+              ),
+            )
+          : null,
     );
   }
 }
