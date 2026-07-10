@@ -310,9 +310,16 @@ test.describe("list virtualization", () => {
     page,
   }) => {
     test.setTimeout(120_000);
+    // A real CDP wheel burst is required here: assigning scrollTop does not
+    // reproduce Chromium/WebKit's native wheel → scroll callback ordering. The
+    // old boundary rollback moved the viewport back down before the fetch
+    // committed; keep that pre-prepend reversal below the same 5px frame bar.
+    // A 300ms relay delay leaves the input boundary and prepend commit as two
+    // distinct phases so this assertion cannot accidentally measure only the
+    // later anchor correction.
     await installMockBridge(page, {
       deepHistoryMessageCount: 1_800,
-      channelWindowDelayMs: 100,
+      channelWindowDelayMs: 300,
     });
     await page.goto("/#/channels/feedf00d-0000-4000-8000-000000000007");
     const timeline = page.getByTestId("message-timeline");
@@ -366,23 +373,34 @@ test.describe("list virtualization", () => {
       });
       await page.waitForTimeout(150);
       const before = await sampleVisibleAnchor();
-      await timeline.evaluate((element) => {
-        element.scrollTop = 150;
+      const wheelTracePromise = timeline.evaluate(async (scroller) => {
+        const s = scroller as HTMLElement;
+        let previousScrollTop = s.scrollTop;
+        let maxBoundaryRollback = 0;
+        let minScrollTop = s.scrollTop;
+        const deadline = performance.now() + 120;
+        while (performance.now() < deadline) {
+          maxBoundaryRollback = Math.max(
+            maxBoundaryRollback,
+            s.scrollTop - previousScrollTop,
+          );
+          previousScrollTop = s.scrollTop;
+          minScrollTop = Math.min(minScrollTop, s.scrollTop);
+          await new Promise((resolve) => requestAnimationFrame(resolve));
+        }
+        return { maxBoundaryRollback, minScrollTop };
       });
-      if (pageIndex === 0) {
-        // The threshold-crossing event has already armed the page load. Cancel
-        // only the following upward momentum event; downward input stays live.
-        const admitted = await timeline.evaluate((element) => ({
-          upward: element.dispatchEvent(
-            new WheelEvent("wheel", { cancelable: true, deltaY: -40 }),
-          ),
-          downward: element.dispatchEvent(
-            new WheelEvent("wheel", { cancelable: true, deltaY: 40 }),
-          ),
-        }));
-        expect(admitted.upward).toBe(false);
-        expect(admitted.downward).toBe(true);
+      const box = await timeline.boundingBox();
+      if (!box) throw new Error("timeline has no bounding box");
+      await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+      for (const deltaY of [-60, -30, -20, -15]) {
+        await page.mouse.wheel(0, deltaY);
+        await page.waitForTimeout(12);
       }
+      const wheelTrace = await wheelTracePromise;
+      expect(wheelTrace.minScrollTop).toBeLessThanOrEqual(200);
+      expect(wheelTrace.maxBoundaryRollback).toBeLessThan(5);
+      const committedAnchor = await sampleVisibleAnchor(before.id);
       const motion = await timeline.evaluate(
         async (scroller, { anchorId, anchorTop, oldHeight }) => {
           const s = scroller as HTMLElement;
@@ -416,8 +434,8 @@ test.describe("list virtualization", () => {
           return { maxDrift, sawPrepend };
         },
         {
-          anchorId: before.id,
-          anchorTop: before.top,
+          anchorId: committedAnchor.id,
+          anchorTop: committedAnchor.top,
           oldHeight: before.scrollHeight,
         },
       );

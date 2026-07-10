@@ -416,7 +416,6 @@ function VirtualizedTimelineRows({
     top: number;
   } | null>(null);
   const prependWatcherFrameRef = React.useRef<number | null>(null);
-  const previousScrollOffsetRef = React.useRef<number | null>(null);
   const cancelUpwardMomentumRef = React.useRef(false);
   const [prependShiftEpoch, clearPrependShift] = React.useReducer(
     (version: number) => version + 1,
@@ -651,22 +650,11 @@ function VirtualizedTimelineRows({
       onAtBottomStateChange?.(
         list.scrollSize - list.viewportSize - offset <= 32,
       );
-      const previousOffset = previousScrollOffsetRef.current;
-      previousScrollOffsetRef.current = offset;
       if (prependAnchorRef.current !== null || offset <= 200) {
         capturePrependAnchor();
       }
       if (offset <= 200) {
-        const startedLoadingOlder = onStartReached?.() ?? false;
-        const scroller = hostRef.current?.firstElementChild;
-        if (
-          startedLoadingOlder &&
-          scroller instanceof HTMLDivElement &&
-          previousOffset !== null &&
-          previousOffset > offset
-        ) {
-          scroller.scrollBy({ top: previousOffset - offset });
-        }
+        onStartReached?.();
         // Reaching the loaded-history boundary ends this upward gesture even
         // when a page request is already in flight. Suppress only its inertial
         // tail; the wheel listener admits downward input immediately and a new
