@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { requiredCredentialEnvKeys } from "./personaDialogPickers.tsx";
+import {
+  isGloballySatisfiedCredentialKey,
+  requiredCredentialEnvKeys,
+} from "./personaDialogPickers.tsx";
 import { hasMissingRequiredEnvKey } from "./personaRuntimeModel.ts";
 
 // These tests cover the Edit Agent required-credential gate behaviour added in
@@ -15,9 +18,16 @@ import { hasMissingRequiredEnvKey } from "./personaRuntimeModel.ts";
 
 // ── helpers ─────────────────────────────────────────────────────────────────
 
-/** Simulate the hook's filtered key list: allRequiredKeys minus globally-satisfied. */
-function filterRequiredKeys(allKeys, globalEnvVars) {
-  return allKeys.filter((key) => (globalEnvVars[key] ?? "").length === 0);
+/**
+ * Simulate the hook's filtered key list: allRequiredKeys minus globally-satisfied.
+ * Delegates to `isGloballySatisfiedCredentialKey` — the same helper used by
+ * `computeLocalModeGate` and `useRequiredCredentialState` — so this test
+ * exercises production semantics rather than a local approximation.
+ */
+function filterRequiredKeys(allKeys, globalEnvVars, envVars = {}) {
+  return allKeys.filter(
+    (key) => !isGloballySatisfiedCredentialKey(key, globalEnvVars, envVars),
+  );
 }
 
 // ── global provider + global API key → not missing, no amber row ─────────
@@ -118,5 +128,60 @@ test("editAgent_globalSatisfiesOneKey_otherKeyStillMissing", () => {
     filteredAnthropic.includes("ANTHROPIC_API_KEY"),
     false,
     "ANTHROPIC_API_KEY must be cleared by global env",
+  );
+});
+
+// ── Explicit empty agent-local shadows global value (Thufir IMPORTANT #1) ──
+//
+// An agent-local value of "" explicitly overrides the global key.
+// Backend semantics: agent env.extend() overwrites global layer; empty = missing.
+// The UI gate must match: do NOT silence the amber row when the local value is "".
+
+test("editAgent_globalSatisfied_agentLocalExplicitlyEmpty_stillRequired", () => {
+  // Setup: global has ANTHROPIC_API_KEY="sk-global", but agent-local has "".
+  // Backend effective value: "" (agent overwrites global) → missing.
+  // Expected: ANTHROPIC_API_KEY must remain required (amber row appears).
+  const allKeys = requiredCredentialEnvKeys("buzz-agent", "anthropic");
+  const globalEnvVars = { ANTHROPIC_API_KEY: "sk-global" };
+  const perAgentEnvVars = { ANTHROPIC_API_KEY: "" };
+
+  const filteredKeys = filterRequiredKeys(
+    allKeys,
+    globalEnvVars,
+    perAgentEnvVars,
+  );
+  assert.ok(
+    filteredKeys.includes("ANTHROPIC_API_KEY"),
+    "ANTHROPIC_API_KEY must remain required when agent-local explicitly shadows global with empty string",
+  );
+  assert.equal(
+    hasMissingRequiredEnvKey(filteredKeys, perAgentEnvVars),
+    true,
+    "requiredEnvKeyMissing must be true when agent-local empty shadows global key",
+  );
+});
+
+test("editAgent_globalSatisfied_agentLocalKeyAbsent_stillSilenced", () => {
+  // Contrast: global has ANTHROPIC_API_KEY="sk-global", agent-local does NOT
+  // have the key at all (key absent from envVars object).
+  // In this case the global satisfies it and the amber row must be absent.
+  const allKeys = requiredCredentialEnvKeys("buzz-agent", "anthropic");
+  const globalEnvVars = { ANTHROPIC_API_KEY: "sk-global" };
+  const perAgentEnvVars = {}; // key NOT present — differs from explicit ""
+
+  const filteredKeys = filterRequiredKeys(
+    allKeys,
+    globalEnvVars,
+    perAgentEnvVars,
+  );
+  assert.equal(
+    filteredKeys.includes("ANTHROPIC_API_KEY"),
+    false,
+    "ANTHROPIC_API_KEY must be silenced when global satisfies it and agent-local doesn't override",
+  );
+  assert.equal(
+    hasMissingRequiredEnvKey(filteredKeys, perAgentEnvVars),
+    false,
+    "requiredEnvKeyMissing must be false when global key is not shadowed",
   );
 });

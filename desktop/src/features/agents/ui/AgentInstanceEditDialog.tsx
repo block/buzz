@@ -384,14 +384,14 @@ export function AgentInstanceEditDialog({
     });
 
   // Merge global env as the base layer so credential keys satisfied via global
-  // config (e.g. ANTHROPIC_API_KEY) are available to model discovery. Agent-local
-  // env takes precedence (higher specificity), matching the agent → global → file
-  // precedence used by the spawn path and the credential gate. Without this merge,
-  // a key satisfied globally produces a "Enter an API key to load models" discovery
-  // hint even though the amber row is correctly absent.
+  // config (e.g. ANTHROPIC_API_KEY) are available to model discovery. Use
+  // `inheritedSubmission.envVars` (the same snapshot the credential gate
+  // validates) rather than raw `envVars`, so an inherit-transition that layers
+  // in persona env vars is reflected in discovery. Agent-local env takes
+  // precedence, matching the agent → global → file spawn-path precedence.
   const envVarsForDiscovery = React.useMemo(
-    () => ({ ...globalConfig.env_vars, ...envVars }),
-    [globalConfig.env_vars, envVars],
+    () => ({ ...globalConfig.env_vars, ...inheritedSubmission.envVars }),
+    [globalConfig.env_vars, inheritedSubmission.envVars],
   );
 
   const {

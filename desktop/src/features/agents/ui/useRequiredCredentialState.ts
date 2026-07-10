@@ -7,6 +7,7 @@ import {
 
 import {
   getBakedSatisfiedEnvKeys,
+  isGloballySatisfiedCredentialKey,
   requiredCredentialEnvKeys,
   runtimeSupportsLlmProviderSelection,
 } from "./personaDialogPickers";
@@ -114,11 +115,18 @@ export function useRequiredCredentialState(params: {
         (key) =>
           !bakedSatisfiedKeys.includes(key) &&
           !fileSatisfiedEnvKeys.includes(key) &&
-          // Exclude globally-satisfied keys: they are covered at the global
-          // layer and must not produce an amber row or block Save.
-          (globalEnvVars[key] ?? "").length === 0,
+          // isGloballySatisfiedCredentialKey returns true when global has the key
+          // AND agent-local has NOT explicitly shadowed it with "" — same semantics
+          // as computeLocalModeGate, preventing create/edit gate drift.
+          !isGloballySatisfiedCredentialKey(key, globalEnvVars, envVars),
       ),
-    [allRequiredKeys, bakedSatisfiedKeys, fileSatisfiedEnvKeys, globalEnvVars],
+    [
+      allRequiredKeys,
+      bakedSatisfiedKeys,
+      fileSatisfiedEnvKeys,
+      globalEnvVars,
+      envVars,
+    ],
   );
 
   const requiredEnvKeyMissing = React.useMemo(

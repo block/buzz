@@ -417,6 +417,30 @@ export function getDefaultPersonaRuntime(runtimes: AcpRuntimeCatalogEntry[]) {
 }
 
 /**
+ * Returns true when `key` is satisfied at the global layer AND the agent-local
+ * `envVars` does NOT explicitly shadow it with an empty string.
+ *
+ * Matches backend semantics: agent env.extend() overwrites global, so an
+ * agent-local value of "" makes the effective value empty → key is missing.
+ * A key absent from `envVars` entirely leaves the global value intact.
+ *
+ * Used by both `computeLocalModeGate` (create dialog) and
+ * `useRequiredCredentialState` (edit dialog) so the two gates cannot drift.
+ */
+export function isGloballySatisfiedCredentialKey(
+  key: string,
+  globalEnvVars: Record<string, string> | undefined,
+  envVars: Record<string, string>,
+): boolean {
+  const globalValue = globalEnvVars?.[key] ?? "";
+  if (globalValue.length === 0) return false;
+  // Agent-local "" explicitly shadows the global — effective value is empty.
+  const agentExplicitlyClearedKey =
+    key in envVars && (envVars[key] ?? "").length === 0;
+  return !agentExplicitlyClearedKey;
+}
+
+/**
  * Filter a required-key list down to those satisfied by the baked build env.
  *
  * A key is baked-satisfied when the agent has no local value for it AND the
@@ -579,9 +603,9 @@ export function computeLocalModeGate({
   const requiredEnvKeys: string[] = [];
   for (const key of requiredKeys) {
     const agentValue = envVars[key] ?? "";
-    const globalValue = globalEnvVars?.[key] ?? "";
-    if (globalValue.length > 0) {
-      // Globally satisfied — not a missing key, and no locked row needed.
+    if (isGloballySatisfiedCredentialKey(key, globalEnvVars, envVars)) {
+      // Globally satisfied and not shadowed by an explicit local empty override —
+      // not a missing key, and no locked row needed.
     } else if (bakedSatisfiedSet.has(key)) {
       // Not in global env but covered by the baked build env — silenced.
       // Don't add to fileSatisfiedEnvKeys; baked keys produce no info row.

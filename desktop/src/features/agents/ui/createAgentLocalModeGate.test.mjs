@@ -27,6 +27,7 @@ import {
   getDefaultLlmProviderLabel,
   getPersonaModelOptions,
   getProviderApiKeyEnvVar,
+  isGloballySatisfiedCredentialKey,
   requiredCredentialEnvKeys,
   runtimeSupportsLlmProviderSelection,
 } from "./personaDialogPickers.tsx";
@@ -1233,5 +1234,128 @@ test("providerConfig_databricks_requiredKeyIsHost_noSecretClear", () => {
     getProviderApiKeyEnvVar("databricks"),
     null,
     "databricks must have no secretEnvVar — DATABRICKS_HOST is not cleared on provider switch",
+  );
+});
+
+// ── Explicit empty agent-local shadows global value (Thufir IMPORTANT #1) ──
+//
+// An agent-local value of "" explicitly overrides the global key, matching
+// backend semantics where agent env.extend() overwrites global layer.
+// The UI gate must show the amber row (key is effectively missing) even when
+// global config has a non-empty value.
+
+test("isGloballySatisfied_globalSet_keyAbsent_returnsTrue", () => {
+  // Global has the key, agent-local does NOT contain it → globally satisfied.
+  assert.equal(
+    isGloballySatisfiedCredentialKey(
+      "ANTHROPIC_API_KEY",
+      { ANTHROPIC_API_KEY: "sk-global" },
+      {},
+    ),
+    true,
+    "key absent from agent env and present in global must be globally satisfied",
+  );
+});
+
+test("isGloballySatisfied_globalSet_keyExplicitlyEmpty_returnsFalse", () => {
+  // Global has the key, agent-local has "" → explicit shadow → NOT satisfied.
+  assert.equal(
+    isGloballySatisfiedCredentialKey(
+      "ANTHROPIC_API_KEY",
+      { ANTHROPIC_API_KEY: "sk-global" },
+      { ANTHROPIC_API_KEY: "" },
+    ),
+    false,
+    "explicit empty agent-local value must shadow global and return false",
+  );
+});
+
+test("isGloballySatisfied_globalSet_keyFilledLocally_returnsTrue", () => {
+  // Global has the key, agent-local also has a value → locally filled,
+  // isGloballySatisfied still returns true (key is not missing).
+  // The gate's agentValue path would catch this as locally satisfied.
+  assert.equal(
+    isGloballySatisfiedCredentialKey(
+      "ANTHROPIC_API_KEY",
+      { ANTHROPIC_API_KEY: "sk-global" },
+      { ANTHROPIC_API_KEY: "sk-local" },
+    ),
+    true,
+    "key filled both globally and locally must return true (not missing)",
+  );
+});
+
+test("isGloballySatisfied_globalNotSet_returnsAlwaysFalse", () => {
+  // Global does NOT have the key → never globally satisfied regardless of agent state.
+  assert.equal(
+    isGloballySatisfiedCredentialKey("ANTHROPIC_API_KEY", {}, {}),
+    false,
+    "absent global key must never be globally satisfied",
+  );
+  assert.equal(
+    isGloballySatisfiedCredentialKey("ANTHROPIC_API_KEY", undefined, {}),
+    false,
+    "undefined globalEnvVars must never be globally satisfied",
+  );
+});
+
+test("localMode_globalEnvSatisfied_agentLocalExplicitlyEmpty_stillRequired", () => {
+  // Setup: global has ANTHROPIC_API_KEY="sk-global", but agent envVars has
+  // ANTHROPIC_API_KEY="" (key present in object, value empty).
+  // Backend effective value: "" (agent overwrites global) → missing.
+  // Expected: ANTHROPIC_API_KEY appears in missingEnvKeys and requiredEnvKeys.
+  const result = computeLocalModeGate({
+    envVars: { ANTHROPIC_API_KEY: "" },
+    globalEnvVars: { ANTHROPIC_API_KEY: "sk-global" },
+    isProviderMode: false,
+    model: "claude-3-5-sonnet-20241022",
+    provider: "anthropic",
+    runtimeId: "buzz-agent",
+    useMesh: false,
+  });
+
+  assert.ok(
+    result.missingEnvKeys.includes("ANTHROPIC_API_KEY"),
+    "ANTHROPIC_API_KEY must be in missingEnvKeys when agent-local empty string shadows global value",
+  );
+  assert.ok(
+    result.requiredEnvKeys.includes("ANTHROPIC_API_KEY"),
+    "ANTHROPIC_API_KEY must be in requiredEnvKeys (amber row must appear)",
+  );
+  assert.equal(
+    result.satisfied,
+    false,
+    "gate must not be satisfied when agent-local empty shadows global key",
+  );
+});
+
+test("localMode_globalEnvSatisfied_agentLocalKeyAbsent_silenced", () => {
+  // Contrast: global has ANTHROPIC_API_KEY="sk-global", agent envVars does NOT
+  // contain the key at all (not present in object). Global satisfies it.
+  // Expected: ANTHROPIC_API_KEY silenced — amber row absent, gate satisfied.
+  const result = computeLocalModeGate({
+    envVars: {}, // key absent, distinct from { ANTHROPIC_API_KEY: "" }
+    globalEnvVars: { ANTHROPIC_API_KEY: "sk-global" },
+    isProviderMode: false,
+    model: "claude-3-5-sonnet-20241022",
+    provider: "anthropic",
+    runtimeId: "buzz-agent",
+    useMesh: false,
+  });
+
+  assert.equal(
+    result.missingEnvKeys.includes("ANTHROPIC_API_KEY"),
+    false,
+    "ANTHROPIC_API_KEY must NOT be in missingEnvKeys when global satisfies it and agent-local doesn't override",
+  );
+  assert.equal(
+    result.requiredEnvKeys.includes("ANTHROPIC_API_KEY"),
+    false,
+    "ANTHROPIC_API_KEY must NOT be in requiredEnvKeys when globally satisfied (no amber row)",
+  );
+  assert.equal(
+    result.satisfied,
+    true,
+    "gate must be satisfied when global key is not shadowed by an explicit empty",
   );
 });
