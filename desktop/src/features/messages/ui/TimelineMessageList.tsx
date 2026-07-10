@@ -22,6 +22,7 @@ import { canManageMessageForCurrentUser } from "@/features/messages/lib/canManag
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type { ChannelType } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
+import { useFeatureEnabled } from "@/shared/features";
 import { DayDivider } from "./DayDivider";
 import { MessageRow } from "./MessageRow";
 import { MessageThreadSummaryRow } from "./MessageThreadSummaryRow";
@@ -115,6 +116,12 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
   threadUnreadCounts,
   unfollowThreadById,
 }: TimelineMessageListProps) {
+  // eagerTimelineLayout preview: opt every row out of content-visibility
+  // skipping so the full fetched window lays out immediately at exact heights
+  // (no estimate→true re-realization, and none of the anchored-scroll
+  // corrections it forces, during scrolling).
+  const eagerTimelineLayout = useFeatureEnabled("eagerTimelineLayout");
+
   const entries = React.useMemo(
     () =>
       mainEntries ??
@@ -277,7 +284,10 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
           )}
           {group.items.map((item) => (
             <div
-              className="timeline-row-cv"
+              className={cn(
+                "timeline-row-cv",
+                eagerTimelineLayout && "timeline-row-cv-eager",
+              )}
               key={getTimelineItemKey(item)}
               style={timelineRowReserveStyle(item)}
             >

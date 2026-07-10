@@ -22,6 +22,15 @@
     content-visibility: visible;
   }
 
+  /* eagerTimelineLayout preview: realize every fetched row's layout up front.
+     Heights are exact from first paint, so scrolling never triggers the
+     estimate→true height re-realization (and the anchored-scroll position
+     corrections it forces). The reserve style stays on the wrapper but is
+     inert without size containment. */
+  .timeline-row-cv.timeline-row-cv-eager {
+    content-visibility: visible;
+  }
+
   .content-visibility-auto-interactive {
     content-visibility: auto;
     contain-intrinsic-size: auto 200px;

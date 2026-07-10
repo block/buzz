@@ -40,6 +40,14 @@
       "platforms": [
         "desktop"
       ]
+    },
+    {
+      "id": "eagerTimelineLayout",
+      "name": "Eager timeline layout",
+      "description": "Lay out every fetched message row immediately instead of skipping offscreen rows (content-visibility). Heights are exact from the start, so scrolling never triggers height re-realizations or position corrections mid-fling — at the cost of a one-time layout of the full loaded window.",
+      "platforms": [
+        "desktop"
+      ]
     }
   ]
 }

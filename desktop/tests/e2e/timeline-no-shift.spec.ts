@@ -562,6 +562,11 @@ test("de-virtualized timeline rows apply content-visibility", async ({
 }, testInfo) => {
   testInfo.setTimeout(45_000);
 
+  // The e2e bridge opts every preview feature in, so `eagerTimelineLayout`
+  // is ON here: rows must compute `visible` (eagerly laid out). The
+  // flag-off spec below covers the default `auto` path. Both guard against
+  // a typo'd/removed wrapper class shipping inert — a bad utility name is
+  // invisible to typecheck.
   await installMockBridge(page);
   await page.goto("/");
   await waitForMockTimelineBridge(page);
@@ -573,22 +578,46 @@ test("de-virtualized timeline rows apply content-visibility", async ({
   const timeline = page.getByTestId("message-timeline");
   await expect(timeline.locator("[data-message-id]").first()).toBeVisible();
 
-  // Guards against a typo'd/removed wrapper class shipping inert — a bad
-  // utility name is invisible to typecheck.
-  const hasContentVisibility = await timeline
+  expect(await firstRowContentVisibility(timeline)).toBe("visible");
+});
+
+test("timeline rows skip offscreen layout when eager layout is off", async ({
+  page,
+}, testInfo) => {
+  testInfo.setTimeout(45_000);
+
+  await installMockBridge(page, undefined, { seedPreviewFeatures: false });
+  await page.goto("/");
+  await waitForMockTimelineBridge(page);
+  await seedNoShiftTimeline(page);
+
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  const timeline = page.getByTestId("message-timeline");
+  await expect(timeline.locator("[data-message-id]").first()).toBeVisible();
+
+  expect(await firstRowContentVisibility(timeline)).toBe("auto");
+});
+
+/** Computed `content-visibility` of the first message row's `timeline-row-cv`
+ *  wrapper, or "missing" when no wrapper is found between row and scroller. */
+function firstRowContentVisibility(timeline: Locator): Promise<string> {
+  return timeline
     .locator("[data-message-id]")
     .first()
     .evaluate((element) => {
       const scroller = element.closest('[data-testid="message-timeline"]');
       let node: HTMLElement | null = element.parentElement;
       while (node && node !== scroller) {
-        if (getComputedStyle(node).contentVisibility === "auto") return true;
+        if (node.classList.contains("timeline-row-cv")) {
+          return getComputedStyle(node).contentVisibility;
+        }
         node = node.parentElement;
       }
-      return false;
+      return "missing";
     });
-  expect(hasContentVisibility).toBe(true);
-});
+}
 
 test("thread panel late row reflow keeps the reading reply stable", async ({
   page,
