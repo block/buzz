@@ -66,9 +66,13 @@ fn test_rename_propagates_to_matching_instance() {
     // both `name` and `display_name` updated to the new value.
     let mut records = vec![agent("persona-1", "Paul", Some("Paul"))];
 
-    let changed = propagate_persona_name_rename(&mut records, "persona-1", "Paul", "Paul Atreides");
+    let renamed = propagate_persona_name_rename(&mut records, "persona-1", "Paul", "Paul Atreides");
 
-    assert!(changed, "must report that a record was modified");
+    assert_eq!(
+        renamed,
+        vec!["pubkey-Paul".to_string()],
+        "must report the renamed record's pubkey"
+    );
     assert_eq!(records[0].name, "Paul Atreides", "name must be updated");
     assert_eq!(
         records[0].display_name,
@@ -86,9 +90,12 @@ fn test_rename_skips_pool_named_instance() {
     // persona display_name. It must keep its individualised name.
     let mut records = vec![agent("persona-1", "Birch", Some("Birch"))];
 
-    let changed = propagate_persona_name_rename(&mut records, "persona-1", "Paul", "Paul Atreides");
+    let renamed = propagate_persona_name_rename(&mut records, "persona-1", "Paul", "Paul Atreides");
 
-    assert!(!changed, "pool-named instance must not be marked changed");
+    assert!(
+        renamed.is_empty(),
+        "pool-named instance must not be reported as renamed"
+    );
     assert_eq!(records[0].name, "Birch", "pool name must be preserved");
     assert_eq!(
         records[0].display_name,
@@ -128,18 +135,25 @@ fn test_rename_only_affects_linked_persona() {
 }
 
 #[test]
-fn test_rename_sync_params_would_carry_new_name() {
-    // After propagation, `record.name` equals the new display_name. The
-    // relay-profile sync step reads `record.name.clone()` to build its
-    // params, so the relay will be updated with the renamed display_name.
-    let mut records = vec![agent("persona-1", "Paul", Some("Paul"))];
+fn test_rename_renames_all_matching_instances_in_one_pass() {
+    // Several instances may carry the definition name (multi-instance deploys
+    // without a name pool): one call renames every match and reports each
+    // pubkey, which is what the relay profile sync collection keys on.
+    let mut records = vec![
+        agent("persona-1", "Paul", Some("Paul")),
+        agent("persona-1", "Paul", Some("Paul")),
+        agent("persona-1", "Birch", Some("Birch")),
+    ];
+    records[1].pubkey = "pubkey-Paul-2".to_string();
 
-    propagate_persona_name_rename(&mut records, "persona-1", "Paul", "Duncan Idaho");
+    let renamed = propagate_persona_name_rename(&mut records, "persona-1", "Paul", "Duncan Idaho");
 
-    // This is exactly what the sync params collection reads:
-    let name_for_relay_sync = records[0].name.clone();
     assert_eq!(
-        name_for_relay_sync, "Duncan Idaho",
-        "relay sync params must carry the renamed display_name"
+        renamed,
+        vec!["pubkey-Paul".to_string(), "pubkey-Paul-2".to_string()],
+        "every matching instance's pubkey must be reported"
     );
+    assert_eq!(records[0].name, "Duncan Idaho");
+    assert_eq!(records[1].name, "Duncan Idaho");
+    assert_eq!(records[2].name, "Birch", "pool-named instance untouched");
 }

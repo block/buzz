@@ -130,14 +130,14 @@ pub struct UpdatePersonaResult {
 /// Only instances whose current `name` equals `old_display_name` are updated;
 /// pool-named instances (e.g. "Birch", "Compass") keep their individualised name.
 /// Updates both `record.name` (relay display name) and `record.display_name`.
-/// Returns `true` if any record was modified.
+/// Returns the pubkeys of the records that were renamed.
 fn propagate_persona_name_rename(
     records: &mut [ManagedAgentRecord],
     persona_id: &str,
     old_display_name: &str,
     new_display_name: &str,
-) -> bool {
-    let mut any_changed = false;
+) -> Vec<String> {
+    let mut renamed = Vec::new();
     for record in records.iter_mut() {
         if record.persona_id.as_deref() != Some(persona_id) {
             continue;
@@ -147,9 +147,9 @@ fn propagate_persona_name_rename(
         }
         record.name = new_display_name.to_string();
         record.display_name = Some(new_display_name.to_string());
-        any_changed = true;
+        renamed.push(record.pubkey.clone());
     }
-    any_changed
+    renamed
 }
 
 #[tauri::command]
@@ -216,11 +216,8 @@ pub async fn update_persona(
             apply_persona_behavior(persona, input.behavior)?;
             persona.updated_at = now_iso();
 
+            let result = persona.clone();
             save_personas(&app, &personas)?;
-            let result = personas
-                .into_iter()
-                .find(|record| record.id == input.id)
-                .ok_or_else(|| format!("agent {} disappeared unexpectedly", input.id))?;
 
             // For pack-backed personas, also write the edit back to the source
             // `.persona.md` so that launch sync (which reads the file) becomes a
@@ -238,27 +235,26 @@ pub async fn update_persona(
                 let mut agents_modified = false;
                 let workspace_relay = crate::relay::relay_ws_url_with_override(&state);
 
+                // Propagate the display_name rename to instances that still
+                // carry the old definition display_name (pool-named instances
+                // keep their individualised name) in one pass; the loop below
+                // only decides which records need a relay profile sync.
+                let renamed: Vec<String> = if name_changed {
+                    propagate_persona_name_rename(
+                        &mut records,
+                        &result.id,
+                        &old_display_name,
+                        &result.display_name,
+                    )
+                } else {
+                    Vec::new()
+                };
+
                 for record in records.iter_mut() {
                     if record.persona_id.as_deref() != Some(&result.id) {
                         continue;
                     }
-                    let mut record_changed = false;
-
-                    // Propagate display_name rename to instances that still carry
-                    // the old definition display_name. Pool-named instances keep
-                    // their individualised name — only those whose `name` equals
-                    // the old definition name are updated.
-                    if name_changed {
-                        let renamed = propagate_persona_name_rename(
-                            std::slice::from_mut(record),
-                            &result.id,
-                            &old_display_name,
-                            &result.display_name,
-                        );
-                        if renamed {
-                            record_changed = true;
-                        }
-                    }
+                    let mut record_changed = renamed.contains(&record.pubkey);
 
                     if avatar_changed {
                         // Update the persisted avatar so reconciliation on next

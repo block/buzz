@@ -254,38 +254,14 @@ async fn start_local_agent_with_preflight(
         return Err(format!("agent {pubkey} is no longer a local agent"));
     }
     // Re-snapshot the persona onto the record at every spawn so the agent always
-    // starts with the current persona config (system_prompt, model, provider).
-    // This clears the "out of date" drift badge without requiring a
-    // delete+recreate. `record.env_vars` is NOT rewritten: it holds agent-level
-    // overrides only, and spawn merges the live persona env underneath at read
-    // time — so persona env edits refresh here too. When the persona leaves
-    // model or provider blank, the agent record's own configured values are
-    // preserved so a user-set model/provider is never clobbered by an
-    // unconfigured persona.
+    // starts with the current persona config (system_prompt, model, provider,
+    // runtime). This clears the "out of date" drift badge without requiring a
+    // delete+recreate. See `apply_persona_snapshot` for the precedence and
+    // env-override self-heal rules.
     if let Some(persona_id) = record.persona_id.clone() {
         let personas = load_personas(app).unwrap_or_default();
         if let Some(persona) = personas.iter().find(|p| p.id == persona_id) {
-            let snapshot =
-                crate::managed_agents::persona_events::persona_snapshot_with_agent_config_fallback(
-                    persona,
-                    record.model.as_deref(),    // fallback: record.model
-                    record.provider.as_deref(), // fallback: record.provider
-                );
-            if let Some(prompt) = snapshot.system_prompt {
-                record.system_prompt = Some(prompt);
-            }
-            record.model = snapshot.model;
-            record.provider = snapshot.provider;
-            record.runtime = snapshot.runtime;
-            // Self-heal records written before env refresh: persona env used to
-            // be baked into `record.env_vars` at create/spawn, turning inherited
-            // values into pseudo-overrides that shadow later persona edits. An
-            // override equal to the persona's current value is indistinguishable
-            // from inheritance, so drop it and let the live merge supply it.
-            record
-                .env_vars
-                .retain(|k, v| persona.env_vars.get(k) != Some(v));
-            record.persona_source_version = Some(snapshot.source_version);
+            crate::managed_agents::persona_events::apply_persona_snapshot(record, persona);
             record.updated_at = crate::util::now_iso();
         }
     }
