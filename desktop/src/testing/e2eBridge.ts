@@ -128,6 +128,9 @@ type E2eConfig = {
     applyWorkspaceDelayMs?: number;
     openDmDelayMs?: number;
     sendMessageDelayMs?: number;
+    /** Delay (ms) after snapshotting a thread-replies page so E2E tests can
+     *  deliver live reply/aux events while an older response is in flight. */
+    threadRepliesDelayMs?: number;
     usersBatchDelayMs?: number;
     /** Delay (ms) applied to continuation channel-window requests so e2e
      *  tests can observe the in-flight prepend window. 0/undefined = instant. */
@@ -3663,6 +3666,10 @@ async function handleGetThreadReplies(
           event_id: page[page.length - 1].id,
         }
       : null;
+  const delayMs = config?.mock?.threadRepliesDelayMs ?? 0;
+  if (delayMs > 0) {
+    await new Promise((resolve) => window.setTimeout(resolve, delayMs));
+  }
 
   return { events: page, next_cursor: nextCursor };
 }
@@ -7171,7 +7178,7 @@ async function handleSendChannelMessage(
       : 1;
 
     const event: RelayEvent = {
-      id: crypto.randomUUID().replace(/-/g, ""),
+      id: mockEventId(),
       pubkey: mockPubkey,
       created_at: createdAt,
       kind,

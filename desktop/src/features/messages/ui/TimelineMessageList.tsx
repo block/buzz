@@ -453,17 +453,6 @@ function VirtualizedTimelineRows({
     });
     return byId;
   }, [items]);
-  const persistentIndexes = React.useMemo(
-    () =>
-      items.flatMap((item, index) =>
-        item.kind === "timeline-item" &&
-        item.item.kind === "message" &&
-        item.item.entry.summary
-          ? [index]
-          : [],
-      ),
-    [items],
-  );
 
   React.useLayoutEffect(() => {
     const scroller = hostRef.current?.firstElementChild;
@@ -573,8 +562,7 @@ function VirtualizedTimelineRows({
         ref={listRef}
         className="h-full min-h-0 w-full overflow-y-auto overflow-x-hidden overscroll-contain px-2"
         data={items}
-        bufferSize={1_500}
-        keepMounted={persistentIndexes}
+        bufferSize={1_000}
         shift={isPrepend}
         onScroll={handleScroll}
         onScrollEnd={handleScrollEnd}

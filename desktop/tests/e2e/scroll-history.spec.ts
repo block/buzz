@@ -2021,16 +2021,11 @@ test("older-history prepend keeps the reading row fixed (no jump to oldest)", as
   );
 });
 
-// Regression: thread-summary badges must not flash during a scrollback prepend.
-// When an older page lands, the urgent render pass still paints the OLD
-// deferred message snapshot, so MessageTimeline passes `mainEntries=undefined`
-// and TimelineMessageList rebuilds entries itself. That fallback used to drop
-// the relay summary map — and since thread replies are usually not local
-// timeline rows, every relay-driven badge unmounted for the whole deferred
-// window and remounted when the heavy render committed (the visible flash).
-// A MutationObserver is commit-granular, so it catches even a single-frame
-// unmount that a polling assertion would race past.
-test("thread summary badge survives an older-history prepend without unmounting", async ({
+// Regression: relay-backed thread summaries must survive in timeline data when
+// their virtual rows unmount during scrollback. The row is expected to leave the
+// DOM outside the bounded window, then render once (with the same summary) when
+// the reader returns.
+test("thread summary badge survives a virtualized older-history prepend", async ({
   page,
 }, testInfo) => {
   testInfo.setTimeout(60_000);
@@ -2074,22 +2069,6 @@ test("thread summary badge survives an older-history prepend without unmounting"
   const oldestBefore = await oldestRenderedIndex();
   expect(oldestBefore).not.toBeNull();
 
-  // Arm the observer AFTER the initial window has settled, so the only
-  // mutations it sees are the prepend landing and any (buggy) badge unmount.
-  await timeline.evaluate((element, selector) => {
-    const scroller = element as HTMLDivElement;
-    const win = window as typeof window & {
-      __SUMMARY_FLASH_PROBE__?: { missingCommits: number };
-    };
-    const probe = { missingCommits: 0 };
-    win.__SUMMARY_FLASH_PROBE__ = probe;
-    new MutationObserver(() => {
-      if (!scroller.querySelector(selector)) {
-        probe.missingCommits += 1;
-      }
-    }).observe(scroller, { childList: true, subtree: true });
-  }, badgeSelector);
-
   // Scroll back until a genuinely older page has landed.
   await timeline.hover();
   await expect
@@ -2103,16 +2082,16 @@ test("thread summary badge survives an older-history prepend without unmounting"
     )
     .toBeLessThan(oldestBefore ?? Number.POSITIVE_INFINITY);
 
-  // The badge row must have stayed mounted through every DOM commit of the
-  // prepend — zero commits observed it missing — and still be attached now.
-  const missingCommits = await page.evaluate(
-    () =>
-      (
-        window as typeof window & {
-          __SUMMARY_FLASH_PROBE__?: { missingCommits: number };
-        }
-      ).__SUMMARY_FLASH_PROBE__?.missingCommits,
-  );
-  expect(missingCommits).toBe(0);
+  // Newer history, including the summary row, is no longer pinned offscreen.
+  await expect(timeline.locator(badgeSelector)).toHaveCount(0);
+
+  // Returning to the bottom remounts the row from stable timeline data; no
+  // persistent DOM node is required for summary correctness.
+  await timeline.evaluate((element) => {
+    const scroller = element as HTMLDivElement;
+    scroller.scrollTop = scroller.scrollHeight;
+    scroller.dispatchEvent(new Event("scroll", { bubbles: true }));
+  });
+  await expect(timeline.locator(badgeSelector)).toBeVisible();
   await expect(timeline.locator(badgeSelector)).toHaveCount(1);
 });

@@ -307,6 +307,69 @@ test.describe("list virtualization", () => {
   });
 });
 
+test("thread-heavy history keeps a bounded mounted window", async ({
+  page,
+}) => {
+  await installMockBridge(page);
+  await page.goto("/");
+  await page.waitForFunction(
+    () => typeof window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__ === "function",
+  );
+
+  // Seed summaries on 120 loaded roots. `keepMounted` previously pinned every
+  // one of these rows forever, so scrolling into older history retained the
+  // newer summary rows and let the DOM grow with every loaded page.
+  await page.evaluate(() => {
+    for (let index = 480; index < 600; index += 1) {
+      window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+        channelName: "deep-history",
+        content: `summary-only reply ${index}`,
+        parentEventId: `mock-deep-history-${index}`,
+      });
+    }
+  });
+
+  await page.getByTestId("channel-deep-history").click();
+  const timeline = page.getByTestId("message-timeline");
+  await expect(timeline.locator("[data-message-id]").first()).toBeVisible();
+
+  // Emit after opening so the live summary path updates every loaded root,
+  // independent of the relay page's summary cap.
+  await page.evaluate(() => {
+    for (let index = 480; index < 600; index += 1) {
+      window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+        channelName: "deep-history",
+        content: `live summary-only reply ${index}`,
+        parentEventId: `mock-deep-history-${index}`,
+      });
+    }
+  });
+  await page.waitForTimeout(500);
+
+  await timeline.evaluate(async (element) => {
+    const scroller = element as HTMLDivElement;
+    // Walk through the loaded thread-heavy range so every summary row has been
+    // mounted at least once. The old keepMounted policy retained all of them.
+    for (
+      let offset = scroller.scrollHeight;
+      offset > scroller.clientHeight;
+      offset -= scroller.clientHeight
+    ) {
+      scroller.scrollTop = offset;
+      scroller.dispatchEvent(new Event("scroll", { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    scroller.scrollTop = scroller.scrollHeight / 3;
+    scroller.dispatchEvent(new Event("scroll", { bubbles: true }));
+  });
+  await page.waitForTimeout(300);
+
+  const mounted = timeline.locator("[data-message-id]");
+  await expect(mounted).not.toHaveCount(0);
+  const mountedCount = await mounted.count();
+  expect(mountedCount).toBeLessThan(30);
+});
+
 test("stationary rich-row resize preserves the visible reading anchor", async ({
   page,
 }) => {
