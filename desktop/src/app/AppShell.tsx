@@ -55,6 +55,8 @@ import { useArchiveSync } from "@/features/local-archive/archiveSyncManager";
 import { useObserverArchiveSeed } from "@/features/local-archive/useObserverArchiveSeed";
 import { useAgentMetricArchiveSeed } from "@/features/local-archive/useAgentMetricArchiveSeed";
 import { useProfileQuery } from "@/features/profile/hooks";
+import { useSendFeedback } from "@/features/settings/hooks/useSendFeedback";
+import { SendFeedbackDialog } from "@/features/settings/ui/SendFeedbackDialog";
 import {
   DEFAULT_SETTINGS_SECTION,
   type SettingsSection,
@@ -110,6 +112,8 @@ export function AppShell() {
   const [browseDialogType, setBrowseDialogType] =
     React.useState<BrowseDialogType>(null);
   const [isCreateChannelOpen, setIsCreateChannelOpen] = React.useState(false);
+  const [isSendFeedbackOpen, setIsSendFeedbackOpen] = React.useState(false);
+  const sendFeedback = useSendFeedback();
   const [isHuddleDrawerOpen, setIsHuddleDrawerOpen] = React.useState(false);
   const mainInsetRef = React.useRef<HTMLElement>(null);
   const location = useLocation();
@@ -767,6 +771,7 @@ export function AppShell() {
                           onNewMessage={handleOpenNewDm}
                           onCreateChannelOpenChange={setIsCreateChannelOpen}
                           onOpenAddCommunity={() => setIsAddCommunityOpen(true)}
+                          onSendFeedback={() => setIsSendFeedbackOpen(true)}
                           onUpdateCommunity={communitiesHook.updateCommunity}
                           onRemoveCommunity={communitiesHook.removeCommunity}
                           onSwitchCommunity={handleSwitchCommunity}
@@ -923,6 +928,20 @@ export function AppShell() {
                       onSelectChannel={(channelId) => {
                         void goChannel(channelId);
                       }}
+                    />
+                    <SendFeedbackDialog
+                      attachedImageUrl={sendFeedback.attachedImage?.url ?? null}
+                      isPending={sendFeedback.isPending}
+                      onAttachImage={sendFeedback.attachImage}
+                      onOpenChange={(open) => {
+                        setIsSendFeedbackOpen(open);
+                        if (!open) {
+                          sendFeedback.reset();
+                        }
+                      }}
+                      onRemoveImage={sendFeedback.removeImage}
+                      onSubmit={sendFeedback.submit}
+                      open={isSendFeedbackOpen}
                     />
                   </SidebarProvider>
                 </div>
