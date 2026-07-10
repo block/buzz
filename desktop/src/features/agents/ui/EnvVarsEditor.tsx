@@ -12,6 +12,18 @@ import {
 export type EnvVarsValue = Record<string, string>;
 
 /**
+ * A single baked / build-time env row passed as an inherited default.
+ * The value is already masked server-side for secrets (`masked === true`).
+ */
+export type InheritedEnvRow = {
+  key: string;
+  /** Display value — real value or `••••••` for masked keys. */
+  value: string;
+  /** True when Rust replaced the real value with the mask placeholder. */
+  masked: boolean;
+};
+
+/**
  * Build a rows array from a value record, optionally skipping a set of keys.
  * Exported for unit tests.
  */
@@ -133,6 +145,21 @@ type EnvVarsEditorProps = {
    * it is set. Only acts on keys that appear in `requiredKeys`.
    */
   focusKey?: string;
+  /**
+   * Read-only rows for baked / build-time inherited defaults. Displayed after
+   * required rows and before user-managed rows. A local row whose key matches
+   * an inherited row takes precedence — the inherited row is hidden and an
+   * "Overrides build default" hint is shown beneath the local row instead.
+   *
+   * **Invariant:** these rows are purely display; they never enter `rows` state
+   * and are never included in `buildRecord` / `onChange` output. Nothing baked
+   * is ever written into `global-agent-config.json`.
+   *
+   * Opt-in — agent create/edit dialogs do not pass this prop and are untouched.
+   */
+  inheritedRows?: readonly InheritedEnvRow[];
+  /** Label for the inherited-row tag (e.g. "build"). Defaults to "build". */
+  inheritedRowsLabel?: string;
 };
 
 type Row = { id: string; key: string; value: string };
@@ -156,6 +183,8 @@ export function EnvVarsEditor({
   requiredKeys = [],
   fileSatisfiedKeys = [],
   focusKey,
+  inheritedRows = [],
+  inheritedRowsLabel = "build",
 }: EnvVarsEditorProps) {
   // Keys that render as their own special rows (required amber rows or
   // file-satisfied read-only rows). These must NEVER enter `rows` state —
@@ -417,10 +446,64 @@ export function EnvVarsEditor({
           </div>
         ))}
 
+        {/* Inherited baked-build rows — read-only, visible value (pre-masked by Rust).
+            Hidden when a local user row has the same key (local wins). */}
+        {inheritedRows
+          .filter((irow) => !rows.some((r) => r.key === irow.key))
+          .map((irow) => (
+            <div key={irow.key} className="space-y-1">
+              <div className="flex items-center gap-2">
+                <div
+                  className={cn(
+                    "flex min-h-11 flex-1 items-center gap-1.5 px-3",
+                    PERSONA_FIELD_SHELL_CLASS,
+                    "border-muted-foreground/20 bg-muted/20",
+                  )}
+                >
+                  <Lock
+                    className="h-3 w-3 shrink-0 text-muted-foreground/40"
+                    aria-hidden
+                  />
+                  <span
+                    className="font-mono text-sm leading-6 text-foreground/60"
+                    data-testid="env-vars-inherited-key"
+                  >
+                    {irow.key}
+                  </span>
+                  <span className="ml-1 rounded-sm bg-muted px-1 py-0.5 text-2xs font-medium text-muted-foreground">
+                    Inherited from {inheritedRowsLabel}
+                  </span>
+                </div>
+                <div
+                  className={cn(
+                    "flex min-h-11 flex-[2] items-center px-3",
+                    PERSONA_FIELD_SHELL_CLASS,
+                    "opacity-60",
+                  )}
+                >
+                  <span
+                    className={cn(
+                      "font-mono text-sm",
+                      irow.masked
+                        ? "text-muted-foreground/50"
+                        : "text-foreground/70",
+                    )}
+                    data-testid="env-vars-inherited-value"
+                  >
+                    {irow.value}
+                  </span>
+                </div>
+                {/* Spacer to align with the remove-button column */}
+                <div className="h-9 w-9 shrink-0" aria-hidden />
+              </div>
+            </div>
+          ))}
+
         {/* User-managed rows */}
         {rows.length === 0 &&
         requiredKeys.length === 0 &&
-        fileSatisfiedKeys.length === 0 ? (
+        fileSatisfiedKeys.length === 0 &&
+        inheritedRows.length === 0 ? (
           <p className="text-xs italic text-muted-foreground">
             No variables set.
           </p>
@@ -494,6 +577,19 @@ export function EnvVarsEditor({
                   </span>
                 </p>
               ) : null}
+              {(() => {
+                if (row.key.length === 0) return null;
+                const override = inheritedRows.find(
+                  (irow) => irow.key === row.key,
+                );
+                if (!override) return null;
+                return (
+                  <p className="ml-1 text-xs text-muted-foreground">
+                    Overrides {inheritedRowsLabel} default{" "}
+                    <span className="font-mono">{override.value}</span>
+                  </p>
+                );
+              })()}
             </div>
           );
         })}

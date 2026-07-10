@@ -21,6 +21,8 @@ import { getBakedBuildEnv, type BakedEnvEntry } from "@/shared/api/tauri";
 import { globalAgentConfigQueryKey } from "@/features/agents/useGlobalAgentConfig";
 import { useAcpRuntimesQuery } from "@/features/agents/hooks";
 import { EnvVarsEditor } from "@/features/agents/ui/EnvVarsEditor";
+import type { InheritedEnvRow } from "@/features/agents/ui/EnvVarsEditor";
+import { getBakedProviderInheritLabel } from "@/features/agents/ui/bakedEnvHelpers";
 import {
   AUTO_PROVIDER_DROPDOWN_VALUE,
   CUSTOM_PROVIDER_DROPDOWN_VALUE,
@@ -46,6 +48,17 @@ const EMPTY_CONFIG: GlobalAgentConfig = {
   provider: null,
   model: null,
 };
+
+/**
+ * Baked env keys that map to structured fields (provider/model/effort dropdowns).
+ * These are routed to their own UI controls and must NOT appear as generic
+ * inherited rows in the env editor.
+ */
+const BAKED_STRUCTURED_KEYS = new Set([
+  "BUZZ_AGENT_PROVIDER",
+  "BUZZ_AGENT_MODEL",
+  BUZZ_AGENT_THINKING_EFFORT,
+]);
 
 type SaveState = "idle" | "saving" | "saved" | "error";
 
@@ -99,6 +112,28 @@ export function GlobalAgentConfigSettingsCard() {
         // non-critical — leave bakedEnv empty
       });
   }, []);
+
+  // Derive structured-field values and generic env rows from bakedEnv.
+  // Structured keys (BUZZ_AGENT_PROVIDER / BUZZ_AGENT_MODEL / BUZZ_AGENT_THINKING_EFFORT)
+  // route to their respective dropdown controls and are excluded from the
+  // generic inherited-rows list passed to EnvVarsEditor.
+  const bakedProvider = React.useMemo(
+    () => bakedEnv.find((e) => e.key === "BUZZ_AGENT_PROVIDER")?.value ?? null,
+    [bakedEnv],
+  );
+  const bakedModel = React.useMemo(
+    () => bakedEnv.find((e) => e.key === "BUZZ_AGENT_MODEL")?.value ?? null,
+    [bakedEnv],
+  );
+  const bakedEffort = React.useMemo(
+    () =>
+      bakedEnv.find((e) => e.key === BUZZ_AGENT_THINKING_EFFORT)?.value ?? null,
+    [bakedEnv],
+  );
+  const bakedGenericRows = React.useMemo<readonly InheritedEnvRow[]>(
+    () => bakedEnv.filter((e) => !BAKED_STRUCTURED_KEYS.has(e.key)),
+    [bakedEnv],
+  );
 
   // Resolve the buzz-agent runtime catalog entry for model discovery.
   // The card is always visible (open=true), so the query is always enabled.
@@ -213,6 +248,15 @@ export function GlobalAgentConfigSettingsCard() {
     ? CUSTOM_PROVIDER_DROPDOWN_VALUE
     : providerValue || AUTO_PROVIDER_DROPDOWN_VALUE;
 
+  // When a baked provider is present and no explicit global provider is set,
+  // relabel the zero-value option to surface the inherited-from-build value.
+  // When an explicit provider IS set, the zero-value option is still shown in
+  // the list but never selected — its label doesn't matter.
+  const providerZeroLabel = React.useMemo(() => {
+    if (!bakedProvider) return null;
+    return getBakedProviderInheritLabel(bakedProvider, providerOptions);
+  }, [bakedProvider, providerOptions]);
+
   return (
     <section className="min-w-0" data-testid="settings-global-agent-config">
       <SettingsSectionHeader
@@ -251,7 +295,9 @@ export function GlobalAgentConfigSettingsCard() {
                   key={opt.id}
                   value={opt.id || AUTO_PROVIDER_DROPDOWN_VALUE}
                 >
-                  {opt.label}
+                  {opt.id === ""
+                    ? (providerZeroLabel ?? opt.label)
+                    : opt.label}
                 </option>
               ))}
               <option value={CUSTOM_PROVIDER_DROPDOWN_VALUE}>
@@ -277,6 +323,7 @@ export function GlobalAgentConfigSettingsCard() {
             <AgentModelField
               disabled={false}
               discoveredModelOptions={discoveredModelOptions}
+              globalModel={bakedModel ?? undefined}
               id="global-agent-model"
               isCustomModelEditing={isCustomModelEditing}
               isRequired={false}
@@ -308,6 +355,7 @@ export function GlobalAgentConfigSettingsCard() {
                     effortDefault={effortDefault}
                     effortValid={effortValid}
                     htmlFor="global-agent-thinking-effort"
+                    inheritedEffort={bakedEffort ?? undefined}
                     label="Default thinking / effort"
                     onChange={(value) => {
                       setConfig((prev) => {
@@ -352,58 +400,13 @@ export function GlobalAgentConfigSettingsCard() {
                     : next;
                 handleEnvVarsChange(merged);
               }}
+              inheritedRows={bakedGenericRows}
+              inheritedRowsLabel="build"
               label="Global environment variables"
               helperText="Injected into all agents as the lowest-priority layer. Per-agent values override these."
             />
           </div>
         </SettingsOptionGroup>
-      )}
-
-      {/* Baked build defaults — only visible in internal (Block) builds.
-          OSS builds return an empty array, so this section is hidden entirely. */}
-      {bakedEnv.length > 0 && (
-        <div className="mt-4">
-          <SettingsOptionGroup>
-            <div className="p-3">
-              <p className="mb-1.5 text-xs font-medium text-foreground">
-                Baked build defaults
-              </p>
-              <p className="mb-2 text-xs text-muted-foreground">
-                Set by your build. Override any of these above.
-              </p>
-              <div className="flex flex-col gap-1">
-                {bakedEnv.map((entry) => {
-                  const friendlyLabel =
-                    entry.key === "BUZZ_AGENT_PROVIDER"
-                      ? "Baked provider"
-                      : entry.key === "BUZZ_AGENT_MODEL"
-                        ? "Baked model"
-                        : null;
-                  return (
-                    <div
-                      className="flex items-baseline gap-2 font-mono text-xs"
-                      key={entry.key}
-                    >
-                      <code className="shrink-0 text-muted-foreground">
-                        {friendlyLabel ?? entry.key}
-                      </code>
-                      <span className="text-muted-foreground">=</span>
-                      <code
-                        className={
-                          entry.masked
-                            ? "text-muted-foreground/50"
-                            : "text-foreground"
-                        }
-                      >
-                        {entry.value}
-                      </code>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-          </SettingsOptionGroup>
-        </div>
       )}
 
       {/* Save bar */}

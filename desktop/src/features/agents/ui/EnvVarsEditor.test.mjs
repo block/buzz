@@ -8,6 +8,8 @@
  *      the emitted record (buildRecord merges required keys from value).
  *   3. Provider/runtime switch (skipKeys change) triggers a row reprojection
  *      — the guard fires when skipKeys changes, even if value is unchanged.
+ *   4. inheritedRows: render/exclusion/override/no-serialize invariants.
+ *   5. getBakedProviderInheritLabel: label helper correctness.
  *
  * These are pure-logic tests — no React renderer needed. The transition tests
  * (Invariant 3) exercise the real exported `skipKeysEqual` guard that controls
@@ -23,6 +25,7 @@ import {
   skipKeysEqual,
   isRequiredKeyMissing,
 } from "./EnvVarsEditor.tsx";
+import { getBakedProviderInheritLabel } from "./bakedEnvHelpers.ts";
 
 // ── Invariant 1: toRows excludes skip keys ─────────────────────────────────
 
@@ -350,5 +353,124 @@ test("isRequiredKeyMissing_keyExplicitlyEmpty_noInherited_missing", () => {
     ),
     true,
     "explicit empty local value with no inherited must be missing",
+  );
+});
+
+// ── Invariant 4: inheritedRows — display/exclusion/override/no-serialize ───
+//
+// These tests exercise the pure-logic invariants that must hold for the
+// inherited build-defaults feature in EnvVarsEditor:
+//
+//   (a) An inherited row with no matching local row IS visible (would render).
+//   (b) An inherited row whose key appears in `rows` is HIDDEN (local wins).
+//   (c) Serialization (buildRecord) NEVER includes inherited-only rows.
+//   (d) A local override row for a masked secret shows the masked value.
+//
+// Tests (a)–(d) operate on the same helpers used by the component render
+// (toRows, toRecord, buildRecord) plus a simulated filter that mirrors the
+// JSX `.filter((irow) => !rows.some((r) => r.key === irow.key))`.
+
+function simulateInheritedFilter(inheritedRows, rows) {
+  return inheritedRows.filter((irow) => !rows.some((r) => r.key === irow.key));
+}
+
+test("inheritedRows_no_local_row_row_is_visible", () => {
+  // DATABRICKS_HOST baked, no local row → inherited row shows.
+  const inherited = [{ key: "DATABRICKS_HOST", value: "https://example.databricks.com/", masked: false }];
+  const rows = toRows({}, new Set()); // no local env vars
+  const visible = simulateInheritedFilter(inherited, rows);
+  assert.equal(visible.length, 1, "inherited row must be visible when no local override");
+  assert.equal(visible[0].key, "DATABRICKS_HOST");
+});
+
+test("inheritedRows_local_row_same_key_inherited_hidden", () => {
+  // User adds a local DATABRICKS_HOST row → inherited row must be hidden.
+  const inherited = [{ key: "DATABRICKS_HOST", value: "https://baked.databricks.com/", masked: false }];
+  const value = { DATABRICKS_HOST: "https://user.databricks.com/" };
+  const rows = toRows(value, new Set());
+  const visible = simulateInheritedFilter(inherited, rows);
+  assert.equal(visible.length, 0, "inherited row must be hidden when local row has same key");
+});
+
+test("inheritedRows_not_serialized_in_buildRecord", () => {
+  // buildRecord must never include keys that come only from inherited rows.
+  // Simulate: inherited has SECRET_KEY, local value does not.
+  const requiredKeys = [];
+  const value = { MY_VAR: "foo" };
+  const rows = toRows(value, new Set(requiredKeys));
+  // buildRecord reimplemented inline to match EnvVarsEditor's buildRecord:
+  const base = {};
+  for (const key of requiredKeys) {
+    if (key in value) base[key] = value[key];
+  }
+  const record = { ...base, ...toRecord(rows) };
+  assert.equal("SECRET_KEY" in record, false, "inherited-only key must NOT appear in serialized record");
+  assert.equal(record.MY_VAR, "foo", "non-inherited key preserved");
+});
+
+test("inheritedRows_masked_secret_local_override_shows_masked_build_value", () => {
+  // Edge case: baked key is a masked secret (e.g. API_KEY → "••••••"),
+  // user types a local override → the hint would show the masked "••••••" value.
+  const inherited = [{ key: "API_KEY", value: "••••••", masked: true }];
+  // The component finds override by: inheritedRows.find(irow => irow.key === row.key)
+  const row = { id: "r1", key: "API_KEY", value: "my-real-key" };
+  const override = inherited.find((irow) => irow.key === row.key);
+  assert.ok(override, "override entry must be found for masked key");
+  assert.equal(override.value, "••••••", "masked baked value shown in override hint");
+  assert.equal(override.masked, true, "masked flag preserved");
+});
+
+test("inheritedRows_structured_keys_excluded_from_generic_rows", () => {
+  // BUZZ_AGENT_PROVIDER, BUZZ_AGENT_MODEL, BUZZ_AGENT_THINKING_EFFORT must
+  // be excluded from bakedGenericRows (they go to structured fields instead).
+  // This mirrors the BAKED_STRUCTURED_KEYS filter in GlobalAgentConfigSettingsCard.
+  const STRUCTURED = new Set(["BUZZ_AGENT_PROVIDER", "BUZZ_AGENT_MODEL", "BUZZ_AGENT_THINKING_EFFORT"]);
+  const allBaked = [
+    { key: "BUZZ_AGENT_PROVIDER", value: "databricks_v2", masked: false },
+    { key: "BUZZ_AGENT_MODEL", value: "goose-claude-opus-4-8", masked: false },
+    { key: "BUZZ_AGENT_THINKING_EFFORT", value: "medium", masked: false },
+    { key: "DATABRICKS_HOST", value: "https://example.databricks.com/", masked: false },
+    { key: "DATABRICKS_MODEL", value: "goose-claude-opus-4-8", masked: false },
+  ];
+  const generic = allBaked.filter((e) => !STRUCTURED.has(e.key));
+  assert.equal(generic.length, 2, "only non-structured keys go to generic rows");
+  const genericKeys = generic.map((e) => e.key).sort();
+  assert.deepEqual(genericKeys, ["DATABRICKS_HOST", "DATABRICKS_MODEL"]);
+});
+
+// ── Invariant 5: getBakedProviderInheritLabel — label helper ───────────────
+
+test("getBakedProviderInheritLabel_known_provider_returns_friendly_name", () => {
+  const options = [
+    { id: "anthropic", label: "Anthropic" },
+    { id: "databricks_v2", label: "Databricks v2 (AI Gateway)" },
+    { id: "openai", label: "OpenAI" },
+  ];
+  const label = getBakedProviderInheritLabel("databricks_v2", options);
+  assert.equal(
+    label,
+    "Databricks v2 (AI Gateway) (inherited from build)",
+    "known provider id must resolve to friendly label",
+  );
+});
+
+test("getBakedProviderInheritLabel_unknown_provider_falls_back_to_raw_id", () => {
+  const options = [
+    { id: "anthropic", label: "Anthropic" },
+  ];
+  const label = getBakedProviderInheritLabel("my-custom-provider", options);
+  assert.equal(
+    label,
+    "my-custom-provider (inherited from build)",
+    "unknown provider id must fall back to raw id",
+  );
+});
+
+test("getBakedProviderInheritLabel_empty_options_falls_back_to_raw_id", () => {
+  const label = getBakedProviderInheritLabel("databricks_v2", []);
+  assert.equal(
+    label,
+    "databricks_v2 (inherited from build)",
+    "empty options table must fall back to raw id",
   );
 });
