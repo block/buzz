@@ -128,9 +128,7 @@ fn path_is_dev_nest(path: &std::path::Path) -> bool {
 /// - [`init_nest_dir`] has not been called yet (unit tests, home dir
 ///   unresolvable) — the fallback path is always the prod nest.
 pub fn nest_is_dev() -> bool {
-    nest_dir()
-        .map(|p| path_is_dev_nest(&p))
-        .unwrap_or(false)
+    nest_dir().map(|p| path_is_dev_nest(&p)).unwrap_or(false)
 }
 
 /// Creates the Buzz nest at `~/.buzz` if it doesn't already exist.
