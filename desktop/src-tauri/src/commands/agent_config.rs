@@ -275,11 +275,13 @@ pub struct BakedEnvEntry {
 ///
 /// Allowlist (case-insensitive):
 /// - `BUZZ_AGENT_PROVIDER`, `BUZZ_AGENT_MODEL` — agent runtime selection
+/// - `BUZZ_AGENT_THINKING_EFFORT` — non-secret enum (low/medium/high)
 /// - `DATABRICKS_HOST`, `DATABRICKS_MODEL` — Block non-secret defaults
 fn is_safe_to_reveal(key: &str) -> bool {
     const SAFE_KEYS: &[&str] = &[
         "BUZZ_AGENT_PROVIDER",
         "BUZZ_AGENT_MODEL",
+        "BUZZ_AGENT_THINKING_EFFORT",
         "DATABRICKS_HOST",
         "DATABRICKS_MODEL",
     ];
@@ -974,12 +976,27 @@ mod tests {
     }
 
     #[test]
+    fn baked_env_thinking_effort_is_unmasked() {
+        // BUZZ_AGENT_THINKING_EFFORT is a non-secret enum — must not be masked.
+        let entries = baked_env_from_map(&[("BUZZ_AGENT_THINKING_EFFORT", "medium")]);
+        assert_eq!(entries.len(), 1);
+        let effort = entries
+            .iter()
+            .find(|e| e.key == "BUZZ_AGENT_THINKING_EFFORT")
+            .unwrap();
+        assert_eq!(effort.value, "medium");
+        assert!(!effort.masked);
+    }
+
+    #[test]
     fn baked_env_allowlist_is_case_insensitive() {
         // Known-safe keys — case-insensitive match must allow them.
         assert!(super::is_safe_to_reveal("buzz_agent_provider"));
         assert!(super::is_safe_to_reveal("BUZZ_AGENT_PROVIDER"));
         assert!(super::is_safe_to_reveal("buzz_agent_model"));
         assert!(super::is_safe_to_reveal("BUZZ_AGENT_MODEL"));
+        assert!(super::is_safe_to_reveal("buzz_agent_thinking_effort"));
+        assert!(super::is_safe_to_reveal("BUZZ_AGENT_THINKING_EFFORT"));
         assert!(super::is_safe_to_reveal("databricks_host"));
         assert!(super::is_safe_to_reveal("DATABRICKS_HOST"));
         assert!(super::is_safe_to_reveal("databricks_model"));

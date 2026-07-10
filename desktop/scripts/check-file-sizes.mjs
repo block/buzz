@@ -303,7 +303,9 @@ const overrides = new Map([
   // global-agent-config: get_agent_config_surface / write_agent_config_field /
   // put_agent_session_config commands + GlobalAgentConfig serde types. New file
   // in this PR; queued to split with the command module refactor.
-  ["src-tauri/src/commands/agent_config.rs", 1002],
+  // +17: baked-env-global-unify: BUZZ_AGENT_THINKING_EFFORT added to
+  // is_safe_to_reveal allowlist + baked_env_thinking_effort_is_unmasked test.
+  ["src-tauri/src/commands/agent_config.rs", 1019],
   // draft-persistence predicate: submit-time `loadDraft` check + inline comment
   // + deps-array entry in submitMessage closes the never-persisted-boundary
   // defect (Thufir Pass-3 finding). Load-bearing correctness fix; queued to
