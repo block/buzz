@@ -402,12 +402,9 @@ function VirtualizedTimelineRows({
 }: VirtualizedTimelineRowsProps) {
   const listRef = React.useRef<VListHandle>(null);
   const hostRef = React.useRef<HTMLDivElement>(null);
-  const [offscreenBufferSize, setOffscreenBufferSize] = React.useState(2_000);
-  const centerAnchorRef = React.useRef<{
-    messageId: string;
-    centerOffset: number;
-  } | null>(null);
-  const isScrollingRef = React.useRef(false);
+  const [offscreenBufferSize, setOffscreenBufferSize] = React.useState(() =>
+    typeof window === "undefined" ? 1_000 : window.innerHeight,
+  );
   const hasInitialPositionedRef = React.useRef(false);
   const items = React.useMemo(
     () => buildVirtualizedItems(dayGroups, leadingContent),
@@ -489,9 +486,9 @@ function VirtualizedTimelineRows({
     const host = hostRef.current;
     if (!host) return;
     const updateBufferSize = () => {
-      // Keep two complete viewports mounted on either side so variable-height
-      // rows can render and settle before the user scrolls them into view.
-      setOffscreenBufferSize(Math.max(2_000, host.clientHeight * 2));
+      // Keep one complete viewport mounted on either side so variable-height
+      // rows can settle before they enter view without overworking measurement.
+      setOffscreenBufferSize(host.clientHeight);
     };
     updateBufferSize();
     const resizeObserver = new ResizeObserver(updateBufferSize);
@@ -499,37 +496,8 @@ function VirtualizedTimelineRows({
     return () => resizeObserver.disconnect();
   }, []);
 
-  const captureCenterAnchor = React.useCallback(() => {
-    const scroller = hostRef.current?.firstElementChild;
-    if (!(scroller instanceof HTMLDivElement)) return;
-    const scrollerRect = scroller.getBoundingClientRect();
-    const viewportCenter = scrollerRect.top + scroller.clientHeight / 2;
-    let anchor: HTMLElement | null = null;
-    let nearestDistance = Number.POSITIVE_INFINITY;
-    for (const row of scroller.querySelectorAll<HTMLElement>(
-      "[data-message-id]",
-    )) {
-      const rect = row.getBoundingClientRect();
-      if (rect.bottom < scrollerRect.top || rect.top > scrollerRect.bottom) {
-        continue;
-      }
-      const distance = Math.abs((rect.top + rect.bottom) / 2 - viewportCenter);
-      if (distance < nearestDistance) {
-        anchor = row;
-        nearestDistance = distance;
-      }
-    }
-    if (!anchor) return;
-    const rect = anchor.getBoundingClientRect();
-    centerAnchorRef.current = {
-      messageId: anchor.dataset.messageId ?? "",
-      centerOffset: (rect.top + rect.bottom) / 2 - viewportCenter,
-    };
-  }, []);
-
   const handleScroll = React.useCallback(
     (offset: number) => {
-      isScrollingRef.current = true;
       const list = listRef.current;
       if (!list) return;
       onVirtualizerRangeChanged?.();
@@ -541,51 +509,6 @@ function VirtualizedTimelineRows({
     [onAtBottomStateChange, onStartReached, onVirtualizerRangeChanged],
   );
 
-  const handleScrollEnd = React.useCallback(() => {
-    isScrollingRef.current = false;
-    captureCenterAnchor();
-  }, [captureCenterAnchor]);
-
-  React.useLayoutEffect(() => {
-    const scroller = hostRef.current?.firstElementChild;
-    const content = scroller?.firstElementChild;
-    if (
-      !(scroller instanceof HTMLDivElement) ||
-      !(content instanceof HTMLElement)
-    ) {
-      return;
-    }
-    captureCenterAnchor();
-    const resizeObserver = new ResizeObserver(() => {
-      requestAnimationFrame(() => {
-        if (isScrollingRef.current) return;
-        const anchor = centerAnchorRef.current;
-        if (!anchor) return;
-        const row = scroller.querySelector<HTMLElement>(
-          `[data-message-id="${CSS.escape(anchor.messageId)}"]`,
-        );
-        if (!row) return;
-        const scrollerRect = scroller.getBoundingClientRect();
-        const rowRect = row.getBoundingClientRect();
-        const viewportCenter = scrollerRect.top + scroller.clientHeight / 2;
-        const nextCenterOffset =
-          (rowRect.top + rowRect.bottom) / 2 - viewportCenter;
-        const delta = nextCenterOffset - anchor.centerOffset;
-        if (Math.abs(delta) > 0.5) scroller.scrollTop += delta;
-      });
-    });
-    const observeItems = () => {
-      for (const item of content.children) resizeObserver.observe(item);
-    };
-    observeItems();
-    const mutationObserver = new MutationObserver(observeItems);
-    mutationObserver.observe(content, { childList: true });
-    return () => {
-      mutationObserver.disconnect();
-      resizeObserver.disconnect();
-    };
-  }, [captureCenterAnchor]);
-
   return (
     <div className="h-full min-h-0 w-full" ref={hostRef}>
       <VList
@@ -593,9 +516,9 @@ function VirtualizedTimelineRows({
         className="h-full min-h-0 w-full overflow-y-auto overflow-x-hidden overscroll-contain px-2"
         data={items}
         bufferSize={offscreenBufferSize}
+        style={{ overflowAnchor: "none" }}
         shift={isPrepend}
         onScroll={handleScroll}
-        onScrollEnd={handleScrollEnd}
       >
         {(item) => {
           if (item.kind === "top-spacer") {
