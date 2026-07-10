@@ -1,11 +1,5 @@
 import * as React from "react";
-import {
-  ChevronDown,
-  ChevronRight,
-  Ellipsis,
-  OctagonX,
-  Trash2,
-} from "lucide-react";
+import { ChevronDown, ChevronRight, Ellipsis, OctagonX } from "lucide-react";
 
 import { formatAgentModelLabel } from "@/features/agents/lib/formatAgentModelLabel";
 import { friendlyAgentLastError } from "@/features/agents/lib/friendlyAgentLastError";
@@ -38,7 +32,6 @@ type UnifiedAgentsSectionProps = {
   isAgentsLoading: boolean;
   startingAgentPubkey: string | null;
   startingPersonaIds: ReadonlySet<string>;
-  onBulkRemoveStopped: () => void;
   onBulkStopRunning: () => void;
   onOpenAgentProfile: (
     pubkey: string,
@@ -77,7 +70,6 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
     isAgentsLoading,
     startingAgentPubkey,
     startingPersonaIds,
-    onBulkRemoveStopped,
     onBulkStopRunning,
     onOpenAgentProfile,
     onOpenPersonaProfile,
@@ -102,9 +94,6 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
 
   const runningCount = agents.filter((agent) =>
     isManagedAgentActive(agent),
-  ).length;
-  const stoppedCount = agents.filter(
-    (agent) => agent.status === "stopped" || agent.status === "not_deployed",
   ).length;
   const { groups, ungrouped, unknown } = React.useMemo(
     () => buildUnifiedGroups(personas, agents),
@@ -164,8 +153,6 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
         handleFileChange={handleFileChange}
         isActionPending={isActionPending}
         runningCount={runningCount}
-        stoppedCount={stoppedCount}
-        onBulkRemoveStopped={onBulkRemoveStopped}
         onBulkStopRunning={onBulkStopRunning}
       />
 
@@ -426,8 +413,6 @@ function SectionHeader({
   handleFileChange,
   isActionPending,
   runningCount,
-  stoppedCount,
-  onBulkRemoveStopped,
   onBulkStopRunning,
 }: {
   agentCount: number;
@@ -435,8 +420,6 @@ function SectionHeader({
   handleFileChange: (e: React.ChangeEvent<HTMLInputElement>) => void;
   isActionPending: boolean;
   runningCount: number;
-  stoppedCount: number;
-  onBulkRemoveStopped: () => void;
   onBulkStopRunning: () => void;
 }) {
   return (
@@ -478,14 +461,6 @@ function SectionHeader({
             >
               <OctagonX className="h-4 w-4" />
               Stop all running ({runningCount})
-            </DropdownMenuItem>
-            <DropdownMenuItem
-              className="text-destructive focus:text-destructive"
-              disabled={isActionPending || stoppedCount === 0}
-              onClick={onBulkRemoveStopped}
-            >
-              <Trash2 className="h-4 w-4" />
-              Remove all stopped ({stoppedCount})
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
