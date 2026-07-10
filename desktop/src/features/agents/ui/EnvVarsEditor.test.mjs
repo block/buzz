@@ -17,7 +17,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { toRows, toRecord, skipKeysEqual } from "./EnvVarsEditor.tsx";
+import {
+  toRows,
+  toRecord,
+  skipKeysEqual,
+  isRequiredKeyMissing,
+} from "./EnvVarsEditor.tsx";
 
 // ── Invariant 1: toRows excludes skip keys ─────────────────────────────────
 
@@ -261,5 +266,89 @@ test("skipKeysEqual_different_sizes_are_not_equal", () => {
     skipKeysEqual(a, b),
     false,
     "sets of different sizes are not equal",
+  );
+});
+
+// ── isRequiredKeyMissing: local-over-inherited precedence (Thufir IMPORTANT) ─
+//
+// isRequiredKeyMissing must match backend effective-env semantics:
+// - key absent from localValue → inherited decides
+// - key present in localValue (even as "") → local decides; inherited ignored
+// An explicit empty local value shadows the global/inherited key and must
+// render the amber "Required" badge, matching backend is_none_or(|v| v.is_empty()).
+
+test("isRequiredKeyMissing_keyAbsent_inheritedSet_notMissing", () => {
+  // Key not in local map at all; inherited provides it → satisfied.
+  assert.equal(
+    isRequiredKeyMissing(
+      "ANTHROPIC_API_KEY",
+      {},
+      { ANTHROPIC_API_KEY: "sk-global" },
+    ),
+    false,
+    "key absent from local and present in inherited must NOT be missing",
+  );
+});
+
+test("isRequiredKeyMissing_keyAbsent_inheritedAbsent_missing", () => {
+  // Key not in local, not in inherited → missing.
+  assert.equal(
+    isRequiredKeyMissing("ANTHROPIC_API_KEY", {}, {}),
+    true,
+    "key absent from both local and inherited must be missing",
+  );
+});
+
+test("isRequiredKeyMissing_keyExplicitlyEmpty_inheritedSet_stillMissing", () => {
+  // Key in local with ""; inherited has a real value.
+  // Local "" shadows inherited — effective value is empty → missing.
+  // This is the Thufir IMPORTANT regression case.
+  assert.equal(
+    isRequiredKeyMissing(
+      "ANTHROPIC_API_KEY",
+      { ANTHROPIC_API_KEY: "" },
+      { ANTHROPIC_API_KEY: "sk-global" },
+    ),
+    true,
+    "explicit empty local value must shadow inherited and render Required badge",
+  );
+});
+
+test("isRequiredKeyMissing_keyFilledLocally_inheritedSet_notMissing", () => {
+  // Key in local with a real value; inherited also set → locally satisfied.
+  assert.equal(
+    isRequiredKeyMissing(
+      "ANTHROPIC_API_KEY",
+      { ANTHROPIC_API_KEY: "sk-local" },
+      { ANTHROPIC_API_KEY: "sk-global" },
+    ),
+    false,
+    "locally filled key must not be missing regardless of inherited value",
+  );
+});
+
+test("isRequiredKeyMissing_keyFilledLocally_noInherited_notMissing", () => {
+  // Key in local with a real value; no inherited → locally satisfied.
+  assert.equal(
+    isRequiredKeyMissing(
+      "ANTHROPIC_API_KEY",
+      { ANTHROPIC_API_KEY: "sk-local" },
+      undefined,
+    ),
+    false,
+    "locally filled key with no inherited must not be missing",
+  );
+});
+
+test("isRequiredKeyMissing_keyExplicitlyEmpty_noInherited_missing", () => {
+  // Key in local as ""; no inherited → missing.
+  assert.equal(
+    isRequiredKeyMissing(
+      "ANTHROPIC_API_KEY",
+      { ANTHROPIC_API_KEY: "" },
+      undefined,
+    ),
+    true,
+    "explicit empty local value with no inherited must be missing",
   );
 });

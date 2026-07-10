@@ -69,6 +69,14 @@ export function skipKeysEqual(
  * Returns true when a required env key is unsatisfied — neither the agent-local
  * value nor the inherited (global / persona) value provides it.
  *
+ * Precedence mirrors the backend effective-env layering: if the key is
+ * explicitly present in `localValue` (even as `""`), the local value is
+ * authoritative — the inherited value is NOT consulted. An explicit empty local
+ * value is an intentional clear (agent env.extend() overwrites global), so the
+ * key is treated as missing even when `inheritedFrom` carries a non-empty value.
+ * Only when the key is absent from `localValue` entirely does `inheritedFrom`
+ * satisfy the requirement.
+ *
  * Used by `EnvVarsEditor` to render the amber "Required" badge on unfilled rows.
  * Exported for unit testing.
  */
@@ -77,9 +85,14 @@ export function isRequiredKeyMissing(
   localValue: EnvVarsValue,
   inheritedFrom: EnvVarsValue | undefined,
 ): boolean {
-  const local = localValue[key] ?? "";
+  if (key in localValue) {
+    // Key is explicitly present in the agent-local map — local decides.
+    // An explicit "" shadows the inherited value (effective value is empty).
+    return (localValue[key] ?? "").length === 0;
+  }
+  // Key absent from agent-local — fall back to inherited (global / persona).
   const inherited = inheritedFrom?.[key] ?? "";
-  return local.length === 0 && inherited.length === 0;
+  return inherited.length === 0;
 }
 
 type EnvVarsEditorProps = {
@@ -344,7 +357,11 @@ export function EnvVarsEditor({
               {(() => {
                 const inheritedValue = inheritedFrom?.[key];
                 if (inheritedValue === undefined) return null;
-                const verb = currentValue ? "Overrides" : "Inherited from";
+                // If the key is explicitly present in the agent-local map
+                // (even as ""), it is an intentional override — show "Overrides"
+                // not "Inherited from". Only show "Inherited from" when the local
+                // record has no entry for this key (global/persona satisfies it).
+                const verb = key in value ? "Overrides" : "Inherited from";
                 return (
                   <p className="ml-1 text-xs text-muted-foreground">
                     {verb} {inheritedLabel} value{" "}
