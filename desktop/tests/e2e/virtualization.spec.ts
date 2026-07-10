@@ -507,7 +507,7 @@ test("thread-heavy history keeps a bounded mounted window", async ({
   const mounted = timeline.locator("[data-message-id]");
   await expect(mounted).not.toHaveCount(0);
   const mountedCount = await mounted.count();
-  // Two viewports of real overscan intentionally mounts more than the old
+  // Three viewports of realization lead intentionally mounts more than the old
   // sub-30 window, while still evicting a substantial part of this 120-row
   // history after every row has been visited.
   expect(mountedCount).toBeLessThan(80);

@@ -599,9 +599,13 @@ function VirtualizedTimelineRows({
     const host = hostRef.current;
     if (!host) return;
     const updateBufferSize = () => {
-      // Keep one complete viewport mounted on either side so variable-height
-      // rows can settle before they enter view without overworking measurement.
-      setOffscreenBufferSize(host.clientHeight);
+      // Measure rows three viewports ahead of the reader. Virtua deliberately
+      // hides each newly mounted row until its first ResizeObserver result; a
+      // one-viewport lead can be consumed by WebKit trackpad momentum before
+      // that result commits, producing a first-pass-only blank flash. The
+      // measured size is cached, which is why revisiting the same range is
+      // already stable.
+      setOffscreenBufferSize(host.clientHeight * 3);
     };
     updateBufferSize();
     const resizeObserver = new ResizeObserver(updateBufferSize);
