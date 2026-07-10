@@ -7,7 +7,6 @@ import {
   selectTimelineBodySurface,
   selectTimelineIntroSurface,
 } from "@/features/messages/lib/timelineSnapshot";
-import { getDmParticipantPreview } from "@/features/channels/lib/dmParticipantDisplay";
 import { preloadTimelineImages } from "@/features/messages/lib/timelineImagePreload";
 import type { TimelineMessage } from "@/features/messages/types";
 import type { MainTimelineEntry } from "@/features/messages/lib/threadPanel";
@@ -19,13 +18,17 @@ import { channelChrome } from "@/shared/layout/chromeLayout";
 import { Spinner } from "@/shared/ui/spinner";
 import { TooltipProvider } from "@/shared/ui/tooltip";
 import { UnreadPill, unreadCountLabel } from "@/shared/ui/UnreadPill";
-import { UserAvatar } from "@/shared/ui/UserAvatar";
 import { TimelineSkeleton, useTimelineSkeletonRows } from "./TimelineSkeleton";
 import { TimelineMessageList } from "./TimelineMessageList";
 import type { TimelineVirtualizerApi } from "./TimelineMessageList";
 import { useAnchoredScroll } from "./useAnchoredScroll";
 import { useLoadOlderOnScroll } from "./useLoadOlderOnScroll";
 import { useBufferedTimelineMessages } from "./useBufferedTimelineMessages";
+import {
+  DirectMessageIntroAvatarStack,
+  type DirectMessageIntroParticipant,
+} from "./DirectMessageIntroAvatarStack";
+import { useSettleGatedPrependMessages } from "./useSettleGatedPrependMessages";
 
 export type MessageTimelineHandle = {
   scrollToBottomOnNextUpdate: () => void;
@@ -122,12 +125,6 @@ type ChannelIntro = {
  *  first render on channel entry stays light instead of blocking on the full
  *  message list. Must be module-level so its identity never changes. */
 const EMPTY_MESSAGES: TimelineMessage[] = [];
-
-type DirectMessageIntroParticipant = {
-  avatarUrl: string | null;
-  displayName: string;
-  pubkey: string;
-};
 
 type TimelineSnapshot = {
   channelId: string | null;
@@ -285,6 +282,15 @@ const MessageTimelineBase = React.forwardRef<
       searchActiveMessageId !== null,
     messages: deferredMessages,
   });
+  // Hold older-page render commits until the scroller is at rest: WKWebView
+  // can drop scrollTop compensation writes during live trackpad momentum.
+  // Full rationale in useSettleGatedPrependMessages.
+  const { messages: renderedMessages, isHoldingPrepend } =
+    useSettleGatedPrependMessages({
+      channelId,
+      messages: bufferedTimeline.messages,
+      scrollElementRef: activeScrollContainerRef,
+    });
 
   const {
     highlightedMessageId,
@@ -299,7 +305,7 @@ const MessageTimelineBase = React.forwardRef<
     channelId,
     contentRef,
     isLoading: showTimelineSkeleton,
-    messages: bufferedTimeline.messages,
+    messages: renderedMessages,
     onTargetReached,
     scrollContainerRef: activeScrollContainerRef,
     targetMessageId,
@@ -370,6 +376,7 @@ const MessageTimelineBase = React.forwardRef<
     hasDirectMessageIntro: directMessageIntro !== null,
     hasReachedChannelStart:
       !isRenderedTimelineBehindHistoryPrepend(deferredMessages, messages) &&
+      !isHoldingPrepend &&
       (messages.length === 0 || (!hasOlderMessages && !isFetchingOlder)),
     isSkeletonVisible: showTimelineSkeleton,
   });
@@ -498,10 +505,13 @@ const MessageTimelineBase = React.forwardRef<
     // Indexed find navigation can legitimately land near the current history
     // boundary. Do not mistake that programmatic jump for scrollback intent and
     // prepend underneath the active match.
+    // A settle-gate hold means the reader is still parked at the OLD
+    // boundary — don't stack more page fetches behind the held commit.
     if (
       searchActiveMessageId ||
       !fetchOlder ||
       isFetchingOlder ||
+      isHoldingPrepend ||
       showTimelineSkeleton ||
       !hasOlderMessages
     ) {
@@ -513,6 +523,7 @@ const MessageTimelineBase = React.forwardRef<
     fetchOlder,
     hasOlderMessages,
     isFetchingOlder,
+    isHoldingPrepend,
     searchActiveMessageId,
     showTimelineSkeleton,
   ]);
@@ -641,12 +652,10 @@ const MessageTimelineBase = React.forwardRef<
       isFollowingThreadById={isFollowingThreadById}
       isMessageUnreadById={isMessageUnreadById}
       messageFooters={messageFooters}
-      mainEntries={
-        bufferedTimeline.messages === messages ? mainEntries : undefined
-      }
+      mainEntries={renderedMessages === messages ? mainEntries : undefined}
       leadingContent={virtualizedLeadingContent}
       threadSummaries={threadSummaries}
-      messages={bufferedTimeline.messages}
+      messages={renderedMessages}
       onDelete={onDelete}
       onEdit={onEdit}
       onMarkUnread={onMarkUnread}
@@ -690,8 +699,10 @@ const MessageTimelineBase = React.forwardRef<
           </div>
         ) : null}
         {/* `isFetchingOlder` clears on fetch resolve, but rows paint a frame
-            later off the deferred snapshot — keep the spinner up until then. */}
+            later (deferred snapshot / settle-gate hold) — keep the spinner up
+            until the page actually renders. */}
         {isFetchingOlder ||
+        isHoldingPrepend ||
         isRenderedTimelineBehindHistoryPrepend(deferredMessages, messages) ? (
           <div
             className={cn(
@@ -938,55 +949,3 @@ const MessageTimelineBase = React.forwardRef<
 });
 
 export const MessageTimeline = React.memo(MessageTimelineBase);
-
-function DirectMessageIntroAvatarStack({
-  participants,
-}: {
-  participants: DirectMessageIntroParticipant[];
-}) {
-  const { hiddenCount, visibleParticipants } =
-    getDmParticipantPreview(participants);
-  const stackItemCount = visibleParticipants.length + (hiddenCount > 0 ? 1 : 0);
-
-  return (
-    <div
-      aria-hidden="true"
-      className="flex shrink-0 items-center"
-      data-testid="message-dm-intro-avatar-stack"
-    >
-      {visibleParticipants.map((participant, index) => (
-        <div
-          className={index > 0 ? "-ml-5" : ""}
-          data-testid="message-dm-intro-avatar-stack-participant"
-          key={participant.pubkey}
-          style={{
-            zIndex: index + 1,
-            ...(index < stackItemCount - 1 && {
-              mask: "radial-gradient(circle 34px at calc(100% + 10px) 50%, transparent 99%, #fff 100%)",
-              WebkitMask:
-                "radial-gradient(circle 34px at calc(100% + 10px) 50%, transparent 99%, #fff 100%)",
-            }),
-          }}
-        >
-          <UserAvatar
-            avatarUrl={participant.avatarUrl}
-            className="h-[60px] w-[60px] text-base"
-            displayName={participant.displayName}
-            size="md"
-          />
-        </div>
-      ))}
-      {hiddenCount > 0 ? (
-        <div
-          className={visibleParticipants.length > 0 ? "-ml-5" : ""}
-          data-testid="message-dm-intro-avatar-stack-more"
-          style={{ zIndex: stackItemCount }}
-        >
-          <span className="flex h-[60px] w-[60px] items-center justify-center rounded-full bg-secondary font-semibold text-secondary-foreground shadow-xs">
-            <span className="text-lg leading-none">+{hiddenCount}</span>
-          </span>
-        </div>
-      ) : null}
-    </div>
-  );
-}

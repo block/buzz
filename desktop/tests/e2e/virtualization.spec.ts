@@ -498,6 +498,143 @@ test.describe("list virtualization", () => {
       expect(exitTrace.maxRollback).toBeLessThan(5);
     }
   });
+
+  test("09 — older-page render commit waits for scroller rest under continued wheel input", async ({
+    page,
+  }) => {
+    test.setTimeout(60_000);
+    // Production shape for the WKWebView dropped-write hazard: heavy
+    // variable-height rows, a slow older-page fetch, and wheel input that
+    // KEEPS ARRIVING through fetch resolution. Every prepend-compensation
+    // mechanism is a scrollTop write, and macOS WebKit can drop those writes
+    // while trackpad momentum owns the offset — so the contract under test is
+    // that the fetched page's RENDER COMMIT (the scrollHeight jump) is
+    // deferred until input quiesces, and that the at-rest commit then holds
+    // the anchored row. Chromium cannot reproduce the dropped write itself;
+    // it CAN prove the commit-at-rest scheduling that makes it unreachable.
+    await installMockBridge(page, {
+      deepHistoryMessageCount: 1_800,
+      channelWindowDelayMs: 300,
+    });
+    await page.goto("/#/channels/feedf00d-0000-4000-8000-000000000007");
+    const timeline = page.getByTestId("message-timeline");
+    await expect(timeline.locator("[data-message-id]").first()).toBeVisible();
+    await page.waitForTimeout(1_000);
+
+    // Mount mid-history rows clear of the load-older sentinel, then trip it.
+    await timeline.evaluate((element) => {
+      element.scrollTop = 4000;
+    });
+    await page.waitForTimeout(300);
+
+    // In-page observer: tracks the last wheel-input timestamp, captures the
+    // first at-rest anchor after input stops, and records when the prepend
+    // commit (scrollHeight jump) lands relative to the last input.
+    const tracePromise = timeline.evaluate(async (scroller) => {
+      const s = scroller as HTMLElement;
+      const baseHeight = s.scrollHeight;
+      let lastInputTs = 0;
+      let sawInput = false;
+      let restAnchor: { id: string; top: number } | null = null;
+      const onWheel = () => {
+        lastInputTs = performance.now();
+        sawInput = true;
+        // Input after a lull invalidates any anchor captured during it —
+        // the commit must be measured against the FINAL at-rest position.
+        restAnchor = null;
+      };
+      s.addEventListener("wheel", onWheel, { passive: true });
+      let commit: { ts: number; gapSinceInput: number } | null = null;
+      let sawSpinnerDuringHold = false;
+      let anchorDriftAfterCommit: number | null = null;
+      const deadline = performance.now() + 8_000;
+      while (performance.now() < deadline) {
+        const now = performance.now();
+        if (commit === null) {
+          if (
+            document.querySelector(
+              '[data-testid="message-timeline-fetching-older"]',
+            ) !== null
+          ) {
+            sawSpinnerDuringHold = true;
+          }
+          // First frame at rest (input quiet for 60ms — shorter than the
+          // gate's own window, so this reading always precedes admission):
+          // capture the row the at-rest commit must hold.
+          if (restAnchor === null && sawInput && now - lastInputTs >= 60) {
+            const scrollerTop = s.getBoundingClientRect().top;
+            const row = Array.from(
+              s.querySelectorAll<HTMLElement>("[data-message-id]"),
+            ).find(
+              (candidate) =>
+                candidate.getBoundingClientRect().top - scrollerTop >= 0,
+            );
+            if (row?.dataset.messageId) {
+              restAnchor = {
+                id: row.dataset.messageId,
+                top: row.getBoundingClientRect().top - scrollerTop,
+              };
+            }
+          }
+          if (s.scrollHeight > baseHeight + 800) {
+            commit = { ts: now, gapSinceInput: now - lastInputTs };
+          }
+        } else if (restAnchor !== null) {
+          const anchor = restAnchor;
+          const scrollerTop = s.getBoundingClientRect().top;
+          const row = Array.from(
+            s.querySelectorAll<HTMLElement>("[data-message-id]"),
+          ).find((candidate) => candidate.dataset.messageId === anchor.id);
+          if (row) {
+            anchorDriftAfterCommit = Math.max(
+              anchorDriftAfterCommit ?? 0,
+              Math.abs(
+                row.getBoundingClientRect().top - scrollerTop - anchor.top,
+              ),
+            );
+          }
+          // Watch a settle window after the commit, then finish.
+          if (now - commit.ts > 700) break;
+        }
+        await new Promise((resolve) => requestAnimationFrame(resolve));
+      }
+      s.removeEventListener("wheel", onWheel);
+      return {
+        commit,
+        capturedRestAnchor: restAnchor !== null,
+        sawSpinnerDuringHold,
+        anchorDriftAfterCommit,
+      };
+    });
+
+    // Trip the boundary, then keep real wheel input flowing DOWN (away from
+    // the boundary) through and well past the 300ms fetch resolution — the
+    // mid-gesture window in which the ungated build commits the page.
+    await timeline.evaluate((element) => {
+      element.scrollTop = 150;
+    });
+    const box = await timeline.boundingBox();
+    if (!box) throw new Error("timeline has no bounding box");
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+    for (let burst = 0; burst < 30; burst += 1) {
+      await page.mouse.wheel(0, 30);
+      await page.waitForTimeout(40);
+    }
+
+    const trace = await tracePromise;
+    // The page must eventually commit — the gate defers, never strands.
+    expect(trace.commit).not.toBeNull();
+    // The commit landed only after input quiesced. On the ungated build the
+    // deferred snapshot flushes as soon as the fetch resolves — between wheel
+    // bursts, a gap far below the quiet window — so this line is the red/green
+    // signal for the settle gate.
+    expect(trace.commit?.gapSinceInput ?? 0).toBeGreaterThanOrEqual(80);
+    // The reader saw the fetching affordance while the page was held.
+    expect(trace.sawSpinnerDuringHold).toBe(true);
+    // The at-rest commit held the anchored row (writes land at rest).
+    expect(trace.capturedRestAnchor).toBe(true);
+    expect(trace.anchorDriftAfterCommit ?? 0).toBeLessThan(5);
+  });
 });
 
 test("thread-heavy history mounts every loaded row", async ({ page }) => {
