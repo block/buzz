@@ -389,7 +389,10 @@ function applyCachedVars(): string | null {
 
     const accent =
       window.localStorage.getItem(ACCENT_STORAGE_KEY) ?? DEFAULT_ACCENT;
-    applyAccentColor(accent);
+    // Pin Buzz themes to the neutral accent here too, matching applyTheme.
+    // Otherwise a cached Buzz theme + non-neutral stored accent flashes the
+    // old accent on reload until the async applyTheme effect runs.
+    applyAccentColor(resolveEffectiveAccent(themeName, accent));
 
     return themeName;
   } catch {
