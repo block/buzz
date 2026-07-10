@@ -356,19 +356,34 @@ const NPM_MISSING_HINT: &str = "Node.js / npm was not found. Install Node.js \
 If npm works in your terminal, make sure your Node version manager is initialized in \
 ~/.zprofile (not only ~/.zshrc) — Buzz resolves tools via non-interactive login shells.";
 
+/// Result of probing `npm prefix -g` in the hermit-stripped login shell.
+#[cfg(unix)]
+enum NpmPrefix {
+    /// npm responded with a parseable prefix path.
+    Found(std::path::PathBuf),
+    /// npm was not found, the spawn failed, the command returned a non-zero
+    /// exit, or the output could not be parsed.
+    Unavailable,
+    /// The probe exceeded the 30-second deadline (e.g. a version-manager init
+    /// that blocks on `/dev/tty`). The install should proceed so the stderr
+    /// classifier remains the backstop.
+    TimedOut,
+}
+
 /// Spawn the same login shell used by `run_install_command` and run
 /// `npm prefix -g` to discover where npm would install global packages.
-/// Returns `None` when npm is not found, the output cannot be parsed, or the
-/// command exceeds the 30-second timeout.
 #[cfg(unix)]
-fn resolve_npm_prefix() -> Option<std::path::PathBuf> {
+fn resolve_npm_prefix() -> NpmPrefix {
     let mut cmd = install_shell_command("npm prefix -g");
-    let mut child = cmd
+    let mut child = match cmd
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
-        .ok()?;
+    {
+        Ok(c) => c,
+        Err(_) => return NpmPrefix::Unavailable,
+    };
 
     // Drain stdout/stderr on background threads to prevent pipe-buffer deadlock.
     let stdout_pipe = child.stdout.take();
@@ -397,16 +412,21 @@ fn resolve_npm_prefix() -> Option<std::path::PathBuf> {
     // 30-second timeout — plenty for `npm prefix -g`; intentionally shorter
     // than the 5-minute install budget in `run_install_command`.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    let result = loop {
+    let raw_bytes: Option<Vec<u8>> = loop {
         let remaining = deadline.saturating_duration_since(std::time::Instant::now());
         if remaining.is_zero() {
-            // Timed out: send SIGTERM, clean up threads, return None.
+            // Timed out: send SIGTERM, clean up threads, signal the caller to
+            // fall through to the install path rather than abort.
             unsafe { libc::kill(child_pid as i32, libc::SIGTERM) };
             drop(rx);
             let _ = wait_thread.join();
             let _ = stdout_thread.join();
             let _ = stderr_thread.join();
-            break None;
+            eprintln!(
+                "buzz: npm prefix probe timed out after 30s; \
+                 proceeding to install (stderr classifier is the backstop)"
+            );
+            return NpmPrefix::TimedOut;
         }
         match rx.recv_timeout(std::time::Duration::from_millis(200).min(remaining)) {
             Ok(Ok(status)) => {
@@ -425,18 +445,21 @@ fn resolve_npm_prefix() -> Option<std::path::PathBuf> {
         }
     };
 
-    let raw = String::from_utf8_lossy(result?.as_slice()).into_owned();
+    let bytes = match raw_bytes {
+        Some(b) => b,
+        None => return NpmPrefix::Unavailable,
+    };
+    let raw = String::from_utf8_lossy(&bytes).into_owned();
     // Version managers can print banner lines before the real prefix — take the
     // last non-empty line to skip any preamble.
-    let prefix = raw
-        .lines()
-        .rfind(|l| !l.trim().is_empty())?
-        .trim()
-        .to_string();
+    let prefix = match raw.lines().rfind(|l| !l.trim().is_empty()) {
+        Some(l) => l.trim().to_string(),
+        None => return NpmPrefix::Unavailable,
+    };
     if prefix.is_empty() {
-        return None;
+        return NpmPrefix::Unavailable;
     }
-    Some(std::path::PathBuf::from(prefix))
+    NpmPrefix::Found(std::path::PathBuf::from(prefix))
 }
 
 /// Check write access to a file-system path using the POSIX `access(2)` syscall.
@@ -497,7 +520,7 @@ fn npm_preflight_check(step: &str, command: &str) -> Option<InstallStepResult> {
     #[cfg(unix)]
     {
         match resolve_npm_prefix() {
-            None => Some(InstallStepResult {
+            NpmPrefix::Unavailable => Some(InstallStepResult {
                 step: step.to_string(),
                 command: command.to_string(),
                 success: false,
@@ -506,18 +529,22 @@ fn npm_preflight_check(step: &str, command: &str) -> Option<InstallStepResult> {
                 exit_code: None,
                 hint: Some(NPM_MISSING_HINT.to_string()),
             }),
-            Some(prefix) if !npm_install_target_is_writable(&prefix) => Some(InstallStepResult {
-                step: step.to_string(),
-                command: command.to_string(),
-                success: false,
-                stdout: String::new(),
-                stderr: format!(
-                    "npm global prefix '{}' is not writable by the current user.",
-                    prefix.display()
-                ),
-                exit_code: None,
-                hint: Some(npm_eacces_guidance(command)),
-            }),
+            NpmPrefix::Found(prefix) if !npm_install_target_is_writable(&prefix) => {
+                Some(InstallStepResult {
+                    step: step.to_string(),
+                    command: command.to_string(),
+                    success: false,
+                    stdout: String::new(),
+                    stderr: format!(
+                        "npm global prefix '{}' is not writable by the current user.",
+                        prefix.display()
+                    ),
+                    exit_code: None,
+                    hint: Some(npm_eacces_guidance(command)),
+                })
+            }
+            // `Found` + writable, or `TimedOut` — proceed; let the install run and
+            // the stderr classifier serve as the backstop.
             _ => None,
         }
     }
