@@ -376,20 +376,40 @@ function simulateInheritedFilter(inheritedRows, rows) {
 
 test("inheritedRows_no_local_row_row_is_visible", () => {
   // DATABRICKS_HOST baked, no local row → inherited row shows.
-  const inherited = [{ key: "DATABRICKS_HOST", value: "https://example.databricks.com/", masked: false }];
+  const inherited = [
+    {
+      key: "DATABRICKS_HOST",
+      value: "https://example.databricks.com/",
+      masked: false,
+    },
+  ];
   const rows = toRows({}, new Set()); // no local env vars
   const visible = simulateInheritedFilter(inherited, rows);
-  assert.equal(visible.length, 1, "inherited row must be visible when no local override");
+  assert.equal(
+    visible.length,
+    1,
+    "inherited row must be visible when no local override",
+  );
   assert.equal(visible[0].key, "DATABRICKS_HOST");
 });
 
 test("inheritedRows_local_row_same_key_inherited_hidden", () => {
   // User adds a local DATABRICKS_HOST row → inherited row must be hidden.
-  const inherited = [{ key: "DATABRICKS_HOST", value: "https://baked.databricks.com/", masked: false }];
+  const inherited = [
+    {
+      key: "DATABRICKS_HOST",
+      value: "https://baked.databricks.com/",
+      masked: false,
+    },
+  ];
   const value = { DATABRICKS_HOST: "https://user.databricks.com/" };
   const rows = toRows(value, new Set());
   const visible = simulateInheritedFilter(inherited, rows);
-  assert.equal(visible.length, 0, "inherited row must be hidden when local row has same key");
+  assert.equal(
+    visible.length,
+    0,
+    "inherited row must be hidden when local row has same key",
+  );
 });
 
 test("inheritedRows_not_serialized_in_buildRecord", () => {
@@ -404,7 +424,11 @@ test("inheritedRows_not_serialized_in_buildRecord", () => {
     if (key in value) base[key] = value[key];
   }
   const record = { ...base, ...toRecord(rows) };
-  assert.equal("SECRET_KEY" in record, false, "inherited-only key must NOT appear in serialized record");
+  assert.equal(
+    "SECRET_KEY" in record,
+    false,
+    "inherited-only key must NOT appear in serialized record",
+  );
   assert.equal(record.MY_VAR, "foo", "non-inherited key preserved");
 });
 
@@ -416,7 +440,11 @@ test("inheritedRows_masked_secret_local_override_shows_masked_build_value", () =
   const row = { id: "r1", key: "API_KEY", value: "my-real-key" };
   const override = inherited.find((irow) => irow.key === row.key);
   assert.ok(override, "override entry must be found for masked key");
-  assert.equal(override.value, "••••••", "masked baked value shown in override hint");
+  assert.equal(
+    override.value,
+    "••••••",
+    "masked baked value shown in override hint",
+  );
   assert.equal(override.masked, true, "masked flag preserved");
 });
 
@@ -424,16 +452,28 @@ test("inheritedRows_structured_keys_excluded_from_generic_rows", () => {
   // BUZZ_AGENT_PROVIDER, BUZZ_AGENT_MODEL, BUZZ_AGENT_THINKING_EFFORT must
   // be excluded from bakedGenericRows (they go to structured fields instead).
   // This mirrors the BAKED_STRUCTURED_KEYS filter in GlobalAgentConfigSettingsCard.
-  const STRUCTURED = new Set(["BUZZ_AGENT_PROVIDER", "BUZZ_AGENT_MODEL", "BUZZ_AGENT_THINKING_EFFORT"]);
+  const STRUCTURED = new Set([
+    "BUZZ_AGENT_PROVIDER",
+    "BUZZ_AGENT_MODEL",
+    "BUZZ_AGENT_THINKING_EFFORT",
+  ]);
   const allBaked = [
     { key: "BUZZ_AGENT_PROVIDER", value: "databricks_v2", masked: false },
     { key: "BUZZ_AGENT_MODEL", value: "goose-claude-opus-4-8", masked: false },
     { key: "BUZZ_AGENT_THINKING_EFFORT", value: "medium", masked: false },
-    { key: "DATABRICKS_HOST", value: "https://example.databricks.com/", masked: false },
+    {
+      key: "DATABRICKS_HOST",
+      value: "https://example.databricks.com/",
+      masked: false,
+    },
     { key: "DATABRICKS_MODEL", value: "goose-claude-opus-4-8", masked: false },
   ];
   const generic = allBaked.filter((e) => !STRUCTURED.has(e.key));
-  assert.equal(generic.length, 2, "only non-structured keys go to generic rows");
+  assert.equal(
+    generic.length,
+    2,
+    "only non-structured keys go to generic rows",
+  );
   const genericKeys = generic.map((e) => e.key).sort();
   assert.deepEqual(genericKeys, ["DATABRICKS_HOST", "DATABRICKS_MODEL"]);
 });
@@ -455,9 +495,7 @@ test("getBakedProviderInheritLabel_known_provider_returns_friendly_name", () => 
 });
 
 test("getBakedProviderInheritLabel_unknown_provider_falls_back_to_raw_id", () => {
-  const options = [
-    { id: "anthropic", label: "Anthropic" },
-  ];
+  const options = [{ id: "anthropic", label: "Anthropic" }];
   const label = getBakedProviderInheritLabel("my-custom-provider", options);
   assert.equal(
     label,

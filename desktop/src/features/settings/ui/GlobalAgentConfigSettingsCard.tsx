@@ -295,9 +295,7 @@ export function GlobalAgentConfigSettingsCard() {
                   key={opt.id}
                   value={opt.id || AUTO_PROVIDER_DROPDOWN_VALUE}
                 >
-                  {opt.id === ""
-                    ? (providerZeroLabel ?? opt.label)
-                    : opt.label}
+                  {opt.id === "" ? (providerZeroLabel ?? opt.label) : opt.label}
                 </option>
               ))}
               <option value={CUSTOM_PROVIDER_DROPDOWN_VALUE}>
