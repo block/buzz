@@ -729,33 +729,29 @@ fn own_group_grandchild_detected_by_ancestor_walk() {
 
     // The ancestor walk finds the harness even though PGID doesn't match it.
     let skip_pids = vec![harness_pid];
-    #[cfg(target_os = "macos")]
-    let found = super::sweep::walk_has_tracked_ancestor(
-        grandchild_pid,
-        &skip_pids,
-        super::sweep::ppid_of_macos,
-    );
-    #[cfg(all(unix, not(target_os = "macos")))]
-    let found = super::sweep::walk_has_tracked_ancestor(
-        grandchild_pid,
-        &skip_pids,
-        super::sweep::ppid_of_linux,
-    );
+    let found =
+        super::sweep::walk_has_tracked_ancestor(grandchild_pid, &skip_pids, super::sweep::ppid_of);
     assert!(
         found,
         "walk must detect grandchild as a live descendant of the tracked harness"
     );
 
     // Contrast: empty skip_pids → not a descendant of any tracked harness.
-    #[cfg(target_os = "macos")]
     let not_found =
-        super::sweep::walk_has_tracked_ancestor(grandchild_pid, &[], super::sweep::ppid_of_macos);
-    #[cfg(all(unix, not(target_os = "macos")))]
-    let not_found =
-        super::sweep::walk_has_tracked_ancestor(grandchild_pid, &[], super::sweep::ppid_of_linux);
+        super::sweep::walk_has_tracked_ancestor(grandchild_pid, &[], super::sweep::ppid_of);
     assert!(
         !not_found,
         "walk with empty skip_pids must return false for a real orphan"
+    );
+
+    // Guard against PID reuse: verify the intermediate is still alive before
+    // cleanup so a recycled PID can't corrupt the kill target.
+    assert!(
+        intermediate
+            .try_wait()
+            .expect("try_wait on intermediate")
+            .is_none(),
+        "intermediate exited before cleanup — its PID may have been recycled"
     );
 
     // Cleanup: SIGKILL the intermediate's process group (takes sleep 30 with it).

@@ -1,9 +1,12 @@
-//! Boot-time sweep for untracked same-bundle harness processes.
+//! Boot-time sweep for untracked same-bundle harness processes, plus low-level
+//! process-tree helpers shared with the periodic orphan sweeps in `runtime.rs`.
 //!
 //! The env-var and PID-file sweeps cannot see a harness whose receipt is gone
 //! or that predates `BUZZ_MANAGED_AGENT` injection. This sweep derives the
 //! expected `buzz-acp` path from the running executable and kills any process
-//! whose exe matches exactly, minus the tracked set.
+//! whose exe matches exactly, minus the tracked set. The PID enumeration,
+//! procargs, parent/PGID lookups, and live-descendant classification helpers
+//! collected here are also called directly by the periodic orphan sweeps.
 
 use std::path::{Path, PathBuf};
 
@@ -126,6 +129,22 @@ pub(super) fn walk_has_tracked_ancestor(
     false
 }
 
+/// OS-resolved parent-PID lookup for `walk_has_tracked_ancestor`.
+/// Test-only: lets tests call a single platform-agnostic name without
+/// cfg gates; production code calls `ppid_of_macos`/`ppid_of_linux` directly.
+#[cfg(all(test, target_os = "macos"))]
+pub(super) fn ppid_of(pid: u32) -> Option<u32> {
+    ppid_of_macos(pid)
+}
+
+/// OS-resolved parent-PID lookup for `walk_has_tracked_ancestor`.
+/// Test-only: lets tests call a single platform-agnostic name without
+/// cfg gates; production code calls `ppid_of_macos`/`ppid_of_linux` directly.
+#[cfg(all(test, unix, not(target_os = "macos")))]
+pub(super) fn ppid_of(pid: u32) -> Option<u32> {
+    ppid_of_linux(pid)
+}
+
 /// Return the parent PID of a process on macOS via `proc_pidinfo`.
 /// Returns `None` if the syscall fails (process may have exited).
 #[cfg(target_os = "macos")]
@@ -146,16 +165,66 @@ pub(super) fn ppid_of_macos(pid: u32) -> Option<u32> {
     Some(unsafe { info.assume_init() }.pbi_ppid)
 }
 
-/// Return the parent PID of a process from `/proc/<pid>/stat`.
-/// Same parsing strategy as `read_pgid_linux` — field 1 after the last `)`
-/// is state, field 2 (index 1) is PPID.
+/// Parse the PPID and PGID fields from `/proc/<pid>/stat` in one read.
+/// Fields after the last `)` (comm may contain spaces/parens): index 1 is
+/// PPID, index 2 is PGID.
 #[cfg(all(unix, not(target_os = "macos")))]
-pub(super) fn ppid_of_linux(pid: u32) -> Option<u32> {
+pub(super) fn proc_stat_ppid_pgid_linux(pid: u32) -> Option<(u32, u32)> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     let after_comm = stat.rsplit_once(')')?.1;
     // Fields after ')': " S ppid pgid ..."
-    let ppid_str = after_comm.split_whitespace().nth(1)?;
-    ppid_str.parse::<u32>().ok()
+    let mut fields = after_comm.split_whitespace();
+    let _state = fields.next()?; // index 0: state
+    let ppid = fields.next()?.parse::<u32>().ok()?; // index 1: PPID
+    let pgid = fields.next()?.parse::<u32>().ok()?; // index 2: PGID
+    Some((ppid, pgid))
+}
+
+/// Return the parent PID of a process from `/proc/<pid>/stat`.
+#[cfg(all(unix, not(target_os = "macos")))]
+pub(super) fn ppid_of_linux(pid: u32) -> Option<u32> {
+    proc_stat_ppid_pgid_linux(pid).map(|(ppid, _)| ppid)
+}
+
+/// True if `pid` is a live descendant of any tracked harness in `skip_pids`.
+///
+/// Three complementary checks:
+/// 1. Direct parent — `ppid` was already fetched by the caller's BSDInfo
+///    UID gate, so this hop is free.
+/// 2. Reparenting guard — if an intermediate in the ancestor chain died,
+///    the process reparents to init (PPID 1) and the ancestor walk can no
+///    longer reach the harness; a process that started inside the
+///    harness's process group still has PGID == harness PID, so the PGID
+///    check spares it. This is NOT a redundant fast-path — it covers a
+///    case the walk cannot.
+/// 3. Bounded ancestor walk from `ppid` — covers deeper live chains where
+///    intermediates run in their own process groups (e.g. buzz-acp ->
+///    node shim -> codex-acp).
+#[cfg(target_os = "macos")]
+pub(super) fn is_live_descendant_macos(pid: u32, ppid: u32, skip_pids: &[u32]) -> bool {
+    if skip_pids.contains(&ppid) {
+        return true;
+    }
+    let pgid = unsafe { libc::getpgid(pid as i32) };
+    if pgid > 0 && skip_pids.contains(&(pgid as u32)) {
+        return true;
+    }
+    walk_has_tracked_ancestor(ppid, skip_pids, ppid_of_macos)
+}
+
+/// Linux variant: reads PPID and PGID from `/proc/<pid>/stat` in a single
+/// read, then applies the same three checks as the macOS variant. An
+/// unreadable stat file (process exiting) yields `false` — the two-tick
+/// grace in the periodic sweep absorbs transient failures.
+#[cfg(all(unix, not(target_os = "macos")))]
+pub(super) fn is_live_descendant_linux(pid: u32, skip_pids: &[u32]) -> bool {
+    let Some((ppid, pgid)) = proc_stat_ppid_pgid_linux(pid) else {
+        return false;
+    };
+    if skip_pids.contains(&ppid) || skip_pids.contains(&pgid) {
+        return true;
+    }
+    walk_has_tracked_ancestor(ppid, skip_pids, ppid_of_linux)
 }
 
 // ── ProcessSnapshot and pure decision function ────────────────────────────
@@ -618,6 +687,34 @@ mod tests {
         // proc_pidinfo / /proc stat failure (process exited) → not a descendant.
         let tree: std::collections::HashMap<u32, u32> = [].into_iter().collect();
         assert!(!walk_has_tracked_ancestor(400, &[100], |p| map_parent(
+            &tree, p
+        )));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn walk_finds_ancestor_at_exact_depth_cap() {
+        // Chain with exactly 32 edges: 1000 → 1001 → … → 1032.
+        // The ancestor at hop 32 is within MAX_DEPTH and must be found.
+        let mut tree = std::collections::HashMap::new();
+        for i in 0..32u32 {
+            tree.insert(1000 + i, 1000 + i + 1);
+        }
+        assert!(walk_has_tracked_ancestor(1000, &[1032], |p| map_parent(
+            &tree, p
+        )));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn walk_misses_ancestor_beyond_depth_cap() {
+        // Chain with 33 edges: 1000 → 1001 → … → 1033.
+        // Hop 33 exceeds MAX_DEPTH (32) — the ancestor must not be found.
+        let mut tree = std::collections::HashMap::new();
+        for i in 0..33u32 {
+            tree.insert(1000 + i, 1000 + i + 1);
+        }
+        assert!(!walk_has_tracked_ancestor(1000, &[1033], |p| map_parent(
             &tree, p
         )));
     }
