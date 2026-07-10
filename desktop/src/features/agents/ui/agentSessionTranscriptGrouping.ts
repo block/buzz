@@ -394,9 +394,23 @@ function getRenderClass(item: TranscriptItem) {
  * session run as the turn they belong to and the `pendingSystemPrompt` slot in
  * `buildBlocksForRun` can consume them correctly.
  *
- * Mid-stream null-session items (after at least one session has resolved) are
- * attributed to the most recently seen session run — same as before, this
- * handles gap frames that arrive after resolution.
+ * **Restart / session-boundary ordering**: on a restart the normalizer stamps
+ * `session/new` with `latestSessionId` (the OLD session's id) because the new
+ * session hasn't resolved yet. So the item arrives with `sessionId = "sess-1"`
+ * (stale), not null. Under the plain grouping rule it lands in the prior run,
+ * causing System Prompt to render ABOVE the session-boundary divider.
+ *
+ * Fix: a `session/new` marker (`isSystemPrompt`) is a session-START signal.
+ * When one arrives and a prior run already exists, park it (and any null-session
+ * items that follow) in `pendingNewRunBuffer`. When the next distinct non-null
+ * sessionId resolves, flush the buffer to the HEAD of that new run — placing
+ * System Prompt after the boundary. If no new session ever resolves after the
+ * marker (stream ends mid-restart), flush back into the current run so nothing
+ * is dropped.
+ *
+ * Mid-stream null-session items (after at least one session has resolved, and
+ * no pending-new-run buffer is open) are attributed to the most recently seen
+ * session run — handling gap frames that arrive after resolution.
  *
  * Only if the entire stream is null-session (no session ever resolves) do the
  * deferred items form a single fallback run keyed `"unknown"`.
@@ -410,20 +424,34 @@ function splitIntoSessionRuns(
   let currentRun: { sessionId: string; items: TranscriptItem[] } | null = null;
   // Buffer for items that arrive before any session has resolved.
   const preSessionBuffer: TranscriptItem[] = [];
+  // Buffer for a session/new marker (and any null-session items trailing it)
+  // that must be re-anchored to the NEXT resolved session (restart scenario).
+  let pendingNewRunBuffer: TranscriptItem[] | null = null;
 
   for (const item of items) {
     if (item.sessionId === null || item.sessionId === undefined) {
       if (currentRun === null) {
         // No session resolved yet — defer into the pre-session buffer.
         preSessionBuffer.push(item);
+      } else if (pendingNewRunBuffer !== null) {
+        // Pending buffer already open — park trailing null-session items here.
+        pendingNewRunBuffer.push(item);
       } else {
-        // Session already resolved — attribute to current run.
+        // Ordinary mid-stream null-session item — attribute to current run.
         currentRun.items.push(item);
       }
       continue;
     }
 
     // item.sessionId is non-null from here.
+
+    // A session/new marker after a prior run is a restart signal: park it in
+    // the pending buffer so it re-anchors to the next distinct session run.
+    if (isSystemPrompt(item) && currentRun !== null) {
+      pendingNewRunBuffer = [item];
+      continue;
+    }
+
     if (!currentRun || item.sessionId !== currentRun.sessionId) {
       const newRun: { sessionId: string; items: TranscriptItem[] } = {
         sessionId: item.sessionId,
@@ -433,11 +461,27 @@ function splitIntoSessionRuns(
         // First resolved session: prepend buffered pre-resolution items.
         newRun.items.push(...preSessionBuffer);
         preSessionBuffer.length = 0;
+      } else if (pendingNewRunBuffer !== null) {
+        // New distinct session after a session/new marker: the buffered items
+        // open this run (placed before its first regular item).
+        newRun.items.push(...pendingNewRunBuffer);
+        pendingNewRunBuffer = null;
       }
       currentRun = newRun;
       runs.push(currentRun);
+    } else if (pendingNewRunBuffer !== null) {
+      // Same sessionId resolved again — the session/new didn't precede a new
+      // session. Flush the buffer into the current run so nothing is dropped.
+      currentRun.items.push(...pendingNewRunBuffer);
+      pendingNewRunBuffer = null;
     }
     currentRun.items.push(item);
+  }
+
+  // Stream ended with an open pending buffer (session/new seen, no new session
+  // resolved after it) — flush into the current run so nothing is dropped.
+  if (pendingNewRunBuffer !== null && currentRun !== null) {
+    currentRun.items.push(...pendingNewRunBuffer);
   }
 
   // Entire stream was null-session (no session ever resolved): emit as one run.

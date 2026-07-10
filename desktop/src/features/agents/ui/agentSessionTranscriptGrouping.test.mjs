@@ -1083,3 +1083,191 @@ test("buildTranscriptDisplayBlocks_nonContiguousRunsSameSession_distinctBoundary
     "all React keys derived from session-boundary blocks are unique",
   );
 });
+
+// ── session/new run-anchor: restart scenario ──────────────────────────────────
+
+/**
+ * Build a system-prompt metadata item as the normalizer produces it on restart:
+ * stale-stamped with the previous session's id (latestSessionId at emit time).
+ */
+function systemPromptItem(id, staleSessionId, ts = "2026-07-08T12:00:00.000Z") {
+  return {
+    id,
+    type: "metadata",
+    renderClass: "raw-rail",
+    title: "System prompt",
+    sections: [{ title: "Base", body: "You are a helpful assistant." }],
+    timestamp: ts,
+    acpSource: "session/new",
+    turnId: null,
+    sessionId: staleSessionId,
+    channelId: "chan-1",
+  };
+}
+
+test("buildTranscriptDisplayBlocks_restartScenario_systemPromptAfterBoundary", () => {
+  // Restart wire sequence: toolA(sess-1) → session/new(sess-1 stale) → toolB(sess-2)
+  // The session/new item is stale-stamped with sess-1 (the OLD session id).
+  // After the fix it must sort into the sess-2 run — AFTER the session-boundary
+  // block, not before it.
+  const ts1 = "2026-07-08T12:00:00.000Z";
+  const ts2 = "2026-07-08T12:01:00.000Z";
+  const items = [
+    // Prior session activity
+    { ...sessionItem("toolA", "sess-1", ts1), turnId: "turn-1" },
+    // session/new stale-stamped with OLD session id (the bug scenario)
+    systemPromptItem("system-prompt", "sess-1", ts2),
+    // New session activity
+    { ...sessionItem("toolB", "sess-2", ts2), turnId: "turn-2" },
+  ];
+
+  const blocks = buildTranscriptDisplayBlocks(items, "sess-2");
+
+  // (a) Exactly one session-boundary block must exist.
+  const boundaryBlocks = blocks.filter((b) => b.kind === "session-boundary");
+  assert.equal(
+    boundaryBlocks.length,
+    1,
+    "exactly one session-boundary block for two sessions",
+  );
+
+  // (b) The session/new item must appear AFTER the boundary, not before it.
+  const boundaryIndex = blocks.indexOf(boundaryBlocks[0]);
+  const systemPromptBlockIndex = blocks.findIndex(
+    (b) =>
+      (b.kind === "single" && b.item.acpSource === "session/new") ||
+      (b.kind === "turn" &&
+        b.segments.some(
+          (seg) =>
+            seg.kind === "prompt" && seg.systemPrompt?.acpSource === "session/new",
+        )),
+  );
+  assert.ok(
+    systemPromptBlockIndex !== -1,
+    "system-prompt item must be present in the output",
+  );
+  assert.ok(
+    boundaryIndex < systemPromptBlockIndex,
+    `boundary (index ${boundaryIndex}) must come before system-prompt (index ${systemPromptBlockIndex})`,
+  );
+
+  // (c) toolA must appear before the boundary; toolB after.
+  const flatAll = flattenDisplayBlocks(blocks);
+  const ids = flatAll.map((i) => i.id);
+  assert.ok(ids.includes("toolA"), "toolA present in flattened output");
+  assert.ok(ids.includes("toolB"), "toolB present in flattened output");
+  const toolAIdx = blocks.findIndex((b) =>
+    flattenDisplayBlocks([b]).some((i) => i.id === "toolA"),
+  );
+  const toolBIdx = blocks.findIndex((b) =>
+    flattenDisplayBlocks([b]).some((i) => i.id === "toolB"),
+  );
+  assert.ok(
+    toolAIdx < boundaryIndex,
+    "toolA block must be before the boundary",
+  );
+  assert.ok(
+    toolBIdx > boundaryIndex,
+    "toolB block must be after the boundary",
+  );
+});
+
+test("buildTranscriptDisplayBlocks_firstEverSession_systemPromptInSingleRun", () => {
+  // First-ever session: session/new arrives with sessionId null before any
+  // session resolves — the preSessionBuffer path handles it, no boundary emitted.
+  // This test guards against regressing the first-session behavior.
+  const ts = "2026-07-08T10:00:00.000Z";
+  const items = [
+    // session/new with null sessionId (first ever, no stale-stamp)
+    {
+      id: "system-prompt",
+      type: "metadata",
+      renderClass: "raw-rail",
+      title: "System prompt",
+      sections: [{ title: "Base", body: "You are a helpful assistant." }],
+      timestamp: ts,
+      acpSource: "session/new",
+      turnId: null,
+      sessionId: null,
+      channelId: "chan-1",
+    },
+    // session_resolved gives the first non-null sessionId
+    {
+      id: "session-resolved",
+      type: "lifecycle",
+      renderClass: "lifecycle",
+      title: "Session ready",
+      text: "",
+      timestamp: ts,
+      acpSource: "session_resolved",
+      turnId: "turn-001",
+      sessionId: "session-001",
+      channelId: "chan-1",
+    },
+    // User prompt follows
+    {
+      id: "user-prompt",
+      type: "message",
+      role: "user",
+      title: "Buzz event",
+      text: "@Agent hello",
+      timestamp: ts,
+      acpSource: "session/prompt:user",
+      turnId: "turn-001",
+      sessionId: "session-001",
+      channelId: "chan-1",
+    },
+  ];
+
+  const blocks = buildTranscriptDisplayBlocks(items, "session-001");
+
+  // No boundary — this is a single-session transcript.
+  const boundaryBlocks = blocks.filter((b) => b.kind === "session-boundary");
+  assert.equal(
+    boundaryBlocks.length,
+    0,
+    "no session-boundary block for a first-ever single session",
+  );
+
+  // System prompt must appear somewhere in the output (in the turn bundle).
+  const flat = flattenDisplayBlocks(blocks);
+  assert.ok(
+    flat.some((i) => i.acpSource === "session/new"),
+    "system-prompt item must be present in the single-session output",
+  );
+});
+
+test("buildTranscriptDisplayBlocks_sessionNewNoFollowingSession_notDropped", () => {
+  // session/new arrives after a resolved session but the stream ends before a
+  // new session resolves (e.g. agent shutdown mid-restart). The item must not
+  // be silently dropped — it should fall back into the current run.
+  const ts1 = "2026-07-08T12:00:00.000Z";
+  const ts2 = "2026-07-08T12:01:00.000Z";
+  const items = [
+    { ...sessionItem("toolA", "sess-1", ts1), turnId: "turn-1" },
+    // session/new stale-stamped; stream ends here — no new session resolves.
+    systemPromptItem("system-prompt", "sess-1", ts2),
+  ];
+
+  const blocks = buildTranscriptDisplayBlocks(items);
+
+  // No boundary — still a single session (no new session resolved).
+  const boundaryBlocks = blocks.filter((b) => b.kind === "session-boundary");
+  assert.equal(
+    boundaryBlocks.length,
+    0,
+    "no boundary when session/new has no following new session",
+  );
+
+  // system-prompt must not be dropped.
+  const flat = flattenDisplayBlocks(blocks);
+  assert.ok(
+    flat.some((i) => i.id === "system-prompt"),
+    "system-prompt must not be dropped when no new session follows",
+  );
+  // toolA must also be present.
+  assert.ok(
+    flat.some((i) => i.id === "toolA"),
+    "toolA must be present when session/new has no following new session",
+  );
+});
