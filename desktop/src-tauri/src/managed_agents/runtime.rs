@@ -1615,6 +1615,16 @@ pub fn spawn_agent_child(
                             "setup_copy": setup_copy,
                             "availability": availability,
                         }),
+                        Requirement::CliConfigInvalid {
+                            probe_args,
+                            setup_copy,
+                            diagnostic,
+                        } => serde_json::json!({
+                            "surface": "cli_config_invalid",
+                            "probe_args": probe_args,
+                            "setup_copy": setup_copy,
+                            "diagnostic": diagnostic,
+                        }),
                     })
                     .collect();
                 let payload = serde_json::json!({

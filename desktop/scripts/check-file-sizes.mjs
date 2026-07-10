@@ -143,7 +143,10 @@ const overrides = new Map([
   // +1 rebase merge: GlobalAgentConfig import added alongside AcpAvailabilityStatus.
   // +2 rebase onto #1667: behavioral quad fields in PersonaRecord/ManagedAgentRecord.
   // +3 rebase onto main (#1568 + #1613): identity-import-keyring + augmented-PATH probes.
-  ["src-tauri/src/managed_agents/readiness.rs", 1565],
+  // +18: CliConfigInvalid requirement surface for config-parse probe classification —
+  // new Requirement variant + updated cli_login_requirements + 3 new probe-layer tests.
+  // Load-bearing UX fix (bad config → clear diagnostic, not "run codex login").
+  ["src-tauri/src/managed_agents/readiness.rs", 1583],
   // applyWorkspace reposDir parameter plus the validateReposDir binding,
   // threaded through Tauri invokes for configurable repos_dir, plus the
   // harness-persona-sync `harnessOverride` create-input bit — load-bearing

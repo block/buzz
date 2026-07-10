@@ -177,6 +177,19 @@ pub enum Requirement {
         /// and route to Doctor with accurate context.
         availability: AcpAvailabilityStatus,
     },
+    /// The CLI is installed but its config file could not be parsed.
+    /// This is an informational surface only — there is no in-app destination
+    /// that can repair an external config file; the user must edit it manually.
+    CliConfigInvalid {
+        /// Arguments used in the probe (e.g. `["codex", "login", "status"]`);
+        /// `probe_args[0]` is the CLI name (e.g. `"codex"`).
+        probe_args: Vec<String>,
+        /// Human-readable hint shown when no structured copy is available.
+        setup_copy: String,
+        /// A one-line excerpt from the CLI's stderr (the parse-error line).
+        /// Shown verbatim in the nudge so the user can identify the problem.
+        diagnostic: String,
+    },
 }
 
 // ── AgentReadiness ────────────────────────────────────────────────────────────
@@ -505,20 +518,25 @@ fn cli_login_requirements(
             };
 
             let augmented_path = cli_probe::augmented_path();
-            let logged_in = cli_probe::login_probe_succeeds(
-                &binary_path,
-                probe_args,
-                augmented_path.as_deref(),
-            );
+            let outcome =
+                cli_probe::login_probe(&binary_path, probe_args, augmented_path.as_deref());
 
-            if logged_in {
-                vec![]
-            } else {
-                vec![Requirement::CliLogin {
-                    probe_args: probe_args.iter().map(|s| s.to_string()).collect(),
-                    setup_copy: setup_copy.to_string(),
-                    availability: AcpAvailabilityStatus::Available,
-                }]
+            match outcome {
+                cli_probe::ProbeOutcome::LoggedIn => vec![],
+                cli_probe::ProbeOutcome::LoggedOut => {
+                    vec![Requirement::CliLogin {
+                        probe_args: probe_args.iter().map(|s| s.to_string()).collect(),
+                        setup_copy: setup_copy.to_string(),
+                        availability: AcpAvailabilityStatus::Available,
+                    }]
+                }
+                cli_probe::ProbeOutcome::ConfigInvalid { stderr_excerpt } => {
+                    vec![Requirement::CliConfigInvalid {
+                        probe_args: probe_args.iter().map(|s| s.to_string()).collect(),
+                        setup_copy: setup_copy.to_string(),
+                        diagnostic: stderr_excerpt,
+                    }]
+                }
             }
         }
         // Tooling is not fully installed — emit CliLogin with the precise
