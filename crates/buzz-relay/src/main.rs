@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
@@ -7,6 +8,7 @@ use uuid::Uuid;
 
 use buzz_audit::AuditService;
 use buzz_auth::AuthService;
+use buzz_core::CommunityId;
 use buzz_db::{Db, DbConfig};
 use buzz_pubsub::PubSubManager;
 use buzz_search::SearchService;
@@ -822,7 +824,10 @@ async fn main() -> anyhow::Result<()> {
         let interval_secs = std::env::var("BUZZ_USAGE_METRICS_INTERVAL_SECS")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
-            .unwrap_or(60)
+            .unwrap_or(300) // 300s default: adoption stocks don't need minute freshness;
+            // if event-table rollups (message counts, DAU/WAU/MAU) become
+            // slow at scale, move them to a maintained rollup table and drop
+            // the interval back to 60s.
             .max(5); // 5s minimum: cheaper than pool poller's 1s minimum
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
@@ -1011,12 +1016,7 @@ fn reminder_to_event(reminder: &buzz_db::event::DueReminder) -> nostr::Event {
 async fn run_usage_metrics_tick(state: &AppState) -> anyhow::Result<()> {
     // --- community id → host label map (one query, cached for this tick) ---
     let hosts = state.db.usage_community_hosts().await?;
-    let host_map: std::collections::HashMap<Uuid, String> =
-        hosts.into_iter().map(|c| (c.id, c.host)).collect();
-
-    // Helper: resolve community UUID → host label string.
-    let host =
-        |id: Uuid| -> String { host_map.get(&id).cloned().unwrap_or_else(|| id.to_string()) };
+    let host_map: HashMap<Uuid, String> = hosts.into_iter().map(|c| (c.id, c.host)).collect();
 
     // --- A. Adoption stocks (DB-polled) ---
 
@@ -1025,112 +1025,238 @@ async fn run_usage_metrics_tick(state: &AppState) -> anyhow::Result<()> {
     metrics::gauge!("buzz_communities_total").set(total as f64);
 
     // buzz_community_users{community, type:human|agent}
-    for row in state.db.usage_user_counts().await? {
-        let community = host(row.community_id);
-        metrics::gauge!("buzz_community_users", "community" => community.clone(), "type" => "human")
-            .set(row.human as f64);
-        metrics::gauge!("buzz_community_users", "community" => community, "type" => "agent")
-            .set(row.agent as f64);
+    // Emit from host_map so communities that have zero users still get a 0
+    // rather than keeping the last nonzero value until process restart.
+    {
+        let rows: HashMap<Uuid, _> = state
+            .db
+            .usage_user_counts()
+            .await?
+            .into_iter()
+            .map(|r| (r.community_id, r))
+            .collect();
+        for (&id, community) in &host_map {
+            let (human, agent) = rows.get(&id).map(|r| (r.human, r.agent)).unwrap_or((0, 0));
+            metrics::gauge!("buzz_community_users", "community" => community.clone(), "type" => "human")
+                .set(human as f64);
+            metrics::gauge!("buzz_community_users", "community" => community.clone(), "type" => "agent")
+                .set(agent as f64);
+        }
     }
 
     // buzz_community_channels{community, type}
-    for row in state.db.usage_channel_counts().await? {
-        let community = host(row.community_id);
-        metrics::gauge!(
-            "buzz_community_channels",
-            "community" => community,
-            "type" => row.channel_type
-        )
-        .set(row.count as f64);
+    // Zero-fill across all (community, channel_type) pairs so a type that
+    // drops to zero emits 0 rather than retaining its last nonzero value.
+    {
+        const CHANNEL_TYPES: &[&str] = &["stream", "forum", "dm", "workflow"];
+        let rows: HashMap<(Uuid, &str), i64> = state
+            .db
+            .usage_channel_counts()
+            .await?
+            .into_iter()
+            .filter_map(|r| {
+                // Map the DB string to a known static str so the key is &str.
+                CHANNEL_TYPES
+                    .iter()
+                    .find(|&&t| t == r.channel_type.as_str())
+                    .map(|&t| ((r.community_id, t), r.count))
+            })
+            .collect();
+        for (&id, community) in &host_map {
+            for &ct in CHANNEL_TYPES {
+                let count = rows.get(&(id, ct)).copied().unwrap_or(0);
+                metrics::gauge!(
+                    "buzz_community_channels",
+                    "community" => community.clone(),
+                    "type" => ct
+                )
+                .set(count as f64);
+            }
+        }
     }
 
     // buzz_community_messages{community}
-    for row in state.db.usage_message_counts().await? {
-        let community = host(row.community_id);
-        metrics::gauge!("buzz_community_messages", "community" => community).set(row.count as f64);
+    // Emit 0 for communities with no messages so dashboards don't stale-read.
+    {
+        let rows: HashMap<Uuid, i64> = state
+            .db
+            .usage_message_counts()
+            .await?
+            .into_iter()
+            .map(|r| (r.community_id, r.count))
+            .collect();
+        for (&id, community) in &host_map {
+            let count = rows.get(&id).copied().unwrap_or(0);
+            metrics::gauge!("buzz_community_messages", "community" => community.clone())
+                .set(count as f64);
+        }
     }
 
     // buzz_community_relay_members{community, role}
-    for row in state.db.usage_relay_member_counts().await? {
-        let community = host(row.community_id);
-        metrics::gauge!(
-            "buzz_community_relay_members",
-            "community" => community,
-            "role" => row.role
-        )
-        .set(row.count as f64);
+    // Zero-fill across all (community, role) pairs; relay_members.role is a
+    // CHECK constraint over {'owner', 'admin', 'member'}.
+    {
+        const RELAY_ROLES: &[&str] = &["owner", "admin", "member"];
+        let rows: HashMap<(Uuid, &str), i64> = state
+            .db
+            .usage_relay_member_counts()
+            .await?
+            .into_iter()
+            .filter_map(|r| {
+                RELAY_ROLES
+                    .iter()
+                    .find(|&&role| role == r.role.as_str())
+                    .map(|&role| ((r.community_id, role), r.count))
+            })
+            .collect();
+        for (&id, community) in &host_map {
+            for &role in RELAY_ROLES {
+                let count = rows.get(&(id, role)).copied().unwrap_or(0);
+                metrics::gauge!(
+                    "buzz_community_relay_members",
+                    "community" => community.clone(),
+                    "role" => role
+                )
+                .set(count as f64);
+            }
+        }
     }
 
     // buzz_community_workflows{community, status}
-    for row in state.db.usage_workflow_counts().await? {
-        let community = host(row.community_id);
-        metrics::gauge!(
-            "buzz_community_workflows",
-            "community" => community,
-            "status" => row.status
-        )
-        .set(row.count as f64);
+    // Zero-fill across all (community, status) pairs; workflow_status is a
+    // DB enum: {'active', 'disabled', 'archived'}.
+    {
+        const WORKFLOW_STATUSES: &[&str] = &["active", "disabled", "archived"];
+        let rows: HashMap<(Uuid, &str), i64> = state
+            .db
+            .usage_workflow_counts()
+            .await?
+            .into_iter()
+            .filter_map(|r| {
+                WORKFLOW_STATUSES
+                    .iter()
+                    .find(|&&s| s == r.status.as_str())
+                    .map(|&s| ((r.community_id, s), r.count))
+            })
+            .collect();
+        for (&id, community) in &host_map {
+            for &status in WORKFLOW_STATUSES {
+                let count = rows.get(&(id, status)).copied().unwrap_or(0);
+                metrics::gauge!(
+                    "buzz_community_workflows",
+                    "community" => community.clone(),
+                    "status" => status
+                )
+                .set(count as f64);
+            }
+        }
     }
 
     // buzz_community_git_repos{community}
-    for row in state.db.usage_git_repo_counts().await? {
-        let community = host(row.community_id);
-        metrics::gauge!("buzz_community_git_repos", "community" => community).set(row.count as f64);
+    // Emit 0 for communities with no repos.
+    {
+        let rows: HashMap<Uuid, i64> = state
+            .db
+            .usage_git_repo_counts()
+            .await?
+            .into_iter()
+            .map(|r| (r.community_id, r.count))
+            .collect();
+        for (&id, community) in &host_map {
+            let count = rows.get(&id).copied().unwrap_or(0);
+            metrics::gauge!("buzz_community_git_repos", "community" => community.clone())
+                .set(count as f64);
+        }
     }
 
     // --- C. Engagement — windowed DAU/WAU/MAU + active channels ---
+    // Emit 0 for window/type/community combos that had no activity; this
+    // ensures a community that was active last tick but quiet this tick reads
+    // 0 rather than retaining its last nonzero value.
 
     for (interval, label) in [("1 day", "1d"), ("7 days", "7d"), ("30 days", "30d")] {
-        for row in state.db.usage_active_user_counts(interval).await? {
-            let community = host(row.community_id);
+        let rows: HashMap<Uuid, _> = state
+            .db
+            .usage_active_user_counts(interval)
+            .await?
+            .into_iter()
+            .map(|r| (r.community_id, r))
+            .collect();
+        for (&id, community) in &host_map {
+            let (human, agent) = rows.get(&id).map(|r| (r.human, r.agent)).unwrap_or((0, 0));
             metrics::gauge!(
                 "buzz_community_active_users",
                 "community" => community.clone(),
                 "window" => label,
                 "type" => "human"
             )
-            .set(row.human as f64);
+            .set(human as f64);
             metrics::gauge!(
                 "buzz_community_active_users",
-                "community" => community,
+                "community" => community.clone(),
                 "window" => label,
                 "type" => "agent"
             )
-            .set(row.agent as f64);
+            .set(agent as f64);
         }
     }
 
     for (interval, label) in [("1 day", "1d"), ("7 days", "7d")] {
-        for row in state.db.usage_active_channel_counts(interval).await? {
-            let community = host(row.community_id);
+        let rows: HashMap<Uuid, i64> = state
+            .db
+            .usage_active_channel_counts(interval)
+            .await?
+            .into_iter()
+            .map(|r| (r.community_id, r.count))
+            .collect();
+        for (&id, community) in &host_map {
+            let count = rows.get(&id).copied().unwrap_or(0);
             metrics::gauge!(
                 "buzz_community_active_channels",
-                "community" => community,
+                "community" => community.clone(),
                 "window" => label
             )
-            .set(row.count as f64);
+            .set(count as f64);
         }
     }
 
     // --- D. Realtime — in-memory snapshots ---
+    // All three gauges are derived from the in-memory conn/sub registries.
+    // We emit from host_map so communities that just dropped to zero
+    // (last connection closed, all subs removed) receive an explicit 0
+    // rather than keeping the stale last value.
 
     // buzz_community_ws_connections{community}
-    for (community_id, count) in state.conn_manager.per_community_ws_connections() {
-        let community = host(*community_id.as_uuid());
-        metrics::gauge!("buzz_community_ws_connections", "community" => community)
-            .set(count as f64);
+    {
+        let conns = state.conn_manager.per_community_ws_connections();
+        for (&id, community) in &host_map {
+            let count = conns.get(&CommunityId::from_uuid(id)).copied().unwrap_or(0);
+            metrics::gauge!("buzz_community_ws_connections", "community" => community.clone())
+                .set(count as f64);
+        }
     }
 
     // buzz_community_users_online{community}
-    for (community_id, count) in state.conn_manager.per_community_users_online() {
-        let community = host(*community_id.as_uuid());
-        metrics::gauge!("buzz_community_users_online", "community" => community).set(count as f64);
+    {
+        let online = state.conn_manager.per_community_users_online();
+        for (&id, community) in &host_map {
+            let count = online
+                .get(&CommunityId::from_uuid(id))
+                .copied()
+                .unwrap_or(0);
+            metrics::gauge!("buzz_community_users_online", "community" => community.clone())
+                .set(count as f64);
+        }
     }
 
     // buzz_community_subscriptions{community}
-    for (community_id, count) in state.sub_registry.per_community_subscriptions() {
-        let community = host(*community_id.as_uuid());
-        metrics::gauge!("buzz_community_subscriptions", "community" => community).set(count as f64);
+    {
+        let subs = state.sub_registry.per_community_subscriptions();
+        for (&id, community) in &host_map {
+            let count = subs.get(&CommunityId::from_uuid(id)).copied().unwrap_or(0);
+            metrics::gauge!("buzz_community_subscriptions", "community" => community.clone())
+                .set(count as f64);
+        }
     }
 
     Ok(())

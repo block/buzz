@@ -97,7 +97,7 @@ pub async fn send_moderation_notice(
     // 1. Create/reuse the two-party DM channel {relay mod key, recipient}.
     //    `open_dm` is participant-hash idempotent, so re-delivery to the same
     //    user reuses the one thread per (community, user).
-    let (dm_channel, _was_created) = state
+    let (dm_channel, was_created) = state
         .db
         .open_dm(
             tenant.community(),
@@ -106,6 +106,17 @@ pub async fn send_moderation_notice(
         )
         .await?;
     let dm_channel_id = dm_channel.id;
+
+    // Count new DM creation; side-effect gates below intentionally do not
+    // gate on was_created (see comment at step 2).
+    if was_created {
+        metrics::counter!(
+            "buzz_channels_created_total",
+            "community" => tenant.host().to_owned(),
+            "type" => "dm"
+        )
+        .increment(1);
+    }
 
     // Resurface the moderation DM for the recipient. `open_dm` only clears
     // `hidden_at` for `created_by` (the relay key), so a user who hid the

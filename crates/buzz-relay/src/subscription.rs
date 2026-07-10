@@ -1520,7 +1520,42 @@ mod tests {
         // Remove one sub from community A — snapshot should reflect it.
         registry.remove_subscription(conn_a, "a1");
         let snap2 = registry.per_community_subscriptions();
-        assert_eq!(snap2.get(&community_a), Some(&1), "community A: 1 sub after removal");
+        assert_eq!(
+            snap2.get(&community_a),
+            Some(&1),
+            "community A: 1 sub after removal"
+        );
         assert_eq!(snap2.get(&community_b), Some(&1), "community B: unchanged");
+    }
+
+    #[test]
+    fn per_community_subscriptions_drops_to_zero_when_all_subs_removed() {
+        // Regression: when the last subscription for a community is removed,
+        // per_community_subscriptions() must return no entry (not stale nonzero).
+        // The poller zero-fills from host_map, so absence == 0 is correct.
+        let registry = SubscriptionRegistry::new();
+        let community = CommunityId::from_uuid(Uuid::from_u128(0xcccc));
+        let conn = Uuid::new_v4();
+
+        registry.register_scoped(
+            community,
+            conn,
+            "c1".to_string(),
+            vec![Filter::new().kind(Kind::TextNote)],
+            None,
+        );
+
+        // Verify nonzero before removal.
+        let snap1 = registry.per_community_subscriptions();
+        assert_eq!(snap1.get(&community), Some(&1), "1 sub before removal");
+
+        // Remove the only sub — community should no longer appear in snapshot.
+        registry.remove_subscription(conn, "c1");
+        let snap2 = registry.per_community_subscriptions();
+        assert!(
+            snap2.get(&community).copied().unwrap_or(0) == 0,
+            "community must have 0 subs after last removal; got {:?}",
+            snap2.get(&community)
+        );
     }
 }

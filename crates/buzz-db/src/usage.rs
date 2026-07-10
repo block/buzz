@@ -205,7 +205,7 @@ pub async fn git_repo_counts(pool: &PgPool) -> Result<Vec<CommunityGitRepoCount>
     let rows = sqlx::query_as::<_, (Uuid, i64)>(
         r#"
         SELECT community_id, COUNT(*) AS count
-        FROM git_repos
+        FROM git_repo_names
         GROUP BY community_id
         "#,
     )
@@ -405,13 +405,39 @@ mod tests {
         let (comm_a_uuid, _, _) = make_community(&pool).await;
         let (comm_b_uuid, _, _) = make_community(&pool).await;
 
-        // Community A: 2 human, 1 agent
-        insert_user(&pool, comm_a_uuid, &random_pubkey(), false).await;
-        insert_user(&pool, comm_a_uuid, &random_pubkey(), false).await;
-        insert_user(&pool, comm_a_uuid, &random_pubkey(), true).await;
+        // Community A: insert 2 humans first, then 1 agent whose owner is one
+        // of those humans (reuses existing pubkey — no extra human row).
+        let human1 = random_pubkey();
+        let human2 = random_pubkey();
+        let agent_pk = random_pubkey();
+        insert_user(&pool, comm_a_uuid, &human1, false).await;
+        insert_user(&pool, comm_a_uuid, &human2, false).await;
+        // Insert agent with human1 as owner (human1 is already in users).
+        sqlx::query(
+            "INSERT INTO users (community_id, pubkey, agent_owner_pubkey)
+             VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
+        )
+        .bind(comm_a_uuid)
+        .bind(&agent_pk)
+        .bind(&human1)
+        .execute(&pool)
+        .await
+        .expect("insert agent user");
 
-        // Community B: 0 human, 1 agent
-        insert_user(&pool, comm_b_uuid, &random_pubkey(), true).await;
+        // Community B: 0 human, 1 agent (owner is a fresh human in comm_b).
+        let owner_b = random_pubkey();
+        insert_user(&pool, comm_b_uuid, &owner_b, false).await;
+        let agent_b = random_pubkey();
+        sqlx::query(
+            "INSERT INTO users (community_id, pubkey, agent_owner_pubkey)
+             VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
+        )
+        .bind(comm_b_uuid)
+        .bind(&agent_b)
+        .bind(&owner_b)
+        .execute(&pool)
+        .await
+        .expect("insert agent user b");
 
         let counts = user_counts(&pool).await.expect("user_counts");
 
@@ -423,7 +449,7 @@ mod tests {
         assert_eq!(a.agent, 1, "community A: 1 agent");
 
         let b = b.expect("community B row");
-        assert_eq!(b.human, 0, "community B: 0 humans");
+        assert_eq!(b.human, 1, "community B: 1 human (the agent owner)");
         assert_eq!(b.agent, 1, "community B: 1 agent");
     }
 
@@ -468,7 +494,7 @@ mod tests {
 
         // Insert a stream and a DM channel.
         sqlx::query(
-            "INSERT INTO channels (id, community_id, name, channel_type, visibility, owner_pubkey)
+            "INSERT INTO channels (id, community_id, name, channel_type, visibility, created_by)
              VALUES ($1, $2, 'test-stream', 'stream', 'open', $3)",
         )
         .bind(uuid::Uuid::new_v4())
@@ -480,7 +506,7 @@ mod tests {
 
         let dm_id = uuid::Uuid::new_v4();
         sqlx::query(
-            "INSERT INTO channels (id, community_id, name, channel_type, visibility, owner_pubkey)
+            "INSERT INTO channels (id, community_id, name, channel_type, visibility, created_by)
              VALUES ($1, $2, 'test-dm', 'dm', 'private', $3)",
         )
         .bind(dm_id)
@@ -534,5 +560,93 @@ mod tests {
         make_community(&pool).await;
         let after = community_count(&pool).await.expect("count after");
         assert!(after > before, "count should increase after insert");
+    }
+
+    /// git_repo_counts queries git_repo_names (not git_repos) and is scoped per community.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn test_git_repo_counts_scoped_per_community() {
+        let pool = get_pool().await;
+        let (comm_uuid, _, _) = make_community(&pool).await;
+        let owner = random_pubkey();
+        insert_user(&pool, comm_uuid, &owner, false).await;
+        let owner_hex = hex::encode(&owner);
+
+        // Insert two repos for this community.
+        for repo_id in &["repo-alpha", "repo-beta"] {
+            sqlx::query(
+                "INSERT INTO git_repo_names (community_id, repo_id, owner_pubkey)
+                 VALUES ($1, $2, $3)
+                 ON CONFLICT DO NOTHING",
+            )
+            .bind(comm_uuid)
+            .bind(repo_id)
+            .bind(&owner_hex)
+            .execute(&pool)
+            .await
+            .expect("insert git repo");
+        }
+
+        let counts = git_repo_counts(&pool).await.expect("git_repo_counts");
+        let comm_counts: Vec<_> = counts
+            .iter()
+            .filter(|r| r.community_id == comm_uuid)
+            .collect();
+
+        assert_eq!(comm_counts.len(), 1, "one row per community");
+        assert_eq!(comm_counts[0].count, 2, "two repos");
+    }
+
+    /// Regression: channel_counts returns no row for a community once all
+    /// channels of a type are soft-deleted.  The poller zero-fills from
+    /// host_map, so absence from this query is the correct "zero" signal.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn test_channel_counts_drops_to_zero_after_last_channel_deleted() {
+        let pool = get_pool().await;
+        let (comm_uuid, _, _) = make_community(&pool).await;
+        let owner = random_pubkey();
+        insert_user(&pool, comm_uuid, &owner, false).await;
+
+        // Insert one stream channel.
+        let ch_id = uuid::Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO channels (id, community_id, name, channel_type, visibility, created_by)
+             VALUES ($1, $2, 'only-stream', 'stream', 'open', $3)",
+        )
+        .bind(ch_id)
+        .bind(comm_uuid)
+        .bind(&owner)
+        .execute(&pool)
+        .await
+        .expect("insert channel");
+
+        // Sanity: row present before deletion.
+        let before = channel_counts(&pool).await.expect("channel_counts before");
+        let before_row = before
+            .iter()
+            .find(|r| r.community_id == comm_uuid && r.channel_type == "stream");
+        assert_eq!(
+            before_row.map(|r| r.count),
+            Some(1),
+            "1 stream channel before deletion"
+        );
+
+        // Soft-delete the channel.
+        sqlx::query("UPDATE channels SET deleted_at = NOW() WHERE id = $1")
+            .bind(ch_id)
+            .execute(&pool)
+            .await
+            .expect("soft-delete channel");
+
+        // After deletion: no row for this community+type — query returns nothing.
+        let after = channel_counts(&pool).await.expect("channel_counts after");
+        let after_row = after
+            .iter()
+            .find(|r| r.community_id == comm_uuid && r.channel_type == "stream");
+        assert!(
+            after_row.is_none(),
+            "no stream row after last channel deleted — poller will zero-fill"
+        );
     }
 }
