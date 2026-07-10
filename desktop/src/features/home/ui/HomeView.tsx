@@ -18,9 +18,9 @@ import {
 } from "@/features/home/lib/inbox";
 import { useInboxSelectionAnchor } from "@/features/home/useInboxSelectionAnchor";
 import {
-  getContextMessageDepth,
   getReactionTargetId,
   matchesInboxFilter,
+  toInboxContextMessage,
 } from "@/features/home/lib/inboxViewHelpers";
 import { useHomeInboxReadState } from "@/features/home/useHomeInboxReadState";
 import { useInboxThreadContext } from "@/features/home/useInboxThreadContext";
@@ -66,7 +66,6 @@ import { KIND_REACTION } from "@/shared/constants/kinds";
 import { topChromeInset } from "@/shared/layout/chromeLayout";
 import { cn } from "@/shared/lib/cn";
 import { normalizePubkey } from "@/shared/lib/pubkey";
-import { resolveMentionProps } from "@/shared/lib/resolveMentionNames";
 import { useElementWidth } from "@/shared/hooks/use-mobile";
 import { useThreadPanelWidth } from "@/shared/hooks/useThreadPanelWidth";
 import { AUXILIARY_PANEL_SINGLE_COLUMN_BREAKPOINT_PX } from "@/shared/layout/AuxiliaryPanel";
@@ -475,31 +474,14 @@ export function HomeView({
       feedProfiles,
     );
 
-    return timelineMessages.map((message) => {
-      const event = eventById.get(message.id);
-      const authorPubkey =
-        message.pubkey ?? event?.pubkey ?? selectedItem.item.pubkey;
-      const { mentionNames, mentionPubkeysByName } = resolveMentionProps(
-        message.tags ?? [],
-        feedProfiles,
-      );
-      return {
-        id: message.id,
-        authorLabel: message.author,
-        authorPubkey,
-        avatarUrl: message.avatarUrl ?? null,
-        content: message.body,
-        createdAt: message.createdAt,
-        depth: event ? getContextMessageDepth(event, eventById) : message.depth,
-        fullTimestampLabel: formatInboxFullTimestamp(message.createdAt),
-        isSelected: message.id === selectedEventId,
-        mentionNames: mentionNames ?? [],
-        mentionPubkeysByName,
-        reactions: message.reactions,
-        tags: message.tags,
-        timeLabel: message.time,
-      };
-    });
+    return timelineMessages.map((message) =>
+      toInboxContextMessage(message, {
+        eventById,
+        fallbackAuthorPubkey: selectedItem.item.pubkey,
+        profiles: feedProfiles,
+        selectedItemId: selectedEventId ?? selectedItem.id,
+      }),
+    );
   }, [
     channelMessages,
     currentPubkey,
