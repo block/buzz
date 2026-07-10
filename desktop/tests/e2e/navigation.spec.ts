@@ -377,6 +377,72 @@ test("message links reopen a closed thread when the same messageId is already in
   );
 });
 
+test("thread reply deep links highlight the targeted reply", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  const rootText = `Thread deep-link root ${Date.now()}`;
+  await page.getByTestId("message-input").fill(rootText);
+  await page.getByTestId("send-message").click();
+
+  const rootMessage = page
+    .getByTestId("message-timeline")
+    .getByTestId("message-row")
+    .filter({ hasText: rootText });
+  await rootMessage.hover();
+  await rootMessage.getByRole("button", { name: "Reply" }).click();
+
+  const threadPanel = page.getByTestId("message-thread-panel");
+  const parentReplyText = `Parent reply ${Date.now()}`;
+  const threadInput = threadPanel.getByTestId("message-input");
+  await threadInput.fill(parentReplyText);
+  await page.keyboard.press("Enter");
+
+  const parentReply = threadPanel
+    .getByTestId("message-row")
+    .filter({ hasText: parentReplyText });
+  await expect(parentReply).toBeVisible();
+  await parentReply.hover();
+  await parentReply.getByRole("button", { name: "Reply" }).click();
+
+  const nestedReplyText = `Deep-linked nested reply ${Date.now()}`;
+  await threadInput.fill(nestedReplyText);
+  await page.keyboard.press("Enter");
+
+  const nestedReply = threadPanel
+    .getByTestId("message-row")
+    .filter({ hasText: nestedReplyText });
+  await expect(nestedReply).toBeVisible();
+  const nestedReplyId = await nestedReply.getAttribute("data-message-id");
+  expect(nestedReplyId).toBeTruthy();
+  await expect
+    .poll(() =>
+      nestedReply.evaluate(
+        (element) => getComputedStyle(element, "::before").animationName,
+      ),
+    )
+    .not.toContain("route-target-highlight-fade");
+
+  await page.goto(
+    `/#/channels/9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50?messageId=${encodeURIComponent(nestedReplyId ?? "")}`,
+  );
+
+  const targetedReply = page
+    .getByTestId("message-thread-panel")
+    .locator(`[data-message-id="${nestedReplyId}"]`);
+  await expect(targetedReply).toBeInViewport();
+  await expect
+    .poll(() =>
+      targetedReply.evaluate(
+        (element) => getComputedStyle(element, "::before").animationName,
+      ),
+    )
+    .toContain("route-target-highlight-fade");
+});
+
 test("message deep links survive reload", async ({ page }) => {
   await page.goto(
     `/#/channels/${ENGINEERING_CHANNEL_ID}?messageId=mock-engineering-shipped`,

@@ -86,6 +86,7 @@ type MessageThreadPanelProps = {
   profiles?: UserProfileLookup;
   replyTargetMessage: TimelineMessage | null;
   scrollTargetId: string | null;
+  scrollTargetHighlighted?: boolean;
   threadHead: TimelineMessage | null;
   threadReplies: MainTimelineEntry[];
   threadUnreadCount?: number;
@@ -329,6 +330,7 @@ export function MessageThreadPanel({
   profiles,
   replyTargetMessage,
   scrollTargetId,
+  scrollTargetHighlighted = false,
   threadHead,
   threadHeadVideoReviewContext,
   threadReplies,
@@ -585,16 +587,22 @@ export function MessageThreadPanel({
     threadHead,
   ]);
 
-  const { isAtBottom, newMessageCount, onScroll, scrollToBottom } =
-    useAnchoredScroll({
-      channelId: threadHeadId,
-      contentRef: threadContentRef,
-      isLoading: repliesRenderState === "pending",
-      messages: threadMessages,
-      onTargetReached: onScrollTargetResolved,
-      scrollContainerRef: threadBodyRef,
-      targetMessageId: scrollTargetId,
-    });
+  const {
+    highlightedMessageId,
+    isAtBottom,
+    newMessageCount,
+    onScroll,
+    scrollToBottom,
+  } = useAnchoredScroll({
+    channelId: threadHeadId,
+    contentRef: threadContentRef,
+    highlightTarget: scrollTargetHighlighted,
+    isLoading: repliesRenderState === "pending",
+    messages: threadMessages,
+    onTargetReached: onScrollTargetResolved,
+    scrollContainerRef: threadBodyRef,
+    targetMessageId: scrollTargetId,
+  });
 
   if (!threadHead) {
     return null;
@@ -748,6 +756,7 @@ export function MessageThreadPanel({
                           isDirectChildOfHighlightedBranch
                         }
                         highlightThreadLineDepths={highlightedLineDepths}
+                        highlighted={entry.message.id === highlightedMessageId}
                         hoverBackground={!entry.summary}
                         huddleMemberPubkeys={huddleMemberPubkeys}
                         huddleMemberPubkeysPending={huddleMemberPubkeysPending}

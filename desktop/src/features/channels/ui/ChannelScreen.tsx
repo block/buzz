@@ -148,6 +148,12 @@ export function ChannelScreen({
   const [threadScrollTargetId, setThreadScrollTargetId] = React.useState<
     string | null
   >(null);
+  const [threadHighlightTargetId, setThreadHighlightTargetId] = React.useState<
+    string | null
+  >(null);
+  const threadScrollTargetHighlighted =
+    threadScrollTargetId !== null &&
+    threadScrollTargetId === threadHighlightTargetId;
   const [threadReplyTargetId, setThreadReplyTargetId] = React.useState<
     string | null
   >(null);
@@ -667,6 +673,7 @@ export function ChannelScreen({
   );
   const handleThreadScrollTargetResolved = React.useCallback(() => {
     setThreadScrollTargetId(null);
+    setThreadHighlightTargetId(null);
   }, []);
   const handleTargetReached = React.useCallback(() => {
     clearMessageRouteTarget({ replace: true });
@@ -683,6 +690,7 @@ export function ChannelScreen({
     setOpenThreadHeadId,
     setProfilePanelPubkey,
     setThreadReplyTargetId,
+    setThreadHighlightTargetId,
     setThreadScrollTargetId,
     targetMessageId,
     timelineMessages,
@@ -967,6 +975,7 @@ export function ChannelScreen({
                   threadTypingPubkeys={threadTypingPubkeys}
                   threadReplyTargetMessage={displayedThreadReplyTargetMessage}
                   threadScrollTargetId={threadScrollTargetId}
+                  threadScrollTargetHighlighted={threadScrollTargetHighlighted}
                   threadUnreadCounts={threadUnreadCounts}
                   threadReplyUnreadCounts={threadReplyUnreadCounts}
                   threadFirstUnreadReplyId={displayedThreadFirstUnreadReplyId}

@@ -141,6 +141,7 @@ export type ChannelPaneProps = {
   threadTypingPubkeys: string[];
   threadReplyTargetMessage: TimelineMessage | null;
   threadScrollTargetId: string | null;
+  threadScrollTargetHighlighted: boolean;
   threadUnreadCounts?: ReadonlyMap<string, number>;
   threadReplyUnreadCounts?: ReadonlyMap<string, number>;
   threadFirstUnreadReplyId?: string | null;

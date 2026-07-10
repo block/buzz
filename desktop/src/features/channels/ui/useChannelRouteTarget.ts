@@ -61,6 +61,7 @@ export function useChannelRouteTarget({
   setOpenThreadHeadId,
   setProfilePanelPubkey,
   setThreadReplyTargetId,
+  setThreadHighlightTargetId,
   setThreadScrollTargetId,
   targetMessageId,
   timelineMessages,
@@ -73,6 +74,9 @@ export function useChannelRouteTarget({
   setOpenThreadHeadId: PanelValueSetter;
   setProfilePanelPubkey: PanelValueSetter;
   setThreadReplyTargetId: React.Dispatch<React.SetStateAction<string | null>>;
+  setThreadHighlightTargetId: React.Dispatch<
+    React.SetStateAction<string | null>
+  >;
   setThreadScrollTargetId: React.Dispatch<React.SetStateAction<string | null>>;
   targetMessageId: string | null;
   timelineMessages: TimelineMessage[];
@@ -149,6 +153,7 @@ export function useChannelRouteTarget({
     setEditTargetId(null);
     setOpenThreadHeadId(routeTarget.threadHeadId, { replace: true });
     setThreadReplyTargetId(routeTarget.threadHeadId);
+    setThreadHighlightTargetId(targetMessageId);
     setThreadScrollTargetId(targetMessageId);
     setExpandedThreadReplyIds(routeTarget.expandedReplyIds);
     handledThreadRouteTargetRef.current = targetKey;
@@ -161,6 +166,7 @@ export function useChannelRouteTarget({
     setOpenThreadHeadId,
     setProfilePanelPubkey,
     setThreadReplyTargetId,
+    setThreadHighlightTargetId,
     setThreadScrollTargetId,
     targetMessageId,
     timelineMessageById,

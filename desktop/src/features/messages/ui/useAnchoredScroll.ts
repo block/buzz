@@ -46,8 +46,10 @@ type UseAnchoredScrollOptions = {
    *  arrivals and to seed/refresh the anchor pre-render. */
   messages: Array<{ id: string }>;
 
-  /** When set, scroll to and highlight this message on mount and on change. */
+  /** When set, scroll to this message on mount and on change. */
   targetMessageId?: string | null;
+  /** Whether an automatic target scroll should also pulse the message. */
+  highlightTarget?: boolean;
   onTargetReached?: (messageId: string) => void;
 };
 
@@ -149,6 +151,7 @@ export function useAnchoredScroll({
   messages,
 
   targetMessageId = null,
+  highlightTarget = true,
   onTargetReached,
 }: UseAnchoredScrollOptions): UseAnchoredScrollResult {
   // Anchor lives in a ref because it must survive renders and is updated
@@ -166,7 +169,7 @@ export function useAnchoredScroll({
   const prevFirstMessageIdRef = React.useRef<string | undefined>(undefined);
   const prevMessageCountRef = React.useRef(0);
   const prevMessagesRef = React.useRef<Array<{ id: string }>>([]);
-  const handledTargetIdRef = React.useRef<string | null>(null);
+  const handledTargetKeyRef = React.useRef<string | null>(null);
   const highlightTimeoutRef = React.useRef<number | null>(null);
   // Tracks a pending rAF queued by pinToBottomOnMount so it can be cancelled
   // on channel switch (the channelId reset effect clears it).
@@ -196,7 +199,7 @@ export function useAnchoredScroll({
     prevFirstMessageIdRef.current = undefined;
     prevMessageCountRef.current = 0;
     prevMessagesRef.current = [];
-    handledTargetIdRef.current = null;
+    handledTargetKeyRef.current = null;
     forceBottomOnNextAppendRef.current = false;
     settlingRef.current = false;
     if (highlightTimeoutRef.current !== null) {
@@ -352,8 +355,12 @@ export function useAnchoredScroll({
         // render or two later. If centering fails now, leave the timeline at
         // its default position and let the post-mount target effect (keyed on
         // `messages`) retry once the row lands, rather than marking it handled.
-        if (scrollToMessageImperative(targetMessageId, { highlight: true })) {
-          handledTargetIdRef.current = targetMessageId;
+        if (
+          scrollToMessageImperative(targetMessageId, {
+            highlight: highlightTarget,
+          })
+        ) {
+          handledTargetKeyRef.current = `${targetMessageId}:${highlightTarget}`;
           onTargetReached?.(targetMessageId);
         } else {
           pinToBottomOnMount();
@@ -442,6 +449,7 @@ export function useAnchoredScroll({
     prevMessageCountRef.current = messages.length;
     prevMessagesRef.current = messages;
   }, [
+    highlightTarget,
     isLoading,
     messages,
     onTargetReached,
@@ -489,10 +497,11 @@ export function useAnchoredScroll({
   // biome-ignore lint/correctness/useExhaustiveDependencies: `messages` is an intentional trigger, not a read — the effect reads the DOM (querySelector), and we need it to re-run each time the rendered row set changes so a target spliced into older history gets centered once its row commits.
   React.useEffect(() => {
     if (!targetMessageId) {
-      handledTargetIdRef.current = null;
+      handledTargetKeyRef.current = null;
       return;
     }
-    if (handledTargetIdRef.current === targetMessageId || isLoading) return;
+    const targetKey = `${targetMessageId}:${highlightTarget}`;
+    if (handledTargetKeyRef.current === targetKey || isLoading) return;
     if (!hasInitializedRef.current) return; // initial-mount path will handle.
 
     const container = scrollContainerRef.current;
@@ -506,10 +515,11 @@ export function useAnchoredScroll({
       // each `messages` commit and retries until the row exists.
       return;
     }
-    handledTargetIdRef.current = targetMessageId;
-    scrollToMessageImperative(targetMessageId, { highlight: true });
+    handledTargetKeyRef.current = `${targetMessageId}:${highlightTarget}`;
+    scrollToMessageImperative(targetMessageId, { highlight: highlightTarget });
     onTargetReached?.(targetMessageId);
   }, [
+    highlightTarget,
     isLoading,
     messages,
     onTargetReached,
