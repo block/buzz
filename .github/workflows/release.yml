@@ -494,6 +494,7 @@ jobs:
             build-essential \
             ca-certificates \
             curl \
+            desktop-file-utils \
             file \
             git \
             libasound2-dev \
@@ -505,6 +506,7 @@ jobs:
             libxdo-dev \
             patchelf \
             pkg-config \
+            squashfs-tools \
             wget \
             xdg-utils
           # Install GitHub CLI — preinstalled on runners but absent in containers.
