@@ -1525,17 +1525,10 @@ test("buildTranscript restart sequence: system-prompt renders after session-boun
   const boundaryIdx = blocks.indexOf(boundaryBlocks[0]);
 
   // (b) The system-prompt must appear AFTER the boundary — not before it.
-  // Production path: system-prompt rides in the prompt bundle of the turn that
-  // carries the user @mention (acpSource "session/new" in the prompt segment).
+  // After consolidation: system-prompt always renders as a standalone single
+  // (never inside the prompt bundle), before the turn's user bubble.
   const systemPromptBlockIdx = blocks.findIndex(
-    (b) =>
-      (b.kind === "single" && b.item?.acpSource === "session/new") ||
-      (b.kind === "turn" &&
-        b.segments.some(
-          (seg) =>
-            seg.kind === "prompt" &&
-            seg.systemPrompt?.acpSource === "session/new",
-        )),
+    (b) => b.kind === "single" && b.item?.acpSource === "session/new",
   );
   assert.ok(
     systemPromptBlockIdx !== -1,
@@ -1548,9 +1541,8 @@ test("buildTranscript restart sequence: system-prompt renders after session-boun
 
   // (c) sess-2 activity must appear AFTER both boundary AND system-prompt.
   // This pins the full required order: boundary → system-prompt → activity.
-  // Because session/prompt:user is present, the system-prompt rides inside the
-  // prompt bundle of the same turn as the tool activity — they share the same
-  // block. Use flat item order to assert system-prompt precedes activity.
+  // The system-prompt standalone single and the tool activity are now in
+  // distinct blocks; use flat item indices to assert ordering.
   const flat = flattenDisplayBlocks(blocks);
   const sess2ActivityItem = flat.find(
     (i) => i.type === "tool" && i.sessionId === "sess-2",

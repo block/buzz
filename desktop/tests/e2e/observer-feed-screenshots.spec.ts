@@ -640,7 +640,7 @@ test.describe("observer feed screenshots", () => {
     });
   });
 
-  test("11 — first-turn bundle: user bubble + Checks ingress dialog", async ({
+  test("11 — first-turn bundle: standalone system-prompt card + Checks ingress (per-turn context only)", async ({
     page,
   }) => {
     await installMockBridge(page, { managedAgents: MANAGED_AGENTS });
@@ -648,9 +648,10 @@ test.describe("observer feed screenshots", () => {
 
     // Full realistic pool.rs first-turn wire sequence:
     // turn_started → session/new → session_resolved → session/prompt
-    // Verifies the prompt bundle keeps context out of the feed: the system
-    // prompt and prompt context both live in the dialog opened via the
-    // CheckCheck footer ingress, with system-prompt sections listed first.
+    // Verifies the consolidated presentation: session/new.systemPrompt always
+    // renders as a standalone top-level "System prompt" card (never injected into
+    // the CheckCheck bundle). The CheckCheck dialog contains only per-turn context
+    // (Buzz event / Thread context) — no Base/System/Core Memory sections.
     await seedObserverEvents(page, OBSERVER_AGENT_PUBKEY, [
       {
         seq: 1,
@@ -722,12 +723,19 @@ test.describe("observer feed screenshots", () => {
     await expect(feedPanel.getByTestId("transcript-prompt-bundle")).toBeVisible(
       { timeout: 5_000 },
     );
-    // Neither the system prompt nor the prompt context renders in the feed.
-    await expect(feedPanel.getByText("System prompt")).toHaveCount(0);
+
+    // Standalone "System prompt" card is visible as a top-level feed row —
+    // it must remain present even after the first prompt arrives.
+    await expect(feedPanel.getByText("System prompt")).toBeVisible({
+      timeout: 5_000,
+    });
+
+    // Per-turn prompt context (Buzz event / Thread context) does NOT appear
+    // as a standalone feed row — it lives behind the CheckCheck toggle.
     await expect(feedPanel.getByText("Prompt context")).toHaveCount(0);
 
-    // Open the dialog: system-prompt sections (Base/System) come before the
-    // prompt-context sections (Buzz event/Thread context).
+    // Open the CheckCheck dialog: it contains ONLY per-turn context sections
+    // (Buzz event, Thread context). Base/System/Core Memory must NOT appear.
     await feedPanel.getByTestId("transcript-prompt-context-toggle").click();
     const dialog = page.getByRole("dialog");
     await expect(dialog).toBeVisible({ timeout: 5_000 });
@@ -735,9 +743,10 @@ test.describe("observer feed screenshots", () => {
       .getByTestId("transcript-prompt-context-sections")
       .locator("article")
       .allInnerTexts();
-    expect(sectionTitles.length).toBe(4);
-    expect(sectionTitles[0]).toContain("Base");
-    expect(sectionTitles[1]).toContain("System");
+    // Only per-turn context sections (Buzz event + Thread context) — no system-prompt sections.
+    expect(sectionTitles.length).toBe(2);
+    expect(sectionTitles[0]).toContain("Buzz event");
+    expect(sectionTitles[1]).toContain("Thread context");
     await settleAnimations(dialog);
     await dialog.screenshot({
       path: `${SHOTS}/11-first-turn-ordering.png`,

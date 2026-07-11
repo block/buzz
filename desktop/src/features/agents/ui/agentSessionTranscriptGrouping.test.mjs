@@ -580,7 +580,6 @@ test("buildTranscriptDisplayBlocks bundles steer message with steer context behi
   const steerSegment = block.segments[1];
   assert.equal(steerSegment.user.id, "steer:chan-1:turn-1");
   assert.equal(steerSegment.context?.id, "steer-context:chan-1:turn-1");
-  assert.equal(steerSegment.systemPrompt, null);
   assert.deepEqual(steerSegment.setup, []);
   // No standalone "Prompt context" metadata row leaks into the feed.
   assert.ok(
@@ -934,20 +933,20 @@ function firstTurnSequence() {
   ];
 }
 
-test("buildTranscriptDisplayBlocks_firstTurnSequence_noStandaloneSystemPrompt", () => {
-  // Regression for: pre-resolution null-session items (turn_started + session/new)
-  // were assigned to a synthetic "unknown" run, causing the system prompt to emit
-  // as a standalone "System prompt" row instead of staying in the prompt bundle.
+test("buildTranscriptDisplayBlocks_firstTurnSequence_standaloneSystemPrompt", () => {
+  // session/new is session-scoped, not turn-scoped. After the consolidation,
+  // the grouper emits it as a standalone "System prompt" single block that
+  // appears BEFORE the first user-prompt turn — never inside the prompt bundle.
   const blocks = buildTranscriptDisplayBlocks(firstTurnSequence());
 
-  // (a) No standalone "System prompt" single block.
+  // (a) Exactly one standalone "System prompt" single block.
   const systemPromptSingles = blocks.filter(
     (b) => b.kind === "single" && b.item.acpSource === "session/new",
   );
   assert.equal(
     systemPromptSingles.length,
-    0,
-    "system prompt must not appear as a standalone single block",
+    1,
+    "system prompt must appear as exactly one standalone single block",
   );
 
   // (b) No session-boundary blocks — this is a single-session transcript.
@@ -958,7 +957,7 @@ test("buildTranscriptDisplayBlocks_firstTurnSequence_noStandaloneSystemPrompt", 
     "must be zero session-boundary blocks for a first-turn single-session sequence",
   );
 
-  // (c) System prompt is inside the turn group (consumed by the prompt bundle).
+  // (c) System prompt is NOT inside any turn group (not in prompt bundle).
   const turnBlocks = blocks.filter((b) => b.kind === "turn");
   assert.ok(turnBlocks.length > 0, "at least one turn block must exist");
   const allTurnItems = flattenDisplayBlocks(turnBlocks);
@@ -966,8 +965,20 @@ test("buildTranscriptDisplayBlocks_firstTurnSequence_noStandaloneSystemPrompt", 
     (item) => item.acpSource === "session/new",
   );
   assert.ok(
-    systemPromptInTurn,
-    "system prompt item must be present inside a turn block (prompt bundle)",
+    !systemPromptInTurn,
+    "system prompt item must NOT be present inside a turn block",
+  );
+
+  // (d) Standalone system-prompt block appears BEFORE the first turn block.
+  const systemPromptIdx = blocks.indexOf(systemPromptSingles[0]);
+  const firstTurnIdx = blocks.findIndex((b) => b.kind === "turn");
+  assert.ok(
+    firstTurnIdx !== -1,
+    "there must be at least one turn block after the system prompt",
+  );
+  assert.ok(
+    systemPromptIdx < firstTurnIdx,
+    `system-prompt single (${systemPromptIdx}) must precede first turn block (${firstTurnIdx})`,
   );
 });
 
@@ -1134,14 +1145,7 @@ test("buildTranscriptDisplayBlocks_restartScenario_systemPromptAfterBoundary", (
   // (b) The session/new item must appear AFTER the boundary, not before it.
   const boundaryIndex = blocks.indexOf(boundaryBlocks[0]);
   const systemPromptBlockIndex = blocks.findIndex(
-    (b) =>
-      (b.kind === "single" && b.item.acpSource === "session/new") ||
-      (b.kind === "turn" &&
-        b.segments.some(
-          (seg) =>
-            seg.kind === "prompt" &&
-            seg.systemPrompt?.acpSource === "session/new",
-        )),
+    (b) => b.kind === "single" && b.item.acpSource === "session/new",
   );
   assert.ok(
     systemPromptBlockIndex !== -1,
@@ -1227,7 +1231,7 @@ test("buildTranscriptDisplayBlocks_firstEverSession_systemPromptInSingleRun", ()
     "no session-boundary block for a first-ever single session",
   );
 
-  // System prompt must appear somewhere in the output (in the turn bundle).
+  // System prompt must appear somewhere in the output (as a standalone single).
   const flat = flattenDisplayBlocks(blocks);
   assert.ok(
     flat.some((i) => i.acpSource === "session/new"),

@@ -8,7 +8,6 @@ export type TranscriptTurnSegment =
   | {
       kind: "prompt";
       user: Extract<TranscriptItem, { type: "message" }>;
-      systemPrompt: Extract<TranscriptItem, { type: "metadata" }> | null;
       context: Extract<TranscriptItem, { type: "metadata" }> | null;
       setup: Extract<TranscriptItem, { type: "lifecycle" }>[];
     };
@@ -139,13 +138,7 @@ type TurnBucket = {
   items: TranscriptItem[];
 };
 
-function classifyTurnItems(
-  items: TranscriptItem[],
-  externalSystemPrompt: Extract<
-    TranscriptItem,
-    { type: "metadata" }
-  > | null = null,
-): TranscriptTurnSegment[] {
+function classifyTurnItems(items: TranscriptItem[]): TranscriptTurnSegment[] {
   const userPrompt = items.find(isUserPrompt) ?? null;
   const setupLifecycle = items.filter(isSetupLifecycle);
   const promptContext = items.find(isPromptContext) ?? null;
@@ -168,7 +161,6 @@ function classifyTurnItems(
       return {
         kind: "prompt",
         user: item,
-        systemPrompt: null,
         context: pendingSteerContexts.shift() ?? null,
         setup: [],
       };
@@ -190,7 +182,6 @@ function classifyTurnItems(
     {
       kind: "prompt",
       user: userPrompt,
-      systemPrompt: externalSystemPrompt,
       context: promptContext,
       setup: setupLifecycle,
     },
@@ -406,8 +397,7 @@ function getRenderClass(item: TranscriptItem) {
  * Pre-resolution items arrive with `sessionId: null` before any session has
  * been assigned. We defer those leading null-session items and **prepend them
  * to the first run that has a non-null sessionId**, so they stay in the same
- * session run as the turn they belong to and the `pendingSystemPrompt` slot in
- * `buildBlocksForRun` can consume them correctly.
+ * session run as the turn they belong to.
  *
  * **Restart / session-boundary ordering**: on a restart the normalizer stamps
  * `session/new` with `latestSessionId` (the OLD session's id) because the new
@@ -611,8 +601,10 @@ function buildBlocksForRun(
     { kind: "single"; item: TranscriptItem } | { kind: "turn"; turnId: string }
   > = [];
 
-  // System-prompt items (turnId=null, acpSource "session/new") accumulate here
-  // until consumed by the first turn that follows them in stream order.
+  // session/new items (turnId=null, acpSource "session/new") are session-scoped.
+  // We hold them here until the first turn is encountered, then emit them as a
+  // standalone single block BEFORE that turn — placing the System prompt card
+  // at the head of the session, before any user bubble or tool activity.
   let pendingSystemPrompt: Extract<
     TranscriptItem,
     { type: "metadata" }
@@ -622,7 +614,7 @@ function buildBlocksForRun(
     const turnId = item.turnId;
     if (!turnId) {
       if (isSystemPrompt(item)) {
-        // Hold system-prompt for injection into the next turn's prompt segment.
+        // Hold for standalone emission before the next turn block.
         pendingSystemPrompt = item;
       } else {
         displayOrder.push({ kind: "single", item });
@@ -639,9 +631,6 @@ function buildBlocksForRun(
     bucket.items.push(item);
   }
 
-  // Track per-turn injected system-prompt so multi-turn streams don't re-inject.
-  const consumedSystemPrompts = new Set<string>();
-
   for (const entry of displayOrder) {
     if (entry.kind === "single") {
       blocks.push({ kind: "single", item: entry.item });
@@ -653,32 +642,16 @@ function buildBlocksForRun(
       continue;
     }
 
-    // Inject system-prompt into the first turn that has a user-prompt item
-    // (it surfaces in the prompt bundle before user/context/activity).
-    // If the turn has no user prompt, emit the system-prompt as a standalone
-    // block BEFORE the turn so it always leads the session regardless of
-    // whether a user prompt is present.
-    let systemPromptForTurn: Extract<
-      TranscriptItem,
-      { type: "metadata" }
-    > | null = null;
-    if (
-      pendingSystemPrompt &&
-      !consumedSystemPrompts.has(pendingSystemPrompt.id)
-    ) {
-      if (bucket.items.some(isUserPrompt)) {
-        // Consume into the prompt bundle.
-        systemPromptForTurn = pendingSystemPrompt;
-        consumedSystemPrompts.add(pendingSystemPrompt.id);
-      } else {
-        // No user prompt in this turn — emit standalone before the turn block
-        // so the system prompt leads the session (boundary → prompt → activity).
-        blocks.push({ kind: "single", item: pendingSystemPrompt });
-        consumedSystemPrompts.add(pendingSystemPrompt.id);
-      }
+    // Emit a pending system-prompt as a standalone block BEFORE this turn so
+    // the System prompt card always leads the session (boundary → System prompt
+    // → first user bubble / tool activity), regardless of whether the turn has
+    // a user prompt or not.
+    if (pendingSystemPrompt) {
+      blocks.push({ kind: "single", item: pendingSystemPrompt });
+      pendingSystemPrompt = null;
     }
 
-    const segments = classifyTurnItems(bucket.items, systemPromptForTurn);
+    const segments = classifyTurnItems(bucket.items);
     if (segments.length > 0) {
       blocks.push({
         kind: "turn",
@@ -691,10 +664,7 @@ function buildBlocksForRun(
   // If system-prompt was never consumed (session/new arrived without any
   // subsequent turn — stream still incomplete or mid-restart), emit it as a
   // standalone single so it remains visible and is not silently dropped.
-  if (
-    pendingSystemPrompt &&
-    !consumedSystemPrompts.has(pendingSystemPrompt.id)
-  ) {
+  if (pendingSystemPrompt) {
     blocks.push({ kind: "single", item: pendingSystemPrompt });
   }
 
@@ -724,9 +694,6 @@ export function flattenDisplayBlocks(
       } else if (segment.kind === "prompt") {
         result.push(segment.user);
         result.push(...segment.setup);
-        if (segment.systemPrompt) {
-          result.push(segment.systemPrompt);
-        }
         if (segment.context) {
           result.push(segment.context);
         }
