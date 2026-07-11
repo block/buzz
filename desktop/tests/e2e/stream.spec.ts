@@ -19,12 +19,23 @@ async function getTimelineMetrics(page: Page) {
   return page.getByTestId("message-timeline").evaluate((element) => {
     const timeline = element as HTMLDivElement;
 
+    const composer = document.querySelector<HTMLElement>(
+      '[data-testid="channel-composer-overlay"]',
+    );
+    const composerHeight = composer?.getBoundingClientRect().height ?? 0;
+
     return {
       clientHeight: timeline.clientHeight,
       scrollHeight: timeline.scrollHeight,
       scrollTop: timeline.scrollTop,
+      // The virtualized timeline reserves a trailing spacer equal to the
+      // overlaid composer. Reaching the visual tail therefore leaves that
+      // spacer below the last row rather than setting the raw DOM distance to 0.
       distanceFromBottom:
-        timeline.scrollHeight - timeline.clientHeight - timeline.scrollTop,
+        timeline.scrollHeight -
+        timeline.clientHeight -
+        timeline.scrollTop -
+        composerHeight,
     };
   });
 }
