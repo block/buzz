@@ -305,6 +305,25 @@ export async function runSendPipeline(deps: {
   return true;
 }
 
+/**
+ * Compose the single-concurrency guard with the send pipeline.
+ *
+ * This is the exact production composition that `beginSend` uses: a second
+ * concurrent call to `runGuardedSend` with the same guard receives `false`
+ * immediately — encode never starts for the blocked call.
+ *
+ * Exported so unit tests can import and call this exact function twice
+ * concurrently with injected counters, proving one encode/upload/send and one
+ * blocked result.  A test that stays green after encode is moved outside the
+ * guard is not a production-composition test; this function is.
+ */
+export function runGuardedSend(
+  guard: ReturnType<typeof createSendGuard>,
+  pipelineDeps: Parameters<typeof runSendPipeline>[0],
+): Promise<boolean> {
+  return guard.runGuarded(() => runSendPipeline(pipelineDeps));
+}
+
 export type UseSnapshotSendControllerResult = {
   /**
    * Sendable destinations with resolved display labels.  DMs are omitted
@@ -423,19 +442,17 @@ export function useSnapshotSendController(): UseSnapshotSendControllerResult {
     encodeFn: () => Promise<{ fileBytes: number[]; fileName: string }>,
     channelId: string,
   ): Promise<boolean> {
-    return guardRef.current.runGuarded(() =>
-      runSendPipeline({
-        encodeFn,
-        channelId,
-        // Eligibility is checked by reading directly from the React Query cache
-        // and the timeout external store — not from rendered React state.
-        checkEligibilityFn: () => checkSendEligibility(queryClient, channelId),
-        uploadFn: (bytes, filename) => uploadMediaBytes(bytes, filename),
-        sendFn: (args) => sendMutation.mutateAsync(args),
-        setStateFn: setState,
-        buildMessageFn: (descriptor) => buildOutgoingMessage("", [descriptor]),
-      }),
-    );
+    return runGuardedSend(guardRef.current, {
+      encodeFn,
+      channelId,
+      // Eligibility is checked by reading directly from the React Query cache
+      // and the timeout external store — not from rendered React state.
+      checkEligibilityFn: () => checkSendEligibility(queryClient, channelId),
+      uploadFn: (bytes, filename) => uploadMediaBytes(bytes, filename),
+      sendFn: (args) => sendMutation.mutateAsync(args),
+      setStateFn: setState,
+      buildMessageFn: (descriptor) => buildOutgoingMessage("", [descriptor]),
+    });
   }
 
   function reset() {

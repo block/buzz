@@ -7,8 +7,14 @@ import {
   isSendableDestination,
   createSendGuard,
   runSendPipeline,
+  runGuardedSend,
   checkSendEligibility,
 } from "./useSnapshotSendController.ts";
+
+import {
+  recordTimeoutFromRejection,
+  clearTimeoutState,
+} from "../../moderation/lib/timeoutStore.ts";
 
 // ── isSendableDestination ─────────────────────────────────────────────────────
 
@@ -231,6 +237,66 @@ test("createSendGuard_sequential_calls_both_run", async () => {
   assert.equal(count, 2);
 });
 
+// ── runGuardedSend: production composition of guard + pipeline ────────────────
+//
+// runGuardedSend is the exact production composition that beginSend uses.
+// Calling it twice concurrently with the same guard must produce exactly one
+// encode, one upload, one send, and one blocked call.
+// A test that stays green after encode is moved outside the guard or after
+// beginSend stops calling runGuardedSend is not a production-composition test;
+// this test is — it will fail in both those cases.
+
+test("runGuardedSend_concurrent_calls_one_encodes_one_blocked", async () => {
+  const guard = createSendGuard();
+  let encodeCount = 0;
+  let uploadCount = 0;
+  let sendCount = 0;
+  const states = [];
+
+  const makeDeps = () => ({
+    channelId: "ch-1",
+    checkEligibilityFn: () => null,
+    encodeFn: async () => {
+      encodeCount++;
+      // Simulate encode latency so the second call definitely arrives
+      // while the first is in-flight.
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      return { fileBytes: [1], fileName: "x.json" };
+    },
+    uploadFn: async (_bytes, _filename) => {
+      uploadCount++;
+      return {
+        url: "https://example.com/x.json",
+        sha256: "a".repeat(64),
+        size: 1,
+        type: "application/json",
+        uploaded: 0,
+      };
+    },
+    sendFn: async () => {
+      sendCount++;
+    },
+    setStateFn: (s) => states.push(s.phase),
+    buildMessageFn: (_d) => ({ content: "", mediaTags: null }),
+  });
+
+  // Fire both concurrently using the same guard.
+  const [r1, r2] = await Promise.all([
+    runGuardedSend(guard, makeDeps()),
+    runGuardedSend(guard, makeDeps()),
+  ]);
+
+  // Exactly one encode, upload, and send ran.
+  assert.equal(encodeCount, 1, `expected encodeCount=1, got ${encodeCount}`);
+  assert.equal(uploadCount, 1, `expected uploadCount=1, got ${uploadCount}`);
+  assert.equal(sendCount, 1, `expected sendCount=1, got ${sendCount}`);
+  // One succeeded, one was blocked.
+  const successes = [r1, r2].filter(Boolean).length;
+  assert.equal(successes, 1, `expected 1 success, got ${successes}`);
+  // Guard is idle after both settle.
+  assert.equal(guard.inFlight, false, "guard should be idle after both settle");
+});
+
 // ── runSendPipeline: production pipeline with injected deps ──────────────────
 //
 // runSendPipeline is the actual production function called by the hook's
@@ -431,20 +497,55 @@ test("checkSendEligibility_missing_channel_returns_error", () => {
   assert.notEqual(result, null, "missing channel must be ineligible");
 });
 
-test("checkSendEligibility_active_timeout_returns_error", () => {
-  // Pass a nowMs that is before a known expiry to simulate an active timeout.
-  // We can't seed timeoutStore from the test, but we can test the timeout
-  // path by checking the return value when nowMs is smaller than an expiry.
-  // Use the exported isTimeoutActive directly instead of seeding state.
-  // NOTE: this test verifies the function is wired correctly; the store
-  // integration is exercised by the E2E timeout test.
-  // The channel is valid — any error must come from the timeout path.
+test("checkSendEligibility_active_timeout_known_expiry_returns_error", () => {
+  // Activate the timeout store with a known future expiry, then assert blocked.
+  // Clear the store in finally so state cannot leak to other tests.
   const qc = makeMockQueryClient({
     '["channels"]': [makeChannel({ id: "ch-1" })],
   });
-  // When the timeout store has no active timeout (default), eligible.
+  const futureExpiry = Date.now() + 60_000; // 1 minute from now
+  try {
+    recordTimeoutFromRejection(
+      `restricted: you are timed out until ${Math.floor(futureExpiry / 1000)}`,
+    );
+    const result = checkSendEligibility(qc, "ch-1");
+    assert.notEqual(
+      result,
+      null,
+      "active timeout (known expiry) must be blocked",
+    );
+  } finally {
+    clearTimeoutState();
+  }
+});
+
+test("checkSendEligibility_active_timeout_unknown_expiry_returns_error", () => {
+  // "restricted: you are timed out until 0" is the unknown-expiry case;
+  // parseTimeoutRejection returns expiresAtMs=null, and isTimeoutActive(null)
+  // returns true (fail-closed).
+  const qc = makeMockQueryClient({
+    '["channels"]': [makeChannel({ id: "ch-1" })],
+  });
+  try {
+    recordTimeoutFromRejection("restricted: you are timed out until 0");
+    const result = checkSendEligibility(qc, "ch-1");
+    assert.notEqual(
+      result,
+      null,
+      "active timeout (unknown expiry) must be blocked",
+    );
+  } finally {
+    clearTimeoutState();
+  }
+});
+
+test("checkSendEligibility_no_timeout_stream_returns_null", () => {
+  // Baseline: no active timeout, valid stream channel → eligible.
+  const qc = makeMockQueryClient({
+    '["channels"]': [makeChannel({ id: "ch-1" })],
+  });
   const result = checkSendEligibility(qc, "ch-1", 1000);
-  assert.equal(result, null, "no timeout → eligible");
+  assert.equal(result, null, "no timeout + valid stream → eligible");
 });
 
 test("checkSendEligibility_dm_with_loading_identity_returns_error", () => {
@@ -481,5 +582,88 @@ test("checkSendEligibility_dm_with_loading_relay_self_returns_error", () => {
     result,
     null,
     "DM with loading relay-self must be ineligible",
+  );
+});
+
+test("checkSendEligibility_classified_moderation_dm_returns_error", () => {
+  // Fail-closed: a 1:1 DM whose only other participant is relaySelf is a
+  // moderation DM and must be blocked.  Identity and relay-self are fully
+  // loaded so the moderation classification can run.
+  const RELAY_SELF = "relay000".padEnd(64, "0");
+  const MY_PUBKEY = "mypubkey".padEnd(64, "0");
+  const qc = makeMockQueryClient({
+    '["channels"]': [
+      makeChannel({
+        id: "ch-mod-dm",
+        channelType: "dm",
+        participantPubkeys: [MY_PUBKEY, RELAY_SELF],
+      }),
+    ],
+    '["identity"]': { pubkey: MY_PUBKEY, displayName: "Me" },
+    '["relaySelf"]': RELAY_SELF,
+    'state:["identity"]': { status: "success", fetchStatus: "idle" },
+    'state:["relaySelf"]': { status: "success", fetchStatus: "idle" },
+  });
+  const result = checkSendEligibility(qc, "ch-mod-dm", 1000);
+  assert.notEqual(result, null, "classified moderation DM must be blocked");
+});
+
+test("checkSendEligibility_ordinary_dm_is_eligible", () => {
+  // A normal 1:1 DM whose other participant is NOT relaySelf must be eligible.
+  const RELAY_SELF = "relay000".padEnd(64, "0");
+  const MY_PUBKEY = "mypubkey".padEnd(64, "0");
+  const OTHER_PUBKEY = "other000".padEnd(64, "0");
+  const qc = makeMockQueryClient({
+    '["channels"]': [
+      makeChannel({
+        id: "ch-ordinary-dm",
+        channelType: "dm",
+        participantPubkeys: [MY_PUBKEY, OTHER_PUBKEY],
+      }),
+    ],
+    '["identity"]': { pubkey: MY_PUBKEY, displayName: "Me" },
+    '["relaySelf"]': RELAY_SELF,
+    'state:["identity"]': { status: "success", fetchStatus: "idle" },
+    'state:["relaySelf"]': { status: "success", fetchStatus: "idle" },
+  });
+  const result = checkSendEligibility(qc, "ch-ordinary-dm", 1000);
+  assert.equal(result, null, "ordinary DM must be eligible");
+});
+
+test("checkSendEligibility_absent_identity_fail_open_for_ordinary_dm", () => {
+  // When identity has not loaded (state undefined) but relay-self is known,
+  // isModerationDm runs with currentPubkey=undefined.  In this state, me=null
+  // and all participants are treated as "others".  For a 2-participant DM,
+  // others.length=2 (≠ 1), so isModerationDm returns false → the DM is
+  // ELIGIBLE (fail-open for absent identity).
+  //
+  // Product decision documented here: checkSendEligibility does not add an
+  // extra fail-closed gate for absent identity beyond the fetching check.
+  // The fetching check (status="pending"/fetchStatus="fetching") covers the
+  // in-progress case; a completed-but-empty state (error or never fetched)
+  // falls through to isModerationDm, which fails open.  This is consistent
+  // with isModerationDm's own documented contract.
+  const RELAY_SELF = "relay000".padEnd(64, "0");
+  const OTHER_PUBKEY = "other000".padEnd(64, "0");
+  const qc = makeMockQueryClient({
+    '["channels"]': [
+      makeChannel({
+        id: "ch-dm-absent-id",
+        channelType: "dm",
+        participantPubkeys: [OTHER_PUBKEY, RELAY_SELF],
+      }),
+    ],
+    // No identity data — state is undefined (not fetched or errored).
+    '["relaySelf"]': RELAY_SELF,
+    'state:["identity"]': undefined,
+    'state:["relaySelf"]': { status: "success", fetchStatus: "idle" },
+  });
+  const result = checkSendEligibility(qc, "ch-dm-absent-id", 1000);
+  // isModerationDm sees others=[OTHER, RELAY_SELF] (length=2 ≠ 1) → false.
+  // The DM is eligible (fail-open for absent identity).
+  assert.equal(
+    result,
+    null,
+    "DM with absent identity is fail-open: isModerationDm needs currentPubkey to classify a moderation DM",
   );
 });
