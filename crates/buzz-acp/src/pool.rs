@@ -1193,24 +1193,30 @@ pub async fn run_prompt_task(
     // never for heartbeats, cached until session invalidation.
     //
     // DM check: use startup channel_info first; lazy-fetch only when missing.
-    // A confirmed DM never receives a canvas section.
+    // A confirmed DM never receives a canvas section. If the channel type cannot
+    // be determined (metadata absent and lazy fetch fails/unknown), skip the canvas
+    // rather than assuming non-DM — failing closed on DM ambiguity is safer.
     //
-    // Failure modes all fail open: no event, blank content, malformed response,
-    // REST error, or timeout each produce `None` and never block session creation.
+    // I3 lifecycle: hold the fetched section in a local `pending_canvas` and
+    // commit it to `canvas_sections` only after session creation succeeds. This
+    // prevents a stale revision A surviving a failed create and being re-used by
+    // the next attempt after the canvas was cleared.
+    let mut pending_canvas: Option<(Uuid, String)> = None;
     if let PromptSource::Channel(cid) = &source {
         let is_new_channel_session = !agent.state.sessions.contains_key(cid);
         if is_new_channel_session && !agent.state.canvas_sections.contains_key(cid) {
             // Resolve DM status: prefer the startup cache, lazy-fetch as fallback.
+            // Unknown → treat as DM (fail-closed).
             let is_dm = match ctx.channel_info.get(cid) {
                 Some(ci) => ci.channel_type == "dm",
                 None => fetch_channel_info(*cid, &ctx.rest_client)
                     .await
                     .map(|ci| ci.channel_type == "dm")
-                    .unwrap_or(false),
+                    .unwrap_or(true),
             };
             if !is_dm {
                 if let Some(section) = fetch_canvas_section(*cid, &ctx.rest_client).await {
-                    agent.state.canvas_sections.insert(*cid, section);
+                    pending_canvas = Some((*cid, section));
                 }
             }
         }
@@ -1224,8 +1230,14 @@ pub async fn run_prompt_task(
     };
 
     // The canvas metadata section — channel-scoped, absent for heartbeats/DMs.
+    // Prefer the committed cache; fall back to pending (for new sessions being created now).
     let agent_canvas: Option<String> = match &source {
-        PromptSource::Channel(cid) => agent.state.canvas_sections.get(cid).cloned(),
+        PromptSource::Channel(cid) => agent
+            .state
+            .canvas_sections
+            .get(cid)
+            .cloned()
+            .or_else(|| pending_canvas.as_ref().map(|(_, s)| s.clone())),
         PromptSource::Heartbeat => None,
     };
 
@@ -1249,6 +1261,10 @@ pub async fn run_prompt_task(
                             "created session {sid} for channel {cid}"
                         );
                         agent.state.sessions.insert(*cid, sid.clone());
+                        // Commit canvas only after session creation succeeds (I3).
+                        if let Some((pending_cid, section)) = pending_canvas.take() {
+                            agent.state.canvas_sections.insert(pending_cid, section);
+                        }
                         (sid, true)
                     }
                     Err(AcpError::AgentExited) => {
@@ -1263,6 +1279,8 @@ pub async fn run_prompt_task(
                         return;
                     }
                     Err(e) => {
+                        // Session creation failed; pending canvas was never committed,
+                        // so the next retry will re-fetch a fresh revision.
                         send_prompt_result(
                             &result_tx,
                             agent,
@@ -2159,6 +2177,45 @@ pub(crate) fn canvas_section_from_query_response(
         }
     };
 
+    // Verify the event's id and signature agree with its content.
+    // A structurally complete but tampered event must not supply trusted metadata.
+    if let Err(err) = event.verify() {
+        tracing::warn!(
+            target: "canvas::fetch",
+            channel = %channel_uuid,
+            %err,
+            "canvas event failed signature verification — emitting no section",
+        );
+        return None;
+    }
+
+    // Validate kind: must be KIND_CANVAS (40100).
+    if event.kind != nostr::Kind::Custom(buzz_core::kind::KIND_CANVAS as u16) {
+        tracing::warn!(
+            target: "canvas::fetch",
+            channel = %channel_uuid,
+            kind = %event.kind.as_u16(),
+            "canvas event has unexpected kind — emitting no section",
+        );
+        return None;
+    }
+
+    // Validate h-tag: must carry the channel UUID we queried.
+    // The REST boundary filters by #h, but we verify here to prevent a
+    // misbehaving relay from injecting a different channel's canvas.
+    let h_tag_matches = event.tags.iter().any(|tag| {
+        let v = tag.as_slice();
+        v.len() >= 2 && v[0] == "h" && v[1] == channel_uuid
+    });
+    if !h_tag_matches {
+        tracing::warn!(
+            target: "canvas::fetch",
+            channel = %channel_uuid,
+            "canvas event is missing expected h-tag — emitting no section",
+        );
+        return None;
+    }
+
     // Blank content means the canvas was cleared; do not fall back to older events.
     if event.content.trim().is_empty() {
         tracing::debug!(
@@ -2172,8 +2229,20 @@ pub(crate) fn canvas_section_from_query_response(
     let id = event.id.to_hex();
 
     // Convert the Nostr timestamp to a UTC RFC3339 string with Z suffix.
-    // If chrono rejects the value (out-of-range), fail open — emit no section.
-    let ts_secs = event.created_at.as_secs() as i64;
+    // Use checked conversion: a u64 that exceeds i64::MAX (e.g. Timestamp::max())
+    // wraps silently with `as i64`, producing a negative value that chrono would
+    // accept as a date in 1969. Reject out-of-range values explicitly instead.
+    let ts_secs = match i64::try_from(event.created_at.as_secs()) {
+        Ok(s) => s,
+        Err(_) => {
+            tracing::warn!(
+                target: "canvas::fetch",
+                channel = %channel_uuid,
+                "canvas event created_at overflows i64 — emitting no section",
+            );
+            return None;
+        }
+    };
     let timestamp = match chrono::DateTime::from_timestamp(ts_secs, 0) {
         Some(dt) => dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         None => {
@@ -3243,7 +3312,7 @@ async fn clear_reactions(rest: crate::relay::RestClient, event_ids: Vec<String>)
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nostr::{EventBuilder, Keys, Kind, Tag};
+    use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
     use serde_json::json;
 
     // These pin the initial_message dispatch path (run_prompt_task, ~line 855):
@@ -4436,14 +4505,15 @@ mod tests {
 
     const CHANNEL_UUID: &str = "00f1ccaf-1506-4dd7-9a0e-fa67e9e486ae";
 
-    /// Build a real, cryptographically signed Nostr event for canvas tests.
+    /// Build a real, cryptographically signed Nostr canvas event for tests.
     ///
-    /// `nostr::Event` requires all fields (pubkey, sig, kind, tags, id) to
-    /// deserialise successfully, so we use `EventBuilder` + `Keys` rather than
-    /// a bare `serde_json::json!({...})` object.
+    /// Includes the correct kind (40100) and an `h` tag carrying `CHANNEL_UUID`
+    /// so all structural and content validations pass.
     fn make_canvas_event_value(content: &str) -> serde_json::Value {
         let keys = Keys::generate();
+        let h_tag = Tag::parse(["h", CHANNEL_UUID]).expect("h tag");
         let event = EventBuilder::new(Kind::Custom(buzz_core::kind::KIND_CANVAS as u16), content)
+            .tags([h_tag])
             .sign_with_keys(&keys)
             .expect("sign");
         serde_json::to_value(&event).expect("serialise")
@@ -4507,8 +4577,10 @@ mod tests {
     #[test]
     fn test_canvas_section_from_query_response_string_timestamp_returns_none() {
         let keys = Keys::generate();
+        let h_tag = Tag::parse(["h", CHANNEL_UUID]).expect("h tag");
         let mut ev = serde_json::to_value(
             EventBuilder::new(Kind::Custom(buzz_core::kind::KIND_CANVAS as u16), "content")
+                .tags([h_tag])
                 .sign_with_keys(&keys)
                 .expect("sign"),
         )
@@ -4527,8 +4599,10 @@ mod tests {
     #[test]
     fn test_canvas_section_from_query_response_missing_timestamp_returns_none() {
         let keys = Keys::generate();
+        let h_tag = Tag::parse(["h", CHANNEL_UUID]).expect("h tag");
         let mut ev = serde_json::to_value(
             EventBuilder::new(Kind::Custom(buzz_core::kind::KIND_CANVAS as u16), "content")
+                .tags([h_tag])
                 .sign_with_keys(&keys)
                 .expect("sign"),
         )
@@ -4539,6 +4613,87 @@ mod tests {
             result.is_none(),
             "missing created_at must be rejected by nostr::Event deserialiser"
         );
+    }
+
+    /// An event with a timestamp at Timestamp::max() (u64::MAX) must return None.
+    ///
+    /// `u64::MAX as i64` wraps to -1, which chrono silently accepts as
+    /// 1969-12-31T23:59:59Z. The checked i64::try_from must reject it first.
+    #[test]
+    fn test_canvas_section_from_query_response_timestamp_max_returns_none() {
+        let keys = Keys::generate();
+        let h_tag = Tag::parse(["h", CHANNEL_UUID]).expect("h tag");
+        let ev = serde_json::to_value(
+            EventBuilder::new(Kind::Custom(buzz_core::kind::KIND_CANVAS as u16), "content")
+                .tags([h_tag])
+                .custom_created_at(Timestamp::max())
+                .sign_with_keys(&keys)
+                .expect("sign"),
+        )
+        .expect("serialise");
+        let result = canvas_section_from_query_response(&[ev], CHANNEL_UUID);
+        assert!(
+            result.is_none(),
+            "Timestamp::max() (u64::MAX) must return None — not wrap to 1969"
+        );
+    }
+
+    /// A structurally complete but tampered event (content altered after signing)
+    /// must be rejected by event.verify().
+    #[test]
+    fn test_canvas_section_from_query_response_tampered_event_returns_none() {
+        let keys = Keys::generate();
+        let h_tag = Tag::parse(["h", CHANNEL_UUID]).expect("h tag");
+        let mut ev = serde_json::to_value(
+            EventBuilder::new(
+                Kind::Custom(buzz_core::kind::KIND_CANVAS as u16),
+                "original",
+            )
+            .tags([h_tag])
+            .sign_with_keys(&keys)
+            .expect("sign"),
+        )
+        .expect("serialise");
+        // Tamper the content after signing — id and sig no longer agree.
+        ev["content"] = serde_json::Value::String("injected instructions".into());
+        let result = canvas_section_from_query_response(&[ev], CHANNEL_UUID);
+        assert!(
+            result.is_none(),
+            "tampered event must fail verify() and return None"
+        );
+    }
+
+    /// An event with the wrong kind (not 40100) must be rejected.
+    #[test]
+    fn test_canvas_section_from_query_response_wrong_kind_returns_none() {
+        let keys = Keys::generate();
+        let h_tag = Tag::parse(["h", CHANNEL_UUID]).expect("h tag");
+        let ev = serde_json::to_value(
+            EventBuilder::new(Kind::Custom(9), "content")
+                .tags([h_tag])
+                .sign_with_keys(&keys)
+                .expect("sign"),
+        )
+        .expect("serialise");
+        let result = canvas_section_from_query_response(&[ev], CHANNEL_UUID);
+        assert!(result.is_none(), "wrong kind must return None");
+    }
+
+    /// An event missing the expected h-tag (or carrying a different channel UUID)
+    /// must be rejected.
+    #[test]
+    fn test_canvas_section_from_query_response_wrong_h_tag_returns_none() {
+        let keys = Keys::generate();
+        let wrong_h = Tag::parse(["h", "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"]).expect("h tag");
+        let ev = serde_json::to_value(
+            EventBuilder::new(Kind::Custom(buzz_core::kind::KIND_CANVAS as u16), "content")
+                .tags([wrong_h])
+                .sign_with_keys(&keys)
+                .expect("sign"),
+        )
+        .expect("serialise");
+        let result = canvas_section_from_query_response(&[ev], CHANNEL_UUID);
+        assert!(result.is_none(), "mismatched h-tag must return None");
     }
 
     #[test]
