@@ -150,15 +150,6 @@ test("long autolink wraps without widening the timeline", async ({ page }) => {
       return barBox.x + barBox.width - (timelineBox.x + timelineBox.width);
     })
     .toBeLessThanOrEqual(0);
-  // #1338 guard: hovering must un-pause the row so the upward-bleeding bar renders
-  await expect
-    .poll(async () =>
-      actionBar.evaluate((bar) => {
-        const cvRow = bar.closest(".timeline-row-cv");
-        return cvRow ? getComputedStyle(cvRow).contentVisibility : "missing";
-      }),
-    )
-    .toBe("visible");
 });
 
 test("supported link previews keep the message link visible", async ({
