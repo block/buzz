@@ -283,6 +283,17 @@ export function channelWindowHasMore(store: ChannelWindowStore) {
 }
 
 /**
+ * Whether the loaded window PROVABLY starts at the channel's beginning. This
+ * is not `!channelWindowHasMore`: an empty store also reports "no more", but
+ * that means the boundary is unresolved (nothing has loaded), not exhausted.
+ * Only a resolved tail page saying `hasMore: false` proves the start.
+ */
+export function channelWindowHistoryExhausted(store: ChannelWindowStore) {
+  const tail = store.pages[store.pages.length - 1];
+  return tail !== undefined && !tail.hasMore;
+}
+
+/**
  * Per-root thread summaries for badge rendering: authoritative page summaries
  * overlaid with any fresher relay-pushed live summaries. The live overlay also
  * covers roots that reached the screen outside a page (liveOverlay rows,

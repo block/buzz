@@ -57,6 +57,12 @@ type MessageTimelineProps = {
   currentPubkey?: string;
   fetchOlder?: () => Promise<void>;
   hasOlderMessages?: boolean;
+  /**
+   * True when the loaded window provably starts at the channel's beginning
+   * (a resolved tail page with `hasMore: false`) — NOT merely the absence of
+   * a paging signal. Gates the oldest loaded day's divider.
+   */
+  historyExhausted?: boolean;
   /** Optional external ref to the scroll container — used by the parent to
    *  observe scroll position or adjust padding dynamically. */
   scrollContainerRef?: React.RefObject<HTMLDivElement | null>;
@@ -129,11 +135,23 @@ const EMPTY_MESSAGES: TimelineMessage[] = [];
 type TimelineSnapshot = {
   channelId: string | null;
   messages: TimelineMessage[];
+  /**
+   * History-exhaustion proof captured with the SAME rows it was derived from.
+   * The oldest-day divider may only exist when this is true, and rows and
+   * proof must travel every transport stage (deferral, buffering, settle
+   * gating) as one value: delivering a fresh proof on the urgent render path
+   * while the rows ride the deferred path lets an intermediate commit mint a
+   * divider against the previous, partially-loaded oldest day — which breaks
+   * Virtua's exact-suffix shift admission when the withheld same-day rows
+   * finally land (the pass-1 tear, ledgered 2026-07-11).
+   */
+  historyExhausted: boolean;
 };
 
 const EMPTY_TIMELINE_SNAPSHOT: TimelineSnapshot = {
   channelId: null,
   messages: EMPTY_MESSAGES,
+  historyExhausted: false,
 };
 
 const MessageTimelineBase = React.forwardRef<
@@ -155,6 +173,7 @@ const MessageTimelineBase = React.forwardRef<
     fetchOlder,
     hasComposerOverlay = true,
     hasOlderMessages = true,
+    historyExhausted = false,
     isFetchingOlder = false,
     followThreadById,
     huddleMemberPubkeys,
@@ -222,8 +241,8 @@ const MessageTimelineBase = React.forwardRef<
   // route change can paint the previous channel's deferred rows for a frame even
   // though the sidebar/header already moved to the new channel.
   const liveSnapshot = React.useMemo<TimelineSnapshot>(
-    () => ({ channelId: channelId ?? null, messages }),
-    [channelId, messages],
+    () => ({ channelId: channelId ?? null, messages, historyExhausted }),
+    [channelId, historyExhausted, messages],
   );
   const deferredSnapshot = React.useDeferredValue(
     liveSnapshot,
@@ -289,12 +308,23 @@ const MessageTimelineBase = React.forwardRef<
   // Hold older-page render commits until the scroller is at rest: WKWebView
   // can drop scrollTop compensation writes during live trackpad momentum.
   // Full rationale in useSettleGatedPrependMessages.
-  const { messages: renderedMessages, isHoldingPrepend } =
-    useSettleGatedPrependMessages({
-      channelId,
-      messages: bufferedTimeline.messages,
-      scrollElementRef: activeScrollContainerRef,
-    });
+  //
+  // The history-exhaustion proof rides through this gate as snapshot metadata
+  // (`meta`), so while a prepend is withheld the rendered rows keep the proof
+  // they were projected with. The buffering stage above cannot split the pair:
+  // it only freezes the TAIL (live arrivals) and passes history prepends
+  // through unchanged, so the oldest rows the proof speaks about are exactly
+  // the deferred snapshot's oldest rows.
+  const {
+    messages: renderedMessages,
+    meta: renderedHistoryExhausted,
+    isHoldingPrepend,
+  } = useSettleGatedPrependMessages({
+    channelId,
+    messages: bufferedTimeline.messages,
+    meta: deferredSnapshot.historyExhausted,
+    scrollElementRef: activeScrollContainerRef,
+  });
 
   const {
     highlightedMessageId,
@@ -659,6 +689,7 @@ const MessageTimelineBase = React.forwardRef<
       messageFooters={messageFooters}
       mainEntries={renderedMessages === messages ? mainEntries : undefined}
       leadingContent={virtualizedLeadingContent}
+      historyExhausted={renderedHistoryExhausted}
       threadSummaries={threadSummaries}
       messages={renderedMessages}
       onDelete={onDelete}

@@ -190,7 +190,7 @@ export function ChannelScreen({
     effectiveOpenThreadHeadId,
   );
   useChannelSubscription(activeChannel);
-  const { fetchOlder, hasOlderMessages, isFetchingOlder } =
+  const { fetchOlder, hasOlderMessages, historyExhausted, isFetchingOlder } =
     useFetchOlderMessages(activeChannel);
   const latestActiveMessage = React.useMemo(() => {
     const messages = messagesQuery.data;
@@ -878,6 +878,7 @@ export function ChannelScreen({
                   fetchOlder={fetchOlder}
                   header={channelHeader}
                   hasOlderMessages={hasOlderMessages}
+                  historyExhausted={historyExhausted}
                   onAddAgent={handleOpenAddBot}
                   onCreateChannel={openCreateChannel}
                   onOpenMembers={handleOpenMembersSidebar}

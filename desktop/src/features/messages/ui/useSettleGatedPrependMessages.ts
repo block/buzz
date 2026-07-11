@@ -67,22 +67,33 @@ export function selectSettleGatedMessages<T extends { id: string }>({
   return { kind: "hold", held: next.slice(prependCount) };
 }
 
-export function useSettleGatedPrependMessages<T extends { id: string }>({
+export function useSettleGatedPrependMessages<T extends { id: string }, M>({
   channelId,
   messages,
+  meta,
   scrollElementRef,
 }: {
   channelId?: string | null;
   messages: T[];
+  /**
+   * Snapshot metadata that must stay paired with the rows it was projected
+   * from (e.g. the history-exhaustion proof that decides whether the oldest
+   * day divider may exist). While a prepend is held, the output keeps the
+   * ADMITTED metadata; rows and metadata only ever advance together, so no
+   * render can pair new proof with withheld rows.
+   */
+  meta: M;
   scrollElementRef: { readonly current: HTMLElement | null };
-}): { messages: T[]; isHoldingPrepend: boolean } {
+}): { messages: T[]; meta: M; isHoldingPrepend: boolean } {
   const admittedRef = React.useRef<T[]>(messages);
+  const admittedMetaRef = React.useRef<M>(meta);
   const previousChannelIdRef = React.useRef(channelId);
   const [, admit] = React.useReducer((epoch: number) => epoch + 1, 0);
 
   if (previousChannelIdRef.current !== channelId) {
     previousChannelIdRef.current = channelId;
     admittedRef.current = messages;
+    admittedMetaRef.current = meta;
   }
 
   const decision = selectSettleGatedMessages({
@@ -92,6 +103,7 @@ export function useSettleGatedPrependMessages<T extends { id: string }>({
   const isHoldingPrepend = decision.kind === "hold";
 
   let output: T[];
+  let outputMeta: M;
   if (decision.kind === "hold") {
     // Same ids as the admitted set; keep array identity stable unless a row
     // object actually changed so Virtua's data model is not rebuilt per render.
@@ -101,13 +113,18 @@ export function useSettleGatedPrependMessages<T extends { id: string }>({
       previous.every((message, index) => message === decision.held[index])
         ? previous
         : decision.held;
+    outputMeta = admittedMetaRef.current;
   } else {
     output = messages;
+    outputMeta = meta;
   }
   admittedRef.current = output;
+  admittedMetaRef.current = outputMeta;
 
   const latestMessagesRef = React.useRef(messages);
   latestMessagesRef.current = messages;
+  const latestMetaRef = React.useRef(meta);
+  latestMetaRef.current = meta;
 
   React.useEffect(() => {
     if (!isHoldingPrepend) return;
@@ -115,6 +132,7 @@ export function useSettleGatedPrependMessages<T extends { id: string }>({
     if (!scroller) {
       // Nothing to observe — never strand the fetched page.
       admittedRef.current = latestMessagesRef.current;
+      admittedMetaRef.current = latestMetaRef.current;
       admit();
       return;
     }
@@ -144,6 +162,7 @@ export function useSettleGatedPrependMessages<T extends { id: string }>({
       ) {
         frame = null;
         admittedRef.current = latestMessagesRef.current;
+        admittedMetaRef.current = latestMetaRef.current;
         admit();
         return;
       }
@@ -157,5 +176,5 @@ export function useSettleGatedPrependMessages<T extends { id: string }>({
     };
   }, [isHoldingPrepend, scrollElementRef]);
 
-  return { messages: output, isHoldingPrepend };
+  return { messages: output, meta: outputMeta, isHoldingPrepend };
 }

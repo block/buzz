@@ -76,6 +76,7 @@ export const ChannelPane = React.memo(function ChannelPane({
   fetchOlder,
   header,
   hasOlderMessages,
+  historyExhausted,
   isFetchingOlder,
   followThreadById,
   isFollowingThread,
@@ -617,6 +618,7 @@ export const ChannelPane = React.memo(function ChannelPane({
             followThreadById={followThreadById}
             hasComposerOverlay={hasMainComposerOverlay}
             hasOlderMessages={hasOlderMessages}
+            historyExhausted={historyExhausted}
             huddleMemberPubkeys={huddleMemberPubkeys}
             huddleMemberPubkeysPending={huddleMemberPubkeysPending}
             isFetchingOlder={isFetchingOlder}
