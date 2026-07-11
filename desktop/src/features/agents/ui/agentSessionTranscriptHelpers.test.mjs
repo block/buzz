@@ -247,7 +247,7 @@ test("parseSystemPromptSections extracts core as its own section after Base+Syst
   assert.deepEqual(sections, [
     { title: "Base", body: "base text" },
     { title: "System", body: "persona text" },
-    { title: "[Agent Memory — core]", body: "my memories" },
+    { title: "Core Memory", body: "my memories" },
   ]);
 });
 
@@ -256,7 +256,7 @@ test("parseSystemPromptSections extracts core as its own section after Base only
   const sections = parseSystemPromptSections(framed);
   assert.deepEqual(sections, [
     { title: "Base", body: "base text" },
-    { title: "[Agent Memory — core]", body: "my memories" },
+    { title: "Core Memory", body: "my memories" },
   ]);
 });
 
@@ -265,16 +265,14 @@ test("parseSystemPromptSections extracts core as its own section after System on
   const sections = parseSystemPromptSections(framed);
   assert.deepEqual(sections, [
     { title: "System", body: "persona text" },
-    { title: "[Agent Memory — core]", body: "my memories" },
+    { title: "Core Memory", body: "my memories" },
   ]);
 });
 
 test("parseSystemPromptSections returns only a core section when no Base/System present", () => {
   const framed = "[Agent Memory — core]\nmy memories";
   const sections = parseSystemPromptSections(framed);
-  assert.deepEqual(sections, [
-    { title: "[Agent Memory — core]", body: "my memories" },
-  ]);
+  assert.deepEqual(sections, [{ title: "Core Memory", body: "my memories" }]);
 });
 
 test("parseSystemPromptSections keeps an embedded core-like line literal when a real appended core follows", () => {
@@ -300,16 +298,20 @@ test("parseSystemPromptSections keeps an embedded core-like line literal when a 
       body: "persona preamble\n[Agent Memory — core]\nthis is NOT the core section — it is inside the persona body",
     },
     {
-      title: "[Agent Memory — core]",
+      title: "Core Memory",
       body: "this IS the appended core",
     },
   ]);
 });
 
 test("parseSystemPromptSections pins the realistic Workspace+Base+System+Core harness shape", () => {
-  // Workspace section preamble is treated as part of Base when [Base] follows.
-  // This is unchanged behavior; core is extracted as a new fourth section.
+  // The real Buzz harness emits [Workspace] content before [Base]. The parser
+  // folds [Workspace] into the Base section (existing unchanged behavior);
+  // core is extracted as a distinct "Core Memory" section last.
   const framed = [
+    "[Workspace]",
+    "You are operating inside the Buzz platform.",
+    "",
     "[Base]",
     "You are an assistant.",
     "",
@@ -323,10 +325,13 @@ test("parseSystemPromptSections pins the realistic Workspace+Base+System+Core ha
   ].join("\n");
   const sections = parseSystemPromptSections(framed);
   assert.deepEqual(sections, [
-    { title: "Base", body: "You are an assistant." },
+    {
+      title: "Base",
+      body: "[Workspace]\nYou are operating inside the Buzz platform.\n\n[Base]\nYou are an assistant.",
+    },
     { title: "System", body: "Custom persona instructions." },
     {
-      title: "[Agent Memory — core]",
+      title: "Core Memory",
       body: "I am Duncan.\n## Lessons Learned\nAlways tag on handoff.",
     },
   ]);

@@ -120,7 +120,8 @@ export function parseSystemPromptSections(
   }
 
   // ── 3. Append core section last ───────────────────────────────────────────
-  if (coreBody) sections.push({ title: CORE_HEADER, body: coreBody });
+  // Map the wire header to a human-readable display title.
+  if (coreBody) sections.push({ title: "Core Memory", body: coreBody });
 
   return sections;
 }
