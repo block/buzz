@@ -119,6 +119,35 @@ pub(crate) struct SnapshotPayload {
     pub filename: String,
 }
 
+/// Enforce the output size ceiling after encoding.
+///
+/// Called by `materialize_snapshot_bytes` before returning bytes to the caller.
+/// Both the save-to-disk and send commands therefore reject an oversized result
+/// before any file dialog or upload, ensuring that a successfully sent/saved
+/// snapshot is always within the importer's acceptance bounds.
+///
+/// Extracted as a pure named function so tests can prove the guard logic
+/// directly (boundary-1 / boundary / boundary+1 for both formats) without
+/// constructing a full `AppHandle`/`AppState`.
+pub(crate) fn validate_snapshot_encode_size(bytes_len: usize, is_png: bool) -> Result<(), String> {
+    if is_png {
+        if bytes_len > import::MAX_SNAPSHOT_PNG_BYTES {
+            return Err(format!(
+                "Snapshot exceeds the {} MiB size limit for .agent.png files. \
+                 Reduce the avatar image size or use JSON format.",
+                import::MAX_SNAPSHOT_PNG_BYTES / (1024 * 1024)
+            ));
+        }
+    } else if bytes_len > import::MAX_SNAPSHOT_JSON_BYTES {
+        return Err(format!(
+            "Snapshot exceeds the {} MiB size limit for .agent.json files. \
+             Reduce memory size or use a config-only snapshot.",
+            import::MAX_SNAPSHOT_JSON_BYTES / (1024 * 1024)
+        ));
+    }
+    Ok(())
+}
+
 /// Parse a `memory_level` string to `MemoryLevel`.
 fn parse_memory_level(s: &str) -> Result<MemoryLevel, String> {
     match s {
@@ -254,6 +283,7 @@ pub(crate) async fn materialize_snapshot_bytes(
     if is_png {
         let png_bytes = encode_snapshot_png(&snapshot, avatar_bytes.as_deref())
             .map_err(|e| format!("Failed to encode .agent.png: {e}"))?;
+        validate_snapshot_encode_size(png_bytes.len(), true)?;
         Ok(SnapshotPayload {
             bytes: png_bytes,
             filename: format!("{slug}.agent.png"),
@@ -261,6 +291,7 @@ pub(crate) async fn materialize_snapshot_bytes(
     } else {
         let json_bytes = encode_snapshot_json(&snapshot)
             .map_err(|e| format!("Failed to encode .agent.json: {e}"))?;
+        validate_snapshot_encode_size(json_bytes.len(), false)?;
         Ok(SnapshotPayload {
             bytes: json_bytes,
             filename: format!("{slug}.agent.json"),

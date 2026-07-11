@@ -121,9 +121,12 @@ function makeDestination(overrides = {}) {
   });
 }
 
+// makeDestination is kept for potential future use.
+void makeDestination; // suppress "unused" lint
+
 test("memory_gate_step_shows_plaintext_core_memory_label", () => {
   const el = MemoryGateStep({
-    destination: makeDestination(),
+    destinationLabel: "#team-alpha",
     memoryLevel: "core",
   });
   const text = collectText(el).join(" ");
@@ -132,7 +135,7 @@ test("memory_gate_step_shows_plaintext_core_memory_label", () => {
 
 test("memory_gate_step_shows_plaintext_all_memory_label", () => {
   const el = MemoryGateStep({
-    destination: makeDestination(),
+    destinationLabel: "#team-alpha",
     memoryLevel: "everything",
   });
   const text = collectText(el).join(" ");
@@ -141,7 +144,7 @@ test("memory_gate_step_shows_plaintext_all_memory_label", () => {
 
 test("memory_gate_step_names_channel_destination", () => {
   const el = MemoryGateStep({
-    destination: makeDestination({ channelType: "stream", name: "team-alpha" }),
+    destinationLabel: "#team-alpha",
     memoryLevel: "core",
   });
   const text = collectText(el).join(" ");
@@ -150,7 +153,7 @@ test("memory_gate_step_names_channel_destination", () => {
 
 test("memory_gate_step_names_dm_destination", () => {
   const el = MemoryGateStep({
-    destination: makeDestination({ channelType: "dm", name: "Alice" }),
+    destinationLabel: "the DM with Alice",
     memoryLevel: "core",
   });
   const text = collectText(el).join(" ");
@@ -159,7 +162,7 @@ test("memory_gate_step_names_dm_destination", () => {
 
 test("memory_gate_step_discloses_media_link_access", () => {
   const el = MemoryGateStep({
-    destination: makeDestination(),
+    destinationLabel: "#team-alpha",
     memoryLevel: "core",
   });
   const text = collectText(el).join(" ");
