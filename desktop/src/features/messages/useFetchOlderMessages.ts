@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { channelWindowKey } from "@/features/messages/lib/messageQueryKeys";
@@ -8,7 +8,11 @@ import {
   emptyChannelWindowStore,
   type ChannelWindowStore,
 } from "@/features/messages/lib/channelWindowStore";
-import { pageOlderMessagesUntilRowFloor } from "@/features/messages/lib/pageOlderMessages";
+import {
+  discardStagedOlderMessages,
+  pageOlderMessagesUntilRowFloor,
+  stageOlderMessages,
+} from "@/features/messages/lib/pageOlderMessages";
 import type { Channel } from "@/shared/api/types";
 
 export function useFetchOlderMessages(channel: Channel | null) {
@@ -76,6 +80,42 @@ export function useFetchOlderMessages(channel: Channel | null) {
       setIsFetchingOlder(false);
     }
   }, [channel?.id, channelId, queryClient]);
+
+  const { data: stagingCursor = null } = useQuery({
+    enabled: channelId !== null,
+    queryKey: windowKey,
+    select: (store: ChannelWindowStore) => {
+      const tail = store.pages.at(-1);
+      return tail?.hasMore && tail.nextCursor
+        ? `${tail.nextCursor.createdAt}:${tail.nextCursor.eventId}`
+        : null;
+    },
+    queryFn: () =>
+      queryClient.getQueryData<ChannelWindowStore>(windowKey) ??
+      emptyChannelWindowStore(),
+  });
+
+  useEffect(() => {
+    if (!channelId || !stagingCursor) return;
+    let disposed = false;
+    const stage = () => {
+      if (!disposed) void stageOlderMessages(queryClient, channelId);
+    };
+    if ("requestIdleCallback" in window) {
+      const id = window.requestIdleCallback(stage, { timeout: 1_000 });
+      return () => {
+        disposed = true;
+        window.cancelIdleCallback(id);
+        discardStagedOlderMessages(channelId);
+      };
+    }
+    const id = globalThis.setTimeout(stage, 250);
+    return () => {
+      disposed = true;
+      globalThis.clearTimeout(id);
+      discardStagedOlderMessages(channelId);
+    };
+  }, [channelId, queryClient, stagingCursor]);
 
   return { fetchOlder, isFetchingOlder, hasOlderMessages, historyExhausted };
 }
