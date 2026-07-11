@@ -644,10 +644,11 @@ describe("archive page subscription notification", () => {
 
     unsubscribe();
 
-    // Must have fired at least one notification for the page.
-    assert.ok(
-      notifyCount >= 1,
-      `expected at least 1 subscriber notification after full archive page, got ${notifyCount}`,
+    // Must have fired exactly one batched notification for the full page.
+    assert.equal(
+      notifyCount,
+      1,
+      `expected exactly 1 batched subscriber notification after full archive page, got ${notifyCount}`,
     );
 
     // Production getter must reflect the added events.
@@ -773,7 +774,8 @@ describe("raw-event-level merge: stateful aggregates across live/archive boundar
     const CHANNEL = "chan-perm";
     const RPC_ID = "rpc-perm-42";
 
-    // Archive: permission request
+    // Archive: permission request — option uses production optionId + kind fields
+    // so the optionId→kind map is populated and the outcome label is correct.
     const permRequest = makeObserverEvent({
       seq: 10,
       timestamp: "2026-01-01T00:10:00.000Z",
@@ -786,12 +788,15 @@ describe("raw-event-level merge: stateful aggregates across live/archive boundar
         method: "session/request_permission",
         params: {
           description: "Read /etc/passwd",
-          options: [{ id: "allow", name: "Allow" }],
+          options: [
+            { optionId: "allow_once", kind: "allow_once", name: "Allow once" },
+          ],
         },
       },
     });
 
-    // Live: permission response (acp_write with result.outcome, no method)
+    // Live: permission response — result.outcome carries outcome:"selected" and
+    // the selected optionId so describePermissionOutcome builds "Approved (allow_once)".
     const permResponse = makeObserverEvent({
       seq: 11,
       timestamp: "2026-01-01T00:10:01.000Z",
@@ -803,8 +808,8 @@ describe("raw-event-level merge: stateful aggregates across live/archive boundar
         id: RPC_ID,
         result: {
           outcome: {
-            outcome: "granted",
-            optionId: "allow",
+            outcome: "selected",
+            optionId: "allow_once",
           },
         },
       },
@@ -818,10 +823,11 @@ describe("raw-event-level merge: stateful aggregates across live/archive boundar
       (item) => item.type === "lifecycle" && item.renderClass === "permission",
     );
     assert.equal(permRows.length, 1, "must produce exactly 1 permission row");
-    // The row must have a non-null outcome after the response is merged in.
-    assert.ok(
-      permRows[0].outcome != null,
-      "permission row must carry a resolved outcome when request+response are in the combined window",
+    // The row must carry the fully-resolved production label.
+    assert.equal(
+      permRows[0].outcome,
+      "Approved (allow_once)",
+      "permission row outcome must be the production-shaped label when request+response are in the combined window",
     );
   });
 
@@ -865,5 +871,50 @@ describe("raw-event-level merge: stateful aggregates across live/archive boundar
       0,
       "live scoped events must be empty after archive-only ingest",
     );
+  });
+
+  it("test_header_last_updated_is_non_null_after_archive_only_ingest", async () => {
+    // Regression for AgentSessionThreadPanel header: after a reload where only
+    // archived events exist (no live relay yet), the merged raw window must
+    // contain events with valid timestamps so the header shows "Last updated …"
+    // rather than "No updates yet".
+    _testRegisterKnownAgents(SUB_ID, [AGENT_PUBKEY]);
+    const CHANNEL = "chan-header";
+    const TIMESTAMP = "2026-06-01T12:00:00.000Z";
+
+    await ingestArchivedObserverEvents(
+      [makeRawEvent({ id: "h".repeat(64) })],
+      () =>
+        Promise.resolve(
+          makeObserverEvent({
+            seq: 1,
+            timestamp: TIMESTAMP,
+            channelId: CHANNEL,
+          }),
+        ),
+    );
+
+    // Simulate what AgentSessionThreadPanel computes for the header timestamp:
+    // merged combined events (live=[], archive=[1 event]) → max timestamp.
+    const archived = getArchivedChannelEvents(AGENT_PUBKEY, CHANNEL);
+    const combined = mergeObserverEventWindows([], archived);
+
+    assert.equal(
+      combined.length,
+      1,
+      "combined must contain the archived event",
+    );
+
+    // latestActivityAt equivalent: max of finite Date.parse values.
+    const latestMs = combined.reduce((acc, e) => {
+      const parsed = Date.parse(e.timestamp);
+      return Number.isFinite(parsed) ? Math.max(acc ?? -Infinity, parsed) : acc;
+    }, /** @type {number | null} */ null);
+
+    assert.ok(
+      latestMs !== null && Number.isFinite(latestMs),
+      "header latest timestamp must be non-null after archive-only ingest (header must not say 'No updates yet')",
+    );
+    assert.equal(latestMs, Date.parse(TIMESTAMP));
   });
 });
