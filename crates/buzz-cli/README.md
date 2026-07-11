@@ -82,11 +82,17 @@ buzz mem set <slug> "my-value"
 buzz mem patch <slug> --base-hash <hex> < diff.patch  # or --no-base-hash
 buzz mem rm <slug>
 
+# Remote Signing (NIP-46)
+buzz bunker connect bunker://<pubkey>?relay=wss://relay.example.com&secret=xyz
+buzz bunker connect bunker://<pubkey>?relay=wss://relay.example.com --name "My Client" --perms "sign_event:1"
+buzz bunker serve                    # start remote signer
+buzz bunker serve --auto-approve --timeout 0  # dev mode, infinite timeout
+
 # Pipe to jq
 buzz channels list | jq '.[].name'
 ```
 
-## 60 Subcommands across 13 Groups
+## 62 Subcommands across 14 Groups
 
 | Group | Subcommand | Description |
 |-------|-----------|-------------|
@@ -150,6 +156,8 @@ buzz channels list | jq '.[].name'
 | | `set` | Write a memory value (use `-` for stdin) |
 | | `patch` | Apply unified diff to memory value |
 | | `rm` | Publish a tombstone to delete memory |
+| `bunker` | `connect` | Connect to a remote signer (NIP-46 client mode) |
+| | `serve` | Start a remote signer (NIP-46 server mode) |
 
 ## Architecture
 

@@ -1,3 +1,4 @@
+pub mod bunker;
 pub mod channels;
 pub mod dms;
 pub mod emoji;

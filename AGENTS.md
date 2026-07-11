@@ -161,6 +161,10 @@ check existing reply handlers for the pattern.
 by the ACP harness into managed agent subprocesses. In development, set
 `BUZZ_PRIVATE_KEY` and `BUZZ_RELAY_URL` in your environment manually.
 
+For production deployments where private keys should not be present in the
+runtime environment, use NIP-46 remote signing via `buzz bunker connect` —
+see the [Remote Signing](#remote-signing-nip-46) section below.
+
 ### Building the CLI
 
 ```bash
@@ -191,6 +195,34 @@ All reads return sig-stripped JSON arrays; all writes return
 `buzz --format compact channels list`, NOT `buzz channels list --format compact`.
 
 See `crates/buzz-cli/TESTING.md` for the full live-testing runbook.
+
+### Remote Signing (NIP-46)
+
+For production agent deployments, use NIP-46 remote signing to keep private
+keys off the agent runtime entirely. The agent connects to a remote signer
+(hardware device, mobile app, or dedicated signing service) over an encrypted
+WebSocket channel:
+
+```bash
+# Client mode — connect to a remote signer
+buzz bunker connect bunker://<signer-pubkey>?relay=wss://relay.example.com&secret=xyz \
+  --name "Production Agent" \
+  --perms "sign_event:1,nip44_encrypt,nip44_decrypt"
+
+# Server mode — run a remote signer daemon
+buzz bunker serve --timeout 0  # infinite timeout
+buzz bunker serve --auto-approve --timeout 3600  # dev mode with 1h timeout
+```
+
+The bunker URL comes from the remote signer. Once connected, all signing
+operations (`sign_event`, `nip44_encrypt`, `nip44_decrypt`) happen on the
+remote signer — the agent runtime never sees the private key.
+
+This is the recommended approach for:
+- Production agents where key compromise = full identity loss
+- CI/CD pipelines that should not store long-lived secrets
+- Multi-tenant agent platforms
+- Compliance environments requiring hardware-backed keys
 
 ---
 

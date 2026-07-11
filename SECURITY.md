@@ -92,6 +92,20 @@ example), keys fall back to a `0o600` owner-only file. The `BUZZ_PRIVATE_KEY`
 environment variable, when set, always takes precedence over both stores — this
 is how harnessed agents and CI receive their identity.
 
+### Remote Signing — NIP-46
+
+For production agent deployments where private keys should never touch the
+runtime environment, Buzz CLI supports
+[NIP-46](https://github.com/nostr-protocol/nips/blob/master/46.md) remote
+signing via `buzz bunker`. The agent runtime connects to a remote signer
+(hardware device, dedicated signing service, or mobile app) over an encrypted
+WebSocket channel. All signing operations happen on the remote signer; the
+agent runtime never sees the private key.
+
+This is the recommended approach for production agents, CI/CD pipelines, and
+any environment where key material should remain physically separated from the
+workload.
+
 ### Input Validation
 
 - All UUIDs (channel IDs, workflow IDs) are validated at API boundaries before

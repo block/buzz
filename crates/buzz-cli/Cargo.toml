@@ -65,3 +65,6 @@ buzz-persona = { path = "../buzz-persona" }
 
 # WebSocket client — ephemeral event publish (kind:20001 is WS-only on the relay)
 buzz-ws-client = { path = "../buzz-ws-client" }
+
+# URL encoding for bunker URL construction
+urlencoding = "2.1"

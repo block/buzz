@@ -160,6 +160,9 @@ pub enum OutputFormat {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// NIP-46 remote signing — connect or serve as a bunker
+    #[command(subcommand)]
+    Bunker(commands::bunker::BunkerCmd),
     /// Send, read, search, and manage messages
     #[command(subcommand)]
     Messages(MessagesCmd),
@@ -1561,9 +1564,10 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         _ => (None, None),
     };
 
-    let client = BuzzClient::new(relay_url, keys, auth_tag, auth_tag_json)?;
+    let client = BuzzClient::new(relay_url.clone(), keys.clone(), auth_tag, auth_tag_json)?;
 
     match cli.command {
+        Cmd::Bunker(sub) => commands::bunker::handle(sub, &keys, &relay_url, cli.format).await,
         Cmd::Messages(sub) => commands::messages::dispatch(sub, &client, &cli.format).await,
         Cmd::Channels(sub) => commands::channels::dispatch(sub, &client, &cli.format).await,
         Cmd::Canvas(sub) => commands::channels::dispatch_canvas(sub, &client).await,
@@ -1600,6 +1604,7 @@ mod tests {
     #[test]
     fn command_inventory_is_stable() {
         let expected_groups: Vec<&str> = vec![
+            "bunker",
             "canvas",
             "channels",
             "dms",

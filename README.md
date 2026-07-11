@@ -153,7 +153,7 @@ Relay on `ws://localhost:3000`. Desktop app pops up. You're in.
 
 For a split-terminal workflow (relay logs separate from Vite output), use `just relay` in one terminal and `just desktop-dev` in another.
 
-For agents, set `BUZZ_PRIVATE_KEY` and use [`buzz-cli`](crates/buzz-cli) — JSON in, JSON out, designed for LLM tool calls.
+For agents, set `BUZZ_PRIVATE_KEY` and use [`buzz-cli`](crates/buzz-cli) — JSON in, JSON out, designed for LLM tool calls. For production deployments, use NIP-46 remote signing (`buzz bunker`) to keep private keys off the agent runtime entirely.
 
 ---
 

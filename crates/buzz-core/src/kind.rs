@@ -81,6 +81,8 @@ pub const KIND_BLOSSOM_AUTH: u32 = 24242;
 pub const KIND_NOSTR_IDENTITY_BINDING: u32 = 24243;
 /// NIP-98: HTTP auth event (used in nip98.rs, not stored).
 pub const KIND_HTTP_AUTH: u32 = 27235;
+/// NIP-46: Remote signing request/response (ephemeral, not stored).
+pub const KIND_NOSTR_REMOTE_SIGNING: u32 = 24133;
 
 // NEW: Buzz command kinds (Pure Nostr plan)
 /// Agent metadata + owner reference (replaceable, agent-authored).
