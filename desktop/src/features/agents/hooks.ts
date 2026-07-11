@@ -34,6 +34,11 @@ import {
   deletePersona,
   exportPersonaToJson,
   exportAgentSnapshot,
+  previewAgentSnapshotImport,
+  confirmAgentSnapshotImport,
+  type AgentSnapshotImportPreview,
+  type AgentSnapshotImportConfirm,
+  type AgentSnapshotImportResult,
   type SnapshotMemoryLevel,
   type SnapshotFormat,
   listPersonas,
@@ -609,6 +614,32 @@ export function useExportAgentSnapshotMutation() {
     }) => exportAgentSnapshot(id, memoryLevel, format, memorySourcePubkey),
   });
 }
+
+export function usePreviewAgentSnapshotImportMutation() {
+  return useMutation({
+    mutationFn: ({
+      fileBytes,
+      fileName,
+    }: {
+      fileBytes: number[];
+      fileName: string;
+    }) => previewAgentSnapshotImport(fileBytes, fileName),
+  });
+}
+
+export function useConfirmAgentSnapshotImportMutation() {
+  return useMutation({
+    mutationFn: (input: AgentSnapshotImportConfirm) =>
+      confirmAgentSnapshotImport(input),
+  });
+}
+
+// Re-export import types for consumers that import from hooks.
+export type {
+  AgentSnapshotImportPreview,
+  AgentSnapshotImportConfirm,
+  AgentSnapshotImportResult,
+};
 
 export function useManagedAgentLogQuery(
   pubkey: string | null,

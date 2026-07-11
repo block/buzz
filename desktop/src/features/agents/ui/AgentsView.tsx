@@ -12,6 +12,7 @@ import { PersonaDeleteDialog } from "./PersonaDeleteDialog";
 import { PersonaImportUpdateDialog } from "./PersonaImportUpdateDialog";
 import { PersonaShareDialog } from "./PersonaShareDialog";
 import { AgentSnapshotExportDialog } from "./AgentSnapshotExportDialog";
+import { AgentSnapshotImportDialog } from "./AgentSnapshotImportDialog";
 import { RelayDirectorySection } from "./RelayDirectorySection";
 import { SecretRevealDialog } from "./SecretRevealDialog";
 import { TeamDeleteDialog } from "./TeamDeleteDialog";
@@ -139,6 +140,9 @@ export function AgentsView() {
               onDeletePersona={personas.openDelete}
               onImportPersonaFile={(fileBytes, fileName) => {
                 void personas.handleImportFile(fileBytes, fileName);
+              }}
+              onImportSnapshotFile={(fileBytes, fileName) => {
+                void personas.handleImportSnapshotFile(fileBytes, fileName);
               }}
             />
 
@@ -332,6 +336,23 @@ export function AgentsView() {
           onOpenChange={(open) => {
             if (!open) {
               personas.setPersonaToExportSnapshot(null);
+            }
+          }}
+        />
+      ) : null}
+      {personas.snapshotImportState ? (
+        <AgentSnapshotImportDialog
+          open={personas.snapshotImportState !== null}
+          preview={personas.snapshotImportState.preview}
+          isConfirming={personas.isSnapshotImportConfirming}
+          result={personas.snapshotImportResult}
+          confirmError={personas.snapshotImportConfirmError}
+          onConfirm={(keepAllowlist) => {
+            void personas.handleConfirmSnapshotImport(keepAllowlist);
+          }}
+          onOpenChange={(open) => {
+            if (!open) {
+              personas.closeSnapshotImportDialog();
             }
           }}
         />

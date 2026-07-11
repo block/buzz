@@ -10,8 +10,12 @@ import {
   useExportAgentSnapshotMutation,
   useExportPersonaJsonMutation,
   usePersonasQuery,
+  usePreviewAgentSnapshotImportMutation,
+  useConfirmAgentSnapshotImportMutation,
   useSetPersonaActiveMutation,
   useUpdatePersonaMutation,
+  type AgentSnapshotImportPreview,
+  type AgentSnapshotImportResult,
 } from "@/features/agents/hooks";
 import { getPersonaLibraryState } from "@/features/agents/lib/catalog";
 import {
@@ -107,6 +111,8 @@ export function usePersonaActions() {
   const setPersonaActiveMutation = useSetPersonaActiveMutation();
   const exportPersonaJsonMutation = useExportPersonaJsonMutation();
   const exportAgentSnapshotMutation = useExportAgentSnapshotMutation();
+  const previewSnapshotImportMutation = usePreviewAgentSnapshotImportMutation();
+  const confirmSnapshotImportMutation = useConfirmAgentSnapshotImportMutation();
 
   const [personaDialogState, setPersonaDialogState] =
     React.useState<PersonaDialogState | null>(null);
@@ -118,6 +124,15 @@ export function usePersonaActions() {
     persona: AgentPersona;
     linkedAgentPubkey: string | null;
   } | null>(null);
+  const [snapshotImportState, setSnapshotImportState] = React.useState<{
+    fileBytes: number[];
+    fileName: string;
+    preview: AgentSnapshotImportPreview;
+  } | null>(null);
+  const [snapshotImportResult, setSnapshotImportResult] =
+    React.useState<AgentSnapshotImportResult | null>(null);
+  const [snapshotImportConfirmError, setSnapshotImportConfirmError] =
+    React.useState<string | null>(null);
   const [isCatalogDialogOpen, setIsCatalogDialogOpen] = React.useState(false);
   const [sharedCatalogPersonaIds, setSharedCatalogPersonaIds] = React.useState<
     string[]
@@ -327,6 +342,61 @@ export function usePersonaActions() {
     }
   }
 
+  async function handleImportSnapshotFile(
+    fileBytes: number[],
+    fileName: string,
+  ) {
+    clearFeedback("library");
+    try {
+      const preview = await previewSnapshotImportMutation.mutateAsync({
+        fileBytes,
+        fileName,
+      });
+      setSnapshotImportState({ fileBytes, fileName, preview });
+      setSnapshotImportResult(null);
+      setSnapshotImportConfirmError(null);
+    } catch (err) {
+      setPersonaErrorMessage(
+        err instanceof Error
+          ? err.message
+          : "Failed to read agent snapshot file.",
+      );
+    }
+  }
+
+  async function handleConfirmSnapshotImport(keepAllowlist: boolean) {
+    if (!snapshotImportState) {
+      return;
+    }
+    setSnapshotImportConfirmError(null);
+    try {
+      const result = await confirmSnapshotImportMutation.mutateAsync({
+        fileBytes: snapshotImportState.fileBytes,
+        fileName: snapshotImportState.fileName,
+        keepAllowlist,
+      });
+      setSnapshotImportResult(result);
+      void queryClient.invalidateQueries({ queryKey: personasQueryKey });
+      if (result.memoryErrors.length > 0) {
+        setPersonaErrorMessage(
+          `${result.displayName} imported, but ${result.memoryErrors.length} memory entr${result.memoryErrors.length === 1 ? "y" : "ies"} failed to restore.`,
+        );
+      } else {
+        setPersonaNoticeMessage(`Imported ${result.displayName}.`);
+      }
+    } catch (err) {
+      setSnapshotImportConfirmError(
+        err instanceof Error ? err.message : "Failed to import agent snapshot.",
+      );
+    }
+  }
+
+  function closeSnapshotImportDialog() {
+    setSnapshotImportState(null);
+    setSnapshotImportResult(null);
+    setSnapshotImportConfirmError(null);
+  }
+
   function handleExport(persona: AgentPersona) {
     clearFeedback("library");
     exportPersonaJsonMutation.mutate(persona.id, {
@@ -458,7 +528,9 @@ export function usePersonaActions() {
     deletePersonaMutation.isPending ||
     setPersonaActiveMutation.isPending ||
     exportPersonaJsonMutation.isPending ||
-    exportAgentSnapshotMutation.isPending;
+    exportAgentSnapshotMutation.isPending ||
+    previewSnapshotImportMutation.isPending ||
+    confirmSnapshotImportMutation.isPending;
 
   return {
     personasQuery,
@@ -506,5 +578,12 @@ export function usePersonaActions() {
     setPersonaCatalogVisibility,
     sharedCatalogPersonaIdSet,
     clearFeedback,
+    snapshotImportState,
+    snapshotImportResult,
+    snapshotImportConfirmError,
+    isSnapshotImportConfirming: confirmSnapshotImportMutation.isPending,
+    handleImportSnapshotFile,
+    handleConfirmSnapshotImport,
+    closeSnapshotImportDialog,
   };
 }

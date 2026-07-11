@@ -808,6 +808,8 @@ pub fn run() {
             parse_persona_files,
             export_persona_to_json,
             export_agent_snapshot,
+            preview_agent_snapshot_import,
+            confirm_agent_snapshot_import,
             get_channel_workflows,
             get_channels_workflows,
             get_workflow,
