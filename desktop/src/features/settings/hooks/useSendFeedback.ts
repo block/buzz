@@ -10,11 +10,8 @@ import type { ImetaMedia } from "@/features/messages/lib/imetaMediaMarkdown";
 import { buildOutgoingMessage } from "@/features/messages/lib/imetaMediaMarkdown";
 import type { SendFeedbackInput } from "@/features/settings/ui/SendFeedbackDialog";
 import { FEEDBACK_CATEGORY_LABELS } from "@/features/settings/ui/SendFeedbackDialog";
-import {
-  pickAndUploadMedia,
-  sendChannelMessage,
-  uploadMediaBytes,
-} from "@/shared/api/tauri";
+import { sendChannelMessage, uploadMediaBytes } from "@/shared/api/tauri";
+import { pickAndUploadImage } from "@/shared/api/tauriMedia";
 import type { Channel } from "@/shared/api/types";
 
 /** Name of the private channel feedback is delivered to. */
@@ -22,7 +19,9 @@ export const FEEDBACK_CHANNEL_NAME = "Buzz feedback";
 
 /**
  * Resolves the private feedback channel from the channel list by name
- * (case-insensitive), excluding DMs. Exported for unit testing.
+ * (case-insensitive). Requires a **private** channel the user is a member of
+ * and excludes DMs, so feedback is never posted to an open (public) channel
+ * that merely shares the name. Exported for unit testing.
  */
 export function findFeedbackChannel(
   channels: Channel[] | undefined,
@@ -34,6 +33,8 @@ export function findFeedbackChannel(
     channels.find(
       (channel) =>
         channel.channelType !== "dm" &&
+        channel.visibility === "private" &&
+        channel.isMember &&
         channel.name.trim().toLowerCase() ===
           FEEDBACK_CHANNEL_NAME.toLowerCase(),
     ) ?? null
@@ -78,15 +79,14 @@ export function useSendFeedback() {
   );
 
   const attachImage = React.useCallback(async () => {
-    const descriptors = await pickAndUploadMedia();
-    const first = descriptors[0];
-    if (!first) {
+    // The Rust `pick_and_upload_image` command validates the file is an image
+    // (via MIME sniffing) BEFORE upload, so discarded/non-image files never
+    // leave the client. Returns null when the user cancels the dialog.
+    const descriptor = await pickAndUploadImage();
+    if (!descriptor) {
       return;
     }
-    if (!first.type.startsWith("image/")) {
-      throw new Error("Please choose an image file.");
-    }
-    setAttachedImage(first);
+    setAttachedImage(descriptor);
   }, []);
 
   const removeImage = React.useCallback(() => {

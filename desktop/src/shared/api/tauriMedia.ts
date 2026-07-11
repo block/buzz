@@ -1,4 +1,14 @@
-import { invokeTauri } from "./tauri";
+import { type BlobDescriptor, invokeTauri } from "./tauri";
+
+/**
+ * Open a native single-file picker constrained to images and upload the
+ * chosen file. Non-image files are rejected in Rust (via MIME sniffing)
+ * before the bytes leave the client, so discarded/non-image selections never
+ * reach the relay. Resolves to `null` when the user cancels the dialog.
+ */
+export async function pickAndUploadImage(): Promise<BlobDescriptor | null> {
+  return invokeTauri<BlobDescriptor | null>("pick_and_upload_image", {});
+}
 
 /**
  * Fetch relay media bytes over IPC (Rust reqwest, WARP-tunneled).

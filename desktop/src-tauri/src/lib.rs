@@ -776,6 +776,7 @@ pub fn run() {
             show_native_notification,
             upload_media,
             pick_and_upload_media,
+            pick_and_upload_image,
             upload_media_bytes,
             download_image,
             download_file,
