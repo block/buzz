@@ -19,9 +19,12 @@ export const FEEDBACK_CHANNEL_NAME = "Buzz feedback";
 
 /**
  * Resolves the private feedback channel from the channel list by name
- * (case-insensitive). Requires a **private** channel the user is a member of
- * and excludes DMs, so feedback is never posted to an open (public) channel
- * that merely shares the name. Exported for unit testing.
+ * (case-insensitive). Requires an **active private stream** channel the user
+ * is a member of: it must be a `stream` (not a DM or forum — a forum would
+ * file feedback as forum posts), non-archived (archived channels reject
+ * writes), private (never an open/public channel that merely shares the
+ * name), and one the user belongs to. Anything else falls through so the
+ * caller creates a fresh channel. Exported for unit testing.
  */
 export function findFeedbackChannel(
   channels: Channel[] | undefined,
@@ -32,8 +35,9 @@ export function findFeedbackChannel(
   return (
     channels.find(
       (channel) =>
-        channel.channelType !== "dm" &&
+        channel.channelType === "stream" &&
         channel.visibility === "private" &&
+        channel.archivedAt === null &&
         channel.isMember &&
         channel.name.trim().toLowerCase() ===
           FEEDBACK_CHANNEL_NAME.toLowerCase(),
@@ -101,6 +105,15 @@ export function useSendFeedback() {
     mutationFn: async (input: SendFeedbackInput) => {
       // Resolve or create the private feedback channel.
       let channel = findFeedbackChannel(channelsQuery.data);
+      if (!channel) {
+        // The cached list may be stale or still seeded from a cold-start
+        // snapshot — e.g. the initial fetch hasn't landed, or we were added to
+        // the feedback channel from another client. Refetch authoritatively
+        // before creating, so we don't spawn a duplicate of a channel that
+        // already exists server-side.
+        const refreshed = await channelsQuery.refetch();
+        channel = findFeedbackChannel(refreshed.data);
+      }
       if (!channel) {
         channel = await createChannelMutation.mutateAsync({
           name: FEEDBACK_CHANNEL_NAME,

@@ -14,6 +14,7 @@ function channel(overrides) {
     channelType: "stream",
     visibility: "open",
     isMember: true,
+    archivedAt: null,
     ...overrides,
   };
 }
@@ -70,4 +71,21 @@ test("findFeedbackChannel_excludesNonMemberChannelsWithMatchingName", () => {
   // and reusing it would be wrong — skip it and create a fresh one.
   const notMember = feedbackChannel({ id: "nm", isMember: false });
   assert.equal(findFeedbackChannel([notMember]), null);
+});
+
+test("findFeedbackChannel_excludesForumChannelsWithMatchingName", () => {
+  // A private forum sharing the name would file feedback as forum posts
+  // (hidden from the default stream view) — require a stream channel.
+  const forum = feedbackChannel({ id: "forum", channelType: "forum" });
+  assert.equal(findFeedbackChannel([forum]), null);
+});
+
+test("findFeedbackChannel_excludesArchivedChannelsWithMatchingName", () => {
+  // An archived channel rejects writes on the relay, so reusing it would make
+  // the send fail — skip it and create a fresh active channel.
+  const archived = feedbackChannel({
+    id: "arch",
+    archivedAt: "2026-01-01T00:00:00Z",
+  });
+  assert.equal(findFeedbackChannel([archived]), null);
 });
