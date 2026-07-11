@@ -43,9 +43,16 @@ bootstrap:
 setup: bootstrap
     ./scripts/dev-setup.sh
 
-# Install git hooks via lefthook
+# Install git hooks via lefthook (dispatches from the shared .git/hooks dir so all
+# linked worktrees inherit the same hooks without a worktree-relative .hooks path)
 hooks:
-    git config --local core.hooksPath .hooks
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # --path-format=absolute guarantees an absolute path from every invocation context:
+    # without it, --git-common-dir returns ".git" from the main checkout and a
+    # relative hooksPath would break linked-worktree dispatch just like .hooks did.
+    HOOKS_DIR="$(git rev-parse --path-format=absolute --git-common-dir)/hooks"
+    git config --local core.hooksPath "$HOOKS_DIR"
     lefthook install --force
 
 # ⚠️  Wipe ALL data and recreate a clean environment
