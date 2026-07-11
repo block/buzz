@@ -40,10 +40,7 @@ pub(crate) fn resolve_from_lists<'a>(
     {
         return Ok((record, false));
     }
-    if let Some(record) = definitions
-        .iter()
-        .find(|a| a.slug.as_deref() == Some(id))
-    {
+    if let Some(record) = definitions.iter().find(|a| a.slug.as_deref() == Some(id)) {
         return Ok((record, true));
     }
     Err(format!("agent {id:?} not found"))
@@ -157,9 +154,8 @@ pub async fn export_agent_snapshot(
 
         let instances = load_managed_agents(&app)?;
         let definitions = load_agent_definitions(&app)?;
-        let (def_record, is_definition) =
-            resolve_from_lists(&id, &instances, &definitions)
-                .map(|(r, is_def)| (r.clone(), is_def))?;
+        let (def_record, is_definition) = resolve_from_lists(&id, &instances, &definitions)
+            .map(|(r, is_def)| (r.clone(), is_def))?;
 
         let memory_pubkey = if memory_level != MemoryLevel::None {
             let mpk = memory_source_pubkey.as_deref().unwrap_or("");
@@ -168,7 +164,12 @@ pub async fn export_agent_snapshot(
             } else {
                 &def_record.pubkey
             };
-            Some(validate_memory_source(mpk, is_definition, def_id, &instances)?)
+            Some(validate_memory_source(
+                mpk,
+                is_definition,
+                def_id,
+                &instances,
+            )?)
         } else {
             None
         };
@@ -235,8 +236,6 @@ pub async fn export_agent_snapshot(
         save_bytes_with_dialog(&app, &filename, "Agent snapshot", &["json"], &json_bytes).await
     }
 }
-
-
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
@@ -337,7 +336,10 @@ mod tests {
 
         // Step 1 — resolution: slug finds the definition, not the instance.
         let (record, is_def) = resolve_from_lists("my-agent", &instances, &defs).unwrap();
-        assert!(is_def, "slug 'my-agent' must resolve to the definition, not the instance");
+        assert!(
+            is_def,
+            "slug 'my-agent' must resolve to the definition, not the instance"
+        );
         assert_eq!(record.slug.as_deref(), Some("my-agent"));
 
         // Step 2 — memory source validation: instance-pk is persona_id-linked.
@@ -375,7 +377,9 @@ mod tests {
         let result = validate_memory_source("", true, "my-agent", &[]);
         assert!(result.is_err());
         assert!(
-            result.unwrap_err().contains("memory_source_pubkey is required"),
+            result
+                .unwrap_err()
+                .contains("memory_source_pubkey is required"),
             "empty pubkey must be rejected with a clear message"
         );
     }
