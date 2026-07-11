@@ -295,6 +295,16 @@ test("snapshot_send_config_only_calls_encode_upload_send_in_order", async ({
     (e) => e.command === "encode_agent_snapshot_for_send",
   );
   expect(encodeEntry).toBeTruthy();
+
+  // Close the dialog and navigate to #general to verify the FileCard renders.
+  await page.getByRole("button", { name: "Close" }).click();
+  await page.getByTestId("channel-general").click();
+
+  // The sent attachment must appear as a FileCard with the exact filename that
+  // the encode step produced ("e2e-agent.agent.json").
+  const fileCard = page.getByTestId("file-card").last();
+  await expect(fileCard).toBeVisible({ timeout: 5000 });
+  await expect(fileCard).toContainText("e2e-agent.agent.json");
 });
 
 // ── Memory-bearing flow: gate stops before encode/upload/send ─────────────────
@@ -739,4 +749,230 @@ test("snapshot_send_double_confirm_cannot_duplicate_send", async ({ page }) => {
     (e) => e.command === "encode_agent_snapshot_for_send",
   ).length;
   expect(encodeCount).toBe(1);
+});
+
+// ── Group DM: resolved label used in picker/search/memgate/done ──────────────
+
+test("snapshot_send_group_dm_shows_resolved_participant_labels", async ({
+  page,
+}) => {
+  // The "Group DM (3)" channel with alice+bob+tyler must show "alice, bob" as
+  // the label in picker, search, memory-gate warning, and done — not "Group DM (3)".
+  await installMockBridge(page, {
+    personas: [
+      {
+        id: ANALYST_PERSONA_ID,
+        displayName: "Analyst",
+        systemPrompt: "You are an analyst.",
+      },
+    ],
+    managedAgents: [
+      {
+        pubkey: ANALYST_PUBKEY,
+        name: "Analyst",
+        personaId: ANALYST_PERSONA_ID,
+        status: "running",
+      },
+    ],
+    agentMemory: createMockAgentMemoryListing(),
+    uploadDescriptors: [MOCK_UPLOAD_DESCRIPTOR],
+  });
+  await gotoAgentsPage(page);
+
+  await page.getByLabel("Open actions for Analyst").click();
+  await page.getByRole("menuitem", { name: "Export snapshot" }).click();
+
+  // Select memory level = "core" so the memory gate shows the destination label.
+  const coreOption = page.getByRole("radio", {
+    name: "Config + core memory",
+  });
+  if (await coreOption.isVisible()) {
+    await coreOption.click();
+  }
+  const sendBtn = page.getByRole("button", { name: "Send in Buzz" });
+  if (await sendBtn.isVisible()) await sendBtn.click();
+
+  await expect(page.getByTestId("agent-snapshot-send-dialog")).toBeVisible();
+
+  const list = page.getByTestId("agent-snapshot-send-channel-list");
+
+  // The Group DM must appear in the picker with the resolved label "bob, charlie",
+  // NOT as bare "Group DM (3)".
+  await expect(list).toContainText("bob, charlie");
+
+  // Search by resolved label must find it.
+  await page.getByTestId("agent-snapshot-send-search").fill("bob");
+  await expect(list).toContainText("bob, charlie");
+
+  // Select it.
+  await list.getByText("bob, charlie").first().click();
+
+  // Clear search and confirm.
+  await page.getByTestId("agent-snapshot-send-search").fill("");
+  await page.getByTestId("agent-snapshot-send-confirm").click();
+
+  // Memory gate must name the destination using the resolved label.
+  const memGate = page.getByTestId("agent-snapshot-send-memory-gate");
+  await expect(memGate).toBeVisible({ timeout: 3000 });
+  await expect(memGate).toContainText("bob, charlie");
+  await expect(memGate).not.toContainText("Group DM");
+
+  // Confirm send — done copy must also use the resolved label.
+  await page.getByTestId("agent-snapshot-send-memgate-confirm").click();
+
+  const done = page.getByTestId("agent-snapshot-send-done");
+  await expect(done).toBeVisible({ timeout: 8000 });
+  const doneText = (await done.textContent()) ?? "";
+  expect(doneText).toMatch(/bob/);
+  expect(doneText).toMatch(/charlie/);
+  expect(doneText).not.toMatch(/Group DM/);
+});
+
+// ── Live destination invalidation: post-selection mutation blocks encode ──────
+
+test("snapshot_send_archived_destination_blocks_encode_after_selection", async ({
+  page,
+}) => {
+  // Seeded with an encodeDelayMs so the confirm button is still present when
+  // the test inspects it (archive mutation happens before confirm click).
+  await installMockBridge(page, {
+    personas: [
+      {
+        id: ANALYST_PERSONA_ID,
+        displayName: "Analyst",
+        systemPrompt: "You are an analyst.",
+      },
+    ],
+    managedAgents: [
+      {
+        pubkey: ANALYST_PUBKEY,
+        name: "Analyst",
+        personaId: ANALYST_PERSONA_ID,
+      },
+    ],
+    uploadDescriptors: [MOCK_UPLOAD_DESCRIPTOR],
+  });
+  await gotoAgentsPage(page);
+
+  await page.getByLabel("Open actions for Analyst").click();
+  await page.getByRole("menuitem", { name: "Export snapshot" }).click();
+  const sendBtn = page.getByRole("button", { name: "Send in Buzz" });
+  if (await sendBtn.isVisible()) await sendBtn.click();
+
+  await expect(page.getByTestId("agent-snapshot-send-dialog")).toBeVisible();
+
+  // Select #random.
+  const list = page.getByTestId("agent-snapshot-send-channel-list");
+  await list.getByText("random").click();
+
+  // Archive #random after selection via the test-only command bridge.
+  await page.evaluate(() => {
+    return (
+      window as Window & {
+        __BUZZ_E2E_INVOKE_MOCK_COMMAND__?: (
+          cmd: string,
+          payload?: Record<string, unknown>,
+        ) => Promise<unknown>;
+        __BUZZ_E2E_INVALIDATE_CHANNELS__?: () => Promise<void>;
+      }
+    ).__BUZZ_E2E_INVOKE_MOCK_COMMAND__?.("archive_channel", {
+      channelId: "9dae0116-799b-5071-a0a8-fdd30a91a35d",
+    });
+  });
+
+  // Invalidate the channels cache so the mutation is visible to subscribers.
+  await page.evaluate(() => {
+    return (
+      window as Window & {
+        __BUZZ_E2E_INVALIDATE_CHANNELS__?: () => Promise<void>;
+      }
+    ).__BUZZ_E2E_INVALIDATE_CHANNELS__?.();
+  });
+
+  // Wait for the confirm button to become disabled (selection cleared because
+  // #random left sendableChannels) or for the error step to appear.
+  // Either outcome proves zero encode/upload/send.
+  const confirmBtn = page.getByTestId("agent-snapshot-send-confirm");
+
+  // The confirm button must be disabled (no selection) within 3 s.
+  await expect(confirmBtn).toBeDisabled({ timeout: 3000 });
+
+  // Attempting to confirm does nothing — button is disabled.
+  // Verify zero encode/upload/send.
+  const log = await readCommandLog(page);
+  const dangerCmds = log
+    .filter((e) =>
+      [
+        "encode_agent_snapshot_for_send",
+        "upload_media_bytes",
+        "send_channel_message",
+      ].includes(e.command),
+    )
+    .map((e) => e.command);
+  expect(dangerCmds).toEqual([]);
+});
+
+// ── Moderation-DM action boundary: confirm is disabled during relay-self load ─
+
+test("snapshot_send_moderation_target_confirm_disabled_during_relay_self_load", async ({
+  page,
+}) => {
+  // ALICE_PUBKEY will be relaySelf (making alice-tyler a moderation DM), but
+  // the response is delayed. During the loading window:
+  // - All DMs are withheld from the picker (fail-closed)
+  // - The confirm button is disabled (no valid selection possible for a DM)
+  // - Zero encode/upload/send can be triggered for that DM target
+  const ALICE_PUBKEY =
+    "953d3363262e86b770419834c53d2446409db6d918a57f8f339d495d54ab001f";
+  await installMockBridge(page, {
+    personas: [
+      {
+        id: ANALYST_PERSONA_ID,
+        displayName: "Analyst",
+        systemPrompt: "You are an analyst.",
+      },
+    ],
+    managedAgents: [
+      {
+        pubkey: ANALYST_PUBKEY,
+        name: "Analyst",
+        personaId: ANALYST_PERSONA_ID,
+      },
+    ],
+    relaySelf: ALICE_PUBKEY,
+    // Long delay keeps the loading window open for the full assertion window.
+    relaySelfDelayMs: 5000,
+    uploadDescriptors: [MOCK_UPLOAD_DESCRIPTOR],
+  });
+  await gotoAgentsPage(page);
+
+  await page.getByLabel("Open actions for Analyst").click();
+  await page.getByRole("menuitem", { name: "Export snapshot" }).click();
+  const sendBtn = page.getByRole("button", { name: "Send in Buzz" });
+  if (await sendBtn.isVisible()) await sendBtn.click();
+
+  await expect(page.getByTestId("agent-snapshot-send-dialog")).toBeVisible();
+
+  const list = page.getByTestId("agent-snapshot-send-channel-list");
+
+  // alice-tyler (the moderation-DM target) must NOT appear — fail-closed.
+  await expect(list.getByText("alice-tyler")).toHaveCount(0);
+
+  // The confirm button must be disabled (no selection is possible for the
+  // moderation-DM target while classification is unresolved).
+  const confirmBtn = page.getByTestId("agent-snapshot-send-confirm");
+  await expect(confirmBtn).toBeDisabled();
+
+  // Zero encode/upload/send for the moderation-DM target.
+  const log = await readCommandLog(page);
+  const dangerCmds = log
+    .filter((e) =>
+      [
+        "encode_agent_snapshot_for_send",
+        "upload_media_bytes",
+        "send_channel_message",
+      ].includes(e.command),
+    )
+    .map((e) => e.command);
+  expect(dangerCmds).toEqual([]);
 });

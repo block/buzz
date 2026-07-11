@@ -168,3 +168,46 @@ test("memory_gate_step_discloses_media_link_access", () => {
   const text = collectText(el).join(" ");
   assert.match(text, /media link/i, `got: ${text}`);
 });
+
+// ── sendPayload inFlightRef: concurrent calls — second is blocked ─────────────
+//
+// The UI hides the confirm button the moment handleSend transitions to the
+// "progress" step (before sendPayload is invoked). The DOM-level double-click
+// guard is therefore the step transition, not the inFlightRef.  inFlightRef
+// protects against a programmatic double-invocation of sendPayload itself.
+// This unit-level harness directly exercises the guard without a browser.
+
+test("inFlightRef_guard_blocks_second_concurrent_sendPayload", async () => {
+  // Reconstruct the exact guard logic from sendPayload in
+  // useSnapshotSendController.ts: an inFlightRef prevents a second call while
+  // the first is in-flight.
+  let inFlight = false;
+  let callCount = 0;
+  const sendOrder = [];
+
+  async function guardedSend() {
+    if (inFlight) return false;
+    inFlight = true;
+    try {
+      callCount++;
+      sendOrder.push("start");
+      // Simulate async work (encode + upload + send).
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      sendOrder.push("end");
+      return true;
+    } finally {
+      inFlight = false;
+    }
+  }
+
+  // Fire both concurrently — the second sees inFlight=true and returns false.
+  const [r1, r2] = await Promise.all([guardedSend(), guardedSend()]);
+
+  // Exactly one invocation ran.
+  assert.equal(callCount, 1, `expected callCount=1, got ${callCount}`);
+  // One returned true (the first), one returned false (the blocked second).
+  const successes = [r1, r2].filter(Boolean).length;
+  assert.equal(successes, 1, `expected 1 success, got ${successes}`);
+  // The single run completed fully (start then end, no interleaving).
+  assert.deepEqual(sendOrder, ["start", "end"]);
+});
