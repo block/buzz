@@ -237,7 +237,7 @@ export async function fetchWorkspaceUnread(args: {
     // read has covered the channel (the drain path in useUnreadChannels only
     // runs while the workspace is active, so the store may not be pruned for
     // inactive workspaces).
-    if (!hasUnread && channel.id in forcedUnreadMap) {
+    if (!hasUnread && Object.hasOwn(forcedUnreadMap, channel.id)) {
       const markerAtWhenForced = forcedUnreadMap[channel.id];
       if (
         readAt === null ||

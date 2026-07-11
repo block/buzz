@@ -249,7 +249,7 @@ export function useUnreadChannels(
     const advanced = drainSyncedAdvances();
     let anyNew = false;
     for (const channelId of advanced) {
-      if (channelId in forcedUnreadRef.current) {
+      if (Object.hasOwn(forcedUnreadRef.current, channelId)) {
         delete forcedUnreadRef.current[channelId];
         anyNew = true;
       }
@@ -349,7 +349,7 @@ export function useUnreadChannels(
       readAt: string | null | undefined,
       { topLevelOnly = false }: { topLevelOnly?: boolean } = {},
     ) => {
-      if (channelId in forcedUnreadRef.current) {
+      if (Object.hasOwn(forcedUnreadRef.current, channelId)) {
         delete forcedUnreadRef.current[channelId];
         if (pubkey) {
           forcedUnreadStore.write(pubkey, forcedUnreadRef.current);
@@ -385,7 +385,7 @@ export function useUnreadChannels(
   // NIP-RS markers are monotonic, so we do not publish a lower timestamp.
   const markChannelUnread = React.useCallback(
     (channelId: string) => {
-      if (!(channelId in forcedUnreadRef.current)) {
+      if (!Object.hasOwn(forcedUnreadRef.current, channelId)) {
         forcedUnreadRef.current[channelId] = getOwnTimestamp(channelId);
         if (pubkey) {
           forcedUnreadStore.write(pubkey, forcedUnreadRef.current);
@@ -848,7 +848,7 @@ export function useUnreadChannels(
       for (const channel of channels) {
         if (channel.id === activeChannelId) continue;
 
-        if (channel.id in forcedUnreadRef.current) {
+        if (Object.hasOwn(forcedUnreadRef.current, channel.id)) {
           // Forced-unread is dot tier only — not high-priority.
           unread.add(channel.id);
           counts.set(channel.id, 1);
