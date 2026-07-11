@@ -15,24 +15,6 @@ use tokio::sync::Mutex as AsyncMutex;
 use crate::huddle::HuddleState;
 use crate::managed_agents::config_bridge::SessionConfigCache;
 use crate::managed_agents::ManagedAgentProcess;
-
-/// How long an idle keep-alive connection in the shared HTTP client is
-/// retained before being closed. Matches reqwest's own default (90s); kept
-/// long enough that a warmed connection survives realistic pointing/dwell
-/// time so a follow-up `/query` (channel open, intent prefetch) can reuse the
-/// existing TLS session instead of paying a fresh handshake. A silently stale
-/// keep-alive that survives a network transition costs at most one transparent
-/// retry (`/query` errors are classified and React Query retries once).
-pub(crate) const HTTP_POOL_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
-
-/// How many idle keep-alive connections the shared HTTP client retains per
-/// host. This caps *idle retained* connections, not concurrency, so raising it
-/// never limits parallelism — it only lets a small warm set survive between
-/// request bursts (e.g. concurrent multi-channel prefetch). Bounded rather
-/// than unlimited so a media/model download burst cannot pin an unbounded
-/// socket set.
-pub(crate) const HTTP_POOL_MAX_IDLE_PER_HOST: usize = 8;
-
 pub struct AppState {
     pub keys: Mutex<Keys>,
     pub http_client: reqwest::Client,
@@ -141,8 +123,8 @@ pub fn build_app_state() -> AppState {
         keys: Mutex::new(keys),
         http_client: reqwest::Client::builder()
             .resolve("localhost", std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
-            .pool_idle_timeout(HTTP_POOL_IDLE_TIMEOUT)
-            .pool_max_idle_per_host(HTTP_POOL_MAX_IDLE_PER_HOST)
+            .pool_idle_timeout(std::time::Duration::from_secs(10))
+            .pool_max_idle_per_host(1)
             .build()
             .unwrap_or_else(|_| reqwest::Client::new()),
         relay_url_override: Mutex::new(None),
@@ -990,7 +972,3 @@ pub(crate) fn save_key_file(path: &std::path::Path, keys: &Keys) -> Result<(), S
 #[cfg(test)]
 #[path = "app_state_tests.rs"]
 mod tests;
-
-#[cfg(test)]
-#[path = "app_state_pool_tests.rs"]
-mod pool_tests;

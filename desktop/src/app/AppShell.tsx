@@ -2,7 +2,7 @@ import * as React from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { Outlet, useLocation } from "@tanstack/react-router";
 
-import { deriveShellRoute, schedulePreconnect } from "@/app/AppShell.helpers";
+import { deriveShellRoute } from "@/app/AppShell.helpers";
 import { AppShellProvider } from "@/app/AppShellContext";
 import {
   AppShellOverlays,
@@ -498,19 +498,34 @@ export function AppShell() {
   }, []);
 
   React.useEffect(() => {
-    let hasRun = false;
+    let isCancelled = false;
 
-    const cancel = schedulePreconnect(() => {
-      hasRun = true;
-      void relayClient.preconnect().catch((error) => {
-        console.error("Failed to preconnect to relay", error);
-      });
-    });
-
-    return () => {
-      if (!hasRun) {
-        cancel();
+    const startPreconnect = () => {
+      if (isCancelled) {
+        return;
       }
+
+      void relayClient.preconnect().catch((error) => {
+        if (!isCancelled) {
+          console.error("Failed to preconnect to relay", error);
+        }
+      });
+    };
+
+    if ("requestIdleCallback" in window) {
+      const idleId = window.requestIdleCallback(startPreconnect, {
+        timeout: 1_500,
+      });
+      return () => {
+        isCancelled = true;
+        window.cancelIdleCallback(idleId);
+      };
+    }
+
+    const timeoutId = globalThis.setTimeout(startPreconnect, 250);
+    return () => {
+      isCancelled = true;
+      globalThis.clearTimeout(timeoutId);
     };
   }, []);
 

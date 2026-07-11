@@ -85,39 +85,6 @@ export function shouldBounceForChannelNotification(tags: string[][]): boolean {
   return !isThreadReply(tags);
 }
 
-/**
- * Schedule the relay preconnect on the next tick.
- *
- * The relay handshake (WS connect + NIP-42 auth) is safe to start the moment
- * `AppShell` mounts: the router only renders `AppShell` once onboarding has
- * settled to `stage === "ready"`, so the signing identity is already present.
- * We still defer by a single macrotask (`delay = 0`) rather than running
- * synchronously so the handshake does not contend with the first paint.
- *
- * Returns a cancel function that prevents `run` from firing if it has not
- * already run — used by the effect cleanup so an unmount before the tick does
- * not open a socket.
- */
-export function schedulePreconnect(
-  run: () => void,
-  scheduler: {
-    setTimeout: (callback: () => void, delayMs: number) => number;
-    clearTimeout: (handle: number) => void;
-  } = globalThis,
-): () => void {
-  let cancelled = false;
-  const handle = scheduler.setTimeout(() => {
-    if (!cancelled) {
-      run();
-    }
-  }, 0);
-
-  return () => {
-    cancelled = true;
-    scheduler.clearTimeout(handle);
-  };
-}
-
 export function toSearchHit(
   target: DesktopNotificationTarget,
 ): SearchHit | null {
