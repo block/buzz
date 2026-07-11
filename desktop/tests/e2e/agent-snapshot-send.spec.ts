@@ -81,8 +81,8 @@ test("snapshot_send_dialog_shows_joined_channels_and_dms", async ({ page }) => {
   await expect(list).toContainText("random");
 
   // DMs (alice-tyler, bob-tyler) must appear.
-  await expect(list).toContainText("alice");
-  await expect(list).toContainText("bob");
+  await expect(list).toContainText("alice-tyler");
+  await expect(list).toContainText("bob-tyler");
 });
 
 test("snapshot_send_dialog_excludes_forum_archived_and_moderation_dm", async ({
@@ -132,6 +132,72 @@ test("snapshot_send_dialog_excludes_forum_archived_and_moderation_dm", async ({
   // Non-member channels must not appear (design and sales exclude the mock user).
   await expect(list).not.toContainText("design");
   await expect(list).not.toContainText("sales");
+});
+
+// ── Moderation-DM fail-closed race: DMs withheld during relay-self loading ────
+
+test("snapshot_send_moderation_dm_not_selectable_during_relay_self_loading", async ({
+  page,
+}) => {
+  // ALICE_PUBKEY is relaySelf but the response is delayed — alice-tyler must
+  // NOT appear in the picker while get_relay_self is in-flight.
+  const ALICE_PUBKEY =
+    "953d3363262e86b770419834c53d2446409db6d918a57f8f339d495d54ab001f";
+  await installMockBridge(page, {
+    personas: [
+      {
+        id: ANALYST_PERSONA_ID,
+        displayName: "Analyst",
+        systemPrompt: "You are an analyst.",
+      },
+    ],
+    managedAgents: [
+      {
+        pubkey: ANALYST_PUBKEY,
+        name: "Analyst",
+        personaId: ANALYST_PERSONA_ID,
+      },
+    ],
+    relaySelf: ALICE_PUBKEY,
+    // Delay get_relay_self so we can observe the fail-closed window.
+    relaySelfDelayMs: 2000,
+    uploadDescriptors: [MOCK_UPLOAD_DESCRIPTOR],
+  });
+  await gotoAgentsPage(page);
+
+  await page.getByLabel("Open actions for Analyst").click();
+  await page.getByRole("menuitem", { name: "Export snapshot" }).click();
+  const sendBtn = page.getByRole("button", { name: "Send in Buzz" });
+  if (await sendBtn.isVisible()) await sendBtn.click();
+
+  await expect(page.getByTestId("agent-snapshot-send-dialog")).toBeVisible();
+
+  const list = page.getByTestId("agent-snapshot-send-channel-list");
+  await expect(list).toBeVisible();
+
+  // While relay-self is loading, ALL DMs must be withheld (fail-closed).
+  // alice-tyler, bob-tyler, and the generic "DM" channel must not appear.
+  await expect(list.getByText("alice-tyler")).toHaveCount(0);
+  await expect(list.getByText("bob-tyler")).toHaveCount(0);
+  await expect(list.getByText("charlie")).toHaveCount(0);
+
+  // Attempting to confirm must not be possible (no DM is selectable).
+  // Streams (general, random) are still available — confirm that.
+  await expect(list).toContainText("general");
+
+  // Select general and confirm — must proceed to done without any DM encode.
+  await list.getByText("general").click();
+  await page.getByTestId("agent-snapshot-send-confirm").click();
+  await expect(page.getByTestId("agent-snapshot-send-done")).toBeVisible({
+    timeout: 8000,
+  });
+
+  // No DM channel was sent to.
+  const log = await readCommandLog(page);
+  const sendEntry = log.find((e) => e.command === "send_channel_message");
+  const sendPayload = sendEntry?.payload as { channelId?: string } | undefined;
+  // general's id is the well-known seed value.
+  expect(sendPayload?.channelId).toBe("9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50");
 });
 
 // ── Config-only send flow: encode → upload → send, correct destination ────────
@@ -218,7 +284,17 @@ test("snapshot_send_config_only_calls_encode_upload_send_in_order", async ({
   expect(imeta).toContain("m application/json");
   expect(imeta).toContain(`x ${sha}`);
   expect(imeta).toContain("size 1234");
-  expect(imeta).toContain("filename analyst.agent.json");
+  // The filename in the imeta comes from the encode payload's fileName — the
+  // controller sets descriptorWithFilename.filename = fileName (the file produced
+  // by encode_agent_snapshot_for_send), which the bridge hardcodes as
+  // "e2e-agent.agent.json".
+  expect(imeta).toContain("filename e2e-agent.agent.json");
+
+  // The encode command itself produces "e2e-agent.agent.json" (bridge fixture).
+  const encodeEntry = log.find(
+    (e) => e.command === "encode_agent_snapshot_for_send",
+  );
+  expect(encodeEntry).toBeTruthy();
 });
 
 // ── Memory-bearing flow: gate stops before encode/upload/send ─────────────────
@@ -271,7 +347,7 @@ test("snapshot_send_memory_gate_stops_before_encode_on_cancel", async ({
     .click();
   await page.getByTestId("agent-snapshot-send-confirm").click();
 
-  // The memory gate must be visible when core memory is selected.
+  // The memory gate MUST be visible when core memory is selected — fail if not.
   const memGate = page.getByTestId("agent-snapshot-send-memory-gate");
   await expect(memGate).toBeVisible({ timeout: 3000 });
 
@@ -346,9 +422,88 @@ test("snapshot_send_memory_gate_names_the_destination", async ({ page }) => {
   await expect(memGate).toContainText("media link");
 });
 
-// ── Progress phases: Preparing → Uploading → Sending ─────────────────────────
+// ── Generic DM label: resolved label used consistently ────────────────────────
 
-test("snapshot_send_progress_shows_preparing_phase_before_uploading", async ({
+test("snapshot_send_generic_dm_shows_resolved_participant_label", async ({
+  page,
+}) => {
+  // The generic "DM" channel with charlie must show "charlie" as the label in
+  // picker, search filter, memory-gate warning, and done copy — not "DM".
+  await installMockBridge(page, {
+    personas: [
+      {
+        id: ANALYST_PERSONA_ID,
+        displayName: "Analyst",
+        systemPrompt: "You are an analyst.",
+      },
+    ],
+    managedAgents: [
+      {
+        pubkey: ANALYST_PUBKEY,
+        name: "Analyst",
+        personaId: ANALYST_PERSONA_ID,
+        status: "running",
+      },
+    ],
+    agentMemory: createMockAgentMemoryListing(),
+    uploadDescriptors: [MOCK_UPLOAD_DESCRIPTOR],
+  });
+  await gotoAgentsPage(page);
+
+  await page.getByLabel("Open actions for Analyst").click();
+  await page.getByRole("menuitem", { name: "Export snapshot" }).click();
+
+  // Select memory level = "core" so the memory gate shows the destination label.
+  const coreOption = page.getByRole("radio", {
+    name: "Config + core memory",
+  });
+  if (await coreOption.isVisible()) {
+    await coreOption.click();
+  }
+  const sendBtn = page.getByRole("button", { name: "Send in Buzz" });
+  if (await sendBtn.isVisible()) await sendBtn.click();
+
+  await expect(page.getByTestId("agent-snapshot-send-dialog")).toBeVisible();
+
+  const list = page.getByTestId("agent-snapshot-send-channel-list");
+
+  // The generic DM must appear in the picker with the resolved label "charlie",
+  // NOT as bare "DM".
+  await expect(list).toContainText("charlie");
+
+  // Search by resolved label must find it.
+  await page.getByTestId("agent-snapshot-send-search").fill("charlie");
+  await expect(list).toContainText("charlie");
+
+  // Select it.
+  await list.getByText("charlie").first().click();
+
+  // Clear search and confirm.
+  await page.getByTestId("agent-snapshot-send-search").fill("");
+  await page.getByTestId("agent-snapshot-send-confirm").click();
+
+  // Memory gate must name the destination using the resolved label, not "DM".
+  const memGate = page.getByTestId("agent-snapshot-send-memory-gate");
+  await expect(memGate).toBeVisible({ timeout: 3000 });
+  await expect(memGate).toContainText("charlie");
+  await expect(memGate).not.toContainText('"DM"');
+
+  // Confirm send — done copy must also use the resolved label.
+  await page.getByTestId("agent-snapshot-send-memgate-confirm").click();
+
+  const done = page.getByTestId("agent-snapshot-send-done");
+  await expect(done).toBeVisible({ timeout: 8000 });
+  const doneText = (await done.textContent()) ?? "";
+  // Done copy must mention "charlie" — proves the resolved label is used, not
+  // the raw generic channel name "DM".
+  expect(doneText).toMatch(/charlie/);
+  // Must not say "sent to DM" using just the raw channel name.
+  expect(doneText).not.toMatch(/sent to DM\b/i);
+});
+
+// ── Timeout gate: timed-out user cannot encode/upload/send ───────────────────
+
+test("snapshot_send_timeout_gate_blocks_encode_before_upload", async ({
   page,
 }) => {
   await installMockBridge(page, {
@@ -366,8 +521,77 @@ test("snapshot_send_progress_shows_preparing_phase_before_uploading", async ({
         personaId: ANALYST_PERSONA_ID,
       },
     ],
-    // Use a slow upload to observe the Preparing phase before Uploading.
+    uploadDescriptors: [MOCK_UPLOAD_DESCRIPTOR],
+  });
+  await gotoAgentsPage(page);
+
+  // Activate the timeout store after the app has loaded via the test-only
+  // bridge global — mirrors a post-send rejection that flips active=true.
+  await page.evaluate(() => {
+    const expiryMs = Date.now() + 60_000; // 60 s from now
+    (
+      window as Window & {
+        __BUZZ_E2E_ACTIVATE_TIMEOUT__?: (ms: number) => void;
+      }
+    ).__BUZZ_E2E_ACTIVATE_TIMEOUT__?.(expiryMs);
+  });
+
+  await page.getByLabel("Open actions for Analyst").click();
+  await page.getByRole("menuitem", { name: "Export snapshot" }).click();
+  const sendBtn = page.getByRole("button", { name: "Send in Buzz" });
+  if (await sendBtn.isVisible()) await sendBtn.click();
+
+  await expect(page.getByTestId("agent-snapshot-send-dialog")).toBeVisible();
+  await page
+    .getByTestId("agent-snapshot-send-channel-list")
+    .getByText("general")
+    .click();
+  await page.getByTestId("agent-snapshot-send-confirm").click();
+
+  // The send must fail with an error — the timeout guard fires before encode.
+  const errorEl = page.getByTestId("agent-snapshot-send-error");
+  await expect(errorEl).toBeVisible({ timeout: 5000 });
+
+  // Verify zero encode/upload/send were called.
+  const log = await readCommandLog(page);
+  const dangerCmds = log
+    .filter((e) =>
+      [
+        "encode_agent_snapshot_for_send",
+        "upload_media_bytes",
+        "send_channel_message",
+      ].includes(e.command),
+    )
+    .map((e) => e.command);
+  expect(dangerCmds).toEqual([]);
+});
+
+// ── Progress phases: Preparing → Uploading → Sending ─────────────────────────
+
+test("snapshot_send_progress_shows_preparing_uploading_sending_phases", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    personas: [
+      {
+        id: ANALYST_PERSONA_ID,
+        displayName: "Analyst",
+        systemPrompt: "You are an analyst.",
+      },
+    ],
+    managedAgents: [
+      {
+        pubkey: ANALYST_PUBKEY,
+        name: "Analyst",
+        personaId: ANALYST_PERSONA_ID,
+      },
+    ],
+    // Delay encode so "Preparing snapshot…" is observable before "Uploading".
+    encodeDelayMs: 400,
+    // Delay upload so "Uploading snapshot…" is observable before "Sending".
     uploadDelayMs: 400,
+    // Delay send so "Sending message…" is observable before done.
+    sendMessageDelayMs: 400,
     uploadDescriptors: [MOCK_UPLOAD_DESCRIPTOR],
   });
   await gotoAgentsPage(page);
@@ -385,8 +609,8 @@ test("snapshot_send_progress_shows_preparing_phase_before_uploading", async ({
   await page.getByTestId("agent-snapshot-send-confirm").click();
 
   // The progress step must appear and show the Preparing phase BEFORE the
-  // upload delay completes — this verifies the controller sets "preparing"
-  // before encoding, not after.
+  // encode delay completes — this verifies the controller sets "preparing"
+  // before calling encode, not after.
   const progress = page.getByTestId("agent-snapshot-send-progress");
   await expect(progress).toBeVisible();
   await expect(progress).toHaveText("Preparing snapshot…");
@@ -467,10 +691,10 @@ test("snapshot_send_double_confirm_cannot_duplicate_send", async ({ page }) => {
         personaId: ANALYST_PERSONA_ID,
       },
     ],
-    // Slow upload ensures the confirm button is in-flight when we try to
-    // click it a second time — proves the in-flight guard fires, not just
-    // that the button disappeared after completion.
-    uploadDelayMs: 600,
+    // Slow encode + upload so both clicks happen before the first operation
+    // resolves — proves the in-flight guard, not just button disappearance.
+    encodeDelayMs: 400,
+    uploadDelayMs: 400,
     uploadDescriptors: [MOCK_UPLOAD_DESCRIPTOR],
   });
   await gotoAgentsPage(page);
@@ -486,17 +710,18 @@ test("snapshot_send_double_confirm_cannot_duplicate_send", async ({ page }) => {
     .getByText("general")
     .click();
 
-  // First click starts the upload.
   const confirmBtn = page.getByTestId("agent-snapshot-send-confirm");
+
+  // First click starts the encode (in-flight due to encodeDelayMs: 400).
   await confirmBtn.click();
 
-  // The progress indicator must be visible — upload is in-flight.
-  await expect(page.getByTestId("agent-snapshot-send-progress")).toBeVisible();
-
-  // Attempt a second click while in-flight — the confirm button is gone (the
-  // dialog switches to the progress step), so this is a no-op.  Playwright
-  // raises if the element is truly gone; catch so the test doesn't abort.
-  await confirmBtn.click({ force: false }).catch(() => {});
+  // The progress indicator must appear — we're in the encode phase.
+  // The confirm button is gone (dialog switched to progress step), so no
+  // second click is possible from the UI — the guard is the step transition.
+  const progress = page.getByTestId("agent-snapshot-send-progress");
+  await expect(progress).toBeVisible();
+  // Confirm the button is no longer present — this is the UI guard.
+  await expect(confirmBtn).toHaveCount(0);
 
   await expect(page.getByTestId("agent-snapshot-send-done")).toBeVisible({
     timeout: 8000,
@@ -508,4 +733,10 @@ test("snapshot_send_double_confirm_cannot_duplicate_send", async ({ page }) => {
     (e) => e.command === "send_channel_message",
   ).length;
   expect(sendCount).toBe(1);
+
+  // encode must also have been called exactly once.
+  const encodeCount = log.filter(
+    (e) => e.command === "encode_agent_snapshot_for_send",
+  ).length;
+  expect(encodeCount).toBe(1);
 });

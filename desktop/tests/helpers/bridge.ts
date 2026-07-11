@@ -207,6 +207,12 @@ type MockBridgeOptions = {
    * explicit `[]` is honoured (models a picker cancel / no files selected).
    */
   uploadDelayMs?: number;
+  /** Delay (ms) applied to `encode_agent_snapshot_for_send` so E2E tests can
+   *  observe the "preparing" phase before the upload begins. 0/undefined = instant. */
+  encodeDelayMs?: number;
+  /** Delay (ms) applied to `get_relay_self` so E2E tests can prove the
+   *  fail-closed race: DMs are withheld while classification is unresolved. */
+  relaySelfDelayMs?: number;
   uploadDescriptors?: {
     url: string;
     sha256: string;

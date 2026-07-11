@@ -9,6 +9,7 @@ import type { ConnectionState } from "@/shared/api/relayClientShared";
 import type { RelayEvent } from "@/shared/api/types";
 import { getMarkdownParseCount } from "@/shared/ui/markdown/nodeCache";
 import { syncAgentTurnsFromEvents } from "@/features/agents/activeAgentTurnsStore";
+import { recordTimeoutFromRejection } from "@/features/moderation/lib/timeoutStore";
 import {
   injectObserverEventsForE2E,
   syncAgentObserverEvents,
@@ -171,6 +172,12 @@ type E2eConfig = {
     // tests/helpers/bridge.ts:MockBridgeOptions.uploadDescriptors.
     meshReporterPubkey?: string;
     uploadDelayMs?: number;
+    /** Delay (ms) applied to `encode_agent_snapshot_for_send` so E2E tests can
+     *  observe the "preparing" phase before the upload begins. 0/undefined = instant. */
+    encodeDelayMs?: number;
+    /** Delay (ms) applied to `get_relay_self` so E2E tests can prove the
+     *  fail-closed race: DMs are withheld while classification is unresolved. */
+    relaySelfDelayMs?: number;
     uploadDescriptors?: RawBlobDescriptor[];
     // Seed rows returned by `list_save_subscriptions`. Each entry uses the same
     // snake_case wire shape the Rust backend returns so tests can drive the
@@ -820,6 +827,12 @@ declare global {
       invalidateQueries: (filters: { queryKey: readonly unknown[] }) => unknown;
     };
     __BUZZ_E2E_MD_PARSE_COUNT__?: () => number;
+    /**
+     * Activate the community timeout store as if a send was rejected with a
+     * timeout message. Lets E2E tests prove the timeout gate fires before encode.
+     * Call after page load. Pass expiresAtMs (epoch ms) or 0 for unknown expiry.
+     */
+    __BUZZ_E2E_ACTIVATE_TIMEOUT__?: (expiresAtMs: number) => void;
   }
 }
 
@@ -2276,6 +2289,37 @@ const mockChannels: MockChannel[] = [
     members: [
       createMockMember(BOB_PUBKEY, "member", 700),
       createMockMember(MOCK_IDENTITY_PUBKEY, "member", 700),
+    ],
+  }),
+  // Generic-named DM — name is "DM" so resolveChannelDisplayLabel must resolve
+  // the participant display name instead of returning the raw channel name.
+  // Used by agent-snapshot-send.spec.ts to prove picker/search/memgate/done
+  // all use the same resolved label from useUsersBatchQuery.
+  createMockChannel({
+    id: "d1rec7dm-0000-4000-8000-000000000001",
+    name: "DM",
+    channel_type: "dm",
+    visibility: "private",
+    description: "Generic-named DM with charlie",
+    topic: null,
+    purpose: null,
+    last_message_at: null,
+    archived_at: null,
+    created_by: CHARLIE_PUBKEY,
+    topic_set_by: null,
+    topic_set_at: null,
+    purpose_set_by: null,
+    purpose_set_at: null,
+    topic_required: false,
+    max_members: 2,
+    nip29_group_id: null,
+    created_minutes_ago: 680,
+    updated_minutes_ago: 680,
+    participants: ["charlie", "tyler"],
+    participant_pubkeys: [CHARLIE_PUBKEY, MOCK_IDENTITY_PUBKEY],
+    members: [
+      createMockMember(CHARLIE_PUBKEY, "member", 680),
+      createMockMember(MOCK_IDENTITY_PUBKEY, "member", 680),
     ],
   }),
   // Deep history channel for the load-older-under-virtualization E2E. Seeded
@@ -8040,6 +8084,14 @@ export function maybeInstallE2eTauriMocks() {
     return item;
   };
   window.__BUZZ_E2E_MD_PARSE_COUNT__ = getMarkdownParseCount;
+  window.__BUZZ_E2E_ACTIVATE_TIMEOUT__ = (expiresAtMs: number) => {
+    const expiresAtSec = expiresAtMs > 0 ? Math.floor(expiresAtMs / 1000) : 0;
+    const msg =
+      expiresAtSec > 0
+        ? `restricted: you are timed out until ${expiresAtSec}`
+        : "restricted: you are timed out until 0";
+    recordTimeoutFromRejection(msg);
+  };
   window.__BUZZ_E2E_EMIT_MOCK_READ_STATE__ = ({
     clientId,
     contexts,
@@ -8717,6 +8769,14 @@ export function maybeInstallE2eTauriMocks() {
       case "encode_agent_snapshot_for_send": {
         // Return a minimal valid `.agent.json` payload so the send flow can
         // proceed through upload_media_bytes without a real Rust encode step.
+        // Optional encodeDelayMs lets specs observe the "preparing" phase before
+        // the upload begins.
+        const encodeDelayMs = activeConfig?.mock?.encodeDelayMs ?? 0;
+        if (encodeDelayMs > 0) {
+          await new Promise((resolve) =>
+            window.setTimeout(resolve, encodeDelayMs),
+          );
+        }
         const jsonBytes = Array.from(
           new TextEncoder().encode(
             JSON.stringify({
@@ -9217,6 +9277,11 @@ export function maybeInstallE2eTauriMocks() {
         return { archived };
       }
       case "get_relay_self":
+        if ((activeConfig?.mock?.relaySelfDelayMs ?? 0) > 0) {
+          await new Promise((resolve) =>
+            window.setTimeout(resolve, activeConfig!.mock!.relaySelfDelayMs),
+          );
+        }
         return activeConfig?.mock?.relaySelf ?? null;
       case "archive_identity":
       case "unarchive_identity":
