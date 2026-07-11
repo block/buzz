@@ -654,6 +654,8 @@ function VirtualizedTimelineRows({
     if (!(scroller instanceof HTMLDivElement)) return;
     let releaseTimer: number | null = null;
     const onWheel = (event: WheelEvent) => {
+      // Programmatic `onScroll` corrections must not retire this watcher.
+      if (prependWatcherFrameRef.current !== null) retirePrependAnchor();
       if (event.deltaY >= 0) {
         cancelUpwardMomentumRef.current = false;
         if (releaseTimer !== null) window.clearTimeout(releaseTimer);
@@ -676,7 +678,7 @@ function VirtualizedTimelineRows({
       scroller.removeEventListener("wheel", onWheel);
       if (releaseTimer !== null) window.clearTimeout(releaseTimer);
     };
-  }, []);
+  }, [retirePrependAnchor]);
 
   const { retainedIndices, onScrollEnd: handleScrollEnd } =
     useTimelineRetention(keys, listRef, isPrepend);
@@ -689,11 +691,11 @@ function VirtualizedTimelineRows({
       onAtBottomStateChange?.(
         list.scrollSize - list.viewportSize - offset <= 32,
       );
-      if (offset > 200 && prependWatcherFrameRef.current !== null) {
-        // The reader has deliberately left the page boundary. A watcher from
-        // the previous prepend must not carry its old row baseline into the
-        // next trip to the edge and pull that later viewport back down.
-        retirePrependAnchor();
+      if (offset > 200 && prependWatcherFrameRef.current === null) {
+        // Outside the history boundary, keep the next anchor capture current
+        // without treating Virtua's programmatic post-prepend correction as
+        // reader intent. Real wheel input retires an active watcher.
+        capturePrependAnchor();
       }
       if (prependAnchorRef.current !== null || offset <= 200) {
         capturePrependAnchor();
@@ -712,7 +714,6 @@ function VirtualizedTimelineRows({
       onAtBottomStateChange,
       onStartReached,
       onVirtualizerRangeChanged,
-      retirePrependAnchor,
     ],
   );
 
