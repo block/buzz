@@ -615,12 +615,14 @@ function VirtualizedTimelineRows({
     if (!onVirtualizerApiChange) return;
     const api: TimelineVirtualizerApi = {
       scrollToBottom() {
+        retirePrependAnchor();
         const lastIndex = itemsLengthRef.current - 1;
         if (lastIndex >= 0) {
           listRef.current?.scrollToIndex(lastIndex, { align: "end" });
         }
       },
       scrollToMessage(messageId) {
+        retirePrependAnchor();
         const index = messageItemIndexByIdRef.current.get(messageId);
         if (index === undefined) return false;
         listRef.current?.scrollToIndex(index, { align: "center" });
@@ -629,7 +631,7 @@ function VirtualizedTimelineRows({
     };
     onVirtualizerApiChange(api);
     return () => onVirtualizerApiChange(null);
-  }, [onVirtualizerApiChange]);
+  }, [onVirtualizerApiChange, retirePrependAnchor]);
 
   React.useLayoutEffect(() => {
     const host = hostRef.current;
@@ -691,13 +693,11 @@ function VirtualizedTimelineRows({
       onAtBottomStateChange?.(
         list.scrollSize - list.viewportSize - offset <= 32,
       );
-      if (offset > 200 && prependWatcherFrameRef.current === null) {
-        // Outside the history boundary, keep the next anchor capture current
-        // without treating Virtua's programmatic post-prepend correction as
-        // reader intent. Real wheel input retires an active watcher.
-        capturePrependAnchor();
-      }
-      if (prependAnchorRef.current !== null || offset <= 200) {
+      if (
+        prependAnchorRef.current !== null ||
+        offset <= 200 ||
+        prependWatcherFrameRef.current === null
+      ) {
         capturePrependAnchor();
       }
       if (offset <= 200) {
