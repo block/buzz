@@ -4,8 +4,9 @@
  * Payload-agnostic upload → send controller for sharing a snapshot to a Buzz
  * channel or DM.  The caller supplies an encode function and a destination;
  * the controller drives prepare → encode → upload → send with honest progress,
- * idempotent double-send protection covering the entire action (not just upload),
- * and fail-closed moderation-DM race handling.
+ * idempotent double-send protection, and fail-closed eligibility checks at two
+ * action-boundary checkpoints that read from live query-cache sources, not from
+ * render-captured snapshots.
  *
  * This hook does not know what kind of snapshot the bytes contain.  A future
  * team-snapshot or other payload can reuse it unchanged by passing different
@@ -14,17 +15,24 @@
  */
 
 import * as React from "react";
+import type { QueryClient } from "@tanstack/react-query";
+import { useQueryClient } from "@tanstack/react-query";
 
 import { uploadMediaBytes, type BlobDescriptor } from "@/shared/api/tauri";
 import { buildOutgoingMessage } from "@/features/messages/lib/imetaMediaMarkdown";
-import { useChannelsQuery } from "@/features/channels/hooks";
+import { channelsQueryKey, useChannelsQuery } from "@/features/channels/hooks";
 import { isModerationDm } from "@/features/moderation/lib/moderationDm";
-import { useRelaySelfQuery } from "@/features/moderation/hooks";
+import {
+  relaySelfQueryKey,
+  useRelaySelfQuery,
+} from "@/features/moderation/hooks";
+import { getTimeoutSnapshot } from "@/features/moderation/lib/timeoutStore";
+import { isTimeoutActive } from "@/features/moderation/lib/timeout";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import { useSendMessageMutation } from "@/features/messages/hooks";
 import { useUsersBatchQuery } from "@/features/profile/hooks";
 import { resolveChannelDisplayLabel } from "@/features/sidebar/lib/channelLabels";
-import type { Channel } from "@/shared/api/types";
+import type { Channel, Identity } from "@/shared/api/types";
 
 // ── Public types ──────────────────────────────────────────────────────────────
 
@@ -104,6 +112,199 @@ export function createSendGuard(): {
   };
 }
 
+/**
+ * Read current eligibility for `channelId` directly from live query-cache
+ * sources and the timeout external store.  Does NOT read rendered React state
+ * or component refs; safe to call inside a `runGuarded` action where render
+ * state may be stale.
+ *
+ * Returns `null` when the channel is eligible; returns a human-readable error
+ * string when it is not.
+ *
+ * Fail-closed on DM classification: if identity or relay-self is still loading
+ * in the cache, any DM destination is treated as ineligible.
+ */
+export function checkSendEligibility(
+  queryClient: QueryClient,
+  channelId: string,
+  nowMs: number = Date.now(),
+): string | null {
+  // ── Timeout check ─────────────────────────────────────────────────────────
+  // Read the module-level snapshot from timeoutStore directly — this is the
+  // same value `useTimeoutState` serves but without requiring a render cycle.
+  const timeoutState = getTimeoutSnapshot();
+  if (timeoutState.active && isTimeoutActive(timeoutState.expiresAtMs, nowMs)) {
+    return "You are currently timed out and cannot send messages.";
+  }
+
+  // ── Channel-cache check ───────────────────────────────────────────────────
+  const channels = queryClient.getQueryData<Channel[]>(channelsQueryKey) ?? [];
+  const channel = channels.find((ch) => ch.id === channelId);
+
+  if (!channel) {
+    return "The selected destination is no longer available. Please pick another.";
+  }
+  if (!isSendableDestination(channel)) {
+    return "The selected destination is no longer available. Please pick another.";
+  }
+
+  // ── Moderation-DM check (fail-closed while loading) ───────────────────────
+  if (channel.channelType === "dm") {
+    const identityState = queryClient.getQueryState<Identity>(["identity"]);
+    const relaySelfState = queryClient.getQueryState<string | null>(
+      relaySelfQueryKey,
+    );
+
+    // Fail-closed: if identity or relay-self is still fetching, we cannot
+    // classify whether this DM is a moderation DM — block it.
+    if (
+      identityState?.status === "pending" ||
+      identityState?.fetchStatus === "fetching"
+    ) {
+      return "The selected destination is no longer available. Please pick another.";
+    }
+    if (
+      relaySelfState?.status === "pending" ||
+      relaySelfState?.fetchStatus === "fetching"
+    ) {
+      return "The selected destination is no longer available. Please pick another.";
+    }
+
+    const identity = queryClient.getQueryData<Identity>(["identity"]);
+    const relaySelf = queryClient.getQueryData<string | null>(
+      relaySelfQueryKey,
+    );
+
+    if (isModerationDm(channel, identity?.pubkey, relaySelf ?? undefined)) {
+      return "The selected destination is no longer available. Please pick another.";
+    }
+  }
+
+  return null;
+}
+
+/**
+ * The core send pipeline: prepare → [eligibility] → encode → [eligibility] →
+ * upload → send.  Extracted as a standalone async function so unit tests can
+ * import and exercise it directly with injected dependencies — the production
+ * hook calls it inside `runGuarded`.
+ *
+ * Dependencies are injected rather than closed-over from React scope so the
+ * function is pure-async and fully testable without a rendering context.
+ */
+export async function runSendPipeline(deps: {
+  encodeFn: () => Promise<{ fileBytes: number[]; fileName: string }>;
+  uploadFn: (bytes: number[], filename: string) => Promise<BlobDescriptor>;
+  sendFn: (args: {
+    channelId: string;
+    content: string;
+    mediaTags: string[][];
+  }) => Promise<unknown>;
+  setStateFn: (state: SnapshotSendState) => void;
+  buildMessageFn: (descriptor: BlobDescriptor) => {
+    content: string;
+    mediaTags: string[][] | null | undefined;
+  };
+  checkEligibilityFn: () => string | null;
+  channelId: string;
+}): Promise<boolean> {
+  const {
+    encodeFn,
+    uploadFn,
+    sendFn,
+    setStateFn,
+    buildMessageFn,
+    checkEligibilityFn,
+    channelId,
+  } = deps;
+
+  // ── Eligibility checkpoint 1: before encode ───────────────────────────────
+  // Reads live sources directly — timeout store, channel cache, identity cache,
+  // relay-self cache.  Not a render snapshot.
+  const reason1 = checkEligibilityFn();
+  if (reason1 !== null) {
+    setStateFn({ phase: "error", error: reason1 });
+    return false;
+  }
+
+  // ── Prepare (encode) ─────────────────────────────────────────────────────
+  setStateFn({ phase: "preparing", error: null });
+
+  let fileBytes: number[];
+  let fileName: string;
+  try {
+    const encoded = await encodeFn();
+    fileBytes = encoded.fileBytes;
+    fileName = encoded.fileName;
+  } catch (err) {
+    setStateFn({
+      phase: "error",
+      error:
+        err instanceof Error
+          ? `Encode failed: ${err.message}`
+          : "Encode failed.",
+    });
+    return false;
+  }
+
+  // ── Eligibility checkpoint 2: after encode, before upload ─────────────────
+  // State can change while encode is awaited (channel archived, membership
+  // lost, timeout received, relay-self resolves to classify DM).
+  const reason2 = checkEligibilityFn();
+  if (reason2 !== null) {
+    setStateFn({ phase: "error", error: reason2 });
+    return false;
+  }
+
+  // ── Upload ────────────────────────────────────────────────────────────────
+  setStateFn({ phase: "uploading", error: null });
+
+  let descriptor: BlobDescriptor;
+  try {
+    descriptor = await uploadFn(fileBytes, fileName);
+  } catch (err) {
+    setStateFn({
+      phase: "error",
+      error:
+        err instanceof Error
+          ? `Upload failed: ${err.message}`
+          : "Upload failed.",
+    });
+    return false;
+  }
+
+  // Preserve the original filename so `buildImetaTags` emits a `filename`
+  // field and the recipient's FileCard renders the correct label.
+  const descriptorWithFilename: BlobDescriptor = {
+    ...descriptor,
+    filename: fileName,
+  };
+
+  // ── Build message content + NIP-92 imeta tags ─────────────────────────────
+  const { content, mediaTags } = buildMessageFn(descriptorWithFilename);
+
+  // ── Send ──────────────────────────────────────────────────────────────────
+  setStateFn({ phase: "sending", error: null });
+
+  try {
+    await sendFn({
+      channelId,
+      content,
+      mediaTags: mediaTags ?? [],
+    });
+  } catch (err) {
+    setStateFn({
+      phase: "error",
+      error:
+        err instanceof Error ? `Send failed: ${err.message}` : "Send failed.",
+    });
+    return false;
+  }
+
+  setStateFn({ phase: "done", error: null });
+  return true;
+}
+
 export type UseSnapshotSendControllerResult = {
   /**
    * Sendable destinations with resolved display labels.  DMs are omitted
@@ -118,18 +319,10 @@ export type UseSnapshotSendControllerResult = {
    * single-concurrency guard.  A second call while the first is in-flight
    * returns `false` immediately — encode never starts for the blocked call.
    *
-   * `encodeFn` is called after the guard is acquired and the `preparing` phase
-   * is set; its result feeds directly into the upload step so the guard covers
-   * the entire action including memory fetch/encode.
-   *
-   * `eligibilityFn`, when supplied, is called at two internal checkpoints:
-   *   1. After acquiring the guard, immediately before `encodeFn()`.
-   *   2. After encode resolves, immediately before `uploadMediaBytes()`.
-   * If it returns a non-null string at either point the action is aborted with
-   * an error state and zero upload/send work is performed.  The function MUST
-   * read live sources (refs, not closed-over render snapshots) so it reflects
-   * the channel-cache and timeout state at the moment of execution, not at the
-   * moment `beginSend` was called.
+   * Eligibility is checked at two internal checkpoints by reading directly
+   * from the React Query cache and the timeout external store — not from
+   * rendered React state or component refs.  This closes both the
+   * pre-flight/guard-entry race and the during-encode state-change race.
    *
    * The caller MUST have already obtained explicit destination-scoped
    * confirmation for memory-bearing payloads before calling this.  Returns
@@ -139,7 +332,6 @@ export type UseSnapshotSendControllerResult = {
   beginSend: (
     encodeFn: () => Promise<{ fileBytes: number[]; fileName: string }>,
     channelId: string,
-    eligibilityFn?: () => string | null,
   ) => Promise<boolean>;
   /** Set state to error with a message (for pre-send gate failures). */
   setErrorState: (message: string) => void;
@@ -151,6 +343,7 @@ export type UseSnapshotSendControllerResult = {
 export function useSnapshotSendController(): UseSnapshotSendControllerResult {
   const channelsQuery = useChannelsQuery();
   const identityQuery = useIdentityQuery();
+  const queryClient = useQueryClient();
 
   // Only fetch relay self when there are DM candidates — same gate as ChannelPane.
   const hasDmCandidates = React.useMemo(
@@ -229,109 +422,20 @@ export function useSnapshotSendController(): UseSnapshotSendControllerResult {
   async function beginSend(
     encodeFn: () => Promise<{ fileBytes: number[]; fileName: string }>,
     channelId: string,
-    eligibilityFn?: () => string | null,
   ): Promise<boolean> {
-    return guardRef.current.runGuarded(async () => {
-      // ── Eligibility checkpoint 1: before encode ───────────────────────────
-      // Called after the guard is acquired so it races only against state changes
-      // that happen between the caller's pre-flight check and this point.
-      if (eligibilityFn) {
-        const reason = eligibilityFn();
-        if (reason !== null) {
-          setState({ phase: "error", error: reason });
-          return false;
-        }
-      }
-
-      // ── Prepare (encode) ─────────────────────────────────────────────────
-      setState({ phase: "preparing", error: null });
-
-      let fileBytes: number[];
-      let fileName: string;
-      try {
-        const encoded = await encodeFn();
-        fileBytes = encoded.fileBytes;
-        fileName = encoded.fileName;
-      } catch (err) {
-        setState({
-          phase: "error",
-          error:
-            err instanceof Error
-              ? `Encode failed: ${err.message}`
-              : "Encode failed.",
-        });
-        return false;
-      }
-
-      // ── Eligibility checkpoint 2: after encode, before upload ─────────────
-      // State can change while encode is awaited (e.g. the user leaves the
-      // channel, a timeout is received, or relay-self resolves to classify the
-      // destination as a moderation DM).  Re-read live sources before touching
-      // the relay or upload pipeline.
-      if (eligibilityFn) {
-        const reason = eligibilityFn();
-        if (reason !== null) {
-          setState({ phase: "error", error: reason });
-          return false;
-        }
-      }
-
-      // ── Upload ────────────────────────────────────────────────────────────
-      setState({ phase: "uploading", error: null });
-
-      let descriptor: BlobDescriptor;
-      try {
-        descriptor = await uploadMediaBytes(fileBytes, fileName);
-      } catch (err) {
-        setState({
-          phase: "error",
-          error:
-            err instanceof Error
-              ? `Upload failed: ${err.message}`
-              : "Upload failed.",
-        });
-        return false;
-      }
-
-      // Preserve the original filename in the descriptor so `buildImetaTags`
-      // emits a `filename` field and the recipient's FileCard renders the
-      // correct label.
-      const descriptorWithFilename: BlobDescriptor = {
-        ...descriptor,
-        filename: fileName,
-      };
-
-      // ── Build message content + NIP-92 imeta tags ─────────────────────────
-      const { content, mediaTags } = buildOutgoingMessage("", [
-        descriptorWithFilename,
-      ]);
-
-      // ── Send to the captured destination via canonical mutation ────────────
-      // Capturing channelId here prevents a channel switch from redirecting
-      // the attachment; useSendMessageMutation resolves the live channel from
-      // the query cache using the supplied id.
-      setState({ phase: "sending", error: null });
-
-      try {
-        await sendMutation.mutateAsync({
-          channelId,
-          content,
-          mediaTags: mediaTags ?? [],
-        });
-      } catch (err) {
-        setState({
-          phase: "error",
-          error:
-            err instanceof Error
-              ? `Send failed: ${err.message}`
-              : "Send failed.",
-        });
-        return false;
-      }
-
-      setState({ phase: "done", error: null });
-      return true;
-    });
+    return guardRef.current.runGuarded(() =>
+      runSendPipeline({
+        encodeFn,
+        channelId,
+        // Eligibility is checked by reading directly from the React Query cache
+        // and the timeout external store — not from rendered React state.
+        checkEligibilityFn: () => checkSendEligibility(queryClient, channelId),
+        uploadFn: (bytes, filename) => uploadMediaBytes(bytes, filename),
+        sendFn: (args) => sendMutation.mutateAsync(args),
+        setStateFn: setState,
+        buildMessageFn: (descriptor) => buildOutgoingMessage("", [descriptor]),
+      }),
+    );
   }
 
   function reset() {

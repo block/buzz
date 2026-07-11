@@ -72,14 +72,6 @@ export function AgentSnapshotSendDialog({
     controller.state.phase === "uploading" ||
     controller.state.phase === "sending";
 
-  // Keep live refs so the eligibilityFn passed to beginSend always reads the
-  // current channel cache and timeout state at the moment of execution inside
-  // the guard — not the stale render-time closure values.
-  const sendableChannelsRef = React.useRef(controller.sendableChannels);
-  sendableChannelsRef.current = controller.sendableChannels;
-  const timeoutActiveRef = React.useRef(timeoutState.active);
-  timeoutActiveRef.current = timeoutState.active;
-
   // Reset all transient state when the dialog opens.
   // biome-ignore lint/correctness/useExhaustiveDependencies: controller.reset and encodeMutation.reset are stable function references; only `open` drives the reset
   React.useEffect(() => {
@@ -166,14 +158,10 @@ export function AgentSnapshotSendDialog({
     }
 
     setStep("progress");
-    // beginSend sets the preparing phase internally before calling encodeFn,
-    // so the progress UI is honest from the first async tick.
-    //
-    // eligibilityFn reads from live refs (not the closed-over render snapshot)
-    // so each checkpoint inside the guard reflects the current channel cache
-    // and timeout state — not the values captured when handleSend was invoked.
-    // This closes the race between the pre-flight check above and the moment
-    // encode (or upload) actually starts.
+    // beginSend reads from the React Query cache and timeout external store
+    // directly at two internal checkpoints — not from render-captured state.
+    // This closes the race between this pre-flight check and the moment encode
+    // or upload actually starts.
     await controller.beginSend(
       () =>
         encodeMutation.mutateAsync({
@@ -183,18 +171,6 @@ export function AgentSnapshotSendDialog({
           memorySourcePubkey: linkedAgentPubkey,
         }),
       destination.id,
-      () => {
-        if (timeoutActiveRef.current) {
-          return "You are currently timed out and cannot send messages.";
-        }
-        const isStillSendable = sendableChannelsRef.current.some(
-          (ch) => ch.id === destination.id,
-        );
-        if (!isStillSendable) {
-          return "The selected destination is no longer available. Please pick another.";
-        }
-        return null;
-      },
     );
     // Phase transitions (done/error) are driven by beginSend via setState
     // inside the controller; the mirror effect above keeps `step` in sync.
