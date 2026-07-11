@@ -630,40 +630,113 @@ test("checkSendEligibility_ordinary_dm_is_eligible", () => {
   assert.equal(result, null, "ordinary DM must be eligible");
 });
 
-test("checkSendEligibility_absent_identity_fail_open_for_ordinary_dm", () => {
-  // When identity has not loaded (state undefined) but relay-self is known,
-  // isModerationDm runs with currentPubkey=undefined.  In this state, me=null
-  // and all participants are treated as "others".  For a 2-participant DM,
-  // others.length=2 (≠ 1), so isModerationDm returns false → the DM is
-  // ELIGIBLE (fail-open for absent identity).
-  //
-  // Product decision documented here: checkSendEligibility does not add an
-  // extra fail-closed gate for absent identity beyond the fetching check.
-  // The fetching check (status="pending"/fetchStatus="fetching") covers the
-  // in-progress case; a completed-but-empty state (error or never fetched)
-  // falls through to isModerationDm, which fails open.  This is consistent
-  // with isModerationDm's own documented contract.
+test("checkSendEligibility_absent_identity_blocks_dm", () => {
+  // Fail-closed: if identity state is absent (never fetched — state undefined),
+  // any DM must be blocked regardless of relay-self state.
   const RELAY_SELF = "relay000".padEnd(64, "0");
   const OTHER_PUBKEY = "other000".padEnd(64, "0");
   const qc = makeMockQueryClient({
     '["channels"]': [
       makeChannel({
-        id: "ch-dm-absent-id",
+        id: "ch-dm",
         channelType: "dm",
-        participantPubkeys: [OTHER_PUBKEY, RELAY_SELF],
+        participantPubkeys: [OTHER_PUBKEY, "deadbeef".padEnd(64, "0")],
       }),
     ],
-    // No identity data — state is undefined (not fetched or errored).
+    // identity state is undefined — never fetched
     '["relaySelf"]': RELAY_SELF,
     'state:["identity"]': undefined,
     'state:["relaySelf"]': { status: "success", fetchStatus: "idle" },
   });
-  const result = checkSendEligibility(qc, "ch-dm-absent-id", 1000);
-  // isModerationDm sees others=[OTHER, RELAY_SELF] (length=2 ≠ 1) → false.
-  // The DM is eligible (fail-open for absent identity).
+  const result = checkSendEligibility(qc, "ch-dm", 1000);
+  assert.notEqual(result, null, "absent identity state must block any DM");
+});
+
+test("checkSendEligibility_errored_identity_blocks_dm", () => {
+  // Fail-closed: if identity query errored, any DM must be blocked.
+  const RELAY_SELF = "relay000".padEnd(64, "0");
+  const qc = makeMockQueryClient({
+    '["channels"]': [
+      makeChannel({
+        id: "ch-dm",
+        channelType: "dm",
+        participantPubkeys: [
+          "other000".padEnd(64, "0"),
+          "deadbeef".padEnd(64, "0"),
+        ],
+      }),
+    ],
+    'state:["identity"]': { status: "error", fetchStatus: "idle" },
+    '["relaySelf"]': RELAY_SELF,
+    'state:["relaySelf"]': { status: "success", fetchStatus: "idle" },
+  });
+  const result = checkSendEligibility(qc, "ch-dm", 1000);
+  assert.notEqual(result, null, "errored identity state must block any DM");
+});
+
+test("checkSendEligibility_absent_relay_self_blocks_dm", () => {
+  // Fail-closed: if relay-self state is absent (never fetched), any DM blocks.
+  const MY_PUBKEY = "mypubkey".padEnd(64, "0");
+  const qc = makeMockQueryClient({
+    '["channels"]': [
+      makeChannel({
+        id: "ch-dm",
+        channelType: "dm",
+        participantPubkeys: [MY_PUBKEY, "other000".padEnd(64, "0")],
+      }),
+    ],
+    '["identity"]': { pubkey: MY_PUBKEY, displayName: "Me" },
+    'state:["identity"]': { status: "success", fetchStatus: "idle" },
+    // relay-self state is undefined — never fetched
+    'state:["relaySelf"]': undefined,
+  });
+  const result = checkSendEligibility(qc, "ch-dm", 1000);
+  assert.notEqual(result, null, "absent relay-self state must block any DM");
+});
+
+test("checkSendEligibility_errored_relay_self_blocks_dm", () => {
+  // Fail-closed: if relay-self query errored, any DM blocks even though
+  // relaySelf=null data might remain in cache from a prior success.
+  const MY_PUBKEY = "mypubkey".padEnd(64, "0");
+  const qc = makeMockQueryClient({
+    '["channels"]': [
+      makeChannel({
+        id: "ch-dm",
+        channelType: "dm",
+        participantPubkeys: [MY_PUBKEY, "other000".padEnd(64, "0")],
+      }),
+    ],
+    '["identity"]': { pubkey: MY_PUBKEY, displayName: "Me" },
+    'state:["identity"]': { status: "success", fetchStatus: "idle" },
+    'state:["relaySelf"]': { status: "error", fetchStatus: "idle" },
+  });
+  const result = checkSendEligibility(qc, "ch-dm", 1000);
+  assert.notEqual(result, null, "errored relay-self state must block any DM");
+});
+
+test("checkSendEligibility_relay_self_null_success_ordinary_dm_eligible", () => {
+  // Semantic boundary: relaySelf successfully resolved to null means the relay
+  // advertises no self pubkey (a known, valid answer).  isModerationDm returns
+  // false when relaySelf is null/undefined.  The DM must be eligible.
+  const MY_PUBKEY = "mypubkey".padEnd(64, "0");
+  const OTHER_PUBKEY = "other000".padEnd(64, "0");
+  const qc = makeMockQueryClient({
+    '["channels"]': [
+      makeChannel({
+        id: "ch-dm-null-relay",
+        channelType: "dm",
+        participantPubkeys: [MY_PUBKEY, OTHER_PUBKEY],
+      }),
+    ],
+    '["identity"]': { pubkey: MY_PUBKEY, displayName: "Me" },
+    '["relaySelf"]': null, // successfully resolved: relay has no self
+    'state:["identity"]': { status: "success", fetchStatus: "idle" },
+    'state:["relaySelf"]': { status: "success", fetchStatus: "idle" },
+  });
+  const result = checkSendEligibility(qc, "ch-dm-null-relay", 1000);
   assert.equal(
     result,
     null,
-    "DM with absent identity is fail-open: isModerationDm needs currentPubkey to classify a moderation DM",
+    "relaySelf=null (known: relay has no self) + ordinary DM must be eligible",
   );
 });

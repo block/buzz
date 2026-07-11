@@ -121,8 +121,13 @@ export function createSendGuard(): {
  * Returns `null` when the channel is eligible; returns a human-readable error
  * string when it is not.
  *
- * Fail-closed on DM classification: if identity or relay-self is still loading
- * in the cache, any DM destination is treated as ineligible.
+ * Fail-closed on DM classification: a DM destination is blocked unless both
+ * identity and relay-self have successfully resolved (`status === "success"`).
+ * This covers pending, fetching, absent (never fetched), and errored states.
+ * The semantic distinction is preserved: a successfully resolved
+ * `relaySelf === null` means the relay advertises no self pubkey — that IS a
+ * known result and the generic moderation helper's fail-open behavior applies.
+ * Any other state (absent, errored, or in-flight) is unknown and must block.
  */
 export function checkSendEligibility(
   queryClient: QueryClient,
@@ -148,25 +153,25 @@ export function checkSendEligibility(
     return "The selected destination is no longer available. Please pick another.";
   }
 
-  // ── Moderation-DM check (fail-closed while loading) ───────────────────────
+  // ── Moderation-DM check (fail-closed) ────────────────────────────────────
   if (channel.channelType === "dm") {
     const identityState = queryClient.getQueryState<Identity>(["identity"]);
     const relaySelfState = queryClient.getQueryState<string | null>(
       relaySelfQueryKey,
     );
 
-    // Fail-closed: if identity or relay-self is still fetching, we cannot
-    // classify whether this DM is a moderation DM — block it.
-    if (
-      identityState?.status === "pending" ||
-      identityState?.fetchStatus === "fetching"
-    ) {
+    // Fail-closed: block the DM unless both identity AND relay-self have
+    // successfully resolved.  Absent state (undefined — never fetched or
+    // cache evicted), pending/fetching, and errored states are all unknown
+    // and must block to prevent misclassification.
+    //
+    // The only exception is a successfully resolved `relaySelf === null`:
+    // that means the relay advertises no self pubkey (a valid, known answer),
+    // and we pass it to isModerationDm, which fails open by its own contract.
+    if (identityState?.status !== "success") {
       return "The selected destination is no longer available. Please pick another.";
     }
-    if (
-      relaySelfState?.status === "pending" ||
-      relaySelfState?.fetchStatus === "fetching"
-    ) {
+    if (relaySelfState?.status !== "success") {
       return "The selected destination is no longer available. Please pick another.";
     }
 
@@ -407,14 +412,16 @@ export function useSnapshotSendController(): UseSnapshotSendControllerResult {
   const sendableChannels = React.useMemo<ResolvedChannel[]>(() => {
     const currentPubkey = identityQuery.data?.pubkey;
     const relaySelf = relaySelfQuery.data;
-    // Fail-closed: withhold ALL DMs until BOTH identity AND relay-self are
-    // known.  Identity is required so isModerationDm can compare the current
-    // user's pubkey against the DM participant list.  If relay-self resolves
-    // before identity, isModerationDm receives no currentPubkey, treats both
-    // participants as "others," and can fail to classify a 1:1 moderation DM.
+    // Fail-closed: withhold ALL DMs until BOTH identity AND relay-self have
+    // successfully resolved (`status === "success"`).  Absent, pending,
+    // fetching, and errored states are all unknown — we cannot classify
+    // whether a DM is a moderation DM without valid identity + relay-self.
+    // A successfully resolved `relaySelf === null` IS known: the relay
+    // advertises no self, and the moderation helper's fail-open applies.
+    const identitySuccess = identityQuery.status === "success";
+    const relaySelfSuccess = relaySelfQuery.status === "success";
     const dmGateOpen =
-      !hasDmCandidates ||
-      (!relaySelfQuery.isLoading && !identityQuery.isLoading);
+      !hasDmCandidates || (identitySuccess && relaySelfSuccess);
     const dmProfiles = dmProfilesQuery.data?.profiles;
 
     return (channelsQuery.data ?? [])
@@ -431,9 +438,9 @@ export function useSnapshotSendController(): UseSnapshotSendControllerResult {
   }, [
     channelsQuery.data,
     identityQuery.data,
-    identityQuery.isLoading,
+    identityQuery.status,
     relaySelfQuery.data,
-    relaySelfQuery.isLoading,
+    relaySelfQuery.status,
     hasDmCandidates,
     dmProfilesQuery.data,
   ]);
