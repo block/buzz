@@ -12,7 +12,8 @@ use crate::config::DEFAULT_MAX_FRAME_BYTES;
 ///
 /// NIP-43 (relay membership) is advertised separately by [`RelayInfo::build`]
 /// only when membership enforcement is actually enabled — see that function.
-pub(crate) const SUPPORTED_NIPS: &[u32] = &[1, 2, 10, 11, 16, 17, 23, 25, 29, 33, 38, 42, 50, 56];
+pub(crate) const SUPPORTED_NIPS: &[u32] =
+    &[1, 2, 10, 11, 16, 17, 23, 25, 29, 33, 37, 38, 42, 50, 56];
 
 /// NIP-43 (relay membership). Advertised only when the relay actually
 /// enforces membership (`BUZZ_REQUIRE_RELAY_MEMBERSHIP=true`) AND has a
@@ -294,6 +295,24 @@ mod tests {
         assert!(
             SUPPORTED_NIPS.contains(&56),
             "NIP-56 (reporting) must be advertised — kind:1984 ingest is live"
+        );
+    }
+
+    #[test]
+    fn supported_nips_includes_nip37() {
+        assert!(
+            SUPPORTED_NIPS.contains(&37),
+            "NIP-37 (draft wraps) must be advertised — kind:31234 ingest and author-only reads are live"
+        );
+    }
+
+    #[test]
+    fn supported_nips_does_not_include_nip40() {
+        // NIP-40 requires expired stored rows to be suppressed on read; Buzz does not
+        // do this generically yet. Desktop must not rely on relay-side expiry suppression.
+        assert!(
+            !SUPPORTED_NIPS.contains(&40),
+            "NIP-40 must NOT be advertised until expired stored rows are generically suppressed on read"
         );
     }
 

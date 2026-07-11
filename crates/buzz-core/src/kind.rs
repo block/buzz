@@ -101,16 +101,31 @@ pub const KIND_AGENT_ENGRAM: u32 = 30174;
 /// author-only (see [`AUTHOR_ONLY_KINDS`]). See `docs/nips/NIP-ER.md`.
 pub const KIND_EVENT_REMINDER: u32 = 30300;
 
+/// NIP-37: Draft wrap (parameterized replaceable, author-only).
+///
+/// Encrypted draft of an unsent message, addressed by `(pubkey, kind=31234, d_tag)`.
+/// Content is NIP-44 v2 ciphertext (to self) containing an unsigned inner event,
+/// or the empty string as a NIP-37 deletion tombstone. The outer envelope carries
+/// no channel scope (`channel_id = NULL`); compose context (channel, reply target,
+/// etc.) lives only inside the encrypted payload.
+///
+/// Reads are strictly author-only — see [`AUTHOR_ONLY_KINDS`] and the author-only
+/// gate in the REQ/COUNT/fan-out handlers. Draft wraps are excluded from FTS
+/// (`search_tsv = NULL`) and must not trigger workflow dispatch.
+pub const KIND_DRAFT: u32 = 31234;
+
 /// Kinds whose stored events are readable only by their author.
 ///
 /// The relay must never reveal the existence, count, tags, content, schedule,
 /// or search matches of these events to anyone but the authenticated author.
-/// Shared across the ingest write path (NIP-ER `not_before` validation) and the
-/// read path (REQ/COUNT/subscription author-only filtering).
+/// Shared across the ingest write path and the read path (REQ/COUNT/subscription
+/// author-only filtering). Also drives the FTS null-tsvector tripwire in
+/// `buzz-search/tests/fts_integration.rs` — every kind added here MUST also
+/// appear in the `search_tsv` generated column exclusion list in
+/// `schema/schema.sql` and the additive migration that introduced it.
 ///
-/// Currently O(1) with a single entry. If this grows past ~4 kinds, convert to
-/// a compile-time bitset or sorted array with binary search for hot-path use.
-pub const AUTHOR_ONLY_KINDS: &[u32] = &[KIND_EVENT_REMINDER];
+/// Sorted for binary-search readiness if the list grows.
+pub const AUTHOR_ONLY_KINDS: &[u32] = &[KIND_EVENT_REMINDER, KIND_DRAFT];
 
 /// Kinds that require a result-level read gate beyond the filter-layer
 /// `#p` check: even a reader who knows an event id MUST match the event's

@@ -15,18 +15,18 @@ use buzz_core::kind::{
     is_relay_admin_kind, KIND_AGENT_ENGRAM, KIND_AGENT_PROFILE, KIND_AGENT_TURN_METRIC,
     KIND_APPROVAL_DENY, KIND_APPROVAL_GRANT, KIND_AUTH, KIND_BOOKMARK_LIST, KIND_BOOKMARK_SET,
     KIND_CANVAS, KIND_CONTACT_LIST, KIND_DELETION, KIND_DM_ADD_MEMBER, KIND_DM_HIDE, KIND_DM_OPEN,
-    KIND_EMOJI_LIST, KIND_EMOJI_SET, KIND_EVENT_REMINDER, KIND_FOLLOW_SET, KIND_FORUM_COMMENT,
-    KIND_FORUM_POST, KIND_FORUM_VOTE, KIND_GIFT_WRAP, KIND_GIT_ISSUE, KIND_GIT_PATCH,
-    KIND_GIT_PR_UPDATE, KIND_GIT_PULL_REQUEST, KIND_GIT_REPO_ANNOUNCEMENT, KIND_GIT_REPO_STATE,
-    KIND_GIT_STATUS_CLOSED, KIND_GIT_STATUS_DRAFT, KIND_GIT_STATUS_MERGED, KIND_GIT_STATUS_OPEN,
-    KIND_HUDDLE_ENDED, KIND_HUDDLE_GUIDELINES, KIND_HUDDLE_PARTICIPANT_JOINED,
-    KIND_HUDDLE_PARTICIPANT_LEFT, KIND_HUDDLE_STARTED, KIND_IA_ARCHIVE_REQUEST,
-    KIND_IA_UNARCHIVE_REQUEST, KIND_LONG_FORM, KIND_MANAGED_AGENT, KIND_MEMBER_ADDED_NOTIFICATION,
-    KIND_MEMBER_REMOVED_NOTIFICATION, KIND_MESH_LLM_RELAY_STATUS, KIND_MODERATION_BAN,
-    KIND_MODERATION_RESOLVE_REPORT, KIND_MODERATION_TIMEOUT, KIND_MODERATION_UNBAN,
-    KIND_MODERATION_UNTIMEOUT, KIND_MUTE_LIST, KIND_NIP29_CREATE_GROUP, KIND_NIP29_DELETE_EVENT,
-    KIND_NIP29_DELETE_GROUP, KIND_NIP29_EDIT_METADATA, KIND_NIP29_JOIN_REQUEST,
-    KIND_NIP29_LEAVE_REQUEST, KIND_NIP29_PUT_USER, KIND_NIP29_REMOVE_USER,
+    KIND_DRAFT, KIND_EMOJI_LIST, KIND_EMOJI_SET, KIND_EVENT_REMINDER, KIND_FOLLOW_SET,
+    KIND_FORUM_COMMENT, KIND_FORUM_POST, KIND_FORUM_VOTE, KIND_GIFT_WRAP, KIND_GIT_ISSUE,
+    KIND_GIT_PATCH, KIND_GIT_PR_UPDATE, KIND_GIT_PULL_REQUEST, KIND_GIT_REPO_ANNOUNCEMENT,
+    KIND_GIT_REPO_STATE, KIND_GIT_STATUS_CLOSED, KIND_GIT_STATUS_DRAFT, KIND_GIT_STATUS_MERGED,
+    KIND_GIT_STATUS_OPEN, KIND_HUDDLE_ENDED, KIND_HUDDLE_GUIDELINES,
+    KIND_HUDDLE_PARTICIPANT_JOINED, KIND_HUDDLE_PARTICIPANT_LEFT, KIND_HUDDLE_STARTED,
+    KIND_IA_ARCHIVE_REQUEST, KIND_IA_UNARCHIVE_REQUEST, KIND_LONG_FORM, KIND_MANAGED_AGENT,
+    KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION, KIND_MESH_LLM_RELAY_STATUS,
+    KIND_MODERATION_BAN, KIND_MODERATION_RESOLVE_REPORT, KIND_MODERATION_TIMEOUT,
+    KIND_MODERATION_UNBAN, KIND_MODERATION_UNTIMEOUT, KIND_MUTE_LIST, KIND_NIP29_CREATE_GROUP,
+    KIND_NIP29_DELETE_EVENT, KIND_NIP29_DELETE_GROUP, KIND_NIP29_EDIT_METADATA,
+    KIND_NIP29_JOIN_REQUEST, KIND_NIP29_LEAVE_REQUEST, KIND_NIP29_PUT_USER, KIND_NIP29_REMOVE_USER,
     KIND_NIP43_LEAVE_REQUEST, KIND_NIP65_RELAY_LIST_METADATA, KIND_PERSONA, KIND_PIN_LIST,
     KIND_PRESENCE_UPDATE, KIND_PROFILE, KIND_REACTION, KIND_READ_STATE, KIND_REPORT,
     KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_BOOKMARKED, KIND_STREAM_MESSAGE_DIFF,
@@ -157,6 +157,8 @@ fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static s
         | KIND_EVENT_REMINDER | KIND_PERSONA | KIND_TEAM | KIND_MANAGED_AGENT => {
             Ok(Scope::UsersWrite)
         }
+        // NIP-37: draft wraps are author-private global state (UsersWrite scope).
+        KIND_DRAFT => Ok(Scope::UsersWrite),
         // NIP-AM: agent turn metrics are agent-authored global events (encrypted to owner).
         KIND_AGENT_TURN_METRIC => Ok(Scope::MessagesWrite),
         // NIP-56 reports are ordinary member writes into the mod-only queue.
@@ -402,6 +404,11 @@ pub(crate) fn is_global_only_kind(kind: u32) -> bool {
             // NIP-AM: agent turn metrics are owner-scoped global events.
             // Channel identity is encrypted inside the payload — no `h` tag.
             | KIND_AGENT_TURN_METRIC
+            // NIP-37: draft wraps are author-private global events.
+            // Compose context (channel, DM, reply target) is encrypted inside
+            // the payload — no outer `h` tag. A stray `h` tag is rejected at
+            // validation time (see `validate_draft_wrap_envelope`).
+            | KIND_DRAFT
     )
 }
 
@@ -1192,6 +1199,147 @@ fn validate_not_before(tag_value: &str) -> Result<u64, &'static str> {
     Ok(value)
 }
 
+/// Validate the public envelope of a NIP-37 `kind:31234` draft wrap before it
+/// reaches NIP-33 parameterized replacement.
+///
+/// The relay cannot decrypt or verify the payload; it enforces the mandatory outer
+/// tag shape so a malformed event cannot win replacement against a valid head:
+///
+/// 1. Exactly one non-empty `d` tag within `D_TAG_MAX_LEN`. Grammar is unrestricted
+///    (NIP-37 does not prescribe it); the relay accepts any non-empty opaque identifier.
+/// 2. Exactly one `k` tag with a canonical ASCII-decimal inner kind value in the
+///    unsigned 16-bit range (0..=65535) with no leading zeros (except bare "0").
+/// 3. No outer `h` tag — compose context is encrypted inside the payload.
+/// 4. No outer `p` tag — prevents this event from entering the mention/feed index.
+/// 5. Non-empty content must be a syntactically plausible NIP-44 v2 ciphertext
+///    (reuses `validate_engram_nip44_content`). Empty content is the NIP-37
+///    deletion tombstone and is explicitly valid.
+/// 6. At most one `expiration` tag, whose value must be canonical ASCII decimal,
+///    strictly greater than both `event.created_at` and the relay's current time.
+///    If present, it must be in the safe-integer range for JSON interoperability.
+fn validate_draft_wrap_envelope(event: &Event) -> Result<(), String> {
+    let now_secs = chrono::Utc::now().timestamp() as u64;
+    let event_created_at = event.created_at.as_secs();
+
+    let mut d_count = 0usize;
+    let mut d_value: Option<&str> = None;
+    let mut k_count = 0usize;
+    let mut k_value: Option<&str> = None;
+    let mut expiration_count = 0usize;
+    let mut expiration_value: Option<&str> = None;
+
+    for tag in event.tags.iter() {
+        let parts = tag.as_slice();
+        if parts.len() < 2 {
+            continue;
+        }
+        match parts[0].as_str() {
+            "d" => {
+                d_count += 1;
+                d_value = Some(&parts[1]);
+            }
+            "k" => {
+                k_count += 1;
+                k_value = Some(&parts[1]);
+            }
+            "h" => {
+                return Err(
+                    "draft-wrap event must not have an `h` tag (compose context belongs inside the encrypted payload)".to_string(),
+                );
+            }
+            "p" => {
+                return Err(
+                    "draft-wrap event must not have a `p` tag (prevents mention/feed indexing)"
+                        .to_string(),
+                );
+            }
+            "expiration" => {
+                expiration_count += 1;
+                expiration_value = Some(&parts[1]);
+            }
+            _ => {}
+        }
+    }
+
+    // Validate `d` tag.
+    if d_count != 1 {
+        return Err(format!(
+            "draft-wrap event must have exactly one `d` tag (got {d_count})"
+        ));
+    }
+    let d = d_value.unwrap();
+    if d.is_empty() {
+        return Err("draft-wrap `d` tag must not be empty".to_string());
+    }
+    if d.len() > buzz_db::event::D_TAG_MAX_LEN {
+        return Err(format!(
+            "draft-wrap `d` tag too long ({} bytes, max {})",
+            d.len(),
+            buzz_db::event::D_TAG_MAX_LEN,
+        ));
+    }
+
+    // Validate `k` tag — canonical decimal, fits u16, no leading zeros.
+    if k_count != 1 {
+        return Err(format!(
+            "draft-wrap event must have exactly one `k` tag (got {k_count})"
+        ));
+    }
+    let k = k_value.unwrap();
+    if k.is_empty() || !k.bytes().all(|b| b.is_ascii_digit()) {
+        return Err("draft-wrap `k` tag must be a canonical decimal integer".to_string());
+    }
+    if k.len() > 1 && k.starts_with('0') {
+        return Err("draft-wrap `k` tag must not have leading zeros".to_string());
+    }
+    let _inner_kind: u16 = k.parse().map_err(|_| {
+        "draft-wrap `k` tag value out of range (must fit unsigned 16-bit kind)".to_string()
+    })?;
+
+    // Validate `expiration` tag (optional, at most one).
+    if expiration_count > 1 {
+        return Err(format!(
+            "draft-wrap event must have at most one `expiration` tag (got {expiration_count})"
+        ));
+    }
+    if let Some(exp_str) = expiration_value {
+        if exp_str.is_empty() || !exp_str.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(
+                "draft-wrap `expiration` tag must be a canonical decimal Unix timestamp"
+                    .to_string(),
+            );
+        }
+        if exp_str.len() > 1 && exp_str.starts_with('0') {
+            return Err("draft-wrap `expiration` tag must not have leading zeros".to_string());
+        }
+        const MAX_SAFE_INT: u64 = 9_007_199_254_740_991;
+        let exp: u64 = exp_str.parse().map_err(|_| {
+            "draft-wrap `expiration` tag value out of safe-integer range".to_string()
+        })?;
+        if exp > MAX_SAFE_INT {
+            return Err(
+                "draft-wrap `expiration` tag value exceeds JSON safe-integer limit".to_string(),
+            );
+        }
+        if exp <= event_created_at {
+            return Err(
+                "draft-wrap `expiration` must be strictly after event `created_at`".to_string(),
+            );
+        }
+        if exp <= now_secs {
+            return Err("draft-wrap `expiration` must be in the future".to_string());
+        }
+    }
+
+    // Validate content: either empty (tombstone) or NIP-44 v2 ciphertext.
+    if !event.content.is_empty() {
+        validate_engram_nip44_content(&event.content)
+            .map_err(|e| e.replace("agent-engram", "draft-wrap"))?;
+    }
+
+    Ok(())
+}
+
 /// Validate the public tag envelope of a NIP-ER `kind:30300` event before it
 /// reaches NIP-33 parameterized replacement.
 ///
@@ -1897,6 +2045,11 @@ async fn ingest_event_inner(
 
     if kind_u32 == KIND_EVENT_REMINDER {
         validate_event_reminder(&event)
+            .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
+    }
+
+    if kind_u32 == KIND_DRAFT {
+        validate_draft_wrap_envelope(&event)
             .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
     }
 
@@ -3385,5 +3538,262 @@ mod tests {
         let err = validate_agent_turn_metric_envelope(&ev).unwrap_err();
         // error comes from validate_engram_nip44_content with label replaced
         assert!(err.contains("agent-turn-metric"), "got: {err}");
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // validate_draft_wrap_envelope tests (kind:31234 / NIP-37)
+    // ──────────────────────────────────────────────────────────────────────────
+
+    fn make_draft(tags: &[&[&str]], content: &str) -> Event {
+        make_event_with_tags(KIND_DRAFT, content, tags)
+    }
+
+    // ── acceptance ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn draft_wrap_accepts_ciphertext_content() {
+        let d = uuid::Uuid::new_v4().to_string();
+        let ev = make_draft(&[&["d", &d], &["k", "9"]], &fake_nip44_v2());
+        assert!(
+            validate_draft_wrap_envelope(&ev).is_ok(),
+            "canonical draft with ciphertext content must be accepted"
+        );
+    }
+
+    #[test]
+    fn draft_wrap_accepts_blank_tombstone() {
+        let d = uuid::Uuid::new_v4().to_string();
+        let ev = make_draft(&[&["d", &d], &["k", "9"]], "");
+        assert!(
+            validate_draft_wrap_envelope(&ev).is_ok(),
+            "tombstone (empty content) must be accepted"
+        );
+    }
+
+    #[test]
+    fn draft_wrap_accepts_various_valid_k_values() {
+        for k in ["0", "1", "9", "1000", "30023", "65535"] {
+            let d = uuid::Uuid::new_v4().to_string();
+            let ev = make_draft(&[&["d", &d], &["k", k]], "");
+            assert!(
+                validate_draft_wrap_envelope(&ev).is_ok(),
+                "k={k} must be accepted"
+            );
+        }
+    }
+
+    // ── d-tag validation ──────────────────────────────────────────────────────
+
+    #[test]
+    fn draft_wrap_rejects_missing_d_tag() {
+        let ev = make_draft(&[&["k", "9"]], &fake_nip44_v2());
+        let err = validate_draft_wrap_envelope(&ev).unwrap_err();
+        assert!(err.contains("`d` tag"), "got: {err}");
+    }
+
+    #[test]
+    fn draft_wrap_rejects_empty_d_tag() {
+        let ev = make_draft(&[&["d", ""], &["k", "9"]], &fake_nip44_v2());
+        let err = validate_draft_wrap_envelope(&ev).unwrap_err();
+        assert!(err.contains("`d` tag"), "got: {err}");
+    }
+
+    #[test]
+    fn draft_wrap_rejects_duplicate_d_tag() {
+        let d = uuid::Uuid::new_v4().to_string();
+        let ev = make_draft(&[&["d", &d], &["d", &d], &["k", "9"]], &fake_nip44_v2());
+        let err = validate_draft_wrap_envelope(&ev).unwrap_err();
+        assert!(err.contains("`d` tag"), "got: {err}");
+    }
+
+    // ── k-tag validation ──────────────────────────────────────────────────────
+
+    #[test]
+    fn draft_wrap_rejects_missing_k_tag() {
+        let d = uuid::Uuid::new_v4().to_string();
+        let ev = make_draft(&[&["d", &d]], &fake_nip44_v2());
+        let err = validate_draft_wrap_envelope(&ev).unwrap_err();
+        assert!(err.contains("`k` tag"), "got: {err}");
+    }
+
+    #[test]
+    fn draft_wrap_rejects_duplicate_k_tag() {
+        let d = uuid::Uuid::new_v4().to_string();
+        let ev = make_draft(&[&["d", &d], &["k", "9"], &["k", "9"]], &fake_nip44_v2());
+        let err = validate_draft_wrap_envelope(&ev).unwrap_err();
+        assert!(err.contains("`k` tag"), "got: {err}");
+    }
+
+    #[test]
+    fn draft_wrap_rejects_k_tag_non_decimal() {
+        let d = uuid::Uuid::new_v4().to_string();
+        let ev = make_draft(&[&["d", &d], &["k", "0x9"]], &fake_nip44_v2());
+        let err = validate_draft_wrap_envelope(&ev).unwrap_err();
+        assert!(err.contains("canonical decimal"), "got: {err}");
+    }
+
+    #[test]
+    fn draft_wrap_rejects_k_tag_leading_zero() {
+        let d = uuid::Uuid::new_v4().to_string();
+        let ev = make_draft(&[&["d", &d], &["k", "09"]], &fake_nip44_v2());
+        let err = validate_draft_wrap_envelope(&ev).unwrap_err();
+        assert!(err.contains("leading zero"), "got: {err}");
+    }
+
+    #[test]
+    fn draft_wrap_rejects_k_tag_out_of_u16_range() {
+        let d = uuid::Uuid::new_v4().to_string();
+        // 65536 = u16::MAX + 1
+        let ev = make_draft(&[&["d", &d], &["k", "65536"]], &fake_nip44_v2());
+        let err = validate_draft_wrap_envelope(&ev).unwrap_err();
+        assert!(err.contains("range"), "got: {err}");
+    }
+
+    // ── h / p outer-tag exclusion ─────────────────────────────────────────────
+
+    #[test]
+    fn draft_wrap_rejects_h_tag() {
+        let d = uuid::Uuid::new_v4().to_string();
+        let ev = make_draft(
+            &[
+                &["d", &d],
+                &["k", "9"],
+                &["h", &uuid::Uuid::new_v4().to_string()],
+            ],
+            &fake_nip44_v2(),
+        );
+        let err = validate_draft_wrap_envelope(&ev).unwrap_err();
+        assert!(err.contains("`h` tag"), "got: {err}");
+    }
+
+    #[test]
+    fn draft_wrap_rejects_p_tag() {
+        let d = uuid::Uuid::new_v4().to_string();
+        let keys = nostr::Keys::generate();
+        let ev = make_draft(
+            &[&["d", &d], &["k", "9"], &["p", &keys.public_key().to_hex()]],
+            &fake_nip44_v2(),
+        );
+        let err = validate_draft_wrap_envelope(&ev).unwrap_err();
+        assert!(err.contains("`p` tag"), "got: {err}");
+    }
+
+    // ── content validation ────────────────────────────────────────────────────
+
+    #[test]
+    fn draft_wrap_rejects_non_base64_content() {
+        let d = uuid::Uuid::new_v4().to_string();
+        let ev = make_draft(&[&["d", &d], &["k", "9"]], "not-a-ciphertext");
+        let err = validate_draft_wrap_envelope(&ev).unwrap_err();
+        assert!(
+            err.contains("base64") || err.contains("NIP-44"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn draft_wrap_rejects_wrong_nip44_version_byte() {
+        let d = uuid::Uuid::new_v4().to_string();
+        // 132 chars of valid base64 but version byte decodes to 0x00, not 0x02.
+        let bad = "A".repeat(132);
+        let ev = make_draft(&[&["d", &d], &["k", "9"]], &bad);
+        let err = validate_draft_wrap_envelope(&ev).unwrap_err();
+        assert!(
+            err.contains("NIP-44 v2") || err.contains("0x02"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn draft_wrap_rejects_short_ciphertext() {
+        // 1-byte decoded (version prefix only, no payload) — too short.
+        let d = uuid::Uuid::new_v4().to_string();
+        let ev = make_draft(&[&["d", &d], &["k", "9"]], "Ag==");
+        let err = validate_draft_wrap_envelope(&ev).unwrap_err();
+        assert!(err.contains("too short"), "got: {err}");
+    }
+
+    // ── expiration tag validation ─────────────────────────────────────────────
+
+    #[test]
+    fn draft_wrap_accepts_valid_future_expiration() {
+        let d = uuid::Uuid::new_v4().to_string();
+        // A timestamp far in the future (year 2100).
+        let ev = make_draft(
+            &[&["d", &d], &["k", "9"], &["expiration", "4102444800"]],
+            "",
+        );
+        assert!(
+            validate_draft_wrap_envelope(&ev).is_ok(),
+            "valid future expiration must be accepted"
+        );
+    }
+
+    #[test]
+    fn draft_wrap_rejects_duplicate_expiration_tag() {
+        let d = uuid::Uuid::new_v4().to_string();
+        let ev = make_draft(
+            &[
+                &["d", &d],
+                &["k", "9"],
+                &["expiration", "4102444800"],
+                &["expiration", "4102444800"],
+            ],
+            "",
+        );
+        let err = validate_draft_wrap_envelope(&ev).unwrap_err();
+        assert!(err.contains("expiration"), "got: {err}");
+    }
+
+    #[test]
+    fn draft_wrap_rejects_expiration_in_past() {
+        let d = uuid::Uuid::new_v4().to_string();
+        let ev = make_draft(
+            &[&["d", &d], &["k", "9"], &["expiration", "1000000000"]],
+            "",
+        );
+        let err = validate_draft_wrap_envelope(&ev).unwrap_err();
+        assert!(err.contains("expiration"), "got: {err}");
+    }
+
+    #[test]
+    fn draft_wrap_rejects_non_decimal_expiration() {
+        let d = uuid::Uuid::new_v4().to_string();
+        let ev = make_draft(
+            &[&["d", &d], &["k", "9"], &["expiration", "not-a-number"]],
+            "",
+        );
+        let err = validate_draft_wrap_envelope(&ev).unwrap_err();
+        assert!(err.contains("expiration"), "got: {err}");
+    }
+
+    // ── routing invariants ────────────────────────────────────────────────────
+
+    #[test]
+    fn draft_wrap_is_global_only() {
+        // Draft wraps must never be channel-scoped; compose context lives in
+        // the encrypted payload only.
+        assert!(
+            is_global_only_kind(KIND_DRAFT),
+            "KIND_DRAFT must be global-only (no h-tag channel scope)"
+        );
+    }
+
+    #[test]
+    fn draft_wrap_requires_users_write_scope() {
+        let dummy = make_dummy_event();
+        assert_eq!(
+            required_scope_for_kind(KIND_DRAFT, &dummy).unwrap(),
+            Scope::UsersWrite,
+            "KIND_DRAFT must require UsersWrite scope"
+        );
+    }
+
+    #[test]
+    fn draft_wrap_does_not_require_h_tag() {
+        assert!(
+            !requires_h_channel_scope(KIND_DRAFT),
+            "KIND_DRAFT must not require an h tag"
+        );
     }
 }

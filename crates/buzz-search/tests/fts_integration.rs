@@ -3,12 +3,12 @@
 //! Run with a local PG: `BUZZ_TEST_DATABASE_URL=postgres://buzz:buzz_dev@localhost:5432/buzz cargo test -p buzz-search --tests -- --include-ignored`
 //!
 //! Each test creates a uniquely-named schema, applies the full migration chain
-//! (0001 through 0008) into it, exercises a scenario, and drops it. Tests are
+//! (0001 through 0012) into it, exercises a scenario, and drops it. Tests are
 //! parallel-safe.
 
 use buzz_core::{
     kind::{
-        AUTHOR_ONLY_KINDS, KIND_AGENT_TURN_METRIC, KIND_MEMBER_ADDED_NOTIFICATION,
+        AUTHOR_ONLY_KINDS, KIND_AGENT_TURN_METRIC, KIND_DRAFT, KIND_MEMBER_ADDED_NOTIFICATION,
         KIND_MEMBER_REMOVED_NOTIFICATION, P_GATED_KINDS,
     },
     CommunityId,
@@ -27,6 +27,7 @@ const MIGRATION_0006_SQL: &str = include_str!("../../../migrations/0006_moderati
 const MIGRATION_0007_SQL: &str = include_str!("../../../migrations/0007_nip_rs_retention.sql");
 const MIGRATION_0008_SQL: &str =
     include_str!("../../../migrations/0008_fresh_install_search_allowlist.sql");
+const MIGRATION_0012_SQL: &str = include_str!("../../../migrations/0012_draft_wrap_fts.sql");
 
 async fn setup() -> (PgPool, String) {
     let url = std::env::var("BUZZ_TEST_DATABASE_URL").unwrap_or_else(|_| TEST_DB_URL.to_string());
@@ -77,6 +78,9 @@ async fn setup() -> (PgPool, String) {
     pool.execute(MIGRATION_0008_SQL)
         .await
         .expect("apply 0008 migration");
+    pool.execute(MIGRATION_0012_SQL)
+        .await
+        .expect("apply 0012 migration");
     (pool, schema)
 }
 

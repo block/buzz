@@ -38,12 +38,13 @@ fn bounded_kind_label(kind: u32) -> String {
         8000..=8003 | 9000..=9022 | 9030..=9036 => kind.to_string(),
         13534..=13535 => kind.to_string(),
         20000..=29999 => kind.to_string(),
-        30023 | 30315 | 39000..=39003 => kind.to_string(),
+        30023 | 30078 | 30174 | 30175..=30177 | 30300 | 30315 | 31234 | 39000..=39003 => {
+            kind.to_string()
+        }
         40002..=40100 => kind.to_string(),
         41001 | 41010..=41012 => kind.to_string(),
         43001..=43006 => kind.to_string(),
-        44100..=44101 => kind.to_string(),
-        44200 => kind.to_string(),
+        44100..=44101 | 44200 => kind.to_string(),
         45001..=45003 => kind.to_string(),
         46001..=46012 | 46020 | 46030..=46031 => kind.to_string(),
         48001 | 48100..=48103 | 48106 => kind.to_string(),
@@ -506,6 +507,11 @@ async fn dispatch_persistent_event_inner(
         && !buzz_core::kind::is_command_kind(kind_u32)
         && !is_relay_workflow_msg
         && kind_u32 != KIND_GIFT_WRAP
+        // Author-only kinds (NIP-ER reminders, NIP-37 draft wraps) are private per-user
+        // state that must not trigger workspace-level workflows. Excluded here explicitly
+        // because today's channel-less engine no-ops on them, but this guard is the
+        // invariant that must hold for any future workflow expansion.
+        && !AUTHOR_ONLY_KINDS.contains(&kind_u32)
     {
         let workflow_engine = Arc::clone(&state.workflow_engine);
         let workflow_event = stored_event.clone();

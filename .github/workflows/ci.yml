@@ -610,6 +610,15 @@ jobs:
         run: cargo test --profile ci -p buzz-test-client --test e2e_event_reminder -- --ignored
         env:
           RELAY_URL: ws://localhost:3000
+      - name: NIP-37 draft wrap e2e
+        # Feature e2e for NIP-37 draft wraps (kind:31234): write-path
+        # validation, NIP-01 replacement/tombstone ordering, author-only privacy
+        # across all read paths (WS REQ, WS COUNT, HTTP /query, /count, live
+        # fan-out), known-d privacy tripwires, FTS/NIP-50 exclusion, and NIP-11
+        # advertisement.
+        run: cargo test --profile ci -p buzz-test-client --test e2e_nip37_draft -- --ignored
+        env:
+          RELAY_URL: ws://localhost:3000
       - name: Upload relay log
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
