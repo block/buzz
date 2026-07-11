@@ -21,7 +21,6 @@ import {
 import { useChannelSortPreference } from "@/features/sidebar/lib/useChannelSortPreference";
 import { useSidebarScrollLock } from "@/features/sidebar/lib/useSidebarScrollLock";
 import { useUnreadOverflow } from "@/features/sidebar/lib/useUnreadOverflow";
-import { useChannelIntentPrefetch } from "@/features/sidebar/lib/useChannelIntentPrefetch";
 import {
   CreateSectionDialog,
   DeleteSectionAlertDialog,
@@ -244,10 +243,6 @@ export function AppSidebar({
   const [dmActionsMenuOpen, setDmActionsMenuOpen] = React.useState(false);
   const scrollRef = React.useRef<HTMLDivElement>(null);
   useSidebarScrollLock(scrollRef);
-  const channelIntentHandlers = useChannelIntentPrefetch(
-    channels,
-    selectedChannelId,
-  );
 
   React.useEffect(() => {
     const scrollElement = scrollRef.current;
@@ -547,7 +542,6 @@ export function AppSidebar({
       <div
         className="relative flex min-h-0 flex-1 flex-col overflow-hidden"
         data-testid="app-sidebar-scroll-anchor"
-        {...channelIntentHandlers}
       >
         <AppSidebarPinnedHeader
           channelLabels={dmChannelLabels}
