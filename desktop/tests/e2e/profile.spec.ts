@@ -628,21 +628,21 @@ test("updates presence from the profile menu", async ({ page }) => {
 
   await openProfileMenu(page);
   await expect(
-    page.getByTestId("profile-popover-current-status"),
+    page.getByTestId("profile-popover-presence-trigger"),
   ).toContainText("Online");
 
   await page.getByTestId("profile-popover-presence-trigger").click();
   await page.getByTestId("profile-popover-status-away").click();
   await openProfileMenu(page);
   await expect(
-    page.getByTestId("profile-popover-current-status"),
+    page.getByTestId("profile-popover-presence-trigger"),
   ).toContainText("Away");
 
   await page.getByTestId("profile-popover-presence-trigger").click();
   await page.getByTestId("profile-popover-status-offline").click();
   await openProfileMenu(page);
   await expect(
-    page.getByTestId("profile-popover-current-status"),
+    page.getByTestId("profile-popover-presence-trigger"),
   ).toContainText("Offline");
 });
 

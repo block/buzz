@@ -3,6 +3,10 @@ import { ChevronRight, Smile } from "lucide-react";
 
 import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
+import {
+  MaskedAvatarBadgeFrame,
+  STATUS_DOT_MASK_CURVE,
+} from "@/features/profile/ui/MaskedAvatarBadgeFrame";
 import { PresenceDot } from "@/features/presence/ui/PresenceBadge";
 import { getPresenceLabel } from "@/features/presence/lib/presence";
 import { SetStatusDialog } from "@/features/user-status/ui/SetStatusDialog";
@@ -132,26 +136,35 @@ export function ProfilePopover({
           <div aria-label="Profile menu" role="menu">
             {/* ── Identity block ─────────────────────────────────── */}
             <div className="flex items-center gap-2 px-3 pt-2 pb-2">
-              <div className="relative shrink-0">
+              <MaskedAvatarBadgeFrame
+                badge={
+                  <span
+                    aria-label={getPresenceLabel(currentStatus)}
+                    className="flex h-3.5 w-3.5 items-center justify-center rounded-full"
+                    data-testid="profile-popover-current-status"
+                    role="img"
+                  >
+                    <PresenceDot className="h-2 w-2" status={currentStatus} />
+                  </span>
+                }
+                badgeBox={{ bottom: -2, height: 14, right: -2, width: 14 }}
+                className="h-8 w-8"
+                curve={STATUS_DOT_MASK_CURVE}
+                cutout={{ cx: 28, cy: 28, r: 7.5 }}
+                size={32}
+              >
                 <ProfileAvatar
                   avatarDataUrl={avatarDataUrl}
                   avatarUrl={avatarUrl}
-                  className="h-8 w-8 text-xs"
+                  className="h-full w-full text-xs"
                   iconClassName="h-4 w-4"
                   label={displayName}
                 />
-              </div>
+              </MaskedAvatarBadgeFrame>
               <div className="min-w-0 flex-1">
                 <p className="truncate text-sm font-semibold leading-tight text-popover-foreground">
                   {displayName}
                 </p>
-                <div
-                  className="inline-flex items-center gap-1.5 text-xs text-muted-foreground"
-                  data-testid="profile-popover-current-status"
-                >
-                  <PresenceDot status={currentStatus} />
-                  <span>{getPresenceLabel(currentStatus)}</span>
-                </div>
               </div>
             </div>
 
