@@ -128,6 +128,18 @@ export function AppShell() {
   } = useAppNavigation();
   const { canGoBack, canGoForward, goBack, goForward } =
     useBackForwardControls();
+  // Navigate home before switching workspaces so the outgoing channel URL is
+  // cleared. Without this, ChannelScreen's read effect continues firing
+  // markChannelRead({ topLevelOnly: true }) for the previous workspace's
+  // channel, advancing its NIP-RS markers and causing the rail badge to vanish
+  // on the next 30s poll (A→B→A→B disappearance bug).
+  const handleSwitchWorkspace = React.useCallback(
+    (id: string) => {
+      void goHome();
+      workspacesHook.switchWorkspace(id);
+    },
+    [goHome, workspacesHook.switchWorkspace],
+  );
   const { selectedChannelId, selectedView } = React.useMemo(
     () => deriveShellRoute(location.pathname),
     [location.pathname],
@@ -659,7 +671,7 @@ export function AppShell() {
                       }
                       onAddWorkspace={() => setIsAddWorkspaceOpen(true)}
                       onRemoveWorkspace={workspacesHook.removeWorkspace}
-                      onSwitchWorkspace={workspacesHook.switchWorkspace}
+                      onSwitchWorkspace={handleSwitchWorkspace}
                       onUpdateWorkspace={workspacesHook.updateWorkspace}
                       workspaces={workspacesHook.workspaces}
                     />
@@ -739,7 +751,7 @@ export function AppShell() {
                           isPresencePending={presenceSession.isPending}
                           onAddWorkspace={(workspace) => {
                             const id = workspacesHook.addWorkspace(workspace);
-                            workspacesHook.switchWorkspace(id);
+                            handleSwitchWorkspace(id);
                           }}
                           onAddWorkspaceOpenChange={setIsAddWorkspaceOpen}
                           onNewDmOpenChange={setIsNewDmOpen}
@@ -747,7 +759,7 @@ export function AppShell() {
                           onOpenAddWorkspace={() => setIsAddWorkspaceOpen(true)}
                           onUpdateWorkspace={workspacesHook.updateWorkspace}
                           onRemoveWorkspace={workspacesHook.removeWorkspace}
-                          onSwitchWorkspace={workspacesHook.switchWorkspace}
+                          onSwitchWorkspace={handleSwitchWorkspace}
                           onCreateAgent={() =>
                             void goAgents().then(requestOpenCreateAgent)
                           }
