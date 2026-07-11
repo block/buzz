@@ -1303,6 +1303,13 @@ pub struct FormatPromptArgs<'a> {
     pub base_prompt: Option<&'a str>,
     /// System prompt content for legacy agents (protocol_version < 2).
     pub system_prompt: Option<&'a str>,
+    /// Rendered `[Channel Canvas]` metadata section for legacy agents.
+    ///
+    /// For modern agents (protocol_version >= 2) the section is delivered via
+    /// the system role in session/new; omit here to avoid duplication.
+    /// For legacy agents it rides in the user message on every turn of the
+    /// session, alongside `[Base]`/`[System]`/`[Agent Memory — core]`.
+    pub agent_canvas: Option<&'a str>,
 }
 
 /// Format the `[Base]` section for the base prompt.
@@ -1374,6 +1381,10 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
     if !args.has_system_prompt_support {
         if let Some(core) = args.agent_core {
             sections.push(core.to_string());
+        }
+        // Channel canvas metadata — same delivery semantics as core for legacy agents.
+        if let Some(canvas) = args.agent_canvas {
+            sections.push(canvas.to_string());
         }
     }
 
@@ -4316,5 +4327,85 @@ mod tests {
             .collect();
         assert_eq!(recovered, vec![e1_id, e2_id, e3_id]);
         assert!(q.withheld_native_steer.is_empty());
+    }
+
+    // ── format_prompt: agent_canvas ─────────────────────────────────────────
+
+    #[test]
+    fn test_format_prompt_canvas_injected_for_legacy_agent() {
+        let canvas = "[Channel Canvas]\nCanvas revision (event ID): abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234\nLast modified: 2024-01-15T10:30:00+00:00\nFetch current content with: buzz canvas get --channel 00f1ccaf-1506-4dd7-9a0e-fa67e9e486ae";
+        let ch = Uuid::new_v4();
+        let batch = FlushBatch {
+            channel_id: ch,
+            events: vec![BatchEvent {
+                event: make_event("hi"),
+                prompt_tag: "test".into(),
+                received_at: Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+        let prompt = format_prompt(
+            &batch,
+            &FormatPromptArgs {
+                agent_canvas: Some(canvas),
+                has_system_prompt_support: false,
+                ..Default::default()
+            },
+        )
+        .join("\n\n");
+        assert!(
+            prompt.contains("[Channel Canvas]"),
+            "legacy agent prompt must include canvas section; got: {prompt}"
+        );
+    }
+
+    #[test]
+    fn test_format_prompt_canvas_omitted_for_modern_agent() {
+        let canvas = "[Channel Canvas]\nCanvas revision (event ID): abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234\nLast modified: 2024-01-15T10:30:00+00:00\nFetch current content with: buzz canvas get --channel 00f1ccaf-1506-4dd7-9a0e-fa67e9e486ae";
+        let ch = Uuid::new_v4();
+        let batch = FlushBatch {
+            channel_id: ch,
+            events: vec![BatchEvent {
+                event: make_event("hi"),
+                prompt_tag: "test".into(),
+                received_at: Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+        let prompt = format_prompt(
+            &batch,
+            &FormatPromptArgs {
+                agent_canvas: Some(canvas),
+                has_system_prompt_support: true,
+                ..Default::default()
+            },
+        )
+        .join("\n\n");
+        assert!(
+            !prompt.contains("[Channel Canvas]"),
+            "modern agent must not get canvas in user message (it's in systemPrompt); got: {prompt}"
+        );
+    }
+
+    #[test]
+    fn test_format_prompt_no_canvas_produces_no_canvas_section() {
+        let ch = Uuid::new_v4();
+        let batch = FlushBatch {
+            channel_id: ch,
+            events: vec![BatchEvent {
+                event: make_event("hi"),
+                prompt_tag: "test".into(),
+                received_at: Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+        let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
+        assert!(
+            !prompt.contains("[Channel Canvas]"),
+            "no canvas section expected when agent_canvas is None; got: {prompt}"
+        );
     }
 }

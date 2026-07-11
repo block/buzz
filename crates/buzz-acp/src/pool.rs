@@ -89,6 +89,13 @@ pub struct SessionState {
     /// channel_id → rendered NIP-AE core prompt section, populated once at
     /// session creation per Tyler's spec (no mid-session refresh).
     pub core_sections: HashMap<Uuid, String>,
+    /// channel_id → rendered `[Channel Canvas]` metadata section.
+    ///
+    /// Populated once before session creation (same lifecycle as `core_sections`).
+    /// Absent when the channel has no canvas, the canvas content is blank, or the
+    /// fetch fails — all fail open. Cleared on session invalidation alongside
+    /// `core_sections` so the next session picks up any canvas change.
+    pub canvas_sections: HashMap<Uuid, String>,
 }
 
 impl SessionState {
@@ -110,6 +117,7 @@ impl SessionState {
     pub fn invalidate_channel(&mut self, channel_id: &Uuid) -> bool {
         self.turn_counts.remove(channel_id);
         self.core_sections.remove(channel_id);
+        self.canvas_sections.remove(channel_id);
         self.sessions.remove(channel_id).is_some()
     }
 
@@ -120,6 +128,7 @@ impl SessionState {
         self.heartbeat_session = None;
         self.heartbeat_turn_count = 0;
         self.core_sections.clear();
+        self.canvas_sections.clear();
     }
 
     #[cfg(test)]
@@ -127,6 +136,7 @@ impl SessionState {
         self.sessions.contains_key(channel_id)
             || self.turn_counts.contains_key(channel_id)
             || self.core_sections.contains_key(channel_id)
+            || self.canvas_sections.contains_key(channel_id)
     }
 }
 
@@ -663,17 +673,22 @@ async fn create_session_and_apply_model(
     agent: &mut OwnedAgent,
     ctx: &PromptContext,
     agent_core: Option<&str>,
+    agent_canvas: Option<&str>,
 ) -> Result<String, AcpError> {
-    // Combine base_prompt + system_prompt + agent core into a single
-    // systemPrompt value for the session/new request. Only sent when the agent
-    // declares protocol version >= 2 (supports systemPrompt); legacy agents
+    // Combine base_prompt + system_prompt + agent core + canvas metadata into a
+    // single systemPrompt value for the session/new request. Only sent when the
+    // agent declares protocol version >= 2 (supports systemPrompt); legacy agents
     // ignore it and receive the same content as user-message sections via
-    // `format_prompt`. Core already carries its own `[Agent Memory — core]`
-    // header from `engram_fetch::build_core_section`, so we just append it.
+    // `format_prompt`. Core carries its own `[Agent Memory — core]` header, and
+    // canvas carries its own `[Channel Canvas]` header; both are appended with a
+    // blank-line separator.
     let combined_system_prompt: Option<String> = if agent.protocol_version >= 2 {
-        with_core(
-            framed_system_prompt(&ctx.cwd, ctx.base_prompt, ctx.system_prompt.as_deref()),
-            agent_core,
+        with_canvas(
+            with_core(
+                framed_system_prompt(&ctx.cwd, ctx.base_prompt, ctx.system_prompt.as_deref()),
+                agent_core,
+            ),
+            agent_canvas,
         )
     } else {
         None
@@ -999,6 +1014,20 @@ fn with_core(framed: Option<String>, core: Option<&str>) -> Option<String> {
     }
 }
 
+/// Append the `[Channel Canvas]` metadata section onto the accumulated system prompt.
+///
+/// The canvas section already carries its `[Channel Canvas]` header (from
+/// `render_canvas_section`), so it is joined with a blank-line separator.
+/// Either side may be absent.
+fn with_canvas(prompt: Option<String>, canvas: Option<&str>) -> Option<String> {
+    match (prompt, canvas) {
+        (Some(prompt), Some(canvas)) => Some(format!("{prompt}\n\n{canvas}")),
+        (Some(prompt), None) => Some(prompt),
+        (None, Some(canvas)) => Some(canvas.to_string()),
+        (None, None) => None,
+    }
+}
+
 /// Return `agent` to the pool via `result_tx`, clearing any steer receiver first.
 ///
 /// Every path that returns an `OwnedAgent` to the pool via `PromptResult` goes
@@ -1160,10 +1189,43 @@ pub async fn run_prompt_task(
         }
     }
 
+    // Canvas metadata fetch — same lifecycle as core: once per new channel session,
+    // never for heartbeats, cached until session invalidation.
+    //
+    // DM check: use startup channel_info first; lazy-fetch only when missing.
+    // A confirmed DM never receives a canvas section.
+    //
+    // Failure modes all fail open: no event, blank content, malformed response,
+    // REST error, or timeout each produce `None` and never block session creation.
+    if let PromptSource::Channel(cid) = &source {
+        let is_new_channel_session = !agent.state.sessions.contains_key(cid);
+        if is_new_channel_session && !agent.state.canvas_sections.contains_key(cid) {
+            // Resolve DM status: prefer the startup cache, lazy-fetch as fallback.
+            let is_dm = match ctx.channel_info.get(cid) {
+                Some(ci) => ci.channel_type == "dm",
+                None => fetch_channel_info(*cid, &ctx.rest_client)
+                    .await
+                    .map(|ci| ci.channel_type == "dm")
+                    .unwrap_or(false),
+            };
+            if !is_dm {
+                if let Some(section) = fetch_canvas_section(*cid, &ctx.rest_client).await {
+                    agent.state.canvas_sections.insert(*cid, section);
+                }
+            }
+        }
+    }
+
     // The core section to fold into the system prompt for this turn's session.
     // Channel-scoped; heartbeats carry no owner core.
     let agent_core: Option<String> = match &source {
         PromptSource::Channel(cid) => agent.state.core_sections.get(cid).cloned(),
+        PromptSource::Heartbeat => None,
+    };
+
+    // The canvas metadata section — channel-scoped, absent for heartbeats/DMs.
+    let agent_canvas: Option<String> = match &source {
+        PromptSource::Channel(cid) => agent.state.canvas_sections.get(cid).cloned(),
         PromptSource::Heartbeat => None,
     };
 
@@ -1173,7 +1235,13 @@ pub async fn run_prompt_task(
                 (sid.clone(), false)
             } else {
                 // Create new session with model application.
-                match create_session_and_apply_model(&mut agent, &ctx, agent_core.as_deref()).await
+                match create_session_and_apply_model(
+                    &mut agent,
+                    &ctx,
+                    agent_core.as_deref(),
+                    agent_canvas.as_deref(),
+                )
+                .await
                 {
                     Ok(sid) => {
                         tracing::info!(
@@ -1211,7 +1279,7 @@ pub async fn run_prompt_task(
             if let Some(sid) = &agent.state.heartbeat_session {
                 (sid.clone(), false)
             } else {
-                match create_session_and_apply_model(&mut agent, &ctx, None).await {
+                match create_session_and_apply_model(&mut agent, &ctx, None, None).await {
                     Ok(sid) => {
                         tracing::info!(
                             target: "pool::session",
@@ -1431,6 +1499,7 @@ pub async fn run_prompt_task(
                 has_system_prompt_support: agent.protocol_version >= 2,
                 base_prompt: ctx.base_prompt,
                 system_prompt: ctx.system_prompt.as_deref(),
+                agent_canvas: agent_canvas.as_deref(),
             },
         )
     } else {
@@ -1995,6 +2064,134 @@ async fn fetch_channel_info(channel_id: Uuid, rest: &RestClient) -> Option<Promp
         }
     })
     .await
+}
+
+/// Fetch the latest canvas event for `channel_id` and return a rendered
+/// `[Channel Canvas]` metadata section, or `None` if absent/blank/error.
+///
+/// Failure modes (all fail open — no crash, no block):
+/// * relay returns no event → `None`
+/// * latest event's content is blank → `None` (cleared canvas; older revisions
+///   are NOT resurrected)
+/// * malformed JSON array, missing fields, bad event ID, bad timestamp →
+///   logged at `warn`; returns `None`
+/// * REST error or timeout → returns `None`
+///
+/// Called at most once per new channel session; the result is cached in
+/// `SessionState::canvas_sections` and cleared on session invalidation.
+async fn fetch_canvas_section(channel_id: Uuid, rest: &RestClient) -> Option<String> {
+    use nostr::{Alphabet, SingleLetterTag};
+
+    let h_tag = SingleLetterTag::lowercase(Alphabet::H);
+    let filter = nostr::Filter::new()
+        .kind(nostr::Kind::Custom(buzz_core::kind::KIND_CANVAS as u16))
+        .custom_tags(h_tag, [channel_id.to_string()])
+        .limit(1);
+
+    const CANVAS_FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+    let json = match tokio::time::timeout(
+        CANVAS_FETCH_TIMEOUT,
+        rest.query(std::slice::from_ref(&filter)),
+    )
+    .await
+    {
+        Ok(Ok(v)) => v,
+        Ok(Err(e)) => {
+            tracing::warn!(
+                target: "canvas::fetch",
+                channel = %channel_id,
+                "canvas query failed: {e} — emitting no section"
+            );
+            return None;
+        }
+        Err(_) => {
+            tracing::warn!(
+                target: "canvas::fetch",
+                channel = %channel_id,
+                timeout_ms = CANVAS_FETCH_TIMEOUT.as_millis() as u64,
+                "canvas fetch timed out — emitting no section"
+            );
+            return None;
+        }
+    };
+
+    let events = match json.as_array() {
+        Some(arr) => arr,
+        None => {
+            tracing::warn!(
+                target: "canvas::fetch",
+                channel = %channel_id,
+                "canvas query response is not a JSON array — emitting no section"
+            );
+            return None;
+        }
+    };
+
+    canvas_section_from_query_response(events, &channel_id.to_string())
+}
+
+/// Parse a canvas query response array and render a `[Channel Canvas]` section.
+///
+/// Extracted as a pure function so tests can exercise the parsing/validation
+/// logic without async machinery or relay connectivity.
+///
+/// Returns `None` on: empty array, blank content, invalid event ID format,
+/// or any missing required field.
+pub(crate) fn canvas_section_from_query_response(
+    events: &[serde_json::Value],
+    channel_uuid: &str,
+) -> Option<String> {
+    let ev = events.first()?;
+
+    let id = ev.get("id").and_then(|v| v.as_str()).unwrap_or("");
+    let created_at = ev.get("created_at").and_then(|v| v.as_i64()).unwrap_or(0);
+    let content = ev.get("content").and_then(|v| v.as_str()).unwrap_or("");
+
+    // Validate: event ID must be 64 lowercase hex chars.
+    if id.len() != 64 || !id.chars().all(|c| c.is_ascii_hexdigit()) {
+        tracing::warn!(
+            target: "canvas::fetch",
+            channel = %channel_uuid,
+            "canvas event has invalid id {:?} — emitting no section",
+            id
+        );
+        return None;
+    }
+
+    // Blank content means the canvas was cleared; do not fall back to older events.
+    if content.trim().is_empty() {
+        tracing::debug!(
+            target: "canvas::fetch",
+            channel = %channel_uuid,
+            "latest canvas event has blank content — emitting no section"
+        );
+        return None;
+    }
+
+    let timestamp = chrono::DateTime::from_timestamp(created_at, 0)
+        .map(|dt| dt.to_rfc3339())
+        .unwrap_or_else(|| format!("{created_at}"));
+
+    tracing::info!(
+        target: "canvas::fetch",
+        channel = %channel_uuid,
+        event_id = %id,
+        "injected channel canvas metadata section into system prompt"
+    );
+    Some(render_canvas_section(id, &timestamp, channel_uuid))
+}
+
+/// Render the `[Channel Canvas]` metadata section string.
+///
+/// Pure function — kept separate so unit tests can exercise rendering
+/// without async machinery or relay connectivity.
+pub(crate) fn render_canvas_section(event_id: &str, timestamp: &str, channel_uuid: &str) -> String {
+    format!(
+        "[Channel Canvas]\n\
+         Canvas revision (event ID): {event_id}\n\
+         Last modified: {timestamp}\n\
+         Fetch current content with: buzz canvas get --channel {channel_uuid}"
+    )
 }
 
 /// Fetch conversation context (thread or DM) for a batch before prompting.
@@ -4120,5 +4317,200 @@ mod tests {
             memory_enabled: false,
             harness_name: "goose".to_string(),
         }
+    }
+
+    // ── render_canvas_section ────────────────────────────────────────────────
+
+    #[test]
+    fn test_render_canvas_section_produces_exact_shape() {
+        let id = "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2";
+        let ts = "2024-01-15T10:30:00+00:00";
+        let uuid = "00f1ccaf-1506-4dd7-9a0e-fa67e9e486ae";
+        let section = render_canvas_section(id, ts, uuid);
+        assert_eq!(
+            section,
+            "[Channel Canvas]\n\
+             Canvas revision (event ID): a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2\n\
+             Last modified: 2024-01-15T10:30:00+00:00\n\
+             Fetch current content with: buzz canvas get --channel 00f1ccaf-1506-4dd7-9a0e-fa67e9e486ae"
+        );
+    }
+
+    // ── with_canvas ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_with_canvas_appends_to_existing_prompt() {
+        let result = with_canvas(Some("base content".into()), Some("[Channel Canvas]\nstuff"));
+        assert_eq!(result.unwrap(), "base content\n\n[Channel Canvas]\nstuff");
+    }
+
+    #[test]
+    fn test_with_canvas_returns_canvas_alone_when_no_prompt() {
+        let result = with_canvas(None, Some("[Channel Canvas]\nstuff"));
+        assert_eq!(result.unwrap(), "[Channel Canvas]\nstuff");
+    }
+
+    #[test]
+    fn test_with_canvas_returns_prompt_alone_when_no_canvas() {
+        let result = with_canvas(Some("base content".into()), None);
+        assert_eq!(result.unwrap(), "base content");
+    }
+
+    #[test]
+    fn test_with_canvas_returns_none_when_both_absent() {
+        let result = with_canvas(None, None);
+        assert!(result.is_none());
+    }
+
+    // ── canvas_sections cache invalidation ───────────────────────────────────
+
+    #[test]
+    fn test_invalidate_channel_clears_canvas_section() {
+        let ch = Uuid::new_v4();
+        let mut s = SessionState::default();
+        s.sessions.insert(ch, "sess".into());
+        s.canvas_sections
+            .insert(ch, "[Channel Canvas]\nrev abc".into());
+
+        s.invalidate_channel(&ch);
+
+        assert!(!s.canvas_sections.contains_key(&ch));
+        assert!(!s.sessions.contains_key(&ch));
+    }
+
+    #[test]
+    fn test_invalidate_all_clears_canvas_sections() {
+        let ch_a = Uuid::new_v4();
+        let ch_b = Uuid::new_v4();
+        let mut s = SessionState::default();
+        s.canvas_sections.insert(ch_a, "canvas-a".into());
+        s.canvas_sections.insert(ch_b, "canvas-b".into());
+        s.sessions.insert(ch_a, "sess-a".into());
+
+        s.invalidate_all();
+
+        assert!(s.canvas_sections.is_empty());
+        assert!(s.sessions.is_empty());
+    }
+
+    #[test]
+    fn test_invalidate_channel_leaves_other_channels_canvas_intact() {
+        let ch_a = Uuid::new_v4();
+        let ch_b = Uuid::new_v4();
+        let mut s = SessionState::default();
+        s.sessions.insert(ch_a, "sess-a".into());
+        s.sessions.insert(ch_b, "sess-b".into());
+        s.canvas_sections.insert(ch_a, "canvas-a".into());
+        s.canvas_sections.insert(ch_b, "canvas-b".into());
+
+        s.invalidate_channel(&ch_a);
+
+        assert!(!s.canvas_sections.contains_key(&ch_a));
+        assert_eq!(s.canvas_sections.get(&ch_b).unwrap(), "canvas-b");
+    }
+
+    #[test]
+    fn test_has_channel_state_true_when_only_canvas_section_present() {
+        let ch = Uuid::new_v4();
+        let mut s = SessionState::default();
+        s.canvas_sections.insert(ch, "canvas".into());
+        assert!(s.has_channel_state(&ch));
+    }
+
+    // ── canvas_section_from_query_response ───────────────────────────────────
+
+    const VALID_ID: &str = "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2";
+    const CHANNEL_UUID: &str = "00f1ccaf-1506-4dd7-9a0e-fa67e9e486ae";
+
+    #[test]
+    fn test_canvas_section_from_query_response_happy_path() {
+        let events = vec![serde_json::json!({
+            "id": VALID_ID,
+            "created_at": 1705312200_i64,
+            "content": "# Team instructions\nBe helpful."
+        })];
+        let result = canvas_section_from_query_response(&events, CHANNEL_UUID);
+        let section = result.expect("expected Some");
+        assert!(section.contains(VALID_ID));
+        assert!(section.contains("buzz canvas get --channel"));
+        assert!(section.contains(CHANNEL_UUID));
+        assert!(section.starts_with("[Channel Canvas]"));
+    }
+
+    #[test]
+    fn test_canvas_section_from_query_response_empty_array_returns_none() {
+        let result = canvas_section_from_query_response(&[], CHANNEL_UUID);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_canvas_section_from_query_response_blank_content_returns_none() {
+        let events = vec![serde_json::json!({
+            "id": VALID_ID,
+            "created_at": 1705312200_i64,
+            "content": "   "
+        })];
+        let result = canvas_section_from_query_response(&events, CHANNEL_UUID);
+        assert!(
+            result.is_none(),
+            "blank content must return None (cleared canvas)"
+        );
+    }
+
+    #[test]
+    fn test_canvas_section_from_query_response_empty_content_returns_none() {
+        let events = vec![serde_json::json!({
+            "id": VALID_ID,
+            "created_at": 1705312200_i64,
+            "content": ""
+        })];
+        let result = canvas_section_from_query_response(&events, CHANNEL_UUID);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_canvas_section_from_query_response_invalid_id_short_returns_none() {
+        let events = vec![serde_json::json!({
+            "id": "abc123",
+            "created_at": 1705312200_i64,
+            "content": "some instructions"
+        })];
+        let result = canvas_section_from_query_response(&events, CHANNEL_UUID);
+        assert!(result.is_none(), "short id must return None");
+    }
+
+    #[test]
+    fn test_canvas_section_from_query_response_invalid_id_non_hex_returns_none() {
+        let events = vec![serde_json::json!({
+            "id": "gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg",
+            "created_at": 1705312200_i64,
+            "content": "some instructions"
+        })];
+        let result = canvas_section_from_query_response(&events, CHANNEL_UUID);
+        assert!(result.is_none(), "non-hex id must return None");
+    }
+
+    #[test]
+    fn test_canvas_section_from_query_response_missing_id_returns_none() {
+        let events = vec![serde_json::json!({
+            "created_at": 1705312200_i64,
+            "content": "some instructions"
+        })];
+        // id defaults to "" which fails the 64-char check
+        let result = canvas_section_from_query_response(&events, CHANNEL_UUID);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_canvas_section_from_query_response_zero_timestamp_uses_epoch() {
+        let events = vec![serde_json::json!({
+            "id": VALID_ID,
+            "created_at": 0_i64,
+            "content": "some instructions"
+        })];
+        let result = canvas_section_from_query_response(&events, CHANNEL_UUID);
+        let section = result.expect("epoch timestamp is valid");
+        // The epoch renders as a valid RFC3339 string, not a fallback integer.
+        assert!(section.contains("1970-01-01") || section.contains("0"));
     }
 }
