@@ -400,6 +400,22 @@ test.describe("list virtualization", () => {
       const wheelTrace = await wheelTracePromise;
       expect(wheelTrace.minScrollTop).toBeLessThanOrEqual(350);
       expect(wheelTrace.maxBoundaryRollback).toBeLessThan(5);
+      // Linux Chromium delivers CDP wheel input with more latency than macOS,
+      // so the burst's final delta can land AFTER the anchor baseline sample
+      // below. maxDrift then reports the reader's own last wheel event as
+      // anchor drift (measured exactly 15 = the -15 delta; changing the delta
+      // to -17 made the failure read 17). Gate the baseline on input settle:
+      // two consecutive frames with identical scrollTop. This tightens the
+      // assertion rather than diluting it — the baseline becomes honest and
+      // genuine post-prepend drift still reads as drift.
+      await timeline.evaluate(async (element) => {
+        let prior = element.scrollTop;
+        for (let frame = 0; frame < 30; frame += 1) {
+          await new Promise((resolve) => requestAnimationFrame(resolve));
+          if (element.scrollTop === prior) break;
+          prior = element.scrollTop;
+        }
+      });
       const committedAnchor = await sampleVisibleAnchor(before.id);
       const motion = await timeline.evaluate(
         async (scroller, { anchorId, anchorTop, oldHeight }) => {
