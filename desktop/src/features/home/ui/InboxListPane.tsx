@@ -112,7 +112,7 @@ type InboxListPaneProps = {
   onRemindLater: (item: InboxItem) => void;
   onSelect: (itemId: string) => void;
   onUnreadOnlyChange: (checked: boolean) => void;
-  selectedId: string | null;
+  selectedConversationId: string | null;
   showRightDivider?: boolean;
   dueReminderCount: number;
   reminderPubkey?: string;
@@ -133,7 +133,7 @@ export function InboxListPane({
   onRemindLater,
   onSelect,
   onUnreadOnlyChange,
-  selectedId,
+  selectedConversationId,
   showRightDivider = false,
   dueReminderCount,
   reminderPubkey,
@@ -157,7 +157,7 @@ export function InboxListPane({
   }, [doneSet, items, onMarkRead]);
 
   const renderItem = (item: InboxItem, index: number) => {
-    const isSelected = item.id === selectedId;
+    const isSelected = item.conversationId === selectedConversationId;
     const isDone = doneSet.has(item.id);
     const hasActiveReminder = activeReminderEventIds?.has(item.id) ?? false;
     const hasChannelTarget = Boolean(item.item.channelId);
@@ -180,6 +180,7 @@ export function InboxListPane({
     };
     const row = (
       <div
+        aria-current={isSelected ? "true" : undefined}
         className="group/inbox-item relative"
         data-testid={`home-inbox-item-${item.id}`}
         style={

@@ -9,10 +9,13 @@ import { ChannelManagementSheet } from "@/features/channels/ui/ChannelManagement
 import {
   type InboxFilter,
   type InboxContextMessage,
+  type InboxItem,
   type InboxReply,
   buildInboxItems,
   formatInboxFullTimestamp,
+  getInboxConversationId,
 } from "@/features/home/lib/inbox";
+import { useInboxSelectionAnchor } from "@/features/home/useInboxSelectionAnchor";
 import {
   getContextMessageDepth,
   getReactionTargetId,
@@ -77,6 +80,27 @@ const INBOX_SEARCH_KEYS = [
   "profileView",
 ] as const;
 
+/**
+ * Finds the InboxItem whose stable conversation contains the given event ID.
+ * Checks `item.id` (the current representative/latest event) first, then
+ * falls back to `item.groupItems` so that a deep-linked or URL-anchored event
+ * that is no longer the representative still resolves to its row.
+ */
+function findItemByEventId(
+  items: readonly InboxItem[],
+  eventId: string,
+): InboxItem | null {
+  // Fast path: representative event matches (the common case).
+  const direct = items.find((item) => item.id === eventId);
+  if (direct) return direct;
+  // Slow path: event is a non-representative group member (e.g. original
+  // mention that was later superseded by a newer reply as the representative).
+  return (
+    items.find((item) => item.groupItems.some((gi) => gi.id === eventId)) ??
+    null
+  );
+}
+
 type HomeViewProps = {
   feed?: HomeFeedResponse;
   isLoading?: boolean;
@@ -132,20 +156,37 @@ export function HomeView({
   const profilePanelView = profilePanelViewFromSearch(
     inboxSearchValues.profileView,
   );
-  const [selectedItemId, setSelectedItemId] = React.useState<string | null>(
-    urlSelectedItemId,
-  );
+  // Selection state — two-tier design so explicit and automatic selections
+  // have distinct ownership:
+  //
+  //   urlSelectedItemId  — explicit/user anchor, URL-authoritative.  Written
+  //     only by handleUserSelectItem (via applyInboxSearchPatch) and by
+  //     back/forward navigation.  Never touched by background data loads.
+  //
+  //   autoSelectedEventId — default desktop selection when the URL carries no
+  //     explicit anchor.  Written only by the auto-selection effect.  Never
+  //     triggers a history push.
+  //
+  //   selectedEventId — the effective anchor used everywhere below: the URL
+  //     anchor when present, otherwise the auto-selected fallback.  Derived
+  //     synchronously, no separate state — so there is no mirror-revert race.
+  const [autoSelectedEventId, setAutoSelectedEventId] = React.useState<
+    string | null
+  >(null);
+  const selectedEventId = urlSelectedItemId ?? autoSelectedEventId;
   const [managedChannelId, setManagedChannelId] = React.useState<string | null>(
     null,
   );
   const { goChannel } = useAppNavigation();
   const openDmMutation = useOpenDmMutation();
-  React.useEffect(() => {
-    setSelectedItemId(urlSelectedItemId);
-  }, [urlSelectedItemId]);
+  // handleUserSelectItem: explicit selection — only patches the URL.
+  // No local setSelectedEventId call; the URL patch triggers a TanStack Router
+  // navigation which updates urlSelectedItemId, which becomes selectedEventId
+  // on the next render.  This avoids the mirror-revert race where
+  // useEffect([urlSelectedItemId]) would fire before navigation commits and
+  // overwrite the optimistically-set local state with the stale URL null.
   const handleUserSelectItem = React.useCallback(
     (itemId: string | null) => {
-      setSelectedItemId(itemId);
       applyInboxSearchPatch({ item: itemId });
     },
     [applyInboxSearchPatch],
@@ -220,26 +261,30 @@ export function HomeView({
   } = useAppShell();
   const { doneSet, markDone, markUnread, undoDone, undoUnread, unreadSet } =
     feedItemState;
-  const feedItems = React.useMemo(
-    () =>
-      feed
-        ? [
-            ...feed.feed.mentions,
-            ...feed.feed.needsAction,
-            ...feed.feed.activity,
-            ...feed.feed.agentActivity,
-          ]
-        : [],
-    [feed],
-  );
-  const selectedFeedItem =
-    feedItems.find((item) => item.id === selectedItemId) ?? null;
+  const { feedItems, activeLatchedItem, coldResolutionPending } =
+    useInboxSelectionAnchor({
+      feed,
+      selectedEventId,
+      availableChannelIds,
+    });
+
+  const threadContextFeedItem = activeLatchedItem;
+  // Derive the default composer parent from the active anchor's own tags so
+  // that InboxDetailPane can recover the original reply target even when the
+  // anchor event has been displaced from the current groupItems. This is null
+  // until the active item is resolved (anchor not yet found in feedItems and
+  // no matching committed latch).
+  const latchedDefaultParentId =
+    activeLatchedItem !== null
+      ? (getThreadReference(activeLatchedItem.tags).parentId ??
+        activeLatchedItem.id)
+      : null;
 
   const channelsQuery = useChannelsQuery();
   const channels = channelsQuery.data;
   const selectedChannelIdCandidate = React.useMemo(() => {
-    return selectedFeedItem?.channelId ?? null;
-  }, [selectedFeedItem]);
+    return threadContextFeedItem?.channelId ?? null;
+  }, [threadContextFeedItem]);
   const selectedChannel = React.useMemo(() => {
     if (!selectedChannelIdCandidate || !channels) return null;
     return (
@@ -263,7 +308,7 @@ export function HomeView({
   const toggleReactionMutation = useToggleReactionMutation();
   const channelMessages = channelMessagesQuery.data;
   const threadContext = useInboxThreadContext(
-    selectedFeedItem,
+    threadContextFeedItem,
     channelMessages,
   );
 
@@ -327,17 +372,77 @@ export function HomeView({
       undoDoneLocal: undoDone,
       undoUnreadLocal: undoUnread,
     });
+  // Resolve the selected row and stable conversation ID from inboxItems
+  // (unfiltered). We need conversationId before filtering so we can keep the
+  // selected item visible when unreadOnly is on. The event anchor may point to
+  // any event in the group (representative or older member), so search both.
+  const selectedItemFromAll = React.useMemo(
+    () =>
+      selectedEventId
+        ? (findItemByEventId(inboxItems, selectedEventId) ?? null)
+        : null,
+    [inboxItems, selectedEventId],
+  );
+  // selectedConversationId: prefer the InboxItem-derived conversationId (stable
+  // group key). Fall back to deriving it from the latched FeedItem when the
+  // anchored event is no longer present in any group's items — this keeps the
+  // correct row selected (by conversationId) even after the anchor event has
+  // been displaced from groupItems by a newer representative.
+  const latchedConversationId = activeLatchedItem
+    ? getInboxConversationId(activeLatchedItem.tags, activeLatchedItem.id)
+    : null;
+  const selectedConversationId =
+    selectedItemFromAll?.conversationId ?? latchedConversationId;
+
   const filteredItems = React.useMemo(() => {
     return inboxItems.filter(
       (item) =>
         matchesInboxFilter(item, filter) &&
         (!unreadOnly ||
           !effectiveDoneSet.has(item.id) ||
-          item.id === selectedItemId),
+          item.conversationId === selectedConversationId),
     );
-  }, [effectiveDoneSet, filter, inboxItems, selectedItemId, unreadOnly]);
-  const selectedItem =
-    filteredItems.find((item) => item.id === selectedItemId) ?? null;
+  }, [
+    effectiveDoneSet,
+    filter,
+    inboxItems,
+    selectedConversationId,
+    unreadOnly,
+  ]);
+  // Prefer the filtered view for the selected item so that filter/unread
+  // changes can still dismiss it, but fall back to the unfiltered row so a
+  // live representative-event change (which keeps the conversation in the
+  // filter) does not make selectedItem go null mid-session.
+  const selectedItem = React.useMemo(() => {
+    if (!selectedEventId) return null;
+    // Primary: find by event anchor in the filtered view.
+    const fromFiltered = findItemByEventId(filteredItems, selectedEventId);
+    if (fromFiltered) return fromFiltered;
+    // Secondary: event anchor is in an unfiltered row (e.g., dismissed item).
+    if (selectedItemFromAll) return selectedItemFromAll;
+    // Tertiary: anchor has been displaced from all groupItems (e.g., a very old
+    // event that fell off the feed window). Resolve by conversationId so the
+    // correct row stays selected and the auto-selection effect doesn't replace
+    // the anchor with a different conversation.
+    if (selectedConversationId) {
+      return (
+        filteredItems.find(
+          (item) => item.conversationId === selectedConversationId,
+        ) ??
+        inboxItems.find(
+          (item) => item.conversationId === selectedConversationId,
+        ) ??
+        null
+      );
+    }
+    return null;
+  }, [
+    filteredItems,
+    inboxItems,
+    selectedConversationId,
+    selectedEventId,
+    selectedItemFromAll,
+  ]);
   const contextMessages = React.useMemo<InboxContextMessage[]>(() => {
     if (!selectedItem) {
       return [];
@@ -386,7 +491,7 @@ export function HomeView({
         createdAt: message.createdAt,
         depth: event ? getContextMessageDepth(event, eventById) : message.depth,
         fullTimestampLabel: formatInboxFullTimestamp(message.createdAt),
-        isSelected: message.id === selectedItem.id,
+        isSelected: message.id === selectedEventId,
         mentionNames: mentionNames ?? [],
         mentionPubkeysByName,
         reactions: message.reactions,
@@ -399,13 +504,15 @@ export function HomeView({
     currentPubkey,
     feedProfiles,
     selectedChannel,
+    selectedEventId,
     selectedItem,
     threadContext.events,
     threadContext.reactionEvents,
   ]);
   const selectedItemReplies = React.useMemo<InboxReply[]>(() => {
     if (!selectedItem) return [];
-    const localReplies = localRepliesByItemId[selectedItem.id] ?? [];
+    const localReplies =
+      localRepliesByItemId[selectedItem.conversationId] ?? [];
     const contextIds = new Set(contextMessages.map((message) => message.id));
     return localReplies.filter((reply) => !contextIds.has(reply.id));
   }, [contextMessages, localRepliesByItemId, selectedItem]);
@@ -418,6 +525,14 @@ export function HomeView({
       return;
     }
 
+    // The URL carries an explicit anchor — auto-selection must not overwrite
+    // it. Clear any stale auto fallback so it cannot reappear if back later
+    // returns to a no-item entry.
+    if (urlSelectedItemId !== null) {
+      setAutoSelectedEventId(null);
+      return;
+    }
+
     // While the feed is loading (e.g. a reload restoring `?item=` from the
     // URL) the selected item simply hasn't arrived yet — don't clobber it.
     if (isLoading || !feed) {
@@ -425,7 +540,7 @@ export function HomeView({
     }
 
     if (filteredItems.length === 0) {
-      setSelectedItemId(null);
+      setAutoSelectedEventId(null);
       return;
     }
 
@@ -435,26 +550,45 @@ export function HomeView({
       return;
     }
 
-    if (!filteredItems.some((item) => item.id === selectedItemId)) {
-      setSelectedItemId(
-        isNarrowHomeViewport ? null : (filteredItems[0]?.id ?? null),
-      );
+    // The event anchor is still valid if the conversation it belongs to is
+    // still present in the filtered list. A live representative-event change
+    // does NOT invalidate the anchor (the same conversationId is still there).
+    if (
+      selectedConversationId !== null &&
+      filteredItems.some(
+        (item) => item.conversationId === selectedConversationId,
+      )
+    ) {
+      return;
     }
+
+    // A cold URL anchor is being resolved via getEventById — the user navigated
+    // to a specific event that is not yet in the inbox list. Do not overwrite
+    // selectedEventId; wait for cold recovery to commit before auto-selecting.
+    if (coldResolutionPending) {
+      return;
+    }
+
+    setAutoSelectedEventId(
+      isNarrowHomeViewport ? null : (filteredItems[0]?.id ?? null),
+    );
   }, [
+    coldResolutionPending,
     feed,
     filteredItems,
     homeInboxWidthPx,
     isLoading,
     isMessagesMode,
     isNarrowHomeViewport,
-    selectedItemId,
+    selectedConversationId,
+    urlSelectedItemId,
   ]);
 
   React.useEffect(() => {
-    void selectedItemId;
+    void selectedConversationId;
     setIsDeletingMessage(false);
     setIsSendingReply(false);
-  }, [selectedItemId]);
+  }, [selectedConversationId]);
 
   if (isLoading && !feed) {
     return <HomeLoadingState />;
@@ -504,7 +638,7 @@ export function HomeView({
   const isSinglePanelDetailView =
     isMessagesMode &&
     isNarrowHomeViewport &&
-    selectedItemId !== null &&
+    selectedEventId !== null &&
     !isSinglePanelAuxiliaryView;
   const showListPane = !isSinglePanelDetailView && !isSinglePanelAuxiliaryView;
   const showDetailPane =
@@ -597,7 +731,7 @@ export function HomeView({
               }}
               onUnreadOnlyChange={setUnreadOnly}
               reminderPubkey={currentPubkey}
-              selectedId={selectedItemId}
+              selectedConversationId={selectedConversationId}
               showRightDivider={showListPane && showDetailPane}
               unreadOnly={unreadOnly}
             />
@@ -644,7 +778,9 @@ export function HomeView({
               isSinglePanelView={isSinglePanelDetailView}
               isThreadContextLoading={threadContext.isLoading}
               item={selectedItem}
+              latchedDefaultParentId={latchedDefaultParentId}
               messages={contextMessages}
+              selectedEventId={selectedEventId}
               onBack={
                 isSinglePanelDetailView
                   ? () => {
@@ -732,8 +868,8 @@ export function HomeView({
                   };
                   setLocalRepliesByItemId((current) => ({
                     ...current,
-                    [itemToReply.id]: [
-                      ...(current[itemToReply.id] ?? []),
+                    [itemToReply.conversationId]: [
+                      ...(current[itemToReply.conversationId] ?? []),
                       reply,
                     ],
                   }));

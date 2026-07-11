@@ -28,6 +28,13 @@ export type InboxFilter =
 
 export type InboxItem = {
   avatarUrl: string | null;
+  /**
+   * Stable conversation identity: `rootId ?? parentId ?? event.id` for the
+   * thread group. Does NOT change when a new reply advances the representative
+   * latest event. Use this for lifecycle continuity: scroll gating, draft
+   * keys, local-reply storage, and selection identity.
+   */
+  conversationId: string;
   id: string;
   item: FeedItem;
   categories: FeedItemCategory[];
@@ -286,6 +293,19 @@ function getInboxThreadKey(item: FeedItem) {
   return thread.rootId ?? thread.parentId ?? item.id;
 }
 
+/**
+ * Returns the stable conversation ID for any FeedItem or relay event: the
+ * NIP-10 root tag id, falling back to parent-reply tag id, then event id.
+ * This is the same derivation used by `buildInboxItems` for `conversationId`.
+ */
+export function getInboxConversationId(
+  tags: string[][],
+  eventId: string,
+): string {
+  const thread = getThreadReference(tags);
+  return thread.rootId ?? thread.parentId ?? eventId;
+}
+
 function formatInboxTimestamp(unixSeconds: number) {
   const date = new Date(unixSeconds * 1_000);
   const now = new Date();
@@ -412,9 +432,11 @@ export function buildInboxItems({
     threadGroups.set(threadKey, group);
   }
 
-  return [...threadGroups.values()]
-    .sort((left, right) => right.latestActivityAt - left.latestActivityAt)
-    .map((group) => {
+  return [...threadGroups.entries()]
+    .sort(
+      ([, left], [, right]) => right.latestActivityAt - left.latestActivityAt,
+    )
+    .map(([conversationId, group]) => {
       const latestItem = group.items.reduce((latest, current) =>
         current.createdAt > latest.createdAt ? current : latest,
       );
@@ -445,6 +467,7 @@ export function buildInboxItems({
 
       return {
         avatarUrl: profiles?.[item.pubkey.toLowerCase()]?.avatarUrl ?? null,
+        conversationId,
         id: item.id,
         item: displayItem,
         categories,

@@ -59,7 +59,9 @@ import {
   loadDraftEntry,
   markDraftSentEntry,
   persistDraftEntry,
+  renameDraftEntry,
   saveDraftEntry,
+  subscribeToStore,
 } from "./useDrafts.ts";
 
 // Minimal ImetaMedia fixtures.
@@ -591,4 +593,315 @@ test("pre_status_sent_entry_is_dropped_on_read", () => {
   const active = getActiveDraftEntries();
   assert.equal(active.length, 0, "old sent: entry is dropped, not promoted");
   assert.equal(getSentDraftEntries().length, 0, "no entries read as sent");
+});
+
+// ── renameDraftEntry storage-layer tests ─────────────────────────────────────────────────────────────────────────────────────────
+
+function makeFullDraft(overrides = {}) {
+  const now = new Date().toISOString();
+  return {
+    content: "Legacy content",
+    selectionStart: 7,
+    selectionEnd: 7,
+    channelId: "chan-rename",
+    createdAt: now,
+    updatedAt: now,
+    pendingImeta: [],
+    spoileredAttachmentUrls: [],
+    status: "active",
+    ...overrides,
+  };
+}
+
+function makeFullImeta(overrides = {}) {
+  return {
+    url: "https://cdn.example.com/img.jpg",
+    sha256: "aabbccdd",
+    size: 1024,
+    type: "image/jpeg",
+    uploaded: 999,
+    dim: "800x600",
+    blurhash: "LEHV6nWB2yk8pyo0adR*",
+    thumb: undefined,
+    duration: undefined,
+    image: undefined,
+    filename: "img.jpg",
+    ...overrides,
+  };
+}
+
+/** Read the raw persisted store blob for the current pubkey. */
+function readRawStore(pubkey) {
+  const raw = localStorage.getItem(`buzz-drafts.v1:${pubkey}`);
+  return raw ? JSON.parse(raw) : {};
+}
+
+test("renameDraftEntry migrates: new key holds exact state, old key gone, one notify", () => {
+  setup("pubkey-rename-basic");
+  const draft = makeFullDraft();
+  saveDraftEntry("inbox-reply:old111", draft);
+
+  let notifyCount = 0;
+  const unsub = subscribeToStore(() => {
+    notifyCount++;
+  });
+  // Reset count after setup saves — only measure the rename call.
+  notifyCount = 0;
+
+  const result = renameDraftEntry("inbox-reply:old111", "thread:new222");
+
+  unsub();
+
+  assert.equal(result, "migrated");
+  assert.equal(
+    notifyCount,
+    1,
+    "exactly one subscriber notification on successful rename",
+  );
+
+  const moved = loadDraftEntry("thread:new222");
+  assert.ok(moved, "canonical key must have the draft");
+  // Single deepStrictEqual proves every field migrated without loss or mutation.
+  assert.deepStrictEqual(
+    moved,
+    draft,
+    "moved record must equal the seeded draft exactly",
+  );
+
+  assert.equal(
+    loadDraftEntry("inbox-reply:old111"),
+    undefined,
+    "legacy key must be removed",
+  );
+
+  // Confirm persistence: localStorage must contain the canonical key, not the legacy key.
+  const persisted = readRawStore("pubkey-rename-basic");
+  assert.ok(
+    "thread:new222" in persisted,
+    "canonical key present in localStorage",
+  );
+  assert.ok(
+    !("inbox-reply:old111" in persisted),
+    "legacy key absent from localStorage",
+  );
+});
+
+test("renameDraftEntry migrates with attachments: all BlobDescriptor fields preserved", () => {
+  setup("pubkey-rename-attach");
+  const img = makeFullImeta();
+  const draft = makeFullDraft({
+    pendingImeta: [img],
+    spoileredAttachmentUrls: [img.url],
+  });
+  saveDraftEntry("inbox-reply:attach1", draft);
+
+  const result = renameDraftEntry(
+    "inbox-reply:attach1",
+    "thread:attach-canonical",
+  );
+  assert.equal(result, "migrated");
+
+  const moved = loadDraftEntry("thread:attach-canonical");
+  assert.ok(moved);
+  // deepStrictEqual confirms every BlobDescriptor optional field (dim, blurhash,
+  // thumb, duration, image, filename) survived the round-trip.
+  assert.deepStrictEqual(
+    moved,
+    draft,
+    "moved record including all attachment metadata must equal the seeded draft",
+  );
+  assert.equal(
+    loadDraftEntry("inbox-reply:attach1"),
+    undefined,
+    "legacy key removed",
+  );
+});
+
+test("renameDraftEntry noop: old key absent, returns noop, no notify, no writes", () => {
+  setup("pubkey-rename-noop");
+
+  const storeBefore = readRawStore("pubkey-rename-noop");
+
+  let notifyCount = 0;
+  const unsub = subscribeToStore(() => {
+    notifyCount++;
+  });
+  notifyCount = 0;
+
+  const result = renameDraftEntry("inbox-reply:missing", "thread:target");
+
+  unsub();
+  assert.equal(result, "noop");
+  assert.equal(notifyCount, 0, "no notification on noop");
+  assert.equal(loadDraftEntry("thread:target"), undefined);
+
+  // localStorage must be byte-identical before and after — no writes on noop.
+  assert.deepStrictEqual(
+    readRawStore("pubkey-rename-noop"),
+    storeBefore,
+    "localStorage must be unchanged on noop",
+  );
+});
+
+test("renameDraftEntry oldKey === newKey: returns noop, no writes, no notify", () => {
+  setup("pubkey-rename-same");
+  saveDraftEntry("thread:same", makeFullDraft());
+
+  const storeBefore = readRawStore("pubkey-rename-same");
+
+  let notifyCount = 0;
+  const unsub = subscribeToStore(() => {
+    notifyCount++;
+  });
+  notifyCount = 0;
+
+  const result = renameDraftEntry("thread:same", "thread:same");
+
+  unsub();
+  assert.equal(result, "noop");
+  assert.equal(notifyCount, 0);
+
+  // localStorage must be byte-identical before and after.
+  assert.deepStrictEqual(
+    readRawStore("pubkey-rename-same"),
+    storeBefore,
+    "localStorage must be unchanged on self-rename noop",
+  );
+});
+
+test("renameDraftEntry collision on distinct content: both records preserved, no notify", () => {
+  setup("pubkey-rename-collision");
+  const legacy = makeFullDraft({ content: "Legacy draft" });
+  const canonical = makeFullDraft({ content: "Canonical draft" });
+  saveDraftEntry("inbox-reply:col1", legacy);
+  saveDraftEntry("thread:col-target", canonical);
+
+  // Snapshot both records before the rename attempt.
+  const legacyBefore = loadDraftEntry("inbox-reply:col1");
+  const canonicalBefore = loadDraftEntry("thread:col-target");
+  const storeBefore = readRawStore("pubkey-rename-collision");
+
+  let notifyCount = 0;
+  const unsub = subscribeToStore(() => {
+    notifyCount++;
+  });
+  notifyCount = 0;
+
+  const result = renameDraftEntry("inbox-reply:col1", "thread:col-target");
+
+  unsub();
+  assert.equal(result, "collision");
+  assert.equal(notifyCount, 0, "no notification on collision");
+
+  // Deep-compare after to before: both records must be byte-identical to their pre-call snapshots.
+  assert.deepStrictEqual(
+    loadDraftEntry("inbox-reply:col1"),
+    legacyBefore,
+    "legacy record must be byte-identical after collision",
+  );
+  assert.deepStrictEqual(
+    loadDraftEntry("thread:col-target"),
+    canonicalBefore,
+    "canonical record must be byte-identical after collision",
+  );
+
+  // localStorage must be byte-identical before and after — no writes on collision.
+  assert.deepStrictEqual(
+    readRawStore("pubkey-rename-collision"),
+    storeBefore,
+    "localStorage must be unchanged on collision",
+  );
+});
+
+test("renameDraftEntry collision on optional attachment field only (blurhash differs): both preserved, no notify", () => {
+  setup("pubkey-rename-collision-optional");
+  const imgA = makeFullImeta({ blurhash: "HASH_A" });
+  const imgB = makeFullImeta({ blurhash: "HASH_B" }); // differs only in blurhash
+  const legacy = makeFullDraft({ pendingImeta: [imgA] });
+  const canonical = makeFullDraft({ pendingImeta: [imgB] });
+  saveDraftEntry("inbox-reply:opt1", legacy);
+  saveDraftEntry("thread:opt-canonical", canonical);
+
+  // Snapshot both records and the store before the rename attempt.
+  const legacyBefore = loadDraftEntry("inbox-reply:opt1");
+  const canonicalBefore = loadDraftEntry("thread:opt-canonical");
+  const storeBefore = readRawStore("pubkey-rename-collision-optional");
+
+  let notifyCount = 0;
+  const unsub = subscribeToStore(() => {
+    notifyCount++;
+  });
+  notifyCount = 0;
+
+  const result = renameDraftEntry("inbox-reply:opt1", "thread:opt-canonical");
+
+  unsub();
+  assert.equal(
+    result,
+    "collision",
+    "blurhash difference must trigger collision",
+  );
+  assert.equal(notifyCount, 0);
+
+  // Deep-compare: both records must survive unchanged.
+  assert.deepStrictEqual(
+    loadDraftEntry("inbox-reply:opt1"),
+    legacyBefore,
+    "legacy record byte-identical after optional-field collision",
+  );
+  assert.deepStrictEqual(
+    loadDraftEntry("thread:opt-canonical"),
+    canonicalBefore,
+    "canonical record byte-identical after optional-field collision",
+  );
+
+  // localStorage unchanged.
+  assert.deepStrictEqual(
+    readRawStore("pubkey-rename-collision-optional"),
+    storeBefore,
+    "localStorage must be unchanged on optional-field collision",
+  );
+});
+
+test("renameDraftEntry identical records: legacy removed, canonical kept, one notify", () => {
+  setup("pubkey-rename-identical");
+  const now = new Date().toISOString();
+  // Both records byte-identical across every field.
+  const shared = makeFullDraft({ createdAt: now, updatedAt: now });
+  saveDraftEntry("inbox-reply:ident", shared);
+  saveDraftEntry("thread:ident-target", shared);
+
+  let notifyCount = 0;
+  const unsub = subscribeToStore(() => {
+    notifyCount++;
+  });
+  notifyCount = 0;
+
+  const result = renameDraftEntry("inbox-reply:ident", "thread:ident-target");
+
+  unsub();
+  assert.equal(result, "migrated", "identical records collapse to migrated");
+  assert.equal(notifyCount, 1);
+  assert.equal(
+    loadDraftEntry("inbox-reply:ident"),
+    undefined,
+    "legacy key removed",
+  );
+  // deepStrictEqual on the surviving canonical record.
+  assert.deepStrictEqual(
+    loadDraftEntry("thread:ident-target"),
+    shared,
+    "canonical record must equal the seeded shared draft",
+  );
+
+  // Confirm localStorage reflects the final state.
+  const persisted = readRawStore("pubkey-rename-identical");
+  assert.ok(
+    "thread:ident-target" in persisted,
+    "canonical key in localStorage",
+  );
+  assert.ok(
+    !("inbox-reply:ident" in persisted),
+    "legacy key absent from localStorage",
+  );
 });

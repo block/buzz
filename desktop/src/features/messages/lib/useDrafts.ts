@@ -238,6 +238,103 @@ export function clearDraftEntry(draftKey: string): void {
 }
 
 /**
+ * Return true only when every field of two DraftState values is identical,
+ * including all BlobDescriptor optional fields (dim, blurhash, thumb,
+ * duration, image, filename, uploaded). Any divergence — including selection
+ * offsets, timestamps, attachment metadata, spoiler state, and status — is
+ * treated as a distinct record that must not be discarded.
+ */
+function draftStatesEqual(a: DraftState, b: DraftState): boolean {
+  if (
+    a.content !== b.content ||
+    a.selectionStart !== b.selectionStart ||
+    a.selectionEnd !== b.selectionEnd ||
+    a.channelId !== b.channelId ||
+    a.createdAt !== b.createdAt ||
+    a.updatedAt !== b.updatedAt ||
+    a.status !== b.status ||
+    a.pendingImeta.length !== b.pendingImeta.length ||
+    a.spoileredAttachmentUrls.length !== b.spoileredAttachmentUrls.length
+  ) {
+    return false;
+  }
+  for (let i = 0; i < a.pendingImeta.length; i++) {
+    const am = a.pendingImeta[i];
+    const bm = b.pendingImeta[i];
+    if (
+      am.url !== bm.url ||
+      am.sha256 !== bm.sha256 ||
+      am.size !== bm.size ||
+      am.type !== bm.type ||
+      am.uploaded !== bm.uploaded ||
+      am.dim !== bm.dim ||
+      am.blurhash !== bm.blurhash ||
+      am.thumb !== bm.thumb ||
+      am.duration !== bm.duration ||
+      am.image !== bm.image ||
+      am.filename !== bm.filename
+    ) {
+      return false;
+    }
+  }
+  for (let i = 0; i < a.spoileredAttachmentUrls.length; i++) {
+    if (a.spoileredAttachmentUrls[i] !== b.spoileredAttachmentUrls[i]) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * Atomically rename a draft key: move the DraftState from `oldKey` to
+ * `newKey`, flush once, and notify once. Returns the outcome:
+ *
+ * - `"migrated"` — the rename succeeded; `oldKey` no longer exists.
+ * - `"collision"` — `newKey` already held a record whose full persisted
+ *   DraftState differed from `oldKey`'s record across any field (content,
+ *   selection, timestamps, attachments, spoiler state, or status). Both
+ *   records are preserved unchanged; no I/O is performed.
+ * - `"noop"` — `oldKey` did not exist in the store; nothing changed.
+ *
+ * If `oldKey === newKey` no I/O occurs and `"noop"` is returned.
+ * Map cardinality is unchanged by a rename (one key removed, one added or
+ * identical collapse), so `evictOldest` is never called here.
+ * Callers must not compose this from public save+clear calls (that would
+ * issue two flushes and could overwrite a concurrent write).
+ */
+export function renameDraftEntry(
+  oldKey: string,
+  newKey: string,
+): "migrated" | "collision" | "noop" {
+  if (oldKey === newKey) return "noop";
+  const map = readStore();
+  const existing = map.get(oldKey);
+  if (existing === undefined) return "noop";
+
+  const destination = map.get(newKey);
+  if (destination !== undefined) {
+    // Only collapse when every persisted field is identical; any divergence
+    // is treated as a collision to prevent silent data loss.
+    if (!draftStatesEqual(existing, destination)) {
+      return "collision";
+    }
+    // Identical records: remove the legacy key, keep the destination entry.
+    map.delete(oldKey);
+    flushStore(map);
+    notifySubscribers();
+    return "migrated";
+  }
+
+  // No destination conflict: move the record. Cardinality is unchanged
+  // (one delete + one set), so evictOldest is not called.
+  map.set(newKey, existing);
+  map.delete(oldKey);
+  flushStore(map);
+  notifySubscribers();
+  return "migrated";
+}
+
+/**
  * Convenience: save if content or attachments are non-empty, otherwise clear.
  * Preserves existing createdAt on updates; sets it on first save.
  */

@@ -786,6 +786,11 @@ declare global {
       payload?: Record<string, unknown>,
     ) => Promise<unknown>;
     __BUZZ_E2E_PUSH_MOCK_FEED_ITEM__?: (item: RawFeedItem) => RawFeedItem;
+    /** Replace an existing feed item by id (or push if not found) and fire the updated event. */
+    __BUZZ_E2E_REPLACE_MOCK_FEED_ITEM__?: (
+      oldId: string,
+      item: RawFeedItem,
+    ) => RawFeedItem;
     __BUZZ_E2E_SIGNED_EVENTS__?: Array<{
       content: string;
       kind: number;
@@ -856,6 +861,22 @@ declare global {
       channelType?: "stream" | "forum" | "dm";
       removeMemberPubkey?: string;
     }) => void;
+    /**
+     * When set to an event ID string, `get_event` calls for that specific ID
+     * are held in a queue and not resolved until `__BUZZ_E2E_RELEASE_GET_EVENT__()`
+     * is called.  Calls for any other event ID proceed normally.  Used by the
+     * cold-recovery race test to prove mid-flight feedItems updates do not
+     * cancel the in-flight promise for the cold anchor specifically.
+     * Set to undefined/null to disable deferral.
+     */
+    __BUZZ_E2E_DEFER_GET_EVENT__?: string | null;
+    /** Flush all deferred `get_event` calls for the target ID.  Each queued
+     *  request is resolved (or rejected) immediately.  Returns the number of
+     *  requests released. */
+    __BUZZ_E2E_RELEASE_GET_EVENT__?: () => number;
+    /** Count of `get_event` invocations for the current defer-target ID since
+     *  the last time `__BUZZ_E2E_DEFER_GET_EVENT__` was set. */
+    __BUZZ_E2E_GET_EVENT_CALL_COUNT__?: number;
   }
 }
 
@@ -938,6 +959,21 @@ const MOCK_IDENTITY_PUBKEY = DEFAULT_MOCK_IDENTITY.pubkey;
 let mockIdentityLostCleared = false;
 // Same pattern for `mock.identityLocked`.
 let mockIdentityLockedCleared = false;
+
+// ── get_event defer/release seam ────────────────────────────────────────────
+// When `window.__BUZZ_E2E_DEFER_GET_EVENT__` is set to a target event ID,
+// `handleGetEvent` holds calls for that ID in this queue.  All other event IDs
+// continue to resolve immediately.
+// `window.__BUZZ_E2E_RELEASE_GET_EVENT__()` flushes the queue and returns the
+// count of released requests, giving the race test a deterministic way to prove
+// that a mid-flight feedItems update does NOT cancel the in-flight promise for
+// the specific cold anchor under test.
+type DeferredGetEvent = {
+  resolve: (value: string) => void;
+  reject: (reason: unknown) => void;
+  run: () => Promise<string>;
+};
+let deferredGetEventQueue: DeferredGetEvent[] = [];
 
 const mockDisplayNames = new Map<string, string>([
   [MOCK_IDENTITY_PUBKEY, DEFAULT_MOCK_IDENTITY.display_name],
@@ -7619,6 +7655,35 @@ async function handleGetEvent(
   },
   config: E2eConfig | undefined,
 ) {
+  // Defer/release seam: when __BUZZ_E2E_DEFER_GET_EVENT__ is set to this
+  // event's ID, hold this call in the queue until __BUZZ_E2E_RELEASE_GET_EVENT__()
+  // is called.  Only the target ID is deferred; all other IDs resolve normally.
+  // This keeps ancestor-lookup and context loads from being stalled or counted.
+  if (
+    window.__BUZZ_E2E_DEFER_GET_EVENT__ &&
+    window.__BUZZ_E2E_DEFER_GET_EVENT__ === args.eventId
+  ) {
+    // Increment the count only for calls that are actually deferred.
+    window.__BUZZ_E2E_GET_EVENT_CALL_COUNT__ =
+      (window.__BUZZ_E2E_GET_EVENT_CALL_COUNT__ ?? 0) + 1;
+    return new Promise<string>((resolve, reject) => {
+      deferredGetEventQueue.push({
+        resolve,
+        reject,
+        run: () => resolveGetEvent(args, config),
+      });
+    });
+  }
+
+  return resolveGetEvent(args, config);
+}
+
+async function resolveGetEvent(
+  args: {
+    eventId: string;
+  },
+  config: E2eConfig | undefined,
+) {
   const identity = getIdentity(config);
   if (!identity) {
     // Allow test specs to mark specific event IDs as definitively deleted.
@@ -8131,6 +8196,22 @@ export function maybeInstallE2eTauriMocks() {
     window.dispatchEvent(new CustomEvent("buzz:e2e-home-feed-updated"));
     return item;
   };
+  window.__BUZZ_E2E_REPLACE_MOCK_FEED_ITEM__ = (oldId, item) => {
+    const category = item.category === "mention" ? "mentions" : item.category;
+    // Remove the old item from every category bucket (it may have been in a
+    // different bucket or the same one).
+    for (const bucket of Object.values(mockFeedOverrides)) {
+      const idx = (bucket as RawFeedItem[]).findIndex((r) => r.id === oldId);
+      if (idx !== -1) {
+        (bucket as RawFeedItem[]).splice(idx, 1);
+        break;
+      }
+    }
+    // Insert the replacement at the front of the correct bucket.
+    mockFeedOverrides[category].unshift(item);
+    window.dispatchEvent(new CustomEvent("buzz:e2e-home-feed-updated"));
+    return item;
+  };
   window.__BUZZ_E2E_MD_PARSE_COUNT__ = getMarkdownParseCount;
   window.__BUZZ_E2E_ACTIVATE_TIMEOUT__ = (expiresAtMs: number) => {
     const expiresAtSec = expiresAtMs > 0 ? Math.floor(expiresAtMs / 1000) : 0;
@@ -8162,6 +8243,21 @@ export function maybeInstallE2eTauriMocks() {
       syncMockChannel(channel);
     }
     touchMockChannel(channel);
+  };
+  // get_event defer/release seam — reset counter and queue on each install.
+  window.__BUZZ_E2E_GET_EVENT_CALL_COUNT__ = 0;
+  window.__BUZZ_E2E_DEFER_GET_EVENT__ = null;
+  deferredGetEventQueue = [];
+  window.__BUZZ_E2E_RELEASE_GET_EVENT__ = () => {
+    const queued = deferredGetEventQueue.splice(0);
+    for (const entry of queued) {
+      entry.run().then(entry.resolve, entry.reject);
+    }
+    // Disable deferral and reset counter after release so the seam is inert
+    // for the remainder of the test (no stray defers from context loads).
+    window.__BUZZ_E2E_DEFER_GET_EVENT__ = null;
+    window.__BUZZ_E2E_GET_EVENT_CALL_COUNT__ = 0;
+    return queued.length;
   };
   window.__BUZZ_E2E_EMIT_MOCK_READ_STATE__ = ({
     clientId,
