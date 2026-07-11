@@ -18,6 +18,10 @@ import {
 import { useReadState } from "@/features/channels/readState/useReadState";
 import { makeRootIdStore } from "@/features/channels/unreadRootIdStore";
 import {
+  forcedUnreadStore,
+  type ForcedUnreadMap,
+} from "@/features/channels/forcedUnreadStore";
+import {
   getThreadReference,
   isBroadcastReply,
 } from "@/features/messages/lib/threading";
@@ -228,10 +232,15 @@ export function useUnreadChannels(
   channelsRef.current = channels;
 
   // Channels manually marked unread this session (e.g., right-click → "mark
-  // unread"). Because NIP-RS read markers are monotonic, this in-session flag
-  // is what makes the badge appear *now* without lowering synced read state.
-  // Cleared when the user opens the channel.
-  const forcedUnreadRef = React.useRef(new Set<string>());
+  // unread"). Because NIP-RS read markers are monotonic, this flag is what
+  // makes the badge appear without lowering synced read state. Each entry
+  // stores the channel's NIP-RS read marker (unix seconds) at force-time, or
+  // null if no marker existed yet. Persisted to localStorage
+  // (buzz-forced-unread.v1) so it survives reload and is visible to the rail
+  // observer for inactive workspaces.
+  const forcedUnreadRef = React.useRef<ForcedUnreadMap>(
+    pubkey ? forcedUnreadStore.read(pubkey) : {},
+  );
 
   // When a synced event advances a read marker (cross-device mark-as-read),
   // remove from forcedUnreadRef so the dot clears immediately.
@@ -240,11 +249,17 @@ export function useUnreadChannels(
     const advanced = drainSyncedAdvances();
     let anyNew = false;
     for (const channelId of advanced) {
-      if (forcedUnreadRef.current.delete(channelId)) {
+      if (Object.hasOwn(forcedUnreadRef.current, channelId)) {
+        delete forcedUnreadRef.current[channelId];
         anyNew = true;
       }
     }
-    if (anyNew) bumpLatestVersion();
+    if (anyNew) {
+      if (pubkey) {
+        forcedUnreadStore.write(pubkey, forcedUnreadRef.current);
+      }
+      bumpLatestVersion();
+    }
   }, [readStateVersion, drainSyncedAdvances]);
 
   // Root event IDs of threads where the current user has replied at least once.
@@ -292,14 +307,16 @@ export function useUnreadChannels(
     0,
   );
 
-  // Reset all in-session state when the identity or relay changes. Unread
-  // tracking depends only on NIP-RS read markers + observed relay events for
-  // this user; nothing here is persisted across restarts.
+  // Reset all in-session state when the identity or relay changes. In-memory
+  // caches are cleared; persisted stores are loaded for the new pubkey (so
+  // forced-unread, participation, etc. are correct for the new identity).
   // biome-ignore lint/correctness/useExhaustiveDependencies: pubkey/relayClient are intentional reset signals
   React.useEffect(() => {
     latestByChannelRef.current = new Map();
     observedUnreadEventsByChannelRef.current = new Map();
-    forcedUnreadRef.current = new Set();
+    // Load persisted forced-unread map for the new pubkey (do NOT clear the
+    // store — another device's data should survive identity switches here).
+    forcedUnreadRef.current = pubkey ? forcedUnreadStore.read(pubkey) : {};
     caughtUpChannelsRef.current = new Set();
     participatedRootIdsRef.current = pubkey
       ? participationStore.read(pubkey)
@@ -332,7 +349,11 @@ export function useUnreadChannels(
       readAt: string | null | undefined,
       { topLevelOnly = false }: { topLevelOnly?: boolean } = {},
     ) => {
-      if (forcedUnreadRef.current.delete(channelId)) {
+      if (Object.hasOwn(forcedUnreadRef.current, channelId)) {
+        delete forcedUnreadRef.current[channelId];
+        if (pubkey) {
+          forcedUnreadStore.write(pubkey, forcedUnreadRef.current);
+        }
         bumpLatestVersion();
       }
       const observedLatest = topLevelOnly
@@ -355,18 +376,25 @@ export function useUnreadChannels(
         bumpLatestVersion();
       }
     },
-    [markContextRead],
+    [markContextRead, pubkey],
   );
 
-  // Manually mark a channel unread (e.g., right-click → "mark unread"). Sets
-  // the in-session forced flag so the sidebar badge appears immediately. NIP-RS
-  // read markers are monotonic, so we do not publish a lower timestamp.
-  const markChannelUnread = React.useCallback((channelId: string) => {
-    if (!forcedUnreadRef.current.has(channelId)) {
-      forcedUnreadRef.current.add(channelId);
-      bumpLatestVersion();
-    }
-  }, []);
+  // Manually mark a channel unread (e.g., right-click → "mark unread"). Persists
+  // the current NIP-RS read marker as baseline to localStorage so the rail
+  // observer can detect when a cross-device read has since covered the force.
+  // NIP-RS markers are monotonic, so we do not publish a lower timestamp.
+  const markChannelUnread = React.useCallback(
+    (channelId: string) => {
+      if (!Object.hasOwn(forcedUnreadRef.current, channelId)) {
+        forcedUnreadRef.current[channelId] = getOwnTimestamp(channelId);
+        if (pubkey) {
+          forcedUnreadStore.write(pubkey, forcedUnreadRef.current);
+        }
+        bumpLatestVersion();
+      }
+    },
+    [getOwnTimestamp, pubkey],
+  );
 
   // Record the thread root of an EXTERNAL message that @-mentioned the user.
   // Keyed on the thread root so the badge gate trips for a mention recipient
@@ -820,7 +848,7 @@ export function useUnreadChannels(
       for (const channel of channels) {
         if (channel.id === activeChannelId) continue;
 
-        if (forcedUnreadRef.current.has(channel.id)) {
+        if (Object.hasOwn(forcedUnreadRef.current, channel.id)) {
           // Forced-unread is dot tier only — not high-priority.
           unread.add(channel.id);
           counts.set(channel.id, 1);
@@ -929,7 +957,7 @@ export function useUnreadChannels(
 
   const markAllChannelsRead = React.useCallback(() => {
     for (const channelId of unreadChannelIdsRef.current) {
-      forcedUnreadRef.current.delete(channelId);
+      delete forcedUnreadRef.current[channelId];
       const unixSeconds =
         latestByChannelRef.current.get(channelId) ??
         getEffectiveTimestamp(channelId) ??
@@ -940,8 +968,11 @@ export function useUnreadChannels(
       latestByChannelRef.current.delete(channelId);
       observedUnreadEventsByChannelRef.current.delete(channelId);
     }
+    if (pubkey) {
+      forcedUnreadStore.write(pubkey, forcedUnreadRef.current);
+    }
     bumpLatestVersion();
-  }, [getEffectiveTimestamp, markContextRead]);
+  }, [getEffectiveTimestamp, markContextRead, pubkey]);
 
   // Identity-stable snapshots of the membership sets for the notify gate.
   // Re-derived only when membershipVersion bumps (a set actually changed), so

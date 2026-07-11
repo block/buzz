@@ -36,6 +36,18 @@ export type ConfigNudgeRequirement =
        * - "not_installed"     → neither adapter nor CLI found
        */
       availability: AcpAvailabilityStatus;
+    }
+  | {
+      /**
+       * The CLI is installed but its config file could not be parsed.
+       * Informational only — no in-app action can repair an external config
+       * file. Rendered without a Doctor or Edit Agent CTA.
+       */
+      surface: "cli_config_invalid";
+      probe_args: string[];
+      setup_copy: string;
+      /** One-line stderr excerpt from the CLI's parse error. */
+      diagnostic: string;
     };
 
 /**
@@ -130,6 +142,13 @@ function isConfigNudgeRequirement(v: unknown): v is ConfigNudgeRequirement {
           r.availability === "adapter_missing" ||
           r.availability === "cli_missing" ||
           r.availability === "not_installed")
+      );
+    case "cli_config_invalid":
+      return (
+        Array.isArray(r.probe_args) &&
+        r.probe_args.every((a) => typeof a === "string") &&
+        typeof r.setup_copy === "string" &&
+        typeof r.diagnostic === "string"
       );
     default:
       return false;

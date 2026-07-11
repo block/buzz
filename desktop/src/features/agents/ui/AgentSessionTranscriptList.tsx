@@ -338,7 +338,9 @@ function getDisplayBlockKey(block: TranscriptDisplayBlock) {
     return block.item.id;
   }
   if (block.kind === "session-boundary") {
-    return `session-boundary:${block.sessionId}:${block.runIndex}`;
+    // Use firstItemId (stable across prepend) rather than runIndex (shifts when
+    // older sessions are prepended, causing unnecessary boundary remounts).
+    return `session-boundary:${block.sessionId}:${block.firstItemId}`;
   }
   return `turn:${block.turnId}`;
 }
@@ -933,12 +935,11 @@ function TurnSetupStatus({
 /**
  * Horizontal rule rendered between session runs in the observer transcript.
  *
- * Three label states:
- *  - `"current"`     — live session, agent is actively running in this context.
- *  - `"most-recent"` — newest visible session but no live match (archived-only
- *                      or session ended). Shown as "Most recent observed session"
- *                      so users know it is history, not active context.
- *  - `"earlier"`     — an older session. Always labeled with the archive signal.
+ * Three label states (based on live-frame observation, not harness affinity):
+ *  - `"current"`     — most recent session observed via the live relay subscription.
+ *  - `"most-recent"` — newest visible session with no matching live frames
+ *                      (loaded from archive or session ended before observation).
+ *  - `"earlier"`     — an older session preceding the most-recent one.
  */
 function SessionBoundaryDivider({
   labelState,
@@ -949,10 +950,10 @@ function SessionBoundaryDivider({
 }) {
   const label =
     labelState === "current"
-      ? "Current session"
+      ? "Latest live-observed session"
       : labelState === "most-recent"
-        ? "Most recent observed session — not in current context"
-        : "Earlier session — not in current context";
+        ? "Most recent observed session"
+        : "Earlier observed session";
   const formattedDate = new Date(sessionStartTimestamp).toLocaleString();
   return (
     <div

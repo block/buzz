@@ -10,14 +10,14 @@ import { toast } from "sonner";
 
 import { useAgentWorking } from "@/features/agents/agentWorkingSignal";
 import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlActions";
-import { scopeByChannel } from "@/features/agents/ui/agentSessionPanelLayout";
-import type {
-  ObserverEvent,
-  TranscriptItem,
-} from "@/features/agents/ui/agentSessionTypes";
+import {
+  mergeObserverEventWindows,
+  scopeByChannel,
+} from "@/features/agents/ui/agentSessionPanelLayout";
+import type { ObserverEvent } from "@/features/agents/ui/agentSessionTypes";
 import { ManagedAgentSessionPanel } from "@/features/agents/ui/ManagedAgentSessionPanel";
 import {
-  useAgentTranscript,
+  useArchivedChannelEvents,
   useObserverEvents,
 } from "@/features/agents/ui/useObserverEvents";
 import { cancelManagedAgentTurn } from "@/shared/api/agentControl";
@@ -107,22 +107,24 @@ export function AgentSessionThreadPanel({
   const topSentinelRef = React.useRef<HTMLDivElement>(null);
   const now = useNow(1000);
   const { events } = useObserverEvents(isLive, agent.pubkey);
-  const transcript = useAgentTranscript(isLive, agent.pubkey);
   const scopedEvents = React.useMemo(
     () => scopeByChannel(events, sessionChannelId),
     [events, sessionChannelId],
   );
-  const scopedTranscript = React.useMemo(
-    () => scopeByChannel(transcript, sessionChannelId),
-    [sessionChannelId, transcript],
+  // Archived channel events merged with live scoped events so the header's
+  // "Last updated" timestamp reflects the full loaded history, not just the
+  // capped live window. Mirrors ManagedAgentSessionPanel's combinedEvents.
+  const archivedChannelEvents = useArchivedChannelEvents(
+    agent.pubkey,
+    sessionChannelId,
+  );
+  const combinedHeaderEvents = React.useMemo(
+    () => mergeObserverEventWindows(scopedEvents, archivedChannelEvents),
+    [scopedEvents, archivedChannelEvents],
   );
   const latestActivityAt = React.useMemo(
-    () =>
-      getLatestActivityTimestamp({
-        events: scopedEvents,
-        transcript: scopedTranscript,
-      }),
-    [scopedEvents, scopedTranscript],
+    () => getLatestActivityTimestamp(combinedHeaderEvents),
+    [combinedHeaderEvents],
   );
   const lastUpdatedLabel = formatLastUpdatedLabel(latestActivityAt, now);
   const lastUpdatedTitle =
@@ -425,13 +427,9 @@ export function AgentSessionThreadPanel({
   );
 }
 
-function getLatestActivityTimestamp({
-  events,
-  transcript,
-}: {
-  events: readonly ObserverEvent[];
-  transcript: readonly TranscriptItem[];
-}): number | null {
+function getLatestActivityTimestamp(
+  events: readonly ObserverEvent[],
+): number | null {
   let latest: number | null = null;
 
   const record = (timestamp: string) => {
@@ -447,10 +445,6 @@ function getLatestActivityTimestamp({
 
   for (const event of events) {
     record(event.timestamp);
-  }
-
-  for (const item of transcript) {
-    record(item.timestamp);
   }
 
   return latest;

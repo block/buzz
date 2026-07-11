@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   friendlyAgentLastError,
   friendlyTurnErrorCopy,
+  CLI_ACP_INTERNAL_ERROR_COPY,
   MODEL_NOT_FOUND_COPY,
   RELAY_MESH_DENIED_COPY,
 } from "./friendlyAgentLastError.ts";
@@ -212,4 +213,106 @@ test("friendlyTurnErrorCopy: garbage string code coerces to NaN → string path"
     friendlyTurnErrorCopy("llm auth: denied", "garbage"),
     RELAY_MESH_DENIED_COPY,
   );
+});
+
+// --- -32603 internal error (Fix #2: CLI-ACP unsupported model hint) ---
+
+test("code -32603 bare 'Internal error' → cli-acp internal error hint (severity: generic)", () => {
+  const result = friendlyAgentLastError("Internal error", -32603);
+  assert.deepEqual(result, {
+    severity: "generic",
+    copy: CLI_ACP_INTERNAL_ERROR_COPY,
+  });
+});
+
+test("code -32603 bare Internal error (wrapped) → cli-acp internal error hint", () => {
+  // The ACP wrapper form "Agent reported error (code -32603): Internal error"
+  // is treated as bare — the remainder after stripping the prefix is
+  // "Internal error", which maps to the hint.
+  const result = friendlyAgentLastError(
+    "Agent reported error (code -32603): Internal error",
+    -32603,
+  );
+  assert.deepEqual(result, {
+    severity: "generic",
+    copy: CLI_ACP_INTERNAL_ERROR_COPY,
+  });
+});
+
+test("code -32603 with specific message → original message preserved, NOT hint", () => {
+  // If the adapter provides detail beyond "Internal error", preserve it —
+  // don't bury actionable information with a broad codex-specific hint.
+  const result = friendlyAgentLastError(
+    "Internal error: model gpt-5.6-sol rejected by adapter",
+    -32603,
+  );
+  assert.deepEqual(result, {
+    severity: "generic",
+    copy: "Internal error: model gpt-5.6-sol rejected by adapter",
+  });
+});
+
+test("embedded code -32603 recovered from message when code param is null", () => {
+  const result = friendlyAgentLastError(
+    "Agent reported error (code -32603): Internal error",
+    null,
+  );
+  assert.deepEqual(result, {
+    severity: "generic",
+    copy: CLI_ACP_INTERNAL_ERROR_COPY,
+  });
+});
+
+test("embedded code -32603 with specific detail → original message preserved", () => {
+  // Embedded code path also preserves specific detail.
+  const result = friendlyAgentLastError(
+    "Agent reported error (code -32603): model not in registry",
+    null,
+  );
+  assert.deepEqual(result, {
+    severity: "generic",
+    copy: "model not in registry",
+  });
+});
+
+test("code -32603 structured param + wrapped specific detail → clean message, NOT wrapper", () => {
+  // Real path: storage.rs stores message = full wrapped line, code = parsed finite.
+  // The transport wrapper must be stripped; only the adapter detail reaches the UI.
+  const result = friendlyAgentLastError(
+    "Agent reported error (code -32603): model not in registry",
+    -32603,
+  );
+  assert.deepEqual(result, {
+    severity: "generic",
+    copy: "model not in registry",
+  });
+});
+
+test("friendlyTurnErrorCopy: -32603 structured param + wrapped specific detail → clean message", () => {
+  // friendlyTurnErrorCopy is the transcript path (agentSessionTranscript.ts).
+  assert.equal(
+    friendlyTurnErrorCopy(
+      "Agent reported error (code -32603): model not in registry",
+      -32603,
+    ),
+    "model not in registry",
+  );
+});
+
+test("friendlyTurnErrorCopy: code -32603 bare Internal error → cli-acp internal error hint", () => {
+  assert.equal(
+    friendlyTurnErrorCopy("Internal error", -32603),
+    CLI_ACP_INTERNAL_ERROR_COPY,
+  );
+});
+
+test("-32603 does not affect -32001/-32002 classification (regression)", () => {
+  assert.deepEqual(friendlyAgentLastError("any", -32001), {
+    severity: "denied",
+    copy: RELAY_MESH_DENIED_COPY,
+  });
+  assert.deepEqual(friendlyAgentLastError("any", -32002), {
+    severity: "denied",
+    copy: MODEL_NOT_FOUND_COPY,
+  });
 });

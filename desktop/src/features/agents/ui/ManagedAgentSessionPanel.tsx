@@ -27,12 +27,17 @@ import type {
 import type { AgentSessionTranscriptVariant } from "./agentSessionTranscriptContext";
 import {
   deriveLatestSessionId,
+  mergeObserverEventWindows,
   resolveDisplayEvents,
   resolveRawRailLayout,
   scopeByChannel,
 } from "./agentSessionPanelLayout";
 import { shorten } from "./agentSessionUtils";
-import { useObserverEvents, useAgentTranscript } from "./useObserverEvents";
+import {
+  useObserverEvents,
+  useArchivedChannelEvents,
+} from "./useObserverEvents";
+import { buildTranscriptState } from "./agentSessionTranscript";
 
 type ManagedAgentSessionPanelProps = {
   agent: Pick<ManagedAgent, "pubkey" | "name" | "status"> & {
@@ -80,22 +85,42 @@ export function ManagedAgentSessionPanel({
     hasObserver,
     agent.pubkey,
   );
-  const transcript = useAgentTranscript(hasObserver, agent.pubkey);
 
-  const scopedTranscript = React.useMemo(
-    () => scopeByChannel(transcript, channelId),
-    [channelId, transcript],
+  // Channel-scoped live events (capped at MAX_OBSERVER_EVENTS) and uncapped
+  // archived events from SQLite paging. Both are raw ObserverEvent[] — we merge
+  // them at the raw-event level and derive a single TranscriptState, so stateful
+  // aggregates (tool start/update, plan replacement, permission request/response)
+  // are never split across two independent state machines.
+  const archivedChannelEvents = useArchivedChannelEvents(
+    agent.pubkey,
+    channelId,
   );
 
-  const displayTranscript = transcriptOverride ?? scopedTranscript;
-
-  const scopedEvents = React.useMemo(
+  const scopedLiveEvents = React.useMemo(
     () => scopeByChannel(events, channelId),
     [channelId, events],
   );
+
+  // Combined raw window: live (scoped) + archive merged by (seq, timestamp),
+  // sorted ascending. Used as the single source for both the transcript and the
+  // raw event rail / header count.
+  const combinedEvents = React.useMemo(
+    () => mergeObserverEventWindows(scopedLiveEvents, archivedChannelEvents),
+    [scopedLiveEvents, archivedChannelEvents],
+  );
+
+  // Derive transcript once from the combined raw window. When transcriptOverride
+  // is set (e.g. E2E snapshot specs), bypass both — the caller supplies the full
+  // transcript directly.
+  const derivedTranscript = React.useMemo(
+    () => buildTranscriptState(combinedEvents).items,
+    [combinedEvents],
+  );
+  const displayTranscript = transcriptOverride ?? derivedTranscript;
+
   const displayEvents = React.useMemo(
-    () => resolveDisplayEvents(scopedEvents, rawEventsOverride),
-    [rawEventsOverride, scopedEvents],
+    () => resolveDisplayEvents(combinedEvents, rawEventsOverride),
+    [rawEventsOverride, combinedEvents],
   );
 
   const latestSessionId = React.useMemo(

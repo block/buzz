@@ -33,6 +33,8 @@ function requirementKey(
       return `normalized_field:${req.field}:${index}`;
     case "cli_login":
       return `cli_login:${req.probe_args.join(",")}:${index}`;
+    case "cli_config_invalid":
+      return `cli_config_invalid:${req.probe_args.join(",")}:${index}`;
   }
 }
 
@@ -59,6 +61,17 @@ function isAuthOnly(reqs: ConfigNudgePayload["requirements"]): boolean {
     reqs.every(
       (r) => r.surface === "cli_login" && r.availability === "available",
     )
+  );
+}
+
+/**
+ * Returns true when every requirement is a `cli_config_invalid` surface.
+ * Config-invalid cards are purely informational — the user must edit an
+ * external file; there is no in-app destination that can fix it.
+ */
+function isAllConfigInvalid(reqs: ConfigNudgePayload["requirements"]): boolean {
+  return (
+    reqs.length > 0 && reqs.every((r) => r.surface === "cli_config_invalid")
   );
 }
 
@@ -164,6 +177,10 @@ export function ConfigNudgeCard({
 
   const allCliLogin = isAllCliLogin(nudge.requirements);
   const authOnly = isAuthOnly(nudge.requirements);
+  const allConfigInvalid = isAllConfigInvalid(nudge.requirements);
+  // Any card that is purely informational (auth-only or all-config-invalid)
+  // has no clickable destination — treat them the same for affordance/routing.
+  const informationalOnly = authOnly || allConfigInvalid;
 
   const openDoctor = () => {
     if (!onOpenSettings) {
@@ -212,9 +229,9 @@ export function ConfigNudgeCard({
     <Attachment
       className={cn(
         "max-w-[min(100%,32rem)] shrink-0 shadow-none",
-        // Affordance: cursor-pointer + subtle hover lift — omitted for auth-only
-        // cards which are purely informational (no click destination).
-        !authOnly && "cursor-pointer hover:shadow-sm",
+        // Affordance: cursor-pointer + subtle hover lift — omitted for
+        // informational-only cards which have no click destination.
+        !informationalOnly && "cursor-pointer hover:shadow-sm",
         className,
       )}
       orientation="horizontal"
@@ -240,15 +257,15 @@ export function ConfigNudgeCard({
         </div>
       </AttachmentContent>
       {/* (A) Install-state all-cli_login card only — single card-level CTA
-          confirming the action at rest. Auth-only cards are informational
-          (no CTA); mixed cards render per-row CTAs instead. */}
-      {allCliLogin && !authOnly && (
+          confirming the action at rest. Informational-only cards have no CTA;
+          mixed cards render per-row CTAs instead. */}
+      {allCliLogin && !informationalOnly && (
         <AttachmentActions className="items-end self-end">
           <span className="text-xs text-muted-foreground">Open Doctor →</span>
         </AttachmentActions>
       )}
-      {/* Auth-only cards are purely informational — no trigger, no routing. */}
-      {!authOnly && (
+      {/* Informational-only cards are purely informational — no trigger, no routing. */}
+      {!informationalOnly && (
         <AttachmentTrigger
           aria-label={
             allCliLogin
@@ -345,5 +362,23 @@ function RequirementRow({
           )}
         </div>
       );
+    case "cli_config_invalid": {
+      // Config-invalid rows are purely informational — the user must edit an
+      // external file. No Doctor CTA (Doctor can't repair ~/.codex/config.toml)
+      // and no Edit Agent CTA (the field isn't managed by Buzz).
+      const cli = requirement.probe_args[0] ?? "the CLI";
+      const configFile = `~/.${cli}/config.toml`;
+      return (
+        <div className="flex items-center gap-2 text-xs leading-4 text-muted-foreground">
+          <span className="flex-1 [overflow-wrap:anywhere]">
+            {configFile} is invalid:{" "}
+            <code className="rounded bg-muted px-1 py-0.5 font-mono text-xs text-foreground">
+              {requirement.diagnostic}
+            </code>{" "}
+            — fix the config and restart the agent
+          </span>
+        </div>
+      );
+    }
   }
 }

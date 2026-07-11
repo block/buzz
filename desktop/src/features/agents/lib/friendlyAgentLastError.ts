@@ -42,11 +42,23 @@ export const RELAY_MESH_DENIED_COPY =
 export const MODEL_NOT_FOUND_COPY =
   "The configured model is not available — open agent settings and select a different one from the dropdown.";
 
-const EMBEDDED_CODE_RE = /^Agent reported error \(code (-?\d+)\): /;
+export const CLI_ACP_INTERNAL_ERROR_COPY =
+  "The agent's harness reported an internal error. For Codex agents this can mean the configured model isn't supported by your installed codex-acp — check the model in `~/.codex/config.toml` or upgrade the adapter (`brew upgrade codex-acp`).";
 
-function recoverEmbeddedCode(trimmed: string): number | null {
+const EMBEDDED_CODE_RE = /^Agent reported error \(code (-?\d+)\): /;
+/** Bare form of the standard JSON-RPC -32603 message (after stripping the ACP wrapper prefix). */
+const BARE_INTERNAL_ERROR = "Internal error";
+
+function recoverEmbeddedCode(trimmed: string): {
+  code: number;
+  remainder: string;
+} | null {
   const match = EMBEDDED_CODE_RE.exec(trimmed);
-  return match ? Number(match[1]) : null;
+  if (!match) return null;
+  return {
+    code: Number(match[1]),
+    remainder: trimmed.slice(match[0].length),
+  };
 }
 
 export function friendlyAgentLastError(
@@ -59,15 +71,33 @@ export function friendlyAgentLastError(
 
   // Structured code first; a code embedded in the message string is the
   // same signal recovered from a record that lost the field.
+  const embedded = recoverEmbeddedCode(trimmed);
   const effectiveCode = Number.isFinite(code)
     ? (code as number)
-    : recoverEmbeddedCode(trimmed);
+    : (embedded?.code ?? null);
   if (effectiveCode != null) {
     switch (effectiveCode) {
       case -32001:
         return { severity: "denied", copy: RELAY_MESH_DENIED_COPY };
       case -32002:
         return { severity: "denied", copy: MODEL_NOT_FOUND_COPY };
+      case -32603: {
+        // Standard JSON-RPC "Internal error" — emitted by external harnesses
+        // (e.g. codex-acp) when the configured model is unsupported. Only
+        // substitute the hint when the message is the bare "Internal error"
+        // form; if the adapter included specific detail, preserve it so we
+        // don't bury actionable information with a broad codex-specific hint.
+        //
+        // "Bare" means the remainder after stripping the ACP wrapper prefix
+        // (if present) is exactly "Internal error". This covers both the raw
+        // form ("Internal error") and the ACP-wrapped form
+        // ("Agent reported error (code -32603): Internal error").
+        const remainder = embedded?.remainder ?? trimmed;
+        if (remainder === BARE_INTERNAL_ERROR) {
+          return { severity: "generic", copy: CLI_ACP_INTERNAL_ERROR_COPY };
+        }
+        return { severity: "generic", copy: remainder };
+      }
     }
     // A structured code we don't recognize is authoritative — don't let
     // string patterns cross-classify it.

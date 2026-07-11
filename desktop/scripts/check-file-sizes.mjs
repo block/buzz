@@ -143,7 +143,10 @@ const overrides = new Map([
   // +1 rebase merge: GlobalAgentConfig import added alongside AcpAvailabilityStatus.
   // +2 rebase onto #1667: behavioral quad fields in PersonaRecord/ManagedAgentRecord.
   // +3 rebase onto main (#1568 + #1613): identity-import-keyring + augmented-PATH probes.
-  ["src-tauri/src/managed_agents/readiness.rs", 1565],
+  // +18: CliConfigInvalid requirement surface for config-parse probe classification —
+  // new Requirement variant + updated cli_login_requirements + 3 new probe-layer tests.
+  // Load-bearing UX fix (bad config → clear diagnostic, not "run codex login").
+  ["src-tauri/src/managed_agents/readiness.rs", 1583],
   // applyWorkspace reposDir parameter plus the validateReposDir binding,
   // threaded through Tauri invokes for configurable repos_dir, plus the
   // harness-persona-sync `harnessOverride` create-input bit — load-bearing
@@ -168,7 +171,11 @@ const overrides = new Map([
   // getProfile/updateProfile/getUserProfile/getUsersBatch/searchUsers) moved to
   // tauriProfiles.ts; limit ratcheted down 1360 → 1241 to bank the headroom.
   // baked-env fold-in: getBakedBuildEnv + BakedEnvEntry type adds ~28 lines.
-  ["src/shared/api/tauri.ts", 1271],
+  // doctor-npm-eacces-preflight: hint field on RawInstallStepResult + mapper
+  // passthrough (+2 lines).
+  ["src/shared/api/tauri.ts", 1273],
+  // doctor-npm-eacces-preflight: hint field added to InstallStepResult (+1 line).
+  ["src/shared/api/types.ts", 1001],
   // readiness-gate: PersonaDialog.tsx threads computeLocalModeGate +
   // requiredCredentialEnvKeys + RequiredFieldLabel so the "New agent" dialog
   // shows required markers and credential amber rows (parity with
@@ -271,6 +278,12 @@ const overrides = new Map([
   // at the 1000 ceiling; comment-only overage, not code growth. Queued to
   // split with the rest of this list.
   ["src/features/channels/ui/ChannelScreen.tsx", 1002],
+  // forced-unread persistence: markChannelUnread now writes through to
+  // forcedUnreadStore (localStorage) so the sidebar badge survives reload and
+  // the rail observer can read it. Three clear points added (markChannelRead,
+  // markAllChannelsRead, drainSyncedAdvances). Load-bearing fix, not generic
+  // debt growth. Queued to split with the rest of this list.
+  ["src/features/channels/useUnreadChannels.ts", 1022],
   // Shared UI was added to this guard after splitting globals/markdown so
   // large shared renderers cannot grow further while follow-up splits land.
   // +33 for config-nudge detect-and-render + author-auth gate (normalizePubkey guard).
