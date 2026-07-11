@@ -186,23 +186,6 @@ desktop-tauri-check: _ensure-sidecar-stubs
 desktop-tauri-test: _ensure-sidecar-stubs
     cd desktop/src-tauri && cargo test
 
-# Run the containerised npm-preflight E2E scenarios (4 tests, ~30s for the timeout test).
-# Builds a Docker image with Node.js + zsh and runs the four #[ignore]d E2E tests
-# against a crafted environment. Does NOT touch the host's npm, PATH, or installs.
-desktop-preflight-e2e:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    if ! command -v docker &>/dev/null; then
-        echo "docker is required for desktop-preflight-e2e"
-        echo "Install it from https://docs.docker.com/get-docker/"
-        exit 1
-    fi
-    docker build \
-        -f desktop/src-tauri/e2e/Dockerfile.preflight-e2e \
-        -t buzz-preflight-e2e \
-        .
-    docker run --rm buzz-preflight-e2e
-
 # Build the full desktop Tauri app locally (unsigned, for testing)
 # Sidecar binary list must stay in sync with _ensure-sidecar-stubs above.
 # pnpm install is unconditional here: release builds must start from a clean dep tree.
