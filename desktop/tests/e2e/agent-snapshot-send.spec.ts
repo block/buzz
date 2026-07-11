@@ -296,15 +296,15 @@ test("snapshot_send_config_only_calls_encode_upload_send_in_order", async ({
   );
   expect(encodeEntry).toBeTruthy();
 
-  // Close the dialog and navigate to #general to verify the FileCard renders.
+  // Close the dialog and navigate to #general to verify the AgentSnapshotCard renders.
   await page.getByRole("button", { name: "Close" }).click();
   await page.getByTestId("channel-general").click();
 
-  // The sent attachment must appear as a FileCard with the exact filename that
-  // the encode step produced ("e2e-agent.agent.json").
-  const fileCard = page.getByTestId("file-card").last();
-  await expect(fileCard).toBeVisible({ timeout: 5000 });
-  await expect(fileCard).toContainText("e2e-agent.agent.json");
+  // The sent attachment must appear as an AgentSnapshotCard (not a generic
+  // FileCard) with the exact filename that the encode step produced.
+  const snapshotCard = page.getByTestId("agent-snapshot-card").last();
+  await expect(snapshotCard).toBeVisible({ timeout: 5000 });
+  await expect(snapshotCard).toContainText("e2e-agent.agent.json");
 });
 
 // ── Memory-bearing flow: gate stops before encode/upload/send ─────────────────

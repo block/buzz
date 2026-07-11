@@ -1117,4 +1117,7 @@ pub async fn export_persona_to_json(
 mod snapshot;
 pub use snapshot::encode_agent_snapshot_for_send;
 pub use snapshot::export_agent_snapshot;
+pub(crate) use snapshot::import::{
+    decode_snapshot_from_bytes, MAX_SNAPSHOT_JSON_BYTES, MAX_SNAPSHOT_PNG_BYTES,
+};
 pub use snapshot::{confirm_agent_snapshot_import, preview_agent_snapshot_import};

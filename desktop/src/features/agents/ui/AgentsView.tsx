@@ -3,6 +3,10 @@ import {
   consumePendingOpenCreateAgent,
   subscribeOpenCreateAgent,
 } from "@/features/agents/openCreateAgentEvent";
+import {
+  consumePendingSnapshotImport,
+  subscribeSnapshotImport,
+} from "@/features/agents/openSnapshotImportFromUrlEvent";
 import { AddAgentToChannelDialog } from "./AddAgentToChannelDialog";
 import { AddTeamToChannelDialog } from "./AddTeamToChannelDialog";
 import { AgentDialog } from "./AgentDialog";
@@ -68,6 +72,23 @@ export function AgentsView() {
 
     return subscribeOpenCreateAgent(() => {
       openUnifiedCreate();
+    });
+  }, []);
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: mount-only; personas.handleImportSnapshotFile is stable
+  React.useEffect(() => {
+    // Consume a snapshot import that was enqueued before navigation (e.g. from
+    // a timeline AgentSnapshotCard click that navigated here).
+    const pending = consumePendingSnapshotImport();
+    if (pending) {
+      void personas.handleImportSnapshotFile(
+        pending.fileBytes,
+        pending.fileName,
+      );
+    }
+
+    return subscribeSnapshotImport(({ fileBytes, fileName }) => {
+      void personas.handleImportSnapshotFile(fileBytes, fileName);
     });
   }, []);
 

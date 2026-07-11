@@ -11,6 +11,8 @@ export type ImetaEntry = {
   size?: number;
   filename?: string;
   duration?: number;
+  /** SHA-256 hex of the attachment bytes (from imeta `x` field). */
+  x?: string;
 };
 
 export type ImetaLookup = Map<string, ImetaEntry>;
@@ -30,6 +32,14 @@ export type MarkdownRuntime = {
   mentionPubkeysByName?: Record<string, string>;
   onOpenChannel: (channelId: string) => void;
   onOpenMessageLink: (link: ParsedMessageLink) => void;
+  /**
+   * Called by AgentSnapshotCard after a successful verified in-memory fetch.
+   * The implementation should navigate to /agents and trigger the existing
+   * snapshot import flow with the supplied bytes. Optional — when absent the
+   * Import button is present but falls back to a no-op (the card is still
+   * rendered on read-only surfaces such as the forum post renderer).
+   */
+  onImportSnapshotFromUrl?: (fileBytes: number[], fileName: string) => void;
 };
 
 export type MarkdownProps = {

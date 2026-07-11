@@ -12,6 +12,7 @@ import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { toast } from "sonner";
 
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
+import { requestOpenSnapshotImport } from "@/features/agents/openSnapshotImportFromUrlEvent";
 import {
   parseMessageLink,
   resolveMessageLinkRenderTarget,
@@ -111,7 +112,8 @@ import {
   MarkdownRuntimeContext,
   useMarkdownRuntime,
 } from "./markdown/runtimeContext";
-import { resolveFileCard } from "./markdownFileCard";
+import { AgentSnapshotCard } from "./markdown/AgentSnapshotCard";
+import { resolveFileCard, resolveSnapshotCard } from "./markdownFileCard";
 import type { MarkdownProps, MarkdownRuntime } from "./markdown/types";
 import { SpoilerInline } from "./markdown/SpoilerInline";
 import {
@@ -1342,7 +1344,8 @@ function createMarkdownComponents(
     href,
     ...props
   }: React.ComponentPropsWithoutRef<"a">) {
-    const { channels, imetaByUrl, onOpenMessageLink } = useMarkdownRuntime();
+    const { channels, imetaByUrl, onOpenMessageLink, onImportSnapshotFromUrl } =
+      useMarkdownRuntime();
     if (!interactive) {
       return <span className="font-medium text-current">{children}</span>;
     }
@@ -1355,6 +1358,27 @@ function createMarkdownComponents(
     }
 
     const label = getReactNodeText(children);
+
+    // Agent snapshot attachment: classify before generic FileCard.
+    // resolveSnapshotCard checks the filename suffix + SHA-256 field.
+    const snapshotCard = resolveSnapshotCard(
+      href ? imetaByUrl?.get(href) : undefined,
+      href,
+      label,
+    );
+    if (snapshotCard) {
+      return (
+        <AgentSnapshotCard
+          href={snapshotCard.href}
+          filename={snapshotCard.filename}
+          size={snapshotCard.size}
+          sha256={snapshotCard.sha256}
+          onImport={(fileBytes, fileName) => {
+            onImportSnapshotFromUrl?.(fileBytes, fileName);
+          }}
+        />
+      );
+    }
 
     // Generic file attachment: a `[filename](url)` link whose href matches an
     // imeta entry with a non-image, non-video MIME. Render a download card
@@ -1799,7 +1823,7 @@ function MarkdownInner({
 }: MarkdownProps) {
   const { channels: rawChannels } = useChannelNavigation();
   const channels = useStableArray(rawChannels);
-  const { goChannel } = useAppNavigation();
+  const { goChannel, goAgents } = useAppNavigation();
   const onOpenChannel = React.useCallback(
     (channelId: string) => {
       void goChannel(channelId);
@@ -1838,6 +1862,10 @@ function MarkdownInner({
       mentionPubkeysByName,
       onOpenChannel,
       onOpenMessageLink,
+      onImportSnapshotFromUrl: (fileBytes: number[], fileName: string) => {
+        requestOpenSnapshotImport({ fileBytes, fileName });
+        void goAgents();
+      },
     }),
     [
       agentMentionPubkeysByName,
@@ -1846,6 +1874,7 @@ function MarkdownInner({
       mentionPubkeysByName,
       onOpenChannel,
       onOpenMessageLink,
+      goAgents,
     ],
   );
 

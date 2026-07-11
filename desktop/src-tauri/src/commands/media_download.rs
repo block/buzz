@@ -1,11 +1,14 @@
 use futures_util::StreamExt;
+use sha2::{Digest, Sha256};
 use tauri::State;
 
 use crate::app_state::AppState;
 use crate::commands::export_util::save_bytes_with_dialog;
+use crate::commands::media::{detect_and_validate_mime, sanitize_filename};
+use crate::commands::personas::{
+    decode_snapshot_from_bytes, MAX_SNAPSHOT_JSON_BYTES, MAX_SNAPSHOT_PNG_BYTES,
+};
 use crate::relay::{classify_request_error, relay_api_base_url_with_override, relay_error_message};
-
-use super::media::{detect_and_validate_mime, sanitize_filename};
 
 /// Maximum download size: 50 MiB. Prevents OOM from oversized responses.
 const MAX_DOWNLOAD_BYTES: u64 = 50 * 1024 * 1024;
@@ -219,6 +222,15 @@ pub async fn copy_image_to_clipboard(
 /// HTTP client, enforcing the download size cap. The caller is responsible for
 /// validating the URL origin and for any content-type checks on the result.
 async fn fetch_blob_bytes(url: &str, state: &State<'_, AppState>) -> Result<Vec<u8>, String> {
+    fetch_blob_bytes_with_cap(url, state, MAX_DOWNLOAD_BYTES).await
+}
+
+/// Core streaming fetcher with a caller-supplied byte cap.
+async fn fetch_blob_bytes_with_cap(
+    url: &str,
+    state: &State<'_, AppState>,
+    cap: u64,
+) -> Result<Vec<u8>, String> {
     // Fetch bytes via the app's HTTP client (goes through WARP tunnel).
     let resp = state
         .http_client
@@ -234,11 +246,11 @@ async fn fetch_blob_bytes(url: &str, state: &State<'_, AppState>) -> Result<Vec<
 
     // Check Content-Length header upfront if present.
     if let Some(content_length) = resp.content_length() {
-        if content_length > MAX_DOWNLOAD_BYTES {
+        if content_length > cap {
             return Err(format!(
                 "file too large ({} MiB, max {} MiB)",
                 content_length / (1024 * 1024),
-                MAX_DOWNLOAD_BYTES / (1024 * 1024)
+                cap / (1024 * 1024)
             ));
         }
     }
@@ -249,11 +261,8 @@ async fn fetch_blob_bytes(url: &str, state: &State<'_, AppState>) -> Result<Vec<
     let mut stream = resp.bytes_stream();
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|e| classify_request_error(&e))?;
-        if bytes.len() as u64 + chunk.len() as u64 > MAX_DOWNLOAD_BYTES {
-            return Err(format!(
-                "file too large (max {} MiB)",
-                MAX_DOWNLOAD_BYTES / (1024 * 1024)
-            ));
+        if bytes.len() as u64 + chunk.len() as u64 > cap {
+            return Err(format!("file too large (max {} MiB)", cap / (1024 * 1024)));
         }
         bytes.extend_from_slice(&chunk);
     }
@@ -261,9 +270,143 @@ async fn fetch_blob_bytes(url: &str, state: &State<'_, AppState>) -> Result<Vec<
     Ok(bytes)
 }
 
+/// Determine whether a sanitized filename is a valid agent snapshot candidate.
+/// Returns the format-specific byte cap for the extension, or an error.
+fn snapshot_cap_for_filename(filename: &str) -> Result<u64, String> {
+    let lower = filename.to_ascii_lowercase();
+    if lower.ends_with(".agent.json") {
+        Ok(MAX_SNAPSHOT_JSON_BYTES as u64)
+    } else if lower.ends_with(".agent.png") {
+        Ok(MAX_SNAPSHOT_PNG_BYTES as u64)
+    } else {
+        Err(format!(
+            "\"{}\" is not a snapshot filename — expected .agent.json or .agent.png",
+            filename
+        ))
+    }
+}
+
+/// Fetch and validate an agent snapshot attachment in memory.
+///
+/// Input validation (before HTTP):
+/// - URL must be a valid same-relay `/media/` URL.
+/// - Filename must end with `.agent.json` or `.agent.png`.
+/// - `expected_sha256` and `expected_size` must be non-empty strings.
+///
+/// During fetch:
+/// - Enforces a format-specific cap (5 MiB JSON, 10 MiB PNG) via
+///   Content-Length header and streamed byte count.
+///
+/// Post-fetch validation (all must pass; returns an error on first failure):
+/// 1. Byte length equals `expected_size`.
+/// 2. SHA-256 hex of bytes equals `expected_sha256` (lowercase).
+/// 3. `decode_snapshot_from_bytes` succeeds — bytes are a well-formed snapshot.
+///
+/// Returns `tauri::ipc::Response` so bytes cross IPC as a raw buffer rather
+/// than a JSON number array (which would be ~3× the size at the 5–10 MiB cap).
+#[tauri::command]
+pub async fn fetch_snapshot_bytes(
+    url: String,
+    filename: String,
+    expected_sha256: String,
+    expected_size: usize,
+    state: State<'_, AppState>,
+) -> Result<tauri::ipc::Response, String> {
+    // ── Pre-fetch validation ──────────────────────────────────────────────
+    let relay_base = relay_api_base_url_with_override(&state);
+    validate_download_url(&url, &relay_base)?;
+
+    // Sanitize the filename and verify it is a recognised snapshot extension.
+    let filename = sanitize_filename(&filename);
+    let cap = snapshot_cap_for_filename(&filename)?;
+
+    if expected_sha256.is_empty() {
+        return Err("missing expected sha256 (imeta x field)".to_string());
+    }
+    if expected_sha256.len() != 64 || !expected_sha256.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(
+            "invalid expected sha256 — must be a 64-hex-digit lowercase string".to_string(),
+        );
+    }
+    if expected_size == 0 {
+        return Err("missing or zero expected size (imeta size field)".to_string());
+    }
+    if expected_size as u64 > cap {
+        return Err(format!(
+            "declared size {} exceeds the {} MiB cap for this format",
+            expected_size,
+            cap / (1024 * 1024)
+        ));
+    }
+
+    // ── Bounded fetch ─────────────────────────────────────────────────────
+    let bytes = fetch_blob_bytes_with_cap(&url, &state, cap).await?;
+
+    // ── Post-fetch validation ─────────────────────────────────────────────
+    // 1. Byte length must equal the declared imeta size.
+    if bytes.len() != expected_size {
+        return Err(format!(
+            "size mismatch: fetched {} bytes but imeta declared {}",
+            bytes.len(),
+            expected_size
+        ));
+    }
+
+    // 2. SHA-256 must match the declared imeta x value.
+    let actual_sha256 = hex::encode(Sha256::digest(&bytes));
+    if actual_sha256 != expected_sha256.to_ascii_lowercase() {
+        return Err("hash mismatch: fetched bytes do not match the declared SHA-256".to_string());
+    }
+
+    // 3. Bytes must parse as a valid agent snapshot.  This rejects malformed
+    //    payloads, memory-bearing PNGs, and format/extension mismatches before
+    //    the bytes reach the frontend importer.
+    decode_snapshot_from_bytes(&bytes).map_err(|e| format!("invalid snapshot: {e}"))?;
+
+    Ok(tauri::ipc::Response::new(bytes))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn snapshot_cap_json_returns_5_mib() {
+        assert_eq!(
+            snapshot_cap_for_filename("analyst.agent.json").unwrap(),
+            MAX_SNAPSHOT_JSON_BYTES as u64
+        );
+    }
+
+    #[test]
+    fn snapshot_cap_png_returns_10_mib() {
+        assert_eq!(
+            snapshot_cap_for_filename("analyst.agent.png").unwrap(),
+            MAX_SNAPSHOT_PNG_BYTES as u64
+        );
+    }
+
+    #[test]
+    fn snapshot_cap_plain_json_rejected() {
+        assert!(snapshot_cap_for_filename("data.json").is_err());
+    }
+
+    #[test]
+    fn snapshot_cap_deceptive_name_rejected() {
+        // foo.agent.json.exe must not match .agent.json
+        assert!(snapshot_cap_for_filename("foo.agent.json.exe").is_err());
+    }
+
+    #[test]
+    fn snapshot_cap_plain_png_rejected() {
+        assert!(snapshot_cap_for_filename("photo.png").is_err());
+    }
+
+    #[test]
+    fn snapshot_cap_agent_json_only_rejected() {
+        // "agent.json" without the leading dot — plain filename, not the suffix
+        assert!(snapshot_cap_for_filename("agentjson").is_err());
+    }
 
     const RELAY_BASE: &str = "https://relay.example.com";
 
