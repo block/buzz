@@ -4,6 +4,7 @@ import {
   ensureRelayObserverSubscription,
   getAgentObserverSnapshot,
   getAgentTranscript,
+  getArchivedChannelTranscript,
   ingestArchivedObserverEvents,
   subscribeAgentObserverStore,
 } from "@/features/agents/observerRelayStore";
@@ -56,6 +57,26 @@ export function useAgentTranscript(
   const getSnapshot = React.useCallback(
     () => getAgentTranscript(agentPubkey, enabled),
     [agentPubkey, enabled],
+  );
+
+  return React.useSyncExternalStore(subscribeToStore, getSnapshot);
+}
+
+/**
+ * Reactively read the channel-scoped archive transcript for a given
+ * (agent, channel) pair. Returns an empty array until archive pages are loaded.
+ *
+ * Subscribes to `subscribeAgentObserverStore` so it re-renders whenever
+ * `ingestArchivedObserverEvents` writes new pages to the archive window — the
+ * same subscription used by the live transcript, keeping both in sync.
+ */
+export function useArchivedChannelTranscript(
+  agentPubkey: string | null | undefined,
+  channelId: string | null | undefined,
+): TranscriptItem[] {
+  const getSnapshot = React.useCallback(
+    () => getArchivedChannelTranscript(agentPubkey, channelId),
+    [agentPubkey, channelId],
   );
 
   return React.useSyncExternalStore(subscribeToStore, getSnapshot);

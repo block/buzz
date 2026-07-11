@@ -39,8 +39,23 @@ export type TranscriptDisplayBlock =
        * of the run it precedes, which is always ≥ 1). Used as a tiebreaker in
        * the React list key so that two non-contiguous runs sharing the same
        * sessionId produce DISTINCT keys and React never duplicates/omits them.
+       *
+       * @deprecated Use `firstItemId` for stable React keys instead. `runIndex`
+       * shifts when older sessions are prepended before existing runs, causing
+       * key churn and unnecessary remounting of unchanged boundary nodes.
+       * Kept for callers that use position for non-key purposes.
        */
       runIndex: number;
+      /**
+       * The `id` of the first `TranscriptItem` in the run that follows this
+       * boundary. Stable across prepend: older runs inserted before this run
+       * do not change the first item of this run, so this field never churns
+       * on archive-page loads.
+       *
+       * Use this field (not `runIndex`) as the React list key component for
+       * session-boundary rows.
+       */
+      firstItemId: string;
     };
 
 export type TranscriptToolRunChildSegment =
@@ -548,12 +563,18 @@ export function buildTranscriptDisplayBlocks(
           : isNewestRun
             ? "most-recent"
             : "earlier";
+      // firstItemId: the id of the first TranscriptItem in this run. Stable
+      // across prepend — inserting older runs before this run does not change
+      // its first item. Falls back to sessionId when the run has no items
+      // (edge case for empty runs from pre-session null-id buffers).
+      const firstItemId = run.items[0]?.id ?? run.sessionId;
       allBlocks.push({
         kind: "session-boundary",
         sessionId: run.sessionId,
         sessionStartTimestamp,
         labelState,
         runIndex: i,
+        firstItemId,
       });
     }
 

@@ -27,12 +27,17 @@ import type {
 import type { AgentSessionTranscriptVariant } from "./agentSessionTranscriptContext";
 import {
   deriveLatestSessionId,
+  mergeTranscriptWindows,
   resolveDisplayEvents,
   resolveRawRailLayout,
   scopeByChannel,
 } from "./agentSessionPanelLayout";
 import { shorten } from "./agentSessionUtils";
-import { useObserverEvents, useAgentTranscript } from "./useObserverEvents";
+import {
+  useObserverEvents,
+  useAgentTranscript,
+  useArchivedChannelTranscript,
+} from "./useObserverEvents";
 
 type ManagedAgentSessionPanelProps = {
   agent: Pick<ManagedAgent, "pubkey" | "name" | "status"> & {
@@ -87,7 +92,24 @@ export function ManagedAgentSessionPanel({
     [channelId, transcript],
   );
 
-  const displayTranscript = transcriptOverride ?? scopedTranscript;
+  // Channel-scoped archive transcript — holds paged history from SQLite that
+  // extends beyond the live MAX_OBSERVER_EVENTS cap. Items are loaded by
+  // useLoadArchivedObserverEvents (scroll-triggered paging in the transcript
+  // list) and stored in a separate per-channel map that is never trimmed.
+  const archivedTranscript = useArchivedChannelTranscript(
+    agent.pubkey,
+    channelId,
+  );
+
+  // Merge live (scoped) + archive into one deduplicated, chronologically-sorted
+  // array. When transcriptOverride is set (e.g. E2E snapshot specs), bypass
+  // both — the caller supplies the full transcript.
+  const mergedTranscript = React.useMemo(
+    () => mergeTranscriptWindows(scopedTranscript, archivedTranscript),
+    [scopedTranscript, archivedTranscript],
+  );
+
+  const displayTranscript = transcriptOverride ?? mergedTranscript;
 
   const scopedEvents = React.useMemo(
     () => scopeByChannel(events, channelId),

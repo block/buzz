@@ -17,6 +17,7 @@ import {
   getAgentObserverSnapshot,
   resetAgentObserverStore,
   _testRegisterKnownAgents,
+  _testGetArchivedChannelEvents,
 } from "@/features/agents/observerRelayStore.ts";
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -145,71 +146,86 @@ describe("ingestArchivedObserverEvents", () => {
     _testRegisterKnownAgents(SUB_ID, [AGENT_PUBKEY]);
     const obs = makeObserverEvent({ seq: 1 });
     await ingestArchivedObserverEvents([makeRawEvent()], makeDecrypt(obs));
+    // Archived events with a channelId are stored in the channel-scoped archive
+    // window (not in the per-agent live snapshot). Read via raw events for tests.
+    const archivedEvents = _testGetArchivedChannelEvents(
+      AGENT_PUBKEY,
+      "chan-1",
+    );
+    assert.equal(archivedEvents.length, 1, "archive must contain 1 raw event");
+    assert.equal(archivedEvents[0].seq, 1);
+    // Also verify the live snapshot is untouched — archive separation.
     const snap = getAgentObserverSnapshot(AGENT_PUBKEY, true);
-    assert.equal(snap.events.length, 1);
-    assert.equal(snap.events[0].seq, 1);
+    assert.equal(
+      snap.events.length,
+      0,
+      "live snapshot must be empty for archived events",
+    );
   });
 
   it("test_dedup_does_not_add_live_present_event", async () => {
-    // Pre-seed a live event via E2E injection.
-    const liveObs = makeObserverEvent({
-      seq: 5,
-      timestamp: "2026-01-01T00:00:05.000Z",
-    });
-    injectObserverEventsForE2E(AGENT_PUBKEY, [liveObs]);
-
     _testRegisterKnownAgents(SUB_ID, [AGENT_PUBKEY]);
-    // Try to ingest an archived event with the SAME (seq, timestamp) — must be deduped.
+    // Ingest the same archived event twice — the channel archive window must dedup
+    // so (seq, timestamp) pairs are only stored once.
     const archivedObs = makeObserverEvent({
       seq: 5,
       timestamp: "2026-01-01T00:00:05.000Z",
     });
-    await ingestArchivedObserverEvents(
-      [makeRawEvent()],
-      makeDecrypt(archivedObs),
+    await ingestArchivedObserverEvents([makeRawEvent(), makeRawEvent()], () =>
+      Promise.resolve(archivedObs),
     );
 
-    const snap = getAgentObserverSnapshot(AGENT_PUBKEY, true);
+    const archiveEvents = _testGetArchivedChannelEvents(AGENT_PUBKEY, "chan-1");
     assert.equal(
-      snap.events.length,
+      archiveEvents.length,
       1,
-      "dedup: duplicate seq+timestamp must not add a second entry",
+      "dedup: identical (seq, timestamp) must produce exactly 1 entry in the archive window",
     );
   });
 
   it("test_older_archived_event_sorts_before_live", async () => {
-    // Pre-seed a newer live event.
+    // Pre-seed a newer live event (no channelId → goes to live path).
     const liveObs = makeObserverEvent({
       seq: 2,
       timestamp: "2026-01-01T00:00:02.000Z",
+      channelId: null,
     });
     injectObserverEventsForE2E(AGENT_PUBKEY, [liveObs]);
 
     _testRegisterKnownAgents(SUB_ID, [AGENT_PUBKEY]);
-    // Ingest an older archived event.
+    // Ingest an older archived event (has channelId → goes to archive window).
     const archivedObs = makeObserverEvent({
       seq: 1,
       timestamp: "2026-01-01T00:00:01.000Z",
+      channelId: "chan-1",
     });
     await ingestArchivedObserverEvents(
       [makeRawEvent()],
       makeDecrypt(archivedObs),
     );
 
+    // Live snapshot has seq=2; archive window for chan-1 has seq=1.
+    // After merge they should appear in ascending time order.
     const snap = getAgentObserverSnapshot(AGENT_PUBKEY, true);
-    assert.equal(snap.events.length, 2);
-    // Ascending time order: older first.
     assert.equal(
-      snap.events[0].seq,
+      snap.events.length,
       1,
-      "older archived event must sort before newer live event",
+      "live snapshot must have 1 event (no-channelId frame)",
     );
-    assert.equal(snap.events[1].seq, 2);
+    assert.equal(snap.events[0].seq, 2, "live event must be seq=2");
+
+    const archiveEvents = _testGetArchivedChannelEvents(AGENT_PUBKEY, "chan-1");
+    assert.equal(
+      archiveEvents.length,
+      1,
+      "archive window must have 1 event (older frame)",
+    );
+    assert.equal(archiveEvents[0].seq, 1, "older archived event must be seq=1");
   });
 
   it("test_multiple_events_ingested_in_order", async () => {
     _testRegisterKnownAgents(SUB_ID, [AGENT_PUBKEY]);
-    // Three events: seq 3, 1, 2 — must end up sorted 1, 2, 3.
+    // Three events with channelId — all go to archive window, not live snapshot.
     const events = [
       makeObserverEvent({ seq: 3, timestamp: "2026-01-01T00:00:03.000Z" }),
       makeObserverEvent({ seq: 1, timestamp: "2026-01-01T00:00:01.000Z" }),
@@ -222,11 +238,25 @@ describe("ingestArchivedObserverEvents", () => {
       [makeRawEvent(), makeRawEvent(), makeRawEvent()],
       decryptFn,
     );
-    const snap = getAgentObserverSnapshot(AGENT_PUBKEY, true);
-    assert.equal(snap.events.length, 3);
+    // All have channelId "chan-1" — verify archive window, not live snapshot.
+    const archiveEvents = _testGetArchivedChannelEvents(AGENT_PUBKEY, "chan-1");
+    assert.equal(
+      archiveEvents.length,
+      3,
+      "archive must have 3 ingested events",
+    );
+    // Events must be sorted ascending by timestamp (compareObserverEvents order).
     assert.deepEqual(
-      snap.events.map((e) => e.seq),
+      archiveEvents.map((e) => e.seq),
       [1, 2, 3],
+      "archive events must be sorted ascending by timestamp",
+    );
+    // Live snapshot must be empty (all events were channeled).
+    const snap = getAgentObserverSnapshot(AGENT_PUBKEY, true);
+    assert.equal(
+      snap.events.length,
+      0,
+      "live snapshot must be empty for channeled archived events",
     );
   });
 
@@ -234,6 +264,10 @@ describe("ingestArchivedObserverEvents", () => {
   // archived rows in the store must render those rows, scoped to the viewed
   // channel. Prior to the fix, getAgentObserverSnapshot returned IDLE_SNAPSHOT
   // when enabled=false, discarding ingested archived events.
+  //
+  // Updated: archived events now go to the channel-scoped archive window
+  // (getArchivedChannelTranscript), not the live snapshot. The channel-scoping
+  // is by construction — cross-channel contamination is impossible.
   it("test_idle_agent_archived_events_readable_when_enabled_false", async () => {
     _testRegisterKnownAgents(SUB_ID, [AGENT_PUBKEY]);
     // Ingest two archived events: one for channel-A, one for channel-B.
@@ -257,34 +291,39 @@ describe("ingestArchivedObserverEvents", () => {
       () => Promise.resolve(events[callIdx++]),
     );
 
-    // With enabled=false (simulating isManagedAgentActive=false for idle agent):
-    // getAgentObserverSnapshot must still return stored events.
-    const snap = getAgentObserverSnapshot(AGENT_PUBKEY, false);
-    assert.equal(
-      snap.events.length,
-      2,
-      "idle agent (enabled=false) must still read archived events from store",
+    // Channel-A archive window must have at least one item.
+    const channelAEvents = _testGetArchivedChannelEvents(
+      AGENT_PUBKEY,
+      "channel-A",
     );
-
-    // scopeByChannel on channel-A must return only the channel-A frame.
-    const { scopeByChannel } = await import(
-      "@/features/agents/ui/agentSessionPanelLayout.ts"
-    );
-    const scopedA = scopeByChannel(snap.events, "channel-A");
     assert.equal(
-      scopedA.length,
+      channelAEvents.length,
       1,
-      "scopeByChannel(channel-A) must include only channel-A frames",
+      "idle agent: channel-A archive window must contain 1 event",
     );
-    assert.equal(scopedA[0].channelId, "channel-A");
 
-    // scopeByChannel on channel-A must exclude channel-B frames — the core
-    // cross-channel-contamination guard.
-    const channelBFrames = scopedA.filter((e) => e.channelId === "channel-B");
+    // Channel-B archive window must have at least one item.
+    const channelBEvents = _testGetArchivedChannelEvents(
+      AGENT_PUBKEY,
+      "channel-B",
+    );
     assert.equal(
-      channelBFrames.length,
-      0,
-      "channel-B frames must NOT appear in channel-A scoped view",
+      channelBEvents.length,
+      1,
+      "idle agent: channel-B archive window must contain 1 event",
+    );
+
+    // Cross-channel contamination guard: channel-A events must not appear in channel-B window.
+    const channelASeqSet = new Set(
+      channelAEvents.map((e) => `${e.seq}:${e.timestamp}`),
+    );
+    const contaminated = channelBEvents.some((e) =>
+      channelASeqSet.has(`${e.seq}:${e.timestamp}`),
+    );
+    assert.equal(
+      contaminated,
+      false,
+      "channel-B archive must NOT contain channel-A events (cross-channel contamination guard)",
     );
   });
 });
@@ -445,3 +484,114 @@ describe("archive paging state reset on channel change", () => {
     );
   });
 });
+
+// ── Archive window beyond MAX_OBSERVER_EVENTS cap (regression) ────────────────
+//
+// The live observer relay store caps per-agent events at MAX_OBSERVER_EVENTS
+// (3,000). Before this fix, archived events flowed through the same capped path,
+// so loading more than 3,000 archived frames silently discarded the oldest ones.
+// The channel-scoped archive window is uncapped — all loaded history persists.
+//
+// This describe block injects 3,100 archived events and verifies every one
+// is preserved in the archive window without truncation.
+
+describe("archive window holds more than MAX_OBSERVER_EVENTS (3000) frames", () => {
+  beforeEach(() => {
+    resetAgentObserverStore();
+  });
+
+  it("test_archive_window_retains_all_events_beyond_3000_cap", async () => {
+    _testRegisterKnownAgents(SUB_ID, [AGENT_PUBKEY]);
+
+    const OVER_CAP = 3100;
+    const rawEvents = Array.from({ length: OVER_CAP }, (_, i) => ({
+      id: `e${String(i).padStart(63, "0")}`,
+      pubkey: AGENT_PUBKEY,
+      created_at: 1000 + i,
+      kind: 24200,
+      tags: [
+        ["p", OTHER_PUBKEY],
+        ["agent", AGENT_PUBKEY],
+        ["frame", "telemetry"],
+      ],
+      content: "encrypted",
+      sig: "s".repeat(128),
+    }));
+    const observerEvents = Array.from({ length: OVER_CAP }, (_, i) =>
+      makeObserverEvent({
+        seq: i + 1,
+        timestamp: new Date(1000000 + i * 1000).toISOString(),
+        channelId: "chan-1",
+      }),
+    );
+    let callIdx = 0;
+    await ingestArchivedObserverEvents(rawEvents, () =>
+      Promise.resolve(observerEvents[callIdx++]),
+    );
+
+    const archiveEvents = _testGetArchivedChannelEvents(AGENT_PUBKEY, "chan-1");
+    assert.equal(
+      archiveEvents.length,
+      OVER_CAP,
+      `archive window must hold all ${OVER_CAP} events without truncation (cap was 3000)`,
+    );
+
+    // The live snapshot must be empty — separation is strict.
+    const snap = getAgentObserverSnapshot(AGENT_PUBKEY, true);
+    assert.equal(
+      snap.events.length,
+      0,
+      "live snapshot must not contain any archived events",
+    );
+
+    // All 3100 events must be sorted ascending.
+    assert.equal(
+      archiveEvents[0].seq,
+      1,
+      "first archived event must be seq=1 (oldest)",
+    );
+    assert.equal(
+      archiveEvents[OVER_CAP - 1].seq,
+      OVER_CAP,
+      `last archived event must be seq=${OVER_CAP} (newest)`,
+    );
+  });
+
+  it("test_resetAgentObserverStore_clears_archive_window", async () => {
+    _testRegisterKnownAgents(SUB_ID, [AGENT_PUBKEY]);
+
+    const obs = makeObserverEvent({ seq: 1, channelId: "chan-1" });
+    await ingestArchivedObserverEvents([makeRawEvent()], () =>
+      Promise.resolve(obs),
+    );
+
+    // Confirm events are present before reset.
+    assert.equal(
+      _testGetArchivedChannelEvents(AGENT_PUBKEY, "chan-1").length,
+      1,
+      "pre-reset: archive must have 1 event",
+    );
+
+    // Reset must wipe the archive window.
+    resetAgentObserverStore();
+
+    assert.equal(
+      _testGetArchivedChannelEvents(AGENT_PUBKEY, "chan-1").length,
+      0,
+      "post-reset: archive window must be empty after resetAgentObserverStore",
+    );
+  });
+});
+
+// ── Session-boundary key stability across prepend (regression) ────────────────
+//
+// getDisplayBlockKey for session-boundary blocks previously used `runIndex` (the
+// run's array-position), which shifts when older sessions are prepended before
+// existing runs — causing React to remount unchanged boundaries and churn the
+// virtual list. The fix uses `firstItemId` (the id of the first item in the
+// following run), which is invariant across prepend.
+//
+// The full key-stability test suite lives in agentSessionTranscriptGrouping.test.mjs
+// where proper TranscriptItem fixtures are already defined. See
+// buildTranscriptDisplayBlocks_sessionBoundary_emitsFirstItemId and
+// buildTranscriptDisplayBlocks_sessionBoundary_keyStableAcrossPrepend there.

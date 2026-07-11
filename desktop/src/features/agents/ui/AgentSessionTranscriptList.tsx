@@ -338,7 +338,9 @@ function getDisplayBlockKey(block: TranscriptDisplayBlock) {
     return block.item.id;
   }
   if (block.kind === "session-boundary") {
-    return `session-boundary:${block.sessionId}:${block.runIndex}`;
+    // Use firstItemId (stable across prepend) rather than runIndex (shifts when
+    // older sessions are prepended, causing unnecessary boundary remounts).
+    return `session-boundary:${block.sessionId}:${block.firstItemId}`;
   }
   return `turn:${block.turnId}`;
 }

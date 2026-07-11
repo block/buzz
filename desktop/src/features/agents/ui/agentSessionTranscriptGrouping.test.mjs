@@ -1328,3 +1328,81 @@ test("splitIntoSessionRuns: system-prompt renders before turn blocks when no use
     `toolA (${toolAIdx}) must be before boundary (${boundaryIdx})`,
   );
 });
+
+// ── Session-boundary firstItemId key stability (regression) ───────────────────
+//
+// Previously getDisplayBlockKey keyed boundaries as
+// `session-boundary:${sessionId}:${runIndex}`. `runIndex` is the run's
+// position in the ordered array — it SHIFTS when older sessions are prepended
+// (archive page load), causing React to remount unchanged boundaries and churn
+// the virtual list.
+//
+// The fix replaces `runIndex` with `firstItemId` — the id of the first
+// TranscriptItem in the run — which is invariant across prepend.
+
+test("buildTranscriptDisplayBlocks_sessionBoundary_emitsFirstItemId", () => {
+  // Two sessions: sess-1 (older) then sess-2 (newer).
+  const items = [
+    sessionItem("a", "sess-1", "2026-07-08T00:00:01.000Z"),
+    sessionItem("b", "sess-2", "2026-07-08T00:00:02.000Z"),
+    sessionItem("c", "sess-2", "2026-07-08T00:00:03.000Z"),
+  ];
+  const blocks = buildTranscriptDisplayBlocks(items, null);
+  const boundary = blocks.find((b) => b.kind === "session-boundary");
+  assert.ok(boundary, "boundary must be present between two sessions");
+  assert.equal(
+    boundary.sessionId,
+    "sess-2",
+    "boundary labels the newer session",
+  );
+  // firstItemId must equal the id of the first item in sess-2's run.
+  assert.ok(boundary.firstItemId, "boundary must carry firstItemId");
+  // "b" is the first item in sess-2's run (from sessionItem("b", "sess-2")).
+  assert.equal(
+    boundary.firstItemId,
+    "b",
+    "firstItemId must equal the id of the first item in the following session run",
+  );
+});
+
+test("buildTranscriptDisplayBlocks_sessionBoundary_keyStableAcrossPrepend", () => {
+  // Before: sess-1 then sess-2.
+  const before = [
+    sessionItem("a", "sess-1", "2026-07-08T00:00:02.000Z"),
+    sessionItem("b", "sess-2", "2026-07-08T00:00:03.000Z"),
+  ];
+  const blocksBefore = buildTranscriptDisplayBlocks(before, null);
+  const boundaryBefore = blocksBefore.find(
+    (b) => b.kind === "session-boundary" && b.sessionId === "sess-2",
+  );
+  assert.ok(boundaryBefore, "must have sess-2 boundary before prepend");
+  const keyBefore = `session-boundary:${boundaryBefore.sessionId}:${boundaryBefore.firstItemId}`;
+
+  // After: prepend an older sess-0 before sess-1. Now [sess-0, sess-1, sess-2].
+  const after = [
+    sessionItem("z", "sess-0", "2026-07-08T00:00:01.000Z"), // oldest — prepended
+    sessionItem("a", "sess-1", "2026-07-08T00:00:02.000Z"),
+    sessionItem("b", "sess-2", "2026-07-08T00:00:03.000Z"),
+  ];
+  const blocksAfter = buildTranscriptDisplayBlocks(after, null);
+  const boundaryAfter = blocksAfter.find(
+    (b) => b.kind === "session-boundary" && b.sessionId === "sess-2",
+  );
+  assert.ok(boundaryAfter, "must still have sess-2 boundary after prepend");
+  const keyAfter = `session-boundary:${boundaryAfter.sessionId}:${boundaryAfter.firstItemId}`;
+
+  // firstItemId-based key must be identical before and after prepend.
+  assert.equal(
+    keyBefore,
+    keyAfter,
+    "session-boundary React key must not change when an older session is prepended",
+  );
+
+  // Sanity check: runIndex DID shift (from 1 to 2) confirming the old key would have changed.
+  assert.equal(boundaryBefore.runIndex, 1, "runIndex before prepend must be 1");
+  assert.equal(
+    boundaryAfter.runIndex,
+    2,
+    "runIndex after prepend must be 2, confirming it is unstable",
+  );
+});
