@@ -331,6 +331,7 @@ test("message images load a thumbnail before requesting the original", async ({
   await expect(trigger.locator(`img[src="${PROGRESSIVE_URL}"]`)).toHaveCount(0);
   expect(fullRequested).toBe(false);
   const before = await trigger.boundingBox();
+  const rowBefore = await row.boundingBox();
 
   releaseThumbnail?.();
   const full = trigger.locator(`img[src="${PROGRESSIVE_URL}"]`);
@@ -341,6 +342,7 @@ test("message images load a thumbnail before requesting the original", async ({
   await expect(full).toBeVisible();
   await expect(full).not.toHaveClass(/opacity-0/);
   expect(await trigger.boundingBox()).toEqual(before);
+  expect(await row.boundingBox()).toEqual(rowBefore);
 });
 
 test("gallery items without imeta dimensions keep their thumbnail aspect ratio", async ({

@@ -3,7 +3,7 @@ import * as React from "react";
 import { cn } from "@/shared/lib/cn";
 
 const IMAGE_CLASS =
-  "col-start-1 row-start-1 block h-auto max-h-64 max-w-[min(24rem,100%)] rounded-2xl object-contain";
+  "absolute inset-0 block h-full w-full rounded-2xl object-contain";
 
 type ProgressiveImageProps = {
   alt: string | undefined;
@@ -64,8 +64,18 @@ export function ProgressiveImage({
     [fullImageRef, thumbnailRef],
   );
 
+  const frameStyle = React.useMemo<React.CSSProperties>(() => {
+    const scale = Math.min(1, 384 / width, 256 / height);
+    return {
+      ...style,
+      aspectRatio: `${width} / ${height}`,
+      height: "auto",
+      width: `${Math.max(1, Math.round(width * scale))}px`,
+    };
+  }, [height, style, width]);
+
   return (
-    <span className="grid max-w-full">
+    <span className="relative block max-w-full" style={frameStyle}>
       {thumbSrc ? (
         <img
           alt=""
