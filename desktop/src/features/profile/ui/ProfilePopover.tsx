@@ -1,5 +1,5 @@
 import * as React from "react";
-import { ChevronRight, MessageSquareText, Smile } from "lucide-react";
+import { ChevronRight, Smile } from "lucide-react";
 
 import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
@@ -274,7 +274,6 @@ export function ProfilePopover({
                 role="menuitem"
                 type="button"
               >
-                <MessageSquareText className="h-4 w-4 shrink-0 text-muted-foreground" />
                 <span className="flex-1">Send feedback</span>
               </button>
             ) : null}
