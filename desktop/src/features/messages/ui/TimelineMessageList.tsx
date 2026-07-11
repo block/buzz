@@ -30,6 +30,7 @@ import { MessageRow } from "./MessageRow";
 import { MessageThreadSummaryRow } from "./MessageThreadSummaryRow";
 import { SystemMessageRow } from "./SystemMessageRow";
 import { UnreadDivider } from "./UnreadDivider";
+import { useTimelineRetention } from "./useTimelineRetention";
 
 export type TimelineVirtualizerApi = {
   scrollToBottom: (behavior?: ScrollBehavior) => void;
@@ -436,6 +437,7 @@ function VirtualizedTimelineRows({
     () => buildVirtualizedItems(dayGroups, leadingContent),
     [dayGroups, leadingContent],
   );
+  const keys = React.useMemo(() => items.map(virtualizedItemKey), [items]);
   itemsLengthRef.current = items.length;
   const previousKeysRef = React.useRef<readonly string[]>([]);
   const prependAnchorRef = React.useRef<{
@@ -451,7 +453,6 @@ function VirtualizedTimelineRows({
   // Virtua's `shift` is a one-render instruction, not a persistent mode. If it
   // stays true after a prepend, later measurement changes can keep anchoring
   // from the end and leave a stale blank range until the next scroll event.
-  const keys = React.useMemo(() => items.map(virtualizedItemKey), [items]);
   const isPrepend = React.useMemo(() => {
     void prependShiftEpoch;
     return didPrependVirtualizedTimeline(previousKeysRef.current, keys);
@@ -563,7 +564,9 @@ function VirtualizedTimelineRows({
 
   React.useLayoutEffect(() => {
     previousKeysRef.current = keys;
-    if (isPrepend) clearPrependShift();
+    if (isPrepend) {
+      clearPrependShift();
+    }
     if (!hasInitialPositionedRef.current && items.length > 0) {
       hasInitialPositionedRef.current = true;
       const scrollToSettledBottom = () => {
@@ -675,6 +678,9 @@ function VirtualizedTimelineRows({
     };
   }, []);
 
+  const { retainedIndices, onScrollEnd: handleScrollEnd } =
+    useTimelineRetention(keys, listRef, isPrepend);
+
   const handleScroll = React.useCallback(
     (offset: number) => {
       const list = listRef.current;
@@ -717,10 +723,11 @@ function VirtualizedTimelineRows({
         className="h-full min-h-0 w-full overflow-y-auto overflow-x-hidden overscroll-contain px-2"
         data={items}
         bufferSize={offscreenBufferSize}
-        keepMounted={items.map((_, index) => index)}
+        keepMounted={retainedIndices}
         style={{ overflowAnchor: "none" }}
         shift={isPrepend}
         onScroll={handleScroll}
+        onScrollEnd={handleScrollEnd}
       >
         {(item) => {
           if (item.kind === "bottom-spacer") {

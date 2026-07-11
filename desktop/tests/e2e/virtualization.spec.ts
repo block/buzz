@@ -496,6 +496,14 @@ test.describe("list virtualization", () => {
       const exitTrace = await exitTracePromise;
       expect(exitTrace.maxForwardTravel).toBeGreaterThan(200);
       expect(exitTrace.maxRollback).toBeLessThan(5);
+
+      // Loading more history must not return keepMounted to its old linear
+      // growth. Virtua still retains every measured size for spacer geometry;
+      // only the live message-row DOM stays bounded around the reader and tail.
+      const mountedMessageCount = await timeline
+        .locator("[data-message-id]")
+        .count();
+      expect(mountedMessageCount).toBeLessThan(400);
     }
   });
 
