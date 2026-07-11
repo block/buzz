@@ -533,178 +533,214 @@ fn import_preview_flags_non_empty_source_allowlist() {
     );
 }
 
-/// keep_allowlist = false → always produces owner-only mode with empty list,
-/// preventing an empty-allowlist-mode definition from being persisted.
-/// keep_allowlist = true with a valid allowlist → preserved via
-/// resolve_mint_behavioral_defaults validation.
+// ── Import: resolve_snapshot_import_behavior — the production selection path
+//
+// All tests below call `resolve_snapshot_import_behavior` directly.  This is
+// the same function invoked by `confirm_agent_snapshot_import`, so the tests
+// exercise the exact production code path, not a reconstruction of it.
+
+/// Uppercase hex pubkeys are lowercased and duplicates are removed before the
+/// resolved allowlist is persisted.
 #[test]
-fn import_allowlist_clear_and_keep_are_enforced_server_side() {
-    use crate::managed_agents::{resolve_mint_behavioral_defaults, RespondTo};
-
-    let valid_pubkey = "aabbcc".repeat(11)[..64].to_string();
-    let source_allowlist = vec![valid_pubkey.clone()];
-
-    // Clear path: always owner-only, empty list (regardless of source mode).
-    // This is the exact logic in confirm_agent_snapshot_import when keep=false.
-    let cleared_mode = RespondTo::OwnerOnly;
-    let cleared_list: Vec<String> = Vec::new();
-    assert_eq!(
-        cleared_mode,
-        RespondTo::default(),
-        "clear must downgrade to default owner-only mode"
-    );
-    assert!(cleared_list.is_empty(), "cleared allowlist must be empty");
-
-    // Keep path: goes through resolve_mint_behavioral_defaults for validation.
-    let minted = resolve_mint_behavioral_defaults(
-        Some(RespondTo::Allowlist),
-        source_allowlist.clone(),
+fn import_allowlist_uppercase_is_normalized_and_deduplicated() {
+    let upper = "AABBCC".repeat(11)[..64].to_string();
+    let lower = upper.to_ascii_lowercase();
+    // allowlist-mode source + keep=true: normalization applies.
+    let minted = resolve_snapshot_import_behavior(
+        Some("allowlist"),
+        &[upper.clone(), upper.clone()], // uppercase + duplicate
         None,
         None,
-        None,
+        true, // keep
     )
     .unwrap();
     assert_eq!(
-        minted.respond_to,
-        RespondTo::Allowlist,
-        "kept mode must be Allowlist"
-    );
-    assert_eq!(
-        minted.respond_to_allowlist, source_allowlist,
-        "kept allowlist must equal the source"
-    );
-
-    // Keep path with an allowlist-mode source but empty list → validation error.
-    // Importing such a snapshot with keep=true must fail before any write.
-    let err = resolve_mint_behavioral_defaults(
-        Some(RespondTo::Allowlist),
-        vec![], // empty — invalid
-        None,
-        None,
-        None,
-    )
-    .unwrap_err();
-    assert!(
-        err.contains("requires at least one pubkey"),
-        "empty allowlist-mode must be rejected by the mint boundary"
-    );
-}
-
-// ── Import: allowlist normalization and mode-preservation ─────────────────
-
-/// validate_respond_to_allowlist normalizes uppercase hex and deduplicates.
-#[test]
-fn import_allowlist_uppercase_is_normalized_and_deduplicated() {
-    use crate::managed_agents::validate_respond_to_allowlist;
-    let upper = "AABBCC".repeat(11)[..64].to_string();
-    let lower = upper.to_ascii_lowercase();
-    // Pass uppercase + duplicate.
-    let result = validate_respond_to_allowlist(&[upper.clone(), upper.clone()]).unwrap();
-    assert_eq!(
-        result,
+        minted.respond_to_allowlist,
         vec![lower],
         "uppercase must be lowercased, duplicate removed"
     );
 }
 
-/// validate_respond_to_allowlist rejects a malformed pubkey.
+/// A malformed pubkey in the raw allowlist is rejected before any key
+/// generation or write.
 #[test]
 fn import_allowlist_malformed_pubkey_is_rejected() {
-    use crate::managed_agents::validate_respond_to_allowlist;
     let bad = "notahexpubkey".to_string();
-    let err = validate_respond_to_allowlist(&[bad]).unwrap_err();
+    let err =
+        resolve_snapshot_import_behavior(Some("allowlist"), &[bad], None, None, true).unwrap_err();
     assert!(
         err.contains("invalid pubkey"),
-        "malformed pubkey must be rejected: {err}"
+        "malformed pubkey must be rejected before key generation: {err}"
     );
 }
 
-/// keepAllowlist = false on a non-allowlist source (anyone) preserves the
-/// source mode — no allowlist choice was displayed to the user.
+/// keep_allowlist = false on a non-allowlist source (anyone) with an empty
+/// list preserves the source mode — no list was present so the toggle was
+/// never shown.
 #[test]
-fn import_non_allowlist_mode_preserved_when_clear_not_applicable() {
-    use crate::managed_agents::{resolve_mint_behavioral_defaults, RespondTo};
-    // Simulate: source_mode = Anyone, keep_allowlist = false.
-    // is_source_allowlist_mode = false → preserve source mode.
-    let resolved_mode = Some(RespondTo::Anyone);
-    let resolved_allowlist: Vec<String> = Vec::new(); // not allowlist-mode
-    let minted =
-        resolve_mint_behavioral_defaults(resolved_mode, resolved_allowlist, None, None, None)
-            .unwrap();
+fn import_non_allowlist_mode_preserved_when_keep_false() {
+    use crate::managed_agents::RespondTo;
+    let minted = resolve_snapshot_import_behavior(
+        Some("anyone"),
+        &[], // no allowlist — toggle never shown
+        None,
+        None,
+        false,
+    )
+    .unwrap();
     assert_eq!(
         minted.respond_to,
         RespondTo::Anyone,
-        "anyone mode must be preserved when clear is not applicable"
+        "anyone mode must be preserved when list is empty (toggle not shown)"
     );
     assert!(
         minted.respond_to_allowlist.is_empty(),
-        "no allowlist for anyone mode"
+        "anyone mode must have no allowlist"
     );
 }
 
-/// keepAllowlist = false on an allowlist-mode source downgrades to owner-only.
+/// Non-allowlist mode with a non-empty list and keep=true: preserve mode + list.
+/// The toggle WAS shown (list is non-empty) so keep_allowlist applies.
 #[test]
-fn import_allowlist_mode_clear_downgrades_to_owner_only() {
-    use crate::managed_agents::{resolve_mint_behavioral_defaults, RespondTo};
-    // Simulate: source_mode = Allowlist, keep_allowlist = false.
-    // is_source_allowlist_mode = true → downgrade.
-    let resolved_mode = Some(RespondTo::OwnerOnly);
-    let resolved_allowlist: Vec<String> = Vec::new();
-    let minted =
-        resolve_mint_behavioral_defaults(resolved_mode, resolved_allowlist, None, None, None)
-            .unwrap();
+fn import_non_allowlist_mode_with_nonempty_list_keep_preserves_mode_and_list() {
+    use crate::managed_agents::RespondTo;
+    let raw = "aabbcc".repeat(11)[..64].to_string();
+    let minted = resolve_snapshot_import_behavior(
+        Some("anyone"),
+        &[raw.clone()],
+        None,
+        None,
+        true, // keep
+    )
+    .unwrap();
+    assert_eq!(
+        minted.respond_to,
+        RespondTo::Anyone,
+        "anyone mode must be preserved on keep=true"
+    );
+    assert_eq!(
+        minted.respond_to_allowlist,
+        vec![raw],
+        "list must be preserved on keep=true"
+    );
+}
+
+/// Non-allowlist mode with a non-empty list and keep=false: Clear preserves
+/// the source mode but empties the list.  Non-allowlist modes are valid
+/// without entries — no mode downgrade occurs.
+#[test]
+fn import_non_allowlist_mode_with_nonempty_list_clear_preserves_mode_empties_list() {
+    use crate::managed_agents::RespondTo;
+    let raw = "aabbcc".repeat(11)[..64].to_string();
+    let minted = resolve_snapshot_import_behavior(
+        Some("anyone"),
+        &[raw],
+        None,
+        None,
+        false, // clear
+    )
+    .unwrap();
+    assert_eq!(
+        minted.respond_to,
+        RespondTo::Anyone,
+        "non-allowlist mode must be preserved on clear (mode is valid without entries)"
+    );
+    assert!(
+        minted.respond_to_allowlist.is_empty(),
+        "cleared list must be empty"
+    );
+}
+
+/// keep_allowlist = true with a valid non-empty allowlist-mode snapshot
+/// preserves the mode and the full allowlist.
+#[test]
+fn import_allowlist_keep_with_valid_list_succeeds() {
+    use crate::managed_agents::RespondTo;
+    let raw = "aabbcc".repeat(11)[..64].to_string();
+    let minted = resolve_snapshot_import_behavior(
+        Some("allowlist"),
+        &[raw.clone()],
+        None,
+        None,
+        true, // keep
+    )
+    .unwrap();
+    assert_eq!(minted.respond_to, RespondTo::Allowlist);
+    assert_eq!(minted.respond_to_allowlist, vec![raw]);
+}
+
+/// keep_allowlist = false on an allowlist-mode source with a non-empty list
+/// downgrades to owner-only and clears the allowlist.
+#[test]
+fn import_allowlist_clear_downgrades_to_owner_only() {
+    use crate::managed_agents::RespondTo;
+    let raw = "aabbcc".repeat(11)[..64].to_string();
+    let minted = resolve_snapshot_import_behavior(
+        Some("allowlist"),
+        &[raw],
+        None,
+        None,
+        false, // clear
+    )
+    .unwrap();
     assert_eq!(
         minted.respond_to,
         RespondTo::OwnerOnly,
         "clear on allowlist-mode must yield owner-only"
     );
-    assert!(minted.respond_to_allowlist.is_empty());
-}
-
-/// keepAllowlist = true with a valid normalized allowlist succeeds.
-#[test]
-fn import_allowlist_keep_with_valid_list_succeeds() {
-    use crate::managed_agents::{
-        resolve_mint_behavioral_defaults, validate_respond_to_allowlist, RespondTo,
-    };
-    let raw = "aabbcc".repeat(11)[..64].to_string();
-    let normalized = validate_respond_to_allowlist(&[raw]).unwrap();
-    let minted = resolve_mint_behavioral_defaults(
-        Some(RespondTo::Allowlist),
-        normalized.clone(),
-        None,
-        None,
-        None,
-    )
-    .unwrap();
-    assert_eq!(minted.respond_to, RespondTo::Allowlist);
-    assert_eq!(minted.respond_to_allowlist, normalized);
-}
-
-/// keepAllowlist = true with an empty allowlist-mode snapshot is rejected.
-#[test]
-fn import_allowlist_keep_with_empty_list_is_rejected() {
-    use crate::managed_agents::{resolve_mint_behavioral_defaults, RespondTo};
-    let err =
-        resolve_mint_behavioral_defaults(Some(RespondTo::Allowlist), vec![], None, None, None)
-            .unwrap_err();
     assert!(
-        err.contains("requires at least one pubkey"),
-        "empty allowlist-mode with keep=true must be rejected: {err}"
+        minted.respond_to_allowlist.is_empty(),
+        "cleared allowlist must be empty"
     );
 }
 
-/// Out-of-range parallelism (0 and 33) is rejected by resolve_mint_behavioral_defaults.
+/// Allowlist-mode snapshot with an empty list and keep=false (the default
+/// when no UI choice was shown) is rejected before any key generation.
+/// This is the primary defect path that the prior implementation missed.
+#[test]
+fn import_empty_allowlist_mode_rejected_with_keep_false() {
+    let err = resolve_snapshot_import_behavior(
+        Some("allowlist"),
+        &[], // empty — no entries to keep or clear
+        None,
+        None,
+        false, // keep=false is the default: UI never showed a choice
+    )
+    .unwrap_err();
+    assert!(
+        err.contains("allowlist is empty"),
+        "empty allowlist-mode + keep=false must be rejected before key generation: {err}"
+    );
+}
+
+/// Allowlist-mode snapshot with an empty list and keep=true is also rejected.
+/// The user explicitly said Keep, but there is nothing to keep.
+#[test]
+fn import_empty_allowlist_mode_rejected_with_keep_true() {
+    let err = resolve_snapshot_import_behavior(
+        Some("allowlist"),
+        &[], // empty
+        None,
+        None,
+        true, // keep=true: user said Keep, but the list is empty
+    )
+    .unwrap_err();
+    assert!(
+        err.contains("allowlist is empty"),
+        "empty allowlist-mode + keep=true must be rejected before key generation: {err}"
+    );
+}
+
+/// Out-of-range parallelism (0 and 33) is rejected.
 #[test]
 fn import_out_of_range_parallelism_is_rejected() {
-    use crate::managed_agents::{resolve_mint_behavioral_defaults, RespondTo};
     for bad_par in [0u32, 33u32] {
-        let err = resolve_mint_behavioral_defaults(
-            Some(RespondTo::OwnerOnly),
-            vec![],
+        let err = resolve_snapshot_import_behavior(
+            None, // no respond_to (defaults to owner-only)
+            &[],
             None,
             Some(bad_par),
-            None,
+            false,
         )
         .unwrap_err();
         assert!(

@@ -310,6 +310,96 @@ pub async fn export_agent_snapshot(
 
 // ── Import helpers ─────────────────────────────────────────────────────────
 
+/// Resolve the behavioral defaults for an incoming agent snapshot.
+///
+/// This is the single authoritative selection path for all import-time
+/// allowlist and behavioral decisions. It is extracted as a pure, testable
+/// function so that unit tests exercise the exact production logic rather
+/// than a reconstruction of it.
+///
+/// # UI contract
+///
+/// The Keep/Clear toggle is shown whenever `has_source_allowlist` is true
+/// (i.e. the raw allowlist is non-empty), regardless of the source mode.
+/// The mode (`respond_to` wire string) and the list are independent axes.
+///
+/// # Decision table
+///
+/// | Source mode  | Non-empty list | keep=true            | keep=false              |
+/// |--------------|----------------|----------------------|-------------------------|
+/// | allowlist    | yes            | preserve mode + list | owner-only + empty      |
+/// | allowlist    | no             | **Err** (reject)     | **Err** (reject)        |
+/// | non-allowlist| yes            | preserve mode + list | preserve mode + empty   |
+/// | non-allowlist| no             | preserve mode        | preserve mode           |
+///
+/// Allowlist-mode + empty list is always rejected: the UI showed no choice
+/// and there is no coherent value to write.
+///
+/// Non-allowlist + non-empty + Clear: preserve the source mode but empty the
+/// list.  Only allowlist-mode requires a mode downgrade on Clear, because
+/// `allowlist` without entries is an invalid state.  Non-allowlist modes
+/// remain valid with an empty list.
+pub(crate) fn resolve_snapshot_import_behavior(
+    raw_respond_to: Option<&str>,
+    raw_allowlist: &[String],
+    mcp_toolsets: Option<String>,
+    parallelism: Option<u32>,
+    keep_allowlist: bool,
+) -> Result<crate::managed_agents::MintBehavioralDefaults, String> {
+    use crate::managed_agents::{
+        resolve_mint_behavioral_defaults, validate_respond_to_allowlist, RespondTo,
+    };
+
+    // Step 1: normalize allowlist; reject malformed pubkeys immediately.
+    let normalized_allowlist = validate_respond_to_allowlist(raw_allowlist)?;
+
+    // Step 2: detect source mode and whether a list was present.
+    let source_mode: Option<RespondTo> = match raw_respond_to {
+        Some(wire) => Some(RespondTo::parse_wire(wire)?),
+        None => None,
+    };
+    let is_source_allowlist_mode = source_mode == Some(RespondTo::Allowlist);
+    let has_source_allowlist = !normalized_allowlist.is_empty();
+
+    // Step 3: hard-reject allowlist-mode + empty list before any key
+    // generation — no coherent value can be written either way.
+    if is_source_allowlist_mode && !has_source_allowlist {
+        return Err(
+            "snapshot respond-to mode is 'allowlist' but the allowlist is empty — \
+             cannot import: no pubkeys to grant access to"
+                .to_string(),
+        );
+    }
+
+    // Step 4: apply Keep/Clear when the toggle was visible (list non-empty),
+    // or preserve the source mode when it was not.
+    let (resolved_mode, resolved_allowlist) = if has_source_allowlist {
+        if keep_allowlist {
+            // Keep: preserve source mode and validated list.
+            (source_mode, normalized_allowlist)
+        } else if is_source_allowlist_mode {
+            // Clear on allowlist-mode: must downgrade mode to owner-only because
+            // allowlist mode without entries is an invalid state.
+            (Some(RespondTo::OwnerOnly), Vec::new())
+        } else {
+            // Clear on non-allowlist mode: preserve source mode, empty the list.
+            // Non-allowlist modes are valid without entries.
+            (source_mode, Vec::new())
+        }
+    } else {
+        // No list present → toggle was never shown; preserve source mode as-is.
+        (source_mode, normalized_allowlist)
+    };
+
+    resolve_mint_behavioral_defaults(
+        resolved_mode,
+        resolved_allowlist,
+        mcp_toolsets,
+        parallelism,
+        None, // no definition record; all inputs are explicit from the snapshot
+    )
+}
+
 const PNG_MAGIC: [u8; 4] = [0x89, 0x50, 0x4e, 0x47];
 
 /// Decode a `buzz-agent-snapshot v1` manifest from raw bytes.
@@ -457,64 +547,12 @@ pub async fn confirm_agent_snapshot_import(
     }
 
     // ── Resolve behavioral defaults ──────────────────────────────────────────
-    //
-    // The snapshot carries respond_to, an allowlist, toolsets, and parallelism
-    // as opaque wire data. All four fields are resolved in one call to
-    // resolve_mint_behavioral_defaults so the resulting MintBehavioralDefaults
-    // is a single consistent struct used verbatim for both PersonaRecord and
-    // ManagedAgentRecord.
-    //
-    // Allowlist normalization (validate_respond_to_allowlist) MUST happen
-    // before passing to resolve_mint_behavioral_defaults — the function
-    // contract (types.rs:813-826) treats input_allowlist as already-normalized
-    // and only calls validate_respond_to_allowlist on the definition fallback
-    // branch.  Raw snapshot pubkeys may be uppercase, padded, or duplicated;
-    // passing them unvalidated would persist invalid data.
-    //
-    // keep_allowlist semantics:
-    //   - The UI shows the Keep/Clear choice ONLY when the source snapshot is
-    //     allowlist-mode (has_source_allowlist = true in the preview).
-    //   - keep_allowlist = true  → user confirmed Keep; pass mode + normalized
-    //     list through the validator.
-    //   - keep_allowlist = false + allowlist-mode source → user chose Clear;
-    //     downgrade to owner-only (empty list).
-    //   - keep_allowlist = false + non-allowlist source → the UI never showed
-    //     a choice; preserve the source mode (e.g. "anyone") unchanged.
-    let source_mode = snapshot
-        .definition
-        .respond_to
-        .as_deref()
-        .map(crate::managed_agents::RespondTo::parse_wire)
-        .transpose()?;
-
-    let is_source_allowlist_mode = source_mode == Some(RespondTo::Allowlist);
-
-    // Normalize the snapshot allowlist regardless of mode — it is the
-    // caller's input and must be validated before any further use.
-    let normalized_allowlist =
-        validate_respond_to_allowlist(&snapshot.definition.respond_to_allowlist)
-            .map_err(|e| format!("snapshot respond-to allowlist is invalid: {e}"))?;
-
-    let (resolved_mode, resolved_allowlist_input) = if input.keep_allowlist {
-        // User confirmed Keep: use source mode + normalized list.
-        (source_mode, normalized_allowlist)
-    } else if is_source_allowlist_mode {
-        // User chose Clear on an allowlist-mode snapshot: downgrade.
-        // An empty-allowlist definition in allowlist-mode fails spawn
-        // validation, so we replace both mode and list.
-        (Some(RespondTo::OwnerOnly), Vec::new())
-    } else {
-        // Non-allowlist source, no UI choice shown: preserve source mode.
-        (source_mode, Vec::new())
-    };
-
-    // Single resolve_mint_behavioral_defaults call for all four fields.
-    let minted = resolve_mint_behavioral_defaults(
-        resolved_mode,
-        resolved_allowlist_input,
+    let minted = resolve_snapshot_import_behavior(
+        snapshot.definition.respond_to.as_deref(),
+        &snapshot.definition.respond_to_allowlist,
         snapshot.definition.mcp_toolsets.clone(),
         snapshot.definition.parallelism,
-        None,
+        input.keep_allowlist,
     )?;
     let minted_parallelism = minted.parallelism;
 
