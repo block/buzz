@@ -336,14 +336,12 @@ type VirtualizedTimelineItem =
   | {
       kind: "leading-content";
       content: React.ReactNode;
-      hasTopClearance: boolean;
     }
   | { kind: "bottom-spacer" }
   | {
       kind: "timeline-item";
       item: TimelineNonDayItem;
       dayHeading: Pick<TimelineDayGroup, "headingTimestamp"> | null;
-      hasTopClearance: boolean;
     };
 
 function timelineItemMessageId(item: TimelineNonDayItem): string | null {
@@ -372,7 +370,6 @@ function buildVirtualizedItems(
               headingTimestamp: group.headingTimestamp,
             }
           : null,
-      hasTopClearance: !leadingContent && group === dayGroups[0] && index === 0,
     })),
   );
 
@@ -382,7 +379,6 @@ function buildVirtualizedItems(
           {
             kind: "leading-content" as const,
             content: leadingContent,
-            hasTopClearance: true,
           },
         ]
       : []),
@@ -696,7 +692,7 @@ function VirtualizedTimelineRows({
     <div className="h-full min-h-0 w-full" ref={hostRef}>
       <VList
         ref={listRef}
-        className="h-full min-h-0 w-full overflow-y-auto overflow-x-hidden overscroll-contain px-2"
+        className="h-full min-h-0 w-full overflow-y-auto overflow-x-hidden overscroll-contain px-2 pt-[var(--channel-top-chrome-height,4.5rem)]"
         data={items}
         bufferSize={offscreenBufferSize}
         keepMounted={retainedIndices}
@@ -716,17 +712,7 @@ function VirtualizedTimelineRows({
             );
           }
           if (item.kind === "leading-content") {
-            return (
-              <div key={virtualizedItemKey(item)}>
-                {item.hasTopClearance ? (
-                  <div
-                    aria-hidden
-                    className="h-[var(--channel-top-chrome-height,4.5rem)]"
-                  />
-                ) : null}
-                {item.content}
-              </div>
-            );
+            return <div key={virtualizedItemKey(item)}>{item.content}</div>;
           }
           const { dayHeading } = item;
           return (
@@ -740,12 +726,6 @@ function VirtualizedTimelineRows({
               key={virtualizedItemKey(item)}
               useContentVisibility={false}
             >
-              {item.hasTopClearance ? (
-                <div
-                  aria-hidden
-                  className="h-[var(--channel-top-chrome-height,4.5rem)]"
-                />
-              ) : null}
               {dayHeading?.headingTimestamp !== null && dayHeading ? (
                 <DayDivider
                   label={formatDayHeading(dayHeading.headingTimestamp)}
