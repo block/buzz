@@ -840,6 +840,19 @@ declare global {
      * updated channel state visible to subscribers.
      */
     __BUZZ_E2E_INVALIDATE_CHANNELS__?: () => Promise<void>;
+    /**
+     * Directly mutate a mock channel's properties without going through a
+     * command handler.  Use for E2E regressions that need to change
+     * channel_type or remove isMember in a single synchronous step, then
+     * follow up with __BUZZ_E2E_INVALIDATE_CHANNELS__ to flush the cache.
+     *
+     * Only the listed fields are writeable; omitted fields are left unchanged.
+     */
+    __BUZZ_E2E_MUTATE_CHANNEL__?: (opts: {
+      channelId: string;
+      channelType?: "stream" | "forum" | "dm";
+      removeMemberPubkey?: string;
+    }) => void;
   }
 }
 
@@ -2303,7 +2316,7 @@ const mockChannels: MockChannel[] = [
   // Used by agent-snapshot-send.spec.ts to prove picker/search/memgate/done
   // all use the same resolved label from useUsersBatchQuery.
   createMockChannel({
-    id: "d1rec7dm-0000-4000-8000-000000000001",
+    id: "d1ec7000-d000-4000-8000-000000000001",
     name: "DM",
     channel_type: "dm",
     visibility: "private",
@@ -2335,7 +2348,7 @@ const mockChannels: MockChannel[] = [
   // NOTE: participants are BOB + CHARLIE (not ALICE, which conflicts with
   // ANALYST_PUBKEY in managed-agent tests).
   createMockChannel({
-    id: "d1rec7dm-0000-4000-8000-000000000003",
+    id: "d1ec7000-d000-4000-8000-000000000003",
     name: "Group DM (3)",
     channel_type: "dm",
     visibility: "private",
@@ -8136,6 +8149,24 @@ export function maybeInstallE2eTauriMocks() {
     await window.__BUZZ_E2E_QUERY_CLIENT__?.invalidateQueries({
       queryKey: ["channels"],
     });
+  };
+  window.__BUZZ_E2E_MUTATE_CHANNEL__ = ({
+    channelId,
+    channelType,
+    removeMemberPubkey,
+  }) => {
+    const channel = mockChannels.find((ch) => ch.id === channelId);
+    if (!channel) return;
+    if (channelType !== undefined) {
+      channel.channel_type = channelType;
+    }
+    if (removeMemberPubkey !== undefined) {
+      channel.members = channel.members.filter(
+        (m) => m.pubkey !== removeMemberPubkey,
+      );
+      syncMockChannel(channel);
+    }
+    touchMockChannel(channel);
   };
   window.__BUZZ_E2E_EMIT_MOCK_READ_STATE__ = ({
     clientId,

@@ -68,7 +68,6 @@ export function AgentSnapshotSendDialog({
 
   const hasMemory = memoryLevel !== "none";
   const isInProgress =
-    encodeMutation.isPending ||
     controller.state.phase === "preparing" ||
     controller.state.phase === "uploading" ||
     controller.state.phase === "sending";
@@ -94,16 +93,22 @@ export function AgentSnapshotSendDialog({
     }
   }, [controller.state.phase]);
 
-  // IMP2: clear the selection if the selected channel is no longer in the
-  // sendable list (e.g. a moderation-DM that appeared before relay-self was
-  // known is now filtered out once the query resolves).
+  // Reconcile selectedChannel when sendableChannels updates:
+  // - Clear if the selection left the list (e.g. archived, lost membership,
+  //   or a moderation-DM filtered out once relay-self resolved).
+  // - Update to the current ResolvedChannel object if the selection is still
+  //   present but its data (e.g. displayLabel) changed, so picker/memgate/done
+  //   all use the same up-to-date resolved label.
   React.useEffect(() => {
     if (selectedChannel === null) return;
-    const stillSendable = controller.sendableChannels.some(
+    const current = controller.sendableChannels.find(
       (ch) => ch.id === selectedChannel.id,
     );
-    if (!stillSendable) {
+    if (!current) {
       setSelectedChannel(null);
+    } else if (current !== selectedChannel) {
+      // Reconcile to the new object (label may have changed as profiles loaded).
+      setSelectedChannel(current);
     }
   }, [controller.sendableChannels, selectedChannel]);
 
@@ -132,49 +137,41 @@ export function AgentSnapshotSendDialog({
   async function handleSend(destination: ResolvedChannel) {
     // IMP3: refuse to send while the user is timed out.
     if (timeoutState.active) {
-      controller.setState({
-        phase: "error",
-        error: "You are currently timed out and cannot send messages.",
-      });
+      controller.setErrorState(
+        "You are currently timed out and cannot send messages.",
+      );
       setStep("error");
       return;
     }
 
     // Revalidate the destination is still in the sendable list.
-    // (Relay-self may have resolved between pick and confirm.)
+    // (Relay-self or identity may have resolved between pick and confirm.)
     const stillSendable = controller.sendableChannels.some(
       (ch) => ch.id === destination.id,
     );
     if (!stillSendable) {
-      controller.setState({
-        phase: "error",
-        error:
-          "The selected destination is no longer available. Please pick another.",
-      });
+      controller.setErrorState(
+        "The selected destination is no longer available. Please pick another.",
+      );
       setStep("error");
       return;
     }
 
     setStep("progress");
-    // Set the preparing phase BEFORE encoding so the progress UI is honest
-    // about what phase the dialog is in while memory is fetched and encoded.
-    controller.setState({ phase: "preparing", error: null });
-    try {
-      const payload = await encodeMutation.mutateAsync({
-        id: persona.id,
-        memoryLevel,
-        format,
-        memorySourcePubkey: linkedAgentPubkey,
-      });
-      await controller.sendPayload(
-        payload.fileBytes,
-        payload.fileName,
-        destination.id,
-      );
-    } catch (_err) {
-      // Encode errors: set error step directly.
-      setStep("error");
-    }
+    // beginSend sets the preparing phase internally before calling encodeFn,
+    // so the progress UI is honest from the first async tick.
+    await controller.beginSend(
+      () =>
+        encodeMutation.mutateAsync({
+          id: persona.id,
+          memoryLevel,
+          format,
+          memorySourcePubkey: linkedAgentPubkey,
+        }),
+      destination.id,
+    );
+    // Phase transitions (done/error) are driven by beginSend via setState
+    // inside the controller; the mirror effect above keeps `step` in sync.
   }
 
   function handleMemgateConfirm() {

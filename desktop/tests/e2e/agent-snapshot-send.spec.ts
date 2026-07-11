@@ -912,6 +912,155 @@ test("snapshot_send_archived_destination_blocks_encode_after_selection", async (
   expect(dangerCmds).toEqual([]);
 });
 
+// ── Live invalidation: membership loss blocks encode ──────────────────────────
+
+test("snapshot_send_membership_loss_blocks_encode_after_selection", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    personas: [
+      {
+        id: ANALYST_PERSONA_ID,
+        displayName: "Analyst",
+        systemPrompt: "You are an analyst.",
+      },
+    ],
+    managedAgents: [
+      {
+        pubkey: ANALYST_PUBKEY,
+        name: "Analyst",
+        personaId: ANALYST_PERSONA_ID,
+      },
+    ],
+    uploadDescriptors: [MOCK_UPLOAD_DESCRIPTOR],
+  });
+  await gotoAgentsPage(page);
+
+  await page.getByLabel("Open actions for Analyst").click();
+  await page.getByRole("menuitem", { name: "Export snapshot" }).click();
+  const sendBtn = page.getByRole("button", { name: "Send in Buzz" });
+  if (await sendBtn.isVisible()) await sendBtn.click();
+
+  await expect(page.getByTestId("agent-snapshot-send-dialog")).toBeVisible();
+
+  // Select #engineering (the mock identity is a member).
+  const list = page.getByTestId("agent-snapshot-send-channel-list");
+  await list.getByText("engineering").click();
+
+  // Remove the mock identity from #engineering's membership via direct mutation.
+  const MOCK_PUBKEY = "deadbeef".repeat(8);
+  await page.evaluate((pubkey) => {
+    (
+      window as Window & {
+        __BUZZ_E2E_MUTATE_CHANNEL__?: (opts: {
+          channelId: string;
+          removeMemberPubkey?: string;
+        }) => void;
+        __BUZZ_E2E_INVALIDATE_CHANNELS__?: () => Promise<void>;
+      }
+    ).__BUZZ_E2E_MUTATE_CHANNEL__?.({
+      channelId: "1c7e1c02-87bb-5e88-b2da-5a7a9432d0c9",
+      removeMemberPubkey: pubkey,
+    });
+    return (
+      window as Window & {
+        __BUZZ_E2E_INVALIDATE_CHANNELS__?: () => Promise<void>;
+      }
+    ).__BUZZ_E2E_INVALIDATE_CHANNELS__?.();
+  }, MOCK_PUBKEY);
+
+  // Confirm button must become disabled (selection cleared by the effect).
+  const confirmBtn = page.getByTestId("agent-snapshot-send-confirm");
+  await expect(confirmBtn).toBeDisabled({ timeout: 3000 });
+
+  // Zero encode/upload/send — handleSend was never reached.
+  const log = await readCommandLog(page);
+  const dangerCmds = log
+    .filter((e) =>
+      [
+        "encode_agent_snapshot_for_send",
+        "upload_media_bytes",
+        "send_channel_message",
+      ].includes(e.command),
+    )
+    .map((e) => e.command);
+  expect(dangerCmds).toEqual([]);
+});
+
+// ── Live invalidation: stream→forum conversion blocks encode ──────────────────
+
+test("snapshot_send_forum_conversion_blocks_encode_after_selection", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    personas: [
+      {
+        id: ANALYST_PERSONA_ID,
+        displayName: "Analyst",
+        systemPrompt: "You are an analyst.",
+      },
+    ],
+    managedAgents: [
+      {
+        pubkey: ANALYST_PUBKEY,
+        name: "Analyst",
+        personaId: ANALYST_PERSONA_ID,
+      },
+    ],
+    uploadDescriptors: [MOCK_UPLOAD_DESCRIPTOR],
+  });
+  await gotoAgentsPage(page);
+
+  await page.getByLabel("Open actions for Analyst").click();
+  await page.getByRole("menuitem", { name: "Export snapshot" }).click();
+  const sendBtn = page.getByRole("button", { name: "Send in Buzz" });
+  if (await sendBtn.isVisible()) await sendBtn.click();
+
+  await expect(page.getByTestId("agent-snapshot-send-dialog")).toBeVisible();
+
+  // Select #agents (stream, mock identity is a member).
+  const list = page.getByTestId("agent-snapshot-send-channel-list");
+  await list.getByText("agents").click();
+
+  // Convert #agents from stream to forum after selection.
+  await page.evaluate(() => {
+    (
+      window as Window & {
+        __BUZZ_E2E_MUTATE_CHANNEL__?: (opts: {
+          channelId: string;
+          channelType?: "stream" | "forum" | "dm";
+        }) => void;
+        __BUZZ_E2E_INVALIDATE_CHANNELS__?: () => Promise<void>;
+      }
+    ).__BUZZ_E2E_MUTATE_CHANNEL__?.({
+      channelId: "94a444a4-c0a3-5966-ab05-530c6ddc2301",
+      channelType: "forum",
+    });
+    return (
+      window as Window & {
+        __BUZZ_E2E_INVALIDATE_CHANNELS__?: () => Promise<void>;
+      }
+    ).__BUZZ_E2E_INVALIDATE_CHANNELS__?.();
+  });
+
+  // Confirm button must become disabled (selection cleared — forums excluded).
+  const confirmBtn = page.getByTestId("agent-snapshot-send-confirm");
+  await expect(confirmBtn).toBeDisabled({ timeout: 3000 });
+
+  // Zero encode/upload/send — handleSend was never reached.
+  const log = await readCommandLog(page);
+  const dangerCmds = log
+    .filter((e) =>
+      [
+        "encode_agent_snapshot_for_send",
+        "upload_media_bytes",
+        "send_channel_message",
+      ].includes(e.command),
+    )
+    .map((e) => e.command);
+  expect(dangerCmds).toEqual([]);
+});
+
 // ── Moderation-DM action boundary: confirm is disabled during relay-self load ─
 
 test("snapshot_send_moderation_target_confirm_disabled_during_relay_self_load", async ({

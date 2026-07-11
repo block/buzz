@@ -2,9 +2,10 @@
  * useSnapshotSendController
  *
  * Payload-agnostic upload → send controller for sharing a snapshot to a Buzz
- * channel or DM.  The caller supplies pre-encoded bytes + filename from the
- * Rust layer; this hook drives uploadMediaBytes → useSendMessageMutation with
- * honest progress and idempotent double-send protection.
+ * channel or DM.  The caller supplies an encode function and a destination;
+ * the controller drives prepare → encode → upload → send with honest progress,
+ * idempotent double-send protection covering the entire action (not just upload),
+ * and fail-closed moderation-DM race handling.
  *
  * This hook does not know what kind of snapshot the bytes contain.  A future
  * team-snapshot or other payload can reuse it unchanged by passing different
@@ -62,37 +63,75 @@ export function isSendableDestination(ch: Channel): boolean {
   return ch.isMember && ch.archivedAt === null && ch.channelType !== "forum";
 }
 
+/**
+ * Pure factory for a single-concurrency action guard.
+ *
+ * Returns `{ runGuarded }` where `runGuarded(action)` executes `action()`
+ * only when no other call is currently in flight; any concurrent call receives
+ * `false` immediately.  The guard is the same mechanism used by
+ * `beginSend` in `useSnapshotSendController` — exported so unit tests can
+ * exercise the production guard logic directly without requiring a React
+ * rendering context.
+ *
+ * @example
+ * ```ts
+ * const { runGuarded } = createSendGuard();
+ * const [r1, r2] = await Promise.all([
+ *   runGuarded(async () => { ...encode/upload/send... }),
+ *   runGuarded(async () => { ...encode/upload/send... }),
+ * ]);
+ * // r1 === true (ran), r2 === false (blocked)
+ * ```
+ */
+export function createSendGuard(): {
+  runGuarded: (action: () => Promise<boolean>) => Promise<boolean>;
+  get inFlight(): boolean;
+} {
+  let inFlight = false;
+  return {
+    runGuarded: async (action) => {
+      if (inFlight) return false;
+      inFlight = true;
+      try {
+        return await action();
+      } finally {
+        inFlight = false;
+      }
+    },
+    get inFlight() {
+      return inFlight;
+    },
+  };
+}
+
 export type UseSnapshotSendControllerResult = {
   /**
    * Sendable destinations with resolved display labels.  DMs are omitted
-   * while the relay-self query is loading (fail-closed moderation-DM race).
+   * while identity or relay-self are loading (fail-closed moderation-DM race).
    */
   sendableChannels: ResolvedChannel[];
-  /** True while channels or the relay-self identity are loading. */
+  /** True while channels, identity, or relay-self are loading. */
   isLoadingChannels: boolean;
   state: SnapshotSendState;
   /**
-   * Directly set the send state. Used by the dialog layer to set the
-   * `preparing` phase before invoking encode, so progress is honest.
-   */
-  setState: React.Dispatch<React.SetStateAction<SnapshotSendState>>;
-  /**
-   * Upload `bytes` and send them to `channelId` as a standard NIP-92 imeta
-   * attachment message.
+   * Execute the full prepare → encode → upload → send sequence behind a
+   * single-concurrency guard.  A second call while the first is in-flight
+   * returns `false` immediately — encode never starts for the blocked call.
+   *
+   * `encodeFn` is called after the guard is acquired and the `preparing` phase
+   * is set; its result feeds directly into the upload step so the guard covers
+   * the entire action including memory fetch/encode.
    *
    * The caller MUST have already obtained explicit destination-scoped
    * confirmation for memory-bearing payloads before calling this.  Returns
-   * false and sets error state if a send is already in progress (double-send
-   * guard) or if any step fails.  The method never throws.
-   *
-   * `channelId` is captured at call-time so a channel switch mid-send cannot
-   * redirect the attachment (delegated to `useSendMessageMutation`).
+   * false and sets error state if blocked or if any step fails.  Never throws.
    */
-  sendPayload: (
-    bytes: number[],
-    filename: string,
+  beginSend: (
+    encodeFn: () => Promise<{ fileBytes: number[]; fileName: string }>,
     channelId: string,
   ) => Promise<boolean>;
+  /** Set state to error with a message (for pre-send gate failures). */
+  setErrorState: (message: string) => void;
   reset: () => void;
 };
 
@@ -135,8 +174,9 @@ export function useSnapshotSendController(): UseSnapshotSendControllerResult {
     error: null,
   });
 
-  // Prevent double-send between renders.
-  const inFlightRef = React.useRef(false);
+  // Single-concurrency guard covering the full encode → upload → send action.
+  // Stored in a ref so it survives re-renders without triggering effects.
+  const guardRef = React.useRef(createSendGuard());
 
   // Pass null channel here — we supply the captured channelId per-send instead.
   const sendMutation = useSendMessageMutation(null, identityQuery.data);
@@ -144,11 +184,14 @@ export function useSnapshotSendController(): UseSnapshotSendControllerResult {
   const sendableChannels = React.useMemo<ResolvedChannel[]>(() => {
     const currentPubkey = identityQuery.data?.pubkey;
     const relaySelf = relaySelfQuery.data;
-    // Fail-closed: withhold ALL DMs until relay-self is known.  Once
-    // relaySelfQuery resolves (either to a pubkey or to null = none advertised)
-    // the filter below can safely classify every DM.  This closes the race
-    // where a user selects a moderation DM while the query is still in flight.
-    const dmGateOpen = !hasDmCandidates || !relaySelfQuery.isLoading;
+    // Fail-closed: withhold ALL DMs until BOTH identity AND relay-self are
+    // known.  Identity is required so isModerationDm can compare the current
+    // user's pubkey against the DM participant list.  If relay-self resolves
+    // before identity, isModerationDm receives no currentPubkey, treats both
+    // participants as "others," and can fail to classify a 1:1 moderation DM.
+    const dmGateOpen =
+      !hasDmCandidates ||
+      (!relaySelfQuery.isLoading && !identityQuery.isLoading);
     const dmProfiles = dmProfilesQuery.data?.profiles;
 
     return (channelsQuery.data ?? [])
@@ -165,27 +208,44 @@ export function useSnapshotSendController(): UseSnapshotSendControllerResult {
   }, [
     channelsQuery.data,
     identityQuery.data,
+    identityQuery.isLoading,
     relaySelfQuery.data,
     relaySelfQuery.isLoading,
     hasDmCandidates,
     dmProfilesQuery.data,
   ]);
 
-  async function sendPayload(
-    bytes: number[],
-    filename: string,
+  async function beginSend(
+    encodeFn: () => Promise<{ fileBytes: number[]; fileName: string }>,
     channelId: string,
   ): Promise<boolean> {
-    if (inFlightRef.current) return false;
-    inFlightRef.current = true;
+    return guardRef.current.runGuarded(async () => {
+      // ── Prepare (encode) ─────────────────────────────────────────────────
+      setState({ phase: "preparing", error: null });
 
-    try {
+      let fileBytes: number[];
+      let fileName: string;
+      try {
+        const encoded = await encodeFn();
+        fileBytes = encoded.fileBytes;
+        fileName = encoded.fileName;
+      } catch (err) {
+        setState({
+          phase: "error",
+          error:
+            err instanceof Error
+              ? `Encode failed: ${err.message}`
+              : "Encode failed.",
+        });
+        return false;
+      }
+
       // ── Upload ────────────────────────────────────────────────────────────
       setState({ phase: "uploading", error: null });
 
       let descriptor: BlobDescriptor;
       try {
-        descriptor = await uploadMediaBytes(bytes, filename);
+        descriptor = await uploadMediaBytes(fileBytes, fileName);
       } catch (err) {
         setState({
           phase: "error",
@@ -202,7 +262,7 @@ export function useSnapshotSendController(): UseSnapshotSendControllerResult {
       // correct label.
       const descriptorWithFilename: BlobDescriptor = {
         ...descriptor,
-        filename,
+        filename: fileName,
       };
 
       // ── Build message content + NIP-92 imeta tags ─────────────────────────
@@ -235,13 +295,11 @@ export function useSnapshotSendController(): UseSnapshotSendControllerResult {
 
       setState({ phase: "done", error: null });
       return true;
-    } finally {
-      inFlightRef.current = false;
-    }
+    });
   }
 
   function reset() {
-    if (!inFlightRef.current) {
+    if (!guardRef.current.inFlight) {
       setState({ phase: "idle", error: null });
     }
   }
@@ -249,10 +307,14 @@ export function useSnapshotSendController(): UseSnapshotSendControllerResult {
   return {
     sendableChannels,
     isLoadingChannels:
-      channelsQuery.isLoading || (hasDmCandidates && relaySelfQuery.isLoading),
+      channelsQuery.isLoading ||
+      (hasDmCandidates &&
+        (relaySelfQuery.isLoading || identityQuery.isLoading)),
     state,
-    setState,
-    sendPayload,
+    beginSend,
+    setErrorState: (message: string) => {
+      setState({ phase: "error", error: message });
+    },
     reset,
   };
 }

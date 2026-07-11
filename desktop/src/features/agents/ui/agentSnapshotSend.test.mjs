@@ -3,7 +3,10 @@ import test from "node:test";
 
 // Tests for the snapshot send controller helpers and dialog behavior.
 
-import { isSendableDestination } from "./useSnapshotSendController.ts";
+import {
+  isSendableDestination,
+  createSendGuard,
+} from "./useSnapshotSendController.ts";
 
 // ── isSendableDestination ─────────────────────────────────────────────────────
 
@@ -169,45 +172,59 @@ test("memory_gate_step_discloses_media_link_access", () => {
   assert.match(text, /media link/i, `got: ${text}`);
 });
 
-// ── sendPayload inFlightRef: concurrent calls — second is blocked ─────────────
+// ── createSendGuard: production concurrency guard ─────────────────────────────
 //
 // The UI hides the confirm button the moment handleSend transitions to the
-// "progress" step (before sendPayload is invoked). The DOM-level double-click
-// guard is therefore the step transition, not the inFlightRef.  inFlightRef
-// protects against a programmatic double-invocation of sendPayload itself.
-// This unit-level harness directly exercises the guard without a browser.
+// "progress" step.  The DOM-level double-click guard is therefore the step
+// transition.  createSendGuard protects against a programmatic double-invocation
+// covering the entire prepare → encode → upload → send sequence.
+// This test imports and exercises the production guard factory directly.
 
-test("inFlightRef_guard_blocks_second_concurrent_sendPayload", async () => {
-  // Reconstruct the exact guard logic from sendPayload in
-  // useSnapshotSendController.ts: an inFlightRef prevents a second call while
-  // the first is in-flight.
-  let inFlight = false;
+test("createSendGuard_blocks_second_concurrent_action", async () => {
+  const guard = createSendGuard();
   let callCount = 0;
-  const sendOrder = [];
+  const callOrder = [];
 
-  async function guardedSend() {
-    if (inFlight) return false;
-    inFlight = true;
-    try {
-      callCount++;
-      sendOrder.push("start");
-      // Simulate async work (encode + upload + send).
-      await new Promise((resolve) => setTimeout(resolve, 20));
-      sendOrder.push("end");
-      return true;
-    } finally {
-      inFlight = false;
-    }
+  async function action() {
+    callCount++;
+    callOrder.push("start");
+    // Simulate async work (prepare + encode + upload + send).
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    callOrder.push("end");
+    return true;
   }
 
   // Fire both concurrently — the second sees inFlight=true and returns false.
-  const [r1, r2] = await Promise.all([guardedSend(), guardedSend()]);
+  const [r1, r2] = await Promise.all([
+    guard.runGuarded(action),
+    guard.runGuarded(action),
+  ]);
 
   // Exactly one invocation ran.
   assert.equal(callCount, 1, `expected callCount=1, got ${callCount}`);
-  // One returned true (the first), one returned false (the blocked second).
+  // One returned true (ran), one returned false (blocked).
   const successes = [r1, r2].filter(Boolean).length;
   assert.equal(successes, 1, `expected 1 success, got ${successes}`);
   // The single run completed fully (start then end, no interleaving).
-  assert.deepEqual(sendOrder, ["start", "end"]);
+  assert.deepEqual(callOrder, ["start", "end"]);
+  // Guard is idle after both settle.
+  assert.equal(
+    guard.inFlight,
+    false,
+    "guard should be idle after both calls settle",
+  );
+});
+
+test("createSendGuard_sequential_calls_both_run", async () => {
+  const guard = createSendGuard();
+  let count = 0;
+  const run = () =>
+    guard.runGuarded(async () => {
+      count++;
+      return true;
+    });
+  // Sequential calls (await each before starting next) both succeed.
+  assert.equal(await run(), true);
+  assert.equal(await run(), true);
+  assert.equal(count, 2);
 });
