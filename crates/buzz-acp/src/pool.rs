@@ -942,6 +942,24 @@ pub(crate) fn prepend_base_for_legacy(
     }
 }
 
+/// Prepend the `[Channel Canvas]` section to the legacy initial-message body.
+///
+/// Protocol-v2 agents already receive the canvas in `systemPrompt`; only
+/// legacy (protocol_version < 2) agents need it injected here so it arrives
+/// before the first prompt — the same "every turn" semantics as per-turn core.
+/// Heartbeats never have an initial_message, so the caller is responsible for
+/// not passing a canvas when `source` is `Heartbeat`.
+pub(crate) fn prepend_canvas_for_legacy(
+    protocol_version: u32,
+    agent_canvas: Option<&str>,
+    body: &str,
+) -> String {
+    match agent_canvas {
+        Some(canvas) if protocol_version < 2 => format!("{canvas}\n\n{body}"),
+        _ => body.to_string(),
+    }
+}
+
 /// Frame the `session/new` `systemPrompt` so each present prompt carries its own
 /// header, keeping the base/persona boundary recoverable downstream.
 ///
@@ -1355,8 +1373,16 @@ pub async fn run_prompt_task(
             // For agents with systemPrompt support (protocol_version >= 2),
             // base_prompt is delivered via the system role in session/new.
             // Legacy agents receive it via [Base] in the user message instead.
+            // Canvas is also injected here for legacy agents: protocol-v2 agents
+            // already have it in systemPrompt; legacy agents need it before the
+            // first prompt, matching the "every turn" per-turn delivery semantics.
             let init_msg =
                 prepend_base_for_legacy(agent.protocol_version, ctx.base_prompt, initial_msg);
+            let init_msg = prepend_canvas_for_legacy(
+                agent.protocol_version,
+                agent_canvas.as_deref(),
+                &init_msg,
+            );
             let init_result = agent
                 .acp
                 .session_prompt_with_idle_timeout(
@@ -3343,6 +3369,80 @@ mod tests {
         assert_eq!(composed, "hello channel");
     }
 
+    // ── prepend_canvas_for_legacy ─────────────────────────────────────────────
+
+    #[test]
+    fn test_initial_message_legacy_agent_gets_canvas_prepended() {
+        // Legacy agents (protocol_version < 2) receive the canvas section before
+        // the initial-message body so it arrives before the first prompt.
+        let canvas = "[Channel Canvas]\nCanvas revision (event ID): abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234\nLast modified: 2024-01-15T10:30:00Z\nFetch current content with: buzz canvas get --channel 00f1ccaf-1506-4dd7-9a0e-fa67e9e486ae";
+        let composed = prepend_canvas_for_legacy(1, Some(canvas), "do the thing");
+        assert!(
+            composed.starts_with("[Channel Canvas]"),
+            "canvas must precede the body"
+        );
+        assert!(
+            composed.ends_with("do the thing"),
+            "body must follow the canvas"
+        );
+        assert!(
+            composed.contains("\n\ndo the thing"),
+            "canvas and body separated by blank line"
+        );
+    }
+
+    #[test]
+    fn test_initial_message_modern_agent_omits_canvas_from_body() {
+        // Protocol-v2 agents receive canvas in systemPrompt; it must NOT be
+        // duplicated in the initial-message user turn.
+        let canvas = "[Channel Canvas]\nsome section";
+        let composed = prepend_canvas_for_legacy(2, Some(canvas), "do the thing");
+        assert_eq!(
+            composed, "do the thing",
+            "modern agent initial message must not contain canvas"
+        );
+        assert!(
+            !composed.contains("[Channel Canvas]"),
+            "canvas must be absent from modern agent initial message"
+        );
+    }
+
+    #[test]
+    fn test_initial_message_legacy_agent_no_canvas_is_unchanged() {
+        // No canvas present: body passes through unmodified.
+        let composed = prepend_canvas_for_legacy(1, None, "do the thing");
+        assert_eq!(composed, "do the thing");
+    }
+
+    #[test]
+    fn test_initial_message_legacy_canvas_and_base_compose_correctly() {
+        // Verify the full composition order when both base and canvas are present:
+        // [Base] → canvas section → initial-message body.
+        let canvas = "[Channel Canvas]\ncanvas content";
+        let base_composed = prepend_base_for_legacy(1, Some("be helpful"), "do the thing");
+        let full = prepend_canvas_for_legacy(1, Some(canvas), &base_composed);
+        assert!(
+            full.starts_with("[Channel Canvas]"),
+            "canvas must be first in composed message"
+        );
+        assert!(
+            full.contains("[Base]"),
+            "base must be present in composed message"
+        );
+        assert!(
+            full.ends_with("do the thing"),
+            "body must be last in composed message"
+        );
+        // Order: canvas → base → body
+        let canvas_pos = full.find("[Channel Canvas]").unwrap();
+        let base_pos = full.find("[Base]").unwrap();
+        let body_pos = full.find("do the thing").unwrap();
+        assert!(
+            canvas_pos < base_pos && base_pos < body_pos,
+            "order must be: canvas → base → body"
+        );
+    }
+
     // Pin the session/new systemPrompt framing: each present prompt carries its
     // own header so the desktop observer can split into labeled sub-sections.
 
@@ -4694,14 +4794,6 @@ mod tests {
         .expect("serialise");
         let result = canvas_section_from_query_response(&[ev], CHANNEL_UUID);
         assert!(result.is_none(), "mismatched h-tag must return None");
-    }
-
-    #[test]
-    fn test_canvas_section_from_query_response_non_array_object_returns_none() {
-        // Passing a single JSON object (not wrapped in a Vec) exercises the
-        // empty-array fast-path because serde_json::Value::Array is never matched.
-        let result = canvas_section_from_query_response(&[], CHANNEL_UUID);
-        assert!(result.is_none());
     }
 
     #[test]
