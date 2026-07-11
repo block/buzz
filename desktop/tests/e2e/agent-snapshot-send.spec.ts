@@ -1125,3 +1125,101 @@ test("snapshot_send_moderation_target_confirm_disabled_during_relay_self_load", 
     .map((e) => e.command);
   expect(dangerCmds).toEqual([]);
 });
+
+// ── Adversarial: eligibility checkpoint 2 — mutate during encode, no upload ──
+
+test("snapshot_send_dest_invalidated_during_encode_blocks_upload", async ({
+  page,
+}) => {
+  // This test exercises the second eligibility checkpoint in beginSend:
+  // after encode completes but before upload starts.
+  //
+  // Setup: use encodeDelayMs: 600 so there is a window to mutate the
+  // destination while encode is in-flight.  The test:
+  //   1. Confirms send (pre-flight passes, guard acquired, encode starts).
+  //   2. Mutates #general to a forum type while encode is in-flight.
+  //   3. When encode completes, checkpoint 2 fires → returns error string.
+  //   4. Asserts: encode ran once, upload and send never ran.
+  await installMockBridge(page, {
+    personas: [
+      {
+        id: ANALYST_PERSONA_ID,
+        displayName: "Analyst",
+        systemPrompt: "You are an analyst.",
+      },
+    ],
+    managedAgents: [
+      {
+        pubkey: ANALYST_PUBKEY,
+        name: "Analyst",
+        personaId: ANALYST_PERSONA_ID,
+      },
+    ],
+    // Slow encode gives us time to mutate the destination mid-flight.
+    encodeDelayMs: 600,
+    uploadDescriptors: [MOCK_UPLOAD_DESCRIPTOR],
+  });
+  await gotoAgentsPage(page);
+
+  await page.getByLabel("Open actions for Analyst").click();
+  await page.getByRole("menuitem", { name: "Export snapshot" }).click();
+  const sendBtn = page.getByRole("button", { name: "Send in Buzz" });
+  if (await sendBtn.isVisible()) await sendBtn.click();
+
+  await expect(page.getByTestId("agent-snapshot-send-dialog")).toBeVisible();
+
+  // Select #general.
+  await page
+    .getByTestId("agent-snapshot-send-channel-list")
+    .getByText("general")
+    .click();
+
+  // Click confirm — pre-flight passes, progress step visible, encode in-flight.
+  await page.getByTestId("agent-snapshot-send-confirm").click();
+  const progress = page.getByTestId("agent-snapshot-send-progress");
+  await expect(progress).toBeVisible();
+  await expect(progress).toHaveText("Preparing snapshot…");
+
+  // While encode is in-flight, convert #general to a forum.
+  // This makes it ineligible: isSendableDestination returns false for forums.
+  await page.evaluate(() => {
+    (
+      window as Window & {
+        __BUZZ_E2E_MUTATE_CHANNEL__?: (opts: {
+          channelId: string;
+          channelType?: "stream" | "forum" | "dm";
+        }) => void;
+        __BUZZ_E2E_INVALIDATE_CHANNELS__?: () => Promise<void>;
+      }
+    ).__BUZZ_E2E_MUTATE_CHANNEL__?.({
+      channelId: "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50",
+      channelType: "forum",
+    });
+    return (
+      window as Window & {
+        __BUZZ_E2E_INVALIDATE_CHANNELS__?: () => Promise<void>;
+      }
+    ).__BUZZ_E2E_INVALIDATE_CHANNELS__?.();
+  });
+
+  // Encode completes, checkpoint 2 fires and detects the invalid destination.
+  // The dialog must show the error step (never transitions to "Uploading").
+  const errorEl = page.getByTestId("agent-snapshot-send-error");
+  await expect(errorEl).toBeVisible({ timeout: 5000 });
+
+  // Verify: encode ran once, upload and send never ran.
+  const log = await readCommandLog(page);
+  const encodeCount = log.filter(
+    (e) => e.command === "encode_agent_snapshot_for_send",
+  ).length;
+  const uploadCount = log.filter(
+    (e) => e.command === "upload_media_bytes",
+  ).length;
+  const sendCount = log.filter(
+    (e) => e.command === "send_channel_message",
+  ).length;
+
+  expect(encodeCount).toBe(1); // encode ran — checkpoint 1 passed
+  expect(uploadCount).toBe(0); // upload blocked by checkpoint 2
+  expect(sendCount).toBe(0); // send never reached
+});

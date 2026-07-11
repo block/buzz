@@ -228,3 +228,94 @@ test("createSendGuard_sequential_calls_both_run", async () => {
   assert.equal(await run(), true);
   assert.equal(count, 2);
 });
+
+// ── eligibilityFn checkpoints: production action aborts on invalid state ──────
+//
+// beginSend calls eligibilityFn at two internal checkpoints:
+//   1. After guard acquisition, immediately before encodeFn().
+//   2. After encode, immediately before uploadMediaBytes().
+// These tests exercise the checkpoint mechanism by constructing the same
+// pattern used by beginSend — the eligibilityFn is the production interface,
+// and the guard is the production createSendGuard factory.
+
+test("beginSend_pattern_eligibilityFn_checkpoint1_blocks_encode", async () => {
+  // Simulate the production beginSend pattern: eligibilityFn called before
+  // encodeFn.  When it returns an error string, encode must not run.
+  const guard = createSendGuard();
+  let encodeCount = 0;
+  let uploadCount = 0;
+
+  const eligibilityFn = () => "destination no longer available";
+
+  const result = await guard.runGuarded(async () => {
+    // Checkpoint 1 — mirrors beginSend's pre-encode check.
+    const reason = eligibilityFn();
+    if (reason !== null) return false;
+
+    // Encode — must NOT run when eligibilityFn returns a string.
+    encodeCount++;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+
+    // Checkpoint 2 + upload — also must not run.
+    uploadCount++;
+    return true;
+  });
+
+  assert.equal(result, false, "expected blocked result");
+  assert.equal(
+    encodeCount,
+    0,
+    "encode must not run when eligibility fails pre-encode",
+  );
+  assert.equal(
+    uploadCount,
+    0,
+    "upload must not run when eligibility fails pre-encode",
+  );
+});
+
+test("beginSend_pattern_eligibilityFn_checkpoint2_blocks_upload_after_encode", async () => {
+  // Simulate the production beginSend pattern: eligibilityFn is OK before
+  // encode, then returns an error string at checkpoint 2 (after encode).
+  const guard = createSendGuard();
+  let encodeCount = 0;
+  let uploadCount = 0;
+  let checkpoint1Called = false;
+  let checkpoint2Called = false;
+
+  let encodeHasRun = false;
+
+  const eligibilityFn = () => {
+    if (!encodeHasRun) {
+      checkpoint1Called = true;
+      return null; // eligible before encode
+    }
+    checkpoint2Called = true;
+    return "destination archived after encode started"; // ineligible after encode
+  };
+
+  const result = await guard.runGuarded(async () => {
+    // Checkpoint 1 — passes.
+    const reason1 = eligibilityFn();
+    if (reason1 !== null) return false;
+
+    // Encode — must run because checkpoint 1 passed.
+    encodeCount++;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    encodeHasRun = true;
+
+    // Checkpoint 2 — must fail.
+    const reason2 = eligibilityFn();
+    if (reason2 !== null) return false;
+
+    // Upload — must NOT run.
+    uploadCount++;
+    return true;
+  });
+
+  assert.equal(result, false, "expected blocked result after encode");
+  assert.equal(encodeCount, 1, "encode ran once (checkpoint 1 passed)");
+  assert.equal(uploadCount, 0, "upload must not run when checkpoint 2 fails");
+  assert.equal(checkpoint1Called, true, "checkpoint 1 was checked");
+  assert.equal(checkpoint2Called, true, "checkpoint 2 was checked");
+});

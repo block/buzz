@@ -122,13 +122,24 @@ export type UseSnapshotSendControllerResult = {
    * is set; its result feeds directly into the upload step so the guard covers
    * the entire action including memory fetch/encode.
    *
+   * `eligibilityFn`, when supplied, is called at two internal checkpoints:
+   *   1. After acquiring the guard, immediately before `encodeFn()`.
+   *   2. After encode resolves, immediately before `uploadMediaBytes()`.
+   * If it returns a non-null string at either point the action is aborted with
+   * an error state and zero upload/send work is performed.  The function MUST
+   * read live sources (refs, not closed-over render snapshots) so it reflects
+   * the channel-cache and timeout state at the moment of execution, not at the
+   * moment `beginSend` was called.
+   *
    * The caller MUST have already obtained explicit destination-scoped
    * confirmation for memory-bearing payloads before calling this.  Returns
-   * false and sets error state if blocked or if any step fails.  Never throws.
+   * false and sets error state if blocked, ineligible, or if any step fails.
+   * Never throws.
    */
   beginSend: (
     encodeFn: () => Promise<{ fileBytes: number[]; fileName: string }>,
     channelId: string,
+    eligibilityFn?: () => string | null,
   ) => Promise<boolean>;
   /** Set state to error with a message (for pre-send gate failures). */
   setErrorState: (message: string) => void;
@@ -218,8 +229,20 @@ export function useSnapshotSendController(): UseSnapshotSendControllerResult {
   async function beginSend(
     encodeFn: () => Promise<{ fileBytes: number[]; fileName: string }>,
     channelId: string,
+    eligibilityFn?: () => string | null,
   ): Promise<boolean> {
     return guardRef.current.runGuarded(async () => {
+      // ── Eligibility checkpoint 1: before encode ───────────────────────────
+      // Called after the guard is acquired so it races only against state changes
+      // that happen between the caller's pre-flight check and this point.
+      if (eligibilityFn) {
+        const reason = eligibilityFn();
+        if (reason !== null) {
+          setState({ phase: "error", error: reason });
+          return false;
+        }
+      }
+
       // ── Prepare (encode) ─────────────────────────────────────────────────
       setState({ phase: "preparing", error: null });
 
@@ -238,6 +261,19 @@ export function useSnapshotSendController(): UseSnapshotSendControllerResult {
               : "Encode failed.",
         });
         return false;
+      }
+
+      // ── Eligibility checkpoint 2: after encode, before upload ─────────────
+      // State can change while encode is awaited (e.g. the user leaves the
+      // channel, a timeout is received, or relay-self resolves to classify the
+      // destination as a moderation DM).  Re-read live sources before touching
+      // the relay or upload pipeline.
+      if (eligibilityFn) {
+        const reason = eligibilityFn();
+        if (reason !== null) {
+          setState({ phase: "error", error: reason });
+          return false;
+        }
       }
 
       // ── Upload ────────────────────────────────────────────────────────────
