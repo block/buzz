@@ -240,7 +240,7 @@ function PreviewBody({
 
 // ── Result body ───────────────────────────────────────────────────────────────
 
-function ResultBody({
+export function ResultBody({
   result,
   confirmError,
 }: {
@@ -264,12 +264,26 @@ function ResultBody({
             data-testid="agent-snapshot-import-partial-memory"
           >
             <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
-            <p>
-              Memory partially restored: {result.memoryWritten} of{" "}
-              {result.memoryTotal} entr
-              {result.memoryTotal === 1 ? "y" : "ies"} written. The agent exists
-              but some memory entries failed to publish.
-            </p>
+            <div className="flex flex-col gap-1">
+              <p>
+                Memory partially restored: {result.memoryWritten} of{" "}
+                {result.memoryTotal} entr
+                {result.memoryTotal === 1 ? "y" : "ies"} written. The agent
+                exists but some memory entries failed to publish.
+              </p>
+              {result.memoryErrors.length > 0 ? (
+                <ul
+                  className="mt-1 space-y-0.5 text-xs"
+                  data-testid="agent-snapshot-import-memory-errors"
+                >
+                  {result.memoryErrors.map((err) => (
+                    <li key={err} className="truncate font-mono">
+                      {err}
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
+            </div>
           </div>
         ) : (
           <p

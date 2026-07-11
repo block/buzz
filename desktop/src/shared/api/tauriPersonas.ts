@@ -218,7 +218,8 @@ export async function exportAgentSnapshot(
 export type AgentSnapshotImportPreview = {
   displayName: string;
   systemPrompt: string | null;
-  avatarDataUrl: string | null;
+  /** Effective avatar: data URL if present, source URL fallback otherwise. */
+  avatarUrl: string | null;
   /** "none" | "core" | "everything" */
   memoryLevel: string;
   memoryEntryCount: number;

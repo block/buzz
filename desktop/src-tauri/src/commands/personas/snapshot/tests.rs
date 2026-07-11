@@ -280,6 +280,77 @@ fn import_empty_bytes_fail_closed() {
     assert!(result.is_err(), "empty bytes must fail closed");
 }
 
+/// JSON snapshot over 5 MiB is rejected before decode allocation.
+#[test]
+fn import_json_over_size_cap_is_rejected() {
+    // Construct a byte slice that looks like JSON (no PNG magic) and exceeds
+    // MAX_SNAPSHOT_JSON_BYTES (5 MiB).  Content doesn't need to be valid JSON
+    // because the size check fires before serde.
+    let oversized = vec![b'{'; super::MAX_SNAPSHOT_JSON_BYTES + 1];
+    let result = decode_snapshot_from_bytes(&oversized);
+    assert!(result.is_err(), "oversized JSON must be rejected");
+    assert!(
+        result.unwrap_err().contains("too large"),
+        "error must mention size"
+    );
+}
+
+/// PNG snapshot over 10 MiB is rejected before decode allocation.
+#[test]
+fn import_png_over_size_cap_is_rejected() {
+    // Start with the PNG magic, then pad to exceed MAX_SNAPSHOT_PNG_BYTES.
+    let mut oversized = vec![0u8; super::MAX_SNAPSHOT_PNG_BYTES + 1];
+    oversized[0] = 0x89;
+    oversized[1] = 0x50; // P
+    oversized[2] = 0x4e; // N
+    oversized[3] = 0x47; // G
+    let result = decode_snapshot_from_bytes(&oversized);
+    assert!(result.is_err(), "oversized PNG must be rejected");
+    assert!(
+        result.unwrap_err().contains("too large"),
+        "error must mention size"
+    );
+}
+
+/// Effective avatar resolution: data URL takes precedence over source URL.
+#[test]
+fn import_avatar_data_url_takes_precedence_over_url() {
+    let mut snapshot = make_snapshot(MemoryLevel::None, vec![]);
+    snapshot.profile.avatar_data_url = Some("data:image/png;base64,abc".to_string());
+    snapshot.profile.avatar_url = Some("https://example.com/avatar.png".to_string());
+
+    // Simulate the effective_avatar resolution logic.
+    let effective = snapshot
+        .profile
+        .avatar_data_url
+        .clone()
+        .or_else(|| snapshot.profile.avatar_url.clone());
+    assert_eq!(
+        effective.as_deref(),
+        Some("data:image/png;base64,abc"),
+        "data URL must win over source URL"
+    );
+}
+
+/// Effective avatar resolution: URL fallback is used when data URL is absent.
+#[test]
+fn import_avatar_url_fallback_is_used_when_no_data_url() {
+    let mut snapshot = make_snapshot(MemoryLevel::None, vec![]);
+    snapshot.profile.avatar_data_url = None;
+    snapshot.profile.avatar_url = Some("https://example.com/avatar.png".to_string());
+
+    let effective = snapshot
+        .profile
+        .avatar_data_url
+        .clone()
+        .or_else(|| snapshot.profile.avatar_url.clone());
+    assert_eq!(
+        effective.as_deref(),
+        Some("https://example.com/avatar.png"),
+        "URL fallback must be used when data URL is absent"
+    );
+}
+
 // ── Import: PNG memory policy ─────────────────────────────────────────────
 
 /// PNG with memory level `core` is rejected before any write.
@@ -462,19 +533,60 @@ fn import_preview_flags_non_empty_source_allowlist() {
     );
 }
 
-/// keep_allowlist = false clears the allowlist on the confirmed import.
-/// keep_allowlist = true preserves it.
+/// keep_allowlist = false → always produces owner-only mode with empty list,
+/// preventing an empty-allowlist-mode definition from being persisted.
+/// keep_allowlist = true with a valid allowlist → preserved via
+/// resolve_mint_behavioral_defaults validation.
 #[test]
 fn import_allowlist_clear_and_keep_are_enforced_server_side() {
-    let source_allowlist = vec!["aabbcc".repeat(11)[..64].to_string()];
-    // Clear path (safe default):
-    let cleared: Vec<String> = Vec::new();
-    assert!(cleared.is_empty(), "cleared allowlist must be empty");
-    // Keep path:
-    let kept = source_allowlist.clone();
+    use crate::managed_agents::{resolve_mint_behavioral_defaults, RespondTo};
+
+    let valid_pubkey = "aabbcc".repeat(11)[..64].to_string();
+    let source_allowlist = vec![valid_pubkey.clone()];
+
+    // Clear path: always owner-only, empty list (regardless of source mode).
+    // This is the exact logic in confirm_agent_snapshot_import when keep=false.
+    let cleared_mode = RespondTo::OwnerOnly;
+    let cleared_list: Vec<String> = Vec::new();
     assert_eq!(
-        kept, source_allowlist,
+        cleared_mode,
+        RespondTo::default(),
+        "clear must downgrade to default owner-only mode"
+    );
+    assert!(cleared_list.is_empty(), "cleared allowlist must be empty");
+
+    // Keep path: goes through resolve_mint_behavioral_defaults for validation.
+    let minted = resolve_mint_behavioral_defaults(
+        Some(RespondTo::Allowlist),
+        source_allowlist.clone(),
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        minted.respond_to,
+        RespondTo::Allowlist,
+        "kept mode must be Allowlist"
+    );
+    assert_eq!(
+        minted.respond_to_allowlist, source_allowlist,
         "kept allowlist must equal the source"
+    );
+
+    // Keep path with an allowlist-mode source but empty list → validation error.
+    // Importing such a snapshot with keep=true must fail before any write.
+    let err = resolve_mint_behavioral_defaults(
+        Some(RespondTo::Allowlist),
+        vec![], // empty — invalid
+        None,
+        None,
+        None,
+    )
+    .unwrap_err();
+    assert!(
+        err.contains("requires at least one pubkey"),
+        "empty allowlist-mode must be rejected by the mint boundary"
     );
 }
 

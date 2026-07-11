@@ -2,6 +2,7 @@ import * as React from "react";
 import { useQueryClient } from "@tanstack/react-query";
 
 import {
+  managedAgentsQueryKey,
   personasQueryKey,
   useAcpRuntimesQuery,
   useCreateManagedAgentMutation,
@@ -377,6 +378,10 @@ export function usePersonaActions() {
       });
       setSnapshotImportResult(result);
       void queryClient.invalidateQueries({ queryKey: personasQueryKey });
+      void queryClient.invalidateQueries({ queryKey: managedAgentsQueryKey });
+      void queryClient.invalidateQueries({
+        queryKey: ["user-profile", result.newPubkey.toLowerCase()],
+      });
       if (result.memoryErrors.length > 0) {
         setPersonaErrorMessage(
           `${result.displayName} imported, but ${result.memoryErrors.length} memory entr${result.memoryErrors.length === 1 ? "y" : "ies"} failed to restore.`,

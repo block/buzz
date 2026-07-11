@@ -5,7 +5,7 @@
 
 use nostr::ToBech32;
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Emitter, State};
 
 use super::super::export_util::save_bytes_with_dialog;
 use crate::{
@@ -16,12 +16,18 @@ use crate::{
             build_snapshot, decode_snapshot_json, decode_snapshot_png, encode_snapshot_json,
             encode_snapshot_png, AgentSnapshotMemoryEntry, MemoryLevel,
         },
-        load_agent_definitions, load_managed_agents, load_personas, save_managed_agents,
-        save_personas, ManagedAgentRecord, PersonaRecord,
+        load_agent_definitions, load_managed_agents, load_personas,
+        resolve_mint_behavioral_defaults, save_managed_agents, save_personas, ManagedAgentRecord,
+        PersonaRecord, RespondTo,
     },
     relay::{effective_agent_relay_url, relay_ws_url_with_override, sync_managed_agent_profile},
     util::now_iso,
 };
+
+/// Maximum snapshot file size accepted before decode (5 MiB for JSON,
+/// 10 MiB for PNG). Mirrors the established persona-import limits.
+const MAX_SNAPSHOT_JSON_BYTES: usize = 5 * 1024 * 1024;
+const MAX_SNAPSHOT_PNG_BYTES: usize = 10 * 1024 * 1024;
 
 // ── Import preview types ──────────────────────────────────────────────────────
 
@@ -33,8 +39,9 @@ pub struct AgentSnapshotImportPreview {
     pub display_name: String,
     /// System prompt, if any.
     pub system_prompt: Option<String>,
-    /// Avatar inlined as a data URL, or `None`.
-    pub avatar_data_url: Option<String>,
+    /// Effective avatar: data URL if present, otherwise the source URL fallback.
+    /// The UI renders this as a single avatar source.
+    pub avatar_url: Option<String>,
     /// Memory level declared in the snapshot.
     pub memory_level: String,
     /// Number of memory entries bundled in the snapshot.
@@ -314,10 +321,19 @@ const PNG_MAGIC: [u8; 4] = [0x89, 0x50, 0x4e, 0x47];
 /// **PNG memory policy:** any PNG manifest whose `memory.level` is not `None`,
 /// or whose `memory.entries` is non-empty despite `level == None`, is rejected
 /// before any write.  Plaintext memory is accepted only from `.agent.json`.
+///
+/// **Size cap:** PNG inputs over 10 MiB and JSON inputs over 5 MiB are rejected
+/// before allocation to avoid avoidable large-input work.
 pub(crate) fn decode_snapshot_from_bytes(
     file_bytes: &[u8],
 ) -> Result<crate::managed_agents::agent_snapshot::AgentSnapshot, String> {
     if file_bytes.len() >= 4 && file_bytes[..4] == PNG_MAGIC {
+        if file_bytes.len() > MAX_SNAPSHOT_PNG_BYTES {
+            return Err(format!(
+                "Snapshot file is too large ({} MiB). PNG snapshots must be under 10 MiB.",
+                file_bytes.len() / (1024 * 1024)
+            ));
+        }
         let snapshot = decode_snapshot_png(file_bytes)?;
         // Hard reject: PNG must never carry memory.
         if snapshot.memory.level != crate::managed_agents::agent_snapshot::MemoryLevel::None {
@@ -335,6 +351,13 @@ pub(crate) fn decode_snapshot_from_bytes(
             );
         }
         return Ok(snapshot);
+    }
+    // JSON path — apply size cap before serde allocation.
+    if file_bytes.len() > MAX_SNAPSHOT_JSON_BYTES {
+        return Err(format!(
+            "Snapshot file is too large ({} MiB). JSON snapshots must be under 5 MiB.",
+            file_bytes.len() / (1024 * 1024)
+        ));
     }
     decode_snapshot_json(file_bytes)
 }
@@ -378,7 +401,12 @@ pub async fn preview_agent_snapshot_import(
         Ok(AgentSnapshotImportPreview {
             display_name: snapshot.profile.display_name.clone(),
             system_prompt: snapshot.definition.system_prompt.clone(),
-            avatar_data_url: snapshot.profile.avatar_data_url.clone(),
+            // Effective avatar: data URL wins; URL fallback if no data URL.
+            avatar_url: snapshot
+                .profile
+                .avatar_data_url
+                .clone()
+                .or_else(|| snapshot.profile.avatar_url.clone()),
             memory_level,
             memory_entry_count: snapshot.memory.entries.len(),
             source_allowlist_count: snapshot.definition.respond_to_allowlist.len(),
@@ -429,11 +457,62 @@ pub async fn confirm_agent_snapshot_import(
     }
 
     // Determine allowlist for the new agent.
-    let allowlist: Vec<String> = if input.keep_allowlist {
-        snapshot.definition.respond_to_allowlist.clone()
-    } else {
-        Vec::new()
+    // If keep_allowlist is true and the source is allowlist-mode, preserve the
+    // list and mode. Otherwise, downgrade both the persona definition and the
+    // live managed record to owner-only (the safe default) — an empty allowlist
+    // in allowlist-mode is invalid and would fail spawn-time validation.
+    let (effective_respond_to, effective_allowlist): (Option<RespondTo>, Vec<String>) = {
+        // Parse the source respond_to mode if present.
+        let source_mode = snapshot
+            .definition
+            .respond_to
+            .as_deref()
+            .map(crate::managed_agents::RespondTo::parse_wire)
+            .transpose()?;
+
+        if input.keep_allowlist {
+            // Keep: pass the source mode + allowlist through
+            // resolve_mint_behavioral_defaults for validation (allowlist must be
+            // non-empty, parallelism in range, etc.).
+            let minted = resolve_mint_behavioral_defaults(
+                source_mode,
+                snapshot.definition.respond_to_allowlist.clone(),
+                None,
+                snapshot.definition.parallelism,
+                None,
+            )?;
+            (Some(minted.respond_to), minted.respond_to_allowlist)
+        } else {
+            // Clear: always downgrade to owner-only regardless of source mode.
+            // This prevents an empty-allowlist definition from being persisted.
+            (Some(RespondTo::OwnerOnly), Vec::new())
+        }
     };
+
+    // Resolved parallelism — validate through the mint boundary.
+    let minted_parallelism = {
+        let minted = resolve_mint_behavioral_defaults(
+            effective_respond_to.clone(),
+            effective_allowlist.clone(),
+            snapshot.definition.mcp_toolsets.clone(),
+            snapshot.definition.parallelism,
+            None,
+        )?;
+        minted.parallelism
+    };
+
+    // Effective avatar: data URL wins; URL fallback when data URL is absent.
+    let effective_avatar: Option<String> = snapshot
+        .profile
+        .avatar_data_url
+        .clone()
+        .or_else(|| snapshot.profile.avatar_url.clone());
+
+    // Wire-format string for the persona definition's respond_to field.
+    let respond_to_wire: Option<String> = effective_respond_to
+        .as_ref()
+        .filter(|m| **m != RespondTo::default())
+        .map(|m| m.as_str().to_string());
 
     // ── Phase 2: mint keys + auth tag (sync, outside lock) ───────────────────
     let (agent_keys, private_key_nsec, pubkey, auth_tag, owner_pubkey_hex) = {
@@ -486,7 +565,7 @@ pub async fn confirm_agent_snapshot_import(
         let persona = PersonaRecord {
             id: persona_id.clone(),
             display_name: display_name.clone(),
-            avatar_url: snapshot.profile.avatar_data_url.clone(),
+            avatar_url: effective_avatar.clone(),
             system_prompt: snapshot
                 .definition
                 .system_prompt
@@ -501,10 +580,10 @@ pub async fn confirm_agent_snapshot_import(
             source_team: None,
             source_team_persona_slug: None,
             env_vars: std::collections::BTreeMap::new(),
-            respond_to: snapshot.definition.respond_to.clone(),
-            respond_to_allowlist: allowlist.clone(),
+            respond_to: respond_to_wire.clone(),
+            respond_to_allowlist: effective_allowlist.clone(),
             mcp_toolsets: snapshot.definition.mcp_toolsets.clone(),
-            parallelism: snapshot.definition.parallelism,
+            parallelism: minted_parallelism,
             created_at: now.clone(),
             updated_at: now.clone(),
         };
@@ -526,7 +605,7 @@ pub async fn confirm_agent_snapshot_import(
             private_key_nsec: private_key_nsec.clone(),
             auth_tag: auth_tag.clone(),
             relay_url: String::new(), // resolves to workspace relay at runtime
-            avatar_url: snapshot.profile.avatar_data_url.clone(),
+            avatar_url: effective_avatar.clone(),
             // Machine-local commands: derive from the runtime catalog at
             // spawn time — never manufacture from snapshot data.
             acp_command: crate::managed_agents::DEFAULT_ACP_COMMAND.to_string(),
@@ -537,9 +616,7 @@ pub async fn confirm_agent_snapshot_import(
             turn_timeout_seconds: 0,
             idle_timeout_seconds: snapshot.definition.idle_timeout_seconds,
             max_turn_duration_seconds: snapshot.definition.max_turn_duration_seconds,
-            parallelism: snapshot
-                .definition
-                .parallelism
+            parallelism: minted_parallelism
                 .unwrap_or(crate::managed_agents::DEFAULT_AGENT_PARALLELISM),
             system_prompt: snapshot.definition.system_prompt.clone(),
             model: snapshot.definition.model.clone(),
@@ -562,16 +639,19 @@ pub async fn confirm_agent_snapshot_import(
             last_exit_code: None,
             last_error: None,
             last_error_code: None,
-            respond_to: crate::managed_agents::RespondTo::default(),
-            respond_to_allowlist: allowlist.clone(),
+            // Instance-level behavioral defaults agree with the resolved
+            // definition: both use the validated effective_respond_to/allowlist
+            // so they are always consistent at mint time.
+            respond_to: effective_respond_to.clone().unwrap_or_default(),
+            respond_to_allowlist: effective_allowlist.clone(),
             is_builtin: false,
             is_active: true,
             source_team: None,
             source_team_persona_slug: None,
-            definition_respond_to: snapshot.definition.respond_to.clone(),
-            definition_respond_to_allowlist: allowlist.clone(),
+            definition_respond_to: respond_to_wire.clone(),
+            definition_respond_to_allowlist: effective_allowlist.clone(),
             definition_mcp_toolsets: snapshot.definition.mcp_toolsets.clone(),
-            definition_parallelism: snapshot.definition.parallelism,
+            definition_parallelism: minted_parallelism,
             relay_mesh: None,
             runtime: snapshot.definition.runtime.clone(),
             name_pool: snapshot.definition.name_pool.clone(),
@@ -580,12 +660,16 @@ pub async fn confirm_agent_snapshot_import(
         records.push(record.clone());
         save_managed_agents(&app, &records)?;
 
-        // Enqueue the kind:30078 managed-agent event via retention.
+        // Enqueue the kind:30177 managed-agent event via retention.
         // (Uses the same pattern as agents.rs::retain_managed_agent_pending
         // inlined here to avoid cross-module private-fn access.)
         retain_agent_pending(&app, &state, &record);
 
         crate::managed_agents::try_regenerate_nest(&app);
+
+        // Notify other mounted clients of local persona+managed-agent writes,
+        // matching the contract used by other local managed-agent mutations.
+        let _ = app.emit("agents-data-changed", ());
 
         (persona, record)
     };
@@ -598,7 +682,7 @@ pub async fn confirm_agent_snapshot_import(
         &relay_url,
         &agent_keys,
         &display_name,
-        snapshot.profile.avatar_data_url.as_deref(),
+        effective_avatar.as_deref(),
         auth_tag.as_deref(),
     )
     .await
@@ -666,7 +750,7 @@ pub async fn confirm_agent_snapshot_import(
     })
 }
 
-/// Inline retention for the managed-agent kind:30078 event — mirrors
+/// Inline retention for the managed-agent kind:30177 event — mirrors
 /// `agents::retain_managed_agent_pending` without requiring cross-module
 /// private function access.
 fn retain_agent_pending(app: &AppHandle, state: &AppState, record: &ManagedAgentRecord) {

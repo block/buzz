@@ -13,7 +13,7 @@ function makePreview(overrides = {}) {
   return {
     displayName: "Test Agent",
     systemPrompt: "You are helpful.",
-    avatarDataUrl: null,
+    avatarUrl: null,
     memoryLevel: "none",
     memoryEntryCount: 0,
     hasSourceAllowlist: false,
