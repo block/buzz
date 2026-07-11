@@ -153,7 +153,7 @@ export function ProfilePopover({
                       aria-expanded={presenceMenuOpen}
                       aria-haspopup="menu"
                       className={cn(
-                        "mt-0.5 inline-flex max-w-full items-center rounded-md px-2 py-0.5 text-xs font-medium outline-hidden transition-opacity hover:opacity-80 focus:outline-none focus-visible:opacity-80 focus-visible:outline-none",
+                        "mt-0.5 inline-flex max-w-full items-center rounded-md px-2 py-0.5 text-xs font-medium outline-hidden transition-opacity hover:opacity-80 focus-visible:opacity-80 focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring",
                         getPresenceChipClassName(currentStatus),
                       )}
                       data-testid="profile-popover-presence-trigger"

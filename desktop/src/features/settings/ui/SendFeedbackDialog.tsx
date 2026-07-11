@@ -36,6 +36,12 @@ const FEEDBACK_CATEGORIES: readonly FeedbackCategory[] = [
   { id: "needs-work", label: "Needs work", icon: Wrench },
 ];
 
+/** Single source of truth for category id → user-facing label. */
+export const FEEDBACK_CATEGORY_LABELS: Record<FeedbackCategoryId, string> =
+  Object.fromEntries(
+    FEEDBACK_CATEGORIES.map((entry) => [entry.id, entry.label]),
+  ) as Record<FeedbackCategoryId, string>;
+
 export type SendFeedbackInput = {
   category: FeedbackCategoryId | null;
   includeLogs: boolean;

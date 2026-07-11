@@ -2,12 +2,15 @@ import { getVersion } from "@tauri-apps/api/app";
 import { useMutation } from "@tanstack/react-query";
 import * as React from "react";
 
-import { useChannelsQuery } from "@/features/channels/hooks";
+import {
+  useChannelsQuery,
+  useCreateChannelMutation,
+} from "@/features/channels/hooks";
 import type { ImetaMedia } from "@/features/messages/lib/imetaMediaMarkdown";
 import { buildOutgoingMessage } from "@/features/messages/lib/imetaMediaMarkdown";
 import type { SendFeedbackInput } from "@/features/settings/ui/SendFeedbackDialog";
+import { FEEDBACK_CATEGORY_LABELS } from "@/features/settings/ui/SendFeedbackDialog";
 import {
-  createChannel,
   pickAndUploadMedia,
   sendChannelMessage,
   uploadMediaBytes,
@@ -17,13 +20,13 @@ import type { Channel } from "@/shared/api/types";
 /** Name of the private channel feedback is delivered to. */
 export const FEEDBACK_CHANNEL_NAME = "Buzz feedback";
 
-const CATEGORY_LABELS: Record<string, string> = {
-  bug: "Bug",
-  praise: "Praise",
-  "needs-work": "Needs work",
-};
-
-function findFeedbackChannel(channels: Channel[] | undefined): Channel | null {
+/**
+ * Resolves the private feedback channel from the channel list by name
+ * (case-insensitive), excluding DMs. Exported for unit testing.
+ */
+export function findFeedbackChannel(
+  channels: Channel[] | undefined,
+): Channel | null {
   if (!channels) {
     return null;
   }
@@ -69,6 +72,7 @@ async function collectDiagnostics(): Promise<string> {
  */
 export function useSendFeedback() {
   const channelsQuery = useChannelsQuery();
+  const createChannelMutation = useCreateChannelMutation();
   const [attachedImage, setAttachedImage] = React.useState<ImetaMedia | null>(
     null,
   );
@@ -76,9 +80,13 @@ export function useSendFeedback() {
   const attachImage = React.useCallback(async () => {
     const descriptors = await pickAndUploadMedia();
     const first = descriptors[0];
-    if (first) {
-      setAttachedImage(first);
+    if (!first) {
+      return;
     }
+    if (!first.type.startsWith("image/")) {
+      throw new Error("Please choose an image file.");
+    }
+    setAttachedImage(first);
   }, []);
 
   const removeImage = React.useCallback(() => {
@@ -94,7 +102,7 @@ export function useSendFeedback() {
       // Resolve or create the private feedback channel.
       let channel = findFeedbackChannel(channelsQuery.data);
       if (!channel) {
-        channel = await createChannel({
+        channel = await createChannelMutation.mutateAsync({
           name: FEEDBACK_CHANNEL_NAME,
           channelType: "stream",
           visibility: "private",
@@ -105,7 +113,7 @@ export function useSendFeedback() {
       const headerParts: string[] = [];
       if (input.category) {
         headerParts.push(
-          `**${CATEGORY_LABELS[input.category] ?? input.category}**`,
+          `**${FEEDBACK_CATEGORY_LABELS[input.category] ?? input.category}**`,
         );
       }
       const bodyLines = [headerParts.join(" "), input.message]
