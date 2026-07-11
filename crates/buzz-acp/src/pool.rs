@@ -2135,31 +2135,32 @@ async fn fetch_canvas_section(channel_id: Uuid, rest: &RestClient) -> Option<Str
 /// Extracted as a pure function so tests can exercise the parsing/validation
 /// logic without async machinery or relay connectivity.
 ///
-/// Returns `None` on: empty array, blank content, invalid event ID format,
-/// or any missing required field.
+/// Returns `None` on: empty array, blank content, malformed/partial event JSON
+/// (requires a complete, structurally valid Nostr event), or an out-of-range
+/// `created_at` timestamp. Never falls back to epoch or raw integers.
 pub(crate) fn canvas_section_from_query_response(
     events: &[serde_json::Value],
     channel_uuid: &str,
 ) -> Option<String> {
-    let ev = events.first()?;
+    let raw = events.first()?;
 
-    let id = ev.get("id").and_then(|v| v.as_str()).unwrap_or("");
-    let created_at = ev.get("created_at").and_then(|v| v.as_i64()).unwrap_or(0);
-    let content = ev.get("content").and_then(|v| v.as_str()).unwrap_or("");
-
-    // Validate: event ID must be 64 lowercase hex chars.
-    if id.len() != 64 || !id.chars().all(|c| c.is_ascii_hexdigit()) {
-        tracing::warn!(
-            target: "canvas::fetch",
-            channel = %channel_uuid,
-            "canvas event has invalid id {:?} — emitting no section",
-            id
-        );
-        return None;
-    }
+    // Deserialise as a complete Nostr Event. Partial objects (missing pubkey,
+    // sig, kind, or tags) are rejected here rather than trusted implicitly.
+    let event = match serde_json::from_value::<nostr::Event>(raw.clone()) {
+        Ok(ev) => ev,
+        Err(err) => {
+            tracing::warn!(
+                target: "canvas::fetch",
+                channel = %channel_uuid,
+                %err,
+                "canvas query returned a malformed event — emitting no section",
+            );
+            return None;
+        }
+    };
 
     // Blank content means the canvas was cleared; do not fall back to older events.
-    if content.trim().is_empty() {
+    if event.content.trim().is_empty() {
         tracing::debug!(
             target: "canvas::fetch",
             channel = %channel_uuid,
@@ -2168,9 +2169,23 @@ pub(crate) fn canvas_section_from_query_response(
         return None;
     }
 
-    let timestamp = chrono::DateTime::from_timestamp(created_at, 0)
-        .map(|dt| dt.to_rfc3339())
-        .unwrap_or_else(|| format!("{created_at}"));
+    let id = event.id.to_hex();
+
+    // Convert the Nostr timestamp to a UTC RFC3339 string with Z suffix.
+    // If chrono rejects the value (out-of-range), fail open — emit no section.
+    let ts_secs = event.created_at.as_secs() as i64;
+    let timestamp = match chrono::DateTime::from_timestamp(ts_secs, 0) {
+        Some(dt) => dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        None => {
+            tracing::warn!(
+                target: "canvas::fetch",
+                channel = %channel_uuid,
+                ts_secs,
+                "canvas event has out-of-range created_at — emitting no section",
+            );
+            return None;
+        }
+    };
 
     tracing::info!(
         target: "canvas::fetch",
@@ -2178,7 +2193,7 @@ pub(crate) fn canvas_section_from_query_response(
         event_id = %id,
         "injected channel canvas metadata section into system prompt"
     );
-    Some(render_canvas_section(id, &timestamp, channel_uuid))
+    Some(render_canvas_section(&id, &timestamp, channel_uuid))
 }
 
 /// Render the `[Channel Canvas]` metadata section string.
@@ -4419,22 +4434,33 @@ mod tests {
 
     // ── canvas_section_from_query_response ───────────────────────────────────
 
-    const VALID_ID: &str = "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2";
     const CHANNEL_UUID: &str = "00f1ccaf-1506-4dd7-9a0e-fa67e9e486ae";
+
+    /// Build a real, cryptographically signed Nostr event for canvas tests.
+    ///
+    /// `nostr::Event` requires all fields (pubkey, sig, kind, tags, id) to
+    /// deserialise successfully, so we use `EventBuilder` + `Keys` rather than
+    /// a bare `serde_json::json!({...})` object.
+    fn make_canvas_event_value(content: &str) -> serde_json::Value {
+        let keys = Keys::generate();
+        let event = EventBuilder::new(Kind::Custom(buzz_core::kind::KIND_CANVAS as u16), content)
+            .sign_with_keys(&keys)
+            .expect("sign");
+        serde_json::to_value(&event).expect("serialise")
+    }
 
     #[test]
     fn test_canvas_section_from_query_response_happy_path() {
-        let events = vec![serde_json::json!({
-            "id": VALID_ID,
-            "created_at": 1705312200_i64,
-            "content": "# Team instructions\nBe helpful."
-        })];
-        let result = canvas_section_from_query_response(&events, CHANNEL_UUID);
+        let ev = make_canvas_event_value("# Team instructions\nBe helpful.");
+        let id = ev["id"].as_str().unwrap().to_string();
+        let result = canvas_section_from_query_response(&[ev], CHANNEL_UUID);
         let section = result.expect("expected Some");
-        assert!(section.contains(VALID_ID));
+        assert!(section.contains(&id), "section must contain the event id");
         assert!(section.contains("buzz canvas get --channel"));
         assert!(section.contains(CHANNEL_UUID));
         assert!(section.starts_with("[Channel Canvas]"));
+        // Timestamp must use Z suffix, not +00:00
+        assert!(section.contains('Z'), "timestamp must use Z suffix");
     }
 
     #[test]
@@ -4445,12 +4471,8 @@ mod tests {
 
     #[test]
     fn test_canvas_section_from_query_response_blank_content_returns_none() {
-        let events = vec![serde_json::json!({
-            "id": VALID_ID,
-            "created_at": 1705312200_i64,
-            "content": "   "
-        })];
-        let result = canvas_section_from_query_response(&events, CHANNEL_UUID);
+        let ev = make_canvas_event_value("   ");
+        let result = canvas_section_from_query_response(&[ev], CHANNEL_UUID);
         assert!(
             result.is_none(),
             "blank content must return None (cleared canvas)"
@@ -4459,58 +4481,86 @@ mod tests {
 
     #[test]
     fn test_canvas_section_from_query_response_empty_content_returns_none() {
-        let events = vec![serde_json::json!({
-            "id": VALID_ID,
+        let ev = make_canvas_event_value("");
+        let result = canvas_section_from_query_response(&[ev], CHANNEL_UUID);
+        assert!(result.is_none());
+    }
+
+    /// A bare JSON object with a plausible-looking id but missing pubkey/sig/kind/tags
+    /// must be rejected — not silently accepted with partial metadata.
+    #[test]
+    fn test_canvas_section_from_query_response_partial_object_returns_none() {
+        let partial = serde_json::json!({
+            "id": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
             "created_at": 1705312200_i64,
-            "content": ""
-        })];
-        let result = canvas_section_from_query_response(&events, CHANNEL_UUID);
+            "content": "some instructions"
+        });
+        let result = canvas_section_from_query_response(&[partial], CHANNEL_UUID);
+        assert!(
+            result.is_none(),
+            "partial event object (missing pubkey/sig/kind/tags) must return None"
+        );
+    }
+
+    /// A JSON object that looks like an event but has `created_at` as a string
+    /// must be rejected — the nostr::Event parser enforces integer type.
+    #[test]
+    fn test_canvas_section_from_query_response_string_timestamp_returns_none() {
+        let keys = Keys::generate();
+        let mut ev = serde_json::to_value(
+            EventBuilder::new(Kind::Custom(buzz_core::kind::KIND_CANVAS as u16), "content")
+                .sign_with_keys(&keys)
+                .expect("sign"),
+        )
+        .expect("serialise");
+        // Corrupt created_at to a string value.
+        ev["created_at"] = serde_json::Value::String("2026-03-15T16:30:00+00:00".into());
+        let result = canvas_section_from_query_response(&[ev], CHANNEL_UUID);
+        assert!(
+            result.is_none(),
+            "string created_at must be rejected by nostr::Event deserialiser"
+        );
+    }
+
+    /// A JSON object that looks like an event but is missing `created_at`
+    /// must be rejected — nostr::Event requires the field.
+    #[test]
+    fn test_canvas_section_from_query_response_missing_timestamp_returns_none() {
+        let keys = Keys::generate();
+        let mut ev = serde_json::to_value(
+            EventBuilder::new(Kind::Custom(buzz_core::kind::KIND_CANVAS as u16), "content")
+                .sign_with_keys(&keys)
+                .expect("sign"),
+        )
+        .expect("serialise");
+        ev.as_object_mut().unwrap().remove("created_at");
+        let result = canvas_section_from_query_response(&[ev], CHANNEL_UUID);
+        assert!(
+            result.is_none(),
+            "missing created_at must be rejected by nostr::Event deserialiser"
+        );
+    }
+
+    #[test]
+    fn test_canvas_section_from_query_response_non_array_object_returns_none() {
+        // Passing a single JSON object (not wrapped in a Vec) exercises the
+        // empty-array fast-path because serde_json::Value::Array is never matched.
+        let result = canvas_section_from_query_response(&[], CHANNEL_UUID);
         assert!(result.is_none());
     }
 
     #[test]
-    fn test_canvas_section_from_query_response_invalid_id_short_returns_none() {
-        let events = vec![serde_json::json!({
-            "id": "abc123",
-            "created_at": 1705312200_i64,
-            "content": "some instructions"
-        })];
-        let result = canvas_section_from_query_response(&events, CHANNEL_UUID);
-        assert!(result.is_none(), "short id must return None");
-    }
-
-    #[test]
-    fn test_canvas_section_from_query_response_invalid_id_non_hex_returns_none() {
-        let events = vec![serde_json::json!({
-            "id": "gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg",
-            "created_at": 1705312200_i64,
-            "content": "some instructions"
-        })];
-        let result = canvas_section_from_query_response(&events, CHANNEL_UUID);
-        assert!(result.is_none(), "non-hex id must return None");
-    }
-
-    #[test]
-    fn test_canvas_section_from_query_response_missing_id_returns_none() {
-        let events = vec![serde_json::json!({
-            "created_at": 1705312200_i64,
-            "content": "some instructions"
-        })];
-        // id defaults to "" which fails the 64-char check
-        let result = canvas_section_from_query_response(&events, CHANNEL_UUID);
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn test_canvas_section_from_query_response_zero_timestamp_uses_epoch() {
-        let events = vec![serde_json::json!({
-            "id": VALID_ID,
-            "created_at": 0_i64,
-            "content": "some instructions"
-        })];
-        let result = canvas_section_from_query_response(&events, CHANNEL_UUID);
-        let section = result.expect("epoch timestamp is valid");
-        // The epoch renders as a valid RFC3339 string, not a fallback integer.
-        assert!(section.contains("1970-01-01") || section.contains("0"));
+    fn test_canvas_section_from_query_response_timestamp_uses_z_suffix() {
+        let ev = make_canvas_event_value("instructions");
+        let result = canvas_section_from_query_response(&[ev], CHANNEL_UUID);
+        let section = result.expect("valid event must produce a section");
+        assert!(
+            section.contains('Z'),
+            "RFC3339 timestamp must use Z suffix, not +00:00"
+        );
+        assert!(
+            !section.contains("+00:00"),
+            "timestamp must not use +00:00 offset"
+        );
     }
 }
