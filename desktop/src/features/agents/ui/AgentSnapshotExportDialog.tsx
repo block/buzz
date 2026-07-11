@@ -20,6 +20,10 @@ type AgentSnapshotExportDialogProps = {
   isPending: boolean;
   open: boolean;
   persona: AgentPersona;
+  /** Pubkey of the linked agent instance to use as the memory source.
+   *  When null, memory levels are disabled — the definition has no agent
+   *  instance with a keypair to read memory from. */
+  linkedAgentPubkey: string | null;
   onExport: (memoryLevel: SnapshotMemoryLevel, format: SnapshotFormat) => void;
   onOpenChange: (open: boolean) => void;
 };
@@ -50,6 +54,7 @@ export function AgentSnapshotExportDialog({
   isPending,
   open,
   persona,
+  linkedAgentPubkey,
   onExport,
   onOpenChange,
 }: AgentSnapshotExportDialogProps) {
@@ -57,6 +62,7 @@ export function AgentSnapshotExportDialog({
     React.useState<SnapshotMemoryLevel>("none");
   const [format, setFormat] = React.useState<SnapshotFormat>("json");
 
+  const hasLinkedAgent = linkedAgentPubkey !== null;
   const showMemoryWarning = memoryLevel !== "none";
   // PNG format is disabled when memory is selected (backend guards this too,
   // but we disable the option proactively to avoid a confusing error).
@@ -132,28 +138,40 @@ export function AgentSnapshotExportDialog({
           <div className="space-y-2">
             <p className="text-sm font-medium">Memory to include</p>
             <div className="space-y-1">
-              {MEMORY_LEVELS.map(({ value, label, description }) => (
-                <label
-                  className="flex cursor-pointer items-start gap-3 rounded-md px-3 py-2 hover:bg-muted"
-                  key={value}
-                >
-                  <input
-                    checked={memoryLevel === value}
-                    className="mt-0.5 shrink-0"
-                    name="memory-level"
-                    onChange={() => setMemoryLevel(value)}
-                    type="radio"
-                    value={value}
-                  />
-                  <div>
-                    <p className="text-sm font-medium leading-none">{label}</p>
-                    <p className="mt-0.5 text-xs text-muted-foreground">
-                      {description}
-                    </p>
-                  </div>
-                </label>
-              ))}
+              {MEMORY_LEVELS.map(({ value, label, description }) => {
+                const memoryDisabled = !hasLinkedAgent && value !== "none";
+                return (
+                  <label
+                    className={`flex items-start gap-3 rounded-md px-3 py-2 ${memoryDisabled ? "cursor-not-allowed opacity-40" : "cursor-pointer hover:bg-muted"}`}
+                    key={value}
+                  >
+                    <input
+                      checked={memoryLevel === value}
+                      className="mt-0.5 shrink-0"
+                      disabled={memoryDisabled}
+                      name="memory-level"
+                      onChange={() => !memoryDisabled && setMemoryLevel(value)}
+                      type="radio"
+                      value={value}
+                    />
+                    <div>
+                      <p className="text-sm font-medium leading-none">
+                        {label}
+                      </p>
+                      <p className="mt-0.5 text-xs text-muted-foreground">
+                        {description}
+                      </p>
+                    </div>
+                  </label>
+                );
+              })}
             </div>
+            {!hasLinkedAgent ? (
+              <p className="px-3 text-xs text-muted-foreground">
+                Memory export requires a running agent instance. Start this
+                definition to enable memory levels.
+              </p>
+            ) : null}
           </div>
 
           {/* Plaintext memory warning */}

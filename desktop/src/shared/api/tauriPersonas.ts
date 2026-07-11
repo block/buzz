@@ -202,9 +202,11 @@ export async function exportAgentSnapshot(
   id: string,
   memoryLevel: SnapshotMemoryLevel,
   format: SnapshotFormat,
+  memorySourcePubkey?: string | null,
 ): Promise<boolean> {
   return invokeTauri<boolean>("export_agent_snapshot", {
     id,
+    memorySourcePubkey: memorySourcePubkey ?? null,
     memoryLevel,
     format,
   });

@@ -26,6 +26,7 @@ import type {
   AgentPersona,
   CreateManagedAgentResponse,
   CreatePersonaInput,
+  ManagedAgent,
   UpdatePersonaInput,
 } from "@/shared/api/types";
 import {
@@ -113,8 +114,10 @@ export function usePersonaActions() {
     React.useState<AgentPersona | null>(null);
   const [personaToShare, setPersonaToShare] =
     React.useState<AgentPersona | null>(null);
-  const [personaToExportSnapshot, setPersonaToExportSnapshot] =
-    React.useState<AgentPersona | null>(null);
+  const [personaToExportSnapshot, setPersonaToExportSnapshot] = React.useState<{
+    persona: AgentPersona;
+    linkedAgentPubkey: string | null;
+  } | null>(null);
   const [isCatalogDialogOpen, setIsCatalogDialogOpen] = React.useState(false);
   const [sharedCatalogPersonaIds, setSharedCatalogPersonaIds] = React.useState<
     string[]
@@ -381,20 +384,32 @@ export function usePersonaActions() {
     setPersonaToShare(persona);
   }
 
-  function openExportSnapshot(persona: AgentPersona) {
+  function openExportSnapshot(
+    persona: AgentPersona,
+    linkedAgent: ManagedAgent | undefined,
+  ) {
     clearFeedback("library");
-    setPersonaToExportSnapshot(persona);
+    setPersonaToExportSnapshot({
+      persona,
+      linkedAgentPubkey: linkedAgent?.pubkey ?? null,
+    });
   }
 
   function handleExportSnapshot(
     persona: AgentPersona,
+    linkedAgentPubkey: string | null,
     memoryLevel: SnapshotMemoryLevel,
     format: SnapshotFormat,
   ) {
     clearFeedback("library");
     setPersonaToExportSnapshot(null);
     exportAgentSnapshotMutation.mutate(
-      { id: persona.id, memoryLevel, format },
+      {
+        id: persona.id,
+        memoryLevel,
+        format,
+        memorySourcePubkey: linkedAgentPubkey,
+      },
       {
         onSuccess: (saved) => {
           if (saved) {

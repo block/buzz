@@ -297,7 +297,7 @@ pub fn encode_snapshot_png(
     snapshot: &AgentSnapshot,
     avatar_bytes: Option<&[u8]>,
 ) -> Result<Vec<u8>, String> {
-    if snapshot.memory.level != MemoryLevel::None {
+    if snapshot.memory.level != MemoryLevel::None || !snapshot.memory.entries.is_empty() {
         return Err(
             "Cannot write memory to a .agent.png file — use .agent.json for memory-bearing \
              snapshots. PNG images are casually shared and would expose memory as plaintext."
@@ -464,10 +464,10 @@ mod tests {
             pubkey: "deadbeef".to_string(),
             name: "Test Agent".to_string(),
             display_name: Some("Test Agent Display".to_string()),
-            persona_id: None,
-            private_key_nsec: "nsec1secret".to_string(), // MUST NOT appear in snapshot
-            auth_tag: Some("auth-tag-secret".to_string()), // MUST NOT appear in snapshot
-            relay_url: "wss://relay.example.com".to_string(), // MUST NOT appear in snapshot
+            persona_id: Some("SENTINEL_PERSONA_ID".to_string()), // MUST NOT appear in snapshot
+            private_key_nsec: "nsec1secret".to_string(),         // MUST NOT appear in snapshot
+            auth_tag: Some("auth-tag-secret".to_string()),       // MUST NOT appear in snapshot
+            relay_url: "wss://relay.example.com".to_string(),    // MUST NOT appear in snapshot
             avatar_url: Some("https://example.com/avatar.png".to_string()),
             acp_command: "/usr/local/bin/acp".to_string(), // MUST NOT appear in snapshot
             agent_command: "goose".to_string(),            // MUST NOT appear in snapshot
@@ -490,19 +490,23 @@ mod tests {
             },
             start_on_app_launch: true,
             auto_restart_on_config_change: true,
-            runtime_pid: Some(12345),    // MUST NOT appear
-            backend: BackendKind::Local, // MUST NOT appear
-            backend_agent_id: Some("agent-id-123".to_string()), // MUST NOT appear
-            provider_binary_path: Some("/usr/bin/provider".to_string()), // MUST NOT appear
-            persona_team_dir: None,
-            persona_name_in_team: None,
+            runtime_pid: Some(12345), // MUST NOT appear
+            backend: BackendKind::Provider {
+                // MUST NOT appear — carries a provider secret
+                id: "SENTINEL_BACKEND_ID".to_string(),
+                config: serde_json::json!({"api_key": "SENTINEL_BACKEND_SECRET"}),
+            },
+            backend_agent_id: Some("SENTINEL_BACKEND_AGENT_ID".to_string()), // MUST NOT appear
+            provider_binary_path: Some("/usr/bin/SENTINEL_PROVIDER_BINARY".to_string()), // MUST NOT appear
+            persona_team_dir: Some(std::path::PathBuf::from("SENTINEL_TEAM_DIR")), // MUST NOT appear
+            persona_name_in_team: Some("SENTINEL_NAME_IN_TEAM".to_string()), // MUST NOT appear
             created_at: "2024-01-01T00:00:00Z".to_string(),
             updated_at: "2024-01-02T00:00:00Z".to_string(),
             last_started_at: Some("2024-01-03T00:00:00Z".to_string()), // MUST NOT appear
             last_stopped_at: None,
             last_exit_code: Some(0), // MUST NOT appear
-            last_error: None,
-            last_error_code: None,
+            last_error: Some("SENTINEL_LAST_ERROR".to_string()), // MUST NOT appear
+            last_error_code: Some(42), // MUST NOT appear
             respond_to: RespondTo::default(),
             respond_to_allowlist: vec!["pubkey1hex".to_string()],
             slug: Some("test-agent".to_string()),
@@ -618,6 +622,29 @@ mod tests {
         assert!(encode_snapshot_png(&snapshot, None).is_ok());
     }
 
+    #[test]
+    fn png_export_rejects_none_level_with_nonempty_entries() {
+        // Inconsistent state: level == None but entries is non-empty.
+        // The encoder must reject this to prevent a memory-leak bypass.
+        let record = minimal_record();
+        let entries = vec![AgentSnapshotMemoryEntry {
+            slug: "core".to_string(),
+            body: "leaked memory".to_string(),
+        }];
+        // Build with entries, then override level to None in the struct.
+        let mut snapshot = build_snapshot(&record, MemoryLevel::Core, entries, None);
+        snapshot.memory.level = MemoryLevel::None; // force inconsistency
+        let result = encode_snapshot_png(&snapshot, None);
+        assert!(
+            result.is_err(),
+            "PNG encoder must reject level=None with non-empty entries"
+        );
+        assert!(
+            result.unwrap_err().contains("Cannot write memory"),
+            "Error must explain the PNG memory restriction"
+        );
+    }
+
     // ── Secret exclusion tests ────────────────────────────────────────────────
     //
     // These tests assert that every field in the exclusion list is absent from
@@ -722,8 +749,16 @@ mod tests {
             "backendAgentId must not appear"
         );
         assert!(
+            !json.contains("SENTINEL_BACKEND_AGENT_ID"),
+            "backendAgentId value must not appear"
+        );
+        assert!(
             !json.contains("providerBinaryPath") && !json.contains("provider_binary_path"),
             "providerBinaryPath must not appear"
+        );
+        assert!(
+            !json.contains("SENTINEL_PROVIDER_BINARY"),
+            "providerBinaryPath value must not appear"
         );
         assert!(
             !json.contains("lastStartedAt") && !json.contains("last_started_at"),
@@ -732,6 +767,28 @@ mod tests {
         assert!(
             !json.contains("lastExitCode") && !json.contains("last_exit_code"),
             "lastExitCode must not appear"
+        );
+        // backend blob — neither the type tag nor provider secret must leak.
+        assert!(
+            !json.contains("\"backend\"") && !json.contains("backend"),
+            "backend field must not appear"
+        );
+        assert!(
+            !json.contains("SENTINEL_BACKEND_ID") && !json.contains("SENTINEL_BACKEND_SECRET"),
+            "backend config values must not appear"
+        );
+        // last_error / last_error_code
+        assert!(
+            !json.contains("lastError") && !json.contains("last_error"),
+            "lastError must not appear"
+        );
+        assert!(
+            !json.contains("SENTINEL_LAST_ERROR"),
+            "lastError value must not appear"
+        );
+        assert!(
+            !json.contains("lastErrorCode") && !json.contains("last_error_code"),
+            "lastErrorCode must not appear"
         );
     }
 
@@ -754,6 +811,33 @@ mod tests {
         assert!(
             !json.contains("personaSourceVersion") && !json.contains("persona_source_version"),
             "personaSourceVersion must not appear"
+        );
+        // personaId
+        assert!(
+            !json.contains("personaId") && !json.contains("persona_id"),
+            "personaId field must not appear"
+        );
+        assert!(
+            !json.contains("SENTINEL_PERSONA_ID"),
+            "personaId value must not appear"
+        );
+        // personaTeamDir
+        assert!(
+            !json.contains("personaTeamDir") && !json.contains("persona_team_dir"),
+            "personaTeamDir field must not appear"
+        );
+        assert!(
+            !json.contains("SENTINEL_TEAM_DIR"),
+            "personaTeamDir value must not appear"
+        );
+        // personaNameInTeam
+        assert!(
+            !json.contains("personaNameInTeam") && !json.contains("persona_name_in_team"),
+            "personaNameInTeam field must not appear"
+        );
+        assert!(
+            !json.contains("SENTINEL_NAME_IN_TEAM"),
+            "personaNameInTeam value must not appear"
         );
     }
 

@@ -317,11 +317,13 @@ export function AgentsView() {
         <AgentSnapshotExportDialog
           isPending={personas.isPending}
           open={personas.personaToExportSnapshot !== null}
-          persona={personas.personaToExportSnapshot}
+          persona={personas.personaToExportSnapshot.persona}
+          linkedAgentPubkey={personas.personaToExportSnapshot.linkedAgentPubkey}
           onExport={(memoryLevel, format) => {
             if (personas.personaToExportSnapshot) {
               personas.handleExportSnapshot(
-                personas.personaToExportSnapshot,
+                personas.personaToExportSnapshot.persona,
+                personas.personaToExportSnapshot.linkedAgentPubkey,
                 memoryLevel,
                 format,
               );
