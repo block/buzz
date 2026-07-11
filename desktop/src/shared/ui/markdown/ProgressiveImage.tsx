@@ -5,6 +5,21 @@ import { cn } from "@/shared/lib/cn";
 const IMAGE_CLASS =
   "absolute inset-0 block h-full w-full rounded-2xl object-contain";
 
+function isSameImageSource(
+  left: string | undefined,
+  right: string | undefined,
+) {
+  if (!left || !right) return false;
+  try {
+    return (
+      new URL(left, window.location.href).href ===
+      new URL(right, window.location.href).href
+    );
+  } catch {
+    return left === right;
+  }
+}
+
 type ProgressiveImageProps = {
   alt: string | undefined;
   fullImageRef: React.RefObject<HTMLImageElement | null>;
@@ -32,8 +47,11 @@ export function ProgressiveImage({
   thumbSrc,
   width,
 }: ProgressiveImageProps) {
-  const [loadFullImage, setLoadFullImage] = React.useState(!thumbSrc);
-  const [fullImageLoaded, setFullImageLoaded] = React.useState(!thumbSrc);
+  const thumbnailSrc = isSameImageSource(thumbSrc, resolvedSrc)
+    ? undefined
+    : thumbSrc;
+  const [loadFullImage, setLoadFullImage] = React.useState(!thumbnailSrc);
+  const [fullImageLoaded, setFullImageLoaded] = React.useState(!thumbnailSrc);
 
   const handleFullLoad = React.useCallback(
     async (image: HTMLImageElement) => {
@@ -76,7 +94,7 @@ export function ProgressiveImage({
 
   return (
     <span className="relative block max-w-full" style={frameStyle}>
-      {thumbSrc ? (
+      {thumbnailSrc ? (
         <img
           alt=""
           aria-hidden="true"
@@ -85,7 +103,7 @@ export function ProgressiveImage({
           height={height}
           loading="lazy"
           ref={setThumbnailRef}
-          src={thumbSrc}
+          src={thumbnailSrc}
           style={style}
           width={width}
           onError={() => setLoadFullImage(true)}
@@ -101,12 +119,12 @@ export function ProgressiveImage({
           className={cn(
             IMAGE_CLASS,
             "transition-opacity duration-200 motion-reduce:transition-none",
-            thumbSrc && !fullImageLoaded && "opacity-0",
+            thumbnailSrc && !fullImageLoaded && "opacity-0",
           )}
           data-spoiler-media-size={showSpoilerSize ? "" : undefined}
           decoding="async"
           height={height}
-          loading={thumbSrc ? undefined : "lazy"}
+          loading={thumbnailSrc ? undefined : "lazy"}
           ref={setFullImageRef}
           src={resolvedSrc}
           style={style}
