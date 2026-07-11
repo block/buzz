@@ -612,9 +612,11 @@ export function AgentDefinitionDialog({
       <p className="text-xs text-warning">
         {selectedRuntime.availability === "adapter_missing"
           ? `${selectedRuntime.label} CLI is installed but the ACP adapter is missing.`
-          : selectedRuntime.availability === "cli_missing"
-            ? `${selectedRuntime.label} ACP adapter is installed but the CLI is missing.`
-            : `${selectedRuntime.label} is not installed.`}{" "}
+          : selectedRuntime.availability === "adapter_outdated"
+            ? `${selectedRuntime.label} ACP adapter is outdated — reinstall to continue.`
+            : selectedRuntime.availability === "cli_missing"
+              ? `${selectedRuntime.label} ACP adapter is installed but the CLI is missing.`
+              : `${selectedRuntime.label} is not installed.`}{" "}
         Visit Settings &gt; Doctor to set it up.
       </p>
     ) : null;

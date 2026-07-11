@@ -349,11 +349,13 @@ export function formatRuntimeOptionLabel(runtime: AcpRuntimeCatalogEntry) {
   const suffix =
     runtime.availability === "adapter_missing"
       ? " (adapter missing)"
-      : runtime.availability === "cli_missing"
-        ? " (CLI missing)"
-        : runtime.availability === "not_installed"
-          ? " (not installed)"
-          : "";
+      : runtime.availability === "adapter_outdated"
+        ? " (adapter outdated)"
+        : runtime.availability === "cli_missing"
+          ? " (CLI missing)"
+          : runtime.availability === "not_installed"
+            ? " (not installed)"
+            : "";
   return `${runtime.label}${suffix}`;
 }
 
@@ -368,6 +370,8 @@ function runtimeAvailabilitySortRank(
     case "not_installed":
       return 2;
     case "adapter_missing":
+      return 3;
+    case "adapter_outdated":
       return 3;
   }
 }

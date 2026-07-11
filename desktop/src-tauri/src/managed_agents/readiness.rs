@@ -39,6 +39,7 @@
 //! UI display only.
 
 use std::collections::BTreeMap;
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
@@ -46,7 +47,8 @@ use crate::managed_agents::{
     agent_env::baked_build_env,
     config_bridge::read_goose_file_config,
     discovery::{
-        classify_runtime, find_command, known_acp_runtime, resolve_command, KnownAcpRuntime,
+        classify_runtime, codex_adapter_availability, find_command, known_acp_runtime,
+        resolve_command, KnownAcpRuntime,
     },
     env_vars::merged_user_env,
     global_config::GlobalAgentConfig,
@@ -500,8 +502,21 @@ fn cli_login_requirements(
         .map(|cli| find_command(cli).is_some())
         .unwrap_or(false);
 
-    let (availability, _cmd, _path) =
+    let (availability, _cmd, adapter_path) =
         classify_runtime(adapter_result, runtime.underlying_cli, underlying_cli_found);
+
+    // For codex-acp: if the adapter resolved as Available, probe the version.
+    // An adapter with major version < 1 is the deprecated package and must be
+    // treated as outdated (blocks login probe — the agent can't reach the relay).
+    let availability = if runtime.id == "codex" && availability == AcpAvailabilityStatus::Available
+    {
+        adapter_path
+            .as_deref()
+            .map(|path_str| codex_adapter_availability(Path::new(path_str)))
+            .unwrap_or(availability)
+    } else {
+        availability
+    };
 
     match availability {
         AcpAvailabilityStatus::Available => {

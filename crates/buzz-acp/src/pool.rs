@@ -3818,9 +3818,14 @@ mod tests {
     /// `install_steer_rx` does not panic.
     #[tokio::test]
     async fn test_send_prompt_result_clears_steer_rx_on_early_return() {
-        let acp = AcpClient::spawn("bash", &["-c".to_string(), "sleep 10".to_string()], &[])
-            .await
-            .expect("failed to spawn test agent");
+        let acp = AcpClient::spawn(
+            "bash",
+            &["-c".to_string(), "sleep 10".to_string()],
+            &[],
+            false,
+        )
+        .await
+        .expect("failed to spawn test agent");
         let mut agent = OwnedAgent {
             index: 0,
             acp,
@@ -3868,9 +3873,14 @@ mod tests {
     /// and the next `install_steer_rx` does not panic.
     #[tokio::test]
     async fn test_send_prompt_result_is_noop_when_steer_rx_already_consumed() {
-        let acp = AcpClient::spawn("bash", &["-c".to_string(), "sleep 10".to_string()], &[])
-            .await
-            .expect("failed to spawn test agent");
+        let acp = AcpClient::spawn(
+            "bash",
+            &["-c".to_string(), "sleep 10".to_string()],
+            &[],
+            false,
+        )
+        .await
+        .expect("failed to spawn test agent");
         let agent = OwnedAgent {
             index: 0,
             acp,

@@ -19,6 +19,34 @@ fn active_installs() -> &'static std::sync::Mutex<std::collections::HashSet<Stri
     ACTIVE.get_or_init(|| Mutex::new(HashSet::new()))
 }
 
+/// Returns the adapter install commands that `install_acp_runtime_blocking` would
+/// run for `runtime_id` given a resolved adapter binary at `adapter_path` (or
+/// `None` if none was found).
+///
+/// Returns `None` when no install is needed (adapter is present and current).
+/// Returns `Some(cmds)` when the adapter is missing or (for codex) outdated.
+///
+/// This is a pure planning function: it never spawns a process.  Tests use it to
+/// assert the correct install command is selected without touching real npm.
+pub(crate) fn plan_adapter_install<'c>(
+    runtime_id: &str,
+    adapter_path: Option<&std::path::Path>,
+    adapter_install_commands: &'c [&'c str],
+) -> Option<&'c [&'c str]> {
+    let needs_install = match adapter_path {
+        None => true,
+        Some(path) if runtime_id == "codex" => {
+            crate::managed_agents::codex_adapter_is_outdated(path)
+        }
+        Some(_) => false,
+    };
+    if needs_install {
+        Some(adapter_install_commands)
+    } else {
+        None
+    }
+}
+
 #[tauri::command]
 pub async fn discover_acp_providers() -> Result<Vec<AcpRuntimeCatalogEntry>, String> {
     tokio::task::spawn_blocking(|| {
@@ -88,13 +116,20 @@ fn install_acp_runtime_blocking(runtime_id: &str) -> Result<InstallRuntimeResult
         }
     }
 
-    // Phase 2: Install adapter if missing and commands are available.
-    let adapter_found = runtime
+    // Phase 2: Install adapter if missing (or outdated) and commands are available.
+    // For the codex runtime, "found" is not enough — the resolved binary must also
+    // pass the 1.x version gate. An outdated 0.16.x adapter must be overwritten by
+    // the new npm install so the CODEX_CONFIG spawn contract works correctly.
+    let adapter_path = runtime
         .commands
         .iter()
-        .any(|cmd| crate::managed_agents::resolve_command(cmd).is_some());
-    if !adapter_found {
-        for cmd in runtime.adapter_install_commands {
+        .find_map(|cmd| crate::managed_agents::resolve_command(cmd));
+    if let Some(cmds) = plan_adapter_install(
+        runtime_id,
+        adapter_path.as_deref(),
+        runtime.adapter_install_commands,
+    ) {
+        for cmd in cmds {
             if is_npm_global_install(cmd) {
                 if let Some(step) = npm_preflight_check("adapter", cmd) {
                     steps.push(step);
@@ -725,5 +760,91 @@ mod tests {
         // Create only `lib/` — no `lib/node_modules`.
         std::fs::create_dir(dir.path().join("lib")).unwrap();
         assert!(npm_install_target_is_writable(dir.path()));
+    }
+
+    // ── adapter_needs_install (codex version gate) ────────────────────────────
+
+    /// plan_adapter_install is the pure install-plan seam used by
+    /// install_acp_runtime_blocking. These tests verify:
+    ///   - A 0.x binary (AdapterOutdated) → install commands returned
+    ///   - A 1.x binary (Available) → None (no reinstall)
+    ///   - Missing binary (None path) → install commands returned
+    #[cfg(unix)]
+    #[test]
+    fn test_plan_adapter_install_selects_npm_command_for_outdated_0x_codex_binary() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("codex-acp");
+        // Simulate old 0.16.x: --version exits non-zero (unrecognised flag)
+        std::fs::write(&bin, "#!/bin/sh\nexit 1\n").expect("write script");
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod script");
+
+        let install_cmds = &["npm install -g @agentclientprotocol/codex-acp"];
+        let plan = plan_adapter_install("codex", Some(&bin), install_cmds);
+
+        assert!(
+            plan.is_some(),
+            "0.x codex adapter must trigger install plan"
+        );
+        let cmds = plan.unwrap();
+        assert!(
+            cmds.iter()
+                .any(|c| c.contains("@agentclientprotocol/codex-acp")),
+            "install plan must select @agentclientprotocol/codex-acp; got {cmds:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_plan_adapter_install_returns_none_for_current_1x_codex_binary() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("codex-acp");
+        // Simulate 1.x adapter: outputs version and exits 0
+        std::fs::write(
+            &bin,
+            "#!/bin/sh\necho '@agentclientprotocol/codex-acp 1.1.2'\nexit 0\n",
+        )
+        .expect("write script");
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod script");
+
+        let install_cmds = &["npm install -g @agentclientprotocol/codex-acp"];
+        let plan = plan_adapter_install("codex", Some(&bin), install_cmds);
+
+        assert!(
+            plan.is_none(),
+            "1.x codex adapter must not trigger install plan (no reinstall needed)"
+        );
+    }
+
+    #[test]
+    fn test_plan_adapter_install_returns_cmds_when_no_adapter_path() {
+        let install_cmds = &["npm install -g @agentclientprotocol/codex-acp"];
+        let plan = plan_adapter_install("codex", None, install_cmds);
+        assert!(plan.is_some(), "missing adapter must trigger install plan");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_plan_adapter_install_non_codex_runtime_never_reinstalls() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // For non-codex runtimes, any resolved binary means no install needed.
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("goose-acp");
+        std::fs::write(&bin, "#!/bin/sh\nexit 1\n").expect("write script");
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod script");
+
+        let install_cmds = &["npm install -g @block/goose-acp"];
+        let plan = plan_adapter_install("goose", Some(&bin), install_cmds);
+        assert!(
+            plan.is_none(),
+            "non-codex runtime with resolved binary must not trigger reinstall"
+        );
     }
 }

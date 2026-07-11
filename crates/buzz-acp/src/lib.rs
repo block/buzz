@@ -1143,6 +1143,7 @@ async fn tokio_main() -> Result<()> {
             &config.agent_command,
             &config.agent_args,
             &config.persona_env_vars,
+            config.has_generated_codex_config,
         )
         .await;
         match spawn_result {
@@ -1581,10 +1582,11 @@ async fn tokio_main() -> Result<()> {
                 let cmd = config.agent_command.clone();
                 let args = config.agent_args.clone();
                 let env = config.persona_env_vars.clone();
+                let has_codex = config.has_generated_codex_config;
                 let observer = observer.clone();
                 let guard = RespawnGuard::new(idx, respawn_tx.clone());
                 respawn_tasks.spawn(async move {
-                    let result = spawn_and_init(&cmd, &args, &env, idx, observer).await;
+                    let result = spawn_and_init(&cmd, &args, &env, has_codex, idx, observer).await;
                     guard.send(result);
                 });
             }
@@ -3010,12 +3012,13 @@ fn recover_panicked_agent(
     let cmd = config.agent_command.clone();
     let args = config.agent_args.clone();
     let env = config.persona_env_vars.clone();
+    let has_codex = config.has_generated_codex_config;
     let guard = RespawnGuard::new(i, respawn_tx.clone());
     respawn_tasks.spawn(async move {
         if !delay.is_zero() {
             tokio::time::sleep(delay).await;
         }
-        let result = spawn_and_init(&cmd, &args, &env, i, observer).await;
+        let result = spawn_and_init(&cmd, &args, &env, has_codex, i, observer).await;
         guard.send(result);
     });
 }
@@ -3158,6 +3161,7 @@ fn spawn_respawn_task(
     let cmd = config.agent_command.clone();
     let args = config.agent_args.clone();
     let env = config.persona_env_vars.clone();
+    let has_codex = config.has_generated_codex_config;
     let guard = RespawnGuard::new(index, respawn_tx.clone());
     respawn_tasks.spawn(async move {
         // Shutdown old agent (reap child, prevent zombie).
@@ -3169,7 +3173,7 @@ fn spawn_respawn_task(
             tokio::time::sleep(delay).await;
         }
 
-        let result = spawn_and_init(&cmd, &args, &env, index, observer).await;
+        let result = spawn_and_init(&cmd, &args, &env, has_codex, index, observer).await;
         guard.send(result);
     });
 
@@ -3185,10 +3189,11 @@ async fn spawn_and_init(
     command: &str,
     args: &[String],
     extra_env: &[(String, String)],
+    has_generated_codex_config: bool,
     agent_index: usize,
     observer: Option<observer::ObserverHandle>,
 ) -> Result<(AcpClient, u32, bool)> {
-    let mut acp = AcpClient::spawn(command, args, extra_env)
+    let mut acp = AcpClient::spawn(command, args, extra_env, has_generated_codex_config)
         .await
         .map_err(|e| anyhow::anyhow!("failed to spawn agent: {e}"))?;
     acp.set_observer(observer, agent_index);
@@ -3230,8 +3235,8 @@ async fn run_models(args: ModelsArgs) -> Result<()> {
         .to_string();
 
     // Spawn outside the timeout so we always own the child for cleanup.
-    // `models` subcommand doesn't use persona packs — no extra env.
-    let mut client = match AcpClient::spawn(&args.agent_command, &agent_args, &[]).await {
+    // `models` subcommand doesn't use persona packs — no extra env, no codex config.
+    let mut client = match AcpClient::spawn(&args.agent_command, &agent_args, &[], false).await {
         Ok(c) => c,
         Err(e) => {
             eprintln!("error: failed to spawn agent: {e}");
@@ -3856,6 +3861,7 @@ mod build_mcp_servers_tests {
             respond_to_allowlist: std::collections::HashSet::new(),
             allowed_respond_to: vec![],
             persona_env_vars: vec![],
+            has_generated_codex_config: false,
             relay_observer: false,
             agent_owner: None,
             no_base_prompt: false,
@@ -4015,6 +4021,7 @@ mod error_outcome_emission_tests {
             respond_to_allowlist: HashSet::new(),
             allowed_respond_to: vec![],
             persona_env_vars: vec![],
+            has_generated_codex_config: false,
             relay_observer: false,
             agent_owner: None,
             no_base_prompt: false,
@@ -4028,7 +4035,7 @@ mod error_outcome_emission_tests {
     async fn dummy_agent(index: usize) -> OwnedAgent {
         OwnedAgent {
             index,
-            acp: AcpClient::spawn("cat", &[], &[])
+            acp: AcpClient::spawn("cat", &[], &[], false)
                 .await
                 .expect("spawn cat as inert agent"),
             state: Default::default(),

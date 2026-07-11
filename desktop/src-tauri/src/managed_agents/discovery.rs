@@ -153,8 +153,8 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         mcp_hooks: false,
         underlying_cli: Some("codex"),
         cli_install_commands: &["curl -fsSL https://chatgpt.com/codex/install.sh | sh"],
-        adapter_install_commands: &["npm install -g @zed-industries/codex-acp"],
-        install_instructions_url: "https://github.com/zed-industries/codex-acp",
+        adapter_install_commands: &["npm install -g @agentclientprotocol/codex-acp"],
+        install_instructions_url: "https://github.com/agentclientprotocol/codex-acp",
         cli_install_hint: "Install the Codex CLI via the official install script.",
         adapter_install_hint: "Install the Codex ACP adapter via npm.",
         skill_dir: Some(".codex/skills"),
@@ -610,6 +610,115 @@ pub(crate) fn classify_runtime(
     }
 }
 
+/// Probe the major version of a `codex-acp` binary by running `--version`.
+///
+/// The 1.x adapter (`@agentclientprotocol/codex-acp`) outputs
+/// `@agentclientprotocol/codex-acp <major>.<minor>.<patch>` on stdout and exits 0.
+/// The old 0.16.x adapter (`@zed-industries/codex-acp`) is a Rust binary that does
+/// not recognise `--version` and exits non-zero.
+///
+/// Returns the major version on success, `None` on any failure (non-zero exit,
+/// unparseable output, timeout, or missing binary).
+///
+/// The probe is bounded by a 5-second deadline. The child is polled with
+/// [`std::process::Child::try_wait`] (the repo's standard deadline pattern) and
+/// killed if it does not exit in time.
+///
+/// Stdout is redirected to a temporary file rather than a pipe. A pipe's
+/// `read_to_end` blocks until all file descriptors holding the write-end are
+/// closed — including those inherited by forked descendants. A regular file does
+/// not have this property: `read` returns EOF at the current write position
+/// regardless of how many processes still have the file open. This makes the
+/// post-exit read guaranteed to complete without blocking, and works identically
+/// on Windows and Unix.
+pub(crate) fn probe_codex_acp_major_version(binary_path: &Path) -> Option<u64> {
+    use std::io::{Read as _, Seek as _, SeekFrom};
+    use std::time::{Duration, Instant};
+
+    /// Hard ceiling on how long the version probe may block discovery.
+    const VERSION_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+
+    // Redirect stdout to a temporary file instead of a pipe.  When the child
+    // exits its write-end is closed; any forked descendant that inherited the
+    // file descriptor can keep writing, but `read` on a regular file returns
+    // EOF at the current file size — not blocking on a "writer present" check.
+    // This is the only cross-platform way to bound the post-exit stdout read
+    // without O_NONBLOCK (which is Unix-only) or a reader thread.
+    let mut tmp = tempfile::tempfile().ok()?;
+
+    let mut child = Command::new(binary_path)
+        .arg("--version")
+        .stdout(tmp.try_clone().ok()?)
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+
+    // Poll try_wait with a deadline — the repo's standard bounded-subprocess
+    // pattern (see backend.rs).  This returns as soon as the process exits
+    // rather than blocking on stdout EOF.
+    let deadline = Instant::now() + VERSION_PROBE_TIMEOUT;
+    let exit_status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return None;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    };
+
+    if !exit_status.success() {
+        return None;
+    }
+
+    // Seek to the start and read at most 4 KiB.  A regular file returns EOF
+    // at the current write position even if a descendant still has the fd
+    // open, so this read is guaranteed to complete without blocking.
+    tmp.seek(SeekFrom::Start(0)).ok()?;
+    let mut buf = Vec::with_capacity(128);
+    let _ = (&mut tmp as &mut dyn std::io::Read)
+        .take(4096)
+        .read_to_end(&mut buf);
+
+    let stdout = String::from_utf8_lossy(&buf);
+    // Output format: "<package-name> <major>.<minor>.<patch>"
+    let version_str = stdout.trim().split_whitespace().last()?;
+    let major_str = version_str.split('.').next()?;
+    major_str.parse::<u64>().ok()
+}
+
+/// Classifies a resolved codex-acp binary path as [`AcpAvailabilityStatus::Available`]
+/// or [`AcpAvailabilityStatus::AdapterOutdated`].
+///
+/// The 0.16.x adapter (`@zed-industries/codex-acp`) does not recognise `--version`
+/// and exits non-zero — that probe failure yields `AdapterOutdated`. The 1.x adapter
+/// (`@agentclientprotocol/codex-acp`) prints its version and exits 0; major ≥ 1
+/// yields `Available`.
+///
+/// Used by `discover_acp_runtimes`, `cli_login_requirements`, and
+/// `install_acp_runtime_blocking` so the version-gate logic is not duplicated.
+pub(crate) fn codex_adapter_availability(path: &Path) -> AcpAvailabilityStatus {
+    match probe_codex_acp_major_version(path) {
+        Some(major) if major >= 1 => AcpAvailabilityStatus::Available,
+        _ => AcpAvailabilityStatus::AdapterOutdated,
+    }
+}
+
+/// Returns `true` when the codex-acp binary at `path` is outdated (major version < 1)
+/// or cannot be probed. Thin wrapper around [`codex_adapter_availability`].
+pub(crate) fn codex_adapter_is_outdated(path: &Path) -> bool {
+    codex_adapter_availability(path) == AcpAvailabilityStatus::AdapterOutdated
+}
+
 pub fn discover_acp_runtimes() -> Vec<AcpRuntimeCatalogEntry> {
     KNOWN_ACP_RUNTIMES
         .iter()
@@ -624,8 +733,20 @@ pub fn discover_acp_runtimes() -> Vec<AcpRuntimeCatalogEntry> {
                 .underlying_cli
                 .map(|cli| find_command(cli).is_some())
                 .unwrap_or(false);
-            let (availability, command, binary_path) =
+            let (mut availability, command, binary_path) =
                 classify_runtime(adapter_result, runtime.underlying_cli, underlying_cli_found);
+
+            // For codex-acp: when the adapter resolves as Available, probe the
+            // version. An adapter with major version < 1 is treated as outdated —
+            // the CODEX_CONFIG spawn contract requires 1.x.
+            if runtime.id == "codex"
+                && availability == AcpAvailabilityStatus::Available
+                && command.as_deref() == Some("codex-acp")
+            {
+                if let Some(path_str) = &binary_path {
+                    availability = codex_adapter_availability(&PathBuf::from(path_str));
+                }
+            }
 
             let underlying_cli_path = runtime
                 .underlying_cli
@@ -646,6 +767,7 @@ pub fn discover_acp_runtimes() -> Vec<AcpRuntimeCatalogEntry> {
                 AcpAvailabilityStatus::Available => cli_hint.to_string(),
                 AcpAvailabilityStatus::CliMissing => cli_hint.to_string(),
                 AcpAvailabilityStatus::AdapterMissing => adapter_hint.to_string(),
+                AcpAvailabilityStatus::AdapterOutdated => adapter_hint.to_string(),
                 AcpAvailabilityStatus::NotInstalled => {
                     if !cli_hint.is_empty() && !adapter_hint.is_empty() {
                         format!("{cli_hint} {adapter_hint}")

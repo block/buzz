@@ -70,6 +70,29 @@ test("extractConfigNudge parses cli_login requirement", () => {
   assert.deepEqual(extractConfigNudge(withSentinel("prose", payload)), payload);
 });
 
+test("extractConfigNudge parses cli_login with adapter_outdated availability", () => {
+  // Backend emits availability: "adapter_outdated" when codex-acp is old (0.16.x).
+  // isConfigNudgeRequirement must accept this literal — regression test for the
+  // validator omission that caused it to be silently rejected.
+  const payload = {
+    agent_name: "Codex",
+    agent_pubkey: CODEX_PUBKEY,
+    requirements: [
+      {
+        surface: "cli_login",
+        probe_args: ["codex", "login", "status"],
+        setup_copy: "run `codex login`",
+        availability: "adapter_outdated",
+      },
+    ],
+  };
+  assert.deepEqual(
+    extractConfigNudge(withSentinel("prose", payload)),
+    payload,
+    "adapter_outdated availability must be accepted by the validator",
+  );
+});
+
 test("extractConfigNudge returns null for cli_login without availability", () => {
   // availability is required — old-format payloads (no availability field)
   // must not parse so stale nudge JSON from before the Doctor-CTA update

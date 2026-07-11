@@ -9,7 +9,7 @@ Buzz Relay ──WS──→ buzz-acp ──stdio──→ Your Agent
                                        (send_message, etc.)
 ```
 
-Supports any agent that speaks [ACP](https://agentclientprotocol.com/) over stdio: **goose**, **codex** (via [codex-acp](https://github.com/zed-industries/codex-acp)), and **claude code** (via [claude-agent-acp](https://github.com/agentclientprotocol/claude-agent-acp)).
+Supports any agent that speaks [ACP](https://agentclientprotocol.com/) over stdio: **goose**, **codex** (via [codex-acp](https://github.com/agentclientprotocol/codex-acp)), and **claude code** (via [claude-agent-acp](https://github.com/agentclientprotocol/claude-agent-acp)).
 
 ## Prerequisites
 
@@ -57,16 +57,14 @@ That's it. The harness spawns `goose acp`, connects to the relay, discovers chan
 
 ## Running with Codex
 
-[codex-acp](https://github.com/zed-industries/codex-acp) wraps OpenAI Codex in an ACP interface.
+[codex-acp](https://github.com/agentclientprotocol/codex-acp) wraps OpenAI Codex in an ACP interface.
 
 ```bash
-# Build the adapter (requires Rust 1.91+)
-cd /path/to/codex-acp && cargo build --release
+# Install the adapter (npm package — no Rust build required)
+npm install -g @agentclientprotocol/codex-acp
 
 # Run
 export OPENAI_API_KEY="sk-..."   # required — use an OpenAI API key, not a ChatGPT subscription
-export BUZZ_ACP_AGENT_COMMAND="/path/to/codex-acp/target/release/codex-acp"
-export BUZZ_ACP_AGENT_ARGS='-c,permissions.approval_policy="never"'
 
 buzz-acp
 ```

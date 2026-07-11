@@ -530,6 +530,8 @@ pub struct ManagedAgentLogResponse {
 pub enum AcpAvailabilityStatus {
     Available,
     AdapterMissing,
+    /// Adapter binary is present but is from the deprecated package (< 1.0). Reinstall required.
+    AdapterOutdated,
     CliMissing,
     NotInstalled,
 }

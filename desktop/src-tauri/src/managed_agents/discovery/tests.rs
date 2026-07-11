@@ -2,10 +2,11 @@ use std::path::PathBuf;
 
 use super::overrides::{divergent_agent_command_override, update_time_agent_command_override};
 use super::{
-    apply_agent_command_update, classify_runtime, create_time_agent_command_override,
-    default_agent_command, effective_agent_command, find_via_login_shell, managed_agent_avatar_url,
-    normalize_agent_args, record_agent_command, BUZZ_AGENT_AVATAR_URL, CLAUDE_CODE_AVATAR_URL,
-    CODEX_AVATAR_URL, GOOSE_AVATAR_URL,
+    apply_agent_command_update, classify_runtime, codex_adapter_availability,
+    codex_adapter_is_outdated, create_time_agent_command_override, default_agent_command,
+    effective_agent_command, find_via_login_shell, managed_agent_avatar_url, normalize_agent_args,
+    probe_codex_acp_major_version, record_agent_command, BUZZ_AGENT_AVATAR_URL,
+    CLAUDE_CODE_AVATAR_URL, CODEX_AVATAR_URL, GOOSE_AVATAR_URL,
 };
 use crate::managed_agents::AcpAvailabilityStatus;
 
@@ -604,4 +605,204 @@ fn apply_agent_command_update_concrete_pin_keeps_materialized_runtime() {
     assert_eq!(record.agent_command_override.as_deref(), Some("codex-acp"));
     assert_eq!(record.runtime.as_deref(), Some("claude"));
     assert_eq!(record_agent_command(&record, &personas), "codex-acp");
+}
+
+// ── probe_codex_acp_major_version ─────────────────────────────────────────────
+
+#[cfg(unix)]
+#[test]
+fn probe_codex_acp_major_version_parses_1x_output() {
+    use std::os::unix::fs::PermissionsExt;
+
+    // Simulate `@agentclientprotocol/codex-acp 1.1.2` output (1.x adapter)
+    let dir = std::env::temp_dir().join(format!("buzz-probe-1x-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let bin = dir.join("codex-acp");
+    std::fs::write(
+        &bin,
+        "#!/bin/sh\necho '@agentclientprotocol/codex-acp 1.1.2'\nexit 0\n",
+    )
+    .expect("write script");
+    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).expect("chmod script");
+
+    let major = probe_codex_acp_major_version(&bin);
+    let _ = std::fs::remove_dir_all(dir);
+
+    assert_eq!(major, Some(1), "1.x adapter must return major version 1");
+}
+
+#[cfg(unix)]
+#[test]
+fn probe_codex_acp_major_version_returns_none_for_nonzero_exit() {
+    use std::os::unix::fs::PermissionsExt;
+
+    // Simulate old 0.16.x adapter: `--version` is unrecognised, exits non-zero
+    let dir = std::env::temp_dir().join(format!("buzz-probe-0x-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let bin = dir.join("codex-acp");
+    std::fs::write(&bin, "#!/bin/sh\nexit 1\n").expect("write script");
+    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).expect("chmod script");
+
+    let major = probe_codex_acp_major_version(&bin);
+    let _ = std::fs::remove_dir_all(dir);
+
+    assert_eq!(
+        major, None,
+        "old 0.16.x adapter (non-zero exit) must return None"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn probe_codex_acp_major_version_returns_none_for_missing_binary() {
+    let path = std::path::Path::new("/nonexistent/path/codex-acp-does-not-exist");
+    let major = probe_codex_acp_major_version(path);
+    assert_eq!(major, None, "missing binary must return None");
+}
+
+// ── codex_adapter_availability / codex_adapter_is_outdated ───────────────────
+//
+// Outcome-level classification: verify helpers map probe results to the correct
+// AcpAvailabilityStatus and boolean without duplicating version-gate logic.
+
+#[cfg(unix)]
+#[test]
+fn codex_adapter_availability_available_for_1x_binary() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = std::env::temp_dir().join(format!("buzz-avail-1x-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let bin = dir.join("codex-acp");
+    std::fs::write(
+        &bin,
+        "#!/bin/sh\necho '@agentclientprotocol/codex-acp 1.1.2'\nexit 0\n",
+    )
+    .expect("write script");
+    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).expect("chmod script");
+
+    let status = codex_adapter_availability(&bin);
+    let _ = std::fs::remove_dir_all(dir);
+
+    assert_eq!(
+        status,
+        AcpAvailabilityStatus::Available,
+        "1.x adapter must classify as Available"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn codex_adapter_availability_outdated_for_0x_binary() {
+    use std::os::unix::fs::PermissionsExt;
+
+    // Simulate old 0.16.x: `--version` exits non-zero (unrecognised flag)
+    let dir = std::env::temp_dir().join(format!("buzz-avail-0x-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let bin = dir.join("codex-acp");
+    std::fs::write(&bin, "#!/bin/sh\nexit 1\n").expect("write script");
+    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).expect("chmod script");
+
+    let status = codex_adapter_availability(&bin);
+    let _ = std::fs::remove_dir_all(dir);
+
+    assert_eq!(
+        status,
+        AcpAvailabilityStatus::AdapterOutdated,
+        "0.x adapter (non-zero exit) must classify as AdapterOutdated"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn codex_adapter_availability_outdated_for_missing_binary() {
+    let path = std::path::Path::new("/nonexistent/codex-acp-probe-test");
+    assert_eq!(
+        codex_adapter_availability(path),
+        AcpAvailabilityStatus::AdapterOutdated,
+        "missing binary must classify as AdapterOutdated"
+    );
+    // Thin wrapper consistency
+    assert!(
+        codex_adapter_is_outdated(path),
+        "missing binary must be classified as outdated via thin wrapper"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn probe_codex_acp_major_version_returns_none_for_hung_direct_child() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::Instant;
+
+    // Simulate a process that writes version to stdout then blocks forever.
+    // The probe reads stdout only after the child exits, so it will time out.
+    // `exec sleep 300` replaces the shell so killing the child reaps `sleep` too.
+    let dir = std::env::temp_dir().join(format!("buzz-probe-hung-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let bin = dir.join("codex-acp");
+    std::fs::write(
+        &bin,
+        "#!/bin/sh\nprintf '@agentclientprotocol/codex-acp 1.1.2\\n'\nexec sleep 300\n",
+    )
+    .expect("write script");
+    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).expect("chmod script");
+
+    let start = Instant::now();
+    let major = probe_codex_acp_major_version(&bin);
+    let elapsed = start.elapsed();
+    let _ = std::fs::remove_dir_all(dir);
+
+    assert_eq!(
+        major, None,
+        "hung binary must return None (timeout kills child)"
+    );
+    // The timeout is 5 s; give a 2 s margin for slow CI.
+    assert!(
+        elapsed.as_secs() < 7,
+        "probe must complete within timeout bound; elapsed: {elapsed:?}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn probe_codex_acp_major_version_returns_version_when_descendant_holds_pipe_open() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::Instant;
+
+    // Simulate a process that forks a background child which inherits stdout
+    // and stays alive, while the parent writes version and exits 0.
+    //
+    // Without O_NONBLOCK the pipe stays open (the descendant holds the write
+    // end), so read_to_end() blocks indefinitely.  With O_NONBLOCK the probe
+    // reads whatever is in the kernel buffer after the parent exits and returns
+    // immediately — NOT waiting for the descendant to close its fd.
+    //
+    // `(exec sleep 60 &)` forks a subshell that execs `sleep 60`; the subshell
+    // inherits the parent's stdout fd and keeps it open.
+    let dir = std::env::temp_dir().join(format!("buzz-probe-descendant-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let bin = dir.join("codex-acp");
+    std::fs::write(
+        &bin,
+        "#!/bin/sh\necho '@agentclientprotocol/codex-acp 1.1.2'\n(exec sleep 60 &)\nexit 0\n",
+    )
+    .expect("write script");
+    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).expect("chmod script");
+
+    let start = Instant::now();
+    let major = probe_codex_acp_major_version(&bin);
+    let elapsed = start.elapsed();
+    let _ = std::fs::remove_dir_all(dir);
+
+    // Must return within ~1 s: non-blocking read, no waiting for descendant.
+    // Give a 3 s margin for slow CI.
+    assert!(
+        elapsed.as_secs() < 3,
+        "probe must not block on descendant pipe; elapsed: {elapsed:?}"
+    );
+    assert_eq!(
+        major,
+        Some(1),
+        "1.x version must be parsed even when descendant holds pipe open"
+    );
 }
