@@ -81,13 +81,23 @@ export function useSendFeedback() {
   const [attachedImage, setAttachedImage] = React.useState<ImetaMedia | null>(
     null,
   );
+  // Bumped on every reset/close. `attachImage` captures the current value
+  // before its (slow) upload await and drops the result if the token changed
+  // meanwhile — otherwise an upload that resolves after the dialog closed
+  // would repopulate a stale image into the next session's draft.
+  const sessionRef = React.useRef(0);
 
   const attachImage = React.useCallback(async () => {
+    const session = sessionRef.current;
     // The Rust `pick_and_upload_image` command validates the file is an image
     // (via MIME sniffing) BEFORE upload, so discarded/non-image files never
     // leave the client. Returns null when the user cancels the dialog.
     const descriptor = await pickAndUploadImage();
     if (!descriptor) {
+      return;
+    }
+    // Dialog was reset/closed while the upload was in flight — discard.
+    if (sessionRef.current !== session) {
       return;
     }
     setAttachedImage(descriptor);
@@ -98,6 +108,8 @@ export function useSendFeedback() {
   }, []);
 
   const reset = React.useCallback(() => {
+    // Invalidate any in-flight attachImage continuation for this session.
+    sessionRef.current += 1;
     setAttachedImage(null);
   }, []);
 
