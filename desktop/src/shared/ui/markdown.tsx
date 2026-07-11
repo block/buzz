@@ -66,6 +66,7 @@ import { InlineEmojiPopover } from "./markdown/InlineEmojiPopover";
 import { MarkdownInput } from "./markdown/MarkdownInput";
 import { MarkdownTable } from "./markdown/MarkdownTable";
 import { MaskedLinkTooltip } from "./markdown/MaskedLinkTooltip";
+import { ProgressiveImage } from "./markdown/ProgressiveImage";
 import { MessageLinkPill } from "./markdown/MessageLinkPill";
 import { renderCachedMarkdown } from "./markdown/nodeCache";
 import {
@@ -112,6 +113,7 @@ type ImageBlockProps = {
   dim?: string;
   resolvedSrc: string | undefined;
   src: string | undefined;
+  thumbSrc?: string;
 };
 
 const IMAGE_LIGHTBOX_ENTER_MS = 260;
@@ -1259,7 +1261,7 @@ function ImageZoomOverlay({
  * body on hover. Keeping the trigger stable and managing the lightbox via
  * React state avoids that repaint.
  */
-function ImageBlock({ alt, dim, resolvedSrc, src }: ImageBlockProps) {
+function ImageBlock({ alt, dim, resolvedSrc, src, thumbSrc }: ImageBlockProps) {
   const [lightboxState, setLightboxState] = React.useState<{
     galleryIndex: number;
     galleryItems?: ImageGalleryItem[];
@@ -1269,8 +1271,10 @@ function ImageBlock({ alt, dim, resolvedSrc, src }: ImageBlockProps) {
   const [isHiddenInSpoiler, setIsHiddenInSpoiler] = React.useState(false);
   const [menu, setMenu] = React.useState<ImageContextMenuPosition | null>(null);
   const inlineImageRef = React.useRef<HTMLImageElement | null>(null);
+  const thumbnailImageRef = React.useRef<HTMLImageElement | null>(null);
   const triggerRef = React.useRef<HTMLButtonElement | null>(null);
   useSmoothCorners(inlineImageRef);
+  useSmoothCorners(thumbnailImageRef);
 
   const [spoilerMediaSize, setSpoilerMediaSize] = React.useState<{
     height: number;
@@ -1309,14 +1313,6 @@ function ImageBlock({ alt, dim, resolvedSrc, src }: ImageBlockProps) {
       updateSpoilerMediaSize(image);
     },
     [resolvedSrc, updateSpoilerMediaSize],
-  );
-
-  const imageRef = React.useCallback(
-    (image: HTMLImageElement | null) => {
-      inlineImageRef.current = image;
-      if (image?.complete) handleImageLoad(image);
-    },
-    [handleImageLoad],
   );
 
   const { intrinsicDimensions, useFixedReserveBox } = useFrozenImageReserve(
@@ -1456,18 +1452,18 @@ function ImageBlock({ alt, dim, resolvedSrc, src }: ImageBlockProps) {
         onClick={handleImageTriggerClick}
         onContextMenuCapture={handleContextMenu}
       >
-        <img
+        <ProgressiveImage
           alt={alt}
-          className="block h-auto max-h-64 max-w-[min(24rem,100%)] rounded-2xl object-contain"
-          data-spoiler-media-size={hiddenSpoilerMediaSize ? "" : undefined}
-          decoding="async"
+          fullImageRef={inlineImageRef}
           height={intrinsicDimensions.height}
-          loading="lazy"
-          ref={imageRef}
-          src={resolvedSrc}
+          onFullLoad={handleImageLoad}
+          onThumbnailLoad={updateSpoilerMediaSize}
+          resolvedSrc={resolvedSrc}
+          showSpoilerSize={Boolean(hiddenSpoilerMediaSize)}
           style={spoilerMediaStyle}
+          thumbnailRef={thumbnailImageRef}
+          thumbSrc={thumbSrc}
           width={intrinsicDimensions.width}
-          onLoad={(event) => handleImageLoad(event.currentTarget)}
         />
       </button>
       {menu && src ? (
@@ -1723,6 +1719,7 @@ function createMarkdownComponents(
             dim={entry?.dim}
             resolvedSrc={resolvedSrc}
             src={src}
+            thumbSrc={entry?.thumb ? rewriteRelayUrl(entry.thumb) : undefined}
           />
         </span>
       );

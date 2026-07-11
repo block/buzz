@@ -2,12 +2,10 @@ import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
 import type { TimelineMessage } from "../types";
 import { parseImetaTags } from "./parseImeta";
 
-const MARKDOWN_IMAGE_RE = /!\[[^\]]*\]\(([^)\s]+)(?:\s+["'][^"']*["'])?\)/g;
-
 /**
- * Return every image URL a mounted timeline row can request. Keeping this
- * projection independent of row rendering lets a virtualized timeline warm the
- * browser cache before the row enters Virtua's mounted range.
+ * Return non-message-media image URLs worth warming before a virtualized row
+ * mounts. Inline image attachments deliberately stay out of this projection:
+ * their native-lazy thumbnail must load before the full-resolution request.
  */
 export function timelineImageUrls(message: TimelineMessage): string[] {
   const urls = new Set<string>();
@@ -17,17 +15,13 @@ export function timelineImageUrls(message: TimelineMessage): string[] {
 
   add(message.avatarUrl);
 
-  for (const match of message.body.matchAll(MARKDOWN_IMAGE_RE)) {
-    add(match[1]);
-  }
-
   if (message.tags) {
     for (const entry of parseImetaTags(message.tags).values()) {
-      if (entry.m?.startsWith("image/")) add(entry.url);
-      // Video poster frames are images too, and otherwise arrive only when the
-      // virtualized row mounts its player.
-      add(entry.image);
-      add(entry.thumb);
+      // Video poster frames are not part of the progressive image path.
+      if (entry.m?.startsWith("video/")) {
+        add(entry.image);
+        add(entry.thumb);
+      }
     }
     for (const tag of message.tags) {
       if (tag[0] === "emoji") add(tag[2]);

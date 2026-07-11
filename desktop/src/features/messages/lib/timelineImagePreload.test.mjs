@@ -15,7 +15,7 @@ function message(over = {}) {
   };
 }
 
-test("timelineImageUrls finds every image a timeline row can render", () => {
+test("timelineImageUrls warms chrome images but leaves attachments lazy", () => {
   const urls = timelineImageUrls(
     message({
       avatarUrl: "https://example.com/avatar.jpg",
@@ -49,26 +49,23 @@ test("timelineImageUrls finds every image a timeline row can render", () => {
     new Set(urls),
     new Set([
       "https://example.com/avatar.jpg",
-      "https://example.com/one.png",
-      "https://example.com/two.webp",
-      "https://example.com/three.jpg",
       "https://example.com/poster.jpg",
       "https://example.com/thumb.jpg",
       "https://example.com/party.png",
       "https://example.com/reaction.png",
     ]),
   );
-  assert.ok(!urls.includes("https://example.com/movie.mp4"));
+  assert.ok(!urls.includes("https://example.com/one.png"));
+  assert.ok(!urls.includes("https://example.com/three.jpg"));
 });
 
-test("timelineImageUrls deduplicates image URLs", () => {
+test("timelineImageUrls deduplicates chrome image URLs", () => {
   const url = "https://example.com/same.png";
   assert.deepEqual(
     timelineImageUrls(
       message({
         avatarUrl: url,
-        body: `![](${url})`,
-        tags: [["imeta", `url ${url}`, "m image/png"]],
+        tags: [["emoji", "same", url]],
       }),
     ),
     [url],
@@ -87,7 +84,7 @@ test("preloadTimelineImages requests URLs once and keeps requests alive", async 
   globalThis.Image = FakeImage;
   try {
     const state = { activeImages: new Set(), requestedUrls: new Set() };
-    const messages = [message({ body: "![](https://example.com/one.png)" })];
+    const messages = [message({ avatarUrl: "https://example.com/one.png" })];
     preloadTimelineImages(messages, state);
     preloadTimelineImages(messages, state);
 

@@ -10,6 +10,8 @@ const SPOILER_VISIBLE_URL = `http://localhost:3000/media/${SPOILER_VISIBLE_SHA}.
 const SPOILER_HIDDEN_URL = `http://localhost:3000/media/${SPOILER_HIDDEN_SHA}.png`;
 const NO_DIM_WIDE_URL = "https://example.com/e2e/gallery-wide.png";
 const NO_DIM_PORTRAIT_URL = "https://example.com/e2e/gallery-portrait.png";
+const PROGRESSIVE_URL = "https://example.com/e2e/progressive-full.png";
+const PROGRESSIVE_THUMB_URL = "https://example.com/e2e/progressive-thumb.jpg";
 
 async function waitForMockLiveSubscription(page: Page, channelName: string) {
   await expect
@@ -35,11 +37,13 @@ function imageImetaTag({
   dim,
   filename,
   sha,
+  thumb,
   url,
 }: {
   dim: string;
   filename: string;
   sha: string;
+  thumb?: string;
   url: string;
 }) {
   return [
@@ -50,6 +54,7 @@ function imageImetaTag({
     "size 1234",
     `dim ${dim}`,
     `filename ${filename}`,
+    ...(thumb ? [`thumb ${thumb}`] : []),
   ];
 }
 
@@ -255,6 +260,87 @@ test("hidden spoiler images are excluded from gallery navigation until revealed"
   await row.locator(`img[src*="${SPOILER_VISIBLE_SHA}"]`).click();
   await expect(dialog).toBeVisible();
   await expect(page.getByRole("button", { name: "Next image" })).toBeVisible();
+});
+
+test("message images load a thumbnail before requesting the original", async ({
+  page,
+}) => {
+  let fullRequested = false;
+  let releaseThumbnail: (() => void) | undefined;
+  let releaseFull: (() => void) | undefined;
+  const thumbnailGate = new Promise<void>((resolve) => {
+    releaseThumbnail = resolve;
+  });
+  const fullGate = new Promise<void>((resolve) => {
+    releaseFull = resolve;
+  });
+  const svg = (fill: string) =>
+    `<svg xmlns="http://www.w3.org/2000/svg" width="320" height="200"><rect width="100%" height="100%" fill="${fill}"/></svg>`;
+
+  await page.route(PROGRESSIVE_THUMB_URL, async (route) => {
+    await thumbnailGate;
+    await route.fulfill({ body: svg("#f4b860"), contentType: "image/svg+xml" });
+  });
+  await page.route(PROGRESSIVE_URL, async (route) => {
+    fullRequested = true;
+    await fullGate;
+    await route.fulfill({ body: svg("#4aa3df"), contentType: "image/svg+xml" });
+  });
+
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await waitForMockLiveSubscription(page, "general");
+  await page.evaluate(
+    ({ content, extraTags }) => {
+      (
+        window as Window & {
+          __BUZZ_E2E_EMIT_MOCK_MESSAGE__?: (input: {
+            channelName: string;
+            content: string;
+            extraTags: string[][];
+          }) => unknown;
+        }
+      ).__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+        channelName: "general",
+        content,
+        extraTags,
+      });
+    },
+    {
+      content: `progressive image\n![progressive](${PROGRESSIVE_URL})`,
+      extraTags: [
+        imageImetaTag({
+          dim: "320x200",
+          filename: "progressive.png",
+          sha: "f".repeat(64),
+          thumb: PROGRESSIVE_THUMB_URL,
+          url: PROGRESSIVE_URL,
+        }),
+      ],
+    },
+  );
+
+  const row = page
+    .getByTestId("message-row")
+    .filter({ hasText: "progressive image" })
+    .last();
+  const trigger = row.getByTestId("message-image-lightbox-trigger");
+  await expect(
+    trigger.locator(`img[src="${PROGRESSIVE_THUMB_URL}"]`),
+  ).toHaveCount(1);
+  await expect(trigger.locator(`img[src="${PROGRESSIVE_URL}"]`)).toHaveCount(0);
+  expect(fullRequested).toBe(false);
+  const before = await trigger.boundingBox();
+
+  releaseThumbnail?.();
+  const full = trigger.locator(`img[src="${PROGRESSIVE_URL}"]`);
+  await expect(full).toHaveCount(1);
+  await expect(full).toHaveClass(/opacity-0/);
+  expect(fullRequested).toBe(true);
+  releaseFull?.();
+  await expect(full).toBeVisible();
+  await expect(full).not.toHaveClass(/opacity-0/);
+  expect(await trigger.boundingBox()).toEqual(before);
 });
 
 test("gallery items without imeta dimensions keep their thumbnail aspect ratio", async ({
