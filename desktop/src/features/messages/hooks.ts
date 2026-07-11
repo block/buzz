@@ -1,5 +1,6 @@
-import { useEffect, useEffectEvent } from "react";
+import { useEffect, useEffectEvent, useLayoutEffect } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import type { QueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 
 import {
@@ -53,6 +54,17 @@ import {
   parseChannelWindowResponse,
   parseLiveThreadSummary,
 } from "@/features/messages/lib/channelWindowResponse";
+import {
+  acquireHeadFetchTicket,
+  isCurrentHeadFetch,
+  recordHeadFetchPublication,
+  registerSubscriptionIntent,
+} from "@/features/messages/lib/channelOpenGate";
+import {
+  readMessageSnapshot,
+  writeMessageSnapshot,
+} from "@/features/messages/lib/messageSnapshot";
+import { useWorkspaces } from "@/features/workspaces/useWorkspaces";
 import {
   CHANNEL_AUX_EVENT_KINDS,
   CHANNEL_TIMELINE_CONTENT_KINDS,
@@ -287,19 +299,52 @@ export function useChannelWindowQuery(channel: Channel | null) {
   });
 }
 
-export function useChannelMessagesQuery(channel: Channel | null) {
-  const queryClient = useQueryClient();
-  const queryKey = channelMessagesKey(channel?.id ?? "none");
-  const windowKey = channelWindowKey(channel?.id ?? "none");
+const CHANNEL_MESSAGES_STALE_TIME_MS = 5 * 60 * 1_000;
+// Long in-memory retention: a channel revisited within the hour paints from
+// cache with zero relay round trips; the persisted snapshot covers restarts.
+const CHANNEL_MESSAGES_GC_TIME_MS = 60 * 60 * 1_000;
 
-  return useQuery({
-    enabled: channel !== null && channel.channelType !== "forum",
+/**
+ * The one authoritative channel-head fetch, shared verbatim by the mounted
+ * `useChannelMessagesQuery` and imperative prefetchers
+ * (`queryClient.prefetchQuery(channelMessagesQueryOptions(qc, channel))`).
+ * Same query key -> same QueryCache entry, so a prefetch and a concurrent
+ * mount share one in-flight promise, and a mount within `staleTime` of a
+ * settled prefetch does zero fetches.
+ *
+ * Ordering: the queryFn waits on `acquireHeadFetchTicket` so its transport
+ * starts after live-subscription activation when a subscription is mounting
+ * (no fetch/subscribe gap); callers with no subscription intent (prefetch,
+ * HomeView) pass immediately, unordered — activation reconciles coverage
+ * later (see `useChannelSubscription`).
+ *
+ * Publication safety: the Tauri transport is non-abortable, so a superseded
+ * fetch can resolve after the fetch that replaced it. The generation ticket
+ * gates the side effects — a stale completion must not write the window
+ * store, record a publication, or return fresher-than-cache data.
+ *
+ * Not for forum channels (callers gate on `channelType`).
+ */
+export function channelMessagesQueryOptions(
+  queryClient: QueryClient,
+  channel: Channel,
+) {
+  const queryKey = channelMessagesKey(channel.id);
+  const windowKey = channelWindowKey(channel.id);
+  return {
     queryKey,
     queryFn: async () => {
-      if (!channel) throw new Error("No channel selected.");
       const previousMessages =
         queryClient.getQueryData<RelayEvent[]>(queryKey) ?? [];
+      const ticket = await acquireHeadFetchTicket(channel.id);
       const events = await getChannelWindowEvents(channel.id);
+      if (!isCurrentHeadFetch(channel.id, ticket.generation)) {
+        // Superseded while in flight: a newer head fetch owns publication.
+        // Return the cache as-is (TanStack has already discarded this fetch
+        // when it was superseded via cancel; this is belt-and-braces for the
+        // non-abortable transport).
+        return queryClient.getQueryData<RelayEvent[]>(queryKey) ?? [];
+      }
       const page = parseChannelWindowResponse(events, channel.id, null);
       const current =
         queryClient.getQueryData<ChannelWindowStore>(windowKey) ??
@@ -307,11 +352,60 @@ export function useChannelMessagesQuery(channel: Channel | null) {
       const next = replaceNewestChannelWindow(current, page);
       const windowEvents = flattenChannelWindowEvents(next);
       queryClient.setQueryData(windowKey, next);
+      recordHeadFetchPublication(channel.id, ticket);
       return mergeRefetchReconciliationEvents(windowEvents, previousMessages);
     },
-    staleTime: 5 * 60 * 1_000,
-    gcTime: 60 * 60 * 1_000,
+    staleTime: CHANNEL_MESSAGES_STALE_TIME_MS,
+    gcTime: CHANNEL_MESSAGES_GC_TIME_MS,
+  };
+}
+
+export function useChannelMessagesQuery(channel: Channel | null) {
+  const queryClient = useQueryClient();
+  const { activeWorkspace } = useWorkspaces();
+  const relayUrl = activeWorkspace?.relayUrl ?? null;
+
+  const query = useQuery({
+    // Structural spread of the shared factory so the mounted options cannot
+    // drift from what imperative prefetchers pass to `prefetchQuery` — same
+    // queryKey, same queryFn, same timings, by construction.
+    ...(channel
+      ? channelMessagesQueryOptions(queryClient, channel)
+      : {
+          queryKey: channelMessagesKey("none"),
+          queryFn: async (): Promise<RelayEvent[]> => [],
+        }),
+    enabled: channel !== null && channel.channelType !== "forum",
+    // Paint instantly from the persisted per-channel snapshot after a
+    // restart / gc while the authoritative fetch revalidates behind it.
+    // Render-only: placeholder frames never enter the query cache, the
+    // window store, or pagination cursors (`isPlaceholderData` is the
+    // boundary consumers gate on).
+    placeholderData: () => {
+      if (!channel || !relayUrl) return undefined;
+      const snapshot = readMessageSnapshot(relayUrl, channel.id);
+      return snapshot ? normalizeTimelineMessages(snapshot) : undefined;
+    },
+    staleTime: CHANNEL_MESSAGES_STALE_TIME_MS,
+    gcTime: CHANNEL_MESSAGES_GC_TIME_MS,
   });
+
+  // Persist the newest slice after each settled update so the next cold open
+  // paints from the snapshot. Placeholder frames are skipped — they are what
+  // the snapshot painted, not new information.
+  const persistSnapshot = useEffectEvent((events: RelayEvent[]) => {
+    if (relayUrl && channel) {
+      writeMessageSnapshot(relayUrl, channel.id, events);
+    }
+  });
+  const settledData = query.isPlaceholderData ? undefined : query.data;
+  useEffect(() => {
+    if (settledData && settledData.length > 0) {
+      persistSnapshot(settledData);
+    }
+  }, [settledData]);
+
+  return query;
 }
 
 export function useChannelSubscription(channel: Channel | null) {
@@ -326,6 +420,35 @@ export function useChannelSubscription(channel: Channel | null) {
       refetchType: "active",
     });
   });
+
+  // Activation-time coverage reconciliation for a head fetch that started
+  // UNORDERED (an imperative prefetch racing this mount, a cache-served
+  // open, or a remount whose prior fetch predates this subscription
+  // session). If one is still in flight, do not cancel it: the Tauri
+  // transport is non-abortable, and for a cold query TanStack's fetch()
+  // returns the existing retryer rather than starting a replacement —
+  // cancellation buys nothing and risks sharing the unordered result as if
+  // it were ordered. Instead join the in-flight promise, then issue exactly
+  // one ordered fetch. `staleTime: 0` forces a genuinely new fetch (the
+  // just-joined data is seconds old, so the default staleTime would elide
+  // it); the gate is active now, so its transport starts post-subscribe,
+  // and its fresh generation strips publication rights from any stale
+  // transport completion still in the pipe.
+  const reconcileAfterActivation = useEffectEvent(
+    async (isDisposed: () => boolean) => {
+      if (!channel) return;
+      const options = channelMessagesQueryOptions(queryClient, channel);
+      const state = queryClient.getQueryState(options.queryKey);
+      if (state?.fetchStatus === "fetching") {
+        await queryClient.fetchQuery(options).catch(() => {
+          // The joined fetch's own error handling applies; reconciliation
+          // still issues the ordered fetch below.
+        });
+        if (isDisposed()) return;
+      }
+      await queryClient.fetchQuery({ ...options, staleTime: 0 });
+    },
+  );
 
   const appendMessage = useEffectEvent((event: RelayEvent) => {
     if (!channelId) return;
@@ -371,9 +494,14 @@ export function useChannelSubscription(channel: Channel | null) {
     const next = mergeLiveChannelWindowEvent(current, event, isTimelineRow);
     if (next !== current) {
       queryClient.setQueryData(windowKey, next);
+      // Preserve-undefined: on a cold cache (no settled head fetch yet) the
+      // flattened write would replace the snapshot placeholder with a
+      // near-empty array. The event is retained in the window store's live
+      // overlay, which the settling head fetch re-flattens — no event loss.
       queryClient.setQueryData<RelayEvent[]>(
         channelMessagesKey(channelId),
-        flattenChannelWindowEvents(next),
+        (current) =>
+          current === undefined ? current : flattenChannelWindowEvents(next),
       );
     }
 
@@ -399,14 +527,22 @@ export function useChannelSubscription(channel: Channel | null) {
     }
   });
 
-  useEffect(() => {
+  // Layout effect, and `useChannelSubscription` is called BEFORE
+  // `useChannelMessagesQuery` in ChannelScreen: intent registration and the
+  // async subscribe start in layout-effect hook order, before TanStack's
+  // observer (passive effect) can start the query fetch. The mount-triggered
+  // head fetch therefore always observes the pending intent and takes the
+  // ordered path — no render-phase module state involved.
+  useLayoutEffect(() => {
     if (!channelId || channelType === "forum") {
       return;
     }
 
     let isDisposed = false;
     let cleanup: (() => Promise<void>) | undefined;
+    const intent = registerSubscriptionIntent(channelId);
     const disposeReconnectListener = relayClient.subscribeToReconnects(() => {
+      // A reconnect gap is unbounded — always resync, no coverage check.
       void refreshNewestWindow().catch((error) => {
         if (!isDisposed) {
           console.error(
@@ -431,22 +567,33 @@ export function useChannelSubscription(channel: Channel | null) {
         }
 
         cleanup = dispose;
-        void refreshNewestWindow().catch((error) => {
-          if (!isDisposed) {
-            console.error(
-              "Failed to refresh channel window after subscribing",
-              channelId,
-              error,
-            );
-          }
-        });
+        // Activation releases any gated head fetch (which then runs ordered:
+        // transport starts strictly after the subscription is live).
+        // Reconciliation runs only when coverage fails — no head fetch is
+        // waiting AND the newest published fetch is not ordered-in-this-
+        // epoch (unordered prefetch, cache-served open, or a remount whose
+        // prior fetch predates this subscription session). This deletes the
+        // duplicate head fetch on every ordinary channel open.
+        if (intent.activate()) {
+          void reconcileAfterActivation(() => isDisposed).catch((error) => {
+            if (!isDisposed) {
+              console.error(
+                "Failed to refresh channel window after subscribing",
+                channelId,
+                error,
+              );
+            }
+          });
+        }
       })
       .catch((error) => {
+        intent.dispose(); // fail open: release any gated head fetch
         console.error("Failed to subscribe to channel", channelId, error);
       });
 
     return () => {
       isDisposed = true;
+      intent.dispose();
       disposeReconnectListener();
       if (cleanup) {
         void cleanup();
