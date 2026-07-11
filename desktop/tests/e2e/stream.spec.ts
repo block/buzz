@@ -28,6 +28,7 @@ async function getTimelineMetrics(page: Page) {
       clientHeight: timeline.clientHeight,
       scrollHeight: timeline.scrollHeight,
       scrollTop: timeline.scrollTop,
+      composerHeight,
       // The virtualized timeline reserves a trailing spacer equal to the
       // overlaid composer. Reaching the visual tail therefore leaves that
       // spacer below the last row rather than setting the raw DOM distance to 0.
@@ -50,7 +51,10 @@ async function ensureTimelineScrollable(
 
   for (let index = 0; index < 24; index += 1) {
     const metrics = await getTimelineMetrics(receiverPage);
-    if (metrics.scrollHeight > metrics.clientHeight + 160) {
+    if (
+      metrics.scrollHeight >
+      metrics.clientHeight + metrics.composerHeight + 160
+    ) {
       return;
     }
 
@@ -63,7 +67,9 @@ async function ensureTimelineScrollable(
   }
 
   const metrics = await getTimelineMetrics(receiverPage);
-  expect(metrics.scrollHeight).toBeGreaterThan(metrics.clientHeight + 160);
+  expect(metrics.scrollHeight).toBeGreaterThan(
+    metrics.clientHeight + metrics.composerHeight + 160,
+  );
 }
 
 async function createAndJoinSharedStream(
