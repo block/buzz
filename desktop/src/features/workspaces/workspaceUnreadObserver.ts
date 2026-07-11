@@ -1,5 +1,8 @@
 import { makeRootIdStore } from "@/features/channels/unreadRootIdStore";
-import { forcedUnreadStore } from "@/features/channels/forcedUnreadStore";
+import {
+  forcedUnreadStore,
+  type ForcedUnreadMap,
+} from "@/features/channels/forcedUnreadStore";
 import { DM_NOTIFIABLE_EVENT_KINDS } from "@/features/channels/isDmNotifiableKind";
 import { mergeReadStateEvents } from "@/features/channels/readState/readStateSnapshot";
 import {
@@ -156,7 +159,7 @@ export async function fetchWorkspaceUnread(args: {
   decryptReadState?: (ciphertext: string) => Promise<string>;
   decryptMutes?: (ciphertext: string) => Promise<string>;
   readThreadRelationships?: (pubkey: string) => ThreadRelationships;
-  readForcedUnread?: (pubkey: string) => ReadonlySet<string>;
+  readForcedUnread?: (pubkey: string) => ForcedUnreadMap;
 }): Promise<WorkspaceUnreadObserverResult> {
   const { client, pubkey } = args;
   const normalizedPubkey = pubkey.toLowerCase();
@@ -214,11 +217,10 @@ export async function fetchWorkspaceUnread(args: {
     mutedRootIds,
   } = readRelationships(normalizedPubkey);
 
-  // Channels manually marked unread on this device. Since forced-unread is
-  // already drained when markChannelRead is called (channel-open) and by
-  // drainSyncedAdvances (cross-device read), the stored set is trustworthy
-  // as-is. We simply OR it into hasUnread — no additional relay fetch needed.
-  const forcedUnreadChannelIds = readForcedUnread(normalizedPubkey);
+  // Channels manually marked unread on this device. Stored as a record of
+  // { channelId: markerAtWhenForced } so the observer can gate the dot on
+  // whether a cross-device read has since advanced past the stored baseline.
+  const forcedUnreadMap = readForcedUnread(normalizedPubkey);
 
   let hasUnread = false;
   let mentionCount = 0;
@@ -226,12 +228,25 @@ export async function fetchWorkspaceUnread(args: {
   for (const channel of channels) {
     if (mutedIds.has(channel.id)) continue;
 
-    // Forced-unread channels light the dot without a relay fetch.
-    if (!hasUnread && forcedUnreadChannelIds.has(channel.id)) {
-      hasUnread = true;
+    // Compute readAt first so the forced-unread gate can compare against it.
+    const readAt = readState.get(channel.id) ?? null;
+
+    // Forced-unread lights the dot without a relay fetch, but only if the
+    // synced read marker has NOT advanced past the stored baseline. This
+    // prevents stale forced-unread from lighting the rail after a cross-device
+    // read has covered the channel (the drain path in useUnreadChannels only
+    // runs while the workspace is active, so the store may not be pruned for
+    // inactive workspaces).
+    if (!hasUnread && channel.id in forcedUnreadMap) {
+      const markerAtWhenForced = forcedUnreadMap[channel.id];
+      if (
+        readAt === null ||
+        (markerAtWhenForced !== null && readAt <= markerAtWhenForced)
+      ) {
+        hasUnread = true;
+      }
     }
 
-    const readAt = readState.get(channel.id) ?? null;
     const since = readAt === null ? 0 : readAt + 1;
     const kinds = unreadKindsForChannel(channel.channelType);
 

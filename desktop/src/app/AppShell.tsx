@@ -133,12 +133,20 @@ export function AppShell() {
   // markChannelRead({ topLevelOnly: true }) for the previous workspace's
   // channel, advancing its NIP-RS markers and causing the rail badge to vanish
   // on the next 30s poll (A→B→A→B disappearance bug).
+  // Guard: skip goHome() when re-selecting the already-active workspace so
+  // the current channel is not unexpectedly cleared.
   const handleSwitchWorkspace = React.useCallback(
     (id: string) => {
-      void goHome();
+      if (id !== workspacesHook.activeWorkspace?.id) {
+        void goHome();
+      }
       workspacesHook.switchWorkspace(id);
     },
-    [goHome, workspacesHook.switchWorkspace],
+    [
+      goHome,
+      workspacesHook.activeWorkspace?.id,
+      workspacesHook.switchWorkspace,
+    ],
   );
   const { selectedChannelId, selectedView } = React.useMemo(
     () => deriveShellRoute(location.pathname),

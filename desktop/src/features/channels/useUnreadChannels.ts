@@ -17,7 +17,10 @@ import {
 } from "@/features/channels/unreadChannelCounts";
 import { useReadState } from "@/features/channels/readState/useReadState";
 import { makeRootIdStore } from "@/features/channels/unreadRootIdStore";
-import { forcedUnreadStore } from "@/features/channels/forcedUnreadStore";
+import {
+  forcedUnreadStore,
+  type ForcedUnreadMap,
+} from "@/features/channels/forcedUnreadStore";
 import {
   getThreadReference,
   isBroadcastReply,
@@ -230,11 +233,13 @@ export function useUnreadChannels(
 
   // Channels manually marked unread this session (e.g., right-click → "mark
   // unread"). Because NIP-RS read markers are monotonic, this flag is what
-  // makes the badge appear without lowering synced read state. Persisted to
-  // localStorage (buzz-forced-unread.v1) so it survives reload and is visible
-  // to the rail observer for inactive workspaces.
-  const forcedUnreadRef = React.useRef(
-    pubkey ? forcedUnreadStore.read(pubkey) : new Set<string>(),
+  // makes the badge appear without lowering synced read state. Each entry
+  // stores the channel's NIP-RS read marker (unix seconds) at force-time, or
+  // null if no marker existed yet. Persisted to localStorage
+  // (buzz-forced-unread.v1) so it survives reload and is visible to the rail
+  // observer for inactive workspaces.
+  const forcedUnreadRef = React.useRef<ForcedUnreadMap>(
+    pubkey ? forcedUnreadStore.read(pubkey) : {},
   );
 
   // When a synced event advances a read marker (cross-device mark-as-read),
@@ -244,7 +249,8 @@ export function useUnreadChannels(
     const advanced = drainSyncedAdvances();
     let anyNew = false;
     for (const channelId of advanced) {
-      if (forcedUnreadRef.current.delete(channelId)) {
+      if (channelId in forcedUnreadRef.current) {
+        delete forcedUnreadRef.current[channelId];
         anyNew = true;
       }
     }
@@ -308,11 +314,9 @@ export function useUnreadChannels(
   React.useEffect(() => {
     latestByChannelRef.current = new Map();
     observedUnreadEventsByChannelRef.current = new Map();
-    // Load persisted forced-unread set for the new pubkey (do NOT clear the
+    // Load persisted forced-unread map for the new pubkey (do NOT clear the
     // store — another device's data should survive identity switches here).
-    forcedUnreadRef.current = pubkey
-      ? forcedUnreadStore.read(pubkey)
-      : new Set();
+    forcedUnreadRef.current = pubkey ? forcedUnreadStore.read(pubkey) : {};
     caughtUpChannelsRef.current = new Set();
     participatedRootIdsRef.current = pubkey
       ? participationStore.read(pubkey)
@@ -345,7 +349,8 @@ export function useUnreadChannels(
       readAt: string | null | undefined,
       { topLevelOnly = false }: { topLevelOnly?: boolean } = {},
     ) => {
-      if (forcedUnreadRef.current.delete(channelId)) {
+      if (channelId in forcedUnreadRef.current) {
+        delete forcedUnreadRef.current[channelId];
         if (pubkey) {
           forcedUnreadStore.write(pubkey, forcedUnreadRef.current);
         }
@@ -375,20 +380,20 @@ export function useUnreadChannels(
   );
 
   // Manually mark a channel unread (e.g., right-click → "mark unread"). Persists
-  // the flag to localStorage (buzz-forced-unread.v1) so it survives reload and
-  // is visible to the rail observer for inactive workspaces. NIP-RS markers are
-  // monotonic, so we do not publish a lower timestamp.
+  // the current NIP-RS read marker as baseline to localStorage so the rail
+  // observer can detect when a cross-device read has since covered the force.
+  // NIP-RS markers are monotonic, so we do not publish a lower timestamp.
   const markChannelUnread = React.useCallback(
     (channelId: string) => {
-      if (!forcedUnreadRef.current.has(channelId)) {
-        forcedUnreadRef.current.add(channelId);
+      if (!(channelId in forcedUnreadRef.current)) {
+        forcedUnreadRef.current[channelId] = getOwnTimestamp(channelId);
         if (pubkey) {
           forcedUnreadStore.write(pubkey, forcedUnreadRef.current);
         }
         bumpLatestVersion();
       }
     },
-    [pubkey],
+    [getOwnTimestamp, pubkey],
   );
 
   // Record the thread root of an EXTERNAL message that @-mentioned the user.
@@ -843,7 +848,7 @@ export function useUnreadChannels(
       for (const channel of channels) {
         if (channel.id === activeChannelId) continue;
 
-        if (forcedUnreadRef.current.has(channel.id)) {
+        if (channel.id in forcedUnreadRef.current) {
           // Forced-unread is dot tier only — not high-priority.
           unread.add(channel.id);
           counts.set(channel.id, 1);
@@ -952,7 +957,7 @@ export function useUnreadChannels(
 
   const markAllChannelsRead = React.useCallback(() => {
     for (const channelId of unreadChannelIdsRef.current) {
-      forcedUnreadRef.current.delete(channelId);
+      delete forcedUnreadRef.current[channelId];
       const unixSeconds =
         latestByChannelRef.current.get(channelId) ??
         getEffectiveTimestamp(channelId) ??

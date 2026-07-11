@@ -678,6 +678,55 @@ function quietRelay() {
   ]);
 }
 
+// A relay that serves one channel (CHANNEL_ID) with a synced read marker at
+// the given unix-second timestamp and no new incoming events.
+function quietRelayWithReadState(readAtSeconds) {
+  return relayFor([
+    // 1. member events
+    () => [
+      event({
+        tags: [
+          ["d", CHANNEL_ID],
+          ["p", PUBKEY],
+        ],
+      }),
+    ],
+    // 2. metadata events (parallel with visibility)
+    () => [
+      event({
+        tags: [
+          ["d", CHANNEL_ID],
+          ["t", "stream"],
+        ],
+      }),
+    ],
+    // 3. visibility events
+    () => [],
+    // 4. read-state events (parallel with mutes)
+    () => [
+      event({
+        pubkey: PUBKEY,
+        created_at: 200,
+        tags: [
+          ["d", "read-state:test"],
+          ["t", "read-state"],
+        ],
+        content: JSON.stringify({
+          v: 1,
+          client_id: "client",
+          contexts: { [CHANNEL_ID]: readAtSeconds },
+        }),
+      }),
+    ],
+    // 5. mutes events
+    () => [],
+    // 6. unread events — none (marker covers everything)
+    () => [],
+    // 7. mention events — none
+    () => [],
+  ]);
+}
+
 test("fetchWorkspaceUnread forced-unread channel lights rail dot (hasUnread:true)", async () => {
   const relay = quietRelay();
 
@@ -688,8 +737,8 @@ test("fetchWorkspaceUnread forced-unread channel lights rail dot (hasUnread:true
     decryptReadState: async (v) => v,
     decryptMutes: async (v) => v,
     readThreadRelationships: readRelationships(),
-    // Forced-unread set contains CHANNEL_ID
-    readForcedUnread: () => new Set([CHANNEL_ID]),
+    // Forced-unread map: CHANNEL_ID forced when marker was null (no prior read)
+    readForcedUnread: () => ({ [CHANNEL_ID]: null }),
   });
 
   assert.deepEqual(result, { hasUnread: true, mentionCount: 0 });
@@ -710,7 +759,7 @@ test("fetchWorkspaceUnread forced-unread channel not in member list → hasUnrea
     decryptReadState: async (v) => v,
     decryptMutes: async (v) => v,
     readThreadRelationships: readRelationships(),
-    readForcedUnread: () => new Set([CHANNEL_ID]),
+    readForcedUnread: () => ({ [CHANNEL_ID]: null }),
   });
 
   assert.deepEqual(result, { hasUnread: false, mentionCount: 0 });
@@ -758,13 +807,13 @@ test("fetchWorkspaceUnread forced-unread channel that is also muted → hasUnrea
     decryptMutes: async (v) => v,
     readThreadRelationships: readRelationships(),
     // CHANNEL_ID is both forced-unread AND muted — mute wins
-    readForcedUnread: () => new Set([CHANNEL_ID]),
+    readForcedUnread: () => ({ [CHANNEL_ID]: null }),
   });
 
   assert.deepEqual(result, { hasUnread: false, mentionCount: 0 });
 });
 
-test("fetchWorkspaceUnread readForcedUnread returns empty set → falls through to relay gate", async () => {
+test("fetchWorkspaceUnread readForcedUnread returns empty map → falls through to relay gate", async () => {
   // No forced-unread, but there IS a real unread event → hasUnread:true via relay
   const relay = relayFor([
     // 1. member events
@@ -810,8 +859,63 @@ test("fetchWorkspaceUnread readForcedUnread returns empty set → falls through 
     decryptReadState: async (v) => v,
     decryptMutes: async (v) => v,
     readThreadRelationships: readRelationships(),
-    readForcedUnread: () => new Set(), // empty — no forced-unread
+    readForcedUnread: () => ({}), // empty — no forced-unread
   });
 
   assert.deepEqual(result, { hasUnread: true, mentionCount: 0 });
+});
+
+test("fetchWorkspaceUnread forced-unread + synced marker advanced PAST baseline → hasUnread:false", async () => {
+  // markerAtWhenForced = 50, observed readAt = 100 (100 > 50 → cross-device read wins)
+  const relay = quietRelayWithReadState(100);
+
+  const result = await fetchWorkspaceUnread({
+    client: relay,
+    pubkey: PUBKEY,
+    nowSeconds: 200,
+    decryptReadState: async (v) => v,
+    decryptMutes: async (v) => v,
+    readThreadRelationships: readRelationships(),
+    // Forced at marker=50; synced marker is now 100 — covers the force
+    readForcedUnread: () => ({ [CHANNEL_ID]: 50 }),
+  });
+
+  assert.deepEqual(result, { hasUnread: false, mentionCount: 0 });
+});
+
+test("fetchWorkspaceUnread forced-unread + synced marker NOT advanced past baseline → hasUnread:true", async () => {
+  // markerAtWhenForced = 100, observed readAt = 100 (equal → force still stands)
+  const relay = quietRelayWithReadState(100);
+
+  const result = await fetchWorkspaceUnread({
+    client: relay,
+    pubkey: PUBKEY,
+    nowSeconds: 200,
+    decryptReadState: async (v) => v,
+    decryptMutes: async (v) => v,
+    readThreadRelationships: readRelationships(),
+    // Forced at marker=100; synced marker is still 100 — no newer read
+    readForcedUnread: () => ({ [CHANNEL_ID]: 100 }),
+  });
+
+  assert.deepEqual(result, { hasUnread: true, mentionCount: 0 });
+});
+
+test("fetchWorkspaceUnread forced-unread with null baseline + synced marker present → hasUnread:false", async () => {
+  // markerAtWhenForced = null (no marker at force-time), but readAt = 50 now
+  // A cross-device read appeared after the force → do NOT light the dot
+  const relay = quietRelayWithReadState(50);
+
+  const result = await fetchWorkspaceUnread({
+    client: relay,
+    pubkey: PUBKEY,
+    nowSeconds: 200,
+    decryptReadState: async (v) => v,
+    decryptMutes: async (v) => v,
+    readThreadRelationships: readRelationships(),
+    // Forced when no marker existed; a cross-device read has since appeared
+    readForcedUnread: () => ({ [CHANNEL_ID]: null }),
+  });
+
+  assert.deepEqual(result, { hasUnread: false, mentionCount: 0 });
 });

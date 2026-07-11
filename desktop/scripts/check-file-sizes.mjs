@@ -280,7 +280,7 @@ const overrides = new Map([
   // the rail observer can read it. Three clear points added (markChannelRead,
   // markAllChannelsRead, drainSyncedAdvances). Load-bearing fix, not generic
   // debt growth. Queued to split with the rest of this list.
-  ["src/features/channels/useUnreadChannels.ts", 1017],
+  ["src/features/channels/useUnreadChannels.ts", 1022],
   // Shared UI was added to this guard after splitting globals/markdown so
   // large shared renderers cannot grow further while follow-up splits land.
   // +33 for config-nudge detect-and-render + author-auth gate (normalizePubkey guard).
