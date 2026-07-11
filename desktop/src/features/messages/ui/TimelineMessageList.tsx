@@ -32,9 +32,11 @@ import { SystemMessageRow } from "./SystemMessageRow";
 import { UnreadDivider } from "./UnreadDivider";
 import { useTimelineRetention } from "./useTimelineRetention";
 import { useUpwardPaginationWheel } from "./useUpwardPaginationWheel";
+import { useVirtualizedBottomSettle } from "./useVirtualizedBottomSettle";
 
 export type TimelineVirtualizerApi = {
   scrollToBottom: (behavior?: ScrollBehavior) => void;
+  settleAtBottom: () => void;
   scrollToMessage: (
     messageId: string,
     options?: { behavior?: ScrollBehavior },
@@ -465,8 +467,14 @@ function VirtualizedTimelineRows({
     prependWatcherFrameRef.current = null;
     prependAnchorRef.current = null;
   }, []);
+  const { cancel: cancelBottomSettle, settle: settleAtBottom } =
+    useVirtualizedBottomSettle(hostRef, listRef, itemsLengthRef);
+  const retireTimelineSettle = React.useCallback(() => {
+    retirePrependAnchor();
+    cancelBottomSettle();
+  }, [cancelBottomSettle, retirePrependAnchor]);
   const { arm: armUpwardMomentum, clear: clearUpwardMomentum } =
-    useUpwardPaginationWheel(hostRef, retirePrependAnchor);
+    useUpwardPaginationWheel(hostRef, retireTimelineSettle);
 
   const capturePrependAnchor = React.useCallback(() => {
     // Keep the pending capture current while the fetch is in flight. Once the
@@ -488,30 +496,18 @@ function VirtualizedTimelineRows({
 
   React.useLayoutEffect(() => {
     if (!isPrepend || !prependAnchorRef.current) return;
-    // Virtua's shift mode correctly absorbs most prepended measurements, but
+    // Virtua's shift mode correctly absorbs prepended measurements, but
     // estimated offsets can misclassify late row growth deep in history. Keep
     // the semantic row identity as a short-lived, deviation-gated backstop.
-    // This watcher deliberately survives a temporary row unmount and uses only
-    // relative correction so Virtua remains the primary scroll owner.
+    // Do not correct in this commit: Virtua has shifted its estimate but has not
+    // applied its ResizeObserver batch yet, so that delta is transient and its
+    // subsequent absolute correction would overwrite our relative write.
+    // This watcher deliberately survives a temporary row unmount and waits for
+    // stable geometry so Virtua remains the primary scroll owner.
     if (prependWatcherFrameRef.current !== null) {
       cancelAnimationFrame(prependWatcherFrameRef.current);
     }
     const anchor = prependAnchorRef.current;
-    const scroller = hostRef.current?.firstElementChild;
-    if (scroller instanceof HTMLDivElement) {
-      const row = Array.from(
-        scroller.querySelectorAll<HTMLElement>("[data-message-id]"),
-      ).find((candidate) => candidate.dataset.messageId === anchor.messageId);
-      if (row) {
-        const top =
-          row.getBoundingClientRect().top -
-          scroller.getBoundingClientRect().top;
-        const delta = top - anchor.top;
-        // Close the commit-frame displacement before paint. The watcher below
-        // remains responsible for late measurements and temporary unmounts.
-        if (Math.abs(delta) > 4) scroller.scrollBy({ top: delta });
-      }
-    }
     const deadline = performance.now() + 3_000;
     let previousScrollTop: number | null = null;
     let settledFrames = 0;
@@ -563,11 +559,18 @@ function VirtualizedTimelineRows({
     clearUpwardMomentum();
   }, [clearUpwardMomentum, isPrepend, retirePrependAnchor]);
 
-  React.useEffect(() => () => retirePrependAnchor(), [retirePrependAnchor]);
+  React.useEffect(
+    () => () => {
+      retirePrependAnchor();
+      cancelBottomSettle();
+    },
+    [cancelBottomSettle, retirePrependAnchor],
+  );
 
   React.useLayoutEffect(() => {
     previousKeysRef.current = keys;
     if (isPrepend) {
+      cancelBottomSettle();
       clearPrependShift();
     }
     if (!hasInitialPositionedRef.current && items.length > 0) {
@@ -581,7 +584,7 @@ function VirtualizedTimelineRows({
         scrollToSettledBottom();
       });
     }
-  }, [isPrepend, items.length, keys]);
+  }, [cancelBottomSettle, isPrepend, items.length, keys]);
 
   React.useEffect(
     () => () => {
@@ -618,14 +621,15 @@ function VirtualizedTimelineRows({
     if (!onVirtualizerApiChange) return;
     const api: TimelineVirtualizerApi = {
       scrollToBottom() {
-        retirePrependAnchor();
+        retireTimelineSettle();
         const lastIndex = itemsLengthRef.current - 1;
         if (lastIndex >= 0) {
           listRef.current?.scrollToIndex(lastIndex, { align: "end" });
         }
       },
+      settleAtBottom,
       scrollToMessage(messageId) {
-        retirePrependAnchor();
+        retireTimelineSettle();
         const index = messageItemIndexByIdRef.current.get(messageId);
         if (index === undefined) return false;
         listRef.current?.scrollToIndex(index, { align: "center" });
@@ -634,7 +638,7 @@ function VirtualizedTimelineRows({
     };
     onVirtualizerApiChange(api);
     return () => onVirtualizerApiChange(null);
-  }, [onVirtualizerApiChange, retirePrependAnchor]);
+  }, [onVirtualizerApiChange, retireTimelineSettle, settleAtBottom]);
 
   React.useLayoutEffect(() => {
     const host = hostRef.current;
@@ -663,9 +667,9 @@ function VirtualizedTimelineRows({
       const scroller = hostRef.current?.firstElementChild;
       if (!list || !(scroller instanceof HTMLDivElement)) return;
       onVirtualizerRangeChanged?.();
-      onAtBottomStateChange?.(
-        list.scrollSize - list.viewportSize - offset <= 32,
-      );
+      const distanceFromBottom = list.scrollSize - list.viewportSize - offset;
+      if (distanceFromBottom > 32) cancelBottomSettle();
+      onAtBottomStateChange?.(distanceFromBottom <= 32);
       if (
         prependAnchorRef.current !== null ||
         offset <= 200 ||
@@ -680,6 +684,7 @@ function VirtualizedTimelineRows({
     },
     [
       armUpwardMomentum,
+      cancelBottomSettle,
       capturePrependAnchor,
       onAtBottomStateChange,
       onStartReached,

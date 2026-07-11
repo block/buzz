@@ -1363,12 +1363,28 @@ test("in-viewport reflow above the anchor row does not push it down", async ({
     return element && element.scrollHeight > element.clientHeight + 800;
   });
 
-  // Scroll to a middle position so we have rows on both sides of the anchor.
-  await timeline.evaluate((element) => {
-    const t = element as HTMLDivElement;
-    t.scrollTop = Math.floor(t.scrollHeight / 2);
-    t.dispatchEvent(new Event("scroll", { bubbles: true }));
-  });
+  await expect
+    .poll(async () => {
+      const metrics = await getTimelineMetrics(page);
+      return metrics.scrollHeight - metrics.clientHeight - metrics.scrollTop;
+    })
+    .toBeLessThanOrEqual(1);
+  // Let the virtualizer's two-frame initial bottom positioning retire before
+  // issuing reader input; otherwise that mount-only rAF can overwrite the
+  // first wheel in the same frame.
+  await page.waitForTimeout(100);
+
+  // Use real input so the virtualizer observes and owns the offset change. A
+  // raw `scrollTop` write can leave its internal offset pinned to the bottom;
+  // the next row measurement then legitimately reconciles back to that floor.
+  await timeline.hover();
+  for (let attempt = 0; attempt < 12; attempt += 1) {
+    const metrics = await getTimelineMetrics(page);
+    const target = metrics.scrollHeight / 2;
+    if (Math.abs(metrics.scrollTop - target) <= 100) break;
+    await page.mouse.wheel(0, target - metrics.scrollTop);
+    await page.waitForTimeout(25);
+  }
   await page.waitForTimeout(50);
 
   // Capture the anchor row (top-crossing) and its baseline top within

@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { settleProgrammaticBottomPin } from "./useAnchoredScroll.ts";
+import {
+  settleProgrammaticBottomPin,
+  shouldSettleVirtualizedBottom,
+} from "./useAnchoredScroll.ts";
 
 function fakeContainer({ clientHeight, scrollHeight, scrollTop }) {
   const writes = [];
@@ -16,6 +19,35 @@ function fakeContainer({ clientHeight, scrollHeight, scrollTop }) {
     },
   };
 }
+
+test("virtualized bottom settle arms only for pinned appends", () => {
+  assert.equal(
+    shouldSettleVirtualizedBottom({
+      anchorKind: "at-bottom",
+      messageDelta: "append",
+      messagesArrived: 1,
+    }),
+    true,
+  );
+  for (const messageDelta of ["prepend", "replace", "none"]) {
+    assert.equal(
+      shouldSettleVirtualizedBottom({
+        anchorKind: "at-bottom",
+        messageDelta,
+        messagesArrived: 1,
+      }),
+      false,
+    );
+  }
+  assert.equal(
+    shouldSettleVirtualizedBottom({
+      anchorKind: "message",
+      messageDelta: "append",
+      messagesArrived: 1,
+    }),
+    false,
+  );
+});
 
 test("settleProgrammaticBottomPin chases the physical floor before clearing", () => {
   const container = fakeContainer({

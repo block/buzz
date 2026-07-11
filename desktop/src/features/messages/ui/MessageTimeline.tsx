@@ -315,6 +315,7 @@ const MessageTimelineBase = React.forwardRef<
     targetMessageId,
     virtualScrollToMessage: timelineVirtualizerApi?.scrollToMessage,
     virtualScrollToBottom: timelineVirtualizerApi?.scrollToBottom,
+    virtualSettleAtBottom: timelineVirtualizerApi?.settleAtBottom,
     virtualizerOwnsPrependAnchoring: useTimelineVirtualizer,
     virtualizerRenderVersion,
   });

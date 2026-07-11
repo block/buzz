@@ -826,6 +826,56 @@ test("offscreen rich-row resize preserves the viewport-center anchor", async ({
   expect(result.scrollCorrection).toBeGreaterThanOrEqual(238);
 });
 
+test("live tail arrivals keep a bottom-pinned virtual timeline settled", async ({
+  page,
+}) => {
+  await installMockBridge(page);
+  await page.goto("/");
+  await page.waitForFunction(
+    () => typeof window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__ === "function",
+  );
+
+  await page.evaluate(() => {
+    for (let index = 0; index < 60; index += 1) {
+      window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+        channelName: "general",
+        content: `live-follow seed ${index}\nsecond line ${index}`,
+        createdAt: 1_700_000_000 + index,
+      });
+    }
+  });
+  await page.getByTestId("channel-general").click();
+  const timeline = page.getByTestId("message-timeline");
+  await expect(timeline).toContainText("live-follow seed 59");
+  await expect
+    .poll(() =>
+      timeline.evaluate(
+        (element) =>
+          element.scrollHeight - element.clientHeight - element.scrollTop,
+      ),
+    )
+    .toBeLessThanOrEqual(1);
+
+  await page.evaluate(() => {
+    window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+      channelName: "general",
+      content:
+        "remote live-follow sentinel\nline two\nline three\nline four\nline five",
+      createdAt: 1_800_000_000,
+    });
+  });
+
+  await expect(page.getByText("remote live-follow sentinel")).toBeVisible();
+  await expect
+    .poll(() =>
+      timeline.evaluate(
+        (element) =>
+          element.scrollHeight - element.clientHeight - element.scrollTop,
+      ),
+    )
+    .toBeLessThanOrEqual(1);
+});
+
 test("live tail arrivals stay buffered while reading and release on jump", async ({
   page,
 }) => {

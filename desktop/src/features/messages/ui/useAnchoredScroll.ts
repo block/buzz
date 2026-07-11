@@ -1,6 +1,9 @@
 import * as React from "react";
 
-import { classifyTimelineMessageDelta } from "@/features/messages/lib/timelineSnapshot";
+import {
+  classifyTimelineMessageDelta,
+  type TimelineMessageDelta,
+} from "@/features/messages/lib/timelineSnapshot";
 
 /**
  * Distance (in CSS pixels) below which we consider the scroll position
@@ -32,6 +35,22 @@ export function settleProgrammaticBottomPin(
   return isAtTrueBottom(container);
 }
 
+export function shouldSettleVirtualizedBottom({
+  anchorKind,
+  messageDelta,
+  messagesArrived,
+}: {
+  anchorKind: AnchorState["kind"];
+  messageDelta: TimelineMessageDelta;
+  messagesArrived: number;
+}): boolean {
+  return (
+    anchorKind === "at-bottom" &&
+    messagesArrived > 0 &&
+    messageDelta === "append"
+  );
+}
+
 type UseAnchoredScrollOptions = {
   /** Scroll container. Owned by the parent so external refs still compose. */
   scrollContainerRef: React.RefObject<HTMLDivElement | null>;
@@ -55,6 +74,7 @@ type UseAnchoredScrollOptions = {
   ) => boolean;
   /** Imperative virtualizer-owned bottom jump, used only when virtualizer mode is active. */
   virtualScrollToBottom?: (behavior?: ScrollBehavior) => void;
+  virtualSettleAtBottom?: () => void;
   /** When active, the virtualizer owns prepend compensation and bottom-state synchronization. */
   virtualizerOwnsPrependAnchoring?: boolean;
   /** Bumps when a virtualized range changes, so pending target/search retries can re-check newly mounted DOM. */
@@ -164,6 +184,7 @@ export function useAnchoredScroll({
   onTargetReached,
   virtualScrollToMessage,
   virtualScrollToBottom,
+  virtualSettleAtBottom,
   virtualizerOwnsPrependAnchoring = false,
   virtualizerRenderVersion = 0,
 }: UseAnchoredScrollOptions): UseAnchoredScrollResult {
@@ -457,11 +478,11 @@ export function useAnchoredScroll({
     // `newLatestArrived` misses that case and the unread counter never bumps.
     const prevMessages = prevMessagesRef.current;
     const messagesArrived = messages.length - prevCount;
-    const isPrepend =
-      classifyTimelineMessageDelta({
-        current: messages,
-        previous: prevMessages,
-      }) === "prepend";
+    const messageDelta = classifyTimelineMessageDelta({
+      current: messages,
+      previous: prevMessages,
+    });
+    const isPrepend = messageDelta === "prepend";
 
     // One-shot: an outbound send armed `scrollToBottomOnNextUpdate`. When the
     // resulting append lands, snap to bottom regardless of the current anchor,
@@ -486,9 +507,16 @@ export function useAnchoredScroll({
     }
 
     if (anchor.kind === "at-bottom") {
-      // Stick to bottom across the append. In virtualized mode, the
-      // virtualizer owns this write; do not slam its scroll element directly.
-      if (!virtualizerOwnsPrependAnchoring) {
+      if (
+        virtualizerOwnsPrependAnchoring &&
+        shouldSettleVirtualizedBottom({
+          anchorKind: anchor.kind,
+          messageDelta,
+          messagesArrived,
+        })
+      ) {
+        virtualSettleAtBottom?.();
+      } else if (!virtualizerOwnsPrependAnchoring) {
         container.scrollTo({ top: container.scrollHeight, behavior: "auto" });
       }
       if (newLatestArrived) setNewMessageCount(0);
@@ -532,6 +560,7 @@ export function useAnchoredScroll({
     scrollToMessageImperative,
     targetMessageId,
     virtualScrollToBottom,
+    virtualSettleAtBottom,
     virtualizerOwnsPrependAnchoring,
   ]);
 
