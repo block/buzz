@@ -57,63 +57,76 @@ export function parsePromptText(text: string): {
 
 /**
  * Split the framed `session/new` `systemPrompt` into its `Base`/`System`/
- * `Core Memory` sub-sections deterministically.
+ * `Core Memory`/`Channel Canvas` sub-sections deterministically.
  *
- * The harness frames the value as:
- *   `[Base]\n{base}\n\n[System]\n{persona}\n\n[Agent Memory — core]\n{core}`
- * with any section omitted when absent. Two core extraction cases:
+ * The harness composes the value in order:
+ *   `[Base]\n{base}\n\n[System]\n{persona}\n\n[Agent Memory — core]\n{core}\n\n[Channel Canvas]\n{canvas}`
+ * with any section omitted when absent. Extraction runs in reverse producer
+ * order so that each `lastIndexOf` search operates on the full input and
+ * each extraction boundary is unambiguous.
  *
- * - **Start of string** (`[Agent Memory — core]\n…`): core-only input with no
- *   Base/System prefix.
- * - **Appended frame** (`\n\n[Agent Memory — core]\n…`): the blank-line separator
- *   that `with_core()` always emits before appending the core. Using `LAST`
- *   occurrence ensures an earlier mention of the header inside a persona body
- *   (with only a single preceding newline) stays literal.
+ * Three extraction passes before Base/System parsing:
  *
- * The remaining prefix after core extraction is split on the FIRST
- * `\n[System]\n` boundary into Base/System. Unlike the generic
- * `parsePromptSections`, no embedded `[...]` line inside a body can start a new
- * section — so a persona containing a bracketed line, or a mid-string-elided
- * header on an oversize prompt, can never drop a label or inflate the count.
+ * 1. **Canvas** (`[Channel Canvas]`): appended last by `with_canvas()`.
+ *    - Start-of-string: canvas-only input.
+ *    - Appended frame (`\n\n[Channel Canvas]\n`): blank-line separator used by
+ *      `with_canvas()`; LAST occurrence guards against an embedded header in a
+ *      persona body (single preceding newline only).
+ *
+ * 2. **Core** (`[Agent Memory — core]`): appended before canvas by `with_core()`.
+ *    Same two cases, same last-occurrence guard.
+ *
+ * 3. **Base/System**: remainder after canvas and core extraction.
+ *    Split on the first `\n[System]\n` boundary; no embedded `[...]` line
+ *    inside a body can start a new section.
  */
 export function parseSystemPromptSections(
   systemPrompt: string,
 ): PromptSection[] {
   const sections: PromptSection[] = [];
 
-  // ── 1. Extract the [Agent Memory — core] block ───────────────────────────
-  // Two producer shapes:
-  //   • Core-only: systemPrompt starts with the header (no Base/System).
-  //   • Appended: `with_core()` emits "\n\n[Agent Memory — core]\n{core}".
-  //     Using the LAST occurrence of the double-newline-prefixed boundary
-  //     means a bare "[Agent Memory — core]" line inside a persona (which
-  //     can only be preceded by a single newline in the section body) is
-  //     never confused with the real appended frame.
-  const CORE_HEADER = "[Agent Memory — core]";
-  const CORE_MARKER_INLINE = `\n\n${CORE_HEADER}\n`; // blank-line-prefixed appended boundary
-  let coreBody: string | null = null;
-  let baseAndSystem = systemPrompt;
+  // ── 1. Extract [Channel Canvas] ───────────────────────────────────────────
+  const CANVAS_HEADER = "[Channel Canvas]";
+  const CANVAS_MARKER_INLINE = `\n\n${CANVAS_HEADER}\n`;
+  let canvasBody: string | null = null;
+  let remainder = systemPrompt;
 
-  if (systemPrompt.startsWith(`${CORE_HEADER}\n`)) {
-    // Core-only input (no Base/System).
-    coreBody = systemPrompt.slice(`${CORE_HEADER}\n`.length).trim();
-    baseAndSystem = "";
+  if (remainder.startsWith(`${CANVAS_HEADER}\n`)) {
+    canvasBody = remainder.slice(`${CANVAS_HEADER}\n`.length).trim();
+    remainder = "";
   } else {
-    const lastAt = systemPrompt.lastIndexOf(CORE_MARKER_INLINE);
-    if (lastAt !== -1) {
-      coreBody = systemPrompt.slice(lastAt + CORE_MARKER_INLINE.length).trim();
-      baseAndSystem = systemPrompt.slice(0, lastAt);
+    const lastCanvas = remainder.lastIndexOf(CANVAS_MARKER_INLINE);
+    if (lastCanvas !== -1) {
+      canvasBody = remainder
+        .slice(lastCanvas + CANVAS_MARKER_INLINE.length)
+        .trim();
+      remainder = remainder.slice(0, lastCanvas);
     }
   }
 
-  // ── 2. Parse Base/System from the remaining prefix ────────────────────────
+  // ── 2. Extract [Agent Memory — core] ──────────────────────────────────────
+  const CORE_HEADER = "[Agent Memory — core]";
+  const CORE_MARKER_INLINE = `\n\n${CORE_HEADER}\n`;
+  let coreBody: string | null = null;
+
+  if (remainder.startsWith(`${CORE_HEADER}\n`)) {
+    coreBody = remainder.slice(`${CORE_HEADER}\n`.length).trim();
+    remainder = "";
+  } else {
+    const lastCore = remainder.lastIndexOf(CORE_MARKER_INLINE);
+    if (lastCore !== -1) {
+      coreBody = remainder.slice(lastCore + CORE_MARKER_INLINE.length).trim();
+      remainder = remainder.slice(0, lastCore);
+    }
+  }
+
+  // ── 3. Parse Base/System from the remaining prefix ────────────────────────
+  const baseAndSystem = remainder;
   if (baseAndSystem) {
-    // Persona-only frame: no [Base], starts directly with [System].
     if (baseAndSystem.startsWith("[System]\n")) {
       const body = baseAndSystem.slice("[System]\n".length).trim();
       if (body) sections.push({ title: "System", body });
     } else {
-      // Base (up to the first [System] boundary) or base-only.
       const marker = "\n[System]\n";
       const at = baseAndSystem.indexOf(marker);
       const head = at === -1 ? baseAndSystem : baseAndSystem.slice(0, at);
@@ -127,9 +140,9 @@ export function parseSystemPromptSections(
     }
   }
 
-  // ── 3. Append core section last ───────────────────────────────────────────
-  // Map the wire header to a human-readable display title.
+  // ── 4. Append core and canvas sections in producer order ──────────────────
   if (coreBody) sections.push({ title: "Core Memory", body: coreBody });
+  if (canvasBody) sections.push({ title: "Channel Canvas", body: canvasBody });
 
   return sections;
 }
