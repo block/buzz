@@ -57,15 +57,19 @@ export function parsePromptText(text: string): {
 
 /**
  * Split the framed `session/new` `systemPrompt` into its `Base`/`System`/
- * `Core Memory`/`Channel Canvas` sub-sections deterministically.
+ * `Team Instructions`/`Core Memory`/`Channel Canvas` sub-sections
+ * deterministically.
  *
  * The harness composes the value in order:
  *   `[Base]\n{base}\n\n[System]\n{persona}\n\n[Agent Memory — core]\n{core}\n\n[Channel Canvas]\n{canvas}`
- * with any section omitted when absent. Extraction runs in reverse producer
- * order so that each `lastIndexOf` search operates on the full input and
- * each extraction boundary is unambiguous.
+ * with any section omitted when absent. For team-pack agents the persona body
+ * already contains the pack-level instructions appended by `compose_prompt()`
+ * in `buzz-persona/src/resolve.rs`:
+ *   `{persona_body}\n\n---\n# Team Instructions\n{pack_instructions}`
+ * Extraction runs in reverse producer order so that each `lastIndexOf` search
+ * operates on the full input and each extraction boundary is unambiguous.
  *
- * Three extraction passes before Base/System parsing:
+ * Four extraction passes before Base/System parsing:
  *
  * 1. **Canvas** (`[Channel Canvas]`): appended last by `with_canvas()`.
  *    - Start-of-string: canvas-only input.
@@ -79,6 +83,15 @@ export function parsePromptText(text: string): {
  * 3. **Base/System**: remainder after canvas and core extraction.
  *    Split on the first `\n[System]\n` boundary; no embedded `[...]` line
  *    inside a body can start a new section.
+ *
+ * 4. **Team Instructions**: if the `System` body contains the exact canonical
+ *    delimiter `\n\n---\n# Team Instructions\n` (produced by `compose_prompt()`),
+ *    the body is split at the **last** occurrence of that boundary (same
+ *    last-occurrence guard as canvas and core). The text before becomes the
+ *    `System` body; the text after becomes a `Team Instructions` section
+ *    inserted immediately after `System`. Non-canonical lookalikes (bare `---`
+ *    without the heading, a `# Team Instructions` on a different line, or only
+ *    a single preceding newline) are kept literal inside `System`.
  */
 export function parseSystemPromptSections(
   systemPrompt: string,
@@ -121,11 +134,36 @@ export function parseSystemPromptSections(
   }
 
   // ── 3. Parse Base/System from the remaining prefix ────────────────────────
+  // The canonical team-instructions delimiter produced by compose_prompt() in
+  // buzz-persona/src/resolve.rs:
+  //   format!("{persona_prompt}\n\n---\n# Team Instructions\n{instructions}")
+  const TEAM_DELIMITER = "\n\n---\n# Team Instructions\n";
+
+  // splitSystemBody: split a raw [System] body string at the last occurrence
+  // of the canonical team delimiter, returning { systemBody, teamBody | null }.
+  // Using lastIndexOf mirrors the canvas/core last-occurrence guard: a persona
+  // author can embed an exact delimiter-like passage inside the persona body;
+  // only the final occurrence is the producer boundary appended by compose_prompt().
+  function splitSystemBody(raw: string): {
+    systemBody: string;
+    teamBody: string | null;
+  } {
+    const at = raw.lastIndexOf(TEAM_DELIMITER);
+    if (at === -1) return { systemBody: raw.trim(), teamBody: null };
+    return {
+      systemBody: raw.slice(0, at).trim(),
+      teamBody: raw.slice(at + TEAM_DELIMITER.length).trim() || null,
+    };
+  }
+
   const baseAndSystem = remainder;
   if (baseAndSystem) {
     if (baseAndSystem.startsWith("[System]\n")) {
-      const body = baseAndSystem.slice("[System]\n".length).trim();
-      if (body) sections.push({ title: "System", body });
+      const raw = baseAndSystem.slice("[System]\n".length);
+      const { systemBody, teamBody } = splitSystemBody(raw);
+      if (systemBody) sections.push({ title: "System", body: systemBody });
+      if (teamBody)
+        sections.push({ title: "Team Instructions", body: teamBody });
     } else {
       const marker = "\n[System]\n";
       const at = baseAndSystem.indexOf(marker);
@@ -134,8 +172,11 @@ export function parseSystemPromptSections(
       if (baseBody) sections.push({ title: "Base", body: baseBody });
 
       if (at !== -1) {
-        const systemBody = baseAndSystem.slice(at + marker.length).trim();
+        const raw = baseAndSystem.slice(at + marker.length);
+        const { systemBody, teamBody } = splitSystemBody(raw);
         if (systemBody) sections.push({ title: "System", body: systemBody });
+        if (teamBody)
+          sections.push({ title: "Team Instructions", body: teamBody });
       }
     }
   }

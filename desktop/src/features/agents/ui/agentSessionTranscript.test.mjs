@@ -1634,13 +1634,14 @@ test("buildTranscript same-seq different-timestamp session/new events both produ
   );
 });
 
-test("buildTranscript four-section system prompt card is standalone with all sections; CheckCheck context contains only Buzz/thread context", () => {
-  // Production scenario: harness emits [Base]/[System]/[Agent Memory — core]/[Channel Canvas]
+test("buildTranscript five-section system prompt card is standalone with all sections; CheckCheck context contains only Buzz/thread context", () => {
+  // Production scenario: team-pack agent harness emits
+  // [Base]/[System (with team delimiter)]/[Agent Memory — core]/[Channel Canvas]
   // in systemPrompt. The display layer must:
   //   (a) Render it as a standalone single block (acpSource "session/new"),
   //       NOT inside any turn's prompt bundle.
-  //   (b) The standalone item must carry all four sections in order:
-  //       Base → System → Core Memory → Channel Canvas.
+  //   (b) The standalone item must carry all five sections in order:
+  //       Base → System → Team Instructions → Core Memory → Channel Canvas.
   //   (c) The prompt segment's context (CheckCheck dialog) must contain only
   //       the session/prompt:context sections (Buzz event + Thread context),
   //       never the system-prompt sections.
@@ -1675,6 +1676,10 @@ test("buildTranscript four-section system prompt card is standalone with all sec
             "",
             "[System]",
             "Custom persona.",
+            "",
+            "---",
+            "# Team Instructions",
+            "Always tag on handoff.",
             "",
             "[Agent Memory — core]",
             "I am Duncan.",
@@ -1740,14 +1745,14 @@ test("buildTranscript four-section system prompt card is standalone with all sec
     "exactly one standalone system-prompt single block",
   );
 
-  // (b) The standalone item carries all four sections in order.
+  // (b) The standalone item carries all five sections in order.
   const spItem = systemPromptBlocks[0].item;
   assert.ok(spItem, "system-prompt block must have an item");
   const titles = (spItem.sections ?? []).map((s) => s.title);
   assert.deepEqual(
     titles,
-    ["Base", "System", "Core Memory", "Channel Canvas"],
-    "system-prompt standalone card must carry Base → System → Core Memory → Channel Canvas in order",
+    ["Base", "System", "Team Instructions", "Core Memory", "Channel Canvas"],
+    "system-prompt standalone card must carry Base → System → Team Instructions → Core Memory → Channel Canvas in order",
   );
 
   // (c) The system-prompt item must NOT be inside any turn group.
@@ -1781,7 +1786,7 @@ test("buildTranscript four-section system prompt card is standalone with all sec
   const contextSectionTitles = (promptContextItem.sections ?? []).map(
     (s) => s.title,
   );
-  // Must have Buzz event and Thread context sections, NOT Base/System/Core Memory/Channel Canvas.
+  // Must have Buzz event and Thread context sections, NOT Base/System/Team Instructions/Core Memory/Channel Canvas.
   assert.ok(
     contextSectionTitles.some((t) => t.toLowerCase().includes("buzz")),
     "prompt context must contain a Buzz event section",
@@ -1791,9 +1796,10 @@ test("buildTranscript four-section system prompt card is standalone with all sec
       (t) =>
         t === "Base" ||
         t === "System" ||
+        t === "Team Instructions" ||
         t === "Core Memory" ||
         t === "Channel Canvas",
     ),
-    "prompt context must NOT contain system-prompt sections (Base/System/Core Memory/Channel Canvas)",
+    "prompt context must NOT contain system-prompt sections (Base/System/Team Instructions/Core Memory/Channel Canvas)",
   );
 });

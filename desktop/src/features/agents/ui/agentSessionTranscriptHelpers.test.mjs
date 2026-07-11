@@ -489,3 +489,195 @@ test("parseSystemPromptSections keeps an embedded canvas-like line literal when 
     { title: "Channel Canvas", body: "this IS the appended canvas" },
   ]);
 });
+
+// ── Team Instructions extraction ───────────────────────────────────────────
+
+test("parseSystemPromptSections extracts Team Instructions as its own section after System (Base+System+Team)", () => {
+  // compose_prompt() appends "\n\n---\n# Team Instructions\n{instructions}" to the persona body.
+  // The canonical delimiter must split System from Team Instructions.
+  const framed = [
+    "[Base]",
+    "You are a helpful assistant.",
+    "",
+    "[System]",
+    "You are Agent X.",
+    "",
+    "---",
+    "# Team Instructions",
+    "Always respond in markdown.",
+  ].join("\n");
+  const sections = parseSystemPromptSections(framed);
+  assert.deepEqual(sections, [
+    { title: "Base", body: "You are a helpful assistant." },
+    { title: "System", body: "You are Agent X." },
+    { title: "Team Instructions", body: "Always respond in markdown." },
+  ]);
+});
+
+test("parseSystemPromptSections extracts Team Instructions after System-only (no Base)", () => {
+  // When [Base] is absent the [System] header starts the input.
+  const framed = [
+    "[System]",
+    "You are Agent Y.",
+    "",
+    "---",
+    "# Team Instructions",
+    "Keep responses concise.",
+  ].join("\n");
+  const sections = parseSystemPromptSections(framed);
+  assert.deepEqual(sections, [
+    { title: "System", body: "You are Agent Y." },
+    { title: "Team Instructions", body: "Keep responses concise." },
+  ]);
+});
+
+test("parseSystemPromptSections extracts Team Instructions with Core Memory and Channel Canvas (full 5-section shape)", () => {
+  // Full production-shaped system prompt: Base → System → Team Instructions → Core Memory → Channel Canvas.
+  // compose_prompt() produces the canonical delimiter; with_core() and with_canvas() append their frames.
+  const framed = [
+    "[Base]",
+    "You are a helpful AI assistant running in Buzz.",
+    "",
+    "[System]",
+    "You are Observer Agent. You coordinate multi-agent workflows.",
+    "",
+    "---",
+    "# Team Instructions",
+    "Always tag on handoff.",
+    "Never expand scope without approval.",
+    "",
+    "[Agent Memory — core]",
+    "I am Observer Agent.",
+    "## Lessons Learned",
+    "Always tag on handoff.",
+    "",
+    "[Channel Canvas]",
+    "Canvas revision (event ID): a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
+    "Last modified: 2026-07-11T10:00:00Z",
+    "Fetch current content with: buzz canvas get --channel 94a444a4-c0a3-5966-ab05-530c6ddc2301",
+  ].join("\n");
+  const sections = parseSystemPromptSections(framed);
+  assert.deepEqual(sections, [
+    { title: "Base", body: "You are a helpful AI assistant running in Buzz." },
+    {
+      title: "System",
+      body: "You are Observer Agent. You coordinate multi-agent workflows.",
+    },
+    {
+      title: "Team Instructions",
+      body: "Always tag on handoff.\nNever expand scope without approval.",
+    },
+    {
+      title: "Core Memory",
+      body: "I am Observer Agent.\n## Lessons Learned\nAlways tag on handoff.",
+    },
+    {
+      title: "Channel Canvas",
+      body: "Canvas revision (event ID): a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2\nLast modified: 2026-07-11T10:00:00Z\nFetch current content with: buzz canvas get --channel 94a444a4-c0a3-5966-ab05-530c6ddc2301",
+    },
+  ]);
+});
+
+test("parseSystemPromptSections does NOT split on a bare '---' without the '# Team Instructions' heading", () => {
+  // A horizontal rule alone inside a persona body is kept literal.
+  const framed = [
+    "[System]",
+    "Some text.",
+    "",
+    "---",
+    "",
+    "More text after a separator.",
+  ].join("\n");
+  const sections = parseSystemPromptSections(framed);
+  assert.deepEqual(sections, [
+    {
+      title: "System",
+      body: "Some text.\n\n---\n\nMore text after a separator.",
+    },
+  ]);
+});
+
+test("parseSystemPromptSections does NOT split on '# Team Instructions' with only a single preceding newline", () => {
+  // The canonical delimiter requires \n\n---\n before the heading.
+  // A single-newline variant is kept literal inside System.
+  const framed = [
+    "[System]",
+    "Persona preamble.",
+    "---",
+    "# Team Instructions",
+    "These look canonical but lack the double newline before ---.",
+  ].join("\n");
+  const sections = parseSystemPromptSections(framed);
+  assert.deepEqual(sections, [
+    {
+      title: "System",
+      body: "Persona preamble.\n---\n# Team Instructions\nThese look canonical but lack the double newline before ---.",
+    },
+  ]);
+});
+
+test("parseSystemPromptSections does NOT split on '# Team Instructions' heading without the '---' separator", () => {
+  // Only the exact composed form \n\n---\n# Team Instructions\n triggers the split.
+  const framed = [
+    "[System]",
+    "Persona text.",
+    "",
+    "# Team Instructions",
+    "This is just a heading in the persona body.",
+  ].join("\n");
+  const sections = parseSystemPromptSections(framed);
+  assert.deepEqual(sections, [
+    {
+      title: "System",
+      body: "Persona text.\n\n# Team Instructions\nThis is just a heading in the persona body.",
+    },
+  ]);
+});
+
+test("parseSystemPromptSections non-team persona (no delimiter) is unaffected", () => {
+  // A standard Base+System prompt without any team instructions must produce
+  // exactly two sections — no Team Instructions row added.
+  const framed = [
+    "[Base]",
+    "You are a helpful assistant.",
+    "",
+    "[System]",
+    "You are a coding assistant.",
+  ].join("\n");
+  const sections = parseSystemPromptSections(framed);
+  assert.deepEqual(sections, [
+    { title: "Base", body: "You are a helpful assistant." },
+    { title: "System", body: "You are a coding assistant." },
+  ]);
+});
+
+test("parseSystemPromptSections splits on the LAST occurrence of the canonical delimiter (embedded lookalike + real appended team suffix)", () => {
+  // A persona body may itself contain the exact delimiter string verbatim
+  // (e.g. an example or a quoted earlier instruction set). compose_prompt()
+  // always APPENDS the real team instructions, so the LAST occurrence is the
+  // authoritative producer boundary. The earlier embedded occurrence must stay
+  // inside the System body.
+  const framed = [
+    "[System]",
+    "Here is an example of team framing:",
+    "",
+    "---",
+    "# Team Instructions",
+    "These are fake — embedded in the persona prose.",
+    "",
+    "---",
+    "# Team Instructions",
+    "These are real — appended by compose_prompt().",
+  ].join("\n");
+  const sections = parseSystemPromptSections(framed);
+  assert.deepEqual(sections, [
+    {
+      title: "System",
+      body: "Here is an example of team framing:\n\n---\n# Team Instructions\nThese are fake — embedded in the persona prose.",
+    },
+    {
+      title: "Team Instructions",
+      body: "These are real — appended by compose_prompt().",
+    },
+  ]);
+});
