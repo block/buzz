@@ -32,16 +32,22 @@ export function useComposerHeightPadding(
           ) ?? scrollEl)
         : scrollEl;
 
+    let lastPadding: number | null = null;
+    let followBottomFrame: number | null = null;
+
     const isNearBottom = (): boolean => {
       const target = getScrollElement();
       const threshold = 32;
+      const trailingClearance =
+        mode === "css-variable" ? (lastPadding ?? 0) : 0;
       return (
-        target.scrollHeight - target.scrollTop - target.clientHeight < threshold
+        target.scrollHeight -
+          target.scrollTop -
+          target.clientHeight -
+          trailingClearance <
+        threshold
       );
     };
-
-    let lastPadding: number | null = null;
-    let followBottomFrame: number | null = null;
 
     const followBottom = () => {
       const target = getScrollElement();
