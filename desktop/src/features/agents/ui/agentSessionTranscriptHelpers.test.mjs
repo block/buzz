@@ -359,8 +359,9 @@ test("parseSystemPromptSections pins the realistic Workspace+Base+System+Core ha
 // ── Channel Canvas extraction ─────────────────────────────────────────────────
 
 test("parseSystemPromptSections pins the full Base+System+Core+Canvas harness shape", () => {
-  // with_canvas() appends "\n\n[Channel Canvas]\n{body}" after the core block.
-  // All four sections must be extracted in display order.
+  // with_canvas() appends "\n\n[Channel Canvas]\n{metadata}" after the core block.
+  // render_canvas_section() emits the revision event ID, last-modified timestamp,
+  // and fetch command — never the canvas body. All four sections are extracted in order.
   const framed = [
     "[Base]",
     "You are an assistant.",
@@ -372,8 +373,9 @@ test("parseSystemPromptSections pins the full Base+System+Core+Canvas harness sh
     "I am Duncan.",
     "",
     "[Channel Canvas]",
-    "## Project Board",
-    "Current sprint items.",
+    "Canvas revision (event ID): a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
+    "Last modified: 2026-07-11T10:00:00Z",
+    "Fetch current content with: buzz canvas get --channel 94a444a4-c0a3-5966-ab05-530c6ddc2301",
   ].join("\n");
   const sections = parseSystemPromptSections(framed);
   assert.deepEqual(sections, [
@@ -382,7 +384,7 @@ test("parseSystemPromptSections pins the full Base+System+Core+Canvas harness sh
     { title: "Core Memory", body: "I am Duncan." },
     {
       title: "Channel Canvas",
-      body: "## Project Board\nCurrent sprint items.",
+      body: "Canvas revision (event ID): a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2\nLast modified: 2026-07-11T10:00:00Z\nFetch current content with: buzz canvas get --channel 94a444a4-c0a3-5966-ab05-530c6ddc2301",
     },
   ]);
 });

@@ -418,7 +418,7 @@ test.describe("observer feed screenshots", () => {
           method: "session/new",
           params: {
             systemPrompt:
-              "[Base]\nYou are a helpful AI assistant running in Buzz.\n\n[System]\nYou are Observer Agent. You coordinate multi-agent workflows in the #agents channel.\n\n[Agent Memory — core]\nI am Observer Agent.\n## Lessons Learned\nAlways tag on handoff.\n\n[Channel Canvas]\n## Sprint board\nTwo active items.",
+              "[Base]\nYou are a helpful AI assistant running in Buzz.\n\n[System]\nYou are Observer Agent. You coordinate multi-agent workflows in the #agents channel.\n\n[Agent Memory — core]\nI am Observer Agent.\n## Lessons Learned\nAlways tag on handoff.\n\n[Channel Canvas]\nCanvas revision (event ID): a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2\nLast modified: 2026-07-11T10:00:00Z\nFetch current content with: buzz canvas get --channel 94a444a4-c0a3-5966-ab05-530c6ddc2301",
           },
         },
       },
@@ -695,7 +695,7 @@ test.describe("observer feed screenshots", () => {
           method: "session/new",
           params: {
             systemPrompt:
-              "[Base]\nYou are a helpful AI assistant running in Buzz.\n\n[System]\nYou are Observer Agent. You coordinate multi-agent workflows in the #agents channel.\n\n[Agent Memory — core]\nI am Observer Agent.\n## Lessons Learned\nAlways tag on handoff.\n\n[Channel Canvas]\n## Sprint board\nTwo active items.",
+              "[Base]\nYou are a helpful AI assistant running in Buzz.\n\n[System]\nYou are Observer Agent. You coordinate multi-agent workflows in the #agents channel.\n\n[Agent Memory — core]\nI am Observer Agent.\n## Lessons Learned\nAlways tag on handoff.\n\n[Channel Canvas]\nCanvas revision (event ID): a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2\nLast modified: 2026-07-11T10:00:00Z\nFetch current content with: buzz canvas get --channel 94a444a4-c0a3-5966-ab05-530c6ddc2301",
           },
         },
       },
