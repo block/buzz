@@ -70,33 +70,8 @@ export function ProfilePopover({
 }: ProfilePopoverProps) {
   const [statusDialogOpen, setStatusDialogOpen] = React.useState(false);
   const [presenceMenuOpen, setPresenceMenuOpen] = React.useState(false);
-  const presenceHoverTimer = React.useRef<number | null>(null);
   const hasUserStatus = Boolean(userStatusText || userStatusEmoji);
   const settingsShortcutLabel = isMacPlatform() ? "⌘," : "Ctrl+,";
-
-  function clearPresenceHoverTimer() {
-    if (presenceHoverTimer.current !== null) {
-      window.clearTimeout(presenceHoverTimer.current);
-      presenceHoverTimer.current = null;
-    }
-  }
-
-  function schedulePresenceMenu(nextOpen: boolean) {
-    clearPresenceHoverTimer();
-    presenceHoverTimer.current = window.setTimeout(
-      () => setPresenceMenuOpen(nextOpen),
-      nextOpen ? 80 : 160,
-    );
-  }
-
-  React.useEffect(
-    () => () => {
-      if (presenceHoverTimer.current !== null) {
-        window.clearTimeout(presenceHoverTimer.current);
-      }
-    },
-    [],
-  );
 
   function handlePopoverOpenChange(nextOpen: boolean) {
     if (!nextOpen) {
@@ -106,7 +81,6 @@ export function ProfilePopover({
   }
 
   function closePopover() {
-    clearPresenceHoverTimer();
     setPresenceMenuOpen(false);
     onOpenChange(false);
   }
@@ -179,17 +153,12 @@ export function ProfilePopover({
                       aria-expanded={presenceMenuOpen}
                       aria-haspopup="menu"
                       className={cn(
-                        "-ml-1 mt-0.5 inline-flex max-w-full items-center rounded-full px-2 py-0.5 text-xs font-medium outline-hidden transition-opacity hover:opacity-80 focus:outline-none focus-visible:opacity-80 focus-visible:outline-none",
+                        "mt-0.5 inline-flex max-w-full items-center rounded-lg px-2 py-0.5 text-xs font-medium outline-hidden transition-opacity hover:opacity-80 focus:outline-none focus-visible:opacity-80 focus-visible:outline-none",
                         getPresenceChipClassName(currentStatus),
                       )}
                       data-testid="profile-popover-presence-trigger"
                       disabled={isStatusPending}
-                      onClick={() => {
-                        clearPresenceHoverTimer();
-                        setPresenceMenuOpen((prev) => !prev);
-                      }}
-                      onMouseEnter={() => schedulePresenceMenu(true)}
-                      onMouseLeave={() => schedulePresenceMenu(false)}
+                      onClick={() => setPresenceMenuOpen((prev) => !prev)}
                       role="menuitem"
                       type="button"
                     >
@@ -201,8 +170,6 @@ export function ProfilePopover({
                   <PopoverContent
                     align="start"
                     className="w-52 p-1"
-                    onMouseEnter={() => schedulePresenceMenu(true)}
-                    onMouseLeave={() => schedulePresenceMenu(false)}
                     side="bottom"
                     sideOffset={4}
                   >
