@@ -56,41 +56,71 @@ export function parsePromptText(text: string): {
 }
 
 /**
- * Split the framed `session/new` `systemPrompt` into its `Base`/`System`
- * sub-sections deterministically.
+ * Split the framed `session/new` `systemPrompt` into its `Base`/`System`/
+ * `Agent Memory — core` sub-sections deterministically.
  *
- * The harness frames the value as `[Base]\n{base}\n\n[System]\n{persona}`, with
- * either prompt omitted when absent: base-only is `[Base]\n{base}`, persona-only
- * is `[System]\n{persona}`. We partition on the FIRST `\n[System]\n` boundary and
- * read each labeled body literally. Unlike the generic `parsePromptSections`,
- * embedded `[...]` lines inside a body never start a new section — so a persona
- * containing a bracketed line, or a mid-string-elided header on an oversize
- * prompt, can never drop a label or inflate the section count.
+ * The harness frames the value as:
+ *   `[Base]\n{base}\n\n[System]\n{persona}\n\n[Agent Memory — core]\n{core}`
+ * with any section omitted when absent. We first extract the trailing
+ * `[Agent Memory — core]` block (using the LAST occurrence of the boundary
+ * so an earlier mention inside a persona body stays literal when the actual
+ * appended core frame follows). The remaining prefix is then split on the
+ * FIRST `\n[System]\n` boundary into Base/System.
+ *
+ * Unlike the generic `parsePromptSections`, no embedded `[...]` line inside a
+ * body can start a new section — so a persona containing a bracketed line, or a
+ * mid-string-elided header on an oversize prompt, can never drop a label or
+ * inflate the section count.
  */
 export function parseSystemPromptSections(
   systemPrompt: string,
 ): PromptSection[] {
   const sections: PromptSection[] = [];
 
-  // Persona-only frame: no [Base], starts directly with [System].
-  if (systemPrompt.startsWith("[System]\n")) {
-    const body = systemPrompt.slice("[System]\n".length).trim();
-    if (body) sections.push({ title: "System", body });
-    return sections;
+  // ── 1. Extract the trailing [Agent Memory — core] block ──────────────────
+  // Use the LAST occurrence so a persona that itself contains an
+  // "[Agent Memory — core]" line remains literal when the real appended frame
+  // follows later in the string.
+  const CORE_HEADER = "[Agent Memory — core]";
+  const CORE_MARKER_INLINE = `\n${CORE_HEADER}\n`; // mid-string boundary
+  let coreBody: string | null = null;
+  let baseAndSystem = systemPrompt;
+
+  if (systemPrompt.startsWith(`${CORE_HEADER}\n`)) {
+    // Core-only input (no Base/System).
+    coreBody = systemPrompt.slice(`${CORE_HEADER}\n`.length).trim();
+    baseAndSystem = "";
+  } else {
+    const lastAt = systemPrompt.lastIndexOf(CORE_MARKER_INLINE);
+    if (lastAt !== -1) {
+      coreBody = systemPrompt.slice(lastAt + CORE_MARKER_INLINE.length).trim();
+      baseAndSystem = systemPrompt.slice(0, lastAt);
+    }
   }
 
-  // Otherwise the head (up to the first [System] boundary, or the whole string)
-  // is the [Base] body.
-  const marker = "\n[System]\n";
-  const at = systemPrompt.indexOf(marker);
-  const head = at === -1 ? systemPrompt : systemPrompt.slice(0, at);
-  const baseBody = head.replace(/^\[Base]\n/, "").trim();
-  if (baseBody) sections.push({ title: "Base", body: baseBody });
+  // ── 2. Parse Base/System from the remaining prefix ────────────────────────
+  if (baseAndSystem) {
+    // Persona-only frame: no [Base], starts directly with [System].
+    if (baseAndSystem.startsWith("[System]\n")) {
+      const body = baseAndSystem.slice("[System]\n".length).trim();
+      if (body) sections.push({ title: "System", body });
+    } else {
+      // Base (up to the first [System] boundary) or base-only.
+      const marker = "\n[System]\n";
+      const at = baseAndSystem.indexOf(marker);
+      const head = at === -1 ? baseAndSystem : baseAndSystem.slice(0, at);
+      const baseBody = head.replace(/^\[Base]\n/, "").trim();
+      if (baseBody) sections.push({ title: "Base", body: baseBody });
 
-  if (at !== -1) {
-    const systemBody = systemPrompt.slice(at + marker.length).trim();
-    sections.push({ title: "System", body: systemBody });
+      if (at !== -1) {
+        const systemBody = baseAndSystem.slice(at + marker.length).trim();
+        if (systemBody) sections.push({ title: "System", body: systemBody });
+      }
+    }
   }
+
+  // ── 3. Append core section last ───────────────────────────────────────────
+  if (coreBody) sections.push({ title: CORE_HEADER, body: coreBody });
 
   return sections;
 }

@@ -237,3 +237,97 @@ test("parseSystemPromptSections returns no sections for empty input", () => {
   assert.deepEqual(parseSystemPromptSections(""), []);
   assert.deepEqual(parseSystemPromptSections("   "), []);
 });
+
+// ── [Agent Memory — core] section tests ──────────────────────────────────────
+
+test("parseSystemPromptSections extracts core as its own section after Base+System", () => {
+  const framed =
+    "[Base]\nbase text\n\n[System]\npersona text\n\n[Agent Memory — core]\nmy memories";
+  const sections = parseSystemPromptSections(framed);
+  assert.deepEqual(sections, [
+    { title: "Base", body: "base text" },
+    { title: "System", body: "persona text" },
+    { title: "[Agent Memory — core]", body: "my memories" },
+  ]);
+});
+
+test("parseSystemPromptSections extracts core as its own section after Base only", () => {
+  const framed = "[Base]\nbase text\n\n[Agent Memory — core]\nmy memories";
+  const sections = parseSystemPromptSections(framed);
+  assert.deepEqual(sections, [
+    { title: "Base", body: "base text" },
+    { title: "[Agent Memory — core]", body: "my memories" },
+  ]);
+});
+
+test("parseSystemPromptSections extracts core as its own section after System only", () => {
+  const framed = "[System]\npersona text\n\n[Agent Memory — core]\nmy memories";
+  const sections = parseSystemPromptSections(framed);
+  assert.deepEqual(sections, [
+    { title: "System", body: "persona text" },
+    { title: "[Agent Memory — core]", body: "my memories" },
+  ]);
+});
+
+test("parseSystemPromptSections returns only a core section when no Base/System present", () => {
+  const framed = "[Agent Memory — core]\nmy memories";
+  const sections = parseSystemPromptSections(framed);
+  assert.deepEqual(sections, [
+    { title: "[Agent Memory — core]", body: "my memories" },
+  ]);
+});
+
+test("parseSystemPromptSections keeps an embedded core-like line literal when a real appended core follows", () => {
+  // The persona body contains a line that looks like the header. The actual
+  // appended core block comes last — only the LAST boundary should split.
+  const framed = [
+    "[Base]",
+    "base text",
+    "",
+    "[System]",
+    "persona preamble",
+    "[Agent Memory — core]",
+    "this is NOT the core section — it is inside the persona body",
+    "",
+    "[Agent Memory — core]",
+    "this IS the appended core",
+  ].join("\n");
+  const sections = parseSystemPromptSections(framed);
+  assert.deepEqual(sections, [
+    { title: "Base", body: "base text" },
+    {
+      title: "System",
+      body: "persona preamble\n[Agent Memory — core]\nthis is NOT the core section — it is inside the persona body",
+    },
+    {
+      title: "[Agent Memory — core]",
+      body: "this IS the appended core",
+    },
+  ]);
+});
+
+test("parseSystemPromptSections pins the realistic Workspace+Base+System+Core harness shape", () => {
+  // Workspace section preamble is treated as part of Base when [Base] follows.
+  // This is unchanged behavior; core is extracted as a new fourth section.
+  const framed = [
+    "[Base]",
+    "You are an assistant.",
+    "",
+    "[System]",
+    "Custom persona instructions.",
+    "",
+    "[Agent Memory — core]",
+    "I am Duncan.",
+    "## Lessons Learned",
+    "Always tag on handoff.",
+  ].join("\n");
+  const sections = parseSystemPromptSections(framed);
+  assert.deepEqual(sections, [
+    { title: "Base", body: "You are an assistant." },
+    { title: "System", body: "Custom persona instructions." },
+    {
+      title: "[Agent Memory — core]",
+      body: "I am Duncan.\n## Lessons Learned\nAlways tag on handoff.",
+    },
+  ]);
+});
