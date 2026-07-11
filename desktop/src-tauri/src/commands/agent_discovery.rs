@@ -726,5 +726,4 @@ mod tests {
         std::fs::create_dir(dir.path().join("lib")).unwrap();
         assert!(npm_install_target_is_writable(dir.path()));
     }
-
 }
