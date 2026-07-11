@@ -640,3 +640,178 @@ test("fetchWorkspaceUnread threaded reply whose root is in mutedRootIds → hasU
 
   assert.deepEqual(result, { hasUnread: false, mentionCount: 0 });
 });
+
+// ── Forced-unread persistence gate tests ─────────────────────────────────
+
+// A relay that serves one channel (CHANNEL_ID) as a member channel,
+// with no read state and no incoming events.
+function quietRelay() {
+  return relayFor([
+    // 1. member events
+    () => [
+      event({
+        tags: [
+          ["d", CHANNEL_ID],
+          ["p", PUBKEY],
+        ],
+      }),
+    ],
+    // 2. metadata events (parallel with visibility)
+    () => [
+      event({
+        tags: [
+          ["d", CHANNEL_ID],
+          ["t", "stream"],
+        ],
+      }),
+    ],
+    // 3. visibility events
+    () => [],
+    // 4. read-state events (parallel with mutes)
+    () => [],
+    // 5. mutes events
+    () => [],
+    // 6. unread events — none
+    () => [],
+    // 7. mention events — none
+    () => [],
+  ]);
+}
+
+test("fetchWorkspaceUnread forced-unread channel lights rail dot (hasUnread:true)", async () => {
+  const relay = quietRelay();
+
+  const result = await fetchWorkspaceUnread({
+    client: relay,
+    pubkey: PUBKEY,
+    nowSeconds: 100,
+    decryptReadState: async (v) => v,
+    decryptMutes: async (v) => v,
+    readThreadRelationships: readRelationships(),
+    // Forced-unread set contains CHANNEL_ID
+    readForcedUnread: () => new Set([CHANNEL_ID]),
+  });
+
+  assert.deepEqual(result, { hasUnread: true, mentionCount: 0 });
+});
+
+test("fetchWorkspaceUnread forced-unread channel not in member list → hasUnread:false", async () => {
+  // The channel is marked forced-unread but the user is not a member of ANY
+  // channel — forced-unread is not consulted when the channel set is empty.
+  const relay = relayFor([
+    // 1. member events — empty
+    () => [],
+  ]);
+
+  const result = await fetchWorkspaceUnread({
+    client: relay,
+    pubkey: PUBKEY,
+    nowSeconds: 100,
+    decryptReadState: async (v) => v,
+    decryptMutes: async (v) => v,
+    readThreadRelationships: readRelationships(),
+    readForcedUnread: () => new Set([CHANNEL_ID]),
+  });
+
+  assert.deepEqual(result, { hasUnread: false, mentionCount: 0 });
+});
+
+test("fetchWorkspaceUnread forced-unread channel that is also muted → hasUnread:false", async () => {
+  const relay = relayFor([
+    // 1. member events
+    () => [
+      event({
+        tags: [
+          ["d", CHANNEL_ID],
+          ["p", PUBKEY],
+        ],
+      }),
+    ],
+    // 2. metadata
+    () => [
+      event({
+        tags: [
+          ["d", CHANNEL_ID],
+          ["t", "stream"],
+        ],
+      }),
+    ],
+    // 3. visibility
+    () => [],
+    // 4. read-state (parallel with mutes)
+    () => [],
+    // 5. mutes — CHANNEL_ID is muted
+    () => [
+      event({
+        pubkey: PUBKEY,
+        content: mutesContent([CHANNEL_ID]),
+      }),
+    ],
+    // No per-channel fetches expected — muted channel is skipped
+  ]);
+
+  const result = await fetchWorkspaceUnread({
+    client: relay,
+    pubkey: PUBKEY,
+    nowSeconds: 100,
+    decryptReadState: async (v) => v,
+    decryptMutes: async (v) => v,
+    readThreadRelationships: readRelationships(),
+    // CHANNEL_ID is both forced-unread AND muted — mute wins
+    readForcedUnread: () => new Set([CHANNEL_ID]),
+  });
+
+  assert.deepEqual(result, { hasUnread: false, mentionCount: 0 });
+});
+
+test("fetchWorkspaceUnread readForcedUnread returns empty set → falls through to relay gate", async () => {
+  // No forced-unread, but there IS a real unread event → hasUnread:true via relay
+  const relay = relayFor([
+    // 1. member events
+    () => [
+      event({
+        tags: [
+          ["d", CHANNEL_ID],
+          ["p", PUBKEY],
+        ],
+      }),
+    ],
+    // 2. metadata
+    () => [
+      event({
+        tags: [
+          ["d", CHANNEL_ID],
+          ["t", "stream"],
+        ],
+      }),
+    ],
+    // 3. visibility
+    () => [],
+    // 4. read-state
+    () => [],
+    // 5. mutes
+    () => [],
+    // 6. unread events
+    () => [
+      event({
+        id: "real-unread".padEnd(64, "0"),
+        created_at: 20,
+        tags: [["h", CHANNEL_ID]],
+      }),
+    ],
+    // 7. mention events
+    () => [],
+  ]);
+
+  const result = await fetchWorkspaceUnread({
+    client: relay,
+    pubkey: PUBKEY,
+    nowSeconds: 100,
+    decryptReadState: async (v) => v,
+    decryptMutes: async (v) => v,
+    readThreadRelationships: readRelationships(),
+    readForcedUnread: () => new Set(), // empty — no forced-unread
+  });
+
+  assert.deepEqual(result, { hasUnread: true, mentionCount: 0 });
+});

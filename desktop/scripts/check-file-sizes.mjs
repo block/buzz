@@ -275,6 +275,12 @@ const overrides = new Map([
   // at the 1000 ceiling; comment-only overage, not code growth. Queued to
   // split with the rest of this list.
   ["src/features/channels/ui/ChannelScreen.tsx", 1002],
+  // forced-unread persistence: markChannelUnread now writes through to
+  // forcedUnreadStore (localStorage) so the sidebar badge survives reload and
+  // the rail observer can read it. Three clear points added (markChannelRead,
+  // markAllChannelsRead, drainSyncedAdvances). Load-bearing fix, not generic
+  // debt growth. Queued to split with the rest of this list.
+  ["src/features/channels/useUnreadChannels.ts", 1017],
   // Shared UI was added to this guard after splitting globals/markdown so
   // large shared renderers cannot grow further while follow-up splits land.
   // +33 for config-nudge detect-and-render + author-auth gate (normalizePubkey guard).

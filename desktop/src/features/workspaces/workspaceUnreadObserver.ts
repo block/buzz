@@ -1,4 +1,5 @@
 import { makeRootIdStore } from "@/features/channels/unreadRootIdStore";
+import { forcedUnreadStore } from "@/features/channels/forcedUnreadStore";
 import { DM_NOTIFIABLE_EVENT_KINDS } from "@/features/channels/isDmNotifiableKind";
 import { mergeReadStateEvents } from "@/features/channels/readState/readStateSnapshot";
 import {
@@ -155,6 +156,7 @@ export async function fetchWorkspaceUnread(args: {
   decryptReadState?: (ciphertext: string) => Promise<string>;
   decryptMutes?: (ciphertext: string) => Promise<string>;
   readThreadRelationships?: (pubkey: string) => ThreadRelationships;
+  readForcedUnread?: (pubkey: string) => ReadonlySet<string>;
 }): Promise<WorkspaceUnreadObserverResult> {
   const { client, pubkey } = args;
   const normalizedPubkey = pubkey.toLowerCase();
@@ -162,6 +164,8 @@ export async function fetchWorkspaceUnread(args: {
   const decryptMutes = args.decryptMutes ?? nip44DecryptFromSelf;
   const readRelationships =
     args.readThreadRelationships ?? defaultReadThreadRelationships;
+  const readForcedUnread =
+    args.readForcedUnread ?? ((pk) => forcedUnreadStore.read(pk));
 
   const channels = await fetchObservedChannels(client, pubkey);
   if (channels.length === 0) {
@@ -210,11 +214,23 @@ export async function fetchWorkspaceUnread(args: {
     mutedRootIds,
   } = readRelationships(normalizedPubkey);
 
+  // Channels manually marked unread on this device. Since forced-unread is
+  // already drained when markChannelRead is called (channel-open) and by
+  // drainSyncedAdvances (cross-device read), the stored set is trustworthy
+  // as-is. We simply OR it into hasUnread — no additional relay fetch needed.
+  const forcedUnreadChannelIds = readForcedUnread(normalizedPubkey);
+
   let hasUnread = false;
   let mentionCount = 0;
 
   for (const channel of channels) {
     if (mutedIds.has(channel.id)) continue;
+
+    // Forced-unread channels light the dot without a relay fetch.
+    if (!hasUnread && forcedUnreadChannelIds.has(channel.id)) {
+      hasUnread = true;
+    }
+
     const readAt = readState.get(channel.id) ?? null;
     const since = readAt === null ? 0 : readAt + 1;
     const kinds = unreadKindsForChannel(channel.channelType);
