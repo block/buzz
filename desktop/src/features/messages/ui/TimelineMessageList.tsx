@@ -31,6 +31,7 @@ import { MessageThreadSummaryRow } from "./MessageThreadSummaryRow";
 import { SystemMessageRow } from "./SystemMessageRow";
 import { UnreadDivider } from "./UnreadDivider";
 import { useTimelineRetention } from "./useTimelineRetention";
+import { useUpwardPaginationWheel } from "./useUpwardPaginationWheel";
 
 export type TimelineVirtualizerApi = {
   scrollToBottom: (behavior?: ScrollBehavior) => void;
@@ -445,7 +446,6 @@ function VirtualizedTimelineRows({
     top: number;
   } | null>(null);
   const prependWatcherFrameRef = React.useRef<number | null>(null);
-  const cancelUpwardMomentumRef = React.useRef(false);
   const [prependShiftEpoch, clearPrependShift] = React.useReducer(
     (version: number) => version + 1,
     0,
@@ -465,6 +465,8 @@ function VirtualizedTimelineRows({
     prependWatcherFrameRef.current = null;
     prependAnchorRef.current = null;
   }, []);
+  const { arm: armUpwardMomentum, clear: clearUpwardMomentum } =
+    useUpwardPaginationWheel(hostRef, retirePrependAnchor);
 
   const capturePrependAnchor = React.useCallback(() => {
     // Keep the pending capture current while the fetch is in flight. Once the
@@ -558,7 +560,8 @@ function VirtualizedTimelineRows({
       prependWatcherFrameRef.current = requestAnimationFrame(watch);
     };
     prependWatcherFrameRef.current = requestAnimationFrame(watch);
-  }, [isPrepend, retirePrependAnchor]);
+    clearUpwardMomentum();
+  }, [clearUpwardMomentum, isPrepend, retirePrependAnchor]);
 
   React.useEffect(() => () => retirePrependAnchor(), [retirePrependAnchor]);
 
@@ -651,44 +654,14 @@ function VirtualizedTimelineRows({
     return () => resizeObserver.disconnect();
   }, []);
 
-  React.useLayoutEffect(() => {
-    const scroller = hostRef.current?.firstElementChild;
-    if (!(scroller instanceof HTMLDivElement)) return;
-    let releaseTimer: number | null = null;
-    const onWheel = (event: WheelEvent) => {
-      // Programmatic `onScroll` corrections must not retire this watcher.
-      if (prependWatcherFrameRef.current !== null) retirePrependAnchor();
-      if (event.deltaY >= 0) {
-        cancelUpwardMomentumRef.current = false;
-        if (releaseTimer !== null) window.clearTimeout(releaseTimer);
-        releaseTimer = null;
-        return;
-      }
-      if (!cancelUpwardMomentumRef.current && scroller.scrollTop > 200) return;
-      event.preventDefault();
-      cancelUpwardMomentumRef.current = true;
-      // Momentum wheel events arrive as one burst. Suppress only that burst;
-      // after a short quiet period, a fresh gesture is admitted normally.
-      if (releaseTimer !== null) window.clearTimeout(releaseTimer);
-      releaseTimer = window.setTimeout(() => {
-        cancelUpwardMomentumRef.current = false;
-        releaseTimer = null;
-      }, 80);
-    };
-    scroller.addEventListener("wheel", onWheel, { passive: false });
-    return () => {
-      scroller.removeEventListener("wheel", onWheel);
-      if (releaseTimer !== null) window.clearTimeout(releaseTimer);
-    };
-  }, [retirePrependAnchor]);
-
   const { retainedIndices, onScrollEnd: handleScrollEnd } =
     useTimelineRetention(keys, listRef, isPrepend);
 
   const handleScroll = React.useCallback(
     (offset: number) => {
       const list = listRef.current;
-      if (!list) return;
+      const scroller = hostRef.current?.firstElementChild;
+      if (!list || !(scroller instanceof HTMLDivElement)) return;
       onVirtualizerRangeChanged?.();
       onAtBottomStateChange?.(
         list.scrollSize - list.viewportSize - offset <= 32,
@@ -701,15 +674,12 @@ function VirtualizedTimelineRows({
         capturePrependAnchor();
       }
       if (offset <= 200) {
-        onStartReached?.();
-        // Reaching the loaded-history boundary ends this upward gesture even
-        // when a page request is already in flight. Suppress only its inertial
-        // tail; the wheel listener admits downward input immediately and a new
-        // upward gesture after the short quiet-period release.
-        cancelUpwardMomentumRef.current = true;
+        // Layout scrolls near the top must not poison the reader's next input.
+        armUpwardMomentum(onStartReached?.() ?? false);
       }
     },
     [
+      armUpwardMomentum,
       capturePrependAnchor,
       onAtBottomStateChange,
       onStartReached,
