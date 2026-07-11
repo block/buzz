@@ -212,6 +212,36 @@ export async function exportAgentSnapshot(
   });
 }
 
+/** The byte payload returned by `encode_agent_snapshot_for_send`. */
+export type EncodedSnapshotPayload = {
+  /** Raw snapshot bytes — pass directly to `uploadMediaBytes`. */
+  fileBytes: number[];
+  /** Suggested filename (e.g. `my-agent.agent.json`). */
+  fileName: string;
+};
+
+/**
+ * Encode a snapshot in memory and return the bytes to the frontend without
+ * opening any file dialog.  Use this for the native-send path; use
+ * `exportAgentSnapshot` for the local save-to-disk path.
+ *
+ * Both commands call the same shared Rust encoder, so byte output is
+ * identical for identical inputs.
+ */
+export async function encodeAgentSnapshotForSend(
+  id: string,
+  memoryLevel: SnapshotMemoryLevel,
+  format: SnapshotFormat,
+  memorySourcePubkey?: string | null,
+): Promise<EncodedSnapshotPayload> {
+  return invokeTauri<EncodedSnapshotPayload>("encode_agent_snapshot_for_send", {
+    id,
+    memorySourcePubkey: memorySourcePubkey ?? null,
+    memoryLevel,
+    format,
+  });
+}
+
 // ── Snapshot import ───────────────────────────────────────────────────────────
 
 /** Preview returned by `preview_agent_snapshot_import` before any write. */

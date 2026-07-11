@@ -810,6 +810,7 @@ pub fn run() {
             export_agent_snapshot,
             preview_agent_snapshot_import,
             confirm_agent_snapshot_import,
+            encode_agent_snapshot_for_send,
             get_channel_workflows,
             get_channels_workflows,
             get_workflow,

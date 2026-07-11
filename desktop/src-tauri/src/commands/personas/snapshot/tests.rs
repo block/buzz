@@ -259,7 +259,6 @@ fn import_wrong_format_string_fails_closed() {
 /// Unsupported version fails closed.
 #[test]
 fn import_unsupported_version_fails_closed() {
-    use crate::managed_agents::agent_snapshot::encode_snapshot_json;
     let mut snapshot = make_snapshot(MemoryLevel::None, vec![]);
     snapshot.version = 99;
     // validate_snapshot inside decode_snapshot_json rejects version != 1;
@@ -876,4 +875,38 @@ fn import_full_memory_success_result_is_structured() {
         "full success: written must equal total"
     );
     assert!(result.memory_errors.is_empty(), "full success: no errors");
+}
+
+// ── parse_memory_level / parse_format_is_png ─────────────────────────────
+
+#[test]
+fn test_parse_memory_level_valid_values() {
+    assert_eq!(parse_memory_level("none").unwrap(), MemoryLevel::None);
+    assert_eq!(parse_memory_level("").unwrap(), MemoryLevel::None);
+    assert_eq!(parse_memory_level("core").unwrap(), MemoryLevel::Core);
+    assert_eq!(
+        parse_memory_level("everything").unwrap(),
+        MemoryLevel::Everything
+    );
+}
+
+#[test]
+fn test_parse_memory_level_invalid_returns_error() {
+    let err = parse_memory_level("all").unwrap_err();
+    assert!(err.contains("Invalid memory_level"), "got: {err}");
+    let err2 = parse_memory_level("Core").unwrap_err(); // case-sensitive
+    assert!(err2.contains("Invalid memory_level"), "got: {err2}");
+}
+
+#[test]
+fn test_parse_format_is_png_valid_values() {
+    assert!(!parse_format_is_png("json").unwrap());
+    assert!(!parse_format_is_png("").unwrap());
+    assert!(parse_format_is_png("png").unwrap());
+}
+
+#[test]
+fn test_parse_format_is_png_invalid_returns_error() {
+    let err = parse_format_is_png("gif").unwrap_err();
+    assert!(err.contains("Invalid format"), "got: {err}");
 }

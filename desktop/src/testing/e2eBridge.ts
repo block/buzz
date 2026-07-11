@@ -8710,6 +8710,55 @@ export function maybeInstallE2eTauriMocks() {
         );
       case "export_persona_to_json":
         return handleExportPersonaToJson(payload as { id: string });
+      case "export_agent_snapshot":
+        // Mimics the save-to-disk path: report success without a real dialog.
+        // Specs assert invocation via __BUZZ_E2E_COMMANDS__.
+        return true;
+      case "encode_agent_snapshot_for_send": {
+        // Return a minimal valid `.agent.json` payload so the send flow can
+        // proceed through upload_media_bytes without a real Rust encode step.
+        const jsonBytes = Array.from(
+          new TextEncoder().encode(
+            JSON.stringify({
+              format: "buzz-agent-snapshot",
+              version: 1,
+              definition: { system_prompt: null },
+              profile: { display_name: "E2E Agent" },
+              memory: { level: "none", entries: [] },
+            }),
+          ),
+        );
+        return {
+          fileBytes: jsonBytes,
+          fileName: "e2e-agent.agent.json",
+        };
+      }
+      case "preview_agent_snapshot_import": {
+        // Return a minimal preview — no writes performed.
+        return {
+          displayName: "Imported Agent",
+          systemPrompt: null,
+          avatarUrl: null,
+          memoryLevel: "none",
+          memoryEntryCount: 0,
+          hasSourceAllowlist: false,
+          sourceAllowlistCount: 0,
+        };
+      }
+      case "confirm_agent_snapshot_import": {
+        // Return a successful import result with fresh synthetic keys.
+        const importResult = {
+          displayName: "Imported Agent",
+          newPubkey:
+            "e2e000000000000000000000000000000000000000000000000000000000000ff",
+          personaId: `e2e-persona-${Date.now()}`,
+          memoryWritten: 0,
+          memoryTotal: 0,
+          memoryErrors: [],
+          profileSyncError: null,
+        };
+        return importResult;
+      }
       case "list_managed_agents":
         return handleListManagedAgents(activeConfig);
       case "get_agent_memory":

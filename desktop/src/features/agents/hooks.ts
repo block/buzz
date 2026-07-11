@@ -34,11 +34,13 @@ import {
   deletePersona,
   exportPersonaToJson,
   exportAgentSnapshot,
+  encodeAgentSnapshotForSend,
   previewAgentSnapshotImport,
   confirmAgentSnapshotImport,
   type AgentSnapshotImportPreview,
   type AgentSnapshotImportConfirm,
   type AgentSnapshotImportResult,
+  type EncodedSnapshotPayload,
   type SnapshotMemoryLevel,
   type SnapshotFormat,
   listPersonas,
@@ -615,6 +617,23 @@ export function useExportAgentSnapshotMutation() {
   });
 }
 
+export function useEncodeAgentSnapshotForSendMutation() {
+  return useMutation({
+    mutationFn: ({
+      id,
+      memoryLevel,
+      format,
+      memorySourcePubkey,
+    }: {
+      id: string;
+      memoryLevel: SnapshotMemoryLevel;
+      format: SnapshotFormat;
+      memorySourcePubkey?: string | null;
+    }) =>
+      encodeAgentSnapshotForSend(id, memoryLevel, format, memorySourcePubkey),
+  });
+}
+
 export function usePreviewAgentSnapshotImportMutation() {
   return useMutation({
     mutationFn: ({
@@ -639,6 +658,7 @@ export type {
   AgentSnapshotImportPreview,
   AgentSnapshotImportConfirm,
   AgentSnapshotImportResult,
+  EncodedSnapshotPayload,
 };
 
 export function useManagedAgentLogQuery(
