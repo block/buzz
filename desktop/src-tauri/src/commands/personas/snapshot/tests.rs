@@ -590,6 +590,130 @@ fn import_allowlist_clear_and_keep_are_enforced_server_side() {
     );
 }
 
+// ── Import: allowlist normalization and mode-preservation ─────────────────
+
+/// validate_respond_to_allowlist normalizes uppercase hex and deduplicates.
+#[test]
+fn import_allowlist_uppercase_is_normalized_and_deduplicated() {
+    use crate::managed_agents::validate_respond_to_allowlist;
+    let upper = "AABBCC".repeat(11)[..64].to_string();
+    let lower = upper.to_ascii_lowercase();
+    // Pass uppercase + duplicate.
+    let result = validate_respond_to_allowlist(&[upper.clone(), upper.clone()]).unwrap();
+    assert_eq!(
+        result,
+        vec![lower],
+        "uppercase must be lowercased, duplicate removed"
+    );
+}
+
+/// validate_respond_to_allowlist rejects a malformed pubkey.
+#[test]
+fn import_allowlist_malformed_pubkey_is_rejected() {
+    use crate::managed_agents::validate_respond_to_allowlist;
+    let bad = "notahexpubkey".to_string();
+    let err = validate_respond_to_allowlist(&[bad]).unwrap_err();
+    assert!(
+        err.contains("invalid pubkey"),
+        "malformed pubkey must be rejected: {err}"
+    );
+}
+
+/// keepAllowlist = false on a non-allowlist source (anyone) preserves the
+/// source mode — no allowlist choice was displayed to the user.
+#[test]
+fn import_non_allowlist_mode_preserved_when_clear_not_applicable() {
+    use crate::managed_agents::{resolve_mint_behavioral_defaults, RespondTo};
+    // Simulate: source_mode = Anyone, keep_allowlist = false.
+    // is_source_allowlist_mode = false → preserve source mode.
+    let resolved_mode = Some(RespondTo::Anyone);
+    let resolved_allowlist: Vec<String> = Vec::new(); // not allowlist-mode
+    let minted =
+        resolve_mint_behavioral_defaults(resolved_mode, resolved_allowlist, None, None, None)
+            .unwrap();
+    assert_eq!(
+        minted.respond_to,
+        RespondTo::Anyone,
+        "anyone mode must be preserved when clear is not applicable"
+    );
+    assert!(
+        minted.respond_to_allowlist.is_empty(),
+        "no allowlist for anyone mode"
+    );
+}
+
+/// keepAllowlist = false on an allowlist-mode source downgrades to owner-only.
+#[test]
+fn import_allowlist_mode_clear_downgrades_to_owner_only() {
+    use crate::managed_agents::{resolve_mint_behavioral_defaults, RespondTo};
+    // Simulate: source_mode = Allowlist, keep_allowlist = false.
+    // is_source_allowlist_mode = true → downgrade.
+    let resolved_mode = Some(RespondTo::OwnerOnly);
+    let resolved_allowlist: Vec<String> = Vec::new();
+    let minted =
+        resolve_mint_behavioral_defaults(resolved_mode, resolved_allowlist, None, None, None)
+            .unwrap();
+    assert_eq!(
+        minted.respond_to,
+        RespondTo::OwnerOnly,
+        "clear on allowlist-mode must yield owner-only"
+    );
+    assert!(minted.respond_to_allowlist.is_empty());
+}
+
+/// keepAllowlist = true with a valid normalized allowlist succeeds.
+#[test]
+fn import_allowlist_keep_with_valid_list_succeeds() {
+    use crate::managed_agents::{
+        resolve_mint_behavioral_defaults, validate_respond_to_allowlist, RespondTo,
+    };
+    let raw = "aabbcc".repeat(11)[..64].to_string();
+    let normalized = validate_respond_to_allowlist(&[raw]).unwrap();
+    let minted = resolve_mint_behavioral_defaults(
+        Some(RespondTo::Allowlist),
+        normalized.clone(),
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    assert_eq!(minted.respond_to, RespondTo::Allowlist);
+    assert_eq!(minted.respond_to_allowlist, normalized);
+}
+
+/// keepAllowlist = true with an empty allowlist-mode snapshot is rejected.
+#[test]
+fn import_allowlist_keep_with_empty_list_is_rejected() {
+    use crate::managed_agents::{resolve_mint_behavioral_defaults, RespondTo};
+    let err =
+        resolve_mint_behavioral_defaults(Some(RespondTo::Allowlist), vec![], None, None, None)
+            .unwrap_err();
+    assert!(
+        err.contains("requires at least one pubkey"),
+        "empty allowlist-mode with keep=true must be rejected: {err}"
+    );
+}
+
+/// Out-of-range parallelism (0 and 33) is rejected by resolve_mint_behavioral_defaults.
+#[test]
+fn import_out_of_range_parallelism_is_rejected() {
+    use crate::managed_agents::{resolve_mint_behavioral_defaults, RespondTo};
+    for bad_par in [0u32, 33u32] {
+        let err = resolve_mint_behavioral_defaults(
+            Some(RespondTo::OwnerOnly),
+            vec![],
+            None,
+            Some(bad_par),
+            None,
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("out of range"),
+            "parallelism {bad_par} must be rejected: {err}"
+        );
+    }
+}
+
 // ── Import: identity-never-travels ───────────────────────────────────────
 
 /// Importing the same snapshot bytes twice must yield two distinct pubkeys.

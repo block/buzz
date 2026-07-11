@@ -96,6 +96,35 @@ test("result_body_renders_memory_errors_list_with_test_id", () => {
     1,
     "exactly one memory-errors list must be rendered",
   );
+
+  // The list must be vertically bounded (max-h-*) and scrollable
+  // (overflow-y-auto) so it cannot grow the dialog without bound.
+  const listNode = errLists[0];
+  const className = listNode.props?.className ?? "";
+  assert.ok(
+    /max-h-/.test(className),
+    `memory-errors list must have a max-height class (got: "${className}")`,
+  );
+  assert.ok(
+    /overflow-y-auto/.test(className),
+    `memory-errors list must have overflow-y-auto (got: "${className}")`,
+  );
+
+  // Each item must use break-all (not truncate) so the full error text is
+  // readable, not clipped.
+  const items = findAll(element, (n) => n.type === "li");
+  assert.ok(items.length > 0, "list items must be present");
+  for (const item of items) {
+    const cls = item.props?.className ?? "";
+    assert.ok(
+      /break-all/.test(cls),
+      `list item must use break-all for full error visibility (got: "${cls}")`,
+    );
+    assert.ok(
+      !/truncate/.test(cls),
+      `list item must not use truncate (got: "${cls}")`,
+    );
+  }
 });
 
 test("result_body_surfaces_both_error_strings_in_tree", () => {

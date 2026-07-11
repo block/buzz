@@ -273,11 +273,11 @@ export function ResultBody({
               </p>
               {result.memoryErrors.length > 0 ? (
                 <ul
-                  className="mt-1 space-y-0.5 text-xs"
+                  className="mt-1 max-h-32 space-y-0.5 overflow-y-auto text-xs"
                   data-testid="agent-snapshot-import-memory-errors"
                 >
                   {result.memoryErrors.map((err) => (
-                    <li key={err} className="truncate font-mono">
+                    <li key={err} className="break-all font-mono">
                       {err}
                     </li>
                   ))}

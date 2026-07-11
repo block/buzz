@@ -17,8 +17,8 @@ use crate::{
             encode_snapshot_png, AgentSnapshotMemoryEntry, MemoryLevel,
         },
         load_agent_definitions, load_managed_agents, load_personas,
-        resolve_mint_behavioral_defaults, save_managed_agents, save_personas, ManagedAgentRecord,
-        PersonaRecord, RespondTo,
+        resolve_mint_behavioral_defaults, save_managed_agents, save_personas,
+        validate_respond_to_allowlist, ManagedAgentRecord, PersonaRecord, RespondTo,
     },
     relay::{effective_agent_relay_url, relay_ws_url_with_override, sync_managed_agent_profile},
     util::now_iso,
@@ -456,50 +456,67 @@ pub async fn confirm_agent_snapshot_import(
         return Err("Snapshot display name is empty.".to_string());
     }
 
-    // Determine allowlist for the new agent.
-    // If keep_allowlist is true and the source is allowlist-mode, preserve the
-    // list and mode. Otherwise, downgrade both the persona definition and the
-    // live managed record to owner-only (the safe default) — an empty allowlist
-    // in allowlist-mode is invalid and would fail spawn-time validation.
-    let (effective_respond_to, effective_allowlist): (Option<RespondTo>, Vec<String>) = {
-        // Parse the source respond_to mode if present.
-        let source_mode = snapshot
-            .definition
-            .respond_to
-            .as_deref()
-            .map(crate::managed_agents::RespondTo::parse_wire)
-            .transpose()?;
+    // ── Resolve behavioral defaults ──────────────────────────────────────────
+    //
+    // The snapshot carries respond_to, an allowlist, toolsets, and parallelism
+    // as opaque wire data. All four fields are resolved in one call to
+    // resolve_mint_behavioral_defaults so the resulting MintBehavioralDefaults
+    // is a single consistent struct used verbatim for both PersonaRecord and
+    // ManagedAgentRecord.
+    //
+    // Allowlist normalization (validate_respond_to_allowlist) MUST happen
+    // before passing to resolve_mint_behavioral_defaults — the function
+    // contract (types.rs:813-826) treats input_allowlist as already-normalized
+    // and only calls validate_respond_to_allowlist on the definition fallback
+    // branch.  Raw snapshot pubkeys may be uppercase, padded, or duplicated;
+    // passing them unvalidated would persist invalid data.
+    //
+    // keep_allowlist semantics:
+    //   - The UI shows the Keep/Clear choice ONLY when the source snapshot is
+    //     allowlist-mode (has_source_allowlist = true in the preview).
+    //   - keep_allowlist = true  → user confirmed Keep; pass mode + normalized
+    //     list through the validator.
+    //   - keep_allowlist = false + allowlist-mode source → user chose Clear;
+    //     downgrade to owner-only (empty list).
+    //   - keep_allowlist = false + non-allowlist source → the UI never showed
+    //     a choice; preserve the source mode (e.g. "anyone") unchanged.
+    let source_mode = snapshot
+        .definition
+        .respond_to
+        .as_deref()
+        .map(crate::managed_agents::RespondTo::parse_wire)
+        .transpose()?;
 
-        if input.keep_allowlist {
-            // Keep: pass the source mode + allowlist through
-            // resolve_mint_behavioral_defaults for validation (allowlist must be
-            // non-empty, parallelism in range, etc.).
-            let minted = resolve_mint_behavioral_defaults(
-                source_mode,
-                snapshot.definition.respond_to_allowlist.clone(),
-                None,
-                snapshot.definition.parallelism,
-                None,
-            )?;
-            (Some(minted.respond_to), minted.respond_to_allowlist)
-        } else {
-            // Clear: always downgrade to owner-only regardless of source mode.
-            // This prevents an empty-allowlist definition from being persisted.
-            (Some(RespondTo::OwnerOnly), Vec::new())
-        }
+    let is_source_allowlist_mode = source_mode == Some(RespondTo::Allowlist);
+
+    // Normalize the snapshot allowlist regardless of mode — it is the
+    // caller's input and must be validated before any further use.
+    let normalized_allowlist =
+        validate_respond_to_allowlist(&snapshot.definition.respond_to_allowlist)
+            .map_err(|e| format!("snapshot respond-to allowlist is invalid: {e}"))?;
+
+    let (resolved_mode, resolved_allowlist_input) = if input.keep_allowlist {
+        // User confirmed Keep: use source mode + normalized list.
+        (source_mode, normalized_allowlist)
+    } else if is_source_allowlist_mode {
+        // User chose Clear on an allowlist-mode snapshot: downgrade.
+        // An empty-allowlist definition in allowlist-mode fails spawn
+        // validation, so we replace both mode and list.
+        (Some(RespondTo::OwnerOnly), Vec::new())
+    } else {
+        // Non-allowlist source, no UI choice shown: preserve source mode.
+        (source_mode, Vec::new())
     };
 
-    // Resolved parallelism — validate through the mint boundary.
-    let minted_parallelism = {
-        let minted = resolve_mint_behavioral_defaults(
-            effective_respond_to.clone(),
-            effective_allowlist.clone(),
-            snapshot.definition.mcp_toolsets.clone(),
-            snapshot.definition.parallelism,
-            None,
-        )?;
-        minted.parallelism
-    };
+    // Single resolve_mint_behavioral_defaults call for all four fields.
+    let minted = resolve_mint_behavioral_defaults(
+        resolved_mode,
+        resolved_allowlist_input,
+        snapshot.definition.mcp_toolsets.clone(),
+        snapshot.definition.parallelism,
+        None,
+    )?;
+    let minted_parallelism = minted.parallelism;
 
     // Effective avatar: data URL wins; URL fallback when data URL is absent.
     let effective_avatar: Option<String> = snapshot
@@ -509,10 +526,12 @@ pub async fn confirm_agent_snapshot_import(
         .or_else(|| snapshot.profile.avatar_url.clone());
 
     // Wire-format string for the persona definition's respond_to field.
-    let respond_to_wire: Option<String> = effective_respond_to
-        .as_ref()
-        .filter(|m| **m != RespondTo::default())
-        .map(|m| m.as_str().to_string());
+    // Omit when it is the default (owner-only) to keep definitions clean.
+    let respond_to_wire: Option<String> = if minted.respond_to != RespondTo::default() {
+        Some(minted.respond_to.as_str().to_string())
+    } else {
+        None
+    };
 
     // ── Phase 2: mint keys + auth tag (sync, outside lock) ───────────────────
     let (agent_keys, private_key_nsec, pubkey, auth_tag, owner_pubkey_hex) = {
@@ -581,8 +600,8 @@ pub async fn confirm_agent_snapshot_import(
             source_team_persona_slug: None,
             env_vars: std::collections::BTreeMap::new(),
             respond_to: respond_to_wire.clone(),
-            respond_to_allowlist: effective_allowlist.clone(),
-            mcp_toolsets: snapshot.definition.mcp_toolsets.clone(),
+            respond_to_allowlist: minted.respond_to_allowlist.clone(),
+            mcp_toolsets: minted.mcp_toolsets.clone(),
             parallelism: minted_parallelism,
             created_at: now.clone(),
             updated_at: now.clone(),
@@ -622,7 +641,7 @@ pub async fn confirm_agent_snapshot_import(
             model: snapshot.definition.model.clone(),
             provider: snapshot.definition.provider.clone(),
             persona_source_version: None,
-            mcp_toolsets: snapshot.definition.mcp_toolsets.clone(),
+            mcp_toolsets: minted.mcp_toolsets.clone(),
             env_vars: std::collections::BTreeMap::new(),
             start_on_app_launch: false,
             auto_restart_on_config_change: true,
@@ -640,17 +659,17 @@ pub async fn confirm_agent_snapshot_import(
             last_error: None,
             last_error_code: None,
             // Instance-level behavioral defaults agree with the resolved
-            // definition: both use the validated effective_respond_to/allowlist
-            // so they are always consistent at mint time.
-            respond_to: effective_respond_to.clone().unwrap_or_default(),
-            respond_to_allowlist: effective_allowlist.clone(),
+            // definition: both come from the single minted struct so they
+            // are always consistent at mint time.
+            respond_to: minted.respond_to,
+            respond_to_allowlist: minted.respond_to_allowlist.clone(),
             is_builtin: false,
             is_active: true,
             source_team: None,
             source_team_persona_slug: None,
             definition_respond_to: respond_to_wire.clone(),
-            definition_respond_to_allowlist: effective_allowlist.clone(),
-            definition_mcp_toolsets: snapshot.definition.mcp_toolsets.clone(),
+            definition_respond_to_allowlist: minted.respond_to_allowlist.clone(),
+            definition_mcp_toolsets: minted.mcp_toolsets.clone(),
             definition_parallelism: minted_parallelism,
             relay_mesh: None,
             runtime: snapshot.definition.runtime.clone(),
