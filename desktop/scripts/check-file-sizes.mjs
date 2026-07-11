@@ -259,11 +259,6 @@ const overrides = new Map([
   // gating). Load-bearing regression coverage for silent identity rotation,
   // not generic debt growth. Approved override; split if the matrix grows.
   ["src-tauri/src/app_state_tests.rs", 1420],
-  // export_agent_snapshot command adds ~119 lines to personas/mod.rs for the
-  // buzz-agent-snapshot v1 export path (manifest build, memory fetch, encode,
-  // save). The file was at 974 lines on main. Load-bearing Phase 3 feature;
-  // queued to split personas/mod.rs at the next commands refactor.
-  ["src-tauri/src/commands/personas/mod.rs", 1105],
   // migration_tests.rs carries the harness-sync migration coverage plus the
   // patch_json_records owner-only writeback regression test (SECURITY.md:90
   // crash-safe 0o600 fallback). Load-bearing security + feature coverage, not
