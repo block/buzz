@@ -304,6 +304,25 @@ test("parseSystemPromptSections keeps an embedded core-like line literal when a 
   ]);
 });
 
+test("parseSystemPromptSections keeps exact core header literal when only a single newline precedes it (no-core persona)", () => {
+  // A no-core [System] persona that contains the exact header text on its own
+  // line (preceded by only a single \n, not the double-newline appended
+  // separator) must NOT be extracted as a Core Memory section.
+  const framed = [
+    "[System]",
+    "persona preamble",
+    "[Agent Memory — core]",
+    "this is persona text, not a real core block",
+  ].join("\n");
+  const sections = parseSystemPromptSections(framed);
+  assert.deepEqual(sections, [
+    {
+      title: "System",
+      body: "persona preamble\n[Agent Memory — core]\nthis is persona text, not a real core block",
+    },
+  ]);
+});
+
 test("parseSystemPromptSections pins the realistic Workspace+Base+System+Core harness shape", () => {
   // The real Buzz harness emits [Workspace] content before [Base]. The parser
   // folds [Workspace] into the Base section (existing unchanged behavior);

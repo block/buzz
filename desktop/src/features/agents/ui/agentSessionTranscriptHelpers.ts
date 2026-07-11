@@ -57,32 +57,40 @@ export function parsePromptText(text: string): {
 
 /**
  * Split the framed `session/new` `systemPrompt` into its `Base`/`System`/
- * `Agent Memory — core` sub-sections deterministically.
+ * `Core Memory` sub-sections deterministically.
  *
  * The harness frames the value as:
  *   `[Base]\n{base}\n\n[System]\n{persona}\n\n[Agent Memory — core]\n{core}`
- * with any section omitted when absent. We first extract the trailing
- * `[Agent Memory — core]` block (using the LAST occurrence of the boundary
- * so an earlier mention inside a persona body stays literal when the actual
- * appended core frame follows). The remaining prefix is then split on the
- * FIRST `\n[System]\n` boundary into Base/System.
+ * with any section omitted when absent. Two core extraction cases:
  *
- * Unlike the generic `parsePromptSections`, no embedded `[...]` line inside a
- * body can start a new section — so a persona containing a bracketed line, or a
- * mid-string-elided header on an oversize prompt, can never drop a label or
- * inflate the section count.
+ * - **Start of string** (`[Agent Memory — core]\n…`): core-only input with no
+ *   Base/System prefix.
+ * - **Appended frame** (`\n\n[Agent Memory — core]\n…`): the blank-line separator
+ *   that `with_core()` always emits before appending the core. Using `LAST`
+ *   occurrence ensures an earlier mention of the header inside a persona body
+ *   (with only a single preceding newline) stays literal.
+ *
+ * The remaining prefix after core extraction is split on the FIRST
+ * `\n[System]\n` boundary into Base/System. Unlike the generic
+ * `parsePromptSections`, no embedded `[...]` line inside a body can start a new
+ * section — so a persona containing a bracketed line, or a mid-string-elided
+ * header on an oversize prompt, can never drop a label or inflate the count.
  */
 export function parseSystemPromptSections(
   systemPrompt: string,
 ): PromptSection[] {
   const sections: PromptSection[] = [];
 
-  // ── 1. Extract the trailing [Agent Memory — core] block ──────────────────
-  // Use the LAST occurrence so a persona that itself contains an
-  // "[Agent Memory — core]" line remains literal when the real appended frame
-  // follows later in the string.
+  // ── 1. Extract the [Agent Memory — core] block ───────────────────────────
+  // Two producer shapes:
+  //   • Core-only: systemPrompt starts with the header (no Base/System).
+  //   • Appended: `with_core()` emits "\n\n[Agent Memory — core]\n{core}".
+  //     Using the LAST occurrence of the double-newline-prefixed boundary
+  //     means a bare "[Agent Memory — core]" line inside a persona (which
+  //     can only be preceded by a single newline in the section body) is
+  //     never confused with the real appended frame.
   const CORE_HEADER = "[Agent Memory — core]";
-  const CORE_MARKER_INLINE = `\n${CORE_HEADER}\n`; // mid-string boundary
+  const CORE_MARKER_INLINE = `\n\n${CORE_HEADER}\n`; // blank-line-prefixed appended boundary
   let coreBody: string | null = null;
   let baseAndSystem = systemPrompt;
 
