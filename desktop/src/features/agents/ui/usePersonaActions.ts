@@ -7,6 +7,7 @@ import {
   useCreateManagedAgentMutation,
   useCreatePersonaMutation,
   useDeletePersonaMutation,
+  useExportAgentSnapshotMutation,
   useExportPersonaJsonMutation,
   usePersonasQuery,
   useSetPersonaActiveMutation,
@@ -16,6 +17,8 @@ import { getPersonaLibraryState } from "@/features/agents/lib/catalog";
 import {
   parsePersonaFiles,
   type ParsePersonaFilesResult,
+  type SnapshotFormat,
+  type SnapshotMemoryLevel,
 } from "@/shared/api/tauriPersonas";
 import { isSingleItemFile } from "@/shared/lib/fileMagic";
 import type {
@@ -102,12 +105,15 @@ export function usePersonaActions() {
   const deletePersonaMutation = useDeletePersonaMutation();
   const setPersonaActiveMutation = useSetPersonaActiveMutation();
   const exportPersonaJsonMutation = useExportPersonaJsonMutation();
+  const exportAgentSnapshotMutation = useExportAgentSnapshotMutation();
 
   const [personaDialogState, setPersonaDialogState] =
     React.useState<PersonaDialogState | null>(null);
   const [personaToDelete, setPersonaToDelete] =
     React.useState<AgentPersona | null>(null);
   const [personaToShare, setPersonaToShare] =
+    React.useState<AgentPersona | null>(null);
+  const [personaToExportSnapshot, setPersonaToExportSnapshot] =
     React.useState<AgentPersona | null>(null);
   const [isCatalogDialogOpen, setIsCatalogDialogOpen] = React.useState(false);
   const [sharedCatalogPersonaIds, setSharedCatalogPersonaIds] = React.useState<
@@ -375,6 +381,37 @@ export function usePersonaActions() {
     setPersonaToShare(persona);
   }
 
+  function openExportSnapshot(persona: AgentPersona) {
+    clearFeedback("library");
+    setPersonaToExportSnapshot(persona);
+  }
+
+  function handleExportSnapshot(
+    persona: AgentPersona,
+    memoryLevel: SnapshotMemoryLevel,
+    format: SnapshotFormat,
+  ) {
+    clearFeedback("library");
+    setPersonaToExportSnapshot(null);
+    exportAgentSnapshotMutation.mutate(
+      { id: persona.id, memoryLevel, format },
+      {
+        onSuccess: (saved) => {
+          if (saved) {
+            setPersonaNoticeMessage(`Exported ${persona.displayName}.`);
+          }
+        },
+        onError: (error) => {
+          setPersonaErrorMessage(
+            error instanceof Error
+              ? error.message
+              : "Failed to export agent snapshot.",
+          );
+        },
+      },
+    );
+  }
+
   function setPersonaCatalogVisibility(
     persona: AgentPersona,
     visible: boolean,
@@ -405,7 +442,8 @@ export function usePersonaActions() {
     updatePersonaMutation.isPending ||
     deletePersonaMutation.isPending ||
     setPersonaActiveMutation.isPending ||
-    exportPersonaJsonMutation.isPending;
+    exportPersonaJsonMutation.isPending ||
+    exportAgentSnapshotMutation.isPending;
 
   return {
     personasQuery,
@@ -446,6 +484,10 @@ export function usePersonaActions() {
     openCatalog,
     openDelete,
     openShare,
+    openExportSnapshot,
+    personaToExportSnapshot,
+    setPersonaToExportSnapshot,
+    handleExportSnapshot,
     setPersonaCatalogVisibility,
     sharedCatalogPersonaIdSet,
     clearFeedback,

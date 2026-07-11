@@ -1,4 +1,11 @@
-import { BookUser, CopyPlus, Ellipsis, Pencil, Trash2 } from "lucide-react";
+import {
+  BookUser,
+  CopyPlus,
+  Ellipsis,
+  FileDown,
+  Pencil,
+  Trash2,
+} from "lucide-react";
 
 import type { AgentPersona } from "@/shared/api/types";
 import {
@@ -16,6 +23,7 @@ export function PersonaActionsMenu({
   onDuplicate,
   onEdit,
   onShare,
+  onExportSnapshot,
   onDeactivate,
   onDelete,
 }: {
@@ -25,6 +33,7 @@ export function PersonaActionsMenu({
   onDuplicate: (persona: AgentPersona) => void;
   onEdit: (persona: AgentPersona) => void;
   onShare: (persona: AgentPersona) => void;
+  onExportSnapshot: (persona: AgentPersona) => void;
   onDeactivate: (persona: AgentPersona) => void;
   onDelete: (persona: AgentPersona) => void;
 }) {
@@ -62,6 +71,13 @@ export function PersonaActionsMenu({
         >
           <CopyPlus className="h-4 w-4" />
           Duplicate
+        </DropdownMenuItem>
+        <DropdownMenuItem
+          disabled={disabled}
+          onClick={() => onExportSnapshot(persona)}
+        >
+          <FileDown className="h-4 w-4" />
+          Export snapshot
         </DropdownMenuItem>
         <DropdownMenuSeparator />
         {persona.sourceTeam ? (

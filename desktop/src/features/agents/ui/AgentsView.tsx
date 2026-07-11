@@ -11,6 +11,7 @@ import { PersonaCatalogDialog } from "./PersonaCatalogDialog";
 import { PersonaDeleteDialog } from "./PersonaDeleteDialog";
 import { PersonaImportUpdateDialog } from "./PersonaImportUpdateDialog";
 import { PersonaShareDialog } from "./PersonaShareDialog";
+import { AgentSnapshotExportDialog } from "./AgentSnapshotExportDialog";
 import { RelayDirectorySection } from "./RelayDirectorySection";
 import { SecretRevealDialog } from "./SecretRevealDialog";
 import { TeamDeleteDialog } from "./TeamDeleteDialog";
@@ -131,6 +132,7 @@ export function AgentsView() {
               onDuplicatePersona={personas.openDuplicate}
               onEditPersona={personas.openEdit}
               onSharePersona={personas.openShare}
+              onExportPersonaSnapshot={personas.openExportSnapshot}
               onDeactivatePersona={(persona) => {
                 void personas.handleSetActive(persona, false, "library");
               }}
@@ -309,6 +311,27 @@ export function AgentsView() {
           }}
           open={personas.personaToShare !== null}
           persona={personas.personaToShare}
+        />
+      ) : null}
+      {personas.personaToExportSnapshot ? (
+        <AgentSnapshotExportDialog
+          isPending={personas.isPending}
+          open={personas.personaToExportSnapshot !== null}
+          persona={personas.personaToExportSnapshot}
+          onExport={(memoryLevel, format) => {
+            if (personas.personaToExportSnapshot) {
+              personas.handleExportSnapshot(
+                personas.personaToExportSnapshot,
+                memoryLevel,
+                format,
+              );
+            }
+          }}
+          onOpenChange={(open) => {
+            if (!open) {
+              personas.setPersonaToExportSnapshot(null);
+            }
+          }}
         />
       ) : null}
       {personas.isCatalogDialogOpen ? (

@@ -33,6 +33,9 @@ import {
   createPersona,
   deletePersona,
   exportPersonaToJson,
+  exportAgentSnapshot,
+  type SnapshotMemoryLevel,
+  type SnapshotFormat,
   listPersonas,
   setPersonaActive,
   updatePersona,
@@ -588,6 +591,20 @@ export function useCreateChannelManagedAgentsMutation(
 export function useExportPersonaJsonMutation() {
   return useMutation({
     mutationFn: (id: string) => exportPersonaToJson(id),
+  });
+}
+
+export function useExportAgentSnapshotMutation() {
+  return useMutation({
+    mutationFn: ({
+      id,
+      memoryLevel,
+      format,
+    }: {
+      id: string;
+      memoryLevel: SnapshotMemoryLevel;
+      format: SnapshotFormat;
+    }) => exportAgentSnapshot(id, memoryLevel, format),
   });
 }
 

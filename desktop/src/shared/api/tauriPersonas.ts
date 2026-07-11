@@ -195,6 +195,21 @@ export async function exportPersonaToJson(id: string): Promise<boolean> {
   return invokeTauri<boolean>("export_persona_to_json", { id });
 }
 
+export type SnapshotMemoryLevel = "none" | "core" | "everything";
+export type SnapshotFormat = "json" | "png";
+
+export async function exportAgentSnapshot(
+  id: string,
+  memoryLevel: SnapshotMemoryLevel,
+  format: SnapshotFormat,
+): Promise<boolean> {
+  return invokeTauri<boolean>("export_agent_snapshot", {
+    id,
+    memoryLevel,
+    format,
+  });
+}
+
 // Patches a single inbound persona/team/agent projection event into the local
 // store (personas.json). The backend resolves the match key and the
 // pending-edit race; the frontend only forwards the raw Nostr event JSON.

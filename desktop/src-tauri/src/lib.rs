@@ -807,6 +807,7 @@ pub fn run() {
             parse_team_file,
             parse_persona_files,
             export_persona_to_json,
+            export_agent_snapshot,
             get_channel_workflows,
             get_channels_workflows,
             get_workflow,
