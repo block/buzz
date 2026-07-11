@@ -57,3 +57,15 @@ export function getPresenceDotClassName(status: PresenceStatus) {
       return "bg-muted-foreground/35";
   }
 }
+
+// Chip styling for the presence pill (colored fill + matching text, no dot).
+export function getPresenceChipClassName(status: PresenceStatus) {
+  switch (status) {
+    case "online":
+      return "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400";
+    case "away":
+      return "bg-amber-500/15 text-amber-600 dark:text-amber-400";
+    case "offline":
+      return "bg-muted-foreground/15 text-muted-foreground";
+  }
+}
