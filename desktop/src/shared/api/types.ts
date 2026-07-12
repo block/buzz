@@ -1013,3 +1013,17 @@ export type GlobalAgentConfig = {
   /** Global fallback model identifier. Null = no global default. */
   model: string | null;
 };
+
+/**
+ * Result returned by `set_global_agent_config`.
+ *
+ * Mirrors the Rust `GlobalAgentConfigSaveResult` struct.
+ */
+export type GlobalAgentConfigSaveResult = {
+  /** The persisted global config (after strip-on-write). */
+  config: GlobalAgentConfig;
+  /** Number of local agents successfully stopped and restarted. */
+  restarted_count: number;
+  /** Number of agents whose stop succeeded but respawn failed. */
+  failed_restart_count: number;
+};

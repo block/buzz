@@ -199,6 +199,24 @@ type E2eConfig = {
       provider: string | null;
       model: string | null;
     };
+    /**
+     * The `restarted_count` returned by `set_global_agent_config`. Defaults to
+     * 0 (no agents restarted). Set to a positive integer to drive the
+     * "Saved. Restarted N agent(s)." status text in GlobalAgentConfigSettingsCard.
+     */
+    globalConfigRestartedCount?: number;
+    /**
+     * The `failed_restart_count` returned by `set_global_agent_config`. Defaults
+     * to 0. Set to a positive integer to drive the "M failed to restart — check
+     * the Agents tab." status text in GlobalAgentConfigSettingsCard.
+     */
+    globalConfigFailedRestartCount?: number;
+    /**
+     * Milliseconds to delay the mocked `set_global_agent_config` response.
+     * Defaults to 0 (resolve immediately). Use to hold a save in flight so a
+     * spec can interleave edits and exercise the mid-save race handling.
+     */
+    globalConfigSaveDelayMs?: number;
   };
   relayHttpUrl?: string;
   relayWsUrl?: string;
@@ -8762,6 +8780,33 @@ export function maybeInstallE2eTauriMocks() {
             model: null,
           }
         );
+      }
+      case "set_global_agent_config": {
+        // In the E2E environment there are no running agents to restart, so
+        // restarted_count is always 0. Return the submitted config as the
+        // saved value (mirrors the backend's strip-on-write pass in tests
+        // where all values are already non-empty).
+        const savedConfig = (
+          payload as {
+            config: {
+              env_vars: Record<string, string>;
+              provider: string | null;
+              model: string | null;
+            };
+          }
+        ).config;
+        // Optional configurable delay so specs can hold a save in flight and
+        // interleave edits (mid-save race coverage).
+        const saveDelayMs = config?.mock?.globalConfigSaveDelayMs ?? 0;
+        if (saveDelayMs > 0) {
+          await new Promise((resolve) => setTimeout(resolve, saveDelayMs));
+        }
+        return {
+          config: savedConfig,
+          restarted_count: config?.mock?.globalConfigRestartedCount ?? 0,
+          failed_restart_count:
+            config?.mock?.globalConfigFailedRestartCount ?? 0,
+        };
       }
       case "update_managed_agent":
         return handleUpdateManagedAgent(

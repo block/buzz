@@ -637,10 +637,6 @@ export function UserProfilePanel({
       }
 
       try {
-        const deletedInstances =
-          await deleteManagedAgentsForPersona(personaToConfirm);
-        if (deletedInstances.cancelled) return;
-
         await deletePersonaMutation.mutateAsync(personaToConfirm.id);
         toast.success(`Deleted ${personaToConfirm.displayName}.`);
         setPersonaToDelete(null);
@@ -651,7 +647,19 @@ export function UserProfilePanel({
         );
       }
     },
-    [deleteManagedAgentsForPersona, deletePersonaMutation.mutateAsync, onClose],
+    [deletePersonaMutation.mutateAsync, onClose],
+  );
+
+  // Count of managed-agent instances backed by the persona being deleted.
+  // Shown in the confirm dialog so the user knows what will be cascade-deleted.
+  const personaDeleteInstanceCount = React.useMemo(
+    () =>
+      personaToDelete
+        ? (managedAgentsQuery.data ?? []).filter(
+            (a) => a.personaId === personaToDelete.id,
+          ).length
+        : 0,
+    [managedAgentsQuery.data, personaToDelete],
   );
 
   const handleAddedToChannel = React.useCallback(
@@ -948,6 +956,7 @@ export function UserProfilePanel({
           ? createPersonaMutation.error
           : null
       }
+      instanceCount={personaDeleteInstanceCount}
       isPending={
         createPersonaMutation.isPending ||
         updatePersonaMutation.isPending ||

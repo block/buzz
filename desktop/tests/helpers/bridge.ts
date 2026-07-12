@@ -256,6 +256,24 @@ type MockBridgeOptions = {
     provider: string | null;
     model: string | null;
   };
+  /**
+   * The `restarted_count` returned by `set_global_agent_config`. Defaults to
+   * 0 (no agents restarted). Set to a positive integer to drive the
+   * "Saved. Restarted N agent(s)." status text in GlobalAgentConfigSettingsCard.
+   */
+  globalConfigRestartedCount?: number;
+  /**
+   * The `failed_restart_count` returned by `set_global_agent_config`. Defaults
+   * to 0. Set to a positive integer to drive the "failed to restart — check
+   * the Agents tab." status text in GlobalAgentConfigSettingsCard.
+   */
+  globalConfigFailedRestartCount?: number;
+  /**
+   * Milliseconds to delay the mocked `set_global_agent_config` response.
+   * Defaults to 0 (resolve immediately). Use to hold a save in flight so a
+   * test can interleave edits and exercise the mid-save race handling.
+   */
+  globalConfigSaveDelayMs?: number;
 };
 
 type BridgeOptions = {

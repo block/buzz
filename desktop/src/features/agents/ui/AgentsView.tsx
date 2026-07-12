@@ -265,6 +265,11 @@ export function AgentsView() {
       ) : null}
       {personas.personaToDelete ? (
         <PersonaDeleteDialog
+          instanceCount={
+            (agents.managedAgents ?? []).filter(
+              (a) => a.personaId === personas.personaToDelete?.id,
+            ).length
+          }
           onConfirm={(persona) => {
             void personas.handleDelete(persona);
           }}

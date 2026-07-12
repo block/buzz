@@ -75,6 +75,12 @@ const overrides = new Map([
   // global-agent-config: resolve_deploy_model_provider + visibility exports
   // add ~40 lines on top of the 1A.1 ratchet. Queued to split.
   ["src-tauri/src/commands/agents.rs", 1340],
+  // agent-lifecycle-fixes: cascade-delete in delete_persona restructured into
+  // 3-phase (stage/stop/commit) + commit_cascade_agents injectable helper for
+  // retry-safety. Load-bearing reviewer-required change; queued to split.
+  // +23: collect_remote_deployed pre-flight guard (provider-deployed cascade
+  // targets refuse the delete before any destructive work).
+  ["src-tauri/src/commands/personas/mod.rs", 1116],
   // #1418 read-path fix: get_thread_replies' blocker fix (shared TIMELINE_KINDS
   // const + build_thread_replies_filter helper, mirroring the channel sibling so
   // the two p-gate filters can't drift) plus two guard unit tests. The file was
@@ -189,7 +195,9 @@ const overrides = new Map([
   // codex-acp-package-swap: "adapter_outdated" variant added to AcpAvailabilityStatus (+1 line).
   // doctor-install-reliability: AuthStatus tagged union + nodeRequired/authStatus/
   // loginHint fields on AcpRuntimeCatalogEntry (+14 lines). Load-bearing new feature.
-  ["src/shared/api/types.ts", 1016],
+  // agent-lifecycle-fixes: GlobalAgentConfigSaveResult type grows with
+  // failed_restart_count (+2 lines). Queued to split with the rest of this list.
+  ["src/shared/api/types.ts", 1030],
   // readiness-gate: PersonaDialog.tsx threads computeLocalModeGate +
   // requiredCredentialEnvKeys + RequiredFieldLabel so the "New agent" dialog
   // shows required markers and credential amber rows (parity with

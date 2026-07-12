@@ -67,6 +67,8 @@ export function GlobalAgentConfigSettingsCard() {
   const [dirty, setDirty] = React.useState(false);
   const [saveState, setSaveState] = React.useState<SaveState>("idle");
   const [saveError, setSaveError] = React.useState<string | null>(null);
+  const [restartedCount, setRestartedCount] = React.useState(0);
+  const [failedRestartCount, setFailedRestartCount] = React.useState(0);
   const [isLoading, setIsLoading] = React.useState(true);
   const [loadError, setLoadError] = React.useState(false);
   const [isCustomProvider, setIsCustomProvider] = React.useState(false);
@@ -221,17 +223,32 @@ export function GlobalAgentConfigSettingsCard() {
   }
 
   async function handleSave() {
+    // Snapshot the config being submitted so we can detect edits that arrive
+    // during the IPC round-trip and avoid clobbering the user's newer input.
+    const submittedConfig = config;
     setSaveState("saving");
     setSaveError(null);
     try {
-      const saved = await setGlobalAgentConfig(config);
-      setConfig(saved);
-      setDirty(false);
+      const result = await setGlobalAgentConfig(submittedConfig);
+      // Apply the backend's canonical config ONLY if nothing changed during the
+      // IPC window. If the user edited, keep their newer value and leave dirty=true
+      // so they can save again. setDirty(false) runs inside the updater so both
+      // state updates batch into the same render (React 18 automatic batching).
+      setConfig((current) => {
+        if (current !== submittedConfig) {
+          // Mid-flight edit detected — do not overwrite newer user input.
+          return current;
+        }
+        setDirty(false);
+        return result.config;
+      });
+      setRestartedCount(result.restarted_count);
+      setFailedRestartCount(result.failed_restart_count);
       setSaveState("saved");
       // Seed the shared TanStack Query cache with the canonical saved value so
       // all open dialogs (and any that open afterward) see the new config
       // synchronously — no second IPC round-trip needed.
-      queryClient.setQueryData(globalAgentConfigQueryKey, saved);
+      queryClient.setQueryData(globalAgentConfigQueryKey, result.config);
       if (savedTimerRef.current) clearTimeout(savedTimerRef.current);
       savedTimerRef.current = setTimeout(() => setSaveState("idle"), 2500);
     } catch (err) {
@@ -423,7 +440,11 @@ export function GlobalAgentConfigSettingsCard() {
           {saveState === "saved" && (
             <span className="flex items-center gap-1 text-sm text-green-600 dark:text-green-400">
               <Check className="size-3.5" />
-              Saved. Running agents keep their current settings until restarted.
+              {restartedCount > 0
+                ? `Saved. Restarted ${restartedCount} agent${restartedCount === 1 ? "" : "s"}.${failedRestartCount > 0 ? ` ${failedRestartCount} failed to restart — check the Agents tab.` : ""}`
+                : failedRestartCount > 0
+                  ? `Saved. ${failedRestartCount} agent${failedRestartCount === 1 ? "" : "s"} failed to restart — check the Agents tab.`
+                  : "Saved."}
             </span>
           )}
           {saveState === "error" && saveError && (
