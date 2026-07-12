@@ -2839,8 +2839,8 @@ impl Db {
         if is_nip_rs {
             if let Some((_, existing_id)) = &existing {
                 // Mentions are denormalized and have no FK to the partitioned
-                // events table. Remove any defensive/legacy rows in the same
-                // transaction before dropping the superseded payload.
+                // events table. Migration 0007 adds the serving index for this
+                // defensive cleanup of malformed/legacy NIP-RS rows.
                 sqlx::query("DELETE FROM event_mentions WHERE community_id = $1 AND event_id = $2")
                     .bind(community_id.as_uuid())
                     .bind(existing_id)

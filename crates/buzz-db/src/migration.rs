@@ -556,8 +556,8 @@ mod tests {
         }
         assert!(!migrations[0].sql.as_str().contains("moderation_reports"));
 
-        // NIP-RS retention and positive FTS allowlist are additive. The
-        // migration seeds replay watermarks before deleting any payload history.
+        // NIP-RS retention is additive and boot-safe: seed replay watermarks
+        // before deleting payload history, without rewriting search storage.
         assert_eq!(migrations[6].version, 7);
         assert!(migrations[6]
             .sql
@@ -574,11 +574,19 @@ mod tests {
         assert!(migrations[6]
             .sql
             .as_str()
-            .contains("DELETE FROM events old"));
+            .contains("CREATE INDEX idx_event_mentions_community_event"));
         assert!(migrations[6]
             .sql
             .as_str()
-            .contains("kind IN (0, 9, 40002, 45001, 45003)"));
+            .contains("NIP-RS retention blocked: deleted event outranks live head"));
+        assert!(migrations[6]
+            .sql
+            .as_str()
+            .contains("DELETE FROM events old"));
+        assert!(!migrations[6]
+            .sql
+            .as_str()
+            .contains("ALTER TABLE events DROP COLUMN search_tsv"));
     }
 
     #[test]
