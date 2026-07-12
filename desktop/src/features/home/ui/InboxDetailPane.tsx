@@ -457,6 +457,7 @@ export function InboxDetailPane({
         return;
       }
 
+      programmaticScrollTopRef.current = null;
       handleUserInteraction();
     };
 
