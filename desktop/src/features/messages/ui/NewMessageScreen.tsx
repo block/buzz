@@ -47,6 +47,7 @@ export function NewMessageScreen() {
   const searchInputRef = React.useRef<HTMLInputElement>(null);
   const toFieldRef = React.useRef<HTMLDivElement>(null);
   const preparedDirectMessageRef = React.useRef<Channel | null>(null);
+  const isMountedRef = React.useRef(false);
   const isPending =
     isPreparingMentionSend ||
     openDmMutation.isPending ||
@@ -114,7 +115,12 @@ export function NewMessageScreen() {
   }, [highlightedRecipient, showRecipientPicker]);
 
   React.useEffect(() => {
+    isMountedRef.current = true;
     searchInputRef.current?.focus({ preventScroll: true });
+
+    return () => {
+      isMountedRef.current = false;
+    };
   }, []);
 
   const handleRemoveUser = React.useCallback(
@@ -194,6 +200,10 @@ export function NewMessageScreen() {
           error instanceof Error ? error.message : "Failed to send message.";
         setSubmitErrorMessage(message);
         throw error;
+      }
+
+      if (!isMountedRef.current) {
+        return;
       }
 
       await goChannel(directMessage.id, { replace: true });

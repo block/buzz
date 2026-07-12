@@ -659,6 +659,65 @@ test("closes direct message results while opening", async ({ page }) => {
   await expect(page.getByTestId("chat-title")).toHaveText("charlie");
 });
 
+test("does not reopen a direct message after leaving the composer", async ({
+  page,
+}) => {
+  await installMockBridge(page, { openDmDelayMs: 1_000 });
+  await page.goto("/");
+  await openNewMessagePage(page);
+
+  await page.getByTestId("new-dm-search").fill("charlie");
+  await page
+    .getByTestId(`new-dm-result-${TEST_IDENTITIES.charlie.pubkey}`)
+    .click();
+  await page.getByTestId("message-input").fill("Send without stale navigation");
+  await page.getByTestId("send-message").click();
+  await expect(page.getByTestId("new-dm-opening")).toContainText("Opening");
+
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await expect(page.getByTestId("dm-list")).toContainText("charlie");
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        return (
+          (
+            window as Window & {
+              __BUZZ_E2E_COMMAND_LOG__?: Array<{
+                command: string;
+                payload: unknown;
+              }>;
+            }
+          ).__BUZZ_E2E_COMMAND_LOG__?.some((entry) => {
+            if (entry.command !== "plugin:websocket|send") {
+              return false;
+            }
+
+            const data = (
+              entry.payload as {
+                message?: { data?: string; type?: string };
+              }
+            )?.message?.data;
+            if (!data) {
+              return false;
+            }
+
+            try {
+              return (JSON.parse(data) as unknown[])[0] === "EVENT";
+            } catch {
+              return false;
+            }
+          }) ?? false
+        );
+      }),
+    )
+    .toBe(true);
+  await expect(page).toHaveURL(
+    new RegExp(`/channels/${GENERAL_CHANNEL_ID}(?:\\?|$)`),
+  );
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+});
+
 test("shows capped participant stack in group direct message header", async ({
   page,
 }) => {
