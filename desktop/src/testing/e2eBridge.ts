@@ -109,6 +109,10 @@ type E2eConfig = {
     acpRuntimesCatalog?: RawAcpRuntimeCatalogEntry[];
     activePersonaIds?: string[];
     installAcpRuntimeResult?: RawInstallRuntimeResult;
+    /** Sequence of results for successive `install_acp_runtime` calls.
+     *  Call N returns results[N]; when exhausted the last entry repeats.
+     *  Takes precedence over `installAcpRuntimeResult`. */
+    installAcpRuntimeResults?: RawInstallRuntimeResult[];
     managedAgentPrereqs?: {
       acp?: MockCommandAvailability;
       mcp?: MockCommandAvailability;
@@ -6130,6 +6134,9 @@ async function handleDiscoverAcpRuntimes(
       install_instructions_url: "https://block.github.io/goose/",
       can_auto_install: true,
       underlying_cli_path: null,
+      node_required: false,
+      auth_status: { status: "not_applicable" },
+      login_hint: undefined,
     },
     {
       id: "claude",
@@ -6145,6 +6152,9 @@ async function handleDiscoverAcpRuntimes(
         "https://www.npmjs.com/package/@anthropic-ai/claude-agent-acp",
       can_auto_install: true,
       underlying_cli_path: "/usr/local/bin/claude",
+      node_required: false,
+      auth_status: { status: "unknown" },
+      login_hint: undefined,
     },
     {
       id: "codex",
@@ -6160,6 +6170,9 @@ async function handleDiscoverAcpRuntimes(
       install_instructions_url: "https://github.com/openai/codex",
       can_auto_install: false,
       underlying_cli_path: null,
+      node_required: false,
+      auth_status: { status: "unknown" },
+      login_hint: undefined,
     },
     {
       id: "buzz-agent",
@@ -6174,9 +6187,16 @@ async function handleDiscoverAcpRuntimes(
       install_instructions_url: "https://github.com/block/buzz",
       can_auto_install: false,
       underlying_cli_path: null,
+      node_required: false,
+      auth_status: { status: "not_applicable" },
+      login_hint: undefined,
     },
   ];
 }
+
+// Per-page install call counter. Reset each test run because this module is
+// re-evaluated via addInitScript, so the counter starts at 0 for every test.
+let installCallCount = 0;
 
 async function handleInstallAcpRuntime(
   args: {
@@ -6184,6 +6204,12 @@ async function handleInstallAcpRuntime(
   },
   config: E2eConfig | undefined,
 ): Promise<RawInstallRuntimeResult> {
+  const sequence = config?.mock?.installAcpRuntimeResults;
+  if (sequence && sequence.length > 0) {
+    const idx = Math.min(installCallCount, sequence.length - 1);
+    installCallCount++;
+    return sequence[idx];
+  }
   const configured = config?.mock?.installAcpRuntimeResult;
   if (configured) {
     return configured;

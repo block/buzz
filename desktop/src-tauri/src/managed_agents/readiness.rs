@@ -55,7 +55,7 @@ use crate::managed_agents::{
     types::{AcpAvailabilityStatus, ManagedAgentRecord, PersonaRecord},
 };
 
-mod cli_probe;
+pub(crate) mod cli_probe;
 
 // ── EffectiveAgentEnv ─────────────────────────────────────────────────────────
 
@@ -969,6 +969,8 @@ mod tests {
             max_tokens_env_var: None,
             context_limit_env_var: None,
             required_normalized_fields: &[],
+            login_hint: None,
+            auth_probe_args: None,
         }
     }
 
@@ -1163,6 +1165,8 @@ mod tests {
             max_tokens_env_var: None,
             context_limit_env_var: None,
             required_normalized_fields: &[],
+            login_hint: None,
+            auth_probe_args: None,
         }
     }
 

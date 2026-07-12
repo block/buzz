@@ -91,6 +91,7 @@ export default defineConfig({
         "**/channel-sort.spec.ts",
         "**/identity-lost.spec.ts",
         "**/global-agent-config-screenshots.spec.ts",
+        "**/doctor-states.spec.ts",
       ],
       use: {
         ...devices["Desktop Chrome"],

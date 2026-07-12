@@ -1,8 +1,10 @@
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{Duration, Instant};
 
 use crate::managed_agents::{
-    AcpAvailabilityStatus, AcpRuntimeCatalogEntry, CommandAvailabilityInfo,
+    AcpAvailabilityStatus, AcpRuntimeCatalogEntry, AuthStatus, CommandAvailabilityInfo,
 };
 
 pub(crate) struct KnownAcpRuntime {
@@ -56,6 +58,12 @@ pub(crate) struct KnownAcpRuntime {
     /// Used by the config bridge to mark fields as required in the UI.
     /// Keys match the camelCase names used in `NormalizedConfig` (e.g. "model", "provider").
     pub required_normalized_fields: &'static [&'static str],
+    /// Human-readable hint shown in Doctor when the runtime is available but not
+    /// authenticated. `None` for runtimes that have no login step (goose, buzz-agent).
+    pub login_hint: Option<&'static str>,
+    /// CLI args for probing authentication status. `args[0]` is the binary name;
+    /// the remainder are the subcommand. `None` for runtimes with no login step.
+    pub auth_probe_args: Option<&'static [&'static str]>,
 }
 
 const GOOSE_AVATAR_URL: &str = "https://goose-docs.ai/img/logo_dark.png";
@@ -114,6 +122,8 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         max_tokens_env_var: Some("GOOSE_MAX_TOKENS"),
         context_limit_env_var: Some("GOOSE_CONTEXT_LIMIT"),
         required_normalized_fields: &["model", "provider"],
+        login_hint: None,
+        auth_probe_args: None,
     },
     KnownAcpRuntime {
         id: "claude",
@@ -142,6 +152,8 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         max_tokens_env_var: None,
         context_limit_env_var: None,
         required_normalized_fields: &[],
+        login_hint: Some("Run the Claude CLI to complete authentication."),
+        auth_probe_args: Some(&["claude", "auth", "status"]),
     },
     KnownAcpRuntime {
         id: "codex",
@@ -170,6 +182,9 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         max_tokens_env_var: None,
         context_limit_env_var: None,
         required_normalized_fields: &[],
+        login_hint: Some("Run `codex login` to authenticate."),
+        // Verified: `codex login status` exits 0 when logged in, non-zero otherwise.
+        auth_probe_args: Some(&["codex", "login", "status"]),
     },
     KnownAcpRuntime {
         id: "buzz-agent",
@@ -198,6 +213,8 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         max_tokens_env_var: Some("BUZZ_AGENT_MAX_OUTPUT_TOKENS"),
         context_limit_env_var: Some("BUZZ_AGENT_MAX_CONTEXT_TOKENS"),
         required_normalized_fields: &["model", "provider"],
+        login_hint: None,
+        auth_probe_args: None,
     },
 ];
 
@@ -509,6 +526,19 @@ fn resolve_command_uncached(command: &str) -> Option<PathBuf> {
         }
     }
 
+    // Check nvm's default Node.js bin directory — nvm initializes via
+    // ~/.zshrc (interactive) which is not loaded by a login shell, so
+    // `node`, `npm`, and npm-global shims installed there are otherwise
+    // invisible.
+    if let Some(home) = dirs::home_dir() {
+        if let Some(nvm_bin) = find_nvm_default_bin(&home) {
+            let candidate = nvm_bin.join(executable_basename(command));
+            if is_executable_file(&candidate) {
+                return Some(candidate);
+            }
+        }
+    }
+
     None
 }
 
@@ -547,22 +577,284 @@ fn find_via_login_shell(command: &str) -> Option<PathBuf> {
     (path.is_absolute() && is_executable_file(&path)).then_some(path)
 }
 
+/// Three-state backing store for the login-shell PATH cache.
+#[derive(Clone)]
+enum LoginShellPath {
+    /// Cache has never been populated; the next call will spawn a login shell.
+    Uninit,
+    /// A login shell was invoked; the inner value is the PATH it returned
+    /// (`None` when the shell produced no output).
+    Probed(Option<String>),
+}
+
+fn path_cache() -> &'static std::sync::Mutex<LoginShellPath> {
+    use std::sync::{Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<LoginShellPath>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(LoginShellPath::Uninit))
+}
+
+fn fetch_login_shell_path_inner() -> Option<String> {
+    let stdout = run_in_login_shell(&["-l", "-c", "echo $PATH"])?;
+    let last_line = stdout.lines().rfind(|l| !l.trim().is_empty())?;
+    Some(last_line.trim().to_string())
+}
+
 /// Return the user's full PATH from a login shell.
-/// Cached via OnceLock so we only spawn one shell per app lifetime.
+///
+/// The result is cached after the first call. Call [`refresh_login_shell_path`]
+/// to invalidate the cache so the next call re-fetches — e.g. after the user
+/// installs Node.js mid-session and clicks Retry.
+///
+/// The lock is never held while the login shell spawns: we check for a cached
+/// value, release the lock, run the shell, then re-lock to write. Two concurrent
+/// callers may both run the shell (last-writer-wins is fine — both produce the
+/// same result), but neither blocks a concurrent agent spawn on the Mutex.
 pub fn login_shell_path() -> Option<String> {
-    use std::sync::OnceLock;
-    static CACHED: OnceLock<Option<String>> = OnceLock::new();
-    CACHED
-        .get_or_init(|| {
-            let stdout = run_in_login_shell(&["-l", "-c", "echo $PATH"])?;
-            let last_line = stdout.lines().rfind(|l| !l.trim().is_empty())?;
-            Some(last_line.trim().to_string())
+    // Fast path: return cached result without spawning a shell.
+    {
+        let guard = path_cache().lock().unwrap_or_else(|e| e.into_inner());
+        if let LoginShellPath::Probed(ref result) = *guard {
+            return result.clone();
+        }
+    }
+
+    // Slow path: spawn shell outside any lock.
+    let result = fetch_login_shell_path_inner();
+
+    // Write back; last-writer-wins is safe here.
+    {
+        let mut guard = path_cache().lock().unwrap_or_else(|e| e.into_inner());
+        *guard = LoginShellPath::Probed(result.clone());
+    }
+
+    result
+}
+
+/// Invalidate the login-shell PATH cache so the next [`login_shell_path`] call
+/// re-fetches from a fresh login shell.
+///
+/// Called before every install/retry operation and on Doctor Re-run so a
+/// newly-installed tool becomes visible without restarting the app.
+pub(crate) fn refresh_login_shell_path() {
+    let mut guard = path_cache().lock().unwrap_or_else(|e| e.into_inner());
+    *guard = LoginShellPath::Uninit;
+}
+
+#[cfg(test)]
+fn is_login_shell_path_uninit() -> bool {
+    matches!(
+        *path_cache().lock().unwrap_or_else(|e| e.into_inner()),
+        LoginShellPath::Uninit
+    )
+}
+
+/// Return `true` when `tag` is a safe nvm alias/version tag that can be joined
+/// onto a `PathBuf` without escaping the nvm root.
+///
+/// nvm uses tags like `v22.1.0` or `lts/hydrogen`. We allow ASCII alphanumeric
+/// plus `. - / _` and require that no path component is `..` and that the tag
+/// does not start with `/` (which would replace the base in `PathBuf::join`).
+fn is_safe_nvm_tag(tag: &str) -> bool {
+    if tag.is_empty() {
+        return false;
+    }
+    // An absolute path in the alias file would let PathBuf::join silently
+    // replace the nvm root with an attacker-controlled path.
+    if tag.starts_with('/') {
+        return false;
+    }
+    // Reject any .. component to prevent upward traversal.
+    for component in tag.split('/') {
+        if component == ".." {
+            return false;
+        }
+    }
+    // Allow only the characters nvm uses in real tag names.
+    tag.chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '/' | '_'))
+}
+
+/// Locate the `bin` directory for nvm's default Node.js version.
+///
+/// Reads `~/.nvm/alias/default`; resolves at most one alias hop to handle
+/// nvm alias chains; falls back to the highest-semver directory under
+/// `~/.nvm/versions/node/`. Returns the `bin` subdirectory only when it exists.
+///
+/// Cheap: at most two file reads or one `read_dir`. Never cached — computed
+/// fresh per call so a mid-session `nvm install` is visible at the next spawn.
+pub fn find_nvm_default_bin(home: &Path) -> Option<PathBuf> {
+    let nvm_root = home.join(".nvm");
+    let versions_root = nvm_root.join("versions").join("node");
+
+    // 1. Try alias/default, with at most one hop.
+    let default_alias = nvm_root.join("alias").join("default");
+    if let Ok(content) = std::fs::read_to_string(&default_alias) {
+        let tag = content.trim().to_string();
+        if is_safe_nvm_tag(&tag) {
+            let candidate = versions_root.join(&tag).join("bin");
+            if candidate.is_dir() {
+                return Some(candidate);
+            }
+            // One alias hop: ~/.nvm/alias/<tag>
+            let hop_file = nvm_root.join("alias").join(&tag);
+            if let Ok(hop_content) = std::fs::read_to_string(&hop_file) {
+                let hop_tag = hop_content.trim().to_string();
+                if is_safe_nvm_tag(&hop_tag) {
+                    let hop_candidate = versions_root.join(&hop_tag).join("bin");
+                    if hop_candidate.is_dir() {
+                        return Some(hop_candidate);
+                    }
+                }
+            }
+        }
+    }
+
+    // 2. Fall back to highest-semver directory under ~/.nvm/versions/node/.
+    let entries = std::fs::read_dir(&versions_root).ok()?;
+    let best = entries
+        .filter_map(|e| e.ok())
+        .filter_map(|e| {
+            let name = e.file_name();
+            let s = name.to_string_lossy().into_owned();
+            parse_semver_tag(&s).map(|v| (v, s))
         })
-        .clone()
+        .max_by(|(a, _), (b, _)| a.cmp(b));
+
+    let (_, tag) = best?;
+    let bin = versions_root.join(&tag).join("bin");
+    bin.is_dir().then_some(bin)
+}
+
+/// Parse a `vMAJ.MIN.PATCH` (or `vMAJ.MIN.PATCH-extra`) tag into a numeric
+/// triple for semver comparison.
+fn parse_semver_tag(s: &str) -> Option<(u64, u64, u64)> {
+    let s = s.strip_prefix('v')?;
+    let mut parts = s.splitn(3, '.');
+    let major = parts.next()?.parse::<u64>().ok()?;
+    let minor = parts.next()?.parse::<u64>().ok()?;
+    let patch_str = parts.next()?;
+    let patch = patch_str.split('-').next()?.parse::<u64>().ok()?;
+    Some((major, minor, patch))
 }
 
 pub(crate) fn find_command(command: &str) -> Option<PathBuf> {
     resolve_command(command)
+}
+
+/// Returns true when the runtime has at least one adapter install step that
+/// is an npm global install. Used to determine whether Node.js is required.
+fn runtime_needs_npm(runtime: &KnownAcpRuntime) -> bool {
+    runtime
+        .adapter_install_commands
+        .iter()
+        .any(|cmd| is_npm_global_install(cmd))
+}
+
+/// Returns `true` when `cmd` is an `npm install -g` invocation.
+///
+/// Used by Doctor to determine whether Node.js is required before running an
+/// install step, and by the npm EACCES preflight in the install command path.
+pub(crate) fn is_npm_global_install(cmd: &str) -> bool {
+    let t = cmd.trim_start();
+    t.starts_with("npm install -g ") || t.starts_with("npm i -g ")
+}
+
+/// Run a CLI auth probe with a 10-second process-level timeout.
+///
+/// Spawns the probe CLI as a child process. Stdout and stderr are drained on
+/// background threads to prevent pipe-buffer deadlock. On timeout the child is
+/// killed and `Unknown` is returned; no orphaned threads or processes are left
+/// behind. Returns `Unknown` on timeout.
+fn probe_auth_status(binary_path: &Path, probe_args: &[&str]) -> AuthStatus {
+    use crate::managed_agents::readiness::cli_probe;
+
+    let augmented_path = cli_probe::augmented_path();
+
+    let mut command = std::process::Command::new(binary_path);
+    command.args(&probe_args[1..]);
+    if let Some(ref path) = augmented_path {
+        command.env("PATH", path);
+    }
+    command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+
+    let mut child = match command.spawn() {
+        Ok(c) => c,
+        Err(_) => return AuthStatus::Unknown,
+    };
+
+    // Drain stdout/stderr on background threads to prevent pipe-buffer deadlock.
+    let stdout_pipe = child.stdout.take();
+    let stderr_pipe = child.stderr.take();
+
+    let stdout_thread = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(mut pipe) = stdout_pipe {
+            let _ = pipe.read_to_end(&mut buf);
+        }
+    });
+    let stderr_thread = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(mut pipe) = stderr_pipe {
+            let _ = pipe.read_to_end(&mut buf);
+        }
+        buf
+    });
+
+    // Save PID for kill-on-timeout before moving child into the wait thread.
+    let child_pid = child.id();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let wait_thread = std::thread::spawn(move || {
+        let _ = tx.send(child.wait());
+    });
+
+    // 10-second timeout for auth probes.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let exit_status = loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            #[cfg(unix)]
+            unsafe {
+                libc::kill(child_pid as i32, libc::SIGTERM);
+            }
+            #[cfg(not(unix))]
+            let _ = child_pid;
+            drop(rx);
+            let _ = wait_thread.join();
+            let _ = stdout_thread.join();
+            let _ = stderr_thread.join();
+            return AuthStatus::Unknown;
+        }
+        match rx.recv_timeout(Duration::from_millis(100).min(remaining)) {
+            Ok(Ok(status)) => break status,
+            Ok(Err(_)) => {
+                let _ = wait_thread.join();
+                let _ = stdout_thread.join();
+                let _ = stderr_thread.join();
+                return AuthStatus::Unknown;
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                let _ = stdout_thread.join();
+                let _ = stderr_thread.join();
+                return AuthStatus::Unknown;
+            }
+        }
+    };
+
+    let _ = wait_thread.join();
+    let _ = stdout_thread.join();
+    let stderr_bytes = stderr_thread.join().unwrap_or_default();
+
+    match cli_probe::classify_probe_output(&stderr_bytes, exit_status.success()) {
+        cli_probe::ProbeOutcome::LoggedIn => AuthStatus::LoggedIn,
+        cli_probe::ProbeOutcome::LoggedOut => AuthStatus::LoggedOut,
+        cli_probe::ProbeOutcome::ConfigInvalid { stderr_excerpt } => AuthStatus::ConfigInvalid {
+            diagnostic: stderr_excerpt,
+        },
+    }
 }
 
 pub fn command_availability(command: &str) -> CommandAvailabilityInfo {
@@ -719,11 +1011,17 @@ pub(crate) fn codex_adapter_is_outdated(path: &Path) -> bool {
     codex_adapter_availability(path) == AcpAvailabilityStatus::AdapterOutdated
 }
 
+/// Intermediate struct built before the (potentially slow) auth probe phase.
+struct PartialEntry {
+    runtime: &'static KnownAcpRuntime,
+    entry: AcpRuntimeCatalogEntry,
+}
+
 pub fn discover_acp_runtimes() -> Vec<AcpRuntimeCatalogEntry> {
-    KNOWN_ACP_RUNTIMES
+    // Phase 1: build all entries (fast — no probes yet).
+    let mut partials: Vec<PartialEntry> = KNOWN_ACP_RUNTIMES
         .iter()
         .map(|runtime| {
-            // Try to find the ACP adapter binary.
             let adapter_result = runtime
                 .commands
                 .iter()
@@ -779,22 +1077,88 @@ pub fn discover_acp_runtimes() -> Vec<AcpRuntimeCatalogEntry> {
                 }
             };
 
-            AcpRuntimeCatalogEntry {
-                id: runtime.id.to_string(),
-                label: runtime.label.to_string(),
-                avatar_url: runtime.avatar_url.to_string(),
+            // node_required: an npm adapter step is pending AND node/npm are absent.
+            let node_required = matches!(
                 availability,
-                command,
-                binary_path,
-                default_args,
-                mcp_command: runtime.mcp_command.map(str::to_string),
-                install_hint,
-                install_instructions_url: runtime.install_instructions_url.to_string(),
-                can_auto_install,
-                underlying_cli_path,
+                AcpAvailabilityStatus::AdapterMissing | AcpAvailabilityStatus::NotInstalled
+            ) && runtime_needs_npm(runtime)
+                && resolve_command("npm").is_none()
+                && resolve_command("node").is_none();
+
+            PartialEntry {
+                runtime,
+                entry: AcpRuntimeCatalogEntry {
+                    id: runtime.id.to_string(),
+                    label: runtime.label.to_string(),
+                    avatar_url: runtime.avatar_url.to_string(),
+                    availability,
+                    command,
+                    binary_path,
+                    default_args,
+                    mcp_command: runtime.mcp_command.map(str::to_string),
+                    install_hint,
+                    install_instructions_url: runtime.install_instructions_url.to_string(),
+                    can_auto_install,
+                    underlying_cli_path,
+                    node_required,
+                    // Filled in by the probe phase below.
+                    auth_status: AuthStatus::Unknown,
+                    login_hint: None,
+                },
             }
         })
-        .collect()
+        .collect();
+
+    // Phase 2: run auth probes in parallel for entries that need them.
+    // Spawn one thread per probeable entry; total cost = max(probe latency).
+    let probe_handles: Vec<(usize, std::thread::JoinHandle<AuthStatus>)> = partials
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, partial)| {
+            if partial.entry.availability != AcpAvailabilityStatus::Available {
+                return None;
+            }
+            let probe_args = partial.runtime.auth_probe_args?;
+            // Need the resolved binary path for the CLI (e.g. the actual `claude` binary).
+            let binary_path = resolve_command(probe_args[0])?;
+            let probe_args_owned: Vec<String> = probe_args.iter().map(|s| s.to_string()).collect();
+
+            let handle = std::thread::spawn(move || {
+                let refs: Vec<&str> = probe_args_owned.iter().map(String::as_str).collect();
+                probe_auth_status(&binary_path, &refs)
+            });
+            Some((idx, handle))
+        })
+        .collect();
+
+    // Collect probe results and patch entries.
+    for (idx, handle) in probe_handles {
+        let status = handle.join().unwrap_or(AuthStatus::Unknown);
+        let partial = &mut partials[idx];
+        partial.entry.login_hint =
+            if matches!(status, AuthStatus::LoggedIn | AuthStatus::NotApplicable) {
+                None
+            } else {
+                partial.runtime.login_hint.map(str::to_string)
+            };
+        partial.entry.auth_status = status;
+    }
+
+    // Fill NotApplicable / Unknown for non-probed entries.
+    for partial in &mut partials {
+        if partial.entry.auth_status == AuthStatus::Unknown {
+            partial.entry.auth_status = if partial.entry.availability
+                == AcpAvailabilityStatus::Available
+                && partial.runtime.auth_probe_args.is_none()
+            {
+                AuthStatus::NotApplicable
+            } else {
+                AuthStatus::Unknown
+            };
+        }
+    }
+
+    partials.into_iter().map(|p| p.entry).collect()
 }
 
 pub fn managed_agent_avatar_url(command: &str) -> Option<String> {

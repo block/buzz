@@ -1530,14 +1530,19 @@ pub fn spawn_agent_child(
 
     // Augment PATH for DMG launches so child processes can find:
     //   - bundled CLI via ~/.local/bin symlink
+    //   - nvm-managed node/npm (nvm initializes only in interactive shells)
     //   - bundled sidecars (buzz, buzz-acp, etc.) via exe parent (Contents/MacOS/)
     //   - runtimes (node, python, etc.) via login shell PATH
+    let nvm_bin = dirs::home_dir()
+        .as_deref()
+        .and_then(super::find_nvm_default_bin);
     let augmented_path = build_augmented_path(
         dirs::home_dir(),
         std::env::current_exe()
             .ok()
             .and_then(|exe| exe.parent().map(std::path::Path::to_path_buf)),
         login_shell_path(),
+        nvm_bin,
     );
 
     let mut command = std::process::Command::new(&resolved_acp_command);

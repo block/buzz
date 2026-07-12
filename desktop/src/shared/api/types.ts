@@ -550,6 +550,14 @@ export type AcpAvailabilityStatus =
   | "cli_missing"
   | "not_installed";
 
+/** Authentication/login status for a CLI-based ACP runtime. */
+export type AuthStatus =
+  | { status: "logged_in" }
+  | { status: "logged_out" }
+  | { status: "config_invalid"; diagnostic: string }
+  | { status: "not_applicable" }
+  | { status: "unknown" };
+
 export type AcpRuntimeCatalogEntry = {
   id: string;
   label: string;
@@ -563,6 +571,12 @@ export type AcpRuntimeCatalogEntry = {
   installInstructionsUrl: string;
   canAutoInstall: boolean;
   underlyingCliPath: string | null;
+  /** True when an npm adapter step is pending but Node.js / npm is absent. */
+  nodeRequired: boolean;
+  /** Login/auth status for CLI-based runtimes. */
+  authStatus: AuthStatus;
+  /** Hint for completing authentication; null when not applicable or already logged in. */
+  loginHint: string | null;
 };
 
 /** An AcpRuntimeCatalogEntry that is confirmed available — command and binaryPath are non-null. */

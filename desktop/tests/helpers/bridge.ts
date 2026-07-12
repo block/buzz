@@ -107,6 +107,35 @@ export type MockAgentMemoryListing = {
 
 type MockBridgeOptions = {
   acpRuntimesCatalog?: Record<string, unknown>[];
+  /** Override the result returned by the `install_acp_runtime` mock command.
+   *  Pass `{ success: false, steps: [...] }` to exercise error/Retry states. */
+  installAcpRuntimeResult?: {
+    success: boolean;
+    steps: {
+      step: string;
+      command: string;
+      success: boolean;
+      stdout: string;
+      stderr: string;
+      exit_code: number | null;
+      hint?: string;
+    }[];
+  };
+  /** Sequence of results for successive `install_acp_runtime` calls. Call N
+   *  returns results[N]; when exhausted the last entry repeats. Takes precedence
+   *  over `installAcpRuntimeResult`. Use for fail-then-succeed Retry tests. */
+  installAcpRuntimeResults?: Array<{
+    success: boolean;
+    steps: {
+      step: string;
+      command: string;
+      success: boolean;
+      stdout: string;
+      stderr: string;
+      exit_code: number | null;
+      hint?: string;
+    }[];
+  }>;
   activePersonaIds?: string[];
   /**
    * Listing returned by the mocked `get_agent_memory` command. Pass a single

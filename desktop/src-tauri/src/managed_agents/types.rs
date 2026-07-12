@@ -536,6 +536,28 @@ pub enum AcpAvailabilityStatus {
     NotInstalled,
 }
 
+/// Authentication/login status for a CLI-based ACP runtime.
+///
+/// Serializes as a tagged union `{ status: "...", diagnostic?: "..." }` so
+/// the TypeScript side can exhaustively switch on `status`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", tag = "status")]
+pub enum AuthStatus {
+    /// The CLI reported a successful login.
+    LoggedIn,
+    /// The CLI exited non-zero without a config-parse signal.
+    LoggedOut,
+    /// The CLI exited non-zero and its stderr contains a config-parse error.
+    ConfigInvalid {
+        /// Trimmed excerpt of the stderr message.
+        diagnostic: String,
+    },
+    /// This runtime does not have a login step (e.g. goose, buzz-agent).
+    NotApplicable,
+    /// Probe was not attempted (runtime unavailable or probe timed out).
+    Unknown,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct AcpRuntimeCatalogEntry {
     pub id: String,
@@ -551,6 +573,14 @@ pub struct AcpRuntimeCatalogEntry {
     /// true when at least one automated install step is available
     pub can_auto_install: bool,
     pub underlying_cli_path: Option<String>,
+    /// true when an npm adapter step is pending but Node.js / npm is absent.
+    /// The UI hides the Install button and shows a Node.js install callout.
+    pub node_required: bool,
+    /// Login/authentication status for CLI-based runtimes.
+    pub auth_status: AuthStatus,
+    /// Hint for completing authentication, shown when `auth_status` is not `logged_in`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub login_hint: Option<String>,
 }
 
 /// Result of a single install step (CLI or adapter).

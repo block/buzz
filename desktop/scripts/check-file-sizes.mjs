@@ -152,7 +152,10 @@ const overrides = new Map([
   // outdated-adapter and garbage-version-output paths through the codex id gate
   // (+140 lines: make_codex_runtime helper, PATH_MUTEX serializer, 2 test fns).
   // Load-bearing test coverage; queued to split with the file generally.
-  ["src-tauri/src/managed_agents/readiness.rs", 1750],
+  // +1: pub(crate) mod cli_probe declaration for doctor auth probe access.
+  // +3: auth_probe_args: None + login_hint: None added to make_cli_runtime and
+  // make_codex_runtime stubs (new KnownAcpRuntime fields).
+  ["src-tauri/src/managed_agents/readiness.rs", 1754],
   // applyWorkspace reposDir parameter plus the validateReposDir binding,
   // threaded through Tauri invokes for configurable repos_dir, plus the
   // harness-persona-sync `harnessOverride` create-input bit — load-bearing
@@ -179,10 +182,14 @@ const overrides = new Map([
   // baked-env fold-in: getBakedBuildEnv + BakedEnvEntry type adds ~28 lines.
   // doctor-npm-eacces-preflight: hint field on RawInstallStepResult + mapper
   // passthrough (+2 lines).
-  ["src/shared/api/tauri.ts", 1273],
+  // doctor-install-reliability: node_required + auth_status + login_hint fields
+  // added to RawAcpRuntimeCatalogEntry + fromRawAcpRuntimeCatalogEntry mapper (+8).
+  ["src/shared/api/tauri.ts", 1281],
   // doctor-npm-eacces-preflight: hint field added to InstallStepResult (+1 line).
   // codex-acp-package-swap: "adapter_outdated" variant added to AcpAvailabilityStatus (+1 line).
-  ["src/shared/api/types.ts", 1002],
+  // doctor-install-reliability: AuthStatus tagged union + nodeRequired/authStatus/
+  // loginHint fields on AcpRuntimeCatalogEntry (+14 lines). Load-bearing new feature.
+  ["src/shared/api/types.ts", 1016],
   // readiness-gate: PersonaDialog.tsx threads computeLocalModeGate +
   // requiredCredentialEnvKeys + RequiredFieldLabel so the "New agent" dialog
   // shows required markers and credential amber rows (parity with
@@ -224,7 +231,20 @@ const overrides = new Map([
   // (+18 lines), codex_adapter_availability/is_outdated helpers (+16 lines),
   // cross-platform probe contract. All load-bearing — required for correct
   // probe behaviour on Windows and descendant-process edge cases.
-  ["src-tauri/src/managed_agents/discovery.rs", 810],
+  // doctor-install-reliability: refreshable login_shell_path cache,
+  // find_nvm_default_bin + parse_semver_tag helpers, auth probe cache +
+  // probe_auth_status/cached_auth_status, runtime_needs_npm, probe_args_for,
+  // PartialEntry struct, and updated discover_acp_runtimes with parallel auth
+  // probes. Load-bearing fresh-install reliability fixes. (+289 lines)
+  // doctor-install-reliability review fixes: LoginShellPath enum + double-checked
+  // locking, is_safe_nvm_tag security validation, classify_probe_output helper,
+  // auth_probe_args on KnownAcpRuntime (removes probe_args_for indirection),
+  // process-level timeout replacing inner-thread pattern. (+75 lines)
+  ["src-tauri/src/managed_agents/discovery.rs", 1171],
+  // rebase over codex-acp-package-swap: its version-probe tests union with the
+  // doctor-install-reliability nvm/login-shell/semver tests — each side alone
+  // stayed under the 1000 default; the union exceeds it.
+  ["src-tauri/src/managed_agents/discovery/tests.rs", 1029],
   // identity-import-keyring: the identity resolution state machine's behavioral
   // matrix (46 tests over FakeIdentityStore — probe × marker × file cells,
   // adoption / read-back-corruption / marker-failure arms, recovery-mode
@@ -339,7 +359,9 @@ const overrides = new Map([
   // in this PR; queued to split with the command module refactor.
   // +17: baked-env-global-unify: BUZZ_AGENT_THINKING_EFFORT added to
   // is_safe_to_reveal allowlist + baked_env_thinking_effort_is_unmasked test.
-  ["src-tauri/src/commands/agent_config.rs", 1019],
+  // +1: doctor-install-reliability: login_hint: None added to goose_runtime test stub.
+  // +1: doctor-install-reliability review fixes: auth_probe_args: None added to stub.
+  ["src-tauri/src/commands/agent_config.rs", 1021],
   // draft-persistence predicate: submit-time `loadDraft` check + inline comment
   // + deps-array entry in submitMessage closes the never-persisted-boundary
   // defect (Thufir Pass-3 finding). Load-bearing correctness fix; queued to

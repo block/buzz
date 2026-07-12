@@ -4,9 +4,9 @@ use tauri::State;
 use crate::{
     app_state::AppState,
     managed_agents::{
-        command_availability, AcpRuntimeCatalogEntry, DiscoverManagedAgentPrereqsRequest,
-        InstallRuntimeResult, InstallStepResult, ManagedAgentPrereqsInfo, RelayAgentInfo,
-        DEFAULT_ACP_COMMAND,
+        command_availability, is_npm_global_install, AcpRuntimeCatalogEntry,
+        DiscoverManagedAgentPrereqsRequest, InstallRuntimeResult, InstallStepResult,
+        ManagedAgentPrereqsInfo, RelayAgentInfo, DEFAULT_ACP_COMMAND,
     },
     nostr_convert,
     relay::query_relay,
@@ -62,6 +62,7 @@ pub(crate) fn plan_adapter_install<'c>(
 pub async fn discover_acp_providers() -> Result<Vec<AcpRuntimeCatalogEntry>, String> {
     tokio::task::spawn_blocking(|| {
         crate::managed_agents::clear_resolve_cache();
+        crate::managed_agents::refresh_login_shell_path();
         crate::managed_agents::discover_acp_runtimes()
     })
     .await
@@ -78,6 +79,13 @@ pub async fn install_acp_runtime(runtime_id: String) -> Result<InstallRuntimeRes
 /// Err(_) = infrastructure failure (panic, concurrency guard).
 /// Ok({success: false}) = an install step failed (stderr captured in steps).
 fn install_acp_runtime_blocking(runtime_id: &str) -> Result<InstallRuntimeResult, String> {
+    // Re-fetch the login-shell PATH so a Node.js installation that happened
+    // after app launch (or after a previous failed install) is visible to this
+    // run and to the subsequent discover_acp_providers call.
+    crate::managed_agents::refresh_login_shell_path();
+    // Clear the resolve cache so newly-installed binaries are found.
+    crate::managed_agents::clear_resolve_cache();
+
     // Prevent concurrent installs for the same runtime.
     {
         let mut set = active_installs()
@@ -374,12 +382,6 @@ fn floor_char_boundary(s: &str, mut index: usize) -> usize {
 }
 
 // ── npm EACCES preflight ──────────────────────────────────────────────────────
-
-/// Returns true when `command` is an npm global install invocation.
-fn is_npm_global_install(command: &str) -> bool {
-    let t = command.trim_start();
-    t.starts_with("npm install -g ") || t.starts_with("npm i -g ")
-}
 
 /// Guidance text for the EACCES / unwritable-prefix case.
 fn npm_eacces_guidance(command: &str) -> String {
