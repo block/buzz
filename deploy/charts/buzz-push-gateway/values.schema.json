@@ -203,6 +203,33 @@
           }
         }
       ]
+    },
+    "migration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "existingSecret",
+        "databaseUrlKey",
+        "runtimeDatabaseRole",
+        "resources"
+      ],
+      "properties": {
+        "existingSecret": {
+          "type": "string",
+          "minLength": 1
+        },
+        "databaseUrlKey": {
+          "type": "string",
+          "minLength": 1
+        },
+        "runtimeDatabaseRole": {
+          "type": "string",
+          "pattern": "^[a-zA-Z_][a-zA-Z0-9_]{0,62}$"
+        },
+        "resources": {
+          "type": "object"
+        }
+      }
     }
   },
   "required": [
@@ -212,7 +239,8 @@
     "maxGrantLifetimeSeconds",
     "appAttestAppId",
     "httpRoute",
-    "image"
+    "image",
+    "migration"
   ],
   "allOf": [
     {

@@ -359,11 +359,9 @@ async fn delegate(State(s): State<AppState>, body: Bytes) -> Response {
         expires_at: d.expires_at,
     };
     match s.grant_keyring.issue(&g) {
-        Ok(delivery_capability) => (
+        Ok(endpoint_grant) => (
             StatusCode::CREATED,
-            Json(DelegationResponse {
-                delivery_capability,
-            }),
+            Json(DelegationResponse { endpoint_grant }),
         )
             .into_response(),
         Err(_) => error(StatusCode::SERVICE_UNAVAILABLE, "temporarily_unavailable"),

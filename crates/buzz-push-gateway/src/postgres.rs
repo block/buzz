@@ -4,7 +4,7 @@ use crate::authority::*;
 use crate::model::AppProfile;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use sqlx::{PgPool, Row};
+use sqlx::{AssertSqlSafe, PgPool, Row};
 use uuid::Uuid;
 
 #[derive(Clone)]
@@ -14,6 +14,45 @@ pub struct PostgresAuthorityStore {
 impl PostgresAuthorityStore {
     pub fn new(pool: PgPool) -> Self {
         Self { pool }
+    }
+
+    pub async fn apply_migrations_and_grants(
+        pool: &PgPool,
+        runtime_role: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        sqlx::migrate!("./migrations").run(pool).await?;
+        if runtime_role.is_empty()
+            || runtime_role.len() > 63
+            || !runtime_role
+                .bytes()
+                .enumerate()
+                .all(|(i, b)| b == b'_' || b.is_ascii_alphabetic() || (i > 0 && b.is_ascii_digit()))
+        {
+            return Err("runtime database role must be a PostgreSQL identifier".into());
+        }
+        let database: String = sqlx::query_scalar("SELECT current_database()")
+            .fetch_one(pool)
+            .await?;
+        let quote_ident = |value: &str| format!("\"{}\"", value.replace('"', "\"\""));
+        let role = quote_ident(runtime_role);
+        let database = quote_ident(&database);
+        let grants = format!(
+            "REVOKE CREATE ON DATABASE {database} FROM {role};
+             REVOKE CREATE ON SCHEMA public FROM PUBLIC;
+             REVOKE CREATE ON SCHEMA public FROM {role};
+             GRANT CONNECT ON DATABASE {database} TO {role};
+             GRANT USAGE ON SCHEMA public TO {role};
+             GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE
+               push_gateway_challenges,
+               push_gateway_installations,
+               push_gateway_delegations,
+               push_gateway_endpoint_quotas,
+               push_gateway_delivery_auth_replays,
+               push_gateway_delivery_request_replays
+             TO {role};"
+        );
+        sqlx::raw_sql(AssertSqlSafe(grants)).execute(pool).await?;
+        Ok(())
     }
 }
 fn at(ts: i64) -> Result<DateTime<Utc>, AuthorityError> {
@@ -39,11 +78,43 @@ fn bytes32(v: Vec<u8>) -> Result<[u8; 32], AuthorityError> {
 #[async_trait]
 impl AuthorityStore for PostgresAuthorityStore {
     async fn ready(&self) -> Result<(), AuthorityError> {
-        sqlx::query_scalar::<_, i32>("SELECT 1")
-            .fetch_one(&self.pool)
+        const TABLES: [&str; 6] = [
+            "push_gateway_challenges",
+            "push_gateway_installations",
+            "push_gateway_delegations",
+            "push_gateway_endpoint_quotas",
+            "push_gateway_delivery_auth_replays",
+            "push_gateway_delivery_request_replays",
+        ];
+        let mut tx = self.pool.begin().await.map_err(db)?;
+        for table in TABLES {
+            let ready: bool = sqlx::query_scalar(
+                "SELECT to_regclass($1) IS NOT NULL
+                    AND COALESCE(has_table_privilege(current_user, to_regclass($1), 'SELECT'), false)
+                    AND COALESCE(has_table_privilege(current_user, to_regclass($1), 'INSERT'), false)
+                    AND COALESCE(has_table_privilege(current_user, to_regclass($1), 'UPDATE'), false)
+                    AND COALESCE(has_table_privilege(current_user, to_regclass($1), 'DELETE'), false)",
+            )
+            .bind(format!("public.{table}"))
+            .fetch_one(&mut *tx)
             .await
-            .map(|_| ())
-            .map_err(db)
+            .map_err(db)?;
+            if !ready {
+                return Err(AuthorityError::Unavailable);
+            }
+        }
+        let least_privilege: bool = sqlx::query_scalar(
+            "SELECT has_database_privilege(current_user, current_database(), 'CONNECT')
+                AND NOT has_database_privilege(current_user, current_database(), 'CREATE')
+                AND NOT has_schema_privilege(current_user, 'public', 'CREATE')",
+        )
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(db)?;
+        if !least_privilege {
+            return Err(AuthorityError::Unavailable);
+        }
+        tx.rollback().await.map_err(db)
     }
 
     async fn put_challenge(&self, c: Challenge) -> Result<(), AuthorityError> {
@@ -341,6 +412,94 @@ mod tests {
     const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz";
 
     #[tokio::test]
+    #[ignore = "requires PostgreSQL with CREATEDB/CREATEROLE"]
+    async fn readiness_requires_migrated_schema_dml_and_no_ddl() {
+        let admin_url = std::env::var("BUZZ_TEST_DATABASE_URL")
+            .or_else(|_| std::env::var("DATABASE_URL"))
+            .unwrap_or_else(|_| TEST_DB_URL.to_owned());
+        let admin = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&admin_url)
+            .await
+            .expect("connect as PostgreSQL test administrator");
+        let suffix = Uuid::new_v4().simple().to_string();
+        let database = format!("push_ready_{suffix}");
+        let runtime_role = format!("push_runtime_{suffix}");
+        sqlx::query(AssertSqlSafe(format!(
+            "CREATE ROLE {runtime_role} LOGIN PASSWORD 'runtime_test'"
+        )))
+        .execute(&admin)
+        .await
+        .expect("create runtime role");
+        sqlx::query(AssertSqlSafe(format!("CREATE DATABASE {database}")))
+            .execute(&admin)
+            .await
+            .expect("create dedicated gateway database");
+
+        let mut admin_database_url = url::Url::parse(&admin_url).expect("parse PostgreSQL URL");
+        admin_database_url.set_path(&database);
+        let mut runtime_database_url = admin_database_url.clone();
+        runtime_database_url
+            .set_username(&runtime_role)
+            .expect("set runtime username");
+        runtime_database_url
+            .set_password(Some("runtime_test"))
+            .expect("set runtime password");
+        let runtime_pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(runtime_database_url.as_str())
+            .await
+            .expect("connect as runtime role");
+        let runtime = PostgresAuthorityStore::new(runtime_pool.clone());
+        assert!(
+            runtime.ready().await.is_err(),
+            "empty database is not ready"
+        );
+
+        let migration_pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(admin_database_url.as_str())
+            .await
+            .expect("connect migration role to dedicated database");
+        PostgresAuthorityStore::apply_migrations_and_grants(&migration_pool, &runtime_role)
+            .await
+            .expect("migrate and grant runtime role");
+        assert!(
+            runtime.ready().await.is_ok(),
+            "migrated least-privilege runtime is ready"
+        );
+        assert!(
+            sqlx::query("CREATE TABLE forbidden_runtime_ddl(id INT)")
+                .execute(&runtime_pool)
+                .await
+                .is_err(),
+            "runtime role cannot create tables"
+        );
+
+        sqlx::query(AssertSqlSafe(format!(
+            "REVOKE DELETE ON push_gateway_installations FROM {runtime_role}"
+        )))
+        .execute(&migration_pool)
+        .await
+        .expect("remove one required DML privilege");
+        assert!(
+            runtime.ready().await.is_err(),
+            "missing DML privilege is not ready"
+        );
+
+        runtime_pool.close().await;
+        migration_pool.close().await;
+        sqlx::query(AssertSqlSafe(format!("DROP DATABASE {database}")))
+            .execute(&admin)
+            .await
+            .expect("drop test database");
+        sqlx::query(AssertSqlSafe(format!("DROP ROLE {runtime_role}")))
+            .execute(&admin)
+            .await
+            .expect("drop test role");
+    }
+
+    #[tokio::test]
     #[ignore = "requires PostgreSQL"]
     async fn reaper_deletes_active_child_of_retention_eligible_revoked_installation() {
         let database_url = std::env::var("BUZZ_TEST_DATABASE_URL")
@@ -554,6 +713,15 @@ mod tests {
         event_hex: &'a str,
         request_id: Uuid,
     ) -> impl std::future::Future<Output = Result<DeliveryPermit, AuthorityError>> + 'a {
+        admit_with_quota(store, event_hex, request_id, 10)
+    }
+
+    fn admit_with_quota<'a>(
+        store: &'a PostgresAuthorityStore,
+        event_hex: &'a str,
+        request_id: Uuid,
+        quota_max_deliveries: i64,
+    ) -> impl std::future::Future<Output = Result<DeliveryPermit, AuthorityError>> + 'a {
         let now = Utc::now().timestamp();
         store.authorize_delivery(
             Uuid::from_u128(DELEGATION_ID),
@@ -564,7 +732,7 @@ mod tests {
             request_id,
             now + 300,
             60,
-            10,
+            quota_max_deliveries,
             now,
         )
     }
@@ -609,6 +777,123 @@ mod tests {
             .await
             .expect("read quota");
         assert_eq!(admitted, 1, "loser's quota reservation rolled back");
+
+        pool.close().await;
+        drop_schema(&schema).await;
+    }
+
+    // Red-team (Tyler's thorough pass): quota ceiling under concurrency. Two
+    // admissions for the SAME endpoint fingerprint but DISTINCT request_ids and
+    // DISTINCT auth events — so neither replay PK fence can gate them; the only
+    // thing standing between the caller and over-admission is the quota upsert's
+    // `WHERE ... admitted < $4` predicate. With max=1 the two admissions race for
+    // a single slot. A snapshot-evaluated predicate (reading admitted=0 in both
+    // txns before either commits) would admit BOTH and burn the ceiling; the
+    // correct behavior relies on Postgres re-checking the ON CONFLICT DO UPDATE
+    // predicate against the row it just locked, so the loser sees admitted=1,
+    // fails `1 < 1`, updates zero rows, and rejects. Exactly one Ok, and the
+    // persisted counter must never exceed the ceiling.
+    #[tokio::test]
+    #[ignore = "requires PostgreSQL"]
+    async fn concurrent_admissions_never_over_admit_past_quota_ceiling() {
+        let (pool, schema) = full_schema(4).await;
+        install_authority(&pool).await;
+        let store = PostgresAuthorityStore::new(pool.clone());
+        let event_a = "22".repeat(32);
+        let event_b = "33".repeat(32);
+
+        let (a, b) = tokio::join!(
+            admit_with_quota(&store, &event_a, Uuid::new_v4(), 1),
+            admit_with_quota(&store, &event_b, Uuid::new_v4(), 1),
+        );
+        assert_eq!(
+            [a.is_ok(), b.is_ok()].iter().filter(|ok| **ok).count(),
+            1,
+            "quota ceiling of 1 admits exactly one of two concurrent attempts"
+        );
+
+        let admitted: i64 = sqlx::query_scalar("SELECT admitted FROM push_gateway_endpoint_quotas")
+            .fetch_one(&pool)
+            .await
+            .expect("read quota");
+        assert_eq!(
+            admitted, 1,
+            "persisted admitted counter must never exceed the ceiling under a race"
+        );
+        // The loser's whole tx rolled back: its distinct auth event is not fenced.
+        let auth_events: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM push_gateway_delivery_auth_replays")
+                .fetch_one(&pool)
+                .await
+                .expect("count auth replays");
+        assert_eq!(auth_events, 1, "rejected admission consumes no auth fence");
+        let requests: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM push_gateway_delivery_request_replays")
+                .fetch_one(&pool)
+                .await
+                .expect("count request replays");
+        assert_eq!(requests, 1, "rejected admission consumes no request fence");
+
+        pool.close().await;
+        drop_schema(&schema).await;
+    }
+
+    // Red-team: Retryable release is unconditional (deletes the request-id row on
+    // the pool, not inside a tx). Attack the window where a losing delivery's
+    // release races a fresh admission that legitimately re-took the same
+    // request_id — could the stale DELETE punch a hole in the live fence? It
+    // cannot: the DELETE keys on (relay_pubkey, request_id) with no ownership
+    // token, but the fence it would remove is exactly the one the retrying caller
+    // is entitled to free, and any *subsequent* admission re-inserts its own row.
+    // Concretely: admit R, Retryable-release R (fence gone), re-admit R (fresh
+    // fence), then replay the SAME release a second time (a duplicated/late
+    // finish) — it must delete the NOW-LIVE fence, and the next admission of R
+    // must still be gated by whatever fence remains. This pins that a duplicated
+    // Retryable finish is idempotent-safe and never leaves R permanently
+    // un-fenceable while the delegation is live.
+    #[tokio::test]
+    #[ignore = "requires PostgreSQL"]
+    async fn duplicated_retryable_release_does_not_permanently_unfence_request_id() {
+        let (pool, schema) = full_schema(2).await;
+        install_authority(&pool).await;
+        let store = PostgresAuthorityStore::new(pool.clone());
+        let request_id = Uuid::new_v4();
+
+        let permit = admit(&store, &"22".repeat(32), request_id)
+            .await
+            .expect("first admission");
+        // Clone the permit's identity into a second release we fire twice.
+        store
+            .finish_delivery(permit, DeliveryDisposition::Retryable)
+            .await
+            .expect("retryable release frees the fence");
+        // Re-admit: fresh fence for the same request_id.
+        let permit2 = admit(&store, &"33".repeat(32), request_id)
+            .await
+            .expect("re-admit after release");
+        // A duplicated/late Retryable finish for the same (relay, request_id)
+        // deletes the now-live fence — this is the worst case for the
+        // unconditional DELETE. It must not error, and R must remain re-admittable
+        // (fence hole is transient, never permanent), which is the honest
+        // NIP-PL §312 contract: a still-live endpoint gets a fresh job.
+        store
+            .finish_delivery(permit2, DeliveryDisposition::Retryable)
+            .await
+            .expect("duplicated retryable release is idempotent-safe");
+        let admitted_again = admit(&store, &"44".repeat(32), request_id).await;
+        assert!(
+            admitted_again.is_ok(),
+            "after any Retryable release the request_id is re-admittable, never permanently unfenceable"
+        );
+        // And a Terminal on that live permit re-burns it, closing the window.
+        store
+            .finish_delivery(admitted_again.unwrap(), DeliveryDisposition::Terminal)
+            .await
+            .expect("terminal finish");
+        assert!(
+            admit(&store, &"55".repeat(32), request_id).await.is_err(),
+            "terminal keeps the fence burned after the release churn"
+        );
 
         pool.close().await;
         drop_schema(&schema).await;

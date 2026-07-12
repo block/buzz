@@ -24,6 +24,23 @@ xs=list(yaml.safe_load_all(open(sys.argv[1])))
 svc=next(x for x in xs if x and x.get('kind')=='Service')
 assert [p['targetPort'] for p in svc['spec']['ports']]==['public']
 d=next(x for x in xs if x and x.get('kind')=='Deployment')
+j=next(x for x in xs if x and x.get('kind')=='Job')
+runtime={'app.kubernetes.io/name':'buzz-push-gateway','app.kubernetes.io/instance':'push','app.kubernetes.io/component':'runtime'}
+migration={**runtime,'app.kubernetes.io/component':'migration'}
+assert svc['spec']['selector']==runtime
+assert d['spec']['selector']['matchLabels']==runtime
+assert d['spec']['template']['metadata']['labels']==runtime
+assert j['spec']['template']['metadata']['labels']==migration
+assert svc['spec']['selector'] != j['spec']['template']['metadata']['labels']
+jenv={e['name']:e for e in j['spec']['template']['spec']['containers'][0]['env']}
+assert jenv['BUZZ_PUSH_RUNTIME_DATABASE_ROLE']['value']=='buzz_push_gateway_runtime'
+assert 'valueFrom' in jenv['DATABASE_URL']
+assert j['spec']['template']['spec']['containers'][0]['args']==['--migrate-only']
+assert j['metadata']['annotations']=={
+    'helm.sh/hook':'pre-install,pre-upgrade',
+    'helm.sh/hook-weight':'-5',
+    'helm.sh/hook-delete-policy':'before-hook-creation,hook-succeeded',
+}
 env={e['name'] for e in d['spec']['template']['spec']['containers'][0]['env']}
 required={'DATABASE_URL','BUZZ_PUSH_APNS_KEY_ID','BUZZ_PUSH_APNS_TEAM_ID','BUZZ_PUSH_APNS_TOPIC','BUZZ_PUSH_GRANT_KEYS','BUZZ_PUSH_TOKEN_KEYS','BUZZ_PUSH_MAX_GRANT_LIFETIME_SECONDS'}
 assert required <= env
@@ -32,7 +49,22 @@ assert not any(x and x.get('kind')=='HTTPRoute' for x in xs)
 # Observability is opt-in: default render exposes no scrape CRDs and 8081 stays
 # free of pod ingress (only 8080 is reachable).
 assert not any(x and x.get('kind') in ('PodMonitor','PrometheusRule') for x in xs)
-np=next(x for x in xs if x and x.get('kind')=='NetworkPolicy')
+nps=[x for x in xs if x and x.get('kind')=='NetworkPolicy']
+np=next(x for x in nps if x['metadata']['name']=='push-buzz-push-gateway')
+migration_np=next(x for x in nps if x['metadata']['name']=='push-buzz-push-gateway-migration')
+assert np['spec']['podSelector']['matchLabels']==runtime
+assert migration_np['spec']['podSelector']['matchLabels']==migration
+assert migration_np['metadata']['annotations']=={
+    'helm.sh/hook':'pre-install,pre-upgrade',
+    'helm.sh/hook-weight':'-10',
+    'helm.sh/hook-delete-policy':'before-hook-creation',
+}
+assert int(migration_np['metadata']['annotations']['helm.sh/hook-weight']) < int(j['metadata']['annotations']['helm.sh/hook-weight'])
+assert migration_np['spec']['ingress']==[]
+assert migration_np['spec']['policyTypes']==['Ingress','Egress']
+migration_ports={p['port'] for rule in migration_np['spec']['egress'] for p in rule.get('ports',[])}
+assert migration_ports=={53,5432}, migration_ports
+assert all(p['port'] != 443 for rule in migration_np['spec']['egress'] for p in rule.get('ports',[]))
 ingress_ports={p['port'] for rule in np['spec']['ingress'] for p in rule.get('ports',[])}
 assert ingress_ports=={8080}, ingress_ports
 production=list(yaml.safe_load_all(open(sys.argv[2])))
@@ -72,7 +104,7 @@ pm=next(x for x in xs if x and x.get('kind')=='PodMonitor')
 ep=pm['spec']['podMetricsEndpoints'][0]
 assert ep['port']=='health' and ep['path']=='/metrics', ep
 assert next(x for x in xs if x and x.get('kind')=='PrometheusRule')['spec']['groups']
-np=next(x for x in xs if x and x.get('kind')=='NetworkPolicy')
+np=next(x for x in xs if x and x.get('kind')=='NetworkPolicy' and x['metadata']['name']=='push-buzz-push-gateway')
 mon=[r for r in np['spec']['ingress'] if {p['port'] for p in r.get('ports',[])}=={8081}]
 assert len(mon)==1, 'exactly one scoped 8081 ingress rule'
 frm=mon[0]['from'][0]

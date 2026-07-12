@@ -2,15 +2,15 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: {{ include "push.name" . }}
-  labels: {{- include "push.labels" . | nindent 4 }}
+  labels: {{- include "push.runtimeLabels" . | nindent 4 }}
 spec:
   replicas: {{ .Values.replicaCount }}
   strategy: { type: RollingUpdate, rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } }
   selector:
-    matchLabels: {{- include "push.labels" . | nindent 6 }}
+    matchLabels: {{- include "push.runtimeLabels" . | nindent 6 }}
   template:
     metadata:
-      labels: {{- include "push.labels" . | nindent 8 }}
+      labels: {{- include "push.runtimeLabels" . | nindent 8 }}
     spec:
       automountServiceAccountToken: false
       terminationGracePeriodSeconds: 60

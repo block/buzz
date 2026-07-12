@@ -23,6 +23,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .json()
         .with_env_filter(EnvFilter::from_default_env())
         .init();
+    if std::env::args().nth(1).as_deref() == Some("--migrate-only") {
+        let database_url = std::env::var("DATABASE_URL")?;
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&database_url)
+            .await?;
+        let runtime_role = std::env::var("BUZZ_PUSH_RUNTIME_DATABASE_ROLE")?;
+        PostgresAuthorityStore::apply_migrations_and_grants(&pool, &runtime_role).await?;
+        return Ok(());
+    }
     let c = Config::from_env()?;
     let metrics_handle = buzz_push_gateway::metrics::install()?;
     let transport = Arc::new(ApnsTransport::token(
@@ -47,7 +57,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .max_connections(20)
         .connect(&c.database_url)
         .await?;
-    sqlx::migrate!("../../migrations").run(&pool).await?;
     let authority = Arc::new(PostgresAuthorityStore::new(pool));
     authority
         .reap_expired(chrono::Utc::now().timestamp())

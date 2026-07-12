@@ -30,6 +30,7 @@ jobs:
       - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4
         with: { version: v3.16.4 }
       - run: deploy/charts/buzz-push-gateway/tests/render.sh
+      - run: deploy/charts/buzz-push-gateway/tests/release-contract.sh
   publish:
     if: github.event_name != 'pull_request'
     needs: validate

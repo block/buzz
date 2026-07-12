@@ -204,7 +204,7 @@ An executor MUST evaluate a lease only against events accepted by the relay orig
 
 Filter matching MUST use only the accepted event envelope and relay-local authorization state. An executor MUST NOT decrypt NIP-44 content, NIP-59 seals or gift wraps, or any other encrypted event content to decide whether to wake an installation. For NIP-59 gift wraps, only outer-envelope fields, including the outer `p` tag, are eligible for matching.
 
-The verified canonical origin is part of every lease and match key. An executor serving more than one origin MUST partition, at minimum, lease state, filter indexes, cursors, durable outbox jobs, endpoint lookup, foreground-suppression state, wake-grant state, quotas, and rate limits by origin. It MUST NOT match a lease against a global event, pubkey, or tag stream, and MUST NOT use authorization state from one origin to approve a wake or wake-grant redemption at another origin.
+The verified canonical origin is part of every lease and match key. An executor serving more than one origin MUST partition, at minimum, lease state, filter indexes, cursors, durable outbox jobs, endpoint lookup, foreground-suppression state, gateway capability state, quotas, and rate limits by origin. It MUST NOT match a lease against a global event, pubkey, or tag stream, and MUST NOT use authorization state from one origin to approve a wake or gateway delivery at another origin.
 
 A wake job MUST preserve the origin and lease address selected at match time. Workers MUST re-check the lease's active state, expiration, endpoint generation, and current read authorization before delivery. A failed authorization check MUST suppress that wake without revealing whether the event existed. Implementations SHOULD make the accepted event and outbox insertion one durable transaction, or provide equivalent crash-safe processing, but delivery through a platform transport remains best-effort.
 
@@ -258,6 +258,157 @@ A pubkey-only client cannot create, replace, or revoke a lease. If a platform en
 
 Implementations MUST NOT interpret this section as NIP-26 delegation. A future specification may define a narrowly scoped installation authorization for unattended endpoint rotation, but such a capability is neither required nor implied here.
 
+## Public APNs Gateway Profile (Buzz, normative)
+
+This section registers the public last-hop profile served at `https://push.buzz.xyz`. It is an optional profile of NIP-PL, but every requirement in this section is normative for implementations that use it. The gateway is stateful: it retains installation authority, encrypted APNs-token custody, relay delegations, replay reservations, and endpoint quotas. The relay remains the executor and retains lease acceptance, matching, tenant authorization, endpoint uniqueness, coalescing, durable jobs/retries, and lease-generation invalidation.
+
+### Registered values and lease mapping
+
+The registered `app_profile` values are `buzz-ios-production` (Apple production APNs environment) and `buzz-ios-sandbox` (Apple sandbox APNs environment). A gateway deployment MUST enable only profiles for which its App Attest application identifier, APNs topic, credentials, and APNs environment are configured consistently. The APNs token registered with the gateway is called the **installation endpoint** and never leaves gateway custody after enrollment.
+
+The opaque string returned as `endpoint_grant` by `POST /v1/delegations` is the **delivery capability**. For this profile, the active lease plaintext's `endpoint` member MUST contain that `endpoint_grant`, not the raw APNs token. `transport` MUST be `apns`, and `app_profile` MUST equal the profile sealed into the grant. Base-protocol endpoint uniqueness, rotation, hashing, and coalescing operate on this opaque lease `endpoint` within an origin. A capability is scoped to one installation, relay signing pubkey, endpoint epoch, generation, and expiry; grants independently issued to different relays are intentionally distinct. The gateway separately enforces global installation-endpoint uniqueness using `(app_profile, SHA-256(token))`. A public-profile relay MUST treat `endpoint` as opaque and MUST NOT parse or transform it.
+
+### Common HTTP and value rules
+
+All routes below accept only `POST`. Clients MUST send `Content-Type: application/json`; bodies are UTF-8 JSON and MUST be at most 8192 bytes. Every request object is closed: unknown members, duplicate members at any depth, missing or incorrectly typed members, trailing non-whitespace data, or a `v` other than integer `1` are `400 {"error":"invalid_request"}`. Integers are signed JSON integers in the ranges stated below. Unix times are integer seconds. UUIDs use the canonical lowercase hyphenated representation. Relay pubkeys are exactly 64 lowercase hexadecimal characters. APNs endpoints are non-empty, even-length lowercase hexadecimal strings encoding at most 512 bytes. Challenges are exactly 32 bytes encoded as unpadded URL-safe base64. `key_id`, `attestation`, and `assertion` use padded or unpadded standard base64 as accepted by Apple's App Attest API; decoded key ids are exactly 32 bytes, attestations are 1..16384 bytes, and assertions are 1..1024 bytes. An `endpoint_grant`, including its key-id prefix, MUST be at most 4096 bytes.
+
+Successful and error responses are UTF-8 `application/json`. Closed error bodies are `{"error":"invalid_request"}`, `{"error":"invalid_attestation"}`, `{"error":"not_authorized"}`, `{"error":"invalid_auth"}`, `{"error":"invalid_grant"}`, `{"error":"temporarily_unavailable"}`, `{"error":"configuration_fault"}`, or `{"error":"not_ready"}`. Authority/custody/quota rejection MUST NOT reveal whether an installation, delegation, or endpoint exists. In particular, delivery grant/authority/replay/quota failures collapse to `404 invalid_grant`; storage failures use `503 temporarily_unavailable`.
+
+### Exact App Attest transcript construction
+
+Every App Attest operation signs a **transcript**, not the received request bytes. Transcript bytes are UTF-8 bytes of:
+
+```
+<domain> + "\\n" + <compact ordered JSON object>
+```
+
+The JSON object has no insignificant whitespace and members appear in the exact order shown below. Strings use JSON escaping for quotation mark, reverse solidus, and U+0000..U+001F; all authority-bearing strings admitted by this profile are ASCII. UUID strings are canonical lowercase-hyphenated. Integers use shortest decimal notation. The fixed `audience` value is part of the signed object and prevents cross-route use. For enrollment, these exact transcript bytes are the App Attest `clientData` supplied to attestation verification. For every assertion route, `clientDataHash = SHA-256(transcript bytes)` is verified by App Attest. The separately stored challenge must equal the request `challenge`, is single-use, expires after 300 seconds, and is consumed only after successful cryptographic verification. Assertion `signCount` MUST strictly increase atomically for the installation.
+
+### Challenge
+
+`POST /v1/installations/challenges`
+
+Request: `{"v":1}`.
+
+Success `200`:
+
+```json
+{"challenge_id":"<uuid>","challenge":"<base64url-no-pad-32-bytes>","expires_at":<unix-seconds>}
+```
+
+The challenge is single-use. Invalid input is `400 invalid_request`; storage/randomness failure is `503 temporarily_unavailable`.
+
+### Installation enrollment
+
+`POST /v1/installations`
+
+Request members, in any request order:
+
+```json
+{"v":1,"challenge_id":"<uuid>","challenge":"<challenge>","key_id":"<standard-base64>","attestation":"<standard-base64 CBOR>","app_profile":"buzz-ios-production","endpoint":"<lowercase APNs-token hex>","endpoint_epoch":1,"expires_at":<unix-seconds>}
+```
+
+`expires_at` MUST satisfy `now < expires_at <= now + configured_max_installation_lifetime`; the selected profile MUST be enabled. The exact transcript is domain `buzz.push.enroll.v1` followed by this ordered object:
+
+```json
+{"v":1,"audience":"https://push.buzz.xyz/v1/installations","challenge_id":"<uuid>","challenge":"<challenge>","key_id":"<standard-base64>","app_profile":"<registered-profile>","endpoint":"<lowercase-hex>","endpoint_epoch":1,"expires_at":<unix-seconds>}
+```
+
+The gateway verifies Apple's attestation chain, configured application identifier, production AAGUID, key identifier, and transcript. Apple documents no APNs-token-to-App-Attest-key binding; token provenance at enrollment is an explicit bootstrap assumption. It then stores only encrypted token custody plus its fingerprint. Success `201`:
+
+```json
+{"installation_handle":"<uuid>","endpoint_epoch":1,"expires_at":<unix-seconds>}
+```
+
+Invalid attestation is `401 invalid_attestation`; a consumed/expired challenge or duplicate key/token is `404 not_authorized`.
+
+### Relay delegation and capability issuance
+
+`POST /v1/delegations`
+
+```json
+{"v":1,"challenge_id":"<uuid>","challenge":"<challenge>","installation_handle":"<uuid>","endpoint_epoch":<positive-integer>,"generation":<positive-integer>,"relay_pubkey":"<64-lowercase-hex>","not_before":<unix-seconds>,"expires_at":<unix-seconds>,"assertion":"<standard-base64 CBOR>"}
+```
+
+`not_before <= now + 300`, `not_before < expires_at`, and `expires_at <= min(now + configured_max_grant_lifetime, installation.expires_at)`. The endpoint epoch MUST equal the current installation epoch. For each `(installation_handle, relay_pubkey)`, generation MUST strictly increase. Transcript domain `buzz.push.delegate.v1`; ordered object:
+
+```json
+{"v":1,"audience":"https://push.buzz.xyz/v1/delegations","challenge_id":"<uuid>","challenge":"<challenge>","installation_handle":"<uuid>","endpoint_epoch":<integer>,"generation":<integer>,"relay_pubkey":"<hex>","not_before":<integer>,"expires_at":<integer>}
+```
+
+Success `201`: `{"endpoint_grant":"<opaque-capability>"}`. The sealed grant contains no APNs token. Grant-key rotation MUST retain decrypt-only predecessor keys through the maximum lifetime of grants they issued.
+
+### Endpoint rotation
+
+`POST /v1/installations/endpoint`
+
+```json
+{"v":1,"challenge_id":"<uuid>","challenge":"<challenge>","installation_handle":"<uuid>","endpoint_epoch":<positive-integer>,"new_endpoint_epoch":<integer>,"endpoint":"<lowercase APNs-token hex>","assertion":"<standard-base64 CBOR>"}
+```
+
+`new_endpoint_epoch` MUST equal `endpoint_epoch + 1` without overflow. Transcript domain `buzz.push.rotate-endpoint.v1`; ordered object:
+
+```json
+{"v":1,"audience":"https://push.buzz.xyz/v1/installations/endpoint","challenge_id":"<uuid>","challenge":"<challenge>","installation_handle":"<uuid>","endpoint_epoch":<integer>,"new_endpoint_epoch":<integer>,"endpoint":"<lowercase-hex>"}
+```
+
+A successful atomic rotation invalidates every grant sealed to the old epoch and returns `200 {"status":"rotated"}`.
+
+### Delegation and installation revocation
+
+`POST /v1/delegations/revoke` request:
+
+```json
+{"v":1,"challenge_id":"<uuid>","challenge":"<challenge>","installation_handle":"<uuid>","relay_pubkey":"<64-lowercase-hex>","generation":<positive-integer>,"assertion":"<standard-base64 CBOR>"}
+```
+
+Transcript domain `buzz.push.revoke-delegation.v1`; ordered object:
+
+```json
+{"v":1,"audience":"https://push.buzz.xyz/v1/delegations/revoke","challenge_id":"<uuid>","challenge":"<challenge>","installation_handle":"<uuid>","relay_pubkey":"<hex>","generation":<integer>}
+```
+
+The generation identifies the current delegation generation. Success is `200 {"status":"revoked"}`.
+
+`POST /v1/installations/revoke` request:
+
+```json
+{"v":1,"challenge_id":"<uuid>","challenge":"<challenge>","installation_handle":"<uuid>","endpoint_epoch":<positive-integer>,"new_endpoint_epoch":<integer>,"assertion":"<standard-base64 CBOR>"}
+```
+
+`new_endpoint_epoch` MUST equal `endpoint_epoch + 1` without overflow. Transcript domain `buzz.push.revoke-installation.v1`; ordered object:
+
+```json
+{"v":1,"audience":"https://push.buzz.xyz/v1/installations/revoke","challenge_id":"<uuid>","challenge":"<challenge>","installation_handle":"<uuid>","endpoint_epoch":<integer>,"new_endpoint_epoch":<integer>}
+```
+
+Success is `200 {"status":"revoked"}`. The revocation atomically invalidates the installation and every delegation.
+
+### Relay delivery
+
+`POST /v1/deliveries/apns` has the exact externally configured URL `https://push.buzz.xyz/v1/deliveries/apns`. Request:
+
+```json
+{"v":1,"endpoint_grant":"<opaque-capability>","request_id":"<uuid>","expires_at":<unix-seconds>}
+```
+
+The relay supplies a NIP-98 `Authorization: Nostr <standard-base64-event-json>` header for method `POST`, the exact URL above, and the SHA-256 payload hash of the **received request body bytes**. The gateway verifies the NIP-98 event signature, timestamp under NIP-98 rules, method, URL, and payload; the event pubkey is the relay identity. It decrypts `endpoint_grant`, requires that signer, current installation/delegation, endpoint epoch and generation, and both `now <= request.expires_at <= grant.expires_at`. Every NIP-98 event id is burned at admission.
+
+The relay's durable job UUID is `request_id` and becomes the stable APNs `apns-id`. Delivery replay/quota reservation is one transaction. The commit of that transaction is send-begin: a revocation or rotation commit that completes first prevents the old-capability send; a send admitted first may finish. Terminal outcomes retain the `(relay_pubkey, request_id)` reservation; transient/configuration outcomes release it only after provider processing so a fresh NIP-98 event may retry the same job. Endpoint quota is charged once per admitted attempt and never refunded. A crash before transient cleanup can reject that id until its bounded request expiry; exactly-once provider delivery is not guaranteed.
+
+Responses:
+
+- `200 {"status":"accepted"}` — APNs accepted; terminal reservation retained.
+- `410 {"status":"invalid_endpoint","generation":<integer>,"invalid_at":<unix-seconds-or-null>}` — permanent endpoint invalidation; terminal reservation retained. The relay applies it only if that generation remains current.
+- `503 {"status":"retry","retry_after_seconds":<positive-integer-or-null>}` — transient APNs outcome; request reservation released after processing.
+- `503 {"error":"configuration_fault"}` — provider configuration fault; request reservation released after processing.
+- `400 {"error":"invalid_request"}` — malformed request or permanent APNs request fault; a provider-reached permanent fault is terminal.
+- `401 {"error":"invalid_auth"}` — absent or invalid NIP-98 authorization.
+- `404 {"error":"invalid_grant"}` — capability, signer, authority, replay, expiry, or quota rejection.
+- `503 {"error":"temporarily_unavailable"}` — durable authority/custody/disposition failure.
+
+The gateway performs one APNs request, except that an APNs expired-provider-token response permits one credential refresh and one retry. The application body is always the exact constant registered in the APNs transport profile above; no request or grant field enters it.
+
 ## Implementation Notes (Buzz, non-normative)
 
 Per `RESEARCH/PUSH_RELAY_INTEGRATION.md` (pinned SHA `88c089d`): the lease matcher hooks the generic post-storage dispatch seam (`buzz-relay/src/handlers/event.rs:245 dispatch_persistent_event`), not `handle_side_effects`; Redis pub/sub is community-scoped routing precedent but not the durable offline-matching source; `event_mentions` is a ready indexed primitive for self-`#p` and needs-action subscriptions but is **not** authorization — private-channel wakes re-check same-community visibility at match/send time. Known footgun: some internal producers bypass `dispatch_persistent_event`; implementation must centralize durable dispatch or add push dispatch at each internal publish path.
@@ -288,25 +439,4 @@ Zombie leases (e.g. `#h` after leaving a channel) are neutralized by match-time 
 - NIP-11 `supported_extensions`: contains `"nip-pl"` pre-numbering; descriptor object `push` as specified in Executor Discovery
 - Classes: `silent`, `default`, `time_sensitive`, `urgent`
 - `h_grammar` values: `"uuid-v4-lowercase"` (initial entry; origins may register additional grammars with this NIP)
-- Wake object versions: `1`
-
----
-### Draft status / open items
-- [x] Lane C (Max): landed — hook seam `dispatch_persistent_event` (event.rs:245), event_mentions ≠ authorization, origin-partition invariant. Folded into Implementation Notes + Matching section.
-- [x] Wren adversarial reread #1 (2026-07-02): 8 blockers + non-blocking cuts, all applied — trusted-origin executor boundary, acceptance/origin-binding state machine, wake-grant wire protocol, class ordering (urgent = approvals-only v1), best-effort delivery language, minimal inactive schema + generation replay window, exact-hex/size-bound schema limits.
-- [x] Wren wire review #2 (2026-07-02): 5 wire blockers + judgment call, all applied — versioned wake object + exact APNs/FCM/UP embeddings (lease reference eliminated), dual-ordering (NIP-01 ∧ generation) atomic acceptance with watermark, endpoint-keyed dedup + endpoint-uniqueness at acceptance, grant upper-bound/monotonic-omission semantics + full token/Bearer/error wire details, replay-window math fixed (`max(last_active_expiration, tombstone_accepted_at + max_lease_ttl) + allowed_skew`). Public plaintext grants CUT — all grants require wake_key. Smaller clarifications (per-origin d MUST, descriptor validity, numeric domains, h_grammar, FCM channel timing, grant-key retention) all in.
-- [x] Wren final pass (2026-07-02, NO-SHIP → fixes applied): 3 blockers — (1) grant key discovery: encrypted `origin` + `key_id` in grant plaintext, bounded trial decryption over retained descriptor pubkeys, exact schema/origin/key_id/url binding, zero-or-multiple valid = ignore, retention through lease+grant TTL; (2) NIP-09 deletion unsupported for kind:30350 (relays MUST ignore), revocation exclusively higher-generation `active:false`, natural-expiry watermark = `last_active_expiration + allowed_skew`; (3) redemption failures identical status/headers/body (`404 invalid_grant`), timing/rate-limit at SHOULD. Plus 3 clarifications: `fallback` version-independent (unknown `v` → MAY display `fallback`, else no display); acceptance requires `transport == selected app_profile.transport` and endpoint uniqueness inside the atomic acceptance transaction; `max_grant_response_len` = UTF-8 JSON body bytes excluding HTTP framing.
-- [x] Wren focused diff check (2026-07-02): blockers 2–3 + clarifications pass; one residual wire ambiguity fixed — grant sender key pinned to the accepted lease's `exec` key (private half unavailable ⇒ no grant, generic wake; never substitute a newer key); retained trial candidate is the full descriptor tuple `(origin, key_id, pubkey, redemption endpoint)` with byte-for-byte `url` binding to the retained endpoint (executor keeps it serving through the retention window); duplicate JSON keys in grant plaintext explicitly invalidate the candidate.
-- [x] Wren SHIP blessing (2026-07-02, event 52cffa11): Minimalness 9/10, Elegance 9/10, Correctness 9/10 — no remaining protocol blocker; ready to move from internal draft to proposal/review.
-- [x] Product defaults (non-protocol, Buzz): DM subscriptions default to class `time_sensitive` (urgent is approvals-only until a privacy-safe DM urgency marker exists); reactions (`kind:7`) advertised in `push_kinds` but never registered without explicit opt-in.
-- [x] Kind 30350 verified unclaimed in upstream nips README registry and Buzz `kind.rs` as of 2026-07-02 (upstream HEAD 8f8444d, buzz main 02ff06c)
-
-### Public last-hop profile (Buzz)
-
-An executor MAY delegate only the platform transport call to a public gateway. This does not transfer executor authority: the relay remains the executor and MUST retain lease acceptance, matching, tenant authorization, endpoint uniqueness, coalescing, durable retries, and lease-generation invalidation in its own database. The gateway retains only installation authority, relay delegations, replay admission, and abuse counters needed to keep a hostile authorized relay inside the installation's capability and the gateway's provider budget; it MUST NOT ingest event content or lease filters.
-
-For APNs, an installation first obtains a single-use challenge and enrolls a token directly with App Attest. The gateway verifies Apple's attestation chain, app identifier, production AAGUID, key identifier, and challenge-bound transcript, then stores the token encrypted under a custody key distinct from the delivery-capability key. Apple documents no token-to-App-Attest-key binding; token provenance at enrollment is therefore an explicit bootstrap assumption, not a property App Attest proves. Later delegation, rotation, and revocation requests require challenge-bound App Attest assertions with strictly increasing counters. A delegation names exactly one relay signing key, endpoint epoch, generation, and expiry; the returned capability contains no device token and delivery dereferences server-custodied state by delegation id.
-
-The relay stores only that opaque capability with its lease. For each attempt it NIP-98-signs the closed delivery request `{v, endpoint_grant, request_id, expires_at}`. No application-content or class field exists. The gateway MUST verify the NIP-98 payload and signer, decrypt the capability, require signer equality, enforce both expiries and current installation/delegation authority, reject replayed NIP-98 event ids or terminal/in-flight request ids, reserve the gateway-owned endpoint quota, and perform at most one APNs request (plus one credential-refresh retry). Delivery admission and quota/replay reservation MUST be one durable operation. The durable admission commit is the instant at which the gateway send begins: a revocation or rotation commit that returns before it MUST prevent that old-capability send; an admitted send MAY finish before the later mutation commits. Authority/custody/throttle rejection responses MUST NOT reveal whether a delegation or endpoint exists.
-
-`request_id` is the relay's durable job id and becomes the stable APNs id across retries. Every NIP-98 event id is burned at admission. The gateway MUST retain the request-id reservation for terminal outcomes (accepted, permanent endpoint invalidation, or permanent request fault), but MUST release it after a transient provider/configuration outcome so the relay can retry with the same request id and a fresh NIP-98 event. Endpoint quota is charged once for every admitted attempt and MUST NOT be refunded for any outcome, including transient outcomes; this deliberately preserves the abuse ceiling across retries. A crash, database failure, or cancellation before transient cleanup MAY leave that request id rejected until its bounded `expires_at`; exactly-once provider delivery is not guaranteed, and duplicate delivery of the fixed content-free wake payload is benign. Cleanup on the APNs path runs in the detached delivery task, while synchronous pre-transport failures can still enter this bounded cleanup-failure class. A relay timeout is not proof that APNs rejected the request: the detached send may later be accepted and terminally burn that request id, so a subsequent `404 invalid_grant` for that job is ambiguous with revocation and the relay uses a fresh job/request id to disambiguate future delivery. A permanent endpoint response returns only the sealed generation and provider invalidation timestamp; the relay MUST apply it only if that generation is still current. Transient responses return a bounded `Retry-After` hint; the relay owns retry policy. Grant lifetime MUST NOT exceed the lease lifetime. Grant-key rotation therefore requires the gateway to retain decrypt-only predecessors through their maximum issued lifetime.
+- Public APNs gateway profile: base URL `https://push.buzz.xyz`; app profiles `buzz-ios-production`, `buzz-ios-sandbox`; wire version `1`

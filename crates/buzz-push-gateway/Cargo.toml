@@ -47,5 +47,4 @@ uuid = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }
-appattest = { version = "0.1.1", default-features = false, features = ["testing"] }
 reqwest = { workspace = true }

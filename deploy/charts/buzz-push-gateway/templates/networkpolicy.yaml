@@ -5,7 +5,7 @@ metadata:
   name: {{ include "push.name" . }}
 spec:
   podSelector:
-    matchLabels: {{- include "push.labels" . | nindent 6 }}
+    matchLabels: {{- include "push.runtimeLabels" . | nindent 6 }}
   policyTypes: [Ingress, Egress]
   ingress:
     - ports: [{ port: 8080, protocol: TCP }]

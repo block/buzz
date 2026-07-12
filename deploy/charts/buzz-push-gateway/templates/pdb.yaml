@@ -6,5 +6,5 @@ metadata:
 spec:
   minAvailable: {{ .Values.podDisruptionBudget.minAvailable }}
   selector:
-    matchLabels: {{- include "push.labels" . | nindent 6 }}
+    matchLabels: {{- include "push.runtimeLabels" . | nindent 6 }}
 {{- end }}

@@ -1,11 +1,12 @@
 name: Auto-tag on Release PR Merge
 
-# Four release lanes share this one workflow — adding a lane is one more branch
+# Five release lanes share this one workflow — adding a lane is one more branch
 # prefix, never a forked copy:
 #
 #   version-bump/<v>   → tag v<v>        → dispatch release.yml (desktop app)
 #   relay-release/<v>  → tag relay-v<v>  → dispatch docker.yml (relay image)
-#   chart-release/<v>  → tag chart-v<v>  → dispatch helm-chart.yml (helm chart)
+#   chart-release/<v>  → tag chart-v<v>  → dispatch helm-chart.yml (main helm chart)
+#   push-chart-release/<v> → tag push-chart-v<v> → dispatch push-gateway-helm-chart.yml
 #   mobile-release/<v> → tag mobile-v<v> → (manual sprout_ref for buzz-releases build — see below)
 #
 # The desktop, relay, and chart lanes dispatch their build workflow rather than
@@ -39,6 +40,7 @@ jobs:
       (startsWith(github.event.pull_request.head.ref, 'version-bump/') ||
        startsWith(github.event.pull_request.head.ref, 'relay-release/') ||
        startsWith(github.event.pull_request.head.ref, 'chart-release/') ||
+       startsWith(github.event.pull_request.head.ref, 'push-chart-release/') ||
        startsWith(github.event.pull_request.head.ref, 'mobile-release/')) &&
       github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
@@ -67,6 +69,10 @@ jobs:
               VERSION="${BRANCH#chart-release/}"
               TAG_PREFIX="chart-v"
               DISPATCH="helm-chart" ;;
+            push-chart-release/*)
+              VERSION="${BRANCH#push-chart-release/}"
+              TAG_PREFIX="push-chart-v"
+              DISPATCH="push-gateway-helm-chart" ;;
             mobile-release/*)
               VERSION="${BRANCH#mobile-release/}"
               TAG_PREFIX="mobile-v"
@@ -79,9 +85,11 @@ jobs:
             echo "::error::Invalid version in branch name: '$VERSION'"
             exit 1
           fi
-          echo "version=$VERSION" >> "$GITHUB_ENV"
-          echo "tag=${TAG_PREFIX}${VERSION}" >> "$GITHUB_ENV"
-          echo "dispatch=$DISPATCH" >> "$GITHUB_ENV"
+          {
+            echo "version=$VERSION"
+            echo "tag=${TAG_PREFIX}${VERSION}"
+            echo "dispatch=$DISPATCH"
+          } >> "$GITHUB_ENV"
           echo "Tagging ${TAG_PREFIX}${VERSION}"
 
       - name: Create and push tag
@@ -121,6 +129,7 @@ jobs:
             release) WORKFLOW="release.yml" ;;
             docker)  WORKFLOW="docker.yml" ;;
             helm-chart) WORKFLOW="helm-chart.yml" ;;
+            push-gateway-helm-chart) WORKFLOW="push-gateway-helm-chart.yml" ;;
             *)
               echo "::error::Unhandled dispatch target: '$DISPATCH'"
               exit 1 ;;

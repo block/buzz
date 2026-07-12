@@ -252,7 +252,7 @@ test-unit:
         cargo nextest run -p buzz-conformance
         # Gateway unit and black-box HTTP tests are infra-free. Postgres-backed
         # contract/race tests run in the dedicated CI job below.
-        cargo nextest run -p buzz-push-gateway --no-run-ignored
+        cargo nextest run -p buzz-push-gateway
     else
         ./scripts/run-tests.sh unit
     fi

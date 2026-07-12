@@ -7,6 +7,17 @@ image:
   pullPolicy: IfNotPresent
   pullSecrets: []
 existingSecret: buzz-push-gateway
+# DDL-capable credentials are used only by the pre-install/pre-upgrade migration
+# Job. Runtime DATABASE_URL in existingSecret should have DML-only privileges.
+migration:
+  existingSecret: buzz-push-gateway-migrations
+  databaseUrlKey: DATABASE_URL
+  # Existing LOGIN role used by runtime DATABASE_URL. Migrations grant it only
+  # CONNECT plus DML on the six gateway tables in this dedicated database.
+  runtimeDatabaseRole: buzz_push_gateway_runtime
+  resources:
+    requests: {cpu: 50m, memory: 64Mi}
+    limits: {cpu: 250m, memory: 128Mi}
 publicDeliveryUrl: https://push.buzz.xyz/v1/deliveries/apns
 maxGrantLifetimeSeconds: 2592000
 enabledProfiles: buzz-ios-production
@@ -28,8 +39,8 @@ httpRoute:
   parentRefs: []
   hostnames: [push.buzz.xyz]
 resources:
-  requests: { cpu: 100m, memory: 128Mi }
-  limits: { cpu: "1", memory: 512Mi }
+  requests: {cpu: 100m, memory: 128Mi}
+  limits: {cpu: "1", memory: 512Mi}
 podDisruptionBudget:
   enabled: true
   minAvailable: 1

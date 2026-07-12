@@ -5,7 +5,6 @@ use serde::{Deserialize, Serialize};
 pub const MAX_REQUEST_BYTES: usize = 8 * 1024;
 pub const MAX_GRANT_BYTES: usize = 4096;
 pub const MAX_ENDPOINT_HEX_BYTES: usize = 512;
-pub const RECONNECT_TEXT: &str = "Reconnect to your relay now";
 pub const APNS_RECONNECT_PAYLOAD: &[u8] =
     br#"{"aps":{"alert":{"body":"Reconnect to your relay now"},"mutable-content":1}}"#;
 pub const WIRE_VERSION: u8 = 1;
@@ -25,14 +24,6 @@ impl AppProfile {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum DeliveryClass {
-    Silent,
-    Default,
-    TimeSensitive,
-}
-
 /// Relay request. It deliberately has no application-payload field:
 /// the gateway emits one compiled-in APNs reconnect payload for every delivery.
 /// `endpoint_grant` is opaque authenticated ciphertext minted by the gateway
@@ -44,25 +35,6 @@ pub struct DeliveryRequest {
     pub endpoint_grant: String,
     pub request_id: uuid::Uuid,
     pub expires_at: i64,
-}
-
-/// Strict relay-supplied claims for gateway-owned endpoint grant issuance.
-/// The authenticated NIP-98 signer becomes `relay_pubkey`; callers cannot
-/// supply or override that authority-bearing field.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct GrantIssueRequest {
-    pub v: u8,
-    pub endpoint: String,
-    pub app_profile: AppProfile,
-    pub generation: i64,
-    pub expires_at: i64,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct GrantIssueResponse {
-    pub endpoint_grant: String,
 }
 
 /// Opaque delivery capability plaintext. It contains no APNs token: the random
@@ -134,7 +106,7 @@ pub struct DelegationRequest {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct DelegationResponse {
-    pub delivery_capability: String,
+    pub endpoint_grant: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

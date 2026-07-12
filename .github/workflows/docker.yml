@@ -306,27 +306,97 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-  push-gateway:
-    name: Build public push gateway image
-    runs-on: ubuntu-24.04
+  push-gateway-build:
+    name: Build public push gateway (${{ matrix.platform }})
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     permissions:
       contents: read
       packages: write
-      id-token: write
-      attestations: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-24.04
+            arch: amd64
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            arch: arm64
     steps:
       - name: Checkout
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || '' }}
           persist-credentials: false
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@68827325e0b33c7199eb31dd4e31fbe9023e06e3  # v3
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5  # v4.1.0
+        with:
+          buildkitd-config-inline: |
+            [worker.oci]
+              max-parallelism = 2
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee  # v4.2.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@80c7e94dd9b9319bd5eb7a0e0fe9291e23a2a2e9  # v6.1.0
+        with:
+          images: ghcr.io/block/buzz-push-gateway
+          labels: |
+            org.opencontainers.image.title=Buzz Push Gateway
+            org.opencontainers.image.description=Capability-gated APNs last hop for Buzz
+            org.opencontainers.image.licenses=Apache-2.0
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf  # v7.2.0
+        with:
+          context: .
+          file: ./Dockerfile.push-gateway
+          platforms: ${{ matrix.platform }}
+          labels: ${{ steps.meta.outputs.labels }}
+          outputs: type=image,name=ghcr.io/block/buzz-push-gateway,push-by-digest=true,name-canonical=true,push=${{ github.event_name != 'pull_request' }}
+          cache-from: type=registry,ref=ghcr.io/block/buzz-push-gateway-buildcache:${{ matrix.arch }}
+          cache-to: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && format('type=registry,ref=ghcr.io/block/buzz-push-gateway-buildcache:{0},mode=max,compression=zstd', matrix.arch) || '' }}
+      - name: Export digest
+        if: github.event_name != 'pull_request'
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: mkdir -p /tmp/gateway-digests && touch "/tmp/gateway-digests/${DIGEST#sha256:}"
+      - name: Upload digest
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: gateway-digests-${{ matrix.arch }}
+          path: /tmp/gateway-digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  push-gateway-merge:
+    name: Publish public push gateway image
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    needs: push-gateway-build
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      - name: Download per-arch digests
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          path: /tmp/gateway-digests
+          pattern: gateway-digests-*
+          merge-multiple: true
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5  # v4.1.0
       - name: Log in to GHCR
-        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
         uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee  # v4.2.0
         with:
           registry: ghcr.io
@@ -342,47 +412,43 @@ jobs:
             type=sha,prefix=sha-,format=short,enable=${{ github.event_name != 'workflow_dispatch' || inputs.version == '' }}
             type=semver,pattern={{version}},match=^relay-v(.*)$,value=${{ inputs.version }}
             type=semver,pattern={{major}}.{{minor}},match=^relay-v(.*)$,value=${{ inputs.version }}
-          labels: |
-            org.opencontainers.image.title=Buzz Push Gateway
-            org.opencontainers.image.description=Capability-gated APNs last hop for Buzz
-            org.opencontainers.image.licenses=Apache-2.0
-      - name: Build and publish gateway
-        id: build
-        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf  # v7.2.0
-        with:
-          context: .
-          file: ./Dockerfile.push-gateway
-          platforms: linux/amd64,linux/arm64
-          push: ${{ github.event_name != 'pull_request' }}
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha,scope=push-gateway
-          cache-to: type=gha,scope=push-gateway,mode=max
+      - name: Merge and publish manifest
+        id: manifest
+        working-directory: /tmp/gateway-digests
+        env:
+          META_TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          set -euo pipefail
+          tags=(); while IFS= read -r tag; do [ -n "$tag" ] && tags+=("-t" "$tag"); done <<< "$META_TAGS"
+          digests=(); for digest in *; do digests+=("ghcr.io/block/buzz-push-gateway@sha256:${digest}"); done
+          docker buildx imagetools create "${tags[@]}" "${digests[@]}"
+          first_tag=$(echo "$META_TAGS" | head -n1)
+          digest=$(docker buildx imagetools inspect "$first_tag" --format '{{json .Manifest}}' | jq -r '.digest')
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
       - name: Attest gateway image provenance
-        if: github.event_name != 'pull_request'
         uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373  # v4.1.1
         with:
           subject-name: ghcr.io/block/buzz-push-gateway
-          subject-digest: ${{ steps.build.outputs.digest }}
+          subject-digest: ${{ steps.manifest.outputs.digest }}
           push-to-registry: true
       - name: Gateway publication summary
-        if: github.event_name != 'pull_request'
         env:
-          GATEWAY_DIGEST: ${{ steps.build.outputs.digest }}
+          GATEWAY_DIGEST: ${{ steps.manifest.outputs.digest }}
           GATEWAY_TAGS: ${{ steps.meta.outputs.tags }}
         run: |
+          set -euo pipefail
           {
             echo "### Published \`ghcr.io/block/buzz-push-gateway\`"
             echo
-            echo "**Digest:** \`${GATEWAY_DIGEST}\`"
+            printf "**Digest:** \`%s\`\n" "$GATEWAY_DIGEST"
             echo
             echo '**Tags:**'
-            echo '```'
-            echo "${GATEWAY_TAGS}"
-            echo '```'
+            echo "\`\`\`"
+            printf '%s\n' "$GATEWAY_TAGS"
+            echo "\`\`\`"
             echo
             echo 'Verify provenance before deployment:'
-            echo '```'
-            echo "gh attestation verify oci://ghcr.io/block/buzz-push-gateway@${GATEWAY_DIGEST} --owner block"
-            echo '```'
+            echo "\`\`\`"
+            printf 'gh attestation verify oci://ghcr.io/block/buzz-push-gateway@%s --owner block\n' "$GATEWAY_DIGEST"
+            echo "\`\`\`"
           } >> "$GITHUB_STEP_SUMMARY"
