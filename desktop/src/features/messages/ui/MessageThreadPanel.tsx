@@ -88,6 +88,7 @@ type MessageThreadPanelProps = {
   scrollTargetId: string | null;
   threadHead: TimelineMessage | null;
   threadReplies: MainTimelineEntry[];
+  threadRepliesPending?: boolean;
   threadUnreadCount?: number;
   threadReplyUnreadCounts?: ReadonlyMap<string, number>;
   threadTypingPubkeys: string[];
@@ -332,6 +333,7 @@ export function MessageThreadPanel({
   threadHead,
   threadHeadVideoReviewContext,
   threadReplies,
+  threadRepliesPending = false,
   threadUnreadCount,
   threadReplyUnreadCounts,
   threadTypingPubkeys,
@@ -589,7 +591,7 @@ export function MessageThreadPanel({
     useAnchoredScroll({
       channelId: threadHeadId,
       contentRef: threadContentRef,
-      isLoading: repliesRenderState === "pending",
+      isLoading: threadRepliesPending || repliesRenderState === "pending",
       messages: threadMessages,
       onTargetReached: onScrollTargetResolved,
       scrollContainerRef: threadBodyRef,
@@ -664,7 +666,15 @@ export function MessageThreadPanel({
           className={cn(THREAD_PANEL_MESSAGE_GUTTER_CLASS, "pb-3 pt-0")}
           data-testid="message-thread-replies"
         >
-          {repliesRenderState === "list" ? (
+          {threadRepliesPending ? (
+            <div
+              className="space-y-2.5 pt-1"
+              data-testid="message-thread-replies-loading"
+            >
+              <ThreadMessageSkeleton />
+              <ThreadMessageSkeleton />
+            </div>
+          ) : repliesRenderState === "list" ? (
             visibleThreadHeadSummary ? (
               <div
                 className="space-y-0"
