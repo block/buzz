@@ -31,6 +31,8 @@ type MockWindow = Window & {
     pubkey?: string;
     mentionPubkeys?: string[];
     id?: string;
+    kind?: number;
+    extraTags?: string[][];
   }) => RelayEvent;
   __BUZZ_E2E_PUSH_MOCK_FEED_ITEM__?: (item: {
     category: "mention" | "needs_action" | "activity" | "agent_activity";
@@ -1317,6 +1319,215 @@ test.describe("inbox stable-conversation regressions", () => {
           (msgCenterOffsetBeforeReactions ?? 0),
       ),
     ).toBeLessThan(30);
+
+    // ── Assert: scrollIntoView spy count is still 1 ───────────────────
+    // Drift compensation uses scrollBy — must NOT call scrollIntoView again.
+    expect(await getScrollIntoViewCount(page)).toBe(1);
+  });
+
+  test("direct container scroll releases the hold before late reaction hydration", async ({
+    page,
+  }) => {
+    // A direct scroll (such as a scrollbar drag) must release the post-center
+    // anchor hold before late reaction hydration. The test asserts the user
+    // action is recognized without wheel, touch, or key events.
+    //
+    // Fixture (same shape as test 6):
+    //   - fetchRoot + 10 older replies in mockMessages only (fetch path).
+    //   - fetchNewest (reply to fetchRoot) in feed as representative.
+    //   - Click fetchNewest → center after fetch settle.
+    //   - Emit kind:7 reaction events targeting older replies ABOVE fetchNewest.
+    //   - Assert selected message stays in viewport; spy count stays 1.
+
+    await installMockBridge(page);
+    await page.goto("/");
+    await expect(getListPane(page)).toBeVisible();
+    await waitForBridgeReady(page);
+    await installScrollSpy(page);
+
+    // ── Seed the fetch-path conversation ─────────────────────────────
+    const { fetchNewest, olderReplyIds } = await page.evaluate(
+      ({ channelId, currentPubkey, senderPubkey }) => {
+        const win = window as MockWindow;
+        const emit = win.__BUZZ_E2E_EMIT_MOCK_MESSAGE__;
+        const push = win.__BUZZ_E2E_PUSH_MOCK_FEED_ITEM__;
+        if (!emit || !push) throw new Error("Bridge helpers not ready");
+
+        const fetchRoot = emit({
+          channelName: "general",
+          content: "Reaction-drift test root.",
+          pubkey: senderPubkey,
+          id: "e0".repeat(32),
+        });
+
+        // 10 older replies — in mockMessages, prepended above fetchNewest
+        // after the context fetch.  Reactions targeting these cause drift.
+        const olderReplyIds: string[] = [];
+        for (let i = 1; i <= 10; i++) {
+          const reply = emit({
+            channelName: "general",
+            content: `Reaction-drift older reply ${i} — long enough to occupy vertical space so reactions adding height push the selected message out of center when uncompensated.`,
+            parentEventId: fetchRoot.id,
+            pubkey: senderPubkey,
+            id: `e${i.toString(16).padStart(1, "0")}`.repeat(32),
+          });
+          olderReplyIds.push(reply.id);
+        }
+
+        const fetchNewest = emit({
+          channelName: "general",
+          content:
+            "Reaction-drift selected reply — the one the user clicks; must hold position after reactions arrive.",
+          parentEventId: fetchRoot.id,
+          pubkey: senderPubkey,
+          mentionPubkeys: [currentPubkey],
+          id: "ef".repeat(32),
+        });
+
+        // Later replies ensure the selected row has enough content below it to
+        // be truly centered rather than clamped at the scroll container floor.
+
+        for (let i = 1; i <= 5; i++) {
+          const reply = emit({
+            channelName: "general",
+            content: `Reaction-drift later reply ${i} — provides content below the selected message for a non-clamped center.`,
+            parentEventId: fetchRoot.id,
+            pubkey: senderPubkey,
+            id: `f${i.toString(16).padStart(1, "0")}`.repeat(32),
+          });
+        }
+
+        push({
+          id: fetchNewest.id,
+          kind: fetchNewest.kind,
+          pubkey: fetchNewest.pubkey,
+          content: fetchNewest.content,
+          created_at: fetchNewest.created_at + 11,
+          channel_id: channelId,
+          channel_name: "general",
+          tags: fetchNewest.tags,
+          category: "mention",
+        });
+
+        return { fetchNewest, olderReplyIds };
+      },
+      {
+        channelId: GENERAL_CHANNEL_ID,
+        currentPubkey: TEST_IDENTITIES.tyler.pubkey,
+        senderPubkey: TEST_IDENTITIES.alice.pubkey,
+      },
+    );
+
+    const newestRow = page.getByTestId(`home-inbox-item-${fetchNewest.id}`);
+    await expect(newestRow).toBeVisible();
+
+    // Reset the spy so only the center from the click is counted.
+    await resetScrollIntoViewCount(page);
+
+    // ── Click the newest reply row ────────────────────────────────────
+    await newestRow.click();
+    const detail = getDetailPane(page);
+    await expect(detail).toContainText("Reaction-drift selected reply");
+
+    // Wait for the thread context fetch to settle.
+    await page.waitForFunction(() => {
+      const scrollable = document.querySelector(
+        '[data-testid="home-inbox-detail"] [aria-busy]',
+      );
+      return scrollable?.getAttribute("aria-busy") !== "true";
+    });
+
+    // Older replies are now rendered (fetch landed).
+    await expect(detail).toContainText("Reaction-drift older reply 1");
+    expect(await getScrollIntoViewCount(page)).toBe(1);
+
+    // Simulate a scrollbar drag: change the actual scroll container directly
+    // and dispatch only `scroll`, without wheel/touch/key input. This must
+    // release the post-center hold before late layout growth arrives.
+    const scrollTopAfterDirectScroll = await page.evaluate(() => {
+      const pane = document.querySelector<HTMLElement>(
+        '[data-testid="home-inbox-detail"] [aria-busy]',
+      );
+      if (!pane) return null;
+      const originalScrollBy = pane.scrollBy.bind(pane);
+      let scrollByCalls = 0;
+      pane.scrollBy = (...args) => {
+        scrollByCalls += 1;
+        originalScrollBy(...args);
+      };
+      (window as Window & { __scrollByCalls?: () => number }).__scrollByCalls =
+        () => scrollByCalls;
+      const scrollTopBefore = pane.scrollTop;
+      pane.scrollTop = Math.min(
+        pane.scrollHeight - pane.clientHeight,
+        pane.scrollTop + 220,
+      );
+      if (pane.scrollTop === scrollTopBefore) return null;
+      pane.dispatchEvent(new Event("scroll"));
+      return pane.scrollTop;
+    });
+    expect(scrollTopAfterDirectScroll).not.toBeNull();
+    await page.evaluate(
+      () =>
+        new Promise<void>((resolve) => requestAnimationFrame(() => resolve())),
+    );
+
+    // ── Emit late reactions targeting messages ABOVE fetchNewest ──────
+    // These simulate the post-settle reaction hydration from
+    // useInboxThreadContext's fetchAuxEventsByReference call.  kind:7 events
+    // with ["e", <olderReplyId>] tags arrive via the channel live subscription
+    // and feed into channelMessages → reactionEvents → messages prop, causing
+    // height growth above the selected row.  Targeting 5 of the 10 older
+    // replies produces ~5 × 36px ≈ 180px of drift when uncompensated.
+    await page.evaluate(
+      ({ senderPubkey, targetIds }) => {
+        const win = window as MockWindow;
+        const emit = win.__BUZZ_E2E_EMIT_MOCK_MESSAGE__;
+        if (!emit) return;
+        for (const targetId of targetIds) {
+          emit({
+            channelName: "general",
+            content: "+",
+            pubkey: senderPubkey,
+            kind: 7,
+            extraTags: [["e", targetId]],
+          });
+        }
+      },
+      {
+        senderPubkey: TEST_IDENTITIES.bob.pubkey,
+        // React to five rows above the selected anchor.
+        targetIds: olderReplyIds.slice(0, 5),
+      },
+    );
+
+    // Wait for reactions to appear: at least one reactions container becomes visible.
+    // The reactions update `messages`, which re-renders InboxMessageRow with
+    // MessageReactions containers, growing each row that received a reaction.
+    await page.waitForFunction(() => {
+      return (
+        (document
+          .querySelector('[data-testid="home-inbox-detail"]')
+          ?.querySelectorAll('[data-testid="message-reactions"]').length ?? 0) >
+        0
+      );
+    });
+
+    await page.evaluate(
+      () =>
+        new Promise<void>((resolve) => requestAnimationFrame(() => resolve())),
+    );
+
+    // The direct scroll releases the hold, so late layout growth must not run
+    // the compensating `scrollBy` writer and pull the reader after they moved.
+    expect(
+      await page.evaluate(
+        () =>
+          (
+            window as Window & { __scrollByCalls?: () => number }
+          ).__scrollByCalls?.() ?? null,
+      ),
+    ).toBe(0);
 
     // ── Assert: scrollIntoView spy count is still 1 ───────────────────
     // Drift compensation uses scrollBy — must NOT call scrollIntoView again.

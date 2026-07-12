@@ -221,6 +221,11 @@ export function InboxDetailPane({
     contentTop: number;
     key: string;
   } | null>(null);
+  // The expected target of a programmatic write. The scroll listener consumes
+  // only an event at this exact position; a no-op write leaves it unset, and a
+  // later real scroll at a different position still releases the hold.
+  const programmaticScrollTopRef = React.useRef<number | null>(null);
+  const isWritingScrollRef = React.useRef(false);
   const selectedMessageScrollKeyRef = React.useRef(selectedMessageScrollKey);
   selectedMessageScrollKeyRef.current = selectedMessageScrollKey;
 
@@ -243,6 +248,23 @@ export function InboxDetailPane({
   const releaseAnchorHold = React.useCallback(() => {
     anchorHoldRef.current = null;
   }, []);
+
+  const noteProgrammaticScroll = React.useCallback(
+    (container: HTMLDivElement, scrollTopBefore: number) => {
+      if (scrollTopBefore === container.scrollTop) return;
+
+      programmaticScrollTopRef.current = container.scrollTop;
+      // Scroll events run before the next animation frame. Expiring this guard
+      // prevents a write whose event never arrives from swallowing a later user
+      // scroll, while still ignoring the matching programmatic scroll event.
+      window.requestAnimationFrame(() => {
+        if (programmaticScrollTopRef.current === container.scrollTop) {
+          programmaticScrollTopRef.current = null;
+        }
+      });
+    },
+    [],
+  );
 
   // Arm the pending center whenever the selection key changes.
   React.useEffect(() => {
@@ -269,11 +291,18 @@ export function InboxDetailPane({
         !userScrolledRef.current
       ) {
         pendingCenterKeyRef.current = null;
+        const container = scrollContainerRef.current;
+        const scrollTopBefore = container?.scrollTop;
+        isWritingScrollRef.current = true;
         detailPaneRef.current
           ?.querySelector<HTMLElement>(
             '[data-testid="home-inbox-selected-message"]',
           )
           ?.scrollIntoView({ block: "center" });
+        isWritingScrollRef.current = false;
+        if (container && scrollTopBefore !== undefined) {
+          noteProgrammaticScroll(container, scrollTopBefore);
+        }
         captureAnchorHold(selectedMessageScrollKey);
       }
     });
@@ -281,7 +310,12 @@ export function InboxDetailPane({
     return () => {
       window.cancelAnimationFrame(rafId);
     };
-  }, [selectedMessageScrollKey, captureAnchorHold, releaseAnchorHold]);
+  }, [
+    selectedMessageScrollKey,
+    captureAnchorHold,
+    releaseAnchorHold,
+    noteProgrammaticScroll,
+  ]);
 
   // Fire the deferred center when loading transitions true → false.
   React.useEffect(() => {
@@ -297,15 +331,27 @@ export function InboxDetailPane({
         !userScrolledRef.current
       ) {
         pendingCenterKeyRef.current = null;
+        const container = scrollContainerRef.current;
+        const scrollTopBefore = container?.scrollTop;
+        isWritingScrollRef.current = true;
         detailPaneRef.current
           ?.querySelector<HTMLElement>(
             '[data-testid="home-inbox-selected-message"]',
           )
           ?.scrollIntoView({ block: "center" });
+        isWritingScrollRef.current = false;
+        if (container && scrollTopBefore !== undefined) {
+          noteProgrammaticScroll(container, scrollTopBefore);
+        }
         captureAnchorHold(selectedMessageScrollKey);
       }
     }
-  }, [isThreadContextLoading, selectedMessageScrollKey, captureAnchorHold]);
+  }, [
+    isThreadContextLoading,
+    selectedMessageScrollKey,
+    captureAnchorHold,
+    noteProgrammaticScroll,
+  ]);
 
   // Compensate for late content growth above the anchor (reactions, channel-
   // window merge, image decode).  Runs as a layout effect so drift is corrected
@@ -335,9 +381,13 @@ export function InboxDetailPane({
     const drift = currentContentTop - hold.contentTop;
     if (Math.abs(drift) > 0.5) {
       hold.contentTop = currentContentTop;
+      const scrollTopBefore = container.scrollTop;
+      isWritingScrollRef.current = true;
       container.scrollBy(0, drift);
+      isWritingScrollRef.current = false;
+      noteProgrammaticScroll(container, scrollTopBefore);
     }
-  }, [messages, replies]);
+  }, [messages, replies, noteProgrammaticScroll]);
 
   // ResizeObserver: compensate for non-React resizes (image decode, embed
   // expand) that grow content above the anchor without triggering a React
@@ -371,7 +421,11 @@ export function InboxDetailPane({
       const drift = currentContentTop - hold.contentTop;
       if (Math.abs(drift) > 0.5) {
         hold.contentTop = currentContentTop;
+        const scrollTopBefore = container.scrollTop;
+        isWritingScrollRef.current = true;
         container.scrollBy(0, drift);
+        isWritingScrollRef.current = false;
+        noteProgrammaticScroll(container, scrollTopBefore);
       }
     });
 
@@ -388,21 +442,38 @@ export function InboxDetailPane({
   // biome-ignore lint/correctness/useExhaustiveDependencies: conversationId is not used inside the effect body; it is listed as a dep solely to trigger re-attachment when a new conversation opens and detailPaneRef.current becomes non-null
   React.useEffect(() => {
     const pane = detailPaneRef.current;
-    if (!pane) return;
+    const container = scrollContainerRef.current;
+    if (!pane || !container) return;
 
-    const handleUserScroll = () => {
+    const handleUserInteraction = () => {
       userScrolledRef.current = true;
       releaseAnchorHold();
     };
+    const handleContainerScroll = () => {
+      if (isWritingScrollRef.current) return;
 
-    pane.addEventListener("wheel", handleUserScroll, { passive: true });
-    pane.addEventListener("touchstart", handleUserScroll, { passive: true });
-    pane.addEventListener("keydown", handleUserScroll, { passive: true });
+      if (programmaticScrollTopRef.current === container.scrollTop) {
+        programmaticScrollTopRef.current = null;
+        return;
+      }
+
+      handleUserInteraction();
+    };
+
+    pane.addEventListener("wheel", handleUserInteraction, { passive: true });
+    pane.addEventListener("touchstart", handleUserInteraction, {
+      passive: true,
+    });
+    pane.addEventListener("keydown", handleUserInteraction, { passive: true });
+    container.addEventListener("scroll", handleContainerScroll, {
+      passive: true,
+    });
 
     return () => {
-      pane.removeEventListener("wheel", handleUserScroll);
-      pane.removeEventListener("touchstart", handleUserScroll);
-      pane.removeEventListener("keydown", handleUserScroll);
+      pane.removeEventListener("wheel", handleUserInteraction);
+      pane.removeEventListener("touchstart", handleUserInteraction);
+      pane.removeEventListener("keydown", handleUserInteraction);
+      container.removeEventListener("scroll", handleContainerScroll);
     };
   }, [conversationId, releaseAnchorHold]);
 
