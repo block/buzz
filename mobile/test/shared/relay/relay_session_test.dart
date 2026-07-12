@@ -7,6 +7,7 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart' as http_testing;
 import 'package:nostr/nostr.dart' as nostr;
 import 'package:pointycastle/digests/sha256.dart';
+import 'package:buzz/shared/auth/auth_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
 
 void main() {
@@ -153,6 +154,43 @@ void main() {
     expect(session.state.reconnectAttempt, 1);
   });
 
+  test('classifies relay internal auth errors as transient', () {
+    expect(
+      classifyRelayAuthFailure(
+        'error: internal error checking restriction state',
+      ),
+      isNot(isA<RelayAuthRejectedException>()),
+    );
+    expect(
+      classifyRelayAuthFailure('restricted: access revoked'),
+      isA<RelayAuthRejectedException>(),
+    );
+  });
+
+  test(
+    'stops reconnecting and signs out after explicit auth rejection',
+    () async {
+      final session = RelaySessionNotifier();
+      final auth = _FakeAuthNotifier();
+      final container = ProviderContainer(
+        overrides: [
+          relaySessionProvider.overrideWith(() => session),
+          authProvider.overrideWith(() => auth),
+        ],
+      );
+      addTearDown(container.dispose);
+      container.read(relaySessionProvider);
+
+      session.debugHandleDisconnected(
+        const RelayAuthRejectedException('invalid key'),
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      expect(session.state.status, SessionStatus.disconnected);
+      expect(auth.signOutCount, 1);
+    },
+  );
+
   test('does not schedule reconnects after background disconnect', () {
     final session = RelaySessionNotifier();
     final container = ProviderContainer(
@@ -256,6 +294,19 @@ void main() {
       unsubscribe();
     },
   );
+}
+
+class _FakeAuthNotifier extends AuthNotifier {
+  int signOutCount = 0;
+
+  @override
+  Future<AuthState> build() async =>
+      const AuthState(status: AuthStatus.unauthenticated);
+
+  @override
+  Future<void> signOut() async {
+    signOutCount++;
+  }
 }
 
 const _channelId = '11111111-1111-4111-8111-111111111111';

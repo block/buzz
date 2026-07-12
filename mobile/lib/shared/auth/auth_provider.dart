@@ -1,4 +1,5 @@
 import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'package:nostr/nostr.dart' as nostr;
 
 import '../workspace/workspace.dart';
 import '../workspace/workspace_provider.dart';
@@ -26,18 +27,26 @@ class AuthNotifier extends AsyncNotifier<AuthState> {
       return const AuthState(status: AuthStatus.unauthenticated);
     }
 
-    final activeId = await storage.loadActiveId();
-    final Workspace active;
-    if (activeId != null && workspaces.any((w) => w.id == activeId)) {
-      active = workspaces.firstWhere((w) => w.id == activeId);
-    } else {
-      // activeId is null or points to a workspace that no longer exists.
-      // Fall back to first workspace and persist the choice.
-      active = workspaces.first;
+    var activeId = await storage.loadActiveId();
+    while (workspaces.isNotEmpty) {
+      final active = activeId != null && workspaces.any((w) => w.id == activeId)
+          ? workspaces.firstWhere((w) => w.id == activeId)
+          : workspaces.first;
       await storage.saveActiveId(active.id);
+
+      if (_hasValidNsec(active.nsec)) {
+        return AuthState(status: AuthStatus.authenticated, workspace: active);
+      }
+
+      await storage.remove(active.id);
+      workspaces.removeWhere((workspace) => workspace.id == active.id);
+      activeId = null;
+      ref.invalidate(workspaceListProvider);
+      ref.invalidate(activeWorkspaceProvider);
     }
 
-    return AuthState(status: AuthStatus.authenticated, workspace: active);
+    await storage.clearActiveId();
+    return const AuthState(status: AuthStatus.unauthenticated);
   }
 
   /// Reload the active workspace after a startup error.
@@ -88,6 +97,17 @@ class AuthNotifier extends AsyncNotifier<AuthState> {
     } else {
       state = const AsyncData(AuthState(status: AuthStatus.unauthenticated));
     }
+  }
+}
+
+bool _hasValidNsec(String? nsec) {
+  if (nsec == null || nsec.isEmpty) return false;
+  try {
+    final decoded = nostr.Nip19.decode(payload: nsec);
+    return decoded.prefix == nostr.Nip19Prefix.nsec &&
+        decoded.data.length == 64;
+  } catch (_) {
+    return false;
   }
 }
 
