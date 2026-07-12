@@ -720,6 +720,8 @@ Iterable<String> _mentionAliases(Iterable<String> mentionNames) sync* {
   for (final name in mentionNames) {
     final trimmed = name.trim();
     if (trimmed.isEmpty) continue;
+    // Message preprocessing replaces spaces in full-name mentions with
+    // non-breaking spaces, so the matching alias must use the same form.
     yield trimmed.replaceAll(' ', '\u00A0');
     final firstName = trimmed.split(RegExp(r'\s+')).first;
     if (firstName.isNotEmpty) {
