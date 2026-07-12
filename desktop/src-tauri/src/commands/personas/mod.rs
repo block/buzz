@@ -96,7 +96,6 @@ pub async fn create_persona(
             env_vars: input.env_vars,
             respond_to: None,
             respond_to_allowlist: Vec::new(),
-            mcp_toolsets: None,
             parallelism: None,
             created_at: now.clone(),
             updated_at: now,
@@ -842,7 +841,6 @@ fn apply_inbound_persona(personas: &mut Vec<PersonaRecord>, inbound: PersonaReco
             local.name_pool = inbound.name_pool;
             local.respond_to = inbound.respond_to;
             local.respond_to_allowlist = inbound.respond_to_allowlist;
-            local.mcp_toolsets = inbound.mcp_toolsets;
             local.parallelism = inbound.parallelism;
             local.updated_at = inbound.updated_at;
         }
@@ -885,7 +883,6 @@ fn apply_inbound_managed_agent(
             local.provider = inbound.provider;
             local.persona_source_version = inbound.persona_source_version;
         }
-        local.mcp_toolsets = inbound.mcp_toolsets;
         local.parallelism = inbound.parallelism;
         local.respond_to = inbound.respond_to;
         local.respond_to_allowlist = inbound.respond_to_allowlist;

@@ -47,8 +47,6 @@ pub struct PersonaEventContent {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub respond_to_allowlist: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mcp_toolsets: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parallelism: Option<u32>,
 }
 
@@ -195,7 +193,6 @@ pub fn persona_from_event(event: &nostr::Event) -> Result<PersonaRecord, String>
         env_vars: BTreeMap::new(),
         respond_to: content.respond_to,
         respond_to_allowlist: content.respond_to_allowlist,
-        mcp_toolsets: content.mcp_toolsets,
         parallelism: content.parallelism,
         created_at: created_at.clone(),
         updated_at: created_at,
@@ -320,7 +317,6 @@ pub fn persona_event_content(record: &PersonaRecord) -> PersonaEventContent {
         // `quad_absent_definition_hash_stable_across_activation`).
         respond_to: record.respond_to.clone(),
         respond_to_allowlist: record.respond_to_allowlist.clone(),
-        mcp_toolsets: record.mcp_toolsets.clone(),
         parallelism: record.parallelism,
     }
 }

@@ -7,8 +7,7 @@
 //!
 //! A small set of *reserved* keys — Buzz's identity and secrets — are
 //! rejected at save time and stripped at runtime so a typo or malicious
-//! value can't swap the agent's nsec. Behavior knobs (GOOSE_MODE,
-//! BUZZ_TOOLSETS, BUZZ_ACP_MODEL, BUZZ_ACP_SYSTEM_PROMPT, …) remain
+//! value can't swap the agent's nsec. Behavior knobs (GOOSE_MODE, BUZZ_ACP_MODEL, BUZZ_ACP_SYSTEM_PROMPT, …) remain
 //! freely overridable — those have dedicated UI fields, but power users
 //! may want to bypass them.
 
@@ -68,8 +67,7 @@ pub(crate) fn filter_derived_provider_model_env_vars(
 ///    example), or redirect the agent to an attacker-controlled relay.
 ///
 /// This list is deliberately narrow — it only covers keys with security
-/// implications. Behavior knobs (GOOSE_MODE, BUZZ_TOOLSETS,
-/// BUZZ_ACP_MODEL, BUZZ_ACP_SYSTEM_PROMPT, …) remain freely
+/// implications. Behavior knobs (GOOSE_MODE, BUZZ_ACP_MODEL, BUZZ_ACP_SYSTEM_PROMPT, …) remain freely
 /// overridable; those have dedicated UI fields but power users may want
 /// to bypass them.
 pub(crate) const RESERVED_ENV_KEYS: &[&str] = &[

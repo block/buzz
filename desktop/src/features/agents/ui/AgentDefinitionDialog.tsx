@@ -220,7 +220,6 @@ export function AgentDefinitionDialog({
       nextNamePoolText.trim().length > 0 ||
         Object.keys(nextEnvVars).length > 0 ||
         nextBehaviorDraft.respondTo !== null ||
-        nextBehaviorDraft.mcpToolsets.trim().length > 0 ||
         nextBehaviorDraft.parallelism.trim().length > 0,
     );
     setIsAvatarUploadPending(false);

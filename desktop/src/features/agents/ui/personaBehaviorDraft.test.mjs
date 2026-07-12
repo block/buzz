@@ -49,23 +49,6 @@ test("parallelism submits only when parseInt > 0", () => {
   assert.equal(group.parallelism, 4);
 });
 
-test("mcpToolsets trims to undefined when empty", () => {
-  const blank = behaviorForSubmit(
-    { ...emptyPersonaBehaviorDraft, mcpToolsets: "   " },
-    emptyPersonaBehaviorDraft,
-    false,
-  );
-  assert.equal(blank, undefined, "whitespace-only toolsets is an empty quad");
-  const set = behaviorForSubmit(
-    { ...emptyPersonaBehaviorDraft, mcpToolsets: " developer " },
-    emptyPersonaBehaviorDraft,
-    false,
-  );
-  assert.equal(set.mcpToolsets, "developer");
-});
-
-// ── Unit semantics: mode and list travel together ────────────────────────────
-
 test("flipping allowlist back to owner-only drops the list from the submit", () => {
   const group = behaviorForSubmit(
     allowlistDraft({ respondTo: "owner-only" }),
@@ -108,7 +91,6 @@ test("edit with a changed quad submits the full group", () => {
   assert.deepEqual(group, {
     respondTo: "allowlist",
     respondToAllowlist: [HEX, "b".repeat(64)],
-    mcpToolsets: undefined,
     parallelism: undefined,
   });
 });
@@ -126,14 +108,12 @@ test("draftFromBehavior round-trips a full quad and copies the list", () => {
   const behavior = {
     respondTo: "allowlist",
     respondToAllowlist: [HEX],
-    mcpToolsets: "developer",
     parallelism: 3,
   };
   const draft = draftFromBehavior(behavior);
   assert.deepEqual(draft, {
     respondTo: "allowlist",
     respondToAllowlist: [HEX],
-    mcpToolsets: "developer",
     parallelism: "3",
   });
   draft.respondToAllowlist.push("mutated");
@@ -147,15 +127,13 @@ test("edit full-clear submits an explicit empty group, not nothing", () => {
   // silently resurrects on reopen.
   const seed = {
     ...emptyPersonaBehaviorDraft,
-    mcpToolsets: "developer",
     parallelism: "4",
   };
   const group = behaviorForSubmit(emptyPersonaBehaviorDraft, seed, true);
   assert.deepEqual(group, {}, "full clear must submit a replace-with-empty");
   // Partial clear keeps working: one field left set submits that field.
-  const partial = behaviorForSubmit({ ...seed, mcpToolsets: "" }, seed, true);
-  assert.equal(partial.parallelism, 4);
-  assert.equal(partial.mcpToolsets, undefined);
+  const partial = behaviorForSubmit({ ...seed, parallelism: "8" }, seed, true);
+  assert.equal(partial.parallelism, 8);
   // Hash-quiet survives the fix: a no-op edit of an ALREADY-quad-less
   // definition still submits nothing — `{}` here would republish and flip
   // content hashes for exactly the definitions the hash-quiet row protects.

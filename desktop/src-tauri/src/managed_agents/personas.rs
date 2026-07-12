@@ -239,7 +239,6 @@ fn built_in_persona_records(now: &str) -> Vec<PersonaRecord> {
             env_vars: std::collections::BTreeMap::new(),
             respond_to: None,
             respond_to_allowlist: Vec::new(),
-            mcp_toolsets: None,
             parallelism: None,
             created_at: now.to_string(),
             updated_at: now.to_string(),

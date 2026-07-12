@@ -143,7 +143,6 @@ fn fixture(
         model: None,
         provider: None,
         persona_source_version: None,
-        mcp_toolsets: None,
         env_vars: std::collections::BTreeMap::new(),
         start_on_app_launch: false,
         auto_restart_on_config_change: true,
@@ -172,7 +171,6 @@ fn fixture(
         source_team_persona_slug: None,
         definition_respond_to: None,
         definition_respond_to_allowlist: Vec::new(),
-        definition_mcp_toolsets: None,
         definition_parallelism: None,
         relay_mesh: None,
     }
@@ -293,7 +291,6 @@ fn persona_with_provider(
         env_vars: std::collections::BTreeMap::new(),
         respond_to: None,
         respond_to_allowlist: Vec::new(),
-        mcp_toolsets: None,
         parallelism: None,
         created_at: "2026-06-09T00:00:00Z".to_string(),
         updated_at: "2026-06-09T00:00:00Z".to_string(),

@@ -73,8 +73,6 @@ pub struct PersonaRecord {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub respond_to_allowlist: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mcp_toolsets: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parallelism: Option<u32>,
     pub created_at: String,
     pub updated_at: String,
@@ -107,7 +105,6 @@ impl PersonaRecord {
             model: self.model,
             provider: self.provider,
             persona_source_version: None,
-            mcp_toolsets: None,
             env_vars: self.env_vars,
             start_on_app_launch: false,
             auto_restart_on_config_change: true,
@@ -136,7 +133,6 @@ impl PersonaRecord {
             source_team_persona_slug: self.source_team_persona_slug,
             definition_respond_to: self.respond_to,
             definition_respond_to_allowlist: self.respond_to_allowlist,
-            definition_mcp_toolsets: self.mcp_toolsets,
             definition_parallelism: self.parallelism,
             relay_mesh: None,
         }
@@ -169,7 +165,6 @@ impl ManagedAgentRecord {
             env_vars: self.env_vars.clone(),
             respond_to: self.definition_respond_to.clone(),
             respond_to_allowlist: self.definition_respond_to_allowlist.clone(),
-            mcp_toolsets: self.definition_mcp_toolsets.clone(),
             parallelism: self.definition_parallelism,
             created_at: self.created_at.clone(),
             updated_at: self.updated_at.clone(),
@@ -276,10 +271,6 @@ pub struct ManagedAgentRecord {
     /// for non-persona agents and for pre-existing records pending backfill.
     #[serde(default)]
     pub persona_source_version: Option<String>,
-    /// Comma-separated toolset string forwarded as BUZZ_TOOLSETS to the MCP subprocess.
-    /// When None, the MCP server uses its own default ("default" toolset).
-    #[serde(default)]
-    pub mcp_toolsets: Option<String>,
     /// Environment variables injected at spawn time. Layered as: desktop
     /// parent env < persona `env_vars` < this agent's `env_vars` (last wins).
     ///
@@ -390,8 +381,6 @@ pub struct ManagedAgentRecord {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub definition_respond_to_allowlist: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub definition_mcp_toolsets: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub definition_parallelism: Option<u32>,
     /// Typed marker for relay-mesh agents. `Some(_)` means this agent runs its
     /// inference through Buzz's relay-mesh local endpoint; the `model_ref` is
@@ -490,7 +479,6 @@ pub struct ManagedAgentSummary {
     /// would." Always `false` for stopped agents and for processes adopted
     /// via a persisted `runtime_pid` (their spawn config is unknown).
     pub needs_restart: bool,
-    pub mcp_toolsets: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub env_vars: BTreeMap<String, String>,
     pub backend: BackendKind,
@@ -725,9 +713,6 @@ pub const DEFAULT_AGENT_TURN_TIMEOUT_SECONDS: u64 = 320;
 /// 1 hour — absolute wall-clock safety cap per turn.
 pub const DEFAULT_AGENT_MAX_TURN_DURATION_SECONDS: u64 = 3600;
 pub const DEFAULT_AGENT_PARALLELISM: u32 = 24;
-/// Toolsets injected as `BUZZ_TOOLSETS` when the record doesn't pin its own —
-/// single source of truth for the spawn env and the spawn-config hash.
-pub const DEFAULT_MCP_TOOLSETS: &str = "default,canvas,forums,dms,media";
 
 fn default_agent_parallelism() -> u32 {
     DEFAULT_AGENT_PARALLELISM
@@ -828,7 +813,6 @@ pub fn validate_respond_to_allowlist(input: &[String]) -> Result<Vec<String>, St
 pub struct MintBehavioralDefaults {
     pub respond_to: RespondTo,
     pub respond_to_allowlist: Vec<String>,
-    pub mcp_toolsets: Option<String>,
     /// Validated (1..=32) when present; caller applies its own default.
     pub parallelism: Option<u32>,
 }
@@ -848,7 +832,6 @@ pub struct MintBehavioralDefaults {
 pub fn resolve_mint_behavioral_defaults(
     input_respond_to: Option<RespondTo>,
     input_allowlist: Vec<String>,
-    input_mcp_toolsets: Option<String>,
     input_parallelism: Option<u32>,
     definition: Option<&PersonaRecord>,
 ) -> Result<MintBehavioralDefaults, String> {
@@ -880,10 +863,6 @@ pub fn resolve_mint_behavioral_defaults(
         );
     }
 
-    let non_blank = |v: Option<String>| v.filter(|s| !s.trim().is_empty());
-    let mcp_toolsets = non_blank(input_mcp_toolsets)
-        .or_else(|| non_blank(definition.and_then(|d| d.mcp_toolsets.clone())));
-
     let parallelism = match input_parallelism {
         // Explicit input is validated here too (not just at the command
         // call sites) so the "validated when present" contract on
@@ -908,7 +887,6 @@ pub fn resolve_mint_behavioral_defaults(
     Ok(MintBehavioralDefaults {
         respond_to,
         respond_to_allowlist,
-        mcp_toolsets,
         parallelism,
     })
 }

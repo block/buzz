@@ -113,7 +113,6 @@ export function AgentInstanceEditDialog({
     agent.personaId != null && agent.agentCommandOverride == null,
   );
   const [agentArgs, setAgentArgs] = React.useState(agent.agentArgs.join(","));
-  const [mcpToolsets, setMcpToolsets] = React.useState(agent.mcpToolsets ?? "");
   const [parallelism, setParallelism] = React.useState(
     String(agent.parallelism),
   );
@@ -169,7 +168,6 @@ export function AgentInstanceEditDialog({
         agent.personaId != null && agent.agentCommandOverride == null,
       );
       setAgentArgs(agent.agentArgs.join(","));
-      setMcpToolsets(agent.mcpToolsets ?? "");
       setParallelism(String(agent.parallelism));
       setSystemPrompt(agent.systemPrompt ?? "");
       setModel(agent.model ?? "");
@@ -655,10 +653,6 @@ export function AgentInstanceEditDialog({
           parsedArgs.join(",") !== agent.agentArgs.join(",")
             ? parsedArgs
             : undefined,
-        mcpToolsets:
-          (mcpToolsets.trim() || null) !== agent.mcpToolsets
-            ? mcpToolsets.trim() || null
-            : undefined,
         parallelism:
           parsedParallelism > 0 && parsedParallelism !== agent.parallelism
             ? parsedParallelism
@@ -1089,7 +1083,6 @@ export function AgentInstanceEditDialog({
                       inheritedEnvVars={inheritedWithGlobal}
                       inheritHarness={inheritHarness}
                       linkedPersona={linkedPersona}
-                      mcpToolsets={mcpToolsets}
                       model={model}
                       modelTuningRuntimeId={prospectiveRuntimeId}
                       parallelism={parallelism}
@@ -1104,7 +1097,6 @@ export function AgentInstanceEditDialog({
                       onAutoRestartChange={setAutoRestartOnConfigChange}
                       onEnvVarsChange={setEnvVars}
                       onInheritHarnessChange={setInheritHarness}
-                      onMcpToolsetsChange={setMcpToolsets}
                       onParallelismChange={setParallelism}
                       onRelayUrlChange={setRelayUrl}
                       onSystemPromptChange={setSystemPrompt}

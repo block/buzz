@@ -25,7 +25,6 @@ fn agent(persona_id: &str, name: &str, display_name: Option<&str>) -> ManagedAge
         model: None,
         provider: None,
         persona_source_version: None,
-        mcp_toolsets: None,
         env_vars: std::collections::BTreeMap::new(),
         start_on_app_launch: false,
         auto_restart_on_config_change: true,
@@ -54,7 +53,6 @@ fn agent(persona_id: &str, name: &str, display_name: Option<&str>) -> ManagedAge
         source_team_persona_slug: None,
         definition_respond_to: None,
         definition_respond_to_allowlist: vec![],
-        definition_mcp_toolsets: None,
         definition_parallelism: None,
         relay_mesh: None,
     }

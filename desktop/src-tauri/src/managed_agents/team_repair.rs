@@ -251,7 +251,6 @@ mod tests {
             env_vars: Default::default(),
             respond_to: None,
             respond_to_allowlist: Vec::new(),
-            mcp_toolsets: None,
             parallelism: None,
             created_at: "2025-01-01T00:00:00Z".to_string(),
             updated_at: "2025-01-01T00:00:00Z".to_string(),
@@ -296,7 +295,6 @@ mod tests {
             model: None,
             provider: None,
             persona_source_version: None,
-            mcp_toolsets: None,
             start_on_app_launch: false,
             auto_restart_on_config_change: true,
             runtime_pid: None,
@@ -325,7 +323,6 @@ mod tests {
             source_team_persona_slug: None,
             definition_respond_to: None,
             definition_respond_to_allowlist: Vec::new(),
-            definition_mcp_toolsets: None,
             definition_parallelism: None,
             relay_mesh: None,
         }

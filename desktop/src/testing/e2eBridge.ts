@@ -529,7 +529,6 @@ type RawManagedAgent = {
   backend_agent_id: string | null;
   respond_to: "owner-only" | "allowlist" | "anyone";
   respond_to_allowlist: string[];
-  mcp_toolsets: string | null;
 };
 
 type RawCreateManagedAgentResponse = {
@@ -585,7 +584,6 @@ type RawPersona = {
   env_vars?: Record<string, string>;
   respond_to?: string | null;
   respond_to_allowlist?: string[];
-  mcp_toolsets?: string | null;
   parallelism?: number | null;
   created_at: string;
   updated_at: string;
@@ -1129,7 +1127,6 @@ function cloneManagedAgent(agent: MockManagedAgent): RawManagedAgent {
     respond_to_allowlist: agent.respond_to_allowlist
       ? [...agent.respond_to_allowlist]
       : [],
-    mcp_toolsets: agent.mcp_toolsets ?? null,
   };
 }
 
@@ -1644,7 +1641,6 @@ function buildSeededManagedAgent(seed: MockManagedAgentSeed): MockManagedAgent {
     backend_agent_id: null,
     respond_to: seed.respondTo ?? "owner-only",
     respond_to_allowlist: seed.respondToAllowlist ?? [],
-    mcp_toolsets: null,
     private_key_nsec: `nsec1mock${seed.pubkey.slice(0, 20)}`,
     log_lines: [
       `buzz-acp starting: relay=${DEFAULT_RELAY_WS_URL} agent_pubkey=${seed.pubkey} parallelism=1`,
@@ -6360,7 +6356,6 @@ async function handleListPersonas(): Promise<RawPersona[]> {
 type PersonaBehaviorInput = {
   respondTo?: "owner-only" | "allowlist" | "anyone";
   respondToAllowlist?: string[];
-  mcpToolsets?: string;
   parallelism?: number;
 };
 
@@ -6377,7 +6372,6 @@ function applyMockPersonaBehavior(
     behavior.respondTo === "allowlist"
       ? [...(behavior.respondToAllowlist ?? [])]
       : [];
-  persona.mcp_toolsets = behavior.mcpToolsets?.trim() || null;
   persona.parallelism = behavior.parallelism ?? null;
 }
 
@@ -6711,7 +6705,6 @@ async function handleCreateManagedAgent(
       idleTimeoutSeconds?: number;
       maxTurnDurationSeconds?: number;
       parallelism?: number;
-      mcpToolsets?: string;
       systemPrompt?: string;
       avatarUrl?: string;
       model?: string;
@@ -6752,8 +6745,6 @@ async function handleCreateManagedAgent(
       : (linkedPersona?.respond_to_allowlist ?? []);
   const mintParallelism =
     args.input.parallelism ?? linkedPersona?.parallelism ?? 1;
-  const mintMcpToolsets =
-    args.input.mcpToolsets ?? linkedPersona?.mcp_toolsets ?? null;
   const personaAvatarUrl =
     args.input.personaId === undefined
       ? null
@@ -6787,7 +6778,6 @@ async function handleCreateManagedAgent(
     idle_timeout_seconds: args.input.idleTimeoutSeconds ?? null,
     max_turn_duration_seconds: args.input.maxTurnDurationSeconds ?? null,
     parallelism: mintParallelism,
-    mcp_toolsets: mintMcpToolsets,
     system_prompt: args.input.systemPrompt?.trim() || null,
     avatar_url: avatarUrl,
     model: args.input.model?.trim() || null,

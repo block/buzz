@@ -648,12 +648,6 @@ pub async fn create_managed_agent(
         let minted = crate::managed_agents::resolve_mint_behavioral_defaults(
             input.respond_to,
             respond_to_allowlist.clone(),
-            input
-                .mcp_toolsets
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(str::to_string),
             input.parallelism,
             linked_persona.as_ref(),
         )?;
@@ -710,7 +704,6 @@ pub async fn create_managed_agent(
                     .map(str::to_string)
             }),
             persona_source_version: snapshot_source_version,
-            mcp_toolsets: minted.mcp_toolsets.clone(),
             // Provider agents are managed externally — force false.
             start_on_app_launch: if input.backend != BackendKind::Local {
                 false
@@ -747,7 +740,6 @@ pub async fn create_managed_agent(
             source_team_persona_slug: None,
             definition_respond_to: None,
             definition_respond_to_allowlist: Vec::new(),
-            definition_mcp_toolsets: None,
             definition_parallelism: None,
             relay_mesh: relay_mesh.clone(),
         };

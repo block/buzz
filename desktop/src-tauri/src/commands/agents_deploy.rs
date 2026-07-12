@@ -142,9 +142,6 @@ pub(super) fn deploy_payload_json(
         // to the harness default (`owner-only`) — no protocol break.
         "respond_to": record.respond_to,
         "respond_to_allowlist": &record.respond_to_allowlist,
-        // MCP toolset filter (BUZZ_TOOLSETS on the local spawn path).
-        // Providers that don't yet read this fall back to their default.
-        "mcp_toolsets": &record.mcp_toolsets,
         // Merged persona + agent env vars. Providers that don't read this
         // field will simply ignore it — no protocol break.
         "env_vars": merged_env,

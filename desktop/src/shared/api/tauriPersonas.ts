@@ -67,7 +67,6 @@ export type RawPersona = {
   env_vars?: Record<string, string>;
   respond_to?: string | null;
   respond_to_allowlist?: string[];
-  mcp_toolsets?: string | null;
   parallelism?: number | null;
   created_at: string;
   updated_at: string;
@@ -91,7 +90,6 @@ export function fromRawPersona(persona: RawPersona): AgentPersona {
     envVars: persona.env_vars ?? {},
     respondTo: (persona.respond_to as RespondToMode | undefined) ?? null,
     respondToAllowlist: persona.respond_to_allowlist ?? [],
-    mcpToolsets: persona.mcp_toolsets ?? null,
     parallelism: persona.parallelism ?? null,
     createdAt: persona.created_at,
     updatedAt: persona.updated_at,

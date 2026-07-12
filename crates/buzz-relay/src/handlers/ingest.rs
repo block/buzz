@@ -3194,8 +3194,8 @@ mod tests {
 
     #[test]
     fn persona_envelope_accepts_behavioral_fields() {
-        // Widened content (respond_to / mcp_toolsets / parallelism) is opaque
-        // to the relay — unknown-field tolerance is the contract.
+        // Unknown legacy fields in persona content remain relay-opaque;
+        // unknown-field tolerance is the contract.
         let ev = make_event_with_tags(
             KIND_PERSONA,
             r#"{"display_name":"x","respond_to":"owner-only","respond_to_allowlist":[],"mcp_toolsets":"default","parallelism":2}"#,

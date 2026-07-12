@@ -17,7 +17,6 @@ fn sample_persona() -> PersonaRecord {
         env_vars: BTreeMap::from([("KEY".to_string(), "value".to_string())]),
         respond_to: None,
         respond_to_allowlist: Vec::new(),
-        mcp_toolsets: None,
         parallelism: None,
         created_at: "2025-01-01T00:00:00Z".to_string(),
         updated_at: "2025-01-01T00:00:00Z".to_string(),
@@ -165,7 +164,6 @@ fn content_matches_nip_ap_vector() {
         name_pool: vec!["Alpha".to_string(), "Beta".to_string()],
         respond_to: None,
         respond_to_allowlist: Vec::new(),
-        mcp_toolsets: None,
         parallelism: None,
     };
     assert_eq!(
@@ -225,7 +223,6 @@ fn content_matches_nip_ap_vector() {
         env_vars: BTreeMap::new(),
         respond_to: None,
         respond_to_allowlist: Vec::new(),
-        mcp_toolsets: None,
         parallelism: None,
         created_at: "2025-01-01T00:00:00Z".to_string(),
         updated_at: "2025-01-01T00:00:00Z".to_string(),
@@ -255,7 +252,6 @@ fn round_trip_minimal_persona() {
         env_vars: BTreeMap::new(),
         respond_to: None,
         respond_to_allowlist: Vec::new(),
-        mcp_toolsets: None,
         parallelism: None,
         created_at: "2025-01-01T00:00:00Z".to_string(),
         updated_at: "2025-01-01T00:00:00Z".to_string(),
@@ -314,7 +310,7 @@ fn build_persona_delete_has_single_a_tag_no_e_tag() {
 /// whose deliberate removal was pinned in the B5 review gates.
 #[test]
 fn behavioral_defaults_survive_record_round_trip() {
-    const FOREIGN: &str = r#"{"display_name":"F","system_prompt":"p","respond_to":"anyone","respond_to_allowlist":["deadbeef"],"mcp_toolsets":"default","parallelism":4}"#;
+    const FOREIGN: &str = r#"{"display_name":"F","system_prompt":"p","respond_to":"anyone","respond_to_allowlist":["deadbeef"],"parallelism":4}"#;
     let parsed: PersonaEventContent = serde_json::from_str(FOREIGN).unwrap();
     // Wire layer preserves the fields...
     assert_eq!(parsed.respond_to.as_deref(), Some("anyone"));
@@ -324,7 +320,6 @@ fn behavioral_defaults_survive_record_round_trip() {
     let reprojected = persona_event_content(&record);
     assert_eq!(reprojected.respond_to.as_deref(), Some("anyone"));
     assert_eq!(reprojected.respond_to_allowlist, vec!["deadbeef"]);
-    assert_eq!(reprojected.mcp_toolsets.as_deref(), Some("default"));
     assert_eq!(reprojected.parallelism, Some(4));
 }
 
@@ -352,7 +347,6 @@ fn quad_absent_definition_hash_stable_across_activation() {
         env_vars: BTreeMap::new(),
         respond_to: None,
         respond_to_allowlist: Vec::new(),
-        mcp_toolsets: None,
         parallelism: None,
         created_at: "2026-01-01T00:00:00Z".to_string(),
         updated_at: "2026-01-01T00:00:00Z".to_string(),
@@ -362,7 +356,6 @@ fn quad_absent_definition_hash_stable_across_activation() {
     let reserved_era = PersonaEventContent {
         respond_to: None,
         respond_to_allowlist: Vec::new(),
-        mcp_toolsets: None,
         parallelism: None,
         ..live.clone()
     };
@@ -396,7 +389,6 @@ fn persona_from_event_content_for_test(content: PersonaEventContent) -> PersonaR
         env_vars: BTreeMap::new(),
         respond_to: content.respond_to,
         respond_to_allowlist: content.respond_to_allowlist,
-        mcp_toolsets: content.mcp_toolsets,
         parallelism: content.parallelism,
         created_at: "2026-01-01T00:00:00Z".to_string(),
         updated_at: "2026-01-01T00:00:00Z".to_string(),
@@ -415,7 +407,6 @@ fn persona_content_hash_is_deterministic() {
         name_pool: vec![],
         respond_to: None,
         respond_to_allowlist: Vec::new(),
-        mcp_toolsets: None,
         parallelism: None,
     };
     let hash1 = persona_content_hash(&content);
@@ -436,7 +427,6 @@ fn persona_content_hash_changes_on_edit() {
         name_pool: vec![],
         respond_to: None,
         respond_to_allowlist: Vec::new(),
-        mcp_toolsets: None,
         parallelism: None,
     };
     let mut content2 = content1.clone();

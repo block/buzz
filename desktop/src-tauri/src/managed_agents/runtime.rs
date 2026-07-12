@@ -1365,7 +1365,6 @@ pub fn build_managed_agent_summary(
         persona_out_of_date,
         persona_orphaned,
         needs_restart,
-        mcp_toolsets: record.mcp_toolsets.clone(),
         env_vars: record.env_vars.clone(),
         backend: record.backend.clone(),
         backend_agent_id: record.backend_agent_id.clone(),
@@ -1737,11 +1736,6 @@ pub fn spawn_agent_child(
         ) {
             command.env(key, value);
         }
-    }
-    if let Some(toolsets) = &record.mcp_toolsets {
-        command.env("BUZZ_TOOLSETS", toolsets);
-    } else {
-        command.env("BUZZ_TOOLSETS", super::types::DEFAULT_MCP_TOOLSETS);
     }
     command.env_remove("BUZZ_ACP_PRIVATE_KEY");
     command.env_remove("BUZZ_ACP_API_TOKEN");

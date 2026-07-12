@@ -378,7 +378,6 @@ test("edit and duplicate seed the behavior group from a quad-bearing persona", (
     isActive: true,
     respondTo: "allowlist",
     respondToAllowlist: ["a".repeat(64)],
-    mcpToolsets: "developer",
     parallelism: 4,
     createdAt: "2025-01-01T00:00:00Z",
     updatedAt: "2025-01-02T00:00:00Z",
@@ -387,7 +386,6 @@ test("edit and duplicate seed the behavior group from a quad-bearing persona", (
   const expected = {
     respondTo: "allowlist",
     respondToAllowlist: ["a".repeat(64)],
-    mcpToolsets: "developer",
     parallelism: 4,
   };
   assert.deepEqual(
@@ -413,7 +411,6 @@ test("a non-allowlist mode does not seed a stale allowlist into the dialog", () 
     isActive: true,
     respondTo: "owner-only",
     respondToAllowlist: ["b".repeat(64)],
-    mcpToolsets: null,
     parallelism: null,
     createdAt: "2025-01-01T00:00:00Z",
     updatedAt: "2025-01-02T00:00:00Z",

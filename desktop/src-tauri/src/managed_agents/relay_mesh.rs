@@ -80,7 +80,6 @@ mod tests {
             parallelism: 1,
             system_prompt: None,
             model: None,
-            mcp_toolsets: None,
             env_vars: BTreeMap::new(),
             start_on_app_launch: false,
             runtime_pid: None,

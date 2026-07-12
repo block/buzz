@@ -420,7 +420,6 @@ export type ManagedAgent = {
    * Always `false` for stopped agents.
    */
   needsRestart: boolean;
-  mcpToolsets: string | null;
   /** Per-agent env vars. Layered on top of persona envVars. */
   envVars: Record<string, string>;
   status: "running" | "stopped" | "deployed" | "not_deployed";
@@ -493,7 +492,6 @@ export type CreateManagedAgentInput = {
   avatarUrl?: string;
   model?: string;
   provider?: string;
-  mcpToolsets?: string;
   envVars?: Record<string, string>;
   spawnAfterCreate?: boolean;
   startOnAppLaunch?: boolean;
@@ -706,7 +704,6 @@ export type UpdateManagedAgentInput = {
   model?: string | null;
   provider?: string | null;
   systemPrompt?: string | null;
-  mcpToolsets?: string | null;
   /** Absent = don't touch. Present = replace the env_vars map entirely. */
   envVars?: Record<string, string>;
   parallelism?: number;
@@ -753,21 +750,19 @@ export type AgentPersona = {
   /** NIP-AP behavioral defaults (wire shape). Null/empty = unset. */
   respondTo: RespondToMode | null;
   respondToAllowlist: string[];
-  mcpToolsets: string | null;
   parallelism: number | null;
   createdAt: string;
   updatedAt: string;
 };
 
 /**
- * NIP-AP behavioral quad for a definition, sent as one group: absent = don't
- * touch the stored quad (legacy callers), present = replace all four as a
+ * NIP-AP behavioral group for a definition, sent as one group: absent = don't
+ * touch the stored behavior group (legacy callers), present = replace the fields as a
  * unit. Mirrors `PersonaBehaviorRequest`.
  */
 export type PersonaBehaviorInput = {
   respondTo?: RespondToMode;
   respondToAllowlist?: string[];
-  mcpToolsets?: string;
   parallelism?: number;
 };
 

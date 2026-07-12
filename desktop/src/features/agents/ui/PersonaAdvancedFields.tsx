@@ -103,44 +103,6 @@ export function PersonaAdvancedFields({
             How many conversations each running instance handles at once (1–32).
           </p>
         </div>
-
-        <div className="space-y-1.5">
-          <label
-            className="text-sm font-medium text-foreground"
-            htmlFor="persona-mcp-toolsets"
-          >
-            MCP toolsets
-            <span className={PERSONA_LABEL_OPTIONAL_CLASS}>Optional</span>
-          </label>
-          <div
-            className={cn(
-              "flex min-h-11 items-center px-3",
-              PERSONA_FIELD_SHELL_CLASS,
-            )}
-          >
-            <Input
-              autoCorrect="off"
-              className={cn(
-                "h-8 px-0 py-0 leading-6",
-                PERSONA_FIELD_CONTROL_CLASS,
-              )}
-              disabled={disabled}
-              id="persona-mcp-toolsets"
-              onChange={(event) =>
-                onBehaviorDraftChange({
-                  ...behaviorDraft,
-                  mcpToolsets: event.target.value,
-                })
-              }
-              placeholder="developer,computercontroller"
-              spellCheck={false}
-              value={behaviorDraft.mcpToolsets}
-            />
-          </div>
-          <p className="text-xs text-muted-foreground">
-            Comma-separated toolset names passed to the MCP server.
-          </p>
-        </div>
       </div>
 
       <div className="space-y-1.5">

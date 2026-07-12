@@ -105,7 +105,6 @@ fn backfill_standalone_agents_in_dir(base_dir: &Path) -> Result<usize, String> {
         // fields are the author's intent; copy them up.
         view_source.definition_respond_to = Some(record.respond_to.as_str().to_string());
         view_source.definition_respond_to_allowlist = record.respond_to_allowlist.clone();
-        view_source.definition_mcp_toolsets = record.mcp_toolsets.clone();
         view_source.definition_parallelism = Some(record.parallelism);
         let Some(persona_view) = view_source.to_persona_view() else {
             eprintln!(

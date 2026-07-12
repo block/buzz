@@ -133,7 +133,6 @@ fn is_reserved_recognises_full_list() {
     assert!(!is_reserved_env_key("GOOSE_MODE"));
     assert!(!is_reserved_env_key("ANTHROPIC_API_KEY"));
     assert!(!is_reserved_env_key("BUZZ_ACP_MODEL")); // behavior knob
-    assert!(!is_reserved_env_key("BUZZ_TOOLSETS"));
 }
 
 #[test]

@@ -10,12 +10,12 @@ use super::{
     RelayMeshConfig, RespondTo,
 };
 
-/// The NIP-AP behavioral quad as one grouped request field.
+/// The NIP-AP behavioral group as one grouped request field.
 ///
 /// Grouped (not flat) because `update_persona` has legacy callers that don't
 /// send behavioral fields at all — flat replace semantics would silently wipe
-/// a stored quad on every team-import edit. Absent group = don't touch the
-/// stored quad; present group = validate and replace all four as a unit
+/// a stored behavior group on every team-import edit. Absent group = don't touch the
+/// stored behavior group; present group = validate and replace the fields as a unit
 /// (mode and allowlist must travel together).
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -25,8 +25,6 @@ pub struct PersonaBehaviorRequest {
     #[serde(default)]
     pub respond_to_allowlist: Vec<String>,
     #[serde(default)]
-    pub mcp_toolsets: Option<String>,
-    #[serde(default)]
     pub parallelism: Option<u32>,
 }
 
@@ -34,11 +32,11 @@ pub struct PersonaBehaviorRequest {
 ///
 /// This is the single write path for definition behavioral fields — both
 /// `create_persona` and `update_persona` route through it, so neither can
-/// skip validation. `None` leaves the record's stored quad untouched (the
+/// skip validation. `None` leaves the record's stored behavior group untouched (the
 /// legacy-caller wipe hazard); `Some` normalizes the allowlist
 /// (`validate_respond_to_allowlist`), rejects allowlist mode with an empty
 /// list (the spawn-time crash-loop `build_respond_to_env` errors on), rejects
-/// out-of-range parallelism, and stores the quad in wire shape.
+/// out-of-range parallelism, and stores the behavior group in wire shape.
 pub fn apply_persona_behavior(
     record: &mut PersonaRecord,
     behavior: Option<PersonaBehaviorRequest>,
@@ -69,10 +67,6 @@ pub fn apply_persona_behavior(
     } else {
         Vec::new()
     };
-    record.mcp_toolsets = behavior
-        .mcp_toolsets
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty());
     record.parallelism = behavior.parallelism;
     Ok(())
 }
@@ -94,7 +88,7 @@ pub struct CreatePersonaRequest {
     /// Environment variables for agents created from this persona.
     #[serde(default)]
     pub env_vars: BTreeMap<String, String>,
-    /// NIP-AP behavioral quad. Absent = quad stays unset.
+    /// NIP-AP behavioral group. Absent = behavior group stays unset.
     #[serde(default)]
     pub behavior: Option<PersonaBehaviorRequest>,
 }
@@ -122,9 +116,9 @@ pub struct UpdatePersonaRequest {
     /// stored credentials when an unrelated field is edited.
     #[serde(default)]
     pub env_vars: Option<BTreeMap<String, String>>,
-    /// NIP-AP behavioral quad. Same absent-vs-present contract as `env_vars`:
-    /// absent = don't touch the stored quad (legacy callers don't send it),
-    /// present = validate and replace all four fields as a unit.
+    /// NIP-AP behavioral group. Same absent-vs-present contract as `env_vars`:
+    /// absent = don't touch the stored behavior group (legacy callers don't send it),
+    /// present = validate and replace the fields as a unit.
     #[serde(default)]
     pub behavior: Option<PersonaBehaviorRequest>,
 }
@@ -166,7 +160,6 @@ pub struct CreateManagedAgentRequest {
     pub avatar_url: Option<String>,
     pub model: Option<String>,
     pub provider: Option<String>,
-    pub mcp_toolsets: Option<String>,
     /// Environment variables for this agent. Layered on top of persona env.
     #[serde(default)]
     pub env_vars: BTreeMap<String, String>,
@@ -208,8 +201,6 @@ pub struct UpdateManagedAgentRequest {
     pub model: Option<Option<String>>,
     #[serde(default)]
     pub system_prompt: Option<Option<String>>,
-    #[serde(default)]
-    pub mcp_toolsets: Option<Option<String>>,
     /// Absent = don't touch. Present = replace the env_vars map entirely.
     #[serde(default)]
     pub env_vars: Option<BTreeMap<String, String>>,
@@ -265,7 +256,6 @@ mod tests {
         let mut record = record_without_quad();
         record.respond_to = Some("allowlist".to_string());
         record.respond_to_allowlist = vec!["a".repeat(64)];
-        record.mcp_toolsets = Some("developer".to_string());
         record.parallelism = Some(4);
         record
     }
@@ -287,7 +277,6 @@ mod tests {
             env_vars: BTreeMap::new(),
             respond_to: None,
             respond_to_allowlist: Vec::new(),
-            mcp_toolsets: None,
             parallelism: None,
             created_at: "2026-01-01T00:00:00Z".to_string(),
             updated_at: "2026-01-01T00:00:00Z".to_string(),
@@ -295,7 +284,7 @@ mod tests {
     }
 
     /// The anchor regression row: an absent behavior group must leave a
-    /// stored quad untouched — legacy update_persona callers (team import,
+    /// stored behavior group untouched — legacy update_persona callers (team import,
     /// profile panel) send no behavior field and must not wipe it.
     #[test]
     fn absent_behavior_leaves_stored_quad_untouched() {
@@ -303,7 +292,6 @@ mod tests {
         apply_persona_behavior(&mut record, None).unwrap();
         assert_eq!(record.respond_to.as_deref(), Some("allowlist"));
         assert_eq!(record.respond_to_allowlist, vec!["a".repeat(64)]);
-        assert_eq!(record.mcp_toolsets.as_deref(), Some("developer"));
         assert_eq!(record.parallelism, Some(4));
     }
 
@@ -315,14 +303,12 @@ mod tests {
             Some(PersonaBehaviorRequest {
                 respond_to: Some(RespondTo::Anyone),
                 respond_to_allowlist: Vec::new(),
-                mcp_toolsets: None,
                 parallelism: None,
             }),
         )
         .unwrap();
         assert_eq!(record.respond_to.as_deref(), Some("anyone"));
         assert!(record.respond_to_allowlist.is_empty());
-        assert_eq!(record.mcp_toolsets, None);
         assert_eq!(record.parallelism, None);
     }
 
@@ -395,7 +381,7 @@ mod tests {
 
     /// Pinky's loop row: an applied behavior group must flow through
     /// `persona_event_content` so the republished 30175 carries the edited
-    /// quad — the write path and the publish path cannot drift apart.
+    /// behavior group — the write path and the publish path cannot drift apart.
     #[test]
     fn applied_behavior_flows_into_persona_event_content() {
         let mut record = record_without_quad();
@@ -404,7 +390,6 @@ mod tests {
             Some(PersonaBehaviorRequest {
                 respond_to: Some(RespondTo::Allowlist),
                 respond_to_allowlist: vec!["c".repeat(64)],
-                mcp_toolsets: Some("developer".to_string()),
                 parallelism: Some(3),
             }),
         )
@@ -412,12 +397,11 @@ mod tests {
         let content = crate::managed_agents::persona_events::persona_event_content(&record);
         assert_eq!(content.respond_to.as_deref(), Some("allowlist"));
         assert_eq!(content.respond_to_allowlist, vec!["c".repeat(64)]);
-        assert_eq!(content.mcp_toolsets.as_deref(), Some("developer"));
         assert_eq!(content.parallelism, Some(3));
     }
 
     #[test]
-    fn parallelism_out_of_range_is_rejected_and_blank_toolsets_normalize_to_none() {
+    fn parallelism_out_of_range_is_rejected() {
         let mut record = record_without_quad();
         for bad in [0u32, 33] {
             let err = apply_persona_behavior(
@@ -434,13 +418,11 @@ mod tests {
         apply_persona_behavior(
             &mut record,
             Some(PersonaBehaviorRequest {
-                mcp_toolsets: Some("   ".to_string()),
                 parallelism: Some(8),
                 ..Default::default()
             }),
         )
         .unwrap();
-        assert_eq!(record.mcp_toolsets, None, "blank toolsets never persist");
         assert_eq!(record.parallelism, Some(8));
     }
 }
