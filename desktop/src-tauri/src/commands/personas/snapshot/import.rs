@@ -117,7 +117,6 @@ pub struct AgentSnapshotImportResult {
 pub(crate) fn resolve_snapshot_import_behavior(
     raw_respond_to: Option<&str>,
     raw_allowlist: &[String],
-    mcp_toolsets: Option<String>,
     parallelism: Option<u32>,
     keep_allowlist: bool,
 ) -> Result<crate::managed_agents::MintBehavioralDefaults, String> {
@@ -169,7 +168,6 @@ pub(crate) fn resolve_snapshot_import_behavior(
     resolve_mint_behavioral_defaults(
         resolved_mode,
         resolved_allowlist,
-        mcp_toolsets,
         parallelism,
         None, // no definition record; all inputs are explicit from the snapshot
     )
@@ -320,7 +318,6 @@ pub async fn confirm_agent_snapshot_import(
     let minted = resolve_snapshot_import_behavior(
         snapshot.definition.respond_to.as_deref(),
         &snapshot.definition.respond_to_allowlist,
-        snapshot.definition.mcp_toolsets.clone(),
         snapshot.definition.parallelism,
         input.keep_allowlist,
     )?;
@@ -409,7 +406,6 @@ pub async fn confirm_agent_snapshot_import(
             env_vars: std::collections::BTreeMap::new(),
             respond_to: respond_to_wire.clone(),
             respond_to_allowlist: minted.respond_to_allowlist.clone(),
-            mcp_toolsets: minted.mcp_toolsets.clone(),
             parallelism: minted_parallelism,
             created_at: now.clone(),
             updated_at: now.clone(),
@@ -449,7 +445,6 @@ pub async fn confirm_agent_snapshot_import(
             model: snapshot.definition.model.clone(),
             provider: snapshot.definition.provider.clone(),
             persona_source_version: None,
-            mcp_toolsets: minted.mcp_toolsets.clone(),
             env_vars: std::collections::BTreeMap::new(),
             start_on_app_launch: false,
             auto_restart_on_config_change: true,
@@ -477,7 +472,6 @@ pub async fn confirm_agent_snapshot_import(
             source_team_persona_slug: None,
             definition_respond_to: respond_to_wire.clone(),
             definition_respond_to_allowlist: minted.respond_to_allowlist.clone(),
-            definition_mcp_toolsets: minted.mcp_toolsets.clone(),
             definition_parallelism: minted_parallelism,
             relay_mesh: None,
             runtime: snapshot.definition.runtime.clone(),

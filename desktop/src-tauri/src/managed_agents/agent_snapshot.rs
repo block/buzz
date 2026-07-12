@@ -94,8 +94,6 @@ pub struct AgentSnapshotDefinition {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mcp_toolsets: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parallelism: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub respond_to: Option<String>,
@@ -183,9 +181,9 @@ pub fn build_snapshot(
     avatar_bytes: Option<&[u8]>,
 ) -> AgentSnapshot {
     // ── Definition ─────────────────────────────────────────────────────
-    // Use definition-level fields (respond_to, allowlist, mcp_toolsets,
-    // parallelism) for portability — instance-level equivalents are
-    // spawn-time snapshots and would be stale.
+    // Use definition-level fields (respond_to, allowlist, parallelism) for
+    // portability — instance-level equivalents are spawn-time snapshots and
+    // would be stale.
     let definition = AgentSnapshotDefinition {
         name: record
             .display_name
@@ -195,10 +193,6 @@ pub fn build_snapshot(
         runtime: record.runtime.clone(),
         model: record.model.clone(),
         provider: record.provider.clone(),
-        mcp_toolsets: record
-            .definition_mcp_toolsets
-            .clone()
-            .or_else(|| record.mcp_toolsets.clone()),
         parallelism: record.definition_parallelism.or(Some(record.parallelism)),
         respond_to: record.definition_respond_to.clone(),
         respond_to_allowlist: record.definition_respond_to_allowlist.clone(),
@@ -482,7 +476,6 @@ mod tests {
             model: Some("claude-opus-4".to_string()),
             provider: Some("anthropic".to_string()),
             persona_source_version: Some("v1.0".to_string()), // MUST NOT appear
-            mcp_toolsets: Some("default".to_string()),
             env_vars: {
                 let mut m = BTreeMap::new();
                 m.insert("API_KEY".to_string(), "secret123".to_string()); // MUST NOT appear
@@ -518,7 +511,6 @@ mod tests {
             source_team_persona_slug: Some("lep".to_string()), // MUST NOT appear
             definition_respond_to: Some("allowlist".to_string()),
             definition_respond_to_allowlist: vec!["abc123def".to_string()],
-            definition_mcp_toolsets: Some("tools".to_string()),
             definition_parallelism: Some(4),
             relay_mesh: None,
         }
@@ -710,6 +702,16 @@ mod tests {
         assert!(
             !json.contains("relayUrl") && !json.contains("relay_url"),
             "relayUrl field must not appear in snapshot"
+        );
+    }
+
+    #[test]
+    fn snapshot_omits_removed_mcp_toolsets_config() {
+        let record = minimal_record();
+        let json = snapshot_json_string(&record);
+        assert!(
+            !json.contains("mcpToolsets") && !json.contains("mcp_toolsets"),
+            "removed MCP toolsets config must not re-enter snapshots"
         );
     }
 

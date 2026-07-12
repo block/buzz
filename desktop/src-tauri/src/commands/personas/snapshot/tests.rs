@@ -41,7 +41,6 @@ fn make_definition(slug: &str) -> ManagedAgentRecord {
         model: None,
         provider: None,
         persona_source_version: None,
-        mcp_toolsets: None,
         env_vars: BTreeMap::new(),
         start_on_app_launch: false,
         auto_restart_on_config_change: false,
@@ -68,7 +67,6 @@ fn make_definition(slug: &str) -> ManagedAgentRecord {
         source_team_persona_slug: None,
         definition_respond_to: None,
         definition_respond_to_allowlist: vec![],
-        definition_mcp_toolsets: None,
         definition_parallelism: None,
         relay_mesh: None,
     }
@@ -99,7 +97,6 @@ fn make_snapshot(
             runtime: None,
             model: None,
             provider: None,
-            mcp_toolsets: None,
             parallelism: None,
             respond_to: None,
             respond_to_allowlist: vec![],
@@ -562,7 +559,6 @@ fn import_allowlist_uppercase_is_normalized_and_deduplicated() {
         Some("allowlist"),
         &[upper.clone(), upper.clone()], // uppercase + duplicate
         None,
-        None,
         true, // keep
     )
     .unwrap();
@@ -578,8 +574,7 @@ fn import_allowlist_uppercase_is_normalized_and_deduplicated() {
 #[test]
 fn import_allowlist_malformed_pubkey_is_rejected() {
     let bad = "notahexpubkey".to_string();
-    let err =
-        resolve_snapshot_import_behavior(Some("allowlist"), &[bad], None, None, true).unwrap_err();
+    let err = resolve_snapshot_import_behavior(Some("allowlist"), &[bad], None, true).unwrap_err();
     assert!(
         err.contains("invalid pubkey"),
         "malformed pubkey must be rejected before key generation: {err}"
@@ -595,7 +590,6 @@ fn import_non_allowlist_mode_preserved_when_keep_false() {
     let minted = resolve_snapshot_import_behavior(
         Some("anyone"),
         &[], // no allowlist — toggle never shown
-        None,
         None,
         false,
     )
@@ -620,7 +614,6 @@ fn import_non_allowlist_mode_with_nonempty_list_keep_preserves_mode_and_list() {
     let minted = resolve_snapshot_import_behavior(
         Some("anyone"),
         std::slice::from_ref(&raw),
-        None,
         None,
         true, // keep
     )
@@ -648,7 +641,6 @@ fn import_non_allowlist_mode_with_nonempty_list_clear_preserves_mode_empties_lis
         Some("anyone"),
         &[raw],
         None,
-        None,
         false, // clear
     )
     .unwrap();
@@ -673,7 +665,6 @@ fn import_allowlist_keep_with_valid_list_succeeds() {
         Some("allowlist"),
         std::slice::from_ref(&raw),
         None,
-        None,
         true, // keep
     )
     .unwrap();
@@ -690,7 +681,6 @@ fn import_allowlist_clear_downgrades_to_owner_only() {
     let minted = resolve_snapshot_import_behavior(
         Some("allowlist"),
         &[raw],
-        None,
         None,
         false, // clear
     )
@@ -715,7 +705,6 @@ fn import_empty_allowlist_mode_rejected_with_keep_false() {
         Some("allowlist"),
         &[], // empty — no entries to keep or clear
         None,
-        None,
         false, // keep=false is the default: UI never showed a choice
     )
     .unwrap_err();
@@ -733,7 +722,6 @@ fn import_empty_allowlist_mode_rejected_with_keep_true() {
         Some("allowlist"),
         &[], // empty
         None,
-        None,
         true, // keep=true: user said Keep, but the list is empty
     )
     .unwrap_err();
@@ -750,7 +738,6 @@ fn import_out_of_range_parallelism_is_rejected() {
         let err = resolve_snapshot_import_behavior(
             None, // no respond_to (defaults to owner-only)
             &[],
-            None,
             Some(bad_par),
             false,
         )
