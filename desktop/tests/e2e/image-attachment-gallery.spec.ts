@@ -571,6 +571,48 @@ test("image mosaic screenshot", async ({ page }) => {
   });
 });
 
+test("mosaic image context menu is portaled outside the clipped gallery", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  await page.getByTestId("message-input").fill("mosaic context menu");
+  await page.getByRole("button", { name: "Attach image" }).click();
+  await page.getByTestId("send-message").click();
+  await expect(page.getByText("Sending")).toHaveCount(0);
+
+  const row = page
+    .getByTestId("message-row")
+    .filter({ hasText: "mosaic context menu" })
+    .last();
+  const mosaic = row.locator("[data-image-mosaic]");
+  const trigger = row.getByTestId("message-image-lightbox-trigger").last();
+  await expect(mosaic).toBeVisible();
+  await trigger.click({ button: "right" });
+
+  const menu = page.locator("[data-image-context-menu]");
+  await expect(menu).toBeVisible();
+  await expect(page.getByRole("button", { name: "Copy image" })).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Download image" }),
+  ).toBeVisible();
+  await expect(mosaic.locator("[data-image-context-menu]")).toHaveCount(0);
+  expect(
+    await menu.evaluate((element) => element.parentElement === document.body),
+  ).toBe(true);
+
+  const mosaicBox = await mosaic.boundingBox();
+  const menuBox = await menu.boundingBox();
+  if (!mosaicBox || !menuBox) {
+    throw new Error("Expected mosaic and image context menu layout boxes");
+  }
+  expect(menuBox.x + menuBox.width).toBeGreaterThan(
+    mosaicBox.x + mosaicBox.width,
+  );
+});
+
 test("right-click image shows Copy image and invokes copy command", async ({
   page,
 }) => {

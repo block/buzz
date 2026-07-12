@@ -204,13 +204,14 @@ function ImageContextMenu({
 }) {
   const itemClass =
     "flex min-h-9 w-full cursor-default select-none items-center rounded-lg py-2 pl-2 pr-4 text-sm outline-hidden hover:bg-muted/50 hover:text-foreground";
-  return (
+  return createPortal(
     <div
       className={cn(
         "fixed z-[100] min-w-60 origin-top-left rounded-xl p-1 slide-in-from-top-1",
         POPOVER_CUSTOM_ENTER_MOTION_CLASS,
         POPOVER_SURFACE_CLASS,
       )}
+      data-image-context-menu=""
       data-image-lightbox-controls=""
       style={{ ...POPOVER_SHADOW_STYLE, left: position.x, top: position.y }}
     >
@@ -220,7 +221,8 @@ function ImageContextMenu({
       <button type="button" className={itemClass} onClick={onDownload}>
         Download image
       </button>
-    </div>
+    </div>,
+    document.body,
   );
 }
 
