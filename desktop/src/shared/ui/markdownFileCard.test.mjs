@@ -207,3 +207,20 @@ test("resolveSnapshotCard: generic FileCard not affected", () => {
   );
   assert.equal(card, null);
 });
+
+test("resolveSnapshotCard: uppercase .AGENT.JSON classifies as snapshot card", () => {
+  // Rust accepts suffixes case-insensitively; the classifier must match.
+  const card = resolveSnapshotCard(
+    {
+      m: "application/json",
+      size: 1024,
+      filename: "analyst.AGENT.JSON",
+      x: SHA256,
+    },
+    JSON_URL,
+    "",
+  );
+  assert.ok(card !== null, ".AGENT.JSON must classify as a snapshot card");
+  assert.equal(card.snapshotKind, "agent");
+  assert.equal(card.sha256, SHA256);
+});

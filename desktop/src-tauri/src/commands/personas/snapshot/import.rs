@@ -226,7 +226,16 @@ pub(crate) fn decode_snapshot_from_bytes(
             file_bytes.len() / (1024 * 1024)
         ));
     }
-    decode_snapshot_json(file_bytes)
+    let snapshot = decode_snapshot_json(file_bytes)?;
+    // Consistency check: none + non-empty entries is always malformed,
+    // regardless of format.  Mirrors the PNG path above so the rule is
+    // enforced at decode time for both formats.
+    if !snapshot.memory.entries.is_empty() && snapshot.memory.level == MemoryLevel::None {
+        return Err(
+            "Snapshot is malformed: memory.level is 'none' but entries are present.".to_string(),
+        );
+    }
+    Ok(snapshot)
 }
 
 // ── `preview_agent_snapshot_import` ──────────────────────────────────────────
@@ -249,14 +258,6 @@ pub async fn preview_agent_snapshot_import(
     tokio::task::spawn_blocking(move || {
         let _ = file_name; // used for context in error messages only
         let snapshot = decode_snapshot_from_bytes(&file_bytes)?;
-
-        // Validate: none + non-empty entries is inconsistent.
-        if snapshot.memory.level == MemoryLevel::None && !snapshot.memory.entries.is_empty() {
-            return Err(
-                "Snapshot is malformed: memory.level is 'none' but entries are present."
-                    .to_string(),
-            );
-        }
 
         let memory_level = match snapshot.memory.level {
             MemoryLevel::None => "none",
@@ -311,12 +312,6 @@ pub async fn confirm_agent_snapshot_import(
 ) -> Result<AgentSnapshotImportResult, String> {
     // ── Phase 1: validate (no I/O) ───────────────────────────────────────────
     let snapshot = decode_snapshot_from_bytes(&input.file_bytes)?;
-
-    if snapshot.memory.level == MemoryLevel::None && !snapshot.memory.entries.is_empty() {
-        return Err(
-            "Snapshot is malformed: memory.level is 'none' but entries are present.".to_string(),
-        );
-    }
 
     let display_name = snapshot.profile.display_name.trim().to_string();
     if display_name.is_empty() {

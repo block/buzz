@@ -6,7 +6,7 @@ use crate::app_state::AppState;
 use crate::commands::export_util::save_bytes_with_dialog;
 use crate::commands::media::{detect_and_validate_mime, sanitize_filename};
 use crate::commands::personas::{
-    decode_snapshot_from_bytes, MAX_SNAPSHOT_JSON_BYTES, MAX_SNAPSHOT_PNG_BYTES,
+    decode_snapshot_from_bytes, MAX_SNAPSHOT_JSON_BYTES, MAX_SNAPSHOT_PNG_BYTES, PNG_MAGIC,
 };
 use crate::relay::{classify_request_error, relay_api_base_url_with_override, relay_error_message};
 
@@ -270,14 +270,51 @@ async fn fetch_blob_bytes_with_cap(
     Ok(bytes)
 }
 
+/// The snapshot file format inferred from the sanitized filename suffix.
+/// Carries the format-specific byte cap used during bounded fetch.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum SnapshotFileKind {
+    /// `.agent.json` — plaintext JSON; accepts memory; 5 MiB cap.
+    Json,
+    /// `.agent.png` — PNG with embedded metadata; no memory; 10 MiB cap.
+    Png,
+}
+
+impl SnapshotFileKind {
+    fn cap(self) -> u64 {
+        match self {
+            SnapshotFileKind::Json => MAX_SNAPSHOT_JSON_BYTES as u64,
+            SnapshotFileKind::Png => MAX_SNAPSHOT_PNG_BYTES as u64,
+        }
+    }
+}
+
+/// Verify that the leading bytes of `bytes` are consistent with `kind`.
+///
+/// PNG magic (`\x89PNG`) is required for `Png` and must be absent for `Json`.
+/// Returns an error with a clear message on mismatch so that `fetch_snapshot_bytes`
+/// fails closed before any bytes reach the frontend.
+fn ensure_bytes_match_kind(bytes: &[u8], kind: SnapshotFileKind) -> Result<(), String> {
+    let has_png_magic = bytes.len() >= 4 && bytes[..4] == PNG_MAGIC;
+    match kind {
+        SnapshotFileKind::Png if !has_png_magic => {
+            Err("format mismatch: filename is .agent.png but bytes are not a PNG".to_string())
+        }
+        SnapshotFileKind::Json if has_png_magic => {
+            Err("format mismatch: filename is .agent.json but bytes are a PNG".to_string())
+        }
+        _ => Ok(()),
+    }
+}
+
 /// Determine whether a sanitized filename is a valid agent snapshot candidate.
-/// Returns the format-specific byte cap for the extension, or an error.
-fn snapshot_cap_for_filename(filename: &str) -> Result<u64, String> {
+/// Returns the `SnapshotFileKind` for the extension, or an error.
+fn snapshot_kind_for_filename(filename: &str) -> Result<SnapshotFileKind, String> {
     let lower = filename.to_ascii_lowercase();
     if lower.ends_with(".agent.json") {
-        Ok(MAX_SNAPSHOT_JSON_BYTES as u64)
+        Ok(SnapshotFileKind::Json)
     } else if lower.ends_with(".agent.png") {
-        Ok(MAX_SNAPSHOT_PNG_BYTES as u64)
+        Ok(SnapshotFileKind::Png)
     } else {
         Err(format!(
             "\"{}\" is not a snapshot filename — expected .agent.json or .agent.png",
@@ -318,7 +355,8 @@ pub async fn fetch_snapshot_bytes(
 
     // Sanitize the filename and verify it is a recognised snapshot extension.
     let filename = sanitize_filename(&filename);
-    let cap = snapshot_cap_for_filename(&filename)?;
+    let kind = snapshot_kind_for_filename(&filename)?;
+    let cap = kind.cap();
 
     if expected_sha256.is_empty() {
         return Err("missing expected sha256 (imeta x field)".to_string());
@@ -358,9 +396,14 @@ pub async fn fetch_snapshot_bytes(
         return Err("hash mismatch: fetched bytes do not match the declared SHA-256".to_string());
     }
 
-    // 3. Bytes must parse as a valid agent snapshot.  This rejects malformed
-    //    payloads, memory-bearing PNGs, and format/extension mismatches before
-    //    the bytes reach the frontend importer.
+    // 3. Byte magic must match the expected kind (filename → format).
+    //    This prevents .agent.png delivering JSON bytes (including memory-bearing
+    //    JSON) and .agent.json delivering PNG bytes.
+    ensure_bytes_match_kind(&bytes, kind)?;
+
+    // 4. Bytes must parse as a valid agent snapshot.  This rejects malformed
+    //    payloads, memory-bearing PNGs, JSON with inconsistent memory fields,
+    //    and any format/extension mismatch not caught by magic-byte check.
     decode_snapshot_from_bytes(&bytes).map_err(|e| format!("invalid snapshot: {e}"))?;
 
     Ok(tauri::ipc::Response::new(bytes))
@@ -371,41 +414,224 @@ mod tests {
     use super::*;
 
     #[test]
-    fn snapshot_cap_json_returns_5_mib() {
-        assert_eq!(
-            snapshot_cap_for_filename("analyst.agent.json").unwrap(),
-            MAX_SNAPSHOT_JSON_BYTES as u64
-        );
+    fn snapshot_kind_json_returns_json_kind_and_correct_cap() {
+        let kind = snapshot_kind_for_filename("analyst.agent.json").unwrap();
+        assert_eq!(kind, SnapshotFileKind::Json);
+        assert_eq!(kind.cap(), MAX_SNAPSHOT_JSON_BYTES as u64);
     }
 
     #[test]
-    fn snapshot_cap_png_returns_10_mib() {
-        assert_eq!(
-            snapshot_cap_for_filename("analyst.agent.png").unwrap(),
-            MAX_SNAPSHOT_PNG_BYTES as u64
-        );
+    fn snapshot_kind_png_returns_png_kind_and_correct_cap() {
+        let kind = snapshot_kind_for_filename("analyst.agent.png").unwrap();
+        assert_eq!(kind, SnapshotFileKind::Png);
+        assert_eq!(kind.cap(), MAX_SNAPSHOT_PNG_BYTES as u64);
     }
 
     #[test]
-    fn snapshot_cap_plain_json_rejected() {
-        assert!(snapshot_cap_for_filename("data.json").is_err());
+    fn snapshot_kind_plain_json_rejected() {
+        assert!(snapshot_kind_for_filename("data.json").is_err());
     }
 
     #[test]
-    fn snapshot_cap_deceptive_name_rejected() {
+    fn snapshot_kind_deceptive_name_rejected() {
         // foo.agent.json.exe must not match .agent.json
-        assert!(snapshot_cap_for_filename("foo.agent.json.exe").is_err());
+        assert!(snapshot_kind_for_filename("foo.agent.json.exe").is_err());
     }
 
     #[test]
-    fn snapshot_cap_plain_png_rejected() {
-        assert!(snapshot_cap_for_filename("photo.png").is_err());
+    fn snapshot_kind_plain_png_rejected() {
+        assert!(snapshot_kind_for_filename("photo.png").is_err());
     }
 
     #[test]
-    fn snapshot_cap_agent_json_only_rejected() {
+    fn snapshot_kind_agent_json_only_rejected() {
         // "agent.json" without the leading dot — plain filename, not the suffix
-        assert!(snapshot_cap_for_filename("agentjson").is_err());
+        assert!(snapshot_kind_for_filename("agentjson").is_err());
+    }
+
+    // ── Focused boundary tests: format mismatch and consistency ──────────────
+    //
+    // These tests exercise the guard logic that fetch_snapshot_bytes applies
+    // after the bounded fetch + hash check.  The validation has two layers:
+    //
+    //   1. Magic-byte kind check: filename kind (from snapshot_kind_for_filename)
+    //      must match the actual byte format (PNG magic or absence of it).
+    //   2. decode_snapshot_from_bytes: rejects malformed manifests including
+    //      JSON with level:none + non-empty entries.
+    //
+    // We verify each rejection path directly — no live HTTP required.
+
+    #[test]
+    fn fetch_boundary_png_filename_with_json_bytes_rejected() {
+        use crate::managed_agents::agent_snapshot::{
+            encode_snapshot_json, AgentSnapshot, AgentSnapshotDefinition, AgentSnapshotMemory,
+            AgentSnapshotProfile, FORMAT_DISCRIMINATOR, FORMAT_VERSION,
+        };
+        let snapshot = AgentSnapshot {
+            format: FORMAT_DISCRIMINATOR.to_string(),
+            version: FORMAT_VERSION,
+            definition: AgentSnapshotDefinition {
+                name: "test".to_string(),
+                system_prompt: None,
+                runtime: None,
+                model: None,
+                provider: None,
+                mcp_toolsets: None,
+                parallelism: None,
+                respond_to: None,
+                respond_to_allowlist: vec![],
+                name_pool: vec![],
+                idle_timeout_seconds: None,
+                max_turn_duration_seconds: None,
+            },
+            profile: AgentSnapshotProfile {
+                display_name: "Test".to_string(),
+                about: None,
+                avatar_data_url: None,
+                avatar_url: None,
+            },
+            memory: AgentSnapshotMemory {
+                level: crate::managed_agents::agent_snapshot::MemoryLevel::None,
+                entries: vec![],
+            },
+        };
+        let json_bytes = encode_snapshot_json(&snapshot).unwrap();
+        // .agent.png filename → Png kind; JSON bytes must be rejected.
+        let kind = snapshot_kind_for_filename("analyst.agent.png").unwrap();
+        let result = ensure_bytes_match_kind(&json_bytes, kind);
+        assert!(
+            result.is_err(),
+            ".agent.png filename with JSON bytes must be rejected by the magic-byte guard"
+        );
+        assert!(
+            result.unwrap_err().contains("not a PNG"),
+            "error must describe the mismatch"
+        );
+    }
+
+    #[test]
+    fn fetch_boundary_png_filename_with_memory_bearing_json_bytes_rejected() {
+        use crate::managed_agents::agent_snapshot::{
+            encode_snapshot_json, AgentSnapshot, AgentSnapshotDefinition, AgentSnapshotMemory,
+            AgentSnapshotMemoryEntry, AgentSnapshotProfile, FORMAT_DISCRIMINATOR, FORMAT_VERSION,
+        };
+        // This is the trust-hole case: memory-bearing JSON delivered under a
+        // .agent.png label to bypass the PNG no-memory policy.
+        let snapshot = AgentSnapshot {
+            format: FORMAT_DISCRIMINATOR.to_string(),
+            version: FORMAT_VERSION,
+            definition: AgentSnapshotDefinition {
+                name: "test".to_string(),
+                system_prompt: None,
+                runtime: None,
+                model: None,
+                provider: None,
+                mcp_toolsets: None,
+                parallelism: None,
+                respond_to: None,
+                respond_to_allowlist: vec![],
+                name_pool: vec![],
+                idle_timeout_seconds: None,
+                max_turn_duration_seconds: None,
+            },
+            profile: AgentSnapshotProfile {
+                display_name: "Test".to_string(),
+                about: None,
+                avatar_data_url: None,
+                avatar_url: None,
+            },
+            memory: AgentSnapshotMemory {
+                level: crate::managed_agents::agent_snapshot::MemoryLevel::Everything,
+                entries: vec![AgentSnapshotMemoryEntry {
+                    slug: "core".to_string(),
+                    body: "Secret memory.".to_string(),
+                }],
+            },
+        };
+        let json_bytes = encode_snapshot_json(&snapshot).unwrap();
+        let kind = snapshot_kind_for_filename("analyst.agent.png").unwrap();
+        let result = ensure_bytes_match_kind(&json_bytes, kind);
+        assert!(
+            result.is_err(),
+            ".agent.png filename with memory-bearing JSON bytes must be rejected"
+        );
+    }
+
+    #[test]
+    fn fetch_boundary_json_filename_with_png_bytes_rejected() {
+        use crate::managed_agents::agent_snapshot::{
+            encode_snapshot_png, AgentSnapshot, AgentSnapshotDefinition, AgentSnapshotMemory,
+            AgentSnapshotProfile, FORMAT_DISCRIMINATOR, FORMAT_VERSION,
+        };
+        let snapshot = AgentSnapshot {
+            format: FORMAT_DISCRIMINATOR.to_string(),
+            version: FORMAT_VERSION,
+            definition: AgentSnapshotDefinition {
+                name: "test".to_string(),
+                system_prompt: None,
+                runtime: None,
+                model: None,
+                provider: None,
+                mcp_toolsets: None,
+                parallelism: None,
+                respond_to: None,
+                respond_to_allowlist: vec![],
+                name_pool: vec![],
+                idle_timeout_seconds: None,
+                max_turn_duration_seconds: None,
+            },
+            profile: AgentSnapshotProfile {
+                display_name: "Test".to_string(),
+                about: None,
+                avatar_data_url: None,
+                avatar_url: None,
+            },
+            memory: AgentSnapshotMemory {
+                level: crate::managed_agents::agent_snapshot::MemoryLevel::None,
+                entries: vec![],
+            },
+        };
+        let png_bytes = encode_snapshot_png(&snapshot, None).unwrap();
+        // .agent.json filename → Json kind; PNG bytes must be rejected.
+        let kind = snapshot_kind_for_filename("analyst.agent.json").unwrap();
+        let result = ensure_bytes_match_kind(&png_bytes, kind);
+        assert!(
+            result.is_err(),
+            ".agent.json filename with PNG bytes must be rejected by the magic-byte guard"
+        );
+        assert!(
+            result.unwrap_err().contains("bytes are a PNG"),
+            "error must describe the mismatch"
+        );
+    }
+
+    #[test]
+    fn decode_boundary_json_none_level_with_entries_rejected() {
+        use crate::commands::personas::decode_snapshot_from_bytes;
+        // Construct JSON bytes directly: level=none but entries non-empty.
+        // encode_snapshot_json does not guard against this, so we can produce it.
+        let raw = serde_json::json!({
+            "format": "buzz-agent-snapshot",
+            "version": 1,
+            "definition": { "name": "test" },
+            "profile": { "displayName": "Test" },
+            "memory": {
+                "level": "none",
+                "entries": [{"slug": "core", "body": "leaked"}]
+            }
+        });
+        let bytes = serde_json::to_vec(&raw).unwrap();
+        let result = decode_snapshot_from_bytes(&bytes);
+        assert!(
+            result.is_err(),
+            "JSON with level:none + non-empty entries must be rejected by decode_snapshot_from_bytes"
+        );
+        assert!(
+            result
+                .unwrap_err()
+                .contains("'none' but entries are present"),
+            "error must describe the consistency violation"
+        );
     }
 
     const RELAY_BASE: &str = "https://relay.example.com";

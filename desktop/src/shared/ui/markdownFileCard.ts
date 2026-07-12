@@ -69,13 +69,7 @@ export function resolveSnapshotCard(
 
   // SHA-256 is required for the bounded verified fetch.
   const sha256 = entry.x?.trim();
-  if (!sha256 || sha256.length !== 64) return null;
-
-  // Reject deceptive double-extensions: the filename itself must end with
-  // exactly .agent.json or .agent.png — no additional extensions after.
-  // (sanitize_filename on the Rust side provides the second line of defence.)
-  if (isJson && !filename.endsWith(".agent.json")) return null;
-  if (isPng && !filename.endsWith(".agent.png")) return null;
+  if (sha256?.length !== 64) return null;
 
   return {
     href: rewriteRelayUrl(href),

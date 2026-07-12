@@ -982,7 +982,7 @@ const MAX_PNG_BYTES: usize = 10 * 1024 * 1024;
 const MAX_JSON_BYTES: usize = 5 * 1024 * 1024;
 const MAX_ZIP_BYTES: usize = 100 * 1024 * 1024;
 
-const PNG_MAGIC: [u8; 4] = [0x89, 0x50, 0x4E, 0x47];
+pub(crate) const PNG_MAGIC: [u8; 4] = [0x89, 0x50, 0x4E, 0x47];
 const ZIP_MAGIC: [u8; 4] = [0x50, 0x4B, 0x03, 0x04];
 const JSON_OPEN_BRACE: u8 = 0x7B;
 

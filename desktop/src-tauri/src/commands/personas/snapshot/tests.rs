@@ -464,25 +464,34 @@ fn import_json_with_memory_decodes_and_warns() {
 
 // ── Import: none + non-empty entries ─────────────────────────────────────
 
-/// memory.level == none with non-empty entries is rejected in the preview
-/// command (the validation happens in the Tauri command body, not in
-/// decode_snapshot_from_bytes, so we verify the guard logic inline here).
+/// memory.level == none with non-empty entries is rejected in
+/// decode_snapshot_from_bytes (the rule is enforced at decode time so it
+/// covers both preview, confirm, and the remote fetch boundary uniformly).
 #[test]
 fn import_none_level_with_entries_is_rejected() {
-    let snapshot = make_snapshot(
-        MemoryLevel::None,
-        vec![AgentSnapshotMemoryEntry {
-            slug: "core".to_string(),
-            body: "Some body".to_string(),
-        }],
-    );
-    // This is the exact guard in preview_agent_snapshot_import and
-    // confirm_agent_snapshot_import.
-    let is_inconsistent =
-        snapshot.memory.level == MemoryLevel::None && !snapshot.memory.entries.is_empty();
+    // Produce JSON bytes with level:none but non-empty entries.  serde happily
+    // serializes this — the guard fires in decode_snapshot_from_bytes.
+    let raw = serde_json::json!({
+        "format": "buzz-agent-snapshot",
+        "version": 1,
+        "definition": { "name": "test" },
+        "profile": { "displayName": "Test" },
+        "memory": {
+            "level": "none",
+            "entries": [{"slug": "core", "body": "Some body"}]
+        }
+    });
+    let bytes = serde_json::to_vec(&raw).unwrap();
+    let result = decode_snapshot_from_bytes(&bytes);
     assert!(
-        is_inconsistent,
-        "none level with non-empty entries must be flagged as inconsistent"
+        result.is_err(),
+        "none level with non-empty entries must be rejected by decode_snapshot_from_bytes"
+    );
+    assert!(
+        result
+            .unwrap_err()
+            .contains("'none' but entries are present"),
+        "error must describe the inconsistency"
     );
 }
 
