@@ -192,7 +192,6 @@ export function InboxDetailPane({
   isLoadingRef.current = isThreadContextLoading;
 
   // Arm the pending center whenever the selection key changes.
-  // biome-ignore lint/correctness/useExhaustiveDependencies: isLoadingRef/pendingCenterKeyRef/userScrolledRef are refs; selectedMessageScrollKey is the sole trigger
   React.useEffect(() => {
     if (!selectedMessageScrollKey) {
       pendingCenterKeyRef.current = null;
@@ -252,7 +251,10 @@ export function InboxDetailPane({
   }, [isThreadContextLoading, selectedMessageScrollKey]);
 
   // Cancel the pending center if the user scrolls before it fires.
-  // biome-ignore lint/correctness/useExhaustiveDependencies: userScrolledRef is a ref; selectedMessageScrollKey triggers reinstall on each new selection so detailPaneRef.current is populated
+  // Keyed on conversationId so listeners are reinstalled when a conversation
+  // opens — detailPaneRef.current is null before the item branch renders, so
+  // a [] effect would attach to null and miss all subsequent selections.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: conversationId is not used inside the effect body; it is listed as a dep solely to trigger re-attachment when a new conversation opens and detailPaneRef.current becomes non-null
   React.useEffect(() => {
     const pane = detailPaneRef.current;
     if (!pane) return;
@@ -270,7 +272,7 @@ export function InboxDetailPane({
       pane.removeEventListener("touchstart", handleUserScroll);
       pane.removeEventListener("keydown", handleUserScroll);
     };
-  }, [selectedMessageScrollKey]);
+  }, [conversationId]);
 
   // Capture the default composer reply parent from the selected-event anchor
   // when the conversation first opens (or when the user explicitly navigates
