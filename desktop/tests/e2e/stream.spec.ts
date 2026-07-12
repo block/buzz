@@ -44,11 +44,9 @@ async function getTimelineMetrics(page: Page) {
 async function ensureTimelineScrollable(
   senderPage: Page,
   receiverPage: Page,
+  channelName: string,
   prefix: string,
 ) {
-  const input = senderPage.getByTestId("message-input");
-  const sendButton = senderPage.getByTestId("send-message");
-
   for (let index = 0; index < 24; index += 1) {
     const metrics = await getTimelineMetrics(receiverPage);
     if (
@@ -60,9 +58,10 @@ async function ensureTimelineScrollable(
 
     const message = `${prefix} seed ${index}`;
 
-    await expect(input).toBeEnabled();
-    await input.fill(message);
-    await sendButton.click();
+    await sendChannelMessage(senderPage, {
+      channelName,
+      content: message,
+    });
     await expectTimelineToContain(receiverPage, message);
   }
 
@@ -343,13 +342,15 @@ test("stays pinned to the latest message when new messages arrive at the bottom"
     await pageTwo.goto("/");
     await createAndJoinSharedStream(pageOne, pageTwo, channelName);
 
-    await ensureTimelineScrollable(pageOne, pageTwo, prefix);
+    await ensureTimelineScrollable(pageOne, pageTwo, channelName, prefix);
     await expect
       .poll(async () => (await getTimelineMetrics(pageTwo)).distanceFromBottom)
       .toBeLessThan(8);
 
-    await pageOne.getByTestId("message-input").fill(incomingMessage);
-    await pageOne.getByTestId("send-message").click();
+    await sendChannelMessage(pageOne, {
+      channelName,
+      content: incomingMessage,
+    });
 
     await expectTimelineToContain(pageTwo, incomingMessage);
     await expect
@@ -388,7 +389,7 @@ test("stays pinned after you send a message and a remote reply arrives right aft
     await pageTwo.goto("/");
     await createAndJoinSharedStream(pageOne, pageTwo, channelName);
 
-    await ensureTimelineScrollable(pageOne, pageTwo, prefix);
+    await ensureTimelineScrollable(pageOne, pageTwo, channelName, prefix);
     await expect
       .poll(async () => (await getTimelineMetrics(pageTwo)).distanceFromBottom)
       .toBeLessThan(8);
@@ -397,8 +398,10 @@ test("stays pinned after you send a message and a remote reply arrives right aft
     await pageTwo.getByTestId("send-message").click();
     await expectTimelineToContain(pageTwo, localMessage);
 
-    await pageOne.getByTestId("message-input").fill(incomingMessage);
-    await pageOne.getByTestId("send-message").click();
+    await sendChannelMessage(pageOne, {
+      channelName,
+      content: incomingMessage,
+    });
 
     await expectTimelineToContain(pageTwo, incomingMessage);
     await expect
@@ -437,7 +440,7 @@ test("keeps bottom-pinned scrolling after the composer grows", async ({
     await pageTwo.goto("/");
     await createAndJoinSharedStream(pageOne, pageTwo, channelName);
 
-    await ensureTimelineScrollable(pageOne, pageTwo, prefix);
+    await ensureTimelineScrollable(pageOne, pageTwo, channelName, prefix);
     await expect
       .poll(async () => (await getTimelineMetrics(pageTwo)).distanceFromBottom)
       .toBeLessThan(8);
@@ -454,8 +457,10 @@ test("keeps bottom-pinned scrolling after the composer grows", async ({
       .poll(async () => (await getTimelineMetrics(pageTwo)).distanceFromBottom)
       .toBeLessThan(8);
 
-    await pageOne.getByTestId("message-input").fill(incomingMessage);
-    await pageOne.getByTestId("send-message").click();
+    await sendChannelMessage(pageOne, {
+      channelName,
+      content: incomingMessage,
+    });
 
     await expectTimelineToContain(pageTwo, incomingMessage);
     await expect
@@ -493,15 +498,17 @@ test("keeps scroll position when new messages arrive above the fold", async ({
     await pageTwo.goto("/");
     await createAndJoinSharedStream(pageOne, pageTwo, channelName);
 
-    await ensureTimelineScrollable(pageOne, pageTwo, prefix);
+    await ensureTimelineScrollable(pageOne, pageTwo, channelName, prefix);
     await expect
       .poll(async () => (await getTimelineMetrics(pageTwo)).distanceFromBottom)
       .toBeLessThan(8);
 
     await scrollTimelineAwayFromBottom(pageTwo);
 
-    await pageOne.getByTestId("message-input").fill(incomingMessage);
-    await pageOne.getByTestId("send-message").click();
+    await sendChannelMessage(pageOne, {
+      channelName,
+      content: incomingMessage,
+    });
 
     await expect(pageTwo.getByTestId("message-scroll-to-latest")).toContainText(
       "1 new message",
