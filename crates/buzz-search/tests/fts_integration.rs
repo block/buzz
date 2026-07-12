@@ -675,7 +675,7 @@ async fn deleted_events_are_excluded() {
     let c = mk_community(&pool, "a.example").await;
     let evt_id = rand_bytes32();
     let pk = rand_bytes32();
-    insert_event(&pool, c, evt_id, pk, 1, "deleted-token-q", None, 1700000000).await;
+    insert_event(&pool, c, evt_id, pk, 9, "deleted-token-q", None, 1700000000).await;
 
     // Soft-delete
     sqlx::query("UPDATE events SET deleted_at = NOW() WHERE community_id = $1 AND id = $2")
