@@ -1373,6 +1373,7 @@ function createMarkdownComponents(
           filename={snapshotCard.filename}
           size={snapshotCard.size}
           sha256={snapshotCard.sha256}
+          thumb={snapshotCard.thumb}
           onImport={(fileBytes, fileName) => {
             onImportSnapshotFromUrl?.(fileBytes, fileName);
           }}

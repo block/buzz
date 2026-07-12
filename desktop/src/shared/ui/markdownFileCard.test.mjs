@@ -224,3 +224,66 @@ test("resolveSnapshotCard: uppercase .AGENT.JSON classifies as snapshot card", (
   assert.equal(card.snapshotKind, "agent");
   assert.equal(card.sha256, SHA256);
 });
+
+// ── thumb plumbing ────────────────────────────────────────────────────────────
+
+test("resolveSnapshotCard: thumb field from imeta is forwarded for .agent.json", () => {
+  const thumbUrl = "https://relay.example/avatar.png";
+  const card = resolveSnapshotCard(
+    {
+      m: "application/json",
+      size: 500,
+      filename: "bot.agent.json",
+      x: SHA256,
+      thumb: thumbUrl,
+    },
+    JSON_URL,
+    "",
+  );
+  assert.ok(card !== null);
+  assert.equal(card.thumb, thumbUrl);
+});
+
+test("resolveSnapshotCard: relay-hosted JSON thumb is rewritten through media proxy", () => {
+  const thumbUrl = `https://relay.example/media/${"b".repeat(64)}.png`;
+  const card = resolveSnapshotCard(
+    {
+      m: "application/json",
+      size: 500,
+      filename: "bot.agent.json",
+      x: SHA256,
+      thumb: thumbUrl,
+    },
+    JSON_URL,
+    "",
+  );
+  assert.ok(card !== null);
+  assert.equal(
+    card.thumb,
+    `buzz-media://localhost/media/${"b".repeat(64)}.png`,
+  );
+});
+
+test("resolveSnapshotCard: .agent.png uses its own URL as thumb", () => {
+  const card = resolveSnapshotCard(
+    { m: "image/png", size: 2048, filename: "bot.agent.png", x: SHA256 },
+    PNG_URL,
+    "",
+  );
+  assert.ok(card !== null);
+  // PNG attachment URL is rewritten by rewriteRelayUrl — just verify it's set
+  assert.ok(
+    card.thumb != null,
+    "PNG card must have a thumb set from its own URL",
+  );
+});
+
+test("resolveSnapshotCard: .agent.json without thumb field yields undefined thumb", () => {
+  const card = resolveSnapshotCard(
+    { m: "application/json", size: 500, filename: "bot.agent.json", x: SHA256 },
+    JSON_URL,
+    "",
+  );
+  assert.ok(card !== null);
+  assert.equal(card.thumb, undefined);
+});

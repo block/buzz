@@ -171,6 +171,9 @@ export function AgentSnapshotSendDialog({
           memorySourcePubkey: linkedAgentPubkey,
         }),
       destination.id,
+      // Pass the agent's avatar URL as the NIP-92 thumb hint so the recipient
+      // card can show the avatar instead of the generic Bot icon.
+      persona.avatarUrl ?? undefined,
     );
     // Phase transitions (done/error) are driven by beginSend via setState
     // inside the controller; the mirror effect above keeps `step` in sync.

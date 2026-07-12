@@ -7,6 +7,8 @@ export type FileCardImetaEntry = {
   filename?: string;
   /** SHA-256 of the attachment bytes (from imeta `x` field). */
   x?: string;
+  /** Optional thumbnail URL (from imeta `thumb` field). */
+  thumb?: string;
 };
 
 export type ResolvedFileCard = {
@@ -30,6 +32,13 @@ export type ResolvedSnapshotCard = {
   sha256: string;
   /** Discriminant for the snapshot kind — currently only "agent". */
   snapshotKind: "agent";
+  /**
+   * Optional thumbnail URL for the card icon. For `.agent.json` attachments
+   * this comes from the imeta `thumb` field set by the sender. For
+   * `.agent.png` attachments it falls back to the attachment URL itself
+   * (the PNG is the avatar card image).
+   */
+  thumb?: string;
 };
 
 /**
@@ -77,6 +86,14 @@ export function resolveSnapshotCard(
     size: entry.size,
     sha256,
     snapshotKind: "agent",
+    // For PNG snapshots, use the attachment URL as the thumb source (it IS
+    // the avatar card image). For JSON, use the explicit imeta `thumb` field
+    // if the sender included one.
+    thumb: isPng
+      ? rewriteRelayUrl(href)
+      : entry.thumb
+        ? rewriteRelayUrl(entry.thumb)
+        : undefined,
   };
 }
 

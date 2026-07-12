@@ -11,6 +11,13 @@ export type AgentSnapshotCardProps = {
   size?: number;
   sha256: string;
   /**
+   * Optional thumbnail URL for the card icon — the agent's avatar image.
+   * When present, renders in place of the generic Bot icon. Falls back to
+   * the Bot icon when absent, when the URL is a non-image MIME, or when
+   * the image fails to load.
+   */
+  thumb?: string;
+  /**
    * Called after bytes are successfully fetched and decoded. The card
    * navigates to /agents and triggers the existing importer flow via this
    * callback. The caller (markdown renderer) must supply the app-level
@@ -41,6 +48,7 @@ export function AgentSnapshotCard({
   filename,
   size,
   sha256,
+  thumb,
   onImport,
 }: AgentSnapshotCardProps) {
   const cardRef = React.useRef<HTMLDivElement | null>(null);
@@ -50,6 +58,7 @@ export function AgentSnapshotCard({
     phase: "idle",
   });
   const inFlightRef = React.useRef(false);
+  const [thumbError, setThumbError] = React.useState(false);
 
   async function handleImport() {
     if (inFlightRef.current) return; // prevent double-click
@@ -82,18 +91,30 @@ export function AgentSnapshotCard({
   }
 
   const isFetching = importState.phase === "fetching";
+  const showThumb = !!thumb && !thumbError;
 
   return (
     <div
       ref={cardRef}
-      className="my-1 inline-flex max-w-sm flex-col gap-2 rounded-2xl border border-border/70 bg-muted/40 px-3 py-2 text-left"
+      className="my-1 inline-flex max-w-sm flex-col gap-2 rounded-2xl border border-primary/25 bg-primary/5 px-3 py-2 text-left"
       style={{ borderRadius: "1rem" }}
       data-testid="agent-snapshot-card"
     >
       {/* Header row: icon + filename */}
       <div className="flex items-center gap-2">
-        <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-background text-muted-foreground">
-          <Bot className="h-4 w-4" />
+        <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary overflow-hidden">
+          {showThumb ? (
+            <img
+              alt=""
+              className="h-full w-full object-cover"
+              data-testid="agent-snapshot-card-thumb"
+              src={thumb}
+              referrerPolicy="no-referrer"
+              onError={() => setThumbError(true)}
+            />
+          ) : (
+            <Bot className="h-4 w-4" />
+          )}
         </span>
         <div className="min-w-0 flex-1">
           <span
