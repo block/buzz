@@ -246,7 +246,7 @@ export function MessageReactions({
   return (
     <div
       className={cn(
-        "group/reactions mt-1.5 flex flex-wrap items-center gap-1.5 pt-1",
+        "group/reactions mt-1.5 flex flex-wrap items-center gap-1.5",
         className,
       )}
       data-testid="message-reactions"

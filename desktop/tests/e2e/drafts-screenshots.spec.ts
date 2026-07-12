@@ -15,8 +15,6 @@ const AGENTS_CHANNEL_ID = "94a444a4-c0a3-5966-ab05-530c6ddc2301";
 // Fixed timestamps for deterministic rendering
 const CREATED_AT_1 = "2026-07-01T10:00:00.000Z";
 const CREATED_AT_2 = "2026-07-02T14:30:00.000Z";
-const CREATED_AT_3 = "2026-07-03T09:15:00.000Z";
-const CREATED_AT_SENT = "2026-07-04T16:45:00.000Z";
 
 type StoredDraftState = {
   content: string;
@@ -65,23 +63,6 @@ const ACTIVE_DRAFTS: StoredDrafts = {
     ],
     spoileredAttachmentUrls: [],
     status: "active",
-  },
-};
-
-/** Active drafts + one sent record for shots that need both subsections. */
-const ACTIVE_AND_SENT_DRAFTS: StoredDrafts = {
-  ...ACTIVE_DRAFTS,
-  [`sent:channel:${GENERAL_CHANNEL_ID}:1720115100000-1`]: {
-    content:
-      "Shipping the draft message improvements in PR #1539 — image persistence, sent records, and the new Drafts inbox section.",
-    selectionStart: 119,
-    selectionEnd: 119,
-    channelId: GENERAL_CHANNEL_ID,
-    createdAt: CREATED_AT_3,
-    updatedAt: CREATED_AT_SENT,
-    pendingImeta: [],
-    spoileredAttachmentUrls: [],
-    status: "sent",
   },
 };
 
@@ -189,37 +170,6 @@ test.describe("drafts screenshots", () => {
     await panel.screenshot({
       path: `${SHOTS}/01-drafts-section-populated.png`,
     });
-  });
-
-  test("02 — sent subsection visible", async ({ page }) => {
-    await installMockBridge(page);
-    await patchWorkspacePubkey(page);
-    await seedDraftStore(page, ACTIVE_AND_SENT_DRAFTS);
-
-    const panel = await openDraftsPanel(page);
-
-    // Both subsection headings should render
-    await expect(panel.getByText("Drafts", { exact: true })).toBeVisible({
-      timeout: 10_000,
-    });
-    await expect(panel.getByText("Sent", { exact: true })).toBeVisible({
-      timeout: 5_000,
-    });
-
-    // At least one row in each subsection
-    const draftRows = panel.locator("[data-testid^='home-draft-item-']");
-    await expect(draftRows).toHaveCount(3, { timeout: 6_000 });
-
-    // The sent draft content should appear
-    await expect(
-      panel.getByText("Shipping the draft message improvements", {
-        exact: false,
-      }),
-    ).toBeVisible({ timeout: 5_000 });
-
-    await page.waitForTimeout(200);
-
-    await panel.screenshot({ path: `${SHOTS}/02-sent-subsection.png` });
   });
 
   test("03 — hover actions visible", async ({ page }) => {

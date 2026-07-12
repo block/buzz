@@ -165,7 +165,6 @@ test("rehost_gate_blocksSave_whenSubmissionSnapshotLacksCredential", () => {
   const canSubmit = computeEditAgentFormValidity({
     name: pinnedAgent.name,
     parallelism: "1",
-    turnTimeoutSeconds: "60",
     agentAcpCommand: pinnedAgent.acpCommand,
     acpCommand: pinnedAgent.acpCommand,
     respondTo: "mentions",
@@ -257,7 +256,6 @@ test("editValidity_allowlistWithEmptyList_blocksSave", () => {
   const base = {
     name: pinnedAgent.name,
     parallelism: "1",
-    turnTimeoutSeconds: "60",
     agentAcpCommand: pinnedAgent.acpCommand,
     acpCommand: pinnedAgent.acpCommand,
     selectedRuntimeId: "claude",

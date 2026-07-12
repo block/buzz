@@ -43,6 +43,7 @@ import { applyEditTagOverlay } from "@/features/messages/lib/applyEditTagOverlay
 import {
   emptyChannelWindowStore,
   flattenChannelWindowEvents,
+  mapChannelWindowEvents,
   mergeLiveChannelWindowEvent,
   mergeLiveThreadSummary,
   replaceNewestChannelWindow,
@@ -769,23 +770,33 @@ export function useEditMessageMutation(channel: Channel | null) {
         return;
       }
 
+      // Apply-on-success cache update: reflect the edit's new content and
+      // imeta tag set immediately, so the local cache matches what the
+      // receiver overlay (formatTimelineMessages) will produce when the
+      // edit event arrives back from the relay. (Not a true optimistic
+      // update — runs in onSuccess, not onMutate. Worth bearing the cost
+      // only because the edit event round-trip can lag perceptibly.)
+      const applyEdit = (message: RelayEvent): RelayEvent => {
+        if (message.id !== eventId) return message;
+        const nextTags = mediaTags
+          ? applyEditTagOverlay(message.tags, mediaTags)
+          : message.tags;
+        return { ...message, content, tags: nextTags };
+      };
+
+      // The WINDOW STORE is the source of truth: every live merge
+      // re-flattens it over `channelMessagesKey`, so patching only the
+      // flattened array gets reverted by the next live event (see
+      // mapChannelWindowEvents). Update the store first, then keep the
+      // flattened cache in step for immediate paint.
+      queryClient.setQueryData<ChannelWindowStore>(
+        channelWindowKey(channel.id),
+        (current) =>
+          current ? mapChannelWindowEvents(current, applyEdit) : current,
+      );
       queryClient.setQueryData<RelayEvent[]>(
         channelMessagesKey(channel.id),
-        (current = []) =>
-          current.map((message) => {
-            if (message.id !== eventId) return message;
-            // Apply-on-success cache update: reflect the edit's new content
-            // and imeta tag set immediately, so the local cache matches
-            // what the receiver overlay (formatTimelineMessages) will
-            // produce when the edit event arrives back from the relay.
-            // (Not a true optimistic update — runs in onSuccess, not
-            // onMutate. Worth bearing the cost only because the edit event
-            // round-trip can lag perceptibly.)
-            const nextTags = mediaTags
-              ? applyEditTagOverlay(message.tags, mediaTags)
-              : message.tags;
-            return { ...message, content, tags: nextTags };
-          }),
+        (current = []) => current.map(applyEdit),
       );
     },
   });

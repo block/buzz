@@ -436,7 +436,7 @@ const DEV_MIGRATION_MARKER: &str = "_dev_migration_v1";
 ///
 /// On subsequent boots (marker already present):
 ///   1. One `dst.load_all_readonly()` — dev blob read (1 keychain prompt)
-///   Returns immediately — prod keyring is NEVER accessed.
+///      Returns immediately — prod keyring is NEVER accessed.
 ///
 /// Idempotency: keys already present in `dst` are not overwritten (the agent
 /// may have rotated their key in the dev service after initial migration).

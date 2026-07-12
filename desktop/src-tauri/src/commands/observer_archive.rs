@@ -1,21 +1,26 @@
-//! Build-time flag for observer-feed archive default.
+//! Build-time flag and runtime dev-nest check for observer-feed archive default.
 //!
-//! When `BUZZ_BUILD_OBSERVER_ARCHIVE_DEFAULT` is set at build time (internal
-//! builds), `observer_archive_default_enabled()` returns `true` and the
-//! frontend auto-seeds an `owner_p` save subscription for the current identity
-//! on first run.
+//! `observer_archive_default_enabled()` returns `true` when either:
+//! - `BUZZ_BUILD_OBSERVER_ARCHIVE_DEFAULT` was set at build time (internal
+//!   builds bake in the flag via `build.rs`), **or**
+//! - the running binary is using the dev nest (`~/.buzz-dev`), which is the
+//!   case for all dev builds launched with `just staging` or `just dev`.
 //!
-//! OSS builds (env var unset) return `false` — no auto-seeding, user opts in
-//! manually via the Local Archive settings card.
+//! When `true`, the frontend auto-seeds an `owner_p` save subscription for the
+//! current identity on first run, so the observer-feed archive is on by default.
+//!
+//! OSS prod builds (baked flag unset, prod nest `~/.buzz`) return `false` —
+//! no auto-seeding; the user opts in manually via the Local Archive settings card.
 
-/// Returns `true` when an internal build has observer-feed archive default-on.
+/// Returns `true` when observer-feed archive should default to on.
 ///
-/// The frontend calls this once at startup to decide whether to seed the
-/// `owner_p` save subscription.  The result is stable for the lifetime of the
-/// binary — it is baked at compile time.
+/// True when the build has the internal baked flag set, or when the running
+/// binary is using the dev nest (`~/.buzz-dev`). The frontend calls this once
+/// at startup to decide whether to seed the `owner_p` save subscription.
 #[tauri::command]
 pub fn observer_archive_default_enabled() -> bool {
     option_env!("BUZZ_DESKTOP_BUILD_OBSERVER_ARCHIVE_DEFAULT").is_some()
+        || crate::managed_agents::nest_is_dev()
 }
 
 #[cfg(test)]

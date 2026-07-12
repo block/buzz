@@ -68,18 +68,20 @@ async function emitMockMessage(
   channelName: string,
   content: string,
   options?: {
+    kind?: number;
     mentionPubkeys?: string[];
     parentEventId?: string;
     pubkey?: string;
   },
 ) {
   const event = await page.evaluate(
-    ({ ch, mentionPubkeys, msg, parentEventId, pubkey }) => {
+    ({ ch, kind, mentionPubkeys, msg, parentEventId, pubkey }) => {
       return (
         window as Window & {
           __BUZZ_E2E_EMIT_MOCK_MESSAGE__?: (input: {
             channelName: string;
             content: string;
+            kind?: number;
             mentionPubkeys?: string[];
             parentEventId?: string | null;
             pubkey?: string;
@@ -88,6 +90,7 @@ async function emitMockMessage(
       ).__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
         channelName: ch,
         content: msg,
+        kind,
         mentionPubkeys,
         parentEventId: parentEventId ?? undefined,
         pubkey: pubkey ?? undefined,
@@ -95,6 +98,7 @@ async function emitMockMessage(
     },
     {
       ch: channelName,
+      kind: options?.kind,
       mentionPubkeys: options?.mentionPubkeys,
       msg: content,
       parentEventId: options?.parentEventId ?? null,
@@ -1476,6 +1480,88 @@ test("hovering avatar opens popover, clicking opens profile panel", async ({
   await avatarButton.click();
   await expect(profilePopover).toHaveCount(0);
   await expect(page.getByTestId("user-profile-panel")).toBeVisible();
+});
+
+test("clicking a mention chip in the timeline opens the profile panel", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await waitForMockLiveSubscription(page, "general");
+
+  await emitMockMessage(page, "general", "Ping @bob about the launch", {
+    mentionPubkeys: [TEST_IDENTITIES.bob.pubkey],
+  });
+  await waitForTimelineSettled(page);
+
+  const mentionChip = page
+    .getByTestId("message-row")
+    .filter({ hasText: "Ping @bob about the launch" })
+    .locator("[data-mention]", { hasText: "@bob" });
+  await expect(mentionChip).toBeVisible();
+  await mentionChip.click();
+
+  const panel = page.getByTestId("user-profile-panel");
+  await expect(panel).toBeVisible();
+  await expect(panel).toContainText("bob");
+});
+
+test("mention text matching the kind-0 name alias resolves and opens the profile panel", async ({
+  page,
+}) => {
+  // bob's mock profile has display_name "bob" and kind-0 name "bobby". A
+  // message that says "@bobby" (how agents/CLI resolve mentions at send time)
+  // must still render a clickable chip bound to bob's pubkey.
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await waitForMockLiveSubscription(page, "general");
+
+  await emitMockMessage(page, "general", "Ask @bobby to review the doc", {
+    mentionPubkeys: [TEST_IDENTITIES.bob.pubkey],
+  });
+  await waitForTimelineSettled(page);
+
+  const mentionChip = page
+    .getByTestId("message-row")
+    .filter({ hasText: "Ask @bobby to review the doc" })
+    .locator("[data-mention]", { hasText: "@bobby" });
+  await expect(mentionChip).toBeVisible();
+  await mentionChip.click();
+
+  const panel = page.getByTestId("user-profile-panel");
+  await expect(panel).toBeVisible();
+  await expect(panel).toContainText("bob");
+});
+
+test("clicking a mention chip in a forum post opens the profile panel", async ({
+  page,
+}) => {
+  await page.goto("/");
+  // Seed the forum post before entering the channel — forum views load from
+  // the mock store on fetch, so no live subscription is needed.
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await emitMockMessage(page, "watercooler", "Welcome aboard @bob!", {
+    kind: 45001,
+    mentionPubkeys: [TEST_IDENTITIES.bob.pubkey],
+  });
+
+  await page.getByTestId("channel-watercooler").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("watercooler");
+
+  const mentionChip = page.locator("[data-mention]", { hasText: "@bob" });
+  await expect(mentionChip).toBeVisible();
+  await mentionChip.click();
+
+  const panel = page.getByTestId("user-profile-panel");
+  await expect(panel).toBeVisible();
+  await expect(panel).toContainText("bob");
+  // The chip click must not bubble into the card and open the thread view.
+  await expect(page.getByRole("button", { name: "Back to posts" })).toHaveCount(
+    0,
+  );
 });
 
 test("bot profile only exposes message action", async ({ page }) => {

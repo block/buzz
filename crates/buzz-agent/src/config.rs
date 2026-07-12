@@ -70,6 +70,32 @@ impl ThinkingEffort {
     }
 }
 
+/// Strip any endpoint-naming prefix from a model name so the family classifiers
+/// (`is_manual_budget_model`, `is_adaptive_thinking_model`, etc.) can match on the canonical
+/// `claude-*` form regardless of how the model is stored in the Databricks catalog.
+///
+/// Rather than maintaining an allowlist of known prefixes, this function finds the first
+/// occurrence of a known model-family token (`claude-`, `gpt-`) and drops everything before
+/// it. This handles any endpoint naming convention without needing to enumerate prefixes.
+///
+/// Examples:
+/// - `databricks-claude-fable-5`  → `claude-fable-5`
+/// - `goose-claude-fable-5`       → `claude-fable-5`
+/// - `team-x-claude-opus-4-7`     → `claude-opus-4-7`
+/// - `goose-gpt-5.5`              → `gpt-5.5`
+/// - `llama-3`                    → `llama-3` (no family token, returned unchanged)
+///
+/// If no family token is present the name is returned unchanged.
+fn strip_catalog_prefix(model: &str) -> &str {
+    const FAMILY_TOKENS: &[&str] = &["claude-", "gpt-"];
+    let lower = model.to_ascii_lowercase();
+    let first_idx = FAMILY_TOKENS.iter().filter_map(|tok| lower.find(tok)).min();
+    match first_idx {
+        Some(idx) => &model[idx..],
+        None => model,
+    }
+}
+
 /// Build the Anthropic thinking/effort request fields for the given model and effort level.
 ///
 /// API shape selection (per Anthropic extended-thinking support table,
@@ -90,8 +116,9 @@ impl ThinkingEffort {
 /// **Everything else** — omit both fields. This includes unknown/future `claude-*` names
 /// not yet in the support table. Safer to omit than to guess an unverified shape.
 ///
-/// The Databricks `databricks-` prefix is stripped before matching so that
-/// `databricks-claude-opus-4-7` routes to the adaptive bucket.
+/// The Databricks `databricks-` and other endpoint-naming prefixes are stripped before
+/// matching so that `databricks-claude-opus-4-7`, `goose-claude-fable-5`, and
+/// `team-x-claude-opus-4-7` all route to the correct bucket. See `strip_catalog_prefix`.
 ///
 /// Returns `(thinking_field, output_config_field)` where each is `None` if not applicable.
 pub fn anthropic_thinking_config(
@@ -100,11 +127,11 @@ pub fn anthropic_thinking_config(
     max_output_tokens: u32,
 ) -> (Option<serde_json::Value>, Option<serde_json::Value>) {
     use serde_json::json;
-    // Normalise the model name for matching: strip Databricks gateway prefixes
-    // (e.g. "databricks-claude-opus-4-7" → "claude-opus-4-7").
-    let model = effective_model
-        .strip_prefix("databricks-")
-        .unwrap_or(effective_model);
+    // Normalise the model name for matching: strip any endpoint-naming prefix
+    // (e.g. "databricks-claude-opus-4-7" → "claude-opus-4-7",
+    //       "goose-claude-fable-5"        → "claude-fable-5",
+    //       "team-x-claude-opus-4-7"      → "claude-opus-4-7").
+    let model = strip_catalog_prefix(effective_model);
 
     if is_manual_budget_model(model) {
         // Manual-budget shape: budget_tokens must be strictly < max_tokens AND must leave
@@ -148,6 +175,20 @@ pub fn anthropic_thinking_config(
     }
 }
 
+/// Returns true for adaptive Anthropic models that support the `xhigh` effort level.
+///
+/// Used by both `clamp_adaptive_effort` (request-time) and `anthropic_efforts_for_model`
+/// (UI capability table) to keep xhigh-support classification in a single place.
+///
+/// `model` must already have catalog prefixes stripped (via `strip_catalog_prefix`).
+fn anthropic_model_supports_xhigh(model: &str) -> bool {
+    model.starts_with("claude-opus-4-7")
+        || model.starts_with("claude-opus-4-8")
+        || model.starts_with("claude-sonnet-5")
+        || model.starts_with("claude-fable-5")
+        || model.starts_with("claude-mythos-5")
+}
+
 /// Clamp the requested effort level to the highest doc-verified level for the given adaptive model.
 ///
 /// Doc-verified availability (Anthropic effort page, July 2025):
@@ -160,16 +201,10 @@ pub fn anthropic_thinking_config(
 /// supported level below the requested one, and logs a warning. This is dynamic (not
 /// startup-time) because `session/set_model` can change the model after startup.
 ///
-/// `model` must already have the `databricks-` prefix stripped.
+/// `model` must already have catalog prefixes stripped (via `strip_catalog_prefix`).
 pub fn clamp_adaptive_effort(model: &str, effort: ThinkingEffort) -> ThinkingEffort {
     // Models that support all levels including xhigh (and max).
-    let supports_xhigh = model.starts_with("claude-opus-4-7")
-        || model.starts_with("claude-opus-4-8")
-        || model.starts_with("claude-sonnet-5")
-        || model.starts_with("claude-fable-5")
-        || model.starts_with("claude-mythos-5");
-    // NOTE: claude-mythos-preview does NOT support xhigh (xhigh → clamp to high).
-    // All adaptive models support low/medium/high and max.
+    let supports_xhigh = anthropic_model_supports_xhigh(model);
 
     let clamped = if supports_xhigh {
         effort // all levels pass through
@@ -347,6 +382,58 @@ fn openai_efforts_for_model(model: &str) -> Option<&'static [ThinkingEffort]> {
     }
 }
 
+/// Returns the effort capability set for a given Anthropic model.
+///
+/// This is the single production source of truth for Anthropic family routing.
+/// Both `anthropic_thinking_config` (request-time) and the effort-table UI
+/// (`valid_effort_values_for_provider_model`, via its Anthropic branch) must
+/// derive their behaviour from this helper so the two stay in sync.
+///
+/// Returns `(valid_values, default)` where:
+/// - `valid_values` is the static slice of `ThinkingEffort` values accepted
+///   by this model family's effort dropdown.
+/// - `default` is `None` for manual-budget models (no semantic default —
+///   user must choose) or `Some(High)` for adaptive families.
+///
+/// `model` must already have catalog prefixes stripped (via `strip_catalog_prefix`).
+pub fn anthropic_efforts_for_model(
+    model: &str,
+) -> (&'static [ThinkingEffort], Option<ThinkingEffort>) {
+    const MANUAL: &[ThinkingEffort] = &[
+        ThinkingEffort::Low,
+        ThinkingEffort::Medium,
+        ThinkingEffort::High,
+    ];
+    const ADAPTIVE_XHIGH: &[ThinkingEffort] = &[
+        ThinkingEffort::Low,
+        ThinkingEffort::Medium,
+        ThinkingEffort::High,
+        ThinkingEffort::XHigh,
+        ThinkingEffort::Max,
+    ];
+    const ADAPTIVE_NO_XHIGH: &[ThinkingEffort] = &[
+        ThinkingEffort::Low,
+        ThinkingEffort::Medium,
+        ThinkingEffort::High,
+        ThinkingEffort::Max,
+    ];
+
+    if is_manual_budget_model(model) {
+        return (MANUAL, None);
+    }
+    if is_adaptive_thinking_model(model) {
+        // Reuse `anthropic_model_supports_xhigh` (the single source of truth
+        // shared with `clamp_adaptive_effort`) — no side-effects, no duplication.
+        if anthropic_model_supports_xhigh(model) {
+            return (ADAPTIVE_XHIGH, Some(ThinkingEffort::High));
+        } else {
+            return (ADAPTIVE_NO_XHIGH, Some(ThinkingEffort::High));
+        }
+    }
+    // Unknown Anthropic model — assume full adaptive (xhigh-capable) as a safe default.
+    (ADAPTIVE_XHIGH, Some(ThinkingEffort::High))
+}
+
 /// Resolve the nearest supported effort level for a given OpenAI model.
 ///
 /// When the requested effort is not in the model's supported set, falls back to the
@@ -489,7 +576,7 @@ pub fn normalize_effort_for_anthropic_route(effort: ThinkingEffort) -> Option<Th
 /// - claude-opus-4-5: effort page states "uses manual thinking, where effort works alongside
 ///   the thinking token budget" — manual bucket, not adaptive.
 ///
-/// `model` must already have the `databricks-` prefix stripped.
+/// `model` must already have catalog prefixes stripped (via `strip_catalog_prefix`).
 fn is_manual_budget_model(model: &str) -> bool {
     model.starts_with("claude-3") || model == "claude-opus-4-5"
 }
@@ -506,7 +593,7 @@ fn is_manual_budget_model(model: &str) -> bool {
 /// Note: Opus 4.5 is NOT in this bucket — it uses manual budget (see `is_manual_budget_model`).
 /// No prefix wildcards over version numbers; each entry is doc-verified explicitly.
 ///
-/// `model` must already have the `databricks-` prefix stripped.
+/// `model` must already have catalog prefixes stripped (via `strip_catalog_prefix`).
 fn is_adaptive_thinking_model(model: &str) -> bool {
     // Exact version strings for Opus 4.x adaptive models (4.6, 4.7, 4.8).
     // Opus 4.5 is excluded — manual budget only.
@@ -1526,6 +1613,45 @@ mod tests {
         assert_eq!(oc["effort"], "medium");
     }
 
+    #[test]
+    fn anthropic_thinking_config_goose_prefix_stripped_for_fable_5() {
+        // "goose-" catalog prefix must be stripped so goose-claude-fable-5 routes to
+        // the adaptive + xhigh/max bucket, not the "unknown model → (None, None)" path.
+        let (thinking, output_config) =
+            anthropic_thinking_config("goose-claude-fable-5", ThinkingEffort::Max, 32_768);
+        let t =
+            thinking.expect("thinking:{type:adaptive} must be present for goose-claude-fable-5");
+        assert_eq!(t["type"], "adaptive");
+        let oc = output_config.expect("output_config must be present for goose-claude-fable-5");
+        assert_eq!(oc["effort"], "max");
+    }
+
+    #[test]
+    fn anthropic_thinking_config_goose_prefix_stripped_for_sonnet_5() {
+        // Adaptive xhigh model via goose- prefix.
+        let (thinking, output_config) =
+            anthropic_thinking_config("goose-claude-sonnet-5", ThinkingEffort::XHigh, 32_768);
+        let t =
+            thinking.expect("thinking:{type:adaptive} must be present for goose-claude-sonnet-5");
+        assert_eq!(t["type"], "adaptive");
+        let oc = output_config.expect("output_config must be present for goose-claude-sonnet-5");
+        assert_eq!(oc["effort"], "xhigh");
+    }
+
+    #[test]
+    fn anthropic_thinking_config_arbitrary_prefix_stripped_for_opus_4_7() {
+        // team-x-claude-opus-4-7: first claude- token at index 7 → strips "team-x-"
+        // Verifies the arbitrary-prefix normalization reaches anthropic_thinking_config
+        // end-to-end: UI exposes max as valid, and runtime must honor it.
+        let (thinking, output_config) =
+            anthropic_thinking_config("team-x-claude-opus-4-7", ThinkingEffort::Max, 32_768);
+        let t =
+            thinking.expect("thinking:{type:adaptive} must be present for team-x-claude-opus-4-7");
+        assert_eq!(t["type"], "adaptive");
+        let oc = output_config.expect("output_config must be present for team-x-claude-opus-4-7");
+        assert_eq!(oc["effort"], "max");
+    }
+
     // ---- clamp_adaptive_effort — per-model clamping tests ----
 
     #[test]
@@ -2363,6 +2489,162 @@ mod tests {
                 normalize_effort_for_openai_route(effort, "llama-4"),
                 effort,
                 "unknown model: {effort:?} must pass through unchanged"
+            );
+        }
+    }
+
+    // ---- effort-table fixture sync guard ----------------------------------------
+    //
+    // Loads `effortTable.fixture.json` (the single source of truth shared with
+    // the TS test in `buzzAgentConfig.test.mjs`) and verifies that this Rust
+    // implementation produces the same valid-effort-value sets and default values
+    // as the TS `getProviderEffortConfig` function.
+    //
+    // Drift (a new model family added to one side but not the other) fails CI here
+    // before it can silently diverge in production.
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    /// Compute the valid effort values for a provider/model pair, mirroring
+    /// `getProviderEffortConfig` in `buzzAgentConfig.ts`.
+    ///
+    /// Returns `(valid_values, default_value)` where `default_value` is `None`
+    /// for Anthropic manual-budget models (TS `defaultValue: null`), otherwise
+    /// `Some("medium")` or `Some("high")`.
+    fn valid_effort_values_for_provider_model(
+        provider: &str,
+        model: &str,
+    ) -> (Vec<&'static str>, Option<&'static str>) {
+        const ALL_7: &[&str] = &["none", "minimal", "low", "medium", "high", "xhigh", "max"];
+        const ALL_EXCEPT_MAX: &[&str] = &["none", "minimal", "low", "medium", "high", "xhigh"];
+        const GPT5_PRO: &[&str] = &["high"];
+        const GPT5_1: &[&str] = &["none", "low", "medium", "high"];
+
+        let p = provider.to_ascii_lowercase();
+        // Strip arbitrary endpoint-naming prefix before model matching, mirroring TS and
+        // strip_catalog_prefix: find the first known family token (claude-, gpt-) and
+        // drop everything before it. Handles any catalog naming convention.
+        let raw_model = model.trim();
+        let lower_raw = raw_model.to_ascii_lowercase();
+        const FAMILY_TOKENS: &[&str] = &["claude-", "gpt-"];
+        let first_idx = FAMILY_TOKENS
+            .iter()
+            .filter_map(|tok| lower_raw.find(tok))
+            .min();
+        let stripped = match first_idx {
+            Some(idx) => &raw_model[idx..],
+            None => raw_model,
+        };
+        let m = stripped.to_ascii_lowercase();
+
+        // Thin adapter: converts production helper output to the string-based
+        // return type used by this function.
+        fn anthropic_result(m: &str) -> (Vec<&'static str>, Option<&'static str>) {
+            let (values, default) = anthropic_efforts_for_model(m);
+            let strs: Vec<&'static str> = values.iter().map(|e| e.openai_effort_str()).collect();
+            (strs, default.map(|e| e.openai_effort_str()))
+        }
+
+        fn openai_result(m: &str) -> (Vec<&'static str>, Option<&'static str>) {
+            if let Some(values) = openai_efforts_for_model(m) {
+                let strs: Vec<&'static str> =
+                    values.iter().map(|e| e.openai_effort_str()).collect();
+                // Determine default from the family.
+                let default_val = if strs == GPT5_PRO {
+                    Some("high")
+                } else if strs == GPT5_1 {
+                    Some("none")
+                } else {
+                    Some("medium")
+                };
+                (strs, default_val)
+            } else {
+                // Unknown model → all-except-max, default medium.
+                (ALL_EXCEPT_MAX.to_vec(), Some("medium"))
+            }
+        }
+
+        if p == "anthropic" {
+            return anthropic_result(&m);
+        }
+        if p == "openai" {
+            return openai_result(&m);
+        }
+        if p == "databricks_v2" {
+            if m.starts_with("claude-") {
+                return anthropic_result(&m);
+            }
+            // gpt-5 family check mirrors gpt5FamilyModel in TS.
+            let is_gpt5 = gpt5_token_matches(&m, "gpt-5-pro")
+                || gpt5_token_matches(&m, "gpt5-pro")
+                || gpt5_token_matches(&m, "gpt-5.5")
+                || gpt5_token_matches(&m, "gpt5.5")
+                || gpt5_token_matches(&m, "gpt-5.4")
+                || gpt5_token_matches(&m, "gpt5.4")
+                || gpt5_token_matches(&m, "gpt-5.1")
+                || gpt5_token_matches(&m, "gpt5.1")
+                || gpt5_base_matches(&m, "gpt-5")
+                || gpt5_base_matches(&m, "gpt5");
+            if is_gpt5 {
+                return openai_result(&m);
+            }
+            if !m.is_empty() {
+                // Concrete non-claude, non-gpt5: MLflow path → all-except-max.
+                return openai_result(&m);
+            }
+            // Blank model: route unknown, all-7.
+            return (ALL_7.to_vec(), Some("medium"));
+        }
+        if p == "databricks" {
+            return openai_result(&m);
+        }
+        // openai-compat, unknown, empty → all-7, default medium.
+        (ALL_7.to_vec(), Some("medium"))
+    }
+
+    #[derive(serde::Deserialize)]
+    struct FixtureEntry {
+        note: Option<String>,
+        provider: String,
+        model: String,
+        #[serde(rename = "validValues")]
+        valid_values: Vec<String>,
+        #[serde(rename = "defaultValue")]
+        default_value: Option<String>,
+    }
+
+    #[test]
+    fn effort_table_fixture_matches_rust_implementation() {
+        let fixture_json =
+            include_str!("../../../desktop/src/features/agents/ui/effortTable.fixture.json");
+        let entries: Vec<FixtureEntry> =
+            serde_json::from_str(fixture_json).expect("fixture must be valid JSON");
+
+        assert!(
+            !entries.is_empty(),
+            "fixture must contain at least one entry"
+        );
+
+        for entry in &entries {
+            let label = entry.note.as_deref().unwrap_or(entry.model.as_str());
+            let (valid_values, default_value) =
+                valid_effort_values_for_provider_model(&entry.provider, &entry.model);
+
+            let expected: Vec<&str> = entry.valid_values.iter().map(String::as_str).collect();
+            assert_eq!(
+                valid_values, expected,
+                "validValues mismatch for fixture entry \"{label}\" \
+                 (provider={}, model={}): Rust side has {valid_values:?}, \
+                 fixture expects {expected:?}",
+                entry.provider, entry.model,
+            );
+
+            let expected_default: Option<&str> = entry.default_value.as_deref();
+            assert_eq!(
+                default_value, expected_default,
+                "defaultValue mismatch for fixture entry \"{label}\" \
+                 (provider={}, model={}): Rust side has {default_value:?}, \
+                 fixture expects {expected_default:?}",
+                entry.provider, entry.model,
             );
         }
     }

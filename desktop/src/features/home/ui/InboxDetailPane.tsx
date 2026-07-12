@@ -18,6 +18,7 @@ import {
   hasSameMessageAuthor,
   isWithinGroupingWindow,
 } from "@/features/messages/lib/messageGrouping";
+import { getThreadReference } from "@/features/messages/lib/threading";
 import { MessageComposer } from "@/features/messages/ui/MessageComposer";
 import { UpdateIndicator } from "@/features/settings/UpdateIndicator";
 import type { Channel } from "@/shared/api/types";
@@ -201,13 +202,17 @@ export function InboxDetailPane({
             id: item.id,
             isSelected: true,
             mentionNames: item.mentionNames,
+            mentionPubkeysByName: item.mentionPubkeysByName,
             timeLabel: formatTime(item.item.createdAt),
           },
           ...pendingReplyMessages,
         ];
   const replyTarget =
     displayMessages.find((message) => message.id === replyTargetId) ?? null;
-  const composerParentEventId = replyTarget?.id ?? item.id;
+  const composerParentEventId =
+    replyTarget?.id ??
+    getThreadReference(item.item.tags ?? []).parentId ??
+    item.id;
   const composerReplyTarget =
     replyTarget && replyTarget.id !== item.id
       ? {

@@ -1,5 +1,11 @@
 import * as React from "react";
 
+import {
+  depthGuideActionsEqual,
+  numberArrayEqual,
+  reactionsEqual,
+  tagsEqual,
+} from "@/features/messages/lib/messageRowEquality";
 import type { TimelineMessage } from "@/features/messages/types";
 import { HuddleAttachment } from "@/features/huddle/components/HuddleAttachment";
 import { MessageReactions } from "@/features/messages/ui/MessageReactions";
@@ -28,10 +34,7 @@ import { useChannelNavigation } from "@/shared/context/ChannelNavigationContext"
 import { parseImetaTags } from "@/features/messages/lib/parseImeta";
 import { useMessageEmoji } from "@/features/messages/lib/useMessageEmoji";
 import { parseWaveMessageContent } from "@/features/messages/lib/waveMessage";
-import {
-  resolveMentionNames,
-  resolveMentionPubkeysByName,
-} from "@/shared/lib/resolveMentionNames";
+import { resolveMentionProps } from "@/shared/lib/resolveMentionNames";
 import { Markdown } from "@/shared/ui/markdown";
 import type { VideoReviewContext } from "@/shared/ui/VideoPlayer";
 import { MessageActionBar } from "./MessageActionBar";
@@ -164,12 +167,8 @@ export const MessageRow = React.memo(
       },
       [channelId, openReminder],
     );
-    const mentionNames = React.useMemo(
-      () => resolveMentionNames(message.tags, profiles),
-      [profiles, message.tags],
-    );
-    const mentionPubkeysByName = React.useMemo(
-      () => resolveMentionPubkeysByName(message.tags, profiles),
+    const { mentionNames, mentionPubkeysByName } = React.useMemo(
+      () => resolveMentionProps(message.tags, profiles),
       [profiles, message.tags],
     );
     // The agent-pubkey set is computed once by the parent (ChannelScreen)
@@ -788,19 +787,29 @@ export const MessageRow = React.memo(
     prev.message.kind === next.message.kind &&
     prev.message.pending === next.message.pending &&
     prev.message.edited === next.message.edited &&
-    prev.message.reactions === next.message.reactions &&
-    prev.message.tags === next.message.tags &&
+    // Value comparisons, not identity: these arrays are rebuilt with fresh
+    // identities on every ingest/refetch even when unchanged — identity
+    // checks made every row re-render on every streamed event in an open
+    // thread (see messageRowEquality.ts).
+    reactionsEqual(prev.message.reactions, next.message.reactions) &&
+    tagsEqual(prev.message.tags, next.message.tags) &&
     prev.message.role === next.message.role &&
     prev.message.personaDisplayName === next.message.personaDisplayName &&
     prev.agentPubkeys === next.agentPubkeys &&
-    prev.collapseDepthGuideActions === next.collapseDepthGuideActions &&
+    depthGuideActionsEqual(
+      prev.collapseDepthGuideActions,
+      next.collapseDepthGuideActions,
+    ) &&
     prev.collapseDescendantsLabel === next.collapseDescendantsLabel &&
     prev.connectDescendants === next.connectDescendants &&
-    prev.depthGuideDepths === next.depthGuideDepths &&
+    numberArrayEqual(prev.depthGuideDepths, next.depthGuideDepths) &&
     prev.highlightDescendantRail === next.highlightDescendantRail &&
     prev.highlighted === next.highlighted &&
     prev.highlightReplyConnector === next.highlightReplyConnector &&
-    prev.highlightThreadLineDepths === next.highlightThreadLineDepths &&
+    numberArrayEqual(
+      prev.highlightThreadLineDepths,
+      next.highlightThreadLineDepths,
+    ) &&
     prev.hoverBackground === next.hoverBackground &&
     prev.huddleMemberPubkeys === next.huddleMemberPubkeys &&
     prev.huddleMemberPubkeysPending === next.huddleMemberPubkeysPending &&

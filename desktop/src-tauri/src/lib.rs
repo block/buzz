@@ -48,8 +48,10 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
-use tauri::{Emitter, Manager, RunEvent};
+use tauri::{Emitter, Listener, Manager, RunEvent};
 use tauri_plugin_window_state::StateFlags;
+
+const INITIAL_RENDER_READY_EVENT: &str = "initial-render-ready";
 
 #[tauri::command]
 fn perform_sidebar_default_haptic() {
@@ -152,6 +154,70 @@ fn toggle_maximize(window: &tauri::Window) {
     }
 }
 
+fn reveal_initial_window<R: tauri::Runtime>(window: &tauri::Window<R>) {
+    if let Err(error) = window.show() {
+        eprintln!("buzz-desktop: failed to reveal main window: {error}");
+        return;
+    }
+    if let Err(error) = window.set_focus() {
+        eprintln!("buzz-desktop: failed to focus main window: {error}");
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn set_initial_window_backing<R: tauri::Runtime>(window: &tauri::Window<R>) {
+    // The window remains transparent at runtime for vibrancy. Use an opaque
+    // native backing only across the first visible frames so the previous app
+    // cannot show through before WebKit has submitted its first surface.
+    if let Err(error) = window.set_background_color(Some(tauri::window::Color(17, 21, 24, 255))) {
+        eprintln!("buzz-desktop: failed to set initial window backing: {error}");
+    }
+}
+
+#[cfg(target_os = "macos")]
+async fn clear_initial_window_backing<R: tauri::Runtime>(window: &tauri::Window<R>) {
+    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    if let Err(error) = window.set_background_color(None) {
+        eprintln!("buzz-desktop: failed to clear initial window backing: {error}");
+    }
+}
+
+#[cfg(target_os = "macos")]
+async fn wait_for_stable_initial_window_geometry<R: tauri::Runtime>(window: &tauri::Window<R>) {
+    const MAX_POLLS: usize = 120;
+    const REQUIRED_STABLE_POLLS: usize = 4;
+
+    let mut previous_bounds = None;
+    let mut stable_polls = 0;
+
+    for _ in 0..MAX_POLLS {
+        // Accept whatever geometry the window-state plugin restores — maximized
+        // or a normal saved size. macOS applies the restore asynchronously, so
+        // we only need consecutive identical outer bounds to know it settled.
+        // Gating on `is_maximized()` here would leave `bounds` permanently
+        // `None` for restored non-maximized windows and stall the reveal until
+        // the poll timeout.
+        let bounds = match (window.outer_position(), window.outer_size()) {
+            (Ok(position), Ok(size)) => Some((position.x, position.y, size.width, size.height)),
+            _ => None,
+        };
+
+        if bounds.is_some() && bounds == previous_bounds {
+            stable_polls += 1;
+            if stable_polls >= REQUIRED_STABLE_POLLS {
+                return;
+            }
+        } else {
+            stable_polls = 0;
+        }
+        previous_bounds = bounds;
+
+        tokio::time::sleep(std::time::Duration::from_millis(16)).await;
+    }
+
+    eprintln!("buzz-desktop: initial window geometry did not settle before reveal timeout");
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let builder = tauri::Builder::default()
@@ -172,9 +238,59 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(
             tauri_plugin_window_state::Builder::default()
-                // Visibility is excluded: the window starts hidden and the
-                // frontend shows it once ready.
+                // Visibility is excluded: the native reveal plugin below
+                // shows the window after saved geometry has been restored.
                 .with_state_flags(StateFlags::all() & !StateFlags::VISIBLE)
+                .build(),
+        )
+        .plugin(
+            tauri::plugin::Builder::<_, ()>::new("initial-window-reveal")
+                .on_webview_ready(|webview| {
+                    if webview.label() != "main" {
+                        return;
+                    }
+
+                    // macOS applies the restored geometry asynchronously. Wait
+                    // for several identical outer bounds and for React to
+                    // commit the startup surface before revealing it.
+                    let window = webview.window();
+
+                    #[cfg(target_os = "macos")]
+                    {
+                        set_initial_window_backing(&window);
+
+                        let (initial_render_tx, initial_render_rx) = tokio::sync::oneshot::channel();
+                        window
+                            .app_handle()
+                            .once(INITIAL_RENDER_READY_EVENT, move |_| {
+                                let _ = initial_render_tx.send(());
+                            });
+
+                        tauri::async_runtime::spawn(async move {
+                            wait_for_stable_initial_window_geometry(&window).await;
+
+                            if tokio::time::timeout(
+                                std::time::Duration::from_secs(5),
+                                initial_render_rx,
+                            )
+                            .await
+                            .is_err()
+                            {
+                                eprintln!(
+                                    "buzz-desktop: initial render did not commit before reveal timeout"
+                                );
+                            }
+
+                            reveal_initial_window(&window);
+                            clear_initial_window_backing(&window).await;
+                        });
+                    }
+
+                    #[cfg(not(target_os = "macos"))]
+                    {
+                        reveal_initial_window(&window);
+                    }
+                })
                 .build(),
         )
         .plugin(tauri_plugin_websocket::init())
@@ -652,7 +768,10 @@ pub fn run() {
             get_agent_config_surface,
             get_runtime_file_config,
             get_baked_build_env_keys,
+            get_baked_build_env,
             put_agent_session_config,
+            get_global_agent_config,
+            set_global_agent_config,
             mesh_availability,
             mesh_start_node,
             mesh_ensure_client_node,

@@ -56,41 +56,134 @@ export function parsePromptText(text: string): {
 }
 
 /**
- * Split the framed `session/new` `systemPrompt` into its `Base`/`System`
- * sub-sections deterministically.
+ * Split the framed `session/new` `systemPrompt` into its `Base`/`System`/
+ * `Team Instructions`/`Core Memory`/`Channel Canvas` sub-sections
+ * deterministically.
  *
- * The harness frames the value as `[Base]\n{base}\n\n[System]\n{persona}`, with
- * either prompt omitted when absent: base-only is `[Base]\n{base}`, persona-only
- * is `[System]\n{persona}`. We partition on the FIRST `\n[System]\n` boundary and
- * read each labeled body literally. Unlike the generic `parsePromptSections`,
- * embedded `[...]` lines inside a body never start a new section — so a persona
- * containing a bracketed line, or a mid-string-elided header on an oversize
- * prompt, can never drop a label or inflate the section count.
+ * The harness composes the value in order:
+ *   `[Base]\n{base}\n\n[System]\n{persona}\n\n[Agent Memory — core]\n{core}\n\n[Channel Canvas]\n{canvas}`
+ * with any section omitted when absent. For team-pack agents the persona body
+ * already contains the pack-level instructions appended by `compose_prompt()`
+ * in `buzz-persona/src/resolve.rs`:
+ *   `{persona_body}\n\n---\n# Team Instructions\n{pack_instructions}`
+ * Extraction runs in reverse producer order so that each `lastIndexOf` search
+ * operates on the full input and each extraction boundary is unambiguous.
+ *
+ * Four extraction passes before Base/System parsing:
+ *
+ * 1. **Canvas** (`[Channel Canvas]`): appended last by `with_canvas()`.
+ *    - Start-of-string: canvas-only input.
+ *    - Appended frame (`\n\n[Channel Canvas]\n`): blank-line separator used by
+ *      `with_canvas()`; LAST occurrence guards against an embedded header in a
+ *      persona body (single preceding newline only).
+ *
+ * 2. **Core** (`[Agent Memory — core]`): appended before canvas by `with_core()`.
+ *    Same two cases, same last-occurrence guard.
+ *
+ * 3. **Base/System**: remainder after canvas and core extraction.
+ *    Split on the first `\n[System]\n` boundary; no embedded `[...]` line
+ *    inside a body can start a new section.
+ *
+ * 4. **Team Instructions**: if the `System` body contains the exact canonical
+ *    delimiter `\n\n---\n# Team Instructions\n` (produced by `compose_prompt()`),
+ *    the body is split at the **last** occurrence of that boundary (same
+ *    last-occurrence guard as canvas and core). The text before becomes the
+ *    `System` body; the text after becomes a `Team Instructions` section
+ *    inserted immediately after `System`. Non-canonical lookalikes (bare `---`
+ *    without the heading, a `# Team Instructions` on a different line, or only
+ *    a single preceding newline) are kept literal inside `System`.
  */
 export function parseSystemPromptSections(
   systemPrompt: string,
 ): PromptSection[] {
   const sections: PromptSection[] = [];
 
-  // Persona-only frame: no [Base], starts directly with [System].
-  if (systemPrompt.startsWith("[System]\n")) {
-    const body = systemPrompt.slice("[System]\n".length).trim();
-    if (body) sections.push({ title: "System", body });
-    return sections;
+  // ── 1. Extract [Channel Canvas] ───────────────────────────────────────────
+  const CANVAS_HEADER = "[Channel Canvas]";
+  const CANVAS_MARKER_INLINE = `\n\n${CANVAS_HEADER}\n`;
+  let canvasBody: string | null = null;
+  let remainder = systemPrompt;
+
+  if (remainder.startsWith(`${CANVAS_HEADER}\n`)) {
+    canvasBody = remainder.slice(`${CANVAS_HEADER}\n`.length).trim();
+    remainder = "";
+  } else {
+    const lastCanvas = remainder.lastIndexOf(CANVAS_MARKER_INLINE);
+    if (lastCanvas !== -1) {
+      canvasBody = remainder
+        .slice(lastCanvas + CANVAS_MARKER_INLINE.length)
+        .trim();
+      remainder = remainder.slice(0, lastCanvas);
+    }
   }
 
-  // Otherwise the head (up to the first [System] boundary, or the whole string)
-  // is the [Base] body.
-  const marker = "\n[System]\n";
-  const at = systemPrompt.indexOf(marker);
-  const head = at === -1 ? systemPrompt : systemPrompt.slice(0, at);
-  const baseBody = head.replace(/^\[Base]\n/, "").trim();
-  if (baseBody) sections.push({ title: "Base", body: baseBody });
+  // ── 2. Extract [Agent Memory — core] ──────────────────────────────────────
+  const CORE_HEADER = "[Agent Memory — core]";
+  const CORE_MARKER_INLINE = `\n\n${CORE_HEADER}\n`;
+  let coreBody: string | null = null;
 
-  if (at !== -1) {
-    const systemBody = systemPrompt.slice(at + marker.length).trim();
-    sections.push({ title: "System", body: systemBody });
+  if (remainder.startsWith(`${CORE_HEADER}\n`)) {
+    coreBody = remainder.slice(`${CORE_HEADER}\n`.length).trim();
+    remainder = "";
+  } else {
+    const lastCore = remainder.lastIndexOf(CORE_MARKER_INLINE);
+    if (lastCore !== -1) {
+      coreBody = remainder.slice(lastCore + CORE_MARKER_INLINE.length).trim();
+      remainder = remainder.slice(0, lastCore);
+    }
   }
+
+  // ── 3. Parse Base/System from the remaining prefix ────────────────────────
+  // The canonical team-instructions delimiter produced by compose_prompt() in
+  // buzz-persona/src/resolve.rs:
+  //   format!("{persona_prompt}\n\n---\n# Team Instructions\n{instructions}")
+  const TEAM_DELIMITER = "\n\n---\n# Team Instructions\n";
+
+  // splitSystemBody: split a raw [System] body string at the last occurrence
+  // of the canonical team delimiter, returning { systemBody, teamBody | null }.
+  // Using lastIndexOf mirrors the canvas/core last-occurrence guard: a persona
+  // author can embed an exact delimiter-like passage inside the persona body;
+  // only the final occurrence is the producer boundary appended by compose_prompt().
+  function splitSystemBody(raw: string): {
+    systemBody: string;
+    teamBody: string | null;
+  } {
+    const at = raw.lastIndexOf(TEAM_DELIMITER);
+    if (at === -1) return { systemBody: raw.trim(), teamBody: null };
+    return {
+      systemBody: raw.slice(0, at).trim(),
+      teamBody: raw.slice(at + TEAM_DELIMITER.length).trim() || null,
+    };
+  }
+
+  const baseAndSystem = remainder;
+  if (baseAndSystem) {
+    if (baseAndSystem.startsWith("[System]\n")) {
+      const raw = baseAndSystem.slice("[System]\n".length);
+      const { systemBody, teamBody } = splitSystemBody(raw);
+      if (systemBody) sections.push({ title: "System", body: systemBody });
+      if (teamBody)
+        sections.push({ title: "Team Instructions", body: teamBody });
+    } else {
+      const marker = "\n[System]\n";
+      const at = baseAndSystem.indexOf(marker);
+      const head = at === -1 ? baseAndSystem : baseAndSystem.slice(0, at);
+      const baseBody = head.replace(/^\[Base]\n/, "").trim();
+      if (baseBody) sections.push({ title: "Base", body: baseBody });
+
+      if (at !== -1) {
+        const raw = baseAndSystem.slice(at + marker.length);
+        const { systemBody, teamBody } = splitSystemBody(raw);
+        if (systemBody) sections.push({ title: "System", body: systemBody });
+        if (teamBody)
+          sections.push({ title: "Team Instructions", body: teamBody });
+      }
+    }
+  }
+
+  // ── 4. Append core and canvas sections in producer order ──────────────────
+  if (coreBody) sections.push({ title: "Core Memory", body: coreBody });
+  if (canvasBody) sections.push({ title: "Channel Canvas", body: canvasBody });
 
   return sections;
 }

@@ -73,3 +73,23 @@ export function shallowArrayEqual(a?: string[], b?: string[]): boolean {
   }
   return true;
 }
+
+/**
+ * Value-equality for the small name→pubkey mention maps. Several call sites
+ * (forum cards, feed rows) rebuild the map inline on every render — comparing
+ * by value in the `Markdown` memo keeps those fresh-but-identical objects from
+ * re-rendering (and DOM-swapping) the whole markdown tree.
+ */
+export function shallowRecordEqual(
+  a?: Record<string, string>,
+  b?: Record<string, string>,
+): boolean {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  const aKeys = Object.keys(a);
+  if (aKeys.length !== Object.keys(b).length) return false;
+  for (const key of aKeys) {
+    if (a[key] !== b[key]) return false;
+  }
+  return true;
+}

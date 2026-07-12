@@ -129,9 +129,9 @@ test.describe("agent readiness gate screenshots", () => {
       timeout: 10_000,
     });
 
-    // Provider empty → required marker shown; submit is now ENABLED.
-    // Wait up to 10 s for prereqsQuery to resolve (async even in mock env).
-    await expect(page.getByTestId("persona-dialog-submit")).toBeEnabled({
+    // Provider empty + no global provider → save is BLOCKED per the
+    // provider-default rule. The submit button must be disabled.
+    await expect(page.getByTestId("persona-dialog-submit")).toBeDisabled({
       timeout: 10_000,
     });
     await settleAnimations(page);
@@ -181,7 +181,10 @@ test.describe("agent readiness gate screenshots", () => {
     });
 
     // Scroll the required row into view so it is visible in the screenshot.
-    await page.getByTestId("env-vars-required-key").scrollIntoViewIfNeeded();
+    // Use evaluate to avoid detachment races with the motion.div container.
+    await page
+      .getByTestId("env-vars-required-key")
+      .evaluate((el) => el.scrollIntoView({ block: "nearest" }));
     await settleAnimations(page);
 
     const dialog = page.getByRole("dialog");
@@ -196,8 +199,10 @@ test.describe("agent readiness gate screenshots", () => {
     await openCreateDialog(page);
     await selectProvider(page, "Anthropic");
     await setCustomModel(page, "claude-opus-4-5");
+    // Fill the required ANTHROPIC_API_KEY amber row in the EnvVarsEditor.
+    // Advanced auto-expands when required keys are missing.
     await page
-      .getByTestId("persona-provider-api-key")
+      .getByLabel("Value for ANTHROPIC_API_KEY")
       .fill("sk-test-api-key-for-e2e");
 
     // All required fields satisfied → submit enabled.
@@ -299,7 +304,7 @@ test.describe("agent readiness gate screenshots", () => {
     });
   });
 
-  // Shot 08: goose runtime, provider empty → required marker shown, save allowed (same as buzz-agent).
+  // Shot 08: goose runtime, provider empty + no global → save BLOCKED (same rule as buzz-agent).
   test("08-create-goose-empty-provider-marker", async ({ page }) => {
     await installMockBridge(page);
     await openCreateDialog(page);
@@ -315,8 +320,9 @@ test.describe("agent readiness gate screenshots", () => {
     await expect(page.locator("#persona-llm-provider")).toBeVisible({
       timeout: 5_000,
     });
-    // Required marker shown; submit is now ENABLED.
-    await expect(page.getByTestId("persona-dialog-submit")).toBeEnabled({
+    // Provider empty + no global provider → save is BLOCKED per the
+    // provider-default rule. The submit button must be disabled.
+    await expect(page.getByTestId("persona-dialog-submit")).toBeDisabled({
       timeout: 10_000,
     });
     await settleAnimations(page);

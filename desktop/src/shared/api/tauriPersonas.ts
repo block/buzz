@@ -71,6 +71,8 @@ export type RawPersona = {
   parallelism?: number | null;
   created_at: string;
   updated_at: string;
+  /** Non-null when the pack `.persona.md` write-back failed (non-fatal). */
+  writeback_warning?: string | null;
 };
 
 export function fromRawPersona(persona: RawPersona): AgentPersona {
@@ -123,26 +125,30 @@ export async function createPersona(
 export async function updatePersona(
   input: UpdatePersonaInput,
 ): Promise<AgentPersona> {
-  return fromRawPersona(
-    await invokeTauri<RawPersona>("update_persona", {
-      input: {
-        id: input.id,
-        displayName: input.displayName,
-        avatarUrl: input.avatarUrl,
-        systemPrompt: input.systemPrompt,
-        runtime: input.runtime,
-        model: input.model,
-        provider: input.provider,
-        namePool: input.namePool ?? [],
-        // Send envVars only when caller explicitly provided it; omitting
-        // tells the backend "don't touch the stored env vars" so editing
-        // unrelated fields can't silently wipe saved credentials.
-        envVars: input.envVars,
-        // Same absent-vs-present contract as envVars for the behavioral quad.
-        behavior: input.behavior,
-      },
-    }),
-  );
+  const raw = await invokeTauri<RawPersona>("update_persona", {
+    input: {
+      id: input.id,
+      displayName: input.displayName,
+      avatarUrl: input.avatarUrl,
+      systemPrompt: input.systemPrompt,
+      runtime: input.runtime,
+      model: input.model,
+      provider: input.provider,
+      namePool: input.namePool ?? [],
+      // Send envVars only when caller explicitly provided it; omitting
+      // tells the backend "don't touch the stored env vars" so editing
+      // unrelated fields can't silently wipe saved credentials.
+      envVars: input.envVars,
+      // Same absent-vs-present contract as envVars for the behavioral quad.
+      behavior: input.behavior,
+    },
+  });
+  if (raw.writeback_warning) {
+    console.warn(
+      `[updatePersona] pack write-back failed (edit saved locally): ${raw.writeback_warning}`,
+    );
+  }
+  return fromRawPersona(raw);
 }
 
 export async function deletePersona(id: string): Promise<void> {

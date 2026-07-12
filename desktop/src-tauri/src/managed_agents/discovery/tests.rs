@@ -1,10 +1,10 @@
 use std::path::PathBuf;
 
+use super::overrides::{divergent_agent_command_override, update_time_agent_command_override};
 use super::{
-    classify_runtime, create_time_agent_command_override, default_agent_command,
-    divergent_agent_command_override, effective_agent_command, find_via_login_shell,
-    managed_agent_avatar_url, normalize_agent_args, record_agent_command,
-    update_time_agent_command_override, BUZZ_AGENT_AVATAR_URL, CLAUDE_CODE_AVATAR_URL,
+    apply_agent_command_update, classify_runtime, create_time_agent_command_override,
+    default_agent_command, effective_agent_command, find_via_login_shell, managed_agent_avatar_url,
+    normalize_agent_args, record_agent_command, BUZZ_AGENT_AVATAR_URL, CLAUDE_CODE_AVATAR_URL,
     CODEX_AVATAR_URL, GOOSE_AVATAR_URL,
 };
 use crate::managed_agents::AcpAvailabilityStatus;
@@ -561,4 +561,47 @@ fn update_time_override_preserves_pin_for_persona_less_agent() {
         update_time_agent_command_override(None, &personas, Some("codex-acp"), false),
         Some("codex-acp".to_string())
     );
+}
+
+#[test]
+fn apply_agent_command_update_inherit_sentinel_clears_pin_and_runtime() {
+    // Choosing Inherit on a persona-linked record clears BOTH the explicit
+    // pin and the materialized runtime, so resolution falls through to the
+    // live definition immediately — not on the next spawn.
+    let personas = vec![persona_with_runtime("p1", Some("goose"))];
+    let mut record = record_with(Some("claude"), Some("p1"), Some("codex-acp"));
+
+    apply_agent_command_update(&mut record, &personas, "", false);
+
+    assert_eq!(record.agent_command_override, None);
+    assert_eq!(record.runtime, None);
+    assert_eq!(record_agent_command(&record, &personas), "goose");
+}
+
+#[test]
+fn apply_agent_command_update_sentinel_keeps_runtime_for_definition_less_record() {
+    // For a record with no persona link the materialized runtime is the only
+    // harness source left once the pin is cleared — a stray empty
+    // agent_command must not change what the agent runs.
+    let mut record = record_with(Some("claude"), None, Some("codex-acp"));
+
+    apply_agent_command_update(&mut record, &[], "", false);
+
+    assert_eq!(record.agent_command_override, None);
+    assert_eq!(record.runtime.as_deref(), Some("claude"));
+    assert_eq!(record_agent_command(&record, &[]), "claude-agent-acp");
+}
+
+#[test]
+fn apply_agent_command_update_concrete_pin_keeps_materialized_runtime() {
+    // A concrete pick only sets the pin; the materialized runtime is left for
+    // the next snapshot apply. The pin shadows it in resolution either way.
+    let personas = vec![persona_with_runtime("p1", Some("goose"))];
+    let mut record = record_with(Some("claude"), Some("p1"), None);
+
+    apply_agent_command_update(&mut record, &personas, "codex-acp", true);
+
+    assert_eq!(record.agent_command_override.as_deref(), Some("codex-acp"));
+    assert_eq!(record.runtime.as_deref(), Some("claude"));
+    assert_eq!(record_agent_command(&record, &personas), "codex-acp");
 }

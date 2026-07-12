@@ -181,6 +181,36 @@ test("fades the pinned sidebar chrome edges", async ({ page }) => {
   expect(fadeStyles.channelAfterBackground).toBe("none");
 });
 
+test("aligns the sidebar search with the channel title outside the Buzz theme", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    window.localStorage.setItem("buzz-theme", "github-light");
+  });
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+
+  const root = page.locator("html");
+  const search = page.getByTestId("open-search");
+  const channelTitle = page.getByTestId("chat-title");
+  await expect(root).not.toHaveAttribute("data-buzz-sidebar", "");
+  await expect(search).toBeVisible();
+  await expect(channelTitle).toHaveText("general");
+
+  const [searchBox, channelTitleBox] = await Promise.all([
+    search.boundingBox(),
+    channelTitle.boundingBox(),
+  ]);
+  expect(searchBox).not.toBeNull();
+  expect(channelTitleBox).not.toBeNull();
+
+  if (!searchBox || !channelTitleBox) return;
+
+  const searchCenter = searchBox.y + searchBox.height / 2;
+  const channelTitleCenter = channelTitleBox.y + channelTitleBox.height / 2;
+  expect(Math.abs(searchCenter - channelTitleCenter)).toBeLessThanOrEqual(2);
+});
+
 test("resizes, persists, and snaps to the default sidebar width", async ({
   page,
 }) => {

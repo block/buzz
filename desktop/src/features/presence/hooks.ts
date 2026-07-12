@@ -197,21 +197,42 @@ export function usePresenceSession(pubkey?: string) {
     React.useState<PresencePreference>(() =>
       readStoredPresencePreference(normalizedPubkey),
     );
-  const [lastActivityAt, setLastActivityAt] = React.useState(() => Date.now());
-  const [statusClock, setStatusClock] = React.useState(() => Date.now());
-  const [isDocumentHidden, setIsDocumentHidden] = React.useState(() =>
-    typeof document === "undefined" ? false : document.hidden,
+  // Activity is tracked in a REF, and React state holds only the DERIVED
+  // status. The previous shape stored raw `Date.now()` timestamps in state
+  // and bumped them from a capture-phase `keydown`/`pointerdown` listener —
+  // which re-rendered this hook's host (AppShell, the app root) on every
+  // keystroke the user typed anywhere in the app. Presence only needs a
+  // render when the automatic status actually flips (online <-> away), so
+  // activity updates the ref and re-derives; setState fires on transitions
+  // only (see typing-latency.perf.ts / keystroke input-to-paint).
+  const lastActivityAtRef = React.useRef(Date.now());
+  const [automaticStatus, setAutomaticStatus] = React.useState<PresenceStatus>(
+    () =>
+      resolveAutomaticPresenceStatus(
+        typeof document === "undefined" ? false : document.hidden,
+        lastActivityAtRef.current,
+        Date.now(),
+      ),
   );
+  const automaticStatusRef = React.useRef(automaticStatus);
   const skipNextSyncRef = React.useRef<PresenceStatus | null>(null);
 
-  React.useEffect(() => {
-    const now = Date.now();
-    setPresencePreference(readStoredPresencePreference(normalizedPubkey));
-    setLastActivityAt(now);
-    setStatusClock(now);
-    setIsDocumentHidden(
+  const reevaluateAutomaticStatus = React.useEffectEvent(() => {
+    const next = resolveAutomaticPresenceStatus(
       typeof document === "undefined" ? false : document.hidden,
+      lastActivityAtRef.current,
+      Date.now(),
     );
+    if (next !== automaticStatusRef.current) {
+      automaticStatusRef.current = next;
+      setAutomaticStatus(next);
+    }
+  });
+
+  React.useEffect(() => {
+    setPresencePreference(readStoredPresencePreference(normalizedPubkey));
+    lastActivityAtRef.current = Date.now();
+    reevaluateAutomaticStatus();
   }, [normalizedPubkey]);
 
   React.useEffect(() => {
@@ -219,9 +240,8 @@ export function usePresenceSession(pubkey?: string) {
   }, [normalizedPubkey, presencePreference]);
 
   const recordActivity = React.useEffectEvent(() => {
-    const now = Date.now();
-    setLastActivityAt(now);
-    setStatusClock(now);
+    lastActivityAtRef.current = Date.now();
+    reevaluateAutomaticStatus();
   });
 
   React.useEffect(() => {
@@ -238,17 +258,16 @@ export function usePresenceSession(pubkey?: string) {
     }
 
     function handleFocus() {
-      setIsDocumentHidden(false);
       recordActivity();
     }
 
     function handleVisibilityChange() {
-      const hidden = document.hidden;
-      setIsDocumentHidden(hidden);
-
-      if (!hidden) {
+      if (!document.hidden) {
         recordActivity();
+        return;
       }
+      // Going hidden can flip the automatic status to away.
+      reevaluateAutomaticStatus();
     }
 
     window.addEventListener("pointerdown", handleUserActivity, true);
@@ -270,23 +289,13 @@ export function usePresenceSession(pubkey?: string) {
     }
 
     const intervalId = window.setInterval(() => {
-      setStatusClock(Date.now());
+      reevaluateAutomaticStatus();
     }, PRESENCE_STATUS_TICK_INTERVAL_MS);
 
     return () => {
       window.clearInterval(intervalId);
     };
   }, [normalizedPubkey]);
-
-  const automaticStatus = React.useMemo(
-    () =>
-      resolveAutomaticPresenceStatus(
-        isDocumentHidden,
-        lastActivityAt,
-        statusClock,
-      ),
-    [isDocumentHidden, lastActivityAt, statusClock],
-  );
   const currentStatus =
     normalizedPubkey.length === 0
       ? "offline"
@@ -305,12 +314,8 @@ export function usePresenceSession(pubkey?: string) {
         status === "online" ? "auto" : status;
 
       if (nextPreference === "auto") {
-        const now = Date.now();
-        setLastActivityAt(now);
-        setStatusClock(now);
-        setIsDocumentHidden(
-          typeof document === "undefined" ? false : document.hidden,
-        );
+        lastActivityAtRef.current = Date.now();
+        reevaluateAutomaticStatus();
       }
 
       setPresencePreference(nextPreference);

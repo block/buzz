@@ -839,9 +839,9 @@ pub async fn update_managed_agent(
         if let Some(parallelism) = input.parallelism {
             record.parallelism = parallelism;
         }
-        if let Some(turn_timeout_seconds) = input.turn_timeout_seconds {
-            record.turn_timeout_seconds = turn_timeout_seconds;
-        }
+        // turn_timeout_seconds is intentionally not applied here —
+        // BUZZ_ACP_TURN_TIMEOUT is deprecated and ignored by the harness.
+        // Use idle_timeout_seconds or max_turn_duration_seconds instead.
         // Store the relay override exactly as supplied (trimmed). An explicit
         // value pins the agent; empty falls back to the workspace relay at
         // read-time. A name-only edit (relay_url == None) leaves the pin intact.
@@ -851,33 +851,30 @@ pub async fn update_managed_agent(
         if let Some(acp_command) = input.acp_command {
             record.acp_command = acp_command;
         }
-        // Harness edit: the persona's runtime is authoritative, so we persist an
-        // explicit `agent_command_override` ONLY when the user picks a command
-        // that diverges from the persona. An empty/whitespace value (the
-        // "Inherit from persona" sentinel) clears the pin back to `None`. A
-        // name-only edit (`agent_command == None`) leaves the pin intact.
-        //
-        // `harness_override` threads the user's explicit intent: when they pick
-        // a runtime/Custom command in the dialog it is a real pin even if it
-        // maps to the persona's own runtime, so a same-runtime pick is kept
-        // rather than dropped back to inherit (see
-        // `update_time_agent_command_override`).
+        // Harness edit: the persona's runtime is authoritative, so an explicit
+        // `agent_command_override` is persisted ONLY when the user picks a
+        // command that diverges from the persona, and the empty/whitespace
+        // "Inherit from persona" sentinel clears both the pin and the
+        // materialized record runtime. A name-only edit
+        // (`agent_command == None`) leaves the pin intact. `harness_override`
+        // threads the user's explicit intent — see `apply_agent_command_update`
+        // and `update_time_agent_command_override` for the full resolution
+        // rules.
         if let Some(agent_command) = input.agent_command {
             let personas = load_personas(&app).unwrap_or_default();
-            record.agent_command_override =
-                crate::managed_agents::update_time_agent_command_override(
-                    record.persona_id.as_deref(),
-                    &personas,
-                    Some(&agent_command),
-                    input.harness_override,
-                );
+            crate::managed_agents::apply_agent_command_update(
+                record,
+                &personas,
+                &agent_command,
+                input.harness_override,
+            );
         }
         if let Some(agent_args) = input.agent_args {
             record.agent_args = agent_args;
         }
-        if let Some(mcp_command) = input.mcp_command {
-            record.mcp_command = mcp_command;
-        }
+        // mcp_command is intentionally not applied here — the effective MCP
+        // command is always catalog-derived (known_acp_runtime at spawn time)
+        // and the per-record field is never read by the runtime.
         if let Some(env_vars) = input.env_vars {
             crate::managed_agents::validate_user_env_keys(&env_vars)?;
             record.env_vars = env_vars;
