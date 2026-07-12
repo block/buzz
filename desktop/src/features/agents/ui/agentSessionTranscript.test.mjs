@@ -950,11 +950,11 @@ test("buildTranscript does not render unknown session/update types (firehose saf
 
 test("observer feed renders system-prompt before prompt-context in display order (first turn, realistic pool.rs sequence)", () => {
   // Reproduces the real ordering bug: pool.rs emits turn_started BEFORE session/new,
-  // so turn_started creates the turn bucket first. Without the injection mechanism,
-  // displayOrder becomes [turn(turn-1), single(system-prompt)] and System prompt
-  // renders after the entire turn block — after Prompt context.
-  // The fix: system-prompt items (acpSource "session/new") are held and injected
-  // into the prompt segment of the first turn that follows them in stream order.
+  // so turn_started creates the turn bucket first. Without the grouper holding the
+  // system-prompt as a standalone block, displayOrder becomes
+  // [turn(turn-1), single(system-prompt)] and System prompt renders after Prompt context.
+  // The fix: system-prompt items (acpSource "session/new") are held in
+  // pendingSystemPrompts[] and emitted as standalone blocks BEFORE the first turn.
   const events = [
     {
       seq: 1,
@@ -1050,8 +1050,8 @@ test("observer feed renders system-prompt before prompt-context in display order
 });
 
 test("observer feed renders system-prompt before prompt-context in display order (multi-turn)", () => {
-  // On subsequent turns, session/new does not re-fire. The system-prompt item
-  // injected into turn-1 must not re-appear in turn-2's prompt segment.
+  // On subsequent turns, session/new does not re-fire. The system-prompt standalone
+  // block emitted before turn-1 must not re-appear in turn-2's display output.
   const events = [
     {
       seq: 1,
@@ -1326,23 +1326,14 @@ test("buildTranscript correctly renders prompt segment when session/prompt arriv
 
 // --- session-boundary ordering: restart scenario end-to-end ─────────────────
 
-test("buildTranscript restart sequence: system-prompt renders after session-boundary, not before", () => {
+test("buildTranscript restart sequence: both sessions retain their own system-prompt card", () => {
   // Full two-session restart sequence routed through processTranscriptEvent.
-  // This is the production scenario that the grouping-only fix missed:
-  // upsertMetadata's replaceItem kept the system-prompt item at its first-session
-  // array position (before any sess-1 activity), so splitIntoSessionRuns saw it
-  // first (currentRun === null) and placed it in run sess-1 — above the boundary.
-  //
-  // Fix requires BOTH:
-  //   1. Normalizer: reposition system-prompt to the stream tail on re-fire
-  //      (removeItem + pushItem with new timestamp) so it arrives at the restart
-  //      event position in stream order.
-  //   2. Grouping: splitIntoSessionRuns pending-buffer re-anchors the
-  //      stale-stamped tail item into the new session run's head.
-  //
-  // Final display order must be: boundary < system-prompt < user-prompt < sess-2 activity.
-  // The session/prompt:user event mirrors production (a restart is triggered by
-  // a user @mention; the screenshot that surfaced the bug shows exactly this).
+  // Each session/new event is keyed by (seq, timestamp) — the same dedup pair
+  // used by observerRelayStore — producing distinct system-prompt items for
+  // sess-1 and sess-2. Both must be present in the final transcript and placed
+  // in the correct run:
+  //   sess-1: system-prompt → sess-1 activity (before boundary)
+  //   sess-2: boundary → system-prompt → user-prompt → sess-2 activity
   const CH = "33333333-3333-3333-3333-333333333333";
   const AUTHOR_HEX = "c".repeat(64);
   const USER_EVENT_HEX = "e".repeat(64);
@@ -1428,8 +1419,9 @@ test("buildTranscript restart sequence: system-prompt renders after session-boun
       turnId: "turn-2",
       payload: { source: "channel", triggeringEventIds: [] },
     },
-    // session/new re-fires for the same channel (restart signal):
-    // upsertMetadata must REPOSITION to tail, not replace in-place.
+    // sess-2 session/new: distinct (seq, timestamp) produces a separate item
+    // (system-prompt:${CH}:6:2026-07-01T11:00:00.100Z) that lands naturally
+    // at the stream tail and is re-anchored to run sess-2.
     {
       seq: 6,
       timestamp: "2026-07-01T11:00:00.100Z",
@@ -1524,64 +1516,290 @@ test("buildTranscript restart sequence: system-prompt renders after session-boun
 
   const boundaryIdx = blocks.indexOf(boundaryBlocks[0]);
 
-  // (b) The system-prompt must appear AFTER the boundary — not before it.
-  // Production path: system-prompt rides in the prompt bundle of the turn that
-  // carries the user @mention (acpSource "session/new" in the prompt segment).
-  const systemPromptBlockIdx = blocks.findIndex(
-    (b) =>
-      (b.kind === "single" && b.item?.acpSource === "session/new") ||
-      (b.kind === "turn" &&
-        b.segments.some(
-          (seg) =>
-            seg.kind === "prompt" &&
-            seg.systemPrompt?.acpSource === "session/new",
-        )),
+  // (b) Exactly two system-prompt standalone blocks — one per session.
+  const systemPromptBlocks = blocks.filter(
+    (b) => b.kind === "single" && b.item?.acpSource === "session/new",
   );
-  assert.ok(
-    systemPromptBlockIdx !== -1,
-    "system-prompt item must be present in the output",
+  assert.equal(
+    systemPromptBlocks.length,
+    2,
+    "must be exactly two system-prompt standalone blocks — one per session",
   );
+  const sess1PromptIdx = blocks.indexOf(systemPromptBlocks[0]);
+  const sess2PromptIdx = blocks.indexOf(systemPromptBlocks[1]);
+
+  // sess-1 system-prompt appears BEFORE the boundary (in run sess-1).
   assert.ok(
-    boundaryIdx < systemPromptBlockIdx,
-    `boundary (idx ${boundaryIdx}) must precede system-prompt (idx ${systemPromptBlockIdx})`,
+    sess1PromptIdx < boundaryIdx,
+    `sess-1 system-prompt (idx ${sess1PromptIdx}) must precede boundary (idx ${boundaryIdx})`,
+  );
+  // sess-2 system-prompt appears AFTER the boundary (in run sess-2).
+  assert.ok(
+    boundaryIdx < sess2PromptIdx,
+    `boundary (idx ${boundaryIdx}) must precede sess-2 system-prompt (idx ${sess2PromptIdx})`,
   );
 
-  // (c) sess-2 activity must appear AFTER both boundary AND system-prompt.
-  // This pins the full required order: boundary → system-prompt → activity.
-  // Because session/prompt:user is present, the system-prompt rides inside the
-  // prompt bundle of the same turn as the tool activity — they share the same
-  // block. Use flat item order to assert system-prompt precedes activity.
+  // (c) sess-2 activity must appear AFTER both boundary AND sess-2 system-prompt.
+  // Required order: boundary → sess-2 system-prompt → sess-2 user-prompt/activity.
+  // Note: the system-prompt item retains sessionId=null (it was created from a
+  // null-session event); we locate it in the flat array by its item id, not sessionId.
   const flat = flattenDisplayBlocks(blocks);
-  const sess2ActivityItem = flat.find(
-    (i) => i.type === "tool" && i.sessionId === "sess-2",
-  );
-  assert.ok(
-    sess2ActivityItem,
-    "sess-2 tool activity must be present in flattened output",
-  );
-  const sess2BlockIdx = blocks.findIndex((b) =>
-    flattenDisplayBlocks([b]).some(
-      (i) => i.type === "tool" && i.sessionId === "sess-2",
-    ),
-  );
-  assert.ok(
-    boundaryIdx < sess2BlockIdx,
-    `boundary (idx ${boundaryIdx}) must precede sess-2 activity (idx ${sess2BlockIdx})`,
-  );
-  // system-prompt and tool activity may be in the same turn block (prompt bundle
-  // + activity segment). Assert ordering via flat item indices.
-  const flatSystemPromptIdx = flat.findIndex(
-    (i) => i.acpSource === "session/new",
-  );
+  const sess2SpItemId = systemPromptBlocks[1].item?.id;
+  const flatSess2PromptIdx = flat.findIndex((i) => i.id === sess2SpItemId);
   const flatSess2ActivityIdx = flat.findIndex(
     (i) => i.type === "tool" && i.sessionId === "sess-2",
   );
   assert.ok(
-    flatSystemPromptIdx !== -1,
-    "system-prompt must appear in flattened output",
+    flatSess2PromptIdx !== -1,
+    "sess-2 system-prompt must appear in flattened output",
   );
   assert.ok(
-    flatSystemPromptIdx < flatSess2ActivityIdx,
-    `system-prompt (flat idx ${flatSystemPromptIdx}) must precede sess-2 activity (flat idx ${flatSess2ActivityIdx})`,
+    flatSess2ActivityIdx !== -1,
+    "sess-2 tool activity must be present in flattened output",
+  );
+  assert.ok(
+    flatSess2PromptIdx < flatSess2ActivityIdx,
+    `sess-2 system-prompt (flat idx ${flatSess2PromptIdx}) must precede sess-2 activity (flat idx ${flatSess2ActivityIdx})`,
+  );
+});
+
+// --- same-seq different-timestamp: both system-prompt cards survive (archive collision) ──
+
+test("buildTranscript same-seq different-timestamp session/new events both produce distinct system-prompt cards", () => {
+  // Archive rebuild scenario: two ObserverHandle processes both start at seq=1
+  // for the same channel. The (seq, timestamp) key pair must distinguish them
+  // so neither card is lost. If keyed by seq alone, the second would silently
+  // replace the first.
+  const CH = "55555555-5555-5555-5555-555555555555";
+  const events = [
+    // Process A: seq=1, timestamp T1
+    {
+      seq: 1,
+      timestamp: "2026-07-01T10:00:00.000Z",
+      kind: "acp_write",
+      agentIndex: 0,
+      channelId: CH,
+      sessionId: "sess-a",
+      turnId: "turn-a",
+      payload: {
+        jsonrpc: "2.0",
+        id: 1,
+        method: "session/new",
+        params: {
+          systemPrompt: "[Base]\nProcess A.",
+        },
+      },
+    },
+    // Process B: seq=1 (same!), timestamp T2 (different)
+    {
+      seq: 1,
+      timestamp: "2026-07-01T11:00:00.000Z",
+      kind: "acp_write",
+      agentIndex: 0,
+      channelId: CH,
+      sessionId: "sess-b",
+      turnId: "turn-b",
+      payload: {
+        jsonrpc: "2.0",
+        id: 1,
+        method: "session/new",
+        params: {
+          systemPrompt: "[Base]\nProcess B.",
+        },
+      },
+    },
+  ];
+
+  const rawItems = buildTranscript(events);
+  const systemPromptItems = rawItems.filter(
+    (i) => i.type === "metadata" && i.acpSource === "session/new",
+  );
+
+  assert.equal(
+    systemPromptItems.length,
+    2,
+    "two same-seq different-timestamp session/new events must produce two distinct system-prompt items — not one (key collision guard)",
+  );
+
+  const bodies = systemPromptItems.map((i) =>
+    (i.sections ?? []).map((s) => s.body).join("|"),
+  );
+  assert.ok(
+    bodies.some((b) => b.includes("Process A")),
+    "Process A system-prompt card must be present",
+  );
+  assert.ok(
+    bodies.some((b) => b.includes("Process B")),
+    "Process B system-prompt card must be present",
+  );
+});
+
+test("buildTranscript five-section system prompt card is standalone with all sections; CheckCheck context contains only Buzz/thread context", () => {
+  // Production scenario: team-pack agent harness emits
+  // [Base]/[System (with team delimiter)]/[Agent Memory — core]/[Channel Canvas]
+  // in systemPrompt. The display layer must:
+  //   (a) Render it as a standalone single block (acpSource "session/new"),
+  //       NOT inside any turn's prompt bundle.
+  //   (b) The standalone item must carry all five sections in order:
+  //       Base → System → Team Instructions → Core Memory → Channel Canvas.
+  //   (c) The prompt segment's context (CheckCheck dialog) must contain only
+  //       the session/prompt:context sections (Buzz event + Thread context),
+  //       never the system-prompt sections.
+  const CH = "44444444-4444-4444-4444-444444444444";
+  const events = [
+    {
+      seq: 1,
+      timestamp: "2026-07-01T10:00:00.000Z",
+      kind: "turn_started",
+      agentIndex: 0,
+      channelId: CH,
+      sessionId: null,
+      turnId: "turn-1",
+      payload: { source: "channel", triggeringEventIds: [] },
+    },
+    {
+      seq: 2,
+      timestamp: "2026-07-01T10:00:00.100Z",
+      kind: "acp_write",
+      agentIndex: 0,
+      channelId: CH,
+      sessionId: null,
+      turnId: "turn-1",
+      payload: {
+        jsonrpc: "2.0",
+        id: 1,
+        method: "session/new",
+        params: {
+          systemPrompt: [
+            "[Base]",
+            "You are a helpful assistant.",
+            "",
+            "[System]",
+            "Custom persona.",
+            "",
+            "---",
+            "# Team Instructions",
+            "Always tag on handoff.",
+            "",
+            "[Agent Memory — core]",
+            "I am Duncan.",
+            "",
+            "[Channel Canvas]",
+            "Canvas revision (event ID): a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
+            "Last modified: 2026-07-01T10:00:00Z",
+            "Fetch current content with: buzz canvas get --channel 44444444-4444-4444-4444-444444444444",
+          ].join("\n"),
+        },
+      },
+    },
+    {
+      seq: 3,
+      timestamp: "2026-07-01T10:00:00.200Z",
+      kind: "session_resolved",
+      agentIndex: 0,
+      channelId: CH,
+      sessionId: "sess-e2e",
+      turnId: "turn-1",
+      payload: { sessionId: "sess-e2e", isNewSession: true },
+    },
+    {
+      seq: 4,
+      timestamp: "2026-07-01T10:00:01.000Z",
+      kind: "acp_write",
+      agentIndex: 0,
+      channelId: CH,
+      sessionId: "sess-e2e",
+      turnId: "turn-1",
+      payload: {
+        jsonrpc: "2.0",
+        id: 2,
+        method: "session/prompt",
+        params: {
+          sessionId: "sess-e2e",
+          prompt: [
+            {
+              type: "text",
+              text: `[Buzz event: @mention]\nEvent ID: ${"a".repeat(64)}\nFrom: x (hex: ${"b".repeat(64)})\nContent: hello`,
+            },
+            {
+              type: "text",
+              text: "[Thread context]\nPrior messages here.",
+            },
+          ],
+        },
+      },
+    },
+  ];
+
+  const rawItems = buildTranscript(events);
+  const blocks = buildTranscriptDisplayBlocks(rawItems);
+  const flat = flattenDisplayBlocks(blocks);
+
+  // (a) Exactly one standalone system-prompt single block.
+  const systemPromptBlocks = blocks.filter(
+    (b) => b.kind === "single" && b.item?.acpSource === "session/new",
+  );
+  assert.equal(
+    systemPromptBlocks.length,
+    1,
+    "exactly one standalone system-prompt single block",
+  );
+
+  // (b) The standalone item carries all five sections in order.
+  const spItem = systemPromptBlocks[0].item;
+  assert.ok(spItem, "system-prompt block must have an item");
+  const titles = (spItem.sections ?? []).map((s) => s.title);
+  assert.deepEqual(
+    titles,
+    ["Base", "System", "Team Instructions", "Core Memory", "Channel Canvas"],
+    "system-prompt standalone card must carry Base → System → Team Instructions → Core Memory → Channel Canvas in order",
+  );
+
+  // (c) The system-prompt item must NOT be inside any turn group.
+  // Verify by checking that no turn block contains it.
+  const systemPromptInTurnBlock = blocks.some(
+    (b) =>
+      b.kind === "turn" &&
+      b.segments.some((seg) =>
+        seg.kind === "prompt"
+          ? seg.user.acpSource === "session/new" ||
+            seg.context?.acpSource === "session/new"
+          : seg.kind === "item"
+            ? seg.item.acpSource === "session/new"
+            : false,
+      ),
+  );
+  assert.ok(
+    !systemPromptInTurnBlock,
+    "system-prompt must not appear inside any turn block",
+  );
+
+  // (d) CheckCheck context (prompt segment's context field) must contain only
+  // the session/prompt:context item — Buzz/thread context only, no system-prompt sections.
+  const promptContextItem = flat.find(
+    (i) => i.acpSource === "session/prompt:context",
+  );
+  assert.ok(
+    promptContextItem,
+    "prompt context item (acpSource session/prompt:context) must be present",
+  );
+  const contextSectionTitles = (promptContextItem.sections ?? []).map(
+    (s) => s.title,
+  );
+  // Must have Buzz event and Thread context sections, NOT Base/System/Team Instructions/Core Memory/Channel Canvas.
+  assert.ok(
+    contextSectionTitles.some((t) => t.toLowerCase().includes("buzz")),
+    "prompt context must contain a Buzz event section",
+  );
+  assert.ok(
+    !contextSectionTitles.some(
+      (t) =>
+        t === "Base" ||
+        t === "System" ||
+        t === "Team Instructions" ||
+        t === "Core Memory" ||
+        t === "Channel Canvas",
+    ),
+    "prompt context must NOT contain system-prompt sections (Base/System/Team Instructions/Core Memory/Channel Canvas)",
   );
 });

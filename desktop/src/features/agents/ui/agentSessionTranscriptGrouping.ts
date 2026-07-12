@@ -8,7 +8,6 @@ export type TranscriptTurnSegment =
   | {
       kind: "prompt";
       user: Extract<TranscriptItem, { type: "message" }>;
-      systemPrompt: Extract<TranscriptItem, { type: "metadata" }> | null;
       context: Extract<TranscriptItem, { type: "metadata" }> | null;
       setup: Extract<TranscriptItem, { type: "lifecycle" }>[];
     };
@@ -139,13 +138,7 @@ type TurnBucket = {
   items: TranscriptItem[];
 };
 
-function classifyTurnItems(
-  items: TranscriptItem[],
-  externalSystemPrompt: Extract<
-    TranscriptItem,
-    { type: "metadata" }
-  > | null = null,
-): TranscriptTurnSegment[] {
+function classifyTurnItems(items: TranscriptItem[]): TranscriptTurnSegment[] {
   const userPrompt = items.find(isUserPrompt) ?? null;
   const setupLifecycle = items.filter(isSetupLifecycle);
   const promptContext = items.find(isPromptContext) ?? null;
@@ -168,7 +161,6 @@ function classifyTurnItems(
       return {
         kind: "prompt",
         user: item,
-        systemPrompt: null,
         context: pendingSteerContexts.shift() ?? null,
         setup: [],
       };
@@ -190,7 +182,6 @@ function classifyTurnItems(
     {
       kind: "prompt",
       user: userPrompt,
-      systemPrompt: externalSystemPrompt,
       context: promptContext,
       setup: setupLifecycle,
     },
@@ -406,8 +397,7 @@ function getRenderClass(item: TranscriptItem) {
  * Pre-resolution items arrive with `sessionId: null` before any session has
  * been assigned. We defer those leading null-session items and **prepend them
  * to the first run that has a non-null sessionId**, so they stay in the same
- * session run as the turn they belong to and the `pendingSystemPrompt` slot in
- * `buildBlocksForRun` can consume them correctly.
+ * session run as the turn they belong to.
  *
  * **Restart / session-boundary ordering**: on a restart the normalizer stamps
  * `session/new` with `latestSessionId` (the OLD session's id) because the new
@@ -415,13 +405,14 @@ function getRenderClass(item: TranscriptItem) {
  * (stale), not null. Under the plain grouping rule it lands in the prior run,
  * causing System Prompt to render ABOVE the session-boundary divider.
  *
- * Fix: a `session/new` marker (`isSystemPrompt`) is a session-START signal.
+ * Fix: `session/new` markers (`isSystemPrompt`) are session-START signals.
  * When one arrives and a prior run already exists, park it (and any null-session
- * items that follow) in `pendingNewRunBuffer`. When the next distinct non-null
- * sessionId resolves, flush the buffer to the HEAD of that new run — placing
- * System Prompt after the boundary. If no new session ever resolves after the
- * marker (stream ends mid-restart), flush back into the current run so nothing
- * is dropped.
+ * items that follow) in `pendingNewRunBuffer`. Multiple markers may arrive
+ * before the new session resolves (rapid restart loop) — all are accumulated
+ * in order. When the next distinct non-null sessionId resolves, flush the
+ * buffer to the HEAD of that new run — placing all System Prompt cards after
+ * the boundary. If no new session ever resolves after the marker(s) (stream
+ * ends mid-restart), flush back into the current run so nothing is dropped.
  *
  * Mid-stream null-session items (after at least one session has resolved, and
  * no pending-new-run buffer is open) are attributed to the most recently seen
@@ -439,7 +430,7 @@ function splitIntoSessionRuns(
   let currentRun: { sessionId: string; items: TranscriptItem[] } | null = null;
   // Buffer for items that arrive before any session has resolved.
   const preSessionBuffer: TranscriptItem[] = [];
-  // Buffer for a session/new marker (and any null-session items trailing it)
+  // Buffer for session/new marker(s) (and any null-session items trailing them)
   // that must be re-anchored to the NEXT resolved session (restart scenario).
   let pendingNewRunBuffer: TranscriptItem[] | null = null;
 
@@ -462,8 +453,15 @@ function splitIntoSessionRuns(
 
     // A session/new marker after a prior run is a restart signal: park it in
     // the pending buffer so it re-anchors to the next distinct session run.
+    // Multiple session/new markers may arrive before the new session resolves
+    // (e.g. a rapid restart loop) — accumulate all of them rather than
+    // reinitializing, so no marker is silently dropped.
     if (isSystemPrompt(item) && currentRun !== null) {
-      pendingNewRunBuffer = [item];
+      if (pendingNewRunBuffer !== null) {
+        pendingNewRunBuffer.push(item);
+      } else {
+        pendingNewRunBuffer = [item];
+      }
       continue;
     }
 
@@ -512,10 +510,11 @@ function splitIntoSessionRuns(
  * Raw observer order is preserved in the source items; this only reorders
  * within a turn for user-facing narrative flow.
  *
- * System-prompt items (acpSource "session/new") are per-channel singles with
- * turnId=null. They are injected into the prompt segment of the first turn
- * that follows them in stream order — placing System prompt between the user
- * message bubble and the Prompt context sections in the rendered output.
+ * System-prompt items (acpSource "session/new") are keyed per source-session
+ * event identity (channel + seq + timestamp) so each session retains its own
+ * card. They render as standalone single blocks at the head of their session
+ * run — before the run's first turn — and never enter the prompt segment or
+ * the CheckCheck (Prompt context) dialog.
  *
  * When items span multiple sessions (archived history + live session), a
  * `session-boundary` block is injected between consecutive session runs.
@@ -611,23 +610,48 @@ function buildBlocksForRun(
     { kind: "single"; item: TranscriptItem } | { kind: "turn"; turnId: string }
   > = [];
 
-  // System-prompt items (turnId=null, acpSource "session/new") accumulate here
-  // until consumed by the first turn that follows them in stream order.
-  let pendingSystemPrompt: Extract<
-    TranscriptItem,
-    { type: "metadata" }
-  > | null = null;
+  // Strategy: accumulate null-session items into `openBatch` while no turn has
+  // been seen. The batch opens on the first system-prompt item. When the first
+  // turn-bound item is encountered (whether it creates a new bucket or reuses
+  // one already started earlier — e.g. turn_started → session/new →
+  // session_resolved, all on the same turn ID), the open batch is bound to that
+  // turn ID in `pendingForTurn` and sealed (openBatch = null) so subsequent
+  // null-session items fall through to inline emission and are NOT hoisted to
+  // the session head. Append to any existing batch for that turn rather than
+  // overwrite so a repeated seal on the same turn cannot lose an earlier batch.
+  // End-of-stream fallback: if no turn ever arrives, emit the open batch as
+  // standalone singles so the cards remain visible.
+  let openBatch: TranscriptItem[] | null = null;
+  // Maps a turn ID to the items that must flush before that turn in the render pass.
+  const pendingForTurn = new Map<string, TranscriptItem[]>();
 
   for (const item of items) {
     const turnId = item.turnId;
     if (!turnId) {
-      if (isSystemPrompt(item)) {
-        // Hold system-prompt for injection into the next turn's prompt segment.
-        pendingSystemPrompt = item;
+      if (openBatch !== null) {
+        // Pre-turn buffering is active — accumulate in wire order.
+        openBatch.push(item);
+      } else if (isSystemPrompt(item)) {
+        // First system-prompt seen and no turn yet — open the batch.
+        openBatch = [item];
       } else {
+        // No pending batch, or batch already sealed; emit inline.
         displayOrder.push({ kind: "single", item });
       }
       continue;
+    }
+
+    // Seal the open batch on the FIRST turn-bound item encountered while
+    // buffering is active — new bucket or existing (e.g. session_resolved
+    // reusing the turn_started bucket).
+    if (openBatch !== null) {
+      const existing = pendingForTurn.get(turnId);
+      if (existing) {
+        existing.push(...openBatch);
+      } else {
+        pendingForTurn.set(turnId, openBatch);
+      }
+      openBatch = null;
     }
 
     let bucket = turnBuckets.get(turnId);
@@ -638,9 +662,6 @@ function buildBlocksForRun(
     }
     bucket.items.push(item);
   }
-
-  // Track per-turn injected system-prompt so multi-turn streams don't re-inject.
-  const consumedSystemPrompts = new Set<string>();
 
   for (const entry of displayOrder) {
     if (entry.kind === "single") {
@@ -653,32 +674,16 @@ function buildBlocksForRun(
       continue;
     }
 
-    // Inject system-prompt into the first turn that has a user-prompt item
-    // (it surfaces in the prompt bundle before user/context/activity).
-    // If the turn has no user prompt, emit the system-prompt as a standalone
-    // block BEFORE the turn so it always leads the session regardless of
-    // whether a user prompt is present.
-    let systemPromptForTurn: Extract<
-      TranscriptItem,
-      { type: "metadata" }
-    > | null = null;
-    if (
-      pendingSystemPrompt &&
-      !consumedSystemPrompts.has(pendingSystemPrompt.id)
-    ) {
-      if (bucket.items.some(isUserPrompt)) {
-        // Consume into the prompt bundle.
-        systemPromptForTurn = pendingSystemPrompt;
-        consumedSystemPrompts.add(pendingSystemPrompt.id);
-      } else {
-        // No user prompt in this turn — emit standalone before the turn block
-        // so the system prompt leads the session (boundary → prompt → activity).
-        blocks.push({ kind: "single", item: pendingSystemPrompt });
-        consumedSystemPrompts.add(pendingSystemPrompt.id);
+    // Flush any items bound to this turn (system-prompt card(s) plus any
+    // interleaved null-session frames) as standalone blocks before the turn.
+    const beforeTurn = pendingForTurn.get(entry.turnId);
+    if (beforeTurn) {
+      for (const pending of beforeTurn) {
+        blocks.push({ kind: "single", item: pending });
       }
     }
 
-    const segments = classifyTurnItems(bucket.items, systemPromptForTurn);
+    const segments = classifyTurnItems(bucket.items);
     if (segments.length > 0) {
       blocks.push({
         kind: "turn",
@@ -688,14 +693,13 @@ function buildBlocksForRun(
     }
   }
 
-  // If system-prompt was never consumed (session/new arrived without any
-  // subsequent turn — stream still incomplete or mid-restart), emit it as a
-  // standalone single so it remains visible and is not silently dropped.
-  if (
-    pendingSystemPrompt &&
-    !consumedSystemPrompts.has(pendingSystemPrompt.id)
-  ) {
-    blocks.push({ kind: "single", item: pendingSystemPrompt });
+  // End-of-stream fallback: session/new arrived but no turn followed yet
+  // (incomplete stream or mid-restart). Emit as standalone singles so the
+  // cards remain visible and are not silently dropped.
+  if (openBatch !== null) {
+    for (const pending of openBatch) {
+      blocks.push({ kind: "single", item: pending });
+    }
   }
 
   return blocks;
@@ -724,9 +728,6 @@ export function flattenDisplayBlocks(
       } else if (segment.kind === "prompt") {
         result.push(segment.user);
         result.push(...segment.setup);
-        if (segment.systemPrompt) {
-          result.push(segment.systemPrompt);
-        }
         if (segment.context) {
           result.push(segment.context);
         }

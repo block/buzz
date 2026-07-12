@@ -580,7 +580,6 @@ test("buildTranscriptDisplayBlocks bundles steer message with steer context behi
   const steerSegment = block.segments[1];
   assert.equal(steerSegment.user.id, "steer:chan-1:turn-1");
   assert.equal(steerSegment.context?.id, "steer-context:chan-1:turn-1");
-  assert.equal(steerSegment.systemPrompt, null);
   assert.deepEqual(steerSegment.setup, []);
   // No standalone "Prompt context" metadata row leaks into the feed.
   assert.ok(
@@ -934,20 +933,20 @@ function firstTurnSequence() {
   ];
 }
 
-test("buildTranscriptDisplayBlocks_firstTurnSequence_noStandaloneSystemPrompt", () => {
-  // Regression for: pre-resolution null-session items (turn_started + session/new)
-  // were assigned to a synthetic "unknown" run, causing the system prompt to emit
-  // as a standalone "System prompt" row instead of staying in the prompt bundle.
+test("buildTranscriptDisplayBlocks_firstTurnSequence_standaloneSystemPrompt", () => {
+  // session/new is session-scoped, not turn-scoped. After the consolidation,
+  // the grouper emits it as a standalone "System prompt" single block that
+  // appears BEFORE the first user-prompt turn — never inside the prompt bundle.
   const blocks = buildTranscriptDisplayBlocks(firstTurnSequence());
 
-  // (a) No standalone "System prompt" single block.
+  // (a) Exactly one standalone "System prompt" single block.
   const systemPromptSingles = blocks.filter(
     (b) => b.kind === "single" && b.item.acpSource === "session/new",
   );
   assert.equal(
     systemPromptSingles.length,
-    0,
-    "system prompt must not appear as a standalone single block",
+    1,
+    "system prompt must appear as exactly one standalone single block",
   );
 
   // (b) No session-boundary blocks — this is a single-session transcript.
@@ -958,7 +957,7 @@ test("buildTranscriptDisplayBlocks_firstTurnSequence_noStandaloneSystemPrompt", 
     "must be zero session-boundary blocks for a first-turn single-session sequence",
   );
 
-  // (c) System prompt is inside the turn group (consumed by the prompt bundle).
+  // (c) System prompt is NOT inside any turn group (not in prompt bundle).
   const turnBlocks = blocks.filter((b) => b.kind === "turn");
   assert.ok(turnBlocks.length > 0, "at least one turn block must exist");
   const allTurnItems = flattenDisplayBlocks(turnBlocks);
@@ -966,8 +965,20 @@ test("buildTranscriptDisplayBlocks_firstTurnSequence_noStandaloneSystemPrompt", 
     (item) => item.acpSource === "session/new",
   );
   assert.ok(
-    systemPromptInTurn,
-    "system prompt item must be present inside a turn block (prompt bundle)",
+    !systemPromptInTurn,
+    "system prompt item must NOT be present inside a turn block",
+  );
+
+  // (d) Standalone system-prompt block appears BEFORE the first turn block.
+  const systemPromptIdx = blocks.indexOf(systemPromptSingles[0]);
+  const firstTurnIdx = blocks.findIndex((b) => b.kind === "turn");
+  assert.ok(
+    firstTurnIdx !== -1,
+    "there must be at least one turn block after the system prompt",
+  );
+  assert.ok(
+    systemPromptIdx < firstTurnIdx,
+    `system-prompt single (${systemPromptIdx}) must precede first turn block (${firstTurnIdx})`,
   );
 });
 
@@ -1134,14 +1145,7 @@ test("buildTranscriptDisplayBlocks_restartScenario_systemPromptAfterBoundary", (
   // (b) The session/new item must appear AFTER the boundary, not before it.
   const boundaryIndex = blocks.indexOf(boundaryBlocks[0]);
   const systemPromptBlockIndex = blocks.findIndex(
-    (b) =>
-      (b.kind === "single" && b.item.acpSource === "session/new") ||
-      (b.kind === "turn" &&
-        b.segments.some(
-          (seg) =>
-            seg.kind === "prompt" &&
-            seg.systemPrompt?.acpSource === "session/new",
-        )),
+    (b) => b.kind === "single" && b.item.acpSource === "session/new",
   );
   assert.ok(
     systemPromptBlockIndex !== -1,
@@ -1227,7 +1231,7 @@ test("buildTranscriptDisplayBlocks_firstEverSession_systemPromptInSingleRun", ()
     "no session-boundary block for a first-ever single session",
   );
 
-  // System prompt must appear somewhere in the output (in the turn bundle).
+  // System prompt must appear somewhere in the output (as a standalone single).
   const flat = flattenDisplayBlocks(blocks);
   assert.ok(
     flat.some((i) => i.acpSource === "session/new"),
@@ -1404,5 +1408,304 @@ test("buildTranscriptDisplayBlocks_sessionBoundary_keyStableAcrossPrepend", () =
     boundaryAfter.runIndex,
     2,
     "runIndex after prepend must be 2, confirming it is unstable",
+  );
+});
+
+// ── Multiple pre-resolution session/new markers — both survive ────────────────
+
+test("buildTranscriptDisplayBlocks_twoPreResolutionSessionNewMarkers_bothSurviveBeforeTurn", () => {
+  // Restart loop: two session/new items arrive after sess-1 resolves but before
+  // sess-2 resolves (e.g. a rapid double-restart). A null-session frame arrives
+  // between them (models a lifecycle event with no session yet). All three must
+  // appear in the sess-2 run — neither marker nor the interleaved null-session
+  // frame may be silently dropped. This is the documented
+  // "marker(s) plus trailing null-session items" contract.
+  //
+  // Wire order:
+  //   toolA(sess-1) → sp-a(sess-1 stale) → null-frame(null) → sp-b(sess-1 stale) → toolB(sess-2)
+  const ts1 = "2026-07-08T12:00:00.000Z";
+  const ts2 = "2026-07-08T12:01:00.000Z";
+  const ts3 = "2026-07-08T12:01:15.000Z";
+  const ts4 = "2026-07-08T12:01:30.000Z";
+  const ts5 = "2026-07-08T12:02:00.000Z";
+
+  // A null-session lifecycle frame (models turn_started or similar arriving
+  // between two session/new firings during a rapid double-restart).
+  const nullFrame = {
+    id: "null-frame",
+    type: "lifecycle",
+    renderClass: "lifecycle",
+    title: "Session starting",
+    text: "",
+    timestamp: ts3,
+    acpSource: "turn_started",
+    turnId: null,
+    sessionId: null,
+    channelId: "chan-1",
+  };
+
+  const items = [
+    { ...sessionItem("toolA", "sess-1", ts1), turnId: "turn-1" },
+    systemPromptItem("sp-a", "sess-1", ts2),
+    nullFrame,
+    systemPromptItem("sp-b", "sess-1", ts4),
+    { ...sessionItem("toolB", "sess-2", ts5), turnId: "turn-2" },
+  ];
+
+  const blocks = buildTranscriptDisplayBlocks(items, "sess-2");
+
+  // Exactly one boundary between the two sessions.
+  const boundaryBlocks = blocks.filter((b) => b.kind === "session-boundary");
+  assert.equal(
+    boundaryBlocks.length,
+    1,
+    "exactly one session-boundary for two sessions",
+  );
+  const boundaryIdx = blocks.indexOf(boundaryBlocks[0]);
+
+  // Both system-prompt blocks must be present.
+  const systemPromptBlocks = blocks.filter(
+    (b) => b.kind === "single" && b.item?.acpSource === "session/new",
+  );
+  assert.equal(
+    systemPromptBlocks.length,
+    2,
+    "both session/new markers must produce standalone single blocks",
+  );
+
+  const spAIdx = blocks.findIndex(
+    (b) => b.kind === "single" && b.item?.id === "sp-a",
+  );
+  const spBIdx = blocks.findIndex(
+    (b) => b.kind === "single" && b.item?.id === "sp-b",
+  );
+  const toolBIdx = blocks.findIndex((b) =>
+    flattenDisplayBlocks([b]).some((i) => i.id === "toolB"),
+  );
+
+  // Both system-prompt blocks appear AFTER the boundary.
+  assert.ok(
+    boundaryIdx < spAIdx,
+    `boundary (${boundaryIdx}) must precede sp-a (${spAIdx})`,
+  );
+  assert.ok(
+    boundaryIdx < spBIdx,
+    `boundary (${boundaryIdx}) must precede sp-b (${spBIdx})`,
+  );
+
+  // Both system-prompt blocks appear BEFORE toolB's turn block.
+  assert.ok(
+    spAIdx < toolBIdx,
+    `sp-a (${spAIdx}) must precede toolB (${toolBIdx})`,
+  );
+  assert.ok(
+    spBIdx < toolBIdx,
+    `sp-b (${spBIdx}) must precede toolB (${toolBIdx})`,
+  );
+
+  // sp-a must appear before sp-b (wire order preserved).
+  assert.ok(
+    spAIdx < spBIdx,
+    `sp-a (${spAIdx}) must precede sp-b (${spBIdx}) — wire order must be preserved`,
+  );
+
+  // The interleaved null-session frame must survive and appear in the sess-2 run
+  // (after the boundary). This proves the "marker plus trailing null-session items"
+  // contract — the null frame lands in the pending buffer between sp-a and sp-b
+  // and must not be lost when the second marker arrives.
+  const flat = flattenDisplayBlocks(blocks);
+  const nullFrameInFlat = flat.some((i) => i.id === "null-frame");
+  assert.ok(
+    nullFrameInFlat,
+    "interleaved null-session frame must survive in the flattened output",
+  );
+  const nullFrameBlockIdx = blocks.findIndex((b) =>
+    flattenDisplayBlocks([b]).some((i) => i.id === "null-frame"),
+  );
+  assert.ok(
+    boundaryIdx < nullFrameBlockIdx,
+    `null-session frame (${nullFrameBlockIdx}) must appear after boundary (${boundaryIdx}) — it belongs to the new session run`,
+  );
+  // Wire order: sp-a → null-frame → sp-b (all flush in insertion order).
+  const flatSpAIdx = flat.findIndex((i) => i.id === "sp-a");
+  const flatNullIdx = flat.findIndex((i) => i.id === "null-frame");
+  const flatSpBIdx = flat.findIndex((i) => i.id === "sp-b");
+  assert.ok(
+    flatSpAIdx < flatNullIdx,
+    `sp-a (${flatSpAIdx}) must precede null-frame (${flatNullIdx}) in flat output`,
+  );
+  assert.ok(
+    flatNullIdx < flatSpBIdx,
+    `null-frame (${flatNullIdx}) must precede sp-b (${flatSpBIdx}) in flat output`,
+  );
+
+  // toolA (sess-1) must appear before the boundary.
+  const toolAIdx = blocks.findIndex((b) =>
+    flattenDisplayBlocks([b]).some((i) => i.id === "toolA"),
+  );
+  assert.ok(
+    toolAIdx < boundaryIdx,
+    `toolA (${toolAIdx}) must be before boundary (${boundaryIdx})`,
+  );
+});
+
+// ── Regression suite for pendingForTurn / openBatch sealing ─────────────────
+
+// Production wire order: turn_started(t1) → session/new → session_resolved(t1).
+// The session/new arrives AFTER the bucket for turn-1 already exists.
+// The system-prompt must still be hoisted before turn-1.
+test("buildTranscriptDisplayBlocks_productionWireOrder_systemPromptBeforeTurn1", () => {
+  const ts = "2026-07-08T12:00:00.000Z";
+  const items = [
+    // turn_started creates the bucket BEFORE session/new fires.
+    {
+      id: "turn-started-t1",
+      type: "lifecycle",
+      renderClass: "lifecycle",
+      title: "Turn started",
+      text: "",
+      timestamp: ts,
+      acpSource: "turn_started",
+      turnId: "turn-1",
+      sessionId: "sess-1",
+      channelId: "chan-1",
+    },
+    // session/new fires AFTER the bucket exists (stale-stamped session).
+    systemPromptItem("sp", "sess-0", ts),
+    // session_resolved reuses the existing turn-1 bucket.
+    {
+      id: "session-resolved-t1",
+      type: "lifecycle",
+      renderClass: "lifecycle",
+      title: "Session resolved",
+      text: "",
+      timestamp: ts,
+      acpSource: "session_resolved",
+      turnId: "turn-1",
+      sessionId: "sess-1",
+      channelId: "chan-1",
+    },
+    // A real activity item so the turn block has segments and appears in output.
+    {
+      id: "assistant-t1",
+      type: "message",
+      role: "assistant",
+      title: "Assistant",
+      text: "Hello",
+      timestamp: ts,
+      acpSource: "agent_message_chunk",
+      turnId: "turn-1",
+      sessionId: "sess-1",
+      channelId: "chan-1",
+    },
+  ];
+
+  const blocks = buildTranscriptDisplayBlocks(items);
+
+  // sp must appear as a standalone single block.
+  const spBlockIdx = blocks.findIndex(
+    (b) => b.kind === "single" && b.item?.id === "sp",
+  );
+  // turn-1 must appear as a turn block.
+  const turnBlockIdx = blocks.findIndex(
+    (b) => b.kind === "turn" && b.turnId === "turn-1",
+  );
+
+  assert.ok(spBlockIdx !== -1, "sp block must be present");
+  assert.ok(turnBlockIdx !== -1, "turn-1 block must be present");
+
+  // System-prompt block must appear before the turn-1 block.
+  assert.ok(
+    spBlockIdx < turnBlockIdx,
+    `sp block (${spBlockIdx}) must precede turn-1 block (${turnBlockIdx}) — system-prompt must flush before its anchor turn even when bucket pre-existed`,
+  );
+});
+
+// Later null-session items (after turn-1) must NOT be hoisted before turn-1.
+// Sequence: sp(null) → turn-1 item → later-null-frame(null) → turn-2 item
+test("buildTranscriptDisplayBlocks_laterNullFrameAfterTurn1_notHoistedBeforeTurn1", () => {
+  const ts = "2026-07-08T12:00:00.000Z";
+  const items = [
+    systemPromptItem("sp", "sess-1", ts),
+    { ...sessionItem("toolA", "sess-1", ts), turnId: "turn-1" },
+    {
+      id: "later-null-frame",
+      type: "lifecycle",
+      renderClass: "lifecycle",
+      title: "Session resolved",
+      text: "",
+      timestamp: ts,
+      acpSource: "session_resolved",
+      turnId: null,
+      sessionId: "sess-1",
+      channelId: "chan-1",
+    },
+    { ...sessionItem("toolB", "sess-1", ts), turnId: "turn-2" },
+  ];
+
+  const blocks = buildTranscriptDisplayBlocks(items);
+  const flat = flattenDisplayBlocks(blocks);
+
+  const spIdx = flat.findIndex((i) => i.id === "sp");
+  const toolAIdx = flat.findIndex((i) => i.id === "toolA");
+  const laterNullIdx = flat.findIndex((i) => i.id === "later-null-frame");
+  const toolBIdx = flat.findIndex((i) => i.id === "toolB");
+
+  assert.ok(spIdx !== -1, "sp must be present");
+  assert.ok(toolAIdx !== -1, "toolA must be present");
+  assert.ok(laterNullIdx !== -1, "later-null-frame must be present");
+  assert.ok(toolBIdx !== -1, "toolB must be present");
+
+  assert.ok(spIdx < toolAIdx, `sp (${spIdx}) must precede toolA (${toolAIdx})`);
+  assert.ok(
+    toolAIdx < laterNullIdx,
+    `toolA (${toolAIdx}) must precede later-null-frame (${laterNullIdx}) — post-turn null items must NOT be hoisted`,
+  );
+  assert.ok(
+    laterNullIdx < toolBIdx,
+    `later-null-frame (${laterNullIdx}) must precede toolB (${toolBIdx})`,
+  );
+});
+
+// A leading non-system-prompt null-session item before any session/new must be
+// emitted inline and must not prevent subsequent system-prompt hoisting. The
+// buffer-open decision must not depend on displayOrder.length === 0.
+test("buildTranscriptDisplayBlocks_leadingSingleBeforeSessionNew_emittedInline", () => {
+  const ts = "2026-07-08T12:00:00.000Z";
+  const items = [
+    {
+      id: "early-lifecycle",
+      type: "lifecycle",
+      renderClass: "lifecycle",
+      title: "Agent connected",
+      text: "",
+      timestamp: ts,
+      acpSource: "agent_connected",
+      turnId: null,
+      sessionId: "sess-1",
+      channelId: "chan-1",
+    },
+    systemPromptItem("sp", "sess-1", ts),
+    { ...sessionItem("toolA", "sess-1", ts), turnId: "turn-1" },
+  ];
+
+  const blocks = buildTranscriptDisplayBlocks(items);
+  const flat = flattenDisplayBlocks(blocks);
+
+  const earlyIdx = flat.findIndex((i) => i.id === "early-lifecycle");
+  const spIdx = flat.findIndex((i) => i.id === "sp");
+  const toolAIdx = flat.findIndex((i) => i.id === "toolA");
+
+  assert.ok(earlyIdx !== -1, "early-lifecycle must be present");
+  assert.ok(spIdx !== -1, "sp must be present");
+  assert.ok(toolAIdx !== -1, "toolA must be present");
+
+  assert.ok(
+    earlyIdx < toolAIdx,
+    `early-lifecycle (${earlyIdx}) must precede toolA (${toolAIdx})`,
+  );
+  assert.ok(
+    spIdx < toolAIdx,
+    `sp (${spIdx}) must precede toolA (${toolAIdx}) — system-prompt must be hoisted even after a leading item`,
   );
 });
