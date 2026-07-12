@@ -35,6 +35,16 @@ export function settleProgrammaticBottomPin(
   return isAtTrueBottom(container);
 }
 
+export function shouldSettleForSplitPanel({
+  isAtBottom,
+  splitPanelOpen,
+}: {
+  isAtBottom: boolean;
+  splitPanelOpen: boolean;
+}): boolean {
+  return isAtBottom && splitPanelOpen;
+}
+
 export function shouldSettleVirtualizedBottom({
   anchorKind,
   messageDelta,
@@ -66,6 +76,7 @@ type UseAnchoredScrollOptions = {
   /** Source of truth for the rendered list. Used to detect new-at-bottom
    *  arrivals and to seed/refresh the anchor pre-render. */
   messages: Array<{ id: string }>;
+  splitPanelOpen?: boolean;
 
   /** When set, scroll to and highlight this message on mount and on change. */
   targetMessageId?: string | null;
@@ -181,6 +192,7 @@ export function useAnchoredScroll({
   channelId,
   isLoading,
   messages,
+  splitPanelOpen = false,
 
   targetMessageId = null,
   onTargetReached,
@@ -195,6 +207,11 @@ export function useAnchoredScroll({
   // restoration). useState would force re-renders we don't want.
   const anchorRef = React.useRef<AnchorState>({ kind: "at-bottom" });
   const [isAtBottom, setIsAtBottom] = React.useState(true);
+  React.useLayoutEffect(() => {
+    if (shouldSettleForSplitPanel({ isAtBottom, splitPanelOpen })) {
+      virtualSettleAtBottom?.();
+    }
+  }, [isAtBottom, splitPanelOpen, virtualSettleAtBottom]);
   const [newMessageCount, setNewMessageCount] = React.useState(0);
   const [highlightedMessageId, setHighlightedMessageId] = React.useState<
     string | null

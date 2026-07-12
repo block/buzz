@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   settleProgrammaticBottomPin,
+  shouldSettleForSplitPanel,
   shouldSettleVirtualizedBottom,
 } from "./useAnchoredScroll.ts";
 
@@ -19,6 +20,21 @@ function fakeContainer({ clientHeight, scrollHeight, scrollTop }) {
     },
   };
 }
+
+test("split panel settles only an already-bottomed timeline", () => {
+  assert.equal(
+    shouldSettleForSplitPanel({ isAtBottom: true, splitPanelOpen: true }),
+    true,
+  );
+  assert.equal(
+    shouldSettleForSplitPanel({ isAtBottom: false, splitPanelOpen: true }),
+    false,
+  );
+  assert.equal(
+    shouldSettleForSplitPanel({ isAtBottom: true, splitPanelOpen: false }),
+    false,
+  );
+});
 
 test("virtualized bottom settle arms for pinned appends and replacements", () => {
   assert.equal(
