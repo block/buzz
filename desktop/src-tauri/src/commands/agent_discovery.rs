@@ -26,24 +26,35 @@ fn active_installs() -> &'static std::sync::Mutex<std::collections::HashSet<Stri
 /// Returns `None` when no install is needed (adapter is present and current).
 /// Returns `Some(cmds)` when the adapter is missing or (for codex) outdated.
 ///
+/// For the codex **outdated** case the returned sequence is a two-step
+/// reinstall: first uninstall the old `@zed-industries/codex-acp` package
+/// (idempotent — exit 0 when absent), then install the new
+/// `@agentclientprotocol/codex-acp`.  This is required because both packages
+/// install a global binary named `codex-acp`, and npm ≥7 refuses to overwrite
+/// a bin file owned by a different package with `EEXIST`.
+///
+/// For the **missing** case the catalog's `adapter_install_commands` are used
+/// as-is (no prior package to remove).
+///
 /// This is a pure planning function: it never spawns a process.  Tests use it to
 /// assert the correct install command is selected without touching real npm.
 pub(crate) fn plan_adapter_install<'c>(
     runtime_id: &str,
     adapter_path: Option<&std::path::Path>,
     adapter_install_commands: &'c [&'c str],
-) -> Option<&'c [&'c str]> {
-    let needs_install = match adapter_path {
-        None => true,
-        Some(path) if runtime_id == "codex" => {
-            crate::managed_agents::codex_adapter_is_outdated(path)
-        }
-        Some(_) => false,
-    };
-    if needs_install {
-        Some(adapter_install_commands)
-    } else {
-        None
+) -> Option<Vec<&'c str>> {
+    match adapter_path {
+        // Adapter present and current — no install needed.
+        Some(_) if runtime_id != "codex" => None,
+        Some(path) if !crate::managed_agents::codex_adapter_is_outdated(path) => None,
+        // Codex adapter is outdated: uninstall the old package first so npm
+        // doesn't hit EEXIST on the shared `codex-acp` bin-link, then install.
+        Some(_) => Some(vec![
+            "npm uninstall -g @zed-industries/codex-acp",
+            "npm install -g @agentclientprotocol/codex-acp",
+        ]),
+        // Adapter missing: use the catalog's install commands directly.
+        None => Some(adapter_install_commands.to_vec()),
     }
 }
 
@@ -656,7 +667,7 @@ mod tests {
     #[test]
     fn test_is_npm_global_install_accepts_catalog_codex_command() {
         assert!(is_npm_global_install(
-            "npm install -g @zed-industries/codex-acp"
+            "npm install -g @agentclientprotocol/codex-acp"
         ));
     }
 
@@ -766,9 +777,9 @@ mod tests {
 
     /// plan_adapter_install is the pure install-plan seam used by
     /// install_acp_runtime_blocking. These tests verify:
-    ///   - A 0.x binary (AdapterOutdated) → install commands returned
+    ///   - A 0.x binary (AdapterOutdated) → uninstall-then-install sequence returned
     ///   - A 1.x binary (Available) → None (no reinstall)
-    ///   - Missing binary (None path) → install commands returned
+    ///   - Missing binary (None path) → catalog install commands returned
     #[cfg(unix)]
     #[test]
     fn test_plan_adapter_install_selects_npm_command_for_outdated_0x_codex_binary() {
@@ -789,10 +800,14 @@ mod tests {
             "0.x codex adapter must trigger install plan"
         );
         let cmds = plan.unwrap();
-        assert!(
-            cmds.iter()
-                .any(|c| c.contains("@agentclientprotocol/codex-acp")),
-            "install plan must select @agentclientprotocol/codex-acp; got {cmds:?}"
+        // Outdated arm: must uninstall the old package first, then install new.
+        assert_eq!(
+            cmds,
+            vec![
+                "npm uninstall -g @zed-industries/codex-acp",
+                "npm install -g @agentclientprotocol/codex-acp",
+            ],
+            "outdated codex adapter must produce uninstall-then-install sequence; got {cmds:?}"
         );
     }
 
@@ -822,10 +837,17 @@ mod tests {
     }
 
     #[test]
-    fn test_plan_adapter_install_returns_cmds_when_no_adapter_path() {
+    fn test_plan_adapter_install_returns_catalog_cmds_when_no_adapter_path() {
         let install_cmds = &["npm install -g @agentclientprotocol/codex-acp"];
         let plan = plan_adapter_install("codex", None, install_cmds);
         assert!(plan.is_some(), "missing adapter must trigger install plan");
+        // Missing arm: use the catalog's install commands directly (no prior
+        // package to uninstall — fresh install, not a reinstall).
+        assert_eq!(
+            plan.unwrap(),
+            vec!["npm install -g @agentclientprotocol/codex-acp"],
+            "missing codex adapter must use catalog install commands only"
+        );
     }
 
     #[cfg(unix)]

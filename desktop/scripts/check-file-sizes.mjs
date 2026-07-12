@@ -148,7 +148,11 @@ const overrides = new Map([
   // Load-bearing UX fix (bad config → clear diagnostic, not "run codex login").
   // codex-acp-package-swap: AdapterOutdated version-probe in cli_login_requirements
   // (+22 lines). Load-bearing — blocks login gate for deprecated 0.16.x adapter.
-  ["src-tauri/src/managed_agents/readiness.rs", 1605],
+  // code-reviewer fix-round: codex readiness gate tests — 2 new tests for
+  // outdated-adapter and garbage-version-output paths through the codex id gate
+  // (+140 lines: make_codex_runtime helper, PATH_MUTEX serializer, 2 test fns).
+  // Load-bearing test coverage; queued to split with the file generally.
+  ["src-tauri/src/managed_agents/readiness.rs", 1750],
   // applyWorkspace reposDir parameter plus the validateReposDir binding,
   // threaded through Tauri invokes for configurable repos_dir, plus the
   // harness-persona-sync `harnessOverride` create-input bit — load-bearing

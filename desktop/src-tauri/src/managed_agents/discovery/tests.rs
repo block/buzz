@@ -772,10 +772,10 @@ fn probe_codex_acp_major_version_returns_version_when_descendant_holds_pipe_open
     // Simulate a process that forks a background child which inherits stdout
     // and stays alive, while the parent writes version and exits 0.
     //
-    // Without O_NONBLOCK the pipe stays open (the descendant holds the write
-    // end), so read_to_end() blocks indefinitely.  With O_NONBLOCK the probe
-    // reads whatever is in the kernel buffer after the parent exits and returns
-    // immediately — NOT waiting for the descendant to close its fd.
+    // The probe writes the child's stdout to a temp file, then reads from the
+    // file after the parent process exits.  Because the file has reached EOF
+    // (the parent closed its write end), read_to_end() returns immediately
+    // without waiting for the descendant to close its inherited fd.
     //
     // `(exec sleep 60 &)` forks a subshell that execs `sleep 60`; the subshell
     // inherits the parent's stdout fd and keeps it open.

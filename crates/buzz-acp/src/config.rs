@@ -573,14 +573,12 @@ fn default_agent_args(command: &str) -> Option<Vec<String>> {
     }
 }
 
-/// Build `-c` flag pairs that enable network access and allowlist the relay hostname
-/// in Codex's network sandbox.
+/// Build the `CODEX_CONFIG` environment variable that enables full outbound
+/// network access in Codex's macOS Seatbelt sandbox.
 ///
 /// Codex sandboxes MCP subprocesses (including `buzz-cli`) behind a Seatbelt sandbox
-/// that blocks all outbound network by default, plus a managed proxy with a domain
-/// sandbox gate for `buzz-cli` (an MCP subprocess that connects to the relay over
-/// WebSocket). Without this, `buzz-cli` requests are blocked by Codex's macOS Seatbelt
-/// sandbox before they can reach the network.
+/// that blocks all outbound network by default. Without this env var, `buzz-cli`
+/// requests are blocked before they can reach the relay WebSocket.
 ///
 /// Returns `Some(("CODEX_CONFIG", "{\"sandbox_workspace_write\":{\"network_access\":true}}"))` for
 /// Codex agents, or `None` for non-Codex agents or when the relay URL cannot be parsed.
