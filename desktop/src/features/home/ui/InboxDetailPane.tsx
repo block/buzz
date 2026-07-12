@@ -166,18 +166,110 @@ export function InboxDetailPane({
     };
   }, [conversationId]);
 
+  // Deferred deliberate-selection centering.
+  //
+  // Bug fixed here: the old one-shot rAF fired on the click render, before
+  // useInboxThreadContext had started its async fetch.  The fetch then prepended
+  // older messages ABOVE the viewport, shifting it mid-thread.
+  //
+  // Fix: arm a pending-center ref on each new (conversationId, selectedEventId)
+  // pair.  If isThreadContextLoading is already false when the rAF fires (no
+  // fetch needed), execute immediately.  If loading starts before/as the rAF
+  // fires, cancel the rAF and re-execute once loading transitions true → false.
+  // User scroll before the center fires cancels it (never yank the reader).
+  //
+  // Effect-ordering note: on the click commit, InboxDetailPane effects run
+  // before HomeView (child-first), so isThreadContextLoading is still false
+  // at that instant — the "is not loading right now" guard alone is NOT
+  // sufficient; we must observe the true → false transition instead.
+  // The isLoading ref is kept up-to-date unconditionally so rAF callbacks
+  // always read the current value (closures would capture stale renders).
+  const pendingCenterKeyRef = React.useRef<string | null>(null);
+  const userScrolledRef = React.useRef(false);
+  const prevLoadingRef = React.useRef(isThreadContextLoading);
+  const isLoadingRef = React.useRef(isThreadContextLoading);
+  // Keep isLoadingRef current every render so rAF callbacks see the live value.
+  isLoadingRef.current = isThreadContextLoading;
+
+  // Arm the pending center whenever the selection key changes.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: isLoadingRef/pendingCenterKeyRef/userScrolledRef are refs; selectedMessageScrollKey is the sole trigger
   React.useEffect(() => {
     if (!selectedMessageScrollKey) {
+      pendingCenterKeyRef.current = null;
       return;
     }
 
-    window.requestAnimationFrame(() => {
-      detailPaneRef.current
-        ?.querySelector<HTMLElement>(
-          '[data-testid="home-inbox-selected-message"]',
-        )
-        ?.scrollIntoView({ block: "center" });
+    pendingCenterKeyRef.current = selectedMessageScrollKey;
+    userScrolledRef.current = false;
+
+    // Attempt the center after the current paint.  By the time this rAF fires,
+    // any synchronous state updates (including isLoading → true) will have
+    // been committed.  Read from the ref so we see the live value.
+    const rafId = window.requestAnimationFrame(() => {
+      if (isLoadingRef.current) {
+        // Loading is in progress — cancel now; the transition effect will fire.
+        return;
+      }
+      if (
+        pendingCenterKeyRef.current === selectedMessageScrollKey &&
+        !userScrolledRef.current
+      ) {
+        pendingCenterKeyRef.current = null;
+        detailPaneRef.current
+          ?.querySelector<HTMLElement>(
+            '[data-testid="home-inbox-selected-message"]',
+          )
+          ?.scrollIntoView({ block: "center" });
+      }
     });
+
+    return () => {
+      window.cancelAnimationFrame(rafId);
+    };
+  }, [selectedMessageScrollKey]);
+
+  // Fire the deferred center when loading transitions true → false.
+  React.useEffect(() => {
+    const wasLoading = prevLoadingRef.current;
+    prevLoadingRef.current = isThreadContextLoading;
+
+    if (wasLoading && !isThreadContextLoading) {
+      // Loading just settled.  If a center is still pending for the current
+      // selection key and the user hasn't scrolled, execute it now.
+      if (
+        pendingCenterKeyRef.current === selectedMessageScrollKey &&
+        selectedMessageScrollKey !== null &&
+        !userScrolledRef.current
+      ) {
+        pendingCenterKeyRef.current = null;
+        detailPaneRef.current
+          ?.querySelector<HTMLElement>(
+            '[data-testid="home-inbox-selected-message"]',
+          )
+          ?.scrollIntoView({ block: "center" });
+      }
+    }
+  }, [isThreadContextLoading, selectedMessageScrollKey]);
+
+  // Cancel the pending center if the user scrolls before it fires.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: userScrolledRef is a ref; selectedMessageScrollKey triggers reinstall on each new selection so detailPaneRef.current is populated
+  React.useEffect(() => {
+    const pane = detailPaneRef.current;
+    if (!pane) return;
+
+    const handleUserScroll = () => {
+      userScrolledRef.current = true;
+    };
+
+    pane.addEventListener("wheel", handleUserScroll, { passive: true });
+    pane.addEventListener("touchstart", handleUserScroll, { passive: true });
+    pane.addEventListener("keydown", handleUserScroll, { passive: true });
+
+    return () => {
+      pane.removeEventListener("wheel", handleUserScroll);
+      pane.removeEventListener("touchstart", handleUserScroll);
+      pane.removeEventListener("keydown", handleUserScroll);
+    };
   }, [selectedMessageScrollKey]);
 
   // Capture the default composer reply parent from the selected-event anchor

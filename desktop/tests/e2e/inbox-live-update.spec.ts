@@ -926,4 +926,181 @@ test.describe("inbox stable-conversation regressions", () => {
     expect(raceSend).not.toBeNull();
     expect(raceSend?.parentEventId).toBe(coldRoot.id);
   });
+
+  test("clicking newest inbox item after fetch-path load snaps to that message, not mid-thread", async ({
+    page,
+  }) => {
+    // Regression: the selected message was visible in `displayMessages` at
+    // click time (it was the feed representative), but useInboxThreadContext
+    // fetched older ancestors and prepended them above the viewport, shifting
+    // scrollTop to mid-thread while the newest message slid below the fold.
+    //
+    // Fix: the deliberate-selection center is deferred until
+    // isThreadContextLoading transitions true → false (fetch settled).
+    //
+    // Fixture:
+    //   - fetchRoot + 10 older replies are in mockMessages only (fetch path).
+    //   - fetchNewest (reply to fetchRoot) is pushed to the feed as the
+    //     representative.
+    //   - The thread is long enough that the detail pane requires scrolling.
+    //
+    // This test must FAIL at 5536cede5 (center fires before fetch, lands
+    // mid-thread) and PASS with the fix (center fires after fetch, lands on
+    // the newest message).
+
+    await installMockBridge(page);
+    await page.goto("/");
+    await expect(getListPane(page)).toBeVisible();
+    await waitForBridgeReady(page);
+    await installScrollSpy(page);
+
+    // ── Seed the fetch-path conversation ─────────────────────────────
+    // All events go into mockMessages via emit; only fetchNewest enters the feed.
+    const { fetchRoot, fetchNewest } = await page.evaluate(
+      ({ channelId, currentPubkey, senderPubkey }) => {
+        const win = window as MockWindow;
+        const emit = win.__BUZZ_E2E_EMIT_MOCK_MESSAGE__;
+        const push = win.__BUZZ_E2E_PUSH_MOCK_FEED_ITEM__;
+        if (!emit || !push) throw new Error("Bridge helpers not ready");
+
+        const fetchRoot = emit({
+          channelName: "general",
+          content: "Fetch-path thread root.",
+          pubkey: senderPubkey,
+          id: "d0".repeat(32),
+        });
+
+        // 10 older replies — in mockMessages, fetched via the context load.
+        // Each is tall enough to push the newest message below the fold.
+        for (let i = 1; i <= 10; i++) {
+          emit({
+            channelName: "general",
+            content: `Fetch-path older reply ${i} — long enough to occupy vertical space in the pane so that the total thread height requires scrolling to see the newest message.`,
+            parentEventId: fetchRoot.id,
+            pubkey: senderPubkey,
+            id: `d${i.toString(16).padStart(1, "0")}`.repeat(32),
+          });
+        }
+
+        // fetchNewest: the feed representative — the message the user clicks.
+        const fetchNewest = emit({
+          channelName: "general",
+          content:
+            "Fetch-path newest reply — the one the user clicks in inbox.",
+          parentEventId: fetchRoot.id,
+          pubkey: senderPubkey,
+          mentionPubkeys: [currentPubkey],
+          id: "df".repeat(32),
+        });
+
+        push({
+          id: fetchNewest.id,
+          kind: fetchNewest.kind,
+          pubkey: fetchNewest.pubkey,
+          content: fetchNewest.content,
+          created_at: fetchNewest.created_at + 11,
+          channel_id: channelId,
+          channel_name: "general",
+          tags: fetchNewest.tags,
+          category: "mention",
+        });
+
+        return { fetchRoot, fetchNewest };
+      },
+      {
+        channelId: GENERAL_CHANNEL_ID,
+        currentPubkey: TEST_IDENTITIES.tyler.pubkey,
+        senderPubkey: TEST_IDENTITIES.alice.pubkey,
+      },
+    );
+
+    // Confirm the feed representative row appeared in the inbox list.
+    const newestRow = page.getByTestId(`home-inbox-item-${fetchNewest.id}`);
+    await expect(newestRow).toBeVisible();
+
+    // Reset the spy so only the click's center is counted.
+    await resetScrollIntoViewCount(page);
+
+    // ── Click the newest reply row ────────────────────────────────────
+    await newestRow.click();
+    const detail = getDetailPane(page);
+    await expect(detail).toContainText("Fetch-path newest reply");
+
+    // Wait for the thread context fetch to complete: the detail pane transitions
+    // from aria-busy=true → aria-busy=false once isThreadContextLoading settles.
+    // State-based: poll until aria-busy is no longer "true".
+    await page.waitForFunction(() => {
+      const scrollable = document.querySelector(
+        '[data-testid="home-inbox-detail"] [aria-busy]',
+      );
+      return scrollable?.getAttribute("aria-busy") !== "true";
+    });
+
+    // After settle, confirm the older replies are now rendered (fetch landed).
+    await expect(detail).toContainText("Fetch-path older reply 1");
+
+    // ── Assert: selected message is within the pane viewport ─────────
+    // The selected message (fetchNewest) must be visible inside the scroll
+    // container — i.e. its bounding rect overlaps with the pane's visible area.
+    const isSelectedMessageInViewport = await page.evaluate(() => {
+      const selectedMsg = document.querySelector<HTMLElement>(
+        '[data-testid="home-inbox-selected-message"]',
+      );
+      const pane = document.querySelector<HTMLElement>(
+        '[data-testid="home-inbox-detail"] [aria-busy]',
+      );
+      if (!selectedMsg || !pane) return false;
+      const paneRect = pane.getBoundingClientRect();
+      const msgRect = selectedMsg.getBoundingClientRect();
+      // At least the top half of the element must overlap the pane's visible area.
+      const msgCenter = msgRect.top + msgRect.height / 2;
+      return msgCenter >= paneRect.top && msgCenter <= paneRect.bottom;
+    });
+    expect(isSelectedMessageInViewport).toBe(true);
+
+    // ── Assert: exactly one programmatic scroll fired ─────────────────
+    expect(await getScrollIntoViewCount(page)).toBe(1);
+
+    // ── Bonus: passive live arrivals after settle still trigger zero ──
+    // Inject a sibling to confirm the scroll-stability invariant is intact.
+    await page.evaluate(
+      ({ channelId, currentPubkey, senderPubkey, rootId, oldId }) => {
+        const win = window as MockWindow;
+        const emit = win.__BUZZ_E2E_EMIT_MOCK_MESSAGE__;
+        const replace = win.__BUZZ_E2E_REPLACE_MOCK_FEED_ITEM__;
+        if (!emit || !replace) throw new Error("Bridge helpers not ready");
+        const passive = emit({
+          channelName: "general",
+          content: "Passive live sibling after fetch settled.",
+          parentEventId: rootId,
+          pubkey: senderPubkey,
+          mentionPubkeys: [currentPubkey],
+          id: "de".repeat(32),
+        });
+        replace(oldId, {
+          id: passive.id,
+          kind: passive.kind,
+          pubkey: passive.pubkey,
+          content: passive.content,
+          created_at: passive.created_at + 12,
+          channel_id: channelId,
+          channel_name: "general",
+          tags: passive.tags,
+          category: "mention",
+        });
+      },
+      {
+        channelId: GENERAL_CHANNEL_ID,
+        currentPubkey: TEST_IDENTITIES.tyler.pubkey,
+        senderPubkey: TEST_IDENTITIES.alice.pubkey,
+        rootId: fetchRoot.id,
+        oldId: fetchNewest.id,
+      },
+    );
+    await expect(
+      page.getByTestId(`home-inbox-item-${"de".repeat(32)}`),
+    ).toBeVisible();
+    // Count must remain 1 — passive arrival must not trigger another center.
+    expect(await getScrollIntoViewCount(page)).toBe(1);
+  });
 });
