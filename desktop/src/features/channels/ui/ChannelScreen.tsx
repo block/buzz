@@ -969,6 +969,7 @@ export function ChannelScreen({
                   targetMessageId={mainTimelineTargetMessageId}
                   threadHeadMessage={displayedThreadHeadMessage}
                   threadMessages={displayedThreadMessages}
+                  threadMessagesPending={threadRepliesQuery.isPending}
                   threadPanelWidthPx={threadPanelWidthPx}
                   threadTypingPubkeys={threadTypingPubkeys}
                   threadReplyTargetMessage={displayedThreadReplyTargetMessage}

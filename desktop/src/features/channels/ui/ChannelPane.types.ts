@@ -137,6 +137,7 @@ export type ChannelPaneProps = {
   profilePanelView: ProfilePanelView;
   threadHeadMessage: TimelineMessage | null;
   threadMessages: MainTimelineEntry[];
+  threadMessagesPending?: boolean;
   threadPanelWidthPx: number;
   threadTypingPubkeys: string[];
   threadReplyTargetMessage: TimelineMessage | null;
