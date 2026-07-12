@@ -261,6 +261,12 @@ mod tests {
             "communities",
             "rate_limit_violations",
             "_operator_global_tables",
+            "push_gateway_challenges",
+            "push_gateway_installations",
+            "push_gateway_delegations",
+            "push_gateway_endpoint_quotas",
+            "push_gateway_delivery_auth_replays",
+            "push_gateway_delivery_request_replays",
         ] {
             if normalized[insert_pos..].contains(&format!("'{value}'")) {
                 globals.insert(value.to_owned());
@@ -471,7 +477,7 @@ mod tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 9);
+        assert_eq!(migrations.len(), 10);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -586,6 +592,23 @@ mod tests {
         assert!(migrations[8].sql.as_str().contains("30350"));
         assert!(migrations[8].sql.as_str().contains("search_tsv"));
         assert!(!migrations[0].sql.as_str().contains("30350"));
+
+        // Public push-gateway authority is intentionally deployment-global and
+        // durable: immediate revocation and hostile-relay admission cannot be
+        // honestly provided by a stateless gateway.
+        assert_eq!(migrations[9].version, 10);
+        assert!(migrations[9]
+            .sql
+            .as_str()
+            .contains("CREATE TABLE push_gateway_installations"));
+        assert!(migrations[9]
+            .sql
+            .as_str()
+            .contains("push_gateway_delegations"));
+        assert!(migrations[9]
+            .sql
+            .as_str()
+            .contains("_operator_global_tables"));
     }
 
     #[test]

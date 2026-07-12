@@ -146,6 +146,15 @@ pub enum IngestError {
     Internal(String),
 }
 
+fn map_push_accept_error(error: super::push_lease::AcceptError) -> IngestError {
+    match error {
+        super::push_lease::AcceptError::Validation(reason) => {
+            IngestError::Rejected(format!("invalid: {reason}"))
+        }
+        super::push_lease::AcceptError::Internal(reason) => IngestError::Internal(reason),
+    }
+}
+
 /// Determine the required scope for a given event kind.
 ///
 /// Returns `Err` for unknown kinds — the relay rejects them.
@@ -2028,7 +2037,7 @@ async fn ingest_event_inner(
     if kind_u32 == super::push_lease::KIND_PUSH_LEASE {
         let outcome = super::push_lease::accept(tenant, state, &event, now)
             .await
-            .map_err(|reason| IngestError::Rejected(format!("invalid: {reason}")))?;
+            .map_err(map_push_accept_error)?;
         match outcome {
             buzz_db::push::AcceptLeaseOutcome::Accepted => {}
             buzz_db::push::AcceptLeaseOutcome::StaleEvent => {
@@ -2554,6 +2563,27 @@ mod tests {
         match result.map_err(map_rejection).unwrap_err() {
             IngestError::Rejected(message) => assert_eq!(message, rejection),
             _ => panic!("expected rejected ingest error"),
+        }
+    }
+
+    #[test]
+    fn push_infrastructure_failures_are_internal_not_protocol_invalid() {
+        match map_push_accept_error(crate::handlers::push_lease::AcceptError::Internal(
+            "gateway unavailable".to_string(),
+        )) {
+            IngestError::Internal(message) => {
+                assert_eq!(message, "gateway unavailable");
+                assert!(!message.starts_with("invalid:"));
+            }
+            _ => panic!("infrastructure failure became a protocol rejection"),
+        }
+        match map_push_accept_error(crate::handlers::push_lease::AcceptError::Validation(
+            "unknown executor key".to_string(),
+        )) {
+            IngestError::Rejected(message) => {
+                assert_eq!(message, "invalid: unknown executor key")
+            }
+            _ => panic!("validation failure did not become a protocol rejection"),
         }
     }
 

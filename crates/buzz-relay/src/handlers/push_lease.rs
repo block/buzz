@@ -34,7 +34,6 @@ pub struct LeasePlaintext {
     pub app_profile: Option<String>,
     pub transport: Option<String>,
     pub endpoint: Option<String>,
-    pub wake_key: Option<String>,
     pub subscriptions: Option<Vec<Subscription>>,
 }
 
@@ -175,7 +174,7 @@ pub fn parse_plaintext(input: &str, max_plaintext_len: usize) -> Result<LeasePla
     } else {
         &["v", "origin", "generation", "active"]
     };
-    let optional: &[&str] = if active { &["wake_key"] } else { &[] };
+    let optional: &[&str] = &[];
     if let Some(key) = required.iter().find(|key| !object.contains_key(**key)) {
         return Err(format!("missing {key}"));
     }
@@ -205,7 +204,6 @@ pub fn validate_plaintext(body: &LeasePlaintext, limits: &LeaseLimits<'_>) -> Re
         if body.app_profile.is_some()
             || body.transport.is_some()
             || body.endpoint.is_some()
-            || body.wake_key.is_some()
             || body.subscriptions.is_some()
         {
             return Err("inactive lease must use minimal schema".into());
@@ -231,9 +229,6 @@ pub fn validate_plaintext(body: &LeasePlaintext, limits: &LeaseLimits<'_>) -> Re
     check_string(app_profile, limits.max_string_len)?;
     check_string(transport, limits.max_string_len)?;
     check_string(endpoint, limits.max_endpoint_len)?;
-    if let Some(wake_key) = &body.wake_key {
-        check_exact_hex(wake_key, "wake_key")?;
-    }
     if subscriptions.is_empty() || subscriptions.len() > limits.max_subscriptions {
         return Err("subscription quota exceeded".into());
     }
@@ -453,26 +448,38 @@ impl<'de> Visitor<'de> for NoDuplicatesVisitor {
     }
 }
 
+/// A lease rejection is either caller-correctable protocol validation or a
+/// transient/internal dependency failure that must remain retryable.
+#[derive(Debug)]
+pub enum AcceptError {
+    Validation(String),
+    Internal(String),
+}
+
+impl From<String> for AcceptError {
+    fn from(reason: String) -> Self {
+        Self::Validation(reason)
+    }
+}
+
 /// Fully validate, provision, and atomically persist one kind:30350 lease.
 pub async fn accept(
     tenant: &buzz_core::TenantContext,
     state: &std::sync::Arc<crate::state::AppState>,
     event: &Event,
     now: i64,
-) -> Result<buzz_db::push::AcceptLeaseOutcome, String> {
+) -> Result<buzz_db::push::AcceptLeaseOutcome, AcceptError> {
     const MAX_LEASE_TTL: i64 = 30 * 24 * 60 * 60;
     const ALLOWED_SKEW: i64 = 120;
     const MAX_CONTENT: usize = 65_536;
     const MAX_PLAINTEXT: usize = 32_768;
     const MAX_ACTIVE_LEASES: i64 = 16;
-    let issuance_url = state
-        .config
-        .push_gateway_issuance_url
-        .as_ref()
-        .ok_or_else(|| "push not supported".to_string())?;
+    if state.config.push_gateway_delivery_url.is_none() {
+        return Err(AcceptError::Validation("push not supported".to_string()));
+    }
     let envelope = validate_envelope(event, now, ALLOWED_SKEW, MAX_LEASE_TTL, MAX_CONTENT)?;
     if envelope.executor_key_id != state.config.push_executor_key_id {
-        return Err("unknown executor key".to_string());
+        return Err(AcceptError::Validation("unknown executor key".to_string()));
     }
     let plaintext = nostr::nips::nip44::decrypt(
         state.relay_keypair.secret_key(),
@@ -519,7 +526,7 @@ pub async fn accept(
     };
     let endpoint_hash;
     let subscriptions;
-    let grant;
+    let capability;
     let active = if body.active {
         let endpoint = body.endpoint.as_deref().expect("validated active endpoint");
         endpoint_hash = sha2::Sha256::digest(endpoint.as_bytes()).to_vec();
@@ -531,20 +538,7 @@ pub async fn accept(
             .map(|sub| sub.class.as_str())
             .max_by_key(|class| class_rank(class))
             .expect("non-empty subscriptions");
-        grant = crate::push_gateway::issue_apns_grant(
-            issuance_url,
-            state.config.push_gateway_timeout,
-            &state.relay_keypair,
-            &crate::push_gateway::GrantIssueRequest {
-                v: 1,
-                endpoint,
-                app_profile: body.app_profile.as_deref().expect("validated profile"),
-                max_class,
-                generation,
-                expires_at: envelope.expiration,
-            },
-        )
-        .await?;
+        capability = endpoint.to_owned();
         subscriptions = serde_json::to_value(
             body.subscriptions
                 .as_ref()
@@ -554,7 +548,7 @@ pub async fn accept(
         Some(buzz_db::push::ActiveLease {
             app_profile: body.app_profile.as_deref().expect("validated profile"),
             endpoint_hash: &endpoint_hash,
-            endpoint_grant: &grant,
+            endpoint_grant: &capability,
             max_class,
             subscriptions: &subscriptions,
         })
@@ -572,7 +566,7 @@ pub async fn accept(
             MAX_ACTIVE_LEASES,
         )
         .await
-        .map_err(|_| "lease persistence failed".to_string())
+        .map_err(|_| AcceptError::Internal("lease persistence failed".to_string()))
 }
 
 fn class_rank(class: &str) -> u8 {

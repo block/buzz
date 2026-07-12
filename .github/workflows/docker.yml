@@ -47,6 +47,7 @@ on:
   pull_request:
     paths:
       - "Dockerfile"
+      - "Dockerfile.push-gateway"
       - ".dockerignore"
       - ".github/workflows/docker.yml"
       - "Cargo.toml"
@@ -302,5 +303,86 @@ jobs:
             echo "Verify provenance:"
             echo '```'
             echo "gh attestation verify oci://${IMAGE_NAME}@${MERGED_DIGEST} --owner block"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  push-gateway:
+    name: Build public push gateway image
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || '' }}
+          persist-credentials: false
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@68827325e0b33c7199eb31dd4e31fbe9023e06e3  # v3
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5  # v4.1.0
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee  # v4.2.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@80c7e94dd9b9319bd5eb7a0e0fe9291e23a2a2e9  # v6.1.0
+        with:
+          images: ghcr.io/block/buzz-push-gateway
+          tags: |
+            type=ref,event=branch,enable=${{ github.event_name != 'workflow_dispatch' || inputs.version == '' }}
+            type=sha,prefix=sha-,format=short,enable=${{ github.event_name != 'workflow_dispatch' || inputs.version == '' }}
+            type=semver,pattern={{version}},match=^relay-v(.*)$,value=${{ inputs.version }}
+            type=semver,pattern={{major}}.{{minor}},match=^relay-v(.*)$,value=${{ inputs.version }}
+          labels: |
+            org.opencontainers.image.title=Buzz Push Gateway
+            org.opencontainers.image.description=Capability-gated APNs last hop for Buzz
+            org.opencontainers.image.licenses=Apache-2.0
+      - name: Build and publish gateway
+        id: build
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf  # v7.2.0
+        with:
+          context: .
+          file: ./Dockerfile.push-gateway
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=push-gateway
+          cache-to: type=gha,scope=push-gateway,mode=max
+      - name: Attest gateway image provenance
+        if: github.event_name != 'pull_request'
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373  # v4.1.1
+        with:
+          subject-name: ghcr.io/block/buzz-push-gateway
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+      - name: Gateway publication summary
+        if: github.event_name != 'pull_request'
+        env:
+          GATEWAY_DIGEST: ${{ steps.build.outputs.digest }}
+          GATEWAY_TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          {
+            echo "### Published \`ghcr.io/block/buzz-push-gateway\`"
+            echo
+            echo "**Digest:** \`${GATEWAY_DIGEST}\`"
+            echo
+            echo '**Tags:**'
+            echo '```'
+            echo "${GATEWAY_TAGS}"
+            echo '```'
+            echo
+            echo 'Verify provenance before deployment:'
+            echo '```'
+            echo "gh attestation verify oci://ghcr.io/block/buzz-push-gateway@${GATEWAY_DIGEST} --owner block"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"

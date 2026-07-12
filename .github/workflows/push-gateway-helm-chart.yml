@@ -1,0 +1,67 @@
+name: push gateway helm chart
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Chart semver (without push-chart-v prefix)"
+        required: true
+      ref:
+        description: "Matching push-chart-v tag"
+        required: true
+  push:
+    tags: ["push-chart-v[0-9]*"]
+  pull_request:
+    paths:
+      - "deploy/charts/buzz-push-gateway/**"
+      - ".github/workflows/push-gateway-helm-chart.yml"
+permissions: {}
+env:
+  CHART_REPO: oci://ghcr.io/block/buzz/charts
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    permissions: { contents: read }
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || '' }}
+          fetch-depth: 0
+      - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4
+        with: { version: v3.16.4 }
+      - run: deploy/charts/buzz-push-gateway/tests/render.sh
+  publish:
+    if: github.event_name != 'pull_request'
+    needs: validate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || '' }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4
+        with: { version: v3.16.4 }
+      - name: Verify release tag and chart version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version="${INPUT_VERSION:-${REF_NAME#push-chart-v}}"
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]
+          test "$(helm show chart deploy/charts/buzz-push-gateway | awk '/^version:/ {print $2}')" = "$version"
+          if [ -n "$INPUT_VERSION" ]; then
+            test "$(git rev-parse HEAD)" = "$(git rev-parse "refs/tags/push-chart-v${version}^{commit}")"
+          fi
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+      - uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - run: helm package deploy/charts/buzz-push-gateway --destination dist
+      - run: helm push "dist/buzz-push-gateway-${VERSION}.tgz" "$CHART_REPO"

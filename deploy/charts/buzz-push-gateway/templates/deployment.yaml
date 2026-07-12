@@ -1,0 +1,65 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "push.name" . }}
+  labels: {{- include "push.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  strategy: { type: RollingUpdate, rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } }
+  selector:
+    matchLabels: {{- include "push.labels" . | nindent 6 }}
+  template:
+    metadata:
+      labels: {{- include "push.labels" . | nindent 8 }}
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 60
+      securityContext: { runAsNonRoot: true, runAsUser: 65532, runAsGroup: 65532, fsGroup: 65532, seccompProfile: { type: RuntimeDefault } }
+      {{- with .Values.image.pullSecrets }}
+      imagePullSecrets: {{ toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: gateway
+          image: "{{ .Values.image.repository }}{{ if .Values.image.digest }}@{{ .Values.image.digest }}{{ else }}:{{ required "image.tag or image.digest is required" .Values.image.tag }}{{ end }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext: { allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: [ALL] } }
+          ports:
+            - { name: public, containerPort: 8080 }
+            - { name: health, containerPort: 8081 }
+          env:
+            - { name: BUZZ_PUSH_BIND_ADDR, value: "0.0.0.0:8080" }
+            - { name: BUZZ_PUSH_HEALTH_ADDR, value: "0.0.0.0:8081" }
+            - { name: BUZZ_PUSH_PUBLIC_DELIVERY_URL, value: {{ .Values.publicDeliveryUrl | quote }} }
+            - { name: BUZZ_PUSH_MAX_GRANT_LIFETIME_SECONDS, value: {{ .Values.maxGrantLifetimeSeconds | quote }} }
+            - { name: BUZZ_PUSH_ENABLED_PROFILES, value: {{ .Values.enabledProfiles | quote }} }
+            - { name: BUZZ_PUSH_APP_ATTEST_APP_ID, value: {{ .Values.appAttestAppId | quote }} }
+            - { name: BUZZ_PUSH_APP_ATTEST_ROOT_CERT_PATH, value: /run/buzz/app-attest/root.pem }
+            - { name: BUZZ_PUSH_APNS_KEY_PATH, value: /run/buzz/apns/provider.p8 }
+            {{- range $name := list "DATABASE_URL" "BUZZ_PUSH_APNS_KEY_ID" "BUZZ_PUSH_APNS_TEAM_ID" "BUZZ_PUSH_APNS_TOPIC" "BUZZ_PUSH_GRANT_KEYS" "BUZZ_PUSH_TOKEN_KEYS" }}
+            - name: {{ $name }}
+              valueFrom: { secretKeyRef: { name: {{ $.Values.existingSecret }}, key: {{ $name }} } }
+            {{- end }}
+          volumeMounts:
+            - { name: app-attest-root, mountPath: /run/buzz/app-attest, readOnly: true }
+            - { name: apns-key, mountPath: /run/buzz/apns, readOnly: true }
+          livenessProbe: { httpGet: { path: /_liveness, port: health }, periodSeconds: 10, timeoutSeconds: 3, failureThreshold: 3 }
+          readinessProbe: { httpGet: { path: /_readiness, port: health }, periodSeconds: 5, timeoutSeconds: 3, failureThreshold: 3 }
+          startupProbe: { httpGet: { path: /_liveness, port: health }, periodSeconds: 2, failureThreshold: 60 }
+          resources: {{- toYaml .Values.resources | nindent 12 }}
+      volumes:
+        - name: app-attest-root
+          secret: { secretName: {{ .Values.appAttestRoot.secretName }}, items: [{ key: {{ .Values.appAttestRoot.secretKey }}, path: root.pem }] }
+        - name: apns-key
+          secret: { secretName: {{ .Values.apnsKey.secretName }}, items: [{ key: {{ .Values.apnsKey.secretKey }}, path: provider.p8 }] }
+      {{- with .Values.nodeSelector }}
+      nodeSelector: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.topologySpreadConstraints }}
+      topologySpreadConstraints: {{- toYaml . | nindent 8 }}
+      {{- end }}

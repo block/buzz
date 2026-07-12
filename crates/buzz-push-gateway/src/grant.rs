@@ -10,7 +10,7 @@ use aes_gcm::{
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use thiserror::Error;
 
-const AAD_PREFIX: &[u8] = b"buzz-stateless-push-grant-v1:";
+const AAD_PREFIX: &[u8] = b"buzz-stateful-delivery-capability-v1:";
 const MAX_KEY_ID_BYTES: usize = 32;
 
 #[derive(Clone)]
@@ -157,10 +157,10 @@ mod tests {
     fn grant() -> EndpointGrant {
         EndpointGrant {
             v: 1,
-            endpoint: "00".repeat(32),
+            delegation_id: uuid::Uuid::nil(),
             relay_pubkey: "11".repeat(32),
             app_profile: AppProfile::BuzzIosProduction,
-            max_class: DeliveryClass::Default,
+            endpoint_epoch: 1,
             generation: 2,
             expires_at: 99,
         }
@@ -202,7 +202,7 @@ mod tests {
     fn complete_envelope_length_is_bounded_on_issue_and_open() {
         let ring = GrantKeyring::new(vec![GrantKey::new("current", &[7; 32]).unwrap()]).unwrap();
         let mut oversized = grant();
-        oversized.endpoint = "a".repeat(MAX_GRANT_BYTES * 2);
+        oversized.relay_pubkey = "a".repeat(MAX_GRANT_BYTES * 2);
         assert!(ring.issue(&oversized).is_err());
 
         let at_limit = "a".repeat(MAX_GRANT_BYTES);

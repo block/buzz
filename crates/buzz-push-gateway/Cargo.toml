@@ -17,17 +17,24 @@ path = "src/main.rs"
 
 [dependencies]
 aes-gcm = "0.10"
+appattest = { version = "0.1.1", default-features = false }
 axum = { workspace = true }
 async-trait = "0.1"
 base64 = "0.22"
+byteorder = "1.5"
+minicbor = "0.25"
 chrono = { workspace = true }
 hex = { workspace = true }
+getrandom = "0.4"
+metrics = { workspace = true }
+metrics-exporter-prometheus = { workspace = true }
 nostr = { workspace = true }
 p256 = { version = "0.14", features = ["ecdsa", "pem", "pkcs8"] }
 rand = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+sqlx = { workspace = true }
 sha2 = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
@@ -40,4 +47,5 @@ uuid = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }
+appattest = { version = "0.1.1", default-features = false, features = ["testing"] }
 reqwest = { workspace = true }

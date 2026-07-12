@@ -1,0 +1,42 @@
+{{- if .Values.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "push.name" . }}
+spec:
+  podSelector:
+    matchLabels: {{- include "push.labels" . | nindent 6 }}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - ports: [{ port: 8080, protocol: TCP }]
+    {{- if .Values.networkPolicy.monitoring.enabled }}
+    {{- if or (not .Values.networkPolicy.monitoring.namespaceSelector) (not .Values.networkPolicy.monitoring.podSelector) }}
+    {{- fail "networkPolicy.monitoring.enabled requires non-empty namespaceSelector and podSelector so 8081 scrape ingress is scoped, never blanket" }}
+    {{- end }}
+    # Scoped scrape access to the private health/metrics port. Off by default so
+    # 8081 has no pod ingress; when enabled the operator names their scraper.
+    - from:
+        - namespaceSelector:
+            matchLabels: {{- toYaml .Values.networkPolicy.monitoring.namespaceSelector | nindent 14 }}
+          podSelector:
+            matchLabels: {{- toYaml .Values.networkPolicy.monitoring.podSelector | nindent 14 }}
+      ports: [{ port: 8081, protocol: TCP }]
+    {{- end }}
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels: {{- toYaml .Values.networkPolicy.dns.namespaceSelector | nindent 14 }}
+          podSelector:
+            matchLabels: {{- toYaml .Values.networkPolicy.dns.podSelector | nindent 14 }}
+      ports: [{ port: 53, protocol: UDP }, { port: 53, protocol: TCP }]
+    - to:
+      {{- range .Values.networkPolicy.apnsEgressCidrs }}
+        - ipBlock: { cidr: {{ . }} }
+      {{- end }}
+      ports: [{ port: 443, protocol: TCP }]
+    - to:
+      {{- range .Values.networkPolicy.postgresEgressCidrs }}
+        - ipBlock: { cidr: {{ . }} }
+      {{- end }}
+      ports: [{ port: 5432, protocol: TCP }]
+{{- end }}

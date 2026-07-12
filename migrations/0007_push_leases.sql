@@ -34,7 +34,6 @@ CREATE TABLE push_wake_outbox (
     endpoint_hash BYTEA NOT NULL CHECK (length(endpoint_hash) = 32),
     event_id BYTEA NOT NULL CHECK (length(event_id) = 32),
     class TEXT NOT NULL CHECK (class IN ('silent','default','time_sensitive','urgent')),
-    wake JSONB NOT NULL,
     expires_at BIGINT NOT NULL,
     state TEXT NOT NULL DEFAULT 'pending' CHECK (state IN ('pending','sending','delivered','failed')),
     attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),

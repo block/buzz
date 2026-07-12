@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "push.name" . }}
+  labels: {{- include "push.labels" . | nindent 4 }}
+spec:
+  selector: {{- include "push.labels" . | nindent 4 }}
+  ports:
+    - { name: https, port: {{ .Values.service.port }}, targetPort: public }

@@ -176,10 +176,10 @@ pub struct Config {
 
     /// Descriptor key identifier accepted in kind:30350 `exec` tags.
     pub push_executor_key_id: String,
-    /// Exact HTTPS gateway endpoint used to issue opaque APNs endpoint grants.
+    /// Exact HTTPS gateway endpoint used to submit client-authorized APNs delivery capabilities.
     /// Push lease support is disabled when unset.
-    pub push_gateway_issuance_url: Option<url::Url>,
-    /// Hard timeout for one gateway grant issuance request.
+    pub push_gateway_delivery_url: Option<url::Url>,
+    /// Hard timeout for one gateway delivery request.
     pub push_gateway_timeout: Duration,
 
     /// Optional path to the web UI `dist/` directory.
@@ -214,22 +214,22 @@ fn parse_operator_api_origin(raw: &str) -> Result<String, ConfigError> {
     Ok(raw.trim_end_matches('/').to_string())
 }
 
-fn parse_push_gateway_issuance_url(raw: &str) -> Result<url::Url, ConfigError> {
+fn parse_push_gateway_delivery_url(raw: &str) -> Result<url::Url, ConfigError> {
     let url = url::Url::parse(raw.trim()).map_err(|e| {
         ConfigError::InvalidValue(format!(
-            "BUZZ_PUSH_GATEWAY_ISSUANCE_URL is not a valid URL: {e}"
+            "BUZZ_PUSH_GATEWAY_DELIVERY_URL is not a valid URL: {e}"
         ))
     })?;
     if url.scheme() != "https"
         || url.host().is_none()
         || !url.username().is_empty()
         || url.password().is_some()
-        || url.path() != "/v1/grants/apns"
+        || url.path() != "/v1/deliveries/apns"
         || url.query().is_some()
         || url.fragment().is_some()
     {
         return Err(ConfigError::InvalidValue(
-            "BUZZ_PUSH_GATEWAY_ISSUANCE_URL must be an exact HTTPS /v1/grants/apns URL without credentials, query, or fragment"
+            "BUZZ_PUSH_GATEWAY_DELIVERY_URL must be an exact HTTPS /v1/deliveries/apns URL without credentials, query, or fragment"
                 .to_string(),
         ));
     }
@@ -514,10 +514,10 @@ impl Config {
                 "BUZZ_PUSH_EXECUTOR_KEY_ID must contain 1..=64 bytes".to_string(),
             ));
         }
-        let push_gateway_issuance_url = std::env::var("BUZZ_PUSH_GATEWAY_ISSUANCE_URL")
+        let push_gateway_delivery_url = std::env::var("BUZZ_PUSH_GATEWAY_DELIVERY_URL")
             .ok()
             .filter(|raw| !raw.trim().is_empty())
-            .map(|raw| parse_push_gateway_issuance_url(&raw))
+            .map(|raw| parse_push_gateway_delivery_url(&raw))
             .transpose()?;
         let push_gateway_timeout_millis = match std::env::var("BUZZ_PUSH_GATEWAY_TIMEOUT_MS") {
             Ok(raw) => raw
@@ -597,7 +597,7 @@ impl Config {
             git_max_concurrent_ops,
             git_hook_hmac_secret,
             push_executor_key_id,
-            push_gateway_issuance_url,
+            push_gateway_delivery_url,
             push_gateway_timeout,
             web_dir,
         })
@@ -719,15 +719,15 @@ mod tests {
 
     #[test]
     fn push_gateway_url_is_exact_and_fail_closed() {
-        assert!(parse_push_gateway_issuance_url("https://push.example/v1/grants/apns").is_ok());
+        assert!(parse_push_gateway_delivery_url("https://push.example/v1/deliveries/apns").is_ok());
         for invalid in [
-            "http://push.example/v1/grants/apns",
-            "https://push.example/v1/grants/apns/",
-            "https://push.example/v1/grants/apns?token=x",
-            "https://user@push.example/v1/grants/apns",
+            "http://push.example/v1/deliveries/apns",
+            "https://push.example/v1/deliveries/apns/",
+            "https://push.example/v1/deliveries/apns?token=x",
+            "https://user@push.example/v1/deliveries/apns",
         ] {
             assert!(
-                parse_push_gateway_issuance_url(invalid).is_err(),
+                parse_push_gateway_delivery_url(invalid).is_err(),
                 "{invalid}"
             );
         }

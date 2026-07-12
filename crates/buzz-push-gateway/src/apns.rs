@@ -12,13 +12,10 @@ use reqwest::{
     header::{AUTHORIZATION, CONTENT_TYPE},
     StatusCode,
 };
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use thiserror::Error;
 
-use crate::{
-    model::DeliveryRequest,
-    model::{AppProfile, DeliveryClass, Wake, FALLBACK_TEXT},
-};
+use crate::model::{AppProfile, APNS_RECONNECT_PAYLOAD};
 
 /// Sanitized delivery outcome. Raw provider bodies never cross this boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,13 +73,21 @@ pub fn classify(code: u16, reason: Option<&str>, timestamp: Option<i64>) -> Deli
     }
 }
 
+/// Closed APNs transport controls. No field can be serialized into application
+/// content; the concrete transport always uses `APNS_RECONNECT_PAYLOAD`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DeliveryAttempt {
+    pub request_id: uuid::Uuid,
+    pub expires_at: i64,
+}
+
 /// APNs sender abstraction for live-validation tests.
 #[async_trait]
 pub trait PushTransport: Send + Sync {
     /// Send one durable job.
     async fn send(
         &self,
-        request: &DeliveryRequest,
+        attempt: DeliveryAttempt,
         profile: AppProfile,
         endpoint: &str,
     ) -> DeliveryOutcome;
@@ -102,24 +107,48 @@ pub struct ApnsTransport {
     key_id: String,
     team_id: String,
     topic: String,
+    production_base_url: String,
+    sandbox_base_url: String,
     cached_jwt: Mutex<Option<CachedJwt>>,
 }
 
 impl ApnsTransport {
     /// Build a reusable APNs client from an Apple `.p8` private key.
     pub fn token(p8: &[u8], key_id: &str, team_id: &str, topic: String) -> Result<Self, ApnsError> {
-        let pem = std::str::from_utf8(p8).map_err(|_| ApnsError::Credential)?;
-        let signing_key = SigningKey::from_pkcs8_pem(pem).map_err(|_| ApnsError::Credential)?;
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(15))
             .build()
             .map_err(|_| ApnsError::Client)?;
+        Self::token_with_client(
+            p8,
+            key_id,
+            team_id,
+            topic,
+            client,
+            "https://api.push.apple.com".to_owned(),
+            "https://api.sandbox.push.apple.com".to_owned(),
+        )
+    }
+
+    fn token_with_client(
+        p8: &[u8],
+        key_id: &str,
+        team_id: &str,
+        topic: String,
+        client: reqwest::Client,
+        production_base_url: String,
+        sandbox_base_url: String,
+    ) -> Result<Self, ApnsError> {
+        let pem = std::str::from_utf8(p8).map_err(|_| ApnsError::Credential)?;
+        let signing_key = SigningKey::from_pkcs8_pem(pem).map_err(|_| ApnsError::Credential)?;
         Ok(Self {
             client,
             signing_key,
             key_id: key_id.to_owned(),
             team_id: team_id.to_owned(),
             topic,
+            production_base_url,
+            sandbox_base_url,
             cached_jwt: Mutex::new(None),
         })
     }
@@ -162,11 +191,6 @@ pub enum ApnsError {
     Client,
 }
 
-#[derive(Serialize)]
-struct WirePayload<'a> {
-    aps: serde_json::Value,
-    npl: &'a Wake,
-}
 #[derive(Deserialize)]
 struct ApnsErrorBody {
     reason: Option<String>,
@@ -177,50 +201,33 @@ struct ApnsErrorBody {
 impl PushTransport for ApnsTransport {
     async fn send(
         &self,
-        job: &DeliveryRequest,
+        attempt: DeliveryAttempt,
         profile: AppProfile,
         endpoint: &str,
     ) -> DeliveryOutcome {
-        let visible = job.class != DeliveryClass::Silent;
-        let aps = if visible {
-            let level = if job.class == DeliveryClass::TimeSensitive {
-                "time-sensitive"
-            } else {
-                "active"
-            };
-            serde_json::json!({"alert":{"body":FALLBACK_TEXT},"mutable-content":1,"interruption-level":level})
-        } else {
-            serde_json::json!({"content-available":1})
-        };
-        let body = match serde_json::to_vec(&WirePayload {
-            aps,
-            npl: &job.wake,
-        }) {
-            Ok(body) if body.len() <= 4096 => body,
-            _ => return DeliveryOutcome::PermanentRequestFault,
-        };
+        // This is the only APNs application body in the program. It is a
+        // byte constant, not a serialization of the relay request, grant,
+        // endpoint, headers, route, provider response, or any generic JSON map.
+        let body = APNS_RECONNECT_PAYLOAD;
         let now = chrono::Utc::now().timestamp();
         let token = match self.jwt(now) {
             Ok(token) => token,
             Err(_) => return DeliveryOutcome::ConfigurationFault,
         };
-        let host = match profile {
-            AppProfile::BuzzIosProduction => "api.push.apple.com",
-            AppProfile::BuzzIosSandbox => "api.sandbox.push.apple.com",
+        let base_url = match profile {
+            AppProfile::BuzzIosProduction => &self.production_base_url,
+            AppProfile::BuzzIosSandbox => &self.sandbox_base_url,
         };
         let response = self
             .client
-            .post(format!("https://{host}/3/device/{endpoint}"))
+            .post(format!("{base_url}/3/device/{endpoint}"))
             .header(AUTHORIZATION, format!("bearer {token}"))
             .header(CONTENT_TYPE, "application/json")
-            .header("apns-id", job.request_id.to_string())
+            .header("apns-id", attempt.request_id.to_string())
             .header("apns-topic", &self.topic)
-            .header(
-                "apns-push-type",
-                if visible { "alert" } else { "background" },
-            )
-            .header("apns-priority", if visible { "10" } else { "5" })
-            .header("apns-expiration", job.expires_at.to_string())
+            .header("apns-push-type", "alert")
+            .header("apns-priority", "10")
+            .header("apns-expiration", attempt.expires_at.to_string())
             .body(body)
             .send()
             .await;
@@ -266,6 +273,74 @@ impl PushTransport for ApnsTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::{body::Bytes, extract::State, http::StatusCode, routing::post, Router};
+    use p256::pkcs8::{EncodePrivateKey, LineEnding};
+    use std::sync::Arc;
+
+    async fn capture_body(
+        State(bodies): State<Arc<Mutex<Vec<Vec<u8>>>>>,
+        body: Bytes,
+    ) -> StatusCode {
+        bodies.lock().unwrap().push(body.to_vec());
+        StatusCode::OK
+    }
+    #[tokio::test]
+    async fn real_outbound_http_body_is_the_exact_constant_for_every_attempt() {
+        let bodies = Arc::new(Mutex::new(Vec::new()));
+        let app = Router::new()
+            .route("/3/device/{endpoint}", post(capture_body))
+            .with_state(bodies.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let signing_key = SigningKey::from_slice(&[7; 32]).unwrap();
+        let pem = signing_key.to_pkcs8_pem(LineEnding::LF).unwrap();
+        let transport = ApnsTransport::token_with_client(
+            pem.as_bytes(),
+            "kid",
+            "team",
+            "app.topic".to_owned(),
+            reqwest::Client::new(),
+            base_url.clone(),
+            base_url,
+        )
+        .unwrap();
+        for (request_id, expires_at, profile, endpoint) in [
+            (
+                uuid::Uuid::nil(),
+                1,
+                AppProfile::BuzzIosProduction,
+                "00".repeat(32),
+            ),
+            (
+                uuid::Uuid::max(),
+                i64::MAX,
+                AppProfile::BuzzIosSandbox,
+                "ff".repeat(32),
+            ),
+        ] {
+            assert_eq!(
+                transport
+                    .send(
+                        DeliveryAttempt {
+                            request_id,
+                            expires_at,
+                        },
+                        profile,
+                        &endpoint,
+                    )
+                    .await,
+                DeliveryOutcome::Accepted
+            );
+        }
+        let captured = bodies.lock().unwrap();
+        assert_eq!(captured.len(), 2);
+        assert!(captured
+            .iter()
+            .all(|body| body.as_slice() == APNS_RECONNECT_PAYLOAD));
+    }
+
     #[test]
     fn response_classes_do_not_massacre_endpoints_on_provider_faults() {
         assert_eq!(

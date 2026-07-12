@@ -71,8 +71,6 @@ pub struct NewWake<'a> {
     pub event_id: &'a [u8],
     /// Effective wake class.
     pub class: &'a str,
-    /// Closed, privacy-safe wake object.
-    pub wake: &'a Value,
     /// Delivery deadline, in Unix seconds.
     pub expires_at: i64,
 }
@@ -94,8 +92,6 @@ pub struct ClaimedWake {
     pub endpoint_grant: String,
     /// Wake class sent to the gateway.
     pub class: String,
-    /// Closed, privacy-safe wake object.
-    pub wake: Value,
     /// Delivery deadline, in Unix seconds.
     pub expires_at: i64,
     /// Attempt number, starting at one for the first claim.
@@ -505,8 +501,8 @@ pub async fn enqueue_wake(
         r#"
         INSERT INTO push_wake_outbox (
             community_id, author, installation_id, lease_generation,
-            endpoint_hash, event_id, class, wake, expires_at
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            endpoint_hash, event_id, class, expires_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
         ON CONFLICT (community_id, endpoint_hash, event_id) DO NOTHING
         RETURNING id
         "#,
@@ -518,7 +514,6 @@ pub async fn enqueue_wake(
     .bind(&endpoint_hash)
     .bind(wake.event_id)
     .bind(wake.class)
-    .bind(wake.wake)
     .bind(wake.expires_at)
     .fetch_optional(&mut *tx)
     .await?;
@@ -587,7 +582,7 @@ pub async fn claim_due_wakes(
           AND l.generation = o.lease_generation
           AND l.endpoint_hash = o.endpoint_hash
         RETURNING o.id, o.claim_id, o.author, o.installation_id,
-                  o.lease_generation, l.endpoint_grant, o.class, o.wake,
+                  o.lease_generation, l.endpoint_grant, o.class,
                   o.expires_at, o.attempts
         "#,
     )
@@ -615,7 +610,7 @@ pub async fn revalidate_wake_for_send(
     let row = sqlx::query(
         r#"
         SELECT o.id, o.claim_id, o.author, o.installation_id,
-               o.lease_generation, l.endpoint_grant, o.class, o.wake,
+               o.lease_generation, l.endpoint_grant, o.class,
                o.expires_at, o.attempts
         FROM push_wake_outbox o
         JOIN push_leases l
@@ -763,7 +758,6 @@ fn row_to_claimed_wake(row: sqlx::postgres::PgRow) -> Result<ClaimedWake> {
         lease_generation: row.try_get("lease_generation")?,
         endpoint_grant: row.try_get("endpoint_grant")?,
         class: row.try_get("class")?,
-        wake: row.try_get("wake")?,
         expires_at: row.try_get("expires_at")?,
         attempt: row.try_get("attempts")?,
     })
@@ -1036,7 +1030,6 @@ mod tests {
                         lease_generation: 1,
                         event_id: &event,
                         class: "default",
-                        wake: &serde_json::json!({"v": 1}),
                         expires_at: i64::MAX / 2,
                     },
                 )
@@ -1074,7 +1067,6 @@ mod tests {
                     lease_generation: 1,
                     event_id: &event,
                     class: "default",
-                    wake: &serde_json::json!({"v": 1}),
                     expires_at: i64::MAX / 2,
                 },
             )
@@ -1110,7 +1102,6 @@ mod tests {
                 lease_generation: generation,
                 event_id: event,
                 class: "default",
-                wake: &serde_json::json!({"v": 1}),
                 expires_at: i64::MAX / 2,
             },
         )
@@ -1221,7 +1212,6 @@ mod tests {
                     lease_generation: 1,
                     event_id: &[19; 32],
                     class: "default",
-                    wake: &serde_json::json!({"v": 1}),
                     expires_at: i64::MAX / 2,
                 },
             )
@@ -1239,7 +1229,6 @@ mod tests {
                     lease_generation: 1,
                     event_id: &[19; 32],
                     class: "default",
-                    wake: &serde_json::json!({"v": 1}),
                     expires_at: i64::MAX / 2,
                 },
             )
@@ -1264,7 +1253,6 @@ mod tests {
                     lease_generation: 2,
                     event_id: &[21; 32],
                     class: "default",
-                    wake: &serde_json::json!({"v": 1}),
                     expires_at: i64::MAX / 2,
                 },
             )

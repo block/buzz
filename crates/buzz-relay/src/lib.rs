@@ -29,8 +29,6 @@ pub mod metrics;
 pub mod nip11;
 /// NIP-01 client/relay message parsing.
 pub mod protocol;
-/// Authenticated client for opaque push-gateway endpoint grants.
-pub mod push_gateway;
 /// Axum router construction.
 pub mod router;
 /// Shared application state.
