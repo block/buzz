@@ -79,8 +79,9 @@ const overrides = new Map([
   // 3-phase (stage/stop/commit) + commit_cascade_agents injectable helper for
   // retry-safety. Load-bearing reviewer-required change; queued to split.
   // +23: collect_remote_deployed pre-flight guard (provider-deployed cascade
-  // targets refuse the delete before any destructive work).
-  ["src-tauri/src/commands/personas/mod.rs", 1116],
+  // targets refuse the delete before any destructive work). Main #1766 grew
+  // this to 1115; the snapshot branch adds 8 lines, so ratchet to 1124.
+  ["src-tauri/src/commands/personas/mod.rs", 1124],
   // #1418 read-path fix: get_thread_replies' blocker fix (shared TIMELINE_KINDS
   // const + build_thread_replies_filter helper, mirroring the channel sibling so
   // the two p-gate filters can't drift) plus two guard unit tests. The file was

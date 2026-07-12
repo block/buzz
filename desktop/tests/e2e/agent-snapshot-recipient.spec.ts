@@ -6,10 +6,7 @@
  * Import agent → preview → confirm flow.
  */
 import { expect, test } from "@playwright/test";
-import {
-  installMockBridge,
-  createMockAgentMemoryListing,
-} from "../helpers/bridge";
+import { installMockBridge } from "../helpers/bridge";
 
 type CommandLogEntry = { command: string; payload: unknown };
 
@@ -37,12 +34,6 @@ const SNAPSHOT_UPLOAD_DESCRIPTOR = {
   type: "application/json",
   uploaded: Math.floor(Date.now() / 1000),
   filename: "e2e-agent.agent.json",
-};
-
-/** Malformed snapshot — bridge will be seeded with snapshotFetchError */
-const BAD_UPLOAD_DESCRIPTOR = {
-  ...SNAPSHOT_UPLOAD_DESCRIPTOR,
-  filename: "bad.agent.json",
 };
 
 // ── Helper: seed bridge, send snapshot to #general, navigate to timeline ─────

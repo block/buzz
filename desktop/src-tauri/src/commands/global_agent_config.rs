@@ -177,7 +177,7 @@ fn collect_restart_candidates(
     app: &AppHandle,
     old_global: &GlobalAgentConfig,
     new_global: &GlobalAgentConfig,
-) -> (Vec<String>, Vec<crate::managed_agents::PersonaRecord>) {
+) -> (Vec<String>, Vec<crate::managed_agents::AgentDefinition>) {
     let records = match load_managed_agents(app) {
         Ok(r) => r,
         Err(e) => {
@@ -260,7 +260,7 @@ async fn restart_local_agent_on_config_change(
     owner_hex: &str,
     old_global: &GlobalAgentConfig,
     new_global: &GlobalAgentConfig,
-    personas_snapshot: &[crate::managed_agents::PersonaRecord],
+    personas_snapshot: &[crate::managed_agents::AgentDefinition],
 ) -> RestartOutcome {
     // ── Step 1: stop under lock, re-verifying eligibility ─────────────────
     let app_for_stop = app.clone();
