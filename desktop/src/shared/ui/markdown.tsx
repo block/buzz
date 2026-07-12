@@ -196,10 +196,12 @@ function useDismissImageContextMenu(isOpen: boolean, onDismiss: () => void) {
 function ImageContextMenu({
   onCopy,
   onDownload,
+  portalContainer,
   position,
 }: {
   onCopy: () => void;
   onDownload: () => void;
+  portalContainer?: Element;
   position: ImageContextMenuPosition;
 }) {
   const itemClass =
@@ -222,7 +224,7 @@ function ImageContextMenu({
         Download image
       </button>
     </div>,
-    document.body,
+    portalContainer ?? document.body,
   );
 }
 
@@ -1039,6 +1041,7 @@ function ImageZoomOverlay({
         <ImageContextMenu
           onCopy={handleMenuCopy}
           onDownload={handleMenuDownload}
+          portalContainer={dialogRef.current ?? undefined}
           position={menu}
         />
       ) : null}

@@ -613,6 +613,48 @@ test("mosaic image context menu is portaled outside the clipped gallery", async 
   );
 });
 
+test("lightbox image context menu stays inside the dialog focus scope", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  await page.getByTestId("message-input").fill("lightbox context menu");
+  await page.getByRole("button", { name: "Attach image" }).click();
+  await page.getByTestId("send-message").click();
+  await expect(page.getByText("Sending")).toHaveCount(0);
+
+  const row = page
+    .getByTestId("message-row")
+    .filter({ hasText: "lightbox context menu" })
+    .last();
+  await row.getByTestId("message-image-lightbox-trigger").first().click();
+
+  const dialog = page.getByRole("dialog");
+  const lightboxImage = dialog.locator(`img[src*="${IMAGE_SHAS[0]}"]`);
+  await expect(lightboxImage).toBeVisible();
+  await lightboxImage.click({ button: "right" });
+
+  const menu = dialog.locator("[data-image-context-menu]");
+  const copyButton = menu.getByRole("button", { name: "Copy image" });
+  const downloadButton = menu.getByRole("button", { name: "Download image" });
+  await expect(menu).toBeVisible();
+  await expect(page.locator("body > [data-image-context-menu]")).toHaveCount(0);
+
+  await dialog.focus();
+  await page.keyboard.press("Shift+Tab");
+  await expect(downloadButton).toBeFocused();
+  await page.keyboard.press("Shift+Tab");
+  await expect(copyButton).toBeFocused();
+  await page.keyboard.press("Tab");
+  await expect(downloadButton).toBeFocused();
+  await page.keyboard.press("Tab");
+  await expect(
+    dialog.getByRole("button", { name: "Next image" }),
+  ).toBeFocused();
+});
+
 test("right-click image shows Copy image and invokes copy command", async ({
   page,
 }) => {
