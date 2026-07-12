@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import {
   Archive,
   BellRing,
@@ -32,6 +33,7 @@ import { LocalArchiveSettingsCard } from "@/features/local-archive/ui/LocalArchi
 import { cn } from "@/shared/lib/cn";
 import {
   ACCENT_COLORS,
+  isBuzzTheme,
   NEUTRAL_ACCENT,
   useTheme,
 } from "@/shared/theme/ThemeProvider";
@@ -378,16 +380,35 @@ function SingleThemeTile({
 
 type AppearanceMode = "system" | "light" | "dark";
 
+// Reveal/hide motion for the accent picker: a small translate + opacity fade.
+// The picker sits below the theme grid and reads as tucking up behind it, so
+// it enters from above (slides *down* into place when a non-Buzz theme reveals
+// it) and exits upward (slides up behind the grid when Buzz hides it). No
+// height/scale — height collapse clipped the swatches behind the grid's bottom
+// fade (the "white bar"). Snappier than the modal 0.2s since this is a small
+// settings control, sharing the modal/ProfileSettingsCard easing curve.
+const ACCENT_PICKER_TRANSITION = {
+  duration: 0.16,
+  ease: [0.23, 1, 0.32, 1] as const,
+};
+
 function ThemeSettingsCard() {
   const {
     setTheme,
     selectedThemeName,
+    themeName,
     isDark,
     accentColor,
     setAccentColor,
     followSystem,
     setFollowSystem,
   } = useTheme();
+
+  // Buzz themes pin a neutral accent (GitHub black in light, white in dark),
+  // so the accent picker is hidden while a Buzz theme is active. `themeName` is
+  // the effective theme, so this also covers System mode resolving to Buzz.
+  const accentPickerHidden = isBuzzTheme(themeName);
+  const shouldReduceMotion = useReducedMotion();
 
   const previewVarsByTheme = useThemePreviewVars();
   const { pairedLight, lightOnly, darkOnly } = useThemeCategories();
@@ -522,15 +543,19 @@ function ThemeSettingsCard() {
               "linear-gradient(to bottom, hsl(var(--background)), hsl(var(--background) / 0))",
           }}
         />
-        {/* Bottom fade */}
-        <div
-          aria-hidden="true"
-          className="pointer-events-none absolute inset-x-0 bottom-0 z-10 h-3"
-          style={{
-            background:
-              "linear-gradient(to top, hsl(var(--background)), hsl(var(--background) / 0))",
-          }}
-        />
+        {/* Bottom fade — hidden while the accent picker is visible so its
+            near-white gradient (Buzz light) can't mask the swatches below it
+            (the "white bar"). Kept only when the picker is hidden. */}
+        {accentPickerHidden ? (
+          <div
+            aria-hidden="true"
+            className="pointer-events-none absolute inset-x-0 bottom-0 z-10 h-3"
+            style={{
+              background:
+                "linear-gradient(to top, hsl(var(--background)), hsl(var(--background) / 0))",
+            }}
+          />
+        ) : null}
         <div className="max-h-[430px] overflow-y-auto rounded-lg pt-2">
           <div className="flex flex-wrap gap-4 p-1">
             {selectedMode === "system" &&
@@ -572,41 +597,86 @@ function ThemeSettingsCard() {
         </div>
       </div>
 
-      {/* Accent color picker */}
-      <div className="shrink-0 px-1 pb-2">
-        <h3 className="mb-2 text-sm font-medium">Accent color</h3>
-        <div className="flex flex-wrap gap-2 p-1">
-          {ACCENT_COLORS.map((color) => {
-            const isNeutral = color.value === NEUTRAL_ACCENT;
-            const swatchColor = isNeutral
-              ? "hsl(var(--foreground))"
-              : color.value;
-            const checkClassName =
-              isNeutral && isDark ? "text-black" : "text-white";
-
-            return (
-              <button
-                className={cn(
-                  "flex h-7 w-7 items-center justify-center rounded-full border border-border/50 transition-transform hover:scale-110",
-                  accentColor === color.value &&
-                    "ring-2 ring-ring ring-offset-2 ring-offset-background",
-                )}
-                data-testid={`accent-color-${color.name.toLowerCase()}`}
-                key={color.value}
-                onClick={() => setAccentColor(color.value)}
-                style={{ backgroundColor: swatchColor }}
-                title={color.name}
-                type="button"
-              >
-                {accentColor === color.value && (
-                  <Check className={cn("h-4 w-4", checkClassName)} />
-                )}
-              </button>
-            );
-          })}
-        </div>
-      </div>
+      {/* Accent color picker — hidden for Buzz themes (pinned neutral accent).
+          Reveal/hide with the translate-up + opacity fade defined by
+          ACCENT_PICKER_TRANSITION above. Reduced motion skips the transition
+          and just renders/unrenders. */}
+      {shouldReduceMotion ? (
+        accentPickerHidden ? null : (
+          <AccentPickerContent
+            accentColor={accentColor}
+            isDark={isDark}
+            setAccentColor={setAccentColor}
+          />
+        )
+      ) : (
+        <AnimatePresence initial={false}>
+          {accentPickerHidden ? null : (
+            <motion.div
+              animate={{ opacity: 1, y: 0 }}
+              className="will-change-[opacity,transform]"
+              exit={{ opacity: 0, y: -10 }}
+              initial={{ opacity: 0, y: -10 }}
+              key="accent-picker"
+              transition={ACCENT_PICKER_TRANSITION}
+            >
+              <AccentPickerContent
+                accentColor={accentColor}
+                isDark={isDark}
+                setAccentColor={setAccentColor}
+              />
+            </motion.div>
+          )}
+        </AnimatePresence>
+      )}
     </section>
+  );
+}
+
+/** Accent swatch grid — shared by the animated and reduced-motion reveal paths. */
+function AccentPickerContent({
+  accentColor,
+  isDark,
+  setAccentColor,
+}: {
+  accentColor: string;
+  isDark: boolean;
+  setAccentColor: (value: string) => void;
+}) {
+  return (
+    <div className="shrink-0 px-1 pb-2 pt-1">
+      <h3 className="mb-2 text-sm font-medium">Accent color</h3>
+      <div className="flex flex-wrap gap-2 p-1">
+        {ACCENT_COLORS.map((color) => {
+          const isNeutral = color.value === NEUTRAL_ACCENT;
+          const swatchColor = isNeutral
+            ? "hsl(var(--foreground))"
+            : color.value;
+          const checkClassName =
+            isNeutral && isDark ? "text-black" : "text-white";
+
+          return (
+            <button
+              className={cn(
+                "flex h-7 w-7 items-center justify-center rounded-full border border-border/50 transition-transform hover:scale-110",
+                accentColor === color.value &&
+                  "ring-2 ring-ring ring-offset-2 ring-offset-background",
+              )}
+              data-testid={`accent-color-${color.name.toLowerCase()}`}
+              key={color.value}
+              onClick={() => setAccentColor(color.value)}
+              style={{ backgroundColor: swatchColor }}
+              title={color.name}
+              type="button"
+            >
+              {accentColor === color.value && (
+                <Check className={cn("h-4 w-4", checkClassName)} />
+              )}
+            </button>
+          );
+        })}
+      </div>
+    </div>
   );
 }
 

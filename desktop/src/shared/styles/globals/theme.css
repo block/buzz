@@ -230,12 +230,6 @@
   --buzz-active-foreground: 0 0% 100%;
 }
 
-:root[data-buzz-sidebar]
-  [data-testid="app-sidebar"]
-  [data-testid="sidebar-pinned-header"] {
-  padding-top: 0.75rem;
-}
-
 :root[data-buzz-sidebar] .group\/sidebar-wrapper,
 :root[data-buzz-sidebar] [data-testid="app-sidebar"],
 :root[data-buzz-sidebar] [data-buzz-glass-inset],
@@ -308,7 +302,8 @@
  * turned those white (white-on-white under Buzz Dark); scoping keeps them on
  * the normal accent-driven active colors.
  */
-:root[data-buzz-sidebar] [data-testid="app-sidebar"] {
+:root[data-buzz-sidebar] [data-testid="app-sidebar"],
+:root[data-buzz-sidebar] [data-testid="settings-sidebar"] {
   --sidebar-active: var(--buzz-active-fill);
   --sidebar-active-foreground: var(--buzz-active-foreground);
 }
@@ -317,7 +312,8 @@
  * Dark variant: keep the active-pill foreground white on the dark gradient.
  * (The pill itself is repainted to a translucent tint by the rule below.)
  */
-:root[data-buzz-sidebar].dark [data-testid="app-sidebar"] {
+:root[data-buzz-sidebar].dark [data-testid="app-sidebar"],
+:root[data-buzz-sidebar].dark [data-testid="settings-sidebar"] {
   --sidebar-active: var(--buzz-active-fill);
   --sidebar-active-foreground: var(--buzz-active-foreground);
 }
@@ -327,7 +323,8 @@
  * gradient (Buzz-only; other themes keep `shadow-xs`). Higher specificity
  * than the `data-[active=true]:shadow-xs` utility and unlayered, so it wins.
  */
-:root[data-buzz-sidebar] [data-testid="app-sidebar"] [data-active="true"] {
+:root[data-buzz-sidebar] [data-testid="app-sidebar"] [data-active="true"],
+:root[data-buzz-sidebar] [data-testid="settings-sidebar"] [data-active="true"] {
   box-shadow: none;
 }
 
@@ -335,7 +332,10 @@
  * On dark the active pill is a translucent white tint rather than a solid
  * fill, so it sits on the gradient without blowing out.
  */
-:root[data-buzz-sidebar].dark [data-testid="app-sidebar"] [data-active="true"] {
+:root[data-buzz-sidebar].dark [data-testid="app-sidebar"] [data-active="true"],
+:root[data-buzz-sidebar].dark
+  [data-testid="settings-sidebar"]
+  [data-active="true"] {
   background-color: color-mix(
     in srgb,
     hsl(var(--buzz-active-fill)) 16%,
@@ -348,13 +348,19 @@
  * `--buzz-hover-surface`) instead of the grey `--sidebar-accent`. Active
  * items are excluded - they stay solid on hover (their
  * `data-[active=true]:hover:bg-sidebar-active` rule). Covers both top-level
- * menu buttons and channel sub-buttons.
+ * menu buttons and channel sub-buttons, in the app nav and the settings nav.
  */
 :root[data-buzz-sidebar]
   [data-testid="app-sidebar"]
   [data-sidebar="menu-button"]:not([data-active="true"]):hover,
 :root[data-buzz-sidebar]
   [data-testid="app-sidebar"]
+  [data-sidebar="menu-sub-button"]:not([data-active="true"]):hover,
+:root[data-buzz-sidebar]
+  [data-testid="settings-sidebar"]
+  [data-sidebar="menu-button"]:not([data-active="true"]):hover,
+:root[data-buzz-sidebar]
+  [data-testid="settings-sidebar"]
   [data-sidebar="menu-sub-button"]:not([data-active="true"]):hover {
   background-color: var(--buzz-hover-surface);
 }

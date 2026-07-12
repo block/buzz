@@ -59,7 +59,7 @@ export function AppSidebarPinnedHeader({
   suggestionChannels,
 }: AppSidebarPinnedHeaderProps) {
   return (
-    <div className="shrink-0 px-2" data-testid="sidebar-pinned-header">
+    <div className="shrink-0 px-2 pt-3" data-testid="sidebar-pinned-header">
       <TopbarSearch
         channelLabels={channelLabels}
         channels={searchChannels}

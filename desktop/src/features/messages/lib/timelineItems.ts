@@ -20,7 +20,7 @@ import { KIND_SYSTEM_MESSAGE } from "@/shared/constants/kinds";
 
 /**
  * One renderable row in the flattened timeline. Dividers carry no message and
- * never appear in the index map; the three message-bearing kinds do.
+ * never appear in the index map; the message-bearing kinds do.
  */
 export type TimelineItem =
   // `headingTimestamp` (not a prebaked label) so the render still resolves
@@ -28,6 +28,11 @@ export type TimelineItem =
   | { kind: "day-divider"; key: string; headingTimestamp: number }
   | { kind: "unread-divider"; key: string }
   | { kind: "system"; key: string; entry: MainTimelineEntry }
+  | {
+      kind: "system-group";
+      key: string;
+      entries: MainTimelineEntry[];
+    }
   | {
       kind: "message";
       key: string;
@@ -57,6 +62,45 @@ function entryRenderKey(entry: MainTimelineEntry): string {
   return entry.message.renderKey ?? entry.message.id;
 }
 
+const MEMBERSHIP_GROUP_WINDOW_SECONDS = 5 * 60;
+
+type MembershipChangePayload = {
+  actor: string | null;
+  mode: "added" | "joined";
+  target: string;
+};
+
+function parseMembershipChangePayload(
+  entry: MainTimelineEntry,
+): MembershipChangePayload | null {
+  if (entry.message.kind !== KIND_SYSTEM_MESSAGE) return null;
+
+  try {
+    const payload = JSON.parse(entry.message.body) as {
+      type?: unknown;
+      actor?: unknown;
+      target?: unknown;
+    };
+    if (
+      payload.type !== "member_joined" ||
+      typeof payload.actor !== "string" ||
+      typeof payload.target !== "string"
+    ) {
+      return null;
+    }
+
+    const actor = payload.actor.trim().toLowerCase();
+    const target = payload.target.trim().toLowerCase();
+    if (!actor || !target) return null;
+
+    return actor === target
+      ? { actor: null, mode: "joined", target }
+      : { actor, mode: "added", target };
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Walks the (already top-level-filtered) entries once, emitting a day-divider
  * at each calendar-day boundary and an unread-divider above the first unread
@@ -69,6 +113,7 @@ export function buildTimelineItems(
   const items: TimelineItem[] = [];
   let previousGroupEntry: MainTimelineEntry | null = null;
   let previousMessageItemIndex: number | null = null;
+  let previousMembershipItemIndex: number | null = null;
 
   // Index boundaries by their start position so the walk below can look up the
   // prepend-stable section key (start-of-local-day). Keying the divider by
@@ -89,6 +134,7 @@ export function buildTimelineItems(
     if (dayBoundary) {
       previousGroupEntry = null;
       previousMessageItemIndex = null;
+      previousMembershipItemIndex = null;
       items.push({
         kind: "day-divider",
         key: dayBoundary.key,
@@ -99,6 +145,7 @@ export function buildTimelineItems(
     if (shouldRenderUnreadDivider(i, message.id, firstUnreadMessageId)) {
       previousGroupEntry = null;
       previousMessageItemIndex = null;
+      previousMembershipItemIndex = null;
       items.push({ kind: "unread-divider", key: `unread-${renderKey}` });
     }
 
@@ -106,9 +153,48 @@ export function buildTimelineItems(
     if (kind === "system") {
       previousGroupEntry = null;
       previousMessageItemIndex = null;
+
+      const membershipChange = parseMembershipChangePayload(entry);
+      const previousItem =
+        previousMembershipItemIndex === null
+          ? null
+          : items[previousMembershipItemIndex];
+      const previousEntries =
+        previousItem?.kind === "system-group"
+          ? previousItem.entries
+          : previousItem?.kind === "system"
+            ? [previousItem.entry]
+            : [];
+      const firstPreviousEntry = previousEntries[0];
+      const firstPreviousPayload = firstPreviousEntry
+        ? parseMembershipChangePayload(firstPreviousEntry)
+        : null;
+
+      if (
+        membershipChange &&
+        firstPreviousEntry &&
+        firstPreviousPayload?.mode === membershipChange.mode &&
+        (membershipChange.mode === "joined" ||
+          firstPreviousPayload.actor === membershipChange.actor) &&
+        message.createdAt >= firstPreviousEntry.message.createdAt &&
+        message.createdAt - firstPreviousEntry.message.createdAt <=
+          MEMBERSHIP_GROUP_WINDOW_SECONDS
+      ) {
+        const groupIndex = previousMembershipItemIndex as number;
+        items[groupIndex] = {
+          kind: "system-group",
+          key: entryRenderKey(firstPreviousEntry),
+          entries: [...previousEntries, entry],
+        };
+        continue;
+      }
+
       items.push({ kind, key: renderKey, entry });
+      previousMembershipItemIndex = membershipChange ? items.length - 1 : null;
       continue;
     }
+
+    previousMembershipItemIndex = null;
 
     const isContinuation =
       previousGroupEntry !== null &&

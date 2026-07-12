@@ -42,7 +42,12 @@ export function classifyChildren(childArray: React.ReactNode[]): {
     (child) =>
       !isBlockMedia(child) &&
       !(typeof child === "string" && child.trim() === "") &&
-      !(React.isValidElement(child) && child.type === "br"),
+      !(
+        React.isValidElement(child) &&
+        ((typeof child.type === "string" && child.type === "br") ||
+          (child.props as { node?: { tagName?: unknown } })?.node?.tagName ===
+            "br")
+      ),
   );
   return { imageChildren, nonImageChildren };
 }
