@@ -6,7 +6,7 @@ import {
   installMockBridge,
   openChannelBrowser,
   openCreateChannelDialog,
-  openNewDirectMessageDialog,
+  openNewMessagePage,
 } from "../helpers/bridge";
 
 const GENERAL_CHANNEL_ID = "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50";
@@ -432,8 +432,11 @@ test("shows presence in sidebar, DM header, and member list", async ({
 test("start a new direct message from the sidebar", async ({ page }) => {
   await page.goto("/");
 
-  await openNewDirectMessageDialog(page);
-  await expect(page.getByTestId("new-dm-dialog")).toBeVisible();
+  await openNewMessagePage(page);
+  await expect(page.getByTestId("new-message-page")).toBeVisible();
+  await expect(page.getByTestId("message-composer")).toBeVisible();
+  await expect(page.getByTestId("new-message-recipient-popover")).toBeVisible();
+  await expect(page.getByTestId("new-message-body")).toBeEmpty();
 
   await page.getByTestId("new-dm-search").fill("charlie");
   await expect(
@@ -444,12 +447,21 @@ test("start a new direct message from the sidebar", async ({ page }) => {
     page.getByTestId(`new-dm-selected-${TEST_IDENTITIES.charlie.pubkey}`),
   ).toBeVisible();
   await expect(page.getByTestId("new-dm-search")).toHaveValue("");
-  await page
-    .getByTestId(`new-dm-selected-${TEST_IDENTITIES.charlie.pubkey}`)
-    .click();
-  await expect(
-    page.getByTestId(`new-dm-selected-${TEST_IDENTITIES.charlie.pubkey}`),
-  ).not.toBeVisible();
+  const selectedCharlie = page.getByTestId(
+    `new-dm-selected-${TEST_IDENTITIES.charlie.pubkey}`,
+  );
+  await selectedCharlie.hover();
+  const selectedCharlieBox = await selectedCharlie.boundingBox();
+  expect(selectedCharlieBox).not.toBeNull();
+  if (!selectedCharlieBox) return;
+  await page.mouse.move(
+    selectedCharlieBox.x + selectedCharlieBox.width / 2,
+    selectedCharlieBox.y + selectedCharlieBox.height / 2,
+  );
+  await page.mouse.down();
+  await expect(page.locator(".buzz-poof-burst")).toHaveCount(1);
+  await page.mouse.up();
+  await expect(selectedCharlie).not.toBeVisible();
   await page.getByTestId("new-dm-search").fill("charlie");
   await expect(
     page.getByTestId(`new-dm-result-${TEST_IDENTITIES.charlie.pubkey}`),
@@ -462,16 +474,91 @@ test("start a new direct message from the sidebar", async ({ page }) => {
     page.getByTestId(`new-dm-selected-${TEST_IDENTITIES.charlie.pubkey}`),
   ).toBeVisible();
 
-  await page.keyboard.press("Enter");
+  await page.getByTestId("message-input").fill("Hello charlie");
+  await page.getByTestId("send-message").click();
 
   await expect(page.getByTestId("dm-list")).toContainText("charlie");
   await expect(page.getByTestId("chat-title")).toHaveText("charlie");
   await expect(page.getByTestId("section-actions-dms")).not.toBeFocused();
 });
 
-test("keeps direct message row add buttons hidden while opening", async ({
+test("keeps typing focus while arrow keys traverse and select DM recipients", async ({
   page,
 }) => {
+  await page.goto("/");
+  await openNewMessagePage(page);
+
+  const search = page.getByTestId("new-dm-search");
+  await expect(search).toBeFocused();
+  const initialActiveDescendant = await search.getAttribute(
+    "aria-activedescendant",
+  );
+  expect(initialActiveDescendant).toMatch(/^new-dm-option-/);
+  await search.press("Enter");
+  await expect(
+    page.locator("button[data-testid^='new-dm-selected-']"),
+  ).toHaveCount(1);
+  await expect(page.getByTestId("new-message-recipient-popover")).toBeVisible();
+
+  await search.fill("o");
+  await expect(
+    page.getByTestId(`new-dm-result-${TEST_IDENTITIES.bob.pubkey}`),
+  ).toBeVisible();
+  await expect(
+    page.getByTestId(`new-dm-result-${TEST_IDENTITIES.outsider.pubkey}`),
+  ).toBeVisible();
+
+  await expect(search).toHaveAttribute(
+    "aria-activedescendant",
+    `new-dm-option-${TEST_IDENTITIES.outsider.pubkey}`,
+  );
+  await expect(
+    page.locator(`#new-dm-option-${TEST_IDENTITIES.outsider.pubkey}`),
+  ).toHaveAttribute("aria-selected", "true");
+
+  await search.press("ArrowDown");
+  await expect(search).toBeFocused();
+  await expect(search).toHaveAttribute(
+    "aria-activedescendant",
+    `new-dm-option-${TEST_IDENTITIES.bob.pubkey}`,
+  );
+
+  await search.press("ArrowUp");
+  await expect(search).toHaveAttribute(
+    "aria-activedescendant",
+    `new-dm-option-${TEST_IDENTITIES.outsider.pubkey}`,
+  );
+  await search.press("Enter");
+
+  await expect(search).toBeFocused();
+  await expect(search).toHaveValue("");
+  await expect(search).toHaveAttribute("aria-activedescendant", /.+/);
+  await expect(
+    page.getByTestId(`new-dm-selected-${TEST_IDENTITIES.outsider.pubkey}`),
+  ).toBeVisible();
+  await expect(page.getByTestId("new-message-recipient-popover")).toBeVisible();
+});
+
+test("sends the first message from the new direct message composer", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await openNewMessagePage(page);
+
+  await page.getByTestId("new-dm-search").fill("charlie");
+  await page
+    .getByTestId(`new-dm-result-${TEST_IDENTITIES.charlie.pubkey}`)
+    .click();
+
+  const message = "First message from the new conversation";
+  await page.getByTestId("message-input").fill(message);
+  await page.getByTestId("send-message").click();
+
+  await expect(page.getByTestId("chat-title")).toHaveText("charlie");
+  await expect(page.getByTestId("message-timeline")).toContainText(message);
+});
+
+test("closes direct message results while opening", async ({ page }) => {
   await page.goto("/");
   await page.evaluate(() => {
     const testWindow = window as Window & {
@@ -482,7 +569,7 @@ test("keeps direct message row add buttons hidden while opening", async ({
     testWindow.__BUZZ_E2E__.mock.openDmDelayMs = 1_000;
   });
 
-  await openNewDirectMessageDialog(page);
+  await openNewMessagePage(page);
   await page.getByTestId("new-dm-search").fill("charlie");
   await page
     .getByTestId(`new-dm-result-${TEST_IDENTITIES.charlie.pubkey}`)
@@ -490,16 +577,13 @@ test("keeps direct message row add buttons hidden while opening", async ({
   await expect(
     page.getByTestId(`new-dm-selected-${TEST_IDENTITIES.charlie.pubkey}`),
   ).toBeVisible();
+  await expect(page.getByTestId("new-message-recipient-popover")).toBeVisible();
 
-  const rowAddButtons = page.locator("[data-testid^='new-dm-add-']");
-  await expect(rowAddButtons.first()).toBeAttached();
+  await page.getByTestId("message-input").fill("Open this conversation");
+  await page.getByTestId("send-message").click();
 
-  await page.getByTestId("new-dm-submit").click();
-
-  await expect(page.getByTestId("new-dm-submit")).toContainText("Opening...");
-  await expect(
-    page.locator("button[data-testid^='new-dm-add-']:visible"),
-  ).toHaveCount(0);
+  await expect(page.getByTestId("new-dm-opening")).toContainText("Opening");
+  await expect(page.getByTestId("new-message-recipient-popover")).toBeHidden();
 
   await expect(page.getByTestId("chat-title")).toHaveText("charlie");
 });
@@ -509,8 +593,8 @@ test("shows capped participant stack in group direct message header", async ({
 }) => {
   await page.goto("/");
 
-  await openNewDirectMessageDialog(page);
-  await expect(page.getByTestId("new-dm-dialog")).toBeVisible();
+  await openNewMessagePage(page);
+  await expect(page.getByTestId("new-message-page")).toBeVisible();
 
   for (const identity of [
     TEST_IDENTITIES.alice,
@@ -522,7 +606,8 @@ test("shows capped participant stack in group direct message header", async ({
     await page.getByTestId(`new-dm-result-${identity.pubkey}`).click();
   }
 
-  await page.getByTestId("new-dm-submit").click();
+  await page.getByTestId("message-input").fill("Hello group");
+  await page.getByTestId("send-message").click();
 
   await expect(page.getByTestId("channel-dm-count-Group DM (5)")).toHaveText(
     "4",
@@ -1886,8 +1971,8 @@ test("new DM picker pages people search beyond the first 50 results", async ({
   await installMockBridge(page, { searchProfiles });
 
   await page.goto("/");
-  await openNewDirectMessageDialog(page);
-  await expect(page.getByTestId("new-dm-dialog")).toBeVisible();
+  await openNewMessagePage(page);
+  await expect(page.getByTestId("new-message-page")).toBeVisible();
   await page.getByTestId("new-dm-search").fill("Alex");
 
   const results = page.locator("[data-testid^='new-dm-result-']");

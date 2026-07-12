@@ -1,0 +1,471 @@
+import { Bot, X } from "lucide-react";
+import * as React from "react";
+
+import { useAppNavigation } from "@/app/navigation/useAppNavigation";
+import { useOpenDmMutation } from "@/features/channels/hooks";
+import { useSendMessageMutation } from "@/features/messages/hooks";
+import { getKeyboardSearchSelection } from "@/features/profile/lib/userCandidateSearch";
+import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
+import { useIdentityQuery } from "@/shared/api/hooks";
+import { cn } from "@/shared/lib/cn";
+import {
+  POOF_ORIGIN_CLASS,
+  POOF_TRIGGER_CLASS,
+} from "@/shared/ui/PoofBurstProvider";
+import { Popover, PopoverAnchor, PopoverContent } from "@/shared/ui/popover";
+
+import { MessageComposer } from "./MessageComposer";
+import { NewMessageResultRow } from "./NewMessageResultRow";
+import {
+  formatRecipientName,
+  useNewMessageRecipients,
+} from "./useNewMessageRecipients";
+
+/**
+ * Conversation-shaped compose surface for starting a direct message. The
+ * normal chat header becomes an inline "To:" field, while recipient discovery
+ * lives in an attached popover instead of taking over the message area.
+ */
+export function NewMessageScreen() {
+  const identityQuery = useIdentityQuery();
+  const currentPubkey = identityQuery.data?.pubkey;
+  const openDmMutation = useOpenDmMutation();
+  const sendMessageMutation = useSendMessageMutation(null, identityQuery.data);
+  const { goChannel } = useAppNavigation();
+
+  const [isRecipientPickerOpen, setIsRecipientPickerOpen] =
+    React.useState(true);
+  const [highlightedRecipientPubkey, setHighlightedRecipientPubkey] =
+    React.useState<string | null>(null);
+  const [submitErrorMessage, setSubmitErrorMessage] = React.useState<
+    string | null
+  >(null);
+  const searchInputRef = React.useRef<HTMLInputElement>(null);
+  const isPending = openDmMutation.isPending || sendMessageMutation.isPending;
+
+  const {
+    deferredSearchQuery,
+    handleDirectoryScroll,
+    hasReachedRecipientLimit,
+    isDirectoryLoading,
+    ownerProfiles,
+    removeUser,
+    searchError,
+    searchQuery,
+    searchResults,
+    selectUser,
+    selectedUsers,
+    setSearchQuery,
+  } = useNewMessageRecipients({ active: true, currentPubkey });
+
+  const showRecipientPicker =
+    isRecipientPickerOpen && !isPending && !hasReachedRecipientLimit;
+  const highlightedRecipientIndex = React.useMemo(() => {
+    if (!showRecipientPicker || searchResults.length === 0) {
+      return -1;
+    }
+
+    if (highlightedRecipientPubkey === null) {
+      return 0;
+    }
+
+    return searchResults.findIndex(
+      (user) => user.pubkey === highlightedRecipientPubkey,
+    );
+  }, [highlightedRecipientPubkey, searchResults, showRecipientPicker]);
+  const highlightedRecipient =
+    highlightedRecipientIndex < 0
+      ? null
+      : (searchResults[highlightedRecipientIndex] ?? null);
+
+  React.useEffect(() => {
+    if (highlightedRecipientPubkey && highlightedRecipientIndex < 0) {
+      setHighlightedRecipientPubkey(null);
+    }
+  }, [highlightedRecipientIndex, highlightedRecipientPubkey]);
+
+  React.useEffect(() => {
+    if (!highlightedRecipient || !showRecipientPicker) {
+      return;
+    }
+
+    document
+      .getElementById(`new-dm-option-${highlightedRecipient.pubkey}`)
+      ?.scrollIntoView({ block: "nearest" });
+  }, [highlightedRecipient, showRecipientPicker]);
+
+  React.useEffect(() => {
+    searchInputRef.current?.focus({ preventScroll: true });
+  }, []);
+
+  const handleRemoveUser = React.useCallback(
+    (pubkey: string) => {
+      removeUser(pubkey);
+    },
+    [removeUser],
+  );
+
+  const handleSelectUser = React.useCallback(
+    (user: Parameters<typeof selectUser>[0]) => {
+      selectUser(user);
+      setHighlightedRecipientPubkey(null);
+      setSubmitErrorMessage(null);
+      setIsRecipientPickerOpen(true);
+      searchInputRef.current?.focus({ preventScroll: true });
+    },
+    [selectUser],
+  );
+
+  const openDirectMessage = React.useCallback(async () => {
+    if (isPending || selectedUsers.length === 0) {
+      return null;
+    }
+
+    setSubmitErrorMessage(null);
+
+    try {
+      return await openDmMutation.mutateAsync({
+        pubkeys: selectedUsers.map((user) => user.pubkey),
+      });
+    } catch (error) {
+      setSubmitErrorMessage(
+        error instanceof Error
+          ? error.message
+          : "Failed to open direct message.",
+      );
+      return null;
+    }
+  }, [isPending, openDmMutation, selectedUsers]);
+
+  const sendFirstMessage = React.useCallback(
+    async (
+      content: string,
+      mentionPubkeys: string[],
+      mediaTags?: string[][],
+    ) => {
+      const directMessage = await openDirectMessage();
+      if (!directMessage) {
+        throw new Error(
+          submitErrorMessage ?? "Choose at least one recipient first.",
+        );
+      }
+
+      try {
+        await sendMessageMutation.mutateAsync({
+          channelId: directMessage.id,
+          content,
+          mentionPubkeys,
+          mediaTags,
+        });
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message : "Failed to send message.";
+        setSubmitErrorMessage(message);
+        throw error;
+      }
+
+      await goChannel(directMessage.id, { replace: true });
+    },
+    [goChannel, openDirectMessage, sendMessageMutation, submitErrorMessage],
+  );
+
+  const composerPlaceholder =
+    selectedUsers.length === 0
+      ? "Choose a recipient to start a message"
+      : selectedUsers.length === 1
+        ? `Message ${formatRecipientName(selectedUsers[0])}`
+        : `Message ${selectedUsers.length} people`;
+
+  return (
+    <div
+      className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden"
+      data-testid="new-message-page"
+    >
+      <header
+        className="relative z-40 shrink-0 cursor-default select-none border-b border-border/35 bg-background/80 px-5 py-2 backdrop-blur-md supports-backdrop-filter:bg-background/70 dark:bg-background/70 dark:backdrop-blur-xl dark:supports-backdrop-filter:bg-background/55"
+        data-testid="new-message-header"
+        data-tauri-drag-region
+      >
+        <div className="flex min-h-9 min-w-0 items-center">
+          <Popover
+            onOpenChange={setIsRecipientPickerOpen}
+            open={showRecipientPicker}
+          >
+            <PopoverAnchor asChild>
+              {/* biome-ignore lint/a11y/noStaticElementInteractions: clicking anywhere in the recipient field focuses its input */}
+              {/* biome-ignore lint/a11y/useKeyWithClickEvents: the nested combobox is the keyboard-accessible focus target */}
+              <div
+                className="group/to-field flex min-h-9 min-w-0 flex-1 cursor-text flex-wrap items-center gap-1.5 py-1"
+                data-testid="new-message-to-field"
+                onClick={() => {
+                  setIsRecipientPickerOpen(true);
+                  searchInputRef.current?.focus({ preventScroll: true });
+                }}
+              >
+                <span className="shrink-0 text-base font-semibold tracking-tight">
+                  To:
+                </span>
+                {selectedUsers.map((user) => (
+                  <button
+                    aria-label={`Remove ${formatRecipientName(user)}`}
+                    className={cn(
+                      "group/selected-recipient inline-flex h-7 max-w-44 items-center gap-1.5 rounded-full bg-muted px-1.5 pr-2.5 text-sm transition-colors hover:bg-muted/80 focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-60",
+                      POOF_TRIGGER_CLASS,
+                      POOF_ORIGIN_CLASS,
+                    )}
+                    data-testid={`new-dm-selected-${user.pubkey}`}
+                    disabled={isPending}
+                    key={user.pubkey}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      handleRemoveUser(user.pubkey);
+                    }}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" || event.key === " ") {
+                        handleRemoveUser(user.pubkey);
+                      }
+                    }}
+                    onPointerDown={(event) => {
+                      if (event.button !== 0) {
+                        return;
+                      }
+                      event.stopPropagation();
+                      handleRemoveUser(user.pubkey);
+                    }}
+                    type="button"
+                  >
+                    <span className="relative h-5 w-5 shrink-0">
+                      <ProfileAvatar
+                        avatarUrl={user.avatarUrl}
+                        className="h-5 w-5 text-3xs shadow-none transition-opacity group-hover/selected-recipient:opacity-0 group-focus-visible/selected-recipient:opacity-0"
+                        iconClassName="h-2.5 w-2.5"
+                        label={formatRecipientName(user)}
+                      />
+                      <span className="absolute inset-0 flex items-center justify-center rounded-full bg-foreground text-background opacity-0 transition-opacity group-hover/selected-recipient:opacity-100 group-focus-visible/selected-recipient:opacity-100">
+                        <X aria-hidden="true" className="h-3 w-3" />
+                      </span>
+                    </span>
+                    <span className="truncate font-medium">
+                      {formatRecipientName(user)}
+                    </span>
+                    {user.isAgent ? (
+                      <Bot
+                        aria-label="agent"
+                        className="h-3.5 w-3.5 shrink-0 text-muted-foreground"
+                      />
+                    ) : null}
+                  </button>
+                ))}
+                <input
+                  aria-activedescendant={
+                    highlightedRecipient
+                      ? `new-dm-option-${highlightedRecipient.pubkey}`
+                      : undefined
+                  }
+                  aria-controls="new-dm-results"
+                  aria-expanded={showRecipientPicker}
+                  aria-label="To"
+                  autoCapitalize="none"
+                  autoComplete="off"
+                  autoCorrect="off"
+                  className="h-7 min-w-32 flex-1 bg-transparent text-base outline-hidden placeholder:text-muted-foreground"
+                  data-testid="new-dm-search"
+                  disabled={isPending || hasReachedRecipientLimit}
+                  id="new-dm-search"
+                  onChange={(event) => {
+                    setSearchQuery(event.target.value);
+                    setHighlightedRecipientPubkey(null);
+                    setSubmitErrorMessage(null);
+                    setIsRecipientPickerOpen(true);
+                  }}
+                  onFocus={() => setIsRecipientPickerOpen(true)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Escape") {
+                      event.preventDefault();
+                      setHighlightedRecipientPubkey(null);
+                      setIsRecipientPickerOpen(false);
+                      return;
+                    }
+
+                    if (
+                      (event.key === "ArrowDown" || event.key === "ArrowUp") &&
+                      searchResults.length > 0
+                    ) {
+                      event.preventDefault();
+                      setIsRecipientPickerOpen(true);
+                      setHighlightedRecipientPubkey(() => {
+                        const current = highlightedRecipientIndex;
+                        if (current < 0) {
+                          const initialIndex =
+                            event.key === "ArrowDown"
+                              ? 0
+                              : searchResults.length - 1;
+                          return searchResults[initialIndex]?.pubkey ?? null;
+                        }
+
+                        const direction = event.key === "ArrowDown" ? 1 : -1;
+                        const nextIndex =
+                          (current + direction + searchResults.length) %
+                          searchResults.length;
+                        return searchResults[nextIndex]?.pubkey ?? null;
+                      });
+                      return;
+                    }
+
+                    if (
+                      event.key === "Backspace" &&
+                      searchQuery.length === 0 &&
+                      selectedUsers.length > 0
+                    ) {
+                      event.preventDefault();
+                      const lastRecipient =
+                        selectedUsers[selectedUsers.length - 1];
+                      if (lastRecipient) {
+                        document
+                          .querySelector<HTMLElement>(
+                            `[data-testid="new-dm-selected-${lastRecipient.pubkey}"]`,
+                          )
+                          ?.dispatchEvent(
+                            new MouseEvent("click", {
+                              bubbles: true,
+                              detail: 0,
+                            }),
+                          );
+                      }
+                      return;
+                    }
+
+                    if (event.key !== "Enter") {
+                      return;
+                    }
+
+                    if (searchQuery.trim().length === 0) {
+                      if (highlightedRecipient) {
+                        event.preventDefault();
+                        handleSelectUser(highlightedRecipient);
+                      }
+                      return;
+                    }
+
+                    const keyboardSelection =
+                      highlightedRecipient ??
+                      getKeyboardSearchSelection({
+                        currentQuery: searchQuery,
+                        rankedQuery: deferredSearchQuery,
+                        results: searchResults,
+                      });
+                    if (!keyboardSelection) {
+                      return;
+                    }
+
+                    event.preventDefault();
+                    handleSelectUser(keyboardSelection);
+                  }}
+                  ref={searchInputRef}
+                  role="combobox"
+                  spellCheck={false}
+                  type="text"
+                  value={searchQuery}
+                />
+              </div>
+            </PopoverAnchor>
+            <PopoverContent
+              align="start"
+              className="w-[min(36rem,calc(100vw-3rem))] overflow-hidden p-0"
+              data-testid="new-message-recipient-popover"
+              onCloseAutoFocus={(event) => event.preventDefault()}
+              onOpenAutoFocus={(event) => event.preventDefault()}
+              side="bottom"
+              sideOffset={6}
+            >
+              <div
+                className="max-h-80 overflow-y-auto"
+                data-testid="new-dm-results"
+                id="new-dm-results"
+                onScroll={handleDirectoryScroll}
+                role="listbox"
+              >
+                {searchResults.length > 0 ? (
+                  <div>
+                    {searchResults.map((user) => (
+                      <NewMessageResultRow
+                        currentPubkey={currentPubkey}
+                        disabled={isPending || hasReachedRecipientLimit}
+                        isKeyboardHighlighted={
+                          highlightedRecipient?.pubkey === user.pubkey
+                        }
+                        key={user.pubkey}
+                        onSelect={handleSelectUser}
+                        ownerProfiles={ownerProfiles}
+                        user={user}
+                      />
+                    ))}
+                  </div>
+                ) : isDirectoryLoading ? (
+                  <p className="px-4 py-3 text-sm text-muted-foreground">
+                    {deferredSearchQuery.length === 0
+                      ? "Loading people and agents…"
+                      : "Searching…"}
+                  </p>
+                ) : (
+                  <p
+                    className="px-4 py-3 text-sm text-muted-foreground"
+                    data-testid="new-dm-empty"
+                  >
+                    {deferredSearchQuery.length === 0
+                      ? "No people or agents available to message."
+                      : "No matching users."}
+                  </p>
+                )}
+              </div>
+            </PopoverContent>
+          </Popover>
+
+          {isPending ? (
+            <span
+              className="shrink-0 pl-2 text-sm text-muted-foreground"
+              data-testid="new-dm-opening"
+            >
+              Opening…
+            </span>
+          ) : null}
+        </div>
+      </header>
+
+      <div
+        className="min-h-0 flex-1 bg-background"
+        data-testid="new-message-body"
+      />
+
+      {hasReachedRecipientLimit ? (
+        <p
+          className="px-5 pb-2 text-sm text-muted-foreground"
+          data-testid="new-dm-limit"
+        >
+          DMs support up to nine people, including you.
+        </p>
+      ) : null}
+      {searchError ? (
+        <p className="px-5 pb-2 text-sm text-destructive">
+          {searchError.message}
+        </p>
+      ) : null}
+      {submitErrorMessage ? (
+        <p className="px-5 pb-2 text-sm text-destructive">
+          {submitErrorMessage}
+        </p>
+      ) : null}
+
+      <MessageComposer
+        channelName="new message"
+        channelType="dm"
+        containerClassName="px-5"
+        disabled={isPending || selectedUsers.length === 0}
+        isSending={isPending}
+        onSend={sendFirstMessage}
+        placeholder={composerPlaceholder}
+      />
+      <div aria-hidden="true" className="min-h-8 bg-background px-5 pb-1.5" />
+    </div>
+  );
+}

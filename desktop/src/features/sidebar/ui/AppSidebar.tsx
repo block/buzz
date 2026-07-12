@@ -38,7 +38,6 @@ import {
   SectionQuickAction,
 } from "@/features/sidebar/ui/CustomChannelSection";
 import { CreateChannelDialog } from "@/features/sidebar/ui/CreateChannelDialog";
-import { NewDirectMessageDialog } from "@/features/sidebar/ui/NewDirectMessageDialog";
 import { SidebarProfileCard } from "@/features/sidebar/ui/SidebarProfileCard";
 import { SidebarRelayConnectionCard } from "@/features/sidebar/ui/SidebarRelayConnectionCard";
 import type { useSidebarRelayConnectionCard } from "@/features/sidebar/ui/useSidebarRelayConnectionCard";
@@ -86,7 +85,6 @@ type AppSidebarProps = {
   isLoading: boolean;
   isCreatingChannel: boolean;
   isCreatingForum: boolean;
-  isOpeningDm: boolean;
   profile?: Profile;
   relayConnectionCard: ReturnType<typeof useSidebarRelayConnectionCard>;
   selfPresenceStatus: PresenceStatus;
@@ -95,6 +93,7 @@ type AppSidebarProps = {
   selectedView:
     | "home"
     | "channel"
+    | "messages"
     | "agents"
     | "workflows"
     | "pulse"
@@ -155,8 +154,7 @@ type AppSidebarProps = {
   onSwitchWorkspace: (id: string) => void;
   selfUserStatus?: UserStatus;
   isPresencePending?: boolean;
-  isNewDmOpen?: boolean;
-  onNewDmOpenChange?: (open: boolean) => void;
+  onNewMessage: () => void;
   isCreateChannelOpen?: boolean;
   onCreateChannelOpenChange?: (open: boolean) => void;
   mutedChannelIds?: ReadonlySet<string>;
@@ -177,7 +175,6 @@ export function AppSidebar({
   isLoading,
   isCreatingChannel,
   isCreatingForum,
-  isOpeningDm,
   profile,
   relayConnectionCard,
   selfPresenceStatus,
@@ -217,8 +214,7 @@ export function AppSidebar({
   onSwitchWorkspace,
   selfUserStatus,
   isPresencePending,
-  isNewDmOpen: isNewDmOpenProp,
-  onNewDmOpenChange,
+  onNewMessage,
   isCreateChannelOpen: isCreateChannelOpenProp,
   onCreateChannelOpenChange,
   mutedChannelIds,
@@ -237,9 +233,6 @@ export function AppSidebar({
     React.useState(false);
   const showSidebarUpdateCard =
     canShowSidebarUpdateCard && !isSidebarUpdateCardDismissed;
-  const [isNewDmOpenInternal, setIsNewDmOpenInternal] = React.useState(false);
-  const isNewDmOpen = isNewDmOpenProp ?? isNewDmOpenInternal;
-  const setIsNewDmOpen = onNewDmOpenChange ?? setIsNewDmOpenInternal;
   const [dmActionsMenuOpen, setDmActionsMenuOpen] = React.useState(false);
   const scrollRef = React.useRef<HTMLDivElement>(null);
   useSidebarScrollLock(scrollRef);
@@ -755,14 +748,14 @@ export function AppSidebar({
                     <div className="absolute right-1 top-1/2 z-10 flex -translate-y-1/2 items-center gap-0.5">
                       <SectionQuickAction
                         label="New message"
-                        onClick={() => setIsNewDmOpen(true)}
+                        onClick={onNewMessage}
                         testId="section-actions-dms-quick-create"
                       />
                       <SectionActionsMenu
                         sectionLabel="direct messages"
                         testId="section-actions-dms"
                         onOpenChange={setDmActionsMenuOpen}
-                        onNewMessage={() => setIsNewDmOpen(true)}
+                        onNewMessage={onNewMessage}
                         sortMode={sortModeFor("dms")}
                         onSortModeChange={(mode) => setSortModeFor("dms", mode)}
                       />
@@ -874,14 +867,6 @@ export function AppSidebar({
           }
         }}
         onCreate={handleCreateFromDialog}
-      />
-
-      <NewDirectMessageDialog
-        currentPubkey={currentPubkey}
-        isPending={isOpeningDm}
-        onOpenChange={setIsNewDmOpen}
-        onSubmit={onOpenDm}
-        open={isNewDmOpen}
       />
 
       <AddWorkspaceDialog

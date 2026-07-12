@@ -109,7 +109,6 @@ export function AppShell() {
   const [searchFocusRequest, setSearchFocusRequest] = React.useState(0);
   const [browseDialogType, setBrowseDialogType] =
     React.useState<BrowseDialogType>(null);
-  const [isNewDmOpen, setIsNewDmOpen] = React.useState(false);
   const [isCreateChannelOpen, setIsCreateChannelOpen] = React.useState(false);
   const [isHuddleDrawerOpen, setIsHuddleDrawerOpen] = React.useState(false);
   const mainInsetRef = React.useRef<HTMLElement>(null);
@@ -119,6 +118,7 @@ export function AppShell() {
     goAgents,
     goChannel,
     goHome,
+    goNewMessage,
     goProjects,
     goPulse,
     goSettings,
@@ -547,7 +547,10 @@ export function AppShell() {
   // Dispatch `buzz://message` deep links into the router.
   useMessageDeepLinks();
 
-  const handleOpenNewDm = React.useCallback(() => setIsNewDmOpen(true), []);
+  const handleOpenNewDm = React.useCallback(
+    () => void goNewMessage(),
+    [goNewMessage],
+  );
   const handleOpenCreateChannel = React.useCallback(
     () => setIsCreateChannelOpen(true),
     [],
@@ -754,8 +757,6 @@ export function AppShell() {
                           isCreatingChannel={createChannelMutation.isPending}
                           isCreatingForum={createForumMutation.isPending}
                           isLoading={channelsQuery.isLoading}
-                          isOpeningDm={openDmMutation.isPending}
-                          isNewDmOpen={isNewDmOpen}
                           isCreateChannelOpen={isCreateChannelOpen}
                           isPresencePending={presenceSession.isPending}
                           onAddWorkspace={(workspace) => {
@@ -763,7 +764,7 @@ export function AppShell() {
                             handleSwitchWorkspace(id);
                           }}
                           onAddWorkspaceOpenChange={setIsAddWorkspaceOpen}
-                          onNewDmOpenChange={setIsNewDmOpen}
+                          onNewMessage={handleOpenNewDm}
                           onCreateChannelOpenChange={setIsCreateChannelOpen}
                           onOpenAddWorkspace={() => setIsAddWorkspaceOpen(true)}
                           onUpdateWorkspace={workspacesHook.updateWorkspace}

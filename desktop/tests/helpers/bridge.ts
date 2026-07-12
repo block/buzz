@@ -677,7 +677,8 @@ export async function openCreateChannelDialog(page: Page) {
   await page.getByRole("menuitem", { name: "New channel" }).click();
 }
 
-export async function openNewDirectMessageDialog(page: Page) {
+export async function openNewMessagePage(page: Page) {
   await openSectionMenu(page, "section-actions-dms");
   await page.getByRole("menuitem", { name: "New message" }).click();
+  await page.getByTestId("new-message-page").waitFor({ state: "visible" });
 }
