@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -101,6 +102,70 @@ void main() {
       container.read(relaySessionProvider.notifier).queryRelay(const []),
       throwsA(isA<FormatException>()),
     );
+  });
+
+  test(
+    'history timeout rejects instead of returning partial empty data',
+    () async {
+      final session = RelaySessionNotifier();
+
+      await expectLater(
+        session.fetchHistory(
+          const NostrFilter(kinds: [39002]),
+          timeout: const Duration(milliseconds: 1),
+        ),
+        throwsA(isA<TimeoutException>()),
+      );
+    },
+  );
+
+  test('background disconnect rejects in-flight history', () async {
+    final session = RelaySessionNotifier();
+    final container = ProviderContainer(
+      overrides: [relaySessionProvider.overrideWith(() => session)],
+    );
+    addTearDown(container.dispose);
+    container.read(relaySessionProvider);
+
+    final history = session.fetchHistory(
+      const NostrFilter(kinds: [39002]),
+      timeout: const Duration(seconds: 1),
+    );
+    final expectation = expectLater(history, throwsException);
+
+    session.debugPauseNow();
+
+    await expectation;
+  });
+
+  test('retries a dropped connected session without live subscriptions', () {
+    final session = RelaySessionNotifier();
+    final container = ProviderContainer(
+      overrides: [relaySessionProvider.overrideWith(() => session)],
+    );
+    addTearDown(container.dispose);
+    container.read(relaySessionProvider);
+
+    session.debugHandleConnected();
+    session.debugHandleDisconnected();
+
+    expect(session.state.status, SessionStatus.reconnecting);
+    expect(session.state.reconnectAttempt, 1);
+  });
+
+  test('does not schedule reconnects after background disconnect', () {
+    final session = RelaySessionNotifier();
+    final container = ProviderContainer(
+      overrides: [relaySessionProvider.overrideWith(() => session)],
+    );
+    addTearDown(container.dispose);
+    container.read(relaySessionProvider);
+
+    session.debugHandleConnected();
+    session.debugPauseNow();
+    session.debugHandleDisconnected();
+
+    expect(session.state.status, SessionStatus.disconnected);
   });
 
   test('delivers the same live event to each matching subscription', () async {

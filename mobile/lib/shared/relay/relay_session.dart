@@ -88,6 +88,8 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   int _reconnectDelayMs = _baseReconnectDelayMs;
   int _subIdCounter = 0;
   bool _disposed = false;
+  bool _paused = false;
+  bool _hasConnectedOnce = false;
 
   @override
   SessionState build() {
@@ -173,8 +175,9 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     final timer = Timer(timeout, () {
       final sub = _historySubscriptions.remove(subId);
       if (sub != null && !sub.completer.isCompleted) {
-        // Resolve with whatever we collected so far rather than failing.
-        sub.completer.complete(sub.events);
+        sub.completer.completeError(
+          TimeoutException('Relay history request timed out after $timeout'),
+        );
       }
       _sendClose(subId);
     });
@@ -266,6 +269,15 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   @visibleForTesting
   void debugFlushEventBuffer() => _flushEventBuffer();
 
+  @visibleForTesting
+  void debugHandleConnected() => _handleConnected();
+
+  @visibleForTesting
+  void debugHandleDisconnected([Object? error]) => _handleDisconnected(error);
+
+  @visibleForTesting
+  void debugPauseNow() => _pauseNow();
+
   /// Force a reconnect (e.g., returning from background).
   Future<void> reconnect() async {
     await _socket?.disconnect();
@@ -277,14 +289,21 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   /// Called by the app lifecycle provider when the app goes to background.
   void onAppPaused() {
     _backgroundGraceTimer?.cancel();
-    _backgroundGraceTimer = Timer(const Duration(seconds: 5), () {
-      _socket?.disconnect();
-      state = const SessionState(status: SessionStatus.disconnected);
-    });
+    _backgroundGraceTimer = Timer(const Duration(seconds: 5), _pauseNow);
+  }
+
+  void _pauseNow() {
+    _paused = true;
+    _reconnectTimer?.cancel();
+    _cancelAllHistory(Exception('App moved to background'));
+    _rejectAllPending(Exception('App moved to background'));
+    _socket?.disconnect();
+    state = const SessionState(status: SessionStatus.disconnected);
   }
 
   /// Called by the app lifecycle provider when the app returns to foreground.
   void onAppResumed() {
+    _paused = false;
     _backgroundGraceTimer?.cancel();
     _backgroundGraceTimer = null;
 
@@ -308,7 +327,9 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     }
 
     state = SessionState(
-      status: SessionStatus.connecting,
+      status: _hasConnectedOnce
+          ? SessionStatus.reconnecting
+          : SessionStatus.connecting,
       reconnectAttempt: state.reconnectAttempt,
     );
 
@@ -326,6 +347,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
 
   void _handleConnected() {
     if (_disposed) return;
+    _hasConnectedOnce = true;
     _reconnectDelayMs = _baseReconnectDelayMs;
     state = const SessionState(status: SessionStatus.connected);
     _replayLiveSubscriptions();
@@ -342,12 +364,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   }
 
   void _scheduleReconnect() {
-    if (_disposed) return;
-    if (_liveSubscriptions.isEmpty) {
-      state = const SessionState(status: SessionStatus.disconnected);
-      return;
-    }
-
+    if (_disposed || _paused) return;
     final attempt = state.reconnectAttempt + 1;
     state = SessionState(
       status: SessionStatus.reconnecting,

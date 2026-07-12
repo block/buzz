@@ -43,6 +43,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
   Set<String> _participatedRootIds = {};
   Set<String> _authoredRootIds = {};
   String? _threadInterestPubkey;
+  bool _hasLoaded = false;
 
   Map<String, int> get latestObservedByChannel =>
       Map.unmodifiable(_latestObservedByChannel);
@@ -55,9 +56,22 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
       });
 
   @override
-  Future<List<Channel>> build() {
-    final sessionState = ref.watch(relaySessionProvider);
+  Future<List<Channel>> build() async {
     ref.watch(relayConfigProvider);
+    final connected = Completer<void>();
+    final sessionState = ref.read(relaySessionProvider);
+    final waitingForInitialConnection =
+        sessionState.status != SessionStatus.connected;
+    ref.listen(relaySessionProvider, (previous, next) {
+      if (next.status != SessionStatus.connected) return;
+      if (waitingForInitialConnection &&
+          !_hasLoaded &&
+          !connected.isCompleted) {
+        connected.complete();
+      } else if (previous?.status != SessionStatus.connected) {
+        unawaited(_backstopRefresh());
+      }
+    });
 
     // Re-fetch when the app returns to foreground so channels created on
     // another device while mobile was backgrounded appear immediately.
@@ -76,25 +90,26 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     });
 
     if (sessionState.status != SessionStatus.connected) {
-      _clearLiveSubscriptions();
-      _latestObservedByChannel.clear();
-      _observedUnreadEventsByChannel.clear();
-      // Preserve the last successfully loaded channels while reconnecting
-      // instead of re-entering a loading/error state. The UI will show cached
-      // channels with a "Reconnecting…" banner overlay, which is far better
-      // than a blank screen.
-      final previous = state.value;
-      if (previous != null && previous.isNotEmpty) {
-        return Future.value(previous);
-      }
+      if (_hasLoaded) return state.value ?? const [];
+      await connected.future;
     }
 
-    return _fetch(
-      subscribeLive: sessionState.status == SessionStatus.connected,
-    );
+    return _fetch(subscribeLive: true);
   }
 
   Future<List<Channel>> _fetch({
+    bool subscribeLive = false,
+    bool fetchLastMessage = true,
+  }) async {
+    final channels = await _fetchChannels(
+      subscribeLive: subscribeLive,
+      fetchLastMessage: fetchLastMessage,
+    );
+    _hasLoaded = true;
+    return channels;
+  }
+
+  Future<List<Channel>> _fetchChannels({
     bool subscribeLive = false,
     bool fetchLastMessage = true,
   }) async {

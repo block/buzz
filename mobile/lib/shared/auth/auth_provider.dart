@@ -1,6 +1,5 @@
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
-import '../relay/relay.dart';
 import '../workspace/workspace.dart';
 import '../workspace/workspace_provider.dart';
 
@@ -13,10 +12,8 @@ class AuthState {
   const AuthState({required this.status, this.workspace});
 }
 
-/// Validates the active workspace on startup by opening a NIP-42-authenticated
-/// websocket. A successful AUTH means the nsec is valid and the relay accepts
-/// us; any other outcome falls through to offline (transient) or removes the
-/// workspace (auth explicitly rejected).
+/// Restores the active workspace without making connectivity load-bearing.
+/// The relay session owns connection recovery after startup.
 class AuthNotifier extends AsyncNotifier<AuthState> {
   @override
   Future<AuthState> build() async {
@@ -40,42 +37,10 @@ class AuthNotifier extends AsyncNotifier<AuthState> {
       await storage.saveActiveId(active.id);
     }
 
-    // Validate by attempting a NIP-42 authenticated WS connection.
-    final socket = RelaySocket(
-      wsUrl: _wsFromBase(active.relayUrl),
-      nsec: active.nsec,
-      onMessage: (_) {},
-      onConnected: () {},
-      onDisconnected: (_) {},
-    );
-    try {
-      await socket.connect().timeout(const Duration(seconds: 8));
-      await socket.disconnect();
-      return AuthState(status: AuthStatus.authenticated, workspace: active);
-    } catch (e) {
-      final msg = e.toString();
-      // The relay explicitly rejected our auth — drop this workspace.
-      if (msg.contains('Auth rejected') ||
-          msg.contains('restricted') ||
-          msg.contains('auth-required')) {
-        await storage.remove(active.id);
-        final remaining = await storage.loadAll();
-        if (remaining.isNotEmpty) {
-          final next = remaining.first;
-          await storage.saveActiveId(next.id);
-          ref.invalidate(workspaceListProvider);
-          ref.invalidate(activeWorkspaceProvider);
-          ref.invalidateSelf();
-          return await future;
-        }
-        return const AuthState(status: AuthStatus.unauthenticated);
-      }
-      // Transient (timeout, network) — keep workspace, go offline.
-      return AuthState(status: AuthStatus.offline, workspace: active);
-    }
+    return AuthState(status: AuthStatus.authenticated, workspace: active);
   }
 
-  /// Retry credential validation (e.g. after a network error).
+  /// Reload the active workspace after a startup error.
   Future<void> retry() async {
     ref.invalidateSelf();
     await future;
@@ -124,13 +89,6 @@ class AuthNotifier extends AsyncNotifier<AuthState> {
       state = const AsyncData(AuthState(status: AuthStatus.unauthenticated));
     }
   }
-}
-
-/// Derive the websocket URL from the workspace's HTTP base URL.
-String _wsFromBase(String baseUrl) {
-  final uri = Uri.parse(baseUrl);
-  final scheme = uri.scheme == 'https' ? 'wss' : 'ws';
-  return uri.replace(scheme: scheme).toString();
 }
 
 final authProvider = AsyncNotifierProvider<AuthNotifier, AuthState>(
