@@ -68,7 +68,7 @@ test.describe("agent provider dropdown screenshots", () => {
       Array.from(el.options).map((o) => o.text.trim()),
     );
     expect(optionTexts).toContain("Databricks");
-    expect(optionTexts).toContain("Databricks v2 (AI Gateway)");
+    expect(optionTexts).toContain("Databricks v2");
 
     await waitForAnimations(page);
 
@@ -88,8 +88,8 @@ test.describe("agent provider dropdown screenshots", () => {
   // → the zero-value option reads "Default (medium)" instead of bare "Inherit".
   //
   // Using databricks_v2 here (rather than no provider) makes this card
-  // visually distinct from shot 01 — the provider select shows "Databricks v2
-  // (AI Gateway)" as the selected value — so the two PNG hashes differ.
+  // visually distinct from shot 01 — the provider select shows "Databricks v2"
+  // as the selected value — so the two PNG hashes differ.
   test("02-effort-default-label", async ({ page }) => {
     await installMockBridge(page, {
       globalAgentConfig: {

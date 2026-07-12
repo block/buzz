@@ -117,7 +117,7 @@ const PERSONA_LLM_PROVIDER_OPTIONS: readonly PersonaModelOption[] = [
   { id: "openai", label: "OpenAI" },
   { id: "openai-compat", label: "OpenAI-compatible" },
   { id: "databricks", label: "Databricks" },
-  { id: "databricks_v2", label: "Databricks v2 (AI Gateway)" },
+  { id: "databricks_v2", label: "Databricks v2" },
 ];
 
 const PERSONA_MODEL_OPTIONS_BY_RUNTIME: Record<

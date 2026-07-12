@@ -483,13 +483,13 @@ test("inheritedRows_structured_keys_excluded_from_generic_rows", () => {
 test("getBakedProviderInheritLabel_known_provider_returns_friendly_name", () => {
   const options = [
     { id: "anthropic", label: "Anthropic" },
-    { id: "databricks_v2", label: "Databricks v2 (AI Gateway)" },
+    { id: "databricks_v2", label: "Databricks v2" },
     { id: "openai", label: "OpenAI" },
   ];
   const label = getBakedProviderInheritLabel("databricks_v2", options);
   assert.equal(
     label,
-    "Databricks v2 (AI Gateway) (inherited from build)",
+    "Databricks v2 (inherited from build)",
     "known provider id must resolve to friendly label",
   );
 });
