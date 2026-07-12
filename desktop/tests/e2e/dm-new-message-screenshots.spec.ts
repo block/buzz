@@ -43,9 +43,12 @@ test("captures selected recipients with the picker open", async ({ page }) => {
   await expect(
     page.locator("button[data-testid^='new-dm-selected-']"),
   ).toHaveCount(2);
+  const search = page.getByTestId("new-dm-search");
+  await search.click();
   await expect(page.getByTestId("new-message-recipient-popover")).toBeVisible();
 
   await waitForAnimations(page);
+  await expect(page.getByTestId("new-message-recipient-popover")).toBeVisible();
   await page.screenshot({ path: `${SHOTS}/02-selected-recipients.png` });
 });
 

@@ -42,6 +42,7 @@ export function NewMessageScreen() {
     string | null
   >(null);
   const searchInputRef = React.useRef<HTMLInputElement>(null);
+  const toFieldRef = React.useRef<HTMLDivElement>(null);
   const isPending = openDmMutation.isPending || sendMessageMutation.isPending;
 
   const {
@@ -212,6 +213,7 @@ export function NewMessageScreen() {
                   setIsRecipientPickerOpen(true);
                   searchInputRef.current?.focus({ preventScroll: true });
                 }}
+                ref={toFieldRef}
               >
                 <span className="shrink-0 text-base font-semibold tracking-tight">
                   To:
@@ -387,6 +389,15 @@ export function NewMessageScreen() {
               className="w-[min(36rem,calc(100vw-3rem))] overflow-hidden p-0"
               data-testid="new-message-recipient-popover"
               onCloseAutoFocus={(event) => event.preventDefault()}
+              onInteractOutside={(event) => {
+                const target = event.detail.originalEvent.target;
+                if (
+                  target instanceof Node &&
+                  toFieldRef.current?.contains(target)
+                ) {
+                  event.preventDefault();
+                }
+              }}
               onOpenAutoFocus={(event) => event.preventDefault()}
               side="bottom"
               sideOffset={6}
