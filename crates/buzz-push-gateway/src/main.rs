@@ -40,6 +40,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         max_grant_lifetime_seconds: c.max_grant_lifetime_seconds,
         enabled_profiles: c.enabled_profiles,
         authorized_relays: c.authorized_relays,
+        now: || chrono::Utc::now().timestamp(),
         accepting: accepting.clone(),
     });
     let pl = tokio::net::TcpListener::bind(c.bind_addr).await?;

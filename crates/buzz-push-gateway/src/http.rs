@@ -37,6 +37,7 @@ pub struct AppState {
     pub max_grant_lifetime_seconds: i64,
     pub enabled_profiles: HashSet<AppProfile>,
     pub authorized_relays: HashSet<String>,
+    pub now: fn() -> i64,
     pub accepting: Arc<AtomicBool>,
 }
 fn error(status: StatusCode, code: &'static str) -> Response {
@@ -93,12 +94,16 @@ async fn issue_grant(State(s): State<AppState>, headers: HeaderMap, body: Bytes)
     if !s.authorized_relays.contains(&relay) {
         return error(StatusCode::UNAUTHORIZED, "invalid_auth");
     }
-    let now = chrono::Utc::now().timestamp();
+    let now = (s.now)();
+    let max_expires_at = match now.checked_add(s.max_grant_lifetime_seconds) {
+        Some(max_expires_at) => max_expires_at,
+        None => return error(StatusCode::BAD_REQUEST, "invalid_request"),
+    };
     if request.v != WIRE_VERSION
         || !valid_hex(&request.endpoint, 32)
         || request.generation < 1
         || request.expires_at <= now
-        || request.expires_at > now.saturating_add(s.max_grant_lifetime_seconds)
+        || request.expires_at > max_expires_at
         || !s.enabled_profiles.contains(&request.app_profile)
     {
         return error(StatusCode::BAD_REQUEST, "invalid_request");
@@ -153,7 +158,7 @@ async fn deliver(State(s): State<AppState>, headers: HeaderMap, body: Bytes) -> 
         Ok(x) => x,
         Err(_) => return error(StatusCode::NOT_FOUND, "invalid_grant"),
     };
-    let now = chrono::Utc::now().timestamp();
+    let now = (s.now)();
     if grant.v != WIRE_VERSION
         || !valid_hex(&grant.endpoint, 32)
         || !valid_hex(&grant.relay_pubkey, 32)
@@ -292,6 +297,7 @@ mod tests {
             max_grant_lifetime_seconds: 3600,
             enabled_profiles: HashSet::from([AppProfile::BuzzIosProduction]),
             authorized_relays: HashSet::from([keys.public_key().to_hex()]),
+            now: || 1_700_000_000,
             accepting: Arc::new(AtomicBool::new(true)),
         }
     }
@@ -330,7 +336,7 @@ mod tests {
         let keys = Keys::generate();
         let state = state(&keys);
         let (app, _) = router(state.clone());
-        let expires_at = chrono::Utc::now().timestamp() + 60;
+        let expires_at = (state.now)() + 60;
         let issue_body = serde_json::to_vec(&serde_json::json!({
             "v": 1,
             "endpoint": "00".repeat(32),
@@ -380,7 +386,7 @@ mod tests {
         let keys = Keys::generate();
         let state = state(&keys);
         let (app, _) = router(state.clone());
-        let now = chrono::Utc::now().timestamp();
+        let now = (state.now)();
         let cases = [
             serde_json::json!({
                 "v": 1, "endpoint": "00".repeat(32),
@@ -430,5 +436,87 @@ mod tests {
         )
         .await;
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    fn valid_issue_body(expires_at: i64) -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({
+            "v": 1, "endpoint": "00".repeat(32),
+            "app_profile": "buzz-ios-production", "max_class": "default",
+            "generation": 1, "expires_at": expires_at,
+        }))
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn issuance_rejects_unauthorized_signer_wrong_body_and_invalid_json() {
+        let keys = Keys::generate();
+        let unauthorized = Keys::generate();
+        let state = state(&keys);
+        let (app, _) = router(state.clone());
+        let body = valid_issue_body((state.now)() + 60);
+
+        let response = post(
+            app.clone(),
+            "/v1/grants/apns",
+            body.clone(),
+            Some(auth(&unauthorized, &state.issuance_url, &body)),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        let other_body = valid_issue_body((state.now)() + 61);
+        let response = post(
+            app.clone(),
+            "/v1/grants/apns",
+            body.clone(),
+            Some(auth(&keys, &state.issuance_url, &other_body)),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        for invalid in [
+            b"{".as_slice(),
+            br#"{"v":1,"v":1,"endpoint":"00","app_profile":"buzz-ios-production","max_class":"default","generation":1,"expires_at":1700000060}"#,
+        ] {
+            let response = post(
+                app.clone(),
+                "/v1/grants/apns",
+                invalid.to_vec(),
+                Some(auth(&keys, &state.issuance_url, invalid)),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        }
+    }
+
+    #[tokio::test]
+    async fn issuance_accepts_exact_ceiling_and_rejects_overflowing_ceiling() {
+        let keys = Keys::generate();
+        let configured_state = state(&keys);
+        let (app, _) = router(configured_state.clone());
+        let body = valid_issue_body(
+            (configured_state.now)() + configured_state.max_grant_lifetime_seconds,
+        );
+        let response = post(
+            app,
+            "/v1/grants/apns",
+            body.clone(),
+            Some(auth(&keys, &configured_state.issuance_url, &body)),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let mut overflow_state = state(&keys);
+        overflow_state.now = || i64::MAX;
+        let (app, _) = router(overflow_state.clone());
+        let body = valid_issue_body(i64::MAX);
+        let response = post(
+            app,
+            "/v1/grants/apns",
+            body.clone(),
+            Some(auth(&keys, &overflow_state.issuance_url, &body)),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 }

@@ -199,6 +199,24 @@ mod tests {
     }
 
     #[test]
+    fn malformed_issuance_security_configuration_fails_startup() {
+        for (key, value) in [
+            (
+                "BUZZ_PUSH_PUBLIC_ISSUANCE_URL",
+                "http://push.example/v1/grants/apns",
+            ),
+            ("BUZZ_PUSH_AUTHORIZED_RELAYS", "not-a-pubkey"),
+            ("BUZZ_PUSH_ENABLED_PROFILES", "unknown-profile"),
+            ("BUZZ_PUSH_MAX_GRANT_LIFETIME_SECONDS", "0"),
+            ("BUZZ_PUSH_MAX_GRANT_LIFETIME_SECONDS", "31536001"),
+        ] {
+            let mut env = base();
+            env.insert(key.into(), value.into());
+            assert!(Config::from_map(&env).is_err(), "accepted {key}={value}");
+        }
+    }
+
+    #[test]
     fn malformed_or_empty_keyrings_fail_startup() {
         for value in ["", "missing_separator", "id:bad-base64"] {
             let mut env = base();
