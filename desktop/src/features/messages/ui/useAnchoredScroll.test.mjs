@@ -39,7 +39,7 @@ test("split panel settles only an already-bottomed timeline", () => {
 test("virtualized bottom settle arms for pinned appends and replacements", () => {
   assert.equal(
     shouldSettleVirtualizedBottom({
-      anchorKind: "at-bottom",
+      isAtBottom: true,
       messageDelta: "append",
       messagesArrived: 1,
       messagesChanged: true,
@@ -48,7 +48,7 @@ test("virtualized bottom settle arms for pinned appends and replacements", () =>
   );
   assert.equal(
     shouldSettleVirtualizedBottom({
-      anchorKind: "at-bottom",
+      isAtBottom: true,
       messageDelta: "replace",
       messagesArrived: 0,
       messagesChanged: true,
@@ -57,7 +57,7 @@ test("virtualized bottom settle arms for pinned appends and replacements", () =>
   );
   assert.equal(
     shouldSettleVirtualizedBottom({
-      anchorKind: "at-bottom",
+      isAtBottom: true,
       messageDelta: "none",
       messagesArrived: 0,
       messagesChanged: true,
@@ -66,7 +66,7 @@ test("virtualized bottom settle arms for pinned appends and replacements", () =>
   );
   assert.equal(
     shouldSettleVirtualizedBottom({
-      anchorKind: "at-bottom",
+      isAtBottom: true,
       messageDelta: "prepend",
       messagesArrived: 1,
       messagesChanged: true,
@@ -75,7 +75,7 @@ test("virtualized bottom settle arms for pinned appends and replacements", () =>
   );
   assert.equal(
     shouldSettleVirtualizedBottom({
-      anchorKind: "at-bottom",
+      isAtBottom: true,
       messageDelta: "none",
       messagesArrived: 0,
       messagesChanged: false,
@@ -84,9 +84,9 @@ test("virtualized bottom settle arms for pinned appends and replacements", () =>
   );
   assert.equal(
     shouldSettleVirtualizedBottom({
-      anchorKind: "message",
-      messageDelta: "append",
-      messagesArrived: 1,
+      isAtBottom: false,
+      messageDelta: "none",
+      messagesArrived: 0,
       messagesChanged: true,
     }),
     false,

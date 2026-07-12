@@ -46,18 +46,18 @@ export function shouldSettleForSplitPanel({
 }
 
 export function shouldSettleVirtualizedBottom({
-  anchorKind,
+  isAtBottom,
   messageDelta,
   messagesArrived,
   messagesChanged,
 }: {
-  anchorKind: AnchorState["kind"];
+  isAtBottom: boolean;
   messageDelta: TimelineMessageDelta;
   messagesArrived: number;
   messagesChanged: boolean;
 }): boolean {
   return (
-    anchorKind === "at-bottom" &&
+    isAtBottom &&
     messageDelta !== "prepend" &&
     (messagesArrived > 0 || messagesChanged)
   );
@@ -206,6 +206,7 @@ export function useAnchoredScroll({
   // both on scroll (commit-time read) and in the layout effect (post-render
   // restoration). useState would force re-renders we don't want.
   const anchorRef = React.useRef<AnchorState>({ kind: "at-bottom" });
+  const virtualizerAtBottomRef = React.useRef(true);
   const [isAtBottom, setIsAtBottom] = React.useState(true);
   React.useLayoutEffect(() => {
     if (shouldSettleForSplitPanel({ isAtBottom, splitPanelOpen })) {
@@ -244,6 +245,7 @@ export function useAnchoredScroll({
   // biome-ignore lint/correctness/useExhaustiveDependencies: channelId is intentionally the sole trigger — we want this effect to fire exactly when the channel changes (and on mount).
   React.useLayoutEffect(() => {
     anchorRef.current = { kind: "at-bottom" };
+    virtualizerAtBottomRef.current = true;
     setIsAtBottom(true);
     setNewMessageCount(0);
     setHighlightedMessageId(null);
@@ -529,7 +531,7 @@ export function useAnchoredScroll({
       if (
         virtualizerOwnsPrependAnchoring &&
         shouldSettleVirtualizedBottom({
-          anchorKind: anchor.kind,
+          isAtBottom: virtualizerAtBottomRef.current,
           messageDelta,
           messagesArrived,
           messagesChanged: messages !== prevMessages,
@@ -680,6 +682,7 @@ export function useAnchoredScroll({
   const onVirtualizerAtBottomStateChange = React.useCallback(
     (atBottom: boolean) => {
       if (!virtualizerOwnsPrependAnchoring) return;
+      virtualizerAtBottomRef.current = atBottom;
       if (atBottom) {
         anchorRef.current = { kind: "at-bottom" };
         setNewMessageCount(0);
