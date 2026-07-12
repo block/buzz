@@ -31,6 +31,8 @@ pub mod migration;
 pub mod moderation;
 /// Monthly table partition management.
 pub mod partition;
+/// Community-scoped push lease and durable wake-outbox persistence.
+pub mod push;
 /// Reaction persistence.
 pub mod reaction;
 /// Relay-level membership persistence (NIP-43).
