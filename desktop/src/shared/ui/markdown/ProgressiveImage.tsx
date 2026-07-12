@@ -93,7 +93,11 @@ export function ProgressiveImage({
   }, [height, style, width]);
 
   return (
-    <span className="relative block max-w-full" style={frameStyle}>
+    <span
+      className="relative block max-w-full"
+      data-progressive-image-frame=""
+      style={frameStyle}
+    >
       {thumbnailSrc ? (
         <img
           alt=""
