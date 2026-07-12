@@ -1,4 +1,4 @@
-//! Serialize `PersonaRecord` ↔ kind:30175 persona events and publish/fetch via relay.
+//! Serialize `AgentDefinition` ↔ kind:30175 persona events and publish/fetch via relay.
 //!
 //! Persona events are NIP-33 parameterized replaceable events keyed by
 //! `(pubkey, kind, d_tag)` where `d_tag` is the plaintext persona slug.
@@ -9,7 +9,7 @@ use buzz_core_pkg::kind::KIND_PERSONA;
 use nostr::{EventBuilder, Kind, Tag};
 use serde::{Deserialize, Serialize};
 
-use super::{ManagedAgentRecord, PersonaRecord};
+use super::{AgentDefinition, ManagedAgentRecord};
 use crate::app_state::AppState;
 
 /// The JSON body stored in a persona event's content field.
@@ -52,7 +52,7 @@ pub struct PersonaEventContent {
     pub parallelism: Option<u32>,
 }
 
-/// Derive the d-tag (persona slug) from a `PersonaRecord`.
+/// Derive the d-tag (persona slug) from a `AgentDefinition`.
 ///
 /// Uses `source_team_persona_slug` if available, otherwise falls back to `id`,
 /// then normalizes to the NIP-AP slug grammar (`^[a-z0-9][a-z0-9_-]{0,63}$`,
@@ -64,7 +64,7 @@ pub struct PersonaEventContent {
 ///
 /// Both the outbound publish and the inbound match key route through this fn,
 /// so the normalized value is consistent in both directions and cannot drift.
-pub fn persona_d_tag(record: &PersonaRecord) -> String {
+pub fn persona_d_tag(record: &AgentDefinition) -> String {
     let raw = record
         .source_team_persona_slug
         .as_deref()
@@ -128,10 +128,10 @@ pub fn monotonic_created_at(prior_head_created_at: Option<i64>) -> nostr::Timest
     nostr::Timestamp::from(now.max(floor) as u64)
 }
 
-/// Build a kind:30175 event from a `PersonaRecord`.
+/// Build a kind:30175 event from a `AgentDefinition`.
 ///
 /// Returns an unsigned `EventBuilder` — the caller signs and submits.
-pub fn build_persona_event(record: &PersonaRecord) -> Result<EventBuilder, String> {
+pub fn build_persona_event(record: &AgentDefinition) -> Result<EventBuilder, String> {
     // Single projection point — persona_event_content owns the field mapping
     // (and the hash-stability rules that come with it).
     let content = persona_event_content(record);
@@ -157,10 +157,10 @@ pub fn build_persona_delete(d_tag: &str, owner_pubkey_hex: &str) -> Result<Event
     Ok(EventBuilder::new(Kind::Custom(5), "").tags(vec![tag]))
 }
 
-/// Parse a kind:30175 event back into a `PersonaRecord`.
+/// Parse a kind:30175 event back into a `AgentDefinition`.
 ///
 /// The event's d-tag becomes the persona ID and slug.
-pub fn persona_from_event(event: &nostr::Event) -> Result<PersonaRecord, String> {
+pub fn persona_from_event(event: &nostr::Event) -> Result<AgentDefinition, String> {
     let d_tag = event
         .tags
         .iter()
@@ -179,7 +179,7 @@ pub fn persona_from_event(event: &nostr::Event) -> Result<PersonaRecord, String>
 
     let created_at = event.created_at.to_human_datetime();
 
-    Ok(PersonaRecord {
+    Ok(AgentDefinition {
         id: d_tag.clone(),
         display_name: content.display_name,
         avatar_url: content.avatar_url,
@@ -298,10 +298,10 @@ pub fn persona_content_hash(content: &PersonaEventContent) -> String {
     hex::encode(digest)
 }
 
-/// Project a `PersonaRecord` onto the content fields published in persona
+/// Project a `AgentDefinition` onto the content fields published in persona
 /// events and engrams. Centralizes the field mapping so a new persona field is
 /// added in exactly one place.
-pub fn persona_event_content(record: &PersonaRecord) -> PersonaEventContent {
+pub fn persona_event_content(record: &AgentDefinition) -> PersonaEventContent {
     PersonaEventContent {
         display_name: record.display_name.clone(),
         avatar_url: record.avatar_url.clone(),
@@ -314,7 +314,7 @@ pub fn persona_event_content(record: &PersonaRecord) -> PersonaEventContent {
         provider: record.provider.clone(),
         name_pool: record.name_pool.clone(),
         // NIP-AP behavioral defaults: live since the create-path unification
-        // (B5) — carried on PersonaRecord in wire shape and copied verbatim.
+        // (B5) — carried on AgentDefinition in wire shape and copied verbatim.
         // Quad-absent records serialize identically to the reserved era, so
         // persona_content_hash is stable across the activation (guarded by
         // `quad_absent_definition_hash_stable_across_activation`).
@@ -368,7 +368,7 @@ pub fn persona_field_with_record_fallback(
 /// `Some`. Env vars are deliberately absent: `record.env_vars` holds agent
 /// overrides only, and the live persona env is merged underneath at read
 /// time (spawn / readiness / deploy) — never snapshotted.
-pub fn persona_snapshot(persona: &PersonaRecord) -> PersonaSnapshot {
+pub fn persona_snapshot(persona: &AgentDefinition) -> PersonaSnapshot {
     PersonaSnapshot {
         system_prompt: Some(persona.system_prompt.clone()),
         model: persona.model.clone(),
@@ -397,7 +397,7 @@ pub fn persona_snapshot(persona: &PersonaRecord) -> PersonaSnapshot {
 /// The two fields (`model`, `provider`) are independent: a persona that sets only
 /// `model` wins on `model` while the agent's `provider` is preserved, and vice versa.
 pub fn persona_snapshot_with_agent_config_fallback(
-    persona: &PersonaRecord,
+    persona: &AgentDefinition,
     current_agent_model: Option<&str>,
     current_agent_provider: Option<&str>,
 ) -> PersonaSnapshot {
@@ -433,7 +433,7 @@ pub fn persona_snapshot_with_agent_config_fallback(
 /// Deliberately does NOT touch `updated_at`: persistence stamps are the
 /// caller's concern, and `spawn_config_hash` (which applies this to a clone)
 /// must stay pure.
-pub fn apply_persona_snapshot(record: &mut ManagedAgentRecord, persona: &PersonaRecord) {
+pub fn apply_persona_snapshot(record: &mut ManagedAgentRecord, persona: &AgentDefinition) {
     let snapshot = persona_snapshot_with_agent_config_fallback(
         persona,
         record.model.as_deref(),    // fallback: record.model

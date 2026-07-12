@@ -1236,7 +1236,7 @@ pub fn sync_managed_agent_processes(
 /// - no persona_id: neither — a hand-built agent has no persona to drift from.
 fn persona_drift_state(
     record: &ManagedAgentRecord,
-    personas: &[crate::managed_agents::types::PersonaRecord],
+    personas: &[crate::managed_agents::types::AgentDefinition],
 ) -> (bool, bool) {
     let Some(persona_id) = record.persona_id.as_deref() else {
         return (false, false);
@@ -1258,7 +1258,7 @@ pub fn build_managed_agent_summary(
     app: &AppHandle,
     record: &ManagedAgentRecord,
     runtimes: &HashMap<String, ManagedAgentProcess>,
-    personas: &[crate::managed_agents::types::PersonaRecord],
+    personas: &[crate::managed_agents::types::AgentDefinition],
 ) -> Result<ManagedAgentSummary, String> {
     use crate::managed_agents::BackendKind;
 
@@ -2050,7 +2050,7 @@ pub(crate) fn runtime_metadata_env_vars<'a>(
 /// PersonaDefault for fields the record did not independently set.
 pub(crate) fn resolve_effective_prompt_model_provider(
     persona_id: Option<&str>,
-    personas: &[crate::managed_agents::types::PersonaRecord],
+    personas: &[crate::managed_agents::types::AgentDefinition],
     record_prompt: Option<String>,
     record_model: Option<String>,
     record_provider: Option<String>,

@@ -13,7 +13,7 @@ pub enum BackendKind {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PersonaRecord {
+pub struct AgentDefinition {
     pub id: String,
     pub display_name: String,
     pub avatar_url: Option<String>,
@@ -80,10 +80,10 @@ pub struct PersonaRecord {
     pub updated_at: String,
 }
 
-impl PersonaRecord {
+impl AgentDefinition {
     /// Project this persona onto a key-less unified [`ManagedAgentRecord`]
     /// (Phase 1A store fold). Identity fields stay empty — keys are minted on
-    /// first start. `PersonaRecord.id` becomes `slug`, preserving the 30175
+    /// first start. `AgentDefinition.id` becomes `slug`, preserving the 30175
     /// event coordinate (`d_tag = slug`) across the fold.
     pub fn into_agent_record(self) -> ManagedAgentRecord {
         ManagedAgentRecord {
@@ -145,12 +145,12 @@ impl PersonaRecord {
 
 impl ManagedAgentRecord {
     /// Present a key-less definition record back in the legacy
-    /// [`PersonaRecord`] shape — the compatibility view the persona command
+    /// [`AgentDefinition`] shape — the compatibility view the persona command
     /// surface serves until Phase 1B unifies the UI. Inverse of
-    /// [`PersonaRecord::into_agent_record`] for the fields personas carry.
-    pub fn to_persona_view(&self) -> Option<PersonaRecord> {
+    /// [`AgentDefinition::into_agent_record`] for the fields personas carry.
+    pub fn to_definition_view(&self) -> Option<AgentDefinition> {
         let slug = self.slug.clone()?;
-        Some(PersonaRecord {
+        Some(AgentDefinition {
             id: slug,
             display_name: self
                 .display_name
@@ -332,16 +332,16 @@ pub struct ManagedAgentRecord {
     #[serde(default)]
     pub respond_to_allowlist: Vec<String>,
     /// Optional display name distinct from the unique `name` handle. Absorbed
-    /// from `PersonaRecord.display_name` (unified agent model, Phase 1A).
+    /// from `AgentDefinition.display_name` (unified agent model, Phase 1A).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
-    /// Stable definition slug — the former `PersonaRecord.id`. Key-less
+    /// Stable definition slug — the former `AgentDefinition.id`. Key-less
     /// records (definitions not yet instantiated) publish kind:30175 at
     /// `d_tag = slug`, preserving the pre-merge event coordinates. `None` for
     /// agents created directly (never persona-backed).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub slug: Option<String>,
-    /// Absorbed from `PersonaRecord.runtime` — the preferred ACP runtime ID
+    /// Absorbed from `AgentDefinition.runtime` — the preferred ACP runtime ID
     /// (e.g. 'goose', 'claude'). Record-first command resolution reads this
     /// before falling back to legacy persona lookup; populated by the store
     /// migration and at create time, and re-mirrored from the linked
@@ -357,28 +357,28 @@ pub struct ManagedAgentRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime: Option<String>,
     /// Pool of short thematic names for clones of this agent. Absorbed from
-    /// `PersonaRecord.name_pool`; feeds clone naming.
+    /// `AgentDefinition.name_pool`; feeds clone naming.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub name_pool: Vec<String>,
-    /// Absorbed from `PersonaRecord.is_builtin`.
+    /// Absorbed from `AgentDefinition.is_builtin`.
     #[serde(default)]
     pub is_builtin: bool,
-    /// Absorbed from `PersonaRecord.is_active` — `false` means an archived
+    /// Absorbed from `AgentDefinition.is_active` — `false` means an archived
     /// definition hidden from pickers. Defaults `true` for existing records.
     #[serde(default = "default_record_active")]
     pub is_active: bool,
-    /// Absorbed from `PersonaRecord.source_team` — team ID when this
+    /// Absorbed from `AgentDefinition.source_team` — team ID when this
     /// definition was imported from a team directory (team definitions are
     /// non-editable). Distinct from `persona_team_dir`/`persona_name_in_team`,
     /// which are the instance-side spawn plumbing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_team: Option<String>,
-    /// Absorbed from `PersonaRecord.source_team_persona_slug` — the
+    /// Absorbed from `AgentDefinition.source_team_persona_slug` — the
     /// definition's slug within its source team.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_team_persona_slug: Option<String>,
     /// NIP-AP definition-level behavioral defaults, absorbed from
-    /// `PersonaRecord` in WIRE shape (kebab-case string / optional u32),
+    /// `AgentDefinition` in WIRE shape (kebab-case string / optional u32),
     /// distinct from the instance-side `respond_to`/`respond_to_allowlist`/
     /// `parallelism` fields above: these are what a *definition* advertises
     /// and are copied onto instances at mint time only. Wire shape (not the
@@ -850,7 +850,7 @@ pub fn resolve_mint_behavioral_defaults(
     input_allowlist: Vec<String>,
     input_mcp_toolsets: Option<String>,
     input_parallelism: Option<u32>,
-    definition: Option<&PersonaRecord>,
+    definition: Option<&AgentDefinition>,
 ) -> Result<MintBehavioralDefaults, String> {
     let (respond_to, respond_to_allowlist) = match input_respond_to {
         // Explicit instance-level choice: the definition default is ignored

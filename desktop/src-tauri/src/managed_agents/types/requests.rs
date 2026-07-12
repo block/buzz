@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use serde::Deserialize;
 
 use super::{
-    default_start_on_app_launch, validate_respond_to_allowlist, BackendKind, PersonaRecord,
+    default_start_on_app_launch, validate_respond_to_allowlist, AgentDefinition, BackendKind,
     RelayMeshConfig, RespondTo,
 };
 
@@ -40,7 +40,7 @@ pub struct PersonaBehaviorRequest {
 /// list (the spawn-time crash-loop `build_respond_to_env` errors on), rejects
 /// out-of-range parallelism, and stores the quad in wire shape.
 pub fn apply_persona_behavior(
-    record: &mut PersonaRecord,
+    record: &mut AgentDefinition,
     behavior: Option<PersonaBehaviorRequest>,
 ) -> Result<(), String> {
     let Some(behavior) = behavior else {
@@ -261,7 +261,7 @@ pub struct UpdateManagedAgentRequest {
 mod tests {
     use super::*;
 
-    fn record_with_quad() -> PersonaRecord {
+    fn record_with_quad() -> AgentDefinition {
         let mut record = record_without_quad();
         record.respond_to = Some("allowlist".to_string());
         record.respond_to_allowlist = vec!["a".repeat(64)];
@@ -270,8 +270,8 @@ mod tests {
         record
     }
 
-    fn record_without_quad() -> PersonaRecord {
-        PersonaRecord {
+    fn record_without_quad() -> AgentDefinition {
+        AgentDefinition {
             id: "p-1".to_string(),
             display_name: "Test".to_string(),
             avatar_url: None,

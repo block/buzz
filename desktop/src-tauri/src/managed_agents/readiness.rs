@@ -52,7 +52,7 @@ use crate::managed_agents::{
     },
     env_vars::merged_user_env,
     global_config::GlobalAgentConfig,
-    types::{AcpAvailabilityStatus, ManagedAgentRecord, PersonaRecord},
+    types::{AcpAvailabilityStatus, AgentDefinition, ManagedAgentRecord},
 };
 
 pub(crate) mod cli_probe;
@@ -93,7 +93,7 @@ pub(crate) struct EffectiveAgentEnv {
 ///   `&GlobalAgentConfig::default()` in tests that don't need global config)
 pub(crate) fn resolve_effective_agent_env(
     record: &ManagedAgentRecord,
-    personas: &[PersonaRecord],
+    personas: &[AgentDefinition],
     runtime: Option<&KnownAcpRuntime>,
     global: &GlobalAgentConfig,
 ) -> EffectiveAgentEnv {

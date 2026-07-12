@@ -13,7 +13,7 @@ use crate::{
         stop_managed_agent_process, sync_managed_agent_processes, team_events::TeamEventContent,
         team_persona_key, try_regenerate_nest, validate_persona_activation_change,
         validate_persona_deletion, CreatePersonaRequest, ManagedAgentRecord, ParsePersonaFilesResult,
-        PersonaRecord, TeamRecord, UpdatePersonaRequest,
+        AgentDefinition, TeamRecord, UpdatePersonaRequest,
     },
     util::now_iso,
 };
@@ -38,7 +38,7 @@ use pending::retain_persona_pending;
 pub(super) use pending::tombstone_persona_pending;
 
 #[tauri::command]
-pub async fn list_personas(app: AppHandle) -> Result<Vec<PersonaRecord>, String> {
+pub async fn list_personas(app: AppHandle) -> Result<Vec<AgentDefinition>, String> {
     use tauri::Manager;
     tokio::task::spawn_blocking(move || {
         let state = app.state::<AppState>();
@@ -56,7 +56,7 @@ pub async fn list_personas(app: AppHandle) -> Result<Vec<PersonaRecord>, String>
 pub async fn create_persona(
     input: CreatePersonaRequest,
     app: AppHandle,
-) -> Result<PersonaRecord, String> {
+) -> Result<AgentDefinition, String> {
     use tauri::Manager;
     tokio::task::spawn_blocking(move || {
         let state = app.state::<AppState>();
@@ -80,7 +80,7 @@ pub async fn create_persona(
             .filter(|s| !s.is_empty())
             .collect();
         crate::managed_agents::validate_user_env_keys(&input.env_vars)?;
-        let mut persona = PersonaRecord {
+        let mut persona = AgentDefinition {
             id: Uuid::new_v4().to_string(),
             display_name,
             avatar_url,
@@ -113,13 +113,13 @@ pub async fn create_persona(
 }
 
 /// Return value of the `update_persona` command. Uses flatten so all
-/// `PersonaRecord` fields appear at the top level of the JSON response,
+/// `AgentDefinition` fields appear at the top level of the JSON response,
 /// alongside the optional `writeback_warning` field — backward-compatible with
 /// callers that already destructure a raw persona object.
 #[derive(Debug, serde::Serialize)]
 pub struct UpdatePersonaResult {
     #[serde(flatten)]
-    persona: PersonaRecord,
+    persona: AgentDefinition,
     /// Non-`None` when the pack `.persona.md` write-back failed (non-fatal).
     /// The in-app edit was already saved; the frontend can use this to surface
     /// a "pack file diverged" indicator so the user knows to check the file.
@@ -166,7 +166,7 @@ pub async fn update_persona(
     // Phase 1: synchronous save (persona record + linked agent avatar updates)
     let (result, profile_sync_params, writeback_warning) = tokio::task::spawn_blocking({
         let app = app.clone();
-        move || -> Result<(PersonaRecord, ProfileSyncParams, Option<String>), String> {
+        move || -> Result<(AgentDefinition, ProfileSyncParams, Option<String>), String> {
             let state = app.state::<AppState>();
             let display_name = trim_required(&input.display_name, "Display name")?;
             // Do not trim system_prompt: `compose_prompt` appends pack_instructions
@@ -826,7 +826,7 @@ fn event_d_tag(event: &nostr::Event) -> Result<String, String> {
 /// `created_at` survive. On no match, the parsed record is inserted as-is; since
 /// `persona_from_event` sets `id = d_tag`, an in-app persona reuses its d-tag as
 /// the id and a re-received event stays idempotent (no duplicate row).
-fn apply_inbound_persona(personas: &mut Vec<PersonaRecord>, inbound: PersonaRecord) {
+fn apply_inbound_persona(personas: &mut Vec<AgentDefinition>, inbound: AgentDefinition) {
     let d_tag = persona_d_tag(&inbound);
     match personas
         .iter_mut()
@@ -930,7 +930,7 @@ pub async fn set_persona_active(
     id: String,
     active: bool,
     app: AppHandle,
-) -> Result<PersonaRecord, String> {
+) -> Result<AgentDefinition, String> {
     use tauri::Manager;
     tokio::task::spawn_blocking(move || {
         let state = app.state::<AppState>();

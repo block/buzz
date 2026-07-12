@@ -276,8 +276,8 @@ fn persona_with_provider(
     prompt: &str,
     model: Option<&str>,
     provider: Option<&str>,
-) -> crate::managed_agents::PersonaRecord {
-    crate::managed_agents::PersonaRecord {
+) -> crate::managed_agents::AgentDefinition {
+    crate::managed_agents::AgentDefinition {
         id: id.to_string(),
         display_name: id.to_string(),
         avatar_url: None,
@@ -317,7 +317,7 @@ use std::collections::BTreeMap;
 /// snapshotted prompt/model/provider/source_version are pinned, with the
 /// system_prompt unwrapped (the persona always carries one). `env_vars` is
 /// deliberately NOT touched — it stays agent overrides only.
-fn pin_persona(record: &mut ManagedAgentRecord, persona: &crate::managed_agents::PersonaRecord) {
+fn pin_persona(record: &mut ManagedAgentRecord, persona: &crate::managed_agents::AgentDefinition) {
     let snapshot = persona_snapshot(persona);
     record.persona_id = Some(persona.id.clone());
     record.system_prompt = snapshot.system_prompt;
@@ -326,7 +326,11 @@ fn pin_persona(record: &mut ManagedAgentRecord, persona: &crate::managed_agents:
     record.persona_source_version = Some(snapshot.source_version);
 }
 
-fn persona_v(id: &str, prompt: &str, env: &[(&str, &str)]) -> crate::managed_agents::PersonaRecord {
+fn persona_v(
+    id: &str,
+    prompt: &str,
+    env: &[(&str, &str)],
+) -> crate::managed_agents::AgentDefinition {
     let mut p = persona_with_provider(id, prompt, Some("model-v"), Some("anthropic"));
     p.env_vars = env
         .iter()
@@ -340,7 +344,7 @@ fn persona_v(id: &str, prompt: &str, env: &[(&str, &str)]) -> crate::managed_age
 /// `resolve_effective_agent_env` perform.
 fn spawn_user_env(
     record: &ManagedAgentRecord,
-    personas: &[crate::managed_agents::PersonaRecord],
+    personas: &[crate::managed_agents::AgentDefinition],
 ) -> BTreeMap<String, String> {
     merged_user_env(
         &live_persona_env(personas, record.persona_id.as_deref()),

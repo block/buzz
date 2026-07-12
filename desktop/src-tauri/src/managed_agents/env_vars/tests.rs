@@ -421,7 +421,7 @@ fn merged_env_drops_oversize_value() {
 //
 // Pack import must strip derived env keys (GOOSE_MODEL, GOOSE_PROVIDER,
 // BUZZ_AGENT_MODEL, BUZZ_AGENT_PROVIDER) so they don't shadow the
-// structured PersonaRecord.model / PersonaRecord.provider fields after
+// structured AgentDefinition.model / AgentDefinition.provider fields after
 // the user edits them in the UI.
 
 #[test]

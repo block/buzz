@@ -14,8 +14,8 @@ use crate::{
     app_state::AppState,
     managed_agents::{
         agent_snapshot::{decode_snapshot_json, decode_snapshot_png, MemoryLevel},
-        load_managed_agents, load_personas, save_managed_agents, save_personas, ManagedAgentRecord,
-        PersonaRecord, RespondTo,
+        load_managed_agents, load_personas, save_managed_agents, save_personas, AgentDefinition,
+        ManagedAgentRecord, RespondTo,
     },
     relay::{effective_agent_relay_url, relay_ws_url_with_override, sync_managed_agent_profile},
     util::now_iso,
@@ -292,7 +292,7 @@ pub async fn preview_agent_snapshot_import(
 /// Phase sequence:
 ///   1. Validate — decode the manifest and reject early on any error.
 ///   2. Mint — generate a new keypair + NIP-OA auth tag; create a
-///      `PersonaRecord` + `ManagedAgentRecord` through the same primitives
+///      `AgentDefinition` + `ManagedAgentRecord` through the same primitives
 ///      used by the normal create flow.
 ///   3. Publish — kind:30175 definition via retention path; kind:0 profile
 ///      via `sync_managed_agent_profile`.
@@ -372,7 +372,7 @@ pub async fn confirm_agent_snapshot_import(
         )
     };
 
-    // ── Phase 3a: create PersonaRecord + ManagedAgentRecord (sync lock) ──────
+    // ── Phase 3a: create AgentDefinition + ManagedAgentRecord (sync lock) ──────
     let (persona, record) = {
         let _store_guard = state
             .managed_agents_store_lock
@@ -391,7 +391,7 @@ pub async fn confirm_agent_snapshot_import(
         let persona_id = uuid::Uuid::new_v4().to_string();
 
         // Build persona from snapshot definition.
-        let persona = PersonaRecord {
+        let persona = AgentDefinition {
             id: persona_id.clone(),
             display_name: display_name.clone(),
             avatar_url: effective_avatar.clone(),

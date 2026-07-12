@@ -1,5 +1,5 @@
 use super::*;
-use crate::managed_agents::PersonaRecord;
+use crate::managed_agents::AgentDefinition;
 
 fn bare_agent_record(
     persona_id: Option<&str>,
@@ -63,9 +63,9 @@ fn bare_agent_record(
         definition_parallelism: None,
     }
 }
-fn persona_record(id: &str, model: Option<&str>, provider: Option<&str>) -> PersonaRecord {
+fn persona_record(id: &str, model: Option<&str>, provider: Option<&str>) -> AgentDefinition {
     use std::collections::BTreeMap;
-    PersonaRecord {
+    AgentDefinition {
         id: id.to_string(),
         display_name: "Test Persona".to_string(),
         avatar_url: None,

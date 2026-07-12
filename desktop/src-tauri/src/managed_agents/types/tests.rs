@@ -1,9 +1,9 @@
-use super::{ManagedAgentRecord, PersonaRecord};
+use super::{AgentDefinition, ManagedAgentRecord};
 use std::path::PathBuf;
 
 #[test]
 fn persona_record_defaults_active_when_field_is_missing() {
-    let record: PersonaRecord = serde_json::from_str(
+    let record: AgentDefinition = serde_json::from_str(
         r#"{
             "id": "builtin:fizz",
             "display_name": "Fizz",
@@ -291,7 +291,7 @@ fn relay_mesh_config_round_trips_snake_case() {
 
 #[test]
 fn persona_record_deserializes_old_source_pack_fields_via_alias() {
-    let record: PersonaRecord = serde_json::from_str(
+    let record: AgentDefinition = serde_json::from_str(
         r#"{
             "id": "persona-1",
             "display_name": "Test",
@@ -314,7 +314,7 @@ fn persona_record_deserializes_old_source_pack_fields_via_alias() {
 
 #[test]
 fn persona_record_serializes_new_field_names() {
-    let record: PersonaRecord = serde_json::from_str(
+    let record: AgentDefinition = serde_json::from_str(
         r#"{
             "id": "persona-1",
             "display_name": "Test",
@@ -468,10 +468,10 @@ fn sample_agent_record() -> ManagedAgentRecord {
     .expect("sample record")
 }
 
-// ── PersonaRecord ↔ AgentRecord fold mapping (Phase 1A) ─────────────────────
+// ── AgentDefinition ↔ ManagedAgentRecord fold mapping (Phase 1A) ─────────────────────
 
-fn sample_persona() -> PersonaRecord {
-    PersonaRecord {
+fn sample_persona() -> AgentDefinition {
+    AgentDefinition {
         id: "custom:helper".to_string(),
         display_name: "Helper".to_string(),
         avatar_url: Some("https://example.com/a.png".to_string()),
@@ -513,7 +513,7 @@ fn persona_view_round_trips_through_agent_record() {
     let view = persona
         .clone()
         .into_agent_record()
-        .to_persona_view()
+        .to_definition_view()
         .expect("slugged record must present a persona view");
     assert_eq!(
         serde_json::to_value(&view).unwrap(),
@@ -527,7 +527,7 @@ fn keyed_record_without_slug_has_no_persona_view() {
     let mut record = sample_persona().into_agent_record();
     record.slug = None;
     assert!(
-        record.to_persona_view().is_none(),
+        record.to_definition_view().is_none(),
         "instances (no slug) are not definitions"
     );
 }
@@ -543,7 +543,7 @@ fn empty_prompt_folds_to_none() {
 
 use super::resolve_mint_behavioral_defaults;
 
-fn quad_definition(respond_to: &str, allowlist: Vec<&str>) -> PersonaRecord {
+fn quad_definition(respond_to: &str, allowlist: Vec<&str>) -> AgentDefinition {
     let mut persona = sample_persona();
     persona.respond_to = Some(respond_to.to_string());
     persona.respond_to_allowlist = allowlist.into_iter().map(str::to_string).collect();

@@ -18,7 +18,7 @@ use super::{effective_agent_command, known_acp_runtime};
 /// only inherits when it exactly equals the persona command.
 pub fn divergent_agent_command_override(
     persona_id: Option<&str>,
-    personas: &[crate::managed_agents::types::PersonaRecord],
+    personas: &[crate::managed_agents::types::AgentDefinition],
     picked_command: Option<&str>,
 ) -> Option<String> {
     let picked = picked_command
@@ -65,7 +65,7 @@ pub fn divergent_agent_command_override(
 ///   and treats a same-runtime restatement as inherit.
 pub fn update_time_agent_command_override(
     persona_id: Option<&str>,
-    personas: &[crate::managed_agents::types::PersonaRecord],
+    personas: &[crate::managed_agents::types::AgentDefinition],
     picked_command: Option<&str>,
     harness_override: bool,
 ) -> Option<String> {
@@ -92,7 +92,7 @@ pub fn update_time_agent_command_override(
 /// must not change what the agent runs.
 pub fn apply_agent_command_update(
     record: &mut crate::managed_agents::types::ManagedAgentRecord,
-    personas: &[crate::managed_agents::types::PersonaRecord],
+    personas: &[crate::managed_agents::types::AgentDefinition],
     agent_command: &str,
     harness_override: bool,
 ) {
@@ -133,7 +133,7 @@ pub fn apply_agent_command_update(
 /// `harness_override`.
 pub fn create_time_agent_command_override(
     persona_id: Option<&str>,
-    personas: &[crate::managed_agents::types::PersonaRecord],
+    personas: &[crate::managed_agents::types::AgentDefinition],
     picked_command: Option<&str>,
     harness_override: bool,
 ) -> Option<String> {

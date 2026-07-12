@@ -31,7 +31,7 @@ fn find_team_for_persona_source<'a>(
 /// Only the four fields that the UI can set and that live in frontmatter are
 /// rewritten: `display_name`, `runtime`, `avatar`, and `model` (the combined
 /// `"provider:model"` string used by the pack format). The markdown body is
-/// preserved byte-for-byte because `PersonaRecord.system_prompt` is the
+/// preserved byte-for-byte because `AgentDefinition.system_prompt` is the
 /// _composed_ prompt (body + pack instructions appended by `compose_prompt`)
 /// and writing it back to the file would cause the instructions to be
 /// double-appended on the next launch sync.
@@ -47,7 +47,7 @@ fn find_team_for_persona_source<'a>(
 /// same key as `sync_team_from_dir` (`team_persona_key`). This handles both
 /// modern teams (where `team.id` equals the manifest id) and legacy/backfilled
 /// teams (where `team.id` is a UUID and the manifest id lives in `source_dir`).
-pub(super) fn write_back_persona_md(app: &AppHandle, persona: &PersonaRecord) -> Option<String> {
+pub(super) fn write_back_persona_md(app: &AppHandle, persona: &AgentDefinition) -> Option<String> {
     // Only pack-backed personas have a source file to write back to.
     persona.source_team.as_ref()?;
 
@@ -69,7 +69,10 @@ pub(super) fn write_back_persona_md(app: &AppHandle, persona: &PersonaRecord) ->
 /// Returns `Err` if write-back fails for any reason (non-fatal at the call
 /// site); `Ok(())` if the persona has no pack source or the file was updated
 /// (or was already current).
-fn try_write_back_persona_md(teams: &[TeamRecord], persona: &PersonaRecord) -> Result<(), String> {
+fn try_write_back_persona_md(
+    teams: &[TeamRecord],
+    persona: &AgentDefinition,
+) -> Result<(), String> {
     let Some(source_team_id) = &persona.source_team else {
         return Ok(()); // non-pack persona — nothing to write back
     };
@@ -199,7 +202,7 @@ fn write_file_atomic(path: &std::path::Path, content: &str) -> Result<(), String
 ///   byte-for-byte (no-op for the body section).
 fn rewrite_persona_md(
     content: &str,
-    persona: &PersonaRecord,
+    persona: &AgentDefinition,
     current_raw_body: &str,
     pack_instructions: Option<&str>,
 ) -> Result<String, String> {

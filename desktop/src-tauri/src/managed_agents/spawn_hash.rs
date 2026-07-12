@@ -30,7 +30,7 @@ use super::{
     known_acp_runtime, normalize_agent_args,
     persona_events::apply_persona_snapshot,
     resolve_effective_agent_env,
-    types::{ManagedAgentRecord, PersonaRecord},
+    types::{AgentDefinition, ManagedAgentRecord},
     GlobalAgentConfig,
 };
 
@@ -58,7 +58,7 @@ pub(crate) fn effective_spawn_prompt(record: &ManagedAgentRecord) -> Option<Stri
 /// Pure — no `AppHandle`, no disk, no keyring.
 pub(crate) fn spawn_config_hash(
     record: &ManagedAgentRecord,
-    personas: &[PersonaRecord],
+    personas: &[AgentDefinition],
     workspace_relay: &str,
     global: &GlobalAgentConfig,
 ) -> u64 {

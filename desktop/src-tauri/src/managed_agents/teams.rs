@@ -3,7 +3,7 @@ use std::{fs, path::PathBuf};
 use tauri::AppHandle;
 
 use crate::{
-    managed_agents::{managed_agents_base_dir, PersonaRecord, TeamRecord},
+    managed_agents::{managed_agents_base_dir, AgentDefinition, TeamRecord},
     util::now_iso,
 };
 
@@ -314,10 +314,10 @@ pub fn import_team_from_directory(
 
     // 6. Create PersonaRecords
     let now = now_iso();
-    let new_personas: Vec<PersonaRecord> = re_resolved
+    let new_personas: Vec<AgentDefinition> = re_resolved
         .personas
         .iter()
-        .map(|p| PersonaRecord {
+        .map(|p| AgentDefinition {
             id: Uuid::new_v4().to_string(),
             display_name: p.display_name.clone(),
             avatar_url: p.avatar.clone(),
@@ -556,7 +556,7 @@ pub fn sync_team_from_dir(
             }
         } else {
             // New persona — create record
-            let new_persona = PersonaRecord {
+            let new_persona = AgentDefinition {
                 id: Uuid::new_v4().to_string(),
                 display_name: dir_persona.display_name.clone(),
                 avatar_url: dir_persona.avatar.clone(),
@@ -655,7 +655,10 @@ pub fn sync_team_from_dir(
 /// Encode a team as a JSON blob for export. The format includes the team's
 /// name, description, and the full persona data for each member (so the
 /// import side can recreate personas that don't exist locally).
-pub fn encode_team_json(team: &TeamRecord, personas: &[PersonaRecord]) -> Result<Vec<u8>, String> {
+pub fn encode_team_json(
+    team: &TeamRecord,
+    personas: &[AgentDefinition],
+) -> Result<Vec<u8>, String> {
     let mut missing_persona_ids = Vec::new();
     let mut resolved_personas = Vec::with_capacity(team.persona_ids.len());
 

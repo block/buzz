@@ -59,8 +59,8 @@ fn record() -> ManagedAgentRecord {
     }
 }
 
-fn persona(id: &str, runtime: Option<&str>, prompt: &str) -> PersonaRecord {
-    PersonaRecord {
+fn persona(id: &str, runtime: Option<&str>, prompt: &str) -> AgentDefinition {
+    AgentDefinition {
         id: id.into(),
         display_name: id.into(),
         avatar_url: None,
@@ -430,7 +430,7 @@ fn missing_definition_leaves_materialized_runtime_in_hash() {
     rec.persona_id = Some("missing".into());
     rec.runtime = Some("goose".into()); // materialized runtime
 
-    let no_personas: &[PersonaRecord] = &[];
+    let no_personas: &[AgentDefinition] = &[];
 
     let mut no_runtime = rec.clone();
     no_runtime.runtime = None;

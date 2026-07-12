@@ -14,9 +14,9 @@
 
 use std::collections::BTreeMap;
 
-/// Env var keys that are *derived* from the structured `PersonaRecord.provider`
-/// and `PersonaRecord.model` fields at spawn/deploy time. These must NOT be
-/// persisted in `PersonaRecord.env_vars` because they would shadow the
+/// Env var keys that are *derived* from the structured `AgentDefinition.provider`
+/// and `AgentDefinition.model` fields at spawn/deploy time. These must NOT be
+/// persisted in `AgentDefinition.env_vars` because they would shadow the
 /// structured fields after the user edits provider/model in the UI.
 ///
 /// At local spawn time, `runtime_metadata_env_vars` re-derives these from the
@@ -33,7 +33,7 @@ pub(crate) const DERIVED_PROVIDER_MODEL_ENV_KEYS: &[&str] = &[
 ];
 
 /// Returns `true` if `key` is a derived provider/model env key that should be
-/// filtered out of persisted `PersonaRecord.env_vars` at pack import time.
+/// filtered out of persisted `AgentDefinition.env_vars` at pack import time.
 pub(crate) fn is_derived_provider_model_key(key: &str) -> bool {
     DERIVED_PROVIDER_MODEL_ENV_KEYS
         .iter()
@@ -41,9 +41,9 @@ pub(crate) fn is_derived_provider_model_key(key: &str) -> bool {
 }
 
 /// Strip derived provider/model env keys from a pack persona's `runtime_env_vars`
-/// before persisting them in `PersonaRecord.env_vars`.
+/// before persisting them in `AgentDefinition.env_vars`.
 ///
-/// The structured `PersonaRecord.provider` / `PersonaRecord.model` fields are
+/// The structured `AgentDefinition.provider` / `AgentDefinition.model` fields are
 /// the authoritative source of truth. Keeping the derived copies would cause
 /// stale env values to override updated structured fields at spawn/deploy time.
 pub(crate) fn filter_derived_provider_model_env_vars(
@@ -305,7 +305,7 @@ pub(crate) fn merged_user_env(
 /// to personas that no longer exist (an orphaned agent spawns from its own
 /// overrides alone — same fallback the prompt/model resolution uses).
 pub(crate) fn live_persona_env(
-    personas: &[super::types::PersonaRecord],
+    personas: &[super::types::AgentDefinition],
     persona_id: Option<&str>,
 ) -> BTreeMap<String, String> {
     persona_id

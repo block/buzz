@@ -4,7 +4,7 @@ use super::{
     normalize_global_config_fields, resolve_effective_model_provider, strip_empty_env_vars,
     validate_global_config, GlobalAgentConfig,
 };
-use crate::managed_agents::{BackendKind, ManagedAgentRecord, PersonaRecord, RespondTo};
+use crate::managed_agents::{AgentDefinition, BackendKind, ManagedAgentRecord, RespondTo};
 
 fn config_with_env(pairs: &[(&str, &str)]) -> GlobalAgentConfig {
     GlobalAgentConfig {
@@ -353,8 +353,8 @@ fn bare_record() -> ManagedAgentRecord {
     }
 }
 
-fn persona(id: &str, model: Option<&str>, provider: Option<&str>) -> PersonaRecord {
-    PersonaRecord {
+fn persona(id: &str, model: Option<&str>, provider: Option<&str>) -> AgentDefinition {
+    AgentDefinition {
         id: id.to_string(),
         display_name: "Test Persona".to_string(),
         avatar_url: None,
@@ -475,7 +475,7 @@ fn resolve_global_fallback_when_record_and_persona_have_none() {
 #[test]
 fn resolve_global_fallback_when_no_persona_linked() {
     let record = bare_record(); // persona_id = None, model/provider = None
-    let personas: Vec<PersonaRecord> = vec![];
+    let personas: Vec<AgentDefinition> = vec![];
     let global = GlobalAgentConfig {
         model: Some("global-model".to_string()),
         provider: Some("global-provider".to_string()),
@@ -493,7 +493,7 @@ fn resolve_global_fallback_when_no_persona_linked() {
 #[test]
 fn resolve_all_none_when_no_source_provides_values() {
     let record = bare_record(); // persona_id = None, model/provider = None
-    let personas: Vec<PersonaRecord> = vec![];
+    let personas: Vec<AgentDefinition> = vec![];
     let global = GlobalAgentConfig::default(); // model/provider = None
 
     let (model, provider) = resolve_effective_model_provider(&record, &personas, &global);
@@ -573,7 +573,7 @@ fn record_runtime_wins_over_persona_runtime_for_command_resolution() {
     record.runtime = Some("claude".to_string());
     record.persona_id = Some("p1".to_string());
 
-    let persona = PersonaRecord {
+    let persona = AgentDefinition {
         id: "p1".to_string(),
         display_name: "Goose persona".to_string(),
         avatar_url: None,

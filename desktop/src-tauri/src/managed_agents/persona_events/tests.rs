@@ -1,7 +1,7 @@
 use super::*;
 
-fn sample_persona() -> PersonaRecord {
-    PersonaRecord {
+fn sample_persona() -> AgentDefinition {
+    AgentDefinition {
         id: "test-persona".to_string(),
         display_name: "Test Persona".to_string(),
         avatar_url: Some("https://example.com/avatar.png".to_string()),
@@ -209,7 +209,7 @@ fn content_matches_nip_ap_vector() {
     // An event built from this content carries the byte-exact vector as its
     // signed content, so a second implementer following the spec computes
     // the same NIP-01 id.
-    let record = PersonaRecord {
+    let record = AgentDefinition {
         id: "test-agent".to_string(),
         display_name: "Test Agent".to_string(),
         avatar_url: Some("https://example.com/avatar.png".to_string()),
@@ -239,7 +239,7 @@ fn content_matches_nip_ap_vector() {
 
 #[test]
 fn round_trip_minimal_persona() {
-    let record = PersonaRecord {
+    let record = AgentDefinition {
         id: "minimal".to_string(),
         display_name: "Minimal".to_string(),
         avatar_url: None,
@@ -306,7 +306,7 @@ fn build_persona_delete_has_single_a_tag_no_e_tag() {
 }
 
 /// NIP-AP behavioral defaults are LIVE since B5 (create-path
-/// unification): the wire fields are carried on PersonaRecord in wire
+/// unification): the wire fields are carried on AgentDefinition in wire
 /// shape and re-emitted verbatim by the projection — a foreign
 /// definition's behavioral values now survive a local
 /// edit-and-republish cycle. This test replaces
@@ -336,7 +336,7 @@ fn behavioral_defaults_survive_record_round_trip() {
 /// and no republish wave fires for quad-absent definitions.
 #[test]
 fn quad_absent_definition_hash_stable_across_activation() {
-    let record = PersonaRecord {
+    let record = AgentDefinition {
         id: "quad-absent".to_string(),
         display_name: "Test".to_string(),
         avatar_url: None,
@@ -377,10 +377,10 @@ fn quad_absent_definition_hash_stable_across_activation() {
     );
 }
 
-/// Test-only bridge: build a PersonaRecord from parsed content the same
+/// Test-only bridge: build a AgentDefinition from parsed content the same
 /// way `persona_from_event` maps fields, without needing a signed event.
-fn persona_from_event_content_for_test(content: PersonaEventContent) -> PersonaRecord {
-    PersonaRecord {
+fn persona_from_event_content_for_test(content: PersonaEventContent) -> AgentDefinition {
+    AgentDefinition {
         id: "staged".to_string(),
         display_name: content.display_name,
         avatar_url: content.avatar_url,
@@ -514,8 +514,8 @@ fn snapshot_runtime_verbatim_from_persona() {
 // ── persona_snapshot_with_agent_config_fallback ────────────────────────────
 
 /// Helper: a persona with no model/provider configured.
-fn blank_model_persona() -> PersonaRecord {
-    PersonaRecord {
+fn blank_model_persona() -> AgentDefinition {
+    AgentDefinition {
         model: None,
         provider: None,
         ..sample_persona()

@@ -7,7 +7,7 @@ use super::{
     encode_team_json, merge_teams, merge_teams_impl, parse_team_json, sort_teams,
     validate_team_deletion, BuiltInTeam,
 };
-use crate::managed_agents::{PersonaRecord, TeamRecord};
+use crate::managed_agents::{AgentDefinition, TeamRecord};
 
 fn team(id: &str, name: &str) -> TeamRecord {
     TeamRecord {
@@ -50,8 +50,8 @@ fn sort_teams_empty_is_noop() {
     assert!(teams.is_empty());
 }
 
-fn persona(id: &str, name: &str, prompt: &str) -> PersonaRecord {
-    PersonaRecord {
+fn persona(id: &str, name: &str, prompt: &str) -> AgentDefinition {
+    AgentDefinition {
         id: id.to_string(),
         display_name: name.to_string(),
         avatar_url: None,

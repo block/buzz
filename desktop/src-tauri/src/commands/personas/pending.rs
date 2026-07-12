@@ -5,7 +5,7 @@
 use tauri::AppHandle;
 
 use crate::app_state::AppState;
-use crate::managed_agents::PersonaRecord;
+use crate::managed_agents::AgentDefinition;
 
 /// Retain a freshly authored persona event in the local store, flagged for
 /// relay sync. Called inside a command's `managed_agents_store_lock`-held body
@@ -26,7 +26,7 @@ use crate::managed_agents::PersonaRecord;
 pub(in crate::commands::personas) fn retain_persona_pending(
     app: &AppHandle,
     state: &AppState,
-    persona: &PersonaRecord,
+    persona: &AgentDefinition,
 ) {
     use crate::managed_agents::{
         managed_agents_base_dir,

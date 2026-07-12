@@ -189,8 +189,8 @@ fn classifies_cli_missing_when_adapter_found_but_cli_absent() {
     assert_eq!(path.as_deref(), Some("/opt/homebrew/bin/codex-acp"));
 }
 
-fn persona_with_runtime(id: &str, runtime: Option<&str>) -> crate::managed_agents::PersonaRecord {
-    crate::managed_agents::PersonaRecord {
+fn persona_with_runtime(id: &str, runtime: Option<&str>) -> crate::managed_agents::AgentDefinition {
+    crate::managed_agents::AgentDefinition {
         id: id.to_string(),
         display_name: id.to_string(),
         avatar_url: None,

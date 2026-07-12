@@ -14,7 +14,7 @@ use crate::{
         },
         current_instance_id, known_acp_runtime, load_managed_agents, load_personas,
         resolve_effective_prompt_model_provider, save_managed_agents, sync_managed_agent_processes,
-        GlobalAgentConfig, KnownAcpRuntime, ManagedAgentRecord, PersonaRecord,
+        AgentDefinition, GlobalAgentConfig, KnownAcpRuntime, ManagedAgentRecord,
     },
 };
 
@@ -53,7 +53,7 @@ pub struct RuntimeFileConfigSubset {
 /// Buzz keeps `had_* == true` and is never re-tagged.
 fn resolve_config_surface(
     mut record: ManagedAgentRecord,
-    personas: &[PersonaRecord],
+    personas: &[AgentDefinition],
     runtime_meta: Option<&KnownAcpRuntime>,
     session_cache: Option<&SessionConfigCache>,
     global: &GlobalAgentConfig,
@@ -661,8 +661,8 @@ mod tests {
         }
     }
 
-    fn persona_with_model(model: &str) -> PersonaRecord {
-        PersonaRecord {
+    fn persona_with_model(model: &str) -> AgentDefinition {
+        AgentDefinition {
             id: "persona-1".to_string(),
             display_name: "Persona".to_string(),
             avatar_url: None,
@@ -732,7 +732,7 @@ mod tests {
         let mut record = agent_record();
         record.persona_id = None;
         record.model = Some("model-x".to_string());
-        let personas: Vec<PersonaRecord> = vec![];
+        let personas: Vec<AgentDefinition> = vec![];
         let cache = session_cache("model-y", false);
 
         let surface = resolve_config_surface(
@@ -760,7 +760,7 @@ mod tests {
         let mut record = agent_record();
         record.persona_id = None;
         record.model = Some("model-x".to_string());
-        let personas: Vec<PersonaRecord> = vec![];
+        let personas: Vec<AgentDefinition> = vec![];
         let cache = session_cache("model-y", true);
 
         let surface = resolve_config_surface(
@@ -787,7 +787,7 @@ mod tests {
         let mut record = agent_record();
         record.persona_id = None;
         record.model = Some("model-x".to_string());
-        let personas: Vec<PersonaRecord> = vec![];
+        let personas: Vec<AgentDefinition> = vec![];
         let cache = session_cache("model-x", true);
 
         let surface = resolve_config_surface(
@@ -842,7 +842,7 @@ mod tests {
         let mut record = agent_record();
         record.persona_id = None;
         // record.model = None (set by agent_record())
-        let personas: Vec<PersonaRecord> = vec![];
+        let personas: Vec<AgentDefinition> = vec![];
         let cache = session_cache("model-y", true);
         let global = crate::managed_agents::GlobalAgentConfig {
             model: Some("global-model".to_string()),

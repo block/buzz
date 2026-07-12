@@ -8,8 +8,8 @@ const UUID: &str = "11111111-2222-3333-4444-555555555555";
 
 /// A local in-app persona: `source_team_persona_slug` is None, so its d-tag
 /// IS its UUID id. Carries env_vars + source_team that must survive a patch.
-fn local_in_app() -> PersonaRecord {
-    PersonaRecord {
+fn local_in_app() -> AgentDefinition {
+    AgentDefinition {
         id: UUID.to_string(),
         display_name: "Local".to_string(),
         avatar_url: None,
@@ -34,8 +34,8 @@ fn local_in_app() -> PersonaRecord {
 
 /// An inbound persona as `persona_from_event` would produce it: id = d-tag,
 /// slug = Some(d-tag), empty env_vars, source_team None.
-fn inbound_for(d_tag: &str, display_name: &str) -> PersonaRecord {
-    PersonaRecord {
+fn inbound_for(d_tag: &str, display_name: &str) -> AgentDefinition {
+    AgentDefinition {
         id: d_tag.to_string(),
         display_name: display_name.to_string(),
         avatar_url: Some("https://example.com/a.png".to_string()),

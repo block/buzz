@@ -147,7 +147,7 @@ const overrides = new Map([
   // #1613 augmented-PATH readiness probes grew the file +3 past the prior cap.
   // +16: resolve_effective_agent_env + global-config readiness wiring (#1448).
   // +1 rebase merge: GlobalAgentConfig import added alongside AcpAvailabilityStatus.
-  // +2 rebase onto #1667: behavioral quad fields in PersonaRecord/ManagedAgentRecord.
+  // +2 rebase onto #1667: behavioral quad fields in AgentDefinition/ManagedAgentRecord.
   // +3 rebase onto main (#1568 + #1613): identity-import-keyring + augmented-PATH probes.
   // +18: CliConfigInvalid requirement surface for config-parse probe classification —
   // new Requirement variant + updated cli_login_requirements + 3 new probe-layer tests.

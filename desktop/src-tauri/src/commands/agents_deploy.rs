@@ -6,7 +6,7 @@ use tauri::AppHandle;
 
 use crate::{
     app_state::AppState,
-    managed_agents::{load_personas, ManagedAgentRecord, PersonaRecord},
+    managed_agents::{load_personas, AgentDefinition, ManagedAgentRecord},
     relay::relay_ws_url_with_override,
 };
 
@@ -24,7 +24,7 @@ use crate::{
 /// Exported `pub(crate)` for unit testing.
 pub(crate) fn resolve_deploy_model_provider<'a>(
     record: &'a ManagedAgentRecord,
-    personas: &'a [PersonaRecord],
+    personas: &'a [AgentDefinition],
     global: &'a crate::managed_agents::GlobalAgentConfig,
 ) -> (Option<&'a str>, Option<&'a str>) {
     let live_persona = record

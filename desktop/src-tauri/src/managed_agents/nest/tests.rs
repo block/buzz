@@ -410,8 +410,8 @@ fn ensure_cli_symlink_does_not_clobber_regular_file_dev() {
     );
 }
 
-fn make_persona(id: &str, display_name: &str) -> PersonaRecord {
-    PersonaRecord {
+fn make_persona(id: &str, display_name: &str) -> AgentDefinition {
+    AgentDefinition {
         id: id.to_string(),
         display_name: display_name.to_string(),
         avatar_url: None,

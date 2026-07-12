@@ -7,7 +7,7 @@
 //! Static template content in AGENTS.md (above the managed-section markers)
 //! and SKILL.md is refreshed when the embedded template version changes.
 
-use super::{load_managed_agents, load_personas, ManagedAgentRecord, PersonaRecord};
+use super::{load_managed_agents, load_personas, AgentDefinition, ManagedAgentRecord};
 #[cfg(test)]
 use super::{BackendKind, RespondTo};
 use crate::app_state::AppState;
@@ -549,7 +549,7 @@ fn escape_md_cell(s: &str) -> String {
 }
 
 pub fn render_dynamic_section(
-    personas: &[PersonaRecord],
+    personas: &[AgentDefinition],
     agents: &[ManagedAgentRecord],
     relay_url: &str,
 ) -> String {
