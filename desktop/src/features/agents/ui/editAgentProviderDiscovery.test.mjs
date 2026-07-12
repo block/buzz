@@ -56,30 +56,54 @@ test("editAgent_providerFieldHidden_forBlankRuntime", () => {
 // ── Provider dropdown options for EditAgentProviderField ────────────────────
 //
 // The provider dropdown contains the well-known providers
-// (databricks_v2, anthropic, openai, openai-compat) plus a default-provider
-// fallback entry so users can clear a saved provider.
-// Note: bare "databricks" (V1 / Model Serving) is no longer offered as a
-// fresh choice in the default picker — Block builds migrate it to V2 at boot
-// and the picker would silently undo any intentional V1 selection.
+// (databricks, databricks_v2, anthropic, openai, openai-compat) plus a
+// default-provider fallback entry so users can clear a saved provider.
+//
+// On OSS builds, Databricks v1 ("databricks") is shown alongside v2 so OSS
+// users who were previously on v1 can select it. On internal Block builds,
+// callers pass hideProviderIds=new Set(["databricks"]) to suppress v1 — the
+// boot migration rewrites any persisted v1 value to v2, so offering v1 there
+// would silently undo the migration.
 
-test("editAgent_providerOptions_includesDatabricksV2Provider", () => {
+test("editAgent_providerOptions_includesDatabricksV2AndV1OnOSS", () => {
+  // OSS builds: no hideProviderIds → both v1 and v2 appear.
   const options = getPersonaProviderOptions("", "buzz-agent");
   const ids = options.map((o) => o.id);
+  assert.ok(ids.includes("databricks_v2"), "databricks_v2 must be present");
   assert.ok(
-    ids.includes("databricks_v2"),
-    "databricks_v2 must be a provider option",
-  );
-  assert.ok(
-    !ids.includes("databricks"),
-    "bare databricks (V1) must NOT be in the default provider list",
+    ids.includes("databricks"),
+    "bare databricks (V1) must be present on OSS builds",
   );
 });
 
-test("editAgent_providerOptions_includesDatabricksV1AsCurrentIfSaved", () => {
-  // A record that already has provider="databricks" (OSS / pre-migration)
-  // must still show it in the dropdown as the current selection so it
-  // remains visible without offering it as a fresh default choice.
-  const options = getPersonaProviderOptions("databricks", "buzz-agent");
+test("editAgent_providerOptions_hidesDatabricksV1OnInternalBuild", () => {
+  // Internal Block builds: pass hideProviderIds to suppress v1.
+  const options = getPersonaProviderOptions(
+    "",
+    "buzz-agent",
+    "",
+    new Set(["databricks"]),
+  );
+  const ids = options.map((o) => o.id);
+  assert.ok(
+    ids.includes("databricks_v2"),
+    "databricks_v2 must still be present",
+  );
+  assert.ok(
+    !ids.includes("databricks"),
+    "bare databricks (V1) must be hidden on internal builds",
+  );
+});
+
+test("editAgent_providerOptions_includesDatabricksV1AsCurrentEvenWhenHidden", () => {
+  // A record already persisted with provider="databricks" must show it as the
+  // current value even when hideProviderIds hides it from fresh selection.
+  const options = getPersonaProviderOptions(
+    "databricks",
+    "buzz-agent",
+    "",
+    new Set(["databricks"]),
+  );
   const ids = options.map((o) => o.id);
   assert.ok(
     ids.includes("databricks"),

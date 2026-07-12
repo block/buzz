@@ -7,6 +7,7 @@ import type {
 import type { MeshAgentPresetPatch } from "@/features/mesh-compute/applyMeshAgentPreset";
 import type { MeshServeTarget } from "@/shared/api/tauriMesh";
 import {
+  getDefaultPersonaRuntime,
   resolvePersonaRuntime,
   type ResolvePersonaRuntimeResult,
 } from "./resolvePersonaRuntime";
@@ -47,7 +48,10 @@ export function resolveStartRuntimeForDefinition(
   persona: AgentPersona,
   runtimes: readonly AcpRuntime[],
 ): { runtime: AcpRuntime; warnings: string[] } {
-  const defaultRuntime = runtimes[0] ?? null;
+  // Use the buzz-agent-first preference (buzz-agent → goose → first available)
+  // so a freshly installed goose never beats the bundled buzz-agent sidecar
+  // for runtime-less personas (item 13 regression guard).
+  const defaultRuntime = getDefaultPersonaRuntime(runtimes);
   const { runtime, warnings, isOverridden }: ResolvePersonaRuntimeResult =
     resolvePersonaRuntime(persona.runtime, runtimes, defaultRuntime);
 

@@ -57,7 +57,6 @@ import type {
 } from "@/shared/api/types";
 import type {
   AttachManagedAgentToChannelInput,
-  AttachManagedAgentToChannelResult,
   CreateChannelManagedAgentInput,
   CreateChannelManagedAgentsResult,
   CreateChannelManagedAgentResult,
@@ -83,10 +82,6 @@ export const teamsQueryKey = ["teams"] as const;
 export const acpRuntimesQueryKey = ["acp-runtimes"] as const;
 export const managedAgentPrereqsQueryKey = ["managed-agent-prereqs"] as const;
 export const backendProvidersQueryKey = ["backend-providers"] as const;
-
-export type EnsureGooseInChannelResult = AttachManagedAgentToChannelResult & {
-  created: boolean;
-};
 
 async function invalidateAgentQueries(
   queryClient: ReturnType<typeof useQueryClient>,
@@ -583,39 +578,6 @@ export function useCreateChannelManagedAgentsMutation(
       }
 
       return createChannelManagedAgents(channelId, inputs);
-    },
-    onSettled: () => {
-      invalidateAgentQueriesInBackground(queryClient, channelId);
-    },
-  });
-}
-
-export function useEnsureGooseInChannelMutation(channelId: string | null) {
-  const queryClient = useQueryClient();
-
-  return useMutation({
-    mutationFn: async (): Promise<EnsureGooseInChannelResult> => {
-      if (!channelId) {
-        throw new Error("No channel selected.");
-      }
-
-      const attached = await ensureChannelAgentPresetInChannel(channelId, {
-        runtime: {
-          id: "goose",
-          label: "Goose",
-          command: "goose",
-          defaultArgs: ["acp"],
-          mcpCommand: null,
-        },
-        role: "bot",
-      });
-
-      return {
-        agent: attached.agent,
-        membershipAdded: attached.membershipAdded,
-        started: attached.started,
-        created: attached.created,
-      };
     },
     onSettled: () => {
       invalidateAgentQueriesInBackground(queryClient, channelId);

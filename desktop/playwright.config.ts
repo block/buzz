@@ -93,6 +93,7 @@ export default defineConfig({
         "**/global-agent-config-screenshots.spec.ts",
         "**/doctor-states.spec.ts",
         "**/agent-lifecycle-feedback.spec.ts",
+        "**/agent-provider-dropdowns.spec.ts",
       ],
       use: {
         ...devices["Desktop Chrome"],

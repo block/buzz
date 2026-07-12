@@ -55,8 +55,14 @@ export function EffortSelectField({
    * Label for the "Inherit" option when no inherited effort is set and the model
    * has a semantic default (i.e. `effortDefault !== null`).
    *
-   * Defaults to `"Inherit"`. Per-agent callers may pass `"Inherit (agent default)"`
+   * Defaults to `"Inherit"`.
+   *
+   * Per-agent callers (BuzzAgentModelTuningFields) pass `"Inherit (agent default)"`
    * to preserve the label that appeared before this component was extracted.
+   *
+   * The global-defaults card (GlobalAgentConfigSettingsCard) passes
+   * `"Default (<effort>)"` when a semantic default exists and nothing is baked
+   * in — so OSS users see "Default (medium)" rather than bare "Inherit".
    */
   inheritFallbackLabel?: string;
   /** Label text for the dropdown. */

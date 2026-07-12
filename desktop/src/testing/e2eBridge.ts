@@ -8808,6 +8808,12 @@ export function maybeInstallE2eTauriMocks() {
             config?.mock?.globalConfigFailedRestartCount ?? 0,
         };
       }
+      case "get_baked_build_env":
+        // Mock always returns an empty baked env (OSS build simulation).
+        return [];
+      case "get_baked_build_env_keys":
+        // Mock always returns no baked env key names (OSS build simulation).
+        return [];
       case "update_managed_agent":
         return handleUpdateManagedAgent(
           payload as Parameters<typeof handleUpdateManagedAgent>[0],

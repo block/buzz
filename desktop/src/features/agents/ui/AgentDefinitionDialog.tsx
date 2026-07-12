@@ -40,6 +40,7 @@ import {
 } from "./personaBehaviorDraft";
 import {
   AUTO_PROVIDER_DROPDOWN_VALUE,
+  BLOCK_BUILD_HIDDEN_PROVIDER_IDS,
   buildTemplateModelDropdownOptions,
   CUSTOM_MODEL_DROPDOWN_VALUE,
   CUSTOM_PROVIDER_DROPDOWN_VALUE,
@@ -76,6 +77,7 @@ import {
 import { useBakedBuildEnvKeysQuery, useRuntimeFileConfigQuery } from "../hooks";
 import { useGlobalAgentConfig } from "../useGlobalAgentConfig";
 import { isBuzzAgentRuntime } from "./buzzAgentConfig";
+import { buildRuntimeModelProviderPayload } from "./agentDefinitionSubmitPayload";
 
 type AgentDefinitionDialogProps = {
   open: boolean;
@@ -154,6 +156,16 @@ export function AgentDefinitionDialog({
   // The seed the draft is diffed against at submit: an untouched quad
   // submits no behavior group, keeping unrelated edits hash-quiet.
   const behaviorSeedRef = React.useRef(emptyPersonaBehaviorDraft);
+  // Tracks when the runtime was auto-seeded by the default-runtime effect in
+  // edit mode (i.e. the user never explicitly chose a runtime). Used to omit
+  // the seeded runtime from the submit payload for builtin definitions whose
+  // canonical runtime is null — the sync would revert it anyway.
+  const isRuntimeAutoSeededRef = React.useRef(false);
+  // Guards the seeding effect so it fires at most once per dialog-open.
+  // Without this, clearing runtime back to "" via "No preference" would re-
+  // trigger the effect (the `runtime` dep would pass the length guard) and
+  // snap the dropdown back to the default — an edit-mode regression.
+  const hasSeededForOpenRef = React.useRef(false);
   const [showAdvancedFields, setShowAdvancedFields] = React.useState(false);
   const [isAvatarUploadPending, setIsAvatarUploadPending] =
     React.useState(false);
@@ -214,22 +226,32 @@ export function AgentDefinitionDialog({
     setIsAvatarUploadPending(false);
     setImportErrorMessage(null);
     setIsImportingUpdate(false);
+    isRuntimeAutoSeededRef.current = false;
+    hasSeededForOpenRef.current = false;
   }, [initialValues, open]);
 
   React.useEffect(() => {
     if (
       !open ||
       !initialValues ||
-      "id" in initialValues ||
       initialValues.runtime?.trim() ||
       runtimesLoading ||
       runtime.trim().length > 0 ||
-      defaultRuntime === null
+      defaultRuntime === null ||
+      hasSeededForOpenRef.current
     ) {
       return;
     }
 
     setRuntime(defaultRuntime.id);
+    hasSeededForOpenRef.current = true;
+    if ("id" in initialValues) {
+      // Edit mode: record that this runtime was auto-seeded so the submit path
+      // can omit it from the payload for builtin definitions (canonical runtime
+      // null; sync would revert the value anyway). Explicit user changes via
+      // the dropdown clear this flag.
+      isRuntimeAutoSeededRef.current = true;
+    }
   }, [defaultRuntime, initialValues, open, runtime, runtimesLoading]);
 
   const isWindowFileDragOver = useWindowFileDragOver(
@@ -299,6 +321,8 @@ export function AgentDefinitionDialog({
       setIsAvatarUploadPending(false);
       setImportErrorMessage(null);
       setIsImportingUpdate(false);
+      // isRuntimeAutoSeededRef and hasSeededForOpenRef are NOT reset here — the
+      // [initialValues, open] effect resets both when the dialog re-opens.
     }
 
     onOpenChange(next);
@@ -313,19 +337,21 @@ export function AgentDefinitionDialog({
       return;
     }
 
-    const trimmedRuntime = runtime.trim();
-    const previousRuntime = initialValues.runtime?.trim() ?? "";
-    const modelProviderEditableWithoutRuntime =
-      initialModelProviderEditableWithoutRuntime && trimmedRuntime.length === 0;
-    const llmProviderVisibleForSubmit =
-      (trimmedRuntime.length > 0 &&
-        runtimeSupportsLlmProviderSelection(trimmedRuntime)) ||
-      modelProviderEditableWithoutRuntime;
-    const shouldPreserveHiddenModelProvider =
-      "id" in initialValues &&
-      previousRuntime.length === 0 &&
-      trimmedRuntime.length === 0 &&
-      !modelProviderEditableWithoutRuntime;
+    const {
+      runtime: runtimeForSubmit,
+      model: modelForSubmit,
+      provider: providerForSubmit,
+    } = buildRuntimeModelProviderPayload({
+      runtime,
+      model,
+      provider,
+      isEditMode: "id" in initialValues,
+      isAutoSeeded: isRuntimeAutoSeededRef.current,
+      initialPreviousRuntime: initialValues.runtime?.trim() ?? "",
+      initialModel: initialValues.model,
+      initialProvider: initialValues.provider,
+      initialModelProviderEditableWithoutRuntime,
+    });
     const namePool = parsePersonaNamePoolText(namePoolText);
     const namePoolInput =
       namePool.length > 0
@@ -337,18 +363,9 @@ export function AgentDefinitionDialog({
       displayName: displayName.trim(),
       avatarUrl: avatarUrl.trim() || undefined,
       systemPrompt: systemPrompt,
-      runtime: trimmedRuntime || undefined,
-      model:
-        trimmedRuntime || modelProviderEditableWithoutRuntime
-          ? model.trim() || undefined
-          : shouldPreserveHiddenModelProvider
-            ? initialValues.model
-            : undefined,
-      provider: llmProviderVisibleForSubmit
-        ? provider.trim() || undefined
-        : shouldPreserveHiddenModelProvider
-          ? initialValues.provider
-          : undefined,
+      runtime: runtimeForSubmit,
+      model: modelForSubmit,
+      provider: providerForSubmit,
       namePool: namePoolInput,
       envVars,
       behavior: behaviorForSubmit(
@@ -515,7 +532,12 @@ export function AgentDefinitionDialog({
     isCustomProviderEditing,
     modelFieldVisible,
     open,
-    provider: effectiveProvider,
+    // Gate provider by runtime: runtimes that don't support LLM provider
+    // selection (codex, claude) must not inherit the global provider — doing
+    // so causes them to discover models from the wrong provider.
+    provider: runtimeSupportsLlmProviderSelection(runtime)
+      ? effectiveProvider
+      : "",
     selectedRuntime,
   });
   const staticModelOptions = getPersonaModelOptions(runtime, effectiveProvider);
@@ -532,10 +554,22 @@ export function AgentDefinitionDialog({
   });
   const showCustomModelInput =
     modelFieldVisible && (isCustomModelEditing || isModelCustom);
+  // On internal Block builds, BUZZ_AGENT_PROVIDER is baked in and a boot
+  // migration rewrites any persisted Databricks v1 values → v2. Hide the v1
+  // option there so it is not offered for new selections. OSS builds have no
+  // baked provider, so v1 remains visible.
+  const hideProviderIds = React.useMemo(
+    () =>
+      (bakedEnvKeys ?? []).includes("BUZZ_AGENT_PROVIDER")
+        ? BLOCK_BUILD_HIDDEN_PROVIDER_IDS
+        : new Set<string>(),
+    [bakedEnvKeys],
+  );
   const providerOptions = getPersonaProviderOptions(
     trimmedProvider,
     runtime,
     globalConfig.provider ?? "",
+    hideProviderIds,
   );
   const defaultLlmProviderLabel = getDefaultLlmProviderLabel(
     runtime,
@@ -668,6 +702,8 @@ export function AgentDefinitionDialog({
   function handleRuntimeDropdownChange(nextValue: string) {
     const nextRuntime =
       nextValue === NO_RUNTIME_DROPDOWN_VALUE ? "" : nextValue;
+    // The user made an explicit choice — no longer auto-seeded.
+    isRuntimeAutoSeededRef.current = false;
     setRuntime(nextRuntime);
     applySelection(
       selectionOnRuntimeChange(selection, {

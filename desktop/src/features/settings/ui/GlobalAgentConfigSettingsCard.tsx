@@ -25,6 +25,7 @@ import type { InheritedEnvRow } from "@/features/agents/ui/EnvVarsEditor";
 import { getBakedProviderInheritLabel } from "@/features/agents/ui/bakedEnvHelpers";
 import {
   AUTO_PROVIDER_DROPDOWN_VALUE,
+  BLOCK_BUILD_HIDDEN_PROVIDER_IDS,
   CUSTOM_PROVIDER_DROPDOWN_VALUE,
   getPersonaProviderOptions,
 } from "@/features/agents/ui/personaDialogPickers";
@@ -134,6 +135,10 @@ export function GlobalAgentConfigSettingsCard() {
   );
   const bakedGenericRows = React.useMemo<readonly InheritedEnvRow[]>(
     () => bakedEnv.filter((e) => !BAKED_STRUCTURED_KEYS.has(e.key)),
+    [bakedEnv],
+  );
+  const bakedEnvKeys = React.useMemo(
+    () => bakedEnv.map((e) => e.key),
     [bakedEnv],
   );
 
@@ -257,9 +262,21 @@ export function GlobalAgentConfigSettingsCard() {
     }
   }
 
+  // On internal Block builds, BUZZ_AGENT_PROVIDER is baked in and a boot
+  // migration rewrites v1→v2. Hide the legacy v1 option so it is not offered
+  // for new selections; OSS builds show it.
+  const hideProviderIds = React.useMemo(
+    () =>
+      bakedEnvKeys.includes("BUZZ_AGENT_PROVIDER")
+        ? BLOCK_BUILD_HIDDEN_PROVIDER_IDS
+        : new Set<string>(),
+    [bakedEnvKeys],
+  );
   const providerOptions = getPersonaProviderOptions(
     providerValue,
     "buzz-agent",
+    undefined,
+    hideProviderIds,
   );
   const providerSelectValue = isCustomProvider
     ? CUSTOM_PROVIDER_DROPDOWN_VALUE
@@ -371,6 +388,11 @@ export function GlobalAgentConfigSettingsCard() {
                     effortValid={effortValid}
                     htmlFor="global-agent-thinking-effort"
                     inheritedEffort={bakedEffort ?? undefined}
+                    inheritFallbackLabel={
+                      effortDefault !== null
+                        ? `Default (${effortDefault})`
+                        : undefined
+                    }
                     label="Default thinking / effort"
                     onChange={(value) => {
                       setConfig((prev) => {

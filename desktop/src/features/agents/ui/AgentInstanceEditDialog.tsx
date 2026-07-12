@@ -7,6 +7,7 @@ import { toast } from "sonner";
 import {
   useAcpRuntimesQuery,
   useAgentConfigSurface,
+  useBakedBuildEnvKeysQuery,
   usePersonasQuery,
   useStartManagedAgentMutation,
   useUpdateManagedAgentMutation,
@@ -28,10 +29,12 @@ import { EditAgentAdvancedFields } from "./EditAgentAdvancedFields";
 import {
   AUTO_MODEL_DROPDOWN_VALUE,
   AUTO_PROVIDER_DROPDOWN_VALUE,
+  BLOCK_BUILD_HIDDEN_PROVIDER_IDS,
   CUSTOM_MODEL_DROPDOWN_VALUE,
   CUSTOM_PROVIDER_DROPDOWN_VALUE,
   formatRuntimeOptionLabel,
   getDefaultLlmModelLabel,
+  getDefaultPersonaRuntime,
   getModelSelectValue,
   getPersonaProviderOptions,
   hasPersonaModelOption,
@@ -328,6 +331,9 @@ export function AgentInstanceEditDialog({
       runtimes.find((r) => r.command?.trim() === agent.agentCommand.trim())
         ?.id ??
       runtimes.find((r) => r.id === agent.agentCommand.trim())?.id ??
+      // Fall back to the app default runtime so discovery can run for agents
+      // whose persona has no runtime set (e.g. freshly-added catalog builtins).
+      getDefaultPersonaRuntime(runtimes)?.id ??
       ""
     );
   }, [
@@ -386,6 +392,8 @@ export function AgentInstanceEditDialog({
       globalEnvVars: globalConfig.env_vars,
       setShowAdvancedFields,
     });
+
+  const { data: bakedEnvKeys } = useBakedBuildEnvKeysQuery({ enabled: open });
 
   // Merge global env as the base layer so credential keys satisfied via global
   // config (e.g. ANTHROPIC_API_KEY) are available to model discovery. Use
@@ -773,10 +781,18 @@ export function AgentInstanceEditDialog({
 
   // Provider field derived state
   const trimmedProvider = provider.trim();
+  const hideProviderIds = React.useMemo(
+    () =>
+      (bakedEnvKeys ?? []).includes("BUZZ_AGENT_PROVIDER")
+        ? BLOCK_BUILD_HIDDEN_PROVIDER_IDS
+        : new Set<string>(),
+    [bakedEnvKeys],
+  );
   const providerOptions = getPersonaProviderOptions(
     trimmedProvider,
     selectedRuntime?.id ?? "",
     globalConfig.provider ?? "",
+    hideProviderIds,
   );
   const providerSelectValue = isCustomProviderEditing
     ? CUSTOM_PROVIDER_DROPDOWN_VALUE
@@ -923,7 +939,6 @@ export function AgentInstanceEditDialog({
                 </p>
               ) : null}
             </div>
-
             {/* LLM provider */}
             {llmProviderFieldVisible ? (
               <div className="space-y-1.5">

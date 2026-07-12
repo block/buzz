@@ -403,7 +403,14 @@ const overrides = new Map([
   // +23 rebase onto #1667: behavioral quad fields (respond_to/parallelism/toolsets)
   // plumbed through AgentInstanceEditDialog from PersonaAdvancedFields.
   // +2 provider-aware effort: model/provider props threaded to BuzzAgentModelTuningFields.
-  ["src/features/agents/ui/AgentInstanceEditDialog.tsx", 1165],
+  // +15 provider/model dropdown fixes: useBakedBuildEnvKeysQuery + hideProviderIds
+  // for Databricks v1 gate; prospectiveRuntimeId default fallback for builtins.
+  ["src/features/agents/ui/AgentInstanceEditDialog.tsx", 1180],
+  // AgentDefinitionDialog grew past 1000 with the following load-bearing fixes:
+  // isRuntimeAutoSeededRef tracking for edit-mode seeding (Fizz shows models);
+  // runtimeSupportsLlmProviderSelection guard on discovery provider (codex fix);
+  // hideProviderIds computation for Databricks v1 gate. Queued to split.
+  ["src/features/agents/ui/AgentDefinitionDialog.tsx", 1035],
 ]);
 
 await runFileSizeCheck({
