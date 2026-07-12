@@ -471,7 +471,7 @@ mod tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 7);
+        assert_eq!(migrations.len(), 8);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -587,6 +587,19 @@ mod tests {
             .sql
             .as_str()
             .contains("ALTER TABLE events DROP COLUMN search_tsv"));
+
+        // Fresh installs opt into the positive search allowlist without making
+        // populated databases rewrite their events heap during relay startup.
+        assert_eq!(migrations[7].version, 8);
+        assert!(migrations[7]
+            .sql
+            .as_str()
+            .contains("IF NOT EXISTS (SELECT 1 FROM events LIMIT 1)"));
+        assert!(migrations[7]
+            .sql
+            .as_str()
+            .contains("CASE WHEN kind IN (0, 9, 40002, 45001, 45003)"));
+        assert!(migrations[7].sql.as_str().contains("ELSE NULL::tsvector"));
     }
 
     #[test]
@@ -801,5 +814,25 @@ mod tests {
             );
             assert!(exists, "migration should create {table}");
         }
+
+        let search_expression: String = sqlx::query_scalar(
+            "SELECT pg_get_expr(adbin, adrelid) \
+             FROM pg_attrdef \
+             WHERE adrelid = 'events'::regclass \
+               AND adnum = (SELECT attnum FROM pg_attribute \
+                            WHERE attrelid = 'events'::regclass \
+                              AND attname = 'search_tsv')",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("read fresh-install search expression");
+        assert!(
+            search_expression.contains("ARRAY[0, 9, 40002, 45001, 45003]"),
+            "fresh-install search allowlist has the wrong kinds: {search_expression}"
+        );
+        assert!(
+            search_expression.contains("ELSE NULL::tsvector"),
+            "fresh installs must default non-allowlisted kinds to NULL: {search_expression}"
+        );
     }
 }
