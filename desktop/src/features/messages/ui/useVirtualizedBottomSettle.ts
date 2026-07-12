@@ -23,10 +23,12 @@ export function useVirtualizedBottomSettle(
     const retire = () => cancel();
     scroller.addEventListener("pointerdown", retire, { passive: true });
     scroller.addEventListener("touchstart", retire, { passive: true });
+    scroller.addEventListener("wheel", retire, { passive: true });
     window.addEventListener("keydown", retire, true);
     return () => {
       scroller.removeEventListener("pointerdown", retire);
       scroller.removeEventListener("touchstart", retire);
+      scroller.removeEventListener("wheel", retire);
       window.removeEventListener("keydown", retire, true);
     };
   }, [cancel, hostRef]);

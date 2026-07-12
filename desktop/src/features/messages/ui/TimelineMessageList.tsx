@@ -382,7 +382,6 @@ function VirtualizedTimelineRows({
   const [offscreenBufferSize, setOffscreenBufferSize] = React.useState(() =>
     typeof window === "undefined" ? 1_000 : window.innerHeight,
   );
-  const initialPositionFrameRef = React.useRef<number | null>(null);
   const hasInitialPositionedRef = React.useRef(false);
   const items = React.useMemo(
     () => buildVirtualizedItems(dayGroups, leadingContent, historyExhausted),
@@ -523,25 +522,9 @@ function VirtualizedTimelineRows({
     }
     if (!hasInitialPositionedRef.current && items.length > 0) {
       hasInitialPositionedRef.current = true;
-      const scrollToSettledBottom = () => {
-        listRef.current?.scrollToIndex(items.length - 1, { align: "end" });
-      };
-      scrollToSettledBottom();
-      initialPositionFrameRef.current = requestAnimationFrame(() => {
-        initialPositionFrameRef.current = null;
-        scrollToSettledBottom();
-      });
+      settleAtBottom();
     }
-  }, [cancelBottomSettle, isPrepend, items.length, keys]);
-
-  React.useEffect(
-    () => () => {
-      if (initialPositionFrameRef.current !== null) {
-        cancelAnimationFrame(initialPositionFrameRef.current);
-      }
-    },
-    [],
-  );
+  }, [cancelBottomSettle, isPrepend, items.length, keys, settleAtBottom]);
 
   const messageItemIndexById = React.useMemo(() => {
     const byId = new Map<string, number>();
