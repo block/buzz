@@ -39,15 +39,17 @@ export function shouldSettleVirtualizedBottom({
   anchorKind,
   messageDelta,
   messagesArrived,
+  messagesChanged,
 }: {
   anchorKind: AnchorState["kind"];
   messageDelta: TimelineMessageDelta;
   messagesArrived: number;
+  messagesChanged: boolean;
 }): boolean {
   return (
     anchorKind === "at-bottom" &&
-    messagesArrived > 0 &&
-    messageDelta === "append"
+    messageDelta !== "prepend" &&
+    (messagesArrived > 0 || messagesChanged)
   );
 }
 
@@ -513,6 +515,7 @@ export function useAnchoredScroll({
           anchorKind: anchor.kind,
           messageDelta,
           messagesArrived,
+          messagesChanged: messages !== prevMessages,
         })
       ) {
         virtualSettleAtBottom?.();

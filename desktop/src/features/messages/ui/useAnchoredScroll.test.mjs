@@ -20,30 +20,58 @@ function fakeContainer({ clientHeight, scrollHeight, scrollTop }) {
   };
 }
 
-test("virtualized bottom settle arms only for pinned appends", () => {
+test("virtualized bottom settle arms for pinned appends and replacements", () => {
   assert.equal(
     shouldSettleVirtualizedBottom({
       anchorKind: "at-bottom",
       messageDelta: "append",
       messagesArrived: 1,
+      messagesChanged: true,
     }),
     true,
   );
-  for (const messageDelta of ["prepend", "replace", "none"]) {
-    assert.equal(
-      shouldSettleVirtualizedBottom({
-        anchorKind: "at-bottom",
-        messageDelta,
-        messagesArrived: 1,
-      }),
-      false,
-    );
-  }
+  assert.equal(
+    shouldSettleVirtualizedBottom({
+      anchorKind: "at-bottom",
+      messageDelta: "replace",
+      messagesArrived: 0,
+      messagesChanged: true,
+    }),
+    true,
+  );
+  assert.equal(
+    shouldSettleVirtualizedBottom({
+      anchorKind: "at-bottom",
+      messageDelta: "none",
+      messagesArrived: 0,
+      messagesChanged: true,
+    }),
+    true,
+  );
+  assert.equal(
+    shouldSettleVirtualizedBottom({
+      anchorKind: "at-bottom",
+      messageDelta: "prepend",
+      messagesArrived: 1,
+      messagesChanged: true,
+    }),
+    false,
+  );
+  assert.equal(
+    shouldSettleVirtualizedBottom({
+      anchorKind: "at-bottom",
+      messageDelta: "none",
+      messagesArrived: 0,
+      messagesChanged: false,
+    }),
+    false,
+  );
   assert.equal(
     shouldSettleVirtualizedBottom({
       anchorKind: "message",
       messageDelta: "append",
       messagesArrived: 1,
+      messagesChanged: true,
     }),
     false,
   );
