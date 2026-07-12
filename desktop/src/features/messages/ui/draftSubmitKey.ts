@@ -3,8 +3,8 @@
  * time.
  *
  * Returns the key when a draft was actually persisted in the store before the
- * send fired (so a sent record should be written), or null when no entry
- * exists (fast / never-persisted send — no sent record should be written).
+ * send fired (so the active draft should be cleared on send), or null when no
+ * entry exists (fast / never-persisted send — no active draft to clear).
  *
  * This is a pure function with no dependencies so it can be imported and
  * exercised directly in Node .mjs tests without a React renderer.

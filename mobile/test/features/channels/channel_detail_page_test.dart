@@ -10,6 +10,8 @@ import 'package:buzz/features/channels/channel_detail_page.dart';
 import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/channel_messages_provider.dart';
 import 'package:buzz/features/channels/channel_typing_provider.dart';
+import 'package:buzz/features/channels/thread_detail_page.dart';
+import 'package:buzz/features/channels/timeline_message.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/features/channels/read_state/read_state_provider.dart';
 import 'package:buzz/features/profile/profile_provider.dart';
@@ -1099,17 +1101,7 @@ void main() {
 
   group('Channel links', () {
     testWidgets('tapping a channel link opens that channel', (tester) async {
-      final randomChannel = Channel(
-        id: 'random-channel',
-        name: 'random',
-        channelType: 'stream',
-        visibility: 'open',
-        description: 'Random discussion',
-        createdBy: 'abc123',
-        createdAt: DateTime(2025),
-        memberCount: 3,
-        isMember: true,
-      );
+      final randomChannel = _channel(id: 'random-channel', name: 'random');
       final observer = _TestNavigatorObserver();
 
       await tester.pumpWidget(
@@ -1137,8 +1129,106 @@ void main() {
 
       expect(observer.pushCount, initialPushCount + 1);
     });
+
+    testWidgets('missing channel link shows an error', (tester) async {
+      final randomChannel = _channel(id: 'random-channel', name: 'random');
+      final channelsNotifier = _FakeChannelsNotifier([
+        _testChannel,
+        randomChannel,
+      ]);
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [
+            _textMsg(
+              id: 'msg1',
+              pubkey: 'alice',
+              content: 'Take this to #random',
+              createdAt: 1000,
+            ),
+          ],
+          users: {
+            'alice': const UserProfile(pubkey: 'alice', displayName: 'Alice'),
+          },
+          channelsNotifier: channelsNotifier,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      channelsNotifier.setChannels([_testChannel]);
+      await tester.tap(find.text('#random'));
+      await tester.pump();
+
+      expect(find.text('Channel could not be opened'), findsOneWidget);
+    });
+
+    testWidgets('tapping a channel link inside a thread opens that channel', (
+      tester,
+    ) async {
+      final randomChannel = _channel(id: 'random-channel', name: 'random');
+      final observer = _TestNavigatorObserver();
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [
+            _textMsg(
+              id: 'msg1',
+              pubkey: 'alice',
+              content: 'Thread root #random',
+              createdAt: 1000,
+            ),
+          ],
+          users: {
+            'alice': const UserProfile(pubkey: 'alice', displayName: 'Alice'),
+          },
+          channels: [_testChannel, randomChannel],
+          navigatorObservers: [observer],
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final threadMessages = formatTimeline([
+        _textMsg(
+          id: 'msg1',
+          pubkey: 'alice',
+          content: 'Thread root #random',
+          createdAt: 1000,
+        ),
+      ]);
+      Navigator.of(tester.element(find.byType(ChannelDetailPage))).push(
+        MaterialPageRoute<void>(
+          builder: (_) => ThreadDetailPage(
+            threadHead: threadMessages.single,
+            allMessages: threadMessages,
+            channelId: _channelId,
+            currentPubkey: 'self',
+            isMember: true,
+            isArchived: false,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      final initialPushCount = observer.pushCount;
+
+      await tester.tap(find.text('#random').last);
+      await tester.pumpAndSettle();
+
+      expect(observer.pushCount, initialPushCount + 1);
+    });
   });
 }
+
+Channel _channel({required String id, required String name}) => Channel(
+  id: id,
+  name: name,
+  channelType: 'stream',
+  visibility: 'open',
+  description: '$name discussion',
+  createdBy: 'abc123',
+  createdAt: DateTime(2025),
+  memberCount: 3,
+  isMember: true,
+);
 
 class _FakeMessagesNotifier extends ChannelMessagesNotifier {
   List<NostrEvent> _messages;

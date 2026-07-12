@@ -32,7 +32,7 @@ fn reconcile_databricks_v1_to_v2_rewrites_v1_provider_on_block_build() {
     // Stale V1 model must be cleared so the baked DATABRICKS_MODEL is not
     // shadowed by BUZZ_AGENT_MODEL at spawn time (last-write-wins in Command::env).
     assert!(
-        records[0].get("model").map_or(true, |v| v.is_null()),
+        records[0].get("model").is_none_or(|v| v.is_null()),
         "stale V1 model field must be cleared when provider is rewritten to V2"
     );
 }
@@ -98,12 +98,12 @@ fn reconcile_databricks_v1_to_v2_clears_model_on_provider_rewrite() {
     // V1 records: provider migrated, model cleared.
     assert_eq!(records[0]["provider"], "databricks_v2");
     assert!(
-        records[0].get("model").map_or(true, |v| v.is_null()),
+        records[0].get("model").is_none_or(|v| v.is_null()),
         "model must be cleared for V1→V2 migrated record A"
     );
     assert_eq!(records[1]["provider"], "databricks_v2");
     assert!(
-        records[1].get("model").map_or(true, |v| v.is_null()),
+        records[1].get("model").is_none_or(|v| v.is_null()),
         "model must be cleared for V1→V2 migrated record B"
     );
     // V2 record: model untouched.

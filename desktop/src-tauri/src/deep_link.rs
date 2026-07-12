@@ -36,6 +36,35 @@ fn parse_message_deep_link(url: &Url) -> Option<serde_json::Value> {
     }))
 }
 
+/// Parse the query string of a `buzz://join?…` URL into the JSON payload
+/// emitted on `deep-link-join`. Requires a ws(s) `relay` URL and a non-empty
+/// `code`; returns `None` otherwise so the frontend never sees a half-formed
+/// payload.
+fn parse_join_deep_link(url: &Url) -> Option<serde_json::Value> {
+    let mut relay: Option<String> = None;
+    let mut code: Option<String> = None;
+    for (k, v) in url.query_pairs() {
+        let v = v.into_owned();
+        if v.is_empty() {
+            continue;
+        }
+        match k.as_ref() {
+            "relay" => relay = Some(v),
+            "code" => code = Some(v),
+            _ => {}
+        }
+    }
+    let (relay_url, code) = (relay?, code?);
+    match Url::parse(&relay_url) {
+        Ok(parsed) if parsed.scheme() == "ws" || parsed.scheme() == "wss" => {}
+        _ => return None,
+    }
+    Some(serde_json::json!({
+        "relayUrl": relay_url,
+        "code": code,
+    }))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct NostrBindDeepLinkPayload {
@@ -142,6 +171,16 @@ pub(crate) fn handle_deep_link_url(app: &tauri::AppHandle, url_str: &str) {
             }
             let _ = app.emit("deep-link-connect", relay_url);
         }
+        Some("join") => {
+            // `buzz://join?relay=<ws(s)://...>&code=<invite code>` — fired by
+            // the relay's /invite/<code> landing page. The frontend claims the
+            // invite against the relay's HTTP API, then adds the workspace.
+            let Some(payload) = parse_join_deep_link(&url) else {
+                eprintln!("buzz-desktop: join deep link missing/invalid relay or code: {url_str}");
+                return;
+            };
+            let _ = app.emit("deep-link-join", payload);
+        }
         Some("message") => {
             // `buzz://message?channel=<uuid>&id=<eventId>[&thread=<rootId>]`
             //
@@ -178,7 +217,7 @@ pub(crate) fn handle_deep_link_url(app: &tauri::AppHandle, url_str: &str) {
 mod tests {
     use url::Url;
 
-    use super::{parse_message_deep_link, parse_nostr_bind_deep_link};
+    use super::{parse_join_deep_link, parse_message_deep_link, parse_nostr_bind_deep_link};
 
     fn valid_nostr_bind_url() -> Url {
         Url::parse(
@@ -235,6 +274,38 @@ mod tests {
         let url = Url::parse("buzz://message?channel=abc&id=xyz&thread=").unwrap();
         let payload = parse_message_deep_link(&url).expect("required params present");
         assert!(payload["threadRootId"].is_null());
+    }
+
+    #[test]
+    fn parse_join_deep_link_extracts_relay_and_code() {
+        let url = Url::parse("buzz://join?relay=wss%3A%2F%2Frelay.example&code=abc.def").unwrap();
+        let payload = parse_join_deep_link(&url).expect("required params present");
+        assert_eq!(payload["relayUrl"], "wss://relay.example");
+        assert_eq!(payload["code"], "abc.def");
+    }
+
+    #[test]
+    fn parse_join_deep_link_rejects_missing_code() {
+        let url = Url::parse("buzz://join?relay=wss%3A%2F%2Frelay.example").unwrap();
+        assert!(parse_join_deep_link(&url).is_none());
+    }
+
+    #[test]
+    fn parse_join_deep_link_rejects_empty_code() {
+        let url = Url::parse("buzz://join?relay=wss%3A%2F%2Frelay.example&code=").unwrap();
+        assert!(parse_join_deep_link(&url).is_none());
+    }
+
+    #[test]
+    fn parse_join_deep_link_rejects_missing_relay() {
+        let url = Url::parse("buzz://join?code=abc.def").unwrap();
+        assert!(parse_join_deep_link(&url).is_none());
+    }
+
+    #[test]
+    fn parse_join_deep_link_rejects_non_websocket_relay() {
+        let url = Url::parse("buzz://join?relay=https%3A%2F%2Frelay.example&code=abc.def").unwrap();
+        assert!(parse_join_deep_link(&url).is_none());
     }
 
     #[test]

@@ -14,7 +14,7 @@ import type {
   HomeFeedResponse,
   RelayEvent,
 } from "@/shared/api/types";
-import { resolveMentionNames } from "@/shared/lib/resolveMentionNames";
+import { resolveMentionProps } from "@/shared/lib/resolveMentionNames";
 
 export type InboxFilter =
   | "all"
@@ -38,6 +38,7 @@ export type InboxItem = {
   isActionRequired: boolean;
   latestActivityAt: number;
   mentionNames: string[];
+  mentionPubkeysByName?: Record<string, string>;
   preview: string;
   senderLabel: string;
   subject: string;
@@ -69,6 +70,7 @@ export type InboxContextMessage = InboxReply & {
   depth: number;
   isSelected: boolean;
   mentionNames: string[];
+  mentionPubkeysByName?: Record<string, string>;
 };
 
 export type InboxGroup = {
@@ -428,7 +430,10 @@ export function buildInboxItems({
       });
       const subject = feedHeadline(item);
       const preview = feedPreview(item);
-      const mentionNames = resolveMentionNames(item.tags, profiles) ?? [];
+      const { mentionNames, mentionPubkeysByName } = resolveMentionProps(
+        item.tags,
+        profiles,
+      );
       const groupChannel = resolveGroupChannel(item, group.items, channelById);
       const channelLabel = groupChannel.name;
       const displayItem: FeedItem = {
@@ -449,7 +454,8 @@ export function buildInboxItems({
         groupItems: group.items,
         isActionRequired: categories.includes("needs_action"),
         latestActivityAt: group.latestActivityAt,
-        mentionNames,
+        mentionNames: mentionNames ?? [],
+        mentionPubkeysByName,
         preview,
         senderLabel,
         subject,

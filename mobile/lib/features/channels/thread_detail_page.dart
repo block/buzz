@@ -8,6 +8,7 @@ import '../../shared/widgets/frosted_app_bar.dart';
 import '../../shared/widgets/frosted_scaffold.dart';
 import '../profile/user_cache_provider.dart';
 import '../profile/user_profile.dart';
+import 'channel_link_navigation.dart';
 import 'channel_typing_provider.dart';
 import 'thread_replies_provider.dart';
 import 'channels_provider.dart';
@@ -468,7 +469,14 @@ class _ThreadMessage extends ConsumerWidget {
                     mentionNames: mentionNames,
                     channelNames: channelNames,
                     tags: message.tags,
-                    onChannelTap: (_) {},
+                    onChannelTap: (targetChannelId) {
+                      openChannelLink(
+                        context: context,
+                        ref: ref,
+                        channelId: targetChannelId,
+                        currentChannelId: channelId,
+                      );
+                    },
                   ),
                   if (message.reactions.isNotEmpty)
                     ReactionRow(

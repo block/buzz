@@ -4,6 +4,7 @@ import {
   ensureRelayObserverSubscription,
   getAgentObserverSnapshot,
   getAgentTranscript,
+  getArchivedChannelEvents,
   ingestArchivedObserverEvents,
   subscribeAgentObserverStore,
 } from "@/features/agents/observerRelayStore";
@@ -15,7 +16,7 @@ import {
 } from "@/shared/api/tauriArchive";
 import { decryptObserverEvent } from "@/shared/api/tauriObserver";
 import { useIdentityQuery } from "@/shared/api/hooks";
-import type { TranscriptItem } from "./agentSessionTypes";
+import type { ObserverEvent, TranscriptItem } from "./agentSessionTypes";
 import type { RelayEvent } from "@/shared/api/types";
 import {
   createArchivePagingState,
@@ -56,6 +57,32 @@ export function useAgentTranscript(
   const getSnapshot = React.useCallback(
     () => getAgentTranscript(agentPubkey, enabled),
     [agentPubkey, enabled],
+  );
+
+  return React.useSyncExternalStore(subscribeToStore, getSnapshot);
+}
+
+/**
+ * Reactively read the channel-scoped archive raw events for a given
+ * (agent, channel) pair. Returns an empty array until archive pages are loaded.
+ *
+ * Subscribes to `subscribeAgentObserverStore` so it re-renders whenever
+ * `ingestArchivedObserverEvents` writes new pages to the archive window — the
+ * same subscription used by the live event snapshot, keeping both in sync.
+ *
+ * UI consumers merge these events with the live event window and call
+ * `buildTranscriptState()` once over the combined sorted/deduplicated set,
+ * so stateful transcript relationships (tool start/update, plan replacement,
+ * permission request/response) are never split across two independent state
+ * machines.
+ */
+export function useArchivedChannelEvents(
+  agentPubkey: string | null | undefined,
+  channelId: string | null | undefined,
+): ObserverEvent[] {
+  const getSnapshot = React.useCallback(
+    () => getArchivedChannelEvents(agentPubkey, channelId),
+    [agentPubkey, channelId],
   );
 
   return React.useSyncExternalStore(subscribeToStore, getSnapshot);

@@ -215,6 +215,47 @@ export function mergeLiveChannelWindowEvent(
   };
 }
 
+/**
+ * Apply a per-event transform across every event the store holds (page rows,
+ * page aux, live overlay, live aux), returning the same store reference when
+ * nothing changed.
+ *
+ * Local writes MUST go through this rather than patching the flattened
+ * `channelMessagesKey` array alone: the window store is the source of truth,
+ * and every live merge re-flattens it into `channelMessagesKey`
+ * (`flattenChannelWindowEvents`), so an update applied only to the flattened
+ * array is silently reverted by the next live event. The message-edit
+ * apply-on-success update hit exactly that: the edit rendered, then the next
+ * live merge re-flattened the un-edited store over it. (Masked on busy
+ * screens because unrelated re-renders kept re-deriving state; exposed once
+ * per-keystroke app-shell renders were removed.)
+ */
+export function mapChannelWindowEvents(
+  store: ChannelWindowStore,
+  map: (event: RelayEvent) => RelayEvent,
+): ChannelWindowStore {
+  let changed = false;
+  const mapEvent = (event: RelayEvent) => {
+    const next = map(event);
+    if (next !== event) changed = true;
+    return next;
+  };
+  const pages = store.pages.map((page) => {
+    const rows = page.rows.map((row) => {
+      const event = mapEvent(row.event);
+      return event === row.event ? row : { ...row, event };
+    });
+    const aux = page.aux.map(mapEvent);
+    return rows.every((row, index) => row === page.rows[index]) &&
+      aux.every((event, index) => event === page.aux[index])
+      ? page
+      : { ...page, rows, aux };
+  });
+  const liveOverlay = store.liveOverlay.map(mapEvent);
+  const liveAux = store.liveAux.map(mapEvent);
+  return changed ? { ...store, pages, liveOverlay, liveAux } : store;
+}
+
 /** Raw events in the chronological order expected by the existing renderer. */
 export function flattenChannelWindowEvents(store: ChannelWindowStore) {
   const byId = new Map<string, RelayEvent>();

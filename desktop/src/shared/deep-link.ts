@@ -1,6 +1,11 @@
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { toast } from "sonner";
 
+import {
+  inviteErrorMessage,
+  isInviteExpiredError,
+} from "@/shared/api/inviteHelpers";
+import { claimInvite } from "@/shared/api/invites";
 import type { Workspace } from "@/features/workspaces/types";
 import {
   deriveWorkspaceName,
@@ -37,19 +42,33 @@ export type NostrBindDeepLinkPayload = {
 };
 
 /**
+ * Payload emitted by the Rust deep-link handler for `buzz://join?…` —
+ * a relay invite from the web landing page (`/invite/<code>`).
+ */
+export type JoinDeepLinkPayload = {
+  relayUrl: string;
+  code: string;
+};
+
+/**
  * Register listeners for deep-link events emitted by the Rust backend.
  *
  * When a `buzz://connect?relay=<url>` link is opened, the handler
  * adds a workspace for the relay (deduplicating by URL) and switches
  * to it. Returns an unlisten function to tear down all listeners.
  *
+ * When a `buzz://join?relay=<url>&code=<invite>` link is opened (relay
+ * invite landing page), the handler first claims the invite against the
+ * relay's HTTP API — signed by this app's identity key — and only adds and
+ * switches to the workspace once the relay has admitted the key.
+ *
  * `buzz://message?…` is handled separately by `listenForMessageDeepLinks`,
  * because it needs to dispatch into the router which only exists below the
  * `RouterProvider` in the component tree.
  */
 export function listenForDeepLinks(deps: DeepLinkDeps): Promise<UnlistenFn> {
-  return listen<string>("deep-link-connect", (event) => {
-    const relayUrl = normalizeRelayUrl(event.payload);
+  const addAndSwitch = (rawRelayUrl: string) => {
+    const relayUrl = normalizeRelayUrl(rawRelayUrl);
     const name = deriveWorkspaceName(relayUrl);
     const id = deps.addWorkspace({
       id: crypto.randomUUID(),
@@ -61,7 +80,37 @@ export function listenForDeepLinks(deps: DeepLinkDeps): Promise<UnlistenFn> {
     // If addWorkspace returned the already-active workspace (same relay URL),
     // switchWorkspace is a no-op — force re-init so the connection refreshes.
     deps.reconnectWorkspace();
+    return name;
+  };
+
+  const connectPromise = listen<string>("deep-link-connect", (event) => {
+    const name = addAndSwitch(event.payload);
     toast.success(`Connected to ${name}`);
+  });
+
+  const joinPromise = listen<JoinDeepLinkPayload>("deep-link-join", (event) => {
+    const { relayUrl, code } = event.payload;
+    void claimInvite(relayUrl, code)
+      .then((result) => {
+        const name = addAndSwitch(relayUrl);
+        toast.success(
+          result.status === "already_member"
+            ? `Already a member of ${name}`
+            : `Joined ${name}`,
+        );
+      })
+      .catch((error: unknown) => {
+        const message = inviteErrorMessage(error);
+        toast.error(
+          isInviteExpiredError(error)
+            ? "This invite link has expired — ask for a new one."
+            : `Couldn't accept the invite: ${message}`,
+        );
+      });
+  });
+
+  return Promise.all([connectPromise, joinPromise]).then((unlistens) => () => {
+    for (const unlisten of unlistens) unlisten();
   });
 }
 

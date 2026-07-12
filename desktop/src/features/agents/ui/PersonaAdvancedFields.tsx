@@ -3,6 +3,8 @@ import { cn } from "@/shared/lib/cn";
 import { EnvVarsEditor, type EnvVarsValue } from "./EnvVarsEditor";
 import { CreateAgentRespondToField } from "./RespondToField";
 import type { PersonaBehaviorDraft } from "./personaBehaviorDraft";
+import { isBuzzAgentRuntime } from "./buzzAgentConfig";
+import { BuzzAgentModelTuningFields } from "./buzzAgentModelTuningFields";
 import {
   PERSONA_FIELD_CONTROL_CLASS,
   PERSONA_FIELD_SHELL_CLASS,
@@ -13,20 +15,33 @@ export function PersonaAdvancedFields({
   behaviorDraft,
   disabled,
   envVars,
+  inheritedEnvVars = {},
+  model,
+  modelTuningRuntimeId = "",
   namePoolText,
   onBehaviorDraftChange,
   onEnvVarsChange,
   onNamePoolTextChange,
+  provider,
   requiredEnvKeys = [],
   fileSatisfiedEnvKeys = [],
 }: {
   behaviorDraft: PersonaBehaviorDraft;
   disabled: boolean;
   envVars: EnvVarsValue;
+  /** Env vars to display as inherited defaults in tuning-field placeholders.
+   *  For templates, pass `globalConfig.env_vars` (the fallback layer). */
+  inheritedEnvVars?: EnvVarsValue;
+  /** Active LLM model — forwarded to BuzzAgentModelTuningFields for effort filtering. */
+  model?: string;
+  /** Runtime id for the buzz-agent tuning knobs visibility gate. */
+  modelTuningRuntimeId?: string;
   namePoolText: string;
   onBehaviorDraftChange: (value: PersonaBehaviorDraft) => void;
   onEnvVarsChange: (value: EnvVarsValue) => void;
   onNamePoolTextChange: (value: string) => void;
+  /** Active LLM provider id — forwarded to BuzzAgentModelTuningFields for effort filtering. */
+  provider?: string;
   requiredEnvKeys?: readonly string[];
   fileSatisfiedEnvKeys?: readonly string[];
 }) {
@@ -166,6 +181,25 @@ export function PersonaAdvancedFields({
         requiredKeys={requiredEnvKeys}
         value={envVars}
       />
+
+      {/* Tier-1 buzz-agent model-tuning knobs — only shown for buzz-agent. */}
+      {isBuzzAgentRuntime(modelTuningRuntimeId) ? (
+        <BuzzAgentModelTuningFields
+          envVars={envVars}
+          inheritedEnvVars={inheritedEnvVars}
+          model={model}
+          onEnvVarChange={(key, value) => {
+            const next = { ...envVars };
+            if (value === "") {
+              delete next[key];
+            } else {
+              next[key] = value;
+            }
+            onEnvVarsChange(next);
+          }}
+          provider={provider}
+        />
+      ) : null}
     </div>
   );
 }

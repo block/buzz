@@ -1,6 +1,9 @@
 import { AlertTriangle } from "lucide-react";
 
-import { requestOpenEditAgent } from "@/features/agents/openEditAgentEvent";
+import {
+  requestOpenEditAgent,
+  type EditAgentFocusTarget,
+} from "@/features/agents/openEditAgentEvent";
 import { useAppShell } from "@/app/AppShellContext";
 import type { ConfigNudgePayload } from "@/shared/lib/configNudge";
 import { cn } from "@/shared/lib/cn";
@@ -30,6 +33,8 @@ function requirementKey(
       return `normalized_field:${req.field}:${index}`;
     case "cli_login":
       return `cli_login:${req.probe_args.join(",")}:${index}`;
+    case "cli_config_invalid":
+      return `cli_config_invalid:${req.probe_args.join(",")}:${index}`;
   }
 }
 
@@ -60,6 +65,17 @@ function isAuthOnly(reqs: ConfigNudgePayload["requirements"]): boolean {
 }
 
 /**
+ * Returns true when every requirement is a `cli_config_invalid` surface.
+ * Config-invalid cards are purely informational — the user must edit an
+ * external file; there is no in-app destination that can fix it.
+ */
+function isAllConfigInvalid(reqs: ConfigNudgePayload["requirements"]): boolean {
+  return (
+    reqs.length > 0 && reqs.every((r) => r.surface === "cli_config_invalid")
+  );
+}
+
+/**
  * Per-state human-readable copy for a cli_login requirement.
  * Uses the probe_args[0] as a best-effort harness name.
  */
@@ -82,6 +98,44 @@ function cliLoginMessage(
       // the backend-supplied copy which has the exact login command.
       return req.setup_copy;
   }
+}
+
+/**
+ * Derive a field-focus target from the first actionable requirement.
+ * `cli_login` requirements don't map to a focusable Edit Agent field,
+ * so they are skipped. Returns `undefined` for cli_login-only nudges.
+ */
+function firstFocusTarget(
+  requirements: ConfigNudgePayload["requirements"],
+): EditAgentFocusTarget | undefined {
+  for (const req of requirements) {
+    if (req.surface === "env_key") {
+      return { type: "env_key", key: req.key };
+    }
+    if (req.surface === "normalized_field") {
+      return { type: "normalized_field", field: req.field };
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Derive a field-focus target from a SINGLE requirement.
+ * Mirrors `firstFocusTarget` but operates on one row — used so per-row
+ * Edit Agent CTAs focus the field that row describes, not the first editable
+ * field on the card.
+ * Returns `undefined` for `cli_login` requirements (Doctor, not Edit Agent).
+ */
+export function focusTargetForRequirement(
+  req: ConfigNudgePayload["requirements"][number],
+): EditAgentFocusTarget | undefined {
+  if (req.surface === "env_key") {
+    return { type: "env_key", key: req.key };
+  }
+  if (req.surface === "normalized_field") {
+    return { type: "normalized_field", field: req.field };
+  }
+  return undefined;
 }
 
 /**
@@ -123,6 +177,10 @@ export function ConfigNudgeCard({
 
   const allCliLogin = isAllCliLogin(nudge.requirements);
   const authOnly = isAuthOnly(nudge.requirements);
+  const allConfigInvalid = isAllConfigInvalid(nudge.requirements);
+  // Any card that is purely informational (auth-only or all-config-invalid)
+  // has no clickable destination — treat them the same for affordance/routing.
+  const informationalOnly = authOnly || allConfigInvalid;
 
   const openDoctor = () => {
     if (!onOpenSettings) {
@@ -133,9 +191,9 @@ export function ConfigNudgeCard({
     onOpenSettings?.("doctor");
   };
 
-  const openEditAgent = () => {
+  const openEditAgent = (focus?: EditAgentFocusTarget) => {
     openProfilePanel?.(nudge.agent_pubkey);
-    requestOpenEditAgent(nudge.agent_pubkey);
+    requestOpenEditAgent(nudge.agent_pubkey, focus);
   };
 
   const handleOpen = () => {
@@ -145,8 +203,8 @@ export function ConfigNudgeCard({
       // install-state cards where Doctor is the correct destination.
       openDoctor();
     } else {
-      // (B) Mixed card — card-level fallback to Edit Agent.
-      openEditAgent();
+      // (B) Mixed card — card-level fallback: focus the first editable field.
+      openEditAgent(firstFocusTarget(nudge.requirements));
     }
   };
 
@@ -157,20 +215,23 @@ export function ConfigNudgeCard({
     openDoctor();
   };
 
-  const handleOpenEditAgent = (e: React.MouseEvent) => {
-    // (B) Per-row Edit Agent CTA — stop propagation so the card trigger
-    // doesn't double-fire.
+  const handleOpenEditAgent = (
+    e: React.MouseEvent,
+    focus: EditAgentFocusTarget | undefined,
+  ) => {
+    // (B) Per-row Edit Agent CTA — focus the field this specific row describes.
+    // Stop propagation so the card trigger doesn't double-fire.
     e.stopPropagation();
-    openEditAgent();
+    openEditAgent(focus);
   };
 
   return (
     <Attachment
       className={cn(
         "max-w-[min(100%,32rem)] shrink-0 shadow-none",
-        // Affordance: cursor-pointer + subtle hover lift — omitted for auth-only
-        // cards which are purely informational (no click destination).
-        !authOnly && "cursor-pointer hover:shadow-sm",
+        // Affordance: cursor-pointer + subtle hover lift — omitted for
+        // informational-only cards which have no click destination.
+        !informationalOnly && "cursor-pointer hover:shadow-sm",
         className,
       )}
       orientation="horizontal"
@@ -196,15 +257,15 @@ export function ConfigNudgeCard({
         </div>
       </AttachmentContent>
       {/* (A) Install-state all-cli_login card only — single card-level CTA
-          confirming the action at rest. Auth-only cards are informational
-          (no CTA); mixed cards render per-row CTAs instead. */}
-      {allCliLogin && !authOnly && (
+          confirming the action at rest. Informational-only cards have no CTA;
+          mixed cards render per-row CTAs instead. */}
+      {allCliLogin && !informationalOnly && (
         <AttachmentActions className="items-end self-end">
           <span className="text-xs text-muted-foreground">Open Doctor →</span>
         </AttachmentActions>
       )}
-      {/* Auth-only cards are purely informational — no trigger, no routing. */}
-      {!authOnly && (
+      {/* Informational-only cards are purely informational — no trigger, no routing. */}
+      {!informationalOnly && (
         <AttachmentTrigger
           aria-label={
             allCliLogin
@@ -226,7 +287,10 @@ function RequirementRow({
 }: {
   allCliLogin: boolean;
   onOpenDoctor: (e: React.MouseEvent) => void;
-  onOpenEditAgent: (e: React.MouseEvent) => void;
+  onOpenEditAgent: (
+    e: React.MouseEvent,
+    focus: EditAgentFocusTarget | undefined,
+  ) => void;
   requirement: ConfigNudgePayload["requirements"][number];
 }) {
   switch (requirement.surface) {
@@ -243,7 +307,9 @@ function RequirementRow({
           {!allCliLogin && (
             <button
               className="relative z-20 shrink-0 font-medium text-muted-foreground hover:underline"
-              onClick={onOpenEditAgent}
+              onClick={(e) =>
+                onOpenEditAgent(e, focusTargetForRequirement(requirement))
+              }
               type="button"
             >
               Edit Agent →
@@ -261,7 +327,9 @@ function RequirementRow({
           {!allCliLogin && (
             <button
               className="relative z-20 shrink-0 font-medium text-muted-foreground hover:underline"
-              onClick={onOpenEditAgent}
+              onClick={(e) =>
+                onOpenEditAgent(e, focusTargetForRequirement(requirement))
+              }
               type="button"
             >
               Edit Agent →
@@ -294,5 +362,23 @@ function RequirementRow({
           )}
         </div>
       );
+    case "cli_config_invalid": {
+      // Config-invalid rows are purely informational — the user must edit an
+      // external file. No Doctor CTA (Doctor can't repair ~/.codex/config.toml)
+      // and no Edit Agent CTA (the field isn't managed by Buzz).
+      const cli = requirement.probe_args[0] ?? "the CLI";
+      const configFile = `~/.${cli}/config.toml`;
+      return (
+        <div className="flex items-center gap-2 text-xs leading-4 text-muted-foreground">
+          <span className="flex-1 [overflow-wrap:anywhere]">
+            {configFile} is invalid:{" "}
+            <code className="rounded bg-muted px-1 py-0.5 font-mono text-xs text-foreground">
+              {requirement.diagnostic}
+            </code>{" "}
+            — fix the config and restart the agent
+          </span>
+        </div>
+      );
+    }
   }
 }

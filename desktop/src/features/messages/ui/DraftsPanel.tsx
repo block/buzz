@@ -6,7 +6,6 @@ import { useChannelsQuery } from "@/features/channels/hooks";
 import {
   clearDraftEntry,
   getActiveDraftEntries,
-  getSentDraftEntries,
   useDraftsSnapshot,
   type DraftState,
 } from "@/features/messages/lib/useDrafts";
@@ -122,14 +121,10 @@ function getDraftPreview(draft: DraftState): string {
 
 function readDraftSections(): DraftSection[] {
   const active = getActiveDraftEntries().filter(isVisibleDraft);
-  const sent = getSentDraftEntries().filter(isVisibleDraft);
   const sections: DraftSection[] = [];
 
   if (active.length > 0) {
     sections.push({ label: "Drafts", status: "active", entries: active });
-  }
-  if (sent.length > 0) {
-    sections.push({ label: "Sent", status: "sent", entries: sent });
   }
 
   return sections;

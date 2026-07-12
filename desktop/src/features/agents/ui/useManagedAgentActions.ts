@@ -375,37 +375,6 @@ export function useManagedAgentActions() {
     );
   }
 
-  async function handleBulkRemoveStopped() {
-    const targets = managedAgents.filter(
-      (a) => a.status === "stopped" || a.status === "not_deployed",
-    );
-    const executed = await runBulkAction(
-      targets,
-      "Remove",
-      "removal",
-      async (a) => {
-        await deleteManagedAgent(a);
-        await removeAgentFromAllChannels(a.pubkey);
-      },
-    );
-    if (
-      executed &&
-      logAgentPubkey &&
-      targets.some((a) => a.pubkey === logAgentPubkey)
-    ) {
-      setLogAgentPubkey(null);
-    }
-  }
-
-  async function deleteManagedAgent(agent: ManagedAgent) {
-    const isDeployedRemote =
-      agent.backend.type === "provider" && agent.backendAgentId;
-    await deleteMutation.mutateAsync({
-      pubkey: agent.pubkey,
-      forceRemoteDelete: isDeployedRemote ? true : undefined,
-    });
-  }
-
   const isPending =
     createAgentMutation.isPending ||
     startMutation.isPending ||
@@ -448,7 +417,6 @@ export function useManagedAgentActions() {
     handleToggleStartOnAppLaunch,
     handleAddedToChannel,
     handleBulkStopRunning,
-    handleBulkRemoveStopped,
     refetchManagedAgents: () => void managedAgentsQuery.refetch(),
     refetchRelayAgents: () => void relayAgentsQuery.refetch(),
   };

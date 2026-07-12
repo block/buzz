@@ -53,6 +53,7 @@ import {
   hasBlockMedia,
   isImageOnlyParagraph,
   shallowArrayEqual,
+  shallowRecordEqual,
 } from "./markdownUtils";
 import {
   CODE_BLOCK_CLASS,
@@ -1807,13 +1808,17 @@ function createMarkdownComponents(
           {mentionLabel}
         </>
       );
+      // Only chips that actually open a profile get the clickable affordance.
+      // A mention whose pubkey didn't resolve stays a plain chip — a pointer
+      // cursor there promises a click that does nothing.
+      const opensProfile = interactive && pubkey !== undefined;
       const mentionNode = (
         <span
           data-mention=""
           className={cn(
-            "cursor-pointer",
             MENTION_CHIP_BASE_CLASSES,
-            MENTION_CHIP_HOVER_CLASSES,
+            opensProfile && "cursor-pointer",
+            opensProfile && MENTION_CHIP_HOVER_CLASSES,
             isAgentMention && "agent-mention-highlight",
           )}
         >
@@ -1821,11 +1826,7 @@ function createMarkdownComponents(
         </span>
       );
 
-      if (!interactive) {
-        return mentionNode;
-      }
-
-      return pubkey ? (
+      return opensProfile ? (
         <UserProfilePopover
           botIdenticonValue={mentionLabel}
           pubkey={pubkey}
@@ -2103,8 +2104,11 @@ export const Markdown = React.memo(
     prev.customEmoji === next.customEmoji &&
     prev.interactive === next.interactive &&
     prev.mediaInset === next.mediaInset &&
-    prev.agentMentionPubkeysByName === next.agentMentionPubkeysByName &&
-    prev.mentionPubkeysByName === next.mentionPubkeysByName &&
+    shallowRecordEqual(
+      prev.agentMentionPubkeysByName,
+      next.agentMentionPubkeysByName,
+    ) &&
+    shallowRecordEqual(prev.mentionPubkeysByName, next.mentionPubkeysByName) &&
     shallowArrayEqual(prev.mentionNames, next.mentionNames) &&
     shallowArrayEqual(prev.channelNames, next.channelNames) &&
     prev.imetaByUrl === next.imetaByUrl &&

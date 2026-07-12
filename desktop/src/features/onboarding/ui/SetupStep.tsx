@@ -14,6 +14,7 @@ import {
 } from "@/features/agents/hooks";
 import { describeResolvedCommand } from "@/features/agents/ui/agentUi";
 import type { AcpRuntimeCatalogEntry } from "@/shared/api/types";
+import { getInstallErrorMessage } from "@/shared/lib/installError";
 import { cn } from "@/shared/lib/cn";
 import { useTheme } from "@/shared/theme/ThemeProvider";
 import { Badge } from "@/shared/ui/badge";
@@ -264,7 +265,7 @@ function RuntimeCard({
         <RuntimeDetails runtime={runtime} />
 
         {installError ? (
-          <p className="mt-3 rounded-md border border-destructive/25 bg-destructive/10 px-3 py-2 text-xs leading-5 text-destructive">
+          <p className="mt-3 whitespace-pre-line rounded-md border border-destructive/25 bg-destructive/10 px-3 py-2 text-xs leading-5 text-destructive">
             {installError}
           </p>
         ) : null}
@@ -285,19 +286,6 @@ function RuntimeCard({
       />
     </div>
   );
-}
-
-function getInstallErrorMessage(result: {
-  steps: { stderr: string; stdout: string; step: string }[];
-}) {
-  const lastStep = result.steps[result.steps.length - 1];
-  if (!lastStep) {
-    return "Install failed with no output.";
-  }
-
-  return `Step "${lastStep.step}" failed: ${
-    lastStep.stderr || lastStep.stdout || "unknown error"
-  }`;
 }
 
 function RuntimeProvidersSection({
@@ -323,7 +311,7 @@ function RuntimeProvidersSection({
           ...current,
           [runtimeId]: result.success
             ? { error: null, success: true }
-            : { error: getInstallErrorMessage(result), success: false },
+            : { error: getInstallErrorMessage(result.steps), success: false },
         }));
       },
       onError: (error) => {

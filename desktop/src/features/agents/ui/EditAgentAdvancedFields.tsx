@@ -8,6 +8,8 @@ import {
   PERSONA_LABEL_OPTIONAL_CLASS,
 } from "./personaDialogPickers";
 import type { AgentPersona } from "@/shared/api/types";
+import { BuzzAgentModelTuningFields } from "./buzzAgentModelTuningFields";
+import { isBuzzAgentRuntime } from "./buzzAgentConfig";
 
 export function EditAgentAdvancedFields({
   acpCommand,
@@ -17,29 +19,29 @@ export function EditAgentAdvancedFields({
   disabled,
   envVars,
   fileSatisfiedEnvKeys,
+  focusKey,
   inheritedEnvVars,
   inheritHarness,
   linkedPersona,
-  mcpCommand,
   mcpToolsets,
+  model,
+  modelTuningRuntimeId,
   parallelism,
+  provider,
   relayUrl,
   requiredEnvKeys,
   selectedRuntimeId,
   systemPrompt,
-  turnTimeoutSeconds,
   onAcpCommandChange,
   onAgentArgsChange,
   onAgentCommandChange,
   onEnvVarsChange,
   onInheritHarnessChange,
-  onMcpCommandChange,
   onMcpToolsetsChange,
   onParallelismChange,
   onRelayUrlChange,
   onAutoRestartChange,
   onSystemPromptChange,
-  onTurnTimeoutChange,
 }: {
   acpCommand: string;
   agentArgs: string;
@@ -48,29 +50,37 @@ export function EditAgentAdvancedFields({
   disabled: boolean;
   envVars: EnvVarsValue;
   fileSatisfiedEnvKeys: readonly string[];
+  /** When set, EnvVarsEditor scrolls and focuses this key's input on mount. */
+  focusKey?: string;
   inheritedEnvVars: Record<string, string>;
   inheritHarness: boolean;
   linkedPersona: AgentPersona | null;
-  mcpCommand: string;
   mcpToolsets: string;
+  /** Active LLM model — forwarded to BuzzAgentModelTuningFields for effort filtering. */
+  model?: string;
+  /**
+   * The actual/prospective runtime id used to decide whether to show the
+   * buzz-agent model-tuning fields. Uses `prospectiveRuntimeId` from
+   * EditAgentDialog — the resolved runtime, not the "inherit"/"custom" sentinel.
+   */
+  modelTuningRuntimeId: string;
   parallelism: string;
+  /** Active LLM provider id — forwarded to BuzzAgentModelTuningFields for effort filtering. */
+  provider?: string;
   relayUrl: string;
   requiredEnvKeys: readonly string[];
   selectedRuntimeId: string;
   systemPrompt: string;
-  turnTimeoutSeconds: string;
   onAcpCommandChange: (value: string) => void;
   onAgentArgsChange: (value: string) => void;
   onAgentCommandChange: (value: string) => void;
   onEnvVarsChange: (value: EnvVarsValue) => void;
   onInheritHarnessChange: (value: boolean) => void;
-  onMcpCommandChange: (value: string) => void;
   onMcpToolsetsChange: (value: string) => void;
   onParallelismChange: (value: string) => void;
   onRelayUrlChange: (value: string) => void;
   onAutoRestartChange: (value: boolean) => void;
   onSystemPromptChange: (value: string) => void;
-  onTurnTimeoutChange: (value: string) => void;
 }) {
   return (
     <div className="space-y-5 pt-2">
@@ -181,36 +191,6 @@ export function EditAgentAdvancedFields({
         </div>
       </div>
 
-      {/* MCP command */}
-      <div className="space-y-1.5">
-        <label
-          className="text-sm font-medium text-foreground"
-          htmlFor="edit-agent-mcp-command"
-        >
-          MCP command
-          <span className={PERSONA_LABEL_OPTIONAL_CLASS}>Optional</span>
-        </label>
-        <div
-          className={cn(
-            "flex min-h-11 items-center px-3",
-            PERSONA_FIELD_SHELL_CLASS,
-          )}
-        >
-          <Input
-            autoCorrect="off"
-            className={cn(
-              "h-8 px-0 py-0 leading-6",
-              PERSONA_FIELD_CONTROL_CLASS,
-            )}
-            disabled={disabled}
-            id="edit-agent-mcp-command"
-            onChange={(event) => onMcpCommandChange(event.target.value)}
-            placeholder="Optional MCP server command"
-            value={mcpCommand}
-          />
-        </div>
-      </div>
-
       {/* MCP toolsets */}
       <div className="space-y-1.5">
         <label
@@ -244,64 +224,33 @@ export function EditAgentAdvancedFields({
         </p>
       </div>
 
-      {/* Turn timeout + Parallelism side by side */}
-      <div className="grid gap-4 md:grid-cols-2">
-        <div className="space-y-1.5">
-          <label
-            className="text-sm font-medium text-foreground"
-            htmlFor="edit-agent-timeout"
-          >
-            Turn timeout
-            <span className={PERSONA_LABEL_OPTIONAL_CLASS}>seconds</span>
-          </label>
-          <div
+      {/* Parallelism */}
+      <div className="space-y-1.5">
+        <label
+          className="text-sm font-medium text-foreground"
+          htmlFor="edit-agent-parallelism"
+        >
+          Parallelism
+        </label>
+        <div
+          className={cn(
+            "flex min-h-11 items-center px-3",
+            PERSONA_FIELD_SHELL_CLASS,
+          )}
+        >
+          <Input
+            autoCorrect="off"
             className={cn(
-              "flex min-h-11 items-center px-3",
-              PERSONA_FIELD_SHELL_CLASS,
+              "h-8 px-0 py-0 leading-6",
+              PERSONA_FIELD_CONTROL_CLASS,
             )}
-          >
-            <Input
-              autoCorrect="off"
-              className={cn(
-                "h-8 px-0 py-0 leading-6",
-                PERSONA_FIELD_CONTROL_CLASS,
-              )}
-              disabled={disabled}
-              id="edit-agent-timeout"
-              onChange={(event) => onTurnTimeoutChange(event.target.value)}
-              placeholder="300"
-              value={turnTimeoutSeconds}
-            />
-          </div>
-        </div>
-
-        <div className="space-y-1.5">
-          <label
-            className="text-sm font-medium text-foreground"
-            htmlFor="edit-agent-parallelism"
-          >
-            Parallelism
-          </label>
-          <div
-            className={cn(
-              "flex min-h-11 items-center px-3",
-              PERSONA_FIELD_SHELL_CLASS,
-            )}
-          >
-            <Input
-              autoCorrect="off"
-              className={cn(
-                "h-8 px-0 py-0 leading-6",
-                PERSONA_FIELD_CONTROL_CLASS,
-              )}
-              disabled={disabled}
-              id="edit-agent-parallelism"
-              inputMode="numeric"
-              onChange={(event) => onParallelismChange(event.target.value)}
-              placeholder="1"
-              value={parallelism}
-            />
-          </div>
+            disabled={disabled}
+            id="edit-agent-parallelism"
+            inputMode="numeric"
+            onChange={(event) => onParallelismChange(event.target.value)}
+            placeholder="1"
+            value={parallelism}
+          />
         </div>
       </div>
 
@@ -391,13 +340,33 @@ export function EditAgentAdvancedFields({
       <EnvVarsEditor
         disabled={disabled}
         fileSatisfiedKeys={fileSatisfiedEnvKeys}
+        focusKey={focusKey}
         helperText="Per-agent env vars. Override the template's vars on collision."
         inheritedFrom={inheritedEnvVars}
-        inheritedLabel="template"
+        inheritedLabel="template / global defaults"
         onChange={onEnvVarsChange}
         requiredKeys={requiredEnvKeys}
         value={envVars}
       />
+
+      {/* Tier-1 buzz-agent model-tuning knobs — only shown for buzz-agent. */}
+      {isBuzzAgentRuntime(modelTuningRuntimeId) ? (
+        <BuzzAgentModelTuningFields
+          envVars={envVars}
+          inheritedEnvVars={inheritedEnvVars}
+          model={model}
+          onEnvVarChange={(key, value) => {
+            const next = { ...envVars };
+            if (value === "") {
+              delete next[key];
+            } else {
+              next[key] = value;
+            }
+            onEnvVarsChange(next);
+          }}
+          provider={provider}
+        />
+      ) : null}
     </div>
   );
 }

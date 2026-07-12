@@ -103,6 +103,14 @@ pub(crate) enum RequirementPayload {
         /// missing and the probe was skipped.
         availability: AcpAvailabilityStatus,
     },
+    /// The CLI is installed but its config file could not be parsed.
+    /// Informational only — no in-app action can fix an external config file.
+    CliConfigInvalid {
+        probe_args: Vec<String>,
+        setup_copy: String,
+        /// One-line stderr excerpt identifying the parse error.
+        diagnostic: String,
+    },
 }
 
 impl RequirementPayload {
@@ -149,6 +157,18 @@ impl RequirementPayload {
                     format!("install {} (open Doctor in Settings to diagnose)", harness)
                 }
             },
+            RequirementPayload::CliConfigInvalid {
+                probe_args,
+                diagnostic,
+                ..
+            } => {
+                let cli = probe_args.first().map(String::as_str).unwrap_or("the CLI");
+                let config_file = format!("~/.{}/config.toml", cli);
+                format!(
+                    "{} is invalid: {} — fix the config and restart the agent",
+                    config_file, diagnostic
+                )
+            }
         }
     }
 }
@@ -213,10 +233,32 @@ impl SetupPayload {
                 .map(|r| format!("- {}", r.instruction()))
                 .collect();
 
+            let all_external = self
+                .requirements
+                .iter()
+                .all(|r| matches!(r, RequirementPayload::CliConfigInvalid { .. }));
+            let any_external = self
+                .requirements
+                .iter()
+                .any(|r| matches!(r, RequirementPayload::CliConfigInvalid { .. }));
+
+            let footer = if all_external {
+                // All requirements are external config files — Edit Agent cannot
+                // help. Don't send the user there.
+                "Fix the config file(s) and restart the agent.".to_string()
+            } else if any_external {
+                // Mixed: some Buzz-managed fields, some external config.
+                "Open Edit Agent in the Buzz app for the Buzz-managed fields; fix the external CLI config files manually and restart the agent.".to_string()
+            } else {
+                // All Buzz-managed — original footer unchanged.
+                "Open Edit Agent in the Buzz app to set these.".to_string()
+            };
+
             format!(
-                "**{}** needs configuration before it can respond:\n{}\n\nOpen Edit Agent in the Buzz app to set these.",
+                "**{}** needs configuration before it can respond:\n{}\n\n{}",
                 self.agent_name,
                 steps.join("\n"),
+                footer,
             )
         };
 
@@ -676,6 +718,85 @@ mod tests {
         let body = payload.nudge_body();
         assert!(body.contains("Fizz"));
         assert!(body.contains("needs configuration"));
+    }
+
+    // ── config-invalid footer tests ────────────────────────────────────────────
+
+    fn make_cli_config_invalid(cli: &str, diagnostic: &str) -> RequirementPayload {
+        RequirementPayload::CliConfigInvalid {
+            probe_args: vec![cli.to_string()],
+            setup_copy: String::new(),
+            diagnostic: diagnostic.to_string(),
+        }
+    }
+
+    #[test]
+    fn nudge_body_all_config_invalid_omits_edit_agent_footer() {
+        // An all-CliConfigInvalid requirements list must NOT send users to
+        // Edit Agent (which cannot fix an external config file).
+        let payload = SetupPayload {
+            agent_name: "Codex".to_string(),
+            agent_pubkey: "test".to_string(),
+            requirements: vec![make_cli_config_invalid(
+                "codex",
+                "unknown variant `ultra` for field `model_reasoning_effort`",
+            )],
+        };
+        let body = payload.nudge_body();
+        assert!(
+            !body.contains("Open Edit Agent"),
+            "all-config-invalid nudge must not mention Open Edit Agent; got: {body:?}"
+        );
+        assert!(
+            body.contains("config.toml"),
+            "nudge must name the config file; got: {body:?}"
+        );
+        assert!(
+            body.contains("restart the agent"),
+            "nudge must include restart guidance; got: {body:?}"
+        );
+    }
+
+    #[test]
+    fn nudge_body_mixed_requirements_uses_split_footer() {
+        // Mixed list: one Buzz-managed env key + one external config invalid.
+        // Footer must address both sides.
+        let payload = SetupPayload {
+            agent_name: "Codex".to_string(),
+            agent_pubkey: "test".to_string(),
+            requirements: vec![
+                RequirementPayload::EnvKey {
+                    key: "SOME_API_KEY".to_string(),
+                },
+                make_cli_config_invalid("codex", "unknown variant `gpt-5.6-sol`"),
+            ],
+        };
+        let body = payload.nudge_body();
+        assert!(
+            body.contains("Open Edit Agent"),
+            "mixed nudge must mention Open Edit Agent for managed fields; got: {body:?}"
+        );
+        assert!(
+            body.contains("fix the external CLI config"),
+            "mixed nudge must mention fixing the external config; got: {body:?}"
+        );
+    }
+
+    #[test]
+    fn nudge_body_all_buzz_managed_retains_original_footer() {
+        // Pure Buzz-managed requirements → original "Open Edit Agent" footer unchanged.
+        let payload = SetupPayload {
+            agent_name: "Fizz".to_string(),
+            agent_pubkey: "test".to_string(),
+            requirements: vec![RequirementPayload::EnvKey {
+                key: "ANTHROPIC_API_KEY".to_string(),
+            }],
+        };
+        let body = payload.nudge_body();
+        assert!(
+            body.contains("Open Edit Agent in the Buzz app to set these."),
+            "all-managed nudge must use the original Edit Agent footer; got: {body:?}"
+        );
     }
 
     // ── sentinel block tests ───────────────────────────────────────────────────
