@@ -129,7 +129,7 @@ export function SendFeedbackDialog({
   }
 
   async function submitFeedback() {
-    if (isPending || message.trim().length === 0) {
+    if (isPending || isAttaching || message.trim().length === 0) {
       return;
     }
     setErrorMessage(null);
@@ -316,7 +316,9 @@ export function SendFeedbackDialog({
               </Button>
               <Button
                 data-testid="feedback-submit"
-                disabled={isPending || message.trim().length === 0}
+                disabled={
+                  isPending || isAttaching || message.trim().length === 0
+                }
                 type="submit"
               >
                 {isPending ? "Sending…" : "Send feedback"}
