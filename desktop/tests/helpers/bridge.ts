@@ -256,6 +256,19 @@ type MockBridgeOptions = {
     provider: string | null;
     model: string | null;
   };
+  /** Delay (ms) for `set_global_agent_config` — hold saves open in tests.
+   *  Alias of `globalConfigSaveDelayMs` (kept for onboarding specs). */
+  setGlobalAgentConfigDelayMs?: number;
+  /**
+   * When set, `get_nsec` throws with this message. For a single always-fail
+   * scenario. Use `nsecErrors` for sequenced fail/succeed.
+   */
+  nsecError?: string;
+  /**
+   * Sequenced results for `get_nsec`. String = throw with that message;
+   * null = succeed. Call N uses results[N]; last entry repeats when exhausted.
+   */
+  nsecErrors?: (string | null)[];
   /**
    * The `restarted_count` returned by `set_global_agent_config`. Defaults to
    * 0 (no agents restarted). Set to a positive integer to drive the

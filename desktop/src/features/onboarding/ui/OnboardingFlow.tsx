@@ -23,6 +23,7 @@ import { ONBOARDING_DEFAULT_THEME_NAME } from "@/shared/theme/theme-loader";
 import { StartupWindowDragRegion } from "@/shared/ui/StartupWindowDragRegion";
 import { StepProgress } from "@/shared/ui/step-progress";
 import { AvatarStep } from "./AvatarStep";
+import { BackupStep } from "./BackupStep";
 import { MembershipDenied } from "./MembershipDenied";
 import { NostrKeyImportForm } from "./NostrKeyImportForm";
 import {
@@ -169,6 +170,9 @@ export function OnboardingFlow({
   const [isUploadingAvatar, setIsUploadingAvatar] = React.useState(false);
   const [isProfileAdvancePending, setIsProfileAdvancePending] =
     React.useState(false);
+  // Track whether the user imported an existing key. The fresh-key path shows
+  // the backup step; the imported-key path skips it (user already has a backup).
+  const [identityWasImported, setIdentityWasImported] = React.useState(false);
   const [membershipRetryPage, setMembershipRetryPage] =
     React.useState<OnboardingPage>("avatar");
   const [transitionDirection, setTransitionDirection] =
@@ -192,7 +196,11 @@ export function OnboardingFlow({
   }, [accentColor, setAccentColor, setTheme, themeName]);
 
   React.useEffect(() => {
-    if (currentPage === "profile" || currentPage === "avatar") {
+    if (
+      currentPage === "profile" ||
+      currentPage === "backup" ||
+      currentPage === "avatar"
+    ) {
       void preloadThemePreviewVars().catch(() => undefined);
     }
 
@@ -246,6 +254,11 @@ export function OnboardingFlow({
   const showKeyImportPage = React.useCallback(() => {
     setTransitionDirection("forward");
     setCurrentPage("key-import");
+  }, []);
+
+  const showBackupPage = React.useCallback(() => {
+    setTransitionDirection("forward");
+    setCurrentPage("backup");
   }, []);
 
   const saveProfileAndContinue = React.useCallback(
@@ -303,17 +316,13 @@ export function OnboardingFlow({
           }
         }
 
-        if (nextPage === "avatar") {
-          showAvatarPage();
-          return;
-        }
-
-        if (nextPage === "theme") {
-          showThemePage();
-          return;
-        }
-
-        showSetupPage();
+        const showNextPage: Partial<Record<OnboardingPage, () => void>> = {
+          backup: showBackupPage,
+          avatar: () => showAvatarPage(),
+          theme: showThemePage,
+          setup: showSetupPage,
+        };
+        (showNextPage[nextPage] ?? showSetupPage)();
       } finally {
         setIsProfileAdvancePending(false);
       }
@@ -324,6 +333,7 @@ export function OnboardingFlow({
       profileUpdateMutation,
       savedProfile,
       showAvatarPage,
+      showBackupPage,
       showSetupPage,
       showThemePage,
     ],
@@ -384,14 +394,31 @@ export function OnboardingFlow({
         }
       : profileStepState.saveRecovery,
   };
-  const currentStep =
-    currentPage === "profile" || currentPage === "key-import"
-      ? 2
-      : currentPage === "avatar"
-        ? 3
-        : currentPage === "theme"
-          ? 4
-          : 5;
+  // Page sequences by path — step 1 is the workspace-picker that precedes
+  // onboarding, so these pages start at step 2 (STEP_OFFSET below).
+  // Fresh-key path: profile(2) → backup(3) → avatar(4) → theme(5) → setup(6)
+  // Imported-key path: profile(2) → avatar(3) → theme(4) → setup(5)
+  const FRESH_STEPS: OnboardingPage[] = [
+    "profile",
+    "backup",
+    "avatar",
+    "theme",
+    "setup",
+  ];
+  const IMPORT_STEPS: OnboardingPage[] = [
+    "profile",
+    "avatar",
+    "theme",
+    "setup",
+  ];
+  const STEP_OFFSET = 2;
+  const activeSteps = identityWasImported ? IMPORT_STEPS : FRESH_STEPS;
+  // key-import occupies the same position as profile.
+  const normalizedPage: OnboardingPage =
+    currentPage === "key-import" ? "profile" : currentPage;
+  const pageIndex = activeSteps.indexOf(normalizedPage);
+  const currentStep = pageIndex >= 0 ? pageIndex + STEP_OFFSET : STEP_OFFSET;
+  const totalOnboardingSteps = activeSteps.length + 1; // +1 for step 1 (workspace picker)
   const hideFixedProgressOnCompact =
     currentPage === "avatar" || currentPage === "theme";
 
@@ -407,6 +434,7 @@ export function OnboardingFlow({
       queryClient.removeQueries({ queryKey: profileQueryKey });
       profileUpdateMutation.reset();
       setDeniedPubkey("");
+      setIdentityWasImported(true);
       setTransitionDirection("backward");
       setCurrentPage("profile");
     },
@@ -460,6 +488,7 @@ export function OnboardingFlow({
     <div
       className={`buzz-startup-shell flex items-center justify-center bg-background px-4 py-8 text-foreground ${
         currentPage === "profile" ||
+        currentPage === "backup" ||
         currentPage === "avatar" ||
         currentPage === "key-import"
           ? "buzz-onboarding-neutral-theme"
@@ -495,6 +524,7 @@ export function OnboardingFlow({
             completeSegmentClassName="bg-primary/35"
             currentStep={currentStep}
             inactiveSegmentClassName="bg-muted-foreground/25"
+            totalSteps={totalOnboardingSteps}
           />
         </OnboardingSlideTransition>
 
@@ -513,7 +543,9 @@ export function OnboardingFlow({
               onUploadingChange: setIsUploadingAvatar,
               skipForNow,
               submit: () => {
-                void saveProfileAndContinue("avatar");
+                void saveProfileAndContinue(
+                  identityWasImported ? "avatar" : "backup",
+                );
               },
               updateAvatarUrl: updateAvatarUrlDraft,
               updateDisplayName: updateDisplayNameDraft,
@@ -566,11 +598,19 @@ export function OnboardingFlow({
               onImport={importExistingKey}
             />
           </OnboardingSlideTransition>
+        ) : currentPage === "backup" ? (
+          <BackupStep
+            currentStep={currentStep}
+            direction={transitionDirection}
+            onBack={showProfilePage}
+            onNext={() => showAvatarPage()}
+            totalSteps={totalOnboardingSteps}
+          />
         ) : currentPage === "avatar" ? (
           <AvatarStep
             actions={{
               advanceWithoutSaving: () => showThemePage(),
-              back: showProfilePage,
+              back: identityWasImported ? showProfilePage : showBackupPage,
               onUploadingChange: setIsUploadingAvatar,
               skipForNow,
               submit: () => {
@@ -578,8 +618,11 @@ export function OnboardingFlow({
               },
               updateAvatarUrl: updateAvatarUrlDraft,
             }}
+            currentStep={currentStep}
             direction={transitionDirection}
+            showAlwaysSkip={true}
             state={avatarStepState}
+            totalSteps={totalOnboardingSteps}
           />
         ) : currentPage === "theme" ? (
           <ThemeStep

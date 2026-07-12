@@ -199,6 +199,21 @@ type E2eConfig = {
       provider: string | null;
       model: string | null;
     };
+    /** Delay (ms) applied to `set_global_agent_config` so tests can observe
+     *  autosave behaviour while a request is in flight. 0/undefined = instant.
+     *  Alias of `globalConfigSaveDelayMs` (kept for onboarding specs). */
+    setGlobalAgentConfigDelayMs?: number;
+    /**
+     * When set, `get_nsec` throws with this message instead of returning the
+     * mock nsec string. Use `nsecErrors` for sequenced failure/success.
+     */
+    nsecError?: string;
+    /**
+     * Sequenced results for `get_nsec`. Each element is either a string
+     * (error message) or null (success — returns the default mock nsec).
+     * Call N uses results[N]; when exhausted the last entry repeats.
+     */
+    nsecErrors?: (string | null)[];
     /**
      * The `restarted_count` returned by `set_global_agent_config`. Defaults to
      * 0 (no agents restarted). Set to a positive integer to drive the
@@ -6216,6 +6231,9 @@ async function handleDiscoverAcpRuntimes(
 // re-evaluated via addInitScript, so the counter starts at 0 for every test.
 let installCallCount = 0;
 
+// Per-page get_nsec call counter for sequenced error testing.
+let nsecCallCount = 0;
+
 async function handleInstallAcpRuntime(
   args: {
     runtimeId?: string;
@@ -8285,8 +8303,23 @@ export function maybeInstallE2eTauriMocks() {
 
         return { ...DEFAULT_MOCK_IDENTITY, lost: isLost, locked: isLocked };
       }
-      case "get_nsec":
+      case "get_nsec": {
+        const nsecSequence = activeConfig?.mock?.nsecErrors;
+        if (nsecSequence && nsecSequence.length > 0) {
+          const idx = Math.min(nsecCallCount, nsecSequence.length - 1);
+          nsecCallCount++;
+          const entry = nsecSequence[idx];
+          if (entry !== null) {
+            throw new Error(entry);
+          }
+          return "nsec1mock000000000000000000000000000000000000000000000000000000";
+        }
+        const nsecError = activeConfig?.mock?.nsecError;
+        if (nsecError) {
+          throw new Error(nsecError);
+        }
         return "nsec1mock000000000000000000000000000000000000000000000000000000";
+      }
       case "persist_current_identity": {
         // Persist the ephemeral key: clears only the lost flag. The locked flag
         // is cleared only by import_identity; production rejects
@@ -8782,10 +8815,9 @@ export function maybeInstallE2eTauriMocks() {
         );
       }
       case "set_global_agent_config": {
-        // In the E2E environment there are no running agents to restart, so
-        // restarted_count is always 0. Return the submitted config as the
-        // saved value (mirrors the backend's strip-on-write pass in tests
-        // where all values are already non-empty).
+        // Echo back the submitted config as the saved value (mirrors the
+        // backend's strip-on-write pass in tests where all values are already
+        // non-empty). The invoke payload wraps it as { config }.
         const savedConfig = (
           payload as {
             config: {
@@ -8796,11 +8828,18 @@ export function maybeInstallE2eTauriMocks() {
           }
         ).config;
         // Optional configurable delay so specs can hold a save in flight and
-        // interleave edits (mid-save race coverage).
-        const saveDelayMs = config?.mock?.globalConfigSaveDelayMs ?? 0;
+        // interleave edits (mid-save race + autosave-coalescing coverage).
+        // Two aliases: onboarding specs use setGlobalAgentConfigDelayMs,
+        // settings-card specs use globalConfigSaveDelayMs.
+        const saveDelayMs =
+          config?.mock?.globalConfigSaveDelayMs ??
+          activeConfig?.mock?.setGlobalAgentConfigDelayMs ??
+          0;
         if (saveDelayMs > 0) {
           await new Promise((resolve) => setTimeout(resolve, saveDelayMs));
         }
+        // In the E2E environment there are no running agents to restart, so
+        // the counts default to 0 unless a spec drives them explicitly.
         return {
           config: savedConfig,
           restarted_count: config?.mock?.globalConfigRestartedCount ?? 0,

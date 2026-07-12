@@ -92,8 +92,12 @@ export default defineConfig({
         "**/identity-lost.spec.ts",
         "**/global-agent-config-screenshots.spec.ts",
         "**/doctor-states.spec.ts",
-        "**/agent-lifecycle-feedback.spec.ts",
+        "**/onboarding-avatar-skip.spec.ts",
+        "**/onboarding-backup.spec.ts",
+        "**/onboarding-agent-defaults.spec.ts",
+        "**/profile-nsec-reveal.spec.ts",
         "**/agent-provider-dropdowns.spec.ts",
+        "**/agent-lifecycle-feedback.spec.ts",
       ],
       use: {
         ...devices["Desktop Chrome"],
