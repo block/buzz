@@ -38,6 +38,31 @@ async fn setup() -> (PgPool, String) {
         .connect(&url)
         .await
         .expect("connect");
+
+    // Serialize the pgcrypto extension install across all parallel test workers.
+    //
+    // `CREATE EXTENSION IF NOT EXISTS pgcrypto` targets `pg_extension`, which is
+    // database-global with a unique index on `extname`.  PostgreSQL's IF NOT EXISTS
+    // is a check-then-insert, not an atomic upsert: when many test workers run
+    // concurrently they all see the extension as absent, all attempt the insert,
+    // and all but one hit SQLSTATE 23505 (unique violation).  A session-level
+    // advisory lock (arbitrary but stable key) serializes the install so that
+    // exactly one worker does the real CREATE; the rest treat it as a no-op when
+    // they enter the lock.  The lock is released automatically when the session
+    // ends, so there is no risk of wedging subsequent runs.
+    sqlx::query("SELECT pg_advisory_lock(3723742987654321)")
+        .execute(&admin_pool)
+        .await
+        .expect("acquire pgcrypto advisory lock");
+    sqlx::query("CREATE EXTENSION IF NOT EXISTS pgcrypto")
+        .execute(&admin_pool)
+        .await
+        .expect("install pgcrypto extension");
+    sqlx::query("SELECT pg_advisory_unlock(3723742987654321)")
+        .execute(&admin_pool)
+        .await
+        .expect("release pgcrypto advisory lock");
+
     let create_sql = format!("CREATE SCHEMA \"{schema}\"");
     sqlx::query(sqlx::AssertSqlSafe(create_sql))
         .execute(&admin_pool)
