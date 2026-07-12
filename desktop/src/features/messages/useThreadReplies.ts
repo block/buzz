@@ -40,11 +40,21 @@ async function fetchThreadAuxBestEffort(
   }
 }
 
+export function collectThreadAuxMessageIds(
+  threadRootId: string,
+  replies: RelayEvent[],
+): string[] {
+  return [
+    ...new Set([threadRootId, ...collectMessageIdsForAuxBackfill(replies)]),
+  ];
+}
+
 async function withThreadAux(
   channelId: string,
+  threadRootId: string,
   replies: RelayEvent[],
 ): Promise<RelayEvent[]> {
-  const messageIds = collectMessageIdsForAuxBackfill(replies);
+  const messageIds = collectThreadAuxMessageIds(threadRootId, replies);
   const [structuralAux, reactions] = await Promise.all([
     fetchThreadAuxBestEffort("structural aux", channelId, () =>
       fetchStructuralAuxForMessages(channelId, messageIds),
@@ -90,7 +100,11 @@ export function useThreadReplies(
         );
         replies.push(...response.events);
         if (!response.nextCursor) {
-          const fetched = await withThreadAux(activeChannel.id, replies);
+          const fetched = await withThreadAux(
+            activeChannel.id,
+            openThreadRootId,
+            replies,
+          );
           const current =
             queryClient.getQueryData<RelayEvent[]>(queryKey) ?? [];
           const receivedInFlight = current.filter(
