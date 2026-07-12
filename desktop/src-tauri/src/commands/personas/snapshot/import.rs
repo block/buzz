@@ -57,8 +57,6 @@ pub struct AgentSnapshotImportPreview {
 pub struct AgentSnapshotImportConfirm {
     /// Raw bytes of the snapshot file (.agent.json or .agent.png).
     pub file_bytes: Vec<u8>,
-    /// Original file name — used for format sniffing.
-    pub file_name: String,
     /// When true, copy source `respond_to_allowlist` to the new agent.
     /// When false (the safe default), the allowlist is cleared.
     pub keep_allowlist: bool,

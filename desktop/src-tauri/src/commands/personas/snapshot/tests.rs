@@ -1,3 +1,7 @@
+use super::import::{
+    decode_snapshot_from_bytes, resolve_snapshot_import_behavior, AgentSnapshotImportResult,
+    MAX_SNAPSHOT_JSON_BYTES, MAX_SNAPSHOT_PNG_BYTES,
+};
 use super::*;
 use crate::managed_agents::{
     agent_snapshot::{
@@ -285,7 +289,7 @@ fn import_json_over_size_cap_is_rejected() {
     // Construct a byte slice that looks like JSON (no PNG magic) and exceeds
     // MAX_SNAPSHOT_JSON_BYTES (5 MiB).  Content doesn't need to be valid JSON
     // because the size check fires before serde.
-    let oversized = vec![b'{'; super::MAX_SNAPSHOT_JSON_BYTES + 1];
+    let oversized = vec![b'{'; MAX_SNAPSHOT_JSON_BYTES + 1];
     let result = decode_snapshot_from_bytes(&oversized);
     assert!(result.is_err(), "oversized JSON must be rejected");
     assert!(
@@ -298,7 +302,7 @@ fn import_json_over_size_cap_is_rejected() {
 #[test]
 fn import_png_over_size_cap_is_rejected() {
     // Start with the PNG magic, then pad to exceed MAX_SNAPSHOT_PNG_BYTES.
-    let mut oversized = vec![0u8; super::MAX_SNAPSHOT_PNG_BYTES + 1];
+    let mut oversized = vec![0u8; MAX_SNAPSHOT_PNG_BYTES + 1];
     oversized[0] = 0x89;
     oversized[1] = 0x50; // P
     oversized[2] = 0x4e; // N
@@ -414,7 +418,7 @@ fn import_png_with_none_level_and_entries_is_rejected() {
     // encode_snapshot_png (it already guards that), but could arrive from
     // a foreign tool. We verify the guard condition matches the spec:
     let level = MemoryLevel::None;
-    let entries = vec![AgentSnapshotMemoryEntry {
+    let entries = [AgentSnapshotMemoryEntry {
         slug: "core".to_string(),
         body: "Leak.".to_string(),
     }];
@@ -615,7 +619,7 @@ fn import_non_allowlist_mode_with_nonempty_list_keep_preserves_mode_and_list() {
     let raw = "aabbcc".repeat(11)[..64].to_string();
     let minted = resolve_snapshot_import_behavior(
         Some("anyone"),
-        &[raw.clone()],
+        std::slice::from_ref(&raw),
         None,
         None,
         true, // keep
@@ -667,7 +671,7 @@ fn import_allowlist_keep_with_valid_list_succeeds() {
     let raw = "aabbcc".repeat(11)[..64].to_string();
     let minted = resolve_snapshot_import_behavior(
         Some("allowlist"),
-        &[raw.clone()],
+        std::slice::from_ref(&raw),
         None,
         None,
         true, // keep
@@ -929,22 +933,19 @@ fn test_parse_format_is_png_invalid_returns_error() {
 /// JSON: boundary-1 passes, boundary is the last legal byte count.
 #[test]
 fn validate_encode_size_json_at_boundary_minus_1_passes() {
-    assert!(
-        super::validate_snapshot_encode_size(super::MAX_SNAPSHOT_JSON_BYTES - 1, false).is_ok()
-    );
+    assert!(super::validate_snapshot_encode_size(MAX_SNAPSHOT_JSON_BYTES - 1, false).is_ok());
 }
 
 /// JSON: exactly at the boundary is the last accepted size.
 #[test]
 fn validate_encode_size_json_at_boundary_passes() {
-    assert!(super::validate_snapshot_encode_size(super::MAX_SNAPSHOT_JSON_BYTES, false).is_ok());
+    assert!(super::validate_snapshot_encode_size(MAX_SNAPSHOT_JSON_BYTES, false).is_ok());
 }
 
 /// JSON: boundary+1 is rejected.
 #[test]
 fn validate_encode_size_json_over_boundary_is_rejected() {
-    let err = super::validate_snapshot_encode_size(super::MAX_SNAPSHOT_JSON_BYTES + 1, false)
-        .unwrap_err();
+    let err = super::validate_snapshot_encode_size(MAX_SNAPSHOT_JSON_BYTES + 1, false).unwrap_err();
     assert!(
         err.contains("size limit"),
         "error must mention size limit, got: {err}"
@@ -954,20 +955,19 @@ fn validate_encode_size_json_over_boundary_is_rejected() {
 /// PNG: boundary-1 passes.
 #[test]
 fn validate_encode_size_png_at_boundary_minus_1_passes() {
-    assert!(super::validate_snapshot_encode_size(super::MAX_SNAPSHOT_PNG_BYTES - 1, true).is_ok());
+    assert!(super::validate_snapshot_encode_size(MAX_SNAPSHOT_PNG_BYTES - 1, true).is_ok());
 }
 
 /// PNG: exactly at the boundary passes.
 #[test]
 fn validate_encode_size_png_at_boundary_passes() {
-    assert!(super::validate_snapshot_encode_size(super::MAX_SNAPSHOT_PNG_BYTES, true).is_ok());
+    assert!(super::validate_snapshot_encode_size(MAX_SNAPSHOT_PNG_BYTES, true).is_ok());
 }
 
 /// PNG: boundary+1 is rejected.
 #[test]
 fn validate_encode_size_png_over_boundary_is_rejected() {
-    let err =
-        super::validate_snapshot_encode_size(super::MAX_SNAPSHOT_PNG_BYTES + 1, true).unwrap_err();
+    let err = super::validate_snapshot_encode_size(MAX_SNAPSHOT_PNG_BYTES + 1, true).unwrap_err();
     assert!(
         err.contains("size limit"),
         "error must mention size limit, got: {err}"

@@ -373,7 +373,6 @@ export function usePersonaActions() {
     try {
       const result = await confirmSnapshotImportMutation.mutateAsync({
         fileBytes: snapshotImportState.fileBytes,
-        fileName: snapshotImportState.fileName,
         keepAllowlist,
       });
       setSnapshotImportResult(result);

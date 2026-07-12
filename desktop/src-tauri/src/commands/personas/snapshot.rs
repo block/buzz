@@ -24,15 +24,8 @@ use crate::{
 
 pub(crate) mod import;
 
-// Re-export import-side types and commands so callers see a flat
-// `snapshot::` namespace (unchanged from before the split).
-pub use import::{
-    confirm_agent_snapshot_import, preview_agent_snapshot_import, AgentSnapshotImportResult,
-};
-pub(crate) use import::{
-    decode_snapshot_from_bytes, resolve_snapshot_import_behavior, MAX_SNAPSHOT_JSON_BYTES,
-    MAX_SNAPSHOT_PNG_BYTES,
-};
+// Re-export import-side commands so callers see a flat `snapshot::` namespace.
+pub use import::{confirm_agent_snapshot_import, preview_agent_snapshot_import};
 
 // ── Pure resolver (testable without AppHandle) ────────────────────────────────
 

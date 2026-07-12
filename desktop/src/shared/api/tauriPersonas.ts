@@ -261,7 +261,6 @@ export type AgentSnapshotImportPreview = {
 /** Confirmation sent to `confirm_agent_snapshot_import`. */
 export type AgentSnapshotImportConfirm = {
   fileBytes: number[];
-  fileName: string;
   /** When true, copy source allowlist to the new agent. Default: false (Clear). */
   keepAllowlist: boolean;
 };
