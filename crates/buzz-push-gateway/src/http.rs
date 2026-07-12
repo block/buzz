@@ -507,7 +507,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
 
         let mut overflow_state = state(&keys);
-        overflow_state.now = || i64::MAX;
+        overflow_state.now = || i64::MAX - 1;
         let (app, _) = router(overflow_state.clone());
         let body = valid_issue_body(i64::MAX);
         let response = post(
