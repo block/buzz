@@ -141,6 +141,56 @@ function computeAnchor(container: HTMLDivElement): AnchorState {
   return { kind: "at-bottom" };
 }
 
+/**
+ * Snapshot the reader's position for realization compensation: the first row
+ * FULLY inside the viewport (its top at/below the scroller top) and that row's
+ * top relative to the scroller top.
+ *
+ * Why *fully* visible and not the top-crossing straddler `computeAnchor` picks:
+ * the CSS scroll-anchoring spec descends past partially-visible candidates and
+ * anchors on the first fully-visible element for exactly the case we hit —
+ * during an upscroll the realizing band is the freshly exposed content hanging
+ * above the fold, so a straddler anchor sits *inside* that churning band and
+ * can't measure the shift below it. The first fully-visible row sits one notch
+ * below the churn, so re-pinning it to its saved offset cancels the net height
+ * change of everything above it (the layout engine sums those deltas for us —
+ * a row resizing below the anchor doesn't move the anchor's top, so it's
+ * excluded for free). Returns null when nothing is fully visible.
+ */
+function snapshotReadingAnchor(
+  container: HTMLDivElement,
+): { id: string; topOffset: number } | null {
+  const containerTop = container.getBoundingClientRect().top;
+  const rows = container.querySelectorAll<HTMLElement>("[data-message-id]");
+  for (const row of rows) {
+    const rect = row.getBoundingClientRect();
+    if (rect.top >= containerTop) {
+      const id = row.dataset.messageId;
+      if (id) return { id, topOffset: rect.top - containerTop };
+    }
+  }
+  return null;
+}
+
+/**
+ * The height the browser is CURRENTLY using to lay out `row`. For a
+ * `content-visibility: auto` row that has never painted this is its
+ * `contain-intrinsic-size` reserve (the estimate) rather than its realized
+ * height; for a row the browser has already realized-and-remembered (the `auto`
+ * keyword) it is that remembered size. We read the computed
+ * `contain-intrinsic-block-size` — Blink returns it as `"<n>px"` or
+ * `"auto <n>px"` — and fall back to the live box height if the property is
+ * empty/unsupported (e.g. WKWebView returning an empty string). Seeding the
+ * resize map with this value is what turns a realization into a MEASURABLE
+ * `realized - reserve` delta instead of an unmeasurable first sighting.
+ */
+function reservedRowHeight(row: HTMLElement): number {
+  const raw = getComputedStyle(row).containIntrinsicBlockSize;
+  const match = raw.match(/(-?\d+(?:\.\d+)?)px/);
+  if (match) return Number.parseFloat(match[1]);
+  return row.getBoundingClientRect().height;
+}
+
 export function useAnchoredScroll({
   scrollContainerRef,
   contentRef,
@@ -181,6 +231,15 @@ export function useAnchoredScroll({
   // ignores transient gaps and keeps chasing the floor. A `ref`, not state — the
   // guard runs on a native scroll event, outside React's render cycle.
   const settlingRef = React.useRef(false);
+  // Baseline for realization/reflow compensation: the first row fully inside
+  // the viewport (top at/below the scroller top) and its top offset, captured
+  // on every scroll event and after every correction. The ResizeObserver
+  // re-pins THIS row to THIS offset — a single measured pin that absorbs the
+  // net height change of everything above it (see `snapshotReadingAnchor`).
+  const readingAnchorRef = React.useRef<{
+    id: string;
+    topOffset: number;
+  } | null>(null);
 
   // Reset everything when the channel changes — the layout effect that runs
   // immediately after this reset is responsible for either jumping to bottom
@@ -315,6 +374,11 @@ export function useAnchoredScroll({
       }
     }
     anchorRef.current = computeAnchor(container);
+    // Baseline the realization-compensation anchor from THIS scroll snapshot —
+    // RO fires after layout, so the "before" position can only come from the
+    // last scroll event (or a prior correction), never from inside the RO
+    // callback. Missing/stale baseline => the RO path skips rather than drifts.
+    readingAnchorRef.current = snapshotReadingAnchor(container);
     const atBottom = anchorRef.current.kind === "at-bottom";
     setIsAtBottom((prev) => (prev === atBottom ? prev : atBottom));
     if (atBottom) {
@@ -452,27 +516,120 @@ export function useAnchoredScroll({
   ]);
 
   // ---------------------------------------------------------------------------
-  // Content resize: while stuck to the bottom, an in-viewport reflow (image
-  // decode, embed expand, late font load) that React isn't driving grows
+  // Content resize: a height change React isn't driving — a bottom-pinned
+  // in-viewport reflow (image decode, embed expand, late font), OR an
+  // off-screen row above the reading position realizing to its true height as
+  // the user scrolls up into it (content-visibility skip -> visible). Both grow
   // `scrollHeight` without a `messages` change, so the layout effect doesn't
-  // fire — re-pin to the new floor here to stay glued. When anchored
-  // mid-history, native scroll anchoring (overflow-anchor) holds the reading
-  // row across the reflow, so there's nothing to do.
+  // fire. The ResizeObserver callback runs in the rendering steps AFTER layout
+  // and BEFORE paint, which makes a `scrollBy` here same-frame invisible — this
+  // is the correct trigger for compensation, not the async-dispatched
+  // `contentvisibilityautostatechange` event (which may fire after the shifted
+  // frame has already painted).
+  //
+  //   - at-bottom: re-pin to the new floor to stay glued.
+  //   - mid-history: `overflow-anchor: none` is set on the scroller and the
+  //     shipped WKWebView has no native anchoring anyway, so nothing holds the
+  //     reading row across the reflow/realization — our writer must. This is
+  //     the fix for the up-scroll jitter AND the latent reflow bug (both were
+  //     previously left to a native anchoring that does not run here).
+  //
+  // Freshness (single-writer + no-fighting-the-wheel): `anchorRef.current` is
+  // re-baselined by `onScroll` every scroll event, and scroll events are
+  // dispatched earlier in the same frame's rendering steps than ResizeObserver
+  // delivery — so when a realization RO fires mid-gesture, the anchor's saved
+  // offset already reflects the user's current scroll position, and the drift
+  // we measure is purely the layout shift above the reading row, not the user's
+  // own wheel delta. We skip while settling a programmatic bottom pin so this
+  // never races the floor-chase in `onScroll`.
   // ---------------------------------------------------------------------------
-  // biome-ignore lint/correctness/useExhaustiveDependencies: channelId is a deliberate re-subscription trigger — the effect body reads only the stable refs, but on a channel switch the keyed scroll container remounts and contentRef.current becomes a fresh node, so the observer must disconnect from the previous channel's detached node and re-observe the live one.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: `messages` is an intentional re-sync trigger — on each committed render we (re)observe any newly-mounted `.timeline-row-cv` rows so a row appended by a load-older page starts being watched. The callback reads only stable refs; `channelId` forces a full re-subscribe when the keyed scroll container remounts.
   React.useEffect(() => {
     const content = contentRef.current;
     if (!content || typeof ResizeObserver === "undefined") return;
-    const observer = new ResizeObserver(() => {
+    // Last-known laid-out height per observed row. The compensable delta of a
+    // resize is `newHeight - lastHeight`. We SEED each row at observe time with
+    // the height the browser is currently using for layout — for a
+    // `content-visibility: auto` row that has never painted, that is its
+    // `contain-intrinsic-size` reserve (the estimate), NOT its realized height
+    // (which the row does not report until it realizes). Seeding with the
+    // reserve is what makes the very first RO delivery — the realization itself
+    // — yield the true `realized - reserve` delta instead of being silently
+    // swallowed as an unmeasurable first sighting.
+    const lastHeights = new WeakMap<Element, number>();
+    const observer = new ResizeObserver((entries) => {
       const container = scrollContainerRef.current;
       if (!container) return;
+      // A programmatic bottom pin is still settling; `onScroll` owns the
+      // floor-chase, so stay out of its way and don't double-write.
+      if (settlingRef.current) return;
       if (anchorRef.current.kind === "at-bottom") {
+        // Bottom-glue: a row realizing/reflowing while pinned grows the content,
+        // so re-pin to the new floor to stay glued, and refresh the height map
+        // so we don't treat this growth as a mid-history delta later.
+        for (const entry of entries) {
+          lastHeights.set(
+            entry.target,
+            entry.target.getBoundingClientRect().height,
+          );
+        }
         container.scrollTo({ top: container.scrollHeight, behavior: "auto" });
+        return;
+      }
+      // Mid-history: a batch of rows realized/reflowed this frame. The
+      // reading anchor — the first fully-visible row, snapshotted by the last
+      // scroll event — has shifted by the net height change of everything above
+      // it. Re-pin it to its saved offset: a single measured correction (the
+      // layout engine already summed the above-anchor deltas into the row's
+      // top, and rows resizing below the anchor don't move it, so they're
+      // excluded for free). This is the single scroll writer for realization;
+      // `overflow-anchor: none` (and WKWebView's absence of it) mean nothing
+      // else competes. We use the RO batch only as the TRIGGER — we detect that
+      // a row's laid-out height actually changed (seeded from the reserve so a
+      // first-realization delivery counts, not swallowed as a first sighting),
+      // then correct from the anchor's own measured drift, never from summing
+      // per-row deltas.
+      let changed = false;
+      for (const entry of entries) {
+        const row = entry.target as HTMLElement;
+        const height = row.getBoundingClientRect().height;
+        const last = lastHeights.get(row);
+        lastHeights.set(row, height);
+        if (last === undefined) continue; // never seeded (defensive).
+        if (Math.abs(height - last) > 0.5) changed = true;
+      }
+      if (!changed) return;
+      const baseline = readingAnchorRef.current;
+      if (!baseline) return; // no stable pre-batch snapshot: skip, don't drift.
+      const anchorRow = container.querySelector<HTMLElement>(
+        `[data-message-id="${CSS.escape(baseline.id)}"]`,
+      );
+      if (!anchorRow) return;
+      const containerTop = container.getBoundingClientRect().top;
+      const currentTopOffset =
+        anchorRow.getBoundingClientRect().top - containerTop;
+      const drift = currentTopOffset - baseline.topOffset;
+      if (Math.abs(drift) > 0.5) {
+        container.scrollBy(0, drift);
+        // Re-baseline after the correction so the next RO batch measures drift
+        // from where we just pinned, not the pre-correction position.
+        readingAnchorRef.current = snapshotReadingAnchor(container);
       }
     });
-    observer.observe(content);
+    // Observe every timeline row (not the content wrapper): a
+    // `content-visibility: auto` row realizing to its true height is a resize
+    // of THAT row's box but does not reliably fire a ResizeObserver on the
+    // wrapper (Blink does not surface CV realization as an ancestor resize).
+    // The RO callback runs after layout, before paint, so the compensating
+    // `scrollBy` is same-frame invisible.
+    for (const row of content.querySelectorAll<HTMLElement>(
+      ".timeline-row-cv",
+    )) {
+      lastHeights.set(row, reservedRowHeight(row));
+      observer.observe(row);
+    }
     return () => observer.disconnect();
-  }, [channelId, contentRef, scrollContainerRef]);
+  }, [channelId, contentRef, scrollContainerRef, messages]);
 
   // ---------------------------------------------------------------------------
   // Target message handling (deep link, jump-to-reply, etc.). Distinct from

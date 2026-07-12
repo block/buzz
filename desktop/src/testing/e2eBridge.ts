@@ -2272,6 +2272,37 @@ const mockChannels: MockChannel[] = [
       createMockMember(MOCK_IDENTITY_PUBKEY, "member", 1900),
     ],
   }),
+  // Jitter-corpus channel for the upscroll-jitter GATE (upscroll-jitter.perf.ts).
+  // Seeded with 400 structurally HETEROGENEOUS messages (headings, lists,
+  // blockquotes, fenced code, long wrapped prose) so `estimateRowHeight`'s known
+  // biases produce a genuine reserve-vs-true error on every never-painted row.
+  // Its own channel so the uniform `deep-history` seed the load-older specs
+  // depend on stays undisturbed.
+  createMockChannel({
+    id: "feedf00d-0000-4000-8000-000000000008",
+    name: "jitter-corpus",
+    channel_type: "stream",
+    visibility: "open",
+    description: "Heterogeneous history for the upscroll-jitter gate",
+    topic: null,
+    purpose: null,
+    last_message_at: isoMinutesAgo(1),
+    archived_at: null,
+    created_by: ALICE_PUBKEY,
+    topic_set_by: null,
+    topic_set_at: null,
+    purpose_set_by: null,
+    purpose_set_at: null,
+    topic_required: false,
+    max_members: null,
+    nip29_group_id: null,
+    created_minutes_ago: 2000,
+    updated_minutes_ago: 1,
+    members: [
+      createMockMember(ALICE_PUBKEY, "owner", 2000),
+      createMockMember(MOCK_IDENTITY_PUBKEY, "member", 1900),
+    ],
+  }),
 ];
 
 const mockMessages = new Map<string, RelayEvent[]>();
@@ -2978,12 +3009,38 @@ function buildReplyMessageTags(
   return tags;
 }
 
+// Body generator for the jitter-corpus seed. Six structurally distinct row
+// kinds, cycled by index, chosen because `estimateRowHeight` mis-reserves most
+// of them — the reserve-vs-true error the upscroll-jitter gate measures.
+function jitterCorpusBody(i: number): string {
+  switch (i % 6) {
+    case 0:
+      // Short prose — estimator is close here (control rows).
+      return `quick note ${i}`;
+    case 1:
+      // Heading + list: estimated as flat 20px lines; rendered line boxes and
+      // list margins are taller.
+      return `# Heading ${i}\n\n- alpha item ${i}\n- beta item ${i}\n- gamma item ${i}\n- delta item ${i}`;
+    case 2:
+      // Long wrapped prose: real wrap width differs from CHARS_PER_LINE=64.
+      return `This is a deliberately long paragraph number ${i} that wraps across several visual lines depending on the true column width, which the fixed characters-per-line heuristic only approximates and therefore systematically mis-estimates on wide and narrow windows alike.`;
+    case 3:
+      // Blockquote: block margins the flat estimate ignores.
+      return `> quoted reply ${i}\n>\n> second quoted line ${i}\n\nfollow-up prose ${i}`;
+    case 4:
+      // Fenced code: code line-height is modeled, block padding/border is not.
+      return `runtime log ${i}:\n\`\`\`\nconst x = ${i};\nconsole.log(x * 2);\nreturn x;\n\`\`\``;
+    default:
+      // Medium two-paragraph prose.
+      return `paragraph one for row ${i}\n\nparagraph two for row ${i} with a little more text to push it onto a second wrapped line`;
+  }
+}
+
 function getMockMessageStore(channelId: string): RelayEvent[] {
   const existing = mockMessages.get(channelId);
   if (existing) {
     return existing;
   }
-
   const seeded: RelayEvent[] =
     channelId === "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50"
       ? [
@@ -3163,7 +3220,24 @@ function getMockMessageStore(channelId: string): RelayEvent[] {
                 content: `Deep history message #${index}`,
                 sig: "mocksig".repeat(20).slice(0, 128),
               }))
-            : [];
+            : channelId === "feedf00d-0000-4000-8000-000000000008"
+              ? // Heterogeneous corpus for the upscroll-jitter gate. Row height
+                // varies widely AND `estimateRowHeight` is known to misjudge
+                // several of these kinds (headings/lists/blockquotes counted as
+                // flat 20px prose lines; long prose vs the fixed CHARS_PER_LINE
+                // wrap guess; code-fence chrome) — that reserve-vs-true mismatch
+                // is exactly the realization error the gate measures.
+                Array.from({ length: 400 }, (_, index) => ({
+                  id: `mock-jitter-${index}`,
+                  pubkey: index % 2 === 0 ? ALICE_PUBKEY : MOCK_IDENTITY_PUBKEY,
+                  created_at:
+                    Math.floor(Date.now() / 1000) - (400 - index) * 60,
+                  kind: 9,
+                  tags: [["h", channelId]],
+                  content: jitterCorpusBody(index),
+                  sig: "mocksig".repeat(20).slice(0, 128),
+                }))
+              : [];
 
   mockMessages.set(channelId, seeded);
   return seeded;

@@ -1,5 +1,6 @@
 import type * as React from "react";
 
+import { extractSupportedLinkPreviews } from "@/shared/lib/linkPreview";
 import { dimensionsFromDim } from "@/shared/ui/markdown/utils";
 import type { TimelineItem } from "./timelineItems";
 import type { TimelineMessage } from "../types";
@@ -24,15 +25,32 @@ const MEDIA_MAX_WIDTH = 384; // max-w-[min(24rem,100%)]
 const MEDIA_MAX_HEIGHT = 256; // max-h-64
 const TEXT_LINE_HEIGHT = 20;
 const CODE_LINE_HEIGHT = 19;
-const CHARS_PER_LINE = 64; // rough wrap width at the timeline column
+const FALLBACK_CHARS_PER_LINE = 64; // rough wrap width at the timeline column
+const AVERAGE_TEXT_CHAR_WIDTH = 7.2; // text-sm, biased toward common prose
+const ROW_HORIZONTAL_CHROME = 64; // avatar + row gap + inline padding
+const MIN_CHARS_PER_LINE = 32;
+const MAX_CHARS_PER_LINE = 96;
 const ROW_CHROME = 26; // author/time header + denser row padding
 const CONTINUATION_ROW_CHROME = 8; // dense row padding only; header/avatar are hidden
 const MEDIA_BLOCK_MARGIN_TOP = 4; // image/video blocks use mt-1 in markdown
 const REACTION_ROW = 24;
 const PREVIEW_CARD = 70;
+const THREAD_SUMMARY_ROW = 38;
+const FOOTER_ROW = 32;
 const MESSAGE_ITEM_BOTTOM_PADDING = 10; // TimelineMessageList pb-2.5
 const MIN_ESTIMATE = 60; // never reserve less than the old flat floor
 const CONTINUATION_MIN_ESTIMATE = 34;
+
+export type TimelineRowReserveOptions = {
+  /** Timeline column width measured once by the caller; absent keeps the old 64-char estimate. */
+  columnWidthPx?: number;
+  /** Optional row footer chrome. The main channel timeline currently leaves this unset. */
+  hasFooter?: boolean;
+};
+
+type EstimateRowHeightOptions = TimelineRowReserveOptions & {
+  isContinuation?: boolean;
+};
 
 function mediaHeightFromDim(dim: string | undefined): number {
   const dimensions = dimensionsFromDim(dim);
@@ -49,10 +67,27 @@ function mediaReserveHeight(dim: string | undefined): number {
   return MEDIA_BLOCK_MARGIN_TOP + mediaHeightFromDim(dim);
 }
 
-function wrappedLineCount(text: string): number {
+function charsPerLineFromColumnWidth(
+  columnWidthPx: number | undefined,
+): number {
+  if (columnWidthPx == null || !Number.isFinite(columnWidthPx)) {
+    return FALLBACK_CHARS_PER_LINE;
+  }
+
+  const textWidth = Math.max(0, columnWidthPx - ROW_HORIZONTAL_CHROME);
+  return Math.max(
+    MIN_CHARS_PER_LINE,
+    Math.min(
+      MAX_CHARS_PER_LINE,
+      Math.floor(textWidth / AVERAGE_TEXT_CHAR_WIDTH),
+    ),
+  );
+}
+
+function wrappedLineCount(text: string, charsPerLine: number): number {
   let lines = 0;
   for (const raw of text.split("\n")) {
-    lines += Math.max(1, Math.ceil(raw.length / CHARS_PER_LINE));
+    lines += Math.max(1, Math.ceil(raw.length / charsPerLine));
   }
   return lines;
 }
@@ -61,7 +96,10 @@ function wrappedLineCount(text: string): number {
  * Strip fenced code blocks from the body, returning the prose remainder and the
  * total number of code lines (for separate mono line-height accounting).
  */
-function splitFencedCode(body: string): { prose: string; codeLines: number } {
+function splitFencedCode(body: string): {
+  prose: string;
+  codeLines: number;
+} {
   const parts = body.split(/```/);
   // Even indices are prose, odd indices are inside a fence.
   let prose = "";
@@ -108,19 +146,55 @@ function stripMediaOnlyLines(text: string): string {
     .join("\n");
 }
 
+function markdownStructureExtraHeight(text: string): number {
+  let extra = 0;
+  let tableRunLines = 0;
+
+  const flushTableRun = () => {
+    if (tableRunLines >= 2) {
+      // GFM tables have cell padding/borders, so they are taller than the same
+      // raw markdown counted as plain 20px text lines.
+      extra += 14 + tableRunLines * 6;
+    }
+    tableRunLines = 0;
+  };
+
+  for (const line of text.split("\n")) {
+    const trimmed = line.trim();
+    const isTableLine =
+      /^\|.+\|$/.test(trimmed) || /\S\s+\|\s+\S/.test(trimmed);
+
+    if (isTableLine) tableRunLines += 1;
+    else flushTableRun();
+
+    if (/^(?:---+|\*\*\*+|___+)\s*$/.test(trimmed)) extra += 12;
+  }
+
+  flushTableRun();
+  return extra;
+}
+
 export function estimateRowHeight(
   message: TimelineMessage,
-  { isContinuation = false }: { isContinuation?: boolean } = {},
+  {
+    columnWidthPx,
+    hasFooter = false,
+    isContinuation = false,
+  }: EstimateRowHeightOptions = {},
 ): number {
   const body = message.body ?? "";
   const { prose, codeLines } = splitFencedCode(body);
   const proseForLineCount = stripMediaOnlyLines(prose);
+  const charsPerLine = charsPerLineFromColumnWidth(columnWidthPx);
 
   let height = isContinuation ? CONTINUATION_ROW_CHROME : ROW_CHROME;
   height +=
-    wrappedLineCount(proseForLineCount.trim() === "" ? "" : proseForLineCount) *
-    TEXT_LINE_HEIGHT;
+    wrappedLineCount(
+      proseForLineCount.trim() === "" ? "" : proseForLineCount,
+      charsPerLine,
+    ) * TEXT_LINE_HEIGHT;
   height += codeLines * CODE_LINE_HEIGHT;
+  height += markdownStructureExtraHeight(proseForLineCount);
 
   const imetaUrls = new Set<string>();
   if (message.tags && message.tags.length > 0) {
@@ -137,16 +211,13 @@ export function estimateRowHeight(
     height += mediaReserveHeight(undefined);
   }
 
-  // A bare non-media URL on its own line usually renders a link-preview card.
-  const hasPreviewUrlLine = body
-    .split("\n")
-    .some(
-      (line) =>
-        /^\s*https?:\/\/\S+\s*$/.test(line) && !MEDIA_URL_RE.test(line.trim()),
-    );
-  if (hasPreviewUrlLine) height += PREVIEW_CARD;
+  // Reserve only cards the renderer can actually produce. Generic bare URLs do
+  // not render preview cards, so keeping the old blanket reserve overestimated
+  // unsupported links by about one card height during first realization.
+  height += extractSupportedLinkPreviews(body).length * PREVIEW_CARD;
 
   if (message.reactions && message.reactions.length > 0) height += REACTION_ROW;
+  if (hasFooter) height += FOOTER_ROW;
 
   return Math.max(
     isContinuation ? CONTINUATION_MIN_ESTIMATE : MIN_ESTIMATE,
@@ -166,14 +237,18 @@ const DIVIDER_HEIGHT = 32;
  */
 export function timelineRowReserveStyle(
   item: TimelineItem,
+  opts: TimelineRowReserveOptions = {},
 ): React.CSSProperties {
   const height =
     item.kind === "message"
       ? estimateRowHeight(item.entry.message, {
+          ...opts,
           isContinuation: item.isContinuation,
-        }) + (item.isFollowedByContinuation ? 0 : MESSAGE_ITEM_BOTTOM_PADDING)
+        }) +
+        (item.entry.summary ? THREAD_SUMMARY_ROW : 0) +
+        (item.isFollowedByContinuation ? 0 : MESSAGE_ITEM_BOTTOM_PADDING)
       : item.kind === "system"
-        ? estimateRowHeight(item.entry.message)
+        ? estimateRowHeight(item.entry.message, opts)
         : DIVIDER_HEIGHT;
   return { containIntrinsicSize: `auto ${height}px` };
 }

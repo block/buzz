@@ -84,10 +84,45 @@ test("estimateRowHeight: imeta dim is not double-counted with its body url", () 
   assert.ok(both < 400, `expected single media reserve, got ${both}`);
 });
 
-test("estimateRowHeight: bare URL line adds a preview card", () => {
+test("estimateRowHeight: unsupported bare URL line does not add a preview card", () => {
   const withUrl = estimateRowHeight(msg({ body: "https://example.com/x" }));
   const withoutUrl = estimateRowHeight(msg({ body: "example" }));
+  assert.ok(withUrl < withoutUrl + 25, `url ${withUrl} vs ${withoutUrl}`);
+});
+
+test("estimateRowHeight: supported GitHub URL line adds a preview card", () => {
+  const withUrl = estimateRowHeight(
+    msg({ body: "https://github.com/block/buzz/pull/1641" }),
+  );
+  const withoutUrl = estimateRowHeight(msg({ body: "example" }));
   assert.ok(withUrl > withoutUrl + 50, `url ${withUrl} vs ${withoutUrl}`);
+});
+
+test("estimateRowHeight: supported Linear and Google URLs add preview cards", () => {
+  const base = estimateRowHeight(msg({ body: "example" }));
+  const linear = estimateRowHeight(
+    msg({ body: "https://linear.app/block/issue/BUZZ-123/fix-scroll" }),
+  );
+  const google = estimateRowHeight(
+    msg({ body: "https://docs.google.com/document/d/abc123/edit" }),
+  );
+  assert.ok(linear > base + 50, `linear ${linear} vs ${base}`);
+  assert.ok(google > base + 50, `google ${google} vs ${base}`);
+});
+
+test("estimateRowHeight: column width option changes prose wrapping", () => {
+  const body = "x".repeat(160);
+  const narrow = estimateRowHeight(msg({ body }), { columnWidthPx: 320 });
+  const fallback = estimateRowHeight(msg({ body }));
+  assert.ok(narrow > fallback + 20, `narrow ${narrow} vs fallback ${fallback}`);
+});
+
+test("estimateRowHeight: markdown structures reserve extra chrome", () => {
+  const table = estimateRowHeight(
+    msg({ body: "| A | B |\n| - | - |\n| 1 | 2 |" }),
+  );
+  const plain = estimateRowHeight(msg({ body: "A B\n- -\n1 2" }));
+  assert.ok(table > plain + 20, `table ${table} vs plain ${plain}`);
 });
 
 test("timelineRowReserveStyle: message item yields containIntrinsicSize", () => {
@@ -95,8 +130,47 @@ test("timelineRowReserveStyle: message item yields containIntrinsicSize", () => 
     kind: "message",
     key: "k",
     entry: { message: msg({ body: "hi" }), summary: null },
+    isContinuation: false,
+    isFollowedByContinuation: false,
   });
   assert.match(String(style.containIntrinsicSize), /^auto \d+px$/);
+});
+
+test("timelineRowReserveStyle: summary rows add summary chrome", () => {
+  const item = {
+    kind: "message",
+    key: "k",
+    entry: {
+      message: msg({ body: "hi" }),
+      summary: {
+        threadHeadId: "m1",
+        replyCount: 3,
+        lastReplyAt: 1,
+        participants: [],
+      },
+    },
+    isContinuation: false,
+    isFollowedByContinuation: false,
+  };
+  const withSummary = Number.parseInt(
+    String(timelineRowReserveStyle(item).containIntrinsicSize).match(
+      /auto (\d+)px/,
+    )?.[1] ?? "0",
+    10,
+  );
+  const withoutSummary = Number.parseInt(
+    String(
+      timelineRowReserveStyle({
+        ...item,
+        entry: { ...item.entry, summary: null },
+      }).containIntrinsicSize,
+    ).match(/auto (\d+)px/)?.[1] ?? "0",
+    10,
+  );
+  assert.ok(
+    withSummary > withoutSummary + 25,
+    `${withSummary} vs ${withoutSummary}`,
+  );
 });
 
 test("timelineRowReserveStyle: divider is short fixed height", () => {

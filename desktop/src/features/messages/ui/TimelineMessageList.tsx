@@ -21,6 +21,7 @@ import type { TimelineMessage } from "@/features/messages/types";
 import { canManageMessageForCurrentUser } from "@/features/messages/lib/canManageMessage";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type { ChannelType } from "@/shared/api/types";
+import { useElementWidth } from "@/shared/hooks/use-mobile";
 import { cn } from "@/shared/lib/cn";
 import { DayDivider } from "./DayDivider";
 import { MessageRow } from "./MessageRow";
@@ -178,6 +179,14 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
     [itemsResult.items],
   );
 
+  // Measure the row column once so row-height estimates reserve credible space
+  // for the *actual* wrap width instead of the 64-char fallback. The rows are
+  // `w-full` inside this wrapper, so its width is the row box the estimator
+  // subtracts chrome from. Zero (pre-measure) passes `undefined` to preserve
+  // the estimator's own fallback rather than tripping its min-chars floor.
+  const [columnRef, columnWidthPx] = useElementWidth<HTMLDivElement>();
+  const reserveColumnWidthPx = columnWidthPx > 0 ? columnWidthPx : undefined;
+
   const renderItem = React.useCallback(
     (item: TimelineNonDayItem) => {
       switch (item.kind) {
@@ -256,7 +265,7 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
   );
 
   return (
-    <div className="flex flex-col">
+    <div className="flex flex-col" ref={columnRef}>
       {dayGroups.map((group) => (
         <section
           className={cn(
@@ -279,7 +288,9 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
             <div
               className="timeline-row-cv"
               key={getTimelineItemKey(item)}
-              style={timelineRowReserveStyle(item)}
+              style={timelineRowReserveStyle(item, {
+                columnWidthPx: reserveColumnWidthPx,
+              })}
             >
               {renderItem(item)}
             </div>
