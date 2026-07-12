@@ -115,6 +115,11 @@ export function InboxDetailPane({
   onToggleReaction,
 }: InboxDetailPaneProps) {
   const detailPaneRef = React.useRef<HTMLElement | null>(null);
+  // Refs for the scroll container and its inner content div — used by the
+  // post-center anchor hold to compensate for late content growth above the
+  // selected message (reactions, channel-window merge, image decode).
+  const scrollContainerRef = React.useRef<HTMLDivElement | null>(null);
+  const contentRef = React.useRef<HTMLDivElement | null>(null);
   const [replyTargetId, setReplyTargetId] = React.useState<string | null>(null);
   const [isFocusHighlightVisible, setIsFocusHighlightVisible] =
     React.useState(true);
@@ -191,15 +196,65 @@ export function InboxDetailPane({
   // Keep isLoadingRef current every render so rAF callbacks see the live value.
   isLoadingRef.current = isThreadContextLoading;
 
+  // Post-center anchor hold.
+  //
+  // After the deliberate-selection center fires, reactions, channel-window
+  // merges, and image decodes can add content ABOVE the selected message.
+  // The browser's native scroll anchoring pins the *topmost visible row*, so
+  // growth between that row and the selected message pushes the selected row
+  // down without compensation — producing the "correct snap → brief pause →
+  // jumps up 2-3 messages" symptom.
+  //
+  // Fix (mirrors useAnchoredScroll.ts:423-433): after the center fires,
+  // hold the selected row's absolute position within the scroll container's
+  // content (invariant under user scroll: scrollBy on same axis changes both
+  // bcrect.top and scrollTop by the same amount, so the sum is stable).  On
+  // every subsequent message-list commit (useLayoutEffect), re-measure and
+  // compensate with scrollBy(0, drift) when content above the anchor has grown.
+  // Release the hold on user interaction or selection-key change.
+  //
+  // Measurement: contentTop = bcrect.top + scrollTop - container.bcrect.top.
+  // This is scroll-invariant: a user scroll ±D changes bcrect.top by ∓D and
+  // scrollTop by ±D, leaving the sum unchanged.  Only content growth above the
+  // anchor changes contentTop.
+  const anchorHoldRef = React.useRef<{
+    contentTop: number;
+    key: string;
+  } | null>(null);
+  const selectedMessageScrollKeyRef = React.useRef(selectedMessageScrollKey);
+  selectedMessageScrollKeyRef.current = selectedMessageScrollKey;
+
+  // Captures the hold after the center fires.  Called from both center paths.
+  const captureAnchorHold = React.useCallback((key: string) => {
+    const container = scrollContainerRef.current;
+    if (!container) return;
+    const selectedRow = container.querySelector<HTMLElement>(
+      '[data-testid="home-inbox-selected-message"]',
+    );
+    if (!selectedRow) return;
+    const contentTop =
+      selectedRow.getBoundingClientRect().top +
+      container.scrollTop -
+      container.getBoundingClientRect().top;
+    anchorHoldRef.current = { contentTop, key };
+  }, []);
+
+  // Releases the hold — called on user interaction and selection-key change.
+  const releaseAnchorHold = React.useCallback(() => {
+    anchorHoldRef.current = null;
+  }, []);
+
   // Arm the pending center whenever the selection key changes.
   React.useEffect(() => {
     if (!selectedMessageScrollKey) {
       pendingCenterKeyRef.current = null;
+      releaseAnchorHold();
       return;
     }
 
     pendingCenterKeyRef.current = selectedMessageScrollKey;
     userScrolledRef.current = false;
+    releaseAnchorHold();
 
     // Attempt the center after the current paint.  By the time this rAF fires,
     // any synchronous state updates (including isLoading → true) will have
@@ -219,13 +274,14 @@ export function InboxDetailPane({
             '[data-testid="home-inbox-selected-message"]',
           )
           ?.scrollIntoView({ block: "center" });
+        captureAnchorHold(selectedMessageScrollKey);
       }
     });
 
     return () => {
       window.cancelAnimationFrame(rafId);
     };
-  }, [selectedMessageScrollKey]);
+  }, [selectedMessageScrollKey, captureAnchorHold, releaseAnchorHold]);
 
   // Fire the deferred center when loading transitions true → false.
   React.useEffect(() => {
@@ -246,9 +302,84 @@ export function InboxDetailPane({
             '[data-testid="home-inbox-selected-message"]',
           )
           ?.scrollIntoView({ block: "center" });
+        captureAnchorHold(selectedMessageScrollKey);
       }
     }
-  }, [isThreadContextLoading, selectedMessageScrollKey]);
+  }, [isThreadContextLoading, selectedMessageScrollKey, captureAnchorHold]);
+
+  // Compensate for late content growth above the anchor (reactions, channel-
+  // window merge, image decode).  Runs as a layout effect so drift is corrected
+  // before paint, preventing visible flicker.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: messages and replies are the reactive triggers that drive displayMessages; we intentionally re-run on every message-list commit to catch reaction/merge re-renders; scrollContainerRef is a stable ref
+  React.useLayoutEffect(() => {
+    const hold = anchorHoldRef.current;
+    const container = scrollContainerRef.current;
+    if (
+      !hold ||
+      !container ||
+      hold.key !== selectedMessageScrollKeyRef.current
+    ) {
+      return;
+    }
+
+    const selectedRow = container.querySelector<HTMLElement>(
+      '[data-testid="home-inbox-selected-message"]',
+    );
+    if (!selectedRow) return;
+
+    // Recompute contentTop: scroll-invariant absolute position within content.
+    const currentContentTop =
+      selectedRow.getBoundingClientRect().top +
+      container.scrollTop -
+      container.getBoundingClientRect().top;
+    const drift = currentContentTop - hold.contentTop;
+    if (Math.abs(drift) > 0.5) {
+      hold.contentTop = currentContentTop;
+      container.scrollBy(0, drift);
+    }
+  }, [messages, replies]);
+
+  // ResizeObserver: compensate for non-React resizes (image decode, embed
+  // expand) that grow content above the anchor without triggering a React
+  // re-render.  Keyed on conversationId so the observer is re-attached when
+  // a new conversation opens and contentRef.current becomes a fresh node.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: conversationId is the re-attachment trigger; the effect body reads only stable refs
+  React.useEffect(() => {
+    const content = contentRef.current;
+    if (!content || typeof ResizeObserver === "undefined") return;
+
+    const observer = new ResizeObserver(() => {
+      const hold = anchorHoldRef.current;
+      const container = scrollContainerRef.current;
+      if (
+        !hold ||
+        !container ||
+        hold.key !== selectedMessageScrollKeyRef.current
+      ) {
+        return;
+      }
+
+      const selectedRow = container.querySelector<HTMLElement>(
+        '[data-testid="home-inbox-selected-message"]',
+      );
+      if (!selectedRow) return;
+
+      const currentContentTop =
+        selectedRow.getBoundingClientRect().top +
+        container.scrollTop -
+        container.getBoundingClientRect().top;
+      const drift = currentContentTop - hold.contentTop;
+      if (Math.abs(drift) > 0.5) {
+        hold.contentTop = currentContentTop;
+        container.scrollBy(0, drift);
+      }
+    });
+
+    observer.observe(content);
+    return () => {
+      observer.disconnect();
+    };
+  }, [conversationId]);
 
   // Cancel the pending center if the user scrolls before it fires.
   // Keyed on conversationId so listeners are reinstalled when a conversation
@@ -261,6 +392,7 @@ export function InboxDetailPane({
 
     const handleUserScroll = () => {
       userScrolledRef.current = true;
+      releaseAnchorHold();
     };
 
     pane.addEventListener("wheel", handleUserScroll, { passive: true });
@@ -272,7 +404,7 @@ export function InboxDetailPane({
       pane.removeEventListener("touchstart", handleUserScroll);
       pane.removeEventListener("keydown", handleUserScroll);
     };
-  }, [conversationId]);
+  }, [conversationId, releaseAnchorHold]);
 
   // Capture the default composer reply parent from the selected-event anchor
   // when the conversation first opens (or when the user explicitly navigates
@@ -516,8 +648,9 @@ export function InboxDetailPane({
         <div
           aria-busy={isThreadContextLoading}
           className="min-h-0 flex-1 overflow-y-auto overscroll-contain pb-32"
+          ref={scrollContainerRef}
         >
-          <div>
+          <div ref={contentRef}>
             {displayMessages.map((message, index) => {
               const isAfterSeparator = index === 1;
               const previousMessage = displayMessages[index - 1];

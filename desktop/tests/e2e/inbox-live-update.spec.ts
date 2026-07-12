@@ -1103,4 +1103,223 @@ test.describe("inbox stable-conversation regressions", () => {
     // Count must remain 1 — passive arrival must not trigger another center.
     expect(await getScrollIntoViewCount(page)).toBe(1);
   });
+
+  test("post-settle reaction hydration does not shift the centered selected message out of viewport", async ({
+    page,
+  }) => {
+    // Regression: after the deliberate-selection center fires (once, at
+    // thread-context settle), reactions fetched for context messages above the
+    // selected one add ~36px per reacted message to the layout.  Without drift
+    // compensation the selected message slides down/out of center while
+    // scrollTop stays numerically fixed.
+    //
+    // Fix: after the center fires, capture the selected row's viewport offset
+    // and compensate with scrollBy(0, drift) on every subsequent message-list
+    // commit.  Release on user interaction.
+    //
+    // This test must FAIL at 5d20801b9 (no hold compensation, selected message
+    // drifts out of center on reaction arrival) and PASS with the fix.
+    //
+    // Fixture (same shape as test 5):
+    //   - fetchRoot + 10 older replies in mockMessages only (fetch path).
+    //   - fetchNewest (reply to fetchRoot) in feed as representative.
+    //   - Click fetchNewest → center after fetch settle.
+    //   - Emit kind:7 reaction events targeting older replies ABOVE fetchNewest.
+    //   - Assert selected message stays in viewport; spy count stays 1.
+
+    await installMockBridge(page);
+    await page.goto("/");
+    await expect(getListPane(page)).toBeVisible();
+    await waitForBridgeReady(page);
+    await installScrollSpy(page);
+
+    // ── Seed the fetch-path conversation ─────────────────────────────
+    const { fetchNewest, olderReplyIds } = await page.evaluate(
+      ({ channelId, currentPubkey, senderPubkey }) => {
+        const win = window as MockWindow;
+        const emit = win.__BUZZ_E2E_EMIT_MOCK_MESSAGE__;
+        const push = win.__BUZZ_E2E_PUSH_MOCK_FEED_ITEM__;
+        if (!emit || !push) throw new Error("Bridge helpers not ready");
+
+        const fetchRoot = emit({
+          channelName: "general",
+          content: "Reaction-drift test root.",
+          pubkey: senderPubkey,
+          id: "e0".repeat(32),
+        });
+
+        // 10 older replies — in mockMessages, prepended above fetchNewest
+        // after the context fetch.  Reactions targeting these cause drift.
+        const olderReplyIds: string[] = [];
+        for (let i = 1; i <= 10; i++) {
+          const reply = emit({
+            channelName: "general",
+            content: `Reaction-drift older reply ${i} — long enough to occupy vertical space so reactions adding height push the selected message out of center when uncompensated.`,
+            parentEventId: fetchRoot.id,
+            pubkey: senderPubkey,
+            id: `e${i.toString(16).padStart(1, "0")}`.repeat(32),
+          });
+          olderReplyIds.push(reply.id);
+        }
+
+        const fetchNewest = emit({
+          channelName: "general",
+          content:
+            "Reaction-drift selected reply — the one the user clicks; must hold position after reactions arrive.",
+          parentEventId: fetchRoot.id,
+          pubkey: senderPubkey,
+          mentionPubkeys: [currentPubkey],
+          id: "ef".repeat(32),
+        });
+
+        // Later replies ensure the selected row has enough content below it to
+        // be truly centered rather than clamped at the scroll container floor.
+        for (let i = 1; i <= 5; i++) {
+          emit({
+            channelName: "general",
+            content: `Reaction-drift later reply ${i} — provides content below the selected message for a non-clamped center.`,
+            parentEventId: fetchRoot.id,
+            pubkey: senderPubkey,
+            id: `f${i.toString(16).padStart(1, "0")}`.repeat(32),
+          });
+        }
+
+        push({
+          id: fetchNewest.id,
+          kind: fetchNewest.kind,
+          pubkey: fetchNewest.pubkey,
+          content: fetchNewest.content,
+          created_at: fetchNewest.created_at + 11,
+          channel_id: channelId,
+          channel_name: "general",
+          tags: fetchNewest.tags,
+          category: "mention",
+        });
+
+        return { fetchNewest, olderReplyIds };
+      },
+      {
+        channelId: GENERAL_CHANNEL_ID,
+        currentPubkey: TEST_IDENTITIES.tyler.pubkey,
+        senderPubkey: TEST_IDENTITIES.alice.pubkey,
+      },
+    );
+
+    const newestRow = page.getByTestId(`home-inbox-item-${fetchNewest.id}`);
+    await expect(newestRow).toBeVisible();
+
+    // Reset the spy so only the center from the click is counted.
+    await resetScrollIntoViewCount(page);
+
+    // ── Click the newest reply row ────────────────────────────────────
+    await newestRow.click();
+    const detail = getDetailPane(page);
+    await expect(detail).toContainText("Reaction-drift selected reply");
+
+    // Wait for the thread context fetch to settle.
+    await page.waitForFunction(() => {
+      const scrollable = document.querySelector(
+        '[data-testid="home-inbox-detail"] [aria-busy]',
+      );
+      return scrollable?.getAttribute("aria-busy") !== "true";
+    });
+
+    // Older replies are now rendered (fetch landed).
+    await expect(detail).toContainText("Reaction-drift older reply 1");
+
+    // Record the deliberate center result before reactions land. Later replies
+    // provide enough space below this row that `scrollIntoView({ block: "center" })`
+    // can center it rather than clamping at the pane bottom.
+    const msgCenterOffsetBeforeReactions = await page.evaluate(() => {
+      const selectedMsg = document.querySelector<HTMLElement>(
+        '[data-testid="home-inbox-selected-message"]',
+      );
+      const pane = document.querySelector<HTMLElement>(
+        '[data-testid="home-inbox-detail"] [aria-busy]',
+      );
+      if (!selectedMsg || !pane) return null;
+      const paneRect = pane.getBoundingClientRect();
+      const msgRect = selectedMsg.getBoundingClientRect();
+      return (
+        msgRect.top + msgRect.height / 2 - (paneRect.top + paneRect.height / 2)
+      );
+    });
+    expect(msgCenterOffsetBeforeReactions).not.toBeNull();
+    expect(await getScrollIntoViewCount(page)).toBe(1);
+
+    // ── Emit late reactions targeting messages ABOVE fetchNewest ──────
+    // These simulate the post-settle reaction hydration from
+    // useInboxThreadContext's fetchAuxEventsByReference call.  kind:7 events
+    // with ["e", <olderReplyId>] tags arrive via the channel live subscription
+    // and feed into channelMessages → reactionEvents → messages prop, causing
+    // height growth above the selected row.  Targeting 5 of the 10 older
+    // replies produces ~5 × 36px ≈ 180px of drift when uncompensated.
+    await page.evaluate(
+      ({ senderPubkey, targetIds }) => {
+        const win = window as MockWindow;
+        const emit = win.__BUZZ_E2E_EMIT_MOCK_MESSAGE__;
+        if (!emit) return;
+        for (const targetId of targetIds) {
+          emit({
+            channelName: "general",
+            content: "+",
+            pubkey: senderPubkey,
+            kind: 7,
+            extraTags: [["e", targetId]],
+          });
+        }
+      },
+      {
+        senderPubkey: TEST_IDENTITIES.bob.pubkey,
+        // React to the first 5 older replies (all above fetchNewest).
+        targetIds: olderReplyIds.slice(0, 5),
+      },
+    );
+
+    // Wait for reactions to appear: at least one reactions container becomes visible.
+    // The reactions update `messages`, which re-renders InboxMessageRow with
+    // MessageReactions containers, growing each row that received a reaction.
+    await page.waitForFunction(() => {
+      return (
+        (document
+          .querySelector('[data-testid="home-inbox-detail"]')
+          ?.querySelectorAll('[data-testid="message-reactions"]').length ?? 0) >
+        0
+      );
+    });
+
+    // ── Assert: selected message retains its post-center viewport offset ─
+    // With the fix: the layout effect fires on messages change, measures drift,
+    // and calls scrollBy(0, drift) to preserve fetchNewest's actual centered
+    // position. Without the fix it drifts ~180px down (5 reactions × 36px).
+    const msgCenterOffsetAfterReactions = await page.evaluate(() => {
+      const selectedMsg = document.querySelector<HTMLElement>(
+        '[data-testid="home-inbox-selected-message"]',
+      );
+      const pane = document.querySelector<HTMLElement>(
+        '[data-testid="home-inbox-detail"] [aria-busy]',
+      );
+      if (!selectedMsg || !pane) return null;
+      const paneRect = pane.getBoundingClientRect();
+      const msgRect = selectedMsg.getBoundingClientRect();
+      const msgCenter = msgRect.top + msgRect.height / 2;
+      const paneCenter = paneRect.top + paneRect.height / 2;
+      // Positive = selected message is below pane center.  Without the fix
+      // this grows by ~180px as reactions add height above the anchor.
+      return msgCenter - paneCenter;
+    });
+    expect(msgCenterOffsetAfterReactions).not.toBeNull();
+    // With the fix the offset stays where the deliberate center placed it.
+    // Without the fix, late reaction height moves it down by ~180px.
+    expect(
+      Math.abs(
+        (msgCenterOffsetAfterReactions ?? Number.MAX_SAFE_INTEGER) -
+          (msgCenterOffsetBeforeReactions ?? 0),
+      ),
+    ).toBeLessThan(30);
+
+    // ── Assert: scrollIntoView spy count is still 1 ───────────────────
+    // Drift compensation uses scrollBy — must NOT call scrollIntoView again.
+    expect(await getScrollIntoViewCount(page)).toBe(1);
+  });
 });
