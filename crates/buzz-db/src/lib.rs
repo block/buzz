@@ -2717,8 +2717,10 @@ impl Db {
     ///
     /// Keeps only the event with the highest `created_at` per `(kind, pubkey, d_tag)`.
     /// Same-second ties are broken by lowest event `id` (deterministic ordering).
-    /// The entire check → soft-delete → insert runs in a single transaction with
-    /// an advisory lock to prevent concurrent-insert races.
+    /// The entire check → retire old payload → insert runs in a single transaction
+    /// with an advisory lock to prevent concurrent-insert races. NIP-RS read-state
+    /// coordinates hard-delete the superseded payload and preserve a compact
+    /// ordering watermark; other NIP-33 kinds retain soft-deleted history.
     ///
     /// **Channel policy:** NIP-33 replacement keys on `(kind, pubkey, d_tag)` globally —
     /// `channel_id` is NOT part of the replacement key. This matches the Nostr spec:
@@ -2773,7 +2775,21 @@ impl Db {
             .execute(&mut *tx)
             .await?;
 
-        // Check for existing event with same (kind, pubkey, d_tag).
+        let is_nip_rs = kind_i32 == buzz_core::kind::KIND_READ_STATE as i32
+            && d_tag.strip_prefix("read-state:").is_some_and(|slot| {
+                slot.len() == 32
+                    && slot
+                        .bytes()
+                        .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+            })
+            && event.tags.iter().any(|tag| {
+                let parts = tag.as_slice();
+                parts.len() == 2 && parts[0] == "t" && parts[1] == "read-state"
+            });
+
+        // Check the live head and, for NIP-RS, the compact historical ordering
+        // watermark. The watermark remains after a NIP-09 coordinate deletion,
+        // preventing a previously accepted signed blob from being resurrected.
         let existing: Option<(chrono::DateTime<chrono::Utc>, Vec<u8>)> = sqlx::query_as(
             "SELECT created_at, id FROM events \
              WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND d_tag = $4 AND deleted_at IS NULL \
@@ -2785,32 +2801,69 @@ impl Db {
         .bind(d_tag)
         .fetch_optional(&mut *tx)
         .await?;
-
-        // Stale-write protection: reject if incoming is not newer.
-        let incoming_id = event.id.as_bytes().as_slice();
-        if let Some((existing_ts, existing_id)) = existing {
-            let dominated = created_at < existing_ts
-                || (created_at == existing_ts && incoming_id >= existing_id.as_slice());
-            if dominated {
-                tx.rollback().await?;
-                let received_at = chrono::Utc::now();
-                return Ok((
-                    StoredEvent::with_received_at(event.clone(), received_at, channel_id, false),
-                    false,
-                ));
-            }
-
-            // Soft-delete the older event(s).
-            sqlx::query(
-                "UPDATE events SET deleted_at = NOW() \
-                 WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND d_tag = $4 AND deleted_at IS NULL",
+        let watermark: Option<(chrono::DateTime<chrono::Utc>, Vec<u8>)> = if is_nip_rs {
+            sqlx::query_as(
+                "SELECT created_at, event_id FROM parameterized_event_watermarks \
+                 WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND d_tag = $4",
             )
             .bind(community_id.as_uuid())
             .bind(kind_i32)
             .bind(pubkey_bytes.as_slice())
             .bind(d_tag)
-            .execute(&mut *tx)
-            .await?;
+            .fetch_optional(&mut *tx)
+            .await?
+        } else {
+            None
+        };
+
+        // Stale-write protection: reject if either durable ordering source
+        // dominates the incoming tuple. Equal timestamps use lowest event id.
+        let incoming_id = event.id.as_bytes().as_slice();
+        let dominated =
+            existing
+                .iter()
+                .chain(watermark.iter())
+                .any(|(accepted_ts, accepted_id)| {
+                    created_at < *accepted_ts
+                        || (created_at == *accepted_ts && incoming_id >= accepted_id.as_slice())
+                });
+        if dominated {
+            tx.rollback().await?;
+            let received_at = chrono::Utc::now();
+            return Ok((
+                StoredEvent::with_received_at(event.clone(), received_at, channel_id, false),
+                false,
+            ));
+        }
+
+        if is_nip_rs {
+            if let Some((_, existing_id)) = &existing {
+                // Mentions are denormalized and have no FK to the partitioned
+                // events table. Remove any defensive/legacy rows in the same
+                // transaction before dropping the superseded payload.
+                sqlx::query("DELETE FROM event_mentions WHERE community_id = $1 AND event_id = $2")
+                    .bind(community_id.as_uuid())
+                    .bind(existing_id)
+                    .execute(&mut *tx)
+                    .await?;
+            }
+        }
+
+        if existing.is_some() {
+            let statement = if is_nip_rs {
+                "DELETE FROM events \
+                 WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND d_tag = $4 AND deleted_at IS NULL"
+            } else {
+                "UPDATE events SET deleted_at = NOW() \
+                 WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND d_tag = $4 AND deleted_at IS NULL"
+            };
+            sqlx::query(statement)
+                .bind(community_id.as_uuid())
+                .bind(kind_i32)
+                .bind(pubkey_bytes.as_slice())
+                .bind(d_tag)
+                .execute(&mut *tx)
+                .await?;
         }
 
         // Insert the new event inside the transaction.
@@ -2845,6 +2898,24 @@ impl Db {
                 StoredEvent::with_received_at(event.clone(), received_at, channel_id, false),
                 false,
             ));
+        }
+
+        if is_nip_rs {
+            sqlx::query(
+                "INSERT INTO parameterized_event_watermarks \
+                     (community_id, kind, pubkey, d_tag, created_at, event_id) \
+                 VALUES ($1, $2, $3, $4, $5, $6) \
+                 ON CONFLICT (community_id, kind, pubkey, d_tag) DO UPDATE SET \
+                     created_at = EXCLUDED.created_at, event_id = EXCLUDED.event_id",
+            )
+            .bind(community_id.as_uuid())
+            .bind(kind_i32)
+            .bind(pubkey_bytes.as_slice())
+            .bind(d_tag)
+            .bind(created_at)
+            .bind(incoming_id)
+            .execute(&mut *tx)
+            .await?;
         }
 
         tx.commit().await?;
@@ -2951,7 +3022,9 @@ mod tests {
     const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz";
 
     async fn setup_db() -> Db {
-        let pool = PgPool::connect(TEST_DB_URL)
+        let database_url =
+            std::env::var("TEST_DATABASE_URL").unwrap_or_else(|_| TEST_DB_URL.into());
+        let pool = PgPool::connect(&database_url)
             .await
             .expect("connect to test DB");
         Db::from_pool(pool)
@@ -2967,6 +3040,83 @@ mod tests {
             .await
             .expect("insert community");
         id
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn nip_rs_replacement_hard_deletes_payload_and_watermark_rejects_replay() {
+        use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
+
+        let db = setup_db().await;
+        let community = CommunityId::from_uuid(make_community(&db.pool).await);
+        let keys = Keys::generate();
+        let d_tag = format!("read-state:{}", "a".repeat(32));
+        let tags = vec![
+            Tag::parse(["d", d_tag.as_str()]).expect("d tag"),
+            Tag::parse(["t", "read-state"]).expect("t tag"),
+        ];
+        let base = Timestamp::now().as_secs();
+        let old = EventBuilder::new(Kind::Custom(buzz_core::kind::KIND_READ_STATE as u16), "old")
+            .tags(tags.clone())
+            .custom_created_at(Timestamp::from(base))
+            .sign_with_keys(&keys)
+            .expect("sign old");
+        let new = EventBuilder::new(Kind::Custom(buzz_core::kind::KIND_READ_STATE as u16), "new")
+            .tags(tags)
+            .custom_created_at(Timestamp::from(base + 1))
+            .sign_with_keys(&keys)
+            .expect("sign new");
+
+        assert!(
+            db.replace_parameterized_event(community, &old, &d_tag, None)
+                .await
+                .expect("insert old")
+                .1
+        );
+        assert!(
+            db.replace_parameterized_event(community, &new, &d_tag, None)
+                .await
+                .expect("replace with new")
+                .1
+        );
+
+        let rows: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM events WHERE community_id=$1 AND kind=30078 AND pubkey=$2 AND d_tag=$3",
+        )
+        .bind(community.as_uuid())
+        .bind(keys.public_key().to_bytes())
+        .bind(&d_tag)
+        .fetch_one(&db.pool)
+        .await
+        .expect("count NIP-RS rows");
+        assert_eq!(rows, 1, "superseded payload must be physically deleted");
+
+        sqlx::query(
+            "UPDATE events SET deleted_at=NOW() WHERE community_id=$1 AND kind=30078 AND pubkey=$2 AND d_tag=$3",
+        )
+        .bind(community.as_uuid())
+        .bind(keys.public_key().to_bytes())
+        .bind(&d_tag)
+        .execute(&db.pool)
+        .await
+        .expect("simulate NIP-09 coordinate deletion");
+
+        assert!(
+            !db.replace_parameterized_event(community, &old, &d_tag, None)
+                .await
+                .expect("replay old")
+                .1
+        );
+        let live: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM events WHERE community_id=$1 AND kind=30078 AND pubkey=$2 AND d_tag=$3 AND deleted_at IS NULL",
+        )
+        .bind(community.as_uuid())
+        .bind(keys.public_key().to_bytes())
+        .bind(&d_tag)
+        .fetch_one(&db.pool)
+        .await
+        .expect("count live NIP-RS rows");
+        assert_eq!(live, 0, "watermark must block stale resurrection");
     }
 
     #[tokio::test]
