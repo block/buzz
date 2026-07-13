@@ -4197,8 +4197,13 @@ mod tests {
         let community_a = CommunityId::from_uuid(make_community(&db.pool).await);
         let community_b = CommunityId::from_uuid(make_community(&db.pool).await);
         let community_c = CommunityId::from_uuid(make_community(&db.pool).await);
-        let owner = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-        let other = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        // Unique per run: `list_communities_owned_by` is keyed only by pubkey,
+        // so a shared fixed pubkey picks up communities leaked by sibling
+        // ignored tests running against the same database.
+        let owner = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+        let owner = owner.as_str();
+        let other = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+        let other = other.as_str();
 
         db.bootstrap_owner(community_a, owner)
             .await
