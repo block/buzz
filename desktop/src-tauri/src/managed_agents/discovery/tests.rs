@@ -630,6 +630,8 @@ fn probe_codex_acp_major_version_parses_1x_output() {
     assert_eq!(major, Some(1), "1.x adapter must return major version 1");
 }
 
+mod codex_version;
+
 #[cfg(unix)]
 #[test]
 fn probe_codex_acp_major_version_returns_none_for_nonzero_exit() {
