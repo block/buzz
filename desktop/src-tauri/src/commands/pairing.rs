@@ -482,6 +482,44 @@ fn pairing_relay_from_nip11(json: &serde_json::Value) -> PairingRelay {
     }
 }
 
+fn parse_auth_challenge(text: &str) -> Option<String> {
+    let arr: serde_json::Value = serde_json::from_str(text).ok()?;
+    let arr = arr.as_array()?;
+    if arr.len() >= 2 && arr[0].as_str()? == "AUTH" {
+        return arr[1].as_str().map(|s| s.to_string());
+    }
+    None
+}
+
+async fn wait_for_eose<S>(read: &mut S, sub_id: &str, dur: Duration) -> Result<(), String>
+where
+    S: StreamExt<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin,
+{
+    tokio::time::timeout(dur, async {
+        loop {
+            let msg = read
+                .next()
+                .await
+                .ok_or_else(|| "relay closed waiting for EOSE".to_string())?
+                .map_err(|e| format!("WS error waiting for EOSE: {e}"))?;
+            if let Message::Text(text) = msg {
+                if let Ok(arr) = serde_json::from_str::<serde_json::Value>(text.as_str()) {
+                    if let Some(arr) = arr.as_array() {
+                        if arr.len() >= 2
+                            && arr[0].as_str() == Some("EOSE")
+                            && arr[1].as_str() == Some(sub_id)
+                        {
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+        }
+    })
+    .await
+    .map_err(|_| "timeout waiting for EOSE".to_string())?
+}
+
 #[cfg(test)]
 mod pairing_relay_tests {
     use super::{pairing_relay_from_nip11, probe_pairing_relay, PairingRelay};
@@ -553,42 +591,4 @@ mod pairing_relay_tests {
 
         assert_eq!(pairing_relay_from_nip11(&document), PairingRelay::MainRelay);
     }
-}
-
-fn parse_auth_challenge(text: &str) -> Option<String> {
-    let arr: serde_json::Value = serde_json::from_str(text).ok()?;
-    let arr = arr.as_array()?;
-    if arr.len() >= 2 && arr[0].as_str()? == "AUTH" {
-        return arr[1].as_str().map(|s| s.to_string());
-    }
-    None
-}
-
-async fn wait_for_eose<S>(read: &mut S, sub_id: &str, dur: Duration) -> Result<(), String>
-where
-    S: StreamExt<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin,
-{
-    tokio::time::timeout(dur, async {
-        loop {
-            let msg = read
-                .next()
-                .await
-                .ok_or_else(|| "relay closed waiting for EOSE".to_string())?
-                .map_err(|e| format!("WS error waiting for EOSE: {e}"))?;
-            if let Message::Text(text) = msg {
-                if let Ok(arr) = serde_json::from_str::<serde_json::Value>(text.as_str()) {
-                    if let Some(arr) = arr.as_array() {
-                        if arr.len() >= 2
-                            && arr[0].as_str() == Some("EOSE")
-                            && arr[1].as_str() == Some(sub_id)
-                        {
-                            return Ok(());
-                        }
-                    }
-                }
-            }
-        }
-    })
-    .await
-    .map_err(|_| "timeout waiting for EOSE".to_string())?
 }
