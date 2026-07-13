@@ -471,7 +471,7 @@ mod tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 6);
+        assert_eq!(migrations.len(), 7);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -555,6 +555,23 @@ mod tests {
             );
         }
         assert!(!migrations[0].sql.as_str().contains("moderation_reports"));
+
+        // Thread subtree pagination uses the full tenant/root/keyset tuple. Keep
+        // the covering index additive so brownfield migration checksums remain
+        // stable.
+        assert_eq!(migrations[6].version, 7);
+        assert!(migrations[6]
+            .sql
+            .as_str()
+            .contains("CREATE INDEX idx_thread_metadata_root_keyset"));
+        assert!(migrations[6]
+            .sql
+            .as_str()
+            .contains("(community_id, root_event_id, event_created_at, event_id)"));
+        assert!(!migrations[0]
+            .sql
+            .as_str()
+            .contains("idx_thread_metadata_root_keyset"));
     }
 
     #[test]
