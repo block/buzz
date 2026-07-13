@@ -31,7 +31,10 @@ export function UserProfileSnapshotExportDialog({
           },
           {
             onSuccess: (saved) => {
-              if (saved) toast.success(`Exported ${persona.displayName}.`);
+              if (saved) {
+                toast.success(`Exported ${persona.displayName}.`);
+                onOpenChange(false);
+              }
             },
             onError: (error) => {
               toast.error(
