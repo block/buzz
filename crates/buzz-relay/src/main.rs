@@ -781,6 +781,32 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
+    // Durable lifecycle backstop: Redis pub/sub cannot deliver to a pod that was
+    // offline. Periodically revalidate only communities with local live sockets
+    // so missed archive commands still converge without a global DB scan.
+    {
+        let lifecycle_state = Arc::clone(&state);
+        let interval_secs = std::env::var("BUZZ_COMMUNITY_REVALIDATE_INTERVAL_SECS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(30)
+            .clamp(1, 300);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                interval.tick().await;
+                let closed = lifecycle_state.revalidate_live_communities().await;
+                if closed > 0 {
+                    tracing::info!(
+                        closed,
+                        "closed sockets for inactive communities during lifecycle revalidation"
+                    );
+                }
+            }
+        });
+    }
+
     // Cross-pod connection-control consumer: receive disconnect commands from
     // Redis pub/sub (published by the pod that recorded a ban) and close any
     // matching local sockets. A member's live connections may land on any pod,
@@ -796,7 +822,7 @@ async fn main() -> anyhow::Result<()> {
                     Ok(scoped) => match scoped.command {
                         buzz_pubsub::conn_control::ConnControl::DisconnectCommunity => {
                             state_for_conn_ctrl
-                                .conn_manager
+                                .community_connections
                                 .disconnect_community(scoped.community_id);
                         }
                         buzz_pubsub::conn_control::ConnControl::DisconnectPubkey {

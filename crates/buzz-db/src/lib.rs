@@ -439,6 +439,17 @@ impl Db {
         .transpose()
     }
 
+    /// Returns whether a community id still exists in the active lifecycle state.
+    pub async fn is_community_active(&self, community_id: CommunityId) -> Result<bool> {
+        let active = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM communities WHERE id = $1 AND archived_at IS NULL)",
+        )
+        .bind(community_id.as_uuid())
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(active)
+    }
+
     /// Returns a community by host regardless of lifecycle state. Operator-plane only.
     pub async fn lookup_community_by_host_for_management(
         &self,

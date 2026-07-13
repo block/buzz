@@ -1,6 +1,7 @@
 //! Shared application state — Arc-wrapped, shared across all connections.
 
 use std::collections::{HashMap, HashSet};
+use std::future::Future;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
@@ -55,7 +56,128 @@ struct ConnEntry {
     grace_limit: u8,
 }
 
-/// Tracks active WebSocket connections and provides message routing by connection ID.
+/// Community-scoped lifecycle registry shared by every long-lived socket type.
+///
+/// A handler registers before durable active-state revalidation. Archival after
+/// registration cancels the token; archival before registration is observed by
+/// the revalidation. The returned guard removes the entry on every exit path.
+pub struct CommunityConnectionRegistry {
+    connections: Arc<DashMap<Uuid, (CommunityId, CancellationToken)>>,
+}
+
+impl Default for CommunityConnectionRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl CommunityConnectionRegistry {
+    /// Creates an empty lifecycle registry.
+    pub fn new() -> Self {
+        Self {
+            connections: Arc::new(DashMap::new()),
+        }
+    }
+
+    /// Registers one socket and returns a guard that deregisters it on drop.
+    pub fn register(
+        &self,
+        connection_id: Uuid,
+        community_id: CommunityId,
+        cancel: CancellationToken,
+    ) -> CommunityConnectionGuard {
+        self.connections
+            .insert(connection_id, (community_id, cancel));
+        CommunityConnectionGuard {
+            connection_id,
+            connections: Arc::clone(&self.connections),
+        }
+    }
+
+    /// Cancels every socket type currently bound to `community_id`.
+    pub fn disconnect_community(&self, community_id: CommunityId) -> usize {
+        let mut closed = 0;
+        for entry in self.connections.iter() {
+            if entry.value().0 == community_id {
+                entry.value().1.cancel();
+                closed += 1;
+            }
+        }
+        closed
+    }
+
+    /// Returns the distinct communities with live sockets on this pod.
+    pub fn bound_communities(&self) -> HashSet<CommunityId> {
+        self.connections
+            .iter()
+            .map(|entry| entry.value().0)
+            .collect()
+    }
+}
+
+/// Removes a socket lifecycle registration on every handler exit path.
+pub struct CommunityConnectionGuard {
+    connection_id: Uuid,
+    connections: Arc<DashMap<Uuid, (CommunityId, CancellationToken)>>,
+}
+
+impl Drop for CommunityConnectionGuard {
+    fn drop(&mut self) {
+        self.connections.remove(&self.connection_id);
+    }
+}
+
+/// Registers a socket, durably revalidates its community, then runs it.
+///
+/// The ordering is the archival admission invariant: archive-before-query is
+/// observed by the query, while archive-after-registration sees the token.
+pub async fn run_registered_community_connection<Check, CheckFuture, Run, RunFuture>(
+    registry: &CommunityConnectionRegistry,
+    connection_id: Uuid,
+    community_id: CommunityId,
+    cancel: CancellationToken,
+    check_active: Check,
+    run: Run,
+) where
+    Check: FnOnce() -> CheckFuture,
+    CheckFuture: Future<Output = Result<bool, buzz_db::DbError>>,
+    Run: FnOnce() -> RunFuture,
+    RunFuture: Future<Output = ()>,
+{
+    let _guard = registry.register(connection_id, community_id, cancel.clone());
+    if !matches!(check_active().await, Ok(true)) {
+        cancel.cancel();
+        return;
+    }
+    if cancel.is_cancelled() {
+        return;
+    }
+    run().await;
+    cancel.cancel();
+}
+
+async fn revalidate_registered_communities<Check, CheckFuture>(
+    registry: &CommunityConnectionRegistry,
+    mut check_active: Check,
+) -> (usize, Vec<(CommunityId, buzz_db::DbError)>)
+where
+    Check: FnMut(CommunityId) -> CheckFuture,
+    CheckFuture: Future<Output = Result<bool, buzz_db::DbError>>,
+{
+    let communities = registry.bound_communities();
+    let mut closed = 0;
+    let mut failures = Vec::new();
+    for community_id in communities {
+        match check_active(community_id).await {
+            Ok(false) => closed += registry.disconnect_community(community_id),
+            Ok(true) => {}
+            Err(error) => failures.push((community_id, error)),
+        }
+    }
+    (closed, failures)
+}
+
+/// Tracks active Nostr WebSocket connections and provides message routing by connection ID.
 pub struct ConnectionManager {
     connections: DashMap<Uuid, ConnEntry>,
 }
@@ -339,6 +461,8 @@ pub struct AppState {
     pub sub_registry: Arc<SubscriptionRegistry>,
     /// Registry of active WebSocket connections.
     pub conn_manager: Arc<ConnectionManager>,
+    /// Lifecycle cancellation for every long-lived socket, including huddle audio.
+    pub community_connections: Arc<CommunityConnectionRegistry>,
     /// Semaphore limiting total concurrent connections.
     pub conn_semaphore: Arc<Semaphore>,
     /// Semaphore limiting concurrent message handler tasks.
@@ -519,6 +643,7 @@ impl AppState {
             search: search_arc,
             sub_registry: Arc::new(SubscriptionRegistry::new()),
             conn_manager: Arc::new(ConnectionManager::new()),
+            community_connections: Arc::new(CommunityConnectionRegistry::new()),
             conn_semaphore: Arc::new(Semaphore::new(max_connections)),
             handler_semaphore: Arc::new(Semaphore::new(max_concurrent_handlers)),
             git_semaphore: Arc::new(Semaphore::new(git_max_concurrent_ops)),
@@ -814,6 +939,10 @@ impl AppState {
             event_id: event_id.to_string(),
             reason: reason.to_string(),
         };
+        // This pre-existing ban path may remain fire-and-forget because the
+        // durable ban row rejects the member again at auth. Community archival
+        // is different: its API awaits publication and live sockets also have a
+        // periodic durable-state revalidation backstop below.
         tokio::spawn(async move {
             if let Err(e) = pubsub.publish_conn_control(&tenant, &command).await {
                 tracing::warn!("Failed to publish conn-control disconnect: {e}");
@@ -824,18 +953,36 @@ impl AppState {
     }
 
     /// Disconnect a community locally and publish the command to every relay pod.
-    pub fn disconnect_community_clusterwide(&self, tenant: &TenantContext) -> usize {
-        let closed = self.conn_manager.disconnect_community(tenant.community());
-        let pubsub = Arc::clone(&self.pubsub);
-        let tenant = tenant.clone();
-        tokio::spawn(async move {
-            if let Err(e) = pubsub
-                .publish_conn_control(&tenant, &ConnControl::DisconnectCommunity)
-                .await
-            {
-                tracing::warn!(community = %tenant.community(), error = %e, "failed to publish community disconnect");
-            }
-        });
+    ///
+    /// Publication is awaited so the archive API can distinguish durable state
+    /// from propagation completion and offer a retryable response on failure.
+    pub async fn disconnect_community_clusterwide(
+        &self,
+        tenant: &TenantContext,
+    ) -> Result<usize, buzz_pubsub::PubSubError> {
+        let closed = self
+            .community_connections
+            .disconnect_community(tenant.community());
+        self.pubsub
+            .publish_conn_control(tenant, &ConnControl::DisconnectCommunity)
+            .await?;
+        Ok(closed)
+    }
+
+    /// Revalidate all communities with live sockets and cancel inactive ones.
+    ///
+    /// This is the durable backstop for Redis pub/sub's lossy offline-subscriber
+    /// semantics: a pod that missed a successful publish eventually observes the
+    /// archived row directly.
+    pub async fn revalidate_live_communities(&self) -> usize {
+        let (closed, failures) =
+            revalidate_registered_communities(&self.community_connections, |community_id| {
+                self.db.is_community_active(community_id)
+            })
+            .await;
+        for (community_id, error) in failures {
+            tracing::warn!(%community_id, %error, "community lifecycle revalidation failed; retaining its sockets until next tick");
+        }
         closed
     }
 
@@ -1324,33 +1471,130 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn disconnect_community_closes_only_matching_tenant() {
-        let mgr = ConnectionManager::new();
+    #[test]
+    fn community_lifecycle_disconnect_covers_socket_types_and_preserves_tenant_fence() {
+        let registry = CommunityConnectionRegistry::new();
         let community_a = CommunityId::from_uuid(Uuid::from_u128(0xa));
         let community_b = CommunityId::from_uuid(Uuid::from_u128(0xb));
-        let register = |community| {
-            let conn_id = Uuid::new_v4();
-            let (tx, _rx) = mpsc::channel(8);
-            let (ctrl_tx, _ctrl_rx) = mpsc::channel(8);
-            let cancel = CancellationToken::new();
-            mgr.register(
-                conn_id,
-                tx,
-                ctrl_tx,
-                cancel.clone(),
-                community,
-                Arc::new(AtomicU8::new(0)),
-                Arc::new(Mutex::new(HashMap::new())),
-                3,
-            );
-            cancel
-        };
-        let cancel_a = register(community_a);
-        let cancel_b = register(community_b);
-        assert_eq!(mgr.disconnect_community(community_a), 1);
+        let ordinary_a = CancellationToken::new();
+        let audio_a = CancellationToken::new();
+        let ordinary_b = CancellationToken::new();
+        let _ordinary_a_guard = registry.register(Uuid::new_v4(), community_a, ordinary_a.clone());
+        let _audio_a_guard = registry.register(Uuid::new_v4(), community_a, audio_a.clone());
+        let _ordinary_b_guard = registry.register(Uuid::new_v4(), community_b, ordinary_b.clone());
+
+        assert_eq!(registry.disconnect_community(community_a), 2);
+        assert!(ordinary_a.is_cancelled());
+        assert!(audio_a.is_cancelled());
+        assert!(!ordinary_b.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn register_then_revalidate_closes_both_archive_race_orderings() {
+        let registry = CommunityConnectionRegistry::new();
+        let community = CommunityId::from_uuid(Uuid::from_u128(0xa));
+
+        // Archive wins before durable revalidation: the check observes inactive
+        // and the socket body never starts.
+        let cancel_before = CancellationToken::new();
+        let started_before = Arc::new(AtomicBool::new(false));
+        let started_before_run = Arc::clone(&started_before);
+        run_registered_community_connection(
+            &registry,
+            Uuid::new_v4(),
+            community,
+            cancel_before.clone(),
+            || async { Ok(false) },
+            move || async move { started_before_run.store(true, Ordering::SeqCst) },
+        )
+        .await;
+        assert!(cancel_before.is_cancelled());
+        assert!(!started_before.load(Ordering::SeqCst));
+
+        // Archive wins after registration but while revalidation is paused: its
+        // sweep sees the token, and even an active query result cannot start the
+        // socket body afterward.
+        let cancel_during = CancellationToken::new();
+        let registered = Arc::new(tokio::sync::Notify::new());
+        let resume = Arc::new(tokio::sync::Notify::new());
+        let registered_check = Arc::clone(&registered);
+        let resume_check = Arc::clone(&resume);
+        let started_during = Arc::new(AtomicBool::new(false));
+        let started_during_run = Arc::clone(&started_during);
+        let future = run_registered_community_connection(
+            &registry,
+            Uuid::new_v4(),
+            community,
+            cancel_during.clone(),
+            move || async move {
+                registered_check.notify_one();
+                resume_check.notified().await;
+                Ok(true)
+            },
+            move || async move { started_during_run.store(true, Ordering::SeqCst) },
+        );
+        tokio::pin!(future);
+        tokio::select! {
+            _ = registered.notified() => {}
+            _ = &mut future => panic!("revalidation should be paused"),
+        }
+        assert_eq!(registry.disconnect_community(community), 1);
+        resume.notify_one();
+        future.await;
+        assert!(cancel_during.is_cancelled());
+        assert!(!started_during.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn revalidation_continues_after_one_community_lookup_failure() {
+        let registry = CommunityConnectionRegistry::new();
+        let archived_a = CommunityId::from_uuid(Uuid::from_u128(0xa));
+        let failed = CommunityId::from_uuid(Uuid::from_u128(0xb));
+        let archived_c = CommunityId::from_uuid(Uuid::from_u128(0xc));
+        let cancel_a = CancellationToken::new();
+        let cancel_failed = CancellationToken::new();
+        let cancel_c = CancellationToken::new();
+        let _guard_a = registry.register(Uuid::new_v4(), archived_a, cancel_a.clone());
+        let _guard_failed = registry.register(Uuid::new_v4(), failed, cancel_failed.clone());
+        let _guard_c = registry.register(Uuid::new_v4(), archived_c, cancel_c.clone());
+
+        let (closed, failures) =
+            revalidate_registered_communities(&registry, |community| async move {
+                if community == failed {
+                    Err(buzz_db::DbError::InvalidData(
+                        "injected lookup failure".into(),
+                    ))
+                } else {
+                    Ok(false)
+                }
+            })
+            .await;
+
+        assert_eq!(closed, 2);
         assert!(cancel_a.is_cancelled());
-        assert!(!cancel_b.is_cancelled());
+        assert!(!cancel_failed.is_cancelled());
+        assert!(cancel_c.is_cancelled());
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].0, failed);
+        assert_eq!(
+            registry.bound_communities(),
+            HashSet::from([archived_a, failed, archived_c])
+        );
+    }
+
+    #[test]
+    fn community_lifecycle_guard_deregisters_on_early_return() {
+        let registry = CommunityConnectionRegistry::new();
+        let community = CommunityId::from_uuid(Uuid::from_u128(0xa));
+        let cancel = CancellationToken::new();
+        let guard = registry.register(Uuid::new_v4(), community, cancel.clone());
+        assert_eq!(registry.bound_communities(), HashSet::from([community]));
+
+        drop(guard);
+
+        assert!(registry.bound_communities().is_empty());
+        assert_eq!(registry.disconnect_community(community), 0);
+        assert!(!cancel.is_cancelled());
     }
 
     #[tokio::test]
