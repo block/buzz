@@ -192,6 +192,58 @@ pub async fn provision_community(
     }
 }
 
+/// Owner assertion supplied by the trusted operator client.
+#[derive(Debug, Deserialize)]
+pub struct ArchiveCommunityRequest {
+    host: String,
+    owner_pubkey: String,
+}
+
+/// Idempotently archive a community owned by the asserted end-user identity.
+pub async fn archive_community(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    const PATH: &str = "/operator/communities/archive";
+    authorize_operator_request(&state, &headers, "POST", PATH, None, Some(&body)).await?;
+    let request: ArchiveCommunityRequest = serde_json::from_slice(&body).map_err(|e| {
+        api_error(
+            StatusCode::BAD_REQUEST,
+            &format!("invalid archive-community JSON: {e}"),
+        )
+    })?;
+    let normalized_host = normalize_candidate_host(&request.host)
+        .map_err(|msg| api_error(StatusCode::BAD_REQUEST, &msg))?;
+    if normalized_host == buzz_core::tenant::relay_url_authority(&state.config.relay_url) {
+        return Err(api_error(
+            StatusCode::CONFLICT,
+            "the deployment community cannot be archived",
+        ));
+    }
+    let owner = validate_pubkey_hex(&request.owner_pubkey).ok_or_else(|| {
+        api_error(
+            StatusCode::BAD_REQUEST,
+            "invalid owner_pubkey: expected 64-char hex pubkey",
+        )
+    })?;
+    let record = state
+        .db
+        .archive_community_owned_by(&normalized_host, &owner)
+        .await
+        .map_err(|e| internal_error(&format!("archive community: {e}")))?
+        .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "community not found"))?;
+    let tenant = TenantContext::resolved(record.id, &record.host);
+    let closed = state.disconnect_community_clusterwide(&tenant);
+    tracing::info!(community = %record.id, host = %record.host, local_connections_closed = closed, "community archived");
+    Ok(Json(serde_json::json!({
+        "community_id": record.id.to_string(),
+        "host": record.host,
+        "archived_at": record.archived_at,
+        "status": "archived",
+    })))
+}
+
 /// List communities where a pubkey currently holds the `owner` role.
 pub async fn list_owned_communities(
     State(state): State<Arc<AppState>>,
@@ -228,6 +280,7 @@ pub async fn list_owned_communities(
             "community_id": row.id.to_string(),
             "host": row.host,
             "created_at": row.created_at,
+            "archived_at": row.archived_at,
         })).collect::<Vec<_>>(),
     })))
 }
@@ -378,7 +431,7 @@ pub async fn community_availability(
         .map_err(|msg| api_error(StatusCode::BAD_REQUEST, &msg))?;
     let existing = state
         .db
-        .lookup_community_by_host(&normalized_host)
+        .lookup_community_by_host_for_management(&normalized_host)
         .await
         .map_err(|e| internal_error(&format!("check community availability: {e}")))?;
 

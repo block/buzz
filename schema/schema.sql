@@ -55,6 +55,7 @@ CREATE TABLE communities (
     host            VARCHAR(255) NOT NULL,
     signing_key     BYTEA,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    archived_at     TIMESTAMPTZ,
     CONSTRAINT chk_communities_id_not_nil CHECK (id <> '00000000-0000-0000-0000-000000000000'::uuid)
 );
 

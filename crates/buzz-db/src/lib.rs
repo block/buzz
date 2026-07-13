@@ -261,6 +261,19 @@ pub struct OwnedCommunityRecord {
     pub host: String,
     /// When the community row was created.
     pub created_at: DateTime<Utc>,
+    /// When the community was archived; absent while active.
+    pub archived_at: Option<DateTime<Utc>>,
+}
+
+/// Community row returned by an owner-authorized archive operation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArchivedCommunityRecord {
+    /// Stable server-resolved community id.
+    pub id: CommunityId,
+    /// Reserved canonical host.
+    pub host: String,
+    /// Durable first-archive timestamp.
+    pub archived_at: DateTime<Utc>,
 }
 
 /// Token summary returned by [`Db::list_active_tokens`].
@@ -407,6 +420,7 @@ impl Db {
             SELECT id, host
             FROM communities
             WHERE lower(host) = lower($1)
+              AND archived_at IS NULL
             "#,
         )
         .bind(normalized_host)
@@ -425,6 +439,24 @@ impl Db {
         .transpose()
     }
 
+    /// Returns a community by host regardless of lifecycle state. Operator-plane only.
+    pub async fn lookup_community_by_host_for_management(
+        &self,
+        normalized_host: &str,
+    ) -> Result<Option<CommunityRecord>> {
+        let row = sqlx::query("SELECT id, host FROM communities WHERE lower(host) = lower($1)")
+            .bind(normalized_host)
+            .fetch_optional(&self.pool)
+            .await?;
+        row.map(|row| {
+            Ok(CommunityRecord {
+                id: CommunityId::from_uuid(row.try_get("id")?),
+                host: row.try_get("host")?,
+            })
+        })
+        .transpose()
+    }
+
     /// Lists communities where `owner_pubkey` currently holds the `owner` role.
     ///
     /// This is an operator-plane helper, not a tenant-scoped data-plane read:
@@ -436,7 +468,7 @@ impl Db {
         let owner_pubkey = owner_pubkey.to_ascii_lowercase();
         let rows = sqlx::query(
             r#"
-            SELECT c.id, c.host, c.created_at
+            SELECT c.id, c.host, c.created_at, c.archived_at
             FROM communities c
             JOIN relay_members rm ON rm.community_id = c.id
             WHERE rm.pubkey = $1
@@ -453,10 +485,12 @@ impl Db {
                 let id: Uuid = row.try_get("id")?;
                 let host: String = row.try_get("host")?;
                 let created_at: DateTime<Utc> = row.try_get("created_at")?;
+                let archived_at: Option<DateTime<Utc>> = row.try_get("archived_at")?;
                 Ok(OwnedCommunityRecord {
                     id: CommunityId::from_uuid(id),
                     host,
                     created_at,
+                    archived_at,
                 })
             })
             .collect()
@@ -478,6 +512,7 @@ impl Db {
             SELECT host
             FROM communities
             WHERE id = $1
+              AND archived_at IS NULL
             "#,
         )
         .bind(community_id.as_uuid())
@@ -632,6 +667,7 @@ impl Db {
                 WHERE lower(c.host) = lower($1)
                   AND lower(rm.pubkey) = lower($2)
                   AND rm.role = 'owner'
+                  AND c.archived_at IS NULL
                 "#,
             )
             .bind(normalized_host)
@@ -652,6 +688,36 @@ impl Db {
                 host,
             },
         ))
+    }
+
+    /// Idempotently archives a community when the asserted pubkey is its current owner.
+    pub async fn archive_community_owned_by(
+        &self,
+        normalized_host: &str,
+        owner_pubkey: &str,
+    ) -> Result<Option<ArchivedCommunityRecord>> {
+        let row = sqlx::query(
+            r#"UPDATE communities c
+               SET archived_at = COALESCE(c.archived_at, now())
+               FROM relay_members rm
+               WHERE lower(c.host) = lower($1)
+                 AND rm.community_id = c.id
+                 AND lower(rm.pubkey) = lower($2)
+                 AND rm.role = 'owner'
+               RETURNING c.id, c.host, c.archived_at"#,
+        )
+        .bind(normalized_host)
+        .bind(owner_pubkey)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(|row| {
+            Ok(ArchivedCommunityRecord {
+                id: CommunityId::from_uuid(row.try_get("id")?),
+                host: row.try_get("host")?,
+                archived_at: row.try_get("archived_at")?,
+            })
+        })
+        .transpose()
     }
 
     /// Returns the community that owns a channel, if the channel exists.

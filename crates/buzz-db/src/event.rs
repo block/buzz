@@ -1306,6 +1306,7 @@ pub async fn query_due_reminders(
           AND e.not_before <= $2
           AND e.deleted_at IS NULL
           AND e.delivered_at IS NULL
+          AND c.archived_at IS NULL
         ORDER BY e.community_id, e.pubkey, e.d_tag, e.created_at DESC, e.id ASC
         LIMIT $3
         "#,

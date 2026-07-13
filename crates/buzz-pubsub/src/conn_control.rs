@@ -54,6 +54,8 @@ pub fn parse_conn_control_channel(channel: &str) -> Option<CommunityId> {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "op")]
 pub enum ConnControl {
+    /// Disconnect every live socket bound to the carrying community.
+    DisconnectCommunity,
     /// Disconnect every live connection authenticated as `pubkey` in the
     /// carrying community — live ban enforcement. `pubkey` is 32 raw bytes.
     /// `event_id` and `reason` reproduce the same NIP-01 `OK` frame the origin
@@ -195,6 +197,13 @@ mod tests {
         let a = ctx(0x1234, "a.example");
         let extended = format!("{}:extra", conn_control_channel(&a));
         assert_eq!(parse_conn_control_channel(&extended), None);
+    }
+
+    #[test]
+    fn disconnect_community_command_serde_round_trips() {
+        let cmd = ConnControl::DisconnectCommunity;
+        let json = serde_json::to_string(&cmd).unwrap();
+        assert_eq!(serde_json::from_str::<ConnControl>(&json).unwrap(), cmd);
     }
 
     #[test]

@@ -65,6 +65,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             get(api::operator::list_owned_communities).post(api::operator::provision_community),
         )
         .route(
+            "/operator/communities/archive",
+            post(api::operator::archive_community),
+        )
+        .route(
             "/operator/communities/availability",
             get(api::operator::community_availability),
         )

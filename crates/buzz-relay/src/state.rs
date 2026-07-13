@@ -195,6 +195,18 @@ impl ConnectionManager {
         closed
     }
 
+    /// Disconnect every live socket bound to one community.
+    pub fn disconnect_community(&self, community: CommunityId) -> usize {
+        let mut closed = 0;
+        for entry in self.connections.iter() {
+            if entry.community_id == community {
+                entry.cancel.cancel();
+                closed += 1;
+            }
+        }
+        closed
+    }
+
     /// Return the server-resolved community that the connection's host bound to.
     pub fn community_for_conn(&self, conn_id: Uuid) -> Option<CommunityId> {
         self.connections
@@ -811,6 +823,22 @@ impl AppState {
         closed
     }
 
+    /// Disconnect a community locally and publish the command to every relay pod.
+    pub fn disconnect_community_clusterwide(&self, tenant: &TenantContext) -> usize {
+        let closed = self.conn_manager.disconnect_community(tenant.community());
+        let pubsub = Arc::clone(&self.pubsub);
+        let tenant = tenant.clone();
+        tokio::spawn(async move {
+            if let Err(e) = pubsub
+                .publish_conn_control(&tenant, &ConnControl::DisconnectCommunity)
+                .await
+            {
+                tracing::warn!(community = %tenant.community(), error = %e, "failed to publish community disconnect");
+            }
+        });
+        closed
+    }
+
     /// Get accessible channel IDs with a 10-second cache. Falls back to DB on miss.
     pub async fn get_accessible_channel_ids_cached(
         &self,
@@ -1294,6 +1322,35 @@ mod tests {
             Some("private".to_string()),
             "A's channel deletion must not evict B's cache entries"
         );
+    }
+
+    #[tokio::test]
+    async fn disconnect_community_closes_only_matching_tenant() {
+        let mgr = ConnectionManager::new();
+        let community_a = CommunityId::from_uuid(Uuid::from_u128(0xa));
+        let community_b = CommunityId::from_uuid(Uuid::from_u128(0xb));
+        let register = |community| {
+            let conn_id = Uuid::new_v4();
+            let (tx, _rx) = mpsc::channel(8);
+            let (ctrl_tx, _ctrl_rx) = mpsc::channel(8);
+            let cancel = CancellationToken::new();
+            mgr.register(
+                conn_id,
+                tx,
+                ctrl_tx,
+                cancel.clone(),
+                community,
+                Arc::new(AtomicU8::new(0)),
+                Arc::new(Mutex::new(HashMap::new())),
+                3,
+            );
+            cancel
+        };
+        let cancel_a = register(community_a);
+        let cancel_b = register(community_b);
+        assert_eq!(mgr.disconnect_community(community_a), 1);
+        assert!(cancel_a.is_cancelled());
+        assert!(!cancel_b.is_cancelled());
     }
 
     #[tokio::test]
