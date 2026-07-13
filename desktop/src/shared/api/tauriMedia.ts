@@ -16,3 +16,29 @@ export async function fetchMediaBytes(
   const bytes = await invokeTauri<ArrayBuffer>("fetch_media_bytes", { url });
   return new Uint8Array(bytes);
 }
+
+/**
+ * Fetch an agent snapshot attachment in memory, verifying size, SHA-256, and
+ * snapshot decode before returning the bytes.
+ *
+ * Inputs come directly from the message's imeta fields; validation is
+ * performed on the Rust side (same-relay URL, format-specific size cap,
+ * hash + size integrity, and snapshot decode). Returns the raw bytes as a
+ * number array so they can be passed to the existing preview/confirm APIs.
+ *
+ * Throws a human-readable error string on any validation failure.
+ */
+export async function fetchSnapshotBytes(args: {
+  url: string;
+  filename: string;
+  expectedSha256: string;
+  expectedSize: number;
+}): Promise<number[]> {
+  const buffer = await invokeTauri<ArrayBuffer>("fetch_snapshot_bytes", {
+    url: args.url,
+    filename: args.filename,
+    expectedSha256: args.expectedSha256,
+    expectedSize: args.expectedSize,
+  });
+  return Array.from(new Uint8Array(buffer));
+}

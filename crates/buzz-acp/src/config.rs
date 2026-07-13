@@ -485,6 +485,12 @@ pub struct Config {
     /// Per-persona env vars to inject at agent spawn time (e.g., GOOSE_PROVIDER, GOOSE_MODEL, BUZZ_AGENT_MODEL).
     /// Populated from persona pack resolution. Empty when no pack is configured.
     pub persona_env_vars: Vec<(String, String)>,
+    /// Whether `codex_network_env()` successfully injected a `CODEX_CONFIG` entry into
+    /// `persona_env_vars`.  When true, `AcpClient::spawn` merges all `CODEX_CONFIG` entries
+    /// and forces `sandbox_workspace_write.network_access = true` via `build_codex_config_env`.
+    /// When false (non-Codex agents or rejected relay URL), the helper returns None and
+    /// any persona-supplied `CODEX_CONFIG` is handled with ordinary operator-wins semantics.
+    pub has_generated_codex_config: bool,
     /// Whether to publish encrypted observer frames through the relay.
     pub relay_observer: bool,
     /// Agent owner pubkey (hex). Used for `--respond-to=owner-only` gate.
@@ -567,62 +573,57 @@ fn default_agent_args(command: &str) -> Option<Vec<String>> {
     }
 }
 
-/// Build `-c` flag pairs that enable network access and allowlist the relay hostname
-/// in Codex's network sandbox.
+/// Build the `CODEX_CONFIG` environment variable that enables full outbound
+/// network access in Codex's macOS Seatbelt sandbox.
 ///
 /// Codex sandboxes MCP subprocesses (including `buzz-cli`) behind a Seatbelt sandbox
-/// that blocks all outbound network by default, plus a managed proxy with a domain
-/// allowlist. Without these flags, `buzz-cli` requests to the relay are blocked before
-/// they reach WARP or any other outbound network path.
+/// that blocks all outbound network by default. Without this env var, `buzz-cli`
+/// requests are blocked before they can reach the relay WebSocket.
 ///
-/// Returns `["-c", "sandbox_workspace_write.network_access=true", "-c",
-/// "network_proxy.mode=\"full\"", "-c", "network_proxy.domains.\"<host>\"=\"allow\""]`
-/// for Codex agents, or an empty vec for non-Codex agents or when the hostname cannot
-/// be parsed from the relay URL.
+/// Returns `Some(("CODEX_CONFIG", "{\"sandbox_workspace_write\":{\"network_access\":true}}"))` for
+/// Codex agents, or `None` for non-Codex agents or when the relay URL cannot be parsed.
 ///
-/// The flags form a layered defense:
-/// - `sandbox_workspace_write.network_access=true` opens the Seatbelt sandbox gate so
-///   outbound TCP/TLS connections are allowed at the OS level
-/// - `network_proxy.mode="full"` enables the managed proxy for all outbound traffic
-/// - `network_proxy.domains."<host>"="allow"` adds the relay hostname to the allowlist
+/// The env var is forwarded by the `@agentclientprotocol/codex-acp` adapter (1.x) as a
+/// session-level config override (via `CODEX_CONFIG` → `thread/start config`), which is
+/// equivalent to the TOML override `sandbox_workspace_write.network_access = true`.
+/// That sets `NetworkSandboxPolicy::Enabled`, causing the Seatbelt policy to include
+/// `(allow network-outbound)` — full outbound TCP/TLS at the OS level.
 ///
-/// Handles `ws://`, `wss://`, `http://`, and `https://` schemes. Port is stripped —
-/// Codex's domain allowlist matches on hostname only.
-pub fn codex_network_args(agent_command: &str, relay_url: &str) -> Vec<String> {
+/// URL validation is preserved as a guard: injection is skipped when the relay URL cannot
+/// be parsed, avoiding accidental sandbox widening for malformed configs.
+///
+/// Handles `ws://`, `wss://`, `http://`, and `https://` schemes.
+pub fn codex_network_env(agent_command: &str, relay_url: &str) -> Option<(String, String)> {
     match normalize_agent_command_identity(agent_command).as_str() {
         "codex" | "codex-acp" => {}
-        _ => return vec![],
+        _ => return None,
     }
 
-    // Use the `url` crate so ws://, wss://, http://, https:// are all handled
-    // correctly. On parse failure, skip injection rather than panicking.
+    // Validate the relay URL before injecting broader network access. On parse failure,
+    // skip injection rather than panicking or widening the sandbox unconditionally.
     let host = match Url::parse(relay_url) {
         Ok(u) => match u.host_str() {
             Some(h) => h.to_owned(),
             None => {
                 tracing::warn!(
                     relay_url,
-                    "codex network allowlist: no host in relay URL — skipping injection"
+                    "codex network config: no host in relay URL — skipping injection"
                 );
-                return vec![];
+                return None;
             }
         },
         Err(e) => {
-            tracing::warn!(relay_url, error = %e, "codex network allowlist: failed to parse relay URL — skipping injection");
-            return vec![];
+            tracing::warn!(relay_url, error = %e, "codex network config: failed to parse relay URL — skipping injection");
+            return None;
         }
     };
 
-    tracing::debug!(host, "injecting codex network allowlist for host");
+    tracing::debug!(host, "injecting CODEX_CONFIG network_access for relay host");
 
-    vec![
-        "-c".into(),
-        "sandbox_workspace_write.network_access=true".into(),
-        "-c".into(),
-        "network_proxy.mode=\"full\"".into(),
-        "-c".into(),
-        format!("network_proxy.domains.\"{host}\"=\"allow\""),
-    ]
+    Some((
+        "CODEX_CONFIG".into(),
+        "{\"sandbox_workspace_write\":{\"network_access\":true}}".into(),
+    ))
 }
 
 pub fn normalize_agent_args(command: &str, agent_args: Vec<String>) -> Vec<String> {
@@ -760,16 +761,7 @@ impl Config {
             ));
         }
 
-        let mut agent_args = normalize_agent_args(&agent_command, args.agent_args);
-
-        // Prepend Codex network allowlist flags so buzz-cli (an MCP subprocess)
-        // can reach the relay through Codex's sandbox proxy. No-op for non-Codex agents.
-        let network_args = codex_network_args(&agent_command, &args.relay_url);
-        if !network_args.is_empty() {
-            let mut merged = network_args;
-            merged.extend(agent_args);
-            agent_args = merged;
-        }
+        let agent_args = normalize_agent_args(&agent_command, args.agent_args);
 
         // Finding #49b — warn on invalid UUIDs in --channels.
         if let Some(ref channels) = args.channels {
@@ -899,7 +891,7 @@ impl Config {
         //
         // Precedence: CLI/env args > persona values > built-in defaults.
         // Persona fills in what's missing. Explicit flags always win.
-        let (persona_system_prompt, persona_model, persona_env_vars) =
+        let (persona_system_prompt, persona_model, mut persona_env_vars) =
             match (&args.persona_pack, &args.persona_name) {
                 (Some(pack_dir), Some(name)) => {
                     let pack = buzz_persona::resolve::resolve_pack(pack_dir).map_err(|e| {
@@ -943,6 +935,17 @@ impl Config {
         }
         let model = args.model.or(persona_model);
 
+        // Inject CODEX_CONFIG so the @agentclientprotocol/codex-acp adapter (1.x)
+        // opens the Seatbelt network sandbox for buzz-cli (an MCP subprocess). No-op
+        // for non-Codex agents or unparseable relay URLs.
+        let has_generated_codex_config =
+            if let Some(network_env) = codex_network_env(&agent_command, &args.relay_url) {
+                persona_env_vars.push(network_env);
+                true
+            } else {
+                false
+            };
+
         validate_multiple_event_handling(args.multiple_event_handling, args.dedup)?;
 
         let config = Config {
@@ -978,6 +981,7 @@ impl Config {
             respond_to_allowlist,
             allowed_respond_to,
             persona_env_vars,
+            has_generated_codex_config,
             relay_observer: args.relay_observer,
             agent_owner: args.agent_owner.map(|s| s.trim().to_ascii_lowercase()),
             no_base_prompt: args.no_base_prompt,
@@ -1348,6 +1352,7 @@ mod tests {
             respond_to_allowlist: HashSet::new(),
             allowed_respond_to: Vec::new(),
             persona_env_vars: vec![],
+            has_generated_codex_config: false,
             relay_observer: false,
             agent_owner: None,
             no_base_prompt: false,
@@ -1510,133 +1515,100 @@ mod tests {
         );
     }
 
-    // --- codex_network_args tests ---
+    // --- codex_network_env tests ---
+
+    const CODEX_CONFIG_JSON: &str = "{\"sandbox_workspace_write\":{\"network_access\":true}}";
 
     #[test]
-    fn codex_network_args_wss_url() {
-        let args = codex_network_args("codex-acp", "wss://sprout-oss.stage.blox.sqprod.co");
+    fn codex_network_env_wss_url() {
+        let result = codex_network_env("codex-acp", "wss://sprout-oss.stage.blox.sqprod.co");
         assert_eq!(
-            args,
-            vec![
-                "-c",
-                "sandbox_workspace_write.network_access=true",
-                "-c",
-                "network_proxy.mode=\"full\"",
-                "-c",
-                "network_proxy.domains.\"sprout-oss.stage.blox.sqprod.co\"=\"allow\"",
-            ]
+            result,
+            Some(("CODEX_CONFIG".to_string(), CODEX_CONFIG_JSON.to_string()))
         );
     }
 
     #[test]
-    fn codex_network_args_ws_url() {
-        let args = codex_network_args("codex-acp", "ws://localhost:3000");
+    fn codex_network_env_ws_url() {
+        let result = codex_network_env("codex-acp", "ws://localhost:3000");
         assert_eq!(
-            args,
-            vec![
-                "-c",
-                "sandbox_workspace_write.network_access=true",
-                "-c",
-                "network_proxy.mode=\"full\"",
-                "-c",
-                "network_proxy.domains.\"localhost\"=\"allow\"",
-            ]
+            result,
+            Some(("CODEX_CONFIG".to_string(), CODEX_CONFIG_JSON.to_string()))
         );
     }
 
     #[test]
-    fn codex_network_args_https_url() {
-        let args = codex_network_args("codex-acp", "https://relay.example.com/path");
+    fn codex_network_env_https_url() {
+        let result = codex_network_env("codex-acp", "https://relay.example.com/path");
         assert_eq!(
-            args,
-            vec![
-                "-c",
-                "sandbox_workspace_write.network_access=true",
-                "-c",
-                "network_proxy.mode=\"full\"",
-                "-c",
-                "network_proxy.domains.\"relay.example.com\"=\"allow\"",
-            ]
+            result,
+            Some(("CODEX_CONFIG".to_string(), CODEX_CONFIG_JSON.to_string()))
         );
     }
 
     #[test]
-    fn codex_network_args_http_url_with_port() {
-        let args = codex_network_args("codex-acp", "http://relay.example.com:8080/query");
+    fn codex_network_env_http_url_with_port() {
+        let result = codex_network_env("codex-acp", "http://relay.example.com:8080/query");
         assert_eq!(
-            args,
-            vec![
-                "-c",
-                "sandbox_workspace_write.network_access=true",
-                "-c",
-                "network_proxy.mode=\"full\"",
-                "-c",
-                "network_proxy.domains.\"relay.example.com\"=\"allow\"",
-            ]
+            result,
+            Some(("CODEX_CONFIG".to_string(), CODEX_CONFIG_JSON.to_string()))
         );
     }
 
     #[test]
-    fn codex_network_args_bare_codex_command() {
-        // "codex" (not "codex-acp") should also get the args.
-        let args = codex_network_args("codex", "wss://relay.example.com");
+    fn codex_network_env_bare_codex_command() {
+        // "codex" (not "codex-acp") should also get the env var.
+        let result = codex_network_env("codex", "wss://relay.example.com");
         assert_eq!(
-            args,
-            vec![
-                "-c",
-                "sandbox_workspace_write.network_access=true",
-                "-c",
-                "network_proxy.mode=\"full\"",
-                "-c",
-                "network_proxy.domains.\"relay.example.com\"=\"allow\"",
-            ]
+            result,
+            Some(("CODEX_CONFIG".to_string(), CODEX_CONFIG_JSON.to_string()))
         );
     }
 
     #[test]
-    fn codex_network_args_full_path_codex_command() {
+    fn codex_network_env_full_path_codex_command() {
         // Full path like /usr/local/bin/codex-acp should be normalized.
-        let args = codex_network_args("/usr/local/bin/codex-acp", "wss://relay.example.com");
+        let result = codex_network_env("/usr/local/bin/codex-acp", "wss://relay.example.com");
         assert_eq!(
-            args,
-            vec![
-                "-c",
-                "sandbox_workspace_write.network_access=true",
-                "-c",
-                "network_proxy.mode=\"full\"",
-                "-c",
-                "network_proxy.domains.\"relay.example.com\"=\"allow\"",
-            ]
+            result,
+            Some(("CODEX_CONFIG".to_string(), CODEX_CONFIG_JSON.to_string()))
         );
     }
 
     #[test]
-    fn codex_network_args_non_codex_agent_returns_empty() {
-        assert!(codex_network_args("goose", "wss://relay.example.com").is_empty());
-        assert!(codex_network_args("claude-agent-acp", "wss://relay.example.com").is_empty());
-        assert!(codex_network_args("buzz-agent", "wss://relay.example.com").is_empty());
+    fn codex_network_env_non_codex_agent_returns_none() {
+        assert!(codex_network_env("goose", "wss://relay.example.com").is_none());
+        assert!(codex_network_env("claude-agent-acp", "wss://relay.example.com").is_none());
+        assert!(codex_network_env("buzz-agent", "wss://relay.example.com").is_none());
     }
 
     #[test]
-    fn codex_network_args_includes_sandbox_network_access() {
-        // The sandbox gate must be the first flag pair — without it, the Seatbelt
-        // sandbox blocks outbound connections before the proxy can intercept them.
-        let args = codex_network_args("codex-acp", "wss://relay.example.com");
-        assert_eq!(args.len(), 6, "expected 3 flag pairs (6 elements)");
-        assert_eq!(args[0], "-c");
-        assert_eq!(args[1], "sandbox_workspace_write.network_access=true");
+    fn codex_network_env_includes_sandbox_network_access() {
+        // The JSON value must set sandbox_workspace_write.network_access=true — without
+        // it, the Seatbelt sandbox blocks outbound connections in the 1.x adapter.
+        let result = codex_network_env("codex-acp", "wss://relay.example.com");
+        let (key, val) = result.expect("expected Some for valid codex + valid url");
+        assert_eq!(key, "CODEX_CONFIG");
+        assert!(
+            val.contains("\"sandbox_workspace_write\""),
+            "JSON must contain sandbox_workspace_write"
+        );
+        assert!(
+            val.contains("\"network_access\":true"),
+            "JSON must set network_access=true"
+        );
     }
 
     #[test]
-    fn codex_network_args_empty_relay_url_returns_empty() {
-        // Empty string fails Url::parse — graceful empty return.
-        assert!(codex_network_args("codex-acp", "").is_empty());
+    fn codex_network_env_empty_relay_url_returns_none() {
+        // Empty string fails Url::parse — graceful None return.
+        assert!(codex_network_env("codex-acp", "").is_none());
     }
 
     #[test]
-    fn codex_network_args_schemeless_string_returns_empty() {
-        // A bare string with no scheme fails Url::parse — graceful empty return.
-        assert!(codex_network_args("codex-acp", "not-a-url").is_empty());
+    fn codex_network_env_schemeless_string_returns_none() {
+        // A bare string with no scheme fails Url::parse — graceful None return.
+        assert!(codex_network_env("codex-acp", "not-a-url").is_none());
     }
 
     #[test]

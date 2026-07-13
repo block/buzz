@@ -5,7 +5,7 @@
 use tauri::AppHandle;
 
 use crate::app_state::AppState;
-use crate::managed_agents::PersonaRecord;
+use crate::managed_agents::AgentDefinition;
 
 /// Retain a freshly authored persona event in the local store, flagged for
 /// relay sync. Called inside a command's `managed_agents_store_lock`-held body
@@ -23,7 +23,11 @@ use crate::managed_agents::PersonaRecord;
 /// does not retain, so the local-only `is_active` toggle never republishes, and
 /// a byte-identical user-save republish is harmlessly NIP-33-replaced). The
 /// guard is intentionally omitted.
-pub(super) fn retain_persona_pending(app: &AppHandle, state: &AppState, persona: &PersonaRecord) {
+pub(in crate::commands::personas) fn retain_persona_pending(
+    app: &AppHandle,
+    state: &AppState,
+    persona: &AgentDefinition,
+) {
     use crate::managed_agents::{
         managed_agents_base_dir,
         persona_events::{build_persona_event, monotonic_created_at, persona_d_tag},

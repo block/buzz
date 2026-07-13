@@ -1,5 +1,5 @@
 import * as React from "react";
-import { ChevronDown, RefreshCw, Upload } from "lucide-react";
+import { ChevronDown } from "lucide-react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 
 import type {
@@ -7,8 +7,6 @@ import type {
   CreatePersonaInput,
   UpdatePersonaInput,
 } from "@/shared/api/types";
-import { useFileImportZone } from "@/shared/hooks/useFileImportZone";
-import { useWindowFileDragOver } from "./useWindowFileDragOver";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 import { ChooserDialogContent } from "@/shared/ui/chooser-dialog-content";
@@ -20,23 +18,12 @@ import { PersonaDropdownField } from "./PersonaDropdownField";
 import type { EnvVarsValue } from "./EnvVarsEditor";
 import { PersonaAdvancedFields } from "./PersonaAdvancedFields";
 import { PersonaModelField } from "./PersonaModelField";
-import { PersonaProviderApiKeyField } from "./PersonaProviderApiKeyField";
-import {
-  getImportButtonLabel,
-  getImportButtonTone,
-  getImportErrorLabel,
-  IMPORT_ERROR_VISIBILITY_MS,
-} from "./personaDialogImportState";
 import {
   canSubmitPersonaDialog,
   formatPersonaNamePoolText,
   parsePersonaNamePoolText,
 } from "./personaDialogState";
-import {
-  getAdvancedEnvVars,
-  hasAdvancedEnvVars,
-  hasText,
-} from "./personaDialogEnvVars";
+import { hasText } from "./personaDialogEnvVars";
 import {
   behaviorForSubmit,
   draftFromBehavior,
@@ -44,25 +31,22 @@ import {
   personaBehaviorDraftValid,
 } from "./personaBehaviorDraft";
 import {
-  AUTO_MODEL_DROPDOWN_VALUE,
   AUTO_PROVIDER_DROPDOWN_VALUE,
+  BLOCK_BUILD_HIDDEN_PROVIDER_IDS,
+  buildTemplateModelDropdownOptions,
   CUSTOM_MODEL_DROPDOWN_VALUE,
   CUSTOM_PROVIDER_DROPDOWN_VALUE,
   computeLocalModeGate,
   formatRuntimeOptionLabel,
-  getBakedSatisfiedEnvKeys,
   getDefaultLlmProviderLabel,
   getDefaultPersonaRuntime,
   getModelSelectValue,
   getPersonaModelOptions,
   getPersonaProviderOptions,
-  getProviderApiKeyConfig,
-  getProviderApiKeyEnvVar,
   getRuntimePersonaModelOptions,
   hasPersonaModelOption,
   NO_RUNTIME_DROPDOWN_VALUE,
   providerRequiresExplicitModel,
-  requiredCredentialEnvKeys,
   runtimeSupportsLlmProviderSelection,
   type PersonaDropdownOption,
   PERSONA_FIELD_CONTROL_CLASS,
@@ -72,10 +56,6 @@ import {
   sortPersonaRuntimes,
 } from "./personaDialogPickers";
 import { RequiredFieldLabel } from "./personaProviderModelFields";
-import {
-  envVarsMergingAdvancedEdit,
-  envVarsWithProviderApiKey,
-} from "./providerEnvVarUpdates";
 import {
   selectionOnModelDropdownChange,
   selectionOnProviderDropdownChange,
@@ -87,6 +67,9 @@ import {
   usePersonaModelDiscovery,
 } from "./usePersonaModelDiscovery";
 import { useBakedBuildEnvKeysQuery, useRuntimeFileConfigQuery } from "../hooks";
+import { useGlobalAgentConfig } from "../useGlobalAgentConfig";
+import { isBuzzAgentRuntime } from "./buzzAgentConfig";
+import { buildRuntimeModelProviderPayload } from "./agentDefinitionSubmitPayload";
 
 type AgentDefinitionDialogProps = {
   open: boolean;
@@ -96,27 +79,23 @@ type AgentDefinitionDialogProps = {
   initialValues: CreatePersonaInput | UpdatePersonaInput | null;
   error: Error | null;
   isPending: boolean;
-  isImportPending?: boolean;
   runtimes: AcpRuntimeCatalogEntry[];
   runtimesLoading?: boolean;
   onOpenChange: (open: boolean) => void;
   onSubmit: (
     input: CreatePersonaInput | UpdatePersonaInput,
   ) => Promise<unknown>;
-  onImportUpdateFile?: (
-    personaId: string,
-    fileBytes: number[],
-    fileName: string,
-  ) => Promise<void>;
-  /**
-   * Rendered in the footer's left slot in create mode only — edit mode's
-   * import button owns that slot (`canImportPersonaUpdate`).
-   */
+  /** Rendered in the footer’s left slot. */
   createFooterSlot?: React.ReactNode;
   /** Rendered below the form fields in create mode only ("Where to run"). */
   createRunSection?: React.ReactNode;
   /** Extra create-mode submit gate (e.g. incomplete provider config). */
   createSubmitBlocked?: boolean;
+  /**
+   * When true, the agent is being created to run on the relay mesh — the
+   * local-mode provider/model gate does not apply and must be bypassed.
+   */
+  createRunOnMesh?: boolean;
 };
 
 const ADVANCED_FIELDS_MOTION_TRANSITION = {
@@ -132,15 +111,14 @@ export function AgentDefinitionDialog({
   initialValues,
   error,
   isPending,
-  isImportPending = false,
   runtimes,
   runtimesLoading = false,
   onOpenChange,
   onSubmit,
-  onImportUpdateFile,
   createFooterSlot,
   createRunSection,
   createSubmitBlocked = false,
+  createRunOnMesh = false,
 }: AgentDefinitionDialogProps) {
   const [displayName, setDisplayName] = React.useState("");
   const [avatarUrl, setAvatarUrl] = React.useState("");
@@ -159,19 +137,20 @@ export function AgentDefinitionDialog({
   // The seed the draft is diffed against at submit: an untouched quad
   // submits no behavior group, keeping unrelated edits hash-quiet.
   const behaviorSeedRef = React.useRef(emptyPersonaBehaviorDraft);
+  // Tracks when the runtime was auto-seeded by the default-runtime effect in
+  // edit mode (i.e. the user never explicitly chose a runtime). Used to omit
+  // the seeded runtime from the submit payload for builtin definitions whose
+  // canonical runtime is null — the sync would revert it anyway.
+  const isRuntimeAutoSeededRef = React.useRef(false);
+  // Guards the seeding effect so it fires at most once per dialog-open.
+  // Without this, clearing runtime back to "" via "No preference" would re-
+  // trigger the effect (the `runtime` dep would pass the length guard) and
+  // snap the dropdown back to the default — an edit-mode regression.
+  const hasSeededForOpenRef = React.useRef(false);
   const [showAdvancedFields, setShowAdvancedFields] = React.useState(false);
   const [isAvatarUploadPending, setIsAvatarUploadPending] =
     React.useState(false);
-  const [isImportingUpdate, setIsImportingUpdate] = React.useState(false);
-  const [importErrorMessage, setImportErrorMessage] = React.useState<
-    string | null
-  >(null);
-  const isEditMode = Boolean(initialValues && "id" in initialValues);
-  const editPersonaId =
-    isEditMode && initialValues && "id" in initialValues
-      ? initialValues.id
-      : null;
-  const canImportPersonaUpdate = isEditMode && Boolean(onImportUpdateFile);
+  const { globalConfig } = useGlobalAgentConfig();
   const defaultRuntime = React.useMemo(
     () => getDefaultPersonaRuntime(runtimes),
     [runtimes],
@@ -203,9 +182,6 @@ export function AgentDefinitionDialog({
         : "";
     const nextEnvVars =
       "envVars" in initialValues ? (initialValues.envVars ?? {}) : {};
-    const managedApiKeyEnvVar = getProviderApiKeyEnvVar(
-      initialValues.provider ?? "",
-    );
     const nextBehaviorDraft = draftFromBehavior(initialValues.behavior);
     behaviorSeedRef.current = draftFromBehavior(initialValues.behavior);
     setBehaviorDraft(nextBehaviorDraft);
@@ -213,80 +189,38 @@ export function AgentDefinitionDialog({
     setEnvVars(nextEnvVars);
     setShowAdvancedFields(
       nextNamePoolText.trim().length > 0 ||
-        hasAdvancedEnvVars(nextEnvVars, managedApiKeyEnvVar) ||
+        Object.keys(nextEnvVars).length > 0 ||
         nextBehaviorDraft.respondTo !== null ||
-        nextBehaviorDraft.mcpToolsets.trim().length > 0 ||
         nextBehaviorDraft.parallelism.trim().length > 0,
     );
     setIsAvatarUploadPending(false);
-    setImportErrorMessage(null);
-    setIsImportingUpdate(false);
+    isRuntimeAutoSeededRef.current = false;
+    hasSeededForOpenRef.current = false;
   }, [initialValues, open]);
 
   React.useEffect(() => {
     if (
       !open ||
       !initialValues ||
-      "id" in initialValues ||
       initialValues.runtime?.trim() ||
       runtimesLoading ||
       runtime.trim().length > 0 ||
-      defaultRuntime === null
+      defaultRuntime === null ||
+      hasSeededForOpenRef.current
     ) {
       return;
     }
 
     setRuntime(defaultRuntime.id);
+    hasSeededForOpenRef.current = true;
+    if ("id" in initialValues) {
+      // Edit mode: record that this runtime was auto-seeded so the submit path
+      // can omit it from the payload for builtin definitions (canonical runtime
+      // null; sync would revert the value anyway). Explicit user changes via
+      // the dropdown clear this flag.
+      isRuntimeAutoSeededRef.current = true;
+    }
   }, [defaultRuntime, initialValues, open, runtime, runtimesLoading]);
-
-  const isWindowFileDragOver = useWindowFileDragOver(
-    open && canImportPersonaUpdate,
-  );
-
-  React.useEffect(() => {
-    if (!open || !importErrorMessage) {
-      return;
-    }
-    const timeout = window.setTimeout(() => {
-      setImportErrorMessage(null);
-    }, IMPORT_ERROR_VISIBILITY_MS);
-    return () => {
-      window.clearTimeout(timeout);
-    };
-  }, [importErrorMessage, open]);
-
-  async function handleImportUpdateSelection(
-    fileBytes: number[],
-    fileName: string,
-  ) {
-    if (!editPersonaId || !onImportUpdateFile) {
-      return;
-    }
-
-    setImportErrorMessage(null);
-    setIsImportingUpdate(true);
-    try {
-      await onImportUpdateFile(editPersonaId, fileBytes, fileName);
-    } catch (error) {
-      setImportErrorMessage(
-        getImportErrorLabel(error instanceof Error ? error.message : null),
-      );
-    } finally {
-      setIsImportingUpdate(false);
-    }
-  }
-
-  const {
-    fileInputRef: importFileInputRef,
-    isDragOver: isImportDragOver,
-    dropHandlers: importDropHandlers,
-    handleFileChange: handleImportFileChange,
-    openFilePicker: openImportFilePicker,
-  } = useFileImportZone({
-    onImportFile: (fileBytes, fileName) => {
-      void handleImportUpdateSelection(fileBytes, fileName);
-    },
-  });
 
   function handleOpenChange(next: boolean) {
     if (!next) {
@@ -304,8 +238,8 @@ export function AgentDefinitionDialog({
       behaviorSeedRef.current = emptyPersonaBehaviorDraft;
       setShowAdvancedFields(false);
       setIsAvatarUploadPending(false);
-      setImportErrorMessage(null);
-      setIsImportingUpdate(false);
+      // isRuntimeAutoSeededRef and hasSeededForOpenRef are NOT reset here — the
+      // [initialValues, open] effect resets both when the dialog re-opens.
     }
 
     onOpenChange(next);
@@ -320,19 +254,21 @@ export function AgentDefinitionDialog({
       return;
     }
 
-    const trimmedRuntime = runtime.trim();
-    const previousRuntime = initialValues.runtime?.trim() ?? "";
-    const modelProviderEditableWithoutRuntime =
-      initialModelProviderEditableWithoutRuntime && trimmedRuntime.length === 0;
-    const llmProviderVisibleForSubmit =
-      (trimmedRuntime.length > 0 &&
-        runtimeSupportsLlmProviderSelection(trimmedRuntime)) ||
-      modelProviderEditableWithoutRuntime;
-    const shouldPreserveHiddenModelProvider =
-      "id" in initialValues &&
-      previousRuntime.length === 0 &&
-      trimmedRuntime.length === 0 &&
-      !modelProviderEditableWithoutRuntime;
+    const {
+      runtime: runtimeForSubmit,
+      model: modelForSubmit,
+      provider: providerForSubmit,
+    } = buildRuntimeModelProviderPayload({
+      runtime,
+      model,
+      provider,
+      isEditMode: "id" in initialValues,
+      isAutoSeeded: isRuntimeAutoSeededRef.current,
+      initialPreviousRuntime: initialValues.runtime?.trim() ?? "",
+      initialModel: initialValues.model,
+      initialProvider: initialValues.provider,
+      initialModelProviderEditableWithoutRuntime,
+    });
     const namePool = parsePersonaNamePoolText(namePoolText);
     const namePoolInput =
       namePool.length > 0
@@ -344,18 +280,9 @@ export function AgentDefinitionDialog({
       displayName: displayName.trim(),
       avatarUrl: avatarUrl.trim() || undefined,
       systemPrompt: systemPrompt,
-      runtime: trimmedRuntime || undefined,
-      model:
-        trimmedRuntime || modelProviderEditableWithoutRuntime
-          ? model.trim() || undefined
-          : shouldPreserveHiddenModelProvider
-            ? initialValues.model
-            : undefined,
-      provider: llmProviderVisibleForSubmit
-        ? provider.trim() || undefined
-        : shouldPreserveHiddenModelProvider
-          ? initialValues.provider
-          : undefined,
+      runtime: runtimeForSubmit,
+      model: modelForSubmit,
+      provider: providerForSubmit,
       namePool: namePoolInput,
       envVars,
       behavior: behaviorForSubmit(
@@ -381,17 +308,6 @@ export function AgentDefinitionDialog({
     void handleSubmit();
   }
 
-  const importButtonTone = getImportButtonTone({
-    isWindowFileDragOver,
-    isImportDragOver,
-    importErrorMessage,
-  });
-  const importButtonLabel = getImportButtonLabel({
-    isWindowFileDragOver,
-    isImportDragOver,
-    importErrorMessage,
-  });
-
   const selectedRuntime = runtimes.find((p) => p.id === runtime);
   const blankRuntimeModelProviderEditable =
     initialModelProviderEditableWithoutRuntime && runtime.trim().length === 0;
@@ -401,17 +317,7 @@ export function AgentDefinitionDialog({
   const llmProviderFieldVisible =
     (runtime.trim().length > 0 && runtimeCanChooseLlmProvider) ||
     blankRuntimeModelProviderEditable;
-  const providerForModelScope = llmProviderFieldVisible ? provider : "";
   const trimmedProvider = provider.trim();
-  const providerApiKeyConfig =
-    llmProviderFieldVisible && !isCustomProviderEditing
-      ? getProviderApiKeyConfig(trimmedProvider)
-      : null;
-  const providerApiKeyValue = providerApiKeyConfig
-    ? (envVars[providerApiKeyConfig.envVar] ?? "")
-    : "";
-  const providerApiKeyFieldVisible =
-    llmProviderFieldVisible && providerApiKeyConfig !== null;
   // Required credential env keys for this runtime + provider combination.
   // Used to show required markers on the LLM provider label and amber
   // locked rows in the env vars editor.
@@ -421,33 +327,43 @@ export function AgentDefinitionDialog({
     enabled: open,
   });
   const { data: bakedEnvKeys } = useBakedBuildEnvKeysQuery({ enabled: open });
-  const localModeGate = computeLocalModeGate({
-    bakedEnvKeys,
-    envVars,
-    isProviderMode: false,
-    model,
-    provider: trimmedProvider,
-    runtimeId: runtime,
-    runtimeFileConfig,
-    useMesh: false,
-  });
-  // Required keys for EnvVarsEditor amber locked rows: all required keys except
-  // those silenced by baked env or file config. Filled keys stay in the amber
-  // row (exclusion semantics, not missing-only), matching the other consumers.
-  const allRequiredEnvKeys = requiredCredentialEnvKeys(
-    runtime,
-    trimmedProvider,
+  const localModeGate = React.useMemo(
+    () =>
+      computeLocalModeGate({
+        bakedEnvKeys,
+        envVars,
+        globalEnvVars: globalConfig.env_vars,
+        globalProvider: globalConfig.provider ?? "",
+        globalModel: globalConfig.model ?? "",
+        isProviderMode: false,
+        model,
+        provider: trimmedProvider,
+        runtimeId: runtime,
+        runtimeFileConfig,
+        useMesh: createRunOnMesh,
+      }),
+    [
+      bakedEnvKeys,
+      createRunOnMesh,
+      envVars,
+      globalConfig.env_vars,
+      globalConfig.provider,
+      globalConfig.model,
+      model,
+      trimmedProvider,
+      runtime,
+      runtimeFileConfig,
+    ],
   );
-  const bakedSatisfiedPersonaKeys = getBakedSatisfiedEnvKeys(
-    allRequiredEnvKeys,
-    envVars,
-    bakedEnvKeys,
-  );
-  const requiredEnvKeys = allRequiredEnvKeys.filter(
-    (key) =>
-      !bakedSatisfiedPersonaKeys.includes(key) &&
-      !localModeGate.fileSatisfiedEnvKeys.includes(key),
-  );
+  // requiredEnvKeys: the gate already handles baked-, global-, and file-
+  // satisfied keys so no further filtering is needed.
+  const { requiredEnvKeys, missingNormalizedFields } = localModeGate;
+  // Effective provider: agent value → global fallback → file fallback.
+  // Mirrors the chain inside computeLocalModeGate so model-option scoping and
+  // model requiredness are consistent with the readiness gate.
+  const fileProvider = runtimeFileConfig?.provider?.trim() ?? "";
+  const effectiveProvider =
+    trimmedProvider || (globalConfig.provider ?? "").trim() || fileProvider;
   // Provider required-ness is a static property of the runtime — it does not
   // change based on whether the field is currently filled. Using the dynamic
   // missingNormalizedFields check would flip the asterisk off once a value is
@@ -456,12 +372,16 @@ export function AgentDefinitionDialog({
   const providerIsRequired = runtimeSupportsLlmProviderSelection(runtime);
   const modelFieldVisible =
     runtime.trim().length > 0 || blankRuntimeModelProviderEditable;
+  // Static asterisk on the model label: uses effectiveProvider so a globally-
+  // set provider correctly marks the model field required.
   const isExplicitModelRequired =
-    modelFieldVisible && providerRequiresExplicitModel(providerForModelScope);
+    modelFieldVisible && providerRequiresExplicitModel(effectiveProvider);
   const isCreateMode = Boolean(initialValues && !("id" in initialValues));
   const selectedRuntimeIsAvailable =
     runtime.trim().length === 0 ||
     selectedRuntime?.availability === "available";
+  // Gate model/provider validity through missingNormalizedFields — single
+  // source of truth with the readiness gate so display and Save can't drift.
   const canSubmit =
     canSubmitPersonaDialog({ displayName, isPending }) &&
     (!isCreateMode || runtime.trim().length > 0) &&
@@ -470,24 +390,63 @@ export function AgentDefinitionDialog({
     // Crash-loop guard, create AND edit: an empty allowlist would crash
     // every instance minted from this definition at startup.
     personaBehaviorDraftValid(behaviorDraft) &&
-    (!isExplicitModelRequired || model.trim().length > 0) &&
+    missingNormalizedFields.length === 0 &&
     !isAvatarUploadPending;
+
+  // Auto-expand the Advanced section once per dialog-open cycle when required
+  // env keys are present, so the user sees a clear signal that action is
+  // needed (e.g. provider API key required). Does not re-open if the user
+  // manually collapses the section afterward.
+  const hasAutoOpenedAdvancedRef = React.useRef(false);
+  React.useEffect(() => {
+    if (!open) {
+      hasAutoOpenedAdvancedRef.current = false;
+      return;
+    }
+    if (requiredEnvKeys.length > 0 && !hasAutoOpenedAdvancedRef.current) {
+      hasAutoOpenedAdvancedRef.current = true;
+      setShowAdvancedFields(true);
+    }
+  }, [open, requiredEnvKeys.length]);
+
+  // Auto-expand Advanced once per open when the selected runtime is buzz-agent
+  // so the model-tuning knobs are immediately reachable — mirrors the agent
+  // instance dialogs' behavior.
+  const hasAutoOpenedForBuzzAgentRef = React.useRef(false);
+  React.useEffect(() => {
+    if (!open) {
+      hasAutoOpenedForBuzzAgentRef.current = false;
+      return;
+    }
+    if (isBuzzAgentRuntime(runtime) && !hasAutoOpenedForBuzzAgentRef.current) {
+      hasAutoOpenedForBuzzAgentRef.current = true;
+      setShowAdvancedFields(true);
+    }
+  }, [open, runtime]);
+  // Merge global env as the base layer so credential keys satisfied via global
+  // config are available to model discovery — same rationale as in AgentInstanceEditDialog.
+  const envVarsForDiscovery = React.useMemo(
+    () => ({ ...globalConfig.env_vars, ...envVars }),
+    [globalConfig.env_vars, envVars],
+  );
   const {
     discoveredModelOptions,
     modelDiscoveryLoading,
     modelDiscoveryStatus,
   } = usePersonaModelDiscovery({
-    envVars,
+    envVars: envVarsForDiscovery,
     isCustomProviderEditing,
     modelFieldVisible,
     open,
-    provider: providerForModelScope,
+    // Gate provider by runtime: runtimes that don't support LLM provider
+    // selection (codex, claude) must not inherit the global provider — doing
+    // so causes them to discover models from the wrong provider.
+    provider: runtimeSupportsLlmProviderSelection(runtime)
+      ? effectiveProvider
+      : "",
     selectedRuntime,
   });
-  const staticModelOptions = getPersonaModelOptions(
-    runtime,
-    providerForModelScope,
-  );
+  const staticModelOptions = getPersonaModelOptions(runtime, effectiveProvider);
   const runtimeModelOptions = getRuntimePersonaModelOptions(runtime);
   const modelOptions = discoveredModelOptions ?? staticModelOptions;
   const isModelCustom = !hasPersonaModelOption(
@@ -501,20 +460,32 @@ export function AgentDefinitionDialog({
   });
   const showCustomModelInput =
     modelFieldVisible && (isCustomModelEditing || isModelCustom);
-  const providerOptions = getPersonaProviderOptions(
-    providerForModelScope,
-    runtime,
+  // On internal Block builds, BUZZ_AGENT_PROVIDER is baked in and a boot
+  // migration rewrites any persisted Databricks v1 values → v2. Hide the v1
+  // option there so it is not offered for new selections. OSS builds have no
+  // baked provider, so v1 remains visible.
+  const hideProviderIds = React.useMemo(
+    () =>
+      (bakedEnvKeys ?? []).includes("BUZZ_AGENT_PROVIDER")
+        ? BLOCK_BUILD_HIDDEN_PROVIDER_IDS
+        : new Set<string>(),
+    [bakedEnvKeys],
   );
-  const defaultLlmProviderLabel = getDefaultLlmProviderLabel(runtime);
+  const providerOptions = getPersonaProviderOptions(
+    trimmedProvider,
+    runtime,
+    globalConfig.provider ?? "",
+    hideProviderIds,
+  );
+  const defaultLlmProviderLabel = getDefaultLlmProviderLabel(
+    runtime,
+    globalConfig.provider ?? "",
+  );
   const providerSelectValue = isCustomProviderEditing
     ? CUSTOM_PROVIDER_DROPDOWN_VALUE
     : trimmedProvider || AUTO_PROVIDER_DROPDOWN_VALUE;
   const showCustomProviderInput =
     llmProviderFieldVisible && isCustomProviderEditing;
-  const advancedEnvVars = getAdvancedEnvVars(
-    envVars,
-    providerApiKeyConfig?.envVar ?? null,
-  );
   const runtimeDropdownValue = runtime.trim() || NO_RUNTIME_DROPDOWN_VALUE;
   const sortedRuntimes = React.useMemo(
     () => sortPersonaRuntimes(runtimes),
@@ -559,10 +530,10 @@ export function AgentDefinitionDialog({
     { label: "Custom provider...", value: CUSTOM_PROVIDER_DROPDOWN_VALUE },
   ];
   const modelDropdownOptions: PersonaDropdownOption[] = [
-    ...modelOptions.map((option) => ({
-      label: option.label,
-      value: option.id || AUTO_MODEL_DROPDOWN_VALUE,
-    })),
+    ...buildTemplateModelDropdownOptions(
+      modelOptions,
+      globalConfig.model ?? "",
+    ),
     ...(modelDiscoveryLoading && discoveredModelOptions === null
       ? [
           {
@@ -581,9 +552,11 @@ export function AgentDefinitionDialog({
       <p className="text-xs text-warning">
         {selectedRuntime.availability === "adapter_missing"
           ? `${selectedRuntime.label} CLI is installed but the ACP adapter is missing.`
-          : selectedRuntime.availability === "cli_missing"
-            ? `${selectedRuntime.label} ACP adapter is installed but the CLI is missing.`
-            : `${selectedRuntime.label} is not installed.`}{" "}
+          : selectedRuntime.availability === "adapter_outdated"
+            ? `${selectedRuntime.label} ACP adapter is outdated — reinstall to continue.`
+            : selectedRuntime.availability === "cli_missing"
+              ? `${selectedRuntime.label} ACP adapter is installed but the CLI is missing.`
+              : `${selectedRuntime.label} is not installed.`}{" "}
         Visit Settings &gt; Doctor to set it up.
       </p>
     ) : null;
@@ -598,7 +571,7 @@ export function AgentDefinitionDialog({
       isCustomModelEditing ||
       !shouldClearKnownModelForSelectionScope({
         model,
-        provider: providerForModelScope,
+        provider: effectiveProvider,
         runtime,
       })
     ) {
@@ -612,29 +585,9 @@ export function AgentDefinitionDialog({
     model,
     modelFieldVisible,
     open,
-    providerForModelScope,
+    effectiveProvider,
     runtime,
   ]);
-
-  function handleProviderApiKeyChange(value: string) {
-    if (!providerApiKeyConfig) {
-      return;
-    }
-
-    setEnvVars((current) =>
-      envVarsWithProviderApiKey(current, providerApiKeyConfig.envVar, value),
-    );
-  }
-
-  function handleAdvancedEnvVarsChange(nextAdvancedEnvVars: EnvVarsValue) {
-    setEnvVars((current) =>
-      envVarsMergingAdvancedEdit(
-        current,
-        nextAdvancedEnvVars,
-        providerApiKeyConfig?.envVar ?? null,
-      ),
-    );
-  }
 
   const selection: RuntimeModelProviderSelection = {
     provider,
@@ -655,6 +608,8 @@ export function AgentDefinitionDialog({
   function handleRuntimeDropdownChange(nextValue: string) {
     const nextRuntime =
       nextValue === NO_RUNTIME_DROPDOWN_VALUE ? "" : nextValue;
+    // The user made an explicit choice — no longer auto-seeded.
+    isRuntimeAutoSeededRef.current = false;
     setRuntime(nextRuntime);
     applySelection(
       selectionOnRuntimeChange(selection, {
@@ -706,48 +661,7 @@ export function AgentDefinitionDialog({
         title={title}
         footer={
           <div className="flex w-full items-center justify-between gap-3">
-            <div className="flex min-h-9 items-center">
-              {canImportPersonaUpdate ? (
-                <>
-                  <input
-                    accept=".md,.json,.png,.zip"
-                    className="hidden"
-                    onChange={handleImportFileChange}
-                    ref={importFileInputRef}
-                    type="file"
-                  />
-                  <button
-                    className={cn(
-                      "inline-flex h-9 items-center gap-2 rounded-md border px-3 text-xs font-medium transition-colors",
-                      importButtonTone === "drag"
-                        ? "border-dashed border-primary/70 bg-primary/10 text-primary"
-                        : importButtonTone === "error"
-                          ? "border-destructive/40 bg-destructive/10 text-destructive hover:bg-destructive/15"
-                          : "border-border bg-background text-muted-foreground hover:bg-muted hover:text-foreground",
-                    )}
-                    disabled={isPending || isImportPending || isImportingUpdate}
-                    type="button"
-                    {...importDropHandlers}
-                    onClick={openImportFilePicker}
-                    title={
-                      importButtonTone === "error"
-                        ? importButtonLabel
-                        : undefined
-                    }
-                  >
-                    <Upload className="h-4 w-4" />
-                    <span className="max-w-[16rem] truncate">
-                      {importButtonLabel}
-                    </span>
-                    {isImportingUpdate ? (
-                      <RefreshCw className="h-4 w-4 animate-spin" />
-                    ) : null}
-                  </button>
-                </>
-              ) : (
-                createFooterSlot
-              )}
-            </div>
+            <div className="flex min-h-9 items-center">{createFooterSlot}</div>
 
             <div className="flex items-center gap-2">
               <Button
@@ -900,14 +814,8 @@ export function AgentDefinitionDialog({
                     />
                   </div>
                 ) : null}
-                {providerApiKeyFieldVisible && providerApiKeyConfig ? (
-                  <PersonaProviderApiKeyField
-                    config={providerApiKeyConfig}
-                    disabled={isPending}
-                    onChange={handleProviderApiKeyChange}
-                    value={providerApiKeyValue}
-                  />
-                ) : null}
+                {/* Provider API key is now surfaced as an amber required row
+                    in EnvVarsEditor — no dedicated field needed. */}
               </div>
             ) : null}
 
@@ -959,12 +867,16 @@ export function AgentDefinitionDialog({
                     <PersonaAdvancedFields
                       behaviorDraft={behaviorDraft}
                       disabled={isPending}
-                      envVars={advancedEnvVars}
+                      envVars={envVars}
                       fileSatisfiedEnvKeys={localModeGate.fileSatisfiedEnvKeys}
+                      inheritedEnvVars={globalConfig.env_vars}
+                      model={model}
+                      modelTuningRuntimeId={runtime}
                       namePoolText={namePoolText}
                       onBehaviorDraftChange={setBehaviorDraft}
-                      onEnvVarsChange={handleAdvancedEnvVarsChange}
+                      onEnvVarsChange={setEnvVars}
                       onNamePoolTextChange={setNamePoolText}
+                      provider={provider}
                       requiredEnvKeys={requiredEnvKeys}
                     />
                   </motion.div>

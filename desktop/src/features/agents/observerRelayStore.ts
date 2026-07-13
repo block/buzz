@@ -35,12 +35,22 @@ const IDLE_SNAPSHOT: ObserverSnapshot = {
   events: [],
 };
 
+const EMPTY_EVENTS: ObserverEvent[] = [];
 const EMPTY_TRANSCRIPT: TranscriptItem[] = [];
 
 const listeners = new Set<() => void>();
 const eventsByAgent = new Map<string, ObserverEvent[]>();
 const transcriptByAgent = new Map<string, TranscriptState>();
 const snapshotByAgent = new Map<string, ObserverSnapshot>();
+
+// Channel-scoped archive event journal — holds paged history loaded from the local
+// SQLite archive without the MAX_OBSERVER_EVENTS live-relay cap. Keyed by
+// `${normalizedAgentPubkey}:${channelId}`. The live relay path writes to
+// `eventsByAgent` (per-agent, capped) and this map is NEVER written by live
+// events — separation is strict so loading deep history can never evict live frames
+// or vice versa. UI consumers merge the raw events from both sources, then derive
+// TranscriptState once over the combined window.
+const archiveEventsByChannel = new Map<string, ObserverEvent[]>();
 
 // Per-agent, per-channel latest-live-session-id.
 // Key: `${normalizePubkey(agentPubkey)}:${channelId}`.
@@ -202,6 +212,75 @@ function appendAgentEvent(agentPubkey: string, event: ObserverEvent) {
   invalidateSnapshot(key);
 
   notifyListeners();
+}
+
+/**
+ * Compose the map key for the channel-scoped archive transcript.
+ * Separates agent identity from channel with `:` — the same delimiter used by
+ * liveSessionKey so all composite keys in this module are consistently shaped.
+ */
+function archiveChannelKey(agentPubkey: string, channelId: string): string {
+  return `${normalizePubkey(agentPubkey)}:${channelId}`;
+}
+
+/**
+ * Append a decoded archived observer event to the channel-scoped archive
+ * event journal. Unlike `appendAgentEvent`, this path does NOT cap or trim —
+ * the channel archive window grows only by explicit paged loads from SQLite,
+ * so unbounded growth from live relay events is impossible.
+ *
+ * Deduplicates on `(seq, timestamp)` — identical to `appendAgentEvent` — so
+ * events that arrive on the live relay before the archive page is loaded are
+ * silently skipped. The archive window and the live transcript are kept
+ * strictly separate: live events never write here.
+ *
+ * Returns `true` if the event was added (state changed), `false` if it was a
+ * duplicate and was skipped. The caller batches notifications.
+ */
+function appendArchivedChannelEvent(
+  agentPubkey: string,
+  channelId: string,
+  event: ObserverEvent,
+): boolean {
+  const key = archiveChannelKey(agentPubkey, channelId);
+  const current = archiveEventsByChannel.get(key) ?? [];
+
+  // Dedup: skip if (seq, timestamp) already present in the archive window.
+  if (
+    current.some(
+      (existing) =>
+        existing.seq === event.seq && existing.timestamp === event.timestamp,
+    )
+  ) {
+    return false;
+  }
+
+  // Archive pages arrive newest-first from SQLite, so each new event sorts
+  // BEFORE the existing entries. Sort the combined array to maintain ascending
+  // order for consumers that call buildTranscriptState over the window.
+  const sorted = [...current, event].sort(compareObserverEvents);
+  archiveEventsByChannel.set(key, sorted);
+  return true;
+}
+
+/**
+ * Read the channel-scoped archive raw events for a given (agent, channel)
+ * pair. Returns an empty array when no archive has been loaded yet.
+ *
+ * Called by `useArchivedChannelEvents` so UI components can reactively
+ * subscribe to archive loads and derive transcript state from the combined
+ * live + archive raw event window without touching the live-capped per-agent
+ * store.
+ */
+export function getArchivedChannelEvents(
+  agentPubkey: string | null | undefined,
+  channelId: string | null | undefined,
+): ObserverEvent[] {
+  if (!agentPubkey || !channelId) return EMPTY_EVENTS;
+  return (
+    archiveEventsByChannel.get(archiveChannelKey(agentPubkey, channelId)) ??
+    EMPTY_EVENTS
+  );
 }
 
 export function compareObserverEvents(
@@ -535,6 +614,7 @@ export async function ingestArchivedObserverEvents(
   rawEvents: RelayEvent[],
   _decryptFn: (event: RelayEvent) => Promise<unknown> = decryptObserverEvent,
 ): Promise<void> {
+  let archiveChanged = false;
   for (const event of rawEvents) {
     const agentPubkey = observerTag(event, "agent");
     const frame = observerTag(event, "frame");
@@ -549,10 +629,30 @@ export async function ingestArchivedObserverEvents(
     }
     try {
       const parsed = (await _decryptFn(event)) as ObserverEvent;
-      appendAgentEvent(agentPubkey, parsed);
+      // Route archived events to the channel-scoped archive window (no cap)
+      // rather than the per-agent live-relay store (MAX_OBSERVER_EVENTS cap).
+      // Events without a channelId fall through to the live store so they
+      // remain visible in the agent's general transcript.
+      if (parsed.channelId) {
+        const added = appendArchivedChannelEvent(
+          agentPubkey,
+          parsed.channelId,
+          parsed,
+        );
+        if (added) archiveChanged = true;
+      } else {
+        // Live path already calls notifyListeners() inside appendAgentEvent.
+        appendAgentEvent(agentPubkey, parsed);
+      }
     } catch {
       // Silently drop decrypt failures — same as live path error handling.
     }
+  }
+  // Batch-notify once for the whole page of archive events. appendAgentEvent
+  // already notifies individually for live/no-channelId events above, so we
+  // only need one extra notify here for the archive path.
+  if (archiveChanged) {
+    notifyListeners();
   }
 }
 
@@ -597,6 +697,7 @@ export function resetAgentObserverStore() {
   eventsByAgent.clear();
   transcriptByAgent.clear();
   snapshotByAgent.clear();
+  archiveEventsByChannel.clear();
   knownAgentPubkeys.clear();
   knownAgentsBySubscription.clear();
   latestLiveSessionByAgentChannel.clear();
@@ -617,4 +718,18 @@ export function _testRegisterKnownAgents(
   pubkeys: readonly string[],
 ): void {
   registerKnownAgents(subscriptionId, pubkeys);
+}
+
+/**
+ * Test-only: read the raw archived observer events for a (agent, channel) pair.
+ * Production callers should use `getArchivedChannelEvents`.
+ * Only call from tests — never from production code.
+ */
+export function _testGetArchivedChannelEvents(
+  agentPubkey: string,
+  channelId: string,
+): ObserverEvent[] {
+  return (
+    archiveEventsByChannel.get(archiveChannelKey(agentPubkey, channelId)) ?? []
+  );
 }

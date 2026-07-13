@@ -37,6 +37,8 @@ pub mod reaction;
 pub mod relay_members;
 /// Thread metadata persistence.
 pub mod thread;
+/// Per-community usage rollup queries for Prometheus gauges.
+pub mod usage;
 /// User profile persistence.
 pub mod user;
 /// Workflow, run, and approval persistence.
@@ -201,6 +203,15 @@ pub struct EnsuredCommunityRecord {
     pub created: bool,
 }
 
+/// Community row returned by an atomic create-with-owner operation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreatedCommunityRecord {
+    /// Stable server-resolved community id.
+    pub id: CommunityId,
+    /// Normalized host stored for the community.
+    pub host: String,
+}
+
 /// Community row returned by operator-plane ownership reads.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OwnedCommunityRecord {
@@ -275,6 +286,64 @@ impl Db {
             idle: self.pool.num_idle() as u32,
             max: self.max_connections,
         }
+    }
+
+    /// Return total number of communities on this relay.
+    pub async fn usage_community_count(&self) -> Result<i64> {
+        usage::community_count(&self.pool).await
+    }
+
+    /// Return per-community user counts split by human/agent.
+    pub async fn usage_user_counts(&self) -> Result<Vec<usage::CommunityUserCounts>> {
+        usage::user_counts(&self.pool).await
+    }
+
+    /// Return per-community channel counts by type.
+    pub async fn usage_channel_counts(&self) -> Result<Vec<usage::CommunityChannelCount>> {
+        usage::channel_counts(&self.pool).await
+    }
+
+    /// Return per-community kind=9 message counts.
+    pub async fn usage_message_counts(&self) -> Result<Vec<usage::CommunityMessageCount>> {
+        usage::message_counts(&self.pool).await
+    }
+
+    /// Return per-community relay-member counts by role.
+    pub async fn usage_relay_member_counts(&self) -> Result<Vec<usage::CommunityMemberCount>> {
+        usage::relay_member_counts(&self.pool).await
+    }
+
+    /// Return per-community workflow counts by status.
+    pub async fn usage_workflow_counts(&self) -> Result<Vec<usage::CommunityWorkflowCount>> {
+        usage::workflow_counts(&self.pool).await
+    }
+
+    /// Return per-community git-repo counts.
+    pub async fn usage_git_repo_counts(&self) -> Result<Vec<usage::CommunityGitRepoCount>> {
+        usage::git_repo_counts(&self.pool).await
+    }
+
+    /// Return per-community distinct active-user counts for a given SQL interval.
+    ///
+    /// `interval_sql` must be a trusted literal such as `"1 day"` or `"7 days"`.
+    pub async fn usage_active_user_counts(
+        &self,
+        interval_sql: &'static str,
+    ) -> Result<Vec<usage::CommunityActiveUsers>> {
+        usage::active_user_counts(&self.pool, interval_sql).await
+    }
+
+    /// Return per-community active-channel counts for a given SQL interval.
+    pub async fn usage_active_channel_counts(
+        &self,
+        interval_sql: &'static str,
+    ) -> Result<Vec<usage::CommunityActiveChannels>> {
+        usage::active_channel_counts(&self.pool, interval_sql).await
+    }
+
+    /// Return all community id → host mappings.
+    pub async fn usage_community_hosts(&self) -> Result<Vec<usage::CommunityHost>> {
+        usage::community_hosts(&self.pool).await
     }
 
     /// Begin a database transaction for atomic multi-statement operations.
@@ -455,6 +524,72 @@ impl Db {
             host,
             created,
         })
+    }
+
+    /// Atomically creates a community and its initial owner.
+    ///
+    /// Returns the existing row when the normalized host already has the same
+    /// current owner, making ambiguous create retries naturally idempotent.
+    /// Returns `None` when the host exists with a different (or missing) owner.
+    /// The initial host and owner inserts share one transaction, so callers
+    /// never observe a partially provisioned community or rotate an owner.
+    pub async fn create_community_with_owner(
+        &self,
+        normalized_host: &str,
+        owner_pubkey: &str,
+    ) -> Result<Option<CreatedCommunityRecord>> {
+        let owner_pubkey = owner_pubkey.to_ascii_lowercase();
+        let mut tx = self.pool.begin().await?;
+        let row = sqlx::query(
+            r#"
+            INSERT INTO communities (host)
+            VALUES ($1)
+            ON CONFLICT (lower(host)) DO NOTHING
+            RETURNING id, host
+            "#,
+        )
+        .bind(normalized_host)
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        let (id, host) = if let Some(row) = row {
+            let id: Uuid = row.try_get("id")?;
+            let host: String = row.try_get("host")?;
+            sqlx::query(
+                "INSERT INTO relay_members (community_id, pubkey, role, added_by) VALUES ($1, $2, 'owner', NULL)",
+            )
+            .bind(id)
+            .bind(&owner_pubkey)
+            .execute(&mut *tx)
+            .await?;
+            (id, host)
+        } else {
+            let existing = sqlx::query(
+                r#"
+                SELECT c.id, c.host
+                FROM communities c
+                JOIN relay_members rm ON rm.community_id = c.id
+                WHERE lower(c.host) = lower($1)
+                  AND lower(rm.pubkey) = lower($2)
+                  AND rm.role = 'owner'
+                "#,
+            )
+            .bind(normalized_host)
+            .bind(&owner_pubkey)
+            .fetch_optional(&mut *tx)
+            .await?;
+            let Some(existing) = existing else {
+                tx.rollback().await?;
+                return Ok(None);
+            };
+            (existing.try_get("id")?, existing.try_get("host")?)
+        };
+
+        tx.commit().await?;
+        Ok(Some(CreatedCommunityRecord {
+            id: CommunityId::from_uuid(id),
+            host,
+        }))
     }
 
     /// Returns the community that owns a channel, if the channel exists.
@@ -1079,7 +1214,11 @@ impl Db {
     }
 
     /// Ensure a user record exists (upsert).
-    pub async fn ensure_user(&self, community_id: CommunityId, pubkey: &[u8]) -> Result<()> {
+    ///
+    /// Returns `true` if a new row was inserted (first time), `false` if it
+    /// already existed. Callers use the `true` return to increment
+    /// `buzz_users_created_total`.
+    pub async fn ensure_user(&self, community_id: CommunityId, pubkey: &[u8]) -> Result<bool> {
         user::ensure_user(&self.pool, community_id, pubkey).await
     }
 
@@ -2923,6 +3062,82 @@ mod tests {
             .expect("lookup stored-case host")
             .expect("community found by stored-case host");
         assert_eq!(found.id, CommunityId::from_uuid(id));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn create_community_with_owner_is_atomic_and_create_only() {
+        let db = setup_db().await;
+        let host = format!("create-only-{}.example", Uuid::new_v4().simple());
+        let owner = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let other = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+        let created = db
+            .create_community_with_owner(&host, owner)
+            .await
+            .expect("create community")
+            .expect("new host");
+        assert_eq!(created.host, host);
+        let owner_role: Option<String> = sqlx::query_scalar(
+            "SELECT role FROM relay_members WHERE community_id = $1 AND pubkey = $2",
+        )
+        .bind(created.id.as_uuid())
+        .bind(owner)
+        .fetch_optional(&db.pool)
+        .await
+        .expect("owner role");
+        assert_eq!(owner_role.as_deref(), Some("owner"));
+
+        let retry = db
+            .create_community_with_owner(&host.to_ascii_uppercase(), owner)
+            .await
+            .expect("same-owner retry")
+            .expect("existing same-owner community");
+        assert_eq!(retry, created, "retry returns the original row");
+
+        let collision = db
+            .create_community_with_owner(&host, other)
+            .await
+            .expect("collision result");
+        assert!(collision.is_none());
+        let roles: Vec<(String, String)> = sqlx::query_as(
+            "SELECT pubkey, role FROM relay_members WHERE community_id = $1 ORDER BY pubkey",
+        )
+        .bind(created.id.as_uuid())
+        .fetch_all(&db.pool)
+        .await
+        .expect("community roles");
+        assert_eq!(roles, vec![(owner.to_string(), "owner".to_string())]);
+
+        db.bootstrap_owner(created.id, other)
+            .await
+            .expect("rotate owner");
+        let post_rotation_retry = db
+            .create_community_with_owner(&host, owner)
+            .await
+            .expect("post-rotation retry");
+        assert!(post_rotation_retry.is_none());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn concurrent_same_owner_create_returns_the_winning_row_to_both_callers() {
+        let db = setup_db().await;
+        let host = format!("concurrent-create-{}.example", Uuid::new_v4().simple());
+        let owner = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+        let (first, second) = tokio::join!(
+            db.create_community_with_owner(&host, owner),
+            db.create_community_with_owner(&host, owner),
+        );
+        let first = first
+            .expect("first concurrent create")
+            .expect("first result");
+        let second = second
+            .expect("second concurrent create")
+            .expect("second result");
+
+        assert_eq!(first, second, "conflict loser re-reads the winning row");
     }
 
     #[tokio::test]

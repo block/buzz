@@ -1,4 +1,4 @@
-import { Check, ChevronDown, Copy, Pencil } from "lucide-react";
+import { Check, ChevronDown, Copy, Eye, EyeOff, Pencil } from "lucide-react";
 import {
   AnimatePresence,
   LayoutGroup,
@@ -12,6 +12,8 @@ import {
   useProfileQuery,
   useUpdateProfileMutation,
 } from "@/features/profile/hooks";
+import { NsecMaskedDisplay } from "@/features/onboarding/ui/NsecMaskedDisplay";
+import { getNsec } from "@/shared/api/tauriIdentity";
 import { MaskedAvatarBadgeFrame } from "@/features/profile/ui/MaskedAvatarBadgeFrame";
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
 import {
@@ -81,6 +83,92 @@ function IdentityRow({
           <Copy className="h-4 w-4 shrink-0" />
           Copy
         </button>
+      ) : null}
+    </div>
+  );
+}
+
+/**
+ * Collapsible row that reveals the user's nsec on demand.
+ * The nsec is fetched only when first expanded and cleared on collapse.
+ */
+function NsecRevealRow() {
+  const [isOpen, setIsOpen] = React.useState(false);
+  const [nsec, setNsec] = React.useState<string | null>(null);
+  const [isLoading, setIsLoading] = React.useState(false);
+  const [loadError, setLoadError] = React.useState<string | null>(null);
+  // Guards against a late-resolving getNsec() repopulating state after Hide
+  // or after the settings panel unmounts.
+  const fetchCancelledRef = React.useRef(false);
+
+  React.useEffect(() => {
+    return () => {
+      fetchCancelledRef.current = true;
+      setNsec(null);
+    };
+  }, []);
+
+  async function handleReveal() {
+    if (!isOpen) {
+      fetchCancelledRef.current = false;
+      setIsOpen(true);
+      setIsLoading(true);
+      setLoadError(null);
+      try {
+        const value = await getNsec();
+        if (!fetchCancelledRef.current) setNsec(value);
+      } catch (err) {
+        if (!fetchCancelledRef.current)
+          setLoadError(
+            err instanceof Error
+              ? err.message
+              : "Failed to retrieve private key.",
+          );
+      } finally {
+        if (!fetchCancelledRef.current) setIsLoading(false);
+      }
+    } else {
+      // Cancel any in-flight fetch before clearing state.
+      fetchCancelledRef.current = true;
+      setNsec(null);
+      setIsOpen(false);
+    }
+  }
+
+  return (
+    <div className="px-4 py-3" data-testid="profile-private-key-row">
+      <div className="flex items-center justify-between gap-4">
+        <p className="text-sm font-medium">Private key</p>
+        <button
+          aria-label={isOpen ? "Hide private key" : "Reveal private key"}
+          className="inline-flex shrink-0 items-center gap-1.5 rounded-full bg-muted px-3 py-1.5 text-sm font-medium text-foreground transition-colors hover:bg-muted/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+          data-testid="profile-private-key-toggle"
+          onClick={() => void handleReveal()}
+          type="button"
+        >
+          {isOpen ? (
+            <>
+              <EyeOff className="h-4 w-4 shrink-0" />
+              Hide
+            </>
+          ) : (
+            <>
+              <Eye className="h-4 w-4 shrink-0" />
+              Reveal
+            </>
+          )}
+        </button>
+      </div>
+      {isOpen ? (
+        <div className="mt-2">
+          {isLoading ? (
+            <p className="text-sm text-muted-foreground">Loading…</p>
+          ) : loadError ? (
+            <p className="text-sm text-destructive">{loadError}</p>
+          ) : nsec ? (
+            <NsecMaskedDisplay nsec={nsec} />
+          ) : null}
+        </div>
       ) : null}
     </div>
   );
@@ -765,6 +853,7 @@ export function ProfileSettingsCard({
                                 testId="profile-nip05"
                                 value={nip05Handle}
                               />
+                              <NsecRevealRow />
                             </div>
                           </details>
                         </div>

@@ -84,6 +84,17 @@ relay:
   # accepts/owns the external multi-pod audio/SFU behavior.
   huddleAudioAvailable: null
   ephemeralTtlOverride: 0
+  # Per-upload-event records (`_uploads/` moderation side channel). Off by
+  # default. Operators hosting communities for other people may have legal
+  # obligations (e.g. NCMEC reporting for US-serving providers) that require
+  # recording the network address of an upload; Buzz never collects IPs unless
+  # uploadIpHeader is set. When set (e.g. "cf-connecting-ip"), the connecting
+  # address reported by YOUR trusted edge is stored in the per-event record
+  # only — never served to clients, never in event data. uploadRecords must be
+  # true for uploadIpHeader to be valid (startup-checked).
+  uploadRecords: false
+  uploadIpHeader: ""
+  uploadPortHeader: ""
 
   livenessProbe:
     httpGet:
@@ -211,7 +222,7 @@ postgresql:
     enabled: true
     size: 10Gi
 externalPostgresql:
-  url: ""                        # postgres://user:pass@host:5432/db
+  url: ""                        # postgres://user:pass@host:5432/db — placeholder example, sadscan:disable np.postgres.1
 
 # ── Redis ────────────────────────────────────────────────────────────────────
 # Eval-only CloudPirates subchart (standalone). REDIS_URL is composed in the

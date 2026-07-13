@@ -59,11 +59,11 @@ export type DraftState = {
   /** URLs of imeta attachments marked as spoilered. */
   spoileredAttachmentUrls: string[];
   /**
-   * Lifecycle status of this draft.
-   * - "active": draft is in progress (not yet sent).
-   * - "sent": draft was sent; kept for the Drafts inbox "Sent" subsection.
+   * Lifecycle status of this draft. Always `"active"` at runtime.
+   * The `"sent"` value is not written by any production path; legacy `sent:`
+   * keyed records from older builds are dropped on read by `readStore`.
    * Entries persisted before this field was added have no status field —
-   * the read path treats absent status as "active" (see `isValidDraftState`).
+   * the read path treats absent status as `"active"` (see `isValidDraftState`).
    */
   status: "active" | "sent";
 };
@@ -76,10 +76,6 @@ const MAX_DRAFTS = 100;
 
 /** Module-level pubkey set by `initDraftStore`. Empty string = no identity. */
 let currentPubkey = "";
-
-/** Monotonically-incrementing counter used to guarantee unique sent-record keys
- *  even when two sends happen within the same millisecond (e.g. in tests). */
-let _sentSeq = 0;
 
 function storageKey(): string {
   return `${DRAFT_STORE_KEY_PREFIX}:${currentPubkey}`;
@@ -140,6 +136,12 @@ function readStore(): Map<string, DraftState> {
       !Array.isArray(parsed)
     ) {
       for (const [key, value] of Object.entries(parsed as StoredDrafts)) {
+        // Drop legacy sent: records — they were written by the old
+        // markDraftSentEntry and have no role now that the Sent section is
+        // removed. Skipping here compacts them out on the next flush.
+        if (key.startsWith("sent:")) {
+          continue;
+        }
         if (isValidDraftState(value)) {
           map.set(key, value);
         }
@@ -169,11 +171,13 @@ function isValidDraftState(v: unknown): v is DraftState {
     return false;
   }
   // Migration: entries written before the status field was introduced have no
-  // status. Treat absent/invalid status as "active" rather than rejecting the
-  // entry — this avoids data loss on first run after the upgrade.
+  // status field. Treat absent status as "active" to avoid data loss on the
+  // first run after the upgrade.
+  // Legacy sent: keys are skipped by readStore before reaching this function;
+  // reject any remaining entry whose status is not "active".
   if (d.status === undefined || d.status === null) {
     (d as DraftState).status = "active";
-  } else if (d.status !== "active" && d.status !== "sent") {
+  } else if (d.status !== "active") {
     return false;
   }
   return true;
@@ -234,6 +238,103 @@ export function clearDraftEntry(draftKey: string): void {
 }
 
 /**
+ * Return true only when every field of two DraftState values is identical,
+ * including all BlobDescriptor optional fields (dim, blurhash, thumb,
+ * duration, image, filename, uploaded). Any divergence — including selection
+ * offsets, timestamps, attachment metadata, spoiler state, and status — is
+ * treated as a distinct record that must not be discarded.
+ */
+function draftStatesEqual(a: DraftState, b: DraftState): boolean {
+  if (
+    a.content !== b.content ||
+    a.selectionStart !== b.selectionStart ||
+    a.selectionEnd !== b.selectionEnd ||
+    a.channelId !== b.channelId ||
+    a.createdAt !== b.createdAt ||
+    a.updatedAt !== b.updatedAt ||
+    a.status !== b.status ||
+    a.pendingImeta.length !== b.pendingImeta.length ||
+    a.spoileredAttachmentUrls.length !== b.spoileredAttachmentUrls.length
+  ) {
+    return false;
+  }
+  for (let i = 0; i < a.pendingImeta.length; i++) {
+    const am = a.pendingImeta[i];
+    const bm = b.pendingImeta[i];
+    if (
+      am.url !== bm.url ||
+      am.sha256 !== bm.sha256 ||
+      am.size !== bm.size ||
+      am.type !== bm.type ||
+      am.uploaded !== bm.uploaded ||
+      am.dim !== bm.dim ||
+      am.blurhash !== bm.blurhash ||
+      am.thumb !== bm.thumb ||
+      am.duration !== bm.duration ||
+      am.image !== bm.image ||
+      am.filename !== bm.filename
+    ) {
+      return false;
+    }
+  }
+  for (let i = 0; i < a.spoileredAttachmentUrls.length; i++) {
+    if (a.spoileredAttachmentUrls[i] !== b.spoileredAttachmentUrls[i]) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * Atomically rename a draft key: move the DraftState from `oldKey` to
+ * `newKey`, flush once, and notify once. Returns the outcome:
+ *
+ * - `"migrated"` — the rename succeeded; `oldKey` no longer exists.
+ * - `"collision"` — `newKey` already held a record whose full persisted
+ *   DraftState differed from `oldKey`'s record across any field (content,
+ *   selection, timestamps, attachments, spoiler state, or status). Both
+ *   records are preserved unchanged; no I/O is performed.
+ * - `"noop"` — `oldKey` did not exist in the store; nothing changed.
+ *
+ * If `oldKey === newKey` no I/O occurs and `"noop"` is returned.
+ * Map cardinality is unchanged by a rename (one key removed, one added or
+ * identical collapse), so `evictOldest` is never called here.
+ * Callers must not compose this from public save+clear calls (that would
+ * issue two flushes and could overwrite a concurrent write).
+ */
+export function renameDraftEntry(
+  oldKey: string,
+  newKey: string,
+): "migrated" | "collision" | "noop" {
+  if (oldKey === newKey) return "noop";
+  const map = readStore();
+  const existing = map.get(oldKey);
+  if (existing === undefined) return "noop";
+
+  const destination = map.get(newKey);
+  if (destination !== undefined) {
+    // Only collapse when every persisted field is identical; any divergence
+    // is treated as a collision to prevent silent data loss.
+    if (!draftStatesEqual(existing, destination)) {
+      return "collision";
+    }
+    // Identical records: remove the legacy key, keep the destination entry.
+    map.delete(oldKey);
+    flushStore(map);
+    notifySubscribers();
+    return "migrated";
+  }
+
+  // No destination conflict: move the record. Cardinality is unchanged
+  // (one delete + one set), so evictOldest is not called.
+  map.set(newKey, existing);
+  map.delete(oldKey);
+  flushStore(map);
+  notifySubscribers();
+  return "migrated";
+}
+
+/**
  * Convenience: save if content or attachments are non-empty, otherwise clear.
  * Preserves existing createdAt on updates; sets it on first save.
  */
@@ -291,7 +392,7 @@ export function getActiveDraftEntries(): Array<{
 
 /**
  * Returns only sent drafts, sorted most-recently-updated first.
- * Used by the "Sent" subsection of the Drafts inbox panel.
+ * Returns empty — sent records are dropped on read. Kept for test assertions.
  */
 export function getSentDraftEntries(): Array<{
   key: string;
@@ -301,60 +402,20 @@ export function getSentDraftEntries(): Array<{
 }
 
 /**
- * Mark a draft as sent by writing its content to a durable sent-record key.
+ * Clear the active draft entry for a sent draft.
  *
- * The active draft key is simultaneously cleared so the composer can create
- * a fresh draft in the same channel without inheriting the sent status, and so
- * the composer's empty-content cleanup can never delete the sent record.
- *
- * The sent record is stored under `sent:<draftKey>:<timestamp>` — a key the
- * composer never writes to — so active and sent records for the same channel
- * can coexist in the store independently.
- *
- * The "never-persisted draft writes no sent record" boundary is enforced at
- * the call site: callers only invoke this function when `sentDraftKey` is
- * non-null, which only holds for drafts that were persisted before submit.
- * This function writes unconditionally so the sent record is created even
- * when the active key was already cleared by a composer cleanup that raced
- * the async send (e.g. the user switched channels while send was in flight).
+ * Kept as a named export so callers (`useMentionSendFlow`) don't need
+ * updating. Previously wrote a visible sent-record to the store; the
+ * sent section has been removed, so we now just clear the active draft.
  */
 export function markDraftSentEntry(
   draftKey: string,
-  content: string,
-  channelId: string,
-  pendingImeta: ImetaMedia[],
-  spoileredAttachmentUrls: string[],
+  _content: string,
+  _channelId: string,
+  _pendingImeta: ImetaMedia[],
+  _spoileredAttachmentUrls: string[],
 ): void {
-  const map = readStore();
-  const existing = map.get(draftKey);
-  const now = new Date().toISOString();
-  // Use the live entry's createdAt when available; fall back to now when the
-  // active key was already cleared by a navigation-during-send race. Either
-  // way the sent record is written — the race cannot cause data loss.
-  const createdAt = existing?.createdAt ?? now;
-  // Write the sent record under a stable, distinct key so it can never be
-  // overwritten by the composer's active-draft persist path.
-  // The `Date.now()-seq` suffix guarantees uniqueness even if two sends in the
-  // same channel happen within the same millisecond.
-  const sentKey = `sent:${draftKey}:${Date.now()}-${++_sentSeq}`;
-  map.set(sentKey, {
-    content,
-    selectionStart: content.length,
-    selectionEnd: content.length,
-    channelId,
-    createdAt,
-    updatedAt: now,
-    pendingImeta,
-    spoileredAttachmentUrls,
-    status: "sent",
-  });
-
-  // Clear the active draft key (if still present) so the composer starts fresh
-  // and any subsequent empty-content persist doesn't encounter the sent record.
-  map.delete(draftKey);
-  evictOldest(map);
-  flushStore(map);
-  notifySubscribers();
+  clearDraftEntry(draftKey);
 }
 
 // ── Reactive hooks ────────────────────────────────────────────────────────────

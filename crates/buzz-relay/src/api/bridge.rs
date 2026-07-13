@@ -2011,9 +2011,9 @@ mod tests {
 
         struct AlwaysErrGuard;
         impl Nip98ReplayGuard for AlwaysErrGuard {
-            fn try_mark<'a>(
+            fn try_mark_in_scope<'a>(
                 &'a self,
-                _ctx: &'a buzz_core::TenantContext,
+                _scope: &'a str,
                 _event_id: &'a EventId,
                 _ttl_secs: u64,
             ) -> Pin<Box<dyn Future<Output = Result<bool, AuthError>> + Send + 'a>> {

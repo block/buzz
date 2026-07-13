@@ -39,6 +39,7 @@
 //! UI display only.
 
 use std::collections::BTreeMap;
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
@@ -46,13 +47,15 @@ use crate::managed_agents::{
     agent_env::baked_build_env,
     config_bridge::read_goose_file_config,
     discovery::{
-        classify_runtime, find_command, known_acp_runtime, resolve_command, KnownAcpRuntime,
+        classify_runtime, codex_adapter_availability, find_command, known_acp_runtime,
+        resolve_command, KnownAcpRuntime,
     },
     env_vars::merged_user_env,
-    types::{AcpAvailabilityStatus, ManagedAgentRecord, PersonaRecord},
+    global_config::GlobalAgentConfig,
+    types::{AcpAvailabilityStatus, AgentDefinition, ManagedAgentRecord},
 };
 
-mod cli_probe;
+pub(crate) mod cli_probe;
 
 // ── EffectiveAgentEnv ─────────────────────────────────────────────────────────
 
@@ -78,17 +81,21 @@ pub(crate) struct EffectiveAgentEnv {
     pub effective_command: String,
 }
 
-/// Assemble the effective agent env from a record, personas, and optional
-/// known-runtime metadata — without an `AppHandle` so it is unit-testable.
+/// Assemble the effective agent env from a record, personas, optional
+/// known-runtime metadata, and the global agent config defaults — without an
+/// `AppHandle` so it is fully unit-testable.
 ///
 /// # Arguments
 /// * `record` — the managed agent record (model/provider/env_vars/…)
 /// * `personas` — all current persona records (for persona-backed resolution)
 /// * `runtime` — the `KnownAcpRuntime` for the effective command, if any
+/// * `global` — global agent config defaults (lowest user layer; pass
+///   `&GlobalAgentConfig::default()` in tests that don't need global config)
 pub(crate) fn resolve_effective_agent_env(
     record: &ManagedAgentRecord,
-    personas: &[PersonaRecord],
+    personas: &[AgentDefinition],
     runtime: Option<&KnownAcpRuntime>,
+    global: &GlobalAgentConfig,
 ) -> EffectiveAgentEnv {
     let effective_command = crate::managed_agents::record_agent_command(record, personas);
 
@@ -96,9 +103,13 @@ pub(crate) fn resolve_effective_agent_env(
     let mut env = baked_build_env();
 
     // Layer 2: runtime metadata env vars (model / provider keys derived from
-    // the record's structured fields).
-    let effective_model = record.model.as_deref();
-    let effective_provider = record.provider.as_deref();
+    // the record's structured fields, with global as fallback).
+    //
+    // Uses the shared resolver to guarantee readiness and spawn agree on the
+    // effective model/provider: agent → persona → global → None.
+    let (effective_model, effective_provider) =
+        super::global_config::resolve_effective_model_provider(record, personas, global);
+
     if let Some(rt) = runtime {
         for (key, value) in super::runtime::runtime_metadata_env_vars(
             rt.model_env_var,
@@ -111,7 +122,14 @@ pub(crate) fn resolve_effective_agent_env(
         }
     }
 
-    // Layer 3: merged user env — live persona env under the record's own
+    // Layer 3a: global env vars — the lowest user-settable layer.
+    // Injected before persona/agent so per-agent values win on collision.
+    // `merged_user_env` with an empty "lower" map applies reserved/malformed-key
+    // filtering to the global map for free.
+    let global_env = merged_user_env(&BTreeMap::new(), &global.env_vars);
+    env.extend(global_env);
+
+    // Layer 3b: merged user env — live persona env under the record's own
     // overrides (last-wins), after reserved/malformed-key filtering. Reading
     // the persona live is what makes persona credential edits refresh on the
     // next spawn instead of being frozen into the record.
@@ -160,6 +178,19 @@ pub enum Requirement {
         /// Carried to the FE so the nudge card can show the right message
         /// and route to Doctor with accurate context.
         availability: AcpAvailabilityStatus,
+    },
+    /// The CLI is installed but its config file could not be parsed.
+    /// This is an informational surface only — there is no in-app destination
+    /// that can repair an external config file; the user must edit it manually.
+    CliConfigInvalid {
+        /// Arguments used in the probe (e.g. `["codex", "login", "status"]`);
+        /// `probe_args[0]` is the CLI name (e.g. `"codex"`).
+        probe_args: Vec<String>,
+        /// Human-readable hint shown when no structured copy is available.
+        setup_copy: String,
+        /// A one-line excerpt from the CLI's stderr (the parse-error line).
+        /// Shown verbatim in the nudge so the user can identify the problem.
+        diagnostic: String,
     },
 }
 
@@ -471,8 +502,25 @@ fn cli_login_requirements(
         .map(|cli| find_command(cli).is_some())
         .unwrap_or(false);
 
-    let (availability, _cmd, _path) =
+    let (availability, cmd, adapter_path) =
         classify_runtime(adapter_result, runtime.underlying_cli, underlying_cli_found);
+
+    // For codex-acp: if the adapter resolved as Available, probe the version.
+    // An adapter with major version < 1 is the deprecated package and must be
+    // treated as outdated (blocks login probe — the agent can't reach the relay).
+    // Guard on `cmd == "codex-acp"` to match the discovery path and avoid
+    // probing when the runtime resolves via an alias command.
+    let availability = if runtime.id == "codex"
+        && availability == AcpAvailabilityStatus::Available
+        && cmd.as_deref() == Some("codex-acp")
+    {
+        adapter_path
+            .as_deref()
+            .map(|path_str| codex_adapter_availability(Path::new(path_str)))
+            .unwrap_or(availability)
+    } else {
+        availability
+    };
 
     match availability {
         AcpAvailabilityStatus::Available => {
@@ -489,20 +537,25 @@ fn cli_login_requirements(
             };
 
             let augmented_path = cli_probe::augmented_path();
-            let logged_in = cli_probe::login_probe_succeeds(
-                &binary_path,
-                probe_args,
-                augmented_path.as_deref(),
-            );
+            let outcome =
+                cli_probe::login_probe(&binary_path, probe_args, augmented_path.as_deref());
 
-            if logged_in {
-                vec![]
-            } else {
-                vec![Requirement::CliLogin {
-                    probe_args: probe_args.iter().map(|s| s.to_string()).collect(),
-                    setup_copy: setup_copy.to_string(),
-                    availability: AcpAvailabilityStatus::Available,
-                }]
+            match outcome {
+                cli_probe::ProbeOutcome::LoggedIn => vec![],
+                cli_probe::ProbeOutcome::LoggedOut => {
+                    vec![Requirement::CliLogin {
+                        probe_args: probe_args.iter().map(|s| s.to_string()).collect(),
+                        setup_copy: setup_copy.to_string(),
+                        availability: AcpAvailabilityStatus::Available,
+                    }]
+                }
+                cli_probe::ProbeOutcome::ConfigInvalid { stderr_excerpt } => {
+                    vec![Requirement::CliConfigInvalid {
+                        probe_args: probe_args.iter().map(|s| s.to_string()).collect(),
+                        setup_copy: setup_copy.to_string(),
+                        diagnostic: stderr_excerpt,
+                    }]
+                }
             }
         }
         // Tooling is not fully installed — emit CliLogin with the precise
@@ -916,6 +969,8 @@ mod tests {
             max_tokens_env_var: None,
             context_limit_env_var: None,
             required_normalized_fields: &[],
+            login_hint: None,
+            auth_probe_args: None,
         }
     }
 
@@ -1068,6 +1123,152 @@ mod tests {
         }
     }
 
+    // ── codex readiness version gate ───────────────────────────────────────
+
+    /// Build a minimal `KnownAcpRuntime` for testing the codex version gate.
+    /// `adapter_commands` are the exact strings passed to `find_command` — use
+    /// `&["codex-acp"]` when the binary is on PATH, or `&[<absolute_path>]`
+    /// when resolving via absolute path.  `underlying_cli` is a portable
+    /// stand-in so the adapter is not misclassified as `CliMissing`.
+    fn make_codex_runtime(
+        adapter_commands: &'static [&'static str],
+        underlying_cli: Option<&'static str>,
+    ) -> KnownAcpRuntime {
+        KnownAcpRuntime {
+            id: "codex",
+            label: "Codex",
+            commands: adapter_commands,
+            aliases: &[],
+            avatar_url: "",
+            mcp_command: None,
+            mcp_hooks: false,
+            underlying_cli,
+            cli_install_commands: &[],
+            adapter_install_commands: &[],
+            install_instructions_url: "",
+            cli_install_hint: "",
+            adapter_install_hint: "",
+            skill_dir: None,
+            supports_acp_model_switching: false,
+            config_file_path: None,
+            config_file_format: None,
+            model_env_var: None,
+            provider_env_var: None,
+            provider_locked: false,
+            default_env: &[],
+            supports_acp_native_config: false,
+            thinking_env_var: None,
+            max_tokens_env_var: None,
+            context_limit_env_var: None,
+            required_normalized_fields: &[],
+            login_hint: None,
+            auth_probe_args: None,
+        }
+    }
+
+    /// Build a temp dir containing a `codex-acp` script with the given body,
+    /// prepend it to PATH, and clear the resolve cache.  Returns the temp dir
+    /// and the original PATH string for restoration.
+    #[cfg(unix)]
+    fn setup_temp_codex_acp(script_body: &str) -> (tempfile::TempDir, String) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let bin = dir.path().join("codex-acp");
+        std::fs::write(&bin, script_body).expect("write script");
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod script");
+
+        let original_path = std::env::var("PATH").unwrap_or_default();
+        let new_path = format!("{}:{}", dir.path().display(), original_path);
+        std::env::set_var("PATH", &new_path);
+        crate::managed_agents::clear_resolve_cache();
+
+        (dir, original_path)
+    }
+
+    /// Restore PATH and clear the resolve cache after a PATH-mutating test.
+    #[cfg(unix)]
+    fn restore_path(original: &str) {
+        std::env::set_var("PATH", original);
+        crate::managed_agents::clear_resolve_cache();
+    }
+
+    /// Codex readiness: outdated adapter (exits non-zero) → AdapterOutdated,
+    /// login probe skipped.
+    #[cfg(unix)]
+    #[test]
+    fn cli_login_requirements_codex_outdated_adapter_emits_adapter_outdated() {
+        let _guard = crate::managed_agents::lock_path_mutex();
+
+        let (dir, orig) = setup_temp_codex_acp("#!/bin/sh\nexit 1\n");
+        let exe = present_binary_str();
+        // underlying_cli = running test binary (always present, never probed)
+        let rt = make_codex_runtime(&["codex-acp"], Some(exe));
+        let reqs = cli_login_requirements(
+            &[exe, "--buzz-probe-must-not-run-xyz"],
+            "run `codex login`",
+            &rt,
+        );
+
+        restore_path(&orig);
+        drop(dir);
+
+        assert!(
+            !reqs.is_empty(),
+            "outdated codex adapter must produce a requirement; got {reqs:?}"
+        );
+        if let Requirement::CliLogin {
+            ref availability, ..
+        } = reqs[0]
+        {
+            assert_eq!(
+                *availability,
+                crate::managed_agents::AcpAvailabilityStatus::AdapterOutdated,
+                "0.x codex adapter must yield AdapterOutdated; got {availability:?}"
+            );
+        } else {
+            panic!("expected CliLogin requirement; got {:?}", reqs[0]);
+        }
+    }
+
+    /// Codex readiness: adapter exits 0 but output is not a parseable version
+    /// → AdapterOutdated (garbage output treated as outdated, same as non-zero).
+    #[cfg(unix)]
+    #[test]
+    fn cli_login_requirements_codex_garbage_version_output_emits_adapter_outdated() {
+        let _guard = crate::managed_agents::lock_path_mutex();
+
+        let (dir, orig) = setup_temp_codex_acp("#!/bin/sh\necho 'not a version string'\nexit 0\n");
+        let exe = present_binary_str();
+        let rt = make_codex_runtime(&["codex-acp"], Some(exe));
+        let reqs = cli_login_requirements(
+            &[exe, "--buzz-probe-must-not-run-xyz"],
+            "run `codex login`",
+            &rt,
+        );
+
+        restore_path(&orig);
+        drop(dir);
+
+        assert!(
+            !reqs.is_empty(),
+            "garbage version output must produce a requirement; got {reqs:?}"
+        );
+        if let Requirement::CliLogin {
+            ref availability, ..
+        } = reqs[0]
+        {
+            assert_eq!(
+                *availability,
+                crate::managed_agents::AcpAvailabilityStatus::AdapterOutdated,
+                "unparseable version output must yield AdapterOutdated; got {availability:?}"
+            );
+        } else {
+            panic!("expected CliLogin requirement; got {:?}", reqs[0]);
+        }
+    }
+
     // ── custom/unknown command ─────────────────────────────────────────────
 
     #[test]
@@ -1172,7 +1373,6 @@ mod tests {
             model: None,
             provider: None,
             persona_source_version: None,
-            mcp_toolsets: None,
             env_vars,
             start_on_app_launch: false,
             auto_restart_on_config_change: true,
@@ -1201,13 +1401,12 @@ mod tests {
             source_team_persona_slug: None,
             definition_respond_to: None,
             definition_respond_to_allowlist: Vec::new(),
-            definition_mcp_toolsets: None,
             definition_parallelism: None,
             relay_mesh: None,
         };
 
         let runtime = known_acp_runtime_exact("buzz-agent");
-        let effective = resolve_effective_agent_env(&record, &[], runtime);
+        let effective = resolve_effective_agent_env(&record, &[], runtime, &Default::default());
 
         // User env_vars must be present in the output (last-write-wins).
         assert_eq!(

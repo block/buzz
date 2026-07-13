@@ -20,7 +20,7 @@ use crate::{
 /// Read the workspace owner's pubkey hex from app state without holding the
 /// lock for longer than necessary. Used to populate `BUZZ_ACP_AGENT_OWNER`
 /// as a fallback for legacy agent records that have no NIP-OA `auth_tag`.
-fn workspace_owner_hex(state: &AppState) -> Result<String, String> {
+pub(super) fn workspace_owner_hex(state: &AppState) -> Result<String, String> {
     let keys = state.keys.lock().map_err(|e| e.to_string())?;
     Ok(keys.public_key().to_hex())
 }
@@ -107,7 +107,11 @@ pub(super) fn retain_managed_agent_pending(
 /// `pending_sync = 1`. The `d_tag` is the agent's pubkey. Best-effort: a
 /// failure is logged and swallowed so a retention hiccup never blocks the
 /// disk-authoritative delete.
-fn tombstone_managed_agent_pending(app: &AppHandle, state: &AppState, agent_pubkey: &str) {
+pub(super) fn tombstone_managed_agent_pending(
+    app: &AppHandle,
+    state: &AppState,
+    agent_pubkey: &str,
+) {
     use crate::managed_agents::{
         agent_events::build_agent_delete,
         retention::{
@@ -214,7 +218,7 @@ async fn ensure_relay_mesh_for_record(
     Ok(())
 }
 
-async fn start_local_agent_with_preflight(
+pub(super) async fn start_local_agent_with_preflight(
     app: &AppHandle,
     state: &AppState,
     pubkey: &str,
@@ -254,37 +258,16 @@ async fn start_local_agent_with_preflight(
         return Err(format!("agent {pubkey} is no longer a local agent"));
     }
     // Re-snapshot the persona onto the record at every spawn so the agent always
-    // starts with the current persona config (system_prompt, model, provider).
-    // This clears the "out of date" drift badge without requiring a
-    // delete+recreate. `record.env_vars` is NOT rewritten: it holds agent-level
-    // overrides only, and spawn merges the live persona env underneath at read
-    // time — so persona env edits refresh here too. When the persona leaves
-    // model or provider blank, the agent record's own configured values are
-    // preserved so a user-set model/provider is never clobbered by an
-    // unconfigured persona.
+    // starts with the current persona config (system_prompt, model, provider,
+    // runtime). This clears the "out of date" drift badge without requiring a
+    // delete+recreate. See `apply_persona_snapshot` for the precedence and
+    // env-override self-heal rules.
+    // Load personas once: used for snapshot application below and summary build
+    // at the end — avoids a second disk read for the same file in the same call.
+    let personas = load_personas(app).unwrap_or_default();
     if let Some(persona_id) = record.persona_id.clone() {
-        let personas = load_personas(app).unwrap_or_default();
         if let Some(persona) = personas.iter().find(|p| p.id == persona_id) {
-            let snapshot =
-                crate::managed_agents::persona_events::persona_snapshot_with_agent_config_fallback(
-                    persona,
-                    record.model.as_deref(),    // fallback: record.model
-                    record.provider.as_deref(), // fallback: record.provider
-                );
-            if let Some(prompt) = snapshot.system_prompt {
-                record.system_prompt = Some(prompt);
-            }
-            record.model = snapshot.model;
-            record.provider = snapshot.provider;
-            // Self-heal records written before env refresh: persona env used to
-            // be baked into `record.env_vars` at create/spawn, turning inherited
-            // values into pseudo-overrides that shadow later persona edits. An
-            // override equal to the persona's current value is indistinguishable
-            // from inheritance, so drop it and let the live merge supply it.
-            record
-                .env_vars
-                .retain(|k, v| persona.env_vars.get(k) != Some(v));
-            record.persona_source_version = Some(snapshot.source_version);
+            crate::managed_agents::persona_events::apply_persona_snapshot(record, persona);
             record.updated_at = crate::util::now_iso();
         }
     }
@@ -297,7 +280,6 @@ async fn start_local_agent_with_preflight(
         .iter()
         .find(|record| record.pubkey == pubkey)
         .ok_or_else(|| format!("agent {pubkey} not found"))?;
-    let personas = load_personas(app).unwrap_or_default();
     build_managed_agent_summary(app, record, &runtimes, &personas)
 }
 
@@ -594,18 +576,14 @@ pub async fn create_managed_agent(
                 .collect::<Vec<_>>(),
         );
 
-        let mcp_command = input
-            .mcp_command
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_string)
-            .unwrap_or_else(
-                || match crate::managed_agents::known_acp_runtime(&agent_command) {
-                    Some(p) => p.mcp_command.unwrap_or("").to_string(),
-                    None => String::new(),
-                },
-            );
+        // Derive MCP command exclusively from the runtime catalog — the
+        // per-record field is never read at spawn time so user-supplied input
+        // is silently discarded. Always sourcing from the catalog ensures
+        // new agents pick up the correct value without any stored override.
+        let mcp_command = match crate::managed_agents::known_acp_runtime(&agent_command) {
+            Some(p) => p.mcp_command.unwrap_or("").to_string(),
+            None => String::new(),
+        };
 
         // For pack-backed personas, resolve the installed pack path and the
         // persona's internal name (slug). ACP's resolve_persona_by_name()
@@ -670,12 +648,6 @@ pub async fn create_managed_agent(
         let minted = crate::managed_agents::resolve_mint_behavioral_defaults(
             input.respond_to,
             respond_to_allowlist.clone(),
-            input
-                .mcp_toolsets
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(str::to_string),
             input.parallelism,
             linked_persona.as_ref(),
         )?;
@@ -699,10 +671,10 @@ pub async fn create_managed_agent(
             agent_command_override,
             agent_args,
             mcp_command,
-            turn_timeout_seconds: input
-                .turn_timeout_seconds
-                .filter(|seconds| *seconds > 0)
-                .unwrap_or(DEFAULT_AGENT_TURN_TIMEOUT_SECONDS),
+            // BUZZ_ACP_TURN_TIMEOUT is deprecated and ignored by the harness;
+            // store the schema default only. Use idle_timeout_seconds or
+            // max_turn_duration_seconds for actual turn-length control.
+            turn_timeout_seconds: DEFAULT_AGENT_TURN_TIMEOUT_SECONDS,
             // 0 or None → harness uses its own default (320s idle, 3600s max), and the CLI also clamps 0 → minimum.
             idle_timeout_seconds: input.idle_timeout_seconds.filter(|s| *s > 0),
             max_turn_duration_seconds: input.max_turn_duration_seconds.filter(|s| *s > 0),
@@ -732,7 +704,6 @@ pub async fn create_managed_agent(
                     .map(str::to_string)
             }),
             persona_source_version: snapshot_source_version,
-            mcp_toolsets: minted.mcp_toolsets.clone(),
             // Provider agents are managed externally — force false.
             start_on_app_launch: if input.backend != BackendKind::Local {
                 false
@@ -769,7 +740,6 @@ pub async fn create_managed_agent(
             source_team_persona_slug: None,
             definition_respond_to: None,
             definition_respond_to_allowlist: Vec::new(),
-            definition_mcp_toolsets: None,
             definition_parallelism: None,
             relay_mesh: relay_mesh.clone(),
         };
@@ -1181,6 +1151,8 @@ mod deploy;
 use deploy::build_deploy_payload;
 #[cfg(test)]
 use deploy::deploy_payload_json;
+#[cfg(test)]
+pub(crate) use deploy::resolve_deploy_model_provider;
 
 #[path = "agents_profile.rs"]
 mod profile;

@@ -5,6 +5,7 @@ import {
   Check,
   ExternalLink,
   Plus,
+  RefreshCw,
   TerminalSquare,
 } from "lucide-react";
 
@@ -13,7 +14,21 @@ import {
   useInstallAcpRuntimeMutation,
 } from "@/features/agents/hooks";
 import { describeResolvedCommand } from "@/features/agents/ui/agentUi";
-import type { AcpRuntimeCatalogEntry } from "@/shared/api/types";
+import {
+  GlobalAgentConfigFields,
+  EMPTY_GLOBAL_CONFIG,
+} from "@/features/agents/ui/GlobalAgentConfigFields";
+import { createSaveCoalescer } from "./saveCoalescer";
+import { getBakedBuildEnv, type BakedEnvEntry } from "@/shared/api/tauri";
+import {
+  getGlobalAgentConfig,
+  setGlobalAgentConfig,
+} from "@/shared/api/tauriGlobalAgentConfig";
+import type {
+  AcpRuntimeCatalogEntry,
+  GlobalAgentConfig,
+} from "@/shared/api/types";
+import { getInstallErrorMessage } from "@/shared/lib/installError";
 import { cn } from "@/shared/lib/cn";
 import { useTheme } from "@/shared/theme/ThemeProvider";
 import { Badge } from "@/shared/ui/badge";
@@ -24,6 +39,7 @@ import {
   OnboardingSlideTransition,
 } from "./OnboardingSlideTransition";
 import type { SetupStepActions, SetupStepState } from "./types";
+import { resolveAgentReadiness } from "./agentReadiness";
 
 type SetupStepProps = {
   actions: SetupStepActions;
@@ -40,6 +56,150 @@ type InstallResultState = {
   error: string | null;
   success: boolean;
 };
+
+function AgentDefaultsSection() {
+  const runtimesQuery = useAcpRuntimesQuery();
+  const [config, setConfig] =
+    React.useState<GlobalAgentConfig>(EMPTY_GLOBAL_CONFIG);
+  const [isLoading, setIsLoading] = React.useState(true);
+  const [isCustomProvider, setIsCustomProvider] = React.useState(false);
+  const [isCustomModelEditing, setIsCustomModelEditing] = React.useState(false);
+  const [bakedEnv, setBakedEnv] = React.useState<BakedEnvEntry[]>([]);
+  const coalescerRef = React.useRef<{
+    enqueue: (value: GlobalAgentConfig) => void;
+    cancel: () => void;
+  } | null>(null);
+
+  React.useEffect(() => {
+    let unmounted = false;
+
+    getGlobalAgentConfig()
+      .then((loaded) => {
+        if (!unmounted) {
+          setConfig(loaded);
+          setIsLoading(false);
+        }
+      })
+      .catch(() => {
+        if (!unmounted) setIsLoading(false);
+      });
+    getBakedBuildEnv()
+      .then((env) => {
+        if (!unmounted) setBakedEnv(env);
+      })
+      .catch(() => undefined);
+
+    // The coalescer serializes autosaves and drains any edit that arrived
+    // while a previous save was in flight. Cancel on unmount so a slow
+    // in-flight request never calls setState on an unmounted component.
+    const coalescer = createSaveCoalescer<GlobalAgentConfig>(
+      // set_global_agent_config returns a save result (config + restart
+      // counts); the coalescer round-trips the persisted config only.
+      async (next) => (await setGlobalAgentConfig(next)).config,
+      () => undefined, // saving state not surfaced in this autosave UX
+      (saved) => {
+        if (!unmounted) setConfig(saved);
+      },
+    );
+    coalescerRef.current = coalescer;
+
+    return () => {
+      unmounted = true;
+      coalescer.cancel();
+    };
+  }, []);
+
+  const buzzAgentRuntime = React.useMemo(
+    () => (runtimesQuery.data ?? []).find((r) => r.id === "buzz-agent"),
+    [runtimesQuery.data],
+  );
+
+  const readiness = resolveAgentReadiness(runtimesQuery.data ?? [], config);
+
+  return (
+    <section className="space-y-4">
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+        <div className="space-y-1">
+          <h2 className="text-xl font-semibold tracking-tight text-foreground">
+            Agent defaults
+          </h2>
+          <p className="max-w-2xl text-sm leading-6 text-muted-foreground">
+            Configure the LLM provider and credentials that buzz-agent uses, or
+            connect a CLI harness like Claude or Goose above.
+          </p>
+        </div>
+
+        <div className="flex shrink-0 items-center gap-2">
+          {readiness.ready ? (
+            <Badge
+              className="border border-primary/20 bg-primary/10 text-primary"
+              data-testid="agent-readiness-badge"
+              variant="outline"
+            >
+              {readiness.reason === "cli"
+                ? `${readiness.runtimeLabel} ready`
+                : "buzz-agent configured"}
+            </Badge>
+          ) : (
+            <Badge
+              className="border border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-400"
+              data-testid="agent-readiness-badge"
+              variant="outline"
+            >
+              Not configured
+            </Badge>
+          )}
+          <Button
+            className="h-7 gap-1.5 text-xs text-muted-foreground hover:text-foreground"
+            data-testid="agent-readiness-recheck"
+            disabled={runtimesQuery.isFetching}
+            onClick={() => void runtimesQuery.refetch()}
+            size="sm"
+            type="button"
+            variant="ghost"
+          >
+            {runtimesQuery.isFetching ? (
+              <Spinner className="h-3 w-3 border-[1.5px]" />
+            ) : (
+              <RefreshCw className="h-3 w-3" />
+            )}
+            Re-check
+          </Button>
+        </div>
+      </div>
+
+      {isLoading ? (
+        <div className="flex items-center gap-2 py-4 text-sm text-muted-foreground">
+          <Spinner className="h-4 w-4 border-2" />
+          Loading…
+        </div>
+      ) : (
+        <GlobalAgentConfigFields
+          bakedEnv={bakedEnv}
+          buzzAgentRuntime={buzzAgentRuntime}
+          config={config}
+          isCustomModelEditing={isCustomModelEditing}
+          isCustomProvider={isCustomProvider}
+          onConfigChange={(next) => {
+            // Always apply optimistically so the UI never reverts mid-save,
+            // then enqueue the persist — the coalescer serialises multiple
+            // rapid edits into a single trailing request.
+            setConfig(next);
+            coalescerRef.current?.enqueue(next);
+          }}
+          onCustomModelEditingChange={setIsCustomModelEditing}
+          onIsCustomProviderChange={setIsCustomProvider}
+        />
+      )}
+
+      {!readiness.ready ? (
+        <p className="text-sm text-muted-foreground">
+          You can finish now and configure agents later in Settings.
+        </p>
+      ) : null}
+    </section>
+  );
+}
 
 function useSetupStepState(): SetupStepState {
   const runtimesQuery = useAcpRuntimesQuery();
@@ -192,6 +352,29 @@ function RuntimeDetails({ runtime }: { runtime: AcpRuntimeCatalogEntry }) {
     );
   }
 
+  if (runtime.availability === "adapter_outdated") {
+    return (
+      <>
+        <p className="mt-2 text-sm leading-5 text-muted-foreground">
+          ACP adapter detected but outdated — reinstall required.
+        </p>
+        <p className="mt-1 text-xs leading-5 text-muted-foreground/80">
+          This updates the machine-global{" "}
+          <code className="rounded bg-muted px-0.5 text-2xs">codex-acp</code>{" "}
+          adapter. Older Buzz releases using the legacy adapter contract may
+          lose relay access until{" "}
+          <code className="rounded bg-muted px-0.5 text-2xs">
+            @zed-industries/codex-acp@0.16.0
+          </code>{" "}
+          is restored.
+        </p>
+        <p className="mt-1 text-xs leading-5 text-muted-foreground/80">
+          {runtime.installHint}
+        </p>
+      </>
+    );
+  }
+
   if (runtime.availability === "cli_missing") {
     return (
       <>
@@ -264,7 +447,7 @@ function RuntimeCard({
         <RuntimeDetails runtime={runtime} />
 
         {installError ? (
-          <p className="mt-3 rounded-md border border-destructive/25 bg-destructive/10 px-3 py-2 text-xs leading-5 text-destructive">
+          <p className="mt-3 whitespace-pre-line rounded-md border border-destructive/25 bg-destructive/10 px-3 py-2 text-xs leading-5 text-destructive">
             {installError}
           </p>
         ) : null}
@@ -285,19 +468,6 @@ function RuntimeCard({
       />
     </div>
   );
-}
-
-function getInstallErrorMessage(result: {
-  steps: { stderr: string; stdout: string; step: string }[];
-}) {
-  const lastStep = result.steps[result.steps.length - 1];
-  if (!lastStep) {
-    return "Install failed with no output.";
-  }
-
-  return `Step "${lastStep.step}" failed: ${
-    lastStep.stderr || lastStep.stdout || "unknown error"
-  }`;
 }
 
 function RuntimeProvidersSection({
@@ -323,7 +493,7 @@ function RuntimeProvidersSection({
           ...current,
           [runtimeId]: result.success
             ? { error: null, success: true }
-            : { error: getInstallErrorMessage(result), success: false },
+            : { error: getInstallErrorMessage(result.steps), success: false },
         }));
       },
       onError: (error) => {
@@ -406,6 +576,8 @@ function SetupStepContent({
       transitionKey={`setup-${direction}`}
     >
       <RuntimeProvidersSection runtimeProviders={runtimeProviders} />
+
+      <AgentDefaultsSection />
 
       <div className="mx-auto flex w-full max-w-md flex-col gap-3">
         <Button

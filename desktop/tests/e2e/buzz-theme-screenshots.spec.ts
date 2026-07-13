@@ -81,3 +81,62 @@ test("appearance picker — dark tab (Buzz Dark)", async ({ page }) => {
   const panel = await openAppearance(page, "dark");
   await panel.screenshot({ path: `${SHOTS}/05-picker-dark.png` });
 });
+
+test("settings nav uses Buzz active pill + hover (light)", async ({ page }) => {
+  await seedTheme(page, "buzz");
+  await installMockBridge(page);
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await page.getByTestId("open-settings").click();
+  await page.getByTestId("profile-popover-settings").click();
+  const sidebar = page.getByTestId("settings-sidebar");
+  await expect(sidebar).toBeVisible({ timeout: 10_000 });
+  // Appearance is the active section here; its nav row should carry the Buzz
+  // white active pill (data-active=true), matching the Left Nav treatment.
+  await page.getByTestId("settings-nav-appearance").click();
+  const activeRow = page.getByTestId("settings-nav-appearance");
+  await expect(activeRow).toHaveAttribute("data-active", "true");
+  await waitForAnimations(page);
+  await sidebar.screenshot({ path: `${SHOTS}/06-settings-nav-light.png` });
+});
+
+test("settings nav uses Buzz active pill + hover (dark)", async ({ page }) => {
+  await seedTheme(page, "buzz-dark");
+  await installMockBridge(page);
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await page.getByTestId("open-settings").click();
+  await page.getByTestId("profile-popover-settings").click();
+  const sidebar = page.getByTestId("settings-sidebar");
+  await expect(sidebar).toBeVisible({ timeout: 10_000 });
+  await page.getByTestId("settings-nav-appearance").click();
+  await waitForAnimations(page);
+  await sidebar.screenshot({ path: `${SHOTS}/07-settings-nav-dark.png` });
+});
+
+test("appearance hides accent picker under Buzz", async ({ page }) => {
+  await seedTheme(page, "buzz");
+  await installMockBridge(page);
+  const panel = await openAppearance(page, "light");
+  // The accent picker is hidden while a Buzz theme is active. Its neutral
+  // swatch testid must not be present.
+  await expect(page.getByTestId("accent-color-neutral")).toHaveCount(0);
+  await panel.screenshot({ path: `${SHOTS}/08-appearance-no-accent.png` });
+});
+
+test("accent picker reveals/hides when toggling Buzz", async ({ page }) => {
+  // Start on a non-Buzz theme so the accent picker is present, then select the
+  // Buzz tile — the picker should animate out and unmount. Reselecting a
+  // non-Buzz tile brings it back. Asserts the presence toggle (the motion
+  // wrapper) works end to end.
+  await seedTheme(page, "github-light");
+  await installMockBridge(page);
+  await openAppearance(page, "light");
+  await expect(page.getByTestId("accent-color-neutral")).toBeVisible();
+
+  // Switch to Buzz — picker should leave (allow the exit animation to settle).
+  await page.getByTestId("theme-option-buzz").click();
+  await expect(page.getByTestId("accent-color-neutral")).toHaveCount(0);
+
+  // Back to a non-Buzz theme — picker returns.
+  await page.getByTestId("theme-option-github-light").click();
+  await expect(page.getByTestId("accent-color-neutral")).toBeVisible();
+});

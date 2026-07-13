@@ -3,6 +3,7 @@
 pub mod bridge;
 pub mod events;
 pub mod git;
+pub mod invites;
 pub mod media;
 pub mod nip05;
 pub mod operator;

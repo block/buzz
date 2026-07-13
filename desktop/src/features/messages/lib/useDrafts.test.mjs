@@ -59,7 +59,9 @@ import {
   loadDraftEntry,
   markDraftSentEntry,
   persistDraftEntry,
+  renameDraftEntry,
   saveDraftEntry,
+  subscribeToStore,
 } from "./useDrafts.ts";
 
 // Minimal ImetaMedia fixtures.
@@ -433,12 +435,12 @@ test("initDraftStore_resets_cache_on_pubkey_change_without_clearAllDrafts", () =
   );
 });
 
-// ── status field: markDraftSent, getActiveDraftEntries, getSentDraftEntries ───
-// markDraftSentEntry snapshots the draft into a distinct `sent:<key>:<ts>` key
-// and removes the original active key so composer cleanup and new drafts are
-// never affected by the sent record's lifecycle.
+// ── markDraftSentEntry: clears active draft (no longer writes sent records) ──
+// markDraftSentEntry now delegates to clearDraftEntry — it clears the active
+// draft and writes nothing to the store. The sent-section UI was removed;
+// these tests verify the new contract.
 
-test("markDraftSent_writes_sent_record_under_distinct_key_and_removes_active_key", () => {
+test("markDraftSent_clears_active_draft_and_writes_no_sent_record", () => {
   setup();
   persistDraftEntry("chan-1", "sent message content", "chan-1", [IMG_A], []);
   markDraftSentEntry("chan-1", "sent message content", "chan-1", [IMG_A], []);
@@ -448,185 +450,67 @@ test("markDraftSent_writes_sent_record_under_distinct_key_and_removes_active_key
     undefined,
     "active key must be cleared after markDraftSent",
   );
-  // Sent record must exist under a sent: key.
+  // No sent records written.
   const sent = getSentDraftEntries();
-  assert.equal(sent.length, 1, "one sent entry must exist");
-  assert.equal(sent[0].draft.status, "sent", "status must be 'sent'");
-  assert.equal(
-    sent[0].draft.content,
-    "sent message content",
-    "content preserved",
-  );
-  assert.equal(sent[0].draft.pendingImeta.length, 1, "image preserved");
-  assert.equal(sent[0].draft.pendingImeta[0].url, IMG_A.url);
-  assert.ok(
-    sent[0].key.startsWith("sent:chan-1:"),
-    "sent key must have sent: prefix",
-  );
+  assert.equal(sent.length, 0, "no sent entries written");
+  // All-entries also empty.
+  assert.equal(getAllDraftEntries().length, 0, "store is empty after send");
 });
 
-test("markDraftSent_writes_sent_record_even_when_active_key_already_cleared", () => {
-  // The never-persisted boundary is enforced at the call site (sentDraftKey
-  // is only set when a draft was actually persisted). This function writes
-  // unconditionally so a navigation-during-send race cannot cause data loss:
-  // if the active key was already cleared before send success, the snapshot
-  // content still produces a sent record (createdAt falls back to now).
+test("markDraftSent_is_a_no_op_when_active_key_absent", () => {
   setup();
   // Call without any prior persistDraftEntry — simulates the race where the
-  // active key was deleted by a composer cleanup before markDraftSent ran.
+  // active key was already cleared before markDraftSent ran.
   markDraftSentEntry("no-such-key", "content", "chan-x", [], []);
   assert.equal(
     loadDraftEntry("no-such-key"),
     undefined,
     "active key still absent",
   );
-  const sent = getSentDraftEntries();
-  assert.equal(
-    sent.length,
-    1,
-    "sent record is written even without a live active key",
-  );
-  assert.equal(sent[0].draft.content, "content");
-  assert.equal(sent[0].draft.status, "sent");
-  assert.ok(
-    sent[0].key.startsWith("sent:no-such-key:"),
-    "sent key has correct prefix",
-  );
-});
-
-test("markDraftSent_send_then_cleanup_preserves_sent_record", () => {
-  // Simulate the full composer lifecycle:
-  // 1. Draft exists on key A.
-  // 2. User sends -> markDraftSent(A) snapshots under sent:A:ts and clears A.
-  // 3. Composer cleanup calls persistDraft(A, "", ...) -> clearDraftEntry(A).
-  // The sent record under sent:A:ts must still exist after step 3.
-  setup();
-  persistDraftEntry("chan-A", "my draft", "chan-A", [IMG_A], []);
-  markDraftSentEntry("chan-A", "my draft", "chan-A", [IMG_A], []);
-  // Simulate composer cleanup: empty persist on the now-absent active key.
-  persistDraftEntry("chan-A", "", "chan-A", [], []);
-  const sent = getSentDraftEntries();
-  assert.equal(sent.length, 1, "sent record must survive composer cleanup");
-  assert.equal(sent[0].draft.content, "my draft");
-});
-
-test("markDraftSent_navigation_during_async_send_still_creates_sent_record", () => {
-  // Regression test for the async-send/navigation race (Thufir Pass-2 finding):
-  // 1. Persisted draft A exists at submit time.
-  // 2. Composer clears the editor (clearContent) then awaits onSend.
-  // 3. While onSend is in flight, user switches channel. MessageComposer
-  //    cleanup runs persistDraftEntry(A, empty) -> clearDraftEntry(A) — active
-  //    key is gone before send success.
-  // 4. Send succeeds; markDraftSentEntry(A, savedContent, ...) runs.
-  // The sent record MUST still be written from the passed-in snapshot.
-  setup();
-  persistDraftEntry("chan-race", "race draft", "chan-race", [IMG_A], []);
-  // Simulate step 3: active key cleared by navigation-during-send cleanup.
-  persistDraftEntry("chan-race", "", "chan-race", [], []);
-  assert.equal(
-    loadDraftEntry("chan-race"),
-    undefined,
-    "active key should be cleared (simulating race)",
-  );
-  // Simulate step 4: send succeeds, mark sent with full snapshot.
-  markDraftSentEntry("chan-race", "race draft", "chan-race", [IMG_A], []);
-  const sent = getSentDraftEntries();
-  assert.equal(
-    sent.length,
-    1,
-    "sent record must be written despite active key being gone",
-  );
-  assert.equal(
-    sent[0].draft.content,
-    "race draft",
-    "snapshot content preserved",
-  );
-  assert.equal(
-    sent[0].draft.pendingImeta.length,
-    1,
-    "snapshot image preserved",
-  );
-  assert.equal(sent[0].draft.status, "sent");
+  // Still no sent record written.
+  assert.equal(getSentDraftEntries().length, 0, "no sent entries");
+  assert.equal(getAllDraftEntries().length, 0, "store still empty");
 });
 
 test("markDraftSent_new_active_draft_after_send_is_independent", () => {
   // After sending, a new draft typed in the same channel must appear in
-  // getActiveDraftEntries() as active, and the sent record must remain in
-  // getSentDraftEntries() -- they coexist under distinct keys.
+  // getActiveDraftEntries() — markDraftSent must not affect it.
   setup("pubkey-coexist");
   persistDraftEntry("chan-X", "original draft", "chan-X", [], []);
   markDraftSentEntry("chan-X", "original draft", "chan-X", [], []);
   // New draft in the same channel.
   persistDraftEntry("chan-X", "new draft after send", "chan-X", [IMG_B], []);
   const active = getActiveDraftEntries();
-  const sent = getSentDraftEntries();
   assert.equal(active.length, 1, "one active draft");
   assert.equal(active[0].draft.content, "new draft after send");
   assert.equal(active[0].draft.status, "active");
-  assert.equal(sent.length, 1, "one sent record");
-  assert.equal(sent[0].draft.content, "original draft");
-  assert.equal(sent[0].draft.status, "sent");
+  // No sent records.
+  assert.equal(getSentDraftEntries().length, 0, "no sent records");
 });
 
-test("markDraftSent_double_send_in_same_channel_creates_two_distinct_sent_records", () => {
-  // Sending twice from the same channel must produce two independent sent
-  // records -- the timestamp suffix prevents key collision.
-  setup("pubkey-double-send");
-  persistDraftEntry("chan-Y", "first draft", "chan-Y", [], []);
-  markDraftSentEntry("chan-Y", "first draft", "chan-Y", [], []);
-  // Second draft in the same channel.
-  persistDraftEntry("chan-Y", "second draft", "chan-Y", [], []);
-  markDraftSentEntry("chan-Y", "second draft", "chan-Y", [], []);
-  const sent = getSentDraftEntries();
-  assert.equal(sent.length, 2, "two distinct sent records");
-  const contents = sent.map((e) => e.draft.content).sort();
-  assert.deepEqual(contents, ["first draft", "second draft"]);
-  const keys = sent.map((e) => e.key);
-  assert.notEqual(keys[0], keys[1], "sent keys must be distinct");
-});
-
-test("getActiveDraftEntries_returns_only_active_drafts", () => {
+test("getActiveDraftEntries_excludes_cleared_drafts", () => {
   setup("pubkey-active");
   persistDraftEntry("chan-active", "active draft", "chan-active", [], []);
   persistDraftEntry("chan-sent", "sent draft", "chan-sent", [], []);
   markDraftSentEntry("chan-sent", "sent draft", "chan-sent", [], []);
   const active = getActiveDraftEntries();
-  assert.equal(active.length, 1, "only one active draft");
+  assert.equal(active.length, 1, "only one active draft remains");
   assert.equal(active[0].key, "chan-active");
   assert.equal(active[0].draft.status, "active");
 });
 
-test("getSentDraftEntries_returns_only_sent_drafts", () => {
+test("getSentDraftEntries_returns_empty_after_markDraftSent", () => {
   setup("pubkey-sent");
   persistDraftEntry("chan-active2", "still drafting", "chan-active2", [], []);
   persistDraftEntry("chan-sent2", "already sent", "chan-sent2", [], []);
   markDraftSentEntry("chan-sent2", "already sent", "chan-sent2", [], []);
+  // markDraftSentEntry now just clears the active entry — no sent record.
   const sent = getSentDraftEntries();
-  assert.equal(sent.length, 1, "only one sent draft");
-  assert.ok(sent[0].key.startsWith("sent:chan-sent2:"), "sent key has prefix");
-  assert.equal(sent[0].draft.status, "sent");
-});
-
-test("getActiveDraftEntries_and_getSentDraftEntries_partition_all_entries", () => {
-  setup("pubkey-partition");
-  persistDraftEntry("ch-a", "draft a", "ch-a", [], []);
-  persistDraftEntry("ch-b", "draft b", "ch-b", [], []);
-  persistDraftEntry("ch-c", "draft c", "ch-c", [], []);
-  markDraftSentEntry("ch-b", "draft b", "ch-b", [], []);
-  const all = getAllDraftEntries();
+  assert.equal(sent.length, 0, "no sent entries");
+  // The remaining active draft is still there.
   const active = getActiveDraftEntries();
-  const sent = getSentDraftEntries();
-  // ch-a, ch-c still active; sent:ch-b:ts is the sent record.
-  assert.equal(all.length, 3);
-  assert.equal(active.length + sent.length, all.length, "active + sent = all");
-  assert.ok(
-    active.every((e) => e.draft.status === "active"),
-    "all active entries have status active",
-  );
-  assert.ok(
-    sent.every((e) => e.draft.status === "sent"),
-    "all sent entries have status sent",
-  );
+  assert.equal(active.length, 1, "one active draft");
+  assert.equal(active[0].key, "chan-active2");
 });
 
 // ── status migration: pre-status entries read as "active" ────────────────────
@@ -681,4 +565,343 @@ test("pre_status_entry_appears_in_getActiveDraftEntries_after_migration", () => 
   assert.equal(active.length, 1, "legacy entry appears in active list");
   assert.equal(active[0].key, "chan-old");
   assert.equal(active[0].draft.status, "active");
+});
+
+test("pre_status_sent_entry_is_dropped_on_read", () => {
+  // Entries previously written with status "sent" (by the old markDraftSentEntry)
+  // used a "sent:" key prefix. readStore now skips those keys entirely so legacy
+  // sent records cannot resurface as ghost drafts.
+  setup("pubkey-normalise");
+  const oldSentEntry = {
+    content: "a message I sent a while ago",
+    selectionStart: 27,
+    selectionEnd: 27,
+    channelId: "chan-z",
+    createdAt: "2025-09-01T00:00:00.000Z",
+    updatedAt: "2025-09-01T00:00:00.000Z",
+    pendingImeta: [],
+    spoileredAttachmentUrls: [],
+    status: "sent",
+  };
+  localStorage.setItem(
+    "buzz-drafts.v1:pubkey-normalise",
+    JSON.stringify({ "sent:chan-z:1725148800000-1": oldSentEntry }),
+  );
+  clearAllDrafts();
+  initDraftStore("pubkey-normalise");
+  // The sent: key is skipped — the entry must NOT appear as an active draft.
+  const active = getActiveDraftEntries();
+  assert.equal(active.length, 0, "old sent: entry is dropped, not promoted");
+  assert.equal(getSentDraftEntries().length, 0, "no entries read as sent");
+});
+
+// ── renameDraftEntry storage-layer tests ─────────────────────────────────────────────────────────────────────────────────────────
+
+function makeFullDraft(overrides = {}) {
+  const now = new Date().toISOString();
+  return {
+    content: "Legacy content",
+    selectionStart: 7,
+    selectionEnd: 7,
+    channelId: "chan-rename",
+    createdAt: now,
+    updatedAt: now,
+    pendingImeta: [],
+    spoileredAttachmentUrls: [],
+    status: "active",
+    ...overrides,
+  };
+}
+
+function makeFullImeta(overrides = {}) {
+  return {
+    url: "https://cdn.example.com/img.jpg",
+    sha256: "aabbccdd",
+    size: 1024,
+    type: "image/jpeg",
+    uploaded: 999,
+    dim: "800x600",
+    blurhash: "LEHV6nWB2yk8pyo0adR*",
+    thumb: undefined,
+    duration: undefined,
+    image: undefined,
+    filename: "img.jpg",
+    ...overrides,
+  };
+}
+
+/** Read the raw persisted store blob for the current pubkey. */
+function readRawStore(pubkey) {
+  const raw = localStorage.getItem(`buzz-drafts.v1:${pubkey}`);
+  return raw ? JSON.parse(raw) : {};
+}
+
+test("renameDraftEntry migrates: new key holds exact state, old key gone, one notify", () => {
+  setup("pubkey-rename-basic");
+  const draft = makeFullDraft();
+  saveDraftEntry("inbox-reply:old111", draft);
+
+  let notifyCount = 0;
+  const unsub = subscribeToStore(() => {
+    notifyCount++;
+  });
+  // Reset count after setup saves — only measure the rename call.
+  notifyCount = 0;
+
+  const result = renameDraftEntry("inbox-reply:old111", "thread:new222");
+
+  unsub();
+
+  assert.equal(result, "migrated");
+  assert.equal(
+    notifyCount,
+    1,
+    "exactly one subscriber notification on successful rename",
+  );
+
+  const moved = loadDraftEntry("thread:new222");
+  assert.ok(moved, "canonical key must have the draft");
+  // Single deepStrictEqual proves every field migrated without loss or mutation.
+  assert.deepStrictEqual(
+    moved,
+    draft,
+    "moved record must equal the seeded draft exactly",
+  );
+
+  assert.equal(
+    loadDraftEntry("inbox-reply:old111"),
+    undefined,
+    "legacy key must be removed",
+  );
+
+  // Confirm persistence: localStorage must contain the canonical key, not the legacy key.
+  const persisted = readRawStore("pubkey-rename-basic");
+  assert.ok(
+    "thread:new222" in persisted,
+    "canonical key present in localStorage",
+  );
+  assert.ok(
+    !("inbox-reply:old111" in persisted),
+    "legacy key absent from localStorage",
+  );
+});
+
+test("renameDraftEntry migrates with attachments: all BlobDescriptor fields preserved", () => {
+  setup("pubkey-rename-attach");
+  const img = makeFullImeta();
+  const draft = makeFullDraft({
+    pendingImeta: [img],
+    spoileredAttachmentUrls: [img.url],
+  });
+  saveDraftEntry("inbox-reply:attach1", draft);
+
+  const result = renameDraftEntry(
+    "inbox-reply:attach1",
+    "thread:attach-canonical",
+  );
+  assert.equal(result, "migrated");
+
+  const moved = loadDraftEntry("thread:attach-canonical");
+  assert.ok(moved);
+  // deepStrictEqual confirms every BlobDescriptor optional field (dim, blurhash,
+  // thumb, duration, image, filename) survived the round-trip.
+  assert.deepStrictEqual(
+    moved,
+    draft,
+    "moved record including all attachment metadata must equal the seeded draft",
+  );
+  assert.equal(
+    loadDraftEntry("inbox-reply:attach1"),
+    undefined,
+    "legacy key removed",
+  );
+});
+
+test("renameDraftEntry noop: old key absent, returns noop, no notify, no writes", () => {
+  setup("pubkey-rename-noop");
+
+  const storeBefore = readRawStore("pubkey-rename-noop");
+
+  let notifyCount = 0;
+  const unsub = subscribeToStore(() => {
+    notifyCount++;
+  });
+  notifyCount = 0;
+
+  const result = renameDraftEntry("inbox-reply:missing", "thread:target");
+
+  unsub();
+  assert.equal(result, "noop");
+  assert.equal(notifyCount, 0, "no notification on noop");
+  assert.equal(loadDraftEntry("thread:target"), undefined);
+
+  // localStorage must be byte-identical before and after — no writes on noop.
+  assert.deepStrictEqual(
+    readRawStore("pubkey-rename-noop"),
+    storeBefore,
+    "localStorage must be unchanged on noop",
+  );
+});
+
+test("renameDraftEntry oldKey === newKey: returns noop, no writes, no notify", () => {
+  setup("pubkey-rename-same");
+  saveDraftEntry("thread:same", makeFullDraft());
+
+  const storeBefore = readRawStore("pubkey-rename-same");
+
+  let notifyCount = 0;
+  const unsub = subscribeToStore(() => {
+    notifyCount++;
+  });
+  notifyCount = 0;
+
+  const result = renameDraftEntry("thread:same", "thread:same");
+
+  unsub();
+  assert.equal(result, "noop");
+  assert.equal(notifyCount, 0);
+
+  // localStorage must be byte-identical before and after.
+  assert.deepStrictEqual(
+    readRawStore("pubkey-rename-same"),
+    storeBefore,
+    "localStorage must be unchanged on self-rename noop",
+  );
+});
+
+test("renameDraftEntry collision on distinct content: both records preserved, no notify", () => {
+  setup("pubkey-rename-collision");
+  const legacy = makeFullDraft({ content: "Legacy draft" });
+  const canonical = makeFullDraft({ content: "Canonical draft" });
+  saveDraftEntry("inbox-reply:col1", legacy);
+  saveDraftEntry("thread:col-target", canonical);
+
+  // Snapshot both records before the rename attempt.
+  const legacyBefore = loadDraftEntry("inbox-reply:col1");
+  const canonicalBefore = loadDraftEntry("thread:col-target");
+  const storeBefore = readRawStore("pubkey-rename-collision");
+
+  let notifyCount = 0;
+  const unsub = subscribeToStore(() => {
+    notifyCount++;
+  });
+  notifyCount = 0;
+
+  const result = renameDraftEntry("inbox-reply:col1", "thread:col-target");
+
+  unsub();
+  assert.equal(result, "collision");
+  assert.equal(notifyCount, 0, "no notification on collision");
+
+  // Deep-compare after to before: both records must be byte-identical to their pre-call snapshots.
+  assert.deepStrictEqual(
+    loadDraftEntry("inbox-reply:col1"),
+    legacyBefore,
+    "legacy record must be byte-identical after collision",
+  );
+  assert.deepStrictEqual(
+    loadDraftEntry("thread:col-target"),
+    canonicalBefore,
+    "canonical record must be byte-identical after collision",
+  );
+
+  // localStorage must be byte-identical before and after — no writes on collision.
+  assert.deepStrictEqual(
+    readRawStore("pubkey-rename-collision"),
+    storeBefore,
+    "localStorage must be unchanged on collision",
+  );
+});
+
+test("renameDraftEntry collision on optional attachment field only (blurhash differs): both preserved, no notify", () => {
+  setup("pubkey-rename-collision-optional");
+  const imgA = makeFullImeta({ blurhash: "HASH_A" });
+  const imgB = makeFullImeta({ blurhash: "HASH_B" }); // differs only in blurhash
+  const legacy = makeFullDraft({ pendingImeta: [imgA] });
+  const canonical = makeFullDraft({ pendingImeta: [imgB] });
+  saveDraftEntry("inbox-reply:opt1", legacy);
+  saveDraftEntry("thread:opt-canonical", canonical);
+
+  // Snapshot both records and the store before the rename attempt.
+  const legacyBefore = loadDraftEntry("inbox-reply:opt1");
+  const canonicalBefore = loadDraftEntry("thread:opt-canonical");
+  const storeBefore = readRawStore("pubkey-rename-collision-optional");
+
+  let notifyCount = 0;
+  const unsub = subscribeToStore(() => {
+    notifyCount++;
+  });
+  notifyCount = 0;
+
+  const result = renameDraftEntry("inbox-reply:opt1", "thread:opt-canonical");
+
+  unsub();
+  assert.equal(
+    result,
+    "collision",
+    "blurhash difference must trigger collision",
+  );
+  assert.equal(notifyCount, 0);
+
+  // Deep-compare: both records must survive unchanged.
+  assert.deepStrictEqual(
+    loadDraftEntry("inbox-reply:opt1"),
+    legacyBefore,
+    "legacy record byte-identical after optional-field collision",
+  );
+  assert.deepStrictEqual(
+    loadDraftEntry("thread:opt-canonical"),
+    canonicalBefore,
+    "canonical record byte-identical after optional-field collision",
+  );
+
+  // localStorage unchanged.
+  assert.deepStrictEqual(
+    readRawStore("pubkey-rename-collision-optional"),
+    storeBefore,
+    "localStorage must be unchanged on optional-field collision",
+  );
+});
+
+test("renameDraftEntry identical records: legacy removed, canonical kept, one notify", () => {
+  setup("pubkey-rename-identical");
+  const now = new Date().toISOString();
+  // Both records byte-identical across every field.
+  const shared = makeFullDraft({ createdAt: now, updatedAt: now });
+  saveDraftEntry("inbox-reply:ident", shared);
+  saveDraftEntry("thread:ident-target", shared);
+
+  let notifyCount = 0;
+  const unsub = subscribeToStore(() => {
+    notifyCount++;
+  });
+  notifyCount = 0;
+
+  const result = renameDraftEntry("inbox-reply:ident", "thread:ident-target");
+
+  unsub();
+  assert.equal(result, "migrated", "identical records collapse to migrated");
+  assert.equal(notifyCount, 1);
+  assert.equal(
+    loadDraftEntry("inbox-reply:ident"),
+    undefined,
+    "legacy key removed",
+  );
+  // deepStrictEqual on the surviving canonical record.
+  assert.deepStrictEqual(
+    loadDraftEntry("thread:ident-target"),
+    shared,
+    "canonical record must equal the seeded shared draft",
+  );
+
+  // Confirm localStorage reflects the final state.
+  const persisted = readRawStore("pubkey-rename-identical");
+  assert.ok(
+    "thread:ident-target" in persisted,
+    "canonical key in localStorage",
+  );
+  assert.ok(
+    !("inbox-reply:ident" in persisted),
+    "legacy key absent from localStorage",
+  );
 });

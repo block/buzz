@@ -35,8 +35,12 @@ pub struct UserSearchProfile {
 
 /// Ensure a user record exists for the given pubkey (upsert).
 /// Creates with minimal fields if not present; no-op if already exists.
-pub async fn ensure_user(pool: &PgPool, community_id: CommunityId, pubkey: &[u8]) -> Result<()> {
-    sqlx::query(
+///
+/// Returns `true` if a new row was inserted, `false` if the user already existed.
+/// The `true` case is the reliable signal for "user was just registered" — used
+/// by callers to increment `buzz_users_created_total`.
+pub async fn ensure_user(pool: &PgPool, community_id: CommunityId, pubkey: &[u8]) -> Result<bool> {
+    let result = sqlx::query(
         r#"
         INSERT INTO users (community_id, pubkey)
         VALUES ($1, $2)
@@ -47,7 +51,7 @@ pub async fn ensure_user(pool: &PgPool, community_id: CommunityId, pubkey: &[u8]
     .bind(pubkey)
     .execute(pool)
     .await?;
-    Ok(())
+    Ok(result.rows_affected() == 1)
 }
 
 /// Get a single user record by pubkey.

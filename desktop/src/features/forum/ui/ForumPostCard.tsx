@@ -10,7 +10,7 @@ import { UserAvatar } from "@/shared/ui/UserAvatar";
 import type { ForumPost } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import { parseImetaTags } from "@/features/messages/lib/parseImeta";
-import { resolveMentionNames } from "@/shared/lib/resolveMentionNames";
+import { resolveMentionProps } from "@/shared/lib/resolveMentionNames";
 import { Markdown } from "@/shared/ui/markdown";
 
 import { formatRelativeTime } from "../lib/time";
@@ -44,7 +44,10 @@ export function ForumPostCard({
     preferResolvedSelfLabel: true,
   });
   const avatarUrl = profiles?.[post.pubkey.toLowerCase()]?.avatarUrl ?? null;
-  const mentionNames = resolveMentionNames(post.tags, profiles);
+  const { mentionNames, mentionPubkeysByName } = resolveMentionProps(
+    post.tags,
+    profiles,
+  );
   // Memoize the imeta map: `parseImetaTags` builds a fresh object each render,
   // and the `Markdown` memo compares `imetaByUrl` by reference. Without this,
   // the post's Markdown (and the FileCard <button> it renders) is rebuilt on
@@ -120,6 +123,7 @@ export function ForumPostCard({
           content={previewContent}
           imetaByUrl={imetaByUrl}
           mentionNames={mentionNames}
+          mentionPubkeysByName={mentionPubkeysByName}
         />
       </div>
 

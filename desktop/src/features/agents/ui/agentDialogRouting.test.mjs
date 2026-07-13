@@ -20,9 +20,7 @@ test("definition-edit routes to AgentDefinitionDialog with exact pass-through", 
     description: "Edit the agent definition.",
     error: null,
     initialValues: { displayName: "Brain" },
-    isImportPending: true,
     isPending: false,
-    onImportUpdateFile: async () => {},
     onOpenChange: noop,
     onSubmit: async () => {},
     open: true,
@@ -59,9 +57,11 @@ test("instance-edit routes to AgentInstanceEditDialog with its contract props", 
   assert.equal(element.type, AgentInstanceEditDialog);
   assert.deepEqual(element.props, {
     agent,
+    onEditLinkedPersona: undefined,
     onOpenChange,
     onUpdated,
     open: true,
+    initialFocus: undefined,
   });
 });
 

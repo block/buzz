@@ -6,6 +6,11 @@ import {
   expandTilde,
   normalizeRelayUrl,
 } from "@/features/workspaces/workspaceStorage";
+import {
+  inviteErrorMessage,
+  isInviteExpiredError,
+} from "@/shared/api/inviteHelpers";
+import { claimInvite } from "@/shared/api/invites";
 import { validateReposDir } from "@/shared/api/tauri";
 import { Button } from "@/shared/ui/button";
 import {
@@ -31,6 +36,8 @@ export function AddWorkspaceDialog({
   const [name, setName] = React.useState("");
   const [relayUrl, setRelayUrl] = React.useState("");
   const [token, setToken] = React.useState("");
+  const [inviteCode, setInviteCode] = React.useState("");
+  const [inviteError, setInviteError] = React.useState<string | null>(null);
   const [reposDir, setReposDir] = React.useState("");
   const [reposDirError, setReposDirError] = React.useState<string | null>(null);
 
@@ -39,6 +46,8 @@ export function AddWorkspaceDialog({
     setName("");
     setRelayUrl("");
     setToken("");
+    setInviteCode("");
+    setInviteError(null);
     setReposDir("");
     setReposDirError(null);
   }, [onOpenChange]);
@@ -62,10 +71,27 @@ export function AddWorkspaceDialog({
         return;
       }
 
+      // If the relay handed out an invite code, claim it before saving the
+      // workspace — a closed relay would otherwise reject the connection.
+      const normalizedRelayUrl = normalizeRelayUrl(relayUrl.trim());
+      if (inviteCode.trim()) {
+        try {
+          await claimInvite(normalizedRelayUrl, inviteCode.trim());
+        } catch (error) {
+          const message = inviteErrorMessage(error);
+          setInviteError(
+            isInviteExpiredError(error)
+              ? "This invite code has expired — ask for a new one."
+              : `Invite rejected: ${message}`,
+          );
+          return;
+        }
+      }
+
       const workspace: Workspace = {
         id: crypto.randomUUID(),
         name: name.trim() || deriveWorkspaceName(relayUrl.trim()),
-        relayUrl: normalizeRelayUrl(relayUrl.trim()),
+        relayUrl: normalizedRelayUrl,
         token: token.trim() || undefined,
         reposDir: expandedReposDir,
         addedAt: new Date().toISOString(),
@@ -74,7 +100,7 @@ export function AddWorkspaceDialog({
       onSubmit(workspace);
       handleClose();
     },
-    [name, relayUrl, token, reposDir, onSubmit, handleClose],
+    [name, relayUrl, token, inviteCode, reposDir, onSubmit, handleClose],
   );
 
   return (
@@ -142,6 +168,30 @@ export function AddWorkspaceDialog({
               type="password"
               value={token}
             />
+          </div>
+          <div className="flex flex-col gap-1.5">
+            <label
+              className="text-sm font-medium text-foreground"
+              htmlFor="ws-invite-code"
+            >
+              Invite Code
+              <span className="ml-1 text-xs font-normal text-muted-foreground">
+                (optional)
+              </span>
+            </label>
+            <Input
+              id="ws-invite-code"
+              onChange={(e) => {
+                setInviteCode(e.target.value);
+                setInviteError(null);
+              }}
+              placeholder="Paste an invite code for a members-only relay"
+              type="text"
+              value={inviteCode}
+            />
+            {inviteError ? (
+              <p className="text-xs text-destructive">{inviteError}</p>
+            ) : null}
           </div>
           <div className="flex flex-col gap-1.5">
             <label

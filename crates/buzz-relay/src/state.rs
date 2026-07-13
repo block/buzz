@@ -1,5 +1,6 @@
 //! Shared application state — Arc-wrapped, shared across all connections.
 
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
@@ -208,6 +209,41 @@ impl ConnectionManager {
             .map(|entry| Arc::clone(&entry.subscriptions))
     }
 
+    /// Snapshot the number of live WebSocket connections per community.
+    ///
+    /// Returns a map from community UUID to connection count. Used by the
+    /// usage poller; snapshotting avoids per-community gauge drift from
+    /// mismatched inc/dec across async boundaries.
+    pub fn per_community_ws_connections(&self) -> HashMap<CommunityId, u64> {
+        let mut counts: HashMap<CommunityId, u64> = HashMap::new();
+        for entry in self.connections.iter() {
+            *counts.entry(entry.community_id).or_default() += 1;
+        }
+        counts
+    }
+
+    /// Snapshot the number of distinct authenticated pubkeys online per community.
+    ///
+    /// A pubkey connected to multiple pods will be counted once per pod — the
+    /// dashboard sums across pods, so per-pod partial counts are correct.
+    /// A pubkey connected twice on the same pod is counted once (distinct set).
+    pub fn per_community_users_online(&self) -> HashMap<CommunityId, u64> {
+        // community_id → set of pubkey bytes
+        let mut seen: HashMap<CommunityId, HashSet<Vec<u8>>> = HashMap::new();
+        for entry in self.connections.iter() {
+            if let Ok(lock) = entry.authenticated_pubkey.read() {
+                if let Some(pk) = lock.as_ref() {
+                    seen.entry(entry.community_id)
+                        .or_default()
+                        .insert(pk.clone());
+                }
+            }
+        }
+        seen.into_iter()
+            .map(|(cid, set)| (cid, set.len() as u64))
+            .collect()
+    }
+
     /// Return the authenticated pubkey for a connection, if any.
     pub fn pubkey_for(&self, conn_id: Uuid) -> Option<Vec<u8>> {
         self.connections
@@ -368,6 +404,12 @@ pub struct AppState {
     /// Per-uploader sliding-window rate limiter for media upload starts.
     /// Key: (community_id, uploader pubkey bytes). Value: (count, window_start).
     pub media_upload_rate_limiter: Arc<ScopedRateLimiter>,
+    /// Per-claimer fixed-window rate limiter for invite claim attempts
+    /// (`POST /api/invites/claim`). Entries expire after the claim window and
+    /// the cache has a hard capacity because pre-membership callers can cheaply
+    /// generate fresh Nostr keys.
+    pub invite_claim_rate_limiter:
+        Arc<moka::sync::Cache<ScopedPubkeyKey, Arc<std::sync::atomic::AtomicU32>>>,
     /// Current in-flight media uploads per (community, uploader pubkey).
     pub media_uploads_in_flight: Arc<DashMap<ScopedPubkeyKey, u32>>,
     /// Cache for observer agent-owner authorization (kind 24200).
@@ -509,6 +551,12 @@ impl AppState {
             observer_rate_limiter: Arc::new(DashMap::new()),
             mesh_connect_rate_limiter: Arc::new(DashMap::new()),
             media_upload_rate_limiter: Arc::new(DashMap::new()),
+            invite_claim_rate_limiter: Arc::new(
+                moka::sync::Cache::builder()
+                    .max_capacity(crate::api::invites::CLAIM_RATE_CACHE_CAPACITY)
+                    .time_to_live(crate::api::invites::CLAIM_RATE_WINDOW)
+                    .build(),
+            ),
             media_uploads_in_flight: Arc::new(DashMap::new()),
             observer_owner_cache: Arc::new(
                 moka::sync::Cache::builder()

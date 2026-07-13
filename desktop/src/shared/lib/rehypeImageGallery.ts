@@ -1,7 +1,7 @@
 /**
  * Rehype plugin that groups consecutive image-only paragraphs into a single
  * merged `<p>` containing all the images. The custom `p` component in
- * markdown.tsx detects 2+ images and renders them as a grid gallery.
+ * markdown.tsx detects 2+ images and renders them as an adaptive mosaic.
  *
  * This runs at the HAST (HTML AST) level, before React rendering, so
  * consecutive `![](a)\n![](b)` paragraphs get merged and the `p` component
@@ -39,15 +39,20 @@ function isText(node: HastNode): node is HastText {
   return node.type === "text";
 }
 
+function isIgnorableImageSeparator(node: HastNode): boolean {
+  return (
+    (isText(node) && node.value.trim() === "") ||
+    (isElement(node) && node.tagName === "br")
+  );
+}
+
 function isImageOnlyParagraph(node: HastNode): node is HastElement {
   if (!isElement(node) || node.tagName !== "p") {
     return false;
   }
 
   const meaningful = node.children.filter(
-    (child) =>
-      !(isText(child) && child.value.trim() === "") &&
-      !(isElement(child) && child.tagName === "br"),
+    (child) => !isIgnorableImageSeparator(child),
   );
 
   return (
@@ -56,8 +61,51 @@ function isImageOnlyParagraph(node: HastNode): node is HastElement {
   );
 }
 
+/**
+ * Composer attachments are appended with soft line breaks, so a post with text
+ * and multiple images initially arrives as one mixed paragraph:
+ * `text<br><img><br><img>`. Split that trailing image run into its own paragraph
+ * so it can use the same gallery path as image-only Markdown.
+ *
+ * Only a trailing run of 2+ images is split. A lone inline image and images
+ * separated by meaningful content retain their original Markdown flow.
+ */
+function splitTrailingImageRun(node: HastNode): HastNode[] {
+  if (!isElement(node) || node.tagName !== "p") return [node];
+
+  let cursor = node.children.length - 1;
+  const trailingImages: HastElement[] = [];
+
+  while (cursor >= 0) {
+    const child = node.children[cursor];
+    if (isElement(child) && child.tagName === "img") {
+      trailingImages.unshift(child);
+      cursor -= 1;
+      continue;
+    }
+    if (isIgnorableImageSeparator(child)) {
+      cursor -= 1;
+      continue;
+    }
+    break;
+  }
+
+  if (trailingImages.length < 2 || cursor < 0) return [node];
+
+  return [
+    { ...node, children: node.children.slice(0, cursor + 1) },
+    {
+      type: "element",
+      tagName: "p",
+      properties: {},
+      children: trailingImages,
+    },
+  ];
+}
+
 export default function rehypeImageGallery() {
   return (tree: HastRoot) => {
+    const normalizedChildren = tree.children.flatMap(splitTrailingImageRun);
     const newChildren: HastNode[] = [];
     let imageRun: HastElement[] = [];
 
@@ -67,7 +115,7 @@ export default function rehypeImageGallery() {
       } else {
         // Merge consecutive single-image paragraphs into one paragraph
         // containing all the images. The `p` component in markdown.tsx
-        // will detect 2+ images and render the grid gallery.
+        // will detect 2+ images and render the mosaic gallery.
         const allImages: HastNode[] = [];
         for (const p of imageRun) {
           for (const child of p.children) {
@@ -86,7 +134,7 @@ export default function rehypeImageGallery() {
       imageRun = [];
     }
 
-    for (const child of tree.children) {
+    for (const child of normalizedChildren) {
       if (isImageOnlyParagraph(child)) {
         imageRun.push(child);
         continue;

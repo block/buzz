@@ -5,10 +5,7 @@ import { applyWorkspace, getDefaultRelayUrl } from "@/shared/api/tauri";
 import { getIdentity } from "@/shared/api/tauriIdentity";
 import { resetMediaCaches } from "@/shared/lib/mediaUrl";
 import { clearSearchHitEventCache } from "@/app/navigation/searchHitEventCache";
-import {
-  clearAllDrafts,
-  initDraftStore,
-} from "@/features/messages/lib/useDrafts";
+import { initDraftStore } from "@/features/messages/lib/useDrafts";
 import { resetRenderScopedReactionHydration } from "@/features/messages/lib/renderScopedReactions";
 import {
   resetActiveAgentTurnsStore,
@@ -41,7 +38,6 @@ function resetWorkspaceState(): void {
   resetVideoPlayerState();
   resetRenderScopedReactionHydration();
   clearSearchHitEventCache();
-  clearAllDrafts();
   clearMarkdownNodeCache();
 }
 

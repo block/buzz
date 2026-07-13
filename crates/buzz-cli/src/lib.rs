@@ -345,10 +345,19 @@ pub enum MessagesCmd {
         depth_limit: Option<u32>,
     },
     /// Full-text search across messages
+    #[command(
+        after_help = "Examples:\n  buzz messages search --query checkout\n  buzz messages search --author npub1... --since 1783497600\n  buzz messages search --author Aaron --query checkout --limit 20"
+    )]
     Search {
-        /// Search query string
+        /// Search query string (optional when --author is given)
         #[arg(long)]
-        query: String,
+        query: Option<String>,
+        /// Filter by author: 64-char hex pubkey, npub, or display name
+        #[arg(long)]
+        author: Option<String>,
+        /// Unix timestamp — return messages after this time
+        #[arg(long)]
+        since: Option<i64>,
         /// Maximum number of results to return
         #[arg(long)]
         limit: Option<u32>,

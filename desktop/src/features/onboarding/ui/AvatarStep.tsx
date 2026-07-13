@@ -26,11 +26,17 @@ type AvatarStepProps = {
     submit: ProfileStepActions["submit"];
     updateAvatarUrl: ProfileStepActions["updateAvatarUrl"];
   };
+  /** Step number for the compact progress bar (mobile layout). */
+  currentStep: number;
   direction: OnboardingTransitionDirection;
+  /** When true, a ghost "Skip for now" button is always visible (not just on error). */
+  showAlwaysSkip?: boolean;
   state: Pick<
     ProfileStepState,
     "avatar" | "isSaving" | "isUploadingAvatar" | "name" | "saveRecovery"
   >;
+  /** Total steps for the compact progress bar (mobile layout). */
+  totalSteps?: number;
 };
 
 function ErrorBanner({ message }: { message: string | null }) {
@@ -119,6 +125,7 @@ function AvatarPreview({
 
 function AvatarStepActions({
   canSubmit,
+  currentStep,
   hidden,
   isSaving,
   isUploadingAvatar,
@@ -127,8 +134,11 @@ function AvatarStepActions({
   onSkipForNow,
   onSubmit,
   saveRecovery,
+  showAlwaysSkip,
+  totalSteps,
 }: {
   canSubmit: boolean;
+  currentStep: number;
   hidden: boolean;
   isSaving: boolean;
   isUploadingAvatar: boolean;
@@ -137,6 +147,8 @@ function AvatarStepActions({
   onSkipForNow: () => void;
   onSubmit: () => void;
   saveRecovery: ProfileStepState["saveRecovery"];
+  showAlwaysSkip: boolean;
+  totalSteps?: number;
 }) {
   const areNavigationActionsDisabled = isSaving || isUploadingAvatar;
 
@@ -177,11 +189,25 @@ function AvatarStepActions({
           </Button>
 
           {saveRecovery.canSkipForNow ? (
+            // Error-recovery path: exits onboarding entirely when there is no
+            // saved display name to fall back on.
             <Button
               className="h-10 w-full text-muted-foreground hover:text-accent-foreground max-lg:pointer-events-auto"
               data-testid="onboarding-skip"
               disabled={areNavigationActionsDisabled}
               onClick={onSkipForNow}
+              type="button"
+              variant="ghost"
+            >
+              Skip for now
+            </Button>
+          ) : showAlwaysSkip && !saveRecovery.errorMessage ? (
+            // Normal path: advances to the theme step without saving an avatar.
+            <Button
+              className="h-10 w-full text-muted-foreground hover:text-accent-foreground max-lg:pointer-events-auto"
+              data-testid="onboarding-skip"
+              disabled={areNavigationActionsDisabled}
+              onClick={onContinueWithoutSaving}
               type="button"
               variant="ghost"
             >
@@ -217,8 +243,9 @@ function AvatarStepActions({
             activeSegmentClassName="bg-primary"
             className="mt-1 max-lg:pointer-events-auto lg:hidden"
             completeSegmentClassName="bg-primary/35"
-            currentStep={3}
+            currentStep={currentStep}
             inactiveSegmentClassName="bg-muted-foreground/25"
+            totalSteps={totalSteps}
           />
         </motion.div>
       )}
@@ -226,7 +253,14 @@ function AvatarStepActions({
   );
 }
 
-export function AvatarStep({ actions, direction, state }: AvatarStepProps) {
+export function AvatarStep({
+  actions,
+  currentStep,
+  direction,
+  showAlwaysSkip = false,
+  state,
+  totalSteps,
+}: AvatarStepProps) {
   const {
     advanceWithoutSaving,
     back,
@@ -377,6 +411,7 @@ export function AvatarStep({ actions, direction, state }: AvatarStepProps) {
 
           <AvatarStepActions
             canSubmit={canSubmit}
+            currentStep={currentStep}
             hidden={areActionsHidden}
             isSaving={isSaving}
             isUploadingAvatar={isUploadingAvatar}
@@ -385,6 +420,8 @@ export function AvatarStep({ actions, direction, state }: AvatarStepProps) {
             onSkipForNow={skipForNow}
             onSubmit={submit}
             saveRecovery={saveRecovery}
+            showAlwaysSkip={showAlwaysSkip}
+            totalSteps={totalSteps}
           />
         </motion.div>
       </motion.div>

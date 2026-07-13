@@ -465,6 +465,11 @@ jobs:
       # AppImage tools (linuxdeploy, appimagetool) are themselves AppImages.
       # Containers lack FUSE, so we must use the extract-and-run fallback.
       APPIMAGE_EXTRACT_AND_RUN: "1"
+    # This job runs in a container where the default run shell is dash;
+    # the AppImage steps below use bash-only syntax ([[ ]], mapfile, arrays).
+    defaults:
+      run:
+        shell: bash
     outputs:
       archive_name: ${{ steps.linux-artifacts.outputs.archive_name }}
       sig: ${{ steps.read-sig.outputs.sig }}
@@ -489,6 +494,7 @@ jobs:
             build-essential \
             ca-certificates \
             curl \
+            desktop-file-utils \
             file \
             git \
             libasound2-dev \
@@ -500,7 +506,9 @@ jobs:
             libxdo-dev \
             patchelf \
             pkg-config \
-            wget
+            squashfs-tools \
+            wget \
+            xdg-utils
           # Install GitHub CLI — preinstalled on runners but absent in containers.
           # wget and ca-certificates are now available from the step above.
           mkdir -p -m 755 /etc/apt/keyrings

@@ -210,7 +210,6 @@ export function resolveInheritedRuntimeSubmission(input: {
 export interface EditAgentFormValidityInput {
   name: string;
   parallelism: string;
-  turnTimeoutSeconds: string;
   /** The command already persisted on the agent (empty when inheriting). */
   agentAcpCommand: string;
   acpCommand: string;
@@ -249,9 +248,6 @@ export function computeEditAgentFormValidity(
   const parallelismValid =
     input.parallelism.trim() === "" ||
     !Number.isNaN(Number.parseInt(input.parallelism, 10));
-  const timeoutValid =
-    input.turnTimeoutSeconds.trim() === "" ||
-    !Number.isNaN(Number.parseInt(input.turnTimeoutSeconds, 10));
   const acpCommandValid = !(
     input.agentAcpCommand && input.acpCommand.trim() === ""
   );
@@ -266,7 +262,6 @@ export function computeEditAgentFormValidity(
   return (
     input.name.trim().length > 0 &&
     parallelismValid &&
-    timeoutValid &&
     acpCommandValid &&
     respondToValid &&
     customCommandValid &&

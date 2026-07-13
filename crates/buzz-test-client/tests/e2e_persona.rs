@@ -146,7 +146,6 @@ async fn test_behavioral_fields_persona_ingests_and_round_trips() {
         "system_prompt": "p",
         "respond_to": "owner-only",
         "respond_to_allowlist": [],
-        "mcp_toolsets": "default",
         "parallelism": 2
     })
     .to_string();

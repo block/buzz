@@ -186,6 +186,7 @@ export function InboxMessageRow({
               content={message.content}
               customEmoji={customEmoji}
               mentionNames={message.mentionNames}
+              mentionPubkeysByName={message.mentionPubkeysByName}
             />
             <MessageReactions
               canToggle={canToggleReactions}

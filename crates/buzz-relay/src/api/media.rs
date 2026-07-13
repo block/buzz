@@ -18,7 +18,7 @@ use axum::{
 use base64::Engine;
 use buzz_audit::{AuditAction, NewAuditEntry};
 use buzz_core::tenant::TenantContext;
-use buzz_media::{BlobDescriptor, MediaError};
+use buzz_media::{BlobDescriptor, MediaError, UploadAttribution, UploadNetworkInfo};
 
 use crate::state::AppState;
 
@@ -209,6 +209,52 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedUpload {
     }
 }
 
+/// Build per-event upload attribution when upload records are enabled
+/// (`BUZZ_MEDIA_UPLOAD_RECORDS`). Returns `None` when the feature is off —
+/// the upload pipeline then writes no `_uploads/` record at all.
+///
+/// - `uploader_name` is the uploader's current display name in the bound
+///   community (best-effort label; lookup failure degrades to absent).
+/// - `net.ip` is read from the operator-configured trusted edge header
+///   (`BUZZ_MEDIA_UPLOAD_IP_HEADER`) and validated as a public IP —
+///   fail-empty: missing/malformed/non-public values record nothing. The
+///   socket address is never used; behind a sidecar it is meaningless, and a
+///   wrong address is worse than none.
+/// - `net.port` (optional companion header) is only kept alongside a valid IP.
+async fn upload_attribution(
+    state: &AppState,
+    auth: &AuthenticatedUpload,
+    headers: &HeaderMap,
+) -> Option<UploadAttribution> {
+    let cfg = &state.config.media;
+    if !cfg.upload_records_enabled {
+        return None;
+    }
+
+    let uploader_name = state
+        .db
+        .get_user(auth.tenant.community(), &auth.auth_event.pubkey.to_bytes())
+        .await
+        .ok()
+        .flatten()
+        .and_then(|profile| profile.display_name)
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty());
+
+    let header_value = |name: &Option<String>| {
+        name.as_deref()
+            .and_then(|h| headers.get(h))
+            .and_then(|v| v.to_str().ok())
+    };
+    let ip = header_value(&cfg.upload_ip_header).and_then(buzz_media::parse_public_ip);
+    let port = ip.and(header_value(&cfg.upload_port_header).and_then(buzz_media::parse_port));
+
+    Some(UploadAttribution {
+        uploader_name,
+        net: UploadNetworkInfo { ip, port },
+    })
+}
+
 /// PUT /media/upload — Blossom BUD-02 upload.
 ///
 /// Auth is validated via the [`AuthenticatedUpload`] extractor BEFORE the body
@@ -238,6 +284,8 @@ pub async fn upload_blob(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
 
+    let attribution = upload_attribution(&state, &auth, &headers).await;
+
     let mut descriptor = if content_type.starts_with("video/") {
         // Video path: stream body directly to disk — never fully buffered in RAM.
         let content_length = headers
@@ -251,6 +299,7 @@ pub async fn upload_blob(
             &auth.auth_event,
             body.into_data_stream(),
             content_length,
+            attribution,
         )
         .await?
     } else {
@@ -280,6 +329,7 @@ pub async fn upload_blob(
                 &auth.tenant,
                 &auth.auth_event,
                 bytes,
+                attribution,
             )
             .await?
         } else {
@@ -289,6 +339,7 @@ pub async fn upload_blob(
                 &auth.tenant,
                 &auth.auth_event,
                 bytes,
+                attribution,
             )
             .await?
         }
@@ -307,7 +358,12 @@ pub async fn upload_blob(
         }
         _ => "other",
     };
-    metrics::counter!("buzz_media_uploads_total", "mime" => mime_label.to_owned()).increment(1);
+    metrics::counter!(
+        "buzz_media_uploads_total",
+        "mime" => mime_label.to_owned(),
+        "community" => auth.tenant.host().to_owned()
+    )
+    .increment(1);
 
     // Audit via bounded channel — same pattern as event audit.
     let desc = descriptor.clone();
@@ -912,6 +968,20 @@ mod tests {
     #[test]
     fn test_validate_media_path_rejects_empty() {
         assert!(validate_media_path("").is_err());
+    }
+
+    #[test]
+    fn test_validate_media_path_rejects_upload_record_keys() {
+        // The `_uploads/` per-event records (and `_meta/` sidecars) must be
+        // unreachable through the serve path. Axum's single path segment
+        // can't even contain `/`, but assert the validator rejects these
+        // shapes outright so the property survives any routing change.
+        assert!(validate_media_path("_uploads").is_err());
+        assert!(validate_media_path(&format!("_uploads/c/{VALID_HASH}/01J.json")).is_err());
+        assert!(validate_media_path("_meta").is_err());
+        assert!(validate_media_path(&format!("_meta/c/{VALID_HASH}.json")).is_err());
+        // Suffix-style metadata keys are also non-servable (>3 segments / bad ext).
+        assert!(validate_media_path(&format!("{VALID_HASH}.png.metadata")).is_err());
     }
 
     #[test]

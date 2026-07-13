@@ -1,4 +1,5 @@
-import { getCurrentWindow } from "@tauri-apps/api/window";
+import { isTauri } from "@tauri-apps/api/core";
+import { emit } from "@tauri-apps/api/event";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { RouterProvider } from "@tanstack/react-router";
 import { Hexagon } from "lucide-react";
@@ -39,15 +40,25 @@ import { StepProgress } from "@/shared/ui/step-progress";
 const LOADING_TEXT = "Setting up your workspace...";
 
 // Minimum time the cold-boot splash stays on screen. A real boot resolves the
-// workspace in well under 100ms, and the hidden Tauri window (visible:false
-// until getCurrentWindow().show()) takes longer than that to put its first
-// frame on screen — without a hold, the bee is unmounted before it is ever
-// visible. The hold runs as an overlay above the already-mounted app, so
+// workspace in well under 100ms, and the native window setup plus first paint
+// can take longer than that — without a hold, the bee is unmounted before it is
+// ever visible. The hold runs as an overlay above the already-mounted app, so
 // time-to-interactive is unchanged; only the reveal waits.
 const BOOT_SPLASH_MIN_VISIBLE_MS = 1_200;
 const BOOT_SPLASH_FADE_MS = 200;
+const INITIAL_RENDER_READY_EVENT = "initial-render-ready";
 
 type BootSplashPhase = "holding" | "fading" | "done";
+
+function useInitialRenderReady() {
+  useLayoutEffect(() => {
+    if (!isTauri()) {
+      return;
+    }
+
+    void emit(INITIAL_RENDER_READY_EVENT);
+  }, []);
+}
 
 // E2E runs skip the hold (it would slow every spec's boot and block pointer
 // actionability); a spec can opt back in via __BUZZ_E2E__.bootSplashHoldMs.
@@ -323,10 +334,7 @@ export function App() {
   // Mounted at the root so Cmd/Ctrl+R reloads in every app state,
   // including the loading and first-run setup screens below.
   useReloadShortcut();
-
-  useLayoutEffect(() => {
-    void getCurrentWindow().show();
-  }, []);
+  useInitialRenderReady();
 
   const [sharedIdentity, setSharedIdentity] = useState<boolean | null>(null);
   useEffect(() => {
