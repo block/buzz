@@ -2775,17 +2775,33 @@ impl Db {
             .execute(&mut *tx)
             .await?;
 
+        let d_tag_count = event
+            .tags
+            .iter()
+            .filter(|tag| tag.as_slice().first().is_some_and(|part| part == "d"))
+            .count();
+        let has_exact_d_tag = event.tags.iter().any(|tag| {
+            let parts = tag.as_slice();
+            parts.len() >= 2 && parts[0] == "d" && parts[1] == d_tag
+        });
+        let read_state_t_tag_count = event
+            .tags
+            .iter()
+            .filter(|tag| {
+                let parts = tag.as_slice();
+                parts.len() == 2 && parts[0] == "t" && parts[1] == "read-state"
+            })
+            .count();
         let is_nip_rs = kind_i32 == buzz_core::kind::KIND_READ_STATE as i32
+            && d_tag_count == 1
+            && has_exact_d_tag
             && d_tag.strip_prefix("read-state:").is_some_and(|slot| {
                 slot.len() == 32
                     && slot
                         .bytes()
                         .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
             })
-            && event.tags.iter().any(|tag| {
-                let parts = tag.as_slice();
-                parts.len() == 2 && parts[0] == "t" && parts[1] == "read-state"
-            });
+            && read_state_t_tag_count == 1;
 
         // Check the live head and, for NIP-RS, the compact historical ordering
         // watermark. The watermark remains after a NIP-09 coordinate deletion,
@@ -2838,6 +2854,12 @@ impl Db {
 
         if existing.is_some() {
             let statement = if is_nip_rs {
+                // Migration 0011 rejects regex-coordinate hard deletes from
+                // pre-fix writers. Authorize only this corrected NIP-RS delete,
+                // transaction-locally so pooled connections cannot leak it.
+                sqlx::query("SELECT set_config('buzz.nip_rs_hard_delete', 'on', true)")
+                    .execute(&mut *tx)
+                    .await?;
                 "DELETE FROM events \
                  WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND d_tag = $4 AND deleted_at IS NULL"
             } else {
@@ -3118,6 +3140,100 @@ mod tests {
         .await
         .expect("count live NIP-RS rows");
         assert_eq!(live, 0, "watermark must block stale resurrection");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn duplicate_nip_rs_discriminator_tags_keep_legacy_retention() {
+        use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
+
+        let db = setup_db().await;
+        let community = CommunityId::from_uuid(make_community(&db.pool).await);
+        let keys = Keys::generate();
+        let base = Timestamp::now().as_secs();
+
+        for (case, tags) in [
+            (
+                "duplicate-d",
+                vec![
+                    Tag::parse(["d", &format!("read-state:{}", "c".repeat(32))])
+                        .expect("first d tag"),
+                    Tag::parse(["d", &format!("read-state:{}", "d".repeat(32))])
+                        .expect("second d tag"),
+                    Tag::parse(["t", "read-state"]).expect("t tag"),
+                ],
+            ),
+            (
+                "duplicate-t",
+                vec![
+                    Tag::parse(["d", &format!("read-state:{}", "e".repeat(32))]).expect("d tag"),
+                    Tag::parse(["t", "read-state"]).expect("first t tag"),
+                    Tag::parse(["t", "read-state"]).expect("second t tag"),
+                ],
+            ),
+        ] {
+            let d_tag = tags
+                .iter()
+                .find_map(|tag| {
+                    let parts = tag.as_slice();
+                    (parts.first().is_some_and(|part| part == "d") && parts.len() >= 2)
+                        .then(|| parts[1].clone())
+                })
+                .expect("first d-tag value");
+            let old = EventBuilder::new(
+                Kind::Custom(buzz_core::kind::KIND_READ_STATE as u16),
+                format!("{case}-old"),
+            )
+            .tags(tags.clone())
+            .custom_created_at(Timestamp::from(base))
+            .sign_with_keys(&keys)
+            .expect("sign old event");
+            let new = EventBuilder::new(
+                Kind::Custom(buzz_core::kind::KIND_READ_STATE as u16),
+                format!("{case}-new"),
+            )
+            .tags(tags)
+            .custom_created_at(Timestamp::from(base + 1))
+            .sign_with_keys(&keys)
+            .expect("sign new event");
+
+            assert!(
+                db.replace_parameterized_event(community, &old, &d_tag, None)
+                    .await
+                    .expect("insert old event")
+                    .1
+            );
+            assert!(
+                db.replace_parameterized_event(community, &new, &d_tag, None)
+                    .await
+                    .expect("replace with new event")
+                    .1
+            );
+
+            let (rows, live): (i64, i64) = sqlx::query_as(
+                "SELECT count(*), count(*) FILTER (WHERE deleted_at IS NULL) FROM events \
+                 WHERE community_id=$1 AND kind=30078 AND pubkey=$2 AND d_tag=$3",
+            )
+            .bind(community.as_uuid())
+            .bind(keys.public_key().to_bytes())
+            .bind(&d_tag)
+            .fetch_one(&db.pool)
+            .await
+            .expect("count retained rows");
+            assert_eq!((rows, live), (2, 1), "{case} must retain legacy history");
+
+            let watermarks: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM parameterized_event_watermarks \
+                 WHERE community_id=$1 AND kind=30078 AND pubkey=$2 AND d_tag=$3",
+            )
+            .bind(community.as_uuid())
+            .bind(keys.public_key().to_bytes())
+            .bind(&d_tag)
+            .fetch_one(&db.pool)
+            .await
+            .expect("count watermarks");
+            assert_eq!(watermarks, 0, "{case} must not create a watermark");
+        }
     }
 
     #[tokio::test]

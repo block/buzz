@@ -12,7 +12,78 @@ static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("../../migrations");
 
 /// Run all pending Buzz database migrations.
 pub async fn run_migrations(pool: &PgPool) -> Result<()> {
+    reject_legacy_nip_rs_cardinality_ambiguity(pool).await?;
     MIGRATOR.run(pool).await?;
+    Ok(())
+}
+
+/// Migration 0007 is checksum-frozen and predates exact NIP-RS tag-cardinality
+/// enforcement. A populated database still on 0001-0006 must not let 0007
+/// irreversibly purge duplicate-tag history. Fail before sqlx starts its
+/// migration transaction so an operator can inspect and repair those rows.
+async fn reject_legacy_nip_rs_cardinality_ambiguity(pool: &PgPool) -> Result<()> {
+    let migrations_table: Option<String> =
+        sqlx::query_scalar("SELECT to_regclass('_sqlx_migrations')::text")
+            .fetch_one(pool)
+            .await?;
+    if migrations_table.is_none() {
+        return Ok(());
+    }
+    let applied: Option<i64> =
+        sqlx::query_scalar("SELECT max(version) FROM _sqlx_migrations WHERE success")
+            .fetch_one(pool)
+            .await?;
+    if applied.is_none_or(|version| version >= 7) {
+        return Ok(());
+    }
+
+    let ambiguous: bool = sqlx::query_scalar(
+        "SELECT EXISTS (\
+             SELECT 1 FROM events e \
+             WHERE e.kind = 30078 \
+               AND e.d_tag ~ '^read-state:[0-9a-f]{32}$' \
+               AND (\
+                   jsonb_typeof(e.tags) IS DISTINCT FROM 'array' \
+                   OR (\
+                       EXISTS (\
+                           SELECT 1 FROM jsonb_array_elements(\
+                               CASE WHEN jsonb_typeof(e.tags) = 'array' THEN e.tags ELSE '[]'::jsonb END\
+                           ) tag \
+                           WHERE tag = '[\"t\", \"read-state\"]'::jsonb\
+                       ) \
+                       AND (\
+                           (SELECT count(*) FROM jsonb_array_elements(\
+                               CASE WHEN jsonb_typeof(e.tags) = 'array' THEN e.tags ELSE '[]'::jsonb END\
+                            ) tag \
+                            WHERE jsonb_typeof(tag) = 'array' \
+                              AND tag->0 = '\"d\"'::jsonb) <> 1 \
+                           OR NOT EXISTS (\
+                               SELECT 1 FROM jsonb_array_elements(\
+                                   CASE WHEN jsonb_typeof(e.tags) = 'array' THEN e.tags ELSE '[]'::jsonb END\
+                               ) tag \
+                               WHERE jsonb_typeof(tag) = 'array' \
+                                 AND jsonb_array_length(tag) >= 2 \
+                                 AND jsonb_typeof(tag->1) = 'string' \
+                                 AND tag->>0 = 'd' \
+                                 AND tag->>1 = e.d_tag\
+                           ) \
+                           OR (SELECT count(*) FROM jsonb_array_elements(\
+                               CASE WHEN jsonb_typeof(e.tags) = 'array' THEN e.tags ELSE '[]'::jsonb END\
+                           ) tag WHERE tag = '[\"t\", \"read-state\"]'::jsonb) <> 1\
+                       )\
+                   )\
+               )\
+         )",
+    )
+    .fetch_one(pool)
+    .await?;
+
+    if ambiguous {
+        return Err(crate::DbError::InvalidData(
+            "NIP-RS migration blocked: pre-0007 database contains kind-30078 rows with ambiguous d/t tag cardinality; repair or remove those nonconforming rows before retrying"
+                .into(),
+        ));
+    }
     Ok(())
 }
 
@@ -471,7 +542,7 @@ mod tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 10);
+        assert_eq!(migrations.len(), 11);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -627,6 +698,18 @@ mod tests {
             .as_str()
             .contains("CREATE OR REPLACE FUNCTION guard_nip_rs_watermark"));
         assert!(migrations[9].sql.as_str().contains("RETURN NULL"));
+
+        assert_eq!(migrations[10].version, 11);
+        assert!(migrations[10]
+            .sql
+            .as_str()
+            .contains("CREATE OR REPLACE FUNCTION guard_nip_rs_watermark"));
+        assert!(migrations[10]
+            .sql
+            .as_str()
+            .contains("CREATE OR REPLACE FUNCTION purge_soft_deleted_nip_rs"));
+        assert!(migrations[10].sql.as_str().contains("tag->>0 = 'd'"));
+        assert!(migrations[10].sql.as_str().contains(") = 1"));
     }
 
     #[test]
