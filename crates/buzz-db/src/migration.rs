@@ -887,6 +887,76 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires Postgres"]
+    async fn pre_0007_ambiguous_nip_rs_data_blocks_without_mutation_and_allows_retry() {
+        let pool = connect_test_pool().await;
+        reset_public_schema(&pool).await;
+        MIGRATOR
+            .run_to(6, &pool)
+            .await
+            .expect("apply migrations 1-6");
+
+        let community_id = uuid::Uuid::new_v4();
+        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+            .bind(community_id)
+            .bind(format!("pre-0007-{}.example", community_id.simple()))
+            .execute(&pool)
+            .await
+            .expect("insert community");
+        let event_id = vec![1_u8; 32];
+        let pubkey = vec![2_u8; 32];
+        let d_tag = format!("read-state:{}", "a".repeat(32));
+        let ambiguous_tags = serde_json::json!([["d", d_tag], ["d", "other"], ["t", "read-state"]]);
+        sqlx::query(
+            "INSERT INTO events \
+             (community_id, id, pubkey, created_at, kind, tags, content, sig, received_at, d_tag) \
+             VALUES ($1, $2, $3, NOW(), 30078, $4, 'ambiguous', $5, NOW(), $6)",
+        )
+        .bind(community_id)
+        .bind(&event_id)
+        .bind(&pubkey)
+        .bind(&ambiguous_tags)
+        .bind(vec![3_u8; 64])
+        .bind(&d_tag)
+        .execute(&pool)
+        .await
+        .expect("insert ambiguous NIP-RS row");
+
+        let before_versions = applied_versions(&pool).await;
+        let before_row: (serde_json::Value, String) =
+            sqlx::query_as("SELECT tags, content FROM events WHERE community_id=$1 AND id=$2")
+                .bind(community_id)
+                .bind(&event_id)
+                .fetch_one(&pool)
+                .await
+                .expect("read ambiguous row before blocked migration");
+        let blocked = run_migrations(&pool).await;
+        assert!(blocked.is_err(), "ambiguous pre-0007 data must fail closed");
+        assert_eq!(applied_versions(&pool).await, before_versions);
+        let after_row: (serde_json::Value, String) =
+            sqlx::query_as("SELECT tags, content FROM events WHERE community_id=$1 AND id=$2")
+                .bind(community_id)
+                .bind(&event_id)
+                .fetch_one(&pool)
+                .await
+                .expect("blocked migration must preserve source row");
+        assert_eq!(after_row, before_row);
+
+        let repaired_tags = serde_json::json!([["d", d_tag], ["t", "read-state"]]);
+        sqlx::query("UPDATE events SET tags=$1 WHERE community_id=$2 AND id=$3")
+            .bind(repaired_tags)
+            .bind(community_id)
+            .bind(&event_id)
+            .execute(&pool)
+            .await
+            .expect("repair ambiguous row");
+        run_migrations(&pool)
+            .await
+            .expect("retry succeeds after operator repair");
+        assert_eq!(applied_versions(&pool).await.last().copied(), Some(11));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
     async fn run_migrations_applies_consolidated_initial_schema_on_fresh_database() {
         let pool = connect_test_pool().await;
         reset_public_schema(&pool).await;

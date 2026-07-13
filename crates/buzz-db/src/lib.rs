@@ -3039,7 +3039,7 @@ mod tests {
     //! channels, that fail-closed chain would go blind.
     use super::*;
     use buzz_core::CommunityId;
-    use sqlx::PgPool;
+    use sqlx::{Acquire, PgPool};
     use uuid::Uuid;
 
     const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz";
@@ -3233,6 +3233,152 @@ mod tests {
             .await
             .expect("count watermarks");
             assert_eq!(watermarks, 0, "{case} must not create a watermark");
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn nip_rs_hard_delete_fence_fails_closed_and_scopes_opt_in_to_transaction() {
+        use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
+
+        let db = setup_db().await;
+        let community = CommunityId::from_uuid(make_community(&db.pool).await);
+        let keys = Keys::generate();
+        let base = Timestamp::now().as_secs();
+        let conforming_d = format!("read-state:{}", "6".repeat(32));
+        let conforming = EventBuilder::new(
+            Kind::Custom(buzz_core::kind::KIND_READ_STATE as u16),
+            "fenced-conforming",
+        )
+        .tags(vec![
+            Tag::parse(["d", conforming_d.as_str()]).expect("d tag"),
+            Tag::parse(["t", "read-state"]).expect("t tag"),
+        ])
+        .custom_created_at(Timestamp::from(base))
+        .sign_with_keys(&keys)
+        .expect("sign conforming event");
+        assert!(
+            db.replace_parameterized_event(community, &conforming, &conforming_d, None)
+                .await
+                .expect("insert conforming event")
+                .1
+        );
+        sqlx::query(
+            "INSERT INTO event_mentions \
+             (community_id, pubkey_hex, event_id, event_created_at, event_kind) \
+             VALUES ($1, $2, $3, to_timestamp($4), 30078)",
+        )
+        .bind(community.as_uuid())
+        .bind("6".repeat(64))
+        .bind(conforming.id.as_bytes().as_slice())
+        .bind(conforming.created_at.as_secs() as f64)
+        .execute(&db.pool)
+        .await
+        .expect("insert mention");
+
+        // Model ce10's first destructive statement. RAISE aborts the transaction,
+        // so its later mention delete and incoming insert can never commit.
+        let mut old_writer = db.pool.begin().await.expect("begin old-writer tx");
+        let rejected = sqlx::query(
+            "DELETE FROM events WHERE community_id=$1 AND kind=30078 \
+             AND pubkey=$2 AND d_tag=$3 AND deleted_at IS NULL",
+        )
+        .bind(community.as_uuid())
+        .bind(keys.public_key().to_bytes())
+        .bind(&conforming_d)
+        .execute(&mut *old_writer)
+        .await;
+        assert!(rejected.is_err(), "old-writer hard delete must be rejected");
+        old_writer.rollback().await.expect("rollback rejected tx");
+        let preserved: (i64, i64) = sqlx::query_as(
+            "SELECT (SELECT count(*) FROM events WHERE community_id=$1 AND id=$2), \
+                    (SELECT count(*) FROM event_mentions WHERE community_id=$1 AND event_id=$2)",
+        )
+        .bind(community.as_uuid())
+        .bind(conforming.id.as_bytes().as_slice())
+        .fetch_one(&db.pool)
+        .await
+        .expect("count preserved payload and mention");
+        assert_eq!(preserved, (1, 1));
+
+        let nonconforming_d = format!("read-state:{}", "7".repeat(32));
+        let nonconforming = EventBuilder::new(
+            Kind::Custom(buzz_core::kind::KIND_READ_STATE as u16),
+            "fenced-nonconforming",
+        )
+        .tags(vec![
+            Tag::parse(["d", nonconforming_d.as_str()]).expect("first d tag"),
+            Tag::parse(["d", "other"]).expect("second d tag"),
+            Tag::parse(["t", "read-state"]).expect("t tag"),
+        ])
+        .custom_created_at(Timestamp::from(base + 1))
+        .sign_with_keys(&keys)
+        .expect("sign nonconforming event");
+        assert!(
+            db.replace_parameterized_event(community, &nonconforming, &nonconforming_d, None,)
+                .await
+                .expect("insert nonconforming event")
+                .1
+        );
+        let rejected_nonconforming = sqlx::query(
+            "DELETE FROM events WHERE community_id=$1 AND id=$2 AND created_at=to_timestamp($3)",
+        )
+        .bind(community.as_uuid())
+        .bind(nonconforming.id.as_bytes().as_slice())
+        .bind(nonconforming.created_at.as_secs() as f64)
+        .execute(&db.pool)
+        .await;
+        assert!(
+            rejected_nonconforming.is_err(),
+            "fence must cover a nonconforming OLD row at a regex coordinate"
+        );
+
+        let unrelated_d = format!("read-state:{}", "8".repeat(32));
+        let unrelated = EventBuilder::new(Kind::Custom(30023), "unrelated")
+            .tags(vec![Tag::parse(["d", unrelated_d.as_str()]).expect("d tag")])
+            .custom_created_at(Timestamp::from(base + 2))
+            .sign_with_keys(&keys)
+            .expect("sign unrelated event");
+        assert!(
+            db.replace_parameterized_event(community, &unrelated, &unrelated_d, None)
+                .await
+                .expect("insert unrelated event")
+                .1
+        );
+        let unrelated_delete = sqlx::query(
+            "DELETE FROM events WHERE community_id=$1 AND id=$2 AND created_at=to_timestamp($3)",
+        )
+        .bind(community.as_uuid())
+        .bind(unrelated.id.as_bytes().as_slice())
+        .bind(unrelated.created_at.as_secs() as f64)
+        .execute(&db.pool)
+        .await
+        .expect("delete unrelated event");
+        assert_eq!(unrelated_delete.rows_affected(), 1);
+
+        // Check both transaction exits on one physical session; pool selection
+        // cannot accidentally hide a leaked session-local authorization value.
+        let mut conn = db.pool.acquire().await.expect("acquire dedicated session");
+        for commit in [true, false] {
+            let mut tx = conn.begin().await.expect("begin GUC transaction");
+            let value: String =
+                sqlx::query_scalar("SELECT set_config('buzz.nip_rs_hard_delete', 'on', true)")
+                    .fetch_one(&mut *tx)
+                    .await
+                    .expect("set transaction-local GUC");
+            assert_eq!(value, "on");
+            if commit {
+                tx.commit().await.expect("commit GUC transaction");
+            } else {
+                tx.rollback().await.expect("rollback GUC transaction");
+            }
+            let leaked: Option<String> = sqlx::query_scalar(
+                "SELECT NULLIF(current_setting('buzz.nip_rs_hard_delete', true), '')",
+            )
+            .fetch_one(&mut *conn)
+            .await
+            .expect("read GUC after transaction");
+            assert_ne!(leaked.as_deref(), Some("on"));
         }
     }
 
