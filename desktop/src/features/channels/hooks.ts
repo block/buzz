@@ -67,17 +67,78 @@ function sortChannels(channels: Channel[]) {
   });
 }
 
+type UpsertCachedChannelOptions = {
+  preserveCachedDmParticipants?: boolean;
+};
+
+function mergeCachedDmParticipants(
+  channel: Channel,
+  cachedChannel: Channel | undefined,
+): Channel {
+  if (channel.channelType !== "dm" || cachedChannel?.channelType !== "dm") {
+    return channel;
+  }
+
+  const participantNames = new Map<string, string>();
+  const recordParticipantNames = (candidate: Channel) => {
+    for (const [index, pubkey] of candidate.participantPubkeys.entries()) {
+      participantNames.set(
+        pubkey.toLowerCase(),
+        candidate.participants[index] ?? pubkey,
+      );
+    }
+  };
+
+  recordParticipantNames(channel);
+  recordParticipantNames(cachedChannel);
+
+  const participantPubkeys = [
+    ...new Map(
+      [...channel.participantPubkeys, ...cachedChannel.participantPubkeys].map(
+        (pubkey) => [pubkey.toLowerCase(), pubkey],
+      ),
+    ).values(),
+  ];
+  const memberPubkeys = [
+    ...new Map(
+      [...channel.memberPubkeys, ...cachedChannel.memberPubkeys].map(
+        (pubkey) => [pubkey.toLowerCase(), pubkey],
+      ),
+    ).values(),
+  ];
+
+  return {
+    ...channel,
+    memberCount: Math.max(channel.memberCount, cachedChannel.memberCount),
+    memberPubkeys,
+    participantPubkeys,
+    participants: participantPubkeys.map(
+      (pubkey) => participantNames.get(pubkey.toLowerCase()) ?? pubkey,
+    ),
+  };
+}
+
 /**
  * Adds or replaces a relay-returned channel in a possibly stale channel list.
+ * The navigation repair path can retain participant additions that reached the
+ * shared cache after its relay-returned DM snapshot was captured.
  * Exported for focused cache race regression coverage.
  */
 export function upsertCachedChannel(
   current: Channel[] | undefined,
   channel: Channel,
+  options: UpsertCachedChannelOptions = {},
 ): Channel[] {
+  const cachedChannel = current?.find(
+    (candidate) => candidate.id === channel.id,
+  );
+  const nextChannel = options.preserveCachedDmParticipants
+    ? mergeCachedDmParticipants(channel, cachedChannel)
+    : channel;
+
   return sortChannels([
     ...(current ?? []).filter((candidate) => candidate.id !== channel.id),
-    channel,
+    nextChannel,
   ]);
 }
 
@@ -190,7 +251,8 @@ export function useOpenDmMutation() {
 
 /**
  * Cancels any in-flight channel-list read and restores a relay-returned channel
- * to the shared cache before a caller depends on it for navigation.
+ * to the shared cache before a caller depends on it for navigation. Participant
+ * additions already present in the cache win over the older channel snapshot.
  */
 export function useUpsertCachedChannel() {
   const queryClient = useQueryClient();
@@ -199,7 +261,9 @@ export function useUpsertCachedChannel() {
     async (channel: Channel) => {
       await queryClient.cancelQueries({ queryKey: channelsQueryKey });
       queryClient.setQueryData<Channel[]>(channelsQueryKey, (current) =>
-        upsertCachedChannel(current, channel),
+        upsertCachedChannel(current, channel, {
+          preserveCachedDmParticipants: true,
+        }),
       );
     },
     [queryClient],
