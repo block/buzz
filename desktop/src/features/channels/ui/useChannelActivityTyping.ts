@@ -159,3 +159,42 @@ export function mergeAgentNamesIntoProfiles(
   }
   return merged;
 }
+
+/**
+ * Fold channel-member agent flags (`role === "bot"` or `isAgent`) into a
+ * profile lookup as `isAgent: true` entries — the same pattern
+ * `mergeAgentNamesIntoProfiles` applies to managed/relay agents, extended to
+ * the membership signal. Per-pubkey `profiles[pk]?.isAgent` checks
+ * (MessageRow's agent predicate) then see member-only bots — agents known
+ * through channel membership alone, with no profile flag and no
+ * managed/relay/feed presence — without a separate agent-set prop.
+ *
+ * Returns the input lookup unchanged (same reference) when no member carries
+ * an agent flag.
+ */
+export function mergeMemberAgentFlagsIntoProfiles(
+  profiles: UserProfileLookup,
+  channelMembers:
+    | readonly Pick<ChannelMember, "pubkey" | "role" | "isAgent">[]
+    | undefined,
+): UserProfileLookup {
+  const agentMembers = (channelMembers ?? []).filter(
+    (member) => member.role === "bot" || member.isAgent,
+  );
+  if (agentMembers.length === 0) {
+    return profiles;
+  }
+  const merged = { ...profiles };
+  for (const member of agentMembers) {
+    const key = normalizePubkey(member.pubkey);
+    merged[key] = {
+      ...merged[key],
+      displayName: merged[key]?.displayName ?? null,
+      avatarUrl: merged[key]?.avatarUrl ?? null,
+      nip05Handle: merged[key]?.nip05Handle ?? null,
+      ownerPubkey: merged[key]?.ownerPubkey ?? null,
+      isAgent: true,
+    };
+  }
+  return merged;
+}

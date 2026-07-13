@@ -37,6 +37,7 @@ import type {
   UpdateManagedAgentInput,
   AcpAvailabilityStatus,
   AcpRuntimeCatalogEntry,
+  AuthStatus,
   CommandAvailability,
   InstallRuntimeResult,
   OpenDmInput,
@@ -181,7 +182,6 @@ export type RawManagedAgent = {
   persona_out_of_date: boolean;
   persona_orphaned: boolean;
   needs_restart: boolean;
-  mcp_toolsets: string | null;
   env_vars?: Record<string, string>;
   status: ManagedAgent["status"];
   pid: number | null;
@@ -228,6 +228,10 @@ export type RawAcpRuntimeCatalogEntry = {
   install_instructions_url: string;
   can_auto_install: boolean;
   underlying_cli_path: string | null;
+  node_required: boolean;
+  /** Tagged union with snake_case status values — same shape as `AuthStatus`. */
+  auth_status: AuthStatus;
+  login_hint?: string;
 };
 
 export type RawInstallStepResult = {
@@ -243,6 +247,8 @@ export type RawInstallStepResult = {
 export type RawInstallRuntimeResult = {
   success: boolean;
   steps: RawInstallStepResult[];
+  restarted_count: number;
+  failed_restart_count: number;
 };
 
 type RawCommandAvailability = {
@@ -857,7 +863,6 @@ export function fromRawManagedAgent(agent: RawManagedAgent): ManagedAgent {
     personaOutOfDate: agent.persona_out_of_date ?? false,
     personaOrphaned: agent.persona_orphaned ?? false,
     needsRestart: agent.needs_restart ?? false,
-    mcpToolsets: agent.mcp_toolsets,
     envVars: agent.env_vars ?? {},
     status: agent.status,
     pid: agent.pid,
@@ -896,6 +901,9 @@ function fromRawAcpRuntimeCatalogEntry(
     installInstructionsUrl: entry.install_instructions_url,
     canAutoInstall: entry.can_auto_install,
     underlyingCliPath: entry.underlying_cli_path,
+    nodeRequired: entry.node_required,
+    authStatus: entry.auth_status,
+    loginHint: entry.login_hint ?? null,
   };
 }
 
@@ -913,6 +921,8 @@ function fromRawInstallRuntimeResult(
       exitCode: step.exit_code,
       hint: step.hint,
     })),
+    restartedCount: raw.restarted_count,
+    failedRestartCount: raw.failed_restart_count,
   };
 }
 
@@ -1004,7 +1014,6 @@ export async function createManagedAgent(input: CreateManagedAgentInput) {
         harnessOverride: input.harnessOverride ?? false,
         agentArgs: input.agentArgs,
         mcpCommand: input.mcpCommand,
-        mcpToolsets: input.mcpToolsets,
         turnTimeoutSeconds: input.turnTimeoutSeconds,
         idleTimeoutSeconds: input.idleTimeoutSeconds,
         maxTurnDurationSeconds: input.maxTurnDurationSeconds,

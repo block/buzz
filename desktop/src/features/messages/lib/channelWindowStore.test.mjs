@@ -3,6 +3,8 @@ import test from "node:test";
 import {
   appendOlderChannelWindow,
   mapChannelWindowEvents,
+  channelWindowHasMore,
+  channelWindowHistoryExhausted,
   channelWindowThreadSummaries,
   emptyChannelWindowStore,
   flattenChannelWindowEvents,
@@ -400,4 +402,27 @@ test("mapChannelWindowEvents rewrites live overlay events", () => {
     ).content,
     "edited-live",
   );
+});
+
+test("exhaustion is unresolved (false) on an empty store, unlike hasMore's default", () => {
+  const store = emptyChannelWindowStore();
+  assert.equal(channelWindowHasMore(store), false);
+  // Both read "no more history", but exhaustion must NOT claim the boundary
+  // is proven before any page resolves — an unloaded window is unknown.
+  assert.equal(channelWindowHistoryExhausted(store), false);
+});
+
+test("exhaustion tracks only a resolved tail page's hasMore", () => {
+  const open = replaceNewestChannelWindow(
+    emptyChannelWindowStore(),
+    page(null, [event("newest", 100)], { hasMore: true }),
+  );
+  assert.equal(channelWindowHistoryExhausted(open), false);
+
+  const closed = appendOlderChannelWindow(
+    open,
+    page(open.pages[0].nextCursor, [event("oldest", 99)], { hasMore: false }),
+  );
+  assert.equal(channelWindowHistoryExhausted(closed), true);
+  assert.equal(channelWindowHasMore(closed), false);
 });

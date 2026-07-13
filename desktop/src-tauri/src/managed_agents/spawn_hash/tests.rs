@@ -24,7 +24,6 @@ fn record() -> ManagedAgentRecord {
         model: None,
         provider: None,
         persona_source_version: None,
-        mcp_toolsets: None,
         env_vars: BTreeMap::new(),
         start_on_app_launch: false,
         auto_restart_on_config_change: true,
@@ -53,14 +52,13 @@ fn record() -> ManagedAgentRecord {
         source_team_persona_slug: None,
         definition_respond_to: None,
         definition_respond_to_allowlist: Vec::new(),
-        definition_mcp_toolsets: None,
         definition_parallelism: None,
         relay_mesh: None,
     }
 }
 
-fn persona(id: &str, runtime: Option<&str>, prompt: &str) -> PersonaRecord {
-    PersonaRecord {
+fn persona(id: &str, runtime: Option<&str>, prompt: &str) -> AgentDefinition {
+    AgentDefinition {
         id: id.into(),
         display_name: id.into(),
         avatar_url: None,
@@ -76,7 +74,6 @@ fn persona(id: &str, runtime: Option<&str>, prompt: &str) -> PersonaRecord {
         env_vars: BTreeMap::new(),
         respond_to: None,
         respond_to_allowlist: Vec::new(),
-        mcp_toolsets: None,
         parallelism: None,
         created_at: "now".into(),
         updated_at: "now".into(),
@@ -272,30 +269,6 @@ fn non_default_max_turn_duration_changes_hash() {
 }
 
 #[test]
-fn explicit_default_toolsets_do_not_change_hash() {
-    // Spawn falls BUZZ_TOOLSETS back to the default set, so None → an
-    // explicit copy of the default is the same spawned value.
-    let rec = record();
-    let mut edited = record();
-    edited.mcp_toolsets = Some(crate::managed_agents::types::DEFAULT_MCP_TOOLSETS.to_string());
-    assert_eq!(
-        spawn_config_hash(&rec, &[], "wss://ws.example", &Default::default()),
-        spawn_config_hash(&edited, &[], "wss://ws.example", &Default::default())
-    );
-}
-
-#[test]
-fn non_default_toolsets_change_hash() {
-    let rec = record();
-    let mut edited = record();
-    edited.mcp_toolsets = Some("default,canvas".to_string());
-    assert_ne!(
-        spawn_config_hash(&rec, &[], "wss://ws.example", &Default::default()),
-        spawn_config_hash(&edited, &[], "wss://ws.example", &Default::default())
-    );
-}
-
-#[test]
 fn non_spawn_bookkeeping_fields_do_not_change_hash() {
     // updated_at / runtime_pid / last_* are lifecycle bookkeeping, not spawn
     // inputs — routine record saves must not trip the badge.
@@ -315,7 +288,7 @@ fn non_spawn_bookkeeping_fields_do_not_change_hash() {
 fn resnapshot_does_not_clobber_record_quad_with_definition_absent_quad() {
     // B5 hash row 3: the prospective re-snapshot copies ONLY
     // prompt/model/provider/env from the linked definition. An instance
-    // whose owner hand-set respond_to/allowlist/parallelism/toolsets must
+    // whose owner hand-set respond_to/allowlist/parallelism must
     // hash identically whether or not its definition carries a quad —
     // activation of the definition-level defaults must never reach through
     // spawn and overwrite instance state.
@@ -326,12 +299,10 @@ fn resnapshot_does_not_clobber_record_quad_with_definition_absent_quad() {
     rec.respond_to = RespondTo::Allowlist;
     rec.respond_to_allowlist = vec!["a".repeat(64)];
     rec.parallelism = 4;
-    rec.mcp_toolsets = Some("default,canvas".into());
 
     let mut definition_with_quad = quadless_definition.clone();
     definition_with_quad[0].respond_to = Some("anyone".into());
     definition_with_quad[0].parallelism = Some(8);
-    definition_with_quad[0].mcp_toolsets = Some("default".into());
 
     assert_eq!(
         spawn_config_hash(
@@ -430,7 +401,7 @@ fn missing_definition_leaves_materialized_runtime_in_hash() {
     rec.persona_id = Some("missing".into());
     rec.runtime = Some("goose".into()); // materialized runtime
 
-    let no_personas: &[PersonaRecord] = &[];
+    let no_personas: &[AgentDefinition] = &[];
 
     let mut no_runtime = rec.clone();
     no_runtime.runtime = None;

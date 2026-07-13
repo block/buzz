@@ -42,6 +42,14 @@ const claudeRuntime = {
   mcpCommand: null,
 };
 
+const buzzAgentRuntime = {
+  ...gooseRuntime,
+  id: "buzz-agent",
+  label: "Buzz Agent",
+  command: "buzz-agent-cmd",
+  mcpCommand: null,
+};
+
 function persona(overrides = {}) {
   return {
     id: "p-1",
@@ -344,5 +352,42 @@ test("row 6: unfetched query refetches instead of resolving empty", async () => 
     runtimes.map((r) => r.id),
     ["claude"],
     "an unfetched query must fetch, not spuriously report no runtimes",
+  );
+});
+
+// ── item-13 regression: buzz-agent-first default runtime ─────────────────────
+//
+// Before this fix, resolveStartRuntimeForDefinition used runtimes[0] (catalog
+// order: goose, claude, codex, buzz-agent), so an installed goose would beat
+// the bundled buzz-agent sidecar as the default for runtime-less personas.
+// The fix applies the preference order: buzz-agent → goose → first available.
+
+test("item-13: goose+buzz-agent both available — persona with no runtime resolves buzz-agent", () => {
+  const { runtime, warnings } = resolveStartRuntimeForDefinition(
+    persona({ runtime: undefined }),
+    [gooseRuntime, claudeRuntime, buzzAgentRuntime],
+  );
+  assert.equal(
+    runtime.id,
+    "buzz-agent",
+    "buzz-agent must win over catalog-first goose for runtime-less personas",
+  );
+  assert.deepEqual(warnings, []);
+});
+
+test("item-13: goose-only available — persona with no runtime resolves goose", () => {
+  const { runtime, warnings } = resolveStartRuntimeForDefinition(
+    persona({ runtime: undefined }),
+    [gooseRuntime, claudeRuntime],
+  );
+  assert.equal(runtime.id, "goose");
+  assert.deepEqual(warnings, []);
+});
+
+test("item-13: no runtimes available — refuses with actionable error", () => {
+  assert.throws(
+    () => resolveStartRuntimeForDefinition(persona({ runtime: undefined }), []),
+    /No available runtime/,
+    "empty runtime list must throw, not silently return null",
   );
 });

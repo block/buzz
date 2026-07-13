@@ -6,7 +6,7 @@ use tauri::AppHandle;
 
 use crate::{
     app_state::AppState,
-    managed_agents::{load_personas, ManagedAgentRecord, PersonaRecord},
+    managed_agents::{load_personas, AgentDefinition, ManagedAgentRecord},
     relay::relay_ws_url_with_override,
 };
 
@@ -24,7 +24,7 @@ use crate::{
 /// Exported `pub(crate)` for unit testing.
 pub(crate) fn resolve_deploy_model_provider<'a>(
     record: &'a ManagedAgentRecord,
-    personas: &'a [PersonaRecord],
+    personas: &'a [AgentDefinition],
     global: &'a crate::managed_agents::GlobalAgentConfig,
 ) -> (Option<&'a str>, Option<&'a str>) {
     let live_persona = record
@@ -142,9 +142,6 @@ pub(super) fn deploy_payload_json(
         // to the harness default (`owner-only`) — no protocol break.
         "respond_to": record.respond_to,
         "respond_to_allowlist": &record.respond_to_allowlist,
-        // MCP toolset filter (BUZZ_TOOLSETS on the local spawn path).
-        // Providers that don't yet read this fall back to their default.
-        "mcp_toolsets": &record.mcp_toolsets,
         // Merged persona + agent env vars. Providers that don't read this
         // field will simply ignore it — no protocol break.
         "env_vars": merged_env,

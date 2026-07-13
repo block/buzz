@@ -31,7 +31,6 @@ function makeAgent(overrides = {}) {
     parallelism: 1,
     systemPrompt: null,
     model: null,
-    mcpToolsets: null,
     envVars: {},
     status: "stopped",
     pid: null,

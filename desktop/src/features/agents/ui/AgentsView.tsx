@@ -3,14 +3,18 @@ import {
   consumePendingOpenCreateAgent,
   subscribeOpenCreateAgent,
 } from "@/features/agents/openCreateAgentEvent";
+import {
+  consumePendingSnapshotImport,
+  subscribeSnapshotImport,
+} from "@/features/agents/openSnapshotImportFromUrlEvent";
 import { AddAgentToChannelDialog } from "./AddAgentToChannelDialog";
 import { AddTeamToChannelDialog } from "./AddTeamToChannelDialog";
 import { AgentDialog } from "./AgentDialog";
-import { BatchImportDialog } from "./BatchImportDialog";
 import { PersonaCatalogDialog } from "./PersonaCatalogDialog";
 import { PersonaDeleteDialog } from "./PersonaDeleteDialog";
-import { PersonaImportUpdateDialog } from "./PersonaImportUpdateDialog";
 import { PersonaShareDialog } from "./PersonaShareDialog";
+import { AgentSnapshotExportDialog } from "./AgentSnapshotExportDialog";
+import { AgentSnapshotImportDialog } from "./AgentSnapshotImportDialog";
 import { RelayDirectorySection } from "./RelayDirectorySection";
 import { SecretRevealDialog } from "./SecretRevealDialog";
 import { TeamDeleteDialog } from "./TeamDeleteDialog";
@@ -66,6 +70,23 @@ export function AgentsView() {
 
     return subscribeOpenCreateAgent(() => {
       openUnifiedCreate();
+    });
+  }, []);
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: mount-only; personas.handleImportSnapshotFile is stable
+  React.useEffect(() => {
+    // Consume a snapshot import that was enqueued before navigation (e.g. from
+    // a timeline AgentSnapshotCard click that navigated here).
+    const pending = consumePendingSnapshotImport();
+    if (pending) {
+      void personas.handleImportSnapshotFile(
+        pending.fileBytes,
+        pending.fileName,
+      );
+    }
+
+    return subscribeSnapshotImport(({ fileBytes, fileName }) => {
+      void personas.handleImportSnapshotFile(fileBytes, fileName);
     });
   }, []);
 
@@ -131,12 +152,13 @@ export function AgentsView() {
               onDuplicatePersona={personas.openDuplicate}
               onEditPersona={personas.openEdit}
               onSharePersona={personas.openShare}
+              onExportPersonaSnapshot={personas.openExportSnapshot}
               onDeactivatePersona={(persona) => {
                 void personas.handleSetActive(persona, false, "library");
               }}
               onDeletePersona={personas.openDelete}
-              onImportPersonaFile={(fileBytes, fileName) => {
-                void personas.handleImportFile(fileBytes, fileName);
+              onImportSnapshotFile={(fileBytes, fileName) => {
+                void personas.handleImportSnapshotFile(fileBytes, fileName);
               }}
             />
 
@@ -242,16 +264,10 @@ export function AgentsView() {
                 : null
           }
           initialValues={personas.personaDialogState.initialValues}
-          isImportPending={
-            personas.personaImportActions.isApplyingPersonaImportUpdate
-          }
           isPending={personas.isPending}
           mode="definition-edit"
           runtimes={personas.acpRuntimesQuery.data ?? []}
           runtimesLoading={personas.acpRuntimesQuery.isLoading}
-          onImportUpdateFile={
-            personas.personaImportActions.handleEditDialogImportUpdateFile
-          }
           onOpenChange={(open) => {
             if (!open) {
               personas.setPersonaDialogState(null);
@@ -265,6 +281,11 @@ export function AgentsView() {
       ) : null}
       {personas.personaToDelete ? (
         <PersonaDeleteDialog
+          instanceCount={
+            (agents.managedAgents ?? []).filter(
+              (a) => a.personaId === personas.personaToDelete?.id,
+            ).length
+          }
           onConfirm={(persona) => {
             void personas.handleDelete(persona);
           }}
@@ -294,7 +315,7 @@ export function AgentsView() {
           }}
           onExport={() => {
             if (personas.personaToShare) {
-              personas.handleExport(personas.personaToShare);
+              personas.openShareExportSnapshot(personas.personaToShare);
             }
           }}
           onOpenChange={(open) => {
@@ -304,6 +325,46 @@ export function AgentsView() {
           }}
           open={personas.personaToShare !== null}
           persona={personas.personaToShare}
+        />
+      ) : null}
+      {personas.personaToExportSnapshot ? (
+        <AgentSnapshotExportDialog
+          isSavePending={personas.isPending}
+          open={personas.personaToExportSnapshot !== null}
+          persona={personas.personaToExportSnapshot.persona}
+          linkedAgentPubkey={personas.personaToExportSnapshot.linkedAgentPubkey}
+          onSaveFile={(memoryLevel, format) => {
+            if (personas.personaToExportSnapshot) {
+              personas.handleExportSnapshot(
+                personas.personaToExportSnapshot.persona,
+                personas.personaToExportSnapshot.linkedAgentPubkey,
+                memoryLevel,
+                format,
+              );
+            }
+          }}
+          onOpenChange={(open) => {
+            if (!open) {
+              personas.setPersonaToExportSnapshot(null);
+            }
+          }}
+        />
+      ) : null}
+      {personas.snapshotImportState ? (
+        <AgentSnapshotImportDialog
+          open={personas.snapshotImportState !== null}
+          preview={personas.snapshotImportState.preview}
+          isConfirming={personas.isSnapshotImportConfirming}
+          result={personas.snapshotImportResult}
+          confirmError={personas.snapshotImportConfirmError}
+          onConfirm={(keepAllowlist) => {
+            void personas.handleConfirmSnapshotImport(keepAllowlist);
+          }}
+          onOpenChange={(open) => {
+            if (!open) {
+              personas.closeSnapshotImportDialog();
+            }
+          }}
         />
       ) : null}
       {personas.isCatalogDialogOpen ? (
@@ -393,19 +454,6 @@ export function AgentsView() {
           team={teamActions.teamToAddToChannel}
         />
       ) : null}
-      {personas.batchImportResult ? (
-        <BatchImportDialog
-          fileName={personas.batchImportFileName}
-          onComplete={personas.handleBatchImportComplete}
-          onOpenChange={(open) => {
-            if (!open) {
-              personas.setBatchImportResult(null);
-            }
-          }}
-          open={personas.batchImportResult !== null}
-          result={personas.batchImportResult}
-        />
-      ) : null}
       {teamActions.teamImportPreview ? (
         <TeamImportDialog
           fileName={teamActions.teamImportPreview.fileName}
@@ -437,33 +485,6 @@ export function AgentsView() {
           personas={personas.libraryPersonas}
           preview={teamActions.teamImportTargetPreview?.preview ?? null}
           team={teamActions.teamImportTarget}
-        />
-      ) : null}
-      {personas.personaImportActions.personaImportTarget ? (
-        <PersonaImportUpdateDialog
-          fileName={
-            personas.personaImportActions.personaImportTargetPreview
-              ?.fileName ?? ""
-          }
-          isPending={
-            personas.personaImportActions.isApplyingPersonaImportUpdate ||
-            personas.updatePersonaMutation.isPending
-          }
-          onApply={personas.personaImportActions.handleImportUpdateApply}
-          onClear={
-            personas.personaImportActions.clearImportUpdateAndReturnToEdit
-          }
-          onOpenChange={(open) => {
-            if (!open) {
-              personas.personaImportActions.closeImportUpdateDialog();
-            }
-          }}
-          open={personas.personaImportActions.personaImportTarget !== null}
-          persona={personas.personaImportActions.personaImportTarget}
-          preview={
-            personas.personaImportActions.personaImportTargetPreview?.preview ??
-            null
-          }
         />
       ) : null}
     </>

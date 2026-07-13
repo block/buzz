@@ -92,13 +92,16 @@ pub async fn start_pairing(
     // own NIP-11 declaration of NIP-43 support rather than `auth_required`,
     // which is also true for plain NIP-42 / NIP-OA relays where the main
     // relay is reachable.
-    let qr_relay_url = if probe_relay_supports_nip43(&ws_url).await {
-        let mut url = url::Url::parse(&ws_url).map_err(|e| format!("invalid relay URL: {e}"))?;
-        let path = url.path().trim_end_matches('/').to_string();
-        url.set_path(&format!("{path}/pair"));
-        url.to_string()
-    } else {
-        ws_url.clone()
+    let qr_relay_url = match probe_pairing_relay(&ws_url).await {
+        PairingRelay::Configured(url) => url,
+        PairingRelay::LegacyPath => {
+            let mut url =
+                url::Url::parse(&ws_url).map_err(|e| format!("invalid relay URL: {e}"))?;
+            let path = url.path().trim_end_matches('/').to_string();
+            url.set_path(&format!("{path}/pair"));
+            url.to_string()
+        }
+        PairingRelay::MainRelay => ws_url.clone(),
     };
 
     let (session, qr_payload) = PairingSession::new_source(qr_relay_url);
@@ -413,27 +416,24 @@ fn parse_relay_event(text: &str, sub_id: &str) -> Option<nostr::Event> {
     serde_json::from_value(arr[2].clone()).ok()
 }
 
-/// Check the relay's NIP-11 document to determine whether it advertises
-/// NIP-43 (relay membership). Returns `true` only if NIP-43 appears in the
-/// relay's `supported_nips`. Unreachable relays, malformed responses, and
-/// non-`ws(s)://` URLs all return `false`: we'd rather fail loudly against
-/// the main relay than misroute pairing to an undeployed `/pair` sidecar.
-///
-/// Converts the WebSocket URL to HTTP(S) and fetches `GET /` with
-/// `Accept: application/nostr+json` per NIP-11.
-///
-/// We test for NIP-43 specifically rather than the broader
-/// `limitation.auth_required` flag because the latter is also set on plain
-/// NIP-42 / NIP-OA relays, which accept unpaired peers on the main relay
-/// and have no `/pair` sidecar.
-async fn probe_relay_supports_nip43(relay_url: &str) -> bool {
-    // Convert ws(s):// to http(s):// for the NIP-11 fetch.
+/// Pairing route discovered from the main relay's NIP-11 document.
+#[derive(Debug, PartialEq, Eq)]
+enum PairingRelay {
+    Configured(String),
+    LegacyPath,
+    MainRelay,
+}
+
+/// Prefer the relay-advertised dedicated pairing URL. The legacy `/pair`
+/// convention remains as a compatibility fallback for NIP-43 relays that do
+/// not advertise the extension yet.
+async fn probe_pairing_relay(relay_url: &str) -> PairingRelay {
     let http_url = if let Some(rest) = relay_url.strip_prefix("wss://") {
         format!("https://{rest}")
     } else if let Some(rest) = relay_url.strip_prefix("ws://") {
         format!("http://{rest}")
     } else {
-        return false;
+        return PairingRelay::MainRelay;
     };
 
     let client = reqwest::Client::builder()
@@ -447,19 +447,112 @@ async fn probe_relay_supports_nip43(relay_url: &str) -> bool {
         .send()
         .await
     {
-        Ok(r) => r,
-        Err(_) => return false, // can't reach relay — assume open
+        Ok(response) => response,
+        Err(_) => return PairingRelay::MainRelay,
     };
 
     let json: serde_json::Value = match resp.json().await {
-        Ok(v) => v,
-        Err(_) => return false,
+        Ok(value) => value,
+        Err(_) => return PairingRelay::MainRelay,
     };
 
-    json.get("supported_nips")
-        .and_then(|v| v.as_array())
-        .map(|arr| arr.iter().any(|n| n.as_u64() == Some(43)))
-        .unwrap_or(false)
+    pairing_relay_from_nip11(&json)
+}
+
+fn pairing_relay_from_nip11(json: &serde_json::Value) -> PairingRelay {
+    if let Some(value) = json
+        .get("pairing_relay_url")
+        .and_then(|value| value.as_str())
+    {
+        if let Ok(url) = url::Url::parse(value) {
+            if matches!(url.scheme(), "ws" | "wss") && url.host_str().is_some() {
+                return PairingRelay::Configured(value.to_string());
+            }
+        }
+    }
+
+    if json
+        .get("supported_nips")
+        .and_then(|value| value.as_array())
+        .is_some_and(|nips| nips.iter().any(|nip| nip.as_u64() == Some(43)))
+    {
+        PairingRelay::LegacyPath
+    } else {
+        PairingRelay::MainRelay
+    }
+}
+
+#[cfg(test)]
+mod pairing_relay_tests {
+    use super::{pairing_relay_from_nip11, probe_pairing_relay, PairingRelay};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[tokio::test]
+    async fn live_nip11_probe_discovers_configured_pairing_relay() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test NIP-11 server");
+        let addr = listener.local_addr().expect("test server address");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept NIP-11 request");
+            let mut request = vec![0; 2048];
+            let bytes_read = stream.read(&mut request).await.expect("read request");
+            let request = String::from_utf8_lossy(&request[..bytes_read]);
+            assert!(request.starts_with("GET / HTTP/1.1"));
+            assert!(request
+                .to_ascii_lowercase()
+                .contains("accept: application/nostr+json"));
+
+            let body = r#"{"pairing_relay_url":"ws://127.0.0.1:5000"}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/nostr+json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream
+                .write_all(response.as_bytes())
+                .await
+                .expect("write response");
+        });
+
+        assert_eq!(
+            probe_pairing_relay(&format!("ws://{addr}")).await,
+            PairingRelay::Configured("ws://127.0.0.1:5000".to_string())
+        );
+        server.await.expect("NIP-11 server task");
+    }
+
+    #[test]
+    fn configured_pairing_relay_takes_precedence_over_legacy_path() {
+        let document = serde_json::json!({
+            "pairing_relay_url": "wss://pairing.buzz.xyz",
+            "supported_nips": [43]
+        });
+
+        assert_eq!(
+            pairing_relay_from_nip11(&document),
+            PairingRelay::Configured("wss://pairing.buzz.xyz".to_string())
+        );
+    }
+
+    #[test]
+    fn invalid_pairing_relay_url_falls_back_to_legacy_path() {
+        let document = serde_json::json!({
+            "pairing_relay_url": "https://pairing.buzz.xyz",
+            "supported_nips": [43]
+        });
+
+        assert_eq!(
+            pairing_relay_from_nip11(&document),
+            PairingRelay::LegacyPath
+        );
+    }
+
+    #[test]
+    fn document_without_pairing_configuration_uses_main_relay() {
+        let document = serde_json::json!({ "supported_nips": [1, 11] });
+
+        assert_eq!(pairing_relay_from_nip11(&document), PairingRelay::MainRelay);
+    }
 }
 
 fn parse_auth_challenge(text: &str) -> Option<String> {

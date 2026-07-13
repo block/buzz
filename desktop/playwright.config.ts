@@ -91,6 +91,14 @@ export default defineConfig({
         "**/channel-sort.spec.ts",
         "**/identity-lost.spec.ts",
         "**/global-agent-config-screenshots.spec.ts",
+        "**/doctor-states.spec.ts",
+        "**/onboarding-avatar-skip.spec.ts",
+        "**/onboarding-backup.spec.ts",
+        "**/onboarding-agent-defaults.spec.ts",
+        "**/profile-nsec-reveal.spec.ts",
+        "**/agent-provider-dropdowns.spec.ts",
+        "**/agent-lifecycle-feedback.spec.ts",
+        "**/inbox-live-update.spec.ts",
       ],
       use: {
         ...devices["Desktop Chrome"],
@@ -100,6 +108,8 @@ export default defineConfig({
       name: "integration",
       testMatch: [
         "**/agents.spec.ts",
+        "**/agent-snapshot-send.spec.ts",
+        "**/agent-snapshot-recipient.spec.ts",
         "**/onboarding.spec.ts",
         "**/stream.spec.ts",
         "**/integration.spec.ts",

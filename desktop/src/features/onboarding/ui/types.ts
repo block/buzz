@@ -3,6 +3,7 @@ import type { AcpRuntimeCatalogEntry, Profile } from "@/shared/api/types";
 export type OnboardingPage =
   | "profile"
   | "key-import"
+  | "backup"
   | "avatar"
   | "theme"
   | "setup"

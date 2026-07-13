@@ -420,7 +420,6 @@ export type ManagedAgent = {
    * Always `false` for stopped agents.
    */
   needsRestart: boolean;
-  mcpToolsets: string | null;
   /** Per-agent env vars. Layered on top of persona envVars. */
   envVars: Record<string, string>;
   status: "running" | "stopped" | "deployed" | "not_deployed";
@@ -493,7 +492,6 @@ export type CreateManagedAgentInput = {
   avatarUrl?: string;
   model?: string;
   provider?: string;
-  mcpToolsets?: string;
   envVars?: Record<string, string>;
   spawnAfterCreate?: boolean;
   startOnAppLaunch?: boolean;
@@ -546,8 +544,17 @@ export type ControlResultFrame = {
 export type AcpAvailabilityStatus =
   | "available"
   | "adapter_missing"
+  | "adapter_outdated"
   | "cli_missing"
   | "not_installed";
+
+/** Authentication/login status for a CLI-based ACP runtime. */
+export type AuthStatus =
+  | { status: "logged_in" }
+  | { status: "logged_out" }
+  | { status: "config_invalid"; diagnostic: string }
+  | { status: "not_applicable" }
+  | { status: "unknown" };
 
 export type AcpRuntimeCatalogEntry = {
   id: string;
@@ -562,6 +569,12 @@ export type AcpRuntimeCatalogEntry = {
   installInstructionsUrl: string;
   canAutoInstall: boolean;
   underlyingCliPath: string | null;
+  /** True when an npm adapter step is pending but Node.js / npm is absent. */
+  nodeRequired: boolean;
+  /** Login/auth status for CLI-based runtimes. */
+  authStatus: AuthStatus;
+  /** Hint for completing authentication; null when not applicable or already logged in. */
+  loginHint: string | null;
 };
 
 /** An AcpRuntimeCatalogEntry that is confirmed available — command and binaryPath are non-null. */
@@ -584,6 +597,8 @@ export type InstallStepResult = {
 export type InstallRuntimeResult = {
   success: boolean;
   steps: InstallStepResult[];
+  restartedCount: number;
+  failedRestartCount: number;
 };
 
 export type CommandAvailability = {
@@ -691,7 +706,6 @@ export type UpdateManagedAgentInput = {
   model?: string | null;
   provider?: string | null;
   systemPrompt?: string | null;
-  mcpToolsets?: string | null;
   /** Absent = don't touch. Present = replace the env_vars map entirely. */
   envVars?: Record<string, string>;
   parallelism?: number;
@@ -738,21 +752,19 @@ export type AgentPersona = {
   /** NIP-AP behavioral defaults (wire shape). Null/empty = unset. */
   respondTo: RespondToMode | null;
   respondToAllowlist: string[];
-  mcpToolsets: string | null;
   parallelism: number | null;
   createdAt: string;
   updatedAt: string;
 };
 
 /**
- * NIP-AP behavioral quad for a definition, sent as one group: absent = don't
- * touch the stored quad (legacy callers), present = replace all four as a
+ * NIP-AP behavioral group for a definition, sent as one group: absent = don't
+ * touch the stored behavior group (legacy callers), present = replace the fields as a
  * unit. Mirrors `PersonaBehaviorRequest`.
  */
 export type PersonaBehaviorInput = {
   respondTo?: RespondToMode;
   respondToAllowlist?: string[];
-  mcpToolsets?: string;
   parallelism?: number;
 };
 
@@ -997,4 +1009,18 @@ export type GlobalAgentConfig = {
   provider: string | null;
   /** Global fallback model identifier. Null = no global default. */
   model: string | null;
+};
+
+/**
+ * Result returned by `set_global_agent_config`.
+ *
+ * Mirrors the Rust `GlobalAgentConfigSaveResult` struct.
+ */
+export type GlobalAgentConfigSaveResult = {
+  /** The persisted global config (after strip-on-write). */
+  config: GlobalAgentConfig;
+  /** Number of local agents successfully stopped and restarted. */
+  restarted_count: number;
+  /** Number of agents whose stop succeeded but respawn failed. */
+  failed_restart_count: number;
 };

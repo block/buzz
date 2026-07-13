@@ -52,6 +52,22 @@ See:
 
 The chart fails at `helm install` / `helm template` time with a clear message if any of these are missing or malformed (see `templates/_validate.tpl`).
 
+## Device pairing relay
+
+The chart can run Buzz's stateless pairing WebSocket relay as an independent
+Deployment and Service using the same image as the main relay:
+
+```yaml
+pairingRelay:
+  enabled: true
+  url: wss://pairing.example.com
+```
+
+`pairingRelay.url` is advertised in the main relay's NIP-11 document so Buzz
+clients connect directly to the dedicated endpoint. The chart does not create
+an Ingress or HTTPRoute for the pairing Service; route the public hostname to
+`<release>-buzz-pairing:5000` with your platform's ingress configuration.
+
 ## HA (production)
 
 `replicaCount > 1` hard-requires Redis:

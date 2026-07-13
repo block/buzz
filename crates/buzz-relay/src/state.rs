@@ -1,5 +1,6 @@
 //! Shared application state — Arc-wrapped, shared across all connections.
 
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
@@ -206,6 +207,41 @@ impl ConnectionManager {
         self.connections
             .get(&conn_id)
             .map(|entry| Arc::clone(&entry.subscriptions))
+    }
+
+    /// Snapshot the number of live WebSocket connections per community.
+    ///
+    /// Returns a map from community UUID to connection count. Used by the
+    /// usage poller; snapshotting avoids per-community gauge drift from
+    /// mismatched inc/dec across async boundaries.
+    pub fn per_community_ws_connections(&self) -> HashMap<CommunityId, u64> {
+        let mut counts: HashMap<CommunityId, u64> = HashMap::new();
+        for entry in self.connections.iter() {
+            *counts.entry(entry.community_id).or_default() += 1;
+        }
+        counts
+    }
+
+    /// Snapshot the number of distinct authenticated pubkeys online per community.
+    ///
+    /// A pubkey connected to multiple pods will be counted once per pod — the
+    /// dashboard sums across pods, so per-pod partial counts are correct.
+    /// A pubkey connected twice on the same pod is counted once (distinct set).
+    pub fn per_community_users_online(&self) -> HashMap<CommunityId, u64> {
+        // community_id → set of pubkey bytes
+        let mut seen: HashMap<CommunityId, HashSet<Vec<u8>>> = HashMap::new();
+        for entry in self.connections.iter() {
+            if let Ok(lock) = entry.authenticated_pubkey.read() {
+                if let Some(pk) = lock.as_ref() {
+                    seen.entry(entry.community_id)
+                        .or_default()
+                        .insert(pk.clone());
+                }
+            }
+        }
+        seen.into_iter()
+            .map(|(cid, set)| (cid, set.len() as u64))
+            .collect()
     }
 
     /// Return the authenticated pubkey for a connection, if any.

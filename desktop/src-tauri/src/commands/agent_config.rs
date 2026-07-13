@@ -14,7 +14,7 @@ use crate::{
         },
         current_instance_id, known_acp_runtime, load_managed_agents, load_personas,
         resolve_effective_prompt_model_provider, save_managed_agents, sync_managed_agent_processes,
-        GlobalAgentConfig, KnownAcpRuntime, ManagedAgentRecord, PersonaRecord,
+        AgentDefinition, GlobalAgentConfig, KnownAcpRuntime, ManagedAgentRecord,
     },
 };
 
@@ -53,7 +53,7 @@ pub struct RuntimeFileConfigSubset {
 /// Buzz keeps `had_* == true` and is never re-tagged.
 fn resolve_config_surface(
     mut record: ManagedAgentRecord,
-    personas: &[PersonaRecord],
+    personas: &[AgentDefinition],
     runtime_meta: Option<&KnownAcpRuntime>,
     session_cache: Option<&SessionConfigCache>,
     global: &GlobalAgentConfig,
@@ -599,6 +599,8 @@ mod tests {
             max_tokens_env_var: Some("GOOSE_MAX_TOKENS"),
             context_limit_env_var: Some("GOOSE_CONTEXT_LIMIT"),
             required_normalized_fields: &["model", "provider"],
+            login_hint: None,
+            auth_probe_args: None,
         }
     }
 
@@ -621,7 +623,6 @@ mod tests {
             parallelism: 1,
             system_prompt: None,
             model: None,
-            mcp_toolsets: None,
             env_vars: BTreeMap::new(),
             start_on_app_launch: false,
             auto_restart_on_config_change: true,
@@ -650,7 +651,6 @@ mod tests {
             source_team_persona_slug: None,
             definition_respond_to: None,
             definition_respond_to_allowlist: Vec::new(),
-            definition_mcp_toolsets: None,
             definition_parallelism: None,
             relay_mesh: None,
             agent_command_override: None,
@@ -659,8 +659,8 @@ mod tests {
         }
     }
 
-    fn persona_with_model(model: &str) -> PersonaRecord {
-        PersonaRecord {
+    fn persona_with_model(model: &str) -> AgentDefinition {
+        AgentDefinition {
             id: "persona-1".to_string(),
             display_name: "Persona".to_string(),
             avatar_url: None,
@@ -676,7 +676,6 @@ mod tests {
             env_vars: BTreeMap::new(),
             respond_to: None,
             respond_to_allowlist: Vec::new(),
-            mcp_toolsets: None,
             parallelism: None,
             created_at: "".to_string(),
             updated_at: "".to_string(),
@@ -730,7 +729,7 @@ mod tests {
         let mut record = agent_record();
         record.persona_id = None;
         record.model = Some("model-x".to_string());
-        let personas: Vec<PersonaRecord> = vec![];
+        let personas: Vec<AgentDefinition> = vec![];
         let cache = session_cache("model-y", false);
 
         let surface = resolve_config_surface(
@@ -758,7 +757,7 @@ mod tests {
         let mut record = agent_record();
         record.persona_id = None;
         record.model = Some("model-x".to_string());
-        let personas: Vec<PersonaRecord> = vec![];
+        let personas: Vec<AgentDefinition> = vec![];
         let cache = session_cache("model-y", true);
 
         let surface = resolve_config_surface(
@@ -785,7 +784,7 @@ mod tests {
         let mut record = agent_record();
         record.persona_id = None;
         record.model = Some("model-x".to_string());
-        let personas: Vec<PersonaRecord> = vec![];
+        let personas: Vec<AgentDefinition> = vec![];
         let cache = session_cache("model-x", true);
 
         let surface = resolve_config_surface(
@@ -840,7 +839,7 @@ mod tests {
         let mut record = agent_record();
         record.persona_id = None;
         // record.model = None (set by agent_record())
-        let personas: Vec<PersonaRecord> = vec![];
+        let personas: Vec<AgentDefinition> = vec![];
         let cache = session_cache("model-y", true);
         let global = crate::managed_agents::GlobalAgentConfig {
             model: Some("global-model".to_string()),

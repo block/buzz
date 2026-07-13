@@ -32,7 +32,16 @@ import {
 import {
   createPersona,
   deletePersona,
-  exportPersonaToJson,
+  exportAgentSnapshot,
+  encodeAgentSnapshotForSend,
+  previewAgentSnapshotImport,
+  confirmAgentSnapshotImport,
+  type AgentSnapshotImportPreview,
+  type AgentSnapshotImportConfirm,
+  type AgentSnapshotImportResult,
+  type EncodedSnapshotPayload,
+  type SnapshotMemoryLevel,
+  type SnapshotFormat,
   listPersonas,
   setPersonaActive,
   updatePersona,
@@ -57,7 +66,6 @@ import type {
 } from "@/shared/api/types";
 import type {
   AttachManagedAgentToChannelInput,
-  AttachManagedAgentToChannelResult,
   CreateChannelManagedAgentInput,
   CreateChannelManagedAgentsResult,
   CreateChannelManagedAgentResult,
@@ -83,10 +91,6 @@ export const teamsQueryKey = ["teams"] as const;
 export const acpRuntimesQueryKey = ["acp-runtimes"] as const;
 export const managedAgentPrereqsQueryKey = ["managed-agent-prereqs"] as const;
 export const backendProvidersQueryKey = ["backend-providers"] as const;
-
-export type EnsureGooseInChannelResult = AttachManagedAgentToChannelResult & {
-  created: boolean;
-};
 
 async function invalidateAgentQueries(
   queryClient: ReturnType<typeof useQueryClient>,
@@ -159,6 +163,7 @@ export function useInstallAcpRuntimeMutation() {
     mutationFn: (runtimeId: string) => installAcpRuntime(runtimeId),
     onSettled: () => {
       void queryClient.invalidateQueries({ queryKey: acpRuntimesQueryKey });
+      void queryClient.invalidateQueries({ queryKey: managedAgentsQueryKey });
     },
   });
 }
@@ -590,44 +595,65 @@ export function useCreateChannelManagedAgentsMutation(
   });
 }
 
-export function useEnsureGooseInChannelMutation(channelId: string | null) {
-  const queryClient = useQueryClient();
-
+export function useExportAgentSnapshotMutation() {
   return useMutation({
-    mutationFn: async (): Promise<EnsureGooseInChannelResult> => {
-      if (!channelId) {
-        throw new Error("No channel selected.");
-      }
-
-      const attached = await ensureChannelAgentPresetInChannel(channelId, {
-        runtime: {
-          id: "goose",
-          label: "Goose",
-          command: "goose",
-          defaultArgs: ["acp"],
-          mcpCommand: null,
-        },
-        role: "bot",
-      });
-
-      return {
-        agent: attached.agent,
-        membershipAdded: attached.membershipAdded,
-        started: attached.started,
-        created: attached.created,
-      };
-    },
-    onSettled: () => {
-      invalidateAgentQueriesInBackground(queryClient, channelId);
-    },
+    mutationFn: ({
+      id,
+      memoryLevel,
+      format,
+      memorySourcePubkey,
+    }: {
+      id: string;
+      memoryLevel: SnapshotMemoryLevel;
+      format: SnapshotFormat;
+      memorySourcePubkey?: string | null;
+    }) => exportAgentSnapshot(id, memoryLevel, format, memorySourcePubkey),
   });
 }
 
-export function useExportPersonaJsonMutation() {
+export function useEncodeAgentSnapshotForSendMutation() {
   return useMutation({
-    mutationFn: (id: string) => exportPersonaToJson(id),
+    mutationFn: ({
+      id,
+      memoryLevel,
+      format,
+      memorySourcePubkey,
+    }: {
+      id: string;
+      memoryLevel: SnapshotMemoryLevel;
+      format: SnapshotFormat;
+      memorySourcePubkey?: string | null;
+    }) =>
+      encodeAgentSnapshotForSend(id, memoryLevel, format, memorySourcePubkey),
   });
 }
+
+export function usePreviewAgentSnapshotImportMutation() {
+  return useMutation({
+    mutationFn: ({
+      fileBytes,
+      fileName,
+    }: {
+      fileBytes: number[];
+      fileName: string;
+    }) => previewAgentSnapshotImport(fileBytes, fileName),
+  });
+}
+
+export function useConfirmAgentSnapshotImportMutation() {
+  return useMutation({
+    mutationFn: (input: AgentSnapshotImportConfirm) =>
+      confirmAgentSnapshotImport(input),
+  });
+}
+
+// Re-export import types for consumers that import from hooks.
+export type {
+  AgentSnapshotImportPreview,
+  AgentSnapshotImportConfirm,
+  AgentSnapshotImportResult,
+  EncodedSnapshotPayload,
+};
 
 export function useManagedAgentLogQuery(
   pubkey: string | null,

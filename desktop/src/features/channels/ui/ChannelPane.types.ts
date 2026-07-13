@@ -46,6 +46,8 @@ export type ChannelPaneProps = {
   fetchOlder?: () => Promise<void>;
   header?: React.ReactNode;
   hasOlderMessages?: boolean;
+  /** True when the loaded window provably starts at the channel's beginning. */
+  historyExhausted?: boolean;
   isFetchingOlder?: boolean;
   isJoining?: boolean;
   isSinglePanelView?: boolean;
@@ -137,6 +139,7 @@ export type ChannelPaneProps = {
   profilePanelView: ProfilePanelView;
   threadHeadMessage: TimelineMessage | null;
   threadMessages: MainTimelineEntry[];
+  threadMessagesPending?: boolean;
   threadPanelWidthPx: number;
   threadTypingPubkeys: string[];
   threadReplyTargetMessage: TimelineMessage | null;

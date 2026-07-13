@@ -1073,10 +1073,17 @@ async fn handle_agent_profile(
         .ok_or_else(|| anyhow::anyhow!("kind:10100 missing channel_add_policy field"))?;
 
     let pubkey_bytes = event.pubkey.to_bytes().to_vec();
-    state
+    if state
         .db
         .ensure_user(tenant.community(), &pubkey_bytes)
-        .await?;
+        .await?
+    {
+        metrics::counter!(
+            "buzz_users_created_total",
+            "community" => tenant.host().to_owned()
+        )
+        .increment(1);
+    }
     state
         .db
         .set_channel_add_policy(tenant.community(), &pubkey_bytes, policy)
@@ -1124,10 +1131,17 @@ async fn handle_kind0_profile(
 
     let pubkey_bytes = event.pubkey.to_bytes().to_vec();
 
-    state
+    if state
         .db
         .ensure_user(tenant.community(), &pubkey_bytes)
-        .await?;
+        .await?
+    {
+        metrics::counter!(
+            "buzz_users_created_total",
+            "community" => tenant.host().to_owned()
+        )
+        .increment(1);
+    }
 
     // Pass all fields as Some — empty string clears the field in the DB.
     // This ensures kind:0 is treated as absolute state, not a partial update.
@@ -1653,13 +1667,21 @@ async fn handle_create_group(
     // If the event has an h-tag UUID, ingest_event() already created the channel
     // via create_channel_with_id(). Fetch it rather than creating a duplicate.
     // If no h-tag, fall back to the original auto-UUID creation path.
+    //
+    // Double-count analysis (C5): the counter increments below do NOT
+    // double-count vs. ingest.rs. For the h-tag path, ingest increments on
+    // was_created=true and this handler only reaches create_channel() on a DB
+    // lookup Err — an error recovery path where ingest's channel is
+    // inaccessible, so the counter correctly records a new creation. For the
+    // no-h-tag path, ingest never creates the channel, so this is the sole
+    // increment.
     let channel = if let Some(client_uuid) = extract_h_tag_channel(event) {
         match state.db.get_channel(tenant.community(), client_uuid).await {
             Ok(ch) => ch,
             Err(_) => {
                 // Channel not found — shouldn't happen (ingest_event pre-created it),
                 // but fall back to creation to stay resilient.
-                state
+                let ch = state
                     .db
                     .create_channel(
                         tenant.community(),
@@ -1670,11 +1692,18 @@ async fn handle_create_group(
                         &actor_bytes,
                         ttl_seconds,
                     )
-                    .await?
+                    .await?;
+                metrics::counter!(
+                    "buzz_channels_created_total",
+                    "community" => tenant.host().to_owned(),
+                    "type" => channel_type.to_string()
+                )
+                .increment(1);
+                ch
             }
         }
     } else {
-        state
+        let ch = state
             .db
             .create_channel(
                 tenant.community(),
@@ -1685,7 +1714,14 @@ async fn handle_create_group(
                 &actor_bytes,
                 ttl_seconds,
             )
-            .await?
+            .await?;
+        metrics::counter!(
+            "buzz_channels_created_total",
+            "community" => tenant.host().to_owned(),
+            "type" => channel_type.to_string()
+        )
+        .increment(1);
+        ch
     };
 
     // Creator becomes owner — evict any stale negative membership lookup.

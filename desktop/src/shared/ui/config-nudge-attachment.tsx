@@ -93,6 +93,8 @@ function cliLoginMessage(
       return `${harness} CLI is missing`;
     case "adapter_missing":
       return `${harness} ACP adapter isn't installed`;
+    case "adapter_outdated":
+      return `${harness} ACP adapter is outdated — reinstall required`;
     case "available":
       // Tooling is present but authentication is needed — fall back to
       // the backend-supplied copy which has the exact login command.

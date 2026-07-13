@@ -30,7 +30,7 @@ use crate::managed_agents::env_vars::{
     validate_user_env_keys, DERIVED_PROVIDER_MODEL_ENV_KEYS, MAX_ENV_VALUE_BYTES,
 };
 use crate::managed_agents::storage::{atomic_write_json_restricted, managed_agents_base_dir};
-use crate::managed_agents::types::{ManagedAgentRecord, PersonaRecord};
+use crate::managed_agents::types::{AgentDefinition, ManagedAgentRecord};
 
 /// The global agent configuration record.
 ///
@@ -216,7 +216,7 @@ pub fn save_global_agent_config(app: &AppHandle, config: &GlobalAgentConfig) -> 
 /// `(effective_model, effective_provider)` — both `Option<&str>`.
 pub(crate) fn resolve_effective_model_provider<'a>(
     record: &'a ManagedAgentRecord,
-    personas: &'a [PersonaRecord],
+    personas: &'a [AgentDefinition],
     global: &'a GlobalAgentConfig,
 ) -> (Option<&'a str>, Option<&'a str>) {
     let (persona_model, persona_provider) = record

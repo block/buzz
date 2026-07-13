@@ -52,3 +52,27 @@ function arraysShallowEqual(
   }
   return true;
 }
+
+/**
+ * Returns `next` but preserves the previous reference when the two Sets have
+ * identical membership. Same purpose as `useStableMap` for Set-valued derived
+ * state (e.g. pubkey sets rebuilt whenever a polling query re-materialises
+ * its data without changing which pubkeys are in it).
+ */
+export function useStableSet<T>(next: ReadonlySet<T>): ReadonlySet<T> {
+  const ref = React.useRef(next);
+  const prev = ref.current;
+  if (prev !== next && setsEqual(prev, next)) {
+    return prev;
+  }
+  ref.current = next;
+  return next;
+}
+
+function setsEqual<T>(a: ReadonlySet<T>, b: ReadonlySet<T>): boolean {
+  if (a.size !== b.size) return false;
+  for (const value of a) {
+    if (!b.has(value)) return false;
+  }
+  return true;
+}

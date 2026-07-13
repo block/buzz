@@ -76,6 +76,7 @@ export const ChannelPane = React.memo(function ChannelPane({
   fetchOlder,
   header,
   hasOlderMessages,
+  historyExhausted,
   isFetchingOlder,
   followThreadById,
   isFollowingThread,
@@ -138,6 +139,7 @@ export const ChannelPane = React.memo(function ChannelPane({
   targetMessageId,
   threadHeadMessage,
   threadMessages,
+  threadMessagesPending = false,
   threadPanelWidthPx,
   threadScrollTargetId,
   threadTypingPubkeys,
@@ -190,6 +192,7 @@ export const ChannelPane = React.memo(function ChannelPane({
     timelineScrollRef,
     composerWrapperRef,
     `${activeChannelId}:${isSinglePanelView}:${hasMainComposerOverlay}`,
+    "css-variable",
   );
   const clearWelcomeComposerDismissTimer = React.useCallback(() => {
     if (welcomeComposerDismissTimerRef.current !== null) {
@@ -606,7 +609,6 @@ export const ChannelPane = React.memo(function ChannelPane({
           ) : null}
           <MessageTimeline
             ref={messageTimelineRef}
-            agentPubkeys={agentPubkeys}
             channelId={activeChannel?.id}
             channelIntro={channelIntro}
             directMessageIntro={directMessageIntro}
@@ -616,6 +618,7 @@ export const ChannelPane = React.memo(function ChannelPane({
             followThreadById={followThreadById}
             hasComposerOverlay={hasMainComposerOverlay}
             hasOlderMessages={hasOlderMessages}
+            historyExhausted={historyExhausted}
             huddleMemberPubkeys={huddleMemberPubkeys}
             huddleMemberPubkeysPending={huddleMemberPubkeysPending}
             isFetchingOlder={isFetchingOlder}
@@ -659,6 +662,9 @@ export const ChannelPane = React.memo(function ChannelPane({
             searchMatchingMessageIds={channelFind.matchingMessageIds}
             searchQuery={channelFind.query}
             targetMessageId={targetMessageId}
+            splitThreadPanelOpen={
+              useSplitAuxiliaryPane && Boolean(openThreadHeadId)
+            }
             threadUnreadCounts={threadUnreadCounts}
           />
           {isNonMemberView ? (
@@ -689,7 +695,7 @@ export const ChannelPane = React.memo(function ChannelPane({
             </div>
           ) : (
             <div
-              className="pointer-events-none absolute inset-x-0 bottom-0 z-40"
+              className="pointer-events-none absolute inset-x-0 bottom-0 z-40 bg-background/70 backdrop-blur-md supports-[backdrop-filter]:bg-background/55"
               data-testid="channel-composer-overlay"
               ref={composerWrapperRef}
             >
@@ -735,7 +741,7 @@ export const ChannelPane = React.memo(function ChannelPane({
                   }
                   showTopBorder={false}
                 />
-                <div className="min-h-8 overflow-visible bg-background px-5 pb-1.5 pt-0">
+                <div className="min-h-8 overflow-visible bg-transparent px-5 pb-1.5 pt-0">
                   <div className="flex h-full w-full items-center gap-2 overflow-visible">
                     {hasComposerBotActivity ? (
                       <div className="flex min-w-0 flex-1 overflow-visible">
@@ -788,7 +794,6 @@ export const ChannelPane = React.memo(function ChannelPane({
         (() => {
           const panel = (
             <MessageThreadPanel
-              agentPubkeys={agentPubkeys}
               channel={activeChannel}
               channelId={activeChannel?.id ?? null}
               channelName={activeChannel?.name ?? "channel"}
@@ -831,6 +836,7 @@ export const ChannelPane = React.memo(function ChannelPane({
               threadHeadVideoReviewContext={threadHeadVideoReviewContext}
               widthPx={threadPanelWidthPx}
               threadReplies={threadMessages}
+              threadRepliesPending={threadMessagesPending}
               threadUnreadCount={threadUnreadCounts?.get(threadHeadMessage.id)}
               threadReplyUnreadCounts={threadReplyUnreadCounts}
               threadTypingPubkeys={threadTypingPubkeys}

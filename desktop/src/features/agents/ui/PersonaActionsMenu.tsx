@@ -1,6 +1,13 @@
-import { BookUser, CopyPlus, Ellipsis, Pencil, Trash2 } from "lucide-react";
+import {
+  BookUser,
+  CopyPlus,
+  Ellipsis,
+  FileDown,
+  Pencil,
+  Trash2,
+} from "lucide-react";
 
-import type { AgentPersona } from "@/shared/api/types";
+import type { AgentPersona, ManagedAgent } from "@/shared/api/types";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -13,18 +20,27 @@ export function PersonaActionsMenu({
   isActionPending,
   isPending,
   persona,
+  linkedAgent,
   onDuplicate,
   onEdit,
   onShare,
+  onExportSnapshot,
   onDeactivate,
   onDelete,
 }: {
   isActionPending: boolean;
   isPending: boolean;
   persona: AgentPersona;
+  /** Profile agent instance linked to this definition, if one exists. Used to
+   *  supply a memory-source pubkey when the user exports with memory. */
+  linkedAgent: ManagedAgent | undefined;
   onDuplicate: (persona: AgentPersona) => void;
   onEdit: (persona: AgentPersona) => void;
   onShare: (persona: AgentPersona) => void;
+  onExportSnapshot: (
+    persona: AgentPersona,
+    linkedAgent: ManagedAgent | undefined,
+  ) => void;
   onDeactivate: (persona: AgentPersona) => void;
   onDelete: (persona: AgentPersona) => void;
 }) {
@@ -62,6 +78,13 @@ export function PersonaActionsMenu({
         >
           <CopyPlus className="h-4 w-4" />
           Duplicate
+        </DropdownMenuItem>
+        <DropdownMenuItem
+          disabled={disabled}
+          onClick={() => onExportSnapshot(persona, linkedAgent)}
+        >
+          <FileDown className="h-4 w-4" />
+          Export snapshot
         </DropdownMenuItem>
         <DropdownMenuSeparator />
         {persona.sourceTeam ? (

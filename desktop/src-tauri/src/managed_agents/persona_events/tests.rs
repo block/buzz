@@ -1,7 +1,7 @@
 use super::*;
 
-fn sample_persona() -> PersonaRecord {
-    PersonaRecord {
+fn sample_persona() -> AgentDefinition {
+    AgentDefinition {
         id: "test-persona".to_string(),
         display_name: "Test Persona".to_string(),
         avatar_url: Some("https://example.com/avatar.png".to_string()),
@@ -17,7 +17,6 @@ fn sample_persona() -> PersonaRecord {
         env_vars: BTreeMap::from([("KEY".to_string(), "value".to_string())]),
         respond_to: None,
         respond_to_allowlist: Vec::new(),
-        mcp_toolsets: None,
         parallelism: None,
         created_at: "2025-01-01T00:00:00Z".to_string(),
         updated_at: "2025-01-01T00:00:00Z".to_string(),
@@ -165,7 +164,6 @@ fn content_matches_nip_ap_vector() {
         name_pool: vec!["Alpha".to_string(), "Beta".to_string()],
         respond_to: None,
         respond_to_allowlist: Vec::new(),
-        mcp_toolsets: None,
         parallelism: None,
     };
     assert_eq!(
@@ -209,7 +207,7 @@ fn content_matches_nip_ap_vector() {
     // An event built from this content carries the byte-exact vector as its
     // signed content, so a second implementer following the spec computes
     // the same NIP-01 id.
-    let record = PersonaRecord {
+    let record = AgentDefinition {
         id: "test-agent".to_string(),
         display_name: "Test Agent".to_string(),
         avatar_url: Some("https://example.com/avatar.png".to_string()),
@@ -225,7 +223,6 @@ fn content_matches_nip_ap_vector() {
         env_vars: BTreeMap::new(),
         respond_to: None,
         respond_to_allowlist: Vec::new(),
-        mcp_toolsets: None,
         parallelism: None,
         created_at: "2025-01-01T00:00:00Z".to_string(),
         updated_at: "2025-01-01T00:00:00Z".to_string(),
@@ -239,7 +236,7 @@ fn content_matches_nip_ap_vector() {
 
 #[test]
 fn round_trip_minimal_persona() {
-    let record = PersonaRecord {
+    let record = AgentDefinition {
         id: "minimal".to_string(),
         display_name: "Minimal".to_string(),
         avatar_url: None,
@@ -255,7 +252,6 @@ fn round_trip_minimal_persona() {
         env_vars: BTreeMap::new(),
         respond_to: None,
         respond_to_allowlist: Vec::new(),
-        mcp_toolsets: None,
         parallelism: None,
         created_at: "2025-01-01T00:00:00Z".to_string(),
         updated_at: "2025-01-01T00:00:00Z".to_string(),
@@ -306,7 +302,7 @@ fn build_persona_delete_has_single_a_tag_no_e_tag() {
 }
 
 /// NIP-AP behavioral defaults are LIVE since B5 (create-path
-/// unification): the wire fields are carried on PersonaRecord in wire
+/// unification): the wire fields are carried on AgentDefinition in wire
 /// shape and re-emitted verbatim by the projection — a foreign
 /// definition's behavioral values now survive a local
 /// edit-and-republish cycle. This test replaces
@@ -314,7 +310,7 @@ fn build_persona_delete_has_single_a_tag_no_e_tag() {
 /// whose deliberate removal was pinned in the B5 review gates.
 #[test]
 fn behavioral_defaults_survive_record_round_trip() {
-    const FOREIGN: &str = r#"{"display_name":"F","system_prompt":"p","respond_to":"anyone","respond_to_allowlist":["deadbeef"],"mcp_toolsets":"default","parallelism":4}"#;
+    const FOREIGN: &str = r#"{"display_name":"F","system_prompt":"p","respond_to":"anyone","respond_to_allowlist":["deadbeef"],"parallelism":4}"#;
     let parsed: PersonaEventContent = serde_json::from_str(FOREIGN).unwrap();
     // Wire layer preserves the fields...
     assert_eq!(parsed.respond_to.as_deref(), Some("anyone"));
@@ -324,7 +320,6 @@ fn behavioral_defaults_survive_record_round_trip() {
     let reprojected = persona_event_content(&record);
     assert_eq!(reprojected.respond_to.as_deref(), Some("anyone"));
     assert_eq!(reprojected.respond_to_allowlist, vec!["deadbeef"]);
-    assert_eq!(reprojected.mcp_toolsets.as_deref(), Some("default"));
     assert_eq!(reprojected.parallelism, Some(4));
 }
 
@@ -336,7 +331,7 @@ fn behavioral_defaults_survive_record_round_trip() {
 /// and no republish wave fires for quad-absent definitions.
 #[test]
 fn quad_absent_definition_hash_stable_across_activation() {
-    let record = PersonaRecord {
+    let record = AgentDefinition {
         id: "quad-absent".to_string(),
         display_name: "Test".to_string(),
         avatar_url: None,
@@ -352,7 +347,6 @@ fn quad_absent_definition_hash_stable_across_activation() {
         env_vars: BTreeMap::new(),
         respond_to: None,
         respond_to_allowlist: Vec::new(),
-        mcp_toolsets: None,
         parallelism: None,
         created_at: "2026-01-01T00:00:00Z".to_string(),
         updated_at: "2026-01-01T00:00:00Z".to_string(),
@@ -362,7 +356,6 @@ fn quad_absent_definition_hash_stable_across_activation() {
     let reserved_era = PersonaEventContent {
         respond_to: None,
         respond_to_allowlist: Vec::new(),
-        mcp_toolsets: None,
         parallelism: None,
         ..live.clone()
     };
@@ -377,10 +370,10 @@ fn quad_absent_definition_hash_stable_across_activation() {
     );
 }
 
-/// Test-only bridge: build a PersonaRecord from parsed content the same
+/// Test-only bridge: build an AgentDefinition from parsed content the same
 /// way `persona_from_event` maps fields, without needing a signed event.
-fn persona_from_event_content_for_test(content: PersonaEventContent) -> PersonaRecord {
-    PersonaRecord {
+fn persona_from_event_content_for_test(content: PersonaEventContent) -> AgentDefinition {
+    AgentDefinition {
         id: "staged".to_string(),
         display_name: content.display_name,
         avatar_url: content.avatar_url,
@@ -396,7 +389,6 @@ fn persona_from_event_content_for_test(content: PersonaEventContent) -> PersonaR
         env_vars: BTreeMap::new(),
         respond_to: content.respond_to,
         respond_to_allowlist: content.respond_to_allowlist,
-        mcp_toolsets: content.mcp_toolsets,
         parallelism: content.parallelism,
         created_at: "2026-01-01T00:00:00Z".to_string(),
         updated_at: "2026-01-01T00:00:00Z".to_string(),
@@ -415,7 +407,6 @@ fn persona_content_hash_is_deterministic() {
         name_pool: vec![],
         respond_to: None,
         respond_to_allowlist: Vec::new(),
-        mcp_toolsets: None,
         parallelism: None,
     };
     let hash1 = persona_content_hash(&content);
@@ -436,7 +427,6 @@ fn persona_content_hash_changes_on_edit() {
         name_pool: vec![],
         respond_to: None,
         respond_to_allowlist: Vec::new(),
-        mcp_toolsets: None,
         parallelism: None,
     };
     let mut content2 = content1.clone();
@@ -514,8 +504,8 @@ fn snapshot_runtime_verbatim_from_persona() {
 // ── persona_snapshot_with_agent_config_fallback ────────────────────────────
 
 /// Helper: a persona with no model/provider configured.
-fn blank_model_persona() -> PersonaRecord {
-    PersonaRecord {
+fn blank_model_persona() -> AgentDefinition {
+    AgentDefinition {
         model: None,
         provider: None,
         ..sample_persona()

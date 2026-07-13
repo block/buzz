@@ -358,7 +358,12 @@ pub async fn upload_blob(
         }
         _ => "other",
     };
-    metrics::counter!("buzz_media_uploads_total", "mime" => mime_label.to_owned()).increment(1);
+    metrics::counter!(
+        "buzz_media_uploads_total",
+        "mime" => mime_label.to_owned(),
+        "community" => auth.tenant.host().to_owned()
+    )
+    .increment(1);
 
     // Audit via bounded channel — same pattern as event audit.
     let desc = descriptor.clone();

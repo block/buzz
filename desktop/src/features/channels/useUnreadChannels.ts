@@ -33,11 +33,30 @@ import {
 import type { RelayClient } from "@/shared/api/relayClientSession";
 import type { Channel, RelayEvent } from "@/shared/api/types";
 import { CHANNEL_MESSAGE_EVENT_KINDS } from "@/shared/constants/kinds";
+import { normalizeRelayUrl } from "@/features/profile/lib/selfProfileStorage";
 import { DM_NOTIFIABLE_EVENT_KINDS } from "./isDmNotifiableKind";
+import {
+  activityScopeKey,
+  addThreadActivityItems,
+  projectActivityForScope,
+  readActivityFromStorage,
+  writeActivityToStorage,
+  type ThreadActivityItem,
+} from "@/features/channels/threadActivityStorage";
+export type { ThreadActivityItem } from "@/features/channels/threadActivityStorage";
+export {
+  activityScopeKey,
+  activityStorageKey,
+  addThreadActivityItems,
+  projectActivityForScope,
+  readActivityFromStorage,
+  writeActivityToStorage,
+} from "@/features/channels/threadActivityStorage";
 
 type UseUnreadChannelsOptions = UseLiveChannelUpdatesOptions & {
   pubkey?: string;
   relayClient?: RelayClient;
+  relayUrl?: string;
   mutedChannelIds?: ReadonlySet<string>;
 };
 
@@ -63,84 +82,6 @@ const authoredStore = makeRootIdStore("buzz-thread-authored.v1");
 // authored, or followed still gets the thread-unread badge.
 const mentionedStore = makeRootIdStore("buzz-thread-mentioned.v1");
 const mutedStore = makeRootIdStore("buzz-thread-muted.v1");
-
-export type ThreadActivityItem = {
-  id: string;
-  kind: number;
-  pubkey: string;
-  content: string;
-  createdAt: number;
-  channelId: string;
-  channelName: string;
-  tags: string[][];
-};
-
-const ACTIVITY_STORAGE_PREFIX = "buzz-thread-activity.v1";
-const MAX_ACTIVITY_ITEMS = 100;
-
-function activityStorageKey(pubkey: string): string {
-  return `${ACTIVITY_STORAGE_PREFIX}:${pubkey}`;
-}
-
-function readActivityFromStorage(pubkey: string): ThreadActivityItem[] {
-  try {
-    const raw = window.localStorage.getItem(activityStorageKey(pubkey));
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-    return parsed.filter(
-      (item): item is ThreadActivityItem =>
-        typeof item === "object" &&
-        item !== null &&
-        typeof item.id === "string",
-    );
-  } catch {
-    return [];
-  }
-}
-
-function writeActivityToStorage(
-  pubkey: string,
-  items: ThreadActivityItem[],
-): void {
-  try {
-    const capped =
-      items.length > MAX_ACTIVITY_ITEMS
-        ? items.slice(items.length - MAX_ACTIVITY_ITEMS)
-        : items;
-    window.localStorage.setItem(
-      activityStorageKey(pubkey),
-      JSON.stringify(capped),
-    );
-  } catch {
-    // Ignore storage errors.
-  }
-}
-
-export function addThreadActivityItems(
-  existing: ThreadActivityItem[],
-  items: ThreadActivityItem[],
-) {
-  if (items.length === 0) {
-    return { didAdd: false, items: existing };
-  }
-
-  const existingIds = new Set(existing.map((item) => item.id));
-  const newItems = items.filter((item) => !existingIds.has(item.id));
-  if (newItems.length === 0) {
-    return { didAdd: false, items: existing };
-  }
-
-  const merged = [...existing, ...newItems].sort(
-    (left, right) => left.createdAt - right.createdAt,
-  );
-  const capped =
-    merged.length > MAX_ACTIVITY_ITEMS
-      ? merged.slice(merged.length - MAX_ACTIVITY_ITEMS)
-      : merged;
-
-  return { didAdd: true, items: capped };
-}
 
 function parseTimestamp(value: string | null | undefined) {
   if (!value) {
@@ -200,11 +141,25 @@ export function useUnreadChannels(
   const {
     pubkey,
     relayClient,
+    relayUrl: relayUrlOption,
     mutedChannelIds: mutedChannelIdsOption,
     ...liveUpdateOptions
   } = options;
   const activeChannelId = activeChannel?.id ?? null;
   const normalizedPubkey = pubkey?.toLowerCase() ?? null;
+  // Scoped relay key for activity storage; empty string when relay not yet known
+  // so rows from an unknown relay never load into the wrong workspace.
+  const normalizedRelayUrl = relayUrlOption
+    ? normalizeRelayUrl(relayUrlOption)
+    : "";
+  // Single identity for the in-memory thread-activity buffer — computed once
+  // per render and used at reset, both writers, and the return fence. The
+  // helper returns "" when either value is absent, which never matches a valid
+  // loaded scope, so the fence returns [] until the buffer is seeded.
+  const currentActivityScope = activityScopeKey(
+    normalizedPubkey,
+    normalizedRelayUrl,
+  );
 
   const {
     getEffectiveTimestamp,
@@ -287,6 +242,10 @@ export function useUnreadChannels(
   // Thread reply events that triggered notifications — surfaced in the Home
   // activity feed as synthetic FeedItems.
   const threadActivityRef = React.useRef<ThreadActivityItem[]>([]);
+  // Tracks the (pubkey:relayUrl) scope currently loaded into threadActivityRef.
+  // Writers guard against this before merging so in-flight writes from a prior
+  // scope cannot corrupt the new one; renders return [] until it matches.
+  const threadActivityScopeRef = React.useRef<string>("");
 
   // Tracks which channels we've already issued a catch-up REQ for this
   // session. Prevents re-fetching on every channels-list refetch, while still
@@ -328,10 +287,14 @@ export function useUnreadChannels(
       ? mentionedStore.read(pubkey)
       : new Set();
     mutedRootIdsRef.current = pubkey ? mutedStore.read(pubkey) : new Set();
-    threadActivityRef.current = pubkey ? readActivityFromStorage(pubkey) : [];
+    threadActivityRef.current =
+      normalizedPubkey && normalizedRelayUrl
+        ? readActivityFromStorage(normalizedPubkey, normalizedRelayUrl)
+        : [];
+    threadActivityScopeRef.current = currentActivityScope;
     bumpLatestVersion();
     bumpMembershipVersion();
-  }, [pubkey, relayClient]);
+  }, [pubkey, relayClient, normalizedRelayUrl]);
 
   // `topLevelOnly` is the passive channel-open path (NIP-RS Option 1): the
   // caller's `readAt` is already the newest TOP-LEVEL message, so the marker
@@ -516,6 +479,16 @@ export function useUnreadChannels(
 
   const handleThreadReplyNotification = React.useCallback(
     (channelId: string, event: RelayEvent) => {
+      // Guard: don't merge into a ref whose scope has drifted from the current
+      // identity. Also reject an empty scope — activityScopeKey() returns ""
+      // when pubkey or relay is absent, and "" !== "" is false, so without this
+      // guard a writer could fire before the first valid scope is established.
+      if (
+        !currentActivityScope ||
+        threadActivityScopeRef.current !== currentActivityScope
+      )
+        return;
+
       const channelName =
         channels.find((ch) => ch.id === channelId)?.name ?? "";
       const item: ThreadActivityItem = {
@@ -532,15 +505,25 @@ export function useUnreadChannels(
       if (!added.didAdd) return;
       const didRecordMentionedRoot = recordMentionedRoot(event);
       threadActivityRef.current = added.items;
-      if (normalizedPubkey !== null) {
-        writeActivityToStorage(normalizedPubkey, added.items);
+      if (normalizedPubkey !== null && normalizedRelayUrl) {
+        writeActivityToStorage(
+          normalizedPubkey,
+          normalizedRelayUrl,
+          added.items,
+        );
       }
       if (didRecordMentionedRoot) {
         bumpMembershipVersion();
       }
       bumpLatestVersion();
     },
-    [channels, normalizedPubkey, recordMentionedRoot],
+    [
+      channels,
+      currentActivityScope,
+      normalizedPubkey,
+      normalizedRelayUrl,
+      recordMentionedRoot,
+    ],
   );
 
   const muteThread = React.useCallback(
@@ -754,6 +737,14 @@ export function useUnreadChannels(
       }),
     ).then((results) => {
       if (isCancelled) return;
+      // Guard: don't merge catch-up results into a ref whose scope has drifted
+      // (relay/pubkey changed while this async fetch was in flight). Also reject
+      // an empty scope for the same reason as the live writer above.
+      if (
+        !currentActivityScope ||
+        threadActivityScopeRef.current !== currentActivityScope
+      )
+        return;
       let didAdvance = false;
       const allThreadReplies: ThreadActivityItem[] = [];
       for (const result of results) {
@@ -787,8 +778,12 @@ export function useUnreadChannels(
         );
         if (added.didAdd) {
           threadActivityRef.current = added.items;
-          if (normalizedPubkey) {
-            writeActivityToStorage(normalizedPubkey, added.items);
+          if (normalizedPubkey && normalizedRelayUrl) {
+            writeActivityToStorage(
+              normalizedPubkey,
+              normalizedRelayUrl,
+              added.items,
+            );
           }
           didAdvance = true;
         }
@@ -817,6 +812,7 @@ export function useUnreadChannels(
     getEffectiveTimestamp,
     isReadStateReady,
     normalizedPubkey,
+    normalizedRelayUrl,
     recordUnreadEvent,
     relayClient,
   ]);
@@ -1013,7 +1009,11 @@ export function useUnreadChannels(
     participatedRootIds,
     authoredRootIds,
     mentionedRootIds,
-    threadActivityItems: threadActivityRef.current,
+    threadActivityItems: projectActivityForScope(
+      threadActivityScopeRef.current,
+      currentActivityScope,
+      threadActivityRef.current,
+    ),
     mutedRootIds: mutedRootIdsRef.current as ReadonlySet<string>,
     muteThread,
     unmuteThread,

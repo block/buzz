@@ -5,10 +5,10 @@ use super::{
 };
 use crate::managed_agents::discovery::{default_agent_command, effective_agent_command};
 use crate::managed_agents::validate_team_id;
-use crate::managed_agents::PersonaRecord;
+use crate::managed_agents::AgentDefinition;
 
-fn custom_persona(id: &str, display_name: &str) -> PersonaRecord {
-    PersonaRecord {
+fn custom_persona(id: &str, display_name: &str) -> AgentDefinition {
+    AgentDefinition {
         id: id.to_string(),
         display_name: display_name.to_string(),
         avatar_url: Some("https://example.com/avatar.png".to_string()),
@@ -24,7 +24,6 @@ fn custom_persona(id: &str, display_name: &str) -> PersonaRecord {
         env_vars: std::collections::BTreeMap::new(),
         respond_to: None,
         respond_to_allowlist: Vec::new(),
-        mcp_toolsets: None,
         parallelism: None,
         created_at: "2026-03-19T00:00:00Z".to_string(),
         updated_at: "2026-03-19T00:00:00Z".to_string(),
@@ -384,9 +383,9 @@ fn migrate_retires_unmodified_personas() {
     let now = "2026-04-01T00:00:00Z";
     // Simulate a store from before the Fizz transition: all 6
     // retired personas with original system prompts.
-    let mut stored: Vec<PersonaRecord> = RETIRED_PERSONAS
+    let mut stored: Vec<AgentDefinition> = RETIRED_PERSONAS
         .iter()
-        .map(|(id, prompt)| PersonaRecord {
+        .map(|(id, prompt)| AgentDefinition {
             id: id.to_string(),
             system_prompt: prompt.to_string(),
             is_builtin: false, // already demoted by merge_personas
@@ -421,7 +420,7 @@ fn migrate_retires_unmodified_personas() {
 #[test]
 fn migrate_preserves_customized_personas() {
     let now = "2026-04-01T00:00:00Z";
-    let mut stored = vec![PersonaRecord {
+    let mut stored = vec![AgentDefinition {
         id: "builtin:researcher".to_string(),
         display_name: "My Researcher".to_string(),
         system_prompt: "My custom research workflow with special instructions".to_string(),
@@ -454,7 +453,7 @@ fn migrate_is_idempotent() {
     assert_eq!(stored.len(), 1);
 
     // 2. Already-retired persona (display_name ends with " (retired)") — no-op.
-    let mut stored_with_retired = vec![PersonaRecord {
+    let mut stored_with_retired = vec![AgentDefinition {
         id: "builtin:researcher".to_string(),
         display_name: "Researcher (retired)".to_string(),
         system_prompt: "My custom prompt".to_string(),
@@ -469,7 +468,7 @@ fn migrate_is_idempotent() {
 
     // 3. Retired persona still marked is_builtin: true (pre-demotion).
     // migrate_retired_personas should still soft-deprecate it.
-    let mut stored_pre_demotion = vec![PersonaRecord {
+    let mut stored_pre_demotion = vec![AgentDefinition {
         id: "builtin:reviewer".to_string(),
         display_name: "Reviewer".to_string(),
         system_prompt: "Custom review prompt".to_string(),

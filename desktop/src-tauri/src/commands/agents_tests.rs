@@ -1,5 +1,5 @@
 use super::*;
-use crate::managed_agents::PersonaRecord;
+use crate::managed_agents::AgentDefinition;
 
 fn bare_agent_record(
     persona_id: Option<&str>,
@@ -29,7 +29,6 @@ fn bare_agent_record(
         model: model.map(str::to_string),
         provider: provider.map(str::to_string),
         persona_source_version: None,
-        mcp_toolsets: None,
         env_vars: BTreeMap::new(),
         start_on_app_launch: false,
         runtime_pid: None,
@@ -59,13 +58,12 @@ fn bare_agent_record(
         auto_restart_on_config_change: false,
         definition_respond_to: None,
         definition_respond_to_allowlist: vec![],
-        definition_mcp_toolsets: None,
         definition_parallelism: None,
     }
 }
-fn persona_record(id: &str, model: Option<&str>, provider: Option<&str>) -> PersonaRecord {
+fn persona_record(id: &str, model: Option<&str>, provider: Option<&str>) -> AgentDefinition {
     use std::collections::BTreeMap;
-    PersonaRecord {
+    AgentDefinition {
         id: id.to_string(),
         display_name: "Test Persona".to_string(),
         avatar_url: None,
@@ -81,7 +79,6 @@ fn persona_record(id: &str, model: Option<&str>, provider: Option<&str>) -> Pers
         env_vars: BTreeMap::new(),
         respond_to: None,
         respond_to_allowlist: vec![],
-        mcp_toolsets: None,
         parallelism: None,
         created_at: "".to_string(),
         updated_at: "".to_string(),
@@ -349,7 +346,6 @@ fn deploy_payload_carries_the_full_behavioral_quad() {
             "turn_timeout_seconds": 320,
             "system_prompt": null,
             "parallelism": 4,
-            "mcp_toolsets": "developer,search",
             "respond_to": "allowlist",
             "respond_to_allowlist": ["{allow}"],
             "created_at": "2026-01-01T00:00:00Z",
@@ -371,7 +367,6 @@ fn deploy_payload_carries_the_full_behavioral_quad() {
     );
 
     assert_eq!(payload["parallelism"], 4);
-    assert_eq!(payload["mcp_toolsets"], "developer,search");
     assert_eq!(payload["respond_to"], "allowlist");
     assert_eq!(payload["respond_to_allowlist"][0], "a".repeat(64));
     assert_eq!(payload["model"], "gpt-x");

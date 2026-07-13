@@ -6,6 +6,7 @@ import { useChannelsQuery } from "@/features/channels/hooks";
 import {
   clearDraftEntry,
   getActiveDraftEntries,
+  renameDraftEntry,
   useDraftsSnapshot,
   type DraftState,
 } from "@/features/messages/lib/useDrafts";
@@ -13,10 +14,19 @@ import {
   useDraftRootStatus,
   type RootStatus,
 } from "@/features/messages/lib/useDraftRootStatus";
+import {
+  migrateInboxReplyDraft,
+  INBOX_REPLY_PREFIX,
+} from "@/features/messages/lib/inboxReplyMigration";
+import {
+  getChannelIdFromTags,
+  getThreadReference,
+} from "@/features/messages/lib/threading";
 import { useUsersBatchQuery } from "@/features/profile/hooks";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { resolveChannelDisplayLabel } from "@/features/sidebar/lib/channelLabels";
 import { useIdentityQuery } from "@/shared/api/hooks";
+import { getEventById } from "@/shared/api/tauri";
 import type { Channel } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import {
@@ -523,6 +533,34 @@ export function DraftsPanel() {
         return;
       }
 
+      // Legacy inbox-reply:<eventId> keys were written by the old InboxDetailPane
+      // before stable conversation IDs were introduced. Migrate them on open:
+      // resolve the embedded event to derive the thread root, verify the channel
+      // tag matches the stored channelId, re-key to thread:<conversationId>, and
+      // navigate to the correct thread composer with the migrated content.
+      if (entry.key.startsWith(INBOX_REPLY_PREFIX)) {
+        void (async () => {
+          const migrated = await migrateInboxReplyDraft(
+            entry.key,
+            entry.draft,
+            {
+              getEventById,
+              getChannelIdFromTags,
+              getThreadReference,
+              renameDraftEntry,
+            },
+          );
+          // Navigate only on successful migration; any failure leaves the
+          // legacy draft untouched and the user in place.
+          if (!migrated) return;
+          void goChannel(migrated.channelId, {
+            messageId: migrated.conversationId,
+            threadRootId: migrated.conversationId,
+          });
+        })();
+        return;
+      }
+
       const threadRootId = getThreadRootId(entry.key);
       void goChannel(
         entry.draft.channelId,
@@ -552,6 +590,25 @@ export function DraftsPanel() {
     setSendTarget(null);
 
     if (!entry.draft.channelId) return;
+
+    // Legacy inbox-reply: keys: migrate first, then auto-send with new key.
+    if (entry.key.startsWith(INBOX_REPLY_PREFIX)) {
+      void (async () => {
+        const migrated = await migrateInboxReplyDraft(entry.key, entry.draft, {
+          getEventById,
+          getChannelIdFromTags,
+          getThreadReference,
+          renameDraftEntry,
+        });
+        if (!migrated) return;
+        void goChannel(migrated.channelId, {
+          messageId: migrated.conversationId,
+          threadRootId: migrated.conversationId,
+          autoSend: migrated.newDraftKey,
+        });
+      })();
+      return;
+    }
 
     const threadRootId = getThreadRootId(entry.key);
     void goChannel(entry.draft.channelId, {

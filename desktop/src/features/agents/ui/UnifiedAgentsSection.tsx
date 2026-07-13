@@ -52,9 +52,13 @@ type UnifiedAgentsSectionProps = {
   onDuplicatePersona: (persona: AgentPersona) => void;
   onEditPersona: (persona: AgentPersona) => void;
   onSharePersona: (persona: AgentPersona) => void;
+  onExportPersonaSnapshot: (
+    persona: AgentPersona,
+    linkedAgent: ManagedAgent | undefined,
+  ) => void;
   onDeactivatePersona: (persona: AgentPersona) => void;
   onDeletePersona: (persona: AgentPersona) => void;
-  onImportPersonaFile: (fileBytes: number[], fileName: string) => void;
+  onImportSnapshotFile: (fileBytes: number[], fileName: string) => void;
 };
 
 const AGENT_CARD_COLUMN_CLASS = "w-full";
@@ -87,9 +91,10 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
     onDuplicatePersona,
     onEditPersona,
     onSharePersona,
+    onExportPersonaSnapshot,
     onDeactivatePersona,
     onDeletePersona,
-    onImportPersonaFile,
+    onImportSnapshotFile,
   } = props;
 
   const runningCount = agents.filter((agent) =>
@@ -118,7 +123,7 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
     dropHandlers,
     handleFileChange,
     openFilePicker,
-  } = useFileImportZone({ onImportFile: onImportPersonaFile });
+  } = useFileImportZone({ onImportFile: onImportSnapshotFile });
 
   function toggle(key: string) {
     setCollapsed((prev) => {
@@ -142,7 +147,7 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
       {isDragOver ? (
         <div className="pointer-events-none absolute -inset-1 z-10 flex items-center justify-center rounded-2xl border-2 border-dashed border-primary/50 bg-background/80 backdrop-blur-sm">
           <p className="text-sm font-medium text-primary">
-            Drop .persona.md, .persona.json, .persona.png, or .zip to import
+            Drop .agent.json or .agent.png to import
           </p>
         </div>
       ) : null}
@@ -170,10 +175,12 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
                       isActionPending={isActionPending}
                       isPending={isPersonasPending}
                       persona={group.persona}
+                      linkedAgent={profileAgent}
                       onDeactivate={onDeactivatePersona}
                       onDelete={onDeletePersona}
                       onDuplicate={onDuplicatePersona}
                       onEdit={onEditPersona}
+                      onExportSnapshot={onExportPersonaSnapshot}
                       onShare={onSharePersona}
                     />
                   }
@@ -433,7 +440,7 @@ function SectionHeader({
         </p>
       </div>
       <input
-        accept=".md,.json,.png,.zip"
+        accept=".agent.json,.agent.png"
         className="hidden"
         onChange={handleFileChange}
         ref={fileInputRef}
@@ -509,8 +516,11 @@ function NewAgentCard({
             Choose from catalog
           </DropdownMenuItem>
         ) : null}
-        <DropdownMenuItem onClick={openFilePicker}>
-          Import agent file
+        <DropdownMenuItem
+          data-testid="import-agent-snapshot-menu-item"
+          onClick={openFilePicker}
+        >
+          Import agent snapshot
         </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>

@@ -13,6 +13,11 @@ export function buildThreadActivityFeedItems(
 
   return threadActivityItems
     .filter((item) => {
+      // Defense-in-depth relay-scope fence: only synthesize rows whose channel
+      // is present in the active workspace's channel set. Rows persisted under
+      // a different relay's scope key should never reach this function, but
+      // this filter is the last line of defense against cross-workspace leaks.
+      if (channelById.get(item.channelId) === undefined) return false;
       const rootId = getThreadReference(item.tags).rootId;
       return !rootId || !mutedRootIds.has(rootId);
     })

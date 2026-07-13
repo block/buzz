@@ -121,3 +121,8 @@ secrets.existingSecret, use that. Otherwise use the chart-managed one.
 {{- include "buzz.minioEndpoint" . -}}
 {{- end -}}
 {{- end -}}
+
+{{- define "buzz.pairingRelaySelectorLabels" -}}
+{{ include "buzz.selectorLabels" . }}
+app.kubernetes.io/component: pairing-relay
+{{- end -}}

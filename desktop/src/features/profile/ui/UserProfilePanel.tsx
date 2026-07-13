@@ -14,7 +14,6 @@ import {
   useCreatePersonaMutation,
   useDeleteManagedAgentMutation,
   useDeletePersonaMutation,
-  useExportPersonaJsonMutation,
   useManagedAgentLogQuery,
   useRelayAgentsQuery,
   useManagedAgentsQuery,
@@ -76,6 +75,7 @@ import { useProfileAgentDeletion } from "@/features/profile/ui/UserProfilePanelD
 import { useProfileFieldBuckets } from "@/features/profile/ui/UserProfilePanelFields";
 import { submitProfilePersonaDialog } from "@/features/profile/ui/UserProfilePanelPersonaSubmit";
 import { UserProfilePersonaDialogs } from "@/features/profile/ui/UserProfilePersonaDialogs";
+import { UserProfileSnapshotExportDialog } from "@/features/profile/ui/UserProfileSnapshotExportDialog";
 import {
   deriveProfileChannels,
   type ProfilePanelTab,
@@ -181,6 +181,8 @@ export function UserProfilePanel({
     React.useState<PersonaDialogState | null>(null);
   const [personaToDelete, setPersonaToDelete] =
     React.useState<AgentPersona | null>(null);
+  const [personaToExportSnapshot, setPersonaToExportSnapshot] =
+    React.useState<AgentPersona | null>(null);
 
   const personasQuery = usePersonasQuery();
   const managedAgentsQuery = useManagedAgentsQuery({ enabled: true });
@@ -245,7 +247,6 @@ export function UserProfilePanel({
   const updatePersonaMutation = useUpdatePersonaMutation();
   const deletePersonaMutation = useDeletePersonaMutation();
   const setPersonaActiveMutation = useSetPersonaActiveMutation();
-  const exportPersonaJsonMutation = useExportPersonaJsonMutation();
   const usersBatchQuery = useUsersBatchQuery(
     effectivePubkey ? [effectivePubkey] : [],
   );
@@ -350,8 +351,7 @@ export function UserProfilePanel({
     createPersonaMutation.isPending ||
     updatePersonaMutation.isPending ||
     deletePersonaMutation.isPending ||
-    setPersonaActiveMutation.isPending ||
-    exportPersonaJsonMutation.isPending;
+    setPersonaActiveMutation.isPending;
   const isFollowing =
     !isSelf &&
     pubkeyLower.length > 0 &&
@@ -577,20 +577,10 @@ export function UserProfilePanel({
   }, [resolvedPersona]);
 
   const handleExportPersona = React.useCallback(() => {
-    if (!resolvedPersona) return;
-    exportPersonaJsonMutation.mutate(resolvedPersona.id, {
-      onSuccess: (saved) => {
-        if (saved) {
-          toast.success(`Exported ${resolvedPersona.displayName}.`);
-        }
-      },
-      onError: (error) => {
-        toast.error(
-          error instanceof Error ? error.message : "Failed to export agent.",
-        );
-      },
-    });
-  }, [exportPersonaJsonMutation, resolvedPersona]);
+    if (resolvedPersona) {
+      setPersonaToExportSnapshot(resolvedPersona);
+    }
+  }, [resolvedPersona]);
 
   const handleDeletePersona = React.useCallback(async () => {
     if (!resolvedPersona) return;
@@ -637,10 +627,6 @@ export function UserProfilePanel({
       }
 
       try {
-        const deletedInstances =
-          await deleteManagedAgentsForPersona(personaToConfirm);
-        if (deletedInstances.cancelled) return;
-
         await deletePersonaMutation.mutateAsync(personaToConfirm.id);
         toast.success(`Deleted ${personaToConfirm.displayName}.`);
         setPersonaToDelete(null);
@@ -651,7 +637,19 @@ export function UserProfilePanel({
         );
       }
     },
-    [deleteManagedAgentsForPersona, deletePersonaMutation.mutateAsync, onClose],
+    [deletePersonaMutation.mutateAsync, onClose],
+  );
+
+  // Count of managed-agent instances backed by the persona being deleted.
+  // Shown in the confirm dialog so the user knows what will be cascade-deleted.
+  const personaDeleteInstanceCount = React.useMemo(
+    () =>
+      personaToDelete
+        ? (managedAgentsQuery.data ?? []).filter(
+            (a) => a.personaId === personaToDelete.id,
+          ).length
+        : 0,
+    [managedAgentsQuery.data, personaToDelete],
   );
 
   const handleAddedToChannel = React.useCallback(
@@ -942,34 +940,46 @@ export function UserProfilePanel({
     />
   ) : null;
   const personaDialogs = (
-    <UserProfilePersonaDialogs
-      createError={
-        createPersonaMutation.error instanceof Error
-          ? createPersonaMutation.error
-          : null
-      }
-      isPending={
-        createPersonaMutation.isPending ||
-        updatePersonaMutation.isPending ||
-        updateManagedAgentMutation.isPending ||
-        createAgentMutation.isPending
-      }
-      personaDialogState={personaDialogState}
-      personaToDelete={personaToDelete}
-      runtimes={acpRuntimesQuery.data ?? []}
-      runtimesLoading={acpRuntimesQuery.isLoading}
-      updateError={
-        updatePersonaMutation.error instanceof Error
-          ? updatePersonaMutation.error
-          : null
-      }
-      onCloseDelete={() => setPersonaToDelete(null)}
-      onCloseDialog={() => setPersonaDialogState(null)}
-      onConfirmDelete={(selectedPersona) => {
-        void handleConfirmDeletePersona(selectedPersona);
-      }}
-      onSubmit={handleSubmitPersona}
-    />
+    <>
+      <UserProfilePersonaDialogs
+        createError={
+          createPersonaMutation.error instanceof Error
+            ? createPersonaMutation.error
+            : null
+        }
+        instanceCount={personaDeleteInstanceCount}
+        isPending={
+          createPersonaMutation.isPending ||
+          updatePersonaMutation.isPending ||
+          updateManagedAgentMutation.isPending ||
+          createAgentMutation.isPending
+        }
+        personaDialogState={personaDialogState}
+        personaToDelete={personaToDelete}
+        runtimes={acpRuntimesQuery.data ?? []}
+        runtimesLoading={acpRuntimesQuery.isLoading}
+        updateError={
+          updatePersonaMutation.error instanceof Error
+            ? updatePersonaMutation.error
+            : null
+        }
+        onCloseDelete={() => setPersonaToDelete(null)}
+        onCloseDialog={() => setPersonaDialogState(null)}
+        onConfirmDelete={(selectedPersona) => {
+          void handleConfirmDeletePersona(selectedPersona);
+        }}
+        onSubmit={handleSubmitPersona}
+      />
+      {personaToExportSnapshot ? (
+        <UserProfileSnapshotExportDialog
+          linkedAgentPubkey={managedAgent?.pubkey ?? null}
+          onOpenChange={(open) => {
+            if (!open) setPersonaToExportSnapshot(null);
+          }}
+          persona={personaToExportSnapshot}
+        />
+      ) : null}
+    </>
   );
   return (
     <UserProfilePanelFrame

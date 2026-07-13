@@ -6,6 +6,7 @@ import {
   Download,
   ExternalLink,
   RefreshCw,
+  XCircle,
 } from "lucide-react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 
@@ -14,7 +15,7 @@ import {
   useInstallAcpRuntimeMutation,
 } from "@/features/agents/hooks";
 import { describeResolvedCommand } from "@/features/agents/ui/agentUi";
-import type { AcpRuntimeCatalogEntry } from "@/shared/api/types";
+import type { AcpRuntimeCatalogEntry, AuthStatus } from "@/shared/api/types";
 import { getInstallErrorMessage } from "@/shared/lib/installError";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
@@ -31,6 +32,8 @@ function StatusIcon({
       return <CheckCircle2 className="h-4 w-4 text-status-added" />;
     case "adapter_missing":
       return <AlertTriangle className="h-4 w-4 text-warning" />;
+    case "adapter_outdated":
+      return <AlertTriangle className="h-4 w-4 text-warning" />;
     case "cli_missing":
       return <AlertTriangle className="h-4 w-4 text-warning" />;
     case "not_installed":
@@ -38,18 +41,51 @@ function StatusIcon({
   }
 }
 
+function AuthStatusBadge({ authStatus }: { authStatus: AuthStatus }) {
+  switch (authStatus.status) {
+    case "logged_in":
+      return (
+        <span className="inline-flex items-center gap-1 text-xs text-status-added">
+          <CheckCircle2 className="h-3 w-3" />
+          Authenticated
+        </span>
+      );
+    case "logged_out":
+      return (
+        <span className="inline-flex items-center gap-1 text-xs text-warning">
+          <AlertTriangle className="h-3 w-3" />
+          Not authenticated
+        </span>
+      );
+    case "config_invalid":
+      return (
+        <span className="inline-flex items-center gap-1 text-xs text-destructive">
+          <XCircle className="h-3 w-3" />
+          Config error
+        </span>
+      );
+    case "not_applicable":
+    case "unknown":
+      return null;
+  }
+}
+
 function InstallActions({
+  hasError,
   isInstalling,
   onInstall,
   runtime,
 }: {
+  hasError: boolean;
   isInstalling: boolean;
   onInstall: () => void;
   runtime: AcpRuntimeCatalogEntry;
 }) {
+  const showInstall = runtime.canAutoInstall && !runtime.nodeRequired;
+
   return (
     <div className="mt-2 flex items-center gap-2">
-      {runtime.canAutoInstall ? (
+      {showInstall ? (
         <Button
           disabled={isInstalling}
           onClick={onInstall}
@@ -59,10 +95,12 @@ function InstallActions({
         >
           {isInstalling ? (
             <RefreshCw className="h-4 w-4 animate-spin" />
+          ) : hasError ? (
+            <RefreshCw className="h-4 w-4" />
           ) : (
             <Download className="h-4 w-4" />
           )}
-          {isInstalling ? "Installing..." : "Install"}
+          {isInstalling ? "Installing..." : hasError ? "Retry" : "Install"}
         </Button>
       ) : null}
       <button
@@ -74,6 +112,48 @@ function InstallActions({
         View instructions
       </button>
     </div>
+  );
+}
+
+/**
+ * Node.js callout when required, or the install actions when it is not.
+ * Used for both `adapter_missing` and `not_installed` availability states.
+ * The `cli_missing` branch is intentionally excluded — its install path does
+ * not involve npm, so no Node.js gate applies.
+ */
+function NodeRequiredOrInstall({
+  hasError,
+  isInstalling,
+  onInstall,
+  runtime,
+}: {
+  hasError: boolean;
+  isInstalling: boolean;
+  onInstall: () => void;
+  runtime: AcpRuntimeCatalogEntry;
+}) {
+  if (runtime.nodeRequired) {
+    return (
+      <p className="mt-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-1.5 text-sm text-amber-700 dark:text-amber-400">
+        Node.js is required to install this adapter.{" "}
+        <button
+          className="underline underline-offset-2 hover:no-underline"
+          onClick={() => void openUrl("https://nodejs.org")}
+          type="button"
+        >
+          Install Node.js
+        </button>
+        , then click Re-run.
+      </p>
+    );
+  }
+  return (
+    <InstallActions
+      hasError={hasError}
+      isInstalling={isInstalling}
+      onInstall={onInstall}
+      runtime={runtime}
+    />
   );
 }
 
@@ -97,6 +177,7 @@ function RuntimeRow({
         runtime.availability === "available"
           ? "bg-background/60"
           : runtime.availability === "adapter_missing" ||
+              runtime.availability === "adapter_outdated" ||
               runtime.availability === "cli_missing"
             ? "bg-amber-500/5"
             : "bg-muted/20",
@@ -155,6 +236,27 @@ function RuntimeRow({
                 </p>
               </>
             )}
+            {/*
+             * Auth badge renders only for `available` runtimes: non-available
+             * entries always have auth_status: unknown (no probe was run), which
+             * AuthStatusBadge maps to null. Rendering it here is self-consistent.
+             */}
+            {runtime.authStatus.status !== "not_applicable" &&
+            runtime.authStatus.status !== "unknown" ? (
+              <div className="mt-2">
+                <AuthStatusBadge authStatus={runtime.authStatus} />
+              </div>
+            ) : null}
+            {/* Login hint shown when not logged in or the config is invalid */}
+            {runtime.loginHint &&
+            runtime.authStatus.status !== "not_applicable" &&
+            runtime.authStatus.status !== "unknown" ? (
+              <p className="mt-1 text-sm text-muted-foreground">
+                {runtime.authStatus.status === "config_invalid"
+                  ? `Config error: ${runtime.authStatus.diagnostic}`
+                  : runtime.loginHint}
+              </p>
+            ) : null}
           </>
         ) : runtime.availability === "adapter_missing" ? (
           <>
@@ -168,7 +270,40 @@ function RuntimeRow({
             <p className="mt-1 text-sm font-normal text-muted-foreground">
               {runtime.installHint}
             </p>
+            <NodeRequiredOrInstall
+              hasError={installError !== null}
+              isInstalling={isInstalling}
+              onInstall={onInstall}
+              runtime={runtime}
+            />
+          </>
+        ) : runtime.availability === "adapter_outdated" ? (
+          <>
+            <p className="mt-1 text-sm font-normal text-muted-foreground">
+              ACP adapter found at{" "}
+              <code className="rounded bg-muted px-1 py-0.5 text-2xs">
+                {runtime.binaryPath ?? "unknown path"}
+              </code>{" "}
+              but it is from the deprecated package. Reinstall to enable relay
+              connectivity.
+            </p>
+            <p className="mt-1 text-sm font-normal text-muted-foreground">
+              This updates the machine-global{" "}
+              <code className="rounded bg-muted px-1 py-0.5 text-2xs">
+                codex-acp
+              </code>{" "}
+              adapter. Older Buzz releases using the legacy adapter contract may
+              lose relay access until{" "}
+              <code className="rounded bg-muted px-1 py-0.5 text-2xs">
+                @zed-industries/codex-acp@0.16.0
+              </code>{" "}
+              is restored.
+            </p>
+            <p className="mt-1 text-sm font-normal text-muted-foreground">
+              {runtime.installHint}
+            </p>
             <InstallActions
+              hasError={installError !== null}
               isInstalling={isInstalling}
               onInstall={onInstall}
               runtime={runtime}
@@ -187,6 +322,7 @@ function RuntimeRow({
               {runtime.installHint}
             </p>
             <InstallActions
+              hasError={installError !== null}
               isInstalling={isInstalling}
               onInstall={onInstall}
               runtime={runtime}
@@ -200,7 +336,8 @@ function RuntimeRow({
             <p className="mt-1 text-sm font-normal text-muted-foreground">
               {runtime.installHint}
             </p>
-            <InstallActions
+            <NodeRequiredOrInstall
+              hasError={installError !== null}
               isInstalling={isInstalling}
               onInstall={onInstall}
               runtime={runtime}
@@ -231,12 +368,20 @@ export function DoctorSettingsPanel() {
   const [installResults, setInstallResults] = React.useState<
     Record<string, { success: boolean; error: string | null }>
   >({});
+  // Per-runtime installing state: tracks which runtime IDs have an in-flight
+  // install so concurrent installs each show their own spinner correctly.
+  const [installingIds, setInstallingIds] = React.useState<Set<string>>(
+    new Set(),
+  );
 
   function handleInstall(runtimeId: string) {
+    // Clear any previous result for this runtime before retrying.
     setInstallResults((prev) => ({
       ...prev,
       [runtimeId]: { success: false, error: null },
     }));
+    setInstallingIds((prev) => new Set(prev).add(runtimeId));
+
     installMutation.mutate(runtimeId, {
       onSuccess: (result) => {
         if (result.success) {
@@ -262,6 +407,13 @@ export function DoctorSettingsPanel() {
             error: error instanceof Error ? error.message : "Install failed.",
           },
         }));
+      },
+      onSettled: () => {
+        setInstallingIds((prev) => {
+          const next = new Set(prev);
+          next.delete(runtimeId);
+          return next;
+        });
       },
     });
   }
@@ -309,10 +461,7 @@ export function DoctorSettingsPanel() {
               <RuntimeRow
                 installError={installResults[runtime.id]?.error ?? null}
                 installSuccess={installResults[runtime.id]?.success ?? false}
-                isInstalling={
-                  installMutation.isPending &&
-                  installMutation.variables === runtime.id
-                }
+                isInstalling={installingIds.has(runtime.id)}
                 key={runtime.id}
                 onInstall={() => handleInstall(runtime.id)}
                 runtime={runtime}

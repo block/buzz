@@ -1,5 +1,37 @@
 # Changelog
 
+## v0.4.1
+
+- feat(desktop): auto-restart setup-mode agents after adapter install, badge drift fallback ([#1786](https://github.com/block/buzz/pull/1786)) ([`11a286b9a`](https://github.com/block/buzz/commit/11a286b9a4284f4f80943d1321f86fa41c472dcf))
+- Retain a stable message window in channel timelines ([#1698](https://github.com/block/buzz/pull/1698)) ([`b0ad2b66d`](https://github.com/block/buzz/commit/b0ad2b66ddb2d91bcee1473050d21f27e2a38eac))
+- refactor(desktop): remove legacy persona-card flows ([#1781](https://github.com/block/buzz/pull/1781)) ([`1fa91f569`](https://github.com/block/buzz/commit/1fa91f569114cfa1d22951311fe80cef0def36d7))
+- Serialize managed agent PATH tests ([#1777](https://github.com/block/buzz/pull/1777)) ([`1fc7488ea`](https://github.com/block/buzz/commit/1fc7488ea58accf8bd96afe94cd93ee54174df00))
+- fix(desktop): stable inbox selection and scroll/draft preservation ([#1760](https://github.com/block/buzz/pull/1760)) ([`7e3252ea3`](https://github.com/block/buzz/commit/7e3252ea3e6b5c6c0db2e2a36c839d9cc2700c89))
+- feat(desktop): add buzz-agent-snapshot v1 export, import, sender-native send, and recipient card/import ([#1753](https://github.com/block/buzz/pull/1753)) ([`1580046b3`](https://github.com/block/buzz/commit/1580046b3c2c3d208e84fb240467454b8f3813f0))
+- refactor(desktop): remove vestigial MCP toolsets config ([#1776](https://github.com/block/buzz/pull/1776)) ([`dfec75b3c`](https://github.com/block/buzz/commit/dfec75b3c0b8080529e4d9089d4ed80e3902aaed))
+- feat(desktop): add key backup and agent defaults to onboarding, make avatar optional ([#1767](https://github.com/block/buzz/pull/1767)) ([`d2e87e1ca`](https://github.com/block/buzz/commit/d2e87e1ca71368312576b7f492818a50042e61e1))
+- fix(desktop): correct provider and model handling in agent config dialogs ([#1764](https://github.com/block/buzz/pull/1764)) ([`f3319dd11`](https://github.com/block/buzz/commit/f3319dd11102bfd52e1ec3065a4d9272a03075ec))
+- fix(desktop): cascade persona deletes and restart agents on global config save ([#1766](https://github.com/block/buzz/pull/1766)) ([`7c346d7f8`](https://github.com/block/buzz/commit/7c346d7f85e7fcb64999b502306f7895d37fb42a))
+- fix(desktop): make doctor installs retryable with per-runtime progress and auth status ([#1765](https://github.com/block/buzz/pull/1765)) ([`25bb71475`](https://github.com/block/buzz/commit/25bb7147523f27a88f1bfece0310889442699c5f))
+- fix(codex): swap to @agentclientprotocol/codex-acp 1.x + detect outdated adapter ([#1750](https://github.com/block/buzz/pull/1750)) ([`6d1a77e49`](https://github.com/block/buzz/commit/6d1a77e49255f18434593c9c7daa811f5c76db0b))
+- fix(desktop): show thread replies loader ([#1773](https://github.com/block/buzz/pull/1773)) ([`e07e02c0e`](https://github.com/block/buzz/commit/e07e02c0eb76376b96e0a9d5fe27009111430845))
+- fix(desktop): restore multi-image mosaic galleries ([#1769](https://github.com/block/buzz/pull/1769)) ([`2c41e9e6b`](https://github.com/block/buzz/commit/2c41e9e6b836fad57da981ec9329fe51e5796085))
+- Group channel membership events ([#1713](https://github.com/block/buzz/pull/1713)) ([`5dc70bd0b`](https://github.com/block/buzz/commit/5dc70bd0b8561ce8aa24338903167e62d6035d10))
+- Fix desktop launch motion and reaction spacing ([#1717](https://github.com/block/buzz/pull/1717)) ([`89e2e2e4a`](https://github.com/block/buzz/commit/89e2e2e4adf4d062995aed46b32f4935c6992513))
+- fix(desktop): align sidebar search across themes ([#1712](https://github.com/block/buzz/pull/1712)) ([`53c177e34`](https://github.com/block/buzz/commit/53c177e341d4f9e7b254b7c83af39380e9b10242))
+- fix(desktop): Buzz theme flicker, white bar & accent-picker motion ([#1681](https://github.com/block/buzz/pull/1681)) ([`5e15a588e`](https://github.com/block/buzz/commit/5e15a588e072198b922fb3793a48d9c98146fc45))
+- feat(desktop): surface Team Instructions as distinct observer section ([#1759](https://github.com/block/buzz/pull/1759)) ([`56d822dc2`](https://github.com/block/buzz/commit/56d822dc2c9b78df50fad7928a8d088b7618e671))
+- fix(desktop): separate system prompt from turn context ([#1754](https://github.com/block/buzz/pull/1754)) ([`84ec63aa2`](https://github.com/block/buzz/commit/84ec63aa24d14553206dde5dbfc61807755313b8))
+- fix(desktop): preserve archived observer history ([#1752](https://github.com/block/buzz/pull/1752)) ([`51234bd89`](https://github.com/block/buzz/commit/51234bd89f1dffcd82bae45428094cff35c4081e))
+- fix(desktop): surface codex config-parse failures and -32603 internal errors clearly ([#1745](https://github.com/block/buzz/pull/1745)) ([`ec3762552`](https://github.com/block/buzz/commit/ec37625522ce1847e2684da2a477ca742255fbf1))
+- fix(desktop): fix workspace rail badge disappearance and persist mark-as-unread ([#1747](https://github.com/block/buzz/pull/1747)) ([`e8df6ba69`](https://github.com/block/buzz/commit/e8df6ba694703a26963524433e0e3a3f6ad252f1))
+- chore(desktop): remove container-only npm-preflight E2E harness ([#1749](https://github.com/block/buzz/pull/1749)) ([`9895b4d39`](https://github.com/block/buzz/commit/9895b4d390591a5adfc368bbc97f53989463c8ef))
+- fix(desktop): preflight npm prefix writability in doctor installs ([#1732](https://github.com/block/buzz/pull/1732)) ([`58aee8f91`](https://github.com/block/buzz/commit/58aee8f91394a97b68902f61a116696ed8ca3e1f))
+- fix(workspaces): exclude muted channels and unfollowed threads from rail unread badge ([#1738](https://github.com/block/buzz/pull/1738)) ([`ea1c75b0d`](https://github.com/block/buzz/commit/ea1c75b0d2bf954efe3816b303a9972e26ff893a))
+- feat(desktop): add explicit Edit avatar CTA in agent instance edit dialog ([#1736](https://github.com/block/buzz/pull/1736)) ([`26966aace`](https://github.com/block/buzz/commit/26966aacec1d8ca58ac5951818e55249e63506a3))
+- fix(observer): order system prompt below current-session divider on restart ([#1734](https://github.com/block/buzz/pull/1734)) ([`67a2d047e`](https://github.com/block/buzz/commit/67a2d047eb866dff3faae9f96b0a4f478e5e2a8b))
+
+
 ## v0.4.0
 
 - feat(desktop): default observer archive on for dev-nest builds ([#1726](https://github.com/block/buzz/pull/1726)) ([`d9e4edbbf`](https://github.com/block/buzz/commit/d9e4edbbf54996df22c59afdaaaaf571b4e3a5c6))

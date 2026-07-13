@@ -36,6 +36,8 @@ fn test_runtime() -> &'static KnownAcpRuntime {
         max_tokens_env_var: Some("GOOSE_MAX_TOKENS"),
         context_limit_env_var: Some("GOOSE_CONTEXT_LIMIT"),
         required_normalized_fields: &["model", "provider"],
+        login_hint: None,
+        auth_probe_args: None,
     }
 }
 
@@ -58,7 +60,6 @@ fn test_record() -> ManagedAgentRecord {
         parallelism: 1,
         system_prompt: None,
         model: None,
-        mcp_toolsets: None,
         env_vars: BTreeMap::new(),
         start_on_app_launch: false,
         auto_restart_on_config_change: true,
@@ -87,7 +88,6 @@ fn test_record() -> ManagedAgentRecord {
         source_team_persona_slug: None,
         definition_respond_to: None,
         definition_respond_to_allowlist: Vec::new(),
-        definition_mcp_toolsets: None,
         definition_parallelism: None,
         relay_mesh: None,
         agent_command_override: None,
@@ -547,6 +547,8 @@ fn buzz_agent_runtime() -> &'static KnownAcpRuntime {
         max_tokens_env_var: Some("BUZZ_AGENT_MAX_OUTPUT_TOKENS"),
         context_limit_env_var: Some("BUZZ_AGENT_MAX_CONTEXT_TOKENS"),
         required_normalized_fields: &["model", "provider"],
+        login_hint: None,
+        auth_probe_args: None,
     }
 }
 

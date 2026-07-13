@@ -133,7 +133,6 @@ fn is_reserved_recognises_full_list() {
     assert!(!is_reserved_env_key("GOOSE_MODE"));
     assert!(!is_reserved_env_key("ANTHROPIC_API_KEY"));
     assert!(!is_reserved_env_key("BUZZ_ACP_MODEL")); // behavior knob
-    assert!(!is_reserved_env_key("BUZZ_TOOLSETS"));
 }
 
 #[test]
@@ -421,7 +420,7 @@ fn merged_env_drops_oversize_value() {
 //
 // Pack import must strip derived env keys (GOOSE_MODEL, GOOSE_PROVIDER,
 // BUZZ_AGENT_MODEL, BUZZ_AGENT_PROVIDER) so they don't shadow the
-// structured PersonaRecord.model / PersonaRecord.provider fields after
+// structured AgentDefinition.model / AgentDefinition.provider fields after
 // the user edits them in the UI.
 
 #[test]

@@ -1,5 +1,23 @@
 import type { AcpRuntimeCatalogEntry } from "@/shared/api/types";
 import type { RuntimeFileConfigSubset } from "@/shared/api/tauri";
+// Dialogs import getDefaultPersonaRuntime via this re-export; lib code imports
+// directly from lib/resolvePersonaRuntime.
+export { getDefaultPersonaRuntime } from "../lib/resolvePersonaRuntime";
+
+/**
+ * Provider ids suppressed from the selection list on internal Block builds.
+ * Databricks v1 (`"databricks"`) is boot-migrated to v2 on those builds, so
+ * offering it for new selections would create a regression path.
+ * OSS builds pass an empty `Set` so v1 remains visible.
+ *
+ * All three dialog sites that show a provider picker import this constant —
+ * `AgentDefinitionDialog`, `AgentInstanceEditDialog`, and
+ * `GlobalAgentConfigSettingsCard` — making it the single source of truth for
+ * which provider ids to suppress on Block builds.
+ */
+export const BLOCK_BUILD_HIDDEN_PROVIDER_IDS: ReadonlySet<string> = new Set([
+  "databricks",
+]);
 
 export const PERSONA_FIELD_SHELL_CLASS =
   "rounded-xl border border-input bg-muted/40 transition-colors duration-150 ease-out hover:border-muted-foreground/40 focus-within:border-muted-foreground/50";
@@ -16,6 +34,7 @@ export const NO_RUNTIME_DROPDOWN_VALUE = "__no_runtime__";
 
 const KNOWN_LLM_PROVIDER_IDS = [
   "anthropic",
+  "databricks",
   "databricks_v2",
   "openai",
   "openai-compat",
@@ -97,7 +116,8 @@ const PERSONA_LLM_PROVIDER_OPTIONS: readonly PersonaModelOption[] = [
   { id: "anthropic", label: "Anthropic" },
   { id: "openai", label: "OpenAI" },
   { id: "openai-compat", label: "OpenAI-compatible" },
-  { id: "databricks_v2", label: "Databricks v2 (AI Gateway)" },
+  { id: "databricks", label: "Databricks" },
+  { id: "databricks_v2", label: "Databricks v2" },
 ];
 
 const PERSONA_MODEL_OPTIONS_BY_RUNTIME: Record<
@@ -294,16 +314,33 @@ export function buildTemplateModelDropdownOptions(
   }));
 }
 
+/**
+ * Build the provider dropdown options for a persona/instance dialog.
+ *
+ * `hideProviderIds` suppresses specific provider ids from the base list while
+ * still preserving the `(current)` tail-append for saved values that are in
+ * the hidden set — so an agent already persisted with a hidden provider
+ * continues to render its current value, while the hidden option is not
+ * offered for new selections.
+ *
+ * Internal Block builds pass `BLOCK_BUILD_HIDDEN_PROVIDER_IDS` to hide the
+ * legacy Databricks v1 option (the boot migration rewrites v1→v2 on those
+ * builds). OSS builds pass an empty Set so v1 remains visible.
+ */
 export function getPersonaProviderOptions(
   currentProvider: string,
   runtimeId: string,
   globalProvider?: string,
+  hideProviderIds?: ReadonlySet<string>,
 ): readonly PersonaModelOption[] {
   const trimmedProvider = currentProvider.trim();
   const defaultProviderOptions = [
     { id: "", label: getDefaultLlmProviderLabel(runtimeId, globalProvider) },
   ];
-  const options = [...defaultProviderOptions, ...PERSONA_LLM_PROVIDER_OPTIONS];
+  const filteredOptions = hideProviderIds?.size
+    ? PERSONA_LLM_PROVIDER_OPTIONS.filter((o) => !hideProviderIds.has(o.id))
+    : PERSONA_LLM_PROVIDER_OPTIONS;
+  const options = [...defaultProviderOptions, ...filteredOptions];
   if (
     trimmedProvider.length === 0 ||
     options.some((option) => option.id === trimmedProvider)
@@ -349,11 +386,13 @@ export function formatRuntimeOptionLabel(runtime: AcpRuntimeCatalogEntry) {
   const suffix =
     runtime.availability === "adapter_missing"
       ? " (adapter missing)"
-      : runtime.availability === "cli_missing"
-        ? " (CLI missing)"
-        : runtime.availability === "not_installed"
-          ? " (not installed)"
-          : "";
+      : runtime.availability === "adapter_outdated"
+        ? " (adapter outdated)"
+        : runtime.availability === "cli_missing"
+          ? " (CLI missing)"
+          : runtime.availability === "not_installed"
+            ? " (not installed)"
+            : "";
   return `${runtime.label}${suffix}`;
 }
 
@@ -368,6 +407,8 @@ function runtimeAvailabilitySortRank(
     case "not_installed":
       return 2;
     case "adapter_missing":
+      return 3;
+    case "adapter_outdated":
       return 3;
   }
 }
@@ -402,18 +443,6 @@ export function sortPersonaRuntimes(
 
     return left.label.localeCompare(right.label);
   });
-}
-
-export function getDefaultPersonaRuntime(runtimes: AcpRuntimeCatalogEntry[]) {
-  const available = runtimes.filter(
-    (runtime) => runtime.availability === "available",
-  );
-  return (
-    available.find((runtime) => runtime.id === "buzz-agent") ??
-    available.find((runtime) => runtime.id === "goose") ??
-    available[0] ??
-    null
-  );
 }
 
 /**

@@ -528,6 +528,9 @@ jobs:
           ref: ${{ github.event_name == 'push' && github.ref || inputs.ref }}
           persist-credentials: false
 
+      - name: Mark workspace safe for git (containerized job)
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
       - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
 
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2

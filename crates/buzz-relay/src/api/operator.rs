@@ -260,6 +260,9 @@ mod tests {
     use tower::ServiceExt;
     use uuid::Uuid;
 
+    use buzz_core::kind::KIND_NIP43_MEMBERSHIP_LIST;
+    use buzz_db::event::EventQuery;
+
     use crate::router::build_router;
     use crate::state::AppState;
 
@@ -324,6 +327,7 @@ mod tests {
             .iter()
             .map(|keys| keys.public_key().to_hex())
             .collect();
+        config.require_relay_membership = true;
 
         let pool = sqlx::PgPool::connect(TEST_DB_URL).await.ok()?;
         let db = buzz_db::Db::from_pool(pool.clone());
@@ -512,6 +516,7 @@ mod tests {
         let body = serde_json::json!({
             "host": host,
             "initial_owner_pubkey": owner.public_key().to_hex(),
+            "create_only": true,
         })
         .to_string();
         let url = format!("http://{INGRESS_HOST}/operator/communities");
@@ -544,12 +549,37 @@ mod tests {
             .await
             .expect("lookup community")
             .expect("community exists");
+        let owner_hex = owner.public_key().to_hex();
         let member = state
             .db
-            .get_relay_member(community.id, &owner.public_key().to_hex())
+            .get_relay_member(community.id, &owner_hex)
             .await
             .expect("lookup owner role")
             .expect("owner member exists");
         assert_eq!(member.role, "owner");
+
+        let membership_events = state
+            .db
+            .query_events(&EventQuery {
+                kinds: Some(vec![KIND_NIP43_MEMBERSHIP_LIST as i32]),
+                global_only: true,
+                limit: Some(1),
+                ..EventQuery::for_community(community.id)
+            })
+            .await
+            .expect("query membership snapshot");
+        let snapshot = membership_events
+            .first()
+            .expect("membership snapshot published during provisioning");
+        assert!(snapshot.event.tags.iter().any(|tag| {
+            tag.as_slice()
+                .first()
+                .is_some_and(|value| value == "member")
+                && tag
+                    .as_slice()
+                    .get(1)
+                    .is_some_and(|value| value == &owner_hex)
+                && tag.as_slice().get(2).is_some_and(|value| value == "owner")
+        }));
     }
 }

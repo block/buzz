@@ -4,9 +4,9 @@ use tauri::State;
 use crate::{
     app_state::AppState,
     managed_agents::{
-        command_availability, AcpRuntimeCatalogEntry, DiscoverManagedAgentPrereqsRequest,
-        InstallRuntimeResult, InstallStepResult, ManagedAgentPrereqsInfo, RelayAgentInfo,
-        DEFAULT_ACP_COMMAND,
+        command_availability, is_npm_global_install, AcpRuntimeCatalogEntry,
+        DiscoverManagedAgentPrereqsRequest, InstallRuntimeResult, InstallStepResult,
+        ManagedAgentPrereqsInfo, RelayAgentInfo, DEFAULT_ACP_COMMAND,
     },
     nostr_convert,
     relay::query_relay,
@@ -19,10 +19,50 @@ fn active_installs() -> &'static std::sync::Mutex<std::collections::HashSet<Stri
     ACTIVE.get_or_init(|| Mutex::new(HashSet::new()))
 }
 
+/// Returns the adapter install commands that `install_acp_runtime_blocking` would
+/// run for `runtime_id` given a resolved adapter binary at `adapter_path` (or
+/// `None` if none was found).
+///
+/// Returns `None` when no install is needed (adapter is present and current).
+/// Returns `Some(cmds)` when the adapter is missing or (for codex) outdated.
+///
+/// For the codex **outdated** case the returned sequence is a two-step
+/// reinstall: first uninstall the old `@zed-industries/codex-acp` package
+/// (idempotent — exit 0 when absent), then install the new
+/// `@agentclientprotocol/codex-acp`.  This is required because both packages
+/// install a global binary named `codex-acp`, and npm ≥7 refuses to overwrite
+/// a bin file owned by a different package with `EEXIST`.
+///
+/// For the **missing** case the catalog's `adapter_install_commands` are used
+/// as-is (no prior package to remove).
+///
+/// This is a pure planning function: it never spawns a process.  Tests use it to
+/// assert the correct install command is selected without touching real npm.
+pub(crate) fn plan_adapter_install<'c>(
+    runtime_id: &str,
+    adapter_path: Option<&std::path::Path>,
+    adapter_install_commands: &'c [&'c str],
+) -> Option<Vec<&'c str>> {
+    match adapter_path {
+        // Adapter present and current — no install needed.
+        Some(_) if runtime_id != "codex" => None,
+        Some(path) if !crate::managed_agents::codex_adapter_is_outdated(path) => None,
+        // Codex adapter is outdated: uninstall the old package first so npm
+        // doesn't hit EEXIST on the shared `codex-acp` bin-link, then install.
+        Some(_) => Some(vec![
+            "npm uninstall -g @zed-industries/codex-acp",
+            "npm install -g @agentclientprotocol/codex-acp",
+        ]),
+        // Adapter missing: use the catalog's install commands directly.
+        None => Some(adapter_install_commands.to_vec()),
+    }
+}
+
 #[tauri::command]
 pub async fn discover_acp_providers() -> Result<Vec<AcpRuntimeCatalogEntry>, String> {
     tokio::task::spawn_blocking(|| {
         crate::managed_agents::clear_resolve_cache();
+        crate::managed_agents::refresh_login_shell_path();
         crate::managed_agents::discover_acp_runtimes()
     })
     .await
@@ -30,15 +70,53 @@ pub async fn discover_acp_providers() -> Result<Vec<AcpRuntimeCatalogEntry>, Str
 }
 
 #[tauri::command]
-pub async fn install_acp_runtime(runtime_id: String) -> Result<InstallRuntimeResult, String> {
-    tokio::task::spawn_blocking(move || install_acp_runtime_blocking(&runtime_id))
-        .await
-        .map_err(|e| format!("install task panicked: {e}"))?
+pub async fn install_acp_runtime(
+    runtime_id: String,
+    app: tauri::AppHandle,
+) -> Result<InstallRuntimeResult, String> {
+    // ── Phase 1: blocking install ────────────────────────────────────────────
+    //
+    // Run the npm install steps synchronously in spawn_blocking.  The
+    // active_installs guard is dropped when install_acp_runtime_blocking
+    // returns (Guard impl Drop) — so Phase 2's restart path runs outside
+    // the guard and cannot re-enter the mutex.
+    let runtime_id_clone = runtime_id.clone();
+    let install_result =
+        tokio::task::spawn_blocking(move || install_acp_runtime_blocking(&runtime_id_clone))
+            .await
+            .map_err(|e| format!("install task panicked: {e}"))??;
+
+    if !install_result.success {
+        return Ok(install_result);
+    }
+
+    // ── Phase 2: async restart of stuck agents ───────────────────────────────
+    //
+    // Mirror set_global_agent_config: after a successful install, restart any
+    // local agents that were spawned in setup-listener mode for this runtime
+    // and whose readiness now computes Ready.  Best-effort — errors are logged
+    // and returned as failed_restart_count without failing the command.
+    let (restarted_count, failed_restart_count) =
+        restart_setup_mode_agents_after_install(&app, &runtime_id).await;
+
+    Ok(InstallRuntimeResult {
+        success: true,
+        steps: install_result.steps,
+        restarted_count,
+        failed_restart_count,
+    })
 }
 
 /// Err(_) = infrastructure failure (panic, concurrency guard).
 /// Ok({success: false}) = an install step failed (stderr captured in steps).
 fn install_acp_runtime_blocking(runtime_id: &str) -> Result<InstallRuntimeResult, String> {
+    // Re-fetch the login-shell PATH so a Node.js installation that happened
+    // after app launch (or after a previous failed install) is visible to this
+    // run and to the subsequent discover_acp_providers call.
+    crate::managed_agents::refresh_login_shell_path();
+    // Clear the resolve cache so newly-installed binaries are found.
+    crate::managed_agents::clear_resolve_cache();
+
     // Prevent concurrent installs for the same runtime.
     {
         let mut set = active_installs()
@@ -82,25 +160,36 @@ fn install_acp_runtime_blocking(runtime_id: &str) -> Result<InstallRuntimeResult
                     return Ok(InstallRuntimeResult {
                         success: false,
                         steps,
+                        restarted_count: 0,
+                        failed_restart_count: 0,
                     });
                 }
             }
         }
     }
 
-    // Phase 2: Install adapter if missing and commands are available.
-    let adapter_found = runtime
+    // Phase 2: Install adapter if missing (or outdated) and commands are available.
+    // For the codex runtime, "found" is not enough — the resolved binary must also
+    // pass the 1.x version gate. An outdated 0.16.x adapter must be overwritten by
+    // the new npm install so the CODEX_CONFIG spawn contract works correctly.
+    let adapter_path = runtime
         .commands
         .iter()
-        .any(|cmd| crate::managed_agents::resolve_command(cmd).is_some());
-    if !adapter_found {
-        for cmd in runtime.adapter_install_commands {
+        .find_map(|cmd| crate::managed_agents::resolve_command(cmd));
+    if let Some(cmds) = plan_adapter_install(
+        runtime_id,
+        adapter_path.as_deref(),
+        runtime.adapter_install_commands,
+    ) {
+        for cmd in cmds {
             if is_npm_global_install(cmd) {
                 if let Some(step) = npm_preflight_check("adapter", cmd) {
                     steps.push(step);
                     return Ok(InstallRuntimeResult {
                         success: false,
                         steps,
+                        restarted_count: 0,
+                        failed_restart_count: 0,
                     });
                 }
             }
@@ -114,6 +203,8 @@ fn install_acp_runtime_blocking(runtime_id: &str) -> Result<InstallRuntimeResult
                 return Ok(InstallRuntimeResult {
                     success: false,
                     steps,
+                    restarted_count: 0,
+                    failed_restart_count: 0,
                 });
             }
         }
@@ -125,7 +216,324 @@ fn install_acp_runtime_blocking(runtime_id: &str) -> Result<InstallRuntimeResult
     Ok(InstallRuntimeResult {
         success: true,
         steps,
+        restarted_count: 0,
+        failed_restart_count: 0,
     })
+}
+
+// ── Post-install auto-restart (Phase 2 of install_acp_runtime) ───────────────
+//
+// After a successful adapter install, restart any local agents that:
+//   1. are local backend + have a live PID,
+//   2. their effective command maps to the just-installed runtime,
+//   3. were spawned in setup-listener mode (setup_mode stamp), AND
+//   4. their readiness now computes Ready.
+//
+// Mirrors the two-phase shape of set_global_agent_config.
+
+/// Outcome of a single per-agent restart attempt during post-install restart.
+#[derive(Debug)]
+enum InstallRestartOutcome {
+    Restarted,
+    FailedAfterStop,
+    Skipped,
+}
+
+/// Pure predicate: should this agent be restarted after an adapter install?
+///
+/// Extracted for unit testing — callers must still re-verify under the lock.
+/// The caller is responsible for computing `pid_alive` (via `process_is_running`)
+/// before invoking this function, keeping the predicate OS-agnostic and testable
+/// on all platforms.
+///
+/// An agent qualifies iff:
+/// - it is a local backend with a live PID (`pid_alive`),
+/// - its effective command maps to `runtime_id`,
+/// - it was **spawned in setup-listener mode** (`setup_mode`), AND
+/// - its readiness **now computes `Ready`** (install fixed the blocker).
+fn should_restart_after_install(
+    is_local: bool,
+    pid_alive: bool,
+    runtime_matches: bool,
+    setup_mode: bool,
+    now_ready: bool,
+) -> bool {
+    is_local && pid_alive && runtime_matches && setup_mode && now_ready
+}
+
+/// Restart all setup-mode agents whose runtime matches `runtime_id` and whose
+/// readiness now computes Ready.  Returns `(restarted_count, failed_restart_count)`.
+async fn restart_setup_mode_agents_after_install(
+    app: &tauri::AppHandle,
+    runtime_id: &str,
+) -> (u32, u32) {
+    use crate::{
+        app_state::AppState,
+        managed_agents::{
+            agent_readiness, known_acp_runtime, load_global_agent_config, load_managed_agents,
+            load_personas, record_agent_command, resolve_effective_agent_env, AgentReadiness,
+            BackendKind,
+        },
+    };
+    use tauri::Manager;
+
+    // ── Pre-scan: collect candidate pubkeys without holding locks ────────────
+    let state = app.state::<AppState>();
+    let owner_hex = match super::agents::workspace_owner_hex(&state) {
+        Ok(h) => h,
+        Err(e) => {
+            eprintln!(
+                "buzz-desktop: install_acp_runtime: failed to compute owner_hex for restart: {e}"
+            );
+            return (0, 0);
+        }
+    };
+
+    let app_for_scan = app.clone();
+    let runtime_id_owned = runtime_id.to_string();
+    let candidates = tokio::task::spawn_blocking(move || {
+        let records = load_managed_agents(&app_for_scan).unwrap_or_default();
+        let personas = load_personas(&app_for_scan).unwrap_or_default();
+        let global = load_global_agent_config(&app_for_scan).unwrap_or_default();
+
+        // Read the runtimes map to check setup_mode stamps.
+        let state_inner = app_for_scan.state::<AppState>();
+        let runtimes = state_inner
+            .managed_agent_processes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
+        records
+            .iter()
+            .filter(|record| {
+                let is_local = record.backend == BackendKind::Local;
+                let pid = record.runtime_pid;
+                let effective_cmd = record_agent_command(record, &personas);
+                let runtime_matches =
+                    known_acp_runtime(&effective_cmd).is_some_and(|r| r.id == runtime_id_owned);
+                let setup_mode = runtimes
+                    .get(&record.pubkey)
+                    .map(|p| p.setup_mode)
+                    .unwrap_or(false);
+                let effective = resolve_effective_agent_env(
+                    record,
+                    &personas,
+                    known_acp_runtime(&effective_cmd),
+                    &global,
+                );
+                let now_ready = matches!(agent_readiness(&effective), AgentReadiness::Ready);
+                let pid_alive = pid.is_some_and(crate::managed_agents::process_is_running);
+                should_restart_after_install(
+                    is_local,
+                    pid_alive,
+                    runtime_matches,
+                    setup_mode,
+                    now_ready,
+                )
+            })
+            .map(|r| r.pubkey.clone())
+            .collect::<Vec<_>>()
+    })
+    .await
+    .unwrap_or_default();
+
+    if candidates.is_empty() {
+        return (0, 0);
+    }
+
+    let mut restarted_count: u32 = 0;
+    let mut failed_restart_count: u32 = 0;
+
+    for pubkey in &candidates {
+        let outcome = restart_single_agent_after_install(app, pubkey, &owner_hex, runtime_id).await;
+        match outcome {
+            InstallRestartOutcome::Restarted => restarted_count += 1,
+            InstallRestartOutcome::FailedAfterStop => failed_restart_count += 1,
+            InstallRestartOutcome::Skipped => {}
+        }
+    }
+
+    (restarted_count, failed_restart_count)
+}
+
+/// Stop-then-start a single setup-mode agent after a successful adapter install.
+///
+/// Mirrors `restart_local_agent_on_config_change` from `global_agent_config.rs`:
+/// eligibility is re-verified under the store lock before the stop, then the
+/// agent is restarted via `start_local_agent_with_preflight`.
+async fn restart_single_agent_after_install(
+    app: &tauri::AppHandle,
+    pubkey: &str,
+    owner_hex: &str,
+    runtime_id: &str,
+) -> InstallRestartOutcome {
+    use crate::{
+        app_state::AppState,
+        managed_agents::{
+            agent_readiness, current_instance_id, find_managed_agent_mut, known_acp_runtime,
+            load_global_agent_config, load_managed_agents, load_personas, process_is_running,
+            record_agent_command, resolve_effective_agent_env, save_managed_agents,
+            stop_managed_agent_process, sync_managed_agent_processes, AgentReadiness, BackendKind,
+        },
+    };
+    use tauri::Manager;
+
+    let app_for_stop = app.clone();
+    let pubkey_owned = pubkey.to_string();
+    let runtime_id_owned = runtime_id.to_string();
+
+    let stop_result = tokio::task::spawn_blocking(move || {
+        let state = app_for_stop.state::<AppState>();
+
+        let _store_guard = state
+            .managed_agents_store_lock
+            .lock()
+            .map_err(|e| format!("failed to acquire store lock: {e}"))?;
+
+        let mut records = load_managed_agents(&app_for_stop)?;
+        let mut runtimes = state
+            .managed_agent_processes
+            .lock()
+            .map_err(|e| format!("failed to acquire runtimes lock: {e}"))?;
+
+        // Sync process state so PID liveness reflects current reality.
+        let (sync_changed, _) = sync_managed_agent_processes(
+            &mut records,
+            &mut runtimes,
+            &current_instance_id(&app_for_stop),
+        );
+        if sync_changed {
+            save_managed_agents(&app_for_stop, &records)?;
+        }
+
+        // Re-verify eligibility under lock.
+        let record = records
+            .iter()
+            .find(|r| r.pubkey == pubkey_owned)
+            .ok_or_else(|| format!("agent {pubkey_owned} not found"))?;
+
+        if record.backend != BackendKind::Local {
+            return Err(format!("agent {pubkey_owned} is no longer a local agent"));
+        }
+        let Some(pid) = record.runtime_pid else {
+            return Err(format!(
+                "agent {pubkey_owned} no longer has a recorded PID after sync"
+            ));
+        };
+        if !process_is_running(pid) {
+            return Err(format!(
+                "agent {pubkey_owned} process {pid} is no longer running"
+            ));
+        }
+
+        let personas = load_personas(&app_for_stop).unwrap_or_default();
+        let global = load_global_agent_config(&app_for_stop).unwrap_or_default();
+
+        let effective_cmd = record_agent_command(record, &personas);
+        let runtime_matches =
+            known_acp_runtime(&effective_cmd).is_some_and(|r| r.id == runtime_id_owned);
+        if !runtime_matches {
+            return Err(format!(
+                "agent {pubkey_owned} runtime no longer matches {runtime_id_owned} under lock"
+            ));
+        }
+
+        let setup_mode = runtimes
+            .get(&pubkey_owned)
+            .map(|p| p.setup_mode)
+            .unwrap_or(false);
+        if !setup_mode {
+            return Err(format!(
+                "agent {pubkey_owned} is not in setup mode under lock — skipping"
+            ));
+        }
+
+        let runtime_meta = known_acp_runtime(&effective_cmd);
+        let effective = resolve_effective_agent_env(record, &personas, runtime_meta, &global);
+        if !matches!(agent_readiness(&effective), AgentReadiness::Ready) {
+            return Err(format!(
+                "agent {pubkey_owned} readiness is still NotReady after install — not bouncing"
+            ));
+        }
+
+        // Stop the process.
+        let record_mut = find_managed_agent_mut(&mut records, &pubkey_owned)?;
+        stop_managed_agent_process(&app_for_stop, record_mut, &mut runtimes)?;
+        save_managed_agents(&app_for_stop, &records)?;
+
+        Ok(())
+    })
+    .await;
+
+    let stopped = match stop_result {
+        Ok(Ok(())) => true,
+        Ok(Err(e)) => {
+            eprintln!("buzz-desktop: install_acp_runtime: skipping restart of {pubkey}: {e}");
+            false
+        }
+        Err(e) => {
+            eprintln!(
+                "buzz-desktop: install_acp_runtime: spawn_blocking failed for stop of {pubkey}: {e}"
+            );
+            false
+        }
+    };
+
+    if !stopped {
+        return InstallRestartOutcome::Skipped;
+    }
+
+    // Start via the normal preflight path — same as config-change restart.
+    {
+        use tauri::Manager;
+        let state = app.state::<AppState>();
+        match super::agents::start_local_agent_with_preflight(app, &state, pubkey, owner_hex, false)
+            .await
+        {
+            Ok(_) => {
+                eprintln!(
+                    "buzz-desktop: install_acp_runtime: restarted setup-mode agent {pubkey} after install"
+                );
+                InstallRestartOutcome::Restarted
+            }
+            Err(e) => {
+                eprintln!(
+                    "buzz-desktop: install_acp_runtime: failed to start {pubkey} after install: {e}"
+                );
+                // Persist last_error so the UI surfaces a diagnosable stopped state.
+                if let Err(save_err) = persist_last_error_on_install(app, pubkey, &e) {
+                    eprintln!(
+                        "buzz-desktop: install_acp_runtime: failed to persist last_error for {pubkey}: {save_err}"
+                    );
+                }
+                InstallRestartOutcome::FailedAfterStop
+            }
+        }
+    }
+}
+
+/// Persist a `last_error` on the agent record under the store lock.
+/// Best-effort: called only after a failed restart.
+fn persist_last_error_on_install(
+    app: &tauri::AppHandle,
+    pubkey: &str,
+    error: &str,
+) -> Result<(), String> {
+    use crate::{
+        app_state::AppState,
+        managed_agents::{find_managed_agent_mut, load_managed_agents, save_managed_agents},
+    };
+    use tauri::Manager;
+    let state = app.state::<AppState>();
+    let _store_guard = state
+        .managed_agents_store_lock
+        .lock()
+        .map_err(|e| format!("failed to acquire store lock: {e}"))?;
+    let mut records = load_managed_agents(app)?;
+    let record = find_managed_agent_mut(&mut records, pubkey)?;
+    record.last_error = Some(error.to_string());
+    record.updated_at = crate::util::now_iso();
+    save_managed_agents(app, &records)
 }
 
 /// Build a login-shell `Command` for `command` with the hermit env vars
@@ -328,12 +736,6 @@ fn floor_char_boundary(s: &str, mut index: usize) -> usize {
 }
 
 // ── npm EACCES preflight ──────────────────────────────────────────────────────
-
-/// Returns true when `command` is an npm global install invocation.
-fn is_npm_global_install(command: &str) -> bool {
-    let t = command.trim_start();
-    t.starts_with("npm install -g ") || t.starts_with("npm i -g ")
-}
 
 /// Guidance text for the EACCES / unwritable-prefix case.
 fn npm_eacces_guidance(command: &str) -> String {
@@ -621,7 +1023,7 @@ mod tests {
     #[test]
     fn test_is_npm_global_install_accepts_catalog_codex_command() {
         assert!(is_npm_global_install(
-            "npm install -g @zed-industries/codex-acp"
+            "npm install -g @agentclientprotocol/codex-acp"
         ));
     }
 
@@ -725,5 +1127,220 @@ mod tests {
         // Create only `lib/` — no `lib/node_modules`.
         std::fs::create_dir(dir.path().join("lib")).unwrap();
         assert!(npm_install_target_is_writable(dir.path()));
+    }
+
+    // ── adapter_needs_install (codex version gate) ────────────────────────────
+
+    /// plan_adapter_install is the pure install-plan seam used by
+    /// install_acp_runtime_blocking. These tests verify:
+    ///   - A 0.x binary (AdapterOutdated) → uninstall-then-install sequence returned
+    ///   - A 1.x binary (Available) → None (no reinstall)
+    ///   - Missing binary (None path) → catalog install commands returned
+    #[cfg(unix)]
+    #[test]
+    fn test_plan_adapter_install_selects_npm_command_for_outdated_0x_codex_binary() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("codex-acp");
+        // Simulate old 0.16.x: --version exits non-zero (unrecognised flag)
+        std::fs::write(&bin, "#!/bin/sh\nexit 1\n").expect("write script");
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod script");
+
+        let install_cmds = &["npm install -g @agentclientprotocol/codex-acp"];
+        let plan = plan_adapter_install("codex", Some(&bin), install_cmds);
+
+        assert!(
+            plan.is_some(),
+            "0.x codex adapter must trigger install plan"
+        );
+        let cmds = plan.unwrap();
+        // Outdated arm: must uninstall the old package first, then install new.
+        assert_eq!(
+            cmds,
+            vec![
+                "npm uninstall -g @zed-industries/codex-acp",
+                "npm install -g @agentclientprotocol/codex-acp",
+            ],
+            "outdated codex adapter must produce uninstall-then-install sequence; got {cmds:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_plan_adapter_install_returns_none_for_current_1x_codex_binary() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("codex-acp");
+        // Simulate 1.x adapter: outputs version and exits 0
+        std::fs::write(
+            &bin,
+            "#!/bin/sh\necho '@agentclientprotocol/codex-acp 1.1.2'\nexit 0\n",
+        )
+        .expect("write script");
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod script");
+
+        let install_cmds = &["npm install -g @agentclientprotocol/codex-acp"];
+        let plan = plan_adapter_install("codex", Some(&bin), install_cmds);
+
+        assert!(
+            plan.is_none(),
+            "1.x codex adapter must not trigger install plan (no reinstall needed)"
+        );
+    }
+
+    #[test]
+    fn test_plan_adapter_install_returns_catalog_cmds_when_no_adapter_path() {
+        let install_cmds = &["npm install -g @agentclientprotocol/codex-acp"];
+        let plan = plan_adapter_install("codex", None, install_cmds);
+        assert!(plan.is_some(), "missing adapter must trigger install plan");
+        // Missing arm: use the catalog's install commands directly (no prior
+        // package to uninstall — fresh install, not a reinstall).
+        assert_eq!(
+            plan.unwrap(),
+            vec!["npm install -g @agentclientprotocol/codex-acp"],
+            "missing codex adapter must use catalog install commands only"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_plan_adapter_install_non_codex_runtime_never_reinstalls() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // For non-codex runtimes, any resolved binary means no install needed.
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("goose-acp");
+        std::fs::write(&bin, "#!/bin/sh\nexit 1\n").expect("write script");
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod script");
+
+        let install_cmds = &["npm install -g @block/goose-acp"];
+        let plan = plan_adapter_install("goose", Some(&bin), install_cmds);
+        assert!(
+            plan.is_none(),
+            "non-codex runtime with resolved binary must not trigger reinstall"
+        );
+    }
+
+    // ── should_restart_after_install ─────────────────────────────────────────
+
+    /// Setup-mode agent on matching runtime that is now Ready → restart.
+    #[test]
+    fn test_should_restart_after_install_setup_mode_now_ready_is_candidate() {
+        assert!(
+            should_restart_after_install(true, true, true, true, true),
+            "setup-mode codex agent that became Ready must be restarted after install"
+        );
+    }
+
+    /// Setup-mode agent still NotReady after install (e.g. logged out) → no restart.
+    #[test]
+    fn test_should_restart_after_install_still_not_ready_is_not_candidate() {
+        assert!(
+            !should_restart_after_install(true, true, true, true, false),
+            "setup-mode agent still NotReady must NOT be restarted (would re-enter setup mode)"
+        );
+    }
+
+    /// Healthy in-pool agent (setup_mode=false) → no restart, even if now Ready.
+    #[test]
+    fn test_should_restart_after_install_healthy_agent_is_not_candidate() {
+        assert!(
+            !should_restart_after_install(true, true, true, false, true),
+            "healthy in-pool agent (setup_mode=false) must NOT be bounced on install"
+        );
+    }
+
+    /// Agent on a different runtime_id → no restart.
+    #[test]
+    fn test_should_restart_after_install_different_runtime_is_not_candidate() {
+        assert!(
+            !should_restart_after_install(true, true, false, true, true),
+            "agent on a different runtime must NOT be restarted by this install"
+        );
+    }
+
+    /// Remote/provider-backend agent → no restart (not local).
+    #[test]
+    fn test_should_restart_after_install_non_local_is_not_candidate() {
+        assert!(
+            !should_restart_after_install(false, true, true, true, true),
+            "non-local (provider-backend) agent must NOT be restarted"
+        );
+    }
+
+    /// Dead process (pid_alive=false) → no restart.
+    #[test]
+    fn test_should_restart_after_install_dead_pid_is_not_candidate() {
+        assert!(
+            !should_restart_after_install(true, false, true, true, true),
+            "agent whose process is no longer running must NOT be restarted"
+        );
+    }
+
+    // ── badge availability-drift (Phase 2) ───────────────────────────────────
+    //
+    // `availability_drift` is a pure predicate over two `Option` values —
+    // no global state, no parallelism hazard.
+
+    /// Both sides known and different → drift detected.
+    #[test]
+    fn test_availability_drift_detected_when_stamped_differs_from_current() {
+        use crate::managed_agents::{availability_drift, AcpAvailabilityStatus};
+        assert!(
+            availability_drift(
+                Some(&AcpAvailabilityStatus::Available),
+                Some(AcpAvailabilityStatus::AdapterOutdated),
+            ),
+            "Available stamped vs AdapterOutdated current must be detected as drift"
+        );
+    }
+
+    /// Both sides known and equal → no drift.
+    #[test]
+    fn test_availability_drift_no_drift_when_stamped_equals_current() {
+        use crate::managed_agents::{availability_drift, AcpAvailabilityStatus};
+        assert!(
+            !availability_drift(
+                Some(&AcpAvailabilityStatus::Available),
+                Some(AcpAvailabilityStatus::Available),
+            ),
+            "matching stamped and current must not show drift"
+        );
+    }
+
+    /// Stamped is None (cold cache at spawn) → no drift regardless of current.
+    #[test]
+    fn test_availability_drift_none_stamp_never_drifts() {
+        use crate::managed_agents::{availability_drift, AcpAvailabilityStatus};
+        assert!(
+            !availability_drift(None, Some(AcpAvailabilityStatus::Available)),
+            "None stamp (cold cache at spawn) must never signal drift"
+        );
+    }
+
+    /// Current is None (cache cold now) → no drift regardless of stamp.
+    #[test]
+    fn test_availability_drift_none_current_never_drifts() {
+        use crate::managed_agents::{availability_drift, AcpAvailabilityStatus};
+        assert!(
+            !availability_drift(Some(&AcpAvailabilityStatus::Available), None),
+            "None current (cache cold) must never signal drift"
+        );
+    }
+
+    /// Non-codex agent (stamp is None) → no drift (None case).
+    #[test]
+    fn test_availability_drift_non_codex_none_never_drifts() {
+        use crate::managed_agents::{availability_drift, AcpAvailabilityStatus};
+        // Non-codex agents have `adapter_availability = None` — must never flip.
+        assert!(
+            !availability_drift(None, Some(AcpAvailabilityStatus::AdapterMissing)),
+            "non-codex agent (None stamp) must never trigger drift badge"
+        );
     }
 }

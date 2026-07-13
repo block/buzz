@@ -75,6 +75,11 @@ const overrides = new Map([
   // global-agent-config: resolve_deploy_model_provider + visibility exports
   // add ~40 lines on top of the 1A.1 ratchet. Queued to split.
   ["src-tauri/src/commands/agents.rs", 1340],
+  // agent-lifecycle-fixes: cascade-delete in delete_persona restructured into
+  // 3-phase (stage/stop/commit) + commit_cascade_agents injectable helper for
+  // retry-safety. Load-bearing reviewer-required change; queued to split.
+  // Consolidation removed the legacy persona-card import/export codecs.
+  ["src-tauri/src/commands/personas/mod.rs", 984],
   // #1418 read-path fix: get_thread_replies' blocker fix (shared TIMELINE_KINDS
   // const + build_thread_replies_filter helper, mirroring the channel sibling so
   // the two p-gate filters can't drift) plus two guard unit tests. The file was
@@ -141,12 +146,21 @@ const overrides = new Map([
   // #1613 augmented-PATH readiness probes grew the file +3 past the prior cap.
   // +16: resolve_effective_agent_env + global-config readiness wiring (#1448).
   // +1 rebase merge: GlobalAgentConfig import added alongside AcpAvailabilityStatus.
-  // +2 rebase onto #1667: behavioral quad fields in PersonaRecord/ManagedAgentRecord.
+  // +2 rebase onto #1667: behavioral quad fields in AgentDefinition/ManagedAgentRecord.
   // +3 rebase onto main (#1568 + #1613): identity-import-keyring + augmented-PATH probes.
   // +18: CliConfigInvalid requirement surface for config-parse probe classification —
   // new Requirement variant + updated cli_login_requirements + 3 new probe-layer tests.
   // Load-bearing UX fix (bad config → clear diagnostic, not "run codex login").
-  ["src-tauri/src/managed_agents/readiness.rs", 1583],
+  // codex-acp-package-swap: AdapterOutdated version-probe in cli_login_requirements
+  // (+22 lines). Load-bearing — blocks login gate for deprecated 0.16.x adapter.
+  // code-reviewer fix-round: codex readiness gate tests — 2 new tests for
+  // outdated-adapter and garbage-version-output paths through the codex id gate
+  // (+140 lines: make_codex_runtime helper, PATH_MUTEX serializer, 2 test fns).
+  // Load-bearing test coverage; queued to split with the file generally.
+  // +1: pub(crate) mod cli_probe declaration for doctor auth probe access.
+  // +3: auth_probe_args: None + login_hint: None added to make_cli_runtime and
+  // make_codex_runtime stubs (new KnownAcpRuntime fields).
+  ["src-tauri/src/managed_agents/readiness.rs", 1754],
   // applyWorkspace reposDir parameter plus the validateReposDir binding,
   // threaded through Tauri invokes for configurable repos_dir, plus the
   // harness-persona-sync `harnessOverride` create-input bit — load-bearing
@@ -173,9 +187,18 @@ const overrides = new Map([
   // baked-env fold-in: getBakedBuildEnv + BakedEnvEntry type adds ~28 lines.
   // doctor-npm-eacces-preflight: hint field on RawInstallStepResult + mapper
   // passthrough (+2 lines).
-  ["src/shared/api/tauri.ts", 1273],
+  // doctor-install-reliability: node_required + auth_status + login_hint fields
+  // added to RawAcpRuntimeCatalogEntry + fromRawAcpRuntimeCatalogEntry mapper (+8).
+  // codex-install-auto-restart: restarted_count + failed_restart_count added to
+  // RawInstallRuntimeResult + fromRawInstallRuntimeResult mapper (+2).
+  ["src/shared/api/tauri.ts", 1282],
   // doctor-npm-eacces-preflight: hint field added to InstallStepResult (+1 line).
-  ["src/shared/api/types.ts", 1001],
+  // codex-acp-package-swap: "adapter_outdated" variant added to AcpAvailabilityStatus (+1 line).
+  // doctor-install-reliability: AuthStatus tagged union + nodeRequired/authStatus/
+  // loginHint fields on AcpRuntimeCatalogEntry (+14 lines). Load-bearing new feature.
+  // agent-lifecycle-fixes: GlobalAgentConfigSaveResult type grows with
+  // failed_restart_count (+2 lines). Queued to split with the rest of this list.
+  ["src/shared/api/types.ts", 1030],
   // readiness-gate: PersonaDialog.tsx threads computeLocalModeGate +
   // requiredCredentialEnvKeys + RequiredFieldLabel so the "New agent" dialog
   // shows required markers and credential amber rows (parity with
@@ -209,7 +232,32 @@ const overrides = new Map([
   // agent-config-propagation: the agent_command_override decision family
   // (divergent / create-time / update-time / apply) moved to
   // discovery/overrides.rs; ratcheting 802 -> 685 to bank the headroom.
-  ["src-tauri/src/managed_agents/discovery.rs", 685],
+  // codex-acp-package-swap: probe_codex_acp_major_version (+24 lines) +
+  // AdapterOutdated version-gate in discover_acp_runtimes (+22 lines). Both
+  // load-bearing — required to detect the deprecated 0.16.x adapter and
+  // prevent silent relay breakage after the spawn-contract change.
+  // codex-acp-package-swap follow-up: tempfile-based bounded stdout read
+  // (+18 lines), codex_adapter_availability/is_outdated helpers (+16 lines),
+  // cross-platform probe contract. All load-bearing — required for correct
+  // probe behaviour on Windows and descendant-process edge cases.
+  // doctor-install-reliability: refreshable login_shell_path cache,
+  // find_nvm_default_bin + parse_semver_tag helpers, auth probe cache +
+  // probe_auth_status/cached_auth_status, runtime_needs_npm, probe_args_for,
+  // PartialEntry struct, and updated discover_acp_runtimes with parallel auth
+  // probes. Load-bearing fresh-install reliability fixes. (+289 lines)
+  // doctor-install-reliability review fixes: LoginShellPath enum + double-checked
+  // locking, is_safe_nvm_tag security validation, classify_probe_output helper,
+  // auth_probe_args on KnownAcpRuntime (removes probe_args_for indirection),
+  // process-level timeout replacing inner-thread pattern. (+75 lines)
+  // codex-install-auto-restart review-fixes: availability_drift pure predicate
+  // + updated adapter_availability_cached() signature (Option return, cold=None)
+  // prevents false restart badge on newly restarted agents. Correctness fix;
+  // load-bearing — required by Thufir's IMPORTANT findings. (+15 lines)
+  ["src-tauri/src/managed_agents/discovery.rs", 1245],
+  // rebase over codex-acp-package-swap: its version-probe tests union with the
+  // doctor-install-reliability nvm/login-shell/semver tests — each side alone
+  // stayed under the 1000 default; the union exceeds it.
+  ["src-tauri/src/managed_agents/discovery/tests.rs", 1029],
   // identity-import-keyring: the identity resolution state machine's behavioral
   // matrix (46 tests over FakeIdentityStore — probe × marker × file cells,
   // adoption / read-back-corruption / marker-failure arms, recovery-mode
@@ -277,7 +325,11 @@ const overrides = new Map([
   // (reply-inclusive; would clear unread state early). The file was already
   // at the 1000 ceiling; comment-only overage, not code growth. Queued to
   // split with the rest of this list.
-  ["src/features/channels/ui/ChannelScreen.tsx", 1002],
+  // member-agent-flags: messageProfiles merge + ref stabilisation split out to
+  // useMessageProfiles.ts, ratcheting 1002 -> 972 (under the 1000 default;
+  // entry kept as a ratchet). +7 rebase onto main (#1698 timeline-window
+  // growth), 972 -> 979.
+  ["src/features/channels/ui/ChannelScreen.tsx", 979],
   // forced-unread persistence: markChannelUnread now writes through to
   // forcedUnreadStore (localStorage) so the sidebar badge survives reload and
   // the rail observer can read it. Three clear points added (markChannelRead,
@@ -324,7 +376,15 @@ const overrides = new Map([
   // in this PR; queued to split with the command module refactor.
   // +17: baked-env-global-unify: BUZZ_AGENT_THINKING_EFFORT added to
   // is_safe_to_reveal allowlist + baked_env_thinking_effort_is_unmasked test.
-  ["src-tauri/src/commands/agent_config.rs", 1019],
+  // +1: doctor-install-reliability: login_hint: None added to goose_runtime test stub.
+  // +1: doctor-install-reliability review fixes: auth_probe_args: None added to stub.
+  ["src-tauri/src/commands/agent_config.rs", 1021],
+  // codex-install-auto-restart review-fixes: should_restart_after_install
+  // takes pid_alive:bool (pure predicate, no OS-dependent call); 3 racy
+  // cache tests replaced with 6 pure availability_drift predicate tests;
+  // dead-pid non-happy-path added. All load-bearing correctness fixes.
+  // (+17 lines net vs previous 1330 limit; rustfmt expanded some call sites)
+  ["src-tauri/src/commands/agent_discovery.rs", 1347],
   // draft-persistence predicate: submit-time `loadDraft` check + inline comment
   // + deps-array entry in submitMessage closes the never-persisted-boundary
   // defect (Thufir Pass-3 finding). Load-bearing correctness fix; queued to
@@ -358,7 +418,14 @@ const overrides = new Map([
   // +23 rebase onto #1667: behavioral quad fields (respond_to/parallelism/toolsets)
   // plumbed through AgentInstanceEditDialog from PersonaAdvancedFields.
   // +2 provider-aware effort: model/provider props threaded to BuzzAgentModelTuningFields.
-  ["src/features/agents/ui/AgentInstanceEditDialog.tsx", 1165],
+  // +15 provider/model dropdown fixes: useBakedBuildEnvKeysQuery + hideProviderIds
+  // for Databricks v1 gate; prospectiveRuntimeId default fallback for builtins.
+  ["src/features/agents/ui/AgentInstanceEditDialog.tsx", 1180],
+  // AgentDefinitionDialog grew past 1000 with the following load-bearing fixes:
+  // isRuntimeAutoSeededRef tracking for edit-mode seeding (Fizz shows models);
+  // runtimeSupportsLlmProviderSelection guard on discovery provider (codex fix);
+  // hideProviderIds computation for Databricks v1 gate. Queued to split.
+  ["src/features/agents/ui/AgentDefinitionDialog.tsx", 1035],
 ]);
 
 await runFileSizeCheck({

@@ -1,10 +1,10 @@
 import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'package:nostr/nostr.dart' as nostr;
 
-import '../relay/relay.dart';
 import '../workspace/workspace.dart';
 import '../workspace/workspace_provider.dart';
 
-enum AuthStatus { unknown, unauthenticated, authenticated, offline }
+enum AuthStatus { unknown, unauthenticated, authenticated }
 
 class AuthState {
   final AuthStatus status;
@@ -13,10 +13,8 @@ class AuthState {
   const AuthState({required this.status, this.workspace});
 }
 
-/// Validates the active workspace on startup by opening a NIP-42-authenticated
-/// websocket. A successful AUTH means the nsec is valid and the relay accepts
-/// us; any other outcome falls through to offline (transient) or removes the
-/// workspace (auth explicitly rejected).
+/// Restores the active workspace without making connectivity load-bearing.
+/// The relay session owns connection recovery after startup.
 class AuthNotifier extends AsyncNotifier<AuthState> {
   @override
   Future<AuthState> build() async {
@@ -29,56 +27,26 @@ class AuthNotifier extends AsyncNotifier<AuthState> {
       return const AuthState(status: AuthStatus.unauthenticated);
     }
 
-    final activeId = await storage.loadActiveId();
-    final Workspace active;
-    if (activeId != null && workspaces.any((w) => w.id == activeId)) {
-      active = workspaces.firstWhere((w) => w.id == activeId);
-    } else {
-      // activeId is null or points to a workspace that no longer exists.
-      // Fall back to first workspace and persist the choice.
-      active = workspaces.first;
+    var activeId = await storage.loadActiveId();
+    while (workspaces.isNotEmpty) {
+      final active = activeId != null && workspaces.any((w) => w.id == activeId)
+          ? workspaces.firstWhere((w) => w.id == activeId)
+          : workspaces.first;
       await storage.saveActiveId(active.id);
-    }
 
-    // Validate by attempting a NIP-42 authenticated WS connection.
-    final socket = RelaySocket(
-      wsUrl: _wsFromBase(active.relayUrl),
-      nsec: active.nsec,
-      onMessage: (_) {},
-      onConnected: () {},
-      onDisconnected: (_) {},
-    );
-    try {
-      await socket.connect().timeout(const Duration(seconds: 8));
-      await socket.disconnect();
-      return AuthState(status: AuthStatus.authenticated, workspace: active);
-    } catch (e) {
-      final msg = e.toString();
-      // The relay explicitly rejected our auth — drop this workspace.
-      if (msg.contains('Auth rejected') ||
-          msg.contains('restricted') ||
-          msg.contains('auth-required')) {
-        await storage.remove(active.id);
-        final remaining = await storage.loadAll();
-        if (remaining.isNotEmpty) {
-          final next = remaining.first;
-          await storage.saveActiveId(next.id);
-          ref.invalidate(workspaceListProvider);
-          ref.invalidate(activeWorkspaceProvider);
-          ref.invalidateSelf();
-          return await future;
-        }
-        return const AuthState(status: AuthStatus.unauthenticated);
+      if (_hasValidNsec(active.nsec)) {
+        return AuthState(status: AuthStatus.authenticated, workspace: active);
       }
-      // Transient (timeout, network) — keep workspace, go offline.
-      return AuthState(status: AuthStatus.offline, workspace: active);
-    }
-  }
 
-  /// Retry credential validation (e.g. after a network error).
-  Future<void> retry() async {
-    ref.invalidateSelf();
-    await future;
+      await storage.remove(active.id);
+      workspaces.removeWhere((workspace) => workspace.id == active.id);
+      activeId = null;
+      ref.invalidate(workspaceListProvider);
+      ref.invalidate(activeWorkspaceProvider);
+    }
+
+    await storage.clearActiveId();
+    return const AuthState(status: AuthStatus.unauthenticated);
   }
 
   /// Authenticate with a workspace. Saves it and switches to it.
@@ -126,11 +94,15 @@ class AuthNotifier extends AsyncNotifier<AuthState> {
   }
 }
 
-/// Derive the websocket URL from the workspace's HTTP base URL.
-String _wsFromBase(String baseUrl) {
-  final uri = Uri.parse(baseUrl);
-  final scheme = uri.scheme == 'https' ? 'wss' : 'ws';
-  return uri.replace(scheme: scheme).toString();
+bool _hasValidNsec(String? nsec) {
+  if (nsec == null || nsec.isEmpty) return false;
+  try {
+    final decoded = nostr.Nip19.decode(payload: nsec);
+    return decoded.prefix == nostr.Nip19Prefix.nsec &&
+        decoded.data.length == 64;
+  } catch (_) {
+    return false;
+  }
 }
 
 final authProvider = AsyncNotifierProvider<AuthNotifier, AuthState>(

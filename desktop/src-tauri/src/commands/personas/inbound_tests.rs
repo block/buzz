@@ -8,8 +8,8 @@ const UUID: &str = "11111111-2222-3333-4444-555555555555";
 
 /// A local in-app persona: `source_team_persona_slug` is None, so its d-tag
 /// IS its UUID id. Carries env_vars + source_team that must survive a patch.
-fn local_in_app() -> PersonaRecord {
-    PersonaRecord {
+fn local_in_app() -> AgentDefinition {
+    AgentDefinition {
         id: UUID.to_string(),
         display_name: "Local".to_string(),
         avatar_url: None,
@@ -25,7 +25,6 @@ fn local_in_app() -> PersonaRecord {
         env_vars: BTreeMap::from([("API_KEY".to_string(), "secret".to_string())]),
         respond_to: None,
         respond_to_allowlist: Vec::new(),
-        mcp_toolsets: None,
         parallelism: None,
         created_at: "2025-01-01T00:00:00Z".to_string(),
         updated_at: "2025-01-01T00:00:00Z".to_string(),
@@ -34,8 +33,8 @@ fn local_in_app() -> PersonaRecord {
 
 /// An inbound persona as `persona_from_event` would produce it: id = d-tag,
 /// slug = Some(d-tag), empty env_vars, source_team None.
-fn inbound_for(d_tag: &str, display_name: &str) -> PersonaRecord {
-    PersonaRecord {
+fn inbound_for(d_tag: &str, display_name: &str) -> AgentDefinition {
+    AgentDefinition {
         id: d_tag.to_string(),
         display_name: display_name.to_string(),
         avatar_url: Some("https://example.com/a.png".to_string()),
@@ -51,7 +50,6 @@ fn inbound_for(d_tag: &str, display_name: &str) -> PersonaRecord {
         env_vars: BTreeMap::new(),
         respond_to: None,
         respond_to_allowlist: Vec::new(),
-        mcp_toolsets: None,
         parallelism: None,
         created_at: "2025-06-01T00:00:00Z".to_string(),
         updated_at: "2025-06-01T00:00:00Z".to_string(),
@@ -91,7 +89,6 @@ fn inbound_quad_edit_applies_to_existing_matched_record() {
     let mut inbound = inbound_for(UUID, "Remote");
     inbound.respond_to = Some("allowlist".to_string());
     inbound.respond_to_allowlist = vec!["a".repeat(64)];
-    inbound.mcp_toolsets = Some("default,canvas".to_string());
     inbound.parallelism = Some(8);
     apply_inbound_persona(&mut personas, inbound);
 
@@ -99,7 +96,6 @@ fn inbound_quad_edit_applies_to_existing_matched_record() {
     let p = &personas[0];
     assert_eq!(p.respond_to, Some("allowlist".to_string()));
     assert_eq!(p.respond_to_allowlist, vec!["a".repeat(64)]);
-    assert_eq!(p.mcp_toolsets, Some("default,canvas".to_string()));
     assert_eq!(p.parallelism, Some(8));
     // A quad-absent inbound also applies (clears), same as prompt/model.
     apply_inbound_persona(&mut personas, inbound_for(UUID, "Remote"));
@@ -179,7 +175,6 @@ fn local_agent() -> ManagedAgentRecord {
         model: Some("local-model".to_string()),
         provider: Some("local-provider".to_string()),
         persona_source_version: Some("local-hash".to_string()),
-        mcp_toolsets: Some("local".to_string()),
         env_vars: BTreeMap::from([("API_KEY".to_string(), "localsecret".to_string())]),
         start_on_app_launch: true,
         auto_restart_on_config_change: true,
@@ -211,7 +206,6 @@ fn local_agent() -> ManagedAgentRecord {
         source_team_persona_slug: None,
         definition_respond_to: None,
         definition_respond_to_allowlist: Vec::new(),
-        definition_mcp_toolsets: None,
         definition_parallelism: None,
         relay_mesh: None,
     }
@@ -228,7 +222,6 @@ fn foreign_agent_event_with_secrets(d_tag: &str) -> nostr::Event {
         "system_prompt": "remote prompt",
         "model": "remote-model",
         "provider": "remote-provider",
-        "mcp_toolsets": "remote",
         "persona_source_version": "remote-hash",
         "parallelism": 99,
         "respond_to": "anyone",
@@ -339,7 +332,6 @@ fn inbound_definition_less_agent_applies_quad() {
         "system_prompt": "remote prompt",
         "model": "remote-model",
         "provider": "remote-provider",
-        "mcp_toolsets": "remote",
         "persona_source_version": "remote-version",
         "parallelism": 99,
         "respond_to": "anyone",

@@ -1,14 +1,14 @@
 use super::*;
 use std::collections::BTreeMap;
 
-/// Build a minimal PersonaRecord with the fields that `rewrite_persona_md` reads.
+/// Build a minimal AgentDefinition with the fields that `rewrite_persona_md` reads.
 fn persona(
     display_name: &str,
     runtime: Option<&str>,
     avatar_url: Option<&str>,
     provider: Option<&str>,
     model: Option<&str>,
-) -> PersonaRecord {
+) -> AgentDefinition {
     // system_prompt matches the SAMPLE_MD body so the "no prompt edit" path
     // is taken in rewrite_persona_md (body preserved byte-for-byte).
     persona_with_prompt(
@@ -29,8 +29,8 @@ fn persona_with_prompt(
     provider: Option<&str>,
     model: Option<&str>,
     system_prompt: &str,
-) -> PersonaRecord {
-    PersonaRecord {
+) -> AgentDefinition {
+    AgentDefinition {
         id: "test-id".to_string(),
         display_name: display_name.to_string(),
         avatar_url: avatar_url.map(str::to_string),
@@ -46,7 +46,6 @@ fn persona_with_prompt(
         env_vars: BTreeMap::new(),
         respond_to: None,
         respond_to_allowlist: Vec::new(),
-        mcp_toolsets: None,
         parallelism: None,
         created_at: "2025-01-01T00:00:00Z".to_string(),
         updated_at: "2025-01-01T00:00:00Z".to_string(),
@@ -200,7 +199,7 @@ fn test_rewrite_avatar_set_and_cleared() {
 
 #[test]
 fn test_rewrite_body_not_replaced_by_system_prompt() {
-    // system_prompt on the PersonaRecord is the COMPOSED prompt (body + pack instructions).
+    // system_prompt on the AgentDefinition is the COMPOSED prompt (body + pack instructions).
     // The body of the .persona.md must not be replaced with it.
     let p = persona(
         "Paul",
@@ -527,7 +526,7 @@ You are Paul.
 // ── find_team_for_persona_source tests ────────────────────────────────────
 //
 // Verify that write_back_persona_md finds teams by team_persona_key, not
-// team.id. Legacy/backfilled teams have a UUID `id` while PersonaRecord
+// team.id. Legacy/backfilled teams have a UUID `id` while AgentDefinition
 // stores the manifest directory name in `source_team`; matching by `id`
 // alone silently misses those teams.
 
@@ -565,7 +564,7 @@ fn make_team_with_path(id: &str, source_dir: &std::path::Path) -> TeamRecord {
 
 #[test]
 fn test_find_team_legacy_uuid_id_matched_by_source_dir_name() {
-    // Legacy shape: team.id is a UUID; PersonaRecord.source_team is the
+    // Legacy shape: team.id is a UUID; AgentDefinition.source_team is the
     // manifest directory name. The old `team.id == source_team` predicate
     // missed this — find_team_for_persona_source must match via source_dir.
     let teams = vec![make_team("some-uuid-123", Some("/teams/com.test.pack"))];
@@ -628,9 +627,9 @@ fn test_find_team_returns_none_when_no_match() {
 // `source_team` stores the key, not the UUID, and the pack file has no
 // `runtime:` frontmatter key (write-back must INSERT it).
 
-/// Build a PersonaRecord matching the legacy incident shape.
-fn legacy_persona(source_team: &str, runtime: Option<&str>) -> PersonaRecord {
-    PersonaRecord {
+/// Build an AgentDefinition matching the legacy incident shape.
+fn legacy_persona(source_team: &str, runtime: Option<&str>) -> AgentDefinition {
+    AgentDefinition {
         id: "ab5c038c-1b12-46e2-8283-d6f7c0606fce".to_string(),
         display_name: "Paul Updated".to_string(),
         avatar_url: None,
@@ -646,7 +645,6 @@ fn legacy_persona(source_team: &str, runtime: Option<&str>) -> PersonaRecord {
         env_vars: BTreeMap::new(),
         respond_to: None,
         respond_to_allowlist: Vec::new(),
-        mcp_toolsets: None,
         parallelism: None,
         created_at: "2026-01-01T00:00:00Z".to_string(),
         updated_at: "2026-01-01T00:00:00Z".to_string(),

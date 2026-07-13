@@ -107,7 +107,11 @@ pub(super) fn retain_managed_agent_pending(
 /// `pending_sync = 1`. The `d_tag` is the agent's pubkey. Best-effort: a
 /// failure is logged and swallowed so a retention hiccup never blocks the
 /// disk-authoritative delete.
-fn tombstone_managed_agent_pending(app: &AppHandle, state: &AppState, agent_pubkey: &str) {
+pub(super) fn tombstone_managed_agent_pending(
+    app: &AppHandle,
+    state: &AppState,
+    agent_pubkey: &str,
+) {
     use crate::managed_agents::{
         agent_events::build_agent_delete,
         retention::{
@@ -258,8 +262,10 @@ pub(super) async fn start_local_agent_with_preflight(
     // runtime). This clears the "out of date" drift badge without requiring a
     // delete+recreate. See `apply_persona_snapshot` for the precedence and
     // env-override self-heal rules.
+    // Load personas once: used for snapshot application below and summary build
+    // at the end — avoids a second disk read for the same file in the same call.
+    let personas = load_personas(app).unwrap_or_default();
     if let Some(persona_id) = record.persona_id.clone() {
-        let personas = load_personas(app).unwrap_or_default();
         if let Some(persona) = personas.iter().find(|p| p.id == persona_id) {
             crate::managed_agents::persona_events::apply_persona_snapshot(record, persona);
             record.updated_at = crate::util::now_iso();
@@ -274,7 +280,6 @@ pub(super) async fn start_local_agent_with_preflight(
         .iter()
         .find(|record| record.pubkey == pubkey)
         .ok_or_else(|| format!("agent {pubkey} not found"))?;
-    let personas = load_personas(app).unwrap_or_default();
     build_managed_agent_summary(app, record, &runtimes, &personas)
 }
 
@@ -643,12 +648,6 @@ pub async fn create_managed_agent(
         let minted = crate::managed_agents::resolve_mint_behavioral_defaults(
             input.respond_to,
             respond_to_allowlist.clone(),
-            input
-                .mcp_toolsets
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(str::to_string),
             input.parallelism,
             linked_persona.as_ref(),
         )?;
@@ -705,7 +704,6 @@ pub async fn create_managed_agent(
                     .map(str::to_string)
             }),
             persona_source_version: snapshot_source_version,
-            mcp_toolsets: minted.mcp_toolsets.clone(),
             // Provider agents are managed externally — force false.
             start_on_app_launch: if input.backend != BackendKind::Local {
                 false
@@ -742,7 +740,6 @@ pub async fn create_managed_agent(
             source_team_persona_slug: None,
             definition_respond_to: None,
             definition_respond_to_allowlist: Vec::new(),
-            definition_mcp_toolsets: None,
             definition_parallelism: None,
             relay_mesh: relay_mesh.clone(),
         };

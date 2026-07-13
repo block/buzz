@@ -410,8 +410,8 @@ fn ensure_cli_symlink_does_not_clobber_regular_file_dev() {
     );
 }
 
-fn make_persona(id: &str, display_name: &str) -> PersonaRecord {
-    PersonaRecord {
+fn make_persona(id: &str, display_name: &str) -> AgentDefinition {
+    AgentDefinition {
         id: id.to_string(),
         display_name: display_name.to_string(),
         avatar_url: None,
@@ -427,7 +427,6 @@ fn make_persona(id: &str, display_name: &str) -> PersonaRecord {
         env_vars: std::collections::BTreeMap::new(),
         respond_to: None,
         respond_to_allowlist: Vec::new(),
-        mcp_toolsets: None,
         parallelism: None,
         created_at: String::new(),
         updated_at: String::new(),
@@ -456,7 +455,6 @@ fn make_agent(name: &str, persona_id: Option<&str>) -> ManagedAgentRecord {
         model: None,
         provider: None,
         persona_source_version: None,
-        mcp_toolsets: None,
         start_on_app_launch: false,
         auto_restart_on_config_change: true,
         runtime_pid: None,
@@ -485,7 +483,6 @@ fn make_agent(name: &str, persona_id: Option<&str>) -> ManagedAgentRecord {
         source_team_persona_slug: None,
         definition_respond_to: None,
         definition_respond_to_allowlist: Vec::new(),
-        definition_mcp_toolsets: None,
         definition_parallelism: None,
         relay_mesh: None,
     }

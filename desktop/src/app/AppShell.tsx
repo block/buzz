@@ -293,6 +293,7 @@ export function AppShell() {
   } = useUnreadChannels(sidebarChannels, activeChannel, {
     pubkey: identityQuery.data?.pubkey,
     relayClient,
+    relayUrl: workspacesHook.activeWorkspace?.relayUrl,
     currentPubkey: identityQuery.data?.pubkey,
     mutedChannelIds,
     notifyForActiveChannel: notificationSettings.settings.notifyWhileViewing,

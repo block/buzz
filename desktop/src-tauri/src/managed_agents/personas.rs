@@ -2,7 +2,7 @@ use std::fs;
 
 use tauri::AppHandle;
 
-use crate::{managed_agents::PersonaRecord, util::now_iso};
+use crate::{managed_agents::AgentDefinition, util::now_iso};
 
 struct BuiltInPersona {
     id: &'static str,
@@ -220,10 +220,10 @@ const RETIRED_PERSONAS: &[(&str, &str)] = &[
     ),
 ];
 
-fn built_in_persona_records(now: &str) -> Vec<PersonaRecord> {
+fn built_in_persona_records(now: &str) -> Vec<AgentDefinition> {
     BUILT_IN_PERSONAS
         .iter()
-        .map(|persona| PersonaRecord {
+        .map(|persona| AgentDefinition {
             id: persona.id.to_string(),
             display_name: persona.display_name.to_string(),
             avatar_url: persona.avatar_url.map(|s| s.to_string()),
@@ -239,7 +239,6 @@ fn built_in_persona_records(now: &str) -> Vec<PersonaRecord> {
             env_vars: std::collections::BTreeMap::new(),
             respond_to: None,
             respond_to_allowlist: Vec::new(),
-            mcp_toolsets: None,
             parallelism: None,
             created_at: now.to_string(),
             updated_at: now.to_string(),
@@ -253,7 +252,7 @@ fn built_in_order(id: &str) -> Option<usize> {
         .position(|persona| persona.id == id)
 }
 
-fn sort_personas(records: &mut [PersonaRecord]) {
+fn sort_personas(records: &mut [AgentDefinition]) {
     records.sort_by(|left, right| {
         let left_builtin = if left.is_builtin { 0 } else { 1 };
         let right_builtin = if right.is_builtin { 0 } else { 1 };
@@ -275,7 +274,7 @@ fn sort_personas(records: &mut [PersonaRecord]) {
     });
 }
 
-fn merge_personas(mut stored: Vec<PersonaRecord>, now: &str) -> (Vec<PersonaRecord>, bool) {
+fn merge_personas(mut stored: Vec<AgentDefinition>, now: &str) -> (Vec<AgentDefinition>, bool) {
     let mut changed = false;
 
     for built_in in built_in_persona_records(now) {
@@ -295,7 +294,7 @@ fn merge_personas(mut stored: Vec<PersonaRecord>, now: &str) -> (Vec<PersonaReco
                 || existing.model != built_in.model
                 || !existing.is_builtin
             {
-                *existing = PersonaRecord {
+                *existing = AgentDefinition {
                     created_at,
                     updated_at,
                     is_active,
@@ -338,7 +337,7 @@ fn merge_personas(mut stored: Vec<PersonaRecord>, now: &str) -> (Vec<PersonaReco
 /// the cost is extra records for pre-transition users, but this
 /// eliminates dangling `persona_id` references in managed-agents.json
 /// and teams.json.
-fn migrate_retired_personas(stored: &mut [PersonaRecord], now: &str) -> bool {
+fn migrate_retired_personas(stored: &mut [AgentDefinition], now: &str) -> bool {
     let mut changed = false;
 
     for record in stored.iter_mut() {
@@ -372,7 +371,7 @@ fn migrate_retired_personas(stored: &mut [PersonaRecord], now: &str) -> bool {
 }
 
 pub fn ensure_persona_is_active(
-    personas: &[PersonaRecord],
+    personas: &[AgentDefinition],
     persona_id: &str,
 ) -> Result<(), String> {
     let persona = personas
@@ -391,7 +390,7 @@ pub fn ensure_persona_is_active(
 }
 
 pub fn ensure_persona_ids_are_active(
-    personas: &[PersonaRecord],
+    personas: &[AgentDefinition],
     persona_ids: &[String],
 ) -> Result<(), String> {
     for persona_id in persona_ids {
@@ -402,7 +401,7 @@ pub fn ensure_persona_ids_are_active(
 }
 
 pub fn validate_persona_deletion(
-    persona: &PersonaRecord,
+    persona: &AgentDefinition,
     referenced_by_team: bool,
 ) -> Result<(), String> {
     if persona.is_builtin {
@@ -427,7 +426,7 @@ pub fn validate_persona_deletion(
 }
 
 pub fn validate_persona_activation_change(
-    persona: &PersonaRecord,
+    persona: &AgentDefinition,
     active: bool,
     referenced_by_managed_agent: bool,
     referenced_by_team: bool,
@@ -453,7 +452,7 @@ pub fn validate_persona_activation_change(
     Ok(())
 }
 
-pub fn load_personas(app: &AppHandle) -> Result<Vec<PersonaRecord>, String> {
+pub fn load_personas(app: &AppHandle) -> Result<Vec<AgentDefinition>, String> {
     let now = now_iso();
 
     // Post-fold: definitions live in the unified agent store, presented in
@@ -462,7 +461,7 @@ pub fn load_personas(app: &AppHandle) -> Result<Vec<PersonaRecord>, String> {
     // reaches this shim.
     let records = crate::managed_agents::storage::load_agent_definitions(app)?
         .iter()
-        .filter_map(|record| record.to_persona_view())
+        .filter_map(|record| record.to_definition_view())
         .collect();
 
     let (records, changed) = merge_personas(records, &now);
@@ -481,17 +480,17 @@ pub fn load_personas(app: &AppHandle) -> Result<Vec<PersonaRecord>, String> {
 /// store; its callers stay unchanged.
 pub(crate) fn load_personas_from_path(
     path: &std::path::Path,
-) -> Result<Vec<PersonaRecord>, String> {
+) -> Result<Vec<AgentDefinition>, String> {
     if !path.exists() {
         return Ok(Vec::new());
     }
     let content = fs::read_to_string(path)
         .map_err(|error| format!("failed to read persona store: {error}"))?;
-    serde_json::from_str::<Vec<PersonaRecord>>(&content)
+    serde_json::from_str::<Vec<AgentDefinition>>(&content)
         .map_err(|error| format!("failed to parse persona store: {error}"))
 }
 
-pub fn save_personas(app: &AppHandle, records: &[PersonaRecord]) -> Result<(), String> {
+pub fn save_personas(app: &AppHandle, records: &[AgentDefinition]) -> Result<(), String> {
     let mut sorted = records.to_vec();
     sort_personas(&mut sorted);
 

@@ -117,6 +117,7 @@ Widget _buildTestable({
   ChannelActions Function(Ref ref)? createChannelActions,
   ReadStateNotifier? readStateNotifier,
   _FakeMessagesNotifier? messagesNotifier,
+  String? canvasContent,
 }) {
   final resolvedChannel = channel ?? _testChannel;
   final fakeChannelsNotifier =
@@ -138,8 +139,8 @@ Widget _buildTestable({
         (ref) async => ChannelDetails.fromChannel(resolvedChannel),
       ),
       channelCanvasProvider(_channelId).overrideWith(
-        (ref) async => const ChannelCanvas(
-          content: null,
+        (ref) async => ChannelCanvas(
+          content: canvasContent,
           updatedAt: null,
           authorPubkey: null,
         ),
@@ -369,6 +370,42 @@ void main() {
         findsNothing,
       );
       expect(find.text('Message #general'), findsOneWidget);
+    });
+
+    testWidgets('keeps manage sheet dismissible with a long canvas', (
+      tester,
+    ) async {
+      tester.view.physicalSize = const Size(400, 800);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: const [],
+          canvasContent: List.generate(
+            80,
+            (index) => 'Canvas line $index',
+          ).join('\n'),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byTooltip('Manage channel'));
+      await tester.pumpAndSettle();
+
+      final sheet = find.byType(BottomSheet);
+      expect(sheet, findsOneWidget);
+      expect(tester.getSize(sheet).height, lessThanOrEqualTo(720));
+
+      final sheetTop = tester.getTopLeft(sheet).dy;
+      await tester.dragFrom(
+        Offset(tester.view.physicalSize.width / 2, sheetTop + 12),
+        const Offset(0, 800),
+      );
+      await tester.pumpAndSettle();
+
+      expect(sheet, findsNothing);
     });
 
     testWidgets('shows empty state when no messages', (tester) async {

@@ -215,6 +215,10 @@ class ChannelDetailPage extends HookConsumerWidget {
                   context: context,
                   isScrollControlled: true,
                   showDragHandle: true,
+                  constraints: BoxConstraints(
+                    maxWidth: 640,
+                    maxHeight: MediaQuery.sizeOf(context).height * 0.9,
+                  ),
                   builder: (_) => ManageChannelSheet(channel: resolvedChannel),
                 );
                 if (shouldClose == true && context.mounted) {

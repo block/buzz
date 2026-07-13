@@ -30,7 +30,7 @@ use super::{
     known_acp_runtime, normalize_agent_args,
     persona_events::apply_persona_snapshot,
     resolve_effective_agent_env,
-    types::{ManagedAgentRecord, PersonaRecord},
+    types::{AgentDefinition, ManagedAgentRecord},
     GlobalAgentConfig,
 };
 
@@ -58,7 +58,7 @@ pub(crate) fn effective_spawn_prompt(record: &ManagedAgentRecord) -> Option<Stri
 /// Pure — no `AppHandle`, no disk, no keyring.
 pub(crate) fn spawn_config_hash(
     record: &ManagedAgentRecord,
-    personas: &[PersonaRecord],
+    personas: &[AgentDefinition],
     workspace_relay: &str,
     global: &GlobalAgentConfig,
 ) -> u64 {
@@ -120,18 +120,12 @@ pub(crate) fn spawn_config_hash(
             .hash(&mut hasher);
     }
     record.idle_timeout_seconds.hash(&mut hasher);
-    // Spawn writes BUZZ_ACP_MAX_TURN_DURATION and BUZZ_TOOLSETS with defaults
-    // filled in, so None and an explicit default are the same spawned value.
+    // Spawn writes BUZZ_ACP_MAX_TURN_DURATION with a default.
     record
         .max_turn_duration_seconds
         .unwrap_or(super::types::DEFAULT_AGENT_MAX_TURN_DURATION_SECONDS)
         .hash(&mut hasher);
     record.parallelism.hash(&mut hasher);
-    record
-        .mcp_toolsets
-        .as_deref()
-        .unwrap_or(super::types::DEFAULT_MCP_TOOLSETS)
-        .hash(&mut hasher);
     record.persona_team_dir.hash(&mut hasher);
     record.persona_name_in_team.hash(&mut hasher);
 

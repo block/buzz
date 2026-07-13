@@ -1,0 +1,13 @@
+diff --git a/lib/index.js b/lib/index.js
+index 110ac3858a002a6cdb698da2b56350bc1bf609d2..41330c4c310a44fd964b1f68de6b99046d2efae7 100644
+--- a/lib/index.js
++++ b/lib/index.js
+@@ -124,7 +124,7 @@ const u = null, {min: d, max: a, abs: h, floor: g} = Math, p = (e, t, o) => d(o,
+                     if (!e.length) break;
+                     N(e.reduce((e, [t, o]) => {
+                         let n;
+-                        if (2 === w) n = !0; else if (I && 1 === w) n = t < I[0]; else {
++                        if (2 === w) n = J(t) < E(); else if (I && 1 === w) n = t < I[0]; else {
+                             const e = E(), o = J(t), r = A(t);
+                             n = 1 !== _ && 0 === w ? o + r <= e : o < e && o + r < e + l;
+                         }

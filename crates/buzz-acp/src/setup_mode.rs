@@ -62,6 +62,8 @@ pub(crate) enum AcpAvailabilityStatus {
     Available,
     /// ACP adapter binary missing; underlying CLI may be present.
     AdapterMissing,
+    /// ACP adapter binary is from the deprecated package (< 1.0). Reinstall required.
+    AdapterOutdated,
     /// CLI binary missing; ACP adapter may be present.
     CliMissing,
     /// Neither adapter nor CLI found.
@@ -136,6 +138,16 @@ impl RequirementPayload {
                         .unwrap_or("the agent");
                     format!(
                         "install the {} ACP adapter (open Doctor in Settings to diagnose)",
+                        harness
+                    )
+                }
+                AcpAvailabilityStatus::AdapterOutdated => {
+                    let harness = probe_args
+                        .first()
+                        .map(String::as_str)
+                        .unwrap_or("the agent");
+                    format!(
+                        "reinstall the {} ACP adapter — the installed version is outdated (open Doctor in Settings to diagnose)",
                         harness
                     )
                 }

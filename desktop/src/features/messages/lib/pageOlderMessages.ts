@@ -2,16 +2,12 @@ import type { QueryClient } from "@tanstack/react-query";
 
 import {
   appendOlderChannelWindow,
-  flattenChannelWindowEvents,
   type ChannelWindowStore,
 } from "@/features/messages/lib/channelWindowStore";
+import { projectChannelWindowMessages } from "@/features/messages/lib/projectChannelWindow";
 import { parseChannelWindowResponse } from "@/features/messages/lib/channelWindowResponse";
-import {
-  channelMessagesKey,
-  channelWindowKey,
-} from "@/features/messages/lib/messageQueryKeys";
+import { channelWindowKey } from "@/features/messages/lib/messageQueryKeys";
 import { getChannelWindowEvents } from "@/shared/api/channelWindow";
-import type { RelayEvent } from "@/shared/api/types";
 
 const CHANNEL_WINDOW_PAGE_SIZE = 50;
 export type PageOlderResult = { hasOlderMessages: boolean };
@@ -59,9 +55,6 @@ async function runPage(
   if (!retained) return { hasOlderMessages: true };
   const next = appendOlderChannelWindow(retained, page);
   queryClient.setQueryData(channelWindowKey(channelId), next);
-  queryClient.setQueryData<RelayEvent[]>(
-    channelMessagesKey(channelId),
-    flattenChannelWindowEvents(next),
-  );
+  projectChannelWindowMessages(queryClient, channelId);
   return { hasOlderMessages: page.hasMore };
 }

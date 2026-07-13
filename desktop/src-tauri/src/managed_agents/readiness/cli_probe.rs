@@ -2,19 +2,26 @@ use std::path::Path;
 
 use crate::managed_agents::runtime::build_augmented_path;
 
-pub(super) fn augmented_path() -> Option<String> {
+/// Build the augmented PATH for CLI probes, including nvm's default Node.js
+/// bin directory so `#!/usr/bin/env node` shims (e.g. codex-acp) resolve.
+pub(crate) fn augmented_path() -> Option<String> {
+    let home = dirs::home_dir();
+    let nvm_bin = home
+        .as_deref()
+        .and_then(crate::managed_agents::find_nvm_default_bin);
     build_augmented_path(
-        dirs::home_dir(),
+        home,
         std::env::current_exe()
             .ok()
             .and_then(|exe| exe.parent().map(std::path::Path::to_path_buf)),
         crate::managed_agents::login_shell_path(),
+        nvm_bin,
     )
 }
 
 /// Outcome of a CLI login-status probe.
 #[derive(Debug, PartialEq, Eq)]
-pub(super) enum ProbeOutcome {
+pub(crate) enum ProbeOutcome {
     /// The CLI reported a successful login (exit 0).
     LoggedIn,
     /// The CLI exited non-zero without a config-parse signal — treat as
@@ -44,7 +51,7 @@ const CONFIG_PARSE_SIGNALS: &[&str] = &["error loading configuration", "unknown 
 /// bypassed. Injects the same augmented PATH used for launched agents so
 /// script shims with `/usr/bin/env <interpreter>` shebangs can find runtimes
 /// such as node/python when the app was launched with a bare GUI PATH.
-pub(super) fn login_probe(
+pub(crate) fn login_probe(
     binary_path: &Path,
     probe_args: &[&str],
     augmented_path: Option<&str>,
@@ -57,22 +64,32 @@ pub(super) fn login_probe(
 
     match command.output() {
         Ok(o) if o.status.success() => ProbeOutcome::LoggedIn,
-        Ok(o) => {
-            let stderr = String::from_utf8_lossy(&o.stderr);
-            let stderr_lower = stderr.to_lowercase();
-            if CONFIG_PARSE_SIGNALS
-                .iter()
-                .all(|sig| stderr_lower.contains(sig))
-            {
-                let excerpt = stderr.trim().lines().next().unwrap_or("").to_string();
-                ProbeOutcome::ConfigInvalid {
-                    stderr_excerpt: excerpt,
-                }
-            } else {
-                ProbeOutcome::LoggedOut
-            }
-        }
+        Ok(o) => classify_probe_output(&o.stderr, false),
         Err(_) => ProbeOutcome::LoggedOut,
+    }
+}
+
+/// Classify collected probe output into a `ProbeOutcome`.
+///
+/// Shared between `login_probe` (which has the full `Output`) and the
+/// process-level timeout path in `probe_auth_status` (which drains stderr
+/// on a background thread and collects it separately).
+pub(crate) fn classify_probe_output(stderr_bytes: &[u8], exit_success: bool) -> ProbeOutcome {
+    if exit_success {
+        return ProbeOutcome::LoggedIn;
+    }
+    let stderr = String::from_utf8_lossy(stderr_bytes);
+    let stderr_lower = stderr.to_lowercase();
+    if CONFIG_PARSE_SIGNALS
+        .iter()
+        .all(|sig| stderr_lower.contains(sig))
+    {
+        let excerpt = stderr.trim().lines().next().unwrap_or("").to_string();
+        ProbeOutcome::ConfigInvalid {
+            stderr_excerpt: excerpt,
+        }
+    } else {
+        ProbeOutcome::LoggedOut
     }
 }
 

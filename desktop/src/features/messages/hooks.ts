@@ -5,19 +5,26 @@ import { toast } from "sonner";
 import {
   channelMessagesKey,
   channelWindowKey,
-  dedupeMessagesById,
-  normalizeTimelineMessages,
-  sortMessages,
   threadRepliesKey,
 } from "@/features/messages/lib/messageQueryKeys";
 import {
   buildReplyTags,
-  getChannelIdFromTags,
   getThreadReference,
   isBroadcastReply,
   normalizeMentionPubkeys,
   resolveReplyRootId,
 } from "@/features/messages/lib/threading";
+import {
+  projectChannelWindowMessages,
+  refreshChannelWindowMessages,
+} from "@/features/messages/lib/projectChannelWindow";
+import { reconcileChannelWindowMessages } from "@/features/messages/lib/channelWindowReconciliation";
+import {
+  mergeMessages,
+  mergeTimelineCacheMessages,
+} from "@/features/messages/lib/messageMerge";
+
+export { mergeMessages, mergeTimelineCacheMessages };
 import { splitOutgoingTags } from "@/features/messages/lib/imetaMediaMarkdown";
 import {
   clearTimeoutState,
@@ -42,7 +49,6 @@ import type { Channel, Identity, RelayEvent } from "@/shared/api/types";
 import { applyEditTagOverlay } from "@/features/messages/lib/applyEditTagOverlay.mjs";
 import {
   emptyChannelWindowStore,
-  flattenChannelWindowEvents,
   mapChannelWindowEvents,
   mergeLiveChannelWindowEvent,
   mergeLiveThreadSummary,
@@ -71,74 +77,6 @@ type MessageQueryContext = {
 
 const CHANNEL_TIMELINE_KINDS = new Set<number>(CHANNEL_TIMELINE_CONTENT_KINDS);
 const CHANNEL_AUX_KINDS = new Set<number>(CHANNEL_AUX_EVENT_KINDS);
-
-function getLocalRenderKey(message: RelayEvent) {
-  return message.localKey ?? message.id;
-}
-
-function isMatchingPendingMessage(pending: RelayEvent, incoming: RelayEvent) {
-  if (
-    !pending.pending ||
-    pending.content !== incoming.content ||
-    pending.kind !== incoming.kind ||
-    pending.pubkey.toLowerCase() !== incoming.pubkey.toLowerCase() ||
-    getChannelIdFromTags(pending.tags) !== getChannelIdFromTags(incoming.tags)
-  ) {
-    return false;
-  }
-
-  const pendingThread = getThreadReference(pending.tags);
-  const incomingThread = getThreadReference(incoming.tags);
-
-  return (
-    pendingThread.parentId === incomingThread.parentId &&
-    pendingThread.rootId === incomingThread.rootId
-  );
-}
-
-function mergeMessagesWithNormalizer(
-  current: RelayEvent[],
-  incoming: RelayEvent,
-  normalize: (messages: RelayEvent[]) => RelayEvent[],
-): RelayEvent[] {
-  const normalizedCurrent = dedupeMessagesById(current);
-  const replacedPending = normalizedCurrent.find((message) =>
-    isMatchingPendingMessage(message, incoming),
-  );
-  const incomingWithLocalKey = replacedPending
-    ? {
-        ...incoming,
-        localKey: replacedPending.localKey ?? replacedPending.id,
-      }
-    : incoming;
-  const incomingLocalKey = getLocalRenderKey(incomingWithLocalKey);
-  const deduped = normalizedCurrent.filter(
-    (message) =>
-      message.id !== incoming.id &&
-      getLocalRenderKey(message) !== incomingLocalKey &&
-      !isMatchingPendingMessage(message, incoming),
-  );
-
-  return normalize([...deduped, incomingWithLocalKey]);
-}
-
-export function mergeMessages(
-  current: RelayEvent[],
-  incoming: RelayEvent,
-): RelayEvent[] {
-  return mergeMessagesWithNormalizer(current, incoming, sortMessages);
-}
-
-export function mergeTimelineCacheMessages(
-  current: RelayEvent[],
-  incoming: RelayEvent,
-): RelayEvent[] {
-  return mergeMessagesWithNormalizer(
-    current,
-    incoming,
-    normalizeTimelineMessages,
-  );
-}
 
 export function createOptimisticMessage(
   channelId: string,
@@ -255,25 +193,6 @@ export function resolveThreadReplyTarget(
   };
 }
 
-function retainRefetchReconciliationEvents(events: RelayEvent[]) {
-  return events.filter((event) => {
-    if (!CHANNEL_TIMELINE_KINDS.has(event.kind)) return false;
-    if (event.pending) return true;
-    const thread = getThreadReference(event.tags);
-    return thread.parentId !== null && !isBroadcastReply(event.tags);
-  });
-}
-
-function mergeRefetchReconciliationEvents(
-  windowEvents: RelayEvent[],
-  previousMessages: RelayEvent[],
-) {
-  const authoritativeIds = new Set(windowEvents.map((event) => event.id));
-  return retainRefetchReconciliationEvents(previousMessages)
-    .filter((event) => !authoritativeIds.has(event.id))
-    .reduce((current, reply) => mergeMessages(current, reply), windowEvents);
-}
-
 export function useChannelWindowQuery(channel: Channel | null) {
   const queryClient = useQueryClient();
   const queryKey = channelWindowKey(channel?.id ?? "none");
@@ -305,9 +224,8 @@ export function useChannelMessagesQuery(channel: Channel | null) {
         queryClient.getQueryData<ChannelWindowStore>(windowKey) ??
         emptyChannelWindowStore();
       const next = replaceNewestChannelWindow(current, page);
-      const windowEvents = flattenChannelWindowEvents(next);
       queryClient.setQueryData(windowKey, next);
-      return mergeRefetchReconciliationEvents(windowEvents, previousMessages);
+      return reconcileChannelWindowMessages(next, previousMessages);
     },
     staleTime: 5 * 60 * 1_000,
     gcTime: 60 * 60 * 1_000,
@@ -320,11 +238,7 @@ export function useChannelSubscription(channel: Channel | null) {
   const channelType = channel?.channelType ?? null;
   const refreshNewestWindow = useEffectEvent(async () => {
     if (!channelId) return;
-    await queryClient.invalidateQueries({
-      queryKey: channelMessagesKey(channelId),
-      exact: true,
-      refetchType: "active",
-    });
+    await refreshChannelWindowMessages(queryClient, channelId);
   });
 
   const appendMessage = useEffectEvent((event: RelayEvent) => {
@@ -371,10 +285,7 @@ export function useChannelSubscription(channel: Channel | null) {
     const next = mergeLiveChannelWindowEvent(current, event, isTimelineRow);
     if (next !== current) {
       queryClient.setQueryData(windowKey, next);
-      queryClient.setQueryData<RelayEvent[]>(
-        channelMessagesKey(channelId),
-        flattenChannelWindowEvents(next),
-      );
+      projectChannelWindowMessages(queryClient, channelId);
     }
 
     if (event.kind === KIND_SYSTEM_MESSAGE) {
@@ -629,10 +540,7 @@ export function useSendMessageMutation(
         optimisticMessage,
       );
       queryClient.setQueryData(windowKey, nextWindow);
-      queryClient.setQueryData<RelayEvent[]>(
-        queryKey,
-        flattenChannelWindowEvents(nextWindow),
-      );
+      projectChannelWindowMessages(queryClient, effectiveChannel.id);
 
       return {
         optimisticId: optimisticMessage.id,
@@ -680,10 +588,7 @@ export function useSendMessageMutation(
         localKey: context.optimisticId,
       });
       queryClient.setQueryData(windowKey, next);
-      queryClient.setQueryData<RelayEvent[]>(
-        context.queryKey,
-        flattenChannelWindowEvents(next),
-      );
+      projectChannelWindowMessages(queryClient, context.channelId);
     },
   });
 }

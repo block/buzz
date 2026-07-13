@@ -257,19 +257,39 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
             if let Some(owner) = nip_oa_owner {
                 // Ensure both agent and owner have users rows (BYO agents may not,
                 // and agent_owner_pubkey has a FK constraint to users.pubkey).
-                if let Err(e) = state
+                match state
                     .db
                     .ensure_user(conn.tenant.community(), pubkey.as_bytes())
                     .await
                 {
-                    warn!(conn_id = %conn_id, error = %e, "ensure_user(agent) failed during NIP-OA backfill");
+                    Ok(true) => {
+                        metrics::counter!(
+                            "buzz_users_created_total",
+                            "community" => conn.tenant.host().to_owned()
+                        )
+                        .increment(1);
+                    }
+                    Ok(false) => {}
+                    Err(e) => {
+                        warn!(conn_id = %conn_id, error = %e, "ensure_user(agent) failed during NIP-OA backfill");
+                    }
                 }
-                if let Err(e) = state
+                match state
                     .db
                     .ensure_user(conn.tenant.community(), owner.as_bytes())
                     .await
                 {
-                    warn!(conn_id = %conn_id, error = %e, "ensure_user(owner) failed during NIP-OA backfill");
+                    Ok(true) => {
+                        metrics::counter!(
+                            "buzz_users_created_total",
+                            "community" => conn.tenant.host().to_owned()
+                        )
+                        .increment(1);
+                    }
+                    Ok(false) => {}
+                    Err(e) => {
+                        warn!(conn_id = %conn_id, error = %e, "ensure_user(owner) failed during NIP-OA backfill");
+                    }
                 }
 
                 // Idempotent backfill: record agent→owner in DB so cross-connection

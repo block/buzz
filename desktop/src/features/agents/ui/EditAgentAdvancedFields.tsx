@@ -23,7 +23,6 @@ export function EditAgentAdvancedFields({
   inheritedEnvVars,
   inheritHarness,
   linkedPersona,
-  mcpToolsets,
   model,
   modelTuningRuntimeId,
   parallelism,
@@ -37,7 +36,6 @@ export function EditAgentAdvancedFields({
   onAgentCommandChange,
   onEnvVarsChange,
   onInheritHarnessChange,
-  onMcpToolsetsChange,
   onParallelismChange,
   onRelayUrlChange,
   onAutoRestartChange,
@@ -55,7 +53,6 @@ export function EditAgentAdvancedFields({
   inheritedEnvVars: Record<string, string>;
   inheritHarness: boolean;
   linkedPersona: AgentPersona | null;
-  mcpToolsets: string;
   /** Active LLM model — forwarded to BuzzAgentModelTuningFields for effort filtering. */
   model?: string;
   /**
@@ -76,7 +73,6 @@ export function EditAgentAdvancedFields({
   onAgentCommandChange: (value: string) => void;
   onEnvVarsChange: (value: EnvVarsValue) => void;
   onInheritHarnessChange: (value: boolean) => void;
-  onMcpToolsetsChange: (value: string) => void;
   onParallelismChange: (value: string) => void;
   onRelayUrlChange: (value: string) => void;
   onAutoRestartChange: (value: boolean) => void;
@@ -189,39 +185,6 @@ export function EditAgentAdvancedFields({
             value={agentArgs}
           />
         </div>
-      </div>
-
-      {/* MCP toolsets */}
-      <div className="space-y-1.5">
-        <label
-          className="text-sm font-medium text-foreground"
-          htmlFor="edit-agent-mcp-toolsets"
-        >
-          MCP toolsets
-          <span className={PERSONA_LABEL_OPTIONAL_CLASS}>Optional</span>
-        </label>
-        <div
-          className={cn(
-            "flex min-h-11 items-center px-3",
-            PERSONA_FIELD_SHELL_CLASS,
-          )}
-        >
-          <Input
-            autoCorrect="off"
-            className={cn(
-              "h-8 px-0 py-0 leading-6",
-              PERSONA_FIELD_CONTROL_CLASS,
-            )}
-            disabled={disabled}
-            id="edit-agent-mcp-toolsets"
-            onChange={(event) => onMcpToolsetsChange(event.target.value)}
-            placeholder="default,canvas,forums,dms,media"
-            value={mcpToolsets}
-          />
-        </div>
-        <p className="text-xs text-muted-foreground">
-          Comma-separated list of toolsets to expose via BUZZ_TOOLSETS.
-        </p>
       </div>
 
       {/* Parallelism */}

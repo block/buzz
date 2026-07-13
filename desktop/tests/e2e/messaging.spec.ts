@@ -150,15 +150,6 @@ test("long autolink wraps without widening the timeline", async ({ page }) => {
       return barBox.x + barBox.width - (timelineBox.x + timelineBox.width);
     })
     .toBeLessThanOrEqual(0);
-  // #1338 guard: hovering must un-pause the row so the upward-bleeding bar renders
-  await expect
-    .poll(async () =>
-      actionBar.evaluate((bar) => {
-        const cvRow = bar.closest(".timeline-row-cv");
-        return cvRow ? getComputedStyle(cvRow).contentVisibility : "missing";
-      }),
-    )
-    .toBe("visible");
 });
 
 test("supported link previews keep the message link visible", async ({
@@ -1031,6 +1022,63 @@ test("thread composer is focused after clicking the reply icon", async ({
 
   await page.keyboard.type("typed-into-thread");
   await expect(threadInput).toHaveText("typed-into-thread");
+});
+
+test("thread refetch preserves a live reply and reaction received in flight", async ({
+  page,
+}) => {
+  await installMockBridge(page, { threadRepliesDelayMs: 800 });
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  const rootMessage = page
+    .getByTestId("message-timeline")
+    .getByTestId("message-row")
+    .first();
+  const rootId = await rootMessage.getAttribute("data-message-id");
+  if (!rootId) throw new Error("Expected a thread root id.");
+
+  await rootMessage.hover();
+  await rootMessage.getByRole("button", { name: "Reply" }).click();
+  const threadPanel = page.getByTestId("message-thread-panel");
+  await expect(threadPanel).toBeVisible();
+
+  const reply = `Live reply during thread fetch ${Date.now()}`;
+  const replyId = await page.evaluate(
+    async ({ channelId, content, parentEventId }) => {
+      const bridgeWindow = window as Window & {
+        __BUZZ_E2E_INVOKE_MOCK_COMMAND__?: (
+          command: string,
+          payload?: Record<string, unknown>,
+        ) => Promise<unknown>;
+      };
+      const invoke = bridgeWindow.__BUZZ_E2E_INVOKE_MOCK_COMMAND__;
+      if (!invoke) throw new Error("Mock Tauri invoke bridge is unavailable.");
+      const sent = (await invoke("send_channel_message", {
+        channelId,
+        content,
+        parentEventId,
+      })) as { event_id: string };
+      await invoke("add_reaction", { eventId: sent.event_id, emoji: "👍" });
+      return sent.event_id;
+    },
+    {
+      channelId: "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50",
+      content: reply,
+      parentEventId: rootId,
+    },
+  );
+
+  const replyRow = threadPanel.locator(`[data-message-id="${replyId}"]`);
+  await expect(replyRow).toContainText(reply);
+  await expect(replyRow.getByLabel("Toggle 👍 reaction")).toBeVisible();
+
+  // The delayed get_thread_replies response was snapshotted before the live
+  // events. Wait past query completion: neither cache addition may disappear.
+  await page.waitForTimeout(1_200);
+  await expect(replyRow).toContainText(reply);
+  await expect(replyRow.getByLabel("Toggle 👍 reaction")).toBeVisible();
 });
 
 test("thread composer keeps focus after sending a thread reply", async ({

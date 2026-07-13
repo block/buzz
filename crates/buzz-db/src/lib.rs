@@ -37,6 +37,8 @@ pub mod reaction;
 pub mod relay_members;
 /// Thread metadata persistence.
 pub mod thread;
+/// Per-community usage rollup queries for Prometheus gauges.
+pub mod usage;
 /// User profile persistence.
 pub mod user;
 /// Workflow, run, and approval persistence.
@@ -284,6 +286,64 @@ impl Db {
             idle: self.pool.num_idle() as u32,
             max: self.max_connections,
         }
+    }
+
+    /// Return total number of communities on this relay.
+    pub async fn usage_community_count(&self) -> Result<i64> {
+        usage::community_count(&self.pool).await
+    }
+
+    /// Return per-community user counts split by human/agent.
+    pub async fn usage_user_counts(&self) -> Result<Vec<usage::CommunityUserCounts>> {
+        usage::user_counts(&self.pool).await
+    }
+
+    /// Return per-community channel counts by type.
+    pub async fn usage_channel_counts(&self) -> Result<Vec<usage::CommunityChannelCount>> {
+        usage::channel_counts(&self.pool).await
+    }
+
+    /// Return per-community kind=9 message counts.
+    pub async fn usage_message_counts(&self) -> Result<Vec<usage::CommunityMessageCount>> {
+        usage::message_counts(&self.pool).await
+    }
+
+    /// Return per-community relay-member counts by role.
+    pub async fn usage_relay_member_counts(&self) -> Result<Vec<usage::CommunityMemberCount>> {
+        usage::relay_member_counts(&self.pool).await
+    }
+
+    /// Return per-community workflow counts by status.
+    pub async fn usage_workflow_counts(&self) -> Result<Vec<usage::CommunityWorkflowCount>> {
+        usage::workflow_counts(&self.pool).await
+    }
+
+    /// Return per-community git-repo counts.
+    pub async fn usage_git_repo_counts(&self) -> Result<Vec<usage::CommunityGitRepoCount>> {
+        usage::git_repo_counts(&self.pool).await
+    }
+
+    /// Return per-community distinct active-user counts for a given SQL interval.
+    ///
+    /// `interval_sql` must be a trusted literal such as `"1 day"` or `"7 days"`.
+    pub async fn usage_active_user_counts(
+        &self,
+        interval_sql: &'static str,
+    ) -> Result<Vec<usage::CommunityActiveUsers>> {
+        usage::active_user_counts(&self.pool, interval_sql).await
+    }
+
+    /// Return per-community active-channel counts for a given SQL interval.
+    pub async fn usage_active_channel_counts(
+        &self,
+        interval_sql: &'static str,
+    ) -> Result<Vec<usage::CommunityActiveChannels>> {
+        usage::active_channel_counts(&self.pool, interval_sql).await
+    }
+
+    /// Return all community id → host mappings.
+    pub async fn usage_community_hosts(&self) -> Result<Vec<usage::CommunityHost>> {
+        usage::community_hosts(&self.pool).await
     }
 
     /// Begin a database transaction for atomic multi-statement operations.
@@ -1154,7 +1214,11 @@ impl Db {
     }
 
     /// Ensure a user record exists (upsert).
-    pub async fn ensure_user(&self, community_id: CommunityId, pubkey: &[u8]) -> Result<()> {
+    ///
+    /// Returns `true` if a new row was inserted (first time), `false` if it
+    /// already existed. Callers use the `true` return to increment
+    /// `buzz_users_created_total`.
+    pub async fn ensure_user(&self, community_id: CommunityId, pubkey: &[u8]) -> Result<bool> {
         user::ensure_user(&self.pool, community_id, pubkey).await
     }
 

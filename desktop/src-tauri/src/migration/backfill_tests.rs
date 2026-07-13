@@ -1,6 +1,6 @@
 use super::backfill_standalone_agents_in_dir;
 use crate::managed_agents::spawn_hash::spawn_config_hash;
-use crate::managed_agents::{ManagedAgentRecord, PersonaRecord};
+use crate::managed_agents::{AgentDefinition, ManagedAgentRecord};
 use crate::migration::test_support::{read_agents_json, write_agents_json};
 use std::path::Path;
 
@@ -77,7 +77,7 @@ fn backfill_links_standalone_agent_to_manufactured_definition() {
 
     // The recorded version matches the definition's actual content hash —
     // the drift badge starts clean.
-    let view = definition.to_persona_view().unwrap();
+    let view = definition.to_definition_view().unwrap();
     let expected = crate::managed_agents::persona_events::persona_content_hash(
         &crate::managed_agents::persona_events::persona_event_content(&view),
     );
@@ -91,7 +91,7 @@ fn backfill_links_standalone_agent_to_manufactured_definition() {
 fn backfilled_definition_carries_prompt_present_even_if_empty() {
     // LOAD-BEARING (B5 gates): old readers hard-fail on an absent prompt. A
     // prompt-less backfilled definition would leave a wiped old device with
-    // no heal source, permanently. `PersonaRecord.system_prompt` is a plain
+    // no heal source, permanently. `AgentDefinition.system_prompt` is a plain
     // String and the outbound projection wraps it in `Some` unconditionally
     // — this row pins that chain against refactors.
     let dir = tempfile::tempdir().unwrap();
@@ -105,7 +105,7 @@ fn backfilled_definition_carries_prompt_present_even_if_empty() {
 
     let records = load_typed(dir.path());
     let definition = records.iter().find(|r| r.pubkey.is_empty()).unwrap();
-    let view: PersonaRecord = definition.to_persona_view().unwrap();
+    let view: AgentDefinition = definition.to_definition_view().unwrap();
     assert_eq!(view.system_prompt, "", "empty, not absent");
     let content = crate::managed_agents::persona_events::persona_event_content(&view);
     assert_eq!(
@@ -137,9 +137,9 @@ fn backfill_of_promptless_record_keeps_spawn_hash_stable() {
 
     let post_records = load_typed(dir.path());
     let post_instance = post_records.iter().find(|r| !r.pubkey.is_empty()).unwrap();
-    let personas: Vec<PersonaRecord> = post_records
+    let personas: Vec<AgentDefinition> = post_records
         .iter()
-        .filter_map(|r| r.to_persona_view())
+        .filter_map(|r| r.to_definition_view())
         .collect();
     let hash_after = spawn_config_hash(
         post_instance,
@@ -179,9 +179,9 @@ fn backfill_of_prompted_record_keeps_spawn_hash_stable() {
 
     let post_records = load_typed(dir.path());
     let post_instance = post_records.iter().find(|r| !r.pubkey.is_empty()).unwrap();
-    let personas: Vec<PersonaRecord> = post_records
+    let personas: Vec<AgentDefinition> = post_records
         .iter()
-        .filter_map(|r| r.to_persona_view())
+        .filter_map(|r| r.to_definition_view())
         .collect();
     let hash_after = spawn_config_hash(
         post_instance,

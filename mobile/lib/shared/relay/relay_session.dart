@@ -65,10 +65,24 @@ class _BufferedEvent {
 
 /// Manages websocket subscriptions, event batching, reconnection with replay,
 /// and pending event tracking. Equivalent to the desktop's RelayClientSession.
+typedef RelaySocketFactory =
+    RelaySocket Function({
+      required String wsUrl,
+      required String? nsec,
+      required void Function(List<dynamic> message) onMessage,
+      required void Function() onConnected,
+      required void Function(Object? error) onDisconnected,
+    });
+
 class RelaySessionNotifier extends Notifier<SessionState> {
-  RelaySessionNotifier({http.Client? httpClient}) : _httpClient = httpClient;
+  RelaySessionNotifier({
+    http.Client? httpClient,
+    RelaySocketFactory socketFactory = RelaySocket.new,
+  }) : _httpClient = httpClient,
+       _socketFactory = socketFactory;
 
   final http.Client? _httpClient;
+  final RelaySocketFactory _socketFactory;
 
   static const _baseReconnectDelayMs = 1000;
   static const _maxReconnectDelayMs = 30000;
@@ -88,6 +102,9 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   int _reconnectDelayMs = _baseReconnectDelayMs;
   int _subIdCounter = 0;
   bool _disposed = false;
+  bool _paused = false;
+  bool _hasConnectedOnce = false;
+  int _connectionGeneration = 0;
 
   @override
   SessionState build() {
@@ -173,8 +190,9 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     final timer = Timer(timeout, () {
       final sub = _historySubscriptions.remove(subId);
       if (sub != null && !sub.completer.isCompleted) {
-        // Resolve with whatever we collected so far rather than failing.
-        sub.completer.complete(sub.events);
+        sub.completer.completeError(
+          TimeoutException('Relay history request timed out after $timeout'),
+        );
       }
       _sendClose(subId);
     });
@@ -266,6 +284,16 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   @visibleForTesting
   void debugFlushEventBuffer() => _flushEventBuffer();
 
+  @visibleForTesting
+  void debugHandleConnected() => _handleConnected(_connectionGeneration);
+
+  @visibleForTesting
+  void debugHandleDisconnected([Object? error]) =>
+      _handleDisconnected(_connectionGeneration, error);
+
+  @visibleForTesting
+  void debugPauseNow() => _pauseNow();
+
   /// Force a reconnect (e.g., returning from background).
   Future<void> reconnect() async {
     await _socket?.disconnect();
@@ -277,14 +305,21 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   /// Called by the app lifecycle provider when the app goes to background.
   void onAppPaused() {
     _backgroundGraceTimer?.cancel();
-    _backgroundGraceTimer = Timer(const Duration(seconds: 5), () {
-      _socket?.disconnect();
-      state = const SessionState(status: SessionStatus.disconnected);
-    });
+    _backgroundGraceTimer = Timer(const Duration(seconds: 5), _pauseNow);
+  }
+
+  void _pauseNow() {
+    _paused = true;
+    _reconnectTimer?.cancel();
+    _cancelAllHistory(Exception('App moved to background'));
+    _rejectAllPending(Exception('App moved to background'));
+    _socket?.disconnect();
+    state = const SessionState(status: SessionStatus.disconnected);
   }
 
   /// Called by the app lifecycle provider when the app returns to foreground.
   void onAppResumed() {
+    _paused = false;
     _backgroundGraceTimer?.cancel();
     _backgroundGraceTimer = null;
 
@@ -302,52 +337,55 @@ class RelaySessionNotifier extends Notifier<SessionState> {
 
   Future<void> _connect(RelayConfig config) async {
     if (_disposed) return;
-    if (_socket?.state == SocketState.connecting ||
-        _socket?.state == SocketState.authenticating) {
-      return;
-    }
 
+    final generation = ++_connectionGeneration;
     state = SessionState(
-      status: SessionStatus.connecting,
+      status: _hasConnectedOnce
+          ? SessionStatus.reconnecting
+          : SessionStatus.connecting,
       reconnectAttempt: state.reconnectAttempt,
     );
 
     _socket?.dispose();
-    _socket = RelaySocket(
+    final socket = _socketFactory(
       wsUrl: config.wsUrl,
       nsec: config.nsec,
-      onMessage: _handleMessage,
-      onConnected: _handleConnected,
-      onDisconnected: _handleDisconnected,
+      onMessage: (message) {
+        if (generation == _connectionGeneration) _handleMessage(message);
+      },
+      onConnected: () => _handleConnected(generation),
+      onDisconnected: (error) => _handleDisconnected(generation, error),
     );
+    _socket = socket;
 
-    await _socket!.connect();
+    await socket.connect();
   }
 
-  void _handleConnected() {
-    if (_disposed) return;
+  void _handleConnected(int generation) {
+    if (_disposed || generation != _connectionGeneration) return;
+    _hasConnectedOnce = true;
     _reconnectDelayMs = _baseReconnectDelayMs;
     state = const SessionState(status: SessionStatus.connected);
     _replayLiveSubscriptions();
   }
 
-  void _handleDisconnected(Object? error) {
-    if (_disposed) return;
+  void _handleDisconnected(int generation, Object? error) {
+    if (_disposed || generation != _connectionGeneration) return;
     _cancelAllHistory(error);
     _rejectAllPending(error);
     _eventBuffer.clear();
     _flushTimer?.cancel();
     _flushTimer = null;
+    if (error is RelayAuthRejectedException) {
+      _reconnectTimer?.cancel();
+      state = const SessionState(status: SessionStatus.disconnected);
+      return;
+    }
     _scheduleReconnect();
   }
 
   void _scheduleReconnect() {
-    if (_disposed) return;
-    if (_liveSubscriptions.isEmpty) {
-      state = const SessionState(status: SessionStatus.disconnected);
-      return;
-    }
-
+    if (_disposed || _paused) return;
     final attempt = state.reconnectAttempt + 1;
     state = SessionState(
       status: SessionStatus.reconnecting,
@@ -586,6 +624,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
 
   void _dispose() {
     _disposed = true;
+    _connectionGeneration++;
     _reconnectTimer?.cancel();
     _flushTimer?.cancel();
     _backgroundGraceTimer?.cancel();

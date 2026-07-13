@@ -314,42 +314,6 @@ test("timeline reserves mixed-media rows before fast scrollback", async ({
     return element && element.scrollHeight > element.clientHeight + 2_000;
   });
 
-  const intrinsic = (rowText: string) =>
-    timeline
-      .locator("[data-message-id]")
-      .filter({ hasText: rowText })
-      .first()
-      .evaluate((row) => {
-        const scroller = row.closest('[data-testid="message-timeline"]');
-        let node: HTMLElement | null = row.parentElement;
-        while (node && node !== scroller) {
-          if (node.classList.contains("timeline-row-cv")) {
-            const match = getComputedStyle(node).containIntrinsicSize.match(
-              /(?:auto\s+)?([0-9.]+)px/,
-            );
-            return match ? Number(match[1]) : 0;
-          }
-          node = node.parentElement;
-        }
-        return 0;
-      });
-
-  await expect
-    .poll(() => intrinsic("mixed-scroll dimmed media"))
-    .toBeGreaterThan(120);
-  await expect
-    .poll(() => intrinsic("mixed-scroll no-dim media"))
-    .toBeGreaterThan(180);
-  await expect
-    .poll(() => intrinsic("mixed-scroll fenced code"))
-    .toBeGreaterThan(160);
-  await expect
-    .poll(() => intrinsic("mixed-scroll link preview"))
-    .toBeGreaterThan(110);
-  await expect
-    .poll(() => intrinsic("mixed-scroll tall text"))
-    .toBeGreaterThan(120);
-
   const anchorId = await timeline
     .locator("[data-message-id]")
     .filter({ hasText: "mixed-scroll tail 28" })
@@ -424,6 +388,92 @@ test("timeline reserves mixed-media rows before fast scrollback", async ({
   expect(drift.samples).toBeGreaterThan(0);
   expect(drift.missingSamples).toBe(0);
   expect(drift.maxDrift).toBeLessThanOrEqual(120);
+});
+
+test("removed-message system row stays fixed when older history prepends", async ({
+  page,
+}, testInfo) => {
+  testInfo.setTimeout(30_000);
+
+  await installMockBridge(page);
+  await page.goto("/");
+  await waitForMockTimelineBridge(page);
+
+  await page.getByTestId("channel-general").click();
+  const timeline = page.getByTestId("message-timeline");
+
+  await page.evaluate(() => {
+    for (let index = 0; index < 10; index += 1) {
+      window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+        channelName: "general",
+        content: `tombstone-neighbor ${index}`,
+        createdAt: 1_700_100_000 + index,
+      });
+    }
+    window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+      channelName: "general",
+      content: JSON.stringify({
+        actor:
+          "f4a42a97e594b77bdbd8ee35191c8b28a94a4cb871d96f32921558275421fb68",
+        type: "message_deleted",
+      }),
+      kind: 40099,
+      createdAt: 1_700_100_010,
+      id: "d".repeat(64),
+    });
+  });
+
+  const tombstoneKey = "d".repeat(64);
+  const tombstone = timeline.locator(
+    `[data-timeline-item-key="${tombstoneKey}"]`,
+  );
+  await expect(tombstone).toContainText("removed a message");
+  await tombstone.scrollIntoViewIfNeeded();
+  await timeline.evaluate((element, key) => {
+    const scroller = element as HTMLDivElement;
+    const row = scroller.querySelector<HTMLElement>(
+      `[data-timeline-item-key="${CSS.escape(key)}"]`,
+    );
+    if (!row) throw new Error("removed-message row is not mounted");
+    scroller.scrollTop +=
+      row.getBoundingClientRect().top - scroller.getBoundingClientRect().top;
+    scroller.dispatchEvent(new Event("scroll", { bubbles: true }));
+  }, "d".repeat(64));
+
+  const topBefore = await tombstone.evaluate(
+    (row) =>
+      row.getBoundingClientRect().top -
+      (
+        row.closest('[data-testid="message-timeline"]') as HTMLElement
+      ).getBoundingClientRect().top,
+  );
+
+  await page.evaluate(() => {
+    for (let index = 0; index < 30; index += 1) {
+      window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+        channelName: "general",
+        content: `older-than-tombstone ${index}`,
+        createdAt: 1_700_000_000 + index,
+      });
+    }
+  });
+
+  await expect(timeline).toContainText("older-than-tombstone 29");
+  await expect
+    .poll(
+      async () =>
+        Math.abs(
+          (await tombstone.evaluate(
+            (row) =>
+              row.getBoundingClientRect().top -
+              (
+                row.closest('[data-testid="message-timeline"]') as HTMLElement
+              ).getBoundingClientRect().top,
+          )) - topBefore,
+        ),
+      { timeout: 5_000 },
+    )
+    .toBeLessThanOrEqual(2);
 });
 
 test("timeline prepend plus late row reflow keeps the reading row stable", async ({
@@ -555,39 +605,6 @@ test("timeline prepend plus late row reflow keeps the reading row stable", async
   expect(drift.samples).toBeGreaterThan(0);
   expect(drift.missingSamples).toBe(0);
   expect(drift.maxDrift).toBeLessThanOrEqual(LATE_REFLOW_DRIFT_PX);
-});
-
-test("de-virtualized timeline rows apply content-visibility", async ({
-  page,
-}, testInfo) => {
-  testInfo.setTimeout(45_000);
-
-  await installMockBridge(page);
-  await page.goto("/");
-  await waitForMockTimelineBridge(page);
-  await seedNoShiftTimeline(page);
-
-  await page.getByTestId("channel-general").click();
-  await expect(page.getByTestId("chat-title")).toHaveText("general");
-
-  const timeline = page.getByTestId("message-timeline");
-  await expect(timeline.locator("[data-message-id]").first()).toBeVisible();
-
-  // Guards against a typo'd/removed wrapper class shipping inert — a bad
-  // utility name is invisible to typecheck.
-  const hasContentVisibility = await timeline
-    .locator("[data-message-id]")
-    .first()
-    .evaluate((element) => {
-      const scroller = element.closest('[data-testid="message-timeline"]');
-      let node: HTMLElement | null = element.parentElement;
-      while (node && node !== scroller) {
-        if (getComputedStyle(node).contentVisibility === "auto") return true;
-        node = node.parentElement;
-      }
-      return false;
-    });
-  expect(hasContentVisibility).toBe(true);
 });
 
 test("thread panel late row reflow keeps the reading reply stable", async ({

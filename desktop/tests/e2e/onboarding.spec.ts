@@ -3,6 +3,11 @@ import { expect, test, type Locator, type Page } from "@playwright/test";
 import { nsecEncode } from "nostr-tools/nip19";
 
 import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
+import {
+  E2E_IDENTITY_OVERRIDE_STORAGE_KEY,
+  seedActiveIdentity,
+  passThroughBackupStep,
+} from "../helpers/onboarding";
 
 type RelayConnectionState =
   | "connected"
@@ -58,7 +63,6 @@ async function setRelayConnectionState(
   }, state);
 }
 
-const E2E_IDENTITY_OVERRIDE_STORAGE_KEY = "buzz:e2e-identity-override.v1";
 const HOME_SEEN_STORAGE_KEY_PREFIX = "buzz-home-feed-seen.v1:";
 const DEFAULT_MOCK_PUBKEY = "deadbeef".repeat(8);
 const BLANK_TYLER_IDENTITY = {
@@ -79,24 +83,6 @@ const FIRST_RUN_ALICE = {
   ...TEST_IDENTITIES.alice,
   username: "",
 };
-
-type TestIdentity = {
-  privateKey: string;
-  pubkey: string;
-  username: string;
-};
-
-async function seedActiveIdentity(page: Page, identity: TestIdentity) {
-  await page.addInitScript(
-    ({ identity: nextIdentity, storageKey }) => {
-      window.localStorage.setItem(storageKey, JSON.stringify(nextIdentity));
-    },
-    {
-      identity,
-      storageKey: E2E_IDENTITY_OVERRIDE_STORAGE_KEY,
-    },
-  );
-}
 
 async function seedOnboardingCompletion(page: Page, pubkey: string) {
   await page.addInitScript(
@@ -160,10 +146,10 @@ async function expectWiderThanTall(locator: Locator) {
 
 async function expectIntroActionIconStackedAboveTitle(
   action: Locator,
-  testId: string,
+  title: string,
 ) {
-  const iconBox = await action.getByTestId(`${testId}-icon`).boundingBox();
-  const titleBox = await action.getByTestId(`${testId}-title`).boundingBox();
+  const iconBox = await action.locator("svg").first().boundingBox();
+  const titleBox = await action.getByText(title, { exact: true }).boundingBox();
   if (!iconBox || !titleBox) {
     throw new Error("Could not measure welcome intro action content");
   }
@@ -286,17 +272,13 @@ async function expectWelcomeView(page: Page) {
   );
   await expectIntroActionIconStackedAboveTitle(
     page.getByTestId("welcome-intro-action-create-channel"),
-    "welcome-intro-action-create-channel",
+    "Create a channel",
   );
   await expect(
-    page.getByTestId("welcome-intro-action-create-channel-title"),
-  ).toHaveText("Create a channel");
-  await expect(
-    page.getByTestId("welcome-intro-action-create-channel-title"),
+    page
+      .getByTestId("welcome-intro-action-create-channel")
+      .getByText("Create a channel", { exact: true }),
   ).toHaveCSS("white-space", "normal");
-  await expect(
-    page.getByTestId("welcome-intro-action-create-channel-description"),
-  ).toHaveCount(0);
   await expect(
     page.getByTestId("welcome-intro-action-create-agent"),
   ).toBeVisible();
@@ -305,14 +287,8 @@ async function expectWelcomeView(page: Page) {
   );
   await expectIntroActionIconStackedAboveTitle(
     page.getByTestId("welcome-intro-action-create-agent"),
-    "welcome-intro-action-create-agent",
+    "Create a custom agent",
   );
-  await expect(
-    page.getByTestId("welcome-intro-action-create-agent-title"),
-  ).toHaveText("Create a custom agent");
-  await expect(
-    page.getByTestId("welcome-intro-action-create-agent-description"),
-  ).toHaveCount(0);
   await expect(page.getByTestId("message-composer")).toBeVisible();
   await expect(page.getByTestId("welcome-composer-guide-banner")).toBeVisible();
   await expect(page.getByTestId("welcome-composer-guide-banner")).toContainText(
@@ -546,6 +522,7 @@ async function expectIncompleteOnboarding(page: Page) {
 
 async function continueToSetupPage(page: Page) {
   await page.getByTestId("onboarding-next").click();
+  await passThroughBackupStep(page);
   await expect(page.getByTestId("onboarding-page-avatar")).toBeVisible();
   await page
     .getByTestId("onboarding-avatar-url")
@@ -785,6 +762,7 @@ test("avatar step uses an add-image placeholder before an avatar is chosen", asy
 
   await page.getByTestId("onboarding-display-name").fill("Morty QA");
   await page.getByTestId("onboarding-next").click();
+  await passThroughBackupStep(page);
 
   await expect(page.getByTestId("onboarding-page-avatar")).toBeVisible();
   const preview = page.getByTestId("onboarding-avatar-preview");
@@ -802,6 +780,7 @@ test("avatar step reveals preset backgrounds after the first emoji pick", async 
 
   await page.getByTestId("onboarding-display-name").fill("Morty QA");
   await page.getByTestId("onboarding-next").click();
+  await passThroughBackupStep(page);
   await expect(page.getByTestId("onboarding-page-avatar")).toBeVisible();
 
   await page.getByRole("tab", { name: "Emoji" }).click();
@@ -828,6 +807,7 @@ test("avatar step accepts an avatar URL before theme selection", async ({
 
   await page.getByTestId("onboarding-display-name").fill("Morty QA");
   await page.getByTestId("onboarding-next").click();
+  await passThroughBackupStep(page);
   await expect(page.getByTestId("onboarding-page-avatar")).toBeVisible();
   await page
     .getByTestId("onboarding-avatar-url")
@@ -859,6 +839,7 @@ test("failed avatar saves can continue without saving the avatar", async ({
 
   await page.getByTestId("onboarding-display-name").fill("Morty QA");
   await page.getByTestId("onboarding-next").click();
+  await passThroughBackupStep(page);
   await expect(page.getByTestId("onboarding-page-avatar")).toBeVisible();
   await page
     .getByTestId("onboarding-avatar-url")
@@ -891,6 +872,7 @@ test("theme step offers skip instead of going back", async ({ page }) => {
 
   await page.getByTestId("onboarding-display-name").fill("Morty QA");
   await page.getByTestId("onboarding-next").click();
+  await passThroughBackupStep(page);
   await expect(page.getByTestId("onboarding-page-avatar")).toBeVisible();
   await page
     .getByTestId("onboarding-avatar-url")
@@ -972,6 +954,7 @@ test("avatar upload rejects a file whose server-detected MIME is not an image", 
 
   await page.getByTestId("onboarding-display-name").fill("Morty QA");
   await page.getByTestId("onboarding-next").click();
+  await passThroughBackupStep(page);
   await expect(page.getByTestId("onboarding-page-avatar")).toBeVisible();
   await page.getByTestId("onboarding-avatar-input").setInputFiles({
     name: "looks-like.png",
@@ -1009,6 +992,7 @@ test("avatar upload accepts a file whose server-detected MIME is an image", asyn
 
   await page.getByTestId("onboarding-display-name").fill("Morty QA");
   await page.getByTestId("onboarding-next").click();
+  await passThroughBackupStep(page);
   await expect(page.getByTestId("onboarding-page-avatar")).toBeVisible();
   await page.getByTestId("onboarding-avatar-input").setInputFiles({
     name: "avatar.png",

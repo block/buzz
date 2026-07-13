@@ -382,12 +382,12 @@ test("custom personas can be shown in the agent catalog", async ({ page }) => {
     "Catalog options",
     "Edit",
     "Duplicate",
+    "Export snapshot",
     "Remove from My Agents",
   ]);
   await expect(
     page.getByRole("menuitem", { name: "Catalog options" }),
   ).toBeVisible();
-  await expect(page.getByRole("menuitem", { name: "Export" })).toHaveCount(0);
   await page.getByRole("menuitem", { name: "Catalog options" }).click();
 
   await expect(page.getByTestId("persona-share-dialog")).toBeVisible();
@@ -437,6 +437,7 @@ test("team-managed personas do not expose editable actions", async ({
   await expect(page.getByRole("menuitem")).toHaveText([
     "Catalog options",
     "Duplicate",
+    "Export snapshot",
     "Managed by team",
   ]);
   await expect(page.getByRole("menuitem", { name: "Edit" })).toHaveCount(0);

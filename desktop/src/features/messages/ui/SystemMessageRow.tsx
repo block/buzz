@@ -2,7 +2,10 @@ import { SmilePlus } from "lucide-react";
 import * as React from "react";
 
 import { EmojiPicker } from "@/features/custom-emoji/ui/EmojiPicker";
-import type { TimelineMessage } from "@/features/messages/types";
+import type {
+  TimelineMessage,
+  TimelineReaction,
+} from "@/features/messages/types";
 import { MessageReactions } from "@/features/messages/ui/MessageReactions";
 import { useReactionHandler } from "@/features/messages/ui/useReactionHandler";
 import { recordQuickReactionEmoji } from "@/features/messages/ui/useQuickReactionEmojis";
@@ -22,6 +25,7 @@ import {
 import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
+import { MessageAuthorText, MessageHeaderRow } from "./MessageHeader";
 import { MessageTimestamp } from "./MessageTimestamp";
 
 const SYSTEM_ACTION_BUTTON_CLASS = "h-6 w-6 rounded-full p-0";
@@ -31,6 +35,7 @@ type SystemMessagePayload = {
   type: string;
   actor?: string;
   target?: string;
+  targets?: string[];
   topic?: string;
   purpose?: string;
   // Moderation tombstone fields (kind:40099 "message_deleted"). All optional and
@@ -45,6 +50,104 @@ type SystemMessageDescription = {
   action: React.ReactNode;
   title: React.ReactNode;
 };
+
+const MAX_VISIBLE_ADDITIONAL_MEMBER_NAMES = 3;
+
+function parseSystemMessagePayload(
+  message: TimelineMessage,
+): SystemMessagePayload | null {
+  try {
+    return JSON.parse(message.body) as SystemMessagePayload;
+  } catch {
+    return null;
+  }
+}
+
+function buildGroupedMembershipPayload(
+  messages: readonly TimelineMessage[],
+): SystemMessagePayload | null {
+  if (messages.length < 2) return null;
+
+  const payloads = messages.map(parseSystemMessagePayload);
+  const firstPayload = payloads[0];
+  const actor = firstPayload?.actor
+    ? normalizePubkey(firstPayload.actor)
+    : null;
+  const firstTarget = firstPayload?.target
+    ? normalizePubkey(firstPayload.target)
+    : null;
+  if (!actor || !firstTarget) return null;
+  const isSelfJoinGroup = actor === firstTarget;
+
+  const targets: string[] = [];
+  for (const payload of payloads) {
+    const payloadActor = payload?.actor ? normalizePubkey(payload.actor) : null;
+    const payloadTarget = payload?.target
+      ? normalizePubkey(payload.target)
+      : null;
+    if (
+      payload?.type !== "member_joined" ||
+      !payloadActor ||
+      !payloadTarget ||
+      (isSelfJoinGroup
+        ? payloadActor !== payloadTarget
+        : payloadActor !== actor || payloadActor === payloadTarget)
+    ) {
+      return null;
+    }
+    targets.push(payloadTarget);
+  }
+
+  if (isSelfJoinGroup) {
+    return {
+      type: "members_joined",
+      target: targets[0],
+      targets,
+    };
+  }
+
+  return {
+    type: "members_added",
+    actor,
+    target: targets[0],
+    targets,
+  };
+}
+
+function aggregateGroupedReactions(
+  messages: readonly TimelineMessage[],
+): TimelineReaction[] {
+  const reactionsByEmoji = new Map<
+    string,
+    TimelineReaction & {
+      usersByKey: Map<string, TimelineReaction["users"][number]>;
+    }
+  >();
+
+  for (const message of messages) {
+    for (const reaction of message.reactions ?? []) {
+      const existing = reactionsByEmoji.get(reaction.emoji) ?? {
+        emoji: reaction.emoji,
+        emojiUrl: reaction.emojiUrl,
+        count: 0,
+        reactedByCurrentUser: false,
+        users: [],
+        usersByKey: new Map(),
+      };
+      existing.reactedByCurrentUser ||= reaction.reactedByCurrentUser === true;
+      for (const user of reaction.users) {
+        const userKey = normalizePubkey(user.pubkey) || user.displayName;
+        existing.usersByKey.set(userKey, user);
+      }
+      reactionsByEmoji.set(reaction.emoji, existing);
+    }
+  }
+
+  return [...reactionsByEmoji.values()].map(({ usersByKey, ...reaction }) => {
+    const users = [...usersByKey.values()];
+    return { ...reaction, count: users.length, users };
+  });
+}
 
 function resolveLabel(
   pubkey: string | undefined,
@@ -96,11 +199,13 @@ function ProfileName({
   highlight = false,
   isAgent = false,
   pubkey,
+  underlineOnHover = false,
 }: {
   children: React.ReactNode;
   highlight?: boolean;
   isAgent?: boolean;
   pubkey: string | undefined;
+  underlineOnHover?: boolean;
 }) {
   const isAgentMention = highlight && isAgent;
   const node = (
@@ -115,6 +220,7 @@ function ProfileName({
               isAgentMention && "agent-mention-highlight",
             )
           : "rounded-xs transition-colors hover:text-foreground",
+        underlineOnHover && "hover:underline",
       )}
     >
       {highlight && !isAgentMention ? (
@@ -252,6 +358,118 @@ function SystemMessageAvatar({
   );
 }
 
+function MembershipPersonName({
+  agentPubkeys,
+  currentPubkey,
+  personaLookup,
+  profiles,
+  pubkey,
+}: {
+  agentPubkeys?: ReadonlySet<string>;
+  currentPubkey: string | undefined;
+  personaLookup?: Map<string, string>;
+  profiles: UserProfileLookup | undefined;
+  pubkey: string;
+}) {
+  return (
+    <ProfileName
+      isAgent={isKnownAgentPubkey(
+        pubkey,
+        profiles,
+        personaLookup,
+        agentPubkeys,
+      )}
+      pubkey={pubkey}
+      underlineOnHover
+    >
+      {resolveDisplayLabel(pubkey, currentPubkey, profiles)}
+    </ProfileName>
+  );
+}
+
+function MemberNamesInlineList({
+  agentPubkeys,
+  currentPubkey,
+  personaLookup,
+  profiles,
+  targets,
+}: {
+  agentPubkeys?: ReadonlySet<string>;
+  currentPubkey: string | undefined;
+  personaLookup?: Map<string, string>;
+  profiles: UserProfileLookup | undefined;
+  targets: string[];
+}) {
+  const visibleTargets = targets.slice(0, MAX_VISIBLE_ADDITIONAL_MEMBER_NAMES);
+  const hiddenTargets = targets.slice(MAX_VISIBLE_ADDITIONAL_MEMBER_NAMES);
+  const renderName = (pubkey: string) => (
+    <MembershipPersonName
+      agentPubkeys={agentPubkeys}
+      currentPubkey={currentPubkey}
+      personaLookup={personaLookup}
+      profiles={profiles}
+      pubkey={pubkey}
+    />
+  );
+
+  return (
+    <>
+      {visibleTargets.map((pubkey, index) => {
+        const isLast = index === visibleTargets.length - 1;
+        const separator =
+          index === 0
+            ? null
+            : isLast && hiddenTargets.length === 0
+              ? visibleTargets.length === 2
+                ? " and "
+                : ", and "
+              : ", ";
+        return (
+          <React.Fragment key={pubkey}>
+            {separator}
+            {renderName(pubkey)}
+          </React.Fragment>
+        );
+      })}
+      {hiddenTargets.length > 0 ? (
+        <>
+          , and{" "}
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                className="cursor-help rounded-xs hover:underline focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring"
+                type="button"
+              >
+                {hiddenTargets.length} others
+              </button>
+            </TooltipTrigger>
+            <TooltipContent className="max-w-72 p-2 text-left" side="top">
+              <div className="max-h-56 space-y-1 overflow-y-auto pr-1">
+                {hiddenTargets.map((pubkey) => (
+                  <div className="flex items-center gap-2" key={pubkey}>
+                    <UserAvatar
+                      avatarUrl={resolveAvatarUrl(pubkey, profiles)}
+                      className="!h-5 !w-5 shrink-0 text-3xs"
+                      displayName={resolveDisplayLabel(
+                        pubkey,
+                        currentPubkey,
+                        profiles,
+                      )}
+                    />
+                    <span className="min-w-0 truncate">
+                      {resolveDisplayLabel(pubkey, currentPubkey, profiles)}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </TooltipContent>
+          </Tooltip>
+        </>
+      ) : null}
+    </>
+  );
+}
+
 function describeSystemEvent(
   payload: SystemMessagePayload,
   currentPubkey: string | undefined,
@@ -283,18 +501,73 @@ function describeSystemEvent(
       {targetLabel}
     </ProfileName>
   );
+  const membershipTitle = (
+    <ProfileName
+      isAgent={isTargetAgent}
+      pubkey={payload.target}
+      underlineOnHover
+    >
+      {targetLabel}
+    </ProfileName>
+  );
 
   switch (payload.type) {
+    case "members_added":
+      if (!payload.actor || !payload.targets?.length) return null;
+      return {
+        title: membershipTitle,
+        action: (
+          <>
+            was added by{" "}
+            <ProfileName pubkey={payload.actor} underlineOnHover>
+              {resolveDisplayLabel(payload.actor, currentPubkey, profiles)}
+            </ProfileName>
+            , along with{" "}
+            <MemberNamesInlineList
+              agentPubkeys={agentPubkeys}
+              currentPubkey={currentPubkey}
+              personaLookup={personaLookup}
+              profiles={profiles}
+              targets={payload.targets.slice(1)}
+            />
+          </>
+        ),
+      };
+    case "members_joined":
+      if (!payload.targets?.length) return null;
+      return {
+        title: membershipTitle,
+        action: (
+          <>
+            joined the channel along with{" "}
+            <MemberNamesInlineList
+              agentPubkeys={agentPubkeys}
+              currentPubkey={currentPubkey}
+              personaLookup={personaLookup}
+              profiles={profiles}
+              targets={payload.targets.slice(1)}
+            />
+          </>
+        ),
+      };
     case "member_joined": {
-      if (payload.actor === payload.target) {
+      if (!payload.actor || !payload.target) return null;
+      if (normalizePubkey(payload.actor) === normalizePubkey(payload.target)) {
         return {
-          title: targetName,
+          title: membershipTitle,
           action: "joined the channel",
         };
       }
       return {
-        title: actorName,
-        action: <>added {targetName} to the channel</>,
+        title: membershipTitle,
+        action: (
+          <>
+            was added by{" "}
+            <ProfileName pubkey={payload.actor} underlineOnHover>
+              {resolveDisplayLabel(payload.actor, currentPubkey, profiles)}
+            </ProfileName>
+          </>
+        ),
       };
     }
     case "member_left":
@@ -354,6 +627,7 @@ function describeSystemEvent(
 
 export const SystemMessageRow = React.memo(function SystemMessageRow({
   message,
+  groupedMessages,
   currentPubkey,
   agentPubkeys,
   profiles,
@@ -361,6 +635,7 @@ export const SystemMessageRow = React.memo(function SystemMessageRow({
   onToggleReaction,
 }: {
   message: TimelineMessage;
+  groupedMessages?: TimelineMessage[];
   currentPubkey?: string;
   agentPubkeys?: ReadonlySet<string>;
   profiles?: UserProfileLookup;
@@ -372,6 +647,45 @@ export const SystemMessageRow = React.memo(function SystemMessageRow({
     remove: boolean,
   ) => Promise<void>;
 }) {
+  const sourceMessages = React.useMemo(
+    () => groupedMessages ?? [message],
+    [groupedMessages, message],
+  );
+  const groupedPayload = React.useMemo(
+    () => buildGroupedMembershipPayload(sourceMessages),
+    [sourceMessages],
+  );
+  const reactionMessage = React.useMemo(
+    () =>
+      groupedPayload
+        ? {
+            ...message,
+            pending: sourceMessages.some((source) => source.pending),
+            reactions: aggregateGroupedReactions(sourceMessages),
+          }
+        : message,
+    [groupedPayload, message, sourceMessages],
+  );
+  const handleGroupedReaction = React.useCallback(
+    async (_groupMessage: TimelineMessage, emoji: string, remove: boolean) => {
+      if (!onToggleReaction) return;
+      if (!remove) {
+        await onToggleReaction(message, emoji, false);
+        return;
+      }
+
+      const reactedMessages = sourceMessages.filter((source) =>
+        source.reactions?.some(
+          (reaction) =>
+            reaction.emoji === emoji && reaction.reactedByCurrentUser,
+        ),
+      );
+      await Promise.all(
+        reactedMessages.map((source) => onToggleReaction(source, emoji, true)),
+      );
+    },
+    [message, onToggleReaction, sourceMessages],
+  );
   const [badgeBurstEmoji, setBadgeBurstEmoji] = React.useState<string | null>(
     null,
   );
@@ -382,14 +696,15 @@ export const SystemMessageRow = React.memo(function SystemMessageRow({
     pending: reactionPending,
     errorMessage: reactionErrorMessage,
     select: handleReactionSelect,
-  } = useReactionHandler(message, onToggleReaction);
+  } = useReactionHandler(
+    reactionMessage,
+    groupedPayload && onToggleReaction
+      ? handleGroupedReaction
+      : onToggleReaction,
+  );
 
-  let payload: SystemMessagePayload;
-  try {
-    payload = JSON.parse(message.body);
-  } catch {
-    return null;
-  }
+  const payload = groupedPayload ?? parseSystemMessagePayload(message);
+  if (!payload) return null;
 
   const description = describeSystemEvent(
     payload,
@@ -401,6 +716,10 @@ export const SystemMessageRow = React.memo(function SystemMessageRow({
   if (!description) {
     return null;
   }
+  const isMembershipArrival =
+    payload.type === "member_joined" ||
+    payload.type === "members_added" ||
+    payload.type === "members_joined";
 
   const wouldAddReaction = (emoji: string) =>
     !reactions.some(
@@ -409,34 +728,39 @@ export const SystemMessageRow = React.memo(function SystemMessageRow({
 
   return (
     <div
-      className="group/message relative mx-1 rounded-2xl px-2 py-2 transition-colors hover:bg-muted/50 focus-within:bg-muted/50"
+      className="group/message relative mx-1 rounded-2xl px-2 py-1 transition-colors hover:bg-muted/50 focus-within:bg-muted/50"
       data-testid="system-message-row"
     >
       <div className="flex items-start gap-2.5">
         <SystemMessageAvatar
-          actorPubkey={payload.actor}
+          actorPubkey={isMembershipArrival ? payload.target : payload.actor}
           agentPubkeys={agentPubkeys}
           currentPubkey={currentPubkey}
           personaLookup={personaLookup}
           profiles={profiles}
-          targetPubkey={payload.target}
+          targetPubkey={isMembershipArrival ? undefined : payload.target}
         />
-        <div className={cn(MESSAGE_MARKDOWN_CLASS, "min-w-0 flex-1")}>
-          <div className="flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-0.5">
-            <div className="truncate text-sm font-semibold leading-none tracking-tight text-foreground">
+        <div
+          className={cn(
+            MESSAGE_MARKDOWN_CLASS,
+            "flex min-w-0 flex-1 flex-col gap-0.5",
+          )}
+        >
+          <MessageHeaderRow>
+            <MessageAuthorText as="div" className="text-foreground">
               {description.title}
-            </div>
+            </MessageAuthorText>
             <MessageTimestamp
               createdAt={message.createdAt}
               time={message.time}
             />
-          </div>
-          <p className="mt-1 text-sm leading-snug text-foreground">
+          </MessageHeaderRow>
+          <p className="-mt-0.5 text-sm leading-snug text-foreground">
             {description.action}
           </p>
           <div>
             <MessageReactions
-              messageId={message.id}
+              messageId={reactionMessage.id}
               reactions={reactions}
               canToggle={canToggleReactions}
               pending={reactionPending}

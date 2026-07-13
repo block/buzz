@@ -14,6 +14,8 @@ import { Button } from "@/shared/ui/button";
 type PersonaDeleteDialogProps = {
   open: boolean;
   persona: AgentPersona | null;
+  /** Number of managed-agent instances backed by this persona. Omit or pass 0 to suppress the instance-count sentence. */
+  instanceCount?: number;
   onConfirm: (persona: AgentPersona) => void;
   onOpenChange: (open: boolean) => void;
 };
@@ -21,6 +23,7 @@ type PersonaDeleteDialogProps = {
 export function PersonaDeleteDialog({
   open,
   persona,
+  instanceCount = 0,
   onConfirm,
   onOpenChange,
 }: PersonaDeleteDialogProps) {
@@ -31,7 +34,7 @@ export function PersonaDeleteDialog({
           <AlertDialogTitle>Delete agent?</AlertDialogTitle>
           <AlertDialogDescription>
             {persona
-              ? `Delete ${persona.displayName}. Existing agents keep their copied settings, but this template will no longer be available for new deployments.`
+              ? `Delete ${persona.displayName}.${instanceCount > 0 ? ` Also deletes ${instanceCount} agent instance${instanceCount === 1 ? "" : "s"}.` : ""}`
               : "Delete this agent."}
           </AlertDialogDescription>
         </AlertDialogHeader>
