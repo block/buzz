@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -112,6 +113,7 @@ Widget _buildComposeBar({
   required MediaUploadService uploadService,
   required ComposeBarOnSend onSend,
   List<ChannelMember> members = const <ChannelMember>[],
+  Future<List<ChannelMember>>? membersFuture,
   List<AgentDirectoryEntry> relayAgents = const <AgentDirectoryEntry>[],
   List<Channel> channels = const <Channel>[],
   String? currentPubkey,
@@ -120,7 +122,9 @@ Widget _buildComposeBar({
     overrides: [
       mediaUploadServiceProvider.overrideWithValue(uploadService),
       currentPubkeyProvider.overrideWith((ref) => currentPubkey),
-      channelMembersProvider('channel-1').overrideWith((ref) async => members),
+      channelMembersProvider(
+        'channel-1',
+      ).overrideWith((ref) => membersFuture ?? Future.value(members)),
       agentDirectoryProvider.overrideWith((ref) async => relayAgents),
       agentOwnersProvider.overrideWith((ref) async => const <String, String>{}),
       relayClientProvider.overrideWithValue(
@@ -445,7 +449,7 @@ void main() {
               channelIds: const ['shared-channel'],
             ),
           ],
-          channels: [_makeSharedMemberChannel()],
+          channels: [_makeCurrentChannel(), _makeSharedMemberChannel()],
           onSend:
               (
                 content,
@@ -486,6 +490,111 @@ void main() {
         ['p', agentPubkey],
         ['role', 'bot'],
       ]);
+    });
+
+    testWidgets('does not mutate a DM when mentioning a non-member agent', (
+      tester,
+    ) async {
+      final agentPubkey = 'd' * 64;
+      final signer = nostr.Keys.generate();
+      final publishedEvents = <Map<String, dynamic>>[];
+      String? sentContent;
+
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(signer.nsec),
+          currentPubkey: signer.public,
+          relayAgents: [_testAgent(agentPubkey)],
+          channels: [
+            _makeCurrentChannel(channelType: 'dm'),
+            _makeSharedMemberChannel(),
+          ],
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {
+                sentContent = content;
+              },
+        ),
+      );
+
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(ComposeBar)),
+      );
+      final session = container.read(relaySessionProvider.notifier);
+      final socket = _RecordingRelaySocket(
+        publishedEvents,
+        session.debugHandleSocketMessageForTest,
+      );
+      session.debugAttachSocketForTest(socket);
+
+      await _selectAndSendAgentMention(tester);
+
+      expect(sentContent, 'hello @Helper Bot');
+      expect(publishedEvents.where((event) => event['kind'] == 9000), isEmpty);
+    });
+
+    testWidgets('waits for current member data before adding an agent', (
+      tester,
+    ) async {
+      final agentPubkey = 'e' * 64;
+      final signer = nostr.Keys.generate();
+      final membersCompleter = Completer<List<ChannelMember>>();
+      final publishedEvents = <Map<String, dynamic>>[];
+      var didSend = false;
+
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(signer.nsec),
+          currentPubkey: signer.public,
+          membersFuture: membersCompleter.future,
+          relayAgents: [_testAgent(agentPubkey)],
+          channels: [_makeCurrentChannel(), _makeSharedMemberChannel()],
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {
+                didSend = true;
+              },
+        ),
+      );
+
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(ComposeBar)),
+      );
+      final session = container.read(relaySessionProvider.notifier);
+      final socket = _RecordingRelaySocket(
+        publishedEvents,
+        session.debugHandleSocketMessageForTest,
+      );
+      session.debugAttachSocketForTest(socket);
+
+      await tester.enterText(find.byType(TextField), '@hel');
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Helper Bot'));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byType(TextField), 'hello @Helper Bot');
+      await tester.tap(find.byIcon(LucideIcons.sendHorizontal));
+      await tester.pump();
+
+      expect(didSend, isFalse);
+      expect(publishedEvents.where((event) => event['kind'] == 9000), isEmpty);
+
+      membersCompleter.complete([
+        ChannelMember(
+          pubkey: agentPubkey,
+          role: 'admin',
+          joinedAt: DateTime(2024),
+        ),
+      ]);
+      await tester.pumpAndSettle();
+
+      expect(didSend, isTrue);
+      expect(publishedEvents.where((event) => event['kind'] == 9000), isEmpty);
     });
 
     testWidgets('shows a clean error when an animated PNG is picked', (
@@ -801,6 +910,48 @@ void main() {
       expect(controller.selection.baseOffset, 6);
     });
   });
+}
+
+MediaUploadService _testUploadService(String nsec) {
+  return MediaUploadService(
+    baseUrl: 'https://relay.example',
+    nsec: nsec,
+    pickGalleryImage: () async => null,
+    pickGalleryVideo: () async => null,
+  );
+}
+
+AgentDirectoryEntry _testAgent(String pubkey) {
+  return AgentDirectoryEntry(
+    pubkey: pubkey,
+    displayName: 'Helper Bot',
+    respondTo: 'anyone',
+    channelIds: const ['shared-channel'],
+  );
+}
+
+Future<void> _selectAndSendAgentMention(WidgetTester tester) async {
+  await tester.enterText(find.byType(TextField), '@hel');
+  await tester.pumpAndSettle();
+  await tester.tap(find.text('Helper Bot'));
+  await tester.pumpAndSettle();
+  await tester.enterText(find.byType(TextField), 'hello @Helper Bot');
+  await tester.tap(find.byIcon(LucideIcons.sendHorizontal));
+  await tester.pumpAndSettle();
+}
+
+Channel _makeCurrentChannel({String channelType = 'stream'}) {
+  return Channel(
+    id: 'channel-1',
+    name: 'current',
+    channelType: channelType,
+    visibility: 'open',
+    description: '',
+    createdBy: 'pubkey123',
+    createdAt: DateTime(2024),
+    memberCount: 2,
+    isMember: true,
+  );
 }
 
 Channel _makeSharedMemberChannel() {

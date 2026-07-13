@@ -280,11 +280,27 @@ class ComposeBar extends HookConsumerWidget {
       final pubkeys = LinkedHashSet<String>.from(
         selectedMentions.map((candidate) => candidate.pubkey.toLowerCase()),
       ).toList();
-      final nonMemberAgentPubkeys = LinkedHashSet<String>.from(
+      final selectedAgentPubkeys = LinkedHashSet<String>.from(
         selectedMentions
-            .where((candidate) => candidate.isAgent && !candidate.isMember)
+            .where((candidate) => candidate.isAgent)
             .map((candidate) => candidate.pubkey.toLowerCase()),
-      ).toList();
+      );
+      final nonMemberAgentPubkeys = <String>[];
+      if (selectedAgentPubkeys.isNotEmpty) {
+        final currentChannel = (await ref.read(
+          channelsProvider.future,
+        )).firstWhere((channel) => channel.id == channelId);
+        if (!currentChannel.isDm) {
+          final memberPubkeys = (await ref.read(
+            channelMembersProvider(channelId).future,
+          )).map((member) => member.pubkey.toLowerCase()).toSet();
+          nonMemberAgentPubkeys.addAll(
+            selectedAgentPubkeys.where(
+              (pubkey) => !memberPubkeys.contains(pubkey),
+            ),
+          );
+        }
+      }
 
       final payload = _ComposeDraftPayload.fromDraft(
         text: text,
