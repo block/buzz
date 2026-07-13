@@ -2,6 +2,8 @@
 
 ## mobile-v0.4.2
 
+- fix(mobile): add mentioned agents to channels ([#1696](https://github.com/block/buzz/pull/1696)) ([`3112e59f`](https://github.com/block/buzz/commit/3112e59fd8141818712b04d55919145f0516846b))
+- Resynchronize the mobile version with the canonical release line after an accidental desktop-derived 0.4.1 version ([#1833](https://github.com/block/buzz/pull/1833)) ([`ffa2de0f`](https://github.com/block/buzz/commit/ffa2de0fba94438397429da7bf60e774285c7ddd))
 
 
 ## mobile-v0.3.33
@@ -13,3 +15,12 @@
 - fix(mobile): highlight full multi-word mentions ([#1762](https://github.com/block/buzz/pull/1762)) ([`92bb959e`](https://github.com/block/buzz/commit/92bb959ee1580ed05a45b80af599b53d78f611bb))
 - [BOT-1264] fix(mobile): #channel tags not tappable ([#1695](https://github.com/block/buzz/pull/1695)) ([`2687a2a1`](https://github.com/block/buzz/commit/2687a2a185a01bfb08478267587c08378d60136d))
 
+
+## mobile-v0.3.32
+
+- Restrict the iOS app to iPhone ([#1735](https://github.com/block/buzz/pull/1735)) ([`215f5218`](https://github.com/block/buzz/commit/215f521880b29d421221b371b5a5818fcdaf4dea))
+
+
+## mobile-v0.3.31
+
+- This release only resynchronized the pre-1.0 mobile version after an accidental 1.0.0 internal build ([#1724](https://github.com/block/buzz/pull/1724)) ([`bdb3e698`](https://github.com/block/buzz/commit/bdb3e6989988c2721e24ea37236edd60038eca50))
