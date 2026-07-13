@@ -73,6 +73,7 @@ opentelemetry_sdk           = { version = "0.32", features = ["trace", "rt-tokio
 opentelemetry-otlp          = { version = "0.32", default-features = false, features = ["trace", "grpc-tonic", "tls-ring"] }
 metrics             = "0.24"
 metrics-exporter-prometheus = "0.18"
+metrics-util        = "0.20"
 
 # Error handling
 thiserror = "2"

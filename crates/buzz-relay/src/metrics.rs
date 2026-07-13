@@ -14,7 +14,7 @@
 //! recorded by [`track_metrics`] middleware on the app router. Buzz-specific
 //! metrics are recorded inline at their call sites.
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use axum::{
     extract::{MatchedPath, Request},
@@ -22,6 +22,7 @@ use axum::{
     response::Response,
 };
 use metrics_exporter_prometheus::{Matcher, PrometheusBuilder};
+use metrics_util::MetricKindMask;
 
 /// HTTP latency buckets (milliseconds) — only for `http_request_latency_ms`.
 const LATENCY_BUCKETS_MS: [f64; 11] = [
@@ -41,9 +42,14 @@ const FANOUT_BUCKETS: [f64; 9] = [0.0, 1.0, 5.0, 10.0, 25.0, 50.0, 100.0, 500.0,
 ///
 /// Must be called from within a Tokio runtime.
 /// Panics if a recorder is already installed or the port is in use.
-pub fn install(port: u16) {
+pub fn install(port: u16, gauge_idle_timeout_secs: u64) {
     let (recorder, exporter) = PrometheusBuilder::new()
         .with_http_listener(([0, 0, 0, 0], port))
+        // Remove gauge series that the relay intentionally stops emitting.
+        .idle_timeout(
+            MetricKindMask::GAUGE,
+            Some(Duration::from_secs(gauge_idle_timeout_secs)),
+        )
         // Per-metric buckets: ms for HTTP latency, seconds for internal processing.
         .set_buckets_for_metric(
             Matcher::Full("http_request_latency_ms".to_owned()),
