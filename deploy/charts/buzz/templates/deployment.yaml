@@ -69,6 +69,9 @@ spec:
             - { name: BUZZ_HEALTH_PORT,   value: {{ .Values.service.healthPort | quote }} }
             - { name: BUZZ_METRICS_PORT,  value: {{ .Values.service.metricsPort | quote }} }
             - { name: RELAY_URL,          value: {{ .Values.relayUrl | quote }} }
+            {{- if .Values.pairingRelay.url }}
+            - { name: BUZZ_PAIRING_RELAY_URL, value: {{ .Values.pairingRelay.url | quote }} }
+            {{- end }}
             - { name: BUZZ_MEDIA_BASE_URL, value: {{ include "buzz.mediaBaseUrl" . | quote }} }
 
             # ── Behavior ─────────────────────────────────────────────

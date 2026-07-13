@@ -33,6 +33,8 @@ pub struct Config {
     pub redis_url: String,
     /// Public WebSocket URL of this relay, advertised in NIP-11.
     pub relay_url: String,
+    /// Public WebSocket URL of the dedicated device-pairing relay, when configured.
+    pub pairing_relay_url: Option<String>,
     /// Maximum number of concurrent WebSocket connections.
     pub max_connections: usize,
     /// Maximum number of concurrently executing message handlers.
@@ -233,6 +235,25 @@ impl Config {
 
         let relay_url =
             std::env::var("RELAY_URL").unwrap_or_else(|_| "ws://localhost:3000".to_string());
+
+        let pairing_relay_url = std::env::var("BUZZ_PAIRING_RELAY_URL")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .map(|value| {
+                let parsed = url::Url::parse(&value).map_err(|e| {
+                    ConfigError::InvalidValue(format!(
+                        "BUZZ_PAIRING_RELAY_URL must be a valid ws:// or wss:// URL: {e}"
+                    ))
+                })?;
+                if !matches!(parsed.scheme(), "ws" | "wss") || parsed.host_str().is_none() {
+                    return Err(ConfigError::InvalidValue(
+                        "BUZZ_PAIRING_RELAY_URL must be a valid ws:// or wss:// URL".to_string(),
+                    ));
+                }
+                Ok(value)
+            })
+            .transpose()?;
 
         let max_connections = std::env::var("BUZZ_MAX_CONNECTIONS")
             .ok()
@@ -508,6 +529,7 @@ impl Config {
             database_url,
             redis_url,
             relay_url,
+            pairing_relay_url,
             max_connections,
             max_concurrent_handlers,
             send_buffer_size,
@@ -673,6 +695,25 @@ mod tests {
         assert!(matches!(
             parse_bind_addr("not-an-addr"),
             Err(ConfigError::InvalidBindAddr(_))
+        ));
+    }
+
+    #[test]
+    fn pairing_relay_url_accepts_websocket_urls_and_rejects_http() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        std::env::set_var("BUZZ_PAIRING_RELAY_URL", "wss://pairing.buzz.xyz");
+        let config = Config::from_env().expect("config");
+        assert_eq!(
+            config.pairing_relay_url.as_deref(),
+            Some("wss://pairing.buzz.xyz")
+        );
+
+        std::env::set_var("BUZZ_PAIRING_RELAY_URL", "https://pairing.buzz.xyz");
+        let result = Config::from_env();
+        std::env::remove_var("BUZZ_PAIRING_RELAY_URL");
+        assert!(matches!(
+            result,
+            Err(ConfigError::InvalidValue(ref msg)) if msg.contains("BUZZ_PAIRING_RELAY_URL")
         ));
     }
 
