@@ -1220,6 +1220,18 @@ impl InMemoryMetricKey {
     }
 }
 
+/// Refresh the exporter recency for legacy event-driven gauges without changing
+/// their values.
+///
+/// `metrics-util` 0.20.4 increments the Prometheus recorder's generation on
+/// every gauge operation, including `increment(0.0)`. The recency policy uses
+/// that generation, so this retains a steady gauge without a snapshot `set()`
+/// racing the lifecycle-relative increments and decrements.
+fn refresh_legacy_active_gauge_recency() {
+    metrics::gauge!("buzz_ws_connections_active").increment(0.0);
+    metrics::gauge!("buzz_subscriptions_active").increment(0.0);
+}
+
 /// Emit pod-local gauges and zero only label keys that disappeared since the
 /// preceding tick. The key stores the resolved host label so a removed or
 /// renamed community can still receive its final zero.
@@ -1238,10 +1250,7 @@ fn emit_in_memory_usage_metrics(
     metrics::gauge!("buzz_total_ws_connections").set(total_connections as f64);
     metrics::gauge!("buzz_total_users_online_pod").set(users_online.values().sum::<u64>() as f64);
     metrics::gauge!("buzz_total_subscriptions").set(total_subscriptions as f64);
-    // These event-driven gauges share the same live registries. Refresh them
-    // here so the gauge-wide idle timeout cannot remove a steady nonzero value.
-    metrics::gauge!("buzz_ws_connections_active").set(total_connections as f64);
-    metrics::gauge!("buzz_subscriptions_active").set(total_subscriptions as f64);
+    refresh_legacy_active_gauge_recency();
 
     let Some(host_map) = host_map else {
         return;
@@ -1671,7 +1680,13 @@ mod tests {
 
     use super::{
         buzz_auto_migrate_enabled, dropped_in_memory_keys, idle_timeout_secs,
-        run_periodic_until_cancelled, EmissionScope, InMemoryMetricKey,
+        refresh_legacy_active_gauge_recency, run_periodic_until_cancelled, EmissionScope,
+        InMemoryMetricKey,
+    };
+    use metrics::GaugeFn;
+    use metrics_util::{
+        debugging::DebugValue,
+        registry::{GenerationalAtomicStorage, Registry},
     };
 
     #[tokio::test(start_paused = true)]
@@ -1734,6 +1749,51 @@ mod tests {
                 "removed.example".to_owned()
             )]
         );
+    }
+
+    #[test]
+    fn test_legacy_gauge_recency_refresh_preserves_lifecycle_deltas() {
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+
+        metrics::with_local_recorder(&recorder, || {
+            let connections = metrics::gauge!("buzz_ws_connections_active");
+            let subscriptions = metrics::gauge!("buzz_subscriptions_active");
+            connections.increment(1.0);
+            subscriptions.increment(1.0);
+
+            refresh_legacy_active_gauge_recency();
+
+            connections.decrement(1.0);
+            subscriptions.increment(1.0);
+        });
+
+        let values = snapshotter
+            .snapshot()
+            .into_vec()
+            .into_iter()
+            .map(|(key, _, _, value)| {
+                let DebugValue::Gauge(value) = value else {
+                    panic!("{} must be a gauge", key.key().name());
+                };
+                (key.key().name().to_owned(), value.into_inner())
+            })
+            .collect::<std::collections::HashMap<_, _>>();
+
+        assert_eq!(values.get("buzz_ws_connections_active"), Some(&0.0));
+        assert_eq!(values.get("buzz_subscriptions_active"), Some(&2.0));
+    }
+
+    #[test]
+    fn test_legacy_gauge_recency_refresh_advances_generation() {
+        let registry = Registry::new(GenerationalAtomicStorage::atomic());
+        let key = metrics::Key::from_name("legacy");
+        let gauge = registry.get_or_create_gauge(&key, Clone::clone);
+        gauge.increment(1.0);
+        let generation_before = gauge.get_generation();
+        gauge.increment(0.0);
+
+        assert!(gauge.get_generation() > generation_before);
     }
 
     #[test]
