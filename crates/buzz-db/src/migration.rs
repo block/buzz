@@ -471,7 +471,7 @@ mod tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 9);
+        assert_eq!(migrations.len(), 10);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -620,6 +620,13 @@ mod tests {
             .sql
             .as_str()
             .contains("CREATE TRIGGER trg_event_mentions_require_live_event"));
+
+        assert_eq!(migrations[9].version, 10);
+        assert!(migrations[9]
+            .sql
+            .as_str()
+            .contains("CREATE OR REPLACE FUNCTION guard_nip_rs_watermark"));
+        assert!(migrations[9].sql.as_str().contains("RETURN NULL"));
     }
 
     #[test]
