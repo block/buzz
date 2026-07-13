@@ -1339,10 +1339,10 @@ pub fn build_managed_agent_summary(
                 &crate::relay::relay_ws_url_with_override(&state),
                 &global_for_hash,
             );
-        let availability_drift = runtime
-            .adapter_availability
-            .as_ref()
-            .is_some_and(|stamped| *stamped != super::adapter_availability_cached());
+        let availability_drift = super::availability_drift(
+            runtime.adapter_availability.as_ref(),
+            super::adapter_availability_cached(),
+        );
         hash_drift || availability_drift
     });
 
@@ -1882,8 +1882,12 @@ pub fn spawn_agent_child(
     // only). The summary builder compares this against the current cached value
     // to detect out-of-band adapter changes after spawn (Phase-2 badge fallback).
     // Non-codex runtimes get `None` — nothing changes for them.
+    // When the cache is cold (e.g. Doctor just installed and cleared the cache),
+    // `adapter_availability_cached()` returns `None`, so the stamp is `None` and
+    // the drift check is skipped until discovery warms the cache — preventing a
+    // false restart badge immediately after auto-restart.
     let spawned_adapter_availability = if runtime_meta.is_some_and(|r| r.id == "codex") {
-        Some(super::adapter_availability_cached())
+        super::adapter_availability_cached()
     } else {
         None
     };

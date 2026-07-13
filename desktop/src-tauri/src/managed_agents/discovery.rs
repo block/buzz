@@ -536,20 +536,35 @@ pub(crate) fn cache_adapter_availability(status: AcpAvailabilityStatus) {
 }
 
 /// Return the most recently cached codex-acp adapter availability, or
-/// `AcpAvailabilityStatus::AdapterMissing` if no discovery has run yet.
+/// `None` if no discovery has run yet.
 ///
 /// This is a **read from cache only** — it never spawns a subprocess.  The
 /// value is populated by `discover_acp_runtimes` and invalidated by
-/// `clear_resolve_cache`.  When the cache is cold (e.g. first launch before
-/// discovery runs), returning `AdapterMissing` is the conservative choice: a
-/// cold cache means we have no proof the adapter is present, so no false-
-/// "available" badge suppression.
-pub(crate) fn adapter_availability_cached() -> AcpAvailabilityStatus {
+/// `clear_resolve_cache`.  When the cache is cold, returning `None` defers
+/// the drift check until discovery has produced a real value, preventing
+/// a fabricated `AdapterMissing` stamp from triggering a false restart badge
+/// on a newly restarted process.
+pub(crate) fn adapter_availability_cached() -> Option<AcpAvailabilityStatus> {
     adapter_availability_cache()
         .lock()
         .ok()
         .and_then(|g| g.clone())
-        .unwrap_or(AcpAvailabilityStatus::AdapterMissing)
+}
+
+/// Pure predicate: does the stamped adapter availability differ from the
+/// current cached availability?
+///
+/// Returns `false` whenever either side is `None` (unknown) — "no data" is
+/// not evidence of drift.  This is extracted for unit testing without global
+/// state and used by `build_managed_agent_summary`.
+pub(crate) fn availability_drift(
+    stamped: Option<&AcpAvailabilityStatus>,
+    current: Option<AcpAvailabilityStatus>,
+) -> bool {
+    match (stamped, current) {
+        (Some(s), Some(c)) => *s != c,
+        _ => false,
+    }
 }
 
 fn resolve_command_uncached(command: &str) -> Option<PathBuf> {

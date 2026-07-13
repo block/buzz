@@ -4,7 +4,7 @@ use tauri::State;
 use crate::{
     app_state::AppState,
     managed_agents::{
-        command_availability, is_npm_global_install, AcpAvailabilityStatus, AcpRuntimeCatalogEntry,
+        command_availability, is_npm_global_install, AcpRuntimeCatalogEntry,
         DiscoverManagedAgentPrereqsRequest, InstallRuntimeResult, InstallStepResult,
         ManagedAgentPrereqsInfo, RelayAgentInfo, DEFAULT_ACP_COMMAND,
     },
@@ -242,24 +242,23 @@ enum InstallRestartOutcome {
 /// Pure predicate: should this agent be restarted after an adapter install?
 ///
 /// Extracted for unit testing — callers must still re-verify under the lock.
+/// The caller is responsible for computing `pid_alive` (via `process_is_running`)
+/// before invoking this function, keeping the predicate OS-agnostic and testable
+/// on all platforms.
 ///
 /// An agent qualifies iff:
-/// - it is a local backend with a live PID (`process_is_running`),
+/// - it is a local backend with a live PID (`pid_alive`),
 /// - its effective command maps to `runtime_id`,
 /// - it was **spawned in setup-listener mode** (`setup_mode`), AND
 /// - its readiness **now computes `Ready`** (install fixed the blocker).
 fn should_restart_after_install(
     is_local: bool,
-    pid: Option<u32>,
+    pid_alive: bool,
     runtime_matches: bool,
     setup_mode: bool,
     now_ready: bool,
 ) -> bool {
-    is_local
-        && pid.is_some_and(|p| crate::managed_agents::process_is_running(p))
-        && runtime_matches
-        && setup_mode
-        && now_ready
+    is_local && pid_alive && runtime_matches && setup_mode && now_ready
 }
 
 /// Restart all setup-mode agents whose runtime matches `runtime_id` and whose
@@ -323,7 +322,14 @@ async fn restart_setup_mode_agents_after_install(
                     &global,
                 );
                 let now_ready = matches!(agent_readiness(&effective), AgentReadiness::Ready);
-                should_restart_after_install(is_local, pid, runtime_matches, setup_mode, now_ready)
+                let pid_alive = pid.is_some_and(|p| crate::managed_agents::process_is_running(p));
+                should_restart_after_install(
+                    is_local,
+                    pid_alive,
+                    runtime_matches,
+                    setup_mode,
+                    now_ready,
+                )
             })
             .map(|r| r.pubkey.clone())
             .collect::<Vec<_>>()
@@ -1222,18 +1228,11 @@ mod tests {
 
     // ── should_restart_after_install ─────────────────────────────────────────
 
-    fn fake_pid() -> Option<u32> {
-        // Use the current test process's own PID — guaranteed to exist and
-        // signalable by us.  PID 1 (launchd/init) returns EPERM on macOS,
-        // making process_is_running(1) return false.
-        Some(std::process::id())
-    }
-
     /// Setup-mode agent on matching runtime that is now Ready → restart.
     #[test]
     fn test_should_restart_after_install_setup_mode_now_ready_is_candidate() {
         assert!(
-            should_restart_after_install(true, fake_pid(), true, true, true),
+            should_restart_after_install(true, true, true, true, true),
             "setup-mode codex agent that became Ready must be restarted after install"
         );
     }
@@ -1242,7 +1241,7 @@ mod tests {
     #[test]
     fn test_should_restart_after_install_still_not_ready_is_not_candidate() {
         assert!(
-            !should_restart_after_install(true, fake_pid(), true, true, false),
+            !should_restart_after_install(true, true, true, true, false),
             "setup-mode agent still NotReady must NOT be restarted (would re-enter setup mode)"
         );
     }
@@ -1251,7 +1250,7 @@ mod tests {
     #[test]
     fn test_should_restart_after_install_healthy_agent_is_not_candidate() {
         assert!(
-            !should_restart_after_install(true, fake_pid(), true, false, true),
+            !should_restart_after_install(true, true, true, false, true),
             "healthy in-pool agent (setup_mode=false) must NOT be bounced on install"
         );
     }
@@ -1260,7 +1259,7 @@ mod tests {
     #[test]
     fn test_should_restart_after_install_different_runtime_is_not_candidate() {
         assert!(
-            !should_restart_after_install(true, fake_pid(), false, true, true),
+            !should_restart_after_install(true, true, false, true, true),
             "agent on a different runtime must NOT be restarted by this install"
         );
     }
@@ -1269,59 +1268,79 @@ mod tests {
     #[test]
     fn test_should_restart_after_install_non_local_is_not_candidate() {
         assert!(
-            !should_restart_after_install(false, fake_pid(), true, true, true),
+            !should_restart_after_install(false, true, true, true, true),
             "non-local (provider-backend) agent must NOT be restarted"
+        );
+    }
+
+    /// Dead process (pid_alive=false) → no restart.
+    #[test]
+    fn test_should_restart_after_install_dead_pid_is_not_candidate() {
+        assert!(
+            !should_restart_after_install(true, false, true, true, true),
+            "agent whose process is no longer running must NOT be restarted"
         );
     }
 
     // ── badge availability-drift (Phase 2) ───────────────────────────────────
     //
-    // The badge logic lives in `build_managed_agent_summary` which requires
-    // an AppHandle — we can't unit-test it directly.  Instead we test the
-    // cache helpers that power it.
+    // `availability_drift` is a pure predicate over two `Option` values —
+    // no global state, no parallelism hazard.
 
-    /// Cache a status, read it back — matches.
+    /// Both sides known and different → drift detected.
     #[test]
-    fn test_adapter_availability_cache_round_trip() {
-        use crate::managed_agents::{
-            adapter_availability_cached, cache_adapter_availability, AcpAvailabilityStatus,
-        };
-        // Warm the cache with Available.
-        cache_adapter_availability(AcpAvailabilityStatus::Available);
-        assert_eq!(
-            adapter_availability_cached(),
-            AcpAvailabilityStatus::Available,
-            "cached Available must round-trip"
-        );
-    }
-
-    /// Stamped Available, current is AdapterOutdated → drift detected.
-    #[test]
-    fn test_adapter_availability_drift_detected() {
-        use crate::managed_agents::{
-            adapter_availability_cached, cache_adapter_availability, AcpAvailabilityStatus,
-        };
-        cache_adapter_availability(AcpAvailabilityStatus::AdapterOutdated);
-        let stamped = AcpAvailabilityStatus::Available;
-        let current = adapter_availability_cached();
-        assert_ne!(
-            stamped, current,
+    fn test_availability_drift_detected_when_stamped_differs_from_current() {
+        use crate::managed_agents::{availability_drift, AcpAvailabilityStatus};
+        assert!(
+            availability_drift(
+                Some(&AcpAvailabilityStatus::Available),
+                Some(AcpAvailabilityStatus::AdapterOutdated),
+            ),
             "Available stamped vs AdapterOutdated current must be detected as drift"
         );
     }
 
-    /// Stamped matches current — no drift.
+    /// Both sides known and equal → no drift.
     #[test]
-    fn test_adapter_availability_no_drift_when_matching() {
-        use crate::managed_agents::{
-            adapter_availability_cached, cache_adapter_availability, AcpAvailabilityStatus,
-        };
-        cache_adapter_availability(AcpAvailabilityStatus::Available);
-        let stamped = AcpAvailabilityStatus::Available;
-        let current = adapter_availability_cached();
-        assert_eq!(
-            stamped, current,
+    fn test_availability_drift_no_drift_when_stamped_equals_current() {
+        use crate::managed_agents::{availability_drift, AcpAvailabilityStatus};
+        assert!(
+            !availability_drift(
+                Some(&AcpAvailabilityStatus::Available),
+                Some(AcpAvailabilityStatus::Available),
+            ),
             "matching stamped and current must not show drift"
+        );
+    }
+
+    /// Stamped is None (cold cache at spawn) → no drift regardless of current.
+    #[test]
+    fn test_availability_drift_none_stamp_never_drifts() {
+        use crate::managed_agents::{availability_drift, AcpAvailabilityStatus};
+        assert!(
+            !availability_drift(None, Some(AcpAvailabilityStatus::Available)),
+            "None stamp (cold cache at spawn) must never signal drift"
+        );
+    }
+
+    /// Current is None (cache cold now) → no drift regardless of stamp.
+    #[test]
+    fn test_availability_drift_none_current_never_drifts() {
+        use crate::managed_agents::{availability_drift, AcpAvailabilityStatus};
+        assert!(
+            !availability_drift(Some(&AcpAvailabilityStatus::Available), None),
+            "None current (cache cold) must never signal drift"
+        );
+    }
+
+    /// Non-codex agent (stamp is None) → no drift (None case).
+    #[test]
+    fn test_availability_drift_non_codex_none_never_drifts() {
+        use crate::managed_agents::{availability_drift, AcpAvailabilityStatus};
+        // Non-codex agents have `adapter_availability = None` — must never flip.
+        assert!(
+            !availability_drift(None, Some(AcpAvailabilityStatus::AdapterMissing)),
+            "non-codex agent (None stamp) must never trigger drift badge"
         );
     }
 }

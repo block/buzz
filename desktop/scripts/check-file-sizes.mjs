@@ -249,9 +249,11 @@ const overrides = new Map([
   // locking, is_safe_nvm_tag security validation, classify_probe_output helper,
   // auth_probe_args on KnownAcpRuntime (removes probe_args_for indirection),
   // process-level timeout replacing inner-thread pattern. (+75 lines)
-  // codex-install-auto-restart: adapter_availability_cache + cache helpers +
-  // cache_adapter_availability call in discover_acp_runtimes (+56 lines).
-  ["src-tauri/src/managed_agents/discovery.rs", 1230],
+  // codex-install-auto-restart review-fixes: availability_drift pure predicate
+  // + updated adapter_availability_cached() signature (Option return, cold=None)
+  // prevents false restart badge on newly restarted agents. Correctness fix;
+  // load-bearing — required by Thufir's IMPORTANT findings. (+15 lines)
+  ["src-tauri/src/managed_agents/discovery.rs", 1245],
   // rebase over codex-acp-package-swap: its version-probe tests union with the
   // doctor-install-reliability nvm/login-shell/semver tests — each side alone
   // stayed under the 1000 default; the union exceeds it.
@@ -373,10 +375,12 @@ const overrides = new Map([
   // +1: doctor-install-reliability: login_hint: None added to goose_runtime test stub.
   // +1: doctor-install-reliability review fixes: auth_probe_args: None added to stub.
   ["src-tauri/src/commands/agent_config.rs", 1021],
-  // codex-install-auto-restart: post-install restart logic (should_restart_after_install
-  // predicate + restart_setup_mode_agents_after_install + restart_single_agent_after_install
-  // + persist_last_error_on_install + 8 new tests). Load-bearing feature growth.
-  ["src-tauri/src/commands/agent_discovery.rs", 1330],
+  // codex-install-auto-restart review-fixes: should_restart_after_install
+  // takes pid_alive:bool (pure predicate, no OS-dependent call); 3 racy
+  // cache tests replaced with 6 pure availability_drift predicate tests;
+  // dead-pid non-happy-path added. All load-bearing correctness fixes.
+  // (+17 lines net vs previous 1330 limit; rustfmt expanded some call sites)
+  ["src-tauri/src/commands/agent_discovery.rs", 1347],
   // draft-persistence predicate: submit-time `loadDraft` check + inline comment
   // + deps-array entry in submitMessage closes the never-persisted-boundary
   // defect (Thufir Pass-3 finding). Load-bearing correctness fix; queued to
