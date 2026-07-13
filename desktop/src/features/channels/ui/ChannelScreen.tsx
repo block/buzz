@@ -43,7 +43,6 @@ import {
   channelWindowThreadSummaries,
   type ChannelWindowThreadSummary,
 } from "@/features/messages/lib/channelWindowStore";
-import { getThreadReference } from "@/features/messages/lib/threading";
 import { imetaMediaFromTags } from "@/features/messages/lib/imetaMediaMarkdown";
 import {
   resolveTimelineLoadingLatch,
@@ -74,7 +73,9 @@ import { useChannelPanelHistoryState } from "./useChannelPanelHistoryState";
 import { useChannelProfilePanel } from "./useChannelProfilePanel";
 import { useChannelRouteTarget } from "./useChannelRouteTarget";
 import { useChannelUnreadState } from "./useChannelUnreadState";
+import { useThreadScrollTargetHighlight } from "./useThreadScrollTargetHighlight";
 import type { ChannelScreenProps } from "./ChannelScreen.types";
+import { latestTopLevelMessage } from "./latestTopLevelMessage";
 const HEADER_ACTIONS_COMPACT_BREAKPOINT_PX = 760,
   EMPTY_RELAY_EVENTS: RelayEvent[] = [];
 export function ChannelScreen({
@@ -140,12 +141,14 @@ export function ChannelScreen({
   const [threadScrollTargetId, setThreadScrollTargetId] = React.useState<
     string | null
   >(null);
-  const [threadHighlightTargetId, setThreadHighlightTargetId] = React.useState<
-    string | null
-  >(null);
-  const threadScrollTargetHighlighted =
-    threadScrollTargetId !== null &&
-    threadScrollTargetId === threadHighlightTargetId;
+  const {
+    resolveThreadScrollTarget,
+    setThreadHighlightTargetId,
+    threadScrollTargetHighlighted,
+  } = useThreadScrollTargetHighlight(
+    threadScrollTargetId,
+    setThreadScrollTargetId,
+  );
   const [threadReplyTargetId, setThreadReplyTargetId] = React.useState<
     string | null
   >(null);
@@ -192,16 +195,10 @@ export function ChannelScreen({
   useChannelSubscription(activeChannel);
   const { fetchOlder, hasOlderMessages, historyExhausted, isFetchingOlder } =
     useFetchOlderMessages(activeChannel);
-  const latestActiveMessage = React.useMemo(() => {
-    const messages = messagesQuery.data;
-    if (!messages) return null;
-    for (let index = messages.length - 1; index >= 0; index -= 1) {
-      if (getThreadReference(messages[index].tags).parentId === null) {
-        return messages[index];
-      }
-    }
-    return null;
-  }, [messagesQuery.data]);
+  const latestActiveMessage = React.useMemo(
+    () => latestTopLevelMessage(messagesQuery.data),
+    [messagesQuery.data],
+  );
   const activeReadAt = latestActiveMessage
     ? new Date(latestActiveMessage.created_at * 1_000).toISOString()
     : null;
@@ -645,10 +642,6 @@ export function ChannelScreen({
     },
     [],
   );
-  const handleThreadScrollTargetResolved = React.useCallback(() => {
-    setThreadScrollTargetId(null);
-    setThreadHighlightTargetId(null);
-  }, []);
   const handleTargetReached = React.useCallback(() => {
     clearMessageRouteTarget({ replace: true });
   }, [clearMessageRouteTarget]);
@@ -932,9 +925,7 @@ export function ChannelScreen({
                   onSendMessage={handleSendMessage}
                   onSendVideoReviewComment={effectiveSendVideoReviewComment}
                   onSendThreadReply={handleSendThreadReply}
-                  onThreadScrollTargetResolved={
-                    handleThreadScrollTargetResolved
-                  }
+                  onThreadScrollTargetResolved={resolveThreadScrollTarget}
                   onThreadPanelResizeStart={handleThreadPanelResizeStart}
                   onTargetReached={handleTargetReached}
                   onToggleReaction={effectiveToggleReaction}

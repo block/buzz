@@ -655,7 +655,7 @@ export function useAnchoredScroll({
     );
     if (!el && virtualizerOwnsPrependAnchoring) {
       if (scrollToMessageImperative(targetMessageId, { highlight: true })) {
-        handledTargetIdRef.current = targetMessageId;
+        handledTargetKeyRef.current = targetKey;
         onTargetReached?.(targetMessageId);
       }
       return;
