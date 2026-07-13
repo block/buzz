@@ -468,8 +468,14 @@ function VirtualizedTimelineRows({
     }
     const anchor = prependAnchorRef.current;
     const deadline = performance.now() + 3_000;
+    // Wait for BOTH the scroller and semantic row geometry to settle. Virtua
+    // can keep scrollTop fixed while its ResizeObserver batch moves the row;
+    // correcting during that transient turns one final adjustment into visible
+    // frame-by-frame jumping as older rows are measured.
     let previousScrollTop: number | null = null;
+    let previousTop: number | null = null;
     let settledFrames = 0;
+    const stableFrameThreshold = 8;
 
     const watch = () => {
       const scroller = hostRef.current?.firstElementChild;
@@ -490,17 +496,25 @@ function VirtualizedTimelineRows({
       const scrollTop = scroller.scrollTop;
       settledFrames =
         previousScrollTop !== null &&
-        Math.abs(scrollTop - previousScrollTop) < 0.5
+        previousTop !== null &&
+        top !== null &&
+        Math.abs(scrollTop - previousScrollTop) < 0.5 &&
+        Math.abs(top - previousTop) < 0.5
           ? settledFrames + 1
           : 0;
       previousScrollTop = scrollTop;
+      previousTop = top;
 
-      if (row && top !== null && settledFrames >= 2) {
+      if (row && top !== null && settledFrames >= stableFrameThreshold) {
         const delta = top - anchor.top;
         if (Math.abs(delta) > 4) {
           scroller.scrollBy({ top: delta });
-          settledFrames = 0;
-          previousScrollTop = null;
+          // This is a backstop, not a second scroll owner. A single correction
+          // after stable geometry restores the semantic anchor; keeping the
+          // watcher alive would turn later independent row measurements into
+          // repeated visible pulls toward an increasingly stale baseline.
+          retirePrependAnchor();
+          return;
         }
       }
 
