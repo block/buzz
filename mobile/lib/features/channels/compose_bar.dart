@@ -323,21 +323,32 @@ class ComposeBar extends HookConsumerWidget {
       BuildContext context,
       EditableTextState editableTextState,
     ) {
+      void pasteImage() {
+        ContextMenuController.removeAny();
+        pickAndUpload(
+          ref.read(mediaUploadServiceProvider).readAndUploadClipboardImage,
+        );
+      }
+
+      if (defaultTargetPlatform == TargetPlatform.iOS &&
+          SystemContextMenu.isSupportedByField(editableTextState)) {
+        return SystemContextMenu.editableText(
+          editableTextState: editableTextState,
+          items: [
+            IOSSystemContextMenuItemCustom(
+              title: 'Paste Image',
+              onPressed: pasteImage,
+            ),
+            ...SystemContextMenu.getDefaultItems(editableTextState),
+          ],
+        );
+      }
+
       final buttonItems = [...editableTextState.contextMenuButtonItems];
       if (defaultTargetPlatform == TargetPlatform.iOS) {
         buttonItems.insert(
           0,
-          ContextMenuButtonItem(
-            label: 'Paste Image',
-            onPressed: () {
-              ContextMenuController.removeAny();
-              pickAndUpload(
-                ref
-                    .read(mediaUploadServiceProvider)
-                    .readAndUploadClipboardImage,
-              );
-            },
-          ),
+          ContextMenuButtonItem(label: 'Paste Image', onPressed: pasteImage),
         );
       }
       return AdaptiveTextSelectionToolbar.buttonItems(

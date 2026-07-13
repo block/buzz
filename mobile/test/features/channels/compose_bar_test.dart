@@ -111,6 +111,7 @@ void _setMockMediaUploadPlatformHandler(
 Widget _buildComposeBar({
   required MediaUploadService uploadService,
   required ComposeBarOnSend onSend,
+  bool? supportsShowingSystemContextMenu,
 }) {
   return ProviderScope(
     overrides: [
@@ -129,6 +130,15 @@ Widget _buildComposeBar({
     ],
     child: MaterialApp(
       theme: AppTheme.light(),
+      builder: supportsShowingSystemContextMenu == null
+          ? null
+          : (context, child) => MediaQuery(
+              data: MediaQuery.of(context).copyWith(
+                supportsShowingSystemContextMenu:
+                    supportsShowingSystemContextMenu,
+              ),
+              child: child!,
+            ),
       home: Scaffold(
         body: SafeArea(
           child: ComposeBar(channelId: 'channel-1', onSend: onSend),
@@ -316,7 +326,79 @@ void main() {
       );
     });
 
-    testWidgets('iOS Paste Image reads the clipboard into the shared path', (
+    testWidgets('iOS native context menu preserves defaults and pastes image', (
+      tester,
+    ) async {
+      final previousPlatform = debugDefaultTargetPlatformOverride;
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      try {
+        final uploadService = MediaUploadService(
+          baseUrl: 'https://relay.example',
+          nsec: nostr.Keys.generate().nsec,
+          httpClient: http_testing.MockClient(
+            (request) async => http.Response(
+              jsonEncode({
+                'url': 'https://relay.example/media/ios-native-paste.png',
+                'sha256':
+                    '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+                'size': 16,
+                'type': 'image/png',
+                'uploaded': 1,
+              }),
+              200,
+            ),
+          ),
+          pickGalleryVideo: () async => null,
+          pickGalleryImage: () async => null,
+          readClipboardImage: () async => _pngBytes,
+        );
+        await tester.pumpWidget(
+          _buildComposeBar(
+            uploadService: uploadService,
+            supportsShowingSystemContextMenu: true,
+            onSend:
+                (
+                  content,
+                  mentionPubkeys, {
+                  mediaTags = const <List<String>>[],
+                }) async {},
+          ),
+        );
+
+        final textField = tester.widget<TextField>(find.byType(TextField));
+        final editableTextState = tester.state<EditableTextState>(
+          find.byType(EditableText),
+        );
+        final defaultItems = SystemContextMenu.getDefaultItems(
+          editableTextState,
+        );
+        final menu =
+            textField.contextMenuBuilder!(
+                  tester.element(find.byType(TextField)),
+                  editableTextState,
+                )
+                as SystemContextMenu;
+        final pasteImage = menu.items.first as IOSSystemContextMenuItemCustom;
+
+        expect(pasteImage.title, 'Paste Image');
+        expect(menu.items.skip(1), orderedEquals(defaultItems));
+        pasteImage.onPressed();
+        await tester.pumpAndSettle();
+
+        expect(
+          find.byKey(
+            const ValueKey(
+              'compose-attachment:https://relay.example/media/ios-native-paste.png',
+            ),
+          ),
+          findsOneWidget,
+        );
+      } finally {
+        debugDefaultTargetPlatformOverride = previousPlatform;
+      }
+    });
+
+    testWidgets('iOS adaptive Paste Image reads the clipboard into shared path', (
       tester,
     ) async {
       final previousPlatform = debugDefaultTargetPlatformOverride;
