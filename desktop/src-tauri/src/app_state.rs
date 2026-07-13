@@ -21,6 +21,15 @@ pub struct AppState {
     /// Workspace-provided relay URL override. Set by `apply_workspace` on app
     /// init and takes priority over env vars and compile-time defaults.
     pub relay_url_override: Mutex<Option<String>>,
+    /// Set during backend setup when managed agents are eligible for launch
+    /// restore. `apply_workspace` consumes it after installing the workspace
+    /// relay and identity, so agents never start against the fallback relay.
+    pub managed_agent_restore_pending: AtomicBool,
+    /// Shared shutdown signal checked by launch-time agent restoration.
+    pub shutdown_started: AtomicBool,
+    /// Serializes the restore spawn/register transition with shutdown cleanup,
+    /// preventing an agent from spawning after shutdown has swept processes.
+    pub managed_agent_restore_transition: Mutex<()>,
     pub managed_agents_store_lock: Mutex<()>,
     pub channel_templates_store_lock: Mutex<()>,
     pub managed_agent_processes: Mutex<HashMap<String, ManagedAgentProcess>>,
@@ -128,6 +137,9 @@ pub fn build_app_state() -> AppState {
             .build()
             .unwrap_or_else(|_| reqwest::Client::new()),
         relay_url_override: Mutex::new(None),
+        managed_agent_restore_pending: AtomicBool::new(false),
+        shutdown_started: AtomicBool::new(false),
+        managed_agent_restore_transition: Mutex::new(()),
         identity_mutation: Mutex::new(()),
         managed_agents_store_lock: Mutex::new(()),
         channel_templates_store_lock: Mutex::new(()),
