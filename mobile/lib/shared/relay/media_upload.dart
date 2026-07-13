@@ -157,7 +157,11 @@ class MediaUploadService {
   Future<BlobDescriptor?> pickAndUploadImage() async {
     final pickedImage = await _pickGalleryImage();
     if (pickedImage == null) return null;
-    final preparedImage = await _prepareUploadImage(pickedImage);
+    return uploadImage(pickedImage);
+  }
+
+  Future<BlobDescriptor> uploadImage(XFile image) async {
+    final preparedImage = await _prepareUploadImage(image);
     return uploadBytes(preparedImage.bytes, mimeType: preparedImage.mimeType);
   }
 

@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'package:image_picker/image_picker.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import 'package:nostr/nostr.dart' as nostr;
@@ -24,6 +25,13 @@ part 'compose_bar/suggestions.dart';
 part 'compose_bar/formatting_toolbar.dart';
 part 'compose_bar/attachments.dart';
 part 'compose_bar/send_button.dart';
+
+const _pastedImageMimeTypes = <String>[
+  'image/jpeg',
+  'image/jpg',
+  'image/png',
+  'image/webp',
+];
 
 /// Rich compose bar with @mention autocomplete, emoji picker, and a markdown
 /// formatting toolbar. Used in both channel and thread views — the caller
@@ -310,6 +318,20 @@ class ComposeBar extends HookConsumerWidget {
       }
     }
 
+    void uploadPastedImage(KeyboardInsertedContent content) {
+      final bytes = content.data;
+      if (bytes == null || bytes.isEmpty) {
+        uploadError.value = 'Unable to read pasted image';
+        return;
+      }
+
+      pickAndUpload(
+        () => ref
+            .read(mediaUploadServiceProvider)
+            .uploadImage(XFile.fromData(bytes)),
+      );
+    }
+
     // Insert an emoji at the cursor.
     void insertEmoji(String emoji) {
       final text = controller.text;
@@ -441,6 +463,10 @@ class ComposeBar extends HookConsumerWidget {
                 controller: controller,
                 focusNode: focusNode,
                 textInputAction: TextInputAction.send,
+                contentInsertionConfiguration: ContentInsertionConfiguration(
+                  allowedMimeTypes: _pastedImageMimeTypes,
+                  onContentInserted: uploadPastedImage,
+                ),
                 onSubmitted: (_) => send(),
                 minLines: 1,
                 maxLines: 5,

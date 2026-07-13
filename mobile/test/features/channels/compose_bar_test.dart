@@ -224,6 +224,131 @@ void main() {
       expect(find.byTooltip('Remove attachment'), findsNothing);
     });
 
+    testWidgets('pasted image follows the attachment preview and send path', (
+      tester,
+    ) async {
+      final keychain = nostr.Keys.generate();
+      var galleryPickerCalled = false;
+      Uint8List? uploadedBytes;
+      String? uploadedMimeType;
+      final uploadService = MediaUploadService(
+        baseUrl: 'https://relay.example',
+        nsec: keychain.nsec,
+        httpClient: http_testing.MockClient((request) async {
+          uploadedBytes = request.bodyBytes;
+          uploadedMimeType = request.headers['Content-Type'];
+          return http.Response(
+            jsonEncode({
+              'url': 'https://relay.example/media/pasted.png',
+              'sha256':
+                  '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+              'size': 16,
+              'type': 'image/png',
+              'uploaded': 1,
+              'thumb': 'https://relay.example/media/pasted.thumb.jpg',
+            }),
+            200,
+          );
+        }),
+        pickGalleryVideo: () async => null,
+        pickGalleryImage: () async {
+          galleryPickerCalled = true;
+          return null;
+        },
+      );
+
+      String? sentContent;
+      List<List<String>> sentMediaTags = const [];
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: uploadService,
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {
+                sentContent = content;
+                sentMediaTags = mediaTags;
+              },
+        ),
+      );
+
+      final textField = tester.widget<TextField>(find.byType(TextField));
+      final insertionConfiguration = textField.contentInsertionConfiguration;
+      expect(insertionConfiguration, isNotNull);
+      expect(
+        insertionConfiguration!.allowedMimeTypes,
+        containsAll(['image/jpeg', 'image/png', 'image/webp']),
+      );
+
+      insertionConfiguration.onContentInserted(
+        KeyboardInsertedContent(
+          mimeType: 'image/png',
+          uri: 'content://clipboard/pasted.png',
+          data: _pngBytes,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(galleryPickerCalled, isFalse);
+      expect(uploadedBytes, _pngBytes);
+      expect(uploadedMimeType, 'image/png');
+      expect(
+        find.byKey(
+          const ValueKey(
+            'compose-attachment:https://relay.example/media/pasted.png',
+          ),
+        ),
+        findsOneWidget,
+      );
+      expect(find.byTooltip('Remove attachment'), findsOneWidget);
+
+      await tester.tap(find.byIcon(LucideIcons.sendHorizontal));
+      await tester.pumpAndSettle();
+
+      expect(sentContent, '\n![image](https://relay.example/media/pasted.png)');
+      expect(sentMediaTags, hasLength(1));
+      expect(
+        sentMediaTags.single,
+        contains('url https://relay.example/media/pasted.png'),
+      );
+    });
+
+    testWidgets('shows an error when pasted image bytes are unavailable', (
+      tester,
+    ) async {
+      final uploadService = MediaUploadService(
+        baseUrl: 'https://relay.example',
+        nsec: nostr.Keys.generate().nsec,
+        pickGalleryVideo: () async => null,
+        pickGalleryImage: () async => null,
+      );
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: uploadService,
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {},
+        ),
+      );
+
+      final textField = tester.widget<TextField>(find.byType(TextField));
+      textField.contentInsertionConfiguration!.onContentInserted(
+        const KeyboardInsertedContent(
+          mimeType: 'image/png',
+          uri: 'content://clipboard/unavailable.png',
+        ),
+      );
+      await tester.pump();
+
+      expect(find.text('Unable to read pasted image'), findsOneWidget);
+      expect(find.byTooltip('Remove attachment'), findsNothing);
+    });
+
     testWidgets('keeps the remove button pinned to the attachment corner', (
       tester,
     ) async {
