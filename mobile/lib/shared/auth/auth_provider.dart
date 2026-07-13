@@ -4,7 +4,7 @@ import 'package:nostr/nostr.dart' as nostr;
 import '../workspace/workspace.dart';
 import '../workspace/workspace_provider.dart';
 
-enum AuthStatus { unknown, unauthenticated, authenticated, offline }
+enum AuthStatus { unknown, unauthenticated, authenticated }
 
 class AuthState {
   final AuthStatus status;
@@ -47,12 +47,6 @@ class AuthNotifier extends AsyncNotifier<AuthState> {
 
     await storage.clearActiveId();
     return const AuthState(status: AuthStatus.unauthenticated);
-  }
-
-  /// Reload the active workspace after a startup error.
-  Future<void> retry() async {
-    ref.invalidateSelf();
-    await future;
   }
 
   /// Authenticate with a workspace. Saves it and switches to it.

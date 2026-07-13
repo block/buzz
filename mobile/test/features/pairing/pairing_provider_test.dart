@@ -185,9 +185,6 @@ class FakeAuthNotifier extends AsyncNotifier<AuthState>
   }
 
   @override
-  Future<void> retry() async {}
-
-  @override
   Future<void> authenticateWithWorkspace(Workspace workspace) async {
     lastWorkspace = workspace;
     state = AsyncData(

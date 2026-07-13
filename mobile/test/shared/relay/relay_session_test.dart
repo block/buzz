@@ -168,7 +168,7 @@ void main() {
   });
 
   test(
-    'stops reconnecting and signs out after explicit auth rejection',
+    'stops reconnecting without deleting workspace after auth rejection',
     () async {
       final session = RelaySessionNotifier();
       final auth = _FakeAuthNotifier();
@@ -182,14 +182,68 @@ void main() {
       container.read(relaySessionProvider);
 
       session.debugHandleDisconnected(
-        const RelayAuthRejectedException('invalid key'),
+        const RelayAuthRejectedException('auth-required: verification failed'),
       );
       await Future<void>.delayed(Duration.zero);
 
       expect(session.state.status, SessionStatus.disconnected);
-      expect(auth.signOutCount, 1);
+      expect(auth.signOutCount, 0);
     },
   );
+
+  test('ignores callbacks from a socket replaced by a config change', () async {
+    final sockets = <_ControlledRelaySocket>[];
+    final keychain = nostr.Keys.generate();
+    final session = RelaySessionNotifier(
+      socketFactory:
+          ({
+            required wsUrl,
+            required nsec,
+            required onMessage,
+            required onConnected,
+            required onDisconnected,
+          }) {
+            final socket = _ControlledRelaySocket(
+              wsUrl: wsUrl,
+              nsec: nsec,
+              onMessage: onMessage,
+              onConnected: onConnected,
+              onDisconnected: onDisconnected,
+            );
+            sockets.add(socket);
+            return socket;
+          },
+    );
+    final config = _FakeRelayConfigNotifier(
+      baseUrl: 'https://old.example',
+      nsec: keychain.nsec,
+    );
+    final container = ProviderContainer(
+      overrides: [
+        relaySessionProvider.overrideWith(() => session),
+        relayConfigProvider.overrideWith(() => config),
+        authProvider.overrideWith(() => _AuthenticatedAuthNotifier()),
+      ],
+    );
+    addTearDown(container.dispose);
+    await container.read(authProvider.future);
+    final subscription = container.listen(relaySessionProvider, (_, _) {});
+    addTearDown(subscription.close);
+    await Future<void>.delayed(Duration.zero);
+
+    config.update(baseUrl: 'https://new.example', nsec: keychain.nsec);
+    await Future<void>.delayed(Duration.zero);
+    expect(sockets, hasLength(2));
+
+    sockets.first.disconnectWith(
+      const RelayAuthRejectedException('blocked: stale workspace'),
+    );
+    sockets.first.connectSuccessfully();
+    expect(session.state.status, SessionStatus.connecting);
+
+    sockets.last.connectSuccessfully();
+    expect(session.state.status, SessionStatus.connected);
+  });
 
   test('does not schedule reconnects after background disconnect', () {
     final session = RelaySessionNotifier();
@@ -307,6 +361,36 @@ class _FakeAuthNotifier extends AuthNotifier {
   Future<void> signOut() async {
     signOutCount++;
   }
+}
+
+class _AuthenticatedAuthNotifier extends AuthNotifier {
+  @override
+  Future<AuthState> build() async =>
+      const AuthState(status: AuthStatus.authenticated);
+}
+
+class _ControlledRelaySocket extends RelaySocket {
+  final void Function() _connected;
+  final void Function(Object? error) _disconnected;
+
+  _ControlledRelaySocket({
+    required super.wsUrl,
+    required super.nsec,
+    required super.onMessage,
+    required super.onConnected,
+    required super.onDisconnected,
+  }) : _connected = onConnected,
+       _disconnected = onDisconnected;
+
+  @override
+  Future<void> connect() async {}
+
+  @override
+  void dispose() {}
+
+  void connectSuccessfully() => _connected();
+
+  void disconnectWith(Object? error) => _disconnected(error);
 }
 
 const _channelId = '11111111-1111-4111-8111-111111111111';

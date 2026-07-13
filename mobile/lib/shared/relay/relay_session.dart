@@ -65,10 +65,24 @@ class _BufferedEvent {
 
 /// Manages websocket subscriptions, event batching, reconnection with replay,
 /// and pending event tracking. Equivalent to the desktop's RelayClientSession.
+typedef RelaySocketFactory =
+    RelaySocket Function({
+      required String wsUrl,
+      required String? nsec,
+      required void Function(List<dynamic> message) onMessage,
+      required void Function() onConnected,
+      required void Function(Object? error) onDisconnected,
+    });
+
 class RelaySessionNotifier extends Notifier<SessionState> {
-  RelaySessionNotifier({http.Client? httpClient}) : _httpClient = httpClient;
+  RelaySessionNotifier({
+    http.Client? httpClient,
+    RelaySocketFactory socketFactory = RelaySocket.new,
+  }) : _httpClient = httpClient,
+       _socketFactory = socketFactory;
 
   final http.Client? _httpClient;
+  final RelaySocketFactory _socketFactory;
 
   static const _baseReconnectDelayMs = 1000;
   static const _maxReconnectDelayMs = 30000;
@@ -90,6 +104,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   bool _disposed = false;
   bool _paused = false;
   bool _hasConnectedOnce = false;
+  int _connectionGeneration = 0;
 
   @override
   SessionState build() {
@@ -270,10 +285,11 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   void debugFlushEventBuffer() => _flushEventBuffer();
 
   @visibleForTesting
-  void debugHandleConnected() => _handleConnected();
+  void debugHandleConnected() => _handleConnected(_connectionGeneration);
 
   @visibleForTesting
-  void debugHandleDisconnected([Object? error]) => _handleDisconnected(error);
+  void debugHandleDisconnected([Object? error]) =>
+      _handleDisconnected(_connectionGeneration, error);
 
   @visibleForTesting
   void debugPauseNow() => _pauseNow();
@@ -321,11 +337,8 @@ class RelaySessionNotifier extends Notifier<SessionState> {
 
   Future<void> _connect(RelayConfig config) async {
     if (_disposed) return;
-    if (_socket?.state == SocketState.connecting ||
-        _socket?.state == SocketState.authenticating) {
-      return;
-    }
 
+    final generation = ++_connectionGeneration;
     state = SessionState(
       status: _hasConnectedOnce
           ? SessionStatus.reconnecting
@@ -334,27 +347,30 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     );
 
     _socket?.dispose();
-    _socket = RelaySocket(
+    final socket = _socketFactory(
       wsUrl: config.wsUrl,
       nsec: config.nsec,
-      onMessage: _handleMessage,
-      onConnected: _handleConnected,
-      onDisconnected: _handleDisconnected,
+      onMessage: (message) {
+        if (generation == _connectionGeneration) _handleMessage(message);
+      },
+      onConnected: () => _handleConnected(generation),
+      onDisconnected: (error) => _handleDisconnected(generation, error),
     );
+    _socket = socket;
 
-    await _socket!.connect();
+    await socket.connect();
   }
 
-  void _handleConnected() {
-    if (_disposed) return;
+  void _handleConnected(int generation) {
+    if (_disposed || generation != _connectionGeneration) return;
     _hasConnectedOnce = true;
     _reconnectDelayMs = _baseReconnectDelayMs;
     state = const SessionState(status: SessionStatus.connected);
     _replayLiveSubscriptions();
   }
 
-  void _handleDisconnected(Object? error) {
-    if (_disposed) return;
+  void _handleDisconnected(int generation, Object? error) {
+    if (_disposed || generation != _connectionGeneration) return;
     _cancelAllHistory(error);
     _rejectAllPending(error);
     _eventBuffer.clear();
@@ -363,7 +379,6 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     if (error is RelayAuthRejectedException) {
       _reconnectTimer?.cancel();
       state = const SessionState(status: SessionStatus.disconnected);
-      unawaited(ref.read(authProvider.notifier).signOut());
       return;
     }
     _scheduleReconnect();
@@ -609,6 +624,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
 
   void _dispose() {
     _disposed = true;
+    _connectionGeneration++;
     _reconnectTimer?.cancel();
     _flushTimer?.cancel();
     _backgroundGraceTimer?.cancel();
