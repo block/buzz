@@ -229,6 +229,8 @@ function gpt5FamilyModel(m: string): boolean {
     gpt5TokenMatches(m, "gpt5-pro") ||
     gpt5TokenMatches(m, "gpt-5.6") ||
     gpt5TokenMatches(m, "gpt5.6") ||
+    gpt5TokenMatches(m, "gpt-5-6") ||
+    gpt5TokenMatches(m, "gpt5-6") ||
     gpt5TokenMatches(m, "gpt-5.5") ||
     gpt5TokenMatches(m, "gpt5.5") ||
     gpt5TokenMatches(m, "gpt-5.4") ||

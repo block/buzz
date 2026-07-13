@@ -12,9 +12,8 @@ pub const PROTOCOL_VERSION: u32 = 2;
 /// - **Anthropic adaptive**: `low|medium|high|xhigh|max` (model-dependent; see `anthropic_thinking_config`).
 ///   `none`/`minimal` are not Anthropic values — rejected at startup.
 /// - **Anthropic manual budget** (claude-3*, opus-4-5): `low|medium|high`; `xhigh`/`max` clamp to high budget.
-/// - **OpenAI Responses / Chat Completions**: effort support is model-dependent. `max` is rejected
-///   at startup for pure `OpenAi`/`Databricks` providers, but is valid for max-supporting model
-///   families on the DatabricksV2 OpenAI route.
+/// - **OpenAI Responses / Chat Completions**: effort support is model-dependent and normalized at
+///   request time; `max` is valid for documented max-supporting families such as GPT-5.6.
 /// - **Databricks**: routed by model family (Claude → Anthropic mapping, GPT-5 → Responses, MLflow → Chat).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ThinkingEffort {
@@ -932,19 +931,13 @@ impl Config {
         }
         // Provider-level effort validation (fail-fast, clear error).
         // `none`/`minimal` are not Anthropic values — rejected at startup.
-        // `max` is rejected at startup for pure OpenAI/Databricks providers.
-        // Model-level clamping (e.g. xhigh on Opus 4.6) is dynamic: happens at request
-        // build time because `session/set_model` can change the model after startup.
         //
-        // DatabricksV2 is intentionally EXCLUDED from startup validation: it dispatches
-        // across Anthropic Messages, OpenAI Responses, and MLflow Chat routes at request
-        // build time based on the effective model. No single effort value is invalid for
-        // all three routes, so provider-wide startup rejection is wrong. Route-aware effort
-        // normalization is applied instead via `normalize_effort_for_openai_route` /
-        // `normalize_effort_for_anthropic_route` at request build time in `llm.rs`.
+        // OpenAI, Databricks, and DatabricksV2 defer effort validation to request-time routing:
+        // availability is model-dependent, and `session/set_model` can change the effective model
+        // after startup. `normalize_effort_for_openai_route` / `normalize_effort_for_anthropic_route`
+        // apply route-aware normalization in `llm.rs` when building each request.
         if let Some(effort) = self.thinking_effort {
             let is_pure_anthropic = matches!(self.provider, Provider::Anthropic);
-            let is_pure_openai = matches!(self.provider, Provider::OpenAi | Provider::Databricks);
             if is_pure_anthropic && matches!(effort, ThinkingEffort::None | ThinkingEffort::Minimal)
             {
                 return Err(format!(
@@ -952,13 +945,6 @@ impl Config {
                      (allowed: low|medium|high|xhigh|max)",
                     effort.openai_effort_str()
                 ));
-            }
-            if is_pure_openai && matches!(effort, ThinkingEffort::Max) {
-                return Err(
-                    "config: BUZZ_AGENT_THINKING_EFFORT=max is not valid for OpenAI/Databricks \
-                     providers (allowed: none|minimal|low|medium|high|xhigh)"
-                        .into(),
-                );
             }
         }
         Ok(())
@@ -1917,30 +1903,43 @@ mod tests {
     }
 
     #[test]
-    fn validate_rejects_max_effort_for_openai() {
-        let cfg = make_config_for_validation(Provider::OpenAi, Some(ThinkingEffort::Max));
-        let err = cfg.validate().unwrap_err();
-        assert!(
-            err.contains("BUZZ_AGENT_THINKING_EFFORT=max"),
-            "error must name the value: {err}"
-        );
-        assert!(
-            err.contains("not valid for OpenAI"),
-            "error must name the provider: {err}"
-        );
-        assert!(
-            err.contains("none|minimal|low|medium|high|xhigh"),
-            "error must name allowed values: {err}"
-        );
+    fn validate_accepts_all_efforts_for_openai() {
+        // OpenAI effort support is model-dependent and normalized at request build time.
+        for effort in [
+            ThinkingEffort::None,
+            ThinkingEffort::Minimal,
+            ThinkingEffort::Low,
+            ThinkingEffort::Medium,
+            ThinkingEffort::High,
+            ThinkingEffort::XHigh,
+            ThinkingEffort::Max,
+        ] {
+            let cfg = make_config_for_validation(Provider::OpenAi, Some(effort));
+            assert!(
+                cfg.validate().is_ok(),
+                "OpenAI must accept {effort:?} at startup (route-aware normalization at request build)"
+            );
+        }
     }
 
     #[test]
-    fn validate_rejects_max_effort_for_databricks() {
-        // Databricks legacy uses OpenAI Chat wire format — same rejection.
-        let cfg = make_config_for_validation(Provider::Databricks, Some(ThinkingEffort::Max));
-        let err = cfg.validate().unwrap_err();
-        assert!(err.contains("BUZZ_AGENT_THINKING_EFFORT=max"), "{err}");
-        assert!(err.contains("not valid for OpenAI/Databricks"), "{err}");
+    fn validate_accepts_all_efforts_for_databricks() {
+        // Legacy Databricks effort support is model-dependent and normalized at request build time.
+        for effort in [
+            ThinkingEffort::None,
+            ThinkingEffort::Minimal,
+            ThinkingEffort::Low,
+            ThinkingEffort::Medium,
+            ThinkingEffort::High,
+            ThinkingEffort::XHigh,
+            ThinkingEffort::Max,
+        ] {
+            let cfg = make_config_for_validation(Provider::Databricks, Some(effort));
+            assert!(
+                cfg.validate().is_ok(),
+                "Databricks must accept {effort:?} at startup (route-aware normalization at request build)"
+            );
+        }
     }
 
     #[test]
