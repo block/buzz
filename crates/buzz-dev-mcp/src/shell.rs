@@ -587,8 +587,8 @@ fn is_under_dir(dir: &Path, root: &Path) -> bool {
 /// `System32\bash.exe`. PATH is parsed with `std::env::split_paths` (never a
 /// hand-split on ';') so it matches exactly what the spawned child would see.
 #[cfg(windows)]
-fn scan_path_for_bash(path_env: &str, system_root: Option<PathBuf>) -> Option<PathBuf> {
-    scan_path_for_command(Path::new("bash.exe"), path_env, system_root.as_deref())
+fn scan_path_for_bash(path_env: &str, system_root: Option<&Path>) -> Option<PathBuf> {
+    scan_path_for_command(Path::new("bash.exe"), path_env, system_root)
 }
 
 /// Scan `path_env` for `name` (or `name.exe` on Windows if `name` has no
@@ -1285,11 +1285,8 @@ mod windows_resolver_tests {
             env::join_paths([sys_root.path().join("System32"), real.path().to_path_buf()])
                 .expect("join");
 
-        let found = scan_path_for_bash(
-            path_env.to_str().expect("utf8"),
-            Some(sys_root.path().to_path_buf()),
-        )
-        .expect("bash found outside System32");
+        let found = scan_path_for_bash(path_env.to_str().expect("utf8"), Some(sys_root.path()))
+            .expect("bash found outside System32");
         assert!(found.is_absolute());
         assert!(!found.starts_with(sys_root.path()));
         assert_eq!(found, real_bash);
@@ -1302,10 +1299,7 @@ mod windows_resolver_tests {
         touch(&sys_root.path().join("System32").join("bash.exe"));
         let path_env = env::join_paths([sys_root.path().join("System32")]).expect("join");
 
-        let found = scan_path_for_bash(
-            path_env.to_str().expect("utf8"),
-            Some(sys_root.path().to_path_buf()),
-        );
+        let found = scan_path_for_bash(path_env.to_str().expect("utf8"), Some(sys_root.path()));
         assert!(found.is_none());
     }
 
@@ -1323,7 +1317,7 @@ mod windows_resolver_tests {
         touch(&sys32.join("bash.exe"));
 
         let path_env = env::join_paths([sys32]).expect("join");
-        let found = scan_path_for_bash(path_env.to_str().expect("utf8"), Some(root));
+        let found = scan_path_for_bash(path_env.to_str().expect("utf8"), Some(&root));
         assert!(
             found.is_none(),
             "case-divergent System32 must still be excluded"
@@ -1345,11 +1339,8 @@ mod windows_resolver_tests {
         let path_env = env::join_paths([real.path().to_path_buf()]).expect("join");
         let sys_root = tempdir().expect("sysroot"); // empty — no System32 here
 
-        let found = scan_path_for_bash(
-            path_env.to_str().expect("utf8"),
-            Some(sys_root.path().to_path_buf()),
-        )
-        .expect("bash on PATH must be found");
+        let found = scan_path_for_bash(path_env.to_str().expect("utf8"), Some(sys_root.path()))
+            .expect("bash on PATH must be found");
         assert_eq!(found, real_bash);
     }
 }
