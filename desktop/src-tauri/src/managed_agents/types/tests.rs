@@ -1,4 +1,7 @@
-use super::{AgentDefinition, ManagedAgentRecord};
+use super::{
+    merge_mcp_servers, replace_mcp_servers, validate_mcp_servers, AgentDefinition,
+    ManagedAgentRecord, McpServerConfig, McpServerEnvVar, MAX_USER_MCP_SERVERS,
+};
 use std::path::PathBuf;
 
 #[test]
@@ -472,6 +475,7 @@ fn sample_agent_record() -> ManagedAgentRecord {
 
 fn sample_persona() -> AgentDefinition {
     AgentDefinition {
+        mcp_servers: vec![],
         id: "custom:helper".to_string(),
         display_name: "Helper".to_string(),
         avatar_url: Some("https://example.com/a.png".to_string()),
@@ -504,6 +508,10 @@ fn persona_into_agent_record_is_keyless_and_slugged() {
     assert_eq!(record.runtime.as_deref(), Some("goose"));
     assert_eq!(record.source_team.as_deref(), Some("team-1"));
     assert_eq!(record.env_vars.get("K").map(String::as_str), Some("v"));
+    assert!(
+        record.mcp_servers.is_empty(),
+        "definition MCP servers remain inherited"
+    );
 }
 
 #[test]
@@ -648,4 +656,92 @@ fn mint_rejects_out_of_range_input_parallelism() {
         !err.contains("definition"),
         "input-branch error must not blame the definition: {err}"
     );
+}
+
+fn mcp_server(name: &str, command: &str, enabled: bool) -> McpServerConfig {
+    McpServerConfig {
+        name: name.into(),
+        command: command.into(),
+        args: vec![],
+        env: vec![],
+        enabled,
+    }
+}
+
+#[test]
+fn merge_mcp_servers_higher_layer_replaces_same_name() {
+    let merged = merge_mcp_servers(
+        &[mcp_server("shared", "global", true)],
+        &[mcp_server("shared", "persona", true)],
+        &[mcp_server("shared", "agent", true)],
+    )
+    .unwrap();
+
+    assert_eq!(merged, vec![mcp_server("shared", "agent", true)]);
+}
+
+#[test]
+fn merge_mcp_servers_disabled_override_masks_lower_server() {
+    let merged = merge_mcp_servers(
+        &[mcp_server("shared", "global", true)],
+        &[],
+        &[mcp_server("shared", "agent", false)],
+    )
+    .unwrap();
+
+    assert!(merged.is_empty());
+}
+
+#[test]
+fn disabled_mask_requires_only_a_name() {
+    let mask = McpServerConfig {
+        name: "shared".into(),
+        command: String::new(),
+        args: vec![],
+        env: vec![],
+        enabled: false,
+    };
+    validate_mcp_servers(&[mask.clone()]).unwrap();
+    assert!(
+        merge_mcp_servers(&[mcp_server("shared", "global", true)], &[], &[mask])
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn replace_mcp_servers_preserves_absent_and_replaces_present_empty_layer() {
+    let mut current = vec![mcp_server("existing", "mcp", true)];
+    replace_mcp_servers(&mut current, &None).unwrap();
+    assert_eq!(current, vec![mcp_server("existing", "mcp", true)]);
+
+    replace_mcp_servers(&mut current, &Some(vec![])).unwrap();
+    assert!(current.is_empty());
+}
+
+#[test]
+fn merge_mcp_servers_rejects_more_than_fifteen_enabled_servers_after_merge() {
+    let global: Vec<_> = (0..MAX_USER_MCP_SERVERS)
+        .map(|index| mcp_server(&format!("global-{index}"), "mcp", true))
+        .collect();
+    let error = merge_mcp_servers(&global, &[mcp_server("persona", "mcp", true)], &[])
+        .expect_err("post-merge cap must include servers from all layers");
+
+    assert!(error.contains("effective MCP server count is 16"));
+}
+
+#[test]
+fn validate_mcp_servers_rejects_empty_duplicate_and_reserved_env_inputs() {
+    assert!(validate_mcp_servers(&[mcp_server("", "mcp", true)]).is_err());
+    assert!(validate_mcp_servers(&[
+        mcp_server("same", "mcp", true),
+        mcp_server("same", "other", true),
+    ])
+    .is_err());
+    let mut server = mcp_server("server", "mcp", true);
+    server.env.push(McpServerEnvVar {
+        name: "BUZZ_ACP_MCP_SERVERS".into(),
+        value: "spoof".into(),
+    });
+    assert!(validate_mcp_servers(&[server]).is_err());
 }

@@ -176,6 +176,7 @@ fn managed_agent(name: &str) -> ManagedAgentRecord {
         agent_command_override: None,
         agent_args: vec![],
         mcp_command: String::new(),
+        mcp_servers: vec![],
         turn_timeout_seconds: 300,
         idle_timeout_seconds: None,
         max_turn_duration_seconds: None,

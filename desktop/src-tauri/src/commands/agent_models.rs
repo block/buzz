@@ -872,6 +872,10 @@ pub async fn update_managed_agent(
             crate::managed_agents::validate_user_env_keys(&env_vars)?;
             record.env_vars = env_vars;
         }
+        if let Some(mcp_servers) = input.mcp_servers {
+            crate::managed_agents::validate_mcp_servers(&mcp_servers)?;
+            record.mcp_servers = mcp_servers;
+        }
 
         // Inbound author gate: merge patch onto current values, then validate
         // the merged state. This lets a single update switch to Allowlist AND

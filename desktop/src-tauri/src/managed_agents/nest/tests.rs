@@ -412,6 +412,7 @@ fn ensure_cli_symlink_does_not_clobber_regular_file_dev() {
 
 fn make_persona(id: &str, display_name: &str) -> AgentDefinition {
     AgentDefinition {
+        mcp_servers: vec![],
         id: id.to_string(),
         display_name: display_name.to_string(),
         avatar_url: None,
@@ -435,6 +436,7 @@ fn make_persona(id: &str, display_name: &str) -> AgentDefinition {
 
 fn make_agent(name: &str, persona_id: Option<&str>) -> ManagedAgentRecord {
     ManagedAgentRecord {
+        mcp_servers: vec![],
         pubkey: String::new(),
         name: name.to_string(),
         persona_id: persona_id.map(|s| s.to_string()),

@@ -42,6 +42,7 @@ fn make_definition(slug: &str) -> ManagedAgentRecord {
         provider: None,
         persona_source_version: None,
         env_vars: BTreeMap::new(),
+        mcp_servers: Vec::new(),
         start_on_app_launch: false,
         auto_restart_on_config_change: false,
         runtime_pid: None,

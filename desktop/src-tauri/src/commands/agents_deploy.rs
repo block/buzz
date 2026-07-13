@@ -93,6 +93,13 @@ pub(super) fn build_deploy_payload(
         effective_model.map(str::to_string),
         effective_provider.map(str::to_string),
     );
+    let effective_command = crate::managed_agents::record_agent_command(record, &personas);
+    let effective_mcp_servers = crate::managed_agents::effective_buzz_agent_mcp_servers(
+        record,
+        &personas,
+        &global_config.mcp_servers,
+        &effective_command,
+    )?;
 
     Ok(deploy_payload_json(
         record,
@@ -103,6 +110,7 @@ pub(super) fn build_deploy_payload(
         effective_model,
         effective_provider,
         merged_env,
+        crate::managed_agents::mcp_server_transport(effective_mcp_servers),
     ))
 }
 
@@ -115,6 +123,7 @@ pub(super) fn deploy_payload_json(
     effective_model: Option<String>,
     effective_provider: Option<String>,
     merged_env: std::collections::BTreeMap<String, String>,
+    effective_mcp_servers: Vec<crate::managed_agents::McpServerTransport>,
 ) -> serde_json::Value {
     serde_json::json!({
         "name": &record.name,
@@ -145,5 +154,7 @@ pub(super) fn deploy_payload_json(
         // Merged persona + agent env vars. Providers that don't read this
         // field will simply ignore it — no protocol break.
         "env_vars": merged_env,
+        // Local MCP configuration resolves exactly like the local spawn path.
+        "mcp_servers": effective_mcp_servers,
     })
 }

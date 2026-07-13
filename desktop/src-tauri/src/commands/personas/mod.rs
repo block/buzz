@@ -77,6 +77,7 @@ pub async fn create_persona(
             .filter(|s| !s.is_empty())
             .collect();
         crate::managed_agents::validate_user_env_keys(&input.env_vars)?;
+        crate::managed_agents::validate_mcp_servers(&input.mcp_servers)?;
         let mut persona = AgentDefinition {
             id: Uuid::new_v4().to_string(),
             display_name,
@@ -91,6 +92,7 @@ pub async fn create_persona(
             source_team: None,
             source_team_persona_slug: None,
             env_vars: input.env_vars,
+            mcp_servers: input.mcp_servers,
             respond_to: None,
             respond_to_allowlist: Vec::new(),
             parallelism: None,
@@ -200,6 +202,10 @@ pub async fn update_persona(
                 crate::managed_agents::validate_user_env_keys(&env_vars)?;
                 persona.env_vars = env_vars;
             }
+            crate::managed_agents::replace_mcp_servers(
+                &mut persona.mcp_servers,
+                &input.mcp_servers,
+            )?;
             apply_persona_behavior(persona, input.behavior)?;
             persona.updated_at = now_iso();
 

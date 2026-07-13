@@ -1465,6 +1465,20 @@ pub(crate) fn build_respond_to_env(
     Ok((set, remove))
 }
 
+/// Set the desktop-resolved MCP transport only for the bundled `buzz-agent`.
+/// Explicitly remove any inherited parent value for other runtimes.
+fn set_buzz_agent_mcp_servers_env(
+    command: &mut std::process::Command,
+    effective_command: &str,
+    servers_json: String,
+) {
+    if known_acp_runtime(effective_command).is_some_and(|runtime| runtime.id == "buzz-agent") {
+        command.env("BUZZ_ACP_MCP_SERVERS", servers_json);
+    } else {
+        command.env_remove("BUZZ_ACP_MCP_SERVERS");
+    }
+}
+
 /// Spawn an agent process without holding any locks on records or runtimes.
 /// Returns the child process and log path on success. The caller is responsible
 /// for updating `ManagedAgentRecord` fields and inserting into the runtimes map.
@@ -1505,6 +1519,15 @@ pub fn spawn_agent_child(
     // and for the env-var merge at spawn time.
     let global = crate::managed_agents::load_global_agent_config(app).unwrap_or_default();
     let effective_command = super::record_agent_command(record, &personas);
+    let effective_mcp_servers = super::effective_buzz_agent_mcp_servers(
+        record,
+        &personas,
+        &global.mcp_servers,
+        &effective_command,
+    )?;
+    let effective_mcp_servers_json =
+        serde_json::to_string(&super::mcp_server_transport(effective_mcp_servers))
+            .map_err(|error| format!("failed to serialize effective MCP servers: {error}"))?;
     let agent_args = normalize_agent_args(&effective_command, record.agent_args.clone());
     let resolved_acp_command = resolve_command(&record.acp_command)
         .ok_or_else(|| missing_command_message(&record.acp_command, "ACP harness command"))?;
@@ -1573,6 +1596,7 @@ pub fn spawn_agent_child(
     command.env("BUZZ_RELAY_URL", &effective_relay_url);
     command.env("BUZZ_ACP_AGENT_COMMAND", &resolved_agent_command);
     command.env("BUZZ_ACP_AGENT_ARGS", agent_args.join(","));
+    set_buzz_agent_mcp_servers_env(&mut command, &effective_command, effective_mcp_servers_json);
     match &resolved_mcp_command {
         Some(mcp_cmd) => {
             command.env("BUZZ_ACP_MCP_COMMAND", mcp_cmd);

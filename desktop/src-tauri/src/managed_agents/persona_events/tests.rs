@@ -15,6 +15,16 @@ fn sample_persona() -> AgentDefinition {
         source_team: None,
         source_team_persona_slug: Some("test-slug".to_string()),
         env_vars: BTreeMap::from([("KEY".to_string(), "value".to_string())]),
+        mcp_servers: vec![crate::managed_agents::McpServerConfig {
+            name: "local-mcp".to_string(),
+            command: "mcp-command".to_string(),
+            args: vec![],
+            env: vec![crate::managed_agents::McpServerEnvVar {
+                name: "MCP_TOKEN".to_string(),
+                value: "mcp-secret".to_string(),
+            }],
+            enabled: true,
+        }],
         respond_to: None,
         respond_to_allowlist: Vec::new(),
         parallelism: None,
@@ -132,9 +142,13 @@ fn round_trip_serialization() {
     assert_eq!(restored.model, Some("claude-opus-4".to_string()));
     assert_eq!(restored.provider, Some("anthropic".to_string()));
     assert_eq!(restored.name_pool, vec!["Alpha", "Beta"]);
-    // env_vars are not included in public persona events (secrets travel
-    // via NIP-44-encrypted engrams only).
+    // Env vars and MCP servers are local-only and absent from public events.
     assert!(restored.env_vars.is_empty());
+    assert!(restored.mcp_servers.is_empty());
+    let wire = serde_json::to_string(&persona_event_content(&record)).unwrap();
+    assert!(!wire.contains("mcp_servers"));
+    assert!(!wire.contains("local-mcp"));
+    assert!(!wire.contains("mcp-secret"));
     assert_eq!(
         restored.source_team_persona_slug,
         Some("test-slug".to_string())
@@ -208,6 +222,7 @@ fn content_matches_nip_ap_vector() {
     // signed content, so a second implementer following the spec computes
     // the same NIP-01 id.
     let record = AgentDefinition {
+        mcp_servers: vec![],
         id: "test-agent".to_string(),
         display_name: "Test Agent".to_string(),
         avatar_url: Some("https://example.com/avatar.png".to_string()),
@@ -237,6 +252,7 @@ fn content_matches_nip_ap_vector() {
 #[test]
 fn round_trip_minimal_persona() {
     let record = AgentDefinition {
+        mcp_servers: vec![],
         id: "minimal".to_string(),
         display_name: "Minimal".to_string(),
         avatar_url: None,
@@ -332,6 +348,7 @@ fn behavioral_defaults_survive_record_round_trip() {
 #[test]
 fn quad_absent_definition_hash_stable_across_activation() {
     let record = AgentDefinition {
+        mcp_servers: vec![],
         id: "quad-absent".to_string(),
         display_name: "Test".to_string(),
         avatar_url: None,
@@ -374,6 +391,7 @@ fn quad_absent_definition_hash_stable_across_activation() {
 /// way `persona_from_event` maps fields, without needing a signed event.
 fn persona_from_event_content_for_test(content: PersonaEventContent) -> AgentDefinition {
     AgentDefinition {
+        mcp_servers: vec![],
         id: "staged".to_string(),
         display_name: content.display_name,
         avatar_url: content.avatar_url,
@@ -506,6 +524,7 @@ fn snapshot_runtime_verbatim_from_persona() {
 /// Helper: a persona with no model/provider configured.
 fn blank_model_persona() -> AgentDefinition {
     AgentDefinition {
+        mcp_servers: vec![],
         model: None,
         provider: None,
         ..sample_persona()

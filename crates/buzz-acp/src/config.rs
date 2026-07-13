@@ -4,6 +4,8 @@
 //! Config file (TOML) for complex subscription rules.
 
 use std::collections::{HashMap, HashSet};
+
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 use clap::Parser;
@@ -37,6 +39,9 @@ pub(crate) const MAX_TURN_DURATION_CEILING_SECS: u64 = 604_800;
 
 #[derive(Debug, Error)]
 pub enum ConfigError {
+    #[error("invalid BUZZ_ACP_MCP_SERVERS: {0}")]
+    McpServers(String),
+
     #[error("failed to parse nostr keys: {0}")]
     KeyParse(#[from] nostr::key::Error),
 
@@ -191,6 +196,34 @@ pub struct ModelsArgs {
     /// Output structured JSON instead of human-readable text.
     #[arg(long)]
     pub json: bool,
+}
+
+/// User-configured stdio MCP server received from desktop via
+/// `BUZZ_ACP_MCP_SERVERS`. The desktop resolves `enabled` as local layering
+/// metadata before serializing this transport shape.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConfiguredMcpServer {
+    pub name: String,
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub env: Vec<ConfiguredMcpEnvVar>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConfiguredMcpEnvVar {
+    pub name: String,
+    pub value: String,
+}
+
+pub fn parse_configured_mcp_servers(
+    raw: Option<&str>,
+) -> Result<Vec<ConfiguredMcpServer>, ConfigError> {
+    let Some(raw) = raw.filter(|value| !value.trim().is_empty()) else {
+        return Ok(Vec::new());
+    };
+    serde_json::from_str(raw).map_err(|error| ConfigError::McpServers(error.to_string()))
 }
 
 #[derive(Debug, Parser)]
@@ -447,6 +480,8 @@ pub struct Config {
     pub agent_command: String,
     pub agent_args: Vec<String>,
     pub mcp_command: String,
+    /// Desktop-resolved MCP servers, appended after the built-in Buzz server.
+    pub configured_mcp_servers: Vec<ConfiguredMcpServer>,
     pub idle_timeout_secs: u64,
     pub max_turn_duration_secs: u64,
     pub agents: u32,
@@ -917,12 +952,16 @@ impl Config {
 
         validate_multiple_event_handling(args.multiple_event_handling, args.dedup)?;
 
+        let configured_mcp_servers =
+            parse_configured_mcp_servers(std::env::var("BUZZ_ACP_MCP_SERVERS").ok().as_deref())?;
+
         let config = Config {
             keys,
             relay_url: args.relay_url,
             agent_command,
             agent_args,
             mcp_command: args.mcp_command,
+            configured_mcp_servers,
             idle_timeout_secs,
             max_turn_duration_secs,
             agents: args.agents,
@@ -1300,6 +1339,7 @@ mod tests {
             agent_command: "goose".into(),
             agent_args: vec!["acp".into()],
             mcp_command: "".into(),
+            configured_mcp_servers: vec![],
             idle_timeout_secs: DEFAULT_IDLE_TIMEOUT_SECS,
             max_turn_duration_secs: DEFAULT_MAX_TURN_DURATION_SECS,
             agents: 1,
@@ -1704,6 +1744,28 @@ mod tests {
         let f = result.get(&ch).unwrap();
         // Once any rule has empty kinds (wildcard), merged result is None (wildcard).
         assert!(f.kinds.is_none(), "wildcard should propagate");
+    }
+
+    #[test]
+    fn parse_configured_mcp_servers_accepts_json_transport() {
+        let servers = parse_configured_mcp_servers(Some(
+            r#"[{"name":"github","command":"npx","args":["github-mcp"],"env":[{"name":"TOKEN","value":"secret"}]}]"#,
+        ))
+        .unwrap();
+
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].name, "github");
+        assert_eq!(servers[0].args, vec!["github-mcp"]);
+        assert_eq!(servers[0].env[0].name, "TOKEN");
+        assert_eq!(
+            serde_json::to_value(&servers).unwrap()[0]["enabled"],
+            serde_json::Value::Null
+        );
+    }
+
+    #[test]
+    fn parse_configured_mcp_servers_rejects_invalid_json() {
+        assert!(parse_configured_mcp_servers(Some("not-json")).is_err());
     }
 
     #[test]

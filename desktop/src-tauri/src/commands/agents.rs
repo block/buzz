@@ -412,6 +412,7 @@ pub async fn create_managed_agent(
         }
     }
     crate::managed_agents::validate_user_env_keys(&input.env_vars)?;
+    crate::managed_agents::validate_mcp_servers(&input.mcp_servers)?;
 
     // Validate & normalize the respond-to allowlist BEFORE any side effects.
     // The harness has its own validator (buzz-acp/src/config.rs) but we want
@@ -716,6 +717,7 @@ pub async fn create_managed_agent(
             persona_team_dir: None,
             persona_name_in_team: None,
             env_vars: input.env_vars.clone(),
+            mcp_servers: input.mcp_servers.clone(),
             created_at: now_iso(),
             updated_at: now_iso(),
             last_started_at: None,

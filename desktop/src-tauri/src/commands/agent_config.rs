@@ -607,6 +607,7 @@ mod tests {
 
     fn agent_record() -> ManagedAgentRecord {
         ManagedAgentRecord {
+            mcp_servers: vec![],
             pubkey: "agent".to_string(),
             name: "Agent".to_string(),
             persona_id: Some("persona-1".to_string()),
@@ -663,6 +664,7 @@ mod tests {
 
     fn persona_with_model(model: &str) -> AgentDefinition {
         AgentDefinition {
+            mcp_servers: vec![],
             id: "persona-1".to_string(),
             display_name: "Persona".to_string(),
             avatar_url: None,
@@ -844,6 +846,7 @@ mod tests {
         let personas: Vec<AgentDefinition> = vec![];
         let cache = session_cache("model-y", true);
         let global = crate::managed_agents::GlobalAgentConfig {
+            mcp_servers: vec![],
             model: Some("global-model".to_string()),
             ..Default::default()
         };

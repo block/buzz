@@ -1,5 +1,5 @@
 use super::*;
-use crate::managed_agents::AgentDefinition;
+use crate::managed_agents::{mcp_server_transport, AgentDefinition, McpServerConfig};
 
 fn bare_agent_record(
     persona_id: Option<&str>,
@@ -9,6 +9,7 @@ fn bare_agent_record(
     use crate::managed_agents::{BackendKind, RespondTo};
     use std::collections::BTreeMap;
     ManagedAgentRecord {
+        mcp_servers: vec![],
         pubkey: "agent".to_string(),
         name: "Agent".to_string(),
         persona_id: persona_id.map(str::to_string),
@@ -65,6 +66,7 @@ fn bare_agent_record(
 fn persona_record(id: &str, model: Option<&str>, provider: Option<&str>) -> AgentDefinition {
     use std::collections::BTreeMap;
     AgentDefinition {
+        mcp_servers: vec![],
         id: id.to_string(),
         display_name: "Test Persona".to_string(),
         avatar_url: None,
@@ -140,6 +142,7 @@ fn deploy_resolver_falls_back_to_global_when_persona_and_record_have_none() {
     let record = bare_agent_record(Some("p1"), None, None);
     let personas = vec![persona_record("p1", None, None)];
     let global = crate::managed_agents::GlobalAgentConfig {
+        mcp_servers: vec![],
         model: Some("global-model".to_string()),
         provider: Some("global-prov".to_string()),
         ..Default::default()
@@ -365,6 +368,13 @@ fn deploy_payload_carries_the_full_behavioral_quad() {
         Some("gpt-x".to_string()),
         Some("openai".to_string()),
         std::collections::BTreeMap::new(),
+        mcp_server_transport(vec![McpServerConfig {
+            name: "example".to_string(),
+            command: "example-mcp".to_string(),
+            args: vec![],
+            env: vec![],
+            enabled: true,
+        }]),
     );
 
     assert_eq!(payload["parallelism"], 4);
@@ -373,4 +383,6 @@ fn deploy_payload_carries_the_full_behavioral_quad() {
     assert_eq!(payload["model"], "gpt-x");
     assert_eq!(payload["provider"], "openai");
     assert_eq!(payload["relay_url"], "wss://relay.example");
+    assert_eq!(payload["mcp_servers"][0]["name"], "example");
+    assert!(payload["mcp_servers"][0].get("enabled").is_none());
 }

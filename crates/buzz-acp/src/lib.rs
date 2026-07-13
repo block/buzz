@@ -3402,10 +3402,11 @@ async fn run_models(args: ModelsArgs) -> Result<()> {
 }
 
 fn build_mcp_servers(config: &Config) -> Vec<McpServer> {
+    let mut servers = Vec::new();
     if config.mcp_command.is_empty() {
-        return vec![];
+        return servers;
     }
-    vec![McpServer {
+    servers.push(McpServer {
         name: std::path::Path::new(&config.mcp_command)
             .file_stem()
             .and_then(|s| s.to_str())
@@ -3443,7 +3444,30 @@ fn build_mcp_servers(config: &Config) -> Vec<McpServer> {
             }
             env
         },
-    }]
+    });
+    servers.extend(
+        config
+            .configured_mcp_servers
+            .iter()
+            .map(configured_mcp_server),
+    );
+    servers
+}
+
+fn configured_mcp_server(server: &config::ConfiguredMcpServer) -> McpServer {
+    McpServer {
+        name: server.name.clone(),
+        command: server.command.clone(),
+        args: server.args.clone(),
+        env: server
+            .env
+            .iter()
+            .map(|variable| EnvVar {
+                name: variable.name.clone(),
+                value: variable.value.clone(),
+            })
+            .collect(),
+    }
 }
 
 #[cfg(test)]
@@ -3875,6 +3899,7 @@ mod build_mcp_servers_tests {
             agent_command: "goose".into(),
             agent_args: vec!["acp".into()],
             mcp_command: "test-mcp-server".into(),
+            configured_mcp_servers: vec![],
             idle_timeout_secs: config::DEFAULT_IDLE_TIMEOUT_SECS,
             max_turn_duration_secs: config::DEFAULT_MAX_TURN_DURATION_SECS,
             agents: 1,
@@ -3909,6 +3934,28 @@ mod build_mcp_servers_tests {
             no_base_prompt: false,
             base_prompt_content: None,
         }
+    }
+
+    #[test]
+    fn build_mcp_servers_appends_configured_servers_after_builtin() {
+        let mut config = test_config();
+        config.configured_mcp_servers = vec![config::ConfiguredMcpServer {
+            name: "github".into(),
+            command: "npx".into(),
+            args: vec!["github-mcp".into()],
+            env: vec![config::ConfiguredMcpEnvVar {
+                name: "TOKEN".into(),
+                value: "secret".into(),
+            }],
+        }];
+
+        let servers = build_mcp_servers(&config);
+        assert_eq!(servers.len(), 2);
+        assert_eq!(servers[0].name, "test-mcp-server");
+        assert_eq!(servers[1].name, "github");
+        assert_eq!(servers[1].command, "npx");
+        assert_eq!(servers[1].args, vec!["github-mcp"]);
+        assert_eq!(servers[1].env[0].name, "TOKEN");
     }
 
     #[test]
@@ -3961,13 +4008,19 @@ mod build_mcp_servers_tests {
     }
 
     #[test]
-    fn empty_mcp_command_returns_no_servers() {
+    fn empty_mcp_command_returns_no_servers_even_when_user_servers_are_configured() {
         let mut config = test_config();
         config.mcp_command = "".into();
-        let servers = build_mcp_servers(&config);
+        config.configured_mcp_servers = vec![config::ConfiguredMcpServer {
+            name: "github".into(),
+            command: "npx".into(),
+            args: vec![],
+            env: vec![],
+        }];
+
         assert!(
-            servers.is_empty(),
-            "empty mcp_command should produce no MCP servers"
+            build_mcp_servers(&config).is_empty(),
+            "without the built-in MCP server, user servers must not reach an invalid ACP invocation"
         );
     }
 
@@ -4040,6 +4093,7 @@ mod error_outcome_emission_tests {
             agent_command: "true".into(),
             agent_args: vec![],
             mcp_command: "test-mcp-server".into(),
+            configured_mcp_servers: vec![],
             idle_timeout_secs: config::DEFAULT_IDLE_TIMEOUT_SECS,
             max_turn_duration_secs: config::DEFAULT_MAX_TURN_DURATION_SECS,
             agents: 1,
