@@ -5,7 +5,6 @@ import {
   useRelayAgentsQuery,
 } from "@/features/agents/hooks";
 import { mergeKnownAgentPubkeys } from "@/features/agents/knownAgentPubkeys";
-import { useHomeFeedQuery } from "@/features/home/hooks";
 import { useStableSet } from "@/shared/hooks/useStableReference";
 
 const EMPTY_KNOWN_AGENT_PUBKEYS: ReadonlySet<string> = new Set();
@@ -42,11 +41,10 @@ export function KnownAgentPubkeysProvider({
 }) {
   const managedAgents = useManagedAgentsQuery().data;
   const relayAgents = useRelayAgentsQuery().data;
-  const feedAgentActivity = useHomeFeedQuery().data?.feed.agentActivity;
 
   const merged = React.useMemo(
-    () => mergeKnownAgentPubkeys(managedAgents, relayAgents, feedAgentActivity),
-    [feedAgentActivity, managedAgents, relayAgents],
+    () => mergeKnownAgentPubkeys(managedAgents, relayAgents),
+    [managedAgents, relayAgents],
   );
   const stable = useStableSet(merged);
 
@@ -59,8 +57,9 @@ export function KnownAgentPubkeysProvider({
 
 /**
  * The workspace-scoped "known agent pubkeys" baseline: locally managed agents
- * ∪ relay-registered agents ∪ home-feed agent activity, normalised via
- * `normalizePubkey`.
+ * ∪ relay-registered agents, normalised via `normalizePubkey`. Home-feed agent
+ * activity is intentionally excluded: it is a display category, not an
+ * authenticated agent-identity source.
  *
  * Every surface that decides whether a pubkey belongs to an agent — the
  * config-nudge trust gate, bot avatars/popovers, agent mention pills — must

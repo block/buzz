@@ -332,8 +332,7 @@ export function HomeView({
   });
   const feedProfiles = feedProfilesQuery.data?.profiles;
   // Agent set for the inbox list/detail bot badges: the workspace-scoped
-  // baseline (which already includes feed agent activity) widened with this
-  // surface's profile lookup.
+  // baseline widened with this surface's profile lookup.
   const workspaceAgentPubkeys = useKnownAgentPubkeys();
   const inboxAgentPubkeys = React.useMemo(() => {
     const pubkeys = new Set(workspaceAgentPubkeys);

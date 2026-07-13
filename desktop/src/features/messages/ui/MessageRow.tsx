@@ -167,8 +167,7 @@ export const MessageRow = React.memo(
       [profiles, message.tags],
     );
     // "Is this pubkey an agent" = the workspace-scoped baseline every surface
-    // shares (managed ∪ relay ∪ feed agent activity) plus the pubkey's own
-    // profile `isAgent` flag from this surface's lookup. Both are per-pubkey
+    // shares (managed ∪ relay) plus the pubkey's own profile `isAgent` flag from this surface's lookup. Both are per-pubkey
     // O(1) checks — no per-row rescan of `profiles` (that duplicated parent
     // work in every mounted row and re-ran on each profile-lookup change).
     const knownAgentPubkeys = useKnownAgentPubkeys();

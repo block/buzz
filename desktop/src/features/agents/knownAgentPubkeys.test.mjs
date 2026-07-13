@@ -7,20 +7,18 @@ const MANAGED =
   "1111111111111111111111111111111111111111111111111111111111111111";
 const RELAY =
   "2222222222222222222222222222222222222222222222222222222222222222";
-const FEED = "3333333333333333333333333333333333333333333333333333333333333333";
 
-test("mergesAllThreeSources", () => {
+test("mergesTrustedSources", () => {
   const merged = mergeKnownAgentPubkeys(
     [{ pubkey: MANAGED }],
     [{ pubkey: RELAY }],
-    [{ pubkey: FEED }],
   );
 
-  assert.deepEqual([...merged].sort(), [MANAGED, RELAY, FEED].sort());
+  assert.deepEqual([...merged].sort(), [MANAGED, RELAY].sort());
 });
 
 test("undefinedSources_yieldEmptySet", () => {
-  const merged = mergeKnownAgentPubkeys(undefined, undefined, undefined);
+  const merged = mergeKnownAgentPubkeys(undefined, undefined);
 
   assert.equal(merged.size, 0);
 });
@@ -32,7 +30,6 @@ test("normalisesCaseAndWhitespace_dedupingAcrossSources", () => {
   const merged = mergeKnownAgentPubkeys(
     [{ pubkey: MANAGED.toUpperCase() }],
     [{ pubkey: ` ${MANAGED}` }],
-    [{ pubkey: MANAGED }],
   );
 
   assert.deepEqual([...merged], [MANAGED]);
