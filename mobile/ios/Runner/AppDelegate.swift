@@ -118,6 +118,8 @@ import UserNotifications
         return
       }
       transcodeVideoToMp4(sourcePath: sourcePath, result: result)
+    case "clipboardHasImage":
+      result(UIPasteboard.general.hasImages)
     case "readClipboardImage":
       guard let imageData = Self.clipboardImageData(from: UIPasteboard.general) else {
         result(nil)
@@ -136,8 +138,10 @@ import UserNotifications
     if let jpegData = pasteboard.data(forPasteboardType: "public.jpeg") {
       return jpegData
     }
-    if let gifData = pasteboard.data(forPasteboardType: "com.compuserve.gif") {
-      return gifData
+    for imageType in ["public.heic", "public.heif", "org.webmproject.webp", "com.compuserve.gif"] {
+      if let imageData = pasteboard.data(forPasteboardType: imageType) {
+        return imageData
+      }
     }
     guard let image = pasteboard.image else {
       return nil

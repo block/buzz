@@ -19,6 +19,17 @@ class RunnerTests: XCTestCase {
     XCTAssertEqual(AppDelegate.clipboardImageData(from: pasteboard), pngData)
   }
 
+  func testClipboardImageDataPreservesOriginalWebPBytesForValidation() throws {
+    let pasteboard = try XCTUnwrap(
+      UIPasteboard(name: UIPasteboard.Name(UUID().uuidString), create: true)
+    )
+    defer { UIPasteboard.remove(withName: pasteboard.name) }
+    let webPData = Data("RIFFxxxxWEBP".utf8)
+    pasteboard.setData(webPData, forPasteboardType: "org.webmproject.webp")
+
+    XCTAssertEqual(AppDelegate.clipboardImageData(from: pasteboard), webPData)
+  }
+
   func testClipboardImageDataPreservesOriginalGifBytesForValidation() throws {
     let pasteboard = try XCTUnwrap(
       UIPasteboard(name: UIPasteboard.Name(UUID().uuidString), create: true)

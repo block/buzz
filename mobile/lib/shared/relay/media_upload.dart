@@ -17,6 +17,7 @@ const _sanitizeImageForUploadMethod = 'sanitizeImageForUpload';
 const _transcodeVideoToMp4Method = 'transcodeVideoToMp4';
 const _transcodeImageToJpegMethod = 'transcodeImageToJpeg';
 const _readClipboardImageMethod = 'readClipboardImage';
+const _clipboardHasImageMethod = 'clipboardHasImage';
 const _uploadAuthKind = 24242;
 const _uploadAuthLifetimeSeconds = 300;
 const _heicBrands = {
@@ -168,6 +169,13 @@ class MediaUploadService {
   Future<BlobDescriptor> uploadImage(XFile image) async {
     final preparedImage = await _prepareUploadImage(image);
     return uploadBytes(preparedImage.bytes, mimeType: preparedImage.mimeType);
+  }
+
+  Future<bool> clipboardHasImage() async {
+    return await _mediaUploadPlatformChannel.invokeMethod<bool>(
+          _clipboardHasImageMethod,
+        ) ??
+        false;
   }
 
   Future<BlobDescriptor> readAndUploadClipboardImage() async {

@@ -73,6 +73,7 @@ class ComposeBar extends HookConsumerWidget {
     final attachments = useState<List<BlobDescriptor>>([]);
     final uploadError = useState<String?>(null);
     final uploadingCount = useState(0);
+    final clipboardHasImage = useState(false);
     final hasAttachments = attachments.value.isNotEmpty;
     final hasPendingUploads = uploadingCount.value > 0;
     final customEmoji = ref.watch(customEmojiListProvider);
@@ -80,6 +81,35 @@ class ComposeBar extends HookConsumerWidget {
     final resolvedHint =
         hintText ??
         (channelName.isNotEmpty ? 'Message #$channelName' : 'Message\u2026');
+
+    useEffect(() {
+      if (defaultTargetPlatform != TargetPlatform.iOS) return null;
+
+      var disposed = false;
+      Future<void> refreshClipboardAvailability() async {
+        final hasImage = await ref
+            .read(mediaUploadServiceProvider)
+            .clipboardHasImage();
+        if (!disposed && context.mounted) {
+          clipboardHasImage.value = hasImage;
+        }
+      }
+
+      void refreshWhenFocused() {
+        if (focusNode.hasFocus) refreshClipboardAvailability();
+      }
+
+      final lifecycleListener = AppLifecycleListener(
+        onResume: refreshClipboardAvailability,
+      );
+      focusNode.addListener(refreshWhenFocused);
+      refreshClipboardAvailability();
+      return () {
+        disposed = true;
+        focusNode.removeListener(refreshWhenFocused);
+        lifecycleListener.dispose();
+      };
+    }, [focusNode]);
 
     // Mention state --------------------------------------------------------
     final mentionQuery = useState<String?>(null);
@@ -335,17 +365,19 @@ class ComposeBar extends HookConsumerWidget {
         return SystemContextMenu.editableText(
           editableTextState: editableTextState,
           items: [
-            IOSSystemContextMenuItemCustom(
-              title: 'Paste Image',
-              onPressed: pasteImage,
-            ),
+            if (clipboardHasImage.value)
+              IOSSystemContextMenuItemCustom(
+                title: 'Paste Image',
+                onPressed: pasteImage,
+              ),
             ...SystemContextMenu.getDefaultItems(editableTextState),
           ],
         );
       }
 
       final buttonItems = [...editableTextState.contextMenuButtonItems];
-      if (defaultTargetPlatform == TargetPlatform.iOS) {
+      if (defaultTargetPlatform == TargetPlatform.iOS &&
+          clipboardHasImage.value) {
         buttonItems.insert(
           0,
           ContextMenuButtonItem(label: 'Paste Image', onPressed: pasteImage),

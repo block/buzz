@@ -159,6 +159,8 @@ void main() {
           return arguments['bytes'] as Uint8List;
         case 'transcodeImageToJpeg':
           return _pngBytes;
+        case 'clipboardHasImage':
+          return true;
         default:
           return null;
       }
@@ -394,6 +396,66 @@ void main() {
           findsOneWidget,
         );
       } finally {
+        debugDefaultTargetPlatformOverride = previousPlatform;
+      }
+    });
+
+    testWidgets('iOS hides Paste Image when clipboard has no image', (
+      tester,
+    ) async {
+      final previousPlatform = debugDefaultTargetPlatformOverride;
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      _setMockMediaUploadPlatformHandler((call) async {
+        if (call.method == 'clipboardHasImage') return false;
+        return null;
+      });
+      try {
+        final uploadService = MediaUploadService(
+          baseUrl: 'https://relay.example',
+          nsec: nostr.Keys.generate().nsec,
+          pickGalleryVideo: () async => null,
+          pickGalleryImage: () async => null,
+        );
+        await tester.pumpWidget(
+          _buildComposeBar(
+            uploadService: uploadService,
+            supportsShowingSystemContextMenu: true,
+            onSend:
+                (
+                  content,
+                  mentionPubkeys, {
+                  mediaTags = const <List<String>>[],
+                }) async {},
+          ),
+        );
+        await tester.pump();
+
+        final textField = tester.widget<TextField>(find.byType(TextField));
+        final editableTextState = tester.state<EditableTextState>(
+          find.byType(EditableText),
+        );
+        final menu =
+            textField.contextMenuBuilder!(
+                  tester.element(find.byType(TextField)),
+                  editableTextState,
+                )
+                as SystemContextMenu;
+
+        expect(menu.items.whereType<IOSSystemContextMenuItemCustom>(), isEmpty);
+      } finally {
+        _setMockMediaUploadPlatformHandler((call) async {
+          switch (call.method) {
+            case 'sanitizeImageForUpload':
+              final arguments = call.arguments as Map<Object?, Object?>;
+              return arguments['bytes'] as Uint8List;
+            case 'transcodeImageToJpeg':
+              return _pngBytes;
+            case 'clipboardHasImage':
+              return true;
+            default:
+              return null;
+          }
+        });
         debugDefaultTargetPlatformOverride = previousPlatform;
       }
     });
