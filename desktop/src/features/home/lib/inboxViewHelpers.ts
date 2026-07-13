@@ -171,7 +171,7 @@ export function toTimelineMessage(
     author: message.authorLabel,
     avatarUrl: message.avatarUrl,
     body: message.content,
-    createdAt: 0,
+    createdAt: message.createdAt,
     depth: message.depth,
     kind: message.kind,
     pubkey: message.authorPubkey,

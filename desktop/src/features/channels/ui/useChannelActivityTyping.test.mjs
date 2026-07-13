@@ -133,6 +133,7 @@ describe("mergeMemberAgentFlagsIntoProfiles", () => {
     const profiles = {
       [AGENT]: {
         displayName: "Deploy Bot",
+        name: "deploybot",
         avatarUrl: "https://example.com/a.png",
         nip05Handle: "deploy@example.com",
         ownerPubkey: AGENT_2,
@@ -146,6 +147,7 @@ describe("mergeMemberAgentFlagsIntoProfiles", () => {
     assert.notEqual(merged, profiles);
     assert.deepEqual(merged[AGENT], {
       displayName: "Deploy Bot",
+      name: "deploybot",
       avatarUrl: "https://example.com/a.png",
       nip05Handle: "deploy@example.com",
       ownerPubkey: AGENT_2,

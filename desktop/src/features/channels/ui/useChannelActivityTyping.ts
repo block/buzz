@@ -188,6 +188,7 @@ export function mergeMemberAgentFlagsIntoProfiles(
   for (const member of agentMembers) {
     const key = normalizePubkey(member.pubkey);
     merged[key] = {
+      ...merged[key],
       displayName: merged[key]?.displayName ?? null,
       avatarUrl: merged[key]?.avatarUrl ?? null,
       nip05Handle: merged[key]?.nip05Handle ?? null,

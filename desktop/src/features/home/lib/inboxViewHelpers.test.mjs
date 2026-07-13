@@ -307,6 +307,7 @@ test("inbox mappings preserve kind and signerPubkey so the nudge gate can pass",
 
   assert.equal(message.kind, 9);
   assert.equal(message.signerPubkey, NUDGE_AGENT_SIGNER);
+  assert.equal(message.createdAt, 1_700_000_000);
   assert.equal(
     getConfigNudgeAuthorPubkey(
       message,
