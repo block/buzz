@@ -2,10 +2,7 @@ import * as React from "react";
 import { AlertCircle, Check, Search, Send } from "lucide-react";
 
 import type { AgentPersona } from "@/shared/api/types";
-import type {
-  SnapshotFormat,
-  SnapshotMemoryLevel,
-} from "@/shared/api/tauriPersonas";
+import type { SnapshotMemoryLevel } from "@/shared/api/tauriPersonas";
 import { Button } from "@/shared/ui/button";
 import {
   Dialog,
@@ -30,7 +27,6 @@ type AgentSnapshotSendDialogProps = {
   persona: AgentPersona;
   linkedAgentPubkey: string | null;
   memoryLevel: SnapshotMemoryLevel;
-  format: SnapshotFormat;
   onOpenChange: (open: boolean) => void;
   /** Called when the snapshot was successfully sent. */
   onSent: () => void;
@@ -53,7 +49,6 @@ export function AgentSnapshotSendDialog({
   persona,
   linkedAgentPubkey,
   memoryLevel,
-  format,
   onOpenChange,
   onSent,
 }: AgentSnapshotSendDialogProps) {
@@ -167,7 +162,9 @@ export function AgentSnapshotSendDialog({
         encodeMutation.mutateAsync({
           id: persona.id,
           memoryLevel,
-          format,
+          // PNG is the avatar card image and retains the snapshot contents.
+          // JSON has no relay-valid thumbnail.
+          format: "png",
           memorySourcePubkey: linkedAgentPubkey,
         }),
       destination.id,

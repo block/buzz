@@ -117,6 +117,17 @@ test("formatImetaMediaLine: spoilered image mime → wrapped ![image] line", () 
   );
 });
 
+test("formatImetaMediaLine: agent snapshot PNG → filename link", () => {
+  assert.equal(
+    formatImetaMediaLine({
+      url: "https://b/analyst.png",
+      type: "image/png",
+      filename: "analyst.agent.png",
+    }),
+    "\n[analyst.agent.png](https://b/analyst.png)",
+  );
+});
+
 test("buildImetaTags keeps media filenames in imeta", () => {
   // Filenames are included for every MIME type — the video review dialog
   // and file cards use them as display titles.
@@ -402,6 +413,20 @@ test("buildOutgoingMessage: appends media markdown line per attachment, in order
     out.content,
     "hi\n![image](https://b/a.png)\n![video](https://b/v.mp4)",
   );
+});
+
+test("buildOutgoingMessage: agent snapshot PNG uses the snapshot-card link path", () => {
+  const out = buildOutgoingMessage("", [
+    {
+      url: "https://b/analyst.png",
+      type: "image/png",
+      sha256: "x",
+      size: 1,
+      uploaded: 0,
+      filename: "analyst.agent.png",
+    },
+  ]);
+  assert.equal(out.content, "\n[analyst.agent.png](https://b/analyst.png)");
 });
 
 test("buildOutgoingMessage: wraps spoilered image and video attachments", () => {
