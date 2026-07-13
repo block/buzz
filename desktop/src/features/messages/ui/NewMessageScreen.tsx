@@ -217,6 +217,10 @@ export function NewMessageScreen() {
         );
       }
 
+      if (!isMountedRef.current) {
+        return;
+      }
+
       try {
         await sendMessageMutation.mutateAsync({
           targetChannel: directMessage,

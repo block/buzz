@@ -39,6 +39,45 @@ type MockFeedWindow = Window & {
   }) => unknown;
 };
 
+async function hasOutgoingEventWithContent(
+  page: import("@playwright/test").Page,
+  content: string,
+) {
+  return page.evaluate((expectedContent) => {
+    return (
+      (
+        window as Window & {
+          __BUZZ_E2E_COMMAND_LOG__?: Array<{
+            command: string;
+            payload: unknown;
+          }>;
+        }
+      ).__BUZZ_E2E_COMMAND_LOG__?.some((entry) => {
+        if (entry.command !== "plugin:websocket|send") {
+          return false;
+        }
+
+        const data = (
+          entry.payload as {
+            message?: { data?: string; type?: string };
+          }
+        )?.message?.data;
+        if (!data) {
+          return false;
+        }
+
+        try {
+          const frame = JSON.parse(data) as unknown[];
+          const event = frame[1] as { content?: unknown } | undefined;
+          return frame[0] === "EVENT" && event?.content === expectedContent;
+        } catch {
+          return false;
+        }
+      }) ?? false
+    );
+  }, content);
+}
+
 async function openChannelManagement(
   page: import("@playwright/test").Page,
   channelName: string,
@@ -670,48 +709,18 @@ test("does not reopen a direct message after leaving the composer", async ({
   await page
     .getByTestId(`new-dm-result-${TEST_IDENTITIES.charlie.pubkey}`)
     .click();
-  await page.getByTestId("message-input").fill("Send without stale navigation");
+  const staleMessage = "Do not send after leaving";
+  await page.getByTestId("message-input").fill(staleMessage);
   await page.getByTestId("send-message").click();
   await expect(page.getByTestId("new-dm-opening")).toContainText("Opening");
 
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
   await expect(page.getByTestId("dm-list")).toContainText("charlie");
-  await expect
-    .poll(() =>
-      page.evaluate(() => {
-        return (
-          (
-            window as Window & {
-              __BUZZ_E2E_COMMAND_LOG__?: Array<{
-                command: string;
-                payload: unknown;
-              }>;
-            }
-          ).__BUZZ_E2E_COMMAND_LOG__?.some((entry) => {
-            if (entry.command !== "plugin:websocket|send") {
-              return false;
-            }
-
-            const data = (
-              entry.payload as {
-                message?: { data?: string; type?: string };
-              }
-            )?.message?.data;
-            if (!data) {
-              return false;
-            }
-
-            try {
-              return (JSON.parse(data) as unknown[])[0] === "EVENT";
-            } catch {
-              return false;
-            }
-          }) ?? false
-        );
-      }),
-    )
-    .toBe(true);
+  // The DM appearing proves the delayed open completed. Give the abandoned
+  // continuation time to run before asserting that it did not publish.
+  await page.waitForTimeout(1_250);
+  expect(await hasOutgoingEventWithContent(page, staleMessage)).toBe(false);
   await expect(page).toHaveURL(
     new RegExp(`/channels/${GENERAL_CHANNEL_ID}(?:\\?|$)`),
   );
