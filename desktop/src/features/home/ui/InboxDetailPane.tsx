@@ -20,6 +20,7 @@ import {
 } from "@/features/messages/lib/messageGrouping";
 import { getThreadReference } from "@/features/messages/lib/threading";
 import { MessageComposer } from "@/features/messages/ui/MessageComposer";
+import { useAnchoredScroll } from "@/features/messages/ui/useAnchoredScroll";
 import { UpdateIndicator } from "@/features/settings/UpdateIndicator";
 import type { Channel } from "@/shared/api/types";
 import { TopChromeInsetHeader } from "@/shared/layout/TopChromeInsetHeader";
@@ -115,9 +116,7 @@ export function InboxDetailPane({
   onToggleReaction,
 }: InboxDetailPaneProps) {
   const detailPaneRef = React.useRef<HTMLElement | null>(null);
-  // Refs for the scroll container and its inner content div — used by the
-  // post-center anchor hold to compensate for late content growth above the
-  // selected message (reactions, channel-window merge, image decode).
+  // Refs for the shared anchored-scroll hook's container and content roots.
   const scrollContainerRef = React.useRef<HTMLDivElement | null>(null);
   const contentRef = React.useRef<HTMLDivElement | null>(null);
   const [replyTargetId, setReplyTargetId] = React.useState<string | null>(null);
@@ -129,15 +128,47 @@ export function InboxDetailPane({
   // scroll centering) key on this.
   const conversationId = item?.conversationId ?? null;
   const selectedChannelId = item?.item.channelId ?? null;
-  // Scroll key: changes only when the user switches to a different conversation
-  // or selects a different event anchor (which triggers centering once). Live
-  // message arrivals in the same conversation do NOT change this key.
-  const selectedMessageScrollKey = React.useMemo(() => {
-    if (!conversationId || !selectedEventId) {
-      return null;
-    }
-    return `${conversationId}:${selectedEventId}`;
-  }, [conversationId, selectedEventId]);
+  // Build the plain, non-virtualized timeline the shared hook anchors against.
+  // Live arrivals rerun its layout compensation without changing the target.
+
+  const selectedMessage = messages.find((message) => message.isSelected);
+  const pendingReplyMessages: InboxDisplayMessage[] = replies.map((reply) => ({
+    ...reply,
+    depth: reply.depth ?? (selectedMessage?.depth ?? 0) + 1,
+    isSelected: false,
+    mentionNames: [],
+  }));
+  const displayMessages: InboxDisplayMessage[] =
+    messages.length > 0
+      ? [...messages, ...pendingReplyMessages]
+      : item
+        ? [
+            {
+              authorLabel: item.senderLabel,
+              authorPubkey: item.item.pubkey,
+              avatarUrl: item.avatarUrl,
+              content: item.preview,
+              createdAt: item.item.createdAt,
+              depth: 0,
+              fullTimestampLabel: item.fullTimestampLabel,
+              id: item.id,
+              isSelected: true,
+              mentionNames: item.mentionNames,
+              mentionPubkeysByName: item.mentionPubkeysByName,
+              timeLabel: formatTime(item.item.createdAt),
+            },
+            ...pendingReplyMessages,
+          ]
+        : pendingReplyMessages;
+  const { onScroll } = useAnchoredScroll({
+    channelId: conversationId,
+    contentRef,
+    isLoading: isThreadContextLoading,
+    messages: displayMessages,
+    pinTargetCentered: true,
+    scrollContainerRef,
+    targetMessageId: selectedEventId,
+  });
 
   const focusComposer = React.useCallback(() => {
     window.requestAnimationFrame(() => {
@@ -170,313 +201,6 @@ export function InboxDetailPane({
       window.clearTimeout(timeoutId);
     };
   }, [conversationId]);
-
-  // Deferred deliberate-selection centering.
-  //
-  // Bug fixed here: the old one-shot rAF fired on the click render, before
-  // useInboxThreadContext had started its async fetch.  The fetch then prepended
-  // older messages ABOVE the viewport, shifting it mid-thread.
-  //
-  // Fix: arm a pending-center ref on each new (conversationId, selectedEventId)
-  // pair.  If isThreadContextLoading is already false when the rAF fires (no
-  // fetch needed), execute immediately.  If loading starts before/as the rAF
-  // fires, cancel the rAF and re-execute once loading transitions true → false.
-  // User scroll before the center fires cancels it (never yank the reader).
-  //
-  // Effect-ordering note: on the click commit, InboxDetailPane effects run
-  // before HomeView (child-first), so isThreadContextLoading is still false
-  // at that instant — the "is not loading right now" guard alone is NOT
-  // sufficient; we must observe the true → false transition instead.
-  // The isLoading ref is kept up-to-date unconditionally so rAF callbacks
-  // always read the current value (closures would capture stale renders).
-  const pendingCenterKeyRef = React.useRef<string | null>(null);
-  const userScrolledRef = React.useRef(false);
-  const prevLoadingRef = React.useRef(isThreadContextLoading);
-  const isLoadingRef = React.useRef(isThreadContextLoading);
-  // Keep isLoadingRef current every render so rAF callbacks see the live value.
-  isLoadingRef.current = isThreadContextLoading;
-
-  // Post-center anchor hold.
-  //
-  // After the deliberate-selection center fires, reactions, channel-window
-  // merges, and image decodes can add content ABOVE the selected message.
-  // The browser's native scroll anchoring pins the *topmost visible row*, so
-  // growth between that row and the selected message pushes the selected row
-  // down without compensation — producing the "correct snap → brief pause →
-  // jumps up 2-3 messages" symptom.
-  //
-  // Fix (mirrors useAnchoredScroll.ts:423-433): after the center fires,
-  // hold the selected row's absolute position within the scroll container's
-  // content (invariant under user scroll: scrollBy on same axis changes both
-  // bcrect.top and scrollTop by the same amount, so the sum is stable).  On
-  // every subsequent message-list commit (useLayoutEffect), re-measure and
-  // compensate with scrollBy(0, drift) when content above the anchor has grown.
-  // Release the hold on user interaction or selection-key change.
-  //
-  // Measurement: contentTop = bcrect.top + scrollTop - container.bcrect.top.
-  // This is scroll-invariant: a user scroll ±D changes bcrect.top by ∓D and
-  // scrollTop by ±D, leaving the sum unchanged.  Only content growth above the
-  // anchor changes contentTop.
-  const anchorHoldRef = React.useRef<{
-    contentTop: number;
-    key: string;
-  } | null>(null);
-  // The expected target of a programmatic write. The scroll listener consumes
-  // only an event at this exact position; a no-op write leaves it unset, and a
-  // later real scroll at a different position still releases the hold.
-  const programmaticScrollTopRef = React.useRef<number | null>(null);
-  const isWritingScrollRef = React.useRef(false);
-  const selectedMessageScrollKeyRef = React.useRef(selectedMessageScrollKey);
-  selectedMessageScrollKeyRef.current = selectedMessageScrollKey;
-
-  // Captures the hold after the center fires.  Called from both center paths.
-  const captureAnchorHold = React.useCallback((key: string) => {
-    const container = scrollContainerRef.current;
-    if (!container) return;
-    const selectedRow = container.querySelector<HTMLElement>(
-      '[data-testid="home-inbox-selected-message"]',
-    );
-    if (!selectedRow) return;
-    const contentTop =
-      selectedRow.getBoundingClientRect().top +
-      container.scrollTop -
-      container.getBoundingClientRect().top;
-    anchorHoldRef.current = { contentTop, key };
-  }, []);
-
-  // Releases the hold — called on user interaction and selection-key change.
-  const releaseAnchorHold = React.useCallback(() => {
-    anchorHoldRef.current = null;
-  }, []);
-
-  const noteProgrammaticScroll = React.useCallback(
-    (container: HTMLDivElement, scrollTopBefore: number) => {
-      if (scrollTopBefore === container.scrollTop) return;
-
-      programmaticScrollTopRef.current = container.scrollTop;
-      // Scroll events run before the next animation frame. Expiring this guard
-      // prevents a write whose event never arrives from swallowing a later user
-      // scroll, while still ignoring the matching programmatic scroll event.
-      window.requestAnimationFrame(() => {
-        if (programmaticScrollTopRef.current === container.scrollTop) {
-          programmaticScrollTopRef.current = null;
-        }
-      });
-    },
-    [],
-  );
-
-  // Arm the pending center whenever the selection key changes.
-  React.useEffect(() => {
-    if (!selectedMessageScrollKey) {
-      pendingCenterKeyRef.current = null;
-      releaseAnchorHold();
-      return;
-    }
-
-    pendingCenterKeyRef.current = selectedMessageScrollKey;
-    userScrolledRef.current = false;
-    releaseAnchorHold();
-
-    // Attempt the center after the current paint.  By the time this rAF fires,
-    // any synchronous state updates (including isLoading → true) will have
-    // been committed.  Read from the ref so we see the live value.
-    const rafId = window.requestAnimationFrame(() => {
-      if (isLoadingRef.current) {
-        // Loading is in progress — cancel now; the transition effect will fire.
-        return;
-      }
-      if (
-        pendingCenterKeyRef.current === selectedMessageScrollKey &&
-        !userScrolledRef.current
-      ) {
-        pendingCenterKeyRef.current = null;
-        const container = scrollContainerRef.current;
-        const scrollTopBefore = container?.scrollTop;
-        isWritingScrollRef.current = true;
-        detailPaneRef.current
-          ?.querySelector<HTMLElement>(
-            '[data-testid="home-inbox-selected-message"]',
-          )
-          ?.scrollIntoView({ block: "center" });
-        isWritingScrollRef.current = false;
-        if (container && scrollTopBefore !== undefined) {
-          noteProgrammaticScroll(container, scrollTopBefore);
-        }
-        captureAnchorHold(selectedMessageScrollKey);
-      }
-    });
-
-    return () => {
-      window.cancelAnimationFrame(rafId);
-    };
-  }, [
-    selectedMessageScrollKey,
-    captureAnchorHold,
-    releaseAnchorHold,
-    noteProgrammaticScroll,
-  ]);
-
-  // Fire the deferred center when loading transitions true → false.
-  React.useEffect(() => {
-    const wasLoading = prevLoadingRef.current;
-    prevLoadingRef.current = isThreadContextLoading;
-
-    if (wasLoading && !isThreadContextLoading) {
-      // Loading just settled.  If a center is still pending for the current
-      // selection key and the user hasn't scrolled, execute it now.
-      if (
-        pendingCenterKeyRef.current === selectedMessageScrollKey &&
-        selectedMessageScrollKey !== null &&
-        !userScrolledRef.current
-      ) {
-        pendingCenterKeyRef.current = null;
-        const container = scrollContainerRef.current;
-        const scrollTopBefore = container?.scrollTop;
-        isWritingScrollRef.current = true;
-        detailPaneRef.current
-          ?.querySelector<HTMLElement>(
-            '[data-testid="home-inbox-selected-message"]',
-          )
-          ?.scrollIntoView({ block: "center" });
-        isWritingScrollRef.current = false;
-        if (container && scrollTopBefore !== undefined) {
-          noteProgrammaticScroll(container, scrollTopBefore);
-        }
-        captureAnchorHold(selectedMessageScrollKey);
-      }
-    }
-  }, [
-    isThreadContextLoading,
-    selectedMessageScrollKey,
-    captureAnchorHold,
-    noteProgrammaticScroll,
-  ]);
-
-  // Compensate for late content growth above the anchor (reactions, channel-
-  // window merge, image decode).  Runs as a layout effect so drift is corrected
-  // before paint, preventing visible flicker.
-  // biome-ignore lint/correctness/useExhaustiveDependencies: messages and replies are the reactive triggers that drive displayMessages; we intentionally re-run on every message-list commit to catch reaction/merge re-renders; scrollContainerRef is a stable ref
-  React.useLayoutEffect(() => {
-    const hold = anchorHoldRef.current;
-    const container = scrollContainerRef.current;
-    if (
-      !hold ||
-      !container ||
-      hold.key !== selectedMessageScrollKeyRef.current
-    ) {
-      return;
-    }
-
-    const selectedRow = container.querySelector<HTMLElement>(
-      '[data-testid="home-inbox-selected-message"]',
-    );
-    if (!selectedRow) return;
-
-    // Recompute contentTop: scroll-invariant absolute position within content.
-    const currentContentTop =
-      selectedRow.getBoundingClientRect().top +
-      container.scrollTop -
-      container.getBoundingClientRect().top;
-    const drift = currentContentTop - hold.contentTop;
-    if (Math.abs(drift) > 0.5) {
-      hold.contentTop = currentContentTop;
-      const scrollTopBefore = container.scrollTop;
-      isWritingScrollRef.current = true;
-      container.scrollBy(0, drift);
-      isWritingScrollRef.current = false;
-      noteProgrammaticScroll(container, scrollTopBefore);
-    }
-  }, [messages, replies, noteProgrammaticScroll]);
-
-  // ResizeObserver: compensate for non-React resizes (image decode, embed
-  // expand) that grow content above the anchor without triggering a React
-  // re-render.  Keyed on conversationId so the observer is re-attached when
-  // a new conversation opens and contentRef.current becomes a fresh node.
-  // biome-ignore lint/correctness/useExhaustiveDependencies: conversationId is the re-attachment trigger; the effect body reads only stable refs
-  React.useEffect(() => {
-    const content = contentRef.current;
-    if (!content || typeof ResizeObserver === "undefined") return;
-
-    const observer = new ResizeObserver(() => {
-      const hold = anchorHoldRef.current;
-      const container = scrollContainerRef.current;
-      if (
-        !hold ||
-        !container ||
-        hold.key !== selectedMessageScrollKeyRef.current
-      ) {
-        return;
-      }
-
-      const selectedRow = container.querySelector<HTMLElement>(
-        '[data-testid="home-inbox-selected-message"]',
-      );
-      if (!selectedRow) return;
-
-      const currentContentTop =
-        selectedRow.getBoundingClientRect().top +
-        container.scrollTop -
-        container.getBoundingClientRect().top;
-      const drift = currentContentTop - hold.contentTop;
-      if (Math.abs(drift) > 0.5) {
-        hold.contentTop = currentContentTop;
-        const scrollTopBefore = container.scrollTop;
-        isWritingScrollRef.current = true;
-        container.scrollBy(0, drift);
-        isWritingScrollRef.current = false;
-        noteProgrammaticScroll(container, scrollTopBefore);
-      }
-    });
-
-    observer.observe(content);
-    return () => {
-      observer.disconnect();
-    };
-  }, [conversationId]);
-
-  // Cancel the pending center if the user scrolls before it fires.
-  // Keyed on conversationId so listeners are reinstalled when a conversation
-  // opens — detailPaneRef.current is null before the item branch renders, so
-  // a [] effect would attach to null and miss all subsequent selections.
-  // biome-ignore lint/correctness/useExhaustiveDependencies: conversationId is not used inside the effect body; it is listed as a dep solely to trigger re-attachment when a new conversation opens and detailPaneRef.current becomes non-null
-  React.useEffect(() => {
-    const pane = detailPaneRef.current;
-    const container = scrollContainerRef.current;
-    if (!pane || !container) return;
-
-    const handleUserInteraction = () => {
-      userScrolledRef.current = true;
-      releaseAnchorHold();
-    };
-    const handleContainerScroll = () => {
-      if (isWritingScrollRef.current) return;
-
-      if (programmaticScrollTopRef.current === container.scrollTop) {
-        programmaticScrollTopRef.current = null;
-        return;
-      }
-
-      programmaticScrollTopRef.current = null;
-      handleUserInteraction();
-    };
-
-    pane.addEventListener("wheel", handleUserInteraction, { passive: true });
-    pane.addEventListener("touchstart", handleUserInteraction, {
-      passive: true,
-    });
-    pane.addEventListener("keydown", handleUserInteraction, { passive: true });
-    container.addEventListener("scroll", handleContainerScroll, {
-      passive: true,
-    });
-
-    return () => {
-      pane.removeEventListener("wheel", handleUserInteraction);
-      pane.removeEventListener("touchstart", handleUserInteraction);
-      pane.removeEventListener("keydown", handleUserInteraction);
-      container.removeEventListener("scroll", handleContainerScroll);
-    };
-  }, [conversationId, releaseAnchorHold]);
 
   // Capture the default composer reply parent from the selected-event anchor
   // when the conversation first opens (or when the user explicitly navigates
@@ -569,33 +293,6 @@ export function InboxDetailPane({
     );
   }
 
-  const selectedMessage = messages.find((message) => message.isSelected);
-  const pendingReplyMessages: InboxDisplayMessage[] = replies.map((reply) => ({
-    ...reply,
-    depth: reply.depth ?? (selectedMessage?.depth ?? 0) + 1,
-    isSelected: false,
-    mentionNames: [],
-  }));
-  const displayMessages: InboxDisplayMessage[] =
-    messages.length > 0
-      ? [...messages, ...pendingReplyMessages]
-      : [
-          {
-            authorLabel: item.senderLabel,
-            authorPubkey: item.item.pubkey,
-            avatarUrl: item.avatarUrl,
-            content: item.preview,
-            createdAt: item.item.createdAt,
-            depth: 0,
-            fullTimestampLabel: item.fullTimestampLabel,
-            id: item.id,
-            isSelected: true,
-            mentionNames: item.mentionNames,
-            mentionPubkeysByName: item.mentionPubkeysByName,
-            timeLabel: formatTime(item.item.createdAt),
-          },
-          ...pendingReplyMessages,
-        ];
   const replyTarget =
     displayMessages.find((message) => message.id === replyTargetId) ?? null;
   // Explicit sub-message reply wins. Otherwise use the captured default parent
@@ -719,7 +416,8 @@ export function InboxDetailPane({
 
         <div
           aria-busy={isThreadContextLoading}
-          className="min-h-0 flex-1 overflow-y-auto overscroll-contain pb-32"
+          className="min-h-0 flex-1 overflow-y-auto overscroll-contain pb-32 [overflow-anchor:none]"
+          onScroll={onScroll}
           ref={scrollContainerRef}
         >
           <div ref={contentRef}>

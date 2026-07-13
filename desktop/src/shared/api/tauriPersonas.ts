@@ -124,12 +124,14 @@ export async function exportAgentSnapshot(
   memoryLevel: SnapshotMemoryLevel,
   format: SnapshotFormat,
   memorySourcePubkey?: string | null,
+  avatarPngDataUrl?: string,
 ): Promise<boolean> {
   return invokeTauri<boolean>("export_agent_snapshot", {
     id,
     memorySourcePubkey: memorySourcePubkey ?? null,
     memoryLevel,
     format,
+    avatarPngDataUrl: avatarPngDataUrl ?? null,
   });
 }
 
@@ -154,12 +156,14 @@ export async function encodeAgentSnapshotForSend(
   memoryLevel: SnapshotMemoryLevel,
   format: SnapshotFormat,
   memorySourcePubkey?: string | null,
+  avatarPngDataUrl?: string,
 ): Promise<EncodedSnapshotPayload> {
   return invokeTauri<EncodedSnapshotPayload>("encode_agent_snapshot_for_send", {
     id,
     memorySourcePubkey: memorySourcePubkey ?? null,
     memoryLevel,
     format,
+    avatarPngDataUrl: avatarPngDataUrl ?? null,
   });
 }
 

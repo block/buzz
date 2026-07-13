@@ -32,12 +32,12 @@ const ANALYST_PUBKEY =
   "953d3363262e86b770419834c53d2446409db6d918a57f8f339d495d54ab001f";
 
 const MOCK_UPLOAD_DESCRIPTOR = {
-  url: `https://mock.relay/media/${"a".repeat(64)}.json`,
+  url: `https://mock.relay/media/${"a".repeat(64)}.png`,
   sha256: "a".repeat(64),
   size: 1234,
-  type: "application/json",
+  type: "image/png",
   uploaded: Math.floor(Date.now() / 1000),
-  filename: "analyst.agent.json",
+  filename: "analyst.agent.png",
 };
 
 // ── Destination picker: channel/DM visibility ─────────────────────────────────
@@ -210,6 +210,7 @@ test("snapshot_send_config_only_calls_encode_upload_send_in_order", async ({
       {
         id: ANALYST_PERSONA_ID,
         displayName: "Analyst",
+        avatarUrl: "https://mock.relay/media/avatar.png",
         systemPrompt: "You are an analyst.",
       },
     ],
@@ -222,6 +223,13 @@ test("snapshot_send_config_only_calls_encode_upload_send_in_order", async ({
     ],
     uploadDescriptors: [MOCK_UPLOAD_DESCRIPTOR],
   });
+  await page.route("https://mock.relay/media/avatar.png", (route) =>
+    route.fulfill({
+      body: Buffer.from([0x89, 0x50, 0x4e, 0x47]),
+      contentType: "image/png",
+      headers: { "access-control-allow-origin": "*" },
+    }),
+  );
   await gotoAgentsPage(page);
 
   await page.getByLabel("Open actions for Analyst").click();
@@ -279,22 +287,30 @@ test("snapshot_send_config_only_calls_encode_upload_send_in_order", async ({
   const imeta = sendPayload?.mediaTags?.[0];
   expect(imeta).toBeDefined();
   const sha = "a".repeat(64);
-  const expectedUrl = `https://mock.relay/media/${sha}.json`;
+  const expectedUrl = `https://mock.relay/media/${sha}.png`;
   expect(imeta).toContain(`url ${expectedUrl}`);
-  expect(imeta).toContain("m application/json");
+  expect(imeta).toContain("m image/png");
   expect(imeta).toContain(`x ${sha}`);
   expect(imeta).toContain("size 1234");
   // The filename in the imeta comes from the encode payload's fileName — the
   // controller sets descriptorWithFilename.filename = fileName (the file produced
   // by encode_agent_snapshot_for_send), which the bridge hardcodes as
-  // "e2e-agent.agent.json".
-  expect(imeta).toContain("filename e2e-agent.agent.json");
+  // "e2e-agent.agent.png".
+  expect(imeta).toContain("filename e2e-agent.agent.png");
 
-  // The encode command itself produces "e2e-agent.agent.json" (bridge fixture).
+  // Send-in-Buzz always encodes PNG so the attachment itself provides the
+  // avatar thumbnail.
   const encodeEntry = log.find(
     (e) => e.command === "encode_agent_snapshot_for_send",
   );
   expect(encodeEntry).toBeTruthy();
+  const encodePayload = encodeEntry?.payload as
+    | { format?: string; avatarPngDataUrl?: string }
+    | undefined;
+  expect(encodePayload?.format).toBe("png");
+  expect(encodePayload?.avatarPngDataUrl).toEqual(
+    expect.stringMatching(/^data:image\/png;base64,/),
+  );
 
   // Close the dialog and navigate to #general to verify the AgentSnapshotCard renders.
   await page.getByRole("button", { name: "Close" }).click();
@@ -304,7 +320,7 @@ test("snapshot_send_config_only_calls_encode_upload_send_in_order", async ({
   // FileCard) with the exact filename that the encode step produced.
   const snapshotCard = page.getByTestId("agent-snapshot-card").last();
   await expect(snapshotCard).toBeVisible({ timeout: 5000 });
-  await expect(snapshotCard).toContainText("e2e-agent.agent.json");
+  await expect(snapshotCard).toContainText("e2e-agent.agent.png");
 });
 
 // ── Memory-bearing flow: gate stops before encode/upload/send ─────────────────

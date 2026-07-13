@@ -28,6 +28,7 @@ export function UserProfileSnapshotExportDialog({
             memoryLevel,
             format,
             memorySourcePubkey: linkedAgentPubkey,
+            avatarUrl: persona.avatarUrl,
           },
           {
             onSuccess: (saved) => {

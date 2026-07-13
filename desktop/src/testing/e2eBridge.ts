@@ -8902,8 +8902,8 @@ export function maybeInstallE2eTauriMocks() {
         // Specs assert invocation via __BUZZ_E2E_COMMANDS__.
         return true;
       case "encode_agent_snapshot_for_send": {
-        // Return a minimal valid `.agent.json` payload so the send flow can
-        // proceed through upload_media_bytes without a real Rust encode step.
+        // Return a minimal PNG-shaped payload so the send flow can proceed
+        // through upload_media_bytes without a real Rust encode step.
         // Optional encodeDelayMs lets specs observe the "preparing" phase before
         // the upload begins.
         const encodeDelayMs = activeConfig?.mock?.encodeDelayMs ?? 0;
@@ -8912,20 +8912,9 @@ export function maybeInstallE2eTauriMocks() {
             window.setTimeout(resolve, encodeDelayMs),
           );
         }
-        const jsonBytes = Array.from(
-          new TextEncoder().encode(
-            JSON.stringify({
-              format: "buzz-agent-snapshot",
-              version: 1,
-              definition: { system_prompt: null },
-              profile: { display_name: "E2E Agent" },
-              memory: { level: "none", entries: [] },
-            }),
-          ),
-        );
         return {
-          fileBytes: jsonBytes,
-          fileName: "e2e-agent.agent.json",
+          fileBytes: [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a],
+          fileName: "e2e-agent.agent.png",
         };
       }
       case "preview_agent_snapshot_import": {
