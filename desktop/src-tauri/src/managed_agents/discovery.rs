@@ -174,10 +174,10 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         underlying_cli: Some("claude"),
         cli_install_commands: &["curl -fsSL https://claude.ai/install.sh | bash"],
         cli_install_commands_windows: &["powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \"irm https://claude.ai/install.ps1 | iex\""],
-        adapter_install_commands: &["npm install -g @agentclientprotocol/claude-agent-acp"],
+        adapter_install_commands: &[],
         install_instructions_url: "https://github.com/agentclientprotocol/claude-agent-acp",
         cli_install_hint: "Install the Claude Code CLI via the official install script.",
-        adapter_install_hint: "Install the Claude Code ACP adapter via npm.",
+        adapter_install_hint: "The Claude Code ACP adapter ships with the Buzz desktop app.",
         skill_dir: Some(".claude/skills"),
         supports_acp_model_switching: false,
         model_env_var: None,
@@ -205,10 +205,10 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         underlying_cli: Some("codex"),
         cli_install_commands: &["curl -fsSL https://chatgpt.com/codex/install.sh | sh"],
         cli_install_commands_windows: &["powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \"irm https://chatgpt.com/codex/install.ps1 | iex\""],
-        adapter_install_commands: &["npm install -g @agentclientprotocol/codex-acp"],
+        adapter_install_commands: &[],
         install_instructions_url: "https://github.com/agentclientprotocol/codex-acp",
         cli_install_hint: "Install the Codex CLI via the official install script.",
-        adapter_install_hint: "Install the Codex ACP adapter via npm.",
+        adapter_install_hint: "The Codex ACP adapter ships with the Buzz desktop app.",
         skill_dir: Some(".codex/skills"),
         supports_acp_model_switching: false,
         model_env_var: None,
@@ -547,11 +547,11 @@ pub fn clear_resolve_cache() {
 // ── Adapter availability cache (Phase-2 badge fallback) ─────────────────────
 //
 // `build_managed_agent_summary` needs to compare the spawn-time adapter
-// availability against the *current* availability without triggering a live
-// `probe_codex_acp_major_version` subprocess on every poll cycle.  This cache
-// stores the last availability status of the codex-acp binary at its resolved
-// path.  It is warmed by `discover_acp_runtimes` (which already probes), so
-// the badge path reads warm data, and is invalidated by `clear_resolve_cache`
+// availability against the *current* availability without re-running command
+// resolution on every poll cycle.  This cache stores the last availability
+// status of the codex-acp binary at its resolved path.  It is warmed by
+// `discover_acp_runtimes` (which already resolves), so the badge path reads
+// warm data, and is invalidated by `clear_resolve_cache`
 // (called on every Doctor install and every `discover_acp_providers` call).
 
 fn adapter_availability_cache() -> &'static std::sync::Mutex<Option<AcpAvailabilityStatus>> {
@@ -1096,114 +1096,6 @@ pub(crate) fn classify_runtime(
     }
 }
 
-/// Probe the major version of a `codex-acp` binary by running `--version`.
-///
-/// The 1.x adapter (`@agentclientprotocol/codex-acp`) outputs
-/// `@agentclientprotocol/codex-acp <major>.<minor>.<patch>` on stdout and exits 0.
-/// The old 0.16.x adapter (`@zed-industries/codex-acp`) is a Rust binary that does
-/// not recognise `--version` and exits non-zero.
-///
-/// Returns the major version on success, `None` on any failure (non-zero exit,
-/// unparseable output, timeout, or missing binary).
-///
-/// The probe is bounded by a 5-second deadline. The child is polled with
-/// [`std::process::Child::try_wait`] (the repo's standard deadline pattern) and
-/// killed if it does not exit in time.
-///
-/// Stdout is redirected to a temporary file rather than a pipe, so forked
-/// descendants cannot hold EOF open. Reads from a regular file return EOF at its
-/// current write position regardless of inherited file descriptors, cross-platform.
-pub(crate) fn probe_codex_acp_major_version(binary_path: &Path) -> Option<u64> {
-    probe_codex_acp_major_version_with_path(
-        binary_path,
-        crate::managed_agents::readiness::cli_probe::augmented_path().as_deref(),
-    )
-}
-pub(crate) fn probe_codex_acp_major_version_with_path(
-    binary_path: &Path,
-    augmented_path: Option<&str>,
-) -> Option<u64> {
-    use std::io::{Read as _, Seek as _, SeekFrom};
-    use std::time::{Duration, Instant};
-    const VERSION_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
-
-    // A regular file returns EOF at its current size even when a descendant
-    // inherits its descriptor, bounding the post-exit read cross-platform.
-    let mut tmp = tempfile::tempfile().ok()?;
-
-    let mut command = Command::new(binary_path);
-    command.arg("--version");
-    if let Some(path) = augmented_path {
-        command.env("PATH", path);
-    }
-    let mut child = command
-        .stdout(tmp.try_clone().ok()?)
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .ok()?;
-
-    // Poll until the deadline rather than blocking on stdout EOF.
-    let deadline = Instant::now() + VERSION_PROBE_TIMEOUT;
-    let exit_status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) => {
-                if Instant::now() >= deadline {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return None;
-                }
-                std::thread::sleep(Duration::from_millis(50));
-            }
-            Err(_) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return None;
-            }
-        }
-    };
-
-    if !exit_status.success() {
-        return None;
-    }
-
-    // Read at most 4 KiB from the regular file without blocking.
-    tmp.seek(SeekFrom::Start(0)).ok()?;
-    let mut buf = Vec::with_capacity(128);
-    let _ = (&mut tmp as &mut dyn std::io::Read)
-        .take(4096)
-        .read_to_end(&mut buf);
-
-    let stdout = String::from_utf8_lossy(&buf);
-    // Output format: "<package-name> <major>.<minor>.<patch>"
-    let version_str = stdout.split_whitespace().last()?;
-    let major_str = version_str.split('.').next()?;
-    major_str.parse::<u64>().ok()
-}
-
-/// Classifies a resolved codex-acp binary path as [`AcpAvailabilityStatus::Available`]
-/// or [`AcpAvailabilityStatus::AdapterOutdated`].
-///
-/// The 0.16.x adapter (`@zed-industries/codex-acp`) does not recognise `--version`
-/// and exits non-zero — that probe failure yields `AdapterOutdated`. The 1.x adapter
-/// (`@agentclientprotocol/codex-acp`) prints its version and exits 0; major ≥ 1
-/// yields `Available`.
-///
-/// Used by `discover_acp_runtimes`, `cli_login_requirements`, and
-/// `install_acp_runtime_blocking` so the version-gate logic is not duplicated.
-pub(crate) fn codex_adapter_availability(path: &Path) -> AcpAvailabilityStatus {
-    match probe_codex_acp_major_version(path) {
-        Some(major) if major >= 1 => AcpAvailabilityStatus::Available,
-        _ => AcpAvailabilityStatus::AdapterOutdated,
-    }
-}
-
-/// Returns `true` when the codex-acp binary at `path` is outdated (major version < 1)
-/// or cannot be probed. Thin wrapper around [`codex_adapter_availability`].
-pub(crate) fn codex_adapter_is_outdated(path: &Path) -> bool {
-    codex_adapter_availability(path) == AcpAvailabilityStatus::AdapterOutdated
-}
-
 /// Intermediate struct built before the (potentially slow) auth probe phase.
 struct PartialEntry {
     runtime: &'static KnownAcpRuntime,
@@ -1224,20 +1116,8 @@ pub fn discover_acp_runtimes() -> Vec<AcpRuntimeCatalogEntry> {
                 .underlying_cli
                 .map(|cli| find_command(cli).is_some())
                 .unwrap_or(false);
-            let (mut availability, command, binary_path) =
+            let (availability, command, binary_path) =
                 classify_runtime(adapter_result, runtime.underlying_cli, underlying_cli_found);
-
-            // For codex-acp: when the adapter resolves as Available, probe the
-            // version. An adapter with major version < 1 is treated as outdated —
-            // the CODEX_CONFIG spawn contract requires 1.x.
-            if runtime.id == "codex"
-                && availability == AcpAvailabilityStatus::Available
-                && command.as_deref() == Some("codex-acp")
-            {
-                if let Some(path_str) = &binary_path {
-                    availability = codex_adapter_availability(&PathBuf::from(path_str));
-                }
-            }
 
             // Warm the adapter-availability cache for the badge fallback.
             // The cache is scoped to the codex runtime; other runtimes leave it
@@ -1265,7 +1145,6 @@ pub fn discover_acp_runtimes() -> Vec<AcpRuntimeCatalogEntry> {
                 AcpAvailabilityStatus::Available => cli_hint.to_string(),
                 AcpAvailabilityStatus::CliMissing => cli_hint.to_string(),
                 AcpAvailabilityStatus::AdapterMissing => adapter_hint.to_string(),
-                AcpAvailabilityStatus::AdapterOutdated => adapter_hint.to_string(),
                 AcpAvailabilityStatus::NotInstalled => {
                     if !cli_hint.is_empty() && !adapter_hint.is_empty() {
                         format!("{cli_hint} {adapter_hint}")

@@ -152,12 +152,6 @@ const overrides = new Map([
   // +18: CliConfigInvalid requirement surface for config-parse probe classification —
   // new Requirement variant + updated cli_login_requirements + 3 new probe-layer tests.
   // Load-bearing UX fix (bad config → clear diagnostic, not "run codex login").
-  // codex-acp-package-swap: AdapterOutdated version-probe in cli_login_requirements
-  // (+22 lines). Load-bearing — blocks login gate for deprecated 0.16.x adapter.
-  // code-reviewer fix-round: codex readiness gate tests — 2 new tests for
-  // outdated-adapter and garbage-version-output paths through the codex id gate
-  // (+140 lines: make_codex_runtime helper, PATH_MUTEX serializer, 2 test fns).
-  // Load-bearing test coverage; queued to split with the file generally.
   // +1: pub(crate) mod cli_probe declaration for doctor auth probe access.
   // +3: auth_probe_args: None + login_hint: None added to make_cli_runtime and
   // make_codex_runtime stubs (new KnownAcpRuntime fields).
@@ -167,7 +161,10 @@ const overrides = new Map([
   // Windows Doctor install fix: cli_install_commands_windows field added to test stubs.
   // team-instructions-first-class: ManagedAgentRecord fixture gains the new
   // team_id field (+1 line).
-  ["src-tauri/src/managed_agents/readiness.rs", 1765],
+  // bundle-acps: codex version-gate retirement removes the AdapterOutdated
+  // probe from cli_login_requirements and its gate tests, both obsolete now
+  // that the bridges ship bundled; ratcheting 1765 -> 1599 to bank the headroom.
+  ["src-tauri/src/managed_agents/readiness.rs", 1599],
   // applyWorkspace reposDir parameter plus the validateReposDir binding,
   // threaded through Tauri invokes for configurable repos_dir, plus the
   // harness-persona-sync `harnessOverride` create-input bit — load-bearing
@@ -208,7 +205,6 @@ const overrides = new Map([
   // split with the rest of this file.
   ["src/shared/api/tauri.ts", 1340],
   // doctor-npm-eacces-preflight: hint field added to InstallStepResult (+1 line).
-  // codex-acp-package-swap: "adapter_outdated" variant added to AcpAvailabilityStatus (+1 line).
   // doctor-install-reliability: AuthStatus tagged union + nodeRequired/authStatus/
   // loginHint fields on AcpRuntimeCatalogEntry (+14 lines). Load-bearing new feature.
   // agent-lifecycle-fixes: GlobalAgentConfigSaveResult type grows with
@@ -223,8 +219,9 @@ const overrides = new Map([
   // field.
   // bundle-acps: NodeRuntimeCheck + NodeRuntimeRequirement types for the
   // bundled-bridge Node.js doctor check (+23 lines on rebase union with
-  // main's Git Bash / signout-wipe / team-instructions type growth).
-  ["src/shared/api/types.ts", 1070],
+  // main's Git Bash / signout-wipe / team-instructions type growth);
+  // "adapter_outdated" availability retired with the codex version gate (-1 line).
+  ["src/shared/api/types.ts", 1069],
   // readiness-gate: PersonaDialog.tsx threads computeLocalModeGate +
   // requiredCredentialEnvKeys + RequiredFieldLabel so the "New agent" dialog
   // shows required markers and credential amber rows (parity with
@@ -258,14 +255,6 @@ const overrides = new Map([
   // agent-config-propagation: the agent_command_override decision family
   // (divergent / create-time / update-time / apply) moved to
   // discovery/overrides.rs; ratcheting 802 -> 685 to bank the headroom.
-  // codex-acp-package-swap: probe_codex_acp_major_version (+24 lines) +
-  // AdapterOutdated version-gate in discover_acp_runtimes (+22 lines). Both
-  // load-bearing — required to detect the deprecated 0.16.x adapter and
-  // prevent silent relay breakage after the spawn-contract change.
-  // codex-acp-package-swap follow-up: tempfile-based bounded stdout read
-  // (+18 lines), codex_adapter_availability/is_outdated helpers (+16 lines),
-  // cross-platform probe contract. All load-bearing — required for correct
-  // probe behaviour on Windows and descendant-process edge cases.
   // doctor-install-reliability: refreshable login_shell_path cache,
   // find_nvm_default_bin + parse_semver_tag helpers, auth probe cache +
   // probe_auth_status/cached_auth_status, runtime_needs_npm, probe_args_for,
@@ -286,11 +275,12 @@ const overrides = new Map([
   // +13: fetch_login_shell_path_inner Windows guard (POSIX PATH → None).
   // resolve_git_bash made pub(crate) for Windows test access.
   // +1: login_shell_candidates doc comment expanded for resolve_bash_path.
-  // bundle-acps: bundled ACP bridge check at the top of the resolution sweep
-  // (+4 lines over the Windows baseline). Temporary — the codex version-gate
-  // retirement later in the same series deletes far more from this file and
-  // ratchets this back down.
-  ["src-tauri/src/managed_agents/discovery.rs", 1371],
+  // bundle-acps: bundled ACP bridge check at the top of the resolution sweep,
+  // then the codex version-gate retirement (probe_codex_acp_major_version,
+  // codex_adapter_availability/is_outdated, AdapterOutdated arm) made
+  // obsolete by pinned bundling; ratcheting 1371 -> 1250 to bank the
+  // deletions (main's Windows Doctor install growth stays).
+  ["src-tauri/src/managed_agents/discovery.rs", 1250],
   // rebase over codex-acp-package-swap: its version-probe tests union with the
   // doctor-install-reliability nvm/login-shell/semver tests — each side alone
   // stayed under the 1000 default; the union exceeds it.
@@ -302,7 +292,10 @@ const overrides = new Map([
   // +32: deterministic .cmd resolver + no-registry + install_shell_from tests.
   // team-instructions-first-class: record_with test fixture gained the new
   // ManagedAgentRecord.team_id field (+1 line) alongside persona_team_dir.
-  ["src-tauri/src/managed_agents/discovery/tests.rs", 1271],
+  // bundle-acps: version-gate retirement deletes the probe/availability test
+  // sections; ratcheting 1271 -> 1067 to bank the deletions (main's Windows
+  // Doctor test growth keeps this above the 1000 default).
+  ["src-tauri/src/managed_agents/discovery/tests.rs", 1067],
   // identity-import-keyring: the identity resolution state machine's behavioral
   // matrix (46 tests over FakeIdentityStore — probe × marker × file cells,
   // adoption / read-back-corruption / marker-failure arms, recovery-mode

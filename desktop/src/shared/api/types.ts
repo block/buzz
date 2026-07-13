@@ -557,7 +557,6 @@ export type GitBashPrerequisite = {
 export type AcpAvailabilityStatus =
   | "available"
   | "adapter_missing"
-  | "adapter_outdated"
   | "cli_missing"
   | "not_installed";
 

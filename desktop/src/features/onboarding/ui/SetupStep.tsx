@@ -353,29 +353,6 @@ function RuntimeDetails({ runtime }: { runtime: AcpRuntimeCatalogEntry }) {
     );
   }
 
-  if (runtime.availability === "adapter_outdated") {
-    return (
-      <>
-        <p className="mt-2 text-sm leading-5 text-muted-foreground">
-          ACP adapter detected but outdated — reinstall required.
-        </p>
-        <p className="mt-1 text-xs leading-5 text-muted-foreground/80">
-          This updates the machine-global{" "}
-          <code className="rounded bg-muted px-0.5 text-2xs">codex-acp</code>{" "}
-          adapter. Older Buzz releases using the legacy adapter contract may
-          lose community access until{" "}
-          <code className="rounded bg-muted px-0.5 text-2xs">
-            @zed-industries/codex-acp@0.16.0
-          </code>{" "}
-          is restored.
-        </p>
-        <p className="mt-1 text-xs leading-5 text-muted-foreground/80">
-          {runtime.installHint}
-        </p>
-      </>
-    );
-  }
-
   if (runtime.availability === "cli_missing") {
     return (
       <>

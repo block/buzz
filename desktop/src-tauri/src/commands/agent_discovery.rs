@@ -19,40 +19,24 @@ fn active_installs() -> &'static std::sync::Mutex<std::collections::HashSet<Stri
     ACTIVE.get_or_init(|| Mutex::new(HashSet::new()))
 }
 
-/// Returns the adapter install commands that `install_acp_runtime_blocking` would
-/// run for `runtime_id` given a resolved adapter binary at `adapter_path` (or
-/// `None` if none was found).
+/// Returns the adapter install commands that `install_acp_runtime_blocking`
+/// would run given a resolved adapter binary at `adapter_path` (or `None` if
+/// none was found).
 ///
-/// Returns `None` when no install is needed (adapter is present and current).
-/// Returns `Some(cmds)` when the adapter is missing or (for codex) outdated.
-///
-/// For the codex **outdated** case the returned sequence is a two-step
-/// reinstall: first uninstall the old `@zed-industries/codex-acp` package
-/// (idempotent — exit 0 when absent), then install the new
-/// `@agentclientprotocol/codex-acp`.  This is required because both packages
-/// install a global binary named `codex-acp`, and npm ≥7 refuses to overwrite
-/// a bin file owned by a different package with `EEXIST`.
-///
-/// For the **missing** case the catalog's `adapter_install_commands` are used
-/// as-is (no prior package to remove).
+/// Returns `None` when no install is needed (adapter is present). Returns
+/// `Some(cmds)` — the catalog's `adapter_install_commands` — when the adapter
+/// is missing. Bundled bridges (claude, codex) have no install commands, so a
+/// missing bundled bridge yields an empty plan.
 ///
 /// This is a pure planning function: it never spawns a process.  Tests use it to
 /// assert the correct install command is selected without touching real npm.
 pub(crate) fn plan_adapter_install<'c>(
-    runtime_id: &str,
     adapter_path: Option<&std::path::Path>,
     adapter_install_commands: &'c [&'c str],
 ) -> Option<Vec<&'c str>> {
     match adapter_path {
-        // Adapter present and current — no install needed.
-        Some(_) if runtime_id != "codex" => None,
-        Some(path) if !crate::managed_agents::codex_adapter_is_outdated(path) => None,
-        // Codex adapter is outdated: uninstall the old package first so npm
-        // doesn't hit EEXIST on the shared `codex-acp` bin-link, then install.
-        Some(_) => Some(vec![
-            "npm uninstall -g @zed-industries/codex-acp",
-            "npm install -g @agentclientprotocol/codex-acp",
-        ]),
+        // Adapter present — no install needed.
+        Some(_) => None,
         // Adapter missing: use the catalog's install commands directly.
         None => Some(adapter_install_commands.to_vec()),
     }
@@ -177,19 +161,16 @@ fn install_acp_runtime_blocking(runtime_id: &str) -> Result<InstallRuntimeResult
         }
     }
 
-    // Phase 2: Install adapter if missing (or outdated) and commands are available.
-    // For the codex runtime, "found" is not enough — the resolved binary must also
-    // pass the 1.x version gate. An outdated 0.16.x adapter must be overwritten by
-    // the new npm install so the CODEX_CONFIG spawn contract works correctly.
+    // Phase 2: Install adapter if missing and commands are available. The
+    // bundled bridges (claude, codex) have no adapter install commands — they
+    // ship with the app.
     let adapter_path = runtime
         .commands
         .iter()
         .find_map(|cmd| crate::managed_agents::resolve_command(cmd));
-    if let Some(cmds) = plan_adapter_install(
-        runtime_id,
-        adapter_path.as_deref(),
-        runtime.adapter_install_commands,
-    ) {
+    if let Some(cmds) =
+        plan_adapter_install(adapter_path.as_deref(), runtime.adapter_install_commands)
+    {
         for cmd in cmds {
             if is_npm_global_install(cmd) {
                 if let Some(step) = npm_preflight_check("adapter", cmd) {
@@ -1196,101 +1177,42 @@ mod tests {
         assert!(npm_install_target_is_writable(dir.path()));
     }
 
-    // ── adapter_needs_install (codex version gate) ────────────────────────────
+    // ── plan_adapter_install ──────────────────────────────────────────────────
 
     /// plan_adapter_install is the pure install-plan seam used by
     /// install_acp_runtime_blocking. These tests verify:
-    ///   - A 0.x binary (AdapterOutdated) → uninstall-then-install sequence returned
-    ///   - A 1.x binary (Available) → None (no reinstall)
+    ///   - A resolved binary → None (no install, no version probing)
     ///   - Missing binary (None path) → catalog install commands returned
-    #[cfg(unix)]
+    ///   - Missing bundled bridge (empty catalog commands) → empty plan
     #[test]
-    fn test_plan_adapter_install_selects_npm_command_for_outdated_0x_codex_binary() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let dir = tempfile::tempdir().unwrap();
-        let bin = dir.path().join("codex-acp");
-        // Simulate old 0.16.x: --version exits non-zero (unrecognised flag)
-        std::fs::write(&bin, "#!/bin/sh\nexit 1\n").expect("write script");
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755))
-            .expect("chmod script");
-
-        let install_cmds = &["npm install -g @agentclientprotocol/codex-acp"];
-        let plan = plan_adapter_install("codex", Some(&bin), install_cmds);
-
-        assert!(
-            plan.is_some(),
-            "0.x codex adapter must trigger install plan"
-        );
-        let cmds = plan.unwrap();
-        // Outdated arm: must uninstall the old package first, then install new.
-        assert_eq!(
-            cmds,
-            vec![
-                "npm uninstall -g @zed-industries/codex-acp",
-                "npm install -g @agentclientprotocol/codex-acp",
-            ],
-            "outdated codex adapter must produce uninstall-then-install sequence; got {cmds:?}"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn test_plan_adapter_install_returns_none_for_current_1x_codex_binary() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let dir = tempfile::tempdir().unwrap();
-        let bin = dir.path().join("codex-acp");
-        // Simulate 1.x adapter: outputs version and exits 0
-        std::fs::write(
-            &bin,
-            "#!/bin/sh\necho '@agentclientprotocol/codex-acp 1.1.2'\nexit 0\n",
-        )
-        .expect("write script");
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755))
-            .expect("chmod script");
-
-        let install_cmds = &["npm install -g @agentclientprotocol/codex-acp"];
-        let plan = plan_adapter_install("codex", Some(&bin), install_cmds);
-
+    fn test_plan_adapter_install_returns_none_for_resolved_binary() {
+        // Any resolved binary means no install needed — the retired codex
+        // version gate must not come back as a reinstall trigger.
+        let install_cmds = &["npm install -g @example/some-acp"];
+        let plan = plan_adapter_install(Some(std::path::Path::new("/usr/bin/true")), install_cmds);
         assert!(
             plan.is_none(),
-            "1.x codex adapter must not trigger install plan (no reinstall needed)"
+            "resolved adapter binary must not trigger an install plan"
         );
     }
 
     #[test]
     fn test_plan_adapter_install_returns_catalog_cmds_when_no_adapter_path() {
-        let install_cmds = &["npm install -g @agentclientprotocol/codex-acp"];
-        let plan = plan_adapter_install("codex", None, install_cmds);
-        assert!(plan.is_some(), "missing adapter must trigger install plan");
-        // Missing arm: use the catalog's install commands directly (no prior
-        // package to uninstall — fresh install, not a reinstall).
+        let install_cmds = &["npm install -g @example/some-acp"];
+        let plan = plan_adapter_install(None, install_cmds);
         assert_eq!(
-            plan.unwrap(),
-            vec!["npm install -g @agentclientprotocol/codex-acp"],
-            "missing codex adapter must use catalog install commands only"
+            plan,
+            Some(vec!["npm install -g @example/some-acp"]),
+            "missing adapter must use catalog install commands"
         );
     }
 
-    #[cfg(unix)]
     #[test]
-    fn test_plan_adapter_install_non_codex_runtime_never_reinstalls() {
-        use std::os::unix::fs::PermissionsExt;
-
-        // For non-codex runtimes, any resolved binary means no install needed.
-        let dir = tempfile::tempdir().unwrap();
-        let bin = dir.path().join("goose-acp");
-        std::fs::write(&bin, "#!/bin/sh\nexit 1\n").expect("write script");
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755))
-            .expect("chmod script");
-
-        let install_cmds = &["npm install -g @block/goose-acp"];
-        let plan = plan_adapter_install("goose", Some(&bin), install_cmds);
-        assert!(
-            plan.is_none(),
-            "non-codex runtime with resolved binary must not trigger reinstall"
-        );
+    fn test_plan_adapter_install_empty_for_missing_bundled_bridge() {
+        // Bundled bridges (claude, codex) carry no install commands: a
+        // missing bundled bridge yields an empty plan (zero install steps).
+        let plan = plan_adapter_install(None, &[]);
+        assert_eq!(plan, Some(vec![]));
     }
 
     // ── should_restart_after_install ─────────────────────────────────────────
@@ -1361,9 +1283,9 @@ mod tests {
         assert!(
             availability_drift(
                 Some(&AcpAvailabilityStatus::Available),
-                Some(AcpAvailabilityStatus::AdapterOutdated),
+                Some(AcpAvailabilityStatus::AdapterMissing),
             ),
-            "Available stamped vs AdapterOutdated current must be detected as drift"
+            "Available stamped vs AdapterMissing current must be detected as drift"
         );
     }
 

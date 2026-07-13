@@ -39,7 +39,6 @@
 //! UI display only.
 
 use std::collections::BTreeMap;
-use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
@@ -47,8 +46,7 @@ use crate::managed_agents::{
     agent_env::baked_build_env,
     config_bridge::read_goose_file_config,
     discovery::{
-        classify_runtime, codex_adapter_availability, find_command, known_acp_runtime,
-        resolve_command, KnownAcpRuntime,
+        classify_runtime, find_command, known_acp_runtime, resolve_command, KnownAcpRuntime,
     },
     env_vars::merged_user_env,
     global_config::GlobalAgentConfig,
@@ -510,25 +508,8 @@ fn cli_login_requirements(
         .map(|cli| find_command(cli).is_some())
         .unwrap_or(false);
 
-    let (availability, cmd, adapter_path) =
+    let (availability, _cmd, _adapter_path) =
         classify_runtime(adapter_result, runtime.underlying_cli, underlying_cli_found);
-
-    // For codex-acp: if the adapter resolved as Available, probe the version.
-    // An adapter with major version < 1 is the deprecated package and must be
-    // treated as outdated (blocks login probe — the agent can't reach the relay).
-    // Guard on `cmd == "codex-acp"` to match the discovery path and avoid
-    // probing when the runtime resolves via an alias command.
-    let availability = if runtime.id == "codex"
-        && availability == AcpAvailabilityStatus::Available
-        && cmd.as_deref() == Some("codex-acp")
-    {
-        adapter_path
-            .as_deref()
-            .map(|path_str| codex_adapter_availability(Path::new(path_str)))
-            .unwrap_or(availability)
-    } else {
-        availability
-    };
 
     match availability {
         AcpAvailabilityStatus::Available => {
@@ -1129,153 +1110,6 @@ mod tests {
                 crate::managed_agents::AcpAvailabilityStatus::Available,
                 "tooling installed, probe fails → Available (logged-out)"
             );
-        }
-    }
-
-    // ── codex readiness version gate ───────────────────────────────────────
-
-    /// Build a minimal `KnownAcpRuntime` for testing the codex version gate.
-    /// `adapter_commands` are the exact strings passed to `find_command` — use
-    /// `&["codex-acp"]` when the binary is on PATH, or `&[<absolute_path>]`
-    /// when resolving via absolute path.  `underlying_cli` is a portable
-    /// stand-in so the adapter is not misclassified as `CliMissing`.
-    fn make_codex_runtime(
-        adapter_commands: &'static [&'static str],
-        underlying_cli: Option<&'static str>,
-    ) -> KnownAcpRuntime {
-        KnownAcpRuntime {
-            id: "codex",
-            label: "Codex",
-            commands: adapter_commands,
-            aliases: &[],
-            avatar_url: "",
-            mcp_command: None,
-            mcp_hooks: false,
-            underlying_cli,
-            cli_install_commands: &[],
-            cli_install_commands_windows: &[],
-            adapter_install_commands: &[],
-            install_instructions_url: "",
-            cli_install_hint: "",
-            adapter_install_hint: "",
-            skill_dir: None,
-            supports_acp_model_switching: false,
-            config_file_path: None,
-            config_file_format: None,
-            model_env_var: None,
-            provider_env_var: None,
-            provider_locked: false,
-            default_env: &[],
-            supports_acp_native_config: false,
-            thinking_env_var: None,
-            max_tokens_env_var: None,
-            context_limit_env_var: None,
-            required_normalized_fields: &[],
-            login_hint: None,
-            auth_probe_args: None,
-        }
-    }
-
-    /// Build a temp dir containing a `codex-acp` script with the given body,
-    /// prepend it to PATH, and clear the resolve cache.  Returns the temp dir
-    /// and the original PATH string for restoration.
-    #[cfg(unix)]
-    fn setup_temp_codex_acp(script_body: &str) -> (tempfile::TempDir, String) {
-        use std::os::unix::fs::PermissionsExt;
-
-        let dir = tempfile::tempdir().expect("create temp dir");
-        let bin = dir.path().join("codex-acp");
-        std::fs::write(&bin, script_body).expect("write script");
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755))
-            .expect("chmod script");
-
-        let original_path = std::env::var("PATH").unwrap_or_default();
-        let new_path = format!("{}:{}", dir.path().display(), original_path);
-        std::env::set_var("PATH", &new_path);
-        crate::managed_agents::clear_resolve_cache();
-
-        (dir, original_path)
-    }
-
-    /// Restore PATH and clear the resolve cache after a PATH-mutating test.
-    #[cfg(unix)]
-    fn restore_path(original: &str) {
-        std::env::set_var("PATH", original);
-        crate::managed_agents::clear_resolve_cache();
-    }
-
-    /// Codex readiness: outdated adapter (exits non-zero) → AdapterOutdated,
-    /// login probe skipped.
-    #[cfg(unix)]
-    #[test]
-    fn cli_login_requirements_codex_outdated_adapter_emits_adapter_outdated() {
-        let _guard = crate::managed_agents::lock_path_mutex();
-
-        let (dir, orig) = setup_temp_codex_acp("#!/bin/sh\nexit 1\n");
-        let exe = present_binary_str();
-        // underlying_cli = running test binary (always present, never probed)
-        let rt = make_codex_runtime(&["codex-acp"], Some(exe));
-        let reqs = cli_login_requirements(
-            &[exe, "--buzz-probe-must-not-run-xyz"],
-            "run `codex login`",
-            &rt,
-        );
-
-        restore_path(&orig);
-        drop(dir);
-
-        assert!(
-            !reqs.is_empty(),
-            "outdated codex adapter must produce a requirement; got {reqs:?}"
-        );
-        if let Requirement::CliLogin {
-            ref availability, ..
-        } = reqs[0]
-        {
-            assert_eq!(
-                *availability,
-                crate::managed_agents::AcpAvailabilityStatus::AdapterOutdated,
-                "0.x codex adapter must yield AdapterOutdated; got {availability:?}"
-            );
-        } else {
-            panic!("expected CliLogin requirement; got {:?}", reqs[0]);
-        }
-    }
-
-    /// Codex readiness: adapter exits 0 but output is not a parseable version
-    /// → AdapterOutdated (garbage output treated as outdated, same as non-zero).
-    #[cfg(unix)]
-    #[test]
-    fn cli_login_requirements_codex_garbage_version_output_emits_adapter_outdated() {
-        let _guard = crate::managed_agents::lock_path_mutex();
-
-        let (dir, orig) = setup_temp_codex_acp("#!/bin/sh\necho 'not a version string'\nexit 0\n");
-        let exe = present_binary_str();
-        let rt = make_codex_runtime(&["codex-acp"], Some(exe));
-        let reqs = cli_login_requirements(
-            &[exe, "--buzz-probe-must-not-run-xyz"],
-            "run `codex login`",
-            &rt,
-        );
-
-        restore_path(&orig);
-        drop(dir);
-
-        assert!(
-            !reqs.is_empty(),
-            "garbage version output must produce a requirement; got {reqs:?}"
-        );
-        if let Requirement::CliLogin {
-            ref availability, ..
-        } = reqs[0]
-        {
-            assert_eq!(
-                *availability,
-                crate::managed_agents::AcpAvailabilityStatus::AdapterOutdated,
-                "unparseable version output must yield AdapterOutdated; got {availability:?}"
-            );
-        } else {
-            panic!("expected CliLogin requirement; got {:?}", reqs[0]);
         }
     }
 

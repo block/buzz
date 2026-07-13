@@ -79,10 +79,11 @@ test("extractConfigNudge parses cli_login requirement", () => {
   assert.deepEqual(extractConfigNudge(withSentinel("prose", payload)), payload);
 });
 
-test("extractConfigNudge parses cli_login with adapter_outdated availability", () => {
-  // Backend emits availability: "adapter_outdated" when codex-acp is old (0.16.x).
-  // isConfigNudgeRequirement must accept this literal — regression test for the
-  // validator omission that caused it to be silently rejected.
+test("extractConfigNudge rejects retired adapter_outdated availability", () => {
+  // The codex version gate was retired when the ACP bridges started shipping
+  // bundled with the app — "adapter_outdated" is no longer a valid
+  // availability. Stale nudge JSON emitted by an older app version must not
+  // parse into a card the current UI has no rendering for.
   const payload = {
     agent_name: "Codex",
     agent_pubkey: CODEX_PUBKEY,
@@ -95,10 +96,10 @@ test("extractConfigNudge parses cli_login with adapter_outdated availability", (
       },
     ],
   };
-  assert.deepEqual(
+  assert.equal(
     extractConfigNudge(withSentinel("prose", payload)),
-    payload,
-    "adapter_outdated availability must be accepted by the validator",
+    null,
+    "retired adapter_outdated availability must be rejected by the validator",
   );
 });
 

@@ -38,8 +38,6 @@ function StatusIcon({
       return <CheckCircle2 className="h-4 w-4 text-status-added" />;
     case "adapter_missing":
       return <AlertTriangle className="h-4 w-4 text-warning" />;
-    case "adapter_outdated":
-      return <AlertTriangle className="h-4 w-4 text-warning" />;
     case "cli_missing":
       return <AlertTriangle className="h-4 w-4 text-warning" />;
     case "not_installed":
@@ -183,7 +181,6 @@ function RuntimeRow({
         runtime.availability === "available"
           ? "bg-background/60"
           : runtime.availability === "adapter_missing" ||
-              runtime.availability === "adapter_outdated" ||
               runtime.availability === "cli_missing"
             ? "bg-amber-500/5"
             : "bg-muted/20",
@@ -277,38 +274,6 @@ function RuntimeRow({
               {runtime.installHint}
             </p>
             <NodeRequiredOrInstall
-              hasError={installError !== null}
-              isInstalling={isInstalling}
-              onInstall={onInstall}
-              runtime={runtime}
-            />
-          </>
-        ) : runtime.availability === "adapter_outdated" ? (
-          <>
-            <p className="mt-1 text-sm font-normal text-muted-foreground">
-              ACP adapter found at{" "}
-              <code className="rounded bg-muted px-1 py-0.5 text-2xs">
-                {runtime.binaryPath ?? "unknown path"}
-              </code>{" "}
-              but it is from the deprecated package. Reinstall to enable relay
-              connectivity.
-            </p>
-            <p className="mt-1 text-sm font-normal text-muted-foreground">
-              This updates the machine-global{" "}
-              <code className="rounded bg-muted px-1 py-0.5 text-2xs">
-                codex-acp
-              </code>{" "}
-              adapter. Older Buzz releases using the legacy adapter contract may
-              lose community access until{" "}
-              <code className="rounded bg-muted px-1 py-0.5 text-2xs">
-                @zed-industries/codex-acp@0.16.0
-              </code>{" "}
-              is restored.
-            </p>
-            <p className="mt-1 text-sm font-normal text-muted-foreground">
-              {runtime.installHint}
-            </p>
-            <InstallActions
               hasError={installError !== null}
               isInstalling={isInstalling}
               onInstall={onInstall}
