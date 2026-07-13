@@ -747,6 +747,7 @@ export function useAnchoredScroll({
   // mid-history, native scroll anchoring (overflow-anchor) holds the reading
   // row across the reflow, so there's nothing to do.
   // ---------------------------------------------------------------------------
+  // biome-ignore lint/correctness/useExhaustiveDependencies: channelId deliberately re-subscribes after a keyed or conditional scroll-content mount replaces ref.current.
   React.useEffect(() => {
     const content = contentRef.current;
     if (!content || typeof ResizeObserver === "undefined") return;
@@ -765,6 +766,7 @@ export function useAnchoredScroll({
     observer.observe(content);
     return () => observer.disconnect();
   }, [
+    channelId,
     contentRef,
     repinPinnedCenter,
     scrollContainerRef,
@@ -773,6 +775,7 @@ export function useAnchoredScroll({
 
   // Pinned centers survive our own corrections but release as soon as the
   // reader deliberately takes control of the scroll position.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: channelId deliberately re-subscribes after a keyed or conditional scroll-container mount replaces ref.current.
   React.useEffect(() => {
     if (!pinTargetCentered) return;
     const container = scrollContainerRef.current;
@@ -791,7 +794,7 @@ export function useAnchoredScroll({
       container.removeEventListener("touchstart", handleUserInteraction);
       container.removeEventListener("keydown", handleUserInteraction);
     };
-  }, [pinTargetCentered, releasePinnedCenter, scrollContainerRef]);
+  }, [channelId, pinTargetCentered, releasePinnedCenter, scrollContainerRef]);
 
   // ---------------------------------------------------------------------------
   // Target message handling (deep link, jump-to-reply, etc.). Distinct from
