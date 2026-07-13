@@ -46,12 +46,13 @@ async function ensureTimelineScrollable(
   receiverPage: Page,
   channelName: string,
   prefix: string,
+  minDistance = 160,
 ) {
   for (let index = 0; index < 24; index += 1) {
     const metrics = await getTimelineMetrics(receiverPage);
     if (
       metrics.scrollHeight >
-      metrics.clientHeight + metrics.composerHeight + 160
+      metrics.clientHeight + metrics.composerHeight + minDistance
     ) {
       return;
     }
@@ -67,7 +68,7 @@ async function ensureTimelineScrollable(
 
   const metrics = await getTimelineMetrics(receiverPage);
   expect(metrics.scrollHeight).toBeGreaterThan(
-    metrics.clientHeight + metrics.composerHeight + 160,
+    metrics.clientHeight + metrics.composerHeight + minDistance,
   );
 }
 
@@ -92,6 +93,18 @@ async function createAndJoinSharedStream(
   await expect(memberPage.getByTestId("stream-list")).toContainText(
     channelName,
   );
+
+  // Channel title/sidebar selection can update before the relay has reconciled
+  // the membership event. Wait until both contexts can participate before a
+  // test relies on live delivery between them. The 30s bound tolerates known
+  // slow convergence; a recurring timeout is evidence to investigate the
+  // membership read-after-write path, not a reason to extend this test wait.
+  await expect(ownerPage.getByTestId("message-input")).toBeEnabled({
+    timeout: 30_000,
+  });
+  await expect(memberPage.getByTestId("message-input")).toBeEnabled({
+    timeout: 30_000,
+  });
 }
 
 async function sendChannelMessage(
@@ -172,7 +185,7 @@ async function scrollTimelineAwayFromBottom(page: Page, minDistance = 160) {
       // so waiting for it guarantees the anchor is in the away-from-bottom
       // branch before callers send the message they expect to be counted.
       await expect(page.getByTestId("message-scroll-to-latest")).toBeVisible();
-      return;
+      return metrics.distanceFromBottom;
     }
   }
 
@@ -498,12 +511,23 @@ test("keeps scroll position when new messages arrive above the fold", async ({
     await pageTwo.goto("/");
     await createAndJoinSharedStream(pageOne, pageTwo, channelName);
 
-    await ensureTimelineScrollable(pageOne, pageTwo, channelName, prefix);
+    const minScrollableDistance = 480;
+    const minAwayDistance = 80;
+    await ensureTimelineScrollable(
+      pageOne,
+      pageTwo,
+      channelName,
+      prefix,
+      minScrollableDistance,
+    );
     await expect
       .poll(async () => (await getTimelineMetrics(pageTwo)).distanceFromBottom)
       .toBeLessThan(8);
 
-    await scrollTimelineAwayFromBottom(pageTwo);
+    const distanceBeforeDelivery = await scrollTimelineAwayFromBottom(
+      pageTwo,
+      minAwayDistance,
+    );
 
     await sendChannelMessage(pageOne, {
       channelName,
@@ -515,7 +539,7 @@ test("keeps scroll position when new messages arrive above the fold", async ({
     );
     await expect
       .poll(async () => (await getTimelineMetrics(pageTwo)).distanceFromBottom)
-      .toBeGreaterThan(160);
+      .toBeGreaterThanOrEqual(distanceBeforeDelivery - 8);
 
     await pageTwo.getByTestId("message-scroll-to-latest").click();
 
