@@ -570,6 +570,22 @@ mod tests {
         assert!(migrations[6]
             .sql
             .as_str()
+            .contains("CREATE TRIGGER trg_events_nip_rs_watermark"));
+        assert!(migrations[6]
+            .sql
+            .as_str()
+            .contains("stale NIP-RS event rejected by durable watermark"));
+        assert!(migrations[6]
+            .sql
+            .as_str()
+            .contains("CREATE TRIGGER trg_events_purge_soft_deleted_nip_rs"));
+        assert!(migrations[6]
+            .sql
+            .as_str()
+            .contains("CREATE TRIGGER trg_event_mentions_require_live_event"));
+        assert!(migrations[6]
+            .sql
+            .as_str()
             .contains("INSERT INTO parameterized_event_watermarks"));
         assert!(migrations[6]
             .sql

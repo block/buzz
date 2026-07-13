@@ -3121,6 +3121,167 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires Postgres"]
+    async fn database_guard_covers_legacy_writer_and_nip09_deletion() {
+        use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
+
+        let db = setup_db().await;
+        let community = CommunityId::from_uuid(make_community(&db.pool).await);
+        let keys = Keys::generate();
+        let d_tag = format!("read-state:{}", "b".repeat(32));
+        let tags = vec![
+            Tag::parse(["d", d_tag.as_str()]).expect("d tag"),
+            Tag::parse(["t", "read-state"]).expect("t tag"),
+        ];
+        let base = Timestamp::now().as_secs();
+        let a = EventBuilder::new(Kind::Custom(buzz_core::kind::KIND_READ_STATE as u16), "A")
+            .tags(tags.clone())
+            .custom_created_at(Timestamp::from(base))
+            .sign_with_keys(&keys)
+            .expect("sign A");
+        let x = EventBuilder::new(Kind::Custom(buzz_core::kind::KIND_READ_STATE as u16), "X")
+            .tags(tags.clone())
+            .custom_created_at(Timestamp::from(base + 1))
+            .sign_with_keys(&keys)
+            .expect("sign X");
+        let b = EventBuilder::new(Kind::Custom(buzz_core::kind::KIND_READ_STATE as u16), "B")
+            .tags(tags)
+            .custom_created_at(Timestamp::from(base + 2))
+            .sign_with_keys(&keys)
+            .expect("sign B");
+
+        async fn legacy_insert(
+            pool: &PgPool,
+            community: CommunityId,
+            event: &nostr::Event,
+            d_tag: &str,
+        ) -> std::result::Result<sqlx::postgres::PgQueryResult, sqlx::Error> {
+            sqlx::query(
+                "INSERT INTO events (community_id, id, pubkey, created_at, kind, tags, content, sig, received_at, d_tag) \
+                 VALUES ($1, $2, $3, to_timestamp($4), $5, $6, $7, $8, NOW(), $9) ON CONFLICT DO NOTHING",
+            )
+            .bind(community.as_uuid())
+            .bind(event.id.as_bytes().as_slice())
+            .bind(event.pubkey.to_bytes())
+            .bind(event.created_at.as_secs() as f64)
+            .bind(buzz_core::kind::KIND_READ_STATE as i32)
+            .bind(serde_json::to_value(&event.tags).expect("serialize tags"))
+            .bind(&event.content)
+            .bind(event.sig.serialize().as_slice())
+            .bind(d_tag)
+            .execute(pool)
+            .await
+        }
+
+        legacy_insert(&db.pool, community, &a, &d_tag)
+            .await
+            .expect("legacy insert A");
+        let duplicate = legacy_insert(&db.pool, community, &a, &d_tag)
+            .await
+            .expect("legacy duplicate A remains idempotent");
+        assert_eq!(duplicate.rows_affected(), 0);
+
+        sqlx::query(
+            "INSERT INTO event_mentions \
+                 (community_id, pubkey_hex, event_id, event_created_at, event_kind) \
+             VALUES ($1, $2, $3, to_timestamp($4), 30078)",
+        )
+        .bind(community.as_uuid())
+        .bind("c".repeat(64))
+        .bind(a.id.as_bytes().as_slice())
+        .bind(a.created_at.as_secs() as f64)
+        .execute(&db.pool)
+        .await
+        .expect("insert live mention");
+
+        // Emulate the pre-PR replacement path after migration 0007: soft-delete
+        // the live row, then insert B without any application watermark write.
+        sqlx::query(
+            "UPDATE events SET deleted_at=NOW() \
+             WHERE community_id=$1 AND kind=30078 AND pubkey=$2 AND d_tag=$3 AND deleted_at IS NULL",
+        )
+        .bind(community.as_uuid())
+        .bind(keys.public_key().to_bytes())
+        .bind(&d_tag)
+        .execute(&db.pool)
+        .await
+        .expect("legacy soft-delete A");
+        let mentions_after_delete: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM event_mentions WHERE community_id=$1 AND event_id=$2",
+        )
+        .bind(community.as_uuid())
+        .bind(a.id.as_bytes().as_slice())
+        .fetch_one(&db.pool)
+        .await
+        .expect("count mentions after delete");
+        assert_eq!(mentions_after_delete, 0);
+
+        let stale_mention = sqlx::query(
+            "INSERT INTO event_mentions \
+                 (community_id, pubkey_hex, event_id, event_created_at, event_kind) \
+             VALUES ($1, $2, $3, to_timestamp($4), 30078)",
+        )
+        .bind(community.as_uuid())
+        .bind("d".repeat(64))
+        .bind(a.id.as_bytes().as_slice())
+        .bind(a.created_at.as_secs() as f64)
+        .execute(&db.pool)
+        .await
+        .expect("stale post-commit mention is skipped");
+        assert_eq!(stale_mention.rows_affected(), 0);
+
+        legacy_insert(&db.pool, community, &b, &d_tag)
+            .await
+            .expect("legacy insert B");
+
+        // NIP-09 deletion through the legacy soft-delete API must physically
+        // remove B while retaining B's ordering tuple in the watermark.
+        sqlx::query(
+            "UPDATE events SET deleted_at=NOW() \
+             WHERE community_id=$1 AND kind=30078 AND pubkey=$2 AND d_tag=$3 AND deleted_at IS NULL",
+        )
+        .bind(community.as_uuid())
+        .bind(keys.public_key().to_bytes())
+        .bind(&d_tag)
+        .execute(&db.pool)
+        .await
+        .expect("legacy NIP-09 delete B");
+
+        let payloads: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM events WHERE community_id=$1 AND kind=30078 AND pubkey=$2 AND d_tag=$3",
+        )
+        .bind(community.as_uuid())
+        .bind(keys.public_key().to_bytes())
+        .bind(&d_tag)
+        .fetch_one(&db.pool)
+        .await
+        .expect("count retained payloads");
+        assert_eq!(
+            payloads, 0,
+            "legacy soft deletes must not retain NIP-RS payloads"
+        );
+
+        let replay = legacy_insert(&db.pool, community, &x, &d_tag).await;
+        assert!(
+            replay.is_err(),
+            "database guard must reject A < X < B replay"
+        );
+
+        let watermark: (chrono::DateTime<chrono::Utc>, Vec<u8>) = sqlx::query_as(
+            "SELECT created_at, event_id FROM parameterized_event_watermarks \
+             WHERE community_id=$1 AND kind=30078 AND pubkey=$2 AND d_tag=$3",
+        )
+        .bind(community.as_uuid())
+        .bind(keys.public_key().to_bytes())
+        .bind(&d_tag)
+        .fetch_one(&db.pool)
+        .await
+        .expect("read B watermark");
+        assert_eq!(watermark.0.timestamp(), base as i64 + 2);
+        assert_eq!(watermark.1, b.id.as_bytes().as_slice());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
     async fn lookup_community_by_host_matches_case_insensitive_host_index() {
         let db = setup_db().await;
         let id = Uuid::new_v4();
