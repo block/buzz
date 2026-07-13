@@ -348,7 +348,7 @@ pub fn decode_snapshot_png(png_bytes: &[u8]) -> Result<AgentSnapshot, String> {
 
 /// Validate that the manifest has the correct format/version and required
 /// fields. Returns an error string on failure.
-fn validate_snapshot(snapshot: &AgentSnapshot) -> Result<(), String> {
+pub(crate) fn validate_snapshot(snapshot: &AgentSnapshot) -> Result<(), String> {
     if snapshot.format != FORMAT_DISCRIMINATOR {
         return Err(format!(
             "Unsupported snapshot format: {:?} (expected {:?})",
@@ -386,7 +386,7 @@ pub fn decode_avatar_data_url(url: &str) -> Option<Vec<u8>> {
 }
 
 /// Build a minimal 1×1 transparent PNG with a single tEXt chunk.
-fn make_png_with_text(keyword: &str, text: &str) -> Result<Vec<u8>, String> {
+pub(crate) fn make_png_with_text(keyword: &str, text: &str) -> Result<Vec<u8>, String> {
     let mut buf = Vec::new();
     {
         let mut enc = Encoder::new(Cursor::new(&mut buf), 1, 1);
