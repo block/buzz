@@ -118,7 +118,7 @@ test("buildTimelineItems: member additions by one actor group within five minute
     group?.entries.map((groupEntry) => groupEntry.message.id),
     ["a", "b", "c"],
   );
-  assert.equal(group?.key, "a");
+  assert.equal(group?.key, "c");
 });
 
 test("buildTimelineItems: self-joins group across different members within five minutes", () => {
@@ -146,7 +146,29 @@ test("buildTimelineItems: self-joins group across different members within five 
   );
 });
 
-test("buildTimelineItems: member-add window is fixed from the first addition", () => {
+test("buildTimelineItems: prepending membership history preserves the loaded suffix", () => {
+  const start = dayAt(2026, 6, 14);
+  const loaded = [
+    memberAddedEntry({ id: "b", target: "target-b", createdAt: start + 240 }),
+    memberAddedEntry({ id: "c", target: "target-c", createdAt: start + 360 }),
+    entry({ id: "message", createdAt: start + 600 }),
+  ];
+  const prepended = [
+    memberAddedEntry({ id: "a", target: "target-a", createdAt: start }),
+    ...loaded,
+  ];
+
+  const loadedItems = buildTimelineItems(loaded, null).items;
+  const prependedItems = buildTimelineItems(prepended, null).items;
+  const loadedKeys = loadedItems.slice(1).map((item) => item.key);
+  const prependedKeys = prependedItems.slice(1).map((item) => item.key);
+
+  assert.deepEqual(loadedKeys, ["c", "message"]);
+  assert.deepEqual(prependedKeys, ["a", "c", "message"]);
+  assert.deepEqual(prependedKeys.slice(-loadedKeys.length), loadedKeys);
+});
+
+test("buildTimelineItems: member-add window is fixed from the newest addition", () => {
   const start = dayAt(2026, 6, 14);
   const entries = [
     memberAddedEntry({ id: "a", target: "target-a", createdAt: start }),
@@ -155,7 +177,7 @@ test("buildTimelineItems: member-add window is fixed from the first addition", (
   ];
 
   const { items } = buildTimelineItems(entries, null);
-  assert.deepEqual(kinds(items), ["day-divider", "system-group", "system"]);
+  assert.deepEqual(kinds(items), ["day-divider", "system", "system-group"]);
 });
 
 test("buildTimelineItems: actor changes and intervening rows break member-add groups", () => {
