@@ -215,7 +215,8 @@ pub async fn archive_community(
     })?;
     let normalized_host = normalize_candidate_host(&request.host)
         .map_err(|msg| api_error(StatusCode::BAD_REQUEST, &msg))?;
-    if normalized_host == buzz_core::tenant::relay_url_authority(&state.config.relay_url) {
+    let deployment_host = buzz_core::tenant::relay_url_authority(&state.config.relay_url);
+    if normalized_host == deployment_host {
         return Err(api_error(
             StatusCode::CONFLICT,
             "the deployment community cannot be archived",
@@ -229,7 +230,7 @@ pub async fn archive_community(
     })?;
     let record = state
         .db
-        .archive_community_owned_by(&normalized_host, &owner)
+        .archive_community_owned_by(&normalized_host, &owner, &deployment_host)
         .await
         .map_err(|e| internal_error(&format!("archive community: {e}")))?
         .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "community not found"))?;

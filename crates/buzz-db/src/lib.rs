@@ -695,6 +695,7 @@ impl Db {
         &self,
         normalized_host: &str,
         owner_pubkey: &str,
+        protected_deployment_host: &str,
     ) -> Result<Option<ArchivedCommunityRecord>> {
         let row = sqlx::query(
             r#"UPDATE communities c
@@ -704,10 +705,12 @@ impl Db {
                  AND rm.community_id = c.id
                  AND lower(rm.pubkey) = lower($2)
                  AND rm.role = 'owner'
+                 AND lower(c.host) <> lower($3)
                RETURNING c.id, c.host, c.archived_at"#,
         )
         .bind(normalized_host)
         .bind(owner_pubkey)
+        .bind(protected_deployment_host)
         .fetch_optional(&self.pool)
         .await?;
         row.map(|row| {

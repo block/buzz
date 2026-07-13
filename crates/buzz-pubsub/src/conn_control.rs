@@ -207,6 +207,16 @@ mod tests {
     }
 
     #[test]
+    fn unknown_command_is_rejected_without_affecting_later_messages() {
+        assert!(serde_json::from_str::<ConnControl>(r#"{"op":"FutureCommand"}"#).is_err());
+        let known = serde_json::to_string(&ConnControl::DisconnectCommunity).unwrap();
+        assert_eq!(
+            serde_json::from_str::<ConnControl>(&known).unwrap(),
+            ConnControl::DisconnectCommunity
+        );
+    }
+
+    #[test]
     fn disconnect_command_serde_round_trips() {
         let cmd = ConnControl::DisconnectPubkey {
             pubkey: vec![7u8; 32],
