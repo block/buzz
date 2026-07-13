@@ -4,7 +4,11 @@ import type {
   ProjectsFilter,
   ProjectsViewMode,
 } from "@/features/projects/lib/projectsViewHelpers";
+import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
+
+const SELECTED_MENU_ITEM_CLASSES =
+  "bg-sidebar-active text-sidebar-active-foreground shadow-xs hover:bg-sidebar-active hover:text-sidebar-active-foreground";
 
 type ProjectsToolbarProps = {
   filter: ProjectsFilter;
@@ -75,11 +79,14 @@ export function ProjectsToolbar({
         <Button
           aria-expanded={searchOpen}
           aria-label="Ask an agent about your projects"
-          className="h-8 w-8 rounded-full px-0"
+          className={cn(
+            "h-8 w-8 rounded-full px-0",
+            searchOpen && SELECTED_MENU_ITEM_CLASSES,
+          )}
           onClick={() => onSearchOpenChange(!searchOpen)}
           size="sm"
           type="button"
-          variant={searchOpen ? "secondary" : "ghost"}
+          variant="ghost"
         >
           <Search className="h-4 w-4" />
         </Button>
@@ -88,12 +95,17 @@ export function ProjectsToolbar({
           {filterOptions.map((option) => (
             <Button
               aria-pressed={filter === option.value}
-              className="h-8 gap-1.5 rounded-full px-3 text-sm"
+              className={cn(
+                "h-8 gap-1.5 rounded-full px-3 text-sm",
+                !searchOpen &&
+                  filter === option.value &&
+                  SELECTED_MENU_ITEM_CLASSES,
+              )}
               key={option.value}
               onClick={() => onFilterChange(option.value)}
               size="sm"
               type="button"
-              variant={filter === option.value ? "secondary" : "ghost"}
+              variant="ghost"
             >
               {option.label}
             </Button>

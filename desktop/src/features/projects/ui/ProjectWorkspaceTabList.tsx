@@ -4,7 +4,10 @@ import type { ProjectPullRequest } from "@/features/projects/hooks";
 import { TabsList, TabsTrigger } from "@/shared/ui/tabs";
 
 const PROJECT_TAB_TRIGGER_CLASS =
-  "h-8 gap-1.5 px-3 text-foreground hover:bg-accent hover:text-accent-foreground data-[state=active]:bg-secondary data-[state=active]:text-secondary-foreground data-[state=active]:shadow-xs";
+  "h-8 gap-1.5 rounded-full px-3 text-foreground hover:bg-accent hover:text-accent-foreground data-[state=active]:bg-sidebar-active data-[state=active]:text-sidebar-active-foreground data-[state=active]:shadow-xs data-[state=active]:hover:bg-sidebar-active data-[state=active]:hover:text-sidebar-active-foreground";
+
+const PROJECT_TAB_SELECTED_CLASS =
+  " bg-sidebar-active text-sidebar-active-foreground shadow-xs hover:bg-sidebar-active hover:text-sidebar-active-foreground";
 
 export function ProjectTabsList({ prsActive }: { prsActive?: boolean }) {
   return (
@@ -28,7 +31,7 @@ export function ProjectTabsList({ prsActive }: { prsActive?: boolean }) {
       </TabsTrigger>
       <TabsTrigger
         className={`${PROJECT_TAB_TRIGGER_CLASS}${
-          prsActive ? " bg-secondary text-secondary-foreground shadow-xs" : ""
+          prsActive ? PROJECT_TAB_SELECTED_CLASS : ""
         }`}
         value="prs"
       >

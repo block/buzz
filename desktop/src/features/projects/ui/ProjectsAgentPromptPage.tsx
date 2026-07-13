@@ -1,4 +1,4 @@
-import { ChevronDown, Loader2, SendHorizontal } from "lucide-react";
+import { ChevronDown, Loader2, SendHorizontal, Trash2 } from "lucide-react";
 import * as React from "react";
 import { toast } from "sonner";
 
@@ -20,6 +20,13 @@ import {
 } from "@/features/messages/hooks";
 import { useProfileQuery, useUsersBatchQuery } from "@/features/profile/hooks";
 import type { Project } from "@/features/projects/hooks";
+import {
+  markProjectsAgentConversationCleared,
+  readProjectsAgentConversationClearedAt,
+  readStoredProjectsAgentConversation,
+  type StoredProjectsAgentConversation,
+  writeStoredProjectsAgentConversation,
+} from "@/features/projects/lib/projectAgentConversationStorage";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import { sendChannelMessage } from "@/shared/api/tauri";
 import type { Channel } from "@/shared/api/types";
@@ -48,8 +55,67 @@ type AgentCandidate = {
   isActive: boolean;
 };
 
+type ProjectAgentConversation = {
+  channel: Channel;
+  agent: AgentCandidate;
+  visibleAfter: number;
+};
+
 const MAX_CONTEXT_REPOS = 8;
 const REPO_CONTEXT_MARKER = "Workspace repositories:";
+
+function latestAgentConversation({
+  candidates,
+  channels,
+  clearedAt,
+  currentPubkey,
+}: {
+  candidates: readonly AgentCandidate[];
+  channels: readonly Channel[];
+  clearedAt: number;
+  currentPubkey: string | null;
+}): ProjectAgentConversation | null {
+  if (!currentPubkey) return null;
+  const normalizedCurrent = normalizePubkey(currentPubkey);
+  const candidatesByPubkey = new Map(
+    candidates.map((candidate) => [candidate.pubkey, candidate]),
+  );
+
+  let latest: {
+    conversation: ProjectAgentConversation;
+    timestamp: number;
+  } | null = null;
+  for (const channel of channels) {
+    if (channel.channelType !== "dm" || !channel.lastMessageAt) continue;
+    const participantPubkeys = [
+      ...new Set(channel.participantPubkeys.map(normalizePubkey)),
+    ];
+    if (!participantPubkeys.includes(normalizedCurrent)) continue;
+    const otherPubkeys = participantPubkeys.filter(
+      (pubkey) => pubkey !== normalizedCurrent,
+    );
+    if (otherPubkeys.length !== 1) continue;
+    const agent = candidatesByPubkey.get(otherPubkeys[0]);
+    if (!agent) continue;
+    const timestamp = Date.parse(channel.lastMessageAt);
+    if (
+      !Number.isFinite(timestamp) ||
+      timestamp <= clearedAt ||
+      (latest && timestamp <= latest.timestamp)
+    ) {
+      continue;
+    }
+    latest = {
+      conversation: {
+        agent,
+        channel,
+        visibleAfter: Math.floor(clearedAt / 1_000),
+      },
+      timestamp,
+    };
+  }
+  return latest?.conversation ?? null;
+}
 
 /** Compact machine-readable footer so the agent can scope git queries
  * (repo announcements are addressable by these coordinates). Only sent
@@ -157,12 +223,14 @@ function ConversationThread({
   agentAvatarUrl,
   currentPubkey,
   selfAvatarUrl,
+  visibleAfter,
 }: {
   channel: Channel;
   agent: AgentCandidate;
   agentAvatarUrl: string | null;
   currentPubkey: string | null;
   selfAvatarUrl: string | null;
+  visibleAfter: number;
 }) {
   useChannelSubscription(channel);
   const messagesQuery = useChannelMessagesQuery(channel);
@@ -174,11 +242,12 @@ function ConversationThread({
       (messagesQuery.data ?? [])
         .filter(
           (event) =>
-            event.kind === KIND_STREAM_MESSAGE ||
-            event.kind === KIND_STREAM_MESSAGE_V2,
+            (event.kind === KIND_STREAM_MESSAGE ||
+              event.kind === KIND_STREAM_MESSAGE_V2) &&
+            event.created_at >= visibleAfter,
         )
         .sort((left, right) => left.created_at - right.created_at),
-    [messagesQuery.data],
+    [messagesQuery.data, visibleAfter],
   );
 
   const lastMessageId = messages[messages.length - 1]?.id ?? null;
@@ -235,24 +304,32 @@ function ConversationThread({
 export function ProjectsAgentPromptPage({
   projects,
   onClose,
+  workspaceId,
 }: {
   projects: readonly Project[];
   onClose: () => void;
+  workspaceId: string | null;
 }) {
   const [prompt, setPrompt] = React.useState("");
+  const [storedConversation, setStoredConversation] =
+    React.useState<StoredProjectsAgentConversation | null>(() =>
+      readStoredProjectsAgentConversation(workspaceId),
+    );
+  const [clearedAt, setClearedAt] = React.useState(() =>
+    readProjectsAgentConversationClearedAt(workspaceId),
+  );
   const [selectedPubkey, setSelectedPubkey] = React.useState<string | null>(
-    null,
+    () => storedConversation?.agentPubkey ?? null,
   );
   const [isSending, setIsSending] = React.useState(false);
-  const [conversation, setConversation] = React.useState<{
-    channel: Channel;
-    agent: AgentCandidate;
-  } | null>(null);
+  const [conversation, setConversation] =
+    React.useState<ProjectAgentConversation | null>(null);
   const textareaRef = React.useRef<HTMLTextAreaElement>(null);
 
   const identityQuery = useIdentityQuery();
   const profileQuery = useProfileQuery();
   const candidates = useAgentCandidates();
+  const channelsQuery = useChannelsQuery();
   const openDmMutation = useOpenDmMutation();
   const startAgentMutation = useStartManagedAgentMutation();
 
@@ -267,6 +344,50 @@ export function ProjectsAgentPromptPage({
         ?.avatarUrl ?? null,
     [candidateProfilesQuery.data],
   );
+
+  const restorableConversation = React.useMemo(() => {
+    if (storedConversation) {
+      const channel = channelsQuery.data?.find(
+        (candidate) => candidate.id === storedConversation.channelId,
+      );
+      const agent = candidates.find(
+        (candidate) =>
+          candidate.pubkey === normalizePubkey(storedConversation.agentPubkey),
+      );
+      return channel && agent
+        ? {
+            agent,
+            channel,
+            visibleAfter: storedConversation.visibleAfter,
+          }
+        : null;
+    }
+    return latestAgentConversation({
+      candidates,
+      channels: channelsQuery.data ?? [],
+      clearedAt,
+      currentPubkey: identityQuery.data?.pubkey ?? null,
+    });
+  }, [
+    candidates,
+    channelsQuery.data,
+    clearedAt,
+    identityQuery.data?.pubkey,
+    storedConversation,
+  ]);
+
+  React.useEffect(() => {
+    if (conversation || !restorableConversation) return;
+    setConversation(restorableConversation);
+    setSelectedPubkey(restorableConversation.agent.pubkey);
+    const stored = {
+      agentPubkey: restorableConversation.agent.pubkey,
+      channelId: restorableConversation.channel.id,
+      visibleAfter: restorableConversation.visibleAfter,
+    };
+    setStoredConversation(stored);
+    writeStoredProjectsAgentConversation(workspaceId, stored);
+  }, [conversation, restorableConversation, workspaceId]);
 
   const selectedAgent =
     conversation?.agent ??
@@ -301,7 +422,19 @@ export function ProjectsAgentPromptPage({
         selectedAgent.pubkey,
       ]);
       if (!conversation) {
-        setConversation({ channel, agent: selectedAgent });
+        const nextConversation = {
+          channel,
+          agent: selectedAgent,
+          visibleAfter: Math.floor(clearedAt / 1_000),
+        };
+        const stored = {
+          agentPubkey: selectedAgent.pubkey,
+          channelId: channel.id,
+          visibleAfter: nextConversation.visibleAfter,
+        };
+        setConversation(nextConversation);
+        setStoredConversation(stored);
+        writeStoredProjectsAgentConversation(workspaceId, stored);
       }
       setPrompt("");
     } catch (error) {
@@ -312,6 +445,7 @@ export function ProjectsAgentPromptPage({
       setIsSending(false);
     }
   }, [
+    clearedAt,
     conversation,
     isSending,
     openDmMutation,
@@ -319,7 +453,18 @@ export function ProjectsAgentPromptPage({
     prompt,
     selectedAgent,
     startAgentMutation,
+    workspaceId,
   ]);
+
+  const handleClearConversation = React.useCallback(() => {
+    const nextClearedAt = Date.now();
+    markProjectsAgentConversationCleared(workspaceId, nextClearedAt);
+    setClearedAt(nextClearedAt);
+    setStoredConversation(null);
+    setConversation(null);
+    setSelectedPubkey(null);
+    setPrompt("");
+  }, [workspaceId]);
 
   const promptBox = (
     <div className="rounded-2xl border border-border/60 bg-card p-3 shadow-sm">
@@ -436,12 +581,25 @@ export function ProjectsAgentPromptPage({
       <div className="flex min-h-0 flex-1 flex-col">
         <div className="min-h-0 flex-1 overflow-y-auto px-4">
           <div className="w-full pb-6 pt-[calc(var(--buzz-channel-content-top-padding,5.75rem)_+_1rem)]">
+            <div className="mb-4 flex justify-end">
+              <Button
+                className="h-8 gap-1.5 rounded-full px-3 text-xs text-muted-foreground"
+                onClick={handleClearConversation}
+                size="sm"
+                type="button"
+                variant="ghost"
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+                Clear conversation
+              </Button>
+            </div>
             <ConversationThread
               agent={conversation.agent}
               agentAvatarUrl={avatarUrlFor(conversation.agent.pubkey)}
               channel={conversation.channel}
               currentPubkey={identityQuery.data?.pubkey ?? null}
               selfAvatarUrl={profileQuery.data?.avatarUrl ?? null}
+              visibleAfter={conversation.visibleAfter}
             />
           </div>
         </div>

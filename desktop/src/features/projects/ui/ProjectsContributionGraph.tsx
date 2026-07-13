@@ -8,7 +8,7 @@ const DAYS_PER_WEEK = 7;
 // Tints of the theme's primary token: the most active cells are fully
 // saturated primary, quieter days fade toward the muted background.
 const LEVEL_CLASSES = [
-  "bg-muted/60 dark:bg-muted/40",
+  "bg-muted/40 dark:bg-muted/30",
   "bg-primary/25",
   "bg-primary/50",
   "bg-primary/75",
@@ -23,6 +23,22 @@ const LEVEL_LABELS = [
   "6–9 events",
   "10+ events",
 ];
+
+/** Activity intensity legend shared with the contribution graph header. */
+export function ProjectsContributionLegend() {
+  return (
+    <div className="flex items-center gap-1.5">
+      {LEVEL_CLASSES.map((levelClass, level) => (
+        <Tooltip key={levelClass}>
+          <TooltipTrigger asChild>
+            <span className={cn("h-2.5 w-2.5 rounded-[3px]", levelClass)} />
+          </TooltipTrigger>
+          <TooltipContent>{LEVEL_LABELS[level]}</TooltipContent>
+        </Tooltip>
+      ))}
+    </div>
+  );
+}
 
 function dayKeyOf(date: Date) {
   const month = `${date.getMonth() + 1}`.padStart(2, "0");
@@ -86,15 +102,6 @@ export function ProjectsContributionGraph({
   const gridTemplateColumns = `repeat(${weeks.length}, minmax(0, 1fr))`;
   const todayKey = dayKeyOf(today);
 
-  let totalContributions = 0;
-  for (const week of weeks) {
-    for (const day of week) {
-      const key = dayKeyOf(day);
-      if (key > todayKey) continue;
-      totalContributions += activityByDay[key] ?? 0;
-    }
-  }
-
   return (
     <div className={cn("space-y-2", className)}>
       <div className="grid gap-2" style={{ gridTemplateColumns }}>
@@ -117,7 +124,13 @@ export function ProjectsContributionGraph({
           week.map((day) => {
             const key = dayKeyOf(day);
             if (key > todayKey) {
-              return <span aria-hidden className="aspect-square" key={key} />;
+              return (
+                <span
+                  aria-hidden
+                  className="aspect-square rounded-[3px] border border-border/40 dark:border-border/30"
+                  key={key}
+                />
+              );
             }
             const count = activityByDay[key] ?? 0;
             const dateLabel = day.toLocaleDateString(undefined, {
@@ -143,22 +156,6 @@ export function ProjectsContributionGraph({
             );
           }),
         )}
-      </div>
-      <div className="flex items-center justify-between gap-2 pt-1">
-        <p className="text-xs text-muted-foreground">
-          {totalContributions} {totalContributions === 1 ? "event" : "events"}{" "}
-          in the last 6 months
-        </p>
-        <div className="flex items-center gap-1.5">
-          {LEVEL_CLASSES.map((levelClass, level) => (
-            <Tooltip key={levelClass}>
-              <TooltipTrigger asChild>
-                <span className={cn("h-2.5 w-2.5 rounded-[3px]", levelClass)} />
-              </TooltipTrigger>
-              <TooltipContent>{LEVEL_LABELS[level]}</TooltipContent>
-            </Tooltip>
-          ))}
-        </div>
       </div>
     </div>
   );

@@ -15,14 +15,17 @@ import {
   useProjectsQuery,
 } from "@/features/projects/hooks";
 import { useProjectsRepoSnapshotsQuery } from "@/features/projects/useProjectsRepoSnapshots";
+import { ProjectsActivityFeed } from "@/features/projects/ui/ProjectsActivityFeed";
 import {
   EmptyFilteredState,
   EmptyState,
   ProjectGridCard,
   ProjectListRow,
+  ProjectRailRow,
 } from "@/features/projects/ui/ProjectCards";
 import { ProjectsIssuesList } from "@/features/projects/ui/ProjectsIssuesList";
 import { ProjectsOverviewPanel } from "@/features/projects/ui/ProjectsOverviewPanel";
+import { ProjectsOverviewRail } from "@/features/projects/ui/ProjectsOverviewRail";
 import { ProjectsPullRequestsList } from "@/features/projects/ui/ProjectsPullRequestsList";
 import { ProjectsAgentPromptPage } from "@/features/projects/ui/ProjectsAgentPromptPage";
 import {
@@ -84,7 +87,7 @@ export function ProjectsView() {
     readStoredFilter(),
   );
   const projectIssuesQuery = useProjectsIssuesQuery(
-    filter === "issues" ? projects : [],
+    filter === "issues" || filter === "all" ? projects : [],
   );
   // One blobless clone per unique repository — only scan while the overview
   // header (filter === "all") is actually visible.
@@ -117,6 +120,9 @@ export function ProjectsView() {
           ...(projectPullRequestsQuery.data?.flatMap(({ pullRequest }) => [
             pullRequest.author,
             ...pullRequest.recipients,
+            ...pullRequest.reviewers,
+            ...pullRequest.approvals.map((approval) => approval.author),
+            ...pullRequest.updates.map((update) => update.author),
             ...pullRequest.comments.map((comment) => comment.author),
           ]) ?? []),
           ...(projectIssuesQuery.data?.flatMap(({ issue }) => [
@@ -323,6 +329,143 @@ export function ProjectsView() {
     return <EmptyState />;
   }
 
+  const repositoryItems =
+    visibleProjects.length === 0 ? (
+      <EmptyFilteredState />
+    ) : viewMode === "grid" ? (
+      <div
+        className={cn(
+          "grid gap-3 md:grid-cols-2",
+          filter !== "all" && "xl:grid-cols-3",
+        )}
+      >
+        {visibleProjects.map((project) => {
+          const summary = activitySummariesQuery.data?.[project.repoAddress];
+          return (
+            <ProjectGridCard
+              canDelete={isProjectOwnedByCurrentUser(project, currentPubkey)}
+              deleteDisabled={deleteProjectMutation.isPending}
+              hasLocal={hasLocalCheckout(project, localRepoNames)}
+              key={project.id}
+              onDelete={handleDeleteProject}
+              onOpen={handleOpenProject}
+              onOpenTerminal={handleOpenTerminal}
+              people={projectPeople(project, summary)}
+              profiles={profiles}
+              project={project}
+              summary={summary}
+            />
+          );
+        })}
+      </div>
+    ) : (
+      <div className="-mx-4 divide-y divide-border/60 border-y border-border/60 bg-card">
+        {visibleProjects.map((project) => {
+          const summary = activitySummariesQuery.data?.[project.repoAddress];
+          return (
+            <ProjectListRow
+              canDelete={isProjectOwnedByCurrentUser(project, currentPubkey)}
+              deleteDisabled={deleteProjectMutation.isPending}
+              hasLocal={hasLocalCheckout(project, localRepoNames)}
+              key={project.id}
+              onDelete={handleDeleteProject}
+              onOpen={handleOpenProject}
+              onOpenTerminal={handleOpenTerminal}
+              people={projectPeople(project, summary)}
+              profiles={profiles}
+              project={project}
+              summary={summary}
+            />
+          );
+        })}
+      </div>
+    );
+
+  const mostActiveProjects = [...projects]
+    .sort((left, right) => {
+      const leftSummary = activitySummariesQuery.data?.[left.repoAddress];
+      const rightSummary = activitySummariesQuery.data?.[right.repoAddress];
+      const activityDifference =
+        (rightSummary?.activityCount ?? 0) - (leftSummary?.activityCount ?? 0);
+      if (activityDifference !== 0) return activityDifference;
+      return (
+        (rightSummary?.updatedAt ?? right.createdAt) -
+        (leftSummary?.updatedAt ?? left.createdAt)
+      );
+    })
+    .slice(0, 3);
+
+  const mostActiveRepositoryItems =
+    mostActiveProjects.length === 0 ? (
+      <p className="px-2 py-8 text-center text-sm text-muted-foreground">
+        No repository activity yet
+      </p>
+    ) : (
+      <div className="space-y-1">
+        {mostActiveProjects.map((project) => {
+          const summary = activitySummariesQuery.data?.[project.repoAddress];
+          return (
+            <ProjectRailRow
+              key={project.id}
+              onOpen={handleOpenProject}
+              project={project}
+              summary={summary}
+            />
+          );
+        })}
+      </div>
+    );
+
+  const listControls = (
+    <div className="flex flex-wrap items-center gap-2 sm:justify-end">
+      <label className="flex items-center gap-2 text-xs text-muted-foreground">
+        <span className="sr-only">Sort projects</span>
+        <select
+          className="h-8 rounded-md bg-transparent px-2 text-xs text-foreground outline-hidden hover:bg-muted/50 focus:ring-1 focus:ring-ring"
+          onChange={(event) =>
+            handleSortChange(event.target.value as ProjectsSort)
+          }
+          value={sort}
+        >
+          <option value="updated">Recent activity</option>
+          <option value="created">Created date</option>
+          <option value="name">Name</option>
+        </select>
+      </label>
+      <ProjectsViewModeToggle
+        onViewModeChange={handleViewModeChange}
+        viewMode={viewMode}
+      />
+    </div>
+  );
+
+  const activityFeed = (
+    <ProjectsActivityFeed
+      isLoading={
+        repoSnapshotsQuery.isLoading ||
+        projectPullRequestsQuery.isLoading ||
+        projectIssuesQuery.isLoading
+      }
+      issues={projectIssuesQuery.data ?? []}
+      onOpenIssue={handleOpenIssue}
+      onOpenProject={handleOpenProject}
+      onOpenPullRequest={handleOpenPullRequest}
+      profiles={profiles}
+      projects={projects}
+      pullRequests={projectPullRequestsQuery.data ?? []}
+      snapshots={repoSnapshotsQuery.data}
+    />
+  );
+
+  const projectsToolbar = (
+    <ProjectsToolbar
+      filter={filter}
+      onFilterChange={handleFilterChange}
+      onSearchOpenChange={setSearchOpen}
+      searchOpen={searchOpen}
+    />
+  );
+
   return (
     <div className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
       <div
@@ -333,18 +476,14 @@ export function ProjectsView() {
         )}
         ref={projectsHeaderChromeRef}
       >
-        <ProjectsToolbar
-          filter={filter}
-          onFilterChange={handleFilterChange}
-          onSearchOpenChange={setSearchOpen}
-          searchOpen={searchOpen}
-        />
+        {projectsToolbar}
       </div>
 
       {searchOpen ? (
         <ProjectsAgentPromptPage
           onClose={() => setSearchOpen(false)}
           projects={projects}
+          workspaceId={activeWorkspace?.id ?? null}
         />
       ) : (
         <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto px-4 pb-4">
@@ -352,115 +491,62 @@ export function ProjectsView() {
             {filter === "all" ? (
               <ProjectsOverviewPanel
                 localRepositoryCount={localProjectCount}
+                metadata={
+                  <ProjectsOverviewRail
+                    profiles={profiles}
+                    projects={projects}
+                    snapshots={repoSnapshotsQuery.data}
+                    snapshotsLoading={repoSnapshotsQuery.isLoading}
+                    summaries={activitySummariesQuery.data}
+                  >
+                    {mostActiveRepositoryItems}
+                  </ProjectsOverviewRail>
+                }
                 onSelectSection={handleFilterChange}
-                profiles={profiles}
                 projects={projects}
                 relayName={activeWorkspace?.name || "Relay"}
-                snapshots={repoSnapshotsQuery.data}
-                snapshotsLoading={repoSnapshotsQuery.isLoading}
                 summaries={activitySummariesQuery.data}
-              />
-            ) : null}
-            <section className="space-y-3">
-              <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-                <h3 className="text-sm font-semibold text-foreground">
-                  {filter === "prs"
-                    ? "Pull requests"
-                    : filter === "issues"
-                      ? "Issues"
-                      : "Repositories"}
-                </h3>
-                <div className="flex flex-wrap items-center gap-2 sm:justify-end">
-                  <label className="flex items-center gap-2 text-xs text-muted-foreground">
-                    <span className="sr-only">Sort projects</span>
-                    <select
-                      className="h-8 rounded-md bg-transparent px-2 text-xs text-foreground outline-hidden hover:bg-muted/50 focus:ring-1 focus:ring-ring"
-                      onChange={(event) =>
-                        handleSortChange(event.target.value as ProjectsSort)
-                      }
-                      value={sort}
-                    >
-                      <option value="updated">Recent activity</option>
-                      <option value="created">Created date</option>
-                      <option value="name">Name</option>
-                    </select>
-                  </label>
-                  <ProjectsViewModeToggle
-                    onViewModeChange={handleViewModeChange}
+              >
+                <section className="space-y-3">
+                  <h3 className="text-sm font-semibold text-foreground">
+                    Recent activity
+                  </h3>
+                  {activityFeed}
+                </section>
+              </ProjectsOverviewPanel>
+            ) : (
+              <section className="space-y-3">
+                <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                  <h3 className="text-sm font-semibold text-foreground">
+                    {filter === "prs"
+                      ? "Pull requests"
+                      : filter === "issues"
+                        ? "Issues"
+                        : "Repositories"}
+                  </h3>
+                  {listControls}
+                </div>
+                {filter === "prs" ? (
+                  <ProjectsPullRequestsList
+                    isLoading={projectPullRequestsQuery.isLoading}
+                    onOpen={handleOpenPullRequest}
+                    profiles={profiles}
+                    pullRequests={visiblePullRequests}
                     viewMode={viewMode}
                   />
-                </div>
-              </div>
-              {filter === "prs" ? (
-                <ProjectsPullRequestsList
-                  isLoading={projectPullRequestsQuery.isLoading}
-                  onOpen={handleOpenPullRequest}
-                  profiles={profiles}
-                  pullRequests={visiblePullRequests}
-                  viewMode={viewMode}
-                />
-              ) : filter === "issues" ? (
-                <ProjectsIssuesList
-                  isLoading={projectIssuesQuery.isLoading}
-                  issues={visibleIssues}
-                  onOpen={handleOpenIssue}
-                  profiles={profiles}
-                  viewMode={viewMode}
-                />
-              ) : visibleProjects.length === 0 ? (
-                <EmptyFilteredState />
-              ) : viewMode === "grid" ? (
-                <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-                  {visibleProjects.map((project) => {
-                    const summary =
-                      activitySummariesQuery.data?.[project.repoAddress];
-                    return (
-                      <ProjectGridCard
-                        canDelete={isProjectOwnedByCurrentUser(
-                          project,
-                          currentPubkey,
-                        )}
-                        deleteDisabled={deleteProjectMutation.isPending}
-                        hasLocal={hasLocalCheckout(project, localRepoNames)}
-                        key={project.id}
-                        onDelete={handleDeleteProject}
-                        onOpen={handleOpenProject}
-                        onOpenTerminal={handleOpenTerminal}
-                        people={projectPeople(project, summary)}
-                        profiles={profiles}
-                        project={project}
-                        summary={summary}
-                      />
-                    );
-                  })}
-                </div>
-              ) : (
-                <div className="-mx-4 divide-y divide-border/60 border-y border-border/60 bg-card">
-                  {visibleProjects.map((project) => {
-                    const summary =
-                      activitySummariesQuery.data?.[project.repoAddress];
-                    return (
-                      <ProjectListRow
-                        canDelete={isProjectOwnedByCurrentUser(
-                          project,
-                          currentPubkey,
-                        )}
-                        deleteDisabled={deleteProjectMutation.isPending}
-                        hasLocal={hasLocalCheckout(project, localRepoNames)}
-                        key={project.id}
-                        onDelete={handleDeleteProject}
-                        onOpen={handleOpenProject}
-                        onOpenTerminal={handleOpenTerminal}
-                        people={projectPeople(project, summary)}
-                        profiles={profiles}
-                        project={project}
-                        summary={summary}
-                      />
-                    );
-                  })}
-                </div>
-              )}
-            </section>
+                ) : filter === "issues" ? (
+                  <ProjectsIssuesList
+                    isLoading={projectIssuesQuery.isLoading}
+                    issues={visibleIssues}
+                    onOpen={handleOpenIssue}
+                    profiles={profiles}
+                    viewMode={viewMode}
+                  />
+                ) : (
+                  repositoryItems
+                )}
+              </section>
+            )}
           </div>
         </div>
       )}
