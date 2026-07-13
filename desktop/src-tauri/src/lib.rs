@@ -697,6 +697,7 @@ pub fn run() {
             get_media_proxy_port,
             fetch_link_preview_title,
             discover_acp_providers,
+            discover_git_bash_prerequisite,
             install_acp_runtime,
             discover_managed_agent_prereqs,
             sign_event,

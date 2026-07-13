@@ -393,44 +393,33 @@ fn resolve_bash(_path_env: &str) -> Result<(PathBuf, String), String> {
 ///      WITHOUT the System32 exclusion — the operator explicitly chose this shell,
 ///      and cmd.exe/powershell.exe live in System32 legitimately.
 ///   2. `GIT_BASH` env override — legacy escape hatch (kept for back-compat).
-///   3. Installed Git for Windows (fast path when the user has Git).
-///   4. PATH scan for `bash.exe`, EXCLUDING System32 (so we never resolve WSL's
-///      `bash.exe` — the `0x8007072c` hazard).
+///   3. `bash.exe` on PATH, excluding System32 so we never resolve WSL's launcher.
+///   4. `git.exe` on PATH → its sibling `..\\bin\\bash.exe`. Git for Windows's
+///      recommended "Git from the command line" option adds `Git\\cmd` to PATH,
+///      not `Git\\bin`, so this is the normal post-install route.
+///   5. Git for Windows's machine then user registry `InstallPath`.
+///   6. Standard `ProgramFiles`, `ProgramFiles(x86)`, and `LocalAppData` paths
+///      when the child inherited their parent environment.
 ///
 /// Returns `(resolved_path, display_name)`. The display name is derived from the
 /// resolved path, guaranteeing the dialect hint and the spawned shell agree.
 ///
-/// The previously-bundled PortableGit fallback (probe 3 in the old order) has
-/// been removed: Git for Windows is a documented host prerequisite, and shipping
-/// a multi-hundred-MB runtime contradicts the VISION_AGENT.md "minimal" principle.
-///
 /// No bash found -> actionable error pointing at the prerequisite.
 #[cfg(windows)]
 fn resolve_bash(path_env: &str) -> Result<(PathBuf, String), String> {
-    // BUZZ_SHELL: explicit operator override — any shell, including cmd or PowerShell.
-    // Bare command names are resolved WITHOUT System32 exclusion: the operator
-    // chose this shell on purpose, and cmd/pwsh legitimately live in System32.
     if let Some(raw) = std::env::var_os("BUZZ_SHELL") {
         let p = PathBuf::from(&raw);
-        // Absolute / rooted path: must exist as a file.
         if p.components().count() > 1 || p.has_root() {
             if p.is_file() {
                 let name = shell_name_from_path(&p);
                 return Ok((p, name));
             }
-            // Non-existent absolute path: fall through, do NOT report this shell.
-        } else {
-            // Bare command name (e.g. "pwsh", "cmd"): scan PATH, NO System32
-            // exclusion — the operator explicitly wants this shell.
-            if let Some(found) = scan_path_for_command(&p, path_env, None) {
-                let name = shell_name_from_path(&found);
-                return Ok((found, name));
-            }
-            // Not found on PATH: fall through.
+        } else if let Some(found) = scan_path_for_command(&p, path_env, None) {
+            let name = shell_name_from_path(&found);
+            return Ok((found, name));
         }
     }
 
-    // GIT_BASH: legacy override kept for back-compat.
     if let Some(p) = std::env::var_os("GIT_BASH").map(PathBuf::from) {
         if p.is_file() {
             let name = shell_name_from_path(&p);
@@ -438,33 +427,138 @@ fn resolve_bash(path_env: &str) -> Result<(PathBuf, String), String> {
         }
     }
 
-    for root in ["ProgramFiles", "LocalAppData"] {
-        if let Some(base) = std::env::var_os(root) {
-            let candidate = match root {
-                "LocalAppData" => PathBuf::from(&base).join("Programs").join("Git"),
-                _ => PathBuf::from(&base).join("Git"),
+    let system_root = std::env::var_os("SystemRoot").map(PathBuf::from);
+    if let Some(p) = scan_path_for_bash(path_env, system_root.as_deref()) {
+        return Ok((p, "bash".to_string()));
+    }
+
+    if let Some(git) = scan_path_for_command(Path::new("git.exe"), path_env, None) {
+        if let Some(bash) = bash_from_git(&git) {
+            return Ok((bash, "bash".to_string()));
+        }
+    }
+
+    if let Some(bash) = git_bash_from_registry() {
+        return Ok((bash, "bash".to_string()));
+    }
+
+    if let Some(bash) = git_bash_from_standard_paths() {
+        return Ok((bash, "bash".to_string()));
+    }
+
+    Err(
+        "Git for Windows (Git Bash) is required but was not found. Checked \\
+         BUZZ_SHELL, GIT_BASH, bash.exe and git.exe on PATH, HKLM/HKCU\\\\SOFTWARE\\\\GitForWindows, \\
+         and the standard Git install locations. Git's \"Cmd\" PATH option adds \\
+         Git\\\\cmd\\\\git.exe but not Git\\\\bin\\\\bash.exe; Buzz normally derives Git Bash from that git.exe. \\
+         Install it from https://git-scm.com/download/win and select \"Git from the command line \\
+         and also from 3rd-party software\", then relaunch Buzz. You can also set \\
+         BUZZ_SHELL to a shell executable."
+            .into(),
+    )
+}
+
+/// Git for Windows puts `git.exe` in `<install>\\cmd`; the MSYS bash binary is
+/// its stable sibling at `<install>\\bin\\bash.exe`.
+#[cfg(windows)]
+fn bash_from_git(git: &Path) -> Option<PathBuf> {
+    let install_root = git.parent()?.parent()?;
+    let bash = install_root.join("bin").join("bash.exe");
+    bash.is_file().then_some(bash)
+}
+
+/// Probe machine and per-user Git for Windows registry keys after inherited
+/// resolver environment locations have been exhausted.
+#[cfg(windows)]
+#[allow(unsafe_code)]
+fn git_bash_from_registry() -> Option<PathBuf> {
+    use std::ffi::OsString;
+    use std::os::windows::ffi::OsStringExt;
+    use windows_sys::Win32::Foundation::{ERROR_MORE_DATA, ERROR_SUCCESS};
+    use windows_sys::Win32::System::Registry::{
+        RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE,
+        KEY_READ,
+    };
+
+    const KEY: &str = "SOFTWARE\\GitForWindows";
+    const VALUE: &str = "InstallPath";
+    let key: Vec<u16> = KEY.encode_utf16().chain(Some(0)).collect();
+    let value: Vec<u16> = VALUE.encode_utf16().chain(Some(0)).collect();
+
+    // SAFETY: Inputs are null-terminated UTF-16 for the duration of each call,
+    // and every successfully opened handle is closed before trying the next hive.
+    unsafe {
+        for hive in [HKEY_LOCAL_MACHINE, HKEY_CURRENT_USER] {
+            let mut handle = std::ptr::null_mut();
+            if RegOpenKeyExW(hive, key.as_ptr(), 0, KEY_READ, &mut handle) != ERROR_SUCCESS {
+                continue;
             }
-            .join("bin")
-            .join("bash.exe");
-            if candidate.is_file() {
-                return Ok((candidate, "bash".to_string()));
+
+            let mut byte_len = 0;
+            let status = RegQueryValueExW(
+                handle,
+                value.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut byte_len,
+            );
+            if (status != ERROR_SUCCESS && status != ERROR_MORE_DATA) || byte_len == 0 {
+                RegCloseKey(handle);
+                continue;
+            }
+
+            let mut data = vec![0u16; (byte_len as usize).div_ceil(2)];
+            let status = RegQueryValueExW(
+                handle,
+                value.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null_mut(),
+                data.as_mut_ptr().cast(),
+                &mut byte_len,
+            );
+            RegCloseKey(handle);
+            if status != ERROR_SUCCESS {
+                continue;
+            }
+
+            while data.last() == Some(&0) {
+                data.pop();
+            }
+            let bash = PathBuf::from(OsString::from_wide(&data))
+                .join("bin")
+                .join("bash.exe");
+            if bash.is_file() {
+                return Some(bash);
             }
         }
     }
 
-    // PATH scan for bash.exe, skipping System32 to avoid WSL's bash.exe launcher.
-    if let Some(p) = scan_path_for_bash(path_env, std::env::var_os("SystemRoot").map(PathBuf::from))
-    {
-        return Ok((p, "bash".to_string()));
-    }
+    None
+}
 
-    Err(
-        "Git for Windows (git bash) is required but was not found.\n\
-         Install it from https://git-scm.com/download/win and re-launch Buzz,\n\
-         or set BUZZ_SHELL to the path of any bash-compatible executable (or a bare\n\
-         command name like cmd or pwsh if it is on PATH)."
-            .into(),
-    )
+#[cfg(windows)]
+fn git_bash_from_standard_paths() -> Option<PathBuf> {
+    git_bash_from_standard_path_bases([
+        std::env::var_os("ProgramFiles").map(PathBuf::from),
+        std::env::var_os("ProgramFiles(x86)").map(PathBuf::from),
+        std::env::var_os("LocalAppData").map(PathBuf::from),
+    ])
+}
+
+#[cfg(windows)]
+fn git_bash_from_standard_path_bases(
+    [program_files, program_files_x86, local_app_data]: [Option<PathBuf>; 3],
+) -> Option<PathBuf> {
+    [
+        program_files.map(|base| base.join("Git")),
+        program_files_x86.map(|base| base.join("Git")),
+        local_app_data.map(|base| base.join("Programs").join("Git")),
+    ]
+    .into_iter()
+    .flatten()
+    .map(|install_root| install_root.join("bin").join("bash.exe"))
+    .find(|bash| bash.is_file())
 }
 
 /// True if `dir` is `root` or lives under it, comparing path components
@@ -1128,6 +1222,53 @@ mod windows_resolver_tests {
             );
         }
         // Err is also acceptable (no Git on test host).
+    }
+
+    #[test]
+    fn git_cmd_on_path_resolves_sibling_git_bash() {
+        let _guard = ENV_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+        let dir = tempdir().expect("tempdir");
+        let git = dir.path().join("Git").join("cmd").join("git.exe");
+        let bash = dir.path().join("Git").join("bin").join("bash.exe");
+        touch(&git);
+        touch(&bash);
+
+        let path_env = env::join_paths([git.parent().expect("cmd dir")]).expect("join");
+        let old_buzz_shell = env::var_os("BUZZ_SHELL");
+        let old_git_bash = env::var_os("GIT_BASH");
+        env::remove_var("BUZZ_SHELL");
+        env::remove_var("GIT_BASH");
+
+        let result = resolve_bash(path_env.to_str().expect("utf8"));
+
+        match old_buzz_shell {
+            Some(value) => env::set_var("BUZZ_SHELL", value),
+            None => env::remove_var("BUZZ_SHELL"),
+        }
+        match old_git_bash {
+            Some(value) => env::set_var("GIT_BASH", value),
+            None => env::remove_var("GIT_BASH"),
+        }
+
+        assert_eq!(
+            result
+                .expect("Git cmd PATH entry should resolve its sibling bash")
+                .0,
+            bash
+        );
+    }
+
+    #[test]
+    fn program_files_x86_git_bash_is_found() {
+        let dir = tempdir().expect("tempdir");
+        let program_files_x86 = dir.path().join("Program Files (x86)");
+        let bash = program_files_x86.join("Git").join("bin").join("bash.exe");
+        touch(&bash);
+
+        assert_eq!(
+            git_bash_from_standard_path_bases([None, Some(program_files_x86), None]),
+            Some(bash)
+        );
     }
 
     #[test]

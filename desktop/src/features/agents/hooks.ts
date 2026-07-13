@@ -14,6 +14,7 @@ import {
   deleteManagedAgent,
   discoverAcpRuntimes,
   discoverBackendProviders,
+  discoverGitBashPrerequisite,
   discoverManagedAgentPrereqs,
   getAgentConfigSurface,
   getBakedBuildEnvKeys,
@@ -92,6 +93,7 @@ export const teamsQueryKey = ["teams"] as const;
 export const acpRuntimesQueryKey = ["acp-runtimes"] as const;
 export const managedAgentPrereqsQueryKey = ["managed-agent-prereqs"] as const;
 export const backendProvidersQueryKey = ["backend-providers"] as const;
+export const gitBashPrerequisiteQueryKey = ["git-bash-prerequisite"] as const;
 
 async function invalidateAgentQueries(
   queryClient: ReturnType<typeof useQueryClient>,
@@ -166,6 +168,14 @@ export function useInstallAcpRuntimeMutation() {
       void queryClient.invalidateQueries({ queryKey: acpRuntimesQueryKey });
       void queryClient.invalidateQueries({ queryKey: managedAgentsQueryKey });
     },
+  });
+}
+
+export function useGitBashPrerequisiteQuery() {
+  return useQuery({
+    queryKey: gitBashPrerequisiteQueryKey,
+    queryFn: discoverGitBashPrerequisite,
+    staleTime: 15_000,
   });
 }
 

@@ -54,6 +54,15 @@ test("extractConfigNudge parses normalized_field requirement", () => {
   assert.deepEqual(extractConfigNudge(withSentinel("prose", payload)), payload);
 });
 
+test("extractConfigNudge parses git_bash requirement", () => {
+  const payload = {
+    agent_name: "Buzz Agent",
+    agent_pubkey: ATLAS_PUBKEY,
+    requirements: [{ surface: "git_bash" }],
+  };
+  assert.deepEqual(extractConfigNudge(withSentinel("prose", payload)), payload);
+});
+
 test("extractConfigNudge parses cli_login requirement", () => {
   const payload = {
     agent_name: "Codex",

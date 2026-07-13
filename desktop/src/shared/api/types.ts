@@ -541,6 +541,13 @@ export type ControlResultFrame = {
   modelId?: string;
 };
 
+export type GitBashPrerequisite = {
+  available: boolean;
+  path: string | null;
+  installInstructionsUrl: string;
+  installHint: string;
+};
+
 export type AcpAvailabilityStatus =
   | "available"
   | "adapter_missing"
