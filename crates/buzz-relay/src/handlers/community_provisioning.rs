@@ -51,6 +51,10 @@ pub struct ProvisionCommunityRequest {
     /// host instead of converging or rotating ownership.
     #[serde(default)]
     pub create_only: bool,
+    /// Optional owner quota enforced atomically with create. Product proxies
+    /// supply their resolved entitlement; generic operator callers may omit it.
+    #[serde(default)]
+    pub max_owned_communities: Option<u32>,
 }
 
 /// JSON response from `POST /operator/communities`.
@@ -281,12 +285,25 @@ pub async fn provision_community(
         let owner_hex = initial_owner.as_deref().ok_or_else(|| {
             "initial_owner_pubkey is required when create_only is true".to_string()
         })?;
-        let record = state
+        let outcome = state
             .db
-            .create_community_with_owner(&request.host, owner_hex)
+            .create_community_with_owner(
+                &request.host,
+                owner_hex,
+                request.max_owned_communities.unwrap_or(u32::MAX),
+            )
             .await
-            .map_err(|e| format!("failed to create community: {e}"))?
-            .ok_or_else(|| "community already exists".to_string())?;
+            .map_err(|e| format!("failed to create community: {e}"))?;
+        let (record, status) = match outcome {
+            buzz_db::CreateCommunityWithOwnerOutcome::Created(record) => (record, "created"),
+            buzz_db::CreateCommunityWithOwnerOutcome::Existing(record) => (record, "existed"),
+            buzz_db::CreateCommunityWithOwnerOutcome::HostTaken => {
+                return Err("community already exists".to_string());
+            }
+            buzz_db::CreateCommunityWithOwnerOutcome::OwnerLimitReached => {
+                return Err("owner community limit reached".to_string());
+            }
+        };
 
         info!(
             operator = %operator_hex,
@@ -299,7 +316,7 @@ pub async fn provision_community(
         return Ok(ProvisionCommunityResponse {
             community_id: record.id.to_string(),
             host: record.host,
-            status: "created",
+            status,
             owner_pubkey: initial_owner,
         });
     }

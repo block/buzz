@@ -203,6 +203,19 @@ pub struct EnsuredCommunityRecord {
     pub created: bool,
 }
 
+/// Outcome of an atomic create-with-owner operation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CreateCommunityWithOwnerOutcome {
+    /// The community and owner row were inserted by this call.
+    Created(CreatedCommunityRecord),
+    /// The host already existed and was owned by the requested owner.
+    Existing(CreatedCommunityRecord),
+    /// The owner already has the maximum number of active communities.
+    OwnerLimitReached,
+    /// The host already exists but is not owned by the requested owner.
+    HostTaken,
+}
+
 /// Community row returned by an atomic create-with-owner operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreatedCommunityRecord {
@@ -526,20 +539,65 @@ impl Db {
         })
     }
 
-    /// Atomically creates a community and its initial owner.
+    /// Atomically creates a community and its initial owner under an owner cap.
     ///
-    /// Returns the existing row when the normalized host already has the same
-    /// current owner, making ambiguous create retries naturally idempotent.
-    /// Returns `None` when the host exists with a different (or missing) owner.
-    /// The initial host and owner inserts share one transaction, so callers
-    /// never observe a partially provisioned community or rotate an owner.
+    /// A transaction-scoped advisory lock serializes all creates for one owner
+    /// across relay instances. Existing same-owner hosts are returned before the
+    /// cap check, making ambiguous retries idempotent even at the limit.
     pub async fn create_community_with_owner(
         &self,
         normalized_host: &str,
         owner_pubkey: &str,
-    ) -> Result<Option<CreatedCommunityRecord>> {
+        max_owned_communities: u32,
+    ) -> Result<CreateCommunityWithOwnerOutcome> {
         let owner_pubkey = owner_pubkey.to_ascii_lowercase();
         let mut tx = self.pool.begin().await?;
+
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(&owner_pubkey)
+            .execute(&mut *tx)
+            .await?;
+
+        let existing = sqlx::query(
+            r#"
+            SELECT c.id, c.host, lower(rm.pubkey) = lower($2) AND rm.role = 'owner' AS owned
+            FROM communities c
+            LEFT JOIN relay_members rm ON rm.community_id = c.id AND rm.role = 'owner'
+            WHERE lower(c.host) = lower($1)
+            "#,
+        )
+        .bind(normalized_host)
+        .bind(&owner_pubkey)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if let Some(existing) = existing {
+            if !existing.try_get::<bool, _>("owned")? {
+                return Ok(CreateCommunityWithOwnerOutcome::HostTaken);
+            }
+            return Ok(CreateCommunityWithOwnerOutcome::Existing(
+                CreatedCommunityRecord {
+                    id: CommunityId::from_uuid(existing.try_get("id")?),
+                    host: existing.try_get("host")?,
+                },
+            ));
+        }
+
+        let owned_count: i64 = sqlx::query_scalar(
+            r#"
+            SELECT count(*)
+            FROM communities c
+            JOIN relay_members rm ON rm.community_id = c.id
+            WHERE lower(rm.pubkey) = lower($1)
+              AND rm.role = 'owner'
+            "#,
+        )
+        .bind(&owner_pubkey)
+        .fetch_one(&mut *tx)
+        .await?;
+        if owned_count >= i64::from(max_owned_communities) {
+            return Ok(CreateCommunityWithOwnerOutcome::OwnerLimitReached);
+        }
+
         let row = sqlx::query(
             r#"
             INSERT INTO communities (host)
@@ -551,45 +609,26 @@ impl Db {
         .bind(normalized_host)
         .fetch_optional(&mut *tx)
         .await?;
-
-        let (id, host) = if let Some(row) = row {
-            let id: Uuid = row.try_get("id")?;
-            let host: String = row.try_get("host")?;
-            sqlx::query(
-                "INSERT INTO relay_members (community_id, pubkey, role, added_by) VALUES ($1, $2, 'owner', NULL)",
-            )
-            .bind(id)
-            .bind(&owner_pubkey)
-            .execute(&mut *tx)
-            .await?;
-            (id, host)
-        } else {
-            let existing = sqlx::query(
-                r#"
-                SELECT c.id, c.host
-                FROM communities c
-                JOIN relay_members rm ON rm.community_id = c.id
-                WHERE lower(c.host) = lower($1)
-                  AND lower(rm.pubkey) = lower($2)
-                  AND rm.role = 'owner'
-                "#,
-            )
-            .bind(normalized_host)
-            .bind(&owner_pubkey)
-            .fetch_optional(&mut *tx)
-            .await?;
-            let Some(existing) = existing else {
-                tx.rollback().await?;
-                return Ok(None);
-            };
-            (existing.try_get("id")?, existing.try_get("host")?)
+        let Some(row) = row else {
+            return Ok(CreateCommunityWithOwnerOutcome::HostTaken);
         };
+        let id: Uuid = row.try_get("id")?;
+        let host: String = row.try_get("host")?;
+        sqlx::query(
+            "INSERT INTO relay_members (community_id, pubkey, role, added_by) VALUES ($1, $2, 'owner', NULL)",
+        )
+        .bind(id)
+        .bind(&owner_pubkey)
+        .execute(&mut *tx)
+        .await?;
 
         tx.commit().await?;
-        Ok(Some(CreatedCommunityRecord {
-            id: CommunityId::from_uuid(id),
-            host,
-        }))
+        Ok(CreateCommunityWithOwnerOutcome::Created(
+            CreatedCommunityRecord {
+                id: CommunityId::from_uuid(id),
+                host,
+            },
+        ))
     }
 
     /// Returns the community that owns a channel, if the channel exists.
@@ -3073,10 +3112,12 @@ mod tests {
         let other = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
         let created = db
-            .create_community_with_owner(&host, owner)
+            .create_community_with_owner(&host, owner, u32::MAX)
             .await
-            .expect("create community")
-            .expect("new host");
+            .expect("create community");
+        let CreateCommunityWithOwnerOutcome::Created(created) = created else {
+            panic!("expected new host");
+        };
         assert_eq!(created.host, host);
         let owner_role: Option<String> = sqlx::query_scalar(
             "SELECT role FROM relay_members WHERE community_id = $1 AND pubkey = $2",
@@ -3089,17 +3130,19 @@ mod tests {
         assert_eq!(owner_role.as_deref(), Some("owner"));
 
         let retry = db
-            .create_community_with_owner(&host.to_ascii_uppercase(), owner)
+            .create_community_with_owner(&host.to_ascii_uppercase(), owner, u32::MAX)
             .await
-            .expect("same-owner retry")
-            .expect("existing same-owner community");
+            .expect("same-owner retry");
+        let CreateCommunityWithOwnerOutcome::Existing(retry) = retry else {
+            panic!("expected existing same-owner community");
+        };
         assert_eq!(retry, created, "retry returns the original row");
 
         let collision = db
-            .create_community_with_owner(&host, other)
+            .create_community_with_owner(&host, other, u32::MAX)
             .await
             .expect("collision result");
-        assert!(collision.is_none());
+        assert_eq!(collision, CreateCommunityWithOwnerOutcome::HostTaken);
         let roles: Vec<(String, String)> = sqlx::query_as(
             "SELECT pubkey, role FROM relay_members WHERE community_id = $1 ORDER BY pubkey",
         )
@@ -3113,10 +3156,13 @@ mod tests {
             .await
             .expect("rotate owner");
         let post_rotation_retry = db
-            .create_community_with_owner(&host, owner)
+            .create_community_with_owner(&host, owner, u32::MAX)
             .await
             .expect("post-rotation retry");
-        assert!(post_rotation_retry.is_none());
+        assert_eq!(
+            post_rotation_retry,
+            CreateCommunityWithOwnerOutcome::HostTaken
+        );
     }
 
     #[tokio::test]
@@ -3127,17 +3173,70 @@ mod tests {
         let owner = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
         let (first, second) = tokio::join!(
-            db.create_community_with_owner(&host, owner),
-            db.create_community_with_owner(&host, owner),
+            db.create_community_with_owner(&host, owner, u32::MAX),
+            db.create_community_with_owner(&host, owner, u32::MAX),
         );
-        let first = first
-            .expect("first concurrent create")
-            .expect("first result");
-        let second = second
-            .expect("second concurrent create")
-            .expect("second result");
+        let first = first.expect("first concurrent create");
+        let second = second.expect("second concurrent create");
+        let records = [first, second].map(|outcome| match outcome {
+            CreateCommunityWithOwnerOutcome::Created(record)
+            | CreateCommunityWithOwnerOutcome::Existing(record) => record,
+            other => panic!("unexpected concurrent outcome: {other:?}"),
+        });
 
-        assert_eq!(first, second, "conflict loser re-reads the winning row");
+        assert_eq!(
+            records[0], records[1],
+            "conflict loser re-reads the winning row"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn concurrent_distinct_creates_cannot_exceed_owner_limit() {
+        let db = setup_db().await;
+        let owner = format!("{:0>64}", Uuid::new_v4().simple());
+        for index in 0..2 {
+            let host = format!("owner-cap-seed-{index}-{}.example", Uuid::new_v4().simple());
+            assert!(matches!(
+                db.create_community_with_owner(&host, &owner, 3)
+                    .await
+                    .expect("seed owned community"),
+                CreateCommunityWithOwnerOutcome::Created(_)
+            ));
+        }
+
+        let first_host = format!("owner-cap-first-{}.example", Uuid::new_v4().simple());
+        let second_host = format!("owner-cap-second-{}.example", Uuid::new_v4().simple());
+        let (first, second) = tokio::join!(
+            db.create_community_with_owner(&first_host, &owner, 3),
+            db.create_community_with_owner(&second_host, &owner, 3),
+        );
+        let outcomes = [first.expect("first create"), second.expect("second create")];
+
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|outcome| matches!(outcome, CreateCommunityWithOwnerOutcome::Created(_)))
+                .count(),
+            1
+        );
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|outcome| matches!(
+                    outcome,
+                    CreateCommunityWithOwnerOutcome::OwnerLimitReached
+                ))
+                .count(),
+            1
+        );
+        assert_eq!(
+            db.list_communities_owned_by(&owner)
+                .await
+                .expect("list capped communities")
+                .len(),
+            3
+        );
     }
 
     #[tokio::test]

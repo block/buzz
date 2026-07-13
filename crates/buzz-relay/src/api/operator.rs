@@ -160,6 +160,9 @@ pub async fn provision_community(
             Err(api_error(StatusCode::FORBIDDEN, &msg))
         }
         Err(msg) if msg == "community already exists" => Err(api_error(StatusCode::CONFLICT, &msg)),
+        Err(msg) if msg == "owner community limit reached" => {
+            Err(api_error(StatusCode::CONFLICT, "limit_reached"))
+        }
         Err(msg)
             if msg.starts_with("failed to create community:")
                 || msg.starts_with("community provisioned but owner bootstrap failed:") =>
