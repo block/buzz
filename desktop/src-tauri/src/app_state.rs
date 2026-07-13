@@ -81,6 +81,21 @@ pub struct AppState {
     /// listener is up before any restore/create can request a connection.
     #[cfg(feature = "mesh-llm")]
     pub mesh_coordinator: AsyncMutex<Option<crate::mesh_llm::MeshCoordinator>>,
+    /// `(creator_pubkey_hex, channel_id)` pairs for channels the *named*
+    /// identity created via `create_channel` and has not yet observed its own
+    /// kind:39002 membership entry for. The relay provisions that entry
+    /// asynchronously (#1761), so without this overlay a freshly created
+    /// channel's owner reads back as `is_member=false` until the snapshot
+    /// propagates, disabling their own composer. Entries are bound to the
+    /// creating identity so an in-process identity swap (`import_identity`,
+    /// workspace apply) can never inherit another identity's stale
+    /// membership. Populated only by this process's own `create_channel`
+    /// calls — a relay can never write into it — so it carries no
+    /// trust-boundary risk. `get_channels` clears an entry once the real
+    /// kind:39002 is observed for the current identity, keeping the set
+    /// bounded and letting a later leave correctly flip the channel back to
+    /// `is_member=false`.
+    pub pending_owned_channels: Mutex<std::collections::HashSet<(String, String)>>,
 }
 
 /// Parse the `BUZZ_PRIVATE_KEY` env var into identity keys. `Some` means the
@@ -146,6 +161,7 @@ pub fn build_app_state() -> AppState {
         mesh_llm_runtime: AsyncMutex::new(None),
         #[cfg(feature = "mesh-llm")]
         mesh_coordinator: AsyncMutex::new(None),
+        pending_owned_channels: Mutex::new(std::collections::HashSet::new()),
     }
 }
 
@@ -172,6 +188,33 @@ impl AppState {
     pub fn clear_session_cache(&self, pubkey: &str) {
         if let Ok(mut map) = self.session_config_cache.lock() {
             map.remove(pubkey);
+        }
+    }
+
+    /// Record that `channel_id` was just created by `creator_pubkey` and its
+    /// kind:39002 owner membership has not yet been observed.
+    pub fn mark_pending_owned_channel(&self, creator_pubkey: &str, channel_id: &str) {
+        if let Ok(mut set) = self.pending_owned_channels.lock() {
+            set.insert((creator_pubkey.to_string(), channel_id.to_string()));
+        }
+    }
+
+    /// Whether `channel_id` is still awaiting `my_pubkey`'s kind:39002 entry.
+    /// Bound to `my_pubkey` so an in-process identity swap never inherits
+    /// another identity's pending-owner entry for the same channel id.
+    pub fn is_pending_owned_channel(&self, my_pubkey: &str, channel_id: &str) -> bool {
+        self.pending_owned_channels
+            .lock()
+            .map(|set| set.contains(&(my_pubkey.to_string(), channel_id.to_string())))
+            .unwrap_or(false)
+    }
+
+    /// Drop the `(my_pubkey, channel_id)` entry from the pending-owner
+    /// overlay once that identity's real kind:39002 membership has been
+    /// observed.
+    pub fn clear_pending_owned_channel(&self, my_pubkey: &str, channel_id: &str) {
+        if let Ok(mut set) = self.pending_owned_channels.lock() {
+            set.remove(&(my_pubkey.to_string(), channel_id.to_string()));
         }
     }
 
