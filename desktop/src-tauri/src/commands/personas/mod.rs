@@ -31,7 +31,7 @@ fn trim_optional(value: Option<String>) -> Option<String> {
 }
 
 mod pending;
-use pending::retain_persona_pending;
+pub(in crate::commands) use pending::retain_persona_pending;
 pub(super) use pending::tombstone_persona_pending;
 
 #[tauri::command]
@@ -973,11 +973,11 @@ pub async fn set_persona_active(
 }
 
 pub(crate) const PNG_MAGIC: [u8; 4] = [0x89, 0x50, 0x4E, 0x47];
-
 mod snapshot;
 pub use snapshot::encode_agent_snapshot_for_send;
 pub use snapshot::export_agent_snapshot;
 pub(crate) use snapshot::import::{
-    decode_snapshot_from_bytes, MAX_SNAPSHOT_JSON_BYTES, MAX_SNAPSHOT_PNG_BYTES,
+    decode_snapshot_from_bytes, resolve_snapshot_import_behavior, MAX_SNAPSHOT_JSON_BYTES,
+    MAX_SNAPSHOT_PNG_BYTES,
 };
 pub use snapshot::{confirm_agent_snapshot_import, preview_agent_snapshot_import};

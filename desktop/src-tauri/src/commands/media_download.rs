@@ -5,8 +5,13 @@ use tauri::State;
 use crate::app_state::AppState;
 use crate::commands::export_util::save_bytes_with_dialog;
 use crate::commands::media::{detect_and_validate_mime, sanitize_filename};
-use crate::commands::personas::{
-    decode_snapshot_from_bytes, MAX_SNAPSHOT_JSON_BYTES, MAX_SNAPSHOT_PNG_BYTES, PNG_MAGIC,
+use crate::commands::{
+    personas::{
+        decode_snapshot_from_bytes, MAX_SNAPSHOT_JSON_BYTES, MAX_SNAPSHOT_PNG_BYTES, PNG_MAGIC,
+    },
+    team_snapshot::{
+        decode_team_snapshot_from_bytes, MAX_TEAM_SNAPSHOT_JSON_BYTES, MAX_TEAM_SNAPSHOT_PNG_BYTES,
+    },
 };
 use crate::relay::{classify_request_error, relay_api_base_url_with_override, relay_error_message};
 
@@ -275,16 +280,35 @@ async fn fetch_blob_bytes_with_cap(
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum SnapshotFileKind {
     /// `.agent.json` — plaintext JSON; accepts memory; 5 MiB cap.
-    Json,
+    AgentJson,
     /// `.agent.png` — PNG with embedded metadata; no memory; 10 MiB cap.
-    Png,
+    AgentPng,
+    /// `.team.json` — team template; 25 MiB cap.
+    TeamJson,
+    /// `.team.png` — team template PNG; 50 MiB cap.
+    TeamPng,
 }
 
 impl SnapshotFileKind {
     fn cap(self) -> u64 {
         match self {
-            SnapshotFileKind::Json => MAX_SNAPSHOT_JSON_BYTES as u64,
-            SnapshotFileKind::Png => MAX_SNAPSHOT_PNG_BYTES as u64,
+            SnapshotFileKind::AgentJson => MAX_SNAPSHOT_JSON_BYTES as u64,
+            SnapshotFileKind::AgentPng => MAX_SNAPSHOT_PNG_BYTES as u64,
+            SnapshotFileKind::TeamJson => MAX_TEAM_SNAPSHOT_JSON_BYTES as u64,
+            SnapshotFileKind::TeamPng => MAX_TEAM_SNAPSHOT_PNG_BYTES as u64,
+        }
+    }
+
+    fn is_png(self) -> bool {
+        matches!(self, SnapshotFileKind::AgentPng | SnapshotFileKind::TeamPng)
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            SnapshotFileKind::AgentJson => ".agent.json",
+            SnapshotFileKind::AgentPng => ".agent.png",
+            SnapshotFileKind::TeamJson => ".team.json",
+            SnapshotFileKind::TeamPng => ".team.png",
         }
     }
 }
@@ -296,14 +320,18 @@ impl SnapshotFileKind {
 /// fails closed before any bytes reach the frontend.
 fn ensure_bytes_match_kind(bytes: &[u8], kind: SnapshotFileKind) -> Result<(), String> {
     let has_png_magic = bytes.len() >= 4 && bytes[..4] == PNG_MAGIC;
-    match kind {
-        SnapshotFileKind::Png if !has_png_magic => {
-            Err("format mismatch: filename is .agent.png but bytes are not a PNG".to_string())
-        }
-        SnapshotFileKind::Json if has_png_magic => {
-            Err("format mismatch: filename is .agent.json but bytes are a PNG".to_string())
-        }
-        _ => Ok(()),
+    if kind.is_png() && !has_png_magic {
+        Err(format!(
+            "format mismatch: filename is {} but bytes are not a PNG",
+            kind.label()
+        ))
+    } else if !kind.is_png() && has_png_magic {
+        Err(format!(
+            "format mismatch: filename is {} but bytes are a PNG",
+            kind.label()
+        ))
+    } else {
+        Ok(())
     }
 }
 
@@ -312,15 +340,37 @@ fn ensure_bytes_match_kind(bytes: &[u8], kind: SnapshotFileKind) -> Result<(), S
 fn snapshot_kind_for_filename(filename: &str) -> Result<SnapshotFileKind, String> {
     let lower = filename.to_ascii_lowercase();
     if lower.ends_with(".agent.json") {
-        Ok(SnapshotFileKind::Json)
+        Ok(SnapshotFileKind::AgentJson)
     } else if lower.ends_with(".agent.png") {
-        Ok(SnapshotFileKind::Png)
+        Ok(SnapshotFileKind::AgentPng)
+    } else if lower.ends_with(".team.json") {
+        Ok(SnapshotFileKind::TeamJson)
+    } else if lower.ends_with(".team.png") {
+        Ok(SnapshotFileKind::TeamPng)
     } else {
         Err(format!(
-            "\"{}\" is not a snapshot filename — expected .agent.json or .agent.png",
+            "\"{}\" is not a snapshot filename — expected .agent.json, .agent.png, .team.json, or .team.png",
             filename
         ))
     }
+}
+
+/// Reject a metadata-declared size before opening the media stream.
+///
+/// Keeping this as a pure helper makes the per-kind cap a testable production
+/// boundary, rather than relying on a duplicated test-side comparison.
+fn ensure_declared_size_within_cap(
+    expected_size: usize,
+    kind: SnapshotFileKind,
+) -> Result<(), String> {
+    if expected_size as u64 > kind.cap() {
+        return Err(format!(
+            "declared size {} exceeds the {} MiB cap for this format",
+            expected_size,
+            kind.cap() / (1024 * 1024)
+        ));
+    }
+    Ok(())
 }
 
 /// Fetch and validate an agent snapshot attachment in memory.
@@ -369,13 +419,7 @@ pub async fn fetch_snapshot_bytes(
     if expected_size == 0 {
         return Err("missing or zero expected size (imeta size field)".to_string());
     }
-    if expected_size as u64 > cap {
-        return Err(format!(
-            "declared size {} exceeds the {} MiB cap for this format",
-            expected_size,
-            cap / (1024 * 1024)
-        ));
-    }
+    ensure_declared_size_within_cap(expected_size, kind)?;
 
     // ── Bounded fetch ─────────────────────────────────────────────────────
     let bytes = fetch_blob_bytes_with_cap(&url, &state, cap).await?;
@@ -401,10 +445,19 @@ pub async fn fetch_snapshot_bytes(
     //    JSON) and .agent.json delivering PNG bytes.
     ensure_bytes_match_kind(&bytes, kind)?;
 
-    // 4. Bytes must parse as a valid agent snapshot.  This rejects malformed
-    //    payloads, memory-bearing PNGs, JSON with inconsistent memory fields,
-    //    and any format/extension mismatch not caught by magic-byte check.
-    decode_snapshot_from_bytes(&bytes).map_err(|e| format!("invalid snapshot: {e}"))?;
+    // 4. Bytes must parse as the snapshot type selected by the filename.
+    //    Team parsing rejects retired flat JSON and persona-pack ZIP inputs
+    //    before anything reaches the frontend.
+    match kind {
+        SnapshotFileKind::AgentJson | SnapshotFileKind::AgentPng => {
+            decode_snapshot_from_bytes(&bytes)
+                .map_err(|e| format!("invalid agent snapshot: {e}"))?;
+        }
+        SnapshotFileKind::TeamJson | SnapshotFileKind::TeamPng => {
+            decode_team_snapshot_from_bytes(&bytes)
+                .map_err(|e| format!("invalid team snapshot: {e}"))?;
+        }
+    }
 
     Ok(tauri::ipc::Response::new(bytes))
 }
@@ -416,14 +469,14 @@ mod tests {
     #[test]
     fn snapshot_kind_json_returns_json_kind_and_correct_cap() {
         let kind = snapshot_kind_for_filename("analyst.agent.json").unwrap();
-        assert_eq!(kind, SnapshotFileKind::Json);
+        assert_eq!(kind, SnapshotFileKind::AgentJson);
         assert_eq!(kind.cap(), MAX_SNAPSHOT_JSON_BYTES as u64);
     }
 
     #[test]
     fn snapshot_kind_png_returns_png_kind_and_correct_cap() {
         let kind = snapshot_kind_for_filename("analyst.agent.png").unwrap();
-        assert_eq!(kind, SnapshotFileKind::Png);
+        assert_eq!(kind, SnapshotFileKind::AgentPng);
         assert_eq!(kind.cap(), MAX_SNAPSHOT_PNG_BYTES as u64);
     }
 
@@ -447,6 +500,33 @@ mod tests {
     fn snapshot_kind_agent_json_only_rejected() {
         // "agent.json" without the leading dot — plain filename, not the suffix
         assert!(snapshot_kind_for_filename("agentjson").is_err());
+    }
+
+    #[test]
+    fn snapshot_kind_team_extensions_are_case_insensitive_and_scale_caps() {
+        let json = snapshot_kind_for_filename("review.TEAM.JSON").unwrap();
+        let png = snapshot_kind_for_filename("review.TEAM.PNG").unwrap();
+        assert_eq!(json, SnapshotFileKind::TeamJson);
+        assert_eq!(png, SnapshotFileKind::TeamPng);
+        assert_eq!(json.cap(), 25 * 1024 * 1024);
+        assert_eq!(png.cap(), 50 * 1024 * 1024);
+    }
+
+    #[test]
+    fn fetch_boundary_team_png_filename_with_json_bytes_rejected() {
+        let bytes = br#"{"format":"buzz-team-snapshot","version":1}"#;
+        let kind = snapshot_kind_for_filename("review.team.png").unwrap();
+        let error = ensure_bytes_match_kind(bytes, kind).unwrap_err();
+        assert!(error.contains(".team.png") && error.contains("not a PNG"));
+    }
+
+    #[test]
+    fn fetch_boundary_team_declared_size_over_cap_rejected() {
+        let kind = snapshot_kind_for_filename("review.team.json").unwrap();
+        assert!(ensure_declared_size_within_cap(MAX_TEAM_SNAPSHOT_JSON_BYTES, kind).is_ok());
+        let error =
+            ensure_declared_size_within_cap(MAX_TEAM_SNAPSHOT_JSON_BYTES + 1, kind).unwrap_err();
+        assert!(error.contains("25 MiB"));
     }
 
     // ── Focused boundary tests: format mismatch and consistency ──────────────
