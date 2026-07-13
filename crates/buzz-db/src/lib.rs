@@ -3145,10 +3145,15 @@ mod tests {
             .sign_with_keys(&keys)
             .expect("sign X");
         let b = EventBuilder::new(Kind::Custom(buzz_core::kind::KIND_READ_STATE as u16), "B")
-            .tags(tags)
+            .tags(tags.clone())
             .custom_created_at(Timestamp::from(base + 2))
             .sign_with_keys(&keys)
             .expect("sign B");
+        let c = EventBuilder::new(Kind::Custom(buzz_core::kind::KIND_READ_STATE as u16), "C")
+            .tags(tags)
+            .custom_created_at(Timestamp::from(base + 3))
+            .sign_with_keys(&keys)
+            .expect("sign C");
 
         async fn legacy_insert(
             pool: &PgPool,
@@ -3233,6 +3238,10 @@ mod tests {
         legacy_insert(&db.pool, community, &b, &d_tag)
             .await
             .expect("legacy insert B");
+        let duplicate_b = legacy_insert(&db.pool, community, &b, &d_tag)
+            .await
+            .expect("live duplicate B is skipped");
+        assert_eq!(duplicate_b.rows_affected(), 0);
 
         sqlx::query(
             "INSERT INTO event_mentions \
@@ -3247,10 +3256,14 @@ mod tests {
         .await
         .expect("insert B mention");
 
-        // Hold the mention side of the lock order open on a second connection.
-        // Replacement must wait for it, then delete event first and mentions
-        // second without forming an events↔mentions deadlock cycle.
-        let mut mention_tx = db.pool.begin().await.expect("begin mention transaction");
+        // Exercise the new Rust hard-delete path independently. An in-flight
+        // mention holds KEY SHARE on B, so replacement by C must block, then
+        // complete after the mention commits and remove both B and its mention.
+        let mut rust_mention_tx = db
+            .pool
+            .begin()
+            .await
+            .expect("begin Rust mention transaction");
         sqlx::query(
             "INSERT INTO event_mentions \
                  (community_id, pubkey_hex, event_id, event_created_at, event_kind) \
@@ -3260,12 +3273,78 @@ mod tests {
         .bind("e".repeat(64))
         .bind(b.id.as_bytes().as_slice())
         .bind(b.created_at.as_secs() as f64)
-        .execute(&mut *mention_tx)
+        .execute(&mut *rust_mention_tx)
         .await
-        .expect("hold live-event key-share lock");
+        .expect("hold B live-event key-share lock");
+
+        let replace_db = db.clone();
+        let replace_d_tag = d_tag.clone();
+        let replace_c = c.clone();
+        let replace_task = tokio::spawn(async move {
+            replace_db
+                .replace_parameterized_event(community, &replace_c, &replace_d_tag, None)
+                .await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(
+            !replace_task.is_finished(),
+            "Rust hard delete should wait for mention lock"
+        );
+        rust_mention_tx
+            .commit()
+            .await
+            .expect("release Rust mention lock");
+        let replaced = tokio::time::timeout(std::time::Duration::from_secs(2), replace_task)
+            .await
+            .expect("Rust hard delete deadlocked with mention insert")
+            .expect("replacement task panicked")
+            .expect("replace B with C");
+        assert!(replaced.1, "C must replace B");
+        let b_mentions: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM event_mentions WHERE community_id=$1 AND event_id=$2",
+        )
+        .bind(community.as_uuid())
+        .bind(b.id.as_bytes().as_slice())
+        .fetch_one(&db.pool)
+        .await
+        .expect("count B mentions after Rust replacement");
+        assert_eq!(b_mentions, 0);
+
+        sqlx::query(
+            "INSERT INTO event_mentions \
+                 (community_id, pubkey_hex, event_id, event_created_at, event_kind) \
+             VALUES ($1, $2, $3, to_timestamp($4), 30078)",
+        )
+        .bind(community.as_uuid())
+        .bind("f".repeat(64))
+        .bind(c.id.as_bytes().as_slice())
+        .bind(c.created_at.as_secs() as f64)
+        .execute(&db.pool)
+        .await
+        .expect("insert C mention");
+
+        // Exercise legacy UPDATE-trigger deletion with the same barrier. While
+        // deletion waits on C's KEY SHARE lock, an exact replay must already be
+        // a zero-row trigger no-op; it must not wait for deletion or resurrect C.
+        let mut legacy_mention_tx = db
+            .pool
+            .begin()
+            .await
+            .expect("begin legacy mention transaction");
+        sqlx::query(
+            "INSERT INTO event_mentions \
+                 (community_id, pubkey_hex, event_id, event_created_at, event_kind) \
+             VALUES ($1, $2, $3, to_timestamp($4), 30078) ON CONFLICT DO NOTHING",
+        )
+        .bind(community.as_uuid())
+        .bind("f".repeat(64))
+        .bind(c.id.as_bytes().as_slice())
+        .bind(c.created_at.as_secs() as f64)
+        .execute(&mut *legacy_mention_tx)
+        .await
+        .expect("hold C live-event key-share lock");
 
         let delete_pool = db.pool.clone();
-        let delete_community = community;
         let delete_pubkey = keys.public_key().to_bytes();
         let delete_d_tag = d_tag.clone();
         let delete_task = tokio::spawn(async move {
@@ -3273,7 +3352,7 @@ mod tests {
                 "UPDATE events SET deleted_at=NOW() \
                  WHERE community_id=$1 AND kind=30078 AND pubkey=$2 AND d_tag=$3 AND deleted_at IS NULL",
             )
-            .bind(delete_community.as_uuid())
+            .bind(community.as_uuid())
             .bind(delete_pubkey)
             .bind(delete_d_tag)
             .execute(&delete_pool)
@@ -3282,17 +3361,23 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         assert!(
             !delete_task.is_finished(),
-            "delete should wait for mention lock"
+            "legacy delete should wait for mention lock"
         );
-        mention_tx.commit().await.expect("release mention lock");
+
+        let replay_while_delete_waits = legacy_insert(&db.pool, community, &c, &d_tag)
+            .await
+            .expect("concurrent exact C replay is skipped");
+        assert_eq!(replay_while_delete_waits.rows_affected(), 0);
+
+        legacy_mention_tx
+            .commit()
+            .await
+            .expect("release legacy mention lock");
         tokio::time::timeout(std::time::Duration::from_secs(2), delete_task)
             .await
-            .expect("delete deadlocked with mention insert")
+            .expect("legacy delete deadlocked with mention insert")
             .expect("delete task panicked")
-            .expect("legacy NIP-09 delete B");
-
-        // NIP-09 deletion through the legacy soft-delete API must physically
-        // remove B while retaining B's ordering tuple in the watermark.
+            .expect("legacy NIP-09 delete C");
 
         let payloads: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM events WHERE community_id=$1 AND kind=30078 AND pubkey=$2 AND d_tag=$3",
@@ -3308,11 +3393,12 @@ mod tests {
             "legacy soft deletes must not retain NIP-RS payloads"
         );
 
-        let replay_b = legacy_insert(&db.pool, community, &b, &d_tag).await;
-        assert!(
-            replay_b.is_err(),
-            "exact watermark replay after deletion must be rejected"
-        );
+        // Opposite commit order: deletion has committed before exact replay.
+        // Equality remains an observable zero-row no-op, never a resurrection.
+        let replay_c = legacy_insert(&db.pool, community, &c, &d_tag)
+            .await
+            .expect("post-delete exact C replay is skipped");
+        assert_eq!(replay_c.rows_affected(), 0);
         let payloads_after_exact_replay: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM events WHERE community_id=$1 AND kind=30078 AND pubkey=$2 AND d_tag=$3",
         )
@@ -3327,7 +3413,7 @@ mod tests {
         let replay = legacy_insert(&db.pool, community, &x, &d_tag).await;
         assert!(
             replay.is_err(),
-            "database guard must reject A < X < B replay"
+            "database guard must reject A < X < C replay"
         );
 
         let watermark: (chrono::DateTime<chrono::Utc>, Vec<u8>) = sqlx::query_as(
@@ -3339,9 +3425,9 @@ mod tests {
         .bind(&d_tag)
         .fetch_one(&db.pool)
         .await
-        .expect("read B watermark");
-        assert_eq!(watermark.0.timestamp(), base as i64 + 2);
-        assert_eq!(watermark.1, b.id.as_bytes().as_slice());
+        .expect("read C watermark");
+        assert_eq!(watermark.0.timestamp(), base as i64 + 3);
+        assert_eq!(watermark.1, c.id.as_bytes().as_slice());
     }
 
     #[tokio::test]

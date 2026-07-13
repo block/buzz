@@ -35,27 +35,21 @@ BEGIN
         RETURNING TRUE INTO advanced;
 
         IF NOT COALESCE(advanced, FALSE) THEN
-            -- Let an exact duplicate reach the events uniqueness constraint so
-            -- legacy `ON CONFLICT DO NOTHING` keeps its existing idempotence.
+            -- Exact equality is idempotent at the durable coordinate level,
+            -- whether or not its payload is still live. Skip it in the trigger
+            -- so concurrent physical deletion cannot create a resurrection
+            -- window between an existence check and uniqueness enforcement.
             IF EXISTS (
                 SELECT 1
-                FROM parameterized_event_watermarks watermark
-                JOIN events live
-                  ON live.community_id = watermark.community_id
-                 AND live.kind = watermark.kind
-                 AND live.pubkey = watermark.pubkey
-                 AND live.d_tag = watermark.d_tag
-                 AND live.created_at = watermark.created_at
-                 AND live.id = watermark.event_id
-                 AND live.deleted_at IS NULL
-                WHERE watermark.community_id = NEW.community_id
-                  AND watermark.kind = NEW.kind
-                  AND watermark.pubkey = NEW.pubkey
-                  AND watermark.d_tag = NEW.d_tag
-                  AND watermark.created_at = NEW.created_at
-                  AND watermark.event_id = NEW.id
+                FROM parameterized_event_watermarks
+                WHERE community_id = NEW.community_id
+                  AND kind = NEW.kind
+                  AND pubkey = NEW.pubkey
+                  AND d_tag = NEW.d_tag
+                  AND created_at = NEW.created_at
+                  AND event_id = NEW.id
             ) THEN
-                RETURN NEW;
+                RETURN NULL;
             END IF;
 
             RAISE EXCEPTION 'stale NIP-RS event rejected by durable watermark'
