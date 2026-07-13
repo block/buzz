@@ -1,10 +1,11 @@
 import type { RelayEvent } from "@/shared/api/types";
 import { CHANNEL_TIMELINE_CONTENT_KINDS } from "@/shared/constants/kinds";
 import {
+  compareRelayOrder,
   flattenChannelWindowEvents,
   type ChannelWindowStore,
 } from "./channelWindowStore";
-import { mergeMessages } from "./messageMerge";
+import { reconcileIncomingMessage } from "./messageMerge";
 import { getThreadReference, isBroadcastReply } from "./threading";
 
 const CHANNEL_TIMELINE_KINDS = new Set<number>(CHANNEL_TIMELINE_CONTENT_KINDS);
@@ -32,10 +33,49 @@ export function reconcileChannelWindowMessages(
     (event) => !authoritativeIds.has(event.id),
   );
 
-  // Merge authoritative rows last so an acknowledged relay event replaces its
-  // matching optimistic row while preserving the local render key.
-  return windowEvents.reduce(
-    (current, event) => mergeMessages(current, event),
-    retained,
+  // Reconcile acknowledgements against cache-only rows without changing the
+  // authoritative window's order. The render key moves from an optimistic row
+  // to its relay acknowledgement while the relay row remains in its original
+  // cursor position.
+  let cacheOnly = retained;
+  const authoritative = windowEvents.map((event) => {
+    const reconciled = reconcileIncomingMessage(cacheOnly, event);
+    const incoming = reconciled.at(-1);
+    cacheOnly = reconciled.slice(0, -1);
+    return incoming ?? event;
+  });
+
+  return mergeChronologicalMessages(cacheOnly, authoritative);
+}
+
+function mergeChronologicalMessages(
+  cacheOnly: RelayEvent[],
+  authoritative: RelayEvent[],
+) {
+  const retained = [...cacheOnly].sort((left, right) =>
+    compareRelayOrder(right, left),
+  );
+  const merged: RelayEvent[] = [];
+  let retainedIndex = 0;
+  let authoritativeIndex = 0;
+
+  while (
+    retainedIndex < retained.length &&
+    authoritativeIndex < authoritative.length
+  ) {
+    const retainedEvent = retained[retainedIndex];
+    const authoritativeEvent = authoritative[authoritativeIndex];
+    if (compareRelayOrder(retainedEvent, authoritativeEvent) > 0) {
+      merged.push(retainedEvent);
+      retainedIndex += 1;
+    } else {
+      merged.push(authoritativeEvent);
+      authoritativeIndex += 1;
+    }
+  }
+
+  return merged.concat(
+    retained.slice(retainedIndex),
+    authoritative.slice(authoritativeIndex),
   );
 }

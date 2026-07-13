@@ -13,6 +13,7 @@ function getLocalRenderKey(message: RelayEvent) {
 function isMatchingPendingMessage(pending: RelayEvent, incoming: RelayEvent) {
   if (
     !pending.pending ||
+    incoming.pending ||
     pending.content !== incoming.content ||
     pending.kind !== incoming.kind ||
     pending.pubkey.toLowerCase() !== incoming.pubkey.toLowerCase() ||
@@ -30,10 +31,9 @@ function isMatchingPendingMessage(pending: RelayEvent, incoming: RelayEvent) {
   );
 }
 
-function mergeMessagesWithNormalizer(
+export function reconcileIncomingMessage(
   current: RelayEvent[],
   incoming: RelayEvent,
-  normalize: (messages: RelayEvent[]) => RelayEvent[],
 ): RelayEvent[] {
   const normalizedCurrent = dedupeMessagesById(current);
   const replacedPending = normalizedCurrent.find((message) =>
@@ -49,11 +49,18 @@ function mergeMessagesWithNormalizer(
   const deduped = normalizedCurrent.filter(
     (message) =>
       message.id !== incoming.id &&
-      getLocalRenderKey(message) !== incomingLocalKey &&
-      !isMatchingPendingMessage(message, incoming),
+      getLocalRenderKey(message) !== incomingLocalKey,
   );
 
-  return normalize([...deduped, incomingWithLocalKey]);
+  return [...deduped, incomingWithLocalKey];
+}
+
+function mergeMessagesWithNormalizer(
+  current: RelayEvent[],
+  incoming: RelayEvent,
+  normalize: (messages: RelayEvent[]) => RelayEvent[],
+): RelayEvent[] {
+  return normalize(reconcileIncomingMessage(current, incoming));
 }
 
 export function mergeMessages(

@@ -4,7 +4,9 @@ import { QueryClient, QueryObserver } from "@tanstack/react-query";
 
 import { channelMessagesKey, channelWindowKey } from "./messageQueryKeys.ts";
 import {
+  appendOlderChannelWindow,
   emptyChannelWindowStore,
+  flattenChannelWindowEvents,
   mergeLiveChannelWindowEvent,
   replaceNewestChannelWindow,
 } from "./channelWindowStore.ts";
@@ -169,6 +171,84 @@ test("test_projection_replaces_pending_send_with_authoritative_event", () => {
   );
   assert.equal(projected[1]?.id, accepted.id);
   assert.equal(projected[1]?.localKey, pending.id);
+});
+
+test("test_reconciliation_preserves_dense_second_window_order", () => {
+  const first = {
+    ...newestPage([event("a", 100), event("b", 100)]),
+    nextCursor: { createdAt: 100, eventId: event("b", 100).id },
+    hasMore: true,
+  };
+  const store = appendOlderChannelWindow(
+    replaceNewestChannelWindow(emptyChannelWindowStore(), first),
+    {
+      ...newestPage([event("c", 100), event("z", 99)]),
+      startCursor: first.nextCursor,
+    },
+  );
+
+  assert.deepEqual(
+    reconcileChannelWindowMessages(store, []).map((item) => item.content),
+    ["z", "c", "b", "a"],
+  );
+  assert.deepEqual(
+    reconcileChannelWindowMessages(store, []).map((item) => item.id),
+    flattenChannelWindowEvents(store).map((item) => item.id),
+  );
+});
+
+test("test_reconciliation_retains_identical_pending_sends", () => {
+  const harness = createHarness();
+  const first = {
+    ...event("first-pending", 110),
+    content: "hello",
+    pending: true,
+  };
+  const second = {
+    ...event("second-pending", 111),
+    content: "hello",
+    pending: true,
+  };
+
+  const projected = reconcileChannelWindowMessages(
+    harness.client.getQueryData(harness.windowKey),
+    [first, second],
+  );
+
+  assert.deepEqual(
+    projected.map((item) => item.id),
+    [event("initial", 100), first, second].map((item) => item.id),
+  );
+});
+
+test("test_reconciliation_acknowledges_only_one_identical_pending_send", () => {
+  const harness = createHarness();
+  const first = {
+    ...event("first-pending", 110),
+    content: "hello",
+    pending: true,
+  };
+  const second = {
+    ...event("second-pending", 111),
+    content: "hello",
+    pending: true,
+  };
+  const accepted = {
+    ...event("accepted", 110),
+    content: "hello",
+  };
+  const window = replaceNewestChannelWindow(
+    harness.client.getQueryData(harness.windowKey),
+    newestPage([accepted, event("initial", 100)]),
+  );
+
+  const projected = reconcileChannelWindowMessages(window, [first, second]);
+
+  assert.deepEqual(
+    projected.map((item) => item.id),
+    [event("initial", 100), accepted, second].map((item) => item.id),
+  );
+  assert.equal(projected[1]?.localKey, first.id);
 });
 
 test("test_live_projection_retains_pending_send_and_non_broadcast_thread_reply", () => {
