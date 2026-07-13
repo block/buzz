@@ -2836,19 +2836,6 @@ impl Db {
             ));
         }
 
-        if is_nip_rs {
-            if let Some((_, existing_id)) = &existing {
-                // Mentions are denormalized and have no FK to the partitioned
-                // events table. Migration 0007 adds the serving index for this
-                // defensive cleanup of malformed/legacy NIP-RS rows.
-                sqlx::query("DELETE FROM event_mentions WHERE community_id = $1 AND event_id = $2")
-                    .bind(community_id.as_uuid())
-                    .bind(existing_id)
-                    .execute(&mut *tx)
-                    .await?;
-            }
-        }
-
         if existing.is_some() {
             let statement = if is_nip_rs {
                 "DELETE FROM events \
@@ -2864,6 +2851,20 @@ impl Db {
                 .bind(d_tag)
                 .execute(&mut *tx)
                 .await?;
+
+            if is_nip_rs {
+                if let Some((_, existing_id)) = &existing {
+                    // Event first, mentions second: migration 0009's live-event
+                    // fence uses this global lock order to avoid deadlocks.
+                    sqlx::query(
+                        "DELETE FROM event_mentions WHERE community_id = $1 AND event_id = $2",
+                    )
+                    .bind(community_id.as_uuid())
+                    .bind(existing_id)
+                    .execute(&mut *tx)
+                    .await?;
+                }
+            }
         }
 
         // Insert the new event inside the transaction.
@@ -3233,18 +3234,65 @@ mod tests {
             .await
             .expect("legacy insert B");
 
-        // NIP-09 deletion through the legacy soft-delete API must physically
-        // remove B while retaining B's ordering tuple in the watermark.
         sqlx::query(
-            "UPDATE events SET deleted_at=NOW() \
-             WHERE community_id=$1 AND kind=30078 AND pubkey=$2 AND d_tag=$3 AND deleted_at IS NULL",
+            "INSERT INTO event_mentions \
+                 (community_id, pubkey_hex, event_id, event_created_at, event_kind) \
+             VALUES ($1, $2, $3, to_timestamp($4), 30078)",
         )
         .bind(community.as_uuid())
-        .bind(keys.public_key().to_bytes())
-        .bind(&d_tag)
+        .bind("e".repeat(64))
+        .bind(b.id.as_bytes().as_slice())
+        .bind(b.created_at.as_secs() as f64)
         .execute(&db.pool)
         .await
-        .expect("legacy NIP-09 delete B");
+        .expect("insert B mention");
+
+        // Hold the mention side of the lock order open on a second connection.
+        // Replacement must wait for it, then delete event first and mentions
+        // second without forming an events↔mentions deadlock cycle.
+        let mut mention_tx = db.pool.begin().await.expect("begin mention transaction");
+        sqlx::query(
+            "INSERT INTO event_mentions \
+                 (community_id, pubkey_hex, event_id, event_created_at, event_kind) \
+             VALUES ($1, $2, $3, to_timestamp($4), 30078) ON CONFLICT DO NOTHING",
+        )
+        .bind(community.as_uuid())
+        .bind("e".repeat(64))
+        .bind(b.id.as_bytes().as_slice())
+        .bind(b.created_at.as_secs() as f64)
+        .execute(&mut *mention_tx)
+        .await
+        .expect("hold live-event key-share lock");
+
+        let delete_pool = db.pool.clone();
+        let delete_community = community;
+        let delete_pubkey = keys.public_key().to_bytes();
+        let delete_d_tag = d_tag.clone();
+        let delete_task = tokio::spawn(async move {
+            sqlx::query(
+                "UPDATE events SET deleted_at=NOW() \
+                 WHERE community_id=$1 AND kind=30078 AND pubkey=$2 AND d_tag=$3 AND deleted_at IS NULL",
+            )
+            .bind(delete_community.as_uuid())
+            .bind(delete_pubkey)
+            .bind(delete_d_tag)
+            .execute(&delete_pool)
+            .await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(
+            !delete_task.is_finished(),
+            "delete should wait for mention lock"
+        );
+        mention_tx.commit().await.expect("release mention lock");
+        tokio::time::timeout(std::time::Duration::from_secs(2), delete_task)
+            .await
+            .expect("delete deadlocked with mention insert")
+            .expect("delete task panicked")
+            .expect("legacy NIP-09 delete B");
+
+        // NIP-09 deletion through the legacy soft-delete API must physically
+        // remove B while retaining B's ordering tuple in the watermark.
 
         let payloads: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM events WHERE community_id=$1 AND kind=30078 AND pubkey=$2 AND d_tag=$3",
@@ -3259,6 +3307,22 @@ mod tests {
             payloads, 0,
             "legacy soft deletes must not retain NIP-RS payloads"
         );
+
+        let replay_b = legacy_insert(&db.pool, community, &b, &d_tag).await;
+        assert!(
+            replay_b.is_err(),
+            "exact watermark replay after deletion must be rejected"
+        );
+        let payloads_after_exact_replay: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM events WHERE community_id=$1 AND kind=30078 AND pubkey=$2 AND d_tag=$3",
+        )
+        .bind(community.as_uuid())
+        .bind(keys.public_key().to_bytes())
+        .bind(&d_tag)
+        .fetch_one(&db.pool)
+        .await
+        .expect("count payloads after exact replay");
+        assert_eq!(payloads_after_exact_replay, 0);
 
         let replay = legacy_insert(&db.pool, community, &x, &d_tag).await;
         assert!(

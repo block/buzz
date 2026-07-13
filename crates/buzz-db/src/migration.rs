@@ -471,7 +471,7 @@ mod tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 8);
+        assert_eq!(migrations.len(), 9);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -570,22 +570,6 @@ mod tests {
         assert!(migrations[6]
             .sql
             .as_str()
-            .contains("CREATE TRIGGER trg_events_nip_rs_watermark"));
-        assert!(migrations[6]
-            .sql
-            .as_str()
-            .contains("stale NIP-RS event rejected by durable watermark"));
-        assert!(migrations[6]
-            .sql
-            .as_str()
-            .contains("CREATE TRIGGER trg_events_purge_soft_deleted_nip_rs"));
-        assert!(migrations[6]
-            .sql
-            .as_str()
-            .contains("CREATE TRIGGER trg_event_mentions_require_live_event"));
-        assert!(migrations[6]
-            .sql
-            .as_str()
             .contains("INSERT INTO parameterized_event_watermarks"));
         assert!(migrations[6]
             .sql
@@ -616,6 +600,26 @@ mod tests {
             .as_str()
             .contains("CASE WHEN kind IN (0, 9, 40002, 45001, 45003)"));
         assert!(migrations[7].sql.as_str().contains("ELSE NULL::tsvector"));
+
+        // Mixed-version guards are additive because 0007/0008 may already be
+        // recorded by a running relay and their sqlx checksums are immutable.
+        assert_eq!(migrations[8].version, 9);
+        assert!(migrations[8]
+            .sql
+            .as_str()
+            .contains("CREATE TRIGGER trg_events_nip_rs_watermark"));
+        assert!(migrations[8]
+            .sql
+            .as_str()
+            .contains("stale NIP-RS event rejected by durable watermark"));
+        assert!(migrations[8]
+            .sql
+            .as_str()
+            .contains("CREATE TRIGGER trg_events_purge_soft_deleted_nip_rs"));
+        assert!(migrations[8]
+            .sql
+            .as_str()
+            .contains("CREATE TRIGGER trg_event_mentions_require_live_event"));
     }
 
     #[test]
