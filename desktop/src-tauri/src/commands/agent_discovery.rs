@@ -69,6 +69,15 @@ pub async fn discover_acp_providers() -> Result<Vec<AcpRuntimeCatalogEntry>, Str
     .map_err(|e| format!("spawn_blocking failed: {e}"))
 }
 
+/// Doctor check for the bundled ACP bridges' Node.js runtime requirement.
+/// `None` when the app bundles no npm-sourced bridges — the Doctor panel
+/// hides the section entirely.
+#[tauri::command]
+pub async fn check_acp_node_runtime(
+) -> Option<crate::managed_agents::node_runtime::NodeRuntimeCheck> {
+    crate::managed_agents::node_runtime::run_node_runtime_check().await
+}
+
 #[tauri::command]
 pub async fn install_acp_runtime(
     runtime_id: String,

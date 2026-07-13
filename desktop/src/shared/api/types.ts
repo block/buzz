@@ -597,6 +597,29 @@ export type AcpRuntime = AcpRuntimeCatalogEntry & {
   binaryPath: string;
 };
 
+export type NodeRuntimeRequirementVerdict = "satisfied" | "unmet" | "unknown";
+
+export type NodeRuntimeRequirement = {
+  binary: string;
+  requirement: string;
+  verdict: NodeRuntimeRequirementVerdict;
+};
+
+/**
+ * Doctor check for the bundled ACP bridges' Node.js runtime requirement
+ * (`check_acp_node_runtime`). Null when the app bundles no npm-sourced
+ * bridges — the Doctor panel hides the section entirely.
+ */
+export type NodeRuntimeCheck = {
+  status: "pass" | "warn";
+  message: string;
+  manifestPath: string;
+  nodePath: string | null;
+  nodeVersion: string | null;
+  requirements: NodeRuntimeRequirement[];
+  fixUrl: string;
+};
+
 export type InstallStepResult = {
   step: string;
   command: string;

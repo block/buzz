@@ -736,6 +736,7 @@ pub fn run() {
             fetch_link_preview_title,
             discover_acp_providers,
             discover_git_bash_prerequisite,
+            check_acp_node_runtime,
             install_acp_runtime,
             discover_managed_agent_prereqs,
             sign_event,

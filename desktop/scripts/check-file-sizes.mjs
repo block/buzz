@@ -202,7 +202,11 @@ const overrides = new Map([
   // mapper. This is the existing API boundary; split remains queued.
   // team-instructions-first-class: createManagedAgent Tauri bridge threads the
   // new teamId input through to the backend (+1 line).
-  ["src/shared/api/tauri.ts", 1305],
+  // bundle-acps: RawNodeRuntimeCheck type + fromRawNodeRuntimeCheck mapper +
+  // checkAcpNodeRuntime wrapper for the bundled-bridge Node.js doctor check
+  // (+35 lines on rebase union with main's Doctor/team growth). Queued to
+  // split with the rest of this file.
+  ["src/shared/api/tauri.ts", 1340],
   // doctor-npm-eacces-preflight: hint field added to InstallStepResult (+1 line).
   // codex-acp-package-swap: "adapter_outdated" variant added to AcpAvailabilityStatus (+1 line).
   // doctor-install-reliability: AuthStatus tagged union + nodeRequired/authStatus/
@@ -217,7 +221,10 @@ const overrides = new Map([
   // doc comment) and AgentTeam/CreateTeamInput/UpdateTeamInput.instructions
   // (+3) — the new team-id spawn link and the runtime-layered instructions
   // field.
-  ["src/shared/api/types.ts", 1047],
+  // bundle-acps: NodeRuntimeCheck + NodeRuntimeRequirement types for the
+  // bundled-bridge Node.js doctor check (+23 lines on rebase union with
+  // main's Git Bash / signout-wipe / team-instructions type growth).
+  ["src/shared/api/types.ts", 1070],
   // readiness-gate: PersonaDialog.tsx threads computeLocalModeGate +
   // requiredCredentialEnvKeys + RequiredFieldLabel so the "New agent" dialog
   // shows required markers and credential amber rows (parity with
@@ -447,7 +454,9 @@ const overrides = new Map([
   // +53: pass 2 — three cfg(windows) install shell tests (resolve succeeds with
   // Git, error hint content, install_shell_command succeeds).
   // +8: install_shell_from pure seam extracted for deterministic testing.
-  ["src-tauri/src/commands/agent_discovery.rs", 1523],
+  // bundle-acps: node runtime check wiring for the bundled-bridge Doctor
+  // requirement (+9 lines on rebase union with the Windows Doctor install fix).
+  ["src-tauri/src/commands/agent_discovery.rs", 1532],
   // draft-persistence predicate: submit-time `loadDraft` check + inline comment
   // + deps-array entry in submitMessage closes the never-persisted-boundary
   // defect (Thufir Pass-3 finding). Load-bearing correctness fix; queued to

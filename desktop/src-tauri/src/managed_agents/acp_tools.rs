@@ -23,6 +23,9 @@ pub const ACP_TOOLS_DIR_ENV: &str = "BUZZ_ACP_TOOLS_DIR";
 /// Bundled resource path, relative to the Tauri resource dir (mirrors the
 /// `resources/acp` entry in `tauri.conf.json`).
 const ACP_TOOLS_RESOURCE_DIR: &str = "resources/acp/bin";
+/// Node runtime manifest staged by `desktop/scripts/prepare-acp-tools-resource.sh`
+/// next to the bundled bin dir.
+const NODE_RUNTIME_MANIFEST_FILE: &str = "node-runtime.json";
 
 static BUNDLED_ACP_TOOLS_DIR: OnceLock<Option<PathBuf>> = OnceLock::new();
 
@@ -53,6 +56,16 @@ pub(crate) fn bundled_acp_tools_dir() -> Option<PathBuf> {
 /// the user picked and must never be redirected into the bundle.
 pub(in crate::managed_agents) fn command_in_bundled_dir(command: &str) -> Option<PathBuf> {
     command_in_dir(&bundled_acp_tools_dir()?, command)
+}
+
+/// Path of the Node runtime manifest staged by
+/// `desktop/scripts/prepare-acp-tools-resource.sh`: it lives next to the
+/// tools bin dir (`acp/node-runtime.json` beside `acp/bin`), so it resolves
+/// for both the bundled resource dir and a `BUZZ_ACP_TOOLS_DIR` dev override.
+pub(in crate::managed_agents) fn node_runtime_manifest_path(bin_dir: &Path) -> Option<PathBuf> {
+    bin_dir
+        .parent()
+        .map(|dir| dir.join(NODE_RUNTIME_MANIFEST_FILE))
 }
 
 fn command_in_dir(dir: &Path, command: &str) -> Option<PathBuf> {
@@ -108,6 +121,15 @@ mod tests {
     #[test]
     fn missing_inputs_resolve_to_none() {
         assert!(bundled_acp_tools_dir_from_parts(None, None).is_none());
+    }
+
+    #[test]
+    fn node_runtime_manifest_sits_beside_bin_dir() {
+        assert_eq!(
+            super::node_runtime_manifest_path(Path::new("/bundle/resources/acp/bin")).as_deref(),
+            Some(Path::new("/bundle/resources/acp/node-runtime.json")),
+        );
+        assert!(super::node_runtime_manifest_path(Path::new("/")).is_none());
     }
 
     #[cfg(unix)]

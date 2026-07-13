@@ -43,6 +43,7 @@ import {
 import type {
   RawAcpRuntimeCatalogEntry,
   RawInstallRuntimeResult,
+  RawNodeRuntimeCheck,
 } from "@/shared/api/tauri";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 
@@ -112,6 +113,9 @@ type E2eConfig = {
   mock?: {
     acpRuntimesCatalog?: RawAcpRuntimeCatalogEntry[];
     activePersonaIds?: string[];
+    /** Bundled-bridge Node.js runtime doctor check; null (default) hides the
+     *  Doctor panel section, matching an app with no npm-sourced bridges. */
+    nodeRuntimeCheck?: RawNodeRuntimeCheck | null;
     installAcpRuntimeResult?: RawInstallRuntimeResult;
     /** Sequence of results for successive `install_acp_runtime` calls.
      *  Call N returns results[N]; when exhausted the last entry repeats.
@@ -8927,6 +8931,8 @@ export function maybeInstallE2eTauriMocks() {
         return getRelayHttpUrl(activeConfig);
       case "discover_acp_providers":
         return handleDiscoverAcpRuntimes(activeConfig);
+      case "check_acp_node_runtime":
+        return activeConfig?.mock?.nodeRuntimeCheck ?? null;
       case "install_acp_runtime":
         return handleInstallAcpRuntime(
           payload as { runtimeId?: string },

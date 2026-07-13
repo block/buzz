@@ -328,4 +328,122 @@ test.describe("Doctor panel state screenshots", () => {
     await waitForAnimations(page);
     await row.screenshot({ path: `${SHOTS}/05-retry-success.png` });
   });
+
+  /**
+   * 06 — bundled-bridge Node.js runtime check passing: green section listing
+   * each bundled bridge's requirement as satisfied, no fix link.
+   */
+  test("06-node-runtime-pass", async ({ page }) => {
+    await installMockBridge(page, {
+      acpRuntimesCatalog: [
+        GOOSE_AVAILABLE,
+        CLAUDE_AVAILABLE_LOGGED_IN,
+        CODEX_NOT_INSTALLED,
+        BUZZ_AGENT_AVAILABLE,
+      ],
+      nodeRuntimeCheck: {
+        status: "pass",
+        message:
+          "Node.js 22.11.0 satisfies the bundled ACP bridge requirements",
+        manifest_path:
+          "/Applications/Buzz.app/Contents/Resources/resources/acp/node-runtime.json",
+        node_path: "/opt/homebrew/bin/node",
+        node_version: "22.11.0",
+        requirements: [
+          {
+            binary: "claude-agent-acp",
+            requirement: ">=18.0.0",
+            verdict: "satisfied",
+          },
+          { binary: "codex-acp", requirement: ">=22", verdict: "satisfied" },
+        ],
+        fix_url: "https://nodejs.org/en/download",
+      },
+    });
+
+    await page.goto("/", { waitUntil: "domcontentloaded" });
+    await openSettings(page, "doctor");
+
+    const section = page.getByTestId("doctor-node-runtime");
+    await expect(section).toBeVisible({ timeout: 10_000 });
+    await expect(section).toContainText("Node.js runtime");
+    await expect(section).toContainText(
+      "Node.js 22.11.0 satisfies the bundled ACP bridge requirements",
+    );
+    await expect(section).toContainText("claude-agent-acp");
+    await expect(section).toContainText("codex-acp");
+    await expect(
+      section.getByRole("button", { name: "Install Node.js" }),
+    ).toHaveCount(0);
+
+    await section.scrollIntoViewIfNeeded();
+    await waitForAnimations(page);
+    await section.screenshot({ path: `${SHOTS}/06-node-runtime-pass.png` });
+  });
+
+  /**
+   * 07 — bundled-bridge Node.js runtime check warning (node too old): amber
+   * section with the unmet requirement and an "Install Node.js" fix link.
+   */
+  test("07-node-runtime-warn", async ({ page }) => {
+    await installMockBridge(page, {
+      acpRuntimesCatalog: [
+        GOOSE_AVAILABLE,
+        CLAUDE_AVAILABLE_LOGGED_IN,
+        CODEX_NOT_INSTALLED,
+        BUZZ_AGENT_AVAILABLE,
+      ],
+      nodeRuntimeCheck: {
+        status: "warn",
+        message:
+          "Node.js 20.10.0 is too old for bundled ACP bridges: codex-acp needs Node.js >=22",
+        manifest_path:
+          "/Applications/Buzz.app/Contents/Resources/resources/acp/node-runtime.json",
+        node_path: "/usr/local/bin/node",
+        node_version: "20.10.0",
+        requirements: [
+          {
+            binary: "claude-agent-acp",
+            requirement: ">=18.0.0",
+            verdict: "satisfied",
+          },
+          { binary: "codex-acp", requirement: ">=22", verdict: "unmet" },
+        ],
+        fix_url: "https://nodejs.org/en/download",
+      },
+    });
+
+    await page.goto("/", { waitUntil: "domcontentloaded" });
+    await openSettings(page, "doctor");
+
+    const section = page.getByTestId("doctor-node-runtime");
+    await expect(section).toBeVisible({ timeout: 10_000 });
+    await expect(section).toContainText("too old for bundled ACP bridges");
+    await expect(section).toContainText("unmet");
+    await expect(
+      section.getByRole("button", { name: "Install Node.js" }),
+    ).toBeVisible();
+
+    await section.scrollIntoViewIfNeeded();
+    await waitForAnimations(page);
+    await section.screenshot({ path: `${SHOTS}/07-node-runtime-warn.png` });
+  });
+
+  /**
+   * 08 — no bundled bridges (nodeRuntimeCheck omitted → null): the Doctor
+   * panel renders no Node.js runtime section at all.
+   */
+  test("08-node-runtime-hidden-when-not-bundled", async ({ page }) => {
+    await installMockBridge(page, {
+      acpRuntimesCatalog: [GOOSE_AVAILABLE, BUZZ_AGENT_AVAILABLE],
+    });
+
+    await page.goto("/", { waitUntil: "domcontentloaded" });
+    await openSettings(page, "doctor");
+
+    await expect(page.getByTestId("doctor-runtime-goose")).toBeVisible({
+      timeout: 10_000,
+    });
+    await expect(page.getByTestId("doctor-node-runtime")).toHaveCount(0);
+  });
 });

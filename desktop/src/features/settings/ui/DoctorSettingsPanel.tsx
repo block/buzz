@@ -14,9 +14,14 @@ import {
   useAcpRuntimesQuery,
   useInstallAcpRuntimeMutation,
   useGitBashPrerequisiteQuery,
+  useNodeRuntimeCheckQuery,
 } from "@/features/agents/hooks";
 import { describeResolvedCommand } from "@/features/agents/ui/agentUi";
-import type { AcpRuntimeCatalogEntry, AuthStatus } from "@/shared/api/types";
+import type {
+  AcpRuntimeCatalogEntry,
+  AuthStatus,
+  NodeRuntimeCheck,
+} from "@/shared/api/types";
 import { getInstallErrorMessage } from "@/shared/lib/installError";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
@@ -408,11 +413,79 @@ function GitBashRow({
   );
 }
 
+/**
+ * Node.js runtime requirement of the bundled ACP bridges (shell shims that
+ * `exec node`). Rendered only when the app ships npm-sourced bridges — the
+ * check query returns null otherwise.
+ */
+function NodeRuntimeSection({ check }: { check: NodeRuntimeCheck }) {
+  return (
+    <div
+      className={cn(
+        "flex min-h-16 items-start gap-3 px-4 py-3 text-sm",
+        check.status === "pass" ? "bg-background/60" : "bg-amber-500/5",
+      )}
+      data-testid="doctor-node-runtime"
+    >
+      <div className="mt-0.5 shrink-0">
+        {check.status === "pass" ? (
+          <CheckCircle2 className="h-4 w-4 text-status-added" />
+        ) : (
+          <AlertTriangle className="h-4 w-4 text-warning" />
+        )}
+      </div>
+
+      <div className="min-w-0 flex-1">
+        <p className="text-sm font-medium">Node.js runtime</p>
+        <p className="mt-1 text-sm font-normal text-muted-foreground">
+          {check.message}.
+        </p>
+        {check.nodePath ? (
+          <p className="mt-1 break-all font-mono text-2xs text-muted-foreground/80">
+            {check.nodePath}
+          </p>
+        ) : null}
+        {check.requirements.length > 0 ? (
+          <ul className="mt-2 space-y-0.5">
+            {check.requirements.map((req) => (
+              <li
+                className="text-2xs text-muted-foreground/80"
+                key={req.binary}
+              >
+                <code className="rounded bg-muted px-1 py-0.5">
+                  {req.binary}
+                </code>{" "}
+                requires Node.js {req.requirement} —{" "}
+                {req.verdict === "satisfied"
+                  ? "satisfied"
+                  : req.verdict === "unmet"
+                    ? "unmet"
+                    : "unknown"}
+              </li>
+            ))}
+          </ul>
+        ) : null}
+        {check.status === "warn" ? (
+          <button
+            className="mt-2 inline-flex items-center gap-1 text-xs text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
+            onClick={() => void openUrl(check.fixUrl)}
+            type="button"
+          >
+            <ExternalLink className="h-4 w-4" />
+            Install Node.js
+          </button>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
 export function DoctorSettingsPanel() {
   const runtimesQuery = useAcpRuntimesQuery();
   const gitBashQuery = useGitBashPrerequisiteQuery();
   const runtimes = runtimesQuery.data ?? [];
-  const isRefreshing = runtimesQuery.isFetching;
+  const nodeRuntimeQuery = useNodeRuntimeCheckQuery();
+  const isRefreshing = runtimesQuery.isFetching || nodeRuntimeQuery.isFetching;
   const installMutation = useInstallAcpRuntimeMutation();
   const [installResults, setInstallResults] = React.useState<
     Record<string, { success: boolean; error: string | null }>
@@ -479,6 +552,7 @@ export function DoctorSettingsPanel() {
               setInstallResults({});
               void runtimesQuery.refetch();
               void gitBashQuery.refetch();
+              void nodeRuntimeQuery.refetch();
             }}
             size="sm"
             type="button"
@@ -533,6 +607,10 @@ export function DoctorSettingsPanel() {
               No known ACP runtimes found.
             </div>
           )}
+
+          {nodeRuntimeQuery.data ? (
+            <NodeRuntimeSection check={nodeRuntimeQuery.data} />
+          ) : null}
 
           {runtimesQuery.error instanceof Error ? (
             <p className="bg-destructive/10 px-4 py-3 text-sm text-destructive">

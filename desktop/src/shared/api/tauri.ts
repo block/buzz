@@ -41,6 +41,8 @@ import type {
   CommandAvailability,
   InstallRuntimeResult,
   GitBashPrerequisite,
+  NodeRuntimeCheck,
+  NodeRuntimeRequirementVerdict,
   OpenDmInput,
   RuntimeConfigSurface,
 } from "@/shared/api/types";
@@ -233,6 +235,20 @@ export type RawAcpRuntimeCatalogEntry = {
   /** Tagged union with snake_case status values — same shape as `AuthStatus`. */
   auth_status: AuthStatus;
   login_hint?: string;
+};
+
+export type RawNodeRuntimeCheck = {
+  status: "pass" | "warn";
+  message: string;
+  manifest_path: string;
+  node_path: string | null;
+  node_version: string | null;
+  requirements: {
+    binary: string;
+    requirement: string;
+    verdict: NodeRuntimeRequirementVerdict;
+  }[];
+  fix_url: string;
 };
 
 export type RawInstallStepResult = {
@@ -915,6 +931,18 @@ function fromRawAcpRuntimeCatalogEntry(
   };
 }
 
+function fromRawNodeRuntimeCheck(raw: RawNodeRuntimeCheck): NodeRuntimeCheck {
+  return {
+    status: raw.status,
+    message: raw.message,
+    manifestPath: raw.manifest_path,
+    nodePath: raw.node_path,
+    nodeVersion: raw.node_version,
+    requirements: raw.requirements,
+    fixUrl: raw.fix_url,
+  };
+}
+
 function fromRawInstallRuntimeResult(
   raw: RawInstallRuntimeResult,
 ): InstallRuntimeResult {
@@ -1091,6 +1119,13 @@ export async function discoverAcpRuntimes(): Promise<AcpRuntimeCatalogEntry[]> {
   return (
     await invokeTauri<RawAcpRuntimeCatalogEntry[]>("discover_acp_providers")
   ).map(fromRawAcpRuntimeCatalogEntry);
+}
+
+export async function checkAcpNodeRuntime(): Promise<NodeRuntimeCheck | null> {
+  const raw = await invokeTauri<RawNodeRuntimeCheck | null>(
+    "check_acp_node_runtime",
+  );
+  return raw ? fromRawNodeRuntimeCheck(raw) : null;
 }
 
 export async function installAcpRuntime(
