@@ -254,6 +254,7 @@ pub(crate) fn nip11_facts(state: &crate::state::AppState) -> (Option<String>, bo
 /// hard build break, the same way a deny-lint would. If you must change this
 /// signature, you are changing the conformance contract: update the conformance
 /// doc and prove the new input is host-scoped, not unscoped, first.
+#[allow(clippy::type_complexity)]
 const _RELAY_INFO_BUILD_STATIC_INPUT_FENCE: fn(
     Option<&str>,
     Option<&str>,
