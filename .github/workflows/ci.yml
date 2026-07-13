@@ -156,6 +156,10 @@ jobs:
         run: just desktop-test
       - name: Desktop build
         run: just desktop-build
+      - name: Desktop Tauri clippy
+        run: just desktop-tauri-clippy
+        env:
+          CMAKE_POLICY_VERSION_MINIMUM: "3.5"
       - name: Desktop Tauri check
         run: just desktop-tauri-check
         env:

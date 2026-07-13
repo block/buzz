@@ -322,7 +322,7 @@ async fn restart_setup_mode_agents_after_install(
                     &global,
                 );
                 let now_ready = matches!(agent_readiness(&effective), AgentReadiness::Ready);
-                let pid_alive = pid.is_some_and(|p| crate::managed_agents::process_is_running(p));
+                let pid_alive = pid.is_some_and(crate::managed_agents::process_is_running);
                 should_restart_after_install(
                     is_local,
                     pid_alive,
