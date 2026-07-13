@@ -26,7 +26,9 @@ fn active_installs() -> &'static std::sync::Mutex<std::collections::HashSet<Stri
 /// Returns `None` when no install is needed (adapter is present). Returns
 /// `Some(cmds)` — the catalog's `adapter_install_commands` — when the adapter
 /// is missing. Bundled bridges (claude, codex) have no install commands, so a
-/// missing bundled bridge yields an empty plan.
+/// missing bundled bridge yields an empty plan; whether the adapter actually
+/// resolves is verified after the install phases (see
+/// `adapter_verification_step`).
 ///
 /// This is a pure planning function: it never spawns a process.  Tests use it to
 /// assert the correct install command is selected without touching real npm.
@@ -40,6 +42,50 @@ pub(crate) fn plan_adapter_install<'c>(
         // Adapter missing: use the catalog's install commands directly.
         None => Some(adapter_install_commands.to_vec()),
     }
+}
+
+/// Post-install verification that the runtime's ACP adapter actually resolves.
+///
+/// `install_acp_runtime_blocking` runs its install phases and then re-resolves
+/// the adapter through `resolve`. For the bundled bridges (claude, codex) the
+/// install plan is empty, so without this gate a broken bundle would run zero
+/// steps and report success — discovery would immediately classify the runtime
+/// as not installed again, an install-succeeds/still-broken loop.
+///
+/// Returns `None` when there is nothing to verify (`commands` is empty) or any
+/// adapter command resolves. Otherwise returns a failed synthetic "verify"
+/// step whose hint points at reinstalling Buzz when the adapter is bundled
+/// (`bundled`, i.e. the catalog carries no install commands) or at the install
+/// step output otherwise.
+fn adapter_verification_step(
+    commands: &[&str],
+    label: &str,
+    bundled: bool,
+    resolve: impl Fn(&str) -> Option<std::path::PathBuf>,
+) -> Option<InstallStepResult> {
+    if commands.is_empty() || commands.iter().any(|cmd| resolve(cmd).is_some()) {
+        return None;
+    }
+    let hint = if bundled {
+        format!(
+            "The {label} ACP adapter ships with the Buzz desktop app but could not be found in \
+             this installation. Reinstall Buzz to restore the bundled adapter."
+        )
+    } else {
+        format!(
+            "The {label} ACP adapter still could not be found after the install steps completed. \
+             Check the step output above and your npm global prefix."
+        )
+    };
+    Some(InstallStepResult {
+        step: "verify".to_string(),
+        command: format!("resolve {}", commands.join(" | ")),
+        success: false,
+        stdout: String::new(),
+        stderr: format!("no {label} ACP adapter binary found on the resolution path"),
+        exit_code: None,
+        hint: Some(hint),
+    })
 }
 
 #[tauri::command]
@@ -163,7 +209,7 @@ fn install_acp_runtime_blocking(runtime_id: &str) -> Result<InstallRuntimeResult
 
     // Phase 2: Install adapter if missing and commands are available. The
     // bundled bridges (claude, codex) have no adapter install commands — they
-    // ship with the app.
+    // ship with the app, and their presence is verified in Phase 3 below.
     let adapter_path = runtime
         .commands
         .iter()
@@ -202,6 +248,24 @@ fn install_acp_runtime_blocking(runtime_id: &str) -> Result<InstallRuntimeResult
 
     // Clear the resolve cache so the next discovery picks up new binaries.
     crate::managed_agents::clear_resolve_cache();
+
+    // Phase 3: verify the adapter actually resolves now. For the bundled
+    // bridges the phases above run zero steps, so this gate is the only thing
+    // standing between a broken bundle and a false success.
+    if let Some(step) = adapter_verification_step(
+        runtime.commands,
+        runtime.label,
+        runtime.adapter_install_commands.is_empty(),
+        crate::managed_agents::resolve_command,
+    ) {
+        steps.push(step);
+        return Ok(InstallRuntimeResult {
+            success: false,
+            steps,
+            restarted_count: 0,
+            failed_restart_count: 0,
+        });
+    }
 
     Ok(InstallRuntimeResult {
         success: true,
@@ -1438,6 +1502,64 @@ mod tests {
         assert!(
             buzz.cli_install_commands_for_os().is_empty(),
             "buzz-agent ships with the app — must never have install commands"
+        );
+    }
+
+    // ── adapter_verification_step ─────────────────────────────────────────────
+
+    /// adapter_verification_step is the pure post-install gate in Phase 3 of
+    /// install_acp_runtime_blocking. These tests verify:
+    ///   - Any adapter command resolving → None (verified, install succeeds)
+    ///   - Nothing resolving → failed synthetic step, hint chosen by `bundled`
+    ///   - Empty command list → None (nothing to verify)
+    #[test]
+    fn test_adapter_verification_step_none_when_any_command_resolves() {
+        let step = adapter_verification_step(
+            &["missing-acp", "claude-agent-acp"],
+            "Claude Code",
+            true,
+            |cmd| {
+                (cmd == "claude-agent-acp")
+                    .then(|| std::path::PathBuf::from("/bundle/bin/claude-agent-acp"))
+            },
+        );
+        assert!(
+            step.is_none(),
+            "a resolving adapter command must verify the install"
+        );
+    }
+
+    #[test]
+    fn test_adapter_verification_step_fails_bundled_with_reinstall_hint() {
+        let step = adapter_verification_step(&["claude-agent-acp"], "Claude Code", true, |_| None)
+            .expect("unresolvable bundled adapter must yield a failed verify step");
+        assert_eq!(step.step, "verify");
+        assert!(!step.success);
+        let hint = step.hint.expect("bundled failure must carry a hint");
+        assert!(
+            hint.contains("Reinstall Buzz"),
+            "bundled-adapter hint must point at reinstalling Buzz; got: {hint}"
+        );
+    }
+
+    #[test]
+    fn test_adapter_verification_step_fails_unbundled_without_reinstall_hint() {
+        let step = adapter_verification_step(&["goose-acp"], "Goose", false, |_| None)
+            .expect("unresolvable npm-installed adapter must yield a failed verify step");
+        assert!(!step.success);
+        let hint = step.hint.expect("unbundled failure must carry a hint");
+        assert!(
+            !hint.contains("Reinstall Buzz"),
+            "npm-installed adapter failure must not suggest reinstalling Buzz; got: {hint}"
+        );
+    }
+
+    #[test]
+    fn test_adapter_verification_step_none_for_empty_commands() {
+        let step = adapter_verification_step(&[], "Whatever", true, |_| None);
+        assert!(
+            step.is_none(),
+            "no adapter commands means nothing to verify"
         );
     }
 }
