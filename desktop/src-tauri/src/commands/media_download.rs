@@ -281,7 +281,7 @@ async fn fetch_blob_bytes_with_cap(
 pub(crate) enum SnapshotFileKind {
     /// `.agent.json` — plaintext JSON; accepts memory; 5 MiB cap.
     AgentJson,
-    /// `.agent.png` — PNG with embedded metadata; no memory; 10 MiB cap.
+    /// `.agent.png` — PNG with embedded metadata; 10 MiB cap.
     AgentPng,
     /// `.team.json` — team template; 25 MiB cap.
     TeamJson,
@@ -443,9 +443,8 @@ pub async fn fetch_snapshot_bytes(
         return Err("hash mismatch: fetched bytes do not match the declared SHA-256".to_string());
     }
 
-    // 3. Byte magic must match the expected kind (filename → format).
-    //    This prevents .agent.png delivering JSON bytes (including memory-bearing
-    //    JSON) and .agent.json delivering PNG bytes.
+    // 3. Byte magic must match the expected kind (filename → format), so a
+    //    filename cannot select a JSON or PNG parser for the other format.
     ensure_bytes_match_kind(&bytes, kind)?;
 
     // 4. Bytes must parse as the snapshot type selected by the filename.

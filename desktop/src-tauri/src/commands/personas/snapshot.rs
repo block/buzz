@@ -173,7 +173,6 @@ fn parse_format_is_png(s: &str) -> Result<bool, String> {
 ///
 /// **Invariants preserved (identical for both callers):**
 /// - JSON/PNG format selection from the parsed `is_png` flag (magic-byte sniffing is import-only)
-/// - PNG + memory hard rejection
 /// - Memory-source pubkey validation
 /// - Secret exclusion (env_vars never enter the manifest via `build_snapshot`)
 /// - Output filename derived from the agent display name
@@ -185,15 +184,6 @@ pub(crate) async fn materialize_snapshot_bytes(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<SnapshotPayload, String> {
-    // Eagerly reject PNG + memory — avoid an unnecessary relay round-trip.
-    if is_png && memory_level != MemoryLevel::None {
-        return Err(
-            "Cannot export memory to .agent.png — use JSON format for memory-bearing \
-             snapshots."
-                .to_string(),
-        );
-    }
-
     // ── Load definition record and memory-source instance under lock ─────────
     let (record, memory_pubkey) = {
         let _store_guard = state
