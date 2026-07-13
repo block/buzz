@@ -1958,6 +1958,28 @@ async fn handle_leave_request(
 // handle_reaction() removed — kind:7 reaction dedup and DB writes are now
 // handled inline in ingest_event() before storage (see ingest.rs step 20a).
 
+/// Soft-delete the live kind:30620 workflow definition event so relay REQs
+/// stop returning it. DB-only deletion leaves the event queryable; clients
+/// read workflows from events, not the DB.
+async fn soft_delete_workflow_def_event(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    actor_bytes: &[u8],
+    d_tag: &str,
+) -> anyhow::Result<()> {
+    state
+        .db
+        .soft_delete_by_coordinate(
+            tenant.community(),
+            buzz_core::kind::KIND_WORKFLOW_DEF as i32,
+            actor_bytes,
+            d_tag,
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to soft-delete workflow event {d_tag}: {e}"))?;
+    Ok(())
+}
+
 /// Handle NIP-09 deletion via `a` tag (addressable/parameterized-replaceable events).
 /// Parses "kind:pubkey:d-tag" and deletes the corresponding DB record.
 async fn handle_a_tag_deletion(
@@ -1992,21 +2014,7 @@ async fn handle_a_tag_deletion(
                     .delete_workflow_for_owner(tenant.community(), wf_id, &actor_bytes)
                     .await
                     .map_err(|e| anyhow::anyhow!("failed to delete workflow {wf_id}: {e}"))?;
-                // Also soft-delete the live kind:30620 event so relay REQs
-                // stop returning it. DB-only deletion leaves the event
-                // queryable; clients read workflows from events, not the DB.
-                state
-                    .db
-                    .soft_delete_by_coordinate(
-                        tenant.community(),
-                        buzz_core::kind::KIND_WORKFLOW_DEF as i32,
-                        &actor_bytes,
-                        d_tag,
-                    )
-                    .await
-                    .map_err(|e| {
-                        anyhow::anyhow!("failed to soft-delete workflow event {d_tag}: {e}")
-                    })?;
+                soft_delete_workflow_def_event(tenant, state, &actor_bytes, d_tag).await?;
                 if let Some(channel_id) = channel_id {
                     state
                         .workflow_engine
@@ -2028,21 +2036,7 @@ async fn handle_a_tag_deletion(
                             .map_err(|e| {
                                 anyhow::anyhow!("failed to delete workflow {}: {e}", wf.id)
                             })?;
-                        // Also soft-delete the live kind:30620 event so relay REQs
-                        // stop returning it. DB-only deletion leaves the event
-                        // queryable; clients read workflows from events, not the DB.
-                        state
-                            .db
-                            .soft_delete_by_coordinate(
-                                tenant.community(),
-                                buzz_core::kind::KIND_WORKFLOW_DEF as i32,
-                                &actor_bytes,
-                                d_tag,
-                            )
-                            .await
-                            .map_err(|e| {
-                                anyhow::anyhow!("failed to soft-delete workflow event {d_tag}: {e}")
-                            })?;
+                        soft_delete_workflow_def_event(tenant, state, &actor_bytes, d_tag).await?;
                         if let Some(channel_id) = channel_id {
                             state
                                 .workflow_engine
