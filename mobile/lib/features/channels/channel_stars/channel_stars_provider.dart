@@ -3,7 +3,7 @@ import 'package:nostr/nostr.dart' as nostr;
 
 import '../../../shared/relay/relay.dart';
 import '../../../shared/theme/theme_provider.dart';
-import '../../../shared/workspace/workspace_provider.dart';
+import '../../../shared/community/community_provider.dart';
 import 'channel_stars_manager.dart';
 import 'channel_stars_storage.dart';
 
@@ -31,8 +31,8 @@ class ChannelStarsNotifier extends Notifier<ChannelStarsState> {
 
     final relayConfig = ref.watch(relayConfigProvider);
     final sessionState = ref.watch(relaySessionProvider);
-    // Rebuild when the active workspace changes (pubkey may differ).
-    ref.watch(activeWorkspaceProvider);
+    // Rebuild when the active community changes (pubkey may differ).
+    ref.watch(activeCommunityProvider);
 
     final nsec = relayConfig.nsec?.trim();
     if (nsec == null || nsec.isEmpty) {

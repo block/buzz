@@ -1,7 +1,9 @@
+import 'dart:convert';
+
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:buzz/shared/workspace/workspace.dart';
-import 'package:buzz/shared/workspace/workspace_storage.dart';
+import 'package:buzz/shared/community/community.dart';
+import 'package:buzz/shared/community/community_storage.dart';
 
 /// In-memory fake that extends Fake to satisfy all FlutterSecureStorage
 /// interface methods, but implements the core read/write/delete with real
@@ -87,21 +89,21 @@ class FakeSecureStorage extends Fake implements FlutterSecureStorage {
 
 void main() {
   late FakeSecureStorage fakeSecure;
-  late WorkspaceStorage storage;
+  late CommunityStorage storage;
 
   setUp(() {
     fakeSecure = FakeSecureStorage();
-    storage = WorkspaceStorage(secure: fakeSecure);
+    storage = CommunityStorage(secure: fakeSecure);
   });
 
-  group('WorkspaceStorage', () {
+  group('CommunityStorage', () {
     test('loadAll returns empty list when no data', () async {
       final result = await storage.loadAll();
       expect(result, isEmpty);
     });
 
-    test('save and loadAll round-trips a workspace', () async {
-      final ws = Workspace.create(
+    test('save and loadAll round-trips a community', () async {
+      final ws = Community.create(
         name: 'Test',
         relayUrl: 'https://relay.example.com',
         pubkey: 'abc123',
@@ -117,8 +119,8 @@ void main() {
       expect(loaded.first.pubkey, 'abc123');
     });
 
-    test('save updates existing workspace with same id', () async {
-      final ws = Workspace.create(
+    test('save updates existing community with same id', () async {
+      final ws = Community.create(
         name: 'Original',
         relayUrl: 'https://relay.example.com',
       );
@@ -131,12 +133,12 @@ void main() {
       expect(loaded.first.name, 'Updated');
     });
 
-    test('remove deletes a workspace', () async {
-      final ws1 = Workspace.create(
+    test('remove deletes a community', () async {
+      final ws1 = Community.create(
         name: 'One',
         relayUrl: 'https://one.example.com',
       );
-      final ws2 = Workspace.create(
+      final ws2 = Community.create(
         name: 'Two',
         relayUrl: 'https://two.example.com',
       );
@@ -150,7 +152,7 @@ void main() {
       expect(loaded.first.id, ws2.id);
     });
 
-    test('active workspace ID persists', () async {
+    test('active community ID persists', () async {
       await storage.saveActiveId('ws-123');
       final id = await storage.loadActiveId();
       expect(id, 'ws-123');
@@ -164,7 +166,24 @@ void main() {
     });
 
     group('migration', () {
-      test('migrates legacy keys to workspace on first load', () async {
+      test('migrates saved workspaces to communities', () async {
+        final legacy = Community.create(
+          name: 'Legacy',
+          relayUrl: 'https://legacy.example.com',
+        );
+        fakeSecure['buzz_workspaces'] = jsonEncode([legacy.toJson()]);
+        fakeSecure['buzz_active_workspace_id'] = legacy.id;
+
+        final loaded = await storage.loadAll();
+
+        expect(loaded.single.id, legacy.id);
+        expect(await storage.loadActiveId(), legacy.id);
+        expect(fakeSecure['buzz_communities'], isNotNull);
+        expect(fakeSecure['buzz_workspaces'], isNull);
+        expect(fakeSecure['buzz_active_workspace_id'], isNull);
+      });
+
+      test('migrates legacy keys to community on first load', () async {
         fakeSecure['buzz_relay_url'] = 'https://legacy.example.com';
         fakeSecure['buzz_token'] = 'legacy_token';
         fakeSecure['buzz_pubkey'] = 'legacy_pub';

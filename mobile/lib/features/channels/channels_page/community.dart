@@ -1,65 +1,65 @@
 part of '../channels_page.dart';
 
-class _WorkspaceSwitcherSheet extends ConsumerWidget {
-  const _WorkspaceSwitcherSheet();
+class _CommunitySwitcherSheet extends ConsumerWidget {
+  const _CommunitySwitcherSheet();
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final workspacesAsync = ref.watch(workspaceListProvider);
-    final activeAsync = ref.watch(activeWorkspaceProvider);
+    final communitiesAsync = ref.watch(communityListProvider);
+    final activeAsync = ref.watch(activeCommunityProvider);
     final sessionState = ref.watch(relaySessionProvider);
 
     return SafeArea(
-      child: workspacesAsync.when(
+      child: communitiesAsync.when(
         loading: () => const SizedBox(
           height: 120,
           child: Center(child: CircularProgressIndicator()),
         ),
         error: (e, _) => Padding(
           padding: const EdgeInsets.all(Grid.xs),
-          child: Text('Error loading workspaces: $e'),
+          child: Text('Error loading communities: $e'),
         ),
-        data: (workspaces) {
+        data: (communities) {
           final activeId = activeAsync.value?.id;
           return Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              for (final workspace in workspaces)
-                _WorkspaceSwitcherTile(
-                  workspace: workspace,
-                  isActive: workspace.id == activeId,
-                  sessionStatus: workspace.id == activeId
+              for (final community in communities)
+                _CommunitySwitcherTile(
+                  community: community,
+                  isActive: community.id == activeId,
+                  sessionStatus: community.id == activeId
                       ? sessionState.status
                       : null,
                   onTap: () async {
-                    if (workspace.id != activeId) {
+                    if (community.id != activeId) {
                       await ref
-                          .read(workspaceListProvider.notifier)
-                          .switchWorkspace(workspace.id);
+                          .read(communityListProvider.notifier)
+                          .switchCommunity(community.id);
                     }
                     if (context.mounted) Navigator.of(context).pop();
                   },
                   onRename: () async {
                     final nav = Navigator.of(context, rootNavigator: true);
-                    final notifier = ref.read(workspaceListProvider.notifier);
+                    final notifier = ref.read(communityListProvider.notifier);
                     Navigator.of(context).pop();
                     final name = await showDialog<String>(
                       context: nav.context,
                       useRootNavigator: true,
                       builder: (_) =>
-                          _RenameWorkspaceDialog(currentName: workspace.name),
+                          _RenameCommunityDialog(currentName: community.name),
                     );
                     if (name != null && name.isNotEmpty) {
-                      await notifier.renameWorkspace(workspace.id, name);
+                      await notifier.renameCommunity(community.id, name);
                     }
                   },
                   onRemove: () async {
                     final confirmed = await showDialog<bool>(
                       context: context,
                       builder: (dialogContext) => AlertDialog(
-                        title: const Text('Remove Workspace'),
+                        title: const Text('Remove Community'),
                         content: Text(
-                          'Remove "${workspace.name}"? You can re-pair later.',
+                          'Remove "${community.name}"? You can re-pair later.',
                         ),
                         actions: [
                           TextButton(
@@ -79,13 +79,13 @@ class _WorkspaceSwitcherSheet extends ConsumerWidget {
                       final messenger = ScaffoldMessenger.of(context);
                       try {
                         await ref
-                            .read(workspaceListProvider.notifier)
-                            .removeWorkspace(workspace.id);
+                            .read(communityListProvider.notifier)
+                            .removeCommunity(community.id);
                         if (context.mounted) Navigator.of(context).pop();
                       } catch (e) {
                         messenger.showSnackBar(
                           SnackBar(
-                            content: Text('Failed to remove workspace: $e'),
+                            content: Text('Failed to remove community: $e'),
                           ),
                         );
                       }
@@ -95,14 +95,14 @@ class _WorkspaceSwitcherSheet extends ConsumerWidget {
               const Divider(height: 1),
               ListTile(
                 leading: const Icon(LucideIcons.plus),
-                title: const Text('Add Workspace'),
+                title: const Text('Add Community'),
                 onTap: () {
                   final nav = Navigator.of(context, rootNavigator: true);
                   ref.read(pairingProvider.notifier).reset();
                   Navigator.of(context).pop();
                   nav.push(
                     MaterialPageRoute<void>(
-                      builder: (_) => const PairingPage(addingWorkspace: true),
+                      builder: (_) => const PairingPage(addingCommunity: true),
                     ),
                   );
                 },
@@ -115,16 +115,16 @@ class _WorkspaceSwitcherSheet extends ConsumerWidget {
   }
 }
 
-class _WorkspaceSwitcherTile extends StatelessWidget {
-  final Workspace workspace;
+class _CommunitySwitcherTile extends StatelessWidget {
+  final Community community;
   final bool isActive;
   final SessionStatus? sessionStatus;
   final VoidCallback onTap;
   final VoidCallback onRename;
   final VoidCallback onRemove;
 
-  const _WorkspaceSwitcherTile({
-    required this.workspace,
+  const _CommunitySwitcherTile({
+    required this.community,
     required this.isActive,
     required this.sessionStatus,
     required this.onTap,
@@ -134,12 +134,12 @@ class _WorkspaceSwitcherTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final host = Uri.tryParse(workspace.relayUrl)?.host ?? workspace.relayUrl;
+    final host = Uri.tryParse(community.relayUrl)?.host ?? community.relayUrl;
 
     return ListTile(
       leading: _StatusDot(isActive: isActive, sessionStatus: sessionStatus),
       title: Text(
-        workspace.name,
+        community.name,
         style: context.textTheme.bodyLarge?.copyWith(
           fontWeight: isActive ? FontWeight.w600 : FontWeight.normal,
         ),
@@ -208,17 +208,17 @@ class _StatusDot extends StatelessWidget {
   }
 }
 
-class _RenameWorkspaceDialog extends HookWidget {
+class _RenameCommunityDialog extends HookWidget {
   final String currentName;
 
-  const _RenameWorkspaceDialog({required this.currentName});
+  const _RenameCommunityDialog({required this.currentName});
 
   @override
   Widget build(BuildContext context) {
     final controller = useTextEditingController(text: currentName);
 
     return AlertDialog(
-      title: const Text('Rename Workspace'),
+      title: const Text('Rename Community'),
       content: TextField(
         controller: controller,
         autofocus: true,
@@ -245,14 +245,14 @@ class _RenameWorkspaceDialog extends HookWidget {
   }
 }
 
-class _WorkspaceIndicator extends ConsumerWidget {
+class _CommunityIndicator extends ConsumerWidget {
   final VoidCallback onTap;
 
-  const _WorkspaceIndicator({required this.onTap});
+  const _CommunityIndicator({required this.onTap});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final activeAsync = ref.watch(activeWorkspaceProvider);
+    final activeAsync = ref.watch(activeCommunityProvider);
 
     final name = activeAsync.value?.name;
 
@@ -260,11 +260,11 @@ class _WorkspaceIndicator extends ConsumerWidget {
       onTap: onTap,
       behavior: HitTestBehavior.opaque,
       child: Padding(
-        padding: const EdgeInsets.only(left: _kWorkspaceAvatarInset),
+        padding: const EdgeInsets.only(left: _kCommunityAvatarInset),
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            _WorkspaceAvatar(name: name),
+            _CommunityAvatar(name: name),
             const SizedBox(width: Grid.xxs),
             if (name != null)
               Flexible(
@@ -279,7 +279,7 @@ class _WorkspaceIndicator extends ConsumerWidget {
               )
             else
               Text(
-                'Workspace',
+                'Community',
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
                 style: context.textTheme.labelLarge?.copyWith(
@@ -293,10 +293,10 @@ class _WorkspaceIndicator extends ConsumerWidget {
   }
 }
 
-class _WorkspaceAvatar extends StatelessWidget {
+class _CommunityAvatar extends StatelessWidget {
   final String? name;
 
-  const _WorkspaceAvatar({required this.name});
+  const _CommunityAvatar({required this.name});
 
   @override
   Widget build(BuildContext context) {

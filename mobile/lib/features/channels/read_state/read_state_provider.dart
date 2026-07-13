@@ -5,7 +5,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../../shared/relay/relay.dart';
 import '../../../shared/theme/theme_provider.dart';
-import '../../../shared/workspace/workspace_provider.dart';
+import '../../../shared/community/community_provider.dart';
 import 'read_state_manager.dart';
 
 class ReadStateState {
@@ -62,7 +62,7 @@ class ReadStateNotifier extends Notifier<ReadStateState> {
 
     final relayConfig = ref.watch(relayConfigProvider);
     ref.watch(relaySessionProvider);
-    final activeWorkspace = ref.watch(activeWorkspaceProvider).value;
+    final activeCommunity = ref.watch(activeCommunityProvider).value;
 
     final nsec = relayConfig.nsec?.trim();
     if (nsec == null || nsec.isEmpty) {
@@ -74,7 +74,7 @@ class ReadStateNotifier extends Notifier<ReadStateState> {
       nsec: nsec,
     );
     final pubkey =
-        _normalizePubkey(activeWorkspace?.pubkey) ??
+        _normalizePubkey(activeCommunity?.pubkey) ??
         _safeDerivedPubkey(signedRelay);
     if (pubkey == null) {
       return const ReadStateState.inert();

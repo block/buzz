@@ -3,7 +3,7 @@ import 'package:uuid/uuid.dart';
 const _uuid = Uuid();
 const _sentinel = Object();
 
-class Workspace {
+class Community {
   final String id;
   final String name;
   final String relayUrl;
@@ -11,7 +11,7 @@ class Workspace {
   final String? nsec;
   final DateTime addedAt;
 
-  const Workspace({
+  const Community({
     required this.id,
     required this.name,
     required this.relayUrl,
@@ -20,13 +20,13 @@ class Workspace {
     required this.addedAt,
   });
 
-  factory Workspace.create({
+  factory Community.create({
     required String name,
     required String relayUrl,
     String? pubkey,
     String? nsec,
   }) {
-    return Workspace(
+    return Community(
       id: _uuid.v4(),
       name: name,
       relayUrl: relayUrl,
@@ -36,13 +36,13 @@ class Workspace {
     );
   }
 
-  Workspace copyWith({
+  Community copyWith({
     String? name,
     String? relayUrl,
     Object? pubkey = _sentinel,
     Object? nsec = _sentinel,
   }) {
-    return Workspace(
+    return Community(
       id: id,
       name: name ?? this.name,
       relayUrl: relayUrl ?? this.relayUrl,
@@ -61,7 +61,7 @@ class Workspace {
     'addedAt': addedAt.toIso8601String(),
   };
 
-  factory Workspace.fromJson(Map<String, dynamic> json) => Workspace(
+  factory Community.fromJson(Map<String, dynamic> json) => Community(
     id: json['id'] as String,
     name: json['name'] as String,
     relayUrl: json['relayUrl'] as String,
@@ -70,7 +70,7 @@ class Workspace {
     addedAt: DateTime.parse(json['addedAt'] as String),
   );
 
-  /// Derive a human-friendly workspace name from a relay URL.
+  /// Derive a human-friendly community name from a relay URL.
   static String nameFromUrl(String url) {
     try {
       final host = Uri.parse(url).host;
@@ -79,7 +79,7 @@ class Workspace {
       if (parts.length > 2) return parts.first;
       return host;
     } catch (_) {
-      return 'Workspace';
+      return 'Community';
     }
   }
 }
