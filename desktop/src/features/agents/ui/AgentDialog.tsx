@@ -63,18 +63,12 @@ type AgentDialogDefinitionEditProps = {
   initialValues: CreatePersonaInput | UpdatePersonaInput | null;
   error: Error | null;
   isPending: boolean;
-  isImportPending?: boolean;
   runtimes: AcpRuntimeCatalogEntry[];
   runtimesLoading?: boolean;
   onOpenChange: (open: boolean) => void;
   onSubmit: (
     input: CreatePersonaInput | UpdatePersonaInput,
   ) => Promise<unknown>;
-  onImportUpdateFile?: (
-    personaId: string,
-    fileBytes: number[],
-    fileName: string,
-  ) => Promise<void>;
 };
 
 type AgentDialogProps =

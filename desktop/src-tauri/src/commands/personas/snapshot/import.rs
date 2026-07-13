@@ -26,6 +26,22 @@ use crate::{
 pub(crate) const MAX_SNAPSHOT_JSON_BYTES: usize = 5 * 1024 * 1024;
 pub(crate) const MAX_SNAPSHOT_PNG_BYTES: usize = 10 * 1024 * 1024;
 
+const LEGACY_PERSONA_FILE_SUFFIXES: [&str; 4] =
+    [".persona.md", ".persona.json", ".persona.png", ".zip"];
+
+pub(super) fn reject_legacy_persona_filename(file_name: &str) -> Result<(), String> {
+    if LEGACY_PERSONA_FILE_SUFFIXES
+        .iter()
+        .any(|suffix| file_name.to_ascii_lowercase().ends_with(suffix))
+    {
+        return Err(
+            "Legacy persona files are no longer supported. Export an .agent.json or .agent.png snapshot instead."
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
 // ── Import preview types ──────────────────────────────────────────────────────
 
 /// Materialized preview returned to the UI before any write is committed.
@@ -252,7 +268,7 @@ pub async fn preview_agent_snapshot_import(
     file_name: String,
 ) -> Result<AgentSnapshotImportPreview, String> {
     tokio::task::spawn_blocking(move || {
-        let _ = file_name; // used for context in error messages only
+        reject_legacy_persona_filename(&file_name)?;
         let snapshot = decode_snapshot_from_bytes(&file_bytes)?;
 
         let memory_level = match snapshot.memory.level {

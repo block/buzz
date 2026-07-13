@@ -806,8 +806,6 @@ pub fn run() {
             pick_team_directory,
             export_team_to_json,
             parse_team_file,
-            parse_persona_files,
-            export_persona_to_json,
             export_agent_snapshot,
             preview_agent_snapshot_import,
             confirm_agent_snapshot_import,

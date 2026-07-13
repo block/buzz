@@ -627,7 +627,7 @@ fn test_find_team_returns_none_when_no_match() {
 // `source_team` stores the key, not the UUID, and the pack file has no
 // `runtime:` frontmatter key (write-back must INSERT it).
 
-/// Build a AgentDefinition matching the legacy incident shape.
+/// Build an AgentDefinition matching the legacy incident shape.
 fn legacy_persona(source_team: &str, runtime: Option<&str>) -> AgentDefinition {
     AgentDefinition {
         id: "ab5c038c-1b12-46e2-8283-d6f7c0606fce".to_string(),

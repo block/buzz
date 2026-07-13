@@ -6792,43 +6792,6 @@ async function handleParseTeamFile(): Promise<{
   };
 }
 
-async function handleParsePersonaFiles(args: {
-  fileBytes: number[];
-  fileName: string;
-}): Promise<{
-  personas: {
-    display_name: string;
-    system_prompt: string;
-    avatar_data_url: string | null;
-    avatar_ref: string | null;
-    source_file: string;
-  }[];
-  skipped: { source_file: string; reason: string }[];
-}> {
-  // In test mode, return canned data — we can't actually parse PNG chunks in JS
-  return {
-    personas: [
-      {
-        display_name: "Imported Persona",
-        system_prompt: "You are an imported test persona.",
-        avatar_data_url: null,
-        avatar_ref: null,
-        source_file: args.fileName,
-      },
-    ],
-    skipped: [],
-  };
-}
-
-async function handleExportPersonaToJson(args: {
-  id: string;
-}): Promise<boolean> {
-  // In test mode, just verify the persona exists
-  const persona = mockPersonas.find((p) => p.id === args.id);
-  if (!persona) throw new Error(`agent ${args.id} not found`);
-  return true; // Simulate successful save
-}
-
 async function handleCreateManagedAgent(
   args: {
     input: {
@@ -8923,12 +8886,6 @@ export function maybeInstallE2eTauriMocks() {
         );
       case "parse_team_file":
         return handleParseTeamFile();
-      case "parse_persona_files":
-        return handleParsePersonaFiles(
-          payload as { fileBytes: number[]; fileName: string },
-        );
-      case "export_persona_to_json":
-        return handleExportPersonaToJson(payload as { id: string });
       case "export_agent_snapshot":
         // Mimics the save-to-disk path: report success without a real dialog.
         // Specs assert invocation via __BUZZ_E2E_COMMANDS__.

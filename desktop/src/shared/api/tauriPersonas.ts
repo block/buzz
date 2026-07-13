@@ -6,52 +6,6 @@ import type {
   UpdatePersonaInput,
 } from "@/shared/api/types";
 
-// Raw types matching Rust snake_case output
-type RawParsedPersonaPreview = {
-  display_name: string;
-  system_prompt: string;
-  avatar_data_url: string | null;
-  avatar_ref: string | null;
-  runtime: string | null;
-  model: string | null;
-  provider: string | null;
-  name_pool?: string[];
-  source_file: string;
-};
-
-type RawSkippedFile = {
-  source_file: string;
-  reason: string;
-};
-
-type RawParsePersonaFilesResult = {
-  personas: RawParsedPersonaPreview[];
-  skipped: RawSkippedFile[];
-};
-
-// Public camelCase types
-export type ParsedPersonaPreview = {
-  displayName: string;
-  systemPrompt: string;
-  avatarDataUrl: string | null;
-  avatarRef: string | null;
-  runtime: string | null;
-  model: string | null;
-  provider: string | null;
-  namePool: string[];
-  sourceFile: string;
-};
-
-export type SkippedFile = {
-  sourceFile: string;
-  reason: string;
-};
-
-export type ParsePersonaFilesResult = {
-  personas: ParsedPersonaPreview[];
-  skipped: SkippedFile[];
-};
-
 export type RawPersona = {
   id: string;
   display_name: string;
@@ -160,37 +114,6 @@ export async function setPersonaActive(
   return fromRawPersona(
     await invokeTauri<RawPersona>("set_persona_active", { id, active }),
   );
-}
-
-export async function parsePersonaFiles(
-  fileBytes: number[],
-  fileName: string,
-): Promise<ParsePersonaFilesResult> {
-  const raw = await invokeTauri<RawParsePersonaFilesResult>(
-    "parse_persona_files",
-    { fileBytes, fileName },
-  );
-  return {
-    personas: raw.personas.map((p) => ({
-      displayName: p.display_name,
-      systemPrompt: p.system_prompt,
-      avatarDataUrl: p.avatar_data_url ?? null,
-      avatarRef: p.avatar_ref ?? null,
-      runtime: p.runtime,
-      model: p.model,
-      provider: p.provider,
-      namePool: p.name_pool ?? [],
-      sourceFile: p.source_file,
-    })),
-    skipped: raw.skipped.map((s) => ({
-      sourceFile: s.source_file,
-      reason: s.reason,
-    })),
-  };
-}
-
-export async function exportPersonaToJson(id: string): Promise<boolean> {
-  return invokeTauri<boolean>("export_persona_to_json", { id });
 }
 
 export type SnapshotMemoryLevel = "none" | "core" | "everything";

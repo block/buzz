@@ -1,6 +1,6 @@
 use super::import::{
-    decode_snapshot_from_bytes, resolve_snapshot_import_behavior, AgentSnapshotImportResult,
-    MAX_SNAPSHOT_JSON_BYTES, MAX_SNAPSHOT_PNG_BYTES,
+    decode_snapshot_from_bytes, reject_legacy_persona_filename, resolve_snapshot_import_behavior,
+    AgentSnapshotImportResult, MAX_SNAPSHOT_JSON_BYTES, MAX_SNAPSHOT_PNG_BYTES,
 };
 use super::*;
 use crate::managed_agents::{
@@ -233,6 +233,23 @@ fn import_sniff_png_bytes_decodes_correctly() {
     assert_eq!(&png_bytes[..4], &[0x89, 0x50, 0x4e, 0x47]);
     let decoded = decode_snapshot_from_bytes(&png_bytes).unwrap();
     assert_eq!(decoded, snapshot);
+}
+
+/// Legacy persona file names fail with migration guidance before decoding.
+#[test]
+fn import_legacy_persona_filename_returns_snapshot_migration_error() {
+    for file_name in [
+        "agent.persona.md",
+        "agent.persona.json",
+        "agent.persona.png",
+        "agent.zip",
+    ] {
+        let error = reject_legacy_persona_filename(file_name).unwrap_err();
+        assert_eq!(
+            error,
+            "Legacy persona files are no longer supported. Export an .agent.json or .agent.png snapshot instead."
+        );
+    }
 }
 
 /// Corrupt/random bytes fail before any writes.

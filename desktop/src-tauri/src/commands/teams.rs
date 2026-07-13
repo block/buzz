@@ -431,3 +431,48 @@ fn parse_team_from_pack_zip(zip_bytes: &[u8]) -> Result<ParsedTeamPreview, Strin
             .collect(),
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use std::io::Write;
+
+    use super::parse_team_from_pack_zip;
+
+    #[test]
+    fn parse_team_pack_zip_keeps_team_import_available() {
+        let cursor = std::io::Cursor::new(Vec::new());
+        let mut zip = zip::ZipWriter::new(cursor);
+        let options = zip::write::SimpleFileOptions::default();
+
+        zip.start_file("reviewers/.plugin/plugin.json", options)
+            .unwrap();
+        zip.write_all(
+            br#"{
+                "id": "com.example.reviewers",
+                "name": "Reviewers",
+                "version": "1.0.0",
+                "personas": ["agents/reviewer.persona.md"]
+            }"#,
+        )
+        .unwrap();
+        zip.start_file("reviewers/agents/reviewer.persona.md", options)
+            .unwrap();
+        zip.write_all(
+            br#"---
+name: "reviewer"
+display_name: "Reviewer"
+description: "Reviews code"
+---
+Review code carefully.
+"#,
+        )
+        .unwrap();
+
+        let bytes = zip.finish().unwrap().into_inner();
+        let preview = parse_team_from_pack_zip(&bytes).unwrap();
+
+        assert_eq!(preview.name, "Reviewers");
+        assert_eq!(preview.personas.len(), 1);
+        assert_eq!(preview.personas[0].display_name, "Reviewer");
+    }
+}

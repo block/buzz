@@ -10,10 +10,8 @@ import {
 import { AddAgentToChannelDialog } from "./AddAgentToChannelDialog";
 import { AddTeamToChannelDialog } from "./AddTeamToChannelDialog";
 import { AgentDialog } from "./AgentDialog";
-import { BatchImportDialog } from "./BatchImportDialog";
 import { PersonaCatalogDialog } from "./PersonaCatalogDialog";
 import { PersonaDeleteDialog } from "./PersonaDeleteDialog";
-import { PersonaImportUpdateDialog } from "./PersonaImportUpdateDialog";
 import { PersonaShareDialog } from "./PersonaShareDialog";
 import { AgentSnapshotExportDialog } from "./AgentSnapshotExportDialog";
 import { AgentSnapshotImportDialog } from "./AgentSnapshotImportDialog";
@@ -159,9 +157,6 @@ export function AgentsView() {
                 void personas.handleSetActive(persona, false, "library");
               }}
               onDeletePersona={personas.openDelete}
-              onImportPersonaFile={(fileBytes, fileName) => {
-                void personas.handleImportFile(fileBytes, fileName);
-              }}
               onImportSnapshotFile={(fileBytes, fileName) => {
                 void personas.handleImportSnapshotFile(fileBytes, fileName);
               }}
@@ -269,16 +264,10 @@ export function AgentsView() {
                 : null
           }
           initialValues={personas.personaDialogState.initialValues}
-          isImportPending={
-            personas.personaImportActions.isApplyingPersonaImportUpdate
-          }
           isPending={personas.isPending}
           mode="definition-edit"
           runtimes={personas.acpRuntimesQuery.data ?? []}
           runtimesLoading={personas.acpRuntimesQuery.isLoading}
-          onImportUpdateFile={
-            personas.personaImportActions.handleEditDialogImportUpdateFile
-          }
           onOpenChange={(open) => {
             if (!open) {
               personas.setPersonaDialogState(null);
@@ -326,7 +315,7 @@ export function AgentsView() {
           }}
           onExport={() => {
             if (personas.personaToShare) {
-              personas.handleExport(personas.personaToShare);
+              personas.openShareExportSnapshot(personas.personaToShare);
             }
           }}
           onOpenChange={(open) => {
@@ -465,19 +454,6 @@ export function AgentsView() {
           team={teamActions.teamToAddToChannel}
         />
       ) : null}
-      {personas.batchImportResult ? (
-        <BatchImportDialog
-          fileName={personas.batchImportFileName}
-          onComplete={personas.handleBatchImportComplete}
-          onOpenChange={(open) => {
-            if (!open) {
-              personas.setBatchImportResult(null);
-            }
-          }}
-          open={personas.batchImportResult !== null}
-          result={personas.batchImportResult}
-        />
-      ) : null}
       {teamActions.teamImportPreview ? (
         <TeamImportDialog
           fileName={teamActions.teamImportPreview.fileName}
@@ -509,33 +485,6 @@ export function AgentsView() {
           personas={personas.libraryPersonas}
           preview={teamActions.teamImportTargetPreview?.preview ?? null}
           team={teamActions.teamImportTarget}
-        />
-      ) : null}
-      {personas.personaImportActions.personaImportTarget ? (
-        <PersonaImportUpdateDialog
-          fileName={
-            personas.personaImportActions.personaImportTargetPreview
-              ?.fileName ?? ""
-          }
-          isPending={
-            personas.personaImportActions.isApplyingPersonaImportUpdate ||
-            personas.updatePersonaMutation.isPending
-          }
-          onApply={personas.personaImportActions.handleImportUpdateApply}
-          onClear={
-            personas.personaImportActions.clearImportUpdateAndReturnToEdit
-          }
-          onOpenChange={(open) => {
-            if (!open) {
-              personas.personaImportActions.closeImportUpdateDialog();
-            }
-          }}
-          open={personas.personaImportActions.personaImportTarget !== null}
-          persona={personas.personaImportActions.personaImportTarget}
-          preview={
-            personas.personaImportActions.personaImportTargetPreview?.preview ??
-            null
-          }
         />
       ) : null}
     </>

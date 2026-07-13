@@ -32,7 +32,6 @@ import {
 import {
   createPersona,
   deletePersona,
-  exportPersonaToJson,
   exportAgentSnapshot,
   encodeAgentSnapshotForSend,
   previewAgentSnapshotImport,
@@ -592,12 +591,6 @@ export function useCreateChannelManagedAgentsMutation(
     onSettled: () => {
       invalidateAgentQueriesInBackground(queryClient, channelId);
     },
-  });
-}
-
-export function useExportPersonaJsonMutation() {
-  return useMutation({
-    mutationFn: (id: string) => exportPersonaToJson(id),
   });
 }
 

@@ -1,5 +1,5 @@
 import * as React from "react";
-import { ChevronDown, RefreshCw, Upload } from "lucide-react";
+import { ChevronDown } from "lucide-react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 
 import type {
@@ -7,8 +7,6 @@ import type {
   CreatePersonaInput,
   UpdatePersonaInput,
 } from "@/shared/api/types";
-import { useFileImportZone } from "@/shared/hooks/useFileImportZone";
-import { useWindowFileDragOver } from "./useWindowFileDragOver";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 import { ChooserDialogContent } from "@/shared/ui/chooser-dialog-content";
@@ -20,12 +18,6 @@ import { PersonaDropdownField } from "./PersonaDropdownField";
 import type { EnvVarsValue } from "./EnvVarsEditor";
 import { PersonaAdvancedFields } from "./PersonaAdvancedFields";
 import { PersonaModelField } from "./PersonaModelField";
-import {
-  getImportButtonLabel,
-  getImportButtonTone,
-  getImportErrorLabel,
-  IMPORT_ERROR_VISIBILITY_MS,
-} from "./personaDialogImportState";
 import {
   canSubmitPersonaDialog,
   formatPersonaNamePoolText,
@@ -87,22 +79,13 @@ type AgentDefinitionDialogProps = {
   initialValues: CreatePersonaInput | UpdatePersonaInput | null;
   error: Error | null;
   isPending: boolean;
-  isImportPending?: boolean;
   runtimes: AcpRuntimeCatalogEntry[];
   runtimesLoading?: boolean;
   onOpenChange: (open: boolean) => void;
   onSubmit: (
     input: CreatePersonaInput | UpdatePersonaInput,
   ) => Promise<unknown>;
-  onImportUpdateFile?: (
-    personaId: string,
-    fileBytes: number[],
-    fileName: string,
-  ) => Promise<void>;
-  /**
-   * Rendered in the footer's left slot in create mode only — edit mode's
-   * import button owns that slot (`canImportPersonaUpdate`).
-   */
+  /** Rendered in the footer’s left slot. */
   createFooterSlot?: React.ReactNode;
   /** Rendered below the form fields in create mode only ("Where to run"). */
   createRunSection?: React.ReactNode;
@@ -128,12 +111,10 @@ export function AgentDefinitionDialog({
   initialValues,
   error,
   isPending,
-  isImportPending = false,
   runtimes,
   runtimesLoading = false,
   onOpenChange,
   onSubmit,
-  onImportUpdateFile,
   createFooterSlot,
   createRunSection,
   createSubmitBlocked = false,
@@ -169,17 +150,7 @@ export function AgentDefinitionDialog({
   const [showAdvancedFields, setShowAdvancedFields] = React.useState(false);
   const [isAvatarUploadPending, setIsAvatarUploadPending] =
     React.useState(false);
-  const [isImportingUpdate, setIsImportingUpdate] = React.useState(false);
-  const [importErrorMessage, setImportErrorMessage] = React.useState<
-    string | null
-  >(null);
   const { globalConfig } = useGlobalAgentConfig();
-  const isEditMode = Boolean(initialValues && "id" in initialValues);
-  const editPersonaId =
-    isEditMode && initialValues && "id" in initialValues
-      ? initialValues.id
-      : null;
-  const canImportPersonaUpdate = isEditMode && Boolean(onImportUpdateFile);
   const defaultRuntime = React.useMemo(
     () => getDefaultPersonaRuntime(runtimes),
     [runtimes],
@@ -223,8 +194,6 @@ export function AgentDefinitionDialog({
         nextBehaviorDraft.parallelism.trim().length > 0,
     );
     setIsAvatarUploadPending(false);
-    setImportErrorMessage(null);
-    setIsImportingUpdate(false);
     isRuntimeAutoSeededRef.current = false;
     hasSeededForOpenRef.current = false;
   }, [initialValues, open]);
@@ -253,55 +222,6 @@ export function AgentDefinitionDialog({
     }
   }, [defaultRuntime, initialValues, open, runtime, runtimesLoading]);
 
-  const isWindowFileDragOver = useWindowFileDragOver(
-    open && canImportPersonaUpdate,
-  );
-
-  React.useEffect(() => {
-    if (!open || !importErrorMessage) {
-      return;
-    }
-    const timeout = window.setTimeout(() => {
-      setImportErrorMessage(null);
-    }, IMPORT_ERROR_VISIBILITY_MS);
-    return () => {
-      window.clearTimeout(timeout);
-    };
-  }, [importErrorMessage, open]);
-
-  async function handleImportUpdateSelection(
-    fileBytes: number[],
-    fileName: string,
-  ) {
-    if (!editPersonaId || !onImportUpdateFile) {
-      return;
-    }
-
-    setImportErrorMessage(null);
-    setIsImportingUpdate(true);
-    try {
-      await onImportUpdateFile(editPersonaId, fileBytes, fileName);
-    } catch (error) {
-      setImportErrorMessage(
-        getImportErrorLabel(error instanceof Error ? error.message : null),
-      );
-    } finally {
-      setIsImportingUpdate(false);
-    }
-  }
-
-  const {
-    fileInputRef: importFileInputRef,
-    isDragOver: isImportDragOver,
-    dropHandlers: importDropHandlers,
-    handleFileChange: handleImportFileChange,
-    openFilePicker: openImportFilePicker,
-  } = useFileImportZone({
-    onImportFile: (fileBytes, fileName) => {
-      void handleImportUpdateSelection(fileBytes, fileName);
-    },
-  });
-
   function handleOpenChange(next: boolean) {
     if (!next) {
       setDisplayName("");
@@ -318,8 +238,6 @@ export function AgentDefinitionDialog({
       behaviorSeedRef.current = emptyPersonaBehaviorDraft;
       setShowAdvancedFields(false);
       setIsAvatarUploadPending(false);
-      setImportErrorMessage(null);
-      setIsImportingUpdate(false);
       // isRuntimeAutoSeededRef and hasSeededForOpenRef are NOT reset here — the
       // [initialValues, open] effect resets both when the dialog re-opens.
     }
@@ -389,17 +307,6 @@ export function AgentDefinitionDialog({
     event.preventDefault();
     void handleSubmit();
   }
-
-  const importButtonTone = getImportButtonTone({
-    isWindowFileDragOver,
-    isImportDragOver,
-    importErrorMessage,
-  });
-  const importButtonLabel = getImportButtonLabel({
-    isWindowFileDragOver,
-    isImportDragOver,
-    importErrorMessage,
-  });
 
   const selectedRuntime = runtimes.find((p) => p.id === runtime);
   const blankRuntimeModelProviderEditable =
@@ -754,48 +661,7 @@ export function AgentDefinitionDialog({
         title={title}
         footer={
           <div className="flex w-full items-center justify-between gap-3">
-            <div className="flex min-h-9 items-center">
-              {canImportPersonaUpdate ? (
-                <>
-                  <input
-                    accept=".md,.json,.png,.zip"
-                    className="hidden"
-                    onChange={handleImportFileChange}
-                    ref={importFileInputRef}
-                    type="file"
-                  />
-                  <button
-                    className={cn(
-                      "inline-flex h-9 items-center gap-2 rounded-md border px-3 text-xs font-medium transition-colors",
-                      importButtonTone === "drag"
-                        ? "border-dashed border-primary/70 bg-primary/10 text-primary"
-                        : importButtonTone === "error"
-                          ? "border-destructive/40 bg-destructive/10 text-destructive hover:bg-destructive/15"
-                          : "border-border bg-background text-muted-foreground hover:bg-muted hover:text-foreground",
-                    )}
-                    disabled={isPending || isImportPending || isImportingUpdate}
-                    type="button"
-                    {...importDropHandlers}
-                    onClick={openImportFilePicker}
-                    title={
-                      importButtonTone === "error"
-                        ? importButtonLabel
-                        : undefined
-                    }
-                  >
-                    <Upload className="h-4 w-4" />
-                    <span className="max-w-[16rem] truncate">
-                      {importButtonLabel}
-                    </span>
-                    {isImportingUpdate ? (
-                      <RefreshCw className="h-4 w-4 animate-spin" />
-                    ) : null}
-                  </button>
-                </>
-              ) : (
-                createFooterSlot
-              )}
-            </div>
+            <div className="flex min-h-9 items-center">{createFooterSlot}</div>
 
             <div className="flex items-center gap-2">
               <Button

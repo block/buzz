@@ -7,7 +7,6 @@ import {
   duplicatePersonaDialogState,
   editPersonaDialogState,
   formatPersonaNamePoolText,
-  importPersonaDialogState,
   parsePersonaNamePoolText,
 } from "./personaDialogState.ts";
 
@@ -177,118 +176,6 @@ test("editPersonaDialogState seeds envVars and namePool from the persona", () =>
   assert.deepEqual(state.initialValues.namePool, ["alice", "bob"]);
 });
 
-test("importPersonaDialogState maps parsed persona previews into create drafts", () => {
-  const state = importPersonaDialogState({
-    displayName: "Imported",
-    avatarDataUrl: null,
-    avatarRef: null,
-    systemPrompt: "Imported prompt",
-    runtime: null,
-    model: "model-b",
-    provider: null,
-    namePool: [],
-    sourceFile: "import.persona.json",
-  });
-
-  assert.equal(state.title, "Import Imported");
-  assert.deepEqual(state.initialValues, {
-    displayName: "Imported",
-    avatarUrl: "",
-    systemPrompt: "Imported prompt",
-    runtime: undefined,
-    model: "model-b",
-    provider: undefined,
-  });
-});
-
-test("importPersonaDialogState preserves imported name pools", () => {
-  const state = importPersonaDialogState({
-    displayName: "Named imports",
-    avatarDataUrl: null,
-    avatarRef: null,
-    systemPrompt: "Imported prompt",
-    runtime: null,
-    model: null,
-    provider: null,
-    namePool: ["Birch", "Compass"],
-    sourceFile: "named.persona.json",
-  });
-
-  assert.deepEqual(state.initialValues.namePool, ["Birch", "Compass"]);
-});
-
-test("importPersonaDialogState filters unresolved Goose app-avatar refs", () => {
-  const state = importPersonaDialogState({
-    displayName: "Goosey",
-    avatarDataUrl: null,
-    avatarRef: "app-avatar:gloopies-19",
-    systemPrompt: "Imported prompt",
-    runtime: null,
-    model: null,
-    provider: null,
-    namePool: [],
-    sourceFile: "goosey.persona.md",
-  });
-
-  assert.equal(state.initialValues.avatarUrl, "");
-});
-
-test("importPersonaDialogState filters nonpersistent imported avatar refs", () => {
-  for (const avatarRef of [
-    "blob:https://buzz.example/temporary-avatar",
-    "ipfs://bafybeigdyrzt",
-  ]) {
-    const state = importPersonaDialogState({
-      displayName: "Packed avatar",
-      avatarDataUrl: null,
-      avatarRef,
-      systemPrompt: "Imported prompt",
-      runtime: null,
-      model: null,
-      provider: null,
-      namePool: [],
-      sourceFile: "pack.persona.zip",
-    });
-
-    assert.equal(state.initialValues.avatarUrl, "");
-  }
-});
-
-test("importPersonaDialogState preserves URL-like avatar refs", () => {
-  const state = importPersonaDialogState({
-    displayName: "Hosted avatar",
-    avatarDataUrl: null,
-    avatarRef: "https://relay.example/avatar.png",
-    systemPrompt: "Imported prompt",
-    runtime: null,
-    model: null,
-    provider: null,
-    namePool: [],
-    sourceFile: "hosted.persona.md",
-  });
-
-  assert.equal(
-    state.initialValues.avatarUrl,
-    "https://relay.example/avatar.png",
-  );
-});
-
-test("importPersonaDialogState filters relative avatar refs from packs", () => {
-  const state = importPersonaDialogState({
-    displayName: "Packed avatar",
-    avatarDataUrl: null,
-    avatarRef: "./avatars/lep.png",
-    systemPrompt: "Imported prompt",
-    runtime: null,
-    model: null,
-    provider: null,
-    namePool: [],
-    sourceFile: "pack.persona.zip",
-  });
-
-  assert.equal(state.initialValues.avatarUrl, "");
-});
-
 test("editPersonaDialogState preserves provider=databricks", () => {
   const state = editPersonaDialogState({
     id: "persona-provider",
@@ -347,22 +234,6 @@ test("duplicatePersonaDialogState preserves provider=databricks", () => {
   });
 
   assert.equal(state.initialValues.provider, "databricks");
-});
-
-test("importPersonaDialogState preserves provider=anthropic", () => {
-  const state = importPersonaDialogState({
-    displayName: "Imported With Provider",
-    avatarDataUrl: null,
-    avatarRef: null,
-    systemPrompt: "Anthropic agent.",
-    runtime: "goose",
-    model: "claude-sonnet",
-    provider: "anthropic",
-    namePool: [],
-    sourceFile: "provider-test.persona.json",
-  });
-
-  assert.equal(state.initialValues.provider, "anthropic");
 });
 
 test("edit and duplicate seed the behavior group from a quad-bearing persona", () => {

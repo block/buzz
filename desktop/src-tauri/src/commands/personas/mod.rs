@@ -1,19 +1,16 @@
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Emitter, Manager};
 use uuid::Uuid;
 
-use super::export_util::save_json_with_dialog;
 use crate::{
     app_state::AppState,
     managed_agents::{
         agent_events::ManagedAgentEventContent, apply_persona_behavior, current_instance_id,
-        delete_agent_key, effective_agent_command, encode_persona_json, load_managed_agents,
-        load_personas, load_teams, managed_agent_avatar_url, parse_json_persona, parse_md_persona,
-        parse_png_persona, parse_zip_personas, persona_events::persona_d_tag, save_managed_agents,
+        delete_agent_key, effective_agent_command, load_managed_agents, load_personas, load_teams,
+        managed_agent_avatar_url, persona_events::persona_d_tag, save_managed_agents,
         save_personas, stop_managed_agent_process, sync_managed_agent_processes,
         team_events::TeamEventContent, team_persona_key, try_regenerate_nest,
         validate_persona_activation_change, validate_persona_deletion, AgentDefinition,
-        CreatePersonaRequest, ManagedAgentRecord, ParsePersonaFilesResult, TeamRecord,
-        UpdatePersonaRequest,
+        CreatePersonaRequest, ManagedAgentRecord, TeamRecord, UpdatePersonaRequest,
     },
     util::now_iso,
 };
@@ -975,141 +972,7 @@ pub async fn set_persona_active(
     .map_err(|e| format!("spawn_blocking failed: {e}"))?
 }
 
-const MAX_PNG_BYTES: usize = 10 * 1024 * 1024;
-const MAX_JSON_BYTES: usize = 5 * 1024 * 1024;
-const MAX_ZIP_BYTES: usize = 100 * 1024 * 1024;
-
 pub(crate) const PNG_MAGIC: [u8; 4] = [0x89, 0x50, 0x4E, 0x47];
-const ZIP_MAGIC: [u8; 4] = [0x50, 0x4B, 0x03, 0x04];
-const JSON_OPEN_BRACE: u8 = 0x7B;
-
-#[tauri::command]
-pub async fn parse_persona_files(
-    file_bytes: Vec<u8>,
-    file_name: String,
-) -> Result<ParsePersonaFilesResult, String> {
-    tokio::task::spawn_blocking(move || {
-        if file_bytes.len() > MAX_ZIP_BYTES {
-            return Err("File is too large (max 100 MB).".to_string());
-        }
-        if file_bytes.is_empty() {
-            return Err("File is empty.".to_string());
-        }
-
-        let first_byte = file_bytes[0];
-
-        if file_bytes.len() >= 4 {
-            let magic: [u8; 4] = file_bytes[..4]
-                .try_into()
-                .map_err(|_| "Failed to read file header".to_string())?;
-
-            if magic == PNG_MAGIC {
-                if file_bytes.len() > MAX_PNG_BYTES {
-                    return Err("PNG file is too large (max 10 MB).".to_string());
-                }
-                let mut preview = parse_png_persona(&file_bytes)?;
-                preview.source_file = file_name;
-                return Ok(ParsePersonaFilesResult {
-                    personas: vec![preview],
-                    skipped: vec![],
-                });
-            }
-
-            if magic == ZIP_MAGIC {
-                return parse_zip_personas(&file_bytes);
-            }
-        }
-
-        if first_byte == JSON_OPEN_BRACE {
-            if file_bytes.len() > MAX_JSON_BYTES {
-                return Err("JSON file is too large (max 5 MB).".to_string());
-            }
-            let mut preview = parse_json_persona(&file_bytes)?;
-            preview.source_file = file_name;
-            return Ok(ParsePersonaFilesResult {
-                personas: vec![preview],
-                skipped: vec![],
-            });
-        }
-
-        // .persona.md: YAML frontmatter starts with "---"
-        let lower_name = file_name.to_ascii_lowercase();
-        if lower_name.ends_with(".persona.md") {
-            if file_bytes.len() > MAX_JSON_BYTES {
-                return Err("Markdown file is too large (max 5 MB).".to_string());
-            }
-            let mut preview = parse_md_persona(&file_bytes)?;
-            preview.source_file = file_name;
-            return Ok(ParsePersonaFilesResult {
-                personas: vec![preview],
-                skipped: vec![],
-            });
-        }
-
-        // If it's a .md file but not .persona.md, give a specific hint.
-        if lower_name.ends_with(".md") {
-            return Err(
-                "Only .persona.md files are supported. Rename to <name>.persona.md".to_string(),
-            );
-        }
-
-        Err(
-            "Unsupported file format. Expected .persona.md, .persona.png, .persona.json, or .zip"
-                .to_string(),
-        )
-    })
-    .await
-    .map_err(|e| format!("spawn_blocking failed: {e}"))?
-}
-
-#[tauri::command]
-pub async fn export_persona_to_json(
-    id: String,
-    app: AppHandle,
-    state: State<'_, AppState>,
-) -> Result<bool, String> {
-    // Load persona data under lock, then drop lock before dialog.
-    //
-    // NOTE: `env_vars` are deliberately NOT included in the exported card.
-    // Persona cards are designed to be shareable artifacts (uploaded,
-    // forked, distributed), and bundling API keys / credentials in them
-    // would be a significant footgun. Users who import a card and need
-    // credentials must supply them post-import via the persona dialog.
-    let (display_name, system_prompt, avatar_url, runtime, model, provider, name_pool) = {
-        let _store_guard = state
-            .managed_agents_store_lock
-            .lock()
-            .map_err(|e| e.to_string())?;
-        let personas = load_personas(&app)?;
-        let persona = personas
-            .iter()
-            .find(|p| p.id == id)
-            .ok_or_else(|| format!("agent {id} not found"))?;
-        (
-            persona.display_name.clone(),
-            persona.system_prompt.clone(),
-            persona.avatar_url.clone(),
-            persona.runtime.clone(),
-            persona.model.clone(),
-            persona.provider.clone(),
-            persona.name_pool.clone(),
-        )
-    };
-
-    let json_bytes = encode_persona_json(
-        &display_name,
-        &system_prompt,
-        avatar_url.as_deref(),
-        runtime.as_deref(),
-        model.as_deref(),
-        provider.as_deref(),
-        &name_pool,
-    )?;
-
-    let slug = crate::util::slugify(&display_name, "persona", 50);
-    let filename = format!("{slug}.persona.json");
-    save_json_with_dialog(&app, &filename, &json_bytes).await
-}
 
 mod snapshot;
 pub use snapshot::encode_agent_snapshot_for_send;

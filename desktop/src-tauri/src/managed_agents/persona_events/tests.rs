@@ -370,7 +370,7 @@ fn quad_absent_definition_hash_stable_across_activation() {
     );
 }
 
-/// Test-only bridge: build a AgentDefinition from parsed content the same
+/// Test-only bridge: build an AgentDefinition from parsed content the same
 /// way `persona_from_event` maps fields, without needing a signed event.
 fn persona_from_event_content_for_test(content: PersonaEventContent) -> AgentDefinition {
     AgentDefinition {

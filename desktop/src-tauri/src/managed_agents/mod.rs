@@ -39,7 +39,7 @@ pub(crate) use global_config::{
     validate_global_config, GlobalAgentConfig,
 };
 pub use nest::*;
-pub use persona_card::*;
+pub use persona_card::find_plugin_json;
 pub use personas::*;
 #[cfg(windows)]
 pub use process_lifecycle::*;
