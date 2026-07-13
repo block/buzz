@@ -5688,7 +5688,7 @@ function handleUpdaterCheck(config: E2eConfig | undefined) {
   };
 }
 
-async function handleUpdaterDownloadAndInstall(
+async function handleUpdaterDownload(
   payload: unknown,
   config: E2eConfig | undefined,
 ) {
@@ -5699,6 +5699,10 @@ async function handleUpdaterDownloadAndInstall(
   }
 
   notifyUpdaterFinished(payload);
+  return 43;
+}
+
+function handleUpdaterInstall() {
   return null;
 }
 
@@ -9352,8 +9356,10 @@ export function maybeInstallE2eTauriMocks() {
         return null;
       case "plugin:updater|check":
         return handleUpdaterCheck(activeConfig);
-      case "plugin:updater|download_and_install":
-        return handleUpdaterDownloadAndInstall(payload, activeConfig);
+      case "plugin:updater|download":
+        return handleUpdaterDownload(payload, activeConfig);
+      case "plugin:updater|install":
+        return handleUpdaterInstall();
       case "is_auto_update_supported":
         // Default true so all existing tests continue to use the auto-update
         // path. Set mock.autoUpdateSupported: false to simulate a .deb install.

@@ -21,63 +21,63 @@ export function SidebarUpdateCompactCard({
   onDismiss,
   testId = "sidebar-update-card-compact",
 }: SidebarUpdateCompactCardProps) {
-  const { relaunch } = useUpdaterContext();
-  const [isRestartPending, setIsRestartPending] = React.useState(false);
-  const restartPendingRef = React.useRef(false);
-  const restartFrameRef = React.useRef<number | null>(null);
-  const restartTimeoutRef = React.useRef<number | null>(null);
+  const { installAndRelaunch } = useUpdaterContext();
+  const [isUpdatePending, setIsUpdatePending] = React.useState(false);
+  const updatePendingRef = React.useRef(false);
+  const updateFrameRef = React.useRef<number | null>(null);
+  const updateTimeoutRef = React.useRef<number | null>(null);
 
   React.useEffect(() => {
     return () => {
-      if (restartFrameRef.current !== null) {
-        window.cancelAnimationFrame(restartFrameRef.current);
+      if (updateFrameRef.current !== null) {
+        window.cancelAnimationFrame(updateFrameRef.current);
       }
-      if (restartTimeoutRef.current !== null) {
-        window.clearTimeout(restartTimeoutRef.current);
+      if (updateTimeoutRef.current !== null) {
+        window.clearTimeout(updateTimeoutRef.current);
       }
-      restartPendingRef.current = false;
+      updatePendingRef.current = false;
     };
   }, []);
 
-  const handleRestart = React.useCallback(() => {
-    if (restartPendingRef.current) {
+  const handleUpdate = React.useCallback(() => {
+    if (updatePendingRef.current) {
       return;
     }
 
-    restartPendingRef.current = true;
-    setIsRestartPending(true);
-    restartFrameRef.current = window.requestAnimationFrame(() => {
-      restartFrameRef.current = null;
-      restartTimeoutRef.current = window.setTimeout(() => {
-        restartTimeoutRef.current = null;
-        void relaunch()
+    updatePendingRef.current = true;
+    setIsUpdatePending(true);
+    updateFrameRef.current = window.requestAnimationFrame(() => {
+      updateFrameRef.current = null;
+      updateTimeoutRef.current = window.setTimeout(() => {
+        updateTimeoutRef.current = null;
+        void installAndRelaunch()
           .catch((error) => {
-            console.error("[SidebarUpdateCard] relaunch failed:", error);
+            console.error("[SidebarUpdateCard] update failed:", error);
           })
           .finally(() => {
-            restartPendingRef.current = false;
-            setIsRestartPending(false);
+            updatePendingRef.current = false;
+            setIsUpdatePending(false);
           });
       }, 0);
     });
-  }, [relaunch]);
+  }, [installAndRelaunch]);
 
   return (
     <SidebarCompactActionCard
-      actionAriaLabel="Restart now to apply update"
-      actionDisabled={isRestartPending}
+      actionAriaLabel="Update now"
+      actionDisabled={isUpdatePending}
       actionTestId={actionTestId}
-      description={isRestartPending ? "Restarting" : "Click to restart"}
+      description={isUpdatePending ? "Updating" : "Click to update"}
       dismissLabel="Dismiss update notification"
       icon={
-        isRestartPending ? (
+        isUpdatePending ? (
           <Spinner aria-hidden="true" className="h-5 w-5 border-2" />
         ) : (
           <CircleArrowUp aria-hidden="true" className="h-5 w-5" />
         )
       }
-      iconKey={isRestartPending ? "pending" : "idle"}
-      onAction={handleRestart}
+      iconKey={isUpdatePending ? "pending" : "idle"}
+      onAction={handleUpdate}
       onDismiss={onDismiss}
       testId={testId}
       title="Ready to update!"
@@ -111,7 +111,7 @@ export function SidebarUpdateCard({ onDismiss }: SidebarUpdateCardProps) {
 
   return (
     <SidebarUpdateCompactCard
-      actionTestId="sidebar-update-restart"
+      actionTestId="sidebar-update-now"
       onDismiss={onDismiss}
       testId="sidebar-update-card"
     />

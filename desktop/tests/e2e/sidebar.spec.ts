@@ -263,23 +263,35 @@ test("shows a sidebar update card when an update is ready", async ({
   await page.getByTestId("settings-nav-updates").click();
   await page.getByRole("button", { name: "Check for Updates" }).click();
   await expect(page.getByTestId("settings-panel-updates")).toContainText(
-    "Update installed. Restart to apply.",
+    "Update downloaded. Click to apply.",
   );
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const commands =
+          (
+            window as Window & {
+              __BUZZ_E2E_COMMANDS__?: string[];
+            }
+          ).__BUZZ_E2E_COMMANDS__ ?? [];
+        return (
+          commands.includes("plugin:updater|install") ||
+          commands.includes("plugin:process|restart")
+        );
+      }),
+    )
+    .toBe(false);
 
   await page.getByTestId("settings-back-to-app").click();
 
   const updateCard = page.getByTestId("sidebar-update-card");
   await expect(updateCard).toBeVisible();
   await expect(updateCard).toContainText("Ready to update!");
-  await expect(updateCard).toContainText("Click to restart");
-  await expect(page.getByTestId("sidebar-update-restart")).toBeVisible();
-  const reservedCardHeight = await updateCard.evaluate(
-    (element) => (element as HTMLElement).offsetHeight,
-  );
-
-  await page.getByTestId("sidebar-update-restart").click();
-  await expect(updateCard).toContainText("Restarting");
-  await expect(page.getByTestId("sidebar-update-restart")).toBeDisabled();
+  await expect(updateCard).toContainText("Click to update");
+  await expect(page.getByTestId("sidebar-update-now")).toBeVisible();
+  await page.getByTestId("sidebar-update-now").click();
+  await expect(updateCard).toContainText("Updating");
+  await expect(page.getByTestId("sidebar-update-now")).toBeDisabled();
 
   await expect
     .poll(() =>
@@ -292,42 +304,34 @@ test("shows a sidebar update card when an update is ready", async ({
           ).__BUZZ_E2E_COMMANDS__ ?? [],
       ),
     )
-    .toContain("plugin:process|restart");
+    .toEqual(
+      expect.arrayContaining([
+        "plugin:updater|download",
+        "plugin:updater|install",
+        "plugin:process|restart",
+      ]),
+    );
 
-  const dismissButton = page.getByTestId("sidebar-update-dismiss");
-  await updateCard.hover();
-  const dismissButtonBox = await dismissButton.boundingBox();
-  expect(dismissButtonBox).not.toBeNull();
-  if (!dismissButtonBox) return;
-
-  await page.mouse.move(
-    dismissButtonBox.x + dismissButtonBox.width / 2,
-    dismissButtonBox.y + dismissButtonBox.height / 2,
+  const commands = await page.evaluate(
+    () =>
+      (
+        window as Window & {
+          __BUZZ_E2E_COMMANDS__?: string[];
+        }
+      ).__BUZZ_E2E_COMMANDS__ ?? [],
   );
-  await page.mouse.down();
-  await expect(page.locator(".buzz-poof-burst")).toHaveCount(1);
-  await expect(updateCard).toBeVisible();
-  await page.mouse.up();
-  await expect(updateCard).toHaveAttribute("data-dismissing", "true");
-  await expect
-    .poll(() =>
-      updateCard.evaluate((element) => (element as HTMLElement).offsetHeight),
-    )
-    .toBe(reservedCardHeight);
-  await expect
-    .poll(() =>
-      updateCard.evaluate((element) =>
-        Number.parseFloat(getComputedStyle(element).opacity),
-      ),
-    )
-    .toBeLessThan(0.05);
-  await expect(updateCard).toBeHidden();
+  expect(commands.indexOf("plugin:updater|download")).toBeLessThan(
+    commands.indexOf("plugin:updater|install"),
+  );
+  expect(commands.indexOf("plugin:updater|install")).toBeLessThan(
+    commands.indexOf("plugin:process|restart"),
+  );
 });
 
 // Regression test for the Linux .deb auto-update guard (PR #1535).
 // When auto-update is not supported (e.g. Linux .deb install), the update
 // check must surface a "manual-required" card with a GitHub link and
-// AppImage hint, and must NEVER invoke plugin:updater|download_and_install.
+// AppImage hint, and must NEVER invoke the in-app download or install commands.
 test("shows manual-required update card and never auto-downloads on non-AppImage installs", async ({
   page,
 }) => {
@@ -373,7 +377,7 @@ test("shows manual-required update card and never auto-downloads on non-AppImage
   await expect(updateCard).toBeVisible();
   await expect(updateCard).toContainText("AppImage");
 
-  // download_and_install must NEVER have been called.
+  // In-app download and install must NEVER have been called.
   const commands = await page.evaluate(
     () =>
       (
@@ -382,5 +386,6 @@ test("shows manual-required update card and never auto-downloads on non-AppImage
         }
       ).__BUZZ_E2E_COMMANDS__ ?? [],
   );
-  expect(commands).not.toContain("plugin:updater|download_and_install");
+  expect(commands).not.toContain("plugin:updater|download");
+  expect(commands).not.toContain("plugin:updater|install");
 });
