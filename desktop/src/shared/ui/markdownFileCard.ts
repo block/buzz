@@ -86,14 +86,9 @@ export function resolveSnapshotCard(
     size: entry.size,
     sha256,
     snapshotKind: "agent",
-    // For PNG snapshots, use the attachment URL as the thumb source (it IS
-    // the avatar card image). For JSON, use the explicit imeta `thumb` field
-    // if the sender included one.
-    thumb: isPng
-      ? rewriteRelayUrl(href)
-      : entry.thumb
-        ? rewriteRelayUrl(entry.thumb)
-        : undefined,
+    // PNG snapshots use the attachment URL as the thumb source because it is
+    // the avatar card image. JSON snapshots use the generic icon.
+    thumb: isPng ? rewriteRelayUrl(href) : undefined,
   };
 }
 
