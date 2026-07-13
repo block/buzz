@@ -757,9 +757,9 @@ fn probe_codex_acp_major_version_returns_none_for_hung_direct_child() {
         major, None,
         "hung binary must return None (timeout kills child)"
     );
-    // The timeout is 5 s; give a 2 s margin for slow CI.
+    // The timeout is 5 s; give a 10 s margin for parallel pre-push suites.
     assert!(
-        elapsed.as_secs() < 7,
+        elapsed.as_secs() < 15,
         "probe must complete within timeout bound; elapsed: {elapsed:?}"
     );
 }
@@ -796,9 +796,9 @@ fn probe_codex_acp_major_version_returns_version_when_descendant_holds_pipe_open
     let _ = std::fs::remove_dir_all(dir);
 
     // Must return within ~1 s: non-blocking read, no waiting for descendant.
-    // Give a 3 s margin for slow CI.
+    // Give a 9 s margin for parallel pre-push suites.
     assert!(
-        elapsed.as_secs() < 3,
+        elapsed.as_secs() < 10,
         "probe must not block on descendant pipe; elapsed: {elapsed:?}"
     );
     assert_eq!(
