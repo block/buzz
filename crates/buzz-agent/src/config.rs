@@ -730,10 +730,6 @@ pub struct Config {
     /// Thinking/reasoning effort level. `None` = use provider default (no
     /// thinking config sent). Set via `BUZZ_AGENT_THINKING_EFFORT`.
     pub thinking_effort: Option<ThinkingEffort>,
-    /// Let an OpenAI-compatible server choose its generation limit instead of
-    /// sending `max_completion_tokens`. Useful for local/unknown models whose
-    /// output limit is discovered and enforced by the serving runtime.
-    pub openai_omit_max_tokens: bool,
 }
 
 impl Config {
@@ -828,7 +824,6 @@ impl Config {
             hook_servers: parse_hook_servers_env("MCP_HOOK_SERVERS"),
             hints_enabled: parse_env("BUZZ_AGENT_NO_HINTS", 0u8)? == 0,
             thinking_effort: parse_thinking_effort(env("BUZZ_AGENT_THINKING_EFFORT").as_deref())?,
-            openai_omit_max_tokens: parse_env("OPENAI_COMPAT_OMIT_MAX_TOKENS", false)?,
         };
         cfg.validate()?;
         Ok(cfg)
@@ -869,7 +864,6 @@ impl Config {
             hook_servers: HookServers::None,
             hints_enabled: false,
             thinking_effort: None,
-            openai_omit_max_tokens: false,
         }
     }
 

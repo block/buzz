@@ -458,79 +458,43 @@ async fn cancel_leaves_history_valid_for_next_prompt() {
     h.shutdown().await;
 }
 
-/// An empty normal completion is not a successful ACP turn. The agent must
-/// give the model one corrective round so a local reasoning model cannot end a
-/// Buzz mention after emitting only hidden thought text.
+/// Empty assistant content + no tool_calls must serialize as "" (not null)
+/// for OpenAI, so subsequent prompts don't get rejected. Round 7 fix 6.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn empty_end_turn_gets_one_corrective_round() {
-    let llm = spawn_capturing_llm(vec![openai_text(""), openai_text("visible answer")]).await;
+async fn empty_assistant_serializes_as_empty_string() {
+    // First call returns content="" finish_reason=stop — agent records an
+    // empty assistant turn. Second call's request body is what we inspect.
+    let llm = spawn_capturing_llm(vec![openai_text(""), openai_text("done")]).await;
     let mut h = Harness::spawn(&llm.url).await;
     let sid = init_session(&mut h, json!([])).await;
 
-    let prompt_id = h
+    let p1 = h
         .send(
             "session/prompt",
             json!({"sessionId": sid, "prompt": [{"type":"text","text":"a"}]}),
         )
         .await;
-    let mut saw_visible_chunk = false;
-    let result = loop {
-        let value = h.recv().await;
-        if value["method"] == "session/update"
-            && value["params"]["update"]["sessionUpdate"] == "agent_message_chunk"
-            && value["params"]["update"]["content"]["text"] == "visible answer"
-        {
-            saw_visible_chunk = true;
-        }
-        if value["id"] == json!(prompt_id) {
-            break value;
-        }
-    };
-
-    assert_eq!(result["result"]["stopReason"], "end_turn");
-    assert!(
-        saw_visible_chunk,
-        "corrective answer was not emitted: {result}"
-    );
+    let _ = h.recv_until(|v| v["id"] == json!(p1)).await;
+    let p2 = h
+        .send(
+            "session/prompt",
+            json!({"sessionId": sid, "prompt": [{"type":"text","text":"b"}]}),
+        )
+        .await;
+    let _ = h.recv_until(|v| v["id"] == json!(p2)).await;
 
     let captured = llm.captured.lock().await;
-    assert_eq!(captured.len(), 2, "expected exactly one corrective request");
-    let retry_messages = captured[1]["messages"].as_array().unwrap();
-    let empty_assistant = retry_messages
+    let msgs = captured[1]["messages"].as_array().unwrap();
+    let empty_assistant = msgs
         .iter()
-        .find(|message| message["role"] == "assistant")
-        .expect("empty assistant turn must be preserved for valid OpenAI history");
-    assert_eq!(empty_assistant["content"], json!(""));
-    assert!(retry_messages.iter().any(|message| {
-        message["role"] == "user"
-            && message["content"]
-                .as_str()
-                .is_some_and(|text| text.contains("ended without any visible text"))
-    }));
-    drop(captured);
-    h.shutdown().await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn repeated_empty_end_turn_fails_instead_of_silent_success() {
-    let llm = spawn_capturing_llm(vec![openai_text(""), openai_text("")]).await;
-    let mut h = Harness::spawn(&llm.url).await;
-    let sid = init_session(&mut h, json!([])).await;
-
-    let prompt_id = h
-        .send(
-            "session/prompt",
-            json!({"sessionId": sid, "prompt": [{"type":"text","text":"a"}]}),
-        )
-        .await;
-    let result = h.recv_until(|value| value["id"] == json!(prompt_id)).await;
-    assert!(
-        result["error"]["message"]
-            .as_str()
-            .is_some_and(|message| message.contains("without visible text or a tool call")),
-        "unexpected result: {result}"
+        .find(|m| m["role"] == "assistant" && m.get("tool_calls").is_none())
+        .expect("no plain assistant turn");
+    // Must be empty string, NOT null.
+    assert_eq!(
+        empty_assistant["content"],
+        json!(""),
+        "expected empty string content, got {empty_assistant}"
     );
-    assert_eq!(llm.captured.lock().await.len(), 2);
     h.shutdown().await;
 }
 

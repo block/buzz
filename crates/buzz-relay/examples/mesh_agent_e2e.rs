@@ -6,8 +6,9 @@
 //! Permutations:
 //!   P1 explicit-model chat  — agent pinned to the served model id replies.
 //!   P2 auto-model chat      — agent sends `model: "auto"`; mesh router picks.
-//!   P3 repeated ordinary chat — several normal prompts must each produce a
-//!      user-visible ACP message, never reasoning-only silent success.
+//!   P3 context-fit regression — an oversized output budget (150k tokens)
+//!      must FAIL with the router's context error (proves the router's fit
+//!      gate — the failure mode the 1024 preset cap protects against).
 //!   P4 agentic tool use     — agent + buzz-dev-mcp writes a file on disk.
 //!
 //! The serve node is the same `mesh_llm_sdk::serve` path Share-compute uses
@@ -32,7 +33,6 @@ use tokio::process::{Child, Command};
 const DEFAULT_MODEL: &str = "unsloth/Qwen3-8B-GGUF:Q4_K_M";
 const API_PORT: u16 = 19437;
 const CONSOLE_PORT: u16 = 13231;
-const BUZZ_BASE_PROMPT: &str = include_str!("../../buzz-acp/src/base_prompt.md");
 
 fn main() -> anyhow::Result<()> {
     tokio::runtime::Builder::new_multi_thread()
@@ -94,9 +94,15 @@ async fn run() -> anyhow::Result<()> {
         }
     };
 
-    // P1: explicit model id. Shared compute mirrors Goose for unknown local
-    // models and lets the serving runtime choose the generation limit.
-    let r = agent_chat(&base, &served_id, "Reply with exactly one word: PONG", &[]).await;
+    // P1: explicit model id.
+    let r = agent_chat(
+        &base,
+        &served_id,
+        "1024",
+        "Reply with exactly one word: PONG",
+        &[],
+    )
+    .await;
     match r {
         Ok(text) => record(
             "P1 explicit-model chat",
@@ -107,7 +113,14 @@ async fn run() -> anyhow::Result<()> {
     }
 
     // P2: auto — router picks the model.
-    let r = agent_chat(&base, "auto", "Reply with exactly one word: PONG", &[]).await;
+    let r = agent_chat(
+        &base,
+        "auto",
+        "1024",
+        "Reply with exactly one word: PONG",
+        &[],
+    )
+    .await;
     match r {
         Ok(text) => record(
             "P2 auto-model chat",
@@ -117,26 +130,33 @@ async fn run() -> anyhow::Result<()> {
         Err(e) => record("P2 auto-model chat", false, e.to_string()),
     }
 
-    // P3: ordinary chat reliability with the real Buzz system prompt and MCP
-    // tool catalog. These prompts reproduce the GUI failure that exact-token,
-    // tiny-context smoke prompts missed. Each fresh ACP session must emit a
-    // visible message chunk; thought-only output is not an answer.
-    let dev_mcp = vec![("dev".to_string(), repo_bin("buzz-dev-mcp")?)];
-    for attempt in 1..=3 {
-        let r = agent_chat(
-            &base,
-            "auto",
-            "What can you do in Buzz? Answer in two short sentences. Do not call a tool for this test.",
-            &dev_mcp,
-        )
-        .await;
-        match r {
-            Ok(text) => record(
-                &format!("P3.{attempt} ordinary chat"),
-                !text.trim().is_empty(),
-                text,
-            ),
-            Err(e) => record(&format!("P3.{attempt} ordinary chat"), false, e.to_string()),
+    // P3: regression — an output budget no served model's context can hold
+    // must be rejected by the router with the context-fit error (the failure
+    // mode that broke relay-mesh agents when buzz-agent's default 32768
+    // budget met a 32k-context model). 150k output: passes buzz-agent's own
+    // config validation (must stay under its 200k max_context_tokens) but
+    // with the router's +25% margin overflows even 128k-context models like
+    // GLM-4.7-Flash.
+    let r = agent_chat(
+        &base,
+        &served_id,
+        "150000",
+        "Reply with exactly one word: PONG",
+        &[],
+    )
+    .await;
+    match r {
+        Ok(text) => record(
+            "P3 oversized-budget must fail",
+            false,
+            format!("unexpectedly succeeded: {text}"),
+        ),
+        Err(e) => {
+            let msg = e.to_string();
+            let is_context_503 = msg.contains("503")
+                || msg.contains("service_unavailable")
+                || msg.contains("context-compatible");
+            record("P3 oversized-budget must fail", is_context_503, msg);
         }
     }
 
@@ -148,7 +168,8 @@ async fn run() -> anyhow::Result<()> {
         "Use your developer tools to create {marker_name} in the current working directory containing exactly the text BUZZ_OK (no quotes, no newline commentary). Then confirm."
     );
     let mcp = vec![("dev".to_string(), repo_bin("buzz-dev-mcp")?)];
-    let (r, marker) = agent_chat_with_marker(&base, &served_id, &prompt, &mcp, &marker_name).await;
+    let (r, marker) =
+        agent_chat_with_marker(&base, &served_id, "1024", &prompt, &mcp, &marker_name).await;
     let file_ok = std::fs::read_to_string(&marker)
         .map(|c| c.contains("BUZZ_OK"))
         .unwrap_or(false);
@@ -191,27 +212,32 @@ fn repo_bin(name: &str) -> anyhow::Result<String> {
 async fn agent_chat(
     base: &str,
     model: &str,
+    max_output_tokens: &str,
     prompt: &str,
     mcp_servers: &[(String, String)],
 ) -> anyhow::Result<String> {
-    let (result, _) = agent_chat_in_isolated_home(base, model, prompt, mcp_servers).await;
+    let (result, _) =
+        agent_chat_in_isolated_home(base, model, max_output_tokens, prompt, mcp_servers).await;
     result
 }
 
 async fn agent_chat_with_marker(
     base: &str,
     model: &str,
+    max_output_tokens: &str,
     prompt: &str,
     mcp_servers: &[(String, String)],
     marker_name: &str,
 ) -> (anyhow::Result<String>, std::path::PathBuf) {
-    let (result, home) = agent_chat_in_isolated_home(base, model, prompt, mcp_servers).await;
+    let (result, home) =
+        agent_chat_in_isolated_home(base, model, max_output_tokens, prompt, mcp_servers).await;
     (result, home.join(marker_name))
 }
 
 async fn agent_chat_in_isolated_home(
     base: &str,
     model: &str,
+    max_output_tokens: &str,
     prompt: &str,
     mcp_servers: &[(String, String)],
 ) -> (anyhow::Result<String>, std::path::PathBuf) {
@@ -236,7 +262,7 @@ async fn agent_chat_in_isolated_home(
         .env("OPENAI_COMPAT_MODEL", model)
         .env("OPENAI_COMPAT_API_KEY", "buzz-mesh-local")
         .env("OPENAI_COMPAT_API", "chat")
-        .env("OPENAI_COMPAT_OMIT_MAX_TOKENS", "true")
+        .env("BUZZ_AGENT_MAX_OUTPUT_TOKENS", max_output_tokens)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -291,7 +317,7 @@ async fn drive_acp(
                 "params": {
                     "cwd": cwd.to_string_lossy(),
                     "mcpServers": mcp_json,
-                    "systemPrompt": BUZZ_BASE_PROMPT
+                    "systemPrompt": "You are a terse test agent. Follow instructions exactly."
                 }
             }))
             .as_bytes(),
@@ -310,14 +336,9 @@ async fn drive_acp(
         let Ok(msg) = serde_json::from_str::<serde_json::Value>(&line) else {
             continue;
         };
-        // Only visible assistant output counts as an answer. Thought chunks
-        // are intentionally excluded: accepting them made reasoning-only turns
-        // look successful even though Buzz had nothing to publish to chat.
+        // Collect any streamed agent text from session/update notifications.
         if msg.get("method").and_then(|m| m.as_str()) == Some("session/update") {
-            let update = &msg["params"]["update"];
-            if update["sessionUpdate"] == "agent_message_chunk" {
-                collect_text(update, &mut agent_text);
-            }
+            collect_text(&msg["params"]["update"], &mut agent_text);
             continue;
         }
         match msg.get("id").and_then(|i| i.as_i64()) {

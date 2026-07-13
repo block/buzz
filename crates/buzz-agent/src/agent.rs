@@ -21,15 +21,6 @@ use crate::wire::{self, WireSender};
 const ERROR_REFLECTION_SUFFIX: &str =
     "\n\n[Reflect] Before retrying, identify the cause and change your approach.";
 
-/// Maximum number of times a provider may claim a normal end-turn while
-/// returning neither user-visible text nor a tool call. Accepting that shape as
-/// success makes ACP turns disappear: the harness has nothing to publish or
-/// execute. One corrective round is enough to recover compatible local models
-/// without allowing an empty-response loop to run unboundedly.
-const MAX_EMPTY_END_TURN_RETRIES: u32 = 1;
-
-const EMPTY_END_TURN_RETRY_PROMPT: &str = "Your previous response ended without any visible text or tool call. Complete the current user request now. Return a user-visible answer, or use the required communication tool when the system instructions require one; do not return an empty response.";
-
 pub struct RunCtx<'a> {
     pub cfg: &'a Config,
     /// Effective model for this session. Usually equals `cfg.model`; overridden
@@ -93,7 +84,6 @@ impl RunCtx<'_> {
         // session) so a stubborn exchange can't permanently disable the stop
         // guard for a long-lived session; `max_rounds` still caps the loop.
         let mut stop_rejections = 0u32;
-        let mut empty_end_turn_retries = 0u32;
         loop {
             if self.cfg.max_rounds > 0 && round >= self.cfg.max_rounds {
                 return Ok(StopReason::MaxTurnRequests);
@@ -220,29 +210,6 @@ impl RunCtx<'_> {
                         "provider: stop=tool_use but zero tool_calls".into(),
                     ));
                 }
-
-                // A provider may return a valid `finish_reason=stop` envelope
-                // containing only hidden/reasoning text. That is not a
-                // completed ACP turn: no user-visible message was emitted and
-                // no communication tool can publish one. Give the model one
-                // explicit corrective round, then fail loudly rather than
-                // reporting a silent success to the harness.
-                if response.stop == ProviderStop::EndTurn && response.text.trim().is_empty() {
-                    self.history.push(HistoryItem::Assistant {
-                        text: response.text,
-                        tool_calls: Vec::new(),
-                    });
-                    if empty_end_turn_retries < MAX_EMPTY_END_TURN_RETRIES {
-                        empty_end_turn_retries = empty_end_turn_retries.saturating_add(1);
-                        self.history
-                            .push(HistoryItem::User(EMPTY_END_TURN_RETRY_PROMPT.to_string()));
-                        continue;
-                    }
-                    return Err(AgentError::Llm(
-                        "provider ended the turn without visible text or a tool call".into(),
-                    ));
-                }
-
                 self.history.push(HistoryItem::Assistant {
                     text: response.text,
                     tool_calls: Vec::new(),

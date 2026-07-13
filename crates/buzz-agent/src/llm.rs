@@ -539,14 +539,8 @@ fn openai_body(
             "parameters": t.input_schema } })
         })
         .collect();
-    let mut body = json!({
-        "model": effective_model,
-        "stream": false,
-        "messages": messages,
-    });
-    if !cfg.openai_omit_max_tokens {
-        body["max_completion_tokens"] = json!(cfg.max_output_tokens);
-    }
+    let mut body = json!({ "model": effective_model, "stream": false,
+        "max_completion_tokens": cfg.max_output_tokens, "messages": messages });
     if let Some(e) = effort {
         body["reasoning_effort"] = json!(e.openai_effort_str());
     }
@@ -1209,7 +1203,6 @@ mod tests {
             openai_api: OpenAiApi::Chat,
             hints_enabled: true,
             thinking_effort: None,
-            openai_omit_max_tokens: false,
         }
     }
 
@@ -1787,22 +1780,6 @@ mod tests {
             body.get("output_config").is_none(),
             "output_config must be absent"
         );
-    }
-
-    #[test]
-    fn openai_body_can_defer_generation_limit_to_compatible_server() {
-        let mut config = cfg(Provider::OpenAi);
-        config.openai_omit_max_tokens = true;
-        let body = openai_body(
-            &config,
-            "system",
-            &[HistoryItem::User("hi".into())],
-            &[],
-            "local-model",
-            None,
-        );
-        assert!(body.get("max_completion_tokens").is_none());
-        assert!(body.get("max_tokens").is_none());
     }
 
     #[test]
