@@ -210,6 +210,7 @@ test("snapshot_send_config_only_calls_encode_upload_send_in_order", async ({
       {
         id: ANALYST_PERSONA_ID,
         displayName: "Analyst",
+        avatarUrl: "https://mock.relay/media/avatar.png",
         systemPrompt: "You are an analyst.",
       },
     ],
@@ -222,6 +223,13 @@ test("snapshot_send_config_only_calls_encode_upload_send_in_order", async ({
     ],
     uploadDescriptors: [MOCK_UPLOAD_DESCRIPTOR],
   });
+  await page.route("https://mock.relay/media/avatar.png", (route) =>
+    route.fulfill({
+      body: Buffer.from([0x89, 0x50, 0x4e, 0x47]),
+      contentType: "image/png",
+      headers: { "access-control-allow-origin": "*" },
+    }),
+  );
   await gotoAgentsPage(page);
 
   await page.getByLabel("Open actions for Analyst").click();
@@ -296,9 +304,13 @@ test("snapshot_send_config_only_calls_encode_upload_send_in_order", async ({
     (e) => e.command === "encode_agent_snapshot_for_send",
   );
   expect(encodeEntry).toBeTruthy();
-  expect(
-    (encodeEntry?.payload as { format?: string } | undefined)?.format,
-  ).toBe("png");
+  const encodePayload = encodeEntry?.payload as
+    | { format?: string; avatarPngDataUrl?: string }
+    | undefined;
+  expect(encodePayload?.format).toBe("png");
+  expect(encodePayload?.avatarPngDataUrl).toEqual(
+    expect.stringMatching(/^data:image\/png;base64,/),
+  );
 
   // Close the dialog and navigate to #general to verify the AgentSnapshotCard renders.
   await page.getByRole("button", { name: "Close" }).click();

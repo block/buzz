@@ -14,6 +14,7 @@ import {
 import { Separator } from "@/shared/ui/separator";
 import { useEncodeAgentSnapshotForSendMutation } from "@/features/agents/hooks";
 import { useTimeoutState } from "@/features/moderation/lib/timeoutStore";
+import { resolveSnapshotAvatarPng } from "./snapshotAvatarPng";
 import {
   useSnapshotSendController,
   type SendPhase,
@@ -158,7 +159,7 @@ export function AgentSnapshotSendDialog({
     // This closes the race between this pre-flight check and the moment encode
     // or upload actually starts.
     await controller.beginSend(
-      () =>
+      async () =>
         encodeMutation.mutateAsync({
           id: persona.id,
           memoryLevel,
@@ -166,6 +167,7 @@ export function AgentSnapshotSendDialog({
           // JSON has no relay-valid thumbnail.
           format: "png",
           memorySourcePubkey: linkedAgentPubkey,
+          avatarPngDataUrl: await resolveSnapshotAvatarPng(persona.avatarUrl),
         }),
       destination.id,
     );
