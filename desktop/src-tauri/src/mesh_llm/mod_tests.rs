@@ -270,6 +270,104 @@ fn signed_reporter_target(reporter_secret: &str, model: &str, endpoint: &str) ->
 }
 
 #[test]
+fn stale_status_is_excluded_from_admission_and_availability() {
+    let secret = "8".repeat(64);
+    let member = nostr::Keys::parse(&secret).unwrap().public_key().to_hex();
+    let stale = signed_reporter_target_at(&secret, "stale-model", "stale-addr", 1_000);
+    let membership = signed_membership_event_at(std::slice::from_ref(&member), 1_121);
+    let events = vec![stale, membership];
+
+    assert!(super::owner_ids_from_events(&events).is_empty());
+    let availability = super::availability_from_events(events);
+    assert!(!availability.available);
+    assert!(availability.serve_targets.is_empty());
+}
+
+#[test]
+fn same_member_can_publish_multiple_owner_scoped_devices() {
+    let secret = "9".repeat(64);
+    let member = nostr::Keys::parse(&secret).unwrap().public_key().to_hex();
+    let first = signed_reporter_target(&secret, "model-a", "addr-a");
+    let second = signed_reporter_target(&secret, "model-b", "addr-b");
+    let first_d = first
+        .tags
+        .iter()
+        .find_map(|tag| {
+            let values = tag.as_slice();
+            (values.first().map(String::as_str) == Some("d"))
+                .then(|| values.get(1).cloned())
+                .flatten()
+        })
+        .unwrap();
+    let second_d = second
+        .tags
+        .iter()
+        .find_map(|tag| {
+            let values = tag.as_slice();
+            (values.first().map(String::as_str) == Some("d"))
+                .then(|| values.get(1).cloned())
+                .flatten()
+        })
+        .unwrap();
+    assert_ne!(
+        first_d, second_d,
+        "device status coordinates must not overwrite"
+    );
+
+    let availability = super::availability_from_events(vec![
+        first,
+        second,
+        signed_membership_event(std::slice::from_ref(&member)),
+    ]);
+    assert_eq!(availability.serve_targets.len(), 2);
+}
+
+fn signed_reporter_target_at(
+    reporter_secret: &str,
+    model: &str,
+    endpoint: &str,
+    created_at: u64,
+) -> nostr::Event {
+    use mesh_llm_host_runtime::crypto::OwnerKeypair;
+
+    let keys = nostr::Keys::parse(reporter_secret).unwrap();
+    let owner = OwnerKeypair::generate();
+    let member_pubkey = keys.public_key().to_hex();
+    super::coordinator::build_status_report_event(json!({
+        "ownerId": owner.owner_id(),
+        "ownerVerifyingKey": hex::encode(owner.verifying_key().as_bytes()),
+        "ownerBindingSig": hex::encode(owner.sign_bytes(
+            &super::identity::member_binding_bytes(&member_pubkey)
+        )),
+        "models": [{"id": model, "name": null}],
+        "serveTargets": [{
+            "modelId": model,
+            "modelName": null,
+            "endpointAddr": endpoint,
+            "nodeName": null,
+            "capacity": null
+        }]
+    }))
+    .unwrap()
+    .custom_created_at(nostr::Timestamp::from(created_at))
+    .sign_with_keys(&keys)
+    .unwrap()
+}
+
+fn signed_membership_event_at(members: &[String], created_at: u64) -> nostr::Event {
+    let keys = nostr::Keys::generate();
+    let tags = members
+        .iter()
+        .map(|member| nostr::Tag::parse(["member", member]).unwrap())
+        .collect::<Vec<_>>();
+    nostr::EventBuilder::new(nostr::Kind::Custom(13_534), "")
+        .tags(tags)
+        .custom_created_at(nostr::Timestamp::from(created_at))
+        .sign_with_keys(&keys)
+        .unwrap()
+}
+
+#[test]
 fn owner_roster_without_membership_list_fails_closed() {
     let events = vec![
         signed_reporter_status(&"1".repeat(64), "owner-a"),

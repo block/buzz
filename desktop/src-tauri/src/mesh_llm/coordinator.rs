@@ -18,7 +18,7 @@ use crate::app_state::AppState;
 /// and store it through their generic user-state path. The relay needs no mesh
 /// handler or kind-registry change.
 pub const KIND_BUZZ_MESH_MEMBER_STATUS: u16 = buzz_core_pkg::kind::KIND_BOOKMARK_SET as u16;
-const STATUS_D_TAG: &str = "buzz-mesh-member-status";
+const STATUS_D_TAG_PREFIX: &str = "buzz-mesh-member-status";
 const ROSTER_POLL_INTERVAL: Duration = Duration::from_secs(60);
 const STATUS_PUBLISH_INTERVAL: Duration = Duration::from_secs(15);
 
@@ -168,7 +168,14 @@ fn bind_payload_to_member(
 pub(crate) fn build_status_report_event(
     payload: serde_json::Value,
 ) -> Result<nostr::EventBuilder, String> {
-    let d = Tag::parse(["d", STATUS_D_TAG]).map_err(|error| error.to_string())?;
+    let owner_id = payload
+        .get("ownerId")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "mesh discovery status is missing ownerId".to_string())?;
+    let d_tag = format!("{STATUS_D_TAG_PREFIX}:{owner_id}");
+    let d = Tag::parse(["d", d_tag.as_str()]).map_err(|error| error.to_string())?;
     let k = Tag::parse(["k", "buzz-mesh-status"]).map_err(|error| error.to_string())?;
     Ok(nostr::EventBuilder::new(
         nostr::Kind::Custom(KIND_BUZZ_MESH_MEMBER_STATUS),
@@ -222,6 +229,8 @@ mod tests {
             nostr::Kind::Custom(KIND_BUZZ_MESH_MEMBER_STATUS)
         );
         assert_eq!(event.pubkey, keys.public_key());
-        assert!(event.as_json().contains(STATUS_D_TAG));
+        assert!(event
+            .as_json()
+            .contains(&format!("{STATUS_D_TAG_PREFIX}:owner")));
     }
 }

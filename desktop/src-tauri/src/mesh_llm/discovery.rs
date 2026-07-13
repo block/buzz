@@ -6,6 +6,27 @@ use sha2::{Digest, Sha256};
 
 use super::{dedupe_models, MeshAvailability, MeshModelOption, MeshServeTarget, MESH_STATUS_KIND};
 
+/// Status notes are refreshed every 15 seconds. Ignore notes older than two
+/// minutes so crashed/offline devices stop contributing compute or admission
+/// identities without requiring a relay-side cleanup job.
+const STATUS_FRESHNESS_SECS: u64 = 120;
+
+fn newest_event_timestamp(events: &[nostr::Event]) -> u64 {
+    events
+        .iter()
+        .map(|event| event.created_at.as_secs())
+        .max()
+        .unwrap_or_default()
+}
+
+fn status_is_fresh(event: &nostr::Event, now: u64) -> bool {
+    event
+        .created_at
+        .as_secs()
+        .saturating_add(STATUS_FRESHNESS_SECS)
+        >= now
+}
+
 fn dedupe_targets(targets: Vec<MeshServeTarget>) -> Vec<MeshServeTarget> {
     let mut by_endpoint = BTreeMap::<String, MeshServeTarget>::new();
     for target in targets {
@@ -26,9 +47,12 @@ pub fn owner_ids_from_events(events: &[nostr::Event]) -> Vec<String> {
     let Some(members) = latest_membership_list(events) else {
         return Vec::new();
     };
+    let now = newest_event_timestamp(events);
     let mut ids: Vec<String> = events
         .iter()
-        .filter(|event| event.kind.as_u16() as u64 == MESH_STATUS_KIND)
+        .filter(|event| {
+            event.kind.as_u16() as u64 == MESH_STATUS_KIND && status_is_fresh(event, now)
+        })
         .filter(|event| {
             reporter_pubkey_from_status_event(event)
                 .is_some_and(|reporter| members.contains(&reporter.to_ascii_lowercase()))
@@ -109,8 +133,10 @@ pub fn availability_from_events(events: Vec<nostr::Event>) -> MeshAvailability {
     let mut all_models = Vec::<MeshModelOption>::new();
     let mut saw_valid_status = false;
 
+    let now = newest_event_timestamp(&events);
     for event in events {
         if event.kind.as_u16() as u64 != MESH_STATUS_KIND
+            || !status_is_fresh(&event, now)
             || !members.contains(&event.pubkey.to_hex().to_ascii_lowercase())
         {
             continue;
