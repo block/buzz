@@ -197,9 +197,9 @@ const PNG_MAGIC: [u8; 4] = [0x89, 0x50, 0x4e, 0x47];
 /// Fails closed on malformed content, wrong format, or unsupported version.
 /// Never trusts the file extension — only the bytes.
 ///
-/// **PNG memory policy:** any PNG manifest whose `memory.level` is not `None`,
-/// or whose `memory.entries` is non-empty despite `level == None`, is rejected
-/// before any write.  Plaintext memory is accepted only from `.agent.json`.
+/// **Memory consistency:** any manifest whose `memory.entries` is non-empty
+/// despite `memory.level == None` is rejected before any write, regardless of
+/// the enclosing format.
 ///
 /// **Size cap:** PNG inputs over 10 MiB and JSON inputs over 5 MiB are rejected
 /// before allocation to avoid avoidable large-input work.
@@ -214,18 +214,9 @@ pub(crate) fn decode_snapshot_from_bytes(
             ));
         }
         let snapshot = decode_snapshot_png(file_bytes)?;
-        // Hard reject: PNG must never carry memory.
-        if snapshot.memory.level != crate::managed_agents::agent_snapshot::MemoryLevel::None {
+        if snapshot.memory.level == MemoryLevel::None && !snapshot.memory.entries.is_empty() {
             return Err(
-                "Cannot import a memory-bearing .agent.png — use .agent.json for \
-                 snapshots that include memory."
-                    .to_string(),
-            );
-        }
-        if !snapshot.memory.entries.is_empty() {
-            return Err(
-                "Snapshot is malformed: .agent.png carries memory entries despite \
-                 memory.level being 'none'."
+                "Snapshot is malformed: memory.level is 'none' but entries are present."
                     .to_string(),
             );
         }

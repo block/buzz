@@ -69,17 +69,6 @@ export function AgentSnapshotExportDialog({
 
   const hasLinkedAgent = linkedAgentPubkey !== null;
   const showMemoryWarning = memoryLevel !== "none";
-  // PNG format is disabled when memory is selected (backend guards this too,
-  // but we disable the option proactively to avoid a confusing error).
-  const pngDisabled = memoryLevel !== "none";
-
-  React.useEffect(() => {
-    // If the user switches to a memory level, force JSON format since PNG
-    // cannot carry memory.
-    if (pngDisabled && format === "png") {
-      setFormat("json");
-    }
-  }, [pngDisabled, format]);
 
   // Reset state when the dialog opens for a fresh export.
   React.useEffect(() => {
@@ -226,23 +215,21 @@ export function AgentSnapshotExportDialog({
                   />
                   <span className="text-sm">.agent.json</span>
                 </label>
-                <label
-                  className={`flex items-center gap-2 ${pngDisabled ? "cursor-not-allowed opacity-40" : "cursor-pointer"}`}
-                >
+                <label className="flex cursor-pointer items-center gap-2">
                   <input
                     checked={format === "png"}
-                    disabled={pngDisabled}
                     name="snapshot-format"
-                    onChange={() => !pngDisabled && setFormat("png")}
+                    onChange={() => setFormat("png")}
                     type="radio"
                     value="png"
                   />
-                  <span className="text-sm">
-                    .agent.png
-                    {pngDisabled ? " (unavailable with memory)" : ""}
-                  </span>
+                  <span className="text-sm">.agent.png</span>
                 </label>
               </div>
+              <p className="text-xs text-muted-foreground">
+                Applies to saved files; snapshots shared in Buzz always use
+                .agent.png. PNG exports include memory when selected.
+              </p>
             </div>
           </div>
         </DialogContent>
@@ -251,7 +238,6 @@ export function AgentSnapshotExportDialog({
       {/* Send-in-Buzz destination picker — opened as a secondary dialog */}
       {sendOpen ? (
         <AgentSnapshotSendDialog
-          format={format}
           linkedAgentPubkey={linkedAgentPubkey}
           memoryLevel={memoryLevel}
           open={sendOpen}

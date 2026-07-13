@@ -7,10 +7,12 @@
 //!   - **memory** — optional, owner-decrypted engrams at one of three levels
 //!
 //! Two encodings are supported:
-//!   - `.agent.json` — canonical, may carry memory at any level
+//!   - `.agent.json` — canonical snapshot manifest
 //!   - `.agent.png` — avatar image with manifest in a `buzz_agent_snapshot`
-//!     tEXt chunk; memory MUST be `None` (PNG files are casually shared and
-//!     would leak plaintext memory into chat uploads)
+//!     tEXt chunk
+//!
+//! Both formats may carry memory at any level. Memory entries are plaintext,
+//! so callers must require an explicit opt-in before exporting them.
 //!
 //! **Zip is NOT in v1** — deferred to v2 for skills bundling.
 //!
@@ -284,17 +286,13 @@ pub fn decode_snapshot_json(bytes: &[u8]) -> Result<AgentSnapshot, String> {
 
 /// Encode a snapshot into a `.agent.png` — avatar as the image body, manifest
 /// in the `buzz_agent_snapshot` tEXt chunk.
-///
-/// **Rejects** any snapshot whose `memory.level != None` — memory in a PNG
-/// file is a security hazard (images are casually shared, pasted into chats).
 pub fn encode_snapshot_png(
     snapshot: &AgentSnapshot,
     avatar_bytes: Option<&[u8]>,
 ) -> Result<Vec<u8>, String> {
-    if snapshot.memory.level != MemoryLevel::None || !snapshot.memory.entries.is_empty() {
+    if snapshot.memory.level == MemoryLevel::None && !snapshot.memory.entries.is_empty() {
         return Err(
-            "Cannot write memory to a .agent.png file — use .agent.json for memory-bearing \
-             snapshots. PNG images are casually shared and would expose memory as plaintext."
+            "Cannot write a snapshot with memory.level 'none' and non-empty memory entries."
                 .to_string(),
         );
     }
@@ -303,18 +301,23 @@ pub fn encode_snapshot_png(
     let json_bytes = encode_snapshot_json(snapshot)?;
     let chunk_text = STANDARD.encode(&json_bytes);
 
-    // Use the avatar bytes as the PNG image when available; otherwise produce
-    // a minimal 1×1 transparent placeholder.
-    let png_bytes = match avatar_bytes.filter(|b| !b.is_empty()) {
-        Some(bytes) if bytes.starts_with(b"\x89PNG") => {
-            // Already a PNG — inject the tEXt chunk.
-            inject_text_chunk(bytes, PNG_CHUNK_KEYWORD, &chunk_text)?
-        }
-        Some(_bytes) => {
-            // Non-PNG avatar (JPEG, etc.) — re-encode as 1×1 placeholder and
-            // carry the avatar via the manifest's `profile.avatar_data_url`.
-            // This keeps the PNG valid while preserving the avatar in the JSON.
-            make_png_with_text(PNG_CHUNK_KEYWORD, &chunk_text)?
+    // Use the avatar as the PNG image body, transcoding decodable non-PNG
+    // avatars. Fall back to a minimal 1×1 transparent placeholder only when
+    // there is no avatar or it cannot be decoded.
+    let png_bytes = match avatar_bytes.filter(|bytes| !bytes.is_empty()) {
+        Some(bytes) => {
+            let encoded_avatar = if bytes.starts_with(b"\x89PNG") {
+                inject_text_chunk(bytes, PNG_CHUNK_KEYWORD, &chunk_text).or_else(|_| {
+                    transcode_avatar_to_png_with_text(bytes, PNG_CHUNK_KEYWORD, &chunk_text)
+                })
+            } else {
+                transcode_avatar_to_png_with_text(bytes, PNG_CHUNK_KEYWORD, &chunk_text)
+            };
+
+            match encoded_avatar {
+                Ok(png_bytes) => png_bytes,
+                Err(_) => make_png_with_text(PNG_CHUNK_KEYWORD, &chunk_text)?,
+            }
         }
         None => make_png_with_text(PNG_CHUNK_KEYWORD, &chunk_text)?,
     };
@@ -401,6 +404,21 @@ pub(crate) fn make_png_with_text(keyword: &str, text: &str) -> Result<Vec<u8>, S
             .map_err(|e| format!("Failed to write PNG image data: {e}"))?;
     }
     Ok(buf)
+}
+
+/// Transcode a decodable avatar to PNG and add the snapshot manifest chunk.
+fn transcode_avatar_to_png_with_text(
+    avatar_bytes: &[u8],
+    keyword: &str,
+    text: &str,
+) -> Result<Vec<u8>, String> {
+    let image = image::load_from_memory(avatar_bytes)
+        .map_err(|e| format!("Failed to decode avatar image: {e}"))?;
+    let mut png_bytes = Vec::new();
+    image
+        .write_to(&mut Cursor::new(&mut png_bytes), image::ImageFormat::Png)
+        .map_err(|e| format!("Failed to encode avatar as PNG: {e}"))?;
+    inject_text_chunk(&png_bytes, keyword, text)
 }
 
 /// Inject a tEXt chunk into an existing PNG by re-encoding it.
@@ -576,35 +594,67 @@ mod tests {
         assert_eq!(parsed.definition.name, snapshot.definition.name);
     }
 
-    // ── PNG memory guard ──────────────────────────────────────────────────────
+    #[test]
+    fn png_snapshot_transcodes_jpeg_avatar_into_image_body() {
+        let avatar = image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+            3,
+            2,
+            image::Rgb([0x12, 0x34, 0x56]),
+        ));
+        let mut jpeg_bytes = Vec::new();
+        avatar
+            .write_to(&mut Cursor::new(&mut jpeg_bytes), image::ImageFormat::Jpeg)
+            .unwrap();
+
+        let snapshot = build_snapshot(
+            &minimal_record(),
+            MemoryLevel::None,
+            vec![],
+            Some(&jpeg_bytes),
+        );
+        let png_bytes = encode_snapshot_png(&snapshot, Some(&jpeg_bytes)).unwrap();
+        let decoder = Decoder::new(Cursor::new(png_bytes));
+        let reader = decoder.read_info().unwrap();
+
+        assert_eq!((reader.info().width, reader.info().height), (3, 2));
+    }
+
+    // ── PNG memory parity ─────────────────────────────────────────────────────
 
     #[test]
-    fn png_export_with_core_memory_is_rejected() {
+    fn png_round_trip_with_core_memory() {
         let record = minimal_record();
         let entries = vec![AgentSnapshotMemoryEntry {
             slug: "core".to_string(),
-            body: "secret memory".to_string(),
+            body: "remember this".to_string(),
         }];
         let snapshot = build_snapshot(&record, MemoryLevel::Core, entries, None);
-        let result = encode_snapshot_png(&snapshot, None);
-        assert!(result.is_err(), "Expected error for PNG with memory");
-        let err = result.unwrap_err();
-        assert!(
-            err.contains("Cannot write memory to a .agent.png"),
-            "Error message should explain the PNG memory restriction, got: {err}"
-        );
+
+        let png_bytes = encode_snapshot_png(&snapshot, None).unwrap();
+        let parsed = decode_snapshot_png(&png_bytes).unwrap();
+
+        assert_eq!(parsed.memory, snapshot.memory);
     }
 
     #[test]
-    fn png_export_with_everything_memory_is_rejected() {
+    fn png_round_trip_with_everything_memory() {
         let record = minimal_record();
-        let entries = vec![AgentSnapshotMemoryEntry {
-            slug: "mem/notes".to_string(),
-            body: "private notes".to_string(),
-        }];
+        let entries = vec![
+            AgentSnapshotMemoryEntry {
+                slug: "core".to_string(),
+                body: "remember this".to_string(),
+            },
+            AgentSnapshotMemoryEntry {
+                slug: "mem/notes".to_string(),
+                body: "private notes".to_string(),
+            },
+        ];
         let snapshot = build_snapshot(&record, MemoryLevel::Everything, entries, None);
-        let result = encode_snapshot_png(&snapshot, None);
-        assert!(result.is_err());
+
+        let png_bytes = encode_snapshot_png(&snapshot, None).unwrap();
+        let parsed = decode_snapshot_png(&png_bytes).unwrap();
+
+        assert_eq!(parsed.memory, snapshot.memory);
     }
 
     #[test]
@@ -632,8 +682,10 @@ mod tests {
             "PNG encoder must reject level=None with non-empty entries"
         );
         assert!(
-            result.unwrap_err().contains("Cannot write memory"),
-            "Error must explain the PNG memory restriction"
+            result
+                .unwrap_err()
+                .contains("memory.level 'none' and non-empty memory entries"),
+            "Error must explain the malformed memory state"
         );
     }
 

@@ -368,80 +368,71 @@ fn import_avatar_url_fallback_is_used_when_no_data_url() {
     );
 }
 
-// ── Import: PNG memory policy ─────────────────────────────────────────────
+// ── Import: PNG memory parity ─────────────────────────────────────────────
 
-/// PNG with memory level `core` is rejected before any write.
+/// PNG with core memory round-trips through the production import decoder.
 #[test]
-fn import_png_with_core_memory_is_rejected() {
-    // encode_snapshot_png refuses to encode memory-bearing snapshots —
-    // that guard on the EXPORT side is correct. On the IMPORT side,
-    // decode_snapshot_from_bytes adds a matching guard so that a
-    // foreign-built PNG carrying a core/everything memory level is also
-    // rejected. We verify the guard condition here.
-    let level = MemoryLevel::Core;
-    let entries = vec![AgentSnapshotMemoryEntry {
-        slug: "core".to_string(),
-        body: "Secret.".to_string(),
-    }];
-    // Simulate what decode_snapshot_from_bytes checks after PNG decode:
-    let would_reject = level != MemoryLevel::None;
-    assert!(
-        would_reject,
-        "PNG with core memory level must be rejected by the import guard"
-    );
-    // Also verify that the encoder itself refuses this on the export side.
+fn import_png_with_core_memory_preserves_entries() {
     use crate::managed_agents::agent_snapshot::encode_snapshot_png;
-    let snapshot = make_snapshot(MemoryLevel::Core, entries);
-    assert!(
-        encode_snapshot_png(&snapshot, None).is_err(),
-        "encode_snapshot_png must also refuse memory-bearing snapshots"
+    let snapshot = make_snapshot(
+        MemoryLevel::Core,
+        vec![AgentSnapshotMemoryEntry {
+            slug: "core".to_string(),
+            body: "Remember this.".to_string(),
+        }],
     );
+
+    let png_bytes = encode_snapshot_png(&snapshot, None).unwrap();
+    let decoded = decode_snapshot_from_bytes(&png_bytes).unwrap();
+
+    assert_eq!(decoded.memory, snapshot.memory);
 }
 
-/// PNG with memory level `everything` is rejected before any write.
+/// PNG with all memory round-trips through the production import decoder.
 #[test]
-fn import_png_with_everything_memory_is_rejected() {
-    // Same as core: both the encoder guard and the decoder guard fire.
-    let level = MemoryLevel::Everything;
-    let would_reject = level != MemoryLevel::None;
-    assert!(
-        would_reject,
-        "PNG with everything memory level must be rejected by the import guard"
-    );
+fn import_png_with_everything_memory_preserves_entries() {
     use crate::managed_agents::agent_snapshot::encode_snapshot_png;
     let snapshot = make_snapshot(
         MemoryLevel::Everything,
-        vec![AgentSnapshotMemoryEntry {
-            slug: "mem/research".to_string(),
-            body: "Notes.".to_string(),
-        }],
+        vec![
+            AgentSnapshotMemoryEntry {
+                slug: "core".to_string(),
+                body: "Remember this.".to_string(),
+            },
+            AgentSnapshotMemoryEntry {
+                slug: "mem/research".to_string(),
+                body: "Notes.".to_string(),
+            },
+        ],
     );
-    assert!(
-        encode_snapshot_png(&snapshot, None).is_err(),
-        "encode_snapshot_png must also refuse memory-bearing snapshots"
-    );
+
+    let png_bytes = encode_snapshot_png(&snapshot, None).unwrap();
+    let decoded = decode_snapshot_from_bytes(&png_bytes).unwrap();
+
+    assert_eq!(decoded.memory, snapshot.memory);
 }
 
-/// PNG with `none` level but non-empty entries is rejected (malformed).
-/// We test this by verifying the guard condition directly, since
-/// encode_snapshot_png correctly refuses to produce such a PNG.
+/// PNG with `none` level but non-empty entries is rejected as malformed.
 #[test]
 fn import_png_with_none_level_and_entries_is_rejected() {
-    // This guard is enforced in decode_snapshot_from_bytes after the PNG
-    // path resolves. A PNG with none + entries cannot be produced by
-    // encode_snapshot_png (it already guards that), but could arrive from
-    // a foreign tool. We verify the guard condition matches the spec:
-    let level = MemoryLevel::None;
-    let entries = [AgentSnapshotMemoryEntry {
-        slug: "core".to_string(),
-        body: "Leak.".to_string(),
-    }];
-    // The guard in decode_snapshot_from_bytes:
-    let would_reject = !entries.is_empty() && level == MemoryLevel::None;
-    assert!(
-        would_reject,
-        "none level + non-empty entries must trigger the guard"
+    use crate::managed_agents::agent_snapshot::{
+        encode_snapshot_json, encode_snapshot_png, make_png_with_text, PNG_CHUNK_KEYWORD,
+    };
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+
+    let snapshot = make_snapshot(
+        MemoryLevel::None,
+        vec![AgentSnapshotMemoryEntry {
+            slug: "core".to_string(),
+            body: "Leak.".to_string(),
+        }],
     );
+    let json = encode_snapshot_json(&snapshot).unwrap();
+    let png_bytes = make_png_with_text(PNG_CHUNK_KEYWORD, &STANDARD.encode(json)).unwrap();
+
+    assert!(encode_snapshot_png(&snapshot, None).is_err());
+    let error = decode_snapshot_from_bytes(&png_bytes).unwrap_err();
+    assert!(error.contains("'none' but entries are present"));
 }
 
 /// PNG with `none` level and no entries imports normally.
