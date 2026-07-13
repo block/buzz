@@ -18,6 +18,7 @@ export function RawEventRail({ events }: { events: ObserverEvent[] }) {
             {events.map((event) => (
               <details
                 className="group rounded-md border border-border/55 bg-muted/25 px-2.5 py-1.5 transition-colors open:bg-muted/35"
+                data-message-id={String(event.seq)}
                 key={event.seq}
               >
                 <summary className="cursor-pointer select-none text-xs text-muted-foreground transition-colors group-open:text-foreground">
