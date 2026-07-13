@@ -48,9 +48,12 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
-use tauri::{Emitter, Listener, Manager, RunEvent};
+#[cfg(target_os = "macos")]
+use tauri::Listener;
+use tauri::{Emitter, Manager, RunEvent};
 use tauri_plugin_window_state::StateFlags;
 
+#[cfg(target_os = "macos")]
 const INITIAL_RENDER_READY_EVENT: &str = "initial-render-ready";
 
 #[tauri::command]
