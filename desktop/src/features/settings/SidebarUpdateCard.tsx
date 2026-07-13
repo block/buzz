@@ -21,7 +21,7 @@ export function SidebarUpdateCompactCard({
   onDismiss,
   testId = "sidebar-update-card-compact",
 }: SidebarUpdateCompactCardProps) {
-  const { installAndRelaunch } = useUpdaterContext();
+  const { installAndRelaunch, status } = useUpdaterContext();
   const [isUpdatePending, setIsUpdatePending] = React.useState(false);
   const updatePendingRef = React.useRef(false);
   const updateFrameRef = React.useRef<number | null>(null);
@@ -62,21 +62,23 @@ export function SidebarUpdateCompactCard({
     });
   }, [installAndRelaunch]);
 
+  const pending = isUpdatePending || status.state === "installing";
+
   return (
     <SidebarCompactActionCard
       actionAriaLabel="Update now"
-      actionDisabled={isUpdatePending}
+      actionDisabled={pending}
       actionTestId={actionTestId}
-      description={isUpdatePending ? "Updating" : "Click to update"}
+      description={pending ? "Updating" : "Click to update"}
       dismissLabel="Dismiss update notification"
       icon={
-        isUpdatePending ? (
+        pending ? (
           <Spinner aria-hidden="true" className="h-5 w-5 border-2" />
         ) : (
           <CircleArrowUp aria-hidden="true" className="h-5 w-5" />
         )
       }
-      iconKey={isUpdatePending ? "pending" : "idle"}
+      iconKey={pending ? "pending" : "idle"}
       onAction={handleUpdate}
       onDismiss={onDismiss}
       testId={testId}

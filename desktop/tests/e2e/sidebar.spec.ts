@@ -328,6 +328,55 @@ test("shows a sidebar update card when an update is ready", async ({
   );
 });
 
+// Regression test for the sidebar card not reflecting an install started from
+// another surface (follow-up to #1820). The header UpdateIndicator and the
+// sidebar compact card both render in the "ready" state; starting the install
+// from the header must flip the sidebar card's copy too, not just the header's.
+test("reflects an install started from the header update button on the sidebar card", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await expect(page.getByTestId("app-sidebar")).toBeVisible();
+
+  await page.evaluate(() => {
+    const testWindow = window as Window & {
+      __BUZZ_E2E__?: { mock?: { updateAvailable?: boolean } };
+    };
+
+    testWindow.__BUZZ_E2E__ = {
+      ...(testWindow.__BUZZ_E2E__ ?? {}),
+      mock: {
+        ...(testWindow.__BUZZ_E2E__?.mock ?? {}),
+        restartDelayMs: 500,
+        updateAvailable: true,
+      },
+    };
+  });
+
+  await page.getByTestId("sidebar-profile-card").click();
+  await page.getByTestId("profile-popover-settings").click();
+  await page.getByTestId("settings-nav-updates").click();
+  await page.getByRole("button", { name: "Check for Updates" }).click();
+  await expect(page.getByTestId("settings-panel-updates")).toContainText(
+    "Update downloaded. Click to apply.",
+  );
+  await page.getByTestId("settings-back-to-app").click();
+
+  await page.getByTestId("channel-general").click();
+
+  const updateCard = page.getByTestId("sidebar-update-card");
+  await expect(updateCard).toBeVisible();
+  await expect(updateCard).toContainText("Click to update");
+
+  await page
+    .getByTestId("chat-header")
+    .getByRole("button", { name: "Update now" })
+    .click();
+
+  await expect(updateCard).toContainText("Updating");
+  await expect(page.getByTestId("sidebar-update-now")).toBeDisabled();
+});
+
 // Regression test for the Linux .deb auto-update guard (PR #1535).
 // When auto-update is not supported (e.g. Linux .deb install), the update
 // check must surface a "manual-required" card with a GitHub link and
