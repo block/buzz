@@ -31,6 +31,15 @@ mod team_repair;
 mod teams;
 mod types;
 
+// Shared guard for tests that mutate or read process-global PATH.
+#[cfg(test)]
+static PATH_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(test)]
+pub(crate) fn lock_path_mutex() -> std::sync::MutexGuard<'static, ()> {
+    PATH_MUTEX.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 pub use backend::*;
 pub use discovery::*;
 pub use env_vars::*;

@@ -923,6 +923,7 @@ fn find_nvm_default_bin_returns_none_when_versions_dir_empty() {
 
 #[test]
 fn refresh_login_shell_path_clears_cache() {
+    let _guard = crate::managed_agents::lock_path_mutex();
     // Populate the cache with a first call.
     let before = super::login_shell_path();
     assert!(

@@ -1125,10 +1125,6 @@ mod tests {
 
     // ── codex readiness version gate ───────────────────────────────────────
 
-    // Mutex to serialize tests that mutate PATH so parallel test threads
-    // don't interfere with each other's resolve_command results.
-    static PATH_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     /// Build a minimal `KnownAcpRuntime` for testing the codex version gate.
     /// `adapter_commands` are the exact strings passed to `find_command` — use
     /// `&["codex-acp"]` when the binary is on PATH, or `&[<absolute_path>]`
@@ -1203,7 +1199,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn cli_login_requirements_codex_outdated_adapter_emits_adapter_outdated() {
-        let _guard = PATH_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::managed_agents::lock_path_mutex();
 
         let (dir, orig) = setup_temp_codex_acp("#!/bin/sh\nexit 1\n");
         let exe = present_binary_str();
@@ -1241,7 +1237,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn cli_login_requirements_codex_garbage_version_output_emits_adapter_outdated() {
-        let _guard = PATH_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::managed_agents::lock_path_mutex();
 
         let (dir, orig) = setup_temp_codex_acp("#!/bin/sh\necho 'not a version string'\nexit 0\n");
         let exe = present_binary_str();
