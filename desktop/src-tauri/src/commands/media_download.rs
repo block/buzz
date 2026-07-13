@@ -373,24 +373,27 @@ fn ensure_declared_size_within_cap(
     Ok(())
 }
 
-/// Fetch and validate an agent snapshot attachment in memory.
+/// Fetch and validate an agent or team snapshot attachment in memory.
 ///
 /// Input validation (before HTTP):
 /// - URL must be a valid same-relay `/media/` URL.
-/// - Filename must end with `.agent.json` or `.agent.png`.
+/// - Filename must end case-insensitively with `.agent.json`, `.agent.png`,
+///   `.team.json`, or `.team.png`.
 /// - `expected_sha256` and `expected_size` must be non-empty strings.
 ///
-/// During fetch:
-/// - Enforces a format-specific cap (5 MiB JSON, 10 MiB PNG) via
-///   Content-Length header and streamed byte count.
+/// During fetch, `SnapshotFileKind::cap()` enforces the kind-specific cap via
+/// Content-Length and streamed byte count: 5 MiB JSON / 10 MiB PNG for agents,
+/// or 25 MiB JSON / 50 MiB PNG for teams.
 ///
 /// Post-fetch validation (all must pass; returns an error on first failure):
 /// 1. Byte length equals `expected_size`.
 /// 2. SHA-256 hex of bytes equals `expected_sha256` (lowercase).
-/// 3. `decode_snapshot_from_bytes` succeeds — bytes are a well-formed snapshot.
+/// 3. The byte magic matches the filename-selected kind.
+/// 4. Agent kinds pass `decode_snapshot_from_bytes`; team kinds pass
+///    `decode_team_snapshot_from_bytes`.
 ///
 /// Returns `tauri::ipc::Response` so bytes cross IPC as a raw buffer rather
-/// than a JSON number array (which would be ~3× the size at the 5–10 MiB cap).
+/// than a JSON number array (which would be ~3× the size at the applicable cap).
 #[tauri::command]
 pub async fn fetch_snapshot_bytes(
     url: String,
