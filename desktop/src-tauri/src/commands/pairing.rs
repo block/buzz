@@ -484,7 +484,42 @@ fn pairing_relay_from_nip11(json: &serde_json::Value) -> PairingRelay {
 
 #[cfg(test)]
 mod pairing_relay_tests {
-    use super::{pairing_relay_from_nip11, PairingRelay};
+    use super::{pairing_relay_from_nip11, probe_pairing_relay, PairingRelay};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[tokio::test]
+    async fn live_nip11_probe_discovers_configured_pairing_relay() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test NIP-11 server");
+        let addr = listener.local_addr().expect("test server address");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept NIP-11 request");
+            let mut request = vec![0; 2048];
+            let bytes_read = stream.read(&mut request).await.expect("read request");
+            let request = String::from_utf8_lossy(&request[..bytes_read]);
+            assert!(request.starts_with("GET / HTTP/1.1"));
+            assert!(request
+                .to_ascii_lowercase()
+                .contains("accept: application/nostr+json"));
+
+            let body = r#"{"pairing_relay_url":"ws://127.0.0.1:5000"}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/nostr+json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream
+                .write_all(response.as_bytes())
+                .await
+                .expect("write response");
+        });
+
+        assert_eq!(
+            probe_pairing_relay(&format!("ws://{addr}")).await,
+            PairingRelay::Configured("ws://127.0.0.1:5000".to_string())
+        );
+        server.await.expect("NIP-11 server task");
+    }
 
     #[test]
     fn configured_pairing_relay_takes_precedence_over_legacy_path() {
