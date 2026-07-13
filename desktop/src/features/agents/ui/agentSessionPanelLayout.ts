@@ -54,6 +54,24 @@ export function mergeObserverEventWindows(
 }
 
 /**
+ * Stable DOM scroll-anchor id for an observer event, shared by the outer
+ * `useAnchoredScroll` message list (`AgentSessionThreadPanel`) and the raw
+ * event rail's rows (`RawEventRail`) so both name the same row identically.
+ *
+ * `seq` alone is not unique across an agent's observer history: it's a
+ * monotonic counter local to one agent process (see buzz-acp's
+ * `ObserverHandle`), so it resets to 1 after every process restart while
+ * `timestamp` keeps climbing. Pairing them matches the exact `(seq,
+ * timestamp)` key `mergeObserverEventWindows` already dedups on above, and
+ * the collision guard the transcript uses for repeated `session/new` events
+ * across restarts (see `system-prompt:${channel}:${seq}:${timestamp}` in
+ * agentSessionTranscript.ts) — unique within one channel's combined window.
+ */
+export function observerEventScrollId(event: ObserverEvent): string {
+  return `${event.seq}:${event.timestamp}`;
+}
+
+/**
  * Derive the most recent session id from a list of observer events by
  * scanning from the end. Returns null when no event carries a sessionId.
  */

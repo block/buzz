@@ -12,6 +12,7 @@ import { useAgentWorking } from "@/features/agents/agentWorkingSignal";
 import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlActions";
 import {
   mergeObserverEventWindows,
+  observerEventScrollId,
   scopeByChannel,
 } from "@/features/agents/ui/agentSessionPanelLayout";
 import type { ObserverEvent } from "@/features/agents/ui/agentSessionTypes";
@@ -153,11 +154,16 @@ export function AgentSessionThreadPanel({
   const rawFeedScopeKey = `${agent.pubkey}:${sessionChannelId ?? "all"}`;
   // Live+archived is what actually renders (an idle agent's feed is
   // archived-only, where scopedEvents alone would be empty and the tail-glue
-  // never fires) — see combinedHeaderEvents above. seq is unique within this
-  // set: mergeObserverEventWindows dedups on (seq, timestamp) and the nested
-  // transcript list already keys blocks off it.
+  // never fires) — see combinedHeaderEvents above. `observerEventScrollId`
+  // keys on (seq, timestamp), not seq alone: seq resets to 1 after every
+  // agent process restart, so a bare seq id can collide across restarts
+  // within one channel's combined window. The raw event rail below uses the
+  // same helper so both id namespaces always agree.
   const anchoredScrollMessages = React.useMemo(
-    () => combinedHeaderEvents.map((event) => ({ id: String(event.seq) })),
+    () =>
+      combinedHeaderEvents.map((event) => ({
+        id: observerEventScrollId(event),
+      })),
     [combinedHeaderEvents],
   );
   const { onScroll } = useAnchoredScroll({
