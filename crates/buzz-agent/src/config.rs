@@ -2624,6 +2624,8 @@ mod tests {
                 || gpt5_token_matches(&m, "gpt5-pro")
                 || gpt5_token_matches(&m, "gpt-5.6")
                 || gpt5_token_matches(&m, "gpt5.6")
+                || gpt5_token_matches(&m, "gpt-5-6")
+                || gpt5_token_matches(&m, "gpt5-6")
                 || gpt5_token_matches(&m, "gpt-5.5")
                 || gpt5_token_matches(&m, "gpt5.5")
                 || gpt5_token_matches(&m, "gpt-5.4")

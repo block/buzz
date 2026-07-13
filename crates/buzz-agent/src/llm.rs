@@ -91,9 +91,10 @@ impl Llm {
             }
             Provider::OpenAi | Provider::Databricks => {
                 self.openai_request(cfg, effective_model, |use_responses| {
-                    // Normalize effort for model-specific availability (per-model table; max is
-                    // already rejected at startup for pure OpenAI, but other per-model corrections
-                    // like none→minimal on gpt-5 base still apply).
+                    // Normalize effort for model-specific availability. Startup no longer rejects
+                    // `max` for pure OpenAI/Databricks; this per-model table is the single authority
+                    // — it keeps `max` for gpt-5.6, clamps `max`→`xhigh` for other OpenAI-shaped
+                    // models, and still applies corrections like none→minimal on the gpt-5 base.
                     let e = effort.map(|ef| normalize_effort_for_openai_route(ef, effective_model));
                     if use_responses {
                         (
