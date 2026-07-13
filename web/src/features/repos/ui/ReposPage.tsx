@@ -2,7 +2,7 @@ import { BookMarked, GitBranch } from "lucide-react";
 import { toast } from "sonner";
 import { useEffect, useMemo, useState } from "react";
 
-import buzzAppIcon from "../../../../../desktop/public/app-icon@3x.png";
+import buzzAppIcon from "@/assets/app-icon@3x.png";
 import { Input } from "@/shared/ui/input";
 import { mockRepos } from "../mock-repos";
 import { useRepos } from "../use-repos";
@@ -182,7 +182,7 @@ export function ReposPage() {
         {filteredRepos.length > 0 ? (
           <div className="divide-y divide-black/10 dark:divide-white/10">
             {filteredRepos.map((repo) => (
-              <RepoListItem key={repo.id} repo={repo} />
+              <RepoListItem key={repo.id} repo={repo} preview={showMockRepos} />
             ))}
           </div>
         ) : (

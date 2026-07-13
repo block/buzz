@@ -118,6 +118,7 @@ function RepoTabs({
   commitsLoading,
   readme,
   readmeLoading,
+  preview,
 }: {
   repoId: string;
   treeEntries: TreeEntry[] | undefined;
@@ -126,6 +127,7 @@ function RepoTabs({
   commitsLoading: boolean;
   readme: ReadmeResult | null | undefined;
   readmeLoading: boolean;
+  preview: boolean;
 }) {
   const [tab, setTab] = useState<Tab>("code");
 
@@ -164,6 +166,7 @@ function RepoTabs({
             entries={treeEntries}
             isLoading={treeLoading}
             repoId={repoId}
+            preview={preview}
           />
           <RepoReadmeSection readme={readme} isLoading={readmeLoading} />
         </>
@@ -177,14 +180,27 @@ function RepoTabs({
 
 export function RepoDetailPage() {
   const { repoId } = useParams({ from: "/repos/$repoId" });
-  const mockRepo = getMockRepo(repoId);
-  const { data: repo, isLoading, error } = useRepo(repoId);
-  const { data: refs, isLoading: refsLoading } = useRepoRefs(repoId);
+  const preview =
+    import.meta.env.DEV &&
+    new URLSearchParams(window.location.search).get("preview") ===
+      "repositories";
+  const mockRepo = preview ? getMockRepo(repoId) : undefined;
+  const showMockRepo = Boolean(mockRepo);
+  const {
+    data: repo,
+    isLoading,
+    error,
+  } = useRepo(repoId, {
+    preview: showMockRepo,
+  });
+  const { data: refs, isLoading: refsLoading } = useRepoRefs(repoId, {
+    preview: showMockRepo,
+  });
 
   const defaultRef = refs?.head?.ref ?? "main";
   const owner = repo?.owner ?? "";
   const repoName = repo?.id ?? "";
-  const browseOwner = mockRepo ? "" : owner;
+  const browseOwner = showMockRepo ? "" : owner;
 
   const {
     data: fetchedTreeEntries,
@@ -201,12 +217,12 @@ export function RepoDetailPage() {
     repoName,
     defaultRef,
   );
-  const treeEntries = mockRepo ? mockRepoTree : fetchedTreeEntries;
-  const commits = mockRepo ? mockRepoCommits : fetchedCommits;
-  const readme = mockRepo ? mockRepoReadme : fetchedReadme;
-  const treeLoading = mockRepo ? false : isTreeLoading;
-  const commitsLoading = mockRepo ? false : areCommitsLoading;
-  const readmeLoading = mockRepo ? false : isReadmeLoading;
+  const treeEntries = showMockRepo ? mockRepoTree : fetchedTreeEntries;
+  const commits = showMockRepo ? mockRepoCommits : fetchedCommits;
+  const readme = showMockRepo ? mockRepoReadme : fetchedReadme;
+  const treeLoading = showMockRepo ? false : isTreeLoading;
+  const commitsLoading = showMockRepo ? false : areCommitsLoading;
+  const readmeLoading = showMockRepo ? false : isReadmeLoading;
 
   // Surface clone/browse errors — these are otherwise silent
   const browseError = treeError || commitsError;
@@ -252,7 +268,7 @@ export function RepoDetailPage() {
       {/* Main content */}
       <div className="min-w-0 flex-1">
         {/* Back link */}
-        <BackToRepositories mockPreview={Boolean(mockRepo)} />
+        <BackToRepositories mockPreview={preview} />
 
         {/* Mobile-only connect button */}
         <div className="mt-4 lg:hidden">
@@ -305,6 +321,7 @@ export function RepoDetailPage() {
           commitsLoading={commitsLoading}
           readme={readme}
           readmeLoading={readmeLoading}
+          preview={showMockRepo}
         />
 
         {/* Clone URLs */}

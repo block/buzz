@@ -7,7 +7,13 @@ import { relativeTime } from "@/shared/lib/relative-time";
 import { truncatePubkey } from "@/shared/lib/pubkey";
 import type { Repo } from "../use-repos";
 
-export function RepoListItem({ repo }: { repo: Repo }) {
+export function RepoListItem({
+  repo,
+  preview = false,
+}: {
+  repo: Repo;
+  preview?: boolean;
+}) {
   return (
     <div className="py-6 text-black dark:text-white">
       {/* Row 1: Name + badge */}
@@ -16,6 +22,7 @@ export function RepoListItem({ repo }: { repo: Repo }) {
         <Link
           to="/repos/$repoId"
           params={{ repoId: repo.id }}
+          search={preview ? { preview: "repositories" } : undefined}
           className="text-lg font-semibold text-black underline-offset-4 hover:text-black/70 hover:underline dark:text-white dark:hover:text-white/70"
         >
           {repo.name}

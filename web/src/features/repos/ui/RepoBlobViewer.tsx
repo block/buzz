@@ -222,16 +222,21 @@ function ViewerBody({
 export function RepoBlobPage() {
   const { repoId, _splat } = useParams({ from: "/repos/$repoId/blob/$" });
   const filepath = _splat ?? "";
+  const preview =
+    import.meta.env.DEV &&
+    new URLSearchParams(window.location.search).get("preview") ===
+      "repositories";
+  const mockView = preview ? getMockBlob(repoId, filepath) : undefined;
+  const showMockBlob = Boolean(mockView);
   const {
     owner,
     repoName,
     defaultRef,
     isLoading: ctxLoading,
     error: ctxError,
-  } = useRepoContext(repoId);
+  } = useRepoContext(repoId, { preview: showMockBlob });
 
-  const mockView = getMockBlob(repoId, filepath);
-  const browseOwner = mockView ? "" : owner;
+  const browseOwner = showMockBlob ? "" : owner;
 
   const {
     data: fetchedView,
@@ -239,7 +244,7 @@ export function RepoBlobPage() {
     error,
   } = useGitBlob(browseOwner, repoName, defaultRef, filepath);
   const view = mockView ?? fetchedView;
-  const isLoading = mockView ? false : isViewLoading;
+  const isLoading = showMockBlob ? false : isViewLoading;
 
   const [running, setRunning] = useState(false);
   const isHtml = view?.kind === "html";
@@ -257,7 +262,7 @@ export function RepoBlobPage() {
   if (ctxError) {
     return (
       <div className="flex-1 bg-[#F3F3F3] px-4 py-8 text-black dark:bg-[#171717] dark:text-white">
-        <BackLink repoId={repoId} />
+        <BackLink repoId={repoId} preview={showMockBlob} />
         <p className="mt-4 text-sm text-destructive">
           Failed to load repository: {ctxError.message}
         </p>
@@ -267,7 +272,7 @@ export function RepoBlobPage() {
 
   return (
     <div className="flex-1 bg-[#F3F3F3] px-4 py-8 text-black dark:bg-[#171717] dark:text-white">
-      <BackLink repoId={repoId} />
+      <BackLink repoId={repoId} preview={showMockBlob} />
 
       <div className="mt-4 flex flex-wrap items-center gap-3">
         <FileText className="h-4 w-4 text-black/50 dark:text-white/50" />
@@ -326,11 +331,12 @@ export function RepoBlobPage() {
   );
 }
 
-function BackLink({ repoId }: { repoId: string }) {
+function BackLink({ repoId, preview }: { repoId: string; preview: boolean }) {
   return (
     <Link
       to="/repos/$repoId"
       params={{ repoId }}
+      search={preview ? { preview: "repositories" } : undefined}
       className="inline-flex items-center gap-1 text-sm text-black/60 hover:text-black dark:text-white/60 dark:hover:text-white"
     >
       <ArrowLeft className="h-4 w-4" />

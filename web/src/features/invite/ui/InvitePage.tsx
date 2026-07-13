@@ -1,4 +1,4 @@
-import buzzAppIcon from "../../../../../desktop/public/app-icon@3x.png";
+import buzzAppIcon from "@/assets/app-icon@3x.png";
 import { relayWsUrl } from "@/shared/lib/relay-url";
 import { Button } from "@/shared/ui/button";
 

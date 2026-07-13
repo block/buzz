@@ -2,7 +2,15 @@ import { File, Folder } from "lucide-react";
 import { Link } from "@tanstack/react-router";
 import type { TreeEntry } from "../git-client";
 
-function TreeRow({ entry, repoId }: { entry: TreeEntry; repoId: string }) {
+function TreeRow({
+  entry,
+  repoId,
+  preview,
+}: {
+  entry: TreeEntry;
+  repoId: string;
+  preview: boolean;
+}) {
   if (entry.type === "tree") {
     // Sub-tree navigation is deferred — show folders as visibly non-clickable
     // so the affordance matches the behaviour.
@@ -21,6 +29,7 @@ function TreeRow({ entry, repoId }: { entry: TreeEntry; repoId: string }) {
     <Link
       to="/repos/$repoId/blob/$"
       params={{ repoId, _splat: entry.name }}
+      search={preview ? { preview: "repositories" } : undefined}
       className="flex items-center gap-2 border-b border-black/10 px-3 py-2 text-sm text-black last:border-b-0 hover:bg-black/5 dark:border-white/10 dark:text-white dark:hover:bg-white/5"
     >
       <File className="h-4 w-4 shrink-0 text-black/50 dark:text-white/50" />
@@ -33,10 +42,12 @@ export function RepoTreeSection({
   entries,
   isLoading,
   repoId,
+  preview = false,
 }: {
   entries: TreeEntry[] | undefined;
   isLoading: boolean;
   repoId: string;
+  preview?: boolean;
 }) {
   if (isLoading) {
     return (
@@ -62,7 +73,12 @@ export function RepoTreeSection({
     <div className="mt-8">
       <div className="overflow-hidden rounded-lg border border-black/10 bg-white/50 dark:border-white/10 dark:bg-white/5">
         {entries.map((entry) => (
-          <TreeRow key={entry.name} entry={entry} repoId={repoId} />
+          <TreeRow
+            key={entry.name}
+            entry={entry}
+            repoId={repoId}
+            preview={preview}
+          />
         ))}
       </div>
     </div>
