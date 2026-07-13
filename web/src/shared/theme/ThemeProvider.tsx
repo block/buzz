@@ -15,8 +15,6 @@ type ThemeContextValue = {
   setTheme: (theme: Theme) => void;
 };
 
-const STORAGE_KEY = "buzz-web-theme";
-
 const ThemeContext = createContext<ThemeContextValue | undefined>(undefined);
 
 function getSystemDark(): boolean {
@@ -29,19 +27,10 @@ function applyClass(isDark: boolean) {
   root.classList.add(isDark ? "dark" : "light");
 }
 
-function readStoredTheme(): Theme {
-  const stored = window.localStorage.getItem(STORAGE_KEY);
-  if (stored === "light" || stored === "dark" || stored === "system") {
-    return stored;
-  }
-  return "system";
-}
-
 export function ThemeProvider({ children }: { children: ReactNode }) {
-  const [theme, setThemeState] = useState<Theme>(readStoredTheme);
+  const [theme, setThemeState] = useState<Theme>("system");
   const [isDark, setIsDark] = useState<boolean>(() => {
-    const t = readStoredTheme();
-    const dark = t === "system" ? getSystemDark() : t === "dark";
+    const dark = getSystemDark();
     applyClass(dark);
     return dark;
   });
@@ -65,7 +54,6 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
   }, [theme]);
 
   const setTheme = useCallback((t: Theme) => {
-    window.localStorage.setItem(STORAGE_KEY, t);
     setThemeState(t);
   }, []);
 

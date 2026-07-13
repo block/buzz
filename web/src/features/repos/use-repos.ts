@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { queryEvents, type NostrEvent } from "@/shared/lib/nostr-client";
 import { relayWsUrl } from "@/shared/lib/relay-url";
+import { getMockRepo, mockRepos } from "./mock-repos";
 
 export interface Repo {
   id: string;
@@ -68,18 +69,22 @@ async function fetchRepos(): Promise<Repo[]> {
     .sort((a, b) => b.createdAt - a.createdAt);
 }
 
-export function useRepos() {
+export function useRepos({ enabled = true }: { enabled?: boolean } = {}) {
   return useQuery({
     queryKey: ["repos"],
     queryFn: fetchRepos,
+    enabled,
     staleTime: 60_000,
   });
 }
 
 export function useRepo(repoId: string) {
+  const mockRepo = getMockRepo(repoId);
+
   return useQuery({
-    queryKey: ["repos"],
-    queryFn: fetchRepos,
+    queryKey: mockRepo ? ["repos", "mock"] : ["repos"],
+    queryFn: mockRepo ? async () => mockRepos : fetchRepos,
+    initialData: mockRepo ? mockRepos : undefined,
     staleTime: 60_000,
     select: (repos) => repos.find((r) => r.id === repoId),
   });

@@ -2,6 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { queryEvents, type NostrEvent } from "@/shared/lib/nostr-client";
 import { relayWsUrl } from "@/shared/lib/relay-url";
 import { dedup } from "./use-repos";
+import { getMockRepo } from "./mock-repos";
 
 export interface RepoRefs {
   branches: string[];
@@ -60,9 +61,19 @@ async function fetchRepoRefs(repoId: string): Promise<RepoRefs> {
 }
 
 export function useRepoRefs(repoId: string) {
+  const isMockRepo = Boolean(getMockRepo(repoId));
+  const mockRefs: RepoRefs = {
+    branches: ["main"],
+    tags: ["v0.1.0"],
+    head: { ref: "main", sha: "a".repeat(40) },
+  };
+
   return useQuery({
-    queryKey: ["repo-refs", repoId],
-    queryFn: () => fetchRepoRefs(repoId),
+    queryKey: isMockRepo
+      ? ["repo-refs", "mock", repoId]
+      : ["repo-refs", repoId],
+    queryFn: isMockRepo ? async () => mockRefs : () => fetchRepoRefs(repoId),
+    initialData: isMockRepo ? mockRefs : undefined,
     staleTime: 60_000,
   });
 }
