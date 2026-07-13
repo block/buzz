@@ -191,7 +191,9 @@ const overrides = new Map([
   // added to RawAcpRuntimeCatalogEntry + fromRawAcpRuntimeCatalogEntry mapper (+8).
   // codex-install-auto-restart: restarted_count + failed_restart_count added to
   // RawInstallRuntimeResult + fromRawInstallRuntimeResult mapper (+2).
-  ["src/shared/api/tauri.ts", 1282],
+  // NIP-37 synced drafts: Tauri bridges for capability gating and opaque
+  // secret-derived draft addresses. Both preserve the key boundary.
+  ["src/shared/api/tauri.ts", 1298],
   // doctor-npm-eacces-preflight: hint field added to InstallStepResult (+1 line).
   // codex-acp-package-swap: "adapter_outdated" variant added to AcpAvailabilityStatus (+1 line).
   // doctor-install-reliability: AuthStatus tagged union + nodeRequired/authStatus/

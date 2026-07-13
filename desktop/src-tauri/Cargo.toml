@@ -89,6 +89,7 @@ mesh-llm-sdk = { git = "https://github.com/Mesh-LLM/mesh-llm.git", rev = "ebc3ab
 mesh-llm-host-runtime = { git = "https://github.com/Mesh-LLM/mesh-llm.git", rev = "ebc3ab4c4b5f4a45d5bc942c66c18583800c3f82", package = "mesh-llm-host-runtime", default-features = false, features = ["dynamic-native-runtime"], optional = true }
 base64 = "0.22"
 sha2 = "0.11"
+hmac = "0.13"
 tar = "0.4"
 bzip2 = "0.6"
 chrono = { version = "0.4", features = ["serde"] }

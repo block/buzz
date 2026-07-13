@@ -706,6 +706,8 @@ pub fn run() {
             create_auth_event,
             nip44_encrypt_to_self,
             nip44_decrypt_from_self,
+            derive_draft_address,
+            relay_supports_nip,
             get_channels,
             create_channel,
             open_dm,

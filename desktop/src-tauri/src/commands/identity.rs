@@ -1,6 +1,8 @@
+use hmac::{Hmac, KeyInit, Mac};
 use nostr::{
     nips::nip44, Event, EventBuilder, JsonUtil, Keys, Kind, PublicKey, Tag, Timestamp, ToBech32,
 };
+use sha2::Sha256;
 use tauri::Manager;
 use tauri::State;
 
@@ -417,6 +419,45 @@ pub async fn nip44_encrypt_to_self(
     .map_err(|e| format!("spawn_blocking failed: {e}"))?
 }
 
+const DRAFT_ADDRESS_DOMAIN: &[u8] = b"buzz-draft-address/v1";
+
+type HmacSha256 = Hmac<Sha256>;
+
+fn derive_draft_address_from_keys(
+    keys: &Keys,
+    logical_compose_key: &str,
+    relay_scope: &str,
+) -> Result<String, String> {
+    let conversation_key =
+        nip44::v2::ConversationKey::derive(keys.secret_key(), &keys.public_key())
+            .map_err(|error| format!("nip44 conversation key failed: {error}"))?;
+    let mut mac = HmacSha256::new_from_slice(conversation_key.as_bytes())
+        .map_err(|error| format!("draft address HMAC initialization failed: {error}"))?;
+    mac.update(DRAFT_ADDRESS_DOMAIN);
+    mac.update(&[0]);
+    mac.update(relay_scope.as_bytes());
+    mac.update(&[0]);
+    mac.update(logical_compose_key.as_bytes());
+    Ok(hex::encode(mac.finalize().into_bytes()))
+}
+
+/// Derive an opaque, stable NIP-37 `d` tag from the identity's NIP-44-to-self
+/// conversation key. The secret-derived operation stays in Rust so raw key
+/// material never enters the webview.
+#[tauri::command]
+pub async fn derive_draft_address(
+    logical_compose_key: String,
+    relay_scope: String,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let keys = state.signing_keys()?;
+    tauri::async_runtime::spawn_blocking(move || {
+        derive_draft_address_from_keys(&keys, &logical_compose_key, &relay_scope)
+    })
+    .await
+    .map_err(|error| format!("spawn_blocking failed: {error}"))?
+}
+
 #[tauri::command]
 pub async fn nip44_decrypt_from_self(
     ciphertext: String,
@@ -430,6 +471,33 @@ pub async fn nip44_decrypt_from_self(
     })
     .await
     .map_err(|e| format!("spawn_blocking failed: {e}"))?
+}
+
+#[cfg(test)]
+mod draft_address_tests {
+    use super::derive_draft_address_from_keys;
+    use nostr::Keys;
+
+    #[test]
+    fn derive_draft_address_is_deterministic_and_scoped() {
+        let keys = Keys::generate();
+        let first =
+            derive_draft_address_from_keys(&keys, "thread:root-a", "wss://relay.example").unwrap();
+        let repeated =
+            derive_draft_address_from_keys(&keys, "thread:root-a", "wss://relay.example").unwrap();
+        let different_key =
+            derive_draft_address_from_keys(&keys, "thread:root-b", "wss://relay.example").unwrap();
+        let different_relay =
+            derive_draft_address_from_keys(&keys, "thread:root-a", "wss://other.example").unwrap();
+
+        assert_eq!(first, repeated);
+        assert_ne!(first, different_key);
+        assert_ne!(first, different_relay);
+        assert_eq!(first.len(), 64);
+        assert!(first
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()));
+    }
 }
 
 #[cfg(test)]

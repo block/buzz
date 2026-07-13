@@ -1,7 +1,11 @@
 import * as React from "react";
 
 import type { ImetaMedia } from "@/features/messages/lib/imetaMediaMarkdown";
-import type { DraftState } from "@/features/messages/lib/useDrafts";
+import { syncDraftChannel } from "@/features/messages/lib/draftSync";
+import {
+  subscribeToRemoteDraftRemovals,
+  type DraftState,
+} from "@/features/messages/lib/useDrafts";
 
 type UseDraftPersistLifecycleParams = {
   effectiveDraftKey: string | null | undefined;
@@ -83,6 +87,7 @@ export function useDraftPersistLifecycle({
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: effectiveDraftKey is the sole trigger
   React.useEffect(() => {
+    if (channelId) syncDraftChannel(channelId);
     // The outgoing draft is persisted by the cleanup below, which runs before
     // this body on key changes and has the correct outgoing channelId in its
     // closure. Do NOT re-persist prevKey here: channelId in this render
@@ -119,4 +124,24 @@ export function useDraftPersistLifecycle({
       }
     };
   }, [effectiveDraftKey]);
+
+  // Remote tombstones are an explicit delete-wins signal. Do not infer this
+  // from store absence: an unsaved composer may legitimately have no entry.
+  React.useEffect(() => {
+    if (!effectiveDraftKey) return;
+    return subscribeToRemoteDraftRemovals((draftKey) => {
+      if (draftKey !== effectiveDraftKey) return;
+      clearContent();
+      pendingImetaForPersistRef.current = [];
+      setPendingImeta([]);
+      spoileredAttachmentUrlsRef.current = new Set();
+      setSpoileredAttachmentUrls(new Set());
+    });
+  }, [
+    effectiveDraftKey,
+    clearContent,
+    setPendingImeta,
+    setSpoileredAttachmentUrls,
+    spoileredAttachmentUrlsRef,
+  ]);
 }

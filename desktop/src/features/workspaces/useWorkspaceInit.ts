@@ -5,6 +5,10 @@ import { applyWorkspace, getDefaultRelayUrl } from "@/shared/api/tauri";
 import { getIdentity } from "@/shared/api/tauriIdentity";
 import { resetMediaCaches } from "@/shared/lib/mediaUrl";
 import { clearSearchHitEventCache } from "@/app/navigation/searchHitEventCache";
+import {
+  configureDraftSync,
+  resetDraftSync,
+} from "@/features/messages/lib/draftSync";
 import { initDraftStore } from "@/features/messages/lib/useDrafts";
 import { resetRenderScopedReactionHydration } from "@/features/messages/lib/renderScopedReactions";
 import {
@@ -37,6 +41,7 @@ function resetWorkspaceState(): void {
   resetMediaCaches();
   resetVideoPlayerState();
   resetRenderScopedReactionHydration();
+  resetDraftSync();
   clearSearchHitEventCache();
   clearMarkdownNodeCache();
 }
@@ -178,7 +183,8 @@ export function useWorkspaceInit(
         // Initialise the draft store for this identity so localStorage drafts
         // are scoped to the correct pubkey before the app renders.
         if (activeWorkspace.pubkey) {
-          initDraftStore(activeWorkspace.pubkey);
+          initDraftStore(activeWorkspace.pubkey, activeWorkspace.relayUrl);
+          configureDraftSync(activeWorkspace.pubkey, activeWorkspace.relayUrl);
         }
         // Restore any turn state saved for this workspace (a prior A→B round-
         // trip). This runs after applyWorkspace succeeds and before the app

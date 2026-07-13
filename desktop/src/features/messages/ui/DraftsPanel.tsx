@@ -3,6 +3,7 @@ import * as React from "react";
 
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import { useChannelsQuery } from "@/features/channels/hooks";
+import { backfillSyncedDrafts } from "@/features/messages/lib/draftSync";
 import {
   clearDraftEntry,
   getActiveDraftEntries,
@@ -465,6 +466,10 @@ export function DraftsPanel() {
   const identityQuery = useIdentityQuery();
   const currentPubkey = identityQuery.data?.pubkey;
   const channelsQuery = useChannelsQuery();
+
+  React.useEffect(() => {
+    backfillSyncedDrafts();
+  }, []);
 
   // Collapse the old `sections` state + `refreshDrafts` pattern onto a
   // reactive snapshot: every draft write re-renders via useSyncExternalStore.

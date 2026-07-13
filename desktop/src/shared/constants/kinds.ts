@@ -40,6 +40,8 @@ export const KIND_HUDDLE_PARTICIPANT_LEFT = 48102;
 export const KIND_HUDDLE_ENDED = 48103;
 // NIP-78 application-specific data. All use kind 30078; the relay
 // differentiates them by d-tag ("read-state:<slotId>", "channel-sections", "channel-mutes", "channel-stars", "channel-sort").
+// NIP-37 encrypted draft wrapper. Draft text and compose metadata remain in the NIP-44-to-self payload.
+export const KIND_DRAFT = 31234;
 export const KIND_READ_STATE = 30078;
 export const KIND_CHANNEL_SECTIONS = 30078;
 export const KIND_CHANNEL_MUTES = 30078;

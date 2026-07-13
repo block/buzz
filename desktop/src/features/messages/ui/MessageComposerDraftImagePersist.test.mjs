@@ -400,3 +400,81 @@ test("strictmode_draft_no_draft_cleanup_persists_empty_imeta", async () => {
 
   await handle.unmount();
 });
+
+/**
+ * A remote tombstone is a delete-wins signal, not an ordinary missing-store
+ * entry. The mounted composer must clear its snapshot before cleanup so stale
+ * editor text cannot recreate the deleted draft or queue a relay publish.
+ */
+test("remote_tombstone_clears_mounted_snapshot_before_cleanup", async () => {
+  const DRAFT_KEY = "chan-lifecycle-remote-delete";
+  setupStore("pubkey-lifecycle-remote-delete");
+  persistDraftEntry(
+    DRAFT_KEY,
+    "stale editor text",
+    DRAFT_KEY,
+    [IMG_A],
+    [IMG_A.url],
+  );
+
+  let editorContent = "stale editor text";
+  let pendingImeta = [IMG_A];
+  const spoileredRef = { current: new Set([IMG_A.url]) };
+  const persisted = [];
+
+  function HarnessComposer() {
+    useDraftPersistLifecycle({
+      effectiveDraftKey: DRAFT_KEY,
+      channelId: DRAFT_KEY,
+      loadDraft: (key) => loadDraftEntry(key),
+      persistDraft: (key, content, channelId, imeta, spoileredUrls) => {
+        persisted.push({ content, imeta, spoileredUrls });
+        persistDraftEntry(key, content, channelId, imeta, spoileredUrls);
+      },
+      livePendingImeta: pendingImeta,
+      setPendingImeta: (imeta) => {
+        pendingImeta = imeta;
+      },
+      setContent: (content) => {
+        editorContent = content;
+      },
+      clearContent: () => {
+        editorContent = "";
+      },
+      setSpoileredAttachmentUrls: (urls) => {
+        spoileredRef.current = urls;
+      },
+      spoileredAttachmentUrlsRef: spoileredRef,
+      syncComposerContentFromEditor: () => editorContent,
+    });
+
+    return null;
+  }
+
+  const handle = await mountStrictMode(HarnessComposer);
+  persisted.length = 0;
+  const { removeRemoteDraftEntry } = await import("../lib/useDrafts.ts");
+  await act(async () => {
+    removeRemoteDraftEntry(DRAFT_KEY);
+  });
+  await handle.unmount();
+
+  assert.equal(editorContent, "", "remote delete clears mounted editor text");
+  assert.deepEqual(pendingImeta, [], "remote delete clears pending images");
+  assert.deepEqual(
+    [...spoileredRef.current],
+    [],
+    "remote delete clears spoiler state",
+  );
+  assert.equal(
+    loadDraftEntry(DRAFT_KEY),
+    undefined,
+    "cleanup does not recreate draft",
+  );
+  assert.ok(
+    persisted.every(
+      ({ content, imeta }) => content === "" && imeta.length === 0,
+    ),
+    "cleanup never persists the stale draft contents",
+  );
+});

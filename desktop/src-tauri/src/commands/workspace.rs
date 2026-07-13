@@ -46,6 +46,38 @@ pub async fn fetch_workspace_icon(
     Ok(doc.icon.filter(|icon| !icon.is_empty()))
 }
 
+#[derive(Deserialize)]
+struct RelayInfoDocument {
+    #[serde(default)]
+    supported_nips: Vec<u32>,
+}
+
+/// Return whether the active relay advertises a requested NIP in its NIP-11
+/// document. Network and parse failures deliberately return false so callers
+/// can preserve offline/local-only behavior.
+#[tauri::command]
+pub async fn relay_supports_nip(nip: u32, state: State<'_, AppState>) -> Result<bool, String> {
+    let relay_url = relay::relay_ws_url_with_override(&state);
+    let http_url = relay::relay_http_base_url(&relay_url);
+    let Ok(response) = state
+        .http_client
+        .get(http_url)
+        .header("Accept", "application/nostr+json")
+        .send()
+        .await
+    else {
+        return Ok(false);
+    };
+    if !response.status().is_success() {
+        return Ok(false);
+    }
+    Ok(response
+        .json::<RelayInfoDocument>()
+        .await
+        .map(|document| document.supported_nips.contains(&nip))
+        .unwrap_or(false))
+}
+
 #[derive(Serialize)]
 pub struct ActiveWorkspaceInfo {
     relay_url: String,

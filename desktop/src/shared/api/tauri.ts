@@ -1236,6 +1236,22 @@ export async function nip44DecryptFromSelf(
   return invokeTauri<string>("nip44_decrypt_from_self", { ciphertext });
 }
 
+/** True only when the active relay advertises the requested NIP in NIP-11. */
+export function relaySupportsNip(nip: number): Promise<boolean> {
+  return invokeTauri<boolean>("relay_supports_nip", { nip });
+}
+
+/** Derive an opaque, identity-scoped NIP-37 draft address without exposing key material. */
+export function deriveDraftAddress(
+  logicalComposeKey: string,
+  relayScope: string,
+): Promise<string> {
+  return invokeTauri<string>("derive_draft_address", {
+    logicalComposeKey,
+    relayScope,
+  });
+}
+
 // ── NIP-AB device pairing ───────────────────────────────────────────────────
 
 export async function startPairing(): Promise<string> {

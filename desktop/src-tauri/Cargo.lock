@@ -925,6 +925,7 @@ dependencies = [
  "earshot",
  "futures-util",
  "hex",
+ "hmac 0.13.0",
  "image",
  "infer",
  "keyring",
