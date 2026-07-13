@@ -247,6 +247,8 @@ export type RawInstallStepResult = {
 export type RawInstallRuntimeResult = {
   success: boolean;
   steps: RawInstallStepResult[];
+  restarted_count: number;
+  failed_restart_count: number;
 };
 
 type RawCommandAvailability = {
@@ -919,6 +921,8 @@ function fromRawInstallRuntimeResult(
       exitCode: step.exit_code,
       hint: step.hint,
     })),
+    restartedCount: raw.restarted_count,
+    failedRestartCount: raw.failed_restart_count,
   };
 }
 

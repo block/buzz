@@ -6396,6 +6396,8 @@ async function handleInstallAcpRuntime(
         exit_code: 0,
       },
     ],
+    restarted_count: 0,
+    failed_restart_count: 0,
   };
 }
 
