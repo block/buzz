@@ -1532,7 +1532,8 @@ mod tests {
     fn per_community_subscriptions_drops_to_zero_when_all_subs_removed() {
         // Regression: when the last subscription for a community is removed,
         // per_community_subscriptions() must return no entry (not stale nonzero).
-        // The poller zero-fills from host_map, so absence == 0 is correct.
+        // The usage poller emits one explicit zero for the previously observed
+        // label before allowing its idle timeout to remove the series.
         let registry = SubscriptionRegistry::new();
         let community = CommunityId::from_uuid(Uuid::from_u128(0xcccc));
         let conn = Uuid::new_v4();
