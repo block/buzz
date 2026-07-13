@@ -397,9 +397,9 @@ fn resolve_bash(_path_env: &str) -> Result<(PathBuf, String), String> {
 ///   4. `git.exe` on PATH → its sibling `..\\bin\\bash.exe`. Git for Windows's
 ///      recommended "Git from the command line" option adds `Git\\cmd` to PATH,
 ///      not `Git\\bin`, so this is the normal post-install route.
-///   5. Git for Windows's machine then user registry `InstallPath`.
-///   6. Standard `ProgramFiles`, `ProgramFiles(x86)`, and `LocalAppData` paths
+///   5. Standard `ProgramFiles`, `ProgramFiles(x86)`, and `LocalAppData` paths
 ///      when the child inherited their parent environment.
+///   6. Git for Windows's machine then user registry `InstallPath`.
 ///
 /// Returns `(resolved_path, display_name)`. The display name is derived from the
 /// resolved path, guaranteeing the dialect hint and the spawned shell agree.
@@ -438,18 +438,18 @@ fn resolve_bash(path_env: &str) -> Result<(PathBuf, String), String> {
         }
     }
 
-    if let Some(bash) = git_bash_from_registry() {
+    if let Some(bash) = git_bash_from_standard_paths() {
         return Ok((bash, "bash".to_string()));
     }
 
-    if let Some(bash) = git_bash_from_standard_paths() {
+    if let Some(bash) = git_bash_from_registry() {
         return Ok((bash, "bash".to_string()));
     }
 
     Err(
         "Git for Windows (Git Bash) is required but was not found. Checked \\
-         BUZZ_SHELL, GIT_BASH, bash.exe and git.exe on PATH, HKLM/HKCU\\\\SOFTWARE\\\\GitForWindows, \\
-         and the standard Git install locations. Git's \"Cmd\" PATH option adds \\
+         BUZZ_SHELL, GIT_BASH, bash.exe and git.exe on PATH, the standard Git install locations, \\
+         and HKLM/HKCU\\\\SOFTWARE\\\\GitForWindows. Git's \"Cmd\" PATH option adds \\
          Git\\\\cmd\\\\git.exe but not Git\\\\bin\\\\bash.exe; Buzz normally derives Git Bash from that git.exe. \\
          Install it from https://git-scm.com/download/win and select \"Git from the command line \\
          and also from 3rd-party software\", then relaunch Buzz. You can also set \\
@@ -467,8 +467,8 @@ fn bash_from_git(git: &Path) -> Option<PathBuf> {
     bash.is_file().then_some(bash)
 }
 
-/// Probe machine and per-user Git for Windows registry keys after inherited
-/// resolver environment locations have been exhausted.
+/// Probe machine and per-user Git for Windows registry keys after the standard
+/// install-location fallback has been exhausted.
 #[cfg(windows)]
 #[allow(unsafe_code)]
 fn git_bash_from_registry() -> Option<PathBuf> {

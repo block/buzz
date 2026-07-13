@@ -132,10 +132,10 @@ fn resolve_git_bash(
             scan_path_for_command(Path::new("git.exe"), path_env, None)
                 .and_then(|git| bash_from_git(&git))
         })
-        .or_else(git_bash_from_registry)
         .or_else(|| {
             git_bash_from_standard_paths([program_files, program_files_x86, local_app_data])
         })
+        .or_else(git_bash_from_registry)
 }
 
 /// Resolve `BUZZ_SHELL` with the same rooted/bare-name semantics as the MCP
@@ -199,8 +199,8 @@ fn is_under_dir(dir: &Path, root: &Path) -> bool {
     })
 }
 
-/// Probe machine and per-user Git for Windows registry keys after the inherited
-/// resolver environment has been exhausted.
+/// Probe machine and per-user Git for Windows registry keys after the standard
+/// install-location fallback has been exhausted.
 #[cfg(windows)]
 fn git_bash_from_registry() -> Option<PathBuf> {
     use std::ffi::OsString;
