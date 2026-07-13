@@ -12,8 +12,9 @@ pub const PROTOCOL_VERSION: u32 = 2;
 /// - **Anthropic adaptive**: `low|medium|high|xhigh|max` (model-dependent; see `anthropic_thinking_config`).
 ///   `none`/`minimal` are not Anthropic values — rejected at startup.
 /// - **Anthropic manual budget** (claude-3*, opus-4-5): `low|medium|high`; `xhigh`/`max` clamp to high budget.
-/// - **OpenAI Responses / Chat Completions**: `none|minimal|low|medium|high|xhigh` (provider pass-through).
-///   `max` is not an OpenAI value — rejected at startup.
+/// - **OpenAI Responses / Chat Completions**: effort support is model-dependent. `max` is rejected
+///   at startup for pure `OpenAi`/`Databricks` providers, but is valid for max-supporting model
+///   families on the DatabricksV2 OpenAI route.
 /// - **Databricks**: routed by model family (Claude → Anthropic mapping, GPT-5 → Responses, MLflow → Chat).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ThinkingEffort {
@@ -310,27 +311,37 @@ fn gpt5_base_matches(lower_model: &str, token: &str) -> bool {
 /// | Model        | Supported effort values                   |
 /// |-------------|-------------------------------------------|
 /// | gpt-5-pro   | `high` only                               |
+/// | gpt-5.6     | `none, low, medium, high, xhigh, max`     |
 /// | gpt-5.5     | `none, low, medium, high, xhigh`          |
 /// | gpt-5.4     | `none, low, medium, high, xhigh`          |
 /// | gpt-5.1     | `none, low, medium, high`                 |
 /// | gpt-5 (base)| `minimal, low, medium, high`              |
-/// | unknown     | not doc-verified — pass through unchanged |
+/// | unknown     | not doc-verified — `max` clamps to `xhigh` |
 ///
 /// Note the `none` vs `minimal` split: `gpt-5` (base) supports `minimal` but not `none`;
-/// `gpt-5.1`/`gpt-5.4`/`gpt-5.5` support `none` but not `minimal`. These are matched via
+/// `gpt-5.1`/`gpt-5.4`/`gpt-5.5`/`gpt-5.6` support `none` but not `minimal`. These are matched via
 /// nearest-supported fallback in `normalize_effort_for_openai_route`.
 ///
 /// Match order: `-pro` variant checked before versioned strings to prevent `gpt-5-pro` from
 /// falling into the `gpt-5` base bucket (substring "gpt-5" is shared).
 ///
 /// `model` is a raw model name (may include Databricks gateway prefixes or date suffixes).
-/// Unknown models return `None` — caller treats `None` as "server-validated pass-through".
+/// Unknown models return `None` — callers pass through values except `max`, which clamps to
+/// `xhigh` until support is confirmed.
 /// Versioned tokens use `gpt5_token_matches` (end-of-string or `-` boundary, blocking digit
 /// and letter continuations). The base token uses `gpt5_base_matches`, which additionally
 /// rejects short `-<1-3 digit>` suffixes that look like two-digit version numbers.
 fn openai_efforts_for_model(model: &str) -> Option<&'static [ThinkingEffort]> {
     // Effort ordered from lowest to highest for each family.
     const GPT5_PRO: &[ThinkingEffort] = &[ThinkingEffort::High];
+    const GPT5_6: &[ThinkingEffort] = &[
+        ThinkingEffort::None,
+        ThinkingEffort::Low,
+        ThinkingEffort::Medium,
+        ThinkingEffort::High,
+        ThinkingEffort::XHigh,
+        ThinkingEffort::Max,
+    ];
     const GPT5_5_AND_5_4: &[ThinkingEffort] = &[
         ThinkingEffort::None,
         ThinkingEffort::Low,
@@ -356,6 +367,12 @@ fn openai_efforts_for_model(model: &str) -> Option<&'static [ThinkingEffort]> {
     // matching the base "gpt-5" prefix first.
     if gpt5_token_matches(&lower, "gpt-5-pro") || gpt5_token_matches(&lower, "gpt5-pro") {
         Some(GPT5_PRO)
+    } else if gpt5_token_matches(&lower, "gpt-5.6")
+        || gpt5_token_matches(&lower, "gpt5.6")
+        || gpt5_token_matches(&lower, "gpt-5-6")
+        || gpt5_token_matches(&lower, "gpt5-6")
+    {
+        Some(GPT5_6)
     } else if gpt5_token_matches(&lower, "gpt-5.5")
         || gpt5_token_matches(&lower, "gpt5.5")
         || gpt5_token_matches(&lower, "gpt-5-5")
@@ -443,8 +460,8 @@ pub fn anthropic_efforts_for_model(
 ///   model families means the "closest analogue" is the other form before jumping to `low`).
 /// - Above that pair: upward clamp first, then downward (prefer more thinking over less).
 /// - `xhigh` falls back to `high` when not supported (no model skips from `high` to `xhigh`).
-/// - `max` is first clamped to `xhigh` by `normalize_effort_for_openai_route` before this
-///   function is reached; this function never sees `max`.
+/// - `max` passes through for model families whose table includes it; otherwise it resolves to
+///   the nearest supported level.
 ///
 /// Logs a `warn!` on every substitution.
 fn resolve_openai_effort(
@@ -505,42 +522,32 @@ fn resolve_openai_effort(
 
 /// Normalize the effort value for an OpenAI-shaped request body (Chat Completions or Responses).
 ///
-/// Two normalizations are applied in order:
-///
-/// 1. **`max` → `xhigh` clamp**: `max` is not a valid OpenAI reasoning effort value; clamped
-///    at this step. The pure-OpenAI startup validator already rejects `max` at startup, so this
-///    clamp only fires on `DatabricksV2` sessions that routed to the OpenAI path.
-///
-/// 2. **Per-model effort availability**: for doc-verified OpenAI model families, the requested
-///    level (post-clamp) is checked against the model's supported set. If not supported, the
-///    nearest supported level is substituted (see `resolve_openai_effort` for preference order).
-///    Unknown/unverified models are passed through unchanged — the server validates.
+/// Per-model effort availability is applied for doc-verified OpenAI model families. A requested
+/// level not in the model's supported set is substituted with the nearest supported level (see
+/// `resolve_openai_effort` for preference order). For unknown/unverified models, `max` is clamped
+/// to `xhigh` because its support cannot be confirmed; all other values pass through unchanged.
 ///
 /// Applies to pure-OpenAI request paths AND DBv2 OpenAI-shaped routes.
 ///
 /// Doc-verified model table (July 2025):
 /// - `gpt-5-pro`: `high` only
+/// - `gpt-5.6`: `none, low, medium, high, xhigh, max`
 /// - `gpt-5.5`, `gpt-5.4`: `none, low, medium, high, xhigh`
 /// - `gpt-5.1`: `none, low, medium, high`
 /// - `gpt-5` (base): `minimal, low, medium, high`
-/// - unknown: pass through (server-validated)
+/// - unknown: `max` clamps to `xhigh`; other values pass through
 pub fn normalize_effort_for_openai_route(effort: ThinkingEffort, model: &str) -> ThinkingEffort {
-    // Step 1: clamp max → xhigh (max is not a valid OpenAI value).
-    let clamped = if effort == ThinkingEffort::Max {
-        tracing::warn!(
-            requested = "max",
-            resolved = "xhigh",
-            "BUZZ_AGENT_THINKING_EFFORT=max is not valid for OpenAI-shaped requests; clamping to xhigh"
-        );
-        ThinkingEffort::XHigh
-    } else {
-        effort
-    };
-
-    // Step 2: per-model effort availability check.
     match openai_efforts_for_model(model) {
-        Some(supported) => resolve_openai_effort(model, clamped, supported),
-        None => clamped, // unknown model — pass through
+        Some(supported) => resolve_openai_effort(model, effort, supported),
+        None if effort == ThinkingEffort::Max => {
+            tracing::warn!(
+                requested = "max",
+                resolved = "xhigh",
+                "BUZZ_AGENT_THINKING_EFFORT=max not confirmed for unknown OpenAI model; clamping to xhigh"
+            );
+            ThinkingEffort::XHigh
+        }
+        None => effort,
     }
 }
 
@@ -925,7 +932,7 @@ impl Config {
         }
         // Provider-level effort validation (fail-fast, clear error).
         // `none`/`minimal` are not Anthropic values — rejected at startup.
-        // `max` is not an OpenAI value — rejected at startup.
+        // `max` is rejected at startup for pure OpenAI/Databricks providers.
         // Model-level clamping (e.g. xhigh on Opus 4.6) is dynamic: happens at request
         // build time because `session/set_model` can change the model after startup.
         //
@@ -2196,6 +2203,26 @@ mod tests {
     }
 
     #[test]
+    fn openai_efforts_for_model_gpt5_6_includes_max() {
+        let expected: &[ThinkingEffort] = &[
+            ThinkingEffort::None,
+            ThinkingEffort::Low,
+            ThinkingEffort::Medium,
+            ThinkingEffort::High,
+            ThinkingEffort::XHigh,
+            ThinkingEffort::Max,
+        ];
+
+        for model in ["gpt-5.6", "gpt-5.6-sol", "gpt-5-6-sol", "goose-gpt-5-6-sol"] {
+            assert_eq!(
+                openai_efforts_for_model(model),
+                Some(expected),
+                "{model} must match the gpt-5.6 effort table"
+            );
+        }
+    }
+
+    #[test]
     fn openai_efforts_for_model_gpt5_5_includes_xhigh() {
         let supported = openai_efforts_for_model("gpt-5.5").expect("gpt-5.5 must be in table");
         assert!(
@@ -2421,6 +2448,26 @@ mod tests {
     }
 
     #[test]
+    fn normalize_openai_route_passes_max_through_for_gpt5_6() {
+        for model in ["gpt-5.6", "gpt-5-6-sol"] {
+            assert_eq!(
+                normalize_effort_for_openai_route(ThinkingEffort::Max, model),
+                ThinkingEffort::Max,
+                "{model} must preserve max"
+            );
+        }
+    }
+
+    #[test]
+    fn normalize_openai_route_gpt5_5_max_becomes_xhigh() {
+        assert_eq!(
+            normalize_effort_for_openai_route(ThinkingEffort::Max, "gpt-5.5"),
+            ThinkingEffort::XHigh,
+            "gpt-5.5 must clamp max to xhigh"
+        );
+    }
+
+    #[test]
     fn normalize_openai_route_gpt5_5_minimal_becomes_none() {
         // gpt-5.5 supports none but not minimal. minimal → none (peer fallback).
         assert_eq!(
@@ -2576,6 +2623,8 @@ mod tests {
             // gpt-5 family check mirrors gpt5FamilyModel in TS.
             let is_gpt5 = gpt5_token_matches(&m, "gpt-5-pro")
                 || gpt5_token_matches(&m, "gpt5-pro")
+                || gpt5_token_matches(&m, "gpt-5.6")
+                || gpt5_token_matches(&m, "gpt5.6")
                 || gpt5_token_matches(&m, "gpt-5.5")
                 || gpt5_token_matches(&m, "gpt5.5")
                 || gpt5_token_matches(&m, "gpt-5.4")

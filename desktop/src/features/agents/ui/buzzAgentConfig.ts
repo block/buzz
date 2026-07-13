@@ -227,6 +227,8 @@ function gpt5FamilyModel(m: string): boolean {
   return (
     gpt5TokenMatches(m, "gpt-5-pro") ||
     gpt5TokenMatches(m, "gpt5-pro") ||
+    gpt5TokenMatches(m, "gpt-5.6") ||
+    gpt5TokenMatches(m, "gpt5.6") ||
     gpt5TokenMatches(m, "gpt-5.5") ||
     gpt5TokenMatches(m, "gpt5.5") ||
     gpt5TokenMatches(m, "gpt-5.4") ||
@@ -242,6 +244,17 @@ function openaiConfig(m: string): ProviderEffortConfig {
   // Check -pro before versioned suffixes (gpt-5-pro contains "gpt-5").
   if (gpt5TokenMatches(m, "gpt-5-pro") || gpt5TokenMatches(m, "gpt5-pro")) {
     return { validValues: ["high"], defaultValue: "high" };
+  }
+  if (
+    gpt5TokenMatches(m, "gpt-5.6") ||
+    gpt5TokenMatches(m, "gpt5.6") ||
+    gpt5TokenMatches(m, "gpt-5-6") ||
+    gpt5TokenMatches(m, "gpt5-6")
+  ) {
+    return {
+      validValues: ["none", "low", "medium", "high", "xhigh", "max"],
+      defaultValue: "medium",
+    };
   }
   if (
     gpt5TokenMatches(m, "gpt-5.5") ||
@@ -275,7 +288,7 @@ function openaiConfig(m: string): ProviderEffortConfig {
       defaultValue: "medium",
     };
   }
-  // Unknown OpenAI model — show all except max (OpenAI doesn't accept max).
+  // Unknown OpenAI model — conservative fallback; max is enabled only for families whose table includes it.
   return {
     validValues: ["none", "minimal", "low", "medium", "high", "xhigh"],
     defaultValue: "medium",
