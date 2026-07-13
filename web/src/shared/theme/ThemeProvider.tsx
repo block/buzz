@@ -21,6 +21,17 @@ function getSystemDark(): boolean {
   return window.matchMedia("(prefers-color-scheme: dark)").matches;
 }
 
+function getInitialTheme(): Theme {
+  if (!import.meta.env.DEV) return "system";
+
+  const previewTheme = new URLSearchParams(window.location.search).get(
+    "previewTheme",
+  );
+  return previewTheme === "light" || previewTheme === "dark"
+    ? previewTheme
+    : "system";
+}
+
 function applyClass(isDark: boolean) {
   const root = document.documentElement;
   root.classList.remove("light", "dark");
@@ -28,9 +39,11 @@ function applyClass(isDark: boolean) {
 }
 
 export function ThemeProvider({ children }: { children: ReactNode }) {
-  const [theme, setThemeState] = useState<Theme>("system");
+  const [theme, setThemeState] = useState<Theme>(getInitialTheme);
   const [isDark, setIsDark] = useState<boolean>(() => {
-    const dark = getSystemDark();
+    const initialTheme = getInitialTheme();
+    const dark =
+      initialTheme === "system" ? getSystemDark() : initialTheme === "dark";
     applyClass(dark);
     return dark;
   });

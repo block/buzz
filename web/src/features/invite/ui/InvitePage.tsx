@@ -40,7 +40,7 @@ export function InvitePage({ code }: { code: string }) {
         <h1 className="mt-6 text-2xl font-semibold tracking-tight text-black">
           You&apos;re invited to join
         </h1>
-        <p className="mt-1 font-mono text-lg text-foreground">{host}</p>
+        <p className="mt-1 font-mono text-lg text-black/70">{host}</p>
 
         <div className="mt-8">
           <Button
@@ -52,7 +52,7 @@ export function InvitePage({ code }: { code: string }) {
           </Button>
         </div>
 
-        <p className="mt-6 text-sm text-muted-foreground">
+        <p className="mt-6 text-sm text-black/60">
           Don&apos;t have the app?{" "}
           <a
             className="font-medium text-black underline-offset-4 hover:text-black/70 hover:decoration-current hover:underline focus-visible:underline"
