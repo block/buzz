@@ -877,10 +877,23 @@ mod tests {
             .expect("active lookup")
             .is_none());
 
+        assert_eq!(
+            state
+                .community_disconnect_publish_attempts
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
         let second = archive_once(Arc::clone(&state)).await;
         assert_eq!(second.status(), StatusCode::SERVICE_UNAVAILABLE);
         let second_json = read_json(second).await;
         assert_eq!(second_json["archived_at"], first_archived_at);
+        assert_eq!(
+            state
+                .community_disconnect_publish_attempts
+                .load(std::sync::atomic::Ordering::Relaxed),
+            2,
+            "idempotent archive retry must republish the disconnect"
+        );
 
         let owned = state
             .db

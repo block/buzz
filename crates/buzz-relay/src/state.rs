@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -463,6 +463,10 @@ pub struct AppState {
     pub conn_manager: Arc<ConnectionManager>,
     /// Lifecycle cancellation for every long-lived socket, including huddle audio.
     pub community_connections: Arc<CommunityConnectionRegistry>,
+    /// Stops only the periodic lifecycle revalidator during graceful shutdown.
+    pub community_revalidator_cancel: CancellationToken,
+    /// Test/telemetry counter for archive disconnect publication attempts.
+    pub community_disconnect_publish_attempts: Arc<AtomicU64>,
     /// Semaphore limiting total concurrent connections.
     pub conn_semaphore: Arc<Semaphore>,
     /// Semaphore limiting concurrent message handler tasks.
@@ -644,6 +648,8 @@ impl AppState {
             sub_registry: Arc::new(SubscriptionRegistry::new()),
             conn_manager: Arc::new(ConnectionManager::new()),
             community_connections: Arc::new(CommunityConnectionRegistry::new()),
+            community_revalidator_cancel: CancellationToken::new(),
+            community_disconnect_publish_attempts: Arc::new(AtomicU64::new(0)),
             conn_semaphore: Arc::new(Semaphore::new(max_connections)),
             handler_semaphore: Arc::new(Semaphore::new(max_concurrent_handlers)),
             git_semaphore: Arc::new(Semaphore::new(git_max_concurrent_ops)),
@@ -963,6 +969,8 @@ impl AppState {
         let closed = self
             .community_connections
             .disconnect_community(tenant.community());
+        self.community_disconnect_publish_attempts
+            .fetch_add(1, Ordering::Relaxed);
         self.pubsub
             .publish_conn_control(tenant, &ConnControl::DisconnectCommunity)
             .await?;
