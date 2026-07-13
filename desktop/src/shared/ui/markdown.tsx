@@ -106,6 +106,7 @@ import {
 } from "./markdown/imageLightbox";
 import { MarkdownTable } from "./markdown/MarkdownTable";
 import { MaskedLinkTooltip } from "./markdown/MaskedLinkTooltip";
+import { ProgressiveImage } from "./markdown/ProgressiveImage";
 import { MessageLinkPill } from "./markdown/MessageLinkPill";
 import { renderCachedMarkdown } from "./markdown/nodeCache";
 import {
@@ -134,6 +135,7 @@ type ImageBlockProps = {
   dim?: string;
   resolvedSrc: string | undefined;
   src: string | undefined;
+  thumbSrc?: string;
 };
 
 type WebKitGestureLikeEvent = Event & {
@@ -1061,7 +1063,7 @@ function ImageZoomOverlay({
  * body on hover. Keeping the trigger stable and managing the lightbox via
  * React state avoids that repaint.
  */
-function ImageBlock({ alt, dim, resolvedSrc, src }: ImageBlockProps) {
+function ImageBlock({ alt, dim, resolvedSrc, src, thumbSrc }: ImageBlockProps) {
   const [lightboxState, setLightboxState] = React.useState<{
     galleryIndex: number;
     galleryItems?: ImageGalleryItem[];
@@ -1072,8 +1074,10 @@ function ImageBlock({ alt, dim, resolvedSrc, src }: ImageBlockProps) {
   const [isHiddenInSpoiler, setIsHiddenInSpoiler] = React.useState(false);
   const [menu, setMenu] = React.useState<ImageContextMenuPosition | null>(null);
   const inlineImageRef = React.useRef<HTMLImageElement | null>(null);
+  const thumbnailImageRef = React.useRef<HTMLImageElement | null>(null);
   const triggerRef = React.useRef<HTMLButtonElement | null>(null);
   useSmoothCorners(inlineImageRef);
+  useSmoothCorners(thumbnailImageRef);
 
   const [spoilerMediaSize, setSpoilerMediaSize] = React.useState<{
     height: number;
@@ -1112,14 +1116,6 @@ function ImageBlock({ alt, dim, resolvedSrc, src }: ImageBlockProps) {
       updateSpoilerMediaSize(image);
     },
     [resolvedSrc, updateSpoilerMediaSize],
-  );
-
-  const imageRef = React.useCallback(
-    (image: HTMLImageElement | null) => {
-      inlineImageRef.current = image;
-      if (image?.complete) handleImageLoad(image);
-    },
-    [handleImageLoad],
   );
 
   const { intrinsicDimensions, useFixedReserveBox } = useFrozenImageReserve(
@@ -1268,18 +1264,18 @@ function ImageBlock({ alt, dim, resolvedSrc, src }: ImageBlockProps) {
         onClick={handleImageTriggerClick}
         onContextMenuCapture={handleContextMenu}
       >
-        <img
+        <ProgressiveImage
           alt={alt}
-          className="block h-auto max-h-64 max-w-[min(24rem,100%)] rounded-2xl object-contain"
-          data-spoiler-media-size={hiddenSpoilerMediaSize ? "" : undefined}
-          decoding="async"
+          fullImageRef={inlineImageRef}
           height={intrinsicDimensions.height}
-          loading="lazy"
-          ref={imageRef}
-          src={resolvedSrc}
+          onFullLoad={handleImageLoad}
+          onThumbnailLoad={updateSpoilerMediaSize}
+          resolvedSrc={resolvedSrc}
+          showSpoilerSize={Boolean(hiddenSpoilerMediaSize)}
           style={spoilerMediaStyle}
+          thumbnailRef={thumbnailImageRef}
+          thumbSrc={thumbSrc}
           width={intrinsicDimensions.width}
-          onLoad={(event) => handleImageLoad(event.currentTarget)}
         />
       </button>
       {menu && src ? (
@@ -1317,7 +1313,7 @@ function ImageMosaic({ children }: { children: React.ReactNode[] }) {
   return (
     <div
       className={cn(
-        "mt-1 grid w-full min-w-0 max-w-lg grid-cols-2 gap-1.5 overflow-hidden rounded-2xl [&_br]:hidden [&_[data-block-media]]:min-h-0 [&_[data-block-media]]:max-w-none [&_[data-block-media]]:overflow-hidden [&_[data-block-media]>button]:m-0 [&_[data-block-media]>button]:h-full [&_[data-block-media]>button]:w-full [&_[data-block-media]>button]:max-w-none [&_[data-block-media]>button]:rounded-none [&_[data-block-media]_img]:!h-full [&_[data-block-media]_img]:!max-h-none [&_[data-block-media]_img]:!w-full [&_[data-block-media]_img]:!max-w-none [&_[data-block-media]_img]:rounded-none [&_[data-block-media]_img]:object-cover",
+        "mt-1 grid w-full min-w-0 max-w-lg grid-cols-2 gap-1.5 overflow-hidden rounded-2xl [&_br]:hidden [&_[data-block-media]]:min-h-0 [&_[data-block-media]]:max-w-none [&_[data-block-media]]:overflow-hidden [&_[data-block-media]>button]:m-0 [&_[data-block-media]>button]:h-full [&_[data-block-media]>button]:w-full [&_[data-block-media]>button]:max-w-none [&_[data-block-media]>button]:rounded-none [&_[data-block-media]_[data-progressive-image-frame]]:!h-full [&_[data-block-media]_[data-progressive-image-frame]]:!w-full [&_[data-block-media]_img]:!h-full [&_[data-block-media]_img]:!max-h-none [&_[data-block-media]_img]:!w-full [&_[data-block-media]_img]:!max-w-none [&_[data-block-media]_img]:rounded-none [&_[data-block-media]_img]:object-cover",
         isTriptych
           ? "h-80 grid-rows-2 [&_[data-block-media]]:h-auto [&_[data-block-media]:first-child]:row-span-2"
           : "[&_[data-block-media]]:h-48",
@@ -1583,6 +1579,7 @@ function createMarkdownComponents(
             dim={entry?.dim}
             resolvedSrc={resolvedSrc}
             src={src}
+            thumbSrc={entry?.thumb ? rewriteRelayUrl(entry.thumb) : undefined}
           />
         </span>
       );

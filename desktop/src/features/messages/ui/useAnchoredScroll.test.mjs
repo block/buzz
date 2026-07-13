@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { settleProgrammaticBottomPin } from "./useAnchoredScroll.ts";
+import {
+  settleProgrammaticBottomPin,
+  shouldSettleForSplitPanel,
+  shouldSettleVirtualizedBottom,
+} from "./useAnchoredScroll.ts";
 
 function fakeContainer({ clientHeight, scrollHeight, scrollTop }) {
   const writes = [];
@@ -16,6 +20,78 @@ function fakeContainer({ clientHeight, scrollHeight, scrollTop }) {
     },
   };
 }
+
+test("split panel settles only an already-bottomed timeline", () => {
+  assert.equal(
+    shouldSettleForSplitPanel({ isAtBottom: true, splitPanelOpen: true }),
+    true,
+  );
+  assert.equal(
+    shouldSettleForSplitPanel({ isAtBottom: false, splitPanelOpen: true }),
+    false,
+  );
+  assert.equal(
+    shouldSettleForSplitPanel({ isAtBottom: true, splitPanelOpen: false }),
+    false,
+  );
+});
+
+test("virtualized bottom settle arms for pinned appends and replacements", () => {
+  assert.equal(
+    shouldSettleVirtualizedBottom({
+      isAtBottom: true,
+      messageDelta: "append",
+      messagesArrived: 1,
+      messagesChanged: true,
+    }),
+    true,
+  );
+  assert.equal(
+    shouldSettleVirtualizedBottom({
+      isAtBottom: true,
+      messageDelta: "replace",
+      messagesArrived: 0,
+      messagesChanged: true,
+    }),
+    true,
+  );
+  assert.equal(
+    shouldSettleVirtualizedBottom({
+      isAtBottom: true,
+      messageDelta: "none",
+      messagesArrived: 0,
+      messagesChanged: true,
+    }),
+    true,
+  );
+  assert.equal(
+    shouldSettleVirtualizedBottom({
+      isAtBottom: true,
+      messageDelta: "prepend",
+      messagesArrived: 1,
+      messagesChanged: true,
+    }),
+    false,
+  );
+  assert.equal(
+    shouldSettleVirtualizedBottom({
+      isAtBottom: true,
+      messageDelta: "none",
+      messagesArrived: 0,
+      messagesChanged: false,
+    }),
+    false,
+  );
+  assert.equal(
+    shouldSettleVirtualizedBottom({
+      isAtBottom: false,
+      messageDelta: "none",
+      messagesArrived: 0,
+      messagesChanged: true,
+    }),
+    false,
+  );
+});
 
 test("settleProgrammaticBottomPin chases the physical floor before clearing", () => {
   const container = fakeContainer({

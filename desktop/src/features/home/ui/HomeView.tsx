@@ -3,6 +3,7 @@ import { RefreshCcw } from "lucide-react";
 
 import { useAppShell } from "@/app/AppShellContext";
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
+import { useKnownAgentPubkeys } from "@/features/agents/useKnownAgentPubkeys";
 import { useChannelsQuery, useOpenDmMutation } from "@/features/channels/hooks";
 import { RightAuxiliaryPane } from "@/features/channels/ui/RightAuxiliaryPane";
 import { ChannelManagementSheet } from "@/features/channels/ui/ChannelManagementSheet";
@@ -17,9 +18,9 @@ import {
 } from "@/features/home/lib/inbox";
 import { useInboxSelectionAnchor } from "@/features/home/useInboxSelectionAnchor";
 import {
-  getContextMessageDepth,
   getReactionTargetId,
   matchesInboxFilter,
+  toInboxContextMessage,
 } from "@/features/home/lib/inboxViewHelpers";
 import { useHomeInboxReadState } from "@/features/home/useHomeInboxReadState";
 import { useInboxThreadContext } from "@/features/home/useInboxThreadContext";
@@ -65,7 +66,6 @@ import { KIND_REACTION } from "@/shared/constants/kinds";
 import { topChromeInset } from "@/shared/layout/chromeLayout";
 import { cn } from "@/shared/lib/cn";
 import { normalizePubkey } from "@/shared/lib/pubkey";
-import { resolveMentionProps } from "@/shared/lib/resolveMentionNames";
 import { useElementWidth } from "@/shared/hooks/use-mobile";
 import { useThreadPanelWidth } from "@/shared/hooks/useThreadPanelWidth";
 import { AUXILIARY_PANEL_SINGLE_COLUMN_BREAKPOINT_PX } from "@/shared/layout/AuxiliaryPanel";
@@ -331,12 +331,11 @@ export function HomeView({
     enabled: feedProfilePubkeys.length > 0,
   });
   const feedProfiles = feedProfilesQuery.data?.profiles;
+  // Agent set for the inbox list/detail bot badges: the workspace-scoped
+  // baseline widened with this surface's profile lookup.
+  const workspaceAgentPubkeys = useKnownAgentPubkeys();
   const inboxAgentPubkeys = React.useMemo(() => {
-    const pubkeys = new Set<string>();
-
-    for (const item of feed?.feed.agentActivity ?? []) {
-      pubkeys.add(normalizePubkey(item.pubkey));
-    }
+    const pubkeys = new Set(workspaceAgentPubkeys);
 
     for (const [pubkey, profile] of Object.entries(feedProfiles ?? {})) {
       if (profile.isAgent) {
@@ -345,7 +344,7 @@ export function HomeView({
     }
 
     return pubkeys;
-  }, [feed?.feed.agentActivity, feedProfiles]);
+  }, [feedProfiles, workspaceAgentPubkeys]);
   const inboxItems = React.useMemo(
     () =>
       buildInboxItems({
@@ -474,31 +473,14 @@ export function HomeView({
       feedProfiles,
     );
 
-    return timelineMessages.map((message) => {
-      const event = eventById.get(message.id);
-      const authorPubkey =
-        message.pubkey ?? event?.pubkey ?? selectedItem.item.pubkey;
-      const { mentionNames, mentionPubkeysByName } = resolveMentionProps(
-        message.tags ?? [],
-        feedProfiles,
-      );
-      return {
-        id: message.id,
-        authorLabel: message.author,
-        authorPubkey,
-        avatarUrl: message.avatarUrl ?? null,
-        content: message.body,
-        createdAt: message.createdAt,
-        depth: event ? getContextMessageDepth(event, eventById) : message.depth,
-        fullTimestampLabel: formatInboxFullTimestamp(message.createdAt),
-        isSelected: message.id === selectedEventId,
-        mentionNames: mentionNames ?? [],
-        mentionPubkeysByName,
-        reactions: message.reactions,
-        tags: message.tags,
-        timeLabel: message.time,
-      };
-    });
+    return timelineMessages.map((message) =>
+      toInboxContextMessage(message, {
+        eventById,
+        fallbackAuthorPubkey: selectedItem.item.pubkey,
+        profiles: feedProfiles,
+        selectedItemId: selectedEventId ?? selectedItem.id,
+      }),
+    );
   }, [
     channelMessages,
     currentPubkey,

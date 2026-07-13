@@ -191,6 +191,8 @@ export function imageLightboxCornerRadiiFromElement(
     topRight: style.borderTopRightRadius,
   };
   const mosaic = element.closest<HTMLElement>("[data-image-mosaic]");
+  const geometryElement =
+    element.closest<HTMLElement>("[data-progressive-image-frame]") ?? element;
   if (!mosaic || mosaic === element) {
     return cornerRadii;
   }
@@ -198,7 +200,7 @@ export function imageLightboxCornerRadiiFromElement(
   // Mosaic tiles themselves are square. Their visible outer corners come from
   // the gallery container's clip, so preserve only the container corners that
   // this tile actually touches when the overlay returns.
-  const elementRect = element.getBoundingClientRect();
+  const elementRect = geometryElement.getBoundingClientRect();
   const mosaicRect = mosaic.getBoundingClientRect();
   const mosaicStyle = window.getComputedStyle(mosaic);
   const touches = (first: number, second: number) =>

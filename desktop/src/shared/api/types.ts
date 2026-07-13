@@ -597,6 +597,8 @@ export type InstallStepResult = {
 export type InstallRuntimeResult = {
   success: boolean;
   steps: InstallStepResult[];
+  restartedCount: number;
+  failedRestartCount: number;
 };
 
 export type CommandAvailability = {

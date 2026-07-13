@@ -425,6 +425,18 @@ pub struct ManagedAgentProcess {
     /// `runtime_pid` have no `ManagedAgentProcess` entry, so their spawn
     /// config is unknown and the badge stays off.
     pub spawn_config_hash: u64,
+    /// Whether this process was spawned in setup-listener mode (i.e.
+    /// `BUZZ_ACP_SETUP_PAYLOAD` was set at launch because the agent was
+    /// `NotReady`). Runtime-only — never persisted. Used by
+    /// `install_acp_runtime` to target only stuck agents for auto-restart,
+    /// excluding healthy in-pool agents.
+    pub setup_mode: bool,
+    /// Adapter availability status stamped at spawn time for runtimes with a
+    /// version gate (currently codex only; `None` for all others). Runtime-only
+    /// — never persisted. The summary builder compares this against the current
+    /// cached availability and sets `needs_restart` on drift, catching out-of-
+    /// band adapter changes that Phase-1 auto-restart doesn't cover.
+    pub adapter_availability: Option<AcpAvailabilityStatus>,
     /// Win32 Job Object owning the harness + its entire process tree. Closing
     /// the handle (via `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`) kills the whole
     /// tree — the Windows mirror of the Unix process-group teardown. `None`
@@ -592,6 +604,12 @@ pub struct InstallStepResult {
 pub struct InstallRuntimeResult {
     pub success: bool,
     pub steps: Vec<InstallStepResult>,
+    /// Number of local agents successfully stopped and restarted after a
+    /// successful install. Mirrors `GlobalAgentConfigSaveResult.restarted_count`.
+    pub restarted_count: u32,
+    /// Number of agents whose stop succeeded but respawn failed.
+    /// Mirrors `GlobalAgentConfigSaveResult.failed_restart_count`.
+    pub failed_restart_count: u32,
 }
 
 #[derive(Debug, Clone, Serialize)]

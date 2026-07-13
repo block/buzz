@@ -4,6 +4,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { channelWindowKey } from "@/features/messages/lib/messageQueryKeys";
 import {
   channelWindowHasMore,
+  channelWindowHistoryExhausted,
   emptyChannelWindowStore,
   type ChannelWindowStore,
 } from "@/features/messages/lib/channelWindowStore";
@@ -30,6 +31,19 @@ export function useFetchOlderMessages(channel: Channel | null) {
     select: channelWindowHasMore,
     // Passive subscription: the window store is written by the messages query
     // and the live subscription via setQueryData; this observer only reads.
+    queryFn: () =>
+      queryClient.getQueryData<ChannelWindowStore>(windowKey) ??
+      emptyChannelWindowStore(),
+  });
+
+  // Distinct from `!hasOlderMessages`: an empty/unloaded window also reports
+  // "no more", but exhaustion requires a RESOLVED tail page proving the
+  // channel's beginning. Consumers gating UI on the history boundary (the
+  // oldest day divider) must use this, not the paging signal.
+  const { data: historyExhausted = false } = useQuery({
+    enabled: channelId !== null,
+    queryKey: windowKey,
+    select: channelWindowHistoryExhausted,
     queryFn: () =>
       queryClient.getQueryData<ChannelWindowStore>(windowKey) ??
       emptyChannelWindowStore(),
@@ -63,5 +77,5 @@ export function useFetchOlderMessages(channel: Channel | null) {
     }
   }, [channel?.id, channelId, queryClient]);
 
-  return { fetchOlder, isFetchingOlder, hasOlderMessages };
+  return { fetchOlder, isFetchingOlder, hasOlderMessages, historyExhausted };
 }

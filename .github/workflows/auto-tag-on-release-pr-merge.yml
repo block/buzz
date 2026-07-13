@@ -1,11 +1,14 @@
 name: Auto-tag on Release PR Merge
 
-# Four release lanes share this one workflow — adding a lane is one more branch
-# prefix, never a forked copy:
+# Four release lanes share this one workflow. Three use an explicit branch
+# prefix; the chart lane also auto-detects a Chart.yaml version bump so a chart
+# feature PR can publish its own new version when merged:
 #
 #   version-bump/<v>   → tag v<v>        → dispatch release.yml (desktop app)
 #   relay-release/<v>  → tag relay-v<v>  → dispatch docker.yml (relay image)
 #   chart-release/<v>  → tag chart-v<v>  → dispatch helm-chart.yml (helm chart)
+#   any internal PR that bumps deploy/charts/buzz/Chart.yaml `version`
+#                       → tag chart-v<v>  → dispatch helm-chart.yml (helm chart)
 #   mobile-release/<v> → tag mobile-v<v> → (manual sprout_ref for buzz-releases build — see below)
 #
 # The desktop, relay, and chart lanes dispatch their build workflow rather than
@@ -36,10 +39,6 @@ jobs:
   auto-tag:
     if: >
       github.event.pull_request.merged == true &&
-      (startsWith(github.event.pull_request.head.ref, 'version-bump/') ||
-       startsWith(github.event.pull_request.head.ref, 'relay-release/') ||
-       startsWith(github.event.pull_request.head.ref, 'chart-release/') ||
-       startsWith(github.event.pull_request.head.ref, 'mobile-release/')) &&
       github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     steps:
@@ -48,12 +47,14 @@ jobs:
           ref: ${{ github.event.pull_request.merge_commit_sha }}
           fetch-depth: 0
 
-      - name: Resolve lane and version from branch name
+      - name: Resolve release lane and version
+        id: release
         env:
           BRANCH: ${{ github.event.pull_request.head.ref }}
         run: |
-          # Lane is decided by branch prefix: the tag prefix and whether a
-          # downstream workflow_dispatch is needed both follow from it.
+          # Explicit release branches retain their established behavior. For an
+          # ordinary internal PR, publish only when Chart.yaml itself changed
+          # and its version differs from the PR's base commit.
           case "$BRANCH" in
             version-bump/*)
               VERSION="${BRANCH#version-bump/}"
@@ -72,21 +73,33 @@ jobs:
               TAG_PREFIX="mobile-v"
               DISPATCH="" ;;
             *)
-              echo "::error::Unhandled branch prefix: '$BRANCH'"
-              exit 1 ;;
+              parent_sha="$(git rev-parse HEAD^)"
+              old_version="$(git show "${parent_sha}:deploy/charts/buzz/Chart.yaml" 2>/dev/null | awk '/^version:/ {print $2}')"
+              VERSION="$(awk '/^version:/ {print $2}' deploy/charts/buzz/Chart.yaml)"
+              if [ -z "$old_version" ] || [ -z "$VERSION" ] || [ "$old_version" = "$VERSION" ]; then
+                echo "No release branch or chart version bump — nothing to tag"
+                echo "enabled=false" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+              TAG_PREFIX="chart-v"
+              DISPATCH="helm-chart" ;;
           esac
           if ! echo "$VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
-            echo "::error::Invalid version in branch name: '$VERSION'"
+            echo "::error::Invalid release version: '$VERSION'"
             exit 1
           fi
-          echo "version=$VERSION" >> "$GITHUB_ENV"
-          echo "tag=${TAG_PREFIX}${VERSION}" >> "$GITHUB_ENV"
-          echo "dispatch=$DISPATCH" >> "$GITHUB_ENV"
+          {
+            echo "enabled=true"
+            echo "version=$VERSION"
+            echo "tag=${TAG_PREFIX}${VERSION}"
+            echo "dispatch=$DISPATCH"
+          } >> "$GITHUB_OUTPUT"
           echo "Tagging ${TAG_PREFIX}${VERSION}"
 
       - name: Create and push tag
+        if: steps.release.outputs.enabled == 'true'
         env:
-          TAG: ${{ env.tag }}
+          TAG: ${{ steps.release.outputs.tag }}
         run: |
           EXISTING_SHA="$(git ls-remote --tags origin "refs/tags/$TAG" | awk '{print $1}')"
           if [ -n "$EXISTING_SHA" ]; then
@@ -104,16 +117,16 @@ jobs:
           git push origin "$TAG"
 
       - name: Trigger release build
-        # The desktop and relay lanes dispatch their build workflow because the
-        # consumer's on:push:tags trigger is dead for auto-pushed tags (default
-        # GITHUB_TOKEN, recursion guard — see header comment). Mobile has no
+        # The desktop, relay, and chart lanes dispatch their build workflow
+        # because the consumer's on:push:tags trigger is dead for tags pushed
+        # by GITHUB_TOKEN (recursion guard — see header comment). Mobile has no
         # consumer yet, so dispatch="" skips this step entirely.
-        if: ${{ env.dispatch != '' }}
+        if: steps.release.outputs.enabled == 'true' && steps.release.outputs.dispatch != ''
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          DISPATCH: ${{ env.dispatch }}
-          VERSION: ${{ env.version }}
-          TAG: ${{ env.tag }}
+          DISPATCH: ${{ steps.release.outputs.dispatch }}
+          VERSION: ${{ steps.release.outputs.version }}
+          TAG: ${{ steps.release.outputs.tag }}
         run: |
           # Both workflows take the bare version (for the build) and the tag ref
           # (so the dispatch builds the tagged commit, not main).

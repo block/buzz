@@ -57,7 +57,7 @@ function cursorsEqual(
 }
 
 /** Relay order: newest timestamp first, then ascending id within a second. */
-function compareRelayOrder(left: RelayEvent, right: RelayEvent) {
+export function compareRelayOrder(left: RelayEvent, right: RelayEvent) {
   return left.created_at !== right.created_at
     ? right.created_at - left.created_at
     : left.id < right.id
@@ -280,6 +280,17 @@ export function flattenChannelWindowEvents(store: ChannelWindowStore) {
 export function channelWindowHasMore(store: ChannelWindowStore) {
   const tail = store.pages[store.pages.length - 1];
   return tail?.hasMore ?? false;
+}
+
+/**
+ * Whether the loaded window PROVABLY starts at the channel's beginning. This
+ * is not `!channelWindowHasMore`: an empty store also reports "no more", but
+ * that means the boundary is unresolved (nothing has loaded), not exhausted.
+ * Only a resolved tail page saying `hasMore: false` proves the start.
+ */
+export function channelWindowHistoryExhausted(store: ChannelWindowStore) {
+  const tail = store.pages[store.pages.length - 1];
+  return tail !== undefined && !tail.hasMore;
 }
 
 /**

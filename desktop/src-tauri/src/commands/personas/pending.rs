@@ -23,7 +23,7 @@ use crate::managed_agents::AgentDefinition;
 /// does not retain, so the local-only `is_active` toggle never republishes, and
 /// a byte-identical user-save republish is harmlessly NIP-33-replaced). The
 /// guard is intentionally omitted.
-pub(in crate::commands::personas) fn retain_persona_pending(
+pub(in crate::commands) fn retain_persona_pending(
     app: &AppHandle,
     state: &AppState,
     persona: &AgentDefinition,

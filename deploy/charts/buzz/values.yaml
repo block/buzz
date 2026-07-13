@@ -150,6 +150,28 @@ relay:
   extraEnv: []
   extraEnvFrom: []
 
+# ── Device pairing relay ─────────────────────────────────────────────────────
+# Optional, stateless NIP-AB relay. When enabled, the main relay advertises
+# pairingRelay.url in NIP-11 and Buzz clients use it instead of the legacy
+# same-host /pair convention.
+pairingRelay:
+  enabled: false
+  url: ""
+  replicaCount: 1
+  service:
+    type: ClusterIP
+    port: 5000
+    annotations: {}
+  podAnnotations: {}
+  podLabels: {}
+  resources:
+    requests:
+      cpu: "50m"
+      memory: "32Mi"
+    limits:
+      cpu: "250m"
+      memory: "128Mi"
+
 # ── Service ──────────────────────────────────────────────────────────────────
 service:
   type: ClusterIP

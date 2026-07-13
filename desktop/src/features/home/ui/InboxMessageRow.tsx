@@ -1,8 +1,11 @@
 import * as React from "react";
 
+import { useKnownAgentPubkeys } from "@/features/agents/useKnownAgentPubkeys";
 import type { InboxContextMessage } from "@/features/home/lib/inbox";
+import { toTimelineMessage } from "@/features/home/lib/inboxViewHelpers";
 import { formatTimeWithoutDayPeriod } from "@/features/messages/lib/dateFormatters";
 import type { TimelineMessage } from "@/features/messages/types";
+import { getConfigNudgeAuthorPubkey } from "@/features/messages/ui/configNudgeAuthPubkey";
 import { MessageActionBar } from "@/features/messages/ui/MessageActionBar";
 import { MessageReactions } from "@/features/messages/ui/MessageReactions";
 import { useReactionHandler } from "@/features/messages/ui/useReactionHandler";
@@ -16,21 +19,6 @@ import { UserAvatar } from "@/shared/ui/UserAvatar";
 export type InboxDisplayMessage = InboxContextMessage & {
   depth: number;
 };
-
-function toTimelineMessage(message: InboxDisplayMessage): TimelineMessage {
-  return {
-    id: message.id,
-    author: message.authorLabel,
-    avatarUrl: message.avatarUrl,
-    body: message.content,
-    createdAt: 0,
-    depth: message.depth,
-    pubkey: message.authorPubkey,
-    reactions: message.reactions ?? [],
-    tags: message.tags,
-    time: message.timeLabel ?? message.fullTimestampLabel,
-  };
-}
 
 type InboxMessageRowProps = {
   agentPubkeys?: ReadonlySet<string>;
@@ -76,8 +64,21 @@ export function InboxMessageRow({
     errorMessage: reactionErrorMessage,
     select: handleReactionSelect,
   } = useReactionHandler(timelineMessage, onToggleReaction);
-  const isAuthorAgent =
-    agentPubkeys?.has(normalizePubkey(message.authorPubkey)) === true;
+  // "Is this pubkey an agent" = the workspace-scoped baseline every surface
+  // shares plus this surface's extras passed via `agentPubkeys` (HomeView
+  // folds feed-profile `isAgent` flags in). Mirrors MessageRow's predicate.
+  const knownAgentPubkeys = useKnownAgentPubkeys();
+  const isKnownAgentPubkey = React.useCallback(
+    (pubkey: string) => {
+      const normalized = normalizePubkey(pubkey);
+      return (
+        knownAgentPubkeys.has(normalized) ||
+        agentPubkeys?.has(normalized) === true
+      );
+    },
+    [agentPubkeys, knownAgentPubkeys],
+  );
+  const isAuthorAgent = isKnownAgentPubkey(message.authorPubkey);
   const profileRole = isAuthorAgent ? "bot" : undefined;
   const hoverTimestampLabel = formatTimeWithoutDayPeriod(
     message.timeLabel ?? message.fullTimestampLabel,
@@ -182,6 +183,14 @@ export function InboxMessageRow({
                 "max-w-full text-left text-sm text-foreground",
                 emojiOnly &&
                   "text-4xl leading-tight [&_p]:leading-tight [&_img[data-custom-emoji]]:h-[1.45em] [&_img[data-custom-emoji]]:align-middle [&_button:has(img[data-custom-emoji])]:align-middle",
+              )}
+              // Only pass the author pubkey for agent-authored messages so
+              // config-nudge cards can authenticate the sender. Uses the
+              // raw event signer (signerPubkey) — not the tag-attributed
+              // display author — to prevent actor/p-tag spoofing.
+              configNudgeAuthorPubkey={getConfigNudgeAuthorPubkey(
+                timelineMessage,
+                isKnownAgentPubkey,
               )}
               content={message.content}
               customEmoji={customEmoji}

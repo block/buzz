@@ -126,6 +126,8 @@ type E2eConfig = {
     addChannelMembersDelayMs?: number;
     createManagedAgentDelayMs?: number;
     channelsReadError?: string;
+    /** Number of seeded rows in the deep-history fixture. Defaults to 600. */
+    deepHistoryMessageCount?: number;
     feedReadError?: string;
     canvasReadError?: string;
     /** Delay (ms) for `apply_workspace` so e2e tests can observe the
@@ -133,6 +135,9 @@ type E2eConfig = {
     applyWorkspaceDelayMs?: number;
     openDmDelayMs?: number;
     sendMessageDelayMs?: number;
+    /** Delay (ms) after snapshotting a thread-replies page so E2E tests can
+     *  deliver live reply/aux events while an older response is in flight. */
+    threadRepliesDelayMs?: number;
     usersBatchDelayMs?: number;
     /** Delay (ms) applied to continuation channel-window requests so e2e
      *  tests can observe the in-flight prepend window. 0/undefined = instant. */
@@ -3318,22 +3323,22 @@ function getMockMessageStore(channelId: string): RelayEvent[] {
                 })),
             ]
           : channelId === "feedf00d-0000-4000-8000-000000000007"
-            ? // 600 messages > CHANNEL_HISTORY_LIMIT (300): the initial load
-              // windows to the newest 300, leaving 300 older behind the until
-              // cursor — enough for several full fetchOlder pages (batch 100),
-              // so the load-older anchor restore is exercised across REPEATED
-              // prepend cycles, not a single lucky pass. created_at increases
-              // with index (oldest first) so message N+1 is newer than N — the
-              // anchor restores the first-visible row across each prepend.
-              Array.from({ length: 600 }, (_, index) => ({
-                id: `mock-deep-history-${index}`,
-                pubkey: index % 2 === 0 ? ALICE_PUBKEY : MOCK_IDENTITY_PUBKEY,
-                created_at: Math.floor(Date.now() / 1000) - (600 - index) * 60,
-                kind: 9,
-                tags: [["h", channelId]],
-                content: `Deep history message #${index}`,
-                sig: "mocksig".repeat(20).slice(0, 128),
-              }))
+            ? (() => {
+                const count = getConfig()?.mock?.deepHistoryMessageCount ?? 600;
+                return Array.from({ length: count }, (_, index) => ({
+                  id: `mock-deep-history-${index}`,
+                  pubkey: index % 2 === 0 ? ALICE_PUBKEY : MOCK_IDENTITY_PUBKEY,
+                  created_at:
+                    Math.floor(Date.now() / 1000) - (count - index) * 60,
+                  kind: 9,
+                  tags: [["h", channelId]],
+                  content:
+                    count > 600
+                      ? `Deep history message #${index}\n${"variable wrapped history ".repeat((index % 12) + 1)}`
+                      : `Deep history message #${index}`,
+                  sig: "mocksig".repeat(20).slice(0, 128),
+                }));
+              })()
             : [];
 
   mockMessages.set(channelId, seeded);
@@ -3853,6 +3858,10 @@ async function handleGetThreadReplies(
           event_id: page[page.length - 1].id,
         }
       : null;
+  const delayMs = config?.mock?.threadRepliesDelayMs ?? 0;
+  if (delayMs > 0) {
+    await new Promise((resolve) => window.setTimeout(resolve, delayMs));
+  }
 
   return { events: page, next_cursor: nextCursor };
 }
@@ -6396,6 +6405,8 @@ async function handleInstallAcpRuntime(
         exit_code: 0,
       },
     ],
+    restarted_count: 0,
+    failed_restart_count: 0,
   };
 }
 
@@ -7346,7 +7357,7 @@ async function handleSendChannelMessage(
       : 1;
 
     const event: RelayEvent = {
-      id: crypto.randomUUID().replace(/-/g, ""),
+      id: mockEventId(),
       pubkey: mockPubkey,
       created_at: createdAt,
       kind,

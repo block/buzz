@@ -15,6 +15,7 @@ import {
   recordTimeoutFromRejection,
   clearTimeoutState,
 } from "../../moderation/lib/timeoutStore.ts";
+import { buildOutgoingMessage } from "../../messages/lib/imetaMediaMarkdown.ts";
 
 // ── isSendableDestination ─────────────────────────────────────────────────────
 
@@ -400,6 +401,54 @@ test("runSendPipeline_checkpoint2_blocks_upload_after_encode", async () => {
   assert.ok(
     states.includes("error"),
     "must set error state after checkpoint 2",
+  );
+});
+
+test("runSendPipeline_avatar_bearing_snapshot_omits_thumb_and_keeps_filename", async () => {
+  let sentMediaTags = null;
+
+  const result = await runSendPipeline({
+    channelId: "ch-1",
+    checkEligibilityFn: () => null,
+    encodeFn: async () => ({
+      fileBytes: [1],
+      fileName: "avatar-bearing.agent.json",
+    }),
+    uploadFn: async () => ({
+      url: "https://example.com/avatar-bearing.agent.json",
+      sha256: "a".repeat(64),
+      size: 1,
+      type: "application/json",
+      uploaded: 0,
+      // This represents an upload descriptor that happens to include a thumb.
+      // A snapshot send must not serialize it as NIP-92 imeta metadata.
+      thumb: "https://example.com/avatar.png",
+    }),
+    sendFn: async ({ mediaTags }) => {
+      sentMediaTags = mediaTags;
+    },
+    setStateFn: () => {},
+    buildMessageFn: (descriptor) => buildOutgoingMessage("", [descriptor]),
+  });
+
+  assert.equal(result, true);
+  assert.deepEqual(sentMediaTags, [
+    [
+      "imeta",
+      "url https://example.com/avatar-bearing.agent.json",
+      "m application/json",
+      `x ${"a".repeat(64)}`,
+      "size 1",
+      "filename avatar-bearing.agent.json",
+    ],
+  ]);
+  assert.ok(
+    sentMediaTags[0].includes("filename avatar-bearing.agent.json"),
+    "snapshot imeta must retain its filename",
+  );
+  assert.ok(
+    !sentMediaTags[0].some((entry) => entry.startsWith("thumb ")),
+    "snapshot imeta must not include a thumb field",
   );
 });
 

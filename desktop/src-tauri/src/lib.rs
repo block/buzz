@@ -48,9 +48,12 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
-use tauri::{Emitter, Listener, Manager, RunEvent};
+#[cfg(target_os = "macos")]
+use tauri::Listener;
+use tauri::{Emitter, Manager, RunEvent};
 use tauri_plugin_window_state::StateFlags;
 
+#[cfg(target_os = "macos")]
 const INITIAL_RENDER_READY_EVENT: &str = "initial-render-ready";
 
 #[tauri::command]
@@ -810,6 +813,10 @@ pub fn run() {
             preview_agent_snapshot_import,
             confirm_agent_snapshot_import,
             encode_agent_snapshot_for_send,
+            export_team_snapshot,
+            encode_team_snapshot_for_send,
+            preview_team_snapshot_import,
+            confirm_team_snapshot_import,
             get_channel_workflows,
             get_channels_workflows,
             get_workflow,

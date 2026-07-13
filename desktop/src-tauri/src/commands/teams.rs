@@ -40,7 +40,7 @@ fn trim_optional(value: Option<String>) -> Option<String> {
 /// Unlike `retain_managed_agent_pending`, this has no projection-equality
 /// short-circuit: teams have no start/stop runtime churn, so a republish only
 /// happens on an actual user edit. The guard is intentionally omitted.
-fn retain_team_pending(app: &AppHandle, state: &AppState, team: &TeamRecord) {
+pub(super) fn retain_team_pending(app: &AppHandle, state: &AppState, team: &TeamRecord) {
     use crate::managed_agents::{
         managed_agents_base_dir,
         persona_events::monotonic_created_at,

@@ -38,7 +38,6 @@ import { useAnchoredScroll } from "./useAnchoredScroll";
 import { selectDeferredListRenderState } from "@/features/messages/lib/timelineSnapshot";
 
 type MessageThreadPanelProps = {
-  agentPubkeys?: ReadonlySet<string>;
   channel: Channel | null;
   channelId: string | null;
   channelName: string;
@@ -297,7 +296,6 @@ export function MessageThreadPanelSkeleton({
 }
 
 export function MessageThreadPanel({
-  agentPubkeys,
   channel,
   channelId,
   channelName,
@@ -626,7 +624,6 @@ export function MessageThreadPanel({
           <div className="rounded-2xl">
             <MessageRow
               actionBarPlacement="inside"
-              agentPubkeys={agentPubkeys}
               channelId={channelId}
               huddleMemberPubkeys={huddleMemberPubkeys}
               huddleMemberPubkeysPending={huddleMemberPubkeysPending}
@@ -744,7 +741,6 @@ export function MessageThreadPanel({
                     >
                       {showUnreadDivider ? <UnreadDivider /> : null}
                       <MessageRow
-                        agentPubkeys={agentPubkeys}
                         channelId={channelId}
                         collapseDepthGuideActions={collapseDepthGuideActions}
                         collapseDescendantsLabel="Collapse replies"

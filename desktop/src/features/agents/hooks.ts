@@ -163,6 +163,7 @@ export function useInstallAcpRuntimeMutation() {
     mutationFn: (runtimeId: string) => installAcpRuntime(runtimeId),
     onSettled: () => {
       void queryClient.invalidateQueries({ queryKey: acpRuntimesQueryKey });
+      void queryClient.invalidateQueries({ queryKey: managedAgentsQueryKey });
     },
   });
 }

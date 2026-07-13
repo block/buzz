@@ -146,10 +146,10 @@ async function expectWiderThanTall(locator: Locator) {
 
 async function expectIntroActionIconStackedAboveTitle(
   action: Locator,
-  testId: string,
+  title: string,
 ) {
-  const iconBox = await action.getByTestId(`${testId}-icon`).boundingBox();
-  const titleBox = await action.getByTestId(`${testId}-title`).boundingBox();
+  const iconBox = await action.locator("svg").first().boundingBox();
+  const titleBox = await action.getByText(title, { exact: true }).boundingBox();
   if (!iconBox || !titleBox) {
     throw new Error("Could not measure welcome intro action content");
   }
@@ -272,17 +272,13 @@ async function expectWelcomeView(page: Page) {
   );
   await expectIntroActionIconStackedAboveTitle(
     page.getByTestId("welcome-intro-action-create-channel"),
-    "welcome-intro-action-create-channel",
+    "Create a channel",
   );
   await expect(
-    page.getByTestId("welcome-intro-action-create-channel-title"),
-  ).toHaveText("Create a channel");
-  await expect(
-    page.getByTestId("welcome-intro-action-create-channel-title"),
+    page
+      .getByTestId("welcome-intro-action-create-channel")
+      .getByText("Create a channel", { exact: true }),
   ).toHaveCSS("white-space", "normal");
-  await expect(
-    page.getByTestId("welcome-intro-action-create-channel-description"),
-  ).toHaveCount(0);
   await expect(
     page.getByTestId("welcome-intro-action-create-agent"),
   ).toBeVisible();
@@ -291,14 +287,8 @@ async function expectWelcomeView(page: Page) {
   );
   await expectIntroActionIconStackedAboveTitle(
     page.getByTestId("welcome-intro-action-create-agent"),
-    "welcome-intro-action-create-agent",
+    "Create a custom agent",
   );
-  await expect(
-    page.getByTestId("welcome-intro-action-create-agent-title"),
-  ).toHaveText("Create a custom agent");
-  await expect(
-    page.getByTestId("welcome-intro-action-create-agent-description"),
-  ).toHaveCount(0);
   await expect(page.getByTestId("message-composer")).toBeVisible();
   await expect(page.getByTestId("welcome-composer-guide-banner")).toBeVisible();
   await expect(page.getByTestId("welcome-composer-guide-banner")).toContainText(

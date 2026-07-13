@@ -498,6 +498,73 @@ pub fn resolve_command(command: &str) -> Option<PathBuf> {
 pub fn clear_resolve_cache() {
     let mut guard = resolve_cache().lock().unwrap_or_else(|e| e.into_inner());
     guard.clear();
+    // Also invalidate the adapter-availability cache so a freshly-installed
+    // adapter is reflected the next time the summary builder checks the badge.
+    clear_adapter_availability_cache();
+}
+
+// ── Adapter availability cache (Phase-2 badge fallback) ─────────────────────
+//
+// `build_managed_agent_summary` needs to compare the spawn-time adapter
+// availability against the *current* availability without triggering a live
+// `probe_codex_acp_major_version` subprocess on every poll cycle.  This cache
+// stores the last availability status of the codex-acp binary at its resolved
+// path.  It is warmed by `discover_acp_runtimes` (which already probes), so
+// the badge path reads warm data, and is invalidated by `clear_resolve_cache`
+// (called on every Doctor install and every `discover_acp_providers` call).
+
+fn adapter_availability_cache() -> &'static std::sync::Mutex<Option<AcpAvailabilityStatus>> {
+    use std::sync::{Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<Option<AcpAvailabilityStatus>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(None))
+}
+
+fn clear_adapter_availability_cache() {
+    if let Ok(mut guard) = adapter_availability_cache().lock() {
+        *guard = None;
+    }
+}
+
+/// Cache the current codex-acp adapter availability status.
+///
+/// Called by `discover_acp_runtimes` after it probes the codex adapter so the
+/// badge path has a warm value without re-probing.
+pub(crate) fn cache_adapter_availability(status: AcpAvailabilityStatus) {
+    if let Ok(mut guard) = adapter_availability_cache().lock() {
+        *guard = Some(status);
+    }
+}
+
+/// Return the most recently cached codex-acp adapter availability, or
+/// `None` if no discovery has run yet.
+///
+/// This is a **read from cache only** — it never spawns a subprocess.  The
+/// value is populated by `discover_acp_runtimes` and invalidated by
+/// `clear_resolve_cache`.  When the cache is cold, returning `None` defers
+/// the drift check until discovery has produced a real value, preventing
+/// a fabricated `AdapterMissing` stamp from triggering a false restart badge
+/// on a newly restarted process.
+pub(crate) fn adapter_availability_cached() -> Option<AcpAvailabilityStatus> {
+    adapter_availability_cache()
+        .lock()
+        .ok()
+        .and_then(|g| g.clone())
+}
+
+/// Pure predicate: does the stamped adapter availability differ from the
+/// current cached availability?
+///
+/// Returns `false` whenever either side is `None` (unknown) — "no data" is
+/// not evidence of drift.  This is extracted for unit testing without global
+/// state and used by `build_managed_agent_summary`.
+pub(crate) fn availability_drift(
+    stamped: Option<&AcpAvailabilityStatus>,
+    current: Option<AcpAvailabilityStatus>,
+) -> bool {
+    match (stamped, current) {
+        (Some(s), Some(c)) => *s != c,
+        _ => false,
+    }
 }
 
 fn resolve_command_uncached(command: &str) -> Option<PathBuf> {
@@ -916,38 +983,39 @@ pub(crate) fn classify_runtime(
 /// [`std::process::Child::try_wait`] (the repo's standard deadline pattern) and
 /// killed if it does not exit in time.
 ///
-/// Stdout is redirected to a temporary file rather than a pipe. A pipe's
-/// `read_to_end` blocks until all file descriptors holding the write-end are
-/// closed — including those inherited by forked descendants. A regular file does
-/// not have this property: `read` returns EOF at the current write position
-/// regardless of how many processes still have the file open. This makes the
-/// post-exit read guaranteed to complete without blocking, and works identically
-/// on Windows and Unix.
+/// Stdout is redirected to a temporary file rather than a pipe, so forked
+/// descendants cannot hold EOF open. Reads from a regular file return EOF at its
+/// current write position regardless of inherited file descriptors, cross-platform.
 pub(crate) fn probe_codex_acp_major_version(binary_path: &Path) -> Option<u64> {
+    probe_codex_acp_major_version_with_path(
+        binary_path,
+        crate::managed_agents::readiness::cli_probe::augmented_path().as_deref(),
+    )
+}
+pub(crate) fn probe_codex_acp_major_version_with_path(
+    binary_path: &Path,
+    augmented_path: Option<&str>,
+) -> Option<u64> {
     use std::io::{Read as _, Seek as _, SeekFrom};
     use std::time::{Duration, Instant};
-
-    /// Hard ceiling on how long the version probe may block discovery.
     const VERSION_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
-    // Redirect stdout to a temporary file instead of a pipe.  When the child
-    // exits its write-end is closed; any forked descendant that inherited the
-    // file descriptor can keep writing, but `read` on a regular file returns
-    // EOF at the current file size — not blocking on a "writer present" check.
-    // This is the only cross-platform way to bound the post-exit stdout read
-    // without O_NONBLOCK (which is Unix-only) or a reader thread.
+    // A regular file returns EOF at its current size even when a descendant
+    // inherits its descriptor, bounding the post-exit read cross-platform.
     let mut tmp = tempfile::tempfile().ok()?;
 
-    let mut child = Command::new(binary_path)
-        .arg("--version")
+    let mut command = Command::new(binary_path);
+    command.arg("--version");
+    if let Some(path) = augmented_path {
+        command.env("PATH", path);
+    }
+    let mut child = command
         .stdout(tmp.try_clone().ok()?)
         .stderr(std::process::Stdio::null())
         .spawn()
         .ok()?;
 
-    // Poll try_wait with a deadline — the repo's standard bounded-subprocess
-    // pattern (see backend.rs).  This returns as soon as the process exits
-    // rather than blocking on stdout EOF.
+    // Poll until the deadline rather than blocking on stdout EOF.
     let deadline = Instant::now() + VERSION_PROBE_TIMEOUT;
     let exit_status = loop {
         match child.try_wait() {
@@ -972,9 +1040,7 @@ pub(crate) fn probe_codex_acp_major_version(binary_path: &Path) -> Option<u64> {
         return None;
     }
 
-    // Seek to the start and read at most 4 KiB.  A regular file returns EOF
-    // at the current write position even if a descendant still has the fd
-    // open, so this read is guaranteed to complete without blocking.
+    // Read at most 4 KiB from the regular file without blocking.
     tmp.seek(SeekFrom::Start(0)).ok()?;
     let mut buf = Vec::with_capacity(128);
     let _ = (&mut tmp as &mut dyn std::io::Read)
@@ -1044,6 +1110,13 @@ pub fn discover_acp_runtimes() -> Vec<AcpRuntimeCatalogEntry> {
                 if let Some(path_str) = &binary_path {
                     availability = codex_adapter_availability(&PathBuf::from(path_str));
                 }
+            }
+
+            // Warm the adapter-availability cache for the badge fallback.
+            // The cache is scoped to the codex runtime; other runtimes leave it
+            // unchanged. Invalidated by `clear_resolve_cache`.
+            if runtime.id == "codex" {
+                cache_adapter_availability(availability.clone());
             }
 
             let underlying_cli_path = runtime

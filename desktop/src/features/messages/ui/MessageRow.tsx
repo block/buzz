@@ -7,6 +7,7 @@ import {
   tagsEqual,
 } from "@/features/messages/lib/messageRowEquality";
 import type { TimelineMessage } from "@/features/messages/types";
+import { useKnownAgentPubkeys } from "@/features/agents/useKnownAgentPubkeys";
 import { HuddleAttachment } from "@/features/huddle/components/HuddleAttachment";
 import { MessageReactions } from "@/features/messages/ui/MessageReactions";
 import { useReactionHandler } from "@/features/messages/ui/useReactionHandler";
@@ -45,10 +46,6 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 
 const DiffMessage = React.lazy(() => import("./DiffMessage"));
 const DiffMessageExpanded = React.lazy(() => import("./DiffMessageExpanded"));
-
-/** Stable empty fallback so rows without an agent-pubkey set keep a constant
- *  reference (a fresh `new Set()` per render would defeat downstream memos). */
-const EMPTY_AGENT_PUBKEYS: ReadonlySet<string> = new Set();
 
 export type ThreadDepthGuideAction = {
   active?: boolean;
@@ -92,10 +89,8 @@ export const MessageRow = React.memo(
     profiles,
     searchQuery,
     showDepthGuides = true,
-    agentPubkeys,
     videoReviewContext,
   }: {
-    agentPubkeys?: ReadonlySet<string>;
     channelId?: string | null;
     collapseDepthGuideActions?: ReadonlyArray<ThreadDepthGuideAction>;
     connectDescendants?: boolean;
@@ -171,15 +166,24 @@ export const MessageRow = React.memo(
       () => resolveMentionProps(message.tags, profiles),
       [profiles, message.tags],
     );
-    // The agent-pubkey set is computed once by the parent (ChannelScreen)
-    // from the same profile lookup and passed down already normalised — no
-    // per-row rescan of `profiles` (that duplicated the parent's work in every
-    // mounted row and re-ran on each profile-lookup change).
-    const resolvedAgentPubkeys = agentPubkeys ?? EMPTY_AGENT_PUBKEYS;
+    // "Is this pubkey an agent" = the workspace-scoped baseline every surface
+    // shares (managed ∪ relay) plus the pubkey's own profile `isAgent` flag from this surface's lookup. Both are per-pubkey
+    // O(1) checks — no per-row rescan of `profiles` (that duplicated parent
+    // work in every mounted row and re-ran on each profile-lookup change).
+    const knownAgentPubkeys = useKnownAgentPubkeys();
+    const isKnownAgentPubkey = React.useCallback(
+      (pubkey: string) => {
+        const normalized = normalizePubkey(pubkey);
+        return (
+          knownAgentPubkeys.has(normalized) ||
+          profiles?.[normalized]?.isAgent === true
+        );
+      },
+      [knownAgentPubkeys, profiles],
+    );
     const profilePopoverRole =
       message.role === "bot" ||
-      (message.pubkey &&
-        resolvedAgentPubkeys.has(normalizePubkey(message.pubkey)))
+      (message.pubkey && isKnownAgentPubkey(message.pubkey))
         ? "bot"
         : message.role;
     const agentMentionPubkeysByName = React.useMemo(() => {
@@ -189,13 +193,13 @@ export const MessageRow = React.memo(
 
       const values: Record<string, string> = {};
       for (const [name, pubkey] of Object.entries(mentionPubkeysByName)) {
-        if (resolvedAgentPubkeys.has(normalizePubkey(pubkey))) {
+        if (isKnownAgentPubkey(pubkey)) {
           values[name] = pubkey;
         }
       }
 
       return Object.keys(values).length > 0 ? values : undefined;
-    }, [resolvedAgentPubkeys, mentionPubkeysByName]);
+    }, [isKnownAgentPubkey, mentionPubkeysByName]);
 
     const imetaByUrl = React.useMemo(
       () => (message.tags ? parseImetaTags(message.tags) : undefined),
@@ -334,7 +338,7 @@ export const MessageRow = React.memo(
               // display author — to prevent actor/p-tag spoofing.
               configNudgeAuthorPubkey={getConfigNudgeAuthorPubkey(
                 message,
-                resolvedAgentPubkeys,
+                isKnownAgentPubkey,
               )}
               content={message.body}
               customEmoji={customEmoji}
@@ -795,7 +799,6 @@ export const MessageRow = React.memo(
     tagsEqual(prev.message.tags, next.message.tags) &&
     prev.message.role === next.message.role &&
     prev.message.personaDisplayName === next.message.personaDisplayName &&
-    prev.agentPubkeys === next.agentPubkeys &&
     depthGuideActionsEqual(
       prev.collapseDepthGuideActions,
       next.collapseDepthGuideActions,
