@@ -51,7 +51,7 @@ const variants: Record<
   },
   ready: {
     Icon: RotateCw,
-    label: "Restart to update",
+    label: "Update now",
     badgeColor: "bg-emerald-500",
   },
 };
