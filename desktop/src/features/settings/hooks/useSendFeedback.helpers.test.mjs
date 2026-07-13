@@ -2,14 +2,16 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  FEEDBACK_CHANNEL_NAME,
   findFeedbackChannel,
+  normalizeFeedbackChannelId,
 } from "./useSendFeedback.ts";
 
-/** Minimal Channel-shaped fixture for the name/type match logic. */
+const FEEDBACK_CHANNEL_ID = "configured-feedback-channel";
+
+/** Minimal Channel-shaped fixture for configured destination matching. */
 function channel(overrides) {
   return {
-    id: "id",
+    id: "other-channel",
     name: "general",
     channelType: "stream",
     visibility: "open",
@@ -19,73 +21,70 @@ function channel(overrides) {
   };
 }
 
-/** A private channel the user is a member of, named like the feedback channel. */
+/** An active private stream matching the configured channel ID. */
 function feedbackChannel(overrides) {
   return channel({
-    id: "fb",
-    name: FEEDBACK_CHANNEL_NAME,
+    id: FEEDBACK_CHANNEL_ID,
+    name: "Support inbox",
     visibility: "private",
     isMember: true,
     ...overrides,
   });
 }
 
-test("findFeedbackChannel_returnsNullWhenUndefined", () => {
-  assert.equal(findFeedbackChannel(undefined), null);
+test("normalizeFeedbackChannelId_returnsNullWhenUnsetOrBlank", () => {
+  assert.equal(normalizeFeedbackChannelId(undefined), null);
+  assert.equal(normalizeFeedbackChannelId(""), null);
+  assert.equal(normalizeFeedbackChannelId("   "), null);
 });
 
-test("findFeedbackChannel_returnsNullWhenNoMatch", () => {
+test("normalizeFeedbackChannelId_trimsConfiguredId", () => {
   assert.equal(
-    findFeedbackChannel([
-      channel({ name: "general" }),
-      channel({ name: "random" }),
-    ]),
-    null,
+    normalizeFeedbackChannelId(`  ${FEEDBACK_CHANNEL_ID}  `),
+    FEEDBACK_CHANNEL_ID,
   );
 });
 
-test("findFeedbackChannel_matchesByNameCaseInsensitively", () => {
-  const match = feedbackChannel({ name: "buzz FEEDBACK" });
-  assert.equal(findFeedbackChannel([channel(), match]), match);
+test("findFeedbackChannel_returnsNullWhenUndefined", () => {
+  assert.equal(findFeedbackChannel(undefined, FEEDBACK_CHANNEL_ID), null);
 });
 
-test("findFeedbackChannel_trimsSurroundingWhitespace", () => {
-  const match = feedbackChannel({ name: `  ${FEEDBACK_CHANNEL_NAME}  ` });
-  assert.equal(findFeedbackChannel([match]), match);
+test("findFeedbackChannel_matchesExactConfiguredId", () => {
+  const match = feedbackChannel();
+  assert.equal(
+    findFeedbackChannel([channel(), match], FEEDBACK_CHANNEL_ID),
+    match,
+  );
 });
 
-test("findFeedbackChannel_excludesDmChannelsWithMatchingName", () => {
-  const dm = feedbackChannel({ id: "dm", channelType: "dm" });
-  assert.equal(findFeedbackChannel([dm]), null);
+test("findFeedbackChannel_doesNotFallBackToName", () => {
+  const sameName = feedbackChannel({ id: "wrong-id" });
+  assert.equal(findFeedbackChannel([sameName], FEEDBACK_CHANNEL_ID), null);
 });
 
-test("findFeedbackChannel_excludesOpenChannelsWithMatchingName", () => {
-  // An open (public) channel sharing the name must NOT be reused — feedback
-  // would leak publicly. Only a private channel qualifies.
-  const open = feedbackChannel({ id: "open", visibility: "open" });
-  assert.equal(findFeedbackChannel([open]), null);
+test("findFeedbackChannel_excludesDmChannels", () => {
+  const dm = feedbackChannel({ channelType: "dm" });
+  assert.equal(findFeedbackChannel([dm], FEEDBACK_CHANNEL_ID), null);
 });
 
-test("findFeedbackChannel_excludesNonMemberChannelsWithMatchingName", () => {
-  // A private channel the user is not a member of can't receive the message,
-  // and reusing it would be wrong — skip it and create a fresh one.
-  const notMember = feedbackChannel({ id: "nm", isMember: false });
-  assert.equal(findFeedbackChannel([notMember]), null);
+test("findFeedbackChannel_excludesOpenChannels", () => {
+  const open = feedbackChannel({ visibility: "open" });
+  assert.equal(findFeedbackChannel([open], FEEDBACK_CHANNEL_ID), null);
 });
 
-test("findFeedbackChannel_excludesForumChannelsWithMatchingName", () => {
-  // A private forum sharing the name would file feedback as forum posts
-  // (hidden from the default stream view) — require a stream channel.
-  const forum = feedbackChannel({ id: "forum", channelType: "forum" });
-  assert.equal(findFeedbackChannel([forum]), null);
+test("findFeedbackChannel_excludesNonMemberChannels", () => {
+  const notMember = feedbackChannel({ isMember: false });
+  assert.equal(findFeedbackChannel([notMember], FEEDBACK_CHANNEL_ID), null);
 });
 
-test("findFeedbackChannel_excludesArchivedChannelsWithMatchingName", () => {
-  // An archived channel rejects writes on the relay, so reusing it would make
-  // the send fail — skip it and create a fresh active channel.
+test("findFeedbackChannel_excludesForumChannels", () => {
+  const forum = feedbackChannel({ channelType: "forum" });
+  assert.equal(findFeedbackChannel([forum], FEEDBACK_CHANNEL_ID), null);
+});
+
+test("findFeedbackChannel_excludesArchivedChannels", () => {
   const archived = feedbackChannel({
-    id: "arch",
     archivedAt: "2026-01-01T00:00:00Z",
   });
-  assert.equal(findFeedbackChannel([archived]), null);
+  assert.equal(findFeedbackChannel([archived], FEEDBACK_CHANNEL_ID), null);
 });

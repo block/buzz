@@ -118,7 +118,7 @@ type AppSidebarProps = {
     templateId?: string;
   }) => Promise<void>;
   onOpenAddCommunity: () => void;
-  onSendFeedback: () => void;
+  onSendFeedback?: () => void;
   onHideDm: (channelId: string) => void;
   onMarkChannelUnread: (channelId: string) => void;
   onMarkChannelRead: (

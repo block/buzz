@@ -2,32 +2,46 @@ import { getVersion } from "@tauri-apps/api/app";
 import { useMutation } from "@tanstack/react-query";
 import * as React from "react";
 
-import {
-  useChannelsQuery,
-  useCreateChannelMutation,
-} from "@/features/channels/hooks";
+import { useChannelsQuery } from "@/features/channels/hooks";
 import type { ImetaMedia } from "@/features/messages/lib/imetaMediaMarkdown";
 import { buildOutgoingMessage } from "@/features/messages/lib/imetaMediaMarkdown";
 import type { SendFeedbackInput } from "@/features/settings/ui/SendFeedbackDialog";
 import { FEEDBACK_CATEGORY_LABELS } from "@/features/settings/ui/SendFeedbackDialog";
+import { useWorkspaces } from "@/features/workspaces/useWorkspaces";
 import { sendChannelMessage, uploadMediaBytes } from "@/shared/api/tauri";
 import { pickAndUploadImage } from "@/shared/api/tauriMedia";
 import type { Channel } from "@/shared/api/types";
 
-/** Name of the private channel feedback is delivered to. */
-export const FEEDBACK_CHANNEL_NAME = "Buzz feedback";
+/** Returns a usable channel ID, or null when feedback is not configured. */
+export function normalizeFeedbackChannelId(
+  configuredId: string | undefined,
+): string | null {
+  const channelId = configuredId?.trim() ?? "";
+  return channelId.length > 0 ? channelId : null;
+}
 
 /**
- * Resolves the private feedback channel from the channel list by name
- * (case-insensitive). Requires an **active private stream** channel the user
- * is a member of: it must be a `stream` (not a DM or forum — a forum would
- * file feedback as forum posts), non-archived (archived channels reject
- * writes), private (never an open/public channel that merely shares the
- * name), and one the user belongs to. Anything else falls through so the
- * caller creates a fresh channel. Exported for unit testing.
+ * Build-time feedback destination. This is intentionally optional: default OSS
+ * builds do not claim to offer a monitored feedback path.
+ */
+export function getConfiguredFeedbackChannelId(): string | null {
+  return normalizeFeedbackChannelId(
+    import.meta.env?.VITE_BUZZ_FEEDBACK_CHANNEL_ID,
+  );
+}
+
+/** True when the optional feedback capability is enabled for this build. */
+export const FEEDBACK_ENABLED = getConfiguredFeedbackChannelId() !== null;
+
+/**
+ * Resolves the configured destination by exact channel ID. It must be an active
+ * private stream that the current user belongs to. No name matching or channel
+ * creation is allowed: distributors are responsible for provisioning a
+ * monitored inbox and its membership before enabling the feature.
  */
 export function findFeedbackChannel(
   channels: Channel[] | undefined,
+  configuredId: string,
 ): Channel | null {
   if (!channels) {
     return null;
@@ -35,18 +49,21 @@ export function findFeedbackChannel(
   return (
     channels.find(
       (channel) =>
+        channel.id === configuredId &&
         channel.channelType === "stream" &&
         channel.visibility === "private" &&
         channel.archivedAt === null &&
-        channel.isMember &&
-        channel.name.trim().toLowerCase() ===
-          FEEDBACK_CHANNEL_NAME.toLowerCase(),
+        channel.isMember,
     ) ?? null
   );
 }
 
+const FEEDBACK_CHANNEL_UNAVAILABLE_MESSAGE =
+  "Feedback is unavailable in this workspace. The configured feedback channel is missing, inaccessible, or not an active private stream. Ask your workspace administrator to verify the channel and your membership.";
+
 /**
- * Best-effort diagnostics text bundled when the user checks "Attach logs".
+ * Best-effort diagnostics text bundled when the user checks
+ * "Attach diagnostics".
  *
  * The desktop app has no on-disk log file yet (it logs to stderr), so this
  * captures the environment context that is available client-side. When a real
@@ -71,13 +88,16 @@ async function collectDiagnostics(): Promise<string> {
 }
 
 /**
- * Owns feedback delivery: resolves (or creates) the private "Buzz feedback"
- * channel, manages the optional image attachment, gathers a diagnostics bundle
- * when logs are requested, and posts the feedback message with imeta tags.
+ * Owns feedback delivery to the explicitly configured private channel, manages
+ * the optional image attachment, gathers a diagnostics bundle when requested,
+ * and posts the feedback message with imeta tags.
  */
 export function useSendFeedback() {
-  const channelsQuery = useChannelsQuery();
-  const createChannelMutation = useCreateChannelMutation();
+  const configuredChannelId = getConfiguredFeedbackChannelId();
+  const channelsQuery = useChannelsQuery({
+    enabled: configuredChannelId !== null,
+  });
+  const { activeWorkspace } = useWorkspaces();
   const [attachedImage, setAttachedImage] = React.useState<ImetaMedia | null>(
     null,
   );
@@ -115,24 +135,17 @@ export function useSendFeedback() {
 
   const submitMutation = useMutation({
     mutationFn: async (input: SendFeedbackInput) => {
-      // Resolve or create the private feedback channel.
-      let channel = findFeedbackChannel(channelsQuery.data);
-      if (!channel) {
-        // The cached list may be stale or still seeded from a cold-start
-        // snapshot — e.g. the initial fetch hasn't landed, or we were added to
-        // the feedback channel from another client. Refetch authoritatively
-        // before creating, so we don't spawn a duplicate of a channel that
-        // already exists server-side.
-        const refreshed = await channelsQuery.refetch();
-        channel = findFeedbackChannel(refreshed.data);
+      if (!configuredChannelId) {
+        throw new Error("Feedback is not configured for this build.");
       }
+
+      // Refetch authoritatively before every send. The configured destination
+      // may have been archived or the user's membership may have changed since
+      // the sidebar cache was populated.
+      const refreshed = await channelsQuery.refetch();
+      const channel = findFeedbackChannel(refreshed.data, configuredChannelId);
       if (!channel) {
-        channel = await createChannelMutation.mutateAsync({
-          name: FEEDBACK_CHANNEL_NAME,
-          channelType: "stream",
-          visibility: "private",
-          description: "In-app feedback and bug reports.",
-        });
+        throw new Error(FEEDBACK_CHANNEL_UNAVAILABLE_MESSAGE);
       }
 
       const headerParts: string[] = [];
@@ -174,6 +187,13 @@ export function useSendFeedback() {
   return {
     attachImage,
     attachedImage,
+    destinationChannelId: configuredChannelId,
+    destinationChannelName: configuredChannelId
+      ? (findFeedbackChannel(channelsQuery.data, configuredChannelId)?.name ??
+        null)
+      : null,
+    destinationRelayUrl: activeWorkspace?.relayUrl ?? "the current relay",
+    destinationWorkspaceName: activeWorkspace?.name ?? "this workspace",
     isPending: submitMutation.isPending,
     removeImage,
     reset,

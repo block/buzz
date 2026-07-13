@@ -623,6 +623,17 @@ test("snaps custom avatar colors to the dot grid", async ({ page }) => {
   await expect(page.getByTestId("profile-avatar-done")).toBeVisible();
 });
 
+test("hides Send feedback when no destination is configured", async ({
+  page,
+}) => {
+  await page.goto("/");
+
+  await openProfileMenu(page);
+  await expect(page.getByTestId("profile-popover-send-feedback")).toHaveCount(
+    0,
+  );
+});
+
 test("updates presence from the profile menu", async ({ page }) => {
   await page.goto("/");
 

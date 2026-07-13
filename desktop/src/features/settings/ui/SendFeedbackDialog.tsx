@@ -53,14 +53,19 @@ export type SendFeedbackInput = {
  *
  * Layout mirrors {@link NewDirectMessageDialog}: a pill row (here, selectable
  * feedback categories in place of profile pills), a generic feedback box with an
- * optional image attachment shown horizontally beside it, and an "Attach logs"
- * checkbox. Selecting a positive category fires the heart-burst emitter.
+ * optional image attachment shown horizontally beside it, and an "Attach
+ * diagnostics" checkbox. Selecting a positive category fires the heart-burst
+ * emitter.
  *
  * Delivery (channel resolution, upload, send) is delegated to `onSubmit`, and
  * image attachment to `onAttachImage`, so this shell stays presentational.
  */
 export function SendFeedbackDialog({
   attachedImageUrl,
+  destinationChannelId,
+  destinationChannelName,
+  destinationRelayUrl,
+  destinationWorkspaceName,
   isPending,
   onAttachImage,
   onOpenChange,
@@ -70,6 +75,14 @@ export function SendFeedbackDialog({
 }: {
   /** Preview URL of the currently-attached image, or null when none. */
   attachedImageUrl: string | null;
+  /** Build-configured private destination channel ID. */
+  destinationChannelId: string;
+  /** Resolved channel name, when the current workspace exposes it. */
+  destinationChannelName: string | null;
+  /** Current relay URL disclosed to the sender. */
+  destinationRelayUrl: string;
+  /** Current workspace/operator label disclosed to the sender. */
+  destinationWorkspaceName: string;
   isPending: boolean;
   /** Opens a file picker and uploads; the parent owns the resulting URL. */
   onAttachImage: () => Promise<void>;
@@ -159,6 +172,28 @@ export function SendFeedbackDialog({
               <span className="sr-only">Close</span>
             </DialogClose>
           </div>
+          <p
+            className="pt-2 text-sm text-muted-foreground"
+            data-testid="feedback-destination-disclosure"
+          >
+            This report goes to the private{" "}
+            <span className="font-medium text-foreground">
+              {destinationChannelName
+                ? `#${destinationChannelName}`
+                : `feedback channel ${destinationChannelId}`}
+            </span>{" "}
+            in{" "}
+            <span className="font-medium text-foreground">
+              {destinationWorkspaceName}
+            </span>{" "}
+            via{" "}
+            <span className="font-medium text-foreground">
+              {destinationRelayUrl}
+            </span>
+            . Attaching an image uploads it immediately to that relay. If you
+            send this report, the image and any diagnostics are shared in the
+            same channel.
+          </p>
         </DialogHeader>
 
         <form
@@ -280,20 +315,26 @@ export function SendFeedbackDialog({
             )}
           </div>
 
-          {/* Attach logs checkbox. */}
-          <label
-            className="mt-4 flex w-fit cursor-pointer items-center gap-2 text-sm text-muted-foreground"
-            htmlFor="feedback-include-logs"
-          >
-            <Checkbox
-              checked={includeLogs}
-              data-testid="feedback-include-logs"
-              disabled={isPending}
-              id="feedback-include-logs"
-              onCheckedChange={(checked) => setIncludeLogs(checked === true)}
-            />
-            Attach logs
-          </label>
+          {/* Optional environment diagnostics attachment. */}
+          <div className="mt-4 space-y-1.5">
+            <label
+              className="flex w-fit cursor-pointer items-center gap-2 text-sm text-muted-foreground"
+              htmlFor="feedback-include-logs"
+            >
+              <Checkbox
+                checked={includeLogs}
+                data-testid="feedback-include-logs"
+                disabled={isPending}
+                id="feedback-include-logs"
+                onCheckedChange={(checked) => setIncludeLogs(checked === true)}
+              />
+              Attach diagnostics
+            </label>
+            <p className="pl-6 text-xs text-muted-foreground">
+              Includes capture time, app version, platform, user agent, and
+              language. No application log lines are collected.
+            </p>
+          </div>
 
           {errorMessage ? (
             <p
