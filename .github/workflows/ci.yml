@@ -54,6 +54,7 @@ jobs:
               - 'pnpm-lock.yaml'
             mobile:
               - 'mobile/**'
+              - '.github/workflows/ci.yml'
 
   rust-lint:
     name: Rust Lint
@@ -734,6 +735,8 @@ jobs:
         run: cd mobile && flutter analyze
       - name: Test
         run: cd mobile && flutter test
+      - name: Build Android debug APK
+        run: just mobile-build-android
 
   security:
     name: Security
