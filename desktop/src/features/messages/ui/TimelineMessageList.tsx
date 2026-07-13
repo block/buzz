@@ -403,7 +403,7 @@ function VirtualizedTimelineRows({
   itemsLengthRef.current = items.length;
   const previousKeysRef = React.useRef<readonly string[]>([]);
   const prependAnchorRef = React.useRef<{
-    messageId: string;
+    itemKey: string;
     top: number;
   } | null>(null);
   const prependWatcherFrameRef = React.useRef<number | null>(null);
@@ -443,12 +443,14 @@ function VirtualizedTimelineRows({
     if (!(scroller instanceof HTMLDivElement)) return;
     const scrollerTop = scroller.getBoundingClientRect().top;
     const row = Array.from(
-      scroller.querySelectorAll<HTMLElement>("[data-message-id]"),
-    ).find((candidate) => candidate.getBoundingClientRect().top >= scrollerTop);
-    const messageId = row?.dataset.messageId;
-    if (!row || !messageId) return;
+      scroller.querySelectorAll<HTMLElement>("[data-timeline-item-key]"),
+    ).find(
+      (candidate) => candidate.getBoundingClientRect().top >= scrollerTop - 1,
+    );
+    const itemKey = row?.dataset.timelineItemKey;
+    if (!row || !itemKey) return;
     prependAnchorRef.current = {
-      messageId,
+      itemKey,
       top: row.getBoundingClientRect().top - scrollerTop,
     };
   }, []);
@@ -482,8 +484,10 @@ function VirtualizedTimelineRows({
         scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop <=
         32;
       const row = Array.from(
-        scroller.querySelectorAll<HTMLElement>("[data-message-id]"),
-      ).find((candidate) => candidate.dataset.messageId === anchor.messageId);
+        scroller.querySelectorAll<HTMLElement>("[data-timeline-item-key]"),
+      ).find(
+        (candidate) => candidate.dataset.timelineItemKey === anchor.itemKey,
+      );
       const top = row
         ? row.getBoundingClientRect().top - scroller.getBoundingClientRect().top
         : null;
@@ -709,6 +713,7 @@ function TimelineRowShell({
   return (
     <div
       className={cn(useContentVisibility && "timeline-row-cv")}
+      data-timeline-item-key={getTimelineItemKey(item)}
       style={useContentVisibility ? timelineRowReserveStyle(item) : undefined}
     >
       {children}
