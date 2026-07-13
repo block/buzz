@@ -27,6 +27,8 @@ pub mod feed;
 pub mod git_repo;
 /// Embedded database migrations.
 pub mod migration;
+/// Community moderation: reports, bans/timeouts, audit actions.
+pub mod moderation;
 /// Monthly table partition management.
 pub mod partition;
 /// Reaction persistence.
@@ -35,6 +37,8 @@ pub mod reaction;
 pub mod relay_members;
 /// Thread metadata persistence.
 pub mod thread;
+/// Per-community usage rollup queries for Prometheus gauges.
+pub mod usage;
 /// User profile persistence.
 pub mod user;
 /// Workflow, run, and approval persistence.
@@ -149,7 +153,7 @@ pub struct DbPoolStats {
 /// Configuration for the Postgres connection pool.
 #[derive(Debug, Clone)]
 pub struct DbConfig {
-    /// Postgres connection URL (e.g. `postgres://user:pass@host/db`).
+    /// Postgres connection URL (usually sourced from `DATABASE_URL`).
     pub database_url: String,
     /// Maximum number of connections in the pool.
     pub max_connections: u32,
@@ -169,7 +173,7 @@ impl Default for DbConfig {
     /// At 20 main + 5 audit = 25/pod, four relay pods fit within the PG limit.
     fn default() -> Self {
         Self {
-            database_url: "postgres://buzz:buzz_dev@localhost:5432/buzz".to_string(),
+            database_url: "postgres://buzz:buzz_dev@localhost:5432/buzz".to_string(), // sadscan:disable np.postgres.1
             max_connections: 20,
             min_connections: 2,
             acquire_timeout_secs: 3,
@@ -186,6 +190,37 @@ pub struct CommunityRecord {
     pub id: CommunityId,
     /// Normalized host that maps to this community.
     pub host: String,
+}
+
+/// Community row returned by idempotent community ensure/create operations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnsuredCommunityRecord {
+    /// Stable server-resolved community id.
+    pub id: CommunityId,
+    /// Normalized host that maps to this community.
+    pub host: String,
+    /// True only when this call inserted the `communities` row.
+    pub created: bool,
+}
+
+/// Community row returned by an atomic create-with-owner operation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreatedCommunityRecord {
+    /// Stable server-resolved community id.
+    pub id: CommunityId,
+    /// Normalized host stored for the community.
+    pub host: String,
+}
+
+/// Community row returned by operator-plane ownership reads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OwnedCommunityRecord {
+    /// Stable server-resolved community id.
+    pub id: CommunityId,
+    /// Normalized host that maps to this community.
+    pub host: String,
+    /// When the community row was created.
+    pub created_at: DateTime<Utc>,
 }
 
 /// Token summary returned by [`Db::list_active_tokens`].
@@ -253,6 +288,64 @@ impl Db {
         }
     }
 
+    /// Return total number of communities on this relay.
+    pub async fn usage_community_count(&self) -> Result<i64> {
+        usage::community_count(&self.pool).await
+    }
+
+    /// Return per-community user counts split by human/agent.
+    pub async fn usage_user_counts(&self) -> Result<Vec<usage::CommunityUserCounts>> {
+        usage::user_counts(&self.pool).await
+    }
+
+    /// Return per-community channel counts by type.
+    pub async fn usage_channel_counts(&self) -> Result<Vec<usage::CommunityChannelCount>> {
+        usage::channel_counts(&self.pool).await
+    }
+
+    /// Return per-community kind=9 message counts.
+    pub async fn usage_message_counts(&self) -> Result<Vec<usage::CommunityMessageCount>> {
+        usage::message_counts(&self.pool).await
+    }
+
+    /// Return per-community relay-member counts by role.
+    pub async fn usage_relay_member_counts(&self) -> Result<Vec<usage::CommunityMemberCount>> {
+        usage::relay_member_counts(&self.pool).await
+    }
+
+    /// Return per-community workflow counts by status.
+    pub async fn usage_workflow_counts(&self) -> Result<Vec<usage::CommunityWorkflowCount>> {
+        usage::workflow_counts(&self.pool).await
+    }
+
+    /// Return per-community git-repo counts.
+    pub async fn usage_git_repo_counts(&self) -> Result<Vec<usage::CommunityGitRepoCount>> {
+        usage::git_repo_counts(&self.pool).await
+    }
+
+    /// Return per-community distinct active-user counts for a given SQL interval.
+    ///
+    /// `interval_sql` must be a trusted literal such as `"1 day"` or `"7 days"`.
+    pub async fn usage_active_user_counts(
+        &self,
+        interval_sql: &'static str,
+    ) -> Result<Vec<usage::CommunityActiveUsers>> {
+        usage::active_user_counts(&self.pool, interval_sql).await
+    }
+
+    /// Return per-community active-channel counts for a given SQL interval.
+    pub async fn usage_active_channel_counts(
+        &self,
+        interval_sql: &'static str,
+    ) -> Result<Vec<usage::CommunityActiveChannels>> {
+        usage::active_channel_counts(&self.pool, interval_sql).await
+    }
+
+    /// Return all community id → host mappings.
+    pub async fn usage_community_hosts(&self) -> Result<Vec<usage::CommunityHost>> {
+        usage::community_hosts(&self.pool).await
+    }
+
     /// Begin a database transaction for atomic multi-statement operations.
     ///
     /// Returns a `'static` transaction because `PgPool` is `Arc`-backed internally.
@@ -290,6 +383,43 @@ impl Db {
             })
         })
         .transpose()
+    }
+
+    /// Lists communities where `owner_pubkey` currently holds the `owner` role.
+    ///
+    /// This is an operator-plane helper, not a tenant-scoped data-plane read:
+    /// callers must gate it on deployment-level operator auth before exposing it.
+    pub async fn list_communities_owned_by(
+        &self,
+        owner_pubkey: &str,
+    ) -> Result<Vec<OwnedCommunityRecord>> {
+        let owner_pubkey = owner_pubkey.to_ascii_lowercase();
+        let rows = sqlx::query(
+            r#"
+            SELECT c.id, c.host, c.created_at
+            FROM communities c
+            JOIN relay_members rm ON rm.community_id = c.id
+            WHERE rm.pubkey = $1
+              AND rm.role = 'owner'
+            ORDER BY c.created_at ASC, c.host ASC
+            "#,
+        )
+        .bind(owner_pubkey)
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter()
+            .map(|row| {
+                let id: Uuid = row.try_get("id")?;
+                let host: String = row.try_get("host")?;
+                let created_at: DateTime<Utc> = row.try_get("created_at")?;
+                Ok(OwnedCommunityRecord {
+                    id: CommunityId::from_uuid(id),
+                    host,
+                    created_at,
+                })
+            })
+            .collect()
     }
 
     /// Returns the normalized host mapped to a community id, if the community
@@ -372,13 +502,13 @@ impl Db {
     pub async fn ensure_configured_community(
         &self,
         normalized_host: &str,
-    ) -> Result<CommunityRecord> {
+    ) -> Result<EnsuredCommunityRecord> {
         let row = sqlx::query(
             r#"
             INSERT INTO communities (host)
             VALUES ($1)
-            ON CONFLICT (lower(host)) DO UPDATE SET host = EXCLUDED.host
-            RETURNING id, host
+            ON CONFLICT (lower(host)) DO UPDATE SET host = communities.host
+            RETURNING id, host, (xmax = 0) AS created
             "#,
         )
         .bind(normalized_host)
@@ -387,11 +517,79 @@ impl Db {
 
         let id: Uuid = row.try_get("id")?;
         let host: String = row.try_get("host")?;
+        let created: bool = row.try_get("created")?;
 
-        Ok(CommunityRecord {
+        Ok(EnsuredCommunityRecord {
             id: CommunityId::from_uuid(id),
             host,
+            created,
         })
+    }
+
+    /// Atomically creates a community and its initial owner.
+    ///
+    /// Returns the existing row when the normalized host already has the same
+    /// current owner, making ambiguous create retries naturally idempotent.
+    /// Returns `None` when the host exists with a different (or missing) owner.
+    /// The initial host and owner inserts share one transaction, so callers
+    /// never observe a partially provisioned community or rotate an owner.
+    pub async fn create_community_with_owner(
+        &self,
+        normalized_host: &str,
+        owner_pubkey: &str,
+    ) -> Result<Option<CreatedCommunityRecord>> {
+        let owner_pubkey = owner_pubkey.to_ascii_lowercase();
+        let mut tx = self.pool.begin().await?;
+        let row = sqlx::query(
+            r#"
+            INSERT INTO communities (host)
+            VALUES ($1)
+            ON CONFLICT (lower(host)) DO NOTHING
+            RETURNING id, host
+            "#,
+        )
+        .bind(normalized_host)
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        let (id, host) = if let Some(row) = row {
+            let id: Uuid = row.try_get("id")?;
+            let host: String = row.try_get("host")?;
+            sqlx::query(
+                "INSERT INTO relay_members (community_id, pubkey, role, added_by) VALUES ($1, $2, 'owner', NULL)",
+            )
+            .bind(id)
+            .bind(&owner_pubkey)
+            .execute(&mut *tx)
+            .await?;
+            (id, host)
+        } else {
+            let existing = sqlx::query(
+                r#"
+                SELECT c.id, c.host
+                FROM communities c
+                JOIN relay_members rm ON rm.community_id = c.id
+                WHERE lower(c.host) = lower($1)
+                  AND lower(rm.pubkey) = lower($2)
+                  AND rm.role = 'owner'
+                "#,
+            )
+            .bind(normalized_host)
+            .bind(&owner_pubkey)
+            .fetch_optional(&mut *tx)
+            .await?;
+            let Some(existing) = existing else {
+                tx.rollback().await?;
+                return Ok(None);
+            };
+            (existing.try_get("id")?, existing.try_get("host")?)
+        };
+
+        tx.commit().await?;
+        Ok(Some(CreatedCommunityRecord {
+            id: CommunityId::from_uuid(id),
+            host,
+        }))
     }
 
     /// Returns the community that owns a channel, if the channel exists.
@@ -1016,7 +1214,11 @@ impl Db {
     }
 
     /// Ensure a user record exists (upsert).
-    pub async fn ensure_user(&self, community_id: CommunityId, pubkey: &[u8]) -> Result<()> {
+    ///
+    /// Returns `true` if a new row was inserted (first time), `false` if it
+    /// already existed. Callers use the `true` return to increment
+    /// `buzz_users_created_total`.
+    pub async fn ensure_user(&self, community_id: CommunityId, pubkey: &[u8]) -> Result<bool> {
         user::ensure_user(&self.pool, community_id, pubkey).await
     }
 
@@ -2173,6 +2375,151 @@ impl Db {
         relay_members::backfill_from_allowlist(&self.pool, community).await
     }
 
+    /// Insert a tenant-scoped NIP-56 report row, idempotent by report event id.
+    pub async fn insert_moderation_report(
+        &self,
+        community: CommunityId,
+        report: moderation::NewReport<'_>,
+    ) -> Result<Uuid> {
+        moderation::insert_report(&self.pool, community, report).await
+    }
+
+    /// List moderation reports for a community, newest first.
+    pub async fn list_moderation_reports(
+        &self,
+        community: CommunityId,
+        status: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<moderation::ReportRecord>> {
+        moderation::list_reports(&self.pool, community, status, limit).await
+    }
+
+    /// Fetch one moderation report by row id.
+    pub async fn get_moderation_report(
+        &self,
+        community: CommunityId,
+        report_id: Uuid,
+    ) -> Result<Option<moderation::ReportRecord>> {
+        moderation::get_report(&self.pool, community, report_id).await
+    }
+
+    /// Fetch one moderation report by signed NIP-56 report event id.
+    pub async fn get_moderation_report_by_event(
+        &self,
+        community: CommunityId,
+        report_event_id: &[u8],
+    ) -> Result<Option<moderation::ReportRecord>> {
+        moderation::get_report_by_event(&self.pool, community, report_event_id).await
+    }
+
+    /// Resolve, dismiss, or escalate an open moderation report.
+    pub async fn resolve_moderation_report(
+        &self,
+        community: CommunityId,
+        report_id: Uuid,
+        status: &str,
+        resolved_by: &[u8],
+        action_id: Option<Uuid>,
+    ) -> Result<bool> {
+        moderation::resolve_report(
+            &self.pool,
+            community,
+            report_id,
+            status,
+            resolved_by,
+            action_id,
+        )
+        .await
+    }
+
+    /// Upsert a community ban for a member pubkey.
+    pub async fn ban_community_member(
+        &self,
+        community: CommunityId,
+        pubkey: &[u8],
+        actor: &[u8],
+        reason: Option<&str>,
+        expires_at: Option<DateTime<Utc>>,
+    ) -> Result<()> {
+        moderation::ban_member(&self.pool, community, pubkey, actor, reason, expires_at).await
+    }
+
+    /// Lift a community ban for a member pubkey.
+    pub async fn unban_community_member(
+        &self,
+        community: CommunityId,
+        pubkey: &[u8],
+        actor: &[u8],
+    ) -> Result<bool> {
+        moderation::unban_member(&self.pool, community, pubkey, actor).await
+    }
+
+    /// Upsert a community timeout/write-block for a member pubkey.
+    pub async fn timeout_community_member(
+        &self,
+        community: CommunityId,
+        pubkey: &[u8],
+        actor: &[u8],
+        muted_until: DateTime<Utc>,
+        reason: Option<&str>,
+    ) -> Result<()> {
+        moderation::timeout_member(&self.pool, community, pubkey, actor, muted_until, reason).await
+    }
+
+    /// Clear a community timeout/write-block for a member pubkey.
+    pub async fn untimeout_community_member(
+        &self,
+        community: CommunityId,
+        pubkey: &[u8],
+        actor: &[u8],
+    ) -> Result<bool> {
+        moderation::untimeout_member(&self.pool, community, pubkey, actor).await
+    }
+
+    /// Fetch the active ban/timeout restriction state for enforcement hot paths.
+    pub async fn moderation_restriction_state(
+        &self,
+        community: CommunityId,
+        pubkey: &[u8],
+    ) -> Result<moderation::RestrictionState> {
+        moderation::restriction_state(&self.pool, community, pubkey).await
+    }
+
+    /// Fetch the full ban/timeout row for a member pubkey.
+    pub async fn get_community_ban(
+        &self,
+        community: CommunityId,
+        pubkey: &[u8],
+    ) -> Result<Option<moderation::BanRecord>> {
+        moderation::get_ban(&self.pool, community, pubkey).await
+    }
+
+    /// List currently restricted members in a community.
+    pub async fn list_community_restrictions(
+        &self,
+        community: CommunityId,
+    ) -> Result<Vec<moderation::BanRecord>> {
+        moderation::list_restricted(&self.pool, community).await
+    }
+
+    /// Insert a moderation audit action row.
+    pub async fn insert_moderation_action(
+        &self,
+        community: CommunityId,
+        action: moderation::NewAction<'_>,
+    ) -> Result<Uuid> {
+        moderation::insert_action(&self.pool, community, action).await
+    }
+
+    /// List moderation audit action rows, newest first.
+    pub async fn list_moderation_actions(
+        &self,
+        community: CommunityId,
+        limit: i64,
+    ) -> Result<Vec<moderation::ActionRecord>> {
+        moderation::list_actions(&self.pool, community, limit).await
+    }
+
     /// Return the current owner of git repo name `repo_id` in `community`, or
     /// `None` if unreserved. See [`git_repo::repo_name_owner`].
     pub async fn repo_name_owner(
@@ -2715,6 +3062,133 @@ mod tests {
             .expect("lookup stored-case host")
             .expect("community found by stored-case host");
         assert_eq!(found.id, CommunityId::from_uuid(id));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn create_community_with_owner_is_atomic_and_create_only() {
+        let db = setup_db().await;
+        let host = format!("create-only-{}.example", Uuid::new_v4().simple());
+        let owner = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let other = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+        let created = db
+            .create_community_with_owner(&host, owner)
+            .await
+            .expect("create community")
+            .expect("new host");
+        assert_eq!(created.host, host);
+        let owner_role: Option<String> = sqlx::query_scalar(
+            "SELECT role FROM relay_members WHERE community_id = $1 AND pubkey = $2",
+        )
+        .bind(created.id.as_uuid())
+        .bind(owner)
+        .fetch_optional(&db.pool)
+        .await
+        .expect("owner role");
+        assert_eq!(owner_role.as_deref(), Some("owner"));
+
+        let retry = db
+            .create_community_with_owner(&host.to_ascii_uppercase(), owner)
+            .await
+            .expect("same-owner retry")
+            .expect("existing same-owner community");
+        assert_eq!(retry, created, "retry returns the original row");
+
+        let collision = db
+            .create_community_with_owner(&host, other)
+            .await
+            .expect("collision result");
+        assert!(collision.is_none());
+        let roles: Vec<(String, String)> = sqlx::query_as(
+            "SELECT pubkey, role FROM relay_members WHERE community_id = $1 ORDER BY pubkey",
+        )
+        .bind(created.id.as_uuid())
+        .fetch_all(&db.pool)
+        .await
+        .expect("community roles");
+        assert_eq!(roles, vec![(owner.to_string(), "owner".to_string())]);
+
+        db.bootstrap_owner(created.id, other)
+            .await
+            .expect("rotate owner");
+        let post_rotation_retry = db
+            .create_community_with_owner(&host, owner)
+            .await
+            .expect("post-rotation retry");
+        assert!(post_rotation_retry.is_none());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn concurrent_same_owner_create_returns_the_winning_row_to_both_callers() {
+        let db = setup_db().await;
+        let host = format!("concurrent-create-{}.example", Uuid::new_v4().simple());
+        let owner = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+        let (first, second) = tokio::join!(
+            db.create_community_with_owner(&host, owner),
+            db.create_community_with_owner(&host, owner),
+        );
+        let first = first
+            .expect("first concurrent create")
+            .expect("first result");
+        let second = second
+            .expect("second concurrent create")
+            .expect("second result");
+
+        assert_eq!(first, second, "conflict loser re-reads the winning row");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn ensure_configured_community_reports_insert_winner() {
+        let db = setup_db().await;
+        let host = format!("ensure-community-{}.example", Uuid::new_v4().simple());
+
+        let first = db
+            .ensure_configured_community(&host)
+            .await
+            .expect("first ensure");
+        assert!(first.created, "first ensure should report created");
+        assert_eq!(first.host, host);
+
+        let second = db
+            .ensure_configured_community(&host)
+            .await
+            .expect("second ensure");
+        assert!(!second.created, "second ensure should report existed");
+        assert_eq!(second.id, first.id);
+        assert_eq!(second.host, host);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn list_communities_owned_by_returns_only_owner_rows() {
+        let db = setup_db().await;
+        let community_a = CommunityId::from_uuid(make_community(&db.pool).await);
+        let community_b = CommunityId::from_uuid(make_community(&db.pool).await);
+        let community_c = CommunityId::from_uuid(make_community(&db.pool).await);
+        let owner = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let other = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+        db.bootstrap_owner(community_a, owner)
+            .await
+            .expect("owner A");
+        db.bootstrap_owner(community_b, other)
+            .await
+            .expect("other owner B");
+        db.add_relay_member(community_c, owner, "admin", None)
+            .await
+            .expect("admin C");
+
+        let owned = db
+            .list_communities_owned_by(owner)
+            .await
+            .expect("list owned communities");
+
+        assert_eq!(owned.len(), 1);
+        assert_eq!(owned[0].id, community_a);
     }
 
     async fn insert_channel(pool: &PgPool, community_id: Uuid, channel_id: Uuid) {

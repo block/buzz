@@ -1,27 +1,51 @@
+use serde::Serialize;
 use tauri::{AppHandle, State};
 
 use crate::{
     app_state::AppState,
     managed_agents::{
         config_bridge::{
+            read_goose_file_config,
             reader::read_config_surface,
             types::{
                 AcpConfigOptionEntry, AcpConfigOptionValue, AcpModelEntry, ConfigOrigin,
                 NormalizedField, RuntimeConfigSurface, SessionConfigCache,
             },
         },
-        current_instance_id, effective_agent_command, known_acp_runtime, load_managed_agents,
-        load_personas, resolve_effective_prompt_model_provider, save_managed_agents,
-        sync_managed_agent_processes, KnownAcpRuntime, ManagedAgentRecord, PersonaRecord,
+        current_instance_id, known_acp_runtime, load_managed_agents, load_personas,
+        resolve_effective_prompt_model_provider, save_managed_agents, sync_managed_agent_processes,
+        AgentDefinition, GlobalAgentConfig, KnownAcpRuntime, ManagedAgentRecord,
     },
 };
 
-/// Resolve the config surface with persona values applied.
+/// Subset of the goose file config exposed to the frontend for gate evaluation.
+///
+/// Only the fields the dialog gate needs — not the full `RuntimeConfigSurface`.
+/// The gate uses this to know which requirements are already satisfied in the
+/// harness config file, so it can show "Set in goose config" rather than
+/// surfacing a false missing-key marker.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeFileConfigSubset {
+    /// Provider set in the harness config file, if any.
+    pub provider: Option<String>,
+    /// Model set in the harness config file, if any.
+    pub model: Option<String>,
+    /// Flat credential env keys found in the harness config file's `extra` map
+    /// (e.g. `DATABRICKS_HOST`).  Only non-empty values are included.
+    pub satisfied_env_keys: Vec<String>,
+}
+
+/// Resolve the config surface with persona and global default values applied.
 ///
 /// The pipeline: resolve the linked persona's prompt/model/provider, inject
 /// each into the record only where the record lacks its own value, let
 /// `read_config_surface` tag those injected fields `BuzzExplicit`, then re-tag
 /// exactly the injected fields to `PersonaDefault`.
+///
+/// Global defaults fill in when neither the record nor the linked persona
+/// provides a value. They are re-tagged to `GlobalDefault` so the UI can
+/// display "inherited from global defaults".
 ///
 /// The re-tag is triple-gated — a field is re-tagged only when (a) the record
 /// did not already have it (`!had_*`), (b) the surface produced the field, and
@@ -29,9 +53,10 @@ use crate::{
 /// Buzz keeps `had_* == true` and is never re-tagged.
 fn resolve_config_surface(
     mut record: ManagedAgentRecord,
-    personas: &[PersonaRecord],
+    personas: &[AgentDefinition],
     runtime_meta: Option<&KnownAcpRuntime>,
     session_cache: Option<&SessionConfigCache>,
+    global: &GlobalAgentConfig,
 ) -> RuntimeConfigSurface {
     let had_prompt =
         record.system_prompt.is_some() || record.env_vars.contains_key("BUZZ_ACP_SYSTEM_PROMPT");
@@ -45,6 +70,7 @@ fn resolve_config_surface(
         personas,
         record.system_prompt.clone(),
         record.model.clone(),
+        record.provider.clone(),
     );
 
     // Build the baseline the reader overrides a live model against, paired with
@@ -67,9 +93,21 @@ fn resolve_config_surface(
             None
         }
     } else {
+        // Prefer persona as baseline, fall back to global when persona has none
+        // and the model was overridden mid-session (global-default agent).
         persona_model
             .clone()
             .map(|m| (m, ConfigOrigin::PersonaDefault))
+            .or_else(|| {
+                if model_overridden {
+                    global
+                        .model
+                        .clone()
+                        .map(|m| (m, ConfigOrigin::GlobalDefault))
+                } else {
+                    None
+                }
+            })
     };
 
     // Inject resolved persona values into the record where absent.
@@ -89,6 +127,24 @@ fn resolve_config_surface(
         }
     }
 
+    // Inject global defaults where neither the record nor the persona had a value.
+    // Track injection so we can re-tag to GlobalDefault after the reader.
+    let inject_global_model = !had_model && record.model.is_none();
+    let inject_global_provider = !had_provider
+        && !provider_env_key.is_empty()
+        && !record.env_vars.contains_key(provider_env_key);
+
+    if inject_global_model {
+        record.model = global.model.clone();
+    }
+    if inject_global_provider {
+        if let Some(ref gprov) = global.provider {
+            record
+                .env_vars
+                .insert(provider_env_key.to_string(), gprov.clone());
+        }
+    }
+
     let mut surface = read_config_surface(
         &record,
         runtime_meta,
@@ -100,11 +156,19 @@ fn resolve_config_surface(
     if !had_prompt {
         retag_persona_default(&mut surface.normalized.system_prompt);
     }
-    if !had_model {
+    if !had_model && !inject_global_model {
         retag_persona_default(&mut surface.normalized.model);
     }
-    if !had_provider && !provider_env_key.is_empty() {
+    if !had_provider && !provider_env_key.is_empty() && !inject_global_provider {
         retag_persona_default(&mut surface.normalized.provider);
+    }
+
+    // Re-tag global-sourced fields from BuzzExplicit to GlobalDefault.
+    if inject_global_model {
+        retag_global_default(&mut surface.normalized.model);
+    }
+    if inject_global_provider {
+        retag_global_default(&mut surface.normalized.provider);
     }
 
     // Re-tag persona-snapshotted model from BuzzExplicit to PersonaDefault.
@@ -132,6 +196,136 @@ fn retag_persona_default(field: &mut Option<NormalizedField>) {
     if let Some(field) = field {
         if field.origin == ConfigOrigin::BuzzExplicit {
             field.origin = ConfigOrigin::PersonaDefault;
+        }
+    }
+}
+
+/// Get the file-layer config for a runtime — used by the Create/Edit/Persona
+/// dialogs to know which requirements are already satisfied in the harness
+/// config file (e.g. `~/.config/goose/config.yaml`), so they can show
+/// "Set in goose config" instead of surfacing a false required-field marker.
+///
+/// Returns `null` when the runtime has no config file or it cannot be parsed.
+/// Currently only "goose" is supported; other runtimes return `null`.
+#[tauri::command]
+pub async fn get_runtime_file_config(
+    runtime_id: String,
+) -> Result<Option<RuntimeFileConfigSubset>, String> {
+    tokio::task::spawn_blocking(move || match runtime_id.as_str() {
+        "goose" => {
+            let cfg = read_goose_file_config()?;
+            let satisfied_env_keys = cfg
+                .extra
+                .into_iter()
+                .filter(|(_, v)| !v.is_empty())
+                .map(|(k, _)| k)
+                .collect();
+            Some(RuntimeFileConfigSubset {
+                provider: cfg.provider,
+                model: cfg.model,
+                satisfied_env_keys,
+            })
+        }
+        _ => None,
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking failed: {e}"))
+}
+
+/// Return the key names of all non-empty baked build env vars.
+///
+/// Internal (Block) builds bake provider credentials and other env pairs into
+/// the binary at compile time via `BUZZ_BUILD_AGENT_ENV`. The backend readiness
+/// gate already treats these keys as satisfying their requirements (Layer 1 of
+/// `resolve_effective_agent_env`). This command exposes the *key names only* —
+/// never the values — so the frontend dialogs can apply the same logic and avoid
+/// surfacing a spurious "Required" badge for keys that are covered by the baked
+/// env.
+///
+/// OSS builds have no baked env, so this returns an empty list — OSS behavior
+/// is unchanged.
+#[tauri::command]
+pub fn get_baked_build_env_keys() -> Vec<String> {
+    crate::managed_agents::baked_build_env()
+        .into_iter()
+        .filter(|(_, v)| !v.is_empty())
+        .map(|(k, _)| k)
+        .collect()
+}
+
+/// A single baked build env entry returned to the frontend.
+///
+/// Values are masked in Rust so unmasked secret values never cross the
+/// Tauri IPC boundary. The `masked` flag lets the frontend style masked
+/// rows distinctly.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct BakedEnvEntry {
+    pub key: String,
+    /// The display value — real value for non-secret keys, `••••••` for
+    /// secret keys whose names match the secret heuristic.
+    pub value: String,
+    /// `true` when the value was replaced by the mask placeholder.
+    pub masked: bool,
+}
+
+/// Returns `true` when a baked-env key is safe to display unmasked in the UI.
+///
+/// This uses an explicit allowlist of keys that are known safe (non-secret).
+/// Any key NOT in this set is masked — default-deny for a security surface.
+///
+/// Allowlist (case-insensitive):
+/// - `BUZZ_AGENT_PROVIDER`, `BUZZ_AGENT_MODEL` — agent runtime selection
+/// - `BUZZ_AGENT_THINKING_EFFORT` — non-secret enum (none/minimal/low/medium/high/xhigh/max)
+/// - `DATABRICKS_HOST`, `DATABRICKS_MODEL` — Block non-secret defaults
+fn is_safe_to_reveal(key: &str) -> bool {
+    const SAFE_KEYS: &[&str] = &[
+        "BUZZ_AGENT_PROVIDER",
+        "BUZZ_AGENT_MODEL",
+        "BUZZ_AGENT_THINKING_EFFORT",
+        "DATABRICKS_HOST",
+        "DATABRICKS_MODEL",
+    ];
+    let upper = key.to_ascii_uppercase();
+    SAFE_KEYS.iter().any(|safe| upper == *safe)
+}
+
+/// Expose the baked build env to the frontend with values shown, but any
+/// key not in the safe-to-reveal allowlist has its value replaced by `••••••`.
+///
+/// Provider and model arrive as `BUZZ_AGENT_PROVIDER` / `BUZZ_AGENT_MODEL`
+/// keys in `baked_build_env()` and are included in the returned list like any
+/// other key. Empty-value keys are filtered out (same as
+/// `get_baked_build_env_keys`).
+///
+/// OSS builds return an empty list — the baked-env section is hidden entirely
+/// in OSS installations.
+#[tauri::command]
+pub fn get_baked_build_env() -> Vec<BakedEnvEntry> {
+    crate::managed_agents::baked_build_env()
+        .into_iter()
+        .filter(|(_, v)| !v.is_empty())
+        .map(|(key, value)| {
+            let masked = !is_safe_to_reveal(&key);
+            let display_value = if masked {
+                "\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}".to_string()
+            } else {
+                value
+            };
+            BakedEnvEntry {
+                key,
+                value: display_value,
+                masked,
+            }
+        })
+        .collect()
+}
+
+/// Re-tag a field's origin from `BuzzExplicit` to `GlobalDefault`, leaving any
+/// other origin untouched. No-op when the field is absent.
+fn retag_global_default(field: &mut Option<NormalizedField>) {
+    if let Some(field) = field {
+        if field.origin == ConfigOrigin::BuzzExplicit {
+            field.origin = ConfigOrigin::GlobalDefault;
         }
     }
 }
@@ -172,19 +366,17 @@ pub async fn get_agent_config_surface(
     };
 
     let personas = load_personas(&app).unwrap_or_default();
-    let effective_cmd = effective_agent_command(
-        record.persona_id.as_deref(),
-        &personas,
-        record.agent_command_override.as_deref(),
-    );
+    let effective_cmd = crate::managed_agents::record_agent_command(&record, &personas);
     let runtime_meta = known_acp_runtime(&effective_cmd);
     let session_cache = state.get_session_cache(&pubkey);
+    let global = crate::managed_agents::load_global_agent_config(&app).unwrap_or_default();
 
     Ok(resolve_config_surface(
         record,
         &personas,
         runtime_meta,
         session_cache.as_ref(),
+        &global,
     ))
 }
 
@@ -407,6 +599,8 @@ mod tests {
             max_tokens_env_var: Some("GOOSE_MAX_TOKENS"),
             context_limit_env_var: Some("GOOSE_CONTEXT_LIMIT"),
             required_normalized_fields: &["model", "provider"],
+            login_hint: None,
+            auth_probe_args: None,
         }
     }
 
@@ -429,9 +623,9 @@ mod tests {
             parallelism: 1,
             system_prompt: None,
             model: None,
-            mcp_toolsets: None,
             env_vars: BTreeMap::new(),
             start_on_app_launch: false,
+            auto_restart_on_config_change: true,
             runtime_pid: None,
             backend: BackendKind::Local,
             backend_agent_id: None,
@@ -444,8 +638,20 @@ mod tests {
             last_stopped_at: None,
             last_exit_code: None,
             last_error: None,
+            last_error_code: None,
             respond_to: RespondTo::OwnerOnly,
             respond_to_allowlist: vec![],
+            display_name: None,
+            slug: None,
+            runtime: None,
+            name_pool: Vec::new(),
+            is_builtin: false,
+            is_active: true,
+            source_team: None,
+            source_team_persona_slug: None,
+            definition_respond_to: None,
+            definition_respond_to_allowlist: Vec::new(),
+            definition_parallelism: None,
             relay_mesh: None,
             agent_command_override: None,
             persona_source_version: None,
@@ -453,8 +659,8 @@ mod tests {
         }
     }
 
-    fn persona_with_model(model: &str) -> PersonaRecord {
-        PersonaRecord {
+    fn persona_with_model(model: &str) -> AgentDefinition {
+        AgentDefinition {
             id: "persona-1".to_string(),
             display_name: "Persona".to_string(),
             avatar_url: None,
@@ -468,6 +674,9 @@ mod tests {
             source_team: None,
             source_team_persona_slug: None,
             env_vars: BTreeMap::new(),
+            respond_to: None,
+            respond_to_allowlist: Vec::new(),
+            parallelism: None,
             created_at: "".to_string(),
             updated_at: "".to_string(),
         }
@@ -496,7 +705,13 @@ mod tests {
         record.model = Some("explicit-model".to_string());
         let personas = vec![persona_with_model("persona-model")];
 
-        let surface = resolve_config_surface(record, &personas, Some(goose_runtime()), None);
+        let surface = resolve_config_surface(
+            record,
+            &personas,
+            Some(goose_runtime()),
+            None,
+            &Default::default(),
+        );
 
         let model = surface.normalized.model.as_ref().expect("model resolved");
         assert_eq!(model.value.as_deref(), Some("explicit-model"));
@@ -514,11 +729,16 @@ mod tests {
         let mut record = agent_record();
         record.persona_id = None;
         record.model = Some("model-x".to_string());
-        let personas: Vec<PersonaRecord> = vec![];
+        let personas: Vec<AgentDefinition> = vec![];
         let cache = session_cache("model-y", false);
 
-        let surface =
-            resolve_config_surface(record, &personas, Some(goose_runtime()), Some(&cache));
+        let surface = resolve_config_surface(
+            record,
+            &personas,
+            Some(goose_runtime()),
+            Some(&cache),
+            &Default::default(),
+        );
         let model = surface.normalized.model.expect("model resolved");
 
         assert_eq!(model.value.as_deref(), Some("model-x"));
@@ -537,11 +757,16 @@ mod tests {
         let mut record = agent_record();
         record.persona_id = None;
         record.model = Some("model-x".to_string());
-        let personas: Vec<PersonaRecord> = vec![];
+        let personas: Vec<AgentDefinition> = vec![];
         let cache = session_cache("model-y", true);
 
-        let surface =
-            resolve_config_surface(record, &personas, Some(goose_runtime()), Some(&cache));
+        let surface = resolve_config_surface(
+            record,
+            &personas,
+            Some(goose_runtime()),
+            Some(&cache),
+            &Default::default(),
+        );
         let model = surface.normalized.model.expect("model resolved");
 
         assert_eq!(model.value.as_deref(), Some("model-y"));
@@ -559,11 +784,16 @@ mod tests {
         let mut record = agent_record();
         record.persona_id = None;
         record.model = Some("model-x".to_string());
-        let personas: Vec<PersonaRecord> = vec![];
+        let personas: Vec<AgentDefinition> = vec![];
         let cache = session_cache("model-x", true);
 
-        let surface =
-            resolve_config_surface(record, &personas, Some(goose_runtime()), Some(&cache));
+        let surface = resolve_config_surface(
+            record,
+            &personas,
+            Some(goose_runtime()),
+            Some(&cache),
+            &Default::default(),
+        );
         let model = surface.normalized.model.expect("model resolved");
 
         assert_eq!(model.value.as_deref(), Some("model-x"));
@@ -581,13 +811,207 @@ mod tests {
         let personas = vec![persona_with_model("persona-model")];
         let cache = session_cache("model-y", true);
 
-        let surface =
-            resolve_config_surface(record, &personas, Some(goose_runtime()), Some(&cache));
+        let surface = resolve_config_surface(
+            record,
+            &personas,
+            Some(goose_runtime()),
+            Some(&cache),
+            &Default::default(),
+        );
         let model = surface.normalized.model.expect("model resolved");
 
         assert_eq!(model.value.as_deref(), Some("model-y"));
         assert_eq!(model.origin, ConfigOrigin::RuntimeOverride);
         assert_eq!(model.overridden_value.as_deref(), Some("persona-model"));
         assert_eq!(model.overridden_origin, Some(ConfigOrigin::PersonaDefault));
+    }
+
+    /// Fix 2 regression: a global-default-only agent (no record model, no
+    /// persona model, but global has a model) that live-switches mid-session
+    /// must render the global model as the secondary tagged `GlobalDefault`.
+    /// Before the fix, `baseline` was `None` in the `!had_model` arm when
+    /// persona has no model, so `read_config_surface` had no secondary to
+    /// surface. Fails against pre-fix code where the baseline arm returned
+    /// `None` when `!had_model && persona_model.is_none() && model_overridden`.
+    #[test]
+    fn global_default_live_switch_renders_global_model_as_secondary_global_default() {
+        // Record has no model, no persona, global provides the model.
+        let mut record = agent_record();
+        record.persona_id = None;
+        // record.model = None (set by agent_record())
+        let personas: Vec<AgentDefinition> = vec![];
+        let cache = session_cache("model-y", true);
+        let global = crate::managed_agents::GlobalAgentConfig {
+            model: Some("global-model".to_string()),
+            ..Default::default()
+        };
+
+        let surface = resolve_config_surface(
+            record,
+            &personas,
+            Some(goose_runtime()),
+            Some(&cache),
+            &global,
+        );
+        let model = surface.normalized.model.expect("model resolved");
+
+        // Live model wins as primary.
+        assert_eq!(model.value.as_deref(), Some("model-y"));
+        assert_eq!(model.origin, ConfigOrigin::RuntimeOverride);
+        // Global model surfaces as secondary, tagged GlobalDefault.
+        assert_eq!(
+            model.overridden_value.as_deref(),
+            Some("global-model"),
+            "global model must be the override baseline secondary"
+        );
+        assert_eq!(
+            model.overridden_origin,
+            Some(ConfigOrigin::GlobalDefault),
+            "override baseline origin must be GlobalDefault, not PersonaDefault or BuzzExplicit"
+        );
+    }
+
+    // ── get_baked_build_env / is_secret_key tests ──────────────────────────
+
+    /// Build a `BakedEnvEntry` vec from a synthetic map, mirroring what
+    /// `get_baked_build_env()` does. Used to test masking without relying on
+    /// compile-time `option_env!` vars (OSS builds have empty `baked_build_env`).
+    fn baked_env_from_map(map: &[(&str, &str)]) -> Vec<BakedEnvEntry> {
+        map.iter()
+            .filter(|(_, v)| !v.is_empty())
+            .map(|(k, v)| {
+                let masked = !super::is_safe_to_reveal(k);
+                BakedEnvEntry {
+                    key: k.to_string(),
+                    value: if masked {
+                        "\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}".to_string()
+                    } else {
+                        v.to_string()
+                    },
+                    masked,
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn baked_env_non_secret_key_shows_real_value() {
+        let entries = baked_env_from_map(&[("BUZZ_AGENT_PROVIDER", "databricks_v2")]);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].key, "BUZZ_AGENT_PROVIDER");
+        assert_eq!(entries[0].value, "databricks_v2");
+        assert!(!entries[0].masked);
+    }
+
+    #[test]
+    fn baked_env_api_key_is_masked() {
+        let entries = baked_env_from_map(&[("ANTHROPIC_API_KEY", "sk-secret")]);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].value, "••••••");
+        assert!(entries[0].masked);
+    }
+
+    #[test]
+    fn baked_env_token_key_is_masked() {
+        let entries = baked_env_from_map(&[("GITHUB_TOKEN", "ghp_secret")]);
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].masked);
+    }
+
+    #[test]
+    fn baked_env_secret_key_is_masked() {
+        let entries = baked_env_from_map(&[("MY_DB_SECRET", "s3cr3t")]);
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].masked);
+    }
+
+    #[test]
+    fn baked_env_password_key_is_masked() {
+        let entries = baked_env_from_map(&[("DB_PASSWORD", "hunter2")]);
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].masked);
+    }
+
+    #[test]
+    fn baked_env_empty_value_filtered_out() {
+        let entries = baked_env_from_map(&[("BUZZ_AGENT_PROVIDER", "")]);
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn baked_env_mixed_keys_correct_masking() {
+        let entries = baked_env_from_map(&[
+            ("BUZZ_AGENT_PROVIDER", "databricks_v2"),
+            ("BUZZ_AGENT_MODEL", "goose-claude-opus-4-8"),
+            ("DATABRICKS_HOST", "https://example.com"),
+            ("DATABRICKS_TOKEN", "dapi-secret"),
+        ]);
+        assert_eq!(entries.len(), 4);
+
+        let provider = entries
+            .iter()
+            .find(|e| e.key == "BUZZ_AGENT_PROVIDER")
+            .unwrap();
+        assert_eq!(provider.value, "databricks_v2");
+        assert!(!provider.masked);
+
+        let model = entries
+            .iter()
+            .find(|e| e.key == "BUZZ_AGENT_MODEL")
+            .unwrap();
+        assert_eq!(model.value, "goose-claude-opus-4-8");
+        assert!(!model.masked);
+
+        let host = entries.iter().find(|e| e.key == "DATABRICKS_HOST").unwrap();
+        assert_eq!(host.value, "https://example.com");
+        assert!(!host.masked);
+
+        let token = entries
+            .iter()
+            .find(|e| e.key == "DATABRICKS_TOKEN")
+            .unwrap();
+        assert_eq!(token.value, "••••••");
+        assert!(token.masked);
+    }
+
+    #[test]
+    fn baked_env_thinking_effort_is_unmasked() {
+        // BUZZ_AGENT_THINKING_EFFORT is a non-secret enum — must not be masked.
+        let entries = baked_env_from_map(&[("BUZZ_AGENT_THINKING_EFFORT", "medium")]);
+        assert_eq!(entries.len(), 1);
+        let effort = entries
+            .iter()
+            .find(|e| e.key == "BUZZ_AGENT_THINKING_EFFORT")
+            .unwrap();
+        assert_eq!(effort.value, "medium");
+        assert!(!effort.masked);
+    }
+
+    #[test]
+    fn baked_env_allowlist_is_case_insensitive() {
+        // Known-safe keys — case-insensitive match must allow them.
+        assert!(super::is_safe_to_reveal("buzz_agent_provider"));
+        assert!(super::is_safe_to_reveal("BUZZ_AGENT_PROVIDER"));
+        assert!(super::is_safe_to_reveal("buzz_agent_model"));
+        assert!(super::is_safe_to_reveal("BUZZ_AGENT_MODEL"));
+        assert!(super::is_safe_to_reveal("buzz_agent_thinking_effort"));
+        assert!(super::is_safe_to_reveal("BUZZ_AGENT_THINKING_EFFORT"));
+        assert!(super::is_safe_to_reveal("databricks_host"));
+        assert!(super::is_safe_to_reveal("DATABRICKS_HOST"));
+        assert!(super::is_safe_to_reveal("databricks_model"));
+        assert!(super::is_safe_to_reveal("DATABRICKS_MODEL"));
+        // Keys NOT in the allowlist — masked regardless of naming pattern.
+        assert!(!super::is_safe_to_reveal("my_api_key"));
+        assert!(!super::is_safe_to_reveal("GITHUB_TOKEN"));
+        assert!(!super::is_safe_to_reveal("DB_SECRET"));
+        assert!(!super::is_safe_to_reveal("DB_PASSWORD"));
+        // Bare names that old heuristic (contains("_TOKEN") etc.) would have missed.
+        assert!(!super::is_safe_to_reveal("APIKEY"));
+        assert!(!super::is_safe_to_reveal("TOKEN"));
+        assert!(!super::is_safe_to_reveal("SECRET"));
+        assert!(!super::is_safe_to_reveal("PASSWORD"));
+        assert!(!super::is_safe_to_reveal("PRIVATE_KEY"));
+        // Unknown key → masked by default.
+        assert!(!super::is_safe_to_reveal("SOME_UNKNOWN_KEY"));
     }
 }

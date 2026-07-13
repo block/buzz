@@ -19,6 +19,20 @@ export type ChannelPaneProps = {
   agentPubkeys?: ReadonlySet<string>;
   agentPubkeysPending?: boolean;
   agentSessionAgents: ChannelAgentSessionAgent[];
+  /**
+   * When non-null, the main composer fires `submitMessage` once after loading
+   * the draft identified by this key — i.e. the user clicked "Send message"
+   * in the Drafts panel and confirmed. Cleared by the composer after firing so
+   * back-navigation cannot re-trigger.
+   */
+  autoSendDraftKey?: string | null;
+  /**
+   * Called after the auto-submit guard fires to surgically clear `?autoSend`
+   * from the URL while preserving `?thread` and all other panel search state.
+   * If omitted, ChannelPane falls back to a full goChannel() re-navigation
+   * (safe for the main-composer path, which carries no URL-backed thread).
+   */
+  onAutoSendComplete?: (() => void) | null;
   botTypingEntries: TypingIndicatorEntry[];
   channelFind: ReturnType<typeof useChannelFind>;
   channelManagementOpen?: boolean;
@@ -32,6 +46,8 @@ export type ChannelPaneProps = {
   fetchOlder?: () => Promise<void>;
   header?: React.ReactNode;
   hasOlderMessages?: boolean;
+  /** True when the loaded window provably starts at the channel's beginning. */
+  historyExhausted?: boolean;
   isFetchingOlder?: boolean;
   isJoining?: boolean;
   isSinglePanelView?: boolean;
@@ -44,6 +60,12 @@ export type ChannelPaneProps = {
   canResetThreadPanelWidth: boolean;
   onCancelEdit?: () => void;
   onCancelThreadReply: () => void;
+  /**
+   * Fired by the header back arrow when Activity has a captured pane to
+   * return to. Absent (arrow hidden) for composer/no-pane opens and
+   * direct/restored Activity URLs — the close affordance is the fallback.
+   */
+  onBackFromAgentSession?: () => void;
   onCloseAgentSession: () => void;
   onCloseChannelManagement?: () => void;
   onChannelManagementDeleted?: () => void;
@@ -117,6 +139,7 @@ export type ChannelPaneProps = {
   profilePanelView: ProfilePanelView;
   threadHeadMessage: TimelineMessage | null;
   threadMessages: MainTimelineEntry[];
+  threadMessagesPending?: boolean;
   threadPanelWidthPx: number;
   threadTypingPubkeys: string[];
   threadReplyTargetMessage: TimelineMessage | null;

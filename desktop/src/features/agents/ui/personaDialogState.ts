@@ -1,7 +1,7 @@
-import type { ParsedPersonaPreview } from "@/shared/api/tauriPersonas";
 import type {
   AgentPersona,
   CreatePersonaInput,
+  PersonaBehaviorInput,
   UpdatePersonaInput,
 } from "@/shared/api/types";
 
@@ -11,11 +11,6 @@ export type PersonaDialogState = {
   submitLabel: string;
   title: string;
 };
-
-type ImportedPersonaAvatarPreview = Pick<
-  ParsedPersonaPreview,
-  "avatarDataUrl" | "avatarRef"
->;
 
 /**
  * Whether the persona dialog's save action should be enabled.
@@ -29,29 +24,6 @@ export function canSubmitPersonaDialog(args: {
   isPending: boolean;
 }): boolean {
   return args.displayName.trim().length > 0 && !args.isPending;
-}
-
-function isSafeImportedAvatarRef(
-  ref: string | null | undefined,
-): ref is string {
-  const trimmed = ref?.trim();
-  if (!trimmed) return false;
-
-  try {
-    const parsed = new URL(trimmed);
-    return (
-      parsed.protocol === "http:" ||
-      parsed.protocol === "https:" ||
-      (parsed.protocol === "data:" && trimmed.startsWith("data:image/"))
-    );
-  } catch {
-    return false;
-  }
-}
-
-export function importedAvatarUrl(persona: ImportedPersonaAvatarPreview) {
-  if (persona.avatarDataUrl) return persona.avatarDataUrl;
-  return isSafeImportedAvatarRef(persona.avatarRef) ? persona.avatarRef : "";
 }
 
 export function formatPersonaNamePoolText(namePool: string[] | undefined) {
@@ -68,8 +40,7 @@ export function parsePersonaNamePoolText(text: string): string[] {
 export function createPersonaDialogState(): PersonaDialogState {
   return {
     title: "Create agent",
-    description:
-      "Create an agent profile and start its managed agent instance.",
+    description: "Create an agent and start it immediately.",
     submitLabel: "Create agent",
     initialValues: {
       displayName: "",
@@ -103,6 +74,30 @@ export function duplicatePersonaDialogState(
       // them if they want a blank template.
       namePool: persona.namePool ?? [],
       envVars: persona.envVars ?? {},
+      ...behaviorEntry(persona),
+    },
+  };
+}
+
+/**
+ * Seed a dialog behavior group from a stored persona. A quad-less persona
+ * yields no `behavior` key at all, keeping initialValues byte-identical to
+ * the pre-quad shape (spread-in entry, matching the namePool import pattern).
+ */
+function behaviorEntry(
+  persona: AgentPersona,
+): { behavior: PersonaBehaviorInput } | Record<string, never> {
+  if (persona.respondTo == null && persona.parallelism == null) {
+    return {};
+  }
+  return {
+    behavior: {
+      respondTo: persona.respondTo ?? undefined,
+      respondToAllowlist:
+        persona.respondTo === "allowlist"
+          ? persona.respondToAllowlist
+          : undefined,
+      parallelism: persona.parallelism ?? undefined,
     },
   };
 }
@@ -128,25 +123,7 @@ export function editPersonaDialogState(
       // the dialog must therefore round-trip the existing values.)
       namePool: persona.namePool ?? [],
       envVars: persona.envVars ?? {},
-    },
-  };
-}
-
-export function importPersonaDialogState(
-  persona: ParsedPersonaPreview,
-): PersonaDialogState {
-  return {
-    title: `Import ${persona.displayName}`,
-    description: "Review and create this imported agent.",
-    submitLabel: "Create agent",
-    initialValues: {
-      displayName: persona.displayName,
-      avatarUrl: importedAvatarUrl(persona),
-      systemPrompt: persona.systemPrompt,
-      runtime: persona.runtime ?? undefined,
-      model: persona.model ?? undefined,
-      provider: persona.provider ?? undefined,
-      ...(persona.namePool.length > 0 ? { namePool: persona.namePool } : {}),
+      ...behaviorEntry(persona),
     },
   };
 }

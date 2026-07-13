@@ -10,6 +10,7 @@ import {
 } from "shiki";
 
 import { useTheme } from "@/shared/theme/ThemeProvider";
+import { resolveShikiThemeName } from "@/shared/theme/theme-loader";
 import { copyCodeBlockToClipboard } from "@/shared/lib/codeBlockClipboard";
 import { Button } from "@/shared/ui/button";
 import { useSmoothCorners } from "@/shared/ui/smoothCorners";
@@ -138,6 +139,10 @@ export function SyntaxHighlightedCode({
   language: string;
 } & React.ComponentProps<"code">) {
   const { themeName } = useTheme();
+  // Buzz aliases ("buzz" / "buzz-dark") are not bundled Shiki themes — resolve
+  // to the real bundle (github-light / github-dark) before touching Shiki, or
+  // it throws and code blocks fall back to plain text.
+  const shikiTheme = resolveShikiThemeName(themeName);
   const [loadedKey, setLoadedKey] = React.useState(0);
 
   React.useEffect(() => {
@@ -157,10 +162,10 @@ export function SyntaxHighlightedCode({
             return;
           }
         }
-        if (!loadedThemes.has(themeName as string)) {
+        if (!loadedThemes.has(shikiTheme)) {
           try {
-            await shikiHighlighter.loadTheme(themeName as BundledTheme);
-            loadedThemes.add(themeName as string);
+            await shikiHighlighter.loadTheme(shikiTheme as BundledTheme);
+            loadedThemes.add(shikiTheme);
             loaded = true;
           } catch {
             return;
@@ -171,30 +176,30 @@ export function SyntaxHighlightedCode({
         /* ignore */
       }
     }
-    if (!loadedLangs.has(language) || !loadedThemes.has(themeName as string)) {
+    if (!loadedLangs.has(language) || !loadedThemes.has(shikiTheme)) {
       loadAssets();
     }
     return () => {
       cancelled = true;
     };
-  }, [language, themeName]);
+  }, [language, shikiTheme]);
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: loadedKey intentionally triggers re-memoization after async asset loading
   const tokens = React.useMemo(() => {
     if (
       !shikiHighlighter ||
       !loadedLangs.has(language) ||
-      !loadedThemes.has(themeName as string)
+      !loadedThemes.has(shikiTheme)
     )
       return null;
     if ((code.match(/\n/g) || []).length > MAX_HIGHLIGHT_LINES) return null;
-    const cacheKey = `${language}:${themeName}:${code}`;
+    const cacheKey = `${language}:${shikiTheme}:${code}`;
     const cached = tokenCache.get(cacheKey);
     if (cached) return cached;
     try {
       const result = shikiHighlighter.codeToTokens(code, {
         lang: language as BundledLanguage,
-        theme: themeName as BundledTheme,
+        theme: shikiTheme as BundledTheme,
       });
       if (tokenCache.size >= MAX_CACHE_ENTRIES) {
         const firstKey = tokenCache.keys().next().value;
@@ -205,7 +210,7 @@ export function SyntaxHighlightedCode({
     } catch {
       return null;
     }
-  }, [code, language, themeName, loadedKey]);
+  }, [code, language, shikiTheme, loadedKey]);
 
   const codeClassName = CODE_BLOCK_CLASS;
 

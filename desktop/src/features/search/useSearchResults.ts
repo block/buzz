@@ -102,12 +102,19 @@ export function useSearchResults({
       .slice(0, 5);
   }, [channelLabels, channels, debouncedQuery]);
 
+  const hasSearchQuery = debouncedQuery.length >= MIN_SEARCH_QUERY_LENGTH;
+  const searchBackedQueriesEnabled = enabled && hasSearchQuery;
+
   const userSearchQuery = useUserSearchQuery(debouncedQuery, {
-    enabled: enabled && debouncedQuery.length >= MIN_SEARCH_QUERY_LENGTH,
+    enabled: searchBackedQueriesEnabled,
     limit,
   });
-  const managedAgentsQuery = useManagedAgentsQuery({ enabled });
-  const relayAgentsQuery = useRelayAgentsQuery({ enabled });
+  const managedAgentsQuery = useManagedAgentsQuery({
+    enabled: searchBackedQueriesEnabled,
+  });
+  const relayAgentsQuery = useRelayAgentsQuery({
+    enabled: searchBackedQueriesEnabled,
+  });
   const managedAgentPubkeys = React.useMemo(
     () =>
       new Set(

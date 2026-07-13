@@ -14,6 +14,7 @@ use tokio::process::{Child, ChildStdin, ChildStdout};
 use tokio_util::codec::{FramedRead, LinesCodec, LinesCodecError};
 
 use crate::observer::{ObserverContext, ObserverHandle};
+use crate::usage::{TurnUsage, UsageTracker};
 
 /// Maximum allowed size of a single NDJSON line from the agent's stdout.
 /// Lines exceeding this limit are rejected to prevent OOM from rogue agents.
@@ -100,8 +101,21 @@ pub enum AcpError {
     #[error("Protocol error: {0}")]
     Protocol(String),
 
-    #[error("Agent reported error: {0}")]
-    AgentError(String),
+    #[error("Agent reported error (code {code}): {message}")]
+    AgentError { code: i64, message: String },
+}
+
+/// Build an [`AcpError::AgentError`] from a JSON-RPC error object,
+/// preserving the numeric code. When the `message` field is missing or
+/// non-string, fall back to the full JSON object so provider-specific
+/// detail (e.g. a `data` field) is not lost.
+fn agent_error_from_json(error: &serde_json::Value) -> AcpError {
+    let code = error.get("code").and_then(|c| c.as_i64()).unwrap_or(-32000);
+    let message = match error.get("message").and_then(|m| m.as_str()) {
+        Some(m) => m.to_string(),
+        None => error.to_string(),
+    };
+    AcpError::AgentError { code, message }
 }
 
 /// ACP client that owns an agent subprocess and communicates over its stdio.
@@ -167,6 +181,153 @@ pub struct AcpClient {
     /// outside of a goose-native turn — the read loop's steer arm is
     /// disabled in that case.
     steer_rx: Option<tokio::sync::mpsc::Receiver<crate::pool::SteerRequest>>,
+    /// Usage tracker — accumulates cumulative token counts from
+    /// `_goose/unstable/session/update` notifications and computes per-turn
+    /// deltas. Both goose and buzz-agent emit this notification; goose gates
+    /// on client capability advertisement, buzz-agent emits unconditionally.
+    goose_usage: UsageTracker,
+}
+
+/// Recursively merge `overlay` into `base`, with `overlay` winning on scalar/shape
+/// collisions.  When both sides have an object for the same key, the merge recurses so
+/// unrelated nested keys from `base` are preserved.
+fn deep_merge(
+    base: &mut serde_json::Map<String, serde_json::Value>,
+    overlay: serde_json::Map<String, serde_json::Value>,
+) {
+    for (k, overlay_val) in overlay {
+        match base.get_mut(&k) {
+            Some(serde_json::Value::Object(base_obj))
+                if matches!(overlay_val, serde_json::Value::Object(_)) =>
+            {
+                // Both sides are objects — recurse to preserve unrelated nested keys.
+                if let serde_json::Value::Object(overlay_obj) = overlay_val {
+                    deep_merge(base_obj, overlay_obj);
+                }
+            }
+            _ => {
+                // Scalar, array, type mismatch, or new key — overlay wins.
+                base.insert(k, overlay_val);
+            }
+        }
+    }
+}
+
+/// Build the merged `CODEX_CONFIG` environment-variable value for a Codex agent spawn.
+///
+/// Returns `Some(json_string)` when `has_generated_codex_config` is true (Buzz injected a
+/// `CODEX_CONFIG` entry via `codex_network_env()`), `None` otherwise.
+///
+/// # Merge contract (when `has_generated_codex_config` is true)
+///
+/// 1. **Persona base** — the first `CODEX_CONFIG` value in `extra_env` is taken as
+///    the base object (all keys preserved, recursively).  When there is no persona entry,
+///    the generated entry serves as the base.
+/// 2. **Generated overlay** — all subsequent `CODEX_CONFIG` entries are deep-merged into
+///    the base so unrelated nested persona keys survive.
+/// 3. **Parent-env precedence** — if `parent_codex_config` is `Some`, its keys are
+///    deep-merged into the result (parent wins on colliding keys at every nesting level;
+///    unrelated keys from either side survive).
+/// 4. **Forced overlay** — `sandbox_workspace_write.network_access = true` is applied
+///    last so relay access is guaranteed regardless of operator / persona config.
+///
+/// When `has_generated_codex_config` is false, the function returns `None` and the
+/// caller handles any persona-supplied `CODEX_CONFIG` with ordinary operator-wins
+/// semantics (no merging, no sandbox widening).
+///
+/// # Errors
+///
+/// Returns `Err(AcpError::Protocol)` when `has_generated_codex_config` is true and any
+/// `CODEX_CONFIG` value is not valid JSON or is not a JSON object, or when
+/// `sandbox_workspace_write` is present but not an object after all merges.
+pub(crate) fn build_codex_config_env(
+    extra_env: &[(String, String)],
+    parent_codex_config: Option<&str>,
+    has_generated_codex_config: bool,
+) -> Result<Option<String>, AcpError> {
+    // Without an explicit Buzz-generated overlay signal, skip the merge entirely.
+    // Any persona CODEX_CONFIG is handled by the caller with operator-wins semantics.
+    if !has_generated_codex_config {
+        return Ok(None);
+    }
+
+    // Collect all CODEX_CONFIG entries from extra_env in order.
+    let codex_entries: Vec<&str> = extra_env
+        .iter()
+        .filter(|(k, _)| k == "CODEX_CONFIG")
+        .map(|(_, v)| v.as_str())
+        .collect();
+
+    if codex_entries.is_empty() {
+        // has_generated_codex_config is true but no entry in extra_env — shouldn't
+        // happen in practice, but treat as no-op rather than panic.
+        return Ok(None);
+    }
+
+    // Parse all entries; first one is the persona base (or the generated entry if no
+    // persona CODEX_CONFIG was set), rest are additional generated entries.
+    let mut parsed_entries: Vec<serde_json::Map<String, serde_json::Value>> = Vec::new();
+    for (i, raw) in codex_entries.iter().enumerate() {
+        match serde_json::from_str::<serde_json::Value>(raw) {
+            Ok(serde_json::Value::Object(obj)) => parsed_entries.push(obj),
+            Ok(_) => {
+                let source = if i == 0 { "persona" } else { "generated" };
+                return Err(AcpError::Protocol(format!(
+                    "CODEX_CONFIG {source} value is valid JSON but not an object"
+                )));
+            }
+            Err(e) => {
+                let source = if i == 0 { "persona" } else { "generated" };
+                return Err(AcpError::Protocol(format!(
+                    "CODEX_CONFIG {source} value is not valid JSON: {e}"
+                )));
+            }
+        }
+    }
+
+    // Start from first entry, deep-merge remaining entries.
+    let mut base = parsed_entries.remove(0);
+    for overlay in parsed_entries {
+        deep_merge(&mut base, overlay);
+    }
+
+    // Deep-merge parent env (parent wins on colliding keys at every nesting level).
+    if let Some(parent_raw) = parent_codex_config {
+        match serde_json::from_str::<serde_json::Value>(parent_raw) {
+            Ok(serde_json::Value::Object(parent_obj)) => {
+                deep_merge(&mut base, parent_obj);
+            }
+            Ok(_) => {
+                return Err(AcpError::Protocol(
+                    "CODEX_CONFIG in parent environment is valid JSON but not an object".into(),
+                ));
+            }
+            Err(e) => {
+                return Err(AcpError::Protocol(format!(
+                    "CODEX_CONFIG in parent environment is not valid JSON: {e}"
+                )));
+            }
+        }
+    }
+
+    // Force sandbox_workspace_write.network_access = true (our invariant, always wins).
+    let sws_entry = base
+        .entry("sandbox_workspace_write")
+        .or_insert_with(|| serde_json::json!({}));
+    match sws_entry {
+        serde_json::Value::Object(sws_obj) => {
+            sws_obj.insert("network_access".to_string(), serde_json::Value::Bool(true));
+        }
+        other => {
+            return Err(AcpError::Protocol(format!(
+                "CODEX_CONFIG sandbox_workspace_write is not an object (got {}); \
+                 cannot set network_access=true",
+                other
+            )));
+        }
+    }
+
+    Ok(Some(serde_json::Value::Object(base).to_string()))
 }
 
 impl AcpClient {
@@ -201,11 +362,17 @@ impl AcpClient {
 
     /// Spawn the agent binary as a subprocess and connect to its stdio pipes.
     ///
+    /// `has_generated_codex_config` must be true when `codex_network_env()` successfully
+    /// injected a `CODEX_CONFIG` entry into `extra_env`.  The spawn path uses it to
+    /// trigger the recursive merge + forced `network_access=true` in
+    /// `build_codex_config_env`.  Pass `false` for test spawns and non-Codex agents.
+    ///
     /// After spawning, call [`initialize`](Self::initialize) before any other method.
     pub async fn spawn(
         command: &str,
         args: &[String],
         extra_env: &[(String, String)],
+        has_generated_codex_config: bool,
     ) -> Result<Self, AcpError> {
         use std::process::Stdio;
 
@@ -220,11 +387,40 @@ impl AcpClient {
             .kill_on_drop(true);
 
         // Per-persona env vars (e.g., GOOSE_PROVIDER, BUZZ_AGENT_PROVIDER).
-        // Only injected if not already set in parent env (operator precedence).
+        // For most keys, operator precedence wins: skip injection if already set
+        // in the parent environment.
+        //
+        // CODEX_CONFIG is handled specially via build_codex_config_env:
+        //   • has_generated_codex_config=true: merge all CODEX_CONFIG entries + parent
+        //     recursively and force network_access=true.
+        //   • has_generated_codex_config=false: return None; any persona-supplied
+        //     CODEX_CONFIG falls through to the normal operator-wins loop below.
+        let has_codex_config = extra_env.iter().any(|(k, _)| k == "CODEX_CONFIG");
+        let parent_codex_config = if has_generated_codex_config && has_codex_config {
+            std::env::var("CODEX_CONFIG").ok()
+        } else {
+            None
+        };
+        let codex_config_value = build_codex_config_env(
+            extra_env,
+            parent_codex_config.as_deref(),
+            has_generated_codex_config,
+        )?;
+        // When the merge path was not taken (None returned), any persona CODEX_CONFIG
+        // entry falls through to the standard operator-wins treatment below.
+        let codex_merge_active = codex_config_value.is_some();
+
         for (key, value) in extra_env {
+            if key == "CODEX_CONFIG" && codex_merge_active {
+                // Handled by build_codex_config_env; skip here to avoid double-setting.
+                continue;
+            }
             if std::env::var(key).is_err() {
                 cmd.env(key, value);
             }
+        }
+        if let Some(merged) = codex_config_value {
+            cmd.env("CODEX_CONFIG", merged);
         }
 
         // Spawn the agent in its own process group so SIGKILL doesn't propagate
@@ -258,6 +454,7 @@ impl AcpClient {
             observer_context: ObserverContext::default(),
             active_run_id: None,
             steer_rx: None,
+            goose_usage: UsageTracker::default(),
         })
     }
 
@@ -303,7 +500,16 @@ impl AcpClient {
         // on ACP v2 ahead of the upstream ACP RFD. Revisit when that RFD merges.
         let params = serde_json::json!({
             "protocolVersion": 2,
-            "clientCapabilities": {},
+            "clientCapabilities": {
+                // Signal to goose that we handle `_goose/unstable/session/update`
+                // notifications. Without this the custom notification is suppressed
+                // on goose's side and usage data is never emitted.
+                "_meta": {
+                    "goose": {
+                        "customNotifications": true
+                    }
+                }
+            },
             "clientInfo": {
                 "name": "buzz-acp",
                 "version": env!("CARGO_PKG_VERSION")
@@ -427,6 +633,11 @@ impl AcpClient {
         let hard_deadline = tokio::time::Instant::now() + max_duration;
         self.current_hard_deadline = Some(hard_deadline);
 
+        // Mark the usage tracker as in-flight for this turn BEFORE sending the
+        // prompt so that any setup notifications recorded earlier are not
+        // misattributed to this turn.
+        self.goose_usage.begin_turn(session_id);
+
         self.last_prompt_id = Some(self.next_id);
         let id = self.next_id;
         self.next_id += 1;
@@ -500,6 +711,20 @@ impl AcpClient {
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn active_run_id(&self) -> Option<&str> {
         self.active_run_id.as_deref()
+    }
+
+    /// Consume and return the per-turn usage record computed from the most
+    /// recent `_goose/unstable/session/update` notification.
+    ///
+    /// Returns `None` if no usage update arrived since the last call (i.e.
+    /// the harness did not emit one for this turn, or this is not a goose
+    /// agent). Must be called at most once per turn; subsequent calls return
+    /// `None` until the next `usage_update` notification is recorded.
+    ///
+    /// Intended for consumption by `publish_agent_turn_metric` in `pool.rs` to
+    /// publish a kind 44200 NIP-AM event.
+    pub fn take_turn_usage(&mut self) -> Option<TurnUsage> {
+        self.goose_usage.take()
     }
 
     /// Install a per-turn steer request channel for goose-native
@@ -828,7 +1053,7 @@ impl AcpClient {
             if let Some(id) = msg.get("id") {
                 if *id == serde_json::json!(expected_id) && msg.get("method").is_none() {
                     if let Some(error) = msg.get("error") {
-                        return Err(AcpError::AgentError(error.to_string()));
+                        return Err(agent_error_from_json(error));
                     }
                     return Ok(msg["result"].clone());
                 }
@@ -839,6 +1064,9 @@ impl AcpClient {
                 match method {
                     "session/update" => {
                         let _ = self.handle_session_update(&msg);
+                    }
+                    "_goose/unstable/session/update" => {
+                        self.handle_goose_usage_update(&msg);
                     }
                     "session/request_permission" => {
                         self.handle_permission_request(&msg).await?;
@@ -1147,7 +1375,7 @@ impl AcpClient {
                                         let _ = ack_tx
                                             .send(crate::pool::SteerAck::PromptCompletedNeutral);
                                     }
-                                    return Err(AcpError::AgentError(error.to_string()));
+                                    return Err(agent_error_from_json(error));
                                 }
                                 if let Some((_, ack_tx)) = pending_steer.take() {
                                     let _ =
@@ -1169,6 +1397,9 @@ impl AcpClient {
                                     tracing::debug!("idle clock reset: tool call started");
                                     idle_deadline = Instant::now() + idle_timeout;
                                 }
+                            }
+                            "_goose/unstable/session/update" => {
+                                self.handle_goose_usage_update(&msg);
                             }
                             "session/request_permission" => {
                                 self.handle_permission_request(&msg).await?;
@@ -1307,6 +1538,46 @@ impl AcpClient {
             other => {
                 tracing::debug!(target: "acp::update", "session/update: {other}");
                 false
+            }
+        }
+    }
+
+    /// Parse a `_goose/unstable/session/update` notification and record the
+    /// usage snapshot in the per-session tracker.
+    ///
+    /// Silently ignores malformed or non-`usage_update` variants — the
+    /// notification is best-effort observability data, not a protocol
+    /// requirement. Failures are logged at debug level.
+    fn handle_goose_usage_update(&mut self, msg: &serde_json::Value) {
+        use crate::usage::{GooseSessionUpdateNotification, GooseSessionUpdateVariant};
+        let params = match msg.get("params") {
+            Some(p) => p,
+            None => {
+                tracing::debug!(
+                    target: "acp::usage",
+                    "_goose/unstable/session/update: missing params"
+                );
+                return;
+            }
+        };
+        match serde_json::from_value::<GooseSessionUpdateNotification>(params.clone()) {
+            Ok(notif) => {
+                if let GooseSessionUpdateVariant::UsageUpdate(payload) = &notif.update {
+                    tracing::debug!(
+                        target: "acp::usage",
+                        session_id = %notif.session_id,
+                        input = payload.accumulated_input_tokens,
+                        output = payload.accumulated_output_tokens,
+                        "goose usage update"
+                    );
+                    self.goose_usage.record(&notif.session_id, payload);
+                }
+            }
+            Err(e) => {
+                tracing::debug!(
+                    target: "acp::usage",
+                    "_goose/unstable/session/update: deserialization error: {e}"
+                );
             }
         }
     }
@@ -1782,7 +2053,13 @@ mod tests {
             "method": "initialize",
             "params": {
                 "protocolVersion": 2,
-                "clientCapabilities": {},
+                "clientCapabilities": {
+                    "_meta": {
+                        "goose": {
+                            "customNotifications": true
+                        }
+                    }
+                },
                 "clientInfo": {
                     "name": "buzz-acp",
                     "version": "0.1.0"
@@ -1795,6 +2072,11 @@ mod tests {
             Some("buzz-acp")
         );
         assert!(msg["params"]["clientCapabilities"].is_object());
+        assert_eq!(
+            msg["params"]["clientCapabilities"]["_meta"]["goose"]["customNotifications"].as_bool(),
+            Some(true),
+            "goose customNotifications capability must be advertised"
+        );
     }
 
     #[test]
@@ -2220,7 +2502,7 @@ mod tests {
     }
 
     async fn spawn_script(script: &str) -> AcpClient {
-        AcpClient::spawn("bash", &["-c".into(), script.into()], &[])
+        AcpClient::spawn("bash", &["-c".into(), script.into()], &[], false)
             .await
             .expect("failed to spawn test script")
     }
@@ -2583,7 +2865,7 @@ mod tests {
     /// which is fine — these tests don't read from the agent, they just
     /// feed JSON into the parser.
     async fn spawn_inert_client() -> AcpClient {
-        AcpClient::spawn("cat", &[], &[])
+        AcpClient::spawn("cat", &[], &[], false)
             .await
             .expect("spawn cat as inert client")
     }
@@ -2824,5 +3106,356 @@ mod tests {
             crate::pool::SteerAck::Success => {}
             other => panic!("expected SteerAck::Success, got {other:?}"),
         }
+    }
+
+    // ── Goose usage notification integration ──────────────────────────────
+
+    /// Build a `_goose/unstable/session/update` JSON-RPC notification.
+    fn goose_usage_update_msg(
+        session_id: &str,
+        input: u64,
+        output: u64,
+        cost: Option<f64>,
+    ) -> serde_json::Value {
+        let mut update = serde_json::json!({
+            "sessionUpdate": "usage_update",
+            "used": input + output,
+            "contextLimit": 200000u64,
+            "accumulatedInputTokens": input,
+            "accumulatedOutputTokens": output,
+        });
+        if let Some(c) = cost {
+            update["accumulatedCost"] = serde_json::json!(c);
+        }
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "_goose/unstable/session/update",
+            "params": {
+                "sessionId": session_id,
+                "update": update
+            }
+        })
+    }
+
+    #[tokio::test]
+    async fn goose_usage_notification_recorded_and_take_returns_usage() {
+        let mut client = spawn_inert_client().await;
+        assert!(client.take_turn_usage().is_none(), "starts empty");
+
+        // begin_turn before sending the prompt — mirrors the real call flow.
+        client.goose_usage.begin_turn("s1");
+        let msg = goose_usage_update_msg("s1", 1000, 200, Some(0.01));
+        client.handle_goose_usage_update(&msg);
+
+        let usage = client
+            .take_turn_usage()
+            .expect("usage should be present after notification");
+        assert_eq!(usage.session_id, "s1");
+        assert_eq!(usage.turn_seq, 1);
+        assert!(!usage.delta_reliable, "first turn must be unreliable");
+        assert_eq!(usage.cumulative_input_tokens, 1000);
+        assert_eq!(usage.cumulative_output_tokens, 200);
+        assert_eq!(usage.cumulative_cost_usd, Some(0.01));
+
+        // Second take must be None.
+        assert!(
+            client.take_turn_usage().is_none(),
+            "take after drain is None"
+        );
+    }
+
+    #[tokio::test]
+    async fn goose_usage_second_turn_delta_reliable() {
+        let mut client = spawn_inert_client().await;
+        // Turn 1.
+        client.goose_usage.begin_turn("s2");
+        client.handle_goose_usage_update(&goose_usage_update_msg("s2", 1000, 200, None));
+        let _ = client.take_turn_usage();
+        // Turn 2.
+        client.goose_usage.begin_turn("s2");
+        client.handle_goose_usage_update(&goose_usage_update_msg("s2", 1800, 450, None));
+        let usage = client.take_turn_usage().expect("turn 2 usage");
+        assert!(usage.delta_reliable);
+        assert_eq!(usage.turn_input_tokens, Some(800));
+        assert_eq!(usage.turn_output_tokens, Some(250));
+    }
+
+    #[tokio::test]
+    async fn goose_usage_malformed_notification_does_not_panic() {
+        let mut client = spawn_inert_client().await;
+        // Missing params entirely.
+        let bad = serde_json::json!({"jsonrpc":"2.0","method":"_goose/unstable/session/update"});
+        client.handle_goose_usage_update(&bad);
+        assert!(client.take_turn_usage().is_none());
+
+        // params present but wrong shape.
+        let bad2 = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "_goose/unstable/session/update",
+            "params": { "oops": true }
+        });
+        client.handle_goose_usage_update(&bad2);
+        assert!(client.take_turn_usage().is_none());
+    }
+
+    #[test]
+    fn agent_error_from_json_falls_back_to_full_json_when_message_missing() {
+        // Errors without a string `message` field (e.g. only a `data` field) must
+        // not be silently truncated to "unknown error" — the full JSON is preserved.
+        let error = serde_json::json!({"code": -32000, "data": "quota exceeded"});
+        match super::agent_error_from_json(&error) {
+            AcpError::AgentError { code, message } => {
+                assert_eq!(code, -32000);
+                assert!(
+                    message.contains("quota exceeded"),
+                    "expected full JSON in message, got: {message}"
+                );
+            }
+            other => panic!("expected AgentError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn agent_error_from_json_uses_message_field_when_present() {
+        let error = serde_json::json!({"code": -32001, "message": "auth denied"});
+        match super::agent_error_from_json(&error) {
+            AcpError::AgentError { code, message } => {
+                assert_eq!(code, -32001);
+                assert_eq!(message, "auth denied");
+            }
+            other => panic!("expected AgentError, got {other:?}"),
+        }
+    }
+
+    // ── build_codex_config_env ────────────────────────────────────────────────
+
+    fn env(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    const GENERATED: &str = r#"{"sandbox_workspace_write":{"network_access":true}}"#;
+
+    #[test]
+    fn build_codex_config_env_returns_none_when_no_codex_config_in_extra_env() {
+        // Non-Codex agents: extra_env has no CODEX_CONFIG → None regardless of signal.
+        let extra = env(&[("GOOSE_PROVIDER", "openai")]);
+        let result = build_codex_config_env(&extra, None, false).unwrap();
+        assert_eq!(
+            result, None,
+            "no CODEX_CONFIG in extra_env must return None"
+        );
+    }
+
+    #[test]
+    fn build_codex_config_env_generated_only_single_entry_with_signal_true_merges_with_parent() {
+        // No persona: Buzz injects one CODEX_CONFIG; signal=true.
+        // Parent may have its own CODEX_CONFIG — deep_merge applies, network_access forced.
+        let extra = env(&[("CODEX_CONFIG", GENERATED)]);
+        let parent =
+            r#"{"some_operator_key":"val","sandbox_workspace_write":{"operator_key":"keep"}}"#;
+        let merged = build_codex_config_env(&extra, Some(parent), true)
+            .unwrap()
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&merged).unwrap();
+        // network_access forced true even though only one entry in extra_env.
+        assert_eq!(
+            v["sandbox_workspace_write"]["network_access"], true,
+            "network_access must be forced true with signal=true"
+        );
+        // Operator key preserved via deep_merge.
+        assert_eq!(
+            v["sandbox_workspace_write"]["operator_key"], "keep",
+            "operator nested key must survive"
+        );
+        assert_eq!(
+            v["some_operator_key"], "val",
+            "operator top-level key must survive"
+        );
+    }
+
+    #[test]
+    fn build_codex_config_env_persona_only_signal_false_returns_none() {
+        // Persona set CODEX_CONFIG; Buzz did not inject a generated overlay (signal=false).
+        // Must return None — no merging, no sandbox widening.
+        let persona = r#"{"some_feature":"on"}"#;
+        let extra = env(&[("CODEX_CONFIG", persona)]);
+        let result = build_codex_config_env(&extra, None, false).unwrap();
+        assert_eq!(
+            result, None,
+            "persona-only CODEX_CONFIG with signal=false must return None"
+        );
+    }
+
+    #[test]
+    fn build_codex_config_env_returns_none_for_persona_only_no_generated_overlay() {
+        // Alias: same scenario as above, confirms the old count-based path no longer exists.
+        let persona = r#"{"some_feature":"on"}"#;
+        let extra = env(&[("CODEX_CONFIG", persona)]);
+        let result = build_codex_config_env(&extra, None, false).unwrap();
+        assert_eq!(
+            result, None,
+            "persona-only CODEX_CONFIG with signal=false must return None"
+        );
+    }
+
+    #[test]
+    fn build_codex_config_env_sets_network_access_from_scratch() {
+        // Persona + generated overlay, signal=true: network_access is forced true.
+        let persona = r#"{}"#;
+        let extra = env(&[("CODEX_CONFIG", persona), ("CODEX_CONFIG", GENERATED)]);
+        let merged = build_codex_config_env(&extra, None, true).unwrap().unwrap();
+        let v: serde_json::Value = serde_json::from_str(&merged).unwrap();
+        assert_eq!(v["sandbox_workspace_write"]["network_access"], true);
+    }
+
+    #[test]
+    fn build_codex_config_env_persona_keys_survive_merge() {
+        // Persona has CODEX_CONFIG with unrelated keys; generated overlay must
+        // force network_access=true without erasing persona keys.
+        let persona_cfg = r#"{"some_feature":{"enabled":true}}"#;
+        // Config::from_args appends generated AFTER persona env vars.
+        let extra = env(&[("CODEX_CONFIG", persona_cfg), ("CODEX_CONFIG", GENERATED)]);
+        let merged = build_codex_config_env(&extra, None, true).unwrap().unwrap();
+        let v: serde_json::Value = serde_json::from_str(&merged).unwrap();
+        assert_eq!(
+            v["some_feature"]["enabled"], true,
+            "persona key must survive merge"
+        );
+        assert_eq!(
+            v["sandbox_workspace_write"]["network_access"], true,
+            "network_access must be forced true"
+        );
+    }
+
+    #[test]
+    fn build_codex_config_env_nested_persona_keys_survive_when_parent_has_same_top_level_key() {
+        // Persona has sandbox_workspace_write.persona_only; parent has
+        // sandbox_workspace_write.parent_only.  A flat top-level spread would drop
+        // persona_only.  deep_merge must preserve both nested keys, and
+        // network_access must be forced true last.
+        let persona_cfg = r#"{"sandbox_workspace_write":{"persona_only":"keep_me"}}"#;
+        let extra = env(&[("CODEX_CONFIG", persona_cfg), ("CODEX_CONFIG", GENERATED)]);
+        let parent = r#"{"sandbox_workspace_write":{"parent_only":"also_here"}}"#;
+        let merged = build_codex_config_env(&extra, Some(parent), true)
+            .unwrap()
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&merged).unwrap();
+        // Both nested keys survive — no flat-spread drop.
+        assert_eq!(
+            v["sandbox_workspace_write"]["persona_only"], "keep_me",
+            "nested persona key must survive when parent has the same top-level key"
+        );
+        assert_eq!(
+            v["sandbox_workspace_write"]["parent_only"], "also_here",
+            "nested parent key must be present"
+        );
+        // Forced last.
+        assert_eq!(
+            v["sandbox_workspace_write"]["network_access"], true,
+            "network_access must be forced true"
+        );
+    }
+
+    #[test]
+    fn build_codex_config_env_parent_env_wins_on_collisions_persona_keys_survive() {
+        // Parent env has CODEX_CONFIG with some keys; persona has different keys.
+        // Parent wins on collision; unrelated persona keys survive.
+        // network_access is always forced true.
+        let persona_cfg = r#"{"persona_key":"persona_val","shared_key":"persona_version"}"#;
+        // Config::from_args appends generated AFTER persona env vars.
+        let extra = env(&[("CODEX_CONFIG", persona_cfg), ("CODEX_CONFIG", GENERATED)]);
+        let parent = r#"{"parent_key":"parent_val","shared_key":"parent_version"}"#;
+        let merged = build_codex_config_env(&extra, Some(parent), true)
+            .unwrap()
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&merged).unwrap();
+        // Parent-only key present
+        assert_eq!(
+            v["parent_key"], "parent_val",
+            "parent-only key must be present"
+        );
+        // Unrelated persona key survives (no collision with parent)
+        assert_eq!(
+            v["persona_key"], "persona_val",
+            "unrelated persona key must survive"
+        );
+        // Collision: parent wins
+        assert_eq!(
+            v["shared_key"], "parent_version",
+            "parent must win on colliding key"
+        );
+        // network_access always true (forced last)
+        assert_eq!(v["sandbox_workspace_write"]["network_access"], true);
+    }
+
+    #[test]
+    fn build_codex_config_env_parent_has_existing_sandbox_other_keys_survive() {
+        // Parent env has sandbox_workspace_write with extra keys; after merge
+        // those extra keys survive alongside network_access=true.
+        let persona = r#"{}"#;
+        let extra = env(&[("CODEX_CONFIG", persona), ("CODEX_CONFIG", GENERATED)]);
+        let parent =
+            r#"{"sandbox_workspace_write":{"network_access":false,"other_sandbox_key":"val"}}"#;
+        let merged = build_codex_config_env(&extra, Some(parent), true)
+            .unwrap()
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&merged).unwrap();
+        // network_access forced true even though parent set false
+        assert_eq!(v["sandbox_workspace_write"]["network_access"], true);
+        // other_sandbox_key survives (parent's sws merged, then network_access forced)
+        assert_eq!(v["sandbox_workspace_write"]["other_sandbox_key"], "val");
+    }
+
+    #[test]
+    fn build_codex_config_env_errors_on_invalid_persona_json() {
+        // Bad persona JSON + generated overlay, signal=true → parse error before merging.
+        let extra = env(&[("CODEX_CONFIG", "not-json"), ("CODEX_CONFIG", GENERATED)]);
+        let result = build_codex_config_env(&extra, None, true);
+        assert!(result.is_err(), "invalid persona JSON must return Err");
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.contains("CODEX_CONFIG"),
+            "error must mention CODEX_CONFIG"
+        );
+    }
+
+    #[test]
+    fn build_codex_config_env_errors_on_non_object_persona_json() {
+        // Non-object persona JSON + generated overlay, signal=true → parse error.
+        let extra = env(&[("CODEX_CONFIG", "[1,2,3]"), ("CODEX_CONFIG", GENERATED)]);
+        let result = build_codex_config_env(&extra, None, true);
+        assert!(result.is_err(), "non-object persona JSON must return Err");
+    }
+
+    #[test]
+    fn build_codex_config_env_errors_on_invalid_parent_json() {
+        let persona = r#"{}"#;
+        let extra = env(&[("CODEX_CONFIG", persona), ("CODEX_CONFIG", GENERATED)]);
+        let result = build_codex_config_env(&extra, Some("bad-json"), true);
+        assert!(result.is_err(), "invalid parent env JSON must return Err");
+    }
+
+    #[test]
+    fn build_codex_config_env_errors_on_non_object_sandbox_workspace_write() {
+        // sandbox_workspace_write must be an object for network_access forcing.
+        // If the parent env sets it to a non-object scalar, deep_merge replaces
+        // our object with the scalar, and the force step must fail clearly.
+        let persona = r#"{}"#;
+        let extra = env(&[("CODEX_CONFIG", persona), ("CODEX_CONFIG", GENERATED)]);
+        // Parent replaces the object with a scalar — deep_merge: scalar overlay wins.
+        let parent = r#"{"sandbox_workspace_write": 42}"#;
+        let result = build_codex_config_env(&extra, Some(parent), true);
+        assert!(
+            result.is_err(),
+            "non-object sandbox_workspace_write must return Err"
+        );
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.contains("sandbox_workspace_write"),
+            "error must mention sandbox_workspace_write"
+        );
     }
 }

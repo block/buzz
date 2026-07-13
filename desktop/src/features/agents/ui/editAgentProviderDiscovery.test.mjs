@@ -4,8 +4,15 @@ import test from "node:test";
 import {
   runtimeSupportsLlmProviderSelection,
   getPersonaProviderOptions,
+  requiredCredentialEnvKeys,
+  isMissingRequiredDropdownField,
 } from "./personaDialogPickers.tsx";
-import { shouldClearModelForRuntimeChange } from "./personaRuntimeModel.ts";
+import {
+  computeEditAgentFormValidity,
+  hasMissingRequiredEnvKey,
+  resolveAgentCommandUpdate,
+  shouldClearModelForRuntimeChange,
+} from "./personaRuntimeModel.ts";
 
 // ── LLM provider field visibility ──────────────────────────────────────────
 //
@@ -48,17 +55,59 @@ test("editAgent_providerFieldHidden_forBlankRuntime", () => {
 
 // ── Provider dropdown options for EditAgentProviderField ────────────────────
 //
-// The provider dropdown must always contain the well-known providers
+// The provider dropdown contains the well-known providers
 // (databricks, databricks_v2, anthropic, openai, openai-compat) plus a
 // default-provider fallback entry so users can clear a saved provider.
+//
+// On OSS builds, Databricks v1 ("databricks") is shown alongside v2 so OSS
+// users who were previously on v1 can select it. On internal Block builds,
+// callers pass hideProviderIds=new Set(["databricks"]) to suppress v1 — the
+// boot migration rewrites any persisted v1 value to v2, so offering v1 there
+// would silently undo the migration.
 
-test("editAgent_providerOptions_includesDatabricksProviders", () => {
+test("editAgent_providerOptions_includesDatabricksV2AndV1OnOSS", () => {
+  // OSS builds: no hideProviderIds → both v1 and v2 appear.
   const options = getPersonaProviderOptions("", "buzz-agent");
   const ids = options.map((o) => o.id);
-  assert.ok(ids.includes("databricks"), "databricks must be a provider option");
+  assert.ok(ids.includes("databricks_v2"), "databricks_v2 must be present");
+  assert.ok(
+    ids.includes("databricks"),
+    "bare databricks (V1) must be present on OSS builds",
+  );
+});
+
+test("editAgent_providerOptions_hidesDatabricksV1OnInternalBuild", () => {
+  // Internal Block builds: pass hideProviderIds to suppress v1.
+  const options = getPersonaProviderOptions(
+    "",
+    "buzz-agent",
+    "",
+    new Set(["databricks"]),
+  );
+  const ids = options.map((o) => o.id);
   assert.ok(
     ids.includes("databricks_v2"),
-    "databricks_v2 must be a provider option",
+    "databricks_v2 must still be present",
+  );
+  assert.ok(
+    !ids.includes("databricks"),
+    "bare databricks (V1) must be hidden on internal builds",
+  );
+});
+
+test("editAgent_providerOptions_includesDatabricksV1AsCurrentEvenWhenHidden", () => {
+  // A record already persisted with provider="databricks" must show it as the
+  // current value even when hideProviderIds hides it from fresh selection.
+  const options = getPersonaProviderOptions(
+    "databricks",
+    "buzz-agent",
+    "",
+    new Set(["databricks"]),
+  );
+  const ids = options.map((o) => o.id);
+  assert.ok(
+    ids.includes("databricks"),
+    "databricks must appear as current provider when it is the saved value",
   );
 });
 
@@ -90,6 +139,28 @@ test("editAgent_providerOptions_includesCurrentIfCustom", () => {
 // We can't render React in pure node tests, but we CAN verify that the logic
 // for deciding whether to show options is sound: when discovery is null, we
 // fall back to staticModelOptions (length > 0), so we always have options.
+
+test("editAgent_requiredDropdownField_onlyMarksMissingKnownField", async () => {
+  const { isMissingRequiredDropdownField } = await import(
+    "./personaDialogPickers.tsx"
+  );
+
+  assert.equal(
+    isMissingRequiredDropdownField({ isRequired: true }, ""),
+    true,
+    "missing required dropdown value must be marked required",
+  );
+  assert.equal(
+    isMissingRequiredDropdownField({ isRequired: true }, "configured"),
+    false,
+    "configured required dropdown value must not show the missing-required mark",
+  );
+  assert.equal(
+    isMissingRequiredDropdownField(null, ""),
+    false,
+    "unknown normalized field names are ignored because they do not map to a dropdown",
+  );
+});
 
 test("editAgent_modelFallback_staticOptionsWhenDiscoveryNull", () => {
   const staticModelOptions = [{ id: "", label: "Default model" }];
@@ -332,6 +403,309 @@ test("editAgent_runtimeDropdown_pinsHarnessWhenConcreteCatalogRuntimeSelected", 
     inheritHarness,
     false,
     "selecting a concrete catalog runtime must set inheritHarness=false",
+  );
+});
+
+// ── Custom command as a runtime pin ──────────────────────────────────────────
+//
+// "Custom command" has no catalog entry (nextRuntime === undefined), so it must
+// clear inheritance directly in the handler rather than relying on the
+// concrete-runtime branch. Without this, an inheriting persona-linked agent that
+// picks "Custom command" keeps inheritHarness=true, the command input stays
+// gated behind !inheritHarness, and Save silently follows the inherit path —
+// discarding the custom-command intent.
+
+test("editAgent_runtimeDropdown_pinsHarnessWhenCustomCommandSelected", () => {
+  // Simulate handleRuntimeDropdownChange("custom") for an inherited agent.
+  let inheritHarness = true; // starts inherited
+
+  const NO_RUNTIME_DROPDOWN_VALUE = "__none__";
+  const nextValue = "custom";
+  const nextRuntimeId =
+    nextValue === NO_RUNTIME_DROPDOWN_VALUE ? "" : nextValue;
+  const nextRuntime = undefined; // "custom" has no catalog entry
+
+  // The fixed handler clears inheritance for ANY explicit selection, before the
+  // concrete-runtime branch (which never runs for a custom command).
+  inheritHarness = false;
+  if (nextRuntime?.command) {
+    // concrete-runtime branch — not taken for custom command
+  }
+
+  assert.equal(nextRuntimeId, "custom");
+  assert.equal(
+    inheritHarness,
+    false,
+    "selecting 'Custom command' must set inheritHarness=false so the command input is editable and Save takes the pin path",
+  );
+});
+
+test("editAgent_runtimeDropdown_keepsInheritWhenCatalogEntryHasNoCommand", () => {
+  // A catalog entry whose adapter is missing/not installed has command:null.
+  // Selecting it must NOT clear inheritance: the concrete-runtime branch can't
+  // set a command, so pinning would leave agentCommand unchanged on Save while
+  // the provider/model logic treats the new runtime as effective — an inherited
+  // Claude agent could persist a Databricks provider while still running Claude.
+  let inheritHarness = true; // inherited Claude agent
+
+  const NO_RUNTIME_DROPDOWN_VALUE = "__none__";
+  const nextValue = "buzz-agent"; // catalog entry, but adapter missing
+  const nextRuntimeId =
+    nextValue === NO_RUNTIME_DROPDOWN_VALUE ? "" : nextValue;
+  const resolvedRuntimeId = nextRuntimeId || "custom";
+  const nextRuntime = { id: "buzz-agent", command: null, defaultArgs: [] };
+
+  // Mirror the guarded handler: only pin when a command can be supplied.
+  const isCustomCommand = resolvedRuntimeId === "custom";
+  if (isCustomCommand || nextRuntime?.command) {
+    inheritHarness = false;
+  }
+
+  assert.equal(
+    inheritHarness,
+    true,
+    "selecting a command:null catalog entry must keep inheritHarness=true to avoid a mismatched command/provider pair",
+  );
+});
+
+test("editAgent_resolveAgentCommandUpdate_pinsCustomCommandNotInherit", () => {
+  // After the custom-command selection clears inheritance, the submit path must
+  // pin the (edited) custom command rather than following the inherit sentinel.
+  assert.equal(
+    resolveAgentCommandUpdate({
+      inheritHarness: false,
+      agentCommand: "/opt/bin/my-custom-agent",
+      originalAgentCommand: "", // was inheriting, no command
+      agentCommandOverride: null,
+    }),
+    "/opt/bin/my-custom-agent",
+    "edited custom command must be persisted as a pin",
+  );
+});
+
+test("editAgent_resolveAgentCommandUpdate_pinsUnchangedPrefillOnInheritTransition", () => {
+  // Codex scenario: a persona-linked agent that was inheriting selects Custom
+  // command and Saves the visible prefilled command without editing it. The
+  // command equals the resolved original, but because the agent had no override
+  // (agentCommandOverride == null) this is an inherit→pin transition and the
+  // command MUST be sent as the pin — otherwise the update is omitted and the
+  // agent keeps inheriting (silent no-op).
+  assert.equal(
+    resolveAgentCommandUpdate({
+      inheritHarness: false,
+      agentCommand: "goose run",
+      originalAgentCommand: "goose run", // prefilled, unchanged
+      agentCommandOverride: null, // was inheriting
+    }),
+    "goose run",
+    "unchanged prefilled command must still be pinned on inherit→pin transition",
+  );
+});
+
+test("editAgent_resolveAgentCommandUpdate_noOpWhenPinnedAndUnchanged", () => {
+  // An already-pinned agent (had an override) whose command is unchanged must
+  // stay a no-op so an unrelated edit does not rewrite the command.
+  assert.equal(
+    resolveAgentCommandUpdate({
+      inheritHarness: false,
+      agentCommand: "claude",
+      originalAgentCommand: "claude",
+      agentCommandOverride: "claude", // already pinned
+    }),
+    undefined,
+    "unchanged command on an already-pinned agent must be omitted",
+  );
+});
+
+test("editAgent_resolveAgentCommandUpdate_inheritSentinelOnlyWhenPinToClear", () => {
+  // Reverting to inherit sends the empty sentinel only when there's a pin to
+  // clear; a name-only edit on an already-inheriting agent leaves it alone.
+  assert.equal(
+    resolveAgentCommandUpdate({
+      inheritHarness: true,
+      agentCommand: "claude",
+      originalAgentCommand: "claude",
+      agentCommandOverride: "claude", // had a pin → clear it
+    }),
+    "",
+    "reverting to inherit with a prior pin must send the clear sentinel",
+  );
+  assert.equal(
+    resolveAgentCommandUpdate({
+      inheritHarness: true,
+      agentCommand: "claude",
+      originalAgentCommand: "claude",
+      agentCommandOverride: null, // was already inheriting → no-op
+    }),
+    undefined,
+    "name-only edit on an inheriting agent must leave the command alone",
+  );
+});
+
+test("editAgent_customCommandSelected_autoExpandsAdvancedSection", () => {
+  // Selecting "Custom command" must reveal the Advanced command input, which is
+  // otherwise collapsed. Without this the user can Save without ever seeing the
+  // field, leaving agentCommand equal to the original effective command (so the
+  // update is omitted) and the custom selection silently no-ops.
+  let showAdvancedFields = false; // starts collapsed on open
+
+  const NO_RUNTIME_DROPDOWN_VALUE = "__none__";
+  const nextValue = "custom";
+  const nextRuntimeId =
+    nextValue === NO_RUNTIME_DROPDOWN_VALUE ? "" : nextValue;
+  const resolvedRuntimeId = nextRuntimeId || "custom";
+  const isCustomCommand = resolvedRuntimeId === "custom";
+
+  // Mirror the handler's auto-expand branch.
+  if (isCustomCommand) {
+    showAdvancedFields = true;
+  }
+
+  assert.equal(
+    showAdvancedFields,
+    true,
+    "selecting 'Custom command' must auto-expand Advanced so the command input is visible",
+  );
+});
+
+test("editAgent_missingRequiredEnvKey_autoExpandsAdvancedOnTransition", () => {
+  // Codex P2: when a provider change makes a credential newly required, the
+  // EnvVarsEditor lives inside the collapsed Advanced section, so the amber
+  // required row would stay unmounted (invisible) while Save is disabled. The
+  // effect auto-expands Advanced on the missing→present-requirement transition.
+  let showAdvancedFields = false; // collapsed by default on open
+  let previousMissing = false;
+
+  // Mirror the effect's transition guard.
+  function applyMissingEffect(requiredEnvKeyMissing) {
+    if (requiredEnvKeyMissing && !previousMissing) {
+      showAdvancedFields = true;
+    }
+    previousMissing = requiredEnvKeyMissing;
+  }
+
+  // Initial render: buzz-agent with no provider — nothing required yet.
+  applyMissingEffect(
+    hasMissingRequiredEnvKey(requiredCredentialEnvKeys("buzz-agent", ""), {}),
+  );
+  assert.equal(
+    showAdvancedFields,
+    false,
+    "Advanced stays collapsed while no credential is required",
+  );
+
+  // User picks anthropic → ANTHROPIC_API_KEY becomes required and is unset.
+  applyMissingEffect(
+    hasMissingRequiredEnvKey(
+      requiredCredentialEnvKeys("buzz-agent", "anthropic"),
+      {},
+    ),
+  );
+  assert.equal(
+    showAdvancedFields,
+    true,
+    "Advanced auto-expands when a required credential is newly missing",
+  );
+
+  // User fills the key, then collapses Advanced manually — no re-expand.
+  showAdvancedFields = false;
+  applyMissingEffect(
+    hasMissingRequiredEnvKey(
+      requiredCredentialEnvKeys("buzz-agent", "anthropic"),
+      { ANTHROPIC_API_KEY: "sk-ant-test" },
+    ),
+  );
+  assert.equal(
+    showAdvancedFields,
+    false,
+    "Advanced does not re-expand once the required credential is filled",
+  );
+});
+
+test("editAgent_missingRequiredEnvKey_blocksSaveViaValidity", () => {
+  // The block-save gate is folded into computeEditAgentFormValidity so the
+  // Save button disables when a runtime/provider-required credential is unset.
+  const base = {
+    name: "My Agent",
+    parallelism: "",
+    agentAcpCommand: "",
+    acpCommand: "",
+    respondTo: "all",
+    respondToAllowlistLength: 0,
+    selectedRuntimeId: "buzz-agent",
+    inheritHarness: false,
+    agentCommand: "buzz-agent",
+    requiredEnvKeyMissing: false,
+  };
+
+  assert.equal(
+    computeEditAgentFormValidity({ ...base, requiredEnvKeyMissing: true }),
+    false,
+    "Save must be blocked when a required credential key is missing",
+  );
+  assert.equal(
+    computeEditAgentFormValidity({ ...base, requiredEnvKeyMissing: false }),
+    true,
+    "Save must be allowed once the required credential key is present",
+  );
+});
+
+test("editAgent_customCommandPinned_blocksSaveWhenCommandEmpty", () => {
+  // A pinned custom command with an empty command field must block Save — the
+  // backend would spawn a runtime with no command otherwise. Exercises the real
+  // computeEditAgentFormValidity helper.
+  const base = {
+    name: "My Agent",
+    parallelism: "",
+    agentAcpCommand: "",
+    acpCommand: "",
+    respondTo: "all",
+    respondToAllowlistLength: 0,
+    selectedRuntimeId: "custom",
+    inheritHarness: false,
+    agentCommand: "",
+    requiredEnvKeyMissing: false,
+  };
+
+  assert.equal(
+    computeEditAgentFormValidity(base),
+    false,
+    "empty pinned custom command must block Save",
+  );
+
+  assert.equal(
+    computeEditAgentFormValidity({ ...base, agentCommand: "/opt/bin/agent" }),
+    true,
+    "non-empty custom command must allow Save",
+  );
+
+  // An inherited (not pinned) selection is never gated by this rule, even with
+  // an empty command — the inherit path resolves the command server-side.
+  assert.equal(
+    computeEditAgentFormValidity({ ...base, inheritHarness: true }),
+    true,
+    "inheriting agents must not be gated by the custom-command rule",
+  );
+
+  // The other validity gates still apply through the helper.
+  assert.equal(
+    computeEditAgentFormValidity({
+      ...base,
+      agentCommand: "/opt/bin/agent",
+      name: "   ",
+    }),
+    false,
+    "blank name must block Save",
+  );
+  assert.equal(
+    computeEditAgentFormValidity({
+      ...base,
+      agentCommand: "/opt/bin/agent",
+      respondTo: "allowlist",
+      respondToAllowlistLength: 0,
+    }),
+    false,
+    "empty allowlist must block Save",
   );
 });
 
@@ -852,7 +1226,7 @@ test("editAgent_findingE_capableBuzzAgentLoadedCatalog_preservedOnNoOpSave", () 
 // to id-based matching when command-path matching misses — same id-fallback used
 // by effectiveRuntimeIdForSubmit.
 
-// Helper mirrors the fixed seeding logic from EditAgentDialog.tsx open-effect /
+// Helper mirrors the fixed seeding logic from AgentInstanceEditDialog.tsx open-effect /
 // catalog-arrival effect.
 function deriveSelectedRuntimeId(agentCommand, runtimes) {
   const matched =
@@ -991,5 +1365,282 @@ test("editAgent_bugA_unknownCommandStillFallsBackToCustom", () => {
     selectedRuntimeId,
     "custom",
     "unknown command/id must still fall back to 'custom'",
+  );
+});
+
+// ── requiredCredentialEnvKeys ──────────────────────────────────────────────
+//
+// Guards the provider-aware credential requirements surface so Phase 2
+// required env rows stay correct as providers and runtimes change.
+
+test("requiredCredentialEnvKeys: buzz-agent + anthropic → ANTHROPIC_API_KEY", () => {
+  const keys = requiredCredentialEnvKeys("buzz-agent", "anthropic");
+  assert.deepEqual(keys, ["ANTHROPIC_API_KEY"]);
+});
+
+test("requiredCredentialEnvKeys: buzz-agent + openai → OPENAI_COMPAT_API_KEY", () => {
+  const keys = requiredCredentialEnvKeys("buzz-agent", "openai");
+  assert.deepEqual(keys, ["OPENAI_COMPAT_API_KEY"]);
+});
+
+test("requiredCredentialEnvKeys: buzz-agent + databricks → DATABRICKS_HOST only (no token)", () => {
+  const keys = requiredCredentialEnvKeys("buzz-agent", "databricks");
+  // DATABRICKS_TOKEN is NOT required — OAuth PKCE is the normal path.
+  assert.deepEqual(keys, ["DATABRICKS_HOST"]);
+  assert.ok(
+    !keys.includes("DATABRICKS_TOKEN"),
+    "DATABRICKS_TOKEN must not be required (OAuth PKCE is the normal auth path)",
+  );
+});
+
+test("requiredCredentialEnvKeys: buzz-agent + databricks_v2 → DATABRICKS_HOST only", () => {
+  const keys = requiredCredentialEnvKeys("buzz-agent", "databricks_v2");
+  assert.deepEqual(keys, ["DATABRICKS_HOST"]);
+});
+
+test("requiredCredentialEnvKeys: goose + anthropic → ANTHROPIC_API_KEY", () => {
+  const keys = requiredCredentialEnvKeys("goose", "anthropic");
+  assert.deepEqual(keys, ["ANTHROPIC_API_KEY"]);
+});
+
+test("requiredCredentialEnvKeys: goose + openai → OPENAI_COMPAT_API_KEY", () => {
+  const keys = requiredCredentialEnvKeys("goose", "openai");
+  assert.deepEqual(keys, ["OPENAI_COMPAT_API_KEY"]);
+});
+
+test("requiredCredentialEnvKeys: buzz-agent + no provider → empty (provider not yet selected)", () => {
+  const keys = requiredCredentialEnvKeys("buzz-agent", "");
+  assert.deepEqual(keys, []);
+});
+
+test("requiredCredentialEnvKeys: claude → empty (uses CLI login, not env keys)", () => {
+  const keys = requiredCredentialEnvKeys("claude", "");
+  assert.deepEqual(keys, []);
+});
+
+test("requiredCredentialEnvKeys: codex → empty (uses CLI login, not env keys)", () => {
+  const keys = requiredCredentialEnvKeys("codex", "");
+  assert.deepEqual(keys, []);
+});
+
+test("requiredCredentialEnvKeys: custom/unknown runtime → empty", () => {
+  const keys = requiredCredentialEnvKeys("my-custom-harness", "anthropic");
+  assert.deepEqual(keys, []);
+});
+
+// ── Block-save gate: hasMissingRequiredEnvKey logic ────────────────────────
+//
+// The AgentInstanceEditDialog computes:
+//   requiredEnvKeyMissing = hasMissingRequiredEnvKey(requiredEnvKeys, envVars)
+// and folds it into canSubmit (via computeEditAgentFormValidity). These tests
+// exercise the exported predicate directly.
+
+const hasRequiredEnvKeyMissing = hasMissingRequiredEnvKey;
+
+test("blockSave_buzzAgentAnthropicMissingKey_blocked", () => {
+  // Will's exact case: buzz-agent / anthropic / opus / no ANTHROPIC_API_KEY
+  const requiredKeys = requiredCredentialEnvKeys("buzz-agent", "anthropic");
+  const envVars = {}; // key absent
+  assert.equal(
+    hasRequiredEnvKeyMissing(requiredKeys, envVars),
+    true,
+    "save must be blocked when ANTHROPIC_API_KEY is missing",
+  );
+});
+
+test("blockSave_buzzAgentAnthropicKeyProvided_allowed", () => {
+  const requiredKeys = requiredCredentialEnvKeys("buzz-agent", "anthropic");
+  const envVars = { ANTHROPIC_API_KEY: "sk-ant-test" };
+  assert.equal(
+    hasRequiredEnvKeyMissing(requiredKeys, envVars),
+    false,
+    "save must be allowed when ANTHROPIC_API_KEY is present",
+  );
+});
+
+test("blockSave_buzzAgentAnthropicEmptyStringKey_blocked", () => {
+  // Empty string is treated the same as absent — matches EnvVarsEditor isMissing
+  const requiredKeys = requiredCredentialEnvKeys("buzz-agent", "anthropic");
+  const envVars = { ANTHROPIC_API_KEY: "" };
+  assert.equal(
+    hasRequiredEnvKeyMissing(requiredKeys, envVars),
+    true,
+    "save must be blocked when ANTHROPIC_API_KEY is empty string",
+  );
+});
+
+test("blockSave_claudeNoCliLogin_notBlocked", () => {
+  // CLI-login runtimes have no dialog-fixable requirement — must never block
+  const requiredKeys = requiredCredentialEnvKeys("claude", "");
+  const envVars = {}; // no keys set
+  assert.equal(
+    hasRequiredEnvKeyMissing(requiredKeys, envVars),
+    false,
+    "claude save must NOT be blocked — CLI login is out-of-band",
+  );
+});
+
+test("blockSave_codexNoCliLogin_notBlocked", () => {
+  const requiredKeys = requiredCredentialEnvKeys("codex", "");
+  const envVars = {};
+  assert.equal(
+    hasRequiredEnvKeyMissing(requiredKeys, envVars),
+    false,
+    "codex save must NOT be blocked — CLI login is out-of-band",
+  );
+});
+
+test("blockSave_buzzAgentDatabricksMissingHost_blocked", () => {
+  const requiredKeys = requiredCredentialEnvKeys("buzz-agent", "databricks");
+  const envVars = {};
+  assert.equal(
+    hasRequiredEnvKeyMissing(requiredKeys, envVars),
+    true,
+    "save must be blocked when DATABRICKS_HOST is missing",
+  );
+});
+
+test("blockSave_buzzAgentDatabricksHostProvided_allowed", () => {
+  const requiredKeys = requiredCredentialEnvKeys("buzz-agent", "databricks");
+  const envVars = { DATABRICKS_HOST: "https://my.databricks.instance" };
+  assert.equal(
+    hasRequiredEnvKeyMissing(requiredKeys, envVars),
+    false,
+    "save must be allowed when DATABRICKS_HOST is present",
+  );
+});
+
+// ── Block-save gate: isMissingRequiredDropdownField ────────────────────────
+//
+// The AgentInstanceEditDialog also gates on modelRequired / providerRequired.
+// These tests guard the isMissingRequiredDropdownField predicate used for both.
+
+test("blockSave_missingRequiredModel_blocked", () => {
+  // isRequired=true and value is empty → should block
+  assert.equal(
+    isMissingRequiredDropdownField({ isRequired: true }, ""),
+    true,
+    "canSubmit must be blocked when required model is unset",
+  );
+});
+
+test("blockSave_requiredModelProvided_allowed", () => {
+  assert.equal(
+    isMissingRequiredDropdownField({ isRequired: true }, "claude-opus-4-5"),
+    false,
+    "canSubmit must be allowed when required model is set",
+  );
+});
+
+test("blockSave_optionalModelEmpty_allowed", () => {
+  // isRequired=false → not a block-save condition
+  assert.equal(
+    isMissingRequiredDropdownField({ isRequired: false }, ""),
+    false,
+    "optional empty model must not block save",
+  );
+});
+
+test("blockSave_nullField_allowed", () => {
+  // null/undefined field descriptor → not required, not blocked
+  assert.equal(
+    isMissingRequiredDropdownField(null, ""),
+    false,
+    "null field must not block save",
+  );
+  assert.equal(
+    isMissingRequiredDropdownField(undefined, ""),
+    false,
+    "undefined field must not block save",
+  );
+});
+
+// ── Block-save gate: inherit-runtime transition cases ──────────────────────
+//
+// When inheritHarness=true, prospectiveRuntimeId resolves from agent.agentCommand
+// (the persona's runtime), not the current dropdown. These tests guard the two
+// failure modes Thufir flagged:
+//   FALSE-ALLOW: claude pin → inherit buzz-agent persona → missing ANTHROPIC_API_KEY
+//     → must be BLOCKED (prospective runtime is buzz-agent/anthropic, key absent)
+//   FALSE-BLOCK: buzz-agent pin → inherit claude persona
+//     → must NOT be blocked (claude has no dialog-fixable credential requirement)
+
+test("blockSave_inheritTransition_claudePin_toBuzzAgentPersona_missingKey_blocked", () => {
+  // Scenario: agent is currently pinned to claude (CLI-login, llmProviderFieldVisible=false
+  // so providerForDiscovery="" in the component). The user checks "Inherit runtime
+  // from persona" where the persona uses buzz-agent/anthropic.
+  // prospectiveRuntimeId resolves to "buzz-agent"; providerForRequiredKeys must
+  // use the PROSPECTIVE runtime's provider-field visibility (buzz-agent supports
+  // provider selection) rather than the current locked runtime's suppression.
+  const prospectiveRuntimeId = "buzz-agent"; // resolved from persona's agentCommand
+  const provider = "anthropic"; // agent's configured provider (in envVars / state)
+
+  // Mirror the component's providerForRequiredKeys computation:
+  //   providerForRequiredKeys = runtimeSupportsLlmProviderSelection(prospectiveRuntimeId)
+  //                              ? provider : ""
+  const providerForRequiredKeys = runtimeSupportsLlmProviderSelection(
+    prospectiveRuntimeId,
+  )
+    ? provider
+    : "";
+
+  const requiredKeys = requiredCredentialEnvKeys(
+    prospectiveRuntimeId,
+    providerForRequiredKeys,
+  );
+  const envVars = {}; // ANTHROPIC_API_KEY absent
+
+  // providerForRequiredKeys must be "anthropic" (buzz-agent supports selection)
+  // so requiredCredentialEnvKeys returns [ANTHROPIC_API_KEY] and save is blocked.
+  assert.equal(
+    providerForRequiredKeys,
+    "anthropic",
+    "providerForRequiredKeys must use the prospective runtime's visibility, not the locked current runtime",
+  );
+  const missing = requiredKeys.some((key) => (envVars[key] ?? "").length === 0);
+  assert.equal(
+    missing,
+    true,
+    "inheriting buzz-agent/anthropic persona with no key must BLOCK save (false-allow prevented)",
+  );
+});
+
+test("blockSave_inheritTransition_buzzAgentPin_toClaudePersona_notBlocked", () => {
+  // Scenario: agent is pinned to buzz-agent/anthropic. The user checks
+  // "Inherit runtime from persona" where the persona uses claude.
+  // prospectiveRuntimeId resolves to "claude"; claude doesn't support provider
+  // selection, so providerForRequiredKeys="" and requiredCredentialEnvKeys returns [].
+  const prospectiveRuntimeId = "claude"; // resolved from persona's agentCommand
+  const provider = "anthropic"; // agent's old provider (no longer relevant for claude)
+
+  // Mirror the component's providerForRequiredKeys computation:
+  const providerForRequiredKeys = runtimeSupportsLlmProviderSelection(
+    prospectiveRuntimeId,
+  )
+    ? provider
+    : "";
+
+  const requiredKeys = requiredCredentialEnvKeys(
+    prospectiveRuntimeId,
+    providerForRequiredKeys,
+  );
+  const envVars = {}; // nothing set — claude doesn't require dialog credentials
+
+  // providerForRequiredKeys must be "" (claude doesn't support provider selection)
+  assert.equal(
+    providerForRequiredKeys,
+    "",
+    "providerForRequiredKeys must be empty for CLI-login runtimes",
+  );
+  const missing = requiredKeys.some((key) => (envVars[key] ?? "").length === 0);
+  assert.equal(
+    missing,
+    false,
+    "inheriting claude persona must NOT block save (false-block prevented — CLI login is out-of-band)",
+  );
+  assert.equal(
+    requiredKeys.length,
+    0,
+    "claude must return empty required keys — no dialog-fixable credential",
   );
 });

@@ -325,3 +325,35 @@ test("readChannelSectionsStore: scoped key takes precedence over legacy key afte
   const result = readChannelSectionsStore(pubkey, relay);
   assert.deepEqual(result, newStore);
 });
+
+test("parseChannelSectionPayload: preserves icon field when present", () => {
+  const payload = {
+    version: 1,
+    sections: [{ id: "s1", name: "Work", icon: "🚀", order: 0 }],
+    assignments: { chan1: "s1" },
+  };
+  const result = parseChannelSectionPayload(payload);
+  assert.deepEqual(result, {
+    version: 1,
+    sections: [{ id: "s1", name: "Work", icon: "🚀", order: 0 }],
+    assignments: { chan1: "s1" },
+  });
+});
+
+test("parseChannelSectionPayload: omits icon field when empty or whitespace", () => {
+  const payload = {
+    version: 1,
+    sections: [
+      { id: "s1", name: "A", icon: "", order: 0 },
+      { id: "s2", name: "B", icon: "   ", order: 1 },
+      { id: "s3", name: "C", order: 2 },
+    ],
+    assignments: {},
+  };
+  const result = parseChannelSectionPayload(payload);
+  assert.deepEqual(result?.sections, [
+    { id: "s1", name: "A", order: 0 },
+    { id: "s2", name: "B", order: 1 },
+    { id: "s3", name: "C", order: 2 },
+  ]);
+});

@@ -5,11 +5,12 @@ import type {
   UpdatePersonaInput,
 } from "@/shared/api/types";
 import { PersonaDeleteDialog } from "@/features/agents/ui/PersonaDeleteDialog";
-import { PersonaDialog } from "@/features/agents/ui/PersonaDialog";
+import { AgentDialog } from "@/features/agents/ui/AgentDialog";
 import type { PersonaDialogState } from "@/features/agents/ui/personaDialogState";
 
 export function UserProfilePersonaDialogs({
   createError,
+  instanceCount,
   isPending,
   personaDialogState,
   personaToDelete,
@@ -22,6 +23,8 @@ export function UserProfilePersonaDialogs({
   onSubmit,
 }: {
   createError: Error | null;
+  /** Number of managed-agent instances backed by the persona being deleted. */
+  instanceCount: number;
   isPending: boolean;
   personaDialogState: PersonaDialogState | null;
   personaToDelete: AgentPersona | null;
@@ -35,11 +38,12 @@ export function UserProfilePersonaDialogs({
 }) {
   return (
     <>
-      <PersonaDialog
+      <AgentDialog
         description={personaDialogState?.description ?? ""}
         error={updateError ?? createError}
         initialValues={personaDialogState?.initialValues ?? null}
         isPending={isPending}
+        mode="definition-edit"
         runtimes={runtimes}
         runtimesLoading={runtimesLoading}
         onOpenChange={(open) => {
@@ -53,6 +57,7 @@ export function UserProfilePersonaDialogs({
         title={personaDialogState?.title ?? "Agent"}
       />
       <PersonaDeleteDialog
+        instanceCount={instanceCount}
         onConfirm={onConfirmDelete}
         onOpenChange={(open) => {
           if (!open) {

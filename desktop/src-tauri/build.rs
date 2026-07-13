@@ -13,6 +13,8 @@ fn main() {
     println!("cargo:rerun-if-env-changed=BUZZ_BUILD_BUZZ_AGENT_MODEL");
     println!("cargo:rerun-if-env-changed=BUZZ_BUILD_AGENT_ENV");
     println!("cargo:rerun-if-env-changed=BUZZ_BUILD_RELAY_RECONNECT_CMD");
+    println!("cargo:rerun-if-env-changed=BUZZ_BUILD_OBSERVER_ARCHIVE_DEFAULT");
+    println!("cargo:rerun-if-env-changed=BUZZ_BUILD_AGENT_METRIC_ARCHIVE_DEFAULT");
     println!("cargo:rustc-check-cfg=cfg(buzz_updater_enabled)");
 
     if let Ok(relay_url) = std::env::var("BUZZ_RELAY_URL") {
@@ -72,6 +74,21 @@ fn main() {
         println!("cargo:rustc-env=BUZZ_DESKTOP_BUILD_RELAY_RECONNECT_CMD={val}");
     }
 
+    // Presence-only flag: when set (any non-empty value), observer-feed archive
+    // defaults to ON for the current identity on first run.  OSS builds leave
+    // this unset → default OFF.  No JSON validation needed — the command only
+    // checks `.is_some()`.
+    if std::env::var("BUZZ_BUILD_OBSERVER_ARCHIVE_DEFAULT").is_ok() {
+        println!("cargo:rustc-env=BUZZ_DESKTOP_BUILD_OBSERVER_ARCHIVE_DEFAULT=1");
+    }
+
+    // Presence-only flag: when set (any non-empty value), agent-turn-metric
+    // archive defaults to ON for the current identity on first run.  OSS builds
+    // leave this unset → default OFF.
+    if std::env::var("BUZZ_BUILD_AGENT_METRIC_ARCHIVE_DEFAULT").is_ok() {
+        println!("cargo:rustc-env=BUZZ_DESKTOP_BUILD_AGENT_METRIC_ARCHIVE_DEFAULT=1");
+    }
+
     let updater_public_key = std::env::var("BUZZ_UPDATER_PUBLIC_KEY")
         .ok()
         .map(|value| value.trim().to_string())
@@ -83,6 +100,21 @@ fn main() {
 
     if updater_public_key.is_some() && updater_endpoint.is_some() {
         println!("cargo:rustc-cfg=buzz_updater_enabled");
+    }
+
+    // Cargo test executables get no embedded Windows manifest (tauri_build
+    // attaches one to bin targets only), so the loader binds comctl32 v5, which
+    // lacks TaskDialogIndirect (statically imported via tauri-plugin-dialog/rfd)
+    // and debug test exes die at load with STATUS_ENTRYPOINT_NOT_FOUND. Declaring
+    // the Common Controls v6 dependency makes link.exe emit a side-by-side
+    // <exe>.manifest that the loader honors for manifest-less executables;
+    // binaries with an embedded manifest (the real app) ignore it.
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows")
+        && std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc")
+    {
+        println!(
+            "cargo:rustc-link-arg=/MANIFESTDEPENDENCY:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'"
+        );
     }
 
     tauri_build::build()

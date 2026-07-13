@@ -1,5 +1,6 @@
 import * as React from "react";
-import { CircleArrowUp } from "lucide-react";
+import { openUrl } from "@tauri-apps/plugin-opener";
+import { CircleArrowUp, ExternalLink } from "lucide-react";
 
 import { useUpdaterContext } from "./hooks/UpdaterProvider";
 import { shouldShowSidebarUpdateCard } from "./sidebarUpdateCardVisibility";
@@ -89,6 +90,23 @@ export function SidebarUpdateCard({ onDismiss }: SidebarUpdateCardProps) {
 
   if (!shouldShowSidebarUpdateCard(status)) {
     return null;
+  }
+
+  if (status.state === "manual-required") {
+    return (
+      <SidebarCompactActionCard
+        actionAriaLabel="Download update from GitHub"
+        actionTestId="sidebar-update-download-github"
+        description={`v${status.version} available — download from GitHub. Switch to AppImage for automatic updates.`}
+        dismissLabel="Dismiss update notification"
+        icon={<ExternalLink aria-hidden="true" className="h-5 w-5" />}
+        iconKey="manual"
+        onAction={() => void openUrl(status.releaseUrl)}
+        onDismiss={onDismiss}
+        testId="sidebar-update-card-manual"
+        title="Update available"
+      />
+    );
   }
 
   return (

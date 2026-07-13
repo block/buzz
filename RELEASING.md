@@ -174,8 +174,9 @@ Each release produces two GitHub releases:
    (macOS).
 
 2. **`buzz-desktop-latest`** — a rolling pre-release for the Tauri
-   auto-updater containing `latest.json`, the signed `.tar.gz` archive,
-   and its `.sig` signature.
+   auto-updater containing `latest.json` and each platform's signed
+   updater artifact plus its `.sig` signature (`.tar.gz` on macOS,
+   `.AppImage` on Linux, and `_alpha-unsigned.exe` on Windows).
 
 ---
 
@@ -186,6 +187,15 @@ Silicon (`darwin-aarch64`, the `release` job) and Intel
 (`darwin-x86_64`, the `release-macos-x64` job) — plus Linux `.deb` and
 `.AppImage`. Both macOS DMGs are codesigned, notarized, and attached to
 the same `v<version>` release. Intel users download the `_x64.dmg`.
+
+The Linux AppImage is post-processed by `desktop/scripts/fix-appimage.sh`,
+which strips infra libraries over-bundled by linuxdeploy (they crash on
+Mesa 25+ / GLib 2.88 distros — see
+[tauri-apps/tauri#15665](https://github.com/tauri-apps/tauri/issues/15665))
+and re-signs the artifact. As a result the AppImage relies on the
+host's Wayland/GStreamer/graphics stack and requires GLib >= 2.72
+(Ubuntu 22.04 or newer). The `release-linux` job builds inside a
+`ubuntu:22.04` container for broad GLIBC compatibility.
 
 ---
 
@@ -219,7 +229,7 @@ The version string must be valid semver: `MAJOR.MINOR.PATCH` with an optional pr
 
 ### Auto-updater reports "no update available"
 Verify that the `buzz-desktop-latest` release exists and contains a
-valid `latest.json`. The auto-updater manifest currently lists
-`darwin-aarch64` only, so Intel and Linux users do not yet receive
-auto-updates — they download new versions manually from the release
-page. (Adding their entries to `latest.json` is a follow-up.)
+valid `latest.json`. The manifest covers all four platform keys
+(`darwin-aarch64`, `darwin-x86_64`, `linux-x86_64`,
+`windows-x86_64`); a missing entry usually means that platform's
+release job failed — check the workflow run.

@@ -282,7 +282,7 @@ function PersonaCatalogDetail({ persona }: { persona: AgentPersona }) {
         items={[
           {
             label: "Type",
-            value: persona.isBuiltIn ? "Built-in persona" : "Custom persona",
+            value: persona.isBuiltIn ? "Built-in agent" : "Custom agent",
           },
           {
             label: "Preferred model",

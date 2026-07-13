@@ -61,6 +61,14 @@ pub const MAX_REPLAY_TTL_SECS: u64 = 3600;
 /// The production implementation lives in `buzz-pubsub` (Redis `SET NX EX`).
 /// A test impl is provided behind `cfg(any(test, feature = "test-utils"))`.
 pub trait Nip98ReplayGuard: Send + Sync {
+    /// Atomically claim `event_id` in an explicit deployment or community scope.
+    fn try_mark_in_scope<'a>(
+        &'a self,
+        scope: &'a str,
+        event_id: &'a EventId,
+        ttl_secs: u64,
+    ) -> Pin<Box<dyn Future<Output = Result<bool, AuthError>> + Send + 'a>>;
+
     /// Atomically claim `event_id` for `ctx`'s community.
     ///
     /// Returns `Ok(true)` when the id is newly inserted (proceed) and
@@ -89,7 +97,10 @@ pub trait Nip98ReplayGuard: Send + Sync {
         ctx: &'a TenantContext,
         event_id: &'a EventId,
         ttl_secs: u64,
-    ) -> Pin<Box<dyn Future<Output = Result<bool, AuthError>> + Send + 'a>>;
+    ) -> Pin<Box<dyn Future<Output = Result<bool, AuthError>> + Send + 'a>> {
+        let scope = ctx.community().to_string();
+        Box::pin(async move { self.try_mark_in_scope(&scope, event_id, ttl_secs).await })
+    }
 }
 
 /// Redis key for a NIP-98 replay marker:
@@ -101,7 +112,12 @@ pub trait Nip98ReplayGuard: Send + Sync {
 /// isolation: a same-id replay across communities must consult two distinct
 /// seen-set rows, not one shared row.
 pub fn nip98_replay_key(ctx: &TenantContext, event_id: &EventId) -> String {
-    format!("buzz:{}:nip98:{}", ctx.community(), event_id.to_hex())
+    nip98_replay_key_for_scope(&ctx.community().to_string(), event_id)
+}
+
+/// Redis key for a NIP-98 replay marker in an explicit trusted scope.
+pub fn nip98_replay_key_for_scope(scope: &str, event_id: &EventId) -> String {
+    format!("buzz:{scope}:nip98:{}", event_id.to_hex())
 }
 
 /// Always-fresh seen-set for unit tests — every `try_mark` returns `Ok(true)`.
@@ -112,9 +128,9 @@ pub struct AlwaysFreshReplayGuard;
 
 #[cfg(any(test, feature = "test-utils"))]
 impl Nip98ReplayGuard for AlwaysFreshReplayGuard {
-    fn try_mark<'a>(
+    fn try_mark_in_scope<'a>(
         &'a self,
-        _ctx: &'a TenantContext,
+        _scope: &'a str,
         _event_id: &'a EventId,
         _ttl_secs: u64,
     ) -> Pin<Box<dyn Future<Output = Result<bool, AuthError>> + Send + 'a>> {

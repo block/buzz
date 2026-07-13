@@ -43,9 +43,16 @@ bootstrap:
 setup: bootstrap
     ./scripts/dev-setup.sh
 
-# Install git hooks via lefthook
+# Install git hooks via lefthook (dispatches from the shared .git/hooks dir so all
+# linked worktrees inherit the same hooks without a worktree-relative .hooks path)
 hooks:
-    git config --local core.hooksPath .hooks
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # --path-format=absolute guarantees an absolute path from every invocation context:
+    # without it, --git-common-dir returns ".git" from the main checkout and a
+    # relative hooksPath would break linked-worktree dispatch just like .hooks did.
+    HOOKS_DIR="$(git rev-parse --path-format=absolute --git-common-dir)/hooks"
+    git config --local core.hooksPath "$HOOKS_DIR"
     lefthook install --force
 
 # ⚠️  Wipe ALL data and recreate a clean environment
@@ -355,7 +362,8 @@ staging *ARGS: bootstrap _ensure-sidecar-stubs
     fi
     # Replace the 0-byte sidecar stub with the real CLI binary so tauri dev picks it up.
     TARGET=$(rustc -vV | sed -n 's|host: ||p')
-    cp target/release/buzz "desktop/src-tauri/binaries/buzz-${TARGET}"
+    TARGET_DIR=$(cargo metadata --format-version 1 --no-deps | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).target_directory")
+    cp "${TARGET_DIR}/release/buzz" "desktop/src-tauri/binaries/buzz-${TARGET}"
     chmod +x "desktop/src-tauri/binaries/buzz-${TARGET}"
     cd {{desktop_dir}}
     export BUZZ_RELAY_URL="wss://sprout-oss.stage.blox.sqprod.co"
@@ -600,6 +608,7 @@ _release-pr lane version:
             TAG_PREFIX="v"
             CHANGELOG="CHANGELOG.md"
             ADD_FILES=(desktop/package.json desktop/src-tauri/tauri.conf.json desktop/src-tauri/Cargo.toml desktop/src-tauri/Cargo.lock pnpm-lock.yaml CHANGELOG.md)
+            LOG_PATHS=(desktop/ crates/buzz-core/ crates/buzz-persona/ crates/buzz-sdk/ crates/buzz-agent/)
             ARTIFACT="Buzz Desktop" ;;
         relay)
             BRANCH_PREFIX="relay-release"
@@ -609,6 +618,7 @@ _release-pr lane version:
             TAG_PREFIX="relay-v"
             CHANGELOG="crates/buzz-relay/CHANGELOG.md"
             ADD_FILES=(crates/buzz-relay/Cargo.toml Cargo.lock crates/buzz-relay/CHANGELOG.md)
+            LOG_PATHS=(crates/buzz-relay/ crates/buzz-core/ crates/buzz-db/ crates/buzz-auth/ crates/buzz-pubsub/ crates/buzz-search/ crates/buzz-audit/ crates/buzz-media/ crates/buzz-sdk/ crates/buzz-workflow/ crates/buzz-conformance/ migrations/)
             ARTIFACT="Buzz Relay" ;;
         mobile)
             BRANCH_PREFIX="mobile-release"
@@ -618,6 +628,7 @@ _release-pr lane version:
             TAG_PREFIX="mobile-v"
             CHANGELOG="mobile/CHANGELOG.md"
             ADD_FILES=(mobile/pubspec.yaml mobile/pubspec.lock mobile/CHANGELOG.md)
+            LOG_PATHS=(mobile/)
             ARTIFACT="Buzz Mobile" ;;
         *)
             echo "Error: unknown release lane '{{ lane }}'"
@@ -666,7 +677,7 @@ _release-pr lane version:
     REPO=$(git remote get-url origin | sed -E 's|.*github\.com[:/]||; s|\.git$||')
     format_log() {
         local range="$1"
-        git log "$range" --format="%h %H %s" --no-merges | while IFS=' ' read -r short full rest; do
+        git log "$range" --format="%h %H %s" --no-merges -- "${LOG_PATHS[@]}" | while IFS=' ' read -r short full rest; do
             local pr subject
             pr=$(printf '%s' "$rest" | grep -oE '\(#[0-9]+\)$' | grep -oE '[0-9]+' || true)
             if [[ -n "$pr" ]]; then
@@ -710,7 +721,17 @@ _release-pr lane version:
     PR_BODY="## ${ARTIFACT} release v${VERSION}"$'\n\n'
     if [[ -n "$LAST_TAG" ]]; then
         PR_BODY+="### Changes since ${LAST_TAG}:"$'\n\n'
-        PR_BODY+="$(format_log "${LAST_TAG}..HEAD~1")"$'\n\n'
+        CHANGELOG_BODY=$(format_log "${LAST_TAG}..HEAD~1")
+        MAX_LOG=62000
+        if (( ${#CHANGELOG_BODY} > MAX_LOG )); then
+            TRUNCATED=$(printf '%s' "$CHANGELOG_BODY" | awk -v max="$MAX_LOG" \
+                'BEGIN{n=0} {line_len=length($0)+1; if(n+line_len>max) exit; n+=line_len; print}')
+            SHOWN=$(printf '%s\n' "$TRUNCATED" | grep -c '^-' || true)
+            TOTAL=$(printf '%s\n' "$CHANGELOG_BODY" | grep -c '^-' || true)
+            SKIPPED=$(( TOTAL - SHOWN ))
+            CHANGELOG_BODY="${TRUNCATED}"$'\n'"_… and ${SKIPPED} more commits — [compare ${LAST_TAG}…${TAG_PREFIX}${VERSION}](https://github.com/${REPO}/compare/${LAST_TAG}...${TAG_PREFIX}${VERSION})_"
+        fi
+        PR_BODY+="${CHANGELOG_BODY}"$'\n\n'
     else
         PR_BODY+="Initial release."$'\n\n'
     fi
@@ -747,3 +768,17 @@ goose-bg relay="ws://localhost:3000" agents="1" heartbeat="0" prompt="" key="$BU
     source ./scripts/_goose-env.sh "{{relay}}" "{{key}}" "{{agents}}" "{{heartbeat}}" "{{prompt}}"
     screen -dmS goose-agent-{{agents}} bash -c "$(printf '%q ' env "${env_args[@]}") ./target/release/buzz-acp"
     echo "Agent running in screen session 'goose-agent-{{agents}}'. Attach with: screen -r goose-agent-{{agents}}"
+
+# ─── Benchmarking ─────────────────────────────────────────────────────────────
+
+# Run the Buzz orchestra benchmark — leaderboard-eligible by default (TB 2.1, k=5, Sonnet+Haiku). Stands up its own Docker stack; --gui opens a live spectator desktop app; other flags pass to benchmark.py (--dataset/--path, --include-task, --attempts, --manifest, --dry-run, ...)
+benchmark *ARGS:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export PATH="{{justfile_directory()}}/bin:$PATH"
+    uv run --project benchmarks/harbor-buzz-orchestra/testbed \
+        benchmarks/harbor-buzz-orchestra/scripts/benchmark.py {{ARGS}}
+
+# Stop the benchmark Docker stack (state and channels are kept)
+benchmark-down:
+    docker compose --project-name buzz-benchmark down

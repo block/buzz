@@ -363,13 +363,13 @@ export function TeamDialog({
               </div>
 
               <div className="space-y-2">
-                <span className="text-sm font-medium">Personas</span>
+                <span className="text-sm font-medium">Agents</span>
                 <p className="text-xs text-muted-foreground">
-                  Select the personas to include in this team.
+                  Select the agents to include in this team.
                 </p>
                 {missingInitialPersonaCount > 0 ? (
                   <p className="rounded-2xl border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
-                    This team references {missingInitialPersonaCount} persona
+                    This team references {missingInitialPersonaCount} agent
                     {missingInitialPersonaCount === 1 ? "" : "s"} that{" "}
                     {missingInitialPersonaCount === 1 ? "is" : "are"} no longer
                     in My Agents. Save to remove them, or add them back to My
@@ -384,7 +384,7 @@ export function TeamDialog({
                   <div
                     className="max-h-60 space-y-1 overflow-y-auto rounded-lg border border-border/70 p-2"
                     role="listbox"
-                    aria-label="Personas"
+                    aria-label="Agents"
                     aria-multiselectable="true"
                   >
                     {orderedPersonas.map((persona) => {

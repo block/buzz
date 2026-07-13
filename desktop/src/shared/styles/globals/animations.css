@@ -338,234 +338,6 @@
   }
 }
 
-@property --buzz-grainient-x-0 {
-  syntax: "<percentage>";
-  inherits: false;
-  initial-value: 85%;
-}
-
-@property --buzz-grainient-y-0 {
-  syntax: "<percentage>";
-  inherits: false;
-  initial-value: 80%;
-}
-
-@property --buzz-grainient-x-1 {
-  syntax: "<percentage>";
-  inherits: false;
-  initial-value: 60%;
-}
-
-@property --buzz-grainient-y-1 {
-  syntax: "<percentage>";
-  inherits: false;
-  initial-value: 24%;
-}
-
-@property --buzz-grainient-x-2 {
-  syntax: "<percentage>";
-  inherits: false;
-  initial-value: 13%;
-}
-
-@property --buzz-grainient-y-2 {
-  syntax: "<percentage>";
-  inherits: false;
-  initial-value: 82%;
-}
-
-@property --buzz-grainient-x-3 {
-  syntax: "<percentage>";
-  inherits: false;
-  initial-value: 24%;
-}
-
-@property --buzz-grainient-y-3 {
-  syntax: "<percentage>";
-  inherits: false;
-  initial-value: 7%;
-}
-
-.buzz-setup-loading-shell {
-  --buzz-grainient-alpha-strong: 0.46;
-  --buzz-grainient-alpha-medium: 0.34;
-  --buzz-grainient-alpha-soft: 0.24;
-  --buzz-setup-loading-text-color: color-mix(
-    in srgb,
-    hsl(var(--foreground)) 88%,
-    hsl(var(--background)) 12%
-  );
-  --buzz-grainient-color-0: hsl(
-    var(--chart-5) /
-    var(--buzz-grainient-alpha-strong)
-  );
-  --buzz-grainient-color-1: hsl(
-    var(--chart-3) /
-    var(--buzz-grainient-alpha-strong)
-  );
-  --buzz-grainient-color-2: hsl(
-    var(--primary) /
-    var(--buzz-grainient-alpha-medium)
-  );
-  --buzz-grainient-color-3: hsl(
-    var(--chart-2) /
-    var(--buzz-grainient-alpha-strong)
-  );
-  background-color: hsl(var(--background));
-  color: hsl(var(--foreground));
-  isolation: isolate;
-  position: relative;
-}
-
-.dark .buzz-setup-loading-shell {
-  --buzz-grainient-alpha-strong: 0.68;
-  --buzz-grainient-alpha-medium: 0.5;
-  --buzz-grainient-alpha-soft: 0.34;
-  --buzz-setup-loading-text-color: color-mix(
-    in srgb,
-    hsl(var(--foreground)) 94%,
-    hsl(var(--background)) 6%
-  );
-}
-
-.buzz-setup-grainient {
-  inset: 0;
-  overflow: hidden;
-  pointer-events: none;
-  position: absolute;
-  z-index: 0;
-}
-
-.buzz-setup-grainient__wash,
-.buzz-setup-grainient__veil {
-  inset: 0;
-  position: absolute;
-}
-
-.buzz-setup-grainient__wash {
-  --buzz-grainient-s-start-0: 9%;
-  --buzz-grainient-s-end-0: 55%;
-  --buzz-grainient-s-start-1: 5%;
-  --buzz-grainient-s-end-1: 72%;
-  --buzz-grainient-s-start-2: 5%;
-  --buzz-grainient-s-end-2: 52%;
-  --buzz-grainient-s-start-3: 13%;
-  --buzz-grainient-s-end-3: 68%;
-  --buzz-grainient-x-0: 85%;
-  --buzz-grainient-y-0: 80%;
-  --buzz-grainient-x-1: 60%;
-  --buzz-grainient-y-1: 24%;
-  --buzz-grainient-x-2: 13%;
-  --buzz-grainient-y-2: 82%;
-  --buzz-grainient-x-3: 24%;
-  --buzz-grainient-y-3: 7%;
-  animation: buzz-grainient-orbit 10s linear infinite alternate;
-  background-color: hsl(var(--background));
-  background-image:
-    radial-gradient(
-      circle at var(--buzz-grainient-x-0) var(--buzz-grainient-y-0),
-      var(--buzz-grainient-color-0) var(--buzz-grainient-s-start-0),
-      transparent var(--buzz-grainient-s-end-0)
-    ),
-    radial-gradient(
-      circle at var(--buzz-grainient-x-1) var(--buzz-grainient-y-1),
-      var(--buzz-grainient-color-1) var(--buzz-grainient-s-start-1),
-      transparent var(--buzz-grainient-s-end-1)
-    ),
-    radial-gradient(
-      circle at var(--buzz-grainient-x-2) var(--buzz-grainient-y-2),
-      var(--buzz-grainient-color-2) var(--buzz-grainient-s-start-2),
-      transparent var(--buzz-grainient-s-end-2)
-    ),
-    radial-gradient(
-      circle at var(--buzz-grainient-x-3) var(--buzz-grainient-y-3),
-      var(--buzz-grainient-color-3) var(--buzz-grainient-s-start-3),
-      transparent var(--buzz-grainient-s-end-3)
-    );
-  background-blend-mode: normal, normal, normal, normal;
-  contain: paint;
-  filter: saturate(1.08);
-  transform: translateZ(0);
-  will-change: transform, opacity;
-}
-
-.buzz-setup-grainient__veil {
-  background:
-    radial-gradient(
-      ellipse 74% 54% at 50% 52%,
-      transparent 0%,
-      hsl(var(--background) / 0.04) 72%,
-      hsl(var(--background) / 0.16) 100%
-    ),
-    linear-gradient(
-      180deg,
-      hsl(var(--background) / 0.04),
-      hsl(var(--background) / 0.12)
-    );
-}
-
-.buzz-setup-loading-text {
-  animation: buzz-setup-character-rise 700ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
-  backface-visibility: hidden;
-  color: var(--buzz-setup-loading-text-color);
-  display: inline-block;
-  opacity: 0;
-  text-shadow:
-    0 1px 2px hsl(var(--background) / 0.62),
-    0 14px 34px hsl(var(--background) / 0.5);
-  transform: translate3d(0, 32px, 0);
-  transform-origin: 50% 55%;
-  will-change: transform, opacity;
-}
-
-@keyframes buzz-grainient-orbit {
-  0% {
-    --buzz-grainient-x-0: 85%;
-    --buzz-grainient-y-0: 80%;
-    --buzz-grainient-x-1: 60%;
-    --buzz-grainient-y-1: 24%;
-    --buzz-grainient-x-2: 13%;
-    --buzz-grainient-y-2: 82%;
-    --buzz-grainient-x-3: 24%;
-    --buzz-grainient-y-3: 7%;
-  }
-
-  100% {
-    --buzz-grainient-x-0: 31%;
-    --buzz-grainient-y-0: 94%;
-    --buzz-grainient-x-1: 2%;
-    --buzz-grainient-y-1: 25%;
-    --buzz-grainient-x-2: 98%;
-    --buzz-grainient-y-2: 20%;
-    --buzz-grainient-x-3: 95%;
-    --buzz-grainient-y-3: 92%;
-  }
-}
-
-@keyframes buzz-setup-character-rise {
-  from {
-    opacity: 0;
-    transform: translate3d(0, 32px, 0);
-  }
-
-  to {
-    opacity: 1;
-    transform: translate3d(0, 0, 0);
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .buzz-setup-grainient__wash {
-    animation: none;
-  }
-
-  .buzz-setup-loading-text {
-    animation: none;
-    opacity: 1;
-    transform: none;
-  }
-}
-
 .buzz-avatar-hue-scrubber {
   background: linear-gradient(
     90deg,
@@ -795,3 +567,280 @@
 }
 
 /* ── Tiptap rich-text composer ──────────────────────────────────────── */
+
+/* ── Setup / cold-boot loading screen ───────────────────────────────────
+   Theme-adaptive grainient background for the "setting up your workspace"
+   gate. Restored from pre-#1570; the animated Buzz mark is the hero (see
+   AppLoadingGate in app/App.tsx). */
+
+@property --buzz-grainient-x-0 {
+  syntax: "<percentage>";
+  inherits: false;
+  initial-value: 85%;
+}
+
+@property --buzz-grainient-y-0 {
+  syntax: "<percentage>";
+  inherits: false;
+  initial-value: 80%;
+}
+
+@property --buzz-grainient-x-1 {
+  syntax: "<percentage>";
+  inherits: false;
+  initial-value: 60%;
+}
+
+@property --buzz-grainient-y-1 {
+  syntax: "<percentage>";
+  inherits: false;
+  initial-value: 24%;
+}
+
+@property --buzz-grainient-x-2 {
+  syntax: "<percentage>";
+  inherits: false;
+  initial-value: 13%;
+}
+
+@property --buzz-grainient-y-2 {
+  syntax: "<percentage>";
+  inherits: false;
+  initial-value: 82%;
+}
+
+@property --buzz-grainient-x-3 {
+  syntax: "<percentage>";
+  inherits: false;
+  initial-value: 24%;
+}
+
+@property --buzz-grainient-y-3 {
+  syntax: "<percentage>";
+  inherits: false;
+  initial-value: 7%;
+}
+
+.buzz-setup-loading-shell {
+  --buzz-grainient-alpha-strong: 0.46;
+  --buzz-grainient-alpha-medium: 0.34;
+  --buzz-grainient-alpha-soft: 0.24;
+  --buzz-grainient-color-0: hsl(
+    var(--chart-5) /
+    var(--buzz-grainient-alpha-strong)
+  );
+  --buzz-grainient-color-1: hsl(
+    var(--chart-3) /
+    var(--buzz-grainient-alpha-strong)
+  );
+  --buzz-grainient-color-2: hsl(
+    var(--primary) /
+    var(--buzz-grainient-alpha-medium)
+  );
+  --buzz-grainient-color-3: hsl(
+    var(--chart-2) /
+    var(--buzz-grainient-alpha-strong)
+  );
+  background-color: hsl(var(--background));
+  color: hsl(var(--foreground));
+  isolation: isolate;
+  position: relative;
+}
+
+.dark .buzz-setup-loading-shell {
+  --buzz-grainient-alpha-strong: 0.68;
+  --buzz-grainient-alpha-medium: 0.5;
+  --buzz-grainient-alpha-soft: 0.34;
+}
+
+.buzz-setup-grainient {
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+  position: absolute;
+  z-index: 0;
+}
+
+.buzz-setup-grainient__wash,
+.buzz-setup-grainient__veil {
+  inset: 0;
+  position: absolute;
+}
+
+.buzz-setup-grainient__wash {
+  --buzz-grainient-s-start-0: 9%;
+  --buzz-grainient-s-end-0: 55%;
+  --buzz-grainient-s-start-1: 5%;
+  --buzz-grainient-s-end-1: 72%;
+  --buzz-grainient-s-start-2: 5%;
+  --buzz-grainient-s-end-2: 52%;
+  --buzz-grainient-s-start-3: 13%;
+  --buzz-grainient-s-end-3: 68%;
+  --buzz-grainient-x-0: 85%;
+  --buzz-grainient-y-0: 80%;
+  --buzz-grainient-x-1: 60%;
+  --buzz-grainient-y-1: 24%;
+  --buzz-grainient-x-2: 13%;
+  --buzz-grainient-y-2: 82%;
+  --buzz-grainient-x-3: 24%;
+  --buzz-grainient-y-3: 7%;
+  animation: buzz-grainient-orbit 10s linear infinite alternate;
+  background-color: hsl(var(--background));
+  background-image:
+    radial-gradient(
+      circle at var(--buzz-grainient-x-0) var(--buzz-grainient-y-0),
+      var(--buzz-grainient-color-0) var(--buzz-grainient-s-start-0),
+      transparent var(--buzz-grainient-s-end-0)
+    ),
+    radial-gradient(
+      circle at var(--buzz-grainient-x-1) var(--buzz-grainient-y-1),
+      var(--buzz-grainient-color-1) var(--buzz-grainient-s-start-1),
+      transparent var(--buzz-grainient-s-end-1)
+    ),
+    radial-gradient(
+      circle at var(--buzz-grainient-x-2) var(--buzz-grainient-y-2),
+      var(--buzz-grainient-color-2) var(--buzz-grainient-s-start-2),
+      transparent var(--buzz-grainient-s-end-2)
+    ),
+    radial-gradient(
+      circle at var(--buzz-grainient-x-3) var(--buzz-grainient-y-3),
+      var(--buzz-grainient-color-3) var(--buzz-grainient-s-start-3),
+      transparent var(--buzz-grainient-s-end-3)
+    );
+  background-blend-mode: normal, normal, normal, normal;
+  contain: paint;
+  filter: saturate(1.08);
+  transform: translateZ(0);
+  will-change: transform, opacity;
+}
+
+.buzz-setup-grainient__veil {
+  background:
+    radial-gradient(
+      ellipse 74% 54% at 50% 52%,
+      transparent 0%,
+      hsl(var(--background) / 0.04) 72%,
+      hsl(var(--background) / 0.16) 100%
+    ),
+    linear-gradient(
+      180deg,
+      hsl(var(--background) / 0.04),
+      hsl(var(--background) / 0.12)
+    );
+}
+
+@keyframes buzz-grainient-orbit {
+  0% {
+    --buzz-grainient-x-0: 85%;
+    --buzz-grainient-y-0: 80%;
+    --buzz-grainient-x-1: 60%;
+    --buzz-grainient-y-1: 24%;
+    --buzz-grainient-x-2: 13%;
+    --buzz-grainient-y-2: 82%;
+    --buzz-grainient-x-3: 24%;
+    --buzz-grainient-y-3: 7%;
+  }
+
+  100% {
+    --buzz-grainient-x-0: 31%;
+    --buzz-grainient-y-0: 94%;
+    --buzz-grainient-x-1: 2%;
+    --buzz-grainient-y-1: 25%;
+    --buzz-grainient-x-2: 98%;
+    --buzz-grainient-y-2: 20%;
+    --buzz-grainient-x-3: 95%;
+    --buzz-grainient-y-3: 92%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .buzz-setup-grainient__wash {
+    animation: none;
+  }
+}
+
+/* Buzz bee wing-flap (ported from the Buzz website's BeeField, tuned for a
+   single hero bee). The two wing lobes beat continuously — a fast in/out scale
+   so the bee reads as actively flapping on the loading gate rather than resting
+   most of the cycle (the website staggers many bees, so it could afford long
+   rests; one bee cannot).
+
+   The animated elements are HTML-level <svg> wings (see FlappingBee.tsx), not
+   SVG children: WebKit paints SVG children on the main thread, so their
+   animations freeze while boot work hogs the thread — exactly when the loading
+   gate is visible. HTML-level transforms run on the compositor and keep
+   flapping. Translation is in percentages of the wing's own 183.4-unit box
+   (30/183.4 = 16.3577%) so the beat is identical at any rendered size.
+
+   The loading gate can be short-lived on a warm refresh, so the flap starts
+   mid-stroke (negative animation-delay, quarter beat in) — the bee is never
+   caught frozen at the rest pose on first paint, and a one-frame flash shows
+   wings visibly mid-beat rather than at the squished full-tuck extreme. The
+   optional --flap-delay custom property can still stagger multiple bees. */
+.bee-sprite .bee-wing {
+  animation-delay: var(--flap-delay, -0.07s);
+  animation-duration: 0.28s;
+  animation-iteration-count: infinite;
+  animation-timing-function: ease-in-out;
+  will-change: transform;
+}
+
+.bee-sprite .bee-wing-left {
+  animation-name: bee-wing-left-flap;
+}
+
+.bee-sprite .bee-wing-right {
+  animation-name: bee-wing-right-flap;
+}
+
+/* Static cutout masks over the wing layers. In the single-SVG mark, the slot
+   cutouts punch through body AND wings (the wings tuck behind the body far
+   enough to sit under the slots' left ends). The wing layers reproduce those
+   holes with a static CSS mask on the non-animated wrapper, so the holes stay
+   fixed while the wing beats beneath them — matching the masked single-SVG
+   rendering. Rect coordinates are the mark's slot cutouts translated into each
+   wing's local 183.4x183.4 box (left wing box starts at x=0, y=62.8; right
+   wing box at x=282.6, y=62.8). The eye cutouts never intersect the wing
+   circles, so they are omitted. */
+.bee-wing-layer {
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+  -webkit-mask-size: 100% 100%;
+  mask-size: 100% 100%;
+}
+
+.bee-wing-layer-left {
+  -webkit-mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 183.4 183.4'%3E%3Cpath fill-rule='evenodd' d='M0,0H183.4V183.4H0ZM171.3,94.4H298.2A5,5 0 0 1 303.2,99.4V127.7A5,5 0 0 1 298.2,132.7H171.3A5,5 0 0 1 166.3,127.7V99.4A5,5 0 0 1 171.3,94.4ZM171.9,172.3H298.1A5,5 0 0 1 303.1,177.3V204.9A5,5 0 0 1 298.1,209.9H171.9A5,5 0 0 1 166.9,204.9V177.3A5,5 0 0 1 171.9,172.3Z'/%3E%3C/svg%3E");
+  mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 183.4 183.4'%3E%3Cpath fill-rule='evenodd' d='M0,0H183.4V183.4H0ZM171.3,94.4H298.2A5,5 0 0 1 303.2,99.4V127.7A5,5 0 0 1 298.2,132.7H171.3A5,5 0 0 1 166.3,127.7V99.4A5,5 0 0 1 171.3,94.4ZM171.9,172.3H298.1A5,5 0 0 1 303.1,177.3V204.9A5,5 0 0 1 298.1,209.9H171.9A5,5 0 0 1 166.9,204.9V177.3A5,5 0 0 1 171.9,172.3Z'/%3E%3C/svg%3E");
+}
+
+.bee-wing-layer-right {
+  -webkit-mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 183.4 183.4'%3E%3Cpath fill-rule='evenodd' d='M0,0H183.4V183.4H0ZM-111.3,94.4H15.6A5,5 0 0 1 20.6,99.4V127.7A5,5 0 0 1 15.6,132.7H-111.3A5,5 0 0 1 -116.3,127.7V99.4A5,5 0 0 1 -111.3,94.4ZM-110.7,172.3H15.5A5,5 0 0 1 20.5,177.3V204.9A5,5 0 0 1 15.5,209.9H-110.7A5,5 0 0 1 -115.7,204.9V177.3A5,5 0 0 1 -110.7,172.3Z'/%3E%3C/svg%3E");
+  mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 183.4 183.4'%3E%3Cpath fill-rule='evenodd' d='M0,0H183.4V183.4H0ZM-111.3,94.4H15.6A5,5 0 0 1 20.6,99.4V127.7A5,5 0 0 1 15.6,132.7H-111.3A5,5 0 0 1 -116.3,127.7V99.4A5,5 0 0 1 -111.3,94.4ZM-110.7,172.3H15.5A5,5 0 0 1 20.5,177.3V204.9A5,5 0 0 1 15.5,209.9H-110.7A5,5 0 0 1 -115.7,204.9V177.3A5,5 0 0 1 -110.7,172.3Z'/%3E%3C/svg%3E");
+}
+
+@keyframes bee-wing-left-flap {
+  0%,
+  100% {
+    transform: translateX(0) scaleX(1);
+  }
+  50% {
+    transform: translateX(16.3577%) scaleX(0.62);
+  }
+}
+
+@keyframes bee-wing-right-flap {
+  0%,
+  100% {
+    transform: translateX(0) scaleX(1);
+  }
+  50% {
+    transform: translateX(-16.3577%) scaleX(0.62);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bee-sprite .bee-wing {
+    animation: none;
+  }
+}

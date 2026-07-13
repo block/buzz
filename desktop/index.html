@@ -5,6 +5,49 @@
     <link rel="icon" type="image/svg+xml" href="/buzz.svg?v=20260610" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title></title>
+    <!--
+      Boot background: the document must be painted before the app bundle (and
+      its stylesheets) load so cold boot never flashes ahead of the loading
+      gate. The window itself is also painted pre-document via `backgroundColor`
+      in tauri.conf.json. The body paints its own themed background once the app
+      CSS loads, so this never shows through after boot.
+
+      The inline script below reads the cached theme background (same
+      `buzz-theme-cache` entry ThemeProvider writes) and applies it synchronously
+      so the boot color matches the themed loading gate — no black flash on light
+      themes. On the first-ever launch (no cache yet) it seeds the `dark` class
+      synchronously so the setup gate reads the dark `:root` vars instead of the
+      light Catppuccin-Latte default, matching the dark `houston` theme
+      ThemeProvider applies moments later — no light flash before it loads.
+    -->
+    <style>
+      html {
+        background-color: #000;
+      }
+    </style>
+    <script>
+      (() => {
+        var cached, bg, parsed;
+        try {
+          cached = window.localStorage.getItem("buzz-theme-cache");
+          if (!cached) {
+            // No stored theme: the default theme (`houston`) is dark, so seed
+            // the `dark` class now. Otherwise the setup gate would paint from
+            // the light `:root` vars until ThemeProvider loads asynchronously.
+            document.documentElement.classList.add("dark");
+            return;
+          }
+          parsed = JSON.parse(cached);
+          bg = parsed.vars["--background"];
+          if (bg) document.documentElement.style.backgroundColor = `hsl(${bg})`;
+          // Match the cached light/dark class so themed vars resolve correctly
+          // before ThemeProvider mounts.
+          document.documentElement.classList.add(parsed.isDark ? "dark" : "light");
+        } catch {
+          /* fall back to the black default above */
+        }
+      })();
+    </script>
   </head>
 
   <body>

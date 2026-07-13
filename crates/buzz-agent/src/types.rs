@@ -139,6 +139,10 @@ pub struct LlmResponse {
     /// tokens, so reading it alone would undercount). Used to gate handoff on
     /// the real token budget rather than a byte estimate.
     pub input_tokens: Option<u64>,
+    /// Output tokens the provider reported for this request, or `None` if the
+    /// response carried no usage. Used to accumulate per-turn output counts
+    /// for NIP-AM metric publishing.
+    pub output_tokens: Option<u64>,
     /// Reasoning/thinking content emitted by the model before its answer, if
     /// any. Non-empty when the provider returns extended-thinking tokens:
     ///
@@ -221,6 +225,7 @@ pub enum AgentError {
     InvalidParams(String),
     Llm(String),
     LlmAuth(String),
+    LlmModelNotFound(String),
     Mcp(String),
     Cancelled,
 }
@@ -231,6 +236,7 @@ impl std::fmt::Display for AgentError {
             Self::InvalidParams(s) => write!(f, "invalid params: {s}"),
             Self::Llm(s) => write!(f, "llm: {s}"),
             Self::LlmAuth(s) => write!(f, "llm auth: {s}"),
+            Self::LlmModelNotFound(s) => write!(f, "llm model not found: {s}"),
             Self::Mcp(s) => write!(f, "mcp: {s}"),
             Self::Cancelled => write!(f, "cancelled"),
         }
@@ -244,6 +250,7 @@ impl AgentError {
         match self {
             Self::InvalidParams(_) => -32602,
             Self::LlmAuth(_) => -32001,
+            Self::LlmModelNotFound(_) => -32002,
             _ => -32000,
         }
     }

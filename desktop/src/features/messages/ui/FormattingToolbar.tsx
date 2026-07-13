@@ -3,6 +3,7 @@ import type { Editor } from "@tiptap/react";
 import {
   Bold,
   Code,
+  HatGlasses,
   Italic,
   Link,
   List,
@@ -28,11 +29,6 @@ type FormattingToolbarProps = {
   onLinkButton?: () => void;
 };
 
-export type SpoilerToggleState = {
-  emptySelection: boolean;
-  nextSpoilered?: boolean;
-};
-
 type ActiveStates = {
   bold: boolean;
   italic: boolean;
@@ -43,6 +39,7 @@ type ActiveStates = {
   bulletList: boolean;
   orderedList: boolean;
   blockquote: boolean;
+  spoiler: boolean;
 };
 
 function getActiveStates(editor: Editor): ActiveStates {
@@ -56,6 +53,7 @@ function getActiveStates(editor: Editor): ActiveStates {
     bulletList: editor.isActive("bulletList"),
     orderedList: editor.isActive("orderedList"),
     blockquote: editor.isActive("blockquote"),
+    spoiler: isSpoilerFormattingActive(editor),
   };
 }
 
@@ -77,12 +75,17 @@ function documentRangeForEmptySelection(editor: Editor): {
   return from < to ? { from, to } : null;
 }
 
-export function toggleSpoilerFormatting(editor: Editor): SpoilerToggleState {
-  const emptySelection = editor.state.selection.empty;
+/**
+ * Toggles the text spoiler mark. With a selection, toggles the mark on the
+ * selected range; with an empty selection, applies/removes spoiler across the
+ * whole document. Text-only — media spoilers are toggled per-attachment in
+ * the attachment lightbox.
+ */
+export function toggleSpoilerFormatting(editor: Editor): void {
   const range = documentRangeForEmptySelection(editor);
   if (!range) {
     editor.chain().focus().toggleMark(SPOILER_MARK_NAME).run();
-    return { emptySelection };
+    return;
   }
 
   const cursorPosition = editor.state.selection.from;
@@ -94,16 +97,14 @@ export function toggleSpoilerFormatting(editor: Editor): SpoilerToggleState {
   );
   if (rangeSpoilerState === "no-markable-content") {
     chain.setTextSelection(cursorPosition).run();
-    return { emptySelection };
+    return;
   }
 
-  const nextSpoilered = rangeSpoilerState !== "fully-spoiled";
-  if (nextSpoilered) {
+  if (rangeSpoilerState !== "fully-spoiled") {
     chain.setMark(SPOILER_MARK_NAME).setTextSelection(cursorPosition).run();
   } else {
     chain.unsetMark(SPOILER_MARK_NAME).setTextSelection(cursorPosition).run();
   }
-  return { emptySelection, nextSpoilered };
 }
 
 /**
@@ -202,6 +203,11 @@ export const FormattingToolbar = React.memo(function FormattingToolbar({
     editor?.chain().focus().toggleBlockquote().run();
   }, [editor]);
 
+  const toggleSpoiler = React.useCallback(() => {
+    if (!editor) return;
+    toggleSpoilerFormatting(editor);
+  }, [editor]);
+
   if (!editor || !activeStates) return null;
 
   const items = [
@@ -264,12 +270,18 @@ export const FormattingToolbar = React.memo(function FormattingToolbar({
       action: toggleBlockquote,
       active: activeStates.blockquote,
     },
+    {
+      icon: HatGlasses,
+      label: "Spoiler",
+      action: toggleSpoiler,
+      active: activeStates.spoiler,
+    },
   ] as const;
 
   return (
     <div className="flex items-center gap-0.5">
       {items.map((item) => (
-        <Tooltip key={item.label}>
+        <Tooltip key={item.label} disableHoverableContent>
           <TooltipTrigger asChild>
             <button
               type="button"

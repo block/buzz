@@ -1,11 +1,18 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:math';
+
+import 'package:http/http.dart' as http;
+import 'package:nostr/nostr.dart' as nostr;
+import 'package:pointycastle/digests/sha256.dart';
+import 'package:uuid/uuid.dart';
 
 import 'package:flutter/foundation.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../auth/auth.dart';
 import 'nostr_models.dart';
+import 'relay_client.dart';
 import 'relay_provider.dart';
 import 'relay_socket.dart';
 
@@ -58,7 +65,25 @@ class _BufferedEvent {
 
 /// Manages websocket subscriptions, event batching, reconnection with replay,
 /// and pending event tracking. Equivalent to the desktop's RelayClientSession.
+typedef RelaySocketFactory =
+    RelaySocket Function({
+      required String wsUrl,
+      required String? nsec,
+      required void Function(List<dynamic> message) onMessage,
+      required void Function() onConnected,
+      required void Function(Object? error) onDisconnected,
+    });
+
 class RelaySessionNotifier extends Notifier<SessionState> {
+  RelaySessionNotifier({
+    http.Client? httpClient,
+    RelaySocketFactory socketFactory = RelaySocket.new,
+  }) : _httpClient = httpClient,
+       _socketFactory = socketFactory;
+
+  final http.Client? _httpClient;
+  final RelaySocketFactory _socketFactory;
+
   static const _baseReconnectDelayMs = 1000;
   static const _maxReconnectDelayMs = 30000;
   static const _eventBatchMs = 16;
@@ -77,6 +102,9 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   int _reconnectDelayMs = _baseReconnectDelayMs;
   int _subIdCounter = 0;
   bool _disposed = false;
+  bool _paused = false;
+  bool _hasConnectedOnce = false;
+  int _connectionGeneration = 0;
 
   @override
   SessionState build() {
@@ -99,6 +127,57 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     return const SessionState(status: SessionStatus.disconnected);
   }
 
+  /// Execute a one-shot query via the relay's HTTP bridge (`POST /query`).
+  Future<List<NostrEvent>> queryRelay(
+    List<NostrFilter> filters, {
+    Duration timeout = const Duration(seconds: 8),
+  }) async {
+    final config = ref.read(relayConfigProvider);
+    final url = Uri.parse(config.baseUrl).resolve('/query').toString();
+    final bodyBytes = utf8.encode(
+      jsonEncode(filters.map((filter) => filter.toJson()).toList()),
+    );
+    final client = _httpClient ?? http.Client();
+    final shouldCloseClient = _httpClient == null;
+    final response = await client
+        .post(
+          Uri.parse(url),
+          headers: {
+            'Authorization': _buildNip98AuthHeader(
+              method: 'POST',
+              url: url,
+              bodyBytes: bodyBytes,
+              nsec: config.nsec,
+            ),
+            'Content-Type': 'application/json',
+          },
+          body: bodyBytes,
+        )
+        .timeout(timeout)
+        .whenComplete(() {
+          if (shouldCloseClient) client.close();
+        });
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw RelayException(response.statusCode, response.body);
+    }
+    final decoded = jsonDecode(response.body);
+    if (decoded is! List) {
+      throw const FormatException('relay returned malformed query response');
+    }
+    try {
+      return [
+        for (final eventJson in decoded)
+          if (eventJson is Map<String, dynamic>)
+            NostrEvent.fromJson(eventJson)
+          else
+            throw const FormatException('relay returned malformed query event'),
+      ];
+    } catch (error) {
+      if (error is FormatException) rethrow;
+      throw FormatException('relay returned malformed query event: $error');
+    }
+  }
+
   /// Fetch historical events matching [filter]. Sends REQ, collects events
   /// until EOSE, then resolves. One-shot subscription.
   Future<List<NostrEvent>> fetchHistory(
@@ -111,8 +190,9 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     final timer = Timer(timeout, () {
       final sub = _historySubscriptions.remove(subId);
       if (sub != null && !sub.completer.isCompleted) {
-        // Resolve with whatever we collected so far rather than failing.
-        sub.completer.complete(sub.events);
+        sub.completer.completeError(
+          TimeoutException('Relay history request timed out after $timeout'),
+        );
       }
       _sendClose(subId);
     });
@@ -204,6 +284,16 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   @visibleForTesting
   void debugFlushEventBuffer() => _flushEventBuffer();
 
+  @visibleForTesting
+  void debugHandleConnected() => _handleConnected(_connectionGeneration);
+
+  @visibleForTesting
+  void debugHandleDisconnected([Object? error]) =>
+      _handleDisconnected(_connectionGeneration, error);
+
+  @visibleForTesting
+  void debugPauseNow() => _pauseNow();
+
   /// Force a reconnect (e.g., returning from background).
   Future<void> reconnect() async {
     await _socket?.disconnect();
@@ -215,14 +305,21 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   /// Called by the app lifecycle provider when the app goes to background.
   void onAppPaused() {
     _backgroundGraceTimer?.cancel();
-    _backgroundGraceTimer = Timer(const Duration(seconds: 5), () {
-      _socket?.disconnect();
-      state = const SessionState(status: SessionStatus.disconnected);
-    });
+    _backgroundGraceTimer = Timer(const Duration(seconds: 5), _pauseNow);
+  }
+
+  void _pauseNow() {
+    _paused = true;
+    _reconnectTimer?.cancel();
+    _cancelAllHistory(Exception('App moved to background'));
+    _rejectAllPending(Exception('App moved to background'));
+    _socket?.disconnect();
+    state = const SessionState(status: SessionStatus.disconnected);
   }
 
   /// Called by the app lifecycle provider when the app returns to foreground.
   void onAppResumed() {
+    _paused = false;
     _backgroundGraceTimer?.cancel();
     _backgroundGraceTimer = null;
 
@@ -240,52 +337,55 @@ class RelaySessionNotifier extends Notifier<SessionState> {
 
   Future<void> _connect(RelayConfig config) async {
     if (_disposed) return;
-    if (_socket?.state == SocketState.connecting ||
-        _socket?.state == SocketState.authenticating) {
-      return;
-    }
 
+    final generation = ++_connectionGeneration;
     state = SessionState(
-      status: SessionStatus.connecting,
+      status: _hasConnectedOnce
+          ? SessionStatus.reconnecting
+          : SessionStatus.connecting,
       reconnectAttempt: state.reconnectAttempt,
     );
 
     _socket?.dispose();
-    _socket = RelaySocket(
+    final socket = _socketFactory(
       wsUrl: config.wsUrl,
       nsec: config.nsec,
-      onMessage: _handleMessage,
-      onConnected: _handleConnected,
-      onDisconnected: _handleDisconnected,
+      onMessage: (message) {
+        if (generation == _connectionGeneration) _handleMessage(message);
+      },
+      onConnected: () => _handleConnected(generation),
+      onDisconnected: (error) => _handleDisconnected(generation, error),
     );
+    _socket = socket;
 
-    await _socket!.connect();
+    await socket.connect();
   }
 
-  void _handleConnected() {
-    if (_disposed) return;
+  void _handleConnected(int generation) {
+    if (_disposed || generation != _connectionGeneration) return;
+    _hasConnectedOnce = true;
     _reconnectDelayMs = _baseReconnectDelayMs;
     state = const SessionState(status: SessionStatus.connected);
     _replayLiveSubscriptions();
   }
 
-  void _handleDisconnected(Object? error) {
-    if (_disposed) return;
+  void _handleDisconnected(int generation, Object? error) {
+    if (_disposed || generation != _connectionGeneration) return;
     _cancelAllHistory(error);
     _rejectAllPending(error);
     _eventBuffer.clear();
     _flushTimer?.cancel();
     _flushTimer = null;
+    if (error is RelayAuthRejectedException) {
+      _reconnectTimer?.cancel();
+      state = const SessionState(status: SessionStatus.disconnected);
+      return;
+    }
     _scheduleReconnect();
   }
 
   void _scheduleReconnect() {
-    if (_disposed) return;
-    if (_liveSubscriptions.isEmpty) {
-      state = const SessionState(status: SessionStatus.disconnected);
-      return;
-    }
-
+    if (_disposed || _paused) return;
     final attempt = state.reconnectAttempt + 1;
     state = SessionState(
       status: SessionStatus.reconnecting,
@@ -524,6 +624,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
 
   void _dispose() {
     _disposed = true;
+    _connectionGeneration++;
     _reconnectTimer?.cancel();
     _flushTimer?.cancel();
     _backgroundGraceTimer?.cancel();
@@ -532,6 +633,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     _recentDeliveryKeys.clear();
     _socket?.dispose();
     _socket = null;
+    _httpClient?.close();
   }
 }
 
@@ -539,3 +641,35 @@ final relaySessionProvider =
     NotifierProvider<RelaySessionNotifier, SessionState>(
       RelaySessionNotifier.new,
     );
+
+String _buildNip98AuthHeader({
+  required String method,
+  required String url,
+  required List<int> bodyBytes,
+  required String? nsec,
+}) {
+  if (nsec == null || nsec.isEmpty) {
+    throw Exception('Cannot query relay: no signing key available');
+  }
+  final privkeyHex = nostr.Nip19.decode(payload: nsec).data;
+  if (privkeyHex.isEmpty) {
+    throw Exception('Invalid nsec');
+  }
+  final payloadHash = SHA256Digest()
+      .process(Uint8List.fromList(bodyBytes))
+      .map((byte) => byte.toRadixString(16).padLeft(2, '0'))
+      .join();
+  final event = nostr.Event.from(
+    kind: 27235,
+    content: '',
+    tags: [
+      ['u', url],
+      ['method', method.toUpperCase()],
+      ['payload', payloadHash],
+      ['nonce', const Uuid().v4()],
+    ],
+    secretKey: privkeyHex,
+    verify: false,
+  );
+  return 'Nostr ${base64.encode(utf8.encode(event.toJson()))}';
+}

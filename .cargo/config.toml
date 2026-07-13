@@ -3,3 +3,9 @@
 # builds and much faster macOS link. Need lldb locals? Override per-shell:
 # CARGO_PROFILE_DEV_DEBUG=2
 debug = "line-tables-only"
+
+[env]
+# CMake 4 (pinned by hermit) removed compat with projects declaring
+# cmake_minimum_required < 3.5; audiopus_sys's vendored opus declares 3.1.
+# Same workaround CI uses. A value already set in the environment wins.
+CMAKE_POLICY_VERSION_MINIMUM = "3.5"

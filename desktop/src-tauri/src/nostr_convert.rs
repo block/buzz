@@ -9,7 +9,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 
-use nostr::Event;
+use nostr::{Event, ToBech32};
 use serde_json::{json, Value};
 
 use crate::models::*;
@@ -304,6 +304,7 @@ pub fn profile_info_from_event(event: &Event) -> Result<ProfileInfo, String> {
         about,
         nip05_handle,
         owner_pubkey: profile_valid_oa_owner_pubkey(event),
+        has_profile_event: true,
     })
 }
 
@@ -338,6 +339,7 @@ pub fn users_batch_from_events(
                 .and_then(Value::as_str)
                 .or_else(|| v.get("name").and_then(Value::as_str))
                 .map(str::to_string),
+            name: v.get("name").and_then(Value::as_str).map(str::to_string),
             avatar_url: v.get("picture").and_then(Value::as_str).map(str::to_string),
             nip05_handle: v.get("nip05").and_then(Value::as_str).map(str::to_string),
             is_agent: owner_pubkey.is_some(),
@@ -446,7 +448,8 @@ pub fn agents_from_events(events: &[Event]) -> Value {
         .map(|ev| {
             let mut v: Value = serde_json::from_str(&ev.content).unwrap_or_else(|_| json!({}));
             let pubkey = ev.pubkey.to_hex();
-            let short_pubkey = pubkey[..8].to_string();
+            // Full npub fallback — truncated prefixes are grindable (see pubkey-display).
+            let npub = ev.pubkey.to_bech32().unwrap_or_else(|_| pubkey.clone());
             // Always overwrite the pubkey with the event author — it's the
             // authoritative source even if the content claims otherwise.
             if let Some(obj) = v.as_object_mut() {
@@ -456,7 +459,7 @@ pub fn agents_from_events(events: &[Event]) -> Value {
                     .and_then(Value::as_str)
                     .filter(|value| !value.trim().is_empty())
                     .map(str::to_string)
-                    .unwrap_or_else(|| short_pubkey.clone());
+                    .unwrap_or_else(|| npub.clone());
                 if !obj.get("name").is_some_and(Value::is_string) {
                     obj.insert("name".to_string(), json!(fallback_name));
                 }
@@ -478,7 +481,7 @@ pub fn agents_from_events(events: &[Event]) -> Value {
             } else {
                 v = json!({
                     "pubkey": pubkey,
-                    "name": short_pubkey,
+                    "name": npub,
                     "agent_type": "agent",
                     "channels": [],
                     "channel_ids": [],

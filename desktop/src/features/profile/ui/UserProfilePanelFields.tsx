@@ -12,8 +12,9 @@ import {
 } from "lucide-react";
 import * as React from "react";
 import { AgentStatusBadge } from "@/features/agents/ui/AgentStatusBadge";
-import { truncatePubkey as truncatePubkeyShort } from "@/features/profile/lib/identity";
+import { truncatePubkey } from "@/shared/lib/pubkey";
 import { copyTextToClipboard } from "@/shared/lib/clipboard";
+import { PubKey } from "@/shared/ui/PubKey";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 import type {
   AgentPersona,
@@ -166,11 +167,10 @@ export function buildPublicFields({
 
   if (pubkey) {
     fields.push({
-      copyValue: pubkey,
-      displayValue: truncatePubkeyShort(pubkey),
+      displayValue: truncatePubkey(pubkey),
+      displayNode: <PubKey pubkey={pubkey} testId="user-profile-copy-pubkey" />,
       icon: Fingerprint,
       label: "Public key",
-      testId: "user-profile-copy-pubkey",
     });
   }
 

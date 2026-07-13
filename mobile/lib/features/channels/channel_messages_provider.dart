@@ -3,21 +3,30 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/relay/relay.dart';
 import 'channel_management_provider.dart';
+import 'channel_window.dart';
+import 'thread_replies_provider.dart';
 
 /// Provides the message list for a specific channel. Registers a live
-/// subscription first, then syncs history via the websocket session.
+/// subscription first, then syncs history via the server-assembled channel
+/// window fast path, falling back to the legacy websocket history path when the
+/// relay does not return a valid NIP-CW bounds overlay.
 class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
   final String channelId;
   void Function()? _unsubscribe;
   bool _reachedOldest = false;
   bool _initInFlight = false;
+  bool _usingChannelWindow = false;
   int _initVersion = 0;
+  ChannelWindowStore _windowStore = const ChannelWindowStore.empty();
 
   ChannelMessagesNotifier(this.channelId);
 
   /// Last successfully loaded messages, preserved across reconnections so the
   /// UI can show stale data instead of a blank loading spinner.
   List<NostrEvent>? _lastKnownMessages;
+
+  Map<String, ChannelWindowThreadSummary> get threadSummaries =>
+      channelWindowThreadSummaries(_windowStore);
 
   @override
   AsyncValue<List<NostrEvent>> build() {
@@ -30,15 +39,13 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
     if (sessionState.status != SessionStatus.connected) {
       _initVersion++;
       _initInFlight = false;
-      // Return cached messages if available so the UI remains usable while
-      // disconnected/reconnecting, instead of showing an empty screen.
       return AsyncData(_lastKnownMessages ?? const []);
     }
 
-    // Reset pagination state on rebuild (e.g. after reconnect).
     _reachedOldest = false;
+    _windowStore = const ChannelWindowStore.empty();
+    _usingChannelWindow = false;
     _init();
-    // Show previous messages while fetching fresh ones, instead of a spinner.
     if (_lastKnownMessages case final cached? when cached.isNotEmpty) {
       return AsyncData(cached);
     }
@@ -52,9 +59,6 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
     try {
       final session = ref.read(relaySessionProvider.notifier);
 
-      // Register live first, then sync history. This matches desktop and closes
-      // the race where an event can arrive after history EOSE but before live
-      // subscription registration.
       try {
         final unsubscribe = await session.subscribe(
           NostrFilter(
@@ -62,6 +66,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
             tags: {
               '#h': [channelId],
             },
+            since: _currentUnixSeconds(),
             limit: 200,
           ),
           _handleLiveEvent,
@@ -72,50 +77,25 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
         }
         _unsubscribe = unsubscribe;
       } catch (error) {
-        if (!_isCurrentInit(initVersion)) {
-          return;
-        }
+        if (!_isCurrentInit(initVersion)) return;
         debugPrint(
           '[ChannelMessagesNotifier] live subscription failed for $channelId: $error',
         );
       }
 
-      // Fetch recent history via REQ/EOSE after the subscription is active.
-      final history = await session.fetchHistory(
-        NostrFilter(
-          kinds: EventKind.channelEventKinds,
-          tags: {
-            '#h': [channelId],
-          },
-          limit: 200,
-        ),
-      );
-      if (!_isCurrentInit(initVersion)) {
-        return;
-      }
+      final history = await _fetchNewestHistory(session);
+      if (!_isCurrentInit(initVersion)) return;
 
-      // Merge fresh history with any events already in state (e.g. from
-      // fetchOlder() or live events that arrived while _init was in flight)
-      // to avoid discarding data the user has already scrolled through.
-      final existing = state.value ?? const [];
-      final existingIds = existing.map((e) => e.id).toSet();
-      final newEvents = history
-          .where((e) => !existingIds.contains(e.id))
-          .toList();
-      final merged = [...existing, ...newEvents];
-      merged.sort((a, b) => a.createdAt.compareTo(b.createdAt));
+      final existing = state.value ?? const <NostrEvent>[];
+      final existingIds = existing.map((event) => event.id).toSet();
+      final merged = [
+        ...existing,
+        ...history.where((event) => !existingIds.contains(event.id)),
+      ]..sort((a, b) => a.createdAt.compareTo(b.createdAt));
       _lastKnownMessages = merged;
       state = AsyncData(merged);
-
-      // Auto-prefetch: if deletions/reactions crowded out displayable messages,
-      // loop fetchOlder() until we have enough content to fill the screen.
-      // Must clear _initInFlight first so fetchOlder() doesn't short-circuit.
-      _initInFlight = false;
-      await _ensureMinDisplayable(initVersion);
     } catch (e, st) {
-      if (!_isCurrentInit(initVersion)) {
-        return;
-      }
+      if (!_isCurrentInit(initVersion)) return;
       final fallbackMessages = state.value ?? _lastKnownMessages;
       if (fallbackMessages != null) {
         debugPrint(
@@ -132,18 +112,111 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
     }
   }
 
-  void _handleLiveEvent(NostrEvent event) {
-    final current = state.value ?? _lastKnownMessages ?? const <NostrEvent>[];
-    final merged = _mergeEvent(current, event);
-    _lastKnownMessages = merged;
-    state = AsyncData(merged);
+  Future<List<NostrEvent>> _fetchNewestHistory(
+    RelaySessionNotifier session,
+  ) async {
+    try {
+      final page = await _fetchWindowPage(session, null);
+      _windowStore = replaceNewestChannelWindow(_windowStore, page);
+      _usingChannelWindow = true;
+      _reachedOldest = !channelWindowHasMore(_windowStore);
+      return flattenChannelWindowEvents(_windowStore);
+    } catch (error) {
+      debugPrint(
+        '[ChannelMessagesNotifier] channel window unavailable for $channelId, falling back to WS history: $error',
+      );
+      _usingChannelWindow = false;
+      final history = await session.fetchHistory(
+        NostrFilters.messages(channelId),
+      );
+      history.sort((a, b) => a.createdAt.compareTo(b.createdAt));
+      return history;
+    }
+  }
 
-    // When a membership system event arrives, refresh the channel member list
-    // so the @mention autocomplete picks up new members without a restart.
+  Future<ChannelWindowPage> _fetchWindowPage(
+    RelaySessionNotifier session,
+    ChannelPageCursor? cursor,
+  ) async {
+    final events = await session.queryRelay([_channelWindowFilter(cursor)]);
+    return parseChannelWindowResponse(events, channelId, cursor);
+  }
+
+  NostrFilter _channelWindowFilter(ChannelPageCursor? cursor) => NostrFilter(
+    kinds: EventKind.channelTimelineContentKinds,
+    tags: {
+      '#h': [channelId],
+    },
+    limit: 50,
+    until: cursor?.createdAt,
+    extensions: {
+      'top_level': true,
+      'include_summaries': true,
+      'include_aux': true,
+      if (cursor != null) 'before_id': cursor.eventId,
+    },
+  );
+
+  void _handleLiveEvent(NostrEvent event) {
+    if (_usingChannelWindow) {
+      _handleWindowLiveEvent(event);
+    } else {
+      final current = state.value ?? _lastKnownMessages ?? const <NostrEvent>[];
+      final merged = _mergeEvent(current, event);
+      _lastKnownMessages = merged;
+      state = AsyncData(merged);
+    }
+
     if (event.kind == EventKind.systemMessage &&
         _isMembershipEvent(event.content)) {
       ref.invalidate(channelMembersProvider(channelId));
     }
+  }
+
+  void _handleWindowLiveEvent(NostrEvent event) {
+    if (!_mergeWindowEventIntoStore(event)) return;
+    final flattened = flattenChannelWindowEvents(_windowStore);
+    _lastKnownMessages = flattened;
+    state = AsyncData(flattened);
+  }
+
+  bool _mergeWindowEventIntoStore(NostrEvent event) {
+    final isTimelineRow = EventKind.channelTimelineContentKinds.contains(
+      event.kind,
+    );
+    final thread = isTimelineRow ? event.threadReference : null;
+    if (thread?.parentId != null) {
+      final rootId = thread?.rootId;
+      if (rootId != null) {
+        ref.invalidate(
+          threadRepliesProvider(
+            ThreadRepliesArgs(channelId: channelId, rootId: rootId),
+          ),
+        );
+      }
+      final parentId = thread?.parentId;
+      if (parentId != null && parentId != rootId) {
+        ref.invalidate(
+          threadRepliesProvider(
+            ThreadRepliesArgs(channelId: channelId, rootId: parentId),
+          ),
+        );
+      }
+      if (!_isBroadcastReply(event)) return false;
+    }
+    if (!isTimelineRow &&
+        !EventKind.channelAuxEventKinds.contains(event.kind)) {
+      return false;
+    }
+
+    final next = mergeLiveChannelWindowEvent(
+      _windowStore,
+      event,
+      isTimelineRow: isTimelineRow,
+    );
+    if (identical(next, _windowStore)) return false;
+    _windowStore = next;
+    return true;
   }
 
   static bool _isMembershipEvent(String content) {
@@ -152,45 +225,6 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
         content.contains('member_removed');
   }
 
-  /// Kinds that are metadata rather than displayable content (deletions,
-  /// reactions, edits, legacy pre-migration messages).
-  static const _metadataKinds = {
-    EventKind.deletion,
-    EventKind.reaction,
-    40001,
-    EventKind.streamMessageEdit,
-    EventKind.huddleParticipantJoined,
-    EventKind.huddleParticipantLeft,
-  };
-
-  /// Minimum displayable messages we want after the initial history load.
-  static const _minDisplayable = 15;
-
-  /// Max extra fetchOlder rounds during auto-prefetch to avoid hammering the
-  /// relay.
-  static const _maxPrefetchRounds = 3;
-
-  /// After the initial history fetch, check whether enough user-visible
-  /// messages were loaded. If deletion/reaction events consumed most of the
-  /// fetch limit, loop [fetchOlder] to backfill displayable content.
-  Future<void> _ensureMinDisplayable(int initVersion) async {
-    for (var i = 0; i < _maxPrefetchRounds; i++) {
-      if (!_isCurrentInit(initVersion) || _reachedOldest) return;
-
-      final events = state.value;
-      if (events == null) return;
-
-      final displayable = events
-          .where((e) => !_metadataKinds.contains(e.kind))
-          .length;
-      if (displayable >= _minDisplayable) return;
-
-      final loaded = await fetchOlder();
-      if (!loaded) return;
-    }
-  }
-
-  /// Merge a new event into the sorted list, deduplicating by ID.
   static List<NostrEvent> _mergeEvent(
     List<NostrEvent> current,
     NostrEvent incoming,
@@ -208,47 +242,50 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
     _unsubscribe = null;
   }
 
-  /// Whether all history has been loaded (no more older messages).
   bool get reachedOldest => _reachedOldest;
 
-  /// Fetch older messages (pagination). Call this when the user scrolls up.
-  /// Returns `true` if new messages were loaded.
   Future<bool> fetchOlder() async {
     if (_reachedOldest || _initInFlight) return false;
 
+    final session = ref.read(relaySessionProvider.notifier);
+    if (_usingChannelWindow) {
+      final cursor = channelWindowNextCursor(_windowStore);
+      if (cursor == null) {
+        _reachedOldest = true;
+        return false;
+      }
+      try {
+        final page = await _fetchWindowPage(session, cursor);
+        _windowStore = appendOlderChannelWindow(_windowStore, page);
+        _reachedOldest = !channelWindowHasMore(_windowStore);
+        final flattened = flattenChannelWindowEvents(_windowStore);
+        _lastKnownMessages = flattened;
+        state = AsyncData(flattened);
+        return page.rows.isNotEmpty || page.aux.isNotEmpty;
+      } catch (error) {
+        debugPrint(
+          '[ChannelMessagesNotifier] failed to fetch older channel window page for $channelId: $error',
+        );
+        return false;
+      }
+    }
+
     final currentEvents = state.value;
     if (currentEvents == null || currentEvents.isEmpty) return false;
-
     final oldest = currentEvents.first.createdAt;
-    final session = ref.read(relaySessionProvider.notifier);
-
     final older = await session.fetchHistory(
-      NostrFilter(
-        kinds: EventKind.channelEventKinds,
-        tags: {
-          '#h': [channelId],
-        },
-        limit: 100,
-        until: oldest,
-      ),
+      NostrFilters.messages(channelId, limit: 100, until: oldest),
     );
-
     if (older.isEmpty) {
       _reachedOldest = true;
       return false;
     }
-
-    // Dedup against existing events. If nothing new remains after dedup
-    // (e.g. all returned events share the boundary timestamp), mark as
-    // exhausted to avoid an infinite fetch loop.
     final currentIds = state.value?.map((e) => e.id).toSet() ?? {};
     final deduped = older.where((e) => !currentIds.contains(e.id)).toList();
-
     if (deduped.isEmpty) {
       _reachedOldest = true;
       return false;
     }
-
     state = state.whenData((events) {
       final merged = [...deduped, ...events];
       merged.sort((a, b) => a.createdAt.compareTo(b.createdAt));
@@ -258,6 +295,14 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
     return true;
   }
 }
+
+bool _isBroadcastReply(NostrEvent event) {
+  return event.tags.any(
+    (tag) => tag.length >= 2 && tag[0] == 'broadcast' && tag[1] == '1',
+  );
+}
+
+int _currentUnixSeconds() => DateTime.now().millisecondsSinceEpoch ~/ 1000;
 
 final channelMessagesProvider =
     NotifierProvider.family<

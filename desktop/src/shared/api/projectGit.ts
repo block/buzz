@@ -123,6 +123,16 @@ function fromRawProjectRepoSnapshot(
   };
 }
 
+export type GitIdentity = {
+  name: string | null;
+  email: string | null;
+};
+
+/** The viewer's configured git identity (`git config user.name/user.email`). */
+export async function getGitIdentity(): Promise<GitIdentity> {
+  return invokeTauri<GitIdentity>("get_git_identity");
+}
+
 export async function getProjectRepoSnapshot(input: {
   cloneUrl: string;
   defaultBranch?: string | null;

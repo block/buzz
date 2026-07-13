@@ -8,15 +8,16 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 
+import { useAgentWorking } from "@/features/agents/agentWorkingSignal";
 import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlActions";
-import { scopeByChannel } from "@/features/agents/ui/agentSessionPanelLayout";
-import type {
-  ObserverEvent,
-  TranscriptItem,
-} from "@/features/agents/ui/agentSessionTypes";
+import {
+  mergeObserverEventWindows,
+  scopeByChannel,
+} from "@/features/agents/ui/agentSessionPanelLayout";
+import type { ObserverEvent } from "@/features/agents/ui/agentSessionTypes";
 import { ManagedAgentSessionPanel } from "@/features/agents/ui/ManagedAgentSessionPanel";
 import {
-  useAgentTranscript,
+  useArchivedChannelEvents,
   useObserverEvents,
 } from "@/features/agents/ui/useObserverEvents";
 import { cancelManagedAgentTurn } from "@/shared/api/agentControl";
@@ -51,18 +52,27 @@ import {
   setTranscriptTimestampsEnabled,
   useTranscriptTimestampsEnabled,
 } from "@/features/agents/ui/transcriptTimestampPreference";
+import { useLoadArchivedObserverEvents } from "@/features/agents/ui/useObserverEvents";
+import { useLoadOlderOnScroll } from "@/features/messages/ui/useLoadOlderOnScroll";
 import type { ChannelAgentSessionAgent } from "./useChannelAgentSessions";
+import { useChannelsQuery } from "@/features/channels/hooks";
 
 type AgentSessionThreadPanelProps = {
   agent: ChannelAgentSessionAgent;
   channel: Channel | null;
   channelId?: string | null;
   canInterruptTurn: boolean;
-  isWorking: boolean;
   layout?: "standalone" | "split";
   isSinglePanelView?: boolean;
   profiles?: UserProfileLookup;
-  onBackToProfile: () => void;
+  /**
+   * Fired by the header back arrow. Restores the pane this panel replaced
+   * (thread or profile) via the captured return target — see
+   * useChannelAgentSessions.backFromAgentSession. Omit when there is no
+   * target (composer/no-pane open, direct/restored URL): the arrow hides
+   * and the close affordance is the fallback.
+   */
+  onBack?: () => void;
   onClose: () => void;
   widthPx: number;
   transparentChrome?: boolean;
@@ -73,47 +83,96 @@ export function AgentSessionThreadPanel({
   canInterruptTurn,
   channel,
   channelId = null,
-  isWorking,
   layout = "standalone",
   isSinglePanelView = false,
   profiles,
-  onBackToProfile,
+  onBack,
   onClose,
   widthPx,
   transparentChrome = false,
 }: AgentSessionThreadPanelProps) {
   const isLive = isManagedAgentActive(agent);
   const isOverlay = useIsThreadPanelOverlay();
+  const sessionChannelId = channelId ?? channel?.id ?? null;
+  // Unified working signal, scoped to this panel's channel (or all channels
+  // when the panel is unscoped) — observer turns primary, typing fallback.
+  const { working: isWorking } = useAgentWorking(
+    agent.pubkey,
+    sessionChannelId,
+  );
   const canStopCurrentTurn = isWorking && canInterruptTurn;
   useEscapeKey(onClose, isOverlay || isSinglePanelView);
 
   const { ref: scrollRef, onScroll } = useStickToBottom<HTMLDivElement>();
-  const sessionChannelId = channelId ?? channel?.id ?? null;
+  const topSentinelRef = React.useRef<HTMLDivElement>(null);
   const now = useNow(1000);
   const { events } = useObserverEvents(isLive, agent.pubkey);
-  const transcript = useAgentTranscript(isLive, agent.pubkey);
   const scopedEvents = React.useMemo(
     () => scopeByChannel(events, sessionChannelId),
     [events, sessionChannelId],
   );
-  const scopedTranscript = React.useMemo(
-    () => scopeByChannel(transcript, sessionChannelId),
-    [sessionChannelId, transcript],
+  // Archived channel events merged with live scoped events so the header's
+  // "Last updated" timestamp reflects the full loaded history, not just the
+  // capped live window. Mirrors ManagedAgentSessionPanel's combinedEvents.
+  const archivedChannelEvents = useArchivedChannelEvents(
+    agent.pubkey,
+    sessionChannelId,
+  );
+  const combinedHeaderEvents = React.useMemo(
+    () => mergeObserverEventWindows(scopedEvents, archivedChannelEvents),
+    [scopedEvents, archivedChannelEvents],
   );
   const latestActivityAt = React.useMemo(
-    () =>
-      getLatestActivityTimestamp({
-        events: scopedEvents,
-        transcript: scopedTranscript,
-      }),
-    [scopedEvents, scopedTranscript],
+    () => getLatestActivityTimestamp(combinedHeaderEvents),
+    [combinedHeaderEvents],
   );
   const lastUpdatedLabel = formatLastUpdatedLabel(latestActivityAt, now);
   const lastUpdatedTitle =
     latestActivityAt === null
       ? undefined
       : `Last updated ${new Date(latestActivityAt).toLocaleString()}`;
+
+  const { fetchOlderArchived, hasOlderArchived } =
+    useLoadArchivedObserverEvents(
+      // Archive history must load regardless of live status — an idle agent's
+      // channel should still show its archived observer history. Enable whenever
+      // there is a resolved sessionChannelId (the hook's owner_p guard handles
+      // the case where no save subscription exists).
+      Boolean(sessionChannelId),
+      sessionChannelId ?? null,
+    );
+
+  useLoadOlderOnScroll({
+    fetchOlder: fetchOlderArchived,
+    hasOlderMessages: hasOlderArchived,
+    isLoading: false,
+    scrollContainerRef: scrollRef,
+    sentinelRef: topSentinelRef,
+  });
   const rawFeedScopeKey = `${agent.pubkey}:${sessionChannelId ?? "all"}`;
+  // Scope label input: prefer the passed channel's name; when the pane is
+  // channel-scoped without a full Channel object (#1380's channelId prop),
+  // resolve the name from the channels cache.
+  const channelsQuery = useChannelsQuery({
+    enabled: Boolean(sessionChannelId),
+  });
+  const scopeChannelName = React.useMemo(() => {
+    if (!sessionChannelId) {
+      return null;
+    }
+    if (channel && channel.id === sessionChannelId) {
+      return channel.name;
+    }
+    return (
+      channelsQuery.data?.find((entry) => entry.id === sessionChannelId)
+        ?.name ?? null
+    );
+  }, [channel, channelsQuery.data, sessionChannelId]);
+  const scopeLabel = sessionChannelId
+    ? scopeChannelName
+      ? `#${scopeChannelName}`
+      : "1 channel"
+    : "All channels";
   const [rawFeedState, setRawFeedState] = React.useState(() => ({
     scopeKey: rawFeedScopeKey,
     show: false,
@@ -304,13 +363,21 @@ export function AgentSessionThreadPanel({
         align="start"
         backButtonAriaLabel="Back from activity"
         backButtonTestId="agent-session-back"
-        onBack={onBackToProfile}
+        onBack={onBack}
       >
         <AuxiliaryPanelHeaderTitleBlock
           subtitle={lastUpdatedLabel}
           subtitleTitle={lastUpdatedTitle}
           title={showRawFeed ? "Raw ACP Activity" : "Activity"}
         />
+        {/* Scope label: makes channel-targeted vs all-channels state obvious
+            (an all-channels pane can look "wrong" without it). */}
+        <span
+          className="min-w-0 shrink truncate text-xs text-muted-foreground"
+          data-testid="agent-session-scope-label"
+        >
+          {scopeLabel}
+        </span>
       </AuxiliaryPanelHeaderGroup>
       {agentHeaderActions}
     </>
@@ -340,10 +407,11 @@ export function AgentSessionThreadPanel({
         className="overflow-y-auto px-3 pb-4"
         panelPadding
       >
+        <div ref={topSentinelRef} aria-hidden className="h-px" />
         <ManagedAgentSessionPanel
           agent={agent}
           channelId={sessionChannelId}
-          className="border-0 bg-transparent p-0 shadow-none"
+          className="border-0 bg-transparent px-0 py-2 shadow-none"
           emptyDescription={
             sessionChannelId
               ? `Mention ${agent.name} in the channel to see its work here.`
@@ -359,13 +427,9 @@ export function AgentSessionThreadPanel({
   );
 }
 
-function getLatestActivityTimestamp({
-  events,
-  transcript,
-}: {
-  events: readonly ObserverEvent[];
-  transcript: readonly TranscriptItem[];
-}): number | null {
+function getLatestActivityTimestamp(
+  events: readonly ObserverEvent[],
+): number | null {
   let latest: number | null = null;
 
   const record = (timestamp: string) => {
@@ -381,10 +445,6 @@ function getLatestActivityTimestamp({
 
   for (const event of events) {
     record(event.timestamp);
-  }
-
-  for (const item of transcript) {
-    record(item.timestamp);
   }
 
   return latest;

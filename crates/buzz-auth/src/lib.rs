@@ -35,7 +35,8 @@ pub use error::AuthError;
 pub use nip42::{generate_challenge, verify_nip42_event};
 pub use nip98::verify_nip98_event;
 pub use nip98_replay::{
-    nip98_replay_key, Nip98ReplayGuard, DEFAULT_REPLAY_TTL_SECS, MAX_REPLAY_TTL_SECS,
+    nip98_replay_key, nip98_replay_key_for_scope, Nip98ReplayGuard, DEFAULT_REPLAY_TTL_SECS,
+    MAX_REPLAY_TTL_SECS,
 };
 pub use rate_limit::{
     ip_rate_limit_key, rate_limit_key, LimitType, RateLimitConfig, RateLimitResult, RateLimiter,

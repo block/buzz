@@ -1,17 +1,21 @@
 import { useEffect, useRef, useState } from "react";
 
 import { relayClient } from "@/shared/api/relayClient";
-import {
-  applyWorkspace,
-  getDefaultRelayUrl,
-  getIdentity,
-} from "@/shared/api/tauri";
+import { applyWorkspace, getDefaultRelayUrl } from "@/shared/api/tauri";
+import { getIdentity } from "@/shared/api/tauriIdentity";
 import { resetMediaCaches } from "@/shared/lib/mediaUrl";
 import { clearSearchHitEventCache } from "@/app/navigation/searchHitEventCache";
-import { clearAllDrafts } from "@/features/messages/lib/useDrafts";
+import { initDraftStore } from "@/features/messages/lib/useDrafts";
 import { resetRenderScopedReactionHydration } from "@/features/messages/lib/renderScopedReactions";
+import {
+  resetActiveAgentTurnsStore,
+  saveActiveAgentTurnsForWorkspace,
+  restoreActiveAgentTurnsForWorkspace,
+} from "@/features/agents/activeAgentTurnsStore";
+import { resetAgentWorkingSignal } from "@/features/agents/agentWorkingSignal";
 import { resetAgentObserverStore } from "@/features/agents/observerRelayStore";
 import { resetSidebarRelayConnectionCardState } from "@/features/sidebar/ui/useSidebarRelayConnectionCard";
+import { clearMarkdownNodeCache } from "@/shared/ui/markdown/nodeCache";
 import { resetVideoPlayerState } from "@/shared/ui/videoPlayerState";
 
 import { initFirstWorkspace } from "./workspaceStorage";
@@ -27,12 +31,14 @@ import type { Workspace } from "./types";
 function resetWorkspaceState(): void {
   relayClient.disconnect();
   resetAgentObserverStore();
+  resetActiveAgentTurnsStore();
+  resetAgentWorkingSignal();
   resetSidebarRelayConnectionCardState();
   resetMediaCaches();
   resetVideoPlayerState();
   resetRenderScopedReactionHydration();
   clearSearchHitEventCache();
-  clearAllDrafts();
+  clearMarkdownNodeCache();
 }
 
 type WorkspaceInitResult =
@@ -66,6 +72,10 @@ export function useWorkspaceInit(
   // Track whether this is the initial mount or a workspace switch.
   // On the initial mount we skip resetting singletons (they're fresh).
   const hasInitializedRef = useRef(false);
+
+  // Track the previously-applied workspace ID so we can save its turn state
+  // before resetting when the user switches to a different workspace.
+  const prevWorkspaceIdRef = useRef<string | null>(null);
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: we intentionally depend on specific properties (id/relayUrl/token/reposDir) — depending on the whole object would trigger resets on name-only changes
   useEffect(() => {
@@ -118,6 +128,15 @@ export function useWorkspaceInit(
       // On workspace switch (not initial mount), reset module singletons
       // so the new tree starts with a clean slate.
       if (hasInitializedRef.current) {
+        // Save the outgoing workspace's turn state before wiping the store so
+        // timers survive a round-trip (A → B → A keeps A's elapsed time).
+        if (prevWorkspaceIdRef.current) {
+          saveActiveAgentTurnsForWorkspace(prevWorkspaceIdRef.current);
+          // Null out immediately so a rapid workspace switch (A→B→C before
+          // B's applyWorkspace resolves) doesn't re-save the now-empty
+          // store under the outgoing workspace ID and delete its snapshot.
+          prevWorkspaceIdRef.current = null;
+        }
         resetWorkspaceState();
       }
       hasInitializedRef.current = true;
@@ -156,6 +175,17 @@ export function useWorkspaceInit(
       }
 
       if (!cancelled) {
+        // Initialise the draft store for this identity so localStorage drafts
+        // are scoped to the correct pubkey before the app renders.
+        if (activeWorkspace.pubkey) {
+          initDraftStore(activeWorkspace.pubkey);
+        }
+        // Restore any turn state saved for this workspace (a prior A→B round-
+        // trip). This runs after applyWorkspace succeeds and before the app
+        // renders so components see the restored timers on first render.
+        restoreActiveAgentTurnsForWorkspace(activeWorkspace.id);
+        // Prime the ref so the NEXT switch saves this workspace's state.
+        prevWorkspaceIdRef.current = activeWorkspace.id;
         setResult({
           isReady: true,
           needsSetup: false,

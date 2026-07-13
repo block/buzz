@@ -9,6 +9,7 @@ import type {
   ChannelWindowCursor,
   ChannelWindowPage,
   ChannelWindowThreadSummary,
+  LiveThreadSummary,
 } from "./channelWindowStore";
 
 const CONTENT_KINDS = new Set<number>(CHANNEL_TIMELINE_CONTENT_KINDS);
@@ -37,6 +38,38 @@ function parseJson<T>(event: RelayEvent, label: string): T {
 
 const mapCursor = (cursor: WireCursor | null): ChannelWindowCursor | null =>
   cursor ? { createdAt: cursor.created_at, eventId: cursor.id } : null;
+
+const mapSummary = (payload: SummaryPayload): ChannelWindowThreadSummary => ({
+  replyCount: payload.reply_count,
+  descendantCount: payload.descendant_count,
+  lastReplyAt: payload.last_reply_at,
+  participantPubkeys: payload.participants,
+});
+
+/**
+ * Parse a relay-pushed live `39005` into its root id and summary, or null for
+ * anything that is not a well-formed thread summary. Live-path counterpart of
+ * the page parsing below — same wire contract, delivered by subscription.
+ */
+export function parseLiveThreadSummary(
+  event: RelayEvent,
+): { rootId: string; live: LiveThreadSummary } | null {
+  if (event.kind !== KIND_CHANNEL_THREAD_SUMMARY) return null;
+  const rootId = targetId(event, "e");
+  if (!rootId) return null;
+  try {
+    return {
+      rootId,
+      live: {
+        summary: mapSummary(JSON.parse(event.content) as SummaryPayload),
+        createdAt: event.created_at,
+      },
+    };
+  } catch {
+    // A malformed live overlay only skips one badge refresh — drop it.
+    return null;
+  }
+}
 
 function expectedBoundsKey(
   channelId: string,
@@ -68,12 +101,7 @@ export function parseChannelWindowResponse(
     const row = rootId ? rowById.get(rootId) : undefined;
     if (!row) continue;
     const payload = parseJson<SummaryPayload>(event, "thread summary");
-    row.thread = {
-      replyCount: payload.reply_count,
-      descendantCount: payload.descendant_count,
-      lastReplyAt: payload.last_reply_at,
-      participantPubkeys: payload.participants,
-    };
+    row.thread = mapSummary(payload);
   }
 
   const boundsEvents = events.filter(

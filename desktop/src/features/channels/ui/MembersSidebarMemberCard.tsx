@@ -1,11 +1,15 @@
 import {
   Activity,
+  Ban,
   Bot,
+  CircleSlash,
+  Clock,
   Ellipsis,
   Pencil,
   Play,
   RotateCcw,
   Shield,
+  ShieldCheck,
   Square,
   Trash2,
 } from "lucide-react";
@@ -16,7 +20,7 @@ import {
 } from "@/features/agents/lib/managedAgentControlActions";
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
 import { PresenceDot } from "@/features/presence/ui/PresenceBadge";
-import { truncatePubkey } from "@/features/profile/lib/identity";
+import { truncatePubkey } from "@/shared/lib/pubkey";
 import type {
   ChannelMember,
   ManagedAgent,
@@ -36,6 +40,7 @@ import {
 
 type MembersSidebarMemberCardProps = {
   canChangeRole: boolean;
+  canModerate: boolean;
   canRemoveMember: boolean;
   isActionPending: boolean;
   isArchived: boolean;
@@ -44,16 +49,34 @@ type MembersSidebarMemberCardProps = {
   memberAvatarLabel: string;
   memberIsBot: boolean;
   memberLabel: string;
+  moderationState?: MemberModerationState;
+  onBan: (member: ChannelMember) => void;
   onChangeRole: (member: ChannelMember, role: string) => void;
   onEditRespondTo?: (agent: ManagedAgent) => void;
   onManagedAgentAction: (agent: ManagedAgent) => void;
   onOpenProfile?: (pubkey: string) => void;
   onRemoveMember: (member: ChannelMember) => void;
+  onTimeout: (member: ChannelMember, expiresAtSecs: number) => void;
+  onUnban: (member: ChannelMember) => void;
+  onUntimeout: (member: ChannelMember) => void;
   onViewActivity?: (pubkey: string) => void;
   presenceStatus?: PresenceStatus | null;
   profileAvatarUrl?: string | null;
   viewerIsOwner: boolean;
 };
+
+/** Whether a member is currently banned / timed out (from the restriction read). */
+export type MemberModerationState = {
+  banned: boolean;
+  timedOut: boolean;
+};
+
+/** Timeout durations offered in the member menu, in seconds. */
+const TIMEOUT_PRESETS: { label: string; seconds: number }[] = [
+  { label: "1 hour", seconds: 60 * 60 },
+  { label: "24 hours", seconds: 24 * 60 * 60 },
+  { label: "7 days", seconds: 7 * 24 * 60 * 60 },
+];
 
 const MEMBER_ROW_INSET_DIVIDER_CLASS =
   "after:pointer-events-none after:absolute after:bottom-0 after:left-[3.75rem] after:right-0 after:h-px after:bg-border/60 after:content-[''] last:after:hidden";
@@ -96,6 +119,7 @@ function formatManagedAgentStatus(agent: ManagedAgent) {
 
 export function MembersSidebarMemberCard({
   canChangeRole,
+  canModerate,
   canRemoveMember,
   isActionPending,
   isArchived,
@@ -104,11 +128,16 @@ export function MembersSidebarMemberCard({
   memberAvatarLabel,
   memberIsBot,
   memberLabel,
+  moderationState,
+  onBan,
   onChangeRole,
   onEditRespondTo,
   onManagedAgentAction,
   onOpenProfile,
   onRemoveMember,
+  onTimeout,
+  onUnban,
+  onUntimeout,
   onViewActivity,
   presenceStatus,
   profileAvatarUrl,
@@ -120,9 +149,13 @@ export function MembersSidebarMemberCard({
     memberIsBot &&
     (viewerIsOwner || managedAgent?.backend.type === "local") &&
     Boolean(onViewActivity);
+  // Community ban/timeout applies to people, never bots, and never the community
+  // owner (whom no moderator can restrict).
+  const canModerateMember =
+    canModerate && !memberIsBot && member.role !== "owner";
   const hasActions = memberIsBot
     ? Boolean(managedAgent) || canRemoveMember || canViewActivity
-    : canRemoveMember || canChangeRole;
+    : canRemoveMember || canChangeRole || canModerateMember;
 
   const memberIdentity = (
     <div className="pointer-events-none relative z-10 flex min-w-0 flex-1 items-center gap-3">
@@ -215,16 +248,22 @@ export function MembersSidebarMemberCard({
       {hasActions ? (
         <MemberActionsMenu
           canChangeRole={canChangeRole}
+          canModerateMember={canModerateMember}
           canRemoveMember={canRemoveMember}
           canViewActivity={canViewActivity}
           disabled={disabled}
           managedAgent={managedAgent}
           member={member}
           memberIsBot={memberIsBot}
+          moderationState={moderationState}
+          onBan={onBan}
           onChangeRole={onChangeRole}
           onEditRespondTo={onEditRespondTo}
           onManagedAgentAction={onManagedAgentAction}
           onRemoveMember={onRemoveMember}
+          onTimeout={onTimeout}
+          onUnban={onUnban}
+          onUntimeout={onUntimeout}
           onViewActivity={onViewActivity}
         />
       ) : null}
@@ -236,33 +275,47 @@ const PEOPLE_ROLES = ["admin", "member", "guest"] as const;
 
 function MemberActionsMenu({
   canChangeRole,
+  canModerateMember,
   canRemoveMember,
   canViewActivity,
   disabled,
   managedAgent,
   member,
   memberIsBot,
+  moderationState,
+  onBan,
   onChangeRole,
   onEditRespondTo,
   onManagedAgentAction,
   onRemoveMember,
+  onTimeout,
+  onUnban,
+  onUntimeout,
   onViewActivity,
 }: {
   canChangeRole: boolean;
+  canModerateMember: boolean;
   canRemoveMember: boolean;
   canViewActivity: boolean;
   disabled: boolean;
   managedAgent?: ManagedAgent;
   member: ChannelMember;
   memberIsBot: boolean;
+  moderationState?: MemberModerationState;
+  onBan: (member: ChannelMember) => void;
   onChangeRole: (member: ChannelMember, role: string) => void;
   onEditRespondTo?: (agent: ManagedAgent) => void;
   onManagedAgentAction: (agent: ManagedAgent) => void;
   onRemoveMember: (member: ChannelMember) => void;
+  onTimeout: (member: ChannelMember, expiresAtSecs: number) => void;
+  onUnban: (member: ChannelMember) => void;
+  onUntimeout: (member: ChannelMember) => void;
   onViewActivity?: (pubkey: string) => void;
 }) {
   const showChangeRole =
     canChangeRole && !memberIsBot && member.role !== "owner";
+  const isBanned = moderationState?.banned ?? false;
+  const isTimedOut = moderationState?.timedOut ?? false;
 
   return (
     <DropdownMenu modal={false}>
@@ -351,6 +404,70 @@ function MemberActionsMenu({
               <Trash2 className="h-4 w-4" />
               Remove from channel
             </DropdownMenuItem>
+          </>
+        ) : null}
+        {canModerateMember ? (
+          <>
+            {canRemoveMember || showChangeRole ? (
+              <DropdownMenuSeparator />
+            ) : null}
+            {isTimedOut ? (
+              <DropdownMenuItem
+                data-testid={`sidebar-untimeout-${member.pubkey}`}
+                disabled={disabled}
+                onClick={() => onUntimeout(member)}
+              >
+                <ShieldCheck className="h-4 w-4" />
+                Lift timeout
+              </DropdownMenuItem>
+            ) : (
+              <DropdownMenuSub>
+                <DropdownMenuSubTrigger
+                  data-testid={`sidebar-timeout-${member.pubkey}`}
+                  disabled={disabled}
+                >
+                  <Clock className="h-4 w-4" />
+                  Time out
+                </DropdownMenuSubTrigger>
+                <DropdownMenuSubContent>
+                  {TIMEOUT_PRESETS.map((preset) => (
+                    <DropdownMenuItem
+                      data-testid={`sidebar-timeout-${preset.seconds}-${member.pubkey}`}
+                      disabled={disabled}
+                      key={preset.seconds}
+                      onClick={() =>
+                        onTimeout(
+                          member,
+                          Math.floor(Date.now() / 1000) + preset.seconds,
+                        )
+                      }
+                    >
+                      {preset.label}
+                    </DropdownMenuItem>
+                  ))}
+                </DropdownMenuSubContent>
+              </DropdownMenuSub>
+            )}
+            {isBanned ? (
+              <DropdownMenuItem
+                data-testid={`sidebar-unban-${member.pubkey}`}
+                disabled={disabled}
+                onClick={() => onUnban(member)}
+              >
+                <CircleSlash className="h-4 w-4" />
+                Lift ban
+              </DropdownMenuItem>
+            ) : (
+              <DropdownMenuItem
+                className="text-destructive focus:text-destructive"
+                data-testid={`sidebar-ban-${member.pubkey}`}
+                disabled={disabled}
+                onClick={() => onBan(member)}
+              >
+                <Ban className="h-4 w-4" />
+                Ban from community
+              </DropdownMenuItem>
+            )}
           </>
         ) : null}
       </DropdownMenuContent>

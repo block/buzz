@@ -47,8 +47,10 @@ class _MessageBubble extends ConsumerWidget {
         ref: ref,
         message: message,
         channelId: currentChannelId,
-        isOwnMessage:
-            currentPubkey?.toLowerCase() == message.pubkey.toLowerCase(),
+        canManageMessage:
+            currentPubkey?.toLowerCase() == pk ||
+            (profile?.ownerPubkey != null &&
+                profile?.ownerPubkey == currentPubkey?.toLowerCase()),
         allMessages: allMessages,
         currentPubkey: currentPubkey,
         isMember: isMember,
@@ -113,24 +115,11 @@ class _MessageBubble extends ConsumerWidget {
                     channelNames: channelNames,
                     tags: message.tags,
                     onChannelTap: (channelId) {
-                      if (channelId == currentChannelId) return;
-                      final channelsAsync = ref.read(channelsProvider);
-                      final channels = channelsAsync.hasValue
-                          ? channelsAsync.value
-                          : null;
-                      Channel? targetChannel;
-                      for (final channel in channels ?? const <Channel>[]) {
-                        if (channel.id == channelId) {
-                          targetChannel = channel;
-                          break;
-                        }
-                      }
-                      if (targetChannel == null) return;
-                      Navigator.of(context).push(
-                        MaterialPageRoute<void>(
-                          builder: (_) =>
-                              ChannelDetailPage(channel: targetChannel!),
-                        ),
+                      openChannelLink(
+                        context: context,
+                        ref: ref,
+                        channelId: channelId,
+                        currentChannelId: currentChannelId,
                       );
                     },
                   ),

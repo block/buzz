@@ -14,7 +14,19 @@ export type ProjectPullRequestComment = {
   content: string;
   author: string;
   createdAt: number;
+  isApproval: boolean;
+  isReviewRequest: boolean;
+  reviewerPubkeys: string[];
 };
+
+export type ProjectPullRequestApproval = {
+  id: string;
+  author: string;
+  createdAt: number;
+};
+
+export const PR_REVIEW_REQUEST_LABEL: string;
+export const PR_APPROVAL_LABEL: string;
 
 export type ProjectPullRequest = {
   id: string;
@@ -25,6 +37,10 @@ export type ProjectPullRequest = {
   repoAddress: string | null;
   labels: string[];
   recipients: string[];
+  /** Requested reviewers (root `p` tags + trusted review-request comments). */
+  reviewers: string[];
+  /** Latest approval per reviewer, oldest first. */
+  approvals: ProjectPullRequestApproval[];
   status: "Open" | "Merged" | "Closed" | "Draft";
   statusEventId: string | null;
   branchName: string | null;

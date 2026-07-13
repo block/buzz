@@ -7,10 +7,9 @@
 use buzz_auth::{
     error::AuthError,
     nip98_replay::{
-        nip98_replay_key, Nip98ReplayGuard, DEFAULT_REPLAY_TTL_SECS, MAX_REPLAY_TTL_SECS,
+        nip98_replay_key_for_scope, Nip98ReplayGuard, DEFAULT_REPLAY_TTL_SECS, MAX_REPLAY_TTL_SECS,
     },
 };
-use buzz_core::TenantContext;
 use nostr::EventId;
 
 /// Redis-backed NIP-98 replay seen-set.
@@ -33,9 +32,9 @@ impl RedisNip98ReplayGuard {
 }
 
 impl Nip98ReplayGuard for RedisNip98ReplayGuard {
-    fn try_mark<'a>(
+    fn try_mark_in_scope<'a>(
         &'a self,
-        ctx: &'a TenantContext,
+        scope: &'a str,
         event_id: &'a EventId,
         ttl_secs: u64,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<bool, AuthError>> + Send + 'a>>
@@ -52,14 +51,14 @@ impl Nip98ReplayGuard for RedisNip98ReplayGuard {
                 // Structured field for ops; the user-facing AuthError stays a
                 // bounded category string.
                 tracing::warn!(
-                    community = %ctx.community(),
+                    scope = %scope,
                     error = %e,
                     "nip98 replay: redis pool acquire failed — caller MUST fail closed"
                 );
                 AuthError::Internal(format!("Redis pool: {e}"))
             })?;
 
-            let key = nip98_replay_key(ctx, event_id);
+            let key = nip98_replay_key_for_scope(scope, event_id);
 
             // SET key 1 NX EX <ttl>. redis-rs typed return: Some("OK") on first
             // claim, None on existing key. Any other value would be a Redis-side
@@ -74,7 +73,7 @@ impl Nip98ReplayGuard for RedisNip98ReplayGuard {
                 .await
                 .map_err(|e| {
                     tracing::warn!(
-                        community = %ctx.community(),
+                        scope = %scope,
                         error = %e,
                         "nip98 replay: redis SET NX EX failed — caller MUST fail closed"
                     );
@@ -86,7 +85,7 @@ impl Nip98ReplayGuard for RedisNip98ReplayGuard {
                 None => Ok(false),
                 Some(other) => {
                     tracing::error!(
-                        community = %ctx.community(),
+                        scope = %scope,
                         reply = %other,
                         "nip98 replay: redis SET NX EX returned an unexpected reply — investigate"
                     );

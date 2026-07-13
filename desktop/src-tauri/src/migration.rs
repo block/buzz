@@ -18,6 +18,8 @@
 use std::path::{Path, PathBuf};
 use tauri::Manager;
 
+use crate::util::replace_with_symlink;
+
 const CANONICAL_DEV_IDENTIFIER: &str = "xyz.block.buzz.app.dev";
 const LEGACY_CANONICAL_DEV_IDENTIFIER: &str = "xyz.block.sprout.app.dev";
 const LEGACY_RELEASE_IDENTIFIER: &str = "xyz.block.sprout.app";
@@ -36,19 +38,17 @@ const SHARED_AGENT_FILES: &[&str] = &[
 /// dev data directory. Each entry becomes a single directory symlink.
 const SHARED_AGENT_DIRS: &[&str] = &["agents/teams"];
 
-/// Create a symlink at `dst` pointing to `src`.
-///
-/// Worktree sync is a dev-only feature (`BUZZ_SHARE_IDENTITY=1`); on Windows
-/// this is a no-op so the rest of `sync_shared_agent_data` keeps compiling and
-/// running harmlessly.
-#[cfg(unix)]
-fn symlink(src: &Path, dst: &Path) -> std::io::Result<()> {
-    std::os::unix::fs::symlink(src, dst)
-}
-
-#[cfg(not(unix))]
-fn symlink(_src: &Path, _dst: &Path) -> std::io::Result<()> {
-    Ok(())
+/// Returns `true` when `name` is a dev data dir name — i.e. it is exactly the
+/// canonical dev identifier or a worktree variant separated by a `.` (e.g.
+/// `xyz.block.buzz.app.dev.my-branch`). Rejects prefix-collisions such as
+/// `xyz.block.buzz.app.developer`. This is the authoritative dev/prod
+/// discriminator shared by `run_boot_migrations`, `sync_shared_agent_data`,
+/// and `reconcile_target_dir`.
+fn is_dev_data_dir_name(name: &str) -> bool {
+    name == CANONICAL_DEV_IDENTIFIER
+        || name
+            .strip_prefix(CANONICAL_DEV_IDENTIFIER)
+            .is_some_and(|rest| rest.starts_with('.'))
 }
 
 fn canonical_dev_data_dir(current: &Path) -> Option<PathBuf> {
@@ -81,7 +81,7 @@ fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
                 if dst_path.exists() || dst_path.is_symlink() {
                     let _ = std::fs::remove_file(&dst_path);
                 }
-                std::os::unix::fs::symlink(target, &dst_path)?;
+                crate::util::create_symlink(&target, &dst_path)?;
             }
             #[cfg(not(unix))]
             {
@@ -101,16 +101,6 @@ fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Reconcile personas and teams into signed retention events. Both readers
-/// consume the already-synced `personas.json`/`teams.json` that
-/// `sync_team_personas` wrote in [`run_boot_migrations`] (see its `# Ordering`
-/// guard). Event signing needs the resolved owner keys, so this runs after
-/// identity resolution, not in [`run_boot_migrations`].
-pub fn run_event_sync(app: &tauri::AppHandle, owner_keys: &nostr::Keys) {
-    migrate_personas_to_events(app, owner_keys);
-    migrate_teams_to_events(app, owner_keys);
-}
-
 /// Run every data migration that must complete before identity resolution and
 /// agent restore. Ordering is load-bearing: `migrate_legacy_app_data_dir` must
 /// precede any disk read, and `sync_shared_agent_data` must precede
@@ -124,9 +114,10 @@ pub fn run_event_sync(app: &tauri::AppHandle, owner_keys: &nostr::Keys) {
 /// files. The pre-identity reader is `reconcile_provider_mcp_commands` (derives
 /// `mcp_command` from each persona's effective harness); the post-identity
 /// readers are `migrate_personas_to_events`/`migrate_teams_to_events` in
-/// [`run_event_sync`]. Sync touches only JSON (no owner keys, no `retention.db`),
-/// so it runs pre-identity here ahead of all readers — reader-first loses a
-/// launch (stale harness/`mcp_command` until the next boot).
+/// [`crate::event_sync::run_event_sync`]. Sync touches only JSON (no owner
+/// keys, no `retention.db`), so it runs pre-identity here ahead of all
+/// readers — reader-first loses a launch (stale harness/`mcp_command` until
+/// the next boot).
 pub fn run_boot_migrations(app: &tauri::AppHandle) {
     // Initialize the process-lifetime nest directory before any filesystem
     // operation that calls nest_dir(). The discriminator matches the existing
@@ -136,7 +127,7 @@ pub fn run_boot_migrations(app: &tauri::AppHandle) {
         let dev = data_dir
             .file_name()
             .and_then(|n| n.to_str())
-            .is_some_and(|n| n.starts_with(CANONICAL_DEV_IDENTIFIER));
+            .is_some_and(is_dev_data_dir_name);
         crate::managed_agents::init_nest_dir(dev);
         dev
     } else {
@@ -154,14 +145,38 @@ pub fn run_boot_migrations(app: &tauri::AppHandle) {
 
     migrate_legacy_app_data_dir(app);
     sync_shared_agent_data(app);
+    // Dev-build-only: copy any agent keys that exist in the production
+    // keyring ("buzz-desktop") into the dev service ("buzz-desktop-dev")
+    // so existing agents don't lose their keys after the service-name split.
+    // Must run after sync_shared_agent_data (JSON symlinked) and before
+    // any load_managed_agents call (which runs hydrate_keys against the
+    // dev service and would log "has no key" for un-migrated entries).
+    #[cfg(debug_assertions)]
+    if is_dev {
+        crate::managed_agents::migrate_agent_keys_to_dev_service(app);
+    }
     migrate_packs_to_teams(app);
     reconcile_persona_team_dirs(app);
     migrate_persona_provider_to_runtime(app);
     reconcile_legacy_command_names(app);
+    // Fold personas.json into the unified store HERE: after the JSON-level
+    // personas.json migrations above (which must see the legacy file), and
+    // before every consumer of the load/save_personas shims below —
+    // sync_team_personas would otherwise operate on an empty definition set.
+    // Post-fold readers of the runtime map (`load_persona_runtimes`) fall
+    // back to the unified store's definitions.
+    fold_personas_into_agent_store(app);
+    // B5: manufacture definitions for standalone agents AFTER the fold (so
+    // pre-existing definition slugs are present for collision checks) and
+    // before event sync republishes — the backfilled link is what flips the
+    // 30177 projection to its slim shape.
+    backfill_standalone_agents(app);
     if let Err(e) = crate::managed_agents::sync_team_personas(app) {
         eprintln!("buzz-desktop: sync-team-personas: {e}");
     }
     reconcile_provider_mcp_commands(app);
+    reconcile_databricks_v1_to_v2(app);
+    materialize_agent_runtimes(app);
 }
 
 /// Copy one-time app state from the legacy app identifier directory to
@@ -497,6 +512,23 @@ pub fn sync_shared_agent_data(app: &tauri::AppHandle) {
         }
     };
 
+    // Guard: refuse to sync against a prod-identifier data directory, regardless
+    // of env vars. A release build launched from an env-armed shell (e.g. macOS
+    // `open` inherits the caller's env) must never overwrite real prod files with
+    // symlinks. Only data dirs whose name starts with CANONICAL_DEV_IDENTIFIER
+    // (the canonical dev dir and all worktree variants) are safe targets.
+    let is_dev = current_dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(is_dev_data_dir_name);
+    if !is_dev {
+        eprintln!(
+            "buzz-desktop: shared-agent-sync: skipping — data dir is not a dev dir ({})",
+            current_dir.display()
+        );
+        return;
+    }
+
     let canonical_dir = match canonical_dev_data_dir(&current_dir) {
         Some(dir) => dir,
         None => {
@@ -585,26 +617,7 @@ pub fn sync_shared_agent_data(app: &tauri::AppHandle) {
             }
         }
 
-        // Already a correct symlink — nothing to do.
-        if dst.is_symlink() {
-            if let Ok(target) = std::fs::read_link(&dst) {
-                if target == src {
-                    continue;
-                }
-            }
-        }
-
-        // Remove whatever's at dst (regular file, wrong symlink, broken symlink).
-        if dst.exists() || dst.is_symlink() {
-            let _ = std::fs::remove_file(&dst);
-        }
-
-        match symlink(&src, &dst) {
-            Ok(_) => synced += 1,
-            Err(e) => {
-                eprintln!("buzz-desktop: shared-agent-sync: failed to symlink {rel}: {e}");
-            }
-        }
+        synced += replace_with_symlink(&src, &dst);
     }
 
     // Ensure shared directories exist in canonical before symlinking.
@@ -638,8 +651,8 @@ pub fn sync_shared_agent_data(app: &tauri::AppHandle) {
                                 }
                             }
                             // Replace the sibling's dir with a symlink to canonical.
-                            let _ = std::fs::remove_dir_all(&sibling_dir);
-                            let _ = symlink(&canonical_target, &sibling_dir);
+                            // replace_with_symlink backs up any leftover real content.
+                            replace_with_symlink(&canonical_target, &sibling_dir);
                             eprintln!(
                                 "buzz-desktop: shared-agent-sync: migrated {rel} from {}",
                                 sibling.display()
@@ -670,26 +683,7 @@ pub fn sync_shared_agent_data(app: &tauri::AppHandle) {
             }
         }
 
-        if dst.is_symlink() {
-            if let Ok(target) = std::fs::read_link(&dst) {
-                if target == src {
-                    continue;
-                }
-            }
-        }
-
-        if dst.is_symlink() {
-            let _ = std::fs::remove_file(&dst);
-        } else if dst.exists() {
-            let _ = std::fs::remove_dir_all(&dst);
-        }
-
-        match symlink(&src, &dst) {
-            Ok(_) => synced += 1,
-            Err(e) => {
-                eprintln!("buzz-desktop: shared-agent-sync: failed to symlink {rel}: {e}");
-            }
-        }
+        synced += replace_with_symlink(&src, &dst);
     }
 
     if synced > 0 {
@@ -800,7 +794,7 @@ fn reconcile_target_dir(current_dir: &Path) -> PathBuf {
     let is_dev_instance = current_dir
         .file_name()
         .and_then(|n| n.to_str())
-        .is_some_and(|n| n.starts_with(CANONICAL_DEV_IDENTIFIER));
+        .is_some_and(is_dev_data_dir_name);
     if is_dev_instance {
         match canonical_dev_data_dir(current_dir) {
             Some(dir) if dir.exists() => dir,
@@ -1044,31 +1038,6 @@ fn reconcile_mcp_commands_in_file(path: &Path) {
     });
 }
 
-/// Build a `persona_id → runtime` map from the personas.json sibling of the
-/// given managed-agents.json path. Returns an empty map when personas can't be
-/// read or parsed — callers then fall back to the record's own snapshot.
-fn load_persona_runtimes(agents_path: &Path) -> std::collections::HashMap<String, String> {
-    let mut map = std::collections::HashMap::new();
-    let Some(personas_path) = agents_path.parent().map(|dir| dir.join("personas.json")) else {
-        return map;
-    };
-    let Ok(content) = std::fs::read_to_string(&personas_path) else {
-        return map;
-    };
-    let Ok(records) = serde_json::from_str::<Vec<serde_json::Value>>(&content) else {
-        return map;
-    };
-    for record in records {
-        if let (Some(id), Some(runtime)) = (
-            record.get("id").and_then(|v| v.as_str()),
-            record.get("runtime").and_then(|v| v.as_str()),
-        ) {
-            map.insert(id.to_string(), runtime.to_string());
-        }
-    }
-    map
-}
-
 fn replace_command_field(
     obj: &mut serde_json::Map<String, serde_json::Value>,
     field: &str,
@@ -1276,6 +1245,114 @@ pub fn reconcile_provider_mcp_commands(app: &tauri::AppHandle) {
     }
 }
 
+fn reconcile_databricks_v1_to_v2_in_file(path: &Path, rewrite_v1_provider: bool) {
+    use crate::managed_agents::is_derived_provider_model_key;
+    patch_json_records(path, |obj| {
+        let mut changed = false;
+
+        // Only rewrite the structured provider field when the baked build env
+        // marks this as a Block build (BUZZ_AGENT_PROVIDER == "databricks_v2").
+        // OSS users may intentionally select V1 (Model Serving), so we must not
+        // silently migrate their provider to V2 (AI Gateway).
+        if rewrite_v1_provider && obj.get("provider").and_then(|v| v.as_str()) == Some("databricks")
+        {
+            let name = obj
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?")
+                .to_string();
+            eprintln!(
+                "buzz-desktop: databricks-v1-to-v2: {name:?}: provider \"databricks\" → \"databricks_v2\"",
+            );
+            obj.insert(
+                "provider".to_string(),
+                serde_json::Value::String("databricks_v2".to_string()),
+            );
+            // Also clear the model field — a V1 model name (e.g. "dbrx-instruct")
+            // on a V2 provider would shadow the baked DATABRICKS_MODEL at spawn time
+            // (BUZZ_AGENT_MODEL from runtime_metadata_env_vars takes priority in
+            // buzz-agent config.rs). Clearing it lets the baked V2 default win.
+            if obj.remove("model").is_some() {
+                eprintln!(
+                    "buzz-desktop: databricks-v1-to-v2: {name:?}: cleared stale V1 model field",
+                );
+            }
+            changed = true;
+        }
+
+        // Strip derived provider/model keys from env_vars on ALL records,
+        // regardless of rewrite_v1_provider. These keys are re-derived from
+        // structured fields at spawn time; stale copies in env_vars silently
+        // override the structured fields (last-write-wins in Command::env) and
+        // can cause V1 routing even when the provider dropdown shows V2.
+        //
+        // The check is case-insensitive (matching the established helper)
+        // to cover any case-variant that may have been written historically.
+        if let Some(serde_json::Value::Object(env_vars)) = obj.get_mut("env_vars") {
+            let stale_keys: Vec<String> = env_vars
+                .keys()
+                .filter(|k| is_derived_provider_model_key(k))
+                .cloned()
+                .collect();
+            for key in stale_keys {
+                env_vars.remove(key.as_str());
+                eprintln!("buzz-desktop: databricks-v1-to-v2: removed stale env_vars[\"{key}\"]",);
+                changed = true;
+            }
+        }
+
+        changed
+    });
+}
+
+/// Strip stale derived provider/model keys from `env_vars` in all
+/// managed-agent records, and — on Block builds — also migrate any persisted
+/// `provider: "databricks"` to `"databricks_v2"`.
+///
+/// **Block builds** (where `baked_build_env()` contains
+/// `BUZZ_AGENT_PROVIDER=databricks_v2`): the structured `provider` field is
+/// rewritten V1→V2 because the baked release targets V2 exclusively. Records
+/// that were saved before this migration would otherwise silently override the
+/// baked value at spawn time (last-write-wins in `Command::env`).
+///
+/// **OSS builds** (baked env empty): the `provider` field is left alone —
+/// V1 (`databricks`) is a valid Model Serving choice for OSS users.
+///
+/// In both cases, stale `BUZZ_AGENT_PROVIDER` / `BUZZ_AGENT_MODEL` /
+/// `GOOSE_PROVIDER` / `GOOSE_MODEL` are stripped from `env_vars`. These keys
+/// are always re-derived from structured fields at spawn time; persisted copies
+/// silence UI edits and cause stale routing.
+///
+/// Covers both the current app data dir and the canonical dev data dir
+/// (for worktree instances) — same dual-dir pattern as
+/// `reconcile_legacy_command_names` and `reconcile_provider_mcp_commands`.
+pub fn reconcile_databricks_v1_to_v2(app: &tauri::AppHandle) {
+    use crate::managed_agents::baked_build_env;
+    // On Block builds, the baked env contains BUZZ_AGENT_PROVIDER=databricks_v2.
+    // Use that as a reliable signal that this is a Block build and the V1
+    // provider should be migrated. OSS builds have an empty baked env, so
+    // rewrite_v1_provider is false and the structured provider is preserved.
+    let rewrite_v1_provider = baked_build_env()
+        .get("BUZZ_AGENT_PROVIDER")
+        .map(|v| v == "databricks_v2")
+        .unwrap_or(false);
+    let Ok(current_dir) = app.path().app_data_dir() else {
+        return;
+    };
+    let mut dirs = vec![current_dir.clone()];
+    if let Some(canonical) = canonical_dev_data_dir(&current_dir) {
+        if canonical.exists() && canonical != current_dir {
+            dirs.push(canonical);
+        }
+    }
+    for dir in dirs {
+        let path = dir.join("agents/managed-agents.json");
+        if path.exists() {
+            reconcile_databricks_v1_to_v2_in_file(&path, rewrite_v1_provider);
+        }
+    }
+}
+
 fn rename_provider_to_runtime_in_personas(path: &Path) {
     patch_json_records(path, |obj| {
         if obj.contains_key("runtime") {
@@ -1301,257 +1378,13 @@ pub fn migrate_persona_provider_to_runtime(app: &tauri::AppHandle) {
     rename_provider_to_runtime_in_personas(&path);
 }
 
-/// Reconcile `personas.json` into the persona-event retention store.
-///
-/// Must run AFTER `migrate_packs_to_teams` (depends on field renames being
-/// complete) and AFTER the persisted identity is resolved (it signs every
-/// retained event with the owner's keys).
-///
-/// Per-record reconcile: for each non-builtin persona it compares the freshly
-/// serialized event content against the retained row at the same coordinate
-/// and re-retains (marking `pending_sync = 1`) only when the row is absent or
-/// its content differs. An unchanged persona is left untouched, so a launch
-/// after a no-op edit does not churn `pending_sync`; a persona added or edited
-/// on disk between launches is picked up and republished. There is no
-/// whole-store sentinel — comparing per coordinate is what lets newly added
-/// personas reach the relay.
-///
-/// Strategy: write to local SQLite retention first (durable copy), mark as
-/// `pending_sync = 1` for later relay publish. Migration succeeds on local
-/// write, not relay acknowledgment. Every retained row is a real signed
-/// event — there is no placeholder path.
-pub fn migrate_personas_to_events(app: &tauri::AppHandle, keys: &nostr::Keys) {
-    use crate::managed_agents::managed_agents_base_dir;
-
-    let Ok(base_dir) = managed_agents_base_dir(app) else {
-        return;
-    };
-
-    match migrate_personas_in_dir(&base_dir, keys) {
-        Ok(0) => {}
-        Ok(migrated) => {
-            eprintln!(
-                "buzz-desktop: persona-event-migration: {migrated} personas migrated to retention"
-            );
-        }
-        Err(e) => {
-            eprintln!("buzz-desktop: persona-event-migration: {e}");
-        }
-    }
-}
-
-/// Core reconcile logic, decoupled from the Tauri `AppHandle` for testing.
-///
-/// Returns the number of personas (re)written to the retention store. Returns
-/// `Ok(0)` when every non-builtin persona already has a matching retained row
-/// (or there are none to reconcile).
-fn migrate_personas_in_dir(base_dir: &Path, keys: &nostr::Keys) -> Result<u32, String> {
-    use crate::managed_agents::{
-        persona_events::{build_persona_event, monotonic_created_at, persona_d_tag},
-        retention::{get_retained_event, open_retention_db, retain_event, RetainedEvent},
-        PersonaRecord,
-    };
-    use buzz_core_pkg::kind::KIND_PERSONA;
-    use nostr::JsonUtil;
-
-    let pubkey = keys.public_key().to_hex();
-
-    // Read personas.json fresh at reconcile time. Nothing to do if absent.
-    let personas_path = base_dir.join("personas.json");
-    if !personas_path.exists() {
-        return Ok(0);
-    }
-
-    let content = std::fs::read_to_string(&personas_path)
-        .map_err(|e| format!("failed to read personas.json: {e}"))?;
-
-    let records: Vec<PersonaRecord> = serde_json::from_str(&content)
-        .map_err(|e| format!("failed to parse personas.json: {e}"))?;
-
-    if records.is_empty() {
-        return Ok(0);
-    }
-
-    // Open (or create) the retention database.
-    let db_path = base_dir.join("retention.db");
-    let conn =
-        open_retention_db(&db_path).map_err(|e| format!("failed to open retention db: {e}"))?;
-
-    let mut migrated = 0u32;
-
-    for record in &records {
-        // Skip built-in personas — they're always available from code.
-        if record.is_builtin {
-            continue;
-        }
-
-        let d_tag = persona_d_tag(record);
-
-        // Fetch the retained head first so the rebuilt event can supersede it:
-        // build at the default `now` and a future-dated head (clock skew, or an
-        // interactive same-second `max(now, head+1)` bump) would make
-        // `retain_event`'s `created_at >= ...` guard SILENTLY skip the UPDATE
-        // while `migrated` over-reports. Mirror the interactive sites' monotonic
-        // bump (F1) so a changed body always lands.
-        let existing = get_retained_event(&conn, KIND_PERSONA, &pubkey, &d_tag)?;
-
-        let event = build_persona_event(record)
-            .map_err(|e| format!("failed to build event for '{}': {e}", record.display_name))?
-            .custom_created_at(monotonic_created_at(
-                existing.as_ref().map(|row| row.created_at),
-            ))
-            .sign_with_keys(keys)
-            .map_err(|e| format!("failed to sign event for '{}': {e}", record.display_name))?;
-
-        // Per-coordinate reconcile: skip when an identical body is already
-        // retained, so an unchanged persona doesn't reset `pending_sync`.
-        // Content is timestamp-independent, so the monotonic bump above never
-        // forces a spurious republish.
-        let event_content = event.content.to_string();
-        if existing
-            .as_ref()
-            .is_some_and(|row| row.content == event_content)
-        {
-            continue;
-        }
-
-        let retained = RetainedEvent {
-            kind: KIND_PERSONA,
-            pubkey: pubkey.clone(),
-            d_tag,
-            content: event_content,
-            // Safety: nostr timestamps are seconds and stay below i64::MAX
-            // until year 2262.
-            created_at: event.created_at.as_secs() as i64,
-            raw_event: event.as_json(),
-            pending_sync: true,
-        };
-
-        // The monotonic bump guarantees `created_at > head`, so the upsert's
-        // `>=` guard always lands the UPDATE — `migrated` counts only real,
-        // retained republishes.
-        retain_event(&conn, &retained)
-            .map_err(|e| format!("failed to retain '{}': {e}", record.display_name))?;
-        migrated += 1;
-    }
-
-    Ok(migrated)
-}
-
-/// Reconcile `teams.json` into kind:30176 team events in the retention store.
-///
-/// Mirrors [`migrate_personas_to_events`] for teams: it picks up team metadata
-/// edits (name/description/persona_ids) made on disk between launches and
-/// queues them for relay publish. Managed agents (kind:30177) are deliberately
-/// NOT reconciled here — they have no pack/dir source and are backfilled from
-/// `managed-agents.json` elsewhere.
-///
-/// Must run after the persisted identity is resolved (it signs each event with
-/// the owner's keys).
-pub fn migrate_teams_to_events(app: &tauri::AppHandle, keys: &nostr::Keys) {
-    use crate::managed_agents::managed_agents_base_dir;
-
-    let Ok(base_dir) = managed_agents_base_dir(app) else {
-        return;
-    };
-
-    match migrate_teams_in_dir(&base_dir, keys) {
-        Ok(0) => {}
-        Ok(migrated) => {
-            eprintln!("buzz-desktop: team-event-migration: {migrated} teams migrated to retention");
-        }
-        Err(e) => {
-            eprintln!("buzz-desktop: team-event-migration: {e}");
-        }
-    }
-}
-
-/// Core team reconcile logic, decoupled from the Tauri `AppHandle` for testing.
-///
-/// Returns the number of teams (re)written to the retention store. The
-/// per-coordinate content compare matches [`migrate_personas_in_dir`]: an
-/// unchanged team is skipped so a launch does not churn `pending_sync`.
-fn migrate_teams_in_dir(base_dir: &Path, keys: &nostr::Keys) -> Result<u32, String> {
-    use crate::managed_agents::{
-        persona_events::monotonic_created_at,
-        retention::{get_retained_event, open_retention_db, retain_event, RetainedEvent},
-        team_events::build_team_event,
-        TeamRecord,
-    };
-    use buzz_core_pkg::kind::KIND_TEAM;
-    use nostr::JsonUtil;
-
-    let pubkey = keys.public_key().to_hex();
-
-    let teams_path = base_dir.join("teams.json");
-    if !teams_path.exists() {
-        return Ok(0);
-    }
-
-    let content = std::fs::read_to_string(&teams_path)
-        .map_err(|e| format!("failed to read teams.json: {e}"))?;
-
-    let records: Vec<TeamRecord> =
-        serde_json::from_str(&content).map_err(|e| format!("failed to parse teams.json: {e}"))?;
-
-    if records.is_empty() {
-        return Ok(0);
-    }
-
-    let db_path = base_dir.join("retention.db");
-    let conn =
-        open_retention_db(&db_path).map_err(|e| format!("failed to open retention db: {e}"))?;
-
-    let mut migrated = 0u32;
-
-    for record in &records {
-        // Skip built-in teams — they're always available from code.
-        if record.is_builtin {
-            continue;
-        }
-
-        // Team d-tag is the team id (team_events.rs: no slug fallback).
-        let d_tag = record.id.clone();
-
-        // Fetch the head first so the monotonic bump can supersede a
-        // future-dated head — see migrate_personas_in_dir (F1/F8).
-        let existing = get_retained_event(&conn, KIND_TEAM, &pubkey, &d_tag)?;
-
-        let event = build_team_event(record)
-            .map_err(|e| format!("failed to build event for team '{}': {e}", record.name))?
-            .custom_created_at(monotonic_created_at(
-                existing.as_ref().map(|row| row.created_at),
-            ))
-            .sign_with_keys(keys)
-            .map_err(|e| format!("failed to sign event for team '{}': {e}", record.name))?;
-
-        let event_content = event.content.to_string();
-        if existing
-            .as_ref()
-            .is_some_and(|row| row.content == event_content)
-        {
-            continue;
-        }
-
-        let retained = RetainedEvent {
-            kind: KIND_TEAM,
-            pubkey: pubkey.clone(),
-            d_tag,
-            content: event_content,
-            created_at: event.created_at.as_secs() as i64,
-            raw_event: event.as_json(),
-            pending_sync: true,
-        };
-
-        // Monotonic bump guarantees the upsert UPDATE lands — `migrated` counts
-        // only real republishes.
-        retain_event(&conn, &retained)
-            .map_err(|e| format!("failed to retain team '{}': {e}", record.name))?;
-        migrated += 1;
-    }
-
-    Ok(migrated)
-}
+mod materialize;
+pub use materialize::materialize_agent_runtimes;
+mod fold;
+pub use fold::fold_personas_into_agent_store;
+use fold::load_persona_runtimes;
+mod backfill;
+pub use backfill::backfill_standalone_agents;
 
 #[cfg(test)]
 #[path = "migration_test_support.rs"]
@@ -1566,9 +1399,13 @@ mod tests;
 mod command_tests;
 
 #[cfg(test)]
+#[path = "migration_databricks_tests.rs"]
+mod databricks_tests;
+
+#[cfg(test)]
 #[path = "migration_team_dir_tests.rs"]
 mod team_dir_tests;
 
 #[cfg(test)]
-#[path = "migration_team_events_tests.rs"]
-mod team_events_tests;
+#[path = "migration_sync_guard_tests.rs"]
+mod sync_guard_tests;

@@ -5,6 +5,7 @@ const STORAGE_KEY_PREFIX = "buzz-channel-sections.v1";
 export type ChannelSection = {
   id: string;
   name: string;
+  icon?: string;
   order: number;
 };
 
@@ -54,14 +55,29 @@ export function parseChannelSectionPayload(
   if (typeof json !== "object" || json === null) return null;
   const obj = json as Record<string, unknown>;
   const sections: ChannelSection[] = Array.isArray(obj.sections)
-    ? obj.sections.filter(
-        (entry: unknown): entry is ChannelSection =>
-          typeof entry === "object" &&
-          entry !== null &&
-          typeof (entry as Record<string, unknown>).id === "string" &&
-          typeof (entry as Record<string, unknown>).name === "string" &&
-          typeof (entry as Record<string, unknown>).order === "number",
-      )
+    ? obj.sections.flatMap((entry: unknown): ChannelSection[] => {
+        if (typeof entry !== "object" || entry === null) return [];
+        const section = entry as Record<string, unknown>;
+        if (
+          typeof section.id !== "string" ||
+          typeof section.name !== "string" ||
+          typeof section.order !== "number"
+        ) {
+          return [];
+        }
+        const icon =
+          typeof section.icon === "string" && section.icon.trim().length > 0
+            ? section.icon.trim()
+            : undefined;
+        return [
+          {
+            id: section.id,
+            name: section.name,
+            ...(icon ? { icon } : {}),
+            order: section.order,
+          },
+        ];
+      })
     : [];
   const assignments: Record<string, string> =
     typeof obj.assignments === "object" &&

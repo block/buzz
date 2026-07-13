@@ -45,8 +45,10 @@ RUN cargo chef cook --release --recipe-path recipe.json
 COPY . .
 RUN cargo build --release --locked -p buzz-relay --bin buzz-relay \
                                    -p buzz-admin --bin buzz-admin \
+                                   -p buzz-pair-relay --bin buzz-pair-relay \
     && strip target/release/buzz-relay \
-    && strip target/release/buzz-admin
+    && strip target/release/buzz-admin \
+    && strip target/release/buzz-pair-relay
 
 # ─── Stage 4: web bundle (pnpm + vite) ──────────────────────────────────────
 # Independent of the Rust layers so a CSS change doesn't bust Rust cache and
@@ -87,6 +89,7 @@ RUN apt-get update \
 
 COPY --from=builder    /build/target/release/buzz-relay /usr/local/bin/buzz-relay
 COPY --from=builder    /build/target/release/buzz-admin /usr/local/bin/buzz-admin
+COPY --from=builder    /build/target/release/buzz-pair-relay /usr/local/bin/buzz-pair-relay
 COPY --from=web-builder /build/web/dist                 /srv/buzz/web
 
 ENV BUZZ_WEB_DIR=/srv/buzz/web

@@ -1,11 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { formatTimelineMessages } from "../../messages/lib/formatTimelineMessages.ts";
+import { getConfigNudgeAuthorPubkey } from "../../messages/ui/configNudgeAuthPubkey.ts";
 import {
   getContextMessageDepth,
   getReactionTargetId,
   isInboxThreadContextEvent,
   matchesInboxFilter,
+  toInboxContextMessage,
+  toTimelineMessage,
 } from "./inboxViewHelpers.ts";
 
 // --- matchesInboxFilter ---
@@ -254,5 +258,94 @@ test("isInboxThreadContextEvent keeps selected thread root, parent, selected eve
       selection,
     ),
     true,
+  );
+});
+
+// --- config-nudge pipeline: toInboxContextMessage → toTimelineMessage ---
+//
+// The inbox detail pane renders messages through two mappings that a real
+// event's `kind` and `signerPubkey` must survive: HomeView's
+// toInboxContextMessage and InboxMessageRow's toTimelineMessage. An earlier
+// version of the HomeView mapping dropped both fields, structurally
+// disabling the config-nudge card on the inbox surface (the raw
+// ```buzz:config-nudge fence rendered instead). These tests run a real event
+// through formatTimelineMessages and both mappings, then assert against the
+// same gate helper InboxMessageRow calls.
+
+const NUDGE_CHANNEL_ID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+const NUDGE_AGENT_SIGNER =
+  "2222222222222222222222222222222222222222222222222222222222222222";
+const NUDGE_HUMAN_SIGNER =
+  "1111111111111111111111111111111111111111111111111111111111111111";
+
+function makeNudgeEvent(overrides = {}) {
+  return {
+    id: "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    pubkey: NUDGE_AGENT_SIGNER,
+    kind: 9,
+    created_at: 1_700_000_000,
+    content: "**Fizz** needs configuration.\n\n```buzz:config-nudge\n{}\n```",
+    tags: [["h", NUDGE_CHANNEL_ID]],
+    sig: "sig",
+    ...overrides,
+  };
+}
+
+function mapThroughInboxPipeline(event) {
+  const [formatted] = formatTimelineMessages([event], null, undefined, null);
+  const contextMessage = toInboxContextMessage(formatted, {
+    eventById: new Map([[event.id, event]]),
+    fallbackAuthorPubkey: event.pubkey,
+    profiles: undefined,
+    selectedItemId: event.id,
+  });
+  return toTimelineMessage(contextMessage);
+}
+
+test("inbox mappings preserve kind and signerPubkey so the nudge gate can pass", () => {
+  const message = mapThroughInboxPipeline(makeNudgeEvent());
+
+  assert.equal(message.kind, 9);
+  assert.equal(message.signerPubkey, NUDGE_AGENT_SIGNER);
+  assert.equal(message.createdAt, 1_700_000_000);
+  assert.equal(
+    getConfigNudgeAuthorPubkey(
+      message,
+      (pubkey) => pubkey === NUDGE_AGENT_SIGNER,
+    ),
+    NUDGE_AGENT_SIGNER,
+  );
+});
+
+test("inbox mappings keep the raw signer distinct from a spoofed actor tag", () => {
+  const message = mapThroughInboxPipeline(
+    makeNudgeEvent({
+      pubkey: NUDGE_HUMAN_SIGNER,
+      tags: [
+        ["h", NUDGE_CHANNEL_ID],
+        ["actor", NUDGE_AGENT_SIGNER],
+      ],
+    }),
+  );
+
+  // The attributed display author resolves to the agent (actor tag), but the
+  // signer stays human — the gate must reject.
+  assert.equal(message.pubkey?.toLowerCase(), NUDGE_AGENT_SIGNER);
+  assert.equal(message.signerPubkey, NUDGE_HUMAN_SIGNER);
+  assert.equal(
+    getConfigNudgeAuthorPubkey(
+      message,
+      (pubkey) => pubkey === NUDGE_AGENT_SIGNER,
+    ),
+    undefined,
+  );
+});
+
+test("inbox mappings: unknown signer never enables the card", () => {
+  const message = mapThroughInboxPipeline(makeNudgeEvent());
+
+  assert.equal(
+    getConfigNudgeAuthorPubkey(message, () => false),
+    undefined,
   );
 });

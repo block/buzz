@@ -157,7 +157,11 @@ pub async fn handle_connection(
     });
 
     info!(conn_id = %conn_id, addr = %addr, "WebSocket connection established");
-    metrics::counter!("buzz_ws_connections_total").increment(1);
+    metrics::counter!(
+        "buzz_ws_connections_total",
+        "community" => conn.tenant.host().to_owned()
+    )
+    .increment(1);
 
     let challenge_msg = RelayMessage::auth_challenge(&challenge);
     if tx
@@ -177,6 +181,7 @@ pub async fn handle_connection(
     state.conn_manager.register(
         conn_id,
         tx.clone(),
+        ctrl_tx.clone(),
         cancel.clone(),
         conn.tenant.community(),
         Arc::clone(&backpressure_count),
@@ -242,9 +247,10 @@ pub async fn handle_connection(
     }
     state.conn_manager.deregister(conn.conn_id);
     if let AuthState::Authenticated(ref auth_ctx) = *conn.auth_state.read().await {
-        let remaining = state
-            .conn_manager
-            .connection_ids_for_pubkey(auth_ctx.pubkey.to_bytes().as_slice());
+        let remaining = state.conn_manager.connection_ids_for_pubkey_in_community(
+            conn.tenant.community(),
+            auth_ctx.pubkey.to_bytes().as_slice(),
+        );
         if remaining.is_empty() {
             let _ = state
                 .pubsub
@@ -294,6 +300,17 @@ async fn send_loop_inner<S>(
             // so backpressure-triggered shutdown isn't starved by queued data.
             biased;
             _ = cancel.cancelled() => {
+                // Drain any queued control frames before closing. A ban
+                // disconnect queues its `OK false "blocked: …"` reason frame on
+                // ctrl and then cancels; without this drain the biased branch
+                // would send Close first and the client would never learn why
+                // (the top-of-loop drain does not run again after we break).
+                // This makes "queue frame on ctrl, then cancel" a safe idiom.
+                while let Ok(ctrl_msg) = ctrl_rx.try_recv() {
+                    if ws_send.send(ctrl_msg).await.is_err() {
+                        break;
+                    }
+                }
                 let _ = ws_send.send(WsMessage::Close(None)).await;
                 break;
             }
@@ -697,6 +714,45 @@ mod tests {
         assert_eq!(
             text_payloads(&state.messages),
             vec!["control", "data-0", "data-1"]
+        );
+    }
+
+    #[tokio::test]
+    async fn send_loop_flushes_queued_control_before_close_on_cancel() {
+        // A ban disconnect queues its `OK false "blocked: …"` reason frame on
+        // the control channel and then cancels the token (B3). The biased
+        // select polls the cancel branch first, so the reason frame would be
+        // stranded unless the cancel branch drains ctrl before emitting Close.
+        // This test exercises `send_loop_inner` end-to-end to prove the reason
+        // frame reaches the client, in order, ahead of the Close.
+        let (_data_tx, data_rx) = mpsc::channel(1);
+        let (ctrl_tx, ctrl_rx) = mpsc::channel(1);
+        ctrl_tx
+            .send(WsMessage::Text("blocked: you are banned".into()))
+            .await
+            .expect("queue ban reason frame");
+
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+
+        let (sink, state) = MockSink::new(None);
+        send_loop_inner(sink, data_rx, ctrl_rx, cancel).await;
+
+        let state = state.lock().expect("mock sink poisoned");
+        assert_eq!(
+            state.messages.len(),
+            2,
+            "reason frame then Close, nothing else"
+        );
+        match &state.messages[0] {
+            WsMessage::Text(text) => {
+                assert_eq!(text.as_str(), "blocked: you are banned")
+            }
+            other => panic!("expected the ban reason frame first, got {other:?}"),
+        }
+        assert!(
+            matches!(state.messages[1], WsMessage::Close(_)),
+            "Close is sent only after the reason frame is flushed"
         );
     }
 }

@@ -209,6 +209,7 @@ pub(crate) fn read_config_surface(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_model_field(
     record_model: &Option<String>,
     file_model: &Option<String>,
@@ -360,7 +361,11 @@ fn build_provider_field(
         (record_provider.as_deref(), ConfigOrigin::BuzzExplicit),
         (file_provider.as_deref(), ConfigOrigin::ConfigFile),
     ];
-    let (value, origin, overridden_value, overridden_origin) = resolve_with_override(tiers)?;
+    let (value, origin, overridden_value, overridden_origin) = match resolve_with_override(tiers) {
+        Some(resolved) => resolved,
+        None if is_required => (None, ConfigOrigin::EnvVar, None, None),
+        None => return None,
+    };
 
     let write_via = if let Some(env_key) = provider_env_var {
         ConfigWriteMechanism::RespawnWithEnvVar {
@@ -512,18 +517,19 @@ fn build_system_prompt_field(
     })
 }
 
-/// Picks the first `Some` value from `tiers` (highest-precedence first) and
-/// returns `(value, origin, overridden_value, overridden_origin)` where the
-/// overridden pair is the next `Some` tier after the winner. Returns `None`
-/// when no tier has a value.
-fn resolve_with_override(
-    tiers: &[(Option<&str>, ConfigOrigin)],
-) -> Option<(
+/// `(value, origin, overridden_value, overridden_origin)` — the resolved
+/// winner plus the next `Some` tier it shadows, if any.
+type ResolvedOverride = (
     Option<String>,
     ConfigOrigin,
     Option<String>,
     Option<ConfigOrigin>,
-)> {
+);
+
+/// Picks the first `Some` value from `tiers` (highest-precedence first);
+/// the overridden pair is the next `Some` tier after the winner. Returns
+/// `None` when no tier has a value.
+fn resolve_with_override(tiers: &[(Option<&str>, ConfigOrigin)]) -> Option<ResolvedOverride> {
     let winner_idx = tiers.iter().position(|(v, _)| v.is_some())?;
     let (value, origin) = &tiers[winner_idx];
     let value = value.map(str::to_string);

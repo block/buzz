@@ -21,10 +21,14 @@ type AppTopChromeProps = {
   hasWorkspaceRail?: boolean;
 };
 
+// Fixed px on purpose (button box + glyph): these controls sit beside the
+// native macOS traffic lights, which ignore the app's Cmd +/- text zoom, so
+// the row must not grow or shrink with the rem scale. Deliberate exception
+// to the rem-first rule.
 const TOP_CHROME_ICON_BUTTON_CLASS =
-  "h-7 w-7 rounded-[4px] text-sidebar-foreground/65 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground [&_svg]:size-4";
+  "h-[28px] w-[28px] rounded-[4px] text-sidebar-foreground/65 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground [&_svg]:size-[16px]";
 const HISTORY_ICON_BUTTON_CLASS =
-  "h-7 w-6 rounded-[4px] text-sidebar-foreground/65 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground [&_svg]:size-4";
+  "h-[28px] w-[24px] rounded-[4px] text-sidebar-foreground/65 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground [&_svg]:size-[16px]";
 
 function preventTopChromeWheel(event: WheelEvent) {
   event.preventDefault();
@@ -66,11 +70,15 @@ export function AppTopChrome({
   // x-position. When the workspace rail is present it already occupies the far
   // left, so the nav row only needs to clear the lights past the rail edge
   // rather than the full offset. In fullscreen those buttons hide.
+  //
+  // Fixed px on purpose: the native traffic lights do not scale with the app's
+  // Cmd +/- text zoom (rem), so rem-based clearance shrinks under them when
+  // zoomed out. This is a deliberate exception to the rem-first rule.
   const macChrome = isMacPlatform() && !isFullscreen;
   const navRowPaddingClass = macChrome
     ? hasWorkspaceRail
-      ? "pl-8"
-      : "pl-20"
+      ? "pl-[32px]"
+      : "pl-[80px]"
     : "pl-3";
   const navRowAlignmentClass = macChrome ? "translate-y-[3px]" : null;
 

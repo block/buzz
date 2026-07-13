@@ -8,8 +8,7 @@ import type {
   RelayAgent,
   UpdateManagedAgentInput,
 } from "@/shared/api/types";
-import { normalizePubkey } from "@/shared/lib/pubkey";
-import { truncatePubkey } from "@/features/profile/lib/identity";
+import { normalizePubkey, truncatePubkey } from "@/shared/lib/pubkey";
 
 export { truncatePubkey };
 
@@ -90,6 +89,7 @@ export function profilePanelTabFromSearch(value: unknown): ProfilePanelTab {
 }
 
 export type UserProfilePanelProps = {
+  callerChannelId?: string | null;
   canResetWidth?: boolean;
   currentPubkey?: string;
   isSinglePanelView?: boolean;
@@ -165,6 +165,8 @@ export function buildPersonaDraftProfile(persona: AgentPersona): Profile {
     about: null,
     nip05Handle: null,
     ownerPubkey: null,
+    // Draft profile synthesised from persona config — not backed by a kind:0 event.
+    hasProfileEvent: false,
   };
 }
 

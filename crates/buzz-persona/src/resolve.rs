@@ -37,7 +37,7 @@ pub struct ResolvedPersona {
     /// from 'databricks:model-id'). Flows into harness-specific env vars (GOOSE_PROVIDER) only.
     pub llm_provider: Option<String>,
     /// Preferred ACP runtime ID from the persona config (e.g., 'goose', 'claude'). Maps to
-    /// PersonaRecord.runtime during pack import.
+    /// AgentDefinition.runtime during pack import.
     pub runtime: Option<String>,
     pub temperature: Option<f64>,
     pub max_context_tokens: Option<u64>,

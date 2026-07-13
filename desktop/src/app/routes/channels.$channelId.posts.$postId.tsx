@@ -39,6 +39,7 @@ function ForumPostRouteComponent() {
       fallback={<ViewLoadingFallback includeHeader kind="forum" />}
     >
       <ChannelRouteScreen
+        autoSendDraftKey={null}
         channelId={channelId}
         selectedPostId={postId}
         targetMessageId={null}

@@ -528,6 +528,21 @@ export function useActiveAgentTurnsByChannel(): ActiveChannelTurnSummary[] {
 }
 
 /**
+ * Sync every running/deployed agent's observer events into the active-turns
+ * store. Extracted from the bridge hook so a regression can drive the exact
+ * observer→derived-liveness path without a React renderer.
+ */
+export function syncActiveAgentTurnsFromObserver(
+  agents: readonly { pubkey: string; status: string }[],
+) {
+  for (const agent of agents) {
+    if (agent.status !== "running" && agent.status !== "deployed") continue;
+    const snapshot = getAgentObserverSnapshot(agent.pubkey, true);
+    syncAgentTurnsFromEvents(agent.pubkey, snapshot.events);
+  }
+}
+
+/**
  * Bridge hook: processes observer events into the active-turns store.
  * Should be called by a parent component that has access to the observer events.
  */
@@ -536,11 +551,7 @@ export function useActiveAgentTurnsBridge(
 ) {
   React.useEffect(() => {
     function syncAll() {
-      for (const agent of agents) {
-        if (agent.status !== "running" && agent.status !== "deployed") continue;
-        const snapshot = getAgentObserverSnapshot(agent.pubkey, true);
-        syncAgentTurnsFromEvents(agent.pubkey, snapshot.events);
-      }
+      syncActiveAgentTurnsFromObserver(agents);
     }
 
     syncAll();
@@ -548,6 +559,11 @@ export function useActiveAgentTurnsBridge(
   }, [agents]);
 }
 
+/**
+ * Clears all live turn state (active turns, offsets, watermarks, tombstones).
+ * Intentionally preserves `savedByWorkspace` — workspace-switch snapshots
+ * must survive the reset that runs between save and restore.
+ */
 export function resetActiveAgentTurnsStore() {
   activeTurnsByAgent.clear();
   lastProcessed.clear();
@@ -556,4 +572,122 @@ export function resetActiveAgentTurnsStore() {
   cachedChannelTurnSummaries = null;
   terminalAtByAgent.clear();
   notifyListeners();
+}
+
+// ---------------------------------------------------------------------------
+// Workspace-switch save / restore
+// ---------------------------------------------------------------------------
+
+type TurnsStoreSnapshot = {
+  turns: Map<string, Map<string, ActiveTurn>>;
+  offsets: Map<string, number>;
+  watermarks: Map<string, ObserverEvent>;
+  terminals: Map<string, Map<string, number>>;
+};
+
+/** Per-workspace snapshots. Keyed by workspace ID. */
+const savedByWorkspace = new Map<string, TurnsStoreSnapshot>();
+
+/**
+ * Snapshot the current active-turns state under `workspaceId` so it can be
+ * restored when the user switches back.  If both the turns map and the
+ * tombstone map are empty there is nothing worth restoring — discard any
+ * previously-saved snapshot instead.
+ *
+ * Deep-clones all four maps so subsequent mutations on the live maps do not
+ * corrupt the snapshot.
+ */
+export function saveActiveAgentTurnsForWorkspace(workspaceId: string): void {
+  if (activeTurnsByAgent.size === 0 && terminalAtByAgent.size === 0) {
+    savedByWorkspace.delete(workspaceId);
+    return;
+  }
+
+  // Deep-clone activeTurnsByAgent: outer map + inner per-agent maps + turn
+  // objects (plain structs, no nested references beyond primitives).
+  const turns = new Map<string, Map<string, ActiveTurn>>();
+  for (const [agentKey, agentTurns] of activeTurnsByAgent) {
+    const clonedAgent = new Map<string, ActiveTurn>();
+    for (const [turnId, turn] of agentTurns) {
+      clonedAgent.set(turnId, { ...turn });
+    }
+    turns.set(agentKey, clonedAgent);
+  }
+
+  // Shallow-clone scalar maps (primitives as values).
+  const offsets = new Map(clockOffsetByAgent);
+  const watermarks = new Map(lastProcessed);
+
+  // Deep-clone terminalAtByAgent: outer map + inner per-agent maps.
+  const terminals = new Map<string, Map<string, number>>();
+  for (const [agentKey, tombstones] of terminalAtByAgent) {
+    terminals.set(agentKey, new Map(tombstones));
+  }
+
+  savedByWorkspace.set(workspaceId, { turns, offsets, watermarks, terminals });
+}
+
+/**
+ * Restore a previously saved active-turns snapshot for `workspaceId` into the
+ * module maps.  No-op when no snapshot exists.
+ *
+ * Clears all four module maps before writing so the function is
+ * self-contained — it replaces rather than merging, regardless of whether the
+ * caller pre-cleared.  At the primary call site (`useWorkspaceInit`) the maps
+ * are already empty after `resetWorkspaceState()`, but this guard makes the
+ * contract explicit.
+ *
+ * Refreshes `lastActivityAt` on every restored turn so the prune interval
+ * doesn't immediately kill turns that were saved more than 25 s ago (the prune
+ * threshold).  New observer events arriving after restore will update
+ * `lastActivityAt` normally via `recordActivity`.
+ *
+ * Consumes the snapshot (deletes it from `savedByWorkspace`) — a given
+ * workspace's snapshot is only usable once per round-trip.
+ */
+export function restoreActiveAgentTurnsForWorkspace(workspaceId: string): void {
+  const snap = savedByWorkspace.get(workspaceId);
+  if (!snap) return;
+  savedByWorkspace.delete(workspaceId);
+
+  // Clear before writing so this is a replace, not a merge.
+  activeTurnsByAgent.clear();
+  clockOffsetByAgent.clear();
+  lastProcessed.clear();
+  terminalAtByAgent.clear();
+
+  const now = Date.now();
+
+  for (const [agentKey, agentTurns] of snap.turns) {
+    const restored = new Map<string, ActiveTurn>();
+    for (const [turnId, turn] of agentTurns) {
+      restored.set(turnId, { ...turn, lastActivityAt: now });
+    }
+    activeTurnsByAgent.set(agentKey, restored);
+  }
+
+  for (const [agentKey, offset] of snap.offsets) {
+    clockOffsetByAgent.set(agentKey, offset);
+  }
+
+  for (const [agentKey, event] of snap.watermarks) {
+    lastProcessed.set(agentKey, event);
+  }
+
+  for (const [agentKey, tombstones] of snap.terminals) {
+    terminalAtByAgent.set(agentKey, new Map(tombstones));
+  }
+
+  cachedTurnSummaries.clear();
+  cachedChannelTurnSummaries = null;
+  notifyListeners();
+}
+
+/**
+ * Discard the saved turn-state snapshot for a workspace that has been
+ * permanently deleted so the entry doesn't sit in memory indefinitely.
+ * Call this alongside the other relay-specific GC in `removeWorkspace`.
+ */
+export function clearSavedWorkspaceSnapshot(workspaceId: string): void {
+  savedByWorkspace.delete(workspaceId);
 }

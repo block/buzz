@@ -15,7 +15,7 @@ import {
 import { toast } from "sonner";
 
 import { MemorySection } from "@/features/agent-memory/ui/MemorySection";
-import { useActiveAgentTurns } from "@/features/agents/activeAgentTurnsStore";
+import { useAgentWorking } from "@/features/agents/agentWorkingSignal";
 import { getManagedAgentPrimaryActionLabel } from "@/features/agents/lib/managedAgentControlActions";
 import { ManagedAgentLogPanel } from "@/features/agents/ui/ManagedAgentLogPanel";
 import { AgentConfigPanel } from "@/features/agents/ui/AgentConfigPanel";
@@ -63,6 +63,7 @@ export { AgentInstructionsFocusedView } from "@/features/profile/ui/UserProfileP
 
 export type ProfileSummaryViewProps = {
   activityAgent: ProfileActivityAgent | null;
+  callerChannelId: string | null;
   canAddToChannel: boolean;
   canEditAgent: boolean;
   canOpenAgentLogs: boolean;
@@ -172,6 +173,7 @@ function RuntimeTabStatusDot({ status }: { status: RuntimeTabStatus }) {
 
 export function ProfileSummaryView({
   activityAgent,
+  callerChannelId,
   canAddToChannel,
   canEditAgent,
   canOpenAgentLogs,
@@ -217,7 +219,7 @@ export function ProfileSummaryView({
   unfollowMutation,
   userStatus,
 }: ProfileSummaryViewProps) {
-  const activeTurns = useActiveAgentTurns(isBot ? pubkey : null);
+  const activeTurns = useAgentWorking(isBot ? pubkey : null).channels;
 
   const showMemoriesTab = isOwner === true && Boolean(pubkey);
   const showInstructionBlock =
@@ -384,6 +386,7 @@ export function ProfileSummaryView({
               activeTurns={activeTurns}
               activityAgent={activityAgent}
               agentInfoFields={agentInfoFields}
+              callerChannelId={callerChannelId}
               channelIdToName={channelIdToName}
               isArchived={isArchived}
               onOpenActivity={onOpenActivity}

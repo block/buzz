@@ -1,0 +1,673 @@
+//! Local-save archive — Tauri commands for archiving relay messages to a
+//! per-identity SQLite database in the Buzz nest.
+//!
+//! # Architecture
+//!
+//! Two access proof paths, chosen by event kind:
+//!
+//! **Persistent scopes** (`channel_h`, `referenced_e`, and `owner_p`+44200):
+//! the relay is the source of truth. Candidates are grouped and re-queried via
+//! a batched authed `/query`; only events the relay returns are inserted.
+//! For kind-44200 (agent turn metrics), content is decrypted at ingest and
+//! stored as plaintext JSON — fail-closed (decrypt error → drop).
+//!
+//! **Ephemeral scope** (`owner_p`, kind 24200 observer frames): the relay
+//! never stores these, so `/query` cannot verify them. The relay's REQ-time
+//! `#p == authed reader` gate is the access control; local per-frame
+//! validation (sig/id + kind + p-tag + agent tag + frame=telemetry + author
+//! == agent) is applied fail-closed.
+
+mod pipeline;
+pub mod store;
+
+use pipeline::{commit_archive, plan_archive, query_buckets};
+
+use nostr::Event;
+use rusqlite::Connection;
+use serde::{Deserialize, Serialize};
+use tauri::State;
+
+use crate::app_state::AppState;
+use crate::managed_agents::nest_dir;
+use crate::relay::{query_relay, relay_ws_url_with_override};
+
+// ── Constants ───────────────────────────────────────────────────────────────
+
+const KIND_AGENT_OBSERVER_FRAME: u16 = 24200;
+const KIND_AGENT_TURN_METRIC: u16 = 44200;
+const OBSERVER_FRAME_TELEMETRY: &str = "telemetry";
+
+// ── DB helpers ───────────────────────────────────────────────────────────────
+
+fn open_db() -> Result<Connection, String> {
+    let nest = nest_dir().ok_or("cannot resolve nest directory for archive")?;
+    let db_path = nest.join("archive").join("archive.db");
+    store::open_archive_db(&db_path)
+}
+
+fn identity_pubkey(state: &AppState) -> Result<String, String> {
+    let keys = state.keys.lock().map_err(|e| e.to_string())?;
+    Ok(keys.public_key().to_hex())
+}
+
+fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
+}
+
+async fn run_archive_db_task<T, F>(task: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce(&Connection) -> Result<T, String> + Send + 'static,
+{
+    tokio::task::spawn_blocking(move || {
+        let conn = open_db()?;
+        task(&conn)
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking failed: {e}"))?
+}
+
+// ── Scope type ───────────────────────────────────────────────────────────────
+
+/// The three supported archive scope discriminants.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScopeType {
+    ChannelH,
+    OwnerP,
+    ReferencedE,
+}
+
+impl ScopeType {
+    fn as_str(&self) -> &'static str {
+        match self {
+            ScopeType::ChannelH => "channel_h",
+            ScopeType::OwnerP => "owner_p",
+            ScopeType::ReferencedE => "referenced_e",
+        }
+    }
+
+    fn is_ephemeral(&self) -> bool {
+        matches!(self, ScopeType::OwnerP)
+    }
+}
+
+// ── archive_events ───────────────────────────────────────────────────────────
+
+/// One event candidate to archive.
+#[derive(Debug, Deserialize)]
+pub struct ArchiveCandidate {
+    /// Raw Nostr event JSON.
+    pub raw_event_json: String,
+    /// Which save scope this candidate was matched against. The backend
+    /// re-verifies this — it is never trusted blind.
+    pub matched_scope: MatchedScope,
+}
+
+/// A scope match assertion from the frontend.
+#[derive(Debug, Deserialize)]
+pub struct MatchedScope {
+    pub scope_type: ScopeType,
+    pub scope_value: String,
+}
+
+/// Result of a batch archive call.
+#[derive(Debug, Serialize)]
+pub struct ArchiveBatchResult {
+    /// Events successfully written to the store (event + scope rows).
+    pub persisted: u32,
+    /// Events dropped due to access denial or invalid payload (not an error).
+    pub dropped: u32,
+}
+
+/// Archive a batch of event candidates.
+///
+/// - Persistent scopes (`channel_h`, `referenced_e`): grouped by scope, then
+///   batch-queried against the relay; only returned events are inserted.
+/// - Ephemeral scope (`owner_p`): local validation only (no `/query`).
+///
+/// # Send-safety
+///
+/// SQLite planning and commit run on the blocking pool. Each phase opens and
+/// drops its own `rusqlite::Connection` inside the blocking closure; no
+/// connection, transaction, or lock is held across the relay-query await.
+#[tauri::command]
+pub async fn archive_events(
+    state: State<'_, AppState>,
+    candidates: Vec<ArchiveCandidate>,
+) -> Result<ArchiveBatchResult, String> {
+    let identity_pk = identity_pubkey(&state)?;
+    let relay_url = relay_ws_url_with_override(&state);
+    let now = now_secs();
+
+    // ── Phase 1: plan (blocking SQLite) ─────────────────────────────────────
+    let plan_identity_pk = identity_pk.clone();
+    let plan_relay_url = relay_url.clone();
+    let plan = run_archive_db_task(move |conn| {
+        plan_archive(candidates, &plan_identity_pk, &plan_relay_url, conn)
+    })
+    .await?;
+
+    // ── Phase 2: relay queries (async) ───────────────────────────────────────
+    let state_ref: &AppState = &state;
+    let bucket_results = query_buckets(plan.buckets, state_ref).await;
+
+    // ── Phase 3: persist (blocking SQLite) ──────────────────────────────────
+    let owner_keys = {
+        let keys_guard = state.keys.lock().map_err(|e| e.to_string())?;
+        keys_guard.clone()
+        // guard drops here, before awaiting the blocking commit task.
+    };
+    let commit_identity_pk = identity_pk.clone();
+    let commit_relay_url = relay_url.clone();
+    run_archive_db_task(move |conn| {
+        commit_archive(
+            bucket_results,
+            plan.ephemeral,
+            plan.pre_dropped,
+            &commit_identity_pk,
+            &commit_relay_url,
+            &owner_keys,
+            now,
+            conn,
+        )
+    })
+    .await
+}
+
+/// Validate an ephemeral observer frame (kind 24200) against ALL local rules.
+///
+/// Rules (verbatim from spec):
+/// 1. kind == 24200
+/// 2. `#p` contains `identity_pubkey`
+/// 3. `agent` tag is present
+/// 4. `frame == "telemetry"` (control frames are not archived)
+/// 5. event author (pubkey) == agent tag value
+/// 6. A matching `owner_p` save-subscription exists AND its `kinds` list
+///    includes `24200` (kinds enforcement mirrors the persistent path).
+fn validate_ephemeral_frame(
+    event: &Event,
+    identity_pk: &str,
+    scope_value: &str,
+    conn: &Connection,
+    sub_identity: &str,
+    relay_url: &str,
+) -> Result<(), String> {
+    // 1. Kind guard.
+    if event.kind.as_u16() != KIND_AGENT_OBSERVER_FRAME {
+        return Err(format!(
+            "expected kind {KIND_AGENT_OBSERVER_FRAME}, got {}",
+            event.kind.as_u16()
+        ));
+    }
+
+    // 2. `#p` contains current identity.
+    let p_matches = event.tags.iter().any(|t| {
+        let s = t.as_slice();
+        s.len() >= 2 && s[0] == "p" && s[1] == identity_pk
+    });
+    if !p_matches {
+        return Err("observer frame #p does not match current identity".into());
+    }
+
+    // 3. `agent` tag present.
+    let agent_value = event
+        .tags
+        .iter()
+        .find_map(|t| {
+            let s = t.as_slice();
+            if s.len() >= 2 && s[0] == "agent" {
+                Some(s[1].clone())
+            } else {
+                None
+            }
+        })
+        .ok_or_else(|| "observer frame missing `agent` tag".to_string())?;
+
+    // 4. `frame == "telemetry"`.
+    let frame_value = event
+        .tags
+        .iter()
+        .find_map(|t| {
+            let s = t.as_slice();
+            if s.len() >= 2 && s[0] == "frame" {
+                Some(s[1].clone())
+            } else {
+                None
+            }
+        })
+        .ok_or_else(|| "observer frame missing `frame` tag".to_string())?;
+    if frame_value != OBSERVER_FRAME_TELEMETRY {
+        return Err(format!("expected frame=telemetry, got {frame_value:?}"));
+    }
+
+    // 5. Event author == agent tag value.
+    if event.pubkey.to_hex() != agent_value {
+        return Err("observer frame author does not match agent tag".into());
+    }
+
+    // 6. Matching owner_p subscription exists AND kind 24200 is in its kinds list.
+    let kinds_json =
+        store::get_subscription_kinds(conn, sub_identity, relay_url, "owner_p", scope_value)?
+            .ok_or_else(|| format!("no owner_p subscription for scope_value={scope_value:?}"))?;
+    let allowed_kinds: Vec<u64> = serde_json::from_str::<Vec<u64>>(&kinds_json).unwrap_or_default();
+    if !allowed_kinds.contains(&(KIND_AGENT_OBSERVER_FRAME as u64)) {
+        return Err(format!(
+            "owner_p subscription kinds {kinds_json:?} does not include {KIND_AGENT_OBSERVER_FRAME}"
+        ));
+    }
+
+    Ok(())
+}
+
+// ── create_save_subscription ─────────────────────────────────────────────────
+
+/// Create a save subscription after running a per-scope access probe.
+///
+/// Probes:
+/// - `channel_h`: verify the current user is a member of the channel (kind 39002
+///   `#p` contains our pubkey, or we are the event author / open channel).
+/// - `referenced_e`: the referenced event id is currently readable via `/query`.
+/// - `owner_p`: restricted to the current identity's own pubkey (v1).
+#[tauri::command]
+pub async fn create_save_subscription(
+    state: State<'_, AppState>,
+    scope_type: ScopeType,
+    scope_value: String,
+    kinds: Vec<u32>,
+) -> Result<(), String> {
+    let identity_pk = identity_pubkey(&state)?;
+    let relay_url = relay_ws_url_with_override(&state);
+    let now = now_secs();
+
+    // Reject kinds outside the valid NIP-01 range 0..=65535 — the nostr crate
+    // silently truncates larger values via `v as u16`, which would create
+    // unmatchable filters.
+    for &k in &kinds {
+        if k > u32::from(u16::MAX) {
+            return Err(format!("kind {k} is out of the valid range 0..=65535"));
+        }
+    }
+
+    // Per-scope access probe.
+    match &scope_type {
+        ScopeType::ChannelH => {
+            probe_channel_access(&state, &identity_pk, &scope_value).await?;
+        }
+        ScopeType::ReferencedE => {
+            probe_event_readable(&state, &scope_value).await?;
+        }
+        ScopeType::OwnerP => {
+            // v1: only the current identity's own pubkey is allowed.
+            if scope_value != identity_pk {
+                return Err(format!(
+                    "owner_p scope_value must equal current identity pubkey in v1 (got {scope_value:?})"
+                ));
+            }
+        }
+    }
+
+    let kinds_json =
+        serde_json::to_string(&kinds).map_err(|e| format!("failed to serialize kinds: {e}"))?;
+
+    let conn = open_db()?;
+    store::upsert_save_subscription(
+        &conn,
+        &identity_pk,
+        &relay_url,
+        scope_type.as_str(),
+        &scope_value,
+        &kinds_json,
+        now,
+    )
+}
+
+/// Probe: the current user has access to `channel_id` (kind 39002 lists them).
+async fn probe_channel_access(
+    state: &AppState,
+    identity_pk: &str,
+    channel_id: &str,
+) -> Result<(), String> {
+    // Fetch the channel's members event (kind 39002, #d = channel_id).
+    let events = query_relay(
+        state,
+        &[serde_json::json!({
+            "kinds": [39002],
+            "#d": [channel_id],
+            "limit": 1
+        })],
+    )
+    .await?;
+
+    // If no members event exists this could be an open channel — try to read
+    // its metadata (kind 39000) as a fallback proof of readability.
+    if events.is_empty() {
+        let meta = query_relay(
+            state,
+            &[serde_json::json!({
+                "kinds": [39000],
+                "#d": [channel_id],
+                "limit": 1
+            })],
+        )
+        .await?;
+        if meta.is_empty() {
+            return Err(format!(
+                "channel {channel_id:?} not found or not accessible"
+            ));
+        }
+        // Open channel — readable, access granted.
+        return Ok(());
+    }
+
+    // Check that the current identity is listed as a member.
+    let ev = &events[0];
+    let is_member = ev.tags.iter().any(|t| {
+        let s = t.as_slice();
+        s.len() >= 2 && s[0] == "p" && s[1] == identity_pk
+    });
+    // Also allow if we are the event author (e.g. the workspace owner who
+    // published the members event may not be in the `#p` list themselves).
+    let is_author = ev.pubkey.to_hex() == identity_pk;
+
+    if is_member || is_author {
+        Ok(())
+    } else {
+        Err(format!(
+            "current identity is not a member of channel {channel_id:?}"
+        ))
+    }
+}
+
+/// Probe: the given event id is currently readable by the current user.
+async fn probe_event_readable(state: &AppState, event_id: &str) -> Result<(), String> {
+    let events = query_relay(
+        state,
+        &[serde_json::json!({
+            "ids": [event_id],
+            "limit": 1
+        })],
+    )
+    .await?;
+
+    if events.is_empty() {
+        return Err(format!("event {event_id:?} not found or not accessible"));
+    }
+    Ok(())
+}
+
+// ── merge_save_subscription_kinds ────────────────────────────────────────────
+
+/// Atomically merge `kind` into the `owner_p` save subscription for the
+/// current identity + relay.
+///
+/// Reads the existing `kinds` array, unions in `kind`, and writes back — all
+/// inside a single SQLite transaction. This prevents the TOCTOU race where two
+/// concurrent seed hooks (observer seed + metric seed) each read an empty row
+/// and the last writer clobbers the first.
+///
+/// Called by both `useObserverArchiveSeed` (kind 24200) and
+/// `useAgentMetricArchiveSeed` (kind 44200) instead of the former
+/// list → merge-in-TS → create pattern.
+#[tauri::command]
+pub async fn merge_save_subscription_kinds(
+    state: State<'_, AppState>,
+    kind: u32,
+) -> Result<(), String> {
+    if kind > u32::from(u16::MAX) {
+        return Err(format!("kind {kind} is out of the valid range 0..=65535"));
+    }
+
+    let identity_pk = identity_pubkey(&state)?;
+    let relay_url = relay_ws_url_with_override(&state);
+    let now = now_secs();
+    let owner_pk = identity_pk.clone();
+    run_archive_db_task(move |conn| {
+        store::merge_owner_p_kinds(conn, &identity_pk, &relay_url, &owner_pk, kind, now)
+    })
+    .await
+}
+
+// ── remove_save_subscription_kind ────────────────────────────────────────────
+
+/// Atomically remove `kind` from the `owner_p` save subscription for the
+/// current identity + relay.
+///
+/// Mirrors `merge_save_subscription_kinds`: reads existing kinds, removes
+/// `kind`, then deletes the row if the list becomes empty or updates it
+/// otherwise.  Uses `BEGIN IMMEDIATE` to prevent the same snapshot race as the
+/// merge path.
+///
+/// Called by both `useObserverArchiveSeed` / `handleObserverToggle` (kind
+/// 24200) and the metric equivalents (kind 44200) on toggle-OFF, replacing the
+/// former TS-side read-modify-overwrite + whole-row `deleteSaveSubscription`
+/// which would drop the *other* kind if `subs` state was stale.
+#[tauri::command]
+pub async fn remove_save_subscription_kind(
+    state: State<'_, AppState>,
+    kind: u32,
+) -> Result<(), String> {
+    if kind > u32::from(u16::MAX) {
+        return Err(format!("kind {kind} is out of the valid range 0..=65535"));
+    }
+
+    let identity_pk = identity_pubkey(&state)?;
+    let relay_url = relay_ws_url_with_override(&state);
+    let owner_pk = identity_pk.clone();
+    run_archive_db_task(move |conn| {
+        store::remove_owner_p_kind(conn, &identity_pk, &relay_url, &owner_pk, kind)
+    })
+    .await
+}
+
+// ── list_save_subscriptions ──────────────────────────────────────────────────
+
+/// List all save subscriptions for the current identity + relay.
+#[tauri::command]
+pub async fn list_save_subscriptions(
+    state: State<'_, AppState>,
+) -> Result<Vec<store::SaveSubscription>, String> {
+    let identity_pk = identity_pubkey(&state)?;
+    let relay_url = relay_ws_url_with_override(&state);
+    run_archive_db_task(move |conn| store::list_save_subscriptions(conn, &identity_pk, &relay_url))
+        .await
+}
+
+// ── delete_save_subscription ─────────────────────────────────────────────────
+
+/// Delete a save subscription.
+///
+/// Does NOT purge already-archived event data — retention is decoupled in v1.
+/// GC of orphaned event rows happens in P4 purge commands, not here.
+#[tauri::command]
+pub fn delete_save_subscription(
+    state: State<'_, AppState>,
+    scope_type: ScopeType,
+    scope_value: String,
+) -> Result<bool, String> {
+    let identity_pk = identity_pubkey(&state)?;
+    let relay_url = relay_ws_url_with_override(&state);
+    let conn = open_db()?;
+    store::delete_save_subscription(
+        &conn,
+        &identity_pk,
+        &relay_url,
+        scope_type.as_str(),
+        &scope_value,
+    )
+}
+
+// ── read_archived_events ─────────────────────────────────────────────────────
+
+// ── read_archived_observer_events_for_channel ────────────────────────────────
+
+/// Read a paginated page of archived kind 24200 events scoped to one channel,
+/// using the `observer_channel_index` as the primary lookup.
+///
+/// The index only contains rows with a known, non-null `channelId` (frames
+/// pre-dating the channelId stamp, or rows where decryption failed, are
+/// absent from the index and thus absent from every scoped channel view —
+/// Will's (a) ruling, 2026-07-08).
+///
+/// Returns at most `limit` events (default `DEFAULT_READ_LIMIT`) in
+/// newest-first order. Compound cursor `(before_created_at, before_id)` works
+/// identically to `read_archived_events`.
+#[tauri::command]
+pub fn read_archived_observer_events_for_channel(
+    state: State<'_, AppState>,
+    channel_id: String,
+    before_created_at: Option<i64>,
+    before_id: Option<String>,
+    limit: Option<i64>,
+) -> Result<Vec<String>, String> {
+    let identity_pk = identity_pubkey(&state)?;
+    let relay_url = relay_ws_url_with_override(&state);
+    let conn = open_db()?;
+    store::read_archived_observer_events_for_channel(
+        &conn,
+        &identity_pk,
+        &relay_url,
+        &channel_id,
+        before_created_at,
+        before_id.as_deref(),
+        limit.unwrap_or(DEFAULT_READ_LIMIT),
+    )
+}
+
+// ── index_observer_channel_id ─────────────────────────────────────────────────
+
+/// Index one or more archived observer frame ids with their decoded channelId.
+///
+/// Called from the TS-side backfill after attempting `decryptObserverEvent`.
+/// `channel_id` is `Some` for frames with a non-null channelId; `None` for
+/// frames where decryption yielded no channelId or failed entirely.  Both cases
+/// write a status row so a re-run skips the frame (INSERT OR IGNORE on PK).
+///
+/// Idempotent: rows that are already indexed are left unchanged.
+#[tauri::command]
+pub fn index_observer_channel_id(
+    state: State<'_, AppState>,
+    entries: Vec<ObserverChannelIndexEntry>,
+) -> Result<(), String> {
+    let identity_pk = identity_pubkey(&state)?;
+    let relay_url = relay_ws_url_with_override(&state);
+    let conn = open_db()?;
+    for entry in &entries {
+        store::upsert_observer_channel_index(
+            &conn,
+            &identity_pk,
+            &relay_url,
+            &entry.event_id,
+            entry.channel_id.as_deref(),
+            entry.created_at,
+        )?;
+    }
+    Ok(())
+}
+
+/// A single (event_id, channel_id?, created_at) record used by
+/// `index_observer_channel_id`.
+///
+/// `channel_id` is `None` for frames where decryption found no channelId or
+/// failed; those rows are written to `observer_channel_index` with a NULL
+/// channel_id so the frame is treated as processed (no re-decrypt on re-run).
+#[derive(Debug, Deserialize)]
+pub struct ObserverChannelIndexEntry {
+    pub event_id: String,
+    pub channel_id: Option<String>,
+    pub created_at: i64,
+}
+
+// ── read_unindexed_observer_rows ─────────────────────────────────────────────
+
+/// Return raw event JSON + id + created_at for all `owner_p` kind 24200 rows
+/// that are NOT yet in `observer_channel_index`.
+///
+/// The TS-side backfill driver calls this once, decrypts each row, and sends
+/// the (id, channelId, created_at) triples back via `index_observer_channel_id`.
+/// Together these constitute the one-shot idempotent backfill required by the
+/// Slice 1 acceptance criteria (Thufir Pass 4).
+#[tauri::command]
+pub fn read_unindexed_observer_rows(
+    state: State<'_, AppState>,
+) -> Result<Vec<RawObserverRow>, String> {
+    let identity_pk = identity_pubkey(&state)?;
+    let relay_url = relay_ws_url_with_override(&state);
+    let conn = open_db()?;
+    let rows = store::read_unindexed_observer_rows(&conn, &identity_pk, &relay_url)?;
+    Ok(rows
+        .into_iter()
+        .map(|(id, raw_json, created_at)| RawObserverRow {
+            id,
+            raw_json,
+            created_at,
+        })
+        .collect())
+}
+
+/// Wire type returned by `read_unindexed_observer_rows`.
+#[derive(Debug, Serialize)]
+pub struct RawObserverRow {
+    pub id: String,
+    pub raw_json: String,
+    pub created_at: i64,
+}
+
+/// Default page size for `read_archived_events`.
+const DEFAULT_READ_LIMIT: i64 = 50;
+
+/// Read a paginated page of archived events for a scope.
+///
+/// Returns at most `limit` events (default `DEFAULT_READ_LIMIT`) in
+/// newest-first order. Pass the compound cursor `(before_created_at,
+/// before_id)` — both `Some` — from the last row of the previous page to
+/// walk backwards. The predicate mirrors `ORDER BY created_at DESC, id DESC`
+/// so same-second siblings are never skipped at a page boundary. Pass
+/// `None`/`None` to start at the newest end.
+/// A returned page shorter than `limit` signals that the archive is exhausted.
+///
+/// `kinds` is an optional filter; an empty array means "no kinds matched"
+/// (not "all kinds") — callers should pass `null`/`None` when they want all.
+///
+/// Note: stored row payloads are not uniform — kind 44200 rows store the raw
+/// metric payload JSON, while all other kinds store full Nostr Event JSON. A
+/// caller doing `Event::from_json` on an unfiltered read must filter by kind
+/// first (today's only reader filters `kinds: [24200]`).
+#[tauri::command]
+pub async fn read_archived_events(
+    state: State<'_, AppState>,
+    scope_type: ScopeType,
+    scope_value: String,
+    kinds: Option<Vec<i64>>,
+    before_created_at: Option<i64>,
+    before_id: Option<String>,
+    limit: Option<i64>,
+) -> Result<Vec<String>, String> {
+    let identity_pk = identity_pubkey(&state)?;
+    let relay_url = relay_ws_url_with_override(&state);
+    let scope_type_str = scope_type.as_str().to_string();
+    let read_limit = limit.unwrap_or(DEFAULT_READ_LIMIT);
+    run_archive_db_task(move |conn| {
+        store::read_archived_events(
+            conn,
+            &identity_pk,
+            &relay_url,
+            &scope_type_str,
+            &scope_value,
+            kinds.as_deref(),
+            before_created_at,
+            before_id.as_deref(),
+            read_limit,
+        )
+    })
+    .await
+}
+
+// ── Tests ────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+#[path = "mod_tests.rs"]
+mod mod_tests;

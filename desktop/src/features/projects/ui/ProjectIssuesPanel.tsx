@@ -17,6 +17,12 @@ import { relativeTime } from "@/features/projects/lib/projectsViewHelpers";
 import type { ChannelMember } from "@/shared/api/types";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { Markdown } from "@/shared/ui/markdown";
+import {
+  ProjectFeedRow,
+  ProjectFeedRowCluster,
+  ProjectFeedRowMonoCell,
+} from "./ProjectFeedRow";
+import { OverviewRailSection } from "./ProjectOverviewPanel";
 import { ProfileIdentityButton } from "./ProjectProfileIdentity";
 
 function compactDate(createdAt: number) {
@@ -99,48 +105,63 @@ function IssueRow({
   onOpen: () => void;
   profiles?: UserProfileLookup;
 }) {
+  const authorProfile = profiles?.[normalizePubkey(issue.author)];
   const authorLabel = resolveUserLabel({ profiles, pubkey: issue.author });
   const status = issueStatusVisual(issue.status);
 
   return (
-    <button
-      className="flex w-full min-w-0 items-start gap-3 p-3 text-left transition-colors hover:bg-muted/30 focus-visible:bg-muted/30 focus-visible:outline-hidden"
-      onClick={onOpen}
-      type="button"
-    >
-      <div className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-muted text-muted-foreground">
-        <CircleDot className="h-5 w-5" />
-      </div>
-      <div className="min-w-0 flex-1 space-y-0.5">
-        <div className="flex min-w-0 items-center gap-1.5">
-          <p className="truncate text-sm font-semibold leading-5 text-foreground">
-            {issue.title}
-          </p>
-          <status.icon className={`h-3.5 w-3.5 shrink-0 ${status.className}`} />
-        </div>
-        <div className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5 text-xs leading-4 text-muted-foreground">
-          <span>#{issue.id.slice(0, 8)}</span>
+    <ProjectFeedRow
+      meta={
+        <>
+          <ProfileIdentityButton
+            avatarClassName="shrink-0"
+            avatarSize="xs"
+            avatarUrl={authorProfile?.avatarUrl ?? null}
+            isAgent={authorProfile?.isAgent === true}
+            label={authorLabel}
+            pubkey={issue.author}
+            showLabel={false}
+          />
+          <span className="truncate font-medium text-foreground/80">
+            {authorLabel}
+          </span>
           <span>opened {relativeTime(issue.createdAt)}</span>
-          <span>by {authorLabel}</span>
           <span>·</span>
           <span>{issue.status}</span>
           {issue.labels.map((label) => (
             <span
-              className="rounded-full border border-border/50 px-1.5 py-0.5 text-2xs"
+              className="rounded-full border border-border/60 px-1.5 py-0.5 text-2xs"
               key={label}
             >
               {label}
             </span>
           ))}
-        </div>
-      </div>
-      {issue.comments.length > 0 ? (
-        <span className="mt-1 flex shrink-0 items-center gap-1 text-xs text-muted-foreground">
-          <MessageSquare className="h-3.5 w-3.5" />
-          {issue.comments.length}
-        </span>
-      ) : null}
-    </button>
+        </>
+      }
+      onOpen={onOpen}
+      statusIcon={
+        <status.icon className={`h-3.5 w-3.5 shrink-0 ${status.className}`} />
+      }
+      testId="project-issue-row"
+      title={issue.title}
+      trailing={
+        <>
+          {issue.comments.length > 0 ? (
+            <span className="flex items-center gap-1 text-xs text-muted-foreground">
+              <MessageSquare className="h-3.5 w-3.5" />
+              {issue.comments.length}
+            </span>
+          ) : null}
+          <ProjectFeedRowCluster>
+            <ProjectFeedRowMonoCell
+              label={`#${issue.id.slice(0, 8)}`}
+              onClick={onOpen}
+              title="View issue"
+            />
+          </ProjectFeedRowCluster>
+        </>
+      }
+    />
   );
 }
 
@@ -184,91 +205,138 @@ function IssueDetail({
   );
 
   return (
-    <div className="divide-y divide-border/50">
-      <header className="space-y-3 p-4">
-        <div className="min-w-0 space-y-2">
+    <div className="grid xl:grid-cols-[minmax(0,1fr)_18rem]">
+      <div className="min-w-0 divide-y divide-border/50">
+        <header className="space-y-3 p-4">
           <div className="min-w-0">
             <p className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
               <CircleDot className="h-3.5 w-3.5" />
               Issue from {authorLabel}
-              <span
-                className={`rounded-full border border-border/50 px-1.5 py-0.5 text-2xs ${issueStatusClassName(issue.status)}`}
-              >
-                {issue.status}
-              </span>
             </p>
             <h3 className="mt-1 line-clamp-2 text-base font-semibold text-foreground">
-              {issue.title}
+              {issue.title}{" "}
+              <span className="font-normal text-muted-foreground">
+                #{issue.id.slice(0, 8)}
+              </span>
             </h3>
           </div>
-          <div className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5 text-xs leading-4 text-muted-foreground">
-            <span>#{issue.id.slice(0, 8)}</span>
-            <span>·</span>
-            <span>opened {compactDate(issue.createdAt)}</span>
-            <span>·</span>
-            <span>updated {compactDate(issue.updatedAt)}</span>
+          {issue.content ? (
+            <Markdown
+              className="text-sm"
+              content={issue.content}
+              interactive={false}
+            />
+          ) : null}
+        </header>
+
+        <section className="space-y-3 p-4">
+          <h4 className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+            <MessageSquare className="h-3.5 w-3.5" />
+            Discussion
+          </h4>
+          {issue.comments.length > 0 ? (
+            <div className="space-y-3">
+              {issue.comments.map((item) => (
+                <article key={item.id}>
+                  <div className="mb-2">
+                    <AuthorIdentity
+                      profiles={profiles}
+                      pubkey={item.author}
+                      role={compactDate(item.createdAt)}
+                    />
+                  </div>
+                  <Markdown
+                    className="text-sm"
+                    content={item.content}
+                    interactive={false}
+                  />
+                </article>
+              ))}
+            </div>
+          ) : (
+            <p className="text-sm text-muted-foreground">No comments yet.</p>
+          )}
+          <ForumComposer
+            className="border border-border/60 bg-background/45"
+            disabled={commentMutation.isPending}
+            isSending={commentMutation.isPending}
+            members={members}
+            onSubmit={handleCommentSubmit}
+            placeholder="Add a comment…"
+            profiles={profiles}
+          />
+        </section>
+      </div>
+
+      <IssueMetaRail issue={issue} profiles={profiles} />
+    </div>
+  );
+}
+
+/** Right-hand meta column for the issue detail view: status, author, labels,
+ * and dates — keeps the conversation column focused. */
+function IssueMetaRail({
+  issue,
+  profiles,
+}: {
+  issue: ProjectIssue;
+  profiles?: UserProfileLookup;
+}) {
+  const authorProfile = profiles?.[normalizePubkey(issue.author)];
+  const authorLabel = resolveUserLabel({ profiles, pubkey: issue.author });
+  const status = issueStatusVisual(issue.status);
+
+  return (
+    <aside className="space-y-6 border-t border-border/60 p-4 xl:border-l xl:border-t-0">
+      <OverviewRailSection title="Status">
+        <span
+          className={`inline-flex items-center gap-1.5 rounded-md border border-border/60 px-2.5 py-1 text-xs font-medium ${status.className}`}
+        >
+          <status.icon className="h-3.5 w-3.5" />
+          {issue.status}
+        </span>
+      </OverviewRailSection>
+      <OverviewRailSection title="Author">
+        <ProfileIdentityButton
+          align="center"
+          avatarSize="xs"
+          avatarUrl={authorProfile?.avatarUrl ?? null}
+          isAgent={authorProfile?.isAgent === true}
+          label={authorLabel}
+          pubkey={issue.author}
+        />
+      </OverviewRailSection>
+      {issue.labels.length > 0 ? (
+        <OverviewRailSection title="Labels">
+          <div className="flex flex-wrap gap-1.5">
             {issue.labels.map((label) => (
               <span
-                className="rounded-full border border-border/50 px-1.5 py-0.5 text-2xs"
+                className="rounded-full border border-border/60 px-1.5 py-0.5 text-2xs text-muted-foreground"
                 key={label}
               >
                 {label}
               </span>
             ))}
           </div>
-        </div>
-        {issue.content ? (
-          <div className="rounded-lg border border-border/50 bg-background/45 p-3">
-            <Markdown
-              className="text-sm"
-              content={issue.content}
-              interactive={false}
-            />
+        </OverviewRailSection>
+      ) : null}
+      <OverviewRailSection title="Activity">
+        <dl className="space-y-1.5 text-xs text-muted-foreground">
+          <div className="flex items-center justify-between gap-3">
+            <dt>Opened</dt>
+            <dd className="font-medium text-foreground">
+              {compactDate(issue.createdAt)}
+            </dd>
           </div>
-        ) : null}
-      </header>
-
-      <section className="space-y-3 p-4">
-        <h4 className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-          <MessageSquare className="h-3.5 w-3.5" />
-          Discussion
-        </h4>
-        {issue.comments.length > 0 ? (
-          <div className="space-y-3">
-            {issue.comments.map((item) => (
-              <article
-                className="rounded-lg border border-border/50 bg-background/45 p-3"
-                key={item.id}
-              >
-                <div className="mb-2">
-                  <AuthorIdentity
-                    profiles={profiles}
-                    pubkey={item.author}
-                    role={compactDate(item.createdAt)}
-                  />
-                </div>
-                <Markdown
-                  className="text-sm"
-                  content={item.content}
-                  interactive={false}
-                />
-              </article>
-            ))}
+          <div className="flex items-center justify-between gap-3">
+            <dt>Updated</dt>
+            <dd className="font-medium text-foreground">
+              {compactDate(issue.updatedAt)}
+            </dd>
           </div>
-        ) : (
-          <p className="text-sm text-muted-foreground">No comments yet.</p>
-        )}
-        <ForumComposer
-          className="rounded-lg border border-border/50 bg-background/45"
-          disabled={commentMutation.isPending}
-          isSending={commentMutation.isPending}
-          members={members}
-          onSubmit={handleCommentSubmit}
-          placeholder="Add a comment…"
-          profiles={profiles}
-        />
-      </section>
-    </div>
+        </dl>
+      </OverviewRailSection>
+    </aside>
   );
 }
 

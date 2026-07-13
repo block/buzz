@@ -1,10 +1,20 @@
-import type { InboxFilter } from "@/features/home/lib/inbox";
+import {
+  formatInboxFullTimestamp,
+  type InboxContextMessage,
+  type InboxFilter,
+} from "@/features/home/lib/inbox";
 import {
   getChannelIdFromTags,
   getThreadReference,
   isBroadcastReply,
 } from "@/features/messages/lib/threading";
-import type { FeedItem, RelayEvent } from "@/shared/api/types";
+import type { TimelineMessage } from "@/features/messages/types";
+import type {
+  FeedItem,
+  RelayEvent,
+  UserProfileSummary,
+} from "@/shared/api/types";
+import { resolveMentionProps } from "@/shared/lib/resolveMentionNames";
 
 function hasThreadReplyTags(tags: string[][]) {
   const thread = getThreadReference(tags);
@@ -98,4 +108,76 @@ export function getReactionTargetId(tags: string[][]) {
   }
 
   return null;
+}
+
+/**
+ * Maps a formatted timeline message into the inbox detail pane's context
+ * message shape. Extracted from HomeView's `contextMessages` memo so the
+ * field selection is unit-testable: `kind` and `signerPubkey` must survive
+ * this mapping for the config-nudge trust gate
+ * (`getConfigNudgeAuthorPubkey`) to run in `InboxMessageRow` — an earlier
+ * version dropped them, structurally disabling the card on the inbox
+ * surface.
+ */
+export function toInboxContextMessage(
+  message: TimelineMessage,
+  context: {
+    eventById: ReadonlyMap<string, RelayEvent>;
+    fallbackAuthorPubkey: string;
+    profiles: Record<string, UserProfileSummary> | undefined;
+    selectedItemId: string;
+  },
+): InboxContextMessage {
+  const event = context.eventById.get(message.id);
+  const authorPubkey =
+    message.pubkey ?? event?.pubkey ?? context.fallbackAuthorPubkey;
+  const { mentionNames, mentionPubkeysByName } = resolveMentionProps(
+    message.tags ?? [],
+    context.profiles,
+  );
+  return {
+    id: message.id,
+    authorLabel: message.author,
+    authorPubkey,
+    avatarUrl: message.avatarUrl ?? null,
+    content: message.body,
+    createdAt: message.createdAt,
+    depth: event
+      ? getContextMessageDepth(event, context.eventById)
+      : message.depth,
+    fullTimestampLabel: formatInboxFullTimestamp(message.createdAt),
+    isSelected: message.id === context.selectedItemId,
+    kind: message.kind,
+    mentionNames: mentionNames ?? [],
+    mentionPubkeysByName,
+    reactions: message.reactions,
+    signerPubkey: message.signerPubkey,
+    tags: message.tags,
+    timeLabel: message.time,
+  };
+}
+
+/**
+ * Converts an inbox context message back into the `TimelineMessage` shape
+ * the shared message components consume (action bar, reactions, and the
+ * config-nudge gate — `kind` and `signerPubkey` ride through for
+ * `getConfigNudgeAuthorPubkey`).
+ */
+export function toTimelineMessage(
+  message: InboxContextMessage,
+): TimelineMessage {
+  return {
+    id: message.id,
+    author: message.authorLabel,
+    avatarUrl: message.avatarUrl,
+    body: message.content,
+    createdAt: message.createdAt,
+    depth: message.depth,
+    kind: message.kind,
+    pubkey: message.authorPubkey,
+    reactions: message.reactions ?? [],
+    signerPubkey: message.signerPubkey,
+    tags: message.tags,
+    time: message.timeLabel ?? message.fullTimestampLabel,
+  };
 }

@@ -1,4 +1,28 @@
-import type { AcpRuntime } from "@/shared/api/types";
+import type { AcpRuntime, AcpRuntimeCatalogEntry } from "@/shared/api/types";
+
+/**
+ * Select the best default runtime from a catalog, using the same preference
+ * order as the UI picker: buzz-agent first (bundled sidecar), then goose,
+ * then the first available entry, then null when nothing is available.
+ *
+ * Generic so that passing AcpRuntime[] (the already-filtered start-path
+ * list) returns AcpRuntime | null while passing AcpRuntimeCatalogEntry[]
+ * (the full catalog) returns AcpRuntimeCatalogEntry | null.  Both call sites
+ * share one preference-order implementation.
+ */
+export function getDefaultPersonaRuntime<T extends AcpRuntimeCatalogEntry>(
+  runtimes: readonly T[],
+): T | null {
+  const available = runtimes.filter(
+    (runtime) => runtime.availability === "available",
+  );
+  return (
+    available.find((runtime) => runtime.id === "buzz-agent") ??
+    available.find((runtime) => runtime.id === "goose") ??
+    available[0] ??
+    null
+  );
+}
 
 /**
  * Result of resolving a persona's preferred runtime against the set of
@@ -73,7 +97,7 @@ export function resolvePersonaRuntime(
     return {
       runtime: defaultRuntime,
       warnings: [
-        `Persona is configured for runtime "${personaRuntimeId}" but it is not available. Using ${defaultRuntime.label} instead.`,
+        `This agent is configured for runtime "${personaRuntimeId}" but it is not available. Using ${defaultRuntime.label} instead.`,
       ],
       isOverridden: true,
     };
@@ -82,7 +106,7 @@ export function resolvePersonaRuntime(
   return {
     runtime: null,
     warnings: [
-      `Persona is configured for runtime "${personaRuntimeId}" but it is not available, and no other runtimes were found.`,
+      `This agent is configured for runtime "${personaRuntimeId}" but it is not available, and no other runtimes were found.`,
     ],
     isOverridden: false,
   };

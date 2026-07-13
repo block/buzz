@@ -8,6 +8,10 @@ mod observer;
 mod pool;
 mod queue;
 mod relay;
+mod setup_mode;
+mod usage;
+
+pub use usage::TurnUsage;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -1091,6 +1095,19 @@ async fn tokio_main() -> Result<()> {
         .init();
 
     let mut config = Config::from_cli().map_err(|e| anyhow::anyhow!("configuration error: {e}"))?;
+
+    // ── Setup-mode early branch ───────────────────────────────────────────────
+    //
+    // When the desktop determines an agent is not ready (missing credentials,
+    // model, or provider), it spawns buzz-acp with BUZZ_ACP_SETUP_PAYLOAD set.
+    // We enter the minimal setup-listener path and never start the agent pool.
+    if let Some(payload) = setup_mode::SetupPayload::from_env()
+        .map_err(|e| anyhow::anyhow!("setup payload error: {e}"))?
+    {
+        tracing::info!("buzz-acp: setup payload present, entering setup-listener mode");
+        return setup_mode::run_setup_listener(config, payload).await;
+    }
+
     tracing::info!("buzz-acp starting: {}", config.summary());
 
     let observer = config
@@ -1126,6 +1143,7 @@ async fn tokio_main() -> Result<()> {
             &config.agent_command,
             &config.agent_args,
             &config.persona_env_vars,
+            config.has_generated_codex_config,
         )
         .await;
         match spawn_result {
@@ -1402,6 +1420,7 @@ async fn tokio_main() -> Result<()> {
             .as_deref()
             .and_then(|hex| nostr::PublicKey::from_hex(hex).ok()),
         memory_enabled: config.memory_enabled,
+        harness_name: crate::config::normalize_agent_command_identity(&config.agent_command),
     });
 
     if !config.memory_enabled {
@@ -1563,10 +1582,11 @@ async fn tokio_main() -> Result<()> {
                 let cmd = config.agent_command.clone();
                 let args = config.agent_args.clone();
                 let env = config.persona_env_vars.clone();
+                let has_codex = config.has_generated_codex_config;
                 let observer = observer.clone();
                 let guard = RespawnGuard::new(idx, respawn_tx.clone());
                 respawn_tasks.spawn(async move {
-                    let result = spawn_and_init(&cmd, &args, &env, idx, observer).await;
+                    let result = spawn_and_init(&cmd, &args, &env, has_codex, idx, observer).await;
                     guard.send(result);
                 });
             }
@@ -2746,21 +2766,38 @@ fn handle_prompt_result(
         PromptOutcome::Cancelled => "cancelled",
     };
     let agent_index = result.agent.index;
+    // Capture the spawn-time configured model and our PID before the agent is
+    // moved into match arms below. `desired_model` reflects the config/persona
+    // model at spawn time — it does NOT reflect `session/set_model` overrides,
+    // which live in buzz-agent's session state and are what `llm: (model) …`
+    // errors carry. The two can legitimately differ; `configured_model=` is
+    // still valuable for identifying a stale orphan running an old model.
+    let harness_configured_model = result
+        .agent
+        .desired_model
+        .as_deref()
+        .unwrap_or("<none>")
+        .to_string();
+    let harness_pid = std::process::id();
 
     let channel_id = match &result.source {
         PromptSource::Channel(ch) => Some(*ch),
         PromptSource::Heartbeat => None,
     };
-    let emit_turn_error = |error_msg: &str| {
+    let emit_turn_error = |error_msg: &str, error_code: Option<i64>| {
         if let Some(ref observer) = observer {
+            let mut payload = serde_json::json!({
+                "outcome": outcome_label,
+                "error": error_msg,
+            });
+            if let Some(code) = error_code {
+                payload["code"] = serde_json::json!(code);
+            }
             observer.emit(
                 "turn_error",
                 Some(agent_index),
                 &observer::context_for(channel_id, None, None),
-                serde_json::json!({
-                    "outcome": outcome_label,
-                    "error": error_msg,
-                }),
+                payload,
             );
         }
     };
@@ -2780,13 +2817,15 @@ fn handle_prompt_result(
             tracing::warn!(
                 agent = agent_index,
                 outcome = outcome_label,
+                configured_model = %harness_configured_model,
+                pid = harness_pid,
                 "agent_returned — respawning"
             );
             let death_message = match outcome_label {
                 "exited" => "Agent process exited unexpectedly",
                 _ => "Agent session timed out due to inactivity",
             };
-            emit_turn_error(death_message);
+            emit_turn_error(death_message, None);
 
             let index = result.agent.index;
             let slot_history = &mut crash_history[index];
@@ -2824,6 +2863,8 @@ fn handle_prompt_result(
             tracing::debug!(
                 agent = agent_index,
                 outcome = outcome_label,
+                configured_model = %harness_configured_model,
+                pid = harness_pid,
                 "agent_returned (cancelled)"
             );
             pool.return_agent(result.agent);
@@ -2836,14 +2877,20 @@ fn handle_prompt_result(
                     | acp::AcpError::Timeout(_)
                     | acp::AcpError::Protocol(_)
             );
+            let error_code = match &e {
+                acp::AcpError::AgentError { code, .. } => Some(*code),
+                _ => None,
+            };
             if is_transport_error {
                 tracing::warn!(
                     agent = agent_index,
                     outcome = outcome_label,
+                    configured_model = %harness_configured_model,
+                    pid = harness_pid,
                     error = %e,
                     "transport/protocol error — respawning agent"
                 );
-                emit_turn_error(&e.to_string());
+                emit_turn_error(&e.to_string(), error_code);
 
                 let index = result.agent.index;
                 let slot_history = &mut crash_history[index];
@@ -2864,10 +2911,12 @@ fn handle_prompt_result(
                 tracing::warn!(
                     agent = agent_index,
                     outcome = outcome_label,
+                    configured_model = %harness_configured_model,
+                    pid = harness_pid,
                     error = %e,
                     "agent_returned (application error — pipe intact)"
                 );
-                emit_turn_error(&e.to_string());
+                emit_turn_error(&e.to_string(), error_code);
                 pool.return_agent(result.agent);
             }
         }
@@ -2963,12 +3012,13 @@ fn recover_panicked_agent(
     let cmd = config.agent_command.clone();
     let args = config.agent_args.clone();
     let env = config.persona_env_vars.clone();
+    let has_codex = config.has_generated_codex_config;
     let guard = RespawnGuard::new(i, respawn_tx.clone());
     respawn_tasks.spawn(async move {
         if !delay.is_zero() {
             tokio::time::sleep(delay).await;
         }
-        let result = spawn_and_init(&cmd, &args, &env, i, observer).await;
+        let result = spawn_and_init(&cmd, &args, &env, has_codex, i, observer).await;
         guard.send(result);
     });
 }
@@ -3111,6 +3161,7 @@ fn spawn_respawn_task(
     let cmd = config.agent_command.clone();
     let args = config.agent_args.clone();
     let env = config.persona_env_vars.clone();
+    let has_codex = config.has_generated_codex_config;
     let guard = RespawnGuard::new(index, respawn_tx.clone());
     respawn_tasks.spawn(async move {
         // Shutdown old agent (reap child, prevent zombie).
@@ -3122,7 +3173,7 @@ fn spawn_respawn_task(
             tokio::time::sleep(delay).await;
         }
 
-        let result = spawn_and_init(&cmd, &args, &env, index, observer).await;
+        let result = spawn_and_init(&cmd, &args, &env, has_codex, index, observer).await;
         guard.send(result);
     });
 
@@ -3138,10 +3189,11 @@ async fn spawn_and_init(
     command: &str,
     args: &[String],
     extra_env: &[(String, String)],
+    has_generated_codex_config: bool,
     agent_index: usize,
     observer: Option<observer::ObserverHandle>,
 ) -> Result<(AcpClient, u32, bool)> {
-    let mut acp = AcpClient::spawn(command, args, extra_env)
+    let mut acp = AcpClient::spawn(command, args, extra_env, has_generated_codex_config)
         .await
         .map_err(|e| anyhow::anyhow!("failed to spawn agent: {e}"))?;
     acp.set_observer(observer, agent_index);
@@ -3183,8 +3235,8 @@ async fn run_models(args: ModelsArgs) -> Result<()> {
         .to_string();
 
     // Spawn outside the timeout so we always own the child for cleanup.
-    // `models` subcommand doesn't use persona packs — no extra env.
-    let mut client = match AcpClient::spawn(&args.agent_command, &agent_args, &[]).await {
+    // `models` subcommand doesn't use persona packs — no extra env, no codex config.
+    let mut client = match AcpClient::spawn(&args.agent_command, &agent_args, &[], false).await {
         Ok(c) => c,
         Err(e) => {
             eprintln!("error: failed to spawn agent: {e}");
@@ -3809,6 +3861,7 @@ mod build_mcp_servers_tests {
             respond_to_allowlist: std::collections::HashSet::new(),
             allowed_respond_to: vec![],
             persona_env_vars: vec![],
+            has_generated_codex_config: false,
             relay_observer: false,
             agent_owner: None,
             no_base_prompt: false,
@@ -3968,6 +4021,7 @@ mod error_outcome_emission_tests {
             respond_to_allowlist: HashSet::new(),
             allowed_respond_to: vec![],
             persona_env_vars: vec![],
+            has_generated_codex_config: false,
             relay_observer: false,
             agent_owner: None,
             no_base_prompt: false,
@@ -3981,7 +4035,7 @@ mod error_outcome_emission_tests {
     async fn dummy_agent(index: usize) -> OwnedAgent {
         OwnedAgent {
             index,
-            acp: AcpClient::spawn("cat", &[], &[])
+            acp: AcpClient::spawn("cat", &[], &[], false)
                 .await
                 .expect("spawn cat as inert agent"),
             state: Default::default(),

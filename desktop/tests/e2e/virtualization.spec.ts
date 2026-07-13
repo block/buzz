@@ -176,133 +176,627 @@ test.describe("list virtualization", () => {
     await expect(headers).toHaveCount(2);
   });
 
-  test("07 — load-older prepend holds the anchored row without jitter or reconcile spin", async ({
+  test("08 — cascading older pages never snap the viewport toward newest", async ({
     page,
   }) => {
-    // Install once: addInitScript re-runs on every navigation in this page, so
-    // each page.goto in the loop below re-applies the mock bridge.
-    await installMockBridge(page);
+    test.setTimeout(120_000);
+    // A real CDP wheel burst is required here: assigning scrollTop does not
+    // reproduce Chromium/WebKit's native wheel → scroll callback ordering. The
+    // old boundary rollback moved the viewport back down before the fetch
+    // committed; keep that pre-prepend reversal below the same 5px frame bar.
+    // A 300ms relay delay leaves the input boundary and prepend commit as two
+    // distinct phases so this assertion cannot accidentally measure only the
+    // later anchor correction.
+    await installMockBridge(page, {
+      deepHistoryMessageCount: 1_800,
+      channelWindowDelayMs: 300,
+    });
+    await page.goto("/#/channels/feedf00d-0000-4000-8000-000000000007");
+    const timeline = page.getByTestId("message-timeline");
+    await expect(timeline.locator("[data-message-id]").first()).toBeVisible();
+    // Initial bottom positioning can momentarily cross the start threshold. Let
+    // any resulting page transaction settle before driving explicit crossings.
+    await page.waitForTimeout(1_000);
 
-    // The deep-history channel seeds 600 messages; the initial load windows to
-    // the newest 200, leaving 400 older behind the until cursor — enough that
-    // every run lands a genuine prepend. Reads the first row at/below the
-    // viewport top and returns scrollTop, scrollHeight, and that row's on-screen
-    // VIEWPORT position in ONE settled snapshot — the position the single-writer
-    // restore must hold steady across the prepend.
-    //
-    // Waits inside the browser for a measurement-settled frame before reading.
-    // The virtualizer re-windows after a scroll: for a few rAFs the mounted rows
-    // can all sit above the viewport top (their absolute offsets lag the new
-    // scrollTop) until the library mounts rows at the current position. That is
-    // a measurement transient, NOT the scrollTop race — scrollTop is already
-    // correct on those frames. Reading on such a frame would throw "no row";
-    // polling for a settled frame removes the flake without touching any
-    // race-detection threshold below (scrollTop value + viewportPos stability),
-    // and snapshots all three fields together so they can't skew across reads.
-    const sampleAnchor = (timeline: Locator) =>
-      timeline.evaluate(async (scroller) => {
+    const sampleVisibleAnchor = (expectedId?: string) =>
+      timeline.evaluate(async (scroller, anchorId) => {
         const s = scroller as HTMLElement;
         for (let frame = 0; frame < 60; frame += 1) {
           const scrollerTop = s.getBoundingClientRect().top;
-          const row = Array.from(
+          const rows = Array.from(
             s.querySelectorAll<HTMLElement>("[data-message-id]"),
-          ).find((r) => r.getBoundingClientRect().top - scrollerTop >= 0);
+          );
+          const row = anchorId
+            ? rows.find((candidate) => candidate.dataset.messageId === anchorId)
+            : rows.find(
+                (candidate) =>
+                  candidate.getBoundingClientRect().top >= scrollerTop,
+              );
           if (row) {
             return {
-              viewportPos: row.getBoundingClientRect().top - scrollerTop,
-              scrollTop: s.scrollTop,
+              id: row.dataset.messageId ?? "",
+              top: row.getBoundingClientRect().top - scrollerTop,
               scrollHeight: s.scrollHeight,
+              bottomDistance: s.scrollHeight - s.clientHeight - s.scrollTop,
             };
           }
           await new Promise((resolve) => requestAnimationFrame(resolve));
         }
-        throw new Error("no anchor row mounted after 60 frames");
-      });
+        throw new Error(
+          `anchor row ${anchorId ?? "at viewport top"} not mounted`,
+        );
+      }, expectedId);
 
-    // Determinism is the bar, not pass-once. The original defect was a RACE: a
-    // second restore loop (the resize-observer restoring to the pre-fetch
-    // scrollTop of 0, fired by the load-older spinner's clientHeight shift)
-    // fought the anchor restore frame-by-frame; last writer won, so the anchor
-    // held only ~2 of 3 runs and on its losing runs scrollTop collapsed to ~0
-    // (view stuck at the top, anchor lost). A single prepend can go green on a
-    // lucky scheduling order, so this drives the prepend on SIX fresh page loads
-    // and asserts the anchor holds on every one — a flaky-pass fails the run.
-    // Fresh navigation each iteration resets the virtualizer's measurement state,
-    // matching the run-to-run conditions under which the race surfaced.
-    for (let run = 0; run < 6; run += 1) {
-      // Force a full document reload each iteration. Navigating straight to the
-      // same hash route is a same-document hash change, not a reload, so the
-      // virtualizer + paginated history would carry over and later runs would
-      // exhaust the older pages — defeating the per-run fresh-prepend premise.
-      await page.goto("about:blank");
-      await page.goto("/#/channels/feedf00d-0000-4000-8000-000000000007");
-      const timeline = page.getByTestId("message-timeline");
-      await expect(timeline).toBeVisible();
-      await expect(
-        page.locator('[data-message-id^="mock-deep-history-"]').first(),
-      ).toBeVisible();
-
-      // Scroll up to mount mid-history rows while staying clear of the load-older
-      // sentinel zone (trips within 200px of the top), then let the windowed rows
-      // measure off their 80px estimate so the pre-prepend anchor reading is
-      // stable. The single trigger is the deliberate scrollTop = 0 below.
-      await timeline.evaluate((el) => {
-        el.scrollTop = 4000;
+    // Load fifteen consecutive server pages in one mounted virtualizer. This
+    // is the production shape that exposed the intermittent end-cache snap:
+    // variable-height rows and repeated front insertions exercise the full
+    // index-shift path rather than allowing a single lucky pass.
+    for (let pageIndex = 0; pageIndex < 15; pageIndex += 1) {
+      // Leave the threshold first so Virtua emits a fresh start-edge crossing;
+      // initial positioning can briefly report offset 0 while mounting.
+      await timeline.evaluate((element) => {
+        element.scrollTop = 4000;
       });
       await page.waitForTimeout(300);
-      await timeline.evaluate((el) => {
-        el.scrollTop = 4000;
+      await timeline.evaluate((element) => {
+        element.scrollTop = 180;
       });
       await page.waitForTimeout(150);
-      const before = await sampleAnchor(timeline);
-      expect(before.scrollTop).toBeGreaterThan(200);
-
-      // Trigger exactly one prepend. Scrolling to 150 trips the load-older
-      // sentinel (its rootMargin reaches 200px past the top) with
-      // previousScrollTopRef pinned near the top — the condition under which the
-      // resize-observer's competing restore collapsed the anchor pre-fix. After
-      // the single fetchOlder lands, the anchor restore carries scrollTop deep
-      // into the content, clear of the 200px sentinel zone, so the observer does
-      // NOT re-fire: one clean prepend, not the re-trigger storm that scrollTop
-      // 0 produces (0 keeps the sentinel tripped across every paged window down
-      // to the small exhaustion-tail page, which legitimately lands the top row
-      // near the top — masking the hold signal).
-      await timeline.evaluate((el) => {
-        el.scrollTop = 150;
+      const before = await sampleVisibleAnchor();
+      const wheelTracePromise = timeline.evaluate(async (scroller) => {
+        const s = scroller as HTMLElement;
+        let previousScrollTop = s.scrollTop;
+        let maxBoundaryRollback = 0;
+        let minScrollTop = s.scrollTop;
+        const deadline = performance.now() + 120;
+        while (performance.now() < deadline) {
+          maxBoundaryRollback = Math.max(
+            maxBoundaryRollback,
+            s.scrollTop - previousScrollTop,
+          );
+          previousScrollTop = s.scrollTop;
+          minScrollTop = Math.min(minScrollTop, s.scrollTop);
+          await new Promise((resolve) => requestAnimationFrame(resolve));
+        }
+        return { maxBoundaryRollback, minScrollTop };
       });
+      const box = await timeline.boundingBox();
+      if (!box) throw new Error("timeline has no bounding box");
+      await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+      for (const deltaY of [-60, -30, -20, -15]) {
+        await page.mouse.wheel(0, deltaY);
+        await page.waitForTimeout(12);
+      }
+      const wheelTrace = await wheelTracePromise;
+      expect(wheelTrace.minScrollTop).toBeLessThanOrEqual(350);
+      expect(wheelTrace.maxBoundaryRollback).toBeLessThan(5);
+      // Linux Chromium delivers CDP wheel input with more latency than macOS,
+      // so the burst's final delta can land AFTER the anchor baseline sample
+      // below. maxDrift then reports the reader's own last wheel event as
+      // anchor drift (measured exactly 15 = the -15 delta; changing the delta
+      // to -17 made the failure read 17). Gate the baseline on input settle:
+      // two consecutive frames with identical scrollTop. This tightens the
+      // assertion rather than diluting it — the baseline becomes honest and
+      // genuine post-prepend drift still reads as drift.
+      await timeline.evaluate(async (element) => {
+        let prior = element.scrollTop;
+        for (let frame = 0; frame < 30; frame += 1) {
+          await new Promise((resolve) => requestAnimationFrame(resolve));
+          if (element.scrollTop === prior) break;
+          prior = element.scrollTop;
+        }
+      });
+      const committedAnchor = await sampleVisibleAnchor(before.id);
+      const motion = await timeline.evaluate(
+        async (scroller, { anchorId, anchorTop, oldHeight }) => {
+          const s = scroller as HTMLElement;
+          let maxDrift = 0;
+          let sawPrepend = false;
+          let sawAnchorAfterPrepend = false;
+          let finalDrift = 0;
+          let stableFrames = 0;
+          for (let frame = 0; frame < 180; frame += 1) {
+            const row = Array.from(
+              s.querySelectorAll<HTMLElement>("[data-message-id]"),
+            ).find((candidate) => candidate.dataset.messageId === anchorId);
+            if (s.scrollHeight > oldHeight + 800 && !sawPrepend) {
+              sawPrepend = true;
+            }
+            if (row) {
+              const top =
+                row.getBoundingClientRect().top - s.getBoundingClientRect().top;
+              const drift = Math.abs(top - anchorTop);
+              if (sawPrepend) {
+                maxDrift = Math.max(maxDrift, drift);
+                sawAnchorAfterPrepend = true;
+                stableFrames =
+                  Math.abs(drift - finalDrift) < 0.5 ? stableFrames + 1 : 0;
+                finalDrift = drift;
+              }
+            }
+            if (sawAnchorAfterPrepend && stableFrames >= 8) break;
+            await new Promise((resolve) => requestAnimationFrame(resolve));
+          }
+          return { maxDrift, sawPrepend };
+        },
+        {
+          anchorId: committedAnchor.id,
+          anchorTop: committedAnchor.top,
+          oldHeight: before.scrollHeight,
+        },
+      );
+      expect(motion.sawPrepend).toBe(true);
+      expect(motion.maxDrift).toBeLessThan(5);
 
-      // Anchor-hold gate (the race signal): poll until the restore has carried
-      // scrollTop deep into the content — past where it sat before the prepend.
-      // Pre-fix, the competing resize-observer restore (firing on the spinner's
-      // clientHeight shift, restoring to previousScrollTopRef ~150) won often
-      // enough that scrollTop stayed pinned near the top; this poll would then
-      // time out, failing the run. scrollHeight grows several frames BEFORE the
-      // restore moves scrollTop, so a scrollHeight gate would read mid-cycle
-      // near the top — the race lives in scrollTop, so the gate watches it.
       await expect
-        .poll(async () => (await sampleAnchor(timeline)).scrollTop, {
-          timeout: 10_000,
-        })
-        .toBeGreaterThan(before.scrollTop);
+        .poll(
+          async () => timeline.evaluate((element) => element.scrollHeight),
+          {
+            timeout: 10_000,
+          },
+        )
+        .toBeGreaterThan(before.scrollHeight + 800);
 
-      // One settled snapshot for the remaining checks so scrollHeight and
-      // viewportPos come from the same frame as the held scrollTop:
-      //   (a) the scroller grew by the prepended rows' height (genuine prepend),
-      //   (b) the first-visible row sits where it did before the prepend.
-      const after = await sampleAnchor(timeline);
-      expect(after.scrollHeight).toBeGreaterThan(before.scrollHeight + 800);
-      expect(Math.abs(after.viewportPos - before.viewportPos)).toBeLessThan(
-        120,
+      // A snap to newest leaves this near zero. Keep a full viewport of history
+      // below the reader after every prepend, rather than checking only the
+      // final page and missing a transient cascade failure.
+      const bottomDistance = await timeline.evaluate(
+        (element) =>
+          element.scrollHeight - element.clientHeight - element.scrollTop,
+      );
+      expect(bottomDistance).toBeGreaterThan(
+        await timeline.evaluate((element) => element.clientHeight),
       );
 
-      // Reconcile terminates: two equal scrollTop reads 600ms apart prove the
-      // rAF loop stopped. Under the double-writer bug the library re-scheduled
-      // one rAF per frame for the full 5s MAX_RECONCILE_MS valve — still churning
-      // 600ms apart.
-      const settled1 = await timeline.evaluate((el) => el.scrollTop);
-      await page.waitForTimeout(600);
-      const settled2 = await timeline.evaluate((el) => el.scrollTop);
-      expect(Math.abs(settled1 - settled2)).toBeLessThan(2);
+      // Leave the boundary with real downward wheel input while this prepend's
+      // three-second semantic-anchor watcher is still alive. The watcher belongs
+      // only to the completed prepend: it must not reinterpret this deliberate
+      // reader movement as row drift and pull the viewport back toward its stale
+      // baseline before the next upward load.
+      const exitTracePromise = timeline.evaluate(async (scroller) => {
+        const s = scroller as HTMLElement;
+        const startScrollTop = s.scrollTop;
+        let previousScrollTop = startScrollTop;
+        let maxForwardTravel = 0;
+        let maxRollback = 0;
+        const deadline = performance.now() + 400;
+        while (performance.now() < deadline) {
+          const travel = s.scrollTop - startScrollTop;
+          maxForwardTravel = Math.max(maxForwardTravel, travel);
+          maxRollback = Math.max(maxRollback, previousScrollTop - s.scrollTop);
+          previousScrollTop = s.scrollTop;
+          await new Promise((resolve) => requestAnimationFrame(resolve));
+        }
+        return { maxForwardTravel, maxRollback };
+      });
+      const exitBox = await timeline.boundingBox();
+      if (!exitBox) throw new Error("timeline has no bounding box");
+      await page.mouse.move(
+        exitBox.x + exitBox.width / 2,
+        exitBox.y + exitBox.height / 2,
+      );
+      for (const deltaY of [120, 100, 80]) {
+        await page.mouse.wheel(0, deltaY);
+        await page.waitForTimeout(12);
+      }
+      const exitTrace = await exitTracePromise;
+      expect(exitTrace.maxForwardTravel).toBeGreaterThan(200);
+      expect(exitTrace.maxRollback).toBeLessThan(5);
+
+      // Loading more history must not return keepMounted to its old linear
+      // growth. Virtua still retains every measured size for spacer geometry;
+      // only the live message-row DOM stays bounded around the reader and tail.
+      const mountedMessageCount = await timeline
+        .locator("[data-message-id]")
+        .count();
+      expect(mountedMessageCount).toBeLessThan(400);
     }
   });
+
+  test("09 — older-page render commit waits for scroller rest under continued wheel input", async ({
+    page,
+  }) => {
+    test.setTimeout(60_000);
+    // Production shape for the WKWebView dropped-write hazard: heavy
+    // variable-height rows, a slow older-page fetch, and wheel input that
+    // KEEPS ARRIVING through fetch resolution. Every prepend-compensation
+    // mechanism is a scrollTop write, and macOS WebKit can drop those writes
+    // while trackpad momentum owns the offset — so the contract under test is
+    // that the fetched page's RENDER COMMIT (the scrollHeight jump) is
+    // deferred until input quiesces, and that the at-rest commit then holds
+    // the anchored row. Chromium cannot reproduce the dropped write itself;
+    // it CAN prove the commit-at-rest scheduling that makes it unreachable.
+    await installMockBridge(page, {
+      deepHistoryMessageCount: 1_800,
+      channelWindowDelayMs: 300,
+    });
+    await page.goto("/#/channels/feedf00d-0000-4000-8000-000000000007");
+    const timeline = page.getByTestId("message-timeline");
+    await expect(timeline.locator("[data-message-id]").first()).toBeVisible();
+    await page.waitForTimeout(1_000);
+
+    // Mount mid-history rows clear of the load-older sentinel, then trip it.
+    await timeline.evaluate((element) => {
+      element.scrollTop = 4000;
+    });
+    await page.waitForTimeout(300);
+
+    // In-page observer: tracks the last wheel-input timestamp, captures the
+    // first at-rest anchor after input stops, and records when the prepend
+    // commit (scrollHeight jump) lands relative to the last input.
+    const tracePromise = timeline.evaluate(async (scroller) => {
+      const s = scroller as HTMLElement;
+      const baseHeight = s.scrollHeight;
+      let lastInputTs = 0;
+      let sawInput = false;
+      let restAnchor: { id: string; top: number } | null = null;
+      const onWheel = () => {
+        lastInputTs = performance.now();
+        sawInput = true;
+        // Input after a lull invalidates any anchor captured during it —
+        // the commit must be measured against the FINAL at-rest position.
+        restAnchor = null;
+      };
+      s.addEventListener("wheel", onWheel, { passive: true });
+      let commit: { ts: number; gapSinceInput: number } | null = null;
+      let sawSpinnerDuringHold = false;
+      let anchorDriftAfterCommit: number | null = null;
+      const deadline = performance.now() + 8_000;
+      while (performance.now() < deadline) {
+        const now = performance.now();
+        if (commit === null) {
+          if (
+            document.querySelector(
+              '[data-testid="message-timeline-fetching-older"]',
+            ) !== null
+          ) {
+            sawSpinnerDuringHold = true;
+          }
+          // First frame at rest (input quiet for 60ms — shorter than the
+          // gate's own window, so this reading always precedes admission):
+          // capture the row the at-rest commit must hold.
+          if (restAnchor === null && sawInput && now - lastInputTs >= 60) {
+            const scrollerTop = s.getBoundingClientRect().top;
+            const row = Array.from(
+              s.querySelectorAll<HTMLElement>("[data-message-id]"),
+            ).find(
+              (candidate) =>
+                candidate.getBoundingClientRect().top - scrollerTop >= 0,
+            );
+            if (row?.dataset.messageId) {
+              restAnchor = {
+                id: row.dataset.messageId,
+                top: row.getBoundingClientRect().top - scrollerTop,
+              };
+            }
+          }
+          if (s.scrollHeight > baseHeight + 800) {
+            commit = { ts: now, gapSinceInput: now - lastInputTs };
+          }
+        } else if (restAnchor !== null) {
+          const anchor = restAnchor;
+          const scrollerTop = s.getBoundingClientRect().top;
+          const row = Array.from(
+            s.querySelectorAll<HTMLElement>("[data-message-id]"),
+          ).find((candidate) => candidate.dataset.messageId === anchor.id);
+          if (row) {
+            anchorDriftAfterCommit = Math.max(
+              anchorDriftAfterCommit ?? 0,
+              Math.abs(
+                row.getBoundingClientRect().top - scrollerTop - anchor.top,
+              ),
+            );
+          }
+          // Watch a settle window after the commit, then finish.
+          if (now - commit.ts > 700) break;
+        }
+        await new Promise((resolve) => requestAnimationFrame(resolve));
+      }
+      s.removeEventListener("wheel", onWheel);
+      return {
+        commit,
+        capturedRestAnchor: restAnchor !== null,
+        sawSpinnerDuringHold,
+        anchorDriftAfterCommit,
+      };
+    });
+
+    // Trip the boundary, then keep real wheel input flowing DOWN (away from
+    // the boundary) through and well past the 300ms fetch resolution — the
+    // mid-gesture window in which the ungated build commits the page.
+    await timeline.evaluate((element) => {
+      element.scrollTop = 150;
+    });
+    const box = await timeline.boundingBox();
+    if (!box) throw new Error("timeline has no bounding box");
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+    for (let burst = 0; burst < 30; burst += 1) {
+      await page.mouse.wheel(0, 30);
+      await page.waitForTimeout(40);
+    }
+
+    const trace = await tracePromise;
+    // The page must eventually commit — the gate defers, never strands.
+    expect(trace.commit).not.toBeNull();
+    // The commit landed only after input quiesced. On the ungated build the
+    // deferred snapshot flushes as soon as the fetch resolves — between wheel
+    // bursts, a gap far below the quiet window — so this line is the red/green
+    // signal for the settle gate.
+    expect(trace.commit?.gapSinceInput ?? 0).toBeGreaterThanOrEqual(80);
+    // The reader saw the fetching affordance while the page was held.
+    expect(trace.sawSpinnerDuringHold).toBe(true);
+    // The at-rest commit held the anchored row (writes land at rest).
+    expect(trace.capturedRestAnchor).toBe(true);
+    expect(trace.anchorDriftAfterCommit ?? 0).toBeLessThan(5);
+  });
+});
+
+test("thread-heavy history mounts every loaded row", async ({ page }) => {
+  await installMockBridge(page);
+  await page.goto("/");
+  await page.waitForFunction(
+    () => typeof window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__ === "function",
+  );
+
+  // Seed summaries on 120 loaded roots. Every loaded row should be realized
+  // immediately so first-pass scrolling never encounters Virtua's hidden
+  // pre-measurement state.
+  await page.evaluate(() => {
+    for (let index = 480; index < 600; index += 1) {
+      window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+        channelName: "deep-history",
+        content: `summary-only reply ${index}`,
+        parentEventId: `mock-deep-history-${index}`,
+      });
+    }
+  });
+
+  await page.getByTestId("channel-deep-history").click();
+  const timeline = page.getByTestId("message-timeline");
+  await expect(timeline.locator("[data-message-id]").first()).toBeVisible();
+
+  // Emit after opening so the live summary path updates every loaded root,
+  // independent of the relay page's summary cap.
+  await page.evaluate(() => {
+    for (let index = 480; index < 600; index += 1) {
+      window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+        channelName: "deep-history",
+        content: `live summary-only reply ${index}`,
+        parentEventId: `mock-deep-history-${index}`,
+      });
+    }
+  });
+  await page.waitForTimeout(500);
+
+  await page.waitForTimeout(300);
+
+  const loadedRows = timeline.locator("[data-message-id]");
+  // The mock channel's current loaded window contains 50 roots; all of them
+  // must already exist and be painted before the first scroll gesture.
+  await expect(loadedRows).toHaveCount(50);
+  expect(
+    await loadedRows.evaluateAll((rows) =>
+      rows.every((row) => getComputedStyle(row).visibility === "visible"),
+    ),
+  ).toBe(true);
+});
+
+test("channel switches settle the last row above the composer", async ({
+  page,
+}) => {
+  await installMockBridge(page);
+  await page.goto("/");
+  await page.waitForFunction(
+    () => typeof window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__ === "function",
+  );
+
+  await page.evaluate(() => {
+    for (const [channelName, prefix] of [
+      ["general", "switch-general"],
+      ["engineering", "switch-engineering"],
+    ] as const) {
+      for (let index = 0; index < 60; index += 1) {
+        window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+          channelName,
+          content: `${prefix}-${index}`,
+          createdAt: 1_700_000_000 + index,
+        });
+      }
+    }
+  });
+
+  for (const channelName of ["general", "engineering", "general"]) {
+    await page.getByTestId(`channel-${channelName}`).click();
+    await expect(page.getByTestId("chat-title")).toHaveText(channelName);
+    const timeline = page.getByTestId("message-timeline");
+    const composer = page.getByTestId("channel-composer-overlay");
+    await expect
+      .poll(async () =>
+        timeline.evaluate(
+          (element, composerElement) => {
+            const rows = Array.from(
+              element.querySelectorAll<HTMLElement>("[data-message-id]"),
+            );
+            const lastRow = rows.at(-1);
+            if (!lastRow) return Number.POSITIVE_INFINITY;
+            return (
+              lastRow.getBoundingClientRect().bottom -
+              (composerElement as HTMLElement).getBoundingClientRect().top
+            );
+          },
+          await composer.elementHandle(),
+        ),
+      )
+      .toBeLessThanOrEqual(1);
+  }
+});
+
+test("offscreen rich-row resize preserves the viewport-center anchor", async ({
+  page,
+}) => {
+  await installMockBridge(page);
+  await page.goto("/");
+  await page.waitForFunction(
+    () => typeof window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__ === "function",
+  );
+  await page.evaluate(() => {
+    for (let index = 0; index < 240; index += 1) {
+      window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+        channelName: "general",
+        content: [
+          `rich resize row ${index}`,
+          "long wrapped text ".repeat((index % 8) + 1),
+        ].join("\n"),
+        createdAt: 1_700_700_000 + index,
+      });
+    }
+  });
+
+  await page.getByTestId("channel-general").click();
+  const timeline = page.getByTestId("message-timeline");
+  await expect(timeline.locator("[data-message-id]").first()).toBeVisible();
+
+  const result = await timeline.evaluate(async (element) => {
+    const scroller = element as HTMLDivElement;
+    scroller.scrollTop = scroller.scrollHeight / 2;
+    scroller.dispatchEvent(new Event("scroll", { bubbles: true }));
+    await new Promise((resolve) => setTimeout(resolve, 250));
+
+    const scrollerRect = scroller.getBoundingClientRect();
+    const rows = Array.from(
+      scroller.querySelectorAll<HTMLElement>("[data-message-id]"),
+    );
+    const visibleRows = rows.filter((row) => {
+      const rect = row.getBoundingClientRect();
+      return rect.bottom > scrollerRect.top && rect.top < scrollerRect.bottom;
+    });
+    const viewportCenter = scrollerRect.top + scroller.clientHeight / 2;
+    const anchor = visibleRows.reduce<HTMLElement | null>((nearest, row) => {
+      if (!nearest) return row;
+      const rowRect = row.getBoundingClientRect();
+      const nearestRect = nearest.getBoundingClientRect();
+      const rowDistance = Math.abs(
+        (rowRect.top + rowRect.bottom) / 2 - viewportCenter,
+      );
+      const nearestDistance = Math.abs(
+        (nearestRect.top + nearestRect.bottom) / 2 - viewportCenter,
+      );
+      return rowDistance < nearestDistance ? row : nearest;
+    }, null);
+    if (!anchor) throw new Error("no visible center anchor");
+    const rowAbove = rows
+      .filter((row) => row.getBoundingClientRect().bottom <= scrollerRect.top)
+      .at(-1);
+    if (!rowAbove) throw new Error("no mounted offscreen rich row above");
+
+    const anchorRect = anchor.getBoundingClientRect();
+    const anchorCenterOffset =
+      (anchorRect.top + anchorRect.bottom) / 2 - viewportCenter;
+    const scrollTop = scroller.scrollTop;
+    rowAbove.style.minHeight = `${rowAbove.getBoundingClientRect().height + 240}px`;
+    await new Promise((resolve) => setTimeout(resolve, 500));
+
+    const nextScrollerRect = scroller.getBoundingClientRect();
+    const nextAnchorRect = anchor.getBoundingClientRect();
+    const nextViewportCenter = nextScrollerRect.top + scroller.clientHeight / 2;
+    return {
+      anchorDrift:
+        (nextAnchorRect.top + nextAnchorRect.bottom) / 2 -
+        nextViewportCenter -
+        anchorCenterOffset,
+      scrollCorrection: scroller.scrollTop - scrollTop,
+    };
+  });
+
+  expect(Math.abs(result.anchorDrift)).toBeLessThanOrEqual(2);
+  expect(result.scrollCorrection).toBeGreaterThanOrEqual(238);
+});
+
+test("live tail arrivals keep a bottom-pinned virtual timeline settled", async ({
+  page,
+}) => {
+  await installMockBridge(page);
+  await page.goto("/");
+  await page.waitForFunction(
+    () => typeof window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__ === "function",
+  );
+
+  await page.evaluate(() => {
+    for (let index = 0; index < 60; index += 1) {
+      window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+        channelName: "general",
+        content: `live-follow seed ${index}\nsecond line ${index}`,
+        createdAt: 1_700_000_000 + index,
+      });
+    }
+  });
+  await page.getByTestId("channel-general").click();
+  const timeline = page.getByTestId("message-timeline");
+  await expect(timeline).toContainText("live-follow seed 59");
+  await expect
+    .poll(() =>
+      timeline.evaluate(
+        (element) =>
+          element.scrollHeight - element.clientHeight - element.scrollTop,
+      ),
+    )
+    .toBeLessThanOrEqual(1);
+
+  await page.evaluate(() => {
+    window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+      channelName: "general",
+      content:
+        "remote live-follow sentinel\nline two\nline three\nline four\nline five",
+      createdAt: 1_800_000_000,
+    });
+  });
+
+  await expect(page.getByText("remote live-follow sentinel")).toBeVisible();
+  await expect
+    .poll(() =>
+      timeline.evaluate(
+        (element) =>
+          element.scrollHeight - element.clientHeight - element.scrollTop,
+      ),
+    )
+    .toBeLessThanOrEqual(1);
+});
+
+test("live tail arrivals stay buffered while reading and release on jump", async ({
+  page,
+}) => {
+  await installMockBridge(page);
+  await page.goto("/");
+  await page.waitForFunction(
+    () => typeof window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__ === "function",
+  );
+  await page.getByTestId("channel-deep-history").click();
+
+  const timeline = page.getByTestId("message-timeline");
+  await expect(timeline.locator("[data-message-id]").first()).toBeVisible();
+  await timeline.evaluate((element) => {
+    element.scrollTop = Math.max(500, element.scrollHeight / 2);
+    element.dispatchEvent(new Event("scroll", { bubbles: true }));
+  });
+  await expect(page.getByTestId("message-scroll-to-latest")).toBeVisible();
+  const frozenHeight = await timeline.evaluate(
+    (element) => element.scrollHeight,
+  );
+
+  await page.evaluate(() => {
+    window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+      channelName: "deep-history",
+      content: "buffered live tail sentinel",
+      createdAt: 1_900_000_000,
+    });
+  });
+
+  await expect(page.getByText("buffered live tail sentinel")).toHaveCount(0);
+  await expect(page.getByTestId("message-scroll-to-latest")).toContainText("1");
+  expect(await timeline.evaluate((element) => element.scrollHeight)).toBe(
+    frozenHeight,
+  );
+
+  await page.getByTestId("message-scroll-to-latest").click();
+  await expect(page.getByText("buffered live tail sentinel")).toBeVisible();
 });

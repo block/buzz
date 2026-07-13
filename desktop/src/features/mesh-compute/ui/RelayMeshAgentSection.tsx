@@ -11,14 +11,13 @@ import {
 import { useMeshAvailability } from "../hooks/useMeshAvailability";
 
 /**
- * The "Run on relay mesh" entry inside CreateAgentDialog. When enabled, the
- * user picks a model from `mesh_availability().models`, the dialog's runtime
- * + env-var state is fanned out from `mesh_agent_preset()`, and the existing
- * runtime/backend pickers are hidden in the parent.
+ * The "Run on relay mesh" entry in the agent create flow (WhereToRunSection).
+ * When enabled, the user picks a model from `mesh_availability().models` and
+ * the instance preset is fanned out from `mesh_agent_preset()`.
  *
- * Lives outside `CreateAgentDialog` so the dialog file's diff stays narrow —
- * the dialog only renders this and reacts to its `onPatch` and `useMesh`
- * callbacks. The dialog is the single source of truth for state; this
+ * Lives outside the dialog so its diff stays narrow — the parent only renders
+ * this and reacts to its `onPatch` and `useMesh`
+ * callbacks. The parent is the single source of truth for state; this
  * component is purely a controller for the mesh-specific subset.
  */
 export function RelayMeshAgentSection({
@@ -43,7 +42,6 @@ export function RelayMeshAgentSection({
     envVars: Record<string, string>;
   };
   useMesh: boolean;
-  modelId: string; // Parent-owned selected model id; retained for API symmetry with onModelIdChange.
   targetEndpointAddr: string;
   onUseMeshChange: (next: boolean) => void;
   /**
@@ -65,11 +63,18 @@ export function RelayMeshAgentSection({
   const disabledReason =
     availability == null
       ? (error ?? "Checking relay mesh availability…")
-      : (availability.reason ?? "Relay compute isn't available right now.");
+      : (availability.reason ?? "The relay mesh isn't available right now.");
 
   // Compute overrides from the currently-selected model's preset, *not* from
   // an arbitrary one — the warning must reflect what'll actually happen.
   const [overrides, setOverrides] = React.useState<string[]>([]);
+
+  // Null means the first availability fetch hasn't succeeded — either still
+  // loading, or the backend was built without mesh-llm and never will resolve.
+  // Hide the card entirely rather than showing a permanently disabled toggle.
+  if (availability === null) {
+    return null;
+  }
 
   const targets = availability?.serveTargets ?? [];
   const selectedValue = targetEndpointAddr;
@@ -88,7 +93,7 @@ export function RelayMeshAgentSection({
     if (!target) {
       onTargetChange(null);
       onModelIdChange("", null);
-      setPresetError("Selected relay mesh target is no longer available.");
+      setPresetError("The selected relay mesh target is no longer available.");
       return;
     }
     setPresetError(null);
@@ -168,7 +173,8 @@ export function RelayMeshAgentSection({
             <p className="flex items-start gap-1.5 rounded bg-warning-bg/60 px-2 py-1.5 text-xs text-warning">
               <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
               <span>
-                Using Relay mesh overrides this agent's {overrides.join(", ")}.
+                Using the relay mesh overrides this agent's{" "}
+                {overrides.join(", ")}.
               </span>
             </p>
           ) : null}

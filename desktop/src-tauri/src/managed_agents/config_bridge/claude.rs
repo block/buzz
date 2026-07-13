@@ -65,12 +65,13 @@ mod tests {
     /// logic as read_config_file but without touching the filesystem.
     fn parse_settings(json: &str) -> RuntimeFileConfig {
         let val: serde_json::Value = serde_json::from_str(json).unwrap();
-        let mut cfg = RuntimeFileConfig::default();
-        cfg.model = json_string(&val, "model");
-        cfg.thinking_effort = json_string(&val, "effortLevel");
         let skip = &["model", "effortLevel"];
-        cfg.extra = super::super::schema_walker::extract_config_fields(&val, skip);
-        cfg
+        RuntimeFileConfig {
+            model: json_string(&val, "model"),
+            thinking_effort: json_string(&val, "effortLevel"),
+            extra: super::super::schema_walker::extract_config_fields(&val, skip),
+            ..Default::default()
+        }
     }
 
     #[test]

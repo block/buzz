@@ -2,7 +2,7 @@
 
 [package]
 name = "buzz-desktop"
-version = "0.3.42"
+version = "0.4.1"
 description = "Buzz desktop app"
 authors = ["you"]
 edition = "2021"
@@ -45,6 +45,7 @@ notify-rust = "4"
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSHapticFeedback"] }
 keyring = { version = "3.6.3", default-features = false, features = ["apple-native", "vendored"], optional = true }
 security-framework = { version = "3.7.0", features = ["OSX_10_15"] }
+window-vibrancy = "0.6"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Security", "Win32_Storage_FileSystem", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_Foundation"] }
@@ -54,7 +55,7 @@ keyring = { version = "3.6.3", default-features = false, features = ["windows-na
 atomic-write-file = "0.3"
 anyhow = "1"
 dirs = "6"
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["macos-private-api"] }
 tauri-plugin-deep-link = "2"
 tauri-plugin-opener = "2"
 tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
@@ -95,6 +96,8 @@ tauri-plugin-global-shortcut = "2"
 tauri-plugin-notification = "2.3.3"
 uuid = { version = "1", features = ["v4"] }
 png = "0.18"
+arboard = "3"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif"] }
 zip = "8"
 sherpa-onnx = "1.12"
 regex = "1"

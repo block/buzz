@@ -27,6 +27,7 @@ import { useSmoothCorners } from "@/shared/ui/smoothCorners";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 import { Spinner } from "./spinner";
+import { useNaturalVideoAspectRatio } from "./videoAspectRatio";
 import {
   getInlinePlaybackPosition,
   getReviewPlaybackPosition,
@@ -722,9 +723,10 @@ export function VideoPlayer({
   const [playbackSpeed, setPlaybackSpeed] = React.useState(
     DEFAULT_PLAYBACK_SPEED,
   );
-  const [naturalAspectRatio, setNaturalAspectRatio] = React.useState<
-    number | null
-  >(null);
+  // Cache-seeded so a row evicted by the virtualized timeline remounts at the
+  // ratio learned on first metadata load, not the 16/9 fallback.
+  const [naturalAspectRatio, learnNaturalAspectRatio] =
+    useNaturalVideoAspectRatio(src);
   const [reviewOpen, setReviewOpenState] = React.useState(() =>
     isVideoReviewOpen(persistedReviewKey),
   );
@@ -1035,9 +1037,7 @@ export function VideoPlayer({
                 event.currentTarget.currentTime = restoredSeconds;
                 setCurrentTime(restoredSeconds);
               }
-              if (videoWidth > 0 && videoHeight > 0) {
-                setNaturalAspectRatio(videoWidth / videoHeight);
-              }
+              learnNaturalAspectRatio(videoWidth, videoHeight);
             }}
             onPause={() => {
               setIsPlaying(false);

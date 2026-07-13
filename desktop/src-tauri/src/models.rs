@@ -6,6 +6,17 @@ use serde::{Deserialize, Deserializer, Serialize};
 pub struct IdentityInfo {
     pub pubkey: String,
     pub display_name: String,
+    /// True when the app booted with an ephemeral key because the OS keyring
+    /// was empty despite a prior successful migration (key was externally
+    /// deleted). The frontend routes to the nsec re-import step when true.
+    /// Mutually exclusive with `locked`.
+    pub lost: bool,
+    /// True when the app booted with an ephemeral key because the OS keyring
+    /// holding the identity is unreachable this boot (keyring locked or
+    /// unavailable). The real key still exists in the keyring; the frontend
+    /// shows a "unlock the keyring and relaunch" screen. Mutually exclusive
+    /// with `lost`.
+    pub locked: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -16,11 +27,21 @@ pub struct ProfileInfo {
     pub about: Option<String>,
     pub nip05_handle: Option<String>,
     pub owner_pubkey: Option<String>,
+    /// `true` when a real kind:0 event was found on the relay; `false` for the
+    /// synthesized fallback returned when no metadata event exists.  The
+    /// onboarding gate uses this to distinguish "new user with no profile" from
+    /// "returning user whose display_name happens to be empty".
+    pub has_profile_event: bool,
 }
 
 #[derive(Serialize, Deserialize)]
 pub struct UserProfileSummaryInfo {
     pub display_name: Option<String>,
+    /// Kind-0 `name` field, carried separately from `display_name` so clients
+    /// can match @mention text against either alias (agents and the CLI
+    /// resolve mentions server-side against `display_name` *or* `name`).
+    #[serde(default)]
+    pub name: Option<String>,
     pub avatar_url: Option<String>,
     pub nip05_handle: Option<String>,
     pub owner_pubkey: Option<String>,

@@ -77,6 +77,8 @@ pub const KIND_READ_STATE: u32 = 30078;
 pub const KIND_AUTH: u32 = 22242;
 /// BUD-01: Blossom upload auth (used in upload.rs, not stored).
 pub const KIND_BLOSSOM_AUTH: u32 = 24242;
+/// Buzz custom one-time identity binding proof (ephemeral, not stored).
+pub const KIND_NOSTR_IDENTITY_BINDING: u32 = 24243;
 /// NIP-98: HTTP auth event (used in nip98.rs, not stored).
 pub const KIND_HTTP_AUTH: u32 = 27235;
 
@@ -110,6 +112,15 @@ pub const KIND_EVENT_REMINDER: u32 = 30300;
 /// a compile-time bitset or sorted array with binary search for hot-path use.
 pub const AUTHOR_ONLY_KINDS: &[u32] = &[KIND_EVENT_REMINDER];
 
+/// Kinds that require a result-level read gate beyond the filter-layer
+/// `#p` check: even a reader who knows an event id MUST match the event's
+/// `#p` tag to receive the event. This closes the kindless `{ids:[…]}` read
+/// path for events whose existence must not be leaked.
+///
+/// Used by `filter_can_match_result_gated_kinds` to force the per-event
+/// fallback path in COUNT rather than the fast SQL `count_events()`.
+pub const RESULT_GATED_KINDS: &[u32] = &[KIND_DM_VISIBILITY, KIND_AGENT_TURN_METRIC];
+
 /// Kinds whose stored events have `#p`-bound read access — readable only by
 /// subscribers whose pubkey appears in the event's `#p` tag.
 ///
@@ -131,6 +142,10 @@ pub const P_GATED_KINDS: &[u32] = &[
     KIND_MEMBER_REMOVED_NOTIFICATION,
     KIND_GIFT_WRAP,
     KIND_DM_VISIBILITY,
+    // NIP-AM: agent turn metrics are encrypted to the owner and must not be
+    // readable by any unauthenticated or non-owner party, including via `ids`
+    // filters — see NIP-AM §Relay Behavior.
+    KIND_AGENT_TURN_METRIC,
 ];
 
 /// NIP-AP: Agent Persona (parameterized replaceable, owner-authored).
@@ -160,6 +175,14 @@ pub const KIND_TEAM: u32 = 30176;
 /// since these events are world-readable on the relay.
 pub const KIND_MANAGED_AGENT: u32 = 30177;
 
+// NIP-56 reporting
+/// NIP-56: Report an event, pubkey, or blob to relay moderators (kind:1984).
+///
+/// Accepted at ingest, persisted to the tenant-scoped `moderation_reports`
+/// queue, and never fanned out publicly. Reports are signals, not triggers:
+/// the relay never auto-actions on them (NIP-56).
+pub const KIND_REPORT: u32 = 1984;
+
 // NIP-29 group admin events
 /// NIP-29: Add a user to a group.
 pub const KIND_NIP29_PUT_USER: u32 = 9000;
@@ -179,6 +202,40 @@ pub const KIND_NIP29_CREATE_INVITE: u32 = 9009;
 pub const KIND_NIP29_JOIN_REQUEST: u32 = 9021;
 /// NIP-29: Request to leave a group.
 pub const KIND_NIP29_LEAVE_REQUEST: u32 = 9022;
+
+// Buzz community moderation commands (mod-signed, processed like 9030-series:
+// validated + executed directly, never stored as regular events; every
+// accepted command writes a `moderation_actions` audit row).
+/// Moderation: ban a pubkey from the community (`p` tag target, optional
+/// `expiration` + `reason` tags).
+pub const KIND_MODERATION_BAN: u32 = 9040;
+/// Moderation: lift a community ban (`p` tag target).
+pub const KIND_MODERATION_UNBAN: u32 = 9041;
+/// Moderation: timeout (write-block) a pubkey until an `expiration` tag
+/// timestamp (`p` tag target, optional `reason`).
+pub const KIND_MODERATION_TIMEOUT: u32 = 9042;
+/// Moderation: clear a timeout early (`p` tag target).
+pub const KIND_MODERATION_UNTIMEOUT: u32 = 9043;
+/// Moderation: resolve a report (`report` tag = report event id hex,
+/// `status` tag = resolved|dismissed, `action` tag =
+/// delete|kick|ban|timeout|dismiss|escalate — see
+/// `handlers/moderation_commands.rs` for the pinned vocabulary).
+pub const KIND_MODERATION_RESOLVE_REPORT: u32 = 9044;
+
+/// Returns `true` for community moderation command kinds (9040–9044).
+///
+/// The canonical route check — use this instead of scattering
+/// `9040..=9044` matches across ingest/dispatch.
+pub const fn is_moderation_command_kind(kind: u32) -> bool {
+    matches!(
+        kind,
+        KIND_MODERATION_BAN
+            | KIND_MODERATION_UNBAN
+            | KIND_MODERATION_TIMEOUT
+            | KIND_MODERATION_UNTIMEOUT
+            | KIND_MODERATION_RESOLVE_REPORT
+    )
+}
 
 // NIP-43 relay membership admin commands
 /// NIP-43: Add a pubkey to the relay member list.
@@ -354,6 +411,15 @@ pub const KIND_MEMBER_ADDED_NOTIFICATION: u32 = 44100;
 /// Stored globally (channel_id = None) with p-tag = target, h-tag = channel UUID.
 pub const KIND_MEMBER_REMOVED_NOTIFICATION: u32 = 44101;
 
+/// NIP-AM: Agent Turn Metric — durable per-turn token-usage record (agent-authored).
+///
+/// Regular stored event (append-only, never replaced). The agent publishes one
+/// event per completed turn, NIP-44 encrypted to its owner. Tags: exactly one `p`
+/// (owner pubkey) and one `agent` (agent pubkey == event pubkey); no `h` tag.
+/// Stored globally (channel_id = NULL); owner-scoped reads only (p-gated, NIP-42).
+/// See `docs/nips/NIP-AM.md`.
+pub const KIND_AGENT_TURN_METRIC: u32 = 44200;
+
 // Forum / social (45000–45999)
 // V1 used addressable range (30001–30003) — wrong.
 /// A forum post (thread root).
@@ -456,6 +522,7 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_PERSONA,
     KIND_TEAM,
     KIND_MANAGED_AGENT,
+    KIND_REPORT,
     KIND_NIP29_PUT_USER,
     KIND_NIP29_REMOVE_USER,
     KIND_NIP29_EDIT_METADATA,
@@ -465,6 +532,11 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_NIP29_CREATE_INVITE,
     KIND_NIP29_JOIN_REQUEST,
     KIND_NIP29_LEAVE_REQUEST,
+    KIND_MODERATION_BAN,
+    KIND_MODERATION_UNBAN,
+    KIND_MODERATION_TIMEOUT,
+    KIND_MODERATION_UNTIMEOUT,
+    KIND_MODERATION_RESOLVE_REPORT,
     RELAY_ADMIN_ADD_MEMBER,
     RELAY_ADMIN_REMOVE_MEMBER,
     RELAY_ADMIN_CHANGE_ROLE,
@@ -520,6 +592,7 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_JOB_ERROR,
     KIND_MEMBER_ADDED_NOTIFICATION,
     KIND_MEMBER_REMOVED_NOTIFICATION,
+    KIND_AGENT_TURN_METRIC,
     KIND_WORKFLOW_DEF,
     KIND_LONG_FORM,
     KIND_USER_STATUS,
@@ -672,6 +745,20 @@ const _: () = assert!(KIND_AUTH <= u16::MAX as u32);
 const _: () = assert!(KIND_CANVAS <= u16::MAX as u32);
 const _: () = assert!(KIND_HUDDLE_GUIDELINES <= u16::MAX as u32);
 const _: () = assert!(EPHEMERAL_KIND_MIN < EPHEMERAL_KIND_MAX);
+// Compile-time: KIND_AGENT_TURN_METRIC is a regular stored kind (not ephemeral, not replaceable).
+const _: () = assert!(!is_ephemeral(KIND_AGENT_TURN_METRIC));
+const _: () = assert!(!is_replaceable(KIND_AGENT_TURN_METRIC));
+const _: () = assert!(!is_parameterized_replaceable(KIND_AGENT_TURN_METRIC));
+const _: () = assert!(KIND_AGENT_TURN_METRIC <= u16::MAX as u32);
+// Moderation kinds fit u16 and are neither replaceable nor ephemeral:
+// 1984 is a regular event (persisted to the queue, never fanned out);
+// 9040–9044 are direct commands (executed, never stored).
+const _: () = assert!(KIND_REPORT <= u16::MAX as u32);
+const _: () = assert!(KIND_MODERATION_RESOLVE_REPORT <= u16::MAX as u32);
+const _: () = assert!(!is_ephemeral(KIND_REPORT));
+const _: () = assert!(is_moderation_command_kind(KIND_MODERATION_BAN));
+const _: () = assert!(is_moderation_command_kind(KIND_MODERATION_RESOLVE_REPORT));
+const _: () = assert!(!is_moderation_command_kind(KIND_REPORT));
 
 #[cfg(test)]
 mod tests {

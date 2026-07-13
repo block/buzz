@@ -122,9 +122,10 @@ type OnboardingGateStage = "blocking" | "onboarding" | "ready";
 type UseFirstRunOnboardingGateOptions = {
   currentPubkey: string | null;
   identityIsFetching: boolean;
+  identityLost: boolean;
   identityStatus: QueryStatus;
   isSharedIdentity: boolean;
-  profileDisplayName: string | null | undefined;
+  profileHasEvent: boolean | undefined;
   profileIsFetching: boolean;
   profileStatus: QueryStatus;
 };
@@ -217,9 +218,10 @@ function resolveOnboardingGateStage({
 export function useFirstRunOnboardingGate({
   currentPubkey,
   identityIsFetching,
+  identityLost,
   identityStatus,
   isSharedIdentity,
-  profileDisplayName,
+  profileHasEvent,
   profileIsFetching,
   profileStatus,
 }: UseFirstRunOnboardingGateOptions) {
@@ -237,6 +239,23 @@ export function useFirstRunOnboardingGate({
         : createOnboardingGateState(currentPubkey),
     );
   }, [currentPubkey]);
+
+  // When the backend signals "identity lost" (keyring was cleared after a
+  // successful migration), force onboarding open immediately so the user can
+  // re-import their nsec. This runs once, after identity settles.
+  React.useEffect(() => {
+    if (!identityLost || !currentPubkey || identityStatus !== "success") {
+      return;
+    }
+    setGateState((current) =>
+      updateActiveGateState(current, currentPubkey, (activeGateState) => ({
+        ...activeGateState,
+        hasCompletedCurrentPubkey: false,
+        hasSettledCurrentPubkey: true,
+        isOpen: true,
+      })),
+    );
+  }, [currentPubkey, identityLost, identityStatus]);
 
   React.useEffect(() => {
     // Fast-path: shared identity worktrees have already onboarded in the
@@ -288,19 +307,32 @@ export function useFirstRunOnboardingGate({
       return;
     }
 
-    // If the relay already has a profile with a display name for this pubkey,
-    // the user has previously completed onboarding (possibly on another
-    // machine or app data directory). Skip the onboarding flow and mark as
-    // complete so they go straight to the app.
+    // If the relay has a real kind:0 metadata event for this pubkey, the user
+    // has previously completed onboarding (possibly on another machine or app
+    // data directory). Skip the onboarding flow and mark as complete so they
+    // go straight to the app.
+    //
+    // We gate on `hasProfileEvent` — a flag set by the Tauri backend when a
+    // real kind:0 event was found — rather than any field value. This correctly
+    // handles the case where a returning user's display_name is empty: the event
+    // still exists, so onboarding is skipped. A missing event (new user, or no
+    // kind:0 on the relay) always shows onboarding regardless of display_name.
     const hasExistingProfile =
-      profileStatus === "success" &&
-      typeof profileDisplayName === "string" &&
-      profileDisplayName.trim().length > 0;
+      profileStatus === "success" && profileHasEvent === true;
 
     setGateState((current) =>
       updateActiveGateState(current, currentPubkey, (activeGateState) => {
+        // Re-read localStorage here to handle the webkit2gtk WAL race: the
+        // synchronous useState initializer may have run before the WAL was
+        // merged into the main SQLite file, returning null for a flag that is
+        // actually present. By the time this effect fires (identity + profile
+        // settled), the WAL has had time to merge and the read is reliable.
+        const hasCompletedAfterRecheck =
+          readOnboardingCompletion(currentPubkey);
         const alreadyOnboarded =
-          activeGateState.hasCompletedCurrentPubkey || hasExistingProfile;
+          activeGateState.hasCompletedCurrentPubkey ||
+          hasCompletedAfterRecheck ||
+          hasExistingProfile;
         if (alreadyOnboarded && typeof window !== "undefined") {
           window.localStorage.setItem(
             onboardingCompletionStorageKey(currentPubkey),
@@ -321,7 +353,7 @@ export function useFirstRunOnboardingGate({
     hasSettledCurrentPubkey,
     identityStatus,
     isSharedIdentity,
-    profileDisplayName,
+    profileHasEvent,
     profileIsFetching,
     profileStatus,
   ]);
@@ -376,13 +408,30 @@ export function useAppOnboardingState(isSharedIdentity: boolean) {
   );
   const [isCompletingWelcomeSetup, setIsCompletingWelcomeSetup] =
     React.useState(false);
-  const profileQuery = useProfileQuery();
+  const identityLost = identity?.lost === true;
+  // Keyring unreachable at boot — the real key is still in the OS keyring but
+  // the session cannot access it. No in-app recovery is possible; the user
+  // must unlock the keyring externally and relaunch. Mutually exclusive with lost.
+  const identityLocked = identity?.locked === true;
+
+  // Sticky boot fact: once identity was lost at boot, this remains true for the
+  // entire session. Per-component state in OnboardingFlow cannot carry this
+  // because the flow remounts when pubkey changes after recovery.
+  const [bootedLost, setBootedLost] = React.useState(false);
+  React.useEffect(() => {
+    if (identityLost) setBootedLost(true);
+  }, [identityLost]);
+
+  const profileQuery = useProfileQuery(
+    !identityLost && !identityLocked && identityQuery.status === "success",
+  );
   const onboardingGate = useFirstRunOnboardingGate({
     currentPubkey,
     identityIsFetching: identityQuery.fetchStatus === "fetching",
+    identityLost,
     identityStatus: identityQuery.status,
     isSharedIdentity,
-    profileDisplayName: profileQuery.data?.displayName,
+    profileHasEvent: profileQuery.data?.hasProfileEvent,
     profileIsFetching: profileQuery.fetchStatus === "fetching",
     profileStatus: profileQuery.status,
   });
@@ -456,9 +505,26 @@ export function useAppOnboardingState(isSharedIdentity: boolean) {
     },
   };
 
+  // Recovery completed this boot: force a relaunch screen regardless of any
+  // other gate state. Backend startup routines (event sync, agent restore,
+  // pending-event flush) were skipped for the ephemeral key and cannot restart
+  // in-process, so nothing else can proceed until the app restarts.
+  const relaunchRequired =
+    bootedLost && !identityLost && identityQuery.status === "success";
+
   return {
     currentPubkey,
     flow,
-    stage: isCompletingWelcomeSetup ? "blocking" : onboardingGate.stage,
+    identityLost,
+    // keyring-locked is the highest-precedence stage: nothing in-session can
+    // clear a locked keyring, so this fully blocks the UI until relaunch.
+    stage:
+      identityLocked && identityQuery.status === "success"
+        ? ("keyring-locked" as const)
+        : relaunchRequired
+          ? ("relaunch-required" as const)
+          : isCompletingWelcomeSetup
+            ? ("blocking" as const)
+            : onboardingGate.stage,
   };
 }

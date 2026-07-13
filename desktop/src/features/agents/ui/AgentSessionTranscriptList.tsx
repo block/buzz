@@ -1,11 +1,15 @@
 import * as React from "react";
 import { motion, useReducedMotion } from "motion/react";
-import { CheckCheck, Radio } from "lucide-react";
+import { CheckCheck, Clock, Radio } from "lucide-react";
 
 import {
   useActiveAgentTurns,
   type ActiveTurnSummary,
 } from "@/features/agents/activeAgentTurnsStore";
+import {
+  subscribeAgentObserverStore,
+  getLatestLiveSessionId,
+} from "@/features/agents/observerRelayStore";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { useAnchoredScroll } from "@/features/messages/ui/useAnchoredScroll";
 import { cn } from "@/shared/lib/cn";
@@ -17,6 +21,7 @@ import {
   DialogTitle,
 } from "@/shared/ui/dialog";
 import { Toggle } from "@/shared/ui/toggle";
+import { AnimatedCount } from "@/shared/ui/AnimatedCount";
 import { FuzzyLogo } from "@/shared/ui/buzz-logo/FuzzyLogo";
 import type { PromptSection, TranscriptItem } from "./agentSessionTypes";
 import { TurnLivenessIndicator } from "./TurnLivenessIndicator";
@@ -34,6 +39,7 @@ import {
   ActivityRowContent,
   ActivityRowLabel,
   type ActivityRowStats,
+  splitActivityRowCountedObject,
   splitActivityRowLabel,
 } from "./activityRenderClasses/ActivityRow";
 import { TranscriptTimestamp } from "./activityRenderClasses/TranscriptTimestamp";
@@ -132,9 +138,21 @@ export function AgentSessionTranscriptList({
     () => isAgentTurnLive(activeTurns, channelId),
     [activeTurns, channelId],
   );
+
+  // Subscribe to the observer relay store so we read the latest-live-session-id
+  // reactively. We don't need the full snapshot — only the key for boundary labeling.
+  const getLatestLive = React.useCallback(
+    () => getLatestLiveSessionId(agentPubkey, channelId),
+    [agentPubkey, channelId],
+  );
+  const latestLiveSessionId = React.useSyncExternalStore(
+    subscribeAgentObserverStore,
+    getLatestLive,
+  );
+
   const displayBlocks = React.useMemo(
-    () => buildTranscriptDisplayBlocks(items),
-    [items],
+    () => buildTranscriptDisplayBlocks(items, latestLiveSessionId),
+    [items, latestLiveSessionId],
   );
   const scrollContainerRef = React.useRef<HTMLDivElement>(null);
   const contentRef = React.useRef<HTMLDivElement>(null);
@@ -280,6 +298,11 @@ function hasRenderableCompactBlock(block: TranscriptDisplayBlock) {
     return isRenderableCompactItem(block.item);
   }
 
+  // session-boundary dividers are not renderable content in compact view.
+  if (block.kind === "session-boundary") {
+    return false;
+  }
+
   return block.segments.some((segment) => {
     if (segment.kind === "item") {
       return isRenderableCompactItem(segment.item);
@@ -314,6 +337,11 @@ function getDisplayBlockKey(block: TranscriptDisplayBlock) {
   if (block.kind === "single") {
     return block.item.id;
   }
+  if (block.kind === "session-boundary") {
+    // Use firstItemId (stable across prepend) rather than runIndex (shifts when
+    // older sessions are prepended, causing unnecessary boundary remounts).
+    return `session-boundary:${block.sessionId}:${block.firstItemId}`;
+  }
   return `turn:${block.turnId}`;
 }
 
@@ -338,6 +366,15 @@ function TranscriptDisplayBlockView({
   // turn — the block wrapper already animates that) skip the transition.
   const hasCompletedInitialRenderRef = useHasCompletedInitialRender();
   const animateSegmentEnter = animationPreferenceEnabled && !shouldReduceMotion;
+
+  if (block.kind === "session-boundary") {
+    return (
+      <SessionBoundaryDivider
+        labelState={block.labelState}
+        sessionStartTimestamp={block.sessionStartTimestamp}
+      />
+    );
+  }
 
   if (block.kind === "single") {
     return (
@@ -386,7 +423,9 @@ function getTurnSegmentKey(turnId: string, segment: TranscriptTurnSegment) {
     return `turn:${turnId}:setup`;
   }
   if (segment.kind === "prompt") {
-    return `turn:${turnId}:prompt`;
+    // A turn can hold multiple prompt segments (initial prompt + mid-turn
+    // steers), so key on the user message id rather than the bare turn id.
+    return `turn:${turnId}:prompt:${segment.user.id}`;
   }
   if (segment.kind === "summary") {
     return segment.summary.id;
@@ -410,7 +449,6 @@ function TranscriptTurnSegmentView({
         context={segment.context}
         profiles={profiles}
         setup={segment.setup}
-        systemPrompt={segment.systemPrompt}
         user={segment.user}
       />
     );
@@ -455,10 +493,10 @@ function SameKindSummaryItem({
 }) {
   const groupedFileEditDiffs = React.useMemo(
     () =>
-      summary.renderClass === "file-edit"
+      summary.renderClass === "file-edit" || summary.variant === "mixed"
         ? getGroupedFileEditDiffs(summary.items)
         : [],
-    [summary.items, summary.renderClass],
+    [summary.items, summary.renderClass, summary.variant],
   );
   const groupedFileEditStats = summarizeFileEditDiffs(groupedFileEditDiffs);
   const expandsToToolItems = summary.items.every(
@@ -467,6 +505,10 @@ function SameKindSummaryItem({
   const variant = useAgentSessionTranscriptVariant();
   const timestampsEnabled = useTranscriptTimestampsEnabled();
   const showTimestamp = timestampsEnabled && variant !== "compactPreview";
+  // Mixed bursts expand to their child segments in original order: raw tool
+  // rows plus nested same-kind summaries that joined the burst (which stay
+  // expandable to their own child rows).
+  const childSegments = summary.segments ?? null;
 
   return (
     <>
@@ -483,30 +525,52 @@ function SameKindSummaryItem({
         <ActivityRowContent
           className={cn(
             "flex flex-col",
-            expandsToToolItems ? "gap-0.5" : "gap-1 pl-5",
+            expandsToToolItems || childSegments ? "gap-0.5" : "gap-1 pl-5",
           )}
         >
-          {expandsToToolItems
-            ? summary.items.map((item) => (
-                <TranscriptItemView
-                  agentAvatarUrl={agentAvatarUrl}
-                  agentName={agentName}
-                  agentPubkey={agentPubkey}
-                  item={item}
-                  key={item.id}
-                  profiles={profiles}
-                />
-              ))
-            : summary.items.map((item) => (
-                <p
-                  className="truncate text-xs text-muted-foreground"
-                  key={item.id}
-                >
-                  {item.type === "tool"
-                    ? item.descriptor.preview || item.descriptor.label
-                    : item.title}
-                </p>
-              ))}
+          {childSegments
+            ? childSegments.map((child) =>
+                child.kind === "summary" ? (
+                  <SameKindSummaryItem
+                    agentAvatarUrl={agentAvatarUrl}
+                    agentName={agentName}
+                    agentPubkey={agentPubkey}
+                    key={child.summary.id}
+                    profiles={profiles}
+                    summary={child.summary}
+                  />
+                ) : (
+                  <TranscriptItemView
+                    agentAvatarUrl={agentAvatarUrl}
+                    agentName={agentName}
+                    agentPubkey={agentPubkey}
+                    item={child.item}
+                    key={child.item.id}
+                    profiles={profiles}
+                  />
+                ),
+              )
+            : expandsToToolItems
+              ? summary.items.map((item) => (
+                  <TranscriptItemView
+                    agentAvatarUrl={agentAvatarUrl}
+                    agentName={agentName}
+                    agentPubkey={agentPubkey}
+                    item={item}
+                    key={item.id}
+                    profiles={profiles}
+                  />
+                ))
+              : summary.items.map((item) => (
+                  <p
+                    className="truncate text-xs text-muted-foreground"
+                    key={item.id}
+                  >
+                    {item.type === "tool"
+                      ? item.descriptor.preview || item.descriptor.label
+                      : item.title}
+                  </p>
+                ))}
         </ActivityRowContent>
       </ActivityRow>
       {showTimestamp ? (
@@ -550,15 +614,33 @@ function ToolRunSummaryLabel({
   label: string;
   stats?: ActivityRowStats | null;
 }) {
+  const animationPreferenceEnabled = useTranscriptAnimationEnabled();
   const parts = splitActivityRowLabel(label);
 
   if (!parts) {
     return <span className="truncate text-sm font-medium">{label}</span>;
   }
 
+  // Streaming bursts grow their count in place ("Ran 16 tool calls" →
+  // "Ran 17 tool calls"); rolling the digits odometer-style makes the
+  // increment legible. AnimatedCount keeps an sr-only static value and
+  // falls back to static text under prefers-reduced-motion.
+  const countedObject =
+    animationPreferenceEnabled && typeof parts.object === "string"
+      ? splitActivityRowCountedObject(parts.object)
+      : null;
+  const object = countedObject ? (
+    <>
+      <AnimatedCount value={countedObject.count} />
+      {countedObject.rest}
+    </>
+  ) : (
+    parts.object
+  );
+
   return (
     <ActivityRowLabel
-      object={parts.object}
+      object={object}
       openToneScope="summary"
       stats={stats}
       verb={parts.verb}
@@ -570,13 +652,11 @@ function TurnPromptBlock({
   context,
   profiles,
   setup,
-  systemPrompt,
   user,
 }: {
   context: Extract<TranscriptItem, { type: "metadata" }> | null;
   profiles?: UserProfileLookup;
   setup: Extract<TranscriptItem, { type: "lifecycle" }>[];
-  systemPrompt: Extract<TranscriptItem, { type: "metadata" }> | null;
   user: Extract<TranscriptItem, { type: "message" }>;
 }) {
   return (
@@ -594,7 +674,6 @@ function TurnPromptBlock({
         item={user}
         profiles={profiles}
         setup={setup}
-        systemPrompt={systemPrompt}
       />
     </div>
   );
@@ -605,18 +684,16 @@ function PromptUserMessage({
   item,
   profiles,
   setup = [],
-  systemPrompt = null,
 }: {
   context?: Extract<TranscriptItem, { type: "metadata" }> | null;
   item: Extract<TranscriptItem, { type: "message" }>;
   profiles?: UserProfileLookup;
   setup?: Extract<TranscriptItem, { type: "lifecycle" }>[];
-  systemPrompt?: Extract<TranscriptItem, { type: "metadata" }> | null;
 }) {
   const [contextOpen, setContextOpen] = React.useState(false);
   const contextSections = React.useMemo(
-    () => [...(systemPrompt?.sections ?? []), ...(context?.sections ?? [])],
-    [context, systemPrompt],
+    () => [...(context?.sections ?? [])],
+    [context],
   );
 
   return (
@@ -845,6 +922,50 @@ function TurnSetupStatus({
         showTimestamp={false}
         timestamp={timestamp}
       />
+    </div>
+  );
+}
+
+/**
+ * Horizontal rule rendered between session runs in the observer transcript.
+ *
+ * Three label states (based on live-frame observation, not harness affinity):
+ *  - `"current"`     — most recent session observed via the live relay subscription.
+ *  - `"most-recent"` — newest visible session with no matching live frames
+ *                      (loaded from archive or session ended before observation).
+ *  - `"earlier"`     — an older session preceding the most-recent one.
+ */
+function SessionBoundaryDivider({
+  labelState,
+  sessionStartTimestamp,
+}: {
+  labelState: "current" | "most-recent" | "earlier";
+  sessionStartTimestamp: string;
+}) {
+  const label =
+    labelState === "current"
+      ? "Latest live-observed session"
+      : labelState === "most-recent"
+        ? "Most recent observed session"
+        : "Earlier observed session";
+  const formattedDate = new Date(sessionStartTimestamp).toLocaleString();
+  return (
+    <div
+      className="flex items-center gap-2 px-3 py-2"
+      data-testid="session-boundary-divider"
+    >
+      <div className="h-px flex-1 bg-border" />
+      <span className="flex items-center gap-1 text-xs text-muted-foreground">
+        {labelState === "current" ? (
+          <Radio aria-hidden="true" className="h-3 w-3" />
+        ) : (
+          <Clock aria-hidden="true" className="h-3 w-3" />
+        )}
+        {label}
+        {" · "}
+        {formattedDate}
+      </span>
+      <div className="h-px flex-1 bg-border" />
     </div>
   );
 }

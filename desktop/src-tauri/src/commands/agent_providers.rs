@@ -1,14 +1,18 @@
 use crate::managed_agents::{discover_provider_candidates, invoke_provider, BackendProviderInfo};
 
 #[tauri::command]
-pub fn discover_backend_providers() -> Vec<BackendProviderInfo> {
-    discover_provider_candidates()
-        .into_iter()
-        .map(|(id, path)| BackendProviderInfo {
-            id,
-            binary_path: path.display().to_string(),
-        })
-        .collect()
+pub async fn discover_backend_providers() -> Result<Vec<BackendProviderInfo>, String> {
+    tokio::task::spawn_blocking(|| {
+        discover_provider_candidates()
+            .into_iter()
+            .map(|(id, path)| BackendProviderInfo {
+                id,
+                binary_path: path.display().to_string(),
+            })
+            .collect()
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking failed: {e}"))
 }
 
 #[tauri::command]

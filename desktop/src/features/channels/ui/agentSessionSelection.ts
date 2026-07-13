@@ -42,6 +42,42 @@ export function resolveSelectedAgentSession({
   };
 }
 
+/**
+ * Where the Activity panel should return to when its back arrow fires.
+ *
+ * Captured when the panel opens (see useChannelAgentSessions) and consumed
+ * exactly once on back — an explicit breadcrumb instead of popping the
+ * app/browser history stack.
+ */
+export type AgentSessionReturnTarget =
+  | { kind: "profile"; pubkey: string }
+  | { kind: "thread"; threadHeadId: string };
+
+/**
+ * Resolve the pane the Activity panel is opening over. Threads win over the
+ * profile panel because that's the render priority of the right pane — a
+ * lingering `profile` URL param never shows while a thread is open.
+ * Returns null when Activity opens over no pane (composer/activity bar from
+ * the main timeline, or a direct/restored `agentSession` URL).
+ */
+export function resolveAgentSessionReturnTarget({
+  openThreadHeadId,
+  profilePanelPubkey,
+}: {
+  openThreadHeadId: string | null;
+  profilePanelPubkey: string | null;
+}): AgentSessionReturnTarget | null {
+  if (openThreadHeadId) {
+    return { kind: "thread", threadHeadId: openThreadHeadId };
+  }
+
+  if (profilePanelPubkey) {
+    return { kind: "profile", pubkey: profilePanelPubkey };
+  }
+
+  return null;
+}
+
 export function isAgentInActivityList({
   activityAgents,
   selectedAgent,

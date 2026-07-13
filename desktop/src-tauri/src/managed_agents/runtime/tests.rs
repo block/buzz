@@ -143,9 +143,9 @@ fn fixture(
         model: None,
         provider: None,
         persona_source_version: None,
-        mcp_toolsets: None,
         env_vars: std::collections::BTreeMap::new(),
         start_on_app_launch: false,
+        auto_restart_on_config_change: true,
         runtime_pid: None,
         backend: Default::default(),
         backend_agent_id: None,
@@ -158,8 +158,20 @@ fn fixture(
         last_stopped_at: None,
         last_exit_code: None,
         last_error: None,
+        last_error_code: None,
         respond_to,
         respond_to_allowlist: allowlist,
+        display_name: None,
+        slug: None,
+        runtime: None,
+        name_pool: Vec::new(),
+        is_builtin: false,
+        is_active: true,
+        source_team: None,
+        source_team_persona_slug: None,
+        definition_respond_to: None,
+        definition_respond_to_allowlist: Vec::new(),
+        definition_parallelism: None,
         relay_mesh: None,
     }
 }
@@ -178,6 +190,8 @@ fn build_env_owner_only_sets_mode_and_removes_others() {
     // auth_tag is present → no AGENT_OWNER fallback fires.
     assert!(remove.contains(&"BUZZ_ACP_AGENT_OWNER"));
 }
+
+// select_untracked_bundle_harnesses tests live in runtime/sweep.rs (mod tests).
 
 #[test]
 fn build_env_allowlist_sets_both_envs_and_joins() {
@@ -260,8 +274,8 @@ fn persona_with_provider(
     prompt: &str,
     model: Option<&str>,
     provider: Option<&str>,
-) -> crate::managed_agents::PersonaRecord {
-    crate::managed_agents::PersonaRecord {
+) -> crate::managed_agents::AgentDefinition {
+    crate::managed_agents::AgentDefinition {
         id: id.to_string(),
         display_name: id.to_string(),
         avatar_url: None,
@@ -275,38 +289,45 @@ fn persona_with_provider(
         source_team: None,
         source_team_persona_slug: None,
         env_vars: std::collections::BTreeMap::new(),
+        respond_to: None,
+        respond_to_allowlist: Vec::new(),
+        parallelism: None,
         created_at: "2026-06-09T00:00:00Z".to_string(),
         updated_at: "2026-06-09T00:00:00Z".to_string(),
     }
 }
 
-// ── persona pin/refresh acceptance (Phase 4) ────────────────────────────
+// ── persona env refresh acceptance ──────────────────────────────────────
 //
-// The full lifecycle Will specified: create from P0, edit P0→P1 (env_vars
-// included), restart stays pinned to P0, delete+respawn refreshes to P1. We
-// exercise it at the pure seams that `create_managed_agent` and
-// `build_managed_agent_summary` are built from: `persona_snapshot` (what create
-// writes onto the record) and `persona_drift_state` (the Agents-menu badge).
-// The env_var assertions are load-bearing — the credential pin is the field
-// that would silently leak on restart if spawn re-read the live persona.
+// The refresh lifecycle Wes decided: `record.env_vars` holds agent-level
+// overrides only, the live persona env is merged underneath at read time
+// (spawn / readiness / deploy), so persona env edits — like prompt/model/
+// provider — reach the agent on the next spawn without delete+recreate.
+// The merge assertions are load-bearing: they witness the credential refresh
+// that the old create-time env baking silently blocked.
 
+use crate::managed_agents::env_vars::{live_persona_env, merged_user_env};
 use crate::managed_agents::persona_events::persona_snapshot;
 use std::collections::BTreeMap;
 
 /// Apply a persona snapshot onto a record, mirroring `create_managed_agent`:
-/// snapshotted prompt/model/provider/env_vars/source_version are pinned, with
-/// the system_prompt unwrapped (the persona always carries one).
-fn pin_persona(record: &mut ManagedAgentRecord, persona: &crate::managed_agents::PersonaRecord) {
-    let snapshot = persona_snapshot(persona, &record.env_vars);
+/// snapshotted prompt/model/provider/source_version are pinned, with the
+/// system_prompt unwrapped (the persona always carries one). `env_vars` is
+/// deliberately NOT touched — it stays agent overrides only.
+fn pin_persona(record: &mut ManagedAgentRecord, persona: &crate::managed_agents::AgentDefinition) {
+    let snapshot = persona_snapshot(persona);
     record.persona_id = Some(persona.id.clone());
     record.system_prompt = snapshot.system_prompt;
     record.model = snapshot.model;
     record.provider = snapshot.provider;
-    record.env_vars = snapshot.env_vars;
     record.persona_source_version = Some(snapshot.source_version);
 }
 
-fn persona_v(id: &str, prompt: &str, env: &[(&str, &str)]) -> crate::managed_agents::PersonaRecord {
+fn persona_v(
+    id: &str,
+    prompt: &str,
+    env: &[(&str, &str)],
+) -> crate::managed_agents::AgentDefinition {
     let mut p = persona_with_provider(id, prompt, Some("model-v"), Some("anthropic"));
     p.env_vars = env
         .iter()
@@ -315,45 +336,63 @@ fn persona_v(id: &str, prompt: &str, env: &[(&str, &str)]) -> crate::managed_age
     p
 }
 
+/// The spawn-time user env for `record` under `personas` — the same
+/// live-persona-under-overrides merge `spawn_agent_child` and
+/// `resolve_effective_agent_env` perform.
+fn spawn_user_env(
+    record: &ManagedAgentRecord,
+    personas: &[crate::managed_agents::AgentDefinition],
+) -> BTreeMap<String, String> {
+    merged_user_env(
+        &live_persona_env(personas, record.persona_id.as_deref()),
+        &record.env_vars,
+    )
+}
+
 #[test]
-fn create_pins_full_persona_snapshot_including_env_vars() {
+fn create_keeps_env_vars_as_overrides_only() {
     let p0 = persona_v("p", "prompt-v0", &[("ANTHROPIC_API_KEY", "key-v0")]);
     let mut record = fixture(RespondTo::Anyone, vec![], Some("tag".into()));
     pin_persona(&mut record, &p0);
 
     assert_eq!(record.system_prompt.as_deref(), Some("prompt-v0"));
     assert_eq!(record.provider.as_deref(), Some("anthropic"));
+    assert!(
+        record.env_vars.is_empty(),
+        "create must NOT bake persona env into the record — overrides only"
+    );
+    // The credential still reaches the spawned process via the live merge.
     assert_eq!(
-        record.env_vars.get("ANTHROPIC_API_KEY").map(String::as_str),
+        spawn_user_env(&record, std::slice::from_ref(&p0))
+            .get("ANTHROPIC_API_KEY")
+            .map(String::as_str),
         Some("key-v0"),
-        "create must pin persona env_vars — the credential pin"
+        "spawn env must carry the persona credential via the live merge"
     );
     assert!(record.persona_source_version.is_some());
 }
 
 #[test]
-fn restart_after_persona_edit_stays_pinned_to_old_snapshot() {
+fn restart_after_persona_edit_refreshes_credential() {
     // Create from P0.
     let p0 = persona_v("p", "prompt-v0", &[("ANTHROPIC_API_KEY", "key-v0")]);
     let mut record = fixture(RespondTo::Anyone, vec![], Some("tag".into()));
     pin_persona(&mut record, &p0);
 
     // Edit the persona to P1 (prompt + credential change). Restart reuses the
-    // SAME record — nothing rewrites the snapshot — so spawn reads P0 fields.
+    // SAME record, but spawn merges the live persona env — so the edited
+    // credential reaches the next spawn without delete+recreate.
     let p1 = persona_v("p", "prompt-v1", &[("ANTHROPIC_API_KEY", "key-v1")]);
-
     assert_eq!(
-        record.system_prompt.as_deref(),
-        Some("prompt-v0"),
-        "restart must keep the pinned prompt"
-    );
-    assert_eq!(
-        record.env_vars.get("ANTHROPIC_API_KEY").map(String::as_str),
-        Some("key-v0"),
-        "restart must NOT pick up the edited credential — the CRITICAL"
+        spawn_user_env(&record, std::slice::from_ref(&p1))
+            .get("ANTHROPIC_API_KEY")
+            .map(String::as_str),
+        Some("key-v1"),
+        "restart must pick up the edited credential — the refresh Wes asked for"
     );
 
-    // The badge flips: the record's snapshot now lags the edited persona.
+    // The badge flips: the record's snapshot lags the edited persona until the
+    // spawn-path re-snapshot runs.
     let (out_of_date, orphaned) = super::persona_drift_state(&record, std::slice::from_ref(&p1));
     assert!(
         out_of_date,
@@ -363,49 +402,75 @@ fn restart_after_persona_edit_stays_pinned_to_old_snapshot() {
 }
 
 #[test]
-fn respawn_after_persona_edit_refreshes_to_new_snapshot() {
-    let p0 = persona_v("p", "prompt-v0", &[("ANTHROPIC_API_KEY", "key-v0")]);
-    let p1 = persona_v("p", "prompt-v1", &[("ANTHROPIC_API_KEY", "key-v1")]);
-
-    // Respawn = delete the old record + create a fresh one. create re-snapshots
-    // the now-current persona (P1).
-    let mut respawned = fixture(RespondTo::Anyone, vec![], Some("tag".into()));
-    pin_persona(&mut respawned, &p1);
-
-    assert_eq!(respawned.system_prompt.as_deref(), Some("prompt-v1"));
-    assert_eq!(
-        respawned
-            .env_vars
-            .get("ANTHROPIC_API_KEY")
-            .map(String::as_str),
-        Some("key-v1"),
-        "respawn must refresh the credential to the edited persona"
-    );
-
-    // Now pinned to current persona → not out of date.
-    let (out_of_date, orphaned) = super::persona_drift_state(&respawned, std::slice::from_ref(&p1));
-    assert!(!out_of_date, "respawn pins to current persona — no drift");
-    assert!(!orphaned);
-
-    // Sanity: P0 differs from P1, so a record still pinned to P0 would drift.
-    let mut stale = fixture(RespondTo::Anyone, vec![], Some("tag".into()));
-    pin_persona(&mut stale, &p0);
-    assert!(super::persona_drift_state(&stale, std::slice::from_ref(&p1)).0);
-}
-
-#[test]
-fn agent_env_overrides_win_over_persona_env_in_snapshot() {
-    // Agent-level env_vars (input.env_vars) layer over persona env on collision,
-    // matching spawn precedence (persona env < agent env).
+fn agent_env_overrides_win_over_persona_env_at_spawn() {
+    // Agent-level env_vars layer over persona env on collision at read time
+    // (persona env < agent env).
     let persona = persona_v("p", "prompt", &[("ANTHROPIC_API_KEY", "persona-key")]);
     let mut record = fixture(RespondTo::Anyone, vec![], Some("tag".into()));
     record.env_vars = BTreeMap::from([("ANTHROPIC_API_KEY".to_string(), "agent-key".to_string())]);
     pin_persona(&mut record, &persona);
 
     assert_eq!(
-        record.env_vars.get("ANTHROPIC_API_KEY").map(String::as_str),
+        spawn_user_env(&record, std::slice::from_ref(&persona))
+            .get("ANTHROPIC_API_KEY")
+            .map(String::as_str),
         Some("agent-key"),
         "agent override must win over persona env"
+    );
+}
+
+#[test]
+fn orphaned_agent_spawns_from_its_own_overrides() {
+    // Persona deleted: the live merge degrades to the record's own overrides.
+    let persona = persona_v("p", "prompt", &[("ANTHROPIC_API_KEY", "persona-key")]);
+    let mut record = fixture(RespondTo::Anyone, vec![], Some("tag".into()));
+    record.env_vars = BTreeMap::from([("EXTRA".to_string(), "agent-value".to_string())]);
+    pin_persona(&mut record, &persona);
+
+    let env = spawn_user_env(&record, &[]);
+    assert_eq!(env.get("EXTRA").map(String::as_str), Some("agent-value"));
+    assert_eq!(
+        env.get("ANTHROPIC_API_KEY"),
+        None,
+        "a deleted persona's env must not linger"
+    );
+}
+
+#[test]
+fn self_heal_drops_overrides_equal_to_persona_value() {
+    // Pre-refresh records baked persona env in as pseudo-overrides. The
+    // spawn-path retain() treats an override equal to the persona's current
+    // value as inherited, so later persona edits refresh it.
+    let p0 = persona_v("p", "prompt", &[("ANTHROPIC_API_KEY", "key-v0")]);
+    let mut record = fixture(RespondTo::Anyone, vec![], Some("tag".into()));
+    record.env_vars = BTreeMap::from([
+        ("ANTHROPIC_API_KEY".to_string(), "key-v0".to_string()), // baked-in persona value
+        ("GENUINE".to_string(), "override".to_string()),         // real override
+    ]);
+    pin_persona(&mut record, &p0);
+
+    // Mirror the start/restore self-heal.
+    record.env_vars.retain(|k, v| p0.env_vars.get(k) != Some(v));
+
+    assert_eq!(
+        record.env_vars.get("ANTHROPIC_API_KEY"),
+        None,
+        "baked-in persona value must be reclassified as inherited"
+    );
+    assert_eq!(
+        record.env_vars.get("GENUINE").map(String::as_str),
+        Some("override"),
+        "genuine overrides must survive the self-heal"
+    );
+
+    // After the persona edits the key, the healed record refreshes.
+    let p1 = persona_v("p", "prompt", &[("ANTHROPIC_API_KEY", "key-v1")]);
+    assert_eq!(
+        spawn_user_env(&record, std::slice::from_ref(&p1))
+            .get("ANTHROPIC_API_KEY")
+            .map(String::as_str),
+        Some("key-v1"),
+        "healed record must inherit the edited persona credential"
     );
 }
 
@@ -605,4 +670,92 @@ fn grandchild_inherits_pgid_of_process_group_leader() {
     // Cleanup: kill the process group.
     unsafe { libc::kill(-harness_pid, libc::SIGTERM) };
     let _ = harness.wait();
+}
+
+/// Validates that `walk_has_tracked_ancestor` catches the production case the
+/// old PGID check missed: the intermediate process is in its OWN process group
+/// (mirroring the node npm-shim wrapper that starts `codex-acp`). The
+/// grandchild's PGID matches the intermediate's PID, not the harness's — so
+/// `skip_pids.contains(&grandchild_pgid)` returns false. The ancestor walk
+/// must still find the harness as an ancestor and return true.
+#[cfg(unix)]
+#[test]
+fn own_group_grandchild_detected_by_ancestor_walk() {
+    use std::os::unix::process::CommandExt;
+    use std::process::Command;
+
+    // The test process is the "harness". Spawn an intermediate with its own
+    // process group (mirrors the node shim). It backgrounds a grandchild
+    // (sleep 30) and prints the grandchild PID so we can inspect it.
+    let mut intermediate = {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "sleep 30 & echo $!; wait"])
+            .stdout(std::process::Stdio::piped())
+            .process_group(0);
+        cmd.spawn().expect("spawn intermediate")
+    };
+
+    use std::io::BufRead;
+    let stdout = intermediate.stdout.take().unwrap();
+    let reader = std::io::BufReader::new(stdout);
+    let grandchild_pid: u32 = reader
+        .lines()
+        .next()
+        .expect("should get a line")
+        .expect("should read line")
+        .trim()
+        .parse()
+        .expect("should parse grandchild PID");
+
+    let intermediate_pid = intermediate.id();
+    let harness_pid = std::process::id();
+
+    // The intermediate is its own process group leader.
+    let intermediate_pgid = unsafe { libc::getpgid(intermediate_pid as i32) };
+    assert_eq!(
+        intermediate_pgid, intermediate_pid as i32,
+        "intermediate should be its own process group leader"
+    );
+
+    // The grandchild inherits the intermediate's group — NOT the harness's.
+    let grandchild_pgid = unsafe { libc::getpgid(grandchild_pid as i32) };
+    assert_eq!(
+        grandchild_pgid, intermediate_pid as i32,
+        "grandchild PGID should be the intermediate, not the harness"
+    );
+    assert_ne!(
+        grandchild_pgid, harness_pid as i32,
+        "grandchild PGID must not equal harness PID — this is the false-positive shape"
+    );
+
+    // The ancestor walk finds the harness even though PGID doesn't match it.
+    let skip_pids = vec![harness_pid];
+    let found =
+        super::sweep::walk_has_tracked_ancestor(grandchild_pid, &skip_pids, super::sweep::ppid_of);
+    assert!(
+        found,
+        "walk must detect grandchild as a live descendant of the tracked harness"
+    );
+
+    // Contrast: empty skip_pids → not a descendant of any tracked harness.
+    let not_found =
+        super::sweep::walk_has_tracked_ancestor(grandchild_pid, &[], super::sweep::ppid_of);
+    assert!(
+        !not_found,
+        "walk with empty skip_pids must return false for a real orphan"
+    );
+
+    // Guard against PID reuse: verify the intermediate is still alive before
+    // cleanup so a recycled PID can't corrupt the kill target.
+    assert!(
+        intermediate
+            .try_wait()
+            .expect("try_wait on intermediate")
+            .is_none(),
+        "intermediate exited before cleanup — its PID may have been recycled"
+    );
+
+    // Cleanup: SIGKILL the intermediate's process group (takes sleep 30 with it).
+    unsafe { libc::kill(-(intermediate_pid as i32), libc::SIGKILL) };
+    let _ = intermediate.wait();
 }

@@ -10,6 +10,41 @@ use crate::{
 
 // ── Reads (pure-nostr via /query) ────────────────────────────────────────────
 
+const DIRECTORY_PAGE_SIZE: usize = 500;
+
+fn advance_directory_cursor(filter: &mut serde_json::Value, page: &[nostr::Event]) {
+    let last = page
+        .last()
+        .expect("a full relay page always has a last event");
+    filter["until"] = serde_json::json!(last.created_at.as_secs());
+    filter["before_id"] = serde_json::json!(last.id.to_hex());
+}
+
+/// Fetch every page for a historical relay filter using the relay's composite
+/// `(until, before_id)` cursor. A timestamp-only cursor can skip rows when more
+/// than one page of events shares the same second.
+async fn query_relay_all(
+    state: &AppState,
+    mut filter: serde_json::Value,
+) -> Result<Vec<nostr::Event>, String> {
+    filter["limit"] = serde_json::json!(DIRECTORY_PAGE_SIZE);
+    let mut all = Vec::new();
+
+    loop {
+        let page = query_relay(state, &[filter.clone()]).await?;
+        let done = page.len() < DIRECTORY_PAGE_SIZE;
+
+        if !done {
+            advance_directory_cursor(&mut filter, &page);
+        }
+
+        all.extend(page);
+        if done {
+            return Ok(all);
+        }
+    }
+}
+
 #[tauri::command]
 pub async fn get_channels(state: State<'_, AppState>) -> Result<Vec<ChannelInfo>, String> {
     let _profile_start = std::time::Instant::now();
@@ -20,26 +55,11 @@ pub async fn get_channels(state: State<'_, AppState>) -> Result<Vec<ChannelInfo>
 
     // Step 1: find all kind:39002 (members) events that mention me, then
     // pull the channel ids out of their `d` tags.
-    let member_events = {
-        let mut all = Vec::new();
-        let mut until: Option<u64> = None;
-        loop {
-            let mut f = serde_json::json!({"kinds": [39002], "#p": [&my_pubkey], "limit": 500});
-            if let Some(u) = until {
-                f["until"] = serde_json::json!(u);
-            }
-            let page = query_relay(&state, &[f]).await?;
-            let done = page.len() < 500;
-            if let Some(t) = page.iter().map(|e| e.created_at.as_secs()).min() {
-                until = Some(t.saturating_sub(1));
-            }
-            all.extend(page);
-            if done {
-                break;
-            }
-        }
-        all
-    };
+    let member_events = query_relay_all(
+        &state,
+        serde_json::json!({"kinds": [39002], "#p": [&my_pubkey]}),
+    )
+    .await?;
 
     #[cfg(debug_assertions)]
     let t_members = _profile_start.elapsed();
@@ -85,14 +105,7 @@ pub async fn get_channels(state: State<'_, AppState>) -> Result<Vec<ChannelInfo>
     // Step 3: fetch ALL open channel metadata so the channel browser can show
     // discoverable channels the user hasn't joined yet. The relay's access
     // control allows reading kind:39000 for open channels regardless of membership.
-    let open_meta_events = query_relay(
-        &state,
-        &[serde_json::json!({
-            "kinds": [39000],
-            "limit": 5000,
-        })],
-    )
-    .await?;
+    let open_meta_events = query_relay_all(&state, serde_json::json!({"kinds": [39000]})).await?;
 
     #[cfg(debug_assertions)]
     let t_open_meta = _profile_start.elapsed();

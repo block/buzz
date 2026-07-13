@@ -18,7 +18,7 @@ use axum::{
 use base64::Engine;
 use buzz_audit::{AuditAction, NewAuditEntry};
 use buzz_core::tenant::TenantContext;
-use buzz_media::{BlobDescriptor, MediaError};
+use buzz_media::{BlobDescriptor, MediaError, UploadAttribution, UploadNetworkInfo};
 
 use crate::state::AppState;
 
@@ -42,15 +42,15 @@ const MEDIA_UPLOAD_RATE_WINDOW: Duration = Duration::from_secs(60);
 
 struct UploadPermit {
     _global: tokio::sync::OwnedSemaphorePermit,
-    in_flight: Arc<dashmap::DashMap<[u8; 32], u32>>,
-    pubkey: [u8; 32],
+    in_flight: Arc<dashmap::DashMap<crate::state::ScopedPubkeyKey, u32>>,
+    key: crate::state::ScopedPubkeyKey,
 }
 
 impl Drop for UploadPermit {
     fn drop(&mut self) {
         use dashmap::mapref::entry::Entry;
 
-        if let Entry::Occupied(mut entry) = self.in_flight.entry(self.pubkey) {
+        if let Entry::Occupied(mut entry) = self.in_flight.entry(self.key) {
             if *entry.get() <= 1 {
                 entry.remove();
             } else {
@@ -60,8 +60,12 @@ impl Drop for UploadPermit {
     }
 }
 
-fn upload_rate_limited(state: &AppState, pubkey: &nostr::PublicKey) -> bool {
-    let key: [u8; 32] = pubkey.to_bytes();
+fn upload_rate_limited(
+    state: &AppState,
+    community_id: buzz_core::CommunityId,
+    pubkey: &nostr::PublicKey,
+) -> bool {
+    let key = (community_id, pubkey.to_bytes());
     let now = Instant::now();
     let limit = state.config.media_uploads_per_minute;
     let mut entry = state
@@ -83,6 +87,7 @@ fn upload_rate_limited(state: &AppState, pubkey: &nostr::PublicKey) -> bool {
 
 fn acquire_upload_permit(
     state: &AppState,
+    community_id: buzz_core::CommunityId,
     pubkey: &nostr::PublicKey,
 ) -> Result<UploadPermit, MediaError> {
     let global = state
@@ -91,7 +96,7 @@ fn acquire_upload_permit(
         .try_acquire_owned()
         .map_err(|_| MediaError::UploadConcurrencyLimitReached)?;
 
-    let key: [u8; 32] = pubkey.to_bytes();
+    let key = (community_id, pubkey.to_bytes());
     let mut in_flight = state.media_uploads_in_flight.entry(key).or_insert(0);
     if *in_flight >= state.config.media_max_concurrent_uploads_per_pubkey {
         return Err(MediaError::UploadConcurrencyLimitReached);
@@ -102,7 +107,7 @@ fn acquire_upload_permit(
     Ok(UploadPermit {
         _global: global,
         in_flight: Arc::clone(&state.media_uploads_in_flight),
-        pubkey: key,
+        key,
     })
 }
 
@@ -185,15 +190,16 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedUpload {
         .await
         .map_err(|_| MediaError::RelayMembershipRequired)?;
 
-        if upload_rate_limited(state, &auth_event.pubkey) {
+        if upload_rate_limited(state, tenant.community(), &auth_event.pubkey) {
             metrics::counter!("buzz_media_upload_rejections_total", "reason" => "rate_limit")
                 .increment(1);
             return Err(MediaError::UploadRateLimitExceeded);
         }
-        let upload_permit = acquire_upload_permit(state, &auth_event.pubkey).inspect_err(|_| {
-            metrics::counter!("buzz_media_upload_rejections_total", "reason" => "concurrency")
-                .increment(1);
-        })?;
+        let upload_permit = acquire_upload_permit(state, tenant.community(), &auth_event.pubkey)
+            .inspect_err(|_| {
+                metrics::counter!("buzz_media_upload_rejections_total", "reason" => "concurrency")
+                    .increment(1);
+            })?;
 
         Ok(AuthenticatedUpload {
             auth_event,
@@ -201,6 +207,52 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedUpload {
             _upload_permit: upload_permit,
         })
     }
+}
+
+/// Build per-event upload attribution when upload records are enabled
+/// (`BUZZ_MEDIA_UPLOAD_RECORDS`). Returns `None` when the feature is off —
+/// the upload pipeline then writes no `_uploads/` record at all.
+///
+/// - `uploader_name` is the uploader's current display name in the bound
+///   community (best-effort label; lookup failure degrades to absent).
+/// - `net.ip` is read from the operator-configured trusted edge header
+///   (`BUZZ_MEDIA_UPLOAD_IP_HEADER`) and validated as a public IP —
+///   fail-empty: missing/malformed/non-public values record nothing. The
+///   socket address is never used; behind a sidecar it is meaningless, and a
+///   wrong address is worse than none.
+/// - `net.port` (optional companion header) is only kept alongside a valid IP.
+async fn upload_attribution(
+    state: &AppState,
+    auth: &AuthenticatedUpload,
+    headers: &HeaderMap,
+) -> Option<UploadAttribution> {
+    let cfg = &state.config.media;
+    if !cfg.upload_records_enabled {
+        return None;
+    }
+
+    let uploader_name = state
+        .db
+        .get_user(auth.tenant.community(), &auth.auth_event.pubkey.to_bytes())
+        .await
+        .ok()
+        .flatten()
+        .and_then(|profile| profile.display_name)
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty());
+
+    let header_value = |name: &Option<String>| {
+        name.as_deref()
+            .and_then(|h| headers.get(h))
+            .and_then(|v| v.to_str().ok())
+    };
+    let ip = header_value(&cfg.upload_ip_header).and_then(buzz_media::parse_public_ip);
+    let port = ip.and(header_value(&cfg.upload_port_header).and_then(buzz_media::parse_port));
+
+    Some(UploadAttribution {
+        uploader_name,
+        net: UploadNetworkInfo { ip, port },
+    })
 }
 
 /// PUT /media/upload — Blossom BUD-02 upload.
@@ -232,6 +284,8 @@ pub async fn upload_blob(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
 
+    let attribution = upload_attribution(&state, &auth, &headers).await;
+
     let mut descriptor = if content_type.starts_with("video/") {
         // Video path: stream body directly to disk — never fully buffered in RAM.
         let content_length = headers
@@ -245,6 +299,7 @@ pub async fn upload_blob(
             &auth.auth_event,
             body.into_data_stream(),
             content_length,
+            attribution,
         )
         .await?
     } else {
@@ -274,6 +329,7 @@ pub async fn upload_blob(
                 &auth.tenant,
                 &auth.auth_event,
                 bytes,
+                attribution,
             )
             .await?
         } else {
@@ -283,6 +339,7 @@ pub async fn upload_blob(
                 &auth.tenant,
                 &auth.auth_event,
                 bytes,
+                attribution,
             )
             .await?
         }
@@ -301,7 +358,12 @@ pub async fn upload_blob(
         }
         _ => "other",
     };
-    metrics::counter!("buzz_media_uploads_total", "mime" => mime_label.to_owned()).increment(1);
+    metrics::counter!(
+        "buzz_media_uploads_total",
+        "mime" => mime_label.to_owned(),
+        "community" => auth.tenant.host().to_owned()
+    )
+    .increment(1);
 
     // Audit via bounded channel — same pattern as event audit.
     let desc = descriptor.clone();
@@ -743,8 +805,87 @@ fn extract_blossom_auth(headers: &HeaderMap) -> Result<nostr::Event, MediaError>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
+    use uuid::Uuid;
 
     const VALID_HASH: &str = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+
+    async fn test_state() -> Arc<AppState> {
+        let mut config = crate::config::Config::from_env().expect("default config loads");
+        config.require_relay_membership = false;
+        config.redis_url = "redis://127.0.0.1:1".to_string();
+        config.media_uploads_per_minute = 1;
+        config.media_max_concurrent_uploads = 2;
+        config.media_max_concurrent_uploads_per_pubkey = 1;
+
+        let pool = sqlx::PgPool::connect_lazy(&config.database_url).expect("lazy pg pool");
+        let db = buzz_db::Db::from_pool(pool.clone());
+        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("redis pool");
+        let pubsub = Arc::new(
+            buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
+                .await
+                .expect("pubsub manager"),
+        );
+        let audit = buzz_audit::AuditService::new(pool.clone());
+        let auth = buzz_auth::AuthService::new(config.auth.clone());
+        let search = buzz_search::SearchService::new(pool.clone());
+        let workflow_engine = Arc::new(buzz_workflow::WorkflowEngine::new(
+            db.clone(),
+            buzz_workflow::WorkflowConfig::default(),
+        ));
+        let media_storage = buzz_media::MediaStorage::new(&config.media).expect("media storage");
+        let (state, _audit_shutdown) = AppState::new(
+            config,
+            db,
+            redis_pool,
+            audit,
+            pubsub,
+            auth,
+            search,
+            workflow_engine,
+            nostr::Keys::generate(),
+            media_storage,
+        );
+        Arc::new(state)
+    }
+
+    #[tokio::test]
+    async fn upload_rate_limiter_is_scoped_by_community() {
+        let state = test_state().await;
+        let pubkey = nostr::Keys::generate().public_key();
+        let community_a = buzz_core::CommunityId::from_uuid(Uuid::from_u128(0xAAAA));
+        let community_b = buzz_core::CommunityId::from_uuid(Uuid::from_u128(0xBBBB));
+
+        assert!(!upload_rate_limited(&state, community_a, &pubkey));
+        assert!(upload_rate_limited(&state, community_a, &pubkey));
+        assert!(
+            !upload_rate_limited(&state, community_b, &pubkey),
+            "A's exhausted upload budget must not rate-limit the same key in B"
+        );
+    }
+
+    #[tokio::test]
+    async fn upload_concurrency_limit_is_scoped_by_community() {
+        let state = test_state().await;
+        let pubkey = nostr::Keys::generate().public_key();
+        let community_a = buzz_core::CommunityId::from_uuid(Uuid::from_u128(0xAAAA));
+        let community_b = buzz_core::CommunityId::from_uuid(Uuid::from_u128(0xBBBB));
+
+        let permit_a =
+            acquire_upload_permit(&state, community_a, &pubkey).expect("first A upload allowed");
+        assert!(matches!(
+            acquire_upload_permit(&state, community_a, &pubkey),
+            Err(MediaError::UploadConcurrencyLimitReached)
+        ));
+        let permit_b = acquire_upload_permit(&state, community_b, &pubkey)
+            .expect("A's in-flight upload must not block B");
+
+        drop(permit_b);
+        drop(permit_a);
+    }
 
     #[test]
     fn test_validate_media_path_bare_hash() {
@@ -827,6 +968,20 @@ mod tests {
     #[test]
     fn test_validate_media_path_rejects_empty() {
         assert!(validate_media_path("").is_err());
+    }
+
+    #[test]
+    fn test_validate_media_path_rejects_upload_record_keys() {
+        // The `_uploads/` per-event records (and `_meta/` sidecars) must be
+        // unreachable through the serve path. Axum's single path segment
+        // can't even contain `/`, but assert the validator rejects these
+        // shapes outright so the property survives any routing change.
+        assert!(validate_media_path("_uploads").is_err());
+        assert!(validate_media_path(&format!("_uploads/c/{VALID_HASH}/01J.json")).is_err());
+        assert!(validate_media_path("_meta").is_err());
+        assert!(validate_media_path(&format!("_meta/c/{VALID_HASH}.json")).is_err());
+        // Suffix-style metadata keys are also non-servable (>3 segments / bad ext).
+        assert!(validate_media_path(&format!("{VALID_HASH}.png.metadata")).is_err());
     }
 
     #[test]

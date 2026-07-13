@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   collectAuxEventIdsForDeletionBackfill,
   collectMessageIdsForAuxBackfill,
+  fetchStructuralAuxForMessages,
   mergeAuxEventsWithDeletionBackfill,
 } from "./auxBackfill.ts";
 
@@ -125,4 +126,55 @@ test("merges deletion markers that target cached or fetched auxiliary event ids"
     merged.map((cachedEvent) => cachedEvent.id),
     [fetchedReactionId, cachedReactionDeletionId, fetchedReactionDeletionId],
   );
+});
+
+test("fetchStructuralAuxForMessages returns edits plus their deletion closure", async () => {
+  const replyId = hex("1");
+  const editId = hex("2");
+  const editDeletionId = hex("3");
+  const edit = event(editId, 40003, {
+    content: "edited text",
+    tags: [
+      ["h", CHANNEL_ID],
+      ["e", replyId],
+    ],
+  });
+  const editDeletion = event(editDeletionId, 5, {
+    tags: [
+      ["h", CHANNEL_ID],
+      ["e", editId],
+    ],
+  });
+  const auxCalls = [];
+  const deletionCalls = [];
+
+  const auxEvents = await fetchStructuralAuxForMessages(CHANNEL_ID, [replyId], {
+    fetchAuxEventsForMessages: async (channelId, ids) => {
+      auxCalls.push({ channelId, ids });
+      return [edit];
+    },
+    fetchAuxDeletionEventsForAuxEvents: async (channelId, ids) => {
+      deletionCalls.push({ channelId, ids });
+      return [editDeletion];
+    },
+  });
+
+  assert.deepEqual(auxCalls, [{ channelId: CHANNEL_ID, ids: [replyId] }]);
+  assert.deepEqual(deletionCalls, [{ channelId: CHANNEL_ID, ids: [editId] }]);
+  assert.deepEqual(
+    auxEvents.map((auxEvent) => auxEvent.id),
+    [editId, editDeletionId],
+  );
+});
+
+test("fetchStructuralAuxForMessages skips all fetches for no message ids", async () => {
+  const auxEvents = await fetchStructuralAuxForMessages(CHANNEL_ID, [], {
+    fetchAuxEventsForMessages: async () => {
+      throw new Error("must not fetch aux for an empty id set");
+    },
+    fetchAuxDeletionEventsForAuxEvents: async () => {
+      throw new Error("must not fetch deletions for an empty id set");
+    },
+  });
+  assert.deepEqual(auxEvents, []);
 });

@@ -1,3 +1,4 @@
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { useUpdaterContext } from "./hooks/UpdaterProvider";
 import { Button } from "@/shared/ui/button";
 import {
@@ -5,7 +6,6 @@ import {
   SettingsOptionRow,
 } from "./ui/SettingsOptionGroup";
 import { SettingsSectionHeader } from "./ui/SettingsSectionHeader";
-
 export function UpdateChecker() {
   const { status, checkForUpdate, relaunch } = useUpdaterContext();
 
@@ -67,6 +67,26 @@ export function UpdateChecker() {
             </div>
             <Button variant="outline" size="sm" onClick={checkForUpdate}>
               Check Again
+            </Button>
+          </SettingsOptionRow>
+        )}
+
+        {status.state === "manual-required" && (
+          <SettingsOptionRow>
+            <div className="min-w-0">
+              <p className="text-sm font-medium">
+                Update available — v{status.version}
+              </p>
+              <p className="text-sm font-normal text-muted-foreground">
+                In-app updates aren't supported on this Linux package. Download
+                the new version from GitHub.{" "}
+                <span className="text-muted-foreground">
+                  Switch to the AppImage build for automatic updates.
+                </span>
+              </p>
+            </div>
+            <Button size="sm" onClick={() => void openUrl(status.releaseUrl)}>
+              Download Update
             </Button>
           </SettingsOptionRow>
         )}

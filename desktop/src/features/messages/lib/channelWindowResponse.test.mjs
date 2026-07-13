@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { parseChannelWindowResponse } from "./channelWindowResponse.ts";
+import {
+  parseChannelWindowResponse,
+  parseLiveThreadSummary,
+} from "./channelWindowResponse.ts";
 
 function event(id, kind, createdAt, content = "", tags = []) {
   return {
@@ -123,5 +126,46 @@ test("rejects absent or contradictory signed bounds", () => {
   assert.throws(
     () => parseChannelWindowResponse([root, bad], "channel", null),
     /disagree/,
+  );
+});
+
+test("parses a relay-pushed live thread summary", () => {
+  const rootId = "a".padEnd(64, "0");
+  const push = event(
+    "s",
+    39005,
+    700,
+    JSON.stringify({
+      reply_count: 4,
+      descendant_count: 6,
+      last_reply_at: 650,
+      participants: ["c".repeat(64)],
+    }),
+    [
+      ["e", rootId],
+      ["d", rootId],
+    ],
+  );
+  const parsed = parseLiveThreadSummary(push);
+  assert.equal(parsed.rootId, rootId);
+  assert.equal(parsed.live.createdAt, 700);
+  assert.deepEqual(parsed.live.summary, {
+    replyCount: 4,
+    descendantCount: 6,
+    lastReplyAt: 650,
+    participantPubkeys: ["c".repeat(64)],
+  });
+});
+
+test("drops malformed or mistargeted live thread summaries", () => {
+  const rootId = "a".padEnd(64, "0");
+  // Wrong kind.
+  assert.equal(parseLiveThreadSummary(event("x", 9, 700, "hi")), null);
+  // No e-tag root.
+  assert.equal(parseLiveThreadSummary(event("s", 39005, 700, "{}")), null);
+  // Unparseable content only skips one refresh instead of throwing.
+  assert.equal(
+    parseLiveThreadSummary(event("s", 39005, 700, "not json", [["e", rootId]])),
+    null,
   );
 });

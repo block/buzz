@@ -1,6 +1,8 @@
 mod app_state;
+mod archive;
 mod commands;
 mod deep_link;
+mod event_sync;
 mod events;
 mod huddle;
 mod managed_agents;
@@ -11,6 +13,7 @@ mod migration;
 #[cfg(test)]
 mod model_tests;
 mod models;
+mod nostr_bind;
 pub mod nostr_convert;
 mod prevent_sleep;
 mod ptt_shortcut;
@@ -45,8 +48,13 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
+#[cfg(target_os = "macos")]
+use tauri::Listener;
 use tauri::{Emitter, Manager, RunEvent};
 use tauri_plugin_window_state::StateFlags;
+
+#[cfg(target_os = "macos")]
+const INITIAL_RENDER_READY_EVENT: &str = "initial-render-ready";
 
 #[tauri::command]
 fn perform_sidebar_default_haptic() {
@@ -62,6 +70,155 @@ fn perform_sidebar_default_haptic() {
             NSHapticFeedbackPerformanceTime::Now,
         );
     }
+}
+
+/// Performs the window action matching the macOS "double-click a window's
+/// title bar to" preference (`AppleActionOnDoubleClick`).
+///
+/// macOS values are `Minimize`, `Maximize` (default when unset), `Fill`, or
+/// `None`.
+/// The desktop app uses a web-based title-bar drag region, so the frontend
+/// forwards double-clicks here and suppresses Tauri's injected drag-region
+/// handler, whose default macOS path hardcodes maximize.
+///
+/// For `Fill`, resize to the current monitor work area instead of using
+/// Tauri's maximize path, which maps to macOS zoom for titled, resizable
+/// windows.
+///
+/// On non-macOS platforms this always toggles maximize (the historical
+/// behavior).
+#[tauri::command]
+fn title_bar_double_click(window: tauri::Window) {
+    #[cfg(target_os = "macos")]
+    {
+        let action = {
+            let output = std::process::Command::new("defaults")
+                .args(["read", "-g", "AppleActionOnDoubleClick"])
+                .output();
+            match output {
+                Ok(output) if output.status.success() => {
+                    String::from_utf8_lossy(&output.stdout).trim().to_string()
+                }
+                _ => "Maximize".to_string(),
+            }
+        };
+
+        match action.as_str() {
+            "None" => {}
+            "Minimize" => {
+                let _ = window.minimize();
+            }
+            "Fill" => {
+                fill_window(&window);
+            }
+            // "Maximize" or any unexpected value.
+            _ => {
+                toggle_maximize(&window);
+            }
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        toggle_maximize(&window);
+    }
+}
+
+/// Fills the current display work area, excluding system UI like the menu bar
+/// and Dock.
+#[cfg(target_os = "macos")]
+fn fill_window(window: &tauri::Window) {
+    match window.current_monitor() {
+        Ok(Some(monitor)) => {
+            if window.is_maximized().unwrap_or(false) {
+                let _ = window.unmaximize();
+            }
+
+            let work_area = monitor.work_area();
+            let _ = window.set_position(work_area.position);
+            let _ = window.set_size(work_area.size);
+        }
+        _ => {
+            let _ = window.maximize();
+        }
+    }
+}
+
+/// Toggles the window between maximized and its previous size, matching the
+/// historical double-click behavior.
+fn toggle_maximize(window: &tauri::Window) {
+    match window.is_maximized() {
+        Ok(true) => {
+            let _ = window.unmaximize();
+        }
+        _ => {
+            let _ = window.maximize();
+        }
+    }
+}
+
+fn reveal_initial_window<R: tauri::Runtime>(window: &tauri::Window<R>) {
+    if let Err(error) = window.show() {
+        eprintln!("buzz-desktop: failed to reveal main window: {error}");
+        return;
+    }
+    if let Err(error) = window.set_focus() {
+        eprintln!("buzz-desktop: failed to focus main window: {error}");
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn set_initial_window_backing<R: tauri::Runtime>(window: &tauri::Window<R>) {
+    // The window remains transparent at runtime for vibrancy. Use an opaque
+    // native backing only across the first visible frames so the previous app
+    // cannot show through before WebKit has submitted its first surface.
+    if let Err(error) = window.set_background_color(Some(tauri::window::Color(17, 21, 24, 255))) {
+        eprintln!("buzz-desktop: failed to set initial window backing: {error}");
+    }
+}
+
+#[cfg(target_os = "macos")]
+async fn clear_initial_window_backing<R: tauri::Runtime>(window: &tauri::Window<R>) {
+    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    if let Err(error) = window.set_background_color(None) {
+        eprintln!("buzz-desktop: failed to clear initial window backing: {error}");
+    }
+}
+
+#[cfg(target_os = "macos")]
+async fn wait_for_stable_initial_window_geometry<R: tauri::Runtime>(window: &tauri::Window<R>) {
+    const MAX_POLLS: usize = 120;
+    const REQUIRED_STABLE_POLLS: usize = 4;
+
+    let mut previous_bounds = None;
+    let mut stable_polls = 0;
+
+    for _ in 0..MAX_POLLS {
+        // Accept whatever geometry the window-state plugin restores — maximized
+        // or a normal saved size. macOS applies the restore asynchronously, so
+        // we only need consecutive identical outer bounds to know it settled.
+        // Gating on `is_maximized()` here would leave `bounds` permanently
+        // `None` for restored non-maximized windows and stall the reveal until
+        // the poll timeout.
+        let bounds = match (window.outer_position(), window.outer_size()) {
+            (Ok(position), Ok(size)) => Some((position.x, position.y, size.width, size.height)),
+            _ => None,
+        };
+
+        if bounds.is_some() && bounds == previous_bounds {
+            stable_polls += 1;
+            if stable_polls >= REQUIRED_STABLE_POLLS {
+                return;
+            }
+        } else {
+            stable_polls = 0;
+        }
+        previous_bounds = bounds;
+
+        tokio::time::sleep(std::time::Duration::from_millis(16)).await;
+    }
+
+    eprintln!("buzz-desktop: initial window geometry did not settle before reveal timeout");
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -84,17 +241,59 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(
             tauri_plugin_window_state::Builder::default()
-                // The main window should always launch edge-to-edge in the
-                // available desktop area. Do not let stale saved geometry or
-                // fullscreen state override the maximized launch config.
-                .with_state_flags(
-                    StateFlags::all()
-                        & !(StateFlags::VISIBLE
-                            | StateFlags::POSITION
-                            | StateFlags::SIZE
-                            | StateFlags::MAXIMIZED
-                            | StateFlags::FULLSCREEN),
-                )
+                // Visibility is excluded: the native reveal plugin below
+                // shows the window after saved geometry has been restored.
+                .with_state_flags(StateFlags::all() & !StateFlags::VISIBLE)
+                .build(),
+        )
+        .plugin(
+            tauri::plugin::Builder::<_, ()>::new("initial-window-reveal")
+                .on_webview_ready(|webview| {
+                    if webview.label() != "main" {
+                        return;
+                    }
+
+                    // macOS applies the restored geometry asynchronously. Wait
+                    // for several identical outer bounds and for React to
+                    // commit the startup surface before revealing it.
+                    let window = webview.window();
+
+                    #[cfg(target_os = "macos")]
+                    {
+                        set_initial_window_backing(&window);
+
+                        let (initial_render_tx, initial_render_rx) = tokio::sync::oneshot::channel();
+                        window
+                            .app_handle()
+                            .once(INITIAL_RENDER_READY_EVENT, move |_| {
+                                let _ = initial_render_tx.send(());
+                            });
+
+                        tauri::async_runtime::spawn(async move {
+                            wait_for_stable_initial_window_geometry(&window).await;
+
+                            if tokio::time::timeout(
+                                std::time::Duration::from_secs(5),
+                                initial_render_rx,
+                            )
+                            .await
+                            .is_err()
+                            {
+                                eprintln!(
+                                    "buzz-desktop: initial render did not commit before reveal timeout"
+                                );
+                            }
+
+                            reveal_initial_window(&window);
+                            clear_initial_window_backing(&window).await;
+                        });
+                    }
+
+                    #[cfg(not(target_os = "macos"))]
+                    {
+                        reveal_initial_window(&window);
+                    }
+                })
                 .build(),
         )
         .plugin(tauri_plugin_websocket::init())
@@ -232,14 +431,26 @@ pub fn run() {
             resolve_persisted_identity(&app_handle, &state)
                 .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
 
-            // Sync team-dir edits and reconcile persona/team events. Needs the
-            // resolved owner keys, so it runs after identity resolution.
+            // When the identity is in recovery mode (lost = keyring empty after
+            // migration, or keyring-locked = keyring unreachable but marker
+            // present), all owner-keyed side effects (event sync, agent restore,
+            // relay publish) are skipped. The frontend shows a recovery screen;
+            // the user must relaunch after restoring the identity.
+            let identity_lost = state
+                .identity_lost
+                .load(std::sync::atomic::Ordering::Acquire);
+            let keyring_locked = state
+                .keyring_locked
+                .load(std::sync::atomic::Ordering::Acquire);
+            let recovery_mode = identity_lost || keyring_locked;
+
+            // Snapshot owner keys after identity resolution; the best-effort
+            // event reconcile itself runs off the synchronous setup path below.
             let owner_keys = state
                 .keys
                 .lock()
                 .map(|k| k.clone())
                 .map_err(|e| -> Box<dyn std::error::Error> { e.to_string().into() })?;
-            migration::run_event_sync(&app_handle, &owner_keys);
 
             // Backfill the pinned persona snapshot for any pre-existing agent
             // that predates the record-authoritative-spawn cutover (persona_id
@@ -330,13 +541,22 @@ pub fn run() {
             // bundled CLI binary. Non-fatal: agents find CLI via PATH.
             if let Ok(exe) = std::env::current_exe() {
                 if let Some(parent) = exe.parent() {
-                    if let Err(error) = managed_agents::ensure_cli_symlink(parent) {
+                    if let Err(error) = managed_agents::ensure_cli_symlink(parent, is_dev_nest) {
                         eprintln!("buzz-desktop: failed to create CLI symlink: {error}");
                     }
                 }
             }
 
             try_regenerate_nest(&app_handle);
+
+            // Sync team-dir edits and reconcile persona/team/agent events after
+            // setup can continue. It is best-effort retention backfill, unlike
+            // identity resolution above, so JSON/SQLite/signing work must not
+            // hold the boot path hostage. Skipped in recovery mode — the owner
+            // key is ephemeral.
+            if !recovery_mode {
+                event_sync::spawn_event_sync(app_handle.clone(), owner_keys);
+            }
 
             if let Some(mgr) = huddle::models::global_model_manager() {
                 mgr.start_stt_download(state.http_client.clone());
@@ -362,7 +582,9 @@ pub fn run() {
             // the boot-time repos symlink result (see restore_agents above):
             // skip when a configured repos_dir could not be resolved, so no
             // agent clones into a REPOS that isn't the user's target.
-            if restore_agents {
+            // Also skipped in recovery mode — agents must not be spawned
+            // under an ephemeral owner key.
+            if restore_agents && !recovery_mode {
                 tauri::async_runtime::spawn(async move {
                     if let Err(error) =
                         restore_managed_agents_on_launch(&app_handle, shutdown_started.as_ref())
@@ -417,38 +639,46 @@ pub fn run() {
             // One loop is the sole publisher for persona, team, and managed-
             // agent writers; a relay-unreachable tick leaves rows pending for
             // the next sweep.
-            let flush_handle = app.handle().clone();
-            tauri::async_runtime::spawn(async move {
-                use std::time::Duration;
-                use tauri::Manager;
-                let Ok(db_path) = managed_agents::managed_agents_base_dir(&flush_handle)
-                    .map(|d| d.join("retention.db"))
-                else {
-                    eprintln!("buzz-desktop: event-flush: cannot resolve retention db path");
-                    return;
-                };
-                loop {
-                    let state = flush_handle.state::<AppState>();
-                    if let Err(e) =
-                        managed_agents::persona_events::flush_pending_events(&db_path, &state).await
-                    {
-                        eprintln!("buzz-desktop: event-flush: {e}");
+            // Skipped in recovery mode — flushing under an ephemeral key would
+            // publish events attributed to an identity the user doesn't own.
+            if !recovery_mode {
+                let flush_handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    use std::time::Duration;
+                    use tauri::Manager;
+                    let Ok(db_path) = managed_agents::managed_agents_base_dir(&flush_handle)
+                        .map(|d| d.join("retention.db"))
+                    else {
+                        eprintln!("buzz-desktop: event-flush: cannot resolve retention db path");
+                        return;
+                    };
+                    loop {
+                        let state = flush_handle.state::<AppState>();
+                        if let Err(e) =
+                            managed_agents::persona_events::flush_pending_events(&db_path, &state)
+                                .await
+                        {
+                            eprintln!("buzz-desktop: event-flush: {e}");
+                        }
+                        tokio::time::sleep(Duration::from_secs(30)).await;
                     }
-                    tokio::time::sleep(Duration::from_secs(30)).await;
-                }
-            });
+                });
+            }
 
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            title_bar_double_click,
             get_identity,
             get_nsec,
             import_identity,
+            persist_current_identity,
             get_profile,
             update_profile,
             get_user_profile,
             get_users_batch,
             get_user_notes,
+            get_git_identity,
             get_project_repo_snapshot,
             get_project_repo_diff,
             get_project_local_repo_diff,
@@ -470,6 +700,7 @@ pub fn run() {
             install_acp_runtime,
             discover_managed_agent_prereqs,
             sign_event,
+            sign_nostr_identity_binding,
             decrypt_observer_event,
             build_observer_control_event,
             create_auth_event,
@@ -514,6 +745,9 @@ pub fn run() {
             upload_media_bytes,
             download_image,
             download_file,
+            fetch_media_bytes,
+            copy_image_to_clipboard,
+            fetch_snapshot_bytes,
             list_relay_members,
             get_my_relay_membership,
             add_relay_member,
@@ -522,6 +756,7 @@ pub fn run() {
             archive_identity,
             unarchive_identity,
             list_archived_identities,
+            get_relay_self,
             resolve_oa_owner,
             list_relay_agents,
             list_managed_agents,
@@ -529,12 +764,18 @@ pub fn run() {
             start_managed_agent,
             stop_managed_agent,
             set_managed_agent_start_on_app_launch,
+            set_managed_agent_auto_restart,
             delete_managed_agent,
             get_managed_agent_log,
             get_agent_models,
             discover_agent_models,
             get_agent_config_surface,
+            get_runtime_file_config,
+            get_baked_build_env_keys,
+            get_baked_build_env,
             put_agent_session_config,
+            get_global_agent_config,
+            set_global_agent_config,
             mesh_availability,
             mesh_start_node,
             mesh_ensure_client_node,
@@ -568,9 +809,16 @@ pub fn run() {
             pick_team_directory,
             export_team_to_json,
             parse_team_file,
-            parse_persona_files,
-            export_persona_to_json,
+            export_agent_snapshot,
+            preview_agent_snapshot_import,
+            confirm_agent_snapshot_import,
+            encode_agent_snapshot_for_send,
+            export_team_snapshot,
+            encode_team_snapshot_for_send,
+            preview_team_snapshot_import,
+            confirm_team_snapshot_import,
             get_channel_workflows,
+            get_channels_workflows,
             get_workflow,
             create_workflow,
             update_workflow,
@@ -621,6 +869,20 @@ pub fn run() {
             get_agent_memory,
             relay_reconnect_hook,
             relay_reconnect_hook_configured,
+            observer_archive_default_enabled,
+            agent_metric_archive_default_enabled,
+            archive::archive_events,
+            archive::create_save_subscription,
+            archive::merge_save_subscription_kinds,
+            archive::remove_save_subscription_kind,
+            archive::list_save_subscriptions,
+            archive::delete_save_subscription,
+            archive::read_archived_events,
+            archive::read_archived_observer_events_for_channel,
+            archive::index_observer_channel_id,
+            archive::read_unindexed_observer_rows,
+            is_auto_update_supported,
+            set_window_vibrancy,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

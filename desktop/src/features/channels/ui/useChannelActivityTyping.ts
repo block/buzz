@@ -1,5 +1,6 @@
 import * as React from "react";
 
+import { reportChannelBotTyping } from "@/features/agents/agentWorkingSignal";
 import type { TypingIndicatorEntry } from "@/features/messages/useChannelTyping";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type {
@@ -13,6 +14,22 @@ import {
   buildChannelAgentSessionCandidates,
   getChannelAgentSessionAgents,
 } from "./useChannelAgentSessions";
+
+/**
+ * Key of bot typing pubkeys that may mark the *channel* as working. Only
+ * channel-scoped entries (`threadHeadId === null`) count — thread-only typing
+ * must not light channel-level surfaces (composer bar, sidebar, profile);
+ * thread surfaces apply their own `threadHeadId` filter.
+ */
+export function channelScopedBotTypingPubkeyKey(
+  entries: readonly Pick<TypingIndicatorEntry, "pubkey" | "threadHeadId">[],
+): string {
+  return entries
+    .filter((entry) => entry.threadHeadId === null)
+    .map((entry) => entry.pubkey.toLowerCase())
+    .sort()
+    .join(",");
+}
 
 export function useChannelActivityTyping({
   activeChannel,
@@ -84,6 +101,25 @@ export function useChannelActivityTyping({
     return { botTypingEntries, humanTypingPubkeys };
   }, [channelAgentPubkeys, typingEntries]);
 
+  // Mirror bot typing into the unified working signal so surfaces that read
+  // agentWorkingSignal (sidebar badges, activity panel, composer bar) get the
+  // typing fallback. Entries follow the typing TTL because this effect
+  // re-reports whenever botTypingEntries changes. Thread-only typing is
+  // excluded — see channelScopedBotTypingPubkeyKey.
+  const botTypingPubkeyKey = channelScopedBotTypingPubkeyKey(botTypingEntries);
+  React.useEffect(() => {
+    if (!activeChannelId) {
+      return;
+    }
+    reportChannelBotTyping(
+      activeChannelId,
+      botTypingPubkeyKey ? botTypingPubkeyKey.split(",") : [],
+    );
+    return () => {
+      reportChannelBotTyping(activeChannelId, []);
+    };
+  }, [activeChannelId, botTypingPubkeyKey]);
+
   return {
     agentSessionCandidates: agentCandidates,
     botTypingEntries,
@@ -118,6 +154,45 @@ export function mergeAgentNamesIntoProfiles(
       avatarUrl: merged[key]?.avatarUrl ?? agent.avatarUrl,
       nip05Handle: merged[key]?.nip05Handle ?? null,
       ownerPubkey: merged[key]?.ownerPubkey ?? currentPubkey ?? null,
+      isAgent: true,
+    };
+  }
+  return merged;
+}
+
+/**
+ * Fold channel-member agent flags (`role === "bot"` or `isAgent`) into a
+ * profile lookup as `isAgent: true` entries — the same pattern
+ * `mergeAgentNamesIntoProfiles` applies to managed/relay agents, extended to
+ * the membership signal. Per-pubkey `profiles[pk]?.isAgent` checks
+ * (MessageRow's agent predicate) then see member-only bots — agents known
+ * through channel membership alone, with no profile flag and no
+ * managed/relay/feed presence — without a separate agent-set prop.
+ *
+ * Returns the input lookup unchanged (same reference) when no member carries
+ * an agent flag.
+ */
+export function mergeMemberAgentFlagsIntoProfiles(
+  profiles: UserProfileLookup,
+  channelMembers:
+    | readonly Pick<ChannelMember, "pubkey" | "role" | "isAgent">[]
+    | undefined,
+): UserProfileLookup {
+  const agentMembers = (channelMembers ?? []).filter(
+    (member) => member.role === "bot" || member.isAgent,
+  );
+  if (agentMembers.length === 0) {
+    return profiles;
+  }
+  const merged = { ...profiles };
+  for (const member of agentMembers) {
+    const key = normalizePubkey(member.pubkey);
+    merged[key] = {
+      ...merged[key],
+      displayName: merged[key]?.displayName ?? null,
+      avatarUrl: merged[key]?.avatarUrl ?? null,
+      nip05Handle: merged[key]?.nip05Handle ?? null,
+      ownerPubkey: merged[key]?.ownerPubkey ?? null,
       isAgent: true,
     };
   }

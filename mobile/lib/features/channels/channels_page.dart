@@ -197,15 +197,17 @@ class ChannelsPage extends HookConsumerWidget {
       }
     }
 
-    // Defer the error view to absorb transient AsyncError frames caused by
-    // the relay session cancelling in-flight history fetches on disconnect/
-    // reconnect (relay_session.dart `_cancelAllHistory`). If the error clears
-    // (channels populate or the next _fetch succeeds) within the grace
-    // window, we never render the error UI.
+    // Only surface fetch errors while the relay is stably connected. During a
+    // reconnect the session owns recovery, so a cancelled in-flight query must
+    // not turn into a manual Retry page.
     final showError = useState(false);
     final hasError = channelsAsync.hasError && channels == null;
+    final canSurfaceError =
+        hasError &&
+        sessionState.status != SessionStatus.connecting &&
+        sessionState.status != SessionStatus.reconnecting;
     useEffect(() {
-      if (!hasError) {
+      if (!canSurfaceError) {
         showError.value = false;
         return null;
       }
@@ -213,7 +215,26 @@ class ChannelsPage extends HookConsumerWidget {
         showError.value = true;
       });
       return timer.cancel;
-    }, [hasError]);
+    }, [canSurfaceError]);
+
+    // Match desktop's degraded-state debounce: cached content remains steady
+    // through brief socket flaps, and the banner appears only for a sustained
+    // reconnect.
+    final showConnectionBanner = useState(false);
+    final isReconnectingWithContent =
+        channels != null &&
+        (sessionState.status == SessionStatus.connecting ||
+            sessionState.status == SessionStatus.reconnecting);
+    useEffect(() {
+      if (!isReconnectingWithContent) {
+        showConnectionBanner.value = false;
+        return null;
+      }
+      final timer = Timer(const Duration(seconds: 2), () {
+        showConnectionBanner.value = true;
+      });
+      return timer.cancel;
+    }, [isReconnectingWithContent]);
 
     return FrostedScaffold(
       appBar: FrostedAppBar(
@@ -248,6 +269,7 @@ class ChannelsPage extends HookConsumerWidget {
         channelsAsync: channelsAsync,
         showError: showError.value,
         sessionStatus: sessionState.status,
+        showConnectionBanner: showConnectionBanner.value,
         currentPubkey: currentPubkey,
         onRefresh: () => ref.read(channelsProvider.notifier).refresh(),
         onSelectChannel: openChannel,

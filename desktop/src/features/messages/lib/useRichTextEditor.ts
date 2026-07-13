@@ -8,7 +8,10 @@ import Link from "@tiptap/extension-link";
 import { Extension, type KeyboardShortcutCommand } from "@tiptap/core";
 import { Plugin, Selection, TextSelection } from "@tiptap/pm/state";
 
-import { isMacPlatform } from "@/shared/lib/platform";
+import {
+  hasPrimaryShortcutModifier,
+  isMacPlatform,
+} from "@/shared/lib/platform";
 import type { CustomEmoji } from "@/shared/lib/remarkCustomEmoji";
 
 import { resolveLinkAt, type LinkSelectionInfo } from "./resolveLinkAt";
@@ -92,6 +95,15 @@ export type RichTextEditorOptions = {
    * this for link affordances that follow keyboard cursor movement.
    */
   onLinkSelectionChange?: (info: LinkSelectionInfo | null) => void;
+  /**
+   * Called on ⌘K/Ctrl+K while the editor has focus. The owner should open
+   * the link-edit modal when the shortcut applies (text is selected, or the
+   * caret sits inside an existing link) and return `true` to consume the
+   * keystroke. Return `false` to let the event fall through to the global
+   * quick-search shortcut — a bare caret in the composer must not hijack
+   * app-wide ⌘K muscle memory.
+   */
+  onLinkShortcut?: () => boolean;
 };
 
 const PASTED_LINK_AT_END_RE =
@@ -173,6 +185,7 @@ export function useRichTextEditor({
   isAutocompleteOpen,
   onEditLink,
   onLinkSelectionChange,
+  onLinkShortcut,
 }: RichTextEditorOptions) {
   const onUpdateRef = React.useRef(onUpdate);
   onUpdateRef.current = onUpdate;
@@ -188,6 +201,9 @@ export function useRichTextEditor({
 
   const onLinkSelectionChangeRef = React.useRef(onLinkSelectionChange);
   onLinkSelectionChangeRef.current = onLinkSelectionChange;
+
+  const onLinkShortcutRef = React.useRef(onLinkShortcut);
+  onLinkShortcutRef.current = onLinkShortcut;
 
   const placeholderRef = React.useRef(placeholder);
   placeholderRef.current = placeholder;
@@ -208,6 +224,16 @@ export function useRichTextEditor({
           // should keep the literal "#", not convert to a heading node.
           // Users type #channel-name and the "#" would get eaten otherwise.
           heading: false,
+          // Suppress spellcheck inside inline code spans — code identifiers
+          // are not natural language and should not show red squiggles.
+          code: {
+            HTMLAttributes: { spellcheck: "false" },
+          },
+          // Code blocks already render as <pre><code> which browsers skip
+          // for spellcheck, but be explicit for consistency.
+          codeBlock: {
+            HTMLAttributes: { spellcheck: "false" },
+          },
           // Disable the trailing-node plugin — it forces an empty paragraph
           // after block nodes (lists, blockquotes, code blocks) which creates
           // a phantom empty line in the compact message composer.
@@ -417,7 +443,7 @@ export function useRichTextEditor({
           autocorrect: "off",
           class: `${MESSAGE_MARKDOWN_CLASS} min-h-0 resize-none overflow-y-hidden border-0 bg-transparent px-0 py-0 text-sm leading-5 text-foreground shadow-none focus-visible:ring-0 caret-foreground outline-hidden max-w-none`,
           "data-testid": "message-input",
-          spellcheck: "false",
+          spellcheck: "true",
         },
         // ArrowUp in an empty composer → edit your last message (Slack
         // parity). Handled here in ProseMirror's own DOM `keydown` hook —
@@ -434,6 +460,30 @@ export function useRichTextEditor({
         // command/caret logic, fires regardless of selection state, and works
         // the same across browser engines. Returning `true` consumes the key.
         handleKeyDown: (view, event) => {
+          // ⌘K / Ctrl+K → link editor. The formatting toolbar has always
+          // advertised this shortcut on its link button; bind it here so it
+          // actually works. Kept alongside the ArrowUp handling below rather
+          // than in a keymap extension so the modifier discrimination is
+          // explicit. Only *conditionally* consumed: the owner returns `true`
+          // only when the shortcut applies (selection or caret-on-link), so a
+          // bare caret still falls through to the app-wide quick-search
+          // binding in `AppShell`. Returning `true` makes ProseMirror call
+          // `preventDefault()`, which the AppShell window listener respects
+          // via `event.defaultPrevented`.
+          if (
+            event.key.toLowerCase() === "k" &&
+            hasPrimaryShortcutModifier(event) &&
+            !event.shiftKey &&
+            !event.altKey &&
+            // Ignore held-key auto-repeat (the first press already opened the
+            // dialog and moved focus into it) and mid-IME composition, where
+            // the selection may span uncommitted composition text.
+            !event.repeat &&
+            !event.isComposing
+          ) {
+            return onLinkShortcutRef.current?.() ?? false;
+          }
+
           if (event.key !== "ArrowUp") return false;
           // Respect the same guards as before: no modifiers (let ⌥↑/⇧↑/etc.
           // through), autocomplete closed, a handler exists, and the composer

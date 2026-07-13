@@ -1,8 +1,10 @@
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{Duration, Instant};
 
 use crate::managed_agents::{
-    AcpAvailabilityStatus, AcpRuntimeCatalogEntry, CommandAvailabilityInfo,
+    AcpAvailabilityStatus, AcpRuntimeCatalogEntry, AuthStatus, CommandAvailabilityInfo,
 };
 
 pub(crate) struct KnownAcpRuntime {
@@ -56,6 +58,12 @@ pub(crate) struct KnownAcpRuntime {
     /// Used by the config bridge to mark fields as required in the UI.
     /// Keys match the camelCase names used in `NormalizedConfig` (e.g. "model", "provider").
     pub required_normalized_fields: &'static [&'static str],
+    /// Human-readable hint shown in Doctor when the runtime is available but not
+    /// authenticated. `None` for runtimes that have no login step (goose, buzz-agent).
+    pub login_hint: Option<&'static str>,
+    /// CLI args for probing authentication status. `args[0]` is the binary name;
+    /// the remainder are the subcommand. `None` for runtimes with no login step.
+    pub auth_probe_args: Option<&'static [&'static str]>,
 }
 
 const GOOSE_AVATAR_URL: &str = "https://goose-docs.ai/img/logo_dark.png";
@@ -114,6 +122,8 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         max_tokens_env_var: Some("GOOSE_MAX_TOKENS"),
         context_limit_env_var: Some("GOOSE_CONTEXT_LIMIT"),
         required_normalized_fields: &["model", "provider"],
+        login_hint: None,
+        auth_probe_args: None,
     },
     KnownAcpRuntime {
         id: "claude",
@@ -142,6 +152,8 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         max_tokens_env_var: None,
         context_limit_env_var: None,
         required_normalized_fields: &[],
+        login_hint: Some("Run the Claude CLI to complete authentication."),
+        auth_probe_args: Some(&["claude", "auth", "status"]),
     },
     KnownAcpRuntime {
         id: "codex",
@@ -153,8 +165,8 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         mcp_hooks: false,
         underlying_cli: Some("codex"),
         cli_install_commands: &["curl -fsSL https://chatgpt.com/codex/install.sh | sh"],
-        adapter_install_commands: &["npm install -g @zed-industries/codex-acp"],
-        install_instructions_url: "https://github.com/zed-industries/codex-acp",
+        adapter_install_commands: &["npm install -g @agentclientprotocol/codex-acp"],
+        install_instructions_url: "https://github.com/agentclientprotocol/codex-acp",
         cli_install_hint: "Install the Codex CLI via the official install script.",
         adapter_install_hint: "Install the Codex ACP adapter via npm.",
         skill_dir: Some(".codex/skills"),
@@ -170,6 +182,9 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         max_tokens_env_var: None,
         context_limit_env_var: None,
         required_normalized_fields: &[],
+        login_hint: Some("Run `codex login` to authenticate."),
+        // Verified: `codex login status` exits 0 when logged in, non-zero otherwise.
+        auth_probe_args: Some(&["codex", "login", "status"]),
     },
     KnownAcpRuntime {
         id: "buzz-agent",
@@ -198,6 +213,8 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         max_tokens_env_var: Some("BUZZ_AGENT_MAX_OUTPUT_TOKENS"),
         context_limit_env_var: Some("BUZZ_AGENT_MAX_CONTEXT_TOKENS"),
         required_normalized_fields: &["model", "provider"],
+        login_hint: None,
+        auth_probe_args: None,
     },
 ];
 
@@ -285,6 +302,40 @@ pub fn default_agent_command() -> String {
         .to_string()
 }
 
+/// Record-first harness resolution (unified agent model, Phase 1A).
+///
+/// Resolution order:
+///   1. explicit override (non-empty) — a deliberate per-instance pin;
+///   2. the record's own `runtime` id mapped to its primary command —
+///      records materialize their runtime at create/migration time;
+///   3. legacy fallback: the linked persona's `runtime` (records created
+///      before the unified model carry `persona_id` but no `runtime`);
+///   4. `default_agent_command()`.
+pub fn record_agent_command(
+    record: &crate::managed_agents::types::ManagedAgentRecord,
+    personas: &[crate::managed_agents::types::AgentDefinition],
+) -> String {
+    if let Some(pin) = record
+        .agent_command_override
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return pin.to_string();
+    }
+
+    if let Some(command) = record
+        .runtime
+        .as_deref()
+        .and_then(known_acp_runtime_exact)
+        .and_then(|r| r.commands.first().copied())
+    {
+        return command.to_string();
+    }
+
+    effective_agent_command(record.persona_id.as_deref(), personas, None)
+}
+
 /// Resolve the agent command (harness) for a spawn/deploy/summary. The linked
 /// persona wins so persona harness edits propagate on the next spawn. An
 /// explicit per-instance override (`agent_command_override`) takes precedence.
@@ -295,7 +346,7 @@ pub fn default_agent_command() -> String {
 ///   3. `default_agent_command()` — no persona/runtime, or persona deleted.
 pub fn effective_agent_command(
     persona_id: Option<&str>,
-    personas: &[crate::managed_agents::types::PersonaRecord],
+    personas: &[crate::managed_agents::types::AgentDefinition],
     agent_command_override: Option<&str>,
 ) -> String {
     if let Some(pin) = agent_command_override
@@ -314,84 +365,8 @@ pub fn effective_agent_command(
         .unwrap_or_else(default_agent_command)
 }
 
-/// Decide whether a user-picked harness command is an explicit per-instance
-/// pin or merely the persona's own runtime restated. Returns the override to
-/// persist: `Some(picked)` when it diverges from the persona, `None` when it
-/// inherits.
-///
-/// Comparison is by RUNTIME IDENTITY, not raw string: a persona on the `claude`
-/// runtime resolves to `claude-agent-acp`, but a client with only the
-/// `claude-code-acp` adapter installed sends that command instead. Both map to
-/// the same `claude` runtime, so neither is a real divergence — string equality
-/// would wrongly bake a pin. An unknown/custom command (no matching runtime)
-/// only inherits when it exactly equals the persona command.
-pub fn divergent_agent_command_override(
-    persona_id: Option<&str>,
-    personas: &[crate::managed_agents::types::PersonaRecord],
-    picked_command: Option<&str>,
-) -> Option<String> {
-    let picked = picked_command
-        .map(str::trim)
-        .filter(|value| !value.is_empty())?;
-    let persona_command = effective_agent_command(persona_id, personas, None);
-    let same_runtime = match (
-        known_acp_runtime(picked),
-        known_acp_runtime(&persona_command),
-    ) {
-        (Some(a), Some(b)) => std::ptr::eq(a, b),
-        _ => picked == persona_command,
-    };
-    if same_runtime {
-        None
-    } else {
-        Some(picked.to_string())
-    }
-}
-
-/// Decide the `agent_command_override` to persist at AGENT CREATE time.
-///
-/// A persona-backed create receives its harness command from
-/// `resolvePersonaRuntime` (frontend), which produces a divergent command in two
-/// distinct cases that the backend MUST tell apart:
-///
-/// - DELIBERATE OVERRIDE (`harness_override` true): the user explicitly picked a
-///   runtime command in UI that exposes a runtime selector. This is a real pin
-///   and is preserved when it differs from the command inheritance would spawn,
-///   including installed aliases such as `claude-code-acp`.
-/// - MISSING-RUNTIME FALLBACK (`harness_override` false): the persona's runtime
-///   isn't installed locally, so `resolvePersonaRuntime` substitutes a fallback
-///   default. This is NOT a pin — baking it would freeze the agent on the fallback
-///   harness even after the persona's runtime is installed and the persona is
-///   re-edited, the exact bug this resolver chain exists to prevent. Stores `None`
-///   so the persona stays authoritative.
-///
-/// `isOverridden` from `resolvePersonaRuntime` cannot distinguish these — it is
-/// `true` for BOTH — so the caller must thread the explicit user-intent bit.
-///
-/// Persona-less creates (`persona_id` is `None`, e.g. the standalone
-/// CreateAgentDialog) have no persona to inherit, so the picked command is always a
-/// real pin and is preserved via `divergent_agent_command_override` regardless of
-/// `harness_override`.
-pub fn create_time_agent_command_override(
-    persona_id: Option<&str>,
-    personas: &[crate::managed_agents::types::PersonaRecord],
-    picked_command: Option<&str>,
-    harness_override: bool,
-) -> Option<String> {
-    if persona_id.is_some() && !harness_override {
-        return None;
-    }
-
-    if persona_id.is_some() && harness_override {
-        let picked = picked_command
-            .map(str::trim)
-            .filter(|value| !value.is_empty())?;
-        let inherited_command = effective_agent_command(persona_id, personas, None);
-        return (picked != inherited_command).then(|| picked.to_string());
-    }
-
-    divergent_agent_command_override(persona_id, personas, picked_command)
-}
+mod overrides;
+pub use overrides::{apply_agent_command_update, create_time_agent_command_override};
 
 fn default_agent_args(command: &str) -> Option<Vec<String>> {
     match normalize_command_identity(command).as_str() {
@@ -523,6 +498,73 @@ pub fn resolve_command(command: &str) -> Option<PathBuf> {
 pub fn clear_resolve_cache() {
     let mut guard = resolve_cache().lock().unwrap_or_else(|e| e.into_inner());
     guard.clear();
+    // Also invalidate the adapter-availability cache so a freshly-installed
+    // adapter is reflected the next time the summary builder checks the badge.
+    clear_adapter_availability_cache();
+}
+
+// ── Adapter availability cache (Phase-2 badge fallback) ─────────────────────
+//
+// `build_managed_agent_summary` needs to compare the spawn-time adapter
+// availability against the *current* availability without triggering a live
+// `probe_codex_acp_major_version` subprocess on every poll cycle.  This cache
+// stores the last availability status of the codex-acp binary at its resolved
+// path.  It is warmed by `discover_acp_runtimes` (which already probes), so
+// the badge path reads warm data, and is invalidated by `clear_resolve_cache`
+// (called on every Doctor install and every `discover_acp_providers` call).
+
+fn adapter_availability_cache() -> &'static std::sync::Mutex<Option<AcpAvailabilityStatus>> {
+    use std::sync::{Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<Option<AcpAvailabilityStatus>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(None))
+}
+
+fn clear_adapter_availability_cache() {
+    if let Ok(mut guard) = adapter_availability_cache().lock() {
+        *guard = None;
+    }
+}
+
+/// Cache the current codex-acp adapter availability status.
+///
+/// Called by `discover_acp_runtimes` after it probes the codex adapter so the
+/// badge path has a warm value without re-probing.
+pub(crate) fn cache_adapter_availability(status: AcpAvailabilityStatus) {
+    if let Ok(mut guard) = adapter_availability_cache().lock() {
+        *guard = Some(status);
+    }
+}
+
+/// Return the most recently cached codex-acp adapter availability, or
+/// `None` if no discovery has run yet.
+///
+/// This is a **read from cache only** — it never spawns a subprocess.  The
+/// value is populated by `discover_acp_runtimes` and invalidated by
+/// `clear_resolve_cache`.  When the cache is cold, returning `None` defers
+/// the drift check until discovery has produced a real value, preventing
+/// a fabricated `AdapterMissing` stamp from triggering a false restart badge
+/// on a newly restarted process.
+pub(crate) fn adapter_availability_cached() -> Option<AcpAvailabilityStatus> {
+    adapter_availability_cache()
+        .lock()
+        .ok()
+        .and_then(|g| g.clone())
+}
+
+/// Pure predicate: does the stamped adapter availability differ from the
+/// current cached availability?
+///
+/// Returns `false` whenever either side is `None` (unknown) — "no data" is
+/// not evidence of drift.  This is extracted for unit testing without global
+/// state and used by `build_managed_agent_summary`.
+pub(crate) fn availability_drift(
+    stamped: Option<&AcpAvailabilityStatus>,
+    current: Option<AcpAvailabilityStatus>,
+) -> bool {
+    match (stamped, current) {
+        (Some(s), Some(c)) => *s != c,
+        _ => false,
+    }
 }
 
 fn resolve_command_uncached(command: &str) -> Option<PathBuf> {
@@ -548,6 +590,19 @@ fn resolve_command_uncached(command: &str) -> Option<PathBuf> {
         let candidate = dir.join(executable_basename(command));
         if is_executable_file(&candidate) {
             return Some(candidate);
+        }
+    }
+
+    // Check nvm's default Node.js bin directory — nvm initializes via
+    // ~/.zshrc (interactive) which is not loaded by a login shell, so
+    // `node`, `npm`, and npm-global shims installed there are otherwise
+    // invisible.
+    if let Some(home) = dirs::home_dir() {
+        if let Some(nvm_bin) = find_nvm_default_bin(&home) {
+            let candidate = nvm_bin.join(executable_basename(command));
+            if is_executable_file(&candidate) {
+                return Some(candidate);
+            }
         }
     }
 
@@ -589,22 +644,284 @@ fn find_via_login_shell(command: &str) -> Option<PathBuf> {
     (path.is_absolute() && is_executable_file(&path)).then_some(path)
 }
 
-/// Return the user's full PATH from a login shell.
-/// Cached via OnceLock so we only spawn one shell per app lifetime.
-pub fn login_shell_path() -> Option<String> {
-    use std::sync::OnceLock;
-    static CACHED: OnceLock<Option<String>> = OnceLock::new();
-    CACHED
-        .get_or_init(|| {
-            let stdout = run_in_login_shell(&["-l", "-c", "echo $PATH"])?;
-            let last_line = stdout.lines().rfind(|l| !l.trim().is_empty())?;
-            Some(last_line.trim().to_string())
-        })
-        .clone()
+/// Three-state backing store for the login-shell PATH cache.
+#[derive(Clone)]
+enum LoginShellPath {
+    /// Cache has never been populated; the next call will spawn a login shell.
+    Uninit,
+    /// A login shell was invoked; the inner value is the PATH it returned
+    /// (`None` when the shell produced no output).
+    Probed(Option<String>),
 }
 
-fn find_command(command: &str) -> Option<PathBuf> {
+fn path_cache() -> &'static std::sync::Mutex<LoginShellPath> {
+    use std::sync::{Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<LoginShellPath>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(LoginShellPath::Uninit))
+}
+
+fn fetch_login_shell_path_inner() -> Option<String> {
+    let stdout = run_in_login_shell(&["-l", "-c", "echo $PATH"])?;
+    let last_line = stdout.lines().rfind(|l| !l.trim().is_empty())?;
+    Some(last_line.trim().to_string())
+}
+
+/// Return the user's full PATH from a login shell.
+///
+/// The result is cached after the first call. Call [`refresh_login_shell_path`]
+/// to invalidate the cache so the next call re-fetches — e.g. after the user
+/// installs Node.js mid-session and clicks Retry.
+///
+/// The lock is never held while the login shell spawns: we check for a cached
+/// value, release the lock, run the shell, then re-lock to write. Two concurrent
+/// callers may both run the shell (last-writer-wins is fine — both produce the
+/// same result), but neither blocks a concurrent agent spawn on the Mutex.
+pub fn login_shell_path() -> Option<String> {
+    // Fast path: return cached result without spawning a shell.
+    {
+        let guard = path_cache().lock().unwrap_or_else(|e| e.into_inner());
+        if let LoginShellPath::Probed(ref result) = *guard {
+            return result.clone();
+        }
+    }
+
+    // Slow path: spawn shell outside any lock.
+    let result = fetch_login_shell_path_inner();
+
+    // Write back; last-writer-wins is safe here.
+    {
+        let mut guard = path_cache().lock().unwrap_or_else(|e| e.into_inner());
+        *guard = LoginShellPath::Probed(result.clone());
+    }
+
+    result
+}
+
+/// Invalidate the login-shell PATH cache so the next [`login_shell_path`] call
+/// re-fetches from a fresh login shell.
+///
+/// Called before every install/retry operation and on Doctor Re-run so a
+/// newly-installed tool becomes visible without restarting the app.
+pub(crate) fn refresh_login_shell_path() {
+    let mut guard = path_cache().lock().unwrap_or_else(|e| e.into_inner());
+    *guard = LoginShellPath::Uninit;
+}
+
+#[cfg(test)]
+fn is_login_shell_path_uninit() -> bool {
+    matches!(
+        *path_cache().lock().unwrap_or_else(|e| e.into_inner()),
+        LoginShellPath::Uninit
+    )
+}
+
+/// Return `true` when `tag` is a safe nvm alias/version tag that can be joined
+/// onto a `PathBuf` without escaping the nvm root.
+///
+/// nvm uses tags like `v22.1.0` or `lts/hydrogen`. We allow ASCII alphanumeric
+/// plus `. - / _` and require that no path component is `..` and that the tag
+/// does not start with `/` (which would replace the base in `PathBuf::join`).
+fn is_safe_nvm_tag(tag: &str) -> bool {
+    if tag.is_empty() {
+        return false;
+    }
+    // An absolute path in the alias file would let PathBuf::join silently
+    // replace the nvm root with an attacker-controlled path.
+    if tag.starts_with('/') {
+        return false;
+    }
+    // Reject any .. component to prevent upward traversal.
+    for component in tag.split('/') {
+        if component == ".." {
+            return false;
+        }
+    }
+    // Allow only the characters nvm uses in real tag names.
+    tag.chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '/' | '_'))
+}
+
+/// Locate the `bin` directory for nvm's default Node.js version.
+///
+/// Reads `~/.nvm/alias/default`; resolves at most one alias hop to handle
+/// nvm alias chains; falls back to the highest-semver directory under
+/// `~/.nvm/versions/node/`. Returns the `bin` subdirectory only when it exists.
+///
+/// Cheap: at most two file reads or one `read_dir`. Never cached — computed
+/// fresh per call so a mid-session `nvm install` is visible at the next spawn.
+pub fn find_nvm_default_bin(home: &Path) -> Option<PathBuf> {
+    let nvm_root = home.join(".nvm");
+    let versions_root = nvm_root.join("versions").join("node");
+
+    // 1. Try alias/default, with at most one hop.
+    let default_alias = nvm_root.join("alias").join("default");
+    if let Ok(content) = std::fs::read_to_string(&default_alias) {
+        let tag = content.trim().to_string();
+        if is_safe_nvm_tag(&tag) {
+            let candidate = versions_root.join(&tag).join("bin");
+            if candidate.is_dir() {
+                return Some(candidate);
+            }
+            // One alias hop: ~/.nvm/alias/<tag>
+            let hop_file = nvm_root.join("alias").join(&tag);
+            if let Ok(hop_content) = std::fs::read_to_string(&hop_file) {
+                let hop_tag = hop_content.trim().to_string();
+                if is_safe_nvm_tag(&hop_tag) {
+                    let hop_candidate = versions_root.join(&hop_tag).join("bin");
+                    if hop_candidate.is_dir() {
+                        return Some(hop_candidate);
+                    }
+                }
+            }
+        }
+    }
+
+    // 2. Fall back to highest-semver directory under ~/.nvm/versions/node/.
+    let entries = std::fs::read_dir(&versions_root).ok()?;
+    let best = entries
+        .filter_map(|e| e.ok())
+        .filter_map(|e| {
+            let name = e.file_name();
+            let s = name.to_string_lossy().into_owned();
+            parse_semver_tag(&s).map(|v| (v, s))
+        })
+        .max_by(|(a, _), (b, _)| a.cmp(b));
+
+    let (_, tag) = best?;
+    let bin = versions_root.join(&tag).join("bin");
+    bin.is_dir().then_some(bin)
+}
+
+/// Parse a `vMAJ.MIN.PATCH` (or `vMAJ.MIN.PATCH-extra`) tag into a numeric
+/// triple for semver comparison.
+fn parse_semver_tag(s: &str) -> Option<(u64, u64, u64)> {
+    let s = s.strip_prefix('v')?;
+    let mut parts = s.splitn(3, '.');
+    let major = parts.next()?.parse::<u64>().ok()?;
+    let minor = parts.next()?.parse::<u64>().ok()?;
+    let patch_str = parts.next()?;
+    let patch = patch_str.split('-').next()?.parse::<u64>().ok()?;
+    Some((major, minor, patch))
+}
+
+pub(crate) fn find_command(command: &str) -> Option<PathBuf> {
     resolve_command(command)
+}
+
+/// Returns true when the runtime has at least one adapter install step that
+/// is an npm global install. Used to determine whether Node.js is required.
+fn runtime_needs_npm(runtime: &KnownAcpRuntime) -> bool {
+    runtime
+        .adapter_install_commands
+        .iter()
+        .any(|cmd| is_npm_global_install(cmd))
+}
+
+/// Returns `true` when `cmd` is an `npm install -g` invocation.
+///
+/// Used by Doctor to determine whether Node.js is required before running an
+/// install step, and by the npm EACCES preflight in the install command path.
+pub(crate) fn is_npm_global_install(cmd: &str) -> bool {
+    let t = cmd.trim_start();
+    t.starts_with("npm install -g ") || t.starts_with("npm i -g ")
+}
+
+/// Run a CLI auth probe with a 10-second process-level timeout.
+///
+/// Spawns the probe CLI as a child process. Stdout and stderr are drained on
+/// background threads to prevent pipe-buffer deadlock. On timeout the child is
+/// killed and `Unknown` is returned; no orphaned threads or processes are left
+/// behind. Returns `Unknown` on timeout.
+fn probe_auth_status(binary_path: &Path, probe_args: &[&str]) -> AuthStatus {
+    use crate::managed_agents::readiness::cli_probe;
+
+    let augmented_path = cli_probe::augmented_path();
+
+    let mut command = std::process::Command::new(binary_path);
+    command.args(&probe_args[1..]);
+    if let Some(ref path) = augmented_path {
+        command.env("PATH", path);
+    }
+    command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+
+    let mut child = match command.spawn() {
+        Ok(c) => c,
+        Err(_) => return AuthStatus::Unknown,
+    };
+
+    // Drain stdout/stderr on background threads to prevent pipe-buffer deadlock.
+    let stdout_pipe = child.stdout.take();
+    let stderr_pipe = child.stderr.take();
+
+    let stdout_thread = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(mut pipe) = stdout_pipe {
+            let _ = pipe.read_to_end(&mut buf);
+        }
+    });
+    let stderr_thread = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(mut pipe) = stderr_pipe {
+            let _ = pipe.read_to_end(&mut buf);
+        }
+        buf
+    });
+
+    // Save PID for kill-on-timeout before moving child into the wait thread.
+    let child_pid = child.id();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let wait_thread = std::thread::spawn(move || {
+        let _ = tx.send(child.wait());
+    });
+
+    // 10-second timeout for auth probes.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let exit_status = loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            #[cfg(unix)]
+            unsafe {
+                libc::kill(child_pid as i32, libc::SIGTERM);
+            }
+            #[cfg(not(unix))]
+            let _ = child_pid;
+            drop(rx);
+            let _ = wait_thread.join();
+            let _ = stdout_thread.join();
+            let _ = stderr_thread.join();
+            return AuthStatus::Unknown;
+        }
+        match rx.recv_timeout(Duration::from_millis(100).min(remaining)) {
+            Ok(Ok(status)) => break status,
+            Ok(Err(_)) => {
+                let _ = wait_thread.join();
+                let _ = stdout_thread.join();
+                let _ = stderr_thread.join();
+                return AuthStatus::Unknown;
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                let _ = stdout_thread.join();
+                let _ = stderr_thread.join();
+                return AuthStatus::Unknown;
+            }
+        }
+    };
+
+    let _ = wait_thread.join();
+    let _ = stdout_thread.join();
+    let stderr_bytes = stderr_thread.join().unwrap_or_default();
+
+    match cli_probe::classify_probe_output(&stderr_bytes, exit_status.success()) {
+        cli_probe::ProbeOutcome::LoggedIn => AuthStatus::LoggedIn,
+        cli_probe::ProbeOutcome::LoggedOut => AuthStatus::LoggedOut,
+        cli_probe::ProbeOutcome::ConfigInvalid { stderr_excerpt } => AuthStatus::ConfigInvalid {
+            diagnostic: stderr_excerpt,
+        },
+    }
 }
 
 pub fn command_availability(command: &str) -> CommandAvailabilityInfo {
@@ -626,7 +943,7 @@ pub fn missing_command_message(command: &str, role: &str) -> String {
     )
 }
 
-fn classify_runtime(
+pub(crate) fn classify_runtime(
     adapter_result: Option<(&str, PathBuf)>,
     underlying_cli: Option<&str>,
     underlying_cli_found: bool,
@@ -652,11 +969,125 @@ fn classify_runtime(
     }
 }
 
+/// Probe the major version of a `codex-acp` binary by running `--version`.
+///
+/// The 1.x adapter (`@agentclientprotocol/codex-acp`) outputs
+/// `@agentclientprotocol/codex-acp <major>.<minor>.<patch>` on stdout and exits 0.
+/// The old 0.16.x adapter (`@zed-industries/codex-acp`) is a Rust binary that does
+/// not recognise `--version` and exits non-zero.
+///
+/// Returns the major version on success, `None` on any failure (non-zero exit,
+/// unparseable output, timeout, or missing binary).
+///
+/// The probe is bounded by a 5-second deadline. The child is polled with
+/// [`std::process::Child::try_wait`] (the repo's standard deadline pattern) and
+/// killed if it does not exit in time.
+///
+/// Stdout is redirected to a temporary file rather than a pipe, so forked
+/// descendants cannot hold EOF open. Reads from a regular file return EOF at its
+/// current write position regardless of inherited file descriptors, cross-platform.
+pub(crate) fn probe_codex_acp_major_version(binary_path: &Path) -> Option<u64> {
+    probe_codex_acp_major_version_with_path(
+        binary_path,
+        crate::managed_agents::readiness::cli_probe::augmented_path().as_deref(),
+    )
+}
+pub(crate) fn probe_codex_acp_major_version_with_path(
+    binary_path: &Path,
+    augmented_path: Option<&str>,
+) -> Option<u64> {
+    use std::io::{Read as _, Seek as _, SeekFrom};
+    use std::time::{Duration, Instant};
+    const VERSION_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+
+    // A regular file returns EOF at its current size even when a descendant
+    // inherits its descriptor, bounding the post-exit read cross-platform.
+    let mut tmp = tempfile::tempfile().ok()?;
+
+    let mut command = Command::new(binary_path);
+    command.arg("--version");
+    if let Some(path) = augmented_path {
+        command.env("PATH", path);
+    }
+    let mut child = command
+        .stdout(tmp.try_clone().ok()?)
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+
+    // Poll until the deadline rather than blocking on stdout EOF.
+    let deadline = Instant::now() + VERSION_PROBE_TIMEOUT;
+    let exit_status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return None;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    };
+
+    if !exit_status.success() {
+        return None;
+    }
+
+    // Read at most 4 KiB from the regular file without blocking.
+    tmp.seek(SeekFrom::Start(0)).ok()?;
+    let mut buf = Vec::with_capacity(128);
+    let _ = (&mut tmp as &mut dyn std::io::Read)
+        .take(4096)
+        .read_to_end(&mut buf);
+
+    let stdout = String::from_utf8_lossy(&buf);
+    // Output format: "<package-name> <major>.<minor>.<patch>"
+    let version_str = stdout.split_whitespace().last()?;
+    let major_str = version_str.split('.').next()?;
+    major_str.parse::<u64>().ok()
+}
+
+/// Classifies a resolved codex-acp binary path as [`AcpAvailabilityStatus::Available`]
+/// or [`AcpAvailabilityStatus::AdapterOutdated`].
+///
+/// The 0.16.x adapter (`@zed-industries/codex-acp`) does not recognise `--version`
+/// and exits non-zero — that probe failure yields `AdapterOutdated`. The 1.x adapter
+/// (`@agentclientprotocol/codex-acp`) prints its version and exits 0; major ≥ 1
+/// yields `Available`.
+///
+/// Used by `discover_acp_runtimes`, `cli_login_requirements`, and
+/// `install_acp_runtime_blocking` so the version-gate logic is not duplicated.
+pub(crate) fn codex_adapter_availability(path: &Path) -> AcpAvailabilityStatus {
+    match probe_codex_acp_major_version(path) {
+        Some(major) if major >= 1 => AcpAvailabilityStatus::Available,
+        _ => AcpAvailabilityStatus::AdapterOutdated,
+    }
+}
+
+/// Returns `true` when the codex-acp binary at `path` is outdated (major version < 1)
+/// or cannot be probed. Thin wrapper around [`codex_adapter_availability`].
+pub(crate) fn codex_adapter_is_outdated(path: &Path) -> bool {
+    codex_adapter_availability(path) == AcpAvailabilityStatus::AdapterOutdated
+}
+
+/// Intermediate struct built before the (potentially slow) auth probe phase.
+struct PartialEntry {
+    runtime: &'static KnownAcpRuntime,
+    entry: AcpRuntimeCatalogEntry,
+}
+
 pub fn discover_acp_runtimes() -> Vec<AcpRuntimeCatalogEntry> {
-    KNOWN_ACP_RUNTIMES
+    // Phase 1: build all entries (fast — no probes yet).
+    let mut partials: Vec<PartialEntry> = KNOWN_ACP_RUNTIMES
         .iter()
         .map(|runtime| {
-            // Try to find the ACP adapter binary.
             let adapter_result = runtime
                 .commands
                 .iter()
@@ -666,8 +1097,27 @@ pub fn discover_acp_runtimes() -> Vec<AcpRuntimeCatalogEntry> {
                 .underlying_cli
                 .map(|cli| find_command(cli).is_some())
                 .unwrap_or(false);
-            let (availability, command, binary_path) =
+            let (mut availability, command, binary_path) =
                 classify_runtime(adapter_result, runtime.underlying_cli, underlying_cli_found);
+
+            // For codex-acp: when the adapter resolves as Available, probe the
+            // version. An adapter with major version < 1 is treated as outdated —
+            // the CODEX_CONFIG spawn contract requires 1.x.
+            if runtime.id == "codex"
+                && availability == AcpAvailabilityStatus::Available
+                && command.as_deref() == Some("codex-acp")
+            {
+                if let Some(path_str) = &binary_path {
+                    availability = codex_adapter_availability(&PathBuf::from(path_str));
+                }
+            }
+
+            // Warm the adapter-availability cache for the badge fallback.
+            // The cache is scoped to the codex runtime; other runtimes leave it
+            // unchanged. Invalidated by `clear_resolve_cache`.
+            if runtime.id == "codex" {
+                cache_adapter_availability(availability.clone());
+            }
 
             let underlying_cli_path = runtime
                 .underlying_cli
@@ -688,6 +1138,7 @@ pub fn discover_acp_runtimes() -> Vec<AcpRuntimeCatalogEntry> {
                 AcpAvailabilityStatus::Available => cli_hint.to_string(),
                 AcpAvailabilityStatus::CliMissing => cli_hint.to_string(),
                 AcpAvailabilityStatus::AdapterMissing => adapter_hint.to_string(),
+                AcpAvailabilityStatus::AdapterOutdated => adapter_hint.to_string(),
                 AcpAvailabilityStatus::NotInstalled => {
                     if !cli_hint.is_empty() && !adapter_hint.is_empty() {
                         format!("{cli_hint} {adapter_hint}")
@@ -699,22 +1150,88 @@ pub fn discover_acp_runtimes() -> Vec<AcpRuntimeCatalogEntry> {
                 }
             };
 
-            AcpRuntimeCatalogEntry {
-                id: runtime.id.to_string(),
-                label: runtime.label.to_string(),
-                avatar_url: runtime.avatar_url.to_string(),
+            // node_required: an npm adapter step is pending AND node/npm are absent.
+            let node_required = matches!(
                 availability,
-                command,
-                binary_path,
-                default_args,
-                mcp_command: runtime.mcp_command.map(str::to_string),
-                install_hint,
-                install_instructions_url: runtime.install_instructions_url.to_string(),
-                can_auto_install,
-                underlying_cli_path,
+                AcpAvailabilityStatus::AdapterMissing | AcpAvailabilityStatus::NotInstalled
+            ) && runtime_needs_npm(runtime)
+                && resolve_command("npm").is_none()
+                && resolve_command("node").is_none();
+
+            PartialEntry {
+                runtime,
+                entry: AcpRuntimeCatalogEntry {
+                    id: runtime.id.to_string(),
+                    label: runtime.label.to_string(),
+                    avatar_url: runtime.avatar_url.to_string(),
+                    availability,
+                    command,
+                    binary_path,
+                    default_args,
+                    mcp_command: runtime.mcp_command.map(str::to_string),
+                    install_hint,
+                    install_instructions_url: runtime.install_instructions_url.to_string(),
+                    can_auto_install,
+                    underlying_cli_path,
+                    node_required,
+                    // Filled in by the probe phase below.
+                    auth_status: AuthStatus::Unknown,
+                    login_hint: None,
+                },
             }
         })
-        .collect()
+        .collect();
+
+    // Phase 2: run auth probes in parallel for entries that need them.
+    // Spawn one thread per probeable entry; total cost = max(probe latency).
+    let probe_handles: Vec<(usize, std::thread::JoinHandle<AuthStatus>)> = partials
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, partial)| {
+            if partial.entry.availability != AcpAvailabilityStatus::Available {
+                return None;
+            }
+            let probe_args = partial.runtime.auth_probe_args?;
+            // Need the resolved binary path for the CLI (e.g. the actual `claude` binary).
+            let binary_path = resolve_command(probe_args[0])?;
+            let probe_args_owned: Vec<String> = probe_args.iter().map(|s| s.to_string()).collect();
+
+            let handle = std::thread::spawn(move || {
+                let refs: Vec<&str> = probe_args_owned.iter().map(String::as_str).collect();
+                probe_auth_status(&binary_path, &refs)
+            });
+            Some((idx, handle))
+        })
+        .collect();
+
+    // Collect probe results and patch entries.
+    for (idx, handle) in probe_handles {
+        let status = handle.join().unwrap_or(AuthStatus::Unknown);
+        let partial = &mut partials[idx];
+        partial.entry.login_hint =
+            if matches!(status, AuthStatus::LoggedIn | AuthStatus::NotApplicable) {
+                None
+            } else {
+                partial.runtime.login_hint.map(str::to_string)
+            };
+        partial.entry.auth_status = status;
+    }
+
+    // Fill NotApplicable / Unknown for non-probed entries.
+    for partial in &mut partials {
+        if partial.entry.auth_status == AuthStatus::Unknown {
+            partial.entry.auth_status = if partial.entry.availability
+                == AcpAvailabilityStatus::Available
+                && partial.runtime.auth_probe_args.is_none()
+            {
+                AuthStatus::NotApplicable
+            } else {
+                AuthStatus::Unknown
+            };
+        }
+    }
+
+    partials.into_iter().map(|p| p.entry).collect()
 }
 
 pub fn managed_agent_avatar_url(command: &str) -> Option<String> {
@@ -723,401 +1240,4 @@ pub fn managed_agent_avatar_url(command: &str) -> Option<String> {
 }
 
 #[cfg(test)]
-mod tests {
-    use std::path::PathBuf;
-
-    use super::{
-        classify_runtime, create_time_agent_command_override, default_agent_command,
-        divergent_agent_command_override, effective_agent_command, find_via_login_shell,
-        managed_agent_avatar_url, normalize_agent_args, BUZZ_AGENT_AVATAR_URL,
-        CLAUDE_CODE_AVATAR_URL, CODEX_AVATAR_URL, GOOSE_AVATAR_URL,
-    };
-    use crate::managed_agents::AcpAvailabilityStatus;
-
-    #[test]
-    fn resolves_known_avatar_for_bare_command() {
-        let avatar_url = managed_agent_avatar_url("goose").expect("goose avatar should resolve");
-
-        assert_eq!(avatar_url, GOOSE_AVATAR_URL);
-    }
-
-    #[test]
-    fn resolves_known_avatar_for_command_paths_and_aliases() {
-        assert_eq!(
-            managed_agent_avatar_url("/usr/local/bin/codex-acp"),
-            Some(CODEX_AVATAR_URL.to_string())
-        );
-        assert_eq!(
-            managed_agent_avatar_url("Claude Code"),
-            Some(CLAUDE_CODE_AVATAR_URL.to_string())
-        );
-        assert_eq!(
-            managed_agent_avatar_url(r"C:\Tools\claude-agent-acp.exe"),
-            Some(CLAUDE_CODE_AVATAR_URL.to_string())
-        );
-        assert_eq!(
-            managed_agent_avatar_url("/usr/local/bin/claude-code-acp"),
-            Some(CLAUDE_CODE_AVATAR_URL.to_string())
-        );
-    }
-
-    #[test]
-    fn returns_none_for_unknown_commands() {
-        assert!(managed_agent_avatar_url("custom-agent").is_none());
-    }
-
-    #[test]
-    fn default_agent_command_resolves_bundled_buzz_agent() {
-        // The create-path default must be the bundled buzz-agent, never the
-        // bare `goose` that isn't on PATH on a stock Windows install.
-        assert_eq!(default_agent_command(), "buzz-agent");
-        // And buzz-agent takes no `acp` arg — confirm no arg leakage from the default.
-        assert_eq!(
-            normalize_agent_args(&default_agent_command(), vec!["acp".into()]),
-            Vec::<String>::new()
-        );
-    }
-
-    #[test]
-    fn normalizes_claude_and_codex_args_to_empty() {
-        assert_eq!(
-            normalize_agent_args("claude-agent-acp", vec!["acp".into()]),
-            Vec::<String>::new()
-        );
-        assert_eq!(
-            normalize_agent_args("claude-code-acp", vec!["acp".into()]),
-            Vec::<String>::new()
-        );
-        assert_eq!(
-            normalize_agent_args("codex-acp", vec!["acp".into()]),
-            Vec::<String>::new()
-        );
-    }
-
-    #[test]
-    fn resolves_buzz_agent_avatar() {
-        assert_eq!(
-            managed_agent_avatar_url("buzz-agent"),
-            Some(BUZZ_AGENT_AVATAR_URL.to_string())
-        );
-        assert_eq!(
-            managed_agent_avatar_url("/usr/local/bin/buzz-agent"),
-            Some(BUZZ_AGENT_AVATAR_URL.to_string())
-        );
-    }
-
-    #[test]
-    fn normalizes_buzz_agent_args_to_empty() {
-        assert_eq!(
-            normalize_agent_args("buzz-agent", Vec::new()),
-            Vec::<String>::new()
-        );
-        assert_eq!(
-            normalize_agent_args("buzz-agent", vec!["acp".into()]),
-            Vec::<String>::new()
-        );
-    }
-
-    #[test]
-    fn login_shell_lookup_treats_command_as_data() {
-        let marker =
-            std::env::temp_dir().join(format!("buzz-discovery-marker-{}", uuid::Uuid::new_v4()));
-        let payload = format!("doesnotexist; touch {} #", marker.display());
-
-        let resolved = find_via_login_shell(&payload);
-
-        assert!(
-            resolved.is_none(),
-            "payload should not resolve to a command"
-        );
-        assert!(
-            !marker.exists(),
-            "shell lookup must not execute injected commands"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn explicit_path_resolution_ignores_non_executable_files() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let dir =
-            std::env::temp_dir().join(format!("buzz-discovery-path-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).expect("create temp dir");
-        let bin = dir.join("buzz-acp");
-        std::fs::write(&bin, "").expect("write placeholder");
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o644))
-            .expect("chmod placeholder");
-
-        assert!(
-            super::resolve_workspace_command(bin.to_str().expect("utf8 path")).is_none(),
-            "non-executable placeholder must not resolve"
-        );
-
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755))
-            .expect("chmod executable");
-        assert_eq!(
-            super::resolve_workspace_command(bin.to_str().expect("utf8 path")),
-            Some(bin.clone())
-        );
-
-        let _ = std::fs::remove_dir_all(dir);
-    }
-
-    #[test]
-    fn classifies_available_when_adapter_found() {
-        let (status, cmd, path) = classify_runtime(
-            Some(("goose", PathBuf::from("/usr/local/bin/goose"))),
-            None,
-            false,
-        );
-        assert_eq!(status, AcpAvailabilityStatus::Available);
-        assert_eq!(cmd.as_deref(), Some("goose"));
-        assert_eq!(path.as_deref(), Some("/usr/local/bin/goose"));
-    }
-
-    #[test]
-    fn classifies_adapter_missing_when_cli_present() {
-        let (status, cmd, path) = classify_runtime(None, Some("claude"), true);
-        assert_eq!(status, AcpAvailabilityStatus::AdapterMissing);
-        assert!(cmd.is_none());
-        assert!(path.is_none());
-    }
-
-    #[test]
-    fn classifies_not_installed_when_nothing_found() {
-        let (status, cmd, path) = classify_runtime(None, Some("claude"), false);
-        assert_eq!(status, AcpAvailabilityStatus::NotInstalled);
-        assert!(cmd.is_none());
-        assert!(path.is_none());
-    }
-
-    #[test]
-    fn classifies_not_installed_when_no_underlying_cli() {
-        let (status, cmd, path) = classify_runtime(None, None, false);
-        assert_eq!(status, AcpAvailabilityStatus::NotInstalled);
-        assert!(cmd.is_none());
-        assert!(path.is_none());
-    }
-
-    #[test]
-    fn classifies_cli_missing_when_adapter_found_but_cli_absent() {
-        let (status, cmd, path) = classify_runtime(
-            Some(("codex-acp", PathBuf::from("/opt/homebrew/bin/codex-acp"))),
-            Some("codex"),
-            false,
-        );
-        assert_eq!(status, AcpAvailabilityStatus::CliMissing);
-        assert_eq!(cmd.as_deref(), Some("codex-acp"));
-        assert_eq!(path.as_deref(), Some("/opt/homebrew/bin/codex-acp"));
-    }
-
-    fn persona_with_runtime(
-        id: &str,
-        runtime: Option<&str>,
-    ) -> crate::managed_agents::PersonaRecord {
-        crate::managed_agents::PersonaRecord {
-            id: id.to_string(),
-            display_name: id.to_string(),
-            avatar_url: None,
-            system_prompt: String::new(),
-            runtime: runtime.map(str::to_string),
-            model: None,
-            provider: None,
-            name_pool: Vec::new(),
-            is_builtin: false,
-            is_active: true,
-            source_team: None,
-            source_team_persona_slug: None,
-            env_vars: std::collections::BTreeMap::new(),
-            created_at: "2026-06-09T00:00:00Z".to_string(),
-            updated_at: "2026-06-09T00:00:00Z".to_string(),
-        }
-    }
-
-    #[test]
-    fn effective_agent_command_explicit_override_wins() {
-        // An explicit pin beats the persona's runtime.
-        let personas = vec![persona_with_runtime("p1", Some("claude"))];
-        assert_eq!(
-            effective_agent_command(Some("p1"), &personas, Some("codex-acp")),
-            "codex-acp"
-        );
-    }
-
-    #[test]
-    fn effective_agent_command_inherits_persona_runtime() {
-        // No override → persona runtime id maps to its primary command.
-        let personas = vec![persona_with_runtime("p1", Some("claude"))];
-        assert_eq!(
-            effective_agent_command(Some("p1"), &personas, None),
-            "claude-agent-acp"
-        );
-    }
-
-    #[test]
-    fn effective_agent_command_empty_override_is_inherit() {
-        // A blank/whitespace override is treated as "inherit", not a pin.
-        let personas = vec![persona_with_runtime("p1", Some("goose"))];
-        assert_eq!(
-            effective_agent_command(Some("p1"), &personas, Some("   ")),
-            "goose"
-        );
-    }
-
-    #[test]
-    fn effective_agent_command_falls_back_to_default() {
-        // No override, no persona runtime, and a deleted persona all fall back
-        // to the bundled default.
-        let personas = vec![persona_with_runtime("p1", None)];
-        assert_eq!(
-            effective_agent_command(Some("p1"), &personas, None),
-            default_agent_command()
-        );
-        assert_eq!(
-            effective_agent_command(Some("gone"), &personas, None),
-            default_agent_command()
-        );
-        assert_eq!(
-            effective_agent_command(None, &personas, None),
-            default_agent_command()
-        );
-    }
-
-    #[test]
-    fn divergent_override_none_when_picked_matches_persona_runtime() {
-        // The persona-backed create/edit flow sends the persona's resolved
-        // command. It must be treated as "inherit" (None), not a pin.
-        let personas = vec![persona_with_runtime("p1", Some("goose"))];
-        assert_eq!(
-            divergent_agent_command_override(Some("p1"), &personas, Some("goose")),
-            None
-        );
-    }
-
-    #[test]
-    fn divergent_override_none_for_alternate_command_of_same_runtime() {
-        // A client with only `claude-code-acp` installed sends that command for
-        // a `claude` persona whose primary command is `claude-agent-acp`. Both
-        // map to the `claude` runtime, so it inherits — string equality would
-        // wrongly bake a pin (CRITICAL-3).
-        let personas = vec![persona_with_runtime("p1", Some("claude"))];
-        assert_eq!(
-            divergent_agent_command_override(Some("p1"), &personas, Some("claude-code-acp")),
-            None
-        );
-    }
-
-    #[test]
-    fn divergent_override_some_when_picked_is_different_runtime() {
-        // A deliberate pin to a different runtime is preserved.
-        let personas = vec![persona_with_runtime("p1", Some("goose"))];
-        assert_eq!(
-            divergent_agent_command_override(Some("p1"), &personas, Some("codex-acp")),
-            Some("codex-acp".to_string())
-        );
-    }
-
-    #[test]
-    fn divergent_override_none_for_empty_or_absent_pick() {
-        // The "Inherit from persona" sentinel (empty) and a name-only edit
-        // (absent) both clear the pin.
-        let personas = vec![persona_with_runtime("p1", Some("goose"))];
-        assert_eq!(
-            divergent_agent_command_override(Some("p1"), &personas, Some("   ")),
-            None
-        );
-        assert_eq!(
-            divergent_agent_command_override(Some("p1"), &personas, None),
-            None
-        );
-    }
-
-    #[test]
-    fn create_time_override_none_when_persona_runtime_not_installed() {
-        // CRITICAL-3 (Case 3): a `claude`-persona agent created on a machine
-        // where the claude adapter isn't installed. `resolvePersonaRuntime`
-        // falls back to the default (`buzz-agent`) and sends THAT command with
-        // `harness_override` false (the user did not pick it). At create this
-        // is a fallback, not a deliberate pin — it must store `None` so the
-        // agent inherits the persona's runtime once it's installed and the
-        // persona is re-edited. Baking `Some("buzz-agent")` here is the exact
-        // bug this resolver chain exists to kill.
-        let personas = vec![persona_with_runtime("p1", Some("claude"))];
-        assert_eq!(
-            create_time_agent_command_override(Some("p1"), &personas, Some("buzz-agent"), false),
-            None
-        );
-    }
-
-    #[test]
-    fn create_time_override_some_when_user_deliberately_overrides_installed_runtime() {
-        // Case 2 + deliberate override: the persona's `claude` runtime IS
-        // available, but the user explicitly picked `codex` in a deploy dialog's
-        // runtime selector ("overriding persona preferences"), so the frontend
-        // sends `codex-acp` with `harness_override` true. This is a real pin and
-        // MUST be preserved — returning `None` would silently swallow the
-        // deliberate override and inherit `claude` on spawn.
-        let personas = vec![persona_with_runtime("p1", Some("claude"))];
-        assert_eq!(
-            create_time_agent_command_override(Some("p1"), &personas, Some("codex-acp"), true),
-            Some("codex-acp".to_string())
-        );
-    }
-
-    #[test]
-    fn create_time_override_none_when_persona_runtime_installed() {
-        // Case 2: the persona's runtime is available, so `resolvePersonaRuntime`
-        // sends the persona's own command with no override. Inherits — no pin.
-        let personas = vec![persona_with_runtime("p1", Some("goose"))];
-        assert_eq!(
-            create_time_agent_command_override(Some("p1"), &personas, Some("goose"), false),
-            None
-        );
-    }
-
-    #[test]
-    fn create_time_override_preserves_selected_runtime_alias() {
-        // A `claude` persona inherits the primary command `claude-agent-acp`,
-        // but discovery may select an installed alias such as `claude-code-acp`.
-        // When UI marks that create-time selection as explicit, preserve the
-        // alias so the first spawn uses a command known to be installed.
-        let personas = vec![persona_with_runtime("p1", Some("claude"))];
-        assert_eq!(
-            create_time_agent_command_override(
-                Some("p1"),
-                &personas,
-                Some("claude-code-acp"),
-                true
-            ),
-            Some("claude-code-acp".to_string())
-        );
-    }
-
-    #[test]
-    fn create_time_override_inherits_exact_persona_command() {
-        let personas = vec![persona_with_runtime("p1", Some("claude"))];
-        assert_eq!(
-            create_time_agent_command_override(
-                Some("p1"),
-                &personas,
-                Some("claude-agent-acp"),
-                true
-            ),
-            None
-        );
-    }
-
-    #[test]
-    fn create_time_override_preserves_pin_for_persona_less_create() {
-        // The standalone CreateAgentDialog creates persona-LESS agents. With no
-        // persona to inherit, the picked command IS the agent's harness and must
-        // be preserved as a real pin (divergence from the bundled default),
-        // regardless of the override flag.
-        let personas = vec![persona_with_runtime("p1", Some("goose"))];
-        assert_eq!(
-            create_time_agent_command_override(None, &personas, Some("codex-acp"), false),
-            Some("codex-acp".to_string())
-        );
-    }
-}
+mod tests;

@@ -281,7 +281,7 @@ function ChangedFileTreeIcon({ path }: { path: string }) {
   return (
     <span
       className={cn(
-        "flex h-6 w-6 shrink-0 items-center justify-center rounded-md",
+        "flex h-6 w-6 shrink-0 items-center justify-center",
         visual.containerClassName,
       )}
     >
@@ -292,7 +292,7 @@ function ChangedFileTreeIcon({ path }: { path: string }) {
 
 function ChangedFolderTreeIcon() {
   return (
-    <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-sky-500/15">
+    <span className="flex h-6 w-6 shrink-0 items-center justify-center bg-sky-500/15">
       <FolderGit2 className="h-4 w-4 fill-sky-500/25 text-sky-500" />
     </span>
   );
@@ -501,6 +501,39 @@ export function ProjectPullRequestFilesChangedPanel({
   isLoading: boolean;
   pullRequest: ProjectPullRequest | null;
 }) {
+  return (
+    <ProjectDiffFilesPanel
+      diff={pullRequest ? diff : null}
+      embedded
+      error={error}
+      headerLabel={
+        pullRequest
+          ? `${pullRequest.title} · ${pullRequest.commit?.slice(0, 7) ?? "PR"}`
+          : ""
+      }
+      isLoading={isLoading}
+      subjectLabel="pull request"
+    />
+  );
+}
+
+export function ProjectDiffFilesPanel({
+  error,
+  diff,
+  isLoading,
+  embedded = false,
+  headerLabel,
+  subjectLabel,
+}: {
+  error: unknown;
+  diff: ProjectRepoDiff | null | undefined;
+  isLoading: boolean;
+  /** Render without an outer border, for nesting inside an existing card. */
+  embedded?: boolean;
+  headerLabel: string;
+  subjectLabel: string;
+}) {
+  const outerBorderClass = embedded ? "" : "border border-border/60 bg-card";
   const [query, setQuery] = React.useState("");
   const [selectedPath, setSelectedPath] = React.useState<string | null>(null);
   const files = diff?.files ?? [];
@@ -536,7 +569,9 @@ export function ProjectPullRequestFilesChangedPanel({
 
   if (isLoading) {
     return (
-      <div className="rounded-xl border border-border/50 bg-card/60 p-4 text-sm text-muted-foreground">
+      <div
+        className={cn("p-4 text-sm text-muted-foreground", outerBorderClass)}
+      >
         Loading changed files…
       </div>
     );
@@ -545,8 +580,13 @@ export function ProjectPullRequestFilesChangedPanel({
   if (error) {
     const message = errorMessage(error);
     return (
-      <div className="space-y-1 rounded-xl border border-border/50 bg-card/60 p-4 text-sm text-muted-foreground">
-        <p>Could not load changed files for this pull request.</p>
+      <div
+        className={cn(
+          "space-y-1 p-4 text-sm text-muted-foreground",
+          outerBorderClass,
+        )}
+      >
+        <p>Could not load changed files for this {subjectLabel}.</p>
         {message ? (
           <p className="font-mono text-xs text-muted-foreground/80">
             {message}
@@ -556,23 +596,33 @@ export function ProjectPullRequestFilesChangedPanel({
     );
   }
 
-  if (!pullRequest || files.length === 0) {
+  if (files.length === 0) {
     return (
-      <div className="rounded-xl border border-border/50 bg-card/60 p-6 text-center text-sm text-muted-foreground">
-        No changed files are available for this pull request yet.
+      <div
+        className={cn(
+          "p-6 text-center text-sm text-muted-foreground",
+          outerBorderClass,
+        )}
+      >
+        No changed files are available for this {subjectLabel} yet.
       </div>
     );
   }
 
   return (
-    <div className="grid min-h-0 overflow-hidden rounded-xl border border-border/50 bg-card/60 lg:grid-cols-[17rem_minmax(0,1fr)]">
+    <div
+      className={cn(
+        "grid min-h-0 overflow-hidden lg:grid-cols-[17rem_minmax(0,1fr)]",
+        outerBorderClass,
+      )}
+    >
       <aside className="border-border/50 border-b bg-background/30 lg:border-r lg:border-b-0">
         <div className="space-y-3 p-3">
           <div className="flex items-center gap-2 text-xs text-muted-foreground">
             <Files className="h-3.5 w-3.5" />
             <span>{files.length} changed files</span>
           </div>
-          <label className="flex h-8 items-center gap-2 rounded-lg border border-border/60 bg-background/70 px-2 text-xs text-muted-foreground">
+          <label className="flex h-8 items-center gap-2 border border-border/60 bg-background/70 px-2 text-xs text-muted-foreground">
             <Search className="h-3.5 w-3.5" />
             <input
               className="min-w-0 flex-1 bg-transparent text-foreground outline-hidden placeholder:text-muted-foreground"
@@ -595,9 +645,7 @@ export function ProjectPullRequestFilesChangedPanel({
         <div className="flex min-h-12 flex-wrap items-center justify-between gap-3 border-border/50 border-b bg-background/30 px-4 py-2 text-xs text-muted-foreground">
           <div className="flex min-w-0 items-center gap-2">
             <GitCommitHorizontal className="h-3.5 w-3.5" />
-            <span className="truncate">
-              {pullRequest.title} · {pullRequest.commit?.slice(0, 7) ?? "PR"}
-            </span>
+            <span className="truncate">{headerLabel}</span>
           </div>
           <div className="flex items-center gap-3">
             <span>{files.length} files changed</span>
@@ -608,7 +656,7 @@ export function ProjectPullRequestFilesChangedPanel({
 
         <div className="p-3">
           {selectedFile ? (
-            <article className="overflow-hidden rounded-lg border border-border/50 bg-background/45">
+            <article className="overflow-hidden border border-border/60 bg-background/45">
               <header className="flex min-h-10 items-center justify-between gap-3 border-border/50 border-b bg-muted/20 px-3 text-xs">
                 <div className="flex min-w-0 items-center gap-2">
                   <FileDiff className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
@@ -637,7 +685,7 @@ export function ProjectPullRequestFilesChangedPanel({
               <DiffPreview file={selectedFile} />
             </article>
           ) : (
-            <div className="rounded-lg border border-border/50 bg-background/45 p-4 text-sm text-muted-foreground">
+            <div className="border border-border/60 bg-background/45 p-4 text-sm text-muted-foreground">
               No files match this filter.
             </div>
           )}

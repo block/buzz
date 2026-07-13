@@ -24,7 +24,7 @@ import {
 import type { RelayMember, RelayMemberRole } from "@/shared/api/types";
 import type { UserProfileSummary } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
-import { normalizePubkey } from "@/shared/lib/pubkey";
+import { normalizePubkey, truncatePubkey } from "@/shared/lib/pubkey";
 import { Button } from "@/shared/ui/button";
 import {
   DropdownMenu,
@@ -39,6 +39,7 @@ import { Input } from "@/shared/ui/input";
 import { SettingsSectionHeader } from "@/features/settings/ui/SettingsSectionHeader";
 import { WorkspaceIconSettingsCard } from "@/features/workspaces/ui/WorkspaceIconSettingsCard";
 import { VirtualizedList } from "@/shared/ui/VirtualizedList";
+import { InviteLinkSection } from "./InviteLinkSection";
 
 type AssignableRelayRole = Exclude<RelayMemberRole, "owner">;
 
@@ -66,10 +67,7 @@ function isValidHexPubkey(value: string): boolean {
 }
 
 function formatDisplayName(member: RelayMember, displayName?: string | null) {
-  return (
-    displayName?.trim() ||
-    `${member.pubkey.slice(0, 10)}…${member.pubkey.slice(-6)}`
-  );
+  return displayName?.trim() || truncatePubkey(member.pubkey);
 }
 
 function npubFromPubkey(pubkey: string): string | null {
@@ -445,6 +443,8 @@ export function RelayMembersSettingsCard({
             </p>
           ) : null}
         </form>
+
+        <InviteLinkSection />
 
         {membersQuery.error instanceof Error ? (
           <p className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">

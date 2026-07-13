@@ -2,6 +2,7 @@ import { ChevronDown, ClockFading, Hash, type LucideIcon } from "lucide-react";
 import * as React from "react";
 
 import { useChannelTemplatesQuery } from "@/features/channel-templates/hooks";
+import { DEFAULT_EPHEMERAL_TTL_SECONDS } from "@/features/channels/lib/ephemeralChannel";
 import type { ChannelTemplate, ChannelVisibility } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
@@ -12,8 +13,6 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
 import { Switch } from "@/shared/ui/switch";
 import { Textarea } from "@/shared/ui/textarea";
 
-/** Default TTL for ephemeral channels: 7 days of inactivity. */
-const EPHEMERAL_TTL_SECONDS = 604800;
 const CREATE_FIELD_SHELL_CLASS =
   "rounded-xl border border-input bg-muted/40 transition-colors duration-150 ease-out hover:border-muted-foreground/40 focus-within:border-muted-foreground/50";
 const CREATE_FIELD_CONTROL_CLASS =
@@ -125,7 +124,7 @@ export function CreateChannelDialog({
         name: trimmedName,
         description: description.trim() || undefined,
         visibility,
-        ttlSeconds: ephemeral ? EPHEMERAL_TTL_SECONDS : undefined,
+        ttlSeconds: ephemeral ? DEFAULT_EPHEMERAL_TTL_SECONDS : undefined,
         templateId: selectedTemplateId ?? undefined,
       });
 

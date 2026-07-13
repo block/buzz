@@ -22,7 +22,7 @@ import type { UseRichTextEditorResult } from "@/features/messages/lib/useRichTex
 import type { UseDraftsResult } from "@/features/messages/lib/useDrafts";
 import type { CustomEmoji } from "@/shared/lib/remarkCustomEmoji";
 import type { AcpRuntime, ChannelType, ManagedAgent } from "@/shared/api/types";
-import { normalizePubkey } from "@/shared/lib/pubkey";
+import { normalizePubkey, truncatePubkey } from "@/shared/lib/pubkey";
 import { MENTION_REFERENCE_TAG } from "@/shared/lib/resolveMentionNames";
 import { buildCustomEmojiTags } from "@/shared/lib/customEmojiTags";
 
@@ -63,7 +63,7 @@ type UseMentionSendFlowOptions = {
   channelType: ChannelType | null;
   contentRef: React.MutableRefObject<string>;
   customEmoji: CustomEmoji[];
-  drafts: Pick<UseDraftsResult, "clearDraft">;
+  drafts: Pick<UseDraftsResult, "markDraftSent">;
   emojiAutocomplete: Pick<UseEmojiAutocompleteResult, "clearEmojis">;
   mentions: UseMentionsResult;
   onSendRef: React.MutableRefObject<
@@ -397,7 +397,13 @@ export function useMentionSendFlow({
             draft.capturedThreadContext,
           );
           if (draft.sentDraftKey) {
-            drafts.clearDraft(draft.sentDraftKey);
+            drafts.markDraftSent(
+              draft.sentDraftKey,
+              draft.savedContent,
+              draft.capturedChannelId ?? draft.sentDraftKey,
+              draft.savedImeta,
+              [...draft.savedSpoileredAttachmentUrls],
+            );
           }
         } catch {
           // Only restore the composer content if the user is still on the
@@ -556,7 +562,8 @@ export function useMentionSendFlow({
     if (!pendingNonMemberSend) return [];
 
     return pendingNonMemberSend.nonMemberPubkeys.map(
-      (pubkey) => mentions.getMentionDisplayName(pubkey) ?? pubkey.slice(0, 8),
+      (pubkey) =>
+        mentions.getMentionDisplayName(pubkey) ?? truncatePubkey(pubkey),
     );
   }, [mentions.getMentionDisplayName, pendingNonMemberSend]);
 

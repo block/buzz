@@ -750,6 +750,344 @@ async fn steer_rejected_on_run_id_mismatch() {
     h.shutdown().await;
 }
 
+// ─── Usage notification (_goose/unstable/session/update usage_update) ───────
+
+/// An OpenAI chat completion response with a `usage` block (prompt_tokens +
+/// completion_tokens). buzz-agent maps these to `accumulatedInputTokens` /
+/// `accumulatedOutputTokens` in the `_goose/unstable/session/update` notification.
+fn openai_text_with_usage(content: &str, input_tokens: u64, output_tokens: u64) -> Value {
+    json!({
+        "id": "cc-u", "object": "chat.completion", "model": "fake-model",
+        "choices": [{
+            "index": 0,
+            "message": { "role": "assistant", "content": content },
+            "finish_reason": "stop",
+        }],
+        "usage": {
+            "prompt_tokens": input_tokens,
+            "completion_tokens": output_tokens,
+            "total_tokens": input_tokens + output_tokens,
+        },
+    })
+}
+
+/// Returns true when `v` is a `_goose/unstable/session/update` usage_update
+/// notification.
+fn is_usage_update(v: &Value) -> bool {
+    v.get("method") == Some(&json!("_goose/unstable/session/update"))
+        && v["params"]["update"]["sessionUpdate"] == "usage_update"
+}
+
+/// Collect every frame that arrives BEFORE the message matching `until_pred`,
+/// then return (frames_before, matching_frame).
+async fn recv_until_with_drain<F>(h: &mut Harness, mut until_pred: F) -> (Vec<Value>, Value)
+where
+    F: FnMut(&Value) -> bool,
+{
+    let mut before = Vec::new();
+    loop {
+        let v = h.recv().await;
+        if until_pred(&v) {
+            return (before, v);
+        }
+        before.push(v);
+    }
+}
+
+/// buzz-agent must emit `_goose/unstable/session/update` with `sessionUpdate:
+/// "usage_update"` **before** the `session/prompt` response on each turn, and
+/// must accumulate counters across turns (turn 2 reports turn1+turn2 sums).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn usage_notification_emitted_before_prompt_response() {
+    let url = spawn_fake_llm(vec![
+        openai_text_with_usage("turn one reply", 10, 5),
+        openai_text_with_usage("turn two reply", 20, 8),
+    ])
+    .await;
+    let mut h = Harness::spawn(&url).await;
+    let sid = init_session(&mut h).await;
+
+    // ── Turn 1 ──────────────────────────────────────────────────────────────
+    let p1 = h
+        .send(
+            "session/prompt",
+            json!({"sessionId": sid, "prompt": [{"type":"text","text":"turn 1"}]}),
+        )
+        .await;
+
+    let (frames_before_t1, response_t1) = recv_until_with_drain(&mut h, |v| v["id"] == p1).await;
+    assert_eq!(
+        response_t1["result"]["stopReason"], "end_turn",
+        "turn 1 must complete with end_turn"
+    );
+
+    // A usage_update notification must appear in the frames before the response.
+    let usage_t1 = frames_before_t1
+        .iter()
+        .find(|v| is_usage_update(v))
+        .unwrap_or_else(|| {
+            panic!(
+                "expected _goose/unstable/session/update usage_update before turn-1 response; frames: {frames_before_t1:#?}"
+            )
+        });
+    assert_eq!(
+        usage_t1["params"]["update"]["sessionUpdate"], "usage_update",
+        "sessionUpdate field must be 'usage_update'"
+    );
+    assert_eq!(
+        usage_t1["params"]["update"]["accumulatedInputTokens"],
+        json!(10u64),
+        "turn 1 accumulated input tokens"
+    );
+    assert_eq!(
+        usage_t1["params"]["update"]["accumulatedOutputTokens"],
+        json!(5u64),
+        "turn 1 accumulated output tokens"
+    );
+
+    // ── Turn 2 ──────────────────────────────────────────────────────────────
+    let p2 = h
+        .send(
+            "session/prompt",
+            json!({"sessionId": sid, "prompt": [{"type":"text","text":"turn 2"}]}),
+        )
+        .await;
+
+    let (frames_before_t2, response_t2) = recv_until_with_drain(&mut h, |v| v["id"] == p2).await;
+    assert_eq!(
+        response_t2["result"]["stopReason"], "end_turn",
+        "turn 2 must complete with end_turn"
+    );
+
+    // Notification arrives before the response, with cumulative sums (10+20, 5+8).
+    let usage_t2 = frames_before_t2
+        .iter()
+        .find(|v| is_usage_update(v))
+        .unwrap_or_else(|| {
+            panic!(
+                "expected _goose/unstable/session/update usage_update before turn-2 response; frames: {frames_before_t2:#?}"
+            )
+        });
+    assert_eq!(
+        usage_t2["params"]["update"]["accumulatedInputTokens"],
+        json!(30u64),
+        "turn 2 accumulated input tokens must be 10+20=30"
+    );
+    assert_eq!(
+        usage_t2["params"]["update"]["accumulatedOutputTokens"],
+        json!(13u64),
+        "turn 2 accumulated output tokens must be 5+8=13"
+    );
+
+    h.shutdown().await;
+}
+
+/// When the provider returns a response with no `usage` block, buzz-agent must
+/// NOT emit a `_goose/unstable/session/update` notification for that turn.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn no_usage_turn_emits_no_usage_notification() {
+    let url = spawn_fake_llm(vec![openai_text("no usage here")]).await;
+    let mut h = Harness::spawn(&url).await;
+    let sid = init_session(&mut h).await;
+
+    let p_id = h
+        .send(
+            "session/prompt",
+            json!({"sessionId": sid, "prompt": [{"type":"text","text":"go"}]}),
+        )
+        .await;
+
+    let (frames_before, response) = recv_until_with_drain(&mut h, |v| v["id"] == p_id).await;
+    assert_eq!(
+        response["result"]["stopReason"], "end_turn",
+        "turn must complete with end_turn"
+    );
+
+    // No usage notification must appear in the frames before the response.
+    let found = frames_before.iter().any(is_usage_update);
+    assert!(
+        !found,
+        "expected NO usage_update notification when provider reports no usage; frames: {frames_before:#?}"
+    );
+
+    h.shutdown().await;
+}
+
+/// When a turn is cancelled AFTER the provider has already returned a response
+/// (so token counts are observed), buzz-agent must still emit the usage
+/// notification before the cancelled `session/prompt` response.
+///
+/// Setup: round 1 is a tool call WITH usage (tokens are captured). After the
+/// tool_call_update notification (proving round 1 is fully processed), we gate
+/// the round-2 LLM response behind a `oneshot` barrier that only releases after
+/// cancel is sent. This guarantees the turn exits with `stopReason: "cancelled"`
+/// deterministically, even on a slow CI worker.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cancelled_turn_with_usage_emits_notification_before_response() {
+    use tokio::sync::oneshot;
+
+    // Gate: the second LLM request (round 2) is held until we explicitly release it.
+    let (gate_tx, gate_rx) = oneshot::channel::<()>();
+    let gate_rx = Arc::new(tokio::sync::Mutex::new(Some(gate_rx)));
+
+    // Round 1: tool call with usage — sets turn_input/output_tokens.
+    // Round 2: gated — blocked until cancel fires, then released so the
+    // in-flight TCP request can resolve. The queue is empty for round 2, so the
+    // agent receives the fallback "no canned response" body which it treats as
+    // an LLM error; the cancel check at the round boundary fires first because
+    // the gate is only released after cancel is enqueued.
+    let responses = vec![openai_tool_call_with_usage(
+        "call_cancel_test",
+        "fake__noop",
+        json!({}),
+        15,
+        6,
+    )];
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let queue = Arc::new(Mutex::new(VecDeque::from(responses)));
+    let gate_rx_clone = gate_rx.clone();
+    tokio::spawn(async move {
+        let mut request_num = 0usize;
+        loop {
+            let (mut sock, _) = match listener.accept().await {
+                Ok(p) => p,
+                Err(_) => return,
+            };
+            let queue = queue.clone();
+            let gate = gate_rx_clone.clone();
+            request_num += 1;
+            let req_num = request_num;
+            tokio::spawn(async move {
+                let mut buf = Vec::new();
+                let mut tmp = [0u8; 4096];
+                while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match sock.read(&mut tmp).await {
+                        Ok(0) | Err(_) => return,
+                        Ok(n) => buf.extend_from_slice(&tmp[..n]),
+                    }
+                    if buf.len() > 1_000_000 {
+                        return;
+                    }
+                }
+                // For request 2+ (round 2), wait for the gate to open before
+                // responding. This ensures cancel is sent before round 2 resolves,
+                // making stopReason: cancelled deterministic.
+                if req_num >= 2 {
+                    let rx = gate.lock().await.take();
+                    if let Some(rx) = rx {
+                        let _ = rx.await;
+                    }
+                }
+                let body = queue
+                    .lock()
+                    .await
+                    .pop_front()
+                    .unwrap_or_else(|| json!({ "error": "no canned response" }));
+                let body_s = serde_json::to_string(&body).unwrap();
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body_s.len(), body_s,
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+                let _ = sock.shutdown().await;
+            });
+        }
+    });
+
+    let mut h = Harness::spawn(&url).await;
+    let sid = init_session(&mut h).await;
+
+    let p_id = h
+        .send(
+            "session/prompt",
+            json!({"sessionId": sid, "prompt": [{"type":"text","text":"start work"}]}),
+        )
+        .await;
+
+    // Wait for the activeRunId advert (agent is live).
+    let _run_id = recv_active_run_id(&mut h).await;
+    // Wait for tool_call_update — proves round 1 LLM response is fully processed
+    // and tokens are captured before we send cancel.
+    h.recv_until(|v| {
+        v.get("method") == Some(&json!("session/update"))
+            && v["params"]["update"]["sessionUpdate"] == "tool_call_update"
+    })
+    .await;
+
+    // Now send cancel and release the round-2 gate. Cancel is enqueued before
+    // round 2 can respond, so the turn exits with stopReason: cancelled.
+    let c_id = h.send("session/cancel", json!({"sessionId": sid})).await;
+    let _ = gate_tx.send(()); // unblock round 2
+
+    let mut saw_usage_before_prompt_response = false;
+    let mut saw_usage = false;
+    let mut saw_cancel_ok = false;
+    let mut saw_prompt_response = false;
+    for _ in 0..40 {
+        let v = h.recv().await;
+        if v["id"] == json!(c_id) {
+            saw_cancel_ok = true;
+        } else if is_usage_update(&v) {
+            saw_usage = true;
+            if !saw_prompt_response {
+                saw_usage_before_prompt_response = true;
+            }
+        } else if v["id"] == json!(p_id) {
+            saw_prompt_response = true;
+            // The gate guarantees stopReason: cancelled — not a race-driven error.
+            assert_eq!(
+                v["result"]["stopReason"], "cancelled",
+                "turn must end with stopReason: cancelled"
+            );
+        }
+        if saw_usage && saw_prompt_response && saw_cancel_ok {
+            break;
+        }
+    }
+    assert!(saw_cancel_ok, "session/cancel was not acknowledged");
+    assert!(
+        saw_usage,
+        "expected usage_update notification for cancelled turn with observed tokens"
+    );
+    assert!(
+        saw_usage_before_prompt_response,
+        "usage_update must arrive before the session/prompt response"
+    );
+
+    h.shutdown().await;
+}
+
+/// A tool-call OpenAI response with a `usage` block. Used to capture tokens in
+/// round 1 before a cancel fires at the round boundary.
+fn openai_tool_call_with_usage(
+    id: &str,
+    name: &str,
+    args: Value,
+    input_tokens: u64,
+    output_tokens: u64,
+) -> Value {
+    json!({
+        "id": "cc-u2", "object": "chat.completion", "model": "fake-model",
+        "choices": [{
+            "index": 0,
+            "message": {
+                "role": "assistant", "content": null,
+                "tool_calls": [{
+                    "id": id, "type": "function",
+                    "function": { "name": name, "arguments": args.to_string() },
+                }],
+            },
+            "finish_reason": "tool_calls",
+        }],
+        "usage": {
+            "prompt_tokens": input_tokens,
+            "completion_tokens": output_tokens,
+            "total_tokens": input_tokens + output_tokens,
+        },
+    })
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn steer_rejected_on_empty_prompt() {
     let (url, _captures) = spawn_capturing_fake_llm(vec![

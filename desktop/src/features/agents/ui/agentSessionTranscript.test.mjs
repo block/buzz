@@ -950,11 +950,11 @@ test("buildTranscript does not render unknown session/update types (firehose saf
 
 test("observer feed renders system-prompt before prompt-context in display order (first turn, realistic pool.rs sequence)", () => {
   // Reproduces the real ordering bug: pool.rs emits turn_started BEFORE session/new,
-  // so turn_started creates the turn bucket first. Without the injection mechanism,
-  // displayOrder becomes [turn(turn-1), single(system-prompt)] and System prompt
-  // renders after the entire turn block — after Prompt context.
-  // The fix: system-prompt items (acpSource "session/new") are held and injected
-  // into the prompt segment of the first turn that follows them in stream order.
+  // so turn_started creates the turn bucket first. Without the grouper holding the
+  // system-prompt as a standalone block, displayOrder becomes
+  // [turn(turn-1), single(system-prompt)] and System prompt renders after Prompt context.
+  // The fix: system-prompt items (acpSource "session/new") are held in
+  // pendingSystemPrompts[] and emitted as standalone blocks BEFORE the first turn.
   const events = [
     {
       seq: 1,
@@ -1050,8 +1050,8 @@ test("observer feed renders system-prompt before prompt-context in display order
 });
 
 test("observer feed renders system-prompt before prompt-context in display order (multi-turn)", () => {
-  // On subsequent turns, session/new does not re-fire. The system-prompt item
-  // injected into turn-1 must not re-appear in turn-2's prompt segment.
+  // On subsequent turns, session/new does not re-fire. The system-prompt standalone
+  // block emitted before turn-1 must not re-appear in turn-2's display output.
   const events = [
     {
       seq: 1,
@@ -1177,5 +1177,629 @@ test("observer feed renders system-prompt before prompt-context in display order
     rawItems[systemPromptRawIdx].turnId ?? null,
     null,
     "system-prompt item must have turnId=null",
+  );
+});
+
+test("steer ingress bundles its prompt context into the steer prompt segment, not a standalone row", () => {
+  // The stray "Prompt context · 1 section" row was leaking from the goose
+  // session/steer path: it upserted metadata without an acpSource, so display
+  // grouping never consumed it into a prompt bundle. It must now ride behind
+  // the steer message bubble's checks-icon dialog like session/prompt context.
+  const events = [
+    {
+      seq: 1,
+      timestamp: "2026-07-01T10:00:00.000Z",
+      kind: "acp_write",
+      agentIndex: 0,
+      channelId: "ch-1",
+      sessionId: "sess-1",
+      turnId: "turn-1",
+      payload: {
+        jsonrpc: "2.0",
+        id: 5,
+        method: "_goose/unstable/session/steer",
+        params: {
+          sessionId: "sess-1",
+          prompt: [
+            {
+              type: "text",
+              text: `[Buzz event: @mention]\nEvent ID: ${"e".repeat(64)}\nFrom: x (hex: ${"f".repeat(64)})\nContent: steer me`,
+            },
+            { type: "text", text: "[Thread context]\nPrior messages here." },
+          ],
+        },
+      },
+    },
+  ];
+
+  const rawItems = buildTranscript(events);
+  const steerMessage = rawItems.find((item) => item.type === "message");
+  const steerContext = rawItems.find((item) => item.type === "metadata");
+  assert.equal(steerMessage?.acpSource, "session/steer:user");
+  assert.equal(steerContext?.acpSource, "session/steer:context");
+
+  const [block] = buildTranscriptDisplayBlocks(rawItems);
+  assert.equal(block.kind, "turn");
+  const promptSegment = block.segments.find(
+    (segment) => segment.kind === "prompt",
+  );
+  assert.ok(promptSegment, "expected steer message to render a prompt bundle");
+  assert.equal(promptSegment.context?.id, steerContext.id);
+  assert.ok(
+    !block.segments.some(
+      (segment) => segment.kind === "item" && segment.item.type === "metadata",
+    ),
+    "steer context must not leak as a standalone metadata row",
+  );
+});
+
+// --- session/prompt late delivery (live subscription timing race) ---
+
+test("buildTranscript correctly renders prompt segment when session/prompt arrives after status lifecycle events", () => {
+  // Simulates the live-subscription timing race: status events (commands, mode,
+  // usage) arrive first because the desktop subscribed slightly after turn start,
+  // then session/prompt arrives later (e.g. via reconnect replay or archive
+  // backfill). buildTranscript is called in out-of-order sequence order but
+  // processTranscriptEvent handles insertion — the full rebuild path in
+  // appendAgentEvent (slow path for out-of-order) re-processes events sorted by
+  // timestamp+seq, so the prompt segment must appear.
+  const TURN = "turn-oot";
+  const SESS = "sess-oot";
+  const CH = "22222222-2222-2222-2222-222222222222";
+  const AUTHOR_HEX = "b".repeat(64);
+  const EVENT_HEX = "d".repeat(64);
+
+  const makeEvent = (seq, kind, timestamp, payload) => ({
+    seq,
+    kind,
+    timestamp,
+    agentIndex: 0,
+    channelId: CH,
+    sessionId: SESS,
+    turnId: TURN,
+    payload,
+  });
+
+  // Status events arrive first (lower seq but same timestamp as prompt)
+  const commandsEvent = makeEvent(2, "acp_read", "2026-06-18T00:01:01Z", {
+    method: "session/update",
+    params: {
+      sessionId: SESS,
+      update: {
+        sessionUpdate: "available_commands_update",
+        availableCommands: ["cmd1", "cmd2"],
+      },
+    },
+  });
+
+  const modeEvent = makeEvent(3, "acp_read", "2026-06-18T00:01:01Z", {
+    method: "session/update",
+    params: {
+      sessionId: SESS,
+      update: { sessionUpdate: "current_mode_update", currentModeId: "code" },
+    },
+  });
+
+  // session/prompt has the lowest seq — it was published first but arrived last
+  const promptEvent = makeEvent(1, "acp_write", "2026-06-18T00:01:00Z", {
+    method: "session/prompt",
+    params: {
+      sessionId: SESS,
+      prompt: [
+        {
+          type: "text",
+          text: `[Buzz event: @mention]\nEvent ID: ${EVENT_HEX.toUpperCase()}\nFrom: Alice (hex: ${AUTHOR_HEX})\nContent: please help`,
+        },
+        { type: "text", text: "[Context]\nScope: thread" },
+      ],
+    },
+  });
+
+  // Deliver events out of order: status first, then prompt
+  const items = buildTranscript([commandsEvent, modeEvent, promptEvent]);
+
+  const userMsg = items.find((i) => i.type === "message" && i.role === "user");
+  assert.ok(
+    userMsg,
+    "user message item must be present even when session/prompt arrives after status events",
+  );
+  assert.equal(
+    userMsg.text,
+    "please help",
+    "user message text extracted from session/prompt Content: line",
+  );
+
+  const blocks = buildTranscriptDisplayBlocks(items);
+  const turnBlock = blocks.find((b) => b.kind === "turn");
+  assert.ok(turnBlock, "expected a turn block");
+  const promptSegment = turnBlock.segments.find((s) => s.kind === "prompt");
+  assert.ok(
+    promptSegment,
+    "prompt segment must be present when session/prompt arrives out-of-order",
+  );
+  assert.equal(
+    promptSegment.user.text,
+    "please help",
+    "prompt segment carries the correct user text",
+  );
+});
+
+// --- session-boundary ordering: restart scenario end-to-end ─────────────────
+
+test("buildTranscript restart sequence: both sessions retain their own system-prompt card", () => {
+  // Full two-session restart sequence routed through processTranscriptEvent.
+  // Each session/new event is keyed by (seq, timestamp) — the same dedup pair
+  // used by observerRelayStore — producing distinct system-prompt items for
+  // sess-1 and sess-2. Both must be present in the final transcript and placed
+  // in the correct run:
+  //   sess-1: system-prompt → sess-1 activity (before boundary)
+  //   sess-2: boundary → system-prompt → user-prompt → sess-2 activity
+  const CH = "33333333-3333-3333-3333-333333333333";
+  const AUTHOR_HEX = "c".repeat(64);
+  const USER_EVENT_HEX = "e".repeat(64);
+
+  const sess1Events = [
+    // sess-1 turn_started
+    {
+      seq: 1,
+      timestamp: "2026-07-01T10:00:00.000Z",
+      kind: "turn_started",
+      agentIndex: 0,
+      channelId: CH,
+      sessionId: null,
+      turnId: "turn-1",
+      payload: { source: "channel", triggeringEventIds: [] },
+    },
+    // sess-1 session/new (first fire — pushes system-prompt to the stream)
+    {
+      seq: 2,
+      timestamp: "2026-07-01T10:00:00.100Z",
+      kind: "acp_write",
+      agentIndex: 0,
+      channelId: CH,
+      sessionId: null,
+      turnId: "turn-1",
+      payload: {
+        jsonrpc: "2.0",
+        id: 1,
+        method: "session/new",
+        params: {
+          systemPrompt:
+            "[Base]\nYou are a helpful assistant.\n\n[System]\nObserver.",
+        },
+      },
+    },
+    // sess-1 resolves
+    {
+      seq: 3,
+      timestamp: "2026-07-01T10:00:00.200Z",
+      kind: "session_resolved",
+      agentIndex: 0,
+      channelId: CH,
+      sessionId: "sess-1",
+      turnId: "turn-1",
+      payload: { sessionId: "sess-1", isNewSession: true },
+    },
+    // sess-1 activity
+    {
+      seq: 4,
+      timestamp: "2026-07-01T10:00:01.000Z",
+      kind: "acp_read",
+      agentIndex: 0,
+      channelId: CH,
+      sessionId: "sess-1",
+      turnId: "turn-1",
+      payload: {
+        method: "session/update",
+        params: {
+          sessionId: "sess-1",
+          update: {
+            sessionUpdate: "tool_call",
+            toolCallId: "call-1",
+            status: "completed",
+            title: "shell",
+            kind: "shell",
+            rawInput: { command: "echo hello" },
+            content: { type: "text", text: "hello" },
+          },
+        },
+      },
+    },
+  ];
+
+  const restartEvents = [
+    // Restart: turn_started with null sessionId
+    {
+      seq: 5,
+      timestamp: "2026-07-01T11:00:00.000Z",
+      kind: "turn_started",
+      agentIndex: 0,
+      channelId: CH,
+      sessionId: null,
+      turnId: "turn-2",
+      payload: { source: "channel", triggeringEventIds: [] },
+    },
+    // sess-2 session/new: distinct (seq, timestamp) produces a separate item
+    // (system-prompt:${CH}:6:2026-07-01T11:00:00.100Z) that lands naturally
+    // at the stream tail and is re-anchored to run sess-2.
+    {
+      seq: 6,
+      timestamp: "2026-07-01T11:00:00.100Z",
+      kind: "acp_write",
+      agentIndex: 0,
+      channelId: CH,
+      sessionId: null,
+      turnId: "turn-2",
+      payload: {
+        jsonrpc: "2.0",
+        id: 2,
+        method: "session/new",
+        params: {
+          systemPrompt:
+            "[Base]\nYou are a helpful assistant.\n\n[System]\nObserver.",
+        },
+      },
+    },
+    // New session resolves
+    {
+      seq: 7,
+      timestamp: "2026-07-01T11:00:00.200Z",
+      kind: "session_resolved",
+      agentIndex: 0,
+      channelId: CH,
+      sessionId: "sess-2",
+      turnId: "turn-2",
+      payload: { sessionId: "sess-2", isNewSession: true },
+    },
+    // sess-2 user @mention prompt (production shape: a restart is triggered by
+    // a user message; this is what surfaced the original bug in the screenshot).
+    {
+      seq: 8,
+      timestamp: "2026-07-01T11:00:00.300Z",
+      kind: "acp_write",
+      agentIndex: 0,
+      channelId: CH,
+      sessionId: "sess-2",
+      turnId: "turn-2",
+      payload: {
+        jsonrpc: "2.0",
+        id: 3,
+        method: "session/prompt",
+        params: {
+          sessionId: "sess-2",
+          prompt: [
+            {
+              type: "text",
+              text: `[Buzz event: @mention]\nEvent ID: ${USER_EVENT_HEX.toUpperCase()}\nFrom: Will (hex: ${AUTHOR_HEX})\nContent: @Paul status check? I had to restart`,
+            },
+          ],
+        },
+      },
+    },
+    // sess-2 activity
+    {
+      seq: 9,
+      timestamp: "2026-07-01T11:00:01.000Z",
+      kind: "acp_read",
+      agentIndex: 0,
+      channelId: CH,
+      sessionId: "sess-2",
+      turnId: "turn-2",
+      payload: {
+        method: "session/update",
+        params: {
+          sessionId: "sess-2",
+          update: {
+            sessionUpdate: "tool_call",
+            toolCallId: "call-2",
+            status: "completed",
+            title: "shell",
+            kind: "shell",
+            rawInput: { command: "echo world" },
+            content: { type: "text", text: "world" },
+          },
+        },
+      },
+    },
+  ];
+
+  const items = buildTranscript([...sess1Events, ...restartEvents]);
+  const blocks = buildTranscriptDisplayBlocks(items, "sess-2");
+
+  // (a) Exactly one session-boundary block between the two sessions.
+  const boundaryBlocks = blocks.filter((b) => b.kind === "session-boundary");
+  assert.equal(
+    boundaryBlocks.length,
+    1,
+    "exactly one session-boundary block for a two-session restart",
+  );
+
+  const boundaryIdx = blocks.indexOf(boundaryBlocks[0]);
+
+  // (b) Exactly two system-prompt standalone blocks — one per session.
+  const systemPromptBlocks = blocks.filter(
+    (b) => b.kind === "single" && b.item?.acpSource === "session/new",
+  );
+  assert.equal(
+    systemPromptBlocks.length,
+    2,
+    "must be exactly two system-prompt standalone blocks — one per session",
+  );
+  const sess1PromptIdx = blocks.indexOf(systemPromptBlocks[0]);
+  const sess2PromptIdx = blocks.indexOf(systemPromptBlocks[1]);
+
+  // sess-1 system-prompt appears BEFORE the boundary (in run sess-1).
+  assert.ok(
+    sess1PromptIdx < boundaryIdx,
+    `sess-1 system-prompt (idx ${sess1PromptIdx}) must precede boundary (idx ${boundaryIdx})`,
+  );
+  // sess-2 system-prompt appears AFTER the boundary (in run sess-2).
+  assert.ok(
+    boundaryIdx < sess2PromptIdx,
+    `boundary (idx ${boundaryIdx}) must precede sess-2 system-prompt (idx ${sess2PromptIdx})`,
+  );
+
+  // (c) sess-2 activity must appear AFTER both boundary AND sess-2 system-prompt.
+  // Required order: boundary → sess-2 system-prompt → sess-2 user-prompt/activity.
+  // Note: the system-prompt item retains sessionId=null (it was created from a
+  // null-session event); we locate it in the flat array by its item id, not sessionId.
+  const flat = flattenDisplayBlocks(blocks);
+  const sess2SpItemId = systemPromptBlocks[1].item?.id;
+  const flatSess2PromptIdx = flat.findIndex((i) => i.id === sess2SpItemId);
+  const flatSess2ActivityIdx = flat.findIndex(
+    (i) => i.type === "tool" && i.sessionId === "sess-2",
+  );
+  assert.ok(
+    flatSess2PromptIdx !== -1,
+    "sess-2 system-prompt must appear in flattened output",
+  );
+  assert.ok(
+    flatSess2ActivityIdx !== -1,
+    "sess-2 tool activity must be present in flattened output",
+  );
+  assert.ok(
+    flatSess2PromptIdx < flatSess2ActivityIdx,
+    `sess-2 system-prompt (flat idx ${flatSess2PromptIdx}) must precede sess-2 activity (flat idx ${flatSess2ActivityIdx})`,
+  );
+});
+
+// --- same-seq different-timestamp: both system-prompt cards survive (archive collision) ──
+
+test("buildTranscript same-seq different-timestamp session/new events both produce distinct system-prompt cards", () => {
+  // Archive rebuild scenario: two ObserverHandle processes both start at seq=1
+  // for the same channel. The (seq, timestamp) key pair must distinguish them
+  // so neither card is lost. If keyed by seq alone, the second would silently
+  // replace the first.
+  const CH = "55555555-5555-5555-5555-555555555555";
+  const events = [
+    // Process A: seq=1, timestamp T1
+    {
+      seq: 1,
+      timestamp: "2026-07-01T10:00:00.000Z",
+      kind: "acp_write",
+      agentIndex: 0,
+      channelId: CH,
+      sessionId: "sess-a",
+      turnId: "turn-a",
+      payload: {
+        jsonrpc: "2.0",
+        id: 1,
+        method: "session/new",
+        params: {
+          systemPrompt: "[Base]\nProcess A.",
+        },
+      },
+    },
+    // Process B: seq=1 (same!), timestamp T2 (different)
+    {
+      seq: 1,
+      timestamp: "2026-07-01T11:00:00.000Z",
+      kind: "acp_write",
+      agentIndex: 0,
+      channelId: CH,
+      sessionId: "sess-b",
+      turnId: "turn-b",
+      payload: {
+        jsonrpc: "2.0",
+        id: 1,
+        method: "session/new",
+        params: {
+          systemPrompt: "[Base]\nProcess B.",
+        },
+      },
+    },
+  ];
+
+  const rawItems = buildTranscript(events);
+  const systemPromptItems = rawItems.filter(
+    (i) => i.type === "metadata" && i.acpSource === "session/new",
+  );
+
+  assert.equal(
+    systemPromptItems.length,
+    2,
+    "two same-seq different-timestamp session/new events must produce two distinct system-prompt items — not one (key collision guard)",
+  );
+
+  const bodies = systemPromptItems.map((i) =>
+    (i.sections ?? []).map((s) => s.body).join("|"),
+  );
+  assert.ok(
+    bodies.some((b) => b.includes("Process A")),
+    "Process A system-prompt card must be present",
+  );
+  assert.ok(
+    bodies.some((b) => b.includes("Process B")),
+    "Process B system-prompt card must be present",
+  );
+});
+
+test("buildTranscript five-section system prompt card is standalone with all sections; CheckCheck context contains only Buzz/thread context", () => {
+  // Production scenario: team-pack agent harness emits
+  // [Base]/[System (with team delimiter)]/[Agent Memory — core]/[Channel Canvas]
+  // in systemPrompt. The display layer must:
+  //   (a) Render it as a standalone single block (acpSource "session/new"),
+  //       NOT inside any turn's prompt bundle.
+  //   (b) The standalone item must carry all five sections in order:
+  //       Base → System → Team Instructions → Core Memory → Channel Canvas.
+  //   (c) The prompt segment's context (CheckCheck dialog) must contain only
+  //       the session/prompt:context sections (Buzz event + Thread context),
+  //       never the system-prompt sections.
+  const CH = "44444444-4444-4444-4444-444444444444";
+  const events = [
+    {
+      seq: 1,
+      timestamp: "2026-07-01T10:00:00.000Z",
+      kind: "turn_started",
+      agentIndex: 0,
+      channelId: CH,
+      sessionId: null,
+      turnId: "turn-1",
+      payload: { source: "channel", triggeringEventIds: [] },
+    },
+    {
+      seq: 2,
+      timestamp: "2026-07-01T10:00:00.100Z",
+      kind: "acp_write",
+      agentIndex: 0,
+      channelId: CH,
+      sessionId: null,
+      turnId: "turn-1",
+      payload: {
+        jsonrpc: "2.0",
+        id: 1,
+        method: "session/new",
+        params: {
+          systemPrompt: [
+            "[Base]",
+            "You are a helpful assistant.",
+            "",
+            "[System]",
+            "Custom persona.",
+            "",
+            "---",
+            "# Team Instructions",
+            "Always tag on handoff.",
+            "",
+            "[Agent Memory — core]",
+            "I am Duncan.",
+            "",
+            "[Channel Canvas]",
+            "Canvas revision (event ID): a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
+            "Last modified: 2026-07-01T10:00:00Z",
+            "Fetch current content with: buzz canvas get --channel 44444444-4444-4444-4444-444444444444",
+          ].join("\n"),
+        },
+      },
+    },
+    {
+      seq: 3,
+      timestamp: "2026-07-01T10:00:00.200Z",
+      kind: "session_resolved",
+      agentIndex: 0,
+      channelId: CH,
+      sessionId: "sess-e2e",
+      turnId: "turn-1",
+      payload: { sessionId: "sess-e2e", isNewSession: true },
+    },
+    {
+      seq: 4,
+      timestamp: "2026-07-01T10:00:01.000Z",
+      kind: "acp_write",
+      agentIndex: 0,
+      channelId: CH,
+      sessionId: "sess-e2e",
+      turnId: "turn-1",
+      payload: {
+        jsonrpc: "2.0",
+        id: 2,
+        method: "session/prompt",
+        params: {
+          sessionId: "sess-e2e",
+          prompt: [
+            {
+              type: "text",
+              text: `[Buzz event: @mention]\nEvent ID: ${"a".repeat(64)}\nFrom: x (hex: ${"b".repeat(64)})\nContent: hello`,
+            },
+            {
+              type: "text",
+              text: "[Thread context]\nPrior messages here.",
+            },
+          ],
+        },
+      },
+    },
+  ];
+
+  const rawItems = buildTranscript(events);
+  const blocks = buildTranscriptDisplayBlocks(rawItems);
+  const flat = flattenDisplayBlocks(blocks);
+
+  // (a) Exactly one standalone system-prompt single block.
+  const systemPromptBlocks = blocks.filter(
+    (b) => b.kind === "single" && b.item?.acpSource === "session/new",
+  );
+  assert.equal(
+    systemPromptBlocks.length,
+    1,
+    "exactly one standalone system-prompt single block",
+  );
+
+  // (b) The standalone item carries all five sections in order.
+  const spItem = systemPromptBlocks[0].item;
+  assert.ok(spItem, "system-prompt block must have an item");
+  const titles = (spItem.sections ?? []).map((s) => s.title);
+  assert.deepEqual(
+    titles,
+    ["Base", "System", "Team Instructions", "Core Memory", "Channel Canvas"],
+    "system-prompt standalone card must carry Base → System → Team Instructions → Core Memory → Channel Canvas in order",
+  );
+
+  // (c) The system-prompt item must NOT be inside any turn group.
+  // Verify by checking that no turn block contains it.
+  const systemPromptInTurnBlock = blocks.some(
+    (b) =>
+      b.kind === "turn" &&
+      b.segments.some((seg) =>
+        seg.kind === "prompt"
+          ? seg.user.acpSource === "session/new" ||
+            seg.context?.acpSource === "session/new"
+          : seg.kind === "item"
+            ? seg.item.acpSource === "session/new"
+            : false,
+      ),
+  );
+  assert.ok(
+    !systemPromptInTurnBlock,
+    "system-prompt must not appear inside any turn block",
+  );
+
+  // (d) CheckCheck context (prompt segment's context field) must contain only
+  // the session/prompt:context item — Buzz/thread context only, no system-prompt sections.
+  const promptContextItem = flat.find(
+    (i) => i.acpSource === "session/prompt:context",
+  );
+  assert.ok(
+    promptContextItem,
+    "prompt context item (acpSource session/prompt:context) must be present",
+  );
+  const contextSectionTitles = (promptContextItem.sections ?? []).map(
+    (s) => s.title,
+  );
+  // Must have Buzz event and Thread context sections, NOT Base/System/Team Instructions/Core Memory/Channel Canvas.
+  assert.ok(
+    contextSectionTitles.some((t) => t.toLowerCase().includes("buzz")),
+    "prompt context must contain a Buzz event section",
+  );
+  assert.ok(
+    !contextSectionTitles.some(
+      (t) =>
+        t === "Base" ||
+        t === "System" ||
+        t === "Team Instructions" ||
+        t === "Core Memory" ||
+        t === "Channel Canvas",
+    ),
+    "prompt context must NOT contain system-prompt sections (Base/System/Team Instructions/Core Memory/Channel Canvas)",
   );
 });

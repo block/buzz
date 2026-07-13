@@ -31,6 +31,7 @@ import { useHuddle } from "../HuddleContext";
 import { AddAgentDialog, type AgentAddResult } from "./AddAgentDialog";
 import { MicControls, SpeakerControls } from "./MicControls";
 import { HuddleParticipantsControl } from "./ParticipantList";
+import { truncatePubkey } from "@/shared/lib/pubkey";
 
 // Mirrors HuddleState in src-tauri/src/huddle/mod.rs.
 type HuddleState = {
@@ -58,6 +59,8 @@ type HuddleBarProps = {
 };
 
 const HUDDLE_DRAWER_EXIT_MS = 260;
+const HUDDLE_STATE_FALLBACK_INTERVAL_MS = 30_000;
+const HUDDLE_MODEL_STATUS_INTERVAL_MS = 10_000;
 const HUDDLE_REACTION_NAME_MAX = 48;
 
 function isVisibleHuddleState(state: HuddleState | null) {
@@ -93,7 +96,7 @@ function clampReactionName(name: string): string {
 }
 
 function fallbackNameForPubkey(pubkey?: string | null): string {
-  return pubkey ? `Participant ${pubkey.slice(0, 8)}` : "Someone";
+  return pubkey ? `Participant ${truncatePubkey(pubkey)}` : "Someone";
 }
 
 function parseHuddleReactionEvent(event: RelayEvent) {
@@ -211,7 +214,7 @@ export function HuddleBar({
     }
     setState(nextState);
   }, []);
-  // Huddle state: event-driven + 10s fallback poll.
+  // Huddle state: event-driven + slow fallback poll.
   React.useEffect(() => {
     let cancelled = false;
     let unlisten: (() => void) | null = null;
@@ -245,8 +248,12 @@ export function HuddleBar({
       else unlisten = fn;
     });
 
-    // Fallback: 10s poll in case events are missed
-    const id = window.setInterval(() => void fetchState(), 10_000);
+    // Fallback in case events are missed; keep it slow so normal huddle use is
+    // event-driven and does not keep a sync IPC command warm on the main thread.
+    const id = window.setInterval(
+      () => void fetchState(),
+      HUDDLE_STATE_FALLBACK_INTERVAL_MS,
+    );
 
     return () => {
       cancelled = true;
@@ -292,7 +299,10 @@ export function HuddleBar({
     }
 
     void pollModels();
-    const id = window.setInterval(() => void pollModels(), 3_000);
+    const id = window.setInterval(
+      () => void pollModels(),
+      HUDDLE_MODEL_STATUS_INTERVAL_MS,
+    );
 
     return () => {
       cancelled = true;

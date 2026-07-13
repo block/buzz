@@ -188,6 +188,40 @@ fn diff_range(
         .unwrap_or_else(|_| "HEAD^..HEAD".to_string())
 }
 
+/// Range for a single commit against its parent, used by the commit detail
+/// view. Root commits fall back to the empty tree so the whole initial tree
+/// renders as additions. Errors when the commit is not reachable in the
+/// available history — diffing an unrelated ref instead would be misleading.
+fn commit_parent_range(
+    repo_dir: &std::path::Path,
+    auth: &GitAuthConfig,
+    commit: &str,
+) -> Result<String, String> {
+    run_git(
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("{commit}^{{commit}}"),
+        ],
+        Some(repo_dir),
+        auth,
+    )
+    .map_err(|_| format!("commit {commit} was not found in the repository history"))?;
+    let parent = format!("{commit}^");
+    if run_git(
+        &["rev-parse", "--verify", "--quiet", &parent],
+        Some(repo_dir),
+        auth,
+    )
+    .is_ok()
+    {
+        return Ok(format!("{parent}..{commit}"));
+    }
+    let empty_tree = empty_tree_ref(repo_dir, auth)?;
+    Ok(format!("{empty_tree}..{commit}"))
+}
+
 fn local_ref_exists(repo_dir: &std::path::Path, auth: &GitAuthConfig, ref_name: &str) -> bool {
     run_git(
         &["rev-parse", "--verify", "--quiet", ref_name],
@@ -273,6 +307,17 @@ fn local_diff_range(
         } else {
             format!("{base_ref}..{target_ref}")
         };
+    }
+    // With no base at all, a bare commit means "diff against its parent"
+    // (commit detail view) rather than against the whole tree.
+    if base_commit.is_none() && base_branch.is_none() {
+        if let Some(target_commit) = target_commit {
+            if local_ref_exists(repo_dir, auth, target_commit) {
+                if let Ok(range) = commit_parent_range(repo_dir, auth, target_commit) {
+                    return range;
+                }
+            }
+        }
     }
     empty_tree_ref(repo_dir, auth)
         .map(|empty_tree| format!("{empty_tree}..{target_ref}"))
@@ -374,11 +419,17 @@ pub async fn get_project_repo_diff(
             target_ref.as_deref(),
             target_commit.as_deref(),
         )?;
-        let range = diff_range(
-            &repo_dir,
-            &auth,
-            diff_base_ref(&repo_dir, &auth, base_branch.as_deref()),
-        );
+        // A commit with no base branch or target ref means "diff this commit
+        // against its parent" (commit detail view), not "diff HEAD against a
+        // base".
+        let range = match (&target_ref, &base_branch, &target_commit) {
+            (None, None, Some(commit)) => commit_parent_range(&repo_dir, &auth, commit)?,
+            _ => diff_range(
+                &repo_dir,
+                &auth,
+                diff_base_ref(&repo_dir, &auth, base_branch.as_deref()),
+            ),
+        };
         diff_from_repo(&repo_dir, &auth, &range)
     })
     .await

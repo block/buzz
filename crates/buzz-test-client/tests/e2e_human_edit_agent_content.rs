@@ -1,7 +1,8 @@
 //! End-to-end tests for human owners editing/managing content authored by
-//! their agents — all four authorization predicate sites:
+//! their agents — all five authorization predicate sites:
 //!
 //! - kind:40003 message edit (`validate_edit_ownership`)
+//! - kind:5 standard deletion (`validate_standard_deletion_event`)
 //! - kind:9005 DELETE_EVENT (`validate_admin_event` 9005 branch)
 //! - kind:9002 EDIT_METADATA privileged-tag branch
 //! - kind:9008 DELETE_GROUP
@@ -303,6 +304,97 @@ async fn test_third_party_cannot_delete_agent_message() {
     assert!(
         !ok.accepted,
         "third party should NOT be able to delete agent message, but was accepted"
+    );
+
+    agent_client.disconnect().await.ok();
+    third_party_client.disconnect().await.ok();
+}
+
+// ─── kind:5 standard deletion ───────────────────────────────────────────────
+
+/// Owner can delete a message authored by their agent via standard NIP-09
+/// kind:5 (the deletion kind the desktop app sends).
+#[tokio::test]
+#[ignore]
+async fn test_owner_can_delete_agent_message_kind5() {
+    let owner_keys = Keys::generate();
+    let agent_keys = Keys::generate();
+    let channel_id = create_agent_owned_channel(&agent_keys).await;
+
+    let mut agent_client = connect_agent_with_owner(&agent_keys, &owner_keys).await;
+
+    let content = format!("agent-msg-{}", uuid::Uuid::new_v4());
+    let ok = agent_client
+        .send_text_message(&agent_keys, &channel_id, &content, 9)
+        .await
+        .expect("agent send message");
+    assert!(ok.accepted, "agent message rejected: {}", ok.message);
+    let msg_event_id = ok.event_id;
+
+    let mut owner_client = BuzzTestClient::connect(&relay_url(), &owner_keys)
+        .await
+        .expect("connect owner");
+
+    let delete_event = EventBuilder::new(Kind::Custom(5), "")
+        .tags(vec![
+            Tag::parse(["e", &msg_event_id]).unwrap(),
+            Tag::parse(["h", &channel_id]).unwrap(),
+        ])
+        .sign_with_keys(&owner_keys)
+        .unwrap();
+
+    let ok = owner_client
+        .send_event(delete_event)
+        .await
+        .expect("send delete");
+    assert!(
+        ok.accepted,
+        "owner kind:5 delete of agent message rejected: {}",
+        ok.message
+    );
+
+    agent_client.disconnect().await.ok();
+    owner_client.disconnect().await.ok();
+}
+
+/// An unrelated third party cannot delete an agent's message via kind:5.
+#[tokio::test]
+#[ignore]
+async fn test_third_party_cannot_delete_agent_message_kind5() {
+    let owner_keys = Keys::generate();
+    let agent_keys = Keys::generate();
+    let third_party_keys = Keys::generate();
+    let channel_id = create_agent_owned_channel(&agent_keys).await;
+
+    let mut agent_client = connect_agent_with_owner(&agent_keys, &owner_keys).await;
+
+    let content = format!("agent-msg-{}", uuid::Uuid::new_v4());
+    let ok = agent_client
+        .send_text_message(&agent_keys, &channel_id, &content, 9)
+        .await
+        .expect("agent send message");
+    assert!(ok.accepted, "agent message rejected: {}", ok.message);
+    let msg_event_id = ok.event_id;
+
+    let mut third_party_client = BuzzTestClient::connect(&relay_url(), &third_party_keys)
+        .await
+        .expect("connect third party");
+
+    let delete_event = EventBuilder::new(Kind::Custom(5), "")
+        .tags(vec![
+            Tag::parse(["e", &msg_event_id]).unwrap(),
+            Tag::parse(["h", &channel_id]).unwrap(),
+        ])
+        .sign_with_keys(&third_party_keys)
+        .unwrap();
+
+    let ok = third_party_client
+        .send_event(delete_event)
+        .await
+        .expect("send delete attempt");
+    assert!(
+        !ok.accepted,
+        "third party should NOT be able to kind:5-delete agent message, but was accepted"
     );
 
     agent_client.disconnect().await.ok();

@@ -4,6 +4,7 @@ import type { UserNote } from "@/shared/api/socialTypes";
 import type { UserProfileSummary } from "@/shared/api/types";
 import { Markdown } from "@/shared/ui/markdown";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
+import { truncatePubkey } from "@/shared/lib/pubkey";
 
 type RecentNotesSectionProps = {
   notes: UserNote[];
@@ -52,7 +53,7 @@ export function RecentNotesSection({
         {notes.slice(0, 5).map((note) => {
           const profile = profiles[note.pubkey.toLowerCase()];
           const displayName =
-            profile?.displayName ?? `${note.pubkey.slice(0, 8)}...`;
+            profile?.displayName ?? truncatePubkey(note.pubkey);
           const isAgent = agentPubkeys.has(note.pubkey);
 
           return (

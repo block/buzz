@@ -17,7 +17,8 @@
  */
 
 import { relayClient } from "@/shared/api/relayClient";
-import { getIdentity, signRelayEvent } from "@/shared/api/tauri";
+import { signRelayEvent } from "@/shared/api/tauri";
+import { getIdentity } from "@/shared/api/tauriIdentity";
 import type { RelayEvent } from "@/shared/api/types";
 import type { CustomEmoji } from "@/shared/lib/remarkCustomEmoji";
 

@@ -112,10 +112,10 @@ class MessageContent extends HookConsumerWidget {
           var segment = mentionParts[i];
           for (final name in mentionNames.values) {
             if (name.contains(' ')) {
-              final nbspName = name.replaceAll(' ', '\u00A0');
+              final normalizedName = _markdownMentionName(name);
               segment = segment.replaceAllMapped(
                 RegExp('@${RegExp.escape(name)}', caseSensitive: false),
-                (m) => '@$nbspName',
+                (m) => '@$normalizedName',
               );
             }
           }
@@ -716,11 +716,13 @@ RegExp _buildPrefixPattern({
   );
 }
 
+String _markdownMentionName(String name) => name.replaceAll(' ', '\u00A0');
+
 Iterable<String> _mentionAliases(Iterable<String> mentionNames) sync* {
   for (final name in mentionNames) {
     final trimmed = name.trim();
     if (trimmed.isEmpty) continue;
-    yield trimmed;
+    yield _markdownMentionName(trimmed);
     final firstName = trimmed.split(RegExp(r'\s+')).first;
     if (firstName.isNotEmpty) {
       yield firstName;

@@ -62,11 +62,7 @@ pub async fn get_agent_models(
         // so model discovery runs against the persona's current harness, not the
         // frozen record snapshot. An explicit per-agent override wins.
         let personas = load_personas(&app).unwrap_or_default();
-        let effective_command = crate::managed_agents::effective_agent_command(
-            record.persona_id.as_deref(),
-            &personas,
-            record.agent_command_override.as_deref(),
-        );
+        let effective_command = crate::managed_agents::record_agent_command(record, &personas);
 
         let args = normalize_agent_args(&effective_command, record.agent_args.clone());
 
@@ -366,16 +362,16 @@ fn openai_dated_snapshot_alias(id: &str) -> Option<String> {
 fn openai_model_display_name(id: &str) -> String {
     let canonical = openai_dated_snapshot_alias(id).unwrap_or_else(|| id.to_string());
     if let Some(rest) = canonical.strip_prefix("chatgpt-") {
-        return format!("ChatGPT {}", title_case_model_suffix(rest, false));
+        return format!("ChatGPT {}", title_case_model_suffix(rest));
     }
     if let Some(rest) = canonical.strip_prefix("gpt-") {
-        return format!("GPT-{}", title_case_model_suffix(rest, true));
+        return format!("GPT-{}", title_case_model_suffix(rest));
     }
 
     canonical
 }
 
-fn title_case_model_suffix(value: &str, preserve_first_separator: bool) -> String {
+fn title_case_model_suffix(value: &str) -> String {
     value
         .split('-')
         .enumerate()
@@ -390,9 +386,7 @@ fn title_case_model_suffix(value: &str, preserve_first_separator: bool) -> Strin
                 part.to_string()
             };
 
-            if preserve_first_separator && index == 0 {
-                part
-            } else if index == 0 {
+            if index == 0 {
                 part
             } else {
                 format!(" {part}")
@@ -644,12 +638,14 @@ fn is_databricks_provider(provider: Option<&str>) -> bool {
             .map(str::trim)
             .map(str::to_ascii_lowercase)
             .as_deref(),
-        Some("databricks" | "databricks_v2")
+        Some("databricks" | "databricks_v2" | "databricks-v2")
     )
 }
 
 fn databricks_agent_provider(provider: &str) -> buzz_agent_pkg::config::Provider {
-    if provider.trim().eq_ignore_ascii_case("databricks_v2") {
+    if provider.trim().eq_ignore_ascii_case("databricks_v2")
+        || provider.trim().eq_ignore_ascii_case("databricks-v2")
+    {
         buzz_agent_pkg::config::Provider::DatabricksV2
     } else {
         buzz_agent_pkg::config::Provider::Databricks
@@ -833,19 +829,12 @@ pub async fn update_managed_agent(
         if let Some(prompt_update) = input.system_prompt {
             record.system_prompt = prompt_update;
         }
-        if let Some(toolsets_update) = input.mcp_toolsets {
-            record.mcp_toolsets = toolsets_update
-                .as_deref()
-                .map(str::trim)
-                .filter(|v| !v.is_empty())
-                .map(str::to_string);
-        }
         if let Some(parallelism) = input.parallelism {
             record.parallelism = parallelism;
         }
-        if let Some(turn_timeout_seconds) = input.turn_timeout_seconds {
-            record.turn_timeout_seconds = turn_timeout_seconds;
-        }
+        // turn_timeout_seconds is intentionally not applied here —
+        // BUZZ_ACP_TURN_TIMEOUT is deprecated and ignored by the harness.
+        // Use idle_timeout_seconds or max_turn_duration_seconds instead.
         // Store the relay override exactly as supplied (trimmed). An explicit
         // value pins the agent; empty falls back to the workspace relay at
         // read-time. A name-only edit (relay_url == None) leaves the pin intact.
@@ -855,25 +844,30 @@ pub async fn update_managed_agent(
         if let Some(acp_command) = input.acp_command {
             record.acp_command = acp_command;
         }
-        // Harness edit: the persona's runtime is authoritative, so we persist an
-        // explicit `agent_command_override` ONLY when the user picks a command
-        // that diverges from the persona. An empty/whitespace value (the
-        // "Inherit from persona" sentinel) clears the pin back to `None`. A
-        // name-only edit (`agent_command == None`) leaves the pin intact.
+        // Harness edit: the persona's runtime is authoritative, so an explicit
+        // `agent_command_override` is persisted ONLY when the user picks a
+        // command that diverges from the persona, and the empty/whitespace
+        // "Inherit from persona" sentinel clears both the pin and the
+        // materialized record runtime. A name-only edit
+        // (`agent_command == None`) leaves the pin intact. `harness_override`
+        // threads the user's explicit intent — see `apply_agent_command_update`
+        // and `update_time_agent_command_override` for the full resolution
+        // rules.
         if let Some(agent_command) = input.agent_command {
             let personas = load_personas(&app).unwrap_or_default();
-            record.agent_command_override = crate::managed_agents::divergent_agent_command_override(
-                record.persona_id.as_deref(),
+            crate::managed_agents::apply_agent_command_update(
+                record,
                 &personas,
-                Some(&agent_command),
+                &agent_command,
+                input.harness_override,
             );
         }
         if let Some(agent_args) = input.agent_args {
             record.agent_args = agent_args;
         }
-        if let Some(mcp_command) = input.mcp_command {
-            record.mcp_command = mcp_command;
-        }
+        // mcp_command is intentionally not applied here — the effective MCP
+        // command is always catalog-derived (known_acp_runtime at spawn time)
+        // and the per-record field is never read by the runtime.
         if let Some(env_vars) = input.env_vars {
             crate::managed_agents::validate_user_env_keys(&env_vars)?;
             record.env_vars = env_vars;
@@ -930,11 +924,7 @@ pub async fn update_managed_agent(
             // not the frozen snapshot, so an inherited harness picks the right
             // default avatar.
             let personas = load_personas(&app).unwrap_or_default();
-            let effective_command = crate::managed_agents::effective_agent_command(
-                record.persona_id.as_deref(),
-                &personas,
-                record.agent_command_override.as_deref(),
-            );
+            let effective_command = crate::managed_agents::record_agent_command(record, &personas);
             let avatar_url = record
                 .avatar_url
                 .clone()

@@ -14,14 +14,9 @@ import {
 } from "@/features/agents/hooks";
 import { useChannelsQuery } from "@/features/channels/hooks";
 import { usePresenceQuery } from "@/features/presence/hooks";
-import { useManagedAgentObserverBridge } from "@/features/agents/observerRelayStore";
-import { useActiveAgentTurnsBridge } from "@/features/agents/activeAgentTurnsStore";
 import type {
-  AcpRuntime,
-  AcpRuntimeCatalogEntry,
   AgentPersona,
   Channel,
-  CreateManagedAgentInput,
   CreateManagedAgentResponse,
   ManagedAgent,
 } from "@/shared/api/types";
@@ -33,7 +28,11 @@ import {
   startManagedAgentWithRules,
   stopManagedAgentWithRules,
 } from "../lib/managedAgentControlActions";
-import { resolvePersonaRuntime } from "../lib/resolvePersonaRuntime";
+import {
+  availableRuntimesForStart,
+  buildInstanceInputForDefinition,
+  resolveStartRuntimeForDefinition,
+} from "../lib/instanceInputForDefinition";
 
 export function useManagedAgentActions() {
   const relayAgentsQuery = useRelayAgentsQuery();
@@ -85,8 +84,8 @@ export function useManagedAgentActions() {
       }),
     [managedAgentsQuery.data],
   );
-  useManagedAgentObserverBridge(managedAgents);
-  useActiveAgentTurnsBridge(managedAgents);
+  // Observer ingestion is owner-global (useAgentObserverIngestion in
+  // AppShell); this hook only reads derived state.
 
   const managedPubkeys = React.useMemo(
     () => new Set(managedAgents.map((agent) => agent.pubkey)),
@@ -172,15 +171,6 @@ export function useManagedAgentActions() {
     }
   }
 
-  async function getAvailableRuntimesForStart() {
-    if (availableRuntimesQuery.isFetched) {
-      return availableRuntimesQuery.data ?? [];
-    }
-
-    const result = await availableRuntimesQuery.refetch();
-    return filterAvailableRuntimes(result.data);
-  }
-
   function setPersonaStartPending(personaId: string, pending: boolean) {
     const next = new Set(startingPersonaIdsRef.current);
     if (pending) {
@@ -199,40 +189,12 @@ export function useManagedAgentActions() {
     setPersonaStartPending(persona.id, true);
     clearFeedback();
     try {
-      const runtimes = await getAvailableRuntimesForStart();
-      const defaultRuntime = runtimes[0] ?? null;
-      const { runtime, warnings, isOverridden } = resolvePersonaRuntime(
-        persona.runtime,
+      const runtimes = await availableRuntimesForStart(availableRuntimesQuery);
+      const { runtime, warnings } = resolveStartRuntimeForDefinition(
+        persona,
         runtimes,
-        defaultRuntime,
       );
-
-      if (!runtime) {
-        throw new Error("No available runtime found for this agent.");
-      }
-      if (isOverridden) {
-        throw new Error(
-          warnings[0] ??
-            "This agent's configured runtime is not available. Install the runtime or edit the agent before starting it.",
-        );
-      }
-
-      const input: CreateManagedAgentInput = {
-        name: persona.displayName,
-        acpCommand: "buzz-acp",
-        agentCommand: runtime.command,
-        agentArgs: runtime.defaultArgs,
-        mcpCommand: runtime.mcpCommand ?? "",
-        personaId: persona.id,
-        systemPrompt: persona.systemPrompt,
-        avatarUrl: persona.avatarUrl ?? undefined,
-        model: persona.model ?? undefined,
-        envVars: persona.envVars,
-        spawnAfterCreate: true,
-        startOnAppLaunch: true,
-        backend: { type: "local" },
-        harnessOverride: !persona.runtime || persona.runtime === runtime.id,
-      };
+      const input = await buildInstanceInputForDefinition(persona, runtime);
 
       const created = await createAgentMutation.mutateAsync(input);
       setCreatedAgent(created);
@@ -413,37 +375,6 @@ export function useManagedAgentActions() {
     );
   }
 
-  async function handleBulkRemoveStopped() {
-    const targets = managedAgents.filter(
-      (a) => a.status === "stopped" || a.status === "not_deployed",
-    );
-    const executed = await runBulkAction(
-      targets,
-      "Remove",
-      "removal",
-      async (a) => {
-        await deleteManagedAgent(a);
-        await removeAgentFromAllChannels(a.pubkey);
-      },
-    );
-    if (
-      executed &&
-      logAgentPubkey &&
-      targets.some((a) => a.pubkey === logAgentPubkey)
-    ) {
-      setLogAgentPubkey(null);
-    }
-  }
-
-  async function deleteManagedAgent(agent: ManagedAgent) {
-    const isDeployedRemote =
-      agent.backend.type === "provider" && agent.backendAgentId;
-    await deleteMutation.mutateAsync({
-      pubkey: agent.pubkey,
-      forceRemoteDelete: isDeployedRemote ? true : undefined,
-    });
-  }
-
   const isPending =
     createAgentMutation.isPending ||
     startMutation.isPending ||
@@ -486,16 +417,7 @@ export function useManagedAgentActions() {
     handleToggleStartOnAppLaunch,
     handleAddedToChannel,
     handleBulkStopRunning,
-    handleBulkRemoveStopped,
     refetchManagedAgents: () => void managedAgentsQuery.refetch(),
     refetchRelayAgents: () => void relayAgentsQuery.refetch(),
   };
-}
-
-function filterAvailableRuntimes(
-  runtimes: readonly AcpRuntimeCatalogEntry[] | undefined,
-): AcpRuntime[] {
-  return (runtimes ?? []).filter(
-    (runtime): runtime is AcpRuntime => runtime.availability === "available",
-  );
 }

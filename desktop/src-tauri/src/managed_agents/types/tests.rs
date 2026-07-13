@@ -1,9 +1,9 @@
-use super::{ManagedAgentRecord, PersonaRecord};
+use super::{AgentDefinition, ManagedAgentRecord};
 use std::path::PathBuf;
 
 #[test]
 fn persona_record_defaults_active_when_field_is_missing() {
-    let record: PersonaRecord = serde_json::from_str(
+    let record: AgentDefinition = serde_json::from_str(
         r#"{
             "id": "builtin:fizz",
             "display_name": "Fizz",
@@ -291,7 +291,7 @@ fn relay_mesh_config_round_trips_snake_case() {
 
 #[test]
 fn persona_record_deserializes_old_source_pack_fields_via_alias() {
-    let record: PersonaRecord = serde_json::from_str(
+    let record: AgentDefinition = serde_json::from_str(
         r#"{
             "id": "persona-1",
             "display_name": "Test",
@@ -314,7 +314,7 @@ fn persona_record_deserializes_old_source_pack_fields_via_alias() {
 
 #[test]
 fn persona_record_serializes_new_field_names() {
-    let record: PersonaRecord = serde_json::from_str(
+    let record: AgentDefinition = serde_json::from_str(
         r#"{
             "id": "persona-1",
             "display_name": "Test",
@@ -466,4 +466,186 @@ fn sample_agent_record() -> ManagedAgentRecord {
         }"#,
     )
     .expect("sample record")
+}
+
+// ── AgentDefinition ↔ ManagedAgentRecord fold mapping (Phase 1A) ─────────────────────
+
+fn sample_persona() -> AgentDefinition {
+    AgentDefinition {
+        id: "custom:helper".to_string(),
+        display_name: "Helper".to_string(),
+        avatar_url: Some("https://example.com/a.png".to_string()),
+        system_prompt: "You help.".to_string(),
+        runtime: Some("goose".to_string()),
+        model: Some("gpt-x".to_string()),
+        provider: Some("openai".to_string()),
+        name_pool: vec!["Nimble".to_string()],
+        is_builtin: false,
+        is_active: true,
+        source_team: Some("team-1".to_string()),
+        source_team_persona_slug: Some("helper".to_string()),
+        env_vars: [("K".to_string(), "v".to_string())].into_iter().collect(),
+        respond_to: None,
+        respond_to_allowlist: Vec::new(),
+        parallelism: None,
+        created_at: "2026-01-01T00:00:00Z".to_string(),
+        updated_at: "2026-01-02T00:00:00Z".to_string(),
+    }
+}
+
+#[test]
+fn persona_into_agent_record_is_keyless_and_slugged() {
+    let record = sample_persona().into_agent_record();
+    assert!(record.pubkey.is_empty(), "fold must not mint identity");
+    assert!(record.private_key_nsec.is_empty());
+    assert_eq!(record.slug.as_deref(), Some("custom:helper"));
+    assert_eq!(record.display_name.as_deref(), Some("Helper"));
+    assert_eq!(record.system_prompt.as_deref(), Some("You help."));
+    assert_eq!(record.runtime.as_deref(), Some("goose"));
+    assert_eq!(record.source_team.as_deref(), Some("team-1"));
+    assert_eq!(record.env_vars.get("K").map(String::as_str), Some("v"));
+}
+
+#[test]
+fn persona_view_round_trips_through_agent_record() {
+    let persona = sample_persona();
+    let view = persona
+        .clone()
+        .into_agent_record()
+        .to_definition_view()
+        .expect("slugged record must present a persona view");
+    assert_eq!(
+        serde_json::to_value(&view).unwrap(),
+        serde_json::to_value(&persona).unwrap(),
+        "fold + view must round-trip every persona field"
+    );
+}
+
+#[test]
+fn keyed_record_without_slug_has_no_persona_view() {
+    let mut record = sample_persona().into_agent_record();
+    record.slug = None;
+    assert!(
+        record.to_definition_view().is_none(),
+        "instances (no slug) are not definitions"
+    );
+}
+
+#[test]
+fn empty_prompt_folds_to_none() {
+    let mut persona = sample_persona();
+    persona.system_prompt = String::new();
+    assert_eq!(persona.into_agent_record().system_prompt, None);
+}
+
+// ── Mint-time behavioral defaults (B5 quad activation) ──────────────────────
+
+use super::resolve_mint_behavioral_defaults;
+
+fn quad_definition(respond_to: &str, allowlist: Vec<&str>) -> AgentDefinition {
+    let mut persona = sample_persona();
+    persona.respond_to = Some(respond_to.to_string());
+    persona.respond_to_allowlist = allowlist.into_iter().map(str::to_string).collect();
+    persona.parallelism = Some(8);
+    persona
+}
+
+#[test]
+fn mint_explicit_input_wins_over_definition() {
+    let definition = quad_definition("anyone", vec![]);
+    let minted = resolve_mint_behavioral_defaults(
+        Some(RespondTo::OwnerOnly),
+        Vec::new(),
+        Some(2),
+        Some(&definition),
+    )
+    .unwrap();
+    assert_eq!(minted.respond_to, RespondTo::OwnerOnly);
+    assert_eq!(minted.parallelism, Some(2));
+}
+
+#[test]
+fn mint_copies_definition_quad_when_input_silent() {
+    let allow = "a".repeat(64);
+    let definition = quad_definition("allowlist", vec![&allow]);
+    let minted =
+        resolve_mint_behavioral_defaults(None, Vec::new(), None, Some(&definition)).unwrap();
+    assert_eq!(minted.respond_to, RespondTo::Allowlist);
+    assert_eq!(minted.respond_to_allowlist, vec![allow]);
+    assert_eq!(minted.parallelism, Some(8));
+}
+
+#[test]
+fn mint_without_definition_or_input_uses_client_defaults() {
+    let minted = resolve_mint_behavioral_defaults(None, Vec::new(), None, None).unwrap();
+    assert_eq!(minted.respond_to, RespondTo::default());
+    assert!(minted.respond_to_allowlist.is_empty());
+    assert_eq!(minted.parallelism, None);
+}
+
+#[test]
+fn mint_fails_loudly_on_unknown_definition_respond_to() {
+    // A typo'd mode must never silently become owner-only — the definition
+    // author intended SOMETHING, and guessing which thing is the one wrong
+    // move. The error must carry the offending string.
+    let definition = quad_definition("allowlst", vec![]);
+    let err =
+        resolve_mint_behavioral_defaults(None, Vec::new(), None, Some(&definition)).unwrap_err();
+    assert!(
+        err.contains("allowlst"),
+        "error must name the bad mode: {err}"
+    );
+}
+
+#[test]
+fn mint_fails_loudly_on_empty_definition_allowlist() {
+    // Inbound definitions bypass the dialog guard entirely — the mint
+    // boundary is the backstop against a crash-looping instance.
+    let definition = quad_definition("allowlist", vec![]);
+    let err =
+        resolve_mint_behavioral_defaults(None, Vec::new(), None, Some(&definition)).unwrap_err();
+    assert!(
+        err.contains("at least one pubkey"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn mint_fails_loudly_on_out_of_range_definition_parallelism() {
+    let mut definition = quad_definition("anyone", vec![]);
+    definition.parallelism = Some(64);
+    let err =
+        resolve_mint_behavioral_defaults(None, Vec::new(), None, Some(&definition)).unwrap_err();
+    assert!(err.contains("64"), "error must name the bad value: {err}");
+}
+
+#[test]
+fn mint_normalizes_definition_allowlist_from_wire() {
+    let upper = "A".repeat(64);
+    let definition = quad_definition("allowlist", vec![&upper]);
+    let minted =
+        resolve_mint_behavioral_defaults(None, Vec::new(), None, Some(&definition)).unwrap();
+    assert_eq!(minted.respond_to_allowlist, vec!["a".repeat(64)]);
+}
+
+#[test]
+fn mint_resolves_each_behavioral_field_independently() {
+    // PR #1667 review (convergent): the input-wins rule is per-FIELD, not
+    let definition = quad_definition("anyone", vec![]);
+    let minted =
+        resolve_mint_behavioral_defaults(None, Vec::new(), None, Some(&definition)).unwrap();
+    assert_eq!(minted.respond_to, RespondTo::Anyone, "inherited");
+    assert_eq!(minted.parallelism, Some(8), "inherited");
+}
+
+#[test]
+fn mint_rejects_out_of_range_input_parallelism() {
+    // The "validated when present" contract on MintBehavioralDefaults holds
+    // for the INPUT branch too, not just definition values.
+    let err = resolve_mint_behavioral_defaults(None, Vec::new(), Some(64), None).unwrap_err();
+    assert!(err.contains("64"), "error must name the bad value: {err}");
+    assert!(
+        !err.contains("definition"),
+        "input-branch error must not blame the definition: {err}"
+    );
 }

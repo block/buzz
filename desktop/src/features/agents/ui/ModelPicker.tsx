@@ -101,7 +101,7 @@ export function ModelPicker({
       acpConfigOption: "from ACP config",
       envVar: "from env",
       configFile: "from config file",
-      personaDefault: "persona default",
+      personaDefault: "template default",
       runtimeOverride: "live override",
     };
     return labels[origin] ?? null;

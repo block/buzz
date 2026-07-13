@@ -183,24 +183,25 @@ test("reconnect backfills more missed channel messages than the live subscriptio
   });
 
   // The virtualized timeline windows the oldest backfilled rows out of the DOM
-  // while the user sits at the bottom, so the backfill depth can't be asserted
-  // by expecting all 260 rows to be mounted at once. Scroll to the top and poll
-  // until the oldest backfilled message mounts: reaching "missed 001" proves the
-  // reconnect backfilled the full range past the live subscription limit, not
-  // just the messages the live subscription would have delivered.
+  // while the user sits at the bottom. Walk upward with real wheel input: the
+  // older-history sentinel arms on a genuine leave→enter transition, and each
+  // prepend restores the visible anchor away from the top. Reaching "missed
+  // 001" proves reconnect backfilled past the live-subscription limit.
+  await timeline.hover();
   await expect
     .poll(
       async () => {
-        await timeline.evaluate((element) => {
-          const scrollable = element as HTMLDivElement;
-          scrollable.scrollTop = 0;
-          scrollable.dispatchEvent(new Event("scroll", { bubbles: true }));
-        });
+        // Compact same-author rows can leave the restored viewport inside the
+        // sentinel band. Move down first so the next upward gesture creates the
+        // leave→enter transition that arms another bounded page.
+        await page.mouse.wheel(0, 1200);
+        await page.waitForTimeout(40);
+        await page.mouse.wheel(0, -6000);
         return timeline.evaluate((element) =>
           (element.textContent ?? "").includes("reconnect e2e missed 001"),
         );
       },
-      { timeout: 15_000 },
+      { intervals: [100, 150, 250], timeout: 15_000 },
     )
     .toBe(true);
 });

@@ -12,9 +12,9 @@ use uuid::Uuid;
 use buzz_auth::Scope;
 use buzz_core::kind::{
     event_kind_u32, is_identity_archive_request_kind, is_parameterized_replaceable,
-    is_relay_admin_kind, KIND_AGENT_ENGRAM, KIND_AGENT_PROFILE, KIND_APPROVAL_DENY,
-    KIND_APPROVAL_GRANT, KIND_AUTH, KIND_BOOKMARK_LIST, KIND_BOOKMARK_SET, KIND_CANVAS,
-    KIND_CONTACT_LIST, KIND_DELETION, KIND_DM_ADD_MEMBER, KIND_DM_HIDE, KIND_DM_OPEN,
+    is_relay_admin_kind, KIND_AGENT_ENGRAM, KIND_AGENT_PROFILE, KIND_AGENT_TURN_METRIC,
+    KIND_APPROVAL_DENY, KIND_APPROVAL_GRANT, KIND_AUTH, KIND_BOOKMARK_LIST, KIND_BOOKMARK_SET,
+    KIND_CANVAS, KIND_CONTACT_LIST, KIND_DELETION, KIND_DM_ADD_MEMBER, KIND_DM_HIDE, KIND_DM_OPEN,
     KIND_EMOJI_LIST, KIND_EMOJI_SET, KIND_EVENT_REMINDER, KIND_FOLLOW_SET, KIND_FORUM_COMMENT,
     KIND_FORUM_POST, KIND_FORUM_VOTE, KIND_GIFT_WRAP, KIND_GIT_ISSUE, KIND_GIT_PATCH,
     KIND_GIT_PR_UPDATE, KIND_GIT_PULL_REQUEST, KIND_GIT_REPO_ANNOUNCEMENT, KIND_GIT_REPO_STATE,
@@ -22,16 +22,17 @@ use buzz_core::kind::{
     KIND_HUDDLE_ENDED, KIND_HUDDLE_GUIDELINES, KIND_HUDDLE_PARTICIPANT_JOINED,
     KIND_HUDDLE_PARTICIPANT_LEFT, KIND_HUDDLE_STARTED, KIND_IA_ARCHIVE_REQUEST,
     KIND_IA_UNARCHIVE_REQUEST, KIND_LONG_FORM, KIND_MANAGED_AGENT, KIND_MEMBER_ADDED_NOTIFICATION,
-    KIND_MEMBER_REMOVED_NOTIFICATION, KIND_MESH_LLM_RELAY_STATUS, KIND_MUTE_LIST,
-    KIND_NIP29_CREATE_GROUP, KIND_NIP29_DELETE_EVENT, KIND_NIP29_DELETE_GROUP,
-    KIND_NIP29_EDIT_METADATA, KIND_NIP29_JOIN_REQUEST, KIND_NIP29_LEAVE_REQUEST,
-    KIND_NIP29_PUT_USER, KIND_NIP29_REMOVE_USER, KIND_NIP43_LEAVE_REQUEST,
-    KIND_NIP65_RELAY_LIST_METADATA, KIND_PERSONA, KIND_PIN_LIST, KIND_PRESENCE_UPDATE,
-    KIND_PROFILE, KIND_REACTION, KIND_READ_STATE, KIND_STREAM_MESSAGE,
-    KIND_STREAM_MESSAGE_BOOKMARKED, KIND_STREAM_MESSAGE_DIFF, KIND_STREAM_MESSAGE_EDIT,
-    KIND_STREAM_MESSAGE_PINNED, KIND_STREAM_MESSAGE_SCHEDULED, KIND_STREAM_MESSAGE_V2,
-    KIND_STREAM_REMINDER, KIND_TEAM, KIND_TEXT_NOTE, KIND_USER_STATUS, KIND_WORKFLOW_DEF,
-    KIND_WORKFLOW_TRIGGER, RELAY_ADMIN_ADD_MEMBER, RELAY_ADMIN_CHANGE_ROLE,
+    KIND_MEMBER_REMOVED_NOTIFICATION, KIND_MESH_LLM_RELAY_STATUS, KIND_MODERATION_BAN,
+    KIND_MODERATION_RESOLVE_REPORT, KIND_MODERATION_TIMEOUT, KIND_MODERATION_UNBAN,
+    KIND_MODERATION_UNTIMEOUT, KIND_MUTE_LIST, KIND_NIP29_CREATE_GROUP, KIND_NIP29_DELETE_EVENT,
+    KIND_NIP29_DELETE_GROUP, KIND_NIP29_EDIT_METADATA, KIND_NIP29_JOIN_REQUEST,
+    KIND_NIP29_LEAVE_REQUEST, KIND_NIP29_PUT_USER, KIND_NIP29_REMOVE_USER,
+    KIND_NIP43_LEAVE_REQUEST, KIND_NIP65_RELAY_LIST_METADATA, KIND_PERSONA, KIND_PIN_LIST,
+    KIND_PRESENCE_UPDATE, KIND_PROFILE, KIND_REACTION, KIND_READ_STATE, KIND_REPORT,
+    KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_BOOKMARKED, KIND_STREAM_MESSAGE_DIFF,
+    KIND_STREAM_MESSAGE_EDIT, KIND_STREAM_MESSAGE_PINNED, KIND_STREAM_MESSAGE_SCHEDULED,
+    KIND_STREAM_MESSAGE_V2, KIND_STREAM_REMINDER, KIND_TEAM, KIND_TEXT_NOTE, KIND_USER_STATUS,
+    KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER, RELAY_ADMIN_ADD_MEMBER, RELAY_ADMIN_CHANGE_ROLE,
     RELAY_ADMIN_REMOVE_MEMBER, RELAY_ADMIN_SET_WORKSPACE_PROFILE,
 };
 use buzz_core::tenant::TenantContext;
@@ -156,6 +157,16 @@ fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static s
         | KIND_EVENT_REMINDER | KIND_PERSONA | KIND_TEAM | KIND_MANAGED_AGENT => {
             Ok(Scope::UsersWrite)
         }
+        // NIP-AM: agent turn metrics are agent-authored global events (encrypted to owner).
+        KIND_AGENT_TURN_METRIC => Ok(Scope::MessagesWrite),
+        // NIP-56 reports are ordinary member writes into the mod-only queue.
+        // Ingest persists them to `moderation_reports` and suppresses public
+        // storage/fanout; reports are signals, never enforcement triggers.
+        KIND_REPORT => Ok(Scope::MessagesWrite),
+        // Community moderation commands are direct, mod-authz-gated writes.
+        // Scope only proves the transport can submit message writes; the
+        // command handler owns role/capability authorization.
+        k if buzz_core::kind::is_moderation_command_kind(k) => Ok(Scope::MessagesWrite),
         // NIP-51 standard lists and NIP-65 relay list — user-owned global state,
         // same ownership shape as kind:3 (contacts) and kind:0 (profile).
         KIND_MUTE_LIST
@@ -189,7 +200,7 @@ fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static s
             Ok(Scope::AdminChannels)
         }
         // NIP-43: relay membership admin commands (9030–9032) + Buzz
-        // workspace-profile command (9033)
+        // workspace-profile command (9033).
         k if k == RELAY_ADMIN_ADD_MEMBER
             || k == RELAY_ADMIN_REMOVE_MEMBER
             || k == RELAY_ADMIN_CHANGE_ROLE
@@ -364,6 +375,15 @@ pub(crate) fn is_global_only_kind(kind: u32) -> bool {
             | KIND_GIT_STATUS_MERGED
             | KIND_GIT_STATUS_CLOSED
             | KIND_GIT_STATUS_DRAFT
+            // Community moderation commands (9040–9044): community-global
+            // direct commands, same model as the NIP-43 9030-series. A stray
+            // `h` tag must never channel-scope them (pinned contract —
+            // handlers/moderation_commands.rs routing docs).
+            | KIND_MODERATION_BAN
+            | KIND_MODERATION_UNBAN
+            | KIND_MODERATION_TIMEOUT
+            | KIND_MODERATION_UNTIMEOUT
+            | KIND_MODERATION_RESOLVE_REPORT
             // NIP-43: relay admin commands and leave requests are global — they
             // must never be channel-scoped, even if the event carries a stray `h` tag.
             | RELAY_ADMIN_ADD_MEMBER
@@ -379,6 +399,9 @@ pub(crate) fn is_global_only_kind(kind: u32) -> bool {
             // Mesh-LLM relay status is relay-signed and global. Clients may
             // subscribe to it, but must not channel-scope or submit it.
             | KIND_MESH_LLM_RELAY_STATUS
+            // NIP-AM: agent turn metrics are owner-scoped global events.
+            // Channel identity is encrypted inside the payload — no `h` tag.
+            | KIND_AGENT_TURN_METRIC
     )
 }
 
@@ -1066,6 +1089,82 @@ fn validate_engram_nip44_content(content: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Validate the public envelope of a NIP-AM `kind:44200` event.
+///
+/// Enforces (without touching the encrypted payload):
+/// - Exactly one `p` tag: 64 lowercase hex chars (the owner pubkey).
+/// - Exactly one `agent` tag: 64 lowercase hex chars equal to `event.pubkey`.
+/// - No `h` tag (channel identity belongs inside the encrypted payload).
+/// - Content syntactically resembles NIP-44 v2 ciphertext (delegated to
+///   `validate_engram_nip44_content`, which does the same length/base64/version check).
+///
+/// Ownership (`is_agent_owner`) is an async DB check performed separately in
+/// `ingest_event_inner` after this synchronous envelope check.
+fn validate_agent_turn_metric_envelope(event: &nostr::Event) -> Result<(), String> {
+    let event_pubkey_hex = event.pubkey.to_hex();
+    let mut p_tags: Vec<&str> = Vec::new();
+    let mut agent_tags: Vec<&str> = Vec::new();
+    let mut has_h_tag = false;
+
+    for tag in event.tags.iter() {
+        let parts = tag.as_slice();
+        if parts.len() < 2 {
+            continue;
+        }
+        match parts[0].as_str() {
+            "p" => p_tags.push(&parts[1]),
+            "agent" => agent_tags.push(&parts[1]),
+            "h" => has_h_tag = true,
+            _ => {}
+        }
+    }
+
+    if has_h_tag {
+        return Err(
+            "agent-turn-metric event must not have an `h` tag (channel identity belongs inside the encrypted payload)".to_string(),
+        );
+    }
+
+    if p_tags.len() != 1 {
+        return Err(format!(
+            "agent-turn-metric event must have exactly one `p` tag (got {})",
+            p_tags.len()
+        ));
+    }
+    let p = p_tags[0];
+    if p.len() != 64
+        || !p
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+    {
+        return Err("agent-turn-metric `p` tag must be 64 lowercase hex chars".to_string());
+    }
+
+    if agent_tags.len() != 1 {
+        return Err(format!(
+            "agent-turn-metric event must have exactly one `agent` tag (got {})",
+            agent_tags.len()
+        ));
+    }
+    let agent = agent_tags[0];
+    if agent.len() != 64
+        || !agent
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+    {
+        return Err("agent-turn-metric `agent` tag must be 64 lowercase hex chars".to_string());
+    }
+    if agent != event_pubkey_hex {
+        return Err("agent-turn-metric `agent` tag must equal event pubkey".to_string());
+    }
+
+    // Content must look like a NIP-44 v2 ciphertext (length, base64, version prefix).
+    validate_engram_nip44_content(&event.content)
+        .map_err(|e| e.replace("agent-engram", "agent-turn-metric"))?;
+
+    Ok(())
+}
+
 /// Parse a NIP-ER `not_before` tag value into a Unix timestamp.
 ///
 /// The value MUST be a decimal integer string containing only ASCII digits, with
@@ -1332,6 +1431,94 @@ async fn ingest_event_inner(
     // pubkey/auth match, and scope validation — never before.
     if buzz_core::kind::is_command_kind(kind_u32) {
         return super::command_executor::handle_command(tenant, state, event, auth).await;
+    }
+
+    // NIP-56 reports are persisted only to the mod queue. They are not stored in
+    // the public events table and never fan out to subscribers. Reports remain
+    // available while timed out so users can signal abuse during a write-block.
+    // A banned actor in the rare missed-disconnect window may also submit a
+    // report; that is tolerated because reports are non-actioning signals and
+    // remain visible only to moderators.
+    if kind_u32 == KIND_REPORT {
+        super::report::handle_report_event(tenant, &event, state)
+            .await
+            .map_err(IngestError::Rejected)?;
+        return Ok(IngestResult {
+            event_id: event_id_hex,
+            accepted: true,
+            message: String::new(),
+        });
+    }
+
+    // Community moderation commands (9040–9044) are direct, community-global
+    // mutations. They are never stored or fanned out as ordinary events; the
+    // handler writes the durable audit/enforcement rows after its own capability
+    // authorization. These commands are intentionally routed before the
+    // timeout/write-block gate below: restriction-lifting commands must remain
+    // available so a wrongly restricted admin is not stranded, while banned
+    // actors are handled by the auth seam and live-disconnect enforcement.
+    if buzz_core::kind::is_moderation_command_kind(kind_u32) {
+        super::moderation_commands::handle_moderation_command(tenant, state, &event)
+            .await
+            .map_err(IngestError::Rejected)?;
+        return Ok(IngestResult {
+            event_id: event_id_hex,
+            accepted: true,
+            message: String::new(),
+        });
+    }
+
+    // Community ban / timeout write-block (COMMUNITY_MODERATION_PLAN.md §0
+    // decision 4). A timeout is a write-block only — the connection stays open,
+    // content writes are refused with `restricted: you are timed out until <ts>`
+    // so the desktop can render a countdown. A ban is normally enforced at the
+    // auth seam, but an already-authenticated connection never re-auths: if the
+    // live-disconnect fan-out is missed (fire-and-forget publish, broadcast lag,
+    // subscriber reconnect window), a banned member's open socket would keep
+    // writing indefinitely. So the ban is re-checked here — this write-path gate
+    // is the durable backstop the fan-out's best-effort delivery relies on.
+    // Moderation/relay-admin commands are exempt: a restriction must never
+    // disarm the tools used to lift or manage it.
+    //
+    // Scope: this gate checks the *authoring* pubkey only, with no NIP-OA
+    // owner→agent cascade. That cascade lives at the auth seam for bans, where
+    // it is structural: an agent whose owner is banned can never authenticate,
+    // so its socket never exists to reach ingest. Timeout has no auth-seam
+    // presence (it is write-block-only), so an owner-timeout does not cascade to
+    // the owner's agents — a deliberate Phase-1 asymmetry. `IngestAuth` does not
+    // carry the self-proving auth tag, so resolving the owner here would mean
+    // plumbing it through the whole transport boundary; the follow-up shape is
+    // the restriction-state cache (see should-fix), which can fold in owner
+    // resolution without a per-write DB round-trip.
+    if !buzz_core::kind::is_moderation_command_kind(kind_u32) && !is_relay_admin_kind(kind_u32) {
+        match state
+            .db
+            .moderation_restriction_state(tenant.community(), auth.pubkey().as_bytes())
+            .await
+        {
+            Ok(r) => {
+                if r.banned {
+                    return Err(IngestError::AuthFailed(
+                        "blocked: you are banned from this community".to_string(),
+                    ));
+                }
+                if let Some(until) = r.muted_until {
+                    if until > chrono::Utc::now() {
+                        return Err(IngestError::AuthFailed(format!(
+                            "restricted: you are timed out until {}",
+                            until.timestamp()
+                        )));
+                    }
+                }
+            }
+            Err(e) => {
+                // Fail closed: a DB error must not let a banned/timed-out actor
+                // write.
+                return Err(IngestError::Internal(format!(
+                    "error: internal error checking restriction state: {e}"
+                )));
+            }
+        }
     }
 
     let mut channel_id = if kind_u32 == KIND_REACTION {
@@ -1671,6 +1858,43 @@ async fn ingest_event_inner(
             .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
     }
 
+    if kind_u32 == KIND_AGENT_TURN_METRIC {
+        validate_agent_turn_metric_envelope(&event)
+            .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
+
+        // Ownership check: `p` tag must be the registered owner of `event.pubkey`.
+        // Tag shape is already verified above; these extractions are infallible.
+        let owner_hex = event
+            .tags
+            .iter()
+            .find_map(|t| {
+                let parts = t.as_slice();
+                if parts.len() >= 2 && parts[0].as_str() == "p" {
+                    Some(parts[1].as_str())
+                } else {
+                    None
+                }
+            })
+            .expect("p tag present (validated above)");
+        let agent_bytes = event.pubkey.to_bytes().to_vec();
+        let owner_bytes = hex::decode(owner_hex).expect("hex validated above");
+        let is_owner = state
+            .db
+            .is_agent_owner(tenant.community(), &agent_bytes, &owner_bytes)
+            .await
+            .map_err(|e| {
+                IngestError::Internal(format!(
+                    "error: db error checking agent-turn-metric ownership: {e}"
+                ))
+            })?;
+        if !is_owner {
+            return Err(IngestError::AuthFailed(
+                "restricted: agent-turn-metric `p` tag must be the registered owner of this agent"
+                    .into(),
+            ));
+        }
+    }
+
     if kind_u32 == KIND_EVENT_REMINDER {
         validate_event_reminder(&event)
             .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
@@ -1773,6 +1997,12 @@ async fn ingest_event_inner(
                 });
             }
             pre_created_channel = Some(client_uuid);
+            metrics::counter!(
+                "buzz_channels_created_total",
+                "community" => tenant.host().to_owned(),
+                "type" => channel_type.to_string()
+            )
+            .increment(1);
         }
     }
 
@@ -2047,6 +2277,20 @@ async fn ingest_event_inner(
         }
     }
 
+    // A freshly inserted reply changed its thread's counters (updated in the
+    // same transaction as the insert) — push a fresh relay-signed 39005 so
+    // subscribed clients can update badge counts without refetching the head
+    // window. Page responses recompute summaries independently, so this is
+    // fan-out-only and best-effort.
+    if let Some(meta) = &thread_meta {
+        crate::handlers::side_effects::emit_live_thread_summary(
+            tenant,
+            state,
+            meta.channel_id,
+            meta.root_event_id.clone(),
+        );
+    }
+
     let pubkey_hex = auth.pubkey().to_hex();
     // Spec WriteInsert (line 514) / WriteInsertGlobal (line 559) /
     // WriteDuplicate (line 606): emit the abstract write at the trailing
@@ -2221,6 +2465,54 @@ mod tests {
     }
 
     #[test]
+    fn reports_and_moderation_commands_require_messages_write_scope() {
+        let dummy = make_dummy_event();
+        for kind in [
+            KIND_REPORT,
+            KIND_MODERATION_BAN,
+            KIND_MODERATION_UNBAN,
+            KIND_MODERATION_TIMEOUT,
+            KIND_MODERATION_UNTIMEOUT,
+            KIND_MODERATION_RESOLVE_REPORT,
+        ] {
+            assert_eq!(
+                required_scope_for_kind(kind, &dummy).unwrap(),
+                Scope::MessagesWrite,
+                "kind {kind} should require MessagesWrite scope"
+            );
+        }
+    }
+
+    #[test]
+    fn moderation_commands_are_global_only() {
+        for kind in [
+            KIND_MODERATION_BAN,
+            KIND_MODERATION_UNBAN,
+            KIND_MODERATION_TIMEOUT,
+            KIND_MODERATION_UNTIMEOUT,
+            KIND_MODERATION_RESOLVE_REPORT,
+        ] {
+            assert!(is_global_only_kind(kind), "kind {kind} must be global-only");
+            assert!(
+                !requires_h_channel_scope(kind),
+                "kind {kind} must not require an h tag"
+            );
+        }
+    }
+
+    #[test]
+    fn moderation_command_rejection_from_ingest_preserves_prefix() {
+        let rejection = "restricted: moderator access required".to_string();
+        let map_rejection = IngestError::Rejected;
+        let result: Result<(), String> = Err(rejection.clone());
+
+        match result.map_err(map_rejection).unwrap_err() {
+            IngestError::Rejected(message) => assert_eq!(message, rejection),
+            _ => panic!("expected rejected ingest error"),
+        }
+    }
+
+    #[test]
     fn global_only_and_channel_scoped_are_disjoint() {
         // A kind cannot be both global-only and channel-scoped
         for kind in 0..=65535u32 {
@@ -2243,6 +2535,12 @@ mod tests {
             KIND_PROFILE,
             KIND_DELETION,
             KIND_REACTION,
+            KIND_REPORT,
+            KIND_MODERATION_BAN,
+            KIND_MODERATION_UNBAN,
+            KIND_MODERATION_TIMEOUT,
+            KIND_MODERATION_UNTIMEOUT,
+            KIND_MODERATION_RESOLVE_REPORT,
             KIND_STREAM_MESSAGE,
             KIND_NIP29_PUT_USER,
             KIND_NIP29_REMOVE_USER,
@@ -2274,6 +2572,7 @@ mod tests {
             KIND_PERSONA,
             KIND_TEAM,
             KIND_MANAGED_AGENT,
+            KIND_AGENT_TURN_METRIC,
         ];
         for kind in migrated {
             assert!(
@@ -2309,6 +2608,24 @@ mod tests {
             KIND_MESH_LLM_RELAY_STATUS
         ));
         assert!(!requires_h_channel_scope(KIND_MESH_LLM_RELAY_STATUS));
+    }
+
+    #[test]
+    fn agent_turn_metric_is_global_only_and_in_scope_allowlist() {
+        let dummy = make_dummy_event();
+        assert!(
+            is_global_only_kind(KIND_AGENT_TURN_METRIC),
+            "kind:44200 must be global-only (no h tag)"
+        );
+        assert!(
+            !requires_h_channel_scope(KIND_AGENT_TURN_METRIC),
+            "kind:44200 must not require an h-tag"
+        );
+        assert_eq!(
+            required_scope_for_kind(KIND_AGENT_TURN_METRIC, &dummy).unwrap(),
+            Scope::MessagesWrite,
+            "kind:44200 requires MessagesWrite scope"
+        );
     }
 
     #[test]
@@ -2869,6 +3186,31 @@ mod tests {
     }
 
     #[test]
+    fn persona_envelope_accepts_promptless_content() {
+        // Unified agent model: system_prompt is optional — a definition can be
+        // pure configuration. The relay validates only the envelope, so a
+        // prompt-less body must ingest identically to a full one.
+        let ev = make_event_with_tags(
+            KIND_PERSONA,
+            r#"{"display_name":"config-only"}"#,
+            &[&["d", "config-only"]],
+        );
+        assert!(validate_persona_envelope(&ev).is_ok());
+    }
+
+    #[test]
+    fn persona_envelope_accepts_behavioral_fields() {
+        // Unknown legacy fields in persona content remain relay-opaque;
+        // unknown-field tolerance is the contract.
+        let ev = make_event_with_tags(
+            KIND_PERSONA,
+            r#"{"display_name":"x","respond_to":"owner-only","respond_to_allowlist":[],"mcp_toolsets":"default","parallelism":2}"#,
+            &[&["d", "behavioral"]],
+        );
+        assert!(validate_persona_envelope(&ev).is_ok());
+    }
+
+    #[test]
     fn persona_envelope_accepts_single_char() {
         let ev = make_persona(&[&["d", "a"]]);
         assert!(validate_persona_envelope(&ev).is_ok());
@@ -2943,5 +3285,105 @@ mod tests {
         let ev = make_persona(&[&["d", "has.dot"]]);
         let err = validate_persona_envelope(&ev).unwrap_err();
         assert!(err.contains("`d` tag"), "got: {err}");
+    }
+
+    // ─── agent_turn_metric envelope tests ────────────────────────────────────
+
+    /// Build an event for kind:44200 with the given tags and content.
+    /// The signing key IS the agent key, so `event.pubkey` matches the agent.
+    fn make_agent_turn_metric(
+        agent_keys: &nostr::Keys,
+        tags: &[&[&str]],
+        content: &str,
+    ) -> nostr::Event {
+        let nostr_tags: Vec<nostr::Tag> = tags
+            .iter()
+            .map(|t| nostr::Tag::parse(t.iter().copied()).unwrap())
+            .collect();
+        nostr::EventBuilder::new(
+            nostr::Kind::Custom(buzz_core::kind::KIND_AGENT_TURN_METRIC as u16),
+            content,
+        )
+        .tags(nostr_tags)
+        .sign_with_keys(agent_keys)
+        .unwrap()
+    }
+
+    #[test]
+    fn agent_turn_metric_envelope_accepts_canonical() {
+        let agent = nostr::Keys::generate();
+        let owner_hex = "b".repeat(64);
+        let agent_hex = agent.public_key().to_hex();
+        let ev = make_agent_turn_metric(
+            &agent,
+            &[&["p", &owner_hex], &["agent", &agent_hex]],
+            &fake_nip44_v2(),
+        );
+        assert!(validate_agent_turn_metric_envelope(&ev).is_ok());
+    }
+
+    #[test]
+    fn agent_turn_metric_envelope_rejects_h_tag() {
+        let agent = nostr::Keys::generate();
+        let owner_hex = "b".repeat(64);
+        let agent_hex = agent.public_key().to_hex();
+        let ev = make_agent_turn_metric(
+            &agent,
+            &[
+                &["p", &owner_hex],
+                &["agent", &agent_hex],
+                &["h", "some-channel-uuid"],
+            ],
+            &fake_nip44_v2(),
+        );
+        let err = validate_agent_turn_metric_envelope(&ev).unwrap_err();
+        assert!(err.contains("`h` tag"), "got: {err}");
+    }
+
+    #[test]
+    fn agent_turn_metric_envelope_rejects_missing_p() {
+        let agent = nostr::Keys::generate();
+        let agent_hex = agent.public_key().to_hex();
+        let ev = make_agent_turn_metric(&agent, &[&["agent", &agent_hex]], &fake_nip44_v2());
+        let err = validate_agent_turn_metric_envelope(&ev).unwrap_err();
+        assert!(err.contains("`p` tag"), "got: {err}");
+    }
+
+    #[test]
+    fn agent_turn_metric_envelope_rejects_missing_agent() {
+        let agent = nostr::Keys::generate();
+        let owner_hex = "b".repeat(64);
+        let ev = make_agent_turn_metric(&agent, &[&["p", &owner_hex]], &fake_nip44_v2());
+        let err = validate_agent_turn_metric_envelope(&ev).unwrap_err();
+        assert!(err.contains("`agent` tag"), "got: {err}");
+    }
+
+    #[test]
+    fn agent_turn_metric_envelope_rejects_agent_mismatch() {
+        let agent = nostr::Keys::generate();
+        let owner_hex = "b".repeat(64);
+        let wrong_agent_hex = "c".repeat(64); // not event.pubkey
+        let ev = make_agent_turn_metric(
+            &agent,
+            &[&["p", &owner_hex], &["agent", &wrong_agent_hex]],
+            &fake_nip44_v2(),
+        );
+        let err = validate_agent_turn_metric_envelope(&ev).unwrap_err();
+        assert!(err.contains("equal event pubkey"), "got: {err}");
+    }
+
+    #[test]
+    fn agent_turn_metric_envelope_rejects_bad_content() {
+        let agent = nostr::Keys::generate();
+        let owner_hex = "b".repeat(64);
+        let agent_hex = agent.public_key().to_hex();
+        let ev = make_agent_turn_metric(
+            &agent,
+            &[&["p", &owner_hex], &["agent", &agent_hex]],
+            "not-a-ciphertext",
+        );
+        let err = validate_agent_turn_metric_envelope(&ev).unwrap_err();
+        // error comes from validate_engram_nip44_content with label replaced
+        assert!(err.contains("agent-turn-metric"), "got: {err}");
     }
 }

@@ -30,9 +30,9 @@ use crate::llm::Llm;
 use crate::mcp::McpRegistry;
 use crate::types::{ContentBlock, HistoryItem};
 use crate::wire::{
-    classify, Inbound, InitializeParams, SessionCancelParams, SessionNewParams,
-    SessionPromptParams, SessionSetModelParams, SessionSteerParams, WireMsg, WireSender,
-    INVALID_PARAMS, METHOD_NOT_FOUND, PARSE_ERROR,
+    classify, goose_session_update, Inbound, InitializeParams, SessionCancelParams,
+    SessionNewParams, SessionPromptParams, SessionSetModelParams, SessionSteerParams, WireMsg,
+    WireSender, INVALID_PARAMS, METHOD_NOT_FOUND, PARSE_ERROR,
 };
 
 struct App {
@@ -80,6 +80,12 @@ struct Session {
     /// overrides `App::cfg.model` for all LLM calls on this session. Persists
     /// across `session/prompt` calls until changed.
     effective_model: Option<String>,
+    /// Session-cumulative input tokens across all turns. Sent in the
+    /// `_goose/unstable/session/update` usage notification so buzz-acp's
+    /// `UsageTracker` can compute per-turn deltas symmetrically with goose.
+    accumulated_input_tokens: u64,
+    /// Session-cumulative output tokens across all turns.
+    accumulated_output_tokens: u64,
 }
 
 fn die(msg: String) -> ! {
@@ -404,6 +410,8 @@ async fn session_new(app: &Arc<App>, id: Value, params: Value, wire_tx: &WireSen
             last_request_history_bytes: None,
             effective_system_prompt,
             effective_model: None,
+            accumulated_input_tokens: 0,
+            accumulated_output_tokens: 0,
         },
     );
     drop(sessions);
@@ -648,6 +656,8 @@ async fn run_prompt(app: Arc<App>, id: Value, params: Value, wire_tx: WireSender
     let effective_model_str = effective_model_override
         .as_deref()
         .unwrap_or(&app.cfg.model);
+    let mut turn_input_tokens: Option<u64> = None;
+    let mut turn_output_tokens: Option<u64> = None;
     let mut ctx = RunCtx {
         cfg: &app.cfg,
         effective_model: effective_model_str,
@@ -664,6 +674,8 @@ async fn run_prompt(app: Arc<App>, id: Value, params: Value, wire_tx: WireSender
         handoff_count: &mut handoff_count,
         last_request_input_tokens: &mut last_request_input_tokens,
         last_request_history_bytes: &mut last_request_history_bytes,
+        turn_input_tokens: &mut turn_input_tokens,
+        turn_output_tokens: &mut turn_output_tokens,
     };
     let result = ctx.run(p.prompt).await;
     if let Some(s) = app.sessions.lock().await.get_mut(&sid) {
@@ -676,6 +688,52 @@ async fn run_prompt(app: Arc<App>, id: Value, params: Value, wire_tx: WireSender
         s.handoff_count = handoff_count;
         s.last_request_input_tokens = last_request_input_tokens;
         s.last_request_history_bytes = last_request_history_bytes;
+    }
+    // Update session-cumulative token counters and emit the usage notification
+    // BEFORE sending the session/prompt response. buzz-acp's UsageTracker
+    // processes the notification while the turn is still in-flight (i.e. before
+    // the response triggers take_turn_usage()), which is required for the
+    // begin_turn gate to recognise it as publishable.
+    //
+    // Only emit when at least one token count was observed — a turn with no
+    // provider response (validation failure, pre-response cancellation) carries
+    // no information and must not produce a kind 44200 record per NIP-AM.
+    if turn_input_tokens.is_some() || turn_output_tokens.is_some() {
+        let accumulated = {
+            let mut sessions = app.sessions.lock().await;
+            if let Some(s) = sessions.get_mut(&sid) {
+                s.accumulated_input_tokens = s
+                    .accumulated_input_tokens
+                    .saturating_add(turn_input_tokens.unwrap_or(0));
+                s.accumulated_output_tokens = s
+                    .accumulated_output_tokens
+                    .saturating_add(turn_output_tokens.unwrap_or(0));
+                Some((s.accumulated_input_tokens, s.accumulated_output_tokens))
+            } else {
+                // Session is gone — the accumulated baseline no longer exists, so
+                // there is nothing correct to emit. Skip the usage notification.
+                None
+            }
+        };
+        if let Some((accumulated_in, accumulated_out)) = accumulated {
+            wire::send(
+                &wire_tx,
+                goose_session_update(
+                    &sid,
+                    json!({
+                        "sessionUpdate": "usage_update",
+                        // used: total tokens as a context-usage proxy;
+                        // contextLimit: 0 (buzz-agent has no context limit tracking).
+                        "used": accumulated_in.saturating_add(accumulated_out),
+                        "contextLimit": 0u64,
+                        "accumulatedInputTokens": accumulated_in,
+                        "accumulatedOutputTokens": accumulated_out,
+                        "model": effective_model_str,
+                    }),
+                ),
+            )
+            .await;
+        }
     }
     match result {
         Ok(stop) => {

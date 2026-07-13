@@ -26,6 +26,7 @@ import {
   parsePromptText,
   parseSystemPromptSections,
 } from "./agentSessionTranscriptHelpers";
+import { friendlyTurnErrorCopy } from "../lib/friendlyAgentLastError";
 
 export { describeRawEvent } from "./agentSessionTranscriptHelpers";
 
@@ -771,6 +772,7 @@ export function processTranscriptEvent(
     const payload = asRecord(event.payload);
     const outcome = asString(payload.outcome) ?? "error";
     const error = asString(payload.error) ?? "Unknown error";
+    const displayError = friendlyTurnErrorCopy(error, payload.code);
     const title =
       event.kind === "agent_panic" ? "Agent error (crash)" : "Turn error";
     upsertTextItem(
@@ -778,7 +780,7 @@ export function processTranscriptEvent(
       `${event.kind}:${ch}:${event.turnId ?? event.seq}`,
       "lifecycle",
       title,
-      `${outcome}: ${error}`,
+      `${outcome}: ${displayError}`,
       event.timestamp,
       ctx,
       event.kind,
@@ -868,11 +870,13 @@ export function processTranscriptEvent(
       }
     } else if (event.kind === "acp_write" && method === "session/new") {
       // The base + persona prompts ride session/new's systemPrompt, framed by
-      // the harness as [Base]/[System]. Surface them as one "System prompt" item
-      // keyed per channel-session — session/new fires once per channel-session,
-      // so a re-created session correctly replaces the prior item.
-      // turnId: null keeps it out of turn buckets; acpSource "session/new" lets
-      // the display grouper inject it before prompt-context in the prompt segment.
+      // the harness as [Base]/[System]/[Agent Memory — core]/[Channel Canvas].
+      // Each session/new event is keyed by (seq, timestamp) — the same dedup
+      // pair used by observerRelayStore — so distinct sessions each retain
+      // their own system-prompt card even across archive rebuilds where two
+      // processes may emit the same seq. turnId: null keeps it out of turn
+      // buckets; acpSource "session/new" lets the display grouper place it
+      // as a standalone card before the session's first turn.
       const params = asRecord(payload.params);
       const systemPrompt = asString(params.systemPrompt);
       if (systemPrompt) {
@@ -880,7 +884,7 @@ export function processTranscriptEvent(
         if (sections.length > 0) {
           upsertMetadata(
             d,
-            `system-prompt:${ch}`,
+            `system-prompt:${ch}:${event.seq}:${event.timestamp}`,
             "System prompt",
             sections,
             event.timestamp,
@@ -906,7 +910,7 @@ export function processTranscriptEvent(
             event.timestamp,
             ctx,
             parsedPrompt.userPubkey,
-            undefined,
+            "session/steer:user",
             parsedPrompt.userEventId,
           );
         }
@@ -918,6 +922,7 @@ export function processTranscriptEvent(
             parsedPrompt.sections,
             event.timestamp,
             ctx,
+            "session/steer:context",
           );
         }
       }

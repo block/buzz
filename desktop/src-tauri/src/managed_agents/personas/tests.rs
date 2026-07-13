@@ -1,13 +1,14 @@
 use super::{
-    ensure_persona_ids_are_active, ensure_persona_is_active, merge_personas,
-    migrate_retired_personas, validate_persona_activation_change, validate_persona_deletion,
-    BUILT_IN_PERSONAS, RETIRED_PERSONAS,
+    built_in_persona_records, ensure_persona_ids_are_active, ensure_persona_is_active,
+    merge_personas, migrate_retired_personas, validate_persona_activation_change,
+    validate_persona_deletion, BUILT_IN_PERSONAS, RETIRED_PERSONAS,
 };
+use crate::managed_agents::discovery::{default_agent_command, effective_agent_command};
 use crate::managed_agents::validate_team_id;
-use crate::managed_agents::PersonaRecord;
+use crate::managed_agents::AgentDefinition;
 
-fn custom_persona(id: &str, display_name: &str) -> PersonaRecord {
-    PersonaRecord {
+fn custom_persona(id: &str, display_name: &str) -> AgentDefinition {
+    AgentDefinition {
         id: id.to_string(),
         display_name: display_name.to_string(),
         avatar_url: Some("https://example.com/avatar.png".to_string()),
@@ -21,6 +22,9 @@ fn custom_persona(id: &str, display_name: &str) -> PersonaRecord {
         source_team: None,
         source_team_persona_slug: None,
         env_vars: std::collections::BTreeMap::new(),
+        respond_to: None,
+        respond_to_allowlist: Vec::new(),
+        parallelism: None,
         created_at: "2026-03-19T00:00:00Z".to_string(),
         updated_at: "2026-03-19T00:00:00Z".to_string(),
     }
@@ -35,7 +39,7 @@ fn merge_personas_adds_missing_built_ins() {
     assert!(records.iter().all(|record| record.is_builtin));
     assert!(records
         .iter()
-        .any(|record| record.id == "builtin:fizz" && record.runtime.as_deref() == Some("goose")));
+        .any(|record| record.id == "builtin:fizz" && record.runtime.is_none()));
     assert!(records
         .iter()
         .any(|record| record.id == "builtin:product-strategist" && !record.is_active));
@@ -210,7 +214,7 @@ fn merge_personas_demotes_retired_builtins() {
 fn ensure_persona_is_active_rejects_missing_personas() {
     let err = ensure_persona_is_active(&[], "missing").unwrap_err();
 
-    assert_eq!(err, "persona missing not found");
+    assert_eq!(err, "agent missing not found");
 }
 
 #[test]
@@ -249,7 +253,7 @@ fn validate_persona_activation_change_rejects_non_builtins() {
 
     assert_eq!(
         err,
-        "Only built-in personas can be added to or removed from My Agents."
+        "Only built-in agents can be added to or removed from My Agents."
     );
 }
 
@@ -295,7 +299,7 @@ fn validate_persona_deletion_rejects_builtins() {
 
     let err = validate_persona_deletion(&persona, false).unwrap_err();
 
-    assert_eq!(err, "Built-in personas cannot be deleted.");
+    assert_eq!(err, "Built-in agents cannot be deleted.");
 }
 
 #[test]
@@ -379,9 +383,9 @@ fn migrate_retires_unmodified_personas() {
     let now = "2026-04-01T00:00:00Z";
     // Simulate a store from before the Fizz transition: all 6
     // retired personas with original system prompts.
-    let mut stored: Vec<PersonaRecord> = RETIRED_PERSONAS
+    let mut stored: Vec<AgentDefinition> = RETIRED_PERSONAS
         .iter()
-        .map(|(id, prompt)| PersonaRecord {
+        .map(|(id, prompt)| AgentDefinition {
             id: id.to_string(),
             system_prompt: prompt.to_string(),
             is_builtin: false, // already demoted by merge_personas
@@ -416,7 +420,7 @@ fn migrate_retires_unmodified_personas() {
 #[test]
 fn migrate_preserves_customized_personas() {
     let now = "2026-04-01T00:00:00Z";
-    let mut stored = vec![PersonaRecord {
+    let mut stored = vec![AgentDefinition {
         id: "builtin:researcher".to_string(),
         display_name: "My Researcher".to_string(),
         system_prompt: "My custom research workflow with special instructions".to_string(),
@@ -449,7 +453,7 @@ fn migrate_is_idempotent() {
     assert_eq!(stored.len(), 1);
 
     // 2. Already-retired persona (display_name ends with " (retired)") — no-op.
-    let mut stored_with_retired = vec![PersonaRecord {
+    let mut stored_with_retired = vec![AgentDefinition {
         id: "builtin:researcher".to_string(),
         display_name: "Researcher (retired)".to_string(),
         system_prompt: "My custom prompt".to_string(),
@@ -464,7 +468,7 @@ fn migrate_is_idempotent() {
 
     // 3. Retired persona still marked is_builtin: true (pre-demotion).
     // migrate_retired_personas should still soft-deprecate it.
-    let mut stored_pre_demotion = vec![PersonaRecord {
+    let mut stored_pre_demotion = vec![AgentDefinition {
         id: "builtin:reviewer".to_string(),
         display_name: "Reviewer".to_string(),
         system_prompt: "Custom review prompt".to_string(),
@@ -478,4 +482,38 @@ fn migrate_is_idempotent() {
 
     // 4. Run again on result of (3) — should be no-op.
     assert!(!migrate_retired_personas(&mut stored_pre_demotion, now));
+}
+
+// ── Fizz default harness ──────────────────────────────────────────────────────
+
+#[test]
+fn fizz_builtin_has_no_pinned_runtime() {
+    // The Fizz built-in must not hard-pin a runtime so it inherits the
+    // bundled default (buzz-agent) rather than requiring goose on PATH.
+    let records = built_in_persona_records("2026-01-01T00:00:00Z");
+    let fizz = records
+        .iter()
+        .find(|r| r.id == "builtin:fizz")
+        .expect("builtin:fizz must exist");
+    assert_eq!(
+        fizz.runtime, None,
+        "Fizz built-in must not pin a runtime — it should inherit the default"
+    );
+}
+
+#[test]
+fn fizz_builtin_resolves_to_buzz_agent() {
+    // With no runtime pin, effective_agent_command must fall through to
+    // default_agent_command(), which resolves the bundled buzz-agent.
+    let records = built_in_persona_records("2026-01-01T00:00:00Z");
+    assert_eq!(
+        effective_agent_command(Some("builtin:fizz"), &records, None),
+        default_agent_command(),
+        "Fizz must resolve to the bundled default harness, not goose"
+    );
+    assert_eq!(
+        effective_agent_command(Some("builtin:fizz"), &records, None),
+        "buzz-agent",
+        "Fizz must resolve to buzz-agent specifically"
+    );
 }

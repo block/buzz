@@ -1,5 +1,8 @@
 import * as React from "react";
 
+import { X } from "lucide-react";
+
+import { EmojiPicker } from "@/features/custom-emoji/ui/EmojiPicker";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -19,9 +22,16 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/shared/ui/dialog";
+import { StatusEmoji } from "@/features/user-status/ui/StatusEmoji";
 import { Input } from "@/shared/ui/input";
+import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
 import type { Channel } from "@/shared/api/types";
 import { useLeaveChannelMutation } from "@/features/channels/hooks";
+
+export type SectionDialogValue = {
+  name: string;
+  icon?: string;
+};
 
 type SectionNameDialogProps = {
   open: boolean;
@@ -29,9 +39,10 @@ type SectionNameDialogProps = {
   title: string;
   description: string;
   initialValue: string;
+  initialIcon?: string;
   confirmLabel: string;
-  isConfirmDisabled: (trimmed: string) => boolean;
-  onConfirm: (name: string) => void;
+  isConfirmDisabled: (trimmed: string, icon: string) => boolean;
+  onConfirm: (value: SectionDialogValue) => void;
 };
 
 function SectionNameDialog({
@@ -40,28 +51,44 @@ function SectionNameDialog({
   title,
   description,
   initialValue,
+  initialIcon = "",
   confirmLabel,
   isConfirmDisabled,
   onConfirm,
 }: SectionNameDialogProps) {
   const [name, setName] = React.useState(initialValue);
+  const [icon, setIcon] = React.useState(initialIcon);
+  const [pickerOpen, setPickerOpen] = React.useState(false);
   const inputRef = React.useRef<HTMLInputElement>(null);
 
   React.useEffect(() => {
-    if (!open) return;
+    if (!open) {
+      setPickerOpen(false);
+      return;
+    }
     setName(initialValue);
+    setIcon(initialIcon);
     // Small delay to let dialog animation start before focusing
     const timerId = globalThis.setTimeout(() => {
       inputRef.current?.focus();
     }, 50);
     return () => globalThis.clearTimeout(timerId);
-  }, [open, initialValue]);
+  }, [open, initialValue, initialIcon]);
+
+  function handleIconSelect(selectedIcon: string) {
+    setIcon(selectedIcon);
+    setPickerOpen(false);
+  }
 
   function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const trimmed = name.trim();
-    if (isConfirmDisabled(trimmed)) return;
-    onConfirm(trimmed);
+    const trimmedIcon = icon.trim();
+    if (isConfirmDisabled(trimmed, trimmedIcon)) return;
+    onConfirm({
+      name: trimmed,
+      ...(trimmedIcon ? { icon: trimmedIcon } : {}),
+    });
   }
 
   return (
@@ -72,23 +99,66 @@ function SectionNameDialog({
           <DialogDescription>{description}</DialogDescription>
         </DialogHeader>
         <form onSubmit={handleSubmit}>
-          <Input
-            autoCapitalize="none"
-            autoComplete="off"
-            autoCorrect="off"
-            onChange={(event) => setName(event.target.value)}
-            placeholder="Section name"
-            ref={inputRef}
-            spellCheck={false}
-            value={name}
-          />
+          <div className="flex items-center gap-2">
+            <Popover onOpenChange={setPickerOpen} open={pickerOpen}>
+              <div className="relative shrink-0">
+                <PopoverTrigger asChild>
+                  <button
+                    aria-label="Choose section icon"
+                    className="flex h-9 w-9 items-center justify-center rounded-md border border-input text-lg transition-colors hover:bg-accent"
+                    type="button"
+                  >
+                    {icon ? (
+                      <StatusEmoji className="h-5 w-5" value={icon} />
+                    ) : (
+                      <span className="text-sm font-medium">#</span>
+                    )}
+                  </button>
+                </PopoverTrigger>
+                {icon ? (
+                  <button
+                    aria-label="Clear section icon"
+                    className="absolute -right-1 -top-1 flex h-4 w-4 items-center justify-center rounded-full border border-background bg-muted text-muted-foreground hover:bg-accent hover:text-foreground"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      setIcon("");
+                    }}
+                    type="button"
+                  >
+                    <X className="h-3 w-3" />
+                  </button>
+                ) : null}
+              </div>
+              <PopoverContent
+                align="start"
+                className="w-auto overflow-hidden rounded-2xl p-0"
+                sideOffset={4}
+              >
+                <EmojiPicker onSelect={handleIconSelect} />
+              </PopoverContent>
+            </Popover>
+            <Input
+              autoCapitalize="none"
+              autoComplete="off"
+              autoCorrect="off"
+              className="flex-1"
+              onChange={(event) => setName(event.target.value)}
+              placeholder="Section name"
+              ref={inputRef}
+              spellCheck={false}
+              value={name}
+            />
+          </div>
           <div className="flex justify-end gap-2 mt-4">
             <DialogClose asChild>
               <Button variant="ghost" type="button">
                 Cancel
               </Button>
             </DialogClose>
-            <Button type="submit" disabled={isConfirmDisabled(name.trim())}>
+            <Button
+              type="submit"
+              disabled={isConfirmDisabled(name.trim(), icon.trim())}
+            >
               {confirmLabel}
             </Button>
           </div>
@@ -101,7 +171,7 @@ function SectionNameDialog({
 export type CreateSectionDialogProps = {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  onConfirm: (name: string) => void;
+  onConfirm: (value: SectionDialogValue) => void;
 };
 
 export function CreateSectionDialog({
@@ -127,13 +197,15 @@ export type RenameSectionDialogProps = {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   sectionName: string;
-  onConfirm: (newName: string) => void;
+  sectionIcon?: string;
+  onConfirm: (value: SectionDialogValue) => void;
 };
 
 export function RenameSectionDialog({
   open,
   onOpenChange,
   sectionName,
+  sectionIcon,
   onConfirm,
 }: RenameSectionDialogProps) {
   return (
@@ -143,9 +215,11 @@ export function RenameSectionDialog({
       title="Rename section"
       description="Enter a new name for this section."
       initialValue={sectionName}
-      confirmLabel="Rename"
-      isConfirmDisabled={(trimmed) =>
-        trimmed.length === 0 || trimmed === sectionName
+      initialIcon={sectionIcon}
+      confirmLabel="Save"
+      isConfirmDisabled={(trimmed, icon) =>
+        trimmed.length === 0 ||
+        (trimmed === sectionName && icon === (sectionIcon ?? ""))
       }
       onConfirm={onConfirm}
     />

@@ -1,7 +1,6 @@
 import * as React from "react";
 
 import { buildIndependentThreadPanel } from "@/features/messages/lib/independentThreadPanel";
-import { useThreadReplies } from "@/features/messages/useThreadReplies";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type {
   Channel,
@@ -13,6 +12,7 @@ import type {
 export function useIndependentThreadPanel(args: {
   activeChannel: Channel | null;
   channelEvents: RelayEvent[];
+  threadReplyEvents: RelayEvent[];
   rootId: string | null;
   replyTargetId: string | null;
   expandedReplyIds: ReadonlySet<string>;
@@ -23,12 +23,19 @@ export function useIndependentThreadPanel(args: {
   personaLookup: Map<string, string>;
   respondToLookup: Map<string, RespondToMode>;
 }) {
-  const replies = useThreadReplies(args.activeChannel, args.rootId);
+  // Depend on the individual fields, NOT the `args` object — callers pass a
+  // fresh object literal every render, so `[args]` never memoizes and the
+  // full O(replies) formatTimelineMessages + buildThreadPanelData rebuild
+  // runs on every ChannelScreen render. In a long thread with agents
+  // streaming (an event or typing tick per ~150ms, each re-rendering the
+  // screen) that saturates the main thread and starves keystrokes — see
+  // typing-latency.perf.ts scenario "thread68+". Mirrors the main timeline's
+  // memoization of the same formatter (ChannelScreen `timelineMessages`).
   return React.useMemo(
     () =>
       buildIndependentThreadPanel(
         args.channelEvents,
-        replies.data ?? [],
+        args.threadReplyEvents,
         args.rootId,
         args.replyTargetId,
         args.expandedReplyIds,
@@ -40,6 +47,20 @@ export function useIndependentThreadPanel(args: {
         args.personaLookup,
         args.respondToLookup,
       ),
-    [args, replies.data],
+    // biome-ignore lint/correctness/useExhaustiveDependencies: fields listed explicitly — see comment above
+    [
+      args.channelEvents,
+      args.threadReplyEvents,
+      args.rootId,
+      args.replyTargetId,
+      args.expandedReplyIds,
+      args.activeChannel,
+      args.currentPubkey,
+      args.currentAvatarUrl,
+      args.profiles,
+      args.members,
+      args.personaLookup,
+      args.respondToLookup,
+    ],
   );
 }

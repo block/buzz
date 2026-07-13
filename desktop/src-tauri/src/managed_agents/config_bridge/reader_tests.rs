@@ -36,6 +36,8 @@ fn test_runtime() -> &'static KnownAcpRuntime {
         max_tokens_env_var: Some("GOOSE_MAX_TOKENS"),
         context_limit_env_var: Some("GOOSE_CONTEXT_LIMIT"),
         required_normalized_fields: &["model", "provider"],
+        login_hint: None,
+        auth_probe_args: None,
     }
 }
 
@@ -58,9 +60,9 @@ fn test_record() -> ManagedAgentRecord {
         parallelism: 1,
         system_prompt: None,
         model: None,
-        mcp_toolsets: None,
         env_vars: BTreeMap::new(),
         start_on_app_launch: false,
+        auto_restart_on_config_change: true,
         runtime_pid: None,
         backend: crate::managed_agents::types::BackendKind::Local,
         backend_agent_id: None,
@@ -73,8 +75,20 @@ fn test_record() -> ManagedAgentRecord {
         last_stopped_at: None,
         last_exit_code: None,
         last_error: None,
+        last_error_code: None,
         respond_to: crate::managed_agents::types::RespondTo::OwnerOnly,
         respond_to_allowlist: vec![],
+        display_name: None,
+        slug: None,
+        runtime: None,
+        name_pool: Vec::new(),
+        is_builtin: false,
+        is_active: true,
+        source_team: None,
+        source_team_persona_slug: None,
+        definition_respond_to: None,
+        definition_respond_to_allowlist: Vec::new(),
+        definition_parallelism: None,
         relay_mesh: None,
         agent_command_override: None,
         persona_source_version: None,
@@ -533,6 +547,8 @@ fn buzz_agent_runtime() -> &'static KnownAcpRuntime {
         max_tokens_env_var: Some("BUZZ_AGENT_MAX_OUTPUT_TOKENS"),
         context_limit_env_var: Some("BUZZ_AGENT_MAX_CONTEXT_TOKENS"),
         required_normalized_fields: &["model", "provider"],
+        login_hint: None,
+        auth_probe_args: None,
     }
 }
 
@@ -658,4 +674,19 @@ fn buzz_agent_thinking_effort_env_var_not_double_surfaced_in_advanced() {
         !advanced_keys.contains(&"BUZZ_AGENT_THINKING_EFFORT"),
         "thinking_effort must not appear in advanced when normalized"
     );
+}
+
+#[test]
+fn missing_required_provider_still_returns_dropdown_field() {
+    let provider = build_provider_field(&None, &None, Some("GOOSE_PROVIDER"), false, true)
+        .expect("required provider field should be surfaced even when empty");
+
+    assert_eq!(provider.value, None);
+    assert_eq!(provider.origin, ConfigOrigin::EnvVar);
+    assert!(provider.is_required);
+}
+
+#[test]
+fn missing_optional_provider_stays_hidden() {
+    assert!(build_provider_field(&None, &None, Some("GOOSE_PROVIDER"), false, false).is_none());
 }

@@ -2128,3 +2128,93 @@ async fn test_private_channel_member_cannot_grant_admin() {
     owner_client.disconnect().await.expect("disconnect owner");
     member_client.disconnect().await.expect("disconnect member");
 }
+
+/// Live badge counts: every thread mutation pushes a fresh relay-signed
+/// kind:39005 recount to channel subscribers — a reply counts up, deleting
+/// that reply counts back down — without any window refetch.
+#[tokio::test]
+#[ignore]
+async fn test_reply_ingest_pushes_live_thread_summary() {
+    let url = relay_url();
+    let keys = Keys::generate();
+    let channel = create_test_channel(&keys).await;
+    let mut client = BuzzTestClient::connect(&url, &keys).await.expect("connect");
+
+    // Root message for the thread — built locally so we keep its id.
+    let root = EventBuilder::new(Kind::Custom(9), "thread root")
+        .tags([Tag::parse(["h", channel.as_str()]).unwrap()])
+        .sign_with_keys(&keys)
+        .expect("sign root");
+    let root_id = root.id;
+    let ok = client.send_event(root).await.expect("send root");
+    assert!(ok.accepted, "root rejected: {}", ok.message);
+
+    // Live subscription shaped like the desktop window-store one: channel
+    // scope with 39005 in kinds.
+    let sid = sub_id("live-summary");
+    let filter = Filter::new()
+        .kind(Kind::Custom(39005))
+        .custom_tags(SingleLetterTag::lowercase(Alphabet::H), [channel.as_str()]);
+    client
+        .subscribe(&sid, vec![filter])
+        .await
+        .expect("subscribe");
+    client
+        .collect_until_eose(&sid, Duration::from_secs(5))
+        .await
+        .expect("EOSE");
+
+    async fn recv_summary(client: &mut BuzzTestClient) -> nostr::Event {
+        loop {
+            match client
+                .recv_event(Duration::from_secs(5))
+                .await
+                .expect("recv 39005")
+            {
+                RelayMessage::Event { event, .. } if event.kind == Kind::Custom(39005) => {
+                    return *event;
+                }
+                _ => continue,
+            }
+        }
+    }
+
+    // Reply → pushed summary counts up.
+    let h_tag = Tag::parse(["h", channel.as_str()]).unwrap();
+    let root_tag = Tag::parse(["e", &root_id.to_hex(), "", "reply"]).unwrap();
+    let reply = EventBuilder::new(Kind::Custom(9), "first reply")
+        .tags([h_tag, root_tag])
+        .sign_with_keys(&keys)
+        .expect("sign reply");
+    let reply_id = reply.id;
+    let ok = client.send_event(reply).await.expect("send reply");
+    assert!(ok.accepted, "reply rejected: {}", ok.message);
+
+    let summary = recv_summary(&mut client).await;
+    let root_tag_val = summary
+        .tags
+        .iter()
+        .find(|t| t.as_slice().first().map(String::as_str) == Some("e"))
+        .and_then(|t| t.content().map(str::to_string))
+        .expect("summary carries root e-tag");
+    assert_eq!(root_tag_val, root_id.to_hex(), "summary targets the root");
+    let content: serde_json::Value = serde_json::from_str(&summary.content).expect("JSON");
+    assert_eq!(content["reply_count"], 1, "reply counted up: {content}");
+
+    // Delete the reply → pushed summary counts back down.
+    let delete = EventBuilder::new(Kind::Custom(5), "")
+        .tags([
+            Tag::parse(["e", &reply_id.to_hex()]).unwrap(),
+            Tag::parse(["h", channel.as_str()]).unwrap(),
+        ])
+        .sign_with_keys(&keys)
+        .expect("sign delete");
+    let ok = client.send_event(delete).await.expect("send delete");
+    assert!(ok.accepted, "delete rejected: {}", ok.message);
+
+    let summary = recv_summary(&mut client).await;
+    let content: serde_json::Value = serde_json::from_str(&summary.content).expect("JSON");
+    assert_eq!(content["reply_count"], 0, "reply counted down: {content}");
+
+    client.disconnect().await.expect("disconnect");
+}

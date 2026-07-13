@@ -1,4 +1,5 @@
 import type { ChannelMember } from "@/shared/api/types";
+import { truncatePubkey } from "@/shared/lib/pubkey";
 
 export const roleOrder: Record<ChannelMember["role"], number> = {
   owner: 0,
@@ -8,10 +9,6 @@ export const roleOrder: Record<ChannelMember["role"], number> = {
   bot: 4,
 };
 
-export function formatPubkey(pubkey: string) {
-  return `${pubkey.slice(0, 8)}\u2026${pubkey.slice(-4)}`;
-}
-
 export function formatMemberName(
   member: ChannelMember,
   currentPubkey?: string,
@@ -20,7 +17,7 @@ export function formatMemberName(
     return "You";
   }
 
-  return member.displayName ?? formatPubkey(member.pubkey);
+  return member.displayName ?? truncatePubkey(member.pubkey);
 }
 
 export function compareMembersByRole(

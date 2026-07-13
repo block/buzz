@@ -40,7 +40,7 @@ fn trim_optional(value: Option<String>) -> Option<String> {
 /// Unlike `retain_managed_agent_pending`, this has no projection-equality
 /// short-circuit: teams have no start/stop runtime churn, so a republish only
 /// happens on an actual user edit. The guard is intentionally omitted.
-fn retain_team_pending(app: &AppHandle, state: &AppState, team: &TeamRecord) {
+pub(super) fn retain_team_pending(app: &AppHandle, state: &AppState, team: &TeamRecord) {
     use crate::managed_agents::{
         managed_agents_base_dir,
         persona_events::monotonic_created_at,
@@ -336,27 +336,31 @@ pub async fn export_team_to_json(
 const MAX_TEAM_ZIP_BYTES: usize = 100 * 1024 * 1024;
 
 #[tauri::command]
-pub fn parse_team_file(
+pub async fn parse_team_file(
     file_bytes: Vec<u8>,
     _file_name: String,
 ) -> Result<ParsedTeamPreview, String> {
-    if file_bytes.is_empty() {
-        return Err("File is empty.".to_string());
-    }
-
-    // Detect zip files (persona packs) BEFORE the JSON size check — zips can be larger.
-    if file_bytes.len() >= 4 && file_bytes[..4] == [0x50, 0x4B, 0x03, 0x04] {
-        if file_bytes.len() > MAX_TEAM_ZIP_BYTES {
-            return Err("ZIP file is too large (max 100 MB).".to_string());
+    tokio::task::spawn_blocking(move || {
+        if file_bytes.is_empty() {
+            return Err("File is empty.".to_string());
         }
-        return parse_team_from_pack_zip(&file_bytes);
-    }
 
-    if file_bytes.len() > MAX_TEAM_JSON_BYTES {
-        return Err("File is too large (max 5 MB).".to_string());
-    }
+        // Detect zip files (persona packs) BEFORE the JSON size check — zips can be larger.
+        if file_bytes.len() >= 4 && file_bytes[..4] == [0x50, 0x4B, 0x03, 0x04] {
+            if file_bytes.len() > MAX_TEAM_ZIP_BYTES {
+                return Err("ZIP file is too large (max 100 MB).".to_string());
+            }
+            return parse_team_from_pack_zip(&file_bytes);
+        }
 
-    parse_team_json(&file_bytes)
+        if file_bytes.len() > MAX_TEAM_JSON_BYTES {
+            return Err("File is too large (max 5 MB).".to_string());
+        }
+
+        parse_team_json(&file_bytes)
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking failed: {e}"))?
 }
 
 /// Parse a persona pack zip as a team: pack name → team name, personas → members.
@@ -426,4 +430,49 @@ fn parse_team_from_pack_zip(zip_bytes: &[u8]) -> Result<ParsedTeamPreview, Strin
             })
             .collect(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Write;
+
+    use super::parse_team_from_pack_zip;
+
+    #[test]
+    fn parse_team_pack_zip_keeps_team_import_available() {
+        let cursor = std::io::Cursor::new(Vec::new());
+        let mut zip = zip::ZipWriter::new(cursor);
+        let options = zip::write::SimpleFileOptions::default();
+
+        zip.start_file("reviewers/.plugin/plugin.json", options)
+            .unwrap();
+        zip.write_all(
+            br#"{
+                "id": "com.example.reviewers",
+                "name": "Reviewers",
+                "version": "1.0.0",
+                "personas": ["agents/reviewer.persona.md"]
+            }"#,
+        )
+        .unwrap();
+        zip.start_file("reviewers/agents/reviewer.persona.md", options)
+            .unwrap();
+        zip.write_all(
+            br#"---
+name: "reviewer"
+display_name: "Reviewer"
+description: "Reviews code"
+---
+Review code carefully.
+"#,
+        )
+        .unwrap();
+
+        let bytes = zip.finish().unwrap().into_inner();
+        let preview = parse_team_from_pack_zip(&bytes).unwrap();
+
+        assert_eq!(preview.name, "Reviewers");
+        assert_eq!(preview.personas.len(), 1);
+        assert_eq!(preview.personas[0].display_name, "Reviewer");
+    }
 }

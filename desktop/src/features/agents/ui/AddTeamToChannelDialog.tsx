@@ -12,6 +12,7 @@ import {
 } from "@/features/agents/lib/teamPersonas";
 import {
   collectRuntimeWarnings,
+  getDefaultPersonaRuntime,
   resolvePersonaRuntime,
 } from "@/features/agents/lib/resolvePersonaRuntime";
 import { useChannelsQuery } from "@/features/channels/hooks";
@@ -65,8 +66,10 @@ export function AddTeamToChannelDialog({
     [channelsQuery.data],
   );
 
-  const providers = providersQuery.data ?? [];
-  const defaultProvider = providers[0] ?? null;
+  const runtimes = providersQuery.data ?? [];
+  // Use the buzz-agent-first preference so the team-deploy fallback mirrors the
+  // single-agent start path (buzz-agent → goose → first available).
+  const defaultProvider = getDefaultPersonaRuntime(runtimes);
 
   const teamPersonaResolution = React.useMemo(
     () =>
@@ -80,8 +83,8 @@ export function AddTeamToChannelDialog({
   // This dialog has no runtime selector, so the fallback is always
   // `defaultProvider` (the first available runtime).
   const runtimeWarnings = React.useMemo(
-    () => collectRuntimeWarnings(resolved, providers, defaultProvider),
-    [resolved, providers, defaultProvider],
+    () => collectRuntimeWarnings(resolved, runtimes, defaultProvider),
+    [resolved, runtimes, defaultProvider],
   );
 
   function reset() {
@@ -122,7 +125,7 @@ export function AddTeamToChannelDialog({
       const inputs = resolved.map((persona) => {
         const { runtime: personaRuntime } = resolvePersonaRuntime(
           persona.runtime,
-          providers,
+          runtimes,
           defaultProvider,
         );
         const runtimeToUse = personaRuntime ?? defaultProvider;
@@ -158,7 +161,7 @@ export function AddTeamToChannelDialog({
           <DialogHeader className="shrink-0 border-b border-border/60 px-6 py-5 pr-14">
             <DialogTitle>Deploy team to channel</DialogTitle>
             <DialogDescription>
-              Create and attach one agent per persona in{" "}
+              Create and attach one agent per member of{" "}
               <strong>{team?.name ?? "this team"}</strong> to the selected
               channel.
             </DialogDescription>
@@ -168,7 +171,7 @@ export function AddTeamToChannelDialog({
             {resolved.length > 0 ? (
               <div className="space-y-1.5">
                 <span className="text-sm font-medium">
-                  Personas ({resolved.length})
+                  Agents ({resolved.length})
                 </span>
                 <div className="flex flex-wrap gap-2">
                   {resolved.map((persona) => (
@@ -237,7 +240,7 @@ export function AddTeamToChannelDialog({
 
             {missingPersonaCount > 0 ? (
               <p className="rounded-2xl border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
-                This team references {missingPersonaCount} persona
+                This team references {missingPersonaCount} agent
                 {missingPersonaCount === 1 ? "" : "s"} that{" "}
                 {missingPersonaCount === 1 ? "is" : "are"} no longer in My
                 Agents. Add them back or edit the team before deploying.

@@ -15,6 +15,7 @@ import '../profile/user_cache_provider.dart';
 import '../profile/user_profile.dart';
 import '../forum/forum_posts_view.dart';
 import 'channel.dart';
+import 'channel_link_navigation.dart';
 import 'agent_activity/working_bots_provider.dart';
 import 'channel_management_provider.dart';
 import 'channel_messages_provider.dart';
@@ -214,6 +215,10 @@ class ChannelDetailPage extends HookConsumerWidget {
                   context: context,
                   isScrollControlled: true,
                   showDragHandle: true,
+                  constraints: BoxConstraints(
+                    maxWidth: 640,
+                    maxHeight: MediaQuery.sizeOf(context).height * 0.9,
+                  ),
                   builder: (_) => ManageChannelSheet(channel: resolvedChannel),
                 );
                 if (shouldClose == true && context.mounted) {
@@ -258,7 +263,13 @@ class ChannelDetailPage extends HookConsumerWidget {
                         events,
                         currentPubkey: currentPubkey,
                       );
-                      final entries = buildMainTimelineEntries(messages);
+                      final summaries = ref
+                          .read(channelMessagesProvider(channel.id).notifier)
+                          .threadSummaries;
+                      final entries = buildMainTimelineEntries(
+                        messages,
+                        relaySummaries: summaries,
+                      );
                       return _MessageList(
                         entries: entries,
                         allMessages: messages,

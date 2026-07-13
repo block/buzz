@@ -38,9 +38,14 @@ use crate::state::AppState;
 /// bound the amplification. 20/sec is far above any real interactive use; a
 /// buggy desktop loop can't storm the relay. Shared by the WS door
 /// (`handlers::event`) and the HTTP door (`handle_mesh_event_http`) — one
-/// limiter, two transports.
-pub(crate) fn connect_request_rate_limited(state: &AppState, pubkey: &nostr::PublicKey) -> bool {
-    let key: [u8; 32] = pubkey.to_bytes();
+/// limiter, two transports. The key includes community because the same Nostr
+/// key can legitimately participate in more than one community.
+pub(crate) fn connect_request_rate_limited(
+    state: &AppState,
+    community_id: CommunityId,
+    pubkey: &nostr::PublicKey,
+) -> bool {
+    let key = (community_id, pubkey.to_bytes());
     let now = std::time::Instant::now();
     let mut entry = state
         .mesh_connect_rate_limiter
@@ -93,7 +98,7 @@ pub async fn handle_mesh_event_http(
             handle_status_report(state, tenant, &pubkey_hex, event).await
         }
         k if k == KIND_MESH_CONNECT_REQUEST => {
-            if connect_request_rate_limited(state, auth_pubkey) {
+            if connect_request_rate_limited(state, tenant.community(), auth_pubkey) {
                 return Err("rate-limited: mesh connect request rate exceeded (20/sec)".to_string());
             }
             handle_connect_request(state, tenant, &pubkey_hex, event).await
@@ -563,9 +568,11 @@ mod tests {
     ) {
         let conn_id = uuid::Uuid::new_v4();
         let (tx, rx) = tokio::sync::mpsc::channel(10);
+        let (ctrl_tx, _ctrl_rx) = tokio::sync::mpsc::channel(10);
         state.conn_manager.register(
             conn_id,
             tx,
+            ctrl_tx,
             tokio_util::sync::CancellationToken::new(),
             test_tenant().community(),
             std::sync::Arc::new(std::sync::atomic::AtomicU8::new(0)),
@@ -802,14 +809,31 @@ mod tests {
         let pubkey = nostr::Keys::generate().public_key();
         for i in 0..20 {
             assert!(
-                !connect_request_rate_limited(&state, &pubkey),
+                !connect_request_rate_limited(&state, test_tenant().community(), &pubkey),
                 "request {} should pass",
                 i + 1
             );
         }
         assert!(
-            connect_request_rate_limited(&state, &pubkey),
+            connect_request_rate_limited(&state, test_tenant().community(), &pubkey),
             "21st request in the same window must be limited"
+        );
+    }
+
+    #[tokio::test]
+    async fn connect_request_rate_limiter_is_scoped_by_community() {
+        let state = test_state().await;
+        let pubkey = nostr::Keys::generate().public_key();
+        let community_a = CommunityId::from_uuid(uuid::Uuid::from_u128(0xAAAA));
+        let community_b = CommunityId::from_uuid(uuid::Uuid::from_u128(0xBBBB));
+
+        for _ in 0..20 {
+            assert!(!connect_request_rate_limited(&state, community_a, &pubkey));
+        }
+        assert!(connect_request_rate_limited(&state, community_a, &pubkey));
+        assert!(
+            !connect_request_rate_limited(&state, community_b, &pubkey),
+            "A's exhausted budget must not rate-limit the same key in B"
         );
     }
 }

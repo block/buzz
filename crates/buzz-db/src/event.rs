@@ -428,8 +428,10 @@ pub async fn query_events(pool: &PgPool, q: &EventQuery) -> Result<Vec<StoredEve
     }
 
     // e-tag pushdown via JSONB containment: tags @> '[["e","<hex>"]]'.
-    // Multiple e-tags use OR (any match). No GIN index yet — acceptable at
-    // current scale; add `CREATE INDEX ... USING gin(tags)` if this becomes hot.
+    // Multiple e-tags use OR (any match). Served by idx_events_tags_gin
+    // (GIN, jsonb_path_ops — migrations/0004): the channel-window aux closure
+    // fans this out once per retained row, which made unindexed containment
+    // the dominant scroll-back cost (~1.7s/page on staging).
     if let Some(ref e_tags) = q.e_tags {
         if !e_tags.is_empty() {
             qb.push(" AND (");

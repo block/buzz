@@ -230,6 +230,49 @@ test("built-in personas are used from the catalog dialog", async ({ page }) => {
   await expect.poll(() => getCatalogOrder(page)).toEqual(initialCatalogOrder);
 });
 
+test("agent avatar emoji picker scrolls inside its popover", async ({
+  page,
+}) => {
+  await gotoApp(page);
+  await page.getByTestId("open-agents-view").click();
+  await page.getByTestId("new-agent-card").click();
+  await page.getByRole("menuitem", { name: "New agent" }).click();
+
+  await expect(page.getByTestId("persona-dialog")).toBeVisible();
+  await page.getByLabel("Add avatar").click();
+  await page.getByRole("tab", { name: "Emoji" }).click();
+  await expect(page.locator("em-emoji-picker")).toBeVisible();
+
+  await page.waitForFunction(() => {
+    const picker = document.querySelector("em-emoji-picker");
+    const scroll = picker?.shadowRoot?.querySelector(".scroll");
+    return (
+      scroll instanceof HTMLElement && scroll.scrollHeight > scroll.clientHeight
+    );
+  });
+
+  const before = await page.locator("em-emoji-picker").evaluate((picker) => {
+    const scroll = picker.shadowRoot?.querySelector(".scroll");
+    return scroll instanceof HTMLElement ? scroll.scrollTop : -1;
+  });
+
+  const box = await page.locator("em-emoji-picker").boundingBox();
+  if (!box) {
+    throw new Error("Could not measure emoji picker bounds.");
+  }
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await page.mouse.wheel(0, 500);
+
+  await expect
+    .poll(async () =>
+      page.locator("em-emoji-picker").evaluate((picker) => {
+        const scroll = picker.shadowRoot?.querySelector(".scroll");
+        return scroll instanceof HTMLElement ? scroll.scrollTop : -1;
+      }),
+    )
+    .toBeGreaterThan(before);
+});
+
 test("agent catalog can reopen from the populated library header", async ({
   page,
 }) => {
@@ -293,7 +336,7 @@ test("catalog detail pane shows the full persona details", async ({ page }) => {
     "You are Fizz.",
   );
   await expect(page.getByTestId("persona-catalog-detail-pane")).toContainText(
-    "Built-in persona",
+    "Built-in agent",
   );
   await expect(page.getByTestId("persona-catalog-detail-pane")).toContainText(
     "Preferred model",
@@ -339,12 +382,12 @@ test("custom personas can be shown in the agent catalog", async ({ page }) => {
     "Catalog options",
     "Edit",
     "Duplicate",
+    "Export snapshot",
     "Remove from My Agents",
   ]);
   await expect(
     page.getByRole("menuitem", { name: "Catalog options" }),
   ).toBeVisible();
-  await expect(page.getByRole("menuitem", { name: "Export" })).toHaveCount(0);
   await page.getByRole("menuitem", { name: "Catalog options" }).click();
 
   await expect(page.getByTestId("persona-share-dialog")).toBeVisible();
@@ -366,7 +409,7 @@ test("custom personas can be shown in the agent catalog", async ({ page }) => {
   ).toContainText("Analyst");
   await selectCatalogPersona(page, analystPersonaId);
   await expect(page.getByTestId("persona-catalog-detail-pane")).toContainText(
-    "Custom persona",
+    "Custom agent",
   );
   await expect(
     page.getByTestId(`persona-catalog-use-agent-target-${analystPersonaId}`),
@@ -394,6 +437,7 @@ test("team-managed personas do not expose editable actions", async ({
   await expect(page.getByRole("menuitem")).toHaveText([
     "Catalog options",
     "Duplicate",
+    "Export snapshot",
     "Managed by team",
   ]);
   await expect(page.getByRole("menuitem", { name: "Edit" })).toHaveCount(0);

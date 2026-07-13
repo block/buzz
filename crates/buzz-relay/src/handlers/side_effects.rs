@@ -11,8 +11,10 @@ use buzz_core::kind::{
     KIND_GIT_REPO_ANNOUNCEMENT, KIND_IA_ARCHIVED, KIND_IA_ARCHIVED_LIST, KIND_IA_UNARCHIVED,
     KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION, KIND_NIP29_GROUP_ADMINS,
     KIND_NIP29_GROUP_MEMBERS, KIND_NIP29_GROUP_METADATA, KIND_NIP43_MEMBERSHIP_LIST, KIND_REACTION,
+    KIND_THREAD_SUMMARY,
 };
-use buzz_db::channel::MemberRole;
+use buzz_core::StoredEvent;
+use buzz_db::channel::{MemberRecord, MemberRole};
 
 use super::event::dispatch_persistent_event;
 use crate::protocol::RelayMessage;
@@ -40,7 +42,9 @@ async fn evict_live_channel_subscriptions(
     channel_id: Uuid,
     target_pubkey: &[u8],
 ) {
-    let conn_ids = state.conn_manager.connection_ids_for_pubkey(target_pubkey);
+    let conn_ids = state
+        .conn_manager
+        .connection_ids_for_pubkey_in_community(tenant.community(), target_pubkey);
 
     for conn_id in conn_ids {
         evict_conn_channel_subscriptions(tenant, state, channel_id, conn_id).await;
@@ -169,8 +173,9 @@ pub async fn handle_side_effects(
 
 /// Validate a standard NIP-09 deletion event before it is stored.
 ///
-/// Buzz accepts standard deletions for self-authored events only. Channel
-/// admin deletions continue to use kind 9005.
+/// Buzz accepts standard deletions for self-authored events, plus the owning
+/// human deleting their agent's events (mirrors `validate_edit_ownership`).
+/// Channel admin deletions continue to use kind 9005.
 pub async fn validate_standard_deletion_event(
     tenant: &TenantContext,
     event: &Event,
@@ -193,7 +198,12 @@ pub async fn validate_standard_deletion_event(
         }
         let target_pubkey_bytes =
             hex::decode(parts[1]).map_err(|_| anyhow::anyhow!("invalid pubkey in a-tag"))?;
-        if target_pubkey_bytes != actor_bytes {
+        if target_pubkey_bytes != actor_bytes
+            && !state
+                .db
+                .is_agent_owner(tenant.community(), &target_pubkey_bytes, &actor_bytes)
+                .await?
+        {
             return Err(anyhow::anyhow!("must be event author"));
         }
         return Ok(());
@@ -208,7 +218,12 @@ pub async fn validate_standard_deletion_event(
 
         let target_author =
             effective_message_author(&target_event.event, &state.relay_keypair.public_key());
-        if target_author != actor_bytes {
+        if target_author != actor_bytes
+            && !state
+                .db
+                .is_agent_owner(tenant.community(), &target_author, &actor_bytes)
+                .await?
+        {
             return Err(anyhow::anyhow!("must be event author"));
         }
     }
@@ -516,6 +531,11 @@ pub async fn validate_admin_event(
         }
         9005 => {
             // DELETE_EVENT: event author OR channel owner/admin.
+            if let Some(action_id) = extract_tag_value(event, "action_id") {
+                Uuid::parse_str(&action_id)
+                    .map_err(|_| anyhow::anyhow!("invalid action_id tag"))?;
+            }
+
             // Extract target event from e tag to check authorship.
             let target_id = event
                 .tags
@@ -554,7 +574,7 @@ pub async fn validate_admin_event(
             // For relay-signed REST messages, the real author is in the p tag.
             let author =
                 effective_message_author(&target_event.event, &state.relay_keypair.public_key());
-            if author == actor_bytes {
+            if author_delete_can_use_self_delete_path(&author, &actor_bytes, event) {
                 // Author deleting their own message: re-gate on membership/open visibility so that
                 // a removed private-channel member cannot mutate old messages after access is revoked.
                 let is_member = state
@@ -578,23 +598,21 @@ pub async fn validate_admin_event(
             // Not the author, or author who is no longer a member of a private channel —
             // must be owner/admin or the owning human of the message's agent-author.
             let members = state.db.get_members(tenant.community(), channel_id).await?;
-            let actor_member = members.iter().find(|m| m.pubkey == actor_bytes);
-            match actor_member {
-                Some(m) if m.role == "owner" || m.role == "admin" => Ok(()),
-                _ => {
-                    // Allow the owning human of the agent that authored the target message,
-                    // even when the human is not a channel member.
-                    if state
-                        .db
-                        .is_agent_owner(tenant.community(), &author, &actor_bytes)
-                        .await?
-                    {
-                        Ok(())
-                    } else {
-                        Err(anyhow::anyhow!(
-                            "must be event author or channel owner/admin"
-                        ))
-                    }
+            if actor_is_channel_owner_or_admin(&members, &actor_bytes) {
+                Ok(())
+            } else {
+                // Allow the owning human of the agent that authored the target message,
+                // even when the human is not a channel member.
+                if state
+                    .db
+                    .is_agent_owner(tenant.community(), &author, &actor_bytes)
+                    .await?
+                {
+                    Ok(())
+                } else {
+                    Err(anyhow::anyhow!(
+                        "must be event author or channel owner/admin"
+                    ))
                 }
             }
         }
@@ -671,6 +689,108 @@ pub async fn emit_system_message(
     }
 
     Ok(())
+}
+
+/// Sign and fan out a fresh relay-signed `kind:39005` thread-summary overlay
+/// for `root_id` after a thread mutation (reply insert or threaded delete).
+///
+/// Fan-out only — never stored. Channel-window pages recompute summaries from
+/// `thread_metadata` on every fetch (`api/bridge.rs`), so a persisted copy
+/// would only add staleness; this live emit exists purely so subscribed
+/// clients can update badge counts without refetching the head window. The
+/// counts are re-read from `thread_metadata` post-commit rather than
+/// incremented, so the emitted summary is exact even under concurrent
+/// replies/deletes (newest `created_at` wins client-side).
+///
+/// Spawned: runs after the triggering write committed and must not add
+/// latency to the ingest acknowledgement, mirroring
+/// `dispatch_persistent_event`.
+pub fn emit_live_thread_summary(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    channel_id: Uuid,
+    root_id: Vec<u8>,
+) {
+    let tenant = tenant.clone();
+    let state = Arc::clone(state);
+    tokio::spawn(async move {
+        let summary = match state
+            .db
+            .get_thread_summary(tenant.community(), &root_id)
+            .await
+        {
+            Ok(Some(summary)) => summary,
+            // Root has no thread row — nothing to summarize (e.g., the root
+            // itself was just deleted).
+            Ok(None) => return,
+            Err(e) => {
+                warn!(
+                    root = %hex::encode(&root_id),
+                    "live thread summary lookup failed: {e}"
+                );
+                return;
+            }
+        };
+
+        let root_hex = hex::encode(&root_id);
+        // Same tags/content shape as the channel-window page overlay in
+        // `api/bridge.rs` — one contract, two delivery doors.
+        let content = serde_json::json!({
+            "reply_count": summary.reply_count,
+            "descendant_count": summary.descendant_count,
+            "last_reply_at": summary.last_reply_at.map(|t| t.timestamp()),
+            "participants": summary.participants.iter().map(hex::encode).collect::<Vec<_>>(),
+        });
+        let tags = [
+            Tag::parse(["e", &root_hex]),
+            Tag::parse(["d", &root_hex]),
+            Tag::parse(["h", &channel_id.to_string()]),
+        ];
+        let mut parsed = Vec::with_capacity(tags.len());
+        for tag in tags {
+            match tag {
+                Ok(tag) => parsed.push(tag),
+                Err(e) => {
+                    warn!(root = %root_hex, "live thread summary tag failed: {e}");
+                    return;
+                }
+            }
+        }
+        let event = match EventBuilder::new(
+            Kind::Custom(KIND_THREAD_SUMMARY as u16),
+            content.to_string(),
+        )
+        .tags(parsed)
+        .sign_with_keys(&state.relay_keypair)
+        {
+            Ok(event) => event,
+            Err(e) => {
+                warn!(root = %root_hex, "live thread summary sign failed: {e}");
+                return;
+            }
+        };
+
+        // Redis before local fan-out so subscribers on other relay pods
+        // receive it too, matching `dispatch_persistent_event`.
+        state.mark_local_event(tenant.community(), &event.id);
+        if let Err(e) = state
+            .pubsub
+            .publish_event(&tenant, EventTopic::Channel(channel_id), &event)
+            .await
+        {
+            state
+                .local_event_ids
+                .invalidate(&(tenant.community(), event.id.to_bytes()));
+            warn!(root = %root_hex, "live thread summary Redis publish failed: {e}");
+        }
+        let stored = StoredEvent::new(event, Some(channel_id));
+        crate::handlers::event::fan_out_event_to_local_subscribers(
+            &state,
+            tenant.community(),
+            &stored,
+        )
+        .await;
+    });
 }
 
 /// Emit a relay-signed membership notification event stored globally (channel_id = None).
@@ -953,10 +1073,17 @@ async fn handle_agent_profile(
         .ok_or_else(|| anyhow::anyhow!("kind:10100 missing channel_add_policy field"))?;
 
     let pubkey_bytes = event.pubkey.to_bytes().to_vec();
-    state
+    if state
         .db
         .ensure_user(tenant.community(), &pubkey_bytes)
-        .await?;
+        .await?
+    {
+        metrics::counter!(
+            "buzz_users_created_total",
+            "community" => tenant.host().to_owned()
+        )
+        .increment(1);
+    }
     state
         .db
         .set_channel_add_policy(tenant.community(), &pubkey_bytes, policy)
@@ -1004,10 +1131,17 @@ async fn handle_kind0_profile(
 
     let pubkey_bytes = event.pubkey.to_bytes().to_vec();
 
-    state
+    if state
         .db
         .ensure_user(tenant.community(), &pubkey_bytes)
-        .await?;
+        .await?
+    {
+        metrics::counter!(
+            "buzz_users_created_total",
+            "community" => tenant.host().to_owned()
+        )
+        .increment(1);
+    }
 
     // Pass all fields as Some — empty string clears the field in the DB.
     // This ensures kind:0 is treated as absolute state, not a partial update.
@@ -1485,18 +1619,23 @@ async fn handle_delete_event_side_effect(
         return Ok(()); // No-op: skip system message to avoid false audit records.
     }
 
+    // Thread counters were decremented in the same transaction — push a fresh
+    // relay-signed 39005 so live badge counts also count *down*.
+    if let Some(root_id) = root_id {
+        emit_live_thread_summary(tenant, state, channel_id, root_id);
+    }
+
     let actor_hex = hex::encode(event.pubkey.to_bytes());
-    emit_system_message(
-        tenant,
-        state,
-        channel_id,
-        serde_json::json!({
-            "type": "message_deleted",
-            "actor": actor_hex,
-            "target_event_id": hex::encode(&target_id),
-        }),
-    )
-    .await?;
+    let mut tombstone = serde_json::json!({
+        "type": "message_deleted",
+        "actor": actor_hex,
+        "target_event_id": hex::encode(&target_id),
+    });
+    copy_optional_string_field(event, &mut tombstone, "action_id");
+    copy_optional_string_field(event, &mut tombstone, "reason_code");
+    copy_optional_string_field(event, &mut tombstone, "public_reason");
+
+    emit_system_message(tenant, state, channel_id, tombstone).await?;
 
     info!(target_event = %hex::encode(&target_id), "NIP-29 DELETE_EVENT processed");
     Ok(())
@@ -1528,13 +1667,21 @@ async fn handle_create_group(
     // If the event has an h-tag UUID, ingest_event() already created the channel
     // via create_channel_with_id(). Fetch it rather than creating a duplicate.
     // If no h-tag, fall back to the original auto-UUID creation path.
+    //
+    // Double-count analysis (C5): the counter increments below do NOT
+    // double-count vs. ingest.rs. For the h-tag path, ingest increments on
+    // was_created=true and this handler only reaches create_channel() on a DB
+    // lookup Err — an error recovery path where ingest's channel is
+    // inaccessible, so the counter correctly records a new creation. For the
+    // no-h-tag path, ingest never creates the channel, so this is the sole
+    // increment.
     let channel = if let Some(client_uuid) = extract_h_tag_channel(event) {
         match state.db.get_channel(tenant.community(), client_uuid).await {
             Ok(ch) => ch,
             Err(_) => {
                 // Channel not found — shouldn't happen (ingest_event pre-created it),
                 // but fall back to creation to stay resilient.
-                state
+                let ch = state
                     .db
                     .create_channel(
                         tenant.community(),
@@ -1545,11 +1692,18 @@ async fn handle_create_group(
                         &actor_bytes,
                         ttl_seconds,
                     )
-                    .await?
+                    .await?;
+                metrics::counter!(
+                    "buzz_channels_created_total",
+                    "community" => tenant.host().to_owned(),
+                    "type" => channel_type.to_string()
+                )
+                .increment(1);
+                ch
             }
         }
     } else {
-        state
+        let ch = state
             .db
             .create_channel(
                 tenant.community(),
@@ -1560,7 +1714,14 @@ async fn handle_create_group(
                 &actor_bytes,
                 ttl_seconds,
             )
-            .await?
+            .await?;
+        metrics::counter!(
+            "buzz_channels_created_total",
+            "community" => tenant.host().to_owned(),
+            "type" => channel_type.to_string()
+        )
+        .increment(1);
+        ch
     };
 
     // Creator becomes owner — evict any stale negative membership lookup.
@@ -1998,6 +2159,12 @@ async fn handle_standard_deletion_event(
             continue;
         }
 
+        // Thread counters were decremented in the same transaction — push a
+        // fresh relay-signed 39005 so live badge counts also count *down*.
+        if let (Some(root_id), Some(channel_id)) = (root_id, target_event.channel_id) {
+            emit_live_thread_summary(tenant, state, channel_id, root_id);
+        }
+
         if u32::from(target_event.event.kind.as_u16()) == KIND_REACTION {
             // Try by reaction_event_id first; fall back to tuple-based removal
             // if the backfill was missed (set_reaction_event_id is best-effort).
@@ -2165,6 +2332,60 @@ fn extract_tag_value(event: &Event, tag_name: &str) -> Option<String> {
         }
     }
     None
+}
+
+fn copy_optional_string_field(event: &Event, object: &mut serde_json::Value, tag_name: &str) {
+    let Some(value) = extract_tag_value(event, tag_name) else {
+        return;
+    };
+    copy_optional_string_value(object, tag_name, value);
+}
+
+fn copy_optional_string_value(object: &mut serde_json::Value, field_name: &str, value: String) {
+    if let Some(map) = object.as_object_mut() {
+        map.insert(field_name.to_string(), serde_json::Value::String(value));
+    }
+}
+
+fn has_moderation_delete_metadata(event: &Event) -> bool {
+    ["action_id", "reason_code", "public_reason"]
+        .iter()
+        .any(|tag_name| extract_tag_value(event, tag_name).is_some())
+}
+
+fn author_delete_can_use_self_delete_path(author: &[u8], actor: &[u8], event: &Event) -> bool {
+    author == actor && !has_moderation_delete_metadata(event)
+}
+
+fn actor_is_channel_owner_or_admin(members: &[MemberRecord], actor: &[u8]) -> bool {
+    members
+        .iter()
+        .any(|m| m.pubkey == actor && (m.role == "owner" || m.role == "admin"))
+}
+
+#[cfg(test)]
+fn delete_tombstone_content(
+    actor_hex: String,
+    target_event_id: String,
+    action_id: Option<String>,
+    reason_code: Option<String>,
+    public_reason: Option<String>,
+) -> serde_json::Value {
+    let mut tombstone = serde_json::json!({
+        "type": "message_deleted",
+        "actor": actor_hex,
+        "target_event_id": target_event_id,
+    });
+    if let Some(action_id) = action_id {
+        copy_optional_string_value(&mut tombstone, "action_id", action_id);
+    }
+    if let Some(reason_code) = reason_code {
+        copy_optional_string_value(&mut tombstone, "reason_code", reason_code);
+    }
+    if let Some(public_reason) = public_reason {
+        copy_optional_string_value(&mut tombstone, "public_reason", public_reason);
+    }
+    tombstone
 }
 
 /// Validate a git repo identifier (d-tag value from kind:30617).
@@ -2990,5 +3211,88 @@ fn topic_for_subscription(channel_id: Option<Uuid>) -> EventTopic {
     match channel_id {
         Some(channel_id) => EventTopic::Channel(channel_id),
         None => EventTopic::Global,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn delete_tombstone_omits_absent_moderation_metadata() {
+        let content =
+            delete_tombstone_content("actor".to_string(), "target".to_string(), None, None, None);
+
+        assert_eq!(content["type"], "message_deleted");
+        assert_eq!(content["actor"], "actor");
+        assert_eq!(content["target_event_id"], "target");
+        assert!(content.get("action_id").is_none());
+        assert!(content.get("reason_code").is_none());
+        assert!(content.get("public_reason").is_none());
+    }
+
+    #[test]
+    fn delete_tombstone_carries_optional_moderation_metadata() {
+        let content = delete_tombstone_content(
+            "actor".to_string(),
+            "target".to_string(),
+            Some("550e8400-e29b-41d4-a716-446655440000".to_string()),
+            Some("spam".to_string()),
+            Some("Removed for spam.".to_string()),
+        );
+
+        assert_eq!(content["type"], "message_deleted");
+        assert_eq!(content["actor"], "actor");
+        assert_eq!(content["target_event_id"], "target");
+        assert_eq!(content["action_id"], "550e8400-e29b-41d4-a716-446655440000");
+        assert_eq!(content["reason_code"], "spam");
+        assert_eq!(content["public_reason"], "Removed for spam.");
+        assert!(!content.to_string().contains("reporter"));
+    }
+
+    #[test]
+    fn author_self_delete_with_moderation_metadata_skips_self_delete_path() {
+        let keys = nostr::Keys::generate();
+        let actor = keys.public_key().to_bytes();
+        let event = EventBuilder::new(Kind::Custom(9005), "")
+            .tags([Tag::parse(["public_reason", "Removed for spam."]).unwrap()])
+            .sign_with_keys(&keys)
+            .expect("sign");
+
+        assert!(!author_delete_can_use_self_delete_path(
+            &actor, &actor, &event
+        ));
+    }
+
+    #[test]
+    fn member_role_is_not_owner_or_admin_for_moderation_metadata() {
+        let channel_id = Uuid::new_v4();
+        let actor = vec![7_u8; 32];
+        let members = vec![MemberRecord {
+            channel_id,
+            pubkey: actor.clone(),
+            role: "member".to_string(),
+            joined_at: chrono::Utc::now(),
+            invited_by: None,
+            removed_at: None,
+        }];
+
+        assert!(!actor_is_channel_owner_or_admin(&members, &actor));
+    }
+
+    #[test]
+    fn admin_role_is_owner_or_admin_for_moderation_metadata() {
+        let channel_id = Uuid::new_v4();
+        let actor = vec![7_u8; 32];
+        let members = vec![MemberRecord {
+            channel_id,
+            pubkey: actor.clone(),
+            role: "admin".to_string(),
+            joined_at: chrono::Utc::now(),
+            invited_by: None,
+            removed_at: None,
+        }];
+
+        assert!(actor_is_channel_owner_or_admin(&members, &actor));
     }
 }

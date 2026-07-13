@@ -41,7 +41,10 @@ function classifyChildren(childArray) {
     (child) =>
       !isBlockMedia(child) &&
       !(typeof child === "string" && child.trim() === "") &&
-      !(isValidElement(child) && child.type === "br"),
+      !(
+        isValidElement(child) &&
+        (child.type === "br" || child.props?.node?.tagName === "br")
+      ),
   );
   return { imageChildren, nonImageChildren };
 }
@@ -67,9 +70,7 @@ function isHastText(node) {
 function isHastImageOnlyParagraph(node) {
   if (!isHastElement(node) || node.tagName !== "p") return false;
   const meaningful = node.children.filter(
-    (child) =>
-      !(isHastText(child) && child.value.trim() === "") &&
-      !(isHastElement(child) && child.tagName === "br"),
+    (child) => !isIgnorableImageSeparator(child),
   );
   return (
     meaningful.length >= 1 &&
@@ -77,8 +78,47 @@ function isHastImageOnlyParagraph(node) {
   );
 }
 
+function isIgnorableImageSeparator(node) {
+  return (
+    (isHastText(node) && node.value.trim() === "") ||
+    (isHastElement(node) && node.tagName === "br")
+  );
+}
+
+function splitTrailingImageRun(node) {
+  if (!isHastElement(node) || node.tagName !== "p") return [node];
+
+  let cursor = node.children.length - 1;
+  const trailingImages = [];
+  while (cursor >= 0) {
+    const child = node.children[cursor];
+    if (isHastElement(child) && child.tagName === "img") {
+      trailingImages.unshift(child);
+      cursor -= 1;
+      continue;
+    }
+    if (isIgnorableImageSeparator(child)) {
+      cursor -= 1;
+      continue;
+    }
+    break;
+  }
+
+  if (trailingImages.length < 2 || cursor < 0) return [node];
+  return [
+    { ...node, children: node.children.slice(0, cursor + 1) },
+    {
+      type: "element",
+      tagName: "p",
+      properties: {},
+      children: trailingImages,
+    },
+  ];
+}
+
 function rehypeImageGallery() {
   return (tree) => {
+    const normalizedChildren = tree.children.flatMap(splitTrailingImageRun);
     const newChildren = [];
     let imageRun = [];
 
@@ -104,7 +144,7 @@ function rehypeImageGallery() {
       imageRun = [];
     }
 
-    for (const child of tree.children) {
+    for (const child of normalizedChildren) {
       if (isHastImageOnlyParagraph(child)) {
         imageRun.push(child);
         continue;
@@ -189,6 +229,32 @@ test("classifyChildren: <br> elements are excluded from non-image", () => {
   const { imageChildren, nonImageChildren } = classifyChildren(children);
   assert.equal(imageChildren.length, 0);
   assert.equal(nonImageChildren.length, 0);
+});
+
+test("classifyChildren: react-markdown break components are excluded", () => {
+  const BreakComponent = () => null;
+  const children = [
+    fakeElement(BreakComponent, { node: { type: "element", tagName: "br" } }),
+  ];
+  const { imageChildren, nonImageChildren } = classifyChildren(children);
+  assert.equal(imageChildren.length, 0);
+  assert.equal(nonImageChildren.length, 0);
+});
+
+test("isImageOnlyParagraph: react-markdown breaks preserve image mosaics", () => {
+  const BreakComponent = () => null;
+  const media = { "data-block-media": "" };
+  const customBreak = fakeElement(BreakComponent, {
+    node: { type: "element", tagName: "br" },
+  });
+  const children = [
+    fakeElement("span", media),
+    customBreak,
+    fakeElement("span", media),
+    customBreak,
+    fakeElement("span", media),
+  ];
+  assert.equal(isImageOnlyParagraph(children), true);
 });
 
 test("classifyChildren: mixed media, text, and br", () => {
@@ -413,6 +479,44 @@ test("rehypeImageGallery: mixed content paragraph is not image-only", () => {
   rehypeImageGallery()(tree);
   // Middle paragraph has text, so it breaks the run
   assert.equal(tree.children.length, 3);
+});
+
+test("rehypeImageGallery: splits composer text from trailing image bundle", () => {
+  const br = { type: "element", tagName: "br", properties: {}, children: [] };
+  const tree = {
+    type: "root",
+    children: [
+      hastP(
+        hastText("gallery bundle"),
+        br,
+        hastImg("a.png"),
+        br,
+        hastImg("b.png"),
+        br,
+        hastImg("c.png"),
+      ),
+    ],
+  };
+
+  rehypeImageGallery()(tree);
+
+  assert.equal(tree.children.length, 2);
+  assert.equal(tree.children[0].children[0].value, "gallery bundle");
+  assert.deepEqual(
+    tree.children[1].children.map((child) => child.properties.src),
+    ["a.png", "b.png", "c.png"],
+  );
+});
+
+test("rehypeImageGallery: leaves a single trailing image in the text flow", () => {
+  const br = { type: "element", tagName: "br", properties: {}, children: [] };
+  const paragraph = hastP(hastText("caption"), br, hastImg("a.png"));
+  const tree = { type: "root", children: [paragraph] };
+
+  rehypeImageGallery()(tree);
+
+  assert.equal(tree.children.length, 1);
+  assert.equal(tree.children[0], paragraph);
 });
 
 // Regression test: react-markdown's `defaultUrlTransform` strips unknown
@@ -655,4 +759,131 @@ test("remarkMessageLinks: text inside inlineCode is left alone", () => {
   assert.equal(kids.length, 1);
   assert.equal(kids[0].type, "inlineCode");
   assert.equal(kids[0].value, "buzz://message?channel=c&id=m");
+});
+
+// ── selectProseOrNudge render-level guard ─────────────────────────────────────
+//
+// `MarkdownInner` calls `selectProseOrNudge(configNudge, markdownNode)` —
+// the single production copy of the prose-suppression branch, exported from
+// `computeConfigNudge.ts`. These tests import and call that exact function
+// through a minimal stub so a revert that changes its behavior is caught
+// at unit-test time.
+//
+// (The full `Markdown` component cannot be rendered in this environment:
+// emoji-mart JSON imports crash the module loader before React runs.)
+
+import {
+  computeConfigNudge,
+  selectProseOrNudge,
+} from "../lib/computeConfigNudge.ts";
+import { stripConfigNudgeSentinel } from "../lib/configNudge.ts";
+
+const AGENT_PUBKEY =
+  "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899";
+const HUMAN_PUBKEY =
+  "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+
+function nudgeBody(agentPubkey) {
+  return [
+    "**Fizz** needs configuration before it can respond:",
+    "- set `ANTHROPIC_API_KEY` in Edit Agent → Environment variables",
+    "",
+    "Open Edit Agent in the Buzz app to set these.",
+    "",
+    "```buzz:config-nudge",
+    JSON.stringify({
+      agent_name: "Fizz",
+      agent_pubkey: agentPubkey,
+      requirements: [{ surface: "env_key", key: "ANTHROPIC_API_KEY" }],
+    }),
+    "```",
+  ].join("\n");
+}
+
+// Minimal wrapper that calls the real production functions from
+// `computeConfigNudge.ts` — `computeConfigNudge` to detect the payload and
+// `selectProseOrNudge` for the prose-suppression branch — without importing
+// any Tauri or context dependencies.
+function GuardStub({ content, configNudgeAuthorPubkey }) {
+  const configNudge = computeConfigNudge(
+    content,
+    true,
+    configNudgeAuthorPubkey,
+  );
+  const stripped =
+    configNudge !== null ? stripConfigNudgeSentinel(content) : content;
+  const markdownNode = React.createElement(
+    "div",
+    { "data-markdown-prose": "" },
+    stripped,
+  );
+  return React.createElement(
+    "div",
+    null,
+    selectProseOrNudge(configNudge, markdownNode),
+    configNudge !== null
+      ? React.createElement("div", { "data-config-nudge": "" })
+      : null,
+  );
+}
+
+test("nudgeGuard_sentinelPresentMatchingAuthor_cardRenderedProseAbsent", () => {
+  const body = nudgeBody(AGENT_PUBKEY);
+  const html = renderToStaticMarkup(
+    React.createElement(GuardStub, {
+      content: body,
+      configNudgeAuthorPubkey: AGENT_PUBKEY,
+    }),
+  );
+  // Card placeholder rendered.
+  assert.ok(
+    html.includes("data-config-nudge"),
+    "data-config-nudge must be present when sentinel+author match",
+  );
+  // Prose suppressed — the raw fallback text must NOT appear outside the card.
+  assert.ok(
+    !html.includes("needs configuration before it can respond"),
+    "prose must be absent when card renders",
+  );
+  assert.ok(
+    !html.includes("data-markdown-prose"),
+    "markdownNode must be null (not rendered) when configNudge is non-null",
+  );
+});
+
+test("nudgeGuard_sentinelPresentWrongAuthor_proseRenderedCardAbsent", () => {
+  // Sentinel present, but author pubkey is human — auth guard rejects, prose shown.
+  const body = nudgeBody(AGENT_PUBKEY);
+  const html = renderToStaticMarkup(
+    React.createElement(GuardStub, {
+      content: body,
+      configNudgeAuthorPubkey: HUMAN_PUBKEY,
+    }),
+  );
+  assert.ok(
+    !html.includes("data-config-nudge"),
+    "card must be absent when author pubkey does not match sentinel agent_pubkey",
+  );
+  assert.ok(
+    html.includes("data-markdown-prose"),
+    "markdownNode must render when configNudge is null (auth mismatch)",
+  );
+});
+
+test("nudgeGuard_noSentinel_proseRenderedCardAbsent", () => {
+  const plain = "Hello, this is a normal message with no sentinel.";
+  const html = renderToStaticMarkup(
+    React.createElement(GuardStub, {
+      content: plain,
+      configNudgeAuthorPubkey: AGENT_PUBKEY,
+    }),
+  );
+  assert.ok(
+    !html.includes("data-config-nudge"),
+    "card must be absent when no sentinel is present",
+  );
+  assert.ok(
+    html.includes("data-markdown-prose"),
+    "markdownNode must render when no sentinel is present",
+  );
 });

@@ -1,4 +1,10 @@
-import { FileCode2, GitBranch, GitCommitHorizontal, Users } from "lucide-react";
+import {
+  FileCode2,
+  GitBranch,
+  GitCommitHorizontal,
+  GitPullRequest,
+  Users,
+} from "lucide-react";
 import type * as React from "react";
 
 import type {
@@ -9,9 +15,15 @@ import type {
   ProjectRepoSnapshot,
 } from "@/features/projects/hooks";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
+import {
+  LANGUAGE_DOT_CLASSES,
+  languageForPath,
+  topLanguagesFromCounts,
+} from "@/features/projects/lib/projectLanguages";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
-import { ReadmePanel } from "./ProjectRepositoryPanel";
+import { ReadmePanel } from "./ProjectReadmePanel";
+import type { RepoSourceHeaderControls } from "./ProjectRepositorySource";
 
 type ProjectOverviewPanelProps = {
   contributors: ProjectRepoContributor[];
@@ -22,55 +34,21 @@ type ProjectOverviewPanelProps = {
   pullRequests: ProjectPullRequest[];
   readmeFile: ProjectRepoFile | null;
   snapshot: ProjectRepoSnapshot | null | undefined;
+  /** Branch picker + remote/local toggle for the readme header. */
+  sourceControls?: RepoSourceHeaderControls;
 };
-
-const LANGUAGE_LABELS: Record<string, string> = {
-  css: "CSS",
-  dart: "Dart",
-  go: "Go",
-  html: "HTML",
-  js: "JavaScript",
-  json: "JSON",
-  jsx: "JavaScript",
-  kt: "Kotlin",
-  mjs: "JavaScript",
-  py: "Python",
-  rb: "Ruby",
-  rs: "Rust",
-  swift: "Swift",
-  ts: "TypeScript",
-  tsx: "TypeScript",
-};
-
-const LANGUAGE_DOT_CLASSES = [
-  "bg-blue-500",
-  "bg-violet-500",
-  "bg-emerald-500",
-  "bg-orange-500",
-  "bg-pink-500",
-];
 
 function shortHash(hash: string | undefined) {
   return hash ? hash.slice(0, 7) : "None";
 }
 
-function languageForPath(path: string) {
-  const fileName = path.split("/").pop()?.toLowerCase() ?? "";
-  const extension = fileName.includes(".") ? fileName.split(".").pop() : "";
-  return extension ? LANGUAGE_LABELS[extension] : undefined;
-}
-
 function topLanguages(files: ProjectRepoFile[]) {
-  const counts = new Map<string, number>();
+  const counts: Record<string, number> = {};
   for (const file of files) {
     const language = languageForPath(file.path);
-    if (language) counts.set(language, (counts.get(language) ?? 0) + 1);
+    if (language) counts[language] = (counts[language] ?? 0) + 1;
   }
-  return [...counts.entries()]
-    .sort(
-      (left, right) => right[1] - left[1] || left[0].localeCompare(right[0]),
-    )
-    .slice(0, 5);
+  return topLanguagesFromCounts(counts);
 }
 
 function projectPeople(project: Project) {
@@ -112,6 +90,30 @@ function PeopleAvatars({
   );
 }
 
+export function LanguageChips({
+  languages,
+}: {
+  languages: Array<[string, number]>;
+}) {
+  return (
+    <div className="flex flex-wrap gap-1.5">
+      {languages.map(([language], index) => (
+        <span
+          className="inline-flex items-center gap-1.5 rounded-full border border-border/60 bg-muted/40 px-2 py-1 text-xs text-muted-foreground"
+          key={language}
+        >
+          <span
+            className={`h-2 w-2 rounded-full ${
+              LANGUAGE_DOT_CLASSES[index % LANGUAGE_DOT_CLASSES.length]
+            }`}
+          />
+          {language}
+        </span>
+      ))}
+    </div>
+  );
+}
+
 export function OverviewRailSection({
   children,
   title,
@@ -120,10 +122,8 @@ export function OverviewRailSection({
   title: string;
 }) {
   return (
-    <section className="space-y-2 border-border/50 border-b pb-4 last:border-b-0 last:pb-0">
-      <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-        {title}
-      </h3>
+    <section className="space-y-2">
+      <h3 className="text-sm font-semibold text-foreground">{title}</h3>
       {children}
     </section>
   );
@@ -138,27 +138,20 @@ export function ProjectOverviewPanel({
   pullRequests,
   readmeFile,
   snapshot,
+  sourceControls,
 }: ProjectOverviewPanelProps) {
   const languages = topLanguages(files);
   const people = projectPeople(project);
   const latestCommit = snapshot?.latestCommit ?? null;
 
   return (
-    <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_18rem]">
+    <div className="grid overflow-hidden rounded-xl border border-border/60 bg-card xl:grid-cols-[minmax(0,1fr)_18rem]">
       <div className="min-w-0">
-        {readmeFile ? (
-          <ReadmePanel file={readmeFile} />
-        ) : (
-          <div className="rounded-xl border border-border/50 bg-card/60 p-6 text-sm text-muted-foreground">
-            <p className="font-medium text-foreground">No README found</p>
-            <p className="mt-1">
-              Add a README to this repository to describe the project and help
-              collaborators get started.
-            </p>
-          </div>
-        )}
+        {/* ReadmePanel renders its own "no README" fallback while keeping
+            the branch + source controls reachable. */}
+        <ReadmePanel file={readmeFile} sourceControls={sourceControls} />
       </div>
-      <aside className="space-y-4 rounded-xl border border-border/50 bg-card/60 p-4">
+      <aside className="space-y-6 border-t border-border/60 p-4 xl:border-l xl:border-t-0">
         <OverviewRailSection title="People">
           <div className="flex items-center justify-between gap-3">
             <PeopleAvatars people={people} profiles={profiles} />
@@ -173,21 +166,7 @@ export function ProjectOverviewPanel({
         </OverviewRailSection>
         <OverviewRailSection title="Top Languages">
           {languages.length > 0 ? (
-            <div className="flex flex-wrap gap-1.5">
-              {languages.map(([language], index) => (
-                <span
-                  className="inline-flex items-center gap-1.5 rounded-full bg-muted/70 px-2 py-1 text-xs text-muted-foreground"
-                  key={language}
-                >
-                  <span
-                    className={`h-2 w-2 rounded-full ${
-                      LANGUAGE_DOT_CLASSES[index % LANGUAGE_DOT_CLASSES.length]
-                    }`}
-                  />
-                  {language}
-                </span>
-              ))}
-            </div>
+            <LanguageChips languages={languages} />
           ) : (
             <p className="text-sm text-muted-foreground">
               No language data is available yet.
@@ -231,7 +210,10 @@ export function ProjectOverviewPanel({
               </dd>
             </div>
             <div className="flex items-center justify-between gap-3">
-              <dt className="text-muted-foreground">PRs</dt>
+              <dt className="flex items-center gap-1.5 text-muted-foreground">
+                <GitPullRequest className="h-3.5 w-3.5" />
+                Pull Requests
+              </dt>
               <dd className="font-medium text-foreground">
                 {pullRequests.length}
               </dd>

@@ -17,14 +17,46 @@ import { installMockBridge } from "../helpers/bridge";
 // this spec uses the simpler mock-bridge setup like messaging.spec.ts.
 const SHORTCODE = "buzz";
 
+async function waitForMockLiveSubscription(
+  page: import("@playwright/test").Page,
+  channelName: string,
+) {
+  await expect
+    .poll(async () =>
+      page.evaluate(
+        ({ ch }) =>
+          (
+            window as Window & {
+              __BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?: (input: {
+                channelName: string;
+              }) => boolean;
+            }
+          ).__BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?.({ channelName: ch }) ??
+          false,
+        { ch: channelName },
+      ),
+    )
+    .toBe(true);
+}
+
 async function openGeneral(page: import("@playwright/test").Page) {
   await page.goto("/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await waitForMockLiveSubscription(page, "general");
 }
 
 test.beforeEach(async ({ page }) => {
   await installMockBridge(page);
+  // The mock emoji sets point at example.com placeholder URLs. Fulfill them
+  // with a real image so visibility assertions still prove the emoji rendered
+  // as an actual, non-broken custom-emoji image.
+  await page.route("https://example.com/e2e/**", (route) =>
+    route.fulfill({
+      contentType: "image/svg+xml",
+      body: '<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32"><rect width="32" height="32" fill="#22c55e"/></svg>',
+    }),
+  );
 });
 
 test("typing a known :shortcode: renders an inline emoji node in the composer", async ({

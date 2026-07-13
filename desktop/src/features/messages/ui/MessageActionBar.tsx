@@ -5,6 +5,7 @@ import {
   Copy,
   CornerUpLeft,
   EllipsisVertical,
+  Flag,
   Link2,
   MailCheck,
   MailOpen,
@@ -18,6 +19,8 @@ import { buildMessageLink } from "@/features/messages/lib/messageLink";
 import { EmojiPicker } from "@/features/custom-emoji/ui/EmojiPicker";
 import { useCustomEmoji } from "@/features/custom-emoji/hooks";
 import { getThreadReference } from "@/features/messages/lib/threading";
+import { ReportMessageDialog } from "@/features/moderation/ui/ReportMessageDialog";
+import { MessageModerationMenuItems } from "@/features/moderation/ui/MessageModerationMenuItems";
 import type {
   TimelineMessage,
   TimelineReaction,
@@ -89,6 +92,7 @@ function MoreActionsMenu({
   isUnread?: boolean;
 }) {
   const [isDeleteDialogOpen, setIsDeleteDialogOpen] = React.useState(false);
+  const [isReportDialogOpen, setIsReportDialogOpen] = React.useState(false);
   // Set true the moment the user picks "Edit message". The
   // `onCloseAutoFocus` handler on `DropdownMenuContent` reads it to
   // suppress Radix's default focus-restoration (which would yank focus
@@ -101,6 +105,14 @@ function MoreActionsMenu({
 
   const hasCopyActions =
     !message.pending && message.kind !== KIND_HUDDLE_STARTED;
+
+  // A report needs a real, delivered event to target and a known author to
+  // name in the NIP-56 `p` tag. Pending sends and system huddle rows have
+  // neither, so the entry is hidden for them.
+  const canReport =
+    !message.pending &&
+    message.kind !== KIND_HUDDLE_STARTED &&
+    Boolean(message.pubkey);
 
   return (
     <>
@@ -228,20 +240,38 @@ function MoreActionsMenu({
             </DropdownMenuItem>
           ) : null}
 
+          {canReport || onDelete ? <DropdownMenuSeparator /> : null}
+
+          {canReport ? (
+            <DropdownMenuItem
+              data-testid={`report-message-${message.id}`}
+              onClick={() => {
+                setIsReportDialogOpen(true);
+              }}
+            >
+              <Flag className="h-4 w-4" />
+              Report message
+            </DropdownMenuItem>
+          ) : null}
+
           {onDelete ? (
-            <>
-              <DropdownMenuSeparator />
-              <DropdownMenuItem
-                className="text-destructive focus:text-destructive"
-                data-testid={`delete-message-${message.id}`}
-                onClick={() => {
-                  setIsDeleteDialogOpen(true);
-                }}
-              >
-                <Trash2 className="h-4 w-4" />
-                Delete message
-              </DropdownMenuItem>
-            </>
+            <DropdownMenuItem
+              className="text-destructive focus:text-destructive"
+              data-testid={`delete-message-${message.id}`}
+              onClick={() => {
+                setIsDeleteDialogOpen(true);
+              }}
+            >
+              <Trash2 className="h-4 w-4" />
+              Delete message
+            </DropdownMenuItem>
+          ) : null}
+
+          {canReport ? (
+            <MessageModerationMenuItems
+              channelId={channelId}
+              message={message}
+            />
           ) : null}
         </DropdownMenuContent>
       </DropdownMenu>
@@ -276,6 +306,15 @@ function MoreActionsMenu({
             </AlertDialogFooter>
           </AlertDialogContent>
         </AlertDialog>
+      ) : null}
+
+      {canReport ? (
+        <ReportMessageDialog
+          open={isReportDialogOpen}
+          onOpenChange={setIsReportDialogOpen}
+          authorPubkey={message.pubkey ?? ""}
+          eventId={message.id}
+        />
       ) : null}
     </>
   );
@@ -326,7 +365,7 @@ function isCustomEmojiShortcode(emoji: string) {
   return emoji.startsWith(":") && emoji.endsWith(":");
 }
 
-export function MessageActionBar({
+export const MessageActionBar = React.memo(function MessageActionBar({
   channelId,
   message,
   onDelete,
@@ -549,4 +588,6 @@ export function MessageActionBar({
       </div>
     </div>
   );
-}
+});
+
+MessageActionBar.displayName = "MessageActionBar";

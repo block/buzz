@@ -24,8 +24,8 @@ export function useChannelSections(
 ): {
   sections: ChannelSection[];
   assignments: Record<string, string>;
-  createSection: (name: string) => ChannelSection | null;
-  renameSection: (sectionId: string, newName: string) => void;
+  createSection: (name: string, icon?: string) => ChannelSection | null;
+  renameSection: (sectionId: string, newName: string, icon?: string) => void;
   deleteSection: (sectionId: string) => void;
   moveSectionUp: (sectionId: string) => void;
   moveSectionDown: (sectionId: string) => void;
@@ -169,7 +169,7 @@ export function useChannelSections(
   );
 
   const createSection = React.useCallback(
-    (name: string): ChannelSection | null => {
+    (name: string, icon?: string): ChannelSection | null => {
       if (!pubkey) return null;
       const prev = readChannelSectionsStore(pubkey, relayUrl);
       const maxOrder =
@@ -179,6 +179,7 @@ export function useChannelSections(
       const section: ChannelSection = {
         id: crypto.randomUUID(),
         name,
+        ...(icon ? { icon } : {}),
         order: maxOrder + 1,
       };
       setStore((current) => {
@@ -196,7 +197,7 @@ export function useChannelSections(
   );
 
   const renameSection = React.useCallback(
-    (sectionId: string, newName: string) => {
+    (sectionId: string, newName: string, icon?: string) => {
       if (!pubkey) {
         return;
       }
@@ -204,7 +205,14 @@ export function useChannelSections(
         const next: ChannelSectionStore = {
           ...prev,
           sections: prev.sections.map((s) =>
-            s.id === sectionId ? { ...s, name: newName } : s,
+            s.id === sectionId
+              ? {
+                  id: s.id,
+                  name: newName,
+                  ...(icon ? { icon } : {}),
+                  order: s.order,
+                }
+              : s,
           ),
         };
         if (!writeChannelSectionsStore(pubkey, next, relayUrl)) {

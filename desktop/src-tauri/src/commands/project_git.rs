@@ -69,6 +69,11 @@ pub struct ProjectRepoPushResult {
     pub pushed: bool,
     pub message: String,
 }
+#[derive(Serialize)]
+pub struct GitIdentityInfo {
+    pub name: Option<String>,
+    pub email: Option<String>,
+}
 fn parse_latest_commit(output: &str) -> Option<ProjectRepoCommitInfo> {
     let line = output.lines().next()?;
     let mut parts = line.split('\0');
@@ -578,6 +583,28 @@ fn compare_local_remote_status(
         can_push: push_block_reason.is_none(),
         push_block_reason,
     }
+}
+
+/// The viewer's configured git identity (`user.name` / `user.email`), used by
+/// the frontend to attribute their own commits to their Buzz profile when git
+/// author strings don't match any relay profile fields.
+#[tauri::command]
+pub async fn get_git_identity(state: State<'_, AppState>) -> Result<GitIdentityInfo, String> {
+    let auth = build_git_auth_config(&state)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let read = |key: &str| {
+            run_git(&["config", "--get", key], None, &auth)
+                .ok()
+                .map(|output| output.trim().to_string())
+                .filter(|value| !value.is_empty())
+        };
+        Ok(GitIdentityInfo {
+            name: read("user.name"),
+            email: read("user.email"),
+        })
+    })
+    .await
+    .map_err(|error| format!("git identity task failed: {error}"))?
 }
 
 #[tauri::command]

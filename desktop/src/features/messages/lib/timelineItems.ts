@@ -12,12 +12,15 @@ import {
 } from "@/features/messages/lib/timelineSnapshot";
 import { shouldRenderUnreadDivider } from "@/features/messages/lib/threadPanel";
 import type { MainTimelineEntry } from "@/features/messages/lib/threadPanel";
-import { hasSameMessageAuthor } from "@/features/messages/lib/messageGrouping";
+import {
+  hasSameMessageAuthor,
+  isWithinGroupingWindow,
+} from "@/features/messages/lib/messageGrouping";
 import { KIND_SYSTEM_MESSAGE } from "@/shared/constants/kinds";
 
 /**
  * One renderable row in the flattened timeline. Dividers carry no message and
- * never appear in the index map; the three message-bearing kinds do.
+ * never appear in the index map; the message-bearing kinds do.
  */
 export type TimelineItem =
   // `headingTimestamp` (not a prebaked label) so the render still resolves
@@ -25,6 +28,11 @@ export type TimelineItem =
   | { kind: "day-divider"; key: string; headingTimestamp: number }
   | { kind: "unread-divider"; key: string }
   | { kind: "system"; key: string; entry: MainTimelineEntry }
+  | {
+      kind: "system-group";
+      key: string;
+      entries: MainTimelineEntry[];
+    }
   | {
       kind: "message";
       key: string;
@@ -54,6 +62,99 @@ function entryRenderKey(entry: MainTimelineEntry): string {
   return entry.message.renderKey ?? entry.message.id;
 }
 
+const MEMBERSHIP_GROUP_WINDOW_SECONDS = 5 * 60;
+
+type MembershipChangePayload = {
+  actor: string | null;
+  mode: "added" | "joined";
+  target: string;
+};
+
+function parseMembershipChangePayload(
+  entry: MainTimelineEntry,
+): MembershipChangePayload | null {
+  if (entry.message.kind !== KIND_SYSTEM_MESSAGE) return null;
+
+  try {
+    const payload = JSON.parse(entry.message.body) as {
+      type?: unknown;
+      actor?: unknown;
+      target?: unknown;
+    };
+    if (
+      payload.type !== "member_joined" ||
+      typeof payload.actor !== "string" ||
+      typeof payload.target !== "string"
+    ) {
+      return null;
+    }
+
+    const actor = payload.actor.trim().toLowerCase();
+    const target = payload.target.trim().toLowerCase();
+    if (!actor || !target) return null;
+
+    return actor === target
+      ? { actor: null, mode: "joined", target }
+      : { actor, mode: "added", target };
+  } catch {
+    return null;
+  }
+}
+
+function membershipChangesCanGroup(
+  first: MembershipChangePayload,
+  second: MembershipChangePayload,
+): boolean {
+  return (
+    first.mode === second.mode &&
+    (first.mode === "joined" || first.actor === second.actor)
+  );
+}
+
+/**
+ * Membership groups are anchored from their newest entry so prepending older
+ * history cannot repartition the rows that are already loaded. Their key is
+ * likewise the newest entry's key: extending the oldest visible group changes
+ * its contents, but not its identity or the virtual list's existing key suffix.
+ */
+function buildMembershipGroups(
+  entries: readonly MainTimelineEntry[],
+  barrierIndexes: ReadonlySet<number>,
+): Map<number, MainTimelineEntry[]> {
+  const groups = new Map<number, MainTimelineEntry[]>();
+
+  for (let end = entries.length - 1; end >= 0; ) {
+    const newestEntry = entries[end];
+    const newestPayload = parseMembershipChangePayload(newestEntry);
+    if (!newestPayload) {
+      end -= 1;
+      continue;
+    }
+
+    let start = end;
+    while (start > 0) {
+      const candidate = entries[start - 1];
+      const candidatePayload = parseMembershipChangePayload(candidate);
+      if (
+        barrierIndexes.has(start) ||
+        !candidatePayload ||
+        !membershipChangesCanGroup(candidatePayload, newestPayload) ||
+        newestEntry.message.createdAt < candidate.message.createdAt ||
+        newestEntry.message.createdAt - candidate.message.createdAt >
+          MEMBERSHIP_GROUP_WINDOW_SECONDS
+      ) {
+        break;
+      }
+      start -= 1;
+    }
+
+    if (start < end) groups.set(start, entries.slice(start, end + 1));
+    end = start - 1;
+  }
+
+  return groups;
+}
+
 /**
  * Walks the (already top-level-filtered) entries once, emitting a day-divider
  * at each calendar-day boundary and an unread-divider above the first unread
@@ -75,6 +176,17 @@ export function buildTimelineItems(
     buildDayGroupBoundaries(entries.map((entry) => entry.message)).map(
       (boundary: DayGroupBoundary) => [boundary.startIndex, boundary] as const,
     ),
+  );
+  const membershipBarrierIndexes = new Set(dayBoundariesByStartIndex.keys());
+  if (firstUnreadMessageId) {
+    const unreadIndex = entries.findIndex(
+      (entry) => entry.message.id === firstUnreadMessageId,
+    );
+    if (unreadIndex > 0) membershipBarrierIndexes.add(unreadIndex);
+  }
+  const membershipGroupsByStartIndex = buildMembershipGroups(
+    entries,
+    membershipBarrierIndexes,
   );
 
   for (let i = 0; i < entries.length; i++) {
@@ -103,13 +215,30 @@ export function buildTimelineItems(
     if (kind === "system") {
       previousGroupEntry = null;
       previousMessageItemIndex = null;
+
+      const membershipGroup = membershipGroupsByStartIndex.get(i);
+      if (membershipGroup) {
+        const newestEntry = membershipGroup[membershipGroup.length - 1];
+        items.push({
+          kind: "system-group",
+          key: entryRenderKey(newestEntry),
+          entries: membershipGroup,
+        });
+        i += membershipGroup.length - 1;
+        continue;
+      }
+
       items.push({ kind, key: renderKey, entry });
       continue;
     }
 
     const isContinuation =
       previousGroupEntry !== null &&
-      hasSameMessageAuthor(previousGroupEntry.message, message);
+      hasSameMessageAuthor(previousGroupEntry.message, message) &&
+      isWithinGroupingWindow(
+        previousGroupEntry.message.createdAt,
+        message.createdAt,
+      );
 
     if (isContinuation && previousMessageItemIndex !== null) {
       const previousItem = items[previousMessageItemIndex];

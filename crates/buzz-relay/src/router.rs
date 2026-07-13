@@ -60,6 +60,24 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/events", post(api::bridge::submit_event))
         .route("/query", post(api::bridge::query_events))
         .route("/count", post(api::bridge::count_events))
+        .route(
+            "/operator/communities",
+            get(api::operator::list_owned_communities).post(api::operator::provision_community),
+        )
+        .route(
+            "/operator/communities/availability",
+            get(api::operator::community_availability),
+        )
+        // Relay invites: mint (owner/admin) + claim (membership-gate exempt)
+        .route("/api/invites", post(api::invites::mint_invite))
+        .route("/api/invites/claim", post(api::invites::claim_invite))
+        // Moderation queue reads (NIP-98 auth + mod-authz gate, L6)
+        .route("/moderation/reports", get(api::bridge::moderation_reports))
+        .route("/moderation/audit", get(api::bridge::moderation_audit))
+        .route(
+            "/moderation/restricted",
+            get(api::bridge::moderation_restricted),
+        )
         // Webhook trigger (secret-authenticated, no NIP-98)
         .route("/hooks/{id}", post(api::bridge::workflow_webhook))
         // Huddle audio WebSocket route
@@ -89,6 +107,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
                     // Reserved API prefixes must 404 normally, not serve index.html.
                     let reserved = path.starts_with("/api/")
                         || path.starts_with("/media/")
+                        || path.starts_with("/operator/")
                         || path.starts_with("/git/")
                         || path.starts_with("/internal/")
                         || path.starts_with("/.well-known/")
@@ -99,7 +118,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
                         || path == "/_status"
                         || path == "/info";
                     // Files with extensions (e.g. /assets/missing.js) should 404.
-                    let has_ext = path.rsplit('/').next().is_some_and(|seg| seg.contains('.'));
+                    // Exception: /invite/<code> — invite codes contain a "."
+                    // (payload.mac separator) but are SPA routes, not files.
+                    let has_ext = !path.starts_with("/invite/")
+                        && path.rsplit('/').next().is_some_and(|seg| seg.contains('.'));
                     if reserved || has_ext {
                         Ok(StatusCode::NOT_FOUND.into_response())
                     } else {
