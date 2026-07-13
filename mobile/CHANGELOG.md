@@ -1,5 +1,9 @@
 # Changelog
 
+## mobile-v0.4.2
+
+
+
 ## mobile-v0.3.33
 
 - fix(mobile): align Android AGP/Gradle/Kotlin with Flutter 3.41.7 (unbreak Android build) ([#1775](https://github.com/block/buzz/pull/1775)) ([`bc14052d`](https://github.com/block/buzz/commit/bc14052d3941ffcc4b54541f65b24b68ce8f215b))
