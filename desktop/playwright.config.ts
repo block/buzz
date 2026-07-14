@@ -123,6 +123,7 @@ export default defineConfig({
         "**/tokens.spec.ts",
         "**/persona-env-vars.spec.ts",
         "**/persona-sync.spec.ts",
+        "**/team-snapshot.spec.ts",
         "**/mesh-compute.spec.ts",
         "**/parity-ancestor-island.spec.ts",
       ],

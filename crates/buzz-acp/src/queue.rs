@@ -1327,6 +1327,8 @@ pub struct FormatPromptArgs<'a> {
     pub base_prompt: Option<&'a str>,
     /// System prompt content for legacy agents (protocol_version < 2).
     pub system_prompt: Option<&'a str>,
+    /// Team instructions for legacy agents, rendered after `[System]`.
+    pub team_instructions: Option<&'a str>,
     /// Rendered `[Channel Canvas]` metadata section for legacy agents.
     ///
     /// For modern agents (protocol_version >= 2) the section is delivered via
@@ -1394,6 +1396,13 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
         }
         if let Some(sp) = args.system_prompt {
             sections.push(format!("[System]\n{sp}"));
+        }
+        if let Some(team) = args
+            .team_instructions
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            sections.push(format!("[Team Instructions]\n{team}"));
         }
     }
 

@@ -226,6 +226,18 @@ type MockBridgeOptions = {
    *  fail-closed race: DMs are withheld while classification is unresolved. */
   relaySelfDelayMs?: number;
   /**
+   * Sequenced results for `confirm_team_snapshot_import`. String = throw
+   * with that message; null = succeed. Call N uses results[N]; last entry
+   * repeats when exhausted. Follows the `nsecErrors` precedent.
+   */
+  teamSnapshotConfirmErrors?: (string | null)[];
+  /**
+   * When true, `preview_team_snapshot_import` returns a preview with
+   * `hasSourceAllowlist: true` so the allowlist section renders in the
+   * import dialog.
+   */
+  teamSnapshotPreviewHasSourceAllowlist?: boolean;
+  /**
    * When set to a non-empty string, `fetch_snapshot_bytes` throws with this
    * message — lets specs prove malformed/hash/size-mismatch error paths.
    */

@@ -28,8 +28,10 @@ pub struct ResolvedPersona {
     pub avatar: Option<String>,
     pub version: String,
 
-    // → Config.system_prompt (persona body + pack_instructions)
+    // → Config.system_prompt (persona body only)
     pub system_prompt: String,
+    /// Pack-owned instructions kept separate for the team model migration.
+    pub pack_instructions: Option<String>,
 
     // → Config.model (plain model ID, post-split)
     pub model: Option<String>,
@@ -195,7 +197,11 @@ fn resolve_one_persona(
     pack_instructions: Option<&str>,
     shared_mcp: Option<&serde_json::Value>,
 ) -> ResolvedPersona {
-    let system_prompt = compose_prompt(&lp.prompt, pack_instructions);
+    let system_prompt = lp.prompt.clone();
+    let pack_instructions = pack_instructions
+        .map(str::trim)
+        .filter(|instructions| !instructions.is_empty())
+        .map(str::to_string);
 
     // Split "provider:model-id" into separate fields (V3 contract).
     let (llm_provider, model) = match lp.model.as_deref() {
@@ -228,6 +234,7 @@ fn resolve_one_persona(
         avatar: lp.avatar.clone(),
         version,
         system_prompt,
+        pack_instructions,
         model,
         llm_provider,
         runtime: lp.runtime.clone(),
@@ -241,16 +248,6 @@ fn resolve_one_persona(
         hooks,
         skills: lp.skills.clone(),
         runtime_env_vars,
-    }
-}
-
-/// Compose the effective system prompt: persona body + pack instructions.
-fn compose_prompt(persona_prompt: &str, pack_instructions: Option<&str>) -> String {
-    match pack_instructions {
-        Some(instructions) if !instructions.trim().is_empty() => {
-            format!("{persona_prompt}\n\n---\n# Team Instructions\n{instructions}")
-        }
-        _ => persona_prompt.to_owned(),
     }
 }
 
@@ -406,26 +403,6 @@ mod tests {
     use std::path::PathBuf;
 
     use crate::merge::{HooksData, TriggersData};
-
-    #[test]
-    fn compose_prompt_body_only() {
-        let result = compose_prompt("You are a bot.", None);
-        assert_eq!(result, "You are a bot.");
-    }
-
-    #[test]
-    fn compose_prompt_with_instructions() {
-        let result = compose_prompt("You are a bot.", Some("Follow the rules."));
-        assert!(result.starts_with("You are a bot."));
-        assert!(result.contains("# Team Instructions"));
-        assert!(result.contains("Follow the rules."));
-    }
-
-    #[test]
-    fn compose_prompt_empty_instructions_ignored() {
-        let result = compose_prompt("You are a bot.", Some("   "));
-        assert_eq!(result, "You are a bot.");
-    }
 
     #[test]
     fn triggers_from_triggers_data() {
@@ -708,10 +685,9 @@ mod tests {
         let pack = resolve_pack(dir).unwrap();
         let p = &pack.personas[0];
 
-        // Prompt composed with instructions
-        assert!(p.system_prompt.contains("You are Bot."));
-        assert!(p.system_prompt.contains("# Team Instructions"));
-        assert!(p.system_prompt.contains("Always be helpful."));
+        // Persona body kept separate from pack instructions.
+        assert_eq!(p.system_prompt, "You are Bot.\n");
+        assert_eq!(p.pack_instructions.as_deref(), Some("Always be helpful."));
 
         // Model split into separate fields (V3 contract)
         assert_eq!(p.model.as_deref(), Some("claude-sonnet-4-20250514"));

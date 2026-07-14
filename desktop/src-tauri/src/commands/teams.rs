@@ -1,14 +1,11 @@
-use tauri::{AppHandle, State};
+use tauri::AppHandle;
 use uuid::Uuid;
 
-use super::export_util::save_json_with_dialog;
 use crate::{
     app_state::AppState,
     managed_agents::{
-        delete_team_with_cascade, encode_team_json, ensure_persona_ids_are_active,
-        import_team_from_directory as do_import_team, load_personas, load_teams, parse_team_json,
-        save_teams, sync_team_from_dir as do_sync_team, try_regenerate_nest, CreateTeamRequest,
-        ParsedTeamPreview, SyncResult, TeamRecord, UpdateTeamRequest,
+        delete_team_with_cascade, ensure_persona_ids_are_active, load_personas, load_teams,
+        save_teams, try_regenerate_nest, CreateTeamRequest, TeamRecord, UpdateTeamRequest,
     },
     util::now_iso,
 };
@@ -158,6 +155,7 @@ pub async fn create_team(input: CreateTeamRequest, app: AppHandle) -> Result<Tea
         let state = app.state::<AppState>();
         let name = trim_required(&input.name, "Team name")?;
         let description = trim_optional(input.description);
+        let instructions = trim_optional(input.instructions);
         let now = now_iso();
 
         let _store_guard = state
@@ -171,6 +169,7 @@ pub async fn create_team(input: CreateTeamRequest, app: AppHandle) -> Result<Tea
             id: Uuid::new_v4().to_string(),
             name,
             description,
+            instructions,
             persona_ids: input.persona_ids,
             is_builtin: false,
             source_dir: None,
@@ -197,6 +196,7 @@ pub async fn update_team(input: UpdateTeamRequest, app: AppHandle) -> Result<Tea
         let state = app.state::<AppState>();
         let name = trim_required(&input.name, "Team name")?;
         let description = trim_optional(input.description);
+        let instructions = trim_optional(input.instructions);
 
         let _store_guard = state
             .managed_agents_store_lock
@@ -212,6 +212,7 @@ pub async fn update_team(input: UpdateTeamRequest, app: AppHandle) -> Result<Tea
 
         team.name = name;
         team.description = description;
+        team.instructions = instructions;
         team.persona_ids = input.persona_ids;
         team.updated_at = now_iso();
 
@@ -251,228 +252,4 @@ pub async fn delete_team(id: String, app: AppHandle) -> Result<(), String> {
     })
     .await
     .map_err(|e| format!("spawn_blocking failed: {e}"))?
-}
-
-#[tauri::command]
-pub async fn install_team_from_directory(
-    app: AppHandle,
-    path: String,
-    symlink: Option<bool>,
-) -> Result<TeamRecord, String> {
-    use tauri::Manager;
-    tokio::task::spawn_blocking(move || {
-        let state = app.state::<AppState>();
-        let _store_guard = state
-            .managed_agents_store_lock
-            .lock()
-            .map_err(|e| e.to_string())?;
-        let source = std::path::PathBuf::from(&path);
-        if !source.is_dir() {
-            return Err(format!("team path is not a directory: {path}"));
-        }
-        let result = do_import_team(&app, &source, symlink.unwrap_or(false))?;
-        try_regenerate_nest(&app);
-        Ok(result)
-    })
-    .await
-    .map_err(|e| format!("spawn_blocking failed: {e}"))?
-}
-
-#[tauri::command]
-pub async fn sync_team_directory(app: AppHandle, team_id: String) -> Result<SyncResult, String> {
-    use tauri::Manager;
-    tokio::task::spawn_blocking(move || {
-        let state = app.state::<AppState>();
-        let _store_guard = state
-            .managed_agents_store_lock
-            .lock()
-            .map_err(|e| e.to_string())?;
-        let result = do_sync_team(&app, &team_id)?;
-        try_regenerate_nest(&app);
-        Ok(result)
-    })
-    .await
-    .map_err(|e| format!("spawn_blocking failed: {e}"))?
-}
-
-#[tauri::command]
-pub async fn pick_team_directory(app: AppHandle) -> Result<Option<String>, String> {
-    use tauri_plugin_dialog::DialogExt;
-    let path = app.dialog().file().blocking_pick_folder();
-    Ok(path.map(|p| p.to_string()))
-}
-
-const MAX_TEAM_JSON_BYTES: usize = 5 * 1024 * 1024;
-
-#[tauri::command]
-pub async fn export_team_to_json(
-    id: String,
-    app: AppHandle,
-    state: State<'_, AppState>,
-) -> Result<bool, String> {
-    // Load team and personas under lock, then drop lock before dialog.
-    let (team, personas) = {
-        let _store_guard = state
-            .managed_agents_store_lock
-            .lock()
-            .map_err(|e| e.to_string())?;
-        let teams = load_teams(&app)?;
-        let team = teams
-            .into_iter()
-            .find(|t| t.id == id)
-            .ok_or_else(|| format!("team {id} not found"))?;
-        let personas = load_personas(&app)?;
-        (team, personas)
-    };
-
-    let json_bytes = encode_team_json(&team, &personas)?;
-
-    let slug = crate::util::slugify(&team.name, "team", 50);
-    let filename = format!("{slug}.team.json");
-    save_json_with_dialog(&app, &filename, &json_bytes).await
-}
-
-/// Max zip size for pack imports via team import (100 MB, same as persona zip limit).
-const MAX_TEAM_ZIP_BYTES: usize = 100 * 1024 * 1024;
-
-#[tauri::command]
-pub async fn parse_team_file(
-    file_bytes: Vec<u8>,
-    _file_name: String,
-) -> Result<ParsedTeamPreview, String> {
-    tokio::task::spawn_blocking(move || {
-        if file_bytes.is_empty() {
-            return Err("File is empty.".to_string());
-        }
-
-        // Detect zip files (persona packs) BEFORE the JSON size check — zips can be larger.
-        if file_bytes.len() >= 4 && file_bytes[..4] == [0x50, 0x4B, 0x03, 0x04] {
-            if file_bytes.len() > MAX_TEAM_ZIP_BYTES {
-                return Err("ZIP file is too large (max 100 MB).".to_string());
-            }
-            return parse_team_from_pack_zip(&file_bytes);
-        }
-
-        if file_bytes.len() > MAX_TEAM_JSON_BYTES {
-            return Err("File is too large (max 5 MB).".to_string());
-        }
-
-        parse_team_json(&file_bytes)
-    })
-    .await
-    .map_err(|e| format!("spawn_blocking failed: {e}"))?
-}
-
-/// Parse a persona pack zip as a team: pack name → team name, personas → members.
-fn parse_team_from_pack_zip(zip_bytes: &[u8]) -> Result<ParsedTeamPreview, String> {
-    use crate::managed_agents::TeamPersonaPreview;
-
-    // Extract to tempdir and resolve the pack directly — gives us structured
-    // access to pack name without parsing formatted strings.
-    let tmp = tempfile::tempdir().map_err(|e| format!("Failed to create temp dir: {e}"))?;
-    let cursor = std::io::Cursor::new(zip_bytes);
-    let mut archive =
-        zip::ZipArchive::new(cursor).map_err(|e| format!("Invalid ZIP archive: {e}"))?;
-
-    let max_decompressed: usize = 100 * 1024 * 1024; // 100 MB
-    let mut total_decompressed: usize = 0;
-
-    for i in 0..archive.len() {
-        let mut entry = archive
-            .by_index(i)
-            .map_err(|e| format!("Failed to read ZIP entry: {e}"))?;
-        let safe_name = match entry.enclosed_name() {
-            Some(name) => name.to_path_buf(),
-            None => continue,
-        };
-        let out_path = tmp.path().join(&safe_name);
-        if entry.is_dir() {
-            std::fs::create_dir_all(&out_path).map_err(|e| format!("Failed to create dir: {e}"))?;
-        } else {
-            if let Some(parent) = out_path.parent() {
-                std::fs::create_dir_all(parent)
-                    .map_err(|e| format!("Failed to create parent dir: {e}"))?;
-            }
-            let mut data = Vec::new();
-            std::io::Read::read_to_end(&mut entry, &mut data)
-                .map_err(|e| format!("Read error: {e}"))?;
-            total_decompressed += data.len();
-            if total_decompressed > max_decompressed {
-                return Err("ZIP decompressed content exceeds 100MB limit".to_string());
-            }
-            std::fs::write(&out_path, &data).map_err(|e| format!("Write error: {e}"))?;
-        }
-    }
-
-    let pack_root = crate::managed_agents::find_plugin_json(tmp.path())
-        .ok_or_else(|| "No .plugin/plugin.json found in ZIP".to_string())?;
-    let resolved = buzz_persona_pkg::resolve::resolve_pack(&pack_root)
-        .map_err(|e| format!("Pack validation failed: {e}"))?;
-
-    if resolved.personas.is_empty() {
-        return Err("Pack contains no personas.".to_string());
-    }
-
-    Ok(ParsedTeamPreview {
-        name: resolved.name,
-        description: if resolved.description.is_empty() {
-            None
-        } else {
-            Some(resolved.description)
-        },
-        personas: resolved
-            .personas
-            .into_iter()
-            .map(|p| TeamPersonaPreview {
-                display_name: p.display_name,
-                system_prompt: p.system_prompt,
-                avatar_url: None,
-            })
-            .collect(),
-    })
-}
-
-#[cfg(test)]
-mod tests {
-    use std::io::Write;
-
-    use super::parse_team_from_pack_zip;
-
-    #[test]
-    fn parse_team_pack_zip_keeps_team_import_available() {
-        let cursor = std::io::Cursor::new(Vec::new());
-        let mut zip = zip::ZipWriter::new(cursor);
-        let options = zip::write::SimpleFileOptions::default();
-
-        zip.start_file("reviewers/.plugin/plugin.json", options)
-            .unwrap();
-        zip.write_all(
-            br#"{
-                "id": "com.example.reviewers",
-                "name": "Reviewers",
-                "version": "1.0.0",
-                "personas": ["agents/reviewer.persona.md"]
-            }"#,
-        )
-        .unwrap();
-        zip.start_file("reviewers/agents/reviewer.persona.md", options)
-            .unwrap();
-        zip.write_all(
-            br#"---
-name: "reviewer"
-display_name: "Reviewer"
-description: "Reviews code"
----
-Review code carefully.
-"#,
-        )
-        .unwrap();
-
-        let bytes = zip.finish().unwrap().into_inner();
-        let preview = parse_team_from_pack_zip(&bytes).unwrap();
-
-        assert_eq!(preview.name, "Reviewers");
-        assert_eq!(preview.personas.len(), 1);
-        assert_eq!(preview.personas[0].display_name, "Reviewer");
-    }
 }

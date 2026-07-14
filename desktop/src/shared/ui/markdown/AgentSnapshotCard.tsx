@@ -10,6 +10,8 @@ export type AgentSnapshotCardProps = {
   filename: string;
   size?: number;
   sha256: string;
+  /** Discriminant used to label the card and route the import. */
+  snapshotKind: "agent" | "team";
   /**
    * Optional thumbnail URL for the card icon — the agent's avatar image.
    * When present, renders in place of the generic Bot icon. Falls back to
@@ -48,6 +50,7 @@ export function AgentSnapshotCard({
   filename,
   size,
   sha256,
+  snapshotKind,
   thumb,
   onImport,
 }: AgentSnapshotCardProps) {
@@ -124,7 +127,7 @@ export function AgentSnapshotCard({
             {filename}
           </span>
           <span className="block text-xs text-muted-foreground">
-            Agent snapshot
+            {snapshotKind === "team" ? "Team snapshot" : "Agent snapshot"}
             {size != null
               ? ` · ${size < 1024 ? `${size} B` : size < 1024 * 1024 ? `${(size / 1024).toFixed(1)} KB` : `${(size / (1024 * 1024)).toFixed(1)} MB`}`
               : ""}
@@ -157,7 +160,11 @@ export function AgentSnapshotCard({
           ) : (
             <Bot className="h-3.5 w-3.5" />
           )}
-          {isFetching ? "Fetching…" : "Import agent"}
+          {isFetching
+            ? "Fetching…"
+            : snapshotKind === "team"
+              ? "Import team"
+              : "Import agent"}
         </button>
         <button
           type="button"

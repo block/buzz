@@ -1355,7 +1355,7 @@ function createMarkdownComponents(
 
     const label = getReactNodeText(children);
 
-    // Agent snapshot attachment: classify before generic FileCard.
+    // Snapshot attachment (agent or team): classify before generic FileCard.
     // resolveSnapshotCard checks the filename suffix + SHA-256 field.
     const snapshotCard = resolveSnapshotCard(
       href ? imetaByUrl?.get(href) : undefined,
@@ -1369,9 +1369,14 @@ function createMarkdownComponents(
           filename={snapshotCard.filename}
           size={snapshotCard.size}
           sha256={snapshotCard.sha256}
+          snapshotKind={snapshotCard.snapshotKind}
           thumb={snapshotCard.thumb}
           onImport={(fileBytes, fileName) => {
-            onImportSnapshotFromUrl?.(fileBytes, fileName);
+            onImportSnapshotFromUrl?.(
+              fileBytes,
+              fileName,
+              snapshotCard.snapshotKind,
+            );
           }}
         />
       );
@@ -1860,8 +1865,12 @@ function MarkdownInner({
       mentionPubkeysByName,
       onOpenChannel,
       onOpenMessageLink,
-      onImportSnapshotFromUrl: (fileBytes: number[], fileName: string) => {
-        requestOpenSnapshotImport({ fileBytes, fileName });
+      onImportSnapshotFromUrl: (
+        fileBytes: number[],
+        fileName: string,
+        snapshotKind: "agent" | "team",
+      ) => {
+        requestOpenSnapshotImport({ fileBytes, fileName, snapshotKind });
         void goAgents();
       },
     }),

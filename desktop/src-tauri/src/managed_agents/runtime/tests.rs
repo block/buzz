@@ -150,6 +150,7 @@ fn fixture(
         backend: Default::default(),
         backend_agent_id: None,
         provider_binary_path: None,
+        team_id: None,
         persona_team_dir: None,
         persona_name_in_team: None,
         created_at: "now".into(),

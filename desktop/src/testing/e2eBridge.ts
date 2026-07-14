@@ -193,6 +193,18 @@ type E2eConfig = {
      *  fail-closed race: DMs are withheld while classification is unresolved. */
     relaySelfDelayMs?: number;
     /**
+     * Sequenced results for `confirm_team_snapshot_import`. String = throw
+     * with that message; null = succeed. Call N uses results[N]; last entry
+     * repeats when exhausted. Follows the `nsecErrors` precedent.
+     */
+    teamSnapshotConfirmErrors?: (string | null)[];
+    /**
+     * When true, `preview_team_snapshot_import` returns a preview with
+     * `hasSourceAllowlist: true` so the allowlist section renders in the
+     * import dialog.
+     */
+    teamSnapshotPreviewHasSourceAllowlist?: boolean;
+    /**
      * When set to a non-empty string, `fetch_snapshot_bytes` throws with this
      * message — lets specs prove malformed/hash/size-mismatch error paths.
      */
@@ -6465,6 +6477,9 @@ let installCallCount = 0;
 // Per-page get_nsec call counter for sequenced error testing.
 let nsecCallCount = 0;
 
+// Per-page confirm_team_snapshot_import call counter for sequenced error testing.
+let teamSnapshotConfirmCallCount = 0;
+
 async function handleInstallAcpRuntime(
   args: {
     runtimeId?: string;
@@ -9061,6 +9076,91 @@ export function maybeInstallE2eTauriMocks() {
           profileSyncError: null,
         };
         return importResult;
+      }
+      case "export_team_snapshot":
+        // Mimics the save-to-disk path: report success without a real dialog.
+        return true;
+      case "encode_team_snapshot_for_send": {
+        // Return a minimal PNG-shaped payload so the send flow can proceed
+        // through upload_media_bytes without a real Rust encode step.
+        const encodeDelayMs = activeConfig?.mock?.encodeDelayMs ?? 0;
+        if (encodeDelayMs > 0) {
+          await new Promise((resolve) =>
+            window.setTimeout(resolve, encodeDelayMs),
+          );
+        }
+        return {
+          fileBytes: [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a],
+          fileName: "e2e-team.team.png",
+        };
+      }
+      case "preview_team_snapshot_import": {
+        // Return a minimal preview — no writes performed.
+        const previewHasAllowlist =
+          activeConfig?.mock?.teamSnapshotPreviewHasSourceAllowlist ?? false;
+        return {
+          name: "Imported Team",
+          description: null,
+          instructions: null,
+          members: [
+            {
+              displayName: "Team Member",
+              systemPrompt: null,
+              avatarUrl: null,
+              hasSourceAllowlist: previewHasAllowlist,
+              sourceAllowlistCount: previewHasAllowlist ? 3 : 0,
+            },
+          ],
+          hasSourceAllowlist: previewHasAllowlist,
+        };
+      }
+      case "confirm_team_snapshot_import": {
+        // Sequenced failure injection: fail once, then succeed (retry test).
+        const confirmSequence = activeConfig?.mock?.teamSnapshotConfirmErrors;
+        if (confirmSequence && confirmSequence.length > 0) {
+          const idx = Math.min(
+            teamSnapshotConfirmCallCount,
+            confirmSequence.length - 1,
+          );
+          teamSnapshotConfirmCallCount++;
+          const entry = confirmSequence[idx];
+          if (entry !== null) {
+            throw new Error(entry);
+          }
+        }
+        // Return a successful import result with fresh synthetic keys.
+        // The nested `team` uses snake_case (Rust TeamRecord has no rename_all);
+        // the outer struct and members use camelCase (their Rust types do).
+        const importTs = Date.now();
+        return {
+          team: {
+            id: `e2e-team-${importTs}`,
+            name: "Imported Team",
+            description: null,
+            persona_ids: [`e2e-persona-${importTs}`],
+            instructions: null,
+            is_builtin: false,
+            source_dir: null,
+            is_symlink: false,
+            symlink_target: null,
+            version: null,
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+          },
+          personaIds: [`e2e-persona-${importTs}`],
+          members: [
+            {
+              displayName: "Team Member",
+              pubkey:
+                "e2e000000000000000000000000000000000000000000000000000000000000ee",
+              personaId: `e2e-persona-${importTs}`,
+              memoryWritten: 0,
+              memoryTotal: 0,
+              memoryErrors: [],
+              profileSyncError: null,
+            },
+          ],
+        };
       }
       case "list_managed_agents":
         return handleListManagedAgents(activeConfig);

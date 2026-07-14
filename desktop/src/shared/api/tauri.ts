@@ -1016,6 +1016,7 @@ export async function createManagedAgent(input: CreateManagedAgentInput) {
       input: {
         name: input.name,
         personaId: input.personaId,
+        teamId: input.teamId,
         relayUrl: input.relayUrl,
         acpCommand: input.acpCommand,
         agentCommand: input.agentCommand,
