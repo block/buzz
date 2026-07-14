@@ -2389,9 +2389,11 @@ test("manage channel keeps canvas near the top of the sheet", async ({
   expect(canvasBox?.y).toBeLessThan(nameBox?.y);
 });
 
-test("home inbox channel label opens management without leaving home", async ({
-  page,
-}) => {
+async function seedHomeInboxMention(
+  page: import("@playwright/test").Page,
+  itemId: string,
+  tags?: string[][],
+) {
   await page.goto("/");
   await expect(page.getByTestId("home-inbox-list")).toBeVisible();
   await page.waitForFunction(
@@ -2401,7 +2403,14 @@ test("home inbox channel label opens management without leaving home", async ({
   );
 
   await page.evaluate(
-    ({ channelId, createdAt, currentPubkey, senderPubkey }) => {
+    ({
+      channelId,
+      createdAt,
+      currentPubkey,
+      itemId: id,
+      senderPubkey,
+      tags: seededTags,
+    }) => {
       const pushFeedItem = (window as MockFeedWindow)
         .__BUZZ_E2E_PUSH_MOCK_FEED_ITEM__;
       if (!pushFeedItem) {
@@ -2409,14 +2418,14 @@ test("home inbox channel label opens management without leaving home", async ({
       }
 
       pushFeedItem({
-        id: "mock-feed-home-channel-panel",
+        id,
         kind: 9,
         pubkey: senderPubkey,
         content: "Please review the home panel routing.",
         created_at: createdAt,
         channel_id: channelId,
         channel_name: "general",
-        tags: [
+        tags: seededTags ?? [
           ["e", channelId],
           ["p", currentPubkey],
         ],
@@ -2427,16 +2436,66 @@ test("home inbox channel label opens management without leaving home", async ({
       channelId: GENERAL_CHANNEL_ID,
       createdAt: Math.floor(Date.now() / 1000),
       currentPubkey: TEST_IDENTITIES.tyler.pubkey,
+      itemId,
       senderPubkey: TEST_IDENTITIES.alice.pubkey,
+      tags,
     },
   );
 
-  await page
-    .getByTestId("home-inbox-item-mock-feed-home-channel-panel")
-    .click();
+  await page.getByTestId(`home-inbox-item-${itemId}`).click();
+}
+
+test("home inbox channel label navigates to the channel message", async ({
+  page,
+}) => {
+  await seedHomeInboxMention(page, "mock-feed-home-channel-navigate");
+
   await page
     .getByTestId("home-inbox-detail")
     .getByRole("button", { exact: true, name: "general" })
+    .click();
+
+  await expect(page).toHaveURL(
+    new RegExp(`#/channels/${GENERAL_CHANNEL_ID}\\?`),
+  );
+  await expect(page).toHaveURL(/messageId=mock-feed-home-channel-navigate/);
+  await expect(page).not.toHaveURL(/threadRootId=/);
+  await expect(page.getByTestId("message-timeline")).toBeVisible();
+  await expect(page.getByTestId("home-inbox-list")).toHaveCount(0);
+});
+
+test("home inbox thread reply mention carries threadRootId to the channel", async ({
+  page,
+}) => {
+  const rootEventId = "mock-feed-home-thread-root";
+  await seedHomeInboxMention(page, "mock-feed-home-thread-navigate", [
+    ["e", rootEventId, "", "root"],
+    ["e", "mock-feed-home-thread-parent", "", "reply"],
+    ["p", TEST_IDENTITIES.tyler.pubkey],
+  ]);
+
+  await page
+    .getByTestId("home-inbox-detail")
+    .getByRole("button", { exact: true, name: "general" })
+    .click();
+
+  await expect(page).toHaveURL(
+    new RegExp(`#/channels/${GENERAL_CHANNEL_ID}\\?`),
+  );
+  await expect(page).toHaveURL(/messageId=mock-feed-home-thread-navigate/);
+  await expect(page).toHaveURL(new RegExp(`threadRootId=${rootEventId}`));
+  await expect(page.getByTestId("message-timeline")).toBeVisible();
+  await expect(page.getByTestId("home-inbox-list")).toHaveCount(0);
+});
+
+test("home inbox manage affordance opens management without leaving home", async ({
+  page,
+}) => {
+  await seedHomeInboxMention(page, "mock-feed-home-channel-panel");
+
+  await page
+    .getByTestId("home-inbox-detail")
+    .getByTestId("channel-management-trigger")
     .click();
 
   await expect(page.getByTestId("channel-management-sheet")).toBeVisible();

@@ -788,10 +788,11 @@ export function HomeView({
                     setIsDeletingMessage(false);
                   });
               }}
-              onOpenChannel={(channelId) => {
+              onManageChannel={(channelId) => {
                 handleCloseProfilePanel();
                 setManagedChannelId(channelId);
               }}
+              onOpenContext={onOpenContext}
               onSendReply={async ({
                 content,
                 mediaTags,
