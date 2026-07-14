@@ -1575,8 +1575,15 @@ test("membership denied shows all four affordances and change-community edits no
 
   // Change the relay URL to a new one. The probe will time out for a fake URL
   // so we wait for the "Use anyway" button.
-  await overlay.locator("#community-edit-url").fill("wss://new-relay.example.com");
+  await overlay
+    .locator("#community-edit-url")
+    .fill("wss://new-relay.example.com");
   await overlay.getByRole("button", { name: "Save changes" }).click();
+
+  // The fields are frozen while the probe is pending, so the saved URL and
+  // any warning cannot get out of sync with a subsequent edit.
+  await expect(overlay.locator("#community-edit-url")).toBeDisabled();
+  await expect(overlay.locator("#community-edit-name")).toBeDisabled();
   await expect(
     overlay.getByRole("button", { name: "Use anyway" }),
   ).toBeVisible();

@@ -20,6 +20,7 @@ import {
 } from "@/shared/theme/ThemeProvider";
 import { useSystemColorScheme } from "@/shared/theme/useSystemColorScheme";
 import { ONBOARDING_DEFAULT_THEME_NAME } from "@/shared/theme/theme-loader";
+import { Button } from "@/shared/ui/button";
 import { StartupWindowDragRegion } from "@/shared/ui/StartupWindowDragRegion";
 import { StepProgress } from "@/shared/ui/step-progress";
 import { AvatarStep } from "./AvatarStep";
@@ -43,14 +44,6 @@ import type {
   ProfileStepState,
 } from "./types";
 
-/**
- * Check whether the relay denies access due to membership gating.
- *
- * Uses the standard relay message path to read the NIP-43 membership snapshot.
- *
- * Returns `true` if denied, `false` if the user is a member (or if the
- * relay doesn't enforce membership / isn't reachable).
- */
 function isRelayMembershipDeniedError(error: unknown): boolean {
   if (!(error instanceof Error)) {
     return false;
@@ -64,16 +57,30 @@ function isRelayMembershipDeniedError(error: unknown): boolean {
   );
 }
 
-async function checkMembershipDenied(): Promise<boolean> {
+type MembershipCheckResult = "denied" | "ok" | "unreachable" | "error";
+
+async function checkMembershipStatus(): Promise<MembershipCheckResult> {
   try {
     const { membership, snapshotFound } = await getMyRelayMembershipLookup();
-    return snapshotFound && membership === null;
+    if (snapshotFound && membership === null) return "denied";
+    return "ok";
   } catch (error) {
-    if (isRelayMembershipDeniedError(error)) {
-      return true;
+    if (isRelayMembershipDeniedError(error)) return "denied";
+    if (error instanceof Error) {
+      const msg = error.message.toLowerCase();
+      if (
+        msg.includes("failed to fetch") ||
+        msg.includes("networkerror") ||
+        msg.includes("timeout") ||
+        msg.includes("econnrefused") ||
+        msg.includes("enotfound") ||
+        msg.includes("connection") ||
+        msg.includes("aborted")
+      ) {
+        return "unreachable";
+      }
     }
-    // Network errors, 401s, 500s — not membership denials.
-    return false;
+    return "error";
   }
 }
 
@@ -179,6 +186,10 @@ export function OnboardingFlow({
     React.useState<OnboardingPage>("profile");
   const [isCommunityChangeOpen, setIsCommunityChangeOpen] =
     React.useState(false);
+  const [membershipError, setMembershipError] = React.useState<{
+    kind: "unreachable" | "error";
+    message?: string;
+  } | null>(null);
   const [transitionDirection, setTransitionDirection] =
     React.useState<OnboardingTransitionDirection>("forward");
   const systemColorScheme = useSystemColorScheme();
@@ -251,6 +262,7 @@ export function OnboardingFlow({
   );
 
   const showProfilePage = React.useCallback(() => {
+    setMembershipError(null);
     setTransitionDirection("backward");
     setCurrentPage("profile");
   }, []);
@@ -281,8 +293,10 @@ export function OnboardingFlow({
       try {
         // Check membership before attempting the profile save. On open relays
         // this passes instantly. On gated relays it prevents a 403 during save.
-        const denied = await checkMembershipDenied();
-        if (denied) {
+        const membershipStatus = await checkMembershipStatus();
+        setMembershipError(null);
+
+        if (membershipStatus === "denied") {
           try {
             const identity = await getIdentity();
             setDeniedPubkey(identity.pubkey);
@@ -294,6 +308,19 @@ export function OnboardingFlow({
           );
           setMembershipRetryPage(nextPage);
           setCurrentPage("membership-denied");
+          return;
+        }
+
+        if (membershipStatus === "unreachable") {
+          setMembershipError({ kind: "unreachable" });
+          return;
+        }
+
+        if (membershipStatus === "error") {
+          setMembershipError({
+            kind: "error",
+            message: "Server error — try again",
+          });
           return;
         }
 
@@ -578,11 +605,47 @@ export function OnboardingFlow({
             />
           </OnboardingSlideTransition>
 
+          {membershipError &&
+          (currentPage === "profile" || currentPage === "avatar") ? (
+            <div className="mb-4 w-full max-w-[500px] rounded-lg border border-destructive/30 bg-destructive/5 p-4 text-sm">
+              {membershipError.kind === "unreachable" ? (
+                <>
+                  <p className="font-medium text-destructive">
+                    Can't reach this relay
+                  </p>
+                  <p className="mt-1 text-muted-foreground">
+                    Check your connection or change your community.
+                  </p>
+                  <Button
+                    className="mt-3"
+                    onClick={() => setIsCommunityChangeOpen(true)}
+                    size="sm"
+                    variant="outline"
+                  >
+                    Change community
+                  </Button>
+                </>
+              ) : (
+                <>
+                  <p className="font-medium text-destructive">
+                    {membershipError.message ?? "Something went wrong"}
+                  </p>
+                  <p className="mt-1 text-muted-foreground">
+                    The relay returned an error. Try again.
+                  </p>
+                </>
+              )}
+            </div>
+          ) : null}
+
           {currentPage === "profile" ? (
             <ProfileStep
               actions={{
                 advanceWithoutSaving: advanceFromProfileWithoutSaving,
-                back: () => setIsCommunityChangeOpen(true),
+                back: () => {
+                  setMembershipError(null);
+                  setIsCommunityChangeOpen(true);
+                },
                 clearAvatarDraft: resetAvatarDraft,
                 importExistingKey: showKeyImportPage,
                 onUploadingChange: setIsUploadingAvatar,
