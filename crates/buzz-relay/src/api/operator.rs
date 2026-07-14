@@ -263,11 +263,19 @@ pub async fn transfer_community(
         )
     })?;
 
+    let expected_owner_pubkey =
+        validate_pubkey_hex(&request.expected_owner_pubkey).ok_or_else(|| {
+            api_error(
+                StatusCode::BAD_REQUEST,
+                "invalid expected_owner_pubkey: expected 64-char hex pubkey",
+            )
+        })?;
+
     let community = CommunityId::from_uuid(community_uuid);
 
     let result = state
         .db
-        .transfer_ownership(community, &new_owner_pubkey)
+        .transfer_ownership(community, &new_owner_pubkey, &expected_owner_pubkey)
         .await
         .map_err(|e| internal_error(&format!("transfer ownership: {e}")))?;
 
@@ -280,6 +288,18 @@ pub async fn transfer_community(
             return Err(api_error(
                 StatusCode::NOT_FOUND,
                 "community has no owner to transfer from",
+            ));
+        }
+        buzz_db::relay_members::TransferResult::OwnerConflict => {
+            return Err(api_error(
+                StatusCode::CONFLICT,
+                "owner_conflict: the current owner no longer matches expected_owner_pubkey",
+            ));
+        }
+        buzz_db::relay_members::TransferResult::LimitReached => {
+            return Err(api_error(
+                StatusCode::CONFLICT,
+                "limit_reached: transferee already owns the maximum number of communities",
             ));
         }
     };
@@ -743,6 +763,7 @@ mod tests {
         let transfer_body = serde_json::json!({
             "community_id": community_id,
             "new_owner_pubkey": new_owner_hex,
+            "expected_owner_pubkey": initial_owner_hex,
         })
         .to_string();
         let transfer_url = format!("http://{INGRESS_HOST}/operator/communities/transfer");
@@ -846,6 +867,7 @@ mod tests {
         let body = serde_json::json!({
             "community_id": "not-a-uuid",
             "new_owner_pubkey": new_owner.public_key().to_hex(),
+            "expected_owner_pubkey": new_owner.public_key().to_hex(),
         })
         .to_string();
         let url = format!("http://{INGRESS_HOST}/operator/communities/transfer");
@@ -879,6 +901,7 @@ mod tests {
         let body = serde_json::json!({
             "community_id": Uuid::new_v4().to_string(),
             "new_owner_pubkey": "not-a-pubkey",
+            "expected_owner_pubkey": "not-a-pubkey",
         })
         .to_string();
         let url = format!("http://{INGRESS_HOST}/operator/communities/transfer");

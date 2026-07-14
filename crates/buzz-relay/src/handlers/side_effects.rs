@@ -2768,13 +2768,16 @@ pub async fn publish_nip43_membership_list(
         .map_err(|e| anyhow::anyhow!("failed to sign kind:13534: {e}"))?;
 
     // NOTE: kind 13534 is technically a regular event (not in the NIP-16 replaceable
-    // range), but we intentionally use replace_addressable_event to get replacement
-    // semantics — only the latest membership snapshot matters. This function keys on
-    // (kind, pubkey, channel_id) and atomically replaces older events, which is exactly
-    // what Pyramid (the reference NIP-43 implementation) does with store.ReplaceEvent().
+    // range), but we intentionally use replace_addressable_event_forced to get
+    // replacement semantics — only the latest membership snapshot matters. Unlike
+    // replace_addressable_event, the forced variant does NOT apply stale-write
+    // protection based on created_at/event-id ordering, because the relay is the
+    // authoritative source for these snapshots. This prevents same-second races
+    // where a transfer snapshot is rejected as "stale" purely because its random
+    // event ID was lexicographically larger than the prior snapshot's.
     let (stored, was_inserted) = state
         .db
-        .replace_addressable_event(tenant.community(), &event, None)
+        .replace_addressable_event_forced(tenant.community(), &event, None)
         .await?;
     if was_inserted {
         dispatch_persistent_event(

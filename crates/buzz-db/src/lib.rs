@@ -528,11 +528,10 @@ impl Db {
 
     /// Atomically creates a community and its initial owner.
     ///
-    /// Returns the existing row when the normalized host already has the same
-    /// current owner, making ambiguous create retries naturally idempotent.
-    /// Returns `None` when the host exists with a different (or missing) owner.
-    /// The initial host and owner inserts share one transaction, so callers
-    /// never observe a partially provisioned community or rotate an owner.
+    /// Atomically create a community host and bootstrap its initial owner,
+    /// enforcing the per-owner community limit inside a transaction that holds
+    /// a per-owner advisory lock. This is the authoritative limit check — kgoose
+    /// preflight counts are advisory only.
     pub async fn create_community_with_owner(
         &self,
         normalized_host: &str,
@@ -540,6 +539,14 @@ impl Db {
     ) -> Result<Option<CreatedCommunityRecord>> {
         let owner_pubkey = owner_pubkey.to_ascii_lowercase();
         let mut tx = self.pool.begin().await?;
+
+        // Serialize on the owner pubkey so concurrent creates to the same
+        // owner cannot both pass the ownership count check.
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(relay_members::owner_count_advisory_lock_key(&owner_pubkey))
+            .execute(&mut *tx)
+            .await?;
+
         let row = sqlx::query(
             r#"
             INSERT INTO communities (host)
@@ -555,6 +562,20 @@ impl Db {
         let (id, host) = if let Some(row) = row {
             let id: Uuid = row.try_get("id")?;
             let host: String = row.try_get("host")?;
+
+            // Enforce the limit before inserting the new owner row.
+            let owned_count: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM relay_members WHERE pubkey = $1 AND role = 'owner'",
+            )
+            .bind(&owner_pubkey)
+            .fetch_one(&mut *tx)
+            .await?;
+
+            if owned_count >= relay_members::MAX_COMMUNITIES_PER_OWNER {
+                tx.rollback().await?;
+                return Ok(None);
+            }
+
             sqlx::query(
                 "INSERT INTO relay_members (community_id, pubkey, role, added_by) VALUES ($1, $2, 'owner', NULL)",
             )
@@ -2368,13 +2389,22 @@ impl Db {
     }
 
     /// Atomically transfers ownership of `community` to `new_owner_pubkey`,
-    /// demoting the previous owner(s) to `member`.
+    /// demoting the previous owner(s) to `member`. Verifies
+    /// `expected_owner_pubkey` matches the current owner inside the same
+    /// transaction to prevent stale-owner races.
     pub async fn transfer_ownership(
         &self,
         community: CommunityId,
         new_owner_pubkey: &str,
+        expected_owner_pubkey: &str,
     ) -> Result<relay_members::TransferResult> {
-        relay_members::transfer_ownership(&self.pool, community, new_owner_pubkey).await
+        relay_members::transfer_ownership(
+            &self.pool,
+            community,
+            new_owner_pubkey,
+            expected_owner_pubkey,
+        )
+        .await
     }
 
     /// Migrates existing `pubkey_allowlist` entries into `relay_members` for `community`.
@@ -2777,6 +2807,123 @@ impl Db {
 
         // Mentions are a denormalized index — safe outside the transaction.
         // insert_event() normally handles this, but we inlined the INSERT above.
+        if let Err(e) = crate::insert_mentions(&self.pool, community_id, event, channel_id).await {
+            tracing::warn!(event_id = %event.id, "Failed to insert mentions: {e}");
+        }
+
+        Ok((
+            StoredEvent::with_received_at(event.clone(), received_at, channel_id, true),
+            true,
+        ))
+    }
+
+    /// Authoritative replacement for relay-generated snapshots (NIP-43
+    /// membership lists).
+    ///
+    /// Unlike [`replace_addressable_event`], this method does NOT apply
+    /// stale-write protection based on `created_at` / event-id ordering. The
+    /// relay is the authoritative source for these events — it always wants
+    /// the latest snapshot to replace any prior one, regardless of
+    /// same-second timestamp races on random event IDs. This fixes the bug
+    /// where a transfer snapshot published in the same second as a create
+    /// snapshot could be rejected as "stale" purely because its random event
+    /// ID happened to be lexicographically larger.
+    ///
+    /// All other semantics (advisory lock serialization, soft-delete old,
+    /// insert new, mentions) match `replace_addressable_event`.
+    pub async fn replace_addressable_event_forced(
+        &self,
+        community_id: CommunityId,
+        event: &nostr::Event,
+        channel_id: Option<Uuid>,
+    ) -> Result<(StoredEvent, bool)> {
+        let kind_i32 = buzz_core::kind::event_kind_i32(event);
+        let pubkey_bytes = event.pubkey.to_bytes();
+        let created_at_secs = event.created_at.as_secs() as i64;
+        let created_at = chrono::DateTime::from_timestamp(created_at_secs, 0)
+            .ok_or(DbError::InvalidTimestamp(created_at_secs))?;
+
+        // Same advisory-lock key algorithm as replace_addressable_event.
+        let lock_key = {
+            let mut h: u64 = 0xcbf29ce484222325;
+            for b in community_id.as_uuid().as_bytes() {
+                h ^= *b as u64;
+                h = h.wrapping_mul(0x100000001b3);
+            }
+            for b in kind_i32.to_le_bytes() {
+                h ^= b as u64;
+                h = h.wrapping_mul(0x100000001b3);
+            }
+            for b in pubkey_bytes.as_slice() {
+                h ^= *b as u64;
+                h = h.wrapping_mul(0x100000001b3);
+            }
+            if let Some(ch) = channel_id {
+                for b in ch.as_bytes() {
+                    h ^= *b as u64;
+                    h = h.wrapping_mul(0x100000001b3);
+                }
+            }
+            h as i64
+        };
+
+        let mut tx = self.pool.begin().await?;
+
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(lock_key)
+            .execute(&mut *tx)
+            .await?;
+
+        // Soft-delete ALL existing events for this (kind, pubkey, channel_id)
+        // without any created_at/id comparison. The relay is authoritative.
+        sqlx::query(
+            "UPDATE events SET deleted_at = NOW() \
+             WHERE community_id = $1 AND kind = $2 AND pubkey = $3 \
+             AND channel_id IS NOT DISTINCT FROM $4 \
+             AND deleted_at IS NULL",
+        )
+        .bind(community_id.as_uuid())
+        .bind(kind_i32)
+        .bind(pubkey_bytes.as_slice())
+        .bind(channel_id)
+        .execute(&mut *tx)
+        .await?;
+
+        let sig_bytes = event.sig.serialize();
+        let tags_json = serde_json::to_value(&event.tags)?;
+        let received_at = chrono::Utc::now();
+        let d_tag = crate::event::extract_d_tag(event);
+
+        let insert_result = sqlx::query(
+            "INSERT INTO events (community_id, id, pubkey, created_at, kind, tags, content, sig, received_at, channel_id, d_tag) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) \
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(community_id.as_uuid())
+        .bind(event.id.as_bytes().as_slice())
+        .bind(pubkey_bytes.as_slice())
+        .bind(created_at)
+        .bind(kind_i32)
+        .bind(&tags_json)
+        .bind(&event.content)
+        .bind(sig_bytes.as_slice())
+        .bind(received_at)
+        .bind(channel_id)
+        .bind(d_tag.as_deref())
+        .execute(&mut *tx)
+        .await?;
+
+        let was_inserted = insert_result.rows_affected() > 0;
+        if !was_inserted {
+            tx.rollback().await?;
+            return Ok((
+                StoredEvent::with_received_at(event.clone(), received_at, channel_id, false),
+                false,
+            ));
+        }
+
+        tx.commit().await?;
+
         if let Err(e) = crate::insert_mentions(&self.pool, community_id, event, channel_id).await {
             tracing::warn!(event_id = %event.id, "Failed to insert mentions: {e}");
         }
@@ -3850,6 +3997,33 @@ mod tests {
             .await
             .expect("post-rotation retry");
         assert!(post_rotation_retry.is_none());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn create_community_with_owner_enforces_per_owner_limit() {
+        let db = setup_db().await;
+        let owner = format!("{:064x}", Uuid::new_v4().as_u128());
+
+        // Create 3 communities for this owner (the max).
+        for i in 0..3 {
+            let host = format!("limit-test-{}-{}.example", i, Uuid::new_v4().simple());
+            db.create_community_with_owner(&host, &owner)
+                .await
+                .expect("create community")
+                .expect("new host");
+        }
+
+        // 4th community for the same owner should fail with None.
+        let host = format!("limit-test-3-{}.example", Uuid::new_v4().simple());
+        let result = db
+            .create_community_with_owner(&host, &owner)
+            .await
+            .expect("create community call");
+        assert!(
+            result.is_none(),
+            "4th community for the same owner should be rejected by limit"
+        );
     }
 
     #[tokio::test]

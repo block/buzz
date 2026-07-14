@@ -177,6 +177,10 @@ pub struct TransferCommunityRequest {
     pub community_id: String,
     /// 64-char hex pubkey of the new owner.
     pub new_owner_pubkey: String,
+    /// 64-char hex pubkey of the current owner. The relay verifies this
+    /// matches inside the transfer transaction and returns `owner_conflict`
+    /// if it doesn't. Prevents stale-owner races.
+    pub expected_owner_pubkey: String,
 }
 
 /// JSON response from `POST /operator/communities/transfer`.

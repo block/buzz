@@ -294,14 +294,47 @@ pub enum TransferResult {
     AlreadyOwner,
     /// No owner row exists for this community (community may not exist).
     NoOwner,
+    /// The `expected_owner_pubkey` did not match the current owner. A
+    /// concurrent transfer or owner rotation has already changed ownership.
+    /// The caller must NOT retry blindly — re-read ownership and re-evaluate.
+    OwnerConflict,
+    /// The transferee already owns the maximum number of communities.
+    /// Enforced atomically inside the transfer transaction so concurrent
+    /// transfers to the same recipient cannot both pass the limit.
+    LimitReached,
+}
+
+/// Maximum number of communities a single pubkey can own. Enforced at the
+/// relay layer — the authoritative layer — so that concurrent transfers or
+/// transfer-vs-create races cannot both pass a preflight count.
+pub const MAX_COMMUNITIES_PER_OWNER: i64 = 3;
+
+/// Stable advisory-lock key for serializing ownership-granting operations
+/// (transfer + create) per recipient pubkey. Uses FNV-1a over the hex pubkey
+/// so the same recipient always maps to the same lock across processes.
+pub fn owner_count_advisory_lock_key(pubkey_hex: &str) -> i64 {
+    let mut h: u64 = 0xcbf29ce484222325; // FNV offset basis
+    for b in pubkey_hex.as_bytes() {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x100000001b3); // FNV prime
+    }
+    h as i64
 }
 
 /// Atomically transfers ownership of `community` to `new_owner_pubkey`.
 ///
 /// Runs in a single transaction:
-/// 1. Reads existing owner rows to detect no-op and error conditions.
-/// 2. Upserts `new_owner_pubkey` as `owner` (insert or promote).
-/// 3. Demotes every other owner in this community to `member` — **not**
+/// 1. Acquires a transaction-scoped advisory lock on the *transferee* pubkey
+///    so that concurrent transfers to the same recipient serialize. The same
+///    lock key is used by [`create_community_with_owner_locked`] to prevent
+///    transfer-vs-create races.
+/// 2. Locks the current owner row `FOR UPDATE` and verifies
+///    `expected_owner_pubkey` matches. This prevents a stale-owner race where
+///    a delayed/retried request overwrites a completed transfer.
+/// 3. Enforces the [`MAX_COMMUNITIES_PER_OWNER`] limit on the transferee by
+///    counting owned communities inside the same transaction.
+/// 4. Upserts `new_owner_pubkey` as `owner` (insert or promote).
+/// 5. Demotes every other owner in this community to `member` — **not**
 ///    `admin`, per product decision: the former owner retains no management
 ///    capabilities.
 ///
@@ -310,14 +343,27 @@ pub async fn transfer_ownership(
     pool: &PgPool,
     community: CommunityId,
     new_owner_pubkey: &str,
+    expected_owner_pubkey: &str,
 ) -> Result<TransferResult> {
     let pubkey = new_owner_pubkey.to_ascii_lowercase();
+    let expected_owner = expected_owner_pubkey.to_ascii_lowercase();
     let mut tx = pool.begin().await?;
 
-    // 1. Read existing owners within the transaction so the check and the
-    //    mutation are atomic — no TOCTOU window between reading and writing.
+    // 1. Serialize on the transferee so concurrent transfers to the same
+    //    recipient cannot both pass the ownership count check.
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(owner_count_advisory_lock_key(&pubkey))
+        .execute(&mut *tx)
+        .await?;
+
+    // 2. Lock the current owner row FOR UPDATE and verify the expected owner.
+    //    FOR UPDATE prevents the stale-owner race: a concurrent transfer that
+    //    already changed the owner will block on this lock until our txn
+    //    completes (or vice versa), and the expected_owner check will fail.
     let existing_owners: Vec<String> = sqlx::query_scalar(
-        "SELECT pubkey FROM relay_members WHERE community_id = $1 AND role = 'owner'",
+        "SELECT pubkey FROM relay_members \
+         WHERE community_id = $1 AND role = 'owner' \
+         FOR UPDATE",
     )
     .bind(community.as_uuid())
     .fetch_all(&mut *tx)
@@ -326,6 +372,13 @@ pub async fn transfer_ownership(
     if existing_owners.is_empty() {
         tx.rollback().await?;
         return Ok(TransferResult::NoOwner);
+    }
+
+    // Stale-owner guard: if the current owner doesn't match the expected
+    // owner, a concurrent transfer or rotation has already changed hands.
+    if !existing_owners.iter().any(|p| p == &expected_owner) {
+        tx.rollback().await?;
+        return Ok(TransferResult::OwnerConflict);
     }
 
     // Already the sole owner — no transfer needed.
@@ -340,7 +393,22 @@ pub async fn transfer_ownership(
         existing_owners.iter().find(|p| **p != pubkey).cloned()
     };
 
-    // 2. Upsert the new owner.
+    // 3. Enforce the transferee's community ownership limit inside the same
+    //    transaction that holds the advisory lock. This is the authoritative
+    //    check — kgoose's preflight count is advisory only.
+    let owned_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM relay_members WHERE pubkey = $1 AND role = 'owner'",
+    )
+    .bind(&pubkey)
+    .fetch_one(&mut *tx)
+    .await?;
+
+    if owned_count >= MAX_COMMUNITIES_PER_OWNER {
+        tx.rollback().await?;
+        return Ok(TransferResult::LimitReached);
+    }
+
+    // 4. Upsert the new owner.
     sqlx::query(
         "INSERT INTO relay_members (community_id, pubkey, role, added_by) \
          VALUES ($1, $2, 'owner', NULL) \
@@ -351,7 +419,7 @@ pub async fn transfer_ownership(
     .execute(&mut *tx)
     .await?;
 
-    // 3. Demote all other owners to member (not admin).
+    // 5. Demote all other owners to member (not admin).
     sqlx::query(
         "UPDATE relay_members SET role = 'member', updated_at = now() \
          WHERE community_id = $1 AND role = 'owner' AND pubkey <> $2",
@@ -555,7 +623,7 @@ mod tests {
             .await
             .expect("bootstrap initial owner");
 
-        let result = transfer_ownership(&pool, community, &new_owner)
+        let result = transfer_ownership(&pool, community, &new_owner, &old_owner)
             .await
             .expect("transfer ownership");
 
@@ -595,7 +663,7 @@ mod tests {
             .await
             .expect("bootstrap owner");
 
-        let result = transfer_ownership(&pool, community, &owner)
+        let result = transfer_ownership(&pool, community, &owner, &owner)
             .await
             .expect("transfer ownership to self");
 
@@ -617,10 +685,11 @@ mod tests {
         let pool = setup_pool().await;
         let community = make_test_community(&pool).await;
         let new_owner = format!("{:064x}", Uuid::new_v4().as_u128());
+        let expected = format!("{:064x}", Uuid::new_v4().as_u128());
 
         // No bootstrap — community exists but has no owner row.
 
-        let result = transfer_ownership(&pool, community, &new_owner)
+        let result = transfer_ownership(&pool, community, &new_owner, &expected)
             .await
             .expect("transfer ownership on empty community");
 
@@ -646,7 +715,7 @@ mod tests {
             .await
             .expect("bootstrap owner B");
 
-        transfer_ownership(&pool, community_a, &new_owner)
+        transfer_ownership(&pool, community_a, &new_owner, &owner_a)
             .await
             .expect("transfer A");
 
@@ -702,7 +771,7 @@ mod tests {
             .await
             .expect("add member");
 
-        let result = transfer_ownership(&pool, community, &existing_member)
+        let result = transfer_ownership(&pool, community, &existing_member, &old_owner)
             .await
             .expect("transfer to existing member");
 
@@ -723,6 +792,89 @@ mod tests {
                 .expect("exists")
                 .role,
             "member"
+        );
+    }
+
+    /// Transfer returns `OwnerConflict` when `expected_owner_pubkey` doesn't
+    /// match the current owner — simulates a stale/delayed request after a
+    /// concurrent transfer has already changed ownership.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn transfer_ownership_returns_owner_conflict_when_expected_mismatches() {
+        let pool = setup_pool().await;
+        let community = make_test_community(&pool).await;
+        let old_owner = format!("{:064x}", Uuid::new_v4().as_u128());
+        let new_owner = format!("{:064x}", Uuid::new_v4().as_u128());
+        let wrong_expected = format!("{:064x}", Uuid::new_v4().as_u128());
+
+        bootstrap_owner(&pool, community, &old_owner)
+            .await
+            .expect("bootstrap initial owner");
+
+        // expected_owner_pubkey doesn't match the actual owner — should conflict.
+        let result = transfer_ownership(&pool, community, &new_owner, &wrong_expected)
+            .await
+            .expect("transfer ownership with wrong expected");
+
+        assert_eq!(result, TransferResult::OwnerConflict);
+
+        // Old owner is still owner — nothing changed.
+        assert_eq!(
+            get_relay_member(&pool, community, &old_owner)
+                .await
+                .expect("get old owner")
+                .expect("exists")
+                .role,
+            "owner"
+        );
+        // New owner was not added.
+        assert!(
+            get_relay_member(&pool, community, &new_owner)
+                .await
+                .expect("get new owner")
+                .is_none(),
+            "new owner must not be added on conflict"
+        );
+    }
+
+    /// Transfer returns `LimitReached` when the transferee already owns the
+    /// maximum number of communities. The limit is enforced inside the
+    /// transfer transaction at the relay layer.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn transfer_ownership_returns_limit_reached_for_maxed_transferee() {
+        let pool = setup_pool().await;
+        let owner = format!("{:064x}", Uuid::new_v4().as_u128());
+        let transferee = format!("{:064x}", Uuid::new_v4().as_u128());
+
+        // Give the transferee 3 communities (the max).
+        for _ in 0..3 {
+            let c = make_test_community(&pool).await;
+            bootstrap_owner(&pool, c, &transferee)
+                .await
+                .expect("bootstrap transferee community");
+        }
+
+        // Create a community owned by `owner` and try to transfer to `transferee`.
+        let community = make_test_community(&pool).await;
+        bootstrap_owner(&pool, community, &owner)
+            .await
+            .expect("bootstrap owner");
+
+        let result = transfer_ownership(&pool, community, &transferee, &owner)
+            .await
+            .expect("transfer to maxed transferee");
+
+        assert_eq!(result, TransferResult::LimitReached);
+
+        // Owner is still owner — transfer did not happen.
+        assert_eq!(
+            get_relay_member(&pool, community, &owner)
+                .await
+                .expect("get owner")
+                .expect("exists")
+                .role,
+            "owner"
         );
     }
 }
