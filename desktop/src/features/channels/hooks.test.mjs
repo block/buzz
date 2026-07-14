@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { upsertCachedChannel } from "./hooks.ts";
+import {
+  reconcileRefreshedCachedChannel,
+  upsertCachedChannel,
+  upsertCachedChannelMember,
+} from "./hooks.ts";
 
 function makeChannel(
   id,
@@ -49,6 +53,92 @@ test("upsertCachedChannel_replacesExistingChannelWithoutDuplicates", () => {
   const repairedChannels = upsertCachedChannel([staleDm], openedDm);
 
   assert.deepEqual(repairedChannels, [openedDm]);
+});
+
+test("upsertCachedChannelMember_recordsDmParticipantBeforeRefetch", () => {
+  const charliePubkey = "charlie-pubkey";
+  const ownerPubkey = "owner-pubkey";
+  const fizzPubkey = "fizz-pubkey";
+  const openedDm = makeChannel("new-dm", "DM", "dm", {
+    participantPubkeys: [charliePubkey, ownerPubkey],
+    participants: ["charlie", "owner"],
+  });
+
+  const channels = upsertCachedChannelMember([openedDm], openedDm.id, {
+    membershipAdded: true,
+    name: "Fizz",
+    pubkey: fizzPubkey,
+  });
+  const updatedDm = channels?.[0];
+
+  assert.deepEqual(updatedDm?.participantPubkeys, [
+    charliePubkey,
+    ownerPubkey,
+    fizzPubkey,
+  ]);
+  assert.deepEqual(updatedDm?.participants, ["charlie", "owner", "Fizz"]);
+  assert.deepEqual(updatedDm?.memberPubkeys, [
+    charliePubkey,
+    ownerPubkey,
+    fizzPubkey,
+  ]);
+  assert.equal(updatedDm?.memberCount, 3);
+});
+
+test("upsertCachedChannelMember_doesNotDuplicateExistingParticipant", () => {
+  const charliePubkey = "charlie-pubkey";
+  const ownerPubkey = "owner-pubkey";
+  const fizzPubkey = "FIZZ-PUBKEY";
+  const openedDm = makeChannel("new-dm", "DM", "dm", {
+    participantPubkeys: [charliePubkey, ownerPubkey, fizzPubkey],
+    participants: ["charlie", "owner", "Fizz"],
+  });
+
+  const channels = upsertCachedChannelMember([openedDm], openedDm.id, {
+    membershipAdded: false,
+    name: "Fizz duplicate",
+    pubkey: fizzPubkey.toLowerCase(),
+  });
+
+  assert.deepEqual(channels, [openedDm]);
+});
+
+test("reconcileRefreshedCachedChannel_preservesOptimisticParticipantAcrossStaleRefresh", () => {
+  const charliePubkey = "charlie-pubkey";
+  const ownerPubkey = "owner-pubkey";
+  const fizzPubkey = "fizz-pubkey";
+  const openedDm = makeChannel("new-dm", "DM", "dm", {
+    participantPubkeys: [charliePubkey, ownerPubkey],
+    participants: ["charlie", "owner"],
+  });
+  const cachedBeforeRefresh = upsertCachedChannelMember(
+    [openedDm],
+    openedDm.id,
+    {
+      membershipAdded: true,
+      name: "Fizz",
+      pubkey: fizzPubkey,
+    },
+  )?.[0];
+
+  const reconciled = reconcileRefreshedCachedChannel(
+    [openedDm],
+    openedDm,
+    cachedBeforeRefresh,
+  );
+
+  assert.deepEqual(reconciled[0].participantPubkeys, [
+    charliePubkey,
+    ownerPubkey,
+    fizzPubkey,
+  ]);
+  assert.deepEqual(reconciled[0].participants, ["charlie", "owner", "Fizz"]);
+  assert.deepEqual(reconciled[0].memberPubkeys, [
+    charliePubkey,
+    ownerPubkey,
+    fizzPubkey,
+  ]);
+  assert.equal(reconciled[0].memberCount, 3);
 });
 
 test("upsertCachedChannel_preservesParticipantsAddedAfterDmOpened", () => {

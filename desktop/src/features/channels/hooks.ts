@@ -67,6 +67,69 @@ function sortChannels(channels: Channel[]) {
   });
 }
 
+export type CachedChannelMember = {
+  membershipAdded: boolean;
+  name: string;
+  pubkey: string;
+};
+
+/**
+ * Records a successful membership mutation in the shared channel list before
+ * its read-after-write refetch completes. DM participant fields are kept in
+ * lockstep so headers and sidebar labels can render the new member immediately.
+ * Exported for focused cache race regression coverage.
+ */
+export function upsertCachedChannelMember(
+  current: Channel[] | undefined,
+  channelId: string,
+  member: CachedChannelMember,
+): Channel[] | undefined {
+  if (!current) {
+    return current;
+  }
+
+  const normalizedPubkey = member.pubkey.toLowerCase();
+  return sortChannels(
+    current.map((channel) => {
+      if (channel.id !== channelId) {
+        return channel;
+      }
+
+      const hasMember = channel.memberPubkeys.some(
+        (pubkey) => pubkey.toLowerCase() === normalizedPubkey,
+      );
+      const memberPubkeys = hasMember
+        ? channel.memberPubkeys
+        : [...channel.memberPubkeys, member.pubkey];
+      const nextChannel = {
+        ...channel,
+        memberCount: Math.max(
+          memberPubkeys.length,
+          channel.memberCount + (member.membershipAdded && !hasMember ? 1 : 0),
+        ),
+        memberPubkeys,
+      };
+
+      if (channel.channelType !== "dm") {
+        return nextChannel;
+      }
+
+      const hasParticipant = channel.participantPubkeys.some(
+        (pubkey) => pubkey.toLowerCase() === normalizedPubkey,
+      );
+      if (hasParticipant) {
+        return nextChannel;
+      }
+
+      return {
+        ...nextChannel,
+        participantPubkeys: [...channel.participantPubkeys, member.pubkey],
+        participants: [...channel.participants, member.name || member.pubkey],
+      };
+    }),
+  );
+}
+
 type UpsertCachedChannelOptions = {
   preserveCachedDmParticipants?: boolean;
 };
@@ -140,6 +203,27 @@ export function upsertCachedChannel(
     ...(current ?? []).filter((candidate) => candidate.id !== channel.id),
     nextChannel,
   ]);
+}
+
+/**
+ * Reconciles a relay-returned channel after a list refresh without losing a
+ * newer participant addition that was optimistically cached before the refresh
+ * completed. Exported for focused cache race regression coverage.
+ */
+export function reconcileRefreshedCachedChannel(
+  refreshed: Channel[] | undefined,
+  channel: Channel,
+  cachedBeforeRefresh: Channel | undefined,
+): Channel[] {
+  const withPreRefreshParticipants = cachedBeforeRefresh
+    ? upsertCachedChannel(refreshed, cachedBeforeRefresh, {
+        preserveCachedDmParticipants: true,
+      })
+    : refreshed;
+
+  return upsertCachedChannel(withPreRefreshParticipants, channel, {
+    preserveCachedDmParticipants: true,
+  });
 }
 
 async function invalidateChannelState(
@@ -250,20 +334,25 @@ export function useOpenDmMutation() {
 }
 
 /**
- * Cancels any in-flight channel-list read and restores a relay-returned channel
- * to the shared cache before a caller depends on it for navigation. Participant
- * additions already present in the cache win over the older channel snapshot.
+ * Waits for any active channel-list refresh to settle, then restores a
+ * relay-returned channel to the shared cache before a caller depends on it for
+ * navigation. Participant additions from the refresh or an optimistic
+ * membership update win over the older channel snapshot.
  */
 export function useUpsertCachedChannel() {
   const queryClient = useQueryClient();
 
   return React.useCallback(
     async (channel: Channel) => {
-      await queryClient.cancelQueries({ queryKey: channelsQueryKey });
+      const cachedBeforeRefresh = queryClient
+        .getQueryData<Channel[]>(channelsQueryKey)
+        ?.find((candidate) => candidate.id === channel.id);
+      await queryClient.refetchQueries({
+        queryKey: channelsQueryKey,
+        type: "active",
+      });
       queryClient.setQueryData<Channel[]>(channelsQueryKey, (current) =>
-        upsertCachedChannel(current, channel, {
-          preserveCachedDmParticipants: true,
-        }),
+        reconcileRefreshedCachedChannel(current, channel, cachedBeforeRefresh),
       );
     },
     [queryClient],

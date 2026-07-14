@@ -6,7 +6,10 @@ import {
   createChannelManagedAgents,
   ensureChannelAgentPresetInChannel,
 } from "@/features/agents/channelAgents";
-import { channelsQueryKey } from "@/features/channels/hooks";
+import {
+  channelsQueryKey,
+  upsertCachedChannelMember,
+} from "@/features/channels/hooks";
 import { evictUsersBatchEntries } from "@/features/profile/hooks";
 import {
   createManagedAgent,
@@ -56,6 +59,7 @@ import type {
   AcpRuntime,
   AgentPersona,
   AgentTeam,
+  Channel,
   CreateManagedAgentInput,
   CreatePersonaInput,
   CreateTeamInput,
@@ -92,14 +96,22 @@ export const acpRuntimesQueryKey = ["acp-runtimes"] as const;
 export const managedAgentPrereqsQueryKey = ["managed-agent-prereqs"] as const;
 export const backendProvidersQueryKey = ["backend-providers"] as const;
 
+type InvalidateAgentQueriesOptions = {
+  refetchChannels?: boolean;
+};
+
 async function invalidateAgentQueries(
   queryClient: ReturnType<typeof useQueryClient>,
   channelId: string | null,
+  options: InvalidateAgentQueriesOptions = {},
 ) {
   await Promise.all([
     queryClient.invalidateQueries({ queryKey: managedAgentsQueryKey }),
     queryClient.invalidateQueries({ queryKey: relayAgentsQueryKey }),
-    queryClient.invalidateQueries({ queryKey: channelsQueryKey }),
+    queryClient.invalidateQueries({
+      queryKey: channelsQueryKey,
+      refetchType: options.refetchChannels === false ? "none" : "active",
+    }),
     ...(channelId
       ? [
           queryClient.invalidateQueries({
@@ -119,9 +131,10 @@ function refreshAgentQueriesInBackground(task: () => Promise<unknown>) {
 function invalidateAgentQueriesInBackground(
   queryClient: ReturnType<typeof useQueryClient>,
   channelId: string | null,
+  options?: InvalidateAgentQueriesOptions,
 ) {
   refreshAgentQueriesInBackground(() =>
-    invalidateAgentQueries(queryClient, channelId),
+    invalidateAgentQueries(queryClient, channelId, options),
   );
 }
 
@@ -513,13 +526,34 @@ export function useAttachManagedAgentToChannelMutation(
 
       return attachManagedAgentToChannel(effectiveChannelId, rest);
     },
+    onSuccess: (result, variables) => {
+      const effectiveChannelId = variables.channelId ?? channelId;
+      if (!effectiveChannelId) {
+        return;
+      }
+
+      queryClient.setQueryData<Channel[]>(channelsQueryKey, (current) =>
+        upsertCachedChannelMember(current, effectiveChannelId, {
+          membershipAdded: result.membershipAdded,
+          name: result.agent.name,
+          pubkey: result.agent.pubkey,
+        }),
+      );
+    },
     onSettled: (_data, _err, variables) => {
       // Invalidate the effective channel (the one the server actually mutated)
       // so its membership/agent state stays fresh. Invalidating the live
       // hook-closure channelId when the user has already switched away would
       // leave the compose-time channel stale.
       const effectiveChannelId = variables?.channelId ?? channelId;
-      invalidateAgentQueriesInBackground(queryClient, effectiveChannelId);
+      // The exact membership has already been applied to channelsQueryKey by
+      // onSuccess. Mark the list stale without starting a background refetch
+      // that could replace that optimistic participant with a lagged snapshot;
+      // mounted channel readers and the first-DM navigation repair provide the
+      // next authoritative refetch.
+      invalidateAgentQueriesInBackground(queryClient, effectiveChannelId, {
+        refetchChannels: false,
+      });
     },
   });
 }
@@ -567,9 +601,30 @@ export function useCreateChannelManagedAgentMutation(channelId: string | null) {
       const failure = result.failures[0];
       throw new Error(failure?.error ?? "Could not create agent.");
     },
+    onSuccess: (result, variables) => {
+      const effectiveChannelId = variables.channelId ?? channelId;
+      if (!effectiveChannelId) {
+        return;
+      }
+
+      queryClient.setQueryData<Channel[]>(channelsQueryKey, (current) =>
+        upsertCachedChannelMember(current, effectiveChannelId, {
+          membershipAdded: result.membershipAdded,
+          name: result.agent.name,
+          pubkey: result.agent.pubkey,
+        }),
+      );
+    },
     onSettled: (_data, _err, variables) => {
       const effectiveChannelId = variables?.channelId ?? channelId;
-      invalidateAgentQueriesInBackground(queryClient, effectiveChannelId);
+      // The exact membership has already been applied to channelsQueryKey by
+      // onSuccess. Mark the list stale without starting a background refetch
+      // that could replace that optimistic participant with a lagged snapshot;
+      // mounted channel readers and the first-DM navigation repair provide the
+      // next authoritative refetch.
+      invalidateAgentQueriesInBackground(queryClient, effectiveChannelId, {
+        refetchChannels: false,
+      });
     },
   });
 }
